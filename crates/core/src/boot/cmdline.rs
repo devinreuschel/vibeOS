@@ -777,6 +777,23 @@ mod tests {
     }
 
     #[test]
+    fn cmdline_options_documented() {
+        const BOOT_MD: &str = include_str!("../../../../docs/BOOT.md");
+        for o in OPTIONS {
+            let name = std::format!("`{}`", o.name);
+            let class = std::format!("| {} |", o.class.as_str());
+            assert!(
+                BOOT_MD
+                    .lines()
+                    .any(|l| l.starts_with(&std::format!("| {name}")) && l.contains(&class)),
+                "BOOT.md §3.2 has no options-table row for {} with class {}",
+                o.name,
+                o.class.as_str()
+            );
+        }
+    }
+
+    #[test]
     fn cmdline_escaped_display() {
         assert_eq!(
             std::format!("{}", Escaped(b"ok ~\x1f\x7f\n\xff\x1e!")),

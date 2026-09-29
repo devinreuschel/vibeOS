@@ -429,10 +429,11 @@ does not meet this yet:
 
 ## 6. Tracing and counters
 
-`syscall_init::set_trace(true)` makes `proc_init::syscall` log
-`user: syscall <name> nr=<nr> = <ret>` on serial after each call; the line
-is not a `vibeOS:` marker. Nothing calls `set_trace`, so no build can turn
-tracing on (F150; ROADMAP §10.7).
+`vibeos.strace=1` on the kernel command line (BOOT.md §3.2) makes
+`syscall_init::init_bsp` call `syscall_init::set_trace(true)`, and
+`proc_init::syscall` then logs `user: syscall <name> nr=<nr> = <ret>` on
+serial after each call that returns (`?` names an unknown number); the line
+is not a `vibeOS:` marker. `exit`, which never returns, prints no line.
 
 `vibeos_syscall_stub` increments the calling TCB's `syscall_count` and the
 global `SYSCALLS` on every entry, `ENOSYS` included. Nothing reads either:

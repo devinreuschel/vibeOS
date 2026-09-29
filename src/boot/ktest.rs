@@ -1,5 +1,6 @@
 //! In-guest tests for boot (kernel_tests only). Rows: the list in crate::ktest.
 
+use vibeos::boot::cmdline::{CMDLINE_MAX, CmdlineBuf};
 use vibeos::boot::{FW_CFG_DMA_READ, FW_CFG_NAME_MAX};
 use vibeos::dma::DmaAlloc;
 use vibeos::paging::VirtAddr;
@@ -124,5 +125,48 @@ pub(crate) fn test_fw_cfg_dma() -> Outcome {
         Err(FwCfgError::Device) => Outcome::Ok,
         Ok(()) => Outcome::Fail("dma write to a read-only file succeeded"),
         Err(_) => Outcome::Fail("dma write failed without the device error bit"),
+    }
+}
+
+/// `BootInfo` holds Limine's `cmdline:`, alone or followed by one space and
+/// the fw_cfg file read again by port I/O, and `boot::cmdline()` parses it.
+pub(crate) fn test_cmdline_captured() -> Outcome {
+    let info = crate::boot::info();
+    let raw = info.cmdline_raw();
+    let lim = info.cmdline_limine_len();
+    if lim == 0 {
+        return Outcome::Fail("limine cmdline empty");
+    }
+    if crate::boot::cmdline().raw() != raw {
+        return Outcome::Fail("boot::cmdline() is not BootInfo's text");
+    }
+    let Some(rest) = raw.get(lim..) else {
+        return Outcome::Fail("limine part past the end");
+    };
+    let file = fw_cfg_init::file(crate::boot::FW_CFG_CMDLINE);
+    match (rest.split_first(), file) {
+        (None, _) => Outcome::Ok,
+        (Some((b' ', tail)), Some(f)) => {
+            let mut text = [0u8; CMDLINE_MAX + 1];
+            let n = fw_cfg_init::read(&f, &mut text);
+            let mut want = CmdlineBuf::new();
+            want.append(&text[..n]);
+            if want.as_bytes() == tail {
+                Outcome::Ok
+            } else {
+                Outcome::Fail("appended text is not the fw_cfg file")
+            }
+        }
+        (Some(_), Some(_)) => Outcome::Fail("no space between the two parts"),
+        (Some(_), None) => Outcome::Fail("text appended without the fw_cfg file"),
+    }
+}
+
+/// Tracing is on exactly when `vibeos.strace` is.
+pub(crate) fn test_strace_flag_matches_cmdline() -> Outcome {
+    if crate::syscall_init::trace_enabled() == crate::boot::cmdline().flag("vibeos.strace") {
+        Outcome::Ok
+    } else {
+        Outcome::Fail("trace_enabled differs from vibeos.strace")
     }
 }

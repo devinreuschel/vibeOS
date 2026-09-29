@@ -197,6 +197,11 @@ pub(crate) const TESTS: &[Test] = &[
     test("bootinfo_consistent", boot::ktest::test_bootinfo_consistent),
     test("fw_cfg_probe", boot::ktest::test_fw_cfg_probe),
     test("fw_cfg_dma", boot::ktest::test_fw_cfg_dma),
+    test("cmdline_captured", boot::ktest::test_cmdline_captured),
+    test(
+        "strace_flag_matches_cmdline",
+        boot::ktest::test_strace_flag_matches_cmdline,
+    ),
     test("df_on_ist", arch::ktest::test_df_on_ist),
     test("pit_tick_rate", time::ktest::test_pit_tick_rate),
     test("now_us_monotonic", time::ktest::test_now_us_monotonic),
