@@ -189,36 +189,61 @@ fn preempt_b() {
     }
 }
 
+/// How long `preempt_two_threads` waits for both workers to run, and then
+/// for both to exit, in 1 ms sleeps.
+const PREEMPT_WAIT_MS: u32 = 500;
+
+/// Two CPU-bound workers that never yield, pinned to one AP: both count
+/// only if the timer preempts one for the other (ROADMAP §10.2, F142).
 pub(crate) fn test_preempt_two_threads() -> Outcome {
+    let here = thread_init::current_cpu();
+    let mask = per_cpu_init::online_mask();
+    let Some(ap) = (1..64u32).find(|&c| c != here && mask & (1u64 << c) != 0) else {
+        return Outcome::Skip("no AP");
+    };
     PREEMPT_A.store(0, Ordering::SeqCst);
     PREEMPT_B.store(0, Ordering::SeqCst);
     PREEMPT_STOP.store(false, Ordering::SeqCst);
-    let Ok(_a) = thread_init::spawn("preempt-a", preempt_a) else {
-        return Outcome::Fail("spawn");
-    };
-    let Ok(_b) = thread_init::spawn("preempt-b", preempt_b) else {
-        return Outcome::Fail("spawn");
-    };
-    let t0 = time_init::uptime_ms();
-    loop {
-        let a = PREEMPT_A.load(Ordering::Relaxed);
-        let b = PREEMPT_B.load(Ordering::Relaxed);
-        if a > 0 && b > 0 {
-            PREEMPT_STOP.store(true, Ordering::SeqCst);
-            let t1 = time_init::uptime_ms();
-            while time_init::uptime_ms().saturating_sub(t1) < 50 {
-                core::hint::spin_loop();
+    let a = thread_init::spawn_on("preempt-a", preempt_a, ap);
+    let b = thread_init::spawn_on("preempt-b", preempt_b, ap);
+    let mut ran = false;
+    if a.is_ok() && b.is_ok() {
+        let mut waited = 0u32;
+        while waited < PREEMPT_WAIT_MS {
+            if PREEMPT_A.load(Ordering::Relaxed) > 0 && PREEMPT_B.load(Ordering::Relaxed) > 0 {
+                ran = true;
+                break;
             }
-            crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
-            return Outcome::Ok;
+            thread_init::sleep_ms(1);
+            waited += 1;
         }
-        if time_init::uptime_ms().saturating_sub(t0) > 500 {
-            PREEMPT_STOP.store(true, Ordering::SeqCst);
-            crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
-            return Outcome::Fail("no preemption");
-        }
-        core::hint::spin_loop();
     }
+    PREEMPT_STOP.store(true, Ordering::SeqCst);
+    let (na, nb) = (
+        PREEMPT_A.load(Ordering::Relaxed),
+        PREEMPT_B.load(Ordering::Relaxed),
+    );
+    // Neither worker may outlive the test: it would hold the AP for the
+    // tests after it.
+    let mut waited = 0u32;
+    let live = |h: &Result<thread_init::ThreadHandle, _>| {
+        h.as_ref().is_ok_and(|h| !thread_init::exited(h.id()))
+    };
+    while (live(&a) || live(&b)) && waited < PREEMPT_WAIT_MS {
+        thread_init::sleep_ms(1);
+        waited += 1;
+    }
+    crate::ktest_info!("a={na} b={nb} on cpu{ap}");
+    if a.is_err() || b.is_err() {
+        return Outcome::Fail("spawn_on");
+    }
+    if live(&a) || live(&b) {
+        return Outcome::Fail("workers did not exit");
+    }
+    if !ran {
+        return Outcome::Fail("no preemption");
+    }
+    Outcome::Ok
 }
 
 pub(crate) fn test_idle_runs() -> Outcome {
