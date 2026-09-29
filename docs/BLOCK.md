@@ -5,7 +5,7 @@ Index: [DESIGN.md](DESIGN.md). This file holds DESIGN §10, and its headings kee
 Phase 7. Portable types live in `crates/core/src/block/mod.rs`, `crates/core/src/block/part.rs`, and
 `crates/core/src/block/cache.rs`. Kernel ramdisk, waiters, and the boot marker live in
 `src/block/block_init.rs`. virtio-blk packing is `crates/core/src/drivers/virtio_blk.rs`;
-the driver is `src/drivers/virtio_blk_init.rs`. Partition children are
+the driver is the directory `src/drivers/virtio_blk_init/`. Partition children are
 `src/block/part_init.rs`. The write-back cache is `src/block/cache_init.rs`.
 
 ## 10.1 Completions
