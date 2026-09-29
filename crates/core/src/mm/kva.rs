@@ -24,8 +24,8 @@ use crate::limits::MAX_KVA_RANGES as MAX_RANGES;
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KvaError {
-    /// Free-list node pool exhausted after coalesce. Not a VA OOM
-    /// (`Kva::alloc` still returns `None` for that; `kva_init` says `NoVa`).
+    /// The node pool refused: `Kva::init` found no node. `Kva::alloc` at
+    /// its live-range cap returns `None`, which `kva_init` reports as `NoVa`.
     Exhausted,
     /// A page count of 0 or above the cap.
     Size,
@@ -64,14 +64,26 @@ pub struct KvaStats {
     pub free_ranges: usize,
 }
 
+// Node links are `u16`, and `alloc`'s cap of `MAX_RANGES - 2` live ranges
+// leaves room for at least one.
+const _: () = assert!(MAX_RANGES <= u16::MAX as usize);
+const _: () = assert!(MAX_RANGES >= 3);
+
+/// Live ranges `alloc` hands out at most. After a coalesce the free list
+/// holds at most `live + 1` ranges, since a live range separates any two,
+/// so with `live` below `MAX_RANGES - 1` a free always finds a node.
+const LIVE_CAP: usize = MAX_RANGES - 2;
+
 pub struct Kva {
     nodes: [Range; MAX_RANGES],
-    next: [Option<u8>; MAX_RANGES],
-    head: Option<u8>,
-    tail: Option<u8>,
+    next: [Option<u16>; MAX_RANGES],
+    head: Option<u16>,
+    tail: Option<u16>,
     /// Unused node indices, stack-allocated.
-    slots: [u8; MAX_RANGES],
-    nslots: u8,
+    slots: [u16; MAX_RANGES],
+    nslots: usize,
+    /// Ranges `alloc` handed out and `free` has not taken back.
+    live: usize,
     used: u64,
     capacity: u64,
 }
@@ -85,19 +97,27 @@ impl Kva {
             tail: None,
             slots: [0; MAX_RANGES],
             nslots: 0,
+            live: 0,
             used: 0,
             capacity: 0,
         }
     }
 
+    /// Reset to one free range `[start, start + size)`. In place: the pool
+    /// is larger than a kernel stack, so no temporary `Kva` is built.
     pub fn init(&mut self, start: u64, size: u64) -> Result<(), KvaError> {
         assert!(size.is_multiple_of(PAGE_SIZE));
         assert!(start.is_multiple_of(PAGE_SIZE));
-        *self = Self::empty();
+        self.nodes.fill(Range { start: 0, len: 0 });
+        self.next.fill(None);
+        self.head = None;
+        self.tail = None;
         for (i, slot) in self.slots.iter_mut().enumerate() {
-            *slot = i as u8;
+            *slot = i as u16;
         }
-        self.nslots = MAX_RANGES as u8;
+        self.nslots = MAX_RANGES;
+        self.live = 0;
+        self.used = 0;
         self.capacity = size;
         let i = self.alloc_slot().ok_or(KvaError::Exhausted)?;
         self.nodes[i as usize] = Range { start, len: size };
@@ -121,12 +141,13 @@ impl Kva {
         }
     }
 
-    /// First-fit. `len` page-aligned. Returns the start VA.
+    /// First-fit. `len` page-aligned. Returns the start VA. `None` when no
+    /// free range fits, or when `MAX_RANGES - 2` ranges are live already.
     pub fn alloc(&mut self, len: u64) -> Option<u64> {
-        if len == 0 || !len.is_multiple_of(PAGE_SIZE) {
+        if len == 0 || !len.is_multiple_of(PAGE_SIZE) || self.live >= LIVE_CAP {
             return None;
         }
-        let mut prev: Option<u8> = None;
+        let mut prev: Option<u16> = None;
         let mut cur = self.head;
         while let Some(i) = cur {
             let r = self.nodes[i as usize];
@@ -142,6 +163,7 @@ impl Kva {
                     };
                 }
                 self.used += len;
+                self.live += 1;
                 return Some(start);
             }
             prev = cur;
@@ -161,24 +183,27 @@ impl Kva {
         self.alloc(len)
     }
 
-    /// Append `[start, start+len)` to the tail. No coalescing on this
-    /// path: DESIGN wants recently-freed VA at the tail so it is not
-    /// the next first-fit hit.
-    ///
-    /// On `Err(Exhausted)` the node pool is full even after coalescing:
-    /// the range is not linked and stays counted in `used`.
-    pub fn free(&mut self, start: u64, len: u64) -> Result<(), KvaError> {
+    /// Append `[start, start+len)`, a range `alloc` handed out, to the
+    /// tail. No coalescing on this path: DESIGN wants recently-freed VA at
+    /// the tail so it is not the next first-fit hit. With no node left it
+    /// coalesces the list first, which always leaves one ([`LIVE_CAP`]).
+    pub fn free(&mut self, start: u64, len: u64) {
         assert!(len.is_multiple_of(PAGE_SIZE) && start.is_multiple_of(PAGE_SIZE));
         assert!(len > 0);
         assert!(
-            self.used >= len,
-            "kva: free {len} when used is {}",
-            self.used
+            self.used >= len && self.live > 0,
+            "kva: free {len} when used is {} over {} ranges",
+            self.used,
+            self.live
         );
         if self.nslots == 0 {
-            self.coalesce_all()?;
+            self.coalesce_all();
         }
-        let i = self.alloc_slot().ok_or(KvaError::Exhausted)?;
+        // Invariant: a coalesced list holds at most `live + 1` ranges and
+        // `live <= LIVE_CAP`, so a node is left (`Kva::alloc`'s cap).
+        assert!(self.nslots > 0, "kva: no node after coalesce");
+        self.nslots -= 1;
+        let i = self.slots[self.nslots];
         self.nodes[i as usize] = Range { start, len };
         self.next[i as usize] = None;
         if let Some(t) = self.tail {
@@ -188,10 +213,10 @@ impl Kva {
         }
         self.tail = Some(i);
         self.used -= len;
-        Ok(())
+        self.live -= 1;
     }
 
-    fn unlink(&mut self, prev: Option<u8>, i: u8) {
+    fn unlink(&mut self, prev: Option<u16>, i: u16) {
         let nxt = self.next[i as usize];
         if let Some(p) = prev {
             self.next[p as usize] = nxt;
@@ -204,64 +229,57 @@ impl Kva {
         self.next[i as usize] = None;
     }
 
-    fn alloc_slot(&mut self) -> Option<u8> {
+    fn alloc_slot(&mut self) -> Option<u16> {
         if self.nslots == 0 {
             return None;
         }
         self.nslots -= 1;
-        Some(self.slots[self.nslots as usize])
+        Some(self.slots[self.nslots])
     }
 
-    fn free_slot(&mut self, i: u8) {
-        self.slots[self.nslots as usize] = i;
+    fn free_slot(&mut self, i: u16) {
+        self.slots[self.nslots] = i;
         self.nslots += 1;
         self.nodes[i as usize] = Range { start: 0, len: 0 };
     }
 
     /// Overflow valve: sort + merge adjacent, rebuild as a single
-    /// address-ordered list. Normal frees never take this path.
-    fn coalesce_all(&mut self) -> Result<(), KvaError> {
-        let mut tmp = [Range { start: 0, len: 0 }; MAX_RANGES];
+    /// address-ordered list, in place. Normal frees never take this path.
+    fn coalesce_all(&mut self) {
+        // A node on the free list has `len > 0`; a spare node has 0
+        // (`free_slot`, `init`). Move the listed ones to the front.
         let mut n = 0usize;
-        let mut cur = self.head;
-        while let Some(i) = cur {
-            tmp[n] = self.nodes[i as usize];
-            n += 1;
-            cur = self.next[i as usize];
+        for r in 0..MAX_RANGES {
+            if self.nodes[r].len > 0 {
+                self.nodes[n] = self.nodes[r];
+                n += 1;
+            }
         }
-        tmp[..n].sort_unstable_by_key(|r| r.start);
+        self.nodes[..n].sort_unstable_by_key(|r| r.start);
         let mut w = 0usize;
-        for i in 0..n {
+        for r in 0..n {
             if w > 0 {
-                let prev = tmp[w - 1];
-                if prev.start + prev.len == tmp[i].start {
-                    tmp[w - 1].len += tmp[i].len;
+                let prev = self.nodes[w - 1];
+                if prev.start + prev.len == self.nodes[r].start {
+                    self.nodes[w - 1].len += self.nodes[r].len;
                     continue;
                 }
             }
-            tmp[w] = tmp[i];
+            self.nodes[w] = self.nodes[r];
             w += 1;
         }
-        self.head = None;
-        self.tail = None;
-        for i in 0..MAX_RANGES {
-            self.slots[i] = i as u8;
-            self.next[i] = None;
-            self.nodes[i] = Range { start: 0, len: 0 };
+        self.nodes[w..].fill(Range { start: 0, len: 0 });
+        self.next.fill(None);
+        for i in 1..w {
+            self.next[i - 1] = Some(i as u16);
         }
-        self.nslots = MAX_RANGES as u8;
-        for r in tmp[..w].iter() {
-            let i = self.alloc_slot().ok_or(KvaError::Exhausted)?;
-            self.nodes[i as usize] = *r;
-            self.next[i as usize] = None;
-            if let Some(t) = self.tail {
-                self.next[t as usize] = Some(i);
-            } else {
-                self.head = Some(i);
-            }
-            self.tail = Some(i);
+        self.head = if w > 0 { Some(0) } else { None };
+        self.tail = w.checked_sub(1).map(|t| t as u16);
+        self.nslots = 0;
+        for i in w..MAX_RANGES {
+            self.slots[self.nslots] = i as u16;
+            self.nslots += 1;
         }
-        Ok(())
     }
 
     /// Test helper: walk the free list into a vec of (start, len).
@@ -282,10 +300,8 @@ impl Kva {
 mod tests {
     use super::*;
 
-    fn fresh() -> Kva {
-        let mut k = Kva::empty();
-        k.init(KVA_START, 64 * PAGE_SIZE).unwrap();
-        k
+    fn fresh() -> std::boxed::Box<Kva> {
+        window(64)
     }
 
     #[test]
@@ -303,7 +319,7 @@ mod tests {
         let mut k = fresh();
         let a = k.alloc(2 * PAGE_SIZE).unwrap();
         let _b = k.alloc(2 * PAGE_SIZE).unwrap();
-        k.free(a, 2 * PAGE_SIZE).unwrap();
+        k.free(a, 2 * PAGE_SIZE);
         // Free list head is the leftover after the two allocs (starting
         // at +4 pages). The just-freed `a` must sit at the tail, so the
         // next first-fit of 2 pages takes leftover, not `a`.
@@ -320,7 +336,7 @@ mod tests {
         let s0 = k.stats();
         let a = k.alloc(8 * PAGE_SIZE).unwrap();
         assert_eq!(k.stats().used, 8 * PAGE_SIZE);
-        k.free(a, 8 * PAGE_SIZE).unwrap();
+        k.free(a, 8 * PAGE_SIZE);
         assert_eq!(k.stats().used, s0.used);
         assert_eq!(k.stats().capacity, s0.capacity);
         // Freed ranges go to the tail without coalescing, so the range
@@ -333,7 +349,7 @@ mod tests {
         let guard = k.alloc_guarded(4).unwrap();
         assert_eq!(guard, KVA_START);
         assert_eq!(k.stats().used, 5 * PAGE_SIZE);
-        k.free(guard, 5 * PAGE_SIZE).unwrap();
+        k.free(guard, 5 * PAGE_SIZE);
         assert_eq!(k.stats().used, 0);
     }
 
@@ -365,43 +381,106 @@ mod tests {
 
     #[test]
     fn init_ok_on_fresh_window() {
-        let mut k = Kva::empty();
+        let mut k = std::boxed::Box::new(Kva::empty());
         assert_eq!(k.init(KVA_START, PAGE_SIZE), Ok(()));
         assert_eq!(k.stats().capacity, PAGE_SIZE);
         assert_eq!(k.stats().used, 0);
         assert_eq!(k.stats().free_ranges, 1);
     }
 
+    /// A window of `pages` pages at `KVA_START`.
+    fn window(pages: u64) -> std::boxed::Box<Kva> {
+        let mut k = std::boxed::Box::new(Kva::empty());
+        k.init(KVA_START, pages * PAGE_SIZE).unwrap();
+        k
+    }
+
     #[test]
-    fn free_with_full_node_pool_keeps_range_used() {
-        let mut k = Kva::empty();
-        k.init(KVA_START, 512 * PAGE_SIZE).unwrap();
-        for i in 0..260u64 {
-            assert_eq!(k.alloc(PAGE_SIZE), Some(KVA_START + i * PAGE_SIZE));
+    fn kva_frees_past_128_ranges_out_of_order() {
+        let mut k = window(1024);
+        let guards: std::vec::Vec<u64> = (0..300).map(|_| k.alloc_guarded(1).unwrap()).collect();
+        assert_eq!(k.stats().used, 600 * PAGE_SIZE);
+        // Odd ones last first, then the even ones: none is adjacent to a
+        // range freed before it until the evens fill the gaps.
+        for g in guards.iter().skip(1).step_by(2).rev() {
+            k.free(*g, 2 * PAGE_SIZE);
         }
-        // Frees of every other page never coalesce: after 127 of them the
-        // 127 freed pages and the tail remainder fill all 128 nodes.
-        for i in 0..127u64 {
-            k.free(KVA_START + 2 * i * PAGE_SIZE, PAGE_SIZE).unwrap();
+        assert!(k.stats().free_ranges > 128);
+        for g in guards.iter().step_by(2) {
+            k.free(*g, 2 * PAGE_SIZE);
         }
-        let before = k.stats();
-        assert_eq!(before.free_ranges, MAX_RANGES);
+        assert_eq!(k.stats().used, 0);
+        assert_eq!(k.live, 0);
+        // Every page is still on the list, once.
+        let total: u64 = k.free_list().iter().map(|r| r.1).sum();
+        assert_eq!(total, 1024 * PAGE_SIZE);
+    }
+
+    #[test]
+    fn kva_alloc_refuses_at_live_cap() {
+        let mut k = window(MAX_RANGES as u64 + 16);
+        let mut got = std::vec::Vec::new();
+        for _ in 0..LIVE_CAP {
+            got.push(k.alloc(PAGE_SIZE).unwrap());
+        }
+        assert_eq!(k.alloc(PAGE_SIZE), None, "the live-range cap refuses");
+        assert_eq!(k.alloc_guarded(1), None);
+        k.free(got.pop().unwrap(), PAGE_SIZE);
+        assert!(k.alloc(PAGE_SIZE).is_some(), "a free makes room again");
+    }
+
+    #[test]
+    fn kva_free_never_fails_at_live_cap() {
+        let mut k = window(4 * MAX_RANGES as u64);
+        let mut live: std::collections::VecDeque<u64> =
+            (0..LIVE_CAP).map(|_| k.alloc(PAGE_SIZE).unwrap()).collect();
+        // Free the oldest and take a new page: each round adds a range to
+        // the list and keeps `LIVE_CAP` ranges live, so the pool runs dry
+        // and the coalesce runs at the cap.
+        let mut ran_dry = false;
+        for _ in 0..2 * MAX_RANGES {
+            ran_dry |= k.nslots == 0;
+            let va = live.pop_front().unwrap();
+            k.free(va, PAGE_SIZE);
+            live.push_back(k.alloc(PAGE_SIZE).unwrap());
+            assert_eq!(k.live, LIVE_CAP);
+        }
+        assert!(ran_dry, "the node pool never ran dry");
+        for va in live {
+            k.free(va, PAGE_SIZE);
+        }
+        assert_eq!(k.stats().used, 0);
+        assert_eq!(k.live, 0);
+    }
+
+    #[test]
+    fn kva_coalesce_in_place_merges_neighbours() {
+        let mut k = window(64);
+        let a = k.alloc(PAGE_SIZE).unwrap();
+        let b = k.alloc(PAGE_SIZE).unwrap();
+        let c = k.alloc(PAGE_SIZE).unwrap();
+        let d = k.alloc(PAGE_SIZE).unwrap();
+        k.free(c, PAGE_SIZE);
+        k.free(a, PAGE_SIZE);
+        k.free(b, PAGE_SIZE);
+        assert_eq!(k.stats().free_ranges, 4);
+        k.coalesce_all();
+        // a, b, c merge; d is live; the remainder after d stays apart.
         assert_eq!(
-            k.free(KVA_START + 254 * PAGE_SIZE, PAGE_SIZE),
-            Err(KvaError::Exhausted)
+            k.free_list(),
+            std::vec![(a, 3 * PAGE_SIZE), (d + PAGE_SIZE, 60 * PAGE_SIZE)]
         );
-        assert_eq!(
-            k.stats().used,
-            before.used,
-            "a failed free must keep its range counted"
-        );
-        assert_eq!(k.stats().free_ranges, MAX_RANGES);
+        assert_eq!(k.nslots, MAX_RANGES - 2);
+        k.free(d, PAGE_SIZE);
+        k.coalesce_all();
+        assert_eq!(k.free_list(), std::vec![(KVA_START, 64 * PAGE_SIZE)]);
+        assert_eq!(k.stats().used, 0);
     }
 
     #[test]
     fn fixed_tables_match_limits() {
         use crate::limits::MAX_KVA_RANGES;
-        let k = Kva::empty();
+        let k = std::boxed::Box::new(Kva::empty());
         assert_eq!(k.nodes.len(), MAX_KVA_RANGES);
         assert_eq!(k.next.len(), MAX_KVA_RANGES);
         assert_eq!(k.slots.len(), MAX_KVA_RANGES);

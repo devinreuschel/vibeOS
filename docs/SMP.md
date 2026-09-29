@@ -221,8 +221,8 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
   `ready`, `wake_inbox`, `apic_id`, and `as_cr3`, the root this CPU last loaded: an `AtomicU64` its
   owner stores after each CR3 write and `addr_space_init::teardown` reads. All are atomics; it is the
   only per-CPU state another CPU reads.
-  `wake_inbox` is a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD`
-  (planned: a bitmap sized from the limits, §7.6). `ready` is the flag an AP sets last in bring-up
+  `wake_inbox`, a slot bitmap with a summary word (§7.6): a remote CPU sets a thread's bit and sends
+  IPI `0xFD`. `ready` is the flag an AP sets last in bring-up
   ([section 7.4](#74-ap-bring-up-sequence)).
 
 `per_cpu_init::init_bsp` allocates one `PerCpu` per MADT CPU in a heap array, not a static array
@@ -401,14 +401,17 @@ locked read-modify-write and add no fence of their own. Rule; not yet enforced:
 `ipi_init::shootdown_va`) do so before their publishing store, which is not enough under x2APIC
 (ROADMAP §20.1).
 
-Planned (ROADMAP §10.4): the wake inbox (§7.5) is a per-CPU bitmap of `AtomicU64` words sized from
-the `limits` thread count, with one summary bit per word. A push is a Release `fetch_or` of the
-thread's bit and then of its word's summary bit, and sends `0xFD`; a drain swaps the summary to zero
-with Acquire and then swaps each flagged word to zero with Acquire. A push allocates nothing and is
-idempotent, so a thread woken from two CPUs at once is queued once. Push and drain live in
-`vibeos-core` with ROADMAP §10.8's model, and the `0xFD` handler calls the drain. Rejected: an
+The wake inbox (§7.5) is `vibeos::irq::ipi::WakeInbox`, a per-CPU bitmap of `AtomicU64` words
+with one bit per thread-table slot, sized from `limits::MAX_THREADS`, and a summary word with one
+bit per word. A push is a Release `fetch_or` of the slot's bit and then of its word's summary bit,
+and sends `0xFD`; a drain swaps the summary to zero with Acquire, then swaps each flagged word to
+zero with Acquire and takes its set bits in ascending order. A push allocates nothing and is
+idempotent, so a thread woken from two CPUs at once is queued once. A bit names a slot, not a tid:
+the `0xFD` handler's drain maps each slot to its tid through `thread_init`'s slot table, which spawn
+publishes with Release under `SCHED` whenever a slot takes a TCB. A bit is set only for a Ready
+thread, which cannot die before it runs, so a slot is not reused while its bit is set. Rejected: an
 intrusive MPSC list, which needs a queued flag in each TCB against double insertion and a larger
-model.
+model. Planned: ROADMAP §10.8's loom model of push and drain.
 
 ## 7.7 Locking with more than one CPU
 
