@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import sys
 import time
 import unittest
@@ -40,6 +41,7 @@ from tests.harness.harness import (
     check_mce_dump,
     contains_panic,
     drain_panic_tail,
+    iter_lines_with_deadline,
     effective_accel_name,
     halt_test_markers,
     is_dump_banner,
@@ -2394,6 +2396,58 @@ class TestMceHelpers(unittest.TestCase):
             b.sendall(b"partial")
             b.close()
             self.assertEqual(_monitor_reply(a, 1.0), "partial")
+
+
+class TestKtestVerdict(unittest.TestCase):
+    """The ktest verdict (ROADMAP §10.2): the partial line at a deadline,
+    the monitor directory, counted runs, and the per-run progress deadline."""
+
+    def test_partial_line_before_timeout(self) -> None:
+        r, w = os.pipe()
+        try:
+            os.write(w, K("vibeOS: ktest: run slow 100\n").encode() + b"vibeOS: stuck at")
+            reader = DeadlineReader(r, time.monotonic() + 0.3)
+            self.assertEqual(reader.next_event(), ("line", K("vibeOS: ktest: run slow 100")))
+            self.assertEqual(reader.next_event(), ("partial", "vibeOS: stuck at"))
+            self.assertEqual(reader.next_event(), ("timeout", ""))
+        finally:
+            os.close(r)
+            os.close(w)
+
+    def test_partial_line_kept_by_helpers(self) -> None:
+        r, w = os.pipe()
+        try:
+            os.write(w, b"a\nhalf")
+            got = list(iter_lines_with_deadline(r, time.monotonic() + 0.3))
+            self.assertEqual(got, ["a", "half"])
+        finally:
+            os.close(r)
+            os.close(w)
+        r, w = os.pipe()
+        try:
+            os.write(w, K("msg: x\n").encode() + b"\x1e  0xffff")
+            result = RunResult(lines=[K("vibeOS: panic:")])
+            drain_panic_tail(DeadlineReader(r, time.monotonic()), result, window_s=0.3)
+            self.assertEqual(result.lines, [K("vibeOS: panic:"), K("msg: x"), K("  0xffff")])
+        finally:
+            os.close(r)
+            os.close(w)
+
+    def test_monitor_dir_removed_at_exit(self) -> None:
+        code = (
+            "from tests.harness.harness import _pick_monitor_path\n"
+            "import os\n"
+            "p = _pick_monitor_path()\n"
+            "assert os.path.isdir(os.path.dirname(p))\n"
+            "print(os.path.dirname(p))\n"
+        )
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        out = subprocess.run(
+            [sys.executable, "-c", code], cwd=root, capture_output=True, text=True, check=True
+        )
+        d = out.stdout.strip()
+        self.assertIn("vibeos-mon-", d)
+        self.assertFalse(os.path.exists(d), d)
 
 
 if __name__ == "__main__":

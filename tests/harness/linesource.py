@@ -15,7 +15,8 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Protocol
 
-# ("line", text) | ("eof", "") | ("timeout", "")
+# ("line", text) | ("partial", text) | ("eof", "") | ("timeout", "");
+# a partial line comes before the timeout it ends in (`DeadlineReader`)
 LineEvent = tuple[str, str]
 
 

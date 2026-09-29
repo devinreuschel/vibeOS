@@ -223,7 +223,10 @@ def check_dump_needles(
 
 
 def _pick_monitor_path() -> str:
+    """A monitor socket path in a fresh `vibeos-mon-*` directory, which is
+    removed when the harness process exits, whichever driver made it."""
     d = tempfile.mkdtemp(prefix="vibeos-mon-")
+    atexit.register(shutil.rmtree, d, ignore_errors=True)
     return os.path.join(d, "monitor.sock")
 
 
@@ -301,9 +304,15 @@ class DeadlineReader:
     deadline passes, or the pipe closes.
 
     Yields `(kind, payload)`:
-      ("line", str)   - one line of serial output, without trailing \\n
-      ("timeout", "") - the deadline arrived
-      ("eof", "")     - the pipe closed
+      ("line", str)    - one line of serial output, without trailing \\n
+      ("partial", str) - the deadline arrived with bytes buffered but no
+                         newline: the line the guest was writing, which often
+                         shows where it stopped; ("timeout", "") follows
+      ("timeout", "")  - the deadline arrived
+      ("eof", "")      - the pipe closed
+
+    A loop that tests only for `timeout` and `eof` takes a partial line as
+    a line.
     """
 
     def __init__(self, fd: int, deadline: float) -> None:
@@ -332,6 +341,10 @@ class DeadlineReader:
         while True:
             remaining = self._deadline - time.monotonic()
             if remaining <= 0:
+                if self._buf:
+                    tail = bytes(self._buf).rstrip(b"\r").decode("utf-8", errors="replace")
+                    self._buf.clear()
+                    return ("partial", tail)
                 return ("timeout", "")
 
             # Cap select's own wait so the deadline is honored precisely.
@@ -362,11 +375,12 @@ class DeadlineReader:
 
 
 def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
-    """Small helper: yield lines until deadline / EOF. For tests."""
+    """Small helper: yield lines, and a partial line at the deadline, until
+    deadline / EOF. For tests."""
     reader = DeadlineReader(fd, deadline)
     while True:
         kind, payload = reader.next_event()
-        if kind == "line":
+        if kind in ("line", "partial"):
             yield payload
         else:
             return
@@ -1720,6 +1734,9 @@ def drain_panic_tail(
     reader.set_deadline(time.monotonic() + window_s)
     while True:
         kind, line = reader.next_event()
+        if kind == "partial":
+            result.lines.append(line)
+            continue
         if kind != "line":
             return
         result.lines.append(line)
@@ -1851,6 +1868,9 @@ def run_qemu_until_exit(
                     reader.set_deadline(time.monotonic() + 2.0)
                     while True:
                         kind, line = reader.next_event()
+                        if kind == "partial":
+                            result.lines.append(line)
+                            continue
                         if kind != "line":
                             break
                         take(line)
@@ -1860,6 +1880,10 @@ def run_qemu_until_exit(
                 break
             if kind == "eof":
                 break
+            if kind == "partial":
+                # Kept for the report; never a line to act on.
+                result.lines.append(line)
+                continue
             take(line)
             if kill_after is not None and kill_at is None:
                 delay = kill_after(line)
