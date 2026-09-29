@@ -4,6 +4,10 @@
 //! Packed fields go through the `read_unaligned_*` helpers — ACPI tables
 //! have no alignment guarantees (HPET's period tick sits at offset 53).
 //! No DSDT/SSDT/AML. MCFG is stashed, not walked.
+//!
+//! Firmware tables are untrusted input (DESIGN §2.10), so no index or
+//! arithmetic here can panic: an out-of-range access is `Truncated`.
+#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use core::fmt;
 
@@ -40,6 +44,7 @@ pub trait PhysMem {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
 pub enum AcpiError {
     Truncated,
     BadSignature,
@@ -75,24 +80,25 @@ pub fn read_unaligned_u8(b: &[u8], off: usize) -> Option<u8> {
     b.get(off).copied()
 }
 
+/// The `N` bytes of `b` at `off`, or `None` past the end or on overflow.
+#[inline]
+fn bytes_at<const N: usize>(b: &[u8], off: usize) -> Option<[u8; N]> {
+    b.get(off..off.checked_add(N)?)?.try_into().ok()
+}
+
 #[inline]
 pub fn read_unaligned_u16(b: &[u8], off: usize) -> Option<u16> {
-    let s = b.get(off..off + 2)?;
-    Some(u16::from_le_bytes([s[0], s[1]]))
+    bytes_at(b, off).map(u16::from_le_bytes)
 }
 
 #[inline]
 pub fn read_unaligned_u32(b: &[u8], off: usize) -> Option<u32> {
-    let s = b.get(off..off + 4)?;
-    Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    bytes_at(b, off).map(u32::from_le_bytes)
 }
 
 #[inline]
 pub fn read_unaligned_u64(b: &[u8], off: usize) -> Option<u64> {
-    let s = b.get(off..off + 8)?;
-    Some(u64::from_le_bytes([
-        s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
-    ]))
+    bytes_at(b, off).map(u64::from_le_bytes)
 }
 
 #[inline]
@@ -111,22 +117,28 @@ fn checksum_range<P: PhysMem>(phys: &P, addr: u64, len: u32) -> Result<u8, AcpiE
     let mut sum = 0u8;
     let mut tmp = [0u8; 256];
     let mut off = 0u32;
-    while off < len {
-        let n = ((len - off) as usize).min(tmp.len());
-        if !phys.read(addr + off as u64, &mut tmp[..n]) {
+    while let Some(left) = len.checked_sub(off).filter(|&l| l != 0) {
+        let n = (left as usize).min(tmp.len());
+        let at = addr
+            .checked_add(u64::from(off))
+            .ok_or(AcpiError::Truncated)?;
+        let chunk = tmp.get_mut(..n).ok_or(AcpiError::Truncated)?;
+        if !phys.read(at, chunk) {
             return Err(AcpiError::Truncated);
         }
-        for &b in &tmp[..n] {
-            sum = sum.wrapping_add(b);
-        }
-        off += n as u32;
+        sum = sum.wrapping_add(checksum(chunk));
+        off = off.checked_add(n as u32).ok_or(AcpiError::Truncated)?;
     }
     Ok(sum)
 }
 
 fn sig4(b: &[u8], off: usize) -> Option<[u8; 4]> {
-    let s = b.get(off..off + 4)?;
-    Some([s[0], s[1], s[2], s[3]])
+    bytes_at(b, off)
+}
+
+/// `off + k` as an offset into a table, or `Truncated` on overflow.
+fn at(off: usize, k: usize) -> Result<usize, AcpiError> {
+    off.checked_add(k).ok_or(AcpiError::Truncated)
 }
 
 // ------------------ RSDP ------------------
@@ -139,13 +151,11 @@ pub struct RsdpInfo {
 }
 
 pub fn parse_rsdp(bytes: &[u8]) -> Result<RsdpInfo, AcpiError> {
-    if bytes.len() < RSDP_V1_LEN {
-        return Err(AcpiError::Truncated);
-    }
-    if &bytes[0..8] != RSDP_SIG {
+    let v1 = bytes.get(..RSDP_V1_LEN).ok_or(AcpiError::Truncated)?;
+    if v1.get(0..8) != Some(&RSDP_SIG[..]) {
         return Err(AcpiError::BadSignature);
     }
-    if !checksum_ok(&bytes[..RSDP_V1_LEN]) {
+    if !checksum_ok(v1) {
         return Err(AcpiError::BadChecksum);
     }
     let revision = read_unaligned_u8(bytes, 15).ok_or(AcpiError::Truncated)?;
@@ -162,10 +172,10 @@ pub fn parse_rsdp(bytes: &[u8]) -> Result<RsdpInfo, AcpiError> {
         return Err(AcpiError::Truncated);
     }
     let length = read_unaligned_u32(bytes, 20).ok_or(AcpiError::Truncated)? as usize;
-    if length < RSDP_V2_LEN || bytes.len() < length {
+    if length < RSDP_V2_LEN {
         return Err(AcpiError::Truncated);
     }
-    if !checksum_ok(&bytes[..length]) {
+    if !checksum_ok(bytes.get(..length).ok_or(AcpiError::Truncated)?) {
         return Err(AcpiError::BadChecksum);
     }
     let xsdt_addr = read_unaligned_u64(bytes, 24).ok_or(AcpiError::Truncated)?;
@@ -206,10 +216,10 @@ impl Gas {
 pub fn parse_gas(bytes: &[u8], off: usize) -> Result<Gas, AcpiError> {
     Ok(Gas {
         space_id: read_unaligned_u8(bytes, off).ok_or(AcpiError::Truncated)?,
-        bit_width: read_unaligned_u8(bytes, off + 1).ok_or(AcpiError::Truncated)?,
-        bit_offset: read_unaligned_u8(bytes, off + 2).ok_or(AcpiError::Truncated)?,
-        access_size: read_unaligned_u8(bytes, off + 3).ok_or(AcpiError::Truncated)?,
-        address: read_unaligned_u64(bytes, off + 4).ok_or(AcpiError::Truncated)?,
+        bit_width: read_unaligned_u8(bytes, at(off, 1)?).ok_or(AcpiError::Truncated)?,
+        bit_offset: read_unaligned_u8(bytes, at(off, 2)?).ok_or(AcpiError::Truncated)?,
+        access_size: read_unaligned_u8(bytes, at(off, 3)?).ok_or(AcpiError::Truncated)?,
+        address: read_unaligned_u64(bytes, at(off, 4)?).ok_or(AcpiError::Truncated)?,
     })
 }
 
@@ -239,11 +249,10 @@ pub fn parse_sdt_header(bytes: &[u8]) -> Result<SdtHeader, AcpiError> {
 
 pub fn validate_sdt(bytes: &[u8]) -> Result<SdtHeader, AcpiError> {
     let hdr = parse_sdt_header(bytes)?;
-    let n = (hdr.length as usize).min(bytes.len());
-    if n < hdr.length as usize {
-        return Err(AcpiError::Truncated);
-    }
-    if !checksum_ok(&bytes[..n]) {
+    let table = bytes
+        .get(..hdr.length as usize)
+        .ok_or(AcpiError::Truncated)?;
+    if !checksum_ok(table) {
         return Err(AcpiError::BadChecksum);
     }
     Ok(hdr)
@@ -307,19 +316,23 @@ pub fn parse_madt(bytes: &[u8]) -> Result<MadtInfo, AcpiError> {
         ..MadtInfo::default()
     };
 
+    // Each record is `type, length, body`; `tail` is the table from `off`.
     let mut off = 44usize;
-    while off + 2 <= table_len {
-        let typ = bytes[off];
-        let len = bytes[off + 1] as usize;
+    while let Some(tail) = bytes.get(off..table_len) {
+        let (Some(&typ), Some(&len)) = (tail.first(), tail.get(1)) else {
+            break;
+        };
+        let len = usize::from(len);
         if len < 2 {
             // zero/garbage length: stop rather than spin
             break;
         }
-        if off + len > table_len {
+        let Some(rec) = tail.get(..len) else {
             // truncated entry: keep what we already parsed
             break;
-        }
-        let rec = &bytes[off..off + len];
+        };
+        // A `get_mut` that finds a slot bounds each count below its array's
+        // length, so the `saturating_add`s below never saturate.
         match typ {
             MADT_TYPE_LAPIC => {
                 if len >= 8 {
@@ -327,8 +340,8 @@ pub fn parse_madt(bytes: &[u8]) -> Result<MadtInfo, AcpiError> {
                     if flags & LAPIC_ENABLED != 0
                         && let Some(slot) = info.apic_ids.get_mut(info.cpu_count)
                     {
-                        *slot = rec[3];
-                        info.cpu_count += 1;
+                        *slot = read_unaligned_u8(rec, 3).unwrap_or(0);
+                        info.cpu_count = info.cpu_count.saturating_add(1);
                     }
                 }
             }
@@ -337,11 +350,11 @@ pub fn parse_madt(bytes: &[u8]) -> Result<MadtInfo, AcpiError> {
                     && let Some(slot) = info.ioapics.get_mut(info.ioapic_count)
                 {
                     *slot = IoApic {
-                        id: rec[2],
+                        id: read_unaligned_u8(rec, 2).unwrap_or(0),
                         addr: read_unaligned_u32(rec, 4).unwrap_or(0),
                         gsi_base: read_unaligned_u32(rec, 8).unwrap_or(0),
                     };
-                    info.ioapic_count += 1;
+                    info.ioapic_count = info.ioapic_count.saturating_add(1);
                 }
             }
             MADT_TYPE_ISO => {
@@ -349,11 +362,11 @@ pub fn parse_madt(bytes: &[u8]) -> Result<MadtInfo, AcpiError> {
                     && let Some(slot) = info.isos.get_mut(info.iso_count)
                 {
                     *slot = Iso {
-                        irq: rec[3],
+                        irq: read_unaligned_u8(rec, 3).unwrap_or(0),
                         gsi: read_unaligned_u32(rec, 4).unwrap_or(0),
                         flags: read_unaligned_u16(rec, 8).unwrap_or(0),
                     };
-                    info.iso_count += 1;
+                    info.iso_count = info.iso_count.saturating_add(1);
                 }
             }
             MADT_TYPE_LAPIC_ADDR_OVERRIDE if len >= 12 => {
@@ -361,7 +374,10 @@ pub fn parse_madt(bytes: &[u8]) -> Result<MadtInfo, AcpiError> {
             }
             _ => {}
         }
-        off += len;
+        let Some(next) = off.checked_add(len) else {
+            break;
+        };
+        off = next;
     }
     Ok(info)
 }
@@ -431,7 +447,8 @@ pub fn parse_fadt(bytes: &[u8]) -> Result<FadtInfo, AcpiError> {
         sleep_control: Gas::empty(),
         sleep_status: Gas::empty(),
     };
-    if n > 109 + 1 {
+    // IAPC_BOOT_ARCH is the u16 at 109, so it needs 111 bytes.
+    if n >= 111 {
         info.iapc_boot_arch = read_unaligned_u16(bytes, 109).unwrap_or(0);
     }
     if n >= 129 {
@@ -526,8 +543,9 @@ fn load_checked<'a, P: PhysMem>(
         return Err(AcpiError::BadChecksum);
     }
     let n = (hdr.length as usize).min(buf.len());
-    read_exact(phys, addr, &mut buf[..n])?;
-    Ok((hdr, &buf[..n]))
+    let prefix = buf.get_mut(..n).ok_or(AcpiError::Truncated)?;
+    read_exact(phys, addr, prefix)?;
+    Ok((hdr, prefix))
 }
 
 fn walk_root<P: PhysMem>(
@@ -543,11 +561,10 @@ fn walk_root<P: PhysMem>(
     if checksum_range(phys, root_addr, hdr.length)? != 0 {
         return Err(AcpiError::BadChecksum);
     }
-    if hdr.length < SDT_HEADER_LEN as u32 {
-        return Err(AcpiError::Truncated);
-    }
-    let body = hdr.length as usize - SDT_HEADER_LEN;
-    let n_entries = body / ptr_size;
+    let body = (hdr.length as usize)
+        .checked_sub(SDT_HEADER_LEN)
+        .ok_or(AcpiError::Truncated)?;
+    let n_entries = body.checked_div(ptr_size).ok_or(AcpiError::Truncated)?;
 
     let mut info = AcpiInfo {
         used_xsdt: expect_sig == SIG_XSDT,
@@ -560,14 +577,18 @@ fn walk_root<P: PhysMem>(
     let mut scratch = [0u8; 4096];
 
     for i in 0..n_entries {
-        let ptr_off = (SDT_HEADER_LEN + i * ptr_size) as u64;
+        let ptr_addr = i
+            .checked_mul(ptr_size)
+            .and_then(|o| o.checked_add(SDT_HEADER_LEN))
+            .and_then(|o| root_addr.checked_add(o as u64))
+            .ok_or(AcpiError::Truncated)?;
         let table_addr = if ptr_size == 8 {
             let mut raw = [0u8; 8];
-            read_exact(phys, root_addr + ptr_off, &mut raw)?;
+            read_exact(phys, ptr_addr, &mut raw)?;
             u64::from_le_bytes(raw)
         } else {
             let mut raw = [0u8; 4];
-            read_exact(phys, root_addr + ptr_off, &mut raw)?;
+            read_exact(phys, ptr_addr, &mut raw)?;
             u32::from_le_bytes(raw) as u64
         };
         if table_addr == 0 {
@@ -578,7 +599,8 @@ fn walk_root<P: PhysMem>(
             Err(AcpiError::BadChecksum) | Err(AcpiError::Truncated) => continue,
             Err(e) => return Err(e),
         };
-        info.table_count += 1;
+        // At most `n_entries`, so this never saturates.
+        info.table_count = info.table_count.saturating_add(1);
         match &th.signature {
             s if s == SIG_MADT => {
                 if let Ok(m) = parse_madt(slice) {
@@ -612,8 +634,11 @@ pub fn walk<P: PhysMem>(phys: &P, rsdp_phys: u64) -> Result<AcpiInfo, AcpiError>
     let rsdp = if phys.read(rsdp_phys, &mut rsdp_buf) {
         parse_rsdp(&rsdp_buf)?
     } else {
-        read_exact(phys, rsdp_phys, &mut rsdp_buf[..RSDP_V1_LEN])?;
-        parse_rsdp(&rsdp_buf[..RSDP_V1_LEN])?
+        let v1 = rsdp_buf
+            .get_mut(..RSDP_V1_LEN)
+            .ok_or(AcpiError::Truncated)?;
+        read_exact(phys, rsdp_phys, v1)?;
+        parse_rsdp(v1)?
     };
 
     if rsdp.revision >= 2 && rsdp.xsdt_addr != 0 {
@@ -632,6 +657,11 @@ pub fn walk<P: PhysMem>(phys: &P, rsdp_phys: u64) -> Result<AcpiInfo, AcpiError>
 // ------------------ host tests ------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "host test fixtures"
+)]
 mod tests {
     use super::*;
     use std::vec;
@@ -942,5 +972,54 @@ mod tests {
         let mut t = sdt(SIG_MADT, &[0; 8]);
         t[10] ^= 0xFF;
         assert_eq!(validate_sdt(&t), Err(AcpiError::BadChecksum));
+    }
+
+    #[test]
+    fn read_unaligned_at_usize_max_is_none() {
+        let b = [0u8; 16];
+        assert_eq!(read_unaligned_u8(&b, usize::MAX), None);
+        assert_eq!(read_unaligned_u16(&b, usize::MAX), None);
+        assert_eq!(read_unaligned_u32(&b, usize::MAX), None);
+        assert_eq!(read_unaligned_u64(&b, usize::MAX), None);
+        assert_eq!(sig4(&b, usize::MAX), None);
+    }
+
+    /// Answers every read: the RSDP and the XSDT header at their addresses,
+    /// zeros elsewhere.
+    struct AnyMem {
+        rsdp_at: u64,
+        rsdp: Vec<u8>,
+        xsdt_at: u64,
+        xsdt: Vec<u8>,
+    }
+
+    impl PhysMem for AnyMem {
+        fn read(&self, addr: u64, buf: &mut [u8]) -> bool {
+            buf.fill(0);
+            let src = if addr == self.rsdp_at {
+                &self.rsdp
+            } else if addr == self.xsdt_at {
+                &self.xsdt
+            } else {
+                return true;
+            };
+            let n = buf.len().min(src.len());
+            buf[..n].copy_from_slice(&src[..n]);
+            true
+        }
+    }
+
+    #[test]
+    fn walk_root_table_wrapping_address_space_is_truncated() {
+        let xsdt_at = u64::MAX - 10;
+        let mut hdr = sdt(SIG_XSDT, &[]);
+        hdr[4..8].copy_from_slice(&300u32.to_le_bytes());
+        let mem = AnyMem {
+            rsdp_at: 0x1000,
+            rsdp: rsdp_v2(xsdt_at, 0),
+            xsdt_at,
+            xsdt: hdr,
+        };
+        assert_eq!(walk(&mem, 0x1000).unwrap_err(), AcpiError::Truncated);
     }
 }
