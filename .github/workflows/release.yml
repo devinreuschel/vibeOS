@@ -4,13 +4,17 @@ on:
   push:
     tags: ["v*"]
 
+# Least privilege (ROADMAP §10.1): the workflow reads; only the job that
+# publishes is granted a write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     name: build ISO and publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # publishes the GitHub Release (softprops/action-gh-release)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -55,8 +59,12 @@ jobs:
       - name: build ktest ISO
         run: make vibeos-ktest.iso
 
+      # F144: the tag reaches the script through the environment, never
+      # through `${{ }}` inside `run:`.
       - name: changelog section
-        run: python3 scripts/changelog_section.py --tag "${{ github.ref_name }}" > /tmp/release-body.md
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python3 scripts/changelog_section.py --tag "$TAG" > /tmp/release-body.md
 
       - name: GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
