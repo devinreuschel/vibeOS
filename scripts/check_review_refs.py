@@ -19,6 +19,22 @@ map runs that mode.
 `--wave 1` also fails while a wave-1 box is open: the boxes `--closed`
 inspects and phase 10's `[wave1].roots`, with every box they need through the
 rows of every needs file. `--print-wave 1` prints them, one per line.
+
+Placement, as the tracking rule in KERNEL_REVIEW.md and Phase 10's preamble place
+a finding's boxes. A placement citation is a finding id on a box line with a phase
+(`gatelib.roadmap_boxes`; exit-gate and Stretch lines count as boxes of their
+phase, and the `- [ ]` lines after `# Beyond` are proposals, not boxes). A box line
+that names `check_review_refs.py` states this script's rules, so its ids are
+examples, not citations. Every finding has a placement citation; a CRITICAL or HIGH
+finding without a LATENT tag has one in Phase 10 or earlier; and a LATENT finding
+whose tag names a phase has one in that phase or an earlier one, except the ids
+DEPARTURES lists. The tag is the text of `LATENT (...)` up to its matching
+parenthesis, since tags nest parentheses. Its phases are the N of each `Phase N`,
+`§N`, and `§N.M` in the tag, and the smallest is its milestone ("Phase 12.5 ..."
+is 12, "Phase 18/22" is 18, "ROADMAP §20.1" is 20). A tag that names no phase gets
+the first rule only. A DEPARTURES entry fails when its key names no box or several,
+when that box does not cite the id, or when the finding passes without it. The
+bare mode (no option) runs these rules.
 """
 
 from __future__ import annotations
@@ -32,30 +48,96 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from scripts import gatelib  # noqa: E402
 from scripts.gatelib import (  # noqa: E402
     BOX,
     CLOSED_SCOPE_END,
     FID,
     GATES,
+    HEADING,
     REVIEW,
     ROADMAP,
+    SEVERITY,
     Box,
-    Finding,
     GateError,
     NeedsFile,
     load_all_needs,
     match_key,
     parse_boxes,
-    parse_review,
     wave1_lines,
 )
 
 __all__ = [
-    "Citation", "Finding", "check", "check_needs", "parse_review", "parse_roadmap", "wave",
+    "DEPARTURES", "Citation", "Finding", "check", "check_needs", "check_placement",
+    "parse_review", "parse_roadmap", "tag_phase", "wave",
 ]
 
 # A lands clause in box text: "lands after", "land before", "lands with or after".
 LANDS = re.compile(r"\blands? (after|with|before)\b", re.IGNORECASE)
+
+# A phase a LATENT tag names: `Phase N`, `§N`, or `§N.M`.
+TAG_PHASE = re.compile(r"(?:\bPhase\s+|§)(\d+)")
+OWN_RULES = "check_review_refs.py"
+
+# Findings whose box sits after the phase their LATENT tag names: id -> (a key naming
+# the box, the reason that box gives).
+DEPARTURES: dict[str, tuple[str, str]] = {
+    "F122": (
+        "the virtio drivers meet the virtio 1.2 driver requirements",
+        "§26.4: Firecracker's and cloud-hypervisor's devices are the first non-QEMU virtio "
+        "devices the drivers meet",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class Finding(gatelib.Finding):
+    tag: str | None = None  # the text of `LATENT (...)`, None without one
+
+
+def latent_tag(rest: str) -> str | None:
+    """The text inside `LATENT (...)` in a severity line's tail, up to the matching
+    parenthesis."""
+    at = rest.find("LATENT (")
+    if at < 0:
+        return None
+    start = at + len("LATENT (")
+    depth = 1
+    for i in range(start, len(rest)):
+        if rest[i] == "(":
+            depth += 1
+        elif rest[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return rest[start:i]
+    return rest[start:]
+
+
+def parse_review(text: str) -> dict[str, Finding]:
+    """`gatelib.parse_review`'s findings, each with its LATENT tag."""
+    tags: dict[str, str | None] = {}
+    current: str | None = None
+    for raw in text.splitlines():
+        m = HEADING.match(raw)
+        if m:
+            current = m.group(1)
+            continue
+        s = SEVERITY.match(raw) if current is not None else None
+        if current is not None and s:
+            tags[current] = latent_tag(s.group(2))
+            current = None
+    return {
+        fid: Finding(f.fid, f.severity, f.latent, tags.get(fid))
+        for fid, f in gatelib.parse_review(text).items()
+    }
+
+
+def tag_phase(tag: str | None) -> int | None:
+    """The smallest phase a LATENT tag names, or None."""
+    if tag is None:
+        return None
+    phases = [int(n) for n in TAG_PHASE.findall(tag)]
+    return min(phases) if phases else None
 
 
 @dataclass(frozen=True)
@@ -147,6 +229,49 @@ def check_needs(roadmap_text: str, needs: list[NeedsFile]) -> list[str]:
     return errors
 
 
+def check_placement(findings: dict[str, Finding], boxes: list[Box]) -> list[str]:
+    """The placement rules and DEPARTURES (the module docstring states them)."""
+    errors: list[str] = []
+    first: dict[str, Box] = {}
+    for b in boxes:
+        if b.phase is None or OWN_RULES in b.text:
+            continue
+        for fid in FID.findall(b.text):
+            old = first.get(fid)
+            if old is None or b.phase < (old.phase or 0):
+                first[fid] = b
+
+    def passes_latent(f: Finding) -> bool:
+        milestone = tag_phase(f.tag) if f.latent else None
+        b = first.get(f.fid)
+        return milestone is None or (b is not None and (b.phase or 0) <= milestone)
+
+    for fid in sorted(findings):
+        f = findings[fid]
+        at = first.get(fid)
+        if at is None:
+            errors.append(f"{fid}: cited by no box line, only by prose")
+            continue
+        if not f.latent and f.severity in ("CRITICAL", "HIGH") and (at.phase or 0) > 10:
+            errors.append(f"{fid} ({f.severity}): no box before `## Phase 11:` cites it "
+                          f"(first ROADMAP.md:{at.line}, Phase {at.phase})")
+        if fid not in DEPARTURES and not passes_latent(f):
+            errors.append(f"{fid}: LATENT tag names Phase {tag_phase(f.tag)}, first box "
+                          f"ROADMAP.md:{at.line} is in Phase {at.phase}")
+    for fid, (key, _reason) in sorted(DEPARTURES.items()):
+        try:
+            box = match_key(key, boxes)
+        except GateError as e:
+            errors.append(f"DEPARTURES {fid}: {e}")
+            continue
+        if fid not in FID.findall(box.text):
+            errors.append(f"DEPARTURES {fid}: ROADMAP.md:{box.line} does not cite {fid}")
+        found = findings.get(fid)
+        if found is None or passes_latent(found):
+            errors.append(f"DEPARTURES {fid}: stale, the finding passes without the entry")
+    return errors
+
+
 def wave(
     number: int, roadmap_text: str, review_text: str, needs: list[NeedsFile]
 ) -> list[Box]:
@@ -175,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
     load_errors: list[str] = []
     needs = load_all_needs(GATES, load_errors)
     errors += load_errors + check_needs(roadmap_text, needs)
+    bare = not args.closed and args.wave is None and args.print_wave is None
+    errors += check_placement(findings, parse_boxes(roadmap_text)) if bare else []
     if args.print_wave is not None:
         for b in wave(args.print_wave, roadmap_text, review_text, needs):
             mark = "[x]" if b.ticked else "[ ]"
