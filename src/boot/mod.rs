@@ -12,7 +12,7 @@ use limine::request::{
 };
 
 use crate::cell::BootCell;
-use crate::paging_init::HHDM_BASE;
+use vibeos::paging::HHDM_BASE;
 
 #[cfg(feature = "kernel_tests")]
 pub mod ktest;

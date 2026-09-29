@@ -35,15 +35,9 @@ use crate::x86;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
 
-/// HHDM base for our physmap. Same VA Limine already gave us (DESIGN
-/// §4.1), so the switch does not invalidate any pointer already computed
-/// as `hhdm_offset + phys` — including the buddy allocator's intrusive
-/// free-list nodes, which live inside the free pages and are reached via
-/// `phys + hhdm_offset`. If Limine ever drifts to a different offset,
-/// the first `Buddy::allocate` after `mov cr3` walks an unmapped VA and
-/// faults with no useful backtrace. `boot::capture` fails loud against
-/// that drift at boot.
-pub const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
+/// The physmap constants live in `vibeos::paging` (MEMORY.md §4.1); these
+/// paths stay for the callers that name them here.
+pub use vibeos::paging::{HHDM_BASE, PHYSMAP_CAP};
 
 /// Low identity window base and size (DESIGN §4.1). 512 MiB is enough
 /// to keep the AP trampoline reachable and to give phase 2's early
@@ -51,11 +45,6 @@ pub const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
 /// physical 0x8000 is fetchable.
 const LOW_ID_BASE: u64 = 0;
 const LOW_ID_SIZE: u64 = 512 * 1024 * 1024;
-
-/// Hard cap on physmap extent (DESIGN §4.1, §9.2). Firmware sometimes
-/// reports multi-terabyte MMIO BARs as memmap entries; walking that at
-/// boot never finishes. The PMM ingests nothing above it.
-pub const PHYSMAP_CAP: u64 = 8 * 1024 * 1024 * 1024;
 
 // Linker-provided section boundaries. Names match `linker.ld`.
 unsafe extern "C" {

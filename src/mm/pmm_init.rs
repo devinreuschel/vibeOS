@@ -19,8 +19,8 @@ use vibeos::lock::RANK_BUDDY;
 use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats};
 
 use crate::boot::BootInfo;
-use crate::paging_init::{HHDM_BASE, PHYSMAP_CAP};
 use crate::sync_init::SpinMutex;
+use vibeos::paging::{HHDM_BASE, PHYSMAP_CAP};
 
 /// AP trampoline page. DESIGN §7.3 fixes the SIPI vector at 0x08, which
 /// means the entry point lives at physical 0x8000.
