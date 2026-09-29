@@ -55,8 +55,11 @@ fn pack(r: Result<(), BlockError>) -> u32 {
         Ok(()) => ST_OK,
         Err(BlockError::Inval) => ST_INVAL,
         Err(BlockError::Io) => ST_IO,
-        // A ramdisk request allocates nothing, so never NoMem.
-        Err(BlockError::Failed | BlockError::NoMem) => ST_FAILED,
+        // A ramdisk request allocates nothing and reaches no registry, so
+        // never NoMem, Gone or Exists.
+        Err(BlockError::Failed | BlockError::NoMem | BlockError::Gone | BlockError::Exists) => {
+            ST_FAILED
+        }
         Err(BlockError::QueueFull) => ST_QFULL,
     }
 }

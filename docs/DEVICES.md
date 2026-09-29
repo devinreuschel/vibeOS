@@ -105,4 +105,9 @@ and a remapping entry left behind lets it raise the next owner's vector. Rejecte
 while a filesystem is mounted, which a surprise removal cannot honor; forcing an unmount at removal,
 which races open descriptors and hides the error from the programs that hold them.
 
+Block devices have rule 9's first two steps. `Registry::unpublish` (`vibeos::block::blockdev`)
+takes a device and its subtree out of the block registry, deepest first, so no new `BlockRef` can
+be taken, and `BlockRef::kill` closes the device's gate, after which I/O through a handle still held
+returns `Gone`. Host tests cover both; nothing in the kernel calls them yet.
+
 Planned (ROADMAP §15.1, §20.3, §20.9): nothing is removed today.

@@ -32,6 +32,7 @@
 //! §2.2 / §5.4) can call the same complete path. Hard IRQ only enqueues
 //! work.
 
+pub mod blockdev;
 pub mod cache;
 pub mod part;
 
@@ -50,8 +51,13 @@ pub enum BlockError {
     Io,
     Failed,
     QueueFull,
-    /// A kernel heap allocation failed (DESIGN §4.4).
+    /// A kernel heap allocation failed (DESIGN §4.4), a registry table is
+    /// full, or the device-id sequence is exhausted.
     NoMem,
+    /// The device was unregistered: its gate is closed (DEVICES.md §12.4).
+    Gone,
+    /// A device of that name or id is already registered.
+    Exists,
 }
 
 impl BlockError {
@@ -62,6 +68,8 @@ impl BlockError {
             BlockError::Failed => "failed",
             BlockError::QueueFull => "queue full",
             BlockError::NoMem => "no memory",
+            BlockError::Gone => "gone",
+            BlockError::Exists => "exists",
         }
     }
 
