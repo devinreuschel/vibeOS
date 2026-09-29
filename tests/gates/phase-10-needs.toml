@@ -273,6 +273,13 @@ needs = ["a kernel command line: `cmdline:`"]
 why = "claim: vibeos.strace=1 is a command-line option"
 
 [[box]]
+key = "syscall tracing behind a flag"
+needs = [
+  "syscall tracing can be switched",  # L1425
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
 key = "no fault or trap that ring-3 code raises reaches `exception_halt`"
 needs = [
   "the `#BP` gate is DPL 3",
@@ -771,6 +778,14 @@ needs = [
   "an `arch` module boundary built",  # L1277
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1317
+[[box]]
+key = "the cross-CPU wake inbox holds"
+needs = [
+  "one `limits` module in `vibeos-core`",  # L1315
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 # L1320
 [[box]]

@@ -15,6 +15,7 @@ use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::lock::RANK_SCHED;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
+use vibeos::proc::pid::IdIndex;
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
     ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action,
@@ -40,7 +41,7 @@ use crate::file_init;
 use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::syscall_init;
-use crate::thread_init::{self, SpawnError};
+use crate::thread_init::{self, Sched, SpawnError};
 #[cfg(not(feature = "vibefs_crash"))]
 use crate::user_init::Loaded;
 use crate::user_init::{self, LoadError};
@@ -102,42 +103,52 @@ impl Proc {
     }
 }
 
-/// The process table. `procs[0]` is never a process: its `wait_wq` is the
-/// kernel's, on which [`wait_kernel`] sleeps for ppid-0 processes.
+/// Entries in the pid-to-slot index: twice the process table, so probe
+/// runs stay short.
+const PROC_INDEX_CAP: usize = (2 * MAX_PROCS).next_power_of_two();
+
+/// The process table. A pid is not a slot index (DESIGN §2.11 rule 4): it
+/// comes from `thread_init`'s id allocator, and `index` maps it to its slot.
 struct Table {
     procs: [Proc; MAX_PROCS],
+    index: IdIndex<PROC_INDEX_CAP>,
+    /// The kernel's wait queue, on which [`wait_kernel`] sleeps for ppid-0
+    /// processes.
+    kernel_wq: WaitQueue,
 }
 
 impl Table {
     const fn empty() -> Self {
         Self {
             procs: [const { Proc::empty() }; MAX_PROCS],
+            index: IdIndex::new(),
+            kernel_wq: WaitQueue::new(),
         }
+    }
+
+    /// `pid`'s slot, for a process that is not `Unused`.
+    fn slot_of(&self, pid: u32) -> Option<usize> {
+        let i = self.index.get(pid)?;
+        let p = self.procs.get(i)?;
+        (p.state != ProcState::Unused && p.pid == pid).then_some(i)
     }
 
     fn get(&self, pid: u32) -> Option<&Proc> {
-        let i = pid as usize;
-        if i == 0 || i >= MAX_PROCS {
-            return None;
-        }
-        let p = &self.procs[i];
-        if p.state == ProcState::Unused || p.pid != pid {
-            None
-        } else {
-            Some(p)
-        }
+        let i = self.slot_of(pid)?;
+        self.procs.get(i)
     }
 
     fn get_mut(&mut self, pid: u32) -> Option<&mut Proc> {
-        let i = pid as usize;
-        if i == 0 || i >= MAX_PROCS {
-            return None;
-        }
-        let p = &mut self.procs[i];
-        if p.state == ProcState::Unused || p.pid != pid {
-            None
+        let i = self.slot_of(pid)?;
+        self.procs.get_mut(i)
+    }
+
+    /// The wait queue a child of `ppid` wakes: the kernel's for ppid 0.
+    fn parent_wq(&mut self, ppid: u32) -> Option<&mut WaitQueue> {
+        if ppid == 0 {
+            Some(&mut self.kernel_wq)
         } else {
-            Some(p)
+            self.get_mut(ppid).map(|p| &mut p.wait_wq)
         }
     }
 }
@@ -153,6 +164,12 @@ fn table_locked<R>(f: impl FnOnce(&mut Table) -> R) -> R {
 
 fn with_table<R>(f: impl FnOnce(&mut Table) -> R) -> R {
     thread_init::with_sched(|_| table_locked(f))
+}
+
+/// Run `f` on the scheduler and the process table, which a pid's
+/// allocation and release need together.
+fn with_sched_table<R>(f: impl FnOnce(&mut Sched, &mut Table) -> R) -> R {
+    thread_init::with_sched(|s| table_locked(|t| f(s, t)))
 }
 
 fn intern_name(path: &str) -> &'static str {
@@ -251,44 +268,48 @@ fn clear_as() {
     syscall_init::clear_user_as();
 }
 
+/// Take a process-table slot and a pid for a new process, `Live`. The pid
+/// is `INIT_PID` when `prefer` asks for it and no pid-1 process exists,
+/// taking over `thread_init::init_bootstrap`'s hold, else a new id.
 fn alloc_pid(prefer: u32) -> Option<u32> {
-    with_table(|t| {
-        let pid = if prefer != 0 {
-            let i = prefer as usize;
-            if i < MAX_PROCS && t.procs[i].state == ProcState::Unused {
-                Some(prefer)
-            } else {
-                None
+    with_sched_table(|s, t| {
+        let slot = t.procs.iter().position(|p| p.state == ProcState::Unused)?;
+        let pid = if prefer == INIT_PID && t.get(INIT_PID).is_none() {
+            if !s.id_in_use(INIT_PID) && !s.hold_id(INIT_PID) {
+                return None;
             }
+            INIT_PID
         } else {
-            None
+            s.alloc_id()?
         };
-        let pid = match pid {
-            Some(p) => p,
-            None => {
-                if prefer == INIT_PID {
-                    return None;
-                }
-                let mut i = 2usize;
-                let mut found = None;
-                while i < MAX_PROCS {
-                    if t.procs[i].state == ProcState::Unused {
-                        found = Some(i as u32);
-                        break;
-                    }
-                    i += 1;
-                }
-                found?
-            }
-        };
-        t.procs[pid as usize].state = ProcState::Live;
-        t.procs[pid as usize].pid = pid;
+        if !t.index.insert(pid, slot) {
+            s.free_id(pid);
+            return None;
+        }
+        let p = t.procs.get_mut(slot)?;
+        p.state = ProcState::Live;
+        p.pid = pid;
         Some(pid)
     })
 }
 
+/// Give back `pid`'s slot and its pid: out of the index, the slot `Unused`,
+/// and the process's use of the id dropped (the id is free once its thread's
+/// slot is reused too).
+fn release_pid(s: &mut Sched, t: &mut Table, pid: u32) {
+    let Some(i) = t.index.remove(pid) else {
+        return;
+    };
+    if let Some(p) = t.procs.get_mut(i) {
+        *p = Proc::empty();
+    }
+    s.free_id(pid);
+}
+
 fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str) {
-    let p = &mut t.procs[pid as usize];
+    let Some(p) = t.get_mut(pid) else {
+        return;
+    };
     *p = Proc::empty();
     p.state = ProcState::Live;
     p.pid = pid;
@@ -322,7 +343,20 @@ fn user_thread_entry() {
     feature = "kernel_shell"
 )))]
 pub fn start_init() {
-    match spawn_elf("/sbin/init", INIT_PID, 0) {
+    use vibeos::boot::cmdline::{CMDLINE_MAX, INIT_ARGV_MAX, INIT_ENVP_MAX};
+    // Init's argv and envp come from the kernel command line (BOOT.md §3.2).
+    let mut words = [0u8; CMDLINE_MAX];
+    let v = crate::boot::cmdline().init_vectors(b"/sbin/init", &mut words);
+    if v.dropped != 0 {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: boot: cmdline: {} init words dropped (at most {} args, {} env)",
+            v.dropped,
+            INIT_ARGV_MAX,
+            INIT_ENVP_MAX
+        );
+    }
+    match spawn_elf("/sbin/init", v.argv(), v.envp(), INIT_PID, 0) {
         Ok(_) => {}
         Err(e) => {
             #[expect(
@@ -334,14 +368,21 @@ pub fn start_init() {
     }
 }
 
-/// Start the ELF at `path` as a new process with parent `ppid` (0: the
-/// kernel, which reaps it with [`wait_kernel`]).
+/// Start the ELF at `path` with `argv` (`[path]` when empty) and `envp`
+/// as a new process with parent `ppid` (0: the kernel, which reaps it with
+/// [`wait_kernel`]).
 #[cfg(not(feature = "vibefs_crash"))]
-pub(crate) fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
+pub(crate) fn spawn_elf(
+    path: &str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    prefer: u32,
+    ppid: u32,
+) -> Result<u32, LoadError> {
     let slot = space_slot().ok_or(LoadError::NoMem)?;
     start_loaded(
         slot,
-        user_init::load_path(path, &[path])?,
+        user_init::load_path(path, argv, envp)?,
         prefer,
         ppid,
         intern_name(path),
@@ -390,18 +431,16 @@ fn start_loaded(
     let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3, &frame) {
         Ok(h) => h,
         Err(e) => {
-            with_table(|t| t.procs[pid as usize] = Proc::empty());
+            with_sched_table(|s, t| release_pid(s, t, pid));
             addr_space_init::teardown(boxed.into_inner());
             return Err(LoadError::Spawn(e));
         }
     };
     with_table(|t| {
         init_slot(t, pid, ppid, name);
-        t.procs[pid as usize].space = Some(boxed);
-        t.procs[pid as usize].fs_base = fs;
-    });
-    with_table(|t| {
         if let Some(p) = t.get_mut(pid) {
+            p.space = Some(boxed);
+            p.fs_base = fs;
             p.tid = h.id();
         }
     });
@@ -434,11 +473,11 @@ pub(crate) fn wait_kernel(pid: u32) -> u32 {
                 match p.state {
                     ProcState::Zombie => {
                         let st = p.wait_status;
-                        reap_zombie(t, pid);
+                        reap_zombie(s, t, pid);
                         KernelWait::Done(st)
                     }
                     ProcState::Live | ProcState::Stopped => {
-                        s.begin_wait(&mut t.procs[0].wait_wq, FAR_DEADLINE);
+                        s.begin_wait(&mut t.kernel_wq, FAR_DEADLINE);
                         KernelWait::Sleep
                     }
                     ProcState::Unused => KernelWait::NotKernelChild,
@@ -754,19 +793,35 @@ pub(crate) mod testing {
         KILL_LINES.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// `getpid` counts per bucket `pid % MAX_PROCS` (a pid is not a slot
+    /// index), each tagged with the pid it counts for: a pid that finds
+    /// another's tag starts the bucket again.
+    static GETPID_TAGS: [AtomicU32; MAX_PROCS] = [const { AtomicU32::new(0) }; MAX_PROCS];
     static GETPIDS: [AtomicU64; MAX_PROCS] = [const { AtomicU64::new(0) }; MAX_PROCS];
 
-    /// `getpid` calls `pid` has made since boot.
+    fn getpid_bucket(pid: u32) -> usize {
+        pid as usize % MAX_PROCS
+    }
+
+    /// `getpid` calls `pid` has made since its bucket last changed hands.
     pub(crate) fn getpid_count(pid: u32) -> u64 {
-        GETPIDS
-            .get(pid as usize)
-            .map_or(0, |c| c.load(Ordering::Acquire))
+        let b = getpid_bucket(pid);
+        match (GETPID_TAGS.get(b), GETPIDS.get(b)) {
+            (Some(tag), Some(c)) if tag.load(Ordering::Acquire) == pid => c.load(Ordering::Acquire),
+            _ => 0,
+        }
     }
 
     pub(super) fn on_getpid(pid: u32) {
-        if let Some(c) = GETPIDS.get(pid as usize) {
-            c.fetch_add(1, Ordering::AcqRel);
+        let b = getpid_bucket(pid);
+        let (Some(tag), Some(c)) = (GETPID_TAGS.get(b), GETPIDS.get(b)) else {
+            return;
+        };
+        if tag.load(Ordering::Acquire) != pid {
+            c.store(0, Ordering::Release);
+            tag.store(pid, Ordering::Release);
         }
+        c.fetch_add(1, Ordering::AcqRel);
     }
 
     /// The pid the next stop stall holds; 0 for none.

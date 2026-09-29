@@ -1,6 +1,8 @@
 //! In-guest tests for sched (kernel_tests only). Rows: the list in crate::ktest.
 
+mod counted;
 mod hooks;
+pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 
 use alloc::boxed::Box;
@@ -235,7 +237,7 @@ pub(crate) fn test_reap_returns_frames() -> Outcome {
         if thread_init::current_id() != registry_tid() {
             return Outcome::Fail("did not return to the registry");
         }
-        if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+        if !thread_init::exited(h.id()) {
             return Outcome::Fail("returned thread not dead");
         }
     }
@@ -268,7 +270,7 @@ pub(crate) fn test_reap_many_via_idle() -> Outcome {
     thread_init::sleep_ms(30);
     i = 0;
     while i < REAP_MANY {
-        if thread_init::try_state(ids[i]) != Some(ThreadState::Dead) {
+        if !thread_init::exited(ids[i]) {
             return Outcome::Fail("parked wave not dead");
         }
         i += 1;
@@ -287,7 +289,7 @@ pub(crate) fn test_reap_many_via_idle() -> Outcome {
         let mut n = 0usize;
         i = 0;
         while i < REAP_MANY {
-            if thread_init::try_state(ids[i]) == Some(ThreadState::Dead) {
+            if thread_init::exited(ids[i]) {
                 n += 1;
             }
             i += 1;
@@ -372,10 +374,10 @@ fn spawn_until_dead(name: &'static str) -> Outcome {
         return Outcome::Fail("spawn");
     };
     thread_init::yield_now();
-    if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+    if !thread_init::exited(h.id()) {
         thread_init::yield_now();
     }
-    if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+    if !thread_init::exited(h.id()) {
         Outcome::Fail("returned thread not dead")
     } else {
         Outcome::Ok
@@ -431,10 +433,7 @@ pub(crate) fn test_cross_cpu_spawn() -> Outcome {
     if XCPU_CPU.load(Ordering::SeqCst) != ap {
         return Outcome::Fail("thread ran on wrong cpu");
     }
-    if !spin_until_ns(
-        || thread_init::try_state(h.id()) == Some(ThreadState::Dead),
-        500_000_000,
-    ) {
+    if !spin_until_ns(|| thread_init::exited(h.id()), 500_000_000) {
         return Outcome::Fail("AP thread did not exit");
     }
     if thread_init::cpu_of(h.id()) != ap {
@@ -899,10 +898,7 @@ fn exit_batch() -> Result<(), Outcome> {
         }
     }
     loop {
-        if ids
-            .iter()
-            .all(|&id| thread_init::try_state(id) == Some(ThreadState::Dead))
-        {
+        if ids.iter().all(|&id| thread_init::exited(id)) {
             return Ok(());
         }
         if time_init::now_ns().saturating_sub(t0) > WAIT_NS {
@@ -1075,7 +1071,9 @@ static SPAWNERS_DONE: AtomicU32 = AtomicU32::new(0);
 
 static SPAWN_BAD: AtomicBool = AtomicBool::new(false);
 
-/// Per TCB slot: spawns that returned it, and runs of a child in it.
+/// Per tid bucket ([`tid_bucket`]): spawns that returned a tid in it, and
+/// runs of a child with one. Tids are not reused before the allocator
+/// wraps, so a child that ran twice or not at all shows as a mismatch.
 static SPAWNED: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
 
 static RAN: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
@@ -1096,8 +1094,13 @@ fn filler_entry() {
     FILL_LIVE.fetch_sub(1, Ordering::AcqRel);
 }
 
+/// `id`'s bucket in [`SPAWNED`] and [`RAN`].
+fn tid_bucket(id: ThreadId) -> usize {
+    id.raw() as usize % MAX_THREADS
+}
+
 fn child_entry() {
-    if let Some(r) = RAN.get(thread_init::current_id().0 as usize) {
+    if let Some(r) = RAN.get(tid_bucket(thread_init::current_id())) {
         r.fetch_add(1, Ordering::AcqRel);
     }
 }
@@ -1112,16 +1115,16 @@ fn slot_spawner() {
     while n < SPAWNS_PER_CPU {
         match thread_init::spawn_on("child", child_entry, 0) {
             Ok(h) => {
-                if let Some(s) = SPAWNED.get(h.id().0 as usize) {
+                if let Some(s) = SPAWNED.get(tid_bucket(h.id())) {
                     s.fetch_add(1, Ordering::AcqRel);
                 }
                 n += 1;
             }
-            Err(SpawnError::NoSlot) => thread_init::yield_now(),
-            Err(SpawnError::NoMemory) => {
-                SPAWN_BAD.store(true, Ordering::Release);
-                break;
-            }
+            // A free slot comes with CPU 0's next exit, and KVA for a stack
+            // with its worker's next free: `Kva::alloc` refuses once
+            // `MAX_KVA_RANGES - 2` ranges are live, and the burst parks
+            // dead stacks on CPU 0's dead list faster than it frees them.
+            Err(SpawnError::NoSlot | SpawnError::NoMemory) => thread_init::yield_now(),
         }
         if time_init::now_ns().saturating_sub(t0) > 6 * WAIT_NS {
             SPAWN_BAD.store(true, Ordering::Release);
@@ -1225,10 +1228,10 @@ pub(crate) fn lifetime_dead_slot_on_cpu() -> Outcome {
     if SPAWN_BAD.load(Ordering::Acquire) {
         return Outcome::Fail("a spawner gave up");
     }
-    for (slot, (s, r)) in SPAWNED.iter().zip(RAN.iter()).enumerate() {
+    for (bucket, (s, r)) in SPAWNED.iter().zip(RAN.iter()).enumerate() {
         let (s, r) = (s.load(Ordering::Acquire), r.load(Ordering::Acquire));
         if s != r {
-            return crate::fail_fmt!("slot {slot}: spawned {s}, ran {r}");
+            return crate::fail_fmt!("tid bucket {bucket}: spawned {s}, ran {r}");
         }
     }
     if !ran {

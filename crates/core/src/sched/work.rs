@@ -79,6 +79,14 @@ impl Default for WorkRing {
     }
 }
 
+/// Which ring an item came from. A `Soft` item is a softirq-equivalent,
+/// and its worker runs it as a no-reclaim thread (DESIGN §2.11 rule 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkClass {
+    Soft,
+    Normal,
+}
+
 #[derive(Clone, Copy)]
 pub struct WorkQueues {
     pub hi: WorkRing,
@@ -101,8 +109,12 @@ impl WorkQueues {
         self.norm.push(item)
     }
 
-    pub fn pop(&mut self) -> Option<WorkItem> {
-        self.hi.pop().or_else(|| self.norm.pop())
+    /// The next item, high ring first, with the ring it came from.
+    pub fn pop(&mut self) -> Option<(WorkItem, WorkClass)> {
+        if let Some(w) = self.hi.pop() {
+            return Some((w, WorkClass::Soft));
+        }
+        self.norm.pop().map(|w| (w, WorkClass::Normal))
     }
 
     pub fn is_empty(self) -> bool {
@@ -154,11 +166,32 @@ mod tests {
         let mut q = WorkQueues::new();
         assert!(q.push(WorkItem::new(mark, 1)));
         assert!(q.push_hi(WorkItem::new(mark, 10)));
-        q.pop().unwrap().run();
-        q.pop().unwrap().run();
+        let (w, c) = q.pop().unwrap();
+        assert_eq!((w.arg, c), (10, WorkClass::Soft));
+        w.run();
+        q.pop().unwrap().0.run();
         assert_eq!(HITS.load(Ordering::SeqCst), 11);
         assert!(q.is_empty());
         WorkItem::EMPTY.run();
+    }
+
+    #[test]
+    fn work_pop_reports_soft_items() {
+        let mut q = WorkQueues::new();
+        assert!(q.pop().is_none());
+        assert!(q.push(WorkItem::new(mark, 0)));
+        assert!(q.push_hi(WorkItem::new(mark, 1)));
+        assert!(q.push(WorkItem::new(mark, 2)));
+        let got = [q.pop(), q.pop(), q.pop()].map(|x| x.map(|(w, c)| (w.arg, c)));
+        assert_eq!(
+            got,
+            [
+                Some((1, WorkClass::Soft)),
+                Some((0, WorkClass::Normal)),
+                Some((2, WorkClass::Normal)),
+            ]
+        );
+        assert!(q.pop().is_none());
     }
 
     #[test]

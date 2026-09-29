@@ -274,7 +274,12 @@ fn at_random() -> [u8; 16] {
 }
 
 #[inline(never)]
-fn fill_stack(space: &AddressSpace, img: &Image, argv: &[&[u8]]) -> Result<u64, LoadError> {
+fn fill_stack(
+    space: &AddressSpace,
+    img: &Image,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<u64, LoadError> {
     let len = (STACK_PAGES * PAGE_SIZE_4K) as usize;
     let mut mem = TryVec::try_with_capacity(len).map_err(|_| LoadError::NoMem)?;
     let zero = [0u8; 256];
@@ -340,24 +345,34 @@ fn fill_stack(space: &AddressSpace, img: &Image, argv: &[&[u8]]) -> Result<u64, 
     if img.phdr_va.is_none() {
         aux[4].val = 0;
     }
-    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem[..], argv, &[], &aux, &at_random())
+    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem[..], argv, envp, &aux, &at_random())
         .map_err(LoadError::Elf)?;
     let base = STACK_TOP - len as u64;
     space.write_bytes(base, &mem).map_err(LoadError::Mem)?;
     Ok(rsp)
 }
 
-/// Build a new address space. Caller installs it only after this returns.
-pub fn load_path(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
+/// Build a new address space from the file at `path`, with `argv` (or
+/// `[path]` when empty) and `envp` on its initial stack. Caller installs
+/// it only after this returns.
+pub fn load_path<A: AsRef<[u8]>>(
+    path: &str,
+    argv: &[A],
+    envp: &[&[u8]],
+) -> Result<Loaded, LoadError> {
     #[cfg(feature = "kernel_tests")]
     let before = crate::proc::ktest::free_now();
-    let r = load_path_inner(path, argv);
+    let r = load_path_inner(path, argv, envp);
     #[cfg(feature = "kernel_tests")]
     crate::proc::ktest::record(before, r.is_ok());
     r
 }
 
-fn load_path_inner(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
+fn load_path_inner<A: AsRef<[u8]>>(
+    path: &str,
+    argv: &[A],
+    envp: &[&[u8]],
+) -> Result<Loaded, LoadError> {
     let file = file_init::open_routed(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
         .map_err(LoadError::Fs)?;
     let mut src = FileImage {
@@ -365,7 +380,7 @@ fn load_path_inner(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
         len: 0,
         pos: 0,
     };
-    let r = load_file(&mut src, path, argv);
+    let r = load_file(&mut src, path, argv, envp);
     match file_init::close(src.file) {
         Ok(()) => r,
         Err(e) => {
@@ -379,7 +394,12 @@ fn load_path_inner(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
 
 /// Load the open file `src` of `path`, mapping each segment from it.
 #[inline(never)]
-fn load_file(src: &mut FileImage, path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
+fn load_file<A: AsRef<[u8]>>(
+    src: &mut FileImage,
+    path: &str,
+    argv: &[A],
+    envp: &[&[u8]],
+) -> Result<Loaded, LoadError> {
     let st = file_init::stat(&src.file).map_err(LoadError::Fs)?;
     if st.size == 0 {
         return Err(LoadError::Empty);
@@ -393,11 +413,9 @@ fn load_file(src: &mut FileImage, path: &str, argv: &[&str]) -> Result<Loaded, L
             .map_err(|_| LoadError::NoMem)?;
     }
     for a in argv {
-        argv_b
-            .try_push(a.as_bytes())
-            .map_err(|_| LoadError::NoMem)?;
+        argv_b.try_push(a.as_ref()).map_err(|_| LoadError::NoMem)?;
     }
-    load_from(src, &argv_b)
+    load_from(src, &argv_b, envp)
 }
 
 /// Build a new address space from the ELF image `elf`, with `argv` on its
@@ -405,12 +423,17 @@ fn load_file(src: &mut FileImage, path: &str, argv: &[&str]) -> Result<Loaded, L
 /// The in-guest tests' loader (C-RING3), over the same `load_from`.
 #[cfg(feature = "kernel_tests")]
 pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
-    load_from(&mut MemImage(elf), argv)
+    load_from(&mut MemImage(elf), argv, &[])
 }
 
-/// Build a new address space from the ELF file `src`, reading its headers
-/// and each segment's file bytes from it as it maps them.
-fn load_from<S: ImageSource>(src: &mut S, argv: &[&[u8]]) -> Result<Loaded, LoadError> {
+/// Build a new address space from the ELF file `src`, with `argv` and
+/// `envp` on its initial stack, reading its headers and each segment's file
+/// bytes from it as it maps them.
+fn load_from<S: ImageSource>(
+    src: &mut S,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<Loaded, LoadError> {
     let img = read_image(src)?;
     // The new space stays on the heap while the image loads, off the
     // stack under which each file read runs its filesystem's frames.
@@ -419,7 +442,7 @@ fn load_from<S: ImageSource>(src: &mut S, argv: &[&[u8]]) -> Result<Loaded, Load
         map_loads(&mut space, &img, src)?;
         let (stack_base, _) = map_stack(&mut space, img.stack_exec)?;
         let fs = setup_tls(&mut space, &img, stack_base, src)?;
-        let rsp = fill_stack(&space, &img, argv)?;
+        let rsp = fill_stack(&space, &img, argv, envp)?;
         Ok((img.entry, rsp, fs))
     })();
     match mapped {

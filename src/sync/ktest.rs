@@ -4,10 +4,11 @@ use core::alloc::Layout;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::lock::{RANK_BUDDY, RANK_DEVICE, RANK_HEAP, RANK_PT, RANK_SCHED, RANK_SERIAL};
+use vibeos::sync::OpGate;
 use vibeos::time::Instant;
 
 use crate::arch;
-use crate::ktest::Outcome;
+use crate::ktest::{Outcome, sleep_until, spawn_thread};
 use crate::kva_init;
 use crate::per_cpu_init;
 use crate::sync::blocking_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore};
@@ -546,9 +547,7 @@ pub(crate) fn test_late_wake_after_exit() -> Outcome {
     let Some(cpu1) = crate::ktest::cpu_remote(1) else {
         return Outcome::Fail("no cpu1");
     };
-    if !late_wait(|| {
-        cpu1.wake_inbox.load(Ordering::Acquire) == 0 && cpu1.runq_len.load(Ordering::Relaxed) == 0
-    }) {
+    if !late_wait(|| cpu1.wake_inbox.is_empty() && cpu1.runq_len.load(Ordering::Relaxed) == 0) {
         return Outcome::Fail("cpu1 did not take the wake");
     }
     if let Err(e) = thread_init::spawn_on("late-probe", late_wake_probe, 1) {
@@ -884,6 +883,82 @@ pub(crate) fn test_sync_try_paths() -> Outcome {
 pub(crate) fn test_spin_poll_hook_installed() -> Outcome {
     if !crate::sync_init::spin_poll_installed() {
         return Outcome::Fail("spin poll hook unset");
+    }
+    Outcome::Ok
+}
+
+// ----- op_gate_kill_sleeps (ROADMAP §10.4, DESIGN §2.11 rule 3) -----
+
+/// The gate the test kills. Once killed it stays dead, so the test runs
+/// once per boot.
+static OGK_GATE: OpGate = OpGate::new();
+/// Thread A is inside the gate.
+static OGK_IN: AtomicBool = AtomicBool::new(false);
+/// Thread A's enter failed.
+static OGK_REFUSED: AtomicBool = AtomicBool::new(false);
+/// Tells A to leave.
+static OGK_RELEASE: AtomicBool = AtomicBool::new(false);
+/// A is about to leave: set just before its exit.
+static OGK_EXITED: AtomicBool = AtomicBool::new(false);
+/// Killer K's `kill` returned, and whether it saw `OGK_EXITED` then.
+static OGK_RETURNED: AtomicBool = AtomicBool::new(false);
+static OGK_SAW_EXITED: AtomicBool = AtomicBool::new(false);
+
+fn ogk_holder() {
+    let Ok(g) = OGK_GATE.enter() else {
+        OGK_REFUSED.store(true, Ordering::SeqCst);
+        return;
+    };
+    OGK_IN.store(true, Ordering::SeqCst);
+    // Bounded, so a broken test still lets the killer return.
+    let _released = sleep_until(|| OGK_RELEASE.load(Ordering::SeqCst), 5_000);
+    OGK_EXITED.store(true, Ordering::SeqCst);
+    g.exit();
+}
+
+fn ogk_killer() {
+    OGK_GATE.kill();
+    OGK_SAW_EXITED.store(OGK_EXITED.load(Ordering::SeqCst), Ordering::SeqCst);
+    OGK_RETURNED.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn test_op_gate_kill_sleeps() -> Outcome {
+    if OGK_GATE.is_dead() {
+        return Outcome::Fail("op_gate_kill_sleeps: gate already killed (ran twice)");
+    }
+    let _a = spawn_thread("ogk_a", ogk_holder);
+    if !sleep_until(
+        || OGK_IN.load(Ordering::SeqCst) || OGK_REFUSED.load(Ordering::SeqCst),
+        2_000,
+    ) || !OGK_IN.load(Ordering::SeqCst)
+    {
+        return Outcome::Fail("holder did not enter the gate");
+    }
+    let _k = spawn_thread("ogk_k", ogk_killer);
+    let dead = sleep_until(|| OGK_GATE.is_dead(), 2_000);
+    let refused = OGK_GATE.enter().is_err();
+    // Let the killer reach its sleep.
+    thread_init::sleep_ms(30);
+    let early = OGK_RETURNED.load(Ordering::SeqCst);
+    OGK_RELEASE.store(true, Ordering::SeqCst);
+    let returned = sleep_until(|| OGK_RETURNED.load(Ordering::SeqCst), 2_000);
+    if !dead {
+        return Outcome::Fail("kill did not mark the gate dead");
+    }
+    if !refused {
+        return Outcome::Fail("enter succeeded on a killed gate");
+    }
+    if early {
+        return Outcome::Fail("kill returned with an operation inside");
+    }
+    if !returned {
+        return Outcome::Fail("kill did not return within 2 s of the last exit");
+    }
+    if !OGK_SAW_EXITED.load(Ordering::SeqCst) {
+        return Outcome::Fail("kill returned before the holder left");
+    }
+    if OGK_GATE.inside() != 0 {
+        return Outcome::Fail("an operation still inside after kill");
     }
     Outcome::Ok
 }

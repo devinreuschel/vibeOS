@@ -5,6 +5,7 @@
 
 pub mod addr_space;
 pub mod elf;
+pub mod pid;
 pub mod syscall;
 
 use crate::fs::{MAX_PATH, O_CLOEXEC};

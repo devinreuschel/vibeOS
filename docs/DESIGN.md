@@ -148,6 +148,9 @@ that sets it:
   `file_init::init` before it brings the filesystems up.
 - `ipi_init::set_reschedule_hook` (a reschedule IPI's preemption point), set by `sched_init::init`
   before the scheduler goes live.
+- `ipi_init::set_slot_tid_hook` (the wake-inbox drain's slot-to-tid lookup,
+  `thread_init::tid_of_slot`), set by `thread_init::init_bootstrap` before a second thread exists;
+  unset, a drain leaves the inbox as it is.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),
   the writeback threads (their wake and bounded wait), and the process layer (the OOM killer).
 
@@ -178,7 +181,7 @@ children, need no row.
 | Subsystem | Portable (`crates/core/src/`) | Kernel (`src/`) |
 |---|---|---|
 | crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `trap.rs`, `atomic.rs` | `main.rs`, `cell.rs` |
-| boot | — | `boot/mod.rs` (`BootInfo`, Limine requests) |
+| boot | `boot/{mod,cmdline}.rs` | `boot/{mod,fw_cfg_init}.rs` (`BootInfo`, Limine requests, fw_cfg) |
 | arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,pic,trap,uart,vectors}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,catch,cpu,gdt,gs,idt,pic,trampoline}.rs`, `arch/x86_64/trampoline.S` |
 | mm | `mm/{mod,pmm,paging,heap,kva}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
 | time | `time/mod.rs` | `time/{mod,time_init}.rs` |
@@ -194,7 +197,7 @@ children, need no row.
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/{mod,virtio_blk_init}.rs` |
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
-| proc | `proc/{mod,elf,syscall}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
+| proc | `proc/{mod,elf,pid,syscall}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
 | ktest | — | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 
 **In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel

@@ -209,7 +209,7 @@ pub(crate) fn test_ring3_syscall_enosys() -> Outcome {
 
 pub(crate) fn test_ring3_hello_exit() -> Outcome {
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf("/hello", 0, 0) {
+    let pid = match proc_init::spawn_elf("/hello", &[], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
     };
@@ -323,7 +323,7 @@ pub(crate) fn test_syscall_ptr_validate() -> Outcome {
 
 pub(crate) fn test_user_syscalls() -> Outcome {
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf("/bin/tests", 0, 0) {
+    let pid = match proc_init::spawn_elf("/bin/tests", &[], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
     };
@@ -1218,5 +1218,92 @@ pub(crate) fn user_fork_wait_stall() -> Outcome {
     match crate::ktest::second_cpu() {
         Some(cpu) if cpu != here => run_on(cpu),
         _ => Outcome::Ok,
+    }
+}
+
+// Fork a child that exits 0 and reap it as c1; fork again as c2. Exit 2 if
+// c2 took c1's pid, 3 unless kill(c1, SIGCONT) is -ESRCH, 4 unless
+// wait4(c1) is -ECHILD, 5 unless wait4(c2) returns c2, 6 if a fork or the
+// first wait4 failed; else 0.
+user_code!(
+    PID_REUSE_PROG,
+    "
+    mov eax, 57
+    syscall
+    test rax, rax
+    js 9f
+    jnz 1f
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+1:
+    mov r12, rax
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 61
+    syscall
+    cmp rax, r12
+    jne 9f
+    mov eax, 57
+    syscall
+    test rax, rax
+    js 9f
+    jnz 2f
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+2:
+    mov r13, rax
+    mov edi, 2
+    cmp r13, r12
+    je 8f
+    mov rdi, r12
+    mov esi, 18
+    mov eax, 62
+    syscall
+    mov edi, 3
+    cmp rax, -3
+    jne 8f
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 61
+    syscall
+    mov edi, 4
+    cmp rax, -10
+    jne 8f
+    mov rdi, r13
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 61
+    syscall
+    mov edi, 5
+    cmp rax, r13
+    jne 8f
+    xor edi, edi
+8:
+    mov eax, 60
+    syscall
+    ud2
+9:
+    mov edi, 6
+    jmp 8b
+    "
+);
+
+/// A reaped process's pid is not the next fork's (ROADMAP §10.4, F127):
+/// after a child is reaped, a second fork gets a new pid, and `kill` and
+/// `wait4` on the old one fail with `ESRCH` and `ECHILD`.
+pub(crate) fn pid_not_reused_after_reap() -> Outcome {
+    match user::run(&Image::Code(PID_REUSE_PROG, DEFAULT), &["pidreuse"]) {
+        Ok(st) if st == wait_exited(0) => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("status {st:#x}"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
     }
 }

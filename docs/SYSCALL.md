@@ -137,7 +137,7 @@ names, Linux values:
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
-| `EAGAIN` | 11 | `fork` with pids 2 to 17 all in use, zombies included (`MAX_PROCS` is 18; pid 0 is unused and pid 1 is reserved for `/sbin/init`) |
+| `EAGAIN` | 11 | `fork` with every process-table slot in use, zombies included (`MAX_PROCS` is 18), or no pid free (pids and tids share one allocator, up to 32,767, then from 300) |
 | `ENOMEM` | 12 | AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4) |
 | `EACCES` | 13 | defined; no syscall returns it |
 | `EFAULT` | 14 | bad user pointer / length |
@@ -432,10 +432,11 @@ does not meet this yet:
 
 ## 6. Tracing and counters
 
-`syscall_init::set_trace(true)` makes `proc_init::syscall` log
-`user: syscall <name> nr=<nr> = <ret>` on serial after each call; the line
-is not a `vibeOS:` marker. Nothing calls `set_trace`, so no build can turn
-tracing on (F150; ROADMAP §10.7).
+`vibeos.strace=1` on the kernel command line (BOOT.md §3.2) makes
+`syscall_init::init_bsp` call `syscall_init::set_trace(true)`, and
+`proc_init::syscall` then logs `user: syscall <name> nr=<nr> = <ret>` on
+serial after each call that returns (`?` names an unknown number); the line
+is not a `vibeOS:` marker. `exit`, which never returns, prints no line.
 
 `vibeos_syscall_stub` increments the calling TCB's `syscall_count` and the
 global `SYSCALLS` on every entry, `ENOSYS` included. Nothing reads either:
@@ -453,8 +454,10 @@ Static ELF64, no libc, hand-written `syscall` stubs. Initrd:
 - `/bin/tests` — syscall / `EFAULT` / `fork`+`exec`+`wait` / fault-kill runner
 - `/bin/sh` — interactive shell; prints `vibeOS: shell ready` then `vibeos>`
 
-Stack: `argc`, `argv`, an empty `envp` (`execve` does not read its `envp`
-argument), and `auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
+Stack: `argc`, `argv`, `envp`, and `auxv`. Init's `argv` and `envp` come
+from the kernel command line (BOOT.md §3.2), at most 8 of each; `execve`
+still passes an empty `envp` (it does not read its `envp` argument). The
+`auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
 `AT_PHDR` (0 when no header table is mapped), `AT_BASE` 0, `AT_FLAGS` 0,
 `AT_UID`, `AT_EUID`, `AT_GID`, and `AT_EGID` (all 0), `AT_CLKTCK` 100,
 `AT_SECURE` 0, `AT_RANDOM`, `AT_NULL`. `AT_RANDOM` is one TSC read and a

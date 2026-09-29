@@ -1,8 +1,15 @@
 //! Synchronization: the kernel half of subsystem `sync` (DESIGN §1.3).
 
-// The blocking primitives have no production caller yet; the in-guest tests
-// are their only users until one lands, which drops this cfg.
-#[cfg(feature = "kernel_tests")]
+// The operation gate's sleep (`blocking_init::gate_sleep`) is the one
+// production user of the blocking primitives; the in-guest tests use the
+// rest until a caller lands, which drops this expectation.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "BlockingMutex, RwLock, Semaphore and Channel have no production caller yet; the in-guest tests use them"
+    )
+)]
 pub(crate) mod blocking_init;
 #[cfg(feature = "kernel_tests")]
 #[allow(

@@ -5,7 +5,7 @@
 
 use core::mem::{offset_of, size_of};
 
-use crate::atomic::AtomicBool;
+use crate::atomic::{AtomicBool, AtomicU32};
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
 use crate::time::Instant;
@@ -18,7 +18,10 @@ pub const RFLAGS_RESERVED1: u64 = 0x2;
 /// `RFLAGS.IF`. `schedule` ORs this on resume when `irq_nest == 0`.
 pub const RFLAGS_IF: u64 = 1 << 9;
 
-/// Slot index in the global TCB table. 0 is the bootstrap thread.
+/// A thread's id, from `proc::pid::PidAlloc`, which pids share (a
+/// process's pid is its first thread's tid). Never a table index: the
+/// thread table finds a TCB through a lookup (`proc::pid::IdIndex`). 0 is
+/// the bootstrap thread, which the allocator never hands out.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ThreadId(pub u32);
@@ -220,6 +223,12 @@ pub struct Tcb {
     pub syscall_count: u64,
     /// 0 = kernel thread. Process pid otherwise.
     pub pid: u32,
+    /// Nonzero while this thread is a no-reclaim thread, which releases no
+    /// counted object in place (DESIGN §2.11 rule 6): the threaded-IRQ
+    /// bottom half for life, and a workqueue worker while it runs a
+    /// softirq-equivalent item (`sync_init::no_reclaim`). Atomic, because
+    /// `Sched::get_mut` builds `&mut Tcb` for threads running elsewhere.
+    pub no_reclaim: AtomicU32,
 }
 
 /// Callee-saved GPRs, rflags, rsp, return address. No XMM: soft-float.
