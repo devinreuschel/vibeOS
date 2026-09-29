@@ -60,6 +60,8 @@ pub(super) static CONSOLE: SpinMutex<Console> = SpinMutex::with_rank(
 static FB_PHYS: AtomicU64 = AtomicU64::new(0);
 static FB_LEN: AtomicU64 = AtomicU64::new(0);
 
+/// The framebuffer console is up; the REPL and the in-guest tests ask.
+#[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
 pub fn ready() -> bool {
     READY.load(Ordering::Acquire)
 }

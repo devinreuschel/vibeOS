@@ -6,10 +6,6 @@ use vibeos::shell::LineEditor;
 
 use crate::file_init::list_dir;
 
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
 fn names_in(
     dirp: &[u8],
     prefix: &[u8],
@@ -18,6 +14,10 @@ fn names_in(
 ) -> usize {
     let path: &[u8] = if dirp.is_empty() { b"." } else { dirp };
     let mut n = 0usize;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "completion in a directory that cannot be listed offers no names, as a shell's does: no failure anyone could act on (DESIGN §2.5)"
+    )]
     let _ = list_dir(path, &mut |d| {
         let nm = d.name.as_bytes();
         if nm.len() >= prefix.len() && nm[..prefix.len()].eq_ignore_ascii_case(prefix) && n < 16 {
@@ -32,10 +32,6 @@ fn names_in(
 
 /// Tab: complete the word at the cursor against the current directory
 /// (or the directory prefix of that word).
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
 pub fn complete_line(ed: &mut LineEditor, command_at: fn(usize) -> Option<&'static str>) {
     let mut line_buf = [0u8; 128];
     let line_n = ed.line().len().min(128);
@@ -77,10 +73,6 @@ pub fn complete_line(ed: &mut LineEditor, command_at: fn(usize) -> Option<&'stat
     apply_word(ed, start, cur, dirp, fill, n == 1);
 }
 
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
 fn complete_cmd(
     ed: &mut LineEditor,
     start: usize,
@@ -107,10 +99,6 @@ fn complete_cmd(
     }
 }
 
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
 fn common_prefix(names: &[[u8; MAX_NAME]; 16], lens: &[u8; 16], n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -132,10 +120,6 @@ fn common_prefix(names: &[[u8; MAX_NAME]; 16], lens: &[u8; 16], n: usize) -> usi
     c
 }
 
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
 fn to_up(c: u8) -> u8 {
     if c.is_ascii_lowercase() {
         c - b'a' + b'A'
@@ -144,10 +128,6 @@ fn to_up(c: u8) -> u8 {
     }
 }
 
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
 fn apply_word(
     ed: &mut LineEditor,
     start: usize,
@@ -173,10 +153,6 @@ fn apply_word(
     ed.set_line(&neu[..m]);
 }
 
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
 fn copy_to(dst: &mut [u8], src: &[u8]) -> usize {
     let n = src.len().min(dst.len());
     dst[..n].copy_from_slice(&src[..n]);

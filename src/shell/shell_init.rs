@@ -3,52 +3,35 @@
 //! Runs as a real thread (not `_start`, not an ISR, not idle). Input
 //! drain is IRQ-off; we never wait for keys while holding a console lock
 //! with IF=1 (DESIGN §9.4). Commands live in the registry table.
-#![cfg_attr(feature = "vibefs_crash", allow(dead_code))]
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(all(not(feature = "kernel_tests"), feature = "kernel_shell"))]
-use vibeos::log::Level;
-use vibeos::marker;
-use vibeos::shell::{
-    Command, Feed, LINE_CAP, LineEditor, MAX_COMMANDS, MAX_TOKENS, PROMPT, Registry,
+#[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
+use vibeos::shell::MAX_TOKENS;
+use vibeos::shell::{Command, LINE_CAP, MAX_COMMANDS, Registry};
+// The REPL's: `kernel_shell` builds that are not `kernel_tests` builds.
+#[cfg(all(feature = "kernel_shell", not(feature = "kernel_tests")))]
+use {
+    crate::console_init,
+    crate::fb_init,
+    vibeos::log::Level,
+    vibeos::marker,
+    vibeos::shell::{Feed, LineEditor, PROMPT},
 };
 
 use super::cmds;
 use crate::cell::IrqCell;
-use crate::console_init::{self, Console};
-use crate::fb_init;
+use crate::console_init::Console;
 
 static REG: IrqCell<Registry> = IrqCell::new(Registry::new());
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)] // parked REPL; production is userspace /bin/sh
-static READY: AtomicBool = AtomicBool::new(false);
 
-fn with_reg<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
+pub(super) fn with_reg<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
     REG.with(f)
 }
 
 /// Subsystems register here. Not a growing `match` on the name.
 pub fn register(cmd: Command) -> bool {
     with_reg(|r| r.register(cmd))
-}
-
-#[allow(dead_code)] // parked #66; userspace /bin/sh is the shell
-pub fn ready() -> bool {
-    READY.load(Ordering::Acquire)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn command_count() -> usize {
-    with_reg(|r| r.len())
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn has_command(name: &str) -> bool {
-    with_reg(|r| r.lookup(name).is_some())
 }
 
 /// Register builtins. Production shell is a user process (`/bin/sh`).
@@ -83,10 +66,7 @@ const HELP: &[Command] = &[Command {
     run: cmd_help,
 }];
 
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
+#[cfg(all(feature = "kernel_shell", not(feature = "kernel_tests")))]
 fn shell_main() {
     let mut ed = LineEditor::new();
     let mut painted = 0usize;
@@ -97,7 +77,6 @@ fn shell_main() {
         fb_init::write(marker::SHELL_READY.as_bytes());
         fb_init::write(b"\n");
     }
-    READY.store(true, Ordering::Release);
     write_prompt(&mut painted);
     loop {
         let k = console_init::wait_key();
@@ -117,6 +96,10 @@ fn shell_main() {
                 console_init::write(b"\n");
                 painted = 0;
                 if let Ok(line) = ed.line_str() {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "`dispatch_line` printed its error on the console already: nothing left to act on (DESIGN §2.5)"
+                    )]
                     let _ = dispatch_line(line);
                 }
                 ed.clear();
@@ -127,27 +110,18 @@ fn shell_main() {
 }
 
 /// The name of the `i`th registered command, for tab completion.
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
+#[cfg(all(feature = "kernel_shell", not(feature = "kernel_tests")))]
 fn command_at(i: usize) -> Option<&'static str> {
     with_reg(|r| r.get(i)).map(|c| c.name)
 }
 
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
+#[cfg(all(feature = "kernel_shell", not(feature = "kernel_tests")))]
 fn write_prompt(painted: &mut usize) {
     console_init::write(PROMPT.as_bytes());
     *painted = PROMPT.len();
 }
 
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
+#[cfg(all(feature = "kernel_shell", not(feature = "kernel_tests")))]
 fn paint(ed: &LineEditor, painted: &mut usize) {
     // `\r` homes serial and FB (column 0, same row). Do not use `\n`.
     console_init::write(b"\r");
@@ -167,12 +141,17 @@ fn paint(ed: &LineEditor, painted: &mut usize) {
     console_init::write(&ed.line()[..ed.cursor()]);
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+/// Run one command line: the REPL's and the in-guest tests'.
+#[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
 pub fn dispatch_line(line: &str) -> Result<(), &'static str> {
     let mut toks = [""; MAX_TOKENS];
     let n = match vibeos::shell::tokenize(line, &mut toks) {
         Ok(n) => n,
         Err(e) => {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+            )]
             let _ = writeln!(Console, "vibeOS: shell: {}", e.as_str());
             return Err(e.as_str());
         }
@@ -181,6 +160,10 @@ pub fn dispatch_line(line: &str) -> Result<(), &'static str> {
         return Ok(());
     }
     let Some(cmd) = with_reg(|r| r.lookup(toks[0])) else {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+        )]
         let _ = writeln!(Console, "vibeOS: shell: unknown: {}", toks[0]);
         return Err("unknown");
     };
@@ -195,16 +178,13 @@ fn cmd_help(_args: &[&str]) {
         let Some(c) = with_reg(|r| r.get(i)) else {
             break;
         };
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+        )]
         let _ = writeln!(Console, "vibeOS: help: {} - {}", c.name, c.help);
         i += 1;
     }
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn builtin_names() -> [&'static str; 10] {
-    [
-        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot", "poweroff",
-    ]
 }
 
 const _: () = {

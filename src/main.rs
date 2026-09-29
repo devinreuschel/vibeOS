@@ -52,15 +52,6 @@ mod log;
 mod mm;
 mod proc;
 mod sched;
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod shell;
 mod smp;
 mod sync;
@@ -96,8 +87,6 @@ use log::{diag, ksyms, log_init, panic, serial};
 use mm::{heap_init, kva_init, paging_init, pmm_init};
 use proc::{addr_space_init, proc_init, syscall_init, user_init};
 use sched::{sched_init, thread_init, work_init};
-// The vibefs_crash build never starts the shell (`normal_boot_tail`).
-#[cfg(not(feature = "vibefs_crash"))]
 use shell::shell_init;
 use smp::{per_cpu_init, smp_init};
 use sync::sync_init;
@@ -327,9 +316,9 @@ fn normal_boot_tail() {
     gp_test_trip();
 
     // `shell ready` is last. gp-test trips after ramdisk so a #GP dump
-    // still has a clean contract through `block: …`. Crash-consistency
-    // builds skip the shell and write a vibefs virtio image until killed.
-    #[cfg(not(feature = "vibefs_crash"))]
+    // still has a clean contract through `block: …`. Every build registers
+    // the builtins; only `kernel_shell` starts the REPL. Crash-consistency
+    // builds then write a vibefs virtio image until killed.
     crate::shell_init::init();
 
     #[cfg(all(
