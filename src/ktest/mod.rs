@@ -585,6 +585,7 @@ pub(crate) const TESTS: &[Test] = &[
         proc::ktest::test_uaccess_readonly_efault,
     )
     .deadline(30_000),
+    test("user_runtime", proc::ktest::user_runtime),
     test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,

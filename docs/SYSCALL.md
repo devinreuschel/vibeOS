@@ -473,8 +473,10 @@ gives the page the later segment's permissions, as Linux does). `PT_PHDR`
 VAs are `check_user_va`'d. Exit status is the kernel-reported low 8 bits
 (`user: exit N` diagnostic for the bootstrap hello).
 
-The Rust user runtime (`vibeos-user`, ROADMAP §10.5) is built; the
-initrd programs stay assembly until §10.5 ports them. `_start`, in `user/src/arch/<arch>/`,
+The Rust user runtime (`vibeos-user`, ROADMAP §10.5) is built, and
+`kernel_tests` kernels embed its programs for the in-guest tests
+(`Image::UserBin`; `user_runtime` runs `ktest_rt` in ring 3); the initrd
+programs stay assembly until §10.5 ports them. `_start`, in `user/src/arch/<arch>/`,
 passes the initial stack pointer to `rt::start`, which reads `argc`,
 `argv`, `envp` and `auxv` into an `env::Env`, calls the program's
 `main!` function, and exits with its return value as the status. A panic

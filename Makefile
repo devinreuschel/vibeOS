@@ -165,6 +165,12 @@ $(USER_STAMP): $(USER_SRCS) user/Cargo.toml user/mem/Cargo.toml Cargo.toml Cargo
 	mkdir -p $(USER_OUT)
 	$(foreach b,$(USER_BIN_NAMES),$(OBJCOPY) --strip-all $(USER_ELF_DIR)/$(b) $(USER_OUT)/$(b) &&) true
 	touch $@
+
+# kernel_tests kernels embed the programs VIBEOS_USER_BINS names (build.rs), so
+# only the ktest ELF's build sees the two variables.
+build/kernels/vibeos-ktest.elf: $(USER_STAMP)
+build/kernels/vibeos-ktest.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
+build/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
 endif
 
 .PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic debug clean distclean setup layout prebuilt \
