@@ -240,6 +240,16 @@ not rely on the optimizer. Planned (ROADMAP §10.2): a `make check` script bound
 frame at a value recorded here. The bound is a screen for one oversized frame; §4.5's measured
 budget is what bounds a whole path.
 
+Neither profile writes a host path into what ships. Every cargo build the Makefile runs for a shipped
+artifact goes through `CARGO_SHIP`, which sets Cargo's `trim-paths = "all"` for the profile being
+built (`-Ztrim-paths --config 'profile.<name>.trim-paths="all"'`). Cargo then passes rustc a
+`--remap-path-prefix` for the checkout, the sysroot and `$CARGO_HOME`, so panic `Location` strings,
+DWARF, and the ThinLTO `.llvm.<hash>` names `gen_ksyms.py` copies into the ksyms table carry none.
+Trim-paths is unstable on the pinned nightly, so the setting lives on the command line: a manifest's
+`cargo-features = ["trim-paths"]` would stop every stable cargo, the MSRV check's included, from
+reading the workspace. It moves into `Cargo.toml`'s profiles once Cargo stabilizes it. Host tools do
+not ship and build without it.
+
 ## 3.6 ISO and QEMU
 
 `make` builds every variant in the one `target/`, copies each variant's ELF to

@@ -80,9 +80,13 @@ endif
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
 NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,llvm-nm)
 
-# The cargo that builds a shipped artifact: the kernel's two links. It passes
-# -Zunstable-options for --artifact-dir.
-CARGO_SHIP = $(CARGO) -Zunstable-options
+# The cargo that builds a shipped artifact: the kernel's two links. Cargo's
+# trim-paths remaps the checkout, the sysroot and $CARGO_HOME out of panic
+# Locations, DWARF and symbol names (ROADMAP §10.2, F151). It is unstable on
+# the pinned nightly, so it goes on the command line: a manifest's
+# `cargo-features` would stop every stable cargo reading the workspace.
+# -Zunstable-options also enables --artifact-dir. Host tools do not ship.
+CARGO_SHIP = $(CARGO) -Ztrim-paths -Zunstable-options --config 'profile.$(CARGO_PROFILE).trim-paths="all"'
 
 # One kernel variant (DESIGN §8.2): every variant builds in the one target/,
 # and --artifact-dir copies its ELF out under cargo's lock, so a parallel

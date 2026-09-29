@@ -181,5 +181,32 @@ class HostToolDepsTest(unittest.TestCase):
             self.assertEqual([b for b in bins if b not in prereqs], [], target)
 
 
+class TrimPathsTest(unittest.TestCase):
+    """ROADMAP §10.2: no host path in any artifact (per-push half)."""
+
+    def test_cargo_ship_trims_paths(self) -> None:
+        ship = make_db().variables["CARGO_SHIP"]
+        self.assertTrue(ship.startswith("$(CARGO) "), ship)
+        self.assertIn("-Ztrim-paths", ship.split())
+        self.assertIn("--config 'profile.$(CARGO_PROFILE).trim-paths=\"all\"'", ship)
+        # The flags go before the subcommand.
+        self.assertNotIn(" build", ship)
+
+    def test_every_kernel_build_uses_cargo_ship(self) -> None:
+        db = make_db()
+        for v in VARIANTS:
+            for line in db.rules[f"build/kernels/vibeos-{v}.elf"].recipe:
+                if " build " in line:
+                    self.assertIn("$(CARGO_SHIP) build ", line, v)
+                    self.assertNotIn("$(CARGO) build", line, v)
+
+    def test_no_manifest_opts_into_cargo_features(self) -> None:
+        manifests = [ROOT / "Cargo.toml", *ROOT.glob("crates/*/Cargo.toml"),
+                     *ROOT.glob("tests/*/Cargo.toml")]
+        for m in manifests:
+            text = m.read_text(encoding="utf-8")
+            self.assertIsNone(re.search(r"^\s*cargo-features\s*=", text, re.M), m)
+
+
 if __name__ == "__main__":
     unittest.main()
