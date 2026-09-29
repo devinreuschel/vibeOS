@@ -172,66 +172,93 @@ pub(crate) fn test_block_vblk_irq() -> Outcome {
     Outcome::Ok
 }
 
+/// Requests `vblk_deep_round` keeps in flight at once.
+const VBLK_DEEP_N: usize = 8;
+
+/// One round of `block_vblk_deep`: submit `VBLK_DEEP_N` writes at gapped
+/// LBAs 10, 12, ..., so the elevator does not merge them into one VQ
+/// request. The request at `bad` asks for 1 sector with 511 bytes, which
+/// `virtio_blk_init::submit` refuses with `Inval`. It waits on every waiter
+/// whose submit returned `Ok` before it returns, so no completion reaches
+/// a waiter in a dead frame (ROADMAP §10.2, F146), and returns its outcome
+/// with the number of submitted waiters still pending, counted just
+/// before it returns.
+fn vblk_deep_round(bad: Option<usize>) -> (Outcome, u32) {
+    let waiters = [const { IoWaiter::new() }; VBLK_DEEP_N];
+    let mut bufs = [[0u8; 512]; VBLK_DEEP_N];
+    let mut submitted = [false; VBLK_DEEP_N];
+    let mut first: Option<&'static str> = None;
+    let mut i = 0usize;
+    while i < VBLK_DEEP_N {
+        bufs[i] = [0x10u8.wrapping_add(i as u8); 512];
+        let len = if bad == Some(i) { 511 } else { 512 };
+        let lba = 10 + 2 * i as u64;
+        let sub = virtio_blk_init::submit(
+            Op::Write,
+            lba,
+            1,
+            bufs[i].as_ptr() as usize,
+            len,
+            &waiters[i],
+        );
+        match sub {
+            Ok(()) => submitted[i] = true,
+            Err(_) => {
+                if first.is_none() {
+                    first = Some("submit");
+                }
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < VBLK_DEEP_N {
+        if submitted[i] && waiters[i].wait().is_err() && first.is_none() {
+            first = Some("wait");
+        }
+        i += 1;
+    }
+    let mut pending = 0u32;
+    i = 0;
+    while i < VBLK_DEEP_N {
+        if submitted[i] && waiters[i].poll().is_none() {
+            pending += 1;
+        }
+        i += 1;
+    }
+    match first {
+        Some(why) => (Outcome::Fail(why), pending),
+        None => (Outcome::Ok, pending),
+    }
+}
+
 pub(crate) fn test_block_vblk_deep() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    let w0 = IoWaiter::new();
-    let w1 = IoWaiter::new();
-    let w2 = IoWaiter::new();
-    let w3 = IoWaiter::new();
-    let w4 = IoWaiter::new();
-    let w5 = IoWaiter::new();
-    let w6 = IoWaiter::new();
-    let w7 = IoWaiter::new();
-    let b0 = [0x10u8; 512];
-    let b1 = [0x11u8; 512];
-    let b2 = [0x12u8; 512];
-    let b3 = [0x13u8; 512];
-    let b4 = [0x14u8; 512];
-    let b5 = [0x15u8; 512];
-    let b6 = [0x16u8; 512];
-    let b7 = [0x17u8; 512];
-    // gapped LBAs so the elevator does not merge them into one VQ request
-    let subs = [
-        virtio_blk_init::submit(Op::Write, 10, 1, b0.as_ptr() as usize, 512, &w0),
-        virtio_blk_init::submit(Op::Write, 12, 1, b1.as_ptr() as usize, 512, &w1),
-        virtio_blk_init::submit(Op::Write, 14, 1, b2.as_ptr() as usize, 512, &w2),
-        virtio_blk_init::submit(Op::Write, 16, 1, b3.as_ptr() as usize, 512, &w3),
-        virtio_blk_init::submit(Op::Write, 18, 1, b4.as_ptr() as usize, 512, &w4),
-        virtio_blk_init::submit(Op::Write, 20, 1, b5.as_ptr() as usize, 512, &w5),
-        virtio_blk_init::submit(Op::Write, 22, 1, b6.as_ptr() as usize, 512, &w6),
-        virtio_blk_init::submit(Op::Write, 24, 1, b7.as_ptr() as usize, 512, &w7),
-    ];
-    let mut i = 0usize;
-    while i < 8 {
-        if subs[i].is_err() {
-            return Outcome::Fail("submit");
-        }
-        i += 1;
-    }
-    if w0.wait().is_err()
-        || w1.wait().is_err()
-        || w2.wait().is_err()
-        || w3.wait().is_err()
-        || w4.wait().is_err()
-        || w5.wait().is_err()
-        || w6.wait().is_err()
-        || w7.wait().is_err()
-    {
-        return Outcome::Fail("wait");
+    match vblk_deep_round(None) {
+        (Outcome::Ok, 0) => {}
+        (Outcome::Ok, n) => return crate::fail_fmt!("round: {} pending", n),
+        (Outcome::Fail(why), _) => return Outcome::Fail(why),
+        _ => return Outcome::Fail("round"),
     }
     let mut out = [0u8; 512];
-    if virtio_blk_init::read(10, &mut out).is_err() || out != b0 {
+    if virtio_blk_init::read(10, &mut out).is_err() || out != [0x10u8; 512] {
         return Outcome::Fail("r0");
     }
-    if virtio_blk_init::read(18, &mut out).is_err() || out != b4 {
+    if virtio_blk_init::read(18, &mut out).is_err() || out != [0x14u8; 512] {
         return Outcome::Fail("r4");
     }
-    if virtio_blk_init::read(24, &mut out).is_err() || out != b7 {
+    if virtio_blk_init::read(24, &mut out).is_err() || out != [0x17u8; 512] {
         return Outcome::Fail("r7");
     }
-    Outcome::Ok
+    match vblk_deep_round(Some(3)) {
+        (Outcome::Fail("submit"), 0) => Outcome::Ok,
+        (Outcome::Fail("submit"), n) => crate::fail_fmt!("bad round: {} pending", n),
+        (Outcome::Ok, _) => Outcome::Fail("bad round: 511-byte request accepted"),
+        (Outcome::Fail(why), _) => crate::fail_fmt!("bad round: {}, want submit", why),
+        _ => Outcome::Fail("bad round"),
+    }
 }
 
 const VBLK_ITERS: u32 = 40;
