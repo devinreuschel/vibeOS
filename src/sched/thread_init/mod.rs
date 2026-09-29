@@ -16,8 +16,11 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kalloc::TryBox;
 use vibeos::kva::DEFAULT_STACK_PAGES;
+use vibeos::limits::PID_MAX;
 use vibeos::lock::RANK_SCHED;
 use vibeos::per_cpu::PerCpu;
+use vibeos::proc::INIT_PID;
+use vibeos::proc::pid::{IdIndex, PidAlloc};
 use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{
@@ -29,7 +32,7 @@ use vibeos::wait::{self, WaitQueue};
 
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
-use crate::sync_init::SpinMutex;
+use crate::sync_init::{self, SleepCtx, SpinMutex};
 use crate::time_init;
 use crate::x86::InterruptGuard;
 
@@ -132,29 +135,128 @@ impl ThreadHandle {
     }
 }
 
+/// Entries in the tid-to-slot index: twice the thread table, so probe runs
+/// stay short.
+const TID_INDEX_CAP: usize = (2 * MAX_THREADS).next_power_of_two();
+
 pub(crate) struct Sched {
     slots: [Option<TryBox<Tcb>>; MAX_THREADS],
+    /// Tids, shared with pids (`proc_init`): a tid is never a slot index.
+    pids: PidAlloc,
+    /// Each live TCB's tid to its slot in `slots`.
+    index: IdIndex<TID_INDEX_CAP>,
     timeouts: TimeoutQueue,
-    places: [(u32, ThreadId); MAX_THREADS],
+    /// Wakes recorded under SCHED, placed after it drops: (cpu, id, slot).
+    places: [(u32, ThreadId, u32); MAX_THREADS],
     place_n: usize,
+    /// The context the current `with_sched` section was entered from, which
+    /// `begin_wait` checks: it runs under SCHED with IF off and cannot read
+    /// IF or `HELD` itself.
+    waiter: SleepCtx,
+}
+
+/// Each thread-table slot's tid, `u32::MAX` for none: what a wake-inbox
+/// bit (a slot) names when its CPU drains it ([`tid_of_slot`]). Stored with
+/// Release under SCHED ([`publish_slot`]) whenever a slot takes a TCB.
+static SLOT_TID: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(u32::MAX) }; MAX_THREADS];
+
+/// Record that `slot` now holds thread `id`. Under SCHED.
+fn publish_slot(slot: usize, id: ThreadId) {
+    if let Some(t) = SLOT_TID.get(slot) {
+        // Release: pairs with the Acquire load in `tid_of_slot`.
+        t.store(id.0, Ordering::Release);
+    }
+}
+
+/// The tid in thread-table slot `slot`, for `ipi_init::drain_inbox`. A slot
+/// with a bit in some inbox holds a Ready thread, which cannot die before
+/// it runs, so the slot is not reused while the bit is set.
+pub(crate) fn tid_of_slot(slot: usize) -> Option<ThreadId> {
+    // Acquire: pairs with the Release store in `publish_slot`.
+    let raw = SLOT_TID.get(slot)?.load(Ordering::Acquire);
+    (raw != u32::MAX).then_some(ThreadId(raw))
 }
 
 impl Sched {
     const fn empty() -> Self {
         Self {
             slots: [const { None }; MAX_THREADS],
+            pids: PidAlloc::new(PID_MAX),
+            index: IdIndex::new(),
             timeouts: TimeoutQueue::empty(),
-            places: [(0, ThreadId::NONE); MAX_THREADS],
+            places: [(0, ThreadId::NONE, 0); MAX_THREADS],
             place_n: 0,
+            waiter: SleepCtx::UNCHECKED,
         }
     }
 
     fn get(&self, id: ThreadId) -> Option<&Tcb> {
-        self.slots.get(id.0 as usize)?.as_deref()
+        let slot = self.index.get(id.raw())?;
+        self.slots.get(slot)?.as_deref().filter(|t| t.id == id)
     }
 
     fn get_mut(&mut self, id: ThreadId) -> Option<&mut Tcb> {
-        self.slots.get_mut(id.0 as usize)?.as_deref_mut()
+        let slot = self.index.get(id.raw())?;
+        self.slots
+            .get_mut(slot)?
+            .as_deref_mut()
+            .filter(|t| t.id == id)
+    }
+
+    /// A new id from the pid and tid allocator, with one use; `None` when
+    /// every id is in use.
+    pub(crate) fn alloc_id(&mut self) -> Option<u32> {
+        self.pids.alloc()
+    }
+
+    /// Add a use to `id`: a user thread's tid is its process's pid, which
+    /// the process holds already. False when `id` is out of range or its
+    /// use count is full.
+    #[must_use]
+    pub(crate) fn hold_id(&mut self, id: u32) -> bool {
+        self.pids.hold(id)
+    }
+
+    /// Whether `id` has a use: `proc_init::alloc_pid` asks it for init's
+    /// pid, which `init_bootstrap` holds until init takes it over.
+    pub(crate) fn id_in_use(&self, id: u32) -> bool {
+        self.pids.in_use(id)
+    }
+
+    /// Drop a use of `id`; at zero the id is free for a later `alloc_id`.
+    #[allow(
+        clippy::panic,
+        reason = "invariant: every carrier drops exactly the use it took (`alloc_id`/`hold_id`), so a use is left to drop"
+    )]
+    pub(crate) fn free_id(&mut self, id: u32) {
+        assert!(self.pids.free(id), "pid: {id} freed with no use");
+    }
+
+    /// A new thread's tid: a user thread's (`pid != 0`) is its process's
+    /// pid, with a use of its own; a kernel thread's is a new id.
+    fn new_tid(&mut self, pid: u32) -> Option<u32> {
+        if pid == 0 {
+            self.alloc_id()
+        } else {
+            self.hold_id(pid).then_some(pid)
+        }
+    }
+
+    /// Point `id` at `slot` in the index and publish it for the inbox.
+    fn bind(&mut self, id: ThreadId, slot: usize) {
+        // Invariant: the index holds one entry per live TCB, at most
+        // `MAX_THREADS`, and has twice that room; `id` is below `PID_MAX`.
+        assert!(self.index.insert(id.raw(), slot), "tid index full");
+        publish_slot(slot, id);
+    }
+
+    /// Retire slot `slot`'s old tid `old`: out of the index and the timeout
+    /// queue, then back to the allocator.
+    fn unbind(&mut self, old: ThreadId) {
+        if self.index.remove(old.raw()).is_some() {
+            self.timeouts.remove(old);
+            self.free_id(old.raw());
+        }
     }
 
     fn ptr(&mut self, id: ThreadId) -> *mut Tcb {
@@ -164,11 +266,23 @@ impl Sched {
         }
     }
 
+    /// `id`'s thread-table slot.
+    fn slot_of(&self, id: ThreadId) -> Option<usize> {
+        let slot = self.index.get(id.raw())?;
+        match self.slots.get(slot)?.as_deref() {
+            Some(t) if t.id == id => Some(slot),
+            _ => None,
+        }
+    }
+
     fn place(&mut self, cpu: u32, id: ThreadId) {
         if self.place_n >= MAX_THREADS {
             return;
         }
-        self.places[self.place_n] = (cpu, id);
+        let Some(slot) = self.slot_of(id) else {
+            return;
+        };
+        self.places[self.place_n] = (cpu, id, slot as u32);
         self.place_n += 1;
     }
 
@@ -186,6 +300,8 @@ impl Sched {
 
     /// Enqueue wait → Blocked. Still holding SCHED. Caller drops, then `schedule`.
     pub(crate) fn begin_wait(&mut self, wq: &mut WaitQueue, deadline: Instant) {
+        sync_init::assert_not_hard_irq();
+        self.waiter.check();
         let id = current_id();
         wq.enqueue(id);
         self.timeouts.insert(id, deadline);
@@ -322,6 +438,9 @@ pub fn schedule_preempt() {
 /// [`apply_if_on_resume`]. `InterruptGuard` stays on the outgoing stack.
 fn schedule_inner(from_irq: bool) {
     let _irq = InterruptGuard::enter();
+    if !from_irq {
+        sync_init::assert_not_hard_irq();
+    }
     crate::ipi_init::drain_inbox();
     let now = Instant {
         ns: time_init::now_ns(),
@@ -400,7 +519,7 @@ fn schedule_inner(from_irq: bool) {
     // while it is `Ready` and placed on this CPU, and drop any other entry.
     let (old_ptr, new_ptr, old_id, new_id) = loop {
         #[cfg(feature = "kernel_tests")]
-        let cand = requeue_next_cpu(next, cur, idle, me);
+        let cand = testing::requeue_next_cpu(next, cur, idle, me);
         #[cfg(not(feature = "kernel_tests"))]
         let cand = next;
         let picked = with_sched(|s| {
@@ -436,67 +555,16 @@ fn runnable_on(t: &Tcb, cpu: u32) -> bool {
     t.state == ThreadState::Ready && t.cpu == cpu
 }
 
-/// C-REQUEUE-HOOK: while `sched::ktest::set_requeue_next_cpu` is on, a user
-/// thread or a `CpuAffinity::Any` kernel thread that this CPU dequeues
-/// while another thread is current moves to the next online CPU instead
-/// of running here, once per slice it runs. A preempted thread that is the
-/// only runnable one here stays queued while this CPU runs idle, whose
-/// dequeue then moves it. Never the running thread, an idle thread, or a
-/// pinned kernel thread; the move goes out through `place` after the
-/// SCHED lock drops, before any switch. Each entry dequeued after a move
-/// goes through the hook too, so a movable thread queued behind a moved
-/// one moves as well.
-#[cfg(feature = "kernel_tests")]
-fn requeue_next_cpu(mut next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> ThreadId {
-    if !testing::requeue_on() {
-        return next;
-    }
-    let Some(target) = testing::next_online_cpu(me) else {
-        return next;
-    };
-    // A stale entry's thread is not runnable here and does not move:
-    // `schedule_inner` drops the entry.
-    let movable = |t: &Tcb| runnable_on(t, me) && (t.pid != 0 || t.affinity == CpuAffinity::Any);
-    loop {
-        if next == idle {
-            return next;
-        }
-        if next == cur {
-            if with_sched(|s| s.get(cur).is_some_and(movable)) {
-                per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
-                return idle;
-            }
-            return next;
-        }
-        if testing::take_arrived(next) {
-            return next;
-        }
-        let moved = with_sched(|s| {
-            let Some(t) = s.get_mut(next) else {
-                return false;
-            };
-            if !movable(t) {
-                return false;
-            }
-            t.cpu = target;
-            if t.pid != 0 {
-                t.affinity = CpuAffinity::Pinned(target);
-            }
-            // Before the place: `with_sched` hands the thread to `target` as
-            // its lock drops, and a dequeue there that finds no arrival would
-            // move it again.
-            testing::moved(next);
-            s.place(target, next);
-            true
-        });
-        if !moved {
-            return next;
-        }
-        next = per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle));
-    }
-}
-
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
+    #[cfg(feature = "kernel_tests")]
+    if sync_init::held_mask() != 0 {
+        // SAFETY: invariant I9: `new_ptr` is a live entry of `SCHED` that
+        // `schedule_inner` or `switch_to` set Running for this CPU, and `id`
+        // changes only while its slot is Dead; established by
+        // `thread_init::spawn_inner`.
+        testing::refuse_switch(unsafe { (*new_ptr).id });
+    }
+    sync_init::assert_switch_clean();
     let now = time_init::read_tsc();
     per_cpu_init::with_current_switch(|cpu| {
         // For the switch tail that runs next on this CPU.
@@ -623,6 +691,21 @@ pub(crate) fn take_dead_stacks() -> u64 {
     per_cpu_init::with_current(|cpu| core::mem::replace(&mut cpu.dead_list, 0))
 }
 
+/// Free this CPU's dead list now, as its worker would: IF=1 only
+/// (`kva_init::free_parked`). True if a stack was freed.
+fn reclaim_dead_stacks_here() -> bool {
+    if !crate::x86::interrupts_enabled() {
+        return false;
+    }
+    let head = take_dead_stacks();
+    if head == 0 {
+        return false;
+    }
+    let n = kva_init::free_parked(head);
+    stacks_reclaimed(n);
+    n > 0
+}
+
 /// The worker has freed `n` stacks it took with [`take_dead_stacks`].
 pub(crate) fn stacks_reclaimed(n: usize) {
     STACKS_IN_FLIGHT.fetch_sub(n, Ordering::AcqRel);
@@ -676,14 +759,14 @@ pub fn halt_if_idle() {
         // SAFETY: `cli` touches only IF; the `sti` below or the idle loop's
         // next pass turns it back on; established here.
         unsafe {
-            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+            core::arch::asm!("cli", options(nostack, preserves_flags));
         }
         crate::ipi_init::drain_inbox();
         if !per_cpu_init::current().runq.is_empty() {
             // SAFETY: `sti` restores the IF=1 this idle loop runs with;
             // established here.
             unsafe {
-                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+                core::arch::asm!("sti", options(nostack, preserves_flags));
             }
             return;
         }
@@ -733,7 +816,13 @@ pub unsafe fn init_bootstrap() {
         let mut s = SCHED.lock();
         assert!(s.slots[0].is_none(), "bootstrap twice");
         s.slots[0] = Some(tcb);
+        // Tid 0 is the bootstrap's, which `PidAlloc` never hands out.
+        s.bind(ThreadId::BOOTSTRAP, 0);
+        // Init stays pid 1: held before any other thread takes an id, and
+        // taken over by init's process (`proc_init::alloc_pid`).
+        assert!(s.hold_id(INIT_PID), "pid: init's hold");
     }
+    crate::ipi_init::set_slot_tid_hook(tid_of_slot);
     per_cpu_init::with_current(|cpu| {
         per_cpu_init::set_current_thread(cpu, ptr);
         cpu.idle = ptr;
@@ -943,10 +1032,14 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
             // Dropped after SCHED is released: no heap free under it.
             return Err((tcb, stack));
         };
-        let id = ThreadId(slot as u32);
+        let Some(raw) = s.alloc_id() else {
+            return Err((tcb, stack));
+        };
+        let id = ThreadId(raw);
         tcb.id = id;
         tcb.stack = Some(stack);
         s.slots[slot] = Some(tcb);
+        s.bind(id, slot);
         Ok(id)
     });
     match placed {
@@ -1010,7 +1103,15 @@ fn spawn_inner(
     };
     let stack = match cached {
         Some(s) => s,
-        None => kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?,
+        None => match kva_init::alloc_guarded_stack(stack_pages) {
+            Ok(s) => s,
+            // Once: an exit burst can leave this CPU's dead list holding
+            // enough stacks for KVA to refuse (`Kva::alloc`'s live cap).
+            Err(_) if reclaim_dead_stacks_here() => {
+                kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?
+            }
+            Err(_) => return Err(SpawnError::NoMemory),
+        },
     };
     let top = stack.top().as_u64();
     assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
@@ -1026,25 +1127,42 @@ fn spawn_inner(
     // heap (one extra mapped page shows up as a leaked frame). A Dead
     // thread whose CPU has not finished switching off it still has
     // `on_cpu` set; its CPU clears it with Release (`finish_switch`).
-    if let Some(id) = with_sched(|s| {
+    // The Dead TCB's old tid leaves the index and the timeout queue and
+    // goes back to the allocator; the new thread takes a new tid.
+    let reused = with_sched(|s| {
         let slot = s.slots.iter().position(|x| match x.as_ref() {
             Some(t) => t.state == ThreadState::Dead && !t.on_cpu.load(Ordering::Acquire),
             None => false,
         })?;
-        let id = ThreadId(slot as u32);
-        s.timeouts.remove(id);
+        let old = s.slots[slot].as_deref()?.id;
+        let ks = stack.take()?;
+        let Some(raw) = s.new_tid(pid) else {
+            stack = Some(ks);
+            return Some(Err(SpawnError::NoSlot));
+        };
+        let id = ThreadId(raw);
+        s.unbind(old);
         let tcb = s.slots[slot].as_deref_mut()?;
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
-        let ks = stack.take()?;
+        tcb.id = id;
         fill_tcb(
             tcb, name, entry, affinity, cpu, ks, top, tramp, first_nest, pid, as_cr3,
         );
+        s.bind(id, slot);
         if enqueue {
             s.place(cpu, id);
         }
-        Some(id)
-    }) {
-        return Ok(ThreadHandle { id });
+        Some(Ok(id))
+    });
+    match reused {
+        Some(Ok(id)) => return Ok(ThreadHandle { id }),
+        Some(Err(e)) => {
+            if let Some(ks) = stack.take() {
+                return_stack(ks);
+            }
+            return Err(e);
+        }
+        None => {}
     }
 
     // Built without the stack, so a failed allocation drops no stack; the
@@ -1093,10 +1211,13 @@ fn spawn_inner(
             // Dropped after SCHED is released: no heap free under it.
             return Err(tcb);
         };
-        let id = ThreadId(slot as u32);
-        s.timeouts.remove(id);
+        let Some(raw) = s.new_tid(pid) else {
+            return Err(tcb);
+        };
+        let id = ThreadId(raw);
         tcb.id = id;
         s.slots[slot] = Some(tcb);
+        s.bind(id, slot);
         if enqueue {
             s.place(cpu, id);
         }
@@ -1167,6 +1288,7 @@ pub fn sleep_ms(ms: u64) {
 
 /// Park until `deadline` (or a far-future sentinel). Sleep path only.
 pub fn park(deadline: Option<Instant>) {
+    sync_init::might_sleep();
     let d = effective_deadline(deadline);
     let id = current_id();
     with_sched(|s| {
@@ -1186,8 +1308,10 @@ pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
 }
 
 pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
+    let ctx = sync_init::sleep_ctx();
     let (r, places, n) = {
         let mut s = SCHED.lock();
+        s.waiter = ctx;
         let r = f(&mut s);
         let n = s.place_n;
         let p = s.places;
@@ -1198,7 +1322,8 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     while i < n {
         #[cfg(feature = "kernel_tests")]
         testing::place_stall(places[i].1);
-        crate::ipi_init::place_ready(places[i].0, places[i].1);
+        let (cpu, id, slot) = places[i];
+        crate::ipi_init::place_ready(cpu, id, slot as usize);
         i += 1;
     }
     r
@@ -1319,36 +1444,7 @@ pub fn current_tcb() -> *mut Tcb {
 }
 
 #[cfg(feature = "kernel_tests")]
-#[allow(
-    clippy::expect_used,
-    reason = "invariant I9: a TCB slot once filled is never emptied, so an id a spawn returned always names one (`thread_init::spawn_inner`)"
-)]
-pub fn state(id: ThreadId) -> ThreadState {
-    SCHED.lock().get(id).expect("unknown thread").state
-}
-
-#[cfg(feature = "kernel_tests")]
-pub fn try_state(id: ThreadId) -> Option<ThreadState> {
-    SCHED.lock().get(id).map(|t| t.state)
-}
-
-#[cfg(feature = "kernel_tests")]
-#[allow(
-    clippy::expect_used,
-    reason = "invariant I9: a TCB slot once filled is never emptied, so an id a spawn returned always names one (`thread_init::spawn_inner`)"
-)]
-pub fn name(id: ThreadId) -> &'static str {
-    SCHED.lock().get(id).expect("unknown thread").name
-}
-
-#[cfg(feature = "kernel_tests")]
-#[allow(
-    clippy::expect_used,
-    reason = "invariant I9: a TCB slot once filled is never emptied, so an id a spawn returned always names one (`thread_init::spawn_inner`)"
-)]
-pub fn cpu_of(id: ThreadId) -> u32 {
-    SCHED.lock().get(id).expect("unknown thread").cpu
-}
+pub use testing::{cpu_of, exited, name, state, try_state};
 
 pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
     SCHED.lock().ptr(id)

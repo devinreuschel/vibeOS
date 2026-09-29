@@ -11,6 +11,7 @@ use crate::paging::{
     user_leaf_flags,
 };
 use crate::pmm::Frames;
+use crate::proc::uaccess::user_range_ok;
 
 pub use crate::limits::MAX_REGIONS;
 
@@ -170,6 +171,28 @@ pub enum UserMemError {
 impl UserMemError {
     /// Linux `EFAULT`. User misuse, never a panic.
     pub const EFAULT: i32 = 14;
+
+    /// Which bound a range that `uaccess::user_range_ok` refused breaks.
+    /// Only meaningful for a refused range.
+    pub const fn refused(ptr: u64, len: u64) -> Self {
+        if len == 0 {
+            return if is_canonical(ptr) {
+                Self::Kernel
+            } else {
+                Self::NonCanonical
+            };
+        }
+        let Some(end) = ptr.checked_add(len) else {
+            return Self::Overflow;
+        };
+        if !is_canonical(ptr) || !is_canonical(end.wrapping_sub(1)) {
+            return Self::NonCanonical;
+        }
+        if ptr >= USER_MAP_END || end > USER_MAP_END {
+            return Self::Kernel;
+        }
+        Self::NullGuard
+    }
 
     pub const fn errno(self) -> i32 {
         match self {
@@ -631,25 +654,13 @@ impl AddressSpace {
 
     /// Range check + present USER mapping. Never panics.
     pub fn check_user_range(&self, ptr: u64, len: u64) -> Result<(), UserMemError> {
+        if !user_range_ok(ptr, len) {
+            return Err(UserMemError::refused(ptr, len));
+        }
         if len == 0 {
-            if !is_canonical(ptr) {
-                return Err(UserMemError::NonCanonical);
-            }
-            if ptr >= USER_MAP_END {
-                return Err(UserMemError::Kernel);
-            }
             return Ok(());
         }
-        let end = ptr.checked_add(len).ok_or(UserMemError::Overflow)?;
-        if !is_canonical(ptr) || !is_canonical(end.wrapping_sub(1)) {
-            return Err(UserMemError::NonCanonical);
-        }
-        if ptr >= USER_MAP_END || end > USER_MAP_END {
-            return Err(UserMemError::Kernel);
-        }
-        if ptr < NULL_GUARD_LEN {
-            return Err(UserMemError::NullGuard);
-        }
+        let end = ptr.wrapping_add(len);
         let mut va = ptr;
         while va < end {
             match self.mapper.probe(VirtAddr(va)) {

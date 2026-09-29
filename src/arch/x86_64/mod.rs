@@ -20,6 +20,7 @@ pub mod gs;
 pub mod idt;
 pub mod pic;
 mod trampoline;
+pub(crate) mod uaccess;
 
 use core::arch::asm;
 use core::mem::offset_of;

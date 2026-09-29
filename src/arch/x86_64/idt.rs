@@ -16,7 +16,6 @@ use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use vibeos::desc::{IdtEntry, InterruptFrame, IstSlot, KERNEL_CS};
-use vibeos::fmt_util;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
 use vibeos::vectors;
@@ -24,7 +23,7 @@ use vibeos::vectors;
 use crate::arch::gs;
 use crate::arch::pic;
 use crate::cell::IrqCell;
-use crate::serial::Serial;
+use crate::serial;
 use crate::x86::{self, DtPtr};
 
 #[repr(C, align(16))]
@@ -797,13 +796,19 @@ fn general_protection(frame: &mut TrapFrame) {
 }
 
 /// Reads CR2 from the frame: with IF=1 a preempting thread's fault can
-/// change the register (DESIGN §5.10 rule 9).
+/// change the register (DESIGN §5.10 rule 9). A CPL-0 fault on a user
+/// accessor's copy with CR2 in the user half resumes at its exception-table
+/// fixup, RCX, RSI and RDI as the fault left them, and the saved AC, which
+/// the fixup's `clac` clears (INTERRUPTS §5.1).
 fn page_fault(frame: &mut TrapFrame) {
     let (err, cr2) = (frame.error_code, frame.cr2);
     if frame.user_mode() {
         #[cfg(feature = "kernel_tests")]
         testing::on_user_pf(frame);
         user_fault(frame);
+    } else if let Some(rip) = super::uaccess::fixup(frame.iret.rip, cr2) {
+        frame.iret.rip = rip;
+        return;
     }
     x86::cli();
     crate::panic::exception_halt(b"#PF", &frame.iret, Some(err), Some(cr2));
@@ -987,33 +992,18 @@ const fn ist_for(vec: u8) -> u8 {
     }
 }
 
-fn hex(n: u64) {
-    let mut b = [0u8; 16];
-    Serial::write_bytes(fmt_util::write_hex(n, &mut b));
-}
-
+/// One `vibeOS: <kind> rip=0x.. ..` line, in one write.
 fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>) {
-    Serial::write_bytes(b"vibeOS: ");
-    Serial::write_bytes(kind);
-    Serial::write_bytes(b" rip=0x");
-    hex(frame.rip);
-    Serial::write_bytes(b" cs=0x");
-    hex(frame.cs);
-    Serial::write_bytes(b" rflags=0x");
-    hex(frame.rflags);
-    Serial::write_bytes(b" rsp=0x");
-    hex(frame.rsp);
-    Serial::write_bytes(b" ss=0x");
-    hex(frame.ss);
-    if let Some(e) = err {
-        Serial::write_bytes(b" err=0x");
-        hex(e);
-    }
-    if let Some(c) = cr2 {
-        Serial::write_bytes(b" cr2=0x");
-        hex(c);
-    }
-    Serial::write_bytes(b"\n");
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = serial::write_line_with(|w| {
+        w.push_bytes(b"vibeOS: ");
+        w.push_bytes(kind);
+        crate::panic::frame_fields(w, frame, err, cr2);
+        Ok(())
+    });
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).

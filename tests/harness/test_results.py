@@ -8,13 +8,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.harness import results, run_e2e, run_ktest
+from tests.harness import frame, results, run_e2e, run_ktest
 from tests.harness.harness import (
     ISA_DEBUG_PASS,
     QemuConfig,
     RunResult,
     overlay_env,
 )
+
+
+def K(text: str) -> str:
+    """`text` as the kernel prints it on serial: framed (DESIGN §2.6)."""
+    return frame.FRAME + text
 
 
 def _load(path: Path) -> dict[str, object]:
@@ -182,13 +187,16 @@ class TestResults(unittest.TestCase):
     def test_ktest_boot_records_one_boot_and_no_retry(self) -> None:
         passing = RunResult(
             lines=[
-                "vibeOS: block: vda 8192 sectors",
-                "vibeOS: block: vdap1 128 sectors",
-                "vibeOS: block: vdap2 7647 sectors",
-                "vibeOS: persist: wrote",
-                "vibeOS: ktest: begin",
-                "vibeOS: ktest: ok alpha",
-                "vibeOS: ktest: end",
+                K("vibeOS: block: vda 8192 sectors"),
+                K("vibeOS: block: vdap1 128 sectors"),
+                K("vibeOS: block: vdap2 7647 sectors"),
+                K("vibeOS: persist: wrote"),
+                K("vibeOS: ktest: begin"),
+                K("vibeOS: ktest: ok alpha"),
+                # A user program's copy of a verdict is not recorded.
+                "?vibeOS: ktest: FAIL forged",
+                "vibeOS: ktest: ok forged",
+                K("vibeOS: ktest: end"),
             ],
             exit_code=ISA_DEBUG_PASS,
         )

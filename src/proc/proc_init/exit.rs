@@ -12,8 +12,10 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
     }
     let (old, ppid, fds, tid) = thread_init::with_sched(|s| {
         table_locked(|t| {
-            if reparent_children(t, pid) {
-                s.wake_all(&mut t.procs[INIT_PID as usize].wait_wq);
+            if reparent_children(s, t, pid)
+                && let Some(init) = t.get_mut(INIT_PID)
+            {
+                s.wake_all(&mut init.wait_wq);
             }
             let p = t.get_mut(pid);
             let (space, ppid, fds, tid, autoreap) = match p {
@@ -30,13 +32,15 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
             };
             if autoreap {
                 // No reaper (ROADMAP §10.5): nobody waits, so free the slot now.
-                reap_zombie(t, pid);
+                reap_zombie(s, t, pid);
             } else {
                 if let Some(par) = t.get_mut(ppid) {
                     par.pending |= bit(SIGCHLD);
                 }
                 // ppid 0 wakes the kernel's queue (`wait_kernel`).
-                s.wake_all(&mut t.procs[ppid as usize].wait_wq);
+                if let Some(wq) = t.parent_wq(ppid) {
+                    s.wake_all(wq);
+                }
             }
             (space, ppid, fds, tid)
         })
@@ -61,16 +65,16 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
 /// F068). With none, a zombie child is freed now and a live one gets
 /// ppid 0 and `autoreap`, so `finish_exit` frees it. True when init
 /// adopted a child and its wait queue needs a wake.
-fn reparent_children(t: &mut Table, dead: u32) -> bool {
+fn reparent_children(s: &mut Sched, t: &mut Table, dead: u32) -> bool {
     // An exiting init is still `Live` here; it must not adopt its own children.
     let init = if dead == INIT_PID {
         InitState::Zombie
     } else {
-        InitState::of(t.procs[INIT_PID as usize].state)
+        InitState::of(t.get(INIT_PID).map_or(ProcState::Unused, |p| p.state))
     };
     let reaper = reaper_for(init);
     let mut adopted = false;
-    let mut i = 1usize;
+    let mut i = 0usize;
     while i < MAX_PROCS {
         let p = &mut t.procs[i];
         if p.state != ProcState::Unused && p.ppid == dead && p.pid != dead {
@@ -79,7 +83,10 @@ fn reparent_children(t: &mut Table, dead: u32) -> bool {
                     p.ppid = r;
                     adopted = true;
                 }
-                None if p.state == ProcState::Zombie => reap_zombie(t, i as u32),
+                None if p.state == ProcState::Zombie => {
+                    let pid = p.pid;
+                    reap_zombie(s, t, pid);
+                }
                 None => {
                     p.ppid = 0;
                     p.autoreap = true;
@@ -102,7 +109,7 @@ pub(super) fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
         let r = thread_init::with_sched(|s| {
             table_locked(|t| {
                 if let Some((cpid, st, ztid)) = find_zombie(t, self_pid, want) {
-                    reap_zombie(t, cpid);
+                    reap_zombie(s, t, cpid);
                     let _ = ztid;
                     return WaitAct::Done(cpid, st);
                 }
@@ -112,25 +119,21 @@ pub(super) fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
                 if nohang {
                     return WaitAct::Done(0, 0);
                 }
-                s.begin_wait(&mut t.procs[self_pid as usize].wait_wq, FAR_DEADLINE);
+                let Some(me) = t.get_mut(self_pid) else {
+                    return WaitAct::Err(ECHILD);
+                };
+                s.begin_wait(&mut me.wait_wq, FAR_DEADLINE);
                 WaitAct::Sleep
             })
         });
         match r {
             WaitAct::Done(0, _) => return 0,
             WaitAct::Done(cpid, st) => {
-                if status != 0
-                    && let Some(space) = current_space()
-                {
-                    if syscall::check_user_ptr(|p, n| space.check_user_range(p, n), status, 4)
-                        .is_err()
-                    {
-                        return syscall::neg(EFAULT);
-                    }
-                    let bytes = st.to_le_bytes();
-                    if space.write_bytes(status, &bytes).is_err() {
-                        return syscall::neg(EFAULT);
-                    }
+                // After `with_sched`, with no lock held: the child is
+                // reaped, and a failed copy returns `EFAULT` without
+                // undoing that, as Linux's does (SYSCALL.md §5).
+                if status != 0 && uaccess_init::copy_to_user_val(status, &st).is_err() {
+                    return syscall::neg(EFAULT);
                 }
                 return cpid as i64;
             }
@@ -153,7 +156,7 @@ enum WaitAct {
 }
 
 fn find_zombie(t: &Table, parent: u32, want: i64) -> Option<(u32, u32, ThreadId)> {
-    let mut i = 1usize;
+    let mut i = 0usize;
     while i < MAX_PROCS {
         let p = &t.procs[i];
         if p.state == ProcState::Zombie && p.ppid == parent && (want < 0 || want == p.pid as i64) {
@@ -165,7 +168,7 @@ fn find_zombie(t: &Table, parent: u32, want: i64) -> Option<(u32, u32, ThreadId)
 }
 
 fn has_child(t: &Table, parent: u32, want: i64) -> bool {
-    let mut i = 1usize;
+    let mut i = 0usize;
     while i < MAX_PROCS {
         let p = &t.procs[i];
         if p.state != ProcState::Unused && p.ppid == parent && (want < 0 || want == p.pid as i64) {
@@ -176,9 +179,8 @@ fn has_child(t: &Table, parent: u32, want: i64) -> bool {
     false
 }
 
-pub(super) fn reap_zombie(t: &mut Table, pid: u32) {
-    let i = pid as usize;
-    t.procs[i] = Proc::empty();
+pub(super) fn reap_zombie(s: &mut Sched, t: &mut Table, pid: u32) {
+    release_pid(s, t, pid);
 }
 
 pub(super) fn sys_kill(pid: u64, sig: u64) -> i64 {
@@ -239,26 +241,26 @@ pub(super) fn sys_kill(pid: u64, sig: u64) -> i64 {
 // and a preempted body carries an interrupt and a switch on top of it.
 #[inline(never)]
 pub(super) fn sys_psinfo(buf: u64, len: u64) -> i64 {
-    if let Err(e) = validate_buf(buf, len) {
-        return syscall::neg(e);
+    if !user_range_ok(buf, len) {
+        return syscall::neg(EFAULT);
     }
     let mut tmp = [0u8; 512];
     let n = format_ps(&mut tmp);
-    let take = n.min(len as usize);
-    let Some(space) = current_space() else {
-        return syscall::neg(EFAULT);
-    };
-    if space.write_bytes(buf, &tmp[..take]).is_err() {
-        return syscall::neg(EFAULT);
+    let take = usize::try_from(len).map_or(n, |l| n.min(l));
+    if take == 0 {
+        return 0;
     }
-    take as i64
+    match uaccess_init::copy_to_user_partial(buf, &tmp[..take]) {
+        0 => syscall::neg(EFAULT),
+        c => c as i64,
+    }
 }
 
 fn format_ps(out: &mut [u8]) -> usize {
     let snap = with_table(|t| {
         let mut s = [(0u32, 0u32, ProcState::Unused, ""); MAX_PROCS];
         let mut n = 0usize;
-        let mut i = 1usize;
+        let mut i = 0usize;
         while i < MAX_PROCS {
             let p = &t.procs[i];
             if p.state != ProcState::Unused {

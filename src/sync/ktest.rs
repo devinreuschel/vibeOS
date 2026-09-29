@@ -486,16 +486,10 @@ static LATE_PROBE: AtomicBool = AtomicBool::new(false);
 const LATE_WAIT_MS: u64 = 2_000;
 
 /// Block on [`LATE_M`] with the wait window held, then take it and exit.
-/// IF stays off from before the lock queues the waiter until it has the
-/// mutex: a tick between the queueing and the hold would switch the
-/// waiter off while it is `Blocked`, and it would reach the hold only once
-/// the unlock woke it, which the test waits for the hold to do.
 fn late_wake_waiter() {
     LATE_RUNS.fetch_add(1, Ordering::AcqRel);
     thread_init::testing::arm_wait_window(thread_init::current_id());
-    let irq = x86::InterruptGuard::enter();
     let mut g = LATE_M.lock();
-    drop(irq);
     *g = (*g).wrapping_add(1);
 }
 
@@ -553,9 +547,7 @@ pub(crate) fn test_late_wake_after_exit() -> Outcome {
     let Some(cpu1) = crate::ktest::cpu_remote(1) else {
         return Outcome::Fail("no cpu1");
     };
-    if !late_wait(|| {
-        cpu1.wake_inbox.load(Ordering::Acquire) == 0 && cpu1.runq_len.load(Ordering::Relaxed) == 0
-    }) {
+    if !late_wait(|| cpu1.wake_inbox.is_empty() && cpu1.runq_len.load(Ordering::Relaxed) == 0) {
         return Outcome::Fail("cpu1 did not take the wake");
     }
     if let Err(e) = thread_init::spawn_on("late-probe", late_wake_probe, 1) {

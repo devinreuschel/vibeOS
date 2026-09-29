@@ -5,7 +5,6 @@
 //! `IoWaiter` path. Kick is inline for ramdisk; virtio-blk replaces it.
 
 use core::cell::UnsafeCell;
-use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::block::{
@@ -15,7 +14,6 @@ use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::wait::WaitQueue;
 
-use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
 
@@ -505,5 +503,5 @@ pub fn init() {
         clippy::let_underscore_must_use,
         reason = "a write to Serial cannot fail (DESIGN §2.5)"
     )]
-    let _ = write_marker(&mut Serial, RAM0_NAME, RAM0_SECTORS).and_then(|()| writeln!(Serial));
+    let _ = crate::serial::write_line_with(|w| write_marker(w, RAM0_NAME, RAM0_SECTORS));
 }

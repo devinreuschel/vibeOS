@@ -3,13 +3,14 @@
 //!
 //! Global IRQ-safe ring + serial sink. The printer thread is a parked
 //! stub until DESIGN §2.5's log contract (ROADMAP §19.5) gives each
-//! console one, so line atomicity on serial is still only as good as the
-//! TX lock. The ring itself is line-atomic because serial capture
-//! assembles per-CPU until `\n`, and `klog!` pushes a whole record.
+//! console one. Each record reaches serial whole, newline included, in
+//! one try-lock write. The ring itself is line-atomic because serial
+//! capture assembles per-CPU until `\n`, and `klog!` pushes a whole record.
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
+use vibeos::fmt_util::StackBuf;
 use vibeos::log::{
     COMPILE_MAX, DEFAULT_RUNTIME_MAX, DUMP_LAST, Level, Logger, MSG_CAP, RING_CAP, Record, allowed,
 };
@@ -146,26 +147,32 @@ pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
         REENTRY_DROPS.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    let mut buf = [0u8; MSG_CAP];
+    // `MSG_CAP` bytes of message and one for its newline.
+    let mut buf = [0u8; MSG_CAP + 1];
     let n = {
-        let mut w = StackBuf {
-            buf: &mut buf,
-            pos: 0,
-        };
+        let mut w = StackBuf::new(&mut buf[..MSG_CAP]);
         #[expect(
             clippy::let_underscore_must_use,
             reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter record and nothing to act on (DESIGN §2.5)"
         )]
         let _ = w.write_fmt(args);
-        w.pos
+        let n = w.len();
+        if w.as_bytes().ends_with(b"\n") {
+            n - 1
+        } else {
+            n
+        }
     };
-    let msg = &buf[..n];
+    let msg = buf.get(..n).unwrap_or(&[]);
     // `false` means the runtime filter kept it out of the ring, not a failure.
     let _ = push_record(level, msg);
-    let mut sent = crate::serial::Serial::try_write_bytes(msg);
-    if !msg.ends_with(b"\n") {
-        sent &= crate::serial::Serial::try_write_bytes(b"\n");
+    // `n <= MSG_CAP`, so the newline has its byte.
+    if let Some(b) = buf.get_mut(n) {
+        *b = b'\n';
     }
+    // The record and its newline in one try-lock write, so another CPU
+    // cannot split it (ROADMAP §10.2, F138).
+    let sent = crate::serial::Serial::try_write_bytes(buf.get(..=n).unwrap_or(&[]));
     if !sent {
         SINK_DROPS.fetch_add(1, Ordering::Relaxed);
     }
@@ -182,22 +189,6 @@ pub fn reentry_drops() -> u64 {
     REENTRY_DROPS.load(Ordering::Relaxed)
 }
 
-struct StackBuf<'a> {
-    buf: &'a mut [u8],
-    pos: usize,
-}
-
-impl fmt::Write for StackBuf<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let src = s.as_bytes();
-        let space = self.buf.len().saturating_sub(self.pos);
-        let n = src.len().min(space);
-        self.buf[self.pos..self.pos + n].copy_from_slice(&src[..n]);
-        self.pos += n;
-        Ok(())
-    }
-}
-
 /// Install the serial capture (`serial::set_capture_hook`). `_start` calls
 /// it right after `Serial::init`, before the first marker, so the ring
 /// holds every boot line (DESIGN §1.2).
@@ -205,8 +196,8 @@ pub fn init() {
     crate::serial::set_capture_hook(capture_serial);
 }
 
-/// Assemble COM1 bytes into records so boot `marker!` / `writeln!(Serial)` is captured
-/// before a framebuffer exists. Caller holds IRQs off (`Serial::write_bytes`
+/// Assemble COM1 bytes into records so boot `marker!` / `writeln!(Serial, ..)` is captured
+/// before a framebuffer exists. Caller holds IRQs off (`Serial::write_line`
 /// / `write_fmt`); `STAGE` is CPU-local and must not outlive that.
 pub fn capture_serial(bytes: &[u8]) {
     if crate::serial::raw::HALTING.load(Ordering::Acquire) || is_emitting() {

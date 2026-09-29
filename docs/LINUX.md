@@ -56,6 +56,7 @@ and each case that reaches the difference is on an expected-failure list citing 
 | `no-vsyscall` | the legacy x86_64 vsyscall page at `0xffffffffff600000` | mapped execute-only by default (`vsyscall=xonly`), with a `[vsyscall]` line in `/proc/<pid>/maps` | not mapped, as on Linux booted with `vsyscall=none`: a call there gets `SIGSEGV`, and `maps` has no `[vsyscall]` line | only binaries linked against glibc before 2.14 call it, and it would put a fixed, user-reachable address in the kernel half | here | `CONFIG_LEGACY_VSYSCALL_NONE=y` |
 | `no-compat-cs` | the x86_64 compat code selector `0x23` (`__USER32_CS`): a far transfer, `iretq`, or `rt_sigreturn` to it | runs 32-bit code; the descriptor is in every CPU's GDT whatever the kernel's configuration | `SIGSEGV`: GDT slot `0x20` is null | 32-bit user code is a non-goal | ROADMAP Non-goals; DESIGN §5.1 | — |
 | `no-modify-ldt` | `modify_ldt` | installs local descriptors, such as 16- and 32-bit code segments | returns `ENOSYS` | its users run 16- and 32-bit code, a non-goal, and an LDT is per-process descriptor state every switch would carry | ROADMAP Non-goals | `CONFIG_MODIFY_LDT_SYSCALL=n` |
+| `console-rs-escape` | bytes a process writes to the console (fds 0-2) that reach the console UART | written unchanged | each 0x1E (ASCII RS) byte prints as `?`; every other byte is unchanged | 0x1E starts every kernel line on the console UART, so no program can forge a kernel marker or panic line | DESIGN §2.6 | — |
 
 ## Native interfaces
 

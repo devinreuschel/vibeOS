@@ -16,7 +16,6 @@ use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_all
 use crate::acpi_init;
 use crate::fb_init;
 use crate::paging_init;
-use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::x86::{self, InterruptGuard};
 
@@ -305,9 +304,10 @@ pub fn init(publish: fn(Device) -> bool) {
 
 /// One `pci:` scan line.
 fn scan_line(info: &FuncInfo) -> core::fmt::Result {
-    write!(Serial, "vibeOS: pci: ")?;
-    pci::write_lspci_line(&mut Serial, info)?;
-    writeln!(Serial)
+    crate::serial::write_line_with(|w| {
+        w.write_str("vibeOS: pci: ")?;
+        pci::write_lspci_line(w, info)
+    })
 }
 
 pub fn enable_mem_master(bdf: Bdf) {
