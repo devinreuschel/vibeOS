@@ -134,7 +134,7 @@ fn identity_on_ap(_: *mut ()) {
 }
 
 pub(crate) fn test_trampoline_page() -> Outcome {
-    if !smp_init::trampoline_installed() {
+    if !trampoline_installed() {
         return Outcome::Fail("no cli opcode at 0x8000");
     }
     // INIT leaves CR0.CD|NW. Blob must AND 0x9FFFFFFF then WBINVD.
@@ -143,7 +143,11 @@ pub(crate) fn test_trampoline_page() -> Outcome {
     let mut wbinvd = false;
     let mut i = 0usize;
     while i + 1 < 0xD0 {
+        // SAFETY: the low identity window maps the trampoline page at 0x8000
+        // (`mm::paging_init::install`), and every offset read here is below
+        // `0xD0`, inside it; established here.
         let a = unsafe { p.add(i).read_volatile() };
+        // SAFETY: as above, `i + 1 < 0xD0`; established here.
         let b = unsafe { p.add(i + 1).read_volatile() };
         if a == 0x0F && b == 0x09 {
             wbinvd = true;
@@ -151,8 +155,11 @@ pub(crate) fn test_trampoline_page() -> Outcome {
         if i + 4 < 0xD0
             && a == 0x25
             && b == 0xFF
+            // SAFETY: as above, `i + 4 < 0xD0`; established here.
             && unsafe { p.add(i + 2).read_volatile() } == 0xFF
+            // SAFETY: as above, `i + 4 < 0xD0`; established here.
             && unsafe { p.add(i + 3).read_volatile() } == 0xFF
+            // SAFETY: as above, `i + 4 < 0xD0`; established here.
             && unsafe { p.add(i + 4).read_volatile() } == 0x9F
         {
             and_cdnw = true;
@@ -172,9 +179,9 @@ pub(crate) fn test_failed_ap_cleanup() -> Outcome {
     // First-fit KVA may map a fresh PT page on the first IST/stack wave.
     // unmap_4k does not return that PT. Warm up, then the measured wave
     // must restore the frame count (ROADMAP failed-AP exit gate).
-    smp_init::exercise_fail_cleanup();
+    exercise_fail_cleanup();
     let n0 = quiescent_free_frames();
-    smp_init::exercise_fail_cleanup();
+    exercise_fail_cleanup();
     let n1 = quiescent_free_frames();
     if n0 != n1 {
         crate::marker!("vibeOS: ktest:   frames {n0} -> {n1}");
@@ -256,4 +263,21 @@ pub(crate) fn percpu_remote_view() -> Outcome {
         return Outcome::Fail("ticks did not advance with IF on");
     }
     Outcome::Ok
+}
+
+// ------------------ hooks ------------------
+
+/// Allocate the same resources as bring-up, then take the timeout free
+/// path. Frame count must return to baseline (injectable fault).
+pub fn exercise_fail_cleanup() {
+    if let Some(a) = smp_init::alloc_ap_resources(0xFE, 0xFE, false) {
+        smp_init::free_ap_resources(a, false);
+    }
+}
+
+pub fn trampoline_installed() -> bool {
+    // SAFETY: the low identity window maps the trampoline page at its
+    // physical address (`mm::paging_init::install`), and `smp_init::init`
+    // wrote it before any test runs; established here.
+    unsafe { smp_init::tramp_page().read_volatile() == 0xFA }
 }

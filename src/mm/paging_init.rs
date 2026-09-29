@@ -28,7 +28,7 @@ use vibeos::paging::{
 };
 use vibeos::pmm::Frames;
 
-use crate::boot::BootInfo;
+use crate::boot::{self, BootInfo};
 use crate::pmm_init;
 use crate::sync_init::{SpinMutex, SpinMutexGuard};
 use crate::x86;
@@ -71,6 +71,9 @@ fn sym_addr(sym: &u8) -> u64 {
 /// same single-CPU safety story applies (DESIGN §7.7 upgrade in phase 4).
 struct BuddyFrames;
 
+// SAFETY: `FrameAlloc`'s contract; the buddy hands out order-0 frames, and
+// every buddy frame lies inside the physmap at `HHDM_BASE`, mapped writable
+// (invariant I14, established at `mm::pmm_init::init`).
 unsafe impl FrameAlloc for BuddyFrames {
     fn alloc_frame(&mut self) -> Option<Frames> {
         let f = pmm_init::with_buddy(|b| b.alloc(0))?;
@@ -82,23 +85,15 @@ unsafe impl FrameAlloc for BuddyFrames {
 /// Table pages [`BuddyFrames`] has handed the kernel mapper. A kernel table
 /// page is never freed (`Mapper` frees table pages only in
 /// `free_user_half`), so this only grows.
-static TABLE_PAGES: AtomicUsize = AtomicUsize::new(0);
-
-/// Page-table pages the kernel mapper has taken from the buddy since boot,
-/// the PML4 included. They stay in the kernel tables for good: a mapping
-/// that reaches a 2 MiB span of KVA or heap no earlier mapping reached
-/// takes one, and its unmap leaves it in place.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn table_pages() -> usize {
-    TABLE_PAGES.load(Ordering::Relaxed)
-}
+pub(super) static TABLE_PAGES: AtomicUsize = AtomicUsize::new(0);
 
 // ------------------ MMIO window (ioremap) ------------------
 
 /// Page-table + ioremap lock. Rank PT. Taken only by [`current_mapper`];
 /// callers that already hold its guard pass it to the `_locked`
 /// map/unmap helpers and drop it before a shootdown wait.
-static PT: SpinMutex<IoremapWindow> = SpinMutex::with_rank(IoremapWindow::new(), RANK_PT);
+pub(super) static PT: SpinMutex<IoremapWindow> =
+    SpinMutex::with_rank(IoremapWindow::new(), RANK_PT);
 
 /// A `Mapper` over the kernel PML4 together with the PT lock that guards
 /// it. Built only by [`current_mapper`]; PT is held for the guard's life
@@ -134,14 +129,6 @@ pub fn with_pt<R>(f: impl FnOnce(&mut MapperGuard) -> R) -> R {
     f(&mut g)
 }
 
-/// Whether PT is free right now: held by no CPU, this one included. It
-/// reads the lock rather than trying it, since a `try_lock` of a rank this
-/// CPU holds fails the rank check.
-#[cfg(feature = "kernel_tests")]
-pub(crate) fn pt_lock_free() -> bool {
-    !PT.is_locked()
-}
-
 static MAP_END: AtomicU64 = AtomicU64::new(0);
 static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
 
@@ -174,6 +161,12 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
         let head = phys.as_u64() & (PAGE_SIZE_4K - 1);
         let round_len = paging_align_up(head + len, PAGE_SIZE_4K);
         let mut alloc = BuddyFrames;
+        // SAFETY: `Mapper::map_range`'s contract; the caller vouches that
+        // `[phys, phys + len)` is device MMIO no cacheable alias touches
+        // (this fn's `# Safety` contract, established here, invariant I17),
+        // and `reserve` handed out VA no other mapping uses; `pt` holds the
+        // page-table lock (invariant I226, established at
+        // `mm::paging_init::current_mapper`).
         unsafe {
             pt.map_range(
                 base_va,
@@ -203,6 +196,11 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
 /// # Safety
 /// Only sound after `install`; the physmap must cover `[phys, phys+len)`.
 pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapError> {
+    // SAFETY: `Mapper::patch_physmap_uc`'s contract; `install` has run, so
+    // the kernel root `current_mapper` walks is the one the CPU uses (this
+    // fn's `# Safety` contract, established here), and the guard holds the
+    // page-table lock (invariant I226, established at
+    // `mm::paging_init::current_mapper`).
     let n = unsafe { current_mapper().patch_physmap_uc(VirtAddr(HHDM_BASE), phys, len) }?;
     let mut off: u64 = 0;
     let hhdm_end = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(len);
@@ -250,6 +248,9 @@ pub unsafe fn map_4k_locked(
     flags: PageFlags,
 ) -> Result<(), MapError> {
     let mut alloc = BuddyFrames;
+    // SAFETY: `Mapper::map_page`'s contract, which this fn's `# Safety`
+    // passes on, established here; `pt` holds the page-table lock
+    // (invariant I226, established at `mm::paging_init::current_mapper`).
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
     }
@@ -262,6 +263,8 @@ pub unsafe fn map_4k_locked(
 /// # Safety
 /// Same contract as `Mapper::map_page`. Must run after [`install`].
 pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+    // SAFETY: `map_4k_locked`'s contract, which this fn's `# Safety` passes
+    // on, established here.
     with_pt(|pt| unsafe { map_4k_locked(pt, va, pa, flags) })?;
     paging::tlb_shootdown_others(va);
     Ok(())
@@ -278,6 +281,9 @@ pub unsafe fn map_2m_locked(
     flags: PageFlags,
 ) -> Result<(), MapError> {
     let mut alloc = BuddyFrames;
+    // SAFETY: `Mapper::map_page`'s contract, which this fn's `# Safety`
+    // passes on, established here; `pt` holds the page-table lock
+    // (invariant I226, established at `mm::paging_init::current_mapper`).
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size2M, MapMode::Fresh, &mut alloc)?;
     }
@@ -290,6 +296,8 @@ pub unsafe fn map_2m_locked(
 /// # Safety
 /// Same contract as `Mapper::map_page`. Must run after [`install`].
 pub unsafe fn map_2m(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+    // SAFETY: `map_2m_locked`'s contract, which this fn's `# Safety` passes
+    // on, established here.
     with_pt(|pt| unsafe { map_2m_locked(pt, va, pa, flags) })?;
     paging::tlb_shootdown_others(va);
     Ok(())
@@ -300,7 +308,12 @@ pub unsafe fn map_2m(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(),
 /// UC-patched). Used for VGA BAR0 when the BAR outruns Limine's surface.
 ///
 /// Returns whether `phys` itself translates through the HHDM physmap.
-pub fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
+///
+/// # Safety
+/// `[phys, phys+len)` is RAM, or device memory that no other mapping
+/// reaches with another memory type (invariant I17): the leaves this maps
+/// are write-back.
+pub unsafe fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
     if len == 0 {
         return true;
     }
@@ -325,6 +338,9 @@ pub fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
         let rem = end - p;
         let try_2m = p & (PAGE_SIZE_2M - 1) == 0 && rem >= PAGE_SIZE_2M;
         if try_2m {
+            // SAFETY: `map_2m`'s contract; `[p, p + 2 MiB)` lies in the range
+            // this fn's `# Safety` contract vouches for (invariant I17,
+            // established here), and its physmap VA was unmapped just now.
             match unsafe { map_2m(va, PhysAddr(p), flags) } {
                 Ok(()) => {
                     p += PAGE_SIZE_2M;
@@ -341,6 +357,10 @@ pub fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
                 | Err(MapError::NonCanonical) => {}
             }
         }
+        // SAFETY: `map_4k`'s contract; `[p, p + 4 KiB)` lies in the range
+        // this fn's `# Safety` contract vouches for (invariant I17,
+        // established here), and a present leaf there returns
+        // `AlreadyMapped` rather than being replaced.
         match unsafe { map_4k(va, PhysAddr(p), flags) } {
             Ok(()) | Err(MapError::AlreadyMapped) => p += PAGE_SIZE_4K,
             Err(MapError::Misaligned)
@@ -358,26 +378,14 @@ pub fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
 /// # Safety
 /// Caller will not use `va` until shootdown.
 pub unsafe fn unmap_4k_locked(pt: &mut MapperGuard, va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
+    // SAFETY: `Mapper::unmap_page`'s contract; this fn runs the local
+    // `invlpg`, and the caller shoots the other CPUs down before it uses
+    // `va` (this fn's `# Safety` contract, established here).
     let r = unsafe { pt.unmap_page(va) }?;
     x86::invlpg(va.as_u64());
     Some(r)
 }
 
-/// Unmap one leaf, drop PT, then shootdown. Returns the frame.
-///
-/// # Safety
-/// Caller is responsible for not unmapping a page the CPU is using
-/// (stack, code, the heap it is currently allocating from, …).
-#[allow(dead_code)]
-pub unsafe fn unmap_4k(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
-    let r = with_pt(|pt| unsafe { unmap_4k_locked(pt, va) });
-    if r.is_some() {
-        paging::tlb_shootdown_others(va);
-    }
-    r
-}
-
-#[allow(dead_code)]
 pub fn translate(va: VirtAddr) -> Option<(PhysAddr, PageSize, PageFlags)> {
     current_mapper().translate(va)
 }
@@ -395,17 +403,22 @@ pub fn assert_unmapped(start: VirtAddr, end: VirtAddr) {
 }
 
 /// Range dump of the live tables. Coalesces adjacent leaves (ROADMAP §1.7).
-pub fn dump_ranges_to(w: &mut impl Write) {
+/// Returns the first write error; the writes after it are skipped.
+pub fn dump_ranges_to(w: &mut impl Write) -> core::fmt::Result {
     {
         let mapper = current_mapper();
         let mut n = 0usize;
+        let mut res = Ok(());
         let mut visit = |va: u64, len: u64, flags: PageFlags, size: PageSize| {
             n += 1;
+            if res.is_err() {
+                return;
+            }
             let sz = match size {
                 PageSize::Size4K => "4k",
                 PageSize::Size2M => "2m",
             };
-            let _ = writeln!(
+            res = writeln!(
                 w,
                 "vibeOS: pt: {va:#x}..{:#x} {sz} flags {:#x}",
                 va + len,
@@ -418,7 +431,8 @@ pub fn dump_ranges_to(w: &mut impl Write) {
             VirtAddr(u64::MAX),
             &mut visit,
         );
-        let _ = writeln!(w, "vibeOS: pt: {n} ranges");
+        res?;
+        writeln!(w, "vibeOS: pt: {n} ranges")
     }
 }
 
@@ -448,26 +462,37 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
 
     // Allocate + zero the fresh PML4. Its token moves into the kernel
     // mapper for good: the kernel PML4 is never freed.
-    let root = PhysAddr(
-        alloc
-            .alloc_frame()
-            .expect("pmm out of frames while allocating PML4")
-            .into_entry(),
-    );
+    let Some(root) = alloc.alloc_frame() else {
+        boot::halt_with("vibeOS: paging: no frame for the PML4");
+    };
+    let root = PhysAddr(root.into_entry());
     let hhdm_ptr = root.as_u64().wrapping_add(HHDM_BASE) as *mut u64;
     for i in 0..paging::PTES_PER_TABLE {
+        // SAFETY: `root` is the order-0 buddy frame above, which Limine's
+        // HHDM maps writable at `HHDM_BASE` (invariant I14, established at
+        // `mm::pmm_init::init`); `i < 512` words stay inside it.
         unsafe { hhdm_ptr.add(i).write_volatile(0) };
     }
+    // SAFETY: `Mapper::new`'s contract; `root` is the zeroed PML4 above,
+    // owned by the kernel for good, and `HHDM_BASE` reaches every buddy
+    // frame (invariant I14, established at `mm::pmm_init::init`). Boot is
+    // single-CPU with IRQs off (this fn's `# Safety` contract), the one
+    // case invariant I226 excepts; established here.
     let mut mapper = unsafe { Mapper::new(root, HHDM_BASE) };
 
     // ---- 1. Kernel image, per section ----
+    // SAFETY: the linker script (`linker.ld`) defines this and each `&__*`
+    // symbol below inside the kernel image, so a shared reference to its
+    // first byte is valid; established here.
     let vma_start = sym_addr(unsafe { &__kernel_vma_start });
     let text_bytes = map_kernel_section(
         &mut mapper,
         &mut alloc,
         kernel_phys_base,
         vma_start,
+        // SAFETY: a linker-defined symbol, as above; established here.
         sym_addr(unsafe { &__text_start }),
+        // SAFETY: a linker-defined symbol, as above; established here.
         sym_addr(unsafe { &__text_end }),
         paging::kernel_text_flags(),
     );
@@ -476,7 +501,9 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         &mut alloc,
         kernel_phys_base,
         vma_start,
+        // SAFETY: a linker-defined symbol, as above; established here.
         sym_addr(unsafe { &__rodata_start }),
+        // SAFETY: a linker-defined symbol, as above; established here.
         sym_addr(unsafe { &__rodata_end }),
         paging::kernel_rodata_flags(),
     );
@@ -488,7 +515,9 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         &mut alloc,
         kernel_phys_base,
         vma_start,
+        // SAFETY: a linker-defined symbol, as above; established here.
         sym_addr(unsafe { &__limine_requests_start }),
+        // SAFETY: a linker-defined symbol, as above; established here.
         sym_addr(unsafe { &__limine_requests_end }),
         paging::kernel_rodata_flags(),
     );
@@ -497,31 +526,41 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         &mut alloc,
         kernel_phys_base,
         vma_start,
+        // SAFETY: a linker-defined symbol, as above; established here.
         sym_addr(unsafe { &__data_start }),
+        // SAFETY: a linker-defined symbol, as above; established here.
         sym_addr(unsafe { &__data_end }),
         paging::kernel_data_flags(),
     );
 
     // ---- 2. Physmap [0, map_end) with 2 MiB pages ----
     let map_end = physmap_extent(info);
-    unsafe {
-        mapper
-            .map_range(
-                VirtAddr(HHDM_BASE),
-                PhysAddr(0),
-                map_end,
-                paging::physmap_flags(),
-                MapMode::Fresh,
-                &mut alloc,
-            )
-            .expect("physmap map_range");
+    // SAFETY: `Mapper::map_range`'s contract; the physmap maps `[0, map_end)`
+    // once, at `HHDM_BASE`, in a root nothing else maps yet (invariant I14,
+    // established here).
+    let physmap = unsafe {
+        mapper.map_range(
+            VirtAddr(HHDM_BASE),
+            PhysAddr(0),
+            map_end,
+            paging::physmap_flags(),
+            MapMode::Fresh,
+            &mut alloc,
+        )
+    };
+    if physmap.is_err() {
+        boot::halt_with("vibeOS: paging: physmap map failed");
     }
 
     // ---- 3. Low identity, 512 MiB, first 2 MiB executable ----
     // First 2 MiB: writable + executable (trampoline lives at 0x8000).
     // Rest: writable + NX. Everything with the GLOBAL bit so the TLB
     // survives CR3 reloads (DESIGN §4.3 TLB section).
-    unsafe {
+    // SAFETY: `Mapper::map_page`'s and `map_range`'s contract; the low
+    // identity window maps `[0, 512 MiB)` onto itself once, in the low half
+    // no other kernel mapping uses, for the AP trampoline (DESIGN §4.1);
+    // established here.
+    let low_id = unsafe {
         mapper
             .map_page(
                 VirtAddr(LOW_ID_BASE),
@@ -531,19 +570,24 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
                 MapMode::Fresh,
                 &mut alloc,
             )
-            .expect("low identity first 2 MiB");
-        mapper
-            .map_range(
-                VirtAddr(LOW_ID_BASE + PAGE_SIZE_2M),
-                PhysAddr(LOW_ID_BASE + PAGE_SIZE_2M),
-                LOW_ID_SIZE - PAGE_SIZE_2M,
-                PageFlags(
-                    PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NX,
-                ),
-                MapMode::Fresh,
-                &mut alloc,
-            )
-            .expect("low identity tail");
+            .and_then(|()| {
+                mapper.map_range(
+                    VirtAddr(LOW_ID_BASE + PAGE_SIZE_2M),
+                    PhysAddr(LOW_ID_BASE + PAGE_SIZE_2M),
+                    LOW_ID_SIZE - PAGE_SIZE_2M,
+                    PageFlags(
+                        PageFlags::PRESENT
+                            | PageFlags::WRITABLE
+                            | PageFlags::GLOBAL
+                            | PageFlags::NX,
+                    ),
+                    MapMode::Fresh,
+                    &mut alloc,
+                )
+            })
+    };
+    if low_id.is_err() {
+        boot::halt_with("vibeOS: paging: low identity map failed");
     }
 
     // ---- 4. Bootloader stack window ----
@@ -553,6 +597,9 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // active tables so the stack VA stays live across `mov cr3`.
     let rsp = x86::read_rsp();
     let duplicated = if mapper.translate(VirtAddr(rsp)).is_none() {
+        // SAFETY: `duplicate_pml4_entry_from_current`'s contract; boot has
+        // not yet written CR3, so Limine's tables are still installed
+        // (this fn's `# Safety` contract, established here).
         unsafe { duplicate_pml4_entry_from_current(&mut mapper, VirtAddr(rsp)) };
         true
     } else {
@@ -566,11 +613,18 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // too: our own kernel .rodata / .data / .bss all carry NX.
     let efer = x86::rdmsr(x86::IA32_EFER);
     if efer & x86::EFER_NXE == 0 {
+        // SAFETY: setting EFER.NXE only enables the NX bit in PTEs; every
+        // table live now (Limine's) and the new ones treat NX as intended,
+        // established here.
         unsafe { x86::wrmsr(x86::IA32_EFER, efer | x86::EFER_NXE) };
     }
 
     // ---- 6. Install ----
     KERNEL_CR3.store(mapper.root().as_u64(), Ordering::Release);
+    // SAFETY: the new root maps the kernel image, the physmap (so every
+    // pointer computed as `phys + HHDM_BASE` stays valid, invariant I14),
+    // the low identity window and the boot stack, so execution continues
+    // across the switch; established here.
     unsafe { x86::write_cr3(mapper.root().as_u64()) };
     MAP_END.store(map_end, Ordering::Relaxed);
 
@@ -626,17 +680,22 @@ fn map_kernel_section(
     }
     let len = end - start;
     let phys = kernel_phys_base + (start - vma_start);
-    unsafe {
-        mapper
-            .map_range(
-                VirtAddr(start),
-                PhysAddr(phys),
-                len,
-                flags,
-                MapMode::Fresh,
-                alloc,
-            )
-            .expect("kernel section map_range");
+    // SAFETY: `Mapper::map_range`'s contract; `[phys, phys + len)` is the
+    // section's own load address in the kernel image, mapped once at its
+    // link VA in a root nothing else maps yet (`install`'s contract);
+    // established here.
+    let r = unsafe {
+        mapper.map_range(
+            VirtAddr(start),
+            PhysAddr(phys),
+            len,
+            flags,
+            MapMode::Fresh,
+            alloc,
+        )
+    };
+    if r.is_err() {
+        boot::halt_with("vibeOS: paging: kernel section map failed");
     }
     len
 }
@@ -669,10 +728,17 @@ fn physmap_extent(info: &BootInfo) -> u64 {
 ///
 /// # Safety
 /// Only sound during boot, with Limine's tables still installed as CR3.
+#[allow(
+    clippy::panic,
+    reason = "boot protocol invariant (DESIGN §3.3): Limine's PML4 maps the boot stack"
+)]
 unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
     let cr3 = x86::read_cr3() & paging::PTE_ADDR_MASK;
     let src = cr3.wrapping_add(HHDM_BASE) as *const u64;
     let idx = va.index(4);
+    // SAFETY: CR3 still holds Limine's PML4 (this fn's `# Safety` contract,
+    // established here), which Limine's HHDM maps at `HHDM_BASE`, and
+    // `idx < 512`.
     let entry = unsafe { src.add(idx).read_volatile() };
     if entry & PageFlags::PRESENT == 0 {
         // Nothing to duplicate; the switch would fault anyway. Better to
@@ -684,6 +750,9 @@ unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
         );
     }
     let dst = mapper.root().as_u64().wrapping_add(HHDM_BASE) as *mut u64;
+    // SAFETY: `mapper`'s root is the new PML4, a buddy frame reached at
+    // `HHDM_BASE` (`Mapper::new`'s contract, invariant I14), and `idx < 512`;
+    // established here.
     let existing = unsafe { dst.add(idx).read_volatile() };
     assert!(
         existing & PageFlags::PRESENT == 0,
@@ -692,6 +761,9 @@ unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
         va.as_u64(),
         idx,
     );
+    // SAFETY: as above, `dst` is the new PML4, and boot is single-CPU, the
+    // case invariant I226 excepts; the assert kept the slot empty,
+    // established here.
     unsafe { dst.add(idx).write_volatile(entry) };
 }
 

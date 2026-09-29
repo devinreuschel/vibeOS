@@ -24,8 +24,7 @@ pub fn meminfo_to(w: &mut impl Write) {
         clippy::let_underscore_must_use,
         reason = "a diagnostic line to Serial or the console carries no failure anyone could act on (DESIGN §2.5)"
     )]
-    let _ = meminfo_lines(w);
-    paging_init::dump_ranges_to(w);
+    let _ = meminfo_lines(w).and_then(|()| paging_init::dump_ranges_to(w));
 }
 
 fn meminfo_lines(w: &mut impl Write) -> fmt::Result {

@@ -39,9 +39,6 @@ SEAM = "crates/core/src/atomic.rs"
 # sweep (ROADMAP §10.1, C-ATOMICS) converts them; `--failing` regenerates it.
 PENDING: tuple[str, ...] = (
     "crates/core/src/kalloc.rs",
-    "crates/core/src/mm/paging.rs",
-    "crates/core/src/mm/pmm.rs",
-    "crates/core/src/smp/per_cpu.rs",
     "crates/core/src/time/mod.rs",
 )
 

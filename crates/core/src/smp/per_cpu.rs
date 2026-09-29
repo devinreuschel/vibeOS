@@ -10,7 +10,8 @@
 //! a separate per-CPU array whose fields are all atomics (DESIGN §7.5).
 
 use core::mem::offset_of;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+
+use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::apic::TimerMode;
 use crate::desc::Tss;
@@ -100,9 +101,10 @@ pub struct PerCpuRemote {
     pub as_cr3: AtomicU64,
 }
 
-impl PerCpuRemote {
-    pub const fn new() -> Self {
-        Self {
+/// `PerCpuRemote`'s initial value, one body for both constructors.
+macro_rules! remote_new {
+    () => {
+        PerCpuRemote {
             ticks: AtomicU64::new(0),
             switches: AtomicU64::new(0),
             runq_len: AtomicUsize::new(0),
@@ -111,6 +113,20 @@ impl PerCpuRemote {
             apic_id: AtomicU32::new(0),
             as_cr3: AtomicU64::new(0),
         }
+    };
+}
+
+impl PerCpuRemote {
+    /// `const` outside `cfg(loom)`, whose atomics have no `const fn new`
+    /// (C-ATOMICS).
+    #[cfg(not(loom))]
+    pub const fn new() -> Self {
+        remote_new!()
+    }
+
+    #[cfg(loom)]
+    pub fn new() -> Self {
+        remote_new!()
     }
 }
 
@@ -126,7 +142,9 @@ impl Default for PerCpuRemote {
 pub struct PerCpu {
     pub self_ptr: *mut PerCpu,
     pub cpu_id: u32,
-    pub irq_nest: AtomicU32,
+    /// `core`'s atomic in every configuration: the offset assertions below
+    /// fix its layout, so it stays out of every loom model (C-ATOMICS).
+    pub irq_nest: crate::atomic::statics::AtomicU32,
     /// `ThreadId::NONE` until bootstrap / AP idle is installed.
     pub idle_id: ThreadId,
     pub current: *mut Tcb,
@@ -177,17 +195,18 @@ pub struct PerCpu {
     pub remote: &'static PerCpuRemote,
 }
 
-// SAFETY: invariant I120 and invariant I21, established at
+// SAFETY: invariant I120 and invariant I21, established by the view split
+// at `smp::per_cpu::PerCpuRemote` and, in the kernel, by
 // `per_cpu_init::cpu`, `per_cpu_init::with_current` and
-// `per_cpu_init::with_cpu`: `per_cpu_init::CPUS` hands a `PerCpu` to its
+// `per_cpu_init::with_cpu`: the kernel's `CPUS` hands a `PerCpu` to its
 // owner CPU alone (`with_current`, busy flag, IF=0), or through the
 // `unsafe fn` `with_cpu` to the BSP while that CPU is not running; other
 // CPUs read only the atomic `PerCpuRemote` that `remote` points to. The raw
 // pointers it holds are owner-only and never dereferenced by another CPU.
 unsafe impl Send for PerCpu {}
 // SAFETY: as for `Send` above: invariant I120 and invariant I21,
-// established at `per_cpu_init::cpu`, `per_cpu_init::with_current` and
-// `per_cpu_init::with_cpu`.
+// established at `smp::per_cpu::PerCpuRemote` and the kernel's
+// `per_cpu_init::with_current` and `per_cpu_init::with_cpu`.
 unsafe impl Sync for PerCpu {}
 
 impl PerCpu {
@@ -195,7 +214,7 @@ impl PerCpu {
         Self {
             self_ptr: core::ptr::null_mut(),
             cpu_id: 0,
-            irq_nest: AtomicU32::new(0),
+            irq_nest: crate::atomic::statics::AtomicU32::new(0),
             idle_id: ThreadId::NONE,
             current: core::ptr::null_mut(),
             idle: core::ptr::null_mut(),
@@ -232,13 +251,15 @@ impl PerCpu {
 const _: () = {
     assert!(offset_of!(PerCpu, self_ptr) == 0);
     assert!(offset_of!(PerCpu, cpu_id) == 8);
+    assert!(offset_of!(PerCpu, irq_nest) == 12);
     assert!(offset_of!(PerCpu, idle_id) == 16);
     assert!(offset_of!(PerCpu, current) == 24);
     assert!(offset_of!(PerCpu, idle) == 32);
     assert!(offset_of!(PerCpu, ready_head) == 40);
 };
 
-#[cfg(test)]
+// The tests build `static` views, which need the `const` constructor.
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
 

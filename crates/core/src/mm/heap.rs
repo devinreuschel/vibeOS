@@ -77,8 +77,9 @@ impl Heap {
     /// is the hard ceiling `extend` will not cross.
     ///
     /// # Safety
-    /// `[base, base+mapped)` must be writable, unused, and not overlap
-    /// any live allocation. `base` 16-aligned.
+    /// `[base, base+mapped)` must be mapped writable, unused, and not
+    /// overlap any live allocation, and from here on only this heap writes
+    /// its free blocks (invariant I225). `base` 16-aligned.
     pub unsafe fn init(&mut self, base: usize, mapped: usize, cap: usize) {
         assert!(base.is_multiple_of(core::mem::align_of::<FreeBlock>()));
         assert!(mapped >= MIN_SPLIT);
@@ -88,6 +89,9 @@ impl Heap {
         self.cap = cap;
         self.free_head = None;
         self.free_bytes = 0;
+        // SAFETY: `insert_free`'s contract; `[base, base + mapped)` is
+        // mapped, writable and unused by this fn's `# Safety` contract
+        // (invariant I225, established here).
         unsafe { self.insert_free(base as *mut u8, mapped) };
     }
 
@@ -126,13 +130,16 @@ impl Heap {
     /// (and coalesced if the previous tail was free).
     ///
     /// # Safety
-    /// The new span must be writable and unused.
+    /// The new span must be mapped writable and unused (invariant I225).
     pub unsafe fn extend(&mut self, new_mapped: usize) {
         assert!(new_mapped > self.mapped);
         assert!(new_mapped <= self.cap);
         let add = new_mapped - self.mapped;
         let start = self.base + self.mapped;
         self.mapped = new_mapped;
+        // SAFETY: `insert_free`'s contract; the new span is mapped,
+        // writable and unused by this fn's `# Safety` contract (invariant
+        // I225, established here).
         unsafe { self.insert_free(start as *mut u8, add) };
     }
 
@@ -147,14 +154,23 @@ impl Heap {
         let mut cur = self.free_head;
         while let Some(node) = cur {
             let block = node.as_ptr();
+            // SAFETY: `block` is a node on the free list, in mapped memory
+            // only the heap writes (invariant I225, established at `mm::heap::Heap::init`).
             let size = unsafe { (*block).size };
             if size >= need {
+                // SAFETY: as above, `block` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
                 let next = unsafe { (*block).next };
-                unlink(&mut self.free_head, prev, next);
+                // SAFETY: `unlink`'s contract; `prev` is `block`'s
+                // predecessor on the free list, or `None` at the head
+                // (invariant I225, established at `mm::heap::Heap::init`).
+                unsafe { unlink(&mut self.free_head, prev, next) };
                 self.free_bytes -= size;
+                // SAFETY: `carve`'s contract; `block` was just unlinked and
+                // is `size` bytes the heap owns (invariant I225, established at `mm::heap::Heap::init`).
                 return unsafe { self.carve(block as *mut u8, size, layout) };
             }
             prev = cur;
+            // SAFETY: as above, `block` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
             cur = unsafe { (*block).next };
         }
         ptr::null_mut()
@@ -166,7 +182,12 @@ impl Heap {
         if layout.size() == 0 || ptr.is_null() {
             return;
         }
+        // SAFETY: `recover`'s contract; `ptr` is a live allocation from
+        // this heap by this fn's `# Safety` contract, established here.
         let (start, size) = unsafe { recover(ptr) };
+        // SAFETY: `insert_free`'s contract; the caller gives the block back
+        // and never uses it again (this fn's `# Safety` contract,
+        // established here), so it is unused heap memory (invariant I225).
         unsafe { self.insert_free(start, size) };
     }
 
@@ -176,17 +197,31 @@ impl Heap {
     ///
     /// # Safety
     /// `ptr` came from `alloc` with `layout`; the returned pointer replaces it.
+    /// `new_size`, rounded up to `layout.align()`, does not overflow `isize`
+    /// (`GlobalAlloc::realloc`'s rule).
     pub unsafe fn realloc(&mut self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if ptr.is_null() {
+            // SAFETY: `layout.align()` is a power of two (it came from a
+            // `Layout`), and this fn's `# Safety` contract bounds `new_size`
+            // and has the caller treat the result as that layout,
+            // established here.
             return unsafe {
                 self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()))
             };
         }
         if new_size == 0 {
+            // SAFETY: `dealloc`'s contract; `ptr` came from `alloc` with
+            // `layout` and the caller drops it for the result (this fn's
+            // `# Safety` contract, established here).
             unsafe { self.dealloc(ptr, layout) };
             return dangling(layout.align());
         }
+        // SAFETY: `layout.align()` is a power of two (it came from a
+        // `Layout`), and this fn's `# Safety` contract bounds `new_size`,
+        // established here.
         let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+        // SAFETY: `recover`'s contract; `ptr` is a live allocation from this
+        // heap by this fn's `# Safety` contract, established here.
         let (start, old_block) = unsafe { recover(ptr) };
         let user_off = ptr as usize - start as usize;
         let old_payload_cap = old_block - user_off;
@@ -195,6 +230,10 @@ impl Heap {
             // worth a free block of its own.
             let used = align_up(user_off + new_size, HEADER_ALIGN);
             if old_block - used >= MIN_SPLIT {
+                // SAFETY: `start` is the live block `recover` found, and
+                // its tail past `used` holds no payload byte, so it is
+                // unused heap memory (invariant I225, established at
+                // `mm::heap::Heap::init`).
                 unsafe {
                     self.resize_block(start, used);
                     self.insert_free((start as usize + used) as *mut u8, old_block - used);
@@ -202,12 +241,18 @@ impl Heap {
             }
             return ptr;
         }
+        // SAFETY: `alloc`'s contract; the new block replaces `ptr` as a
+        // `new_layout` allocation, established here.
         let new_ptr = unsafe { self.alloc(new_layout) };
         if new_ptr.is_null() {
             return ptr::null_mut();
         }
         let copy = layout.size().min(new_size);
+        // SAFETY: both blocks are live and distinct and hold at least
+        // `copy` bytes, established here.
         unsafe { ptr::copy_nonoverlapping(ptr, new_ptr, copy) };
+        // SAFETY: `dealloc`'s contract; `ptr` came from `alloc` with
+        // `layout` and `new_ptr` replaces it, established here.
         unsafe { self.dealloc(ptr, layout) };
         new_ptr
     }
@@ -215,6 +260,8 @@ impl Heap {
     /// # Safety
     /// `start` is a live block header this heap owns.
     unsafe fn resize_block(&mut self, start: *mut u8, new_size: usize) {
+        // SAFETY: `start` is a live block header this heap owns, by this
+        // fn's `# Safety` contract, established here.
         unsafe { (start as *mut usize).write(new_size) };
     }
 
@@ -233,13 +280,23 @@ impl Heap {
             back >= block as usize + HEADER,
             "heap: carve backpointer in its header"
         );
+        // SAFETY: the asserts above put `back` inside `block`, which this
+        // fn's `# Safety` contract hands over (invariant I225, established
+        // here).
         unsafe { (back as *mut usize).write(user - block as usize) };
 
         let used = align_up(user + layout.size() - block as usize, HEADER_ALIGN);
         if size - used >= MIN_SPLIT {
+            // SAFETY: `block`'s header is the heap's (invariant I225,
+            // established here).
             unsafe { (block as *mut usize).write(used) };
+            // SAFETY: `insert_free`'s contract; the tail past `used` is
+            // unused memory of the block this fn owns (invariant I225,
+            // established here).
             unsafe { self.insert_free((block as usize + used) as *mut u8, size - used) };
         } else {
+            // SAFETY: `block`'s header is the heap's (invariant I225,
+            // established here).
             unsafe { (block as *mut usize).write(size) };
         }
         user as *mut u8
@@ -260,6 +317,7 @@ impl Heap {
         let mut cur = self.free_head;
         while let Some(node) = cur {
             let nstart = node.as_ptr() as usize;
+            // SAFETY: `node` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
             let nsize = unsafe { (*node.as_ptr()).size };
             let nend = nstart + nsize;
             assert!(
@@ -270,6 +328,7 @@ impl Heap {
                 break;
             }
             prev = cur;
+            // SAFETY: `node` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
             cur = unsafe { (*node.as_ptr()).next };
         }
 
@@ -278,6 +337,7 @@ impl Heap {
         let mut reuse_prev = false;
         if let Some(p) = prev {
             let pstart = p.as_ptr() as usize;
+            // SAFETY: `p` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
             let psize = unsafe { (*p.as_ptr()).size };
             if pstart + psize == start {
                 block_start = pstart;
@@ -289,16 +349,21 @@ impl Heap {
         if let Some(n) = cur {
             let nstart = n.as_ptr() as usize;
             if block_start + block_size == nstart {
+                // SAFETY: `n` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
                 let nsize = unsafe { (*n.as_ptr()).size };
                 block_size += nsize;
                 self.free_bytes -= nsize;
+                // SAFETY: `n` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
                 let nnext = unsafe { (*n.as_ptr()).next };
-                unlink(&mut self.free_head, prev, nnext);
+                // SAFETY: `unlink`'s contract; `prev` is `n`'s predecessor
+                // on the free list, or `None` at the head (invariant I225, established at `mm::heap::Heap::init`).
+                unsafe { unlink(&mut self.free_head, prev, nnext) };
                 cur = nnext;
             }
         }
 
         if reuse_prev && let Some(p) = prev {
+            // SAFETY: `p` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
             unsafe {
                 (*p.as_ptr()).size = block_size;
                 (*p.as_ptr()).next = cur;
@@ -308,12 +373,19 @@ impl Heap {
         }
 
         let node = block_start as *mut FreeBlock;
+        // SAFETY: `[block_start, block_start + block_size)` is unused heap
+        // memory this fn's `# Safety` contract hands over, merged with the
+        // free neighbour the loop unlinked (invariant I225, established
+        // here).
         unsafe {
             (*node).size = block_size;
             (*node).next = cur;
         }
+        // SAFETY: `node` is `ptr` or a later address in the heap window,
+        // never null, established here.
         let nn = unsafe { NonNull::new_unchecked(node) };
         if let Some(p) = prev {
+            // SAFETY: `p` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
             unsafe { (*p.as_ptr()).next = Some(nn) };
         } else {
             self.free_head = Some(nn);
@@ -332,20 +404,31 @@ fn dangling(align: usize) -> *mut u8 {
 /// `user` is a live allocation from this heap.
 unsafe fn recover(user: *mut u8) -> (*mut u8, usize) {
     let back = (user as usize - BACKPTR) as *const usize;
+    // SAFETY: `user` is a live allocation by this fn's `# Safety` contract,
+    // so `carve` wrote its back-pointer just below it, established here.
     let off = unsafe { back.read() };
     assert!(off >= HEADER + BACKPTR, "heap: bad back-pointer");
     let start = (user as usize - off) as *mut u8;
+    // SAFETY: `start` is that live block's header, established here.
     let size = unsafe { (start as *const usize).read() };
     assert!(size >= off, "heap: truncated block");
     (start, size)
 }
 
-fn unlink(
+/// Unlink the node after `prev` (or the head, for `None`) by pointing
+/// `prev` at `next`.
+///
+/// # Safety
+/// `prev`, when `Some`, is a node on the free list `head` starts, in heap
+/// memory only this heap writes (invariant I225).
+unsafe fn unlink(
     head: &mut Option<NonNull<FreeBlock>>,
     prev: Option<NonNull<FreeBlock>>,
     next: Option<NonNull<FreeBlock>>,
 ) {
     if let Some(p) = prev {
+        // SAFETY: `p` is a free-list node by this fn's `# Safety` contract
+        // (invariant I225, established here).
         unsafe { (*p.as_ptr()).next = next };
     } else {
         *head = next;
@@ -373,6 +456,9 @@ mod tests {
             let mem = vec![0u8; cap + HEADER_ALIGN];
             let base = align_up(mem.as_ptr() as usize, HEADER_ALIGN);
             let mut heap = Heap::empty();
+            // SAFETY: `init`'s contract; `mem` is `cap` bytes past `base`,
+            // 16-aligned host memory this pool owns (invariant I225,
+            // established here).
             unsafe { heap.init(base, mapped, cap) };
             Self { _mem: mem, heap }
         }
@@ -391,6 +477,9 @@ mod tests {
         let mut mem = vec![0u8; 256];
         let block = align_up(mem.as_mut_ptr() as usize, HEADER_ALIGN) as *mut u8;
         let mut heap = Heap::empty();
+        // SAFETY: breaks `carve`'s contract on purpose; its `assert!` fires
+        // before any write, and `mem` is large enough either way,
+        // established here.
         unsafe { heap.carve(block, 32, layout(64, 8)) };
     }
 
@@ -401,9 +490,13 @@ mod tests {
         assert_eq!(s0.used, 0);
         assert_eq!(s0.capacity, 64 * 1024);
         let l = layout(128, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let a = unsafe { p.heap.alloc(l) };
         assert!(!a.is_null());
         assert!(p.heap.stats().used > 0);
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(a, l) };
         assert_eq!(p.heap.stats(), s0);
     }
@@ -415,14 +508,20 @@ mod tests {
         let mut align = 1usize;
         while align <= 4096 {
             let l = layout(align, align);
+            // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until
+            // it frees it, established here.
             let a = unsafe { p.heap.alloc(l) };
             assert!(!a.is_null(), "align {align}");
             assert_eq!(a as usize % align, 0, "align {align}");
+            // SAFETY: `a` is a live allocation of `align >= 1` bytes,
+            // established here.
             unsafe { a.write(0x5A) };
             live.push((a, l));
             align *= 2;
         }
         for (a, l) in live {
+            // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this
+            // layout and is not used after, established here.
             unsafe { p.heap.dealloc(a, l) };
         }
         assert_eq!(p.heap.stats().used, 0);
@@ -433,13 +532,25 @@ mod tests {
         let mut p = Pool::new(64 * 1024, 64 * 1024);
         let small = layout(16, 8);
         let l = layout(64, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let pad = unsafe { p.heap.alloc(small) };
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let a = unsafe { p.heap.alloc(l) };
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let keep = unsafe { p.heap.alloc(l) };
         assert!(!pad.is_null() && !a.is_null() && !keep.is_null());
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(a, l) };
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let b = unsafe { p.heap.alloc(l) };
         assert_eq!(a, b, "hole between live neighbours must be first-fit");
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe {
             p.heap.dealloc(b, l);
             p.heap.dealloc(keep, l);
@@ -451,9 +562,15 @@ mod tests {
     fn alloc_free_realloc_reuses() {
         let mut p = Pool::new(64 * 1024, 64 * 1024);
         let l = layout(64, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let a = unsafe { p.heap.alloc(l) };
         assert!(!a.is_null());
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(a, l) };
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let b = unsafe { p.heap.alloc(l) };
         assert_eq!(a, b, "first-fit must reuse the just-freed block");
 
@@ -461,10 +578,16 @@ mod tests {
         // for 64 in a much larger initial heap, so the leftover split
         // may or may not leave slack; realloc to a smaller size first
         // then grow back).
+        // SAFETY: `Heap::realloc`'s contract; `b` came from `alloc` with
+        // `l`, and the result replaces it, established here.
         let c = unsafe { p.heap.realloc(b, l, 32) };
         assert_eq!(c, b);
+        // SAFETY: `Heap::realloc`'s contract; the pointer came from `alloc` or the last
+        // `realloc` with this layout, and the result replaces it, established here.
         let d = unsafe { p.heap.realloc(c, layout(32, 8), 48) };
         assert!(!d.is_null());
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(d, layout(48, 8)) };
     }
 
@@ -472,12 +595,18 @@ mod tests {
     fn oom_returns_null_without_corruption() {
         let mut p = Pool::new(4096, 4096);
         let huge = layout(1024 * 1024, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let n = unsafe { p.heap.alloc(huge) };
         assert!(n.is_null());
         // Still able to hand out a small block.
         let l = layout(16, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let a = unsafe { p.heap.alloc(l) };
         assert!(!a.is_null());
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(a, l) };
         assert_eq!(p.heap.stats().used, 0);
     }
@@ -486,11 +615,19 @@ mod tests {
     fn extend_makes_room() {
         let mut p = Pool::new(4096, 16 * 4096);
         let big = layout(6000, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         assert!(unsafe { p.heap.alloc(big) }.is_null());
+        // SAFETY: `Heap::extend`'s contract; `Pool::new` backs all of `cap` with host memory
+        // the heap owns (invariant I225, established here).
         unsafe { p.heap.extend(3 * 4096) };
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let a = unsafe { p.heap.alloc(big) };
         assert!(!a.is_null());
         assert!(p.heap.mapped() >= 3 * 4096);
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(a, big) };
     }
 
@@ -498,17 +635,33 @@ mod tests {
     fn coalesce_after_freeing_neighbours() {
         let mut p = Pool::new(32 * 1024, 32 * 1024);
         let l = layout(128, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let a = unsafe { p.heap.alloc(l) };
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let b = unsafe { p.heap.alloc(l) };
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let c = unsafe { p.heap.alloc(l) };
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(a, l) };
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(c, l) };
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(b, l) };
         // One coalesced free region: a request almost the size of the
         // whole heap must succeed.
         let big = layout(16 * 1024, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let d = unsafe { p.heap.alloc(big) };
         assert!(!d.is_null(), "coalesce failed; 16KiB alloc missed");
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(d, big) };
     }
 
@@ -516,9 +669,13 @@ mod tests {
     fn zst_is_non_null_and_noop_free() {
         let mut p = Pool::new(4096, 4096);
         let l = layout(0, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let a = unsafe { p.heap.alloc(l) };
         assert!(!a.is_null());
         assert_eq!(p.heap.stats().used, 0);
+        // SAFETY: `Heap::dealloc`'s contract; each pointer came from `alloc` with this layout
+        // and is not used after, established here.
         unsafe { p.heap.dealloc(a, l) };
     }
 
@@ -526,9 +683,15 @@ mod tests {
     fn double_free_panics() {
         let mut p = Pool::new(4096, 4096);
         let l = layout(32, 8);
+        // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
+        // frees it, established here.
         let a = unsafe { p.heap.alloc(l) };
+        // SAFETY: `dealloc`'s contract; `a` came from `alloc` with `l`,
+        // established here.
         unsafe { p.heap.dealloc(a, l) };
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: frees `a` twice on purpose; `insert_free` finds the
+            // overlap and panics before it writes, established here.
             unsafe { p.heap.dealloc(a, l) };
         }));
         assert!(res.is_err(), "double free must panic");
