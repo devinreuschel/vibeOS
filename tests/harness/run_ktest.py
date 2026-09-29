@@ -24,8 +24,10 @@ from tests.harness.harness import (
     check_ktest_output,
     contains_panic,
     default_iso,
+    effective_accel_name,
     env_config,
     env_flag,
+    expected_lapic_mode,
     ktest_devices,
     ktest_lines,
     ktest_summary,
@@ -264,6 +266,52 @@ def ran(lines: Iterable[str], name: str) -> bool:
 # `block_persist` writes a pattern the persist reboot rereads (DESIGN §8.2).
 PERSIST_TEST = "block_persist"
 
+# DESIGN §2.6's line when CPUID.80000007H:EDX[8] is clear, and the results
+# marker that records whether a boot that asked for the bit got it (L1194).
+INVTSC_ABSENT = "vibeOS: time: invariant tsc absent"
+INVTSC_MARKER = "invariant_tsc"
+LAPIC_TIMER_PREFIX = "vibeOS: time: lapic_timer ok ("
+
+
+def _wants_invtsc(cpu: str) -> bool:
+    """The `-cpu` string asks QEMU for invariant TSC (`+invtsc` or `invtsc=on`)."""
+    parts = [p.strip() for p in cpu.split(",")]
+    return "+invtsc" in parts or "invtsc=on" in parts
+
+
+def _hpet_on(cfg: QemuConfig) -> bool:
+    """False when the config, or a `-machine` value in its extra args, turns HPET off."""
+    if not cfg.hpet:
+        return False
+    for i, arg in enumerate(cfg.extra[:-1]):
+        if arg == "-machine" and "hpet=off" in cfg.extra[i + 1].split(","):
+            return False
+    return True
+
+
+def check_boot_cpu(lines: list[str], cfg: QemuConfig) -> None:
+    """The boot's timer and TSC match its CPU string (ROADMAP §10.1, F078).
+
+    When `cfg.cpu` asks for invariant TSC, records the `invariant_tsc` marker
+    and raises on DESIGN §2.6's absent line (L1194). Then requires the
+    `lapic_timer` mode `run_e2e.py`'s boot contract expects of the same
+    CPU, HPET and accelerator (L1197): `tsc-deadline` under KVM `-cpu max`,
+    `periodic` under TCG or `-tsc-deadline`, `pit` with HPET off.
+    """
+    if _wants_invtsc(cfg.cpu):
+        absent = INVTSC_ABSENT in lines
+        results.current().record("marker", INVTSC_MARKER, "failed" if absent else "passed")
+        if absent:
+            raise HarnessError(
+                f"-cpu {cfg.cpu} asks for invariant TSC but the guest printed {INVTSC_ABSENT!r}"
+            )
+    want = expected_lapic_mode(cpu=cfg.cpu, hpet=_hpet_on(cfg), accel=effective_accel_name(cfg))
+    if f"{LAPIC_TIMER_PREFIX}{want})" in lines:
+        return
+    heads = [ln for ln in lines if ln.startswith(LAPIC_TIMER_PREFIX)]
+    got = heads[0][len(LAPIC_TIMER_PREFIX) :].rstrip(")") if heads else "no lapic_timer line"
+    raise HarnessError(f"lapic_timer mode: want {want}, got {got}")
+
 
 def _ktest_boot(
     cfg: QemuConfig,
@@ -303,6 +351,7 @@ def _ktest_boot(
         _check_serial_whole(klines)
     if SERIAL_FRAME_OK in klines:
         _check_serial_frame(raw.lines)
+    check_boot_cpu(klines, cfg)
     _require_line(klines, _block_name("vda"), "missing virtio-blk marker")
     _require_line(klines, _block_name("vdap1"), "missing vdap1 marker")
     persist = ran(raw.lines, PERSIST_TEST)

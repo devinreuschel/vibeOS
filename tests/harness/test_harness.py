@@ -1072,6 +1072,8 @@ BLOCK_MARKERS = (
     "vibeOS: block: vda 8192 sectors",
     "vibeOS: block: vdap1 128 sectors",
     "vibeOS: block: vdap2 7647 sectors",
+    # And the timer line `run_ktest.check_boot_cpu` requires of a TCG boot.
+    "vibeOS: time: lapic_timer ok (periodic)",
 )
 
 
@@ -1231,7 +1233,7 @@ class TestPersistDecision(unittest.TestCase):
             *STACK_REPORT,
             "vibeOS: ktest: end",
         )
-        env = {"VIBEOS_ISO": "x.iso", "VIBEOS_KTEST": "heap_box", "VIBEOS_QEMU_ACCEL": ""}
+        env = {"VIBEOS_ISO": "x.iso", "VIBEOS_KTEST": "heap_box", "VIBEOS_QEMU_ACCEL": "tcg"}
         with (
             overlay_env(env, clear=True),
             mock.patch.object(results.Results, "write"),
@@ -1253,6 +1255,7 @@ class TestNoRetry(unittest.TestCase):
                 K("vibeOS: block: vdap1 128 sectors"),
                 K("vibeOS: block: vdap2 7647 sectors"),
                 K("vibeOS: persist: wrote"),
+                K("vibeOS: time: lapic_timer ok (periodic)"),
                 K("vibeOS: ktest: begin 1"),
                 K("vibeOS: ktest: run x 10000"),
                 K("vibeOS: ktest: ok x (5 us)"),
