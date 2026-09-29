@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 #[cfg(feature = "kernel_tests")]
 use core::sync::atomic::{AtomicU16, AtomicUsize};
 
-use vibeos::lock::{Held, RankError};
+use vibeos::lock::{Held, RANK_SCHED, RankError};
 use vibeos::sync::SpinLock;
 use vibeos::thread::Tcb;
 
@@ -221,7 +221,6 @@ fn held_slot() -> Option<&'static AtomicU64> {
 }
 
 /// This CPU's held locks. `Held::EMPTY` before per-CPU data is live.
-#[cfg(feature = "kernel_tests")]
 pub fn held() -> Held {
     match held_slot() {
         // Relaxed: only this CPU writes its slot.
@@ -230,16 +229,54 @@ pub fn held() -> Held {
     }
 }
 
-/// Bit `rank - 1` set for each rank this CPU holds.
-#[cfg(feature = "kernel_tests")]
+/// Bit `rank - 1` set for each rank this CPU holds; 0 before per-CPU
+/// data is live.
 pub fn held_mask() -> u8 {
     held().mask()
+}
+
+/// Whether this CPU may take `SCHED` now: it is not in a lockless section
+/// (DESIGN §2.2's last row: NMI, `#MC`, `#DB`, `service_incoming` work),
+/// holds neither `SCHED` nor a lock ranked after it, and the panic path has
+/// not set `HALTING`. False before per-CPU data is live, when `HELD` cannot
+/// say.
+pub(crate) fn may_take_sched() -> bool {
+    if halting() {
+        return false;
+    }
+    let Some(slot) = held_slot() else {
+        return false;
+    };
+    // Relaxed: only this CPU writes its slot.
+    let held = Held::from_raw(slot.load(Ordering::Relaxed));
+    held.acquire(RANK_SCHED).is_ok()
 }
 
 /// The current thread's `Tcb`, or `None` before per-CPU data is live and
 /// before the bootstrap thread is installed.
 fn current_tcb() -> Option<NonNull<Tcb>> {
     NonNull::new(per_cpu_init::try_current()?.current)
+}
+
+/// Whether a counted object may be released in place here (DESIGN §2.11
+/// rule 6, §4.4 rule 1): IF=1, no ranked lock held on this CPU, and the
+/// current thread is not a no-reclaim thread. Before per-CPU data is live
+/// IF alone decides. `kalloc::set_release_context` installs it.
+pub(crate) fn may_release_here() -> bool {
+    if !crate::x86::interrupts_enabled() {
+        return false;
+    }
+    if held_mask() != 0 {
+        return false;
+    }
+    match current_tcb() {
+        // SAFETY: invariant I9: a `Tcb` is never freed, so the current
+        // thread's pointer stays valid, and `no_reclaim` is atomic because
+        // `Sched::get_mut` may build `&mut Tcb` for it on another CPU;
+        // established by `thread_init::spawn_inner`.
+        Some(t) => unsafe { t.as_ref() }.no_reclaim.load(Ordering::Relaxed) == 0,
+        None => true,
+    }
 }
 
 /// While alive, the thread that made it is a no-reclaim thread: a counted

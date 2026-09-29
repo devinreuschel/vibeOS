@@ -322,6 +322,10 @@ fn normal_boot_tail() {
     // before `irq: enabled`, as `sched_init::init` requires; established
     // here.
     unsafe { sched_init::init() };
+    // DESIGN §2.11 rule 6: from here a last put where it may not release
+    // defers to this CPU's list, and a worker releases it.
+    vibeos::kalloc::set_release_context(sync_init::may_release_here);
+    vibeos::kalloc::set_deferral(work_init::defer_release);
     crate::marker!(marker::SCHED_CPU0);
     crate::marker!(marker::IRQ_ENABLED);
 

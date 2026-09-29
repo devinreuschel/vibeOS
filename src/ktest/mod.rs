@@ -281,6 +281,10 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("cross_cpu_spawn", sched::ktest::test_cross_cpu_spawn),
     test(
+        "counted_deferred_release",
+        sched::ktest::test_counted_deferred_release,
+    ),
+    test(
         "reschedule_ipi_wake_ap",
         irq::ktest::test_reschedule_ipi_wake_ap,
     ),
