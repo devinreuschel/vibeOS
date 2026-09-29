@@ -21,6 +21,7 @@ pub const DEFAULT_STACK_PAGES: usize = 4;
 use crate::limits::MAX_KVA_RANGES as MAX_RANGES;
 
 /// Why a KVA request failed.
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KvaError {
     /// Free-list node pool exhausted after coalesce. Not a VA OOM
@@ -163,6 +164,9 @@ impl Kva {
     /// Append `[start, start+len)` to the tail. No coalescing on this
     /// path: DESIGN wants recently-freed VA at the tail so it is not
     /// the next first-fit hit.
+    ///
+    /// On `Err(Exhausted)` the node pool is full even after coalescing:
+    /// the range is not linked and stays counted in `used`.
     pub fn free(&mut self, start: u64, len: u64) -> Result<(), KvaError> {
         assert!(len.is_multiple_of(PAGE_SIZE) && start.is_multiple_of(PAGE_SIZE));
         assert!(len > 0);
@@ -171,7 +175,6 @@ impl Kva {
             "kva: free {len} when used is {}",
             self.used
         );
-        self.used -= len;
         if self.nslots == 0 {
             self.coalesce_all()?;
         }
@@ -184,6 +187,7 @@ impl Kva {
             self.head = Some(i);
         }
         self.tail = Some(i);
+        self.used -= len;
         Ok(())
     }
 
@@ -366,6 +370,32 @@ mod tests {
         assert_eq!(k.stats().capacity, PAGE_SIZE);
         assert_eq!(k.stats().used, 0);
         assert_eq!(k.stats().free_ranges, 1);
+    }
+
+    #[test]
+    fn free_with_full_node_pool_keeps_range_used() {
+        let mut k = Kva::empty();
+        k.init(KVA_START, 512 * PAGE_SIZE).unwrap();
+        for i in 0..260u64 {
+            assert_eq!(k.alloc(PAGE_SIZE), Some(KVA_START + i * PAGE_SIZE));
+        }
+        // Frees of every other page never coalesce: after 127 of them the
+        // 127 freed pages and the tail remainder fill all 128 nodes.
+        for i in 0..127u64 {
+            k.free(KVA_START + 2 * i * PAGE_SIZE, PAGE_SIZE).unwrap();
+        }
+        let before = k.stats();
+        assert_eq!(before.free_ranges, MAX_RANGES);
+        assert_eq!(
+            k.free(KVA_START + 254 * PAGE_SIZE, PAGE_SIZE),
+            Err(KvaError::Exhausted)
+        );
+        assert_eq!(
+            k.stats().used,
+            before.used,
+            "a failed free must keep its range counted"
+        );
+        assert_eq!(k.stats().free_ranges, MAX_RANGES);
     }
 
     #[test]

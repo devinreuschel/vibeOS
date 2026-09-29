@@ -450,6 +450,25 @@ profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.
 
+`make gate PHASE=N` (`scripts/gate.py`) is the phase exit gate the maintainer runs before tagging
+(ROADMAP §10.9). It prints one row per exit-gate line, `PASS`, `FAIL` or `TAG  L<line>  <text>`, each
+followed by its entries' results, then a `BOX  ROADMAP.md:<line>  rule A|B: <text>` row per box it
+rejects and `gate: phase N at <sha>: pass|fail`, and exits 0 on pass, 1 on fail and 2 on a usage
+error. From Phase 10 on it runs every entry of `tests/gates/phase-<N>.toml` (§8.6) and fails when the
+map is missing or `scripts/check_gates.py` rejects it; a `cmd` entry runs once per distinct command,
+with its output in `build/gate/phase-<N>/<i>.log`, and one that selects in-guest tests with
+`VIBEOS_KTEST=` passes only when its tier's fresh `build/results/<arch>-<tier>.json` lists each named
+test as passed and each glob matches one. For a phase below 10, which has no map, it runs no entry and
+needs every gate line but the tag ticked. Every phase gets two box rules: rule A rejects an open box
+under a `### N.M` heading of phase N, outside a `### N.M Stretch:` subsection, whose `lands in` notes
+name no `§M.x` with M > N; rule B rejects an open box anywhere in the roadmap whose `lands in` note
+names a section of phase N (a `§N.x` in a code span does not count). A local run gates `HEAD` of a
+work tree whose tracked files are clean, so `COMMIT=<sha>` must name `HEAD`; `python3 scripts/gate.py
+--phase N --dry-run` prints the rows and the box problems and runs nothing. `RECORD=1` runs only the
+map's record entries, on the Apple Silicon dev host (§8.6). `make gate PHASE=10` fails today by
+design, on every open Phase 10 box and on the open earlier boxes deferred into §10; it runs in no
+per-push tier.
+
 ## 8.6 CI and coverage
 
 `ci` runs on a push to `main`, on every pull request, and on `workflow_dispatch`, never on a push to
@@ -520,11 +539,107 @@ each pass 40 s alone and cannot split below a target.
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
+| `ci-history` | `ci` or `release` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. |
 
 The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
 base, so the results files carry the merge commit, which `--run-commit` names; `check_ticks.py`
 reads commits and their messages from the pull request's head.
+
+**CI history.** ROADMAP §10.9's `ci-history` workflow keeps what `ci` and `release` ran past
+GitHub's 90-day limit on Actions logs and artifacts. When a run of either completes, its `record`
+job writes one JSON record per run id, `runs/<workflow>/<run_id>.json`, to the orphan `ci-history`
+branch (C-HISTORY): the run id, workflow, `attempt`, event, head SHA, branch, conclusion, start and
+finish; per job its conclusion, `created`, `started`, `completed`, seconds and per-step seconds, the
+results files of its `results-<arch>-<job>` artifact and the runner data of its `runner-<job>`
+artifact, `<job>` naming the job by the slug of its display name; and, for a workflow that takes a
+commit as input, that commit (`release`'s `commit-input` artifact). A re-run replaces the run's
+record with its latest attempt, which `attempt` names. No record carries an actor, author or
+e-mail: the branch is public data (DESIGN §1.5). The job holds `contents: write` and
+`actions: read` only, checks out nothing but a clone of `ci-history` alone, and runs
+`scripts/ci_history.py` and `scripts/gatelib.py` as fetched from the default branch at
+`GITHUB_SHA`, never the triggering commit's. No field of the run reaches a shell line: the tool
+reads only the run id from the event file, checks the workflow's name, path and repository against
+its allowlist, takes the rest from the API, and reads artifacts as capped bytes in memory. On a
+rejected push it re-applies its one file on the new tip, up to 10 times, so concurrent runs lose no
+record. The `daily` job (04:23 UTC, and on dispatch) runs `--rotate`, then `--backfill --limit
+200`, which records each `ci` run on `main` that the API still lists and the branch lacks, or
+writes a tombstone (`"jobs": []` and `"tombstone": "<reason>"`) when the jobs API answers 404, 410
+or no jobs, then the completeness check. That check, `python3 scripts/ci_history.py` with no mode,
+fails on any `ci` run on `main` (a push or dispatch run of this repository's `main`) since the
+history landed, that is whose head commit descends from the oldest commit on `main` that touches
+`ci-history.yml`, with no record or tombstone. A tombstone passes unless a gate map's `job` entry
+names the workflow, the run proves the gated commit (`--gated`, else the checkout's `HEAD`), and no
+successful full record proves it. `python3 scripts/ci_history.py --series ci` prints each `main`
+run's push-to-green time (its latest job end minus its earliest job creation) and their median,
+the numbers ROADMAP §10.1 reads; `--job` and `--step` narrow it to a job or a step. `--rotate`
+writes the branch's packed size (`size-pack` of a full clone) to the job summary; past
+500,000,000 bytes it moves the oldest UTC year's records into a zstd archive, the asset of the
+prerelease `ci-history-<year>`, never marked latest and tagged at the branch's tip before the
+rotation, lists it in `archives.json` with its SHA-256 and run ids, and restarts the branch from an
+orphan commit holding the rest, pushed with a lease on the tip it read. It refuses to archive the
+current year and fails with the size instead. `ci_history.py` reads the branch and the archives
+alike. The packed size is recorded here once the first daily run measures it (ROADMAP §10.9).
+
+**Gate maps.** From Phase 10 on, `tests/gates/phase-<N>.toml` gives each exit-gate line of phase N
+but the tag the entries that prove it (ROADMAP §10.9, C-GATEMAP): one `[[line]]` per line, its `key`
+the line's full text after `- [ ] ` or `- [x] `, compared with whitespace collapsed, and
+`[[line.entry]]` rows that each hold exactly one of `cmd` (a local command), `job = {workflow, job}`
+(a job of a GitHub-hosted workflow that must be green on a run proving the gated commit, read through
+`gh`) or `record = {cmd}` (a dev-host record, below), with an optional `expect = "fail"` for a command
+that must fail, which counts only after a plain entry of its line passed in the same run. A line with
+several entries, one per architecture or accelerator for example, passes only when all of them pass.
+Each later phase adds its map in the slice that closes its gate; Phases 0 to 9 get none.
+`scripts/check_gates.py`, which `make check` runs, reads text only (no entry runs, no `gh`, no
+`ci-history`) and fails on a `phase-<N>.toml` with N below 10; on a key that matches no exit-gate
+line of phase N, matches the tag line, or repeats another; on a gate line but the tag with no entry;
+on an entry with none or two of `cmd`, `job` and `record`, or an `expect` other than `"fail"`; on an
+entry that runs `make gate` or `scripts/gate.py`, so the entry for a line that names the gate runs
+that line's other checks; on a line that names a `scripts/check_<x>.py` with no `cmd` or `record`
+entry containing that path; and on a job entry whose workflow has a `self-hosted` label anywhere
+outside a comment. Until a workflow a job entry names exists (`macos.yml`, `nightly.yml`), a
+`test -f .github/workflows/<wf>.yml` entry stands in for it, since `rule_gate_dispatch` rejects a
+missing workflow, so the line fails rather than passes without its job.
+`tests/harness/test_gates.py` holds a failing case per rule and runs the script on the tree.
+
+**Which run proves a commit.** A run proves commit C only when its event is `push`, `schedule`, or
+`workflow_dispatch` and its head SHA is C, or, for a workflow that takes a commit as input, its
+CI-history record names C (`commit`); a `pull_request` run never proves a commit, since it tests the
+merge with the pull request's base. `gatelib.run_proves_commit` is that rule, and `make gate`, the
+`ticks` job and every other reader of runs use it. A gate map's `job` entry passes on a run of its
+workflow that concluded `success`, proves the gated commit, and whose jobs named as the job id's
+`name:` in the workflow at that commit (or `<name> (…)`, one per matrix leg) all concluded `success`;
+`gate.py` takes the candidates from `gh api …/actions/workflows/<wf>/runs -f head_sha=<C>` and from
+the workflow's `ci-history` records, merging a run's record into it for a workflow that takes a
+commit as input. It starts nothing: when no run proves the commit it prints the maintainer's
+commands, `git push origin <C>:refs/heads/gate/<N>` and `gh workflow run <wf> --ref gate/<N>`, or
+for a workflow that takes a commit as input `gh workflow run <wf> --ref main -f commit=<C>`, so
+every workflow a gate entry names has a `workflow_dispatch` trigger (`rule_gate_dispatch`). A
+`record` entry's command never runs off the dev host: the entry passes only when `ci-history` holds
+a dev-host record (below) with event `dev-host`, the gated commit, phase N, the line's key, the map's
+command at that commit, every required field, and result `pass`.
+
+**Dev-host records.** No hosted CI runner can run an HVF guest, so a gate line, or the part of one,
+that runs under HVF has a `record` entry, proved on the Apple Silicon dev host (ROADMAP §10.9).
+`make gate PHASE=N RECORD=1` refuses to run anywhere but macOS on arm64; it runs only the map's record
+entries, each in a `git worktree` of the gated commit in a temporary directory, so an uncommitted
+change in the maintainer's tree reaches no record, and writes one JSON record per commit and entry,
+pass or fail: `schema`, `event: "dev-host"`, `commit`, `head_sha`, the fixed `host: "dev-host"`,
+`mac_model` (`sysctl -n hw.model`), `macos` (`sw_vers`), `qemu` (the first `--version` line of each
+`qemu-system-*` on `PATH`), `phase`, `line` (the key), `command`, `numbers` (`seconds` and any
+`numbers` section of the run's results files), `result`, `started`, `finished`, and `results`, the
+`build/results/*.json` files the run wrote, which `check_ticks.py` reads. Every string is scrubbed
+first (the worktree becomes `<checkout>`, the temporary directory `<tmp>`, the home directory
+`<home>`), and `ci_history.validate_record` then refuses any record that holds the machine's
+hostname (`socket.gethostname()`, its short form, `scutil --get LocalHostName`), user name, home
+directory, or serial number (`ioreg -rd1 -c IOPlatformExpertDevice`, compared and never printed or
+stored), since `ci-history` is public (DESIGN §1.5). `ci_history.py --record PATH` commits the record
+at `records/<yyyy-mm-dd>-dev-host-<sha>-<entry-id>.json` (C-HISTORY; the entry id is the first 12
+hex digits of the SHA-256 of the phase, the key and the command) and, on a rejected push, re-applies
+it on the new tip and pushes again. Two record entries of one line with one command would share a
+path, so `RECORD=1` refuses them before anything runs. Everywhere else, `release.yml` included, the
+records are only read (above). `tests/harness/test_gate_records.py` pushes only to a bare repository
+in its own temporary directory.
 
 **Workflow rules.** `scripts/check_workflows.py`, which `make check` runs, reads every workflow
 with a stdlib YAML subset reader that fails on anything it does not parse (anchors, aliases, tags,
@@ -539,8 +654,9 @@ pinned as `@<40 hex>  # <version>`, where `./` paths and `docker://…@sha256:` 
 clause and runs every rule on the real files.
 
 Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
-candidate commit, restores no cache, checks out nothing, and receives only artifacts and their
-SHA-256 list (ROADMAP §10.1, §14.6). Today `release` builds, tests, and publishes in one job with
+candidate commit, restores no cache, checks out nothing (ROADMAP §10.9's history job checks out
+only the `ci-history` branch and runs `main`'s `scripts/ci_history.py`, never the candidate's), and
+receives only artifacts and their SHA-256 list (ROADMAP §10.1, §14.6). Today `release` builds, tests, and publishes in one job with
 `contents: write`, a persisted checkout token, and restored caches.
 
 **Runners.** Every Linux job runs on GitHub's free `ubuntu-26.04` image (`ubuntu-26.04-arm` for

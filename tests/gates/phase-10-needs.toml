@@ -320,6 +320,24 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
+# L1447
+[[box]]
+key = "`make gate PHASE=N` checks every"
+needs = [
+  "`release.yml` runs only from `main`,",  # L1207
+  "a gate map from Phase",  # L1446
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1449
+[[box]]
+key = "dev-host records, for a gate"
+needs = [
+  "`make gate PHASE=N` checks every",  # L1447
+  "CI history: when a `ci`",  # L1448
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
 # Lands-after, lands-with and lands-before clauses in box text.
 
 [[box]]
@@ -690,3 +708,12 @@ needs = [
   "every `IrqCell` static that more",  # L1304
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1448
+[[box]]
+key = "CI history: when a `ci`"
+needs = [
+  "no workflow expands a `${{",  # L1204
+  "`ci.yml` runs on a push",  # L1205
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"

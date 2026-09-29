@@ -6,7 +6,9 @@ needs-file form (a substring of exactly one box line of docs/ROADMAP.md). The
 check fails when a listed name appears in `src/`, `crates/`, `user/`,
 `tests/`, `scripts/`, `.github/`, the `Makefile`, `build.rs`, or `setup.sh`,
 outside this file and `tests/harness/test_gone.py`. `docs/` and
-`CHANGELOG.md` are dated prose and are not read.
+`CHANGELOG.md` are dated prose and are not read, and neither are the `key`
+strings of a gate map (`tests/gates/phase-<N>.toml`), which quote exit-gate
+lines of docs/ROADMAP.md in full (C-GATEMAP); its commands are read.
 
 A row is one of:
 - an identifier, which fails as a whole word;
@@ -148,6 +150,8 @@ GONE: list[tuple[str, str]] = [
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
          "setup.sh"]
 EXEMPT = frozenset({"scripts/check_gone.py", "tests/harness/test_gone.py"})
+GATE_MAP = re.compile(r"^tests/gates/phase-\d+\.toml$")
+GATE_KEY = re.compile(r'^key = (?:"""[\s\S]*?"""|"[^"\n]*")', re.M)
 DEFINITION = re.compile(r"^(\S+): (fn|struct|enum|union|trait|type|const|static|mod|macro"
                         r"|def|class) ([A-Za-z_][A-Za-z0-9_]*)$")
 GLOB_CHARS = frozenset("*?[")
@@ -222,6 +226,13 @@ def check_table(gone: list[tuple[str, str]], roadmap_text: str) -> list[str]:
     return errors
 
 
+def drop_gate_keys(path: str, text: str) -> str:
+    """A gate map's text with each `key` string emptied, its lines kept."""
+    if not GATE_MAP.match(path):
+        return text
+    return GATE_KEY.sub(lambda m: 'key = ""' + "\n" * m.group(0).count("\n"), text)
+
+
 def scoped_files(repo: Path = ROOT) -> tuple[dict[str, str], list[str]]:
     """Tracked and untracked, not ignored, files in scope, less the exempt."""
     out = gatelib.git(repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard",
@@ -230,7 +241,7 @@ def scoped_files(repo: Path = ROOT) -> tuple[dict[str, str], list[str]]:
     files: dict[str, str] = {}
     for p in paths:
         try:
-            files[p] = (repo / p).read_text(encoding="utf-8")
+            files[p] = drop_gate_keys(p, (repo / p).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             continue
     return files, paths

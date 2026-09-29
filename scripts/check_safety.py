@@ -54,9 +54,7 @@ INVARIANTS = "docs/INVARIANTS.md"
 # (ROADMAP §10.1, C-LINTS) fixes them; `--failing` regenerates the list.
 PENDING: tuple[str, ...] = (
     "crates/core/src/kalloc.rs",
-    "crates/core/src/mm/pmm.rs",
     "crates/core/src/proc/addr_space/mod.rs",
-    "crates/core/src/smp/per_cpu.rs",
     "src/log/log_init.rs",
     "src/log/serial/raw.rs",
     "src/proc/addr_space_init.rs",
