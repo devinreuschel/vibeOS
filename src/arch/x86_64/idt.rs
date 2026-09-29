@@ -555,6 +555,30 @@ fn cpl3_body_if_on(v: u8) -> bool {
     v < 32 && ((PARANOID_MASK >> v) & 1 == 0 || v == vectors::DB)
 }
 
+/// What a ring-3 fault runs before the kernel-fault path: the process
+/// layer's `try_user_fault`, which signals the faulting process and does
+/// not return, or returns when no process owns the fault. `proc_init::init`
+/// sets it before the first ring-3 entry (DESIGN §1.2). Unset, it returns.
+static USER_FAULT: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the ring-3 fault hook.
+pub fn set_user_fault_hook(f: fn(&TrapFrame)) {
+    // Release: pairs with the Acquire load in `user_fault`.
+    USER_FAULT.store(f as *mut (), Ordering::Release);
+}
+
+fn user_fault(frame: &TrapFrame) {
+    // Acquire: pairs with the Release store in `set_user_fault_hook`.
+    let p = USER_FAULT.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `USER_FAULT` holds a `fn(&TrapFrame)`;
+    // established by `arch::idt::set_user_fault_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn(&TrapFrame)>(p) };
+    f(frame);
+}
+
 /// The exception intercept for vectors 0 to 31: `catch::intercept`, which
 /// `catch::init` sets right after `idt::init` (DESIGN §1.2). Unset, no
 /// exception is intercepted.
@@ -644,7 +668,7 @@ fn user_return_fault(frame: &TrapFrame) {
         ss: user.ss,
         ..UserFrame::zeroed()
     };
-    crate::proc_init::try_user_fault(&TrapFrame::for_user(vectors::GP, frame.error_code, &ctx));
+    user_fault(&TrapFrame::for_user(vectors::GP, frame.error_code, &ctx));
     panic!(
         "idt: user-return iretq fault with no process, rip={:#x}",
         user.rip
@@ -669,7 +693,7 @@ fn default_body(frame: &mut TrapFrame) {
     let err = frame.error_code;
     let cr2 = (n == vectors::PF).then_some(frame.cr2);
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     let err = vectors::pushes_error_code(n).then_some(err);
     x86::cli();
@@ -678,14 +702,14 @@ fn default_body(frame: &mut TrapFrame) {
 
 fn breakpoint(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     dump(b"#BP", &frame.iret, None, None);
 }
 
 fn invalid_opcode(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     x86::cli();
     crate::panic::exception_halt(b"#UD", &frame.iret, None, None);
@@ -707,7 +731,7 @@ fn debug_ex(frame: &mut TrapFrame) {
         if testing::on_user_db(frame) {
             return;
         }
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     x86::cli();
     crate::panic::exception_halt(b"#DB", &frame.iret, None, None);
@@ -717,7 +741,7 @@ fn debug_ex(frame: &mut TrapFrame) {
 /// return; from the kernel it returns, and the caller halts.
 fn kill_if_user(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
 }
 
@@ -746,7 +770,7 @@ fn page_fault(frame: &mut TrapFrame) {
     if frame.user_mode() {
         #[cfg(feature = "kernel_tests")]
         testing::on_user_pf(frame);
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     x86::cli();
     crate::panic::exception_halt(b"#PF", &frame.iret, Some(err), Some(cr2));

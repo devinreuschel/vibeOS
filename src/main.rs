@@ -195,6 +195,7 @@ fn normal_boot_tail() {
     unsafe { per_cpu_init::init_bsp() };
     unsafe { thread_init::init_bootstrap() };
     unsafe { syscall_init::init_bsp() };
+    proc_init::init();
     crate::marker!(marker::PER_CPU_BSP);
 
     acpi_init::report();

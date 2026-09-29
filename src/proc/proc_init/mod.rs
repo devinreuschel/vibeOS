@@ -430,6 +430,13 @@ pub(crate) fn wait_kernel(pid: u32) -> u32 {
     }
 }
 
+/// Install the process layer's hooks in the layers below it (DESIGN §1.2):
+/// the ring-3 fault hook in `arch::idt`. `_start` calls it right after
+/// `syscall_init::init_bsp`, before the first ring-3 entry.
+pub fn init() {
+    crate::arch::idt::set_user_fault_hook(try_user_fault);
+}
+
 /// A syscall from ring 3, over the user frame its entry saved.
 pub fn syscall(frame: &mut UserFrame) -> i64 {
     #[cfg(feature = "kernel_tests")]

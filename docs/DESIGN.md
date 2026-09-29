@@ -132,6 +132,8 @@ that sets it:
   `ipi_init::init` before the first AP starts (§7.9).
 - `idt::set_intercept_hook` (the exception intercept for vectors 0 to 31), set by `catch::init` right
   after `idt::init`.
+- `idt::set_user_fault_hook` (a ring-3 fault's signal, `proc_init::try_user_fault`), set by
+  `proc_init::init` right after `syscall_init::init_bsp`, before the first ring-3 entry.
 - `ipi_init::set_reschedule_hook` (a reschedule IPI's preemption point), set by `sched_init::init`
   before the scheduler goes live.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),
