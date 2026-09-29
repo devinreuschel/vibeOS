@@ -774,7 +774,7 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (ext
 
 # L1320
 [[box]]
-key = "`MAX_ELF` removed: the loader maps segments"
+key = "removed: the loader maps segments from the file"
 needs = [
   "the initrd is sized by `mkinitrd` from its contents",  # L1370
 ]

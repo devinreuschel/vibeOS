@@ -156,6 +156,9 @@ GONE: list[tuple[str, str]] = [
     ("VIBEOS_INITRD", "the initrd is sized by"),
     ("INITRD_RO", "the initrd is sized by"),
     ("INITRD_BYTES", "the initrd is sized by"),
+    ("MAX_ELF", "`MAX_ELF` removed: the loader maps"),
+    ("TooBig", "`MAX_ELF` removed: the loader maps"),
+    ("src/proc/user_init.rs: fn read_path", "`MAX_ELF` removed: the loader maps"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
