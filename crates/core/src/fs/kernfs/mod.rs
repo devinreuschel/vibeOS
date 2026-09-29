@@ -9,7 +9,8 @@
 
 use core::cell::RefCell;
 
-use crate::block::BlockError;
+use crate::block::blockdev::BlockRef;
+use crate::block::{BlockError, MAX_BLOCKDEVS};
 use crate::cache::{self, Backend, Cache, CacheKey, CacheStats, PAGE};
 
 use super::{
@@ -24,7 +25,7 @@ mod procfs;
 mod sysfs;
 mod tmpfs;
 
-use devfs::mix_rng;
+use devfs::{blk_read, blk_write, mix_rng};
 use node::{
     kern_alloc, kern_create, kern_drop_sb, kern_find_child, kern_get, kern_get_mut, kern_idx,
     kern_info, kern_link, kern_lookup, kern_lookup_ino, kern_mk_dir, kern_mk_lnk, kern_mk_root,
@@ -165,6 +166,10 @@ pub struct KernState {
     skins: [Skin; MAX_MOUNTS],
     cons_out: [u8; 64],
     cons_len: u8,
+    /// The devices devfs block nodes name; a node's `tag` is its slot.
+    /// A slot is filled once and never overwritten, so no handle is
+    /// dropped, perhaps for the last time, under the store's lock.
+    blk: [Option<BlockRef>; MAX_BLOCKDEVS],
 }
 
 impl KernState {
@@ -180,6 +185,7 @@ impl KernState {
             skins: [Skin::EMPTY; MAX_MOUNTS],
             cons_out: [0u8; 64],
             cons_len: 0,
+            blk: [const { None }; MAX_BLOCKDEVS],
         }
     }
 
@@ -360,6 +366,11 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         off: u64,
         buf: &mut [u8],
     ) -> Result<usize, FsError> {
+        // A block node's I/O runs with the store unlocked, through a clone
+        // of its handle taken under the lock.
+        if let Some(dev) = self.op(cx, |k, x| kern_block_of(k, x.inst, ino.key[0])) {
+            return blk_read(&dev, off, buf);
+        }
         self.op(cx, |k, x| kern_read(k, x, ino, off, buf))
     }
 
@@ -370,6 +381,9 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         off: u64,
         buf: &[u8],
     ) -> Result<usize, FsError> {
+        if let Some(dev) = self.op(cx, |k, x| kern_block_of(k, x.inst, ino.key[0])) {
+            return blk_write(&dev, off, buf);
+        }
         self.op(cx, |k, x| kern_write(k, x, ino, off, buf))
     }
 
@@ -415,6 +429,17 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
             }
         });
     }
+}
+
+/// A clone of the handle block node `ino` names, or `None` for any other
+/// node.
+fn kern_block_of(k: &KernState, inst: u32, ino: u32) -> Option<BlockRef> {
+    let n = kern_get(k, inst, ino)?;
+    if n.kind != KernKind::Block {
+        return None;
+    }
+    let slot = usize::try_from(n.tag).ok()?;
+    k.blk.get(slot)?.clone()
 }
 
 fn touch_dir(k: &mut KernState, inst: u32, ino: u32, t: u64) {

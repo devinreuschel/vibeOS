@@ -406,14 +406,7 @@ fn populate_devfs() {
     let mut failed = 0u32;
     let mut last = None;
     for r in all.iter().take(n).flatten() {
-        let sz = r
-            .capacity_sectors()
-            .and_then(|c| {
-                r.logical_block_size()
-                    .map(|bs| c.saturating_mul(u64::from(bs)))
-            })
-            .unwrap_or(0);
-        if let Err(e) = fs_init::KERNFS.devfs_add_block(r.name().as_bytes(), sz) {
+        if let Err(e) = fs_init::KERNFS.devfs_add_block(r) {
             failed = failed.saturating_add(1);
             last = Some(e);
         }

@@ -315,9 +315,12 @@ in order under generated names, `<parent>p<N>` (e.g. `ram0p1`, `vdap1`),
 and each registration prints the marker `vibeOS: block: <name> <n>
 sectors`. It stops at the first entry whose registration fails, with one
 log line naming the entry and the error (ROADMAP §10.12, F117). FAT and
-vibefs `mount_dev` mount any registered name, a disk or a partition. Only
-in-guest tests use the child devices for I/O otherwise: devfs block nodes
-return `NotSupp` (ROADMAP §10.4, F081).
+vibefs `mount_dev` mount any registered name, a disk or a partition. Each
+registered device has a devfs block node, `/dev/<name>`, which reads and
+writes through its `BlockRef` with no lock held: a read at or past the end
+returns 0, a write there fails with `ENOSPC`, a partial block is read,
+changed and written back, and I/O after the device is gone fails with
+`EIO` (ROADMAP §10.4, F081).
 
 `part_init::init` stamps an MBR on `ram0` (RAM) in every build. Only a
 `kernel_tests` build stamps a GPT, through `stamp_vda_gpt`, and only on an
