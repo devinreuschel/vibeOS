@@ -134,6 +134,8 @@ that sets it:
   after `idt::init`.
 - `idt::set_user_fault_hook` (a ring-3 fault's signal, `proc_init::try_user_fault`), set by
   `proc_init::init` right after `syscall_init::init_bsp`, before the first ring-3 entry.
+- `idt::set_user_return_hook` (the FP binding check on a return to ring 3, §7.5), set by
+  `syscall_init::init_bsp` before the first ring-3 entry.
 - `ipi_init::set_reschedule_hook` (a reschedule IPI's preemption point), set by `sched_init::init`
   before the scheduler goes live.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),

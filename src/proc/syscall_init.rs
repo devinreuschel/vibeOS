@@ -268,6 +268,7 @@ pub unsafe fn init_cpu() {
 /// GDT loaded, `GS_BASE` is the BSP `PerCpu`.
 pub unsafe fn init_bsp() {
     unsafe { init_cpu() };
+    crate::arch::idt::set_user_return_hook(fp_user_return);
     per_cpu_init::with_current(|cpu| {
         cpu.tss = gdt::bsp_tss_ptr();
         let top = gdt::bsp_rsp0_top();
@@ -391,6 +392,11 @@ pub extern "C" fn vibeos_fp_user_return() {
             fpu::bind(&mut cpu.fp_owner, me, addr, &mut tcb.fp_cpu);
         }
     });
+}
+
+/// `vibeos_fp_user_return` as `arch::idt`'s user-return hook.
+fn fp_user_return() {
+    vibeos_fp_user_return();
 }
 
 /// The running thread's x87 status word, x87 control word, and MXCSR,
