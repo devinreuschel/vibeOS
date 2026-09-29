@@ -69,6 +69,7 @@ FIRST_MAPPED_PHASE = check_gates.FIRST_MAPPED_PHASE
 KTEST_VAR = re.compile(r"(?:^|\s)VIBEOS_KTEST=('[^']*'|\"[^\"]*\"|\S+)")
 MAKE_TIER = re.compile(r"\bmake\s+(?:\S+=\S*\s+)*(test-[A-Za-z0-9-]+)")
 STRETCH = re.compile(r"^### \d+\.\d+ Stretch:")
+SECTION_HEADING = re.compile(r"^#{1,3} ")
 SERIAL = re.compile(r'"IOPlatformSerialNumber"\s*=\s*"([^"]*)"')
 ROW_TEXT = 100
 
@@ -92,7 +93,7 @@ def box_problems(roadmap_text: str, phase: int) -> list[BoxProblem]:
     stretch: set[int] = set()
     under = False
     for n, raw in enumerate(roadmap_text.splitlines(), start=1):
-        if raw.startswith("#"):
+        if SECTION_HEADING.match(raw):
             under = STRETCH.match(raw) is not None
         elif under:
             stretch.add(n)
@@ -112,12 +113,6 @@ def box_problems(roadmap_text: str, phase: int) -> list[BoxProblem]:
         if phase in majors:
             out.append(BoxProblem(b.line, "B", b.text))
     return out
-
-
-BOX_RULES = {
-    "A": "open, and no `lands in §M.x` with M > N",
-    "B": "open, and its `lands in` note names a section of phase N",
-}
 
 
 # --- injected tools -----------------------------------------------------------

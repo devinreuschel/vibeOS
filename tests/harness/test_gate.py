@@ -259,6 +259,8 @@ class BoxRules(unittest.TestCase):
         self.assertNotIn(36, got)  # deferred to §12.1
         self.assertNotIn(38, got)  # under `### 11.8 Stretch:`
         self.assertNotIn(32, got)  # an exit-gate line
+        nested = ROADMAP.replace("- [ ] a stretch box", "#### Notes\n- [ ] a stretch box")
+        self.assertNotIn(39, {p.line for p in box_problems(nested, 11)})
 
     def test_rule_b(self) -> None:
         problems = box_problems(ROADMAP, 10)
