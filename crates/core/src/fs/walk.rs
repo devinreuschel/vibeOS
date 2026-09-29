@@ -541,6 +541,10 @@ impl Walker {
                     }),
                     Err(FsError::NotFound) => {
                         if !cached {
+                            #[expect(
+                                clippy::let_underscore_must_use,
+                                reason = "an uncached negative dentry costs only a later lookup; nothing to act on (DESIGN §2.5)"
+                            )]
                             let _ = v.dcache_insert(sb, dir.dslot, self.comp(), None);
                         }
                         Err(FsError::NotFound)

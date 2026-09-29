@@ -426,6 +426,10 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
             && self.with(|v| v.file_kind(f.id)) == Ok(InodeKind::Reg)
             && let Err(e) = self.ftruncate(&f, 0)
         {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "cleanup after an error already returned (DESIGN §2.5)"
+            )]
             let _ = self.close(f);
             return Err(e);
         }

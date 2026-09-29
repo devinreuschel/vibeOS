@@ -52,10 +52,6 @@ pub mod console;
 pub mod dev;
 pub mod drivers;
 pub mod fmt_util;
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod fs;
 pub mod irq;
 #[allow(
