@@ -53,9 +53,11 @@ enum Media {
 
 /// A volume slot. Its `vol` and `back` cells belong to the one thread
 /// holding `busy`, or, while `used` is clear, to the one path filling the
-/// slot (invariant I236).
+/// slot (invariant I236). The volume is mounted in place
+/// (`FatVol::mount_in`), never moved: it holds its cluster buffer and FAT
+/// cache, too large for a kernel stack (DESIGN §4.5).
 pub(super) struct Slot {
-    vol: UnsafeCell<Option<FatVol>>,
+    vol: UnsafeCell<FatVol>,
     back: UnsafeCell<Media>,
     pub(super) used: AtomicBool,
     pub(super) busy: AtomicBool,
@@ -71,14 +73,14 @@ unsafe impl Sync for Slot {}
 
 const _: () = {
     const fn send<T: Send>() {}
-    send::<Option<FatVol>>();
+    send::<FatVol>();
     send::<Media>();
 };
 
 impl Slot {
     const fn empty() -> Self {
         Self {
-            vol: UnsafeCell::new(None),
+            vol: UnsafeCell::new(FatVol::new()),
             back: UnsafeCell::new(Media::Initrd),
             used: AtomicBool::new(false),
             busy: AtomicBool::new(false),
@@ -285,15 +287,10 @@ fn with_grabbed<R>(
     // `i < MAX_VOLS` was checked there; established by
     // `fs::fat_init::grab`.
     let r = unsafe {
-        match (*SLOTS[i].vol.get()).as_mut() {
-            None => Err(FsError::Io),
-            Some(v) => {
-                let mut io = Io {
-                    back: &*SLOTS[i].back.get(),
-                };
-                f(v, &mut io)
-            }
-        }
+        let mut io = Io {
+            back: &*SLOTS[i].back.get(),
+        };
+        f(&mut *SLOTS[i].vol.get(), &mut io)
     };
     drop_busy(id);
     r
@@ -666,24 +663,21 @@ pub fn init() {
         return;
     };
     with_initrd(|span| *span = Some(Span { va, len }));
-    let mut io = Io {
-        back: &Media::Initrd,
-    };
-    let vol = match FatVol::mount(&mut io) {
-        Ok(v) => v,
-        Err(_) => {
-            LIVE.store(false, Ordering::Release);
-            return;
-        }
-    };
-    let root_clu = vol.info.root_clus;
     // SAFETY: invariant I236: slot 0's `used` flag is clear, so no `grab`
-    // takes it, and this boot path is its one writer until the Release
+    // takes it, and this boot path is its one accessor until the Release
     // store of `used` below; established here.
-    unsafe {
-        *SLOTS[0].vol.get() = Some(vol);
+    let mounted = unsafe {
         *SLOTS[0].back.get() = Media::Initrd;
-    }
+        let vol = &mut *SLOTS[0].vol.get();
+        let mut io = Io {
+            back: &*SLOTS[0].back.get(),
+        };
+        vol.mount_in(&mut io).map(|()| vol.info.root_clus)
+    };
+    let Ok(root_clu) = mounted else {
+        LIVE.store(false, Ordering::Release);
+        return;
+    };
     SLOTS[0].used.store(true, Ordering::Release);
     SLOTS[0].busy.store(false, Ordering::Release);
     NVOL.store(1, Ordering::Release);
@@ -816,7 +810,7 @@ pub(super) fn drop_slot(id: u8) -> Result<(), FatError> {
     // SAFETY: invariant I236: `grab` above took the slot's busy flag,
     // which is dropped only below; established by `fs::fat_init::grab`.
     unsafe {
-        *slot.vol.get() = None;
+        (*slot.vol.get()).clear();
         // Releases the slot's device handle.
         *slot.back.get() = Media::Initrd;
     }
@@ -856,8 +850,6 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
         api.mount_fs(None, at.as_bytes(), fs, dev, ro)?;
         return Ok(vol);
     }
-    let vol = FatVol::mount(&mut Io { back: &back })?;
-    let root_clu = vol.info.root_clus;
     let id = {
         let _g = ALLOC.lock();
         let mut i = 1usize;
@@ -874,13 +866,33 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
         }
         i as u8
     };
+    let slot = &SLOTS[id as usize];
     // SAFETY: invariant I236: this thread set the slot's `busy` flag
     // under `ALLOC` above, and drops it only below; established here.
-    unsafe {
-        *SLOTS[id as usize].vol.get() = Some(vol);
-        *SLOTS[id as usize].back.get() = back;
-    }
-    SLOTS[id as usize].busy.store(false, Ordering::Release);
+    let mounted = unsafe {
+        *slot.back.get() = back;
+        let vol = &mut *slot.vol.get();
+        let mut io = Io {
+            back: &*slot.back.get(),
+        };
+        vol.mount_in(&mut io).map(|()| vol.info.root_clus)
+    };
+    let root_clu = match mounted {
+        Ok(r) => r,
+        Err(e) => {
+            // SAFETY: invariant I236: the busy flag taken above is still
+            // this thread's; established here.
+            unsafe {
+                (*slot.vol.get()).clear();
+                // Releases the device handle.
+                *slot.back.get() = Media::Initrd;
+            }
+            slot.used.store(false, Ordering::Release);
+            slot.busy.store(false, Ordering::Release);
+            return Err(e.into());
+        }
+    };
+    slot.busy.store(false, Ordering::Release);
     recount();
     ROOT_CLU[id as usize].store(root_clu, Ordering::Release);
     match api.mount_fs(None, at.as_bytes(), &FAT_FS[id as usize], dev, ro) {

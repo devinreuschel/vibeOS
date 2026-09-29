@@ -58,13 +58,12 @@ impl FatVol {
             None => return Ok(false),
             Some(c) => c,
         };
-        let mut clbuf = [0u8; MAX_CLUS_BYTES];
-        let n = self.read_cluster(d, clu, &mut clbuf)?;
+        let n = Self::read_cluster(&self.info, d, clu, &mut self.clbuf)?;
         let end = pin.checked_add(ENT).ok_or(FatError::Corrupt)?;
         if end > n {
             return Err(FatError::Corrupt);
         }
-        ent.copy_from_slice(clbuf.get(pin..end).ok_or(FatError::Corrupt)?);
+        ent.copy_from_slice(self.clbuf.get(pin..end).ok_or(FatError::Corrupt)?);
         Ok(true)
     }
 
@@ -79,14 +78,18 @@ impl FatVol {
         let idx = off.checked_div(cb).ok_or(FatError::Corrupt)?;
         let pin = off.checked_rem(cb).ok_or(FatError::Corrupt)? as usize;
         let clu = self.nth_clu(d, dir, idx)?.ok_or(FatError::Corrupt)?;
-        let mut clbuf = [0u8; MAX_CLUS_BYTES];
-        let n = self.read_cluster(d, clu, &mut clbuf)?;
+        let n = Self::read_cluster(&self.info, d, clu, &mut self.clbuf)?;
         let end = pin.checked_add(ENT).ok_or(FatError::Corrupt)?;
         if end > n {
             return Err(FatError::Corrupt);
         }
-        put_at(&mut clbuf, pin, ent)?;
-        self.write_cluster(d, clu, clbuf.get(..n).ok_or(FatError::Corrupt)?)
+        put_at(&mut self.clbuf, pin, ent)?;
+        Self::write_cluster(
+            &self.info,
+            d,
+            clu,
+            self.clbuf.get(..n).ok_or(FatError::Corrupt)?,
+        )
     }
 
     /// Find `slots` free entries in `dir` and return where they start. A
@@ -271,16 +274,23 @@ impl FatVol {
         clu: u32,
         parent: u32,
     ) -> Result<(), FatError> {
-        let mut buf = [0u8; MAX_CLUS_BYTES];
         let n = self.info.clus_bytes();
-        fill_dot(&mut buf[0..ENT], b".          ", clu, self.now)?;
+        let now = self.now;
+        let buf = &mut self.clbuf;
+        buf.fill(0);
+        fill_dot(&mut buf[0..ENT], b".          ", clu, now)?;
         let p = if parent == self.info.root_clus {
             0
         } else {
             parent
         };
-        fill_dot(&mut buf[ENT..ENT * 2], b"..         ", p, self.now)?;
-        self.write_cluster(d, clu, buf.get(..n).ok_or(FatError::Corrupt)?)
+        fill_dot(&mut buf[ENT..ENT * 2], b"..         ", p, now)?;
+        Self::write_cluster(
+            &self.info,
+            d,
+            clu,
+            self.clbuf.get(..n).ok_or(FatError::Corrupt)?,
+        )
     }
 
     pub(super) fn update_short<D: Disk>(

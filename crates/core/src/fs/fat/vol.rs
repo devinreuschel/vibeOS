@@ -1,7 +1,73 @@
 use super::*;
 
+/// The [`FatInfo`] of a volume nothing is mounted in.
+const NO_INFO: FatInfo = FatInfo {
+    bps: 0,
+    spc: 0,
+    rsvd: 0,
+    num_fats: 0,
+    fatsz: 0,
+    totsec: 0,
+    root_clus: 0,
+    fsinfo: 0,
+    backup: 0,
+    data_lba: 0,
+    nclus: 0,
+    media: 0,
+};
+
+impl Default for FatVol {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FatVol {
+    /// A volume with nothing mounted, for a slot to [`Self::mount_in`].
+    pub const fn new() -> Self {
+        Self {
+            info: NO_INFO,
+            cache: [FatSec::EMPTY; FAT_CACHE],
+            hint: 2,
+            free: 0xFFFFFFFF,
+            fsinfo_dirty: false,
+            now: 0,
+            clbuf: [0; MAX_CLUS_BYTES],
+        }
+    }
+
+    /// Reset to [`Self::new`]'s state in place. Never `*v = FatVol::new()`:
+    /// that builds the whole volume, cluster buffer and FAT cache, as a
+    /// temporary on the kernel stack (DESIGN §4.5).
+    pub fn clear(&mut self) {
+        self.info = NO_INFO;
+        for c in self.cache.iter_mut() {
+            c.used = false;
+            c.dirty = false;
+            c.idx = 0;
+            c.data.fill(0);
+        }
+        self.hint = 2;
+        self.free = 0xFFFFFFFF;
+        self.fsinfo_dirty = false;
+        self.now = 0;
+        self.clbuf.fill(0);
+    }
+
+    /// Mount the volume on `d` by value: [`Self::new`] and
+    /// [`Self::mount_in`], for host code and the boot-only initrd builder.
+    /// The kernel mounts into its slot with `mount_in`.
     pub fn mount<D: Disk>(d: &mut D) -> Result<Self, FatError> {
+        let mut vol = Self::new();
+        vol.mount_in(d)?;
+        Ok(vol)
+    }
+
+    /// Mount the volume on `d` into `self`, in place: [`Self::clear`], then
+    /// the BPB and FSInfo. On an error `self` is left cleared or partly
+    /// filled, and mounts nothing the caller may use.
+    pub fn mount_in<D: Disk>(&mut self, d: &mut D) -> Result<(), FatError> {
+        self.clear();
         let ss = d.sector_size();
         if ss != SEC as u32 {
             return Err(FatError::Inval);
@@ -12,14 +78,8 @@ impl FatVol {
         if info.clus_bytes() == 0 || info.clus_bytes() > MAX_CLUS_BYTES {
             return Err(FatError::Inval);
         }
-        let mut vol = Self {
-            info,
-            cache: [FatSec::EMPTY; FAT_CACHE],
-            hint: 2,
-            free: 0xFFFFFFFF,
-            fsinfo_dirty: false,
-            now: 0,
-        };
+        self.info = info;
+        let vol = self;
         if info.fsinfo != 0 && info.fsinfo < info.rsvd {
             let mut fs = [0u8; SEC];
             d.read(info.fsinfo, &mut fs)?;
@@ -40,7 +100,7 @@ impl FatVol {
         if vol.free == 0xFFFFFFFF {
             vol.free = vol.count_free(d)?;
         }
-        Ok(vol)
+        Ok(())
     }
 
     pub fn root(&self) -> Node {

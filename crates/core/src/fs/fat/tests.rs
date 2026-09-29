@@ -1117,3 +1117,91 @@ fn lfn_unpaired_surrogate_falls_back() {
         assert_eq!(v.lookup(d, root, b"abc.txt").unwrap().dir_off, n.dir_off);
     });
 }
+
+/// `mount_in` into a volume that held another mount leaves exactly what
+/// the by-value `mount` builds (ROADMAP §10.4, F058).
+#[test]
+fn fat_mount_in_place_matches_by_value() {
+    let mut a = fresh(IMG);
+    with_vol(&mut a, |v, d| {
+        let root = v.info.root_clus;
+        let mut w = create_words(v, d, root, b"A.BIN");
+        v.write_ino(d, &mut w, true, 0, false, &[7u8; 3000])
+            .unwrap();
+        v.sync(d).unwrap();
+    });
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        v.create(d, v.info.root_clus, b"only-in-b", true).unwrap();
+        v.sync(d).unwrap();
+    });
+    let mut da = MemDisk::new(&mut a, SEC as u32).unwrap();
+    let mut slot = FatVol::new();
+    slot.mount_in(&mut da).unwrap();
+    // Dirty the volume's buffers and cache with image A's clusters.
+    let root_a = slot.info.root_clus;
+    slot.lookup(&mut da, root_a, b"A.BIN").unwrap();
+    let mut db = MemDisk::new(&mut b, SEC as u32).unwrap();
+    slot.mount_in(&mut db).unwrap();
+    let mut b2 = b.clone();
+    let mut db2 = MemDisk::new(&mut b2, SEC as u32).unwrap();
+    let by_value = FatVol::mount(&mut db2).unwrap();
+    assert_eq!(format!("{:?}", slot.info), format!("{:?}", by_value.info));
+    assert_eq!(
+        (slot.hint, slot.free, slot.now),
+        (by_value.hint, by_value.free, by_value.now)
+    );
+    let mut db = MemDisk::new(&mut b, SEC as u32).unwrap();
+    let root = slot.info.root_clus;
+    assert!(slot.lookup(&mut db, root, b"only-in-b").unwrap().is_dir());
+    assert_eq!(
+        slot.lookup(&mut db, root, b"A.BIN"),
+        Err(FatError::NotFound)
+    );
+    // A failed mount leaves a cleared volume, not the old one.
+    let mut junk = vec![0u8; IMG];
+    let mut dj = MemDisk::new(&mut junk, SEC as u32).unwrap();
+    assert!(slot.mount_in(&mut dj).is_err());
+    assert_eq!(slot.info.nclus, 0);
+}
+
+/// Reads and writes that cross cluster boundaries at unaligned offsets go
+/// through the volume's one cluster buffer, and directory updates between
+/// them do not disturb the data (ROADMAP §10.4, F058).
+#[test]
+fn fat_rw_across_clusters_volume_buffer() {
+    let mut b = fresh(256 * 1024);
+    let cb = with_vol(&mut b, |v, d| {
+        let cb = v.info.clus_bytes();
+        let root = v.info.root_clus;
+        let data: Vec<u8> = (0..5 * cb + 333).map(|i| (i * 7 + 3) as u8).collect();
+        let mut w = create_words(v, d, root, b"cross.bin");
+        let off = 100u64;
+        assert_eq!(
+            v.write_ino(d, &mut w, true, off, false, &data).unwrap(),
+            (data.len(), off)
+        );
+        // Directory work reuses the buffer between file I/O calls.
+        v.create(d, root, b"between", true).unwrap();
+        let mut out = vec![0u8; data.len()];
+        assert_eq!(v.read_ino(d, &w, off, &mut out).unwrap(), data.len());
+        assert_eq!(out, data);
+        let mut head = vec![0xFFu8; off as usize];
+        assert_eq!(v.read_ino(d, &w, 0, &mut head).unwrap(), off as usize);
+        assert!(head.iter().all(|&x| x == 0));
+        // A write at an unaligned offset inside the file, across a cluster.
+        let patch = vec![0xA5u8; cb + 17];
+        let at = (cb - 9) as u64;
+        v.write_ino(d, &mut w, true, at, false, &patch).unwrap();
+        let mut all = vec![0u8; w.size as usize];
+        v.read_ino(d, &w, 0, &mut all).unwrap();
+        let mut want = vec![0u8; off as usize];
+        want.extend_from_slice(&data);
+        want[at as usize..at as usize + patch.len()].copy_from_slice(&patch);
+        assert_eq!(all, want);
+        v.sync(d).unwrap();
+        cb
+    });
+    assert!(cb >= SEC);
+    fsck(&b);
+}

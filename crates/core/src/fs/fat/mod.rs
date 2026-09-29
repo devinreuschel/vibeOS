@@ -295,7 +295,13 @@ pub struct FatVol {
     pub free: u32,
     fsinfo_dirty: bool,
     pub now: u32,
+    /// The one cluster buffer, used only by the thread that holds the
+    /// volume (its caller's lock): no call puts a cluster on the stack.
+    clbuf: [u8; MAX_CLUS_BYTES],
 }
+
+/// A zero cluster, for [`FatVol::zero_cluster`].
+static ZERO_CLUSTER: [u8; MAX_CLUS_BYTES] = [0; MAX_CLUS_BYTES];
 
 /// A FAT file's inode words, owned by the caller (the `Vfs` inode, from
 /// ROADMAP §10.4's `InodeOps` box). Its identity is its dirent location,
@@ -375,9 +381,16 @@ impl FatVol {
         Ok(Some(clu))
     }
 
-    fn write_cluster<D: Disk>(&mut self, d: &mut D, clu: u32, buf: &[u8]) -> Result<(), FatError> {
-        let n = self.info.clus_bytes();
-        let lba = self.info.clus_lba(clu)?;
+    /// Write cluster `clu` from `buf`. An associated fn over `info`, so a
+    /// caller can pass its own `clbuf`.
+    fn write_cluster<D: Disk>(
+        info: &FatInfo,
+        d: &mut D,
+        clu: u32,
+        buf: &[u8],
+    ) -> Result<(), FatError> {
+        let n = info.clus_bytes();
+        let lba = info.clus_lba(clu)?;
         let src = buf.get(..n).ok_or(FatError::Inval)?;
         let (secs, _) = src.as_chunks::<SEC>();
         for (i, sec) in (0u32..).zip(secs) {
