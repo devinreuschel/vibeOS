@@ -302,7 +302,7 @@ in the test harness produces either false confidence or a debugging session in t
 Those tests exercise `check_markers_in_order`, which no runner calls; `run_qemu_and_check`, the
 matcher every e2e run uses, has no unit test (ROADMAP §10.2, F141).
 
-The `vibefs_crash` build (`vibefs_init::crash_loop`) prints no boot contract past its own lines,
+The `vibefs_crash` build (`fs::vibefs_crash::crash_loop`) prints no boot contract past its own lines,
 which `run_vibefs_crash.py` knows:
 
 | Line | Meaning |

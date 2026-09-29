@@ -73,7 +73,6 @@ KNOWN: list[str] = [
     "two-way kernel:arch::x86_64::idt kernel:proc::syscall_init",
     "two-way kernel:fs::fat_init kernel:fs::fs_init",
     "two-way kernel:fs::file_init kernel:fs::fs_init",
-    "two-way kernel:fs::file_init kernel:fs::vibefs_init",
     "two-way kernel:fs::fs_init kernel:fs::vibefs_init",
     "two-way kernel:proc::proc_init kernel:proc::syscall_init",
     "two-way kernel:proc::syscall_init kernel:sched::thread_init",

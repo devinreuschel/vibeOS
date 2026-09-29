@@ -289,7 +289,7 @@ fn normal_boot_tail() {
     crate::proc_init::start_init();
 
     #[cfg(feature = "vibefs_crash")]
-    crate::vibefs_init::crash_loop();
+    crate::fs::vibefs_crash::crash_loop();
 
     #[cfg(feature = "kernel_tests")]
     crate::ktest::run();
