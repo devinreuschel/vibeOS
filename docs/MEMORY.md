@@ -298,7 +298,8 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
   §11.4), so they survive a CR3 reload. Unmapping one requires a shootdown on every online CPU
   before the VA or the frame behind it can be reused (§2.4). See [section 7.9](SMP.md#79-tlb-shootdown).
 - A kernel-half edit runs a local `invlpg`, drops PT, then calls `paging::tlb_shootdown_others(va)`,
-  a hook that `ipi_init::init` points at `ipi_init::shootdown_va` before the first AP starts (§7.9).
+  or `paging::tlb_shootdown_ranges` for several pages at once, through a hook that `ipi_init::init`
+  points at `ipi_init::shootdown_ranges` before the first AP starts (§7.9).
   Host tests, and boot before `ipi_init::init`, leave the hook unset; the local `invlpg` is enough
   there.
 - Frames and page-table pages that a PTE change drops go into a per-operation gather, Linux's
@@ -674,7 +675,13 @@ is the second.
   `NR_CACHED_STACKS`), which the next spawn on that CPU reuses zeroed and still mapped; any other
   stack goes on the CPU's dead list, linked through the dead stacks themselves
   (`kva_init::park_on_list`), and that CPU's workqueue worker unmaps and frees it with IF=1
-  (`kva_init::free_parked`). No other CPU reaches the slot, the cache, or the list. Frame counts
+  (`kva_init::free_parked`). The worker frees the list in batches of up to 16 stacks and 64 pages:
+  it unmaps each stack of a batch, sends one shootdown round for all of them (§7.9), then frees their
+  frames and VA. A round waits for every other CPU's ack while an exit sends none, so with a round per
+  page a burst of exits outran the worker, and the dead stacks, their frames, and the fresh KVA and
+  page-table pages their live VA pushed the allocator into piled up
+  (`lifetime_stack_reclaim`, `dead_list_batched_rounds`). No other CPU reaches the slot, the cache,
+  or the list. Frame counts
   (`ktest::free_frames`) count cached stacks as free until ROADMAP §12.1's categories. A CPU going
   offline (ROADMAP §19.6) frees its cache.
 

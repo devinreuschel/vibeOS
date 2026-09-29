@@ -5,7 +5,7 @@ use crate::sys::{self, Errno};
 /// Write all of `buf` to `fd`, retrying short writes.
 pub fn write_all(fd: i32, mut buf: &[u8]) -> Result<(), Errno> {
     while !buf.is_empty() {
-        let n = sys::write(fd, buf)?;
+        let n = sys::write(fd as u32, buf.as_ptr(), buf.len())?;
         if n == 0 {
             // A write that takes nothing would loop forever; report it as
             // the I/O error Linux's `write(2)` uses.

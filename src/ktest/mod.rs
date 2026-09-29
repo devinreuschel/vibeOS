@@ -321,6 +321,11 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("serial_lines_whole", log::ktest::test_serial_lines_whole).deadline(60_000),
     test("serial_frame", log::ktest::test_serial_frame),
+    test("trace_ring_own_cpu", log::ktest::test_trace_ring_own_cpu),
+    test(
+        "trace_tracepoints_fire",
+        log::ktest::test_trace_tracepoints_fire,
+    ),
     test("fb_bgrx_roundtrip", console::ktest::test_fb_bgrx_roundtrip),
     test("fb_pitch", console::ktest::test_fb_pitch),
     test("fb_cr_home", console::ktest::test_fb_cr_home),
@@ -423,6 +428,10 @@ pub(crate) const TESTS: &[Test] = &[
         sched::ktest::lifetime_stack_reclaim,
     )
     .deadline(120_000),
+    test(
+        "dead_list_batched_rounds",
+        sched::ktest::dead_list_batched_rounds,
+    ),
     test("exit_burst", sched::ktest::exit_burst).deadline(60_000),
     test(
         "lifetime_dead_slot_on_cpu",
@@ -600,6 +609,18 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(30_000),
     test("user_runtime", proc::ktest::user_runtime),
+    test(
+        "syscall_ptr_decl_efault",
+        proc::ktest::syscall_ptr_decl_efault,
+    ),
+    test(
+        "read_ebadf_before_efault",
+        proc::ktest::read_ebadf_before_efault,
+    ),
+    test(
+        "wait4_echild_before_efault",
+        proc::ktest::wait4_echild_before_efault,
+    ),
     test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,
@@ -1068,6 +1089,13 @@ pub(crate) struct FrameCount {
     /// Mapped heap pages, for the failure line. They are not added back:
     /// heap growth in the test's window takes buddy frames and fails it.
     heap: usize,
+    /// The rest are for the failure line alone, each naming one place the
+    /// frames can be: dead threads' stacks not yet cached or freed when
+    /// [`settle`] returned (non-zero only when it timed out), KVA bytes
+    /// reserved, and frames of dropped `Frames` tokens.
+    in_flight: usize,
+    kva_used: u64,
+    dropped: usize,
 }
 
 impl FrameCount {
@@ -1078,6 +1106,9 @@ impl FrameCount {
             cached: thread_init::cached_stack_frames(),
             tables: crate::mm::ktest::table_pages(),
             heap: crate::heap_init::stats().capacity / vibeos::paging::PAGE_SIZE_4K as usize,
+            in_flight: thread_init::stacks_in_flight(),
+            kva_used: kva_init::stats().used,
+            dropped: vibeos::pmm::leaked_frames(),
         }
     }
 
@@ -1087,13 +1118,15 @@ impl FrameCount {
     }
 
     /// `Ok` when `after` accounts for as many frames as `self`; otherwise a
-    /// failure line that names every count before and after.
-    pub(crate) fn unchanged(&self, after: &Self, exits: usize) -> Outcome {
+    /// failure line that names every count before and after, and, after,
+    /// the stacks in flight, the KVA KiB used, and the dropped
+    /// frames, in [`FAIL_MSG_BYTES`].
+    pub(crate) fn unchanged(&self, after: &Self) -> Outcome {
         if after.total() == self.total() {
             return Outcome::Ok;
         }
         crate::fail_fmt!(
-            "frames {} -> {} after {exits} exits (buddy {}->{} cache {}->{} pt {}->{} heap {}->{})",
+            "frames {}->{} buddy {}->{} cache {}->{} pt {}->{} heap {}->{} fly {} kva {}k drop {}",
             self.total(),
             after.total(),
             self.buddy,
@@ -1104,6 +1137,9 @@ impl FrameCount {
             after.tables,
             self.heap,
             after.heap,
+            after.in_flight,
+            after.kva_used / 1024,
+            after.dropped.saturating_sub(self.dropped),
         )
     }
 }

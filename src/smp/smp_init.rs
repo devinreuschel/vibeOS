@@ -3,11 +3,13 @@
 //! One AP at a time: they share the trampoline page and its param block.
 //! `write_volatile` + `compiler_fence(SeqCst)` before SIPI.
 
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use vibeos::apic::IpiMode;
+use vibeos::arch::CycleCounter;
 use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
+use vibeos::log::trace::{ClockInfo, WARP_MAX_ITERS, WARP_MS, WarpLine};
 use vibeos::marker;
 use vibeos::per_cpu::PerCpu;
 use vibeos::smp::{
@@ -19,9 +21,11 @@ use vibeos::thread::ThreadId;
 use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
+use crate::arch::current::Arch;
 use crate::arch::gdt::{self, ApTables, CpuTables};
 use crate::cell::IrqCell;
 use crate::kva_init;
+use crate::log::trace_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
@@ -246,6 +250,78 @@ fn wait_ready(cpu_id: u32) -> bool {
     false
 }
 
+/// The line the TSC warp test shares between the BSP and the AP it is
+/// starting (DESIGN §7.4).
+static WARP: WarpLine = WarpLine::new();
+/// APs whose warp test met the BSP.
+static WARP_RUNS: AtomicU32 = AtomicU32::new(0);
+
+/// The warp test's barrier timeout and run span, in TSC cycles, or `None`
+/// before the TSC is calibrated, when neither side runs it.
+fn warp_budget() -> Option<(u64, u64)> {
+    let per_ms = time_init::tsc_per_ms();
+    if per_ms == 0 {
+        return None;
+    }
+    Some((
+        per_ms.checked_mul(READY_TIMEOUT_MS)?,
+        per_ms.checked_mul(WARP_MS)?,
+    ))
+}
+
+/// The BSP's side of the warp test against the AP it just sent SIPIs.
+/// Runs with IF=1, never inside an `InterruptGuard`: an interrupt only
+/// delays a read and cannot fake a backward step.
+fn tsc_warp_source() {
+    let Some((timeout, span)) = warp_budget() else {
+        return;
+    };
+    if WARP.arrive(Arch::now, timeout) {
+        time_init::note_tsc_warp(WARP.run(Arch::now, span, WARP_MAX_ITERS));
+        WARP_RUNS.fetch_add(1, Ordering::Relaxed);
+        if !WARP.wait_left(Arch::now, timeout) {
+            crate::klog!(
+                vibeos::log::Level::Warn,
+                "vibeOS: smp: tsc warp: ap did not leave"
+            );
+        }
+    }
+    WARP.reset();
+}
+
+/// The AP's side of the warp test, with IF=0 before its first `sti`
+/// (at most `WARP_MAX_ITERS` iterations). Alone past the timeout, it skips.
+fn tsc_warp_target() {
+    let Some((timeout, span)) = warp_budget() else {
+        return;
+    };
+    if WARP.arrive(Arch::now, timeout) {
+        time_init::note_tsc_warp(WARP.run(Arch::now, span, WARP_MAX_ITERS));
+        WARP.leave();
+    }
+}
+
+/// The skew marker, once an AP ran the warp test, and the clock the core
+/// tool reads from the trace's header.
+fn report_tsc_warp() {
+    let runs = WARP_RUNS.load(Ordering::Relaxed);
+    if runs > 0 {
+        crate::marker!("vibeOS: smp: tsc skew {} cycles", time_init::tsc_max_skew());
+    }
+    if !time_init::tsc_warp_ok() {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: smp: tsc warp: traces order per cpu"
+        );
+    }
+    trace_init::publish_clock(&ClockInfo {
+        freq_hz: Arch::freq_hz().unwrap_or(0),
+        invariant: time_init::tsc_invariant(),
+        warp_measured: runs > 0,
+        max_skew: time_init::tsc_max_skew(),
+    });
+}
+
 /// Start the AP `a` describes and wait for it. Every failure prints its
 /// line and frees what `a` holds.
 fn start_one(a: ApAlloc) {
@@ -320,6 +396,7 @@ fn start_one(a: ApAlloc) {
     )]
     let _ = apic_init::send_ipi(apic_id, SIPI_VECTOR, IpiMode::Sipi);
 
+    tsc_warp_source();
     if !wait_ready(cpu_id) {
         crate::marker!("vibeOS: smp: apic {apic_id} timed out");
         free_live_ap(cpu_id, idle_id, published, true);
@@ -372,6 +449,7 @@ extern "C" fn ap_entry() -> ! {
     cpu.tsc_per_ms = time_init::tsc_per_ms();
     cpu.timer_mode = apic_init::timer_mode();
     apic_init::arm_ap();
+    tsc_warp_target();
     per_cpu_init::mark_online(cpu.cpu_id);
     crate::marker!(
         "{}{}{}",
@@ -398,10 +476,12 @@ pub unsafe fn init() {
         .apic_id
         .load(Ordering::Relaxed) as u8;
     let Some(info) = acpi_init::info() else {
+        report_tsc_warp();
         crate::marker!(marker::SMP_DONE);
         return;
     };
     let Some(madt) = info.madt.as_ref() else {
+        report_tsc_warp();
         crate::marker!(marker::SMP_DONE);
         return;
     };
@@ -426,5 +506,6 @@ pub unsafe fn init() {
         logical += 1;
     }
 
+    report_tsc_warp();
     crate::marker!(marker::SMP_DONE);
 }

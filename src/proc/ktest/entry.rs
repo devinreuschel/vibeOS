@@ -240,6 +240,21 @@ pub(crate) fn test_syscall_dispatch() -> Outcome {
     if proc_init::dispatch(0xC0FFEE, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
         return Outcome::Fail("enosys");
     }
+    // The number is `eax` sign-extended (SYSCALL.md §1): the high half of
+    // `rax` is ignored, and a negative `eax` names no call.
+    if proc_init::dispatch(0xFFFF_FFFF_0000_0000 | vibeos::syscall::SYS_GETPID, [0; 6]) != 0 {
+        return Outcome::Fail("getpid, high half set");
+    }
+    if proc_init::dispatch(
+        0x1_0000_0000 | vibeos::syscall::SYS_WRITE,
+        [3, 0, 1, 0, 0, 0],
+    ) != vibeos::syscall::neg(vibeos::syscall::EBADF)
+    {
+        return Outcome::Fail("write, high half set");
+    }
+    if proc_init::dispatch(0x8000_0000, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
+        return Outcome::Fail("negative eax");
+    }
     Outcome::Ok
 }
 

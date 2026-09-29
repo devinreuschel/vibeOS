@@ -35,6 +35,7 @@
 #![allow(clippy::identity_op)] // PTE masks read as `x << n` even when n is 0
 
 use crate::atomic::statics::{AtomicPtr, Ordering};
+use crate::ipi::ShootRange;
 use crate::pmm::Frames;
 
 pub const PAGE_SHIFT: u32 = 12;
@@ -932,7 +933,7 @@ pub struct UserFreeStats {
 /// Host tests and pre-SMP boot leave this unset (local `invlpg` is enough).
 static SHOOTDOWN_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-pub fn set_tlb_shootdown_hook(f: fn(VirtAddr)) {
+pub fn set_tlb_shootdown_hook(f: fn(&[ShootRange])) {
     SHOOTDOWN_HOOK.store(f as *mut (), Ordering::Release);
 }
 
@@ -940,16 +941,24 @@ pub fn set_tlb_shootdown_hook(f: fn(VirtAddr)) {
 /// code can call it after any leaf edit including MMIO patches.
 #[inline]
 pub fn tlb_shootdown_others(va: VirtAddr) {
+    tlb_shootdown_ranges(&[ShootRange::page(va.as_u64())]);
+}
+
+/// Invalidate every page of `ranges` on every other CPU, one round per
+/// `ipi::SHOOT_RANGES` ranges (DESIGN §7.9), after the caller has cleared
+/// their PTEs and run its local `invlpg`s.
+#[inline]
+pub fn tlb_shootdown_ranges(ranges: &[ShootRange]) {
     let p = SHOOTDOWN_HOOK.load(Ordering::Acquire);
     if p.is_null() {
         return;
     }
     // SAFETY: the only non-null value `SHOOTDOWN_HOOK` ever holds is a
-    // `fn(VirtAddr)` cast to a pointer, stored by
+    // `fn(&[ShootRange])` cast to a pointer, stored by
     // `mm::paging::set_tlb_shootdown_hook`; a fn pointer and `*mut ()` have
     // the same size.
-    let f: fn(VirtAddr) = unsafe { core::mem::transmute(p) };
-    f(va);
+    let f: fn(&[ShootRange]) = unsafe { core::mem::transmute(p) };
+    f(ranges);
 }
 
 // Host tests take their table frames from the shared buddy pool.

@@ -168,8 +168,22 @@ For each enabled APIC ID that is not the BSP:
 On the AP side (`smp_init::ap_entry`), in order: `cli`; load the per-CPU GDT and TSS; set `GS_BASE`
 and `KERNEL_GS_BASE` (`per_cpu_init::install_gs`); write CR0 and CR4 whole (`arch::cpu::init_control_regs`), program the
 syscall MSRs and the FPU, and set RSP0 (`syscall_init::init_ap`); load the shared IDT; enable the LAPIC; copy the BSP's `tsc_per_ms` and timer mode into `PerCpu`; arm the
-LAPIC timer with the BSP's calibration (`apic_init::arm_ap`); mark the CPU online and print
+LAPIC timer with the BSP's calibration (`apic_init::arm_ap`); run the TSC warp test against the
+BSP; mark the CPU online and print
 `vibeOS: sched: cpu<i> ready`; publish the ready flag; `sti`; enter the idle loop.
+
+The TSC warp test (`smp_init::tsc_warp_source` on the BSP, `tsc_warp_target` on the AP) measures
+the AP's TSC against the BSP's over one shared cache line, `trace::WarpLine`. The BSP joins it just
+before step 5, with IF=1; the AP joins after arming its timer, with IF=0 before its first `sti`. Each
+side waits at a barrier that spins on its own cycle counter for at most the 3 s of step 5 and skips
+the test when left alone, then reads its counter for 2 ms, at most 200,000 times: each read is
+compared with the largest read either side has published, and one below it is a backward step.
+The skew is the largest backward step, in cycles, 0 for none (`time_init::note_tsc_warp`,
+`tsc_max_skew`); any backward step makes the TSC unfit to order a trace across CPUs, Linux's
+`check_tsc_warp` rule ([DESIGN §6.4](TIME.md#64-timekeeping-api)). Once at least one AP ran
+the test, the BSP prints `vibeOS: smp: tsc skew <n> cycles` before `vibeOS: smp: done`, and it
+always publishes the calibration, the invariant bit and the warp result into the flight recorder's
+header (`trace_init::publish_clock`), where the core tool reads them.
 
 `GS_BASE` must be set before any `lidt` and before `sti`. NMI and timer IRQs both
 read per-CPU state through `gs:[0]`. Setting it after `lidt` is a null dereference
@@ -398,7 +412,7 @@ whose `dmb oshst` puts the CPU's earlier stores ahead of it, as the `dmb ishst` 
 SGI write does. INIT and SIPI go through the same send. Callers publish with a Release store or a
 locked read-modify-write and add no fence of their own. Rule; not yet enforced:
 `apic_init::send_ipi` has no barrier of its own, and the callers that fence (`smp_init::start_one`,
-`ipi_init::shootdown_va`) do so before their publishing store, which is not enough under x2APIC
+`ipi_init::shootdown_ranges`) do so before their publishing store, which is not enough under x2APIC
 (ROADMAP §20.1).
 
 The wake inbox (§7.5) is `vibeos::irq::ipi::WakeInbox`, a per-CPU bitmap of `AtomicU64` words
@@ -559,18 +573,23 @@ between working and a hang that only appears under load. `SpinMutex::lock`'s spi
 reaches `service_incoming` through `sync_init::set_spin_poll`, which `ipi_init::init` sets before the
 first AP starts.
 
-The wait never panics, because `shootdown_va` and `call_mask` free frames and reuse their slot as
+The wait never panics, because `shootdown_ranges` and `call_mask` free frames and reuse their slot as
 soon as `ipi_init::wait_acks` returns. After each second (1000 × `tsc_per_ms` cycles) without every
 acknowledgement, it logs `vibeOS: ipi: wait_acks late <n> s: cpu<i> …` and counts it in
 `ipi_init::ack_late_count`. Without a TSC it logs every 50,000,000 polls. A CPU at IF=0 that does not
 poll `service_incoming` delays every shootdown until it does. One that never does leaves a hang for
 ROADMAP §10.7's forensics to report. `lifetime_shootdown_ack_late` holds IF off for 3 s on one CPU
-while another unmaps. As built, one round invalidates one VA
-(`shootdown_va`) on every online CPU; ROADMAP §12.3 replaces it with the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
+while another unmaps. As built, a round is kernel-only and goes to every online CPU: it carries up
+to 16 ranges (`vibeos::ipi::SHOOT_RANGES`) of 1 to 32 pages each (`ShootRange`, a page-aligned start
+with the page count in its low 12 bits), and each receiver runs `invlpg` on every page of them
+(`ipi_init::shootdown_ranges`, which sends one round per 16 ranges; `paging::tlb_shootdown_others(va)`
+is the one-page case). A KVA unmap of up to 32 pages sends one round, and a worker frees its CPU's
+dead stacks 16 to a round ([§4.5](MEMORY.md#45-kernel-virtual-address-allocator)); ROADMAP §12.3
+adds the target, the "all" count, and the freed-tables flag of the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
 rest mapped with no error.
 
 The shootdown handler allocates nothing and takes no lock ([§2.2](INVARIANTS.md#22-interrupt-handler-rules)). It
-reads a request slot and executes `invlpg`.
+reads a request slot and executes `invlpg` on each page it names, at most 512.
 
 ## 7.10 Verification and later work
 
