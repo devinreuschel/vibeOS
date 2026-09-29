@@ -104,7 +104,8 @@ impl<const WORDS: usize> Default for WakeInbox<WORDS> {
 /// Words in the kernel's inbox: one bit per thread-table slot.
 pub const INBOX_WORDS: usize = MAX_THREADS.div_ceil(64);
 
-const _: () = assert!(MAX_THREADS <= 64 * 64, "the inbox summary is one u64");
+// The summary is one u64, so the thread table has at most 64 * 64 slots.
+const _: () = assert!(INBOX_WORDS <= 64, "the inbox summary is one u64");
 
 /// The kernel's per-CPU wake inbox, sized from `limits::MAX_THREADS`.
 pub type ThreadInbox = WakeInbox<INBOX_WORDS>;
