@@ -302,7 +302,11 @@ in the test harness produces either false confidence or a debugging session in t
 Both runners, `run_qemu_and_check` and `run_qemu_console_input`, read serial from a line source
 (`tests/harness/linesource.py`): a QEMU child in a run, and in unit tests a `FakeLineSource` that
 scripts the lines, the exit status, and QEMU's stderr, so the matcher every e2e run uses is tested
-without QEMU (ROADMAP §10.2, F141).
+without QEMU (ROADMAP §10.2, F141). QEMU's stderr goes to a temporary file, apart from serial, so
+serial lines carry only the guest's output. When QEMU exits before the last marker, the error names
+the missing marker, QEMU's exit status, and the last 20 lines of its stderr, then the serial tail, so
+a firmware QEMU could not load reads as that and not only as `missing marker 'serial_online'`
+(F079); a timeout shows the stderr lines too when there are any.
 
 The `vibefs_crash` build (`vibefs_init::crash_loop`) prints no boot contract past its own lines,
 which `run_vibefs_crash.py` knows:

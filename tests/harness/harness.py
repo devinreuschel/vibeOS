@@ -48,6 +48,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import IO
 
 from tests.harness.linesource import LineSource
 
@@ -101,6 +102,7 @@ class RunResult:
     exit_code: int | None = None
     timed_out: bool = False
     panic_line: str | None = None
+    stderr: str = ""
 
 
 def serial_tail(lines: list[str], n: int = 40) -> str:
@@ -297,9 +299,10 @@ def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
 class QemuProcess:
     """A `LineSource` over a QEMU child (C-LINESOURCE).
 
-    Serial comes from stdout through `DeadlineReader`. `stdin=True` gives the
-    guest's COM1 a pipe for `send_input`. `monitor_sock` is the HMP socket
-    that `monitor` and `quit` use.
+    Serial comes from stdout through `DeadlineReader`, and only serial:
+    stderr goes to a temporary file, which cannot fill and stall QEMU the
+    way a second pipe can. `stdin=True` gives the guest's COM1 a pipe for
+    `send_input`. `monitor_sock` is the HMP socket `monitor` and `quit` use.
     """
 
     def __init__(
@@ -310,10 +313,11 @@ class QemuProcess:
         monitor_sock: str | None = None,
         stdin: bool = False,
     ) -> None:
+        self._err = tempfile.TemporaryFile()
         self._proc = subprocess.Popen(
             argv,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=self._err,
             stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
             bufsize=0,
         )
@@ -369,7 +373,13 @@ class QemuProcess:
         return code
 
     def stderr_text(self) -> str:
-        return ""
+        return _file_text(self._err)
+
+
+def _file_text(f: IO[bytes]) -> str:
+    """A child's stderr file so far. `pread` leaves the shared offset alone."""
+    fd = f.fileno()
+    return os.pread(fd, os.fstat(fd).st_size, 0).decode("utf-8", errors="replace")
 
 
 def _start_qemu(cfg: QemuConfig, deadline: float, *, stdin: bool = False) -> QemuProcess:
@@ -382,6 +392,19 @@ def _start_qemu(cfg: QemuConfig, deadline: float, *, stdin: bool = False) -> Qem
     return QemuProcess(
         qemu_argv(cfg, monitor_sock), deadline, monitor_sock=monitor_sock, stdin=stdin
     )
+
+
+def _qemu_report(result: RunResult, *, exited: bool) -> str:
+    """QEMU's exit status and stderr tail, then the serial tail (F079).
+
+    `exited`: QEMU ended the run itself. After a timeout the harness killed
+    it, so only a non-empty stderr is shown.
+    """
+    out = f"; QEMU exited with status {result.exit_code}" if exited else ""
+    err = result.stderr.splitlines()[-20:]
+    if exited or err:
+        out += "\n--- qemu stderr ---\n" + ("\n".join(err) if err else "(no stderr)")
+    return out + serial_tail(result.lines)
 
 
 def _reap(src: LineSource) -> int | None:
@@ -746,6 +769,7 @@ def run_qemu_and_check(
                     break
     finally:
         result.exit_code = _reap(src)
+        result.stderr = src.stderr_text()
 
     if result.timed_out:
         missing = (
@@ -753,13 +777,14 @@ def run_qemu_and_check(
         )
         raise HarnessError(
             f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers; "
-            f"missing {missing!r}{serial_tail(result.lines)}"
+            f"missing {missing!r}{_qemu_report(result, exited=False)}"
         )
 
     if marker_idx < len(markers):
         missing = markers[marker_idx].name
         raise HarnessError(
             f"missing marker {missing!r} after {len(result.lines)} lines"
+            f"{_qemu_report(result, exited=True)}"
         )
 
     if expect_panic and panic_seen is None:
@@ -899,10 +924,11 @@ def run_qemu_inject_mce(
     argv = qemu_argv(cfg, monitor_sock)
     panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
 
+    err = tempfile.TemporaryFile()
     proc = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=err,
         stdin=subprocess.DEVNULL,
         bufsize=1,
         text=True,
@@ -926,9 +952,14 @@ def run_qemu_inject_mce(
                     f"markers; missing {missing!r}{serial_tail(result.lines)}"
                 )
             if kind == "eof":
+                try:
+                    result.exit_code = proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    result.exit_code = None
+                result.stderr = _file_text(err)
                 raise HarnessError(
                     f"missing marker {markers[marker_idx].name!r} after "
-                    f"{len(result.lines)} lines"
+                    f"{len(result.lines)} lines{_qemu_report(result, exited=True)}"
                 )
             result.lines.append(line)
             for sig in panic_signatures:
@@ -1042,21 +1073,18 @@ def run_qemu_console_input(
                 break
     finally:
         result.exit_code = _reap(src)
+        result.stderr = src.stderr_text()
 
-    if result.timed_out or not saw_ready:
+    report = _qemu_report(result, exited=not result.timed_out)
+    if not saw_ready:
+        why = f"after {timeout_s}s" if result.timed_out else "before QEMU exited"
         raise HarnessError(
-            f"console input: no shell ready after {timeout_s}s; "
-            f"matched={result.matched}{serial_tail(result.lines)}"
+            f"console input: no shell ready {why}; matched={result.matched}{report}"
         )
     if not saw_serial:
-        raise HarnessError(
-            f"console input: serial echo missing{serial_tail(result.lines)}"
-        )
+        raise HarnessError(f"console input: serial echo missing{report}")
     if not saw_ps2:
-        raise HarnessError(
-            f"console input: PS/2 sendkey echo missing (i8042)"
-            f"{serial_tail(result.lines)}"
-        )
+        raise HarnessError(f"console input: PS/2 sendkey echo missing (i8042){report}")
     return result
 
 

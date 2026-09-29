@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import socket
+import sys
 import time
 import unittest
 from typing import Any
@@ -27,6 +28,7 @@ from tests.harness.harness import (
     HarnessError,
     Marker,
     QemuConfig,
+    QemuProcess,
     RunResult,
     _monitor_reply,
     check_mce_dump,
@@ -225,6 +227,76 @@ class TestMarkerOrder(unittest.TestCase):
         with mock.patch("shutil.which", return_value=None):
             result, _ = check_fake(["vibeOS: serial online"], ABC_MARKERS[:1])
         self.assertEqual(result.matched, ["a"])
+
+
+QEMU_LOAD_ERR = "qemu-system-x86_64: -bios x.fd: could not load"
+
+
+class TestQemuExitReport(unittest.TestCase):
+    """An early QEMU exit names its status and stderr (F079)."""
+
+    def test_fake_exit_names_status_and_stderr(self) -> None:
+        src = FakeLineSource([], exit_code=1, stderr=QEMU_LOAD_ERR + "\n")
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_and_check(FAKE_CFG, ABC_MARKERS[:1], line_source=src)
+        msg = str(cm.exception)
+        self.assertIn("missing marker 'a' after 0 lines", msg)
+        self.assertIn("QEMU exited with status 1", msg)
+        self.assertIn("--- qemu stderr ---", msg)
+        self.assertIn(QEMU_LOAD_ERR, msg)
+
+    def test_no_stderr_says_so(self) -> None:
+        src = FakeLineSource.from_lines(["limine: Loading executable"], exit_code=0)
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_and_check(FAKE_CFG, ABC_MARKERS[:1], line_source=src)
+        msg = str(cm.exception)
+        self.assertIn("status 0", msg)
+        self.assertIn("(no stderr)", msg)
+        self.assertIn("limine: Loading executable", msg)
+
+    def test_stderr_tail_is_last_20_lines(self) -> None:
+        err = "".join(f"warn {i}\n" for i in range(30))
+        src = FakeLineSource([], exit_code=1, stderr=err)
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_and_check(FAKE_CFG, ABC_MARKERS[:1], line_source=src)
+        msg = str(cm.exception)
+        self.assertIn("warn 29", msg)
+        self.assertIn("warn 10", msg)
+        self.assertNotIn("warn 9\n", msg)
+
+    def test_timeout_shows_nonempty_stderr(self) -> None:
+        src = FakeLineSource([("timeout", "")], exit_code=None, stderr="qemu: warning x\n")
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_and_check(FAKE_CFG, ABC_MARKERS[:1], line_source=src)
+        self.assertIn("qemu: warning x", str(cm.exception))
+        src = FakeLineSource([("timeout", "")], exit_code=None)
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_and_check(FAKE_CFG, ABC_MARKERS[:1], line_source=src)
+        self.assertNotIn("qemu stderr", str(cm.exception))
+
+    def test_console_input_exit_report(self) -> None:
+        src = FakeLineSource([], exit_code=1, stderr=QEMU_LOAD_ERR)
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        msg = str(cm.exception)
+        self.assertIn("status 1", msg)
+        self.assertIn(QEMU_LOAD_ERR, msg)
+
+    def test_real_child_stderr_kept_apart_from_serial(self) -> None:
+        argv = [
+            sys.executable,
+            "-c",
+            "import sys; print('serial line'); "
+            "sys.stderr.write('qemu-system-x86_64: could not load\\n'); sys.exit(1)",
+        ]
+        src = QemuProcess(argv, time.monotonic() + 10.0)
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_and_check(FAKE_CFG, ABC_MARKERS[:1], line_source=src)
+        msg = str(cm.exception)
+        self.assertIn("missing marker 'a' after 1 lines", msg)
+        self.assertIn("QEMU exited with status 1", msg)
+        self.assertIn("--- qemu stderr ---\nqemu-system-x86_64: could not load", msg)
+        self.assertIn("--- serial tail 1/1 ---\nserial line", msg)
 
 
 CONSOLE_OK_LINES = [
