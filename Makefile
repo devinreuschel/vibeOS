@@ -155,6 +155,9 @@ check:
 	cargo fmt --check --all
 	cargo clippy -p vibeos-core --all-targets --features std --target $(HOST_TRIPLE) -- -D warnings
 	cargo clippy -p vibeos-hostlib-tests --all-targets --target $(HOST_TRIPLE) -- -D warnings
+	# The portable core as the kernel links it (no `std`), for the host, where no
+	# port exists, so only type parameters reach one (ROADMAP §10.3).
+	cargo build -p vibeos-core --lib --target $(HOST_TRIPLE)
 	cargo clippy -p vibeos-core --target $(TARGET) -- -D warnings
 	cargo clippy --bin vibeos -- -D warnings
 	$(MAKE) test-unit

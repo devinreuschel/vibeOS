@@ -115,7 +115,9 @@ The mechanism:
   `type AddressSpace = vibeos::AddressSpace<Arch>`), so kernel code never spells the parameter.
 - The kernel binary names its port once, as `arch::current::Arch` in `src/arch/current.rs`, a type
   alias chosen by `cfg(target_arch)` in the kernel crate, where a compile-time item checks that the
-  port implements the seam traits built so far. `vibeos-core` contains no `cfg(target_arch)` and no
+  port implements the seam traits built so far. `make check` also builds `vibeos-core` as the kernel
+  links it, without `std`, for the host, where no port exists, so only a type parameter reaches one.
+  `vibeos-core` contains no `cfg(target_arch)` and no
   assembly, test modules included (ROADMAP Phase 10 gate); `scripts/check_core_stable.py` enforces
   it from ROADMAP §10.3's A2 box.
 - The atomics seam is the one exception: a module selected by `cfg(loom)` (ROADMAP §10.8), because
