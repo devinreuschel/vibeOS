@@ -754,3 +754,11 @@ needs = [
   "an `arch` module boundary built",  # L1277
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1000
+[[box]]
+key = "user copies dereference the user"
+needs = [
+  "user-VA accessors replace the physmap",  # L1377
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
