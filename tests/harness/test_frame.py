@@ -239,9 +239,9 @@ class PanicSignatureTests(unittest.TestCase):
                 result = check([K(ONLINE), line, K(CONTRACT)], [Marker(CONTRACT, "c")])
                 self.assertEqual(result.matched, ["c"])
                 with self.assertRaisesRegex(HarnessError, "panic signature"):
-                    check_ktest_output([K("vibeOS: ktest: begin"), K(line)], ISA_DEBUG_PASS)
+                    check_ktest_output([K("vibeOS: ktest: begin 1"), K(line)], ISA_DEBUG_PASS)
                 check_ktest_output(
-                    [K("vibeOS: ktest: begin"), line, K("vibeOS: ktest: end")], ISA_DEBUG_PASS
+                    [K("vibeOS: ktest: begin 1"), line, K("vibeOS: ktest: end")], ISA_DEBUG_PASS
                 )
 
     def test_panic_done_framed_only(self) -> None:
@@ -264,20 +264,24 @@ class KtestVerdictTests(unittest.TestCase):
         return check_ktest_output(lines, ISA_DEBUG_PASS)
 
     def test_begin_and_end_framed_only(self) -> None:
-        self.run_ktest([K("vibeOS: ktest: begin"), K("vibeOS: ktest: end")])
+        self.run_ktest([K("vibeOS: ktest: begin 1"), K("vibeOS: ktest: end")])
         with self.assertRaisesRegex(HarnessError, "ktest end without begin"):
             self.run_ktest(["vibeOS: ktest: begin", K("vibeOS: ktest: end")])
         with self.assertRaisesRegex(HarnessError, "ktest_end"):
-            self.run_ktest([K("vibeOS: ktest: begin"), "vibeOS: ktest: end"])
+            self.run_ktest([K("vibeOS: ktest: begin 1"), "vibeOS: ktest: end"])
 
     def test_fail_framed_only(self) -> None:
         with self.assertRaisesRegex(HarnessError, "ktest FAIL"):
             self.run_ktest(
-                [K("vibeOS: ktest: begin"), K("vibeOS: ktest: FAIL x: y"), K("vibeOS: ktest: end")]
+                [
+                    K("vibeOS: ktest: begin 1"),
+                    K("vibeOS: ktest: FAIL x: y"),
+                    K("vibeOS: ktest: end"),
+                ]
             )
         self.run_ktest(
             [
-                K("vibeOS: ktest: begin"),
+                K("vibeOS: ktest: begin 1"),
                 "vibeOS: ktest: FAIL x: y",
                 "?vibeOS: ktest: FAIL forged",
                 K("vibeOS: ktest: end"),
@@ -350,7 +354,7 @@ class LiminePanicTests(unittest.TestCase):
                     run_qemu_and_check(FAKE_CFG, [Marker(ONLINE, "a")], line_source=src)
                 self.assertTrue(src.killed)
                 with self.assertRaisesRegex(HarnessError, "Limine panic"):
-                    check_ktest_output([line, K("vibeOS: ktest: begin")], ISA_DEBUG_PASS)
+                    check_ktest_output([line, K("vibeOS: ktest: begin 1")], ISA_DEBUG_PASS)
 
     def test_after_first_framed_line_is_a_user_line(self) -> None:
         for line in (LIMINE_COLOUR_PANIC, LIMINE_PLAIN_PANIC):
@@ -358,7 +362,7 @@ class LiminePanicTests(unittest.TestCase):
                 result = check([K(ONLINE), line, K(CONTRACT)], [Marker(CONTRACT, "c")])
                 self.assertEqual(result.matched, ["c"])
                 check_ktest_output(
-                    [K("vibeOS: ktest: begin"), line, K("vibeOS: ktest: end")], ISA_DEBUG_PASS
+                    [K("vibeOS: ktest: begin 1"), line, K("vibeOS: ktest: end")], ISA_DEBUG_PASS
                 )
 
 
@@ -453,7 +457,7 @@ class ForgedLinesTests(unittest.TestCase):
         result = check(forged_boot(), [Marker(ONLINE, "a"), Marker(CONTRACT, "c")])
         self.assertEqual(result.matched, ["a", "c"])
         check_ktest_output(
-            [K("vibeOS: ktest: begin"), *forged_boot(), K("vibeOS: ktest: end")], ISA_DEBUG_PASS
+            [K("vibeOS: ktest: begin 1"), *forged_boot(), K("vibeOS: ktest: end")], ISA_DEBUG_PASS
         )
 
 

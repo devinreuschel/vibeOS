@@ -11,6 +11,7 @@ from collections.abc import Callable
 from tests.harness import frame, results
 from tests.harness.harness import (
     HarnessError,
+    KtestSummary,
     QemuConfig,
     RunResult,
     check_ktest_output,
@@ -18,6 +19,7 @@ from tests.harness.harness import (
     env_config,
     env_flag,
     ktest_devices,
+    ktest_summary,
     make_disk,
     qemu_argv,
     run_qemu_until_exit,
@@ -160,6 +162,14 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> Run
     return raw
 
 
+def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
+    """The report on stderr: passes out of runs, the ten slowest runs, the
+    info lines, then the exit status."""
+    for line in summary.text():
+        print(line, file=sys.stderr)
+    print(f"[ktest] exit {exit_code}", file=sys.stderr)
+
+
 def main() -> int:
     env = env_config(default_iso=default_iso("ktest"), default_timeout=90)
     results.Results(env.tier)
@@ -173,15 +183,7 @@ def main() -> int:
             print(f"[ktest] FAIL: {e}", file=sys.stderr)
             return 1
 
-        klines = frame.kernel_lines(raw.lines)
-        oks = [ln for ln in klines if ln.startswith("vibeOS: ktest: ok ")]
-        skips = [ln for ln in klines if ln.startswith("vibeOS: ktest: skip ")]
-        print(
-            f"[ktest] ok: {len(oks)} passed, {len(skips)} skipped, exit {raw.exit_code}",
-            file=sys.stderr,
-        )
-        for ln in oks + skips:
-            print(f"[ktest]   . {ln}", file=sys.stderr)
+        print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
 
         if skip_persist:
             return 0

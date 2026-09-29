@@ -58,7 +58,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import IO
+from typing import IO, NamedTuple
 
 from tests.harness import frame
 from tests.harness.frame import kernel_text as kernel_text
@@ -1592,9 +1592,129 @@ ISA_DEBUG_FAIL = 35  # write 0x11
 # The `panic_exit` build writes 0x11 after `panic: halted`.
 PANIC_EXIT_STATUS = ISA_DEBUG_FAIL
 
-KTEST_BEGIN = "vibeOS: ktest: begin"
-KTEST_END = "vibeOS: ktest: end"
-KTEST_FAIL_PREFIX = "vibeOS: ktest: FAIL"
+
+# ktest protocol (DESIGN §8.2, C-KTEST-PROTO): one kernel line per event.
+KTEST_PREFIX = "vibeOS: ktest: "
+KTEST_KINDS = ("begin", "run", "ok", "fail", "skip", "info", "end", "bad_option")
+_KTEST_NAME = r"[A-Za-z0-9_.-]+"
+_KTEST_RUN_RE = re.compile(rf"run ({_KTEST_NAME}) (\d+)")
+_KTEST_OK_RE = re.compile(rf"ok ({_KTEST_NAME})(?: \((\d+) us\))?")
+_KTEST_FAIL_RE = re.compile(rf"FAIL ({_KTEST_NAME})(?:: (.*))?")
+_KTEST_SKIP_RE = re.compile(rf"skip ({_KTEST_NAME})(?:: (.*))?")
+_KTEST_INFO_RE = re.compile(rf"info ({_KTEST_NAME}): (.*)")
+_KTEST_BAD_RE = re.compile(r"bad option ([^=\s]+)=(.*)")
+# The ten slowest runs `print_ktest_summary` lists.
+KTEST_SLOWEST = 10
+
+
+class KtestLine(NamedTuple):
+    """One protocol line: `kind` is one of `KTEST_KINDS`."""
+
+    kind: str
+    name: str = ""
+    # `begin`'s run count; None when the line has none.
+    n: int | None = None
+    deadline_ms: int | None = None
+    us: int | None = None
+    # A failure's or skip's reason, an info line's text, `bad option`'s
+    # `<key>=<value>`.
+    text: str = ""
+
+
+def parse_ktest_line(raw: str) -> KtestLine | None:
+    """The protocol line `raw` holds, or None.
+
+    Only a framed line (C-FRAME) whose text starts with `vibeOS: ktest: `
+    and then a protocol word parses, so a `dmesg:` or `logrec:` replay, a
+    user program's line, and a `vibeOS: ktest:   <detail>` line never do.
+    """
+    text = frame.kernel_text(raw)
+    if text is None or not text.startswith(KTEST_PREFIX):
+        return None
+    rest = text[len(KTEST_PREFIX) :].rstrip()
+    if rest == "end":
+        return KtestLine("end")
+    if rest == "begin" or rest.startswith("begin "):
+        count = rest[len("begin") :].strip()
+        return KtestLine("begin", n=int(count) if count.isdigit() else None)
+    m = _KTEST_RUN_RE.fullmatch(rest)
+    if m is not None:
+        return KtestLine("run", m.group(1), deadline_ms=int(m.group(2)))
+    m = _KTEST_OK_RE.fullmatch(rest)
+    if m is not None:
+        us = m.group(2)
+        return KtestLine("ok", m.group(1), us=None if us is None else int(us))
+    m = _KTEST_FAIL_RE.fullmatch(rest)
+    if m is not None:
+        return KtestLine("fail", m.group(1), text=m.group(2) or "")
+    m = _KTEST_SKIP_RE.fullmatch(rest)
+    if m is not None:
+        return KtestLine("skip", m.group(1), text=m.group(2) or "")
+    m = _KTEST_INFO_RE.fullmatch(rest)
+    if m is not None:
+        return KtestLine("info", m.group(1), text=m.group(2))
+    m = _KTEST_BAD_RE.fullmatch(rest)
+    if m is not None:
+        return KtestLine("bad_option", m.group(1), text=f"{m.group(1)}={m.group(2)}")
+    return None
+
+
+def ktest_lines(lines: Iterable[str]) -> list[KtestLine]:
+    """The protocol lines among raw serial `lines`, in order."""
+    return [k for k in (parse_ktest_line(ln) for ln in lines) if k is not None]
+
+
+@dataclass
+class KtestSummary:
+    """What one ktest boot printed."""
+
+    # `begin`'s count; None without a `begin` line or a count.
+    begin: int | None = None
+    runs: list[KtestLine] = field(default_factory=list)
+    oks: list[KtestLine] = field(default_factory=list)
+    fails: list[KtestLine] = field(default_factory=list)
+    skips: list[KtestLine] = field(default_factory=list)
+    infos: list[KtestLine] = field(default_factory=list)
+
+    def slowest(self, k: int = KTEST_SLOWEST) -> list[KtestLine]:
+        """The `k` timed `ok` runs that took longest, slowest first."""
+        timed = [o for o in self.oks if o.us is not None]
+        return sorted(timed, key=lambda o: o.us or 0, reverse=True)[:k]
+
+    def text(self) -> list[str]:
+        """The report: passes out of runs, the slowest runs, the info lines."""
+        n = self.begin if self.begin is not None else len(self.runs)
+        out = [f"[ktest] {len(self.oks)} of {n} runs passed, {len(self.skips)} skipped"]
+        for f in self.fails:
+            out.append(f"[ktest]   FAIL {f.name}: {f.text}")
+        slow = self.slowest()
+        if slow:
+            out.append(f"[ktest] slowest {len(slow)}:")
+            out += [f"[ktest]   {o.us} us {o.name}" for o in slow]
+        if self.infos:
+            out.append("[ktest] info:")
+            out += [f"[ktest]   {i.name}: {i.text}" for i in self.infos]
+        return out
+
+
+def ktest_summary(lines: Iterable[str]) -> KtestSummary:
+    """Sort raw serial `lines`' protocol lines into a `KtestSummary`."""
+    s = KtestSummary()
+    for k in ktest_lines(lines):
+        if k.kind == "begin":
+            s.begin = k.n
+        elif k.kind == "run":
+            s.runs.append(k)
+        elif k.kind == "ok":
+            s.oks.append(k)
+        elif k.kind == "fail":
+            s.fails.append(k)
+        elif k.kind == "skip":
+            s.skips.append(k)
+        elif k.kind == "info":
+            s.infos.append(k)
+    return s
+
 # After a panic banner, keep reading this long so the dump's `msg:` line and
 # the backtrace land in the HarnessError and the results file.
 PANIC_DRAIN_S = 0.4
@@ -1620,10 +1740,13 @@ def check_ktest_output(
     *,
     pass_status: int = ISA_DEBUG_PASS,
 ) -> RunResult:
-    """Require begin then end, reject any FAIL line, require pass exit status.
+    """Require `begin <n>` then `end`, reject any FAIL line, require pass exit status.
 
-    `begin`, `FAIL`, `end` and the panic signatures match only kernel lines
-    (framed, DESIGN §2.6), so a user program's forged `FAIL` line is ignored.
+    Each line is read through `parse_ktest_line`, so `begin`, `FAIL`,
+    `end` and the panic signatures match only kernel lines (framed, DESIGN
+    §2.6) at the start of their text: a user program's forged `FAIL` line
+    and a `dmesg:` or `logrec:` replay are ignored. A `begin` with no count,
+    `begin 0` (no test selected) and a `bad option` line fail the run.
     """
     result = RunResult()
     result.exit_code = exit_code
@@ -1637,16 +1760,22 @@ def check_ktest_output(
         if why is not None:
             result.panic_line = raw
             raise HarnessError(f"{why[0]} in: {why[1]!r}")
-        line = kernel_text(raw)
-        if line is None:
+        k = parse_ktest_line(raw)
+        if k is None:
             continue
-        if KTEST_BEGIN in line:
+        if k.kind == "bad_option":
+            raise HarnessError(f"ktest: bad option {k.text}")
+        if k.kind == "begin":
             if saw_end:
                 raise HarnessError("ktest begin after end")
+            if k.n is None:
+                raise HarnessError("ktest begin without a run count")
+            if k.n == 0:
+                raise HarnessError("ktest: no test selected")
             saw_begin = True
-        if KTEST_FAIL_PREFIX in line:
-            fails.append(line)
-        if KTEST_END in line:
+        elif k.kind == "fail":
+            fails.append(frame.kernel_text(raw) or raw)
+        elif k.kind == "end":
             if not saw_begin:
                 raise HarnessError("ktest end without begin")
             saw_end = True

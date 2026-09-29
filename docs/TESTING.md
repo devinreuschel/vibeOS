@@ -92,16 +92,32 @@ are `--features panic_test --features panic_exit` and `--features gp_test --feat
 (underscores everywhere; Cargo features in this crate do not use hyphens).
 
 ```
-vibeOS: ktest: begin
-vibeOS: ktest: ok <name>
+vibeOS: ktest: begin <n>
+vibeOS: ktest: run <name> <deadline_ms>
+vibeOS: ktest: ok <name> (<us> us)
 vibeOS: ktest: FAIL <name>: <reason>
 vibeOS: ktest: skip <name>: <reason>
+vibeOS: ktest: info <name>: <text>
 vibeOS: ktest: end
 ```
 
-The harness requires `begin` and `end`, rejects any `FAIL` line and any panic signature, and checks
-the exit status. It reads each of these lines only when framed (§2.6), so a user program's copy, such as
-the unframed `?vibeOS: ktest: FAIL forged` line `/bin/tests` prints, is ignored.
+`begin` counts the runs the boot will make, and the runner asserts that it made that many before
+`end`. A `run` line precedes each run with the name and deadline of the row, and the run's result
+line follows it: `ok` with the run's time in microseconds, read from the cycle counter
+(`CycleCounter::now`) around the body, `FAIL` with its reason, or `skip` with its reason. A test
+prints a counter or a measurement as an `info` line (`ktest_info!`), which names the running test,
+or `ktest` between tests, and is never a result: it is not counted in `begin`'s `<n>`. A failure
+reason formats into a fixed 120-byte `FailMsg` through `vibeos::fmt_util::StackBuf`, cut at a
+character boundary. The runner's own group, `ktest_names_unique`, checks that names are unique
+across `GROUPS` and match `[a-z0-9_]+`.
+
+The harness reads each line through `harness.parse_ktest_line`, which matches `vibeOS: ktest: ` and a
+protocol word at the start of a framed line's text (§2.6), so a user program's copy, such as the
+unframed `?vibeOS: ktest: FAIL forged` line `/bin/tests` prints, a `dmesg:` or `logrec:` replay, and
+a `vibeOS: ktest:   <detail>` line never count. It requires `begin <n>` and `end`, fails a `begin`
+with no count and `begin 0` (`ktest: no test selected`), rejects any `FAIL` line and any panic
+signature, and checks the exit status. `run_ktest.py` prints `[ktest] <ok> of <n> runs passed, <s>
+skipped`, the ten slowest runs, and the info lines (`ktest_summary`).
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -115,11 +131,8 @@ the first boot and once for the persist reboot, `run_e2e.py` boots each variant 
 every other tier. The results file keeps its `retries` list, which stays empty, and `check_ticks.py`
 still fails a pull request whose results list a retry (ROADMAP §10.9).
 
-Planned (ROADMAP §10.2): `begin` carries the number of runs the boot will make, after the command
-line's filter and repeat count, and `vibeOS: ktest: run <name> <deadline_ms>` precedes each run,
-with the deadline the kernel enforces in the guest (10 s unless the registry sets another). The
-harness requires one result line per run line and exactly that many results. It has no whole-run
-deadline. `VIBEOS_TIMEOUT` bounds each stretch in which no test runs: from QEMU's start to `begin`,
+Planned (ROADMAP §10.2): the harness requires one result line per run line and exactly that many
+results. It has no whole-run deadline. `VIBEOS_TIMEOUT` bounds each stretch in which no test runs: from QEMU's start to `begin`,
 and from `end` to QEMU's exit. From `begin` to `end`, each run gets its printed deadline plus 5 s,
 and each gap between lines 5 s, all multiplied by `env_config`'s one timeout scale. That backstops
 the in-guest deadline, which a CPU wedged with IF=0 never checks; a timeout names the test of the
@@ -320,6 +333,9 @@ survived, so a run that shows one would otherwise pass. The blocked-thread sweep
 hung-thread reports follow. A test that provokes one on purpose declares it; in any
 other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
 lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a 30 s pause.
+
+The in-guest runner's failure lines fail a `make test-kernel` run the same way, matched on framed
+lines only (§8.2): `vibeOS: ktest: FAIL <name>: <reason>`.
 
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
 fd 2, and a fuzzer writes random bytes. The harness scans framed lines only (§2.6), and fails on

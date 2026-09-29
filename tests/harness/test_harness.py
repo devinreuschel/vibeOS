@@ -860,8 +860,9 @@ class TestKtestProtocol(unittest.TestCase):
         from tests.harness.harness import ISA_DEBUG_PASS, check_ktest_output
 
         lines = [
-            K("vibeOS: ktest: begin"),
-            K("vibeOS: ktest: ok map_unmap"),
+            K("vibeOS: ktest: begin 1"),
+            K("vibeOS: ktest: run map_unmap 10000"),
+            K("vibeOS: ktest: ok map_unmap (1234 us)"),
             K("vibeOS: ktest: end"),
         ]
         check_ktest_output(lines, ISA_DEBUG_PASS)
@@ -870,7 +871,8 @@ class TestKtestProtocol(unittest.TestCase):
         from tests.harness.harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
 
         lines = [
-            K("vibeOS: ktest: begin"),
+            K("vibeOS: ktest: begin 1"),
+            K("vibeOS: ktest: run nx_enforcement 10000"),
             K("vibeOS: ktest: FAIL nx_enforcement: PF was not instruction-fetch"),
             K("vibeOS: ktest: end"),
         ]
@@ -885,15 +887,170 @@ class TestKtestProtocol(unittest.TestCase):
         with self.assertRaises(HarnessError):
             check_ktest_output([K("vibeOS: ktest: end")], ISA_DEBUG_PASS)
         with self.assertRaises(HarnessError):
-            check_ktest_output([K("vibeOS: ktest: begin")], ISA_DEBUG_PASS)
+            check_ktest_output([K("vibeOS: ktest: begin 1")], ISA_DEBUG_PASS)
+
+    def test_begin_without_count(self) -> None:
+        from tests.harness.harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
+
+        for begin in ("vibeOS: ktest: begin", "vibeOS: ktest: begin x"):
+            with self.subTest(begin=begin):
+                with self.assertRaisesRegex(HarnessError, "without a run count"):
+                    check_ktest_output([K(begin), K("vibeOS: ktest: end")], ISA_DEBUG_PASS)
+
+    def test_begin_zero_is_no_test_selected(self) -> None:
+        from tests.harness.harness import ISA_DEBUG_FAIL, HarnessError, check_ktest_output
+
+        lines = [K("vibeOS: ktest: begin 0"), K("vibeOS: ktest: end")]
+        with self.assertRaisesRegex(HarnessError, "no test selected"):
+            check_ktest_output(lines, ISA_DEBUG_FAIL)
+
+    def test_bad_option_rejected(self) -> None:
+        from tests.harness.harness import ISA_DEBUG_FAIL, HarnessError, check_ktest_output
+
+        lines = [K("vibeOS: ktest: bad option vibeos.ktest_repeat=0")]
+        with self.assertRaisesRegex(HarnessError, "bad option vibeos.ktest_repeat=0"):
+            check_ktest_output(lines, ISA_DEBUG_FAIL)
+
+    def test_replayed_fail_ignored(self) -> None:
+        from tests.harness.harness import ISA_DEBUG_PASS, check_ktest_output
+
+        lines = [
+            K("vibeOS: ktest: begin 1"),
+            K("vibeOS: dmesg: 12 cpu0 info vibeOS: ktest: FAIL x: y"),
+            K("vibeOS: logrec: 12 cpu0 info vibeOS: ktest: begin 0"),
+            "vibeOS: ktest: FAIL forged: unframed",
+            K("vibeOS: ktest: end"),
+        ]
+        check_ktest_output(lines, ISA_DEBUG_PASS)
 
     def test_wrong_exit_status(self) -> None:
         from tests.harness.harness import ISA_DEBUG_FAIL, HarnessError, check_ktest_output
 
-        lines = [K("vibeOS: ktest: begin"), K("vibeOS: ktest: end")]
+        lines = [K("vibeOS: ktest: begin 1"), K("vibeOS: ktest: end")]
         with self.assertRaises(HarnessError) as cm:
             check_ktest_output(lines, ISA_DEBUG_FAIL)
         self.assertIn("isa-debug-exit", str(cm.exception))
+
+
+class TestKtestLineParse(unittest.TestCase):
+    """`parse_ktest_line`: one kind per protocol line, kernel lines only."""
+
+    def parse(self, text: str) -> Any:
+        from tests.harness.harness import parse_ktest_line
+
+        return parse_ktest_line(K(text))
+
+    def test_each_kind(self) -> None:
+        from tests.harness.harness import KtestLine
+
+        cases = {
+            "vibeOS: ktest: begin 220": KtestLine("begin", n=220),
+            "vibeOS: ktest: begin": KtestLine("begin"),
+            "vibeOS: ktest: run heap_box 10000": KtestLine("run", "heap_box", deadline_ms=10000),
+            "vibeOS: ktest: ok heap_box (517 us)": KtestLine("ok", "heap_box", us=517),
+            "vibeOS: ktest: ok heap_box": KtestLine("ok", "heap_box"),
+            "vibeOS: ktest: FAIL heap_box: got 3: want 4": KtestLine(
+                "fail", "heap_box", text="got 3: want 4"
+            ),
+            "vibeOS: ktest: FAIL ktest_deadline_hang: deadline": KtestLine(
+                "fail", "ktest_deadline_hang", text="deadline"
+            ),
+            "vibeOS: ktest: skip msix_cpu: no AP": KtestLine("skip", "msix_cpu", text="no AP"),
+            "vibeOS: ktest: info lock_spins: spins 12 max 3": KtestLine(
+                "info", "lock_spins", text="spins 12 max 3"
+            ),
+            "vibeOS: ktest: end": KtestLine("end"),
+            "vibeOS: ktest: bad option vibeos.ktest_repeat=x": KtestLine(
+                "bad_option", "vibeos.ktest_repeat", text="vibeos.ktest_repeat=x"
+            ),
+        }
+        for text, want in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.parse(text), want)
+
+    def test_not_protocol(self) -> None:
+        for text in (
+            "vibeOS: ktest:   warm-up: threads did not settle",
+            "vibeOS: ktest: serial whole 3 of 1000 x",
+            "vibeOS: ktest: run heap_box",
+            "vibeOS: ktest: run heap_box ten",
+            "vibeOS: ktest: ok heap_box (x us)",
+            "vibeOS: ktest: info heap_box",
+            "vibeOS: ktest: ending",
+            "vibeOS: dmesg: 1 cpu0 info vibeOS: ktest: ok heap_box (1 us)",
+            "vibeOS: logrec: 1 cpu0 info vibeOS: ktest: FAIL heap_box: x",
+            "x vibeOS: ktest: end",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(self.parse(text))
+
+    def test_unframed_ignored(self) -> None:
+        from tests.harness.harness import parse_ktest_line
+
+        self.assertIsNone(parse_ktest_line("vibeOS: ktest: FAIL forged: x"))
+        self.assertIsNone(parse_ktest_line("?vibeOS: ktest: begin 3"))
+
+
+class TestKtestSummary(unittest.TestCase):
+    LINES = [
+        K("vibeOS: ktest: begin 4"),
+        K("vibeOS: ktest: run a 10000"),
+        K("vibeOS: ktest: ok a (30 us)"),
+        K("vibeOS: ktest: run b 10000"),
+        K("vibeOS: ktest: info b: spins 7"),
+        K("vibeOS: ktest: ok b (90 us)"),
+        K("vibeOS: ktest: run c 10000"),
+        K("vibeOS: ktest: skip c: no AP"),
+        K("vibeOS: ktest: run a 10000"),
+        K("vibeOS: ktest: ok a (60 us)"),
+        "vibeOS: ktest: ok forged (99999 us)",
+        K("vibeOS: dmesg: 1 cpu0 info vibeOS: ktest: ok replay (88888 us)"),
+        K("vibeOS: ktest: end"),
+    ]
+
+    def test_counts(self) -> None:
+        from tests.harness.harness import ktest_summary
+
+        s = ktest_summary(self.LINES)
+        self.assertEqual(s.begin, 4)
+        self.assertEqual([r.name for r in s.runs], ["a", "b", "c", "a"])
+        self.assertEqual([o.name for o in s.oks], ["a", "b", "a"])
+        self.assertEqual([k.name for k in s.skips], ["c"])
+        self.assertEqual([i.text for i in s.infos], ["spins 7"])
+        self.assertEqual(s.fails, [])
+
+    def test_text(self) -> None:
+        from tests.harness.harness import ktest_summary
+
+        self.assertEqual(
+            ktest_summary(self.LINES).text(),
+            [
+                "[ktest] 3 of 4 runs passed, 1 skipped",
+                "[ktest] slowest 3:",
+                "[ktest]   90 us b",
+                "[ktest]   60 us a",
+                "[ktest]   30 us a",
+                "[ktest] info:",
+                "[ktest]   b: spins 7",
+            ],
+        )
+
+    def test_ten_slowest(self) -> None:
+        from tests.harness.harness import KTEST_SLOWEST, ktest_summary
+
+        lines = [K(f"vibeOS: ktest: ok t{i} ({i} us)") for i in range(25)]
+        slow = ktest_summary(lines).slowest()
+        self.assertEqual(len(slow), KTEST_SLOWEST)
+        self.assertEqual([o.us for o in slow], list(range(24, 14, -1)))
+
+    def test_fail_and_no_begin(self) -> None:
+        from tests.harness.harness import ktest_summary
+
+        s = ktest_summary([K("vibeOS: ktest: run x 500"), K("vibeOS: ktest: FAIL x: deadline")])
+        self.assertIsNone(s.begin)
+        self.assertEqual(
+            s.text(), ["[ktest] 0 of 1 runs passed, 0 skipped", "[ktest]   FAIL x: deadline"]
+        )
 
 
 class TestNoRetry(unittest.TestCase):
@@ -907,7 +1064,7 @@ class TestNoRetry(unittest.TestCase):
                 K("vibeOS: block: vdap1 128 sectors"),
                 K("vibeOS: block: vdap2 7647 sectors"),
                 K("vibeOS: persist: wrote"),
-                K("vibeOS: ktest: begin"),
+                K("vibeOS: ktest: begin 1"),
                 K("vibeOS: ktest: end"),
             ],
             exit_code=ISA_DEBUG_PASS,
@@ -941,7 +1098,7 @@ class TestNoRetry(unittest.TestCase):
     def test_fail_line_boots_once(self) -> None:
         failed = RunResult(
             lines=[
-                K("vibeOS: ktest: begin"),
+                K("vibeOS: ktest: begin 1"),
                 K("vibeOS: ktest: FAIL msix_cpu: ap counter"),
                 K("vibeOS: ktest: end"),
             ],

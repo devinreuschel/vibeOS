@@ -7,6 +7,7 @@
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use vibeos::arch::CycleCounter;
 use vibeos::dev::Device;
 use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_DEVICE;
@@ -16,6 +17,7 @@ use vibeos::pmm::Frames;
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::vectors;
 
+use crate::arch::current::Arch;
 use crate::ipi_init;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -160,6 +162,29 @@ impl Test {
 
 pub(crate) type Suite = &'static [Test];
 
+/// The runner's own rows (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[test("ktest_names_unique", test_ktest_names_unique)];
+
+/// Test names are unique across [`GROUPS`] and match `[a-z0-9_]+`, the
+/// form `vibeos.ktest=` globs and the harness's results name.
+fn test_ktest_names_unique() -> Outcome {
+    for (i, (_, _, t)) in rows().enumerate() {
+        if t.name.is_empty()
+            || !t
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return crate::fail_fmt!("name {:?} is not [a-z0-9_]+", t.name);
+        }
+        if rows().skip(i + 1).any(|(_, _, o)| o.name == t.name) {
+            return crate::fail_fmt!("duplicate test name {}", t.name);
+        }
+    }
+    crate::ktest_info!("{} rows in {} groups", rows().count(), GROUPS.len());
+    Outcome::Ok
+}
+
 /// Every subsystem's rows, in run order: each group's `TESTS` lives in its
 /// subsystem's `ktest.rs`, and a new test goes in its subsystem's list
 /// (DESIGN §8.2). A group missing here is dead code, which the
@@ -168,6 +193,7 @@ pub(crate) type Suite = &'static [Test];
 /// `log_boot_captured` reads boot lines that the other groups' lines push
 /// out of the log ring.
 pub(crate) const GROUPS: &[Suite] = &[
+    TESTS,
     log::ktest::TESTS,
     mm::ktest::TESTS,
     acpi::ktest::TESTS,
@@ -219,52 +245,124 @@ pub fn run() -> ! {
     }
 }
 
-/// Run every suite with IF on and `irq_nest` 0, the context production
-/// kernel threads run in, then exit QEMU.
+/// Every selected row, as (group, row, test), in run order.
+fn rows() -> impl Iterator<Item = (usize, usize, &'static Test)> {
+    GROUPS
+        .iter()
+        .enumerate()
+        .flat_map(|(g, suite)| suite.iter().enumerate().map(move |(r, t)| (g, r, t)))
+}
+
+/// [`CURRENT`] when no test runs.
+const NO_TEST: u32 = u32::MAX;
+
+/// The running row as `group << 16 | row`, or [`NO_TEST`].
+static CURRENT: AtomicU32 = AtomicU32::new(NO_TEST);
+
+/// The row `cur` names, if any.
+fn row_of(cur: u32) -> Option<&'static Test> {
+    GROUPS
+        .get((cur >> 16) as usize)?
+        .get((cur & 0xFFFF) as usize)
+}
+
+/// The running test's name, or `ktest` between tests.
+fn current_name() -> &'static str {
+    row_of(CURRENT.load(Ordering::Relaxed)).map_or(REGISTRY_NAME, |t| t.name)
+}
+
+/// Print `vibeOS: ktest: info <test>: <text>`, a counter or a measurement
+/// that is never a result (DESIGN §8.2). Use [`crate::ktest_info!`].
+pub(crate) fn info(args: fmt::Arguments<'_>) {
+    let name = current_name();
+    crate::marker!("vibeOS: ktest: info {name}: {args}");
+}
+
+/// `ktest::info` with `format_args!`: an info line for the running test.
+#[macro_export]
+macro_rules! ktest_info {
+    ($($arg:tt)*) => {
+        $crate::ktest::info(format_args!($($arg)*))
+    };
+}
+
+/// Run every selected row with IF on and `irq_nest` 0, the context
+/// production kernel threads run in, then exit QEMU (DESIGN §8.2).
 fn registry_main() {
     REGISTRY_TID.store(thread_init::current_id().0, Ordering::Release);
-    crate::marker!("vibeOS: ktest: begin");
+    let sel = vibeos::ktest::Selection::all();
+    let repeat = 1;
+    let Some(n) = vibeos::ktest::run_count(
+        rows().map(|(_, _, t)| (t.name, t.once, t.opt_in)),
+        &sel,
+        repeat,
+    ) else {
+        crate::marker!("vibeOS: ktest: FAIL ktest: run count overflows u32");
+        qemu_exit(EXIT_FAIL);
+    };
+    crate::marker!("vibeOS: ktest: begin {n}");
     quiesce_frames();
+    let freq = Arch::freq_hz().unwrap_or(0);
     let mut failed = false;
-    for suite in GROUPS {
-        for t in suite.iter() {
-            let name = t.name;
-            let mut outcome = (t.run)();
-            // A test that needs interrupts off takes its own guard and
-            // drops it before it returns.
-            let if_on = x86::interrupts_enabled();
-            let nest = per_cpu_init::irq_nest();
-            if !if_on || nest != 0 {
-                per_cpu_init::current().irq_nest.store(0, Ordering::Relaxed);
-                x86::sti();
-                if !matches!(outcome, Outcome::Fail(_) | Outcome::FailFmt(_)) {
-                    outcome = crate::fail_fmt!("left IF={} irq_nest={}", u8::from(if_on), nest);
-                }
+    let mut runs: u32 = 0;
+    for pass in 1..=repeat {
+        for (g, r, t) in rows() {
+            if !sel.selects(t.name, t.opt_in) || !vibeos::ktest::runs_in_pass(t.once, pass) {
+                continue;
             }
-            match outcome {
-                Outcome::Ok => {
-                    crate::marker!("vibeOS: ktest: ok {name}");
-                }
-                Outcome::Fail(why) => {
-                    // Same shape as skip: reason on the protocol line so
-                    // check_ktest_output (which raises on that line alone)
-                    // is enough to diagnose (DESIGN §8.2).
-                    crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
-                    failed = true;
-                }
-                Outcome::FailFmt(msg) => {
-                    let why = msg.as_str();
-                    crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
-                    failed = true;
-                }
-                Outcome::Skip(reason) => {
-                    crate::marker!("vibeOS: ktest: skip {name}: {reason}");
-                }
-            }
+            runs += 1;
+            failed |= !run_one(g, r, t, freq);
         }
     }
+    // `n` and the loop ask the same two predicates.
+    assert_eq!(runs, n, "ktest: runs made != begin count");
     crate::marker!("vibeOS: ktest: end");
     qemu_exit(if failed { EXIT_FAIL } else { EXIT_PASS });
+}
+
+/// One run of row `r` of group `g`: its run line, the body, and its result
+/// line. False when it failed.
+fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
+    let name = t.name;
+    crate::marker!("vibeOS: ktest: run {name} {}", t.deadline_ms);
+    CURRENT.store(((g as u32) << 16) | r as u32, Ordering::Relaxed);
+    let t0 = Arch::now();
+    let mut outcome = (t.run)();
+    let us = vibeos::ktest::cycles_to_us(Arch::now().wrapping_sub(t0), freq);
+    CURRENT.store(NO_TEST, Ordering::Relaxed);
+    // A test that needs interrupts off takes its own guard and drops it
+    // before it returns.
+    let if_on = x86::interrupts_enabled();
+    let nest = per_cpu_init::irq_nest();
+    if !if_on || nest != 0 {
+        per_cpu_init::current().irq_nest.store(0, Ordering::Relaxed);
+        x86::sti();
+        if !matches!(outcome, Outcome::Fail(_) | Outcome::FailFmt(_)) {
+            outcome = crate::fail_fmt!("left IF={} irq_nest={}", u8::from(if_on), nest);
+        }
+    }
+    match outcome {
+        Outcome::Ok => {
+            crate::marker!("vibeOS: ktest: ok {name} ({us} us)");
+            true
+        }
+        Outcome::Fail(why) => {
+            // Same shape as skip: reason on the protocol line so
+            // check_ktest_output (which raises on that line alone) is
+            // enough to diagnose (DESIGN §8.2).
+            crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
+            false
+        }
+        Outcome::FailFmt(msg) => {
+            let why = msg.as_str();
+            crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
+            false
+        }
+        Outcome::Skip(reason) => {
+            crate::marker!("vibeOS: ktest: skip {name}: {reason}");
+            true
+        }
+    }
 }
 
 fn qemu_exit(code: u32) -> ! {
