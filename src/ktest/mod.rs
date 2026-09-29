@@ -534,6 +534,10 @@ pub(crate) const TESTS: &[Test] = &[
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,
     ),
+    test(
+        "wake_inbox_and_kva_pool",
+        irq::ktest::wake_inbox_and_kva_pool,
+    ),
 ];
 
 /// The one list, [`TESTS`] (DESIGN §8.2).
