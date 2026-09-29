@@ -44,6 +44,12 @@ stamp=$(python3 -c 'import sys, time; print(time.strftime("%Y%m%d%H%M%S00", time
 # pin, so their times are pinned too.
 rm -rf "$staging"
 mkdir -p "$staging/boot" "$staging/EFI/BOOT"
+# The notices every published image carries (ROADMAP §10.9, DESIGN §1.5):
+# vibeOS's LICENSE and the third-party notices, generated for this tree.
+mkdir -p "$staging/LICENSES"
+cp "$root/LICENSE" "$staging/LICENSES/LICENSE"
+python3 "$root/scripts/gen_notices.py" --out "$staging/LICENSES/THIRD-PARTY-NOTICES.txt" \
+    --limine-dir "$limine_dir"
 cp "$kernel_elf" "$staging/boot/vibeos"
 # The initrd, which limine.conf's module_path: loads as a Limine module.
 cp "$initrd" "$staging/boot/initrd.fat"

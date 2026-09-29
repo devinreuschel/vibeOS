@@ -4,12 +4,13 @@
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::fs::FsError;
+use vibeos::fs::{FsError, O_RDONLY, OpenFlags};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::proc::{SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, wait_exited, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 
 use crate::arch::idt::testing as idt_testing;
+use crate::console_init::testing as console_testing;
 use crate::file_init;
 use crate::heap_init::fail_after::{self, Scope, Seen};
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
@@ -1006,4 +1007,122 @@ pub(crate) fn test_kalloc_nomem() -> Outcome {
         return out;
     }
     munmap_16m()
+}
+
+/// `/sbin/init`'s line for a `/bin/tests` that did not pass (`user/init.asm`).
+const INIT_EXITED: &[u8] = b"init: /bin/tests exited ";
+
+/// The copy's line, with `exited` changed so that the ktest boot does not
+/// print the registered failure line.
+const INIT_EXITED_COPY: &[u8] = b"init: /bin/tests EXITED ";
+
+/// What the copy prints: `/hello` exits 42, the wait status `42 << 8`.
+const INIT_REPORT: &[u8] = b"init: /bin/tests EXITED 10752\n";
+
+/// A file's bytes.
+fn read_file(path: &[u8]) -> Result<TryVec<u8>, &'static str> {
+    let f = file_init::open(path, OpenFlags::from_bits(O_RDONLY), 0).map_err(|_| "open")?;
+    let mut out = TryVec::new();
+    let mut buf = [0u8; 512];
+    let r = loop {
+        match file_init::read(&f, &mut buf) {
+            Ok(0) => break Ok(()),
+            Ok(n) => {
+                if out
+                    .try_extend_from_slice(buf.get(..n).unwrap_or(&[]))
+                    .is_err()
+                {
+                    break Err("no memory");
+                }
+            }
+            Err(_) => break Err("read"),
+        }
+    };
+    let closed = file_init::close(f);
+    r?;
+    closed.map_err(|_| "close")?;
+    Ok(out)
+}
+
+/// Replace each `from` in `image` with `to`, of the same length; how many.
+fn patch_all(image: &mut [u8], from: &[u8], to: &[u8]) -> usize {
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while let Some(w) = image.get_mut(i..i.saturating_add(from.len())) {
+        if w == from {
+            w.copy_from_slice(to);
+            n += 1;
+            i += from.len();
+        } else {
+            i += 1;
+        }
+    }
+    n
+}
+
+/// `/sbin/init` reports a `/bin/tests` that did not pass: a copy whose
+/// `/bin/tests` and `/bin/sh` are `/hello`, which exits 42, prints its
+/// line with that wait status, whole, on the console (ROADMAP §10.2, F073).
+pub(crate) fn test_init_reports_failed_tests() -> Outcome {
+    let mut image = match read_file(b"/sbin/init") {
+        Ok(v) => v,
+        Err(why) => return crate::fail_fmt!("/sbin/init: {why}"),
+    };
+    let lines = image
+        .windows(INIT_EXITED.len())
+        .filter(|w| *w == INIT_EXITED)
+        .count();
+    if lines != 1 {
+        return crate::fail_fmt!("{lines} exited lines in /sbin/init, want 1");
+    }
+    for (from, to, what) in [
+        (&b"/bin/tests\0"[..], &b"/hello\0\0\0\0\0"[..], "/bin/tests"),
+        (&b"/bin/sh\0"[..], &b"/hello\0\0"[..], "/bin/sh"),
+        (INIT_EXITED, INIT_EXITED_COPY, "exited line"),
+    ] {
+        if patch_all(&mut image, from, to) == 0 {
+            return crate::fail_fmt!("no {what} in /sbin/init");
+        }
+    }
+    console_testing::start_capture();
+    let pid = match proc_init::spawn_image(&image, &[&b"/sbin/init"[..]], 0) {
+        Ok(pid) => pid,
+        Err(e) => {
+            console_testing::stop_capture();
+            return crate::fail_fmt!("spawn: {}", e.as_str());
+        }
+    };
+    let seen = pid != 1
+        && sleep_until_s19(
+            || {
+                let mut got = [0u8; console_testing::CAPTURE_CAP];
+                let n = console_testing::captured(&mut got);
+                got.get(..n)
+                    .unwrap_or(&[])
+                    .windows(INIT_REPORT.len())
+                    .any(|w| w == INIT_REPORT)
+            },
+            5_000,
+        );
+    let mut got = [0u8; console_testing::CAPTURE_CAP];
+    let n = console_testing::captured(&mut got);
+    console_testing::stop_capture();
+    // After both children exit the copy spins in `wait4` on ECHILD, so the
+    // kill lands at its next syscall exit.
+    let killed = kill(pid, SIGKILL);
+    let st = proc_init::wait_kernel(pid);
+    if pid == 1 {
+        return Outcome::Fail("the copy of /sbin/init got pid 1");
+    }
+    if !seen {
+        let text = core::str::from_utf8(got.get(..n).unwrap_or(&[])).unwrap_or("<not utf-8>");
+        return crate::fail_fmt!("no EXITED 10752 line; captured {text:?}");
+    }
+    if killed != 0 {
+        return crate::fail_fmt!("SIGKILL returned {killed}");
+    }
+    if st != wait_signaled(SIGKILL) {
+        return crate::fail_fmt!("status {st:#x}, want {:#x}", wait_signaled(SIGKILL));
+    }
+    Outcome::Ok
 }

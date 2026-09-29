@@ -581,16 +581,18 @@ fn parse_mbr<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     sector_buf: &mut [u8],
 ) -> Result<Table, PartError> {
     let mut t = Table::empty(TableOrigin::Mbr);
-    for i in 0..4 {
-        let (sys, start, count) = mbr_entry(sector_buf, i).ok_or(PartError::Truncated)?;
+    // `parse_logical` reads EBRs into `sector_buf`, so the four primary
+    // entries are copied out before the first of them is walked (F117).
+    let mut prim = [(0u8, 0u64, 0u64); 4];
+    for (i, e) in prim.iter_mut().enumerate() {
+        *e = mbr_entry(sector_buf, i).ok_or(PartError::Truncated)?;
+    }
+    for (sys, start, count) in prim {
         if sys == 0 || count == 0 || sys == MBR_PROTECTIVE {
             continue;
         }
         if is_extended(sys) {
             parse_logical(&mut t, nsectors, read, sector_buf, start, count);
-            // `parse_logical` read EBRs into `sector_buf`; the next primary
-            // entry is read from sector 0 again.
-            read(0, sector_buf).map_err(|_| PartError::Truncated)?;
             continue;
         }
         let Some(end) = start.checked_add(count) else {
@@ -840,30 +842,62 @@ mod tests {
         assert_eq!(t.parts[0].start_lba, 9);
     }
 
-    /// A primary entry after the extended one is read from sector 0, not
-    /// from the last EBR the logical walk left in the sector buffer.
+    /// A primary entry after the extended one is read from the MBR, not
+    /// from the last EBR the logical walk left in the sector buffer
+    /// (F117). Two layouts, so "slot 1, slot 2" holds counted from 0 or 1.
     #[test]
     fn mbr_primary_after_extended() {
-        let mut d = disk(256 * 512);
-        let mut mbr = [0u8; 512];
-        pack_mbr(
-            &mut mbr,
-            &[
-                (MBR_EXTENDED, 8, 40),
-                (MBR_LINUX, 100, 16),
-                (0, 0, 0),
-                (0, 0, 0),
-            ],
+        let image = |slots: &[(u8, u32, u32); 4]| {
+            let mut d = disk(128 * 512);
+            let mut mbr = [0u8; 512];
+            pack_mbr(&mut mbr, slots);
+            put(&mut d, 0, &mbr);
+            // EBRs at 8 and 24, one 8-sector logical each; the last EBR's
+            // entries 1 to 3 are empty.
+            let mut e1 = [0u8; 512];
+            pack_ebr(&mut e1, MBR_LINUX, 1, 8, 16, 8);
+            put(&mut d, 8, &e1);
+            let mut e2 = [0u8; 512];
+            pack_ebr(&mut e2, MBR_LINUX, 1, 8, 0, 0);
+            put(&mut d, 24, &e2);
+            d
+        };
+        let got = |d: &[u8]| {
+            let t = parse_image(d, 512).unwrap();
+            let mut v: Vec<(u64, u64, PartKind)> = (0..t.n)
+                .map(|i| (t.parts[i].start_lba, t.parts[i].nsectors, t.parts[i].kind))
+                .collect();
+            v.sort_by_key(|&(s, n, _)| (s, n));
+            v
+        };
+        let linux = PartKind::Mbr { sys: MBR_LINUX };
+        // (a) extended in slot 0, the primary in slot 1.
+        let a = image(&[
+            (MBR_EXTENDED, 8, 40),
+            (MBR_LINUX, 64, 16),
+            (0, 0, 0),
+            (0, 0, 0),
+        ]);
+        assert_eq!(
+            got(&a),
+            vec![(9, 8, linux), (25, 8, linux), (64, 16, linux)]
         );
-        put(&mut d, 0, &mbr);
-        let mut e1 = [0u8; 512];
-        pack_ebr(&mut e1, MBR_LINUX, 1, 8, 0, 0);
-        put(&mut d, 8, &e1);
-        let t = parse_image(&d, 512).unwrap();
-        assert_eq!(t.n, 2);
-        assert_eq!(t.parts[0].start_lba, 9);
-        assert_eq!(t.parts[1].start_lba, 100);
-        assert_eq!(t.parts[1].nsectors, 16);
+        // (b) a primary, the extended in slot 1, the primary in slot 2.
+        let b = image(&[
+            (MBR_LINUX, 4, 4),
+            (MBR_EXTENDED, 8, 40),
+            (MBR_LINUX, 64, 16),
+            (0, 0, 0),
+        ]);
+        assert_eq!(
+            got(&b),
+            vec![
+                (4, 4, linux),
+                (9, 8, linux),
+                (25, 8, linux),
+                (64, 16, linux)
+            ]
+        );
     }
 
     /// Crafted GPT headers (ROADMAP §10.1): each field out of range gives

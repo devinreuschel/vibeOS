@@ -60,27 +60,24 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import IO
 
-from tests.harness import frame
+from tests.harness import frame, registry
 from tests.harness.frame import kernel_text as kernel_text
 from tests.harness.linesource import LineSource
 
+# The rows of the marker registry, `tests/contract/markers.toml` (ROADMAP
+# §10.2): the contract lists and the failure lists below are built from them.
+ROWS: tuple[registry.Row, ...] = registry.load_rows()
+
 # Any of these substrings in a kernel line (a framed one, DESIGN §2.6) means
-# the run has failed. Matches exception mnemonics rather than English so
-# shell prose does not false-fire (DESIGN §9.7). A user program's line never
-# matches: every driver also fails on `frame.USER_FAILURES` in user text and
-# on `frame.LIMINE_SIGNATURES` before the first framed line.
-PANIC_SIGNATURES: tuple[str, ...] = (
-    "panicked at",
-    "vibeOS: panic:",
-    "#PF",
-    "#GP",
-    "#UD",
-    "#DF",
-    "double fault",
-    "stack overflow",
-    # The `vibefs_crash` build's refusal of a `vibeos.crash_plant=` value.
-    "vibeOS: vibefs: bad crash_plant",
-)
+# the run has failed: the head signature of each kernel `failure` row. The
+# mnemonics match rather than English, so shell prose does not false-fire
+# (DESIGN §9.7). A user program's line never matches: every driver also fails
+# on `frame.USER_FAILURES` in user text and on `frame.LIMINE_SIGNATURES`
+# before the first framed line.
+PANIC_SIGNATURES: tuple[str, ...] = registry.signatures(ROWS, {frame.KERNEL})
+# The kernel `failure` rows with a placeholder before their last literal, as
+# patterns: a kernel line one of them matches fails the run too.
+FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = registry.failure_patterns(ROWS, {frame.KERNEL})
 
 # End of the dump. expect_panic waits for this so backtrace/logrec are in the log.
 PANIC_DONE = "vibeOS: panic: halted"
@@ -161,15 +158,19 @@ def serial_tail(lines: list[str], n: int = 40) -> str:
 
 
 def panic_signature(raw: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> str | None:
-    """The first of `sigs` in `raw`'s kernel text, if any."""
+    """The first of `sigs` in `raw`'s kernel text, else the first of
+    `FAILURE_PATTERNS` that matches it (as its pattern), else None."""
     text = kernel_text(raw)
     if text is None:
         return None
-    return next((s for s in sigs if s in text), None)
+    sig = next((s for s in sigs if s in text), None)
+    if sig is not None:
+        return sig
+    return next((p.pattern for p in FAILURE_PATTERNS if p.search(text)), None)
 
 
 def contains_panic(line: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> bool:
-    """A kernel line holding one of `sigs`."""
+    """A kernel line holding one of `sigs`, or one of `FAILURE_PATTERNS` matches."""
     return panic_signature(line, sigs) is not None
 
 
@@ -791,16 +792,6 @@ def expected_lapic_mode(
     if accel_s == "tcg" or "-tsc-deadline" in parts:
         return "periodic"
     return "tsc-deadline"
-
-
-def lapic_timer_marker(
-    *,
-    cpu: str | None = None,
-    hpet: bool = True,
-    accel: str | None = None,
-) -> Marker:
-    mode = expected_lapic_mode(cpu=cpu, hpet=hpet, accel=accel)
-    return Marker(f"vibeOS: time: lapic_timer ok ({mode})", "lapic_timer_ok")
 
 
 def _accel_args(cfg: QemuConfig) -> list[str]:
@@ -1752,60 +1743,31 @@ def run_qemu_until_exit(
     return result
 
 
-# Boot contract, in order. Extended per DESIGN §8.3 as each phase lands.
-# Phase 0 gave us serial + limine; slice A added PMM free-frames; slice B
-# `paging: cr3 ok`; slice C `heap ok` / `kva: ready`. Phase 2 slice B
-# (ACPI) inserts `paging: mmio uc` after CR3 (only emitted when a real
-# LAPIC/IOAPIC/HPET leaf was patched). Phase 2 slice A then emits
-# `gdt ok` / `pic: remapped` / `idt ok` after KVA (IST from KVA), then
-# `per_cpu: bsp ready` (GS_BASE; DESIGN step 11, after GDT because
-# `mov gs` zeros the hidden base), then `acpi: xsdt <n> tables`. Slice C
-# adds TSC calibration: a diagnostic `time: calibrated hpet|pit <n>/ms`
-# then the exit-gate `time: tsc <n>/ms`. Phase 4 slice A then emits
-# `time: lapic_timer ok (<mode>)` after the LAPIC timer is proven (PIC
-# masked only then). Phase 3 slice B then emits
-# `sched: cpu0 ready` and `irq: enabled` (keyboard stays masked until
-# phase 5). Phase 4 slice C then emits `sched: cpu<i> ready` then
-# `smp: ap online` for each AP, then `smp: done` before `console ok` /
-# `shell ready`. `boot: phase1 done` was retired when `shell ready` became
-# the trailing marker (DESIGN §3.3 / §8.3).
-# Phase 5 slice B then emits `console ok` after SMP. Phase 6 slice A
-# emits `pci: <n> devices` (and per-device lines) after that. Phase 6
-# slice C may emit diagnostic `work: ready` / virtio lines (not contract
-# markers). Phase 7 slice A emits `block: <name> <n> sectors` for the
-# ramdisk, still before `shell ready`. Slice C adds
-# `block: <parent>p<N> <n> sectors` for partition children (ram0p1, ram0p2).
-# Shell `shell ready` is last. IRQ1 is unmasked
-# only after the handler exists. TCG: `VIBEOS_QEMU_ACCEL=tcg` (make default)
-# or `VIBEOS_QEMU_EXTRA="-accel tcg"`.
-# `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);
-# unlike `paging: mmio uc` it is not a claim that ports were programmed.
-# Trailing live marker is `shell ready`. Runtime-derived payload uses
-# `and_contains`.
+# The boot contract: the `contract` rows of the registry, in order
+# (TESTING.md §8.3 gives the rules). `smp: done`'s count of `ap online`
+# lines is the per-AP group's close (`registry.per_ap_close`, F141).
 AP_ONLINE = "vibeOS: smp: ap online"
 
-_PHASE0_BEFORE_TIME: list[Marker] = [
-    Marker("vibeOS: serial online", "serial_online"),
-    Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
-    Marker(
-        "vibeOS: pmm: ",
-        "pmm_free_frames",
-        and_contains=(" free 4KiB frames",),
-    ),
-    Marker("vibeOS: paging: cr3 ok", "paging_cr3_ok"),
-    Marker("vibeOS: paging: mmio uc", "paging_mmio_uc"),
-    Marker("vibeOS: heap ok", "heap_ok"),
-    Marker("vibeOS: kva: ready", "kva_ready"),
-    Marker("vibeOS: gdt ok", "gdt_ok"),
-    Marker("vibeOS: pic: remapped", "pic_remapped"),
-    Marker("vibeOS: idt ok", "idt_ok"),
-    Marker("vibeOS: per_cpu: bsp ready", "per_cpu_bsp"),
-    Marker(
-        "vibeOS: acpi: xsdt ",
-        "acpi_xsdt",
-        and_contains=(" tables",),
-    ),
-]
+
+def _marker_for(row: registry.Row, binding: Mapping[str, str]) -> Marker:
+    """The `Marker` for a contract row: its bound text split at the placeholders
+    left, matched on its source's side of the frame (DESIGN §2.6)."""
+    text = registry.bind(row.text, binding)
+    frags = [f for f in registry.fragments(text) if f]
+    name = registry.bind(row.name or "", binding)
+    return Marker(frags[0], name, and_contains=tuple(frags[1:]), source=row.source)
+
+
+def contract_markers(cfg: registry.BootConfig) -> list[Marker]:
+    """`cfg`'s contract as markers, in order."""
+    markers: list[Marker] = []
+    close = registry.per_ap_close(ROWS, cfg)
+    for row, binding in registry.contract(ROWS, cfg):
+        m = _marker_for(row, binding)
+        if close is not None and row is close[1]:
+            m.exactly_before = (registry.head(close[0].text), max(cfg.smp, 1) - 1)
+        markers.append(m)
+    return markers
 
 
 def boot_contract_markers(
@@ -1819,78 +1781,13 @@ def boot_contract_markers(
     """Live e2e contract. Pins the LAPIC timer mode and SMP AP count."""
     if smp is None:
         smp = env_int("VIBEOS_SMP", DEFAULT_SMP)
-    after = [
-        Marker(
-            "vibeOS: time: tsc ",
-            "time_tsc",
-            and_contains=("/ms",),
-        ),
-        lapic_timer_marker(cpu=cpu, hpet=hpet, accel=accel),
-        Marker("vibeOS: sched: cpu0 ready", "sched_cpu0"),
-        Marker("vibeOS: irq: enabled", "irq_enabled"),
-    ]
-    for i in range(1, max(smp, 1)):
-        after.append(
-            Marker(f"vibeOS: sched: cpu{i} ready", f"sched_cpu{i}")
-        )
-        after.append(Marker(AP_ONLINE, f"smp_ap_online_{i - 1}"))
-    after.append(
-        Marker(
-            "vibeOS: smp: done",
-            "smp_done",
-            exactly_before=(AP_ONLINE, max(smp, 1) - 1),
-        )
+    cfg = registry.BootConfig(
+        hpet=hpet,
+        smp=smp,
+        lapic_mode=expected_lapic_mode(cpu=cpu, hpet=hpet, accel=accel),
+        gp_test=gp,
     )
-    after.append(Marker("vibeOS: console ok", "console_ok"))
-    after.append(
-        Marker(
-            "vibeOS: pci: ",
-            "pci_devices",
-            and_contains=(" devices",),
-        )
-    )
-    after.append(
-        Marker(
-            "vibeOS: block: ",
-            "block_ramdisk",
-            and_contains=(" ram0 ", " sectors"),
-        )
-    )
-    after.append(
-        Marker(
-            "vibeOS: block: ",
-            "block_ram0p1",
-            and_contains=(" ram0p1 ", " sectors"),
-        )
-    )
-    after.append(
-        Marker(
-            "vibeOS: block: ",
-            "block_ram0p2",
-            and_contains=(" ram0p2 ", " sectors"),
-        )
-    )
-    # gp-test trips after PCI enum / ramdisk and never reaches the shell thread.
-    if not gp:
-        after.append(Marker("vibeOS: shell ready", "shell_ready"))
-    if hpet:
-        calib = Marker(
-            "vibeOS: time: calibrated hpet ",
-            "time_calib_hpet",
-            and_contains=("/ms",),
-        )
-    else:
-        calib = Marker(
-            "vibeOS: time: calibrated pit ",
-            "time_calib_pit",
-            and_contains=("/ms",),
-        )
-    markers = _PHASE0_BEFORE_TIME + [calib] + after
-    if gp:
-        markers = markers + [
-            Marker("vibeOS: boot: gp-test armed", "gp_test_armed"),
-        ]
-    return markers
+    return contract_markers(cfg)
 
 
 PHASE0_MARKERS: list[Marker] = boot_contract_markers()
@@ -1898,19 +1795,14 @@ PHASE0_MARKERS: list[Marker] = boot_contract_markers()
 # Production ISO with HPET emulation off: PIT calib + PIT tick.
 PHASE0_PIT_MARKERS: list[Marker] = boot_contract_markers(hpet=False)
 
-# Markers that must appear *before* the deliberate panic in the panic-test
-# build. panic-test panics right after the limine handshake, so PMM never
-# runs on this path.
-PHASE0_PANIC_PREFIX: list[Marker] = [
-    Marker("vibeOS: serial online", "serial_online"),
-    Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
-    Marker("vibeOS: boot: panic-test armed", "panic_test_armed"),
-]
-
 
 def halt_test_markers() -> list[Marker]:
-    """Prefix markers for the intentional panic-test ISO."""
-    return list(PHASE0_PANIC_PREFIX)
+    """The markers that come before the deliberate panic in the panic-test
+    build, which panics right after the Limine handshake: the contract rows
+    that hold under `panic_test`."""
+    return contract_markers(
+        registry.BootConfig(hpet=True, smp=1, lapic_mode="", panic_test=True)
+    )
 
 
 # gp-test boots all the way through IDT, then a deliberate #GP dumps and
