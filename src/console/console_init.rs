@@ -100,13 +100,13 @@ fn wait_key_loop() -> DecodedKey {
         // SAFETY: `cli` only changes IF, which this wait loop owns: it holds no
         // lock and no `InterruptGuard` here; established here.
         unsafe {
-            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+            core::arch::asm!("cli", options(nostack, preserves_flags));
         }
         if let Some(k) = read() {
             // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
             // lock and no `InterruptGuard` here; established here.
             unsafe {
-                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+                core::arch::asm!("sti", options(nostack, preserves_flags));
             }
             return k;
         }
@@ -114,7 +114,7 @@ fn wait_key_loop() -> DecodedKey {
             // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
             // lock and no `InterruptGuard` here; established here.
             unsafe {
-                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+                core::arch::asm!("sti", options(nostack, preserves_flags));
             }
             thread_init::yield_now();
             continue;

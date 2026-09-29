@@ -202,9 +202,9 @@ irq::set_handler(vec, my_handler);
 ```
 
 The kernel binary exposes this as `irq_init::allocate_vector`. Allocate is refused
-inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `IN_ISR` flag around the handler. The
-timer, IPI, and keyboard ISRs do not set it, and no blocking primitive checks it (ROADMAP §10.3,
-F110). That flag is not the `InterruptGuard` nest: `allocate_vector` takes only spinlocks, so a
+inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `hardirq::IN_ISR` flag around the handler. The
+timer, IPI, and keyboard ISRs do not set it, and `park`, `begin_wait` and a voluntary `schedule` assert that it is clear
+([INVARIANTS.md §2.2](INVARIANTS.md#22-interrupt-handler-rules)). That flag is not the `InterruptGuard` nest: `allocate_vector` takes only spinlocks, so a
 caller with IF off may allocate, and only a device hard-IRQ is refused.
 
 Planned (ROADMAP §11.3, on x86_64 before the GIC): drivers name an interrupt by an `IrqId`, a `u32`

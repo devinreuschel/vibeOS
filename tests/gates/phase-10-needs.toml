@@ -786,3 +786,11 @@ needs = [
   "one `limits` module in `vibeos-core`",  # L1315
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1301
+[[box]]
+key = "enabling and disabling interrupts and"
+needs = [
+  "the seam proven by a",  # L1279
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"

@@ -228,7 +228,7 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
 `per_cpu_init::init_bsp` allocates one `PerCpu` per MADT CPU in a heap array, not a static array
 sized by a `MAX_CPUS` guess, and installs the BSP at slot 0; each AP installs its own slot with
 `per_cpu_init::install_gs`. `current` and `idle` are `*mut Tcb`. The other per-CPU tables are static
-and cap the CPU count at 64: the MADT `apic_ids` array (`acpi::MAX_CPUS`), `irq_init::IN_ISR`,
+and cap the CPU count at 64: the MADT `apic_ids` array (`acpi::MAX_CPUS`), `hardirq::IN_ISR`,
 `ipi_init::SHOOT`, `per_cpu_init::WITH_BUSY`, `sync_init::HELD`, `log_init::EMITTING` and `log_init::STAGE`, and the `u64` online mask. The 64-slot thread table, of which boot takes 2N+3 at
 `-smp N`, limits it further (ROADMAP §10.4, F037).
 

@@ -187,7 +187,7 @@ pub fn stac() {
     // SAFETY: `stac` only changes RFLAGS.AC, and `smap_live` is set only
     // once CR4.SMAP is on, so the instruction is defined; established
     // at `arch::x86_64::cpu::init_control_regs`.
-    unsafe { asm!("stac", options(nomem, nostack)) };
+    unsafe { asm!("stac", options(nostack)) };
 }
 
 /// Clear `RFLAGS.AC`. No-op when SMAP is unsupported.
@@ -206,7 +206,7 @@ pub fn clac() {
     // SAFETY: `clac` only changes RFLAGS.AC, and `smap_live` is set only
     // once CR4.SMAP is on, so the instruction is defined; established
     // at `arch::x86_64::cpu::init_control_regs`.
-    unsafe { asm!("clac", options(nomem, nostack)) };
+    unsafe { asm!("clac", options(nostack)) };
 }
 
 /// CPUID leaf 7 EBX/ECX, or zeros if the leaf is missing.
@@ -325,7 +325,7 @@ pub fn read_rip() -> u64 {
 pub fn halt() -> ! {
     loop {
         // SAFETY: `cli; hlt` stops this CPU with interrupts off and touches no memory; established here.
-        unsafe { asm!("cli; hlt", options(nomem, nostack)) };
+        unsafe { asm!("cli; hlt", options(nostack)) };
     }
 }
 
@@ -411,7 +411,7 @@ impl Drop for InterruptGuard {
         if self.restore {
             // SAFETY: IF was 1 when this guard entered (here), so turning it
             // back on restores the state its holder found.
-            unsafe { asm!("sti", options(nomem, nostack)) };
+            unsafe { asm!("sti", options(nostack)) };
         }
     }
 }
@@ -595,13 +595,13 @@ pub fn rdtscp() -> u64 {
 pub fn sti() {
     // SAFETY: `sti` only sets IF; every interrupt then enters through the IDT's
     // stubs, which preserve the interrupted state; established here.
-    unsafe { asm!("sti", options(nomem, nostack, preserves_flags)) };
+    unsafe { asm!("sti", options(nostack, preserves_flags)) };
 }
 
 #[inline]
 pub fn cli() {
     // SAFETY: `cli` only clears IF; established here.
-    unsafe { asm!("cli", options(nomem, nostack, preserves_flags)) };
+    unsafe { asm!("cli", options(nostack, preserves_flags)) };
 }
 
 /// One `hlt`. Returns when the next interrupt (or NMI) arrives.

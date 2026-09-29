@@ -98,6 +98,7 @@ impl<T> BlockingMutex<T> {
     }
 
     pub fn lock_until(&self, deadline: Option<Instant>) -> Option<BlockingMutexGuard<'_, T>> {
+        sync_init::might_sleep();
         let d = deadline_of(deadline);
         loop {
             let got = thread_init::with_sched(|s| {
@@ -208,6 +209,7 @@ impl<T> RwLock<T> {
     }
 
     pub fn read_until(&self, deadline: Option<Instant>) -> Option<RwLockReadGuard<'_, T>> {
+        sync_init::might_sleep();
         let d = deadline_of(deadline);
         loop {
             let got = thread_init::with_sched(|s| {
@@ -237,6 +239,7 @@ impl<T> RwLock<T> {
     }
 
     pub fn write_until(&self, deadline: Option<Instant>) -> Option<RwLockWriteGuard<'_, T>> {
+        sync_init::might_sleep();
         let d = deadline_of(deadline);
         loop {
             let got = thread_init::with_sched(|s| {
@@ -370,6 +373,7 @@ impl Semaphore {
     }
 
     pub fn acquire_until(&self, deadline: Option<Instant>) -> Option<()> {
+        sync_init::might_sleep();
         let d = deadline_of(deadline);
         loop {
             let got = thread_init::with_sched(|s| {
@@ -440,6 +444,7 @@ impl Condvar {
         guard: BlockingMutexGuard<'a, T>,
         deadline: Option<Instant>,
     ) -> (BlockingMutexGuard<'a, T>, WaitOutcome) {
+        sync_init::might_sleep();
         let guard = ManuallyDrop::new(guard);
         let mutex = guard.mutex;
         let d = deadline_of(deadline);
@@ -479,6 +484,7 @@ impl Condvar {
         done: impl FnOnce() -> bool,
         deadline: Instant,
     ) -> Option<WaitOutcome> {
+        sync_init::might_sleep();
         let waiting = thread_init::with_sched(|s| {
             if done() {
                 return false;
@@ -572,6 +578,7 @@ impl<T, const N: usize> Channel<T, N> {
     }
 
     pub fn send_until(&self, v: T, deadline: Option<Instant>) -> Result<(), T> {
+        sync_init::might_sleep();
         let d = deadline_of(deadline);
         let mut v = v;
         loop {
@@ -610,6 +617,7 @@ impl<T, const N: usize> Channel<T, N> {
     }
 
     pub fn recv_until(&self, deadline: Option<Instant>) -> Option<T> {
+        sync_init::might_sleep();
         let d = deadline_of(deadline);
         loop {
             let got = thread_init::with_sched(|s| {
