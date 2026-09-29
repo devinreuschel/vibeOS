@@ -13,7 +13,6 @@ use vibeos::syscall::SYS_KILL;
 use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
 use crate::apic_init;
-use crate::ipi_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{
     FAIL_MSG_BYTES, FailMsg, FrameCount, Outcome, SUITES, TESTS, alloc_frames, cpu_remote,
@@ -919,7 +918,7 @@ pub(crate) fn lifetime_stack_reclaim() -> Outcome {
         return Outcome::Fail("registry not on cpu0");
     }
     let base = FrameCount::quiescent();
-    let t0 = ipi_init::testing::shootdowns_from_tail();
+    let t0 = crate::irq::ktest::shootdowns_from_tail();
     CHURN_STOP.store(false, Ordering::Release);
     CHURN_DONE.store(0, Ordering::Release);
     for c in CHURN.iter() {
@@ -958,7 +957,7 @@ pub(crate) fn lifetime_stack_reclaim() -> Outcome {
             return crate::fail_fmt!("cpu{cpu} churn did not advance");
         }
     }
-    let tail = ipi_init::testing::shootdowns_from_tail().wrapping_sub(t0);
+    let tail = crate::irq::ktest::shootdowns_from_tail().wrapping_sub(t0);
     if tail != 0 {
         return crate::fail_fmt!("{tail} shootdowns sent from a switch tail");
     }

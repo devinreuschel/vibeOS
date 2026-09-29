@@ -554,7 +554,7 @@ pub(crate) fn finish_switch() {
         "finish_switch with IF on"
     );
     #[cfg(feature = "kernel_tests")]
-    crate::ipi_init::testing::tail_enter();
+    crate::irq::ktest::tail_enter();
     let (prev, kick) = per_cpu_init::with_current(|cpu| {
         let prev = core::mem::replace(&mut cpu.tail_prev, core::ptr::null_mut());
         let Some(stack) = cpu.dead_stack.take() else {
@@ -582,7 +582,7 @@ pub(crate) fn finish_switch() {
         kick_dead_stacks();
     }
     #[cfg(feature = "kernel_tests")]
-    crate::ipi_init::testing::tail_leave();
+    crate::irq::ktest::tail_leave();
     if !prev.is_null() {
         // SAFETY: `prev` is the TCB this CPU switched off (stored in
         // `tail_prev` by `thread_init::switch_now`), a live entry of `SCHED`

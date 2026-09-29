@@ -4,10 +4,10 @@
 //! Handlers are allocation-free. Shootdown and call-function take neither
 //! the page-table lock nor SCHED. A waiter with IF off polls inbound
 //! slots so two concurrent shootdowns cannot deadlock.
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
+use vibeos::apic::IpiError;
 use vibeos::ipi::{MAX_IPI_CPUS, all_acked, inbox_bit, waiter_mask};
 use vibeos::log::Level;
 use vibeos::paging::VirtAddr;
@@ -56,17 +56,52 @@ impl CallSlot {
 
 static SHOOT: [Slot; MAX_IPI_CPUS] = [const { Slot::empty() }; MAX_IPI_CPUS];
 static CALL: CallSlot = CallSlot::empty();
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §4.9 0xFB call-function; only the in-guest tests send one yet"
+    )
+)]
 static CALL_BUSY: AtomicBool = AtomicBool::new(false);
-static RESCHED_COUNT: AtomicU64 = AtomicU64::new(0);
-static SHOOT_COUNT: AtomicU64 = AtomicU64::new(0);
-static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(super) static RESCHED_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(super) static SHOOT_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(super) static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+/// IPIs the LAPIC refused to send since boot.
+static SEND_FAILS: AtomicU64 = AtomicU64::new(0);
+
+/// Count a refused IPI and log it at most once a second (DESIGN §2.5).
+/// The caller goes on: a shootdown or call waiter still polls its acks and
+/// logs each late second, and a reschedule leaves its thread in the inbox.
+#[inline]
+fn note_send(what: &str, r: Result<(), IpiError>) {
+    if let Err(e) = r {
+        send_failed(what, e);
+    }
+}
+
+/// `note_send`'s failure path, out of line so the IPI senders' frames stay
+/// as small as they were.
+#[cold]
+#[inline(never)]
+fn send_failed(what: &str, e: IpiError) {
+    let n = SEND_FAILS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    crate::klog_ratelimited!(
+        1000,
+        Level::Warn,
+        "vibeOS: ipi: {} not sent: {} ({} since boot)",
+        what,
+        e.as_str(),
+        n
+    );
+}
 
 fn my_bit() -> u64 {
     let id = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
     if id >= 64 { 0 } else { 1u64 << id }
 }
 
-fn my_index() -> usize {
+pub(super) fn my_index() -> usize {
     per_cpu_init::try_current()
         .map(|c| c.cpu_id as usize)
         .unwrap_or(0)
@@ -116,6 +151,8 @@ fn service_calls() {
     let f = CALL.func.load(Ordering::Relaxed);
     let arg = CALL.arg.load(Ordering::Relaxed);
     if !f.is_null() {
+        // SAFETY: invariant: a non-null `CALL.func` holds a `fn(*mut ())`;
+        // established by `ipi_init::call_mask`, its only non-null store.
         let f: fn(*mut ()) = unsafe { core::mem::transmute(f) };
         // Call-function work runs inside whatever this CPU holds, so it
         // takes no lock (DESIGN §2.2's last row).
@@ -177,12 +214,7 @@ fn wait_acks(waiters: u64, acked: &AtomicU64) {
 }
 
 /// Late periods [`wait_acks`] has logged since boot.
-static ACK_LATE: AtomicU64 = AtomicU64::new(0);
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn ack_late_count() -> u64 {
-    ACK_LATE.load(Ordering::Relaxed)
-}
+pub(super) static ACK_LATE: AtomicU64 = AtomicU64::new(0);
 
 /// Without a TSC, [`wait_acks`] logs every this many polls.
 const NO_TSC_LATE_POLLS: u64 = 50_000_000;
@@ -209,7 +241,7 @@ impl core::fmt::Display for CpuList {
 pub fn shootdown_va(va: VirtAddr) {
     let _irq = x86::InterruptGuard::enter();
     #[cfg(feature = "kernel_tests")]
-    testing::note_shootdown();
+    crate::irq::ktest::note_shootdown();
     let me = my_index() as u32;
     let waiters = waiter_mask(per_cpu_init::online_mask(), me);
     if waiters == 0 {
@@ -220,7 +252,10 @@ pub fn shootdown_va(va: VirtAddr) {
     slot.acked.store(0, Ordering::Relaxed);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     slot.waiters.store(waiters, Ordering::Release);
-    let _ = apic_init::send_ipi_all_ex_self(vectors::IPI_SHOOTDOWN);
+    note_send(
+        "shootdown",
+        apic_init::send_ipi_all_ex_self(vectors::IPI_SHOOTDOWN),
+    );
     wait_acks(waiters, &slot.acked);
     slot.waiters.store(0, Ordering::Release);
 }
@@ -252,7 +287,10 @@ pub fn place_ready(cpu: u32, id: ThreadId) {
         return;
     }
     inbox_push(cpu, id);
-    let _ = apic_init::send_ipi_cpu(cpu, vectors::IPI_RESCHEDULE);
+    note_send(
+        "reschedule",
+        apic_init::send_ipi_cpu(cpu, vectors::IPI_RESCHEDULE),
+    );
 }
 
 pub fn drain_inbox() -> bool {
@@ -277,18 +315,12 @@ pub fn drain_inbox() -> bool {
 /// What a reschedule IPI runs after it drains the inbox: the scheduler's
 /// preemption point, which `sched_init::init` sets (DESIGN §1.2). Unset,
 /// the IPI only counts and drains.
-static RESCHED: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+pub(super) static RESCHED: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Install the reschedule hook.
 pub fn set_reschedule_hook(f: fn()) {
     // Release: pairs with the Acquire load in `on_reschedule_ipi`.
     RESCHED.store(f as *mut (), Ordering::Release);
-}
-
-/// Whether the reschedule hook is set.
-#[cfg(feature = "kernel_tests")]
-pub fn reschedule_hook_installed() -> bool {
-    !RESCHED.load(Ordering::Acquire).is_null()
 }
 
 pub fn on_reschedule_ipi() {
@@ -322,6 +354,10 @@ pub fn on_halt_ipi() -> ! {
 /// Fixed IPI `0xFE`, not NMI (DESIGN §2.5 / §7.6).
 pub fn halt_others() {
     crate::serial::raw::HALTING.store(true, Ordering::Release);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "DESIGN §2.5: no failure anyone could act on: the panic path halts next"
+    )]
     let _ = apic_init::send_ipi_all_ex_self(vectors::IPI_HALT);
 }
 
@@ -329,7 +365,14 @@ pub fn halt_others() {
 /// to reclaim the single CALL slot (`wait` is the public completion
 /// contract). IRQ-off for publish → IPI → ack → clear; inbound still
 /// polls `service_incoming`.
-pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), wait: bool) {
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §4.9 0xFB call-function; only the in-guest tests send one yet"
+    )
+)]
+pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
     let me = my_index() as u32;
     let waiters = waiter_mask(mask & per_cpu_init::online_mask(), me);
     if waiters == 0 {
@@ -351,17 +394,23 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), wait: bool) {
     let mut c = 0u32;
     while c < 64 {
         if waiters & (1u64 << c) != 0 {
-            let _ = apic_init::send_ipi_cpu(c, vectors::IPI_CALL);
+            note_send("call", apic_init::send_ipi_cpu(c, vectors::IPI_CALL));
         }
         c += 1;
     }
     wait_acks(waiters, &CALL.acked);
-    let _ = wait;
     CALL.waiters.store(0, Ordering::Release);
     CALL.func.store(core::ptr::null_mut(), Ordering::Relaxed);
     CALL_BUSY.store(false, Ordering::Release);
 }
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §4.9 0xFB call-function; only the in-guest tests send one yet"
+    )
+)]
 pub fn call_cpu(cpu: u32, f: fn(*mut ()), arg: *mut (), wait: bool) {
     if cpu >= 64 {
         return;
@@ -373,57 +422,4 @@ pub fn call_cpu(cpu: u32, f: fn(*mut ()), arg: *mut (), wait: bool) {
 pub fn init() {
     vibeos::paging::set_tlb_shootdown_hook(shootdown_va);
     crate::sync_init::set_spin_poll(service_incoming);
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn reschedule_count() -> u64 {
-    RESCHED_COUNT.load(Ordering::Relaxed)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn shootdown_count() -> u64 {
-    SHOOT_COUNT.load(Ordering::Relaxed)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn call_count() -> u64 {
-    CALL_COUNT.load(Ordering::Relaxed)
-}
-
-/// Counts of what switch tails do, for the in-guest tests (DESIGN §8.2).
-/// `kernel_tests` builds only.
-#[cfg(feature = "kernel_tests")]
-pub mod testing {
-    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-    use vibeos::ipi::MAX_IPI_CPUS;
-
-    use super::my_index;
-
-    /// Per CPU: inside a switch tail. Owner CPU only, IF=0.
-    static IN_TAIL: [AtomicBool; MAX_IPI_CPUS] = [const { AtomicBool::new(false) }; MAX_IPI_CPUS];
-    /// Shootdowns started while their CPU's `IN_TAIL` was set.
-    static FROM_TAIL: AtomicU64 = AtomicU64::new(0);
-
-    /// This CPU enters a switch tail. IF=0.
-    pub fn tail_enter() {
-        IN_TAIL[my_index()].store(true, Ordering::Relaxed);
-    }
-
-    /// This CPU leaves its switch tail. IF=0.
-    pub fn tail_leave() {
-        IN_TAIL[my_index()].store(false, Ordering::Relaxed);
-    }
-
-    /// Shootdowns sent from a switch tail since boot.
-    pub fn shootdowns_from_tail() -> u64 {
-        FROM_TAIL.load(Ordering::Acquire)
-    }
-
-    /// `shootdown_va`'s count, IF=0.
-    pub(super) fn note_shootdown() {
-        if IN_TAIL[my_index()].load(Ordering::Relaxed) {
-            FROM_TAIL.fetch_add(1, Ordering::AcqRel);
-        }
-    }
 }

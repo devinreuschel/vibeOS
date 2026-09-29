@@ -11,7 +11,6 @@ use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
 use vibeos::paging::{PageFlags, PhysAddr, VirtAddr, heap_flags};
 
 use crate::diag;
-use crate::ipi_init;
 use crate::ktest::{
     Outcome, alloc_frame, alloc_frames_owned, catch_alloc_error, catch_fault, free_frame,
     free_frames, free_frames_owned, quiescent_free_frames, second_cpu, settle_threads,
@@ -388,7 +387,7 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
         };
     }
 
-    let before = ipi_init::shootdown_count();
+    let before = crate::irq::ktest::shootdown_count();
     let _ = unsafe { paging_init::unmap_4k(va) };
     if shoot_touch(2) != 2 {
         shoot_quit();
@@ -397,7 +396,9 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
         kva_init::free_va(va, PAGE_SIZE);
         return Outcome::Fail("AP did not fault after unmap");
     }
-    if per_cpu_init::online_mask().count_ones() > 1 && ipi_init::shootdown_count() <= before {
+    if per_cpu_init::online_mask().count_ones() > 1
+        && crate::irq::ktest::shootdown_count() <= before
+    {
         shoot_quit();
         let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
         free_frame(pa);
