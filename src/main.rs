@@ -186,6 +186,7 @@ fn normal_boot_tail() {
     crate::marker!(marker::PIC_REMAPPED);
 
     unsafe { arch::idt::init() };
+    arch::catch::init();
     crate::marker!(marker::IDT_OK);
 
     // DESIGN §3.3 step 11. After GDT: `mov gs` already ran. Before

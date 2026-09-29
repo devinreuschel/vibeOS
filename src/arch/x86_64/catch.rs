@@ -169,6 +169,12 @@ fn record(frame: &TrapFrame) {
     LAST.with(|last| *last = caught);
 }
 
+/// Install [`intercept`] as `arch::idt`'s exception intercept. `_start`
+/// calls it right after `idt::init`.
+pub fn init() {
+    crate::arch::idt::set_intercept_hook(intercept);
+}
+
 /// Called by `arch::idt`'s dispatcher for vectors 0 to 31. `true` means
 /// skip the body and iret (RIP already adjusted). Longjmp never returns.
 pub fn intercept(frame: &mut TrapFrame) -> bool {

@@ -13,7 +13,7 @@
 use core::arch::global_asm;
 use core::mem::{offset_of, size_of};
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use vibeos::desc::{IdtEntry, InterruptFrame, IstSlot, KERNEL_CS};
 use vibeos::fmt_util;
@@ -21,7 +21,6 @@ use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
 use vibeos::vectors;
 
-use crate::arch::catch;
 use crate::arch::gs;
 use crate::arch::pic;
 use crate::cell::IrqCell;
@@ -556,14 +555,40 @@ fn cpl3_body_if_on(v: u8) -> bool {
     v < 32 && ((PARANOID_MASK >> v) & 1 == 0 || v == vectors::DB)
 }
 
-/// Test hook, then `catch::intercept`. `true` skips the body.
+/// The exception intercept for vectors 0 to 31: `catch::intercept`, which
+/// `catch::init` sets right after `idt::init` (DESIGN §1.2). Unset, no
+/// exception is intercepted.
+static INTERCEPT: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the exception intercept. `true` from it skips the body.
+pub fn set_intercept_hook(f: fn(&mut TrapFrame) -> bool) {
+    // Release: pairs with the Acquire load in `intercept`.
+    INTERCEPT.store(f as *mut (), Ordering::Release);
+}
+
+#[inline(always)]
+fn intercept(frame: &mut TrapFrame) -> bool {
+    // Acquire: pairs with the Release store in `set_intercept_hook`.
+    let p = INTERCEPT.load(Ordering::Acquire);
+    if p.is_null() {
+        return false;
+    }
+    // SAFETY: invariant: a non-null `INTERCEPT` holds a
+    // `fn(&mut TrapFrame) -> bool`; established by
+    // `arch::idt::set_intercept_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn(&mut TrapFrame) -> bool>(p) };
+    f(frame)
+}
+
+/// Test hook, then the intercept (`catch::intercept`). `true` skips the
+/// body.
 #[inline(always)]
 fn pre_body(frame: &mut TrapFrame, v: u8) -> bool {
     #[cfg(feature = "kernel_tests")]
     if testing::on_entry(frame, v) {
         return true;
     }
-    v < 32 && catch::intercept(frame)
+    v < 32 && intercept(frame)
 }
 
 // Labels on the `iretq` instructions that return to ring 3.
