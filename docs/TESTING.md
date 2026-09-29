@@ -336,7 +336,7 @@ failure becomes invisible, because the harness sees its last marker and passes. 
 sits between `console ok` and `shell ready` so `lspci` is registered before the prompt. The ramdisk
 `block: <name> <n> sectors` line sits after PCI and still before the shell. Partition children emit
 `block: <parent>p<N> <n> sectors` after the parent (e2e: `ram0p1`, `ram0p2`). virtio-blk adds
-`block: vda <n> sectors` and `vdapN` when the ktest disk is present (not on the production e2e `pc`
+`block: vda <n> sectors` and `vdapN`, and `block: vdb <n> sectors`, when the ktest disks are present (not on the production e2e `pc`
 set). The same blind spot follows the last marker: writeback, deferred reclaim, and vibefs commits
 keep running after `shell ready`, and a panic there is invisible to a harness that stops reading at
 it. So the console-input boot keeps reading serial for 3 s after its last reply (`CONSOLE_TAIL_S`)

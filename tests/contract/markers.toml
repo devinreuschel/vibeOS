@@ -955,13 +955,6 @@ source = "kernel"
 section = "§7.2"
 
 [[marker]]
-text = "vibeOS: virtio: blk already bound"
-kind = "diagnostic"
-arch = "both"
-source = "kernel"
-section = "§7.2"
-
-[[marker]]
 text = "vibeOS: virtio: blk missing modern caps"
 kind = "diagnostic"
 arch = "both"

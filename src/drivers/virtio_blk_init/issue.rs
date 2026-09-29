@@ -37,7 +37,7 @@ pub(super) fn copy_to_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
         // SAFETY: invariant I235: the segment's `len` bytes stay valid and
         // untouched until the request completes, and `issue` checked that
         // the segments total at most `BOUNCE`, the bounce area's size;
-        // established by `virtio_blk_init::build`.
+        // established by `virtio_blk_init::VirtioBlk::build`.
         unsafe {
             core::ptr::copy_nonoverlapping(s.ptr as *const u8, dst, s.len);
             dst = dst.add(s.len);
@@ -54,7 +54,7 @@ pub(super) fn copy_from_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
     while i < req.nseg {
         let s = req.segs[i as usize];
         // SAFETY: invariant I235, as in `copy_to_bounce`; established by
-        // `virtio_blk_init::build`.
+        // `virtio_blk_init::VirtioBlk::build`.
         unsafe {
             core::ptr::copy_nonoverlapping(src, s.ptr as *mut u8, s.len);
             src = src.add(s.len);
@@ -88,364 +88,369 @@ pub(super) enum Issued {
     Full(Request),
 }
 
-pub(super) fn issue(blk: &mut Blk, req: Request) -> Issued {
-    match req.bio.op {
-        Op::Flush if blk.features & F_FLUSH == 0 => return Issued::Local(req, Ok(())),
-        Op::Discard if blk.features & F_DISCARD == 0 => {
-            return Issued::Local(req, Err(BlockError::Inval));
-        }
-        Op::Read | Op::Write | Op::Flush | Op::Discard => {}
-    }
-    let need = descs_for(req.bio.op);
-    let Some(qi) = pick_vq(blk, need) else {
-        return Issued::Full(req);
-    };
-    let Some(si) = alloc_slot(blk) else {
-        return Issued::Full(req);
-    };
-    let Some(sector) = sector_for_lba(req.bio.lba, blk.blk_size) else {
-        blk.slot_used[si] = false;
-        return Issued::Local(req, Err(BlockError::Inval));
-    };
-    if req.bio.op.needs_buf() {
-        let want = (req.bio.nsect as usize).saturating_mul(blk.blk_size as usize);
-        if req.bytes() != want || want == 0 || want > BOUNCE {
-            blk.slot_used[si] = false;
-            return Issued::Local(req, Err(BlockError::Inval));
-        }
-    }
-
-    let typ = match req.bio.op {
-        Op::Read => T_IN,
-        Op::Write => T_OUT,
-        Op::Flush => T_FLUSH,
-        Op::Discard => T_DISCARD,
-    };
-
-    let base = slot_base(&blk.slots, si);
-    // SAFETY: slot `si` is free (`alloc_slot` just marked it), so the device
-    // owns none of its `SLOT_STRIDE` bytes; established by
-    // `virtio_blk_init::issue::alloc_slot`.
-    unsafe {
-        core::ptr::write_bytes(base, 0, SLOT_STRIDE);
-        let mut hdr = [0u8; 16];
-        pack_header(&mut hdr, typ, sector);
-        core::ptr::copy_nonoverlapping(hdr.as_ptr(), base, 16);
-        *base.add(16) = 0xFF;
-    }
-    if req.bio.op == Op::Write {
-        copy_to_bounce(&blk.slots, si, &req);
-    }
-    if req.bio.op == Op::Discard {
-        let n512 = match sector_for_lba(req.bio.nsect as u64, blk.blk_size) {
-            Some(n) if n <= u32::MAX as u64 => n as u32,
-            _ => {
-                blk.slot_used[si] = false;
-                return Issued::Local(req, Err(BlockError::Inval));
-            }
-        };
-        let maxd = MAX_DISCARD.load(Ordering::Acquire);
-        if maxd != 0 && n512 > maxd {
-            blk.slot_used[si] = false;
-            return Issued::Local(req, Err(BlockError::Inval));
-        }
-        let mut disc = [0u8; 16];
-        pack_discard(&mut disc, sector, n512, 0);
-        // SAFETY: as above: bytes 32..48 of the free slot `si`; established
-        // by `virtio_blk_init::issue::alloc_slot`.
-        unsafe {
-            core::ptr::copy_nonoverlapping(disc.as_ptr(), base.add(32), 16);
-        }
-    }
-
-    let hdr_d = slot_dev(&blk.slots, si, 0);
-    let st_d = slot_dev(&blk.slots, si, 16);
-    let data_d = slot_dev(&blk.slots, si, SLOT_META);
-    let disc_d = slot_dev(&blk.slots, si, 32);
-    blk.slots.sync_for_device::<Arch>();
-
-    let chain: [DescBuf; 3];
-    let nchain: usize;
-    match req.bio.op {
-        Op::Read => {
-            chain = [
-                DescBuf {
-                    addr: hdr_d,
-                    len: 16,
-                    flags: 0,
-                },
-                DescBuf {
-                    addr: data_d,
-                    len: req.bytes() as u32,
-                    flags: DESC_F_WRITE,
-                },
-                DescBuf {
-                    addr: st_d,
-                    len: 1,
-                    flags: DESC_F_WRITE,
-                },
-            ];
-            nchain = 3;
-        }
-        Op::Write => {
-            chain = [
-                DescBuf {
-                    addr: hdr_d,
-                    len: 16,
-                    flags: 0,
-                },
-                DescBuf {
-                    addr: data_d,
-                    len: req.bytes() as u32,
-                    flags: 0,
-                },
-                DescBuf {
-                    addr: st_d,
-                    len: 1,
-                    flags: DESC_F_WRITE,
-                },
-            ];
-            nchain = 3;
-        }
-        Op::Flush => {
-            chain = [
-                DescBuf {
-                    addr: hdr_d,
-                    len: 16,
-                    flags: 0,
-                },
-                DescBuf {
-                    addr: st_d,
-                    len: 1,
-                    flags: DESC_F_WRITE,
-                },
-                DescBuf {
-                    addr: 0,
-                    len: 0,
-                    flags: 0,
-                },
-            ];
-            nchain = 2;
-        }
-        Op::Discard => {
-            chain = [
-                DescBuf {
-                    addr: hdr_d,
-                    len: 16,
-                    flags: 0,
-                },
-                DescBuf {
-                    addr: disc_d,
-                    len: 16,
-                    flags: 0,
-                },
-                DescBuf {
-                    addr: st_d,
-                    len: 1,
-                    flags: DESC_F_WRITE,
-                },
-            ];
-            nchain = 3;
-        }
-    }
-
-    let v = match blk.vqs[qi].as_mut() {
-        Some(v) => v,
-        None => {
-            blk.slot_used[si] = false;
-            return Issued::Full(req);
-        }
-    };
-    let old = v.vq.last_avail;
-    let head = match v.vq.add_chain(&chain[..nchain]) {
-        Ok(h) => h,
-        Err(_) => {
-            blk.slot_used[si] = false;
-            return Issued::Full(req);
-        }
-    };
-    if (head as usize) < MAX_QSIZE {
-        v.inflight[head as usize] = si as u8;
-    }
-    blk.slot_req[si] = Some(req);
-    v.vq.publish();
-    v.qdma.sync_for_device::<Arch>();
-    let kick = v.vq.should_kick(old);
-    Issued::Device { qi, kick }
-}
-
-/// Requests finished here that one [`pump`] pass holds before it drops
-/// `BLK` to wake their waiters and picks again. Small, so the pass's frame
+/// Requests finished here that one [`pump`](Self::pump) pass holds before it drops
+/// the queue lock to wake their waiters and picks again. Small, so the pass's frame
 /// stays far below a top half's 4 KiB share of a kernel stack: `pump` runs
 /// on a submitter's stack, under the FAT write path (DESIGN §4.5).
 pub(super) const PUMP_BATCH: usize = 4;
 
-/// Dispatch what `blk.q` picks until it is idle or a virtqueue is full.
-/// A request finished here (`Local`) is completed or aborted under `BLK`,
-/// and its waiters wake after the lock drops, [`PUMP_BATCH`] at a time.
-pub(super) fn pump() {
-    loop {
-        let mut kicks = [0u64; MAX_VQ];
-        let mut want = [false; MAX_VQ];
-        let mut local: [Option<(Request, Result<(), BlockError>)>; PUMP_BATCH] = [None; PUMP_BATCH];
-        let mut nlocal = 0usize;
-        let mut again = false;
-        {
-            let mut g = BLK.lock();
-            let Some(blk) = g.as_deref_mut() else {
-                return;
-            };
-            loop {
-                if nlocal == PUMP_BATCH {
-                    again = true;
-                    break;
-                }
-                let req = match blk.q.pick() {
-                    Some(r) => r,
-                    None => {
-                        blk.running = false;
-                        break;
-                    }
-                };
-                let seq = u64::from(req.seq);
-                match issue(blk, req) {
-                    Issued::Device { qi, kick } => {
-                        IO_REQS.fetch_add(1, Ordering::Relaxed);
-                        if req.bio.op == Op::Flush {
-                            FLUSHES.fetch_add(1, Ordering::Relaxed);
-                        }
-                        if kick && let Some(v) = blk.vqs[qi].as_ref() {
-                            kicks[qi] = v.doorbell;
-                            want[qi] = true;
-                        }
-                    }
-                    Issued::Local(req, res) => {
-                        if req.bio.op == Op::Flush && res.is_ok() {
-                            FLUSHES.fetch_add(1, Ordering::Relaxed);
-                        }
-                        let report = match res {
-                            Ok(()) => blk.q.complete(seq) == Completion::Report,
-                            Err(_) => {
-                                blk.q.abort(seq);
-                                true
-                            }
-                        };
-                        if report {
-                            local[nlocal] = Some((req, res));
-                            nlocal += 1;
-                        }
-                    }
-                    Issued::Full(req) => {
-                        if blk.q.requeue(req).is_err() {
-                            local[nlocal] = Some((req, Err(BlockError::Failed)));
-                            nlocal += 1;
-                        }
-                        break;
-                    }
-                }
+impl VirtioBlk {
+    pub(super) fn issue(&self, blk: &mut Blk, req: Request) -> Issued {
+        match req.bio.op {
+            Op::Flush if blk.features & F_FLUSH == 0 => return Issued::Local(req, Ok(())),
+            Op::Discard if blk.features & F_DISCARD == 0 => {
+                return Issued::Local(req, Err(BlockError::Inval));
             }
+            Op::Read | Op::Write | Op::Flush | Op::Discard => {}
         }
-        let mut i = 0usize;
-        while i < nlocal {
-            if let Some((req, res)) = local[i].take() {
-                block_init::complete_waiters(&req, res);
-            }
-            i += 1;
-        }
-        i = 0;
-        while i < MAX_VQ {
-            if want[i] {
-                kick(kicks[i]);
-            }
-            i += 1;
-        }
-        if !again {
-            return;
-        }
-    }
-}
-
-pub(super) fn fail_rest() {
-    STATE.store(DeviceState::Failed.as_u8(), Ordering::Release);
-    loop {
-        let mut dump = [None; MAX_QUEUE];
-        let n = {
-            let mut g = BLK.lock();
-            let Some(blk) = g.as_deref_mut() else {
-                return;
-            };
-            blk.q.fail();
-            blk.q.drain(&mut dump)
+        let need = descs_for(req.bio.op);
+        let Some(qi) = pick_vq(blk, need) else {
+            return Issued::Full(req);
         };
-        if n == 0 {
-            return;
-        }
-        let mut i = 0usize;
-        while i < n {
-            if let Some(r) = dump[i] {
-                block_init::complete_waiters(&r, Err(BlockError::Failed));
+        let Some(si) = alloc_slot(blk) else {
+            return Issued::Full(req);
+        };
+        let Some(sector) = sector_for_lba(req.bio.lba, blk.blk_size) else {
+            blk.slot_used[si] = false;
+            return Issued::Local(req, Err(BlockError::Inval));
+        };
+        if req.bio.op.needs_buf() {
+            let want = (req.bio.nsect as usize).saturating_mul(blk.blk_size as usize);
+            if req.bytes() != want || want == 0 || want > BOUNCE {
+                blk.slot_used[si] = false;
+                return Issued::Local(req, Err(BlockError::Inval));
             }
-            i += 1;
+        }
+
+        let typ = match req.bio.op {
+            Op::Read => T_IN,
+            Op::Write => T_OUT,
+            Op::Flush => T_FLUSH,
+            Op::Discard => T_DISCARD,
+        };
+
+        let base = slot_base(&blk.slots, si);
+        // SAFETY: slot `si` is free (`alloc_slot` just marked it), so the device
+        // owns none of its `SLOT_STRIDE` bytes; established by
+        // `virtio_blk_init::issue::alloc_slot`.
+        unsafe {
+            core::ptr::write_bytes(base, 0, SLOT_STRIDE);
+            let mut hdr = [0u8; 16];
+            pack_header(&mut hdr, typ, sector);
+            core::ptr::copy_nonoverlapping(hdr.as_ptr(), base, 16);
+            *base.add(16) = 0xFF;
+        }
+        if req.bio.op == Op::Write {
+            copy_to_bounce(&blk.slots, si, &req);
+        }
+        if req.bio.op == Op::Discard {
+            let n512 = match sector_for_lba(req.bio.nsect as u64, blk.blk_size) {
+                Some(n) if n <= u32::MAX as u64 => n as u32,
+                _ => {
+                    blk.slot_used[si] = false;
+                    return Issued::Local(req, Err(BlockError::Inval));
+                }
+            };
+            let maxd = self.max_discard.load(Ordering::Acquire);
+            if maxd != 0 && n512 > maxd {
+                blk.slot_used[si] = false;
+                return Issued::Local(req, Err(BlockError::Inval));
+            }
+            let mut disc = [0u8; 16];
+            pack_discard(&mut disc, sector, n512, 0);
+            // SAFETY: as above: bytes 32..48 of the free slot `si`; established
+            // by `virtio_blk_init::issue::alloc_slot`.
+            unsafe {
+                core::ptr::copy_nonoverlapping(disc.as_ptr(), base.add(32), 16);
+            }
+        }
+
+        let hdr_d = slot_dev(&blk.slots, si, 0);
+        let st_d = slot_dev(&blk.slots, si, 16);
+        let data_d = slot_dev(&blk.slots, si, SLOT_META);
+        let disc_d = slot_dev(&blk.slots, si, 32);
+        blk.slots.sync_for_device::<Arch>();
+
+        let chain: [DescBuf; 3];
+        let nchain: usize;
+        match req.bio.op {
+            Op::Read => {
+                chain = [
+                    DescBuf {
+                        addr: hdr_d,
+                        len: 16,
+                        flags: 0,
+                    },
+                    DescBuf {
+                        addr: data_d,
+                        len: req.bytes() as u32,
+                        flags: DESC_F_WRITE,
+                    },
+                    DescBuf {
+                        addr: st_d,
+                        len: 1,
+                        flags: DESC_F_WRITE,
+                    },
+                ];
+                nchain = 3;
+            }
+            Op::Write => {
+                chain = [
+                    DescBuf {
+                        addr: hdr_d,
+                        len: 16,
+                        flags: 0,
+                    },
+                    DescBuf {
+                        addr: data_d,
+                        len: req.bytes() as u32,
+                        flags: 0,
+                    },
+                    DescBuf {
+                        addr: st_d,
+                        len: 1,
+                        flags: DESC_F_WRITE,
+                    },
+                ];
+                nchain = 3;
+            }
+            Op::Flush => {
+                chain = [
+                    DescBuf {
+                        addr: hdr_d,
+                        len: 16,
+                        flags: 0,
+                    },
+                    DescBuf {
+                        addr: st_d,
+                        len: 1,
+                        flags: DESC_F_WRITE,
+                    },
+                    DescBuf {
+                        addr: 0,
+                        len: 0,
+                        flags: 0,
+                    },
+                ];
+                nchain = 2;
+            }
+            Op::Discard => {
+                chain = [
+                    DescBuf {
+                        addr: hdr_d,
+                        len: 16,
+                        flags: 0,
+                    },
+                    DescBuf {
+                        addr: disc_d,
+                        len: 16,
+                        flags: 0,
+                    },
+                    DescBuf {
+                        addr: st_d,
+                        len: 1,
+                        flags: DESC_F_WRITE,
+                    },
+                ];
+                nchain = 3;
+            }
+        }
+
+        let v = match blk.vqs[qi].as_mut() {
+            Some(v) => v,
+            None => {
+                blk.slot_used[si] = false;
+                return Issued::Full(req);
+            }
+        };
+        let old = v.vq.last_avail;
+        let head = match v.vq.add_chain(&chain[..nchain]) {
+            Ok(h) => h,
+            Err(_) => {
+                blk.slot_used[si] = false;
+                return Issued::Full(req);
+            }
+        };
+        if (head as usize) < MAX_QSIZE {
+            v.inflight[head as usize] = si as u8;
+        }
+        blk.slot_req[si] = Some(req);
+        v.vq.publish();
+        v.qdma.sync_for_device::<Arch>();
+        let kick = v.vq.should_kick(old);
+        Issued::Device { qi, kick }
+    }
+
+    /// Dispatch what `blk.q` picks until it is idle or a virtqueue is full.
+    /// A request finished here (`Local`) is completed or aborted under the queue lock,
+    /// and its waiters wake after the lock drops, [`PUMP_BATCH`] at a time.
+    pub(super) fn pump(&self) {
+        loop {
+            let mut kicks = [0u64; MAX_VQ];
+            let mut want = [false; MAX_VQ];
+            let mut local: [Option<(Request, Result<(), BlockError>)>; PUMP_BATCH] =
+                [None; PUMP_BATCH];
+            let mut nlocal = 0usize;
+            let mut again = false;
+            {
+                let mut g = self.st.lock();
+                let Some(blk) = g.as_deref_mut() else {
+                    return;
+                };
+                loop {
+                    if nlocal == PUMP_BATCH {
+                        again = true;
+                        break;
+                    }
+                    let req = match blk.q.pick() {
+                        Some(r) => r,
+                        None => {
+                            blk.running = false;
+                            break;
+                        }
+                    };
+                    let seq = u64::from(req.seq);
+                    match self.issue(blk, req) {
+                        Issued::Device { qi, kick } => {
+                            self.io_reqs.fetch_add(1, Ordering::Relaxed);
+                            if req.bio.op == Op::Flush {
+                                self.flushes.fetch_add(1, Ordering::Relaxed);
+                            }
+                            if kick && let Some(v) = blk.vqs[qi].as_ref() {
+                                kicks[qi] = v.doorbell;
+                                want[qi] = true;
+                            }
+                        }
+                        Issued::Local(req, res) => {
+                            if req.bio.op == Op::Flush && res.is_ok() {
+                                self.flushes.fetch_add(1, Ordering::Relaxed);
+                            }
+                            let report = match res {
+                                Ok(()) => blk.q.complete(seq) == Completion::Report,
+                                Err(_) => {
+                                    blk.q.abort(seq);
+                                    true
+                                }
+                            };
+                            if report {
+                                local[nlocal] = Some((req, res));
+                                nlocal += 1;
+                            }
+                        }
+                        Issued::Full(req) => {
+                            if blk.q.requeue(req).is_err() {
+                                local[nlocal] = Some((req, Err(BlockError::Failed)));
+                                nlocal += 1;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            let mut i = 0usize;
+            while i < nlocal {
+                if let Some((req, res)) = local[i].take() {
+                    block_init::complete_waiters(&req, res);
+                }
+                i += 1;
+            }
+            i = 0;
+            while i < MAX_VQ {
+                if want[i] {
+                    kick(kicks[i]);
+                }
+                i += 1;
+            }
+            if !again {
+                return;
+            }
         }
     }
-}
 
-/// Retire `req`'s dispatch under `BLK`, drop it, then wake. A retry goes
-/// back on the queue for [`harvest`]'s closing [`pump`].
-pub(super) fn finish(mut req: Request, res: Result<(), BlockError>) {
-    let seq = u64::from(req.seq);
-    let mut g = BLK.lock();
-    let Some(blk) = g.as_deref_mut() else {
-        drop(g);
-        block_init::complete_waiters(&req, Err(BlockError::Failed));
-        return;
-    };
-    match res {
-        Ok(()) => {
-            let c = blk.q.complete(seq);
-            drop(g);
-            if c == Completion::Report {
-                block_init::complete_waiters(&req, Ok(()));
+    pub(super) fn fail_rest(&self) {
+        self.state
+            .store(DeviceState::Failed.as_u8(), Ordering::Release);
+        loop {
+            let mut dump = [None; MAX_QUEUE];
+            let n = {
+                let mut g = self.st.lock();
+                let Some(blk) = g.as_deref_mut() else {
+                    return;
+                };
+                blk.q.fail();
+                blk.q.drain(&mut dump)
+            };
+            if n == 0 {
+                return;
+            }
+            let mut i = 0usize;
+            while i < n {
+                if let Some(r) = dump[i] {
+                    block_init::complete_waiters(&r, Err(BlockError::Failed));
+                }
+                i += 1;
             }
         }
-        Err(e) if e.retryable() && req.retries_left > 0 => {
-            req.retries_left -= 1;
-            let requeued = blk.q.requeue(req);
-            drop(g);
-            if requeued.is_err() {
-                block_init::complete_waiters(&req, Err(BlockError::Failed));
-                fail_rest();
-            }
-        }
-        Err(e) if e.retryable() => {
-            blk.q.abort(seq);
+    }
+
+    /// Retire `req`'s dispatch under the queue lock, drop it, then wake. A retry goes
+    /// back on the queue for [`harvest`](Self::harvest)'s closing [`pump`](Self::pump).
+    pub(super) fn finish(&self, mut req: Request, res: Result<(), BlockError>) {
+        let seq = u64::from(req.seq);
+        let mut g = self.st.lock();
+        let Some(blk) = g.as_deref_mut() else {
             drop(g);
             block_init::complete_waiters(&req, Err(BlockError::Failed));
-            fail_rest();
-        }
-        Err(e) => {
-            blk.q.abort(seq);
-            drop(g);
-            block_init::complete_waiters(&req, Err(e));
+            return;
+        };
+        match res {
+            Ok(()) => {
+                let c = blk.q.complete(seq);
+                drop(g);
+                if c == Completion::Report {
+                    block_init::complete_waiters(&req, Ok(()));
+                }
+            }
+            Err(e) if e.retryable() && req.retries_left > 0 => {
+                req.retries_left -= 1;
+                let requeued = blk.q.requeue(req);
+                drop(g);
+                if requeued.is_err() {
+                    block_init::complete_waiters(&req, Err(BlockError::Failed));
+                    self.fail_rest();
+                }
+            }
+            Err(e) if e.retryable() => {
+                blk.q.abort(seq);
+                drop(g);
+                block_init::complete_waiters(&req, Err(BlockError::Failed));
+                self.fail_rest();
+            }
+            Err(e) => {
+                blk.q.abort(seq);
+                drop(g);
+                block_init::complete_waiters(&req, Err(e));
+            }
         }
     }
-}
 
-pub(super) fn submit_req(req: Request) -> Result<bool, BlockError> {
-    let mut g = BLK.lock();
-    let blk = g.as_deref_mut().ok_or(BlockError::Failed)?;
-    blk.q.submit(req)?;
-    if blk.running {
-        Ok(false)
-    } else {
-        blk.running = true;
-        Ok(true)
+    pub(super) fn submit_req(&self, req: Request) -> Result<bool, BlockError> {
+        let mut g = self.st.lock();
+        let blk = g.as_deref_mut().ok_or(BlockError::Failed)?;
+        blk.q.submit(req)?;
+        if blk.running {
+            Ok(false)
+        } else {
+            blk.running = true;
+            Ok(true)
+        }
     }
 }
 
 #[cfg(feature = "kernel_tests")]
 /// Async submit. `buf` lives until `w` completes. Hard IRQ must not call this.
 pub fn submit(
+    blk: &VirtioBlk,
     op: Op,
     lba: u64,
     nsect: u32,
@@ -453,5 +458,5 @@ pub fn submit(
     len: usize,
     w: &IoWaiter,
 ) -> Result<(), BlockError> {
-    start(build(op, lba, nsect, ptr, len, w)?)
+    blk.start(blk.build(op, lba, nsect, ptr, len, w)?)
 }

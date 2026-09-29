@@ -28,9 +28,9 @@ use vibeos::virtio::{
 };
 use vibeos::virtio_blk::{
     CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
-    F_FLUSH, F_MQ, F_TOPOLOGY, NAME, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, logical_capacity,
-    map_status, nq_from_config, pack_discard, pack_header, pick_blk_size, pick_features,
-    sector_for_lba,
+    F_FLUSH, F_MQ, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
+    logical_capacity, map_status, nq_from_config, pack_discard, pack_header, pick_blk_size,
+    pick_features, sector_for_lba,
 };
 
 use crate::arch::{self, current::Arch};
@@ -47,32 +47,91 @@ mod irq;
 mod issue;
 mod vq;
 
-#[cfg(feature = "kernel_tests")]
-pub use irq::queue_vector;
 use irq::{blk_top, blk_work};
 #[cfg(feature = "kernel_tests")]
 pub use issue::submit;
-use issue::{Blk, N_SLOTS, SLOT_STRIDE, pump, submit_req};
+use issue::{Blk, N_SLOTS, SLOT_STRIDE};
 use vq::{FREE, MAX_QSIZE, MAX_VQ, Vq, clamp_qsize};
 
-static BLK: SpinMutex<Option<TryBox<Blk>>> = SpinMutex::with_rank(None, RANK_DEVICE);
-static ISR_VA: AtomicU64 = AtomicU64::new(0);
-static LIVE: AtomicBool = AtomicBool::new(false);
-static STATE: AtomicU8 = AtomicU8::new(0);
-pub(super) static FEATURES: AtomicU64 = AtomicU64::new(0);
-static BLK_SIZE: AtomicU32 = AtomicU32::new(SECTOR);
-static CAP: AtomicU64 = AtomicU64::new(0);
-static NQ: AtomicU8 = AtomicU8::new(0);
-pub(super) static TOP_HITS: AtomicU32 = AtomicU32::new(0);
-pub(super) static THREAD_HITS: AtomicU32 = AtomicU32::new(0);
-pub(super) static COMPLETIONS: AtomicU32 = AtomicU32::new(0);
-static PHYS_EXP: AtomicU8 = AtomicU8::new(0);
-static ALIGN_OFF: AtomicU8 = AtomicU8::new(0);
-static MIN_IO: AtomicU16 = AtomicU16::new(0);
-static OPT_IO: AtomicU32 = AtomicU32::new(0);
-static MAX_DISCARD: AtomicU32 = AtomicU32::new(0);
-static IO_REQS: AtomicU64 = AtomicU64::new(0);
-pub(super) static FLUSHES: AtomicU64 = AtomicU64::new(0);
+/// One bound virtio-blk function: what the driver keeps for it. The PCI
+/// registry slot of the device owns it as a `dev::Instance`; the block
+/// registry's entry and each queue vector hold counted references to it
+/// (DESIGN §12.1 rule 1). The queue state stays behind a pointer, so the
+/// instance is small.
+pub(crate) struct VirtioBlk {
+    /// Keeps the device's entry alive while the instance is.
+    #[cfg_attr(
+        not(feature = "kernel_tests"),
+        expect(
+            dead_code,
+            reason = "held for its count; only the in-guest tests read it"
+        )
+    )]
+    dev: DevRef,
+    name: [u8; 4],
+    name_len: u8,
+    st: SpinMutex<Option<TryBox<Blk>>>,
+    isr: AtomicU64,
+    live: AtomicBool,
+    state: AtomicU8,
+    features: AtomicU64,
+    blk_size: AtomicU32,
+    cap: AtomicU64,
+    nq: AtomicU8,
+    top_hits: AtomicU32,
+    thread_hits: AtomicU32,
+    completions: AtomicU32,
+    phys_exp: AtomicU8,
+    align_off: AtomicU8,
+    min_io: AtomicU16,
+    opt_io: AtomicU32,
+    max_discard: AtomicU32,
+    io_reqs: AtomicU64,
+    flushes: AtomicU64,
+    /// The vectors the probe allocated, one per queue (or one for all),
+    /// each as `QUEUE_VEC_LIVE | cpu << 8 | vector`; 0 for none.
+    queue_vecs: [AtomicU64; MAX_VQ],
+    /// Completions whose device status [`harvest`](Self::harvest) replaces
+    /// with `S_UNSUPP` (test-only, AGENTS.md rule 9).
+    #[cfg(feature = "kernel_tests")]
+    inject_unsupp: AtomicU32,
+}
+
+impl VirtioBlk {
+    fn new(dev: DevRef, name: &str) -> Self {
+        let mut n = [0u8; 4];
+        let len = name.len().min(n.len());
+        if let (Some(d), Some(s)) = (n.get_mut(..len), name.as_bytes().get(..len)) {
+            d.copy_from_slice(s);
+        }
+        Self {
+            dev,
+            name: n,
+            name_len: len as u8,
+            st: SpinMutex::with_rank(None, RANK_DEVICE),
+            isr: AtomicU64::new(0),
+            live: AtomicBool::new(false),
+            state: AtomicU8::new(0),
+            features: AtomicU64::new(0),
+            blk_size: AtomicU32::new(SECTOR),
+            cap: AtomicU64::new(0),
+            nq: AtomicU8::new(0),
+            top_hits: AtomicU32::new(0),
+            thread_hits: AtomicU32::new(0),
+            completions: AtomicU32::new(0),
+            phys_exp: AtomicU8::new(0),
+            align_off: AtomicU8::new(0),
+            min_io: AtomicU16::new(0),
+            opt_io: AtomicU32::new(0),
+            max_discard: AtomicU32::new(0),
+            io_reqs: AtomicU64::new(0),
+            flushes: AtomicU64::new(0),
+            queue_vecs: [const { AtomicU64::new(0) }; MAX_VQ],
+            #[cfg(feature = "kernel_tests")]
+            inject_unsupp: AtomicU32::new(0),
+        }
+    }
+}
 
 fn r8(va: u64, off: u16) -> u8 {
     // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
@@ -196,9 +255,6 @@ fn fail_armed(dev: &Device, common: u64, vecs: &[u8], nvec: usize) {
     fail_status(common);
 }
 
-/// The vectors the probe allocated, one per queue (or one for all), each as
-/// `QUEUE_VEC_LIVE | cpu << 8 | vector`; 0 for none.
-static QUEUE_VECS: [AtomicU64; MAX_VQ] = [const { AtomicU64::new(0) }; MAX_VQ];
 const QUEUE_VEC_LIVE: u64 = 1 << 63;
 
 fn online_cpus() -> u16 {
@@ -214,7 +270,14 @@ fn msix_table_size(dev: &Device) -> u16 {
     vibeos::pci::read_msix_cap(&mut hw, dev.addr, cap_off).table_size
 }
 
-fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
+/// Bring `dev` up as `blk`, the instance `inst` holds: fill it, give each
+/// queue vector a reference to it, then register its disk.
+fn setup(
+    blk: &VirtioBlk,
+    inst: &Instance,
+    dev: &Device,
+    caps: ModernCaps,
+) -> Result<(), VirtioError> {
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
     let notify_cap = caps.notify.ok_or(VirtioError::NoCaps)?;
     let isr_cap = caps.isr.ok_or(VirtioError::NoCaps)?;
@@ -263,13 +326,17 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
         return Err(VirtioError::Failed);
     }
     if feat & F_TOPOLOGY != 0 {
-        PHYS_EXP.store(r8(cfg, CFG_TOPOLOGY), Ordering::Release);
-        ALIGN_OFF.store(r8(cfg, CFG_TOPOLOGY + 1), Ordering::Release);
-        MIN_IO.store(r16(cfg, CFG_TOPOLOGY + 2), Ordering::Release);
-        OPT_IO.store(r32(cfg, CFG_TOPOLOGY + 4), Ordering::Release);
+        blk.phys_exp.store(r8(cfg, CFG_TOPOLOGY), Ordering::Release);
+        blk.align_off
+            .store(r8(cfg, CFG_TOPOLOGY + 1), Ordering::Release);
+        blk.min_io
+            .store(r16(cfg, CFG_TOPOLOGY + 2), Ordering::Release);
+        blk.opt_io
+            .store(r32(cfg, CFG_TOPOLOGY + 4), Ordering::Release);
     }
     if feat & F_DISCARD != 0 {
-        MAX_DISCARD.store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
+        blk.max_discard
+            .store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
     }
     let cfg_nq = r16(cfg, CFG_NUM_QUEUES);
     let common_nq = r16(common, COMMON_OFF_NUM_QUEUES);
@@ -298,7 +365,7 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
                 return Err(VirtioError::Failed);
             }
         };
-        if irq_init::set_threaded(vec, Some(blk_top), blk_work, None).is_err() {
+        if irq_init::set_threaded(vec, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
@@ -374,7 +441,7 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
                     return Err(VirtioError::Failed);
                 }
             };
-            if irq_init::set_threaded(vec, Some(blk_top), blk_work, None).is_err() {
+            if irq_init::set_threaded(vec, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
                 #[expect(
                     clippy::let_underscore_must_use,
                     reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
@@ -545,12 +612,13 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
     let st = r8(common, COMMON_OFF_STATUS);
     w8(common, COMMON_OFF_STATUS, st | STATUS_DRIVER_OK);
 
-    ISR_VA.store(isr, Ordering::Release);
-    FEATURES.store(feat, Ordering::Release);
-    BLK_SIZE.store(blk_size, Ordering::Release);
-    CAP.store(capacity, Ordering::Release);
-    NQ.store(nq as u8, Ordering::Release);
-    STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);
+    blk.isr.store(isr, Ordering::Release);
+    blk.features.store(feat, Ordering::Release);
+    blk.blk_size.store(blk_size, Ordering::Release);
+    blk.cap.store(capacity, Ordering::Release);
+    blk.nq.store(nq as u8, Ordering::Release);
+    blk.state
+        .store(DeviceState::Ready.as_u8(), Ordering::Release);
 
     let boxed = uninit.write(Blk {
         q: Queue::new(),
@@ -563,7 +631,7 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
         blk_size,
         running: false,
     });
-    *BLK.lock() = Some(boxed);
+    *blk.st.lock() = Some(boxed);
     let mut i = 0usize;
     while i < MAX_VQ {
         let v = if i < nvec {
@@ -571,27 +639,29 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
         } else {
             0
         };
-        QUEUE_VECS[i].store(v, Ordering::Release);
+        blk.queue_vecs[i].store(v, Ordering::Release);
         i += 1;
     }
-    LIVE.store(true, Ordering::Release);
+    blk.live.store(true, Ordering::Release);
 
-    // The registration prints the `block: vda` marker. A failure leaves
-    // the driver live but vda unregistered, so nothing mounts it.
-    if let Err(e) = register() {
+    // The registration prints the `block: <name>` marker. A failure leaves
+    // the instance live but its disk unregistered, so nothing mounts it.
+    if let Err(e) = register(blk, inst) {
         crate::klog!(
             vibeos::log::Level::Error,
-            "vibeOS: blk: {NAME} not registered: {}",
+            "vibeOS: blk: {} not registered: {}",
+            blk.name(),
             e.as_str()
         );
     }
     let mq = if feat & F_MQ != 0 { "mq" } else { "sq" };
     crate::marker!(
-        "vibeOS: virtio: blk {NAME} {} qsz={q0sz} nq={nq} {mq} feat={:#x} bs={blk_size} topo={}/{} discard={}",
+        "vibeOS: virtio: blk {} {} qsz={q0sz} nq={nq} {mq} feat={:#x} bs={blk_size} topo={}/{} discard={}",
+        blk.name(),
         dev.addr,
         feat,
-        PHYS_EXP.load(Ordering::Acquire),
-        OPT_IO.load(Ordering::Acquire),
+        blk.phys_exp.load(Ordering::Acquire),
+        blk.opt_io.load(Ordering::Acquire),
         feat & F_DISCARD != 0
     );
     Ok(())
@@ -638,19 +708,30 @@ impl Driver for BlkDriver {
     fn order(&self) -> u8 {
         41
     }
+    /// Each function is its own instance, named `vda`, `vdb`, … in bind
+    /// order. The instance exists before the device is touched, so each
+    /// queue vector gets a reference to it; on a failure it holds no queue
+    /// state and every DMA buffer was freed by `setup`.
     fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
-        if LIVE.load(Ordering::Acquire) {
-            crate::marker!("vibeOS: virtio: blk already bound");
-            return Err(ProbeError::Failed);
-        }
         let caps = virtio::read_modern_caps(&mut pci_init::HwCfg, dev.addr);
         if !caps.is_complete() || caps.device.is_none() {
             crate::marker!("vibeOS: virtio: blk missing modern caps");
             return Err(ProbeError::NoResource);
         }
+        let mut name = [0u8; 4];
+        let Some(name) = free_name(&mut name) else {
+            crate::klog!(
+                vibeos::log::Level::Warn,
+                "vibeOS: virtio: blk {}: no free disk name",
+                dev.addr
+            );
+            return Err(ProbeError::Busy);
+        };
         claim_bars(dev, &caps)?;
-        match setup(dev, caps) {
-            Ok(()) => Ok(None),
+        let inst = vibeos::dev::instance(VirtioBlk::new(dev.clone(), name))?;
+        let blk = inst.downcast_ref::<VirtioBlk>().ok_or(ProbeError::Failed)?;
+        match setup(blk, &inst, dev, caps) {
+            Ok(()) => Ok(Some(inst)),
             Err(VirtioError::NoVersion1) => {
                 crate::marker!("vibeOS: virtio: blk no VERSION_1");
                 Err(ProbeError::Failed)
@@ -674,208 +755,317 @@ pub fn init() {
     }
 }
 
-pub fn live() -> bool {
-    LIVE.load(Ordering::Acquire)
-}
-
-pub fn state() -> DeviceState {
-    DeviceState::from_u8(STATE.load(Ordering::Acquire))
-}
-
-pub fn logical_block_size() -> u32 {
-    BLK_SIZE.load(Ordering::Acquire)
-}
-
-pub fn capacity_sectors() -> u64 {
-    CAP.load(Ordering::Acquire)
-}
-
-pub fn num_queues() -> u8 {
-    NQ.load(Ordering::Acquire)
-}
-
-pub fn io_reqs() -> u64 {
-    IO_REQS.load(Ordering::Relaxed)
-}
-
-/// Check a request and tie it to `w`. Hard IRQ must not call this.
-fn build(
-    op: Op,
-    lba: u64,
-    nsect: u32,
-    ptr: usize,
-    len: usize,
-    w: &IoWaiter,
-) -> Result<Request, BlockError> {
-    if irq_init::in_hard_irq() {
-        return Err(BlockError::Failed);
+impl VirtioBlk {
+    /// The disk's name, `vda`, `vdb`, … in bind order.
+    pub fn name(&self) -> &str {
+        let n = self.name.get(..self.name_len as usize).unwrap_or(&[]);
+        core::str::from_utf8(n).unwrap_or("vd?")
     }
-    if !LIVE.load(Ordering::Acquire) {
-        return Err(BlockError::Failed);
+
+    pub fn live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
     }
-    if DeviceState::from_u8(STATE.load(Ordering::Acquire)) == DeviceState::Failed {
-        return Err(BlockError::Failed);
+
+    pub fn state(&self) -> DeviceState {
+        DeviceState::from_u8(self.state.load(Ordering::Acquire))
     }
-    let bs = logical_block_size() as usize;
-    let cap = capacity_sectors();
-    let mut req = Request::new(op, lba, nsect).with_waiter(w as *const IoWaiter as usize);
-    match op {
-        Op::Read | Op::Write => {
-            if nsect == 0 || (nsect as usize).checked_mul(bs) != Some(len) {
-                return Err(BlockError::Inval);
-            }
-            if lba
-                .checked_add(nsect as u64)
-                .map(|e| e > cap)
-                .unwrap_or(true)
-            {
-                return Err(BlockError::Inval);
-            }
-            req = req.with_seg(ptr, len);
+
+    pub fn logical_block_size(&self) -> u32 {
+        self.blk_size.load(Ordering::Acquire)
+    }
+
+    pub fn capacity_sectors(&self) -> u64 {
+        self.cap.load(Ordering::Acquire)
+    }
+
+    pub fn num_queues(&self) -> u8 {
+        self.nq.load(Ordering::Acquire)
+    }
+
+    pub fn io_reqs(&self) -> u64 {
+        self.io_reqs.load(Ordering::Relaxed)
+    }
+
+    /// Replace the device status of the next `n` completions with
+    /// `S_UNSUPP` (test-only).
+    #[cfg(feature = "kernel_tests")]
+    #[expect(
+        dead_code,
+        reason = "block_two_disk_instances, the proof test, injects a failure"
+    )]
+    pub fn inject_unsupp(&self, n: u32) {
+        self.inject_unsupp.store(n, Ordering::Release);
+    }
+
+    /// Check a request and tie it to `w`. Hard IRQ must not call this.
+    fn build(
+        &self,
+        op: Op,
+        lba: u64,
+        nsect: u32,
+        ptr: usize,
+        len: usize,
+        w: &IoWaiter,
+    ) -> Result<Request, BlockError> {
+        if irq_init::in_hard_irq() {
+            return Err(BlockError::Failed);
         }
-        Op::Flush => {
-            if nsect != 0 || len != 0 {
-                return Err(BlockError::Inval);
-            }
+        if !self.live() {
+            return Err(BlockError::Failed);
         }
-        Op::Discard => {
-            if len != 0 || nsect == 0 {
-                return Err(BlockError::Inval);
-            }
-            if lba
-                .checked_add(nsect as u64)
-                .map(|e| e > cap)
-                .unwrap_or(true)
-            {
-                return Err(BlockError::Inval);
-            }
+        if self.state() == DeviceState::Failed {
+            return Err(BlockError::Failed);
         }
-    }
-    Ok(req)
-}
-
-fn start(req: Request) -> Result<(), BlockError> {
-    if submit_req(req)? {
-        pump();
-    }
-    Ok(())
-}
-
-fn blocking(op: Op, lba: u64, nsect: u32, ptr: usize, len: usize) -> Result<(), BlockError> {
-    blocking_req(op, lba, nsect, ptr, len, false)
-}
-
-/// Submit and wait, yielding while the queue is full. `fua` marks a write.
-fn blocking_req(
-    op: Op,
-    lba: u64,
-    nsect: u32,
-    ptr: usize,
-    len: usize,
-    fua: bool,
-) -> Result<(), BlockError> {
-    let mut spins = 0u32;
-    loop {
-        let w = IoWaiter::new();
-        let mut req = build(op, lba, nsect, ptr, len, &w)?;
-        if fua {
-            req = req.with_fua();
-        }
-        match start(req) {
-            Ok(()) => return w.wait(),
-            Err(BlockError::QueueFull) => {
-                spins = spins.saturating_add(1);
-                if spins > 1_000_000 {
-                    return Err(BlockError::QueueFull);
+        let bs = self.logical_block_size() as usize;
+        let cap = self.capacity_sectors();
+        let mut req = Request::new(op, lba, nsect).with_waiter(w as *const IoWaiter as usize);
+        match op {
+            Op::Read | Op::Write => {
+                if nsect == 0 || (nsect as usize).checked_mul(bs) != Some(len) {
+                    return Err(BlockError::Inval);
                 }
-                thread_init::yield_now();
+                if lba
+                    .checked_add(nsect as u64)
+                    .map(|e| e > cap)
+                    .unwrap_or(true)
+                {
+                    return Err(BlockError::Inval);
+                }
+                req = req.with_seg(ptr, len);
             }
-            Err(e) => return Err(e),
+            Op::Flush => {
+                if nsect != 0 || len != 0 {
+                    return Err(BlockError::Inval);
+                }
+            }
+            Op::Discard => {
+                if len != 0 || nsect == 0 {
+                    return Err(BlockError::Inval);
+                }
+                if lba
+                    .checked_add(nsect as u64)
+                    .map(|e| e > cap)
+                    .unwrap_or(true)
+                {
+                    return Err(BlockError::Inval);
+                }
+            }
+        }
+        Ok(req)
+    }
+
+    fn start(&self, req: Request) -> Result<(), BlockError> {
+        if self.submit_req(req)? {
+            self.pump();
+        }
+        Ok(())
+    }
+
+    fn blocking(
+        &self,
+        op: Op,
+        lba: u64,
+        nsect: u32,
+        ptr: usize,
+        len: usize,
+    ) -> Result<(), BlockError> {
+        self.blocking_req(op, lba, nsect, ptr, len, false)
+    }
+
+    /// Submit and wait, yielding while the queue is full. `fua` marks a write.
+    fn blocking_req(
+        &self,
+        op: Op,
+        lba: u64,
+        nsect: u32,
+        ptr: usize,
+        len: usize,
+        fua: bool,
+    ) -> Result<(), BlockError> {
+        let mut spins = 0u32;
+        loop {
+            let w = IoWaiter::new();
+            let mut req = self.build(op, lba, nsect, ptr, len, &w)?;
+            if fua {
+                req = req.with_fua();
+            }
+            match self.start(req) {
+                Ok(()) => return w.wait(),
+                Err(BlockError::QueueFull) => {
+                    spins = spins.saturating_add(1);
+                    if spins > 1_000_000 {
+                        return Err(BlockError::QueueFull);
+                    }
+                    thread_init::yield_now();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        let bs = self.logical_block_size() as usize;
+        if bs == 0 || !buf.len().is_multiple_of(bs) {
+            return Err(BlockError::Inval);
+        }
+        let nsect = (buf.len() / bs) as u32;
+        self.blocking(Op::Read, lba, nsect, buf.as_mut_ptr() as usize, buf.len())
+    }
+
+    pub fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        let bs = self.logical_block_size() as usize;
+        if bs == 0 || !buf.len().is_multiple_of(bs) {
+            return Err(BlockError::Inval);
+        }
+        let nsect = (buf.len() / bs) as u32;
+        self.blocking(Op::Write, lba, nsect, buf.as_ptr() as usize, buf.len())
+    }
+
+    pub fn flush(&self) -> Result<(), BlockError> {
+        self.blocking(Op::Flush, 0, 0, 0, 0)
+    }
+
+    /// Write `buf` at `lba` with `Fua`: durable when this returns `Ok`.
+    /// virtio-blk has no FUA (DESIGN §10.4), so the queue sends a `Flush`.
+    #[cfg(feature = "kernel_tests")]
+    pub fn write_fua(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        let bs = self.logical_block_size() as usize;
+        if bs == 0 || !buf.len().is_multiple_of(bs) {
+            return Err(BlockError::Inval);
+        }
+        let nsect = (buf.len() / bs) as u32;
+        self.blocking_req(
+            Op::Write,
+            lba,
+            nsect,
+            buf.as_ptr() as usize,
+            buf.len(),
+            true,
+        )
+    }
+
+    pub fn discard(&self, lba: u64, nsectors: u64) -> Result<(), BlockError> {
+        if nsectors == 0 || nsectors > u32::MAX as u64 {
+            return Err(BlockError::Inval);
+        }
+        self.blocking(Op::Discard, lba, nsectors as u32, 0, 0)
+    }
+}
+
+/// Observers the in-guest tests read.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "observers only the in-guest tests read")
+)]
+impl VirtioBlk {
+    /// The PCI function this instance drives.
+    pub fn dev(&self) -> &DevRef {
+        &self.dev
+    }
+
+    pub fn features(&self) -> u64 {
+        self.features.load(Ordering::Acquire)
+    }
+
+    pub fn has_mq(&self) -> bool {
+        self.features() & F_MQ != 0 && self.num_queues() > 1
+    }
+
+    #[cfg_attr(
+        feature = "kernel_tests",
+        expect(
+            dead_code,
+            reason = "block_two_disk_instances, the proof test, reads it"
+        )
+    )]
+    pub fn has_flush(&self) -> bool {
+        self.features() & F_FLUSH != 0
+    }
+
+    pub fn has_discard(&self) -> bool {
+        self.features() & F_DISCARD != 0
+    }
+
+    /// Runs of this disk's top half.
+    pub fn top_hits(&self) -> u32 {
+        self.top_hits.load(Ordering::Acquire)
+    }
+
+    /// Runs of this disk's bottom half.
+    pub fn thread_hits(&self) -> u32 {
+        self.thread_hits.load(Ordering::Acquire)
+    }
+
+    /// Requests this disk's device completed.
+    pub fn completions(&self) -> u32 {
+        self.completions.load(Ordering::Acquire)
+    }
+
+    /// `Flush` requests dispatched, emulated-`Fua` ones and those finished
+    /// locally without `F_FLUSH` included.
+    pub fn flushes(&self) -> u64 {
+        self.flushes.load(Ordering::Relaxed)
+    }
+
+    /// A test LBA inside the Linux GPT partition (which starts at 512), not
+    /// the GPT backup.
+    pub fn persist_lba(&self) -> u64 {
+        const LBA: u64 = 2048;
+        let cap = self.capacity_sectors();
+        if cap > LBA + 1 {
+            LBA
+        } else {
+            cap.saturating_sub(1)
         }
     }
 }
 
-pub fn read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-    let bs = logical_block_size() as usize;
-    if bs == 0 || !buf.len().is_multiple_of(bs) {
-        return Err(BlockError::Inval);
+/// A disk's driver operations as the block registry's entry holds them: a
+/// counted reference to the instance, which holds no `BlockRef`, so no
+/// reference cycle forms.
+struct VblkDev {
+    inst: Instance,
+}
+
+impl VblkDev {
+    fn blk(&self) -> Result<&VirtioBlk, BlockError> {
+        self.inst
+            .downcast_ref::<VirtioBlk>()
+            .ok_or(BlockError::Failed)
     }
-    let nsect = (buf.len() / bs) as u32;
-    blocking(Op::Read, lba, nsect, buf.as_mut_ptr() as usize, buf.len())
 }
 
-pub fn write(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
-    let bs = logical_block_size() as usize;
-    if bs == 0 || !buf.len().is_multiple_of(bs) {
-        return Err(BlockError::Inval);
-    }
-    let nsect = (buf.len() / bs) as u32;
-    blocking(Op::Write, lba, nsect, buf.as_ptr() as usize, buf.len())
-}
-
-pub fn flush() -> Result<(), BlockError> {
-    blocking(Op::Flush, 0, 0, 0, 0)
-}
-
-#[cfg(feature = "kernel_tests")]
-/// Write `buf` at `lba` with `Fua`: durable when this returns `Ok`.
-/// virtio-blk has no FUA (DESIGN §10.4), so the queue sends a `Flush`.
-pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
-    let bs = logical_block_size() as usize;
-    if bs == 0 || !buf.len().is_multiple_of(bs) {
-        return Err(BlockError::Inval);
-    }
-    let nsect = (buf.len() / bs) as u32;
-    blocking_req(
-        Op::Write,
-        lba,
-        nsect,
-        buf.as_ptr() as usize,
-        buf.len(),
-        true,
-    )
-}
-
-pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
-    if nsectors == 0 || nsectors > u32::MAX as u64 {
-        return Err(BlockError::Inval);
-    }
-    blocking(Op::Discard, lba, nsectors as u32, 0, 0)
-}
-
-/// vda's driver operations, which its registry entry owns.
-struct Vda;
-
-impl BlockDevice for Vda {
+impl BlockDevice for VblkDev {
     fn logical_block_size(&self) -> u32 {
-        logical_block_size()
+        self.blk().map_or(SECTOR, |b| b.logical_block_size())
     }
     fn capacity_sectors(&self) -> u64 {
-        capacity_sectors()
+        self.blk().map_or(0, |b| b.capacity_sectors())
     }
     fn state(&self) -> DeviceState {
-        state()
+        self.blk().map_or(DeviceState::Failed, |b| b.state())
     }
     fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        read(lba, buf)
+        self.blk()?.read(lba, buf)
     }
     fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
-        write(lba, buf)
+        self.blk()?.write(lba, buf)
     }
     fn flush(&self) -> Result<(), BlockError> {
-        flush()
+        self.blk()?.flush()
     }
     fn discard(&self, lba: u64, nsectors: u64) -> Result<(), BlockError> {
-        discard(lba, nsectors)
+        self.blk()?.discard(lba, nsectors)
     }
 }
 
-/// Register vda in the block registry, through the page cache.
-fn register() -> Result<(), BlockError> {
-    let ops =
-        TryBox::<dyn BlockDevice>::try_new_unsize(Vda, |b| b).map_err(|_| BlockError::NoMem)?;
+/// Register `blk`'s disk under its name in the block registry, through the
+/// page cache.
+fn register(blk: &VirtioBlk, inst: &Instance) -> Result<(), BlockError> {
+    let ops = TryBox::<dyn BlockDevice>::try_new_unsize(VblkDev { inst: inst.clone() }, |b| b)
+        .map_err(|_| BlockError::NoMem)?;
     crate::block::blockdev_init::register(
-        NAME.as_bytes(),
+        blk.name().as_bytes(),
         Backing::Disk {
             ops,
             cache: Some(&crate::cache_init::PAGE_CACHE),
@@ -884,17 +1074,79 @@ fn register() -> Result<(), BlockError> {
     .map(|_| ())
 }
 
-pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {
-    if !live() {
-        return Ok(());
+/// The first `vd<x>` name the block registry does not hold. Binding is
+/// serial, so it stays free until the probe registers it.
+fn free_name(out: &mut [u8; 4]) -> Option<&str> {
+    let mut i = 0u8;
+    while i < MAX_DISKS {
+        let mut n = [0u8; 4];
+        let taken = crate::block::blockdev_init::lookup(disk_name(i, &mut n)?.as_bytes()).is_some();
+        if !taken {
+            return disk_name(i, out);
+        }
+        i += 1;
     }
-    writeln!(
-        f,
-        "vibeOS: blk: {NAME} {} {} sectors {} nq={} io={}",
-        logical_block_size(),
-        capacity_sectors(),
-        state().as_str(),
-        num_queues(),
-        io_reqs()
+    None
+}
+
+/// Run `f` on each bound virtio-blk instance, in registry order, with the
+/// registry unlocked; stop at the first `Some`. The driver keeps no list:
+/// the device registry owns the instances.
+fn find_disk<R>(mut f: impl FnMut(&VirtioBlk) -> Option<R>) -> Option<R> {
+    let mut i = 0usize;
+    while let Some(d) = dev_init::get(i) {
+        i += 1;
+        if dev_init::bound(&d) != Some(BLK_DRV.name()) {
+            continue;
+        }
+        let Some(inst) = dev_init::instance(&d) else {
+            continue;
+        };
+        if let Some(b) = inst.downcast_ref::<VirtioBlk>()
+            && let Some(r) = f(b)
+        {
+            return Some(r);
+        }
+    }
+    None
+}
+
+/// Run `f` on the disk named `name`; `None` when no bound instance has
+/// that name.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "only the in-guest tests look a disk up by name yet"
     )
+)]
+pub(crate) fn with_disk<R>(name: &[u8], f: impl FnOnce(&VirtioBlk) -> R) -> Option<R> {
+    let mut f = Some(f);
+    find_disk(|b| {
+        if b.name().as_bytes() != name {
+            return None;
+        }
+        f.take().map(|f| f(b))
+    })
+}
+
+/// Print one `vibeOS: blk: <name> …` line per bound instance.
+pub(crate) fn shell_lines(f: &mut impl core::fmt::Write) -> core::fmt::Result {
+    let mut res = Ok(());
+    find_disk::<()>(|b| {
+        if b.live() {
+            res = writeln!(
+                f,
+                "vibeOS: blk: {} {} {} sectors {} nq={} io={}",
+                b.name(),
+                b.logical_block_size(),
+                b.capacity_sectors(),
+                b.state().as_str(),
+                b.num_queues(),
+                b.io_reqs()
+            );
+        }
+        res.err().map(|_| ())
+    });
+    res
 }

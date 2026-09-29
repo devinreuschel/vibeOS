@@ -4,59 +4,74 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use vibeos::block::{BlockError, DeviceState, Op};
 use vibeos::dev::DevRef;
-use vibeos::virtio_blk::{F_DISCARD, F_MQ};
 
 use crate::block_init::IoWaiter;
 use crate::ktest::{Outcome, Test, test};
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
-use crate::virtio_blk_init;
+use crate::virtio_blk_init::{self, VirtioBlk};
 
-// ---- Observers the drivers tests read. Their state stays in
-// `virtio_blk_init` as `pub(super)` items.
+// ---- vda, the ktest disk, looked up by name: the driver keeps no list
+// of its instances (DESIGN §12.1 rule 1).
 
-fn features() -> u64 {
-    virtio_blk_init::FEATURES.load(Ordering::Acquire)
+/// Run `f` on vda's instance; `None` when vda is not bound.
+pub(crate) fn vda<R>(f: impl FnOnce(&VirtioBlk) -> R) -> Option<R> {
+    virtio_blk_init::with_disk(b"vda", f)
+}
+
+/// Whether vda is bound and live.
+pub(crate) fn vda_live() -> bool {
+    vda(|b| b.live()).unwrap_or(false)
+}
+
+pub(crate) fn vda_read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+    vda(|b| b.read(lba, buf)).unwrap_or(Err(BlockError::Gone))
+}
+
+pub(crate) fn vda_write(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    vda(|b| b.write(lba, buf)).unwrap_or(Err(BlockError::Gone))
+}
+
+pub(crate) fn vda_write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    vda(|b| b.write_fua(lba, buf)).unwrap_or(Err(BlockError::Gone))
+}
+
+fn vda_flush() -> Result<(), BlockError> {
+    vda(|b| b.flush()).unwrap_or(Err(BlockError::Gone))
 }
 
 fn has_mq() -> bool {
-    features() & F_MQ != 0 && virtio_blk_init::num_queues() > 1
+    vda(|b| b.has_mq()).unwrap_or(false)
 }
 
 fn has_discard() -> bool {
-    features() & F_DISCARD != 0
+    vda(|b| b.has_discard()).unwrap_or(false)
 }
 
-/// Runs of the virtio-blk top half (`blk_top`).
+/// Runs of vda's top half (`blk_top`).
 pub(crate) fn top_hits() -> u32 {
-    virtio_blk_init::TOP_HITS.load(Ordering::Acquire)
+    vda(|b| b.top_hits()).unwrap_or(0)
 }
 
 fn thread_hits() -> u32 {
-    virtio_blk_init::THREAD_HITS.load(Ordering::Acquire)
+    vda(|b| b.thread_hits()).unwrap_or(0)
 }
 
 fn completions() -> u32 {
-    virtio_blk_init::COMPLETIONS.load(Ordering::Acquire)
+    vda(|b| b.completions()).unwrap_or(0)
 }
 
 /// `Flush` requests dispatched to vda, emulated-`Fua` ones and those
 /// finished locally without `F_FLUSH` included.
 pub(crate) fn flushes() -> u64 {
-    virtio_blk_init::FLUSHES.load(Ordering::Relaxed)
+    vda(|b| b.flushes()).unwrap_or(0)
 }
 
-/// A test LBA inside the Linux GPT partition (which starts at 512), not
+/// A test LBA inside vda's Linux GPT partition (which starts at 512), not
 /// the GPT backup.
 pub(crate) fn persist_lba() -> u64 {
-    const LBA: u64 = 2048;
-    let cap = virtio_blk_init::capacity_sectors();
-    if cap > LBA + 1 {
-        LBA
-    } else {
-        cap.saturating_sub(1)
-    }
+    vda(|b| b.persist_lba()).unwrap_or(0)
 }
 
 fn find_blk() -> Option<DevRef> {
@@ -65,7 +80,7 @@ fn find_blk() -> Option<DevRef> {
 }
 
 pub(crate) fn test_block_vblk_rw() -> Outcome {
-    if !virtio_blk_init::live() {
+    if !vda_live() {
         return Outcome::Skip("no virtio-blk");
     }
     let Some(d) = find_blk() else {
@@ -76,12 +91,17 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
         Some(_) => return Outcome::Fail("wrong driver"),
         None => return Outcome::Fail("unbound"),
     }
+    // The first function binds first, so it is vda, and its instance is
+    // the one its registry entry owns.
+    if vda(|b| b.dev().same(&d)) != Some(true) {
+        return Outcome::Fail("vda is not the first function's instance");
+    }
     // vda's registry handle; its `_dev` calls reach the driver below the
     // page cache, as this test always has.
     let Some(d) = crate::block::blockdev_init::lookup(b"vda") else {
         return Outcome::Fail("no device");
     };
-    if d.name().as_str() != vibeos::virtio_blk::NAME || d.parent().is_some() {
+    if d.name().as_str() != "vda" || d.parent().is_some() {
         return Outcome::Fail("name");
     }
     let (Ok(bs), Ok(cap)) = (d.logical_block_size(), d.capacity_sectors()) else {
@@ -147,18 +167,18 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
 }
 
 pub(crate) fn test_block_vblk_irq() -> Outcome {
-    if !virtio_blk_init::live() {
+    if !vda_live() {
         return Outcome::Skip("no virtio-blk");
     }
     let t0 = top_hits();
     let th0 = thread_hits();
     let c0 = completions();
     let buf = [0x3Du8; 512];
-    if virtio_blk_init::write(2, &buf).is_err() {
+    if vda_write(2, &buf).is_err() {
         return Outcome::Fail("write");
     }
     let mut out = [0u8; 512];
-    if virtio_blk_init::read(2, &mut out).is_err() || out != buf {
+    if vda_read(2, &mut out).is_err() || out != buf {
         return Outcome::Fail("read");
     }
     if completions() <= c0 {
@@ -194,14 +214,9 @@ fn vblk_deep_round(bad: Option<usize>) -> (Outcome, u32) {
         bufs[i] = [0x10u8.wrapping_add(i as u8); 512];
         let len = if bad == Some(i) { 511 } else { 512 };
         let lba = 10 + 2 * i as u64;
-        let sub = virtio_blk_init::submit(
-            Op::Write,
-            lba,
-            1,
-            bufs[i].as_ptr() as usize,
-            len,
-            &waiters[i],
-        );
+        let (ptr, w) = (bufs[i].as_ptr() as usize, &waiters[i]);
+        let sub = vda(|b| virtio_blk_init::submit(b, Op::Write, lba, 1, ptr, len, w))
+            .unwrap_or(Err(BlockError::Gone));
         match sub {
             Ok(()) => submitted[i] = true,
             Err(_) => {
@@ -234,7 +249,7 @@ fn vblk_deep_round(bad: Option<usize>) -> (Outcome, u32) {
 }
 
 pub(crate) fn test_block_vblk_deep() -> Outcome {
-    if !virtio_blk_init::live() {
+    if !vda_live() {
         return Outcome::Skip("no virtio-blk");
     }
     match vblk_deep_round(None) {
@@ -244,13 +259,13 @@ pub(crate) fn test_block_vblk_deep() -> Outcome {
         _ => return Outcome::Fail("round"),
     }
     let mut out = [0u8; 512];
-    if virtio_blk_init::read(10, &mut out).is_err() || out != [0x10u8; 512] {
+    if vda_read(10, &mut out).is_err() || out != [0x10u8; 512] {
         return Outcome::Fail("r0");
     }
-    if virtio_blk_init::read(18, &mut out).is_err() || out != [0x14u8; 512] {
+    if vda_read(18, &mut out).is_err() || out != [0x14u8; 512] {
         return Outcome::Fail("r4");
     }
-    if virtio_blk_init::read(24, &mut out).is_err() || out != [0x17u8; 512] {
+    if vda_read(24, &mut out).is_err() || out != [0x17u8; 512] {
         return Outcome::Fail("r7");
     }
     match vblk_deep_round(Some(3)) {
@@ -284,12 +299,12 @@ fn vblk_worker() {
             buf[j] = (id as u8).wrapping_add(i as u8).wrapping_add(j as u8);
             j += 1;
         }
-        if virtio_blk_init::write(lba, &buf).is_err() {
+        if vda_write(lba, &buf).is_err() {
             VBLK_FAIL.fetch_add(1, Ordering::SeqCst);
             break;
         }
         let mut out = [0u8; 512];
-        if virtio_blk_init::read(lba, &mut out).is_err() || out != buf {
+        if vda_read(lba, &mut out).is_err() || out != buf {
             VBLK_FAIL.fetch_add(1, Ordering::SeqCst);
             break;
         }
@@ -299,7 +314,7 @@ fn vblk_worker() {
 }
 
 pub(crate) fn test_block_vblk_concurrent() -> Outcome {
-    if !virtio_blk_init::live() {
+    if !vda_live() {
         return Outcome::Skip("no virtio-blk");
     }
     VBLK_WID.store(0, Ordering::SeqCst);
@@ -328,10 +343,10 @@ pub(crate) fn test_block_vblk_concurrent() -> Outcome {
 }
 
 pub(crate) fn test_block_vblk_mq() -> Outcome {
-    if !virtio_blk_init::live() {
+    if !vda_live() {
         return Outcome::Skip("no virtio-blk");
     }
-    let nq = virtio_blk_init::num_queues();
+    let nq = vda(|b| b.num_queues()).unwrap_or(0);
     if nq == 0 {
         return Outcome::Fail("zero queues");
     }
@@ -352,7 +367,7 @@ pub(crate) fn test_block_vblk_mq() -> Outcome {
 const PERSIST_MAGIC: [u8; 8] = *b"vibeOS7B";
 
 pub(crate) fn test_block_persist() -> Outcome {
-    if !virtio_blk_init::live() {
+    if !vda_live() {
         return Outcome::Skip("no virtio-blk");
     }
     let lba = persist_lba();
@@ -360,7 +375,7 @@ pub(crate) fn test_block_persist() -> Outcome {
         return Outcome::Fail("no persist lba");
     }
     let mut buf = [0u8; 512];
-    if virtio_blk_init::read(lba, &mut buf).is_err() {
+    if vda_read(lba, &mut buf).is_err() {
         return Outcome::Fail("read");
     }
     if buf[0..8] == PERSIST_MAGIC {
@@ -380,10 +395,10 @@ pub(crate) fn test_block_persist() -> Outcome {
         buf[i] = 0xA5;
         i += 1;
     }
-    if virtio_blk_init::write(lba, &buf).is_err() {
+    if vda_write(lba, &buf).is_err() {
         return Outcome::Fail("write");
     }
-    if virtio_blk_init::flush().is_err() {
+    if vda_flush().is_err() {
         return Outcome::Fail("flush");
     }
     crate::marker!("vibeOS: persist: wrote");

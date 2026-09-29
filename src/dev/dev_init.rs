@@ -121,10 +121,6 @@ pub fn bound(dev: &DevRef) -> Option<&'static str> {
 }
 
 /// A reference to `dev`'s driver instance.
-#[expect(
-    dead_code,
-    reason = "C-INSTANCES: virtio-blk's instance lookup reads it once the driver returns one"
-)]
 pub fn instance(dev: &DevRef) -> Option<Instance> {
     REG.lock().instance(dev)
 }

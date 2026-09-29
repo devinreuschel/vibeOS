@@ -13,7 +13,6 @@ use vibeos::sched::stack_depth;
 
 use crate::arch::current::Arch;
 use crate::block::blockdev_init;
-use crate::drivers::virtio_blk_init;
 use crate::file_init;
 use crate::ktest::{Outcome, sleep_until};
 use crate::thread_init;
@@ -160,7 +159,11 @@ fn fat16k_worker() {
 pub(crate) fn fat_vda_16k_stack() -> Outcome {
     let Some((cpu, vec)) = (0..64u32)
         .filter(|&c| per_cpu_init::is_online(c))
-        .find_map(|c| virtio_blk_init::queue_vector(c).map(|v| (c, v)))
+        .find_map(|c| {
+            crate::drivers::ktest::vda(|b| b.queue_vector(c))
+                .flatten()
+                .map(|v| (c, v))
+        })
     else {
         return Outcome::Fail("no virtio-blk queue vector");
     };

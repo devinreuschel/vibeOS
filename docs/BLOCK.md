@@ -266,7 +266,9 @@ blocks. Discard on ramdisk validates the range and otherwise no-ops.
 ## 10.4 virtio-blk
 
 Modern virtio-blk (`1af4:1042`, `VERSION_1` required) binds by id on the
-Phase 6 transport. Config reads capacity (512-byte units), `blk_size` (512
+Phase 6 transport. Each bound function is its own instance (`VirtioBlk`), owned by its PCI
+registry entry and named `vda`, `vdb`, … in bind order, with its own queues, bounce slots and
+vectors; the driver keeps no list of them (DEVICES.md §12.1 rule 1). Config reads capacity (512-byte units), `blk_size` (512
 if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
 descriptor chain: header + data (or discard range) + status. The status
 byte is device-writable DMA, never a stack slot. Completions harvest the
