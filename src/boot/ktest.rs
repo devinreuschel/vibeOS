@@ -1,7 +1,11 @@
 //! In-guest tests for boot (kernel_tests only). Rows: the list in crate::ktest.
 
+use vibeos::boot::{FW_CFG_DMA_READ, FW_CFG_NAME_MAX};
+use vibeos::dma::DmaAlloc;
 use vibeos::paging::VirtAddr;
 
+use super::fw_cfg_init::{self, FwCfgError, FwCfgFile};
+use crate::dma_init;
 use crate::ktest::Outcome;
 use crate::paging_init;
 
@@ -22,4 +26,103 @@ pub(crate) fn test_bootinfo_consistent() -> Outcome {
         return Outcome::Fail("fb outside physmap");
     }
     Outcome::Ok
+}
+
+/// Up to 16 directory entries, names NUL-padded.
+fn fw_cfg_entries() -> ([(FwCfgFile, [u8; FW_CFG_NAME_MAX], usize); 16], usize) {
+    let mut out = [(FwCfgFile { select: 0, size: 0 }, [0u8; FW_CFG_NAME_MAX], 0); 16];
+    let mut n = 0;
+    fw_cfg_init::walk(|f, name| {
+        let slot = &mut out[n];
+        slot.0 = f;
+        slot.1[..name.len()].copy_from_slice(name);
+        slot.2 = name.len();
+        n += 1;
+        n < out.len()
+    });
+    (out, n)
+}
+
+/// fw_cfg is found under QEMU, its directory entries are found again by
+/// name, an absent name is not, and `read` returns `min(size, len)` bytes.
+pub(crate) fn test_fw_cfg_probe() -> Outcome {
+    if !fw_cfg_init::hypervisor() {
+        return Outcome::Skip("no hypervisor bit");
+    }
+    if !fw_cfg_init::present() {
+        return Outcome::Fail("fw_cfg not present under a hypervisor");
+    }
+    let (entries, n) = fw_cfg_entries();
+    if n == 0 {
+        return Outcome::Fail("empty fw_cfg directory");
+    }
+    for (f, name, len) in &entries[..n] {
+        let Ok(name) = core::str::from_utf8(&name[..*len]) else {
+            continue;
+        };
+        if fw_cfg_init::file(name) != Some(*f) {
+            return Outcome::Fail("directory entry not found again by name");
+        }
+    }
+    if fw_cfg_init::file("opt/vibeos/no-such-file").is_some() {
+        return Outcome::Fail("absent name found");
+    }
+    let Some((f, _, _)) = entries[..n].iter().find(|e| e.0.size >= 4) else {
+        return Outcome::Fail("no file of 4 bytes or more");
+    };
+    let mut small = [0u8; 3];
+    if fw_cfg_init::read(f, &mut small) != 3 {
+        return Outcome::Fail("read past a short buffer");
+    }
+    let mut big = [0u8; 64];
+    let tiny = FwCfgFile {
+        select: f.select,
+        size: 2,
+    };
+    if fw_cfg_init::read(&tiny, &mut big) != 2 {
+        return Outcome::Fail("read past the file size");
+    }
+    if big[..2] != small[..2] {
+        return Outcome::Fail("two reads of one file differ");
+    }
+    Outcome::Ok
+}
+
+/// A DMA read equals the port read of the same file, and a DMA write to a
+/// read-only file is refused by the device.
+pub(crate) fn test_fw_cfg_dma() -> Outcome {
+    if !fw_cfg_init::hypervisor() {
+        return Outcome::Skip("no hypervisor bit");
+    }
+    if !fw_cfg_init::has_dma() {
+        return Outcome::Skip("no fw_cfg dma");
+    }
+    let (entries, n) = fw_cfg_entries();
+    let Some((f, _, _)) = entries[..n].iter().find(|e| e.0.size != 0) else {
+        return Outcome::Fail("no non-empty fw_cfg file");
+    };
+    let len = (f.size as usize).min(256);
+    let mut port = [0u8; 256];
+    if fw_cfg_init::read(f, &mut port[..len]) != len {
+        return Outcome::Fail("short port read");
+    }
+    let Some(buf) = dma_init::alloc(DmaAlloc::new(4096)) else {
+        return Outcome::Fail("no dma buffer");
+    };
+    let r = fw_cfg_init::transfer(FW_CFG_DMA_READ, f.select, &buf, len as u32);
+    // SAFETY: `dma_init::alloc` established it: `buf` owns 4096 bytes at
+    // `as_ptr`, and the transfer above has completed or failed.
+    let got = unsafe { core::slice::from_raw_parts(buf.as_ptr().add(fw_cfg_init::DMA_DATA), len) };
+    let same = got == &port[..len];
+    dma_init::free(buf);
+    match r {
+        Ok(()) if same => {}
+        Ok(()) => return Outcome::Fail("dma read differs from port read"),
+        Err(e) => return Outcome::Fail(e.as_str()),
+    }
+    match fw_cfg_init::dma_write(f.select, b"vibeOS") {
+        Err(FwCfgError::Device) => Outcome::Ok,
+        Ok(()) => Outcome::Fail("dma write to a read-only file succeeded"),
+        Err(_) => Outcome::Fail("dma write failed without the device error bit"),
+    }
 }

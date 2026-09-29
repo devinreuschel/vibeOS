@@ -14,6 +14,15 @@ use limine::request::{
 use crate::cell::BootCell;
 use vibeos::paging::HHDM_BASE;
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "`capture` reads the command line through it once ROADMAP §10.2's capture lands"
+    )
+)]
+pub mod fw_cfg_init;
+
 #[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,
