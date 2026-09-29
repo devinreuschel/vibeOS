@@ -1093,3 +1093,118 @@ fn read_corrupt_leaves_buffer_untouched() {
         assert_eq!(read_all(v, d, ino, 0, BLOCK), craft_block(0));
     });
 }
+
+/// Commit `n` times from a fresh volume with `plant` set, one new file
+/// and a write per commit; `fsck` of the result.
+fn planted_commits(plant: Plant, n: u32) -> FsckReport {
+    let mut b = fresh(64 * BLOCK);
+    with_vol(&mut b, |v, d| {
+        v.set_plant(plant);
+        for i in 0..n {
+            let ino = new_file(v, d, format!("f{i}").as_bytes());
+            assert_eq!(v.write(d, ino, 0, &payload(i)).unwrap(), 300);
+            v.sync(d).unwrap();
+        }
+    });
+    fsck_of(&mut b)
+}
+
+#[test]
+fn plant_leak_shows_leak_warning() {
+    let r = planted_commits(Plant::None, 3);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+    let r = planted_commits(Plant::Leak, 3);
+    assert_eq!(r.errors, 0);
+    assert!(r.warnings >= 2, "warnings {}", r.warnings);
+}
+
+/// A device with a volatile cache that keeps every write until the next
+/// flush. At each superblock write it captures the image a power loss
+/// right after that write could leave: the durable blocks plus the super.
+struct PendingDisk {
+    durable: Vec<u8>,
+    pending: Vec<(u32, [u8; BLOCK])>,
+    captured: Vec<Vec<u8>>,
+}
+
+impl Disk for PendingDisk {
+    fn nblocks(&self) -> u32 {
+        (self.durable.len() / BLOCK) as u32
+    }
+
+    fn read_block(&mut self, bno: u32, buf: &mut [u8; BLOCK]) -> Result<(), Error> {
+        let o = bno as usize * BLOCK;
+        buf.copy_from_slice(&self.durable[o..o + BLOCK]);
+        for (p, data) in &self.pending {
+            if *p == bno {
+                buf.copy_from_slice(data);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_block(&mut self, bno: u32, buf: &[u8; BLOCK]) -> Result<(), Error> {
+        if bno < 2 {
+            let mut img = self.durable.clone();
+            let o = bno as usize * BLOCK;
+            img[o..o + BLOCK].copy_from_slice(buf);
+            self.captured.push(img);
+        }
+        self.pending.push((bno, *buf));
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        for (bno, data) in self.pending.drain(..) {
+            let o = bno as usize * BLOCK;
+            self.durable[o..o + BLOCK].copy_from_slice(&data);
+        }
+        Ok(())
+    }
+}
+
+/// Run commits with `plant` on a [`PendingDisk`]; for each image captured
+/// at a super write, whether it mounts and `fsck` finds it clean.
+fn early_super_images(plant: Plant) -> Vec<bool> {
+    let mut d = PendingDisk {
+        durable: fresh(64 * BLOCK),
+        pending: Vec::new(),
+        captured: Vec::new(),
+    };
+    let mut v = Vol::new();
+    mount(&mut d, &mut v).unwrap();
+    v.set_plant(plant);
+    for i in 0..6u32 {
+        v.create(
+            &mut d,
+            ROOT_INO,
+            format!("f{i}").as_bytes(),
+            InodeKind::Reg,
+            0o644,
+            None,
+        )
+        .unwrap();
+        let ino = v
+            .lookup(&mut d, ROOT_INO, format!("f{i}").as_bytes())
+            .unwrap()
+            .ino;
+        assert_eq!(v.write(&mut d, ino, 0, &payload(i)).unwrap(), 300);
+        v.sync(&mut d).unwrap();
+    }
+    assert_eq!(d.captured.len(), 6);
+    d.captured
+        .iter_mut()
+        .map(|img| {
+            let mut md = MemDisk::new(img).unwrap();
+            let mut mv = Vol::new();
+            mount(&mut md, &mut mv).is_ok() && fsck(&mut md).is_ok_and(|r| r.errors == 0)
+        })
+        .collect()
+}
+
+#[test]
+fn plant_early_super_breaks_rebuilt_image() {
+    assert!(early_super_images(Plant::None).iter().all(|&ok| ok));
+    let early = early_super_images(Plant::EarlySuper);
+    assert!(early.iter().any(|&ok| !ok), "{early:?}");
+}

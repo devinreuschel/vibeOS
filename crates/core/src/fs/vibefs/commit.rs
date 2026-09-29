@@ -178,6 +178,8 @@ impl Vol {
 
         // directory roots assigned while writing dir trees
         let mut dir_roots = [0u32; MAX_INODES];
+        // The `new_meta` index of this commit's first directory block.
+        let mut first_dir_meta: Option<usize> = None;
 
         li = 0;
         while li < MAX_INODES {
@@ -191,6 +193,9 @@ impl Vol {
                     continue;
                 }
                 let (leaves, ints) = dir_need(nd);
+                if first_dir_meta.is_none() {
+                    first_dir_meta = Some(n_new);
+                }
                 let mut dleaf = [0u32; 8];
                 let mut k = 0usize;
                 while k < leaves {
@@ -323,11 +328,21 @@ impl Vol {
         let mut sbuf = [0u8; BLOCK];
         write_alloc_into(self, &old_meta[..old_meta_n as usize], &mut sbuf);
         d.write_block(alloc_bno, &sbuf)?;
+        let slot = (self.generation % 2) as u8;
+        #[cfg(any(test, feature = "crash_plant"))]
+        let early_super = self.plant == Plant::EarlySuper;
+        #[cfg(not(any(test, feature = "crash_plant")))]
+        let early_super = false;
+        if early_super {
+            pack_super(&mut sbuf, self, slot);
+            d.write_block(slot as u32, &sbuf)?;
+        }
         d.flush()?;
 
-        let slot = (self.generation % 2) as u8;
-        pack_super(&mut sbuf, self, slot);
-        d.write_block(slot as u32, &sbuf)?;
+        if !early_super {
+            pack_super(&mut sbuf, self, slot);
+            d.write_block(slot as u32, &sbuf)?;
+        }
         d.flush()?;
 
         // In memory, apply the drops the alloc map above already carries.
@@ -344,7 +359,14 @@ impl Vol {
         // `need <= MAX_META` was checked before the first allocation, so no
         // call below fails with the new super on disk.
         debug_assert_eq!(n_new, need);
-        for &b in &new_meta[..n_new] {
+        #[cfg(any(test, feature = "crash_plant"))]
+        let leak = first_dir_meta.filter(|_| self.plant == Plant::Leak);
+        #[cfg(not(any(test, feature = "crash_plant")))]
+        let leak = first_dir_meta.filter(|_| false);
+        for (i, &b) in new_meta[..n_new].iter().enumerate() {
+            if leak == Some(i) {
+                continue;
+            }
             self.mark_meta(b)?;
         }
         self.dirty = false;

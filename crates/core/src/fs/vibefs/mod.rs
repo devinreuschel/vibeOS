@@ -282,6 +282,21 @@ impl Dent {
     }
 }
 
+/// A commit defect a `vibefs_crash` kernel plants, so the crash test shows
+/// that it can fail (docs/VIBEFS.md §12). Test-only: the `crash_plant`
+/// feature, which only that build enables.
+#[cfg(any(test, feature = "crash_plant"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Plant {
+    None,
+    /// Each commit leaves its first directory block out of the metadata
+    /// table, so the next commit never frees it: a leak `fsck` warns of.
+    Leak,
+    /// Each commit writes its superblock before the flush ahead of it, so
+    /// the super can reach the medium before the blocks it names.
+    EarlySuper,
+}
+
 pub struct Vol {
     pub nblocks: u32,
     pub generation: u64,
@@ -304,6 +319,8 @@ pub struct Vol {
     drop: [u32; MAX_DROP],
     ndrop: u8,
     iobuf: [u8; BLOCK],
+    #[cfg(any(test, feature = "crash_plant"))]
+    plant: Plant,
 }
 
 fn kind_of(k: u8) -> Result<InodeKind, Error> {

@@ -24,6 +24,8 @@ impl Vol {
             drop: [0; MAX_DROP],
             ndrop: 0,
             iobuf: [0; BLOCK],
+            #[cfg(any(test, feature = "crash_plant"))]
+            plant: Plant::None,
         }
     }
 
@@ -71,6 +73,16 @@ impl Vol {
         }
         self.ndrop = 0;
         self.iobuf.fill(0);
+        #[cfg(any(test, feature = "crash_plant"))]
+        {
+            self.plant = Plant::None;
+        }
+    }
+
+    /// Plant `p` in every later commit of this volume (test-only).
+    #[cfg(any(test, feature = "crash_plant"))]
+    pub fn set_plant(&mut self, p: Plant) {
+        self.plant = p;
     }
 }
 
