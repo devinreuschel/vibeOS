@@ -9,7 +9,6 @@
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::desc::InterruptFrame;
 use vibeos::fmt_util;
@@ -26,8 +25,6 @@ unsafe extern "C" {
     static __kernel_vma_start: u8;
     static __kernel_vma_end: u8;
 }
-
-static DUMPING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "panic_exit")]
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -72,7 +69,7 @@ fn stackish(p: u64) -> bool {
 /// `hlt`s (or isa-debug-exit) without walking the ring again.
 fn begin_dump() {
     x86::cli();
-    if DUMPING.swap(true, Ordering::SeqCst) {
+    if !crate::serial::raw::claim_dump() {
         Serial::init();
         Serial::write_bytes(b"vibeOS: panic: reentered\n");
         finish();

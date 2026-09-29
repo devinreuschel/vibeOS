@@ -133,6 +133,12 @@ GONE: list[tuple[str, str]] = [
     ("retryable_ktest_failure", "the harness retries nothing"),
     ("silent_user_syscalls_hang", "the harness retries nothing"),
     ("check_markers_in_order", "the marker-order unit tests drive"),
+    ("is_halting", "every two-way dependency between kernel modules"),
+    ("DUMPING", "every two-way dependency between kernel modules"),
+    ("write_bytes_raw", "every two-way dependency between kernel modules"),
+    ("write_byte_raw", "every two-way dependency between kernel modules"),
+    ("CONTROL_REGS", "every two-way dependency between kernel modules"),
+    ("src/proc/syscall_init.rs: fn dispatch", "every two-way dependency between kernel modules"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

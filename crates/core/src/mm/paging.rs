@@ -55,6 +55,21 @@ pub const NULL_GUARD_LEN: u64 = PAGE_SIZE_4K;
 /// PML4 indices `KERNEL_PML4_FIRST..512` are the shared kernel half.
 pub const KERNEL_PML4_FIRST: usize = 256;
 
+/// HHDM base for the kernel's physmap (MEMORY.md §4.1). The same VA Limine
+/// already gave, so the switch to the kernel's PML4 invalidates no pointer
+/// computed as `hhdm_offset + phys`, the buddy allocator's intrusive
+/// free-list nodes included: they live inside the free pages and are
+/// reached through `phys + hhdm_offset`. If Limine drifted to another
+/// offset, the first allocation after `mov cr3` would walk an unmapped VA
+/// and fault with no useful backtrace, so the kernel's boot capture fails
+/// loud against that drift.
+pub const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
+
+/// Hard cap on the physmap's extent (MEMORY.md §4.1, PITFALLS.md §9.2).
+/// Firmware sometimes reports multi-terabyte MMIO BARs as memmap entries;
+/// walking that at boot never finishes. The PMM ingests nothing above it.
+pub const PHYSMAP_CAP: u64 = 8 * 1024 * 1024 * 1024;
+
 /// Physical byte address. Newtype so a physical value cannot silently
 /// stand in for a virtual one, and vice versa (DESIGN §1.1).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

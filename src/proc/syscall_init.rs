@@ -8,12 +8,12 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::addr_space::AddressSpace;
+use vibeos::arch::x86_64::trap::sysret_ok;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{Fxsave, Tcb};
-use vibeos::trap::x86_64::sysret_ok;
 use vibeos::vectors;
 
 use crate::arch::gdt;
@@ -57,7 +57,7 @@ global_asm!(
         mov qword ptr gs:[{user_rsp}], rsp
         mov rsp, qword ptr gs:[{ksp}]
 
-        // The user frame (vibeos::trap::x86_64::UserFrame), top down:
+        // The user frame (vibeos::arch::x86_64::trap::UserFrame), top down:
         // RCX is the return RIP and R11 the user RFLAGS.
         push {user_ss}
         push qword ptr gs:[{user_rsp}]
@@ -219,7 +219,7 @@ unsafe extern "C" fn vibeos_syscall_bad_rip(frame: *mut UserFrame) -> ! {
     let f = unsafe { &*frame };
     #[cfg(feature = "kernel_tests")]
     testing::BAD_RIP_KILLS.fetch_add(1, Ordering::Relaxed);
-    crate::proc_init::try_user_fault(&TrapFrame::for_user(vectors::GP, 0, f));
+    crate::arch::idt::user_fault(&TrapFrame::for_user(vectors::GP, 0, f));
     panic!(
         "syscall: non-canonical return RIP {:#x} with no process",
         f.rip
@@ -227,7 +227,7 @@ unsafe extern "C" fn vibeos_syscall_bad_rip(frame: *mut UserFrame) -> ! {
 }
 
 /// The exit's choice between `sysretq` and `iretq` (Linux's rule,
-/// `trap::x86_64::sysret_ok`).
+/// `arch::x86_64::trap::sysret_ok`).
 ///
 /// # Safety
 /// `f` is the user frame the exit is returning over.
@@ -268,6 +268,8 @@ pub unsafe fn init_cpu() {
 /// GDT loaded, `GS_BASE` is the BSP `PerCpu`.
 pub unsafe fn init_bsp() {
     unsafe { init_cpu() };
+    crate::arch::idt::set_user_return_hook(fp_user_return);
+    crate::thread_init::set_switch_hooks(on_switch, fpu_template);
     per_cpu_init::with_current(|cpu| {
         cpu.tss = gdt::bsp_tss_ptr();
         let top = gdt::bsp_rsp0_top();
@@ -391,6 +393,11 @@ pub extern "C" fn vibeos_fp_user_return() {
             fpu::bind(&mut cpu.fp_owner, me, addr, &mut tcb.fp_cpu);
         }
     });
+}
+
+/// `vibeos_fp_user_return` as `arch::idt`'s user-return hook.
+fn fp_user_return() {
+    vibeos_fp_user_return();
 }
 
 /// The running thread's x87 status word, x87 control word, and MXCSR,
@@ -645,6 +652,17 @@ fn bump_counter() {
     }
 }
 
+/// The syscall handler: the process layer's `syscall`, which its `init`
+/// sets before the first ring-3 entry (DESIGN §1.2). Unset, every syscall
+/// returns `-ENOSYS`.
+static HANDLER: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the syscall handler.
+pub fn set_syscall_handler(f: fn(&mut UserFrame) -> i64) {
+    // Release: pairs with the Acquire load in `vibeos_syscall_stub`.
+    HANDLER.store(f as *mut (), Ordering::Release);
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     bump_counter();
@@ -652,14 +670,20 @@ pub extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     // syscall_init::vibeos_syscall_entry built at the top of this thread's
     // kernel stack, which only this thread's syscall path refers to.
     let frame = unsafe { &mut *frame };
-    let r = crate::proc_init::syscall(frame);
+    // Acquire: pairs with the Release store in `set_syscall_handler`.
+    let p = HANDLER.load(Ordering::Acquire);
+    let r = if p.is_null() {
+        ENOSYS_RET
+    } else {
+        // SAFETY: invariant: a non-null `HANDLER` holds a
+        // `fn(&mut UserFrame) -> i64`; established by
+        // `syscall_init::set_syscall_handler`, its only store.
+        let f = unsafe { core::mem::transmute::<*mut (), fn(&mut UserFrame) -> i64>(p) };
+        f(frame)
+    };
     #[cfg(feature = "kernel_tests")]
     testing::on_exit(frame);
     r
-}
-
-pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
-    crate::proc_init::dispatch(nr, args)
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).

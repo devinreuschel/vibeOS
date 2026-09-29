@@ -85,6 +85,7 @@ pub unsafe fn init_bsp() {
     }
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     unsafe { CPUS.set(boxed) };
+    x86::set_per_cpu_hooks(irq_nest_enter, irq_nest_leave, cpu_index_hook);
     LIVE.store(true, Ordering::Release);
     ONLINE.store(1, Ordering::Release);
 }
@@ -221,6 +222,11 @@ pub fn irq_nest_leave() {
         let old = c.irq_nest.fetch_sub(1, Ordering::Relaxed);
         assert!(old > 0, "irq nest underflow");
     }
+}
+
+/// `x86::cpu_index`'s hook: this CPU's `cpu_id` once the area is live.
+fn cpu_index_hook() -> Option<u32> {
+    try_current().map(|c| c.cpu_id)
 }
 
 pub fn irq_nest() -> u32 {

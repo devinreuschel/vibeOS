@@ -332,7 +332,7 @@ the missing marker, QEMU's exit status, and the last 20 lines of its stderr, the
 a firmware QEMU could not load reads as that and not only as `missing marker 'serial_online'`
 (F079); a timeout shows the stderr lines too when there are any.
 
-The `vibefs_crash` build (`vibefs_init::crash_loop`) prints no boot contract past its own lines,
+The `vibefs_crash` build (`fs::vibefs_crash::crash_loop`) prints no boot contract past its own lines,
 which `run_vibefs_crash.py` knows:
 
 | Line | Meaning |

@@ -82,7 +82,7 @@ and `ss`, and the user RSP, which it copies out of the per-CPU scratch, in
 `sysretq` only when the saved RIP equals the saved RCX, the saved RFLAGS
 equals the saved R11, CS and SS are the user selectors, RIP is below
 `USER_MAP_END`, and RF, TF, and VM are clear
-(`vibeos::trap::x86_64::sysret_ok`); otherwise it restores all 15 GPRs from
+(`vibeos::arch::x86_64::trap::sysret_ok`); otherwise it restores all 15 GPRs from
 the frame and uses `iretq` on the frame's tail, as Linux does, so a hook or
 a later `execve` that changes RCX or R11 returns them intact. A
 spawned or forked process's first entry is the same exit over the frame its

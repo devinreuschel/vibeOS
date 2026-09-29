@@ -10,6 +10,7 @@ use core::fmt::Write;
 use core::mem::MaybeUninit;
 
 use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
+use vibeos::arch::x86_64::trap::{self as x86_trap, Abi};
 use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
@@ -29,7 +30,6 @@ use vibeos::syscall::{
     SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE, UserFrame,
 };
 use vibeos::thread::ThreadId;
-use vibeos::trap::x86_64::Abi;
 use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, SyscallAbi, TrapKind};
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
@@ -430,6 +430,15 @@ pub(crate) fn wait_kernel(pid: u32) -> u32 {
     }
 }
 
+/// Install the process layer's hooks in the layers below it (DESIGN §1.2):
+/// the ring-3 fault hook in `arch::idt` and the syscall handler in
+/// `syscall_init`. `_start` calls it right after `syscall_init::init_bsp`,
+/// before the first ring-3 entry.
+pub fn init() {
+    crate::arch::idt::set_user_fault_hook(try_user_fault);
+    syscall_init::set_syscall_handler(syscall);
+}
+
 /// A syscall from ring 3, over the user frame its entry saved.
 pub fn syscall(frame: &mut UserFrame) -> i64 {
     #[cfg(feature = "kernel_tests")]
@@ -597,14 +606,14 @@ fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, i32> {
 /// DR6 (`#DB`) or the thread's FSW and MXCSR (`#MF`, `#XM`), then the one
 /// table in `vibeos::trap` (DESIGN §5.2). `None`: not a ring-3 fault.
 fn sig_for_vec(f: &TrapFrame) -> Option<(u32, i32)> {
-    let kind = match trap::x86_64::decode(f.vector as u8, f.error_code) {
+    let kind = match x86_trap::decode(f.vector as u8, f.error_code) {
         TrapKind::Debug(_) => TrapKind::Debug(vectors::dr6_cause(f.dr6)),
         TrapKind::FloatingPoint(unit, _) => {
             let cause =
                 syscall_init::current_fp_words().map_or(FpCause::Unknown, |(fsw, fcw, mx)| {
                     match unit {
-                        FpUnit::X87 => trap::x86_64::fp_cause(fsw, fcw),
-                        FpUnit::Simd => trap::x86_64::fp_cause(mx & 0x3F, (mx >> 7) & 0x3F),
+                        FpUnit::X87 => x86_trap::fp_cause(fsw, fcw),
+                        FpUnit::Simd => x86_trap::fp_cause(mx & 0x3F, (mx >> 7) & 0x3F),
                     }
                 });
             TrapKind::FloatingPoint(unit, cause)

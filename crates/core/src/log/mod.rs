@@ -5,7 +5,7 @@
 //! and never takes SCHED. Runtime filter is an `AtomicU8` checked on
 //! emit and again on `dmesg`.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// Compile-time ceiling. Records above this are not formatted or stored.
 #[cfg(debug_assertions)]
@@ -307,6 +307,58 @@ impl<const N: usize, const M: usize> Default for Logger<N, M> {
     }
 }
 
+/// A per-site rate limit (C-RATELIMIT): DESIGN §2.5's "a counter plus a
+/// log line at most once a second". `klog_ratelimited!` keeps one in a
+/// `static` per call site.
+pub struct RateLimit {
+    /// Calls suppressed since the last line.
+    suppressed: AtomicU64,
+    /// The last line's time plus one; 0 before the first line.
+    last: AtomicU64,
+}
+
+impl RateLimit {
+    pub const fn new() -> Self {
+        Self {
+            suppressed: AtomicU64::new(0),
+            last: AtomicU64::new(0),
+        }
+    }
+
+    /// Whether a line is due at `now_ms`: the first call, or the first
+    /// call `interval_ms` or more after the last line. When one is,
+    /// returns the number of calls suppressed since the last line and
+    /// resets it; otherwise counts this call and returns `None`. Of two
+    /// callers racing for the same line, one gets it and the other counts.
+    pub fn check(&self, now_ms: u64, interval_ms: u64) -> Option<u64> {
+        let last = self.last.load(Ordering::Acquire);
+        let due = last == 0 || now_ms.saturating_sub(last - 1) >= interval_ms;
+        // AcqRel: the winner's swap of `suppressed` follows its claim, and
+        // a loser reads the claim before it counts.
+        if !due
+            || self
+                .last
+                .compare_exchange(
+                    last,
+                    now_ms.saturating_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+        {
+            self.suppressed.fetch_add(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(self.suppressed.swap(0, Ordering::AcqRel))
+    }
+}
+
+impl Default for RateLimit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +467,40 @@ mod tests {
     fn compile_max_is_at_least_info() {
         assert!(COMPILE_MAX >= Level::Info);
         assert!(allowed(Level::Info, Level::Info, COMPILE_MAX));
+    }
+
+    #[test]
+    fn ratelimit_first_call_prints() {
+        let r = RateLimit::new();
+        assert_eq!(r.check(0, 1000), Some(0));
+    }
+
+    #[test]
+    fn ratelimit_counts_inside_the_interval() {
+        let r = RateLimit::new();
+        assert_eq!(r.check(5, 1000), Some(0));
+        assert_eq!(r.check(5, 1000), None);
+        assert_eq!(r.check(500, 1000), None);
+        assert_eq!(r.check(1004, 1000), None);
+        assert_eq!(r.check(1005, 1000), Some(3));
+    }
+
+    #[test]
+    fn ratelimit_resets_after_a_line() {
+        let r = RateLimit::new();
+        assert_eq!(r.check(0, 10), Some(0));
+        assert_eq!(r.check(1, 10), None);
+        assert_eq!(r.check(10, 10), Some(1));
+        assert_eq!(r.check(19, 10), None);
+        assert_eq!(r.check(20, 10), Some(1));
+        assert_eq!(r.check(40, 10), Some(0));
+    }
+
+    #[test]
+    fn ratelimit_clock_near_max_does_not_overflow() {
+        let r = RateLimit::new();
+        assert_eq!(r.check(u64::MAX, 1000), Some(0));
+        assert_eq!(r.check(u64::MAX, 1000), None);
+        assert_eq!(r.check(0, 1000), None);
     }
 }

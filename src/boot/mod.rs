@@ -12,7 +12,7 @@ use limine::request::{
 };
 
 use crate::cell::BootCell;
-use crate::paging_init::HHDM_BASE;
+use vibeos::paging::HHDM_BASE;
 
 #[cfg(feature = "kernel_tests")]
 pub mod ktest;
@@ -139,7 +139,10 @@ pub fn info() -> &'static BootInfo {
     INFO.get()
 }
 
-fn halt_with(msg: &str) -> ! {
+/// Print `msg` as a marker line and halt: the boot path's stop for a
+/// fatal condition before the panic handler can run (C-LINTS's boot-halt
+/// rule).
+pub(crate) fn halt_with(msg: &str) -> ! {
     crate::marker!(msg);
     crate::x86::halt();
 }

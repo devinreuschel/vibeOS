@@ -2,20 +2,51 @@
 //!
 //! Polled TX with a bounded THRE wait; a dead UART drops the byte rather
 //! than wedging the panic handler (DESIGN §9.6). Byte-granularity TX lock
-//! so SMP CPUs do not interleave bytes (DESIGN §7.7). Panic/halt skips
-//! the lock so a holder cannot stall the dump. `log!` uses try-lock + drop.
+//! so SMP CPUs do not interleave bytes (DESIGN §7.7). Once `raw::HALTING`
+//! is set the writes skip the lock so a holder cannot stall the dump.
+//! `log!` uses try-lock + drop. The port I/O, the halt flag and the dump
+//! owner live in [`raw`], which takes no lock and calls nothing above arch.
+
+pub mod raw;
 
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use vibeos::lock::RANK_SERIAL;
-use vibeos::uart::*;
 
 use crate::sync_init::SpinMutex;
-use crate::x86::{self, InterruptGuard};
+use crate::x86::InterruptGuard;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TX: SpinMutex<()> = SpinMutex::with_rank((), RANK_SERIAL);
+
+/// The log ring's serial capture, set by the log module's `init` before the first
+/// marker (DESIGN §1.2). Unset, nothing is captured.
+static CAPTURE: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the log capture `Serial::write_bytes` calls while `HALTING` is
+/// clear.
+pub fn set_capture_hook(f: fn(&[u8])) {
+    // Release: pairs with the Acquire load in `capture`.
+    CAPTURE.store(f as *mut (), Ordering::Release);
+}
+
+fn capture(bytes: &[u8]) {
+    // Acquire: pairs with the Release store in `set_capture_hook`.
+    let p = CAPTURE.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `CAPTURE` holds a `fn(&[u8])`;
+    // established by `serial::set_capture_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn(&[u8])>(p) };
+    f(bytes);
+}
+
+fn halting() -> bool {
+    raw::HALTING.load(Ordering::Acquire)
+}
 
 pub struct Serial;
 
@@ -25,44 +56,14 @@ impl Serial {
     /// Safe to call more than once; the panic handler re-runs it since the
     /// panic may itself be *in* the serial path (DESIGN §2.5).
     pub fn init() {
-        unsafe {
-            x86::outb(COM1_BASE + REG_IER, 0x00); // mask all interrupts
-            x86::outb(COM1_BASE + REG_LCR, LCR_DLAB);
-            x86::outb(COM1_BASE + REG_DLL, (BAUD_115200_DIVISOR & 0xFF) as u8);
-            x86::outb(COM1_BASE + REG_DLM, (BAUD_115200_DIVISOR >> 8) as u8);
-            x86::outb(COM1_BASE + REG_LCR, LCR_8N1);
-            x86::outb(COM1_BASE + REG_FCR, FCR_ENABLE);
-            x86::outb(COM1_BASE + REG_MCR, MCR_READY);
-        }
+        raw::init();
         INITIALIZED.store(true, Ordering::Release);
-    }
-
-    fn write_byte_raw(b: u8) {
-        // Bounded THRE poll; drop on cap rather than spin forever.
-        let mut spin = TX_POLL_CAP;
-        while spin > 0 {
-            let lsr = unsafe { x86::inb(COM1_BASE + REG_LSR) };
-            if lsr & LSR_THRE != 0 {
-                unsafe { x86::outb(COM1_BASE + REG_DATA, b) };
-                return;
-            }
-            spin -= 1;
-        }
-    }
-
-    fn write_bytes_raw(bytes: &[u8]) {
-        for &b in bytes {
-            if b == b'\n' {
-                Self::write_byte_raw(b'\r');
-            }
-            Self::write_byte_raw(b);
-        }
     }
 
     pub fn write_bytes(bytes: &[u8]) {
         let _irq = InterruptGuard::enter();
-        if !crate::ipi_init::is_halting() && !crate::log_init::is_emitting() {
-            crate::log_init::capture_serial(bytes);
+        if !halting() {
+            capture(bytes);
         }
         Self::write_bytes_plain(bytes);
     }
@@ -70,33 +71,32 @@ impl Serial {
     /// TX without ring capture. `dmesg` uses this so a dump cannot wrap
     /// the ring in copies of itself.
     pub fn write_bytes_plain(bytes: &[u8]) {
-        if crate::ipi_init::is_halting() {
-            Self::write_bytes_raw(bytes);
+        if halting() {
+            // IF=0 for the CPU-index read in `write_after_halt`.
+            let _irq = InterruptGuard::enter();
+            raw::write_after_halt(bytes);
             return;
         }
         let _g = TX.lock();
-        Self::write_bytes_raw(bytes);
+        raw::write_bytes(bytes);
     }
 
     /// Poll COM1 RX. No lock; caller holds IRQs off if racing a consumer.
     pub fn try_read_byte() -> Option<u8> {
-        let lsr = unsafe { x86::inb(COM1_BASE + REG_LSR) };
-        if lsr & LSR_DR == 0 {
-            return None;
-        }
-        Some(unsafe { x86::inb(COM1_BASE + REG_DATA) })
+        raw::try_read_byte()
     }
 
     /// ISR / log sink: one lock for the whole buffer, drop the line if busy.
     pub fn try_write_bytes(bytes: &[u8]) -> bool {
-        if crate::ipi_init::is_halting() {
-            Self::write_bytes_raw(bytes);
+        if halting() {
+            let _irq = InterruptGuard::enter();
+            raw::write_after_halt(bytes);
             return true;
         }
         let Some(_g) = TX.try_lock() else {
             return false;
         };
-        Self::write_bytes_raw(bytes);
+        raw::write_bytes(bytes);
         true
     }
 }

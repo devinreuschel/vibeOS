@@ -77,7 +77,11 @@ These are not style preferences. They shape every subsystem.
    call up, except through a hook an upper layer installs at init, and §1.2 lists each one. The
    buddy and the heap never call up, directly or by hook, but for the TLB shootdown a kernel-half
    mapping change makes (§4.3): an allocation reaches reclaim, the writeback wait, and the OOM
-   killer only through the allocation entry's hooks (§4.4).
+   killer only through the allocation entry's hooks (§4.4). `scripts/check_cycles.py`, which `make
+   check` runs, enforces it on the module graph of both crates: it fails on two modules that use
+   each other, on an edge from `heap`, `heap_init`, `pmm` or `pmm_init` to a scheduler, VFS,
+   block-cache or process module, and on any reference from the raw serial layer (`serial::raw`)
+   to a kernel module but `arch::cpu`. Cycles of three or more modules it prints and does not fail.
 7. **The portable crate is stable Rust.** `vibeos-core` enables no `#![feature]` and builds with its
    MSRV (§3.1), the oldest Rust that Kani (ROADMAP §10.8) and Verus (Phase 38) use: each pins its
    own toolchain, older than the kernel's nightly, and must build the code the kernel links. Nightly
@@ -123,8 +127,29 @@ Upward calls go only through hooks an upper layer installs at init, each listed 
 that sets it:
 
 - `paging::tlb_shootdown_others`, set by `ipi_init::init` before the first AP starts (§4.3).
-- Planned (ROADMAP §10.3, A4): the spin-poll hook in `sync_init`, set by `ipi_init::init`, and the
-  scheduler hooks in `ipi_init`, set by `sched_init::init`.
+- `x86::set_per_cpu_hooks` (`InterruptGuard`'s nesting count and `x86::cpu_index`), set by
+  `per_cpu_init::init_bsp` before it marks the per-CPU area live.
+- `serial::set_capture_hook` (the log ring's serial capture), set by `log_init::init` right after
+  `Serial::init`, before the first marker.
+- Planned (ROADMAP §10.7): `serial::raw::set_stop_hook`, set by the stop primitive.
+- `sync_init::set_spin_poll` (`SpinMutex::lock`'s spin runs `service_incoming`), set by
+  `ipi_init::init` before the first AP starts (§7.9).
+- `idt::set_intercept_hook` (the exception intercept for vectors 0 to 31), set by `catch::init` right
+  after `idt::init`.
+- `idt::set_user_fault_hook` (a ring-3 fault's signal, `proc_init::try_user_fault`), set by
+  `proc_init::init` right after `syscall_init::init_bsp`, before the first ring-3 entry.
+- `idt::set_user_return_hook` (the FP binding check on a return to ring 3, §7.5), set by
+  `syscall_init::init_bsp` before the first ring-3 entry.
+- `thread_init::set_switch_hooks` (a context switch's hardware side, `syscall_init::on_switch`, and
+  a new thread's FP image), set by `syscall_init::init_bsp` before the scheduler starts.
+- `thread_init::set_kick_hook` (wake a CPU's workqueue worker to free its dead stacks), set by
+  `work_init::init` before it starts the workers.
+- `syscall_init::set_syscall_handler` (the syscall entry's handler, `proc_init::syscall`), set by
+  `proc_init::init` before the first ring-3 entry; unset, a syscall returns `-ENOSYS`.
+- `fs_init::set_test_hooks` (a `kernel_tests` build's File API hooks, `file_init::testing`), set by
+  `file_init::init` before it brings the filesystems up.
+- `ipi_init::set_reschedule_hook` (a reschedule IPI's preemption point), set by `sched_init::init`
+  before the scheduler goes live.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),
   the writeback threads (their wake and bounded wait), and the process layer (the OOM killer).
 
@@ -163,14 +188,14 @@ children, need no row.
 | irq | `irq/{mod,ipi}.rs` | `irq/{mod,irq_init,ipi_init}.rs` |
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
 | sched | `sched/{mod,thread,wait,work,fpu}.rs` | `sched/{mod,thread_init,sched_init,work_init}.rs` |
-| sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init}.rs` |
-| log | `log/mod.rs` | `log/{mod,log_init,serial,panic,diag,ksyms}.rs` |
+| sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
+| log | `log/mod.rs` | `log/{mod,log_init,panic,diag,ksyms}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
-| shell | `shell/mod.rs` | `shell/{mod,shell_init}.rs` |
+| shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
 | dev | `dev/{mod,pci,dma,virtio,entropy}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/{mod,virtio_blk_init}.rs` |
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
-| fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,file_init}.rs` |
+| fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
 | proc | `proc/{mod,elf,syscall}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
 | ktest | — | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 

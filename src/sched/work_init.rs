@@ -119,6 +119,7 @@ pub fn live() -> bool {
 
 /// One worker per online CPU, then the threaded-IRQ bottom half.
 pub fn init() {
+    thread_init::set_kick_hook(kick_dead_stacks);
     let n = per_cpu_init::cpu_count().max(1);
     let mut cpu = 0u32;
     while cpu < n as u32 {

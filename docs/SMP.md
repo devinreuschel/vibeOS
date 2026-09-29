@@ -549,7 +549,9 @@ The initiator waits with interrupts disabled (`InterruptGuard` around publish â†
 waiters). A waiter with IF off cannot take an incoming shootdown as an IRQ, which would deadlock two
 CPUs shooting down at once. The wait loop therefore calls `service_incoming` and processes pending
 slots so a spinning initiator still helps its peers. This is not optional; it is the difference
-between working and a hang that only appears under load.
+between working and a hang that only appears under load. `SpinMutex::lock`'s spin polls it too: it
+reaches `service_incoming` through `sync_init::set_spin_poll`, which `ipi_init::init` sets before the
+first AP starts.
 
 The wait never panics, because `shootdown_va` and `call_mask` free frames and reuse their slot as
 soon as `ipi_init::wait_acks` returns. After each second (1000 Ã— `tsc_per_ms` cycles) without every

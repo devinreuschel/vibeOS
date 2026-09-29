@@ -5,4 +5,6 @@ pub(crate) mod file_init;
 pub(crate) mod fs_init;
 #[cfg(feature = "kernel_tests")]
 pub mod ktest;
+#[cfg(feature = "vibefs_crash")]
+pub(crate) mod vibefs_crash;
 pub(crate) mod vibefs_init;

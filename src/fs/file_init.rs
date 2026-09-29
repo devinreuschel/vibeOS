@@ -1,4 +1,5 @@
-//! Kernel File API + shell file commands. ROADMAP §8.6 / §10.4.
+//! Kernel File API. ROADMAP §8.6 / §10.4. The shell's file commands
+//! are in `shell::cmds::fs`.
 //!
 //! A thin File API over `Vfs` (C-FILEAPI): every function runs
 //! [`fs_init::api`], which calls a backend only with the VFS lock dropped,
@@ -13,20 +14,19 @@
 //! so reads, writes, seeks and closes share one table and one data path.
 
 use vibeos::fs::{
-    DirEntry, FileId, FileRef, FsError, InodeKind, InodeRef, MAX_NAME, MAX_PATH, O_CREAT,
-    O_DIRECTORY, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, OpenFlags, S_IFREG, SeekFrom, Stat,
+    DirEntry, FileId, FileRef, FileSystem, FsError, InodeKind, InodeRef, MAX_NAME, MAX_PATH,
+    O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, OpenFlags, S_IFREG, SeekFrom, Stat,
     split_basename,
 };
-use vibeos::shell::{Command, LineEditor, MAX_COMMANDS};
 
+use crate::block_init;
 use crate::cell::IrqCell;
-use crate::console_init::Console;
+use crate::dev_init;
 use crate::fat_init;
 use crate::fs_init;
-use crate::shell_init;
+use crate::part_init;
 use crate::vibefs_init;
-
-use core::fmt::Write;
+use crate::virtio_blk_init;
 
 struct CwdBuf {
     buf: [u8; MAX_PATH],
@@ -41,7 +41,7 @@ const fn cwd_root() -> CwdBuf {
 
 static CWD: IrqCell<CwdBuf> = IrqCell::new(cwd_root());
 
-fn cwd_copy() -> ([u8; MAX_PATH], usize) {
+pub(crate) fn cwd_copy() -> ([u8; MAX_PATH], usize) {
     CWD.with(|c| {
         let mut buf = [0u8; MAX_PATH];
         buf[..c.len].copy_from_slice(&c.buf[..c.len]);
@@ -49,7 +49,7 @@ fn cwd_copy() -> ([u8; MAX_PATH], usize) {
     })
 }
 
-fn set_cwd(p: &[u8]) {
+pub(crate) fn set_cwd(p: &[u8]) {
     CWD.with(|c| {
         let n = p.len().min(MAX_PATH);
         c.buf[..n].copy_from_slice(&p[..n]);
@@ -58,7 +58,7 @@ fn set_cwd(p: &[u8]) {
 }
 
 /// `path`, made absolute against the working directory, and its length.
-fn join_cwd(p: &[u8]) -> Result<([u8; MAX_PATH], usize), FsError> {
+pub(crate) fn join_cwd(p: &[u8]) -> Result<([u8; MAX_PATH], usize), FsError> {
     let mut out = [0u8; MAX_PATH];
     if p.first() == Some(&b'/') {
         if p.len() > MAX_PATH {
@@ -445,95 +445,98 @@ pub mod testing {
     }
 }
 
-// ---- shell ----
-
-fn err_line(op: &str, e: FsError) {
-    let _ = writeln!(Console, "vibeOS: {op}: {}", e.as_str());
+/// The filesystem bring-up: the FAT and vibefs backends, the root
+/// (`fs_init::init`), then while it is live the pseudo filesystems, devfs
+/// and sysfs, and vibefs on `/vibe`, and last the working directory.
+pub fn init() {
+    #[cfg(feature = "kernel_tests")]
+    fs_init::set_test_hooks(testing::write_window, testing::open_race);
+    fat_init::init();
+    vibefs_init::init();
+    fs_init::init(fat_init::live());
+    if fs_init::live() {
+        let _ = mount_pseudo();
+        populate_devfs();
+        populate_sysfs();
+        attach_vibefs();
+    }
+    set_cwd(b"/");
 }
 
-pub fn init() {
-    set_cwd(b"/");
-    let cmds = [
-        Command {
-            name: "ls",
-            help: "list directory; -l long",
-            run: cmd_ls,
-        },
-        Command {
-            name: "cat",
-            help: "print file",
-            run: cmd_cat,
-        },
-        Command {
-            name: "cp",
-            help: "copy file",
-            run: cmd_cp,
-        },
-        Command {
-            name: "mv",
-            help: "rename / move",
-            run: cmd_mv,
-        },
-        Command {
-            name: "rm",
-            help: "unlink; -r recursive",
-            run: cmd_rm,
-        },
-        Command {
-            name: "mkdir",
-            help: "create directory; -p parents",
-            run: cmd_mkdir,
-        },
-        Command {
-            name: "touch",
-            help: "create or bump file",
-            run: cmd_touch,
-        },
-        Command {
-            name: "stat",
-            help: "inode metadata",
-            run: cmd_stat,
-        },
-        Command {
-            name: "df",
-            help: "volume space",
-            run: cmd_df,
-        },
-        Command {
-            name: "mount",
-            help: "mount fat32|vibefs <dev> <path> | ramfs <path>",
-            run: cmd_mount,
-        },
-        Command {
-            name: "umount",
-            help: "unmount path",
-            run: cmd_umount,
-        },
-        Command {
-            name: "sync",
-            help: "flush FAT + vibefs + block Flush",
-            run: cmd_sync,
-        },
-        Command {
-            name: "cd",
-            help: "change directory",
-            run: cmd_cd,
-        },
-        Command {
-            name: "pwd",
-            help: "print cwd",
-            run: cmd_pwd,
-        },
-    ];
-    for c in cmds {
-        let _ = shell_init::register(c);
+fn attach_vibefs() {
+    if !vibefs_init::live() {
+        return;
     }
-    let _ = MAX_COMMANDS;
+    let _ = mkdir(b"/vibe", 0o755);
+    let _ = vibefs_init::mount_mem("/vibe");
+}
+
+/// Mount the four pseudo filesystems on `/dev`, `/proc`, `/tmp` and
+/// `/sys`, each mountpoint made with `mkdir` through the root's ops (an
+/// existing directory is kept).
+fn mount_pseudo() -> Result<(), FsError> {
+    let skins: [(&[u8], &'static dyn FileSystem); 4] = [
+        (b"/dev", &fs_init::DEVFS),
+        (b"/proc", &fs_init::PROCFS),
+        (b"/tmp", &fs_init::TMPFS),
+        (b"/sys", &fs_init::SYSFS),
+    ];
+    for (at, fs) in skins {
+        mkdir(at, 0o755)?;
+        fs_init::api().mount_fs(None, at, fs, None, false)?;
+    }
+    Ok(())
+}
+
+fn populate_devfs() {
+    let sz = block_init::capacity_sectors().saturating_mul(block_init::logical_block_size() as u64);
+    let _ = fs_init::KERNFS.devfs_add_block(block_init::name().as_bytes(), sz);
+    if virtio_blk_init::live() {
+        let sz = virtio_blk_init::capacity_sectors()
+            .saturating_mul(virtio_blk_init::logical_block_size() as u64);
+        let _ = fs_init::KERNFS.devfs_add_block(virtio_blk_init::name().as_bytes(), sz);
+    }
+    let n = part_init::count();
+    let mut i = 0usize;
+    while i < n {
+        if let Some((name, nsect, bs, _)) = part_init::info(i) {
+            let sz = nsect.saturating_mul(bs as u64);
+            let _ = fs_init::KERNFS.devfs_add_block(name.as_bytes(), sz);
+        }
+        i += 1;
+    }
+}
+
+fn hex_nib(d: u8) -> u8 {
+    if d < 10 { b'0' + d } else { b'a' + (d - 10) }
+}
+
+fn bdf_name(bus: u8, device: u8, function: u8, out: &mut [u8; 8]) -> &[u8] {
+    // "00:01.0"
+    out[0] = hex_nib(bus >> 4);
+    out[1] = hex_nib(bus & 0xf);
+    out[2] = b':';
+    out[3] = hex_nib(device >> 4);
+    out[4] = hex_nib(device & 0xf);
+    out[5] = b'.';
+    out[6] = hex_nib(function & 0xf);
+    &out[..7]
+}
+
+fn populate_sysfs() {
+    let mut i = 0usize;
+    while let Some(d) = dev_init::get(i) {
+        let mut name = [0u8; 8];
+        let bdf = bdf_name(d.addr.bus, d.addr.device, d.addr.function, &mut name);
+        let drv = d.bound.map(|s| s.as_bytes());
+        let _ = fs_init::KERNFS.sysfs_add_device(bdf, d.vendor, d.device_id, d.class, drv);
+        i += 1;
+    }
 }
 
 /// Report each entry of directory `path` but `.` and `..` to `cb`, with
 /// the VFS lock dropped.
-fn list_dir(path: &[u8], cb: &mut dyn FnMut(&DirEntry)) -> Result<(), FsError> {
+pub(crate) fn list_dir(path: &[u8], cb: &mut dyn FnMut(&DirEntry)) -> Result<(), FsError> {
     let f = open(path, OpenFlags::from_bits(O_RDONLY | O_DIRECTORY), 0)?;
     let r = readdir(&f, &mut |d| {
         let n = d.name.as_bytes();
@@ -547,7 +550,11 @@ fn list_dir(path: &[u8], cb: &mut dyn FnMut(&DirEntry)) -> Result<(), FsError> {
 }
 
 /// `path/name` into `out`; its length.
-fn child_path(path: &[u8], name: &[u8], out: &mut [u8; MAX_PATH]) -> Result<usize, FsError> {
+pub(crate) fn child_path(
+    path: &[u8],
+    name: &[u8],
+    out: &mut [u8; MAX_PATH],
+) -> Result<usize, FsError> {
     let (buf, mut n) = join_cwd(path)?;
     out[..n].copy_from_slice(&buf[..n]);
     if n == 0 || out[n - 1] != b'/' {
@@ -563,510 +570,4 @@ fn child_path(path: &[u8], name: &[u8], out: &mut [u8; MAX_PATH]) -> Result<usiz
     }
     out[n..end].copy_from_slice(name);
     Ok(end)
-}
-
-fn rm_r(path: &[u8]) -> Result<(), FsError> {
-    let st = stat_path(path)?;
-    if st.kind != InodeKind::Dir {
-        return unlink(path);
-    }
-    let mut kids: [[u8; MAX_NAME]; 16] = [[0; MAX_NAME]; 16];
-    let mut klens = [0u8; 16];
-    let mut nk = 0usize;
-    list_dir(path, &mut |d| {
-        let n = d.name.as_bytes();
-        if nk < 16 {
-            kids[nk][..n.len()].copy_from_slice(n);
-            klens[nk] = n.len() as u8;
-            nk += 1;
-        }
-    })?;
-    let mut i = 0usize;
-    while i < nk {
-        let mut child = [0u8; MAX_PATH];
-        let n = child_path(path, &kids[i][..klens[i] as usize], &mut child)?;
-        rm_r(&child[..n])?;
-        i += 1;
-    }
-    rmdir(path)
-}
-
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
-fn names_in(
-    dirp: &[u8],
-    prefix: &[u8],
-    out: &mut [[u8; MAX_NAME]; 16],
-    lens: &mut [u8; 16],
-) -> usize {
-    let path: &[u8] = if dirp.is_empty() { b"." } else { dirp };
-    let mut n = 0usize;
-    let _ = list_dir(path, &mut |d| {
-        let nm = d.name.as_bytes();
-        if nm.len() >= prefix.len() && nm[..prefix.len()].eq_ignore_ascii_case(prefix) && n < 16 {
-            let l = nm.len().min(MAX_NAME);
-            out[n][..l].copy_from_slice(&nm[..l]);
-            lens[n] = l as u8;
-            n += 1;
-        }
-    });
-    n
-}
-
-/// Tab: complete the word at the cursor against the current directory
-/// (or the directory prefix of that word).
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
-pub fn complete_line(ed: &mut LineEditor) {
-    let mut line_buf = [0u8; 128];
-    let line_n = ed.line().len().min(128);
-    line_buf[..line_n].copy_from_slice(&ed.line()[..line_n]);
-    let line = &line_buf[..line_n];
-    let cur = ed.cursor();
-    let mut start = cur;
-    while start > 0 && line[start - 1] != b' ' && line[start - 1] != b'\t' {
-        start -= 1;
-    }
-    let word = &line[start..cur];
-    let first = {
-        let mut i = 0usize;
-        while i < start && (line[i] == b' ' || line[i] == b'\t') {
-            i += 1;
-        }
-        i == start
-    };
-    if first && !word.contains(&b'/') {
-        complete_cmd(ed, start, word);
-        return;
-    }
-    let slash = word.iter().rposition(|&c| c == b'/');
-    let (dirp, pref) = match slash {
-        Some(i) => (&word[..=i], &word[i + 1..]),
-        None => (&b""[..], word),
-    };
-    let mut names = [[0u8; MAX_NAME]; 16];
-    let mut lens = [0u8; 16];
-    let n = names_in(dirp, pref, &mut names, &mut lens);
-    if n == 0 {
-        return;
-    }
-    let common = common_prefix(&names, &lens, n);
-    if common <= pref.len() && n > 1 {
-        return;
-    }
-    let fill = &names[0][..common];
-    apply_word(ed, start, cur, dirp, fill, n == 1);
-}
-
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
-fn complete_cmd(ed: &mut LineEditor, start: usize, pref: &[u8]) {
-    let mut hit: Option<&'static str> = None;
-    let mut n = 0u32;
-    let names = [
-        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot", "poweroff",
-        "ls", "cat", "cp", "mv", "rm", "mkdir", "touch", "stat", "df", "mount", "umount", "sync",
-        "cd", "pwd", "blk", "lspci", "devices",
-    ];
-    for nm in names {
-        if nm.as_bytes().starts_with(pref) {
-            n += 1;
-            hit = Some(nm);
-            if n > 1 {
-                break;
-            }
-        }
-    }
-    if n == 1
-        && let Some(h) = hit
-    {
-        apply_word(ed, start, ed.cursor(), b"", h.as_bytes(), true);
-    }
-    let _ = shell_init::command_count();
-}
-
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
-fn common_prefix(names: &[[u8; MAX_NAME]; 16], lens: &[u8; 16], n: usize) -> usize {
-    if n == 0 {
-        return 0;
-    }
-    let mut c = lens[0] as usize;
-    let mut i = 1usize;
-    while i < n {
-        let mut k = 0usize;
-        let a = &names[0][..c.min(lens[0] as usize)];
-        let b = &names[i][..lens[i] as usize];
-        while k < a.len() && k < b.len() && to_up(a[k]) == to_up(b[k]) {
-            k += 1;
-        }
-        if k < c {
-            c = k;
-        }
-        i += 1;
-    }
-    c
-}
-
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
-fn to_up(c: u8) -> u8 {
-    if c.is_ascii_lowercase() {
-        c - b'a' + b'A'
-    } else {
-        c
-    }
-}
-
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
-fn apply_word(
-    ed: &mut LineEditor,
-    start: usize,
-    cur: usize,
-    dirp: &[u8],
-    name: &[u8],
-    unique: bool,
-) {
-    let mut tmp = [0u8; 128];
-    let mut n = 0usize;
-    n += copy_to(&mut tmp[n..], dirp);
-    n += copy_to(&mut tmp[n..], name);
-    if unique {
-        n += copy_to(&mut tmp[n..], b" ");
-    }
-    let line = ed.line();
-    let rest = if cur < line.len() { &line[cur..] } else { &[] };
-    let mut neu = [0u8; 128];
-    let mut m = 0usize;
-    m += copy_to(&mut neu[m..], &line[..start]);
-    m += copy_to(&mut neu[m..], &tmp[..n]);
-    m += copy_to(&mut neu[m..], rest);
-    ed.set_line(&neu[..m]);
-}
-
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
-fn copy_to(dst: &mut [u8], src: &[u8]) -> usize {
-    let n = src.len().min(dst.len());
-    dst[..n].copy_from_slice(&src[..n]);
-    n
-}
-
-fn cmd_ls(args: &[&str]) {
-    let mut long = false;
-    let mut path = ".";
-    let mut i = 1usize;
-    while i < args.len() {
-        match args[i] {
-            "-l" => long = true,
-            s => path = s,
-        }
-        i += 1;
-    }
-    let st = match stat_path(path.as_bytes()) {
-        Ok(s) => s,
-        Err(e) => {
-            err_line("ls", e);
-            return;
-        }
-    };
-    if st.kind != InodeKind::Dir {
-        if long {
-            let _ = writeln!(Console, "{} {} {}", st.kind.as_str(), st.size, path);
-        } else {
-            let _ = writeln!(Console, "{path}");
-        }
-        return;
-    }
-    let r = list_dir(path.as_bytes(), &mut |d| {
-        let name = d.name.as_bytes();
-        if long {
-            let mut child = [0u8; MAX_PATH];
-            let size = child_path(path.as_bytes(), name, &mut child)
-                .and_then(|n| stat_path(&child[..n]))
-                .map_or(0, |s| s.size);
-            let _ = write!(Console, "{} {:>8} ", d.kind.as_str(), size);
-        }
-        crate::console_init::write(name);
-        crate::console_init::write(b"\n");
-    });
-    if let Err(e) = r {
-        err_line("ls", e);
-    }
-}
-
-fn cmd_cat(args: &[&str]) {
-    if args.len() < 2 {
-        err_line("cat", FsError::Inval);
-        return;
-    }
-    let mut i = 1usize;
-    while i < args.len() {
-        match open(args[i].as_bytes(), OpenFlags::from_bits(O_RDONLY), 0) {
-            Ok(f) => {
-                let mut buf = [0u8; 512];
-                loop {
-                    match read(&f, &mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => crate::console_init::write(&buf[..n]),
-                        Err(e) => {
-                            err_line("cat", e);
-                            break;
-                        }
-                    }
-                }
-                let _ = close(f);
-            }
-            Err(e) => err_line("cat", e),
-        }
-        i += 1;
-    }
-}
-
-fn cmd_cp(args: &[&str]) {
-    if args.len() < 3 {
-        err_line("cp", FsError::Inval);
-        return;
-    }
-    let src = match open(args[1].as_bytes(), OpenFlags::from_bits(O_RDONLY), 0) {
-        Ok(f) => f,
-        Err(e) => {
-            err_line("cp", e);
-            return;
-        }
-    };
-    let dflags = OpenFlags::from_bits(O_WRONLY | O_CREAT | O_TRUNC);
-    match open(args[2].as_bytes(), dflags, 0o644) {
-        Ok(dst) => {
-            let mut buf = [0u8; 512];
-            loop {
-                match read(&src, &mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if write(&dst, &buf[..n]).is_err() {
-                            err_line("cp", FsError::Io);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        err_line("cp", e);
-                        break;
-                    }
-                }
-            }
-            let _ = close(dst);
-        }
-        Err(e) => err_line("cp", e),
-    }
-    let _ = close(src);
-}
-
-fn cmd_mv(args: &[&str]) {
-    if args.len() < 3 {
-        err_line("mv", FsError::Inval);
-        return;
-    }
-    if let Err(e) = rename(args[1].as_bytes(), args[2].as_bytes()) {
-        err_line("mv", e);
-    }
-}
-
-fn cmd_rm(args: &[&str]) {
-    let mut rec = false;
-    let mut i = 1usize;
-    while i < args.len() {
-        if args[i] == "-r" {
-            rec = true;
-            i += 1;
-            continue;
-        }
-        let r = if rec {
-            rm_r(args[i].as_bytes())
-        } else {
-            unlink(args[i].as_bytes())
-        };
-        if let Err(e) = r {
-            err_line("rm", e);
-        }
-        i += 1;
-    }
-}
-
-fn cmd_mkdir(args: &[&str]) {
-    let mut p = false;
-    let mut i = 1usize;
-    while i < args.len() {
-        if args[i] == "-p" {
-            p = true;
-            i += 1;
-            continue;
-        }
-        let r = if p {
-            mkdir_p(args[i].as_bytes())
-        } else {
-            mkdir(args[i].as_bytes(), 0o755)
-        };
-        if let Err(e) = r {
-            err_line("mkdir", e);
-        }
-        i += 1;
-    }
-}
-
-fn cmd_touch(args: &[&str]) {
-    if args.len() < 2 {
-        err_line("touch", FsError::Inval);
-        return;
-    }
-    let mut i = 1usize;
-    while i < args.len() {
-        match open(
-            args[i].as_bytes(),
-            OpenFlags::from_bits(O_WRONLY | O_CREAT),
-            0o644,
-        ) {
-            Ok(f) => {
-                let _ = close(f);
-            }
-            Err(e) => err_line("touch", e),
-        }
-        i += 1;
-    }
-}
-
-fn cmd_stat(args: &[&str]) {
-    let path = args.get(1).copied().unwrap_or(".");
-    match stat_path(path.as_bytes()) {
-        Ok(s) => {
-            let _ = writeln!(
-                Console,
-                "vibeOS: stat: ino {} {} size {} mode {:o}",
-                s.ino,
-                s.kind.as_str(),
-                s.size,
-                s.mode
-            );
-        }
-        Err(e) => err_line("stat", e),
-    }
-}
-
-fn cmd_df(_args: &[&str]) {
-    match fat_init::df(fat_init::VOL_INITRD) {
-        Ok((ft, tot, free, nclus)) => {
-            let _ = writeln!(
-                Console,
-                "vibeOS: df: {} total {} free {} clusters {}",
-                ft.as_str(),
-                tot,
-                free,
-                nclus
-            );
-        }
-        Err(e) => err_line("df", e),
-    }
-    if vibefs_init::live()
-        && let Ok((ft, tot, free, nblk)) = vibefs_init::df(vibefs_init::VOL_MEM)
-    {
-        let _ = writeln!(
-            Console,
-            "vibeOS: df: {} total {} free {} blocks {}",
-            ft.as_str(),
-            tot,
-            free,
-            nblk
-        );
-    }
-}
-
-fn cmd_mount(args: &[&str]) {
-    if args.len() < 2 {
-        let _ = writeln!(
-            Console,
-            "vibeOS: mount: fat32 <dev> <path> | vibefs <dev> <path> | ramfs <path>"
-        );
-        return;
-    }
-    let (source, target) = match args[1] {
-        "fat32" | "vibefs" if args.len() >= 4 => (args[2], args[3]),
-        "ramfs" if args.len() >= 3 => ("none", args[2]),
-        _ => {
-            err_line("mount", FsError::Inval);
-            return;
-        }
-    };
-    let _ = mkdir_p(target.as_bytes());
-    match mount(
-        source.as_bytes(),
-        target.as_bytes(),
-        args[1].as_bytes(),
-        false,
-    ) {
-        Ok(()) if args[1] == "ramfs" => {
-            let _ = writeln!(Console, "vibeOS: mount: ramfs on {target}");
-        }
-        Ok(()) => {
-            let _ = writeln!(Console, "vibeOS: mount: {} {source} on {target}", args[1]);
-        }
-        Err(e) => err_line("mount", e),
-    }
-}
-
-fn cmd_umount(args: &[&str]) {
-    if args.len() < 2 {
-        err_line("umount", FsError::Inval);
-        return;
-    }
-    if let Err(e) = umount(args[1].as_bytes()) {
-        err_line("umount", e);
-    }
-}
-
-fn cmd_sync(_args: &[&str]) {
-    if let Err(e) = sync_fs() {
-        err_line("sync", e);
-    }
-}
-
-fn cmd_cd(args: &[&str]) {
-    let path = args.get(1).copied().unwrap_or("/");
-    let (abs, n) = match join_cwd(path.as_bytes()) {
-        Ok(a) => a,
-        Err(e) => {
-            err_line("cd", e);
-            return;
-        }
-    };
-    match stat_path(path.as_bytes()) {
-        Ok(s) if s.kind == InodeKind::Dir => {
-            if n == 0 {
-                set_cwd(b"/");
-            } else {
-                set_cwd(&abs[..n]);
-            }
-        }
-        Ok(_) => err_line("cd", FsError::NotDir),
-        Err(e) => err_line("cd", e),
-    }
-}
-
-fn cmd_pwd(_args: &[&str]) {
-    let (b, n) = cwd_copy();
-    crate::console_init::write(&b[..n]);
-    crate::console_init::write(b"\n");
 }

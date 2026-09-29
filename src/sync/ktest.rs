@@ -7,7 +7,8 @@ use vibeos::time::Instant;
 use crate::arch;
 use crate::ktest::Outcome;
 use crate::per_cpu_init;
-use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
+use crate::sync::blocking_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore};
+use crate::sync_init::SpinMutex;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
@@ -453,5 +454,14 @@ pub(crate) fn test_sync_try_paths() -> Outcome {
         return Outcome::Fail("try_recv empty");
     }
     CV.notify_all();
+    Outcome::Ok
+}
+
+/// `ipi_init::init` installed `SpinMutex::lock`'s spin poll
+/// (`sync_init::set_spin_poll`), so a spinning CPU still services IPIs.
+pub(crate) fn test_spin_poll_hook_installed() -> Outcome {
+    if !crate::sync_init::spin_poll_installed() {
+        return Outcome::Fail("spin poll hook unset");
+    }
     Outcome::Ok
 }

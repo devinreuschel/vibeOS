@@ -16,7 +16,6 @@ use vibeos::vectors;
 
 use crate::apic_init;
 use crate::per_cpu_init;
-use crate::thread_init;
 use crate::time_init;
 use crate::x86;
 
@@ -57,7 +56,6 @@ impl CallSlot {
 static SHOOT: [Slot; MAX_IPI_CPUS] = [const { Slot::empty() }; MAX_IPI_CPUS];
 static CALL: CallSlot = CallSlot::empty();
 static CALL_BUSY: AtomicBool = AtomicBool::new(false);
-static HALTING: AtomicBool = AtomicBool::new(false);
 static RESCHED_COUNT: AtomicU64 = AtomicU64::new(0);
 static SHOOT_COUNT: AtomicU64 = AtomicU64::new(0);
 static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -269,10 +267,35 @@ pub fn drain_inbox() -> bool {
     })
 }
 
+/// What a reschedule IPI runs after it drains the inbox: the scheduler's
+/// preemption point, which `sched_init::init` sets (DESIGN §1.2). Unset,
+/// the IPI only counts and drains.
+static RESCHED: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the reschedule hook.
+pub fn set_reschedule_hook(f: fn()) {
+    // Release: pairs with the Acquire load in `on_reschedule_ipi`.
+    RESCHED.store(f as *mut (), Ordering::Release);
+}
+
+/// Whether the reschedule hook is set.
+#[cfg(feature = "kernel_tests")]
+pub fn reschedule_hook_installed() -> bool {
+    !RESCHED.load(Ordering::Acquire).is_null()
+}
+
 pub fn on_reschedule_ipi() {
     RESCHED_COUNT.fetch_add(1, Ordering::Relaxed);
     drain_inbox();
-    thread_init::schedule_preempt();
+    // Acquire: pairs with the Release store in `set_reschedule_hook`.
+    let p = RESCHED.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `RESCHED` holds a `fn()`; established
+    // by `ipi_init::set_reschedule_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
+    f();
 }
 
 pub fn on_shootdown_ipi() {
@@ -284,19 +307,15 @@ pub fn on_call_ipi() {
 }
 
 pub fn on_halt_ipi() -> ! {
-    HALTING.store(true, Ordering::Release);
+    crate::serial::raw::HALTING.store(true, Ordering::Release);
     x86::halt();
 }
 
 /// Broadcast halt so others stop before we trash the log.
 /// Fixed IPI `0xFE`, not NMI (DESIGN §2.5 / §7.6).
 pub fn halt_others() {
-    HALTING.store(true, Ordering::Release);
+    crate::serial::raw::HALTING.store(true, Ordering::Release);
     let _ = apic_init::send_ipi_all_ex_self(vectors::IPI_HALT);
-}
-
-pub fn is_halting() -> bool {
-    HALTING.load(Ordering::Acquire)
 }
 
 /// Run `f(arg)` on every online CPU in `mask` except self. Always waits
@@ -346,6 +365,7 @@ pub fn call_cpu(cpu: u32, f: fn(*mut ()), arg: *mut (), wait: bool) {
 /// Install the shootdown hook. IDT overlays are already in place.
 pub fn init() {
     vibeos::paging::set_tlb_shootdown_hook(shootdown_va);
+    crate::sync_init::set_spin_poll(service_incoming);
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]

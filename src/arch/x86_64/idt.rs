@@ -13,7 +13,7 @@
 use core::arch::global_asm;
 use core::mem::{offset_of, size_of};
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use vibeos::desc::{IdtEntry, InterruptFrame, IstSlot, KERNEL_CS};
 use vibeos::fmt_util;
@@ -21,7 +21,6 @@ use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
 use vibeos::vectors;
 
-use crate::arch::catch;
 use crate::arch::gs;
 use crate::arch::pic;
 use crate::cell::IrqCell;
@@ -556,14 +555,66 @@ fn cpl3_body_if_on(v: u8) -> bool {
     v < 32 && ((PARANOID_MASK >> v) & 1 == 0 || v == vectors::DB)
 }
 
-/// Test hook, then `catch::intercept`. `true` skips the body.
+/// What a ring-3 fault runs before the kernel-fault path: the process
+/// layer's `try_user_fault`, which signals the faulting process and does
+/// not return, or returns when no process owns the fault. `proc_init::init`
+/// sets it before the first ring-3 entry (DESIGN §1.2). Unset, it returns.
+static USER_FAULT: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the ring-3 fault hook.
+pub fn set_user_fault_hook(f: fn(&TrapFrame)) {
+    // Release: pairs with the Acquire load in `user_fault`.
+    USER_FAULT.store(f as *mut (), Ordering::Release);
+}
+
+/// Run the ring-3 fault hook. The syscall exit's non-canonical-RIP path
+/// takes it too.
+pub fn user_fault(frame: &TrapFrame) {
+    // Acquire: pairs with the Release store in `set_user_fault_hook`.
+    let p = USER_FAULT.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `USER_FAULT` holds a `fn(&TrapFrame)`;
+    // established by `arch::idt::set_user_fault_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn(&TrapFrame)>(p) };
+    f(frame);
+}
+
+/// The exception intercept for vectors 0 to 31: `catch::intercept`, which
+/// `catch::init` sets right after `idt::init` (DESIGN §1.2). Unset, no
+/// exception is intercepted.
+static INTERCEPT: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the exception intercept. `true` from it skips the body.
+pub fn set_intercept_hook(f: fn(&mut TrapFrame) -> bool) {
+    // Release: pairs with the Acquire load in `intercept`.
+    INTERCEPT.store(f as *mut (), Ordering::Release);
+}
+
+#[inline(always)]
+fn intercept(frame: &mut TrapFrame) -> bool {
+    // Acquire: pairs with the Release store in `set_intercept_hook`.
+    let p = INTERCEPT.load(Ordering::Acquire);
+    if p.is_null() {
+        return false;
+    }
+    // SAFETY: invariant: a non-null `INTERCEPT` holds a
+    // `fn(&mut TrapFrame) -> bool`; established by
+    // `arch::idt::set_intercept_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn(&mut TrapFrame) -> bool>(p) };
+    f(frame)
+}
+
+/// Test hook, then the intercept (`catch::intercept`). `true` skips the
+/// body.
 #[inline(always)]
 fn pre_body(frame: &mut TrapFrame, v: u8) -> bool {
     #[cfg(feature = "kernel_tests")]
     if testing::on_entry(frame, v) {
         return true;
     }
-    v < 32 && catch::intercept(frame)
+    v < 32 && intercept(frame)
 }
 
 // Labels on the `iretq` instructions that return to ring 3.
@@ -619,18 +670,38 @@ fn user_return_fault(frame: &TrapFrame) {
         ss: user.ss,
         ..UserFrame::zeroed()
     };
-    crate::proc_init::try_user_fault(&TrapFrame::for_user(vectors::GP, frame.error_code, &ctx));
+    user_fault(&TrapFrame::for_user(vectors::GP, frame.error_code, &ctx));
     panic!(
         "idt: user-return iretq fault with no process, rip={:#x}",
         user.rip
     );
 }
 
+/// The FP binding check every return to ring 3 runs with IF=0
+/// (`syscall_init::vibeos_fp_user_return`, DESIGN §7.5), which
+/// `syscall_init::init_bsp` sets before the first ring-3 entry (DESIGN
+/// §1.2). Unset, nothing is checked.
+static USER_RETURN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the user-return hook.
+pub fn set_user_return_hook(f: fn()) {
+    // Release: pairs with the Acquire load in `exit_to_user`.
+    USER_RETURN.store(f as *mut (), Ordering::Release);
+}
+
 /// The last step before the stub's exit for a frame whose saved CS.RPL is
 /// 3. Only the dispatcher calls it.
 pub fn exit_to_user(_frame: &mut TrapFrame) {
     x86::cli();
-    crate::syscall_init::vibeos_fp_user_return();
+    // Acquire: pairs with the Release store in `set_user_return_hook`.
+    let p = USER_RETURN.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `USER_RETURN` holds a `fn()`;
+    // established by `arch::idt::set_user_return_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
+    f();
 }
 
 /// Run `body` for `vector`. Writes no gate: every gate already points at
@@ -644,7 +715,7 @@ fn default_body(frame: &mut TrapFrame) {
     let err = frame.error_code;
     let cr2 = (n == vectors::PF).then_some(frame.cr2);
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     let err = vectors::pushes_error_code(n).then_some(err);
     x86::cli();
@@ -653,14 +724,14 @@ fn default_body(frame: &mut TrapFrame) {
 
 fn breakpoint(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     dump(b"#BP", &frame.iret, None, None);
 }
 
 fn invalid_opcode(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     x86::cli();
     crate::panic::exception_halt(b"#UD", &frame.iret, None, None);
@@ -682,7 +753,7 @@ fn debug_ex(frame: &mut TrapFrame) {
         if testing::on_user_db(frame) {
             return;
         }
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     x86::cli();
     crate::panic::exception_halt(b"#DB", &frame.iret, None, None);
@@ -692,7 +763,7 @@ fn debug_ex(frame: &mut TrapFrame) {
 /// return; from the kernel it returns, and the caller halts.
 fn kill_if_user(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
 }
 
@@ -721,7 +792,7 @@ fn page_fault(frame: &mut TrapFrame) {
     if frame.user_mode() {
         #[cfg(feature = "kernel_tests")]
         testing::on_user_pf(frame);
-        crate::proc_init::try_user_fault(frame);
+        user_fault(frame);
     }
     x86::cli();
     crate::panic::exception_halt(b"#PF", &frame.iret, Some(err), Some(cr2));

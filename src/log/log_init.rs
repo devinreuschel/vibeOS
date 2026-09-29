@@ -54,7 +54,9 @@ fn runtime() -> Level {
     Level::from_u8(RUNTIME.load(Ordering::Acquire)).unwrap_or(DEFAULT_RUNTIME_MAX)
 }
 
-fn timestamp() -> u64 {
+/// The clock records are stamped with: uptime in ms once the TSC is
+/// calibrated, the raw TSC before that. `klog_ratelimited!` reads it too.
+pub fn timestamp() -> u64 {
     // Seqlock tick once time is live; raw TSC before that. Same clock
     // paths as the rest of the kernel (DESIGN §9.4).
     if time_init::tsc_per_ms() != 0 {
@@ -170,11 +172,18 @@ impl fmt::Write for StackBuf<'_> {
     }
 }
 
+/// Install the serial capture (`serial::set_capture_hook`). `_start` calls
+/// it right after `Serial::init`, before the first marker, so the ring
+/// holds every boot line (DESIGN §1.2).
+pub fn init() {
+    crate::serial::set_capture_hook(capture_serial);
+}
+
 /// Assemble COM1 bytes into records so boot `marker!` / `writeln!(Serial)` is captured
 /// before a framebuffer exists. Caller holds IRQs off (`Serial::write_bytes`
 /// / `write_fmt`); `STAGE` is CPU-local and must not outlive that.
 pub fn capture_serial(bytes: &[u8]) {
-    if crate::ipi_init::is_halting() || is_emitting() {
+    if crate::serial::raw::HALTING.load(Ordering::Acquire) || is_emitting() {
         return;
     }
     if !allowed(Level::Info, runtime(), COMPILE_MAX) {
@@ -346,5 +355,25 @@ impl fmt::Write for Log {
 macro_rules! klog {
     ($lvl:expr, $($arg:tt)*) => {{
         $crate::log_init::log_fmt($lvl, format_args!($($arg)*));
+    }};
+}
+
+/// `klog!` at most once per `interval_ms` per call site (C-RATELIMIT), the
+/// one form of DESIGN §2.5's "a counter plus a log line at most once a
+/// second". A per-site `static` `vibeos::log::RateLimit` counts the calls
+/// in between, on `log_init::timestamp`'s clock; the next line carries
+/// that count as `[N suppressed]` when it is not 0.
+#[macro_export]
+macro_rules! klog_ratelimited {
+    ($interval_ms:expr, $lvl:expr, $($arg:tt)*) => {{
+        static LIMIT: vibeos::log::RateLimit = vibeos::log::RateLimit::new();
+        match LIMIT.check($crate::log_init::timestamp(), $interval_ms) {
+            Some(0) => $crate::log_init::log_fmt($lvl, format_args!($($arg)*)),
+            Some(n) => $crate::log_init::log_fmt(
+                $lvl,
+                format_args!("{} [{} suppressed]", format_args!($($arg)*), n),
+            ),
+            None => {}
+        }
     }};
 }

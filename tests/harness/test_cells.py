@@ -180,6 +180,11 @@ class TestImplHeaders(unittest.TestCase):
             "src/foo.rs:1: unsafe impl Sync for MyCell: a generic impl belongs only in "
             + ", ".join(check_cells.GENERIC_IMPL_FILES)])
 
+    def test_generic_blocking_lock_impl_passes_in_blocking_init(self) -> None:
+        text = ("unsafe impl<T: Send> Sync for BlockingMutex<T> {}\n"
+                "unsafe impl<T: Send + Sync> Sync for RwLock<T> {}\n")
+        self.assertEqual(self.errs(text, "src/sync/blocking_init.rs"), [])
+
     def test_concrete_impl_passes_anywhere(self) -> None:
         text = ("// SAFETY: invariant I120, established at `per_cpu_init::cpu`.\n"
                 "unsafe impl Sync for PerCpu {}\n")

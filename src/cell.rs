@@ -207,9 +207,7 @@ self::assert_impl!(IrqCell<Cell<u8>>: Sync);
 fn owner_token() -> u32 {
     #[cfg(target_os = "none")]
     {
-        crate::per_cpu_init::try_current()
-            .map(|c| c.cpu_id + 1)
-            .unwrap_or(1)
+        crate::x86::cpu_index().map(|i| i + 1).unwrap_or(1)
     }
     #[cfg(not(target_os = "none"))]
     {

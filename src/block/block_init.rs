@@ -14,12 +14,9 @@ use vibeos::block::{
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::FAR_DEADLINE;
-use vibeos::shell::Command;
 use vibeos::wait::WaitQueue;
 
-use crate::console_init::Console;
 use crate::serial::Serial;
-use crate::shell_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
 
@@ -538,21 +535,6 @@ pub fn device() -> &'static dyn block::BlockDevice {
     &Ram0
 }
 
-fn cmd_blk(_args: &[&str]) {
-    let st = state().as_str();
-    let _ = writeln!(
-        Console,
-        "vibeOS: blk: {} {} {} sectors {st} io {}",
-        RAM0_NAME,
-        RAM0_BLOCK_SIZE,
-        RAM0_SECTORS,
-        io_reqs()
-    );
-    let _ = crate::virtio_blk_init::shell_line(&mut Console);
-    let _ = crate::part_init::shell_lines(&mut Console);
-    let _ = crate::cache_init::shell_line(&mut Console);
-}
-
 pub fn init() {
     debug_assert_eq!(ram().byte_len(), RAM0_BYTES);
     {
@@ -563,9 +545,4 @@ pub fn init() {
     LIVE.store(true, Ordering::Release);
     let _ = write_marker(&mut Serial, RAM0_NAME, RAM0_SECTORS);
     let _ = writeln!(Serial);
-    let _ = shell_init::register(Command {
-        name: "blk",
-        help: "block devices",
-        run: cmd_blk,
-    });
 }

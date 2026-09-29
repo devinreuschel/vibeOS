@@ -14,7 +14,6 @@ use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_all
 
 use crate::acpi_init;
 use crate::cell::IrqCell;
-use crate::dev_init;
 use crate::fb_init;
 use crate::paging_init;
 use crate::serial::Serial;
@@ -218,8 +217,10 @@ fn map_func_bars(info: &FuncInfo, dev: &mut Device) {
     }
 }
 
-/// Scan, map memory BARs, publish devices, emit `pci: N devices`.
-pub fn init() {
+/// Scan, map memory BARs, publish each device through `publish` (the
+/// device registry's `dev_init::push`, which `_start` passes), emit
+/// `pci: N devices`.
+pub fn init(publish: fn(Device) -> bool) {
     if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
         ECAM.with(|e| {
             e.base = m.ecam_base;
@@ -244,7 +245,7 @@ pub fn init() {
         let _ = write!(Serial, "vibeOS: pci: ");
         let _ = pci::write_lspci_line(&mut Serial, &info);
         let _ = writeln!(Serial);
-        let _ = dev_init::push(dev);
+        let _ = publish(dev);
         i += 1;
     }
     crate::marker!("vibeOS: pci: {} devices", n);

@@ -4,11 +4,11 @@
 //! CPU from values the BSP computes once from CPUID (DESIGN §5.1, §11.4).
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::log::Level;
 
-use crate::cell::BootCell;
 use crate::x86;
 
 /// # Safety
@@ -296,6 +296,52 @@ pub fn halt() -> ! {
     }
 }
 
+// Per-CPU hooks (DESIGN §1.2): the per-CPU module's `init_bsp` installs them
+// before it marks the per-CPU area live. Unset, the nest hooks do nothing and
+// `cpu_index` returns `None`, as before the area exists.
+static NEST_ENTER: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static NEST_LEAVE: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static CPU_INDEX: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the per-CPU hooks: `InterruptGuard`'s nesting count and this
+/// CPU's index. The per-CPU module's `init_bsp` calls it once, on the BSP.
+pub fn set_per_cpu_hooks(nest_enter: fn(), nest_leave: fn(), cpu_index: fn() -> Option<u32>) {
+    // Release: pairs with the Acquire loads in `run_hook` and `cpu_index`,
+    // so a CPU that sees a hook sees what `init_bsp` wrote before it.
+    NEST_ENTER.store(nest_enter as *mut (), Ordering::Release);
+    NEST_LEAVE.store(nest_leave as *mut (), Ordering::Release);
+    CPU_INDEX.store(cpu_index as *mut (), Ordering::Release);
+}
+
+/// Run a `fn()` hook of `set_per_cpu_hooks`, or nothing when it is unset.
+#[inline]
+fn run_hook(hook: &AtomicPtr<()>) {
+    // Acquire: pairs with the Release stores in `set_per_cpu_hooks`.
+    let p = hook.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `NEST_ENTER` or `NEST_LEAVE` holds a
+    // `fn()`; established by `arch::cpu::set_per_cpu_hooks`, their only
+    // store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
+    f();
+}
+
+/// This CPU's index (`cpu_id`), or `None` before the per-CPU area is live.
+pub fn cpu_index() -> Option<u32> {
+    // Acquire: pairs with the Release store in `set_per_cpu_hooks`.
+    let p = CPU_INDEX.load(Ordering::Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: invariant: a non-null `CPU_INDEX` holds a
+    // `fn() -> Option<u32>`; established by `arch::cpu::set_per_cpu_hooks`,
+    // its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn() -> Option<u32>>(p) };
+    f()
+}
+
 /// Save `RFLAGS.IF`, `cli`, restore on drop. DESIGN §2.3 / ROADMAP §3.5.
 /// Nested: each guard saves IF as it found it; only a guard that saw
 /// IF=1 restores it, so inner drops do not `sti` while an outer holds.
@@ -317,7 +363,7 @@ impl InterruptGuard {
                 out(reg) rflags,
             );
         }
-        crate::per_cpu_init::irq_nest_enter();
+        run_hook(&NEST_ENTER);
         Self {
             restore: rflags & (1 << 9) != 0,
         }
@@ -326,7 +372,7 @@ impl InterruptGuard {
 
 impl Drop for InterruptGuard {
     fn drop(&mut self) {
-        crate::per_cpu_init::irq_nest_leave();
+        run_hook(&NEST_LEAVE);
         if self.restore {
             unsafe { asm!("sti", options(nomem, nostack)) };
         }
@@ -580,7 +626,24 @@ pub struct ControlRegs {
     pub cr4: u64,
 }
 
-static CONTROL_REGS: BootCell<ControlRegs> = BootCell::new();
+// The values `init_control_regs` writes, stored by its first call (the
+// BSP's, before `smp: done`). CR0 is 0 until then: the stored CR0 always
+// has PE set.
+static CONTROL_CR0: AtomicU64 = AtomicU64::new(0);
+static CONTROL_CR4: AtomicU64 = AtomicU64::new(0);
+
+fn stored_control_regs() -> Option<ControlRegs> {
+    // Acquire: pairs with the Release store of CR0 in `init_control_regs`,
+    // so CR4 is the value stored before it.
+    let cr0 = CONTROL_CR0.load(Ordering::Acquire);
+    if cr0 == 0 {
+        return None;
+    }
+    Some(ControlRegs {
+        cr0,
+        cr4: CONTROL_CR4.load(Ordering::Relaxed),
+    })
+}
 
 /// CR0: PE, MP, ET, NE, WP, AM, PG, so EM, TS, CD and NW are clear. CR4:
 /// PAE, OSFXSR, OSXMMEXCPT, and MCE, PGE, SMEP, SMAP and UMIP where CPUID
@@ -612,15 +675,20 @@ pub fn init_control_regs() {
     // The kernel asks Limine for no 5-level paging, and the AP trampoline
     // builds 4-level mode, so no CPU has it set.
     assert!(x86::read_cr4() & CR4_LA57 == 0, "CR4.LA57 set");
-    let first = CONTROL_REGS.try_get().is_none();
-    if first {
-        // SAFETY: `BootCell::set` needs one writer before `smp: done`;
-        // established at `normal_boot_tail`, where the BSP's
-        // `syscall_init::init_bsp` makes the first call before
-        // `smp_init::init` starts any AP.
-        unsafe { CONTROL_REGS.set(compute()) };
-    }
-    let regs = *CONTROL_REGS.get();
+    let stored = stored_control_regs();
+    let first = stored.is_none();
+    let regs = match stored {
+        Some(r) => r,
+        None => {
+            // One writer: the BSP's `syscall_init::init_bsp` makes the
+            // first call before `smp_init::init` starts any AP.
+            let r = compute();
+            CONTROL_CR4.store(r.cr4, Ordering::Relaxed);
+            // Release: pairs with the Acquire load in `stored_control_regs`.
+            CONTROL_CR0.store(r.cr0, Ordering::Release);
+            r
+        }
+    };
     // SAFETY: CR0 keeps PE and PG and CR4 keeps PAE, which long mode
     // requires, and every other bit is one CPUID reports or every x86-64
     // CPU has; established by `arch::cpu::compute`.
@@ -646,5 +714,5 @@ pub fn init_control_regs() {
 /// The values `init_control_regs` writes, once the BSP has computed them.
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn control_regs() -> Option<ControlRegs> {
-    CONTROL_REGS.try_get().copied()
+    stored_control_regs()
 }

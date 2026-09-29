@@ -195,7 +195,7 @@ whose table fails to parse or has no entries and whose LBA 0–33 and last 33 se
 zeros; the production kernel never writes `vda` here ([section 10.5](BLOCK.md#105-partitions); ROADMAP
 §10.11, F003). It emits
 `block: <parent>p<N> <n> sectors` per child. A writeback cache thread starts
-before the scan. `fs_init` then makes the FAT initrd `/` (a ramfs root only when the initrd is not
+before the scan. `file_init::init` then makes the FAT initrd `/` (a ramfs root only when the initrd is not
 live) and mounts devfs / procfs / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys` and vibefs at
 `/vibe`, with no serial marker. Step 18 runs `/hello`, then starts `/sbin/init`; the trailing
 contract line is `shell ready`, from `/bin/sh` (row 18).

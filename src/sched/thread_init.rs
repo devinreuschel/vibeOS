@@ -12,16 +12,17 @@
 //! the CPU's workqueue worker unmaps and frees with IF=1 (DESIGN §4.5).
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kalloc::TryBox;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
+use vibeos::per_cpu::PerCpu;
 use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{
-    CpuAffinity, CpuContext, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
+    CpuAffinity, CpuContext, Fxsave, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
     apply_if_on_resume, prepare_thread, switch_context,
 };
 use vibeos::time::Instant;
@@ -32,6 +33,76 @@ use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
 use crate::time_init;
 use crate::x86::InterruptGuard;
+
+// The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
+// sets before the scheduler runs a second thread.
+/// The hardware side of a context switch (FPU, RSP0, CR3):
+/// `syscall_init::on_switch`. Unset, a switch changes none of them.
+static SWITCH_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+/// A new thread's FP image: `syscall_init::fpu_template`. Unset, a thread
+/// starts with `Fxsave::empty()`.
+static FPU_TEMPLATE_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the context-switch and FP-template hooks.
+pub fn set_switch_hooks(
+    on_switch: fn(&mut PerCpu, *mut Tcb, *mut Tcb),
+    fpu_template: fn() -> Fxsave,
+) {
+    // Release: pairs with the Acquire loads in `on_switch` and
+    // `fpu_template`.
+    SWITCH_HOOK.store(on_switch as *mut (), Ordering::Release);
+    FPU_TEMPLATE_HOOK.store(fpu_template as *mut (), Ordering::Release);
+}
+
+fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
+    // Acquire: pairs with the Release store in `set_switch_hooks`.
+    let p = SWITCH_HOOK.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `SWITCH_HOOK` holds a
+    // `fn(&mut PerCpu, *mut Tcb, *mut Tcb)`; established by
+    // `thread_init::set_switch_hooks`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn(&mut PerCpu, *mut Tcb, *mut Tcb)>(p) };
+    f(cpu, old, new);
+}
+
+fn fpu_template() -> Fxsave {
+    // Acquire: pairs with the Release store in `set_switch_hooks`.
+    let p = FPU_TEMPLATE_HOOK.load(Ordering::Acquire);
+    if p.is_null() {
+        return Fxsave::empty();
+    }
+    // SAFETY: invariant: a non-null `FPU_TEMPLATE_HOOK` holds a
+    // `fn() -> Fxsave`; established by `thread_init::set_switch_hooks`,
+    // its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn() -> Fxsave>(p) };
+    f()
+}
+
+/// Wake this CPU's workqueue worker to free its dead stacks:
+/// `work_init::kick_dead_stacks`, which `work_init::init` sets (DESIGN
+/// §1.2). Unset, nothing is woken; the worker frees the list when it
+/// starts.
+static KICK_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the dead-stack kick.
+pub fn set_kick_hook(f: fn()) {
+    // Release: pairs with the Acquire load in `kick_dead_stacks`.
+    KICK_HOOK.store(f as *mut (), Ordering::Release);
+}
+
+fn kick_dead_stacks() {
+    // Acquire: pairs with the Release store in `set_kick_hook`.
+    let p = KICK_HOOK.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `KICK_HOOK` holds a `fn()`;
+    // established by `thread_init::set_kick_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
+    f();
+}
 
 /// Why a `spawn*` call made no thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,7 +476,7 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             (*new_ptr).on_cpu.store(true, Ordering::Relaxed);
-            crate::syscall_init::on_switch(cpu, old_ptr, new_ptr);
+            on_switch(cpu, old_ptr, new_ptr);
         }
     });
     // SAFETY: both TCBs are live entries of `SCHED` that this CPU runs
@@ -481,7 +552,7 @@ pub(crate) fn finish_switch() {
         }
     });
     if kick {
-        crate::work_init::kick_dead_stacks();
+        kick_dead_stacks();
     }
     #[cfg(feature = "kernel_tests")]
     crate::ipi_init::testing::tail_leave();
@@ -588,7 +659,7 @@ pub unsafe fn init_bootstrap() {
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
-        fpu: crate::syscall_init::fpu_template(),
+        fpu: fpu_template(),
         fp_cpu: None,
         syscall_count: 0,
         pid: 0,
@@ -786,7 +857,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
-        fpu: crate::syscall_init::fpu_template(),
+        fpu: fpu_template(),
         fp_cpu: None,
         syscall_count: 0,
         pid: 0,
@@ -918,7 +989,7 @@ fn spawn_inner(
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3,
-        fpu: crate::syscall_init::fpu_template(),
+        fpu: fpu_template(),
         fp_cpu: None,
         syscall_count: 0,
         pid,
@@ -996,7 +1067,7 @@ fn fill_tcb(
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
-    tcb.fpu = crate::syscall_init::fpu_template();
+    tcb.fpu = fpu_template();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.syscall_count = 0;

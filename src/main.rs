@@ -60,6 +60,8 @@ use log::{diag, ksyms, log_init, panic, serial};
 use mm::{heap_init, kva_init, paging_init, pmm_init};
 use proc::{addr_space_init, proc_init, syscall_init, user_init};
 use sched::{sched_init, thread_init, work_init};
+// The vibefs_crash build never starts the shell (`normal_boot_tail`).
+#[cfg(not(feature = "vibefs_crash"))]
 use shell::shell_init;
 use smp::{per_cpu_init, smp_init};
 use sync::sync_init;
@@ -88,6 +90,7 @@ static REQ_END: RequestsEndMarker = RequestsEndMarker::new();
 pub extern "C" fn _start() -> ! {
     // Step 1: serial. Nothing before this is debuggable.
     serial::Serial::init();
+    log_init::init();
     crate::marker!(marker::SERIAL_ONLINE);
 
     // Step 2: base revision. DESIGN §3.3 puts this immediately after serial.
@@ -183,6 +186,7 @@ fn normal_boot_tail() {
     crate::marker!(marker::PIC_REMAPPED);
 
     unsafe { arch::idt::init() };
+    arch::catch::init();
     crate::marker!(marker::IDT_OK);
 
     // DESIGN §3.3 step 11. After GDT: `mov gs` already ran. Before
@@ -191,6 +195,7 @@ fn normal_boot_tail() {
     unsafe { per_cpu_init::init_bsp() };
     unsafe { thread_init::init_bootstrap() };
     unsafe { syscall_init::init_bsp() };
+    proc_init::init();
     crate::marker!(marker::PER_CPU_BSP);
 
     acpi_init::report();
@@ -236,7 +241,7 @@ fn normal_boot_tail() {
 
     // Phase 6 slice A: scan → list → bind. Marker before `shell ready`
     // so lspci is available once the shell thread runs.
-    crate::pci_init::init();
+    crate::pci_init::init(crate::dev_init::push);
     crate::work_init::init();
     crate::virtio_init::init();
     crate::virtio_blk_init::init();
@@ -245,7 +250,7 @@ fn normal_boot_tail() {
     crate::block_init::init();
     crate::cache_init::init();
     crate::part_init::init();
-    crate::fs_init::init();
+    crate::file_init::init();
 
     // ROADMAP §10.6: `/hello` runs as a process the kernel spawns and
     // waits for. Diagnostic only, not a `vibeOS:` marker.
@@ -286,7 +291,7 @@ fn normal_boot_tail() {
     crate::proc_init::start_init();
 
     #[cfg(feature = "vibefs_crash")]
-    crate::vibefs_init::crash_loop();
+    crate::fs::vibefs_crash::crash_loop();
 
     #[cfg(feature = "kernel_tests")]
     crate::ktest::run();

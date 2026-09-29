@@ -5,7 +5,7 @@
 //! in the kernel half (`syscall_init`). No second entry path.
 
 use crate::addr_space::UserMemError;
-pub use crate::trap::x86_64::UserFrame;
+pub use crate::arch::x86_64::trap::UserFrame;
 
 /// Linux `EPERM`.
 pub const EPERM: i32 = 1;
