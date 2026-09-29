@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "tests/hostlib"]
+members = ["crates/core", "tests/hostlib", "user", "user/mem"]
 resolver = "3"
 
 # C-LINTS (ROADMAP §10.1): every member has `[lints] workspace = true`. A module

@@ -131,6 +131,48 @@ $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_C
 
 KERNEL_ELF := build/kernels/vibeos-default.elf
 
+# The Rust user programs (ROADMAP §10.5, C-USERBINS): each user/src/bin/<name>.rs
+# links as a static non-PIE ET_EXEC at 1 GiB for $(USER_TRIPLE), through rust-lld
+# and no C compiler. Only this invocation passes the flags, through --config, so
+# .cargo/config.toml needs no table for the triple and its [build] -D warnings
+# still applies (F147); the list repeats -D warnings anyway. Opt-level comes from
+# the profile override, since member manifests' profiles are ignored.
+# check_user_elf.py reads each ELF before the strip, which drops .symtab.
+USER_TRIPLE := x86_64-unknown-linux-musl
+USER_BIN_NAMES := $(sort $(basename $(notdir $(wildcard user/src/bin/*.rs))))
+VIBEOS_USER_BINS ?= $(USER_BIN_NAMES)
+USER_OUT := $(CURDIR)/build/user
+USER_STAMP := $(USER_OUT)/.stamp
+USER_SRCS := $(shell find user/src user/mem -type f 2>/dev/null)
+USER_ELF_DIR := $(CARGO_TARGET_DIR)/$(USER_TRIPLE)/$(if $(filter release,$(CARGO_PROFILE)),release,debug)
+OBJCOPY := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objcopy),$(LLVM_TOOL_DIR)/llvm-objcopy,llvm-objcopy)
+USER_CARGO_CONFIG := \
+	--config 'build.rustflags=["-D","warnings","-C","linker=rust-lld","-C","relocation-model=static","-C","link-self-contained=no","-C","link-arg=-zseparate-loadable-segments","-C","link-arg=--image-base=0x40000000","-C","panic=abort"]' \
+	--config 'profile.$(CARGO_PROFILE).opt-level="z"'
+
+.PHONY: user
+user: $(USER_STAMP)
+
+all: user
+
+ifneq ($(VIBEOS_PREBUILT),1)
+# The build is $(CARGO_SHIP)'s, so trim-paths keeps host paths out of the
+# programs as out of the kernel (ROADMAP §10.2).
+$(USER_STAMP): $(USER_SRCS) user/Cargo.toml user/mem/Cargo.toml Cargo.toml Cargo.lock rust-toolchain.toml scripts/check_user_elf.py Makefile
+	$(CARGO) clippy -p vibeos-user -p vibeos-user-mem --target $(USER_TRIPLE) $(CARGO_FLAGS) $(USER_CARGO_CONFIG) -- -D warnings
+	$(CARGO_SHIP) build -p vibeos-user --target $(USER_TRIPLE) $(CARGO_FLAGS) $(USER_CARGO_CONFIG)
+	python3 scripts/check_user_elf.py $(addprefix $(USER_ELF_DIR)/,$(USER_BIN_NAMES))
+	mkdir -p $(USER_OUT)
+	$(foreach b,$(USER_BIN_NAMES),$(OBJCOPY) --strip-all $(USER_ELF_DIR)/$(b) $(USER_OUT)/$(b) &&) true
+	touch $@
+
+# kernel_tests kernels embed the programs VIBEOS_USER_BINS names (build.rs), so
+# only the ktest ELF's build sees the two variables.
+build/kernels/vibeos-ktest.elf: $(USER_STAMP)
+build/kernels/vibeos-ktest.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
+build/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
+endif
+
 .PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
@@ -144,6 +186,7 @@ help:
 	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
 	  '  all / iso             kernel + build/vibeos.iso (hybrid BIOS/UEFI)' \
 	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
+	  '  user                  Rust user programs, as build/user/<name> (ROADMAP §10.5)' \
 	  '  isos                  every ISO variant, as build/vibeos*.iso' \
 	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
 	  '  run                   boot production ISO in a QEMU window, COM1 on the terminal (VIBEOS_* apply)' \

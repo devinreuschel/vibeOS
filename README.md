@@ -11,7 +11,8 @@ If you learn something about hardware or Rust from reading this, good, but that'
 
 ## Stack
 
-- Dated Rust nightly, pinned in `rust-toolchain.toml`, with built-in `x86_64-unknown-none`
+- Dated Rust nightly, pinned in `rust-toolchain.toml`, with built-in `x86_64-unknown-none` for the kernel and
+  `x86_64-unknown-linux-musl` for user programs
 - Limine to boot, `linker.ld` for layout, `Makefile` to build the ISO, QEMU to run and test
 
 ## Status
