@@ -14,15 +14,19 @@
 //! so reads, writes, seeks and closes share one table and one data path.
 
 use vibeos::fs::{
-    DirEntry, FileId, FileRef, FsError, InodeKind, InodeRef, MAX_NAME, MAX_PATH, O_CREAT,
-    O_DIRECTORY, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, OpenFlags, S_IFREG, SeekFrom, Stat,
+    DirEntry, FileId, FileRef, FileSystem, FsError, InodeKind, InodeRef, MAX_NAME, MAX_PATH,
+    O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, OpenFlags, S_IFREG, SeekFrom, Stat,
     split_basename,
 };
 
+use crate::block_init;
 use crate::cell::IrqCell;
+use crate::dev_init;
 use crate::fat_init;
 use crate::fs_init;
+use crate::part_init;
 use crate::vibefs_init;
+use crate::virtio_blk_init;
 
 struct CwdBuf {
     buf: [u8; MAX_PATH],
@@ -441,8 +445,93 @@ pub mod testing {
     }
 }
 
+/// The filesystem bring-up: the FAT and vibefs backends, the root
+/// (`fs_init::init`), then while it is live the pseudo filesystems, devfs
+/// and sysfs, and vibefs on `/vibe`, and last the working directory.
 pub fn init() {
+    #[cfg(feature = "kernel_tests")]
+    fs_init::set_test_hooks(testing::write_window, testing::open_race);
+    fat_init::init();
+    vibefs_init::init();
+    fs_init::init(fat_init::live());
+    if fs_init::live() {
+        let _ = mount_pseudo();
+        populate_devfs();
+        populate_sysfs();
+        attach_vibefs();
+    }
     set_cwd(b"/");
+}
+
+fn attach_vibefs() {
+    if !vibefs_init::live() {
+        return;
+    }
+    let _ = mkdir(b"/vibe", 0o755);
+    let _ = vibefs_init::mount_mem("/vibe");
+}
+
+/// Mount the four pseudo filesystems on `/dev`, `/proc`, `/tmp` and
+/// `/sys`, each mountpoint made with `mkdir` through the root's ops (an
+/// existing directory is kept).
+fn mount_pseudo() -> Result<(), FsError> {
+    let skins: [(&[u8], &'static dyn FileSystem); 4] = [
+        (b"/dev", &fs_init::DEVFS),
+        (b"/proc", &fs_init::PROCFS),
+        (b"/tmp", &fs_init::TMPFS),
+        (b"/sys", &fs_init::SYSFS),
+    ];
+    for (at, fs) in skins {
+        mkdir(at, 0o755)?;
+        fs_init::api().mount_fs(None, at, fs, None, false)?;
+    }
+    Ok(())
+}
+
+fn populate_devfs() {
+    let sz = block_init::capacity_sectors().saturating_mul(block_init::logical_block_size() as u64);
+    let _ = fs_init::KERNFS.devfs_add_block(block_init::name().as_bytes(), sz);
+    if virtio_blk_init::live() {
+        let sz = virtio_blk_init::capacity_sectors()
+            .saturating_mul(virtio_blk_init::logical_block_size() as u64);
+        let _ = fs_init::KERNFS.devfs_add_block(virtio_blk_init::name().as_bytes(), sz);
+    }
+    let n = part_init::count();
+    let mut i = 0usize;
+    while i < n {
+        if let Some((name, nsect, bs, _)) = part_init::info(i) {
+            let sz = nsect.saturating_mul(bs as u64);
+            let _ = fs_init::KERNFS.devfs_add_block(name.as_bytes(), sz);
+        }
+        i += 1;
+    }
+}
+
+fn hex_nib(d: u8) -> u8 {
+    if d < 10 { b'0' + d } else { b'a' + (d - 10) }
+}
+
+fn bdf_name(bus: u8, device: u8, function: u8, out: &mut [u8; 8]) -> &[u8] {
+    // "00:01.0"
+    out[0] = hex_nib(bus >> 4);
+    out[1] = hex_nib(bus & 0xf);
+    out[2] = b':';
+    out[3] = hex_nib(device >> 4);
+    out[4] = hex_nib(device & 0xf);
+    out[5] = b'.';
+    out[6] = hex_nib(function & 0xf);
+    &out[..7]
+}
+
+fn populate_sysfs() {
+    let mut i = 0usize;
+    while let Some(d) = dev_init::get(i) {
+        let mut name = [0u8; 8];
+        let bdf = bdf_name(d.addr.bus, d.addr.device, d.addr.function, &mut name);
+        let drv = d.bound.map(|s| s.as_bytes());
+        let _ = fs_init::KERNFS.sysfs_add_device(bdf, d.vendor, d.device_id, d.class, drv);
+        i += 1;
+    }
 }
 
 /// Report each entry of directory `path` but `.` and `..` to `cb`, with

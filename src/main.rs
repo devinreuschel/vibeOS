@@ -248,7 +248,7 @@ fn normal_boot_tail() {
     crate::block_init::init();
     crate::cache_init::init();
     crate::part_init::init();
-    crate::fs_init::init();
+    crate::file_init::init();
 
     // ROADMAP §10.6: `/hello` runs as a process the kernel spawns and
     // waits for. Diagnostic only, not a `vibeOS:` marker.

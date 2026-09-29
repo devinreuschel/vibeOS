@@ -1,28 +1,25 @@
-//! VFS bring-up. ROADMAP §8.1 / §8.4 / §8.6.
+//! The VFS instance. ROADMAP §8.1 / §8.4 / §8.6.
 //!
 //! RANK_DEVICE (DESIGN §2.1), as are the ramfs and kernfs store locks
-//! ([`RAMFS`], [`KERNFS`]), never nested. FAT initrd is root when live;
-//! otherwise ramfs. Then kernfs skins on `/dev` `/proc` `/tmp` `/sys` and
-//! vibefs on `/vibe`, each mountpoint made with `file_init::mkdir` and
-//! mounted through [`FileApi::mount_fs`]. Every backend call runs through
-//! [`api`], with this lock dropped (C-FILEAPI). No serial marker.
+//! ([`RAMFS`], [`KERNFS`]), never nested. [`init`] makes the root: the FAT
+//! initrd when it is live, otherwise ramfs. The File API module's `init`
+//! runs the bring-up around it: the backends first, then kernfs skins on
+//! `/dev` `/proc` `/tmp` `/sys` and vibefs on `/vibe`, each mountpoint made
+//! with its `mkdir` and mounted through [`FileApi::mount_fs`]. Every
+//! backend call runs through [`api`], with this lock dropped (C-FILEAPI).
+//! No serial marker.
 
+#[cfg(feature = "kernel_tests")]
+use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::fs::{
-    FileApi, FileSystem, FsError, FsType, Guarded, Hooks, KernFs, KernSkin, KernState, PathRef,
-    RamFs, RamState, Vfs,
+    FileApi, FsError, FsType, Guarded, Hooks, KernFs, KernSkin, KernState, PathRef, RamFs,
+    RamState, Vfs,
 };
 use vibeos::lock::RANK_DEVICE;
 
-use crate::block_init;
-use crate::dev_init;
-use crate::fat_init;
-use crate::file_init;
-use crate::part_init;
 use crate::sync_init::SpinMutex;
-use crate::vibefs_init;
-use crate::virtio_blk_init;
 
 static VFS: SpinMutex<Vfs> = SpinMutex::with_rank(Vfs::new(), RANK_DEVICE);
 /// Every ramfs instance's nodes: the root when FAT is not live, and each
@@ -38,92 +35,14 @@ pub static TMPFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType
 pub static SYSFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType::Sys);
 static LIVE: AtomicBool = AtomicBool::new(false);
 
-pub fn init() {
-    fat_init::init();
-    vibefs_init::init();
-    if fat_init::live() {
+/// Make the root: the FAT initrd when `root_is_fat`, else a ramfs.
+/// The File API module's `init` runs the rest of the bring-up.
+pub fn init(root_is_fat: bool) {
+    if root_is_fat {
         LIVE.store(true, Ordering::Release);
     } else {
         let ok = api().mount_root(&RAMFS, None, false).is_ok();
         LIVE.store(ok, Ordering::Release);
-    }
-    if live() {
-        let _ = mount_pseudo();
-        populate_devfs();
-        populate_sysfs();
-        attach_vibefs();
-    }
-    file_init::init();
-}
-
-fn attach_vibefs() {
-    if !vibefs_init::live() {
-        return;
-    }
-    let _ = file_init::mkdir(b"/vibe", 0o755);
-    let _ = vibefs_init::mount_mem("/vibe");
-}
-
-/// Mount the four pseudo filesystems on `/dev`, `/proc`, `/tmp` and
-/// `/sys`, each mountpoint made with `mkdir` through the root's ops (an
-/// existing directory is kept).
-fn mount_pseudo() -> Result<(), FsError> {
-    let skins: [(&[u8], &'static dyn FileSystem); 4] = [
-        (b"/dev", &DEVFS),
-        (b"/proc", &PROCFS),
-        (b"/tmp", &TMPFS),
-        (b"/sys", &SYSFS),
-    ];
-    for (at, fs) in skins {
-        file_init::mkdir(at, 0o755)?;
-        api().mount_fs(None, at, fs, None, false)?;
-    }
-    Ok(())
-}
-
-fn populate_devfs() {
-    let sz = block_init::capacity_sectors().saturating_mul(block_init::logical_block_size() as u64);
-    let _ = KERNFS.devfs_add_block(block_init::name().as_bytes(), sz);
-    if virtio_blk_init::live() {
-        let sz = virtio_blk_init::capacity_sectors()
-            .saturating_mul(virtio_blk_init::logical_block_size() as u64);
-        let _ = KERNFS.devfs_add_block(virtio_blk_init::name().as_bytes(), sz);
-    }
-    let n = part_init::count();
-    let mut i = 0usize;
-    while i < n {
-        if let Some((name, nsect, bs, _)) = part_init::info(i) {
-            let sz = nsect.saturating_mul(bs as u64);
-            let _ = KERNFS.devfs_add_block(name.as_bytes(), sz);
-        }
-        i += 1;
-    }
-}
-
-fn hex_nib(d: u8) -> u8 {
-    if d < 10 { b'0' + d } else { b'a' + (d - 10) }
-}
-
-fn bdf_name(bus: u8, device: u8, function: u8, out: &mut [u8; 8]) -> &[u8] {
-    // "00:01.0"
-    out[0] = hex_nib(bus >> 4);
-    out[1] = hex_nib(bus & 0xf);
-    out[2] = b':';
-    out[3] = hex_nib(device >> 4);
-    out[4] = hex_nib(device & 0xf);
-    out[5] = b'.';
-    out[6] = hex_nib(function & 0xf);
-    &out[..7]
-}
-
-fn populate_sysfs() {
-    let mut i = 0usize;
-    while let Some(d) = dev_init::get(i) {
-        let mut name = [0u8; 8];
-        let bdf = bdf_name(d.addr.bus, d.addr.device, d.addr.function, &mut name);
-        let drv = d.bound.map(|s| s.as_bytes());
-        let _ = KERNFS.sysfs_add_device(bdf, d.vendor, d.device_id, d.class, drv);
-        i += 1;
     }
 }
 
@@ -145,12 +64,39 @@ pub fn api() -> FileApi<'static, SpinMutex<Vfs>> {
     FileApi::with_hooks(&VFS, hooks())
 }
 
+/// The in-guest tests' File API hooks (`Hooks`), which the File API
+/// module's `init` installs in a `kernel_tests` build. Each unset one is `Hooks::NONE`'s.
+#[cfg(feature = "kernel_tests")]
+static WRITE_WINDOW: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+#[cfg(feature = "kernel_tests")]
+static OPEN_RACE: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the in-guest tests' File API hooks.
+#[cfg(feature = "kernel_tests")]
+pub fn set_test_hooks(write_window: fn(), open_race: fn() -> bool) {
+    // Release: pairs with the Acquire loads in `hooks`.
+    WRITE_WINDOW.store(write_window as *mut (), Ordering::Release);
+    OPEN_RACE.store(open_race as *mut (), Ordering::Release);
+}
+
 #[cfg(feature = "kernel_tests")]
 fn hooks() -> Hooks {
-    Hooks {
-        write_window: file_init::testing::write_window,
-        open_race: file_init::testing::open_race,
+    let mut h = Hooks::NONE;
+    // Acquire: pairs with the Release stores in `set_test_hooks`.
+    let w = WRITE_WINDOW.load(Ordering::Acquire);
+    if !w.is_null() {
+        // SAFETY: invariant: a non-null `WRITE_WINDOW` holds a `fn()`;
+        // established by `fs_init::set_test_hooks`, its only store.
+        h.write_window = unsafe { core::mem::transmute::<*mut (), fn()>(w) };
     }
+    let r = OPEN_RACE.load(Ordering::Acquire);
+    if !r.is_null() {
+        // SAFETY: invariant: a non-null `OPEN_RACE` holds a
+        // `fn() -> bool`; established by `fs_init::set_test_hooks`, its
+        // only store.
+        h.open_race = unsafe { core::mem::transmute::<*mut (), fn() -> bool>(r) };
+    }
+    h
 }
 
 #[cfg(not(feature = "kernel_tests"))]
