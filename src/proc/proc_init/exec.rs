@@ -54,16 +54,15 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
         with_sched_table(|s, t| release_pid(s, t, pid));
         return Err(KError::from_errno(ENOMEM));
     };
-    let Some(cloned) = addr_space_init::clone_full(src) else {
+    let Some(boxed) = clone_into(slot, src) else {
         close_all_fds(&mut { fds });
         with_sched_table(|s, t| release_pid(s, t, pid));
         return Err(KError::from_errno(ENOMEM));
     };
-    let cr3 = cloned.root().as_u64();
+    let cr3 = boxed.root().as_u64();
     let mut child = *frame;
     child.rax = 0;
     let fs = crate::x86::rdmsr(crate::x86::IA32_FS_BASE);
-    let boxed = slot.write(cloned);
     let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3, &child) {
         Ok(h) => h,
         Err(e) => {
@@ -88,6 +87,17 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
     Ok(pid as usize)
+}
+
+/// A full copy of `src` for fork, moved into `slot`. Out of line, so the
+/// clone's by-value moves are off `sys_fork`'s frame, which stays on the
+/// stack under the child's spawn (DESIGN §4.5).
+#[inline(never)]
+fn clone_into(
+    slot: TryBox<MaybeUninit<AddressSpace>>,
+    src: &AddressSpace,
+) -> Option<TryBox<AddressSpace>> {
+    addr_space_init::clone_full(src).map(|c| slot.write(c))
 }
 
 // Out of line: `dispatch_frame` keeps only the running syscall's frame,
