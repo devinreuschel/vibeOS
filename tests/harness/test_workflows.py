@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 
 from scripts.check_workflows import (
+    CI,
     ROOT,
+    TEMPORARY,
     Node,
     Problem,
     Tree,
@@ -16,6 +18,9 @@ from scripts.check_workflows import (
     load_tree,
     parse,
     rule_action_pins,
+    rule_ci_triggers,
+    rule_concurrency_group,
+    rule_gate_dispatch,
     rule_no_expr_in_run,
     rule_permissions,
     rule_qemu_pin,
@@ -311,6 +316,118 @@ class TestQemuPin(unittest.TestCase):
     def test_qemu_in_env_counts(self) -> None:
         t = tree("jobs:\n  a:\n    env:\n      APT_PACKAGES: qemu-system-x86 ovmf\n")
         self.assertEqual(rules(rule_qemu_pin(t)), [(2, "qemu_pin")])
+
+
+BRANCHES = ", ".join(f'"{b}"' for b in ("main", *TEMPORARY))
+GROUP = (
+    "${{ github.event_name == 'pull_request' && format('ci-pr-{0}', "
+    "github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}"
+)
+
+
+def ci(
+    push: str = f"  push:\n    branches: [{BRANCHES}]\n",
+    pr: str = "  pull_request:\n",
+    dispatch: str = "  workflow_dispatch:\n",
+    group: str = GROUP,
+) -> Tree:
+    text = f"on:\n{push}{pr}{dispatch}concurrency:\n  group: {group}\n"
+    return Tree(workflows={CI: parse(text, CI)})
+
+
+class TestCiTriggers(unittest.TestCase):
+    def test_built_shape_passes(self) -> None:
+        self.assertEqual(rule_ci_triggers(ci()), [])
+
+    def test_other_push_branches_fail(self) -> None:
+        for branches in ('["**"]', "[main]", f"[{BRANCHES}, dev]"):
+            with self.subTest(branches=branches):
+                t = ci(push=f"  push:\n    branches: {branches}\n")
+                self.assertEqual(rules(rule_ci_triggers(t)), [(2, "ci_triggers")])
+
+    def test_push_without_branches_fails(self) -> None:
+        self.assertEqual(rules(rule_ci_triggers(ci(push="  push:\n"))), [(2, "ci_triggers")])
+
+    def test_filters_fail(self) -> None:
+        for key in ("tags", "branches-ignore", "paths", "paths-ignore", "tags-ignore"):
+            with self.subTest(key=key):
+                push = f"  push:\n    branches: [{BRANCHES}]\n    {key}: [x]\n"
+                self.assertEqual(rules(rule_ci_triggers(ci(push=push))), [(4, "ci_triggers")])
+                pr = f"  pull_request:\n    {key}: [x]\n"
+                self.assertEqual(rules(rule_ci_triggers(ci(pr=pr))), [(5, "ci_triggers")])
+
+    def test_missing_pull_request_or_dispatch_fails(self) -> None:
+        self.assertEqual(rules(rule_ci_triggers(ci(pr=""))), [(1, "ci_triggers")])
+        self.assertEqual(rules(rule_ci_triggers(ci(dispatch=""))), [(1, "ci_triggers")])
+
+    def test_group_without_pr_number_or_run_id_fails(self) -> None:
+        for group in (
+            "ci-${{ github.ref }}",
+            "${{ format('ci-pr-{0}', github.event.pull_request.number) }}",
+            "${{ format('ci-run-{0}', github.run_id) }}",
+        ):
+            with self.subTest(group=group):
+                self.assertEqual(rules(rule_ci_triggers(ci(group=group))), [(7, "ci_triggers")])
+
+    def test_missing_ci_yml_fails(self) -> None:
+        self.assertEqual(rules(rule_ci_triggers(tree("on: push\n"))), [(1, "ci_triggers")])
+
+
+class TestConcurrencyGroup(unittest.TestCase):
+    def test_head_ref_and_ref_name_fail(self) -> None:
+        for ref in ("github.head_ref", "github.ref_name"):
+            with self.subTest(ref=ref):
+                t = tree(f"concurrency:\n  group: ci-${{{{ {ref} }}}}\n")
+                self.assertEqual(rules(rule_concurrency_group(t)), [(2, "concurrency_group")])
+
+    def test_job_level_and_scalar_form_fail(self) -> None:
+        t = tree("jobs:\n  a:\n    concurrency: lane-${{ github.ref_name }}\n")
+        self.assertEqual(rules(rule_concurrency_group(t)), [(3, "concurrency_group")])
+
+    def test_run_id_group_passes(self) -> None:
+        t = tree(
+            "concurrency:\n  group: ci-${{ github.run_id }}\njobs:\n  a:\n    concurrency: x\n"
+        )
+        self.assertEqual(rule_concurrency_group(t), [])
+
+
+class TestGateDispatch(unittest.TestCase):
+    NIGHTLY = ".github/workflows/nightly.yml"
+
+    def gate(self, workflow: str, on: str) -> list[tuple[int, str]]:
+        t = Tree(
+            workflows={self.NIGHTLY: parse(f"name: nightly-run\non:\n{on}", self.NIGHTLY)},
+            gate_workflows=[("tests/gates/phase-10.toml", workflow)],
+        )
+        return rules(rule_gate_dispatch(t))
+
+    def test_named_workflow_without_dispatch_fails(self) -> None:
+        on = "  schedule:\n    - cron: '0 3 * * *'\n"
+        for name in ("nightly.yml", "nightly", "nightly-run"):
+            with self.subTest(name=name):
+                self.assertEqual(self.gate(name, on), [(1, "gate_dispatch")])
+
+    def test_named_workflow_with_dispatch_passes(self) -> None:
+        self.assertEqual(self.gate("nightly.yml", "  workflow_dispatch:\n"), [])
+        self.assertEqual(self.gate("nightly-run", "  workflow_dispatch:\n"), [])
+
+    def test_unknown_workflow_fails(self) -> None:
+        self.assertEqual(self.gate("gone.yml", "  workflow_dispatch:\n"), [(1, "gate_dispatch")])
+
+    def test_gate_map_is_read(self) -> None:
+        import tempfile
+
+        from scripts.check_workflows import _gate_workflows
+
+        with tempfile.TemporaryDirectory() as d:
+            gates = Path(d, "tests/gates")
+            gates.mkdir(parents=True)
+            gates.joinpath("phase-10.toml").write_text(
+                '[[line]]\nkey = "k"\n[[line.entry]]\njob = {workflow = "ci.yml", job = "tier"}\n'
+                '[[line.entry]]\ncmd = "make check"\n'
+            )
+            gates.joinpath("phase-10-needs.toml").write_text('[[box]]\nkey = "k"\nneeds = []\n')
+            self.assertEqual(_gate_workflows(Path(d)), [("tests/gates/phase-10.toml", "ci.yml")])
 
 
 class TestTree(unittest.TestCase):

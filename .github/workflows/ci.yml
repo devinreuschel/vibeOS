@@ -1,21 +1,27 @@
 name: ci
 
+# ROADMAP §10.1: pushes to `main`, every pull request, and dispatch. TEMPORARY
+# (scripts/check_workflows.py): the Phase 10 integration branch (`phase-10`,
+# and the branch that stands in for it) and the `p10/**` slice branches also
+# run on push until P10-S98 empties the list, so a slice's race-proof test
+# commit runs red in CI before its fix (#93 §9 D-18).
 on:
   push:
-    branches: ["**"]
+    branches: [main, phase-10, claude/phase-10-workflow-test-d2sfm3, "p10/**"]
   pull_request:
+  workflow_dispatch:
 
 # Least privilege: the jobs read the tree and write only artifacts and caches,
 # which use the runner's own token. ROADMAP §10.1.
 permissions:
   contents: read
 
-# One slot per branch and event; older SHAs get cancelled. A push run and a
-# pull-request run of one branch do not share a slot, so a push cannot cancel
-# the pull request's `ticks` job.
+# A pull request's runs share `ci-pr-<number>` and cancel superseded ones;
+# every other run has a group of its own, keyed by its run id, so no run on
+# `main` is cancelled or dropped as pending (DESIGN §8.6).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:

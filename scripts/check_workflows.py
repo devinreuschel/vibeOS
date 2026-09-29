@@ -22,6 +22,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = ".github/workflows"
+CI = f"{WORKFLOWS_DIR}/ci.yml"
+# Push branches ci.yml may name besides `main` until P10-S98 empties the list
+# and ticks ROADMAP §10.1's trigger box (#93 §9 D-18). The second entry is the
+# branch that stands in for `phase-10` while Phase 10 is integrated.
+TEMPORARY: tuple[str, ...] = ("phase-10", "claude/phase-10-workflow-test-d2sfm3", "p10/**")
 
 
 class Unsupported(Exception):
@@ -577,12 +582,123 @@ def rule_qemu_pin(tree: Tree) -> list[Problem]:
     return out
 
 
+FILTERS = ("tags", "tags-ignore", "branches-ignore", "paths", "paths-ignore")
+
+
+def rule_ci_triggers(tree: Tree) -> list[Problem]:
+    """L1205: ci.yml runs on push to `main`, every pull request and dispatch, grouped per PR."""
+    wf = tree.workflows.get(CI)
+    if wf is None:
+        return [Problem(CI, 1, "ci_triggers", "ci.yml is missing")]
+    out = []
+    on = wf.get("on")
+    if on is None or on.kind != "map":
+        return [Problem(CI, on.line if on else 1, "ci_triggers", "`on:` is not a mapping")]
+    push = on.get("push")
+    if push is None:
+        out.append(Problem(CI, on.line, "ci_triggers", "no `push` trigger"))
+    else:
+        branches = push.get("branches")
+        names = branches.scalars() if branches is not None else []
+        want = {"main", *TEMPORARY}
+        if branches is None or set(names) != want or len(names) != len(want):
+            out.append(
+                Problem(
+                    CI,
+                    push.line,
+                    "ci_triggers",
+                    f"push branches {names} are not main plus TEMPORARY {list(TEMPORARY)}",
+                )
+            )
+    for event in ("push", "pull_request"):
+        node = on.get(event)
+        for key in FILTERS:
+            f = node.get(key) if node is not None else None
+            if f is not None:
+                out.append(Problem(CI, f.line, "ci_triggers", f"`{event}` has a `{key}` filter"))
+    for event in ("pull_request", "workflow_dispatch"):
+        if on.get(event) is None:
+            out.append(Problem(CI, on.line, "ci_triggers", f"no `{event}` trigger"))
+    conc = wf.get("concurrency")
+    group = conc.get("group") if conc is not None else None
+    text = (group.value if group is not None else None) or ""
+    m = re.search(r"'ci-pr-[^']*'\s*,\s*github\.event\.pull_request\.number", text)
+    if m is None or "github.run_id" not in text:
+        out.append(
+            Problem(
+                CI,
+                (group or conc or wf).line,
+                "ci_triggers",
+                "concurrency group must be `ci-pr-<pull_request.number>` for a pull request "
+                "and keyed by `github.run_id` otherwise",
+            )
+        )
+    return out
+
+
+def _groups(wf: Node) -> list[Node]:
+    out = []
+    for holder in [wf, *_jobs(wf)]:
+        conc = holder.get("concurrency")
+        if conc is None:
+            continue
+        group = conc.get("group") if conc.kind == "map" else conc
+        if group is not None:
+            out.append(group)
+    return out
+
+
+def rule_concurrency_group(tree: Tree) -> list[Problem]:
+    """L1205: a group from the branch name lets unrelated runs (a fork's `main`) share it."""
+    out = []
+    for path, wf in tree.workflows.items():
+        for group in _groups(wf):
+            for ref in ("github.head_ref", "github.ref_name"):
+                if ref in (group.value or ""):
+                    out.append(
+                        Problem(path, group.line, "concurrency_group", f"group built from {ref}")
+                    )
+    return out
+
+
+def rule_gate_dispatch(tree: Tree) -> list[Problem]:
+    """L1205: a workflow a gate entry names can be dispatched, so the gate can rerun it."""
+    out = []
+    by_name: dict[str, Node] = {}
+    for path, wf in tree.workflows.items():
+        name = Path(path).name
+        by_name[name] = wf
+        by_name[Path(path).stem] = wf
+        title = wf.get("name")
+        if title is not None and title.value:
+            by_name.setdefault(title.value, wf)
+    for gate, workflow in tree.gate_workflows:
+        target = by_name.get(workflow)
+        if target is None:
+            out.append(Problem(gate, 1, "gate_dispatch", f"names unknown workflow {workflow!r}"))
+            continue
+        on = target.get("on")
+        dispatch = on is not None and (
+            on.get("workflow_dispatch") is not None or "workflow_dispatch" in on.scalars()
+        )
+        if not dispatch:
+            out.append(
+                Problem(
+                    gate, 1, "gate_dispatch", f"workflow {workflow!r} has no workflow_dispatch"
+                )
+            )
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
     rule_permissions,
     rule_action_pins,
     rule_runs_on,
     rule_qemu_pin,
+    rule_ci_triggers,
+    rule_concurrency_group,
+    rule_gate_dispatch,
 ]
 
 

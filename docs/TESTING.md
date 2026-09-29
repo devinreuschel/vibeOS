@@ -451,15 +451,20 @@ does not boot it twice.
 
 ## 8.6 CI and coverage
 
-Two jobs run on every push and pull request, on Linux, and `ticks` on pull requests; the other
-rows below are scheduled, dispatched, or run on a tag. `concurrency` cancels superseded runs that
-share a group, one per branch and event (`github.event_name` is in the key): a push run never
-cancels a pull request's run or its `ticks` job, a merge to `main` still cancels the push run of
-the merge before it, and a fork's pull request from its own `main` shares a slot only with other
-pull requests from a branch named `main`, never with `main`'s push runs. Planned (ROADMAP §10.1): `ci` runs on pushes to
-`main`, pull requests, and `workflow_dispatch`; a pull request's runs share one group per pull
-request number and cancel superseded ones, and every other run has its own group, so no `main` run
-is cancelled. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9). The earlier
+`ci` runs on a push to `main`, on every pull request, and on `workflow_dispatch`, never on a push to
+another branch, with one temporary exception: until ROADMAP §10.1's trigger box is ticked, pushes to
+the Phase 10 integration branch (`phase-10`, and the branch that stands in for it) and to the
+`p10/**` slice branches run too, so a slice's race-proof test commit runs red before its fix
+(`TEMPORARY` in `scripts/check_workflows.py`). A pull request's runs share the concurrency group
+`ci-pr-<number>` and cancel superseded ones; every other run has a group of its own, `ci-run-<run
+id>`, so no run on `main` is cancelled or dropped as pending, and a fork's pull request from its own
+`main` shares nothing with `main`'s runs. `scripts/check_workflows.py` fails on `ci.yml` push branches
+other than `main` and the temporary list, on a `tags`, `branches-ignore` or `paths` filter, on a
+missing `pull_request` or `workflow_dispatch` trigger, or on a group that is not built that way
+(`rule_ci_triggers`); on any `concurrency` group built from `github.head_ref` or `github.ref_name`
+(`rule_concurrency_group`); and on a workflow a §10.9 gate entry names that has no
+`workflow_dispatch` trigger (`rule_gate_dispatch`). The other rows below are scheduled,
+dispatched, or run on a tag. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9). The earlier
 one-ladder-job rule (runner queues) was lifted on 2026-09-22: the repo is public, so Actions minutes
 are free, and agents own the CI design. ROADMAP §10.1 plans a build-once job plus a tier matrix per
 architecture; until that lands the ladder is one job.
