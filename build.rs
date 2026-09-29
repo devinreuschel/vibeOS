@@ -6,8 +6,13 @@
 //!     (DESIGN §9.1).
 //!   - `VIBEOS_KSYMS` staged by the Makefile. An empty fallback so
 //!     `cargo check` works without `make`.
+//!   - `VIBEOS_USER_BINS` and `VIBEOS_USER_DIR`: in `kernel_tests` builds,
+//!     the user programs `make user` built, embedded for `Image::UserBin`
+//!     (C-USERBINS). An empty table otherwise, so bare `cargo clippy
+//!     --features kernel_tests` works without `make`.
 
 use std::env;
+use std::io::Write;
 use std::path::PathBuf;
 
 fn main() {
@@ -38,4 +43,26 @@ fn main() {
         )
         .unwrap();
     }
+
+    println!("cargo:rerun-if-env-changed=VIBEOS_USER_BINS");
+    println!("cargo:rerun-if-env-changed=VIBEOS_USER_DIR");
+    let mut bins = std::fs::File::create(out.join("user_bins.rs")).unwrap();
+    writeln!(bins, "pub(crate) static USER_BINS: &[(&str, &[u8])] = &[").unwrap();
+    if env::var_os("CARGO_FEATURE_KERNEL_TESTS").is_some()
+        && let (Ok(names), Ok(dir)) = (env::var("VIBEOS_USER_BINS"), env::var("VIBEOS_USER_DIR"))
+    {
+        for name in names.split_whitespace() {
+            let path = PathBuf::from(&dir).join(name);
+            if !path.is_file() {
+                panic!(
+                    "VIBEOS_USER_BINS names {name}, but {} is missing; run `make user`",
+                    path.display()
+                );
+            }
+            println!("cargo:rerun-if-changed={}", path.display());
+            let path = path.to_str().unwrap();
+            writeln!(bins, "    ({name:?}, include_bytes!({path:?})),").unwrap();
+        }
+    }
+    writeln!(bins, "];").unwrap();
 }

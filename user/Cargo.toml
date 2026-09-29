@@ -1,0 +1,19 @@
+[package]
+name = "vibeos-user"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# The Rust user runtime (ROADMAP §10.5). It builds only through `make user`,
+# which passes the target, the linker and the code-generation flags
+# (BOOT.md §3.1); programs are `src/bin/<name>.rs`.
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+vibeos-user-mem = { path = "mem" }
+
+[lints]
+workspace = true
