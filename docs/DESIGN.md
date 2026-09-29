@@ -171,7 +171,7 @@ lie in its subsystem's directory, except `ktest.rs` until ROADMAP §10.2's Q2 bo
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/{mod,virtio_blk_init}.rs` |
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,file_init}.rs` |
-| proc | `proc/{mod,addr_space,elf,syscall}.rs` | `proc/{mod,proc_init,addr_space_init,user_init,syscall_init}.rs` |
+| proc | `proc/{mod,elf,syscall}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,proc_init,addr_space_init,user_init,syscall_init}.rs` |
 | ktest | — | `ktest.rs`, `ktest/*.rs` (`kernel_tests` only) |
 
 ## 1.4 Documentation rules
