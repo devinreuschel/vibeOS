@@ -1,5 +1,7 @@
 //! ELF64 parse + initial stack. ROADMAP §9.4. Mapping is the kernel half.
 
+#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+
 use crate::limits::EXEC_IMAGE_MAX;
 use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END, is_canonical};
 
@@ -47,6 +49,7 @@ pub const AT_SECURE: u64 = 23;
 pub const AT_RANDOM: u64 = 25;
 pub const AT_EXECFN: u64 = 31;
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ElfError {
     Truncated,
@@ -123,7 +126,8 @@ impl TlsSeg {
         let aligned = if self.align <= 1 {
             self.memsz
         } else {
-            self.memsz.checked_add(self.align - 1)? & !(self.align - 1)
+            let mask = self.align.checked_sub(1)?;
+            self.memsz.checked_add(mask)? & !mask
         };
         let need = aligned.checked_add(8)?.max(PAGE_SIZE_4K);
         Some(need.checked_add(PAGE_SIZE_4K - 1)? & !(PAGE_SIZE_4K - 1))
@@ -158,21 +162,24 @@ pub fn page_up(x: u64) -> u64 {
     x.saturating_add(PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1)
 }
 
+/// The `N` bytes of `b` at `o`, or `Truncated` when they run past its end.
+fn bytes_at<const N: usize>(b: &[u8], o: usize) -> Result<[u8; N], ElfError> {
+    let end = o.checked_add(N).ok_or(ElfError::Truncated)?;
+    b.get(o..end)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(ElfError::Truncated)
+}
+
 fn le16(b: &[u8], o: usize) -> Result<u16, ElfError> {
-    let s = b.get(o..o + 2).ok_or(ElfError::Truncated)?;
-    Ok(u16::from_le_bytes([s[0], s[1]]))
+    bytes_at(b, o).map(u16::from_le_bytes)
 }
 
 fn le32(b: &[u8], o: usize) -> Result<u32, ElfError> {
-    let s = b.get(o..o + 4).ok_or(ElfError::Truncated)?;
-    Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    bytes_at(b, o).map(u32::from_le_bytes)
 }
 
 fn le64(b: &[u8], o: usize) -> Result<u64, ElfError> {
-    let s = b.get(o..o + 8).ok_or(ElfError::Truncated)?;
-    Ok(u64::from_le_bytes([
-        s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
-    ]))
+    bytes_at(b, o).map(u64::from_le_bytes)
 }
 
 fn check_user_va(va: u64, len: u64) -> Result<(), ElfError> {
@@ -202,16 +209,17 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
     if data.len() < EHDR_SIZE {
         return Err(ElfError::Truncated);
     }
-    if data[0] != ELFMAG0 || data[1] != b'E' || data[2] != b'L' || data[3] != b'F' {
+    let [m0, m1, m2, m3, class, endian, version, ..] = bytes_at::<EI_NIDENT>(data, 0)?;
+    if [m0, m1, m2, m3] != [ELFMAG0, b'E', b'L', b'F'] {
         return Err(ElfError::BadMagic);
     }
-    if data[4] != ELFCLASS64 {
+    if class != ELFCLASS64 {
         return Err(ElfError::BadClass);
     }
-    if data[5] != ELFDATA2LSB {
+    if endian != ELFDATA2LSB {
         return Err(ElfError::BadEndian);
     }
-    if data[6] != EV_CURRENT {
+    if version != EV_CURRENT {
         return Err(ElfError::BadVersion);
     }
     let typ = le16(data, 16)?;
@@ -247,6 +255,12 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
     if ph_end > data.len() as u64 {
         return Err(ElfError::Truncated);
     }
+    // `ph_end <= data.len()`, so both bounds fit a `usize`.
+    let table = usize::try_from(phoff)
+        .ok()
+        .zip(usize::try_from(ph_end).ok())
+        .and_then(|(lo, hi)| data.get(lo..hi))
+        .ok_or(ElfError::Truncated)?;
 
     let mut loads = [LoadSeg {
         vaddr: 0,
@@ -261,44 +275,42 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
     let mut saw_gnu_stack = false;
     let mut tls = None;
     let mut phdr_va = None;
-    let mut i = 0u16;
-    while i < phnum {
-        let o = (phoff as usize) + (i as usize) * PHDR_SIZE;
-        let p_type = le32(data, o)?;
-        let p_flags = le32(data, o + 4)?;
-        let p_offset = le64(data, o + 8)?;
-        let p_vaddr = le64(data, o + 16)?;
-        let p_filesz = le64(data, o + 32)?;
-        let p_memsz = le64(data, o + 40)?;
-        let p_align = le64(data, o + 48)?;
+    // `table` is `phnum` entries of `PHDR_SIZE` bytes (`phentsize` was
+    // checked above), so each chunk is one whole entry.
+    for ph in table.as_chunks::<PHDR_SIZE>().0 {
+        let p_type = le32(ph, 0)?;
+        let p_flags = le32(ph, 4)?;
+        let p_offset = le64(ph, 8)?;
+        let p_vaddr = le64(ph, 16)?;
+        let p_filesz = le64(ph, 32)?;
+        let p_memsz = le64(ph, 40)?;
+        let p_align = le64(ph, 48)?;
         match p_type {
             PT_INTERP => return Err(ElfError::HasInterp),
             PT_LOAD => {
                 if p_filesz > p_memsz {
                     return Err(ElfError::FileszGtMemsz);
                 }
-                if p_align != 0 && (p_align & (p_align - 1)) != 0 {
+                if p_align != 0 && !p_align.is_power_of_two() {
                     return Err(ElfError::BadAlign);
                 }
                 check_user_va(p_vaddr, p_memsz.max(1))?;
-                if p_align > 1 && (p_vaddr & (p_align - 1)) != (p_offset & (p_align - 1)) {
+                if p_align > 1 && p_vaddr.checked_rem(p_align) != p_offset.checked_rem(p_align) {
                     return Err(ElfError::BadAlign);
                 }
                 let file_end = p_offset.checked_add(p_filesz).ok_or(ElfError::Truncated)?;
                 if file_end > data.len() as u64 {
                     return Err(ElfError::Truncated);
                 }
-                let mut j = 0;
-                while j < nload {
-                    if ranges_overlap(loads[j].vaddr, loads[j].memsz, p_vaddr, p_memsz) {
-                        return Err(ElfError::Overlap);
-                    }
-                    j += 1;
+                if loads
+                    .iter()
+                    .take(nload)
+                    .any(|l| ranges_overlap(l.vaddr, l.memsz, p_vaddr, p_memsz))
+                {
+                    return Err(ElfError::Overlap);
                 }
-                if nload >= MAX_LOADS {
-                    return Err(ElfError::TooManyLoads);
-                }
-                loads[nload] = LoadSeg {
+                let slot = loads.get_mut(nload).ok_or(ElfError::TooManyLoads)?;
+                *slot = LoadSeg {
                     vaddr: p_vaddr,
                     memsz: p_memsz,
                     offset: p_offset,
@@ -306,7 +318,7 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
                     write: p_flags & PF_W != 0,
                     exec: p_flags & PF_X != 0,
                 };
-                nload += 1;
+                nload = nload.checked_add(1).ok_or(ElfError::TooManyLoads)?;
             }
             PT_GNU_STACK => {
                 saw_gnu_stack = true;
@@ -332,28 +344,22 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
             }
             _ => {}
         }
-        i += 1;
     }
     if nload == 0 {
         return Err(ElfError::NoLoad);
     }
-    image_bytes(&loads[..nload], tls)?;
+    image_bytes(loads.get(..nload).ok_or(ElfError::TooManyLoads)?, tls)?;
     if !saw_gnu_stack {
         stack_exec = false;
     }
     check_user_va(entry, 1)?;
     if phdr_va.is_none() {
-        let mut j = 0;
-        while j < nload {
-            let s = loads[j];
-            if s.offset <= phoff
-                && phoff + (phnum as u64) * (phentsize as u64) <= s.offset + s.filesz
-            {
-                phdr_va = Some(s.vaddr + (phoff - s.offset));
-                break;
-            }
-            j += 1;
-        }
+        // The first `PT_LOAD` whose file bytes hold the whole table maps it.
+        phdr_va = loads.iter().take(nload).find_map(|s| {
+            let delta = phoff.checked_sub(s.offset)?;
+            (ph_end <= s.offset.checked_add(s.filesz)?).then_some(())?;
+            s.vaddr.checked_add(delta)
+        });
     }
     if let Some(va) = phdr_va {
         let ph_len = (phnum as u64).saturating_mul(phentsize as u64).max(1);
@@ -403,8 +409,10 @@ fn image_bytes(loads: &[LoadSeg], tls: Option<TlsSeg>) -> Result<u64, ElfError> 
 }
 
 impl Image<'_> {
+    /// The `PT_LOAD` segments; empty if `nload` is past `loads`, which
+    /// `parse` never builds.
     pub fn loads(&self) -> &[LoadSeg] {
-        &self.loads[..self.nload]
+        self.loads.get(..self.nload).unwrap_or(&[])
     }
 
     pub fn file_bytes(&self, seg: LoadSeg) -> Result<&[u8], ElfError> {
@@ -429,107 +437,94 @@ pub fn build_initial_stack(
         return Err(ElfError::Stack);
     }
     mem.fill(0);
-    let base = stack_top.wrapping_sub(mem.len() as u64);
+    let base = stack_top
+        .checked_sub(mem.len() as u64)
+        .ok_or(ElfError::Stack)?;
     let mut sp = mem.len();
 
+    /// Copy `bytes` and a NUL below `*sp`; the offset of the copy.
     fn push(mem: &mut [u8], sp: &mut usize, bytes: &[u8]) -> Result<usize, ElfError> {
         let n = bytes.len().checked_add(1).ok_or(ElfError::Stack)?;
-        if *sp < n {
-            return Err(ElfError::Stack);
-        }
-        *sp -= n;
-        mem[*sp..*sp + bytes.len()].copy_from_slice(bytes);
-        mem[*sp + bytes.len()] = 0;
-        Ok(*sp)
+        let lo = sp.checked_sub(n).ok_or(ElfError::Stack)?;
+        let (body, nul) = mem
+            .get_mut(lo..*sp)
+            .ok_or(ElfError::Stack)?
+            .split_at_mut(bytes.len());
+        body.copy_from_slice(bytes);
+        nul.fill(0);
+        *sp = lo;
+        Ok(lo)
     }
 
     let mut argv_off = [0usize; 8];
     if argv.len() > argv_off.len() {
         return Err(ElfError::Stack);
     }
-    let mut i = 0;
-    while i < argv.len() {
-        argv_off[i] = push(mem, &mut sp, argv[i])?;
-        i += 1;
+    for (off, a) in argv_off.iter_mut().zip(argv) {
+        *off = push(mem, &mut sp, a)?;
     }
     let mut env_off = [0usize; 8];
     if envp.len() > env_off.len() {
         return Err(ElfError::Stack);
     }
-    i = 0;
-    while i < envp.len() {
-        env_off[i] = push(mem, &mut sp, envp[i])?;
-        i += 1;
+    for (off, e) in env_off.iter_mut().zip(envp) {
+        *off = push(mem, &mut sp, e)?;
     }
-    if sp < 16 {
-        return Err(ElfError::Stack);
-    }
-    sp -= 16;
-    mem[sp..sp + 16].copy_from_slice(random);
-    let random_off = sp;
+    let random_off = sp.checked_sub(random.len()).ok_or(ElfError::Stack)?;
+    mem.get_mut(random_off..sp)
+        .ok_or(ElfError::Stack)?
+        .copy_from_slice(random);
+    sp = random_off;
 
-    let naux = aux.len() + 2; // AT_RANDOM + AT_NULL
-    let ptr_bytes = 8 + 8 * (argv.len() + 1) + 8 * (envp.len() + 1) + 16 * naux;
-    if sp < ptr_bytes {
-        return Err(ElfError::Stack);
-    }
-    let mut rsp_off = sp - ptr_bytes;
-    rsp_off &= !0xf;
-    if rsp_off + ptr_bytes > sp {
-        if rsp_off < 16 {
-            return Err(ElfError::Stack);
-        }
-        rsp_off -= 16;
-    }
+    // argc, argv[] and NULL, envp[] and NULL, then the auxv pairs with
+    // AT_RANDOM and AT_NULL.
+    let words = argv
+        .len()
+        .checked_add(envp.len())
+        .and_then(|n| n.checked_add(3))
+        .and_then(|n| aux.len().checked_add(2)?.checked_mul(2)?.checked_add(n))
+        .ok_or(ElfError::Stack)?;
+    let ptr_bytes = words.checked_mul(8).ok_or(ElfError::Stack)?;
+    // 16-byte aligned, with the vector below everything pushed so far.
+    let rsp_off = sp.checked_sub(ptr_bytes).ok_or(ElfError::Stack)? & !0xf;
 
-    fn poke_u64(mem: &mut [u8], off: usize, v: u64) -> Result<(), ElfError> {
+    fn poke_u64(mem: &mut [u8], off: &mut usize, v: u64) -> Result<(), ElfError> {
         let e = off.checked_add(8).ok_or(ElfError::Stack)?;
-        if e > mem.len() {
-            return Err(ElfError::Stack);
-        }
-        mem[off..e].copy_from_slice(&v.to_le_bytes());
+        mem.get_mut(*off..e)
+            .ok_or(ElfError::Stack)?
+            .copy_from_slice(&v.to_le_bytes());
+        *off = e;
         Ok(())
     }
+    let va = |off: usize| base.checked_add(off as u64).ok_or(ElfError::Stack);
 
     let mut o = rsp_off;
-    poke_u64(mem, o, argv.len() as u64)?;
-    o += 8;
-    i = 0;
-    while i < argv.len() {
-        poke_u64(mem, o, base + argv_off[i] as u64)?;
-        o += 8;
-        i += 1;
+    poke_u64(mem, &mut o, argv.len() as u64)?;
+    for &off in argv_off.iter().take(argv.len()) {
+        poke_u64(mem, &mut o, va(off)?)?;
     }
-    poke_u64(mem, o, 0)?;
-    o += 8;
-    i = 0;
-    while i < envp.len() {
-        poke_u64(mem, o, base + env_off[i] as u64)?;
-        o += 8;
-        i += 1;
+    poke_u64(mem, &mut o, 0)?;
+    for &off in env_off.iter().take(envp.len()) {
+        poke_u64(mem, &mut o, va(off)?)?;
     }
-    poke_u64(mem, o, 0)?;
-    o += 8;
-    i = 0;
-    while i < aux.len() {
-        poke_u64(mem, o, aux[i].tag)?;
-        o += 8;
-        poke_u64(mem, o, aux[i].val)?;
-        o += 8;
-        i += 1;
+    poke_u64(mem, &mut o, 0)?;
+    for a in aux {
+        poke_u64(mem, &mut o, a.tag)?;
+        poke_u64(mem, &mut o, a.val)?;
     }
-    poke_u64(mem, o, AT_RANDOM)?;
-    o += 8;
-    poke_u64(mem, o, base + random_off as u64)?;
-    o += 8;
-    poke_u64(mem, o, AT_NULL)?;
-    o += 8;
-    poke_u64(mem, o, 0)?;
-    let _ = o;
-    Ok(base + rsp_off as u64)
+    poke_u64(mem, &mut o, AT_RANDOM)?;
+    poke_u64(mem, &mut o, va(random_off)?)?;
+    poke_u64(mem, &mut o, AT_NULL)?;
+    poke_u64(mem, &mut o, 0)?;
+    va(rsp_off)
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "host tests: the module deny overrides the crate root's cfg(test) allow, and a failing index ends the test"
+)]
 mod tests {
     use super::*;
 
@@ -858,5 +853,43 @@ mod tests {
         let elf = build_elf(0x4000_0000, &[0x90, 0xC3], &[]);
         let img = parse(&elf).unwrap();
         assert_eq!(img.loads.len(), crate::limits::MAX_ELF_LOADS);
+    }
+
+    /// A stack whose top is below its own length has no user VA for its
+    /// base; `base + off` used to overflow and panic (ROADMAP §10.1, E1).
+    #[test]
+    fn elf_rejects_stack_top_below_len() {
+        let mut mem = [0u8; 4096];
+        let got = build_initial_stack(0x100, &mut mem, &[b"/hello"], &[], &[], &[0; 16]);
+        assert_eq!(got, Err(ElfError::Stack));
+        let top = 0x7000_0000u64;
+        assert!(build_initial_stack(top, &mut mem, &[b"/hello"], &[], &[], &[0; 16]).is_ok());
+    }
+
+    /// A stack too small for the strings, the random bytes or the vector
+    /// is refused at each step, never indexed out of bounds.
+    #[test]
+    fn elf_rejects_stack_too_small() {
+        let top = 0x7000_0000u64;
+        for len in [1usize, 7, 8, 16, 24, 64, 90] {
+            let mut mem = std::vec![0u8; len];
+            let got = build_initial_stack(top, &mut mem, &[b"/hello"], &[b"A=B"], &[], &[0; 16]);
+            assert_eq!(got, Err(ElfError::Stack), "len {len}");
+        }
+        let too_many: [&[u8]; 9] = [b"a"; 9];
+        let mut mem = [0u8; 4096];
+        let got = build_initial_stack(top, &mut mem, &too_many, &[], &[], &[0; 16]);
+        assert_eq!(got, Err(ElfError::Stack));
+    }
+
+    /// `Image`'s fields are public, so a hand-built one can carry an
+    /// `nload` past `loads`; `loads()` used to slice out of bounds.
+    #[test]
+    fn elf_rejects_nload_past_loads() {
+        let elf = build_elf(0x4000_0000, &[0x90, 0xC3], &[]);
+        let mut img = parse(&elf).unwrap();
+        assert_eq!(img.loads().len(), 1);
+        img.nload = MAX_LOADS + 1;
+        assert!(img.loads().is_empty());
     }
 }
