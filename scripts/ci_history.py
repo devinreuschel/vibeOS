@@ -20,6 +20,11 @@ Modes (one `if` branch each in `main`):
   time, head SHA, run id, seconds), then the median. With no `--job`, the
   run's push-to-green time (§10.1): its latest job `completed` minus its
   earliest job `created`.
+- `--rotate`: print the branch's packed size (DESIGN §8.6), and past
+  `ROTATE_AT_BYTES` move the oldest UTC year's records into a zstd archive,
+  the asset of a prerelease `ci-history-<year>` never marked latest, listed in
+  `archives.json`, and restart the branch from an orphan commit holding the
+  rest. `records()` and `has()` read the branch and every archive alike.
 
 Trust rules: a fork's pull request sets a run's branch, title and artifacts, so
 no run field reaches a shell line (subprocesses take argv lists), commit
@@ -35,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import io
 import json
@@ -44,6 +50,7 @@ import re
 import statistics
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import tomllib
@@ -89,6 +96,8 @@ HISTORY_WORKFLOW = ".github/workflows/ci-history.yml"
 MAIN = "main"
 MAIN_EVENTS = frozenset({"push", "workflow_dispatch"})
 BACKFILL_LIMIT = 200
+ASSET = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+ARCHIVES = "archives.json"
 GATE_MAP = re.compile(r"^(phase-\d+|common)\.toml$")
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
@@ -505,6 +514,66 @@ def attach_artifacts(rec: dict[str, Any], arts: Artifacts) -> None:
     rec["runner"] = runners[0] if len(runners) == 1 else None
 
 
+# --- archives: codec and releases -----------------------------------------------
+
+
+class Codec(Protocol):
+    def compress(self, data: bytes) -> bytes: ...
+
+    def decompress(self, data: bytes) -> bytes: ...
+
+
+class ZstdCli:
+    """The `zstd` CLI over stdin (Python 3.11 has no zstd module)."""
+
+    @staticmethod
+    def _run(argv: list[str], data: bytes) -> bytes:
+        r = subprocess.run(argv, input=data, capture_output=True, check=False)
+        if r.returncode != 0:
+            raise HistoryError(f"{argv[0]}: {r.stderr.decode('utf-8', 'replace').strip()}")
+        return r.stdout
+
+    def compress(self, data: bytes) -> bytes:
+        return self._run(["zstd", "-19", "-q", "-c"], data)
+
+    def decompress(self, data: bytes) -> bytes:
+        return self._run(["zstd", "-d", "-q", "-c"], data)
+
+
+class Releaser(Protocol):
+    def create(self, tag: str, asset: Path, target: str, notes: str) -> None: ...
+
+    def download(self, tag: str, asset: str, dest: Path) -> Path: ...
+
+
+class GhReleaser:
+    """`gh release`: a prerelease, never marked latest, tagged at `target`."""
+
+    def __init__(self, repo: str) -> None:
+        self.repo = repo
+
+    @staticmethod
+    def _run(argv: list[str]) -> None:
+        r = subprocess.run(argv, capture_output=True, check=False)
+        if r.returncode != 0:
+            raise HistoryError(f"gh release: {r.stderr.decode('utf-8', 'replace').strip()}")
+
+    def create(self, tag: str, asset: Path, target: str, notes: str) -> None:
+        self._run([
+            "gh", "release", "create", tag, str(asset), "--repo", self.repo,
+            "--prerelease", "--latest=false", "--target", target, "--title", tag,
+            "--notes", notes,
+        ])
+
+    def download(self, tag: str, asset: str, dest: Path) -> Path:
+        dest.mkdir(parents=True, exist_ok=True)
+        self._run([
+            "gh", "release", "download", tag, "--repo", self.repo, "--pattern", asset,
+            "--dir", str(dest), "--clobber",
+        ])
+        return dest / asset
+
+
 # --- the history repository -----------------------------------------------------
 
 
@@ -567,11 +636,18 @@ class HistoryRepo:
         remote: str,
         *,
         sleep: Callable[[float], None] = time.sleep,
+        releaser: Releaser | None = None,
+        codec: Codec | None = None,
+        archive_dir: Path | None = None,
     ) -> None:
         self.workdir = workdir
         self.remote = remote
         self.sleep = sleep
+        self.releaser = releaser
+        self.codec = codec
+        self.archive_dir = archive_dir or workdir / "archives"
         self.invalid: list[str] = []  # record files that are not a valid record
+        self._archived: dict[str, list[dict[str, Any]]] = {}  # by asset
 
     def git(self, *args: str, check: bool = True, input: bytes | None = None) -> str:
         r = subprocess.run(
@@ -632,7 +708,8 @@ class HistoryRepo:
         self.git("clean", "-fdq")
 
     def fetch(self, depth: int | None) -> None:
-        args = ["fetch", "-q", "--no-tags"]
+        # Keep what arrives packed, as a clone does, so `size-pack` measures it.
+        args = ["-c", "fetch.unpackLimit=1", "fetch", "-q", "--no-tags"]
         if depth is not None:
             args.append(f"--depth={depth}")
         elif (self.workdir / ".git" / "shallow").exists():
@@ -721,14 +798,97 @@ class HistoryRepo:
         return obj
 
     def records(self, workflow: str | None = None) -> list[dict[str, Any]]:
-        """Every valid record on the branch, of one workflow or all. Files that
-        are not a valid record go to `invalid` and count as missing."""
+        """Every valid record on the branch and in every archive `archives.json`
+        lists, of one workflow or all. Branch files that are not a valid record
+        go to `invalid` and count as missing."""
         self.invalid = []
-        return list(self._branch_records(workflow))
+        out = list(self._branch_records(workflow))
+        for entry in self.archives():
+            out += [r for r in self._archive_records(entry)
+                    if workflow is None or r["workflow"] == workflow]
+        return out
 
     def has(self, workflow: str, run_id: int) -> bool:
+        """The branch holds a valid record of the run, or an archive lists it."""
         p = self.workdir / record_path(workflow, run_id)
-        return p.is_file() and self._read(p, workflow) is not None
+        if p.is_file() and self._read(p, workflow) is not None:
+            return True
+        return any(run_id in e["runs"].get(workflow, []) for e in self.archives())
+
+    def archives(self) -> list[dict[str, Any]]:
+        """The entries of `archives.json` (C-HISTORY), or [] without one."""
+        p = self.workdir / ARCHIVES
+        if not p.is_file():
+            return []
+        try:
+            index = json.loads(p.read_bytes())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise HistoryError(f"{ARCHIVES}: {e}") from e
+        entries = index.get("archives") if isinstance(index, dict) else None
+        if not isinstance(index, dict) or index.get("schema") != SCHEMA or not isinstance(
+            entries, list
+        ):
+            raise HistoryError(f"{ARCHIVES}: not a schema-1 archive index")
+        for entry in entries:
+            ok = (
+                isinstance(entry, dict)
+                and isinstance(entry.get("year"), int)
+                and isinstance(entry.get("tag"), str)
+                and isinstance(entry.get("asset"), str)
+                and ASSET.fullmatch(entry["asset"]) is not None
+                and isinstance(entry.get("sha256"), str)
+                and isinstance(entry.get("runs"), dict)
+                and all(isinstance(v, list) for v in entry["runs"].values())
+            )
+            if not ok:
+                raise HistoryError(f"{ARCHIVES}: a malformed entry")
+        return entries
+
+    def _archive_records(self, entry: Mapping[str, Any]) -> list[dict[str, Any]]:
+        asset: str = entry["asset"]
+        if asset in self._archived:
+            return self._archived[asset]
+        path = self.archive_dir / asset
+        if not path.is_file():
+            if self.releaser is None:
+                raise HistoryError(f"{asset}: not in {self.archive_dir} and no releaser")
+            path = self.releaser.download(entry["tag"], asset, self.archive_dir)
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+            raise HistoryError(f"{asset}: SHA-256 differs from {ARCHIVES}")
+        if self.codec is None:
+            raise HistoryError(f"{asset}: no codec")
+        out: list[dict[str, Any]] = []
+        with tarfile.open(fileobj=io.BytesIO(self.codec.decompress(data)), mode="r:") as tar:
+            for m in tar:
+                parts = m.name.split("/")
+                if not m.isreg() or len(parts) != 3 or parts[0] != "runs":
+                    continue
+                key, name = parts[1], parts[2]
+                if key not in WORKFLOWS or not name.endswith(".json"):
+                    continue
+                f = tar.extractfile(m)
+                try:
+                    obj = json.loads(f.read()) if f is not None else None
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    obj = None
+                stem = name.removesuffix(".json")
+                if stem.isdigit() and valid_record(obj, key, int(stem)):
+                    assert isinstance(obj, dict)
+                    out.append(obj)
+        self._archived[asset] = out
+        return out
+
+    def packed_bytes(self) -> int:
+        """`size-pack` of `git count-objects -v`, in bytes (a full clone's)."""
+        for line in self.git("count-objects", "-v").splitlines():
+            k, _, v = line.partition(":")
+            if k.strip() == "size-pack":
+                return int(v.strip()) * 1024
+        raise HistoryError("git count-objects: no size-pack")
+
+    def files(self) -> list[str]:
+        return [f for f in self.git("ls-files", "-z").split("\0") if f]
 
 
 # --- completeness -------------------------------------------------------------
@@ -1014,6 +1174,120 @@ def print_series(points: list[Point]) -> None:
         print("no matching records")
 
 
+# --- rotation -----------------------------------------------------------------
+
+
+def record_year(history: HistoryRepo, rel: str) -> int | None:
+    """The UTC year a history file belongs to: a run record's `started` (else
+    `created`), a dev-host record's name; None for anything else."""
+    parts = rel.split("/")
+    if parts[0] == "records" and len(parts) == 2 and parts[1][:4].isdigit():
+        return int(parts[1][:4])
+    if parts[0] != "runs" or len(parts) != 3:
+        return None
+    try:
+        obj = json.loads((history.workdir / rel).read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    t = parse_time(obj.get("started")) or parse_time(obj.get("created"))
+    return t.year if t is not None else None
+
+
+def _tar(history: HistoryRepo, files: list[str]) -> bytes:
+    """A deterministic tar of `files` (sorted; zero times and owners)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for rel in sorted(files):
+            data = (history.workdir / rel).read_bytes()
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            info.mode = 0o644
+            info.mtime = 0
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def rotate(
+    history: HistoryRepo,
+    releaser: Releaser,
+    codec: Codec,
+    now: datetime,
+    threshold: int = ROTATE_AT_BYTES,
+) -> str | None:
+    """Past `threshold` packed bytes, archive the oldest UTC year and restart
+    the branch from an orphan commit holding the rest, pushed with a lease on
+    the tip it read; a lost lease starts again. Returns the archive's tag, or
+    None under the threshold. Refuses the current year."""
+    released: dict[str, str] = {}  # tag -> sha256, released by this call
+    for attempt in range(1, PUSH_ATTEMPTS + 1):
+        history.open(depth=None)
+        size = history.packed_bytes()
+        summary([f"ci-history packed size: {size} bytes (size-pack of a full clone)"])
+        if size <= threshold:
+            return None
+        tip = history.head()
+        if tip is None:
+            return None
+        years: dict[int, list[str]] = {}
+        for rel in history.files():
+            y = record_year(history, rel)
+            if y is not None:
+                years.setdefault(y, []).append(rel)
+        if not years:
+            raise HistoryError(f"ci-history packs {size} bytes and holds no dated record")
+        year = min(years)
+        if year >= now.year:
+            raise HistoryError(
+                f"ci-history packs {size} bytes, over {threshold}, and its oldest records are "
+                f"from {year}, the current year: not rotating"
+            )
+        moved = sorted(years[year])
+        tag = f"{BRANCH}-{year}"
+        asset = f"{tag}.tar.zst"
+        blob = codec.compress(_tar(history, moved))
+        digest = hashlib.sha256(blob).hexdigest()
+        history.archive_dir.mkdir(parents=True, exist_ok=True)
+        (history.archive_dir / asset).write_bytes(blob)
+        if tag in released:
+            if released[tag] != digest:
+                raise HistoryError(f"{tag}: released, and {year}'s records changed since")
+        else:
+            releaser.create(
+                tag, history.archive_dir / asset, tip,
+                f"CI history records of {year} (ROADMAP §10.9). The tag holds the "
+                "ci-history branch as it was before the rotation.",
+            )
+            released[tag] = digest
+        runs: dict[str, list[int]] = {}
+        for rel in moved:
+            parts = rel.split("/")
+            if parts[0] == "runs" and parts[2].removesuffix(".json").isdigit():
+                runs.setdefault(parts[1], []).append(int(parts[2].removesuffix(".json")))
+        index = history.archives() + [{
+            "year": year, "tag": tag, "asset": asset, "sha256": digest,
+            "runs": {k: sorted(v) for k, v in sorted(runs.items())},
+        }]
+        history.git("checkout", "-q", "--orphan", f"{BRANCH}-rotated")
+        for rel in moved:
+            (history.workdir / rel).unlink()
+        (history.workdir / ARCHIVES).write_bytes(encode({"schema": SCHEMA, "archives": index}))
+        history.git("add", "-A")
+        history.git("commit", "-q", "--no-verify", "-m", f"rotate: {year} to {tag}")
+        pushed = history._ok(
+            "push", "-q", f"--force-with-lease=refs/heads/{BRANCH}:{tip}",
+            "origin", f"HEAD:refs/heads/{BRANCH}",
+        )
+        history.git("branch", "-q", "-M", BRANCH)
+        if pushed:
+            summary([f"ci-history: moved {len(moved)} records of {year} to {tag}"])
+            return tag
+        if attempt < PUSH_ATTEMPTS:
+            history.sleep(random.uniform(1.0, 5.0))
+    raise HistoryError(f"rotation lost its lease {PUSH_ATTEMPTS} times")
+
+
 # --- output -------------------------------------------------------------------
 
 
@@ -1075,6 +1349,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--series", metavar="WORKFLOW", choices=sorted(WORKFLOWS),
         help="print a run's push-to-green time, or a job's or step's seconds, per record",
     )
+    mode.add_argument(
+        "--rotate", action="store_true",
+        help=f"print the packed size; past {ROTATE_AT_BYTES} bytes archive the oldest year",
+    )
     ap.add_argument("--job", metavar="NAME", help="--series: the job")
     ap.add_argument("--step", metavar="NAME", help="--series: the job's step")
     ap.add_argument("--branch", default=MAIN, help="--series: the runs' branch ('' for any)")
@@ -1122,7 +1400,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.step is not None and args.job is None:
                 print("ci_history: --step needs --job", file=sys.stderr)
                 return 2
-            history = HistoryRepo(workdir, args.remote or default_remote())
+            history = HistoryRepo(workdir, args.remote or default_remote(),
+                                  releaser=GhReleaser(_repository()), codec=ZstdCli())
             history.open(depth=1)
             events = frozenset(e for e in args.events.split(",") if e)
             print_series(series(history, args.series, args.job, args.step,
@@ -1130,7 +1409,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         repo = _repository()
         api = GhApi()
-        history = HistoryRepo(workdir, args.remote or default_remote())
+        releaser = GhReleaser(repo)
+        history = HistoryRepo(workdir, args.remote or default_remote(),
+                              releaser=releaser, codec=ZstdCli())
+        if args.rotate:
+            tag = rotate(history, releaser, ZstdCli(), datetime.now(UTC))
+            if tag is not None:
+                print(f"ci-history: rotated into {tag}")
+            return 0
         if args.backfill:
             history.open(depth=1)
             written, tombs = backfill(api, repo, history, args.limit)

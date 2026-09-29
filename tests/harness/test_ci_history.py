@@ -7,10 +7,12 @@ configuration, no system configuration, and `HOME` in the temp dir.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
 import subprocess
+import tarfile
 import tempfile
 import textwrap
 import unittest
@@ -193,6 +195,9 @@ class GitIsolated(unittest.TestCase):
             os.environ.pop(k, None)
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
+        quiet = mock.patch("sys.stdout", io.StringIO())
+        quiet.start()
+        self.addCleanup(quiet.stop)
         self.remote = self.tmp / "remote.git"
         self.gitrun("init", "-q", "--bare", str(self.remote), cwd=self.tmp)
         self.sleeps: list[float] = []
@@ -350,7 +355,8 @@ class TestEvent(unittest.TestCase):
     def test_main_notice_for_unlisted_run(self) -> None:
         path = self.event(name="other", path=".github/workflows/other.yml")
         with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": REPO}), \
-                mock.patch.object(ci_history, "GhApi") as gh:
+                mock.patch.object(ci_history, "GhApi") as gh, \
+                mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(ci_history.main(["--event", str(path)]), 0)
             gh.assert_not_called()
 
@@ -771,6 +777,16 @@ class TestBackfill(GitIsolated):
         with self.assertRaises(ApiError):
             self.backfill()
 
+    def test_backfill_skips_archived(self) -> None:
+        self.world.add(run_obj(421, created="2026-03-10T00:00:00Z"))
+        index = {"schema": 1, "archives": [{
+            "year": 2025, "tag": "ci-history-2025", "asset": "ci-history-2025.tar.zst",
+            "sha256": "0" * 64, "runs": {"ci": [421]},
+        }]}
+        self.h.commit_files({"archives.json": json.dumps(index).encode()}, "index")
+        self.assertEqual(self.backfill(), (0, 0))
+        self.assertNotIn("runs/ci/421.json", self.remote_files())
+
     def test_backfill_limit(self) -> None:
         for i in range(5):
             self.world.add(run_obj(430 + i, created=f"2026-03-1{i}T00:00:00Z"))
@@ -849,6 +865,163 @@ class TestSeries(GitIsolated):
         self.assertEqual(out.getvalue().splitlines()[-1], "median 170 s over 3 runs")
         with mock.patch("sys.stderr", io.StringIO()):
             self.assertEqual(ci_history.main(["--series", "ci", "--step", "make"]), 2)
+
+
+class FakeCodec:
+    def compress(self, data: bytes) -> bytes:
+        return b"Z" + data[::-1]
+
+    def decompress(self, data: bytes) -> bytes:
+        assert data[:1] == b"Z"
+        return data[:0:-1]
+
+
+class FakeReleaser:
+    def __init__(self) -> None:
+        self.assets: dict[tuple[str, str], bytes] = {}
+        self.created: list[tuple[str, str, str]] = []
+        self.on_create: list[Any] = []
+
+    def create(self, tag: str, asset: Path, target: str, notes: str) -> None:
+        self.created.append((tag, asset.name, target))
+        self.assets[(tag, asset.name)] = asset.read_bytes()
+        for hook in self.on_create:
+            hook()
+
+    def download(self, tag: str, asset: str, dest: Path) -> Path:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / asset).write_bytes(self.assets[(tag, asset)])
+        return dest / asset
+
+
+class TestArchive(GitIsolated):
+    NOW = datetime(2026, 5, 1, tzinfo=UTC)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.rel = FakeReleaser()
+        self.codec = FakeCodec()
+        seed = self.history("seed")
+        files: dict[str, bytes] = {}
+        for rid, day in ((601, "2024-06-01"), (602, "2024-12-31"), (603, "2025-01-01"),
+                         (604, "2026-02-01")):
+            rec = ci_history.tombstone(run_obj(rid, created=f"{day}T23:59:00Z"), "ci", "t")
+            files[ci_history.record_path("ci", rid)] = ci_history.encode(rec)
+        files["records/2024-07-01-host-" + "e" * 12 + ".json"] = b"{}\n"
+        seed.commit_files(files, "seed")
+        self.tip = self.gitrun("rev-parse", "ci-history", cwd=self.remote)
+
+    def repo(self, name: str) -> HistoryRepo:
+        return HistoryRepo(self.tmp / name, str(self.remote), sleep=self.sleeps.append,
+                           releaser=self.rel, codec=self.codec)
+
+    def rotate(self, h: HistoryRepo, threshold: int = 0) -> str | None:
+        return ci_history.rotate(h, self.rel, self.codec, self.NOW, threshold)
+
+    def test_rotation_moves_oldest_year(self) -> None:
+        h = self.repo("rot")
+        self.assertEqual(self.rotate(h), "ci-history-2024")
+        # the prerelease, tagged at the pre-rotation tip
+        self.assertEqual(self.rel.created,
+                         [("ci-history-2024", "ci-history-2024.tar.zst", self.tip)])
+        # an orphan root holding the rest and the index
+        parents = self.gitrun("rev-list", "--parents", "-n1", "ci-history",
+                              cwd=self.remote).split()
+        self.assertEqual(len(parents), 1)
+        self.assertEqual(self.remote_files(),
+                         {"runs/ci/603.json", "runs/ci/604.json", "archives.json"})
+        index = self.remote_show("archives.json")
+        self.assertEqual(index["schema"], 1)
+        (entry,) = index["archives"]
+        blob = self.rel.assets[("ci-history-2024", "ci-history-2024.tar.zst")]
+        self.assertEqual(entry, {
+            "year": 2024, "tag": "ci-history-2024", "asset": "ci-history-2024.tar.zst",
+            "sha256": hashlib.sha256(blob).hexdigest(), "runs": {"ci": [601, 602]},
+        })
+        with tarfile.open(fileobj=io.BytesIO(self.codec.decompress(blob))) as tar:
+            self.assertEqual(sorted(tar.getnames()), [
+                "records/2024-07-01-host-" + "e" * 12 + ".json",
+                "runs/ci/601.json", "runs/ci/602.json",
+            ])
+        # the next year goes next, and the index grows
+        self.assertEqual(self.rotate(self.repo("rot2")), "ci-history-2025")
+        self.assertEqual([e["year"] for e in self.remote_show("archives.json")["archives"]],
+                         [2024, 2025])
+        # under the threshold nothing moves
+        self.assertIsNone(self.rotate(self.repo("rot3"), threshold=10**12))
+
+    def test_rotation_lease(self) -> None:
+        # a record lands between the rotation's read and its push: the lease
+        # fails, the rotation starts again, and the record survives
+        w = self.history("writer")
+
+        def race() -> None:
+            if not self.rel.on_create:
+                return
+            self.rel.on_create.clear()
+            w.commit_files({"runs/ci/700.json": ci_history.encode(
+                ci_history.tombstone(run_obj(700, created="2026-04-01T00:00:00Z"), "ci", "t"))},
+                "ci run 700")
+
+        self.rel.on_create.append(race)
+        h = self.repo("rot")
+        self.assertEqual(self.rotate(h), "ci-history-2024")
+        self.assertEqual(len(self.rel.created), 1)
+        self.assertEqual(self.remote_files(), {"runs/ci/603.json", "runs/ci/604.json",
+                                               "runs/ci/700.json", "archives.json"})
+        self.assertEqual(len(self.sleeps), 1)
+
+    def test_gh_releaser_argv(self) -> None:
+        with mock.patch.object(subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, b"", b"")
+            ci_history.GhReleaser(REPO).create("ci-history-2024", Path("a.tar.zst"), SHA, "n")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["gh", "release", "create", "ci-history-2024"])
+        for flag in ("--prerelease", "--latest=false"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--target") + 1], SHA)
+        self.assertEqual(argv[argv.index("--repo") + 1], REPO)
+
+    def test_rotation_refuses_current_year(self) -> None:
+        with self.assertRaises(HistoryError) as cm:
+            ci_history.rotate(self.repo("rot"), self.rel, self.codec,
+                              datetime(2024, 8, 1, tzinfo=UTC), 0)
+        self.assertIn("current year", str(cm.exception))
+        self.assertIn("bytes", str(cm.exception))
+        self.assertEqual(self.rel.created, [])
+        self.assertEqual(self.gitrun("rev-parse", "ci-history", cwd=self.remote), self.tip)
+
+    def test_reader_reads_branch_and_archive(self) -> None:
+        self.rotate(self.repo("rot"))
+        r = self.repo("reader")
+        r.open()
+        self.assertEqual(sorted(x["run_id"] for x in r.records("ci")), [601, 602, 603, 604])
+        self.assertEqual(sorted(x["run_id"] for x in r.records()), [601, 602, 603, 604])
+        self.assertTrue((self.tmp / "reader/archives/ci-history-2024.tar.zst").is_file())
+        self.assertTrue(r.has("ci", 601))
+        self.assertTrue(r.has("ci", 604))
+        self.assertFalse(r.has("ci", 605))
+        self.assertFalse(r.has("release", 601))
+        # the downloaded archive is not committed by a later write
+        r.commit_files({"runs/ci/800.json": b"{}\n"}, "ci run 800")
+        self.assertNotIn("archives/ci-history-2024.tar.zst", self.remote_files())
+        # a writer that read the pre-rotation tip does not re-add archived files
+        self.assertNotIn("runs/ci/601.json", self.remote_files())
+
+    def test_archive_sha_mismatch_fails(self) -> None:
+        self.rotate(self.repo("rot"))
+        key = ("ci-history-2024", "ci-history-2024.tar.zst")
+        self.rel.assets[key] = self.rel.assets[key] + b"tampered"
+        r = self.repo("reader")
+        r.open()
+        with self.assertRaises(HistoryError) as cm:
+            r.records("ci")
+        self.assertIn("SHA-256", str(cm.exception))
+
+    def test_packed_bytes(self) -> None:
+        h = self.repo("full")
+        h.open(depth=None)
+        self.assertGreater(h.packed_bytes(), 0)
 
 
 if __name__ == "__main__":
