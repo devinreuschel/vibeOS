@@ -8,7 +8,7 @@ use core::ops::Range;
 use limine::memmap::{Entry, MEMMAP_USABLE};
 use limine::request::{
     ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, FramebufferResponse,
-    HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest,
+    HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
 };
 
 use crate::cell::BootCell;
@@ -72,6 +72,13 @@ static MODULES: ModulesRequest = ModulesRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static CMDLINE_REQ: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
+// 256 KiB for the steps before `thread_init::init_bootstrap` moves boot
+// onto its guarded KVA stack (MEMORY.md §4.5); Limine guarantees only
+// 64 KiB without it.
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static STACK_SIZE: StackSizeRequest = StackSizeRequest::new(256 * 1024);
 
 /// The fw_cfg file whose text follows Limine's command line.
 pub const FW_CFG_CMDLINE: &str = "opt/vibeos/cmdline";

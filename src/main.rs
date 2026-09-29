@@ -13,7 +13,9 @@
 //! is VFS root, then `/dev` `/proc` `/tmp` `/sys` (no marker). `/sbin/init`
 //! last; a `kernel_shell` build spawns the kernel shell thread instead.
 //! The `kernel_tests` build runs the in-guest registry after that and
-//! exits through isa-debug-exit.
+//! exits through isa-debug-exit. Boot runs on Limine's stack up to the BSP
+//! per_cpu step, where `thread_init::init_bootstrap` moves it onto the
+//! bootstrap thread's guarded 64 KiB KVA stack for the rest ([`boot_rest`]).
 
 #![no_std]
 #![no_main]
@@ -160,17 +162,17 @@ pub extern "C" fn _start() -> ! {
     }
 
     #[cfg(not(feature = "panic_test"))]
-    {
-        normal_boot_tail();
-        x86::halt();
-    }
+    normal_boot_tail();
 }
 
-/// The non-panic-test tail of `_start`. Kept as a fn so a `#[cfg]` on
-/// the call site silences `unreachable_code` in panic-test builds
-/// without duplicating markers.
+/// The non-panic-test tail of `_start`, up to `per_cpu: bsp ready`'s first
+/// step. Kept as a fn so a `#[cfg]` on the call site silences
+/// `unreachable_code` in panic-test builds without duplicating markers. It
+/// runs on Limine's stack (256 KiB, the request in `boot`) and ends in
+/// `thread_init::init_bootstrap`, which moves boot onto the bootstrap
+/// thread's guarded KVA stack and continues in [`boot_rest`].
 #[cfg(not(feature = "panic_test"))]
-fn normal_boot_tail() {
+fn normal_boot_tail() -> ! {
     // ---- Phase 1 slice A: physical memory manager. ----
     // Capture Limine once. Nothing else reads the request statics.
     let info = boot::capture();
@@ -276,8 +278,16 @@ fn normal_boot_tail() {
     // below: the GDT is loaded and the PIC masks every line, as `per_cpu_init::init_bsp` requires; established here.
     unsafe { per_cpu_init::init_bsp() };
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
-    // below: `GS_BASE` is the BSP's `PerCpu` (`per_cpu_init::init_bsp` above), first call, as `thread_init::init_bootstrap` requires; established here.
-    unsafe { thread_init::init_bootstrap() };
+    // in `boot_rest`: `GS_BASE` is the BSP's `PerCpu` (`per_cpu_init::init_bsp` above) and KVA is up, first call, as `thread_init::init_bootstrap` requires; established here.
+    unsafe { thread_init::init_bootstrap(boot_rest) }
+}
+
+/// The rest of boot, from `per_cpu: bsp ready` on, on the bootstrap
+/// thread's guarded 64 KiB KVA stack (MEMORY.md §4.5). Entered once, by
+/// `thread_init::init_bootstrap`'s switch; it never returns, since nothing
+/// is left on the stack below it.
+#[cfg(not(feature = "panic_test"))]
+extern "C" fn boot_rest() -> ! {
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the GDT is loaded and `GS_BASE` is the BSP's `PerCpu`, as `syscall_init::init_bsp` requires; established here.
     unsafe { syscall_init::init_bsp() };

@@ -103,6 +103,7 @@ first module), and derive the rest themselves.
 | RSDP | Physical pointer to the ACPI RSDP. Gates all of ACPI, APIC, HPET, SMP. |
 | Modules | The files `limine.conf`'s `module_path:` keys load, as HHDM addresses and lengths: the x86_64 initrd, `/boot/initrd.fat`. `capture` keeps each one's physical range, never a slice over it, and never calls `path()` or `cmdline()`, which unwrap. Optional: with none the root is a ramfs. |
 | Executable command line | The `limine.conf` entry's `cmdline:`, read as raw bytes up to the NUL (at most 2048), never through the crate's `cmdline()`, which unwraps non-UTF-8. Optional: absent means empty. |
+| Stack size | 256 KiB, for the steps before `thread_init::init_bootstrap` moves boot onto its guarded KVA stack ([§4.5](MEMORY.md#45-kernel-virtual-address-allocator)); without the request Limine guarantees 64 KiB. |
 | SMP (optional) | Limine can bring up APs for us. We do it ourselves; see [section 7](SMP.md#7-smp) for why. |
 
 Firmware reclaimable regions stay out of the free lists. Reclaiming them is a few megabytes for a
@@ -167,7 +168,7 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 8 | MMIO PTE attribute patch | `paging: mmio uc` | LAPIC/IOAPIC/HPET pages must be uncacheable before first touch. |
 | 9 | Kernel heap | `heap ok` | `alloc` becomes legal. Until `irq: enabled` (step 15) boot may use its infallible API; from then on every allocation is fallible ([§4.4](MEMORY.md#44-kernel-heap)). |
 | 10 | Kernel VA allocator | `kva: ready` | Guarded stacks need it, so threads need it. |
-| 11 | Per-CPU area for the BSP, bootstrap TCB, syscall MSRs | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. Then `thread_init::init_bootstrap` makes `_start`'s context the bootstrap thread, and `syscall_init::init_bsp` programs STAR, LSTAR, FMASK (§7.2), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0. `syscall_init::init_bsp` first runs `arch::cpu::init_control_regs`, which writes CR0 and CR4 whole (§11.4). |
+| 11 | Per-CPU area for the BSP, bootstrap TCB, syscall MSRs | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. Then `thread_init::init_bootstrap` makes the bootstrap thread, with a guarded 64 KiB KVA stack in its `Tcb.stack` (§4.5), and switches boot onto that stack; `main.rs`'s `boot_rest` continues there, and `syscall_init::init_bsp` programs STAR, LSTAR, FMASK (§7.2), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0. `syscall_init::init_bsp` first runs `arch::cpu::init_control_regs`, which writes CR0 and CR4 whole (§11.4). |
 | 12 | ACPI tables | `acpi: xsdt N tables` | MADT drives APIC and SMP, HPET drives calibration. |
 | 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
 | 13b | BSP LAPIC, I/O APIC, LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calib. Prove a tick (TSC-deadline → periodic → PIT), then mask PIC + PIT GSI if LAPIC owns it. |
@@ -270,8 +271,10 @@ boots the release profile, and releases ship the dev profile (ROADMAP §10.2, F1
 
 `opt-level = 1` for the dev profile. At `opt-level = 0` the page table setup function's stack frame is
 large enough to overflow the boot stack Limine provides, and it faults on entry before printing
-anything. If a boot function needs a big frame, box it or move it to a thread with a real stack; do
-not rely on the optimizer. Planned (ROADMAP §10.2): a `make check` script bounds each function's
+anything. The kernel asks Limine for a 256 KiB stack for the steps before `per_cpu: bsp ready`, and
+from that step on boot runs on a real, guarded stack: the bootstrap thread's 64 KiB KVA stack
+(§4.5), where an overflow faults on the guard page. If a boot function needs a big frame, box it or
+run it after that step; do not rely on the optimizer. Planned (ROADMAP §10.2): a `make check` script bounds each function's
 frame at a value recorded here. The bound is a screen for one oversized frame; §4.5's measured
 budget is what bounds a whole path.
 

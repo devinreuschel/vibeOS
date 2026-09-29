@@ -102,9 +102,8 @@ Buddy free list nodes live inside free pages, and a kernel stack overflow wrote 
 every kernel stack gets an unmapped guard below it, and stack overflow is a page fault, reported
 from a stack known to be good, rather than silent corruption: x86_64's `#DF` runs on IST 1 (§5.1),
 and aarch64's vector entries test the stack bit of §4.5's layout and move to a per-CPU overflow
-stack (§11.5 rule 6; ROADMAP §11.3). The bootstrap thread breaks the rule (`stack: None`): `_start`
-and all of boot run on Limine's stack (at least 64 KiB, no guard page, in bootloader-reclaimable
-memory). The kernel sends no stack size request (ROADMAP §10.6, F072).
+stack (§11.5 rule 6; ROADMAP §11.3). The bootstrap thread keeps it too: `thread_init::init_bootstrap`
+moves boot off Limine's stack onto a guarded 64 KiB KVA stack once KVA is up (§4.5).
 
 **A PTE edit appears to have no effect.**
 No `invlpg` after the edit. Rule: `invlpg` after any single-PTE modification, including MMIO attribute

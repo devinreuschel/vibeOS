@@ -678,7 +678,12 @@ is the second.
   (`ktest::free_frames`) count cached stacks as free until ROADMAP §12.1's categories. A CPU going
   offline (ROADMAP §19.6) frees its cache.
 
-Default kernel stack is 4 pages (16 KiB) plus its 16 KiB guard. Budget: the deepest use observed on
+Default kernel stack is 4 pages (16 KiB) plus its 16 KiB guard. Two threads get 16 pages (64 KiB):
+the bootstrap thread (`thread_init::BOOT_STACK_PAGES`), since direct calls alone reach about 32 KB
+from `_start`, and the in-guest registry thread (ROADMAP §10.2). `thread_init::init_bootstrap`
+allocates the bootstrap stack once KVA is up and switches boot onto it, so from `per_cpu: bsp ready`
+on boot runs on a guarded stack its `Tcb.stack` records; before that it runs on Limine's stack,
+which the kernel's stack size request makes 256 KiB. Budget: the deepest use observed on
 a kernel stack, interrupts that landed on it included, stays at or below the stack's size minus
 4 KiB, which is 12 KiB of a 16 KiB thread stack and 60 KiB of a 64 KiB one. The 4 KiB is the margin
 for a hard-IRQ entry frame and top half (§2.2) that no run happened to land at the deepest point.

@@ -334,9 +334,10 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](SM
   8-entry `Excludes` list, admits a range past the eighth with a `pmm: excludes overflow` line, and
   excludes the fixed page `0x8000` (ROADMAP §10.6).
 - Buddy free list nodes live inside the free pages themselves. A stray write into freed memory
-  corrupts the allocator, so guard pages on stacks are not optional. One stack has none: Limine's
-  boot stack (at least 64 KiB, no guard page, in bootloader-reclaimable memory), which all of boot
-  runs on, so an overflow there corrupts memory silently (ROADMAP §10.6, F072).
+  corrupts the allocator, so guard pages on stacks are not optional: every kernel stack, the
+  bootstrap thread's included, is a guarded KVA stack. Boot leaves Limine's stack at
+  `thread_init::init_bootstrap`, once KVA is up, for the bootstrap thread's guarded 64 KiB stack
+  ([§4.5](MEMORY.md#45-kernel-virtual-address-allocator)).
 - A PTE change that removes or narrows a translation takes effect only when every CPU that could hold
   the old translation has invalidated it and acknowledged. Such changes are unmapping, making a PTE
   not-present, read-only, or NX, and clearing its dirty bit. The rule covers kernel and user
@@ -689,7 +690,7 @@ that review cites means the review's text.
 | I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes (ROADMAP §10.11, F043) |
 | I24 | vibefs never overwrites a live block before the newer superblock is durable, and from v2 reuses a block a commit freed only after the next commit's superblock is durable, so the older slot's tree stays whole; a v2 NOCOW file's data blocks are the one exception, overwritten in place ([VIBEFS.md](VIBEFS.md) §15) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on v1's on-disk refcounts, which its mount does not check (F061); v2 keeps no per-block count and checks its pointers and allocation map as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `arch::x86_64::switch::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §11.6, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069) |
-| I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
+| I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack`; `thread_init::init_bootstrap` moves boot onto one | enforced for the bootstrap thread by the in-guest `boot_stack_guarded`; documented otherwise | Yes: boot leaves Limine's stack at `init_bootstrap`, and every other kernel stack comes from `alloc_guarded_stack` (ROADMAP §10.6, F072) |
 | I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic`; `indexing_slicing` and `arithmetic_side_effects` denied in the byte parsers `scripts/check_core_stable.py` lists | enforced by clippy; vibefs v1 excepted | Partly: vibefs v1 and its truncate-grow still panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::raw`, `console_init::write`, `tests/harness/frame.py` | enforced (the `/bin/tests` forged-line case, `test_frame.py`) | Yes |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch::arm` (`ARMED`, the arming CPU's token) | enforced by the in-guest `catch_ignores_other_cpu` and `catch_ignores_user_frame` | Yes: `arch::catch` and the dispatcher's intercept compile only with `kernel_tests`, so production has no catch hook; `intercept`, `on_panic` and `on_alloc_error` act only on the CPU whose token `ARMED` holds, `intercept` only on a CPL-0 frame, and each CPU records its catch in its own `LAST` slot. A window must not span a CPU migration, which nothing does while no preempted thread changes CPU (I36) |
