@@ -12,6 +12,7 @@ use crate::atomic::Ordering;
 use crate::atomic::statics::{AtomicU8, AtomicU64};
 
 pub mod line;
+pub mod trace;
 
 /// Compile-time ceiling. Records above this are not formatted or stored.
 #[cfg(debug_assertions)]
