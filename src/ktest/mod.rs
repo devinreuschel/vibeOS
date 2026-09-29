@@ -41,7 +41,7 @@ use crate::vibefs_init;
 use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::x86;
-use crate::{acpi, arch, boot, irq, log, mm, proc, sched, smp, sync, time};
+use crate::{acpi, arch, boot, console, irq, log, mm, proc, sched, smp, sync, time};
 pub(crate) mod user;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -170,7 +170,6 @@ mod p10_s09;
 mod p10_s11;
 mod p10_s12;
 mod p10_s13;
-mod p10_s19;
 
 /// Rows run in this order. A new test goes in its subsystem's ktest.rs, and its row goes after the
 /// last row whose path starts with that subsystem, or at the end if it has none (ROADMAP §10.2's T1
@@ -293,14 +292,14 @@ pub(crate) const TESTS: &[Test] = &[
         "log_dmesg_no_recapture",
         log::ktest::test_log_dmesg_no_recapture,
     ),
-    test("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
-    test("fb_pitch", test_fb_pitch),
-    test("fb_cr_home", test_fb_cr_home),
-    test("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
-    test("kbd_8042_clock", test_kbd_8042_clock),
-    test("kbd_ps2_irq", test_kbd_ps2_irq),
-    test("console_mux", test_console_mux),
-    test("kbd_ring_drain", test_kbd_ring_drain),
+    test("fb_bgrx_roundtrip", console::ktest::test_fb_bgrx_roundtrip),
+    test("fb_pitch", console::ktest::test_fb_pitch),
+    test("fb_cr_home", console::ktest::test_fb_cr_home),
+    test("kbd_gsi_unmasked", console::ktest::test_kbd_gsi_unmasked),
+    test("kbd_8042_clock", console::ktest::test_kbd_8042_clock),
+    test("kbd_ps2_irq", console::ktest::test_kbd_ps2_irq),
+    test("console_mux", console::ktest::test_console_mux),
+    test("kbd_ring_drain", console::ktest::test_kbd_ring_drain),
     test("shell_registry", test_shell_registry),
     test("shell_dispatch", test_shell_dispatch),
     test("shell_dmesg_level", test_shell_dmesg_level),
@@ -463,12 +462,12 @@ pub(crate) const TESTS: &[Test] = &[
     test("kill_line_whole", proc::ktest::test_kill_line_whole).deadline(30_000),
     test(
         "console_write_newlines",
-        p10_s19::test_console_write_newlines,
+        console::ktest::test_console_write_newlines,
     )
     .deadline(60_000),
     test(
         "lifetime_console_write_acks_shootdown",
-        p10_s19::test_lifetime_console_write_acks_shootdown,
+        console::ktest::test_lifetime_console_write_acks_shootdown,
     )
     .deadline(60_000),
     test(
@@ -874,177 +873,6 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
         core::hint::spin_loop();
     }
     true
-}
-
-fn test_fb_bgrx_roundtrip() -> Outcome {
-    if !crate::fb_init::ready() {
-        return Outcome::Fail("no framebuffer");
-    }
-    let color = vibeos::fb::pack_bgrx(0x11, 0x22, 0x33);
-    if !crate::fb_init::put_pixel(0, 0, color) {
-        return Outcome::Fail("put origin");
-    }
-    match crate::fb_init::get_pixel(0, 0) {
-        Some(got) if got == color => Outcome::Ok,
-        Some(_) => Outcome::Fail("pixel mismatch"),
-        None => Outcome::Fail("get origin"),
-    }
-}
-
-fn test_fb_pitch() -> Outcome {
-    let Some(pitch) = crate::fb_init::pitch() else {
-        return Outcome::Fail("no pitch");
-    };
-    let Some(width) = crate::fb_init::width() else {
-        return Outcome::Fail("no width");
-    };
-    // Must not assume pitch == width*4. QEMU often equals; still use pitch.
-    if pitch < (width as u64) * 4 {
-        return Outcome::Fail("pitch smaller than width*4");
-    }
-    let color = vibeos::fb::pack_bgrx(0x44, 0x55, 0x66);
-    if !crate::fb_init::put_pixel(0, 1, color) {
-        return Outcome::Fail("put row1");
-    }
-    match crate::fb_init::get_pixel(0, 1) {
-        Some(got) if got == color => Outcome::Ok,
-        Some(_) => Outcome::Fail("row1 mismatch"),
-        None => Outcome::Fail("get row1"),
-    }
-}
-
-fn test_fb_cr_home() -> Outcome {
-    if !crate::fb_init::ready() {
-        return Outcome::Fail("no framebuffer");
-    }
-    crate::fb_init::write(b"\n");
-    let Some((col, row)) = crate::fb_init::cursor() else {
-        return Outcome::Fail("no cursor");
-    };
-    if col != 0 {
-        return Outcome::Fail("newline not col0");
-    }
-    crate::fb_init::write(b"X");
-    let mut hit: Option<(u32, u32)> = None;
-    let mut gy = 0u8;
-    while gy < vibeos::font::FONT_H as u8 && hit.is_none() {
-        let mut gx = 0u8;
-        while gx < vibeos::font::FONT_W as u8 {
-            if vibeos::font::glyph_pixel(b'X', gx, gy) {
-                hit = Some((gx as u32, gy as u32));
-                break;
-            }
-            gx += 1;
-        }
-        gy += 1;
-    }
-    let Some((gx, gy)) = hit else {
-        return Outcome::Fail("X glyph empty");
-    };
-    let (ox, oy) = vibeos::fb::glyph_origin(0, row);
-    let Some(lit) = crate::fb_init::get_pixel(ox + gx, oy + gy) else {
-        return Outcome::Fail("get lit");
-    };
-    crate::fb_init::write(b"\r ");
-    match crate::fb_init::get_pixel(ox + gx, oy + gy) {
-        Some(after) if after != lit => Outcome::Ok,
-        Some(_) => Outcome::Fail("CR did not home"),
-        None => Outcome::Fail("get after"),
-    }
-}
-
-fn test_kbd_gsi_unmasked() -> Outcome {
-    if crate::kbd_init::pic_fallback() {
-        if crate::apic_init::owns_tick() {
-            return Outcome::Fail("pic fallback after pic masked");
-        }
-        return Outcome::Skip("pic fallback");
-    }
-    let Some(gsi) = crate::kbd_init::gsi() else {
-        return Outcome::Fail("no keyboard gsi");
-    };
-    match crate::apic_init::gsi_masked(gsi) {
-        Some(false) => Outcome::Ok,
-        Some(true) => Outcome::Fail("keyboard gsi still masked"),
-        None => Outcome::Fail("gsi not on ioapic"),
-    }
-}
-
-fn test_kbd_8042_clock() -> Outcome {
-    if !crate::kbd_init::live() {
-        return Outcome::Fail("kbd not live");
-    }
-    let Some(cfg) = crate::kbd_init::read_cfg() else {
-        return Outcome::Fail("cfg read failed");
-    };
-    if !vibeos::kbd::cfg_clock1_on(cfg) {
-        return Outcome::Fail("clock1 disabled");
-    }
-    if !vibeos::kbd::cfg_int1_on(cfg) {
-        return Outcome::Fail("int1 off");
-    }
-    Outcome::Ok
-}
-
-/// 0xD2 → IRQ1 → decoder → PS/2 ring. Serial mux cannot satisfy this.
-/// Device clock is `kbd_8042_clock` / sendkey.
-fn test_kbd_ps2_irq() -> Outcome {
-    if !crate::kbd_init::live() {
-        return Outcome::Fail("kbd not live");
-    }
-    let mut n = 64u32;
-    while n > 0 && crate::console_init::read().is_some() {
-        n -= 1;
-    }
-    if !crate::kbd_init::inject_scancode(0x1E) {
-        return Outcome::Fail("0xD2 inject");
-    }
-    let t0 = crate::time_init::now_us();
-    loop {
-        if let Some(vibeos::kbd::DecodedKey::Char(b'a')) = crate::kbd_init::pop() {
-            return Outcome::Ok;
-        }
-        if crate::time_init::now_us().saturating_sub(t0) > 50_000 {
-            return Outcome::Fail("no irq key");
-        }
-        core::hint::spin_loop();
-    }
-}
-
-fn test_console_mux() -> Outcome {
-    use vibeos::console::BackendId;
-    if !crate::console_init::live() {
-        return Outcome::Fail("mux not live");
-    }
-    if !crate::console_init::enabled(BackendId::Serial) {
-        return Outcome::Fail("serial off");
-    }
-    if crate::fb_init::ready() && !crate::console_init::enabled(BackendId::Framebuffer) {
-        return Outcome::Fail("fb off");
-    }
-    crate::console_init::write(b"");
-    crate::console_init::set_enabled(BackendId::Framebuffer, false);
-    if crate::console_init::enabled(BackendId::Framebuffer) {
-        crate::console_init::set_enabled(BackendId::Framebuffer, true);
-        return Outcome::Fail("disable failed");
-    }
-    crate::console_init::set_enabled(BackendId::Framebuffer, true);
-    if crate::fb_init::ready() && !crate::console_init::enabled(BackendId::Framebuffer) {
-        return Outcome::Fail("re-enable failed");
-    }
-    Outcome::Ok
-}
-
-fn test_kbd_ring_drain() -> Outcome {
-    if !crate::kbd_init::live() {
-        return Outcome::Fail("kbd not live");
-    }
-    crate::kbd_init::push_for_test(vibeos::kbd::DecodedKey::Char(b'q'));
-    match crate::console_init::read() {
-        Some(vibeos::kbd::DecodedKey::Char(b'q')) => Outcome::Ok,
-        Some(_) => Outcome::Fail("wrong key"),
-        None => Outcome::Fail("ring empty"),
-    }
 }
 
 fn test_shell_registry() -> Outcome {

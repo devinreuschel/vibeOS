@@ -1,18 +1,188 @@
-//! In-guest tests of P10-S19, Preemptible syscall bodies, lossless stop/continue, bounded console writes (DESIGN §8.2).
+//! In-guest tests for console (kernel_tests only). Rows: the list in crate::ktest.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::console::BackendId;
 use vibeos::fb::PIECE_BYTES;
 
-use super::user::{self, Image, Layout, user_code};
-use super::{Outcome, cpu_remote, free_frames_owned};
-use super::{sleep_until_s19, spin_until};
 use crate::console_init;
 use crate::fb_init::{self, testing as fb_testing};
+use crate::ktest::user::{self, Image, Layout, user_code};
+use crate::ktest::{Outcome, cpu_remote, free_frames_owned, sleep_until_s19, spin_until};
 use crate::kva_init;
 use crate::proc_init::testing as proc_testing;
 use crate::x86;
+
+pub(crate) fn test_fb_bgrx_roundtrip() -> Outcome {
+    if !crate::fb_init::ready() {
+        return Outcome::Fail("no framebuffer");
+    }
+    let color = vibeos::fb::pack_bgrx(0x11, 0x22, 0x33);
+    if !crate::fb_init::put_pixel(0, 0, color) {
+        return Outcome::Fail("put origin");
+    }
+    match crate::fb_init::get_pixel(0, 0) {
+        Some(got) if got == color => Outcome::Ok,
+        Some(_) => Outcome::Fail("pixel mismatch"),
+        None => Outcome::Fail("get origin"),
+    }
+}
+
+pub(crate) fn test_fb_pitch() -> Outcome {
+    let Some(pitch) = crate::fb_init::pitch() else {
+        return Outcome::Fail("no pitch");
+    };
+    let Some(width) = crate::fb_init::width() else {
+        return Outcome::Fail("no width");
+    };
+    // Must not assume pitch == width*4. QEMU often equals; still use pitch.
+    if pitch < (width as u64) * 4 {
+        return Outcome::Fail("pitch smaller than width*4");
+    }
+    let color = vibeos::fb::pack_bgrx(0x44, 0x55, 0x66);
+    if !crate::fb_init::put_pixel(0, 1, color) {
+        return Outcome::Fail("put row1");
+    }
+    match crate::fb_init::get_pixel(0, 1) {
+        Some(got) if got == color => Outcome::Ok,
+        Some(_) => Outcome::Fail("row1 mismatch"),
+        None => Outcome::Fail("get row1"),
+    }
+}
+
+pub(crate) fn test_fb_cr_home() -> Outcome {
+    if !crate::fb_init::ready() {
+        return Outcome::Fail("no framebuffer");
+    }
+    crate::fb_init::write(b"\n");
+    let Some((col, row)) = crate::fb_init::cursor() else {
+        return Outcome::Fail("no cursor");
+    };
+    if col != 0 {
+        return Outcome::Fail("newline not col0");
+    }
+    crate::fb_init::write(b"X");
+    let mut hit: Option<(u32, u32)> = None;
+    let mut gy = 0u8;
+    while gy < vibeos::font::FONT_H as u8 && hit.is_none() {
+        let mut gx = 0u8;
+        while gx < vibeos::font::FONT_W as u8 {
+            if vibeos::font::glyph_pixel(b'X', gx, gy) {
+                hit = Some((gx as u32, gy as u32));
+                break;
+            }
+            gx += 1;
+        }
+        gy += 1;
+    }
+    let Some((gx, gy)) = hit else {
+        return Outcome::Fail("X glyph empty");
+    };
+    let (ox, oy) = vibeos::fb::glyph_origin(0, row);
+    let Some(lit) = crate::fb_init::get_pixel(ox + gx, oy + gy) else {
+        return Outcome::Fail("get lit");
+    };
+    crate::fb_init::write(b"\r ");
+    match crate::fb_init::get_pixel(ox + gx, oy + gy) {
+        Some(after) if after != lit => Outcome::Ok,
+        Some(_) => Outcome::Fail("CR did not home"),
+        None => Outcome::Fail("get after"),
+    }
+}
+
+pub(crate) fn test_kbd_gsi_unmasked() -> Outcome {
+    if crate::kbd_init::pic_fallback() {
+        if crate::apic_init::owns_tick() {
+            return Outcome::Fail("pic fallback after pic masked");
+        }
+        return Outcome::Skip("pic fallback");
+    }
+    let Some(gsi) = crate::kbd_init::gsi() else {
+        return Outcome::Fail("no keyboard gsi");
+    };
+    match crate::apic_init::gsi_masked(gsi) {
+        Some(false) => Outcome::Ok,
+        Some(true) => Outcome::Fail("keyboard gsi still masked"),
+        None => Outcome::Fail("gsi not on ioapic"),
+    }
+}
+
+pub(crate) fn test_kbd_8042_clock() -> Outcome {
+    if !crate::kbd_init::live() {
+        return Outcome::Fail("kbd not live");
+    }
+    let Some(cfg) = crate::kbd_init::read_cfg() else {
+        return Outcome::Fail("cfg read failed");
+    };
+    if !vibeos::kbd::cfg_clock1_on(cfg) {
+        return Outcome::Fail("clock1 disabled");
+    }
+    if !vibeos::kbd::cfg_int1_on(cfg) {
+        return Outcome::Fail("int1 off");
+    }
+    Outcome::Ok
+}
+
+/// 0xD2 → IRQ1 → decoder → PS/2 ring. Serial mux cannot satisfy this.
+/// Device clock is `kbd_8042_clock` / sendkey.
+pub(crate) fn test_kbd_ps2_irq() -> Outcome {
+    if !crate::kbd_init::live() {
+        return Outcome::Fail("kbd not live");
+    }
+    let mut n = 64u32;
+    while n > 0 && crate::console_init::read().is_some() {
+        n -= 1;
+    }
+    if !crate::kbd_init::inject_scancode(0x1E) {
+        return Outcome::Fail("0xD2 inject");
+    }
+    let t0 = crate::time_init::now_us();
+    loop {
+        if let Some(vibeos::kbd::DecodedKey::Char(b'a')) = crate::kbd_init::pop() {
+            return Outcome::Ok;
+        }
+        if crate::time_init::now_us().saturating_sub(t0) > 50_000 {
+            return Outcome::Fail("no irq key");
+        }
+        core::hint::spin_loop();
+    }
+}
+
+pub(crate) fn test_console_mux() -> Outcome {
+    use vibeos::console::BackendId;
+    if !crate::console_init::live() {
+        return Outcome::Fail("mux not live");
+    }
+    if !crate::console_init::enabled(BackendId::Serial) {
+        return Outcome::Fail("serial off");
+    }
+    if crate::fb_init::ready() && !crate::console_init::enabled(BackendId::Framebuffer) {
+        return Outcome::Fail("fb off");
+    }
+    crate::console_init::write(b"");
+    crate::console_init::set_enabled(BackendId::Framebuffer, false);
+    if crate::console_init::enabled(BackendId::Framebuffer) {
+        crate::console_init::set_enabled(BackendId::Framebuffer, true);
+        return Outcome::Fail("disable failed");
+    }
+    crate::console_init::set_enabled(BackendId::Framebuffer, true);
+    if crate::fb_init::ready() && !crate::console_init::enabled(BackendId::Framebuffer) {
+        return Outcome::Fail("re-enable failed");
+    }
+    Outcome::Ok
+}
+
+pub(crate) fn test_kbd_ring_drain() -> Outcome {
+    if !crate::kbd_init::live() {
+        return Outcome::Fail("kbd not live");
+    }
+    crate::kbd_init::push_for_test(vibeos::kbd::DecodedKey::Char(b'q'));
+    match crate::console_init::read() {
+        Some(vibeos::kbd::DecodedKey::Char(b'q')) => Outcome::Ok,
+        Some(_) => Outcome::Fail("wrong key"),
+        None => Outcome::Fail("ring empty"),
+    }
+}
 
 // Fill the 4096 bytes past the code page with '\n', write(1, them, 4096),
 // then getpid (the done flag); exit 0 when the write returned 4096.
@@ -70,7 +240,9 @@ fn fb_console_on() -> bool {
 }
 
 static NL_PIDS: AtomicU64 = AtomicU64::new(0);
+
 static NL_SPAWNED: AtomicBool = AtomicBool::new(false);
+
 /// 0 while watching, 1 when CPU 0 ticked during the write, 2 when the
 /// write was done first, 3 when no grid hold came.
 static NL_TICK: AtomicU32 = AtomicU32::new(0);
@@ -118,8 +290,8 @@ fn nl_watcher() {
 /// per chunk and per redraw piece: CPU 0 ticks during it, each hold draws
 /// at most 16 KiB, and each chunk scrolls at most once (ROADMAP §10.6,
 /// F044). A write with IF off leaves its redraw to the next write.
-pub(super) fn test_console_write_newlines() -> Outcome {
-    let Some(other) = super::second_cpu() else {
+pub(crate) fn test_console_write_newlines() -> Outcome {
+    let Some(other) = crate::ktest::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
     };
     if !fb_console_on() {
@@ -131,8 +303,8 @@ pub(super) fn test_console_write_newlines() -> Outcome {
     let st = {
         let _serial = SerialOff::new();
         fb_testing::reset();
-        super::spawn_thread_on("s19_nl_watch", nl_watcher, other);
-        super::spawn_thread_on("s19_nl_spawn", nl_spawner, 0);
+        crate::ktest::spawn_thread_on("s19_nl_watch", nl_watcher, other);
+        crate::ktest::spawn_thread_on("s19_nl_spawn", nl_spawner, 0);
         if !sleep_until_s19(|| NL_SPAWNED.load(Ordering::Acquire), 5_000) {
             return Outcome::Fail("spawner did not run");
         }
@@ -235,8 +407,11 @@ const XCR_LAYOUT: Layout = Layout {
 };
 
 static ACK_PID: AtomicU64 = AtomicU64::new(0);
+
 static ACK_SPAWNED: AtomicBool = AtomicBool::new(false);
+
 static ACK_DONE: AtomicBool = AtomicBool::new(false);
+
 /// What the write record held when the unmap returned; `u64::MAX` when
 /// the write took fewer than 2 grid holds in time or `vmap` failed.
 static ACK_AT_UNMAP: AtomicU64 = AtomicU64::new(0);
@@ -254,7 +429,7 @@ fn ack_spawner() {
 /// unmap one frame, and record whether the write had returned by then.
 fn ack_unmapper() {
     let rec = if spin_until(|| fb_testing::grid_holds() >= 2, 10_000_000_000) {
-        match super::alloc_frames_owned(0).map(kva_init::vmap) {
+        match crate::ktest::alloc_frames_owned(0).map(kva_init::vmap) {
             Some(Ok(v)) => {
                 free_frames_owned(kva_init::vunmap(v));
                 proc_testing::console_write_done_ns()
@@ -271,8 +446,8 @@ fn ack_unmapper() {
 /// A 1 MiB console `write` from ring 3 on CPU 0 acknowledges a shootdown
 /// another CPU sends during it: the unmap returns before the write does
 /// (ROADMAP §10.10, F011).
-pub(super) fn test_lifetime_console_write_acks_shootdown() -> Outcome {
-    let Some(other) = super::second_cpu() else {
+pub(crate) fn test_lifetime_console_write_acks_shootdown() -> Outcome {
+    let Some(other) = crate::ktest::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
     };
     if !fb_console_on() {
@@ -285,8 +460,8 @@ pub(super) fn test_lifetime_console_write_acks_shootdown() -> Outcome {
         let _serial = SerialOff::new();
         fb_testing::reset();
         proc_testing::arm_console_write_record();
-        super::spawn_thread_on("s19_ack_unmap", ack_unmapper, other);
-        super::spawn_thread_on("s19_ack_spawn", ack_spawner, 0);
+        crate::ktest::spawn_thread_on("s19_ack_unmap", ack_unmapper, other);
+        crate::ktest::spawn_thread_on("s19_ack_spawn", ack_spawner, 0);
         if !sleep_until_s19(|| ACK_SPAWNED.load(Ordering::Acquire), 5_000) {
             return Outcome::Fail("spawner did not run");
         }
