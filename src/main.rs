@@ -186,6 +186,7 @@ fn normal_boot_tail() {
     crate::marker!(marker::PIC_REMAPPED);
 
     unsafe { arch::idt::init() };
+    #[cfg(feature = "kernel_tests")]
     arch::catch::init();
     crate::marker!(marker::IDT_OK);
 

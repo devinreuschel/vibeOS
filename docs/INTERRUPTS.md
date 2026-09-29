@@ -104,9 +104,10 @@ No body is an `extern "x86-interrupt"` function. Every gate is an interrupt gate
 and gets `SIGTRAP`.
 `#DF`, NMI, `#MC`, and `#DB` run on IST stacks (§5.1).
 
-`catch::intercept` runs in the dispatcher before the body of every vector below `0x20`, in every build; only the in-guest test
-registry (`kernel_tests`) arms it. Planned (ROADMAP §10.2, F146): it compiles only under
-`kernel_tests` and acts only on a CPL-0 frame on the CPU that armed it.
+`catch::intercept`, the in-guest test registry's exception catcher, compiles only under `kernel_tests`
+(`arch::catch` and the dispatcher's intercept hook both), where it runs in the dispatcher before the
+body of every vector below `0x20`; a production build runs every body directly (ROADMAP §10.2,
+F146). Planned (ROADMAP §10.2, F146): it acts only on a CPL-0 frame on the CPU that armed it.
 
 Rule: ring 3 never halts the kernel. Each exception vector has one row below. The Ring 3 column is
 the rule; the last column says what the code does where it differs. The table lives in

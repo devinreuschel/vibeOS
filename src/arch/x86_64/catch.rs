@@ -1,9 +1,8 @@
 //! Scoped transient exception / alloc-error catcher for in-guest tests.
+//! Compiles only with `kernel_tests` (AGENTS.md rule 9).
 //!
 //! Install, run a faulting op, either longjmp out or step RIP past the
 //! instruction, restore. Nested catch is not supported. DESIGN §5.2 / §8.2.
-
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use core::alloc::Layout;
 use core::arch::global_asm;
