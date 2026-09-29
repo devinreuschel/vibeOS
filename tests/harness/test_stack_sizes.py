@@ -146,6 +146,7 @@ def elf(sections: list[tuple[str, int, int, bytes]]) -> bytes:
 
 class TestMain(unittest.TestCase):
     known: dict[str, tuple[int, str]] = {}
+    not_roots: tuple[str, ...] = ()
 
     def run_main(self, blob: bytes | None, listing: str = LISTING,
                  *extra: str) -> tuple[int, str, str]:
@@ -162,6 +163,7 @@ class TestMain(unittest.TestCase):
                 contextlib.redirect_stderr(err),
                 mock.patch.object(css, "BOUND_BYTES", 4096),
                 mock.patch.object(css, "KNOWN_OVER", self.known),
+                mock.patch.object(css, "NOT_ROOTS", self.not_roots),
             ):
                 rc = css.main(["--elf", str(path), "--objdump", str(fake), *extra])
         return rc, out.getvalue(), err.getvalue()
@@ -216,6 +218,18 @@ class TestMain(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("KNOWN_OVER entry 'b' is not over the bound: delete it", err)
         self.known = {}
+
+    def test_not_roots(self) -> None:
+        # d is reached only as an address-taken root; NOT_ROOTS drops it.
+        blob = elf([(".stack_sizes", 0, 0, self.sizes(entry=8, d=9000))])
+        self.not_roots = ("d",)
+        rc, out, _ = self.run_main(blob)
+        self.assertEqual(rc, 0, out)
+        self.not_roots = ("gone",)
+        rc, _, err = self.run_main(blob)
+        self.assertEqual(rc, 1)
+        self.assertIn("no function gone (NOT_ROOTS)", err)
+        self.not_roots = ()
 
     def test_report_lists_no_entry(self) -> None:
         blob = elf([(".stack_sizes", 0, 0, self.sizes(entry=8, a=300))])

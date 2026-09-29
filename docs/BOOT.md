@@ -290,7 +290,9 @@ section and symbol tables with the standard library, and the call graph from `ll
 roots are `vibeos_syscall_entry` and every address-taken function: one whose address a code operand
 names other than as a direct call or jump target, or an aligned 8-byte word of allocated data other
 than the ksyms table, which names every function for backtraces (an address a `linker.ld` symbol
-also names, such as `__text_start`, the first function's, is not taken by being loaded). That covers
+also names, such as `__text_start`, the first function's, is not taken by being loaded; and
+`NOT_ROOTS` names `boot_rest`, the boot's continuation on the bootstrap thread's 64 KiB stack, which
+runs before any syscall or shell command). That covers
 the shell commands through their registry, the table syscalls, the `dyn InodeOps` vtables, and
 thread and IRQ entries, and makes the rule conservative at every indirect call. From the roots it
 follows direct calls and jumps into other functions (tail calls). Precompiled `core`, `alloc` and

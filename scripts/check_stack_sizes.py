@@ -20,7 +20,8 @@ call graph from `llvm-objdump -d` (the `llvm-tools` component):
   target, or as an aligned 8-byte word in allocated data other than the
   ksyms table, which names every function for backtraces. An address a
   `linker.ld` symbol also names (`__text_start` is the first function's) is
-  not taken by being loaded. That covers the
+  not taken by being loaded, and `NOT_ROOTS` names the boot's continuation,
+  which runs before any syscall. That covers the
   shell commands through their registry, the table syscalls, `dyn
   InodeOps` vtables, and thread and IRQ entries.
 - From the roots, direct `call` edges and jumps into another function (tail
@@ -74,6 +75,11 @@ KNOWN_OVER: dict[str, tuple[int, str]] = {
 # Entry points no data or code operand names: the `syscall` instruction's
 # target, set through an MSR.
 SYSCALL_ROOTS: tuple[str, ...] = ("vibeos_syscall_entry",)
+
+# Address-taken functions that are no root: the boot's continuation, which
+# runs once on the bootstrap thread's 64 KiB stack before any syscall or
+# shell command (BOOT.md §3.5). A name the ELF lacks fails.
+NOT_ROOTS: tuple[str, ...] = ("vibeos::boot_rest",)
 
 # The default variant's ELF (C-BUILD-OUTPUTS); `make check` builds it first.
 DEFAULT_ELF = ROOT / "build/kernels/vibeos-default.elf"
@@ -390,6 +396,9 @@ def main(argv: list[str] | None = None) -> int:
     missing = [r for r in SYSCALL_ROOTS if r not in by_name]
     if missing:
         return fail(f"{args.elf}: no root {', '.join(missing)}")
+    gone = [r for r in NOT_ROOTS if r not in by_name]
+    if gone:
+        return fail(f"{args.elf}: no function {', '.join(gone)} (NOT_ROOTS)")
     sizes = {a: s for a, s in sizes_raw.items() if a in dis.names}
     try:
         script = LINKER_SCRIPT.read_text(encoding="utf-8")
@@ -397,7 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, struct.error) as e:
         return fail(f"{e}")
     roots = [by_name[r] for r in SYSCALL_ROOTS]
-    roots += sorted(address_taken(dis.names, dis.code_refs, sections) - bounds)
+    not_roots = bounds | {by_name[n] for n in NOT_ROOTS}
+    roots += sorted(address_taken(dis.names, dis.code_refs, sections) - not_roots)
     parent = reachable(roots, dis.edges)
     bad, stale = known_over(violations(sizes, parent, BOUND_BYTES), dis.names, KNOWN_OVER)
 
