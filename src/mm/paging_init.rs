@@ -18,7 +18,7 @@
 
 use core::fmt::Write;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use vibeos::lock::RANK_PT;
 use vibeos::marker;
@@ -84,8 +84,24 @@ struct BuddyFrames;
 
 unsafe impl FrameAlloc for BuddyFrames {
     fn alloc_frame(&mut self) -> Option<Frames> {
-        pmm_init::with_buddy(|b| b.alloc(0))
+        let f = pmm_init::with_buddy(|b| b.alloc(0))?;
+        TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
+        Some(f)
     }
+}
+
+/// Table pages [`BuddyFrames`] has handed the kernel mapper. A kernel table
+/// page is never freed (`Mapper` frees table pages only in
+/// `free_user_half`), so this only grows.
+static TABLE_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Page-table pages the kernel mapper has taken from the buddy since boot,
+/// the PML4 included. They stay in the kernel tables for good: a mapping
+/// that reaches a 2 MiB span of KVA or heap no earlier mapping reached
+/// takes one, and its unmap leaves it in place.
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn table_pages() -> usize {
+    TABLE_PAGES.load(Ordering::Relaxed)
 }
 
 // ------------------ MMIO window (ioremap) ------------------
