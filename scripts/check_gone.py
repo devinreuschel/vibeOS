@@ -132,6 +132,7 @@ GONE: list[tuple[str, str]] = [
     ("_retry_hang", "the harness retries nothing"),
     ("retryable_ktest_failure", "the harness retries nothing"),
     ("silent_user_syscalls_hang", "the harness retries nothing"),
+    ("check_markers_in_order", "the marker-order unit tests drive"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

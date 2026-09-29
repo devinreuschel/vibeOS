@@ -9,6 +9,7 @@ import os
 import socket
 import time
 import unittest
+from typing import Any
 from unittest import mock
 
 import tests.harness.run_e2e as run_e2e
@@ -28,7 +29,6 @@ from tests.harness.harness import (
     QemuConfig,
     RunResult,
     _monitor_reply,
-    check_markers_in_order,
     check_mce_dump,
     contains_panic,
     drain_panic_tail,
@@ -36,67 +36,19 @@ from tests.harness.harness import (
     mce_monitor_cmd,
     overlay_env,
     qemu_argv,
+    run_qemu_and_check,
+    run_qemu_console_input,
     serial_tail,
 )
+from tests.harness.linesource import FakeLineSource
 
 
-class TestOrderedMarkerCheck(unittest.TestCase):
-    def test_all_present_in_order(self) -> None:
-        lines = [
-            "vibeOS: serial online",
-            "vibeOS: limine: rev 3 ok",
-            "vibeOS: boot: phase1 done",
-        ]
-        markers = [
-            Marker("vibeOS: serial online", "a"),
-            Marker("vibeOS: limine: rev 3 ok", "b"),
-            Marker("vibeOS: boot: phase1 done", "c"),
-        ]
-        result = check_markers_in_order(lines, markers)
-        self.assertEqual(result.matched, ["a", "b", "c"])
-
+class TestMarkerShape(unittest.TestCase):
     def test_serial_tail(self) -> None:
         self.assertEqual(serial_tail([]), " (no serial)")
         self.assertIn("b", serial_tail(["a", "b"], n=1))
         self.assertIn("1/2", serial_tail(["a", "b"], n=1))
         self.assertNotIn("\na\n", serial_tail(["a", "b"], n=1))
-
-    def test_out_of_order_fails(self) -> None:
-        lines = [
-            "vibeOS: boot: phase1 done",  # too early
-            "vibeOS: serial online",
-            "vibeOS: limine: rev 3 ok",
-        ]
-        markers = [
-            Marker("vibeOS: serial online", "a"),
-            Marker("vibeOS: limine: rev 3 ok", "b"),
-            Marker("vibeOS: boot: phase1 done", "c"),
-        ]
-        with self.assertRaises(HarnessError):
-            check_markers_in_order(lines, markers)
-
-    def test_missing_final_marker_fails(self) -> None:
-        lines = ["vibeOS: serial online", "vibeOS: limine: rev 3 ok"]
-        markers = [
-            Marker("vibeOS: serial online", "a"),
-            Marker("vibeOS: limine: rev 3 ok", "b"),
-            Marker("vibeOS: boot: phase1 done", "c"),
-        ]
-        with self.assertRaises(HarnessError) as cm:
-            check_markers_in_order(lines, markers)
-        # The error names the missing marker's `name`, not its substring.
-        self.assertIn("'c'", str(cm.exception))
-
-    def test_panic_signature_fails_fast(self) -> None:
-        lines = [
-            "vibeOS: serial online",
-            "panicked at src/foo.rs:1:1",
-            "vibeOS: boot: phase1 done",
-        ]
-        markers = [Marker("vibeOS: boot: phase1 done", "c")]
-        with self.assertRaises(HarnessError) as cm:
-            check_markers_in_order(lines, markers)
-        self.assertIn("panicked at", str(cm.exception))
 
     def test_and_contains_requires_all_fragments(self) -> None:
         # A line that carries only the suffix must NOT satisfy a marker
@@ -158,7 +110,77 @@ class TestOrderedMarkerCheck(unittest.TestCase):
         self.assertFalse(m.matches("vibeOS: virtio: blk vda"))
         self.assertFalse(m.matches("vibeOS: block: vdap1 128 sectors"))
 
-    def test_and_contains_wrong_shape_fails_ordered_check(self) -> None:
+
+ABC_MARKERS = [
+    Marker("vibeOS: serial online", "a"),
+    Marker("vibeOS: limine: rev 3 ok", "b"),
+    Marker("vibeOS: boot: phase1 done", "c"),
+]
+FAKE_CFG = QemuConfig(iso="fake.iso")
+
+
+def check_fake(
+    lines: list[str],
+    markers: list[Marker],
+    *,
+    end: str = "eof",
+    exit_code: int | None = 0,
+    stderr: str = "",
+    **kw: Any,
+) -> tuple[RunResult, FakeLineSource]:
+    """Run `run_qemu_and_check` over `lines` through a `FakeLineSource`."""
+    src = FakeLineSource.from_lines(lines, end=end, exit_code=exit_code, stderr=stderr)
+    return run_qemu_and_check(FAKE_CFG, markers, line_source=src, **kw), src
+
+
+class TestMarkerOrder(unittest.TestCase):
+    """`run_qemu_and_check` driven through `FakeLineSource` (F141)."""
+
+    def test_all_present_in_order_quits(self) -> None:
+        lines = [
+            "vibeOS: serial online",
+            "vibeOS: limine: rev 3 ok",
+            "vibeOS: boot: phase1 done",
+        ]
+        result, src = check_fake(lines, ABC_MARKERS)
+        self.assertEqual(result.matched, ["a", "b", "c"])
+        self.assertTrue(src.quit_sent)
+        self.assertEqual(result.exit_code, 0)
+
+    def test_out_of_order_fails(self) -> None:
+        lines = [
+            "vibeOS: boot: phase1 done",  # too early
+            "vibeOS: serial online",
+            "vibeOS: limine: rev 3 ok",
+        ]
+        with self.assertRaises(HarnessError) as cm:
+            check_fake(lines, ABC_MARKERS)
+        self.assertIn("'c'", str(cm.exception))
+
+    def test_missing_final_marker_fails(self) -> None:
+        lines = ["vibeOS: serial online", "vibeOS: limine: rev 3 ok"]
+        with self.assertRaises(HarnessError) as cm:
+            check_fake(lines, ABC_MARKERS)
+        # The error names the missing marker's `name`, not its substring.
+        self.assertIn("missing marker 'c'", str(cm.exception))
+
+    def test_panic_signature_fails_fast_and_kills(self) -> None:
+        lines = [
+            "vibeOS: serial online",
+            "panicked at src/foo.rs:1:1",
+            "vibeOS: boot: phase1 done",
+        ]
+        src = FakeLineSource.from_lines(lines)
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_and_check(
+                FAKE_CFG, [Marker("vibeOS: boot: phase1 done", "c")], line_source=src
+            )
+        self.assertIn("panicked at", str(cm.exception))
+        self.assertTrue(src.killed)
+        # Fails at the signature: the line after it is never read.
+        self.assertEqual(src.next_event(), ("line", "vibeOS: boot: phase1 done"))
+
+    def test_and_contains_wrong_shape_fails(self) -> None:
         # The pmm marker must not accept a line that lacks the prefix.
         lines = [
             "vibeOS: serial online",
@@ -175,7 +197,7 @@ class TestOrderedMarkerCheck(unittest.TestCase):
             Marker("vibeOS: boot: phase1 done", "b"),
         ]
         with self.assertRaises(HarnessError) as cm:
-            check_markers_in_order(lines, markers)
+            check_fake(lines, markers)
         self.assertIn("'pmm'", str(cm.exception))
 
     def test_extra_lines_between_markers_are_fine(self) -> None:
@@ -187,12 +209,57 @@ class TestOrderedMarkerCheck(unittest.TestCase):
             "even more",
             "vibeOS: boot: phase1 done",
         ]
-        markers = [
-            Marker("vibeOS: serial online", "a"),
-            Marker("vibeOS: limine: rev 3 ok", "b"),
-            Marker("vibeOS: boot: phase1 done", "c"),
-        ]
-        check_markers_in_order(lines, markers)
+        result, _ = check_fake(lines, ABC_MARKERS)
+        self.assertEqual(result.matched, ["a", "b", "c"])
+
+    def test_timeout_names_missing_marker(self) -> None:
+        src = FakeLineSource.from_lines(["vibeOS: serial online"], end="timeout")
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_and_check(FAKE_CFG, ABC_MARKERS, line_source=src, timeout_s=7.0)
+        msg = str(cm.exception)
+        self.assertIn("timed out after 7.0s", msg)
+        self.assertIn("missing 'b'", msg)
+        self.assertTrue(src.killed)
+
+    def test_fake_skips_path_and_iso_checks(self) -> None:
+        with mock.patch("shutil.which", return_value=None):
+            result, _ = check_fake(["vibeOS: serial online"], ABC_MARKERS[:1])
+        self.assertEqual(result.matched, ["a"])
+
+
+CONSOLE_OK_LINES = [
+    "vibeOS: shell ready",
+    "$ echo serial-ok",
+    "serial-ok",
+    "$ echo ps2-ok",
+    "ps2-ok",
+]
+
+
+class TestConsoleInput(unittest.TestCase):
+    """`run_qemu_console_input` driven through `FakeLineSource`."""
+
+    def test_serial_then_sendkey_then_quit(self) -> None:
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES, end="timeout")
+        result = run_qemu_console_input(FAKE_CFG, line_source=src)
+        self.assertEqual(result.matched, ["shell_ready", "serial_echo", "ps2_echo"])
+        self.assertEqual(src.inputs, [b"echo serial-ok\n"])
+        self.assertEqual(len(src.monitor_cmds), 1)
+        self.assertTrue(src.monitor_cmds[0].startswith("sendkey e-c-h-o-spc-p-s-2"))
+        self.assertTrue(src.quit_sent)
+
+    def test_missing_ps2_echo_fails(self) -> None:
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES[:3])
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        self.assertIn("PS/2 sendkey echo missing", str(cm.exception))
+
+    def test_panic_fails(self) -> None:
+        src = FakeLineSource.from_lines(["vibeOS: shell ready", "vibeOS: panic: x"])
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        self.assertIn("vibeOS: panic:", str(cm.exception))
+        self.assertTrue(src.killed)
 
 
 class TestPanicSignatureScan(unittest.TestCase):

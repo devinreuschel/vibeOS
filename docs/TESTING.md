@@ -299,8 +299,10 @@ versus forty five, on every CI run and every local invocation.
 Python, standard library only. `subprocess` with its own timeout rather than shelling out to GNU
 `timeout`, which does not exist on macOS. The harness helpers get their own unit tests, because a bug
 in the test harness produces either false confidence or a debugging session in the wrong repository.
-Those tests exercise `check_markers_in_order`, which no runner calls; `run_qemu_and_check`, the
-matcher every e2e run uses, has no unit test (ROADMAP §10.2, F141).
+Both runners, `run_qemu_and_check` and `run_qemu_console_input`, read serial from a line source
+(`tests/harness/linesource.py`): a QEMU child in a run, and in unit tests a `FakeLineSource` that
+scripts the lines, the exit status, and QEMU's stderr, so the matcher every e2e run uses is tested
+without QEMU (ROADMAP §10.2, F141).
 
 The `vibefs_crash` build (`vibefs_init::crash_loop`) prints no boot contract past its own lines,
 which `run_vibefs_crash.py` knows:
