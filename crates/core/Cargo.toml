@@ -15,6 +15,15 @@ name = "vibeos"
 default = []
 # Host tools and `cargo test`. Kernel builds leave this off (`no_std`).
 std = []
+# vibefs commit defects a `vibefs_crash` kernel plants on request, so the
+# crash test shows it can fail (docs/VIBEFS.md §12, ROADMAP §10.2).
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+crash_plant = []
+
+[dependencies]
+# Compile-time proof that a typed copy to user memory has no padding or
+# uninitialized bytes (INVARIANTS §2.4, ROADMAP §10.6).
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
 
 [lints]
 workspace = true

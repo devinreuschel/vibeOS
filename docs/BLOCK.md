@@ -288,10 +288,10 @@ virtio-blk has no FUA, so the block layer completes a `Fua` write with a
 `Flush` after it (§10.2); without `F_FLUSH` that `Flush` is the same no-op,
 since every completed write is already durable.
 
-`issue()` publishes `avail.idx` after `dma_wmb`, then `should_kick` loads
-`avail_event` or `used.flags` to decide whether to kick, with no full barrier
-between, so a kick can be lost and the queue stop ([section 4.7](MEMORY.md#47-dma);
-ROADMAP §10.3, F016). `kick` writes the doorbell at the notify formula in
+`issue()` publishes `avail.idx` after `dma_wmb`, then `should_kick` runs
+`dma_mb` before it loads `avail_event` or `used.flags` to decide whether to
+kick, and `get_used` runs `dma_mb` after its `used_event` store, so neither a
+kick nor an interrupt is lost ([section 4.7](MEMORY.md#47-dma); F016). `kick` writes the doorbell at the notify formula in
 [section 9.3](PITFALLS.md#93-interrupts). The doorbell
 value is the queue index; `kick` writes 0 for every queue (ROADMAP §11.5, F047).
 

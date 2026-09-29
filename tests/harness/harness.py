@@ -8,18 +8,22 @@ Standard library only. `subprocess` with its own timeout, not shell `timeout`,
 because macOS coreutils lacks it (ROADMAP §0.6).
 
 One QEMU launcher (`qemu_argv`) and one `VIBEOS_*` reader (`env_config`).
-Drivers live in `run_*.py` and must not parse the environment or build argv.
+Drivers live in `run_*.py` and must not parse the environment or build argv;
+`run_interactive.py` is the one behind `make run`, `make run-panic` and
+`make debug`.
 
 | Variable | Default | Drivers |
 |---|---|---|
-| `VIBEOS_ISO` | per driver | all |
-| `VIBEOS_SMP` | `2` (Makefile `?=`) | all |
-| `VIBEOS_QEMU_CPU` | `max` | all |
-| `VIBEOS_MEM` | `128M` | all |
-| `VIBEOS_BIOS` | unset (SeaBIOS) | all |
-| `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all |
-| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash | all |
-| `VIBEOS_QEMU_EXTRA` | empty | all |
+| `VIBEOS_ISO` | per driver | all, `run_interactive` |
+| `VIBEOS_SMP` | `2` | all, `run_interactive` |
+| `VIBEOS_QEMU_CPU` | `max` | all, `run_interactive` |
+| `VIBEOS_MEM` | `128M` | all, `run_interactive` |
+| `VIBEOS_BIOS` | unset, `seabios`: SeaBIOS; `uefi`: probe, pflash | all, `run_interactive` |
+| `VIBEOS_FW_X86_64` | probed (`FIRMWARE_TABLE`) | all, `run_interactive` (`VIBEOS_BIOS=uefi`) |
+| `VIBEOS_FW_AARCH64` | probed (`FIRMWARE_TABLE`) | none yet (ROADMAP §11.7) |
+| `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all, `run_interactive` |
+| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash, none interactive | all, `run_interactive` |
+| `VIBEOS_QEMU_EXTRA` | empty | all, `run_interactive` |
 | `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all (`results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
@@ -40,6 +44,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv.
 
 from __future__ import annotations
 
+import atexit
 import os
 import random
 import re
@@ -55,11 +60,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import IO
 
+from tests.harness import frame
+from tests.harness.frame import kernel_text as kernel_text
 from tests.harness.linesource import LineSource
 
-# Any of these substrings in a serial line means the run has failed. Matches
-# exception mnemonics rather than English so shell prose does not false-fire
-# (DESIGN §9.7).
+# Any of these substrings in a kernel line (a framed one, DESIGN §2.6) means
+# the run has failed. Matches exception mnemonics rather than English so
+# shell prose does not false-fire (DESIGN §9.7). A user program's line never
+# matches: every driver also fails on `frame.USER_FAILURES` in user text and
+# on `frame.LIMINE_SIGNATURES` before the first framed line.
 PANIC_SIGNATURES: tuple[str, ...] = (
     "panicked at",
     "vibeOS: panic:",
@@ -69,6 +78,8 @@ PANIC_SIGNATURES: tuple[str, ...] = (
     "#DF",
     "double fault",
     "stack overflow",
+    # The `vibefs_crash` build's refusal of a `vibeos.crash_plant=` value.
+    "vibeOS: vibefs: bad crash_plant",
 )
 
 # End of the dump. expect_panic waits for this so backtrace/logrec are in the log.
@@ -92,15 +103,7 @@ def is_dump_banner(line: str) -> bool:
     return text is not None and DUMP_BANNER_RE.match(text) is not None
 
 
-# A kernel line starts with this until DESIGN §2.6's frame lands; then
-# `kernel_text` is the one predicate that changes (to the frame's split).
-KERNEL_LINE_PREFIX = "vibeOS:"
 SERIAL_ONLINE = "vibeOS: serial online"
-
-
-def kernel_text(line: str) -> str | None:
-    """The kernel's text of a serial line, or None when the kernel did not print it."""
-    return line if line.startswith(KERNEL_LINE_PREFIX) else None
 
 
 class HarnessError(Exception):
@@ -119,15 +122,21 @@ class Marker:
 
     `exactly_before=(needle, n)`: exactly `n` lines containing `needle`
     precede this marker, and none follows it.
+
+    `source` is where the line comes from (`frame.KERNEL` or `frame.USER`):
+    a kernel marker matches only a framed line, a user program's only an
+    unframed one (DESIGN §2.6). Empty means `frame.source_of(substring)`.
     """
 
     substring: str
     name: str
     and_contains: tuple[str, ...] = ()
     exactly_before: tuple[str, int] | None = None
+    source: str = ""
 
-    def matches(self, line: str) -> bool:
-        if self.substring not in line:
+    def matches(self, raw: str) -> bool:
+        line = frame.text_for(self.source or frame.source_of(self.substring), raw)
+        if line is None or self.substring not in line:
             return False
         return all(needle in line for needle in self.and_contains)
 
@@ -151,8 +160,37 @@ def serial_tail(lines: list[str], n: int = 40) -> str:
     return f"\n--- serial tail {len(tail)}/{len(lines)} ---\n{body}"
 
 
+def panic_signature(raw: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> str | None:
+    """The first of `sigs` in `raw`'s kernel text, if any."""
+    text = kernel_text(raw)
+    if text is None:
+        return None
+    return next((s for s in sigs if s in text), None)
+
+
 def contains_panic(line: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> bool:
-    return any(s in line for s in sigs)
+    """A kernel line holding one of `sigs`."""
+    return panic_signature(line, sigs) is not None
+
+
+def run_failure(
+    raw: str, stream: frame.Stream, sigs: tuple[str, ...] = PANIC_SIGNATURES
+) -> tuple[str, str] | None:
+    """Why `raw` fails a run, as (reason, the line's text), or None: a panic
+    signature in kernel text, a `frame.USER_FAILURES` entry in user text, or
+    Limine's panic line before the boot's first framed line. Feeds `raw` to
+    `stream`."""
+    limine = stream.limine_panic(raw)
+    _, text = stream.feed(raw)
+    if limine:
+        return "Limine panic before the kernel", text
+    sig = panic_signature(raw, sigs)
+    if sig is not None:
+        return f"panic signature {sig!r}", text
+    fail = frame.user_failure(raw)
+    if fail is not None:
+        return f"user failure {fail!r}", text
+    return None
 
 
 def dump_after_panic(
@@ -171,8 +209,8 @@ def check_dump_needles(
     dump: Iterable[str],
     needles: tuple[str | tuple[str, ...], ...] = (),
 ) -> None:
-    """Each needle must appear. A tuple means all fragments on one line."""
-    lines = list(dump)
+    """Each needle must appear on a kernel line. A tuple means all fragments on one line."""
+    lines = frame.kernel_lines(dump)
     for needle in needles:
         if isinstance(needle, tuple):
             if not any(all(part in line for part in needle) for line in lines):
@@ -462,7 +500,8 @@ def _reap(src: LineSource) -> int | None:
 # QEMU 10 dropped `-no-hpet`. `pc,hpet=off` is the machine property on
 # 8.x (where -no-hpet is only deprecated) and on 10.x.
 HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
-# Keep in sync with Makefile `VIBEOS_* ?=` (`make run`).
+# The only defaults of the QEMU settings: the Makefile sets none, and
+# `make run` reads them through `run_interactive.py` (ROADMAP §10.2).
 DEFAULT_SMP = 2
 DEFAULT_CPU = "max"
 DEFAULT_MEM = "128M"
@@ -479,7 +518,8 @@ class QemuConfig:
     smp: int = DEFAULT_SMP
     cpu: str = DEFAULT_CPU
     mem: str = DEFAULT_MEM
-    bios: str | None = None  # None = QEMU default (SeaBIOS)
+    # UEFI firmware on pflash; None = QEMU's default SeaBIOS.
+    firmware: Firmware | None = None
     extra: tuple[str, ...] = ()
     hpet: bool = True
     # None → VIBEOS_QEMU_ACCEL, else DEFAULT_ACCEL. Empty string omits -accel.
@@ -494,6 +534,11 @@ class QemuConfig:
     # `vibeos.ktest=` for this boot alone: `qemu_argv` appends it last, so it
     # wins over any `vibeos.ktest=` in `cmdline` (C-CMDLINE).
     ktest: str | None = None
+    # A display window (`make run`, `make debug`); False adds `-display none`.
+    display: bool = False
+    # `-s -S`: a gdb stub on tcp::1234 and the CPUs halted until it continues
+    # (`make debug`).
+    gdb: bool = False
 
 
 @dataclass
@@ -502,7 +547,7 @@ class EnvConfig:
     smp: int
     cpu: str
     mem: str
-    bios: str | None
+    firmware: Firmware | None
     accel: str | None
     timeout: float
     extra: tuple[str, ...]
@@ -538,7 +583,7 @@ class EnvConfig:
             smp=self.smp,
             cpu=self.cpu,
             mem=self.mem,
-            bios=self.bios,
+            firmware=self.firmware,
             extra=extra + self.extra,
             hpet=hpet,
             accel=self.accel,
@@ -584,10 +629,28 @@ def default_iso(variant: str = "default") -> str:
     return f"build/vibeos-{variant}.iso"
 
 
+def env_firmware(environ: Mapping[str, str]) -> Firmware | None:
+    """`VIBEOS_BIOS`: unset, empty or `seabios` is SeaBIOS (None); `uefi` is
+    the x86_64 pair `probe_firmware` finds, which `VIBEOS_FW_X86_64` names."""
+    bios = environ.get("VIBEOS_BIOS", "")
+    if bios in ("", "seabios"):
+        return None
+    if bios != "uefi":
+        raise HarnessError(
+            f"VIBEOS_BIOS={bios}: not seabios or uefi; to boot a firmware image, name it "
+            "with VIBEOS_FW_X86_64 and set VIBEOS_BIOS=uefi"
+        )
+    fw = probe_firmware("x86_64", environ)
+    if fw is None:
+        raise HarnessError(
+            "VIBEOS_BIOS=uefi: no x86_64 UEFI firmware installed (apt: ovmf; Homebrew: qemu); "
+            "set VIBEOS_FW_X86_64 to a code image"
+        )
+    return fw
+
+
 def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
-    bios = os.environ.get("VIBEOS_BIOS")
-    if bios == "":
-        bios = None
+    firmware = env_firmware(os.environ)
     accel_raw = os.environ.get("VIBEOS_QEMU_ACCEL")
     extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
     ktest = os.environ.get("VIBEOS_KTEST", "")
@@ -612,7 +675,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         smp=env_int("VIBEOS_SMP", DEFAULT_SMP),
         cpu=os.environ.get("VIBEOS_QEMU_CPU", DEFAULT_CPU),
         mem=os.environ.get("VIBEOS_MEM", DEFAULT_MEM),
-        bios=bios,
+        firmware=firmware,
         accel=DEFAULT_ACCEL if accel_raw is None else accel_raw,
         timeout=timeout,
         extra=extra,
@@ -748,6 +811,172 @@ def _accel_args(cfg: QemuConfig) -> list[str]:
     return ["-accel", accel]
 
 
+class FirmwareError(HarnessError):
+    """A UEFI firmware image the probe cannot use: a code image without its
+    paired variable-store template, or a `VIBEOS_FW_<ARCH>` that names a
+    missing file or no code image of its architecture (C-FIRMWARE)."""
+
+
+@dataclass(frozen=True)
+class Firmware:
+    """A UEFI firmware pair: the code image, booted read-only from pflash
+    unit 0, and the variable-store template each run copies onto unit 1."""
+
+    arch: str
+    code: str
+    vars_template: str
+
+
+@dataclass(frozen=True)
+class FirmwarePair:
+    """One probe row: a code image and its variable-store template, both
+    basenames of files in the same directory, and the directories to look in.
+    `{homebrew}` in a directory stands for each of `_homebrew_dirs`."""
+
+    code: str
+    vars_template: str
+    dirs: tuple[str, ...]
+
+
+HOMEBREW_QEMU = "{homebrew}/share/qemu"
+
+# The probe table (ROADMAP §10.2, I1), rows in probe order per architecture.
+# Ubuntu's apt `ovmf` and `qemu-efi-aarch64`; then Homebrew's `qemu`, which
+# ships no vars file named for either 64-bit architecture, so its 32-bit
+# ones pair with the 64-bit code. Secure-boot builds need SMM and q35, and
+# are left out.
+FIRMWARE_TABLE: dict[str, tuple[FirmwarePair, ...]] = {
+    "x86_64": (
+        FirmwarePair("OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd", ("/usr/share/OVMF",)),
+        FirmwarePair("edk2-x86_64-code.fd", "edk2-i386-vars.fd", (HOMEBREW_QEMU,)),
+    ),
+    "aarch64": (
+        FirmwarePair("AAVMF_CODE.fd", "AAVMF_VARS.fd", ("/usr/share/AAVMF",)),
+        FirmwarePair("edk2-aarch64-code.fd", "edk2-arm-vars.fd", (HOMEBREW_QEMU,)),
+    ),
+}
+
+# One variable per architecture: a code image, which overrides the probe.
+FIRMWARE_VARS: dict[str, str] = {
+    "x86_64": "VIBEOS_FW_X86_64",
+    "aarch64": "VIBEOS_FW_AARCH64",
+}
+
+
+def _homebrew_dirs(environ: Mapping[str, str]) -> list[str]:
+    """Homebrew's prefixes, in probe order: `$HOMEBREW_PREFIX` when set, then
+    Apple Silicon's `/opt/homebrew` and Intel's `/usr/local`."""
+    out: list[str] = []
+    for d in (environ.get("HOMEBREW_PREFIX", ""), "/opt/homebrew", "/usr/local"):
+        if d and d.rstrip("/") not in out:
+            out.append(d.rstrip("/"))
+    return out
+
+
+def _rooted(root: str, path: str) -> str:
+    return os.path.join(root, path.lstrip("/")) if root else path
+
+
+def firmware_dirs(pair: FirmwarePair, environ: Mapping[str, str], root: str = "") -> list[str]:
+    """The directories `pair` is looked for in, in order, under `root`."""
+    out: list[str] = []
+    for d in pair.dirs:
+        if "{homebrew}" in d:
+            out += [_rooted(root, d.format(homebrew=h)) for h in _homebrew_dirs(environ)]
+        else:
+            out.append(_rooted(root, d))
+    return out
+
+
+def _paired(arch: str, code: str, pair: FirmwarePair) -> Firmware:
+    vars_template = os.path.join(os.path.dirname(code), pair.vars_template)
+    if not os.path.isfile(vars_template):
+        raise FirmwareError(
+            f"{arch} firmware code {code} has no variable-store template {vars_template}"
+        )
+    return Firmware(arch, code, vars_template)
+
+
+def probe_firmware(
+    arch: str, environ: Mapping[str, str] | None = None, *, root: str = ""
+) -> Firmware | None:
+    """The UEFI firmware pair for `arch`, or None when none is installed.
+
+    `VIBEOS_FW_<ARCH>` names a code image of the architecture's rows, whose
+    template is the row's in the same directory. Otherwise the first row
+    whose code image exists decides; its template missing fails the probe,
+    which never falls through to a later row. `root` prefixes every probed
+    path (tests)."""
+    if arch not in FIRMWARE_TABLE:
+        raise FirmwareError(f"no firmware table for {arch!r} (one of {', '.join(FIRMWARE_TABLE)})")
+    environ = os.environ if environ is None else environ
+    rows = FIRMWARE_TABLE[arch]
+    var = FIRMWARE_VARS[arch]
+    override = environ.get(var, "")
+    if override:
+        if not os.path.isfile(override):
+            raise FirmwareError(f"{var}={override}: no such file")
+        name = os.path.basename(override)
+        pair = next((r for r in rows if r.code == name), None)
+        if pair is None:
+            other = [a for a, rs in FIRMWARE_TABLE.items() if any(r.code == name for r in rs)]
+            what = f"{other[0]}'s code image" if other else "not a code image the probe knows"
+            raise FirmwareError(
+                f"{var}={override}: {what}; {arch} takes one of "
+                + ", ".join(r.code for r in rows)
+            )
+        return _paired(arch, override, pair)
+    for pair in rows:
+        for d in firmware_dirs(pair, environ, root):
+            code = os.path.join(d, pair.code)
+            if os.path.isfile(code):
+                return _paired(arch, code, pair)
+    return None
+
+
+# The per-process directory of variable-store copies; atexit removes it.
+_VARS_DIR: str | None = None
+
+
+def new_vars_copy(fw: Firmware) -> str:
+    """A fresh copy of `fw`'s variable-store template for one QEMU run, so no
+    run sees another's variables and the template stays untouched. It is the
+    only way to make one; a later reboot that must keep its variables reuses
+    the path instead of calling this again."""
+    global _VARS_DIR
+    if _VARS_DIR is None:
+        _VARS_DIR = tempfile.mkdtemp(prefix="vibeos-fw-")
+        atexit.register(remove_vars_copies)
+    fd, path = tempfile.mkstemp(prefix=f"{fw.arch}-vars-", suffix=".fd", dir=_VARS_DIR)
+    os.close(fd)
+    shutil.copyfile(fw.vars_template, path)
+    return path
+
+
+def remove_vars_copies() -> None:
+    """Remove this process's variable-store copies."""
+    global _VARS_DIR
+    if _VARS_DIR is not None:
+        shutil.rmtree(_VARS_DIR, ignore_errors=True)
+        _VARS_DIR = None
+
+
+def _drive_file(path: str) -> str:
+    """`path` as a `-drive file=` value: QEMU splits options at a comma, and
+    reads a doubled one as a literal comma."""
+    return path.replace(",", ",,")
+
+
+def pflash_args(fw: Firmware, vars_copy: str) -> list[str]:
+    """The firmware code read-only on pflash unit 0 and a variable store on
+    unit 1, never `-bios`, which refuses a code image whose size is not a
+    multiple of 64 KiB (Homebrew's `edk2-x86_64-code.fd`, ROADMAP §10.2)."""
+    return [
+        "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={_drive_file(fw.code)}",
+        "-drive", f"if=pflash,format=raw,unit=1,file={_drive_file(vars_copy)}",
+    ]
+
+
 # OVMF BDS PXEs the default e1000 if the CD isn't first/ready. slirp
 # answers DHCP; TFTP does not. Silent stall matches VIBEOS_TIMEOUT.
 # Hits the UEFI e2e second boot (COM1 is an open pipe; marker boot is not).
@@ -826,16 +1055,20 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
         "-smp", str(cfg.smp),
         "-cpu", cfg.cpu,
         "-no-reboot",
-        "-display", "none",
-        "-serial", "stdio",
     ]
+    if not cfg.display:
+        # QEMU keeps the last `-display`, so there is only ever this one.
+        argv += ["-display", "none"]
+    argv += ["-serial", "stdio"]
     if monitor_sock is not None:
         argv += ["-monitor", f"unix:{monitor_sock},server=on,wait=off"]
     argv += _accel_args(cfg)
     if not cfg.hpet:
         argv += list(HPET_OFF_MACHINE)
-    if cfg.bios:
-        argv += ["-bios", cfg.bios]
+    if cfg.gdb:
+        argv += ["-s", "-S"]
+    if cfg.firmware is not None:
+        argv += pflash_args(cfg.firmware, new_vars_copy(cfg.firmware))
         argv += list(OVMF_BOOT_ARGS)
     elif cfg.boot_order:
         argv += ["-boot", f"order={cfg.boot_order}"]
@@ -882,12 +1115,18 @@ def run_qemu_and_check(
 
     `line_source` replaces QEMU (C-LINESOURCE): the PATH and ISO checks are
     skipped and the lines, exit status and stderr come from the source.
+
+    Panic signatures, the dump and `PANIC_DONE` match only kernel lines
+    (framed, DESIGN §2.6); each marker matches its own source's lines.
+    Limine's panic line before the first framed line, and a
+    `frame.USER_FAILURES` line before the dump, fail the run.
     """
     panic_signatures = _panic_sigs(cfg, panic_signatures, extra_panic)
     deadline = time.monotonic() + timeout_s
     src = line_source if line_source is not None else _start_qemu(cfg, deadline)
 
     result = RunResult()
+    stream = frame.Stream()
     marker_idx = 0
     dump_at: int | None = None  # index in result.lines of the dump's first line
     banners = 0
@@ -911,18 +1150,28 @@ def run_qemu_and_check(
                 break
 
             result.lines.append(line)
-            sig = next((s for s in panic_signatures if s in line), None)
+            limine = stream.limine_panic(line)
+            framed, text = stream.feed(line)
+            if limine:
+                result.panic_line = line
+                raise fail(f"Limine panic before the kernel in: {text!r}")
+            ktext = text if framed else None
+            sig = panic_signature(line, panic_signatures)
+            ufail = frame.user_failure(line)
+            if dump_at is None and ufail is not None:
+                result.panic_line = line
+                raise fail(f"user failure {ufail!r} in: {text!r}")
 
             if dump_at is None and sig is not None and not expect_panic:
                 result.panic_line = line
-                raise fail(f"panic signature {sig!r} in: {line!r}")
+                raise fail(f"panic signature {sig!r} in: {text!r}")
             if dump_at is None and expect_panic and (sig is not None or is_dump_banner(line)):
                 dump_at = len(result.lines) - 1
                 result.panic_line = line
                 if marker_idx < len(markers):
                     raise fail(
                         f"missing marker {markers[marker_idx].name!r} before the first "
-                        f"panic signature: {line!r}{serial_tail(result.lines)}"
+                        f"panic signature: {text!r}{serial_tail(result.lines)}"
                     )
 
             if dump_at is not None:
@@ -930,13 +1179,14 @@ def run_qemu_and_check(
                     banners += 1
                     if banners > 1:
                         raise fail(f"expected one dump banner, saw {banners}: {line!r}")
-                if PANIC_DONE in line and not panic_done:
+                if ktext is not None and PANIC_DONE in ktext and not panic_done:
                     panic_done = True
                     src.set_deadline(time.monotonic() + PANIC_EXIT_S)
                 continue
 
             for needle, n in exact.items():
-                if needle in line:
+                ntext = frame.text_for(frame.source_of(needle), line)
+                if ntext is not None and needle in ntext:
                     counts[needle] += 1
                     if counts[needle] > n:
                         raise fail(
@@ -1096,7 +1346,7 @@ def check_mce_dump(
     first = needles[0]
     started = any(
         all(part in line for part in first) if isinstance(first, tuple) else first in line
-        for line in after
+        for line in frame.kernel_lines(after)
     )
     if not started:
         if exit_code is not None:
@@ -1117,9 +1367,10 @@ def run_qemu_inject_mce(
 ) -> RunResult:
     """Boot, wait for `markers`, inject a machine check with `cmd`, check the dump.
 
-    Before the injection any panic signature fails the run. After it the
-    lines are collected until `PANIC_DONE`, EOF, or `MCE_DUMP_WAIT_S`, and
-    `check_mce_dump` judges them. Never retries.
+    Before the injection a failing line (`run_failure`) fails the run.
+    After it the lines are collected until a kernel line holds `PANIC_DONE`,
+    EOF, or `MCE_DUMP_WAIT_S`, and `check_mce_dump` judges them. Never
+    retries.
     """
     if not shutil.which("qemu-system-x86_64"):
         raise HarnessError("qemu-system-x86_64 not on PATH")
@@ -1142,6 +1393,7 @@ def run_qemu_inject_mce(
     assert proc.stdout is not None
 
     result = RunResult()
+    stream = frame.Stream()
     marker_idx = 0
     reader = DeadlineReader(proc.stdout.fileno(), time.monotonic() + timeout_s)
     after: list[str] = []
@@ -1168,10 +1420,10 @@ def run_qemu_inject_mce(
                     f"{len(result.lines)} lines{_qemu_report(result, exited=True)}"
                 )
             result.lines.append(line)
-            for sig in panic_signatures:
-                if sig in line:
-                    result.panic_line = line
-                    raise HarnessError(f"panic signature {sig!r} in: {line!r}")
+            why = run_failure(line, stream, panic_signatures)
+            if why is not None:
+                result.panic_line = line
+                raise HarnessError(f"{why[0]} in: {why[1]!r}")
             if markers[marker_idx].matches(line):
                 result.matched.append(markers[marker_idx].name)
                 marker_idx += 1
@@ -1193,7 +1445,7 @@ def run_qemu_inject_mce(
                 break
             result.lines.append(line)
             after.append(line)
-            if PANIC_DONE in line:
+            if PANIC_DONE in (kernel_text(line) or ""):
                 break
     finally:
         if proc.poll() is None:
@@ -1205,7 +1457,9 @@ def run_qemu_inject_mce(
             result.exit_code = proc.wait()
 
     check_mce_dump(after, exit_code=exited, reply=reply, needles=dump_needles)
-    result.panic_line = next((ln for ln in after if "vibeOS: panic:" in ln), None)
+    result.panic_line = next(
+        (ln for ln in after if "vibeOS: panic:" in (kernel_text(ln) or "")), None
+    )
     return result
 
 
@@ -1218,9 +1472,13 @@ CONSOLE_TAIL_S = 3.0
 
 
 def _console_tail(
-    src: LineSource, result: RunResult, sigs: tuple[str, ...], window_s: float
+    src: LineSource,
+    result: RunResult,
+    sigs: tuple[str, ...],
+    window_s: float,
+    stream: frame.Stream,
 ) -> None:
-    """Read serial for `window_s`: fail on a panic signature or on QEMU's exit."""
+    """Read serial for `window_s`: fail on a failing line (`run_failure`) or on QEMU's exit."""
     src.set_deadline(time.monotonic() + window_s)
     while True:
         kind, line = src.next_event()
@@ -1234,14 +1492,11 @@ def _console_tail(
                 f"{_qemu_report(result, exited=True)}"
             )
         result.lines.append(line)
-        for sig in sigs:
-            if sig in line:
-                result.panic_line = line
-                src.kill()
-                raise HarnessError(
-                    f"panic signature {sig!r} in the {window_s} s after the last reply: "
-                    f"{line}"
-                )
+        why = run_failure(line, stream, sigs)
+        if why is not None:
+            result.panic_line = line
+            src.kill()
+            raise HarnessError(f"{why[0]} in the {window_s} s after the last reply: {why[1]}")
 
 
 def run_qemu_console_input(
@@ -1255,6 +1510,9 @@ def run_qemu_console_input(
     `-display none` still has an i8042; QEMU `sendkey` injects set-1
     scancodes on IRQ1, the same path as a focused QEMU window.
     `line_source` replaces QEMU as in `run_qemu_and_check`.
+
+    `shell ready` and the replies are `/bin/sh`'s, so they match only
+    unframed lines; panic signatures match only kernel lines (DESIGN §2.6).
     """
     panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
     deadline = time.monotonic() + timeout_s
@@ -1265,6 +1523,7 @@ def run_qemu_console_input(
     )
 
     result = RunResult()
+    stream = frame.Stream()
     saw_ready = False
     saw_serial = False
     saw_ps2 = False
@@ -1279,14 +1538,15 @@ def run_qemu_console_input(
             if kind == "eof":
                 break
             result.lines.append(line)
-            for sig in panic_signatures:
-                if sig in line:
-                    result.panic_line = line
-                    src.kill()
-                    raise HarnessError(
-                        f"panic signature {sig!r} in: {line!r}"
-                    )
-            if not saw_ready and SHELL_READY_NEEDLE in line:
+            why = run_failure(line, stream, panic_signatures)
+            if why is not None:
+                result.panic_line = line
+                src.kill()
+                raise HarnessError(f"{why[0]} in: {why[1]!r}")
+            utext = frame.user_text(line)
+            if utext is None:
+                continue
+            if not saw_ready and SHELL_READY_NEEDLE in utext:
                 saw_ready = True
                 result.matched.append("shell_ready")
                 # Prompt is written without a newline; give the shell
@@ -1294,19 +1554,19 @@ def run_qemu_console_input(
                 time.sleep(0.2)
                 src.send_input(f"echo {SERIAL_ECHO_TOKEN}\n".encode())
                 continue
-            if saw_ready and not saw_serial and SERIAL_ECHO_TOKEN in line:
+            if saw_ready and not saw_serial and SERIAL_ECHO_TOKEN in utext:
                 # Line editor reprints the command; wait for the echo
                 # payload, not only the typed line.
-                if line.strip() == SERIAL_ECHO_TOKEN:
+                if utext.strip() == SERIAL_ECHO_TOKEN:
                     saw_serial = True
                     result.matched.append("serial_echo")
                     src.monitor("sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n"))
                     continue
-            if saw_serial and not saw_ps2 and line.strip() == PS2_ECHO_TOKEN:
+            if saw_serial and not saw_ps2 and utext.strip() == PS2_ECHO_TOKEN:
                 saw_ps2 = True
                 result.matched.append("ps2_echo")
                 # A later reply step goes before the tail.
-                _console_tail(src, result, panic_signatures, CONSOLE_TAIL_S)
+                _console_tail(src, result, panic_signatures, CONSOLE_TAIL_S, stream)
                 src.quit()
                 break
     finally:
@@ -1315,9 +1575,9 @@ def run_qemu_console_input(
 
     report = _qemu_report(result, exited=not result.timed_out)
     if not saw_ready:
-        why = f"after {timeout_s}s" if result.timed_out else "before QEMU exited"
+        when = f"after {timeout_s}s" if result.timed_out else "before QEMU exited"
         raise HarnessError(
-            f"console input: no shell ready {why}; matched={result.matched}{report}"
+            f"console input: no shell ready {when}; matched={result.matched}{report}"
         )
     if not saw_serial:
         raise HarnessError(f"console input: serial echo missing{report}")
@@ -1350,7 +1610,7 @@ def drain_panic_tail(
         if kind != "line":
             return
         result.lines.append(line)
-        if PANIC_DONE in line:
+        if PANIC_DONE in (kernel_text(line) or ""):
             return
 
 
@@ -1360,18 +1620,26 @@ def check_ktest_output(
     *,
     pass_status: int = ISA_DEBUG_PASS,
 ) -> RunResult:
-    """Require begin then end, reject any FAIL line, require pass exit status."""
+    """Require begin then end, reject any FAIL line, require pass exit status.
+
+    `begin`, `FAIL`, `end` and the panic signatures match only kernel lines
+    (framed, DESIGN §2.6), so a user program's forged `FAIL` line is ignored.
+    """
     result = RunResult()
     result.exit_code = exit_code
+    stream = frame.Stream()
     saw_begin = False
     saw_end = False
     fails: list[str] = []
-    for line in lines:
-        result.lines.append(line)
-        for sig in PANIC_SIGNATURES:
-            if sig in line:
-                result.panic_line = line
-                raise HarnessError(f"panic signature {sig!r} in: {line!r}")
+    for raw in lines:
+        result.lines.append(raw)
+        why = run_failure(raw, stream)
+        if why is not None:
+            result.panic_line = raw
+            raise HarnessError(f"{why[0]} in: {why[1]!r}")
+        line = kernel_text(raw)
+        if line is None:
+            continue
         if KTEST_BEGIN in line:
             if saw_end:
                 raise HarnessError("ktest begin after end")
@@ -1405,7 +1673,8 @@ def run_qemu_until_exit(
     """Boot the ISO and wait for QEMU to exit (isa-debug-exit).
 
     `kill_after(line)` may return seconds-until-SIGKILL. The first non-None
-    wins (vibefs crash consistency). A kill is not a harness timeout.
+    wins (vibefs crash consistency). A kill is not a harness timeout. It gets
+    the raw line; a failing line (`run_failure`) ends the run.
     """
     if not shutil.which("qemu-system-x86_64"):
         raise HarnessError("qemu-system-x86_64 not on PATH")
@@ -1430,17 +1699,16 @@ def run_qemu_until_exit(
     deadline = time.monotonic() + timeout_s
     kill_at: float | None = None
     reader = DeadlineReader(proc.stdout.fileno(), deadline)
+    stream = frame.Stream()
 
     def take(line: str) -> None:
         result.lines.append(line)
-        for sig in panic_signatures:
-            if sig in line:
-                result.panic_line = line
-                drain_panic_tail(reader, result)
-                proc.kill()
-                raise HarnessError(
-                    f"panic signature {sig!r} in: {line!r}{serial_tail(result.lines)}"
-                )
+        why = run_failure(line, stream, panic_signatures)
+        if why is not None:
+            result.panic_line = line
+            drain_panic_tail(reader, result)
+            proc.kill()
+            raise HarnessError(f"{why[0]} in: {why[1]!r}{serial_tail(result.lines)}")
 
     try:
         while True:

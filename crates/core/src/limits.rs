@@ -20,8 +20,8 @@
 
 /// Thread table slots (`thread_init`'s scheduler, `sched` run and timeout queues).
 pub const MAX_THREADS: usize = 64;
-/// Process table slots (`proc_init`). Pids 2 to 17 leave room for 16 live
-/// processes besides init, as ROADMAP §10.10's `exit_burst` runs.
+/// Process table slots (`proc_init`), init's included: room for the 16 live
+/// processes besides init that ROADMAP §10.10's `exit_burst` runs.
 pub const MAX_PROCS: usize = 18;
 /// File descriptors per process (`proc::FdTable`, `fs::FdTable`).
 pub const MAX_FDS: usize = 16;
@@ -41,9 +41,12 @@ pub const MAX_REGIONS: usize = 32;
 /// 128 MiB guest, and the size of the 1-2 GiB window that static `ET_EXEC`
 /// images link into.
 pub const EXEC_IMAGE_MAX: u64 = 1 << 30;
-/// `pid_max`: pids and tids count up to it, Linux's default (ROADMAP §10.4).
+/// `pid_max`, Linux's default: pids and tids run `1..PID_MAX`
+/// (`proc::pid::PidAlloc`, ROADMAP §10.4). ROADMAP §23.4 makes the maximum
+/// tunable as `kernel/pid_max`.
 pub const PID_MAX: u32 = 32_768;
-/// Where pid allocation wraps to, Linux's `RESERVED_PIDS` (ROADMAP §10.4).
+/// Where pid allocation wraps to past `PID_MAX`, Linux's `RESERVED_PIDS`
+/// (`proc::pid::PidAlloc`, ROADMAP §10.4).
 pub const PID_WRAP: u32 = 300;
 /// RAM-backed node slots (`fs::Vfs` ramfs).
 pub const MAX_RAM_NODES: usize = 64;
@@ -61,9 +64,13 @@ pub const MAX_NAME: usize = 64;
 pub const MAX_SYMLINK: u32 = 8;
 /// Components one lookup walks, symlinks included (`fs`).
 pub const MAX_WALK: u32 = 80;
-/// Kernel virtual-address free-list nodes (`kva::Kva`). A `u8` holds the
-/// count (`kva::Kva`'s `nslots`), hence the assert below.
-pub const MAX_KVA_RANGES: usize = 128;
+/// Kernel virtual-address free-list nodes (`kva::Kva`): one per thread stack
+/// (`MAX_THREADS`); 8 per CPU (`acpi::MAX_CPUS`), for its 4 IST stacks, its
+/// RSP0 stack, its 2 cached stacks and its 1 dead-stack slot; and 64 for
+/// `vmap` and tests. `Kva::alloc` refuses once this minus 2 ranges are live,
+/// so `Kva::free` never runs out of nodes. `u16` links hold an index, hence
+/// the assert below.
+pub const MAX_KVA_RANGES: usize = MAX_THREADS + 8 * crate::acpi::MAX_CPUS + 64;
 /// Pages one deferred unmap batch holds (`kva_init`).
 pub const MAX_UNMAP_PAGES: usize = 32;
 /// Mounted FAT volumes (`fat_init`).
@@ -84,11 +91,11 @@ pub const MAX_CLAIMS: usize = 64;
 pub const MAX_COMMANDS: usize = 48;
 /// Tokens in one kernel shell line (`shell`).
 pub const MAX_TOKENS: usize = 16;
-/// Bytes of an ELF file `user_init` loads from the initrd.
-pub const MAX_ELF: u64 = 64 * 1024;
+/// Limine modules `boot::BootInfo` records; the initrd is the first.
+pub const MAX_BOOT_MODULES: usize = 4;
 /// `PT_LOAD` segments in one image (`elf::Image`).
 pub const MAX_ELF_LOADS: usize = 8;
 
 const _: () = assert!(EXEC_IMAGE_MAX > 192 * 1024 * 1024);
 const _: () = assert!(PID_WRAP < PID_MAX);
-const _: () = assert!(MAX_KVA_RANGES <= u8::MAX as usize);
+const _: () = assert!(MAX_KVA_RANGES <= u16::MAX as usize);

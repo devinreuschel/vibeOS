@@ -1,4 +1,12 @@
-//! Host FAT32 initrd. Same `fat::mkinitrd` as the kernel, plus optional files.
+//! Host FAT32 initrd: `fat::mkinitrd`'s seed files plus optional ones, on
+//! an image sized from its contents plus `fat::INITRD_FREE_BYTES` of free
+//! space for the in-guest write tests (ROADMAP §10.5). Limine loads it as a
+//! module (DESIGN §3.1).
+//!
+//! Two passes: the files go onto a scratch image large enough for them,
+//! which gives the data clusters they use; then onto an image of
+//! `fat::image_sectors(used, INITRD_FREE_BYTES)` sectors, which must leave
+//! at least that much free.
 //!
 //! Reproducible (ROADMAP §10.2, F152): the added files' times come from
 //! `SOURCE_DATE_EPOCH` (a fixed time when it is unset), and the files are
@@ -15,7 +23,7 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use vibeos::fat::{self, FatError, FatInode, FatVol, INITRD_BYTES, MemDisk, SEC};
+use vibeos::fat::{self, FatError, FatInode, FatVol, INITRD_FREE_BYTES, MemDisk, SEC};
 
 /// The added files' time when `SOURCE_DATE_EPOCH` is unset, in
 /// `FatVol::now`'s unit (seconds since 1980-01-01 UTC).
@@ -123,22 +131,48 @@ fn main() -> ExitCode {
 }
 
 /// The initrd image: `fat::mkinitrd`'s, plus `extras` (destination, bytes)
-/// added in destination order with their times at `now`.
+/// added in destination order with their times at `now`, on the smallest
+/// image with `INITRD_FREE_BYTES` free after them.
 fn build_image(now: u32, mut extras: Vec<(&str, Vec<u8>)>) -> Result<Vec<u8>, FatError> {
-    let mut buf = vec![0u8; INITRD_BYTES];
-    fat::mkinitrd(&mut buf)?;
-    if extras.is_empty() {
-        return Ok(buf);
-    }
     extras.sort_by(|a, b| a.0.cmp(b.0));
-    let mut disk = MemDisk::new(&mut buf, SEC as u32)?;
+    // Pass 1: a scratch image with room for every file's data plus a
+    // cluster per file and some for the directories; doubled while short.
+    let data: u64 = extras
+        .iter()
+        .map(|(_, d)| (d.len() as u64).div_ceil(SEC as u64) + 1)
+        .sum();
+    let mut spare = 64u64;
+    let used = loop {
+        let clusters = u32::try_from(data + spare).map_err(|_| FatError::NoSpace)?;
+        let mut buf = vec![0u8; fat::image_sectors(clusters, 0)? as usize * SEC];
+        match fill(&mut buf, now, &extras) {
+            Ok(vol) => break vol.info.nclus - vol.free,
+            Err(FatError::NoSpace) => spare *= 2,
+            Err(e) => return Err(e),
+        }
+    };
+    // Pass 2: the sized image, with the same files in the same order.
+    let totsec = fat::image_sectors(used, INITRD_FREE_BYTES)?;
+    let mut buf = vec![0u8; totsec as usize * SEC];
+    let vol = fill(&mut buf, now, &extras)?;
+    if vol.info.nclus - vol.free != used || vol.free_bytes() < INITRD_FREE_BYTES {
+        return Err(FatError::NoSpace);
+    }
+    Ok(buf)
+}
+
+/// Format `buf` with `fat::mkinitrd` and add `extras` in order; the synced
+/// volume, remounted so its free count is read back from the image.
+fn fill(buf: &mut [u8], now: u32, extras: &[(&str, Vec<u8>)]) -> Result<FatVol, FatError> {
+    fat::mkinitrd(buf)?;
+    let mut disk = MemDisk::new(buf, SEC as u32)?;
     let mut vol = FatVol::mount(&mut disk)?;
     vol.now = now;
-    for (dest, data) in &extras {
+    for (dest, data) in extras {
         add_file(&mut vol, &mut disk, dest, data)?;
     }
     vol.sync(&mut disk)?;
-    Ok(buf)
+    FatVol::mount(&mut disk)
 }
 
 fn add_file(vol: &mut FatVol, disk: &mut MemDisk, dest: &str, data: &[u8]) -> Result<(), FatError> {

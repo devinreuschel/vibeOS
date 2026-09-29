@@ -11,6 +11,8 @@
 use crate::atomic::Ordering;
 use crate::atomic::statics::{AtomicU8, AtomicU64};
 
+pub mod line;
+
 /// Compile-time ceiling. Records above this are not formatted or stored.
 #[cfg(debug_assertions)]
 pub const COMPILE_MAX: Level = Level::Trace;

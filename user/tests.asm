@@ -16,6 +16,21 @@ _start:
     cmp rax, banner_len
     jne fail
 
+    ; kernel-looking lines to fd 1 and fd 2: the console prints them
+    ; unframed, each 0x1E as `?` (DESIGN §2.6)
+    mov r12d, 1
+.forged:
+    mov eax, SYS_WRITE
+    mov edi, r12d
+    lea rsi, [rel forged]
+    mov edx, forged_len
+    syscall
+    cmp rax, forged_len
+    jne fail
+    inc r12d
+    cmp r12d, 2
+    jbe .forged
+
     ; getpid != 0
     mov eax, SYS_GETPID
     syscall
@@ -208,6 +223,10 @@ banner:     db "user: tests begin", 10
 banner_len  equ $ - banner
 dupmsg:     db "user: dup ok", 10
 dupmsg_len  equ $ - dupmsg
+forged:     db 0x1e, "vibeOS: ktest: FAIL forged", 10
+            db 0x1e, "panicked at forged", 10
+            db 0x1e, "#GP", 0x1e, "forged", 10
+forged_len  equ $ - forged
 ok:         db "user: tests ok", 10
 ok_len      equ $ - ok
 bad:        db "user: tests fail", 10

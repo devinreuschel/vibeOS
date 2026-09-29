@@ -315,6 +315,8 @@ pub(crate) const TESTS: &[Test] = &[
         "log_reentry_drop_counted",
         log::ktest::test_log_reentry_drop_counted,
     ),
+    test("serial_lines_whole", log::ktest::test_serial_lines_whole).deadline(60_000),
+    test("serial_frame", log::ktest::test_serial_frame),
     test("fb_bgrx_roundtrip", console::ktest::test_fb_bgrx_roundtrip),
     test("fb_pitch", console::ktest::test_fb_pitch),
     test("fb_cr_home", console::ktest::test_fb_cr_home),
@@ -366,6 +368,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("vfs_walk", fs::ktest::test_vfs_walk),
     test("pseudo_fs", fs::ktest::test_pseudo_fs),
     test("fat_initrd", fs::ktest::test_fat_initrd),
+    test("initrd_module_sized", fs::ktest::test_initrd_module_sized),
     test("vibefs", fs::ktest::test_vibefs),
     test("ktest_rows", sched::ktest::test_ktest_rows),
     test("ktest_fail_fmt", sched::ktest::test_ktest_fail_fmt),
@@ -490,6 +493,14 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(30_000),
     test("arch_seam_core", arch::ktest::test_arch_seam_core),
+    test(
+        "uaccess_smap_stray_fault",
+        arch::ktest::test_uaccess_smap_stray_fault,
+    ),
+    test(
+        "uaccess_smep_user_jump",
+        arch::ktest::test_uaccess_smep_user_jump,
+    ),
     test("console_read_exit", proc::ktest::test_console_read_exit).deadline(30_000),
     test("user_entry_irq", proc::ktest::test_user_entry_irq).deadline(120_000),
     test(
@@ -504,7 +515,28 @@ pub(crate) const TESTS: &[Test] = &[
     .deadline(30_000),
     test("fp_no_leak", sched::ktest::test_fp_no_leak).deadline(60_000),
     test("fp_migrate_counter", sched::ktest::test_fp_migrate_counter).deadline(30_000),
+    test(
+        "lock_across_switch_asserts",
+        sched::ktest::lock_across_switch_asserts,
+    ),
+    test(
+        "block_in_hard_irq_asserts",
+        sched::ktest::block_in_hard_irq_asserts,
+    ),
+    test(
+        "in_hard_irq_top_bottom",
+        sched::ktest::in_hard_irq_top_bottom,
+    ),
+    test(
+        "sleep_under_spinlock_asserts",
+        sched::ktest::sleep_under_spinlock_asserts,
+    ),
     test("exec_huge_memsz", proc::ktest::test_exec_huge_memsz).deadline(60_000),
+    test(
+        "exec_large_elf_from_file",
+        proc::ktest::test_exec_large_elf_from_file,
+    )
+    .deadline(60_000),
     test(
         "brk_mmap_munmap_user",
         proc::ktest::test_brk_mmap_munmap_user,
@@ -544,8 +576,26 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_tf_repin", proc::ktest::test_user_tf_repin).deadline(60_000),
     test("user_fork_wait_stall", proc::ktest::user_fork_wait_stall),
     test(
+        "pid_not_reused_after_reap",
+        proc::ktest::pid_not_reused_after_reap,
+    ),
+    test(
+        "uaccess_syscall_copies",
+        proc::ktest::test_uaccess_syscall_copies,
+    )
+    .deadline(30_000),
+    test(
+        "uaccess_readonly_efault",
+        proc::ktest::test_uaccess_readonly_efault,
+    )
+    .deadline(30_000),
+    test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,
+    ),
+    test(
+        "wake_inbox_and_kva_pool",
+        irq::ktest::wake_inbox_and_kva_pool,
     ),
 ];
 
@@ -641,12 +691,12 @@ fn qemu_exit(code: u32) -> ! {
 }
 
 /// Pages per stack in [`quiesce_frames`]' KVA walk: 17 pages of VA a round,
-/// so one walk between two coalesces covers about 8 MiB.
+/// so one walk between two coalesces covers `MAX_KVA_RANGES` times that.
 const WARM_STACK_PAGES: usize = 16;
 /// Ceiling on walk rounds: two coalesces take at most two free lists' worth.
 const WARM_ROUNDS: usize = 3 * vibeos::limits::MAX_KVA_RANGES;
 /// Default-size stacks the warm-up allocates and frees: past one free-list
-/// coalesce, since the node pool is `MAX_KVA_RANGES` (128).
+/// coalesce, since the node pool is `MAX_KVA_RANGES`.
 const WARM_DEFAULT_STACKS: usize = 2 * vibeos::limits::MAX_KVA_RANGES;
 /// Ceiling on [`settle_threads`]' wait.
 const SETTLE_MS: u64 = 2_000;
@@ -1010,11 +1060,9 @@ pub(crate) struct FrameCount {
     /// The rest are for the failure line alone, each naming one place the
     /// frames can be: dead threads' stacks not yet cached or freed when
     /// [`settle`] returned (non-zero only when it timed out), KVA bytes
-    /// reserved, KVA bytes a full free-list node pool leaked
-    /// (`kva_init::leaked_bytes`), and frames of dropped `Frames` tokens.
+    /// reserved, and frames of dropped `Frames` tokens.
     in_flight: usize,
     kva_used: u64,
-    kva_leaked: u64,
     dropped: usize,
 }
 
@@ -1028,7 +1076,6 @@ impl FrameCount {
             heap: crate::heap_init::stats().capacity / vibeos::paging::PAGE_SIZE_4K as usize,
             in_flight: thread_init::stacks_in_flight(),
             kva_used: kva_init::stats().used,
-            kva_leaked: kva_init::leaked_bytes(),
             dropped: vibeos::pmm::leaked_frames(),
         }
     }
@@ -1040,14 +1087,14 @@ impl FrameCount {
 
     /// `Ok` when `after` accounts for as many frames as `self`; otherwise a
     /// failure line that names every count before and after, and, after,
-    /// the stacks in flight, the KVA KiB used and leaked, and the dropped
+    /// the stacks in flight, the KVA KiB used, and the dropped
     /// frames, in [`FAIL_MSG_BYTES`].
     pub(crate) fn unchanged(&self, after: &Self) -> Outcome {
         if after.total() == self.total() {
             return Outcome::Ok;
         }
         crate::fail_fmt!(
-            "frames {}->{} buddy {}->{} cache {}->{} pt {}->{} heap {}->{} fly {} kva {}k lk {}k drop {}",
+            "frames {}->{} buddy {}->{} cache {}->{} pt {}->{} heap {}->{} fly {} kva {}k drop {}",
             self.total(),
             after.total(),
             self.buddy,
@@ -1060,7 +1107,6 @@ impl FrameCount {
             after.heap,
             after.in_flight,
             after.kva_used / 1024,
-            after.kva_leaked / 1024,
             after.dropped.saturating_sub(self.dropped),
         )
     }

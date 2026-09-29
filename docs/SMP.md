@@ -221,14 +221,14 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
   `ready`, `wake_inbox`, `apic_id`, and `as_cr3`, the root this CPU last loaded: an `AtomicU64` its
   owner stores after each CR3 write and `addr_space_init::teardown` reads. All are atomics; it is the
   only per-CPU state another CPU reads.
-  `wake_inbox` is a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD`
-  (planned: a bitmap sized from the limits, §7.6). `ready` is the flag an AP sets last in bring-up
+  `wake_inbox`, a slot bitmap with a summary word (§7.6): a remote CPU sets a thread's bit and sends
+  IPI `0xFD`. `ready` is the flag an AP sets last in bring-up
   ([section 7.4](#74-ap-bring-up-sequence)).
 
 `per_cpu_init::init_bsp` allocates one `PerCpu` per MADT CPU in a heap array, not a static array
 sized by a `MAX_CPUS` guess, and installs the BSP at slot 0; each AP installs its own slot with
 `per_cpu_init::install_gs`. `current` and `idle` are `*mut Tcb`. The other per-CPU tables are static
-and cap the CPU count at 64: the MADT `apic_ids` array (`acpi::MAX_CPUS`), `irq_init::IN_ISR`,
+and cap the CPU count at 64: the MADT `apic_ids` array (`acpi::MAX_CPUS`), `hardirq::IN_ISR`,
 `ipi_init::SHOOT`, `per_cpu_init::WITH_BUSY`, `sync_init::HELD`, `log_init::EMITTING` and `log_init::STAGE`, and the `u64` online mask. The 64-slot thread table, of which boot takes 2N+3 at
 `-smp N`, limits it further (ROADMAP §10.4, F037).
 
@@ -262,7 +262,7 @@ preemption point. Rule; not yet enforced: ROADMAP §10.3's `current` box (F039).
 
 `thread_init::switch_now` swaps `irq_nest` between the TCB and `PerCpu` and calls
 `syscall_init::on_switch` (FPU, RSP0, CR3) inside `with_current_switch`, then calls
-`thread::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS) after that `&mut` has ended. AGENTS.md rule 8 governs adding
+`arch::x86_64::switch::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS) after that `&mut` has ended. AGENTS.md rule 8 governs adding
 user-visible CPU state; the commit that adds it also adds its row here. The Arch column names the
 port a row belongs to; the aarch64 rows are planned (ROADMAP Phase 11), and there `switch_now` calls
 that port's `on_switch` and `switch_context`. A control that holds one value for every thread, such
@@ -401,14 +401,17 @@ locked read-modify-write and add no fence of their own. Rule; not yet enforced:
 `ipi_init::shootdown_ranges`) do so before their publishing store, which is not enough under x2APIC
 (ROADMAP §20.1).
 
-Planned (ROADMAP §10.4): the wake inbox (§7.5) is a per-CPU bitmap of `AtomicU64` words sized from
-the `limits` thread count, with one summary bit per word. A push is a Release `fetch_or` of the
-thread's bit and then of its word's summary bit, and sends `0xFD`; a drain swaps the summary to zero
-with Acquire and then swaps each flagged word to zero with Acquire. A push allocates nothing and is
-idempotent, so a thread woken from two CPUs at once is queued once. Push and drain live in
-`vibeos-core` with ROADMAP §10.8's model, and the `0xFD` handler calls the drain. Rejected: an
+The wake inbox (§7.5) is `vibeos::irq::ipi::WakeInbox`, a per-CPU bitmap of `AtomicU64` words
+with one bit per thread-table slot, sized from `limits::MAX_THREADS`, and a summary word with one
+bit per word. A push is a Release `fetch_or` of the slot's bit and then of its word's summary bit,
+and sends `0xFD`; a drain swaps the summary to zero with Acquire, then swaps each flagged word to
+zero with Acquire and takes its set bits in ascending order. A push allocates nothing and is
+idempotent, so a thread woken from two CPUs at once is queued once. A bit names a slot, not a tid:
+the `0xFD` handler's drain maps each slot to its tid through `thread_init`'s slot table, which spawn
+publishes with Release under `SCHED` whenever a slot takes a TCB. A bit is set only for a Ready
+thread, which cannot die before it runs, so a slot is not reused while its bit is set. Rejected: an
 intrusive MPSC list, which needs a queued flag in each TCB against double insertion and a larger
-model.
+model. Planned: ROADMAP §10.8's loom model of push and drain.
 
 ## 7.7 Locking with more than one CPU
 
@@ -430,11 +433,9 @@ The global lock order is in [section 2.1](INVARIANTS.md#21-lock-order) and the o
 - A lock taken from an ISR is taken with interrupts disabled in every other context too. The scheduler
   lock is the canonical case: the timer ISR calls into the scheduler, so any holder with interrupts
   enabled deadlocks the moment its own timer fires.
-- Serial TX takes a lock so bytes from different CPUs do not interleave. `Serial::write_fmt` keeps
-  IRQs off for the whole line but takes the TX lock once per `write_str` piece, so another CPU can
-  write between two pieces of a formatted line, and `log_fmt` sends a record and its newline as two
-  writes. The harness then misses a contract line split that way. Planned (ROADMAP §10.2, F138):
-  each line is formatted, newline included, into one buffer and written under one TX hold.
+- Serial TX takes a lock so bytes from different CPUs do not interleave. Each kernel line is
+  formatted, newline included, into one stack buffer and written under one TX hold, so another CPU
+  cannot split it (ROADMAP §10.2, F138).
 - klog records go to one global IRQ-safe log ring and to a serial sink that only try-locks TX.
   Per-CPU serial capture assembles serial output into lines for the ring. Planned (ROADMAP §19.5):
   one lockless ring any context may append to, and a printer thread per console (§2.5).

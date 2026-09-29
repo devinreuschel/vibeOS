@@ -829,3 +829,382 @@ fn rename_dir_into_own_subtree_einval() {
     assert_eq!(r.errors, 0, "{r:?}");
     assert_eq!(r.count(Defect::Unreachable), 0);
 }
+
+/// Block `i` of the crafted test data: every byte `i + 1`, the first
+/// eight the block's number.
+fn craft_block(i: u32) -> [u8; BLOCK] {
+    let mut blk = [(i + 1) as u8; BLOCK];
+    blk[..4].copy_from_slice(&i.to_le_bytes());
+    blk
+}
+
+/// Hold `ino`'s first `blocks` file blocks in one multi-block extent, which
+/// the kernel never writes itself: contiguous blocks on a fresh volume,
+/// written with [`craft_block`] and committed.
+fn craft_extent(v: &mut Vol, d: &mut MemDisk, ino: u32, blocks: u32) {
+    let first = v.alloc_block().unwrap();
+    for i in 1..blocks {
+        assert_eq!(v.alloc_block().unwrap(), first + i, "contiguous blocks");
+    }
+    for i in 0..blocks {
+        d.write_block(first + i, &craft_block(i)).unwrap();
+    }
+    let crc = v.extent_crc(d, first, blocks).unwrap();
+    let is = v.inode_slot(ino).unwrap();
+    v.inodes[is].extents[0] = Extent {
+        log: 0,
+        phys: first,
+        len: blocks,
+        crc,
+    };
+    v.inodes[is].n_ext = 1;
+    v.inodes[is].size = u64::from(blocks) * BLOCK as u64;
+    v.inodes[is].flags &= !F_INLINE;
+    v.inodes[is].inline_len = 0;
+    v.dirty = true;
+    v.sync(d).unwrap();
+}
+
+/// `ino`'s extents, each `(log, phys, len, crc)`.
+fn extents(v: &Vol, ino: u32) -> Vec<(u32, u32, u32, u32)> {
+    let r = &v.inodes[v.inode_slot(ino).unwrap()];
+    r.extents[..r.n_ext as usize]
+        .iter()
+        .map(|e| (e.log, e.phys, e.len, e.crc))
+        .collect()
+}
+
+#[test]
+fn write_past_16k_retry_no_leak() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        for k in 0..4u64 {
+            let blk = craft_block(k as u32);
+            assert_eq!(v.write(d, ino, k * BLOCK as u64, &blk).unwrap(), BLOCK);
+        }
+        assert_eq!(n_ext(v, ino), MAX_EXT as u8);
+        v.sync(d).unwrap();
+        let df = v.df();
+        let ex = extents(v, ino);
+        for i in 0..100 {
+            assert_eq!(
+                v.write(d, ino, 16 * 1024, b"x").unwrap_err(),
+                Error::NoSpace,
+                "retry {i}"
+            );
+            assert_eq!(v.df(), df, "free space after retry {i}");
+        }
+        assert_eq!(extents(v, ino), ex);
+        assert_eq!(v.file_size(ino).unwrap(), 16 * 1024);
+        v.sync(d).unwrap();
+        assert_eq!(v.df(), df);
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+#[test]
+fn write_short_count_updates_size() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        for k in 0..3u64 {
+            let blk = craft_block(k as u32);
+            assert_eq!(v.write(d, ino, k * BLOCK as u64, &blk).unwrap(), BLOCK);
+        }
+        v.sync(d).unwrap();
+        let (_, free, _) = v.df();
+        let two = [0x5Au8; 2 * BLOCK];
+        assert_eq!(v.write(d, ino, 12 * 1024, &two).unwrap(), BLOCK);
+        assert_eq!(v.file_size(ino).unwrap(), 16 * 1024);
+        assert_eq!(v.df().1, free - BLOCK as u64);
+        let mut out = [0u8; 2 * BLOCK];
+        assert_eq!(v.read(d, ino, 12 * 1024, &mut out).unwrap(), BLOCK);
+        assert_eq!(out[..BLOCK], two[..BLOCK]);
+        v.sync(d).unwrap();
+        assert_eq!(v.df().1, free - BLOCK as u64);
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+#[test]
+fn cow_split_without_slots_leaks_nothing() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        craft_extent(v, d, ino, 3);
+        for k in 3..5u64 {
+            let blk = craft_block(k as u32);
+            assert_eq!(v.write(d, ino, k * BLOCK as u64, &blk).unwrap(), BLOCK);
+        }
+        assert_eq!(n_ext(v, ino), 3);
+        let df = v.df();
+        let ex = extents(v, ino);
+        assert_eq!(
+            v.write(d, ino, BLOCK as u64 + 7, b"x").unwrap_err(),
+            Error::NoSpace
+        );
+        assert_eq!(v.df(), df);
+        assert_eq!(extents(v, ino), ex);
+        v.sync(d).unwrap();
+        assert_eq!(v.df(), df);
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+/// Require every extent of `ino` to match its CRC.
+fn assert_crcs_valid(v: &mut Vol, d: &mut MemDisk, ino: u32) {
+    let is = v.inode_slot(ino).unwrap();
+    let r = v.inodes[is];
+    for e in &r.extents[..r.n_ext as usize] {
+        v.check_extent(d, *e)
+            .unwrap_or_else(|err| panic!("extent at {}: {err:?}", e.log));
+    }
+}
+
+/// `ino`'s bytes from `off`, `len` of them, which must all read.
+fn read_all(v: &mut Vol, d: &mut MemDisk, ino: u32, off: u64, len: usize) -> Vec<u8> {
+    let mut out = vec![0u8; len];
+    assert_eq!(v.read(d, ino, off, &mut out).unwrap(), len);
+    out
+}
+
+#[test]
+fn overwrite_corrupt_block_reports_corrupt() {
+    let mut b = fresh(256 * 1024);
+    let (ino, phys) = with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        assert_eq!(v.write(d, ino, 0, &payload(1)).unwrap(), 300);
+        v.sync(d).unwrap();
+        let ex = extents(v, ino);
+        assert_eq!(ex.len(), 1);
+        (ino, ex[0].1)
+    });
+    b[phys as usize * BLOCK + 17] ^= 0x40;
+    let reads_corrupt = |v: &mut Vol, d: &mut MemDisk| {
+        for _ in 0..3 {
+            let mut out = [0u8; 300];
+            assert_eq!(v.read(d, ino, 0, &mut out).unwrap_err(), Error::Corrupt);
+        }
+    };
+    with_vol(&mut b, |v, d| {
+        let df = v.df();
+        let ex = extents(v, ino);
+        assert_eq!(v.write(d, ino, 100, b"z").unwrap_err(), Error::Corrupt);
+        reads_corrupt(v, d);
+        assert_eq!(v.df(), df);
+        assert_eq!(extents(v, ino), ex);
+        v.sync(d).unwrap();
+        reads_corrupt(v, d);
+        assert_eq!(extents(v, ino), ex);
+    });
+    with_vol(&mut b, |v, d| reads_corrupt(v, d));
+}
+
+#[test]
+fn cow_block0_of_two_block_extent() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        craft_extent(v, d, ino, 2);
+        assert_eq!(v.write(d, ino, 5, b"new").unwrap(), 3);
+        assert_eq!(n_ext(v, ino), 2);
+        assert_crcs_valid(v, d, ino);
+        let mut blk0 = craft_block(0);
+        blk0[5..8].copy_from_slice(b"new");
+        assert_eq!(read_all(v, d, ino, 0, BLOCK), blk0);
+        assert_eq!(read_all(v, d, ino, BLOCK as u64, BLOCK), craft_block(1));
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+#[test]
+fn cow_middle_of_three_block_extent() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        craft_extent(v, d, ino, 3);
+        assert_eq!(v.write(d, ino, BLOCK as u64 + 9, b"mid").unwrap(), 3);
+        assert_eq!(n_ext(v, ino), 3);
+        assert_crcs_valid(v, d, ino);
+        let mut blk1 = craft_block(1);
+        blk1[9..12].copy_from_slice(b"mid");
+        assert_eq!(read_all(v, d, ino, 0, BLOCK), craft_block(0));
+        assert_eq!(read_all(v, d, ino, BLOCK as u64, BLOCK), blk1);
+        assert_eq!(read_all(v, d, ino, 2 * BLOCK as u64, BLOCK), craft_block(2));
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+/// Truncate a file held in one crafted 2-block extent to `new` bytes;
+/// every CRC stays valid and the kept bytes unchanged.
+fn truncate_two_block_extent(new: u64) {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        craft_extent(v, d, ino, 2);
+        let mut want = craft_block(0).to_vec();
+        want.extend_from_slice(&craft_block(1));
+        want.truncate(new as usize);
+        v.truncate(d, ino, new).unwrap();
+        assert_eq!(v.file_size(ino).unwrap(), new);
+        assert_crcs_valid(v, d, ino);
+        assert_eq!(read_all(v, d, ino, 0, new as usize), want);
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+#[test]
+fn truncate_two_block_extent_to_1_5_blocks() {
+    truncate_two_block_extent(BLOCK as u64 + BLOCK as u64 / 2);
+}
+
+#[test]
+fn truncate_two_block_extent_to_half_block() {
+    truncate_two_block_extent(BLOCK as u64 / 2);
+}
+
+#[test]
+fn read_corrupt_leaves_buffer_untouched() {
+    let mut b = fresh(256 * 1024);
+    let (ino, phys) = with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        for k in 0..2u64 {
+            let blk = craft_block(k as u32);
+            assert_eq!(v.write(d, ino, k * BLOCK as u64, &blk).unwrap(), BLOCK);
+        }
+        v.sync(d).unwrap();
+        (ino, extents(v, ino)[1].1)
+    });
+    b[phys as usize * BLOCK + 100] ^= 1;
+    with_vol(&mut b, |v, d| {
+        let mut out = vec![0xAAu8; 2 * BLOCK];
+        assert_eq!(v.read(d, ino, 0, &mut out).unwrap_err(), Error::Corrupt);
+        assert!(out.iter().all(|&c| c == 0xAA));
+        assert_eq!(read_all(v, d, ino, 0, BLOCK), craft_block(0));
+    });
+}
+
+/// Commit `n` times from a fresh volume with `plant` set, one new file
+/// and a write per commit; `fsck` of the result.
+fn planted_commits(plant: Plant, n: u32) -> FsckReport {
+    let mut b = fresh(64 * BLOCK);
+    with_vol(&mut b, |v, d| {
+        v.set_plant(plant);
+        for i in 0..n {
+            let ino = new_file(v, d, format!("f{i}").as_bytes());
+            assert_eq!(v.write(d, ino, 0, &payload(i)).unwrap(), 300);
+            v.sync(d).unwrap();
+        }
+    });
+    fsck_of(&mut b)
+}
+
+#[test]
+fn plant_leak_shows_leak_warning() {
+    let r = planted_commits(Plant::None, 3);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+    let r = planted_commits(Plant::Leak, 3);
+    assert_eq!(r.errors, 0);
+    assert!(r.warnings >= 2, "warnings {}", r.warnings);
+}
+
+/// A device with a volatile cache that keeps every write until the next
+/// flush. At each superblock write it captures the image a power loss
+/// right after that write could leave: the durable blocks plus the super.
+struct PendingDisk {
+    durable: Vec<u8>,
+    pending: Vec<(u32, [u8; BLOCK])>,
+    captured: Vec<Vec<u8>>,
+}
+
+impl Disk for PendingDisk {
+    fn nblocks(&self) -> u32 {
+        (self.durable.len() / BLOCK) as u32
+    }
+
+    fn read_block(&mut self, bno: u32, buf: &mut [u8; BLOCK]) -> Result<(), Error> {
+        let o = bno as usize * BLOCK;
+        buf.copy_from_slice(&self.durable[o..o + BLOCK]);
+        for (p, data) in &self.pending {
+            if *p == bno {
+                buf.copy_from_slice(data);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_block(&mut self, bno: u32, buf: &[u8; BLOCK]) -> Result<(), Error> {
+        if bno < 2 {
+            let mut img = self.durable.clone();
+            let o = bno as usize * BLOCK;
+            img[o..o + BLOCK].copy_from_slice(buf);
+            self.captured.push(img);
+        }
+        self.pending.push((bno, *buf));
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        for (bno, data) in self.pending.drain(..) {
+            let o = bno as usize * BLOCK;
+            self.durable[o..o + BLOCK].copy_from_slice(&data);
+        }
+        Ok(())
+    }
+}
+
+/// Run commits with `plant` on a [`PendingDisk`]; for each image captured
+/// at a super write, whether it mounts and `fsck` finds it clean.
+fn early_super_images(plant: Plant) -> Vec<bool> {
+    let mut d = PendingDisk {
+        durable: fresh(64 * BLOCK),
+        pending: Vec::new(),
+        captured: Vec::new(),
+    };
+    let mut v = Vol::new();
+    mount(&mut d, &mut v).unwrap();
+    v.set_plant(plant);
+    for i in 0..6u32 {
+        v.create(
+            &mut d,
+            ROOT_INO,
+            format!("f{i}").as_bytes(),
+            InodeKind::Reg,
+            0o644,
+            None,
+        )
+        .unwrap();
+        let ino = v
+            .lookup(&mut d, ROOT_INO, format!("f{i}").as_bytes())
+            .unwrap()
+            .ino;
+        assert_eq!(v.write(&mut d, ino, 0, &payload(i)).unwrap(), 300);
+        v.sync(&mut d).unwrap();
+    }
+    assert_eq!(d.captured.len(), 6);
+    d.captured
+        .iter_mut()
+        .map(|img| {
+            let mut md = MemDisk::new(img).unwrap();
+            let mut mv = Vol::new();
+            mount(&mut md, &mut mv).is_ok() && fsck(&mut md).is_ok_and(|r| r.errors == 0)
+        })
+        .collect()
+}
+
+#[test]
+fn plant_early_super_breaks_rebuilt_image() {
+    assert!(early_super_images(Plant::None).iter().all(|&ok| ok));
+    let early = early_super_images(Plant::EarlySuper);
+    assert!(early.iter().any(|&ok| !ok), "{early:?}");
+}

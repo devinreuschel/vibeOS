@@ -16,4 +16,5 @@ pub(crate) mod addr_space_init;
 pub mod ktest;
 pub(crate) mod proc_init;
 pub(crate) mod syscall_init;
+pub(crate) mod uaccess_init;
 pub(crate) mod user_init;

@@ -4,10 +4,10 @@
 use vibeos::addr_space::{AddressSpace, AsError, UserMemError, UserPerms};
 use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
-    AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, ElfError, Image,
+    AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, Builder, EHDR_SIZE, ElfError, Image, PHDR_SIZE,
 };
-use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags};
-use vibeos::kalloc::TryVec;
+use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom};
+use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
@@ -15,7 +15,6 @@ use crate::file_init;
 use crate::thread_init::SpawnError;
 use crate::x86;
 
-use vibeos::limits::MAX_ELF;
 const STACK_PAGES: u64 = 32;
 const STACK_TOP: u64 = 0x0000_0000_8000_0000;
 
@@ -30,7 +29,6 @@ pub enum LoadError {
     Elf(ElfError),
     As(AsError),
     Mem(UserMemError),
-    TooBig,
     Empty,
     NoProc,
     /// The process's thread could not be made.
@@ -50,7 +48,6 @@ impl LoadError {
             Self::Elf(e) => e.as_str(),
             Self::As(_) => "as",
             Self::Mem(_) => "efault",
-            Self::TooBig => "too big",
             Self::Empty => "empty",
             Self::NoProc => "eagain",
             Self::Spawn(e) => e.as_str(),
@@ -74,43 +71,129 @@ fn align_up(x: u64, a: u64) -> u64 {
     }
 }
 
-fn read_path(path: &str) -> Result<TryVec<u8>, LoadError> {
-    let f = file_init::open_routed(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
-        .map_err(LoadError::Fs)?;
-    let r = read_file(&f);
-    let closed = file_init::close(f);
-    let bytes = r?;
-    closed.map_err(LoadError::Fs)?;
-    Ok(bytes)
+/// Where the loader reads an ELF file from: the open file, or an image in
+/// memory (C-RING3's `load_image`). One loader serves both (AGENTS.md
+/// rule 10).
+trait ImageSource {
+    /// The file's length in bytes.
+    fn len(&self) -> u64;
+    /// Fill `buf` with the bytes at `off`. A short read, where the file
+    /// ended first, is `ElfError::Truncated`.
+    fn read_exact_at(&mut self, off: u64, buf: &mut [u8]) -> Result<(), LoadError>;
 }
 
-/// Read `f` whole, at most its stated size, into a buffer reserved up
-/// front, so the reads never reallocate.
-fn read_file(f: &FileRef) -> Result<TryVec<u8>, LoadError> {
-    let st = file_init::stat(f).map_err(LoadError::Fs)?;
-    if st.size == 0 {
-        return Err(LoadError::Empty);
+/// An ELF image in memory: the in-guest tests' ring-3 images (C-RING3).
+#[cfg(feature = "kernel_tests")]
+struct MemImage<'a>(&'a [u8]);
+
+#[cfg(feature = "kernel_tests")]
+impl ImageSource for MemImage<'_> {
+    fn len(&self) -> u64 {
+        self.0.len() as u64
     }
-    if st.size > MAX_ELF {
-        return Err(LoadError::TooBig);
+
+    fn read_exact_at(&mut self, off: u64, buf: &mut [u8]) -> Result<(), LoadError> {
+        let bytes = usize::try_from(off)
+            .ok()
+            .and_then(|lo| Some(lo..lo.checked_add(buf.len())?))
+            .and_then(|r| self.0.get(r))
+            .ok_or(LoadError::Elf(ElfError::Truncated))?;
+        buf.copy_from_slice(bytes);
+        Ok(())
     }
-    let size = st.size as usize;
-    let mut buf = TryVec::try_with_capacity(size).map_err(|_| LoadError::NoMem)?;
-    let mut chunk = [0u8; 512];
-    while buf.len() < size {
-        let want = (size - buf.len()).min(chunk.len());
-        match file_init::read(f, &mut chunk[..want]) {
-            Ok(0) => break,
-            Ok(k) => buf
-                .try_extend_from_slice(&chunk[..k.min(want)])
-                .map_err(|_| LoadError::NoMem)?,
-            Err(e) => return Err(LoadError::Fs(e)),
+}
+
+/// An open ELF file of `len` bytes, whose file position is `pos`.
+struct FileImage {
+    file: FileRef,
+    len: u64,
+    pos: u64,
+}
+
+impl ImageSource for FileImage {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_exact_at(&mut self, off: u64, buf: &mut [u8]) -> Result<(), LoadError> {
+        if off != self.pos {
+            self.pos = file_init::seek(&self.file, SeekFrom::Start(off)).map_err(LoadError::Fs)?;
         }
+        let mut done = 0usize;
+        while let Some(rest) = buf.get_mut(done..).filter(|r| !r.is_empty()) {
+            // A file that shrank since `stat` ends early: not an ELF image.
+            let n = match file_init::read(&self.file, rest).map_err(LoadError::Fs)? {
+                0 => return Err(LoadError::Elf(ElfError::Truncated)),
+                n => n.min(rest.len()),
+            };
+            done += n;
+            self.pos += n as u64;
+        }
+        Ok(())
     }
-    Ok(buf)
 }
 
-fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError> {
+/// Program headers read per batch: 8 records, 448 bytes on the stack
+/// whatever `phnum` the file claims.
+const PH_BATCH: usize = 8;
+
+/// Read the ELF header and program headers of `src`, in batches of
+/// [`PH_BATCH`], and check them against its length.
+#[inline(never)]
+fn read_image<S: ImageSource>(src: &mut S) -> Result<Image, LoadError> {
+    let file_len = src.len();
+    let mut eh = [0u8; EHDR_SIZE];
+    src.read_exact_at(0, &mut eh)?;
+    let eh = elf::parse_ehdr(&eh, file_len).map_err(LoadError::Elf)?;
+    let mut b = Builder::new(eh, file_len);
+    let mut batch = [0u8; PH_BATCH * PHDR_SIZE];
+    let mut done = 0usize;
+    let phnum = usize::from(eh.phnum);
+    while done < phnum {
+        let n = (phnum - done).min(PH_BATCH);
+        let off = (done * PHDR_SIZE) as u64;
+        let off = eh
+            .phoff
+            .checked_add(off)
+            .ok_or(LoadError::Elf(ElfError::Truncated))?;
+        let buf = &mut batch[..n * PHDR_SIZE];
+        src.read_exact_at(off, buf)?;
+        for ph in buf.as_chunks::<PHDR_SIZE>().0 {
+            b.push(ph).map_err(LoadError::Elf)?;
+        }
+        done += n;
+    }
+    b.finish().map_err(LoadError::Elf)
+}
+
+/// Copy `len` file bytes at `off` of `src` to user address `va` of
+/// `space`, through a 512-byte stack buffer.
+#[inline(never)]
+fn copy_file_bytes<S: ImageSource>(
+    space: &mut AddressSpace,
+    src: &mut S,
+    off: u64,
+    va: u64,
+    len: u64,
+) -> Result<(), LoadError> {
+    let mut chunk = [0u8; 512];
+    let mut done = 0u64;
+    while done < len {
+        let n = (len - done).min(chunk.len() as u64) as usize;
+        let buf = &mut chunk[..n];
+        src.read_exact_at(off + done, buf)?;
+        space.write_bytes(va + done, buf).map_err(LoadError::Mem)?;
+        done += n as u64;
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn map_loads<S: ImageSource>(
+    space: &mut AddressSpace,
+    img: &Image,
+    src: &mut S,
+) -> Result<(), LoadError> {
     let mut top = 0u64;
     for seg in img.loads() {
         top = top.max(seg.vaddr.saturating_add(seg.memsz));
@@ -129,10 +212,7 @@ fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError>
             Err(e) => return Err(LoadError::As(e)),
         }
         if seg.filesz != 0 {
-            let bytes = img.file_bytes(*seg).map_err(LoadError::Elf)?;
-            space
-                .write_bytes(seg.vaddr, bytes)
-                .map_err(LoadError::Mem)?;
+            copy_file_bytes(space, src, seg.offset, seg.vaddr, seg.filesz)?;
         }
     }
     // The heap starts on the page after the image, as on Linux with
@@ -141,6 +221,7 @@ fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError>
     Ok(())
 }
 
+#[inline(never)]
 fn map_stack(space: &mut AddressSpace, exec: bool) -> Result<(u64, u64), LoadError> {
     let len = STACK_PAGES * PAGE_SIZE_4K;
     let base = STACK_TOP - len;
@@ -153,7 +234,13 @@ fn map_stack(space: &mut AddressSpace, exec: bool) -> Result<(u64, u64), LoadErr
     Ok((base, STACK_TOP))
 }
 
-fn setup_tls(space: &mut AddressSpace, img: &Image<'_>, stack_base: u64) -> Result<u64, LoadError> {
+#[inline(never)]
+fn setup_tls<S: ImageSource>(
+    space: &mut AddressSpace,
+    img: &Image,
+    stack_base: u64,
+    src: &mut S,
+) -> Result<u64, LoadError> {
     let Some(tls) = img.tls else {
         return Ok(0);
     };
@@ -169,17 +256,7 @@ fn setup_tls(space: &mut AddressSpace, img: &Image<'_>, stack_base: u64) -> Resu
     let fs = tls_map + map_len - 8;
     let tls_start = fs - aligned;
     if tls.filesz != 0 {
-        let start = tls.offset as usize;
-        let end = start
-            .checked_add(tls.filesz as usize)
-            .ok_or(LoadError::Elf(ElfError::Truncated))?;
-        let bytes = img
-            .data
-            .get(start..end)
-            .ok_or(LoadError::Elf(ElfError::Truncated))?;
-        space
-            .write_bytes(tls_start, bytes)
-            .map_err(LoadError::Mem)?;
+        copy_file_bytes(space, src, tls.offset, tls_start, tls.filesz)?;
     }
     space
         .write_bytes(fs, &fs.to_le_bytes())
@@ -196,9 +273,10 @@ fn at_random() -> [u8; 16] {
     b
 }
 
+#[inline(never)]
 fn fill_stack(
     space: &AddressSpace,
-    img: &Image<'_>,
+    img: &Image,
     argv: &[&[u8]],
     envp: &[&[u8]],
 ) -> Result<u64, LoadError> {
@@ -295,7 +373,38 @@ fn load_path_inner<A: AsRef<[u8]>>(
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
-    let bytes = read_path(path)?;
+    let file = file_init::open_routed(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
+        .map_err(LoadError::Fs)?;
+    let mut src = FileImage {
+        file,
+        len: 0,
+        pos: 0,
+    };
+    let r = load_file(&mut src, path, argv, envp);
+    match file_init::close(src.file) {
+        Ok(()) => r,
+        Err(e) => {
+            if let Ok(loaded) = r {
+                addr_space_init::teardown(loaded.space);
+            }
+            Err(LoadError::Fs(e))
+        }
+    }
+}
+
+/// Load the open file `src` of `path`, mapping each segment from it.
+#[inline(never)]
+fn load_file<A: AsRef<[u8]>>(
+    src: &mut FileImage,
+    path: &str,
+    argv: &[A],
+    envp: &[&[u8]],
+) -> Result<Loaded, LoadError> {
+    let st = file_init::stat(&src.file).map_err(LoadError::Fs)?;
+    if st.size == 0 {
+        return Err(LoadError::Empty);
+    }
+    src.len = st.size;
     let mut argv_b =
         TryVec::<&[u8]>::try_with_capacity(argv.len().max(1)).map_err(|_| LoadError::NoMem)?;
     if argv.is_empty() {
@@ -306,45 +415,61 @@ fn load_path_inner<A: AsRef<[u8]>>(
     for a in argv {
         argv_b.try_push(a.as_ref()).map_err(|_| LoadError::NoMem)?;
     }
-    load_image_env(&bytes, &argv_b, envp)
+    load_from(src, &argv_b, envp)
 }
 
 /// Build a new address space from the ELF image `elf`, with `argv` on its
 /// initial stack as given. Caller installs it only after this returns.
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "C-RING3's in-guest entry, `proc_init::spawn_image`, is its caller"
-    )
-)]
+/// The in-guest tests' loader (C-RING3), over the same `load_from`.
+#[cfg(feature = "kernel_tests")]
 pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
-    load_image_env(elf, argv, &[])
+    load_from(&mut MemImage(elf), argv, &[])
 }
 
-/// [`load_image`] with `envp` on the initial stack as well.
-fn load_image_env(elf: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> Result<Loaded, LoadError> {
-    let img = elf::parse(elf).map_err(LoadError::Elf)?;
-    let Some(mut space) = addr_space_init::create() else {
-        return Err(LoadError::As(AsError::OutOfFrames));
-    };
+/// Build a new address space from the ELF file `src`, with `argv` and
+/// `envp` on its initial stack, reading its headers and each segment's file
+/// bytes from it as it maps them.
+fn load_from<S: ImageSource>(
+    src: &mut S,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<Loaded, LoadError> {
+    let img = read_image(src)?;
+    // The new space stays on the heap while the image loads, off the
+    // stack under which each file read runs its filesystem's frames.
+    let mut space = new_space()?;
     let mapped = (|| {
-        map_loads(&mut space, &img)?;
+        map_loads(&mut space, &img, src)?;
         let (stack_base, _) = map_stack(&mut space, img.stack_exec)?;
-        let fs = setup_tls(&mut space, &img, stack_base)?;
+        let fs = setup_tls(&mut space, &img, stack_base, src)?;
         let rsp = fill_stack(&space, &img, argv, envp)?;
         Ok((img.entry, rsp, fs))
     })();
     match mapped {
         Ok((entry, rsp, fs)) => Ok(Loaded {
-            space,
+            space: space.into_inner(),
             entry,
             rsp,
             fs,
         }),
         Err(e) => {
-            addr_space_init::teardown(space);
+            drop_space(space);
             Err(e)
         }
     }
+}
+
+/// A new user address space, on the heap.
+#[inline(never)]
+fn new_space() -> Result<TryBox<AddressSpace>, LoadError> {
+    // The box first, so a refused allocation leaves nothing to tear down.
+    let slot = TryBox::<AddressSpace>::try_new_uninit().map_err(|_| LoadError::NoMem)?;
+    let space = addr_space_init::create().ok_or(LoadError::As(AsError::OutOfFrames))?;
+    Ok(slot.write(space))
+}
+
+/// Unmap and free what a failed load mapped.
+#[inline(never)]
+fn drop_space(space: TryBox<AddressSpace>) {
+    addr_space_init::teardown(space.into_inner());
 }

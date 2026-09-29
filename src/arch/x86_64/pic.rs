@@ -11,7 +11,7 @@ use vibeos::pic::{
 };
 use vibeos::vectors;
 
-use crate::serial::Serial;
+use crate::serial;
 use crate::x86;
 
 /// Remap master `0x20` / slave `0x28`, then mask every line.
@@ -126,9 +126,15 @@ fn eoi(kind: Eoi) {
 }
 
 fn unexpected(irq: u8) -> ! {
-    Serial::write_bytes(b"vibeOS: irq: unexpected ");
-    let mut buf = [0u8; 4];
-    Serial::write_bytes(fmt_util::write_dec(irq as u64, &mut buf));
-    Serial::write_bytes(b"\n");
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = serial::write_line_with(|w| {
+        w.push_bytes(b"vibeOS: irq: unexpected ");
+        let mut buf = [0u8; 4];
+        w.push_bytes(fmt_util::write_dec(irq as u64, &mut buf));
+        Ok(())
+    });
     x86::halt();
 }

@@ -20,11 +20,11 @@ weakness was that nearly everything lived behind `main.rs` and was therefore unt
 Anything in `crates/core/src/lib.rs` and its submodules, compiled as `vibeos-core` on the host. No hardware
 access, no `unsafe` port I/O, no MMIO. The kernel half calls into it. Each port's pure half
 ([§11.1](PORTABILITY.md#111-the-seam)) is part of it and runs on every host. Rule; not yet enforced: ROADMAP §10.3.
-The x86-only pieces (`switch_context` in `thread.rs`, the fences in `dma.rs`) are
-`cfg(target_arch = "x86_64")`, so an aarch64 host such as the dev Mac compiles them and their tests
-out. ROADMAP §10.3 moves them to the kernel crate, and the host test that runs a port's switch
-assembly lives in `tests/hostlib`, which includes that port's assembly when the host's architecture
-matches (ROADMAP §10.2, §11.4).
+The core carries no assembly and no `cfg(target_arch)`, which `scripts/check_core_stable.py` enforces,
+so every host runs all of its tests. A host test of a port's assembly lives in `tests/hostlib`:
+`switch_context_roundtrip`, in `tests/hostlib/tests/switch_context.rs`, includes
+`src/arch/x86_64/switch.rs` with empty `cli` and `sti` macros and runs on x86_64 Linux hosts, since
+the assembly uses the kernel's object format (ELF); other hosts build an empty test binary.
 
 Things that belong here and are easy to get wrong, so should have tests from the day they are written:
 
@@ -93,7 +93,8 @@ vibeOS: ktest: end
 ```
 
 The harness requires `begin` and `end`, rejects any `FAIL` line and any panic signature, and checks
-the exit status. ROADMAP §10.2 makes it read each of these lines only when framed (§2.6).
+the exit status. It reads each of these lines only when framed (§2.6), so a user program's copy, such as
+the unframed `?vibeOS: ktest: FAIL forged` line `/bin/tests` prints, is ignored.
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -134,6 +135,33 @@ its configuration, in either direction, so a lost `-device` or a regressed detec
 tests into skips fails the tier. Tests a run does not select print no run line and need no row, and
 a test that `VIBEOS_KTEST` names without a glob must run whatever the file says (ROADMAP §12.3).
 
+Besides the verdicts, `run_ktest.py` reads these lines of the in-guest tests themselves:
+
+```
+vibeOS: ktest: serial whole <i> of 1000 <pad>
+vibeOS: ktest: serial noise cpu<c> <n> <pad>
+vibeOS: ktest: serial noise klog cpu<c> <n> <pad>
+```
+
+`serial_lines_whole` (ROADMAP §10.2, F138) pins a thread to each AP that prints the two `serial noise`
+lines in a loop, while CPU 0 prints the 1,000 numbered `serial whole` lines; `<pad>` is a fixed
+36-byte string. When the run holds `vibeOS: ktest: ok serial_lines_whole`, `_check_serial_whole`
+requires each numbered line exactly once and fails on any line that holds `serial whole` or
+`serial noise` but is not exactly one of these lines, a fragment of a line another CPU split. It reads
+kernel lines; a log-ring replay of one (a dump's `logrec`) is checked for fragments and not counted.
+
+```
+vibeOS: ktest: serial frame a?b?c?d
+?serial-frame open
+vibeOS: ktest: serial frame after open
+```
+
+`serial_frame` (§2.6) prints a kernel line with a `\n`, a `\r` and a 0x1E inside it, then writes
+`\x1eserial-frame open` through the console `write` that user descriptors reach, then a kernel line.
+When the run holds `vibeOS: ktest: ok serial_frame`, `_check_serial_frame` requires the first framed
+with each of the three as `?`, the second as the exact unframed line `?serial-frame open`, and the
+third framed on a later line of its own, since the kernel breaks the open user line first.
+
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
 
@@ -157,10 +185,11 @@ removed silently. The executable contract is `boot_contract_markers()` in `tests
 the list below gives its order, the paragraphs after it add the lines that depend on the machine (the
 calibration source, the LAPIC timer mode, the per-AP pairs, and the partition children), and the
 `_start` table in [section 3.3](BOOT.md#33-_start-order) says why each step sits where it does. Every line in
-it is the kernel's except `shell ready`, which `/bin/sh` prints in the production ISO. ROADMAP §10.2
-makes the harness match the kernel's lines only when framed (§2.6), and a line a user program prints
-(`shell ready`, the ROADMAP §10.5 `utest_*` lines, `user: tests ok`) only when unframed; today it
-matches every line.
+it is the kernel's except `shell ready`, which `/bin/sh` prints in the production ISO. The harness
+matches the kernel's lines only when framed (§2.6), and a line a user program prints (`shell ready`,
+the ROADMAP §10.5 `utest_*` lines, `user: tests begin`, `ok` and `fail`, `user: dup ok`, the `init:`
+lines, and the console-input replies) only when unframed. `Marker.source` says which a marker is;
+until the registry below gives each line its source, `frame.USER_PREFIXES` lists the user lines.
 
 Planned (ROADMAP §10.2): one registry, `tests/contract/markers.toml`, holds every line the harness
 knows (contract markers, diagnostics, failure lines and halt reasons, and the ktest and utest
@@ -289,9 +318,10 @@ other run it fails the run, since a recovery no test expected is a bug a timeout
 lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a 30 s pause.
 
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
-fd 2, and a fuzzer writes random bytes. ROADMAP §10.2 makes the harness scan framed lines only
-(§2.6). Before the kernel's first framed line it fails fast on Limine's panic line, the one failure
-that cannot be framed.
+fd 2, and a fuzzer writes random bytes. The harness scans framed lines only (§2.6), and fails on
+`user: tests fail` only when unframed. Before the kernel's first framed line it fails fast on Limine's
+panic line, the one failure that cannot be framed: `PANIC`, optional ANSI colour codes, then `: `
+(`frame.LIMINE_PANIC`). After the first framed line the same text is just a user line.
 
 Expected-panic e2e matches boot markers only against the lines before the first panic signature (or
 dump banner), so the dump's `vibeOS: logrec:` replay of earlier records cannot satisfy one, and a
@@ -342,6 +372,15 @@ serial lines carry only the guest's output. When QEMU exits before the last mark
 the missing marker, QEMU's exit status, and the last 20 lines of its stderr, then the serial tail, so
 a firmware QEMU could not load reads as that and not only as `missing marker 'serial_online'`
 (F079); a timeout shows the stderr lines too when there are any.
+
+Every driver classifies each serial line through `tests/harness/frame.py` (DESIGN §2.6): a framed line
+is the kernel's and is matched with its frame stripped, an unframed line is a user program's or the
+loader's, and each driver checks the three failure tuples, the kernel's `PANIC_SIGNATURES` on framed
+lines, `frame.USER_FAILURES` on unframed ones, and `frame.LIMINE_SIGNATURES` before the first framed
+line. `/bin/tests` writes `\x1evibeOS: ktest: FAIL forged`, `\x1epanicked at forged` and
+`\x1e#GP\x1eforged` to fd 1 and to fd 2; the run stays green, and `run_e2e.py`'s `_check_forged_lines`
+requires each as an unframed line (`?vibeOS: ktest: FAIL forged`, `?panicked at forged`,
+`?#GP?forged`) exactly twice and no framed line holding `forged`, and records `forged_user_lines`.
 
 The `vibefs_crash` build (`fs::vibefs_crash::crash_loop`) prints no boot contract past its own lines,
 which `run_vibefs_crash.py` knows:
@@ -396,8 +435,9 @@ number of images checked, and the trace's write and flush counts.
 
 | Context | Flags |
 |---------|-------|
-| `make run` | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -accel tcg -no-reboot -serial stdio` (Makefile `QEMU_BASE`, plus `-serial stdio` from the `run` recipe) |
-| e2e | as above plus `-display none -monitor unix:...,server=on,wait=off` (`harness.qemu_argv`) |
+| e2e | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -no-reboot -display none -serial stdio -monitor unix:...,server=on,wait=off -accel tcg` (`harness.qemu_argv`) |
+| UEFI (`VIBEOS_BIOS=uefi`, `make test-e2e-uefi`) | as e2e plus `-drive if=pflash,format=raw,unit=0,readonly=on,file=<code>` and `-drive if=pflash,format=raw,unit=1,file=<copy>`, where `<copy>` is a fresh copy of the pair's variable-store template made for each QEMU start (`harness.new_vars_copy`, in one per-process temporary directory that exit removes), and `-boot order=d,menu=off` with `-fw_cfg` entries turning off OVMF's PXE and setup (`harness.OVMF_BOOT_ARGS`). A comma in a path is doubled. Never `-bios` |
+| `make run`, `make run-panic`, `make debug` | e2e's argv from `tests/harness/run_interactive.py` (`run`, `panic`, `debug`), which builds it with `env_config` and `harness.qemu_argv` and adds no `-monitor`: `make run` opens a display window instead of `-display none`, `make run-panic` boots `build/vibeos-panic.iso` with `-display none`, and `make debug` is `make run` plus `-s -S`. COM1 is the terminal (`-serial stdio`), and the launcher ignores `SIGINT` while QEMU runs |
 | ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
@@ -413,19 +453,22 @@ declared `expect=reset` (§8.3) boots without it and counts QMP `RESET` events i
 its line does not expect still fails the run.
 
 All `VIBEOS_*` overrides are read in `tests/harness/harness.py` (`env_config` / `env_flag` /
-`env_int`). Drivers do not parse the environment. Makefile `?=` values are the `make run` source;
-harness defaults match them.
+`env_int`), which holds their only defaults. Drivers do not parse the environment, and the Makefile
+sets none of them: `make run`, `make run-panic` and `make debug` honour the same settings through
+`run_interactive.py`.
 
 | Variable | Default | Who honours it |
 |----------|---------|----------------|
-| `VIBEOS_ISO` | per driver, from `harness.default_iso(variant)` (`build/vibeos.iso`, `build/vibeos-ktest.iso`, `build/vibeos-vibefs-crash.iso`) | all drivers |
-| `VIBEOS_SMP` | `2` | all; `make run` |
-| `VIBEOS_QEMU_CPU` | `max` | all; `make run` |
-| `VIBEOS_MEM` | `128M` | all; `make run` |
-| `VIBEOS_BIOS` | unset (SeaBIOS) | all |
-| `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all; `make run` |
-| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash; planned (ROADMAP §10.2): the §8.2 boot allowance, which bounds only the stretches of a boot in which no test runs | all drivers |
-| `VIBEOS_QEMU_EXTRA` | empty | all drivers |
+| `VIBEOS_ISO` | per driver, from `harness.default_iso(variant)` (`build/vibeos.iso`, `build/vibeos-ktest.iso`, `build/vibeos-vibefs-crash.iso`) | all drivers; `run_interactive` |
+| `VIBEOS_SMP` | `2` | all drivers; `run_interactive` |
+| `VIBEOS_QEMU_CPU` | `max` | all drivers; `run_interactive` |
+| `VIBEOS_MEM` | `128M` | all drivers; `run_interactive` |
+| `VIBEOS_BIOS` | unset or `seabios`: SeaBIOS; `uefi`: the x86_64 firmware pair the probe finds, on pflash; anything else fails and names `VIBEOS_FW_X86_64` | all drivers; `run_interactive` |
+| `VIBEOS_FW_X86_64` | probed (the firmware table below) | all drivers and `run_interactive` under `VIBEOS_BIOS=uefi`; `make test-e2e-uefi`; `setup.sh` |
+| `VIBEOS_FW_AARCH64` | probed (the firmware table below) | `run_interactive.py firmware aarch64` and `setup.sh`; planned (ROADMAP §11.7): the aarch64 QEMU line |
+| `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all drivers; `run_interactive` |
+| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash; planned (ROADMAP §10.2): the §8.2 boot allowance, which bounds only the stretches of a boot in which no test runs | all drivers; `run_interactive` only when set |
+| `VIBEOS_QEMU_EXTRA` | empty | all drivers; `run_interactive` |
 | `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all drivers, which write `build/results/<arch>-<tier>.json` (schema 1, `tests/harness/results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
@@ -441,11 +484,43 @@ harness defaults match them.
 | `VIBEOS_PREBUILT` | unset | the Makefile: `1` makes `make test-*` use the files `make prebuilt` packed (`build/prebuilt.tar`, unpacked in place) and build nothing, as a CI tier job does (§8.6) |
 | `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when `qemu-system-x86_64 --version` differs, or when the variable is unset (§8.6, Runners) |
 
-`VIBEOS_BIOS` reaches QEMU as `-bios`, which accepts only an image whose size is a multiple of
-64 KiB. apt's combined `/usr/share/ovmf/OVMF.fd`, the Makefile's `OVMF` default and the one CI uses,
-boots. Homebrew's code-only `edk2-x86_64-code.fd` is refused and needs `-drive if=pflash` instead.
-`make test-e2e-uefi` prints a skip message when `OVMF` does not exist and then runs the harness
-anyway, because the check and the run are separate recipe lines (ROADMAP §10.2, F079).
+UEFI firmware is found by one probe, `harness.probe_firmware(arch)`, which reads one table of
+(code image, variable-store template) pairs per architecture, `harness.FIRMWARE_TABLE`, in this
+order (ROADMAP §10.2, I1, F079):
+
+| Architecture | Code image | Variable-store template | Directories |
+|--------------|------------|-------------------------|-------------|
+| x86_64 | `OVMF_CODE_4M.fd` | `OVMF_VARS_4M.fd` | `/usr/share/OVMF` (Ubuntu's `ovmf`) |
+| x86_64 | `edk2-x86_64-code.fd` | `edk2-i386-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
+| aarch64 | `AAVMF_CODE.fd` | `AAVMF_VARS.fd` | `/usr/share/AAVMF` (Ubuntu's `qemu-efi-aarch64`) |
+| aarch64 | `edk2-aarch64-code.fd` | `edk2-arm-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
+
+Homebrew's `<prefix>` is `$HOMEBREW_PREFIX` when set, then `/opt/homebrew`, then `/usr/local`.
+Homebrew ships no vars file named for either 64-bit architecture, so its 32-bit ones pair with the
+64-bit code. The first row whose code image exists decides: when its template is missing the probe
+fails and names both paths, and never falls through to a later row. `VIBEOS_FW_X86_64` and
+`VIBEOS_FW_AARCH64` override the probe with a code image, whose template is its row's in the same
+directory; a missing file, or an image no row of that architecture names, fails. Secure-boot builds
+need SMM and `q35`, so the table leaves them out. The code image boots read-only from pflash, so a
+code-only image boots whatever its size (Homebrew's `edk2-x86_64-code.fd` is 0x37C000 bytes, which
+`-bios` refuses because it is no multiple of 64 KiB).
+
+`python3 tests/harness/run_interactive.py firmware <arch>` prints the pair and exits 0, exits 1 and
+names the directories it searched when none is installed, and exits 2 on a probe error; `setup.sh`
+reports it for both architectures. `make test-e2e-uefi` runs it and the harness in one shell line:
+0 runs the boot contract with `VIBEOS_BIOS=uefi` and passes its status on, 1 prints
+`test-e2e-uefi: SKIP: …` and exits 0, or prints `test-e2e-uefi: FAIL: …` and fails when `CI` is
+set, and 2 fails.
+
+`make debug` builds the production ISO and starts it as `make run` does, with `-s -S`: QEMU opens a
+gdb stub on TCP port 1234 (every interface, as `-s` does) and holds the CPUs until gdb continues.
+The launcher first writes `build/debug/symbols.gdb`, which loads the kernel ELF
+(`build/kernels/vibeos-default.elf`) with `file` and each initrd program in the Makefile's
+`DEBUG_USER_ELFS` with `add-symbol-file <elf> -o 0`. From the repository root, in a second terminal,
+`gdb -x scripts/vibeos.gdb` (Homebrew's `x86_64-elf-gdb` on macOS) sources that file and connects.
+The kernel is not in memory when QEMU starts, so set a hardware breakpoint (`hbreak _start`) and
+`continue`; a software `break` would be written into memory Limine later overwrites. Today's user
+ELFs carry no symbols, so gdb warns that they add none.
 
 ## 8.5 Make targets
 

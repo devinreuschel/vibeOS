@@ -22,10 +22,13 @@ named ELF under `build/kernels/`, which the variant's recipe deletes before it b
 and prerequisites are a `find` over `src/` and `crates/core/src/`. The host tools and the initrd,
 which build from `vibeos-core` too, list the same sources and `Cargo.lock` (`$(HOSTLIB_DEPS)`).
 
-**Bare `cargo build` has an empty initrd; a relative linker script used to fail off-root.**
-`build.rs` only copies `VIBEOS_INITRD` (64 KiB) and passes an absolute `-T linker.ld`. Unset
-`VIBEOS_INITRD` embeds zeros so `cargo check` works. Rule: `make` stages `build/initrd.fat` via
-hostlib `mkinitrd`. Do not generate the image inside `build.rs`.
+**A kernel booted without the ISO's module has no initrd; a relative linker script used to fail off-root.**
+The initrd is not in the kernel: `limine.conf`'s `module_path:` loads `/boot/initrd.fat` as a Limine
+module, and `fat_init` mounts that memory in place. A kernel booted from a hand-made config without
+the `module_path:` line, or from bare `cargo build` output, mounts a ramfs root and reports
+`user: init failed`. `build.rs` only passes an absolute `-T linker.ld` (and the ksyms table). Rule:
+`make` builds `build/initrd.fat` with hostlib `mkinitrd` and `mkiso.sh` stages it. Do not generate
+the image inside `build.rs` or embed it in the kernel.
 
 **A Limine response pointer is null and the kernel dies with no explanation.**
 The request static was not in the `.limine_requests` section, so the loader never saw it. Rule: every
@@ -167,8 +170,9 @@ queue, which QEMU ignores and a device that shares one doorbell does not (ROADMA
 `fence(Release)` + `sfence`, then the index. Used-ring harvest is `dma_rmb` after observing `used.idx`.
 `dma_wmb` orders stores only. The kick decision loads `avail_event` or `used.flags` after the
 `avail.idx` store, and the harvest reads `used.idx` again after its `used_event` store, so each needs
-a full barrier (`mfence`) between the store and the load (virtio 1.2 §2.7.13.4.1). No `dma_mb`
-exists, and under `VIRTIO_F_EVENT_IDX` one lost kick stops a queue for good (ROADMAP §10.3, F016).
+a full barrier between the store and the load (virtio 1.2 §2.7.13.4.1): without it, under
+`VIRTIO_F_EVENT_IDX` one lost kick stops a queue for good. `dma::dma_mb` (`mfence` on x86_64) runs
+first in `SplitQueue::should_kick` and right after `get_used`'s `used_event` store (F016).
 On aarch64 the notify is a Device store, which can reach the device before the `avail.idx` store is
 visible; `mmio_write`'s `dmb oshst` orders them ([§4.7](MEMORY.md#47-dma)).
 

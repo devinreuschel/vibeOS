@@ -135,8 +135,10 @@ impl TlsSeg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Image<'a> {
-    pub data: &'a [u8],
+pub struct Image {
+    /// Length of the file the image was parsed against; every `PT_LOAD`'s
+    /// and the `PT_TLS` init image's file bytes end at or below it.
+    pub file_len: u64,
     pub entry: u64,
     pub loads: [LoadSeg; MAX_LOADS],
     pub nload: usize,
@@ -205,11 +207,31 @@ fn ranges_overlap(a: u64, alen: u64, b: u64, blen: u64) -> bool {
     a < be && b < ae
 }
 
-pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
-    if data.len() < EHDR_SIZE {
+/// What the loader needs from the 64-byte ELF header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ehdr {
+    pub entry: u64,
+    pub phoff: u64,
+    pub phnum: u16,
+}
+
+impl Ehdr {
+    /// End of the program header table in the file; `parse_ehdr` checked
+    /// it is at or below the file's length.
+    fn ph_end(&self) -> Option<u64> {
+        let bytes = u64::from(self.phnum).checked_mul(PHDR_SIZE as u64)?;
+        self.phoff.checked_add(bytes)
+    }
+}
+
+/// Check the ELF header `b` (its first [`EHDR_SIZE`] bytes) of a file of
+/// `file_len` bytes, whose program header table must end at or below
+/// `file_len`.
+pub fn parse_ehdr(b: &[u8], file_len: u64) -> Result<Ehdr, ElfError> {
+    if b.len() < EHDR_SIZE || file_len < EHDR_SIZE as u64 {
         return Err(ElfError::Truncated);
     }
-    let [m0, m1, m2, m3, class, endian, version, ..] = bytes_at::<EI_NIDENT>(data, 0)?;
+    let [m0, m1, m2, m3, class, endian, version, ..] = bytes_at::<EI_NIDENT>(b, 0)?;
     if [m0, m1, m2, m3] != [ELFMAG0, b'E', b'L', b'F'] {
         return Err(ElfError::BadMagic);
     }
@@ -222,62 +244,88 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
     if version != EV_CURRENT {
         return Err(ElfError::BadVersion);
     }
-    let typ = le16(data, 16)?;
+    let typ = le16(b, 16)?;
     if typ != ET_EXEC {
         return Err(ElfError::BadType);
     }
-    let machine = le16(data, 18)?;
+    let machine = le16(b, 18)?;
     if machine != EM_X86_64 {
         return Err(ElfError::BadMachine);
     }
-    let version = le32(data, 20)?;
+    let version = le32(b, 20)?;
     if version != 1 {
         return Err(ElfError::BadVersion);
     }
-    let entry = le64(data, 24)?;
-    let phoff = le64(data, 32)?;
-    let ehsize = le16(data, 52)?;
+    let entry = le64(b, 24)?;
+    let phoff = le64(b, 32)?;
+    let ehsize = le16(b, 52)?;
     if ehsize as usize != EHDR_SIZE {
         return Err(ElfError::Truncated);
     }
-    let phentsize = le16(data, 54)?;
+    let phentsize = le16(b, 54)?;
     if phentsize as usize != PHDR_SIZE {
         return Err(ElfError::BadPhentsize);
     }
-    let phnum = le16(data, 56)?;
+    let phnum = le16(b, 56)?;
     if phnum == 0 {
         return Err(ElfError::NoLoad);
     }
-    let ph_bytes = (phnum as u64)
-        .checked_mul(phentsize as u64)
-        .ok_or(ElfError::Truncated)?;
-    let ph_end = phoff.checked_add(ph_bytes).ok_or(ElfError::Truncated)?;
-    if ph_end > data.len() as u64 {
+    let eh = Ehdr {
+        entry,
+        phoff,
+        phnum,
+    };
+    if eh.ph_end().ok_or(ElfError::Truncated)? > file_len {
         return Err(ElfError::Truncated);
     }
-    // `ph_end <= data.len()`, so both bounds fit a `usize`.
-    let table = usize::try_from(phoff)
-        .ok()
-        .zip(usize::try_from(ph_end).ok())
-        .and_then(|(lo, hi)| data.get(lo..hi))
-        .ok_or(ElfError::Truncated)?;
+    Ok(eh)
+}
 
-    let mut loads = [LoadSeg {
-        vaddr: 0,
-        memsz: 0,
-        offset: 0,
-        filesz: 0,
-        write: false,
-        exec: false,
-    }; MAX_LOADS];
-    let mut nload = 0usize;
-    let mut stack_exec = false;
-    let mut saw_gnu_stack = false;
-    let mut tls = None;
-    let mut phdr_va = None;
-    // `table` is `phnum` entries of `PHDR_SIZE` bytes (`phentsize` was
-    // checked above), so each chunk is one whole entry.
-    for ph in table.as_chunks::<PHDR_SIZE>().0 {
+/// Builds an [`Image`] from the program headers of a file, pushed one
+/// [`PHDR_SIZE`]-byte record at a time in table order, so a loader reading
+/// from a file never holds the whole table.
+#[derive(Clone, Copy, Debug)]
+pub struct Builder {
+    eh: Ehdr,
+    file_len: u64,
+    pushed: u16,
+    loads: [LoadSeg; MAX_LOADS],
+    nload: usize,
+    stack_exec: bool,
+    saw_gnu_stack: bool,
+    tls: Option<TlsSeg>,
+    phdr_va: Option<u64>,
+}
+
+impl Builder {
+    pub fn new(eh: Ehdr, file_len: u64) -> Self {
+        Self {
+            eh,
+            file_len,
+            pushed: 0,
+            loads: [LoadSeg {
+                vaddr: 0,
+                memsz: 0,
+                offset: 0,
+                filesz: 0,
+                write: false,
+                exec: false,
+            }; MAX_LOADS],
+            nload: 0,
+            stack_exec: false,
+            saw_gnu_stack: false,
+            tls: None,
+            phdr_va: None,
+        }
+    }
+
+    /// Take the next program header record `ph`. `Truncated` past the
+    /// header's `phnum`, or for a record shorter than [`PHDR_SIZE`].
+    pub fn push(&mut self, ph: &[u8]) -> Result<(), ElfError> {
+        if self.pushed >= self.eh.phnum || ph.len() < PHDR_SIZE {
+            return Err(ElfError::Truncated);
+        }
+        self.pushed = self.pushed.checked_add(1).ok_or(ElfError::Truncated)?;
         let p_type = le32(ph, 0)?;
         let p_flags = le32(ph, 4)?;
         let p_offset = le64(ph, 8)?;
@@ -298,18 +346,19 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
                 if p_align > 1 && p_vaddr.checked_rem(p_align) != p_offset.checked_rem(p_align) {
                     return Err(ElfError::BadAlign);
                 }
-                let file_end = p_offset.checked_add(p_filesz).ok_or(ElfError::Truncated)?;
-                if file_end > data.len() as u64 {
-                    return Err(ElfError::Truncated);
-                }
-                if loads
+                self.check_file_bytes(p_offset, p_filesz)?;
+                if self
+                    .loads
                     .iter()
-                    .take(nload)
+                    .take(self.nload)
                     .any(|l| ranges_overlap(l.vaddr, l.memsz, p_vaddr, p_memsz))
                 {
                     return Err(ElfError::Overlap);
                 }
-                let slot = loads.get_mut(nload).ok_or(ElfError::TooManyLoads)?;
+                let slot = self
+                    .loads
+                    .get_mut(self.nload)
+                    .ok_or(ElfError::TooManyLoads)?;
                 *slot = LoadSeg {
                     vaddr: p_vaddr,
                     memsz: p_memsz,
@@ -318,11 +367,11 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
                     write: p_flags & PF_W != 0,
                     exec: p_flags & PF_X != 0,
                 };
-                nload = nload.checked_add(1).ok_or(ElfError::TooManyLoads)?;
+                self.nload = self.nload.checked_add(1).ok_or(ElfError::TooManyLoads)?;
             }
             PT_GNU_STACK => {
-                saw_gnu_stack = true;
-                stack_exec = p_flags & PF_X != 0;
+                self.saw_gnu_stack = true;
+                self.stack_exec = p_flags & PF_X != 0;
             }
             PT_TLS => {
                 if p_filesz > p_memsz {
@@ -331,7 +380,8 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
                 if p_align != 0 && !p_align.is_power_of_two() {
                     return Err(ElfError::BadAlign);
                 }
-                tls = Some(TlsSeg {
+                self.check_file_bytes(p_offset, p_filesz)?;
+                self.tls = Some(TlsSeg {
                     vaddr: p_vaddr,
                     offset: p_offset,
                     filesz: p_filesz,
@@ -340,43 +390,94 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
                 });
             }
             PT_PHDR => {
-                phdr_va = Some(p_vaddr);
+                self.phdr_va = Some(p_vaddr);
             }
             _ => {}
         }
+        Ok(())
     }
-    if nload == 0 {
-        return Err(ElfError::NoLoad);
+
+    /// `Truncated` unless `[offset, offset + filesz)` lies in the file.
+    fn check_file_bytes(&self, offset: u64, filesz: u64) -> Result<(), ElfError> {
+        let end = offset.checked_add(filesz).ok_or(ElfError::Truncated)?;
+        if end > self.file_len {
+            return Err(ElfError::Truncated);
+        }
+        Ok(())
     }
-    image_bytes(loads.get(..nload).ok_or(ElfError::TooManyLoads)?, tls)?;
-    if !saw_gnu_stack {
-        stack_exec = false;
+
+    /// The image, once every one of the header's `phnum` records was
+    /// pushed; `Truncated` before.
+    pub fn finish(self) -> Result<Image, ElfError> {
+        if self.pushed != self.eh.phnum {
+            return Err(ElfError::Truncated);
+        }
+        let Self {
+            eh,
+            file_len,
+            loads,
+            nload,
+            mut stack_exec,
+            saw_gnu_stack,
+            tls,
+            mut phdr_va,
+            ..
+        } = self;
+        if nload == 0 {
+            return Err(ElfError::NoLoad);
+        }
+        image_bytes(loads.get(..nload).ok_or(ElfError::TooManyLoads)?, tls)?;
+        if !saw_gnu_stack {
+            stack_exec = false;
+        }
+        check_user_va(eh.entry, 1)?;
+        let ph_end = eh.ph_end().ok_or(ElfError::Truncated)?;
+        if phdr_va.is_none() {
+            // The first `PT_LOAD` whose file bytes hold the whole table maps it.
+            phdr_va = loads.iter().take(nload).find_map(|s| {
+                let delta = eh.phoff.checked_sub(s.offset)?;
+                (ph_end <= s.offset.checked_add(s.filesz)?).then_some(())?;
+                s.vaddr.checked_add(delta)
+            });
+        }
+        if let Some(va) = phdr_va {
+            let ph_len = u64::from(eh.phnum).saturating_mul(PHDR_SIZE as u64).max(1);
+            check_user_va(va, ph_len)?;
+        }
+        Ok(Image {
+            file_len,
+            entry: eh.entry,
+            loads,
+            nload,
+            stack_exec,
+            tls,
+            phoff: eh.phoff,
+            phentsize: PHDR_SIZE as u16,
+            phnum: eh.phnum,
+            phdr_va,
+        })
     }
-    check_user_va(entry, 1)?;
-    if phdr_va.is_none() {
-        // The first `PT_LOAD` whose file bytes hold the whole table maps it.
-        phdr_va = loads.iter().take(nload).find_map(|s| {
-            let delta = phoff.checked_sub(s.offset)?;
-            (ph_end <= s.offset.checked_add(s.filesz)?).then_some(())?;
-            s.vaddr.checked_add(delta)
-        });
+}
+
+/// Parse the whole ELF file `data`: [`parse_ehdr`], then every program
+/// header through a [`Builder`].
+pub fn parse(data: &[u8]) -> Result<Image, ElfError> {
+    let file_len = data.len() as u64;
+    let eh = parse_ehdr(data, file_len)?;
+    let ph_end = eh.ph_end().ok_or(ElfError::Truncated)?;
+    // `ph_end <= data.len()`, so both bounds fit a `usize`.
+    let table = usize::try_from(eh.phoff)
+        .ok()
+        .zip(usize::try_from(ph_end).ok())
+        .and_then(|(lo, hi)| data.get(lo..hi))
+        .ok_or(ElfError::Truncated)?;
+    let mut b = Builder::new(eh, file_len);
+    // `table` is `phnum` entries of `PHDR_SIZE` bytes, so each chunk is
+    // one whole entry.
+    for ph in table.as_chunks::<PHDR_SIZE>().0 {
+        b.push(ph)?;
     }
-    if let Some(va) = phdr_va {
-        let ph_len = (phnum as u64).saturating_mul(phentsize as u64).max(1);
-        check_user_va(va, ph_len)?;
-    }
-    Ok(Image {
-        data,
-        entry,
-        loads,
-        nload,
-        stack_exec,
-        tls,
-        phoff,
-        phentsize,
-        phnum,
-        phdr_va,
-    })
+    b.finish()
 }
 
 /// The bytes the loader maps for `loads` and `tls`: each `PT_LOAD`'s
@@ -408,19 +509,11 @@ fn image_bytes(loads: &[LoadSeg], tls: Option<TlsSeg>) -> Result<u64, ElfError> 
     Ok(total)
 }
 
-impl Image<'_> {
+impl Image {
     /// The `PT_LOAD` segments; empty if `nload` is past `loads`, which
     /// `parse` never builds.
     pub fn loads(&self) -> &[LoadSeg] {
         self.loads.get(..self.nload).unwrap_or(&[])
-    }
-
-    pub fn file_bytes(&self, seg: LoadSeg) -> Result<&[u8], ElfError> {
-        let start = seg.offset as usize;
-        let end = start
-            .checked_add(seg.filesz as usize)
-            .ok_or(ElfError::Truncated)?;
-        self.data.get(start..end).ok_or(ElfError::Truncated)
     }
 }
 
@@ -612,7 +705,8 @@ mod tests {
         assert!(!img.stack_exec);
         assert!(img.tls.is_none());
         assert_eq!(img.loads()[0].filesz, 3);
-        assert_eq!(img.file_bytes(img.loads()[0]).unwrap(), &code);
+        assert_eq!(img.loads()[0].offset, 0x1000);
+        assert_eq!(img.file_len, 0x1000 + 3);
     }
 
     #[test]
@@ -880,6 +974,204 @@ mod tests {
         let mut mem = [0u8; 4096];
         let got = build_initial_stack(top, &mut mem, &too_many, &[], &[], &[0; 16]);
         assert_eq!(got, Err(ElfError::Stack));
+    }
+
+    const STATIC_LLD: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/elf/static-lld"
+    ));
+    const STATIC_GNULD: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/elf/static-gnuld"
+    ));
+
+    fn seg(vaddr: u64, offset: u64, filesz: u64, memsz: u64, write: bool, exec: bool) -> LoadSeg {
+        LoadSeg {
+            vaddr,
+            memsz,
+            offset,
+            filesz,
+            write,
+            exec,
+        }
+    }
+
+    /// The checked-in static binaries from `tests/fixtures/elf/start.S`
+    /// parse to what `llvm-readobj --elf-output-style=GNU -h -l` prints for
+    /// them, and each cut one byte short of its last segment's file end is
+    /// `Truncated`.
+    #[test]
+    fn elf_parse_linked_static_binaries() {
+        struct Want<'a> {
+            name: &'static str,
+            data: &'static [u8],
+            entry: u64,
+            phnum: u16,
+            loads: &'a [LoadSeg],
+            tls: TlsSeg,
+            phdr_va: u64,
+        }
+        let lld = [
+            seg(0x20_0000, 0x0, 0x216, 0x216, false, false),
+            seg(0x20_1218, 0x218, 0x29, 0x29, false, true),
+            seg(0x20_2248, 0x248, 0x8, 0xdb8, true, false),
+            seg(0x20_3250, 0x250, 0x8, 0x3db0, true, false),
+        ];
+        let gnuld = [
+            seg(0x40_0000, 0x0, 0x1c8, 0x1c8, false, false),
+            seg(0x40_1000, 0x1000, 0x29, 0x29, false, true),
+            seg(0x40_2000, 0x2000, 0x16, 0x16, false, false),
+            seg(0x40_3ff8, 0x2ff8, 0x10, 0x4008, true, false),
+        ];
+        let wants = [
+            Want {
+                name: "static-lld",
+                data: STATIC_LLD,
+                entry: 0x20_1218,
+                phnum: 8,
+                loads: &lld,
+                tls: TlsSeg {
+                    vaddr: 0x20_2248,
+                    offset: 0x248,
+                    filesz: 0x8,
+                    memsz: 0x48,
+                    align: 8,
+                },
+                phdr_va: 0x20_0040,
+            },
+            Want {
+                name: "static-gnuld",
+                data: STATIC_GNULD,
+                entry: 0x40_1000,
+                phnum: 7,
+                loads: &gnuld,
+                tls: TlsSeg {
+                    vaddr: 0x40_3ff8,
+                    offset: 0x2ff8,
+                    filesz: 0x8,
+                    memsz: 0x48,
+                    align: 8,
+                },
+                phdr_va: 0x40_0040,
+            },
+        ];
+        for w in wants {
+            let img = parse(w.data).unwrap_or_else(|e| panic!("{}: {}", w.name, e.as_str()));
+            assert_eq!(img.entry, w.entry, "{}", w.name);
+            assert_eq!(img.phnum, w.phnum, "{}", w.name);
+            assert_eq!(img.loads(), w.loads, "{}", w.name);
+            assert_eq!(img.tls, Some(w.tls), "{}", w.name);
+            assert!(!img.stack_exec, "{}", w.name);
+            assert_eq!(img.phdr_va, Some(w.phdr_va), "{}", w.name);
+            let end = w.loads.iter().map(|s| s.offset + s.filesz).max().unwrap();
+            assert_eq!(
+                parse_err(&w.data[..end as usize - 1]),
+                ElfError::Truncated,
+                "{}",
+                w.name
+            );
+            assert!(parse(&w.data[..end as usize]).is_ok(), "{}", w.name);
+        }
+    }
+
+    /// `parse_ehdr` on `data`'s header and a `Builder` fed its program
+    /// headers one record at a time, both against `file_len`.
+    fn build_with(data: &[u8], file_len: u64) -> Result<Image, ElfError> {
+        let eh = parse_ehdr(data, file_len)?;
+        let mut b = Builder::new(eh, file_len);
+        let lo = eh.phoff as usize;
+        for i in 0..eh.phnum as usize {
+            let o = lo + i * PHDR_SIZE;
+            b.push(&data[o..o + PHDR_SIZE])?;
+        }
+        b.finish()
+    }
+
+    /// Every `PT_LOAD`'s file bytes, the `PT_TLS` init image and the
+    /// program header table end at or below the file's length: one byte
+    /// past it, or an `offset + filesz` that overflows, is `Truncated`.
+    #[test]
+    fn elf_parse_file_len_bounds() {
+        let code = [0x90u8; 16];
+        let elf = build_elf(0x4000_0000, &code, &[]);
+        let end = elf.len() as u64;
+        assert!(build_with(&elf, end).is_ok());
+        assert_eq!(build_with(&elf, end - 1), Err(ElfError::Truncated));
+        assert_eq!(parse_err(&elf[..elf.len() - 1]), ElfError::Truncated);
+
+        let tls = |off: u64, filesz: u64| {
+            build_elf(
+                0x4000_0000,
+                &code,
+                &[(PT_TLS, PF_R, off, 0x4000_0000, filesz, 16, 8)],
+            )
+        };
+        let exact = tls(0x1000, 16);
+        assert!(parse(&exact).is_ok());
+        assert_eq!(parse_err(&tls(0x1001, 16)), ElfError::Truncated);
+        assert_eq!(parse_err(&tls(u64::MAX - 7, 16)), ElfError::Truncated);
+        assert_eq!(
+            build_with(&exact, exact.len() as u64 - 1),
+            Err(ElfError::Truncated)
+        );
+
+        let mut over = build_elf(0x4000_0000, &code, &[]);
+        // PT_LOAD p_offset, aligned like p_vaddr, and p_filesz = p_memsz
+        // so that their sum is 2^64.
+        put64(&mut over, 72, 0u64.wrapping_sub(0x1000));
+        put64(&mut over, 96, 0x1000);
+        put64(&mut over, 104, 0x1000);
+        assert_eq!(parse_err(&over), ElfError::Truncated);
+
+        // The table itself: 64 + 56 bytes ends at 120.
+        let two = build_elf(0x4000_0000, &code, &[(PT_GNU_STACK, PF_R, 0, 0, 0, 0, 16)]);
+        let table_end = (EHDR_SIZE + 2 * PHDR_SIZE) as u64;
+        assert!(parse_ehdr(&two, table_end).is_ok());
+        assert_eq!(parse_ehdr(&two, table_end - 1), Err(ElfError::Truncated));
+        assert_eq!(
+            parse_ehdr(&two[..EHDR_SIZE - 1], table_end),
+            Err(ElfError::Truncated)
+        );
+
+        // A push past `phnum`, and a finish short of it.
+        let eh = parse_ehdr(&elf, end).unwrap();
+        let mut b = Builder::new(eh, end);
+        assert_eq!(b.finish(), Err(ElfError::Truncated));
+        b.push(&elf[64..64 + PHDR_SIZE]).unwrap();
+        assert_eq!(b.push(&elf[64..64 + PHDR_SIZE]), Err(ElfError::Truncated));
+        assert_eq!(
+            b.push(&elf[64..64 + PHDR_SIZE - 1]),
+            Err(ElfError::Truncated)
+        );
+    }
+
+    /// A `Builder` fed one record at a time gives what `parse` gives, for
+    /// the `build_elf` images and both linked fixtures.
+    #[test]
+    fn elf_builder_matches_parse() {
+        let code = [0x90u8, 0xC3];
+        let images = [
+            build_elf(0x4000_0000, &code, &[]),
+            build_elf(
+                0x4000_0000,
+                &[0x90, 0, 0, 0, 0, 0, 0, 0],
+                &[
+                    (PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 16),
+                    (PT_TLS, PF_R | PF_W, 0x1000, 0x4000_0000, 1, 8, 8),
+                ],
+            ),
+            build_elf(
+                0x4000_0000,
+                &code,
+                &[(PT_GNU_STACK, PF_R | PF_W | PF_X, 0, 0, 0, 0, 16)],
+            ),
+            build_elf(0x4000_0000, &code, &[(PT_INTERP, PF_R, 0, 0, 0, 0, 1)]),
+            STATIC_LLD.to_vec(),
+            STATIC_GNULD.to_vec(),
+        ];
+        for (i, img) in images.iter().enumerate() {
+            assert_eq!(build_with(img, img.len() as u64), parse(img), "image {i}");
+        }
     }
 
     /// `Image`'s fields are public, so a hand-built one can carry an

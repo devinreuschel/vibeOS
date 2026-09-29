@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use vibeos::apic::{Polarity, Trigger};
 use vibeos::ipi::MAX_IPI_CPUS;
 use vibeos::irq::{self, IrqError};
+use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::pci::{Bdf, CFG_COMMAND, CMD_INTX_DISABLE};
 use vibeos::thread::ThreadState;
@@ -16,11 +17,13 @@ use crate::ipi_init;
 use crate::irq_init;
 use crate::ktest::{
     EDU_IDENT, EDU_IDENT_VAL, Outcome, alloc_frames_owned, bar0_va, cpu_remote, find_edu,
-    free_frames_owned, mmio_r32, mmio_w32, second_cpu, spawn_thread_on, spin_until_ns,
+    free_frames_owned, mmio_r32, mmio_w32, quiescent_free_frames, second_cpu, spawn_thread_on,
+    spin_until_ns,
 };
 use crate::kva_init;
 use crate::pci_init;
 use crate::per_cpu_init;
+use crate::sync::blocking_init::Semaphore;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
@@ -885,4 +888,145 @@ pub(crate) fn note_shootdown() {
     if IN_TAIL[ipi_init::my_index()].load(Ordering::Relaxed) {
         FROM_TAIL.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+// ---- wake_inbox_and_kva_pool (ROADMAP §10.4, D1) ----
+
+/// Guarded stacks the KVA half frees out of order: past the old 128-node
+/// free-list pool.
+const INBOX_KVA_STACKS: usize = 300;
+
+static INBOX_SEM: Semaphore = Semaphore::new(0);
+/// Set once the target is about to block on [`INBOX_SEM`].
+static INBOX_BLOCKING: AtomicBool = AtomicBool::new(false);
+/// The tid the target ran with after its wake, `u32::MAX` until then.
+static INBOX_RAN: AtomicU32 = AtomicU32::new(u32::MAX);
+
+fn inbox_target() {
+    INBOX_BLOCKING.store(true, Ordering::SeqCst);
+    INBOX_SEM.acquire();
+    INBOX_RAN.store(thread_init::current_id().raw(), Ordering::SeqCst);
+}
+
+fn inbox_throwaway() {}
+
+/// Free more than 128 non-adjacent guarded stacks, odd ones last first and
+/// then the even ones; KVA `used` and the free frames come back.
+fn kva_pool_frees_out_of_order() -> Outcome {
+    let before = quiescent_free_frames();
+    let tables0 = crate::mm::ktest::table_pages();
+    let used0 = kva_init::stats().used;
+    let Ok(mut stacks) =
+        TryVec::<Option<kva_init::GuardedStack>>::try_with_capacity(INBOX_KVA_STACKS)
+    else {
+        return Outcome::Fail("no memory for the stack list");
+    };
+    for i in 0..INBOX_KVA_STACKS {
+        let s = match kva_init::alloc_guarded_stack(1) {
+            Ok(s) => s,
+            Err(e) => {
+                for s in stacks.iter_mut().filter_map(Option::take) {
+                    kva_init::free_stack(s);
+                }
+                return crate::fail_fmt!("stack {i}: {}", e.as_str());
+            }
+        };
+        if stacks.try_push(Some(s)).is_err() {
+            return Outcome::Fail("stack list push");
+        }
+    }
+    for i in (1..INBOX_KVA_STACKS).step_by(2).rev() {
+        if let Some(s) = stacks.get_mut(i).and_then(Option::take) {
+            kva_init::free_stack(s);
+        }
+    }
+    for i in (0..INBOX_KVA_STACKS).step_by(2) {
+        if let Some(s) = stacks.get_mut(i).and_then(Option::take) {
+            kva_init::free_stack(s);
+        }
+    }
+    drop(stacks);
+    let used1 = kva_init::stats().used;
+    if used1 != used0 {
+        return crate::fail_fmt!("kva used {used0} -> {used1}");
+    }
+    // A stack that reached VA no mapping reached before took a page-table
+    // page, which stays in the kernel tables.
+    let after = quiescent_free_frames();
+    let tables = crate::mm::ktest::table_pages().saturating_sub(tables0);
+    if after.saturating_add(tables) != before {
+        return crate::fail_fmt!("frames {before} -> {after} (+{tables} table pages)");
+    }
+    Outcome::Ok
+}
+
+/// Spawn and reap throwaway threads on this CPU until one's tid is 64 or
+/// more, so the next spawn's is too. False if none gets there.
+fn burn_tids_past_64() -> bool {
+    for _ in 0..4 * vibeos::thread::MAX_THREADS {
+        let Ok(h) = thread_init::spawn_here("tid-burn", inbox_throwaway) else {
+            return false;
+        };
+        if !spin_until_ns(
+            || {
+                thread_init::yield_now();
+                thread_init::exited(h.id())
+            },
+            500_000_000,
+        ) {
+            return false;
+        }
+        if h.id().raw() >= 64 {
+            return true;
+        }
+    }
+    false
+}
+
+/// The cross-CPU wake inbox holds any thread-table slot and the KVA node
+/// pool frees more than 128 ranges out of order (ROADMAP §10.4, D1): a
+/// thread whose tid is 64 or more, blocked on another CPU, is woken from
+/// this one through that CPU's inbox and a reschedule IPI.
+pub(crate) fn wake_inbox_and_kva_pool() -> Outcome {
+    let kva = kva_pool_frees_out_of_order();
+    if !matches!(kva, Outcome::Ok) {
+        return kva;
+    }
+    let Some(ap) = second_cpu() else {
+        return Outcome::Skip("no AP");
+    };
+    if !burn_tids_past_64() {
+        return Outcome::Fail("no tid reached 64");
+    }
+    INBOX_BLOCKING.store(false, Ordering::SeqCst);
+    INBOX_RAN.store(u32::MAX, Ordering::SeqCst);
+    let Ok(h) = thread_init::spawn_on("inbox-target", inbox_target, ap) else {
+        return Outcome::Fail("spawn target");
+    };
+    let blocked = spin_until_ns(
+        || {
+            INBOX_BLOCKING.load(Ordering::SeqCst)
+                && matches!(
+                    thread_init::try_state(h.id()),
+                    Some(ThreadState::Blocked { .. })
+                )
+        },
+        500_000_000,
+    );
+    let before = reschedule_count();
+    INBOX_SEM.release();
+    if !blocked {
+        return Outcome::Fail("target did not block");
+    }
+    if !spin_until_ns(|| INBOX_RAN.load(Ordering::SeqCst) != u32::MAX, 500_000_000) {
+        return Outcome::Fail("target not woken within 500 ms");
+    }
+    let tid = INBOX_RAN.load(Ordering::SeqCst);
+    if tid != h.id().raw() || tid < 64 {
+        return crate::fail_fmt!("target ran as tid {tid}, spawned as {}", h.id().raw());
+    }
+    if reschedule_count() <= before {
+        return Outcome::Fail("no reschedule IPI");
+    }
+    Outcome::Ok
 }

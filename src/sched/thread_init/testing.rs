@@ -1,6 +1,9 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
+use vibeos::sched::take_next;
+use vibeos::thread::{CpuAffinity, MAX_THREADS, Tcb, ThreadId, ThreadState};
+
+use super::{runnable_on, with_sched};
 
 use crate::per_cpu_init;
 use crate::time_init;
@@ -90,7 +93,8 @@ pub fn fail_next_fork_stack() {
 pub(in crate::sched) static REQUEUE: AtomicBool = AtomicBool::new(false);
 /// Moves the hook has made since boot (`sched::ktest::requeues`).
 pub(in crate::sched) static REQUEUES: AtomicU64 = AtomicU64::new(0);
-/// Set when a thread was moved, cleared by the dequeue that runs it.
+/// Per thread-table slot: set when its thread was moved, cleared by the
+/// dequeue that runs it.
 pub(in crate::sched) static ARRIVED: [AtomicBool; MAX_THREADS] =
     [const { AtomicBool::new(false) }; MAX_THREADS];
 
@@ -106,17 +110,19 @@ pub(super) fn next_online_cpu(me: u32) -> Option<u32> {
         .find(|&c| mask & (1u64 << c) != 0)
 }
 
-pub(super) fn moved(id: ThreadId) {
-    if let Some(a) = ARRIVED.get(id.raw() as usize) {
+/// Thread-table slot `slot`'s thread was moved. Under SCHED.
+pub(super) fn moved(slot: usize) {
+    if let Some(a) = ARRIVED.get(slot) {
         a.store(true, Ordering::Release);
     }
     REQUEUES.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Whether `id` arrived by a move and has not run since; clears it.
-pub(super) fn take_arrived(id: ThreadId) -> bool {
+/// Whether slot `slot`'s thread arrived by a move and has not run since;
+/// clears it. Under SCHED.
+pub(super) fn take_arrived(slot: usize) -> bool {
     ARRIVED
-        .get(id.raw() as usize)
+        .get(slot)
         .is_some_and(|a| a.swap(false, Ordering::AcqRel))
 }
 
@@ -200,10 +206,117 @@ pub(super) fn place_stall(id: ThreadId) {
     let end =
         time_init::read_tsc().saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
     while time_init::read_tsc() < end {
-        if super::try_state(id) == Some(ThreadState::Dead) {
+        if exited(id) {
             PLACE_LATE.store(true, Ordering::Release);
             return;
         }
         core::hint::spin_loop();
     }
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "invariant: a test asks only about a thread it keeps from being reaped, and a thread's tid names its TCB until a spawn reuses its Dead slot (`thread_init::spawn_inner`)"
+)]
+pub fn state(id: ThreadId) -> ThreadState {
+    super::SCHED.lock().get(id).expect("unknown thread").state
+}
+
+pub fn try_state(id: ThreadId) -> Option<ThreadState> {
+    super::SCHED.lock().get(id).map(|t| t.state)
+}
+
+/// Whether `id`'s thread has exited: its TCB is Dead, or a spawn has
+/// reused its Dead slot, after which the tid names no thread. For an id a
+/// spawn returned.
+pub fn exited(id: ThreadId) -> bool {
+    matches!(try_state(id), None | Some(ThreadState::Dead))
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "invariant: a test asks only about a thread it keeps from being reaped, and a thread's tid names its TCB until a spawn reuses its Dead slot (`thread_init::spawn_inner`)"
+)]
+pub fn name(id: ThreadId) -> &'static str {
+    super::SCHED.lock().get(id).expect("unknown thread").name
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "invariant: a test asks only about a thread it keeps from being reaped, and a thread's tid names its TCB until a spawn reuses its Dead slot (`thread_init::spawn_inner`)"
+)]
+pub fn cpu_of(id: ThreadId) -> u32 {
+    super::SCHED.lock().get(id).expect("unknown thread").cpu
+}
+
+/// C-REQUEUE-HOOK: while `sched::ktest::set_requeue_next_cpu` is on, a user
+/// thread or a `CpuAffinity::Any` kernel thread that this CPU dequeues
+/// while another thread is current moves to the next online CPU instead
+/// of running here, once per slice it runs. A preempted thread that is the
+/// only runnable one here stays queued while this CPU runs idle, whose
+/// dequeue then moves it. Never the running thread, an idle thread, or a
+/// pinned kernel thread; the move goes out through `place` after the
+/// SCHED lock drops, before any switch.
+pub(super) fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> ThreadId {
+    if !requeue_on() || next == idle {
+        return next;
+    }
+    let Some(target) = next_online_cpu(me) else {
+        return next;
+    };
+    // A stale entry's thread is not runnable here and does not move:
+    // `schedule_inner` drops the entry.
+    let movable = |t: &Tcb| runnable_on(t, me) && (t.pid != 0 || t.affinity == CpuAffinity::Any);
+    if next == cur {
+        if with_sched(|s| s.get(cur).is_some_and(movable)) {
+            per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
+            return idle;
+        }
+        return next;
+    }
+    let did_move = with_sched(|s| {
+        let Some(slot) = s.slot_of(next) else {
+            return false;
+        };
+        if take_arrived(slot) {
+            return false;
+        }
+        let Some(t) = s.get_mut(next) else {
+            return false;
+        };
+        if !movable(t) {
+            return false;
+        }
+        t.cpu = target;
+        if t.pid != 0 {
+            t.affinity = CpuAffinity::Pinned(target);
+        }
+        // Before the place: `with_sched` hands the thread to `target` as
+        // its lock drops, and a dequeue there that finds no arrival would
+        // move it again.
+        moved(slot);
+        s.place(target, next);
+        true
+    });
+    if !did_move {
+        return next;
+    }
+    per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle))
+}
+
+/// The incoming thread of the last switch `sync_init::assert_switch_clean`
+/// refused, or `ThreadId::NONE`.
+static REFUSED_SWITCH: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Called by `switch_now` just before a switch that holds a ranked lock.
+pub(super) fn refuse_switch(id: ThreadId) {
+    REFUSED_SWITCH.store(id.0, Ordering::Relaxed);
+}
+
+/// The thread a refused switch was about to run, which `schedule_inner` has
+/// already set Running and taken off this CPU's run queue: a test that
+/// catches the refusal `switch_to`s it to undo that. Clears the record.
+pub fn take_refused_switch() -> Option<ThreadId> {
+    let id = ThreadId(REFUSED_SWITCH.swap(ThreadId::NONE.0, Ordering::Relaxed));
+    if id.is_none() { None } else { Some(id) }
 }

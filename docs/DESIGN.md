@@ -148,6 +148,9 @@ that sets it:
   `file_init::init` before it brings the filesystems up.
 - `ipi_init::set_reschedule_hook` (a reschedule IPI's preemption point), set by `sched_init::init`
   before the scheduler goes live.
+- `ipi_init::set_slot_tid_hook` (the wake-inbox drain's slot-to-tid lookup,
+  `thread_init::tid_of_slot`), set by `thread_init::init_bootstrap` before a second thread exists;
+  unset, a drain leaves the inbox as it is.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),
   the writeback threads (their wake and bounded wait), and the process layer (the OOM killer).
 
@@ -179,22 +182,22 @@ children, need no row.
 |---|---|---|
 | crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `trap.rs`, `atomic.rs` | `main.rs`, `cell.rs` |
 | boot | `boot/{mod,cmdline}.rs` | `boot/{mod,fw_cfg_init}.rs` (`BootInfo`, Limine requests, fw_cfg) |
-| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,pic,trap,uart,vectors}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,catch,cpu,gdt,gs,idt,pic,trampoline}.rs`, `arch/x86_64/trampoline.S` |
+| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,pic,trap,uart,vectors}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,catch,cpu,gdt,gs,idt,pic,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S` |
 | mm | `mm/{mod,pmm,paging,heap,kva}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
 | time | `time/mod.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
-| irq | `irq/{mod,ipi}.rs` | `irq/{mod,irq_init,ipi_init}.rs` |
+| irq | `irq/{mod,ipi}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
 | sched | `sched/{mod,thread,wait,work,fpu}.rs` | `sched/{mod,sched_init,work_init}.rs`, `sched/thread_init/{mod,testing}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
-| log | `log/mod.rs` | `log/{mod,log_init,panic,diag,ksyms}.rs`, `log/serial/{mod,raw}.rs` |
+| log | `log/{mod,line}.rs` | `log/{mod,log_init,panic,diag,ksyms}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
 | shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
 | dev | `dev/{mod,pci,dma,virtio,entropy}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/{mod,virtio_blk_init}.rs` |
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
-| proc | `proc/{mod,elf,syscall}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
+| proc | `proc/{mod,elf,pid,syscall,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
 | ktest | — | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 
 **In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel

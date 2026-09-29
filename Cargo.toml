@@ -50,7 +50,7 @@ panic_exit = []
 # Write-loop kernel for QEMU-kill crash consistency (docs/VIBEFS.md §12).
 # Its own named ELF and ISO; never the production image.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
-vibefs_crash = []
+vibefs_crash = ["vibeos/crash_plant"]
 
 [lints]
 workspace = true
