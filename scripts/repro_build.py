@@ -149,7 +149,7 @@ def build(spec: BuildSpec, commit: str) -> None:
     env = build_env(spec)
     if spec.rustup_home != default_rustup_home():
         # A fresh RUSTUP_HOME: install rust-toolchain.toml's toolchain.
-        run(["rustup", "toolchain", "install"], spec.checkout, env)
+        run(["rustup", "toolchain", "install", "--no-self-update"], spec.checkout, env)
     run(["./setup.sh"], spec.checkout, env)
     run(["make", "isos"], spec.checkout, env)
 
