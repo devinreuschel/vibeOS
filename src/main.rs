@@ -181,10 +181,6 @@ mod smp;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod sync;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod time;
 
 #[cfg(feature = "kernel_tests")]

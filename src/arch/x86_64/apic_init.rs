@@ -382,6 +382,11 @@ fn calib_periodic(va: u64) -> Option<u64> {
     if !hpet_period_ok(period_fs) {
         return None;
     }
+    let hpet_now = || {
+        // SAFETY: `hpet_va` is what `time::time_init::hpet_ready` returned,
+        // `hpet_read_main`'s requirement.
+        unsafe { time_init::hpet_read_main(hpet_va) }
+    };
     let want = (PIT_CALIB_MS as u128 * FS_PER_MS) / period_fs as u128;
     let want = u64::try_from(want).ok()?;
     if want == 0 {
@@ -394,11 +399,11 @@ fn calib_periodic(va: u64) -> Option<u64> {
         apic::lvt_timer_oneshot(vectors::LAPIC_TIMER, true),
     );
     lapic_write(va, LAPIC_TIMER_ICR, 0xFFFF_FFFF);
-    let start_h = time_init::hpet_read_main(hpet_va);
+    let start_h = hpet_now();
     let start_c = lapic_read(va, LAPIC_TIMER_CCR);
     let mut spins = 0u64;
     loop {
-        let now = time_init::hpet_read_main(hpet_va);
+        let now = hpet_now();
         if now.wrapping_sub(start_h) >= want {
             break;
         }
