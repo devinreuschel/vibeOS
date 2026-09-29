@@ -746,6 +746,12 @@ The rule for every completion, hand-off, and deferred reclaim:
    CPU has passed a point the reclaimer can observe: its `switch_context` away from the object has
    returned, or INIT has stopped the AP. A global list that any CPU drains does not meet this rule.
 
+Small portable types in `vibeos-core` carry these stores and loads, each method with its order and
+no caller naming one, so ROADMAP §10.8's loom models run the kernel's own code. A cross-CPU wake is a
+hand-off: `vibeos::irq::ipi::WakeInbox::push` sets the slot's bit and then its word's summary bit
+with Release read-modify-writes, and the owner CPU's `WakeInbox::drain`, masked, takes them with
+Acquire swaps.
+
 Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
 
 - On the bring-up timeout, `smp_init::start_one` frees an AP's kernel stack, GDT/TSS, and IST and
