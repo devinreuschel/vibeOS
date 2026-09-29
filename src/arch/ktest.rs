@@ -130,11 +130,18 @@ pub(crate) fn test_star_sysret_layout() -> Outcome {
     Outcome::Ok
 }
 
+/// A kernel `int3` returns, and the `#BP` body ran for it exactly once
+/// (ROADMAP §10.2, F142).
 pub(crate) fn test_int3_roundtrip() -> Outcome {
+    let before = testing::bp_hits();
     // SAFETY: `int3` raises `#BP`, whose CPL-0 body returns past it, and
     // touches nothing else; established by `arch::x86_64::idt::init`, which
     // gives `#BP` its gate.
     unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
+    let ran = testing::bp_hits().wrapping_sub(before);
+    if ran != 1 {
+        return crate::fail_fmt!("#BP body ran {ran} times, want 1");
+    }
     Outcome::Ok
 }
 
