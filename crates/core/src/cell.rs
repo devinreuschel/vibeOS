@@ -437,4 +437,126 @@ mod tests {
             ][..]
         );
     }
+
+    /// The four portable hand-off primitives, driven from real host threads
+    /// on the stub port, each thread its own CPU (ROADMAP §10.8).
+    #[test]
+    fn portable_prims_threads() {
+        use crate::atomic::AtomicU64;
+        use crate::block::DoneWord;
+        use crate::irq::ipi::WakeInbox;
+        use crate::sched::thread::OnCpu;
+        use std::sync::Arc;
+        use std::sync::mpsc::channel;
+        use std::vec::Vec;
+
+        // IrqCell: four threads, 1,000 increments each, on distinct CPUs.
+        let cell = Arc::new(IrqCell::<u64, Arch>::new(0));
+        let adders: Vec<_> = (0..4)
+            .map(|_| {
+                let cell = Arc::clone(&cell);
+                std::thread::spawn(move || {
+                    for _ in 0..1000 {
+                        cell.with(|v| *v += 1);
+                    }
+                    Arch::cpu_id()
+                })
+            })
+            .collect();
+        let mut cpus: Vec<u32> = adders.into_iter().map(|a| a.join().unwrap()).collect();
+        assert_eq!(cell.with(|v| *v), 4000);
+        cpus.sort_unstable();
+        cpus.dedup();
+        assert_eq!(cpus.len(), 4, "each host thread is its own CPU");
+
+        // WakeInbox: three threads push disjoint thirds of the ids while a
+        // fourth, masked, drains until it has every id exactly once.
+        const SLOTS: usize = 4 * 64;
+        let inbox = Arc::new(WakeInbox::<4>::new());
+        let owner = {
+            let inbox = Arc::clone(&inbox);
+            std::thread::spawn(move || {
+                let _masked = Arch::save_disable();
+                let mut seen = std::vec![0u32; SLOTS];
+                let mut total = 0;
+                while total < SLOTS {
+                    inbox.drain::<Arch>(|s| {
+                        seen[s] += 1;
+                        total += 1;
+                    });
+                    crate::atomic::spin_loop();
+                }
+                seen
+            })
+        };
+        let pushers: Vec<_> = (0..3)
+            .map(|k| {
+                let inbox = Arc::clone(&inbox);
+                std::thread::spawn(move || {
+                    for id in (k..SLOTS).step_by(3) {
+                        assert!(inbox.push(id));
+                    }
+                })
+            })
+            .collect();
+        for p in pushers {
+            p.join().unwrap();
+        }
+        let seen = owner.join().unwrap();
+        assert!(seen.iter().all(|&n| n == 1), "every id drained once");
+        // A push's summary bit can land after the drain that took its word
+        // bit: the next drain clears it and finds nothing.
+        {
+            let _masked = Arch::save_disable();
+            assert!(!inbox.drain::<Arch>(|_| {}));
+        }
+        assert!(inbox.is_empty());
+
+        // DoneWord: one thread publishes a status while another polls; the
+        // poller sees what the publisher wrote before it.
+        let done = Arc::new(DoneWord::new());
+        let payload = Arc::new(AtomicU64::new(0));
+        let poller = {
+            let (done, payload) = (Arc::clone(&done), Arc::clone(&payload));
+            std::thread::spawn(move || {
+                let status = loop {
+                    if let Some(s) = done.poll() {
+                        break s;
+                    }
+                    crate::atomic::spin_loop();
+                };
+                (status, payload.load(Ordering::Relaxed))
+            })
+        };
+        payload.store(42, Ordering::Relaxed);
+        done.publish(7);
+        assert_eq!(poller.join().unwrap(), (7, 42));
+
+        // OnCpu: one thread sets, saves, then clears the flag while another
+        // waits for `is_clear` and sees the save.
+        let on_cpu = Arc::new(OnCpu::new());
+        let saved = Arc::new(AtomicU64::new(0));
+        let (set_tx, set_rx) = channel();
+        let switcher = {
+            let (on_cpu, saved) = (Arc::clone(&on_cpu), Arc::clone(&saved));
+            std::thread::spawn(move || {
+                on_cpu.set();
+                set_tx.send(()).unwrap();
+                saved.store(0x5A7E, Ordering::Relaxed);
+                on_cpu.clear();
+            })
+        };
+        let reaper = {
+            let (on_cpu, saved) = (Arc::clone(&on_cpu), Arc::clone(&saved));
+            std::thread::spawn(move || {
+                set_rx.recv().unwrap();
+                while !on_cpu.is_clear() {
+                    crate::atomic::spin_loop();
+                }
+                saved.load(Ordering::Relaxed)
+            })
+        };
+        switcher.join().unwrap();
+        assert_eq!(reaper.join().unwrap(), 0x5A7E);
+    }
 }
