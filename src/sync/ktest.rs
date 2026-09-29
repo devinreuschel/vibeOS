@@ -486,10 +486,16 @@ static LATE_PROBE: AtomicBool = AtomicBool::new(false);
 const LATE_WAIT_MS: u64 = 2_000;
 
 /// Block on [`LATE_M`] with the wait window held, then take it and exit.
+/// IF stays off from before the lock queues the waiter until it has the
+/// mutex: a tick between the queueing and the hold would switch the
+/// waiter off while it is `Blocked`, and it would reach the hold only once
+/// the unlock woke it, which the test waits for the hold to do.
 fn late_wake_waiter() {
     LATE_RUNS.fetch_add(1, Ordering::AcqRel);
     thread_init::testing::arm_wait_window(thread_init::current_id());
+    let irq = x86::InterruptGuard::enter();
     let mut g = LATE_M.lock();
+    drop(irq);
     *g = (*g).wrapping_add(1);
 }
 

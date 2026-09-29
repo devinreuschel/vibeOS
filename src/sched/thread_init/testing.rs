@@ -146,7 +146,9 @@ static PLACE_LATE: AtomicBool = AtomicBool::new(false);
 /// Hold `id`'s next blocking wait (`sync_init::wait_resume`) between the
 /// store that queues it on the wait queue and its `schedule`, IF=0,
 /// until [`arm_late_wake`]'s held wake lets it go or 2 s pass. The
-/// thread calls it on itself before it blocks.
+/// thread calls it on itself before it blocks, and blocks with IF off: a
+/// tick after the queueing and before the hold would switch it off
+/// `Blocked`, and it would reach the hold only once woken.
 pub fn arm_wait_window(id: ThreadId) {
     WINDOW_GO.store(false, Ordering::Relaxed);
     WINDOW_HELD.store(false, Ordering::Relaxed);
