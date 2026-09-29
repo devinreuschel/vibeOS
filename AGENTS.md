@@ -74,8 +74,8 @@ Apple Silicon. The scheduled `macos` workflow (`.github/workflows/macos.yml`) ru
 ## Toolchain bump (C1)
 
 Bump the date in `rust-toolchain.toml` and the matching `toolchain:` inputs in
-`.github/workflows/ci.yml`, `.github/workflows/smp-stress.yml`, and
-`.github/workflows/release.yml` in one PR.
+`.github/workflows/ci.yml`, `.github/workflows/smp-stress.yml`,
+`.github/workflows/nightly.yml`, and `.github/workflows/release.yml` in one PR.
 `make test` must be green. From Phase 24 a bump also changes the build key of
 every port built with that toolchain, and the next release waits until both
 architectures' rebuilds have built those ports twice

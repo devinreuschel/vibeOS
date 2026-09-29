@@ -95,6 +95,8 @@ class WorkflowSpec:
 WORKFLOWS: dict[str, WorkflowSpec] = {
     "ci": WorkflowSpec(".github/workflows/ci.yml", False),
     "release": WorkflowSpec(".github/workflows/release.yml", True),
+    "nightly": WorkflowSpec(".github/workflows/nightly.yml", False),
+    "smp-stress": WorkflowSpec(".github/workflows/smp-stress.yml", False),
 }
 
 ARCH_TOKENS = ("x86_64", "aarch64")

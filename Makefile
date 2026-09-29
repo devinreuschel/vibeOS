@@ -483,8 +483,11 @@ test-kernel: $(ISO_KTEST)
 test-kernel-smp4: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/harness/run_ktest.py
 
+# The nightly KVM leg adds +invtsc, so its invariant-TSC check still applies
+# (DESIGN §8.4).
+LAPIC_FALLBACK_CPU ?= qemu64,-tsc-deadline
 test-lapic-fallback: $(ISO_KTEST)
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/harness/run_ktest.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=$(LAPIC_FALLBACK_CPU) python3 tests/harness/run_ktest.py
 
 # Over the volatile-cache device (DESIGN §8.3): nbd-cache serves the disk,
 # vibefs-cat reads /w from each image rebuilt from its trace.

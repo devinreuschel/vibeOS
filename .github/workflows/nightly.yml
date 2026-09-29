@@ -1,0 +1,157 @@
+name: nightly
+
+# ROADMAP §10.1, DESIGN §8.6: the nightly scheduled jobs, each in its own
+# scheduled lane (the lane map and ledger in DESIGN §8.6). `kvm` is the x86_64
+# KVM leg: `make test-kernel`, the e2e and LAPIC-fallback runs, and the
+# §10.10 selection at -smp 4, under `-accel kvm -cpu max,+invtsc`. Jobs call
+# only `make` targets and scripts (C-SCHED-TARGETS), and each ends by writing
+# its runner record and uploading it with its results files, which the ticks
+# job reads for `[nightly]` proofs (C-TICK, C-RESULTS, C-HISTORY). No timeout
+# override, skip or retry is set here (AGENTS.md, Do not).
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+# Least privilege: the jobs read the tree and write only artifacts and caches,
+# which use the runner's own token. ROADMAP §10.1.
+permissions:
+  contents: read
+
+jobs:
+  kvm:
+    name: kvm
+    runs-on: ubuntu-26.04
+    timeout-minutes: 180
+    # Scheduled lane 0 (DESIGN §8.6): one job at a time, the rest queued.
+    concurrency:
+      group: sched-lane-0
+      queue: max
+    # The harness fails every boot when QEMU is not this version (ROADMAP
+    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
+    # and DESIGN §8.6 together. QEMU leaves invariant TSC out of its default
+    # migratable vCPU even under KVM, so the leg asks for it (ROADMAP §10.1).
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+      APT_PACKAGES: qemu-system-x86 xorriso nasm dosfstools
+      VIBEOS_QEMU_ACCEL: kvm
+      VIBEOS_QEMU_CPU: max,+invtsc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Host packages from a cache keyed by the runner image and the package
+      # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
+      # with no `apt-get update` and no download; a miss installs as before
+      # and saves what apt downloaded.
+      - name: apt cache key
+        id: apt-key
+        run: |
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
+
+      # GitHub's documented udev rule opens /dev/kvm to the runner user.
+      - name: open /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: rust-src, llvm-tools
+          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-kvm-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-kvm-
+
+      - name: cache limine binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: limine
+          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+
+      - name: setup
+        run: ./setup.sh
+
+      # L1194: the in-guest registry under KVM; run_ktest.py's boot check
+      # fails the leg when the guest reports no invariant TSC.
+      - name: make test-kernel (kvm)
+        if: ${{ !cancelled() }}
+        run: make test-kernel
+
+      # L1195 (F078): the boot contract at -smp 2 and -smp 1, and the
+      # periodic fallback with invariant TSC still asked for.
+      - name: make test-e2e (kvm)
+        if: ${{ !cancelled() }}
+        run: make test-e2e
+
+      - name: make test-e2e (kvm, -smp 1)
+        if: ${{ !cancelled() }}
+        run: VIBEOS_SMP=1 make test-e2e
+
+      - name: make test-lapic-fallback (kvm)
+        if: ${{ !cancelled() }}
+        run: make test-lapic-fallback LAPIC_FALLBACK_CPU=qemu64,+invtsc,-tsc-deadline
+
+      # L1196: exit-gate line §10.10's selection, repeated 20 times at -smp 4.
+      - name: make test-kernel-smp4 (kvm, §10.10 selection x20)
+        if: ${{ !cancelled() }}
+        run: VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4
+
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-kvm
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-kvm
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90

@@ -339,11 +339,17 @@ class TestEvent(unittest.TestCase):
             ),
             ("release", 555),
         )
+        self.assertEqual(
+            ci_history.load_event(
+                self.event(name="nightly", path=".github/workflows/nightly.yml"), REPO
+            ),
+            ("nightly", 555),
+        )
 
     def test_event_rejects_unlisted_workflow(self) -> None:
         with self.assertRaises(NotRecorded):
             ci_history.load_event(
-                self.event(name="nightly", path=".github/workflows/nightly.yml"), REPO
+                self.event(name="macos", path=".github/workflows/macos.yml"), REPO
             )
         with self.assertRaises(NotRecorded):
             ci_history.load_event(self.event(), "someone/else")
