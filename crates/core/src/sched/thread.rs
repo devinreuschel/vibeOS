@@ -6,7 +6,7 @@
 
 use core::mem::{offset_of, size_of};
 
-use crate::atomic::{AtomicBool, AtomicU32};
+use crate::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
 use crate::time::Instant;
@@ -181,6 +181,73 @@ impl Fxsave {
     }
 }
 
+/// A TCB's on-CPU flag (DESIGN §2.8 rule 2): set while a CPU runs the
+/// thread or is still switching off it. The atomic is private, so each
+/// store and load carries its order here and no caller names one.
+#[repr(transparent)]
+pub struct OnCpu(AtomicBool);
+
+impl OnCpu {
+    /// A clear flag. `const` outside `cfg(loom)`, whose atomics have no
+    /// `const fn new` (C-ATOMICS).
+    #[cfg(not(loom))]
+    pub const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    /// A clear flag (loom's atomics have no `const fn new`).
+    #[cfg(loom)]
+    pub fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    /// A set flag, for a TCB built for the thread already running on this
+    /// CPU (the bootstrap and AP idle threads). `const` outside `cfg(loom)`.
+    #[cfg(not(loom))]
+    pub const fn new_set() -> Self {
+        Self(AtomicBool::new(true))
+    }
+
+    /// A set flag (loom's atomics have no `const fn new`).
+    #[cfg(loom)]
+    pub fn new_set() -> Self {
+        Self(AtomicBool::new(true))
+    }
+
+    /// The incoming side of a switch marks the thread on this CPU.
+    #[inline(always)]
+    pub fn set(&self) {
+        // Relaxed (P10-S08): the scheduler lock, held across the switch's
+        // bookkeeping, orders this store with every reader that could see
+        // the thread Dead; nothing is published through it.
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// The switch tail's last access to the TCB it switched off, after
+    /// `switch_context` has saved every piece of the thread's CPU state.
+    #[inline(always)]
+    pub fn clear(&self) {
+        // Release: pairs with the Acquire load in `is_clear`, so a CPU that
+        // sees the flag clear sees every save into the TCB before it.
+        self.0.store(false, Ordering::Release);
+    }
+
+    /// True once no CPU runs or is switching off the thread: `spawn_inner`'s
+    /// Dead-slot reuse check and the reaper.
+    #[inline(always)]
+    pub fn is_clear(&self) -> bool {
+        // Acquire: pairs with the Release store in `clear`.
+        !self.0.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(not(loom))]
+impl Default for OnCpu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Global TCB. `next`/`prev` are the run-queue links Slice B fills.
 #[repr(C, align(16))]
 pub struct Tcb {
@@ -188,14 +255,15 @@ pub struct Tcb {
     pub name: &'static str,
     pub state: ThreadState,
     /// Set while a CPU runs this thread or is still switching off it: the
-    /// incoming side of `thread_init::switch_now` sets it (Relaxed), and
-    /// `thread_init::finish_switch` on that CPU clears it with Release as
-    /// its last access to the TCB, after `switch_context` has saved every
-    /// piece of DESIGN §7.5's per-thread state. `thread_init::spawn_inner`
-    /// reuses a Dead slot only after an Acquire load finds it clear, and
-    /// ROADMAP §13.8's core dump and §17.4's `ptrace` requests wait on it
-    /// too. A running bootstrap or AP idle TCB starts set.
-    pub on_cpu: AtomicBool,
+    /// incoming side of `thread_init::switch_now` sets it ([`OnCpu::set`]),
+    /// and `thread_init::finish_switch` on that CPU clears it with Release
+    /// ([`OnCpu::clear`]) as its last access to the TCB, after
+    /// `switch_context` has saved every piece of DESIGN §7.5's per-thread
+    /// state. `thread_init::spawn_inner` reuses a Dead slot only after an
+    /// Acquire load finds it clear ([`OnCpu::is_clear`]), and ROADMAP
+    /// §13.8's core dump and §17.4's `ptrace` requests wait on it too. A
+    /// running bootstrap or AP idle TCB starts set.
+    pub on_cpu: OnCpu,
     pub stack: Option<GuardedStack>,
     pub context: CpuContext,
     pub entry: fn(),
@@ -323,6 +391,32 @@ pub fn apply_if_on_resume(rflags: &mut u64, irq_nest: u32) {
 mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn on_cpu_clear_is_seen() {
+        use crate::atomic::AtomicU64;
+        use std::sync::Arc;
+        assert!(OnCpu::new().is_clear());
+        assert!(!OnCpu::new_set().is_clear());
+        // A payload the switch-out writes before its clear: a thread that
+        // sees the flag clear must see it (the Release/Acquire pair).
+        let flag = Arc::new(OnCpu::new());
+        let saved = Arc::new(AtomicU64::new(0));
+        flag.set();
+        assert!(!flag.is_clear());
+        let switcher = {
+            let (flag, saved) = (Arc::clone(&flag), Arc::clone(&saved));
+            std::thread::spawn(move || {
+                saved.store(0xC0FFEE, Ordering::Relaxed);
+                flag.clear();
+            })
+        };
+        while !flag.is_clear() {
+            crate::atomic::spin_loop();
+        }
+        assert_eq!(saved.load(Ordering::Relaxed), 0xC0FFEE);
+        switcher.join().unwrap();
+    }
 
     #[test]
     fn context_layout() {

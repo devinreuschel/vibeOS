@@ -32,10 +32,8 @@ pub mod arch;
 pub mod atomic;
 pub mod block;
 pub mod boot;
-// Kernel `mod cell` in main.rs. Host tests only: production vibeos-core
-// has no InterruptGuard / per_cpu_init.
-#[cfg(test)]
-#[path = "../../../src/cell.rs"]
+// The cells, over a port's seam (DESIGN §2.3); the kernel names them over
+// its port in `src/cell.rs`.
 pub mod cell;
 pub mod console;
 pub mod dev;

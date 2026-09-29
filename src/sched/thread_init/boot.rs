@@ -2,12 +2,12 @@
 //! Limine's stack onto a guarded KVA stack (ROADMAP §10.6, MEMORY.md §4.5).
 
 use core::ops::Range;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::AtomicU32;
 
 use vibeos::arch::ContextSwitch;
 use vibeos::kalloc::TryBox;
 use vibeos::proc::INIT_PID;
-use vibeos::thread::{CpuAffinity, CpuContext, Tcb, ThreadId, ThreadState, WaitOutcome};
+use vibeos::thread::{CpuAffinity, CpuContext, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome};
 
 use super::{SCHED, fpu_template, tid_of_slot, with_sched};
 use crate::arch::current::Arch;
@@ -38,7 +38,7 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         id: ThreadId::BOOTSTRAP,
         name: "bootstrap",
         state: ThreadState::Running,
-        on_cpu: AtomicBool::new(true),
+        on_cpu: OnCpu::new_set(),
         stack: Some(stack),
         context: CpuContext::empty(),
         entry: bootstrap_entry,
@@ -116,7 +116,7 @@ pub(crate) fn bootstrap_stack() -> Option<(Range<u64>, u64, bool)> {
         Some((
             st.base().as_u64()..st.top().as_u64(),
             t.context.rsp,
-            t.on_cpu.load(Ordering::Acquire),
+            !t.on_cpu.is_clear(),
         ))
     })
 }

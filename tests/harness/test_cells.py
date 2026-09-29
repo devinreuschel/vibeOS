@@ -11,6 +11,9 @@ from scripts.check_cells import impl_errors, must_be_unsafe_errors, unsafe_impls
 ENTRY = [("src/a.rs", "force_unlock")]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "cells"
 
+# The portable cells' file, where a generic cell impl may sit.
+CELL = "crates/core/src/cell.rs"
+
 
 class TestMustBeUnsafe(unittest.TestCase):
     def errs(self, text: str, entries: list[tuple[str, str]] = ENTRY) -> list[str]:
@@ -71,7 +74,7 @@ class TestMustBeUnsafe(unittest.TestCase):
                          ["src/a.rs: must-be-unsafe fn IrqCell::force_unlock not found"])
 
     def test_list_holds_the_box_functions(self) -> None:
-        for entry in [("src/cell.rs", "IrqCell::force_unlock"),
+        for entry in [("crates/core/src/cell.rs", "IrqCell::force_unlock"),
                       ("src/log/log_init.rs", "force_unlock"),
                       ("src/log/log_init.rs", "with_logger_unlocked"),
                       ("src/log/log_init.rs", "dump_tail"),
@@ -121,13 +124,13 @@ class TestRemoteView(unittest.TestCase):
 
 
 class TestImplHeaders(unittest.TestCase):
-    def errs(self, text: str, path: str = "src/cell.rs") -> list[str]:
+    def errs(self, text: str, path: str = CELL) -> list[str]:
         return impl_errors(path, text)
 
     def test_one_line(self) -> None:
         self.assertEqual(self.errs("unsafe impl<T: Send> Sync for IrqCell<T> {}\n"), [])
         self.assertEqual(self.errs("unsafe impl<T> Sync for IrqCell<T> {}\n"),
-                         ["src/cell.rs:1: unsafe impl Sync for IrqCell: T is not bounded by Send"])
+                         [f"{CELL}:1: unsafe impl Sync for IrqCell: T is not bounded by Send"])
 
     def test_multi_line_with_where_on_its_own_line(self) -> None:
         text = ("unsafe impl<T>\n"
@@ -137,7 +140,7 @@ class TestImplHeaders(unittest.TestCase):
                 "{\n}\n")
         self.assertEqual(self.errs(text), [])
         self.assertEqual(self.errs(text.replace("T: Send,", "T: Copy,")),
-                         ["src/cell.rs:1: unsafe impl Send for IrqCell: T is not bounded by Send"])
+                         [f"{CELL}:1: unsafe impl Send for IrqCell: T is not bounded by Send"])
 
     def test_where_adds_to_inline_bounds(self) -> None:
         text = "unsafe impl<T: Send> Sync for RwLock<T> where T: Sync {}\n"
@@ -145,7 +148,7 @@ class TestImplHeaders(unittest.TestCase):
 
     def test_sized_alone_is_no_bound(self) -> None:
         self.assertEqual(self.errs("unsafe impl<T: ?Sized> Send for IrqCell<T> {}\n"),
-                         ["src/cell.rs:1: unsafe impl Send for IrqCell: T is not bounded by Send"])
+                         [f"{CELL}:1: unsafe impl Send for IrqCell: T is not bounded by Send"])
         text = "unsafe impl<T: ?Sized + Send> Send for IrqCell<T> {}\n"
         self.assertEqual(self.errs(text), [])
 
@@ -166,7 +169,7 @@ class TestImplHeaders(unittest.TestCase):
             with self.subTest(ty=ty):
                 self.assertEqual(
                     self.errs(f"unsafe impl<T: Send> Sync for {ty}<T> {{}}\n"),
-                    [f"src/cell.rs:1: unsafe impl Sync for {ty}: T is not bounded by Sync"])
+                    [f"{CELL}:1: unsafe impl Sync for {ty}: T is not bounded by Sync"])
                 self.assertEqual(
                     self.errs(f"unsafe impl<T: Send + Sync> Sync for {ty}<T> {{}}\n"), [])
                 self.assertEqual(self.errs(f"unsafe impl<T: Send> Send for {ty}<T> {{}}\n"), [])
@@ -179,6 +182,20 @@ class TestImplHeaders(unittest.TestCase):
         self.assertEqual(self.errs(text, "src/foo.rs"), [
             "src/foo.rs:1: unsafe impl Sync for MyCell: a generic impl belongs only in "
             + ", ".join(check_cells.GENERIC_IMPL_FILES)])
+
+    def test_generic_cell_impl_only_in_the_portable_cell(self) -> None:
+        text = "unsafe impl<T: Send + Sync> Sync for BootCell<T> {}\n"
+        self.assertEqual(self.errs(text, CELL), [])
+        self.assertEqual(self.errs(text, "src/cell.rs"), [
+            "src/cell.rs:1: unsafe impl Sync for BootCell: a generic impl belongs only in "
+            + ", ".join(check_cells.GENERIC_IMPL_FILES)])
+
+    def test_port_parameter_must_be_bounded(self) -> None:
+        text = "unsafe impl<T: Send, A> Sync for IrqCell<T, A> {}\n"
+        self.assertEqual(self.errs(text), [
+            f"{CELL}:1: unsafe impl Sync for IrqCell: A is not bounded by Send"])
+        text = "unsafe impl<T: Send, A: Send> Sync for IrqCell<T, A> {}\n"
+        self.assertEqual(self.errs(text), [])
 
     def test_generic_blocking_lock_impl_passes_in_blocking_init(self) -> None:
         text = ("unsafe impl<T: Send> Sync for BlockingMutex<T> {}\n"
@@ -220,7 +237,7 @@ class TestImplHeaders(unittest.TestCase):
 
     def test_fixture_cell_869b6da(self) -> None:
         text = (FIXTURES / "cell_869b6da.rs").read_text(encoding="utf-8")
-        errs = self.errs(text, "src/cell.rs")
+        errs = self.errs(text, CELL)
         self.assertEqual([e.split(":")[1] for e in errs], ["37", "38", "94", "95"])
 
     def test_fixture_sync_init_869b6da(self) -> None:

@@ -148,7 +148,7 @@ class TestArchCode(unittest.TestCase):
 
     def test_repo_core_is_clean(self) -> None:
         src = check_core_stable.CORE_ROOT.parent
-        cell = (check_core_stable.ROOT / "src" / "cell.rs").resolve()
+        cell = (src / "cell.rs").resolve()
         self.assertIn(cell, core_files(src))
         self.assertEqual(arch_code_errors(src), [])
 
