@@ -39,10 +39,6 @@
 extern crate alloc;
 
 #[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
 )]
@@ -82,10 +78,6 @@ mod boot;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod cell;
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
@@ -162,10 +154,6 @@ mod mm;
 )]
 mod proc;
 #[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 #[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
@@ -201,10 +189,6 @@ mod smp;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod sync;
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
@@ -268,10 +252,6 @@ static BASE_REV: BaseRevision = BaseRevision::with_revision(3);
 static REQ_END: RequestsEndMarker = RequestsEndMarker::new();
 
 #[unsafe(no_mangle)]
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 #[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 pub extern "C" fn _start() -> ! {
     // Step 1: serial. Nothing before this is debuggable.
@@ -502,10 +482,6 @@ fn normal_boot_tail() {
 }
 
 #[cfg(feature = "gp_test")]
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"

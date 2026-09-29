@@ -472,7 +472,8 @@ machine and memory map it was written for.
 Log ring (ROADMAP §5.5):
 
 - 256 records of up to 96 message bytes; a wrap drops the oldest record and counts it, and the panic
-  dump prints the count (`last N (M dropped)`).
+  dump prints that count with the two drop counts below
+  (`vibeOS: log: last N (M dropped, S sink, R reentry)`).
 - Compile-time maximum level: `trace` in debug builds, `debug` in release. Runtime filter: an
   `AtomicU8`, default `info`.
 - The panic dump prints the last 24 records.
@@ -484,7 +485,8 @@ Log ring (ROADMAP §5.5):
 - Host tests cover overflow, filtering, and symbol lookup.
 - One global IRQ-safe ring and a serial try-lock sink. The sink drops its copy of a record when
   another CPU holds the TX lock, and `log_fmt` drops a record its CPU emits while already inside
-  `log_fmt`; neither drop is counted. Planned: a log record reaches serial whole (ROADMAP §10.2,
+  `log_fmt`; each drop is counted, in `log_init::sink_drops` (once per record) and
+  `log_init::reentry_drops`. Planned: a log record reaches serial whole (ROADMAP §10.2,
   F138); the log contract below (ROADMAP §19.5).
 
 Planned (ROADMAP §19.5), the log contract:

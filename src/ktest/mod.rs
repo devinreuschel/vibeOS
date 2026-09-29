@@ -280,6 +280,10 @@ pub(crate) const TESTS: &[Test] = &[
         "log_dmesg_no_recapture",
         log::ktest::test_log_dmesg_no_recapture,
     ),
+    test(
+        "log_reentry_drop_counted",
+        log::ktest::test_log_reentry_drop_counted,
+    ),
     test("fb_bgrx_roundtrip", console::ktest::test_fb_bgrx_roundtrip),
     test("fb_pitch", console::ktest::test_fb_pitch),
     test("fb_cr_home", console::ktest::test_fb_cr_home),

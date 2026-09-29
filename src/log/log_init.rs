@@ -8,7 +8,7 @@
 //! assembles per-CPU until `\n`, and `klog!` pushes a whole record.
 
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use vibeos::log::{
     COMPILE_MAX, DEFAULT_RUNTIME_MAX, DUMP_LAST, Level, Logger, MSG_CAP, RING_CAP, Record, allowed,
@@ -42,6 +42,11 @@ static STAGE: [IrqCell<Stage>; 64] = [const { IrqCell::new(Stage::empty()) }; 64
 /// Extra runtime copy so `allows` can be checked without the ring lock
 /// on the serial capture path. Kept in sync with `Logger.filter`.
 static RUNTIME: AtomicU8 = AtomicU8::new(DEFAULT_RUNTIME_MAX as u8);
+/// Records whose serial copy the try-lock sink dropped because another CPU
+/// held the TX lock (DESIGN §2.5). Kept apart from `REENTRY_DROPS`.
+static SINK_DROPS: AtomicU64 = AtomicU64::new(0);
+/// Records `log_fmt` dropped because its CPU was already inside `log_fmt`.
+static REENTRY_DROPS: AtomicU64 = AtomicU64::new(0);
 
 fn cpu_index() -> usize {
     per_cpu_init::try_current()
@@ -136,6 +141,7 @@ pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
+        REENTRY_DROPS.fetch_add(1, Ordering::Relaxed);
         return;
     }
     let mut buf = [0u8; MSG_CAP];
@@ -149,11 +155,24 @@ pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
     };
     let msg = &buf[..n];
     let _ = push_record(level, msg);
-    let _ = crate::serial::Serial::try_write_bytes(msg);
+    let mut sent = crate::serial::Serial::try_write_bytes(msg);
     if !msg.ends_with(b"\n") {
-        let _ = crate::serial::Serial::try_write_bytes(b"\n");
+        sent &= crate::serial::Serial::try_write_bytes(b"\n");
+    }
+    if !sent {
+        SINK_DROPS.fetch_add(1, Ordering::Relaxed);
     }
     EMITTING[i].store(false, Ordering::Release);
+}
+
+/// Records whose serial copy the try-lock sink dropped.
+pub fn sink_drops() -> u64 {
+    SINK_DROPS.load(Ordering::Relaxed)
+}
+
+/// Records `log_fmt` dropped on re-entry from its own CPU.
+pub fn reentry_drops() -> u64 {
+    REENTRY_DROPS.load(Ordering::Relaxed)
 }
 
 struct StackBuf<'a> {
@@ -312,9 +331,11 @@ pub unsafe fn dump_tail(n: usize) {
         with_logger_unlocked(|l| {
             let _ = writeln!(
                 Serial,
-                "vibeOS: log: last {} ({} dropped)",
+                "vibeOS: log: last {} ({} dropped, {} sink, {} reentry)",
                 n.min(l.ring.len()),
-                l.ring.dropped()
+                l.ring.dropped(),
+                sink_drops(),
+                reentry_drops()
             );
             let unit = if time_init::tsc_per_ms() != 0 {
                 "ms"
