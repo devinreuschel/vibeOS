@@ -1,8 +1,9 @@
 //! In-guest tests for sync (kernel_tests only). Rows: the list in crate::ktest.
 
+use core::alloc::Layout;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::lock::RANK_DEVICE;
+use vibeos::lock::{RANK_BUDDY, RANK_DEVICE, RANK_HEAP, RANK_PT, RANK_SCHED, RANK_SERIAL};
 use vibeos::time::Instant;
 
 use crate::arch;
@@ -86,14 +87,71 @@ pub(crate) fn test_spin_mutex() -> Outcome {
 pub(crate) fn test_lock_spins() -> Outcome {
     let c = crate::sync_init::spin_counts();
     crate::marker!(
-        "vibeOS: ktest:   spins pt={} buddy={} heap={} sched={} device={} serial={}",
-        c[1],
-        c[2],
-        c[3],
-        c[4],
-        c[5],
-        c[6]
+        "vibeOS: ktest:   spins heap={} pt={} buddy={} sched={} device={} serial={}",
+        c[usize::from(RANK_HEAP)],
+        c[usize::from(RANK_PT)],
+        c[usize::from(RANK_BUDDY)],
+        c[usize::from(RANK_SCHED)],
+        c[usize::from(RANK_DEVICE)],
+        c[usize::from(RANK_SERIAL)]
     );
+    Outcome::Ok
+}
+
+/// One byte allocated and freed under PT must fail the rank check: the heap
+/// ranks first (DESIGN §2.1).
+pub(crate) fn test_rank_alloc_under_pt_asserts() -> Outcome {
+    let layout = Layout::new::<u8>();
+    let if0 = x86::interrupts_enabled();
+    let nest0 = per_cpu_init::irq_nest();
+    let held0 = sync_init::testing::held();
+    let fails0 = sync_init::testing::rank_failures();
+    let hit = crate::paging_init::with_pt(|_pt| {
+        let held_pt = sync_init::testing::held();
+        let nest_pt = per_cpu_init::irq_nest();
+        let hit = arch::catch::catch_panic(|| {
+            // `black_box` keeps LLVM from eliding the unused pair.
+            // SAFETY: `layout` has a nonzero size; established here.
+            let p = core::hint::black_box(unsafe { alloc::alloc::alloc(layout) });
+            if !p.is_null() {
+                // SAFETY: `p` came from `alloc` with `layout` just above;
+                // established here.
+                unsafe { alloc::alloc::dealloc(p, layout) };
+            }
+        });
+        // The longjmp skipped the `InterruptGuard` that `HEAP.lock()`
+        // entered; PT's guard drop restores IF.
+        per_cpu_init::current()
+            .irq_nest
+            .store(nest_pt, Ordering::Relaxed);
+        // SAFETY: invariant: a rank refusal panics in
+        // `sync_init::lock_enter` before the spin, so `HEAP` was never taken
+        // and `held_pt`, the word with PT counted, is what this CPU holds;
+        // established by `sync_init::SpinMutex::lock`.
+        unsafe { sync_init::testing::restore_held(held_pt) };
+        hit
+    });
+    if !hit {
+        return Outcome::Fail("allocation under PT passed the rank check");
+    }
+    let fails = sync_init::testing::rank_failures() - fails0;
+    if fails != 1 {
+        return crate::fail_fmt!("{} rank failures, want 1", fails);
+    }
+    if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("IF or irq_nest changed");
+    }
+    if sync_init::testing::held() != held0 || sync_init::held_mask() != held0.mask() {
+        return Outcome::Fail("held word changed");
+    }
+    // SAFETY: `layout` has a nonzero size; established here.
+    let p = core::hint::black_box(unsafe { alloc::alloc::alloc(layout) });
+    if p.is_null() {
+        return Outcome::Fail("heap unusable after the catch");
+    }
+    // SAFETY: `p` came from `alloc` with `layout` just above; established
+    // here.
+    unsafe { alloc::alloc::dealloc(p, layout) };
     Outcome::Ok
 }
 

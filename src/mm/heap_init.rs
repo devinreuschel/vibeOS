@@ -2,8 +2,10 @@
 //!
 //! Portable free-list logic is `vibeos::heap`. This module pulls order-0
 //! frames from the buddy, maps them writable+NX, and grows in page
-//! increments up to the 64 MiB cap. Heap lock is dropped before PT/buddy
-//! on grow (lock order: page tables → buddy → heap).
+//! increments up to the 64 MiB cap. The heap ranks first (heap → page
+//! tables → buddy, DESIGN §2.1); growth still drops the heap lock before it
+//! takes PT and then the buddy, so the frame allocation can enter direct
+//! reclaim with nothing held (DESIGN §4.4 rule 1).
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
@@ -110,7 +112,8 @@ fn grow_for(layout: Layout) -> bool {
     if mapped <= old {
         return false;
     }
-    // translate takes PT (rank 1); HEAP is rank 3. Do not invert.
+    // `page_present` takes PT with HEAP dropped, as the maps above did:
+    // growth holds nothing across a frame allocation (DESIGN §4.4 rule 1).
     let (cur, cap) = {
         let h = HEAP.lock();
         (h.0.mapped(), h.0.cap())

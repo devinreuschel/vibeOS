@@ -146,10 +146,7 @@ inode lock. ROADMAP §13.12's lock-dependency build checks both tiers.
 The rank check fails an allocation or a free made while PT, BUDDY, SCHED, DEVICE, or SERIAL is held,
 on every call, whether or not the heap grows. Growth takes PT and then BUDDY after dropping HEAP
 (`heap_init::grow_for`), so the frame allocation it makes can enter direct reclaim with nothing held
-([§4.4](MEMORY.md#44-kernel-heap) rule 1). Rule; not yet enforced: `crates/core/src/sync/lock.rs` ranks the heap third, after
-PT and BUDDY, so an allocation under either fails only when it grows the heap, through PT's
-recursive-lock check or the rank check on PT, and passes every test that does not grow the heap
-(ROADMAP §10.3).
+([§4.4](MEMORY.md#44-kernel-heap) rule 1).
 
 Filesystem spinlocks take `RANK_DEVICE`: today the VFS lock, which also guards the open-file table,
 the ramfs and kernfs store locks, and each backend's mount and slot-allocation locks. The rank order therefore forbids heap allocation under them and
@@ -644,7 +641,7 @@ that review cites means the review's text.
 
 | # | Invariant | Established at | Status | Holds today |
 |---|-----------|----------------|--------|-------------|
-| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: `lock.rs` still ranks the heap after PT and BUDDY, so an allocation under either fails only when it grows the heap; a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
+| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `syscall_init::first_return` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `syscall_init::first_return` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |

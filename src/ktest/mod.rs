@@ -253,6 +253,10 @@ pub(crate) const TESTS: &[Test] = &[
         sync::ktest::test_spin_poll_hook_installed,
     ),
     test(
+        "rank_alloc_under_pt_asserts",
+        sync::ktest::test_rank_alloc_under_pt_asserts,
+    ),
+    test(
         "rank_lock_nested_keeps_outer",
         sync::ktest::test_rank_lock_nested_keeps_outer,
     ),

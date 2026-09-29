@@ -3,12 +3,12 @@
 //! Acquire increasing rank, release reverse. Never take a lower rank
 //! while holding a higher one. Rank 0 is untracked.
 
+/// Kernel heap. First: growing it takes PT and then BUDDY after dropping it.
+pub const RANK_HEAP: u8 = 1;
 /// Page tables / KVA / ioremap.
-pub const RANK_PT: u8 = 1;
+pub const RANK_PT: u8 = 2;
 /// Buddy physical allocator.
-pub const RANK_BUDDY: u8 = 2;
-/// Kernel heap.
-pub const RANK_HEAP: u8 = 3;
+pub const RANK_BUDDY: u8 = 3;
 /// Scheduler (TCB table, timeouts, wait queues).
 pub const RANK_SCHED: u8 = 4;
 /// Device / driver locks.
@@ -209,51 +209,68 @@ mod tests {
 
     #[test]
     fn ranks_are_the_documented_order() {
-        assert_eq!(RANK_PT, 1);
-        assert_eq!(RANK_BUDDY, 2);
-        assert_eq!(RANK_HEAP, 3);
+        assert_eq!(RANK_HEAP, 1);
+        assert_eq!(RANK_PT, 2);
+        assert_eq!(RANK_BUDDY, 3);
         assert_eq!(RANK_SCHED, 4);
         assert_eq!(RANK_DEVICE, 5);
         assert_eq!(RANK_SERIAL, 6);
         const {
+            assert!(RANK_HEAP < RANK_PT);
             assert!(RANK_PT < RANK_BUDDY);
-            assert!(RANK_BUDDY < RANK_HEAP);
-            assert!(RANK_HEAP < RANK_SCHED);
+            assert!(RANK_BUDDY < RANK_SCHED);
             assert!(RANK_SCHED < RANK_DEVICE);
             assert!(RANK_DEVICE < RANK_SERIAL);
+            assert!(RANK_SERIAL <= MAX_RANK);
         }
     }
 
     #[test]
     fn acquire_increasing_is_ok() {
         let mut h = Held::EMPTY;
-        for r in [RANK_PT, RANK_BUDDY, RANK_HEAP, RANK_SCHED, RANK_SERIAL] {
+        for r in [RANK_HEAP, RANK_PT, RANK_BUDDY, RANK_SCHED, RANK_SERIAL] {
             h = h.acquire(r).unwrap();
         }
-        assert_eq!(h.count(RANK_PT), 1);
+        assert_eq!(h.count(RANK_HEAP), 1);
         assert_eq!(h.count(RANK_DEVICE), 0);
-        for r in [RANK_SERIAL, RANK_SCHED, RANK_HEAP, RANK_BUDDY, RANK_PT] {
+        for r in [RANK_SERIAL, RANK_SCHED, RANK_BUDDY, RANK_PT, RANK_HEAP] {
             h = h.release(r);
         }
         assert!(h.is_empty());
-        assert_eq!(h.release(RANK_PT), Held::EMPTY);
+        assert_eq!(h.release(RANK_HEAP), Held::EMPTY);
     }
 
     #[test]
-    fn heap_then_buddy_is_forbidden() {
-        let h = Held::EMPTY.acquire(RANK_HEAP).unwrap();
-        assert!(matches!(
-            h.acquire(RANK_BUDDY),
+    fn pt_then_heap_is_forbidden() {
+        let h = Held::EMPTY.acquire(RANK_PT).unwrap();
+        assert_eq!(
+            h.acquire(RANK_HEAP),
             Err(RankError::Order {
-                rank: RANK_BUDDY,
+                rank: RANK_HEAP,
+                held: 1 << (RANK_PT - 1),
+            })
+        );
+        assert!(h.acquire_nested(RANK_HEAP).is_err());
+        assert!(h.acquire(RANK_BUDDY).is_ok());
+        assert!(h.acquire(RANK_SERIAL).is_ok());
+        assert_eq!(h.acquire(0), Ok(h));
+    }
+
+    #[test]
+    fn buddy_then_heap_is_forbidden() {
+        let h = Held::EMPTY.acquire(RANK_BUDDY).unwrap();
+        assert!(matches!(
+            h.acquire(RANK_HEAP),
+            Err(RankError::Order {
+                rank: RANK_HEAP,
                 ..
             })
         ));
         assert!(h.acquire(RANK_PT).is_err());
-        assert!(h.acquire_nested(RANK_PT).is_err());
+        assert!(h.acquire_nested(RANK_HEAP).is_err());
         assert!(h.acquire(RANK_SCHED).is_ok());
-        assert!(h.acquire(RANK_SERIAL).is_ok());
-        assert_eq!(h.acquire(0), Ok(h));
+        let dev = Held::EMPTY.acquire(RANK_DEVICE).unwrap();
+        assert!(dev.acquire(RANK_HEAP).is_err());
     }
 
     #[test]
