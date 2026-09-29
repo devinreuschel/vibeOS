@@ -49,8 +49,9 @@ holds a copy that only an in-guest test reads (ROADMAP §10.7 deletes it, F111).
 count is also measured once, on the BSP, and `apic_init::arm_ap` reuses it on every AP. Both assume
 one TSC rate and one LAPIC timer rate on every CPU. `time_init::init` checks the invariant TSC CPUID
 bit and prints `vibeOS: time: invariant tsc absent` when it is clear, because everything downstream
-assumes the TSC does not change rate. Planned (ROADMAP §10.7): each AP measures its TSC against the
-BSP's at bring-up, and a marker reports the largest skew.
+assumes the TSC does not change rate. Each AP measures its TSC against the BSP's at bring-up with a
+warp test ([DESIGN §7.4](SMP.md#74-ap-bring-up-sequence)), and `vibeOS: smp: tsc skew <n> cycles`
+reports the largest backward step it saw.
 
 ## 6.3 The tick
 
@@ -161,9 +162,13 @@ it shows, those two read once per tick and interpolate from the TSC, which still
 ticks coalesce. Planned: ROADMAP §10.3 (F027) moves x86_64 `now_ns` to this model, and §11.3 gives
 aarch64 the same function. Until then option 1 stalls and lags: after a CPU 0 IF-off stretch or deep
 idle, the `LAST_NS` clamp repeats one value until the interpolation catches up, and time then stays
-behind the TSC by the lost ticks. Trace timestamps are separate: ROADMAP §10.7's records carry raw
-cycle-counter reads, which order records across CPUs only when the TSC is invariant and the warp test
-saw no backward step.
+behind the TSC by the lost ticks. Trace timestamps are separate: ROADMAP §10.7's flight-recorder
+records carry raw cycle-counter reads. A trace orders records across CPUs only when CPUID reports the
+TSC invariant and the bring-up warp test ([DESIGN §7.4](SMP.md#74-ap-bring-up-sequence)), whose
+result `vibeOS: smp: tsc skew <n> cycles` reports, saw no backward step (Linux's `check_tsc_warp`
+rule). Otherwise the export (`trace::export_chrome`) orders records within each CPU only and says so
+in its `otherData`. The header of `VIBEOS_TRACE` carries the calibration and the warp result for the
+core tool.
 
 ## 6.5 Timers and timeouts
 

@@ -162,7 +162,7 @@ pub(crate) fn test_sleep_ms_50() -> Outcome {
     }
     // TCG: ticks coalesce under SMP; sleep is now_ns. Keep 50–100 on
     // invariant TSC.
-    if !crate::time::ktest::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
+    if !crate::time_init::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
         return Outcome::Ok;
     }
     crate::marker!("vibeOS: ktest:   sleep_ms dt={dt} du={du}");

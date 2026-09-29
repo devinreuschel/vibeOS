@@ -956,3 +956,20 @@ needs = [
   "`release.yml` runs only from `main`,",  # L1207
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1416
+[[box]]
+key = "tracepoints at the boundaries that"
+needs = [
+  "a flight recorder (moved from",  # L1415
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1417
+[[box]]
+key = "timestamps from the §10.3 cycle"
+needs = [
+  "a hostlib core tool reads",  # L1412
+  "a flight recorder (moved from",  # L1415
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"

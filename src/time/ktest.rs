@@ -28,11 +28,6 @@ pub(crate) fn source() -> CalibSource {
         .unwrap_or(CalibSource::Pit)
 }
 
-/// CPUID.8000_0007H:EDX[8]. TCG leaves this clear; KVM and real silicon set it.
-pub(crate) fn tsc_invariant() -> bool {
-    STATE.try_get().is_some_and(|s| s.invariant_tsc)
-}
-
 pub(crate) fn deadline_after(now: Instant) -> Instant {
     next_deadline(now)
 }
@@ -96,7 +91,7 @@ pub(crate) fn test_tsc_calib_source() -> Outcome {
             }
             // Boot HPET ran before APs. Remeasure both under this SMP load.
             let ref_k = measure_hpet().unwrap_or(k);
-            let (lo_pct, hi_pct) = calib_band(tsc_invariant());
+            let (lo_pct, hi_pct) = calib_band(time_init::tsc_invariant());
             let mut last_pit = 0u64;
             let mut i = 0u32;
             while i < 3 {

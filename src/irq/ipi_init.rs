@@ -139,6 +139,7 @@ fn service_shootdowns() {
                 }
             }
             s.acked.fetch_or(me, Ordering::Release);
+            vibeos::trace!(IpiAck, u64::from(vectors::IPI_SHOOTDOWN), i as u64);
             SHOOT_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         i += 1;
@@ -169,6 +170,7 @@ fn service_calls() {
         f(arg);
     }
     CALL.acked.fetch_or(me, Ordering::Release);
+    vibeos::trace!(IpiAck, u64::from(vectors::IPI_CALL), u64::MAX);
     CALL_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -299,6 +301,7 @@ fn inbox_push(cpu: u32, slot: usize) {
 /// Place `id`, in thread-table slot `slot`, on `cpu`. Local: runq. Remote:
 /// inbox + 0xFD. Never a remote queue lock. IRQ-off for the local runq.
 pub fn place_ready(cpu: u32, id: ThreadId, slot: usize) {
+    vibeos::trace!(Wake, u64::from(id.0), u64::from(cpu));
     let _irq = crate::x86::InterruptGuard::enter();
     let me = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
     let cpu = if cpu == me || per_cpu_init::is_online(cpu) {
@@ -365,6 +368,7 @@ pub fn set_reschedule_hook(f: fn()) {
 }
 
 pub fn on_reschedule_ipi() {
+    vibeos::trace!(IpiAck, u64::from(vectors::IPI_RESCHEDULE), u64::MAX);
     RESCHED_COUNT.fetch_add(1, Ordering::Relaxed);
     drain_inbox();
     // Acquire: pairs with the Release store in `set_reschedule_hook`.
