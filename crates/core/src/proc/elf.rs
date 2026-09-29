@@ -882,6 +882,104 @@ mod tests {
         assert_eq!(got, Err(ElfError::Stack));
     }
 
+    const STATIC_LLD: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/elf/static-lld"
+    ));
+    const STATIC_GNULD: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/elf/static-gnuld"
+    ));
+
+    fn seg(vaddr: u64, offset: u64, filesz: u64, memsz: u64, write: bool, exec: bool) -> LoadSeg {
+        LoadSeg {
+            vaddr,
+            memsz,
+            offset,
+            filesz,
+            write,
+            exec,
+        }
+    }
+
+    /// The checked-in static binaries from `tests/fixtures/elf/start.S`
+    /// parse to what `llvm-readobj --elf-output-style=GNU -h -l` prints for
+    /// them, and each cut one byte short of its last segment's file end is
+    /// `Truncated`.
+    #[test]
+    fn elf_parse_linked_static_binaries() {
+        struct Want<'a> {
+            name: &'static str,
+            data: &'static [u8],
+            entry: u64,
+            phnum: u16,
+            loads: &'a [LoadSeg],
+            tls: TlsSeg,
+            phdr_va: u64,
+        }
+        let lld = [
+            seg(0x20_0000, 0x0, 0x216, 0x216, false, false),
+            seg(0x20_1218, 0x218, 0x29, 0x29, false, true),
+            seg(0x20_2248, 0x248, 0x8, 0xdb8, true, false),
+            seg(0x20_3250, 0x250, 0x8, 0x3db0, true, false),
+        ];
+        let gnuld = [
+            seg(0x40_0000, 0x0, 0x1c8, 0x1c8, false, false),
+            seg(0x40_1000, 0x1000, 0x29, 0x29, false, true),
+            seg(0x40_2000, 0x2000, 0x16, 0x16, false, false),
+            seg(0x40_3ff8, 0x2ff8, 0x10, 0x4008, true, false),
+        ];
+        let wants = [
+            Want {
+                name: "static-lld",
+                data: STATIC_LLD,
+                entry: 0x20_1218,
+                phnum: 8,
+                loads: &lld,
+                tls: TlsSeg {
+                    vaddr: 0x20_2248,
+                    offset: 0x248,
+                    filesz: 0x8,
+                    memsz: 0x48,
+                    align: 8,
+                },
+                phdr_va: 0x20_0040,
+            },
+            Want {
+                name: "static-gnuld",
+                data: STATIC_GNULD,
+                entry: 0x40_1000,
+                phnum: 7,
+                loads: &gnuld,
+                tls: TlsSeg {
+                    vaddr: 0x40_3ff8,
+                    offset: 0x2ff8,
+                    filesz: 0x8,
+                    memsz: 0x48,
+                    align: 8,
+                },
+                phdr_va: 0x40_0040,
+            },
+        ];
+        for w in wants {
+            let img = parse(w.data).unwrap_or_else(|e| panic!("{}: {}", w.name, e.as_str()));
+            assert_eq!(img.entry, w.entry, "{}", w.name);
+            assert_eq!(img.phnum, w.phnum, "{}", w.name);
+            assert_eq!(img.loads(), w.loads, "{}", w.name);
+            assert_eq!(img.tls, Some(w.tls), "{}", w.name);
+            assert!(!img.stack_exec, "{}", w.name);
+            assert_eq!(img.phdr_va, Some(w.phdr_va), "{}", w.name);
+            let end = w.loads.iter().map(|s| s.offset + s.filesz).max().unwrap();
+            assert_eq!(
+                parse_err(&w.data[..end as usize - 1]),
+                ElfError::Truncated,
+                "{}",
+                w.name
+            );
+            assert!(parse(&w.data[..end as usize]).is_ok(), "{}", w.name);
+        }
+    }
+
     /// `Image`'s fields are public, so a hand-built one can carry an
     /// `nload` past `loads`; `loads()` used to slice out of bounds.
     #[test]
