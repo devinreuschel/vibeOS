@@ -1040,6 +1040,8 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     };
     let mut i = 0;
     while i < n {
+        #[cfg(feature = "kernel_tests")]
+        testing::place_stall(places[i].1);
         crate::ipi_init::place_ready(places[i].0, places[i].1);
         i += 1;
     }
@@ -1198,7 +1200,7 @@ pub fn snapshot(out: &mut [ThreadInfo]) -> usize {
 pub mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-    use vibeos::thread::{MAX_THREADS, ThreadId};
+    use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
     use crate::per_cpu_init;
     use crate::time_init;
@@ -1331,5 +1333,93 @@ pub mod testing {
         ARRIVED
             .get(id.raw() as usize)
             .is_some_and(|a| a.swap(false, Ordering::AcqRel))
+    }
+
+    /// Most either late-wake hold spins, in ms of TSC time.
+    const LATE_WAKE_MS: u64 = 2_000;
+    /// Thread whose next wait [`wait_window`] holds, or `u32::MAX`.
+    static WINDOW_TID: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// Set while [`wait_window`] holds its thread.
+    static WINDOW_HELD: AtomicBool = AtomicBool::new(false);
+    /// Lets the thread [`wait_window`] holds go on.
+    static WINDOW_GO: AtomicBool = AtomicBool::new(false);
+    /// Thread whose next wake [`place_stall`] delivers late, or `u32::MAX`.
+    static PLACE_TID: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// Set when [`place_stall`] delivered its wake after the thread died.
+    static PLACE_LATE: AtomicBool = AtomicBool::new(false);
+
+    /// Hold `id`'s next blocking wait (`sync_init::wait_resume`) between the
+    /// store that queues it on the wait queue and its `schedule`, IF=0,
+    /// until [`arm_late_wake`]'s held wake lets it go or 2 s pass. The
+    /// thread calls it on itself before it blocks.
+    pub fn arm_wait_window(id: ThreadId) {
+        WINDOW_GO.store(false, Ordering::Relaxed);
+        WINDOW_HELD.store(false, Ordering::Relaxed);
+        WINDOW_TID.store(id.raw(), Ordering::Release);
+    }
+
+    /// Whether [`arm_wait_window`]'s thread is held now.
+    pub fn wait_window_held() -> bool {
+        WINDOW_HELD.load(Ordering::Acquire)
+    }
+
+    /// Called by `sync_init::wait_resume` before it schedules.
+    pub fn wait_window() {
+        let me = super::current_id().raw();
+        if WINDOW_TID
+            .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        // IF=0 so no tick switches the held thread off before the wake.
+        let _irq = crate::x86::InterruptGuard::enter();
+        WINDOW_HELD.store(true, Ordering::Release);
+        let end = time_init::read_tsc()
+            .saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
+        while !WINDOW_GO.load(Ordering::Acquire) && time_init::read_tsc() < end {
+            core::hint::spin_loop();
+        }
+        WINDOW_HELD.store(false, Ordering::Release);
+    }
+
+    /// Deliver the next wake of `id` late: the waker, after `with_sched`
+    /// has dropped SCHED and before it pushes `id` to its CPU, lets
+    /// [`arm_wait_window`]'s thread go and spins until `id` is `Dead` or 2 s
+    /// pass, as a waker preempted at that point would while `id` runs on.
+    pub fn arm_late_wake(id: ThreadId) {
+        PLACE_LATE.store(false, Ordering::Relaxed);
+        PLACE_TID.store(id.raw(), Ordering::Release);
+    }
+
+    /// Whether [`arm_late_wake`]'s wake went out after its thread died.
+    pub fn late_wake_after_death() -> bool {
+        PLACE_LATE.load(Ordering::Acquire)
+    }
+
+    pub fn disarm_late_wake() {
+        PLACE_TID.store(u32::MAX, Ordering::Release);
+        WINDOW_TID.store(u32::MAX, Ordering::Release);
+        WINDOW_GO.store(true, Ordering::Release);
+    }
+
+    /// Called by `with_sched` before it delivers each place.
+    pub(super) fn place_stall(id: ThreadId) {
+        if PLACE_TID
+            .compare_exchange(id.raw(), u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        WINDOW_GO.store(true, Ordering::Release);
+        let end = time_init::read_tsc()
+            .saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
+        while time_init::read_tsc() < end {
+            if super::try_state(id) == Some(ThreadState::Dead) {
+                PLACE_LATE.store(true, Ordering::Release);
+                return;
+            }
+            core::hint::spin_loop();
+        }
     }
 }

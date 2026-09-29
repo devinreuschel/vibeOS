@@ -234,6 +234,10 @@ pub(crate) const TESTS: &[Test] = &[
         "blocking_mutex_counter",
         sync::ktest::test_blocking_mutex_counter,
     ),
+    test(
+        "late_wake_after_exit",
+        sync::ktest::test_late_wake_after_exit,
+    ),
     test("rwlock_exclusion", sync::ktest::test_rwlock_exclusion),
     test(
         "rwlock_writer_timeout",
