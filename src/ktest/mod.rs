@@ -347,6 +347,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("dev_random_source", dev::ktest::test_dev_random_source),
     test("rng_pool_no_dup", dev::ktest::rng_pool_no_dup),
     test(
+        "rng_refill_after_empty_completion",
+        dev::ktest::rng_refill_after_empty_completion,
+    ),
+    test(
         "dev_probe_alloc_fail",
         dev::ktest::test_dev_probe_alloc_fail,
     ),

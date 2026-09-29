@@ -585,6 +585,9 @@ pub(crate) mod rng_hooks {
     /// Completions published since [`arm_pattern`].
     static REFILLS: AtomicU32 = AtomicU32::new(0);
     static STALL: AtomicU32 = AtomicU32::new(0);
+    static ZERO_NEXT: AtomicBool = AtomicBool::new(false);
+    /// Completions [`arm_zero_next`] emptied.
+    static ZERO_PUB: AtomicU32 = AtomicU32::new(0);
 
     /// From now on, refill `r` publishes `(32·r + i) as u8` for
     /// `r < PATTERN_REFILLS`, and nothing from then on: 256 distinct values.
@@ -603,13 +606,29 @@ pub(crate) mod rng_hooks {
         STALL.store(spins, Ordering::Release);
     }
 
+    /// The next completion publishes zero bytes.
+    pub(crate) fn arm_zero_next() {
+        ZERO_NEXT.store(true, Ordering::Release);
+    }
+
+    /// Completions [`arm_zero_next`] has emptied.
+    pub(crate) fn zero_published() -> u32 {
+        ZERO_PUB.load(Ordering::Acquire)
+    }
+
     /// Turn every hook off.
     pub(crate) fn disarm() {
         PATTERN.store(false, Ordering::Release);
         STALL.store(0, Ordering::Release);
+        ZERO_NEXT.store(false, Ordering::Release);
     }
 
     pub(crate) fn on_publish(payload: &mut [u8; RNG_PAYLOAD], len: &mut usize) {
+        if ZERO_NEXT.swap(false, Ordering::AcqRel) {
+            *len = 0;
+            ZERO_PUB.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
         if !PATTERN.load(Ordering::Acquire) {
             return;
         }
@@ -729,6 +748,36 @@ pub(crate) fn rng_pool_no_dup() -> Outcome {
     }
     if refills < 3 {
         return crate::fail_fmt!("{refills} pattern refills landed, want 3");
+    }
+    Outcome::Ok
+}
+
+/// ROADMAP §10.12 (F121): after a completion that publishes zero bytes,
+/// `hw_fill` asks for another refill, since the pool is empty and no
+/// request is in flight.
+pub(crate) fn rng_refill_after_empty_completion() -> Outcome {
+    if !virtio_init::rng_bound() {
+        return Outcome::Skip("no virtio-rng");
+    }
+    let z0 = rng_hooks::zero_published();
+    rng_hooks::arm_zero_next();
+    // A request already in flight completes empty just the same.
+    if virtio_init::rng_request().is_err() {
+        rng_hooks::disarm();
+        return Outcome::Fail("request");
+    }
+    if !spin_until_ns(|| rng_hooks::zero_published() > z0, 2_000_000_000) {
+        rng_hooks::disarm();
+        return Outcome::Fail("no empty completion");
+    }
+    let c0 = rng_completions();
+    let t0 = crate::time_init::now_ns();
+    while rng_completions() <= c0 {
+        if crate::time_init::now_ns().saturating_sub(t0) > 2_000_000_000 {
+            return Outcome::Fail("no refill");
+        }
+        vibeos::entropy::hw_fill(&mut [0u8; 8]);
+        core::hint::spin_loop();
     }
     Outcome::Ok
 }

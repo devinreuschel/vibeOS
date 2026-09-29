@@ -18,6 +18,11 @@ fn hw_fill(buf: &mut [u8]) -> (usize, Source) {
         if n > 0 {
             i += n;
             src = Source::VirtioRng;
+        }
+        // Fewer bytes than asked, 0 included, means the pool is empty:
+        // ask for the next refill, which `rng_request` skips while one is
+        // in flight, so an empty completion cannot stop refills (F121).
+        if n < buf.len() {
             refill();
         }
     }
