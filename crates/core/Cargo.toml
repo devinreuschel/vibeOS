@@ -14,3 +14,11 @@ name = "vibeos"
 default = []
 # Host tools and `cargo test`. Kernel builds leave this off (`no_std`).
 std = []
+
+[lints]
+workspace = true
+
+# Loom models (ROADMAP §10.8) are `#[cfg(all(test, loom))]` unit tests, built
+# with `RUSTFLAGS="--cfg loom"`; `crate::atomic` swaps in loom's atomics there.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"

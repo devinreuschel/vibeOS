@@ -97,6 +97,8 @@ fn be64(b: &[u8], o: usize) -> u64 {
     u64::from_be_bytes(a)
 }
 
+#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn read_n(s: &mut UnixStream, n: usize) -> io::Result<Vec<u8>> {
     let mut v = vec![0u8; n];
     s.read_exact(&mut v)?;
@@ -110,6 +112,8 @@ fn closed(e: &io::Error) -> bool {
     )
 }
 
+#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 impl Server {
     fn new(image: File, trace: File, data: File, seed: u64) -> io::Result<Self> {
         let size = image.metadata()?.len();
@@ -387,6 +391,7 @@ impl Server {
     }
 }
 
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 struct Args {
     socket: String,
     image: String,
@@ -415,6 +420,7 @@ fn parse_args() -> Option<Args> {
     })
 }
 
+#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
 fn run(a: &Args) -> io::Result<bool> {
     let image = OpenOptions::new().read(true).write(true).open(&a.image)?;
     let trace = File::create(&a.trace)?;
@@ -451,6 +457,12 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
+#[allow(
+    clippy::let_underscore_must_use,
+    reason = "audit pending, ROADMAP §10.1"
+)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

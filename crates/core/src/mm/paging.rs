@@ -236,8 +236,9 @@ pub const fn is_canonical(va: u64) -> bool {
 
 /// Mapper over a single PML4 root.
 ///
-/// Not `Sync`: the design uses one root per address space and a lock at
-/// the call site (DESIGN §2.1 puts page tables first in the lock order).
+/// Auto-`Send + Sync`, since it holds only a root address and an offset,
+/// so nothing in the type serializes a root: callers do, through the
+/// page-table lock (DESIGN §2.1 puts page tables first in the lock order).
 pub struct Mapper {
     root: PhysAddr,
     hhdm_offset: u64,

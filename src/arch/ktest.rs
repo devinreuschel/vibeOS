@@ -78,6 +78,87 @@ pub(crate) fn test_int3_roundtrip() -> Outcome {
     Outcome::Ok
 }
 
+// `int3` on the CPU that armed the catch, and on another one. Both
+// `#[inline(never)]`, so each `int3` lies in its own function.
+#[inline(never)]
+fn int3_here() {
+    unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
+}
+
+#[inline(never)]
+fn int3_other(_: *mut ()) {
+    unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
+}
+
+/// Whether `rip`, a `#BP` return address, lies in the function at `f`:
+/// past its start, near it, and with no start of `g` in between.
+fn rip_in(rip: u64, f: u64, g: u64) -> bool {
+    rip > f && rip - f < 64 && !(g > f && g < rip)
+}
+
+/// A `#BP` on another CPU during a catch window takes its normal path (log
+/// and continue), and the window catches this CPU's `#BP` (F146).
+pub(crate) fn test_catch_ignores_other_cpu() -> Outcome {
+    let me = x86::cpu_index().unwrap_or(0);
+    let mask = per_cpu_init::online_mask() & !(1u64 << me);
+    if mask == 0 {
+        return Outcome::Skip("one CPU");
+    }
+    let other = mask.trailing_zeros();
+    let here = int3_here as *const () as u64;
+    let there = int3_other as *const () as u64;
+    // insn_len 0: `#BP` is a trap, its saved RIP is already past `int3`.
+    let caught = arch::catch::catch_skip(vectors::BP, 0, || {
+        ipi_init::call_cpu(other, int3_other, core::ptr::null_mut(), true);
+        int3_here();
+    });
+    let Some(c) = caught else {
+        return Outcome::Fail("no #BP caught");
+    };
+    if rip_in(c.frame.rip, here, there) {
+        return Outcome::Ok;
+    }
+    if rip_in(c.frame.rip, there, here) {
+        return crate::fail_fmt!(
+            "caught cpu {other}'s #BP at {:#x}, not this cpu's {me}",
+            c.frame.rip
+        );
+    }
+    crate::fail_fmt!("caught rip {:#x} in neither int3 fn", c.frame.rip)
+}
+
+// `ud2`, then exit(0) if the kernel stepped past it.
+user_code!(
+    UD2_EXIT0,
+    "
+    ud2
+    xor edi, edi
+    mov eax, 60
+    syscall
+    "
+);
+
+/// A ring-3 `#UD` during a catch window for `#UD` takes its ring-3 path
+/// (SIGILL), and the window catches nothing (F146).
+pub(crate) fn test_catch_ignores_user_frame() -> Outcome {
+    let mut st = None;
+    let caught = arch::catch::catch_skip(vectors::UD, 2, || {
+        st = Some(user::run(&Image::Code(UD2_EXIT0, DEFAULT), &["ud2_exit0"]));
+    });
+    let st = match st {
+        Some(Ok(st)) => st,
+        Some(Err(e)) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+        None => return Outcome::Fail("catch body did not run"),
+    };
+    if st != wait_signaled(SIGILL) {
+        return crate::fail_fmt!("status {st:#x}, want SIGILL");
+    }
+    if let Some(c) = caught {
+        return crate::fail_fmt!("caught a CPL-{} #UD at {:#x}", c.frame.cs & 3, c.frame.rip);
+    }
+    Outcome::Ok
+}
+
 pub(crate) fn test_scoped_pf() -> Outcome {
     let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");

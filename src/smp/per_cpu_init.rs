@@ -210,7 +210,9 @@ pub unsafe fn install_gs(cpu: &PerCpu) {
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
 }
 
-/// InterruptGuard nesting. No-op before [`init_bsp`], or if GS is still 0.
+/// InterruptGuard nesting. A no-op only before [`init_bsp`] sets `LIVE`;
+/// after that it loads `gs:[0]`, so `GS_BASE` must already point at this
+/// CPU's `PerCpu`.
 pub fn irq_nest_enter() {
     if let Some(c) = try_current() {
         c.irq_nest.fetch_add(1, Ordering::Relaxed);

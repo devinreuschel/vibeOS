@@ -440,7 +440,10 @@ anyway, because the check and the run are separate recipe lines (ROADMAP §10.2,
 
 `make check` is the fast local gate (rustfmt `--check`; clippy `-D warnings` on `vibeos-core` and hostlib
 for the host, on `vibeos-core` for `x86_64-unknown-none`, and on the kernel with its default features; host
-unit tests, harness unit tests, ruff/mypy when installed). CI runs it as the `check` job before QEMU (DESIGN §8.6).
+unit tests, the `release_assert_` host tests again with debug assertions off, harness unit tests,
+ruff/mypy when installed; a production-feature link under the `hookcheck`
+profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q2's `nm` check; then every
+`scripts/check_*.py`). CI runs it as the `check` job before QEMU (DESIGN §8.6).
 `make test-e2e` is enough when only boot output or QEMU wiring changed. `make test` is the gate before
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.

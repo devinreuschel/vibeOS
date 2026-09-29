@@ -55,3 +55,35 @@ pub(crate) fn test_log_dmesg_no_recapture() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// Formats as `outer`, logging a record of its own while it does.
+struct LogsWhileFormatting;
+
+impl core::fmt::Display for LogsWhileFormatting {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        crate::klog!(vibeos::log::Level::Info, "vibeOS: ktest: log-reentry-inner");
+        f.write_str("outer")
+    }
+}
+
+/// A `klog!` whose argument's `Display` calls `klog!` drops the inner
+/// record, and `reentry_drops` counts it (DESIGN §2.5).
+pub(crate) fn test_log_reentry_drop_counted() -> Outcome {
+    let before = crate::log_init::reentry_drops();
+    crate::klog!(
+        vibeos::log::Level::Info,
+        "vibeOS: ktest: log-reentry-{}",
+        LogsWhileFormatting
+    );
+    let after = crate::log_init::reentry_drops();
+    if after.wrapping_sub(before) != 1 {
+        return crate::fail_fmt!("reentry_drops {before} -> {after}, want +1");
+    }
+    if !crate::log_init::contains_msg("log-reentry-outer") {
+        return Outcome::Fail("outer record missing from ring");
+    }
+    if crate::log_init::contains_msg("log-reentry-inner") {
+        return Outcome::Fail("inner record stored");
+    }
+    Outcome::Ok
+}
