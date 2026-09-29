@@ -46,6 +46,8 @@ allow = [
     { crate = "vibeos", reason = "workspace member: the kernel binary" },
     { crate = "vibeos-core", reason = "workspace member: the portable crate the kernel and host tools link" },
     { crate = "vibeos-hostlib-tests", reason = "workspace member: host tools and host tests" },
+    { crate = "vibeos-user", reason = "workspace member: the user runtime and user programs, ROADMAP §10.5" },
+    { crate = "vibeos-user-mem", reason = "workspace member: vibeos-user's mem functions" },
     # The kernel.
     { crate = "limine", reason = "vibeos dependency: the Limine boot protocol" },
     # zerocopy (ROADMAP §10.6).
