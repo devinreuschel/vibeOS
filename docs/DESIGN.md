@@ -149,8 +149,7 @@ compiles it under `cfg(test)` through `#[path]`. `user/` holds freestanding ELFs
 **Reading the table.** Paths are relative to `crates/core/src/` (Portable) and `src/` (Kernel).
 `{a,b}` lists files of one directory, and `*` matches within one. Every listed path exists, and every
 `.rs`, `.S` and `.asm` file under the two roots is listed once. Outside the `crate` row, a row's paths
-lie in its subsystem's directory, except `ktest.rs` until ROADMAP §10.2's Q2 box moves the runner to
-`ktest/mod.rs`. Test bodies in `src/<s>/ktest.rs` need no row.
+lie in its subsystem's directory. Test bodies in `src/<s>/ktest.rs` need no row.
 
 | Subsystem | Portable (`crates/core/src/`) | Kernel (`src/`) |
 |---|---|---|
@@ -172,7 +171,7 @@ lie in its subsystem's directory, except `ktest.rs` until ROADMAP §10.2's Q2 bo
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,kernfs,ramfs,testfs,fat,vibefs}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,file_init}.rs` |
 | proc | `proc/{mod,addr_space,elf,syscall}.rs` | `proc/{mod,proc_init,addr_space_init,user_init,syscall_init}.rs` |
-| ktest | — | `ktest.rs`, `ktest/*.rs` (`kernel_tests` only) |
+| ktest | — | `ktest/{mod,user}.rs`, `ktest/p10_s*.rs` (`kernel_tests` only) |
 
 ## 1.4 Documentation rules
 

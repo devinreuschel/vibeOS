@@ -121,7 +121,7 @@ left out of the aggregate registry is unreferenced code, which the `kernel_tests
 Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
 names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,
 `no smep/smap/umip`, `pit owns tick`, `pic fallback`, and `rtc unread` (the `Outcome::Skip` reasons
-in `src/ktest.rs`). Destructive exception tests run inside `arch::catch` scopes, which longjmp out or
+in the in-guest test bodies, DESIGN §1.3). Destructive exception tests run inside `arch::catch` scopes, which longjmp out or
 step RIP past the faulting instruction, instead of skipping.
 
 Planned (ROADMAP §10.2): `tests/harness/skips.toml` lists each test allowed to skip, with its reason
