@@ -61,6 +61,15 @@ SECTIONS
         KEEP(*(.trampoline))
         __trampoline_end = .;
     } :rodata
+
+    /* The ksyms table (scripts/gen_ksyms.py). Inside __rodata_* so paging
+     * maps it; the kernel reads it only through these bounds, so the second
+     * ksyms link leaves .text where the first put it (DESIGN §2.5). */
+    .ksyms : ALIGN(8) {
+        __ksyms_start = .;
+        KEEP(*(.ksyms))
+        __ksyms_end = .;
+    } :rodata
     __rodata_end = .;
 
     . = ALIGN(4K);

@@ -37,7 +37,7 @@ Quickstart:
 
     ./setup.sh          # fetches Limine binaries, verifies host tools
     make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts)
-    make                # kernel + vibeos.iso (hybrid BIOS/UEFI)
+    make                # kernel + build/vibeos.iso (hybrid BIOS/UEFI)
     make run            # QEMU window = PS/2; the terminal is COM1 (`-serial stdio`)
     make test           # host + harness units, e2e (BIOS, UEFI, panic, #GP, #MC, PIT, 9 GiB), in-guest, vibefs crash
 

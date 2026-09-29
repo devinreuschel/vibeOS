@@ -87,22 +87,40 @@ physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive
 | HHDM | Higher-half direct map offset. `virt = phys + offset` for any physical access before our own tables exist. |
 | Executable address | Physical and virtual base of the loaded kernel, so we can map ourselves and exclude ourselves from the allocator. |
 | RSDP | Physical pointer to the ACPI RSDP. Gates all of ACPI, APIC, HPET, SMP. |
+| Executable command line | The `limine.conf` entry's `cmdline:`, read as raw bytes up to the NUL (at most 2048), never through the crate's `cmdline()`, which unwraps non-UTF-8. Optional: absent means empty. |
 | SMP (optional) | Limine can bring up APs for us. We do it ourselves; see [section 7](SMP.md#7-smp) for why. |
 
 Firmware reclaimable regions stay out of the free lists. Reclaiming them is a few megabytes for a
 nonzero chance of stomping something ACPI still points at.
 
-Kernel command line. Planned (ROADMAP §10.2): the kernel reads a Linux-style command line, and its
-option names follow the Linux-interfaces rule. An option Linux defines keeps Linux's name and meaning
+Kernel command line (ROADMAP §10.2). `boot::capture` keeps it in `BootInfo`: the `limine.conf`
+entry's `cmdline:` (`vibeos.strace=0` in the shipped entry), then, on x86_64 when CPUID.1:ECX[31]
+reports a hypervisor and QEMU's fw_cfg lists `opt/vibeos/cmdline`, one space and that file's text,
+trailing NULs and whitespace stripped (`boot::fw_cfg_init`, invariant I244), so the harness sets
+options on the unmodified ISO (`VIBEOS_CMDLINE`, [§8.4](TESTING.md#84-qemu-flags)). At most 2048 bytes
+are kept, Linux's x86 `COMMAND_LINE_SIZE`; the rest is dropped with one log line. The kernel prints
+it once as `vibeOS: boot: cmdline: <text>`, a byte outside 0x20 to 0x7E as `?`. The portable
+`vibeos::boot::cmdline` parses it as Linux's `kernel-parameters.rst` describes: words split at ASCII
+whitespace outside double quotes, which are removed from the word or value they enclose; `-` and `_`
+are equal in a name; the last occurrence wins; `--` ends the kernel's words. Its option names follow
+the Linux-interfaces rule. An option Linux defines keeps Linux's name and meaning
 (`root=`, `init=`, `ro`, `rw`, `console=`, `loglevel=`, `panic=`, `mitigations=`, `crashkernel=`). An
 option only vibeOS defines is `vibeos.<name>=`, the `module.parameter` form Linux's parser gives a
 module's options, so no later Linux option can take its name. `sysctl.<path>=` sets a sysctl vibeOS
 implements, and an unknown path is logged and ignored, as on Linux. A word the kernel does not
 recognize reaches init as Linux passes it: an undotted `name=value` into init's environment, any other
-undotted word, and every word after `--`, as an argument; an unrecognized dotted word is dropped.
-ROADMAP §10.2's parser lists each option here as it lands, with its ROADMAP §39.1 class: `internal`
-for an option only the harness or a test sets, such as `vibeos.ktest=`, and `stable` or `unstable`
-for the rest.
+undotted word, and every word after `--`, as an argument; an unrecognized dotted word is dropped with
+a log line. Init gets at most 8 argv entries (`argv[0]` included) and 8 environment strings, the
+initial stack's capacity until ROADMAP §10.6 raises it; a word past either is dropped with one log
+line. No sysctl exists yet, so every `sysctl.<path>=` word (`.` or `/` separators) is logged and
+ignored. The parser's `OPTIONS` lists each option as it lands, and this table lists it with its
+ROADMAP §39.1 class: `internal` for an option only the harness or a test sets, such as
+`vibeos.ktest=`, and `stable` or `unstable` for the rest. The host test `cmdline_options_documented`
+fails when an `OPTIONS` row has no row here with its class.
+
+| Option | Defined by | Class | Meaning | Box |
+|--------|------------|-------|---------|-----|
+| `vibeos.strace` | vibeOS | unstable | `vibeos.strace=1` (or bare, `y`, `Y`, `on`) prints one `user: syscall` line per syscall that returns ([SYSCALL.md §6](SYSCALL.md#6-tracing-and-counters)); anything else leaves it off | ROADMAP §10.7 |
 
 Planned (ROADMAP §18.7, §22.2): under Secure Boot the kernel command line is the `cmdline:` of the
 Limine configuration enrolled into the signed Limine binary, which sets `editor_enabled: no`, so
@@ -221,7 +239,8 @@ with. Two requirements that are easy to get wrong:
   without mapping code writable.
 
 Export at minimum: `__kernel_vma_start`, `__kernel_vma_end`, and per-section start/end pairs for
-`.text`, `.rodata`, `.data`, `.bss`.
+`.text`, `.rodata`, `.data`, `.bss`, and `__ksyms_start` and `__ksyms_end` around the `.ksyms`
+section, which sits after `.rodata` and before `__rodata_end`, so paging maps it (§2.5).
 
 ## 3.5 Profiles
 
@@ -240,14 +259,54 @@ not rely on the optimizer. Planned (ROADMAP §10.2): a `make check` script bound
 frame at a value recorded here. The bound is a screen for one oversized frame; §4.5's measured
 budget is what bounds a whole path.
 
+Neither profile writes a host path into what ships. Every cargo build the Makefile runs for a shipped
+artifact goes through `CARGO_SHIP`, which sets Cargo's `trim-paths = "all"` for the profile being
+built (`-Ztrim-paths --config 'profile.<name>.trim-paths="all"'`). Cargo then passes rustc a
+`--remap-path-prefix` for the checkout, the sysroot and `$CARGO_HOME`, so panic `Location` strings,
+DWARF, and the ThinLTO `.llvm.<hash>` names `gen_ksyms.py` copies into the ksyms table carry none.
+Trim-paths is unstable on the pinned nightly, so the setting lives on the command line: a manifest's
+`cargo-features = ["trim-paths"]` would stop every stable cargo, the MSRV check's included, from
+reading the workspace. It moves into `Cargo.toml`'s profiles once Cargo stabilizes it. Host tools do
+not ship and build without it.
+
 ## 3.6 ISO and QEMU
+
+`make` builds every variant in the one `target/`, copies each variant's ELF to
+`build/kernels/vibeos-<variant>.elf`, and writes `build/vibeos.iso` and `build/vibeos-<variant>.iso`;
+`make isos` builds them all. Each ISO recipe reads only its own named ELF, so a test build cannot be
+packaged as production. The repository root holds no build product.
 
 `make` stages `build/iso_root_<variant>/` with the kernel ELF, `limine.conf`, and the Limine BIOS
 and UEFI artifacts, then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid
 means the same image boots BIOS and UEFI, which matters for real hardware later.
 
 The Makefile lists every `.rs` and `.asm` under `src/` and `crates/core/src/` as a prerequisite. A hand-maintained short list
-produced stale ISOs when new subsystem directories appeared.
+produced stale ISOs when new subsystem directories appeared. The host tools (`mkfs-vibefs`,
+`fsck-vibefs` and the other hostlib binaries) and `build/initrd.fat` build from `vibeos-core` too, so
+their rules list `$(HOSTLIB_DEPS)`: every kernel source, `Cargo.lock`, the manifests, and
+`tests/hostlib/src/bin/*.rs`.
+
+Builds are reproducible: two builds of one commit give byte-identical kernels, initrd and ISOs
+(ROADMAP §10.2, F151, F152). No build time or builder identity lands in them. The Makefile exports
+`SOURCE_DATE_EPOCH`: the caller's value, else the commit's time (`git log -1 --format=%ct`), else
+`1262304000`. `mkinitrd` stamps the files it adds with that time, in destination order whatever the
+`--add` order. `mkiso.sh` stages every file above its time pin, which sets each staged path's times to
+the epoch, and runs `xorriso` with `-r`, so Rock Ridge records uid and gid 0, and with
+`--modification-date` and `--set_all_file_dates` at the epoch's UTC time, which also fixes the volume
+UUID. No identifier is random either: `--gpt_disk_guid` is a constant in `mkiso.sh`, from which xorriso
+derives the partition GUIDs, and after `limine bios-install`, which seeds the MBR disk signature at
+`0x1B8` from `time(NULL)`, `scripts/iso_disk_id.py` overwrites it with the first 4 bytes of the SHA-256
+of the image with those bytes zeroed. That is safe because `limine.conf` names its files with `boot():`,
+never by disk signature. The xorriso version lands in the volume descriptor, so `mkiso.sh` records it
+beside each ISO as `<iso>.xorriso-version`, which a release publishes. An incremental build keeps the
+epoch of the commit it last rebuilt a file at; compare clean builds.
+
+`make repro` does (`scripts/repro_build.py`, run by a scheduled job): it clones the commit twice, at
+checkout paths of different lengths, each with its own `CARGO_HOME` and `RUSTUP_HOME`, a copy of
+`limine/` and no `CARGO_TARGET_DIR`, runs `./setup.sh` and `make isos` in each, and fails unless every
+`build/kernels/*.elf`, `build/*.iso` and `build/initrd.fat` matches byte for byte and holds none of the
+checkouts, `$HOME`, or either `CARGO_HOME` or `RUSTUP_HOME`. `REPRO_ARGS=--share-rustup` reuses the
+caller's toolchain for a local run; `REPRO_ARGS=--scan-only` only scans this checkout's `build/`.
 
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP
 rather than discovering AP bugs only in CI. Full flag set in [section 8.4](TESTING.md#84-qemu-flags).

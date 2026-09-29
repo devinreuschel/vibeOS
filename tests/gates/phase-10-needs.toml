@@ -273,6 +273,13 @@ needs = ["a kernel command line: `cmdline:`"]
 why = "claim: vibeos.strace=1 is a command-line option"
 
 [[box]]
+key = "syscall tracing behind a flag"
+needs = [
+  "syscall tracing can be switched",  # L1425
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
 key = "no fault or trap that ring-3 code raises reaches `exception_halt`"
 needs = [
   "the `#BP` gate is DPL 3",
@@ -545,6 +552,23 @@ needs = [
   "e2e checks the boot log's",
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the panic e2e requires the"
+needs = [
+  "the second ksyms link leaves",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "a deterministic kernel, initrd, and"
+needs = [
+  "one `target/` for every feature",
+  "no build time or builder",
+  "no random identifier in the",
+  "no host path in any",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 # Closes rows (How to read this): the box named by `key` lands all the work
 # of each box in `closes`, and the commit that ticks it ticks them.

@@ -250,6 +250,7 @@ fn take_work() -> Option<Handler> {
 }
 
 fn irq_thread() {
+    let _nr = crate::sync_init::no_reclaim();
     loop {
         match take_work() {
             Some(h) => h(),

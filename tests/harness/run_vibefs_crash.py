@@ -32,6 +32,7 @@ from tests.harness import results
 from tests.harness.harness import (
     EnvConfig,
     HarnessError,
+    default_iso,
     env_config,
     env_int,
     env_str,
@@ -190,7 +191,7 @@ def _one_round(env: EnvConfig, tools: Tools, rng: random.Random, round: int) -> 
 
 
 def main() -> int:
-    env = env_config(default_iso="vibeos-vibefs-crash.iso", default_timeout=90)
+    env = env_config(default_iso=default_iso("vibefs-crash"), default_timeout=90)
     res = results.Results(env.tier)
     tools = Tools(
         mkfs=env_str("VIBEOS_MKFS", "mkfs-vibefs"),

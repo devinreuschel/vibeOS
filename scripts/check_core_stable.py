@@ -41,6 +41,10 @@ PARSERS: tuple[tuple[str, str, str], ...] = (
     ("shell/mod.rs", "fn", "tokenize"),
     ("console/kbd.rs", "fn", "Decoder::feed"),
     ("fs/vibefs/mod.rs", "allow", "§14.8"),
+    ("boot/cmdline.rs", "inner", ""),
+    ("boot/mod.rs", "fn", "parse_fw_cfg_dir_count"),
+    ("boot/mod.rs", "fn", "parse_fw_cfg_dir_entry"),
+    ("boot/mod.rs", "fn", "fw_cfg_dma_access"),
 )
 # Rows whose attribute the sweep that owns the module adds (ROADMAP §10.1),
 # as `path` or `path::target`. A pending row whose attribute exists fails.

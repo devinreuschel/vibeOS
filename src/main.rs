@@ -96,7 +96,7 @@ use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init};
 use drivers::virtio_blk_init;
 use fs::{fat_init, file_init, fs_init, vibefs_init};
 use irq::{ipi_init, irq_init};
-use log::{diag, ksyms, log_init, panic, serial};
+use log::{diag, log_init, panic, serial};
 use mm::{heap_init, kva_init, paging_init, pmm_init};
 use proc::{addr_space_init, proc_init, syscall_init, user_init};
 use sched::{sched_init, thread_init, work_init};
@@ -322,6 +322,15 @@ fn normal_boot_tail() {
     // before `irq: enabled`, as `sched_init::init` requires; established
     // here.
     unsafe { sched_init::init() };
+    // DESIGN §2.11 rule 6: from here a last put where it may not release
+    // defers to this CPU's list, and a worker releases it.
+    vibeos::kalloc::set_release_context(sync_init::may_release_here);
+    vibeos::kalloc::set_deferral(work_init::defer_release);
+    // DESIGN §2.11 rule 3: `OpGate::kill` sleeps on SCHED from here.
+    vibeos::sync::set_gate_wait(
+        sync::blocking_init::gate_sleep,
+        sync::blocking_init::gate_wake,
+    );
     crate::marker!(marker::SCHED_CPU0);
     crate::marker!(marker::IRQ_ENABLED);
 
@@ -357,7 +366,7 @@ fn normal_boot_tail() {
     {
         use crate::serial::Serial;
         use core::fmt::Write;
-        match crate::proc_init::spawn_elf("/hello", 0, 0) {
+        match crate::proc_init::spawn_elf("/hello", &[], &[], 0, 0) {
             Ok(pid) => {
                 let st = crate::proc_init::wait_kernel(pid);
                 let code = if vibeos::proc::wifsignaled(st) {

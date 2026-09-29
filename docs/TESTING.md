@@ -75,9 +75,12 @@ that can longjmp out of an interrupt gate, since the skipped `iretq` would leave
 test the registry fails it if IF is off or `irq_nest` is not 0, and restores both. `ktest_context`
 checks the registry's context and a `spawn_here` worker's.
 
-Built into a separate Cargo target directory (`target-kernel-tests`) with its own ISO. This is not
-fussiness: sharing a target directory means a feature-enabled ELF can end up packaged into the
-production ISO, and the difference is not visible from the outside. The panic-dump and `#GP` ISOs
+Built in the one `target/` like every variant, but copied to its own named ELF,
+`build/kernels/vibeos-ktest.elf`, which only `build/vibeos-ktest.iso`'s recipe reads. This is not
+fussiness: an ISO recipe that packaged whatever ELF the last build left in `target/` could put a
+feature-enabled ELF into the production ISO, and the difference is not visible from the outside.
+Each variant's recipe removes its named ELF first, builds with `--artifact-dir`, so a parallel
+build of another variant cannot swap the file, and writes the named ELF last. The panic-dump and `#GP` ISOs
 are `--features panic_test --features panic_exit` and `--features gp_test --features panic_exit`
 (underscores everywhere; Cargo features in this crate do not use hyphens).
 
@@ -251,6 +254,14 @@ Each `meminfo:` line (told apart by its text up to the first digit) and each `pm
 once; the `meminfo:` frame total equals the `pmm: <n> total` line's; free is at most the
 `pmm: <n> free 4KiB frames` count; used is total minus free; and heap use is at most heap capacity.
 
+Two diagnostics come from the kernel command line (BOOT.md §3.2): the kernel prints
+`vibeOS: boot: cmdline: <text>` once, after `limine: rev <n> ok` and before `pmm:` (ROADMAP §10.2),
+and with `vibeos.strace=1` each syscall that returns prints `user: syscall <name> nr=<n> = <ret>`
+(ROADMAP §10.7). `make test-e2e-strace` boots the production ISO with `VIBEOS_CMDLINE=vibeos.strace=1`
+and fails unless the echo reads `limine.conf`'s `cmdline:` value, one space, then the harness's fw_cfg
+words, comes before the first trace line, every trace line has that form, and the first `write` line
+reads `user: syscall write nr=1 = <int>`.
+
 The list above is the contract of a boot through Limine. Planned (ROADMAP §25.4, §26.4): a boot
 through the image's direct entry prints `vibeOS: boot: <path> entry ok`, where `<path>` is `kexec`,
 `crash`, or `pvh`, in place of `limine: rev <n> ok`. A crash entry, ROADMAP §25.4's capture kernel,
@@ -385,7 +396,7 @@ number of images checked, and the trace's write and flush counts.
 
 | Context | Flags |
 |---------|-------|
-| `make run` | `-cdrom vibeos.iso -m 128M -smp 2 -cpu max -accel tcg -no-reboot -serial stdio` (Makefile `QEMU_BASE`, plus `-serial stdio` from the `run` recipe) |
+| `make run` | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -accel tcg -no-reboot -serial stdio` (Makefile `QEMU_BASE`, plus `-serial stdio` from the `run` recipe) |
 | e2e | as above plus `-display none -monitor unix:...,server=on,wait=off` (`harness.qemu_argv`) |
 | ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
@@ -407,7 +418,7 @@ harness defaults match them.
 
 | Variable | Default | Who honours it |
 |----------|---------|----------------|
-| `VIBEOS_ISO` | per driver (`vibeos.iso`, `vibeos-ktest.iso`, `vibeos-vibefs-crash.iso`) | all drivers |
+| `VIBEOS_ISO` | per driver, from `harness.default_iso(variant)` (`build/vibeos.iso`, `build/vibeos-ktest.iso`, `build/vibeos-vibefs-crash.iso`) | all drivers |
 | `VIBEOS_SMP` | `2` | all; `make run` |
 | `VIBEOS_QEMU_CPU` | `max` | all; `make run` |
 | `VIBEOS_MEM` | `128M` | all; `make run` |
@@ -525,7 +536,7 @@ includes its `cargo test` of the host tools, the one tier that needs the toolcha
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
 | x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic` | 32 |
-| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem` | 30 |
+| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-strace` | 30 |
 | x86_64 | in-guest-1 | `test-kernel` | 64 |
 | x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
 | x86_64 | in-guest-3 | `test-lapic-fallback` | 50 |

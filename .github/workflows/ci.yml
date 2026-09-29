@@ -236,7 +236,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: vibeos.iso
-          path: vibeos.iso
+          path: build/vibeos.iso
           if-no-files-found: error
           retention-days: 7
 
@@ -259,7 +259,7 @@ jobs:
             jobs: 1
           - arch: x86_64
             tier: e2e-2
-            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem
+            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace
             jobs: 1
           - arch: x86_64
             tier: in-guest-1
