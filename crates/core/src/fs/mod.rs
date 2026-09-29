@@ -109,6 +109,9 @@ pub enum FsError {
     FileTooBig,
     /// A kernel heap allocation failed (DESIGN §4.4).
     NoMem,
+    /// Nothing to return now, and the caller may try again: `/dev/random`
+    /// when no hardware source has a byte (ROADMAP §10.12).
+    Again,
 }
 
 impl FsError {
@@ -129,6 +132,7 @@ impl FsError {
             FsError::Io => "io",
             FsError::FileTooBig => "file too big",
             FsError::NoMem => "no memory",
+            FsError::Again => "again",
         }
     }
 }

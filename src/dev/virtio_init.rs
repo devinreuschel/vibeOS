@@ -2,7 +2,7 @@
 //!
 //! Transport + virtio-rng. virtio-blk is `virtio_blk_init`. ROADMAP §6.5.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
@@ -34,6 +34,12 @@ struct Q {
     data: DmaBuffer,
     doorbell: u64,
     features: u64,
+    /// The last completion's payload. `rng_take` claims and reads it under
+    /// `Q`, which `harvest` holds to replace it, so no byte reaches two
+    /// readers (ROADMAP §10.12, F121).
+    pool: [u8; RNG_PAYLOAD],
+    pool_len: u8,
+    pool_pos: u8,
 }
 
 static Q: SpinMutex<Option<Q>> = SpinMutex::with_rank(None, RANK_DEVICE);
@@ -51,11 +57,8 @@ pub(super) static DATA_DEV: AtomicU64 = AtomicU64::new(0);
 pub(super) static DATA_VIRT: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
-const RNG_PAYLOAD: usize = 32;
+pub(crate) const RNG_PAYLOAD: usize = 32;
 const RNG_PAYLOAD_OFF: usize = 16;
-static POOL: [AtomicU8; RNG_PAYLOAD] = [const { AtomicU8::new(0) }; RNG_PAYLOAD];
-static POOL_LEN: AtomicU32 = AtomicU32::new(0);
-static POOL_POS: AtomicU32 = AtomicU32::new(0);
 
 fn r8(va: u64, off: u16) -> u8 {
     // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
@@ -204,21 +207,26 @@ fn rng_top() {
     }
 }
 
-fn publish_pool(virt: u64, len: u32) {
+/// Replace the pool with the completion's payload. Runs under `Q`.
+fn publish_pool(q: &mut Q, len: u32) {
     let n = (len as usize).min(RNG_PAYLOAD);
-    let p = virt.wrapping_add(RNG_PAYLOAD_OFF as u64) as *const u8;
-    let mut i = 0usize;
-    while i < n {
-        // SAFETY: invariant: `virt` is the rng's data buffer, whose
-        // `RNG_PAYLOAD` bytes from `RNG_PAYLOAD_OFF` the device wrote and
-        // `harvest` synced for the CPU, and `i < RNG_PAYLOAD`; established by
+    let p = q.data.virt().wrapping_add(RNG_PAYLOAD_OFF as u64) as *const u8;
+    for (i, b) in q.pool.iter_mut().enumerate().take(n) {
+        // SAFETY: invariant: `data` is the rng's buffer, whose `RNG_PAYLOAD`
+        // bytes from `RNG_PAYLOAD_OFF` the device wrote and `harvest` synced
+        // for the CPU, and `i < n <= RNG_PAYLOAD`; established by
         // `virtio_init::setup`, which allocates it.
-        let b = unsafe { p.add(i).read_volatile() };
-        POOL[i].store(b, Ordering::Relaxed);
-        i += 1;
+        *b = unsafe { p.add(i).read_volatile() };
     }
-    POOL_LEN.store(n as u32, Ordering::Release);
-    POOL_POS.store(0, Ordering::Release);
+    #[cfg(feature = "kernel_tests")]
+    let n = {
+        let mut n = n;
+        crate::dev::ktest::rng_hooks::on_publish(&mut q.pool, &mut n);
+        n.min(RNG_PAYLOAD)
+    };
+    // `n <= RNG_PAYLOAD`, which is 32.
+    q.pool_len = n as u8;
+    q.pool_pos = 0;
 }
 
 fn harvest() {
@@ -233,7 +241,7 @@ fn harvest() {
             }
             if n != 0 {
                 q.data.sync_for_cpu::<Arch>();
-                publish_pool(q.data.virt(), last);
+                publish_pool(q, last);
                 IN_FLIGHT.store(false, Ordering::Release);
             }
         }
@@ -418,6 +426,9 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         data,
         doorbell,
         features: feat,
+        pool: [0; RNG_PAYLOAD],
+        pool_len: 0,
+        pool_pos: 0,
     });
 
     crate::marker!(
@@ -503,24 +514,29 @@ pub fn rng_bound() -> bool {
     BOUND.load(Ordering::Acquire)
 }
 
-/// Copy harvested virtio-rng bytes. Does not take the queue lock.
+/// Copy harvested virtio-rng bytes into `buf`; returns how many, 0 when
+/// the pool is empty or no device is bound. The claim and the copy run
+/// under `Q`, so a refill cannot replace the pool between them.
 pub fn rng_take(buf: &mut [u8]) -> usize {
-    let mut i = 0usize;
-    while i < buf.len() {
-        let pos = POOL_POS.load(Ordering::Relaxed);
-        let len = POOL_LEN.load(Ordering::Acquire);
-        if pos >= len {
-            break;
-        }
-        if POOL_POS
-            .compare_exchange(pos, pos + 1, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            buf[i] = POOL[pos as usize].load(Ordering::Relaxed);
-            i += 1;
-        }
+    // pair order: VFS (fs_init::KERNFS's store lock) before virtio-rng `Q`
+    let mut g = Q.lock_nested(1);
+    let Some(q) = g.as_mut() else {
+        return 0;
+    };
+    let pos = q.pool_pos as usize;
+    let n = buf.len().min((q.pool_len as usize).saturating_sub(pos));
+    let (Some(dst), Some(src)) = (buf.get_mut(..n), q.pool.get(pos..pos + n)) else {
+        return 0;
+    };
+    if n == 0 {
+        return 0;
     }
-    i
+    // `pos + n <= pool_len`, a `u8`.
+    q.pool_pos = (pos + n) as u8;
+    #[cfg(feature = "kernel_tests")]
+    crate::dev::ktest::rng_hooks::on_take_claim();
+    dst.copy_from_slice(src);
+    n
 }
 
 /// Submit one entropy buffer. Completion is harvested by the IRQ thread.

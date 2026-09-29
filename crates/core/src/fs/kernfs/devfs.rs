@@ -165,19 +165,3 @@ pub(super) fn blk_write(dev: &BlockRef, off: u64, buf: &[u8]) -> Result<usize, F
     }
     Ok(n)
 }
-
-pub(super) fn mix_rng(k: &mut KernState) -> u64 {
-    let mut x = k.rng;
-    if x == 0 {
-        x = k.now ^ 0x9E37_79B9_7F4A_7C15;
-        if x == 0 {
-            x = 1;
-        }
-    }
-    // xorshift64. Not a CSPRNG.
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    k.rng = x;
-    x
-}
