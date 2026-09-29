@@ -160,6 +160,7 @@ check:
 	cargo clippy --bin vibeos -- -D warnings
 	$(MAKE) test-unit
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
+	$(MAKE) models-quick
 	$(MAKE) test-harness
 	@if command -v ruff >/dev/null 2>&1; then \
 	    ruff check tests scripts; \
