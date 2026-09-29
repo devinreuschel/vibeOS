@@ -56,8 +56,11 @@ impl LoadError {
     }
 }
 
+/// A loaded image. The space stays in the box the loader built it in, so
+/// the callers, whose frames stay on the stack under the new thread's
+/// spawn, never hold or copy it (DESIGN §4.5).
 pub struct Loaded {
-    pub space: AddressSpace,
+    pub space: TryBox<AddressSpace>,
     pub entry: u64,
     pub rsp: u64,
     pub fs: u64,
@@ -385,7 +388,7 @@ fn load_path_inner<A: AsRef<[u8]>>(
         Ok(()) => r,
         Err(e) => {
             if let Ok(loaded) = r {
-                addr_space_init::teardown(loaded.space);
+                drop_space(loaded.space);
             }
             Err(LoadError::Fs(e))
         }
@@ -447,7 +450,7 @@ fn load_from<S: ImageSource>(
     })();
     match mapped {
         Ok((entry, rsp, fs)) => Ok(Loaded {
-            space: space.into_inner(),
+            space,
             entry,
             rsp,
             fs,

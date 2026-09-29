@@ -140,9 +140,6 @@ pub(super) fn sys_execve(
             }
         }
     }
-    let Some(slot) = space_slot() else {
-        return Err(KError::from_errno(ENOMEM));
-    };
     let loaded = match user_init::load_path(path_s, &argv_s, &[]) {
         Ok(l) => l,
         Err(e) => return Err(KError::from_errno(load_errno(e))),
@@ -151,7 +148,7 @@ pub(super) fn sys_execve(
     let entry = loaded.entry;
     let rsp = loaded.rsp;
     let fs = loaded.fs;
-    let mut boxed = Some(slot.write(loaded.space));
+    let mut boxed = Some(loaded.space);
     let cr3 = boxed.as_ref().map(|s| s.root().as_u64()).unwrap_or(0);
     let old = with_table(|t| {
         let p = t.get_mut(pid)?;

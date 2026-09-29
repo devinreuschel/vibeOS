@@ -381,9 +381,7 @@ pub(crate) fn spawn_elf(
     prefer: u32,
     ppid: u32,
 ) -> Result<u32, LoadError> {
-    let slot = space_slot().ok_or(LoadError::NoMem)?;
     start_loaded(
-        slot,
         user_init::load_path(path, argv, envp)?,
         prefer,
         ppid,
@@ -400,8 +398,7 @@ pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, 
         Some(Ok(a)) => intern_name(a),
         _ => "user",
     };
-    let slot = space_slot().ok_or(LoadError::NoMem)?;
-    start_loaded(slot, user_init::load_image(elf, argv)?, 0, ppid, name)
+    start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
 }
 
 /// The heap slot a new address space moves into, taken before the space
@@ -413,7 +410,6 @@ fn space_slot() -> Option<TryBox<MaybeUninit<AddressSpace>>> {
 
 #[cfg(not(feature = "vibefs_crash"))]
 fn start_loaded(
-    slot: TryBox<MaybeUninit<AddressSpace>>,
     loaded: Loaded,
     prefer: u32,
     ppid: u32,
@@ -422,14 +418,14 @@ fn start_loaded(
     let pid = match alloc_pid(prefer) {
         Some(p) => p,
         None => {
-            addr_space_init::teardown(loaded.space);
+            addr_space_init::teardown(loaded.space.into_inner());
             return Err(LoadError::NoProc);
         }
     };
     let cr3 = loaded.space.root().as_u64();
     let frame = UserFrame::new_user(loaded.entry, loaded.rsp);
     let fs = loaded.fs;
-    let boxed = slot.write(loaded.space);
+    let boxed = loaded.space;
     let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3, &frame) {
         Ok(h) => h,
         Err(e) => {
