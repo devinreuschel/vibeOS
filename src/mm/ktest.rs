@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
 use vibeos::paging::{self, PageFlags, PageSize, PhysAddr, VirtAddr, heap_flags};
+use vibeos::pmm::Frames;
 
 use crate::diag;
 use crate::ktest::{
@@ -20,6 +21,7 @@ use crate::kva_init;
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::thread_init;
+use crate::x86;
 
 // ------------------ tests ------------------
 
@@ -334,26 +336,74 @@ pub(crate) fn test_vmap() -> Outcome {
     Outcome::Ok
 }
 
+/// A `FrameAlloc` that has no frames: remapping a present leaf needs no
+/// table, so `mmio_uc_flags`' restore never asks it for one.
+struct NoFrames;
+
+// SAFETY: `FrameAlloc`'s contract is on the frames it hands out, and this
+// one hands out none; established here.
+unsafe impl paging::FrameAlloc for NoFrames {
+    fn alloc_frame(&mut self) -> Option<Frames> {
+        None
+    }
+}
+
 pub(crate) fn test_mmio_uc_flags() -> Outcome {
     // LAPIC (0xFEE0_0000) sits above QEMU's 128 MiB map_end, so the
     // generic patch API is still proven on a leaf we know exists:
     // 2 MiB, inside the identity rest / physmap. ACPI's real bases
     // are checked by `acpi_discovery`.
     let phys = PhysAddr(0x0020_0000);
+    let va = VirtAddr(paging_init::HHDM_BASE + phys.as_u64());
+    // The whole leaf the patch covers, and its flags, to restore after.
+    let Some((pa, size, saved)) = paging_init::translate(va) else {
+        return Outcome::Fail("translate before");
+    };
+    let mask = size.bytes() - 1;
+    let leaf_va = VirtAddr(va.as_u64() & !mask);
+    let leaf_pa = PhysAddr(pa.as_u64() & !mask);
     // SAFETY: `paging_init::patch_physmap_uc`'s contract; `install` has run and the physmap
     // covers physical 2 MiB. Making that RAM leaf UC breaks invariant I17 on purpose, for this
-    // test: UC only slows its accesses; established here.
+    // test, until the restore below: UC only slows its accesses; established here.
     if unsafe { paging_init::patch_physmap_uc(phys, 4096) }.is_err() {
         return Outcome::Fail("patch_physmap_uc");
     }
-    let va = VirtAddr(paging_init::HHDM_BASE + phys.as_u64());
-    let Some((_, _, flags)) = paging_init::translate(va) else {
-        return Outcome::Fail("translate");
+    let patched = paging_init::translate(va).map(|(_, _, f)| f);
+    let restored = {
+        let mut m = paging_init::current_mapper();
+        // SAFETY: `Mapper::map_page`'s contract; the leaf goes back to the
+        // physical range and flags `translate` read above, which the
+        // physmap mapped before this test, so no other mapping reaches it
+        // anew; the guard holds the page-table lock (invariant I226,
+        // established at `mm::paging_init::current_mapper`).
+        unsafe {
+            m.map_page(
+                leaf_va,
+                leaf_pa,
+                saved,
+                size,
+                paging::MapMode::Remap,
+                &mut NoFrames,
+            )
+        }
     };
-    if !flags.contains(PageFlags::PCD | PageFlags::PWT) {
-        return Outcome::Fail("PCD/PWT not set on physmap leaf");
+    x86::invlpg(leaf_va.as_u64());
+    paging::tlb_shootdown_others(leaf_va);
+    if restored.is_err() {
+        return Outcome::Fail("restore map_page");
     }
-    Outcome::Ok
+    match patched {
+        None => return Outcome::Fail("translate after patch"),
+        Some(f) if !f.contains(PageFlags::PCD | PageFlags::PWT) => {
+            return Outcome::Fail("PCD/PWT not set on physmap leaf");
+        }
+        Some(_) => {}
+    }
+    match paging_init::translate(va) {
+        Some((_, s, f)) if s == size && f.0 == saved.0 => Outcome::Ok,
+        Some((_, _, f)) => crate::fail_fmt!("restored flags {:#x}, want {:#x}", f.0, saved.0),
+        None => Outcome::Fail("translate after restore"),
+    }
 }
 
 /// The probe `tlb_shootdown_remote` drives on the AP: a kernel thread
