@@ -17,7 +17,7 @@ weakness was that nearly everything lived behind `main.rs` and was therefore unt
 
 ## 8.1 Host unit tests
 
-Anything in `src/lib.rs` and its submodules, compiled as `vibeos-core` on the host. No hardware
+Anything in `crates/core/src/lib.rs` and its submodules, compiled as `vibeos-core` on the host. No hardware
 access, no `unsafe` port I/O, no MMIO. The kernel half calls into it. Each port's pure half
 ([§11.1](PORTABILITY.md#111-the-seam)) is part of it and runs on every host. Rule; not yet enforced: ROADMAP §10.3.
 The x86-only pieces (`switch_context` in `thread.rs`, the fences in `dma.rs`) are

@@ -26,18 +26,19 @@ ROOT = Path(__file__).resolve().parent.parent
 # commit that says why, such as a type that now proves the argument.
 MUST_BE_UNSAFE: list[tuple[str, str]] = [
     ("src/cell.rs", "IrqCell::force_unlock"),
-    ("src/log_init.rs", "force_unlock"),
-    ("src/log_init.rs", "with_logger_unlocked"),
-    ("src/log_init.rs", "dump_tail"),
-    ("src/per_cpu_init.rs", "with_cpu"),
-    ("src/addr_space_init.rs", "load_cr3_u64"),
-    ("src/syscall_init.rs", "switch_cr3_for"),
+    ("src/log/log_init.rs", "force_unlock"),
+    ("src/log/log_init.rs", "with_logger_unlocked"),
+    ("src/log/log_init.rs", "dump_tail"),
+    ("src/smp/per_cpu_init.rs", "with_cpu"),
+    ("src/proc/addr_space_init.rs", "load_cr3_u64"),
+    ("src/proc/syscall_init.rs", "switch_cr3_for"),
 ]
 
 # The only files that may hold a generic `unsafe impl` of `Send` or `Sync`
 # (one with a type parameter), so no new cell type appears elsewhere.
-# src/kalloc.rs holds `TryArc`'s one bounded pair (C-KALLOC).
-GENERIC_IMPL_FILES: tuple[str, ...] = ("src/cell.rs", "src/sync_init.rs", "src/kalloc.rs")
+# crates/core/src/kalloc.rs holds `TryArc`'s one bounded pair (C-KALLOC).
+GENERIC_IMPL_FILES: tuple[str, ...] = ("src/cell.rs", "src/sync/sync_init.rs",
+                                       "crates/core/src/kalloc.rs")
 
 # Types that share `&T` between holders, whose `Sync` needs `T: Send + Sync`
 # (AGENTS.md rule 6); every other type's `Sync` and `Send` need `T: Send`.
@@ -339,7 +340,7 @@ def legacy_errors(path: str, text: str) -> list[str]:
     errors: list[str] = []
     for n, ln in enumerate(text.splitlines(), 1):
         where = f"{path}:{n}:{ln}"
-        if "static mut" in ln and path != "src/arch/catch.rs":
+        if "static mut" in ln and path != "src/arch/x86_64/catch.rs":
             errors.append(f"static mut outside catch.rs: {where}")
         if "-> &'static mut" in ln:
             errors.append(f"function returns &'static mut: {where}")
@@ -348,10 +349,15 @@ def legacy_errors(path: str, text: str) -> list[str]:
     return errors
 
 
+# The kernel's sources and vibeos-core's.
+SCAN_ROOTS: tuple[str, ...] = ("src", "crates/core/src")
+
+
 def read_tree(root: Path = ROOT) -> dict[str, str]:
     return {
         p.relative_to(root).as_posix(): p.read_text(encoding="utf-8")
-        for p in sorted((root / "src").rglob("*.rs"))
+        for d in SCAN_ROOTS
+        for p in sorted((root / d).rglob("*.rs"))
     }
 
 

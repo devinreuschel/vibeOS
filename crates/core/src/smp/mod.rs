@@ -3,6 +3,8 @@
 //! Portable: offsets, SIPI vector, timeouts. The `.trampoline` blob and
 //! INIT/SIPI live in the binary crate. One AP at a time: they share this page.
 
+pub mod per_cpu;
+
 /// SIPI vector `0x08` → physical `0x8000`. 4 KiB aligned, below 1 MiB.
 pub const TRAMPOLINE_PHYS: u64 = 0x8000;
 pub const SIPI_VECTOR: u8 = 0x08;

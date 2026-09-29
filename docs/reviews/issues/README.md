@@ -8,7 +8,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 
 | ID | Title | Impact | Effort | Tier | Depends on | Status |
 |---|---|---|---|---|---|---|
-| [A1](A1-directory-per-subsystem.md) | Directory per subsystem, matching a corrected module map | High | L | III | Q1, A2 | `proposed` |
+| [A1](A1-directory-per-subsystem.md) | Directory per subsystem, matching a corrected module map | High | L | III | Q1, A2 | `implemented (#194)` |
 | [A2](A2-portable-half-host-tests.md) | Make the portable half portable; host tests on any host | High | M | II | C1 | `in progress (#88)` |
 | [A3](A3-vfs-single-dispatch.md) | Make the VFS the only file-operation dispatch point | High | L | III | Q3 | `in progress (#194)` |
 | [A4](A4-break-module-cycles.md) | Break the mutual dependencies between kernel modules | Medium | M | III | A3, A1 | `proposed` |

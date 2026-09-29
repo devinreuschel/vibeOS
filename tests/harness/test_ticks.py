@@ -41,10 +41,10 @@ FILES = {
                      "fn test_calls() -> Outcome {\n"
                      "    asm!(\"int3\", options(nomem));\n"
                      "    fail(\"handler\", Some(vec));\n    Outcome::Ok\n}\n"),
-    "src/boot.rs": ("fn boot() {\n    marker!(\"vibeOS: boot: {} cpus up\", n);\n"
+    "src/boot/mod.rs": ("fn boot() {\n    marker!(\"vibeOS: boot: {} cpus up\", n);\n"
                     "    marker!(marker::READY);\n}\n"),
-    "src/marker.rs": "pub const READY: &str = \"vibeOS: ready\";\n",
-    "src/proc.rs": ("pub fn reaper() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n"
+    "crates/core/src/marker.rs": "pub const READY: &str = \"vibeOS: ready\";\n",
+    "src/cell.rs": ("pub fn reaper() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n"
                     "    fn reaper_for_init_state() {\n        assert!(true);\n    }\n}\n"),
     "user/tests/src/main.rs": "fn user_dup() {\n    dup();\n}\n",
     "crates/core/src/a.rs": ("#[cfg(test)]\nmod tests {\n    #[test]\n    fn host_one() {\n"
@@ -319,8 +319,8 @@ class TestDiffRule(RepoCase):
         ("test-kernel", "Makefile", "echo kernel", "echo kernel2"),
         ("tests/harness/test_x.py", "tests/harness/test_x.py", "x = 1", "x = 2"),
         ("tests/harness/test_x.py::test_py", "tests/harness/test_x.py", "x = 1", "x = 2"),
-        ('"vibeOS: boot: 4 cpus up"', "src/boot.rs", ", n);", ", m);"),
-        ('"vibeOS: ready"', "src/marker.rs", "ready", "ready"),
+        ('"vibeOS: boot: 4 cpus up"', "src/boot/mod.rs", ", n);", ", m);"),
+        ('"vibeOS: ready"', "crates/core/src/marker.rs", "ready", "ready"),
         ("legacy_row", "src/ktest.rs", "Outcome::Ok\n}\n\nfn test_suite",
          "Outcome::Ok // x\n}\n\nfn test_suite"),
         ("suite_row", "src/ktest.rs", "        test_suite,", "        test_suite,  "),
@@ -403,16 +403,41 @@ class TestDiffRule(RepoCase):
                          ["ktest", "ktest"])
 
     def test_host_test_in_src_resolves(self) -> None:
-        """vibeos-core's sources are src/*.rs, so a #[test] there is a host test."""
+        """vibeos-core compiles src/cell.rs under cfg(test), so a #[test] there is a host
+        test."""
         tree = check_ticks.Tree("HEAD", self.repo.path)
         defs = check_ticks.resolve("reaper_for_init_state", tree)[0]
-        self.assertEqual([(d.kind, d.path) for d in defs], [("host", "src/proc.rs")])
+        self.assertEqual([(d.kind, d.path) for d in defs], [("host", "src/cell.rs")])
         self.assertEqual(check_ticks.resolve("reaper", tree)[0], [])
 
     def test_proof_deleted_by_a_later_commit_is_not_found(self) -> None:
         self.commit(f"t\n\nProves: check_x -- {self.PREFIX}", "delta box",
                     self.change("scripts/check_x.py", "return 0", "return 1"))
         self.commit("rm", files={"scripts/check_x.py": None})
+        self.assertErrors(self.run_check(), "proof not found")
+
+    def tick_wave(self) -> str:
+        self.commit(f"t\n\nProves: scripts/check_x.py::wave -- {self.PREFIX}", "delta box",
+                    self.change("scripts/check_x.py", "return 0", "return 1"))
+        return (self.repo.path / "scripts/check_x.py").read_text()
+
+    def test_path_proof_follows_a_later_move(self) -> None:
+        text = self.tick_wave()
+        self.commit("mv", files={"scripts/check_x.py": None, "scripts/sub/check_x.py": text})
+        self.assertEqual(self.run_check().errors, [])
+
+    def test_path_proof_follows_moves_whose_old_path_is_reused(self) -> None:
+        text = self.tick_wave()
+        self.commit("mv", files={"scripts/check_x.py": None, "scripts/sub/check_x.py": text})
+        self.commit("mv2", files={"scripts/sub/check_x.py": None, "scripts/sub/two.py": text})
+        self.commit("reuse", files={"scripts/check_x.py": "X = 1\n"})
+        self.assertEqual(self.run_check().errors, [])
+
+    def test_moved_proof_that_lost_its_def_is_not_found(self) -> None:
+        self.tick_wave()
+        self.commit("mv", files={"scripts/check_x.py": None,
+                                 "scripts/sub/check_x.py": FILES["scripts/check_x.py"]
+                                 .replace("def wave(", "def other(")})
         self.assertErrors(self.run_check(), "proof not found")
 
 
@@ -492,7 +517,7 @@ class TestResultsRule(RepoCase):
         r = self.run_check([results_file(head, ktest=["suite_row"], retries=[retry])])
         self.assertErrors(r, "test-kernel retried user_syscalls: timeout at user: dup ok")
         self.base = head
-        self.commit("no tick", files={"src/boot.rs": "fn boot() {}\n"})
+        self.commit("no tick", files={"src/boot/mod.rs": "fn boot() {}\n"})
         self.assertEqual(self.run_check([results_file(self.head(), retries=[retry])]).errors,
                          [])
 
@@ -564,7 +589,7 @@ class TestBrackets(RepoCase):
 
     def test_run_not_docs_only(self) -> None:
         first = self.tick_bracket("suite_row", "nightly")
-        self.commit("code", files={"src/boot.rs": "fn boot() {}\n"})
+        self.commit("code", files={"src/boot/mod.rs": "fn boot() {}\n"})
         for sha in (first, self.base):
             with self.subTest(sha=sha):
                 self.assertErrors(self.run_check([], gh=self.nightly(sha)), "no run")
@@ -710,11 +735,11 @@ class TestFailsBefore(RepoCase):
     def setUp(self) -> None:
         super().setUp()
         self.test_sha = self.commit("test alone",
-                                    files={"src/boot.rs": "fn boot() {}\nfn t() {}\n"})
+                                    files={"src/boot/mod.rs": "fn boot() {}\nfn t() {}\n"})
 
     def fix(self, lines: str) -> str:
         return self.commit(f"fix\n\nProves: make lint (existing: x) -- {ZETA}\n{lines}",
-                           "zeta box", {"src/boot.rs": "fn boot() { fixed(); }\nfn t() {}\n"})
+                           "zeta box", {"src/boot/mod.rs": "fn boot() { fixed(); }\nfn t() {}\n"})
 
     def good(self, sha: str | None = None) -> str:
         short = (sha or self.test_sha)[:12]

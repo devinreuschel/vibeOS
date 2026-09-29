@@ -2,7 +2,7 @@
 //!
 //! The kernel builds its own PML4 from buddy frames and never edits
 //! Limine's tables again. The pieces that touch CR3/EFER/`invlpg` live
-//! in the binary crate (`src/paging_init.rs`, `src/x86.rs`); everything
+//! in the binary crate (`src/mm/paging_init.rs`, `src/arch/x86_64/cpu.rs`); everything
 //! algorithmic (index math, PTE encoding, walk, split-into-2MiB) lives
 //! here so `cargo test --lib` covers it.
 //!

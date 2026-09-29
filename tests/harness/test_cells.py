@@ -72,10 +72,10 @@ class TestMustBeUnsafe(unittest.TestCase):
 
     def test_list_holds_the_box_functions(self) -> None:
         for entry in [("src/cell.rs", "IrqCell::force_unlock"),
-                      ("src/log_init.rs", "force_unlock"),
-                      ("src/log_init.rs", "with_logger_unlocked"),
-                      ("src/log_init.rs", "dump_tail"),
-                      ("src/per_cpu_init.rs", "with_cpu")]:
+                      ("src/log/log_init.rs", "force_unlock"),
+                      ("src/log/log_init.rs", "with_logger_unlocked"),
+                      ("src/log/log_init.rs", "dump_tail"),
+                      ("src/smp/per_cpu_init.rs", "with_cpu")]:
             self.assertIn(entry, check_cells.MUST_BE_UNSAFE)
 
     def test_tree_passes(self) -> None:
@@ -89,7 +89,7 @@ class TestRemoteView(unittest.TestCase):
     def test_unsafe_impl_for_view_fails_anywhere(self) -> None:
         for trait in ("Send", "Sync"):
             text = f"// SAFETY: no.\nunsafe impl {trait} for PerCpuRemote {{}}\n"
-            for path in ("src/per_cpu.rs", "src/cell.rs", "src/x.rs"):
+            for path in ("crates/core/src/smp/per_cpu.rs", "src/cell.rs", "src/x.rs"):
                 with self.subTest(trait=trait, path=path):
                     self.assertEqual(impl_errors(path, text), [
                         f"{path}:2: unsafe impl {trait} for PerCpuRemote: "
@@ -104,15 +104,15 @@ class TestRemoteView(unittest.TestCase):
         text = ("impl Default for PerCpuRemote {}\n"
                 "unsafe impl Send for PerCpu {}\n"
                 "// unsafe impl Sync for PerCpuRemote {}\n")
-        self.assertEqual(impl_errors("src/per_cpu.rs", text), [])
+        self.assertEqual(impl_errors("crates/core/src/smp/per_cpu.rs", text), [])
 
     def test_with_cpu_must_be_unsafe(self) -> None:
-        entry = [("src/per_cpu_init.rs", "with_cpu")]
+        entry = [("src/smp/per_cpu_init.rs", "with_cpu")]
         safe = "pub fn with_cpu<R>(id: u32, f: impl FnOnce(&mut PerCpu) -> R) -> Option<R> {}\n"
-        self.assertEqual(must_be_unsafe_errors({"src/per_cpu_init.rs": safe}, entry),
-                         ["src/per_cpu_init.rs:1: with_cpu must be declared `unsafe fn`"])
+        self.assertEqual(must_be_unsafe_errors({"src/smp/per_cpu_init.rs": safe}, entry),
+                         ["src/smp/per_cpu_init.rs:1: with_cpu must be declared `unsafe fn`"])
         text = safe.replace("pub fn", "pub unsafe fn")
-        self.assertEqual(must_be_unsafe_errors({"src/per_cpu_init.rs": text}, entry), [])
+        self.assertEqual(must_be_unsafe_errors({"src/smp/per_cpu_init.rs": text}, entry), [])
 
     def test_tree_has_no_view_impl(self) -> None:
         for path, text in check_cells.read_tree().items():
@@ -141,7 +141,7 @@ class TestImplHeaders(unittest.TestCase):
 
     def test_where_adds_to_inline_bounds(self) -> None:
         text = "unsafe impl<T: Send> Sync for RwLock<T> where T: Sync {}\n"
-        self.assertEqual(self.errs(text, "src/sync_init.rs"), [])
+        self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [])
 
     def test_sized_alone_is_no_bound(self) -> None:
         self.assertEqual(self.errs("unsafe impl<T: ?Sized> Send for IrqCell<T> {}\n"),
@@ -151,15 +151,15 @@ class TestImplHeaders(unittest.TestCase):
 
     def test_two_parameters_name_the_unbounded_one(self) -> None:
         text = "unsafe impl<A: Send, B> Send for Pair<A, B> {}\n"
-        self.assertEqual(self.errs(text, "src/sync_init.rs"), [
-            "src/sync_init.rs:1: unsafe impl Send for Pair: B is not bounded by Send"])
+        self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [
+            "src/sync/sync_init.rs:1: unsafe impl Send for Pair: B is not bounded by Send"])
 
     def test_const_generic_and_lifetimes_are_not_type_parameters(self) -> None:
         for text in ("unsafe impl<T: Send, const N: usize> Sync for Channel<T, N> {}\n",
                      "unsafe impl<'a, T: Send + 'a> Send for Guard<'a, T> {}\n",
                      "unsafe impl<const N: usize> Sync for Ring<N> {}\n"):
             with self.subTest(text=text):
-                self.assertEqual(self.errs(text, "src/sync_init.rs"), [])
+                self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [])
 
     def test_shares_ref_needs_sync(self) -> None:
         for ty in ("BootCell", "RwLock"):
@@ -183,7 +183,7 @@ class TestImplHeaders(unittest.TestCase):
     def test_concrete_impl_passes_anywhere(self) -> None:
         text = ("// SAFETY: invariant I120, established at `per_cpu_init::cpu`.\n"
                 "unsafe impl Sync for PerCpu {}\n")
-        self.assertEqual(self.errs(text, "src/per_cpu.rs"), [])
+        self.assertEqual(self.errs(text, "crates/core/src/smp/per_cpu.rs"), [])
 
     def test_comment_inside_a_header(self) -> None:
         text = ("unsafe impl<T /* no { here */: Send> // a { comment\n"
@@ -194,16 +194,16 @@ class TestImplHeaders(unittest.TestCase):
 
     def test_spin_mutex_guard_form(self) -> None:
         text = "unsafe impl<T: Send + Sync> Sync for SpinMutexGuard<'_, T> {}\n"
-        self.assertEqual(self.errs(text, "src/sync_init.rs"), [])
+        self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [])
 
     def test_try_arc_form(self) -> None:
         for trait in ("Send", "Sync"):
             text = f"unsafe impl<T: ?Sized + Send + Sync> {trait} for TryArc<T> {{}}\n"
-            self.assertEqual(self.errs(text, "src/kalloc.rs"), [])
+            self.assertEqual(self.errs(text, "crates/core/src/kalloc.rs"), [])
 
     def test_other_traits_are_ignored(self) -> None:
         text = "unsafe impl<A: FrameAlloc> FrameAlloc for Counting<'_, A> {}\n"
-        self.assertEqual(self.errs(text, "src/addr_space.rs"), [])
+        self.assertEqual(self.errs(text, "crates/core/src/proc/addr_space.rs"), [])
 
     def test_header_fields(self) -> None:
         text = ("unsafe impl<'a, T: ?Sized + Send, const N: usize>\n"
@@ -223,7 +223,7 @@ class TestImplHeaders(unittest.TestCase):
         impls = unsafe_impls(text)
         self.assertEqual(sum(1 for i in impls if i.params), 8)
         self.assertEqual(sum(1 for i in impls if not i.params), 4)
-        self.assertEqual(self.errs(text, "src/sync_init.rs"), [])
+        self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [])
 
     def test_tree_passes(self) -> None:
         for path, text in check_cells.read_tree().items():

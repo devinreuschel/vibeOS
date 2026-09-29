@@ -18,21 +18,21 @@ FEATURE = "#![no_std]\n#![feature(abi_x86_interrupt)]\n"
 
 class TestOutsideArch(unittest.TestCase):
     def test_handler_in_src_is_reported(self) -> None:
-        errs = x86_interrupt_outside_arch({"src/irq_init.rs": "fn a() {}\n" + HANDLER})
+        errs = x86_interrupt_outside_arch({"src/irq/irq_init.rs": "fn a() {}\n" + HANDLER})
         self.assertEqual(len(errs), 1)
-        self.assertTrue(errs[0].startswith("src/irq_init.rs:2: "), errs[0])
+        self.assertTrue(errs[0].startswith("src/irq/irq_init.rs:2: "), errs[0])
 
     def test_handler_under_crates_user_and_tests_is_reported(self) -> None:
-        files = {"crates/x/src/lib.rs": HANDLER, "user/bin/y.rs": HANDLER,
+        files = {"crates/x/src/y.rs": HANDLER, "user/bin/y.rs": HANDLER,
                  "tests/hostlib/src/z.rs": HANDLER}
         errs = x86_interrupt_outside_arch(files)
         self.assertEqual([e.split(":")[0] for e in errs], sorted(files))
 
     def test_handler_in_arch_is_allowed(self) -> None:
-        self.assertEqual(x86_interrupt_outside_arch({"src/arch/idt.rs": HANDLER}), [])
+        self.assertEqual(x86_interrupt_outside_arch({"src/arch/x86_64/idt.rs": HANDLER}), [])
 
     def test_commented_line_is_ignored(self) -> None:
-        files = {"src/kbd_init.rs": f"// was: {ABI} fn kbd()\n"
+        files = {"src/console/kbd_init.rs": f"// was: {ABI} fn kbd()\n"
                                     f"fn kbd() {{}} // not {ABI}\n"}
         self.assertEqual(x86_interrupt_outside_arch(files), [])
 
@@ -52,7 +52,7 @@ class TestStaleFeature(unittest.TestCase):
         self.assertTrue(errs[0].startswith("src/main.rs:2: "), errs[0])
 
     def test_feature_is_accepted_while_an_arch_handler_exists(self) -> None:
-        files = {"src/main.rs": FEATURE, "src/arch/idt.rs": HANDLER}
+        files = {"src/main.rs": FEATURE, "src/arch/x86_64/idt.rs": HANDLER}
         self.assertEqual(stale_abi_feature(FEATURE, files), [])
 
     def test_commented_feature_is_ignored(self) -> None:
@@ -72,7 +72,7 @@ class TestTree(unittest.TestCase):
     def test_scope_is_rust_under_the_four_roots(self) -> None:
         files = scoped_files()
         self.assertIn("src/main.rs", files)
-        self.assertIn("src/arch/idt.rs", files)
+        self.assertIn("src/arch/x86_64/idt.rs", files)
         self.assertTrue(all(p.endswith(".rs") for p in files))
         self.assertTrue(all(p.split("/")[0] in check_entry.SCOPE for p in files))
 
@@ -84,12 +84,12 @@ class TestTree(unittest.TestCase):
 
     def test_planted_handler_fails(self) -> None:
         planted = dict(scoped_files())
-        planted["src/irq_init.rs"] += HANDLER
+        planted["src/irq/irq_init.rs"] += HANDLER
         err = io.StringIO()
         with mock.patch.object(check_entry, "scoped_files", return_value=planted), \
                 contextlib.redirect_stderr(err):
             self.assertEqual(check_entry.main([]), 1)
-        self.assertIn("src/irq_init.rs:", err.getvalue())
+        self.assertIn("src/irq/irq_init.rs:", err.getvalue())
 
     def test_usage(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):

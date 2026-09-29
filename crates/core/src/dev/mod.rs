@@ -3,9 +3,14 @@
 //! Scan fills a device list; [`Registry::bind_all`] matches drivers by
 //! id and probes in dependency order. Resource claims are exclusive.
 
+pub mod dma;
+pub mod entropy;
+pub mod pci;
+pub mod virtio;
+
 use core::fmt;
 
-use crate::pci::{self, Bar, BarKind, Bdf, CapSet, FuncInfo, MAX_BARS, MAX_SCAN};
+use crate::pci::{Bar, BarKind, Bdf, CapSet, FuncInfo, MAX_BARS, MAX_SCAN};
 
 pub const MAX_DEVICES: usize = MAX_SCAN;
 pub use crate::limits::MAX_CLAIMS;

@@ -2,11 +2,11 @@
 
 Index: [DESIGN.md](DESIGN.md). This file holds DESIGN §10, and its headings keep DESIGN's numbers.
 
-Phase 7. Portable types live in `src/block.rs`, `src/part.rs`, and
-`src/cache.rs`. Kernel ramdisk, waiters, and the boot marker live in
-`src/block_init.rs`. virtio-blk packing is `src/virtio_blk.rs`;
-the driver is `src/virtio_blk_init.rs`. Partition children are
-`src/part_init.rs`. The write-back cache is `src/cache_init.rs`.
+Phase 7. Portable types live in `crates/core/src/block/mod.rs`, `crates/core/src/block/part.rs`, and
+`crates/core/src/block/cache.rs`. Kernel ramdisk, waiters, and the boot marker live in
+`src/block/block_init.rs`. virtio-blk packing is `crates/core/src/drivers/virtio_blk.rs`;
+the driver is `src/drivers/virtio_blk_init.rs`. Partition children are
+`src/block/part_init.rs`. The write-back cache is `src/block/cache_init.rs`.
 
 ## 10.1 Completions
 
@@ -297,7 +297,7 @@ value is the queue index; `kick` writes 0 for every queue (ROADMAP §11.5, F047)
 
 ## 10.5 Partitions
 
-MBR (primary + extended/logical) and GPT parse in `src/part.rs`. Protective
+MBR (primary + extended/logical) and GPT parse in `crates/core/src/block/part.rs`. Protective
 MBR type `0xEE` is not a data device; GPT is. Header and entry CRCs are
 checked; a bad primary falls back to the backup header at the last LBA.
 EBR walk is capped at 128; a corrupt next-LBA stops the chain. `parse_mbr`

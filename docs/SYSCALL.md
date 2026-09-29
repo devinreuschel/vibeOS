@@ -178,7 +178,7 @@ F083) replaces them with one `KError` table that generates §2.
   argument byte but NUL (ROADMAP §10.4)
 - `dup` with a full fd table returns `EBADF` (Linux `EMFILE`) (ROADMAP §10.4)
 - `ENFILE`, `ENOSPC`, `ESPIPE`, `ENOTEMPTY`, and `ELOOP` are not
-  defined in `src/syscall.rs` (F083; ROADMAP §10.4)
+  defined in `crates/core/src/proc/syscall.rs` (F083; ROADMAP §10.4)
 - `fork` near memory exhaustion: a kernel stack that cannot be allocated
   returns `ENOMEM` and frees the clone, but the child's TCB box and the
   boxed address space panic when the heap cannot grow, until ROADMAP
@@ -189,7 +189,7 @@ F083) replaces them with one `KError` table that generates §2.
 ## 3. Syscalls
 
 `proc_init::dispatch_frame` dispatches with a `match` on `rax`, and each
-handler checks its own pointers. `src/syscall.rs` holds a `SyscallInfo` row
+handler checks its own pointers. `crates/core/src/proc/syscall.rs` holds a `SyscallInfo` row
 per call (name, arity, pointer mask, length argument), but the kernel reads
 only the name, for the §6 trace line, and only host tests run
 `syscall::validate_args`. The rows have drifted: `OPEN`, `EXECVE`, and

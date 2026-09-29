@@ -14,56 +14,42 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod acpi;
-pub mod addr_space;
-pub mod apic;
+pub mod arch;
 pub mod block;
-pub mod cache;
 // Kernel `mod cell` in main.rs. Host tests only: production vibeos-core
 // has no InterruptGuard / per_cpu_init.
 #[cfg(test)]
+#[path = "../../../src/cell.rs"]
 pub mod cell;
 pub mod console;
-pub mod desc;
 pub mod dev;
-pub mod dma;
-pub mod elf;
-pub mod entropy;
-pub mod fat;
-pub mod fb;
+pub mod drivers;
 pub mod fmt_util;
-pub mod font;
-pub mod fpu;
 pub mod fs;
-pub mod heap;
-pub mod ipi;
 pub mod irq;
 pub mod kalloc;
-pub mod kbd;
-pub mod kva;
 pub mod limits;
-pub mod lock;
 pub mod log;
 pub mod marker;
-pub mod paging;
-pub mod part;
-pub mod pci;
-pub mod per_cpu;
-pub mod pic;
-pub mod pmm;
+pub mod mm;
 pub mod proc;
 pub mod sched;
 pub mod shell;
 pub mod smp;
 pub mod symtab;
 pub mod sync;
-pub mod syscall;
-pub mod thread;
 pub mod time;
 pub mod trap;
-pub mod uart;
-pub mod vectors;
-pub mod vibefs;
-pub mod virtio;
-pub mod virtio_blk;
-pub mod wait;
-pub mod work;
+
+pub use arch::x86_64::{apic, desc, pic, uart, vectors};
+pub use block::{cache, part};
+pub use console::{fb, font, kbd};
+pub use dev::{dma, entropy, pci, virtio};
+pub use drivers::virtio_blk;
+pub use fs::{fat, vibefs};
+pub use irq::ipi;
+pub use mm::{heap, kva, paging, pmm};
+pub use proc::{addr_space, elf, syscall};
+pub use sched::{fpu, thread, wait, work};
+pub use smp::per_cpu;
+pub use sync::lock;

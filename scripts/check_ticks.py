@@ -17,7 +17,9 @@ The proof exists at the head: a `make <target>` rule, a path (optionally
 a user test, a host `#[test]`, a harness or script `def`, a harness or script
 file). A bare word that names none of those but is a Makefile target
 (`test-e2e-mce`) is that `make` rule, since ROADMAP's How to read this names
-"a `make` target" as a proof without the `make` word. Its definition changes
+"a `make` target" as a proof without the `make` word. A path that git finds
+renamed by a commit between the ticking commit and the head (`git log -M -B`)
+resolves at its head path. Its definition changes
 in `git diff base...head`, or its name appears in the ticked line; otherwise
 the line carries `(existing: <reason>)`, which the report lists.
 
@@ -74,8 +76,12 @@ IGNORE_ATTR = re.compile(r"^\s*#\[ignore\b")
 MARKER_CALL = re.compile(r"marker!\(\s*\"((?:[^\"\\]|\\.)*)\"", re.S)
 MARKER_CONST = re.compile(r"^\s*pub\s+const\s+([A-Z0-9_]+):\s*&str\s*=\s*\"((?:[^\"\\]|\\.)*)\";",
                           re.M)
-# vibeos-core is built from src/lib.rs (crates/core/Cargo.toml), so its #[test]s live in src/.
+# vibeos-core's #[test]s live in crates/core/src/, and in src/cell.rs, which its
+# crate root compiles under cfg(test).
 HOST_TEST_DIRS = ("src/", "crates/", "tests/hostlib/")
+# Where `marker!` calls and the marker constants live.
+MARKER_DIRS = ("src/", "crates/core/src/")
+MARKER_CONSTS = "crates/core/src/marker.rs"
 PY_DIRS = ("tests/harness/", "scripts/")
 HARNESS_DIR = "tests/harness/"
 # Workflow file whose jobs a bracket's `make <target>` proof is looked up in.
@@ -411,7 +417,7 @@ def _resolve_job(workflow: str, job: str, tree: Tree) -> list[Definition]:
 
 def _resolve_marker(text: str, tree: Tree) -> list[Definition]:
     out: list[Definition] = []
-    for path in tree.grep("marker", ("src/",)):
+    for path in tree.grep("marker", MARKER_DIRS):
         src = tree.read(path) or ""
         for m in MARKER_CALL.finditer(src):
             fmt = m.group(1).encode().decode("unicode_escape")
@@ -419,11 +425,11 @@ def _resolve_marker(text: str, tree: Tree) -> list[Definition]:
                 a = src.count("\n", 0, m.start()) + 1
                 b = src.count("\n", 0, m.end()) + 1
                 out.append(Definition("marker", path, a, b, text))
-    consts = tree.read("src/marker.rs") or ""
+    consts = tree.read(MARKER_CONSTS) or ""
     for m in MARKER_CONST.finditer(consts):
         if m.group(2) == text:
             n = consts.count("\n", 0, m.start()) + 1
-            out.append(Definition("marker", "src/marker.rs", n, n, text))
+            out.append(Definition("marker", MARKER_CONSTS, n, n, text))
     return out
 
 
@@ -694,6 +700,7 @@ class Checker:
         self.report = Report()
         self.commits = self._read_commits()
         self._changed: dict[str, list[tuple[int, int]]] | None = None
+        self._moved: dict[str, list[tuple[str, str]]] = {}
         self.gh = gh if gh is not None else Gh(repo)
         self.history = history if history is not None else History(repo)
         self.results: list[dict[str, Any]] | None = None
@@ -773,8 +780,41 @@ class Checker:
             self.check_fails_before(c)
             self.check_closes(c)
 
+    def moved(self, sha: str, path: str) -> str | None:
+        """Where `path` of commit `sha` is at the head: each later commit's
+        renames applied in order (`-B` pairs a path a new file reuses with its
+        old content), or None when no commit renamed it."""
+        if sha not in self._moved:
+            out = gatelib.git(self.repo, "log", "--reverse", "--topo-order", "-M", "-B",
+                              "--name-status", "--no-color", "--no-ext-diff", "--format=",
+                              "-z", f"{sha}..{self.head}")
+            f = out.split("\0")
+            renames: list[tuple[str, str]] = []
+            i = 0
+            while i < len(f):
+                status = f[i].strip()
+                if not status:
+                    i += 1
+                elif status.startswith(("R", "C")):
+                    renames.append((f[i + 1], f[i + 2]))
+                    i += 3
+                else:
+                    i += 2
+            self._moved[sha] = renames
+        now, hit = path, False
+        for old, new in self._moved[sha]:
+            if old == now:
+                now, hit = new, True
+        return now if hit else None
+
     def check_proof(self, c: Commit, p: ProvesLine, t: Tick) -> list[Definition]:
         defs, name = resolve(p.proof, self.tree)
+        path, sep, rest = p.proof.partition("::")
+        if not defs and "/" in path and not p.proof.startswith('"'):
+            # A path proof whose file a later commit moved resolves at its new path.
+            new = self.moved(c.sha, path)
+            if new is not None:
+                defs, name = resolve(new + sep + rest, self.tree)
         if not defs:
             self.report.error(c.sha, t.line, f"proof not found at the head: {p.proof!r}")
             return defs

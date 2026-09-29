@@ -4,6 +4,10 @@
 //! Input merge is lock-free vs the keyboard ISR: the PS/2 ring is
 //! drained with IRQs off (DESIGN §9.4); these helpers do not take a lock.
 
+pub mod fb;
+pub mod font;
+pub mod kbd;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendId {
     Serial,

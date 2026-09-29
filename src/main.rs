@@ -26,54 +26,44 @@
 
 extern crate alloc;
 
-mod acpi_init;
-mod addr_space_init;
-mod apic_init;
+mod acpi;
 mod arch;
-mod block_init;
+mod block;
 mod boot;
-mod cache_init;
 mod cell;
-mod console_init;
-mod dev_init;
-mod diag;
-mod dma_init;
-mod entropy_init;
-mod fat_init;
-mod fb_init;
-mod file_init;
-mod fs_init;
-mod heap_init;
-mod ipi_init;
-mod irq_init;
-mod kbd_init;
-mod ksyms;
-mod kva_init;
-mod log_init;
-mod paging_init;
-mod panic;
-mod part_init;
-mod pci_init;
-mod per_cpu_init;
-mod pmm_init;
-mod proc_init;
-mod sched_init;
-mod serial;
-mod shell_init;
-mod smp_init;
-mod sync_init;
-mod syscall_init;
-mod thread_init;
-mod time_init;
-mod user_init;
-mod vibefs_init;
-mod virtio_blk_init;
-mod virtio_init;
-mod work_init;
-mod x86;
+mod console;
+mod dev;
+mod drivers;
+mod fs;
+mod irq;
+mod log;
+mod mm;
+mod proc;
+mod sched;
+mod shell;
+mod smp;
+mod sync;
+mod time;
 
 #[cfg(feature = "kernel_tests")]
 mod ktest;
+
+use acpi::acpi_init;
+use arch::x86_64::{apic_init, cpu as x86};
+use block::{block_init, cache_init, part_init};
+use console::{console_init, fb_init, kbd_init};
+use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init};
+use drivers::virtio_blk_init;
+use fs::{fat_init, file_init, fs_init, vibefs_init};
+use irq::{ipi_init, irq_init};
+use log::{diag, ksyms, log_init, panic, serial};
+use mm::{heap_init, kva_init, paging_init, pmm_init};
+use proc::{addr_space_init, proc_init, syscall_init, user_init};
+use sched::{sched_init, thread_init, work_init};
+use shell::shell_init;
+use smp::{per_cpu_init, smp_init};
+use sync::sync_init;
+use time::time_init;
 
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 

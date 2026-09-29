@@ -4,6 +4,8 @@
 //! They never pick IDT slots. CPU binding is recorded so MSI-X dest and
 //! Phase 19 affinity rebalance share one table.
 
+pub mod ipi;
+
 use crate::vectors;
 
 /// Inclusive pool. Keyboard already took [`vectors::KBD`] (`0x30`).

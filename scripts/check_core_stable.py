@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CORE_ROOT = ROOT / "src" / "lib.rs"
+CORE_ROOT = ROOT / "crates" / "core" / "src" / "lib.rs"
 
 # `#![feature(..)]` or `#![cfg_attr(<cond>, feature(..))]`; `feature = "std"`
 # inside a cfg predicate is a Cargo feature, not a language feature.

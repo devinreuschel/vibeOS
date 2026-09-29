@@ -32,6 +32,9 @@
 //! §2.2 / §5.4) can call the same complete path. Hard IRQ only enqueues
 //! work.
 
+pub mod cache;
+pub mod part;
+
 use crate::fmt_util;
 
 pub const DEFAULT_BLOCK_SIZE: u32 = 512;

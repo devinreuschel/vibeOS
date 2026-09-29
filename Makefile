@@ -46,10 +46,10 @@ QEMU_BASE = qemu-system-x86_64 \
     -accel $(VIBEOS_QEMU_ACCEL) \
     -no-reboot
 
-# Prerequisites: everything under src/, the linker script, the limine config,
-# and this Makefile. A find(1) so newly added source dirs are not silently
-# missed (DESIGN §9.1).
-KERNEL_SRCS := $(shell find src -type f \( -name '*.rs' -o -name '*.asm' -o -name '*.S' \) 2>/dev/null)
+# Prerequisites: everything under src/ and crates/core/src/, the linker
+# script, the limine config, and this Makefile. A find(1) so newly added
+# source dirs are not silently missed (DESIGN §9.1).
+KERNEL_SRCS := $(shell find src crates/core/src -type f \( -name '*.rs' -o -name '*.asm' -o -name '*.S' \) 2>/dev/null)
 USER_HELLO  := user/hello
 USER_INIT   := user/init
 USER_SH     := user/sh
@@ -171,7 +171,7 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-$(INITRD): src/fat.rs tests/hostlib/src/bin/mkinitrd.rs tests/hostlib/Cargo.toml \
+$(INITRD): crates/core/src/fs/fat.rs tests/hostlib/src/bin/mkinitrd.rs tests/hostlib/Cargo.toml \
 		crates/core/Cargo.toml $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
 	mkdir -p $(dir $@)
 	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
@@ -217,7 +217,7 @@ test-unit:
 test-harness:
 	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v
 
-# Host mkfs/fsck share src/vibefs.rs. Artifacts land under
+# Host mkfs/fsck share crates/core/src/fs/vibefs.rs. Artifacts land under
 # $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/ (A2). Defined above the tiers that
 # name them: make expands a prerequisite list when it reads the rule.
 MKFS_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/mkfs-vibefs
@@ -225,7 +225,7 @@ FSCK_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/fsck-vibefs
 NBD_CACHE := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/nbd-cache
 VIBEFS_CAT := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/vibefs-cat
 
-$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT): src/vibefs.rs \
+$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT): crates/core/src/fs/vibefs.rs \
 		tests/hostlib/src/bin/mkfs_vibefs.rs tests/hostlib/src/bin/fsck_vibefs.rs \
 		tests/hostlib/src/bin/nbd_cache.rs tests/hostlib/src/bin/vibefs_cat.rs \
 		tests/hostlib/Cargo.toml crates/core/Cargo.toml

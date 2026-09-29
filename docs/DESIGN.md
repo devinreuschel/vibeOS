@@ -82,7 +82,7 @@ These are not style preferences. They shape every subsystem.
    MSRV (§3.1), the oldest Rust that Kani (ROADMAP §10.8) and Verus (Phase 38) use: each pins its
    own toolchain, older than the kernel's nightly, and must build the code the kernel links. Nightly
    features stay in the kernel binary. `scripts/check_core_stable.py` in `make check` finds no
-   feature attribute in `src/lib.rs`. Rule; not yet enforced: nothing builds the crate with its
+   feature attribute in `crates/core/src/lib.rs`. Rule; not yet enforced: nothing builds the crate with its
    MSRV, which would reject a feature attribute however it is formatted and any API or syntax newer
    than the MSRV (ROADMAP §10.1).
 
@@ -133,38 +133,46 @@ reclaim hooks are set, an allocation goes from the reserve straight to failure.
 
 ## 1.3 Module map
 
-As of 2026-09-22 (Phase 9). Files that exist, not a target layout. [A1](reviews/issues/A1-directory-per-subsystem.md)
-will nest this pairing; do not invent `src/mm/` or `src/drivers/` until then.
+As of 2026-09-28 (Phase 10). Files that exist; `scripts/check_module_map.py` in `make check` fails
+when this table and the tree differ.
 
-**Naming.** `src/<name>.rs` is the portable half (`vibeos-core`, `src/lib.rs`, host-tested via
-`make test-unit`). `src/<name>_init.rs` is the kernel half (`src/main.rs`). A few kernel-only files
-have no portable pair. `src/arch/` holds only what touches privileged CPU state (GDT, IDT, PIC, catch,
-gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, not kernel modules.
+**Layout.** One directory per subsystem in each crate, with the same name in both. The portable half
+of subsystem `<s>` is `crates/core/src/<s>/` (`vibeos-core`, host-tested by `make test-unit`), and its
+kernel half is `src/<s>/` (the kernel binary, rooted at `src/main.rs`). A kernel module keeps the
+`_init` suffix of its portable pair and sits in the directory that mirrors it (`mm/pmm.rs` and
+`mm/pmm_init.rs`). A module named like its directory is that directory's `mod.rs`. Each crate root
+re-exports its modules under their pre-move names (`vibeos::pmm`, `crate::pmm_init`, `crate::x86`).
+`arch/x86_64/` is the x86_64 port: its pure half (encodings, trap decode) in `vibeos-core`, and its
+hardware half in the kernel (DESIGN §11.1). `src/cell.rs` stays at the kernel root; `vibeos-core`
+compiles it under `cfg(test)` through `#[path]`. `user/` holds freestanding ELFs, not kernel modules.
 
-| Subsystem | Portable | Kernel |
-|-----------|----------|--------|
-| crate | `src/lib.rs` (`vibeos-core`) | `src/main.rs` (`_start`, base revision, boot order) |
-| boot / serial | `uart.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs` | `boot.rs` (`BootInfo`, Limine requests), `serial.rs`, `panic.rs`, `diag.rs`, `ksyms.rs` |
-| arch | `desc.rs`, `pic.rs`, `vectors.rs` | `arch/mod.rs`, `arch/gdt.rs`, `arch/idt.rs`, `arch/pic.rs`, `arch/catch.rs`, `arch/gs.rs`, `arch/cpu.rs`, `arch/trampoline.rs`, `arch/trampoline.S`, `x86.rs` |
-| mm | `pmm.rs`, `paging.rs`, `heap.rs`, `kva.rs` | `pmm_init.rs`, `paging_init.rs`, `heap_init.rs`, `kva_init.rs` |
-| time | `time.rs` | `time_init.rs` |
-| acpi | `acpi.rs` | `acpi_init.rs` |
-| interrupts | `irq.rs`, `apic.rs`, `ipi.rs` | `irq_init.rs`, `apic_init.rs`, `ipi_init.rs` |
-| smp | `smp.rs`, `per_cpu.rs` | `smp_init.rs`, `per_cpu_init.rs` |
-| sched | `thread.rs`, `sched.rs`, `wait.rs`, `sync.rs`, `lock.rs`, `work.rs` | `thread_init.rs`, `sched_init.rs`, `sync_init.rs`, `work_init.rs` |
-| cell | `cell.rs` (`#[cfg(test)]` in `vibeos-core`) | `cell.rs` (`BootCell`, `IrqCell`) |
-| log | `log.rs` | `log_init.rs` |
-| console | `console.rs`, `kbd.rs`, `fb.rs`, `font.rs`, `shell.rs` | `console_init.rs`, `kbd_init.rs`, `fb_init.rs`, `shell_init.rs` |
-| devices | `pci.rs`, `dev.rs`, `dma.rs`, `virtio.rs` | `pci_init.rs`, `dev_init.rs`, `dma_init.rs`, `virtio_init.rs` |
-| block | `block.rs`, `virtio_blk.rs`, `part.rs`, `cache.rs` | `block_init.rs`, `virtio_blk_init.rs`, `part_init.rs`, `cache_init.rs` |
-| fs | `fs/mod.rs`, `fs/kernfs.rs`, `fs/ramfs.rs`, `fat.rs`, `vibefs.rs` | `fs_init.rs`, `fat_init.rs`, `vibefs_init.rs`, `file_init.rs` |
-| entropy | `entropy.rs` | `entropy_init.rs` |
-| proc | `addr_space.rs`, `elf.rs`, `proc.rs`, `syscall.rs` | `addr_space_init.rs`, `user_init.rs`, `proc_init.rs`, `syscall_init.rs` |
-| limits | `limits.rs` (every table and resource cap) | — |
-| kalloc | `kalloc.rs` (fallible heap types; stub until ROADMAP §10.4) | — |
-| fpu | `fpu.rs` (FP register binding; stub until ROADMAP §10.6) | — |
-| trap | `trap.rs` (portable trap kinds and ring-3 actions; stub until ROADMAP §10.6) | — |
-| ktest | — | `ktest.rs`, `ktest/p10_s*.rs` (`kernel_tests` only) |
+**Reading the table.** Paths are relative to `crates/core/src/` (Portable) and `src/` (Kernel).
+`{a,b}` lists files of one directory, and `*` matches within one. Every listed path exists, and every
+`.rs`, `.S` and `.asm` file under the two roots is listed once. Outside the `crate` row, a row's paths
+lie in its subsystem's directory, except `ktest.rs` until ROADMAP §10.2's Q2 box moves the runner to
+`ktest/mod.rs`. Test bodies in `src/<s>/ktest.rs` need no row.
+
+| Subsystem | Portable (`crates/core/src/`) | Kernel (`src/`) |
+|---|---|---|
+| crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `trap.rs` | `main.rs`, `cell.rs` |
+| boot | — | `boot/mod.rs` (`BootInfo`, Limine requests) |
+| arch | `arch/mod.rs`, `arch/x86_64/{mod,apic,desc,pic,trap,uart,vectors}.rs` | `arch/mod.rs`, `arch/x86_64/{mod,apic_init,catch,cpu,gdt,gs,idt,pic,trampoline}.rs`, `arch/x86_64/trampoline.S` |
+| mm | `mm/{mod,pmm,paging,heap,kva}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
+| time | `time/mod.rs` | `time/{mod,time_init}.rs` |
+| acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
+| irq | `irq/{mod,ipi}.rs` | `irq/{mod,irq_init,ipi_init}.rs` |
+| smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
+| sched | `sched/{mod,thread,wait,work,fpu}.rs` | `sched/{mod,thread_init,sched_init,work_init}.rs` |
+| sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init}.rs` |
+| log | `log/mod.rs` | `log/{mod,log_init,serial,panic,diag,ksyms}.rs` |
+| console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
+| shell | `shell/mod.rs` | `shell/{mod,shell_init}.rs` |
+| dev | `dev/{mod,pci,dma,virtio,entropy}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
+| drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/{mod,virtio_blk_init}.rs` |
+| block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
+| fs | `fs/{mod,kernfs,ramfs,testfs,fat,vibefs}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,file_init}.rs` |
+| proc | `proc/{mod,addr_space,elf,syscall}.rs` | `proc/{mod,proc_init,addr_space_init,user_init,syscall_init}.rs` |
+| ktest | — | `ktest.rs`, `ktest/*.rs` (`kernel_tests` only) |
 
 ## 1.4 Documentation rules
 
