@@ -301,9 +301,8 @@ MBR (primary + extended/logical) and GPT parse in `crates/core/src/block/part.rs
 MBR type `0xEE` is not a data device; GPT is. Header and entry CRCs are
 checked; a bad primary falls back to the backup header at the last LBA.
 EBR walk is capped at 128; a corrupt next-LBA stops the chain. `parse_mbr`
-reads the four primary entries from `sector_buf`, which the EBR walk reuses,
-so a primary listed after an extended entry is read from the last EBR
-(ROADMAP §10.12, F117). Entries are checked against the disk size only: an
+copies the four MBR entries before the EBR walk reuses its sector buffer.
+Entries are checked against the disk size only: an
 entry that overlaps another entry or the table itself, a GPT header whose
 MyLBA is not the LBA it was read from, and a GPT entry outside the usable
 range are all accepted (ROADMAP §13.9, F117).
