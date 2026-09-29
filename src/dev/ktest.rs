@@ -568,3 +568,167 @@ pub(crate) fn test_dev_probe_alloc_fail() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// Test hooks in virtio-rng's pool path (AGENTS rule 9: `kernel_tests`
+/// only). `virtio_init::publish_pool` calls [`on_publish`](rng_hooks::on_publish)
+/// with each completion's payload, and `virtio_init::rng_take` calls
+/// [`on_take_claim`](rng_hooks::on_take_claim) between a claim and its read.
+pub(crate) mod rng_hooks {
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    use crate::virtio_init::RNG_PAYLOAD;
+
+    /// Refills that publish a counter pattern before the rest publish none.
+    pub(crate) const PATTERN_REFILLS: u32 = 8;
+
+    static PATTERN: AtomicBool = AtomicBool::new(false);
+    /// Completions published since [`arm_pattern`].
+    static REFILLS: AtomicU32 = AtomicU32::new(0);
+    static STALL: AtomicU32 = AtomicU32::new(0);
+
+    /// From now on, refill `r` publishes `(32·r + i) as u8` for
+    /// `r < PATTERN_REFILLS`, and nothing from then on: 256 distinct values.
+    pub(crate) fn arm_pattern() {
+        REFILLS.store(0, Ordering::Relaxed);
+        PATTERN.store(true, Ordering::Release);
+    }
+
+    /// Pattern refills published since [`arm_pattern`].
+    pub(crate) fn pattern_refills() -> u32 {
+        REFILLS.load(Ordering::Acquire).min(PATTERN_REFILLS)
+    }
+
+    /// Spin `spins` times between each take's claim and its read.
+    pub(crate) fn set_take_stall(spins: u32) {
+        STALL.store(spins, Ordering::Release);
+    }
+
+    /// Turn every hook off.
+    pub(crate) fn disarm() {
+        PATTERN.store(false, Ordering::Release);
+        STALL.store(0, Ordering::Release);
+    }
+
+    pub(crate) fn on_publish(payload: &mut [u8; RNG_PAYLOAD], len: &mut usize) {
+        if !PATTERN.load(Ordering::Acquire) {
+            return;
+        }
+        let r = REFILLS.fetch_add(1, Ordering::AcqRel);
+        if r >= PATTERN_REFILLS {
+            *len = 0;
+            return;
+        }
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = (r as usize * RNG_PAYLOAD + i) as u8;
+        }
+        *len = RNG_PAYLOAD;
+    }
+
+    pub(crate) fn on_take_claim() {
+        let n = STALL.load(Ordering::Acquire);
+        for _ in 0..n {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Spins between a take's claim and its read: under 100,000 instructions
+/// with IF=0 once the take holds the queue lock (AGENTS rule 2).
+const RNG_STALL: u32 = 10_000;
+/// How long the pool reader runs at most.
+const RNG_READ_NS: u64 = 2_000_000_000;
+
+static RNG_SEEN: [core::sync::atomic::AtomicU8; 256] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; 256];
+static RNG_READER_DONE: AtomicBool = AtomicBool::new(false);
+static RNG_REQ_ERRS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Drain the pool a byte at a time and ask for the next refill after each
+/// take, as `hw_fill` did before ROADMAP §10.12, so a refill is nearly
+/// always in flight while it drains.
+fn rng_pool_reader() {
+    let t0 = crate::time_init::now_ns();
+    let mut b = [0u8; 1];
+    loop {
+        let n = virtio_init::rng_take(&mut b);
+        if n == 1
+            && let Some(c) = RNG_SEEN.get(b[0] as usize)
+        {
+            c.fetch_add(1, Ordering::AcqRel);
+        }
+        if virtio_init::rng_request().is_err() {
+            RNG_REQ_ERRS.fetch_add(1, Ordering::Relaxed);
+        }
+        if n == 0 && rng_hooks::pattern_refills() >= rng_hooks::PATTERN_REFILLS {
+            break;
+        }
+        if crate::time_init::now_ns().saturating_sub(t0) > RNG_READ_NS {
+            break;
+        }
+    }
+    RNG_READER_DONE.store(true, Ordering::Release);
+}
+
+/// ROADMAP §10.12 (F121, F140): each virtio-rng pool byte reaches one
+/// reader, while refills land on another CPU.
+pub(crate) fn rng_pool_no_dup() -> Outcome {
+    if !virtio_init::rng_bound() {
+        return Outcome::Skip("no virtio-rng");
+    }
+    let tcpu = crate::irq_init::threaded_cpu();
+    let mask = crate::per_cpu_init::online_mask();
+    let Some(cpu) = (0..64u32).find(|&c| c != tcpu && mask & (1u64 << c) != 0) else {
+        return Outcome::Skip("one CPU");
+    };
+    // Empty the pool of the device's own bytes, which the pattern's 256
+    // values could repeat, with no request left in flight.
+    let c0 = rng_completions();
+    if virtio_init::rng_request().is_err() {
+        return Outcome::Fail("request");
+    }
+    // A request already in flight completes just the same.
+    if !spin_until_ns(|| rng_completions() > c0, 2_000_000_000) {
+        return Outcome::Fail("no completion");
+    }
+    let mut sink = [0u8; 64];
+    while virtio_init::rng_take(&mut sink) > 0 {}
+    for c in &RNG_SEEN {
+        c.store(0, Ordering::Relaxed);
+    }
+    RNG_READER_DONE.store(false, Ordering::Release);
+    RNG_REQ_ERRS.store(0, Ordering::Relaxed);
+    rng_hooks::set_take_stall(RNG_STALL);
+    rng_hooks::arm_pattern();
+    let _reader = crate::ktest::spawn_thread_on("rng-reader", rng_pool_reader, cpu);
+    let done = spin_until_ns(
+        || RNG_READER_DONE.load(Ordering::Acquire),
+        RNG_READ_NS + 1_000_000_000,
+    );
+    let refills = rng_hooks::pattern_refills();
+    rng_hooks::disarm();
+    // Leave the pool with the device's bytes for the tests after this one.
+    let c1 = rng_completions();
+    if virtio_init::rng_request().is_err() {
+        return Outcome::Fail("request after");
+    }
+    if !spin_until_ns(|| rng_completions() > c1, 2_000_000_000) {
+        return Outcome::Fail("no completion after");
+    }
+    if !done {
+        return Outcome::Fail("reader did not finish");
+    }
+    let errs = RNG_REQ_ERRS.load(Ordering::Relaxed);
+    if errs != 0 {
+        return crate::fail_fmt!("{errs} requests failed");
+    }
+    for (v, c) in RNG_SEEN.iter().enumerate() {
+        let n = c.load(Ordering::Acquire);
+        if n > 1 {
+            return crate::fail_fmt!("value {v:#04x} read {n} times");
+        }
+    }
+    if refills < 3 {
+        return crate::fail_fmt!("{refills} pattern refills landed, want 3");
+    }
+    Outcome::Ok
+}

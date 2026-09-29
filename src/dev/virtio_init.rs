@@ -51,7 +51,7 @@ pub(super) static DATA_DEV: AtomicU64 = AtomicU64::new(0);
 pub(super) static DATA_VIRT: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
-const RNG_PAYLOAD: usize = 32;
+pub(crate) const RNG_PAYLOAD: usize = 32;
 const RNG_PAYLOAD_OFF: usize = 16;
 static POOL: [AtomicU8; RNG_PAYLOAD] = [const { AtomicU8::new(0) }; RNG_PAYLOAD];
 static POOL_LEN: AtomicU32 = AtomicU32::new(0);
@@ -207,15 +207,24 @@ fn rng_top() {
 fn publish_pool(virt: u64, len: u32) {
     let n = (len as usize).min(RNG_PAYLOAD);
     let p = virt.wrapping_add(RNG_PAYLOAD_OFF as u64) as *const u8;
+    let mut payload = [0u8; RNG_PAYLOAD];
     let mut i = 0usize;
     while i < n {
         // SAFETY: invariant: `virt` is the rng's data buffer, whose
         // `RNG_PAYLOAD` bytes from `RNG_PAYLOAD_OFF` the device wrote and
         // `harvest` synced for the CPU, and `i < RNG_PAYLOAD`; established by
         // `virtio_init::setup`, which allocates it.
-        let b = unsafe { p.add(i).read_volatile() };
-        POOL[i].store(b, Ordering::Relaxed);
+        payload[i] = unsafe { p.add(i).read_volatile() };
         i += 1;
+    }
+    #[cfg(feature = "kernel_tests")]
+    let n = {
+        let mut n = n;
+        crate::dev::ktest::rng_hooks::on_publish(&mut payload, &mut n);
+        n.min(RNG_PAYLOAD)
+    };
+    for (slot, &b) in POOL.iter().zip(payload.iter()).take(n) {
+        slot.store(b, Ordering::Relaxed);
     }
     POOL_LEN.store(n as u32, Ordering::Release);
     POOL_POS.store(0, Ordering::Release);
@@ -516,6 +525,8 @@ pub fn rng_take(buf: &mut [u8]) -> usize {
             .compare_exchange(pos, pos + 1, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
+            #[cfg(feature = "kernel_tests")]
+            crate::dev::ktest::rng_hooks::on_take_claim();
             buf[i] = POOL[pos as usize].load(Ordering::Relaxed);
             i += 1;
         }
