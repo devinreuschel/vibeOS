@@ -802,3 +802,37 @@ needs = [
   "user-VA accessors replace the physmap",  # L1377
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1275
+[[box]]
+key = "`switch_context` and the DMA fences"
+needs = [
+  "an `arch` module boundary built",  # L1277
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1266
+[[box]]
+key = "the host test `switch_context_roundtrip` runs"
+needs = [
+  "`switch_context` and the DMA fences",  # L1275
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1276
+[[box]]
+key = "`dma::dma_mb`, a full barrier (`mfence`"
+needs = [
+  "queue setup, kick, and completion",  # L838
+  "an `arch` module boundary built",  # L1277
+  "the seam proven by a",  # L1279
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L838
+[[box]]
+key = "queue setup, kick, and completion"
+needs = [
+  "`dma::dma_mb`, a full barrier (`mfence`",  # L1276
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"

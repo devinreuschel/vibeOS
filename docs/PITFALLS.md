@@ -167,8 +167,9 @@ queue, which QEMU ignores and a device that shares one doorbell does not (ROADMA
 `fence(Release)` + `sfence`, then the index. Used-ring harvest is `dma_rmb` after observing `used.idx`.
 `dma_wmb` orders stores only. The kick decision loads `avail_event` or `used.flags` after the
 `avail.idx` store, and the harvest reads `used.idx` again after its `used_event` store, so each needs
-a full barrier (`mfence`) between the store and the load (virtio 1.2 §2.7.13.4.1). No `dma_mb`
-exists, and under `VIRTIO_F_EVENT_IDX` one lost kick stops a queue for good (ROADMAP §10.3, F016).
+a full barrier between the store and the load (virtio 1.2 §2.7.13.4.1): without it, under
+`VIRTIO_F_EVENT_IDX` one lost kick stops a queue for good. `dma::dma_mb` (`mfence` on x86_64) runs
+first in `SplitQueue::should_kick` and right after `get_used`'s `used_event` store (F016).
 On aarch64 the notify is a Device store, which can reach the device before the `avail.idx` store is
 visible; `mmio_write`'s `dmb oshst` orders them ([§4.7](MEMORY.md#47-dma)).
 

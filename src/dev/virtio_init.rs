@@ -16,9 +16,10 @@ use vibeos::virtio::{
     COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE, COMMON_OFF_STATUS, DEV_RNG_LEGACY,
     DEV_RNG_MODERN, F_EVENT_IDX, F_INDIRECT_DESC, MSI_NO_VECTOR, ModernCaps, OFFER, PciCap,
     STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, SplitLayout,
-    SplitQueue, VENDOR_ID, VirtioError, notify_addr, pick_features, write_indirect_write,
+    VENDOR_ID, VirtioError, notify_addr, pick_features, write_indirect_write,
 };
 
+use crate::arch::{self, current::Arch};
 use crate::dev_init;
 use crate::dma_init;
 use crate::irq_init;
@@ -28,7 +29,7 @@ use crate::sync_init::SpinMutex;
 use crate::work_init;
 
 struct Q {
-    vq: SplitQueue,
+    vq: arch::current::SplitQueue,
     qdma: DmaBuffer,
     data: DmaBuffer,
     doorbell: u64,
@@ -231,7 +232,7 @@ fn harvest() {
                 last = u.len;
             }
             if n != 0 {
-                q.data.sync_for_cpu();
+                q.data.sync_for_cpu::<Arch>();
                 publish_pool(q.data.virt(), last);
                 IN_FLIGHT.store(false, Ordering::Release);
             }
@@ -253,7 +254,7 @@ fn rng_work() {
 }
 
 fn kick(doorbell: u64) {
-    dma::dma_wmb();
+    dma::dma_wmb::<Arch>();
     // SAFETY: invariant I234: `doorbell` is queue 0's notify register inside
     // the notify capability's BAR, which `map_mmio` mapped uncached, checked
     // against the capability length by `virtio::notify_addr`; established by
@@ -365,10 +366,11 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     // least `layout.total` bytes, which stays allocated beside the queue
     // until the device is reset and it is freed; established by
     // `dma_init::alloc`.
-    let mut vq =
-        unsafe { SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0) };
+    let mut vq = unsafe {
+        arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
+    };
     vq.init();
-    qdma.sync_for_device();
+    qdma.sync_for_device::<Arch>();
     w64(
         common,
         COMMON_OFF_QDESC,
@@ -545,7 +547,7 @@ pub fn rng_request() -> Result<(), VirtioError> {
         );
         write_indirect_write(q.data.virt() as *mut u8, payload, RNG_PAYLOAD as u32);
     }
-    q.data.sync_for_device();
+    q.data.sync_for_device::<Arch>();
     if q.features & F_INDIRECT_DESC != 0 {
         q.vq.add_indirect(table, 16)?;
     } else {
@@ -553,7 +555,7 @@ pub fn rng_request() -> Result<(), VirtioError> {
     }
     let old = q.vq.last_avail;
     q.vq.publish();
-    q.qdma.sync_for_device();
+    q.qdma.sync_for_device::<Arch>();
     if q.vq.should_kick(old) {
         kick(q.doorbell);
     }

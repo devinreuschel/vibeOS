@@ -799,16 +799,20 @@ capture kernel entered from a crash clears it on every function, and aborts SMMU
 it touches a device, routes an interrupt, or turns off an IOMMU translation it found enabled.
 Clearing Bus Master Enable also stops a device's MSIs, which are memory writes.
 
-`sync_for_device` / `sync_for_cpu` always run at the API boundary. On x86 they are `fence(Release)` +
-`sfence` and `fence(Acquire)` + `lfence`. Descriptor publish stores the index after that store-side
-barrier, not a bare `compiler_fence`.
+`sync_for_device` / `sync_for_cpu` always run at the API boundary. They and `dma::dma_wmb` /
+`dma_rmb` are generic over the port's `Barriers` (§11.1) and call its methods. On x86_64, in
+`src/arch/x86_64/mod.rs`, `dma_wmb` is `fence(Release)` + `sfence` and `dma_rmb` is `fence(Acquire)` +
+`lfence`. Descriptor publish stores the index after that store-side barrier, not a bare
+`compiler_fence`.
 
 Neither barrier orders a store before a later load from another address. After the driver stores
-`avail.idx`, it loads `avail_event` (EVENT_IDX) or `used.flags` to decide whether to kick; virtio 1.2
-§2.7.13.4.1 requires a full barrier (`mfence`) between the two, and `SplitQueue::get_used` needs one
-after its `used_event` store. Without them the driver and the device can each miss the other's
-update and the queue stops. `SplitQueue::should_kick` and `get_used` have neither (ROADMAP §10.3,
-F016).
+`avail.idx`, it loads `avail_event` (EVENT_IDX) or `used.flags` to decide whether to kick, and after
+`SplitQueue::get_used` stores `used_event` it loads `used.idx` again; virtio 1.2 §2.7.13.4.1 requires
+a full barrier between each store and load, or the driver and the device can each miss the other's
+update and the queue stops (F016). `dma::dma_mb` is that barrier (`mfence` on x86_64):
+`SplitQueue::should_kick` runs it before its first load, and `get_used` runs it right after its
+`used_event` store. The host test `split_queue_dma_mb_order` records ring stores, ring loads, and
+barriers through the stub port and finds `dma_mb` between each pair.
 
 Device ordering, on both architectures. An MMIO write through the §11.1 accessors is ordered after
 every earlier store to memory, so a driver that stores descriptors and an index and then writes a

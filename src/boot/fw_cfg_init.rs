@@ -20,6 +20,7 @@ use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 
 pub use vibeos::boot::FwCfgFile;
 
+use crate::arch::current::Arch;
 use crate::dma_init;
 use crate::x86;
 
@@ -219,7 +220,7 @@ pub(super) fn transfer(
     // `DMA_DATA + len` bytes (checked above) mapped at `as_ptr`, and no
     // device reaches them before the port write below.
     unsafe { core::ptr::copy_nonoverlapping(desc.as_ptr(), base, desc.len()) };
-    dma::dma_wmb();
+    dma::dma_wmb::<Arch>();
     // SAFETY: invariant I244, established at `boot::fw_cfg_init::probe`:
     // `has_dma` found the signature and the DMA feature, so 0x514 and
     // 0x518 are the DMA address register, big-endian in two halves; the
@@ -241,7 +242,7 @@ pub(super) fn transfer(
             return Err(FwCfgError::Device);
         }
         if c == 0 {
-            dma::dma_rmb();
+            dma::dma_rmb::<Arch>();
             return Ok(());
         }
         core::hint::spin_loop();
