@@ -189,12 +189,13 @@ F083) replaces them with one `KError` table that generates §2.
 ## 3. Syscalls
 
 `proc_init::dispatch_frame` dispatches with a `match` on `rax`, and each
-handler checks its own pointers. `crates/core/src/proc/syscall.rs` holds a `SyscallInfo` row
-per call (name, arity, pointer mask, length argument), but the kernel reads
-only the name, for the §6 trace line, and only host tests run
-`syscall::validate_args`. The rows have drifted: `OPEN`, `EXECVE`, and
-`WAIT4` have `ptr_mask` 0 although each takes user pointers (F150; ROADMAP
-§10.5 dispatches through the generated syscall table).
+handler checks its own pointers. One table,
+`crates/core/src/proc/syscalls.toml`, holds each call's number per
+architecture, its arguments' C types in order, and its pointer arguments;
+`scripts/gen_syscalls.py` writes from it the kernel's table
+(`vibeos::syscall::ROWS`, the `SYS_*` numbers, and the §6 trace names), the
+user stubs (`vibeos_user::sys`), and the table below, and `make check` fails
+when one differs (ROADMAP §10.5).
 
 The rule ROADMAP §10.5 keeps: dispatch checks no pointer itself, and a
 handler checks each pointer where it first copies through it, after the
@@ -203,28 +204,32 @@ whether a path or a child exists), so a call with two bad arguments returns
 the errno the baseline returns: `read(-1, <unmapped>, 1)` is `EBADF`, and
 `wait4` with no child and an unmapped status pointer is `ECHILD`.
 
-| nr | name | arity | pointers |
-|---:|------|------:|----------|
-| 0 | `read` | 3 | `rsi` buffer, `rdx` length |
-| 1 | `write` | 3 | `rsi` buffer, `rdx` length |
-| 2 | `open` | 3 | `rdi` path, a C string of at most 255 bytes |
-| 3 | `close` | 1 | |
-| 8 | `lseek` | 3 | |
-| 9 | `mmap` | 6 | anonymous and private only; returns the address |
-| 11 | `munmap` | 2 | |
-| 12 | `brk` | 1 | returns the break; `0` if the caller is not a process |
-| 24 | `sched_yield` | 0 | |
-| 32 | `dup` | 1 | CLOEXEC cleared on the new fd |
-| 33 | `dup2` | 2 | |
-| 39 | `getpid` | 0 | `0` if the caller is not a process |
-| 57 | `fork` | 0 | full AS copy; child `rax=0` |
-| 59 | `execve` | 3 | `rdi` path; `rsi` argv, at most 15 C strings of at most 255 bytes each; `rdx` envp, not read |
-| 60 | `exit` | 1 | status in `rdi` (low 8 bits) |
-| 61 | `wait4` | 4 | optional `rsi` status (4 bytes); `r10` rusage not read |
-| 62 | `kill` | 2 | default actions only |
-| 72 | `fcntl` | 3 | `F_GETFD` / `F_SETFD` (CLOEXEC) |
-| 110 | `getppid` | 0 | |
-| 500 | `psinfo` | 2 | `rdi` buf, `rsi` len; vibeOS-specific |
+<!-- gen_syscalls: begin syscall-table -->
+
+| x86_64 | aarch64 | name | arity | arguments | pointer arguments | notes |
+|---:|---:|------|------:|-----------|-------------------|-------|
+| 0 | 63 | `read` | 3 | `unsigned int fd`, `char *buf`, `size_t count` | `buf`: out, `count` bytes, after the `fd` lookup | — |
+| 1 | 64 | `write` | 3 | `unsigned int fd`, `const char *buf`, `size_t count` | `buf`: in, `count` bytes, after the `fd` lookup | — |
+| 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `pathname` at most 255 bytes |
+| 3 | 57 | `close` | 1 | `unsigned int fd` | — | — |
+| 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | — |
+| 9 | 222 | `mmap` | 6 | `unsigned long addr`, `unsigned long length`, `unsigned long prot`, `unsigned long flags`, `unsigned long fd`, `unsigned long offset` | — | anonymous and private only; returns the address |
+| 11 | 215 | `munmap` | 2 | `unsigned long addr`, `size_t length` | — | — |
+| 12 | 214 | `brk` | 1 | `unsigned long addr` | — | returns the break; `0` if the caller is not a process |
+| 24 | 124 | `sched_yield` | 0 | — | — | — |
+| 32 | 23 | `dup` | 1 | `unsigned int oldfd` | — | CLOEXEC cleared on the new fd |
+| 33 | — | `dup2` | 2 | `unsigned int oldfd`, `unsigned int newfd` | — | — |
+| 39 | 172 | `getpid` | 0 | — | — | `0` if the caller is not a process |
+| 57 | — | `fork` | 0 | — | — | full address-space copy; the child returns 0 |
+| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `argv` at most 15 strings of at most 255 bytes each; `envp` not read |
+| 60 | 93 | `exit` | 1 | `int status` | — | the low 8 bits of `status` |
+| 61 | 260 | `wait4` | 4 | `pid_t pid`, `int *wstatus`, `int options`, `struct rusage *rusage` | `wstatus`: out, 4 bytes, may be NULL, after a child is reaped; `rusage`: not read (ROADMAP §13.7) | — |
+| 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | default actions only |
+| 72 | 25 | `fcntl` | 3 | `unsigned int fd`, `unsigned int cmd`, `unsigned long arg` | — | `F_GETFD` and `F_SETFD` (`FD_CLOEXEC`) only |
+| 110 | 173 | `getppid` | 0 | — | — | — |
+| 500 | — | `psinfo` | 2 | `char *buf`, `size_t len` | `buf`: out, `len` bytes, before anything else | vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`) |
+
+<!-- gen_syscalls: end syscall-table -->
 
 `sched_yield` calls the kernel `yield_now` when the caller has a pid
 (any spawned process). A kernel-side `dispatch()`

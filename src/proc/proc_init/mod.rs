@@ -517,7 +517,9 @@ pub fn syscall(frame: &mut UserFrame) -> i64 {
     let args: [u64; 6] = core::array::from_fn(|i| Abi::arg(frame, i));
     let ret = dispatch_frame(nr, args, Some(frame));
     if syscall_init::trace_enabled() {
-        let name = syscall::info(nr).map(|i| i.name).unwrap_or("?");
+        let name = syscall::x86_64::TABLE
+            .lookup(nr)
+            .map_or("?", |s| s.row().name);
         #[expect(
             clippy::let_underscore_must_use,
             reason = "a write to Serial cannot fail (DESIGN §2.5)"

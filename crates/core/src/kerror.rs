@@ -13,6 +13,10 @@ pub struct KError {
 }
 
 impl KError {
+    /// Linux `ENOSYS`: the number names no syscall. The syscall table's
+    /// dispatch returns it (ROADMAP §10.5).
+    pub const ENOSYS: KError = KError::from_errno(38);
+
     /// The error for Linux errno `errno`.
     ///
     /// Callers pass the errno constants of `vibeos::syscall`, never a value
@@ -38,6 +42,7 @@ mod tests {
         assert_eq!(KError::from_errno(1).errno(), 1);
         assert_eq!(KError::from_errno(38).errno(), 38);
         assert_eq!(KError::from_errno(4095).errno(), 4095);
+        assert_eq!(KError::ENOSYS.errno(), crate::syscall::ENOSYS);
         assert_eq!(KError::from_errno(14), KError::from_errno(14));
         assert_ne!(KError::from_errno(9), KError::from_errno(10));
         for bad in [0, -1, 4096, i32::MIN, i32::MAX] {

@@ -162,6 +162,12 @@ GONE: list[tuple[str, str]] = [
     ("MAX_ELF", "`MAX_ELF` removed: the loader maps"),
     ("TooBig", "`MAX_ELF` removed: the loader maps"),
     ("src/proc/user_init.rs: fn read_path", "`MAX_ELF` removed: the loader maps"),
+    ("SyscallInfo", "syscall dispatch indexes the generated"),
+    ("validate_args", "syscall dispatch indexes the generated"),
+    ("ptr_mask", "syscall dispatch indexes the generated"),
+    ("len_arg", "syscall dispatch indexes the generated"),
+    ("check_user_ptr", "syscall dispatch indexes the generated"),
+    ("crates/core/src/proc/syscall.rs: fn info", "syscall dispatch indexes the generated"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

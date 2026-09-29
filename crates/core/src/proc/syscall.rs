@@ -1,10 +1,11 @@
-//! Syscall numbers, errno, dispatch metadata. ROADMAP §9.3.
+//! Syscall numbers, errno, and the dispatch table's types. ROADMAP §9.3,
+//! §10.5.
 //!
-//! Slice A: entry/exit + this symbol returning `ENOSYS`.
-//! Slice B: same `vibeos_syscall_stub` looks up the table. Handlers live
-//! in the kernel half (`syscall_init`). No second entry path.
+//! The table itself is generated from `syscalls.toml` into
+//! [`crate::proc::syscall_table`] (C-SYSTABLE), and its items are re-exported
+//! here, with the x86_64 `SYS_*` numbers. Handlers live in the kernel half
+//! (`proc_init`); `vibeos_syscall_stub` is the one entry path.
 
-use crate::addr_space::UserMemError;
 pub use crate::arch::x86_64::trap::UserFrame;
 
 /// Linux `EPERM`.
@@ -52,28 +53,6 @@ pub const E2BIG: i32 = 7;
 /// Linux `ENOEXEC`.
 pub const ENOEXEC: i32 = 8;
 
-pub const SYS_READ: u64 = 0;
-pub const SYS_WRITE: u64 = 1;
-pub const SYS_OPEN: u64 = 2;
-pub const SYS_CLOSE: u64 = 3;
-pub const SYS_LSEEK: u64 = 8;
-pub const SYS_MMAP: u64 = 9;
-pub const SYS_MUNMAP: u64 = 11;
-pub const SYS_BRK: u64 = 12;
-pub const SYS_DUP: u64 = 32;
-pub const SYS_DUP2: u64 = 33;
-pub const SYS_GETPID: u64 = 39;
-pub const SYS_FORK: u64 = 57;
-pub const SYS_EXECVE: u64 = 59;
-pub const SYS_EXIT: u64 = 60;
-pub const SYS_WAIT4: u64 = 61;
-pub const SYS_KILL: u64 = 62;
-pub const SYS_FCNTL: u64 = 72;
-pub const SYS_GETPPID: u64 = 110;
-pub const SYS_SCHED_YIELD: u64 = 24;
-/// vibeOS-specific until ROADMAP §13.9 procfs replaces it. `rdi` buf, `rsi` len.
-pub const SYS_PSINFO: u64 = 500;
-
 pub const F_GETFD: u64 = 1;
 pub const F_SETFD: u64 = 2;
 
@@ -81,215 +60,20 @@ pub const fn neg(errno: i32) -> i64 {
     -(errno as i64)
 }
 
-/// Per-entry arity + which args are user pointers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SyscallInfo {
-    pub name: &'static str,
-    pub nr: u64,
-    pub arity: u8,
-    /// Bit i set → arg i is a user pointer.
-    pub ptr_mask: u8,
-    /// Index of the length arg for that pointer, or `0xff` if none.
-    pub len_arg: u8,
-}
+pub use crate::proc::syscall_table::x86_64::nr::*;
+pub use crate::proc::syscall_table::{
+    Arg, CType, Dir, Handlers, NrRule, NrTable, Ptr, PtrKind, ROWS, Row, Sys, SysResult, aarch64,
+    x86_64,
+};
+#[cfg(test)]
+pub use crate::proc::syscall_table::{Recorder, Val};
 
-const WRITE: SyscallInfo = SyscallInfo {
-    name: "write",
-    nr: SYS_WRITE,
-    arity: 3,
-    ptr_mask: 1 << 1,
-    len_arg: 2,
-};
-const READ: SyscallInfo = SyscallInfo {
-    name: "read",
-    nr: SYS_READ,
-    arity: 3,
-    ptr_mask: 1 << 1,
-    len_arg: 2,
-};
-const OPEN: SyscallInfo = SyscallInfo {
-    name: "open",
-    nr: SYS_OPEN,
-    arity: 3,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const CLOSE: SyscallInfo = SyscallInfo {
-    name: "close",
-    nr: SYS_CLOSE,
-    arity: 1,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const LSEEK: SyscallInfo = SyscallInfo {
-    name: "lseek",
-    nr: SYS_LSEEK,
-    arity: 3,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const MMAP: SyscallInfo = SyscallInfo {
-    name: "mmap",
-    nr: SYS_MMAP,
-    arity: 6,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const MUNMAP: SyscallInfo = SyscallInfo {
-    name: "munmap",
-    nr: SYS_MUNMAP,
-    arity: 2,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const BRK: SyscallInfo = SyscallInfo {
-    name: "brk",
-    nr: SYS_BRK,
-    arity: 1,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const DUP: SyscallInfo = SyscallInfo {
-    name: "dup",
-    nr: SYS_DUP,
-    arity: 1,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const DUP2: SyscallInfo = SyscallInfo {
-    name: "dup2",
-    nr: SYS_DUP2,
-    arity: 2,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const YIELD: SyscallInfo = SyscallInfo {
-    name: "sched_yield",
-    nr: SYS_SCHED_YIELD,
-    arity: 0,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const GETPID: SyscallInfo = SyscallInfo {
-    name: "getpid",
-    nr: SYS_GETPID,
-    arity: 0,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const GETPPID: SyscallInfo = SyscallInfo {
-    name: "getppid",
-    nr: SYS_GETPPID,
-    arity: 0,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const FORK: SyscallInfo = SyscallInfo {
-    name: "fork",
-    nr: SYS_FORK,
-    arity: 0,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const EXECVE: SyscallInfo = SyscallInfo {
-    name: "execve",
-    nr: SYS_EXECVE,
-    arity: 3,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const EXIT: SyscallInfo = SyscallInfo {
-    name: "exit",
-    nr: SYS_EXIT,
-    arity: 1,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const WAIT4: SyscallInfo = SyscallInfo {
-    name: "wait4",
-    nr: SYS_WAIT4,
-    arity: 4,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const KILL: SyscallInfo = SyscallInfo {
-    name: "kill",
-    nr: SYS_KILL,
-    arity: 2,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const FCNTL: SyscallInfo = SyscallInfo {
-    name: "fcntl",
-    nr: SYS_FCNTL,
-    arity: 3,
-    ptr_mask: 0,
-    len_arg: 0xff,
-};
-const PSINFO: SyscallInfo = SyscallInfo {
-    name: "psinfo",
-    nr: SYS_PSINFO,
-    arity: 2,
-    ptr_mask: 1 << 0,
-    len_arg: 1,
-};
-
-const TABLE: &[SyscallInfo] = &[
-    READ, WRITE, OPEN, CLOSE, LSEEK, MMAP, MUNMAP, BRK, DUP, DUP2, YIELD, GETPID, GETPPID, FORK,
-    EXECVE, EXIT, WAIT4, KILL, FCNTL, PSINFO,
-];
-
-pub fn info(nr: u64) -> Option<SyscallInfo> {
-    let mut i = 0;
-    while i < TABLE.len() {
-        if TABLE[i].nr == nr {
-            return Some(TABLE[i]);
-        }
-        i += 1;
+/// `r` as the value the syscall returns in `rax`: the result, or `-errno`.
+pub const fn encode(r: SysResult) -> i64 {
+    match r {
+        Ok(v) => v as i64,
+        Err(e) => neg(e.errno()),
     }
-    None
-}
-
-/// All-or-nothing: any failure → `EFAULT`, copy nothing. `len == 0` is ok.
-pub fn check_user_ptr(
-    check: impl Fn(u64, u64) -> Result<(), UserMemError>,
-    ptr: u64,
-    len: u64,
-) -> Result<(), i32> {
-    if len == 0 {
-        return Ok(());
-    }
-    match check(ptr, len) {
-        Ok(()) => Ok(()),
-        Err(e) => match e {
-            UserMemError::NonCanonical
-            | UserMemError::Kernel
-            | UserMemError::Overflow
-            | UserMemError::Unmapped
-            | UserMemError::NullGuard => Err(e.errno()),
-        },
-    }
-}
-
-pub fn validate_args(
-    inf: SyscallInfo,
-    args: [u64; 6],
-    check: impl Fn(u64, u64) -> Result<(), UserMemError>,
-) -> Result<(), i32> {
-    let mut i = 0u8;
-    while i < inf.arity {
-        if inf.ptr_mask & (1 << i) != 0 {
-            let ptr = args[i as usize];
-            let len = if inf.len_arg == 0xff {
-                0
-            } else {
-                args[inf.len_arg as usize]
-            };
-            check_user_ptr(&check, ptr, len)?;
-        }
-        i += 1;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -322,58 +106,63 @@ mod tests {
     }
 
     #[test]
-    fn table_arity_and_unknown_is_none() {
-        let w = info(SYS_WRITE).unwrap();
-        assert_eq!(w.name, "write");
-        assert_eq!(w.arity, 3);
-        assert_eq!(w.ptr_mask, 1 << 1);
-        assert_eq!(w.len_arg, 2);
-        assert!(info(SYS_GETPID).is_some());
-        assert!(info(SYS_EXIT).is_some());
-        assert!(info(SYS_SCHED_YIELD).is_some());
-        assert!(info(SYS_FORK).is_some());
-        assert!(info(SYS_EXECVE).is_some());
-        assert!(info(SYS_WAIT4).is_some());
-        assert!(info(SYS_READ).is_some());
-        assert!(info(SYS_OPEN).is_some());
-        assert!(info(SYS_PSINFO).is_some());
-        assert_eq!(info(SYS_MMAP).map(|i| (i.arity, i.ptr_mask)), Some((6, 0)));
-        assert_eq!(
-            info(SYS_MUNMAP).map(|i| (i.arity, i.ptr_mask)),
-            Some((2, 0))
-        );
-        assert_eq!(info(SYS_BRK).map(|i| (i.arity, i.ptr_mask)), Some((1, 0)));
-        assert!(info(0xC0FFEE).is_none());
-        assert!(info(u64::MAX).is_none());
-        let mut n = 0;
-        for e in TABLE {
-            n += 1;
-            match e.nr {
-                SYS_READ | SYS_WRITE | SYS_OPEN | SYS_CLOSE | SYS_LSEEK | SYS_MMAP | SYS_MUNMAP
-                | SYS_BRK | SYS_DUP | SYS_DUP2 | SYS_SCHED_YIELD | SYS_GETPID | SYS_GETPPID
-                | SYS_FORK | SYS_EXECVE | SYS_EXIT | SYS_WAIT4 | SYS_KILL | SYS_FCNTL
-                | SYS_PSINFO => {}
-                _ => panic!("unexpected nr"),
+    fn syscall_table_invariants() {
+        for (tab, arch) in [(&x86_64::TABLE, 0), (&aarch64::TABLE, 1)] {
+            let mut seen = [0usize; Sys::ALL.len()];
+            for (nr, slot) in tab.slots().iter().enumerate() {
+                let Some(sys) = slot else { continue };
+                let row = sys.row();
+                let want = if arch == 0 { row.x86_64 } else { row.aarch64 };
+                assert_eq!(want, Some(nr as u32), "{} slot {nr}", row.name);
+                seen[*sys as usize] += 1;
+            }
+            for row in &ROWS {
+                let has = if arch == 0 { row.x86_64 } else { row.aarch64 };
+                assert_eq!(
+                    seen[row.sys as usize],
+                    usize::from(has.is_some()),
+                    "{}",
+                    row.name
+                );
             }
         }
-        assert_eq!(n, TABLE.len());
-        assert_eq!(n, 20);
-    }
-
-    #[test]
-    fn ptr_policy_all_or_nothing() {
-        let check_ok = |_p, _l| Ok(());
-        assert!(check_user_ptr(check_ok, 0x1000, 0).is_ok());
-        assert!(check_user_ptr(check_ok, 0x1000, 8).is_ok());
-        let check_fault = |_p, _l| Err(UserMemError::Unmapped);
-        assert_eq!(check_user_ptr(check_fault, 0x1000, 8), Err(EFAULT));
-        assert!(check_user_ptr(check_fault, 0x1000, 0).is_ok());
-
-        let inf = info(SYS_WRITE).unwrap();
-        let args = [1, 0x1000, 4, 0, 0, 0];
-        assert!(validate_args(inf, args, check_ok).is_ok());
-        assert_eq!(validate_args(inf, args, check_fault), Err(EFAULT));
-        let zero = [1, 0xFFFF_8000_0000_0000, 0, 0, 0, 0];
-        assert!(validate_args(inf, zero, check_fault).is_ok());
+        assert_eq!(ROWS.len(), Sys::ALL.len());
+        for (i, sys) in Sys::ALL.iter().enumerate() {
+            assert_eq!(*sys as usize, i);
+            assert_eq!(sys.row().sys, *sys);
+            assert!(core::ptr::eq(sys.row(), &ROWS[i]));
+        }
+        for row in &ROWS {
+            assert!(row.arity() <= 6, "{}", row.name);
+            for a in row.args {
+                match a.ptr {
+                    None => assert!(a.ty.is_int(), "{}.{} undeclared pointer", row.name, a.name),
+                    Some(p) => {
+                        assert_eq!(a.ty, CType::Ptr, "{}.{}", row.name, a.name);
+                        if let PtrKind::Buf { len_from } = p.kind {
+                            let len = row.args.get(usize::from(len_from)).map(|l| l.ty);
+                            assert!(len.is_some_and(CType::is_int), "{}.{}", row.name, a.name);
+                        }
+                        assert!(!p.when.is_empty(), "{}.{}", row.name, a.name);
+                    }
+                }
+            }
+        }
+        let declared = |sys: Sys, arg: &str| {
+            let a = sys.row().args.iter().find(|a| a.name == arg).unwrap();
+            a.ptr.is_some_and(|p| p.kind != PtrKind::Unread)
+        };
+        assert!(declared(Sys::Open, "pathname"));
+        assert!(declared(Sys::Execve, "pathname"));
+        assert!(declared(Sys::Execve, "argv"));
+        assert!(declared(Sys::Execve, "envp"));
+        assert!(declared(Sys::Wait4, "wstatus"));
+        assert!(declared(Sys::Read, "buf"));
+        assert!(declared(Sys::Write, "buf"));
+        assert!(declared(Sys::Psinfo, "buf"));
+        assert!(!declared(Sys::Wait4, "rusage"));
+        assert_eq!(x86_64::TABLE.lookup(SYS_GETPID), Some(Sys::Getpid));
+        assert_eq!(x86_64::TABLE.lookup(0xC0FFEE), None);
+        assert_eq!(x86_64::TABLE.lookup(u64::MAX), None);
     }
 }

@@ -19,7 +19,7 @@
 use core::hint::black_box;
 
 use vibeos_user::env::{self, Env};
-use vibeos_user::sys;
+use vibeos_user::{rt, sys};
 
 vibeos_user::main!(main);
 
@@ -202,33 +202,38 @@ fn fp() -> i32 {
 fn panic_capture() -> i32 {
     let pid = match sys::fork() {
         Ok(0) => {
-            let Ok(fd) = sys::open(CAPTURE, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o644)
-            else {
-                sys::exit(41);
+            let flags = sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC;
+            let Ok(fd) = sys::open(CAPTURE.as_ptr().cast(), flags, 0o644) else {
+                rt::exit(41);
             };
-            if sys::dup2(fd as i32, 2).is_err() {
-                sys::exit(42);
+            if sys::dup2(fd as u32, 2).is_err() {
+                rt::exit(42);
             }
             panic!("{MESSAGE}");
         }
         Ok(pid) => pid,
         Err(_) => return 40,
     };
-    let mut status = 0u32;
-    if sys::wait4(pid as i32, &mut status, 0) != Ok(pid) {
+    let mut status = 0i32;
+    // SAFETY: `wait4` writes 4 bytes through `&raw mut status`, a local no
+    // reference covers, and nothing through the null rusage; established here.
+    let r = unsafe { sys::wait4(pid as i32, &raw mut status, 0, core::ptr::null_mut()) };
+    if r != Ok(pid) {
         return 43;
     }
-    match sys::exit_code(status) {
+    match sys::exit_code(status as u32) {
         Some(101) => {}
         Some(41) => return 44,
         Some(42) => return 45,
         _ => return 46,
     }
-    let Ok(fd) = sys::open(CAPTURE, sys::O_RDONLY, 0) else {
+    let Ok(fd) = sys::open(CAPTURE.as_ptr().cast(), sys::O_RDONLY, 0) else {
         return 47;
     };
     let mut buf = [0u8; 256];
-    let n = sys::read(fd as i32, &mut buf).unwrap_or(0);
+    // SAFETY: `read` writes at most `buf.len()` bytes into `buf`, a local no
+    // other reference covers; established here.
+    let n = unsafe { sys::read(fd as u32, buf.as_mut_ptr(), buf.len()) }.unwrap_or(0);
     let got = &buf[..n];
     if !got.starts_with(b"panicked at ") {
         return 48;
