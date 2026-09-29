@@ -69,10 +69,6 @@ mod time;
     clippy::disallowed_macros,
     reason = "kernel_tests-only in-guest tests: a failure ends a test, not the kernel"
 )]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod ktest;
 
 use acpi::acpi_init;
