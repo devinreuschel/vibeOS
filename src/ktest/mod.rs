@@ -398,6 +398,10 @@ pub(crate) const TESTS: &[Test] = &[
         sched::ktest::lifetime_stack_reclaim,
     )
     .deadline(120_000),
+    test(
+        "dead_list_batched_rounds",
+        sched::ktest::dead_list_batched_rounds,
+    ),
     test("exit_burst", sched::ktest::exit_burst).deadline(60_000),
     test(
         "lifetime_dead_slot_on_cpu",

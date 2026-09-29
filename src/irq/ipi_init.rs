@@ -404,6 +404,9 @@ pub mod testing {
     static IN_TAIL: [AtomicBool; MAX_IPI_CPUS] = [const { AtomicBool::new(false) }; MAX_IPI_CPUS];
     /// Shootdowns started while their CPU's `IN_TAIL` was set.
     static FROM_TAIL: AtomicU64 = AtomicU64::new(0);
+    /// Shootdown rounds started by any CPU: with another CPU online, each
+    /// is one IPI broadcast and one wait for acks.
+    static ROUNDS: AtomicU64 = AtomicU64::new(0);
 
     /// This CPU enters a switch tail. IF=0.
     pub fn tail_enter() {
@@ -420,8 +423,14 @@ pub mod testing {
         FROM_TAIL.load(Ordering::Acquire)
     }
 
+    /// Shootdown rounds started since boot.
+    pub fn rounds_sent() -> u64 {
+        ROUNDS.load(Ordering::Acquire)
+    }
+
     /// `shootdown_va`'s count, IF=0.
     pub(super) fn note_shootdown() {
+        ROUNDS.fetch_add(1, Ordering::AcqRel);
         if IN_TAIL[my_index()].load(Ordering::Relaxed) {
             FROM_TAIL.fetch_add(1, Ordering::AcqRel);
         }
