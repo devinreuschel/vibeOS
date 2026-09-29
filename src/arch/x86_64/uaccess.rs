@@ -16,16 +16,9 @@ use vibeos::proc::uaccess::{ExEntry, ExKind, search, user_range_ok};
 use super::Arch;
 use super::cpu as x86;
 
-/// Until ROADMAP §10.6's identity-teardown box removes the GLOBAL,
-/// supervisor, writable identity map of VA 0 to 512 MiB, a user address
-/// there can reach low physical memory the process never mapped, so the
-/// accessors refuse any range that starts below it.
-const LOW_IDENTITY_END: u64 = 512 << 20;
-
-/// The range check the accessors repeat: the pure user-range rule, and the
-/// temporary low-identity refusal.
+/// The range check the accessors repeat: the pure user-range rule.
 fn accept(addr: u64, len: usize) -> bool {
-    user_range_ok(addr, len as u64) && addr >= LOW_IDENTITY_END
+    user_range_ok(addr, len as u64)
 }
 
 /// `len` bytes from `src` to `dst` with `rep movsb`; the bytes not copied.
@@ -86,8 +79,7 @@ unsafe fn movsb(dst: u64, src: u64, len: usize) -> usize {
 }
 
 impl UserAccess for Arch {
-    /// Refuses, copying nothing, a range `user_range_ok` refuses or one
-    /// that starts below 512 MiB.
+    /// Refuses, copying nothing, a range `user_range_ok` refuses.
     unsafe fn copy_in(dst: *mut u8, src: u64, len: usize) -> usize {
         if !accept(src, len) {
             return len;
@@ -98,8 +90,7 @@ impl UserAccess for Arch {
         unsafe { movsb(dst as usize as u64, src, len) }
     }
 
-    /// Refuses, copying nothing, a range `user_range_ok` refuses or one
-    /// that starts below 512 MiB.
+    /// Refuses, copying nothing, a range `user_range_ok` refuses.
     unsafe fn copy_out(dst: u64, src: *const u8, len: usize) -> usize {
         if !accept(dst, len) {
             return len;

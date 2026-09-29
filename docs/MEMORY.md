@@ -16,7 +16,7 @@ adopting it re-plans this table. Kernel regions are fixed, not discovered, excep
 | Range | Size | Role |
 |-------|------|------|
 | `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space, one PML4 per process (`AddressSpace`), below `USER_END`. Page 0 is never mapped (`NULL_GUARD_LEN`). The top 4 KiB page is never mapped either: user mappings end at `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`), which the ELF loader and every address-space range check use, so a `syscall` in the last mappable page returns to a canonical RIP. The syscall exit still sends a non-canonical saved RIP to `SIGSEGV` (§5.10 rule 2). Each user PML4 copies the kernel's PML4[256..512) at creation, so the whole kernel half stays mapped, supervisor-only, while ring 3 runs: no KPTI (ROADMAP §18.3, F024, F133). |
-| `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel PML4 only (user PML4s do not copy slot 0). 2 MiB pages, GLOBAL; the first 2 MiB supervisor writable and executable. |
+| `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel PML4 only (user PML4s do not copy slot 0), until `smp: done`: the first 2 MiB as 4 KiB pages, the rest 2 MiB pages, all GLOBAL, writable and NX except the trampoline page. From `smp: done` only the trampoline page stays: 4 KiB, read-only, executable, not global. |
 | *hole* | | Non-canonical. Any pointer here is a bug. |
 | Limine's HHDM offset +, inside the slot `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` | 64 TiB slot; today `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table); today the constant `HHDM_BASE`, which `boot::capture` asserts Limine's offset equals. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a display BAR0 from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). The physmap never leaves its slot (below the table). |
 | `0xFFFF_C000_0000_0000` – `0xFFFF_C000_0400_0000` | 64 MiB | Kernel heap. Starts at 1 MiB mapped and grows. Planned (ROADMAP §12.6): the region's size is set at boot from installed memory, up to the 16 TiB below the KVA region, so the heap can grow as far as RAM does ([§4.4](#44-kernel-heap)). |
@@ -96,11 +96,12 @@ drops RAM past `MAXMEM`, and hot-added RAM past it is refused the same way (ROAD
 
 The low identity window exists for one reason: an AP starting from SIPI runs in real mode and then
 32-bit protected mode in the trampoline page below 1 MiB (§7.3), so that page must be identity
-mapped and executable. All 512 MiB stay mapped and GLOBAL for the life of the kernel CR3, so a
-NULL-plus-offset access from a kernel thread reads low RAM instead of faulting, and buddy frames
-below 2 MiB have a supervisor writable, executable alias. Planned (ROADMAP §10.6, F085): the window
-is torn down after `smp: done`, keeping only the trampoline page (4 KiB, read-only, executable, not
-global).
+mapped and executable. After `smp: done`, `smp_init::init` asserts that the bootstrap thread's stack
+and its own RSP lie outside the window and calls `paging_init::teardown_identity`, which unmaps every
+identity leaf but the trampoline page's and flushes the whole TLB, global entries included, on every
+CPU (§4.3). From then a NULL-plus-offset access from kernel code faults, as it does from user code,
+and no buddy frame has an identity alias. The trampoline page stays mapped, read-only, executable and
+not global, for as long as the kernel CR3 lives.
 
 The physmap is capped at 8 GiB (`PHYSMAP_CAP`) regardless of what the memory map says. Some firmware
 describes MMIO BARs as multi-terabyte regions, and walking that to build page tables at boot does not
@@ -250,7 +251,9 @@ time:
 
 1. Kernel image, mapped per section with correct permissions.
 2. Physmap over `[0, map_end)` at the HHDM offset, using 2 MiB pages.
-3. Low identity window, 512 MiB, 2 MiB pages, first 2 MiB executable.
+3. Low identity window, 512 MiB: the first 2 MiB as 4 KiB pages, with the trampoline page (§7.3)
+   read-only, executable and not global, and the rest 2 MiB pages. `paging_init::teardown_identity`
+   removes all of it but the trampoline page after `smp: done` (§4.1).
 4. The bootloader stack window, duplicated out of Limine's active tables so `_start`'s own stack keeps
    working across the `mov cr3`.
 
@@ -280,12 +283,13 @@ runs after the guard drops (§7.9).
 | Heap | present, global, writable, NX |
 | Kernel stacks | present, global, writable, NX, guard unmapped below (§4.5) |
 | MMIO | present, global, writable, NX, PCD + PWT |
-| Low identity, first 2 MiB | present, global, writable, executable (trampoline) |
-| Low identity, rest | present, global, writable, NX |
+| Low identity, trampoline page | present, read-only, executable, not global; kept after `smp: done` |
+| Low identity, rest (until `smp: done`) | present, global, writable, NX |
 
 NX everywhere by default. The one thing that must stay executable low down is the trampoline page;
 mapping the whole identity window NX is how the old tree produced a page fault during AP bring-up that
-looked exactly like a hang.
+looked exactly like a hang. The page is read-only, so the trampoline's GDT carries its descriptors'
+accessed bits preset: with `CR0.WP` set the AP's write of one would fault before it has an IDT.
 
 The physmap covers the kernel image's frames, so it is a writable alias of `.text` and `.rodata`:
 W^X holds per virtual address, not per frame (ROADMAP §18.1, F105).
@@ -298,6 +302,10 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
 ### TLB
 
 - `invlpg` after any single-PTE edit, including MMIO attribute patches.
+- The identity teardown (§4.1) unmaps its leaves under PT, dropping it at least every 64 leaves
+  (§2.9 rule 2), then flushes the whole TLB, global entries included, on this CPU (a `CR4.PGE`
+  toggle, or a CR3 reload when PGE is clear) and on every other online CPU through
+  `ipi_init::call_mask`, before anything relies on VA 0 faulting.
 - Kernel mappings are `GLOBAL`, and every CPU sets `CR4.PGE` (`arch::cpu::init_control_regs`,
   §11.4), so they survive a CR3 reload. Unmapping one requires a shootdown on every online CPU
   before the VA or the frame behind it can be reused (§2.4). See [section 7.9](SMP.md#79-tlb-shootdown).

@@ -109,13 +109,6 @@ fn bootstrap_entry() {
 /// The bootstrap thread's stack range, its saved RSP, and whether it is on
 /// a CPU now (its saved RSP is stale while it runs). `None` before
 /// [`init_bootstrap`].
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "its production reader is the identity teardown's stack check (ROADMAP §10.6)"
-    )
-)]
 pub(crate) fn bootstrap_stack() -> Option<(Range<u64>, u64, bool)> {
     with_sched(|s| {
         let t = s.get(ThreadId::BOOTSTRAP)?;

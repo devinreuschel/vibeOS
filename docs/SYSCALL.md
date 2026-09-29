@@ -392,9 +392,7 @@ check, accepts a non-empty range from `NULL_GUARD_LEN` (the first page is
 never user memory) up to at most `USER_MAP_END` with no overflow, and an
 empty range only below `USER_MAP_END`, as Linux's `access_ok`. A refused
 range returns `-EFAULT` before any I/O, so `read(fd, kernel_ptr, 0)` returns
-`-EFAULT`, as on Linux. Until ROADMAP §10.6's identity-teardown box, the
-x86_64 accessors also refuse a range that starts below 512 MiB, where the
-kernel's GLOBAL identity map would otherwise reach low physical memory.
+`-EFAULT`, as on Linux.
 
 **Byte counts.** An accessor reports how many bytes it copied before a
 fault. `read`, `write`, and `psinfo` return that count when it is above 0

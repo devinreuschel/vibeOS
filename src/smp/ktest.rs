@@ -189,6 +189,35 @@ pub(crate) fn test_trampoline_page() -> Outcome {
     if base.wrapping_sub(page) >= 0x1000 {
         return crate::fail_fmt!("gdt base {base:#x} not inside page {page:#x}");
     }
+    // The page is read-only, so the AP must never set an accessed bit: the
+    // four descriptors after the null one carry it preset (0x9B, 0x93).
+    let gdt = base - page;
+    for d in 1..5u64 {
+        let at = gdt + d * 8 + 5;
+        // SAFETY: as above, `at` is below `0xD0`, inside the page;
+        // established here.
+        let access = unsafe { p.add(at as usize).read_volatile() };
+        if access & 1 == 0 {
+            return crate::fail_fmt!(
+                "gdt descriptor {d} access {access:#x} lacks the accessed bit"
+            );
+        }
+    }
+    // After the identity teardown the page is the window's one leaf:
+    // 4 KiB, present, read-only, executable, not global.
+    let Some((pa, size, flags)) = crate::paging_init::translate(vibeos::paging::VirtAddr(page))
+    else {
+        return crate::fail_fmt!("trampoline page {page:#x} not identity mapped");
+    };
+    use vibeos::paging::{PageFlags, PageSize};
+    let bad = PageFlags::WRITABLE | PageFlags::NX | PageFlags::GLOBAL;
+    if pa.as_u64() != page || size != PageSize::Size4K || flags.0 & bad != 0 {
+        return crate::fail_fmt!(
+            "trampoline pte pa {:#x} flags {:#x}, want {page:#x} 4 KiB, not writable, NX or global",
+            pa.as_u64(),
+            flags.0
+        );
+    }
     Outcome::Ok
 }
 

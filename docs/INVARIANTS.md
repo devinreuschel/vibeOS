@@ -351,9 +351,9 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](SM
 - MMIO pages are mapped uncacheable. QEMU tolerates write-back MMIO; real hardware does not. On
   aarch64 they are Device-nGnRE (ROADMAP §11.1), and a device access is ordered against Normal
   memory only by [§4.7](MEMORY.md#47-dma)'s accessors.
-- Every mapping is `NO_EXECUTE` unless it holds code that is fetched. Exception: the low identity
-  window's first 2 MiB is executable, though only the trampoline page (§7.3) is fetched, and only
-  during AP bring-up (ROADMAP §10.6, F085).
+- Every mapping is `NO_EXECUTE` unless it holds code that is fetched. The trampoline page (§7.3) is
+  the low identity window's one executable leaf, read-only and not global, and after `smp: done` the
+  window's only leaf (ROADMAP §10.6, F085).
 - A value copied to user memory has no padding and no uninitialized bytes. Reading a padding byte is
   undefined behaviour in Rust, and copying one out leaks kernel stack or heap. The typed copy-out,
   `uaccess::copy_to_user_val`, takes only a type bounded by `zerocopy`'s `IntoBytes + Immutable`,
@@ -675,7 +675,7 @@ that review cites means the review's text.
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `thread_init::finish_switch` | enforced by the in-guest `lifetime_stack_reclaim` | Yes: `thread_exit` parks the stack in its CPU's `PerCpu.dead_stack`, and only that CPU's switch tail, after `switch_context` has returned, moves it into the CPU's stack cache or onto its dead list, which that CPU's worker frees (ROADMAP §10.10, F012) |
 | I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter::finish` | enforced by the in-guest `lifetime_iowaiter_publish_last` | Yes: `finish` runs `wake_all` under SCHED, then stores `done` with Release as its last access (ROADMAP §10.10, F002); ROADMAP §10.8 adds its loom model |
 | I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §12.1, F101) |
-| I13 | The low identity window is removed after `smp: done` (§4.1) | none yet | documented | No: it stays mapped and GLOBAL, VA 0 included (ROADMAP §10.6, F085) |
+| I13 | The low identity window is removed after `smp: done` (§4.1) | `paging_init::teardown_identity`, from `smp_init::init` | enforced by the in-guest `kernel_va0_faults` | Yes: all but the trampoline page is unmapped and the TLB flushed on every CPU, global entries included, so a kernel read of VA 0 faults (ROADMAP §10.6, F085) |
 | I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §11.2, F020) |
 | I15 | Frame 0, the trampoline page, and the kernel image, framebuffers, and boot modules never enter the buddy (§2.4) | `pmm_init::init` through `vibeos::pmm::clip_usable`; `Buddy::insert_region` skips frame 0 | enforced; host tests `clip_usable_eight_framebuffers` and `clip_usable_unsorted_overlapping` | Yes: the trampoline page is the usable page `boot::capture` chose from the memory map, and the clip has no fixed-size list (ROADMAP §10.6) |
 | I16 | The kernel PML4 lies below 4 GiB, because the trampoline loads a 32-bit CR3 | `smp_init::start_one` | enforced by skipping every AP | Not guaranteed: the PML4 frame has no address limit, and above 4 GiB every AP is skipped with a `smp: cr3 above 4GiB` line (ROADMAP §20.1) |

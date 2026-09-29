@@ -224,6 +224,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("trampoline_page", smp::ktest::test_trampoline_page),
     test("failed_ap_cleanup", smp::ktest::test_failed_ap_cleanup),
     test("boot_stack_guarded", sched::ktest::boot_stack_guarded),
+    test("kernel_va0_faults", mm::ktest::kernel_va0_faults),
     test("spawn_sentinel", sched::ktest::test_spawn_sentinel),
     test("switch_two_threads", sched::ktest::test_switch_two_threads),
     test("irq_guard_nest", arch::ktest::test_irq_guard_nest),

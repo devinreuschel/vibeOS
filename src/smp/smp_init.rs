@@ -438,15 +438,40 @@ extern "C" fn ap_entry() -> ! {
 /// Scheduler live, LAPIC ready, trampoline page identity-mapped and
 /// excluded from the PMM.
 pub unsafe fn init() {
-    match crate::boot::info().trampoline_page {
+    let keep = match crate::boot::info().trampoline_page {
         Some(page) if install_blob(page) => {
             crate::marker!("vibeOS: smp: trampoline page {page:#x}");
             core::sync::atomic::compiler_fence(Ordering::SeqCst);
             start_aps(page);
+            Some(page)
         }
-        _ => crate::marker!("vibeOS: smp: no trampoline page"),
-    }
+        _ => {
+            crate::marker!("vibeOS: smp: no trampoline page");
+            None
+        }
+    };
     crate::marker!(marker::SMP_DONE);
+    // ROADMAP §10.6: the low identity window goes, all but the trampoline
+    // page. Kernel invariant: boot runs on the bootstrap thread's KVA stack
+    // (`thread_init::init_bootstrap`), outside the window.
+    let window = crate::paging_init::identity_window();
+    let rsp = x86::read_rsp();
+    assert!(
+        !window.contains(&rsp),
+        "smp: rsp {rsp:#x} in the identity window"
+    );
+    let stack = thread_init::bootstrap_stack().map(|(r, _, _)| r);
+    assert!(
+        stack
+            .as_ref()
+            .is_some_and(|r| r.end <= window.start || r.start >= window.end),
+        "smp: bootstrap stack {stack:#x?} not outside the identity window"
+    );
+    // SAFETY: every AP is up or abandoned (`start_aps` returned), nothing
+    // uses an identity address but the trampoline page, which `keep`
+    // keeps, and this CPU's stack is outside the window (checked above);
+    // established here.
+    unsafe { crate::paging_init::teardown_identity(keep) };
 }
 
 /// Start each MADT CPU but the BSP, one at a time, from `page`.

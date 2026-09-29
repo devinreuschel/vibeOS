@@ -56,8 +56,9 @@ Host: `cr_homes_column_same_row`, `cr_paint_overwrites_in_place`. In-guest: `fb_
 
 **AP bring-up hangs with no output, or faults at a low address.**
 The low identity window was mapped with NX on 2 MiB pages, and the AP fetched the trampoline from
-its low page after enabling paging. Rule: the first 2 MiB of the identity window is executable.
-Everything else stays NX.
+its low page after enabling paging. Rule: the trampoline page is the identity window's one
+executable leaf, a 4 KiB page, read-only, with its GDT's accessed bits preset so the AP never writes
+it; everything else stays NX, and after `smp: done` the rest of the window is gone.
 
 **Building page tables at boot never finishes.**
 `map_end` was computed from raw memory map entries, and firmware described an MMIO BAR as a

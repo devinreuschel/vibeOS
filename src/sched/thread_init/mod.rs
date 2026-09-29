@@ -36,9 +36,10 @@ use crate::time_init;
 use crate::x86::InterruptGuard;
 
 mod boot;
-pub use boot::init_bootstrap;
 #[cfg(feature = "kernel_tests")]
-pub(crate) use boot::{BOOT_STACK_PAGES, bootstrap_stack};
+pub(crate) use boot::BOOT_STACK_PAGES;
+pub(crate) use boot::bootstrap_stack;
+pub use boot::init_bootstrap;
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.
