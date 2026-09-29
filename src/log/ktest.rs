@@ -446,4 +446,6 @@ pub(crate) const TESTS: &[Test] = &[
     test("log_reentry_drop_counted", test_log_reentry_drop_counted),
     test("serial_lines_whole", test_serial_lines_whole).deadline(60_000),
     test("serial_frame", test_serial_frame),
+    test("trace_ring_own_cpu", test_trace_ring_own_cpu),
+    test("trace_tracepoints_fire", test_trace_tracepoints_fire),
 ];

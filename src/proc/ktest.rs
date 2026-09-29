@@ -60,4 +60,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("uaccess_syscall_copies", test_uaccess_syscall_copies).deadline(30_000),
     test("uaccess_readonly_efault", test_uaccess_readonly_efault).deadline(30_000),
     test("user_runtime", user_runtime),
+    test("syscall_ptr_decl_efault", syscall_ptr_decl_efault),
+    test("read_ebadf_before_efault", read_ebadf_before_efault),
+    test("wait4_echild_before_efault", wait4_echild_before_efault),
 ];

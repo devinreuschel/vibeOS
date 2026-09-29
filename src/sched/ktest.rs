@@ -1407,6 +1407,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("spawn_stack_oom", spawn_stack_oom).deadline(10_000),
     test("fork_oom", fork_oom).deadline(10_000),
     test("lifetime_stack_reclaim", lifetime_stack_reclaim).deadline(120_000),
+    test("dead_list_batched_rounds", dead_list_batched_rounds),
     test("exit_burst", exit_burst).deadline(60_000),
     test("lifetime_dead_slot_on_cpu", lifetime_dead_slot_on_cpu).deadline(180_000),
     test("fp_no_leak", test_fp_no_leak).deadline(60_000),
