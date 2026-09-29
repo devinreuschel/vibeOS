@@ -556,6 +556,12 @@ fn runnable_on(t: &Tcb, cpu: u32) -> bool {
 }
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
+    // SAFETY: invariant I9: the callers (`thread_init::schedule_inner`,
+    // `thread_init::switch_to`) pass two live entries of `SCHED`, and `id`
+    // changes only while a slot is Dead; established by
+    // `thread_init::spawn_inner`.
+    let (from, to) = unsafe { ((*old_ptr).id.0, (*new_ptr).id.0) };
+    vibeos::trace!(Switch, u64::from(from), u64::from(to));
     #[cfg(feature = "kernel_tests")]
     if sync_init::held_mask() != 0 {
         // SAFETY: invariant I9: `new_ptr` is a live entry of `SCHED` that
