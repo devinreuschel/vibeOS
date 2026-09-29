@@ -1,25 +1,6 @@
 use super::*;
 
 impl FatVol {
-    pub(super) fn last_clu<D: Disk>(&mut self, d: &mut D, first: u32) -> Result<u32, FatError> {
-        let mut clu = first;
-        let mut i = 0u32;
-        loop {
-            let next = self.fat_get(d, clu)?;
-            if is_eoc(next) {
-                return Ok(clu);
-            }
-            if next < 2 || next == BAD_CLUS {
-                return Err(FatError::Corrupt);
-            }
-            clu = next;
-            i = i.checked_add(1).ok_or(FatError::Corrupt)?;
-            if i > self.info.nclus {
-                return Err(FatError::Corrupt);
-            }
-        }
-    }
-
     /// The cluster count of the chain at `first` and its last cluster.
     pub(super) fn chain_len<D: Disk>(
         &mut self,

@@ -904,3 +904,73 @@ fn extend_failure_rolls_back_chain() {
     });
     fsck(&b);
 }
+
+/// The offset of `dir`'s first `0x00` entry within its first cluster.
+fn first_free_off(v: &mut FatVol, d: &mut MemDisk, dir: u32) -> u32 {
+    let cb = v.info.clus_bytes() as u32;
+    let mut ent = [0u8; ENT];
+    (0..cb)
+        .step_by(ENT)
+        .find(|&o| {
+            assert!(v.read_dir_raw(d, dir, o, &mut ent).unwrap());
+            ent[0] == ENT_FREE
+        })
+        .unwrap_or(cb)
+}
+
+#[test]
+fn lfn_creates_keep_free_bytes() {
+    let mut b = fresh(INITRD_BYTES);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let free = v.free_bytes();
+        for i in 1..=6 {
+            v.create(d, root, format!("a{i}.txt").as_bytes(), false)
+                .unwrap();
+            assert_eq!(v.free_bytes(), free, "create a{i}.txt");
+        }
+        v.rename(d, root, b"a1.txt", root, b"b1.txt").unwrap();
+        assert_eq!(v.free_bytes(), free);
+        assert_eq!(v.chain_len(d, root).unwrap().1, root);
+        assert_eq!(v.lookup(d, root, b"b1.txt").unwrap().name(), b"b1.txt");
+        v.sync(d).unwrap();
+    });
+    fsck(&b);
+}
+
+#[test]
+fn dir_reserve_extends_only_when_tail_too_short() {
+    let mut b = fresh(INITRD_BYTES);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let cb = v.info.clus_bytes() as u64;
+        let free = v.free_bytes();
+        let left = (cb as u32 - first_free_off(v, d, root)) / ENT_U32;
+        for i in 0..left {
+            v.create(d, root, format!("F{i}").as_bytes(), false)
+                .unwrap();
+        }
+        assert_eq!(v.free_bytes(), free);
+        assert_eq!(first_free_off(v, d, root), cb as u32);
+        let n = v.create(d, root, b"LAST", false).unwrap();
+        assert_eq!(v.free_bytes(), free - cb);
+        assert_eq!(n.dir_off, cb as u32);
+        assert_ne!(v.chain_len(d, root).unwrap().1, root);
+        v.create(d, root, b"NEXT", false).unwrap();
+        assert_eq!(v.free_bytes(), free - cb);
+        v.sync(d).unwrap();
+    });
+    fsck(&b);
+}
+
+#[test]
+fn dir_reserve_refuses_before_alloc() {
+    let mut b = fresh(INITRD_BYTES);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let free = v.free_bytes();
+        assert_eq!(v.dir_reserve(d, root, 40), Err(FatError::NoSpace));
+        assert_eq!(v.free_bytes(), free);
+        assert_eq!(v.chain_len(d, root).unwrap().1, root);
+    });
+}

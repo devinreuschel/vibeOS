@@ -117,56 +117,79 @@ impl FatVol {
         self.write_cluster(d, clu, clbuf.get(..n).ok_or(FatError::Corrupt)?)
     }
 
+    /// Find `slots` free entries in `dir` and return where they start. A
+    /// run of deleted entries between live ones serves when it is long
+    /// enough; otherwise the free run that reaches the first `0x00` entry,
+    /// with every entry after it to the chain's end, serves, and the
+    /// directory grows by one cluster only when that is too short.
     pub(super) fn dir_reserve<D: Disk>(
         &mut self,
         d: &mut D,
         dir: u32,
         slots: usize,
     ) -> Result<(u32, u32), FatError> {
-        let need = slots.checked_mul(ENT).ok_or(FatError::Inval)?;
-        let cb = self.info.clus_bytes();
+        let need = slots
+            .checked_mul(ENT)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or(FatError::NoSpace)?;
+        let cb = self.info.clus_bytes() as u32;
         let mut off = 0u32;
         let mut run = 0usize;
         let mut run_off = 0u32;
         loop {
             let mut ent = [0u8; ENT];
-            match self.read_dir_raw(d, dir, off, &mut ent) {
-                Ok(false) => break,
-                Err(e) => return Err(e),
-                Ok(true) => {
-                    if ent[0] == ENT_FREE || ent[0] == ENT_DEL {
-                        if run == 0 {
-                            run_off = off;
-                        }
-                        run = run.checked_add(1).ok_or(FatError::Corrupt)?;
-                        if run >= slots {
-                            return Ok((dir, run_off));
-                        }
-                    } else {
-                        run = 0;
-                    }
-                    off = off.checked_add(ENT as u32).ok_or(FatError::Corrupt)?;
-                    if ent[0] == ENT_FREE {
-                        break;
-                    }
-                }
+            if !self.read_dir_raw(d, dir, off, &mut ent)? {
+                break;
             }
+            if ent[0] == ENT_FREE {
+                if run == 0 {
+                    run_off = off;
+                }
+                run = run.checked_add(1).ok_or(FatError::Corrupt)?;
+                break;
+            }
+            if ent[0] == ENT_DEL {
+                if run == 0 {
+                    run_off = off;
+                }
+                run = run.checked_add(1).ok_or(FatError::Corrupt)?;
+                if run >= slots {
+                    return Ok((dir, run_off));
+                }
+            } else {
+                run = 0;
+            }
+            off = off.checked_add(ENT_U32).ok_or(FatError::Corrupt)?;
         }
-        if run >= slots {
-            return Ok((dir, run_off));
-        }
-        // extend directory
-        let last = self.last_clu(d, dir)?;
-        let new = self.alloc_clu(d, last)?;
-        self.zero_cluster(d, new)?;
-        self.fat_set(d, last, new)?;
-        self.fat_set(d, new, EOC_MIN)?;
-        self.commit_fat(d)?;
-        d.flush()?;
         let start = if run > 0 { run_off } else { off };
-        let have = run.checked_mul(ENT).ok_or(FatError::Corrupt)?;
-        if have.checked_add(cb).ok_or(FatError::Corrupt)? < need {
-            return Err(FatError::NoSpace);
+        let (nclu, last) = self.chain_len(d, dir)?;
+        let chain = nclu.checked_mul(cb).ok_or(FatError::Corrupt)?;
+        let avail = chain.checked_sub(start).ok_or(FatError::Corrupt)?;
+        let end = start.checked_add(need).ok_or(FatError::NoSpace)?;
+        if avail < need {
+            let short = need.checked_sub(avail).ok_or(FatError::Corrupt)?;
+            if short > cb || end > MAX_DIR_BYTES {
+                return Err(FatError::NoSpace);
+            }
+            let new = self.alloc_clu(d, last)?;
+            let linked = self
+                .zero_cluster(d, new)
+                .and_then(|()| self.fat_set(d, last, new));
+            if let Err(e) = linked {
+                return self
+                    .fat_set(d, new, 0)
+                    .and_then(|()| self.commit_fat(d))
+                    .and(Err(e));
+            }
+            self.commit_fat(d)?;
+            d.flush()?;
+        }
+        // A foreign image may hold garbage after its terminator: the entry
+        // after the reserved ones ends the directory.
+        let mut ent = [0u8; ENT];
+        if self.read_dir_raw(d, dir, end, &mut ent)? && ent[0] != ENT_FREE {
+            ent.fill(0);
+            self.write_dir_raw(d, dir, end, &ent)?;
         }
         Ok((dir, start))
     }
