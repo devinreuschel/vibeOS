@@ -63,3 +63,18 @@ cpu = "qemu64,-tsc-deadline"
 name = "uaccess_smep_user_jump"
 reason = "cpu: CR4.SMEP clear"
 cpu = "qemu64,-tsc-deadline"
+
+# No invariant TSC, so the PIT-against-HPET band means nothing
+# (`tsc_calib_source`): TCG on every per-push tier and the weekly
+# smp-stress job, and the nightly KVM leg's `make test-lapic-fallback`,
+# whose model has no invariant TSC bit.
+[[skip]]
+name = "tsc_calib_source"
+reason = "no invariant tsc"
+accel = "tcg"
+
+[[skip]]
+name = "tsc_calib_source"
+reason = "no invariant tsc"
+accel = "kvm"
+cpu = "qemu64,-tsc-deadline"

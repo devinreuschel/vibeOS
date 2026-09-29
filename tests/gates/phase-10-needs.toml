@@ -1022,6 +1022,23 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
+# L476
+[[box]]
+key = "the PIT tick runs at"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+  "`pit_tick_rate` counts timer interrupts, not",  # L1265
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L478
+[[box]]
+key = "`now_us` monotonic across 10k reads"
+needs = [
+  "the in-guest clock tests can",  # L1255
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # L1434
 [[box]]
 key = "the §10.4 wake inbox's push"

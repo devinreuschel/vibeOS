@@ -78,7 +78,11 @@ NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,ll
 # the pinned nightly, so it goes on the command line: a manifest's
 # `cargo-features` would stop every stable cargo reading the workspace.
 # -Zunstable-options also enables --artifact-dir. Host tools do not ship.
-CARGO_SHIP = $(CARGO) -Ztrim-paths -Zunstable-options --config 'profile.$(CARGO_PROFILE).trim-paths="all"'
+# CARGO_INCREMENTAL=0: a shipped ELF is built whole, as CI builds it, so a
+# local ELF inlines and lays out frames as CI's does; check_stack_sizes.py
+# screens that ELF, and an incremental build's codegen units give some
+# functions different frames (ROADMAP §10.2).
+CARGO_SHIP = CARGO_INCREMENTAL=0 $(CARGO) -Ztrim-paths -Zunstable-options --config 'profile.$(CARGO_PROFILE).trim-paths="all"'
 
 # One kernel variant (DESIGN §8.2): every variant builds in the one target/,
 # and --artifact-dir copies its ELF out under cargo's lock, so a parallel
@@ -478,7 +482,7 @@ test-e2e-strace: $(ISO)
 	VIBEOS_TIER=test-e2e-strace VIBEOS_ISO=$(ISO) VIBEOS_CMDLINE=vibeos.strace=1 python3 -c 'from tests.harness.run_e2e import strace_main; raise SystemExit(strace_main())'
 
 test-kernel: $(ISO_KTEST)
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py --hpet-off
 
 test-kernel-smp4: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/harness/run_ktest.py

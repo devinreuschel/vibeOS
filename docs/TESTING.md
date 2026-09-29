@@ -151,6 +151,10 @@ The portable half, `vibeos::ktest`, parses and counts, with host tests. A boot t
 exactly its expected runs (`check_select_run`), the opt-in and once rows included, and no run of
 `ktest_deadline_hang`; and at `-smp 2` the repeat boot, `reap_many_via_idle` 20 times (F074).
 Each records its verdict in the tier's results file as a `marker`.
+After its first boot, and whatever `VIBEOS_KTEST` holds, `make test-kernel` also boots with
+`-machine pc,hpet=off` and `-cpu <model>,-tsc-deadline`, limited by `vibeos.ktest=` to the opt-in
+tests that need the PIT tick (`pit_tick_rate`), and requires `lapic_timer ok (pit)` and an `ok` line
+for each (`run_ktest.hpet_off_boot`).
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -184,7 +188,7 @@ directory (`vibeos-mon-*`) is removed when the driver exits. The `utest_*` lines
 
 Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
 names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,
-`no smep/smap/umip`, `pit owns tick`, `pic fallback`, and `rtc unread` (the `Outcome::Skip` reasons
+`no smep/smap/umip`, `pit owns tick`, `pic fallback`, `rtc unread`, and `no invariant tsc` (the `Outcome::Skip` reasons
 in the in-guest test bodies, DESIGN §1.3). Destructive exception tests run inside `arch::catch` scopes, which longjmp out or
 step RIP past the faulting instruction, instead of skipping.
 
