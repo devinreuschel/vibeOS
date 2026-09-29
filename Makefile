@@ -151,7 +151,7 @@ KERNEL_ELF := build/kernels/vibeos-default.elf
 .PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
-        test-smp-stress test-vibefs-crash test-e2e-uefi
+        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi
 
 help:
 	@printf '%s\n' \
@@ -184,6 +184,7 @@ help:
 	  '  test-vibefs-crash     QEMU-kill + host fsck-vibefs' \
 	  '  test-smp-stress       -smp 4, longer timeout (scheduled CI)' \
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
+	  '  test-vibefs-crash-plants  each vibeos.crash_plant= defect caught, then a clean round' \
 	  '  gate PHASE=N          phase exit gate: gate-map entries and box rules (RECORD=1: dev-host records)' \
 	  '  prebuilt              every ISO and host tool a tier uses, as build/prebuilt.tar;' \
 	  '                        VIBEOS_PREBUILT=1 make test-* then uses them (CI tier jobs)' \
@@ -427,6 +428,15 @@ test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE
 	cargo test -p vibeos-hostlib-tests --target $(HOST_TRIPLE)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) \
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py
+
+# The crash test's planted defects (ROADMAP §10.2): each plant must fail a
+# round, then an unplanted control round must pass. Its own tier keeps the
+# planted failures out of test-vibefs-crash's results.
+test-vibefs-crash-plants: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
+	cargo test -p vibeos-hostlib-tests --target $(HOST_TRIPLE)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) \
+	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py \
+	    --plants leak,early_super
 
 test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
