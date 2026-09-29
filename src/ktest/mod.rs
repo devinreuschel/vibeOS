@@ -257,6 +257,10 @@ pub(crate) const TESTS: &[Test] = &[
         sync::ktest::test_rank_alloc_under_pt_asserts,
     ),
     test(
+        "rank_same_rank_lock_asserts",
+        sync::ktest::test_rank_same_rank_lock_asserts,
+    ),
+    test(
         "rank_lock_nested_keeps_outer",
         sync::ktest::test_rank_lock_nested_keeps_outer,
     ),

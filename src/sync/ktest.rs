@@ -160,6 +160,60 @@ pub(crate) fn test_rank_alloc_under_pt_asserts() -> Outcome {
 static RANK_A: SpinMutex<u32> = SpinMutex::with_rank(0, RANK_DEVICE);
 static RANK_B: SpinMutex<u32> = SpinMutex::with_rank(0, RANK_DEVICE);
 
+/// A second `RANK_DEVICE` lock taken with `lock` or `try_lock` while one is
+/// held fails the rank check (DESIGN §2.3's nesting rule).
+pub(crate) fn test_rank_same_rank_lock_asserts() -> Outcome {
+    let if0 = x86::interrupts_enabled();
+    let nest0 = per_cpu_init::irq_nest();
+    let held0 = sync_init::testing::held();
+    let fails0 = sync_init::testing::rank_failures();
+    let hits;
+    {
+        let _a = RANK_A.lock();
+        let held_a = sync_init::testing::held();
+        let nest_a = per_cpu_init::irq_nest();
+        let restore = || {
+            // The longjmp skipped the `InterruptGuard` `RANK_B`'s acquire
+            // entered; `RANK_A`'s guard drop restores IF.
+            per_cpu_init::current()
+                .irq_nest
+                .store(nest_a, Ordering::Relaxed);
+            // SAFETY: invariant: a rank refusal panics in
+            // `sync_init::lock_enter` before the spin, so `RANK_B` was never
+            // taken and `held_a`, the word with `RANK_A` counted, is what
+            // this CPU holds; established by `sync_init::SpinMutex::lock`
+            // and `try_lock`.
+            unsafe { sync_init::testing::restore_held(held_a) };
+        };
+        let hit_lock = arch::catch::catch_panic(|| {
+            let _b = RANK_B.lock();
+        });
+        restore();
+        let hit_try = arch::catch::catch_panic(|| {
+            let _b = RANK_B.try_lock();
+        });
+        restore();
+        hits = [hit_lock, hit_try];
+    }
+    if hits != [true, true] {
+        return crate::fail_fmt!("hits [lock, try_lock] = {:?}, want both", hits);
+    }
+    let fails = sync_init::testing::rank_failures() - fails0;
+    if fails != 2 {
+        return crate::fail_fmt!("{} rank failures, want 2", fails);
+    }
+    if RANK_B.is_locked() {
+        return Outcome::Fail("RANK_B left held");
+    }
+    if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("IF or irq_nest changed");
+    }
+    if sync_init::testing::held() != held0 || sync_init::held_mask() != held0.mask() {
+        return Outcome::Fail("held word changed");
+    }
+    Outcome::Ok
+}
+
 pub(crate) fn test_rank_lock_nested_keeps_outer() -> Outcome {
     let if0 = x86::interrupts_enabled();
     let nest0 = per_cpu_init::irq_nest();
@@ -208,7 +262,7 @@ pub(crate) fn test_rank_lock_nested_keeps_outer() -> Outcome {
     if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
         return Outcome::Fail("IF or irq_nest changed");
     }
-    if RANK_B.try_lock().is_none() {
+    if RANK_B.is_locked() {
         return Outcome::Fail("RANK_B left held");
     }
     Outcome::Ok

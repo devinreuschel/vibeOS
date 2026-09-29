@@ -115,10 +115,15 @@ impl<T> IrqCell<T> {
         }
     }
 
+    /// Refused inside a lockless section (DESIGN §2.2's last row), as
+    /// `SpinMutex::lock` is.
     #[inline(always)]
+    #[track_caller]
     #[allow(clippy::panic)]
     pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         let _irq = InterruptGuard::enter();
+        #[cfg(target_os = "none")]
+        crate::sync_init::check_cell_context();
         let me = owner_token();
         loop {
             match self

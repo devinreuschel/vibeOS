@@ -16,6 +16,7 @@ use vibeos::vectors;
 
 use crate::apic_init;
 use crate::per_cpu_init;
+use crate::sync_init;
 use crate::time_init;
 use crate::x86;
 
@@ -88,8 +89,11 @@ fn service_shootdowns() {
         let s = &SHOOT[i];
         let w = s.waiters.load(Ordering::Acquire);
         if w & me != 0 && s.acked.load(Ordering::Relaxed) & me == 0 {
-            let va = s.va.load(Ordering::Relaxed);
-            x86::invlpg(va);
+            {
+                let _lockless = sync_init::lockless_section();
+                let va = s.va.load(Ordering::Relaxed);
+                x86::invlpg(va);
+            }
             s.acked.fetch_or(me, Ordering::Release);
             SHOOT_COUNT.fetch_add(1, Ordering::Relaxed);
         }
@@ -113,6 +117,9 @@ fn service_calls() {
     let arg = CALL.arg.load(Ordering::Relaxed);
     if !f.is_null() {
         let f: fn(*mut ()) = unsafe { core::mem::transmute(f) };
+        // Call-function work runs inside whatever this CPU holds, so it
+        // takes no lock (DESIGN §2.2's last row).
+        let _lockless = sync_init::lockless_section();
         f(arg);
     }
     CALL.acked.fetch_or(me, Ordering::Release);

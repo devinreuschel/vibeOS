@@ -78,12 +78,11 @@ impl<T> SpinMutex<T> {
     }
 
     /// Take the lock. The rank checker refuses it while this CPU holds a
-    /// higher rank (DESIGN §2.1).
+    /// lock of its rank or a higher one (DESIGN §2.1, §2.3), or runs code
+    /// that takes no lock (§2.2's last row).
     #[track_caller]
     pub fn lock(&self) -> SpinMutexGuard<'_, T> {
-        // Not yet strict: ROADMAP §10.3's nesting-rule box makes `lock`
-        // refuse a held rank (`Held::acquire`).
-        self.lock_counted(true)
+        self.lock_counted(false)
     }
 
     /// Take a second lock of a rank this CPU already holds. `subclass`
@@ -114,14 +113,15 @@ impl<T> SpinMutex<T> {
         }
     }
 
-    /// One shot. `None` if held, including by us: a rank-0 lock this CPU
-    /// holds fails without a second CAS (which would panic the TAS).
+    /// One shot. `None` if another CPU holds it. The rank checker refuses
+    /// it as it does `lock`, before anything else, so a ranked lock this CPU
+    /// already holds fails the check; a rank-0 lock this CPU holds returns
+    /// `None` without a second CAS (which would panic the TAS).
     #[track_caller]
     pub fn try_lock(&self) -> Option<SpinMutexGuard<'_, T>> {
         let irq = InterruptGuard::enter();
         let owner = owner_token();
-        // Not yet strict: see `lock`.
-        let rank = lock_enter(self.rank, true);
+        let rank = lock_enter(self.rank, false);
         if self.lock.is_locked() && self.lock.owner() == owner {
             lock_leave(rank);
             return None;
@@ -242,17 +242,25 @@ fn rank_refused(e: RankError, held: Held) -> ! {
     );
 }
 
+/// Whether the rank checker is off: the panic path, §2.2's stated
+/// exception, has set `HALTING`.
+fn halting() -> bool {
+    crate::serial::raw::HALTING.load(Ordering::Acquire)
+}
+
 /// Count one lock of `rank` on this CPU, or panic if the rank checker
-/// refuses it. `nested` allows a rank already held (`lock_nested`).
-/// Returns the rank counted, which the guard releases: 0 when nothing was.
+/// refuses it. `nested` allows a rank already held (`lock_nested`). A
+/// rank-0 lock is not counted but is still refused inside a lockless
+/// section. Returns the rank counted, which the guard releases: 0 when
+/// nothing was.
 #[track_caller]
 fn lock_enter(rank: u8, nested: bool) -> u8 {
-    if rank == 0 {
-        return 0;
-    }
     let Some(slot) = held_slot() else {
         return 0;
     };
+    if halting() {
+        return 0;
+    }
     // Relaxed: only this CPU writes its slot, with IF off; an NMI that
     // raises the depth lowers it again before it returns.
     let held = Held::from_raw(slot.load(Ordering::Relaxed));
@@ -263,6 +271,9 @@ fn lock_enter(rank: u8, nested: bool) -> u8 {
     };
     if let Err(e) = r {
         rank_refused(e, held);
+    }
+    if rank == 0 {
+        return 0;
     }
     let now = slot.fetch_add(Held::count_unit(rank), Ordering::Relaxed);
     #[cfg(feature = "kernel_tests")]
@@ -281,6 +292,60 @@ fn lock_leave(rank: u8) {
     };
     if Held::from_raw(slot.load(Ordering::Relaxed)).count(rank) != 0 {
         slot.fetch_sub(Held::count_unit(rank), Ordering::Relaxed);
+    }
+}
+
+/// Refuse an `IrqCell` inside a lockless section: shootdown or
+/// call-function work, or an NMI, `#MC`, or CPL-0 `#DB` body (DESIGN §2.2's
+/// last row). Off once `HALTING` is set.
+#[track_caller]
+pub fn check_cell_context() {
+    let Some(slot) = held_slot() else {
+        return;
+    };
+    if halting() {
+        return;
+    }
+    let held = Held::from_raw(slot.load(Ordering::Relaxed));
+    if let Err(e) = held.check_cell() {
+        rank_refused(e, held);
+    }
+}
+
+/// While alive, this CPU takes no lock: `lock_enter` and `IrqCell::with`
+/// refuse (DESIGN §2.2's last row). Built by [`lockless_section`].
+pub struct LocklessSection {
+    raised: bool,
+    /// Per-CPU state: the section ends on the CPU it began on.
+    _not_send: core::marker::PhantomData<*const ()>,
+}
+
+/// Raise this CPU's lockless depth until the returned guard drops.
+/// Nothing before per-CPU data is live.
+pub fn lockless_section() -> LocklessSection {
+    let raised = held_slot().is_some_and(|slot| {
+        // Relaxed: only this CPU changes its slot, and an NMI that raises
+        // the depth between this load and the add lowers it again first.
+        if Held::from_raw(slot.load(Ordering::Relaxed)).lockless_depth() == u8::MAX {
+            return false;
+        }
+        slot.fetch_add(Held::depth_unit(), Ordering::Relaxed);
+        true
+    });
+    LocklessSection {
+        raised,
+        _not_send: core::marker::PhantomData,
+    }
+}
+
+impl Drop for LocklessSection {
+    fn drop(&mut self) {
+        if !self.raised {
+            return;
+        }
+        if let Some(slot) = held_slot() {
+            slot.fetch_sub(Held::depth_unit(), Ordering::Relaxed);
+        }
     }
 }
 

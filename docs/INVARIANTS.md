@@ -297,9 +297,19 @@ The lock, the serviced spins, and the two cells:
 Two locks of one rank nest only through `lock_nested`, in a pair order the call site's comment
 names, and a per-rank count keeps the outer rank held when the inner lock drops. ROADMAP §12.1 adds
 `fork`'s pair, the parent's page-table lock before the child's. ROADMAP §13.12's lock classes add
-address order for a socket pair and check every pair order. Rule; not yet enforced: `lock` lets a
-lock of a held rank nest, the inner release clears the rank bit the outer lock still holds, and
-nothing stops the code in §2.2's last row from taking a lock (I1; ROADMAP §10.3, F108).
+address order for a socket pair and check every pair order.
+
+The rank checker enforces both rules (I1). Each CPU keeps one word, `sync_init::HELD`: a 4-bit count
+per rank and a lockless depth, changed with atomic adds, since an NMI may run between a load and a
+store. `lock` and `try_lock` fail the check while this CPU holds a lock of their rank or a later one;
+`lock_nested` allows the held rank itself and counts it, so the inner release leaves the outer rank
+held. Each is `#[track_caller]`, so a refusal names its call site, and the check runs before the
+spin, so a refused lock is never taken. `sync_init::lockless_section` raises the depth for code in
+§2.2's last row: `ipi_init::service_shootdowns` around each slot it serves, `service_calls` around the
+call-function closure, and the NMI and `#MC` bodies and a CPL-0 `#DB` body once the `kernel_tests`
+intercept has passed. While it is nonzero, `lock_enter` refuses every `SpinMutex`, rank 0 included,
+and `IrqCell::with` refuses too (`sync_init::check_cell_context`). Checks and counting stop once
+`serial::raw::HALTING` is set: the panic path is §2.2's stated exception.
 
 A wake takes the scheduler lock, which ranks before device and serial locks. So code holding one of
 those records the wake and performs it after dropping the lock, as §10.1's completion does, and a
@@ -650,7 +660,7 @@ that review cites means the review's text.
 
 | # | Invariant | Established at | Status | Holds today |
 |---|-----------|----------------|--------|-------------|
-| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
+| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter`, `IrqCell::with` | enforced at runtime, per CPU | Partly: a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `syscall_init::first_return` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `syscall_init::first_return` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |
