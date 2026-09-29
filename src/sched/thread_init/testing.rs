@@ -94,6 +94,16 @@ pub(in crate::sched) static REQUEUES: AtomicU64 = AtomicU64::new(0);
 pub(in crate::sched) static ARRIVED: [AtomicBool; MAX_THREADS] =
     [const { AtomicBool::new(false) }; MAX_THREADS];
 
+/// Let `id`, spawned pinned and not yet run, run on any CPU: a thread
+/// the requeue hook may move, queued where it was spawned.
+pub fn unpin(id: ThreadId) {
+    super::with_sched(|s| {
+        if let Some(t) = s.get_mut(id) {
+            t.affinity = vibeos::thread::CpuAffinity::Any;
+        }
+    });
+}
+
 pub(super) fn requeue_on() -> bool {
     REQUEUE.load(Ordering::Acquire)
 }

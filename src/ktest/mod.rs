@@ -499,6 +499,10 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(30_000),
     test("fp_no_leak", sched::ktest::test_fp_no_leak).deadline(60_000),
+    test(
+        "requeue_moves_each_dequeue",
+        sched::ktest::test_requeue_moves_each_dequeue,
+    ),
     test("fp_migrate_counter", sched::ktest::test_fp_migrate_counter).deadline(30_000),
     test("exec_huge_memsz", proc::ktest::test_exec_huge_memsz).deadline(60_000),
     test(

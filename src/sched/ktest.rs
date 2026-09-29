@@ -2,8 +2,10 @@
 
 mod counted;
 mod hooks;
+mod requeue;
 pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
+pub(crate) use requeue::test_requeue_moves_each_dequeue;
 
 use alloc::boxed::Box;
 use core::fmt;
