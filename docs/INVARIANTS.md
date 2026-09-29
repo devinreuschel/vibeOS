@@ -539,12 +539,13 @@ harness's order depend on scheduling; and Linux's variable-length descriptor and
 96-byte records do not need and which loom models less easily.
 
 Symbols come from a two-pass link (Makefile `KERNEL_VARIANT`): `nm` output from the first link fills
-an in-image `.rodata` table (`KSYMS`) that the second link builds in. Rule: every function has the same address
-in both links. Not yet enforced: nothing compares them, and in the panic-test build the
-reference to the filled table compiles larger than the empty one and shifts every later function, so
-that ISO's table mis-names frames (ROADMAP §10.2, F084). Planned (ROADMAP §10.2, F084): `KSYMS`
-moves to its own `.ksyms` section, which the kernel finds only through the linker-defined
-`__ksyms_start` and `__ksyms_end`, so the code that reads it is the same size empty and filled.
+an in-image table (`KSYMS`) that the second link builds in. Rule: every function has the same address
+in both links. `gen_ksyms.py` emits `KSYMS` as a `#[used]` static in its own `.ksyms` section, which
+`linker.ld` places after `.rodata` and no kernel code names: `log::ksyms::lookup` finds the entries
+only through the linker-defined `__ksyms_start` and `__ksyms_end`, never through a slice whose length
+is a compile-time constant, so the code that reads the table is the same size empty and filled. Every
+`KERNEL_VARIANT` recipe then reruns `gen_ksyms.py --check` on the final ELF and fails when the table
+differs from the one it linked (ROADMAP §10.2, F084).
 Frame pointers come from `-C force-frame-pointers=yes` in `.cargo/config.toml` (§3.1); there is no
 target JSON.
 
@@ -721,6 +722,7 @@ that review cites means the review's text.
 | I234 | A VA `pci_init::map_mmio` returns maps its BAR or ECAM page, uncached unless it is the kept write-back framebuffer BAR, for the rest of the boot: nothing unmaps it | `pci_init::map_mmio` (the UC physmap patch or `ioremap`); `pci_init::map_func_bars` records it in the device's resources | documented | Partly: a range `patch_physmap_uc` fails on is still returned (ROADMAP §10.12, F115), and a BAR may overlap RAM until the same box refuses it |
 | I235 | A block `Request`'s segments name memory valid for their lengths that nothing else touches until the request's completion runs | `virtio_blk_init::build` and `block_init`'s submit paths, whose callers keep the buffer until `IoWaiter::wait` returns or the completion runs | documented | Yes: every in-tree submitter waits on its `IoWaiter` before it reuses the buffer |
 | I236 | A volume slot's `vol` and `back` cells in `fs::fat_init::SLOTS` and `fs::vibefs_init::SLOTS` are touched only by the one thread holding the slot's `busy` flag, which `grab`'s compare-exchange or the mount path under `ALLOC` sets and a Release store clears, or, while the slot's `used` flag is clear, by the one boot or mount path filling it before it stores `used` with Release | `fs::fat_init::grab`, `fs::vibefs_init::grab` | enforced at runtime (busy flag) | Yes: `drop_slot` no longer writes a slot whose `grab` failed |
+| I244 | QEMU's fw_cfg ports (the selector 0x510, the data byte 0x511, the DMA address 0x514-0x51B) are touched only by `boot::fw_cfg_init`, only after CPUID.1:ECX[31] reports a hypervisor, so bare metal never sees a write to them, and by one CPU at a time: `boot::capture` before `smp: done`, then boot-time callers and the in-guest registry. The selector is device-global and unlocked, so a caller that can race takes a ranked lock first (§2.1) | `boot::fw_cfg_init::probe` (the CPUID check before any port access), `boot::fw_cfg_init::select` | enforced in part (`select` debug-asserts the hypervisor bit; one CPU at a time is by convention) | Yes |
 
 ## 2.8 Publish last
 
@@ -987,7 +989,9 @@ covers the last store of a hand-off; these rules cover the rest.
    half, a timer or IPI callback, a spinlock section, a threaded bottom half or softirq-equivalent
    item, a writeback thread, a thread already in reclaim, an RCU read-side section), the put defers:
    it links the object onto this CPU's deferred-release list through a node the object's allocation
-   carries, so it allocates nothing, and queues a work item that runs the release with IF=1.
+   carries, so it allocates nothing, and queues a work item that runs the release with IF=1. It
+   queues the item at once where this CPU may take `SCHED`; under `SCHED` or a lock ranked after
+   it, and in §2.2's last row, it leaves the list for this CPU's next timer tick to queue.
    `TryArc`'s drop makes this check and defers by itself, because a completion or a timer cannot
    know that its put is the last and Rust drops values implicitly; `put_deferred` is the explicit
    form, for code that knows its put may be the last. A count whose release only returns memory to
@@ -1037,8 +1041,8 @@ Today the code breaks rules 1, 2, 4, and 5: TCBs are never freed and their slots
 place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
 from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
 §12.5, F042), a pid is the index of its process-table slot, handed out lowest first
-(ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. Nothing implements
-rule 3's operation gate or rule 6's deferred release yet (ROADMAP §10.4). A process's working
+(ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. `kalloc::TryArc`
+implements rule 6's deferred release, and `sync::OpGate` rule 3's operation gate (ROADMAP §10.4). A process's working
 directory is a path string: one kernel-global `file_init::CWD` serves every process, and `Proc::cwd`
 is a buffer nothing reads (ROADMAP §10.4, F057).
 

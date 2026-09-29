@@ -716,6 +716,7 @@ pub unsafe fn init_bootstrap() {
         fp_cpu: None,
         syscall_count: 0,
         pid: 0,
+        no_reclaim: AtomicU32::new(0),
     });
     let Ok(mut tcb) = tcb else {
         crate::boot::halt_with("vibeOS: thread: no memory for the bootstrap TCB");
@@ -925,6 +926,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         fp_cpu: None,
         syscall_count: 0,
         pid: 0,
+        no_reclaim: AtomicU32::new(0),
     });
     let Ok(mut tcb) = tcb else {
         return Err(stack);
@@ -1061,6 +1063,7 @@ fn spawn_inner(
         fp_cpu: None,
         syscall_count: 0,
         pid,
+        no_reclaim: AtomicU32::new(0),
     });
     let mut tcb = match tcb {
         Ok(t) => t,
@@ -1194,7 +1197,8 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     r
 }
 
-#[cfg(feature = "kernel_tests")]
+/// Why the current thread's last wait ended. Valid after `schedule`
+/// returns from a wait.
 pub fn last_wait_outcome() -> WaitOutcome {
     let p = per_cpu_init::current_thread();
     assert!(!p.is_null(), "no current thread");

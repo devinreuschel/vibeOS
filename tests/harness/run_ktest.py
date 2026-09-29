@@ -13,6 +13,7 @@ from tests.harness.harness import (
     QemuConfig,
     RunResult,
     check_ktest_output,
+    default_iso,
     env_config,
     env_flag,
     ktest_devices,
@@ -72,7 +73,7 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> Run
 
 
 def main() -> int:
-    env = env_config(default_iso="vibeos-ktest.iso", default_timeout=90)
+    env = env_config(default_iso=default_iso("ktest"), default_timeout=90)
     results.Results(env.tier)
     skip_persist = env_flag("VIBEOS_SKIP_PERSIST")
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")

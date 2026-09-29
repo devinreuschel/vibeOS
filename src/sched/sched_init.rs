@@ -44,6 +44,7 @@ pub fn on_timer_tick() {
     if !is_live() {
         return;
     }
+    crate::work_init::kick_deferred();
     let preempt = per_cpu_init::with_current(|cpu| {
         // Single writer: only this CPU stores its `ticks`.
         let ticks = cpu.remote.ticks.load(Ordering::Relaxed).wrapping_add(1);

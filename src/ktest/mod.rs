@@ -195,6 +195,13 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("bootcell_set_once", sync::ktest::test_bootcell_set_once),
     test("bootinfo_consistent", boot::ktest::test_bootinfo_consistent),
+    test("fw_cfg_probe", boot::ktest::test_fw_cfg_probe),
+    test("fw_cfg_dma", boot::ktest::test_fw_cfg_dma),
+    test("cmdline_captured", boot::ktest::test_cmdline_captured),
+    test(
+        "strace_flag_matches_cmdline",
+        boot::ktest::test_strace_flag_matches_cmdline,
+    ),
     test("df_on_ist", arch::ktest::test_df_on_ist),
     test("pit_tick_rate", time::ktest::test_pit_tick_rate),
     test("now_us_monotonic", time::ktest::test_now_us_monotonic),
@@ -271,6 +278,7 @@ pub(crate) const TESTS: &[Test] = &[
         "cross_cpu_cells_ranked",
         sync::ktest::test_cross_cpu_cells_ranked,
     ),
+    test("op_gate_kill_sleeps", sync::ktest::test_op_gate_kill_sleeps).once(),
     test(
         "sched_lock_timer_irq",
         sched::ktest::test_sched_lock_timer_irq,
@@ -280,6 +288,10 @@ pub(crate) const TESTS: &[Test] = &[
         sched::ktest::test_spawn_exit_thousands,
     ),
     test("cross_cpu_spawn", sched::ktest::test_cross_cpu_spawn),
+    test(
+        "counted_deferred_release",
+        sched::ktest::test_counted_deferred_release,
+    ),
     test(
         "reschedule_ipi_wake_ap",
         irq::ktest::test_reschedule_ipi_wake_ap,
