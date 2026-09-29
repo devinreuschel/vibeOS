@@ -189,6 +189,9 @@ vibeOS: block: <name> <n> sectors
 vibeOS: shell ready
 ```
 
+`vibeOS: serial online` is the kernel's first serial line: `run_e2e.py` fails when a kernel line (one
+starting `vibeOS:`) comes before it; Limine's or the firmware's output may precede it.
+
 Live e2e through Phase 6 slice A asserts through `idt ok`, then `per_cpu: bsp ready`,
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
 `sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`

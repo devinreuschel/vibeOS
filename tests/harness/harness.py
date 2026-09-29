@@ -83,7 +83,19 @@ DUMP_BANNER_RE = re.compile(
 
 
 def is_dump_banner(line: str) -> bool:
-    return DUMP_BANNER_RE.match(line) is not None
+    text = kernel_text(line)
+    return text is not None and DUMP_BANNER_RE.match(text) is not None
+
+
+# A kernel line starts with this until DESIGN §2.6's frame lands; then
+# `kernel_text` is the one predicate that changes (to the frame's split).
+KERNEL_LINE_PREFIX = "vibeOS:"
+SERIAL_ONLINE = "vibeOS: serial online"
+
+
+def kernel_text(line: str) -> str | None:
+    """The kernel's text of a serial line, or None when the kernel did not print it."""
+    return line if line.startswith(KERNEL_LINE_PREFIX) else None
 
 
 class HarnessError(Exception):

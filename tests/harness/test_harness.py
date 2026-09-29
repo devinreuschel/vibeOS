@@ -41,6 +41,7 @@ from tests.harness.harness import (
     effective_accel_name,
     halt_test_markers,
     is_dump_banner,
+    kernel_text,
     mce_monitor_cmd,
     overlay_env,
     qemu_argv,
@@ -455,6 +456,48 @@ class TestExpectPanic(unittest.TestCase):
                 self.assertFalse(is_dump_banner(line))
 
 
+class TestFirstKernelLine(unittest.TestCase):
+    """`vibeOS: serial online` is the kernel's first serial line."""
+
+    def boot(self, lines: list[str]) -> None:
+        result, _ = check_fake(lines, ABC_MARKERS)
+        run_e2e.check_first_kernel_line(result.lines)
+
+    def test_kernel_line_first_fails(self) -> None:
+        lines = ["vibeOS: heap ok"] + [m.substring for m in ABC_MARKERS]
+        with self.assertRaises(HarnessError) as cm:
+            self.boot(lines)
+        self.assertIn(
+            "kernel line before 'vibeOS: serial online': vibeOS: heap ok", str(cm.exception)
+        )
+
+    def test_limine_line_first_passes(self) -> None:
+        self.boot(PANIC_BOOT[:1] + [m.substring for m in ABC_MARKERS])
+
+    def test_nothing_before_serial_line_passes(self) -> None:
+        self.boot([m.substring for m in ABC_MARKERS])
+
+    def test_glued_non_kernel_prefix_passes(self) -> None:
+        lines = [m.substring for m in ABC_MARKERS]
+        lines[0] = "\x1b[2J\x1b[Hlimine: boot " + lines[0]
+        self.boot(lines)
+
+    def test_glued_kernel_prefix_fails(self) -> None:
+        lines = [m.substring for m in ABC_MARKERS]
+        lines[0] = "vibeOS: heap ok" + lines[0]
+        with self.assertRaises(HarnessError) as cm:
+            self.boot(lines)
+        self.assertIn("vibeOS: heap okvibeOS: serial online", str(cm.exception))
+
+    def test_no_serial_line_passes_here(self) -> None:
+        run_e2e.check_first_kernel_line(["limine: Loading executable"])
+
+    def test_kernel_text(self) -> None:
+        self.assertEqual(kernel_text("vibeOS: heap ok"), "vibeOS: heap ok")
+        self.assertIsNone(kernel_text("limine: Loading executable"))
+        self.assertIsNone(kernel_text("user: tests ok"))
+
+
 QEMU_LOAD_ERR = "qemu-system-x86_64: -bios x.fd: could not load"
 
 
@@ -844,7 +887,7 @@ class TestNoRetry(unittest.TestCase):
 
     def test_e2e_console_input_no_shell_boots_once(self) -> None:
         marker_boot = RunResult(
-            lines=[*run_e2e.PCI_GOLDEN, "vibeOS: pci: 6 devices"],
+            lines=["vibeOS: serial online", *run_e2e.PCI_GOLDEN, "vibeOS: pci: 6 devices"],
             exit_code=0,
         )
         with (
