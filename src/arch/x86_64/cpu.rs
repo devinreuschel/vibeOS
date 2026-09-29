@@ -5,11 +5,10 @@
 
 use core::arch::asm;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::log::Level;
 
-use crate::cell::BootCell;
 use crate::x86;
 
 /// # Safety
@@ -627,7 +626,24 @@ pub struct ControlRegs {
     pub cr4: u64,
 }
 
-static CONTROL_REGS: BootCell<ControlRegs> = BootCell::new();
+// The values `init_control_regs` writes, stored by its first call (the
+// BSP's, before `smp: done`). CR0 is 0 until then: the stored CR0 always
+// has PE set.
+static CONTROL_CR0: AtomicU64 = AtomicU64::new(0);
+static CONTROL_CR4: AtomicU64 = AtomicU64::new(0);
+
+fn stored_control_regs() -> Option<ControlRegs> {
+    // Acquire: pairs with the Release store of CR0 in `init_control_regs`,
+    // so CR4 is the value stored before it.
+    let cr0 = CONTROL_CR0.load(Ordering::Acquire);
+    if cr0 == 0 {
+        return None;
+    }
+    Some(ControlRegs {
+        cr0,
+        cr4: CONTROL_CR4.load(Ordering::Relaxed),
+    })
+}
 
 /// CR0: PE, MP, ET, NE, WP, AM, PG, so EM, TS, CD and NW are clear. CR4:
 /// PAE, OSFXSR, OSXMMEXCPT, and MCE, PGE, SMEP, SMAP and UMIP where CPUID
@@ -659,15 +675,20 @@ pub fn init_control_regs() {
     // The kernel asks Limine for no 5-level paging, and the AP trampoline
     // builds 4-level mode, so no CPU has it set.
     assert!(x86::read_cr4() & CR4_LA57 == 0, "CR4.LA57 set");
-    let first = CONTROL_REGS.try_get().is_none();
-    if first {
-        // SAFETY: `BootCell::set` needs one writer before `smp: done`;
-        // established at `normal_boot_tail`, where the BSP's
-        // `syscall_init::init_bsp` makes the first call before
-        // `smp_init::init` starts any AP.
-        unsafe { CONTROL_REGS.set(compute()) };
-    }
-    let regs = *CONTROL_REGS.get();
+    let stored = stored_control_regs();
+    let first = stored.is_none();
+    let regs = match stored {
+        Some(r) => r,
+        None => {
+            // One writer: the BSP's `syscall_init::init_bsp` makes the
+            // first call before `smp_init::init` starts any AP.
+            let r = compute();
+            CONTROL_CR4.store(r.cr4, Ordering::Relaxed);
+            // Release: pairs with the Acquire load in `stored_control_regs`.
+            CONTROL_CR0.store(r.cr0, Ordering::Release);
+            r
+        }
+    };
     // SAFETY: CR0 keeps PE and PG and CR4 keeps PAE, which long mode
     // requires, and every other bit is one CPUID reports or every x86-64
     // CPU has; established by `arch::cpu::compute`.
@@ -693,5 +714,5 @@ pub fn init_control_regs() {
 /// The values `init_control_regs` writes, once the BSP has computed them.
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn control_regs() -> Option<ControlRegs> {
-    CONTROL_REGS.try_get().copied()
+    stored_control_regs()
 }
