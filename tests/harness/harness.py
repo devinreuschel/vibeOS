@@ -48,6 +48,9 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import IO
+
+from tests.harness.linesource import LineSource
 
 # Any of these substrings in a serial line means the run has failed. Matches
 # exception mnemonics rather than English so shell prose does not false-fire
@@ -65,6 +68,34 @@ PANIC_SIGNATURES: tuple[str, ...] = (
 
 # End of the dump. expect_panic waits for this so backtrace/logrec are in the log.
 PANIC_DONE = "vibeOS: panic: halted"
+# How long QEMU has after PANIC_DONE to exit with PANIC_EXIT_STATUS.
+PANIC_EXIT_S = 10.0
+
+# The line that opens a dump, mirroring the headers `src/log/panic.rs` writes:
+# `panic` (the bare `PANIC_BANNER`), `begin_dump`'s `panic: reentered`,
+# `exception_vec`, and `exception_halt` for each kind `src/arch/x86_64/idt.rs`
+# passes it. Anchored at the start, so a `vibeOS: logrec:` replay never counts.
+DUMP_BANNER_RE = re.compile(
+    r"^vibeOS: (?:panic:(?: reentered)?$"
+    r"|exception: vector \d+ rip=0x"
+    r"|(?:#UD|nmi|#DB|#GP|#PF|#DF|#MC) rip=0x)"
+)
+
+
+def is_dump_banner(line: str) -> bool:
+    text = kernel_text(line)
+    return text is not None and DUMP_BANNER_RE.match(text) is not None
+
+
+# A kernel line starts with this until DESIGN §2.6's frame lands; then
+# `kernel_text` is the one predicate that changes (to the frame's split).
+KERNEL_LINE_PREFIX = "vibeOS:"
+SERIAL_ONLINE = "vibeOS: serial online"
+
+
+def kernel_text(line: str) -> str | None:
+    """The kernel's text of a serial line, or None when the kernel did not print it."""
+    return line if line.startswith(KERNEL_LINE_PREFIX) else None
 
 
 class HarnessError(Exception):
@@ -80,11 +111,15 @@ class Marker:
     payload is runtime-generated (a decimal count, a hex address) can be
     pinned to its full `vibeOS: <subsystem>: <state>` shape without
     hard-coding the varying part. See DESIGN §2.6 / §8.3.
+
+    `exactly_before=(needle, n)`: exactly `n` lines containing `needle`
+    precede this marker, and none follows it.
     """
 
     substring: str
     name: str
     and_contains: tuple[str, ...] = ()
+    exactly_before: tuple[str, int] | None = None
 
     def matches(self, line: str) -> bool:
         if self.substring not in line:
@@ -99,6 +134,7 @@ class RunResult:
     exit_code: int | None = None
     timed_out: bool = False
     panic_line: str | None = None
+    stderr: str = ""
 
 
 def serial_tail(lines: list[str], n: int = 40) -> str:
@@ -108,40 +144,6 @@ def serial_tail(lines: list[str], n: int = 40) -> str:
     tail = lines[-n:]
     body = "\n".join(tail)
     return f"\n--- serial tail {len(tail)}/{len(lines)} ---\n{body}"
-
-
-def check_markers_in_order(
-    lines: Iterable[str],
-    markers: list[Marker],
-    panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
-) -> RunResult:
-    """Walk `lines` once. Assert `markers` are seen in order.
-
-    Raises `HarnessError` on:
-      - a panic signature appearing anywhere
-      - the input ending before every marker matched
-      - a marker appearing out of the requested order
-
-    Returns the result on success.
-    """
-    result = RunResult()
-    idx = 0
-    for line in lines:
-        result.lines.append(line)
-        for sig in panic_signatures:
-            if sig in line:
-                result.panic_line = line
-                raise HarnessError(f"panic signature {sig!r} in: {line!r}")
-        if idx < len(markers) and markers[idx].matches(line):
-            result.matched.append(markers[idx].name)
-            idx += 1
-
-    if idx < len(markers):
-        missing = markers[idx].name
-        raise HarnessError(
-            f"missing marker {missing!r} after {len(result.lines)} lines"
-        )
-    return result
 
 
 def contains_panic(line: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> bool:
@@ -324,6 +326,132 @@ def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
             yield payload
         else:
             return
+
+
+class QemuProcess:
+    """A `LineSource` over a QEMU child (C-LINESOURCE).
+
+    Serial comes from stdout through `DeadlineReader`, and only serial:
+    stderr goes to a temporary file, which cannot fill and stall QEMU the
+    way a second pipe can. `stdin=True` gives the guest's COM1 a pipe for
+    `send_input`. `monitor_sock` is the HMP socket `monitor` and `quit` use.
+    """
+
+    def __init__(
+        self,
+        argv: list[str],
+        deadline: float,
+        *,
+        monitor_sock: str | None = None,
+        stdin: bool = False,
+    ) -> None:
+        self._err = tempfile.TemporaryFile()
+        self._proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=self._err,
+            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+            bufsize=0,
+        )
+        assert self._proc.stdout is not None
+        self._reader = DeadlineReader(self._proc.stdout.fileno(), deadline)
+        self._monitor_sock = monitor_sock
+        self._mon: socket.socket | None = None
+        self._stderr: str | None = None  # set, and the files closed, at exit
+
+    def next_event(self) -> tuple[str, str]:
+        if self._stderr is not None:
+            return ("eof", "")
+        return self._reader.next_event()
+
+    def set_deadline(self, deadline: float) -> None:
+        self._reader.set_deadline(deadline)
+
+    def send_input(self, data: bytes) -> None:
+        if self._proc.stdin is None:
+            raise HarnessError("QemuProcess: started without stdin")
+        self._proc.stdin.write(data)
+        self._proc.stdin.flush()
+
+    def monitor(self, cmd: str) -> None:
+        if self._monitor_sock is None:
+            raise HarnessError("QemuProcess: started without a monitor")
+        if self._mon is None:
+            self._mon = _connect_monitor(self._monitor_sock)
+        _monitor_cmd(self._mon, cmd)
+
+    def quit(self) -> None:
+        if self._mon is not None:
+            try:
+                _monitor_cmd(self._mon, "quit")
+            except OSError:
+                pass
+        elif self._monitor_sock is not None:
+            _send_monitor_quit(self._monitor_sock)
+        if self.wait(2.0) is None:
+            self.kill()
+
+    def kill(self) -> None:
+        self._proc.kill()
+
+    def wait(self, timeout: float) -> int | None:
+        try:
+            code = self._proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        if self._stderr is None:
+            self._stderr = _file_text(self._err)
+            for f in (self._mon, self._err, self._proc.stdout, self._proc.stdin):
+                if f is not None:
+                    try:
+                        f.close()
+                    except OSError:
+                        pass
+            self._mon = None
+        return code
+
+    def stderr_text(self) -> str:
+        return self._stderr if self._stderr is not None else _file_text(self._err)
+
+
+def _file_text(f: IO[bytes]) -> str:
+    """A child's stderr file so far. `pread` leaves the shared offset alone."""
+    fd = f.fileno()
+    return os.pread(fd, os.fstat(fd).st_size, 0).decode("utf-8", errors="replace")
+
+
+def _start_qemu(cfg: QemuConfig, deadline: float, *, stdin: bool = False) -> QemuProcess:
+    """Check PATH and the ISO, then start QEMU with a monitor socket."""
+    if not shutil.which("qemu-system-x86_64"):
+        raise HarnessError("qemu-system-x86_64 not on PATH")
+    if not os.path.exists(cfg.iso):
+        raise HarnessError(f"ISO missing: {cfg.iso}")
+    monitor_sock = _pick_monitor_path()
+    return QemuProcess(
+        qemu_argv(cfg, monitor_sock), deadline, monitor_sock=monitor_sock, stdin=stdin
+    )
+
+
+def _qemu_report(result: RunResult, *, exited: bool) -> str:
+    """QEMU's exit status and stderr tail, then the serial tail (F079).
+
+    `exited`: QEMU ended the run itself. After a timeout the harness killed
+    it, so only a non-empty stderr is shown.
+    """
+    out = f"; QEMU exited with status {result.exit_code}" if exited else ""
+    err = result.stderr.splitlines()[-20:]
+    if exited or err:
+        out += "\n--- qemu stderr ---\n" + ("\n".join(err) if err else "(no stderr)")
+    return out + serial_tail(result.lines)
+
+
+def _reap(src: LineSource) -> int | None:
+    """The exit status; kill the source if it has not exited within 5 s."""
+    code = src.wait(5.0)
+    if code is None:
+        src.kill()
+        code = src.wait(5.0)
+    return code
 
 
 # QEMU 10 dropped `-no-hpet`. `pc,hpet=off` is the machine property on
@@ -612,117 +740,139 @@ def run_qemu_and_check(
     extra_panic: tuple[str, ...] = (),
     expect_panic: bool = False,
     dump_needles: tuple[str | tuple[str, ...], ...] = (),
+    line_source: LineSource | None = None,
 ) -> RunResult:
     """Boot the ISO, stream serial, and assert the boot contract.
 
     On success (all markers seen in order), issues `quit` through the QEMU
     monitor so the process exits quickly.
 
-    `expect_panic=True` inverts the panic scanner: exactly one panic
-    signature must appear, treated as success. Markers are still checked
-    against the lines observed *before* the panic banner.
+    `expect_panic=True`: the dump starts at the first line with a panic
+    signature or a dump banner. Markers and `exactly_before` counts see only
+    the lines before it, so the dump's logrec replay cannot satisfy one. The
+    dump must hold exactly one banner and reach `PANIC_DONE`; QEMU must then
+    exit within `PANIC_EXIT_S` with `PANIC_EXIT_STATUS`; then `dump_needles`.
+
+    `line_source` replaces QEMU (C-LINESOURCE): the PATH and ISO checks are
+    skipped and the lines, exit status and stderr come from the source.
     """
-    if not shutil.which("qemu-system-x86_64"):
-        raise HarnessError("qemu-system-x86_64 not on PATH")
-    if not os.path.exists(cfg.iso):
-        raise HarnessError(f"ISO missing: {cfg.iso}")
-
-    monitor_sock = _pick_monitor_path()
-    argv = qemu_argv(cfg, monitor_sock)
     panic_signatures = _panic_sigs(cfg, panic_signatures, extra_panic)
-
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        bufsize=1,
-        text=True,
-    )
-    assert proc.stdout is not None
+    deadline = time.monotonic() + timeout_s
+    src = line_source if line_source is not None else _start_qemu(cfg, deadline)
 
     result = RunResult()
     marker_idx = 0
-    deadline = time.monotonic() + timeout_s
-    panic_seen: str | None = None
+    dump_at: int | None = None  # index in result.lines of the dump's first line
+    banners = 0
     panic_done = False
-    reader = DeadlineReader(proc.stdout.fileno(), deadline)
+    exact = {m.exactly_before[0]: m.exactly_before[1] for m in markers if m.exactly_before}
+    counts = dict.fromkeys(exact, 0)
+
+    def fail(msg: str) -> HarnessError:
+        src.kill()
+        return HarnessError(msg)
 
     try:
         while True:
-            kind, line = reader.next_event()
+            kind, line = src.next_event()
             if kind == "timeout":
                 result.timed_out = True
-                proc.kill()
+                src.kill()
                 break
             if kind == "eof":
                 # QEMU closed its stdout (usually because it exited).
                 break
 
             result.lines.append(line)
+            sig = next((s for s in panic_signatures if s in line), None)
 
-            if not expect_panic:
-                for sig in panic_signatures:
-                    if sig in line:
-                        result.panic_line = line
-                        proc.kill()
-                        raise HarnessError(
-                            f"panic signature {sig!r} in: {line!r}"
-                        )
-            else:
-                for sig in panic_signatures:
-                    if sig in line and panic_seen is None:
-                        panic_seen = line
-                        result.panic_line = line
-                if PANIC_DONE in line:
+            if dump_at is None and sig is not None and not expect_panic:
+                result.panic_line = line
+                raise fail(f"panic signature {sig!r} in: {line!r}")
+            if dump_at is None and expect_panic and (sig is not None or is_dump_banner(line)):
+                dump_at = len(result.lines) - 1
+                result.panic_line = line
+                if marker_idx < len(markers):
+                    raise fail(
+                        f"missing marker {markers[marker_idx].name!r} before the first "
+                        f"panic signature: {line!r}{serial_tail(result.lines)}"
+                    )
+
+            if dump_at is not None:
+                if is_dump_banner(line):
+                    banners += 1
+                    if banners > 1:
+                        raise fail(f"expected one dump banner, saw {banners}: {line!r}")
+                if PANIC_DONE in line and not panic_done:
                     panic_done = True
+                    src.set_deadline(time.monotonic() + PANIC_EXIT_S)
+                continue
+
+            for needle, n in exact.items():
+                if needle in line:
+                    counts[needle] += 1
+                    if counts[needle] > n:
+                        raise fail(
+                            f"extra {needle!r} line ({counts[needle]} seen, "
+                            f"expected exactly {n}): {line}"
+                        )
 
             if marker_idx < len(markers) and markers[marker_idx].matches(line):
+                eb = markers[marker_idx].exactly_before
+                if eb is not None and counts[eb[0]] != eb[1]:
+                    raise fail(
+                        f"{counts[eb[0]]} {eb[0]!r} lines before "
+                        f"{markers[marker_idx].name!r}, expected exactly {eb[1]}"
+                    )
                 result.matched.append(markers[marker_idx].name)
                 marker_idx += 1
                 if marker_idx == len(markers) and not expect_panic:
                     # Done. Ask QEMU to exit; kill hard if it drags its feet.
-                    _send_monitor_quit(monitor_sock)
-                    try:
-                        proc.wait(timeout=2.0)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    break
-
-            if expect_panic and panic_seen is not None and marker_idx == len(markers):
-                # Wait for the dump trailer so backtrace / logrec are captured.
-                if panic_done:
-                    proc.kill()
+                    src.quit()
                     break
     finally:
-        try:
-            result.exit_code = proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            result.exit_code = proc.wait()
+        result.exit_code = _reap(src)
+        result.stderr = src.stderr_text()
 
+    if result.timed_out and panic_done:
+        raise HarnessError(
+            f"QEMU did not exit within {PANIC_EXIT_S:g} s of {PANIC_DONE!r}"
+            f"{_qemu_report(result, exited=False)}"
+        )
     if result.timed_out:
         missing = (
             markers[marker_idx].name if marker_idx < len(markers) else "none"
         )
         raise HarnessError(
             f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers; "
-            f"missing {missing!r}{serial_tail(result.lines)}"
+            f"missing {missing!r}{_qemu_report(result, exited=False)}"
         )
 
     if marker_idx < len(markers):
         missing = markers[marker_idx].name
         raise HarnessError(
             f"missing marker {missing!r} after {len(result.lines)} lines"
+            f"{_qemu_report(result, exited=True)}"
         )
 
-    if expect_panic and panic_seen is None:
-        raise HarnessError("expected a panic signature; none seen")
-
-    if expect_panic and dump_needles:
-        dump = dump_after_panic(result.lines, panic_signatures)
-        check_dump_needles(dump, dump_needles)
-
+    if not expect_panic:
+        return result
+    if dump_at is None:
+        raise HarnessError(
+            f"expected a panic signature; none seen{_qemu_report(result, exited=True)}"
+        )
+    if not panic_done:
+        raise HarnessError(
+            f"dump ended before {PANIC_DONE!r}{_qemu_report(result, exited=True)}"
+        )
+    if banners != 1:
+        raise HarnessError(f"expected one dump banner, saw {banners}{serial_tail(result.lines)}")
+    if result.exit_code != PANIC_EXIT_STATUS:
+        raise HarnessError(
+            f"panic exit status {result.exit_code}, expected {PANIC_EXIT_STATUS}"
+            f"{_qemu_report(result, exited=True)}"
+        )
+    check_dump_needles(result.lines[dump_at:], dump_needles)
     return result
 
 
@@ -853,10 +1003,11 @@ def run_qemu_inject_mce(
     argv = qemu_argv(cfg, monitor_sock)
     panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
 
+    err = tempfile.TemporaryFile()
     proc = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=err,
         stdin=subprocess.DEVNULL,
         bufsize=1,
         text=True,
@@ -880,9 +1031,14 @@ def run_qemu_inject_mce(
                     f"markers; missing {missing!r}{serial_tail(result.lines)}"
                 )
             if kind == "eof":
+                try:
+                    result.exit_code = proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    result.exit_code = None
+                result.stderr = _file_text(err)
                 raise HarnessError(
                     f"missing marker {markers[marker_idx].name!r} after "
-                    f"{len(result.lines)} lines"
+                    f"{len(result.lines)} lines{_qemu_report(result, exited=True)}"
                 )
             result.lines.append(line)
             for sig in panic_signatures:
@@ -929,49 +1085,69 @@ def run_qemu_inject_mce(
 SERIAL_ECHO_TOKEN = "serial-ok"
 PS2_ECHO_TOKEN = "ps2-ok"
 SHELL_READY_NEEDLE = "vibeOS: shell ready"
+# Writeback, deferred reclaim and vibefs commits run on after `shell ready`
+# (DESIGN §8.3), so the console boot keeps reading this long past its last reply.
+CONSOLE_TAIL_S = 3.0
+
+
+def _console_tail(
+    src: LineSource, result: RunResult, sigs: tuple[str, ...], window_s: float
+) -> None:
+    """Read serial for `window_s`: fail on a panic signature or on QEMU's exit."""
+    src.set_deadline(time.monotonic() + window_s)
+    while True:
+        kind, line = src.next_event()
+        if kind == "timeout":
+            return
+        if kind == "eof":
+            result.exit_code = _reap(src)
+            result.stderr = src.stderr_text()
+            raise HarnessError(
+                f"console input: QEMU exited in the {window_s} s after the last reply"
+                f"{_qemu_report(result, exited=True)}"
+            )
+        result.lines.append(line)
+        for sig in sigs:
+            if sig in line:
+                result.panic_line = line
+                src.kill()
+                raise HarnessError(
+                    f"panic signature {sig!r} in the {window_s} s after the last reply: "
+                    f"{line}"
+                )
 
 
 def run_qemu_console_input(
     cfg: QemuConfig,
     timeout_s: float = 45.0,
+    *,
+    line_source: LineSource | None = None,
 ) -> RunResult:
     """Boot, then type via COM1 and via PS/2 (`sendkey`). Both must echo.
 
     `-display none` still has an i8042; QEMU `sendkey` injects set-1
     scancodes on IRQ1, the same path as a focused QEMU window.
+    `line_source` replaces QEMU as in `run_qemu_and_check`.
     """
-    if not shutil.which("qemu-system-x86_64"):
-        raise HarnessError("qemu-system-x86_64 not on PATH")
-    if not os.path.exists(cfg.iso):
-        raise HarnessError(f"ISO missing: {cfg.iso}")
-
-    monitor_sock = _pick_monitor_path()
-    argv = qemu_argv(cfg, monitor_sock)
     panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.PIPE,
-        bufsize=0,
+    deadline = time.monotonic() + timeout_s
+    src = (
+        line_source
+        if line_source is not None
+        else _start_qemu(cfg, deadline, stdin=True)
     )
-    assert proc.stdout is not None
-    assert proc.stdin is not None
 
     result = RunResult()
-    deadline = time.monotonic() + timeout_s
-    reader = DeadlineReader(proc.stdout.fileno(), deadline)
     saw_ready = False
     saw_serial = False
     saw_ps2 = False
-    mon: socket.socket | None = None
 
     try:
         while True:
-            kind, line = reader.next_event()
+            kind, line = src.next_event()
             if kind == "timeout":
                 result.timed_out = True
-                proc.kill()
+                src.kill()
                 break
             if kind == "eof":
                 break
@@ -979,7 +1155,7 @@ def run_qemu_console_input(
             for sig in panic_signatures:
                 if sig in line:
                     result.panic_line = line
-                    proc.kill()
+                    src.kill()
                     raise HarnessError(
                         f"panic signature {sig!r} in: {line!r}"
                     )
@@ -989,8 +1165,7 @@ def run_qemu_console_input(
                 # Prompt is written without a newline; give the shell
                 # thread a beat before stuffing COM1.
                 time.sleep(0.2)
-                proc.stdin.write(f"echo {SERIAL_ECHO_TOKEN}\n".encode())
-                proc.stdin.flush()
+                src.send_input(f"echo {SERIAL_ECHO_TOKEN}\n".encode())
                 continue
             if saw_ready and not saw_serial and SERIAL_ECHO_TOKEN in line:
                 # Line editor reprints the command; wait for the echo
@@ -998,55 +1173,37 @@ def run_qemu_console_input(
                 if line.strip() == SERIAL_ECHO_TOKEN:
                     saw_serial = True
                     result.matched.append("serial_echo")
-                    if mon is None:
-                        mon = _connect_monitor(monitor_sock)
-                    _monitor_cmd(
-                        mon, "sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n")
-                    )
+                    src.monitor("sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n"))
                     continue
             if saw_serial and not saw_ps2 and line.strip() == PS2_ECHO_TOKEN:
                 saw_ps2 = True
                 result.matched.append("ps2_echo")
-                if mon is None:
-                    mon = _connect_monitor(monitor_sock)
-                _monitor_cmd(mon, "quit")
-                try:
-                    proc.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                # A later reply step goes before the tail.
+                _console_tail(src, result, panic_signatures, CONSOLE_TAIL_S)
+                src.quit()
                 break
     finally:
-        if mon is not None:
-            try:
-                mon.close()
-            except OSError:
-                pass
-        try:
-            result.exit_code = proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            result.exit_code = proc.wait()
+        result.exit_code = _reap(src)
+        result.stderr = src.stderr_text()
 
-    if result.timed_out or not saw_ready:
+    report = _qemu_report(result, exited=not result.timed_out)
+    if not saw_ready:
+        why = f"after {timeout_s}s" if result.timed_out else "before QEMU exited"
         raise HarnessError(
-            f"console input: no shell ready after {timeout_s}s; "
-            f"matched={result.matched}{serial_tail(result.lines)}"
+            f"console input: no shell ready {why}; matched={result.matched}{report}"
         )
     if not saw_serial:
-        raise HarnessError(
-            f"console input: serial echo missing{serial_tail(result.lines)}"
-        )
+        raise HarnessError(f"console input: serial echo missing{report}")
     if not saw_ps2:
-        raise HarnessError(
-            f"console input: PS/2 sendkey echo missing (i8042)"
-            f"{serial_tail(result.lines)}"
-        )
+        raise HarnessError(f"console input: PS/2 sendkey echo missing (i8042){report}")
     return result
 
 
 # isa-debug-exit at 0xf4: host status = (value << 1) | 1. DESIGN §8.2.
 ISA_DEBUG_PASS = 33  # write 0x10
 ISA_DEBUG_FAIL = 35  # write 0x11
+# The `panic_exit` build writes 0x11 after `panic: halted`.
+PANIC_EXIT_STATUS = ISA_DEBUG_FAIL
 
 KTEST_BEGIN = "vibeOS: ktest: begin"
 KTEST_END = "vibeOS: ktest: end"
@@ -1230,6 +1387,8 @@ def run_qemu_until_exit(
 # unlike `paging: mmio uc` it is not a claim that ports were programmed.
 # Trailing live marker is `shell ready`. Runtime-derived payload uses
 # `and_contains`.
+AP_ONLINE = "vibeOS: smp: ap online"
+
 _PHASE0_BEFORE_TIME: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
@@ -1279,8 +1438,14 @@ def boot_contract_markers(
         after.append(
             Marker(f"vibeOS: sched: cpu{i} ready", f"sched_cpu{i}")
         )
-        after.append(Marker("vibeOS: smp: ap online", f"smp_ap_online_{i - 1}"))
-    after.append(Marker("vibeOS: smp: done", "smp_done"))
+        after.append(Marker(AP_ONLINE, f"smp_ap_online_{i - 1}"))
+    after.append(
+        Marker(
+            "vibeOS: smp: done",
+            "smp_done",
+            exactly_before=(AP_ONLINE, max(smp, 1) - 1),
+        )
+    )
     after.append(Marker("vibeOS: console ok", "console_ok"))
     after.append(
         Marker(

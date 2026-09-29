@@ -189,6 +189,9 @@ vibeOS: block: <name> <n> sectors
 vibeOS: shell ready
 ```
 
+`vibeOS: serial online` is the kernel's first serial line: `run_e2e.py` fails when a kernel line (one
+starting `vibeOS:`) comes before it; Limine's or the firmware's output may precede it.
+
 Live e2e through Phase 6 slice A asserts through `idt ok`, then `per_cpu: bsp ready`,
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
 `sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`
@@ -220,17 +223,33 @@ sits between `console ok` and `shell ready` so `lspci` is registered before the 
 `block: vda <n> sectors` and `vdapN` when the ktest disk is present (not on the production e2e `pc`
 set). The same blind spot follows the last marker: writeback, deferred reclaim, and vibefs commits
 keep running after `shell ready`, and a panic there is invisible to a harness that stops reading at
-it. Planned (ROADMAP §10.2): the console-input boot keeps reading serial for 3 s after its last
-reply and fails on a panic signature in that window.
+it. So the console-input boot keeps reading serial for 3 s after its last reply (`CONSOLE_TAIL_S`)
+and fails on a panic signature in that window, or on QEMU's exit, before it quits QEMU.
 
 With `-smp N`, additionally:
 
 - for each AP `i` in `1..N`, `vibeOS: sched: cpu<i> ready` then `vibeOS: smp: ap online`, in order,
-  before `smp: done`. The harness requires at least these `N-1` pairs and does not reject an extra
-  `ap online` line; ROADMAP §10.2 makes it count exactly `N-1` (F141)
+  before `smp: done`: exactly these `N-1` `ap online` lines, and an extra one before or after
+  `smp: done` fails (F141). The count is `smp_done`'s `exactly_before` in `boot_contract_markers`,
+  and it covers `-smp 1`, which has no pair
 - `vibeOS: sched: cpu<i> ready` for every `i` in `0..N`
 - `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
   (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
+
+e2e also reads the boot log's memory diagnostics, which print before `sched: cpu0 ready`, in every
+production mode (default, `EXPECT_PIT`, highmem, and UEFI; `check_meminfo` in `run_e2e.py`):
+
+```
+vibeOS: pmm: <n> free 4KiB frames
+vibeOS: pmm: <n> total, largest order <n>
+vibeOS: meminfo: total <n> frames, free <n>, used <n>, largest order <n>
+vibeOS: meminfo: leaked <n> frames
+vibeOS: meminfo: heap used <n> B / capacity <n> B
+```
+
+Each `meminfo:` line (told apart by its text up to the first digit) and each `pmm:` line appears
+once; the `meminfo:` frame total equals the `pmm: <n> total` line's; free is at most the
+`pmm: <n> free 4KiB frames` count; used is total minus free; and heap use is at most heap capacity.
 
 The list above is the contract of a boot through Limine. Planned (ROADMAP §25.4, §26.4): a boot
 through the image's direct entry prints `vibeOS: boot: <path> entry ok`, where `<path>` is `kexec`,
@@ -263,15 +282,20 @@ fd 2, and a fuzzer writes random bytes. ROADMAP §10.2 makes the harness scan fr
 (§2.6). Before the kernel's first framed line it fails fast on Limine's panic line, the one failure
 that cannot be framed.
 
-Expected-panic e2e waits for `vibeOS: panic: halted` so the dump (regs, thread, last log records,
-backtrace) is in the captured log, then checks dump needles. Planned (ROADMAP §10.7, F135): before
+Expected-panic e2e matches boot markers only against the lines before the first panic signature (or
+dump banner), so the dump's `vibeOS: logrec:` replay of earlier records cannot satisfy one, and a
+marker still unmatched there fails the run (F141). From that line on it counts dump banners, the line
+that opens a dump, and requires exactly one: the bare `vibeOS: panic:` of a Rust panic,
+`vibeOS: exception: vector <n> rip=0x…`, `vibeOS: <kind> rip=0x…` for `#UD`, `nmi`, `#DB`, `#GP`,
+`#PF`, `#DF`, and `#MC`, or `vibeOS: panic: reentered` (`DUMP_BANNER_RE`); the other signature lines
+of a dump do not count. Planned (ROADMAP §10.7, F135): before
 `panic: halted` the dump prints one `vibeOS: panic: cpu N stopped (ipi|poll|nmi|panic)` or
 `vibeOS: panic: cpu N not stopped` line for each other online CPU (§2.5 step 1), and the F135
 variant checks them. `panic_exit` writes isa-debug-exit
-`0x11` so QEMU leaves instead of sitting in `hlt`. The harness kills QEMU at `panic: halted` instead of
-waiting for that exit, so it never checks status 35. It also matches boot markers on every line,
-including the dump's `vibeOS: logrec:` replay of earlier records, so a marker printed out of order
-before the panic can match again in the dump (ROADMAP §10.2, F141).
+`0x11` so QEMU leaves instead of sitting in `hlt`. The harness reads through `vibeOS: panic: halted`,
+so the dump (regs, thread, last log records, backtrace) is in the captured log, then gives QEMU up to
+10 s (`PANIC_EXIT_S`) to exit and requires status 35 (`PANIC_EXIT_STATUS`); then it checks the dump
+needles.
 
 Planned (ROADMAP §10.7, §11.7), the event rule. The panic path signals pvpanic
 ([§2.5](INVARIANTS.md#25-panic-policy) steps 6 and 7), QEMU runs with `-action panic=pause`, and the harness
@@ -299,8 +323,14 @@ versus forty five, on every CI run and every local invocation.
 Python, standard library only. `subprocess` with its own timeout rather than shelling out to GNU
 `timeout`, which does not exist on macOS. The harness helpers get their own unit tests, because a bug
 in the test harness produces either false confidence or a debugging session in the wrong repository.
-Those tests exercise `check_markers_in_order`, which no runner calls; `run_qemu_and_check`, the
-matcher every e2e run uses, has no unit test (ROADMAP §10.2, F141).
+Both runners, `run_qemu_and_check` and `run_qemu_console_input`, read serial from a line source
+(`tests/harness/linesource.py`): a QEMU child in a run, and in unit tests a `FakeLineSource` that
+scripts the lines, the exit status, and QEMU's stderr, so the matcher every e2e run uses is tested
+without QEMU (ROADMAP §10.2, F141). QEMU's stderr goes to a temporary file, apart from serial, so
+serial lines carry only the guest's output. When QEMU exits before the last marker, the error names
+the missing marker, QEMU's exit status, and the last 20 lines of its stderr, then the serial tail, so
+a firmware QEMU could not load reads as that and not only as `missing marker 'serial_online'`
+(F079); a timeout shows the stderr lines too when there are any.
 
 The `vibefs_crash` build (`vibefs_init::crash_loop`) prints no boot contract past its own lines,
 which `run_vibefs_crash.py` knows:
