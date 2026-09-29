@@ -26,7 +26,7 @@ use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering, fence};
+use crate::atomic::{AtomicUsize, Ordering, fence};
 
 /// A heap allocation failed. Callers map it to `ENOMEM` (or the errno
 /// Linux returns there) at the syscall boundary (DESIGN §4.4).
@@ -118,7 +118,8 @@ impl<T: ?Sized> TryBox<T> {
     /// `p` came from `TryBox::<T>::into_raw` (or `Box::<T>::into_raw`), and
     /// no other `TryBox` or `Box` owns it.
     pub unsafe fn from_raw(p: *mut T) -> Self {
-        // SAFETY: this fn's contract, stated in its `# Safety` section.
+        // SAFETY: the caller meets this fn's contract; established by
+        // `kalloc::TryBox::from_raw`'s `# Safety` section.
         TryBox(unsafe { Box::from_raw(p) })
     }
 }
@@ -536,14 +537,15 @@ mod tests {
     }
 
     // SAFETY: every call forwards to `System` with the caller's arguments
-    // unchanged, or returns null, which `GlobalAlloc` allows for failure
-    // (`std::alloc::System`).
+    // unchanged, or returns null, which `GlobalAlloc` allows for failure;
+    // established here.
     unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
             if take_fail() {
                 return core::ptr::null_mut();
             }
-            // SAFETY: the caller's `GlobalAlloc::alloc` contract, forwarded.
+            // SAFETY: the caller meets `GlobalAlloc::alloc`'s contract, which
+            // this method forwards to `System` unchanged here.
             let p = unsafe { System.alloc(l) };
             if !p.is_null() {
                 add_live(l.size() as isize);
@@ -553,7 +555,8 @@ mod tests {
 
         unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
             add_live(-(l.size() as isize));
-            // SAFETY: the caller's `GlobalAlloc::dealloc` contract, forwarded.
+            // SAFETY: the caller meets `GlobalAlloc::dealloc`'s contract, which
+            // this method forwards to `System` unchanged here.
             unsafe { System.dealloc(p, l) }
         }
 
@@ -561,7 +564,8 @@ mod tests {
             if take_fail() {
                 return core::ptr::null_mut();
             }
-            // SAFETY: the caller's `GlobalAlloc::realloc` contract, forwarded.
+            // SAFETY: the caller meets `GlobalAlloc::realloc`'s contract, which
+            // this method forwards to `System` unchanged here.
             let q = unsafe { System.realloc(p, l, new) };
             if !q.is_null() {
                 add_live(new as isize - l.size() as isize);
@@ -621,7 +625,9 @@ mod tests {
         }
     }
 
-    static ARC_DROPS: AtomicUsize = AtomicUsize::new(0);
+    // `core`'s atomic in both configurations: loom's has no `const fn new`.
+    static ARC_DROPS: crate::atomic::statics::AtomicUsize =
+        crate::atomic::statics::AtomicUsize::new(0);
     static ARC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -662,8 +668,8 @@ mod tests {
         let mut b = TryBox::try_new(41u64).unwrap();
         *b += 1;
         let p = TryBox::into_raw(b);
-        // SAFETY: `p` came from `TryBox::into_raw` just above, and nothing
-        // else owns it.
+        // SAFETY: `p` came from `kalloc::TryBox::into_raw` just above, and
+        // nothing else owns it.
         let b = unsafe { TryBox::from_raw(p) };
         assert_eq!(*b, 42);
         assert_eq!(b.into_inner(), 42);

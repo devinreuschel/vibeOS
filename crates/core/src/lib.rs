@@ -45,7 +45,7 @@ pub mod irq;
 #[allow(
     clippy::disallowed_types,
     clippy::disallowed_macros,
-    reason = "kalloc wraps alloc's owning types (DESIGN §4.4)"
+    reason = "permanent: kalloc wraps alloc's owning types, and everything it exposes is fallible (DESIGN §4.4)"
 )]
 pub mod kalloc;
 pub mod limits;
