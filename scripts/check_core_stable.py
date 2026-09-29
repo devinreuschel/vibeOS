@@ -55,9 +55,6 @@ PARSERS: tuple[tuple[str, str, str], ...] = (
 # Rows whose attribute the sweep that owns the module adds (ROADMAP §10.1),
 # as `path` or `path::target`. A pending row whose attribute exists fails.
 PARSERS_PENDING: tuple[str, ...] = (
-    "console/kbd.rs::Decoder::feed",
-    "proc/elf.rs",
-    "shell/mod.rs::tokenize",
 )
 
 ATTR_START = re.compile(r"#!?\[")

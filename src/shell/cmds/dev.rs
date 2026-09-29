@@ -25,7 +25,15 @@ pub(crate) const COMMANDS: &[Command] = &[
 fn cmd_lspci(_args: &[&str]) {
     let mut i = 0usize;
     while let Some(d) = dev_init::get(i) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+        )]
         let _ = d.write_lspci(&mut Console);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+        )]
         let _ = writeln!(Console);
         i += 1;
     }
@@ -34,6 +42,10 @@ fn cmd_lspci(_args: &[&str]) {
 fn cmd_devices(_args: &[&str]) {
     let mut i = 0usize;
     while let Some(d) = dev_init::get(i) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+        )]
         let _ = d.write_tree(&mut Console);
         i += 1;
     }

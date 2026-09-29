@@ -45,17 +45,13 @@ pub mod irq;
 #[allow(
     clippy::disallowed_types,
     clippy::disallowed_macros,
-    reason = "kalloc wraps alloc's owning types (DESIGN §4.4)"
+    reason = "permanent: kalloc wraps alloc's owning types, and everything it exposes is fallible (DESIGN §4.4)"
 )]
 pub mod kalloc;
 pub mod limits;
 pub mod log;
 pub mod marker;
 pub mod mm;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod proc;
 pub mod sched;
 pub mod shell;

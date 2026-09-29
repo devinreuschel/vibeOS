@@ -24,7 +24,6 @@ use crate::ktest::{Outcome, spawn_thread_on, spin_until_ns};
 use crate::kva_init;
 use crate::per_cpu_init;
 use crate::proc_init;
-use crate::syscall_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86::{
@@ -119,7 +118,7 @@ pub(crate) fn test_gdt_selectors() -> Outcome {
 }
 
 pub(crate) fn test_star_sysret_layout() -> Outcome {
-    if !syscall_init::star_configured() {
+    if !crate::proc::ktest::star_configured() {
         return Outcome::Fail("STAR.SYSCALL_CS/SYSRET_CS or EFER.SCE");
     }
     Outcome::Ok
@@ -614,7 +613,7 @@ pub(crate) fn test_ac_clear_on_exception() -> Outcome {
     BP_PROBE.reset();
     let ac_after = {
         let _g = x86::InterruptGuard::enter();
-        addr_space_init::load_cr3(&space);
+        crate::proc::ktest::load_cr3(&space);
         x86::invlpg(USER_VA);
         testing::set_hook(vectors::BP, Some(bp_hook));
         x86::stac();

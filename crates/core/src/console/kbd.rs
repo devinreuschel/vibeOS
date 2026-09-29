@@ -205,9 +205,16 @@ impl Decoder {
 
     /// Consume one set-1 byte. `None` for prefix, break, unknown, or a
     /// typematic make of a lock/modifier (already down).
+    #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     pub fn feed(&mut self, sc: u8) -> Option<DecodedKey> {
         if self.e1 > 0 {
-            self.e1 -= 1;
+            #[allow(
+                clippy::arithmetic_side_effects,
+                reason = "bounded: the `self.e1 > 0` test above"
+            )]
+            {
+                self.e1 -= 1;
+            }
             return None;
         }
         if sc == SC_E1 {
@@ -231,6 +238,7 @@ impl Decoder {
     }
 
     /// First make → true. Typematic make and every break → false.
+    #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     fn make_edge(&mut self, bit: u16, release: bool) -> bool {
         if release {
             self.down &= !bit;
@@ -243,12 +251,14 @@ impl Decoder {
         true
     }
 
+    #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     fn sync_mods(&mut self) {
         self.mods.shift = self.down & DOWN_SHIFT != 0;
         self.mods.ctrl = self.down & DOWN_CTRL != 0;
         self.mods.alt = self.down & DOWN_ALT != 0;
     }
 
+    #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     fn modifier(&mut self, bit: u16, release: bool, named: NamedKey) -> Option<DecodedKey> {
         let first = self.make_edge(bit, release);
         self.sync_mods();
@@ -259,6 +269,7 @@ impl Decoder {
         }
     }
 
+    #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     fn lock_toggle(
         &mut self,
         bit: u16,
@@ -273,6 +284,7 @@ impl Decoder {
         Some(DecodedKey::Named(named))
     }
 
+    #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     fn feed_plain(&mut self, make: u8, release: bool) -> Option<DecodedKey> {
         match make {
             0x2A => self.modifier(DOWN_LSHIFT, release, NamedKey::LeftShift),
@@ -299,6 +311,7 @@ impl Decoder {
         }
     }
 
+    #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     fn feed_e0(&mut self, make: u8, release: bool) -> Option<DecodedKey> {
         match make {
             0x1D => self.modifier(DOWN_RCTRL, release, NamedKey::RightCtrl),
@@ -313,6 +326,7 @@ impl Decoder {
         }
     }
 
+    #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     fn decode_make(&self, make: u8, e0: bool) -> Option<DecodedKey> {
         if e0 {
             return e0_named(make).map(DecodedKey::Named).or({
@@ -358,11 +372,13 @@ impl Decoder {
         Some(self.apply_ctrl(ch))
     }
 
+    #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     fn apply_ctrl(&self, ch: u8) -> DecodedKey {
         if self.mods.ctrl {
             let up = ch.to_ascii_uppercase();
             if up.is_ascii_uppercase() {
-                return DecodedKey::Char(up - b'A' + 1);
+                // `A` (0x41) to `Z` (0x5A) become 0x01 to 0x1A.
+                return DecodedKey::Char(up & 0x1F);
             }
         }
         DecodedKey::Char(ch)
@@ -375,24 +391,21 @@ impl Default for Decoder {
     }
 }
 
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn unshifted_top(make: u8, shifted: bool) -> Option<u8> {
     const U: &[u8] = b"1234567890-=";
     const S: &[u8] = b"!@#$%^&*()_+";
-    let i = (make - 0x02) as usize;
-    if i >= U.len() {
-        return None;
-    }
-    Some(if shifted { S[i] } else { U[i] })
+    let i = usize::from(make.checked_sub(0x02)?);
+    if shifted { S.get(i) } else { U.get(i) }.copied()
 }
 
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn from_row(make: u8, base: u8, map: &[u8], shifted: bool, caps: bool) -> Option<u8> {
-    let i = (make - base) as usize;
-    if i >= map.len() {
-        return None;
-    }
-    Some(case_letter(map[i], shifted, caps))
+    let i = usize::from(make.checked_sub(base)?);
+    Some(case_letter(*map.get(i)?, shifted, caps))
 }
 
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn case_letter(c: u8, shifted: bool, caps: bool) -> u8 {
     if c.is_ascii_lowercase() {
         let upper = shifted != caps;
@@ -413,6 +426,7 @@ fn case_letter(c: u8, shifted: bool, caps: bool) -> u8 {
     }
 }
 
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn plain_named(make: u8) -> Option<NamedKey> {
     Some(match make {
         0x3B => NamedKey::F1,
@@ -431,6 +445,7 @@ fn plain_named(make: u8) -> Option<NamedKey> {
     })
 }
 
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn e0_named(make: u8) -> Option<NamedKey> {
     Some(match make {
         0x47 => NamedKey::Home,
@@ -447,6 +462,7 @@ fn e0_named(make: u8) -> Option<NamedKey> {
     })
 }
 
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn keypad(make: u8, num: bool, _shifted: bool) -> Option<DecodedKey> {
     if num {
         let ch = match make {
@@ -806,6 +822,75 @@ mod tests {
                 DecodedKey::Char(b'a'),
                 DecodedKey::Char(b'a'),
             ]
+        );
+    }
+
+    /// Every byte, alone and after each prefix, with every modifier and
+    /// lock held, decodes or is dropped; none panics.
+    #[test]
+    fn decoder_every_byte_every_state() {
+        let holds: [&[u8]; 6] = [&[], &[0x2A], &[0x1D], &[0x38], &[0x3A], &[0x45]];
+        for hold in holds {
+            for pre in [None, Some(SC_E0), Some(SC_E1)] {
+                for sc in 0..=u8::MAX {
+                    let mut d = Decoder::new();
+                    for &b in hold {
+                        d.feed(b);
+                    }
+                    if let Some(p) = pre {
+                        d.feed(p);
+                    }
+                    d.feed(sc);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decoder_ctrl_letters_and_row_edges() {
+        // Ctrl+A and Ctrl+Z bound the control range; Ctrl+1 stays a digit.
+        assert_eq!(
+            feed(&[0x1D, 0x1E]),
+            [
+                DecodedKey::Named(NamedKey::LeftCtrl),
+                DecodedKey::Char(0x01)
+            ]
+        );
+        assert_eq!(
+            feed(&[0x1D, 0x2C]),
+            [
+                DecodedKey::Named(NamedKey::LeftCtrl),
+                DecodedKey::Char(0x1A)
+            ]
+        );
+        assert_eq!(
+            feed(&[0x1D, 0x02]),
+            [
+                DecodedKey::Named(NamedKey::LeftCtrl),
+                DecodedKey::Char(b'1')
+            ]
+        );
+        // The first and last key of each row.
+        assert_eq!(
+            feed(&[0x02, 0x0D]),
+            [DecodedKey::Char(b'1'), DecodedKey::Char(b'=')]
+        );
+        assert_eq!(
+            feed(&[0x10, 0x1B]),
+            [DecodedKey::Char(b'q'), DecodedKey::Char(b']')]
+        );
+        assert_eq!(
+            feed(&[0x1E, 0x28]),
+            [DecodedKey::Char(b'a'), DecodedKey::Char(b'\'')]
+        );
+        assert_eq!(
+            feed(&[0x2C, 0x35]),
+            [DecodedKey::Char(b'z'), DecodedKey::Char(b'/')]
+        );
+        // Pause's E1 sequence swallows its five bytes, then decoding resumes.
+        assert_eq!(
+            feed(&[SC_E1, 0x1D, 0x45, SC_E1, 0x9D, 0xC5, 0x1E]),
+            [DecodedKey::Char(b'a')]
         );
     }
 }

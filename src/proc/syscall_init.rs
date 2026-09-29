@@ -1,4 +1,3 @@
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 //! STAR / LSTAR / FMASK / SCE, syscall entry asm, FPU, RSP0/CR3 on switch.
 //! ROADMAP §9.1 / §9.3. Same entry as Slice A; stub is the dispatch table.
 
@@ -220,10 +219,16 @@ unsafe extern "C" fn vibeos_syscall_bad_rip(frame: *mut UserFrame) -> ! {
     #[cfg(feature = "kernel_tests")]
     testing::BAD_RIP_KILLS.fetch_add(1, Ordering::Relaxed);
     crate::arch::idt::user_fault(&TrapFrame::for_user(vectors::GP, 0, f));
-    panic!(
-        "syscall: non-canonical return RIP {:#x} with no process",
-        f.rip
-    );
+    #[allow(
+        clippy::panic,
+        reason = "invariant: a thread returns to ring 3 only as a process's thread, and `proc_init::init` installs the fault hook before the first ring-3 entry, so `user_fault` kills it and does not return"
+    )]
+    {
+        panic!(
+            "syscall: non-canonical return RIP {:#x} with no process",
+            f.rip
+        );
+    }
 }
 
 /// The exit's choice between `sysretq` and `iretq` (Linux's rule,
@@ -252,6 +257,10 @@ pub unsafe fn init_cpu() {
     crate::arch::cpu::init_control_regs();
     let entry = vibeos_syscall_entry as *const () as u64;
     let star = ((STAR_SYSRET as u64) << 48) | ((KERNEL_CS as u64) << 32);
+    // SAFETY: STAR, LSTAR, FMASK and EFER are architectural MSRs that
+    // every x86_64 CPU has; STAR names the GDT's selectors and LSTAR the
+    // entry stub, and EFER keeps its other bits. The GDT is loaded (this
+    // fn's contract, `syscall_init::init_cpu`).
     unsafe {
         x86::wrmsr(IA32_STAR, star);
         x86::wrmsr(IA32_LSTAR, entry);
@@ -267,6 +276,8 @@ pub unsafe fn init_cpu() {
 /// # Safety
 /// GDT loaded, `GS_BASE` is the BSP `PerCpu`.
 pub unsafe fn init_bsp() {
+    // SAFETY: the GDT is loaded and `GS_BASE` is the BSP's `PerCpu` (this
+    // fn's contract, `syscall_init::init_bsp`).
     unsafe { init_cpu() };
     crate::arch::idt::set_user_return_hook(fp_user_return);
     crate::thread_init::set_switch_hooks(on_switch, fpu_template);
@@ -287,6 +298,8 @@ pub unsafe fn init_bsp() {
 /// # Safety
 /// `tss` is this CPU's live TSS; `rsp0` is its kernel stack top.
 pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
+    // SAFETY: the AP loaded its GDT and `GS_BASE` before this call (this
+    // fn's contract, `syscall_init::init_ap`).
     unsafe { init_cpu() };
     per_cpu_init::with_current(|cpu| {
         cpu.tss = tss;
@@ -306,6 +319,9 @@ fn init_fpu() {
     let mut tmpl = Fxsave::empty();
     fp_init_template(&mut tmpl);
     if FPU_TEMPLATE.try_get().is_none() {
+        // SAFETY: only the BSP reaches this first, from `init_bsp` before
+        // `smp: done`, so the one write races no reader; established by
+        // `syscall_init::init_bsp`.
         unsafe { FPU_TEMPLATE.set(tmpl) };
         FPU_READY.store(true, Ordering::Release);
     }
@@ -314,6 +330,9 @@ fn init_fpu() {
 fn seed_current_fpu() {
     let p = per_cpu_init::current_thread();
     if !p.is_null() {
+        // SAFETY: invariant: a non-null current thread is this CPU's live TCB,
+        // touched only by this CPU while it runs, and at boot nothing else
+        // runs here; established by `per_cpu_init::set_current_thread`.
         unsafe {
             (*p).fpu = fpu_template();
             crate::thread_init::fp_invalidate(&mut *p);
@@ -449,6 +468,9 @@ pub fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
     };
     cpu.kernel_rsp0 = top;
     if !cpu.tss.is_null() {
+        // SAFETY: invariant: a non-null `cpu.tss` is this CPU's own live TSS,
+        // which only this CPU writes, and the caller holds `&mut PerCpu`;
+        // established by `syscall_init::init_bsp` and `syscall_init::init_ap`.
         unsafe { (*cpu.tss).set_rsp0(top) };
     }
 }
@@ -468,6 +490,10 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
         return true;
     }
+    // SAFETY: invariant I128: `want` is the kernel root or a TCB's root,
+    // which stays allocated while that TCB names it, and every root shares
+    // the kernel half this code and stack run in; established by
+    // `addr_space_init::teardown`.
     unsafe { x86::write_cr3(want) };
     cpu.remote.as_cr3.store(want, Ordering::Release);
     false
@@ -500,6 +526,9 @@ pub fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
 pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     switch_fpu(cpu, old);
     if !new.is_null() {
+        // SAFETY: invariant: `new` is the live TCB this CPU is switching to,
+        // and the caller holds this CPU's `&mut PerCpu` with IF=0, as
+        // `switch_cr3_for` requires; established by `thread_init::switch_now`.
         unsafe {
             set_rsp0_for(cpu, &*new);
             switch_cr3_for(cpu, &*new);
@@ -586,34 +615,37 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
     }
 }
 
-pub fn star_configured() -> bool {
-    let star = x86::rdmsr(IA32_STAR);
-    let efer = x86::rdmsr(IA32_EFER);
-    let syscall_cs = ((star >> 32) & 0xFFFF) as u16;
-    let sysret_cs = ((star >> 48) & 0xFFFF) as u16;
-    syscall_cs == KERNEL_CS && sysret_cs == STAR_SYSRET && (efer & EFER_SCE) != 0
-}
-
 // --- Slice B: dispatch, early fd1 ---
 
 static TRACE: AtomicBool = AtomicBool::new(false);
 static CURRENT_AS: AtomicPtr<AddressSpace> = AtomicPtr::new(ptr::null_mut());
 static SYSCALLS: AtomicU64 = AtomicU64::new(0);
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
+#[allow(
+    dead_code,
+    reason = "P10-S36 adds its caller, the boot command line's trace switch"
+)]
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Release);
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
 pub fn trace_enabled() -> bool {
     TRACE.load(Ordering::Acquire)
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "P10-S86 adds its procfs caller; mm::ktest reads it today"
+    )
+)]
 pub fn syscall_count() -> u64 {
     let t = per_cpu_init::current_thread();
     if !t.is_null() {
+        // SAFETY: invariant: a non-null current thread is this CPU's live
+        // TCB, and only this CPU writes its `syscall_count` (`bump_counter`);
+        // established by `per_cpu_init::set_current_thread`.
         unsafe { (*t).syscall_count }
     } else {
         SYSCALLS.load(Ordering::Relaxed)
@@ -625,6 +657,11 @@ fn current_as() -> Option<&'static AddressSpace> {
     if p.is_null() {
         None
     } else {
+        // SAFETY: invariant: only a process's own thread stores its space
+        // here, and that thread replaces it (execve) or clears it (exit)
+        // before the space is torn down, so a non-null `CURRENT_AS` is live;
+        // established by `syscall_init::set_user_as` and
+        // `syscall_init::clear_user_as`, called from `proc_init`.
         Some(unsafe { &*p })
     }
 }
@@ -648,6 +685,9 @@ fn bump_counter() {
     SYSCALLS.fetch_add(1, Ordering::Relaxed);
     let t = per_cpu_init::current_thread();
     if !t.is_null() {
+        // SAFETY: invariant: a non-null current thread is this CPU's live
+        // TCB, and only the thread itself, on this CPU, writes its
+        // `syscall_count`; established by `per_cpu_init::set_current_thread`.
         unsafe { (*t).syscall_count = (*t).syscall_count.wrapping_add(1) };
     }
 }

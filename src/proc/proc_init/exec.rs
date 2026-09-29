@@ -171,7 +171,7 @@ pub(super) fn sys_execve(path: u64, argv: u64, envp: u64, frame: Option<&mut Use
     let mut i = 0usize;
     while i < MAX_FDS {
         if let Some(fd) = gone[i] {
-            let _ = close_fd_slot(fd);
+            close_dropped(fd, "execve close-on-exec");
         }
         i += 1;
     }
@@ -191,6 +191,10 @@ pub(super) fn sys_execve(path: u64, argv: u64, envp: u64, frame: Option<&mut Use
         orig_rax: frame.orig_rax,
         ..UserFrame::new_user(entry, rsp)
     };
+    // SAFETY: FS_BASE is an architectural MSR, and `fs` is the new image's
+    // thread pointer, a canonical user address the loader chose
+    // (`user_init::load_image`), so the next ring-3 `fs:` access reaches its
+    // TLS block; established by `user_init::setup_tls`.
     unsafe { crate::x86::wrmsr(crate::x86::IA32_FS_BASE, fs) };
     0
 }

@@ -717,3 +717,32 @@ needs = [
   "`ci.yml` runs on a push",  # L1205
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1223
+[[box]]
+key = "`kernel_tests` hooks isolated in per-subsystem"
+needs = [
+  "one directory per subsystem, portable",  # L1280
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1281
+[[box]]
+key = "`fs/mod.rs`, `vibefs.rs`, `fat.rs`, `fs/kernfs.rs`, and"
+needs = [
+  "`kernel_tests` hooks isolated in per-subsystem",  # L1223
+  "one directory per subsystem, portable",  # L1280
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1189
+[[box]]
+key = "DESIGN §2.5's rule that nothing"
+needs = [
+  "one `KError` with `From` for",  # L1343
+  "the portable block cache's readahead",  # L1490
+  "a vibefs write that cannot",  # L1495
+  "vibefs never rewrites corrupt data",  # L1496
+  "`pci_init::map_mmio` refuses a range that",  # L1510
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"

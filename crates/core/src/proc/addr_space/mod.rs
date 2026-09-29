@@ -95,6 +95,7 @@ pub struct Region {
     pub backing: Backing,
 }
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AsError {
     Misaligned,
@@ -156,6 +157,7 @@ pub enum MmapError {
     NotAnon,
 }
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserMemError {
     NonCanonical,
@@ -202,6 +204,9 @@ struct Counting<'a, A: FrameAlloc> {
     n: &'a mut usize,
 }
 
+// SAFETY: every frame comes from `inner` unchanged, so `Counting` keeps
+// `inner`'s promise of order-0 tokens writable through the HHDM
+// (`paging::FrameAlloc`); the count is the only thing added, here.
 unsafe impl<A: FrameAlloc> FrameAlloc for Counting<'_, A> {
     fn alloc_frame(&mut self) -> Option<Frames> {
         let f = self.inner.alloc_frame()?;
@@ -222,7 +227,15 @@ impl AddressSpace {
     /// reachable through `kernel.hhdm_offset()`.
     pub unsafe fn new<A: FrameAlloc>(kernel: &Mapper, alloc: &mut A) -> Option<Self> {
         let root = PhysAddr(alloc.alloc_frame()?.into_entry());
+        // SAFETY: `root` is an owned frame from `alloc`, writable through
+        // `kernel`'s HHDM offset (this fn's contract), and this space owns it
+        // until `teardown`; the mapper walks nothing before the zeroing
+        // below, so the root is zeroed before first use, as
+        // `paging::Mapper::new` requires.
         let mapper = unsafe { Mapper::new(root, kernel.hhdm_offset()) };
+        // SAFETY: `root` is the owned frame just taken from `alloc`,
+        // reachable through the HHDM offset (this fn's contract), as
+        // `paging::Mapper::zero_frame` requires; established here.
         unsafe { mapper.zero_frame(root) };
         let mut space = Self {
             mapper,
@@ -418,7 +431,8 @@ impl AddressSpace {
                 }
                 Some((_, PageSize::Size4K, _)) => {
                     // SAFETY: the TLB entry for `page` goes through `flush`
-                    // below, before its frame is freed (this fn's contract).
+                    // below, before its frame is freed (this fn's contract,
+                    // `addr_space::AddressSpace::unmap_pages`).
                     if let Some((pa, _)) = unsafe { self.mapper.unmap_page(page) } {
                         flush(page.as_u64());
                         // SAFETY: `unmap_page` just cleared this user leaf,
@@ -662,6 +676,10 @@ impl AddressSpace {
             return Ok(());
         }
         self.check_user_range(src, dst.len() as u64)?;
+        // SAFETY: `dst` is `dst.len()` live, writable bytes, and
+        // `check_user_range` just found every page of the source mapped in
+        // this space, as `addr_space::AddressSpace::copy_via_hhdm` requires;
+        // established here.
         unsafe { self.copy_via_hhdm(src, dst.as_mut_ptr(), dst.len(), false) }
     }
 
@@ -672,6 +690,11 @@ impl AddressSpace {
             return Ok(());
         }
         self.check_user_range(dst, src.len() as u64)?;
+        // SAFETY: `src` is `src.len()` live bytes that a copy to user only
+        // reads (`to_user` is true, so the `*mut` is never written through),
+        // and `check_user_range` just found every page of the destination
+        // mapped in this space, as `addr_space::AddressSpace::copy_via_hhdm`
+        // requires; established here.
         unsafe { self.copy_via_hhdm(dst, src.as_ptr() as *mut u8, src.len(), true) }
     }
 
@@ -690,6 +713,10 @@ impl AddressSpace {
             let page_off = va & (span - 1);
             let chunk = (span - page_off).min(len - off);
             let ptr = (pa.as_u64().wrapping_add(self.mapper.hhdm_offset())) as *mut u8;
+            // SAFETY: `translate` found `va` mapped to `pa` in a page of
+            // `span` bytes, `chunk` stops at that page's end, and the HHDM
+            // maps every frame writable (`paging::FrameAlloc`), so
+            // `[ptr, ptr+chunk)` is one live frame's bytes; established here.
             unsafe { core::ptr::write_bytes(ptr, 0, chunk as usize) };
             off += chunk;
         }
@@ -715,10 +742,18 @@ impl AddressSpace {
             let page_off = cur & (span - 1);
             let chunk = (span - page_off).min((len - off) as u64) as usize;
             let user = (pa.as_u64().wrapping_add(self.mapper.hhdm_offset())) as *mut u8;
-            if to_user {
-                unsafe { core::ptr::copy_nonoverlapping(buf.add(off) as *const u8, user, chunk) };
-            } else {
-                unsafe { core::ptr::copy_nonoverlapping(user as *const u8, buf.add(off), chunk) };
+            // SAFETY: `off + chunk <= len`, so `buf.add(off)` and its `chunk`
+            // bytes lie in the caller's `len` live bytes (this fn's contract,
+            // `addr_space::AddressSpace::copy_via_hhdm`); `translate` found
+            // `cur` mapped and `chunk` stops at its page's end, so `user` is
+            // `chunk` bytes of one frame through the HHDM; a user frame is
+            // never a kernel object, so the two do not overlap.
+            unsafe {
+                if to_user {
+                    core::ptr::copy_nonoverlapping(buf.add(off) as *const u8, user, chunk);
+                } else {
+                    core::ptr::copy_nonoverlapping(user as *const u8, buf.add(off), chunk);
+                }
             }
             off += chunk;
         }
@@ -873,7 +908,8 @@ impl AddressSpace {
             let hi = r_end.min(end);
             if r.backing != Backing::Reserved {
                 // SAFETY: `[lo, hi)` lies in this region, whose leaves hold
-                // order-0 tokens from `pool` (this fn's contract).
+                // order-0 tokens from `pool`, and `flush` covers every TLB
+                // (this fn's contract, `addr_space::AddressSpace::unmap_free`).
                 unsafe { self.unmap_pages(lo, hi - lo, pool, flush)? };
             }
             let below = (r.start < va).then(|| Region {
@@ -899,6 +935,10 @@ impl AddressSpace {
     /// `pool` may recycle every user/PT/PML4 frame this space still owns.
     pub unsafe fn teardown_pool<A: FrameFree>(&mut self, pool: &mut A) -> TeardownStats {
         let mut free = |f: Frames| pool.free_frame(f);
+        // SAFETY: the caller hands every frame this space owns to `pool`
+        // and uses the space no more (this fn's contract,
+        // `addr_space::AddressSpace::teardown_pool`), which is
+        // `teardown`'s contract.
         unsafe { self.teardown(&mut free) }
     }
 
@@ -911,6 +951,9 @@ impl AddressSpace {
         kernel: &Mapper,
         alloc: &mut A,
     ) -> Result<AddressSpace, AsError> {
+        // SAFETY: `kernel` is the live kernel mapper and `alloc` hands out
+        // owned frames (this fn's contract,
+        // `addr_space::AddressSpace::clone_anon`), as `new` requires.
         let mut dst = unsafe { AddressSpace::new(kernel, alloc) }.ok_or(AsError::OutOfFrames)?;
         dst.brk_start = self.brk_start;
         dst.brk = self.brk;
@@ -925,6 +968,9 @@ impl AddressSpace {
                     dst.insert_region(r)?;
                     continue;
                 }
+                // SAFETY: `dst` is new, so `[r.start, r.start+r.len)` is
+                // unmapped in it, and `alloc` hands out owned frames (this
+                // fn's contract, `addr_space::AddressSpace::clone_anon`).
                 unsafe { dst.map_anon(r.start, r.len, r.perms, alloc)? };
                 let mut off = 0u64;
                 while off < r.len {
@@ -941,6 +987,9 @@ impl AddressSpace {
         match rc {
             Ok(()) => Ok(dst),
             Err(e) => {
+                // SAFETY: `dst` was never loaded in a CR3 and is dropped
+                // here, and every frame it holds came from `alloc`, which may
+                // take it back (`addr_space::FrameFree`).
                 let _ = unsafe { dst.teardown_pool(alloc) };
                 Err(e)
             }
@@ -949,6 +998,8 @@ impl AddressSpace {
 }
 
 // Host tests give frames back to the shared buddy pool.
+// SAFETY: every frame a host test's space holds came from this pool's
+// buddy, and `free_frame` gives it back to that buddy; established here.
 #[cfg(test)]
 unsafe impl FrameFree for crate::pmm::testing::Pool {
     fn free_frame(&mut self, f: Frames) {

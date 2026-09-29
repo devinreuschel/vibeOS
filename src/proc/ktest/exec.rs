@@ -13,10 +13,10 @@ use vibeos::proc::{SIGSEGV, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::syscall::SYS_GETPID;
 use vibeos::vectors;
 
+use super::hooks as exec_testing;
 use crate::addr_space_init::testing as as_testing;
 use crate::apic_init;
 use crate::console_init;
-use crate::kbd_init;
 use crate::ktest::user::{self, DEFAULT, Image, Layout, user_code};
 use crate::ktest::{Outcome, fid, sleep_until};
 use crate::pmm_init;
@@ -24,7 +24,7 @@ use crate::proc_init;
 use crate::syscall_init::testing as sc_testing;
 use crate::thread_init;
 use crate::time_init;
-use crate::user_init::{LoadError, testing as exec_testing};
+use crate::user_init::LoadError;
 
 // exit(7) when getppid() is 0 (the kernel spawned it), else exit(1).
 user_code!(
@@ -264,7 +264,7 @@ pub(crate) fn test_console_read_exit() -> Outcome {
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     };
     let halted = sleep_until(|| console_init::testing::halts() != 0, 5_000);
-    kbd_init::push_for_test(DecodedKey::Char(b'k'));
+    crate::console::ktest::push_for_test(DecodedKey::Char(b'k'));
     let st = user::wait(pid);
     if !halted {
         return Outcome::Fail("reader never reached wait_key's halt");

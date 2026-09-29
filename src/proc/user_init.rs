@@ -19,7 +19,12 @@ use vibeos::limits::MAX_ELF;
 const STACK_PAGES: u64 = 32;
 const STACK_TOP: u64 = 0x0000_0000_8000_0000;
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "vibefs_crash",
+    allow(dead_code, reason = "the vibefs_crash build spawns no process")
+)]
 pub enum LoadError {
     Fs(FsError),
     Elf(ElfError),
@@ -35,6 +40,10 @@ pub enum LoadError {
 }
 
 impl LoadError {
+    #[cfg_attr(
+        feature = "vibefs_crash",
+        allow(dead_code, reason = "the vibefs_crash build spawns no process")
+    )]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Fs(_) => "fs",
@@ -69,8 +78,10 @@ fn read_path(path: &str) -> Result<TryVec<u8>, LoadError> {
     let f = file_init::open_routed(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
         .map_err(LoadError::Fs)?;
     let r = read_file(&f);
-    let _ = file_init::close(f);
-    r
+    let closed = file_init::close(f);
+    let bytes = r?;
+    closed.map_err(LoadError::Fs)?;
+    Ok(bytes)
 }
 
 /// Read `f` whole, at most its stated size, into a buffer reserved up
@@ -110,6 +121,9 @@ fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError>
         let end = elf::page_up(seg.vaddr.saturating_add(seg.memsz));
         let len = end - start;
         let perms = UserPerms::from_elf(seg.write, seg.exec);
+        // SAFETY: `addr_space_init::map_anon` checks the range is in the
+        // user half and clear of every region before it maps anything, and
+        // maps from the buddy; established by `addr_space_init::map_anon`.
         match unsafe { addr_space_init::map_anon(space, start, len, perms) } {
             Ok(()) | Err(AsError::Overlap) => {}
             Err(e) => return Err(LoadError::As(e)),
@@ -131,6 +145,9 @@ fn map_stack(space: &mut AddressSpace, exec: bool) -> Result<(u64, u64), LoadErr
     let len = STACK_PAGES * PAGE_SIZE_4K;
     let base = STACK_TOP - len;
     let perms = if exec { UserPerms::RWX } else { UserPerms::RW };
+    // SAFETY: `addr_space_init::map_anon` checks the range is in the user
+    // half and clear of every region before it maps anything; established
+    // by `addr_space_init::map_anon`.
     unsafe { addr_space_init::map_anon(space, base, len, perms) }.map_err(LoadError::As)?;
     space.zero_bytes(base, len).map_err(LoadError::Mem)?;
     Ok((base, STACK_TOP))
@@ -143,6 +160,9 @@ fn setup_tls(space: &mut AddressSpace, img: &Image<'_>, stack_base: u64) -> Resu
     let aligned = align_up(tls.memsz, tls.align.max(1));
     let map_len = tls.map_len().ok_or(LoadError::Elf(ElfError::ImageTooBig))?;
     let tls_map = stack_base.saturating_sub(map_len);
+    // SAFETY: `addr_space_init::map_anon` checks the range is in the user
+    // half and clear of every region before it maps anything; established
+    // by `addr_space_init::map_anon`.
     unsafe { addr_space_init::map_anon(space, tls_map, map_len, UserPerms::RW) }
         .map_err(LoadError::As)?;
     space.zero_bytes(tls_map, map_len).map_err(LoadError::Mem)?;
@@ -252,10 +272,10 @@ fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u
 /// Build a new address space. Caller installs it only after this returns.
 pub fn load_path(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
     #[cfg(feature = "kernel_tests")]
-    let before = testing::free_now();
+    let before = crate::proc::ktest::free_now();
     let r = load_path_inner(path, argv);
     #[cfg(feature = "kernel_tests")]
-    testing::record(before, r.is_ok());
+    crate::proc::ktest::record(before, r.is_ok());
     r
 }
 
@@ -301,61 +321,5 @@ pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
             addr_space_init::teardown(space);
             Err(e)
         }
-    }
-}
-
-#[cfg(feature = "kernel_tests")]
-pub(crate) mod testing {
-    use alloc::vec::Vec;
-    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-    use crate::pmm_init;
-
-    /// Free-frame counts around one [`super::load_path`] call.
-    #[derive(Clone, Copy, Debug)]
-    pub(crate) struct ExecFrames {
-        /// Buddy free frames at entry.
-        pub before: usize,
-        /// Buddy free frames at return, after a failed load's teardown.
-        pub after: usize,
-        pub ok: bool,
-    }
-
-    const SLOTS: usize = 4;
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    static BEFORE: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
-    static AFTER: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
-    static OK: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
-
-    pub(super) fn free_now() -> usize {
-        pmm_init::with_buddy(|b| b.stats().free_frames)
-    }
-
-    pub(super) fn record(before: usize, ok: bool) {
-        let after = free_now();
-        let i = NEXT.load(Ordering::Relaxed);
-        BEFORE[i % SLOTS].store(before as u64, Ordering::Relaxed);
-        AFTER[i % SLOTS].store(after as u64, Ordering::Relaxed);
-        OK[i % SLOTS].store(u64::from(ok), Ordering::Relaxed);
-        NEXT.store(i.wrapping_add(1), Ordering::Release);
-    }
-
-    /// Forget the recorded loads.
-    pub(crate) fn clear_exec_frames() {
-        NEXT.store(0, Ordering::Release);
-    }
-
-    /// The last four `load_path` calls since [`clear_exec_frames`], oldest
-    /// first.
-    pub(crate) fn exec_frames() -> Vec<ExecFrames> {
-        let n = NEXT.load(Ordering::Acquire);
-        let first = n.saturating_sub(SLOTS);
-        (first..n)
-            .map(|i| ExecFrames {
-                before: BEFORE[i % SLOTS].load(Ordering::Relaxed) as usize,
-                after: AFTER[i % SLOTS].load(Ordering::Relaxed) as usize,
-                ok: OK[i % SLOTS].load(Ordering::Relaxed) != 0,
-            })
-            .collect()
     }
 }

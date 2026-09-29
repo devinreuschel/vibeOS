@@ -38,7 +38,6 @@ SEAM = "crates/core/src/atomic.rs"
 # Files that use `core`'s atomics directly at this tip, skipped until their
 # sweep (ROADMAP §10.1, C-ATOMICS) converts them; `--failing` regenerates it.
 PENDING: tuple[str, ...] = (
-    "crates/core/src/kalloc.rs",
 )
 
 BANNED = re.compile(r"\b(?:core|std)::(?:sync::atomic\b|hint::spin_loop\b)")

@@ -1,5 +1,11 @@
 //! Host fsck.vibefs. Same format module as the kernel.
 
+#![allow(
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "host tool: `alloc`'s growing calls may panic, and a failed allocation ends this host process, not the kernel (DESIGN §4.4)"
+)]
+
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -7,7 +13,6 @@ use std::process::ExitCode;
 
 use vibeos::vibefs::{self, Defect, MemDisk};
 
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(path) = args.next() else {

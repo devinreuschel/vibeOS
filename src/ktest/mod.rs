@@ -616,6 +616,9 @@ fn registry_main() {
 }
 
 fn qemu_exit(code: u32) -> ! {
+    // SAFETY: `ISA_DEBUG_EXIT` is the isa-debug-exit port the harness gives
+    // every kernel_tests guest, which no other code uses; the write ends the
+    // guest and touches no memory; established here.
     unsafe { x86::outl(ISA_DEBUG_EXIT, code) };
     x86::halt();
 }
@@ -916,10 +919,14 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
 }
 
 pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
+    // SAFETY: invariant: every caller passes a device's BAR 0 VA, which
+    // `pci_init` mapped uncached, and a register offset inside that BAR;
+    // established by `ktest::bar0_va`.
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32) }
 }
 
 pub(crate) fn mmio_w32(va: u64, off: u32, val: u32) {
+    // SAFETY: invariant: as for `mmio_r32`; established by `ktest::bar0_va`.
     unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, val) }
 }
 

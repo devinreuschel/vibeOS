@@ -91,6 +91,10 @@ pub(crate) const COMMANDS: &[Command] = &[
 ];
 
 fn err_line(op: &str, e: FsError) {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+    )]
     let _ = writeln!(Console, "vibeOS: {op}: {}", e.as_str());
 }
 
@@ -114,8 +118,16 @@ fn cmd_ls(args: &[&str]) {
     };
     if st.kind != InodeKind::Dir {
         if long {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+            )]
             let _ = writeln!(Console, "{} {} {}", st.kind.as_str(), st.size, path);
         } else {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+            )]
             let _ = writeln!(Console, "{path}");
         }
         return;
@@ -127,6 +139,10 @@ fn cmd_ls(args: &[&str]) {
             let size = child_path(path.as_bytes(), name, &mut child)
                 .and_then(|n| stat_path(&child[..n]))
                 .map_or(0, |s| s.size);
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+            )]
             let _ = write!(Console, "{} {:>8} ", d.kind.as_str(), size);
         }
         crate::console_init::write(name);
@@ -157,7 +173,9 @@ fn cmd_cat(args: &[&str]) {
                         }
                     }
                 }
-                let _ = close(f);
+                if let Err(e) = close(f) {
+                    err_line("cat", e);
+                }
             }
             Err(e) => err_line("cat", e),
         }
@@ -196,11 +214,15 @@ fn cmd_cp(args: &[&str]) {
                     }
                 }
             }
-            let _ = close(dst);
+            if let Err(e) = close(dst) {
+                err_line("cp", e);
+            }
         }
         Err(e) => err_line("cp", e),
     }
-    let _ = close(src);
+    if let Err(e) = close(src) {
+        err_line("cp", e);
+    }
 }
 
 fn cmd_mv(args: &[&str]) {
@@ -268,7 +290,9 @@ fn cmd_touch(args: &[&str]) {
             0o644,
         ) {
             Ok(f) => {
-                let _ = close(f);
+                if let Err(e) = close(f) {
+                    err_line("touch", e);
+                }
             }
             Err(e) => err_line("touch", e),
         }
@@ -280,6 +304,10 @@ fn cmd_stat(args: &[&str]) {
     let path = args.get(1).copied().unwrap_or(".");
     match stat_path(path.as_bytes()) {
         Ok(s) => {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+            )]
             let _ = writeln!(
                 Console,
                 "vibeOS: stat: ino {} {} size {} mode {:o}",
@@ -296,6 +324,10 @@ fn cmd_stat(args: &[&str]) {
 fn cmd_df(_args: &[&str]) {
     match fat_init::df(fat_init::VOL_INITRD) {
         Ok((ft, tot, free, nclus)) => {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+            )]
             let _ = writeln!(
                 Console,
                 "vibeOS: df: {} total {} free {} clusters {}",
@@ -310,6 +342,10 @@ fn cmd_df(_args: &[&str]) {
     if vibefs_init::live()
         && let Ok((ft, tot, free, nblk)) = vibefs_init::df(vibefs_init::VOL_MEM)
     {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+        )]
         let _ = writeln!(
             Console,
             "vibeOS: df: {} total {} free {} blocks {}",
@@ -323,6 +359,10 @@ fn cmd_df(_args: &[&str]) {
 
 fn cmd_mount(args: &[&str]) {
     if args.len() < 2 {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+        )]
         let _ = writeln!(
             Console,
             "vibeOS: mount: fat32 <dev> <path> | vibefs <dev> <path> | ramfs <path>"
@@ -337,7 +377,10 @@ fn cmd_mount(args: &[&str]) {
             return;
         }
     };
-    let _ = mkdir_p(target.as_bytes());
+    if let Err(e) = mkdir_p(target.as_bytes()) {
+        err_line("mount", e);
+        return;
+    }
     match mount(
         source.as_bytes(),
         target.as_bytes(),
@@ -345,9 +388,17 @@ fn cmd_mount(args: &[&str]) {
         false,
     ) {
         Ok(()) if args[1] == "ramfs" => {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+            )]
             let _ = writeln!(Console, "vibeOS: mount: ramfs on {target}");
         }
         Ok(()) => {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+            )]
             let _ = writeln!(Console, "vibeOS: mount: {} {source} on {target}", args[1]);
         }
         Err(e) => err_line("mount", e),

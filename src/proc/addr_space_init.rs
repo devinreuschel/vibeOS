@@ -1,4 +1,3 @@
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 //! Kernel AddressSpace: buddy + PT lock. ROADMAP §9.2.
 
 use core::fmt;
@@ -19,12 +18,18 @@ use crate::x86;
 
 struct BuddyPool;
 
+// SAFETY: the buddy hands out order-0 frames of RAM, which the physmap maps
+// writable at the HHDM offset, as `paging::FrameAlloc` requires; established
+// by `paging_init::install`.
 unsafe impl FrameAlloc for BuddyPool {
     fn alloc_frame(&mut self) -> Option<Frames> {
         pmm_init::with_buddy(|b| b.alloc(0))
     }
 }
 
+// SAFETY: every frame an address space holds came from the buddy through
+// this pool's `alloc_frame`, and `free_frame` gives it back to the buddy,
+// as `addr_space::FrameFree` requires; established here.
 unsafe impl FrameFree for BuddyPool {
     fn free_frame(&mut self, f: Frames) {
         pmm_init::with_buddy(|b| b.free(f));
@@ -35,6 +40,10 @@ unsafe impl FrameFree for BuddyPool {
 pub fn create() -> Option<AddressSpace> {
     let kernel = paging_init::current_mapper();
     let mut pool = BuddyPool;
+    // SAFETY: `kernel` is the live kernel mapper and the buddy hands out
+    // owned frames writable through its HHDM offset, as
+    // `addr_space::AddressSpace::new` requires; established by
+    // `paging_init::current_mapper`.
     unsafe { AddressSpace::new(&kernel, &mut pool) }
 }
 
@@ -77,7 +86,8 @@ pub unsafe fn map_anon(
     space.check_new_region(va, len)?;
     // SAFETY: `check_new_region` found the range free of regions, so no
     // page in it is mapped (invariant of
-    // `addr_space::AddressSpace::insert_region`); this fn's contract.
+    // `vibeos::addr_space::AddressSpace::insert_region`); this fn's
+    // contract, `addr_space_init::map_anon`.
     unsafe { map_chunks(space, va, len, perms)? };
     let region = Region {
         start: va,
@@ -112,7 +122,8 @@ unsafe fn map_chunks(
         let rc = with_pt_chunk(n / PAGE_SIZE_4K, || {
             let mut pool = BuddyPool;
             // SAFETY: `[cur, ce)` is inside the unmapped range this fn's
-            // contract names, and the buddy hands out owned frames.
+            // contract names (`addr_space_init::map_chunks`), and the buddy
+            // hands out owned frames (`addr_space_init::BuddyPool`).
             unsafe { space.map_pages(cur, n, perms, &mut pool) }
         });
         // `map_pages` rolled its own chunk back; a failed zero leaves this
@@ -182,7 +193,8 @@ fn local_flush(space: &AddressSpace) -> impl FnMut(u64) + use<> {
 pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
     let end = va.checked_add(len).ok_or(AsError::Overflow)?;
     if len == 0 {
-        // SAFETY: an empty range touches no leaf; `unmap_free` checks it.
+        // SAFETY: an empty range touches no leaf, which
+        // `vibeos::addr_space::AddressSpace::unmap_free` checks first.
         return paging_init::with_pt(|_pt| unsafe {
             space.unmap_free(va, 0, &mut BuddyPool, &mut |_| {})
         });
@@ -228,7 +240,7 @@ fn brk_grow(space: &mut AddressSpace, va: u64, len: u64, want: u64) -> Result<()
     space.heap_grow_check(va, len)?;
     // SAFETY: `heap_grow_check` found `[va, va+len)` in the user half and
     // clear of every region, so no page in it is mapped (invariant of
-    // `addr_space::AddressSpace::insert_region`).
+    // `vibeos::addr_space::AddressSpace::insert_region`).
     unsafe { map_chunks(space, va, len, UserPerms::RW)? };
     if let Err(e) = space.heap_grow_commit(va, len, want) {
         // SAFETY: `map_chunks` just mapped the range from the buddy, here.
@@ -334,7 +346,13 @@ fn root_holder(root: u64) -> Option<RootHolder> {
 pub fn teardown(mut space: AddressSpace) -> TeardownStats {
     let root = space.root().as_u64();
     if let Some(h) = root_holder(root) {
-        panic!("addr_space: teardown of root {root:#x} still loaded: {h:?}");
+        #[allow(
+            clippy::panic,
+            reason = "invariant I128: a root is torn down only after every CPU and TCB has let it go; a holder is a kernel bug"
+        )]
+        {
+            panic!("addr_space: teardown of root {root:#x} still loaded: {h:?}");
+        }
     }
     paging_init::with_pt(|_pt| {
         let mut pool = BuddyPool;
@@ -343,17 +361,6 @@ pub fn teardown(mut space: AddressSpace) -> TeardownStats {
         // these tables once they are freed.
         unsafe { space.teardown_pool(&mut pool) }
     })
-}
-
-pub fn load_cr3(space: &AddressSpace) {
-    let want = space.root().as_u64();
-    per_cpu_init::with_current(|cpu| {
-        if cpu.remote.as_cr3.load(Ordering::Relaxed) == want {
-            return;
-        }
-        unsafe { x86::write_cr3(want) };
-        cpu.remote.as_cr3.store(want, Ordering::Release);
-    });
 }
 
 /// Load `want` into CR3 unless this CPU already has it (or it is 0), and
@@ -371,6 +378,9 @@ pub unsafe fn load_cr3_u64(want: u64) {
         if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
             return;
         }
+        // SAFETY: invariant I128: `want` is a PML4 that shares the kernel
+        // half this code and stack run in and stays allocated while loaded
+        // (this fn's contract, `addr_space_init::load_cr3_u64`).
         unsafe { x86::write_cr3(want) };
         cpu.remote.as_cr3.store(want, Ordering::Release);
     });
@@ -388,13 +398,8 @@ pub fn load_kernel_cr3() {
 pub fn clone_full(src: &vibeos::addr_space::AddressSpace) -> Option<AddressSpace> {
     let kernel = paging_init::current_mapper();
     let mut pool = BuddyPool;
+    // SAFETY: `kernel` is the live kernel mapper and the buddy hands out
+    // owned frames, as `addr_space::AddressSpace::clone_anon` requires;
+    // established by `paging_init::current_mapper`.
     unsafe { src.clone_anon(&kernel, &mut pool) }.ok()
-}
-
-pub fn cr3_was_skipped(space: &AddressSpace) -> bool {
-    crate::per_cpu_init::current()
-        .remote
-        .as_cr3
-        .load(Ordering::Relaxed)
-        == space.root().as_u64()
 }

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 from scripts import check_test_hooks
-from scripts.check_test_hooks import scan, symbol_name
+from scripts.check_test_hooks import file_errors, scan, source_errors, symbol_name
 
 H = "::h0123456789abcdef"
 
@@ -134,6 +134,82 @@ class TestMain(unittest.TestCase):
                 os.environ.pop("CARGO_TARGET_DIR", None)
             else:
                 os.environ["CARGO_TARGET_DIR"] = old
+
+
+class TestSourceRules(unittest.TestCase):
+    """Q2's source rules: no blanket `allow(dead_code)`, no crate-level panic_test allow."""
+
+    def test_module_level_dead_code_allow_fails(self) -> None:
+        for text in ("#![allow(dead_code)]\n",
+                     '#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]\n',
+                     '#![cfg_attr(\n    feature = "vibefs_crash",\n    allow(dead_code)\n)]\n',
+                     "#[allow(dead_code)]\npub(crate) mod parked;\n",
+                     '#[cfg_attr(feature = "x", allow(dead_code))]\n'
+                     "// c\n#[cfg(test)]\nmod m {}\n"):
+            with self.subTest(text=text):
+                errs = file_errors("src/x/y_init.rs", text)
+                self.assertEqual(len(errs), 1, errs)
+                self.assertIn("allow(dead_code)", errs[0])
+
+    def test_item_level_and_test_files_pass(self) -> None:
+        text = ('#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code, reason = "S86"))]\n'
+                "pub fn syscall_count() -> u64 { 0 }\n"
+                "// #![allow(dead_code)] in a comment\n#[allow(unused)]\nmod m;\n")
+        self.assertEqual(file_errors("src/x/y_init.rs", text), [])
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            for rel in ("src/x/ktest.rs", "src/x/ktest/hooks.rs", "src/ktest/mod.rs"):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text("#![allow(dead_code)]\n")
+            (root / "crates").mkdir()
+            self.assertEqual(source_errors(root, ()), [])
+
+    def test_crate_level_panic_test_allow_fails(self) -> None:
+        text = ('#![no_std]\n'
+                '#![cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]\n')
+        errs = file_errors("src/main.rs", text)
+        self.assertEqual(len(errs), 1, errs)
+        self.assertIn("crate-level panic_test allow", errs[0])
+        text = '#![cfg_attr(feature = "panic_test", allow(unused_imports))]\n'
+        self.assertEqual(len(file_errors("src/main.rs", text)), 1)
+
+    def test_panic_test_allow_on_main_mod_lines_passes(self) -> None:
+        text = ('#![no_std]\n'
+                '#[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]\n'
+                "mod acpi;\n"
+                '#[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]\n'
+                "use dev::entropy_init;\n")
+        self.assertEqual(file_errors("src/main.rs", text), [])
+        # Only src/main.rs gets the exception.
+        mod_line = '#[cfg_attr(feature = "panic_test", allow(dead_code))]\nmod acpi;\n'
+        self.assertEqual(len(file_errors("src/x/mod.rs", mod_line)), 1)
+
+    def test_pending_skips_and_goes_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / "src" / "log").mkdir(parents=True)
+            (root / "crates").mkdir()
+            f = root / "src" / "log" / "log_init.rs"
+            f.write_text("#![allow(dead_code)]\n")
+            self.assertEqual(len(source_errors(root, ())), 1)
+            self.assertEqual(source_errors(root, ("src/log/log_init.rs",)), [])
+            f.write_text("pub fn f() {}\n")
+            errs = source_errors(root, ("src/log/log_init.rs", "src/gone.rs"))
+            self.assertEqual(len(errs), 2, errs)
+            self.assertIn("passes", errs[0])
+            self.assertIn("missing", errs[1])
+
+    def test_main_fails_on_source_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            (root / "src").mkdir()
+            (root / "crates").mkdir()
+            (root / "src" / "a_init.rs").write_text("#![allow(dead_code)]\n")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = check_test_hooks.main(["--root", t, "--elf", str(root / "none")])
+            self.assertEqual(rc, 1)
+            self.assertIn("src/a_init.rs:1", err.getvalue())
 
 
 if __name__ == "__main__":

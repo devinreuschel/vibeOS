@@ -347,7 +347,7 @@ const CELL_CASES: &[CellCase] = &[
         name: "kbd_init::KBD",
         take: || {
             if let Some(k) = crate::kbd_init::pop() {
-                crate::kbd_init::push_for_test(k);
+                crate::console::ktest::push_for_test(k);
             }
         },
         file: "src/console/kbd_init.rs",
