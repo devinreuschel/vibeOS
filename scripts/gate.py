@@ -1,27 +1,42 @@
 #!/usr/bin/env python3
-"""The phase exit gate (ROADMAP §10.9, the gate-map and `make gate` boxes).
+"""The phase exit gate (ROADMAP §10.9, the `make gate` and dev-host boxes).
 
-`run_gate` prints one row per exit-gate line of phase N, each followed by its
-entries' results, and a final verdict:
+`make gate PHASE=N [RECORD=1] [COMMIT=sha]` runs this script. It prints one
+row per exit-gate line of phase N, each followed by its entries' results:
 
     PASS  L1145  `make check` (fmt, clippy ...
           ok    cmd make check
     FAIL  L1147  `make test` passes on the scheduled macOS CI job ...
           FAIL  cmd test -f .github/workflows/macos.yml  exit 1 (build/gate/phase-10/3.log)
     TAG   L1176  tag `phase-10` and release `v0.10.0`
+    BOX   ROADMAP.md:1391  rule A: the top user page is never mappable ...
     gate: phase 10 at <sha>: fail
 
-It runs every entry of `tests/gates/phase-<N>.toml` (C-GATEMAP;
-`scripts/check_gates.py` holds the map's rules, which run first): a `cmd`
-entry through `sh -c` at the root, each distinct command once. A line passes
-only when every entry passes; an `expect = "fail"` entry passes on a non-zero
-exit, and only after a plain entry of its line passed in the same run.
+For N >= 10 it runs every entry of `tests/gates/phase-<N>.toml`
+(C-GATEMAP; `scripts/check_gates.py` holds the map's rules, which run
+first): a `cmd` entry through `sh -c` at the root, each distinct command
+once. A line passes only when every entry passes. For N < 10, which
+has no map, it runs no entry and needs every gate line but the tag ticked.
+Every phase gets the two box rules:
+
+- rule A: an open box under a `### N.M` heading of phase N, outside a
+  `### N.M Stretch:` subsection, whose `lands in` notes name no `§M.x` with
+  M > N;
+- rule B: an open box anywhere in the roadmap whose `lands in` note names a
+  `§N.x` of phase N.
+
+A local run gates `HEAD` of a clean work tree (tracked files): `--commit`
+must name `HEAD`. `--dry-run` prints the rows and the box problems and runs
+nothing.
+
+Exit codes: 0 pass, 1 fail, 2 usage.
 
 Standard library only.
 """
 
 from __future__ import annotations
 
+import argparse
 import fnmatch
 import json
 import os
@@ -36,13 +51,62 @@ from typing import Protocol
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts import check_gates  # noqa: E402
+from scripts import check_gates, gatelib  # noqa: E402
 from scripts.check_gates import Entry, GateLine, MapLine, norm  # noqa: E402
 
 ARCH = "x86_64"
+FIRST_MAPPED_PHASE = check_gates.FIRST_MAPPED_PHASE
 KTEST_VAR = re.compile(r"(?:^|\s)VIBEOS_KTEST=('[^']*'|\"[^\"]*\"|\S+)")
 MAKE_TIER = re.compile(r"\bmake\s+(?:\S+=\S*\s+)*(test-[A-Za-z0-9-]+)")
+STRETCH = re.compile(r"^### \d+\.\d+ Stretch:")
 ROW_TEXT = 100
+
+
+class GateUsage(Exception):
+    """The command line or the checkout cannot be gated (exit 2)."""
+
+
+# --- the box rules ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BoxProblem:
+    line: int
+    rule: str  # "A" or "B"
+    text: str
+
+
+def box_problems(roadmap_text: str, phase: int) -> list[BoxProblem]:
+    """Rules A and B over every open box of the roadmap, in line order."""
+    stretch: set[int] = set()
+    under = False
+    for n, raw in enumerate(roadmap_text.splitlines(), start=1):
+        if raw.startswith("#"):
+            under = STRETCH.match(raw) is not None
+        elif under:
+            stretch.add(n)
+    out: list[BoxProblem] = []
+    for b in gatelib.parse_boxes(roadmap_text):
+        if b.ticked:
+            continue
+        majors = [m for m, _ in check_gates.lands_in_sections(b.text)]
+        in_section = (
+            b.phase == phase
+            and b.section is not None
+            and b.section.split(".")[0] == str(phase)
+            and b.line not in stretch
+        )
+        if in_section and not any(m > phase for m in majors):
+            out.append(BoxProblem(b.line, "A", b.text))
+        if phase in majors:
+            out.append(BoxProblem(b.line, "B", b.text))
+    return out
+
+
+BOX_RULES = {
+    "A": "open, and no `lands in §M.x` with M > N",
+    "B": "open, and its `lands in` note names a section of phase N",
+}
 
 
 # --- injected tools -----------------------------------------------------------
@@ -58,7 +122,6 @@ def shell_runner(cmd: str, cwd: Path, log: Path) -> int:
     with open(log, "wb") as f:
         return subprocess.run(["sh", "-c", cmd], cwd=cwd, stdout=f, stderr=subprocess.STDOUT,
                               check=False).returncode
-
 
 
 # --- entries ------------------------------------------------------------------
@@ -161,14 +224,12 @@ def line_verdict(results: list[EntryResult]) -> bool:
     return bool(results) and all(r.ok for r in results)
 
 
-
 # --- the gate ------------------------------------------------------------------
 
 
 def short(text: str) -> str:
     t = norm(text)
     return t if len(t) <= ROW_TEXT else t[: ROW_TEXT - 1] + "…"
-
 
 
 @dataclass
@@ -182,6 +243,8 @@ def run_gate(
     root: Path,
     tools: Tools,
     out: Callable[[str], None] = print,
+    *,
+    dry_run: bool = False,
 ) -> bool:
     """Print the rows for phase N at `commit` (the tree at `root`) and return
     whether the gate passes."""
@@ -189,19 +252,32 @@ def run_gate(
     gates = check_gates.gate_lines(roadmap, phase)
     map_path = root / "tests" / "gates" / f"phase-{phase}.toml"
     ok = bool(gates)
+    if not gates:
+        out(f"gate: phase {phase} has no exit-gate lines in docs/ROADMAP.md")
     lines: list[MapLine] | None = None
-    try:
-        lines = check_gates.load_map(map_path.read_text(encoding="utf-8"),
-                                     str(map_path.relative_to(root)))
-    except (OSError, check_gates.MapError) as err:
-        out(f"MAP   {err}")
+    if phase >= FIRST_MAPPED_PHASE:
+        if not map_path.is_file():
+            out(f"MAP   no tests/gates/phase-{phase}.toml: from Phase {FIRST_MAPPED_PHASE} on "
+                "every gate line needs an entry")
+            ok = False
+        else:
+            try:
+                lines = check_gates.load_map(map_path.read_text(encoding="utf-8"),
+                                             str(map_path.relative_to(root)))
+            except check_gates.MapError as err:
+                out(f"MAP   {err}")
+                ok = False
+            if lines is not None:
+                problems = check_gates.validate(phase, lines, gates,
+                                                check_gates.read_workflow_file(root))
+                for p in problems:
+                    out(f"MAP   {p}")
+                if problems:
+                    ok, lines = False, None
+    elif map_path.is_file():
+        out(f"MAP   tests/gates/phase-{phase}.toml: Phases 0 to {FIRST_MAPPED_PHASE - 1} "
+            "get no gate map")
         ok = False
-    if lines is not None:
-        problems = check_gates.validate(phase, lines, gates, check_gates.read_workflow_file(root))
-        for p in problems:
-            out(f"MAP   {p}")
-        if problems:
-            ok, lines = False, None
     by_key = {ml.key: ml for ml in lines or []}
     cache = CmdCache(root, phase, tools.runner)
     index = {id(e): i for i, e in enumerate(
@@ -210,12 +286,15 @@ def run_gate(
         if g.tag:
             out(f"TAG   L{g.line}  {short(g.text)}")
             continue
-        passed, rows = evaluate_line(g, by_key.get(norm(g.text)), root, cache, index,
-                                     lines is not None)
+        passed, rows = evaluate_line(g, by_key.get(norm(g.text)), phase, root, cache, index,
+                                     dry_run, lines is not None)
         ok = ok and passed
         out(f"{'PASS' if passed else 'FAIL'}  L{g.line}  {short(g.text)}")
         for r in rows:
             out(r)
+    for bp in box_problems(roadmap, phase):
+        ok = False
+        out(f"BOX   ROADMAP.md:{bp.line}  rule {bp.rule}: {short(bp.text)}")
     out(f"gate: phase {phase} at {commit}: {'pass' if ok else 'fail'}")
     return ok
 
@@ -223,16 +302,22 @@ def run_gate(
 def evaluate_line(
     g: GateLine,
     ml: MapLine | None,
+    phase: int,
     root: Path,
     cache: CmdCache,
     index: dict[int, int],
+    dry_run: bool,
     mapped: bool,
 ) -> tuple[bool, list[str]]:
     """(verdict, indented rows) of one non-tag gate line."""
+    if phase < FIRST_MAPPED_PHASE:
+        return (True, []) if g.ticked else (False, ["      FAIL  unticked"])
     if not mapped:
         return False, ["      FAIL  the gate map is missing or invalid"]
     if ml is None or not ml.entries:
         return False, ["      FAIL  no entry"]
+    if dry_run:
+        return True, [f"      -     {e.describe()}  (not run)" for e in ml.entries]
     results: list[EntryResult] = []
     for e in (x for x in ml.entries if not x.expect_fail):
         if e.kind == "cmd":
@@ -250,3 +335,68 @@ def evaluate_line(
     rows = [f"      {'ok  ' if r.ok else 'FAIL'}  {r.entry.describe()}"
             + (f"  {r.detail}" if r.detail else "") for r in results]
     return line_verdict(results), rows
+
+
+# --- main ------------------------------------------------------------------------
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        prog="gate.py",
+        description="Phase exit gate (ROADMAP §10.9): run a phase's gate-map entries, print "
+        "PASS or FAIL per gate line, and apply the box rules.",
+    )
+    ap.add_argument("--phase", type=int, required=True, metavar="N")
+    ap.add_argument("--commit", default="HEAD", metavar="SHA",
+                    help="the gated commit (default HEAD; a local run gates HEAD only)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the rows and box problems; run nothing")
+    ap.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
+    return ap.parse_args(argv)
+
+
+def resolve(root: Path, rev: str) -> str:
+    r = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "-q",
+                        f"{rev}^{{commit}}"], capture_output=True, text=True, check=False)
+    if r.returncode != 0 or not r.stdout.strip():
+        raise GateUsage(f"{rev!r} names no commit")
+    return r.stdout.strip()
+
+
+def main(
+    argv: list[str] | None = None,
+    tools: Tools | None = None,
+    out: Callable[[str], None] = print,
+) -> int:
+    try:
+        args = parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    root: Path = args.root
+    tools = tools or Tools(shell_runner)
+    try:
+        if args.phase < 0:
+            raise GateUsage("PHASE is a phase number")
+        commit = resolve(root, args.commit)
+        if not args.dry_run:
+            head = resolve(root, "HEAD")
+            if commit != head:
+                out(f"gate: a local run gates HEAD ({head}); check out {commit} to gate it")
+                return 1
+            dirty = gatelib.git(root, "status", "--porcelain", "--untracked-files=no")
+            if dirty.strip():
+                out("gate: tracked files differ from HEAD; gate a clean checkout:")
+                out(dirty.rstrip())
+                return 1
+    except GateUsage as e:
+        out(f"gate: {e}")
+        return 2
+    except gatelib.GateError as e:
+        out(f"gate: {e}")
+        return 1
+    ok = run_gate(args.phase, commit, root, tools, out, dry_run=args.dry_run)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -450,6 +450,25 @@ profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.
 
+`make gate PHASE=N` (`scripts/gate.py`) is the phase exit gate the maintainer runs before tagging
+(ROADMAP §10.9). It prints one row per exit-gate line, `PASS`, `FAIL` or `TAG  L<line>  <text>`, each
+followed by its entries' results, then a `BOX  ROADMAP.md:<line>  rule A|B: <text>` row per box it
+rejects and `gate: phase N at <sha>: pass|fail`, and exits 0 on pass, 1 on fail and 2 on a usage
+error. From Phase 10 on it runs every entry of `tests/gates/phase-<N>.toml` (§8.6) and fails when the
+map is missing or `scripts/check_gates.py` rejects it; a `cmd` entry runs once per distinct command,
+with its output in `build/gate/phase-<N>/<i>.log`, and one that selects in-guest tests with
+`VIBEOS_KTEST=` passes only when its tier's fresh `build/results/<arch>-<tier>.json` lists each named
+test as passed and each glob matches one. For a phase below 10, which has no map, it runs no entry and
+needs every gate line but the tag ticked. Every phase gets two box rules: rule A rejects an open box
+under a `### N.M` heading of phase N, outside a `### N.M Stretch:` subsection, whose `lands in` notes
+name no `§M.x` with M > N; rule B rejects an open box anywhere in the roadmap whose `lands in` note
+names a section of phase N (a `§N.x` in a code span does not count). A local run gates `HEAD` of a
+work tree whose tracked files are clean, so `COMMIT=<sha>` must name `HEAD`; `python3 scripts/gate.py
+--phase N --dry-run` prints the rows and the box problems and runs nothing. `RECORD=1` runs only the
+map's record entries, on the Apple Silicon dev host (§8.6). `make gate PHASE=10` fails today by
+design, on every open Phase 10 box and on the open earlier boxes deferred into §10; it runs in no
+per-push tier.
+
 ## 8.6 CI and coverage
 
 `ci` runs on a push to `main`, on every pull request, and on `workflow_dispatch`, never on a push to
