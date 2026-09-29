@@ -175,6 +175,10 @@ GONE: list[tuple[str, str]] = [
     ("warn_xorshift", "`/dev/random` and `/dev/urandom` return only hardware bytes"),
     ("set_warn", "`/dev/random` and `/dev/urandom` return only hardware bytes"),
     ("XorShift", "`/dev/random` and `/dev/urandom` return only hardware bytes"),
+    ("_PHASE0_BEFORE_TIME", "one marker registry, `tests/contract/markers.toml`, read with"),
+    ("PHASE0_PANIC_PREFIX", "one marker registry, `tests/contract/markers.toml`, read with"),
+    ("lapic_timer_marker", "one marker registry, `tests/contract/markers.toml`, read with"),
+    ("BOOT_DONE", "one marker registry, `tests/contract/markers.toml`, read with"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

@@ -186,6 +186,10 @@ pub(crate) const TESTS: &[Test] = &[
         proc::ktest::test_syscall_ptr_validate,
     ),
     test("user_syscalls", proc::ktest::test_user_syscalls),
+    test(
+        "init_reports_failed_tests",
+        proc::ktest::test_init_reports_failed_tests,
+    ),
     test("int3_roundtrip", arch::ktest::test_int3_roundtrip),
     test("scoped_pf", arch::ktest::test_scoped_pf),
     test("gp_catch", arch::ktest::test_gp_catch),

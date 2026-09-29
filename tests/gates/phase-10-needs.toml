@@ -940,3 +940,19 @@ needs = [
   "`part_init` registers a child for",  # L1513
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "`deny.toml`, and `cargo deny check"
+needs = [
+  "`ruff` and `mypy` pinned by",  # L1190
+  "a nightly x86_64 KVM leg",  # L1194
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+[[box]]
+key = "third-party notices on every published"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "`release.yml` runs only from `main`,",  # L1207
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
