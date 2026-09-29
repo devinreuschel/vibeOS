@@ -451,83 +451,82 @@ fn err_line(op: &str, e: FsError) {
     let _ = writeln!(Console, "vibeOS: {op}: {}", e.as_str());
 }
 
+/// The file commands, which `shell_init::register_builtins` registers.
+pub(crate) const COMMANDS: &[Command] = &[
+    Command {
+        name: "ls",
+        help: "list directory; -l long",
+        run: cmd_ls,
+    },
+    Command {
+        name: "cat",
+        help: "print file",
+        run: cmd_cat,
+    },
+    Command {
+        name: "cp",
+        help: "copy file",
+        run: cmd_cp,
+    },
+    Command {
+        name: "mv",
+        help: "rename / move",
+        run: cmd_mv,
+    },
+    Command {
+        name: "rm",
+        help: "unlink; -r recursive",
+        run: cmd_rm,
+    },
+    Command {
+        name: "mkdir",
+        help: "create directory; -p parents",
+        run: cmd_mkdir,
+    },
+    Command {
+        name: "touch",
+        help: "create or bump file",
+        run: cmd_touch,
+    },
+    Command {
+        name: "stat",
+        help: "inode metadata",
+        run: cmd_stat,
+    },
+    Command {
+        name: "df",
+        help: "volume space",
+        run: cmd_df,
+    },
+    Command {
+        name: "mount",
+        help: "mount fat32|vibefs <dev> <path> | ramfs <path>",
+        run: cmd_mount,
+    },
+    Command {
+        name: "umount",
+        help: "unmount path",
+        run: cmd_umount,
+    },
+    Command {
+        name: "sync",
+        help: "flush FAT + vibefs + block Flush",
+        run: cmd_sync,
+    },
+    Command {
+        name: "cd",
+        help: "change directory",
+        run: cmd_cd,
+    },
+    Command {
+        name: "pwd",
+        help: "print cwd",
+        run: cmd_pwd,
+    },
+];
+
 pub fn init() {
     set_cwd(b"/");
-    let cmds = [
-        Command {
-            name: "ls",
-            help: "list directory; -l long",
-            run: cmd_ls,
-        },
-        Command {
-            name: "cat",
-            help: "print file",
-            run: cmd_cat,
-        },
-        Command {
-            name: "cp",
-            help: "copy file",
-            run: cmd_cp,
-        },
-        Command {
-            name: "mv",
-            help: "rename / move",
-            run: cmd_mv,
-        },
-        Command {
-            name: "rm",
-            help: "unlink; -r recursive",
-            run: cmd_rm,
-        },
-        Command {
-            name: "mkdir",
-            help: "create directory; -p parents",
-            run: cmd_mkdir,
-        },
-        Command {
-            name: "touch",
-            help: "create or bump file",
-            run: cmd_touch,
-        },
-        Command {
-            name: "stat",
-            help: "inode metadata",
-            run: cmd_stat,
-        },
-        Command {
-            name: "df",
-            help: "volume space",
-            run: cmd_df,
-        },
-        Command {
-            name: "mount",
-            help: "mount fat32|vibefs <dev> <path> | ramfs <path>",
-            run: cmd_mount,
-        },
-        Command {
-            name: "umount",
-            help: "unmount path",
-            run: cmd_umount,
-        },
-        Command {
-            name: "sync",
-            help: "flush FAT + vibefs + block Flush",
-            run: cmd_sync,
-        },
-        Command {
-            name: "cd",
-            help: "change directory",
-            run: cmd_cd,
-        },
-        Command {
-            name: "pwd",
-            help: "print cwd",
-            run: cmd_pwd,
-        },
-    ];
-    for c in cmds {
-        let _ = shell_init::register(c);
-    }
     let _ = MAX_COMMANDS;
 }
 

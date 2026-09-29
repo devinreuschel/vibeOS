@@ -1,15 +1,11 @@
-//! Device registry instance, bind, shell commands. ROADMAP §6.1.
-
-use core::fmt::Write;
+//! Device registry instance and bind. ROADMAP §6.1. The `lspci` and
+//! `devices` commands are in `shell::cmds::dev`.
 
 use vibeos::dev::{ClaimError, Device, Driver, MAX_DEVICES, Registry};
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::Bdf;
-use vibeos::shell::Command;
 
-use crate::console_init::Console;
 use crate::pci_init;
-use crate::shell_init;
 use crate::sync_init::SpinMutex;
 
 static REG: SpinMutex<Registry> = SpinMutex::with_rank(Registry::new(), RANK_DEVICE);
@@ -98,36 +94,7 @@ pub fn claim(dev_i: usize, bar: u8) -> Result<(), ClaimError> {
     REG.lock().claim(dev_i, bar)
 }
 
-/// Register lspci / devices. Bind any drivers already registered.
+/// Bind any drivers already registered.
 pub fn init() {
     bind_all();
-    let _ = shell_init::register(Command {
-        name: "lspci",
-        help: "pci devices",
-        run: cmd_lspci,
-    });
-    let _ = shell_init::register(Command {
-        name: "devices",
-        help: "device tree",
-        run: cmd_devices,
-    });
-}
-
-/// One Device at a time: a full [Device; MAX] (and a second Registry)
-/// overflows the 16 KiB shell stack. Drop RANK_DEVICE before FB print.
-fn cmd_lspci(_args: &[&str]) {
-    let mut i = 0usize;
-    while let Some(d) = get(i) {
-        let _ = d.write_lspci(&mut Console);
-        let _ = writeln!(Console);
-        i += 1;
-    }
-}
-
-fn cmd_devices(_args: &[&str]) {
-    let mut i = 0usize;
-    while let Some(d) = get(i) {
-        let _ = d.write_tree(&mut Console);
-        i += 1;
-    }
 }
