@@ -190,6 +190,8 @@ GONE: list[tuple[str, str]] = [
     ("PHASE0_PANIC_PREFIX", "one marker registry, `tests/contract/markers.toml`, read with"),
     ("lapic_timer_marker", "one marker registry, `tests/contract/markers.toml`, read with"),
     ("BOOT_DONE", "one marker registry, `tests/contract/markers.toml`, read with"),
+    ("CALIB_BAND_TCG", "`tsc_calib_source` measures PIT channel 2 once"),
+    ("calib_band", "`tsc_calib_source` measures PIT channel 2 once"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

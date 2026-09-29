@@ -3,8 +3,8 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::time::{
-    CalibSource, Instant, TICK_NS, calib_band, calib_in_band, interpolate_ns, next_deadline,
-    unix_from_civil,
+    CALIB_BAND_INVARIANT, CalibSource, Instant, TICK_NS, calib_in_band, interpolate_ns,
+    next_deadline, unix_from_civil,
 };
 
 use vibeos::apic::TimerMode;
@@ -571,43 +571,42 @@ pub(crate) fn test_now_us_planted_tear() -> Outcome {
     }
 }
 
+/// The boot calibration is consistent with the tables, and on an invariant
+/// TSC one PIT channel 2 measurement lands within 75–125% of one fresh HPET
+/// sample. Without an invariant TSC (TCG) the band means nothing, so it
+/// skips; the nightly KVM leg runs it.
 pub(crate) fn test_tsc_calib_source() -> Outcome {
     let present = acpi_init::info().is_some_and(|i| i.hpet_present());
+    let k = time_init::tsc_per_ms();
     match source() {
         CalibSource::Hpet => {
             if !present {
                 return Outcome::Fail("hpet source without table");
             }
-            let k = time_init::tsc_per_ms();
             if !(50_000..=10_000_000).contains(&k) {
                 return Outcome::Fail("tsc_per_ms out of range");
             }
-            // Boot HPET ran before APs. Remeasure both under this SMP load.
-            let ref_k = measure_hpet().unwrap_or(k);
-            let (lo_pct, hi_pct) = calib_band(time_init::tsc_invariant());
-            let mut last_pit = 0u64;
-            let mut i = 0u32;
-            while i < 3 {
-                if let Some(pit) = measure_pit_ch2() {
-                    last_pit = pit;
-                    if calib_in_band(ref_k, pit, lo_pct, hi_pct) {
-                        return Outcome::Ok;
-                    }
-                }
-                i += 1;
+            if !time_init::tsc_invariant() {
+                return Outcome::Skip("no invariant tsc");
             }
-            crate::marker!("vibeOS: ktest:   hpet {k}/ms ref {ref_k}/ms pit {last_pit}/ms");
-            if last_pit == 0 {
-                Outcome::Fail("pit ch2 calib failed")
+            // Boot HPET ran before APs. Remeasure both under this SMP load.
+            let Some(hpet) = measure_hpet() else {
+                return Outcome::Fail("hpet calib failed");
+            };
+            let Some(pit) = measure_pit_ch2() else {
+                return Outcome::Fail("pit ch2 calib failed");
+            };
+            let (lo, hi) = CALIB_BAND_INVARIANT;
+            if calib_in_band(hpet, pit, lo, hi) {
+                Outcome::Ok
             } else {
-                Outcome::Fail("pit ch2 disagreed with hpet")
+                crate::fail_fmt!("pit ch2 {pit}/ms outside {lo}-{hi}% of hpet {hpet}/ms")
             }
         }
         CalibSource::Pit => {
             if present {
                 return Outcome::Fail("pit source despite hpet table");
             }
-            let k = time_init::tsc_per_ms();
             if !(50_000..=10_000_000).contains(&k) {
                 return Outcome::Fail("tsc_per_ms out of range");
             }

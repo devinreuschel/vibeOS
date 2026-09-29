@@ -188,7 +188,7 @@ directory (`vibeos-mon-*`) is removed when the driver exits. The `utest_*` lines
 
 Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
 names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,
-`no smep/smap/umip`, `pit owns tick`, `pic fallback`, and `rtc unread` (the `Outcome::Skip` reasons
+`no smep/smap/umip`, `pit owns tick`, `pic fallback`, `rtc unread`, and `no invariant tsc` (the `Outcome::Skip` reasons
 in the in-guest test bodies, DESIGN §1.3). Destructive exception tests run inside `arch::catch` scopes, which longjmp out or
 step RIP past the faulting instruction, instead of skipping.
 
