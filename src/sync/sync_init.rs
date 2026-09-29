@@ -10,6 +10,8 @@ use core::ops::{Deref, DerefMut};
 use core::panic::Location;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+#[cfg(feature = "kernel_tests")]
+use core::sync::atomic::{AtomicU16, AtomicUsize};
 
 use vibeos::lock::{Held, RankError};
 use vibeos::sync::SpinLock;
@@ -277,7 +279,7 @@ fn lock_enter(rank: u8, nested: bool) -> u8 {
     }
     let now = slot.fetch_add(Held::count_unit(rank), Ordering::Relaxed);
     #[cfg(feature = "kernel_tests")]
-    testing::trace_record(rank, Held::from_raw(now).count(rank) + 1);
+    trace_record(rank, Held::from_raw(now).count(rank) + 1);
     #[cfg(not(feature = "kernel_tests"))]
     let _ = now;
     rank
@@ -349,11 +351,42 @@ impl Drop for LocklessSection {
     }
 }
 
+/// The CPU whose acquisitions are traced; `usize::MAX` when disarmed.
+#[cfg(feature = "kernel_tests")]
+static TRACE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+#[cfg(feature = "kernel_tests")]
+static TRACE_LEN: AtomicUsize = AtomicUsize::new(0);
+/// `rank << 8 | count` of each entry.
+#[cfg(feature = "kernel_tests")]
+static TRACE_RC: [AtomicU16; testing::TRACE_CAP] =
+    [const { AtomicU16::new(0) }; testing::TRACE_CAP];
+#[cfg(feature = "kernel_tests")]
+static TRACE_AT: [AtomicPtr<Location<'static>>; testing::TRACE_CAP] =
+    [const { AtomicPtr::new(ptr::null_mut()) }; testing::TRACE_CAP];
+
+/// Record one acquisition if this CPU is armed. Relaxed throughout:
+/// only the armed CPU writes, and it reads the result itself.
+#[cfg(feature = "kernel_tests")]
+#[track_caller]
+fn trace_record(rank: u8, count: u8) {
+    if TRACE_CPU.load(Ordering::Relaxed) != lock_cpu() {
+        return;
+    }
+    let i = TRACE_LEN.load(Ordering::Relaxed);
+    if i >= testing::TRACE_CAP {
+        return;
+    }
+    TRACE_RC[i].store(u16::from(rank) << 8 | u16::from(count), Ordering::Relaxed);
+    TRACE_AT[i].store(
+        core::ptr::from_ref(Location::caller()).cast_mut(),
+        Ordering::Relaxed,
+    );
+    TRACE_LEN.store(i + 1, Ordering::Relaxed);
+}
+
 /// Test access to the rank checker (kernel_tests only).
 #[cfg(feature = "kernel_tests")]
 pub mod testing {
-    use core::sync::atomic::{AtomicU16, AtomicUsize};
-
     use super::*;
 
     /// This CPU's held locks.
@@ -391,14 +424,6 @@ pub mod testing {
         pub at: &'static Location<'static>,
     }
 
-    /// The CPU whose acquisitions are traced; `usize::MAX` when disarmed.
-    static TRACE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
-    static TRACE_LEN: AtomicUsize = AtomicUsize::new(0);
-    /// `rank << 8 | count` of each entry.
-    static TRACE_RC: [AtomicU16; TRACE_CAP] = [const { AtomicU16::new(0) }; TRACE_CAP];
-    static TRACE_AT: [AtomicPtr<Location<'static>>; TRACE_CAP] =
-        [const { AtomicPtr::new(ptr::null_mut()) }; TRACE_CAP];
-
     /// Trace this CPU's counted acquisitions until [`trace_take`]. Call with
     /// IF off, so the thread stays on this CPU.
     pub fn trace_arm() {
@@ -418,7 +443,7 @@ pub mod testing {
             let at = TRACE_AT[i].load(Ordering::Relaxed);
             // SAFETY: invariant: a non-null `TRACE_AT` slot holds a
             // `&'static Location` cast to a pointer, and nothing writes
-            // through it; established by `testing::trace_record`, its only
+            // through it; established by `sync_init::trace_record`, its only
             // store.
             let at: &'static Location<'static> = unsafe { at.as_ref() }?;
             Some(TraceEntry {
@@ -427,24 +452,5 @@ pub mod testing {
                 at,
             })
         })
-    }
-
-    /// Record one acquisition if this CPU is armed. Relaxed throughout:
-    /// only the armed CPU writes, and it reads the result itself.
-    #[track_caller]
-    pub(super) fn trace_record(rank: u8, count: u8) {
-        if TRACE_CPU.load(Ordering::Relaxed) != lock_cpu() {
-            return;
-        }
-        let i = TRACE_LEN.load(Ordering::Relaxed);
-        if i >= TRACE_CAP {
-            return;
-        }
-        TRACE_RC[i].store(u16::from(rank) << 8 | u16::from(count), Ordering::Relaxed);
-        TRACE_AT[i].store(
-            core::ptr::from_ref(Location::caller()).cast_mut(),
-            Ordering::Relaxed,
-        );
-        TRACE_LEN.store(i + 1, Ordering::Relaxed);
     }
 }
