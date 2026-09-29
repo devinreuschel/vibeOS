@@ -35,6 +35,7 @@ extern crate alloc;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod acpi;
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
@@ -44,6 +45,7 @@ mod acpi;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod arch;
+#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
@@ -58,6 +60,7 @@ mod block;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod boot;
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
@@ -72,6 +75,7 @@ mod cell;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod console;
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
@@ -81,6 +85,7 @@ mod console;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod dev;
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
@@ -126,6 +131,8 @@ mod log;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod mm;
+#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
@@ -153,6 +160,7 @@ mod sched;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod shell;
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
@@ -275,6 +283,7 @@ pub extern "C" fn _start() -> ! {
 /// the call site silences `unreachable_code` in panic-test builds
 /// without duplicating markers.
 #[cfg(not(feature = "panic_test"))]
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"

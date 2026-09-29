@@ -1,5 +1,30 @@
 # Shared clippy settings. `clippy -D warnings` is Q1; this file exists so
 # `make check` and ad hoc `cargo clippy` share one config.
 #
-# E1 restriction lint *levels* live in `src/lib.rs` (deny unwrap/expect/panic)
-# and, for indexing and arithmetic, in each byte parser (ROADMAP §10.1).
+# Lint *levels* live in root `Cargo.toml`'s `[workspace.lints]` (C-LINTS), in
+# `src/main.rs` and `crates/core/src/lib.rs` (deny unwrap/expect/panic) and,
+# for indexing and arithmetic, in each byte parser (ROADMAP §10.1).
+
+# `missing_safety_doc` covers private `unsafe fn`s too (ROADMAP §10.1).
+check-private-items = true
+
+# `alloc`'s growing calls panic on allocation failure; kernel code uses
+# `vibeos::kalloc`'s fallible types, which wrap these (DESIGN §4.4, AGENTS.md
+# rule 4). Clippy ignores a path it cannot resolve: each entry here was
+# checked to fire.
+disallowed-types = [
+    { path = "alloc::boxed::Box", reason = "panics on allocation failure; use vibeos::kalloc::TryBox (DESIGN §4.4)" },
+    { path = "alloc::vec::Vec", reason = "panics on allocation failure; use vibeos::kalloc::TryVec (DESIGN §4.4)" },
+    { path = "alloc::string::String", reason = "panics on allocation failure; use vibeos::kalloc::TryString (DESIGN §4.4)" },
+    { path = "alloc::sync::Arc", reason = "panics on allocation failure; use vibeos::kalloc::TryArc (DESIGN §4.4)" },
+    { path = "alloc::rc::Rc", reason = "panics on allocation failure; use vibeos::kalloc's fallible types (DESIGN §4.4)" },
+    { path = "alloc::collections::BTreeMap", reason = "panics on allocation failure; use vibeos::kalloc::TryBTreeMap (DESIGN §4.4)" },
+    { path = "alloc::collections::BTreeSet", reason = "panics on allocation failure; use vibeos::kalloc's fallible types (DESIGN §4.4)" },
+    { path = "alloc::collections::VecDeque", reason = "panics on allocation failure; use vibeos::kalloc's fallible types (DESIGN §4.4)" },
+    { path = "alloc::collections::BinaryHeap", reason = "panics on allocation failure; use vibeos::kalloc's fallible types (DESIGN §4.4)" },
+    { path = "alloc::collections::LinkedList", reason = "panics on allocation failure; use vibeos::kalloc's fallible types (DESIGN §4.4)" },
+]
+disallowed-macros = [
+    { path = "alloc::vec", reason = "panics on allocation failure; use vibeos::kalloc::TryVec (DESIGN §4.4)" },
+    { path = "alloc::format", reason = "panics on allocation failure; format into a fixed buffer or vibeos::kalloc's fallible types (DESIGN §4.4)" },
+]

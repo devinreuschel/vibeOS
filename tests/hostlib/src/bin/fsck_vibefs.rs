@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use vibeos::vibefs::{self, Defect, MemDisk};
 
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(path) = args.next() else {

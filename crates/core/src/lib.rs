@@ -57,10 +57,16 @@ pub mod fmt_util;
 )]
 pub mod fs;
 pub mod irq;
+#[allow(
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "kalloc wraps alloc's owning types (DESIGN §4.4)"
+)]
 pub mod kalloc;
 pub mod limits;
 pub mod log;
 pub mod marker;
+#[allow(clippy::missing_safety_doc, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
