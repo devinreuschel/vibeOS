@@ -811,8 +811,8 @@ and a bound.
    reclaim (ROADMAP §12.6), or copies through a faulting user-memory accessor (§5.1) once ROADMAP
    §12.2 lets its fault sleep) runs with IF=1, no spinlock held, and outside any RCU read-side section
    ([§2.12](#212-rcu)). `sync_init::might_sleep`, called first in `park`, `BlockingMutex::lock_until`,
-   `RwLock::read_until` and `write_until`, `Semaphore::acquire_until`, `Condvar::wait_until`, and
-   `Channel::send_until` and `recv_until`, before any lock, asserts that the thread is not in a device
+   `RwLock::read_until` and `write_until`, `Semaphore::acquire_until`, `Condvar::wait_until` and
+   `wait_unless`, and `Channel::send_until` and `recv_until`, before any lock, asserts that the thread is not in a device
    top half in every build, and that this CPU's `HELD` rank mask is empty and IF is on in debug and
    `kernel_tests` builds. `Sched::begin_wait`, which runs under SCHED with IF=0, checks the same on
    the `SleepCtx` that `with_sched` recorded before it took SCHED. A rank-0 lock or an `IrqCell` is

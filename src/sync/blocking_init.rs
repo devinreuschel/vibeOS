@@ -484,6 +484,7 @@ impl Condvar {
         done: impl FnOnce() -> bool,
         deadline: Instant,
     ) -> Option<WaitOutcome> {
+        sync_init::might_sleep();
         let waiting = thread_init::with_sched(|s| {
             if done() {
                 return false;
