@@ -250,7 +250,7 @@ jobs:
             jobs: 1
           - arch: x86_64
             tier: e2e-2
-            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem
+            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace
             jobs: 1
           - arch: x86_64
             tier: in-guest-1

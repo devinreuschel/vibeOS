@@ -1040,6 +1040,84 @@ class TestQemuArgv(unittest.TestCase):
         self.assertEqual(argv.count("-boot"), 1)
 
 
+class TestStraceE2e(unittest.TestCase):
+    """`make test-e2e-strace`'s checks (ROADMAP §10.7, F150)."""
+
+    ECHO = "vibeOS: boot: cmdline: vibeos.strace=0 vibeos.strace=1"
+    GOOD = [
+        "vibeOS: serial online",
+        ECHO,
+        "vibeOS: smp: done",
+        "user: syscall getpid nr=39 = 1",
+        "init: startinguser: syscall write nr=1 = 14",
+        "user: syscall write nr=1 = -14",
+        "user: syscall ? nr=999 = -38",
+    ]
+
+    def test_limine_cmdline_value(self) -> None:
+        import tempfile
+
+        text = (
+            "timeout: 0\n"
+            "/Other\n    cmdline: nope\n"
+            "/vibeOS\n    protocol: limine\n    cmdline:  a=1 vibeos.strace=0 \n"
+            "/Later\n    cmdline: later\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+            f.write(text)
+        try:
+            self.assertEqual(run_e2e.limine_cmdline(f.name), "a=1 vibeos.strace=0")
+        finally:
+            os.unlink(f.name)
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+            f.write("/vibeOS\n    protocol: limine\n")
+        try:
+            self.assertEqual(run_e2e.limine_cmdline(f.name), "")
+        finally:
+            os.unlink(f.name)
+        self.assertEqual(run_e2e.limine_cmdline(), "vibeos.strace=0")
+
+    def test_check_strace_lines_ok(self) -> None:
+        echo, write = run_e2e.check_strace_lines(self.GOOD, "vibeos.strace=0 vibeos.strace=1")
+        self.assertEqual(echo, self.ECHO)
+        self.assertEqual(write, "user: syscall write nr=1 = 14")
+        # A carriage return from the serial line is not part of the text.
+        lines = [line + "\r" for line in self.GOOD]
+        run_e2e.check_strace_lines(lines, "vibeos.strace=0 vibeos.strace=1")
+
+    def test_check_strace_lines_missing_write(self) -> None:
+        lines = [line for line in self.GOOD if "write" not in line]
+        with self.assertRaisesRegex(HarnessError, "write"):
+            run_e2e.check_strace_lines(lines, "vibeos.strace=0 vibeos.strace=1")
+        with self.assertRaisesRegex(HarnessError, "user: syscall"):
+            run_e2e.check_strace_lines(self.GOOD[:3], "vibeos.strace=0 vibeos.strace=1")
+        bad_nr = [*self.GOOD[:3], "user: syscall write nr=2 = 1"]
+        with self.assertRaisesRegex(HarnessError, "nr=1"):
+            run_e2e.check_strace_lines(bad_nr, "vibeos.strace=0 vibeos.strace=1")
+
+    def test_check_strace_lines_malformed(self) -> None:
+        for bad in (
+            "user: syscall write nr=1 =",
+            "user: syscall write nr=x = 1",
+            "user: syscall write nr=1 = 1 extra",
+            "user: syscall  nr=1 = 1",
+        ):
+            with self.subTest(bad=bad), self.assertRaisesRegex(HarnessError, "malformed"):
+                run_e2e.check_strace_lines(
+                    [*self.GOOD, bad], "vibeos.strace=0 vibeos.strace=1"
+                )
+
+    def test_check_strace_lines_echo_mismatch(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "cmdline echo"):
+            run_e2e.check_strace_lines(self.GOOD, "vibeos.strace=1")
+        no_echo = [line for line in self.GOOD if line != self.ECHO]
+        with self.assertRaisesRegex(HarnessError, "boot: cmdline"):
+            run_e2e.check_strace_lines(no_echo, "vibeos.strace=0 vibeos.strace=1")
+        late = [self.GOOD[0], self.GOOD[3], self.ECHO, *self.GOOD[4:]]
+        with self.assertRaisesRegex(HarnessError, "before the cmdline echo"):
+            run_e2e.check_strace_lines(late, "vibeos.strace=0 vibeos.strace=1")
+
+
 class TestFwCfgCmdline(unittest.TestCase):
     """C-CMDLINE: the harness's words reach the kernel as fw_cfg `opt/vibeos/cmdline`."""
 
