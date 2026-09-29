@@ -16,6 +16,7 @@ mod chain;
 mod dirent;
 mod mkfs;
 mod rw;
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod vol;
 
 pub use dirent::lfn_checksum;

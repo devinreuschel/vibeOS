@@ -709,3 +709,22 @@ fn rename_dir_dotdot_names_new_parent() {
     });
     fsck(&b);
 }
+
+/// Mount `b` with FATSz32 set to `fatsz` and NumFATs to `nfats`.
+fn mount_with_fatsz(fatsz: u32, nfats: u8) -> Result<(), FatError> {
+    let mut b = fresh(INITRD_BYTES);
+    b[36..40].copy_from_slice(&fatsz.to_le_bytes());
+    b[16] = nfats;
+    let mut disk = MemDisk::new(&mut b, SEC as u32).unwrap();
+    FatVol::mount(&mut disk).map(|_| ())
+}
+
+#[test]
+fn fat_bpb_data_lba_overflow_two_fats() {
+    assert_eq!(mount_with_fatsz(0x8000_0000, 2), Err(FatError::Corrupt));
+}
+
+#[test]
+fn fat_bpb_data_lba_overflow_one_fat() {
+    assert_eq!(mount_with_fatsz(0xFFFF_FFFF, 1), Err(FatError::Corrupt));
+}

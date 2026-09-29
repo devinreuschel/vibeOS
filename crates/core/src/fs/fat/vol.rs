@@ -32,7 +32,7 @@ impl FatVol {
                 if free != 0xFFFFFFFF {
                     vol.free = free;
                 }
-                if hint >= 2 && hint < info.nclus + 2 {
+                if hint >= 2 && !info.past_end(hint) {
                     vol.hint = hint;
                 }
             }
@@ -61,39 +61,29 @@ impl FatVol {
         let mut node = self.root();
         let mut stack = [0u32; 16];
         let mut sp = 0usize;
-        let mut i = 0usize;
-        while i < path.len() && path[i] == b'/' {
-            i += 1;
-        }
-        while i < path.len() {
-            let mut j = i;
-            while j < path.len() && path[j] != b'/' {
-                j += 1;
+        for comp in path.split(|&c| c == b'/') {
+            if comp.is_empty() || name_is_dot(comp) {
+                continue;
             }
-            let comp = &path[i..j];
-            if !comp.is_empty() && !name_is_dot(comp) {
-                if name_is_dotdot(comp) {
-                    if sp == 0 {
-                        node = self.root();
-                    } else {
-                        sp -= 1;
-                        node = self.node_from_clu(stack[sp], InodeKind::Dir, 0, 0, 0)?;
+            if name_is_dotdot(comp) {
+                match sp.checked_sub(1) {
+                    None => node = self.root(),
+                    Some(up) => {
+                        sp = up;
+                        let clu = *stack.get(up).ok_or(FatError::Corrupt)?;
+                        node = self.node_from_clu(clu, InodeKind::Dir, 0, 0, 0)?;
                     }
-                } else {
-                    if node.kind != InodeKind::Dir {
-                        return Err(FatError::NotDir);
-                    }
-                    if sp < stack.len() {
-                        stack[sp] = node.clu;
-                        sp += 1;
-                    }
-                    node = self.lookup(d, node.clu, comp)?;
                 }
+            } else {
+                if node.kind != InodeKind::Dir {
+                    return Err(FatError::NotDir);
+                }
+                if let Some(slot) = stack.get_mut(sp) {
+                    *slot = node.clu;
+                    sp = sp.checked_add(1).ok_or(FatError::Corrupt)?;
+                }
+                node = self.lookup(d, node.clu, comp)?;
             }
-            while j < path.len() && path[j] == b'/' {
-                j += 1;
-            }
-            i = j;
         }
         Ok(node)
     }
@@ -140,8 +130,10 @@ impl FatVol {
         d.flush()
     }
 
+    /// Free space in bytes; saturates only for a `FatInfo` that
+    /// `parse_bpb` never builds, whose cluster size is not a sector count.
     pub fn free_bytes(&self) -> u64 {
-        self.free as u64 * self.info.clus_bytes() as u64
+        u64::from(self.free).saturating_mul(self.info.clus_bytes() as u64)
     }
 
     pub fn fats_identical<D: Disk>(&mut self, d: &mut D) -> Result<bool, FatError> {
@@ -150,14 +142,12 @@ impl FatVol {
         }
         let mut a = [0u8; SEC];
         let mut b = [0u8; SEC];
-        let mut sec = 0u32;
-        while sec < self.info.fatsz {
+        for sec in 0..self.info.fatsz {
             d.read(self.info.fat_lba(0, sec)?, &mut a)?;
             d.read(self.info.fat_lba(1, sec)?, &mut b)?;
             if a != b {
                 return Ok(false);
             }
-            sec += 1;
         }
         Ok(true)
     }
@@ -200,7 +190,11 @@ impl FatVol {
         n.mtime = fat_to_unix(le16(ent, 24)?, le16(ent, 22)?);
         if !lfn.is_empty() {
             let len = lfn.len().min(MAX_NAME);
-            n.name[..len].copy_from_slice(&lfn[..len]);
+            let src = lfn.get(..len).ok_or(FatError::Corrupt)?;
+            n.name
+                .get_mut(..len)
+                .ok_or(FatError::Corrupt)?
+                .copy_from_slice(src);
             n.name_len = len as u8;
         } else {
             let (nm, nl) = decode_short(ent);
@@ -217,13 +211,8 @@ impl FatVol {
         if name_is_dot(name) || name_is_dotdot(name) {
             return Err(FatError::Inval);
         }
-        let mut i = 0usize;
-        while i < name.len() {
-            let c = name[i];
-            if c == 0 || c == b'/' || c < 0x20 {
-                return Err(FatError::Inval);
-            }
-            i += 1;
+        if name.iter().any(|&c| c == 0 || c == b'/' || c < 0x20) {
+            return Err(FatError::Inval);
         }
         Ok(())
     }
@@ -238,7 +227,7 @@ fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
         return Err(FatError::Inval);
     }
     let spc = boot[13];
-    if spc == 0 || (spc & (spc - 1)) != 0 {
+    if !spc.is_power_of_two() {
         return Err(FatError::Inval);
     }
     let rsvd = le16(boot, 14)? as u32;
@@ -266,12 +255,17 @@ fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
     let fsinfo = le16(boot, 48)? as u32;
     let backup = le16(boot, 50)? as u32;
     let media = boot[21];
-    let data_lba = rsvd + num_fats as u32 * fatsz;
-    if data_lba >= totsec {
-        return Err(FatError::Corrupt);
-    }
-    let data_secs = totsec - data_lba;
-    let nclus = data_secs / spc as u32;
+    let data_lba = u32::from(num_fats)
+        .checked_mul(fatsz)
+        .and_then(|f| f.checked_add(rsvd))
+        .ok_or(FatError::Corrupt)?;
+    let data_secs = match totsec.checked_sub(data_lba) {
+        Some(n) if n > 0 => n,
+        _ => return Err(FatError::Corrupt),
+    };
+    let nclus = data_secs
+        .checked_div(u32::from(spc))
+        .ok_or(FatError::Corrupt)?;
     if nclus < 2 {
         return Err(FatError::Corrupt);
     }
