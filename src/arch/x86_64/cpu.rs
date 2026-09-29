@@ -60,10 +60,6 @@ pub unsafe fn write_cr3(cr3: u64) {
 
 /// `invlpg` for a single virtual address. Cheap enough that every leaf
 /// edit calls it; DESIGN §4.3 requires it after any single-PTE change.
-///
-/// `#[allow(dead_code)]` because slice B only exercises this from the
-/// (phase-2-wired) MMIO patch path; phase 2 turns it into a used symbol
-/// without editing this file.
 #[inline]
 pub fn invlpg(va: u64) {
     // SAFETY: `invlpg` only drops TLB entries for one page, which never changes
@@ -296,9 +292,6 @@ pub unsafe fn write_cr4(val: u64) {
 /// Read `rsp`. Used by paging bring-up to find which top-level PML4
 /// entry covers Limine's boot stack, so the switch to our own PML4
 /// survives the following `mov cr3`.
-///
-/// `#[allow(dead_code)]` for the panic-test build, which never reaches
-/// paging init.
 #[inline]
 pub fn read_rsp() -> u64 {
     let val: u64;

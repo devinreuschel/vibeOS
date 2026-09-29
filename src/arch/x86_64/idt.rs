@@ -163,13 +163,6 @@ impl TrapFrame {
     }
 
     /// Mutable form of [`TrapFrame::user`]. The exit restores what it holds.
-    #[cfg_attr(
-        not(feature = "kernel_tests"),
-        allow(
-            dead_code,
-            reason = "only kernel_tests hooks rewrite a trapped user frame today"
-        )
-    )]
     pub fn user_mut(&mut self) -> &mut UserFrame {
         // SAFETY: invariant: bytes `F_USER..` of a `TrapFrame` have
         // `UserFrame`'s layout, and a pointer derived from `&mut self` is
