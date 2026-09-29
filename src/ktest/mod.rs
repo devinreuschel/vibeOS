@@ -19,7 +19,7 @@ use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::irq::{self, IrqError};
 use vibeos::kva::PAGE_SIZE;
 use vibeos::lock::RANK_DEVICE;
-use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr};
+use vibeos::paging::{PAGE_SIZE_4K, PhysAddr, USER_END, VirtAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::per_cpu::PerCpuRemote;
 use vibeos::pmm::Frames;
@@ -59,7 +59,7 @@ use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
 use crate::x86;
-use crate::{arch, mm};
+use crate::{acpi, arch, mm};
 pub(crate) mod user;
 use user::user_code;
 
@@ -220,7 +220,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("kva_deferred", mm::ktest::test_kva_deferred),
     test("vmap", mm::ktest::test_vmap),
     test("mmio_uc_flags", mm::ktest::test_mmio_uc_flags),
-    test("acpi_discovery", test_acpi_discovery),
+    test("acpi_discovery", acpi::ktest::test_acpi_discovery),
     test("gdt_selectors", test_gdt_selectors),
     test("star_sysret_layout", test_star_sysret_layout),
     test(
@@ -835,59 +835,6 @@ global_asm!(
 );
 
 const WRITE_U8_1_LEN: u8 = 3;
-
-fn leaf_is_uc(phys: u64) -> bool {
-    if phys == 0 {
-        return false;
-    }
-    let va = VirtAddr(paging_init::HHDM_BASE.wrapping_add(phys));
-    match paging_init::translate(va) {
-        Some((_, _, flags)) => flags.contains(PageFlags::PCD | PageFlags::PWT),
-        None => false,
-    }
-}
-
-fn test_acpi_discovery() -> Outcome {
-    let Some(info) = acpi_init::info() else {
-        return Outcome::Fail("no acpi info");
-    };
-    if info.table_count == 0 {
-        return Outcome::Fail("zero tables");
-    }
-    if info.cpu_count() == 0 {
-        return Outcome::Fail("no enabled cpus");
-    }
-    if info.ioapic_count() == 0 {
-        return Outcome::Fail("no ioapic");
-    }
-    if !info.hpet_present() {
-        return Outcome::Fail("no hpet");
-    }
-    if !acpi_init::mmio_uc_patched() {
-        return Outcome::Fail("mmio uc not patched");
-    }
-    let Some(madt) = info.madt.as_ref() else {
-        return Outcome::Fail("no madt");
-    };
-    if !leaf_is_uc(madt.lapic_base) {
-        return Outcome::Fail("lapic not uc");
-    }
-    for io in madt.ioapics.iter().take(madt.ioapic_count) {
-        if !leaf_is_uc(io.addr as u64) {
-            return Outcome::Fail("ioapic not uc");
-        }
-    }
-    let Some(hpet) = info.hpet else {
-        return Outcome::Fail("no hpet");
-    };
-    if !leaf_is_uc(hpet.base) {
-        return Outcome::Fail("hpet not uc");
-    }
-    if hpet.period_fs == 0 {
-        return Outcome::Fail("hpet period unread");
-    }
-    Outcome::Ok
-}
 
 fn test_gdt_selectors() -> Outcome {
     if x86::read_cs() != KERNEL_CS {
