@@ -107,7 +107,8 @@ and gets `SIGTRAP`.
 `catch::intercept`, the in-guest test registry's exception catcher, compiles only under `kernel_tests`
 (`arch::catch` and the dispatcher's intercept hook both), where it runs in the dispatcher before the
 body of every vector below `0x20`; a production build runs every body directly (ROADMAP §10.2,
-F146). Planned (ROADMAP §10.2, F146): it acts only on a CPL-0 frame on the CPU that armed it.
+F146). It acts only on a CPL-0 frame on the CPU that armed the catch, so a fault on another CPU, or
+one raised by ring 3, takes its normal path ([§2.7](INVARIANTS.md#27-invariant-register) row I29).
 
 Rule: ring 3 never halts the kernel. Each exception vector has one row below. The Ring 3 column is
 the rule; the last column says what the code does where it differs. The table lives in
