@@ -1309,6 +1309,8 @@ pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
 
 pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     let ctx = sync_init::sleep_ctx();
+    #[cfg(feature = "kernel_tests")]
+    let window = testing::window_enter();
     let (r, places, n) = {
         let mut s = SCHED.lock();
         s.waiter = ctx;
@@ -1325,6 +1327,10 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
         let (cpu, id, slot) = places[i];
         crate::ipi_init::place_ready(cpu, id, slot as usize);
         i += 1;
+    }
+    #[cfg(feature = "kernel_tests")]
+    if window.is_some() {
+        testing::wait_window();
     }
     r
 }

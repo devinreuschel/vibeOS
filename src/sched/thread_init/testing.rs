@@ -149,10 +149,11 @@ static PLACE_TID: AtomicU32 = AtomicU32::new(u32::MAX);
 /// Set when [`place_stall`] delivered its wake after the thread died.
 static PLACE_LATE: AtomicBool = AtomicBool::new(false);
 
-/// Hold `id`'s next blocking wait (`sync_init::wait_resume`) between the
-/// store that queues it on the wait queue and its `schedule`, IF=0,
-/// until [`arm_late_wake`]'s held wake lets it go or 2 s pass. The
-/// thread calls it on itself before it blocks.
+/// Hold `id`'s next blocking wait between the store that queues it on the
+/// wait queue and its `schedule`, IF=0, until [`arm_late_wake`]'s held
+/// wake lets it go or 2 s pass: the `with_sched` whose section leaves it
+/// `Blocked` holds it once SCHED has dropped. The thread calls it on
+/// itself before it blocks.
 pub fn arm_wait_window(id: ThreadId) {
     WINDOW_GO.store(false, Ordering::Relaxed);
     WINDOW_HELD.store(false, Ordering::Relaxed);
@@ -164,17 +165,32 @@ pub fn wait_window_held() -> bool {
     WINDOW_HELD.load(Ordering::Acquire)
 }
 
-/// Called by `sync_init::wait_resume` before it schedules.
-pub fn wait_window() {
-    let me = super::current_id().raw();
+/// Called by `with_sched` before it takes SCHED: IF off for each section
+/// of [`arm_wait_window`]'s thread until [`wait_window`] has run. SCHED's
+/// own guard would turn IF back on as it drops, and a tick between that
+/// and the hold would switch the thread off `Blocked`, so that it reached
+/// the hold only once woken.
+pub(super) fn window_enter() -> Option<crate::x86::InterruptGuard> {
+    let armed = WINDOW_TID.load(Ordering::Acquire);
+    (armed != u32::MAX && armed == super::current_id().raw())
+        .then(crate::x86::InterruptGuard::enter)
+}
+
+/// Called by `with_sched` after it has delivered its places, IF off under
+/// [`window_enter`]'s guard. Holds the thread when that section left it
+/// `Blocked`: the wait's queueing is done and its `schedule` not yet.
+pub(super) fn wait_window() {
+    let me = super::current_id();
+    if !matches!(try_state(me), Some(ThreadState::Blocked { .. })) {
+        return;
+    }
+    let me = me.raw();
     if WINDOW_TID
         .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
         .is_err()
     {
         return;
     }
-    // IF=0 so no tick switches the held thread off before the wake.
-    let _irq = crate::x86::InterruptGuard::enter();
     WINDOW_HELD.store(true, Ordering::Release);
     let end =
         time_init::read_tsc().saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
