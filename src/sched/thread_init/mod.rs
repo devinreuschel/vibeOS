@@ -443,10 +443,12 @@ fn runnable_on(t: &Tcb, cpu: u32) -> bool {
 /// only runnable one here stays queued while this CPU runs idle, whose
 /// dequeue then moves it. Never the running thread, an idle thread, or a
 /// pinned kernel thread; the move goes out through `place` after the
-/// SCHED lock drops, before any switch.
+/// SCHED lock drops, before any switch. Each entry dequeued after a move
+/// goes through the hook too, so a movable thread queued behind a moved
+/// one moves as well.
 #[cfg(feature = "kernel_tests")]
-fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> ThreadId {
-    if !testing::requeue_on() || next == idle {
+fn requeue_next_cpu(mut next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> ThreadId {
+    if !testing::requeue_on() {
         return next;
     }
     let Some(target) = testing::next_online_cpu(me) else {
@@ -455,38 +457,43 @@ fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> T
     // A stale entry's thread is not runnable here and does not move:
     // `schedule_inner` drops the entry.
     let movable = |t: &Tcb| runnable_on(t, me) && (t.pid != 0 || t.affinity == CpuAffinity::Any);
-    if next == cur {
-        if with_sched(|s| s.get(cur).is_some_and(movable)) {
-            per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
-            return idle;
+    loop {
+        if next == idle {
+            return next;
         }
-        return next;
-    }
-    if testing::take_arrived(next) {
-        return next;
-    }
-    let moved = with_sched(|s| {
-        let Some(t) = s.get_mut(next) else {
-            return false;
-        };
-        if !movable(t) {
-            return false;
+        if next == cur {
+            if with_sched(|s| s.get(cur).is_some_and(movable)) {
+                per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
+                return idle;
+            }
+            return next;
         }
-        t.cpu = target;
-        if t.pid != 0 {
-            t.affinity = CpuAffinity::Pinned(target);
+        if testing::take_arrived(next) {
+            return next;
         }
-        // Before the place: `with_sched` hands the thread to `target` as
-        // its lock drops, and a dequeue there that finds no arrival would
-        // move it again.
-        testing::moved(next);
-        s.place(target, next);
-        true
-    });
-    if !moved {
-        return next;
+        let moved = with_sched(|s| {
+            let Some(t) = s.get_mut(next) else {
+                return false;
+            };
+            if !movable(t) {
+                return false;
+            }
+            t.cpu = target;
+            if t.pid != 0 {
+                t.affinity = CpuAffinity::Pinned(target);
+            }
+            // Before the place: `with_sched` hands the thread to `target` as
+            // its lock drops, and a dequeue there that finds no arrival would
+            // move it again.
+            testing::moved(next);
+            s.place(target, next);
+            true
+        });
+        if !moved {
+            return next;
+        }
+        next = per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle));
     }
-    per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle))
 }
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
