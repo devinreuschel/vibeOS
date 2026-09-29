@@ -7,11 +7,15 @@ use vibeos::time::{
     unix_from_civil,
 };
 
+use vibeos::apic::TimerMode;
+
 use crate::acpi_init;
+use crate::apic_init;
 use crate::ktest::{Outcome, Test, test};
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init::{self, STATE};
+use crate::x86;
 
 /// A fresh PIT channel 2 calibration (`tsc_per_ms`).
 pub(crate) fn measure_pit_ch2() -> Option<u64> {
@@ -38,16 +42,45 @@ pub(crate) fn deadline_after(now: Instant) -> Instant {
     next_deadline(now)
 }
 
+/// PIT interrupts taken, counted by `time_init::on_pit_tick`.
+static PIT_IRQS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn count_pit_irq() {
+    // Relaxed: a counter; `pit_tick_rate` reads it on the CPU the PIT
+    // interrupts, and no data hangs off it.
+    PIT_IRQS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn pit_irqs() -> u64 {
+    // Relaxed: as in `count_pit_irq`.
+    PIT_IRQS.load(Ordering::Relaxed)
+}
+
+/// PIT interrupts over an 80 ms TSC spin with IF=1, in a boot where the PIT
+/// drives the tick (`make test-kernel`'s hpet=off boot). It spins rather
+/// than `busy_wait_ms`, which halts when IF=1.
 pub(crate) fn test_pit_tick_rate() -> Outcome {
-    let t0 = time_init::uptime_ms();
-    time_init::busy_wait_ms(80);
-    let t1 = time_init::uptime_ms();
-    let dt = t1.saturating_sub(t0);
-    if (40..=160).contains(&dt) {
+    if apic_init::timer_mode() != TimerMode::Pit {
+        return Outcome::Fail("pit does not drive the tick");
+    }
+    if !x86::interrupts_enabled() {
+        return Outcome::Fail("IF off");
+    }
+    let k = time_init::tsc_per_ms();
+    if k == 0 {
+        return Outcome::Fail("no tsc_per_ms");
+    }
+    let span = k.saturating_mul(80);
+    let n0 = pit_irqs();
+    let t0 = time_init::read_tsc();
+    while time_init::read_tsc().wrapping_sub(t0) < span {
+        core::hint::spin_loop();
+    }
+    let n = pit_irqs().wrapping_sub(n0);
+    if (40..=160).contains(&n) {
         Outcome::Ok
     } else {
-        crate::marker!("vibeOS: ktest:   ticks {t0} -> {t1} dt={dt}");
-        Outcome::Fail("pit not ~1 kHz")
+        crate::fail_fmt!("{n} pit interrupts in 80 ms, want 40 to 160")
     }
 }
 
@@ -638,7 +671,7 @@ pub(crate) fn test_rtc_offset() -> Outcome {
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
-    test("pit_tick_rate", test_pit_tick_rate),
+    test("pit_tick_rate", test_pit_tick_rate).opt_in(),
     test("now_us_monotonic", test_now_us_monotonic),
     test("now_us_under_yields", test_now_us_under_yields),
     test("now_us_planted_tear", test_now_us_planted_tear),

@@ -353,6 +353,8 @@ pub fn on_hw_tick(tsc: u64) {
 }
 
 pub fn on_pit_tick(tsc: u64) {
+    #[cfg(feature = "kernel_tests")]
+    super::ktest::count_pit_irq();
     on_hw_tick(tsc);
 }
 

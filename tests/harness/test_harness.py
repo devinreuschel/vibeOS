@@ -33,6 +33,7 @@ from tests.harness.harness import (
     PANIC_EXIT_S,
     PANIC_EXIT_STATUS,
     DeadlineReader,
+    EnvConfig,
     HarnessError,
     Marker,
     QemuConfig,
@@ -2832,6 +2833,100 @@ class TestSkips(unittest.TestCase):
             self.assertTrue(set(row.match) <= set(FIELDS))
         names = {r.name for r in rows}
         self.assertIn("cpu_hardening", names)
+
+
+class TestHpetOffBoot(unittest.TestCase):
+    """`make test-kernel`'s hpet=off boot (ROADMAP §10.2): the PIT drives the
+    tick, and `vibeos.ktest=` limits it to `HPET_OFF_KTEST`."""
+
+    GOOD = (
+        "vibeOS: time: lapic_timer ok (pit)",
+        "vibeOS: ktest: begin 1",
+        "vibeOS: ktest: run pit_tick_rate 10000",
+        "vibeOS: ktest: ok pit_tick_rate (80000 us)",
+        "vibeOS: ktest: end",
+    )
+
+    @staticmethod
+    def env(cpu: str = "max", ktest: str = "foo") -> EnvConfig:
+        return EnvConfig(
+            iso="x.iso",
+            smp=2,
+            cpu=cpu,
+            mem="128M",
+            firmware=None,
+            accel="tcg",
+            timeout=1.0,
+            extra=(),
+            ktest=ktest,
+            ktest_repeat=3,
+        )
+
+    def cfg(self, cpu: str = "max") -> QemuConfig:
+        return run_ktest.hpet_off_config(self.env(cpu), "disk.img")
+
+    def check(self, *texts: str, exit_code: int = ISA_DEBUG_PASS) -> None:
+        run_ktest.check_hpet_off_boot([K(t) for t in texts], exit_code, self.cfg())
+
+    def test_argv(self) -> None:
+        argv = qemu_argv(self.cfg(), None)
+        joined = " ".join(argv)
+        self.assertIn("-machine pc,hpet=off", joined)
+        cpu = argv[argv.index("-cpu") + 1]
+        self.assertEqual(cpu, "max,-tsc-deadline")
+        self.assertEqual(self.cfg("max,+invtsc").cpu, "max,+invtsc,-tsc-deadline")
+        self.assertEqual(self.cfg("qemu64,-tsc-deadline").cpu, "qemu64,-tsc-deadline")
+
+    def test_selection_overrides_env(self) -> None:
+        cfg = self.cfg()
+        self.assertEqual(run_ktest.ktest_selection(cfg), "pit_tick_rate")
+        argv = qemu_argv(cfg, None)
+        fw = next(a for a in argv if a.startswith("name=opt/vibeos/cmdline,"))
+        self.assertIn("vibeos.ktest_repeat=3", fw)
+        self.assertTrue(fw.endswith(" vibeos.ktest=pit_tick_rate"), fw)
+
+    def test_check_passes_without_block_lines(self) -> None:
+        self.check(*self.GOOD)
+
+    def test_check_refuses(self) -> None:
+        periodic = ("vibeOS: time: lapic_timer ok (periodic)", *self.GOOD[1:])
+        skip = (*self.GOOD[:3], "vibeOS: ktest: skip pit_tick_rate: why", self.GOOD[4])
+        fail = (*self.GOOD[:3], "vibeOS: ktest: FAIL pit_tick_rate: no", self.GOOD[4])
+        missing = (self.GOOD[0], "vibeOS: ktest: begin 1", "vibeOS: ktest: run x 10000",
+                   "vibeOS: ktest: ok x (1 us)", "vibeOS: ktest: end")
+        for why, lines in (
+            ("periodic", periodic),
+            ("skip", skip),
+            ("FAIL", fail),
+            ("missing", missing),
+        ):
+            with self.subTest(why=why):
+                with self.assertRaisesRegex(HarnessError, "hpet=off boot"):
+                    self.check(*lines)
+
+    def _main(self, argv: list[str]) -> mock.MagicMock:
+        first = _boot(
+            *BLOCK_MARKERS,
+            "vibeOS: ktest: begin 1",
+            "vibeOS: ktest: run heap_box 10000",
+            "vibeOS: ktest: ok heap_box (3 us)",
+            *STACK_REPORT,
+            "vibeOS: ktest: end",
+        )
+        env = {"VIBEOS_ISO": "x.iso", "VIBEOS_KTEST": "heap_box", "VIBEOS_QEMU_ACCEL": ""}
+        with (
+            overlay_env(env, clear=True),
+            mock.patch.object(results.Results, "write"),
+            mock.patch.object(run_ktest, "run_qemu_until_exit", side_effect=[first]),
+            mock.patch.object(run_ktest, "qemu_argv", return_value=["qemu"]),
+            mock.patch.object(run_ktest, "hpet_off_boot") as off,
+        ):
+            self.assertEqual(run_ktest.main(argv), 0)
+        return off
+
+    def test_main_flag(self) -> None:
+        self.assertEqual(self._main(["--hpet-off"]).call_count, 1)
+        self.assertEqual(self._main([]).call_count, 0)
 
 
 if __name__ == "__main__":
