@@ -25,6 +25,12 @@ Modes (one `if` branch each in `main`):
   the asset of a prerelease `ci-history-<year>` never marked latest, listed in
   `archives.json`, and restart the branch from an orphan commit holding the
   rest. `records()` and `has()` read the branch and every archive alike.
+- `--record PATH`: the dev-host record writer `make gate PHASE=N RECORD=1`
+  calls on the Apple Silicon dev host (ROADMAP §10.9, the dev-host box). It
+  refuses a record that lacks a required field or holds the machine's
+  hostname, user name, home directory or serial number, and commits it at
+  `records/<yyyy-mm-dd>-dev-host-<sha>-<entry-id>.json` (C-HISTORY), with the
+  writer's retry on a rejected push. `dev_host_records` is the one reader.
 
 Trust rules: a fork's pull request sets a run's branch, title and artifacts, so
 no run field reaches a shell line (subprocesses take argv lists), commit
@@ -55,7 +61,7 @@ import tempfile
 import time
 import tomllib
 import zipfile
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1288,6 +1294,108 @@ def rotate(
     raise HistoryError(f"rotation lost its lease {PUSH_ATTEMPTS} times")
 
 
+# --- dev-host records -----------------------------------------------------------
+
+DEV_HOST = "dev-host"
+# The fields every dev-host record carries (ROADMAP §10.9, the dev-host box);
+# `make gate` passes a record entry only on a record holding all of them.
+REQUIRED_RECORD_FIELDS = (
+    "schema", "event", "commit", "head_sha", "host", "mac_model", "macos", "qemu",
+    "phase", "line", "command", "numbers", "result", "started", "finished", "results",
+)
+RECORDS = "records"
+
+
+def dev_host_records(history: HistoryRepo) -> list[dict[str, Any]]:
+    """Every JSON object under `records/` on the branch whose event is
+    `dev-host`. Readers match a record by its content (commit, phase, line,
+    command), never by its file name."""
+    out: list[dict[str, Any]] = []
+    d = history.workdir / RECORDS
+    if not d.is_dir():
+        return out
+    for p in sorted(d.glob("*.json")):
+        try:
+            obj = json.loads(p.read_bytes())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(obj, dict) and obj.get("event") == DEV_HOST:
+            out.append(obj)
+    return out
+
+
+def record_entry_id(phase: int, line: str, command: str) -> str:
+    """C-HISTORY's entry id: the first 12 hex digits of SHA-256 over the
+    phase, the gate line's key (whitespace collapsed) and the command."""
+    key = " ".join(line.split())
+    return hashlib.sha256(f"{phase}\n{key}\n{command}".encode()).hexdigest()[:12]
+
+
+def dev_host_record_path(rec: Mapping[str, Any]) -> str:
+    """`records/<yyyy-mm-dd>-dev-host-<sha>-<entry-id>.json` (C-HISTORY): one
+    file per commit and entry, dated by the run's start."""
+    commit = rec.get("commit")
+    started = parse_time(rec.get("started"))
+    phase, line, command = rec.get("phase"), rec.get("line"), rec.get("command")
+    if (
+        not isinstance(commit, str) or not HEX40.fullmatch(commit) or started is None
+        or not isinstance(phase, int) or not isinstance(line, str)
+        or not isinstance(command, str)
+    ):
+        raise HistoryError("a dev-host record needs a commit, start, phase, line and command")
+    day = started.astimezone(UTC).date().isoformat()
+    return f"{RECORDS}/{day}-{DEV_HOST}-{commit}-{record_entry_id(phase, line, command)}.json"
+
+
+def _holds(text: str, kind: str, value: str) -> bool:
+    if kind == "user name":
+        # A user name is matched as a word: `dev` is in `/dev/null` but not `dev-host`.
+        edge = r"[A-Za-z0-9_.-]"
+        return re.search(rf"(?<!{edge}){re.escape(value)}(?!{edge})", text) is not None
+    return value.lower() in text.lower()
+
+
+def validate_record(rec: Mapping[str, Any], forbidden: Sequence[tuple[str, str]]) -> list[str]:
+    """Why a dev-host record may not go to the public branch (DESIGN §1.5):
+    a missing required field, an event or host other than `dev-host`, or any
+    `forbidden` (kind, value), such as the machine's hostname, user name, home
+    directory or serial number, anywhere in it. A message names the kind,
+    never the value."""
+    problems = [f"no `{f}`" for f in REQUIRED_RECORD_FIELDS if f not in rec]
+    if rec.get("schema") != SCHEMA:
+        problems.append(f"schema is not {SCHEMA}")
+    for f in ("event", "host"):
+        if f in rec and rec[f] != DEV_HOST:
+            problems.append(f"`{f}` is not {DEV_HOST!r}")
+    if rec.get("result") not in ("pass", "fail"):
+        problems.append("`result` is not pass or fail")
+    text = json.dumps(rec, sort_keys=True)
+    for kind in dict.fromkeys(k for k, v in forbidden if v and _holds(text, k, v)):
+        problems.append(f"it holds the machine's {kind}")
+    return problems
+
+
+def record_main(
+    path: Path, history: HistoryRepo, forbidden: Sequence[tuple[str, str]]
+) -> str | None:
+    """`--record PATH`: validate the dev-host record in `path` and commit it
+    to the opened branch at its C-HISTORY path, re-applying it on a newer tip
+    when the push is rejected (`HistoryRepo.commit_files`). Returns the pushed
+    commit, or None when the branch already held it."""
+    try:
+        rec = json.loads(path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise HistoryError(f"{path.name}: {e}") from e
+    if not isinstance(rec, dict):
+        raise HistoryError(f"{path.name}: not a JSON object")
+    problems = validate_record(rec, forbidden)
+    if problems:
+        raise HistoryError(f"refusing the dev-host record: {'; '.join(problems)}")
+    rel = dev_host_record_path(rec)
+    entry = record_entry_id(rec["phase"], rec["line"], rec["command"])
+    return history.commit_files({rel: encode(rec)}, f"dev-host {rec['commit'][:12]} {entry}")
+
+
 # --- output -------------------------------------------------------------------
 
 
@@ -1353,6 +1461,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--rotate", action="store_true",
         help=f"print the packed size; past {ROTATE_AT_BYTES} bytes archive the oldest year",
     )
+    mode.add_argument("--record", metavar="PATH", type=Path,
+                      help="commit the dev-host record in PATH (make gate RECORD=1)")
     ap.add_argument("--job", metavar="NAME", help="--series: the job")
     ap.add_argument("--step", metavar="NAME", help="--series: the job's step")
     ap.add_argument("--branch", default=MAIN, help="--series: the runs' branch ('' for any)")
@@ -1375,6 +1485,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     workdir = args.history or default_workdir()
     try:
+        if args.record is not None:
+            from scripts import gate
+
+            history = HistoryRepo(workdir, args.remote or default_remote())
+            history.open(depth=1)
+            sha = record_main(args.record, history, gate.forbidden_values(gate.LocalHost()))
+            print(f"ci-history: dev-host record, commit {sha or 'unchanged'}")
+            return 0
         if args.event is not None:
             repo = os.environ.get("GITHUB_REPOSITORY", "")
             try:

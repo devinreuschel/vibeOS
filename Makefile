@@ -138,6 +138,7 @@ help:
 	  '  test-vibefs-crash     QEMU-kill + host fsck-vibefs' \
 	  '  test-smp-stress       -smp 4, longer timeout (scheduled CI)' \
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
+	  '  gate PHASE=N          phase exit gate: gate-map entries and box rules (RECORD=1: dev-host records)' \
 	  '  prebuilt              every ISO and host tool a tier uses, as build/prebuilt.tar;' \
 	  '                        VIBEOS_PREBUILT=1 make test-* then uses them (CI tier jobs)' \
 	  '  clean / distclean     build products; distclean also drops limine/'
@@ -322,6 +323,12 @@ test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp t
 # Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_TIMEOUT=180 python3 tests/harness/run_ktest.py
+
+# Phase exit gate (ROADMAP §10.9): the gate map's entries and the box rules.
+.PHONY: gate
+gate:
+	@test -n "$(PHASE)" || { echo "gate: set PHASE=N" >&2; exit 2; }
+	python3 scripts/gate.py --phase "$(PHASE)" $(if $(filter 1,$(RECORD)),--record) $(if $(COMMIT),--commit "$(COMMIT)")
 
 clean:
 	rm -rf build/iso_root_* iso_root iso_root_panic iso_root_gp iso_root_ktest iso_root_vibefs_crash \

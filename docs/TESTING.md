@@ -450,6 +450,25 @@ profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.
 
+`make gate PHASE=N` (`scripts/gate.py`) is the phase exit gate the maintainer runs before tagging
+(ROADMAP §10.9). It prints one row per exit-gate line, `PASS`, `FAIL` or `TAG  L<line>  <text>`, each
+followed by its entries' results, then a `BOX  ROADMAP.md:<line>  rule A|B: <text>` row per box it
+rejects and `gate: phase N at <sha>: pass|fail`, and exits 0 on pass, 1 on fail and 2 on a usage
+error. From Phase 10 on it runs every entry of `tests/gates/phase-<N>.toml` (§8.6) and fails when the
+map is missing or `scripts/check_gates.py` rejects it; a `cmd` entry runs once per distinct command,
+with its output in `build/gate/phase-<N>/<i>.log`, and one that selects in-guest tests with
+`VIBEOS_KTEST=` passes only when its tier's fresh `build/results/<arch>-<tier>.json` lists each named
+test as passed and each glob matches one. For a phase below 10, which has no map, it runs no entry and
+needs every gate line but the tag ticked. Every phase gets two box rules: rule A rejects an open box
+under a `### N.M` heading of phase N, outside a `### N.M Stretch:` subsection, whose `lands in` notes
+name no `§M.x` with M > N; rule B rejects an open box anywhere in the roadmap whose `lands in` note
+names a section of phase N (a `§N.x` in a code span does not count). A local run gates `HEAD` of a
+work tree whose tracked files are clean, so `COMMIT=<sha>` must name `HEAD`; `python3 scripts/gate.py
+--phase N --dry-run` prints the rows and the box problems and runs nothing. `RECORD=1` runs only the
+map's record entries, on the Apple Silicon dev host (§8.6). `make gate PHASE=10` fails today by
+design, on every open Phase 10 box and on the open earlier boxes deferred into §10; it runs in no
+per-push tier.
+
 ## 8.6 CI and coverage
 
 `ci` runs on a push to `main`, on every pull request, and on `workflow_dispatch`, never on a push to
@@ -561,6 +580,66 @@ rotation, lists it in `archives.json` with its SHA-256 and run ids, and restarts
 orphan commit holding the rest, pushed with a lease on the tip it read. It refuses to archive the
 current year and fails with the size instead. `ci_history.py` reads the branch and the archives
 alike. The packed size is recorded here once the first daily run measures it (ROADMAP §10.9).
+
+**Gate maps.** From Phase 10 on, `tests/gates/phase-<N>.toml` gives each exit-gate line of phase N
+but the tag the entries that prove it (ROADMAP §10.9, C-GATEMAP): one `[[line]]` per line, its `key`
+the line's full text after `- [ ] ` or `- [x] `, compared with whitespace collapsed, and
+`[[line.entry]]` rows that each hold exactly one of `cmd` (a local command), `job = {workflow, job}`
+(a job of a GitHub-hosted workflow that must be green on a run proving the gated commit, read through
+`gh`) or `record = {cmd}` (a dev-host record, below), with an optional `expect = "fail"` for a command
+that must fail, which counts only after a plain entry of its line passed in the same run. A line with
+several entries, one per architecture or accelerator for example, passes only when all of them pass.
+Each later phase adds its map in the slice that closes its gate; Phases 0 to 9 get none.
+`scripts/check_gates.py`, which `make check` runs, reads text only (no entry runs, no `gh`, no
+`ci-history`) and fails on a `phase-<N>.toml` with N below 10; on a key that matches no exit-gate
+line of phase N, matches the tag line, or repeats another; on a gate line but the tag with no entry;
+on an entry with none or two of `cmd`, `job` and `record`, or an `expect` other than `"fail"`; on an
+entry that runs `make gate` or `scripts/gate.py`, so the entry for a line that names the gate runs
+that line's other checks; on a line that names a `scripts/check_<x>.py` with no `cmd` or `record`
+entry containing that path; and on a job entry whose workflow has a `self-hosted` label anywhere
+outside a comment. Until a workflow a job entry names exists (`macos.yml`, `nightly.yml`), a
+`test -f .github/workflows/<wf>.yml` entry stands in for it, since `rule_gate_dispatch` rejects a
+missing workflow, so the line fails rather than passes without its job.
+`tests/harness/test_gates.py` holds a failing case per rule and runs the script on the tree.
+
+**Which run proves a commit.** A run proves commit C only when its event is `push`, `schedule`, or
+`workflow_dispatch` and its head SHA is C, or, for a workflow that takes a commit as input, its
+CI-history record names C (`commit`); a `pull_request` run never proves a commit, since it tests the
+merge with the pull request's base. `gatelib.run_proves_commit` is that rule, and `make gate`, the
+`ticks` job and every other reader of runs use it. A gate map's `job` entry passes on a run of its
+workflow that concluded `success`, proves the gated commit, and whose jobs named as the job id's
+`name:` in the workflow at that commit (or `<name> (…)`, one per matrix leg) all concluded `success`;
+`gate.py` takes the candidates from `gh api …/actions/workflows/<wf>/runs -f head_sha=<C>` and from
+the workflow's `ci-history` records, merging a run's record into it for a workflow that takes a
+commit as input. It starts nothing: when no run proves the commit it prints the maintainer's
+commands, `git push origin <C>:refs/heads/gate/<N>` and `gh workflow run <wf> --ref gate/<N>`, or
+for a workflow that takes a commit as input `gh workflow run <wf> --ref main -f commit=<C>`, so
+every workflow a gate entry names has a `workflow_dispatch` trigger (`rule_gate_dispatch`). A
+`record` entry's command never runs off the dev host: the entry passes only when `ci-history` holds
+a dev-host record (below) with event `dev-host`, the gated commit, phase N, the line's key, the map's
+command at that commit, every required field, and result `pass`.
+
+**Dev-host records.** No hosted CI runner can run an HVF guest, so a gate line, or the part of one,
+that runs under HVF has a `record` entry, proved on the Apple Silicon dev host (ROADMAP §10.9).
+`make gate PHASE=N RECORD=1` refuses to run anywhere but macOS on arm64; it runs only the map's record
+entries, each in a `git worktree` of the gated commit in a temporary directory, so an uncommitted
+change in the maintainer's tree reaches no record, and writes one JSON record per commit and entry,
+pass or fail: `schema`, `event: "dev-host"`, `commit`, `head_sha`, the fixed `host: "dev-host"`,
+`mac_model` (`sysctl -n hw.model`), `macos` (`sw_vers`), `qemu` (the first `--version` line of each
+`qemu-system-*` on `PATH`), `phase`, `line` (the key), `command`, `numbers` (`seconds` and any
+`numbers` section of the run's results files), `result`, `started`, `finished`, and `results`, the
+`build/results/*.json` files the run wrote, which `check_ticks.py` reads. Every string is scrubbed
+first (the worktree becomes `<checkout>`, the temporary directory `<tmp>`, the home directory
+`<home>`), and `ci_history.validate_record` then refuses any record that holds the machine's
+hostname (`socket.gethostname()`, its short form, `scutil --get LocalHostName`), user name, home
+directory, or serial number (`ioreg -rd1 -c IOPlatformExpertDevice`, compared and never printed or
+stored), since `ci-history` is public (DESIGN §1.5). `ci_history.py --record PATH` commits the record
+at `records/<yyyy-mm-dd>-dev-host-<sha>-<entry-id>.json` (C-HISTORY; the entry id is the first 12
+hex digits of the SHA-256 of the phase, the key and the command) and, on a rejected push, re-applies
+it on the new tip and pushes again. Two record entries of one line with one command would share a
+path, so `RECORD=1` refuses them before anything runs. Everywhere else, `release.yml` included, the
+records are only read (above). `tests/harness/test_gate_records.py` pushes only to a bare repository
+in its own temporary directory.
 
 **Workflow rules.** `scripts/check_workflows.py`, which `make check` runs, reads every workflow
 with a stdlib YAML subset reader that fails on anything it does not parse (anchors, aliases, tags,
