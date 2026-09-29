@@ -59,6 +59,11 @@ QEMU_BASE = qemu-system-x86_64 \
 # script, the limine config, and this Makefile. A find(1) so newly added
 # source dirs are not silently missed (DESIGN §9.1).
 KERNEL_SRCS := $(shell find src crates/core/src -type f \( -name '*.rs' -o -name '*.asm' -o -name '*.S' \) 2>/dev/null)
+# Host tools and the initrd build from vibeos-core too, so they list every
+# kernel source, the lockfile, the manifests and every hostlib binary
+# (ROADMAP §10.2, F143).
+HOSTLIB_DEPS := $(KERNEL_SRCS) Cargo.lock Cargo.toml crates/core/Cargo.toml tests/hostlib/Cargo.toml \
+	$(wildcard tests/hostlib/src/bin/*.rs)
 USER_HELLO  := user/hello
 USER_INIT   := user/init
 USER_SH     := user/sh
@@ -206,8 +211,7 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-$(INITRD): $(shell find crates/core/src/fs/fat -type f -name '*.rs') tests/hostlib/src/bin/mkinitrd.rs tests/hostlib/Cargo.toml \
-		crates/core/Cargo.toml $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+$(INITRD): $(HOSTLIB_DEPS) $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
 	mkdir -p $(dir $@)
 	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
 	    --add $(abspath $(USER_HELLO)):/hello \
@@ -263,10 +267,7 @@ NBD_CACHE := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/nbd-cache
 VIBEFS_CAT := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/vibefs-cat
 
 ifneq ($(VIBEOS_PREBUILT),1)
-$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT): $(shell find crates/core/src/fs/vibefs -type f -name '*.rs') \
-		tests/hostlib/src/bin/mkfs_vibefs.rs tests/hostlib/src/bin/fsck_vibefs.rs \
-		tests/hostlib/src/bin/nbd_cache.rs tests/hostlib/src/bin/vibefs_cat.rs \
-		tests/hostlib/Cargo.toml crates/core/Cargo.toml
+$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT): $(HOSTLIB_DEPS)
 	cargo build -p vibeos-hostlib-tests --bins --target $(HOST_TRIPLE)
 endif
 

@@ -19,7 +19,8 @@ Two causes, both real. `CARGO_TARGET_DIR` pointed at a shared cache so the ISO c
 separately the Makefile's prerequisite list was hand-maintained and did not include newly added source
 directories. Rule: `make` pins `CARGO_TARGET_DIR` to `./target`, each ISO packages only its variant's
 named ELF under `build/kernels/`, which the variant's recipe deletes before it builds and writes last,
-and prerequisites are a `find` over `src/` and `crates/core/src/`.
+and prerequisites are a `find` over `src/` and `crates/core/src/`. The host tools and the initrd,
+which build from `vibeos-core` too, list the same sources and `Cargo.lock` (`$(HOSTLIB_DEPS)`).
 
 **Bare `cargo build` has an empty initrd; a relative linker script used to fail off-root.**
 `build.rs` only copies `VIBEOS_INITRD` (64 KiB) and passes an absolute `-T linker.ld`. Unset

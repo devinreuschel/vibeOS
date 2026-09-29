@@ -252,7 +252,10 @@ and UEFI artifacts, then builds a hybrid ISO with `xorriso` and runs `limine bio
 means the same image boots BIOS and UEFI, which matters for real hardware later.
 
 The Makefile lists every `.rs` and `.asm` under `src/` and `crates/core/src/` as a prerequisite. A hand-maintained short list
-produced stale ISOs when new subsystem directories appeared.
+produced stale ISOs when new subsystem directories appeared. The host tools (`mkfs-vibefs`,
+`fsck-vibefs` and the other hostlib binaries) and `build/initrd.fat` build from `vibeos-core` too, so
+their rules list `$(HOSTLIB_DEPS)`: every kernel source, `Cargo.lock`, the manifests, and
+`tests/hostlib/src/bin/*.rs`.
 
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP
 rather than discovering AP bugs only in CI. Full flag set in [section 8.4](TESTING.md#84-qemu-flags).

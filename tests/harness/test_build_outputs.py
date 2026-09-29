@@ -160,5 +160,26 @@ class NamedOutputsTest(unittest.TestCase):
         self.assertEqual(make_db().variables["ISO"], default_iso())
 
 
+class HostToolDepsTest(unittest.TestCase):
+    """ROADMAP §10.2: the `mkfs-vibefs`/`fsck-vibefs` and `$(INITRD)` rules depend."""
+
+    def test_host_tools_and_initrd_list_every_source(self) -> None:
+        db = make_db()
+        srcs = db.variables["KERNEL_SRCS"].split()
+        for path in ("crates/core/src/lib.rs", "crates/core/src/block/part.rs"):
+            self.assertIn(path, srcs)
+        self.assertTrue(any(p.startswith("crates/core/src/fs/") for p in srcs))
+        targets = [db.variables[v] for v in ("MKFS_VIBEFS", "FSCK_VIBEFS", "INITRD")]
+        for target in targets:
+            prereqs = set(db.rules[target].prereqs)
+            self.assertIn("Cargo.lock", prereqs, target)
+            self.assertIn("tests/hostlib/Cargo.toml", prereqs, target)
+            missing = [p for p in srcs if p not in prereqs]
+            self.assertEqual(missing, [], target)
+            bins = sorted(str(p.relative_to(ROOT)) for p in
+                          (ROOT / "tests/hostlib/src/bin").glob("*.rs"))
+            self.assertEqual([b for b in bins if b not in prereqs], [], target)
+
+
 if __name__ == "__main__":
     unittest.main()
