@@ -187,7 +187,7 @@ children, need no row.
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
 | irq | `irq/{mod,ipi}.rs` | `irq/{mod,irq_init,ipi_init}.rs` |
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
-| sched | `sched/{mod,thread,wait,work,fpu}.rs` | `sched/{mod,thread_init,sched_init,work_init}.rs` |
+| sched | `sched/{mod,thread,wait,work,fpu}.rs` | `sched/{mod,sched_init,work_init}.rs`, `sched/thread_init/{mod,testing}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
 | log | `log/mod.rs` | `log/{mod,log_init,panic,diag,ksyms}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |

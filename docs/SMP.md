@@ -375,6 +375,11 @@ what was written. Planned (ROADMAP §13.8, §17.4): nothing reads another thread
 
 The reschedule IPI is what makes cross-CPU wakeups work without ever locking a remote run queue: push
 onto the target's inbox, send `0xFD`, done. `0xFD` then takes SCHED IRQ-off via `schedule_preempt`.
+A wake's push goes out after its waker has dropped SCHED (`thread_init::with_sched` delivers the
+places a closure made once the lock is released), so it can reach the CPU after the thread has
+already resumed there through its own `schedule`, which found it `Ready`, and has since blocked
+again or exited. A run-queue entry is therefore only a hint: `thread_init::schedule_inner` runs a
+dequeued thread only while SCHED shows it `Ready` and placed on that CPU, and drops any other entry.
 Shootdown and call-function work take no lock at all, since a CPU in a serviced spin runs them inside
 whatever it holds ([§2.2](INVARIANTS.md#22-interrupt-handler-rules)). Call-function uses one global slot; the
 initiator holds IF off from publish through reclaim, polling inbound work while it waits.

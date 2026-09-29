@@ -29,6 +29,8 @@ fn me() -> ThreadId {
 }
 
 fn wait_resume() -> WaitOutcome {
+    #[cfg(feature = "kernel_tests")]
+    thread_init::testing::wait_window();
     thread_init::schedule();
     thread_init::last_wait_outcome()
 }
