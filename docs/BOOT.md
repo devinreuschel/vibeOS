@@ -13,8 +13,9 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Why nightly | The kernel binary's `alloc_error_handler`; the flags `-Zsanitizer` (ROADMAP §12.1), `-Zretpoline-external-thunk` and `-Zfunction-return` (§18.3), and `-Zub-checks` (§18.4). `vibeos-core` uses none (§1.1 constraint 7). |
 | MSRV | `rust-version` in `crates/core/Cargo.toml`, for `vibeos-core` only (§1.1 constraint 7): the older of the last stable release before the nightly Kani pins (ROADMAP §10.8) and the Rust release Verus requires (the latest Verus release's, until ROADMAP §38.1 pins one). Before §10.8 lands, the stable release current on the pinned nightly's date. A bump of the nightly, Kani, or Verus re-derives it. `1.98`, the stable release current on 2026-09-22, which `make check`, `setup.sh` and the `check` job read from the manifest |
 | Components | `llvm-tools` (objdump/nm/size), `rustfmt`, `clippy`; `rust-src` for rust-analyzer |
-| Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
+| Target | built-in `x86_64-unknown-none` for the kernel, and `x86_64-unknown-linux-musl` for user programs (ROADMAP §10.5); both in `rust-toolchain.toml` `targets` |
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
+| User build | `make user` (a prerequisite of `make all` and of the ktest kernel): clippy `-D warnings`, then `cargo build -p vibeos-user --target x86_64-unknown-linux-musl` with, through `--config` only, `-D warnings`, `-C linker=rust-lld`, `-C relocation-model=static`, `-C link-self-contained=no`, `-C link-arg=-zseparate-loadable-segments`, `-C link-arg=--image-base=0x40000000`, `-C panic=abort`, and opt-level `"z"`; `scripts/check_user_elf.py` on each unstripped ELF; then each program stripped to `build/user/<name>` |
 | Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
 | Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins) |
 
@@ -53,10 +54,17 @@ Target notes:
   `f64` multiply compiles to a call to `__muldf3`, `f64` arguments pass in integer registers, and
   rustc warns that enabling SSE there breaks the target's ABI. A user program built for it would use
   no SSE and could not call C built by ROADMAP §14.1's clang, which passes `f64` in XMM registers,
-  and `aarch64-unknown-none` differs again (hard-float, strict alignment). Planned (ROADMAP §10.5,
-  §11.1): the `no_std` user runtime builds for `<arch>-unknown-linux-musl`, the triple `std` user
-  code uses (ROADMAP §24.3), and links with `rust-lld` as a static `ET_EXEC` with no crt objects, so
-  no host needs a C compiler for it.
+  and `aarch64-unknown-none` differs again (hard-float, strict alignment). So the `no_std` user
+  runtime (ROADMAP §10.5) builds for `x86_64-unknown-linux-musl`, the triple `std` user code uses
+  (ROADMAP §24.3): the SysV hard-float ABI, the small code model, and the prebuilt `core` in rustup's
+  `rust-std`, with no `-Zbuild-std`. It links with `rust-lld` as a static non-PIE `ET_EXEC` below
+  2 GiB with no crt objects, so no host needs a C compiler for it, and each `PT_LOAD` on pages of
+  its own. `.cargo/config.toml` has no table for the triple, so `std` builds of it keep their
+  defaults; a `compile_error!` stops a build of the crate for any other target. The triple's
+  `compiler_builtins` leaves `memcpy`, `memmove`, `memset`, `memcmp`, `bcmp` and `strlen` to a libc,
+  so `vibeos-user-mem` defines them. `core` for the triple is built to unwind, so the runtime
+  defines a `rust_eh_personality` that nothing calls. Planned (ROADMAP §11.1):
+  `aarch64-unknown-linux-musl`.
 - `build.rs` passes the linker script as an absolute `-T` so the link does not depend on cwd.
 - Each kernel target has an ISA floor, and a CPU feature above it is used only where CPUID or an ID
   register reports it. x86_64 builds for x86-64-v1, the target's default CPU, and also needs NX,

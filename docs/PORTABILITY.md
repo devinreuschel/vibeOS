@@ -203,9 +203,11 @@ because x86 has no broadcast invalidation.
 ## 11.3 Adding an architecture
 
 A port adds `arch/<name>/` in both crates, its pure half in `vibeos-core` and its hardware half,
-implementing every trait the §11.1 table names, in the kernel crate; its column in that table; its
+implementing every trait the §11.1 table names, in the kernel crate; `user/src/arch/<name>/` in the
+user runtime, whose portable files name no architecture (`scripts/check_user_arch.py`); its column in
+that table; its
 rows in `docs/ARCH.md`; a harness profile; and its marker list (ROADMAP §11.7). It changes no shared
-module. ROADMAP §11.8's riscv64 stretch measures that: a port that needs a change outside the two
+module. ROADMAP §11.8's riscv64 stretch measures that: a port that needs a change outside its three
 `arch/` directories, or a concern the table lacks, has found a seam defect, and the fix lands in the
 seam (a new row or a changed trait), not as a special case in portable code.
 

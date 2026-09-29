@@ -57,7 +57,7 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
 
 `make help` lists targets. Optional: `pre-commit install` (rustfmt, ruff, and `scripts/check_*.py`). `make check` runs `cargo fmt --check` and clippy `-D warnings` on `vibeos-core` and hostlib for the host triple, on `vibeos-core` for `x86_64-unknown-none`, and on the kernel binary (`--bin vibeos`) with its default features; CI's ladder clippies the kernel once for each other ISO feature set and once with `kernel_shell`. Every kernel build denies warnings through `[target.x86_64-unknown-none].rustflags`, which replaces `[build].rustflags` for the kernel target (F147).
 
-Kernel target is built-in `x86_64-unknown-none` (B2). `./setup.sh` runs `rustup target add`.
+Kernel target is built-in `x86_64-unknown-none` (B2); user programs build for `x86_64-unknown-linux-musl`, linked by `rust-lld` with no C compiler (ROADMAP §10.5). `./setup.sh` runs `rustup target add` for both.
 
 `make check` needs `ruff` and `mypy` at the versions the `check` job in `.github/workflows/ci.yml` pins, and `fsck.fat` (`dosfstools`) for the FAT host tests, and it fails when one is missing. `VIBEOS_ALLOW_MISSING_TOOLS=1` is a gate switch, not one of the `VIBEOS_*` QEMU overrides `harness.py` reads: the Makefile and the FAT host test read it, skip each check whose tool is missing, and print the check they skipped. CI never sets it. `make check` also builds `vibeos-core` with its MSRV toolchain, which `./setup.sh` installs, and fails without it on the same terms.
 
