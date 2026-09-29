@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
-use vibeos::paging::{PageFlags, PhysAddr, VirtAddr, heap_flags};
+use vibeos::paging::{self, PageFlags, PageSize, PhysAddr, VirtAddr, heap_flags};
 
 use crate::diag;
 use crate::ipi_init;
@@ -25,31 +25,41 @@ use crate::thread_init;
 // ------------------ tests ------------------
 
 pub(crate) fn test_map_unmap() -> Outcome {
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
+    let Some(va) = alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
     };
     let Some(pa) = alloc_frame() else {
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("frame alloc");
     };
+    // SAFETY: `paging_init::map_4k`'s contract; `pa` is a frame this test owns and `va` a KVA
+    // page `alloc_va` reserved that nothing else maps; established here.
     if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("map_4k");
     }
+    // SAFETY: `va` is mapped writable to memory this test owns (the map above); established
+    // here.
     unsafe { (va.as_u64() as *mut u64).write_volatile(0xAABB_CCDD_EEFF_0011) };
+    // SAFETY: `va` is mapped writable to memory this test owns (the map above); established
+    // here.
     let got = unsafe { (va.as_u64() as *const u64).read_volatile() };
     if got != 0xAABB_CCDD_EEFF_0011 {
         return Outcome::Fail("readback mismatch");
     }
-    let Some((unmapped, _)) = (unsafe { paging_init::unmap_4k(va) }) else {
+    // SAFETY: `unmap_4k`'s contract; `va` is a test page, neither a stack nor code nor heap,
+    // and the test does not touch it again until it frees or remaps it; established here.
+    let Some((unmapped, _)) = (unsafe { unmap_4k(va) }) else {
         return Outcome::Fail("unmap returned none");
     };
     if unmapped != pa {
         return Outcome::Fail("unmap phys mismatch");
     }
     free_frame(pa);
-    kva_init::free_va(va, PAGE_SIZE);
+    free_va(va, PAGE_SIZE);
+    // SAFETY: the access faults on purpose on an unmapped page; `catch_fault` recovers from the
+    // #PF, established here.
     let fault = catch_fault(|| unsafe {
         (va.as_u64() as *mut u8).write_volatile(1);
     });
@@ -60,25 +70,35 @@ pub(crate) fn test_map_unmap() -> Outcome {
 }
 
 pub(crate) fn test_nx_enforcement() -> Outcome {
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
+    let Some(va) = alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
     };
     let Some(pa) = alloc_frame() else {
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("frame alloc");
     };
+    // SAFETY: `paging_init::map_4k`'s contract; `pa` is a frame this test owns and `va` a KVA
+    // page `alloc_va` reserved that nothing else maps; established here.
     if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("map_4k");
     }
+    // SAFETY: `va` is mapped writable to memory this test owns (the map above); established
+    // here.
     unsafe { (va.as_u64() as *mut u8).write_volatile(0xC3) };
+    // SAFETY: a code address fits a fn pointer; calling it faults on the NX page before any
+    // instruction runs, which `catch_fault` recovers from; established here.
     let f: unsafe extern "C" fn() = unsafe { core::mem::transmute(va.as_u64()) };
     core::hint::black_box(f);
+    // SAFETY: executes the NX page on purpose; `catch_fault` recovers from the #PF, established
+    // here.
     let fault = catch_fault(|| unsafe { f() });
-    let _ = unsafe { paging_init::unmap_4k(va) };
+    // SAFETY: `unmap_4k`'s contract; `va` is a test page, neither a stack nor code nor heap,
+    // and the test does not touch it again until it frees or remaps it; established here.
+    let _ = unsafe { unmap_4k(va) };
     free_frame(pa);
-    kva_init::free_va(va, PAGE_SIZE);
+    free_va(va, PAGE_SIZE);
     let Some(fault) = fault else {
         return Outcome::Fail("NX execute did not fault");
     };
@@ -122,15 +142,22 @@ pub(crate) fn test_heap_align() -> Outcome {
         let Ok(layout) = Layout::from_size_align(align, align) else {
             return Outcome::Fail("layout");
         };
+        // SAFETY: `GlobalAlloc::alloc`'s contract; the layout has a nonzero size; established
+        // here.
         let p = unsafe { alloc::alloc::alloc(layout) };
         if p.is_null() {
             return Outcome::Fail("alloc null");
         }
         if !(p as usize).is_multiple_of(align) {
+            // SAFETY: `GlobalAlloc::dealloc`'s contract; each pointer came from `alloc` with
+            // this layout and is not used after; established here.
             unsafe { alloc::alloc::dealloc(p, layout) };
             return Outcome::Fail("alignment");
         }
+        // SAFETY: `p` is a live allocation of `align >= 1` bytes; established here.
         unsafe { p.write(0x5A) };
+        // SAFETY: `GlobalAlloc::dealloc`'s contract; each pointer came from `alloc` with this
+        // layout and is not used after; established here.
         unsafe { alloc::alloc::dealloc(p, layout) };
         align *= 2;
     }
@@ -146,13 +173,19 @@ pub(crate) fn test_heap_reuse() -> Outcome {
     };
     // Sandwich: live blocks on both sides so the hole cannot coalesce
     // with a larger neighbour (first-fit would then carve a different VA).
+    // SAFETY: `GlobalAlloc::alloc`'s contract; the layout has a nonzero size; established here.
     let pad = unsafe { alloc::alloc::alloc(small) };
+    // SAFETY: `GlobalAlloc::alloc`'s contract; the layout has a nonzero size; established here.
     let a = unsafe { alloc::alloc::alloc(layout) };
+    // SAFETY: `GlobalAlloc::alloc`'s contract; the layout has a nonzero size; established here.
     let keep = unsafe { alloc::alloc::alloc(layout) };
     if pad.is_null() || a.is_null() || keep.is_null() {
         return Outcome::Fail("setup alloc");
     }
+    // SAFETY: `GlobalAlloc::dealloc`'s contract; each pointer came from `alloc` with this
+    // layout and is not used after; established here.
     unsafe { alloc::alloc::dealloc(a, layout) };
+    // SAFETY: `GlobalAlloc::alloc`'s contract; the layout has a nonzero size; established here.
     let b = unsafe { alloc::alloc::alloc(layout) };
     if b.is_null() {
         return Outcome::Fail("second alloc");
@@ -162,6 +195,8 @@ pub(crate) fn test_heap_reuse() -> Outcome {
     let reused = core::hint::black_box(a as usize) == core::hint::black_box(b as usize);
     if !reused {
         crate::marker!("vibeOS: ktest:   reuse pad={pad:p} a={a:p} keep={keep:p} b={b:p}");
+        // SAFETY: `GlobalAlloc::dealloc`'s contract; each pointer came from `alloc` with this
+        // layout and is not used after; established here.
         unsafe {
             alloc::alloc::dealloc(b, layout);
             alloc::alloc::dealloc(keep, layout);
@@ -169,12 +204,20 @@ pub(crate) fn test_heap_reuse() -> Outcome {
         };
         return Outcome::Fail("did not reuse freed block");
     }
+    // SAFETY: `GlobalAlloc::realloc`'s contract; `b` came from `alloc` with `layout`, and 32
+    // bytes at its alignment fit `isize`; established here.
     let c = unsafe { alloc::alloc::realloc(b, layout, 32) };
     let same = core::hint::black_box(c as usize) == core::hint::black_box(b as usize);
     if !c.is_null() {
+        // SAFETY: `GlobalAlloc::dealloc`'s contract; each pointer came from `alloc` with this
+        // layout and is not used after; established here.
         unsafe { alloc::alloc::dealloc(c, Layout::from_size_align(32, 8).unwrap()) };
     }
+    // SAFETY: `GlobalAlloc::dealloc`'s contract; each pointer came from `alloc` with this
+    // layout and is not used after; established here.
     unsafe { alloc::alloc::dealloc(keep, layout) };
+    // SAFETY: `GlobalAlloc::dealloc`'s contract; each pointer came from `alloc` with this
+    // layout and is not used after; established here.
     unsafe { alloc::alloc::dealloc(pad, small) };
     if !same {
         return Outcome::Fail("realloc shrink moved");
@@ -200,13 +243,19 @@ pub(crate) fn test_stack_guard() -> Outcome {
     let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
+    // SAFETY: `stack`'s lowest mapped page is writable (`kva_init::alloc_guarded_stack`) and no
+    // thread runs on it; established here.
     unsafe { (stack.base().as_u64() as *mut u64).write_volatile(0x1111_2222) };
+    // SAFETY: `stack`'s lowest mapped page is writable (`kva_init::alloc_guarded_stack`) and no
+    // thread runs on it; established here.
     let got = unsafe { (stack.base().as_u64() as *const u64).read_volatile() };
     if got != 0x1111_2222 {
         kva_init::free_stack(stack);
         return Outcome::Fail("mapped stack not writable");
     }
     let guard = stack.guard().as_u64();
+    // SAFETY: the access faults on purpose on an unmapped page; `catch_fault` recovers from the
+    // #PF, established here.
     let fault = catch_fault(|| unsafe {
         (guard as *mut u8).write_volatile(1);
     });
@@ -267,9 +316,17 @@ pub(crate) fn test_vmap() -> Outcome {
         return Outcome::Fail("vmap");
     };
     let va = v.base();
+    // SAFETY: `va` is mapped writable to memory this test owns (the map above); established
+    // here.
     unsafe { (va.as_u64() as *mut u64).write_volatile(0x100) };
+    // SAFETY: `va` is mapped writable to memory this test owns (the map above); established
+    // here.
     unsafe { ((va.as_u64() + PAGE_SIZE) as *mut u64).write_volatile(0x200) };
+    // SAFETY: `va` is mapped writable to memory this test owns (the map above); established
+    // here.
     let ga = unsafe { (va.as_u64() as *const u64).read_volatile() };
+    // SAFETY: `va` is mapped writable to memory this test owns (the map above); established
+    // here.
     let gb = unsafe { ((va.as_u64() + PAGE_SIZE) as *const u64).read_volatile() };
     free_frames_owned(kva_init::vunmap(v));
     if ga != 0x100 || gb != 0x200 {
@@ -284,6 +341,9 @@ pub(crate) fn test_mmio_uc_flags() -> Outcome {
     // 2 MiB, inside the identity rest / physmap. ACPI's real bases
     // are checked by `acpi_discovery`.
     let phys = PhysAddr(0x0020_0000);
+    // SAFETY: `paging_init::patch_physmap_uc`'s contract; `install` has run and the physmap
+    // covers physical 2 MiB. Making that RAM leaf UC breaks invariant I17 on purpose, for this
+    // test: UC only slows its accesses; established here.
     if unsafe { paging_init::patch_physmap_uc(phys, 4096) }.is_err() {
         return Outcome::Fail("patch_physmap_uc");
     }
@@ -322,6 +382,9 @@ fn shoot_prober() {
         }
         if req != seen {
             let va = SHOOT_VA.load(Ordering::Relaxed);
+            // SAFETY: `va` is the test's page, mapped to a frame the test
+            // owns or, after its unmap, unmapped; `catch_fault` recovers
+            // from the #PF in the second case, established here.
             let fault = catch_fault(|| unsafe {
                 core::ptr::read_volatile(va as *const u64);
             });
@@ -357,18 +420,22 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
     };
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
+    let Some(va) = alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
     };
     let Some(pa) = alloc_frame() else {
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("frame alloc");
     };
+    // SAFETY: `paging_init::map_4k`'s contract; `pa` is a frame this test owns and `va` a KVA
+    // page `alloc_va` reserved that nothing else maps; established here.
     if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("map");
     }
+    // SAFETY: `va` is mapped writable to memory this test owns (the map above); established
+    // here.
     unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
 
     SHOOT_VA.store(va.as_u64(), Ordering::Relaxed);
@@ -378,9 +445,12 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     let r = shoot_touch(1);
     if r != 1 {
         shoot_quit();
-        let _ = unsafe { paging_init::unmap_4k(va) };
+        // SAFETY: `unmap_4k`'s contract; `va` is a test page, neither a stack nor code nor
+        // heap, and the test does not touch it again until it frees or remaps it; established
+        // here.
+        let _ = unsafe { unmap_4k(va) };
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return if r == 0 {
             Outcome::Fail("AP probe did not answer")
         } else {
@@ -389,34 +459,46 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     }
 
     let before = ipi_init::shootdown_count();
-    let _ = unsafe { paging_init::unmap_4k(va) };
+    // SAFETY: `unmap_4k`'s contract; `va` is a test page, neither a stack nor code nor heap,
+    // and the test does not touch it again until it frees or remaps it; established here.
+    let _ = unsafe { unmap_4k(va) };
     if shoot_touch(2) != 2 {
         shoot_quit();
+        // SAFETY: `paging_init::map_4k`'s contract; `pa` is a frame this test owns and `va` a
+        // KVA page `alloc_va` reserved that nothing else maps; established here.
         let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("AP did not fault after unmap");
     }
     if per_cpu_init::online_mask().count_ones() > 1 && ipi_init::shootdown_count() <= before {
         shoot_quit();
+        // SAFETY: `paging_init::map_4k`'s contract; `pa` is a frame this test owns and `va` a
+        // KVA page `alloc_va` reserved that nothing else maps; established here.
         let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("no shootdown IPI");
     }
 
+    // SAFETY: `paging_init::map_4k`'s contract; `pa` is a frame this test owns and `va` a KVA
+    // page `alloc_va` reserved that nothing else maps; established here.
     if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
         shoot_quit();
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("remap");
     }
+    // SAFETY: `va` is mapped writable to memory this test owns (the map above); established
+    // here.
     unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
     let ok = shoot_touch(3) == 1;
     shoot_quit();
-    let _ = unsafe { paging_init::unmap_4k(va) };
+    // SAFETY: `unmap_4k`'s contract; `va` is a test page, neither a stack nor code nor heap,
+    // and the test does not touch it again until it frees or remaps it; established here.
+    let _ = unsafe { unmap_4k(va) };
     free_frame(pa);
-    kva_init::free_va(va, PAGE_SIZE);
+    free_va(va, PAGE_SIZE);
     if !ok {
         return Outcome::Fail("AP could not read after remap");
     }
@@ -522,7 +604,7 @@ pub(crate) fn frames_none_leaked() -> Outcome {
 /// Another CPU may take PT briefly after the drop, so the free check polls.
 pub(crate) fn current_mapper_holds_pt() -> Outcome {
     let g = paging_init::current_mapper();
-    let held = !paging_init::pt_lock_free();
+    let held = !pt_lock_free();
     let walks = g
         .translate(VirtAddr(current_mapper_holds_pt as *const () as u64))
         .is_some();
@@ -533,7 +615,7 @@ pub(crate) fn current_mapper_holds_pt() -> Outcome {
     if !walks {
         return Outcome::Fail("guard's mapper does not translate kernel text");
     }
-    if !spin_until_ns(paging_init::pt_lock_free, 100_000_000) {
+    if !spin_until_ns(pt_lock_free, 100_000_000) {
         return Outcome::Fail("PT still held after drop");
     }
     Outcome::Ok
@@ -605,4 +687,148 @@ pub(crate) fn vmap_32_frames_unmapped() -> Outcome {
         return crate::fail_fmt!("kva used {used0} before vmap, {used1} after vunmap");
     }
     Outcome::Ok
+}
+
+// ------------------ hooks ------------------
+
+// Test-only helpers over `kva_init`'s free list and `paging_init`'s
+// tables (Q2).
+
+/// Reserve `len` bytes of KVA with nothing mapped (Q2: no production
+/// caller).
+pub(crate) fn alloc_va(len: u64) -> Option<VirtAddr> {
+    paging_init::with_pt(|_pt| kva_init::with_kva(|k| k.alloc(len)).map(VirtAddr))
+}
+
+/// Give back a range [`alloc_va`] reserved.
+pub(crate) fn free_va(va: VirtAddr, len: u64) {
+    kva_init::release_va(va, len);
+}
+
+/// Page-table pages the kernel mapper has taken from the buddy since boot,
+/// the PML4 included. They stay in the kernel tables for good: a mapping
+/// that reaches a 2 MiB span of KVA or heap no earlier mapping reached
+/// takes one, and its unmap leaves it in place.
+pub(crate) fn table_pages() -> usize {
+    paging_init::TABLE_PAGES.load(Ordering::Relaxed)
+}
+
+/// Whether PT is free right now: held by no CPU, this one included. It
+/// reads the lock rather than trying it, since a `try_lock` of a rank this
+/// CPU holds fails the rank check.
+pub(crate) fn pt_lock_free() -> bool {
+    !paging_init::PT.is_locked()
+}
+
+/// Unmap one leaf, drop PT, then shootdown. Returns the frame.
+///
+/// # Safety
+/// Caller is responsible for not unmapping a page the CPU is using
+/// (stack, code, the heap it is currently allocating from, …).
+pub unsafe fn unmap_4k(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
+    // SAFETY: `unmap_4k_locked`'s contract; the caller will not use `va`
+    // until the shootdown below (this fn's `# Safety` contract, established
+    // here).
+    let r = paging_init::with_pt(|pt| unsafe { paging_init::unmap_4k_locked(pt, va) });
+    if r.is_some() {
+        paging::tlb_shootdown_others(va);
+    }
+    r
+}
+
+/// A `kernel_tests` hook that fails every counted heap allocation after a
+/// budget (ROADMAP §10.4, C-FAILAFTER). `heap_init`'s `KernelAlloc::alloc`
+/// and `realloc` ask [`fail_after::refuse`] before they take the heap lock or grow the
+/// heap, so a refused allocation maps no frame; `dealloc` never asks.
+pub(crate) mod fail_after {
+    use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+
+    use vibeos::thread::ThreadId;
+
+    use crate::x86::InterruptGuard;
+    use crate::{per_cpu_init, syscall_init, thread_init};
+
+    /// Which allocations the hook counts.
+    #[derive(Clone, Copy)]
+    pub(crate) enum Scope {
+        /// Allocations on a process thread (pid != 0) whose
+        /// `Tcb.syscall_count` is at least `from_syscall`: 1 counts from
+        /// the thread's first syscall, 2 skips it.
+        Processes { from_syscall: u64 },
+        /// Allocations on one thread, a kernel thread included.
+        Thread(ThreadId),
+    }
+
+    /// What the hook saw while armed: `counted` in-scope allocations, of
+    /// which it refused the last `refused`.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) struct Seen {
+        pub counted: usize,
+        pub refused: usize,
+    }
+
+    const KIND_PROCESSES: u8 = 0;
+    const KIND_THREAD: u8 = 1;
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static KIND: AtomicU8 = AtomicU8::new(KIND_PROCESSES);
+    /// `from_syscall`, or the thread id.
+    static ARG: AtomicU64 = AtomicU64::new(0);
+    static BUDGET: AtomicUsize = AtomicUsize::new(0);
+    static COUNTED: AtomicUsize = AtomicUsize::new(0);
+    static REFUSED: AtomicUsize = AtomicUsize::new(0);
+
+    /// The first `budget` allocations in `scope` succeed; every later one
+    /// returns null. One arm at a time.
+    pub(crate) fn arm(budget: usize, scope: Scope) {
+        assert!(!ARMED.load(Ordering::Acquire), "fail_after: armed twice");
+        let (kind, arg) = match scope {
+            Scope::Processes { from_syscall } => (KIND_PROCESSES, from_syscall),
+            Scope::Thread(id) => (KIND_THREAD, u64::from(id.0)),
+        };
+        KIND.store(kind, Ordering::Relaxed);
+        ARG.store(arg, Ordering::Relaxed);
+        BUDGET.store(budget, Ordering::Relaxed);
+        COUNTED.store(0, Ordering::Relaxed);
+        REFUSED.store(0, Ordering::Relaxed);
+        // Publishes the fields above to `refuse`'s Acquire load.
+        ARMED.store(true, Ordering::Release);
+    }
+
+    /// Stop counting and return what the hook saw since [`arm`].
+    pub(crate) fn disarm() -> Seen {
+        ARMED.store(false, Ordering::Release);
+        Seen {
+            counted: COUNTED.load(Ordering::Acquire),
+            refused: REFUSED.load(Ordering::Acquire),
+        }
+    }
+
+    /// Whether this allocation is refused. Atomics only; never allocates.
+    pub(crate) fn refuse() -> bool {
+        if !ARMED.load(Ordering::Acquire) {
+            return false;
+        }
+        // One thread's pid, id and count: no switch between the reads.
+        let _irq = InterruptGuard::enter();
+        if per_cpu_init::current_thread().is_null() {
+            return false;
+        }
+        let arg = ARG.load(Ordering::Relaxed);
+        let in_scope = match KIND.load(Ordering::Relaxed) {
+            KIND_PROCESSES => {
+                thread_init::current_pid() != 0 && syscall_init::syscall_count() >= arg
+            }
+            _ => u64::from(thread_init::current_id().0) == arg,
+        };
+        if !in_scope {
+            return false;
+        }
+        let n = COUNTED.fetch_add(1, Ordering::AcqRel);
+        if n < BUDGET.load(Ordering::Relaxed) {
+            return false;
+        }
+        REFUSED.fetch_add(1, Ordering::AcqRel);
+        true
+    }
 }

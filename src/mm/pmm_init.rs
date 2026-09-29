@@ -118,6 +118,12 @@ pub unsafe fn init(info: &BootInfo) -> PmmStats {
     for r in info.usable() {
         let end = r.end.min(PHYSMAP_CAP);
         if r.start < end {
+            // SAFETY: `insert_clipped`'s contract; Limine's HHDM maps every
+            // USABLE range (this fn's `# Safety` contract, established
+            // here), clipped to the physmap cap so the kernel's physmap
+            // reaches it too (invariant I14), and the excludes keep frame 0,
+            // the trampoline, the kernel image and framebuffers out
+            // (invariant I15, established here).
             unsafe { insert_clipped(&mut buddy, r.start, end, excl.as_slice()) };
         }
     }
@@ -143,6 +149,10 @@ unsafe fn insert_clipped(buddy: &mut Buddy, base: u64, end: u64, sorted: &[Range
         let ex_s = r.start.max(cur);
         let ex_e = r.end.min(end);
         if ex_s > cur {
+            // SAFETY: `Buddy::insert_region`'s contract; `[cur, ex_s)` is part
+            // of the range this fn's `# Safety` contract vouches for, below
+            // every exclude, and not yet inserted, established here
+            // (invariants I14 and I15).
             unsafe { buddy.insert_region(cur, ex_s) };
         }
         cur = ex_e;
@@ -151,6 +161,9 @@ unsafe fn insert_clipped(buddy: &mut Buddy, base: u64, end: u64, sorted: &[Range
         }
     }
     if cur < end {
+        // SAFETY: as above: `[cur, end)` is the range's tail past the last
+        // exclude, vouched for by this fn's `# Safety` contract and not yet
+        // inserted, established here (invariants I14 and I15).
         unsafe { buddy.insert_region(cur, end) };
     }
 }
