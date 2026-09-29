@@ -1,5 +1,8 @@
 //! Synchronization: the kernel half of subsystem `sync` (DESIGN §1.3).
 
+// The blocking primitives have no production caller yet; the in-guest tests
+// are their only users until one lands, which drops this cfg.
+#[cfg(feature = "kernel_tests")]
 pub(crate) mod blocking_init;
 #[cfg(feature = "kernel_tests")]
 #[allow(

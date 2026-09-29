@@ -47,7 +47,6 @@ PENDING: tuple[str, ...] = (
     "crates/core/src/mm/pmm.rs",
     "crates/core/src/sched/thread.rs",
     "crates/core/src/smp/per_cpu.rs",
-    "crates/core/src/sync/mod.rs",
     "crates/core/src/time/mod.rs",
 )
 
