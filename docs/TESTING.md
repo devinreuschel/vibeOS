@@ -198,7 +198,8 @@ Live e2e through Phase 6 slice A asserts through `idt ok`, then `per_cpu: bsp re
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
 `sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`
 followed by `smp: ap online`, then `smp: done`, then `console ok`, then
-`pci: <n> devices`, then `block: <name> <n> sectors`, then `shell ready`.
+`pci: <n> devices`, then `block: <name> <n> sectors`, then `/bin/tests`' `user: tests ok`, then
+`shell ready`.
 `boot: phase1 done` was a Phase 1–4 stand-in and is no longer in the contract; the
 trailing marker is `shell ready`. After that, the same ISO is booted again and the
 harness types `echo serial-ok` on COM1 and `echo ps2-ok` via QEMU `sendkey` (i8042 /
@@ -213,9 +214,10 @@ the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 (`-cpu qemu64,-tsc-deadline`) runs in-guest tests on the periodic path.
 
 In the production ISO, `shell ready` is written from ring 3 by `/bin/sh`, which `/sbin/init` starts
-after waiting for `/bin/tests`. `init` passes no status pointer to `wait4`, and the harness matches
-neither `user: tests ok` nor `user: tests fail`, so a failing `/bin/tests` passes every e2e variant
-(ROADMAP §10.5, F073).
+after waiting for `/bin/tests`. Every e2e variant that reaches the shell requires `/bin/tests`'
+unframed `user: tests ok` before `shell ready` (the `user_tests_ok` row), and every driver fails the
+run on an unframed `user: tests fail`, so a failing `/bin/tests` fails the boot (ROADMAP §10.2,
+F073). `init` passes no status pointer to `wait4`, so it does not report the failure itself.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`

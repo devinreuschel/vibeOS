@@ -17,7 +17,10 @@ from typing import Any
 from unittest import mock
 
 from tests.harness import frame, harness, registry
-from tests.harness.harness import Marker
+from tests.harness.harness import Marker, QemuConfig
+from tests.harness.linesource import FakeLineSource
+
+FAKE_CFG = QemuConfig(iso="fake.iso")
 
 # (substring, name, and_contains, exactly_before, the side of the frame the
 # marker matches on: `Marker.source`, or `frame.source_of` when it is empty).
@@ -61,6 +64,7 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p1 ', 'block_ram0p1', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p2 ', 'block_ram0p2', (' sectors',), None, 'kernel'),
+        ('user: tests ok', 'user_tests_ok', (), None, 'user'),
         ('vibeOS: shell ready', 'shell_ready', (), None, 'user'),
     ],
     'hpet_smp2': [
@@ -89,6 +93,7 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p1 ', 'block_ram0p1', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p2 ', 'block_ram0p2', (' sectors',), None, 'kernel'),
+        ('user: tests ok', 'user_tests_ok', (), None, 'user'),
         ('vibeOS: shell ready', 'shell_ready', (), None, 'user'),
     ],
     'hpet_smp4': [
@@ -121,6 +126,7 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p1 ', 'block_ram0p1', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p2 ', 'block_ram0p2', (' sectors',), None, 'kernel'),
+        ('user: tests ok', 'user_tests_ok', (), None, 'user'),
         ('vibeOS: shell ready', 'shell_ready', (), None, 'user'),
     ],
     'pit_smp2': [
@@ -149,6 +155,7 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p1 ', 'block_ram0p1', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p2 ', 'block_ram0p2', (' sectors',), None, 'kernel'),
+        ('user: tests ok', 'user_tests_ok', (), None, 'user'),
         ('vibeOS: shell ready', 'shell_ready', (), None, 'user'),
     ],
     'kvm_smp2': [
@@ -177,6 +184,7 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p1 ', 'block_ram0p1', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p2 ', 'block_ram0p2', (' sectors',), None, 'kernel'),
+        ('user: tests ok', 'user_tests_ok', (), None, 'user'),
         ('vibeOS: shell ready', 'shell_ready', (), None, 'user'),
     ],
     'kvm_notscdl_smp2': [
@@ -205,6 +213,7 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p1 ', 'block_ram0p1', (' sectors',), None, 'kernel'),
         ('vibeOS: block: ram0p2 ', 'block_ram0p2', (' sectors',), None, 'kernel'),
+        ('user: tests ok', 'user_tests_ok', (), None, 'user'),
         ('vibeOS: shell ready', 'shell_ready', (), None, 'user'),
     ],
     'gp_smp2': [
@@ -556,6 +565,66 @@ class TestSignatures(unittest.TestCase):
                 with self.subTest(row=row.text):
                     self.assertFalse([h for h in heads if h in text])
                     self.assertFalse([p for p in pats if p.search(text)])
+
+
+def synthetic_boot(cfg: registry.BootConfig) -> list[str]:
+    """One serial line per contract row of `cfg`, from `registry.sample`:
+    framed for a kernel row, unframed for a user program's."""
+    out = []
+    for row, binding in registry.contract(registry.load_rows(), cfg):
+        text = registry.sample(row, binding)
+        out.append(text if row.source == frame.USER else frame.FRAME + text)
+    return out
+
+
+class TestUserTestsResult(unittest.TestCase):
+    """`/bin/tests`' result on the production path (ROADMAP §10.2, F073)."""
+
+    CFG = registry.BootConfig(hpet=True, smp=2, lapic_mode="periodic")
+
+    def run_boot(self, lines: list[str]) -> harness.RunResult:
+        with mock.patch.dict(os.environ, clear=True):
+            markers = harness.boot_contract_markers(smp=2, cpu="max", accel="tcg")
+        return harness.run_qemu_and_check(
+            FAKE_CFG, markers, line_source=FakeLineSource.from_lines(lines)
+        )
+
+    def test_green_boot(self) -> None:
+        names = self.run_boot(synthetic_boot(self.CFG)).matched
+        self.assertEqual(names[-2:], ["user_tests_ok", "shell_ready"])
+
+    def test_user_tests_ok_required(self) -> None:
+        lines = [ln for ln in synthetic_boot(self.CFG) if ln != "user: tests ok"]
+        with self.assertRaisesRegex(harness.HarnessError, "missing marker 'user_tests_ok'"):
+            self.run_boot(lines)
+
+    def test_framed_user_tests_ok_does_not_count(self) -> None:
+        lines = [frame.FRAME + ln if ln == "user: tests ok" else ln
+                 for ln in synthetic_boot(self.CFG)]
+        with self.assertRaisesRegex(harness.HarnessError, "missing marker 'user_tests_ok'"):
+            self.run_boot(lines)
+
+    def test_user_tests_fail_fails_run(self) -> None:
+        lines = synthetic_boot(self.CFG)
+        at = lines.index("user: tests ok")
+        lines = lines[:at] + ["user: tests fail"] + lines[at:]
+        with self.assertRaisesRegex(harness.HarnessError, "user failure 'user: tests fail'"):
+            self.run_boot(lines)
+
+    def test_user_tests_fail_fails_console_boot(self) -> None:
+        src = FakeLineSource.from_lines([frame.FRAME + "vibeOS: serial online",
+                                         "user: tests fail"])
+        with self.assertRaisesRegex(harness.HarnessError, "user failure 'user: tests fail'"):
+            harness.run_qemu_console_input(FAKE_CFG, line_source=src)
+
+    def test_shell_variants_list_it(self) -> None:
+        with mock.patch.dict(os.environ, clear=True):
+            for hpet in (True, False):
+                names = [m.name for m in harness.boot_contract_markers(smp=2, hpet=hpet)]
+                self.assertEqual(names[-2:], ["user_tests_ok", "shell_ready"])
+            gp = [m.name for m in harness.boot_contract_markers(smp=2, gp=True)]
+            self.assertNotIn("user_tests_ok", gp)
+        self.assertNotIn("user_tests_ok", [m.name for m in harness.halt_test_markers()])
 
 
 if __name__ == "__main__":

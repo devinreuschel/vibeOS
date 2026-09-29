@@ -1094,12 +1094,17 @@ arch = "both"
 source = "user"
 section = "§9.8"
 
+# `/bin/tests` passed: every e2e boot that reaches the shell requires it
+# (F073).
 [[marker]]
 text = "user: tests ok"
-kind = "diagnostic"
+kind = "contract"
 arch = "both"
 source = "user"
 section = "§9.8"
+order = 290
+name = "user_tests_ok"
+when = ["!gp_test", "!panic_test"]
 
 [[marker]]
 text = "user: tests fail"
