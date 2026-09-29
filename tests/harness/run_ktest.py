@@ -322,7 +322,8 @@ def check_deadline_trip(lines: Iterable[str], name: str, deadline_ms: int) -> No
 def ktest_deadline_trip(env: EnvConfig) -> None:
     """The expect-fail boot of `ktest_deadline_hang` (ROADMAP §10.2, T1):
     another CPU's tick finds its deadline passed, prints the FAIL line and
-    panics. Panic signatures are expected, so none fails the boot."""
+    panics. Its failure and panic lines are expected (`expect_fail`), and
+    `check_deadline_trip` checks them."""
     penv = dataclasses.replace(env, ktest=TRIP_TEST, ktest_repeat=None)
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     try:
@@ -331,10 +332,10 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
             raw = run_qemu_until_exit(
                 cfg,
                 timeout_s=env.timeout,
-                panic_signatures=(),
                 kill_after=lambda ln: (
                     TRIP_KILL_AFTER_S if frame.kernel_text(ln) == PANIC_DONE else None
                 ),
+                expect_fail=True,
             )
             results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
             check_deadline_trip(raw.lines, TRIP_TEST, TRIP_DEADLINE_MS)

@@ -1791,12 +1791,16 @@ def run_qemu_until_exit(
     panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
     extra_panic: tuple[str, ...] = (),
     kill_after: Callable[[str], float | None] | None = None,
+    *,
+    expect_fail: bool = False,
 ) -> RunResult:
     """Boot the ISO and wait for QEMU to exit (isa-debug-exit).
 
     `kill_after(line)` may return seconds-until-SIGKILL. The first non-None
     wins (vibefs crash consistency). A kill is not a harness timeout. It gets
-    the raw line; a failing line (`run_failure`) ends the run.
+    the raw line; a failing line (`run_failure`) ends the run, unless
+    `expect_fail` is set: an expect-fail boot (`run_ktest`'s deadline trip)
+    reads on through its failure and panic lines and checks them itself.
     """
     if not shutil.which("qemu-system-x86_64"):
         raise HarnessError("qemu-system-x86_64 not on PATH")
@@ -1826,7 +1830,10 @@ def run_qemu_until_exit(
     def take(line: str) -> None:
         result.lines.append(line)
         why = run_failure(line, stream, panic_signatures)
-        if why is not None:
+        if why is not None and expect_fail:
+            if result.panic_line is None:
+                result.panic_line = line
+        elif why is not None:
             result.panic_line = line
             drain_panic_tail(reader, result)
             proc.kill()

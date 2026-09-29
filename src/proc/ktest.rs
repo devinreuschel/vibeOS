@@ -29,6 +29,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("syscall_dispatch", test_syscall_dispatch),
     test("syscall_ptr_validate", test_syscall_ptr_validate),
     test("user_syscalls", test_user_syscalls),
+    test("init_reports_failed_tests", test_init_reports_failed_tests),
     test("user_code_exit", test_user_code_exit),
     test("user_image_elf", test_user_image_elf),
     test("user_code_layout", test_user_code_layout),
@@ -56,4 +57,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("pid_not_reused_after_reap", pid_not_reused_after_reap),
     test("uaccess_syscall_copies", test_uaccess_syscall_copies).deadline(30_000),
     test("uaccess_readonly_efault", test_uaccess_readonly_efault).deadline(30_000),
+    test("user_runtime", user_runtime),
 ];

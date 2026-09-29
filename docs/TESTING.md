@@ -332,10 +332,13 @@ planned (ROADMAP §25.5), the soft lockup, hard lockup, and hung-thread reports 
 provokes one on purpose declares it; in any other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
 lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a 30 s pause.
 
-The in-guest runner's failure lines fail a `make test-kernel` run the same way, matched on framed
-lines only (§8.2): `vibeOS: ktest: FAIL <name>: <reason>`, which includes the deadline failure
-signature `vibeOS: ktest: FAIL <name>: deadline` that a timer tick prints before it panics, and
-`vibeOS: ktest: bad option <key>=<value>`, printed before `begin`.
+The in-guest runner's failure lines fail a `make test-kernel` run, matched on framed lines only
+(§8.2): `check_ktest_output` rejects every `vibeOS: ktest: FAIL <name>: <reason>` (a `test` row),
+and two `failure` rows fail the run as soon as they print: the deadline failure signature
+`vibeOS: ktest: FAIL <name>: deadline`, which a timer tick prints before it panics, and
+`vibeOS: ktest: bad option <key>=<value>`, printed before `begin`. The deadline trip boot expects
+both its failure and its panic (`run_qemu_until_exit(..., expect_fail=True)`) and checks them
+itself.
 
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
 fd 2, and a fuzzer writes random bytes. The harness scans framed lines only (§2.6), and fails on

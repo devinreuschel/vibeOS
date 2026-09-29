@@ -2036,6 +2036,32 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("vibeOS: vibefs: wr 2", r.lines)
         self.assertEqual(r.exit_code, -signal.SIGKILL)
 
+    def test_run_until_exit_expect_fail_reads_on(self) -> None:
+        import tempfile
+
+        from tests.harness.harness import HarnessError, overlay_env, run_qemu_until_exit
+
+        with tempfile.TemporaryDirectory() as d:
+            qemu = os.path.join(d, "qemu-system-x86_64")
+            with open(qemu, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "printf '\\036vibeOS: ktest: FAIL t: deadline\\n'\n"
+                    "printf '\\036vibeOS: panic:\\n'\n"
+                    "printf '\\036vibeOS: panic: halted\\n'\n"
+                )
+            os.chmod(qemu, 0o755)
+            iso = os.path.join(d, "x.iso")
+            open(iso, "wb").close()
+            path = d + os.pathsep + os.environ.get("PATH", "")
+            cfg = QemuConfig(iso=iso, accel="")
+            with overlay_env({"PATH": path}):
+                with self.assertRaisesRegex(HarnessError, "deadline"):
+                    run_qemu_until_exit(cfg, timeout_s=20)
+                r = run_qemu_until_exit(cfg, timeout_s=20, expect_fail=True)
+        self.assertEqual(r.lines[-1], "\x1evibeOS: panic: halted")
+        self.assertEqual(r.panic_line, "\x1evibeOS: ktest: FAIL t: deadline")
+
 
 class TestEnvConfig(unittest.TestCase):
     def test_env_flag(self) -> None:
