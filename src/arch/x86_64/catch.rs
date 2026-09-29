@@ -9,6 +9,9 @@
 //! another CPU, or one raised by ring 3, takes its normal path (invariant
 //! I29). The window must not span a CPU migration, which nothing does
 //! while no preempted thread changes CPU (invariant I36).
+//!
+//! It also holds the arch stall points production code calls under
+//! `kernel_tests` to widen a race window ([`force_kernel_window`]).
 
 use core::alloc::Layout;
 use core::arch::global_asm;
@@ -315,5 +318,36 @@ pub fn on_panic() {
     if armed_here() == ST_PANIC {
         disarm();
         unsafe { vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1) };
+    }
+}
+
+/// `gs::force_kernel` calls [`force_kernel_window`] still holds.
+static FK_STALLS: AtomicU32 = AtomicU32::new(0);
+
+/// Hold the next `n` `gs::force_kernel` calls in [`force_kernel_window`];
+/// 0 disarms.
+pub fn arm_force_kernel_window(n: u32) {
+    FK_STALLS.store(n, Ordering::Release);
+}
+
+/// Stalls not yet taken.
+pub fn force_kernel_windows_left() -> u32 {
+    FK_STALLS.load(Ordering::Acquire)
+}
+
+/// In `gs::force_kernel`, once the data segments are loaded and before
+/// `GS_BASE` is written back: while armed, spin 2 ms so an interrupt lands
+/// inside that window. It reads no `gs:` operand, since `mov gs` zeroed
+/// `GS_BASE`.
+pub fn force_kernel_window() {
+    if FK_STALLS
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+        .is_err()
+    {
+        return;
+    }
+    let t0 = crate::time_init::now_ns();
+    while crate::time_init::now_ns().saturating_sub(t0) < 2_000_000 {
+        core::hint::spin_loop();
     }
 }

@@ -34,6 +34,8 @@ pub fn force_kernel() {
     };
     let ptr = cpu.self_ptr as u64;
     unsafe { load_data_segs(KERNEL_DS) };
+    #[cfg(feature = "kernel_tests")]
+    crate::arch::x86_64::catch::force_kernel_window();
     unsafe {
         x86::wrmsr(IA32_GS_BASE, ptr);
         x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);

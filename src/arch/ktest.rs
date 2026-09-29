@@ -1293,3 +1293,66 @@ pub(crate) fn cpu_control_regs() -> Outcome {
     }
     Outcome::Ok
 }
+
+static FK_TARGET: AtomicU32 = AtomicU32::new(0);
+static FK_STOP: AtomicBool = AtomicBool::new(false);
+static FK_DONE: AtomicBool = AtomicBool::new(false);
+/// Floods `FK_TARGET` with reschedule IPIs until `FK_STOP`.
+fn force_kernel_ipi_sender() {
+    let target = FK_TARGET.load(Ordering::Acquire);
+    while !FK_STOP.load(Ordering::Acquire) {
+        // A failed send only thins the IPI stream.
+        let _ = apic_init::send_ipi_cpu(target, vectors::IPI_RESCHEDULE);
+        let t = time_init::now_ns().saturating_add(20_000);
+        while time_init::now_ns() < t {
+            core::hint::spin_loop();
+        }
+    }
+    FK_DONE.store(true, Ordering::Release);
+}
+
+/// `gs::force_kernel` called with IF=1 while another CPU floods this one
+/// with IPIs, its window held open: an interrupt between its `mov gs` and
+/// its `GS_BASE` write would run at CPL 0 on `GS_BASE` = 0, which the entry
+/// stub does not swap, and fault on the first per-CPU access.
+pub(crate) fn test_force_kernel_irq_window() -> Outcome {
+    let Some(ap) = crate::ktest::second_cpu() else {
+        return Outcome::Skip("needs 2 CPUs");
+    };
+    let Some(me) = x86::cpu_index() else {
+        return Outcome::Fail("no cpu index");
+    };
+    if ap == me {
+        return Outcome::Skip("registry on the second CPU");
+    }
+    if !x86::interrupts_enabled() {
+        return Outcome::Fail("IF off in the registry");
+    }
+    FK_TARGET.store(me, Ordering::Release);
+    FK_STOP.store(false, Ordering::Release);
+    FK_DONE.store(false, Ordering::Release);
+    spawn_thread_on("fk_ipi_sender", force_kernel_ipi_sender, ap);
+    arch::catch::arm_force_kernel_window(20);
+    let t0 = time_init::now_ns();
+    while arch::catch::force_kernel_windows_left() != 0
+        && time_init::now_ns().saturating_sub(t0) < 5_000_000_000
+    {
+        arch::gs::force_kernel();
+    }
+    let left = arch::catch::force_kernel_windows_left();
+    arch::catch::arm_force_kernel_window(0);
+    FK_STOP.store(true, Ordering::Release);
+    if !spin_until_ns(|| FK_DONE.load(Ordering::Acquire), 5_000_000_000) {
+        return Outcome::Fail("IPI sender did not stop");
+    }
+    if left != 0 {
+        return Outcome::Fail("force_kernel did not reach its window");
+    }
+    let Some(cpu) = per_cpu_init::try_current() else {
+        return Outcome::Fail("per-CPU area gone");
+    };
+    if x86::rdmsr(x86::IA32_GS_BASE) != cpu.self_ptr as u64 {
+        return Outcome::Fail("GS_BASE is not this CPU's PerCpu");
+    }
+    Outcome::Ok
+}
