@@ -1,15 +1,20 @@
 //! In-guest tests for drivers (kernel_tests only). Rows: [`TESTS`].
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use vibeos::block::{BlockError, DeviceState, Op};
-use vibeos::dev::DevRef;
+use vibeos::dev::{DevRef, Instance};
+use vibeos::lock::RANK_DEVICE;
 
 use crate::block_init::IoWaiter;
-use crate::ktest::{Outcome, Test, test};
+use crate::fat_init;
+use crate::file_init;
+use crate::ktest::{Outcome, Test, fid, test};
 use crate::per_cpu_init;
+use crate::sync_init::SpinMutex;
 use crate::thread_init;
 use crate::time_init;
+use crate::vibefs_init::{self, VibeVolume};
 use crate::virtio_blk_init::{self, VirtioBlk};
 
 // ---- vda, the ktest disk, looked up by name: the driver keeps no list
@@ -405,6 +410,238 @@ pub(crate) fn test_block_persist() -> Outcome {
     Outcome::Ok
 }
 
+// ---- block_two_disk_instances: ROADMAP §10.4's driver and volume
+// instances (D2).
+
+/// Run `f` on vdb's instance; `None` when vdb is not bound.
+fn vdb<R>(f: impl FnOnce(&VirtioBlk) -> R) -> Option<R> {
+    virtio_blk_init::with_disk(b"vdb", f)
+}
+
+/// The instances the device registry owns for bound virtio-blk functions,
+/// and how many there are.
+fn blk_instances() -> ([Option<Instance>; 2], usize) {
+    let mut out: [Option<Instance>; 2] = [const { None }; 2];
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while let Some(d) = crate::dev_init::get(i) {
+        i += 1;
+        if crate::dev_init::bound(&d) != Some("virtio-blk") {
+            continue;
+        }
+        if let (Some(slot), Some(inst)) = (out.get_mut(n), crate::dev_init::instance(&d)) {
+            *slot = Some(inst);
+        }
+        n += 1;
+    }
+    (out, n)
+}
+
+/// 1: two functions, two instances, two disks.
+fn two_instances() -> Result<(), &'static str> {
+    let (insts, n) = blk_instances();
+    if n != 2 {
+        return Err("want exactly two bound virtio-blk functions");
+    }
+    let (Some(a), Some(b)) = (&insts[0], &insts[1]) else {
+        return Err("a bound function without an instance");
+    };
+    if vibeos::dev::same_instance(a, b) {
+        return Err("both functions share one instance");
+    }
+    let (Some(ia), Some(ib)) = (a.downcast_ref::<VirtioBlk>(), b.downcast_ref::<VirtioBlk>())
+    else {
+        return Err("instance type");
+    };
+    if (ia.name(), ib.name()) != ("vda", "vdb") || ia.dev().same(ib.dev()) {
+        return Err("names not vda, vdb in bind order");
+    }
+    if vda(|b| b.capacity_sectors()) != Some(8192) || vdb(|b| b.capacity_sectors()) != Some(2048) {
+        return Err("capacities not 8192 and 2048");
+    }
+    if ia.has_flush() != ib.has_flush() {
+        return Err("same device model, different flush support");
+    }
+    let lookup = crate::block::blockdev_init::lookup;
+    match (lookup(b"vda"), lookup(b"vdb")) {
+        (Some(x), Some(y)) if x.id() != y.id() => Ok(()),
+        (Some(_), Some(_)) => Err("vda and vdb share a block id"),
+        _ => Err("vda or vdb not registered"),
+    }
+}
+
+/// A disk's `(completions, thread_hits)`.
+fn counters(b: &VirtioBlk) -> (u32, u32) {
+    (b.completions(), b.thread_hits())
+}
+
+fn vdb_write(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    vdb(|b| b.write(lba, buf)).unwrap_or(Err(BlockError::Gone))
+}
+
+fn vdb_read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+    vdb(|b| b.read(lba, buf)).unwrap_or(Err(BlockError::Gone))
+}
+
+/// 2: I/O on each disk reaches its own device, on its own queues and
+/// vectors.
+fn io_on_each() -> Result<(), &'static str> {
+    let (a0, b0) = (vda(counters), vdb(counters));
+    let (wa, wb) = ([0xA5u8; 512], [0x5Au8; 512]);
+    vda_write(2, &wa).map_err(|_| "vda write")?;
+    vdb_write(2, &wb).map_err(|_| "vdb write")?;
+    let (mut ra, mut rb) = ([0u8; 512], [0u8; 512]);
+    vda_read(2, &mut ra).map_err(|_| "vda read")?;
+    vdb_read(2, &mut rb).map_err(|_| "vdb read")?;
+    if ra != wa || rb != wb {
+        return Err("a disk read back the other's pattern");
+    }
+    let (Some(a0), Some(b0), Some(a1), Some(b1)) = (a0, b0, vda(counters), vdb(counters)) else {
+        return Err("vda or vdb gone");
+    };
+    if a1.0 <= a0.0 || b1.0 <= b0.0 {
+        return Err("a disk's completions did not advance");
+    }
+    if a1.1 <= a0.1 || b1.1 <= b0.1 {
+        return Err("a disk's bottom half did not run");
+    }
+    Ok(())
+}
+
+/// 3: a failure injected on vdb fails vdb's request alone.
+fn fails_alone() -> Result<(), &'static str> {
+    let buf = [0x77u8; 512];
+    vdb(|b| b.inject_unsupp(1)).ok_or("no vdb")?;
+    match vdb_write(3, &buf) {
+        Err(BlockError::Inval) => {}
+        Ok(()) => return Err("injected failure not reported"),
+        Err(_) => return Err("injected failure: wrong error"),
+    }
+    vda_write(3, &buf).map_err(|_| "vda write after vdb's failure")?;
+    let mut out = [0u8; 512];
+    vda_read(3, &mut out).map_err(|_| "vda read after vdb's failure")?;
+    vdb_write(3, &buf).map_err(|_| "vdb write after its failure")?;
+    let ready = |b: &VirtioBlk| b.state() == DeviceState::Ready;
+    if vda(ready) != Some(true) || vdb(ready) != Some(true) {
+        return Err("a disk not Ready after an injected failure");
+    }
+    Ok(())
+}
+
+const PROBE: &str = "/vdb/d2probe";
+const PROBE_DATA: &[u8] = b"vdb is its own volume";
+
+/// Write [`PROBE`], or read it back and compare.
+fn probe_file(write: bool) -> Result<(), &'static str> {
+    use vibeos::fs::{O_CREAT, O_RDONLY, O_RDWR, O_TRUNC};
+    let flags = if write {
+        O_RDWR | O_CREAT | O_TRUNC
+    } else {
+        O_RDONLY
+    };
+    let f = fid::open(PROBE, flags, 0o644).map_err(|_| "open probe")?;
+    let r = if write {
+        match fid::write(f, PROBE_DATA) {
+            Ok(n) if n == PROBE_DATA.len() => Ok(()),
+            _ => Err("write probe"),
+        }
+    } else {
+        let mut buf = [0u8; 32];
+        match fid::read(f, &mut buf) {
+            Ok(n) if buf.get(..n) == Some(PROBE_DATA) => Ok(()),
+            _ => Err("read probe back"),
+        }
+    };
+    let c = fid::close(f).map_err(|_| "close probe");
+    r.and(c)
+}
+
+/// vdb's block entry holds a vibefs volume.
+fn vdb_holds_vibefs() -> bool {
+    crate::block::blockdev_init::lookup(b"vdb")
+        .and_then(|r| crate::block::blockdev_init::holder(&r))
+        .is_some_and(|h| h.downcast_ref::<VibeVolume>().is_some())
+}
+
+/// 4: a vibefs on vdb is its own volume instance, which vdb's entry holds.
+fn volume_on_vdb() -> Result<(), &'static str> {
+    vibefs_init::mkfs_dev("vdb").map_err(|_| "mkfs vdb")?;
+    file_init::mkdir(b"/vdb", 0o755).map_err(|_| "mkdir /vdb")?;
+    vibefs_init::mount_dev("vdb", "/vdb", false).map_err(|_| "mount vdb")?;
+    let r = mounted_checks();
+    let u = file_init::umount(b"/vdb").map_err(|_| "umount /vdb");
+    r.and(u)?;
+    if crate::block::blockdev_init::lookup(b"vdb")
+        .and_then(|r| crate::block::blockdev_init::holder(&r))
+        .is_some()
+    {
+        return Err("vdb still holds a volume after umount");
+    }
+    vibefs_init::mount_dev("vdb", "/vdb", false).map_err(|_| "remount vdb")?;
+    let r = probe_file(false);
+    let u = file_init::umount(b"/vdb").map_err(|_| "umount /vdb again");
+    r.and(u)
+}
+
+fn mounted_checks() -> Result<(), &'static str> {
+    if !vdb_holds_vibefs() {
+        return Err("vdb's entry does not hold a vibefs volume");
+    }
+    probe_file(true)?;
+    probe_file(false)?;
+    if fid::stat_path("/vibe/d2probe").err() != Some(vibeos::fs::FsError::NotFound) {
+        return Err("/vibe shows vdb's file");
+    }
+    match fat_init::mount_dev("vdb", "/vdb2", false) {
+        Err(vibeos::fs::FsError::Busy) => Ok(()),
+        Ok(()) => {
+            let _ = file_init::umount(b"/vdb2");
+            Err("FAT mounted over vdb's vibefs")
+        }
+        Err(_) => Err("FAT mount of vdb: want Busy"),
+    }
+}
+
+/// The volume thread has finished.
+static TWO_DONE: AtomicBool = AtomicBool::new(false);
+/// Why the volume thread failed; `None` when it passed.
+static TWO_WHY: SpinMutex<Option<&'static str>> = SpinMutex::with_rank(None, RANK_DEVICE);
+
+fn two_volume_worker() {
+    *TWO_WHY.lock() = volume_on_vdb().err();
+    // Release: pairs with the test's Acquire load of `TWO_DONE`.
+    TWO_DONE.store(true, Ordering::Release);
+}
+
+/// ROADMAP §10.4 (D2): the two ktest disks are two driver instances, owned
+/// by their PCI entries, each with its own name, I/O, interrupts and
+/// failure, and a vibefs on vdb is a volume instance its block entry
+/// holds, on a thread with `spawn`'s default 16 KiB stack.
+pub(crate) fn test_block_two_disk_instances() -> Outcome {
+    if let Err(why) = two_instances()
+        .and_then(|()| io_on_each())
+        .and_then(|()| fails_alone())
+    {
+        return Outcome::Fail(why);
+    }
+    TWO_DONE.store(false, Ordering::Relaxed);
+    *TWO_WHY.lock() = None;
+    let Ok(_t) = thread_init::spawn("d2-vol", two_volume_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let t0 = time_init::uptime_ms();
+    while !TWO_DONE.load(Ordering::Acquire) {
+        if time_init::uptime_ms().saturating_sub(t0) > 20_000 {
+            return Outcome::Fail("volume thread stalled");
+        }
+        thread_init::yield_now();
+    }
+    match *TWO_WHY.lock() {
+        Some(why) => Outcome::Fail(why),
+        None => Outcome::Ok,
+    }
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -414,4 +651,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_vblk_concurrent", test_block_vblk_concurrent),
     test("block_vblk_mq", test_block_vblk_mq),
     test("block_persist", test_block_persist),
+    test("block_two_disk_instances", test_block_two_disk_instances).deadline(30_000),
 ];

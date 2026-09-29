@@ -789,10 +789,6 @@ impl VirtioBlk {
     /// Replace the device status of the next `n` completions with
     /// `S_UNSUPP` (test-only).
     #[cfg(feature = "kernel_tests")]
-    #[expect(
-        dead_code,
-        reason = "block_two_disk_instances, the proof test, injects a failure"
-    )]
     pub fn inject_unsupp(&self, n: u32) {
         self.inject_unsupp.store(n, Ordering::Release);
     }
@@ -971,13 +967,6 @@ impl VirtioBlk {
         self.features() & F_MQ != 0 && self.num_queues() > 1
     }
 
-    #[cfg_attr(
-        feature = "kernel_tests",
-        expect(
-            dead_code,
-            reason = "block_two_disk_instances, the proof test, reads it"
-        )
-    )]
     pub fn has_flush(&self) -> bool {
         self.features() & F_FLUSH != 0
     }

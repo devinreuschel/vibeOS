@@ -755,10 +755,6 @@ pub(super) fn spare_volume() -> Result<Instance, FsError> {
 /// Make a fresh vibefs on block device `name`, which nothing may hold
 /// (test-only, AGENTS.md rule 9: `block_two_disk_instances`).
 #[cfg(feature = "kernel_tests")]
-#[expect(
-    dead_code,
-    reason = "block_two_disk_instances, the proof test, formats vdb"
-)]
 pub fn mkfs_dev(name: &str) -> Result<(), FsError> {
     let r = blockdev_init::lookup(name.as_bytes()).ok_or(FsError::NotFound)?;
     if blockdev_init::holder(&r).is_some() {
