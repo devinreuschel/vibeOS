@@ -35,6 +35,18 @@ is 12, "Phase 18/22" is 18, "ROADMAP §20.1" is 20). A tag that names no phase g
 the first rule only. A DEPARTURES entry fails when its key names no box or several,
 when that box does not cite the id, or when the finding passes without it. The
 bare mode (no option) runs these rules.
+
+Design reviews, in every mode. An id that follows the words `design review` (any
+case, the two words split by any whitespace, a line break included) in `docs/`,
+`AGENTS.md`, or `README.md` needs a row in docs/reviews/DESIGN_REVIEWS.md: a table
+line whose first cell is that id. Each row's Sections cell, the column its table's
+header names, splits on `;`; a group that begins with DESIGN, ROADMAP, SYSCALL, or
+VIBEFS splits on `,` into items that must name a heading of that document. DESIGN
+is docs/DESIGN.md and its topic files (`doc_refs.LAYOUT`). `§N[.M...]` names a
+numbered heading, and in ROADMAP a bare `§N` also names `## Phase N:`; `Phase N`
+names `## Phase N:`; `header` and a group with no items name the document; any
+other item equals a heading title (with or without its number) or a bold paragraph
+lead (`**Standing gates**`), ignoring case.
 """
 
 from __future__ import annotations
@@ -48,7 +60,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts import gatelib  # noqa: E402
+from scripts import doc_refs, gatelib  # noqa: E402
 from scripts.gatelib import (  # noqa: E402
     BOX,
     CLOSED_SCOPE_END,
@@ -68,8 +80,9 @@ from scripts.gatelib import (  # noqa: E402
 )
 
 __all__ = [
-    "DEPARTURES", "Citation", "Finding", "check", "check_needs", "check_placement",
-    "parse_review", "parse_roadmap", "tag_phase", "wave",
+    "DEPARTURES", "Citation", "DocHeading", "Finding", "check", "check_design_reviews",
+    "check_needs", "check_placement", "design_review_ids", "doc_headings", "parse_review",
+    "parse_roadmap", "tag_phase", "wave",
 ]
 
 # A lands clause in box text: "lands after", "land before", "lands with or after".
@@ -88,6 +101,148 @@ DEPARTURES: dict[str, tuple[str, str]] = {
         "devices the drivers meet",
     ),
 }
+
+DESIGN_REVIEWS = ROOT / "docs" / "reviews" / "DESIGN_REVIEWS.md"
+REVIEW_ID = re.compile(r"(?i:design)\s+(?i:review)\s+([A-Z]\d{3})\b")
+DOCS: dict[str, tuple[str, ...]] = {
+    "DESIGN": tuple(path for path, _ in doc_refs.LAYOUT),
+    "ROADMAP": ("docs/ROADMAP.md",),
+    "SYSCALL": ("docs/SYSCALL.md",),
+    "VIBEFS": ("docs/VIBEFS.md",),
+}
+DOC_GROUP = re.compile(rf"^({'|'.join(DOCS)})\b\s*(.*)$")
+SECTION_ITEM = re.compile(r"^§(\d+(?:\.\d+)*)$")
+PHASE_ITEM = re.compile(r"^Phase (\d+)$")
+PHASE_TITLE = re.compile(r"^Phase (\d+):")
+BOLD_LEAD = re.compile(r"^\*\*([^*]+?)\.?\*\*")
+
+
+@dataclass(frozen=True)
+class DocHeading:
+    file: str
+    line: int
+    level: int
+    number: str | None  # "2.10" for `### 2.10 Trust boundaries`
+    title: str  # the heading's text, its number included
+
+
+def read_docs(paths: tuple[str, ...]) -> dict[str, str]:
+    """path -> text for each of `paths` that exists under ROOT."""
+    out: dict[str, str] = {}
+    for p in paths:
+        f = ROOT / p
+        if f.is_file():
+            out[p] = f.read_text(encoding="utf-8")
+    return out
+
+
+def doc_headings(doc: str, files: dict[str, str] | None = None) -> list[DocHeading]:
+    """The ATX headings outside fences of `doc` (DESIGN, ROADMAP, SYSCALL, VIBEFS), over
+    its files in order. `files` maps a path to its text; by default they are read."""
+    paths = DOCS[doc]
+    texts = read_docs(paths) if files is None else files
+    out: list[DocHeading] = []
+    for path in paths:
+        text = texts.get(path)
+        if text is None:
+            continue
+        fenced = False
+        for n, raw in enumerate(text.splitlines(), start=1):
+            if raw.startswith(doc_refs.FENCE):
+                fenced = not fenced
+                continue
+            m = None if fenced else doc_refs.HEADING.match(raw)
+            if m is None:
+                continue
+            title = m.group(2)
+            num = doc_refs.NUMBER.match(title)
+            out.append(DocHeading(path, n, len(m.group(1)), num.group(1) if num else None,
+                                  title))
+    return out
+
+
+def design_review_ids(text: str) -> list[tuple[int, str]]:
+    """(line, id) of each id that follows the words `design review` in `text`."""
+    return [(text.count("\n", 0, m.start()) + 1, m.group(1)) for m in REVIEW_ID.finditer(text)]
+
+
+def _names(doc: str, files: dict[str, str]) -> tuple[set[str], set[int], set[str]]:
+    """A document's heading numbers, `## Phase N:` numbers, and names (heading titles,
+    with and without their number, and bold paragraph leads), casefolded."""
+    numbers: set[str] = set()
+    phases: set[int] = set()
+    names: set[str] = set()
+    for h in doc_headings(doc, files):
+        names.add(h.title.casefold())
+        if h.number is not None:
+            numbers.add(h.number)
+            names.add(h.title[len(h.number):].lstrip(". ").casefold())
+        p = PHASE_TITLE.match(h.title)
+        if p is not None and h.level == 2:
+            phases.add(int(p.group(1)))
+    for path in DOCS[doc]:
+        for raw in files.get(path, "").splitlines():
+            b = BOLD_LEAD.match(raw)
+            if b is not None:
+                names.add(b.group(1).strip().casefold())
+    return numbers, phases, names
+
+
+def check_design_reviews(cites: dict[str, str], reviews: str, files: dict[str, str]) -> list[str]:
+    """`cites` maps a path in scope to its text, `reviews` is DESIGN_REVIEWS.md, and
+    `files` maps each DOCS path to its text."""
+    errors: list[str] = []
+    rows: dict[str, tuple[int, str | None]] = {}
+    col: int | None = None
+    for n, raw in enumerate(reviews.splitlines(), start=1):
+        if not raw.startswith("|"):
+            col = None
+            continue
+        cells = [c.strip() for c in raw.strip().strip("|").split("|")]
+        if col is None and "Sections" in cells:
+            col = cells.index("Sections")
+            continue
+        if cells and re.fullmatch(r"[A-Z]\d{3}", cells[0]):
+            sections = cells[col] if col is not None and col < len(cells) else None
+            rows.setdefault(cells[0], (n, sections))
+    for path in sorted(cites):
+        for line, rid in design_review_ids(cites[path]):
+            if rid not in rows:
+                errors.append(f"{path}:{line}: design review {rid} has no row in "
+                              f"DESIGN_REVIEWS.md")
+    index = {doc: _names(doc, files) for doc in DOCS}
+    for rid, (n, sections) in rows.items():
+        for group in (sections or "").split(";"):
+            g = DOC_GROUP.match(group.strip())
+            if g is None:
+                continue
+            doc = g.group(1)
+            numbers, phases, names = index[doc]
+            for item in (x.strip() for x in g.group(2).split(",")):
+                if not item or item == "header":
+                    continue
+                sec = SECTION_ITEM.match(item)
+                ph = PHASE_ITEM.match(item)
+                if sec is not None:
+                    ok = sec.group(1) in numbers or (
+                        doc == "ROADMAP" and "." not in sec.group(1)
+                        and int(sec.group(1)) in phases)
+                elif ph is not None:
+                    ok = int(ph.group(1)) in phases
+                else:
+                    ok = item.casefold() in names
+                if not ok:
+                    errors.append(f"DESIGN_REVIEWS.md:{n}: {rid}: {doc} {item} names no heading")
+    return errors
+
+
+def design_review_inputs() -> tuple[dict[str, str], str, dict[str, str]]:
+    """The tree's inputs to `check_design_reviews`."""
+    cites = read_docs(tuple(
+        str(p.relative_to(ROOT)) for p in sorted((ROOT / "docs").rglob("*.md"))
+    ) + ("AGENTS.md", "README.md"))
+    files = read_docs(tuple(p for paths in DOCS.values() for p in paths))
+    return cites, DESIGN_REVIEWS.read_text(encoding="utf-8"), files
 
 
 @dataclass(frozen=True)
@@ -302,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
     errors += load_errors + check_needs(roadmap_text, needs)
     bare = not args.closed and args.wave is None and args.print_wave is None
     errors += check_placement(findings, parse_boxes(roadmap_text)) if bare else []
+    errors += check_design_reviews(*design_review_inputs())
     if args.print_wave is not None:
         for b in wave(args.print_wave, roadmap_text, review_text, needs):
             mark = "[x]" if b.ticked else "[ ]"

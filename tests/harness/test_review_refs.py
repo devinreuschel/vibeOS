@@ -12,8 +12,11 @@ from scripts.check_review_refs import (
     DEPARTURES,
     Finding,
     check,
+    check_design_reviews,
     check_needs,
     check_placement,
+    design_review_inputs,
+    doc_headings,
     parse_review,
     parse_roadmap,
     tag_phase,
@@ -407,6 +410,93 @@ class TestPlacement(unittest.TestCase):
             got = check_placement(findings, boxes)
         self.assertEqual(len(got), 1)
         self.assertTrue(got[0].startswith("F122: LATENT tag names Phase 20"), got)
+
+
+REVIEWS = """# Design reviews
+
+| Id | Severity | Decision | Sections | PR |
+|----|----------|----------|----------|----|
+| G001 | Major | one | {sections} | #92 |
+
+## H
+
+| Id | Severity | Decision | PR | Sections |
+|----|----------|----------|----|----------|
+| H007 | Legal | two | #93 | README |
+"""
+
+DOC_FILES = {
+    "docs/DESIGN.md": "# vibeOS design\n\n## Contents\n\n# 1. Overview\n\n### 1.3 Module map\n",
+    "docs/INVARIANTS.md": "# 2. Invariants\n\n### 2.10 Trust boundaries\n",
+    "docs/ROADMAP.md": ("# Roadmap\n\n## How to read this\n\n**Standing gates** apply.\n\n"
+                        "## Phase 10: Consolidation\n\n### 10.9 Engineering system\n"),
+    "docs/SYSCALL.md": "# Syscall ABI\n\n## 1. Registers\n\n```\n### 1.9 fenced\n```\n",
+}
+
+
+class TestDesignReviews(unittest.TestCase):
+    def errs(self, cites: dict[str, str], sections: str = "DESIGN §2.10") -> list[str]:
+        return check_design_reviews(cites, REVIEWS.format(sections=sections), DOC_FILES)
+
+    def test_unknown_id_fails(self) -> None:
+        got = self.errs({"docs/X.md": "see\ndesign review G002 here"})
+        self.assertEqual(got, ["docs/X.md:2: design review G002 has no row in DESIGN_REVIEWS.md"])
+
+    def test_known_id_passes(self) -> None:
+        for text in ("design review G001", "[design review H007](reviews/x.md)",
+                     "Design\nReview G001", "per the DESIGN  REVIEW H007"):
+            with self.subTest(text=text):
+                self.assertEqual(self.errs({"AGENTS.md": text}), [])
+
+    def test_no_id_is_ignored(self) -> None:
+        self.assertEqual(self.errs({"README.md": "A design review writes each decision. "
+                                                 "design review g001, design review G0012"}),
+                         [])
+
+    def test_missing_section_fails(self) -> None:
+        got = self.errs({}, "DESIGN §2.10, §2.11")
+        self.assertEqual(got, ["DESIGN_REVIEWS.md:5: G001: DESIGN §2.11 names no heading"])
+
+    def test_fenced_heading_does_not_resolve(self) -> None:
+        got = self.errs({}, "SYSCALL §1.9")
+        self.assertEqual(got, ["DESIGN_REVIEWS.md:5: G001: SYSCALL §1.9 names no heading"])
+
+    def test_items_resolve(self) -> None:
+        sections = ("DESIGN §1.3, §2.10, §2, Contents, header; ROADMAP §10, §10.9, Phase 10, "
+                    "How to read this, standing gates, Engineering system; SYSCALL §1, header; "
+                    "DESIGN; VIBEFS header")
+        self.assertEqual(self.errs({}, sections), [])
+
+    def test_unknown_items_fail(self) -> None:
+        got = self.errs({}, "ROADMAP Phase 11, §11, Nowhere")
+        self.assertEqual([e.split(": ", 2)[2] for e in got], [
+            "ROADMAP Phase 11 names no heading", "ROADMAP §11 names no heading",
+            "ROADMAP Nowhere names no heading",
+        ])
+
+    def test_bare_section_is_a_phase_only_in_roadmap(self) -> None:
+        got = self.errs({}, "SYSCALL §10")
+        self.assertEqual(got, ["DESIGN_REVIEWS.md:5: G001: SYSCALL §10 names no heading"])
+
+    def test_other_groups_are_ignored(self) -> None:
+        self.assertEqual(self.errs({}, "AGENTS rule 2; issue plan A3; README; CHANGELOG"), [])
+
+    def test_doc_headings(self) -> None:
+        got = doc_headings("DESIGN", DOC_FILES)
+        self.assertEqual([(h.file, h.line, h.level, h.number, h.title) for h in got], [
+            ("docs/DESIGN.md", 1, 1, None, "vibeOS design"),
+            ("docs/DESIGN.md", 3, 2, None, "Contents"),
+            ("docs/DESIGN.md", 5, 1, "1", "1. Overview"),
+            ("docs/DESIGN.md", 7, 3, "1.3", "1.3 Module map"),
+            ("docs/INVARIANTS.md", 1, 1, "2", "2. Invariants"),
+            ("docs/INVARIANTS.md", 3, 3, "2.10", "2.10 Trust boundaries"),
+        ])
+
+    def test_real_tree_passes(self) -> None:
+        cites, reviews, files = design_review_inputs()
+        self.assertIn("AGENTS.md", cites)
+        self.assertIn("docs/INVARIANTS.md", files)
+        self.assertEqual(check_design_reviews(cites, reviews, files), [])
 
 
 if __name__ == "__main__":
