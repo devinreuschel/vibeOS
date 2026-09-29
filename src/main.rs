@@ -88,6 +88,7 @@ static REQ_END: RequestsEndMarker = RequestsEndMarker::new();
 pub extern "C" fn _start() -> ! {
     // Step 1: serial. Nothing before this is debuggable.
     serial::Serial::init();
+    log_init::init();
     crate::marker!(marker::SERIAL_ONLINE);
 
     // Step 2: base revision. DESIGN §3.3 puts this immediately after serial.

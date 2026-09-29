@@ -125,6 +125,9 @@ that sets it:
 - `paging::tlb_shootdown_others`, set by `ipi_init::init` before the first AP starts (§4.3).
 - `x86::set_per_cpu_hooks` (`InterruptGuard`'s nesting count and `x86::cpu_index`), set by
   `per_cpu_init::init_bsp` before it marks the per-CPU area live.
+- `serial::set_capture_hook` (the log ring's serial capture), set by `log_init::init` right after
+  `Serial::init`, before the first marker.
+- Planned (ROADMAP §10.7): `serial::raw::set_stop_hook`, set by the stop primitive.
 - Planned (ROADMAP §10.3, A4): the spin-poll hook in `sync_init`, set by `ipi_init::init`, and the
   scheduler hooks in `ipi_init`, set by `sched_init::init`.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),
@@ -166,7 +169,7 @@ children, need no row.
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
 | sched | `sched/{mod,thread,wait,work,fpu}.rs` | `sched/{mod,thread_init,sched_init,work_init}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init}.rs` |
-| log | `log/mod.rs` | `log/{mod,log_init,serial,panic,diag,ksyms}.rs` |
+| log | `log/mod.rs` | `log/{mod,log_init,panic,diag,ksyms}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
 | shell | `shell/mod.rs` | `shell/{mod,shell_init}.rs` |
 | dev | `dev/{mod,pci,dma,virtio,entropy}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |

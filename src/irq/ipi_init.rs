@@ -57,7 +57,6 @@ impl CallSlot {
 static SHOOT: [Slot; MAX_IPI_CPUS] = [const { Slot::empty() }; MAX_IPI_CPUS];
 static CALL: CallSlot = CallSlot::empty();
 static CALL_BUSY: AtomicBool = AtomicBool::new(false);
-static HALTING: AtomicBool = AtomicBool::new(false);
 static RESCHED_COUNT: AtomicU64 = AtomicU64::new(0);
 static SHOOT_COUNT: AtomicU64 = AtomicU64::new(0);
 static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -284,19 +283,15 @@ pub fn on_call_ipi() {
 }
 
 pub fn on_halt_ipi() -> ! {
-    HALTING.store(true, Ordering::Release);
+    crate::serial::raw::HALTING.store(true, Ordering::Release);
     x86::halt();
 }
 
 /// Broadcast halt so others stop before we trash the log.
 /// Fixed IPI `0xFE`, not NMI (DESIGN §2.5 / §7.6).
 pub fn halt_others() {
-    HALTING.store(true, Ordering::Release);
+    crate::serial::raw::HALTING.store(true, Ordering::Release);
     let _ = apic_init::send_ipi_all_ex_self(vectors::IPI_HALT);
-}
-
-pub fn is_halting() -> bool {
-    HALTING.load(Ordering::Acquire)
 }
 
 /// Run `f(arg)` on every online CPU in `mask` except self. Always waits

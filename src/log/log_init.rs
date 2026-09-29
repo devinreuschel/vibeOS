@@ -170,11 +170,18 @@ impl fmt::Write for StackBuf<'_> {
     }
 }
 
+/// Install the serial capture (`serial::set_capture_hook`). `_start` calls
+/// it right after `Serial::init`, before the first marker, so the ring
+/// holds every boot line (DESIGN §1.2).
+pub fn init() {
+    crate::serial::set_capture_hook(capture_serial);
+}
+
 /// Assemble COM1 bytes into records so boot `marker!` / `writeln!(Serial)` is captured
 /// before a framebuffer exists. Caller holds IRQs off (`Serial::write_bytes`
 /// / `write_fmt`); `STAGE` is CPU-local and must not outlive that.
 pub fn capture_serial(bytes: &[u8]) {
-    if crate::ipi_init::is_halting() || is_emitting() {
+    if crate::serial::raw::HALTING.load(Ordering::Acquire) || is_emitting() {
         return;
     }
     if !allowed(Level::Info, runtime(), COMPILE_MAX) {

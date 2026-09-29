@@ -362,13 +362,13 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](SM
 
 Binding order (do not invert):
 
-1. Stop every other CPU first. Today `ipi_init::halt_others` sets `HALTING`, broadcasts the halt IPI
+1. Stop every other CPU first. Today `ipi_init::halt_others` sets `serial::raw::HALTING`, broadcasts the halt IPI
    `0xFE` (Fixed delivery), and returns without waiting. A CPU spinning with IF=0 does not take the
    IPI, and once `HALTING` is set its serial writes skip the TX lock, so it can write COM1 during the
    dump; a second panicking CPU re-runs `Serial::init` mid-dump. Planned (ROADMAP §10.7, F135; §11.3
    on aarch64): one stop primitive, which every path that stops the other CPUs uses, ROADMAP §25.4's
    capture jump included:
-   - The first CPU into `begin_dump` claims the dump (the `DUMPING` swap) before it stops anyone. A
+   - The first CPU into `begin_dump` claims the dump (`serial::raw::claim_dump`) before it stops anyone. A
      CPU that finds the dump claimed by another CPU sets no request and runs the stop routine itself;
      the owner re-entering prints `vibeOS: panic: reentered` and halts, as today.
    - The owner sets `HALTING`, then for each other online CPU sets STOP in that CPU's request word
@@ -395,10 +395,12 @@ Binding order (do not invert):
      CPU whose `stopped` flag is set the handler halts again and does nothing else; an NMI with no
      request on the dump owner returns at once, so the dump completes. Any other NMI with no request
      dumps and halts, as today, until ROADMAP §25.5 makes it an all-CPU backtrace.
-   - Only the owner writes COM1. A4's raw serial layer (ROADMAP §10.3) holds `HALTING`, the owner's
-     CPU id, and a write that takes no lock and no `InterruptGuard` and writes only on the owner;
-     once `HALTING` is set, a serial write or log append on any other CPU runs the stop routine
-     instead.
+   - Only the owner writes COM1. Built: A4's raw serial layer (ROADMAP §10.3, `serial::raw`) holds
+     `HALTING`, the owner's CPU id (`claim_dump` and `owner_cpu`, which replace the `DUMPING` flag),
+     and `write_owner`, a write that takes no lock and no `InterruptGuard` and writes only on the
+     owner. Planned (ROADMAP §10.7): once `HALTING` is set, a serial write or log append on any other
+     CPU runs the stop routine instead, through the hook the stop primitive installs with
+     `serial::raw::set_stop_hook`; until then such a write goes out without the TX lock.
 
    Why one primitive: an IPI misses a CPU spinning with IF=0, and aarch64 has no NMI before ROADMAP
    §25.5 and none on GICv2, but the commonest such CPU, a waiter on a lock the panicking CPU holds,

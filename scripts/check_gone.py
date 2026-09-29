@@ -132,6 +132,8 @@ GONE: list[tuple[str, str]] = [
     ("_retry_hang", "the harness retries nothing"),
     ("retryable_ktest_failure", "the harness retries nothing"),
     ("silent_user_syscalls_hang", "the harness retries nothing"),
+    ("is_halting", "every two-way dependency between kernel modules"),
+    ("DUMPING", "every two-way dependency between kernel modules"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

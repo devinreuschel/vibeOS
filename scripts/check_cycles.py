@@ -65,7 +65,6 @@ UPPER_PREFIXES = ("sched", "thread", "wait", "cache", "proc")
 
 # Exact failure keys the tree may still produce while this branch breaks them.
 KNOWN: list[str] = [
-    "raw missing",
     "two-way core:arch::x86_64::trap core:trap",
     "two-way core:fs core:fs::kernfs",
     "two-way kernel:arch::x86_64::catch kernel:arch::x86_64::idt",
@@ -83,7 +82,6 @@ KNOWN: list[str] = [
     "two-way kernel:fs::file_init kernel:shell::shell_init",
     "two-way kernel:fs::fs_init kernel:fs::vibefs_init",
     "two-way kernel:irq::ipi_init kernel:sched::thread_init",
-    "two-way kernel:log::log_init kernel:log::serial",
     "two-way kernel:mm::paging_init kernel:mm::pmm_init",
     "two-way kernel:proc::proc_init kernel:proc::syscall_init",
     "two-way kernel:proc::syscall_init kernel:sched::thread_init",
