@@ -72,7 +72,8 @@ class TestOwnerDecisions(unittest.TestCase):
         self.assertIn("bad date", got[0])
 
     def test_unresolvable_place_fails(self) -> None:
-        for box in ("- [ ] writes an OWNER DECISION block in DESIGN §2.99 that",
+        missing = "§2.99"  # kept apart from DESIGN so doc_refs.py does not resolve it
+        for box in (f"- [ ] writes an OWNER DECISION block in DESIGN {missing} that",
                     "- [ ] writes an OWNER DECISION block in VIBEFS §3.1 that"):
             with self.subTest(box=box):
                 got = errs(roadmap(box))
