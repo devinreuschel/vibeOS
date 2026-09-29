@@ -49,8 +49,9 @@ holds a copy that only an in-guest test reads (ROADMAP §10.7 deletes it, F111).
 count is also measured once, on the BSP, and `apic_init::arm_ap` reuses it on every AP. Both assume
 one TSC rate and one LAPIC timer rate on every CPU. `time_init::init` checks the invariant TSC CPUID
 bit and prints `vibeOS: time: invariant tsc absent` when it is clear, because everything downstream
-assumes the TSC does not change rate. Planned (ROADMAP §10.7): each AP measures its TSC against the
-BSP's at bring-up, and a marker reports the largest skew.
+assumes the TSC does not change rate. Each AP measures its TSC against the BSP's at bring-up with a
+warp test ([DESIGN §7.4](SMP.md#74-ap-bring-up-sequence)), and `vibeOS: smp: tsc skew <n> cycles`
+reports the largest backward step it saw.
 
 ## 6.3 The tick
 

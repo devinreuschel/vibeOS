@@ -5,7 +5,7 @@
 //! lock; the NMI, `#MC` and `#DB` bodies never record (DESIGN §2.2).
 
 use vibeos::arch::{CycleCounter, InterruptMask, PerCpuBase};
-use vibeos::log::trace::{self, Event, KernelTrace};
+use vibeos::log::trace::{self, ClockInfo, Event, KernelTrace};
 
 use crate::arch::current::Arch;
 
@@ -30,4 +30,10 @@ pub(crate) fn record(ev: Event, a: u64, b: u64) {
         ring.push(cpu, ev, Arch::now(), a, b);
     }
     Arch::restore(saved);
+}
+
+/// Publish the calibration and warp result into the trace's header, where
+/// the core tool reads them. The BSP, once bring-up is done.
+pub(crate) fn publish_clock(c: &ClockInfo) {
+    VIBEOS_TRACE.publish_clock(c);
 }

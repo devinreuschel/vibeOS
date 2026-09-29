@@ -87,7 +87,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: irq: enabled', 'irq_enabled', (), None, 'kernel'),
         ('vibeOS: sched: cpu1 ready', 'sched_cpu1', (), None, 'kernel'),
         ('vibeOS: smp: ap online', 'smp_ap_online_0', (), None, 'kernel'),
-        ('vibeOS: smp: done', 'smp_done', (), ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: tsc skew ', 'smp_tsc_skew', (' cycles',),
+         ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: done', 'smp_done', (), None, 'kernel'),
         ('vibeOS: console ok', 'console_ok', (), None, 'kernel'),
         ('vibeOS: pci: ', 'pci_devices', (' devices',), None, 'kernel'),
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
@@ -120,7 +122,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: smp: ap online', 'smp_ap_online_1', (), None, 'kernel'),
         ('vibeOS: sched: cpu3 ready', 'sched_cpu3', (), None, 'kernel'),
         ('vibeOS: smp: ap online', 'smp_ap_online_2', (), None, 'kernel'),
-        ('vibeOS: smp: done', 'smp_done', (), ('vibeOS: smp: ap online', 3), 'kernel'),
+        ('vibeOS: smp: tsc skew ', 'smp_tsc_skew', (' cycles',),
+         ('vibeOS: smp: ap online', 3), 'kernel'),
+        ('vibeOS: smp: done', 'smp_done', (), None, 'kernel'),
         ('vibeOS: console ok', 'console_ok', (), None, 'kernel'),
         ('vibeOS: pci: ', 'pci_devices', (' devices',), None, 'kernel'),
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
@@ -149,7 +153,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: irq: enabled', 'irq_enabled', (), None, 'kernel'),
         ('vibeOS: sched: cpu1 ready', 'sched_cpu1', (), None, 'kernel'),
         ('vibeOS: smp: ap online', 'smp_ap_online_0', (), None, 'kernel'),
-        ('vibeOS: smp: done', 'smp_done', (), ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: tsc skew ', 'smp_tsc_skew', (' cycles',),
+         ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: done', 'smp_done', (), None, 'kernel'),
         ('vibeOS: console ok', 'console_ok', (), None, 'kernel'),
         ('vibeOS: pci: ', 'pci_devices', (' devices',), None, 'kernel'),
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
@@ -178,7 +184,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: irq: enabled', 'irq_enabled', (), None, 'kernel'),
         ('vibeOS: sched: cpu1 ready', 'sched_cpu1', (), None, 'kernel'),
         ('vibeOS: smp: ap online', 'smp_ap_online_0', (), None, 'kernel'),
-        ('vibeOS: smp: done', 'smp_done', (), ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: tsc skew ', 'smp_tsc_skew', (' cycles',),
+         ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: done', 'smp_done', (), None, 'kernel'),
         ('vibeOS: console ok', 'console_ok', (), None, 'kernel'),
         ('vibeOS: pci: ', 'pci_devices', (' devices',), None, 'kernel'),
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
@@ -207,7 +215,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: irq: enabled', 'irq_enabled', (), None, 'kernel'),
         ('vibeOS: sched: cpu1 ready', 'sched_cpu1', (), None, 'kernel'),
         ('vibeOS: smp: ap online', 'smp_ap_online_0', (), None, 'kernel'),
-        ('vibeOS: smp: done', 'smp_done', (), ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: tsc skew ', 'smp_tsc_skew', (' cycles',),
+         ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: done', 'smp_done', (), None, 'kernel'),
         ('vibeOS: console ok', 'console_ok', (), None, 'kernel'),
         ('vibeOS: pci: ', 'pci_devices', (' devices',), None, 'kernel'),
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
@@ -236,7 +246,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
         ('vibeOS: irq: enabled', 'irq_enabled', (), None, 'kernel'),
         ('vibeOS: sched: cpu1 ready', 'sched_cpu1', (), None, 'kernel'),
         ('vibeOS: smp: ap online', 'smp_ap_online_0', (), None, 'kernel'),
-        ('vibeOS: smp: done', 'smp_done', (), ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: tsc skew ', 'smp_tsc_skew', (' cycles',),
+         ('vibeOS: smp: ap online', 1), 'kernel'),
+        ('vibeOS: smp: done', 'smp_done', (), None, 'kernel'),
         ('vibeOS: console ok', 'console_ok', (), None, 'kernel'),
         ('vibeOS: pci: ', 'pci_devices', (' devices',), None, 'kernel'),
         ('vibeOS: block: ram0 ', 'block_ramdisk', (' sectors',), None, 'kernel'),
@@ -508,8 +520,9 @@ class TestBuilder(unittest.TestCase):
             names = [m.name for m in harness.boot_contract_markers(smp=3, cpu="max", accel="tcg")]
         self.assertEqual(names.count("smp_done"), 1)
         i = names.index("smp_done")
-        self.assertEqual(names[i - 4 : i],
-                         ["sched_cpu1", "smp_ap_online_0", "sched_cpu2", "smp_ap_online_1"])
+        self.assertEqual(names[i - 5 : i],
+                         ["sched_cpu1", "smp_ap_online_0", "sched_cpu2", "smp_ap_online_1",
+                          "smp_tsc_skew"])
 
 
 class TestSignatures(unittest.TestCase):

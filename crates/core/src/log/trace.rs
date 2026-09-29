@@ -455,6 +455,213 @@ impl<const CPUS: usize, const N: usize> Trace<CPUS, N> {
         // Acquire: pairs with the Release store in `publish_clock`.
         self.flags.load(Ordering::Acquire)
     }
+
+    /// Publish the calibration and warp result for the core tool: the
+    /// fields, then the flags that say they are there.
+    pub fn publish_clock(&self, c: &ClockInfo) {
+        self.freq_hz.store(c.freq_hz, Ordering::Relaxed);
+        self.max_skew.store(c.max_skew, Ordering::Relaxed);
+        // Release: pairs with the Acquire load in `flags`.
+        self.flags.store(c.flags(), Ordering::Release);
+    }
+
+    /// The published clock, or `None` before [`Trace::publish_clock`].
+    pub fn clock(&self) -> Option<ClockInfo> {
+        let flags = self.flags();
+        ClockInfo::from_header(
+            self.freq_hz.load(Ordering::Relaxed),
+            self.max_skew.load(Ordering::Relaxed),
+            flags,
+        )
+    }
+}
+
+/// Milliseconds each side of the warp test reads its counter for.
+pub const WARP_MS: u64 = 2;
+/// Ceiling on one side's warp-test iterations.
+pub const WARP_MAX_ITERS: u32 = 200_000;
+
+/// The cache line the bring-up TSC warp test shares between the BSP and
+/// one AP (DESIGN §7.4). Each side reads its own counter and compares the
+/// read with the largest one either side has published; a read below it
+/// is a backward step, which makes the counter unfit to order a trace
+/// across CPUs (Linux's `check_tsc_warp` rule).
+#[repr(C, align(64))]
+pub struct WarpLine {
+    last: AtomicU64,
+    arrived: AtomicU32,
+    left: AtomicU32,
+}
+
+impl WarpLine {
+    #[allow(
+        clippy::new_without_default,
+        reason = "a const constructor for statics"
+    )]
+    pub const fn new() -> Self {
+        Self {
+            last: AtomicU64::new(0),
+            arrived: AtomicU32::new(0),
+            left: AtomicU32::new(0),
+        }
+    }
+
+    /// Ready the line for the next AP. Only once neither side runs.
+    pub fn reset(&self) {
+        self.last.store(0, Ordering::Relaxed);
+        self.left.store(0, Ordering::Relaxed);
+        // Release: pairs with the Acquire loads in `arrive`.
+        self.arrived.store(0, Ordering::Release);
+    }
+
+    /// The barrier: true once both sides have arrived, false when this
+    /// side waited `timeout` cycles of `now` alone and withdrew. Spins on
+    /// the counter, never on a timer interrupt.
+    pub fn arrive(&self, now: impl Fn() -> u64, timeout: u64) -> bool {
+        // AcqRel: the side that arrives second sees the first's `reset`.
+        if self.arrived.fetch_add(1, Ordering::AcqRel) >= 1 {
+            return true;
+        }
+        let t0 = now();
+        loop {
+            // Acquire: pairs with the other side's AcqRel `fetch_add`.
+            if self.arrived.load(Ordering::Acquire) >= 2 {
+                return true;
+            }
+            if now().saturating_sub(t0) >= timeout {
+                // Withdraw, unless the other side arrived meanwhile.
+                return self
+                    .arrived
+                    .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err();
+            }
+            crate::atomic::spin_loop();
+        }
+    }
+
+    /// One iteration: load the largest published read, take a read, and
+    /// publish it. Returns the read and how far it fell below the loaded
+    /// value (0 for none).
+    pub fn step(&self, read: impl FnOnce() -> u64) -> (u64, u64) {
+        // Acquire: pairs with the AcqRel `fetch_max` below on the other
+        // side, so the read taken next comes after the one published.
+        let prev = self.last.load(Ordering::Acquire);
+        let now = read();
+        self.last.fetch_max(now, Ordering::AcqRel);
+        (now, prev.saturating_sub(now))
+    }
+
+    /// Step for `span` cycles of `read`, at most `max_iters` times; the
+    /// largest backward step seen, in cycles, 0 for none.
+    pub fn run(&self, read: impl Fn() -> u64, span: u64, max_iters: u32) -> u64 {
+        let t0 = read();
+        let mut worst = 0u64;
+        let mut i = 0u32;
+        while i < max_iters {
+            let (now, back) = self.step(&read);
+            worst = worst.max(back);
+            if now.saturating_sub(t0) >= span {
+                break;
+            }
+            i += 1;
+        }
+        worst
+    }
+
+    /// The AP side is done with the line.
+    pub fn leave(&self) {
+        // Release: pairs with the Acquire load in `wait_left`.
+        self.left.fetch_add(1, Ordering::Release);
+    }
+
+    /// Wait up to `timeout` cycles of `now` for the other side to
+    /// [`leave`](WarpLine::leave). False on a timeout.
+    pub fn wait_left(&self, now: impl Fn() -> u64, timeout: u64) -> bool {
+        let t0 = now();
+        loop {
+            // Acquire: pairs with the Release `fetch_add` in `leave`.
+            if self.left.load(Ordering::Acquire) != 0 {
+                return true;
+            }
+            if now().saturating_sub(t0) >= timeout {
+                return false;
+            }
+            crate::atomic::spin_loop();
+        }
+    }
+}
+
+const _: () = {
+    assert!(size_of::<WarpLine>() == 64);
+    assert!(core::mem::align_of::<WarpLine>() == 64);
+};
+
+/// How a trace's timestamps may be ordered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Order {
+    /// One timeline across CPUs, merged by timestamp.
+    Global,
+    /// Each CPU on its own, in ring order; the reason says why.
+    PerCpu(&'static str),
+}
+
+/// The calibration and warp result the BSP publishes into the trace's
+/// header once bring-up is done.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClockInfo {
+    /// Counter frequency; 0 when uncalibrated.
+    pub freq_hz: u64,
+    /// CPUID reports the TSC invariant.
+    pub invariant: bool,
+    /// At least one AP ran the warp test.
+    pub warp_measured: bool,
+    /// The largest backward step the warp test saw, in cycles; 0 for none.
+    pub max_skew: u64,
+}
+
+impl ClockInfo {
+    /// DESIGN §6.4: records order across CPUs only when the counter is
+    /// invariant and the warp test ran and saw no backward step.
+    pub const fn order(&self) -> Order {
+        if !self.invariant {
+            Order::PerCpu("tsc not invariant")
+        } else if !self.warp_measured {
+            Order::PerCpu("tsc warp test did not run")
+        } else if self.max_skew != 0 {
+            Order::PerCpu("tsc warp test saw a backward step")
+        } else {
+            Order::Global
+        }
+    }
+
+    /// The header flag bits for this clock.
+    pub const fn flags(&self) -> u32 {
+        let mut f = CLOCK_PUBLISHED;
+        if self.invariant {
+            f |= TSC_INVARIANT;
+        }
+        if self.warp_measured {
+            f |= WARP_MEASURED;
+        }
+        if self.max_skew != 0 {
+            f |= WARP_BACKWARD;
+        }
+        f
+    }
+
+    /// The clock a header's fields describe, or `None` before the BSP
+    /// published one.
+    pub const fn from_header(freq_hz: u64, max_skew: u64, flags: u32) -> Option<ClockInfo> {
+        if flags & CLOCK_PUBLISHED == 0 {
+            return None;
+        }
+        Some(ClockInfo {
+            freq_hz,
+            invariant: flags & TSC_INVARIANT != 0,
+            warp_measured: flags & WARP_MEASURED != 0,
+            max_skew,
+        })
+    }
 }
 
 /// Where [`emit`] sends a record: null, or the kernel's
@@ -715,5 +922,134 @@ mod tests {
         assert!(t.is_live());
         assert_eq!(t.ring(1).unwrap().cap.load(Ordering::Relaxed), 4);
         assert!(t.ring(2).is_none());
+    }
+
+    #[test]
+    fn warp_step_scripted_backward() {
+        let w = WarpLine::new();
+        assert_eq!(w.step(|| 100), (100, 0));
+        assert_eq!(w.step(|| 90), (90, 10));
+        // The largest read stays published.
+        assert_eq!(w.step(|| 95), (95, 5));
+        assert_eq!(w.step(|| 120), (120, 0));
+        let reads = [200u64, 210, 150, 220, 230];
+        let i = std::cell::Cell::new(0usize);
+        let w = WarpLine::new();
+        let worst = w.run(
+            || {
+                let v = reads[i.get().min(reads.len() - 1)];
+                i.set(i.get() + 1);
+                v
+            },
+            25,
+            100,
+        );
+        assert_eq!(worst, 60);
+    }
+
+    #[test]
+    fn warp_step_monotonic_sees_none() {
+        let w = WarpLine::new();
+        let t = std::cell::Cell::new(0u64);
+        let clock = || {
+            t.set(t.get() + 3);
+            t.get()
+        };
+        assert_eq!(w.run(clock, 3000, WARP_MAX_ITERS), 0);
+        // It stops at the span, well before the iteration cap.
+        assert!(t.get() < 3100);
+        // And at the cap when the span is never reached.
+        let n = std::cell::Cell::new(0u32);
+        let w = WarpLine::new();
+        w.run(
+            || {
+                n.set(n.get() + 1);
+                1
+            },
+            u64::MAX,
+            50,
+        );
+        assert_eq!(n.get(), 51);
+    }
+
+    #[test]
+    fn warp_threads_synced_see_none() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64 as StdU64;
+        // One shared counter both sides read: a synchronized clock.
+        let counter = Arc::new(StdU64::new(1));
+        let line = Arc::new(WarpLine::new());
+        let side = |c: Arc<StdU64>, l: Arc<WarpLine>| {
+            std::thread::spawn(move || {
+                let read = || c.fetch_add(1, Ordering::Relaxed);
+                assert!(l.arrive(read, 1 << 40));
+                let back = l.run(read, 20_000, WARP_MAX_ITERS);
+                l.leave();
+                back
+            })
+        };
+        let a = side(counter.clone(), line.clone());
+        let b = side(counter.clone(), line.clone());
+        assert_eq!(a.join().unwrap(), 0);
+        assert_eq!(b.join().unwrap(), 0);
+        assert!(line.wait_left(|| 0, 1));
+        line.reset();
+        assert_eq!(line.arrived.load(Ordering::Relaxed), 0);
+        assert_eq!(line.left.load(Ordering::Relaxed), 0);
+        assert_eq!(line.last.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn warp_arrive_times_out_alone() {
+        let w = WarpLine::new();
+        let t = std::cell::Cell::new(0u64);
+        let clock = || {
+            t.set(t.get() + 10);
+            t.get()
+        };
+        assert!(!w.arrive(clock, 1000));
+        assert!(t.get() >= 1000);
+        // It withdrew, so the next side waits for a partner of its own.
+        assert_eq!(w.arrived.load(Ordering::Relaxed), 0);
+        assert!(!w.wait_left(clock, 100));
+        // A partner already there: the second arrival meets it at once.
+        w.arrived.store(1, Ordering::Relaxed);
+        assert!(w.arrive(|| 0, 0));
+    }
+
+    #[test]
+    fn order_rule_matrix() {
+        for invariant in [false, true] {
+            for warp_measured in [false, true] {
+                for max_skew in [0u64, 1, 5000] {
+                    let c = ClockInfo {
+                        freq_hz: 1_000_000_000,
+                        invariant,
+                        warp_measured,
+                        max_skew,
+                    };
+                    let global = invariant && warp_measured && max_skew == 0;
+                    assert_eq!(c.order() == Order::Global, global, "{c:?}");
+                    let f = c.flags();
+                    assert_eq!(f & CLOCK_PUBLISHED, CLOCK_PUBLISHED);
+                    assert_eq!(f & TSC_INVARIANT != 0, invariant);
+                    assert_eq!(f & WARP_MEASURED != 0, warp_measured);
+                    assert_eq!(f & WARP_BACKWARD != 0, max_skew != 0);
+                    assert_eq!(ClockInfo::from_header(c.freq_hz, max_skew, f), Some(c));
+                }
+            }
+        }
+        assert_eq!(ClockInfo::from_header(1, 0, 0), None);
+        let t: Trace<1, 1> = Trace::new();
+        assert_eq!(t.clock(), None);
+        let c = ClockInfo {
+            freq_hz: 3,
+            invariant: true,
+            warp_measured: false,
+            max_skew: 0,
+        };
+        t.publish_clock(&c);
+        assert_eq!(t.clock(), Some(c));
+        assert_eq!(c.order(), Order::PerCpu("tsc warp test did not run"));
     }
 }

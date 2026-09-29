@@ -376,6 +376,34 @@ pub fn tsc_per_ms() -> u64 {
     STATE.try_get().map(|s| s.tsc_per_ms).unwrap_or(0)
 }
 
+/// CPUID.8000_0007H:EDX[8]. TCG leaves this clear; KVM and real silicon set it.
+pub fn tsc_invariant() -> bool {
+    STATE.try_get().is_some_and(|s| s.invariant_tsc)
+}
+
+/// The largest backward step the AP bring-up TSC warp test saw, in
+/// cycles (DESIGN §7.4); 0 for none.
+static TSC_WARP_MAX: AtomicU64 = AtomicU64::new(0);
+
+/// One side of a warp test saw at most `backward` cycles of backward step.
+pub fn note_tsc_warp(backward: u64) {
+    // Release: pairs with the Acquire loads in `tsc_warp_ok` and
+    // `tsc_max_skew`.
+    TSC_WARP_MAX.fetch_max(backward, Ordering::Release);
+}
+
+/// No warp test has seen the TSC step backward. True on a one-CPU boot,
+/// which runs none. Final once `smp_init::init` returns.
+pub fn tsc_warp_ok() -> bool {
+    tsc_max_skew() == 0
+}
+
+/// The largest backward step any warp test saw, in cycles; 0 for none.
+pub fn tsc_max_skew() -> u64 {
+    // Acquire: pairs with the Release `fetch_max` in `note_tsc_warp`.
+    TSC_WARP_MAX.load(Ordering::Acquire)
+}
+
 /// Wall-clock seconds, RTC at boot plus uptime.
 #[cfg_attr(
     not(feature = "kernel_tests"),

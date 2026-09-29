@@ -402,7 +402,7 @@ kind = "contract"
 arch = "x86_64"
 source = "kernel"
 section = "§2.2"
-order = 280
+order = 290
 name = "gp_test_armed"
 when = ["gp_test", "!panic_test"]
 
@@ -719,7 +719,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§4.5"
-order = 220
+order = 230
 name = "smp_done"
 when = ["!panic_test"]
 
@@ -787,7 +787,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§5.3"
-order = 230
+order = 240
 name = "console_ok"
 when = ["!panic_test"]
 
@@ -867,7 +867,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§6.2"
-order = 240
+order = 250
 name = "pci_devices"
 when = ["!panic_test"]
 
@@ -940,7 +940,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.1"
-order = 250
+order = 260
 name = "block_ramdisk"
 when = ["!panic_test"]
 
@@ -1012,7 +1012,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.3"
-order = 260
+order = 270
 name = "block_ram0p1"
 when = ["!panic_test"]
 
@@ -1022,7 +1022,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.3"
-order = 270
+order = 280
 name = "block_ram0p2"
 when = ["!panic_test"]
 
@@ -1082,7 +1082,7 @@ kind = "contract"
 arch = "both"
 source = "user"
 section = "§9.8"
-order = 300
+order = 310
 name = "shell_ready"
 when = ["!gp_test", "!panic_test"]
 
@@ -1102,7 +1102,7 @@ kind = "contract"
 arch = "both"
 source = "user"
 section = "§9.8"
-order = 290
+order = 300
 name = "user_tests_ok"
 when = ["!gp_test", "!panic_test"]
 
@@ -1199,6 +1199,18 @@ kind = "failure"
 arch = "both"
 source = "kernel"
 section = "§10.7"
+
+# The AP bring-up TSC warp test's largest backward step (DESIGN §7.4),
+# printed before `smp: done` once an AP ran it.
+[[marker]]
+text = "vibeOS: smp: tsc skew <n> cycles"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+order = 220
+name = "smp_tsc_skew"
+when = ["smp>1", "!panic_test"]
 
 # §12.5 Unified page cache
 
