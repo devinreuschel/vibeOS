@@ -3,7 +3,7 @@
 //! Portable half: interpolation, seqlock, deadline math, wall-clock offset.
 //! Port I/O, HPET MMIO, and the IRQ0 handler live in the binary crate.
 
-use core::sync::atomic::{AtomicU64, Ordering, fence};
+use crate::atomic::{AtomicU64, Ordering, fence, statics};
 
 /// PIT input frequency in Hz. DESIGN §6.1.
 pub const PIT_HZ: u64 = 1_193_182;
@@ -156,9 +156,10 @@ fn interpolate(tick_ms: u64, tsc_at_tick: u64, tsc_now: u64, tsc_per_ms: u64, pe
     clamp_u64(base.saturating_add(extra))
 }
 
-/// `fetch_max` then return the larger of previous and `n`.
-pub fn monotonic_max(last: &AtomicU64, n: u64) -> u64 {
-    last.fetch_max(n, Ordering::Relaxed).max(n)
+/// `fetch_max` then return the larger of previous and `n`. `last` is a
+/// `static` (`time_init::LAST_NS`), so it takes the seam's `core` flavour.
+pub fn monotonic_max(last: &statics::AtomicU64, n: u64) -> u64 {
+    last.fetch_max(n, statics::Ordering::Relaxed).max(n)
 }
 
 fn clamp_u64(v: u128) -> u64 {
@@ -178,7 +179,19 @@ pub struct TickClock {
 }
 
 impl TickClock {
+    /// `const` outside loom, whose atomics have no `const fn new`
+    /// (C-ATOMICS); the kernel's `static` clock needs it.
+    #[cfg(not(loom))]
     pub const fn new() -> Self {
+        Self {
+            seq: AtomicU64::new(0),
+            tick: AtomicU64::new(0),
+            tsc: AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(loom)]
+    pub fn new() -> Self {
         Self {
             seq: AtomicU64::new(0),
             tick: AtomicU64::new(0),
