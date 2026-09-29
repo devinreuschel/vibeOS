@@ -374,22 +374,39 @@ fn schedule_inner(from_irq: bool) {
         }
     }
 
-    let next = per_cpu_init::with_current(|cpu| {
+    let mut next = per_cpu_init::with_current(|cpu| {
         enqueue_runnable(&mut cpu.runq, cur, idle, cur_state);
         cpu.runq.remove(idle);
         take_next(&mut cpu.runq, idle)
     });
-    #[cfg(feature = "kernel_tests")]
-    let next = requeue_next_cpu(next, cur, idle, me);
 
-    let (old_ptr, new_ptr, old_id, new_id) = with_sched(|s| {
-        if let Some(t) = s.get_mut(next) {
-            t.state = ThreadState::Running;
-            t.cpu = me;
+    // A run-queue entry says only that some wake put the thread here. The
+    // wake's push reaches this CPU after its waker has dropped SCHED, so it
+    // can land after the thread has already resumed through its own
+    // `schedule`, which found it `Ready`, and has since blocked again or
+    // exited; the entry is then stale. SCHED decides: run a thread only
+    // while it is `Ready` and placed on this CPU, and drop any other entry.
+    let (old_ptr, new_ptr, old_id, new_id) = loop {
+        #[cfg(feature = "kernel_tests")]
+        let cand = requeue_next_cpu(next, cur, idle, me);
+        #[cfg(not(feature = "kernel_tests"))]
+        let cand = next;
+        let picked = with_sched(|s| {
+            if cand != idle && !s.get(cand).is_some_and(|t| runnable_on(t, me)) {
+                return None;
+            }
+            if let Some(t) = s.get_mut(cand) {
+                t.state = ThreadState::Running;
+                t.cpu = me;
+            }
+            relink(s);
+            Some((s.ptr(cur), s.ptr(cand), cur, cand))
+        });
+        match picked {
+            Some(p) => break p,
+            None => next = per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle)),
         }
-        relink(s);
-        (s.ptr(cur), s.ptr(next), cur, next)
-    });
+    };
 
     if old_id == new_id || old_ptr.is_null() || new_ptr.is_null() {
         return;
@@ -397,6 +414,14 @@ fn schedule_inner(from_irq: bool) {
     assert!(!new_ptr.is_null(), "schedule: next vanished");
     switch_now(old_ptr, new_ptr);
     finish_switch();
+}
+
+/// Whether `t` may run on CPU `cpu` now: `Ready`, and placed there. A
+/// thread is placed on one CPU at a time (`Sched::place_home`, `spawn_inner`,
+/// the requeue hook), and `schedule_inner` sets it `Running` under SCHED
+/// before the switch, so no other CPU's stale entry can run it meanwhile.
+fn runnable_on(t: &Tcb, cpu: u32) -> bool {
+    t.state == ThreadState::Ready && t.cpu == cpu
 }
 
 /// C-REQUEUE-HOOK: while `testing::set_requeue_next_cpu` is on, a user
@@ -415,7 +440,9 @@ fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> T
     let Some(target) = testing::next_online_cpu(me) else {
         return next;
     };
-    let movable = |t: &Tcb| t.pid != 0 || t.affinity == CpuAffinity::Any;
+    // A stale entry's thread is not runnable here and does not move:
+    // `schedule_inner` drops the entry.
+    let movable = |t: &Tcb| runnable_on(t, me) && (t.pid != 0 || t.affinity == CpuAffinity::Any);
     if next == cur {
         if with_sched(|s| s.get(cur).is_some_and(movable)) {
             per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
@@ -1111,6 +1138,8 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     };
     let mut i = 0;
     while i < n {
+        #[cfg(feature = "kernel_tests")]
+        testing::place_stall(places[i].1);
         crate::ipi_init::place_ready(places[i].0, places[i].1);
         i += 1;
     }
@@ -1266,141 +1295,4 @@ pub fn snapshot(out: &mut [ThreadInfo]) -> usize {
 
 /// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.
 #[cfg(feature = "kernel_tests")]
-pub mod testing {
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-
-    use vibeos::thread::{MAX_THREADS, ThreadId};
-
-    use crate::per_cpu_init;
-    use crate::time_init;
-
-    /// CPU whose exits [`exit_stall`] holds, or `u32::MAX`.
-    static STALL_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
-    /// Exits left to hold.
-    static STALL_LEFT: AtomicU32 = AtomicU32::new(0);
-    /// How long each held exit spins, in ms of TSC time.
-    static STALL_MS: AtomicU64 = AtomicU64::new(0);
-
-    /// Hold the next `exits` thread exits on `cpu` for `ms` of TSC time
-    /// each, between the store that makes the exiting thread's stack
-    /// reclaimable and the switch off it. The hold spins with IF=0 and
-    /// services no IPI.
-    pub fn arm_exit_stall(cpu: u32, exits: u32, ms: u64) {
-        STALL_CPU.store(cpu, Ordering::Relaxed);
-        STALL_MS.store(ms, Ordering::Relaxed);
-        STALL_LEFT.store(exits, Ordering::Release);
-    }
-
-    pub fn disarm_exit_stall() {
-        STALL_LEFT.store(0, Ordering::Release);
-        STALL_CPU.store(u32::MAX, Ordering::Relaxed);
-    }
-
-    /// Called by `thread_exit` just before it switches away.
-    pub(super) fn exit_stall() {
-        if STALL_CPU.load(Ordering::Relaxed) != super::current_cpu() {
-            return;
-        }
-        if STALL_LEFT
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-            .is_err()
-        {
-            return;
-        }
-        let cycles = STALL_MS
-            .load(Ordering::Relaxed)
-            .saturating_mul(time_init::tsc_per_ms());
-        let end = time_init::read_tsc().saturating_add(cycles);
-        while time_init::read_tsc() < end {
-            core::hint::spin_loop();
-        }
-    }
-
-    /// One-shot: the next spawn from a process context fails as if its
-    /// kernel stack could not be allocated.
-    pub(super) static FAIL_FORK_STACK: AtomicBool = AtomicBool::new(false);
-
-    /// Move this CPU's cached stacks onto its dead list and wake its worker,
-    /// which unmaps and frees them.
-    pub fn drain_local_stack_cache() {
-        let kick = crate::per_cpu_init::with_current(|cpu| {
-            let mut any = false;
-            while let Some(stack) = cpu.stack_cache.take() {
-                super::CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
-                super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
-                crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
-                any = true;
-            }
-            any
-        });
-        if kick {
-            crate::work_init::kick_dead_stacks();
-        }
-    }
-
-    /// Put `stack`, which nothing runs on, on this CPU's dead list and wake
-    /// its worker, as the switch tail does with a stack the cache refuses.
-    pub fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
-        super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
-        crate::per_cpu_init::with_current(|cpu| {
-            crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
-        });
-        crate::work_init::kick_dead_stacks();
-    }
-
-    /// Make the next `spawn*` made on behalf of a process (a `fork`) return
-    /// `SpawnError::NoMemory` before it allocates anything. One-shot.
-    pub fn fail_next_fork_stack() {
-        FAIL_FORK_STACK.store(true, Ordering::Release);
-    }
-
-    static REQUEUE: AtomicBool = AtomicBool::new(false);
-    static REQUEUES: AtomicU64 = AtomicU64::new(0);
-    /// Set when a thread was moved, cleared by the dequeue that runs it.
-    static ARRIVED: [AtomicBool; MAX_THREADS] = [const { AtomicBool::new(false) }; MAX_THREADS];
-
-    /// C-REQUEUE-HOOK: move each user or `CpuAffinity::Any` thread to the
-    /// next online CPU when its CPU dequeues it (`requeue_next_cpu`).
-    /// Turning it on forgets the arrivals an earlier use left: a thread
-    /// moved just before the hook went off keeps its flag, and a later
-    /// thread in that slot would run where it is dequeued instead of moving.
-    pub fn set_requeue_next_cpu(on: bool) {
-        if on {
-            for a in ARRIVED.iter() {
-                a.store(false, Ordering::Relaxed);
-            }
-        }
-        REQUEUE.store(on, Ordering::Release);
-    }
-
-    /// Moves the hook has made since boot.
-    pub fn requeues() -> u64 {
-        REQUEUES.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn requeue_on() -> bool {
-        REQUEUE.load(Ordering::Acquire)
-    }
-
-    /// The first online CPU after `me`, wrapping; `None` with one CPU.
-    pub(super) fn next_online_cpu(me: u32) -> Option<u32> {
-        let mask = per_cpu_init::online_mask();
-        (1..64u32)
-            .map(|d| me.wrapping_add(d) % 64)
-            .find(|&c| mask & (1u64 << c) != 0)
-    }
-
-    pub(super) fn moved(id: ThreadId) {
-        if let Some(a) = ARRIVED.get(id.raw() as usize) {
-            a.store(true, Ordering::Release);
-        }
-        REQUEUES.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Whether `id` arrived by a move and has not run since; clears it.
-    pub(super) fn take_arrived(id: ThreadId) -> bool {
-        ARRIVED
-            .get(id.raw() as usize)
-            .is_some_and(|a| a.swap(false, Ordering::AcqRel))
-    }
-}
+pub mod testing;
