@@ -79,6 +79,32 @@ impl Level {
     }
 }
 
+/// The runtime level for Linux's `loglevel=N` (ROADMAP §10.2, BOOT.md
+/// §3.2). Linux prints a message when its level is below N, and its
+/// levels are 0 to 3 for errors, 4 for warnings, 5 and 6 for notices and
+/// information, and 7 for debugging. So 0 to 4 give [`Level::Error`], 5 and
+/// 6 [`Level::Warn`], 7 [`Level::Info`], and 8 and up [`Level::Debug`].
+/// `None` for anything but a decimal that fits a `u32`. Not
+/// [`Level::from_name`], whose numbers run the other way.
+pub fn level_from_loglevel(v: &[u8]) -> Option<Level> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut n: u32 = 0;
+    for &b in v {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        n = n.checked_mul(10)?.checked_add(u32::from(b - b'0'))?;
+    }
+    Some(match n {
+        0..=4 => Level::Error,
+        5 | 6 => Level::Warn,
+        7 => Level::Info,
+        _ => Level::Debug,
+    })
+}
+
 /// True when `level` should be stored / shown given compile and runtime caps.
 pub const fn allowed(level: Level, runtime_max: Level, compile_max: Level) -> bool {
     (level as u8) <= (compile_max as u8) && (level as u8) <= (runtime_max as u8)
@@ -368,6 +394,40 @@ impl Default for RateLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loglevel_linux_numbering() {
+        for (v, want) in [
+            ("0", Level::Error),
+            ("3", Level::Error),
+            ("4", Level::Error),
+            ("5", Level::Warn),
+            ("6", Level::Warn),
+            ("7", Level::Info),
+            ("8", Level::Debug),
+            ("15", Level::Debug),
+            ("007", Level::Info),
+            ("4294967295", Level::Debug),
+        ] {
+            assert_eq!(level_from_loglevel(v.as_bytes()), Some(want), "{v}");
+        }
+    }
+
+    #[test]
+    fn loglevel_rejects_other_values() {
+        for v in [
+            "",
+            "x",
+            "-1",
+            "7x",
+            " 7",
+            "info",
+            "4294967296",
+            "99999999999999999999",
+        ] {
+            assert_eq!(level_from_loglevel(v.as_bytes()), None, "{v:?}");
+        }
+    }
 
     fn rec(ts: u64, lvl: Level, msg: &str) -> Record<8> {
         Record::from_msg(ts, 0, lvl, msg.as_bytes())

@@ -61,12 +61,19 @@ pub struct Opt {
 }
 
 /// Every option the kernel recognizes; later phases append theirs.
-pub const OPTIONS: &[Opt] = &[Opt {
-    name: "vibeos.strace",
-    origin: Origin::Vibeos,
-    // ROADMAP §19.1 settles it.
-    class: Class::Unstable,
-}];
+pub const OPTIONS: &[Opt] = &[
+    Opt {
+        name: "vibeos.strace",
+        origin: Origin::Vibeos,
+        // ROADMAP §19.1 settles it.
+        class: Class::Unstable,
+    },
+    Opt {
+        name: "loglevel",
+        origin: Origin::Linux,
+        class: Class::Unstable,
+    },
+];
 
 /// Sysctl paths vibeOS implements, dotted. None yet: every
 /// `sysctl.<path>=` word is logged and ignored.

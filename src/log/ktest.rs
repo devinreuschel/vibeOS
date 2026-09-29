@@ -8,6 +8,28 @@ use vibeos::log::Level;
 use crate::ktest::{Outcome, Test, spin_until_ns, test};
 use crate::{per_cpu_init, thread_init, time_init};
 
+/// The runtime level is what `loglevel=` set at boot (BOOT.md §3.2), or
+/// the default without one. It runs first in its group, before the tests
+/// that set the level and restore it.
+pub(crate) fn test_log_boot_level() -> Outcome {
+    use vibeos::boot::cmdline::Escaped;
+    use vibeos::log::{DEFAULT_RUNTIME_MAX, level_from_loglevel};
+    let arg = crate::boot::cmdline().get("loglevel");
+    let want = arg
+        .and_then(level_from_loglevel)
+        .unwrap_or(DEFAULT_RUNTIME_MAX);
+    let got = crate::log_init::max_level();
+    if got != want {
+        return crate::fail_fmt!(
+            "runtime level {} with loglevel={}, want {}",
+            got.as_str(),
+            Escaped(arg.unwrap_or(b"<absent>")),
+            want.as_str()
+        );
+    }
+    Outcome::Ok
+}
+
 pub(crate) fn test_log_boot_captured() -> Outcome {
     if !crate::log_init::contains_msg("serial online") {
         return Outcome::Fail("serial online missing from ring");
@@ -244,6 +266,7 @@ pub(crate) fn test_serial_frame() -> Outcome {
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
+    test("log_boot_level", test_log_boot_level),
     test("log_boot_captured", test_log_boot_captured),
     test("log_runtime_filter", test_log_runtime_filter),
     test("log_emit_roundtrip", test_log_emit_roundtrip),
