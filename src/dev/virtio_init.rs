@@ -190,6 +190,8 @@ fn rng_top() {
     TOP_HITS.fetch_add(1, Ordering::SeqCst);
     let isr = ISR_VA.load(Ordering::Acquire);
     if isr != 0 {
+        // Reading the ISR status acknowledges the interrupt; the value
+        // itself is not needed (virtio 1.x §4.1.4.5).
         let _ = r8(isr, 0);
     }
     if !work_init::raise_softirq(on_soft, 1) {
@@ -487,7 +489,12 @@ impl Driver for RngDriver {
 }
 
 pub fn init() {
-    let _ = dev_init::register_driver(&RNG_DRV);
+    if !dev_init::register_driver(&RNG_DRV) {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: virtio: rng driver not registered: registry full"
+        );
+    }
 }
 
 pub fn rng_bound() -> bool {

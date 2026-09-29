@@ -54,12 +54,15 @@ pub const MBR_EXTENDED_LBA: u8 = 0x0F;
 pub const MBR_LINUX_EXTENDED: u8 = 0x85;
 pub const MBR_PROTECTIVE: u8 = 0xEE;
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PartError {
     Truncated,
     BadCrc,
     Invalid,
     Empty,
+    /// The parser's scratch could not be allocated (DESIGN §4.4).
+    NoMemory,
 }
 
 impl PartError {
@@ -69,6 +72,7 @@ impl PartError {
             PartError::BadCrc => "bad crc",
             PartError::Invalid => "invalid",
             PartError::Empty => "empty",
+            PartError::NoMemory => "no memory",
         }
     }
 }
@@ -1174,6 +1178,7 @@ mod tests {
     fn error_strings() {
         assert_eq!(PartError::BadCrc.as_str(), "bad crc");
         assert_eq!(PartError::Truncated.as_str(), "truncated");
+        assert_eq!(PartError::NoMemory.as_str(), "no memory");
     }
 
     #[test]

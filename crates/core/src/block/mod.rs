@@ -43,6 +43,7 @@ pub const MAX_QUEUE: usize = 32;
 pub const MAX_SEGS: usize = 8;
 pub use crate::limits::MAX_BLOCKDEVS;
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockError {
     Inval,
@@ -739,9 +740,13 @@ impl Ramdisk {
         self.check_range(lba, nsectors)
     }
 
-    /// Run one queued request against `data`. Seg pointers must be valid
-    /// for `Read`/`Write`.
-    pub fn apply(self, data: &mut [u8], req: &Request) -> Result<(), BlockError> {
+    /// Run one queued request against `data`.
+    ///
+    /// # Safety
+    /// Invariant I235: for `Read` and `Write`, each of `req`'s segments is
+    /// valid for its length (for writes, `Read`) and aliases neither `data`
+    /// nor anything else in use until this returns.
+    pub unsafe fn apply(self, data: &mut [u8], req: &Request) -> Result<(), BlockError> {
         match req.bio.op {
             Op::Flush => self.flush(),
             Op::Discard => self.discard(req.bio.lba, req.bio.nsect as u64),
@@ -758,10 +763,14 @@ impl Ramdisk {
                         return Err(BlockError::Inval);
                     }
                     if req.bio.op == Op::Read {
+                        // SAFETY: invariant I235; established by
+                        // `block::Ramdisk::apply`'s `# Safety` contract.
                         let buf =
                             unsafe { core::slice::from_raw_parts_mut(s.ptr as *mut u8, s.len) };
                         self.read(data, lba, buf)?;
                     } else {
+                        // SAFETY: invariant I235; established by
+                        // `block::Ramdisk::apply`'s `# Safety` contract.
                         let buf = unsafe { core::slice::from_raw_parts(s.ptr as *const u8, s.len) };
                         self.write(data, lba, buf)?;
                     }
@@ -788,7 +797,15 @@ pub fn write_marker(f: &mut impl core::fmt::Write, name: &str, sectors: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::sync::Mutex;
+
+    #[test]
+    fn block_error_no_memory_not_retryable() {
+        assert_eq!(BlockError::NoMem.as_str(), "no memory");
+        assert!(!BlockError::NoMem.retryable());
+        assert!(BlockError::Io.retryable());
+    }
 
     fn wr(lba: u64, n: u32, ptr: usize) -> Request {
         Request::new(Op::Write, lba, n).with_seg(ptr, n as usize * 512)

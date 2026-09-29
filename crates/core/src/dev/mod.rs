@@ -538,7 +538,9 @@ impl Registry {
             while dv < self.n_dev {
                 if self.devices[dv].bound.is_none() && self.devices[dv].matches_driver(drv) {
                     enable(&self.devices[dv]);
-                    if let Ok(()) = drv.probe(&mut self.devices[dv]) {
+                    // A failed probe leaves the device unbound for a later
+                    // driver; the kernel's `dev_init::bind_all` also logs it.
+                    if drv.probe(&mut self.devices[dv]).is_ok() {
                         self.devices[dv].bound = Some(drv.name())
                     }
                 }

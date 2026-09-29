@@ -26,10 +26,10 @@ use vibeos::virtio::{
     STATUS_FEATURES_OK, SplitLayout, SplitQueue, VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_blk::{
-    CFG_BLK_SIZE, CFG_CAPACITY, CFG_DISCARD_ALIGN, CFG_MAX_DISCARD_SECTORS, CFG_MAX_DISCARD_SEG,
-    CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD, F_FLUSH, F_MQ, F_TOPOLOGY, NAME, SECTOR, T_DISCARD,
-    T_FLUSH, T_IN, T_OUT, logical_capacity, map_status, nq_from_config, pack_discard, pack_header,
-    pick_blk_size, pick_features, sector_for_lba,
+    CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
+    F_FLUSH, F_MQ, F_TOPOLOGY, NAME, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, logical_capacity,
+    map_status, nq_from_config, pack_discard, pack_header, pick_blk_size, pick_features,
+    sector_for_lba,
 };
 
 use crate::block_init::{self, IoWaiter};
@@ -730,6 +730,8 @@ fn blk_top() {
     TOP_HITS.fetch_add(1, Ordering::SeqCst);
     let isr = ISR_VA.load(Ordering::Acquire);
     if isr != 0 {
+        // Reading the ISR status acknowledges the interrupt; the value
+        // itself is not needed (virtio 1.x §4.1.4.5).
         let _ = r8(isr, 0);
     }
 }
@@ -808,7 +810,6 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     }
     if feat & F_DISCARD != 0 {
         MAX_DISCARD.store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
-        let _ = (r32(cfg, CFG_MAX_DISCARD_SEG), r32(cfg, CFG_DISCARD_ALIGN));
     }
     let cfg_nq = r16(cfg, CFG_NUM_QUEUES);
     let common_nq = r16(common, COMMON_OFF_NUM_QUEUES);
@@ -1179,7 +1180,12 @@ impl Driver for BlkDriver {
 }
 
 pub fn init() {
-    let _ = dev_init::register_driver(&BLK_DRV);
+    if !dev_init::register_driver(&BLK_DRV) {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: virtio: blk driver not registered: registry full"
+        );
+    }
 }
 
 pub fn live() -> bool {

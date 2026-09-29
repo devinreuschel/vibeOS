@@ -9,8 +9,6 @@
 //! `Flush` (DESIGN §10.6). Phase 12 makes this cache each block device's
 //! mapping in one page cache of mappings (DESIGN §10.6).
 
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -437,8 +435,15 @@ fn writeback_main() {
         if !LIVE.load(Ordering::Acquire) {
             continue;
         }
-        if over_dirty() {
-            let _ = writeback_dev(None);
+        if over_dirty()
+            && let Err(e) = writeback_dev(None)
+        {
+            crate::klog_ratelimited!(
+                1000,
+                vibeos::log::Level::Warn,
+                "vibeOS: cache: background writeback failed: {}",
+                e.as_str()
+            );
         }
     }
 }
@@ -488,32 +493,15 @@ pub mod testing {
     /// The hold point lets go by itself after this long.
     const SELF_RELEASE_NS: u64 = 5_000_000_000;
 
-    static DEV: AtomicU32 = AtomicU32::new(0);
-    static OFF: AtomicU64 = AtomicU64::new(UNARMED);
-    static HELD: AtomicBool = AtomicBool::new(false);
-    static RELEASE: AtomicBool = AtomicBool::new(false);
-
-    /// Hold `blk-wb`'s next write of the page holding `byte_off` of `dev`.
-    pub fn hold_wb(dev: u32, byte_off: u64) {
-        RELEASE.store(false, Ordering::Release);
-        HELD.store(false, Ordering::Release);
-        DEV.store(dev, Ordering::Release);
-        OFF.store(CacheKey::page(dev, byte_off).offset, Ordering::Release);
-    }
-
-    /// `blk-wb` is stopped at the hold point.
-    pub fn held() -> bool {
-        HELD.load(Ordering::Acquire)
-    }
-
-    /// Let a held write go, and disarm a hold not yet reached.
-    pub fn release() {
-        OFF.store(UNARMED, Ordering::Release);
-        RELEASE.store(true, Ordering::Release);
-    }
+    // The hold's state; `block::ktest`'s setters arm and read it.
+    pub(in crate::block) const UNARMED_OFF: u64 = UNARMED;
+    pub(in crate::block) static DEV: AtomicU32 = AtomicU32::new(0);
+    pub(in crate::block) static OFF: AtomicU64 = AtomicU64::new(UNARMED);
+    pub(in crate::block) static HELD: AtomicBool = AtomicBool::new(false);
+    pub(in crate::block) static RELEASE: AtomicBool = AtomicBool::new(false);
 
     /// `writeback_dev`'s hold point, reached with no lock held. It sleeps
-    /// until [`release`], or [`SELF_RELEASE_NS`] at most.
+    /// until `block::ktest::release`, or [`SELF_RELEASE_NS`] at most.
     pub(super) fn hold_point(key: CacheKey) {
         if DEV.load(Ordering::Acquire) != key.dev
             || OFF

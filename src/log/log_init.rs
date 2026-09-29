@@ -160,6 +160,7 @@ pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
         w.pos
     };
     let msg = &buf[..n];
+    // `false` means the runtime filter kept it out of the ring, not a failure.
     let _ = push_record(level, msg);
     let mut sent = crate::serial::Serial::try_write_bytes(msg);
     if !msg.ends_with(b"\n") {
@@ -226,6 +227,7 @@ pub fn capture_serial(bytes: &[u8]) {
                     let rec =
                         Record::from_msg(timestamp(), cpu_id(), Level::Info, &st.buf[..st.len]);
                     st.len = 0;
+                    // `false` means filtered out, not a failure.
                     let _ = LOG.with(|l| l.emit(rec));
                 }
                 continue;
