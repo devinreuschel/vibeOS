@@ -62,7 +62,7 @@ PENDING: tuple[str, ...] = (
     "src/log/log_init.rs",
     "src/log/serial/raw.rs",
     "src/proc/addr_space_init.rs",
-    "src/sched/thread_init.rs",
+    "src/sched/thread_init/mod.rs",
 )
 
 # (path, regex of a false wording) for statements corrected against the code
