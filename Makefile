@@ -148,7 +148,7 @@ $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_C
 
 KERNEL_ELF := build/kernels/vibeos-default.elf
 
-.PHONY: help check all kernel iso isos run run-panic clean distclean setup layout prebuilt \
+.PHONY: help check all kernel iso isos repro run run-panic clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
@@ -160,6 +160,7 @@ help:
 	  '  all / iso             kernel + build/vibeos.iso (hybrid BIOS/UEFI)' \
 	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
 	  '  isos                  every ISO variant, as build/vibeos*.iso' \
+	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
 	  '  run                   boot production ISO in QEMU' \
 	  '  run-panic             boot panic-test ISO' \
 	  '  layout                objdump sections + __kernel_ symbols' \
@@ -259,6 +260,11 @@ user/tests: user/tests.bin scripts/mkuserelf.py
 iso: $(ISO)
 
 isos: $(ISOS)
+
+# Two clean builds of one commit, compared byte for byte (ROADMAP §10.2,
+# DESIGN §3.6). REPRO_ARGS: see scripts/repro_build.py.
+repro:
+	python3 scripts/repro_build.py $(REPRO_ARGS)
 
 run: $(ISO)
 	$(QEMU_BASE) -serial stdio

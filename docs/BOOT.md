@@ -283,6 +283,13 @@ never by disk signature. The xorriso version lands in the volume descriptor, so 
 beside each ISO as `<iso>.xorriso-version`, which a release publishes. An incremental build keeps the
 epoch of the commit it last rebuilt a file at; compare clean builds.
 
+`make repro` does (`scripts/repro_build.py`, run by a scheduled job): it clones the commit twice, at
+checkout paths of different lengths, each with its own `CARGO_HOME` and `RUSTUP_HOME`, a copy of
+`limine/` and no `CARGO_TARGET_DIR`, runs `./setup.sh` and `make isos` in each, and fails unless every
+`build/kernels/*.elf`, `build/*.iso` and `build/initrd.fat` matches byte for byte and holds none of the
+checkouts, `$HOME`, or either `CARGO_HOME` or `RUSTUP_HOME`. `REPRO_ARGS=--share-rustup` reuses the
+caller's toolchain for a local run; `REPRO_ARGS=--scan-only` only scans this checkout's `build/`.
+
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP
 rather than discovering AP bugs only in CI. Full flag set in [section 8.4](TESTING.md#84-qemu-flags).
 
