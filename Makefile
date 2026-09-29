@@ -150,7 +150,7 @@ KERNEL_ELF := build/kernels/vibeos-default.elf
 
 .PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
-        test-e2e-pit test-e2e-highmem test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
+        test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
 
 help:
@@ -175,6 +175,7 @@ help:
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
 	  '  test-e2e-highmem      boot contract with 9 GiB, past the physmap cap' \
+	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
@@ -397,6 +398,11 @@ test-e2e-pit: $(ISO)
 test-e2e-highmem: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_MEM=9G python3 tests/harness/run_e2e.py
 
+# Kernel command line through fw_cfg (BOOT.md §3.2): vibeos.strace=1 turns
+# the syscall trace on; the echo shows limine.conf's words, then the harness's.
+test-e2e-strace: $(ISO)
+	VIBEOS_TIER=test-e2e-strace VIBEOS_ISO=$(ISO) VIBEOS_CMDLINE=vibeos.strace=1 python3 -c 'from tests.harness.run_e2e import strace_main; raise SystemExit(strace_main())'
+
 test-kernel: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py
 
@@ -413,7 +419,7 @@ test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) \
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)

@@ -87,22 +87,40 @@ physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive
 | HHDM | Higher-half direct map offset. `virt = phys + offset` for any physical access before our own tables exist. |
 | Executable address | Physical and virtual base of the loaded kernel, so we can map ourselves and exclude ourselves from the allocator. |
 | RSDP | Physical pointer to the ACPI RSDP. Gates all of ACPI, APIC, HPET, SMP. |
+| Executable command line | The `limine.conf` entry's `cmdline:`, read as raw bytes up to the NUL (at most 2048), never through the crate's `cmdline()`, which unwraps non-UTF-8. Optional: absent means empty. |
 | SMP (optional) | Limine can bring up APs for us. We do it ourselves; see [section 7](SMP.md#7-smp) for why. |
 
 Firmware reclaimable regions stay out of the free lists. Reclaiming them is a few megabytes for a
 nonzero chance of stomping something ACPI still points at.
 
-Kernel command line. Planned (ROADMAP §10.2): the kernel reads a Linux-style command line, and its
-option names follow the Linux-interfaces rule. An option Linux defines keeps Linux's name and meaning
+Kernel command line (ROADMAP §10.2). `boot::capture` keeps it in `BootInfo`: the `limine.conf`
+entry's `cmdline:` (`vibeos.strace=0` in the shipped entry), then, on x86_64 when CPUID.1:ECX[31]
+reports a hypervisor and QEMU's fw_cfg lists `opt/vibeos/cmdline`, one space and that file's text,
+trailing NULs and whitespace stripped (`boot::fw_cfg_init`, invariant I244), so the harness sets
+options on the unmodified ISO (`VIBEOS_CMDLINE`, [§8.4](TESTING.md#84-qemu-flags)). At most 2048 bytes
+are kept, Linux's x86 `COMMAND_LINE_SIZE`; the rest is dropped with one log line. The kernel prints
+it once as `vibeOS: boot: cmdline: <text>`, a byte outside 0x20 to 0x7E as `?`. The portable
+`vibeos::boot::cmdline` parses it as Linux's `kernel-parameters.rst` describes: words split at ASCII
+whitespace outside double quotes, which are removed from the word or value they enclose; `-` and `_`
+are equal in a name; the last occurrence wins; `--` ends the kernel's words. Its option names follow
+the Linux-interfaces rule. An option Linux defines keeps Linux's name and meaning
 (`root=`, `init=`, `ro`, `rw`, `console=`, `loglevel=`, `panic=`, `mitigations=`, `crashkernel=`). An
 option only vibeOS defines is `vibeos.<name>=`, the `module.parameter` form Linux's parser gives a
 module's options, so no later Linux option can take its name. `sysctl.<path>=` sets a sysctl vibeOS
 implements, and an unknown path is logged and ignored, as on Linux. A word the kernel does not
 recognize reaches init as Linux passes it: an undotted `name=value` into init's environment, any other
-undotted word, and every word after `--`, as an argument; an unrecognized dotted word is dropped.
-ROADMAP §10.2's parser lists each option here as it lands, with its ROADMAP §39.1 class: `internal`
-for an option only the harness or a test sets, such as `vibeos.ktest=`, and `stable` or `unstable`
-for the rest.
+undotted word, and every word after `--`, as an argument; an unrecognized dotted word is dropped with
+a log line. Init gets at most 8 argv entries (`argv[0]` included) and 8 environment strings, the
+initial stack's capacity until ROADMAP §10.6 raises it; a word past either is dropped with one log
+line. No sysctl exists yet, so every `sysctl.<path>=` word (`.` or `/` separators) is logged and
+ignored. The parser's `OPTIONS` lists each option as it lands, and this table lists it with its
+ROADMAP §39.1 class: `internal` for an option only the harness or a test sets, such as
+`vibeos.ktest=`, and `stable` or `unstable` for the rest. The host test `cmdline_options_documented`
+fails when an `OPTIONS` row has no row here with its class.
+
+| Option | Defined by | Class | Meaning | Box |
+|--------|------------|-------|---------|-----|
+| `vibeos.strace` | vibeOS | unstable | `vibeos.strace=1` (or bare, `y`, `Y`, `on`) prints one `user: syscall` line per syscall that returns ([SYSCALL.md §6](SYSCALL.md#6-tracing-and-counters)); anything else leaves it off | ROADMAP §10.7 |
 
 Planned (ROADMAP §18.7, §22.2): under Secure Boot the kernel command line is the `cmdline:` of the
 Limine configuration enrolled into the signed Limine binary, which sets `editor_enabled: no`, so
