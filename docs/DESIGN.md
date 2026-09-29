@@ -173,7 +173,7 @@ children, need no row.
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
 | log | `log/mod.rs` | `log/{mod,log_init,panic,diag,ksyms}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
-| shell | `shell/mod.rs` | `shell/{mod,shell_init}.rs`, `shell/cmds/{mod,blk,dev,sys}.rs` |
+| shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
 | dev | `dev/{mod,pci,dma,virtio,entropy}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/{mod,virtio_blk_init}.rs` |
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |

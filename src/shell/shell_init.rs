@@ -69,7 +69,7 @@ fn register_builtins() {
     for c in cmds::dev::COMMANDS
         .iter()
         .chain(cmds::blk::COMMANDS)
-        .chain(crate::file_init::COMMANDS)
+        .chain(cmds::fs::COMMANDS)
         .chain(HELP)
         .chain(cmds::sys::COMMANDS)
     {
@@ -104,7 +104,7 @@ fn shell_main() {
         match ed.feed(k) {
             Feed::Pending => paint(&ed, &mut painted),
             Feed::Complete => {
-                crate::file_init::complete_line(&mut ed);
+                super::complete::complete_line(&mut ed, command_at);
                 paint(&ed, &mut painted);
             }
             Feed::Cancel => {
@@ -124,6 +124,15 @@ fn shell_main() {
             }
         }
     }
+}
+
+/// The name of the `i`th registered command, for tab completion.
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
+fn command_at(i: usize) -> Option<&'static str> {
+    with_reg(|r| r.get(i)).map(|c| c.name)
 }
 
 #[cfg_attr(

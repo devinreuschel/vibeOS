@@ -5,4 +5,5 @@
 
 pub(crate) mod blk;
 pub(crate) mod dev;
+pub(crate) mod fs;
 pub(crate) mod sys;

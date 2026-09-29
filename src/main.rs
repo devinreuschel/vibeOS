@@ -60,6 +60,8 @@ use log::{diag, ksyms, log_init, panic, serial};
 use mm::{heap_init, kva_init, paging_init, pmm_init};
 use proc::{addr_space_init, proc_init, syscall_init, user_init};
 use sched::{sched_init, thread_init, work_init};
+// The vibefs_crash build never starts the shell (`normal_boot_tail`).
+#[cfg(not(feature = "vibefs_crash"))]
 use shell::shell_init;
 use smp::{per_cpu_init, smp_init};
 use sync::sync_init;
