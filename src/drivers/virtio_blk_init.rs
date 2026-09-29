@@ -2,7 +2,8 @@
 //!
 //! Modern transport from Phase 6. One VQ per CPU when `F_MQ` is offered;
 //! otherwise a single request queue. Completions run on the threaded IRQ
-//! (DESIGN §2.2 / §5.4). Kick barriers are the Phase 6 `dma_wmb` story.
+//! (DESIGN §2.2 / §5.4). `kick` runs `dma_wmb` before the doorbell, and
+//! `SplitQueue::should_kick` runs `dma_mb` before its kick-decision load.
 //! Status bytes live in DMA, not on the submitter stack.
 
 use core::fmt::Write;

@@ -236,6 +236,8 @@ impl Default for SgList {
 /// port's [`Barriers::dma_wmb`].
 #[inline]
 pub fn dma_wmb<A: Barriers>() {
+    #[cfg(test)]
+    trace::record(trace::Ev::Wmb);
     A::dma_wmb();
 }
 
@@ -243,7 +245,21 @@ pub fn dma_wmb<A: Barriers>() {
 /// [`Barriers::dma_rmb`].
 #[inline]
 pub fn dma_rmb<A: Barriers>() {
+    #[cfg(test)]
+    trace::record(trace::Ev::Rmb);
     A::dma_rmb();
+}
+
+/// Full barrier: orders earlier stores before later loads, as well as what
+/// [`dma_wmb`] and [`dma_rmb`] order. The port's [`Barriers::dma_mb`]
+/// (`mfence` on x86_64). A virtqueue runs it between its index store and the
+/// load that decides a kick or re-reads `used.idx` (virtio 1.2
+/// §2.7.13.4.1, F016).
+#[inline]
+pub fn dma_mb<A: Barriers>() {
+    #[cfg(test)]
+    trace::record(trace::Ev::Mb);
+    A::dma_mb();
 }
 
 /// Publish `idx` after descriptor stores: [`dma_wmb`], then a Release store.
@@ -281,6 +297,99 @@ pub fn free_to_buddy<A: Barriers>(buddy: &mut Buddy, buf: DmaBuffer) {
 
 pub fn crosses_boundary(phys: u64, size: u64, boundary: u64) -> bool {
     pmm::crosses_boundary(phys, size, boundary)
+}
+
+/// Host-test trace of ring accesses and barriers, per thread: between
+/// [`trace::start`] and [`trace::take`], the `dma_*` barriers here and the
+/// virtqueue's ring accessors record each event, so a test can check where a
+/// barrier falls between a store and a later load.
+#[cfg(test)]
+pub(crate) mod trace {
+    use core::cell::RefCell;
+
+    /// Events a [`Log`] keeps; a later one sets [`Log::overflow`].
+    pub(crate) const CAP: usize = 256;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Ev {
+        /// A ring load at this address.
+        Load(usize),
+        /// A ring store at this address.
+        Store(usize),
+        Wmb,
+        Rmb,
+        Mb,
+    }
+
+    /// The events recorded since [`start`], oldest first.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Log {
+        evs: [Ev; CAP],
+        n: usize,
+        /// Set when an event did not fit.
+        pub(crate) overflow: bool,
+    }
+
+    impl Log {
+        const EMPTY: Log = Log {
+            evs: [Ev::Mb; CAP],
+            n: 0,
+            overflow: false,
+        };
+
+        pub(crate) fn as_slice(&self) -> &[Ev] {
+            &self.evs[..self.n]
+        }
+    }
+
+    struct State {
+        on: bool,
+        log: Log,
+    }
+
+    std::thread_local! {
+        static STATE: RefCell<State> = const {
+            RefCell::new(State {
+                on: false,
+                log: Log::EMPTY,
+            })
+        };
+    }
+
+    /// Clear the log and record from now on.
+    pub(crate) fn start() {
+        STATE.with(|c| {
+            let mut s = c.borrow_mut();
+            s.on = true;
+            s.log = Log::EMPTY;
+        });
+    }
+
+    /// Record `e` if recording is on.
+    pub(crate) fn record(e: Ev) {
+        STATE.with(|c| {
+            let mut s = c.borrow_mut();
+            if !s.on {
+                return;
+            }
+            let n = s.log.n;
+            if n < CAP {
+                s.log.evs[n] = e;
+                s.log.n = n + 1;
+            } else {
+                s.log.overflow = true;
+            }
+        });
+    }
+
+    /// Stop recording and return what was recorded.
+    pub(crate) fn take() -> Log {
+        STATE.with(|c| {
+            let mut s = c.borrow_mut();
+            s.on = false;
+            core::mem::replace(&mut s.log, Log::EMPTY)
+        })
+    }
 }
 
 #[cfg(test)]

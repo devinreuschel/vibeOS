@@ -342,6 +342,8 @@ impl SplitLayout {
 /// `base + off` is valid for a volatile read (`load_*`) or write
 /// (`store_*`) of the field's size, and aligned to it.
 unsafe fn load_u16(base: *const u8, off: usize) -> u16 {
+    #[cfg(test)]
+    dma::trace::record(dma::trace::Ev::Load(base as usize + off));
     // SAFETY: the caller meets this fn's contract; established by
     // `virtio::load_u16`'s `# Safety` section.
     unsafe { u16::from_le(core::ptr::read_volatile(base.add(off) as *const u16)) }
@@ -350,6 +352,8 @@ unsafe fn load_u16(base: *const u8, off: usize) -> u16 {
 /// # Safety
 /// As [`load_u16`], for a write.
 unsafe fn store_u16(base: *mut u8, off: usize, v: u16) {
+    #[cfg(test)]
+    dma::trace::record(dma::trace::Ev::Store(base as usize + off));
     // SAFETY: the caller meets this fn's contract; established by
     // `virtio::load_u16`'s `# Safety` section.
     unsafe { core::ptr::write_volatile(base.add(off) as *mut u16, v.to_le()) }
@@ -358,6 +362,8 @@ unsafe fn store_u16(base: *mut u8, off: usize, v: u16) {
 /// # Safety
 /// As [`load_u16`], for four bytes.
 unsafe fn load_u32(base: *const u8, off: usize) -> u32 {
+    #[cfg(test)]
+    dma::trace::record(dma::trace::Ev::Load(base as usize + off));
     // SAFETY: the caller meets this fn's contract; established by
     // `virtio::load_u16`'s `# Safety` section.
     unsafe { u32::from_le(core::ptr::read_volatile(base.add(off) as *const u32)) }
@@ -366,6 +372,8 @@ unsafe fn load_u32(base: *const u8, off: usize) -> u32 {
 /// # Safety
 /// As [`load_u16`], for a four-byte write.
 unsafe fn store_u32(base: *mut u8, off: usize, v: u32) {
+    #[cfg(test)]
+    dma::trace::record(dma::trace::Ev::Store(base as usize + off));
     // SAFETY: the caller meets this fn's contract; established by
     // `virtio::load_u16`'s `# Safety` section.
     unsafe { core::ptr::write_volatile(base.add(off) as *mut u32, v.to_le()) }
@@ -666,11 +674,19 @@ impl<A: Barriers> SplitQueue<A> {
         self.free_chain(id);
         if self.event_idx {
             self.wr16(self.layout.used_event(), self.last_used);
+            // The next `used.idx` load, here or in the caller's loop, comes
+            // after the `used_event` store (virtio 1.2 §2.7.13.4.1, F016).
+            dma::dma_mb::<A>();
         }
         Some(UsedElem { id, len })
     }
 
+    /// Whether the device wants a kick for the buffers published since
+    /// `old_avail`. Runs [`dma::dma_mb`] first, so its `avail_event` or
+    /// `used.flags` load follows `publish`'s `avail.idx` store (virtio 1.2
+    /// §2.7.13.4.1, F016).
     pub fn should_kick(&self, old_avail: u16) -> bool {
+        dma::dma_mb::<A>();
         let new = self.avail_idx();
         if self.event_idx {
             let event = self.rd16(self.layout.avail_event());
@@ -1042,6 +1058,71 @@ mod tests {
         assert_eq!(q.num_free, 4);
         assert_eq!(q.avail_idx(), 20);
         assert_eq!(q.used_idx(), 20);
+    }
+
+    /// Whether a `Mb` lies between the last `Store(store)` and the first
+    /// `Load(load)` after it in `log`, which must hold both.
+    fn mb_between(log: &[dma::trace::Ev], store: usize, load: usize) -> bool {
+        use dma::trace::Ev;
+        let s = log
+            .iter()
+            .rposition(|e| *e == Ev::Store(store))
+            .expect("store recorded");
+        let l = s + log[s..]
+            .iter()
+            .position(|e| *e == Ev::Load(load))
+            .expect("load recorded after the store");
+        log[s..l].contains(&Ev::Mb)
+    }
+
+    /// F016: `dma_mb` separates `publish`'s `avail.idx` store from
+    /// `should_kick`'s `avail_event` (EVENT_IDX) or `used.flags` load, and
+    /// `get_used`'s `used_event` store from the next `used.idx` load.
+    #[test]
+    fn split_queue_dma_mb_order() {
+        let layout = SplitLayout::new(4).unwrap();
+        let data_off = layout.total as u64;
+        for event_idx in [true, false] {
+            let (_keep, base) = pool(layout.total + 64);
+            let at = |off: usize| base as usize + off;
+            let mut q = queue(layout, base, event_idx);
+            q.init();
+            q.add(data_off, 8, DESC_F_WRITE).unwrap();
+            let old = q.last_avail;
+            dma::trace::start();
+            q.publish();
+            let _ = q.should_kick(old);
+            let log = dma::trace::take();
+            assert!(!log.overflow);
+            let load = if event_idx {
+                layout.avail_event()
+            } else {
+                layout.used_flags()
+            };
+            assert!(
+                mb_between(log.as_slice(), at(layout.avail_idx()), at(load)),
+                "event_idx {event_idx}: no dma_mb between avail.idx and the kick load"
+            );
+
+            // SAFETY: descriptors address `base` from offset 0, the `pool`
+            // buffer; established here.
+            assert_eq!(unsafe { sim_complete(&mut q, 0x11, base, 0) }, 1);
+            if event_idx {
+                dma::trace::start();
+                assert!(q.get_used().is_some());
+                assert_eq!(q.get_used(), None);
+                let log = dma::trace::take();
+                assert!(!log.overflow);
+                assert!(
+                    mb_between(
+                        log.as_slice(),
+                        at(layout.used_event()),
+                        at(layout.used_idx())
+                    ),
+                    "no dma_mb between used_event and the next used.idx load"
+                );
+            }
+        }
     }
 
     #[test]
