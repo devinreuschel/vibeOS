@@ -1,4 +1,5 @@
 use super::*;
+use vibeos::fmt_util;
 
 pub(super) fn sys_exit(status: u64, _from_signal: bool) -> i64 {
     finish_exit(wait_exited(status as u32), false);
@@ -268,18 +269,31 @@ fn format_ps(out: &mut [u8]) -> usize {
         }
         (s, n)
     });
+    // One `<pid> <ppid> <state> <name>\n` line per process, whole lines
+    // only, written with `fmt_util` into `out` (no allocation, DESIGN §4.4).
     let mut w = 0usize;
-    let mut i = 0usize;
-    while i < snap.1 {
-        let (pid, ppid, st, name) = snap.0[i];
-        let line = alloc::format!("{pid} {ppid} {} {name}\n", st.name());
-        let b = line.as_bytes();
-        if w + b.len() > out.len() {
+    for &(pid, ppid, st, name) in snap.0.iter().take(snap.1) {
+        let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
+        let parts: [&[u8]; 8] = [
+            fmt_util::write_dec(u64::from(pid), &mut a),
+            b" ",
+            fmt_util::write_dec(u64::from(ppid), &mut b),
+            b" ",
+            st.name().as_bytes(),
+            b" ",
+            name.as_bytes(),
+            b"\n",
+        ];
+        let len = parts.iter().map(|p| p.len()).sum::<usize>();
+        let Some(mut dst) = out.get_mut(w..).and_then(|r| r.get_mut(..len)) else {
             break;
+        };
+        for p in parts {
+            let (head, rest) = dst.split_at_mut(p.len());
+            head.copy_from_slice(p);
+            dst = rest;
         }
-        out[w..w + b.len()].copy_from_slice(b);
-        w += b.len();
-        i += 1;
+        w += len;
     }
     w
 }
@@ -289,6 +303,10 @@ pub fn write_ps(w: &mut impl Write) {
     let n = format_ps(&mut tmp);
     let s = core::str::from_utf8(&tmp[..n]).unwrap_or("");
     for line in s.lines() {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a diagnostic line to Serial or the console carries no failure anyone could act on (DESIGN §2.5)"
+        )]
         let _ = writeln!(w, "vibeOS: ps: {line}");
     }
 }

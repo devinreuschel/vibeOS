@@ -35,11 +35,27 @@ pub(super) fn close_fd_slot(fd: Fd) -> Result<(), FsError> {
     }
 }
 
+/// Close `fd` where the call that drops it has no one to report a failed
+/// close to (exit, exec's close-on-exec, the fd `dup2` displaces; Linux
+/// drops these errors too): a failure is counted in a rate-limited line
+/// (DESIGN §2.5).
+pub(super) fn close_dropped(fd: Fd, why: &str) {
+    if let Err(e) = close_fd_slot(fd) {
+        crate::klog_ratelimited!(
+            1000,
+            vibeos::log::Level::Warn,
+            "vibeOS: proc: {} close failed: {}",
+            why,
+            e.as_str()
+        );
+    }
+}
+
 pub(super) fn close_all_fds(fds: &mut FdTable) {
     let mut i = 0u32;
     while i < MAX_FDS as u32 {
         if let Some(old) = fds.close(i) {
-            let _ = close_fd_slot(old);
+            close_dropped(old, "exit");
         }
         i += 1;
     }
@@ -54,6 +70,10 @@ pub(super) fn dup_table(src: FdTable) -> Option<FdTable> {
             let mut j = 0u32;
             while j < i {
                 if let Some(id) = src.get(j).and_then(file_id) {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
+                    )]
                     let _ = file_init::close(FileRef::from_raw(id));
                 }
                 j += 1;
@@ -219,6 +239,10 @@ pub(super) fn sys_open(path: u64, flags: u64, _mode: u64) -> i64 {
             match r {
                 Some(fd) => fd as i64,
                 None => {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
+                    )]
                     let _ = file_init::close(FileRef::from_raw(id));
                     syscall::neg(EMFILE)
                 }
@@ -273,6 +297,10 @@ pub(super) fn sys_dup(old: u64) -> i64 {
             Ok(n) => Some(n),
             Err(_) => {
                 if let Some(id) = file_id(s) {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
+                    )]
                     let _ = file_init::close(FileRef::from_raw(id));
                 }
                 None
@@ -303,6 +331,10 @@ pub(super) fn sys_dup2(old: u64, new: u64) -> i64 {
             Ok(displaced) => Some((new as u32, displaced)),
             Err(_) => {
                 if let Some(id) = file_id(s) {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
+                    )]
                     let _ = file_init::close(FileRef::from_raw(id));
                 }
                 None
@@ -312,7 +344,7 @@ pub(super) fn sys_dup2(old: u64, new: u64) -> i64 {
     match r {
         Some((n, disp)) => {
             if let Some(d) = disp {
-                let _ = close_fd_slot(d);
+                close_dropped(d, "dup2 displaced fd");
             }
             n as i64
         }
@@ -333,8 +365,10 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
             F_GETFD => s.flags as i64,
             F_SETFD => {
                 s.flags = (arg as u32) & FD_CLOEXEC;
-                let _ = p.fds.set(fd as u32, s);
-                0
+                match p.fds.set(fd as u32, s) {
+                    Ok(()) => 0,
+                    Err(_) => syscall::neg(EBADF),
+                }
             }
             _ => syscall::neg(EINVAL),
         }

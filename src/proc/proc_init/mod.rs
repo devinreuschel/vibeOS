@@ -4,8 +4,6 @@
 //! clone, ELF load, or heap teardown. COW is Phase 12. User handlers are
 //! Phase 13.
 
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-
 use core::fmt::Write;
 use core::mem::MaybeUninit;
 
@@ -20,7 +18,7 @@ use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
     ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action,
-    fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled, wait_stopped,
+    fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
@@ -43,7 +41,9 @@ use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::syscall_init;
 use crate::thread_init::{self, SpawnError};
-use crate::user_init::{self, LoadError, Loaded};
+#[cfg(not(feature = "vibefs_crash"))]
+use crate::user_init::Loaded;
+use crate::user_init::{self, LoadError};
 
 mod exec;
 mod exit;
@@ -52,9 +52,11 @@ mod fd;
 pub use exit::write_ps;
 
 use exec::{sys_brk, sys_execve, sys_fork, sys_mmap, sys_munmap};
-use exit::{finish_exit, reap_zombie, sys_exit, sys_kill, sys_psinfo, sys_wait4};
+#[cfg(not(feature = "vibefs_crash"))]
+use exit::reap_zombie;
+use exit::{finish_exit, sys_exit, sys_kill, sys_psinfo, sys_wait4};
 use fd::{
-    close_all_fds, close_fd_slot, dup_table, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
+    close_all_fds, close_dropped, dup_table, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
     sys_lseek, sys_open, sys_read, sys_write, validate_buf,
 };
 
@@ -234,6 +236,10 @@ fn space_of(pid: u32) -> Option<&'static AddressSpace> {
         let p = t.get(pid)?;
         p.space.as_ref().map(|s| &**s as *const AddressSpace)
     })
+    // SAFETY: a process's space is replaced or taken only by its own thread
+    // (`proc_init::sys_execve`, `proc_init::finish_exit`), and every caller
+    // reads its own process's space or one whose thread is stopped, so the
+    // box outlives the borrow; established by `proc_init::current_space`.
     .map(|p| unsafe { &*p })
 }
 
@@ -310,11 +316,19 @@ fn user_thread_entry() {
     unsafe { syscall_init::first_return(fs) };
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[cfg(not(any(
+    feature = "kernel_tests",
+    feature = "vibefs_crash",
+    feature = "kernel_shell"
+)))]
 pub fn start_init() {
     match spawn_elf("/sbin/init", INIT_PID, 0) {
         Ok(_) => {}
         Err(e) => {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to Serial cannot fail (DESIGN §2.5)"
+            )]
             let _ = writeln!(Serial, "user: init failed: {}", e.as_str());
         }
     }
@@ -322,6 +336,7 @@ pub fn start_init() {
 
 /// Start the ELF at `path` as a new process with parent `ppid` (0: the
 /// kernel, which reaps it with [`wait_kernel`]).
+#[cfg(not(feature = "vibefs_crash"))]
 pub(crate) fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
     let slot = space_slot().ok_or(LoadError::NoMem)?;
     start_loaded(
@@ -335,6 +350,8 @@ pub(crate) fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadE
 
 /// Start the in-memory ELF image `elf` with `argv` as a new process with
 /// parent `ppid` (0: the kernel, which reaps it with [`wait_kernel`]).
+/// The in-guest tests' ring-3 entry (C-RING3).
+#[cfg(feature = "kernel_tests")]
 pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, LoadError> {
     let name = match argv.first().map(|a| core::str::from_utf8(a)) {
         Some(Ok(a)) => intern_name(a),
@@ -351,6 +368,7 @@ fn space_slot() -> Option<TryBox<MaybeUninit<AddressSpace>>> {
     TryBox::<AddressSpace>::try_new_uninit().ok()
 }
 
+#[cfg(not(feature = "vibefs_crash"))]
 fn start_loaded(
     slot: TryBox<MaybeUninit<AddressSpace>>,
     loaded: Loaded,
@@ -391,6 +409,7 @@ fn start_loaded(
     Ok(pid)
 }
 
+#[cfg(not(feature = "vibefs_crash"))]
 enum KernelWait {
     Done(u32),
     Sleep,
@@ -400,6 +419,7 @@ enum KernelWait {
 /// Block until `pid`, a process whose parent is the kernel (ppid 0),
 /// exits; reap it and return its `wait4` status word. Returns once the
 /// zombie is reaped, before its address space and kernel stack are freed.
+#[cfg(not(feature = "vibefs_crash"))]
 pub(crate) fn wait_kernel(pid: u32) -> u32 {
     debug_assert_eq!(current_pid(), 0);
     loop {
@@ -457,11 +477,17 @@ pub fn syscall(frame: &mut UserFrame) -> i64 {
     let ret = dispatch_frame(nr, args, Some(frame));
     if syscall_init::trace_enabled() {
         let name = syscall::info(nr).map(|i| i.name).unwrap_or("?");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to Serial cannot fail (DESIGN §2.5)"
+        )]
         let _ = writeln!(Serial, "user: syscall {name} nr={nr} = {ret}");
     }
     ret
 }
 
+/// A syscall from kernel code, with no user frame: the in-guest tests'.
+#[cfg(feature = "kernel_tests")]
 pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
     dispatch_frame(nr, args, None)
 }
@@ -649,6 +675,10 @@ pub fn try_user_fault(f: &TrapFrame) {
     // runs with IF=1, and a thread that ran on this CPU between two writes
     // would land inside this line in the CPU's log capture stage.
     let (name, rip, err) = (sig_name(sig), f.user().rip, f.error_code);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
     let _ = if f.vector == u64::from(vectors::PF) {
         writeln!(
             Serial,
@@ -669,10 +699,6 @@ pub fn try_user_fault(f: &TrapFrame) {
     crate::arch::gs::force_kernel();
     finish_exit(wait_signaled(sig), true);
 }
-
-const _: fn(u32) = |s| {
-    let _ = wait_stopped(s);
-};
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(feature = "kernel_tests")]

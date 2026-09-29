@@ -13,6 +13,7 @@ use vibeos::proc::{SIGSEGV, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::syscall::SYS_GETPID;
 use vibeos::vectors;
 
+use super::hooks as exec_testing;
 use crate::addr_space_init::testing as as_testing;
 use crate::apic_init;
 use crate::console_init;
@@ -24,7 +25,7 @@ use crate::proc_init;
 use crate::syscall_init::testing as sc_testing;
 use crate::thread_init;
 use crate::time_init;
-use crate::user_init::{LoadError, testing as exec_testing};
+use crate::user_init::LoadError;
 
 // exit(7) when getppid() is 0 (the kernel spawned it), else exit(1).
 user_code!(

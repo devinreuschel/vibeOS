@@ -54,17 +54,6 @@ mod fs;
 mod irq;
 mod log;
 mod mm;
-#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod proc;
 mod sched;
 #[allow(
