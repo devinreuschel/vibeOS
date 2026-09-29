@@ -29,7 +29,7 @@ use vibeos::wait::{self, WaitQueue};
 
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
-use crate::sync_init::SpinMutex;
+use crate::sync_init::{self, SleepCtx, SpinMutex};
 use crate::time_init;
 use crate::x86::InterruptGuard;
 
@@ -137,6 +137,10 @@ pub(crate) struct Sched {
     timeouts: TimeoutQueue,
     places: [(u32, ThreadId); MAX_THREADS],
     place_n: usize,
+    /// The context the current `with_sched` section was entered from, which
+    /// `begin_wait` checks: it runs under SCHED with IF off and cannot read
+    /// IF or `HELD` itself.
+    waiter: SleepCtx,
 }
 
 impl Sched {
@@ -146,6 +150,7 @@ impl Sched {
             timeouts: TimeoutQueue::empty(),
             places: [(0, ThreadId::NONE); MAX_THREADS],
             place_n: 0,
+            waiter: SleepCtx::UNCHECKED,
         }
     }
 
@@ -186,7 +191,8 @@ impl Sched {
 
     /// Enqueue wait → Blocked. Still holding SCHED. Caller drops, then `schedule`.
     pub(crate) fn begin_wait(&mut self, wq: &mut WaitQueue, deadline: Instant) {
-        crate::sync_init::assert_not_hard_irq();
+        sync_init::assert_not_hard_irq();
+        self.waiter.check();
         let id = current_id();
         wq.enqueue(id);
         self.timeouts.insert(id, deadline);
@@ -324,7 +330,7 @@ pub fn schedule_preempt() {
 fn schedule_inner(from_irq: bool) {
     let _irq = InterruptGuard::enter();
     if !from_irq {
-        crate::sync_init::assert_not_hard_irq();
+        sync_init::assert_not_hard_irq();
     }
     crate::ipi_init::drain_inbox();
     let now = Instant {
@@ -495,14 +501,14 @@ fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> T
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
     #[cfg(feature = "kernel_tests")]
-    if crate::sync_init::held_mask() != 0 {
+    if sync_init::held_mask() != 0 {
         // SAFETY: invariant I9: `new_ptr` is a live entry of `SCHED` that
         // `schedule_inner` or `switch_to` set Running for this CPU, and `id`
         // changes only while its slot is Dead; established by
         // `thread_init::spawn_inner`.
         testing::refuse_switch(unsafe { (*new_ptr).id });
     }
-    crate::sync_init::assert_switch_clean();
+    sync_init::assert_switch_clean();
     let now = time_init::read_tsc();
     per_cpu_init::with_current_switch(|cpu| {
         // For the switch tail that runs next on this CPU.
@@ -1170,7 +1176,7 @@ pub fn sleep_ms(ms: u64) {
 
 /// Park until `deadline` (or a far-future sentinel). Sleep path only.
 pub fn park(deadline: Option<Instant>) {
-    crate::sync_init::might_sleep();
+    sync_init::might_sleep();
     let d = effective_deadline(deadline);
     let id = current_id();
     with_sched(|s| {
@@ -1190,8 +1196,10 @@ pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
 }
 
 pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
+    let ctx = sync_init::sleep_ctx();
     let (r, places, n) = {
         let mut s = SCHED.lock();
+        s.waiter = ctx;
         let r = f(&mut s);
         let n = s.place_n;
         let p = s.places;

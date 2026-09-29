@@ -500,6 +500,10 @@ pub(crate) const TESTS: &[Test] = &[
         "in_hard_irq_top_bottom",
         sched::ktest::in_hard_irq_top_bottom,
     ),
+    test(
+        "sleep_under_spinlock_asserts",
+        sched::ktest::sleep_under_spinlock_asserts,
+    ),
     test("exec_huge_memsz", proc::ktest::test_exec_huge_memsz).deadline(60_000),
     test(
         "brk_mmap_munmap_user",

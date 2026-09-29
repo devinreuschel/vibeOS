@@ -708,7 +708,7 @@ that review cites means the review's text.
 | I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; clippy's `let_underscore_must_use` and `unused_result_ok`, denied workspace-wide | enforced in part (the lints, outside modules whose `mod` line carries an audit-pending allow) | No: modules not yet audited carry an audit-pending allow, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
 | I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 does not: pending signals are acted on only at syscall entry and after the `wait4` sleep (ROADMAP §10.6, F033) |
 | I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](PORTABILITY.md#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
-| I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |
+| I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | `sync_init::might_sleep`, `Sched::begin_wait` | enforced in debug and `kernel_tests` builds | Partly: only the entry points §2.9 rule 4 names check, a rank-0 lock or an `IrqCell` held across a sleep is not counted, and a build without `debug_assertions` or `kernel_tests` checks only the hard-IRQ flag |
 | I41 | No sleeping lock of levels 2 to 4 is held across a copy to or from user memory, and code that holds the address-space lock takes no level-1 lock (§2.1) | none yet | documented | Yes, vacuously: the address-space lock, page waits, and the filesystems' block-mapping locks arrive with ROADMAP §12.5 and §13.1, and ROADMAP §13.12's lock-dependency build reports a violation the first time one happens |
 | I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](MEMORY.md#44-kernel-heap)) | `vibeos::kalloc` on every path after `irq: enabled`; clippy's `disallowed-types` and `disallowed-macros` in `vibeos-core` and the kernel binary | enforced by clippy (ROADMAP §10.4) and the in-guest `kalloc_nomem` and `dev_probe_alloc_fail` tests | Partly: every allocation after `irq: enabled` is fallible (ROADMAP §10.4, F010); a full thread table still panics until ROADMAP §10.4's box that makes it an error |
 | I120 | Another CPU reads a CPU's per-CPU state only through its `PerCpuRemote`, whose fields are atomics, and takes `&mut` to another CPU's `PerCpu` only through `with_cpu` while that CPU is not running (§7.5) | `per_cpu_init::cpu`, `per_cpu_init::with_cpu` | enforced (the view type, its const assertion, and `check_cells.py`'s type and must-be-unsafe lists) | Yes, except an AP that accepted a SIPI and stalled past the ready timeout (ROADMAP §11.4, F032) |
@@ -808,8 +808,14 @@ and a bound.
 4. Code that may sleep (waits on a wait queue, takes a sleeping lock (§2.1), allocates with
    reclaim (ROADMAP §12.6), or copies through a faulting user-memory accessor (§5.1) once ROADMAP
    §12.2 lets its fault sleep) runs with IF=1, no spinlock held, and outside any RCU read-side section
-   ([§2.12](#212-rcu)), and asserts each in debug builds (ROADMAP §10.3; the read-side check from
-   §19.5).
+   ([§2.12](#212-rcu)). `sync_init::might_sleep`, called first in `park`, `BlockingMutex::lock_until`,
+   `RwLock::read_until` and `write_until`, `Semaphore::acquire_until`, `Condvar::wait_until`, and
+   `Channel::send_until` and `recv_until`, before any lock, asserts that the thread is not in a device
+   top half in every build, and that this CPU's `HELD` rank mask is empty and IF is on in debug and
+   `kernel_tests` builds. `Sched::begin_wait`, which runs under SCHED with IF=0, checks the same on
+   the `SleepCtx` that `with_sched` recorded before it took SCHED. A rank-0 lock or an `IrqCell` is
+   not counted, and the `try_*` calls, which never sleep, are unchecked. The read-side check comes
+   from §19.5.
 5. `current`, the running thread's TCB pointer, is read only through `arch::current_tcb()`: one
    instruction that preemption cannot split, whose answer the switch keeps right on every CPU. On
    x86_64 it is one `gs`-relative load of `PerCpu.current` (`mov reg, gs:[offset]`), never `gs:[0]`

@@ -13,6 +13,7 @@ use crate::irq::hardirq;
 use crate::irq_init;
 use crate::ktest::{Outcome, sleep_until, spin_until_ns};
 use crate::per_cpu_init;
+use crate::sync::blocking_init::{BlockingMutex, RwLock, Semaphore};
 use crate::sync_init::{self, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
@@ -240,4 +241,88 @@ pub(crate) fn in_hard_irq_top_bottom() -> Outcome {
         (2, 1) => Outcome::Ok,
         (t, b) => crate::fail_fmt!("in_hard_irq: top {t} bottom {b}, want 2 1"),
     }
+}
+
+static SLEEP_MUTEX: BlockingMutex<u32> = BlockingMutex::new(0);
+static SLEEP_RW: RwLock<u32> = RwLock::new(0);
+static SLEEP_SEM: Semaphore = Semaphore::new(1);
+
+fn sleep_mutex_lock() {
+    drop(SLEEP_MUTEX.lock());
+}
+
+fn sleep_rw_read() {
+    drop(SLEEP_RW.read());
+}
+
+fn sleep_rw_write() {
+    drop(SLEEP_RW.write());
+}
+
+fn sleep_sem_acquire() {
+    SLEEP_SEM.acquire();
+    SLEEP_SEM.release();
+}
+
+fn sleep_park() {
+    thread_init::park(Some(Instant {
+        ns: time_init::now_ns().saturating_add(1_000_000),
+    }));
+}
+
+/// ROADMAP §10.3 (F108, F075): every call that may sleep fails its check
+/// under a ranked `SpinMutex`, and `BlockingMutex::lock` fails it with IF
+/// off. Each check fires before the call takes anything.
+pub(crate) fn sleep_under_spinlock_asserts() -> Outcome {
+    use sync_init::testing::SleepTrip;
+    let calls: [(&str, fn()); 5] = [
+        ("BlockingMutex::lock", sleep_mutex_lock),
+        ("RwLock::read", sleep_rw_read),
+        ("RwLock::write", sleep_rw_write),
+        ("Semaphore::acquire", sleep_sem_acquire),
+        ("park", sleep_park),
+    ];
+    let saved = Saved::now();
+    let _ = sync_init::testing::take_trip();
+    for (what, call) in calls {
+        // A fresh lock each time: the longjmp leaves it locked.
+        let s = SpinMutex::with_rank((), RANK_BUDDY);
+        let nest = per_cpu_init::irq_nest();
+        let hit = arch::catch::catch_panic(|| {
+            let _s = s.lock();
+            call();
+        });
+        let trip = sync_init::testing::take_trip();
+        saved.restore_locks(nest);
+        if saved.if_on {
+            x86::sti();
+        }
+        if !hit {
+            return crate::fail_fmt!("{what}: no panic under a spinlock");
+        }
+        if trip != Some(SleepTrip::Held) {
+            return crate::fail_fmt!("{what}: trip {:?}, want Held", trip);
+        }
+    }
+    let g = x86::InterruptGuard::enter();
+    let nest = per_cpu_init::irq_nest();
+    let hit = arch::catch::catch_panic(sleep_mutex_lock);
+    let trip = sync_init::testing::take_trip();
+    saved.restore_locks(nest);
+    drop(g);
+    if !hit {
+        return Outcome::Fail("BlockingMutex::lock: no panic with IF off");
+    }
+    if trip != Some(SleepTrip::IfOff) {
+        return crate::fail_fmt!("BlockingMutex::lock: trip {:?}, want IfOff", trip);
+    }
+    // The assertions fired before anything was acquired.
+    match SLEEP_MUTEX.try_lock() {
+        Some(g) => drop(g),
+        None => return Outcome::Fail("BlockingMutex left locked"),
+    }
+    if let Err(o) = saved.check() {
+        return o;
+    }
+    Outcome::Ok
 }
