@@ -1131,7 +1131,11 @@ class TestWorkflow(unittest.TestCase):
         self.assertEqual(cond, {"record": "github.event_name == 'workflow_run'",
                                 "daily": "github.event_name != 'workflow_run'"})
         for job in self.jobs.values():
-            self.assertIsNone(job.get("concurrency"))
+            conc = job.get("concurrency")
+            assert conc is not None
+            # Scheduled lane 6 (DESIGN §8.6), queued, never cancelled.
+            self.assertEqual({c.key: c.value for c in conc.children},
+                             {"group": "sched-lane-6", "queue": "max"})
             self.assertEqual(job.get("runs-on").value, "ubuntu-26.04")  # type: ignore[union-attr]
 
     def test_workflow_names_match_files(self) -> None:

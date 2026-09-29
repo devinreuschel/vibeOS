@@ -14,6 +14,12 @@ jobs:
   stress:
     name: high-CPU SMP stress
     runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    # Scheduled lane 4 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out.
+    concurrency:
+      group: sched-lane-4
+      queue: max
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
     # and DESIGN §8.6 together.
@@ -75,6 +81,11 @@ jobs:
   nightly-canary:
     name: latest nightly canary
     runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    # Scheduled lane 5 (DESIGN §8.6); continue-on-error does not free the lane.
+    concurrency:
+      group: sched-lane-5
+      queue: max
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
     # and DESIGN §8.6 together.

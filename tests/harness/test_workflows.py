@@ -15,6 +15,8 @@ from scripts.check_workflows import (
     Tree,
     Unsupported,
     check,
+    lane_map,
+    ledger,
     load_tree,
     parse,
     rule_action_pins,
@@ -22,9 +24,14 @@ from scripts.check_workflows import (
     rule_ci_triggers,
     rule_concurrency_group,
     rule_gate_dispatch,
+    rule_job_lane,
+    rule_lane_capacity,
+    rule_lane_map,
+    rule_ledger_row,
     rule_no_expr_in_run,
     rule_permissions,
     rule_qemu_pin,
+    rule_row_lane,
     rule_runs_on,
     rule_tiers,
     rule_upstream,
@@ -623,6 +630,204 @@ class TestUpstream(unittest.TestCase):
     def test_bad_heading_fails(self) -> None:
         md = self.PRE + ENTRY.format(path="Makefile").replace("### QEMU: a title", "### a title")
         self.assertEqual(upstream(md), [(9, "entry heading is not `### <project>: <title>`")])
+
+
+SCHED = ".github/workflows/sched.yml"
+LANE_DOC = """\
+## 8.6 CI
+
+| Lane | Reserved for | Jobs |
+|---|---|---|
+| `sched-lane-0` | nightly | `sched.yml` `a` |
+| `sched-lane-1` | nightly | `sched.yml` `b` |
+| `sched-lane-7` | none | multi-day chains |
+
+Release windows: none
+
+| Workflow | Cadence | Jobs per run | Job-hours per run | Peak concurrent jobs | Lanes |
+|---|---|---|---|---|---|
+| `sched.yml` | daily and dispatch | 2 | 1 (estimated) | 2 | `sched-lane-0`, `sched-lane-1` |
+
+## 8.7 next
+"""
+
+
+def sched_wf(jobs: str, on: str = "schedule:\n    - cron: \"1 2 * * *\"") -> str:
+    return f"on:\n  {on}\npermissions:\n  contents: read\njobs:\n{jobs}"
+
+
+def lane_job(name: str, lane: str, extra: str = "", timeout: str = "30") -> str:
+    return (
+        f"  {name}:\n    runs-on: ubuntu-26.04\n    timeout-minutes: {timeout}\n"
+        f"    concurrency:\n      group: {lane}\n      queue: max\n{extra}"
+        "    steps:\n      - run: make x\n"
+    )
+
+
+GOOD_JOBS = lane_job("a", "sched-lane-0") + lane_job("b", "sched-lane-1")
+
+
+def sched_tree(jobs: str = GOOD_JOBS, doc: str = LANE_DOC, **kw: str) -> Tree:
+    return Tree(workflows={SCHED: parse(sched_wf(jobs, **kw), SCHED)}, testing_md=doc)
+
+
+def lane_rules(t: Tree) -> list[tuple[str, str]]:
+    out = []
+    for rule in (rule_ledger_row, rule_lane_capacity, rule_job_lane, rule_row_lane, rule_lane_map):
+        out += [(p.rule, p.message) for p in rule(t)]
+    return out
+
+
+class TestLaneTables(unittest.TestCase):
+    def test_parses_both_tables(self) -> None:
+        lanes = lane_map(LANE_DOC)
+        self.assertEqual(sorted(lanes), ["sched-lane-0", "sched-lane-1", "sched-lane-7"])
+        self.assertEqual(lanes["sched-lane-0"].reserved, "nightly")
+        self.assertEqual(lanes["sched-lane-0"].workflows, frozenset({"sched.yml"}))
+        self.assertEqual(lanes["sched-lane-7"].workflows, frozenset())
+        rows = ledger(LANE_DOC)
+        self.assertEqual(list(rows), ["sched.yml"])
+        self.assertEqual(rows["sched.yml"].jobs_per_run, 2)
+        self.assertEqual(rows["sched.yml"].lanes, ("sched-lane-0", "sched-lane-1"))
+
+    def test_other_section_and_header_ignored(self) -> None:
+        self.assertEqual(ledger(LANE_DOC.replace("## 8.6", "## 8.5")), {})
+        self.assertEqual(lane_map(LANE_DOC.replace("| Reserved for |", "| Reserved |")), {})
+
+
+class TestLedgerRow(unittest.TestCase):
+    def test_passing_workflow(self) -> None:
+        self.assertEqual(lane_rules(sched_tree()), [])
+
+    def test_missing_row_fails(self) -> None:
+        doc = LANE_DOC.replace("| `sched.yml` | daily", "| `other.yml` | daily")
+        got = [p.message for p in rule_ledger_row(sched_tree(doc=doc))]
+        self.assertEqual(got, ["scheduled workflow sched.yml has no §8.6 ledger row"])
+
+    def test_dispatch_only_counts_and_push_only_does_not(self) -> None:
+        doc = LANE_DOC.replace("`sched.yml` | daily", "`x.yml` | daily")
+        t = sched_tree(doc=doc, on="workflow_dispatch:")
+        self.assertEqual([p.rule for p in rule_ledger_row(t)], ["ledger_row"])
+        t = sched_tree("  a:\n    runs-on: ubuntu-26.04\n", doc=doc, on="push:")
+        self.assertEqual(rule_ledger_row(t) + rule_job_lane(t), [])
+
+    def test_ci_and_release_exempt(self) -> None:
+        wf = parse(sched_wf("  a:\n    runs-on: ubuntu-26.04\n"), CI)
+        rel = parse(sched_wf("  a:\n    runs-on: ubuntu-26.04\n"), ".github/workflows/release.yml")
+        t = Tree(workflows={CI: wf, ".github/workflows/release.yml": rel}, testing_md="")
+        self.assertEqual(lane_rules(t), [])
+
+
+class TestLaneCapacity(unittest.TestCase):
+    def matrix(self, body: str) -> str:
+        return lane_job("a", "sched-lane-0", extra=f"    strategy:\n      matrix:\n{body}")
+
+    def test_under_capacity_passes(self) -> None:
+        axes = "        x: [" + ", ".join(str(i) for i in range(10)) + "]\n"
+        axes += "        y: [" + ", ".join(str(i) for i in range(10)) + "]\n"
+        jobs = self.matrix(axes) + lane_job("b", "sched-lane-1")
+        self.assertEqual(rule_lane_capacity(sched_tree(jobs)), [])
+
+    def test_over_capacity_fails(self) -> None:
+        axes = "        x: [" + ", ".join(str(i) for i in range(10)) + "]\n"
+        axes += "        y: [" + ", ".join(str(i) for i in range(10)) + "]\n"
+        axes += "        include:\n          - x: 99\n"
+        got = [p.message for p in rule_lane_capacity(sched_tree(self.matrix(axes)))]
+        self.assertEqual(got, ["101 jobs of one run in sched-lane-0; a lane holds 100"])
+
+    def test_jobs_in_one_lane_add_up(self) -> None:
+        axes = "        x: [" + ", ".join(str(i) for i in range(100)) + "]\n"
+        jobs = self.matrix(axes) + lane_job("b", "sched-lane-0")
+        got = [p.message for p in rule_lane_capacity(sched_tree(jobs))]
+        self.assertEqual(got, ["101 jobs of one run in sched-lane-0; a lane holds 100"])
+
+    def test_expression_matrix_fails_as_uncountable(self) -> None:
+        bodies = ("        x: ${{ fromJSON(inputs.x) }}\n", "        x: [a, \"${{ inputs.y }}\"]\n")
+        for body in bodies:
+            with self.subTest(body=body):
+                got = [p.message for p in rule_lane_capacity(sched_tree(self.matrix(body)))]
+                self.assertEqual(
+                    got, ["job `a`: matrix uses an expression; its job count is uncountable"]
+                )
+
+    def test_row_over_lane_capacity_fails(self) -> None:
+        doc = LANE_DOC.replace("| 2 | 1 (estimated)", "| 201 | 1 (estimated)")
+        got = [p.message for p in rule_lane_capacity(sched_tree(doc=doc))]
+        self.assertEqual(got, ["ledger row sched.yml: 201 jobs per run in 2 lane(s) of 100"])
+
+
+class TestJobLane(unittest.TestCase):
+    def test_missing_group_fails(self) -> None:
+        jobs = "  a:\n    runs-on: ubuntu-26.04\n    steps:\n      - run: x\n"
+        got = [p.message for p in rule_job_lane(sched_tree(jobs + lane_job("b", "sched-lane-1")))]
+        self.assertEqual(
+            got, ["job `a` declares no `concurrency: {group: sched-lane-<n>, queue: max}`"]
+        )
+
+    def test_missing_queue_fails(self) -> None:
+        jobs = GOOD_JOBS.replace("      queue: max\n", "", 1)
+        self.assertEqual([p.rule for p in rule_job_lane(sched_tree(jobs))], ["job_lane"])
+
+    def test_expression_group_fails(self) -> None:
+        jobs = GOOD_JOBS.replace("group: sched-lane-0", "group: sched-lane-${{ inputs.n }}")
+        self.assertEqual([p.rule for p in rule_job_lane(sched_tree(jobs))], ["job_lane"])
+
+    def test_non_lane_group_fails(self) -> None:
+        jobs = GOOD_JOBS.replace("group: sched-lane-0", "group: sched-lane-10")
+        self.assertEqual([p.rule for p in rule_job_lane(sched_tree(jobs))], ["job_lane"])
+
+    def test_cancel_in_progress_fails(self) -> None:
+        jobs = GOOD_JOBS.replace("queue: max\n", "queue: max\n      cancel-in-progress: true\n", 1)
+        got = [p.message for p in rule_job_lane(sched_tree(jobs))]
+        self.assertEqual(got, ["job `a`: `cancel-in-progress` with `queue: max`"])
+
+    def test_reserved_lane_needs_short_timeout(self) -> None:
+        jobs = lane_job("a", "sched-lane-0", timeout="331") + lane_job("b", "sched-lane-1")
+        got = [p.message for p in rule_job_lane(sched_tree(jobs))]
+        self.assertEqual(got, ["job `a` in reserved sched-lane-0 needs `timeout-minutes` <= 330"])
+        jobs = lane_job("a", "sched-lane-0", timeout="330") + lane_job("b", "sched-lane-1")
+        self.assertEqual(rule_job_lane(sched_tree(jobs)), [])
+
+    def test_unreserved_lane_takes_a_long_job(self) -> None:
+        doc = LANE_DOC.replace(
+            "`sched-lane-0`, `sched-lane-1` |", "`sched-lane-1`, `sched-lane-7` |"
+        )
+        doc = doc.replace("| multi-day chains |", "| multi-day chains; `sched.yml` `a` |")
+        jobs = lane_job("a", "sched-lane-7", timeout="3000") + lane_job("b", "sched-lane-1")
+        self.assertEqual(lane_rules(sched_tree(jobs, doc=doc)), [])
+
+    def test_self_hosted_job_is_not_laned(self) -> None:
+        jobs = GOOD_JOBS + "  c:\n    runs-on: [self-hosted, linux]\n    steps:\n      - run: x\n"
+        self.assertEqual(rule_job_lane(sched_tree(jobs)), [])
+
+
+class TestRowLane(unittest.TestCase):
+    def test_lane_outside_row_fails(self) -> None:
+        jobs = lane_job("a", "sched-lane-0") + lane_job("b", "sched-lane-7")
+        got = [p.message for p in rule_row_lane(sched_tree(jobs))]
+        self.assertEqual(
+            got,
+            ["job `b` runs in sched-lane-7, not in its ledger row's lanes "
+             "['sched-lane-0', 'sched-lane-1']"],
+        )
+
+    def test_lane_in_row_passes(self) -> None:
+        self.assertEqual(rule_row_lane(sched_tree()), [])
+
+
+class TestLaneMap(unittest.TestCase):
+    def test_row_lane_the_map_does_not_give_fails(self) -> None:
+        doc = LANE_DOC.replace("| nightly | `sched.yml` `b` |", "| nightly | none |")
+        got = [p.message for p in rule_lane_map(sched_tree(doc=doc))]
+        want = "ledger row sched.yml names sched-lane-1, which the lane map does not give it"
+        self.assertEqual(got, [want])
+
+    def test_row_lane_missing_from_map_fails(self) -> None:
+        doc = LANE_DOC.replace("| `sched-lane-1` | nightly | `sched.yml` `b` |\n", "")
+        self.assertEqual([p.rule for p in rule_lane_map(sched_tree(doc=doc))], ["lane_map"])
+
+    def test_map_that_lists_the_workflow_passes(self) -> None:
+        self.assertEqual(rule_lane_map(sched_tree()), [])
 
 
 class TestTree(unittest.TestCase):

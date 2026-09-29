@@ -715,7 +715,8 @@ each pass 40 s alone and cannot split below a target.
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, the §8.2 per-run deadlines |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
-| `ci-history` | `ci` or `release` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. |
+| `ci-history` | `ci` or `release` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. Both jobs run in `sched-lane-6`. |
+| `macos` | daily 04:23 UTC + dispatch, `sched-lane-9` | `macos-15` arm64 with Homebrew's `qemu`, `xorriso`, `nasm` and `dosfstools`; jobs `check` (`make check`) and `test` (`make -k test-e2e-uefi test`, with Homebrew's edk2 firmware on pflash); each uploads `build/results/`. |
 
 The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
@@ -857,21 +858,56 @@ and smp-stress under HVF for 30 minutes each (`tests/gates/common.toml`), the on
 those tests on a weakly ordered CPU directly. The weekly aarch64 smp-stress leg records whether TCG
 there showed any weak outcome (`weak_order_probe`).
 
-**Scheduled capacity.** Planned (ROADMAP §10.1): the Free plan's 20 concurrent jobs are the owner's
-account's, shared with its other repositories, and scheduled and dispatched workflows hold 10 of
-them as lanes. A lane is a job-level concurrency group, `sched-lane-<n>`, with `queue: max`: it runs
-one job at a time and holds up to 100 waiting, first in first out. Without `queue: max` a group
-keeps one waiting job and cancels it when another arrives, and GitHub runs no queue across
-workflows, so lanes are how the split holds. This section will hold the lane map, which reserves for
-jobs that end within 5.5 hours the lanes their cadence needs and names the lanes a release window
-takes (ROADMAP §22.1), and a ledger row per workflow: cadence, jobs per run, job-hours per run
-(estimated, then measured from `ci-history`), peak concurrent jobs, and lanes.
-`ci_history.py --budget` holds every lane but the rebuilds' under 60% busy and every reserved-lane
-wait under 12 hours. The 40% left absorbs GitHub's delays to scheduled runs and new workflows, and
-keeps the account from running its share full around the clock, which GitHub's Actions terms count
-against it when the burden is disproportionate to the benefits. The section also records each
-per-push tier's median QEMU time, which `ci_history.py --tiers` keeps under 60 s, and the
-`ci-history` branch's packed size (ROADMAP §10.9).
+**Scheduled capacity.** The Free plan's 20 concurrent jobs are the owner's account's, shared with
+its other repositories, and scheduled and dispatched workflows hold 10 of them as lanes (ROADMAP
+§10.1). A lane is a job-level concurrency group, `sched-lane-<n>`, declared in block style with
+`queue: max`: it runs one job at a time and holds up to 100 waiting, first in first out. Without
+`queue: max` a group keeps one waiting job and cancels it when another arrives, GitHub rejects
+`cancel-in-progress` beside `queue: max`, and GitHub runs no queue across workflows, so lanes are how
+the split holds. Every job on a GitHub-hosted runner of a workflow that runs on a schedule or a
+dispatch, `ci.yml` and `release.yml` aside, runs in a lane, named by a literal group. The lane map
+reserves for jobs that end within 5.5 hours (`timeout-minutes` at most 330) the lanes their cadence
+needs, which no multi-day chain (a soak, a campaign, ROADMAP §24.2's rebuilds) takes, and names the
+lanes a release window takes (ROADMAP §22.1). The ledger gives each scheduled or dispatched
+workflow's cadence, jobs per run, job-hours per run (estimated until `ci-history` measures them),
+peak concurrent jobs, and lanes. Both change in the same commit as the workflows they describe.
+`scripts/check_workflows.py` fails on a scheduled or dispatched workflow with no ledger row
+(`rule_ledger_row`); on more than 100 jobs of one run in one lane, a matrix counting the product of
+its literal axes plus its `include` entries and a matrix built from an expression failing as
+uncountable, or on a row whose jobs per run pass 100 per lane (`rule_lane_capacity`); on a job
+without a literal `sched-lane-<0-9>` group and `queue: max`, with `cancel-in-progress`, or in a
+reserved lane without `timeout-minutes` of at most 330 (`rule_job_lane`); on a job in a lane its
+row does not give it (`rule_row_lane`); and on a row's lane that the map does not list for that
+workflow (`rule_lane_map`). `Reserved for` is `nightly`, `weekly`, `scheduled`, `history` or
+`none`, and from ROADMAP §24.2 `rebuilds`.
+
+| Lane | Reserved for | Jobs |
+|---|---|---|
+| `sched-lane-0` | nightly | `nightly.yml` `kvm` |
+| `sched-lane-1` | nightly | `nightly.yml` `release-profile` |
+| `sched-lane-2` | nightly | `nightly.yml` `repro`; `models` and `miri` when they land |
+| `sched-lane-3` | nightly | `nightly.yml` `budget`, `advisories`, `provenance`; `irqoff` when it lands |
+| `sched-lane-4` | weekly | `smp-stress.yml` `stress`, `repeat-kernel` |
+| `sched-lane-5` | weekly | `smp-stress.yml` `repeat-kernel-smp4`, `nightly-canary`; `fuzz` when it lands |
+| `sched-lane-6` | history | `ci-history.yml` (every job) |
+| `sched-lane-7` | none | multi-day chains (soaks, campaigns); a §22.1 release window |
+| `sched-lane-8` | none | multi-day chains; a §22.1 release window |
+| `sched-lane-9` | scheduled | `macos.yml` (P10-S47) |
+
+Release windows: none
+
+| Workflow | Cadence | Jobs per run | Job-hours per run | Peak concurrent jobs | Lanes |
+|---|---|---|---|---|---|
+| `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 2 | 0.6 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
+| `ci-history.yml` | each completed `ci` or `release` run (`record`); daily `23 4 * * *` and dispatch (`daily`) | 1 | 0.05 per `record`, 0.3 per `daily` (estimated) | 1 | `sched-lane-6` |
+| `macos.yml` | daily `23 4 * * *` and dispatch | 2 | 1.5 (estimated) | 1 | `sched-lane-9` |
+
+Planned (ROADMAP §10.1): `ci_history.py --budget` holds every lane but the rebuilds' under 60%
+busy and every reserved-lane wait under 12 hours. The 40% left absorbs GitHub's delays to scheduled
+runs and new workflows, and keeps the account from running its share full around the clock, which
+GitHub's Actions terms count against it when the burden is disproportionate to the benefits. The
+section also records each per-push tier's median QEMU time, which `ci_history.py --tiers` keeps
+under 60 s, and the `ci-history` branch's packed size (ROADMAP §10.9).
 
 **Issues and crash records.** Planned (ROADMAP §14.10, §22.5): one `workflow_run` filer is the only
 job with `issues: write`; it checks out nothing, runs no repository code, and opens or comments on

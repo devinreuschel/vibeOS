@@ -25,6 +25,11 @@ jobs:
     if: github.event_name == 'workflow_run'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
+    # Scheduled lane 6 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out, so no record is cancelled as pending.
+    concurrency:
+      group: sched-lane-6
+      queue: max
     permissions:
       contents: write  # push the run's record to ci-history (ROADMAP §10.9)
       actions: read  # read the run's jobs, steps and artifacts
@@ -49,6 +54,11 @@ jobs:
     if: github.event_name != 'workflow_run'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
+    # Scheduled lane 6 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out, so no record is cancelled as pending.
+    concurrency:
+      group: sched-lane-6
+      queue: max
     permissions:
       contents: write  # push backfilled records and the rotated branch to ci-history (ROADMAP §10.9)
       actions: read  # list ci's runs and read their jobs, steps and artifacts

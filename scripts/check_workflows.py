@@ -904,6 +904,241 @@ def rule_upstream(tree: Tree) -> list[Problem]:
     return out
 
 
+# L1200 (DESIGN §8.6, Scheduled capacity): the ten scheduled lanes.
+RELEASE = f"{WORKFLOWS_DIR}/release.yml"
+LANE_MAP_HEADER = "| Lane | Reserved for | Jobs |"
+LEDGER_HEADER = (
+    "| Workflow | Cadence | Jobs per run | Job-hours per run | Peak concurrent jobs | Lanes |"
+)
+LANE_RE = re.compile(r"sched-lane-[0-9]")
+RESERVED = ("nightly", "weekly", "scheduled", "history", "rebuilds")
+RESERVED_TIMEOUT_MIN = 330
+LANE_CAPACITY = 100
+
+
+@dataclass(frozen=True)
+class LaneRow:
+    """One lane-map row: its reservation and the workflow files its Jobs cell names."""
+
+    reserved: str
+    workflows: frozenset[str]
+    line: int
+
+
+@dataclass(frozen=True)
+class LedgerRow:
+    """One ledger row, keyed by workflow file name."""
+
+    jobs_per_run: int | None
+    lanes: tuple[str, ...]
+    line: int
+
+
+def _table(md: str, header: str) -> list[tuple[int, list[str]]]:
+    """(1-based line, cells) per row of the table in §8.6 under exactly `header`."""
+    first, text = section(md, "8.6")
+    lines = text.splitlines()
+    at = next((i for i, ln in enumerate(lines) if ln.strip() == header), None)
+    if at is None:
+        return []
+    out = []
+    for i in range(at + 2, len(lines)):
+        ln = lines[i].strip()
+        if not ln.startswith("|"):
+            break
+        out.append((first + i, [c.strip() for c in ln.strip("|").split("|")]))
+    return out
+
+
+def lane_map(text: str) -> dict[str, LaneRow]:
+    """DESIGN §8.6's lane map: lane name to row."""
+    out = {}
+    for no, cells in _table(text, LANE_MAP_HEADER):
+        lane = re.fullmatch(r"`?(sched-lane-[0-9])`?", cells[0]) if cells else None
+        if lane is None or len(cells) != 3:
+            continue
+        wfs = frozenset(re.findall(r"`([\w.-]+\.ya?ml)`", cells[2]))
+        out[lane.group(1)] = LaneRow(cells[1].strip("`"), wfs, no)
+    return out
+
+
+def ledger(text: str) -> dict[str, LedgerRow]:
+    """DESIGN §8.6's ledger: workflow file name to row."""
+    out = {}
+    for no, cells in _table(text, LEDGER_HEADER):
+        if len(cells) != 6:
+            continue
+        m = re.search(r"\d+", cells[2])
+        out[cells[0].strip("`")] = LedgerRow(
+            int(m.group(0)) if m else None, tuple(LANE_RE.findall(cells[5])), no
+        )
+    return out
+
+
+def _scheduled(tree: Tree) -> list[tuple[str, Node]]:
+    """Workflows that run on a schedule or a dispatch, ci.yml and release.yml aside."""
+    out = []
+    for path, wf in tree.workflows.items():
+        if path in (CI, RELEASE):
+            continue
+        on = wf.get("on")
+        if on is None:
+            continue
+        events = {c.key for c in on.children} | set(on.scalars())
+        if events & {"schedule", "workflow_dispatch"}:
+            out.append((path, wf))
+    return out
+
+
+def _hosted(job: Node) -> bool:
+    runs_on = job.get("runs-on")
+    return runs_on is None or "self-hosted" not in runs_on.scalars()
+
+
+def _lane(job: Node) -> str | None:
+    """The job's literal `sched-lane-<n>` group, or None."""
+    conc = job.get("concurrency")
+    group = conc.get("group") if conc is not None and conc.kind == "map" else None
+    value = group.value if group is not None and group.kind == "scalar" else None
+    return value if value is not None and LANE_RE.fullmatch(value) else None
+
+
+def _job_count(job: Node) -> int | None:
+    """How many jobs one run starts for `job`: its matrix's literal axes multiplied,
+    plus its `include` entries; None when the matrix uses an expression."""
+    strategy = job.get("strategy")
+    matrix = strategy.get("matrix") if strategy is not None else None
+    if matrix is None:
+        return 1
+    if matrix.kind != "map":
+        return None
+    product = 1
+    axes = 0
+    includes = 0
+    for axis in matrix.children:
+        if axis.key == "exclude":
+            continue
+        if axis.kind != "seq":
+            return None
+        if axis.key == "include":
+            includes = len(axis.items)
+            continue
+        if any(i.kind != "scalar" or "${{" in (i.value or "") for i in axis.items):
+            return None
+        product *= len(axis.items)
+        axes += 1
+    return (product if axes else 0) + includes
+
+
+def _sched_jobs(tree: Tree) -> Iterator[tuple[str, Node, Node]]:
+    for path, wf in _scheduled(tree):
+        for job in _jobs(wf):
+            if _hosted(job):
+                yield path, wf, job
+
+
+def rule_ledger_row(tree: Tree) -> list[Problem]:
+    """L1200: every scheduled or dispatched workflow has a DESIGN §8.6 ledger row."""
+    rows = ledger(tree.testing_md)
+    out = []
+    for path, wf in _scheduled(tree):
+        if Path(path).name not in rows:
+            msg = f"scheduled workflow {Path(path).name} has no §8.6 ledger row"
+            out.append(Problem(path, wf.line, "ledger_row", msg))
+    return out
+
+
+def rule_lane_capacity(tree: Tree) -> list[Problem]:
+    """L1200: a lane queues at most 100 jobs, so no run puts more than that in one lane."""
+    out = []
+    counts: dict[tuple[str, str], int] = {}
+    for path, _, job in _sched_jobs(tree):
+        lane = _lane(job)
+        n = _job_count(job)
+        if n is None:
+            msg = f"job `{job.key}`: matrix uses an expression; its job count is uncountable"
+            out.append(Problem(path, job.line, "lane_capacity", msg))
+            continue
+        if lane is not None:
+            counts[(path, lane)] = counts.get((path, lane), 0) + n
+    for (path, lane), n in sorted(counts.items()):
+        if n > LANE_CAPACITY:
+            msg = f"{n} jobs of one run in {lane}; a lane holds {LANE_CAPACITY}"
+            out.append(Problem(path, 1, "lane_capacity", msg))
+    doc = "docs/TESTING.md"
+    for name, row in ledger(tree.testing_md).items():
+        if row.jobs_per_run is not None and row.jobs_per_run > LANE_CAPACITY * len(row.lanes):
+            msg = (
+                f"ledger row {name}: {row.jobs_per_run} jobs per run in "
+                f"{len(row.lanes)} lane(s) of {LANE_CAPACITY}"
+            )
+            out.append(Problem(doc, row.line, "lane_capacity", msg))
+    return out
+
+
+def rule_job_lane(tree: Tree) -> list[Problem]:
+    """L1200: a scheduled job declares a literal `sched-lane-<n>` group with `queue: max`.
+
+    GitHub rejects `cancel-in-progress` beside `queue: max`, and a reserved lane
+    holds only jobs that end within 5.5 hours.
+    """
+    lanes = lane_map(tree.testing_md)
+    out = []
+    for path, _, job in _sched_jobs(tree):
+        conc = job.get("concurrency")
+        queue = conc.get("queue") if conc is not None and conc.kind == "map" else None
+        lane = _lane(job)
+        if lane is None or queue is None or queue.value != "max":
+            want = "concurrency: {group: sched-lane-<n>, queue: max}"
+            msg = f"job `{job.key}` declares no `{want}`"
+            out.append(Problem(path, job.line, "job_lane", msg))
+            continue
+        assert conc is not None
+        if conc.get("cancel-in-progress") is not None:
+            msg = f"job `{job.key}`: `cancel-in-progress` with `queue: max`"
+            out.append(Problem(path, job.line, "job_lane", msg))
+        row = lanes.get(lane)
+        if row is not None and row.reserved in RESERVED:
+            t = job.get("timeout-minutes")
+            v = t.value if t is not None else None
+            if v is None or not v.isdigit() or int(v) > RESERVED_TIMEOUT_MIN:
+                msg = (
+                    f"job `{job.key}` in reserved {lane} needs `timeout-minutes` "
+                    f"<= {RESERVED_TIMEOUT_MIN}"
+                )
+                out.append(Problem(path, job.line, "job_lane", msg))
+    return out
+
+
+def rule_row_lane(tree: Tree) -> list[Problem]:
+    """L1200: a scheduled job's lane is one its workflow's ledger row gives it."""
+    rows = ledger(tree.testing_md)
+    out = []
+    for path, _, job in _sched_jobs(tree):
+        lane = _lane(job)
+        row = rows.get(Path(path).name)
+        if lane is None or row is None:
+            continue
+        if lane not in row.lanes:
+            msg = f"job `{job.key}` runs in {lane}, not in its ledger row's lanes {list(row.lanes)}"
+            out.append(Problem(path, job.line, "row_lane", msg))
+    return out
+
+
+def rule_lane_map(tree: Tree) -> list[Problem]:
+    """L1200: every lane a ledger row gives a workflow is one the lane map lists for it."""
+    doc = "docs/TESTING.md"
+    lanes = lane_map(tree.testing_md)
+    out = []
+    for name, row in ledger(tree.testing_md).items():
+        for lane in row.lanes:
+            entry = lanes.get(lane)
+            if entry is None or name not in entry.workflows:
+                msg = f"ledger row {name} names {lane}, which the lane map does not give it"
+                out.append(Problem(doc, row.line, "lane_map", msg))
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
     rule_permissions,
@@ -916,6 +1151,11 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_tiers,
     rule_budget_doc,
     rule_upstream,
+    rule_ledger_row,
+    rule_lane_capacity,
+    rule_job_lane,
+    rule_row_lane,
+    rule_lane_map,
 ]
 
 
