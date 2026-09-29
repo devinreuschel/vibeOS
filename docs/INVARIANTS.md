@@ -353,10 +353,12 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](SM
   window's first 2 MiB is executable, though only the trampoline page (§7.3) is fetched, and only
   during AP bring-up (ROADMAP §10.6, F085).
 - A value copied to user memory has no padding and no uninitialized bytes. Reading a padding byte is
-  undefined behaviour in Rust, and copying one out leaks kernel stack or heap. A typed copy-out takes
-  only a type whose bytes are all initialized, proved at compile time (ROADMAP §10.6); a byte slice
-  passes as it is. Holds today only because every copy-out takes a byte slice built by hand; nothing
-  checks it until that box lands.
+  undefined behaviour in Rust, and copying one out leaks kernel stack or heap. The typed copy-out,
+  `uaccess::copy_to_user_val`, takes only a type bounded by `zerocopy`'s `IntoBytes + Immutable`,
+  whose derive refuses at compile time a type with padding or uninitialized bytes (a `compile_fail`
+  doctest on it copies out a `#[repr(C)]` struct with a hole); the byte form, `copy_to_user`, takes
+  a `&[u8]`. A uapi struct whose Linux layout has an implicit hole declares it as an explicit field
+  that the kernel zeroes (`_pad: [u8; N]`).
 - A second-level translation of guest memory (an EPT or NPT entry on x86_64, a stage-2 entry on
   aarch64) is a mapping of the host frame behind it, since ROADMAP §21.2 backs guest RAM with the
   VMM's address space. Every change or removal of a user PTE (`munmap`, a COW write-protect or

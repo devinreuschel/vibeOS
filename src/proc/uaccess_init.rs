@@ -3,7 +3,7 @@
 //! check, then the port's copy inside its user-access window, whose fault
 //! resumes at an exception-table fixup.
 
-use vibeos::proc::uaccess::{self, Fault};
+use vibeos::proc::uaccess::{self, Fault, Immutable, IntoBytes};
 
 use crate::arch::current::Arch;
 
@@ -13,6 +13,10 @@ pub(crate) fn copy_from_user(dst: &mut [u8], src: u64) -> Result<(), Fault> {
 }
 
 /// Copy `src` to user address `dst`, all or nothing.
+#[expect(
+    dead_code,
+    reason = "C-UACCESS's byte form; ROADMAP §10.6's handler copies (P10-S70) call it"
+)]
 pub(crate) fn copy_to_user(dst: u64, src: &[u8]) -> Result<(), Fault> {
     uaccess::copy_to_user::<Arch>(dst, src)
 }
@@ -33,4 +37,10 @@ pub(crate) fn copy_to_user_partial(dst: u64, src: &[u8]) -> usize {
 /// or `out.len()` when `out` filled before a NUL.
 pub(crate) fn strncpy_from_user(out: &mut [u8], src: u64) -> Result<usize, Fault> {
     uaccess::strncpy_from_user::<Arch>(out, src)
+}
+
+/// Copy `v` to user address `dst`, all or nothing; `T` has no padding or
+/// uninitialized bytes (INVARIANTS §2.4).
+pub(crate) fn copy_to_user_val<T: IntoBytes + Immutable>(dst: u64, v: &T) -> Result<(), Fault> {
+    uaccess::copy_to_user_val::<Arch, T>(dst, v)
 }

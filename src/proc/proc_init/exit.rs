@@ -122,7 +122,7 @@ pub(super) fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
                 // After `with_sched`, with no lock held: the child is
                 // reaped, and a failed copy returns `EFAULT` without
                 // undoing that, as Linux's does (SYSCALL.md §5).
-                if status != 0 && uaccess_init::copy_to_user(status, &st.to_le_bytes()).is_err() {
+                if status != 0 && uaccess_init::copy_to_user_val(status, &st).is_err() {
                     return syscall::neg(EFAULT);
                 }
                 return cpid as i64;

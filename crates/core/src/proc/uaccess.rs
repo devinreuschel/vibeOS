@@ -9,6 +9,8 @@
 
 use core::mem::size_of;
 
+pub use zerocopy::{Immutable, IntoBytes};
+
 use crate::arch::UserAccess;
 use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END};
 use crate::proc::syscall::EFAULT;
@@ -118,6 +120,54 @@ pub fn copy_to_user<A: UserAccess>(dst: u64, src: &[u8]) -> Result<(), Fault> {
     } else {
         Err(Fault)
     }
+}
+
+/// Copy `v` to user address `dst`, all or nothing: the typed form of
+/// [`copy_to_user`]. `IntoBytes` refuses at compile time a type with
+/// padding or uninitialized bytes, so no kernel byte leaks through a hole
+/// (INVARIANTS §2.4). A uapi struct whose Linux layout has an implicit
+/// hole declares it as an explicit field the kernel zeroes.
+///
+/// A `#[repr(C)]` struct with an implicit hole does not build:
+///
+/// ```compile_fail
+/// use vibeos::proc::uaccess::copy_to_user_val;
+/// use zerocopy::{Immutable, IntoBytes};
+///
+/// #[derive(IntoBytes, Immutable)]
+/// #[repr(C)]
+/// struct Hole {
+///     a: u8,
+///     b: u32,
+/// }
+///
+/// let _ = copy_to_user_val::<vibeos::arch::stub::Arch, _>(0x4000_0000, &Hole { a: 1, b: 2 });
+/// ```
+///
+/// The same struct with the hole as an explicit field does:
+///
+/// ```no_run
+/// use vibeos::proc::uaccess::copy_to_user_val;
+/// use zerocopy::{Immutable, IntoBytes};
+///
+/// #[derive(IntoBytes, Immutable)]
+/// #[repr(C)]
+/// struct Hole {
+///     a: u8,
+///     _pad: [u8; 3],
+///     b: u32,
+/// }
+///
+/// let _ = copy_to_user_val::<vibeos::arch::stub::Arch, _>(
+///     0x4000_0000,
+///     &Hole { a: 1, _pad: [0; 3], b: 2 },
+/// );
+/// ```
+pub fn copy_to_user_val<A: UserAccess, T: IntoBytes + Immutable>(
+    dst: u64,
+    v: &T,
+) -> Result<(), Fault> {
+    copy_to_user::<A>(dst, v.as_bytes())
 }
 
 /// Copy from user address `src` into `dst` and return the bytes copied
@@ -409,6 +459,17 @@ mod tests {
         assert_eq!(copy_from_user::<Fake>(&mut got, BASE), Ok(()));
         assert_eq!(&got, b"abcdefgh");
         assert_eq!(copy_from_user::<Fake>(&mut got, BASE + P - 4), Err(Fault));
+    }
+
+    #[test]
+    fn copy_to_user_val_bytes() {
+        setup(BASE, P as usize, u64::MAX);
+        assert_eq!(
+            copy_to_user_val::<Fake, u32>(BASE + 4, &0x1122_3344),
+            Ok(())
+        );
+        assert_eq!(peek(BASE + 4, 4), [0x44, 0x33, 0x22, 0x11]);
+        assert_eq!(copy_to_user_val::<Fake, u32>(BASE + P - 2, &1), Err(Fault));
     }
 
     #[test]
