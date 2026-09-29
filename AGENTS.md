@@ -59,6 +59,8 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
 
 Kernel target is built-in `x86_64-unknown-none` (B2). `./setup.sh` runs `rustup target add`.
 
+`make check` needs `ruff` and `mypy` at the versions the `check` job in `.github/workflows/ci.yml` pins, and `fsck.fat` (`dosfstools`) for the FAT host tests, and it fails when one is missing. `VIBEOS_ALLOW_MISSING_TOOLS=1` is a gate switch, not one of the `VIBEOS_*` QEMU overrides `harness.py` reads: the Makefile and the FAT host test read it, skip each check whose tool is missing, and print the check they skipped. CI never sets it. `make check` also builds `vibeos-core` with its MSRV toolchain, which `./setup.sh` installs, and fails without it on the same terms.
+
 `VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. Makefile `?=` defaults are the source for `make run`. One reader: `tests/harness/harness.py` (`env_config`).
 
 macOS: `brew install qemu xorriso nasm python dosfstools`. `make test-unit` runs `vibeos-core` on the
@@ -84,6 +86,8 @@ architectures' rebuilds have built those ports twice
 ([ROADMAP §24.2](docs/ROADMAP.md#242-ports)), so land it just after a release.
 Do not re-introduce an undated nightly except the weekly canary job in
 `smp-stress.yml`. Not a drive-by.
+A bump of the nightly, Kani, or Verus re-derives the MSRV (BOOT.md §3.1); the same PR sets
+`rust-version` in `crates/core/Cargo.toml`, which `setup.sh`, the `check` job, and `make check` read.
 
 ## Do not
 

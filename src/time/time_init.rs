@@ -465,6 +465,7 @@ pub unsafe fn init() {
     };
 
     st.tsc_per_ms = per_ms;
+    crate::arch::x86_64::publish_tsc_per_ms(per_ms);
     st.source = source;
     st.clock.write(0, rdtsc_ser(use_rdtscp));
 

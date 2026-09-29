@@ -145,6 +145,8 @@ GONE: list[tuple[str, str]] = [
     ("crates/core/src/sync/lock.rs: fn can_acquire", "the rank checker enforces DESIGN"),
     ("crates/core/src/sync/lock.rs: fn release_mask", "the rank checker enforces DESIGN"),
     ("heap_then_buddy_is_forbidden", "the heap ranks first"),
+    ("find_features", "`vibeos-core` builds with its MSRV"),
+    ("FEATURE_ATTR", "`vibeos-core` builds with its MSRV"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

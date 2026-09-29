@@ -1,3 +1,4 @@
+pub mod current;
 #[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,
