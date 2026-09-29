@@ -8,10 +8,11 @@ use core::ops::Range;
 use limine::memmap::{Entry, MEMMAP_USABLE};
 use limine::request::{
     ExecutableAddressRequest, FramebufferRequest, FramebufferResponse, HhdmRequest, MemmapRequest,
-    RsdpRequest,
+    ModulesRequest, RsdpRequest,
 };
 
 use crate::cell::BootCell;
+use vibeos::limits::MAX_BOOT_MODULES;
 use vibeos::paging::HHDM_BASE;
 
 #[cfg(feature = "kernel_tests")]
@@ -50,6 +51,12 @@ static EXEC_ADDR: ExecutableAddressRequest = ExecutableAddressRequest::new();
 #[unsafe(link_section = ".limine_requests")]
 static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
 
+// The files `limine.conf`'s `module_path:` keys load: the initrd on
+// x86_64 (DESIGN §3.3).
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static MODULES: ModulesRequest = ModulesRequest::new();
+
 // Kernel image bounds from linker.ld (DESIGN §3.4). Virtual.
 unsafe extern "C" {
     static __kernel_vma_start: u8;
@@ -75,6 +82,11 @@ pub struct BootInfo {
     pub rsdp_phys: u64,
     memmap: &'static [&'static Entry],
     fb: Option<&'static FramebufferResponse>,
+    /// Physical `(base, end)` of each module, in response order; the first
+    /// `nmod` are filled. Taken once in [`capture`], before anything writes
+    /// module memory, so no slice over it outlives `capture`.
+    modules: [(u64, u64); MAX_BOOT_MODULES],
+    nmod: usize,
 }
 
 impl BootInfo {
@@ -102,6 +114,41 @@ impl BootInfo {
             })
         })
     }
+
+    /// Every module Limine loaded, as physical ranges, in response order.
+    pub fn modules(&self) -> impl Iterator<Item = Range<u64>> {
+        self.modules
+            .iter()
+            .take(self.nmod)
+            .map(|&(base, end)| base..end)
+    }
+
+    /// The initrd: the first module, if Limine loaded one.
+    pub fn initrd(&self) -> Option<Range<u64>> {
+        self.modules().next()
+    }
+}
+
+/// The physical ranges of the modules in `MODULES`' response, from each
+/// file's HHDM address and length; one that is not an HHDM address, or
+/// past [`MAX_BOOT_MODULES`], is skipped. Never `File::path()` or
+/// `cmdline()`, which unwrap.
+fn module_ranges() -> ([(u64, u64); MAX_BOOT_MODULES], usize) {
+    let mut out = [(0u64, 0u64); MAX_BOOT_MODULES];
+    let mut n = 0usize;
+    let files = MODULES.response().map_or(&[][..], |r| r.modules());
+    for f in files {
+        let data = f.data();
+        let range = (data.as_ptr() as u64)
+            .checked_sub(HHDM_BASE)
+            .and_then(|base| Some((base, base.checked_add(data.len() as u64)?)));
+        let (Some(range), Some(slot)) = (range, out.get_mut(n)) else {
+            continue;
+        };
+        *slot = range;
+        n += 1;
+    }
+    (out, n)
 }
 
 static INFO: BootCell<BootInfo> = BootCell::new();
@@ -134,6 +181,7 @@ pub fn capture() -> &'static BootInfo {
     // Base revision 3 hands back a physical RSDP, other revisions an HHDM VA.
     let rsdp_raw = rsdp.address as u64;
     let kernel_len = (&raw const __kernel_vma_end as u64) - (&raw const __kernel_vma_start as u64);
+    let (modules, nmod) = module_ranges();
     // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
     // the one write, first thing in `normal_boot_tail` on the BSP, before
     // any reader and long before SMP.
@@ -143,6 +191,8 @@ pub fn capture() -> &'static BootInfo {
             rsdp_phys: rsdp_raw.checked_sub(HHDM_BASE).unwrap_or(rsdp_raw),
             memmap: memmap.entries(),
             fb: FRAMEBUFFER.response(),
+            modules,
+            nmod,
         })
     };
     INFO.get()

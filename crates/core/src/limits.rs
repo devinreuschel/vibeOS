@@ -86,6 +86,8 @@ pub const MAX_COMMANDS: usize = 48;
 pub const MAX_TOKENS: usize = 16;
 /// Bytes of an ELF file `user_init` loads from the initrd.
 pub const MAX_ELF: u64 = 64 * 1024;
+/// Limine modules `boot::BootInfo` records; the initrd is the first.
+pub const MAX_BOOT_MODULES: usize = 4;
 /// `PT_LOAD` segments in one image (`elf::Image`).
 pub const MAX_ELF_LOADS: usize = 8;
 

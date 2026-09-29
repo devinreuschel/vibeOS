@@ -18,7 +18,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use vibeos::block::BlockError;
-use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, INITRD_BYTES, Node, SEC};
+use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, Node, SEC};
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps,
     InodeRef, Key, MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
@@ -110,18 +110,63 @@ pub(super) static SLOTS: [Slot; MAX_VOLS] = [Slot::empty(), Slot::empty()];
 pub(super) static ALLOC: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
 static MNTS: SpinMutex<[Mnt; MNT_MAX]> =
     SpinMutex::with_rank([Mnt::EMPTY, Mnt::EMPTY], RANK_DEVICE);
-static INITRD: SpinMutex<[u8; INITRD_BYTES]> = SpinMutex::with_rank([0; INITRD_BYTES], RANK_DEVICE);
+/// The initrd module's bytes in the physmap, set once by [`init`]. Whoever
+/// holds this lock is the one accessor of those bytes (`Io`'s
+/// `Media::Initrd` arms); `None` while there is no initrd.
+static INITRD: SpinMutex<Option<Span>> = SpinMutex::with_rank(None, RANK_DEVICE);
 
-/// Run `f` on the initrd image.
-pub(super) fn with_initrd<R>(f: impl FnOnce(&mut [u8; INITRD_BYTES]) -> R) -> R {
+/// A module's physmap VA and length.
+#[derive(Clone, Copy)]
+pub(super) struct Span {
+    va: u64,
+    len: usize,
+}
+
+/// Run `f` on the initrd's span, holding the lock that owns its bytes.
+pub(super) fn with_initrd<R>(f: impl FnOnce(&mut Option<Span>) -> R) -> R {
     let mut g = INITRD.lock();
     f(&mut g)
 }
+
+/// The physmap VA and length of the initrd module (`boot::BootInfo::initrd`),
+/// only when the physmap maps all of it: below `paging_init::map_end`, or
+/// above it through the leaves `paging_init::install` adds for modules. The
+/// module is not usable RAM, so no frame allocator hands its frames out.
+fn initrd_span() -> Option<(u64, usize)> {
+    let r = crate::boot::info().initrd()?;
+    let len = usize::try_from(r.end.checked_sub(r.start)?).ok()?;
+    let va = r.start.checked_add(crate::paging_init::HHDM_BASE)?;
+    let last = r.end.checked_sub(1)?;
+    let mapped = |pa: u64| {
+        let va = pa.checked_add(crate::paging_init::HHDM_BASE)?;
+        let (got, _, _) = crate::paging_init::translate(vibeos::paging::VirtAddr(va))?;
+        (got.as_u64() == pa).then_some(())
+    };
+    if len == 0 {
+        return None;
+    }
+    if r.end > crate::paging_init::map_end() {
+        // `install` maps a module's pages in order, so its first and last
+        // page being there means all of it is.
+        mapped(r.start)?;
+        mapped(last)?;
+    }
+    Some((va, len))
+}
+
+/// Where sector `lba` lies in `span`: its VA, when all of it is inside.
+fn sector_va(span: &Span, lba: u32) -> Result<u64, FatError> {
+    let off = (lba as usize).checked_mul(SEC).ok_or(FatError::Inval)?;
+    let end = off.checked_add(SEC).ok_or(FatError::Inval)?;
+    if end > span.len {
+        return Err(FatError::Io);
+    }
+    span.va.checked_add(off as u64).ok_or(FatError::Io)
+}
+
 static LIVE: AtomicBool = AtomicBool::new(false);
 /// Slots in use, which the in-guest test `fat_initrd` reads.
 pub(super) static NVOL: AtomicU8 = AtomicU8::new(0);
-
-const INITRD_RO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/initrd.fat"));
 
 struct Io {
     back: Media,
@@ -134,7 +179,9 @@ impl Disk for Io {
 
     fn nsectors(&self) -> u32 {
         match self.back {
-            Media::Initrd => (INITRD_BYTES / SEC) as u32,
+            Media::Initrd => with_initrd(|span| {
+                span.map_or(0, |s| u32::try_from(s.len / SEC).unwrap_or(u32::MAX))
+            }),
             Media::Dev(cache_init::DEV_RAM0) => block_init::capacity_sectors() as u32,
             Media::Dev(cache_init::DEV_VDA) => virtio_blk_init::capacity_sectors() as u32,
             Media::Dev(_) => 0,
@@ -143,36 +190,46 @@ impl Disk for Io {
 
     fn read(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), FatError> {
         match self.back {
-            Media::Initrd => {
-                let ss = SEC;
-                let off = (lba as usize).checked_mul(ss).ok_or(FatError::Inval)?;
-                let end = off.checked_add(ss).ok_or(FatError::Inval)?;
-                with_initrd(|data| {
-                    if end > data.len() || buf.len() != ss {
-                        return Err(FatError::Io);
-                    }
-                    buf.copy_from_slice(&data[off..end]);
-                    Ok(())
-                })
-            }
+            Media::Initrd => with_initrd(|span| {
+                let span = span.as_ref().ok_or(FatError::Io)?;
+                let va = sector_va(span, lba)?;
+                if buf.len() != SEC {
+                    return Err(FatError::Io);
+                }
+                // SAFETY: the initrd's sector at `va` is `SEC` bytes of the
+                // module, mapped by the physmap and never handed out as
+                // RAM (`fs::fat_init::initrd_span`), inside the span
+                // (`fs::fat_init::sector_va`); the `INITRD` lock held here
+                // makes this the one accessor of those bytes, and `buf` is
+                // `SEC` bytes of this thread's own memory, checked here.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(va as *const u8, buf.as_mut_ptr(), SEC);
+                }
+                Ok(())
+            }),
             Media::Dev(dev) => cache_init::read(dev, lba as u64, buf).map_err(fat_io_err),
         }
     }
 
     fn write(&mut self, lba: u32, buf: &[u8]) -> Result<(), FatError> {
         match self.back {
-            Media::Initrd => {
-                let ss = SEC;
-                let off = (lba as usize).checked_mul(ss).ok_or(FatError::Inval)?;
-                let end = off.checked_add(ss).ok_or(FatError::Inval)?;
-                with_initrd(|data| {
-                    if end > data.len() || buf.len() != ss {
-                        return Err(FatError::Io);
-                    }
-                    data[off..end].copy_from_slice(buf);
-                    Ok(())
-                })
-            }
+            Media::Initrd => with_initrd(|span| {
+                let span = span.as_ref().ok_or(FatError::Io)?;
+                let va = sector_va(span, lba)?;
+                if buf.len() != SEC {
+                    return Err(FatError::Io);
+                }
+                // SAFETY: the initrd's sector at `va` is `SEC` writable
+                // bytes of the module, mapped by the physmap and never
+                // handed out as RAM (`fs::fat_init::initrd_span`), inside
+                // the span (`fs::fat_init::sector_va`); the `INITRD` lock
+                // held here makes this the one accessor of those bytes, and
+                // `buf` is `SEC` bytes, checked here.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(buf.as_ptr(), va as *mut u8, SEC);
+                }
+                Ok(())
+            }),
             Media::Dev(dev) => cache_init::write(dev, lba as u64, buf).map_err(fat_io_err),
         }
     }
@@ -601,20 +658,15 @@ pub fn live() -> bool {
     LIVE.load(Ordering::Acquire)
 }
 
+/// Mount the initrd module as the root, or leave `LIVE` false when Limine
+/// loaded none (or the physmap does not cover it) and `fs_init` mounts the
+/// ramfs root.
 pub fn init() {
-    let ok_image = with_initrd(|buf| {
-        if INITRD_RO.len() == INITRD_BYTES {
-            buf.copy_from_slice(INITRD_RO);
-            true
-        } else {
-            buf.fill(0);
-            fat::mkinitrd(buf).is_ok()
-        }
-    });
-    if !ok_image {
+    let Some((va, len)) = initrd_span() else {
         LIVE.store(false, Ordering::Release);
         return;
-    }
+    };
+    with_initrd(|span| *span = Some(Span { va, len }));
     let mut io = Io {
         back: Media::Initrd,
     };
@@ -857,7 +909,4 @@ fn recount() {
     NVOL.store(n, Ordering::Release);
 }
 
-const _: () = {
-    assert!(INITRD_BYTES.is_multiple_of(SEC));
-    assert!(MAX_PATH >= MNT_PATH);
-};
+const _: () = assert!(MAX_PATH >= MNT_PATH);

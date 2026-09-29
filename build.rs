@@ -4,13 +4,11 @@
 //!
 //!   - linker.ld as an absolute `-T` so the link works from any cwd
 //!     (DESIGN §9.1).
-//!   - `VIBEOS_KSYMS` / `VIBEOS_INITRD` staged by the Makefile. Empty
-//!     fallbacks so `cargo check` works without `make`.
+//!   - `VIBEOS_KSYMS` staged by the Makefile. An empty fallback so
+//!     `cargo check` works without `make`.
 
 use std::env;
 use std::path::PathBuf;
-
-const INITRD_BYTES: usize = 64 * 1024;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -39,26 +37,5 @@ fn main() {
              static KSYMS: [vibeos::symtab::Entry; 0] = [\n];\n",
         )
         .unwrap();
-    }
-
-    println!("cargo:rerun-if-env-changed=VIBEOS_INITRD");
-    let initrd = out.join("initrd.fat");
-    if let Ok(src) = env::var("VIBEOS_INITRD") {
-        println!("cargo:rerun-if-changed={src}");
-        let body = std::fs::read(&src).unwrap_or_else(|e| {
-            panic!("read VIBEOS_INITRD {src}: {e}");
-        });
-        if body.len() != INITRD_BYTES {
-            panic!(
-                "VIBEOS_INITRD {src} is {} bytes, expected {INITRD_BYTES}; run `make`, not bare `cargo build`",
-                body.len()
-            );
-        }
-        std::fs::write(&initrd, body).unwrap();
-    } else {
-        println!(
-            "cargo:warning=VIBEOS_INITRD unset; embedding empty initrd. Run `make`, not bare `cargo build`."
-        );
-        std::fs::write(&initrd, [0u8; INITRD_BYTES]).unwrap();
     }
 }

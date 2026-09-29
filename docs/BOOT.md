@@ -18,9 +18,10 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
 | Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins) |
 
-`make` is the usual entry. It stages `build/initrd.fat` and passes `VIBEOS_INITRD` into `build.rs`.
-Bare `cargo check` / `cargo build` works: `build.rs` passes `-T$CARGO_MANIFEST_DIR/linker.ld` and
-embeds an empty 64 KiB initrd if the env is unset. Host tests: `make test-unit` (`cargo test -p vibeos-core
+`make` is the usual entry. It builds `build/initrd.fat` with hostlib `mkinitrd` and stages it on the
+ISO as `/boot/initrd.fat`, which `limine.conf`'s `module_path:` loads as a Limine module; the kernel
+embeds no initrd. Bare `cargo check` / `cargo build` works: `build.rs` passes
+`-T$CARGO_MANIFEST_DIR/linker.ld`, and a kernel booted with no module mounts a ramfs root. Host tests: `make test-unit` (`cargo test -p vibeos-core
 --features std --target $HOST`). `tests/hostlib` is mkfs/fsck/`mkinitrd` only.
 
 `make` pins `CARGO_TARGET_DIR` to `./target`. Some environments point it at a shared cache, which
@@ -77,7 +78,8 @@ loader never sees the request, so the response pointer is null and the kernel di
 with no explanation. Check the base revision before trusting any other response. After that handshake,
 `boot::capture` reads every response once into a write-once `BootInfo` (`BootCell`). Nothing else
 touches the Limine request statics, and no Limine type leaves `boot`: consumers get the kernel's
-physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive the rest themselves.
+physical span, the RSDP, and `usable()` / `framebuffers()` / `modules()` iterators (with `initrd()`, the
+first module), and derive the rest themselves.
 
 | Request | What we need from it |
 |---------|---------------------|
@@ -87,6 +89,7 @@ physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive
 | HHDM | Higher-half direct map offset. `virt = phys + offset` for any physical access before our own tables exist. |
 | Executable address | Physical and virtual base of the loaded kernel, so we can map ourselves and exclude ourselves from the allocator. |
 | RSDP | Physical pointer to the ACPI RSDP. Gates all of ACPI, APIC, HPET, SMP. |
+| Modules | The files `limine.conf`'s `module_path:` keys load, as HHDM addresses and lengths: the x86_64 initrd, `/boot/initrd.fat`. `capture` keeps each one's physical range, never a slice over it, and never calls `path()` or `cmdline()`, which unwrap. Optional: with none the root is a ramfs. |
 | SMP (optional) | Limine can bring up APs for us. We do it ourselves; see [section 7](SMP.md#7-smp) for why. |
 
 Firmware reclaimable regions stay out of the free lists. Reclaiming them is a few megabytes for a
@@ -258,8 +261,9 @@ not ship and build without it.
 `make isos` builds them all. Each ISO recipe reads only its own named ELF, so a test build cannot be
 packaged as production. The repository root holds no build product.
 
-`make` stages `build/iso_root_<variant>/` with the kernel ELF, `limine.conf`, and the Limine BIOS
-and UEFI artifacts, then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid
+`make` stages `build/iso_root_<variant>/` with the kernel ELF, `build/initrd.fat` as
+`boot/initrd.fat`, `limine.conf`, and the Limine BIOS and UEFI artifacts
+(`scripts/mkiso.sh <kernel-elf> <initrd> <out.iso> <staging-dir>`), then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid
 means the same image boots BIOS and UEFI, which matters for real hardware later.
 
 The Makefile lists every `.rs` and `.asm` under `src/` and `crates/core/src/` as a prerequisite. A hand-maintained short list

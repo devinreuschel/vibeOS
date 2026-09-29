@@ -105,8 +105,12 @@ global).
 The physmap is capped at 8 GiB (`PHYSMAP_CAP`) regardless of what the memory map says. Some firmware
 describes MMIO BARs as multi-terabyte regions, and walking that to build page tables at boot does not
 finish. `paging_init::physmap_extent` sets `map_end` to the 2 MiB-rounded maximum of the usable-RAM
-end, the kernel image end, and each framebuffer's end, capped at 8 GiB, and ignores raw memory map
-entries. `acpi_init::map_gap` then adds 4 KiB leaves above `map_end` for ACPI tables (write-back) and
+end, the kernel image end, each framebuffer's end, and each Limine module's end (the initrd, which
+`fat_init` reads and writes in place), capped at 8 GiB, and ignores raw memory map entries. Limine loads
+modules top-down, so on a guest with RAM past the cap the initrd lies above `map_end`; `install`
+then maps each module's pages above `map_end` at their physmap alias, in 4 KiB leaves where they are
+not 2 MiB aligned, and `fat_init` mounts the initrd only once it finds its first and last byte
+mapped. `acpi_init::map_gap` then adds 4 KiB leaves above `map_end` for ACPI tables (write-back) and
 for the LAPIC, I/O APIC, and HPET (UC), with no cap. RAM above the cap never enters the buddy:
 free-list nodes, page tables, and heap pages are all reached through the physmap after `mov cr3`, so a
 frame past it triple-faults on first touch. The physmap covers a framebuffer only below the cap, so for a
