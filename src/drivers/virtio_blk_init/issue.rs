@@ -92,7 +92,7 @@ pub(super) enum Issued {
 /// the queue lock to wake their waiters and picks again. Small, so the pass's frame
 /// stays far below a top half's 4 KiB share of a kernel stack: `pump` runs
 /// on a submitter's stack, under the FAT write path (DESIGN §4.5).
-pub(super) const PUMP_BATCH: usize = 4;
+pub(super) const PUMP_BATCH: usize = 2;
 
 impl VirtioBlk {
     pub(super) fn issue(&self, blk: &mut Blk, req: Request) -> Issued {
@@ -458,5 +458,8 @@ pub fn submit(
     len: usize,
     w: &IoWaiter,
 ) -> Result<(), BlockError> {
-    blk.start(blk.build(op, lba, nsect, ptr, len, w)?)
+    if blk.submit_req(blk.build(op, lba, nsect, ptr, len, w)?)? {
+        blk.pump();
+    }
+    Ok(())
 }

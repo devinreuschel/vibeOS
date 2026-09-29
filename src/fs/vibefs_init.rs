@@ -767,6 +767,14 @@ pub fn mkfs_dev(name: &str) -> Result<(), FsError> {
     vibefs::Disk::flush(&mut io).map_err(Error::to_fs)
 }
 
+/// Whether `r` carries a vibefs. Out of line, so its block buffer's frame
+/// is gone before the mount's (DESIGN §4.5: the mount runs on 16 KiB).
+#[inline(never)]
+fn probe_dev(r: &BlockRef) -> bool {
+    let media = Media::Dev(r.clone());
+    vibefs::probe(&mut Io { back: &media })
+}
+
 /// Mount the vibefs volume on block device `name` on `at`. A device whose
 /// entry holds a vibefs volume shares it, and `Vfs` shares its superblock
 /// (`Busy` when `ro` differs); one holding another filesystem's volume is
@@ -782,12 +790,10 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<(), FsError> {
             .mount_fs(None, at.as_bytes(), &VIBE_FS, dev, ro, Some(h))
             .map(|_| ());
     }
-    let vol = new_volume(Media::Dev(r.clone()), |v, io| {
-        if !vibefs::probe(io) {
-            return Err(Error::Inval);
-        }
-        vibefs::mount(io, v)
-    })?;
+    if !probe_dev(&r) {
+        return Err(FsError::Inval);
+    }
+    let vol = new_volume(Media::Dev(r.clone()), |v, io| vibefs::mount(io, v))?;
     blockdev_init::set_holder(&r, vol.clone()).map_err(|e| match e {
         BlockError::Exists => FsError::Busy,
         _ => FsError::Io,

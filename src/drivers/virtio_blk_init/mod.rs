@@ -850,13 +850,6 @@ impl VirtioBlk {
         Ok(req)
     }
 
-    fn start(&self, req: Request) -> Result<(), BlockError> {
-        if self.submit_req(req)? {
-            self.pump();
-        }
-        Ok(())
-    }
-
     fn blocking(
         &self,
         op: Op,
@@ -866,6 +859,31 @@ impl VirtioBlk {
         len: usize,
     ) -> Result<(), BlockError> {
         self.blocking_req(op, lba, nsect, ptr, len, false)
+    }
+
+    /// Build a request tied to `w` and queue it; whether the caller must
+    /// pump. Out of line, so the request is gone from the stack before the
+    /// pump's frame goes on it (a mount runs on 16 KiB, DESIGN §4.5).
+    #[inline(never)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a request's fields, as `build` takes them, and its FUA flag"
+    )]
+    fn queue_new(
+        &self,
+        op: Op,
+        lba: u64,
+        nsect: u32,
+        ptr: usize,
+        len: usize,
+        fua: bool,
+        w: &IoWaiter,
+    ) -> Result<bool, BlockError> {
+        let mut req = self.build(op, lba, nsect, ptr, len, w)?;
+        if fua {
+            req = req.with_fua();
+        }
+        self.submit_req(req)
     }
 
     /// Submit and wait, yielding while the queue is full. `fua` marks a write.
@@ -881,12 +899,13 @@ impl VirtioBlk {
         let mut spins = 0u32;
         loop {
             let w = IoWaiter::new();
-            let mut req = self.build(op, lba, nsect, ptr, len, &w)?;
-            if fua {
-                req = req.with_fua();
-            }
-            match self.start(req) {
-                Ok(()) => return w.wait(),
+            match self.queue_new(op, lba, nsect, ptr, len, fua, &w) {
+                Ok(run) => {
+                    if run {
+                        self.pump();
+                    }
+                    return w.wait();
+                }
                 Err(BlockError::QueueFull) => {
                     spins = spins.saturating_add(1);
                     if spins > 1_000_000 {
