@@ -181,7 +181,7 @@ build/kernels/vibeos-ktest.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
 build/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
 endif
 
-.PHONY: help check check-python check-msrv all kernel iso isos repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
+.PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi
@@ -196,6 +196,7 @@ help:
 	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
 	  '  user                  Rust user programs, as build/user/<name> (ROADMAP §10.5)' \
 	  '  isos                  every ISO variant, as build/vibeos*.iso' \
+	  '  release-artifacts     v* release images (release profile) into OUT=<dir>' \
 	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
 	  '  ci-budget             scheduled lanes under 60% busy and tier medians under 60 s (ci-history)' \
 	  '  run                   boot production ISO in a QEMU window, COM1 on the terminal (VIBEOS_* apply)' \
@@ -362,6 +363,21 @@ user/tests: user/tests.bin scripts/mkuserelf.py
 iso: $(ISO)
 
 isos: $(ISOS)
+
+# v* release images (ROADMAP §10.1, §10.2; BOOT.md §3.5): the production ISO in
+# the release profile, copied to OUT. The ISO and named-ELF paths do not name
+# the profile, so a newer dev build would be reused: remove, rebuild, verify
+# that the image's kernel is the release link's output.
+RELEASE_ELF := $(CARGO_TARGET_DIR)/$(TARGET)/release/vibeos
+release-artifacts:
+	@if [ -z "$(OUT)" ]; then echo "release-artifacts: set OUT=<dir>" >&2; exit 2; fi
+	@if [ -n "$$(ls -A "$(OUT)" 2>/dev/null)" ]; then echo "release-artifacts: $(OUT) is not empty" >&2; exit 2; fi
+	rm -f $(ISO) $(KERNEL_ELF)
+	$(MAKE) CARGO_PROFILE=release $(ISO)
+	mkdir -p "$(OUT)" && cp $(ISO) "$(OUT)/vibeos.iso"
+	rm -f build/release-kernel.elf
+	xorriso -osirrox on -indev "$(OUT)/vibeos.iso" -extract /boot/vibeos build/release-kernel.elf
+	cmp build/release-kernel.elf $(RELEASE_ELF)
 
 # Two clean builds of one commit, compared byte for byte (ROADMAP §10.2,
 # DESIGN §3.6). REPRO_ARGS: see scripts/repro_build.py.
