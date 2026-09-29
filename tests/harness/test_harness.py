@@ -25,6 +25,8 @@ from tests.harness.harness import (
     MCE_MCG_STATUS,
     MCE_UC_STATUS,
     OVMF_BOOT_ARGS,
+    PANIC_EXIT_S,
+    PANIC_EXIT_STATUS,
     DeadlineReader,
     HarnessError,
     Marker,
@@ -37,6 +39,8 @@ from tests.harness.harness import (
     contains_panic,
     drain_panic_tail,
     effective_accel_name,
+    halt_test_markers,
+    is_dump_banner,
     mce_monitor_cmd,
     overlay_env,
     qemu_argv,
@@ -294,6 +298,161 @@ class TestSmpApCount(unittest.TestCase):
         with self.assertRaises(HarnessError) as cm:
             check_fake(lines, markers)
         self.assertIn("before 'smp_done', expected exactly 2", str(cm.exception))
+
+
+# A real `make test-e2e-panic` boot's serial (the panic_exit build).
+PANIC_BOOT = [
+    "limine: Loading executable `boot():/boot/vibeos`...",
+    "vibeOS: serial online",
+    "vibeOS: limine: rev 3 ok",
+    "vibeOS: boot: panic-test armed",
+]
+PANIC_DUMP = [
+    "vibeOS: panic:",
+    "vibeOS: panic: at src/main.rs:110:9",
+    "vibeOS: panic: msg: intentional panic-test trip",
+    "vibeOS: regs: rbp=0xffff800007f92f70 rsp=0xffff800007f92ee0 rflags=0x82",
+    "vibeOS: panic: thread cpu=0 tid=0 <early>",
+    "vibeOS: log: last 3 (0 dropped)",
+    "vibeOS: logrec: 2980393398tsc cpu0 info vibeOS: serial online",
+    "vibeOS: logrec: 2981355280tsc cpu0 info vibeOS: limine: rev 3 ok",
+    "vibeOS: logrec: 2981513364tsc cpu0 info vibeOS: boot: panic-test armed",
+    "vibeOS: backtrace:",
+    "  0xffffffff80001a5b __rustc::rust_begin_unwind+0x1b",
+    "vibeOS: panic: halted",
+]
+PANIC_NEEDLES: tuple[str | tuple[str, ...], ...] = (
+    "vibeOS: panic: at",
+    "intentional panic-test",
+    ("vibeOS: logrec:", "serial online"),
+    "rust_begin_unwind",
+    "vibeOS: panic: halted",
+)
+BANNER_KINDS = (
+    "vibeOS: panic:",
+    "vibeOS: exception: vector 3 rip=0xffffffff80001000 cs=0x8",
+    "vibeOS: #UD rip=0xffffffff80001000 cs=0x8",
+    "vibeOS: nmi rip=0xffffffff80001000 cs=0x8",
+    "vibeOS: #DB rip=0xffffffff80001000 cs=0x8",
+    "vibeOS: #GP rip=0xffffffff80001000 cs=0x8 err=0x0",
+    "vibeOS: #PF rip=0xffffffff80001000 cs=0x8 err=0x2 cr2=0x0",
+    "vibeOS: #DF rip=0xffffffff80001000 cs=0x8 err=0x0",
+    "vibeOS: #MC rip=0xffffffff80001000 cs=0x8",
+)
+
+
+class TestExpectPanic(unittest.TestCase):
+    """expect_panic: pre-panic markers, one banner, exit status 35 (F141)."""
+
+    def expect(
+        self,
+        lines: list[str],
+        *,
+        markers: list[Marker] | None = None,
+        end: str = "eof",
+        exit_code: int | None = PANIC_EXIT_STATUS,
+        needles: tuple[str | tuple[str, ...], ...] = (),
+    ) -> tuple[RunResult, FakeLineSource]:
+        src = FakeLineSource.from_lines(lines, end=end, exit_code=exit_code)
+        result = run_qemu_and_check(
+            FAKE_CFG,
+            halt_test_markers() if markers is None else markers,
+            expect_panic=True,
+            dump_needles=needles,
+            line_source=src,
+        )
+        return result, src
+
+    def test_real_dump_passes_unkilled(self) -> None:
+        result, src = self.expect(PANIC_BOOT + PANIC_DUMP, needles=PANIC_NEEDLES)
+        self.assertEqual(result.matched, ["serial_online", "limine_ok", "panic_test_armed"])
+        self.assertEqual(result.panic_line, "vibeOS: panic:")
+        self.assertEqual(result.exit_code, 35)
+        self.assertFalse(src.killed)
+        self.assertFalse(src.quit_sent)
+
+    def test_exit_wait_deadline(self) -> None:
+        t0 = time.monotonic()
+        _, src = self.expect(PANIC_BOOT + PANIC_DUMP)
+        self.assertEqual(len(src.deadlines), 1)
+        self.assertGreaterEqual(src.deadlines[0], t0 + PANIC_EXIT_S - 0.1)
+
+    def test_marker_only_in_logrec_replay_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.expect(PANIC_BOOT[:3] + PANIC_DUMP)
+        self.assertIn(
+            "missing marker 'panic_test_armed' before the first panic signature",
+            str(cm.exception),
+        )
+
+    def test_count_ignores_logrec_replay(self) -> None:
+        markers = [
+            Marker("vibeOS: smp: done", "smp_done", exactly_before=(AP_ONLINE, 1)),
+        ]
+        lines = [AP_ONLINE, "vibeOS: smp: done", "vibeOS: #GP rip=0x1 err=0x0"]
+        lines += [f"vibeOS: logrec: 46ms cpu0 info {AP_ONLINE}", "vibeOS: panic: halted"]
+        result, _ = self.expect(lines, markers=markers)
+        self.assertEqual(result.matched, ["smp_done"])
+
+    def test_exit_zero_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.expect(PANIC_BOOT + PANIC_DUMP, exit_code=0)
+        self.assertIn("panic exit status 0, expected 35", str(cm.exception))
+
+    def test_halted_then_timeout_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.expect(PANIC_BOOT + PANIC_DUMP, end="timeout", exit_code=None)
+        self.assertIn(
+            "QEMU did not exit within 10 s of 'vibeOS: panic: halted'", str(cm.exception)
+        )
+
+    def test_dump_ended_before_halted_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.expect(PANIC_BOOT + PANIC_DUMP[:-1], exit_code=1)
+        msg = str(cm.exception)
+        self.assertIn("dump ended before 'vibeOS: panic: halted'", msg)
+        self.assertIn("QEMU exited with status 1", msg)
+
+    def test_two_banners_fail(self) -> None:
+        lines = PANIC_BOOT + PANIC_DUMP[:3] + ["vibeOS: #PF rip=0x1 err=0x0 cr2=0x0"]
+        with self.assertRaises(HarnessError) as cm:
+            self.expect(lines + PANIC_DUMP[3:])
+        self.assertIn("expected one dump banner, saw 2", str(cm.exception))
+
+    def test_reentered_fails(self) -> None:
+        lines = PANIC_BOOT + PANIC_DUMP[:3] + ["vibeOS: panic: reentered"]
+        with self.assertRaises(HarnessError) as cm:
+            self.expect(lines + ["vibeOS: panic: halted"])
+        self.assertIn("expected one dump banner, saw 2", str(cm.exception))
+
+    def test_signature_without_banner_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.expect(PANIC_BOOT + PANIC_DUMP[1:])
+        self.assertIn("expected one dump banner, saw 0", str(cm.exception))
+
+    def test_no_panic_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.expect(PANIC_BOOT)
+        self.assertIn("expected a panic signature; none seen", str(cm.exception))
+
+    def test_each_banner_kind_passes(self) -> None:
+        for banner in BANNER_KINDS:
+            with self.subTest(banner=banner):
+                self.assertTrue(is_dump_banner(banner))
+                lines = PANIC_BOOT + [banner, "vibeOS: panic: thread cpu=0 tid=0"]
+                result, _ = self.expect(lines + ["vibeOS: panic: halted"])
+                self.assertEqual(result.panic_line, banner)
+
+    def test_non_banners(self) -> None:
+        for line in (
+            "vibeOS: logrec: 1ms cpu0 info vibeOS: panic:",
+            "vibeOS: logrec: 1ms cpu0 info vibeOS: #GP rip=0x1",
+            "vibeOS: panic: at src/main.rs:1:1",
+            "vibeOS: panic: halted",
+            "x vibeOS: panic:",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(is_dump_banner(line))
 
 
 QEMU_LOAD_ERR = "qemu-system-x86_64: -bios x.fd: could not load"

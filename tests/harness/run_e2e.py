@@ -227,6 +227,7 @@ def main() -> int:
         print(f"[e2e]   . {name}", file=sys.stderr)
     if expect_panic and result.panic_line:
         print(f"[e2e]   . panic seen: {result.panic_line!r}", file=sys.stderr)
+        print(f"[e2e]   . panic exit status {result.exit_code}", file=sys.stderr)
     if not expect_panic and not gp_test:
         try:
             _check_pci_qemu_set(result.lines)

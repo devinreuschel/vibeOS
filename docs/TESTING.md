@@ -264,15 +264,20 @@ fd 2, and a fuzzer writes random bytes. ROADMAP §10.2 makes the harness scan fr
 (§2.6). Before the kernel's first framed line it fails fast on Limine's panic line, the one failure
 that cannot be framed.
 
-Expected-panic e2e waits for `vibeOS: panic: halted` so the dump (regs, thread, last log records,
-backtrace) is in the captured log, then checks dump needles. Planned (ROADMAP §10.7, F135): before
+Expected-panic e2e matches boot markers only against the lines before the first panic signature (or
+dump banner), so the dump's `vibeOS: logrec:` replay of earlier records cannot satisfy one, and a
+marker still unmatched there fails the run (F141). From that line on it counts dump banners, the line
+that opens a dump, and requires exactly one: the bare `vibeOS: panic:` of a Rust panic,
+`vibeOS: exception: vector <n> rip=0x…`, `vibeOS: <kind> rip=0x…` for `#UD`, `nmi`, `#DB`, `#GP`,
+`#PF`, `#DF`, and `#MC`, or `vibeOS: panic: reentered` (`DUMP_BANNER_RE`); the other signature lines
+of a dump do not count. Planned (ROADMAP §10.7, F135): before
 `panic: halted` the dump prints one `vibeOS: panic: cpu N stopped (ipi|poll|nmi|panic)` or
 `vibeOS: panic: cpu N not stopped` line for each other online CPU (§2.5 step 1), and the F135
 variant checks them. `panic_exit` writes isa-debug-exit
-`0x11` so QEMU leaves instead of sitting in `hlt`. The harness kills QEMU at `panic: halted` instead of
-waiting for that exit, so it never checks status 35. It also matches boot markers on every line,
-including the dump's `vibeOS: logrec:` replay of earlier records, so a marker printed out of order
-before the panic can match again in the dump (ROADMAP §10.2, F141).
+`0x11` so QEMU leaves instead of sitting in `hlt`. The harness reads through `vibeOS: panic: halted`,
+so the dump (regs, thread, last log records, backtrace) is in the captured log, then gives QEMU up to
+10 s (`PANIC_EXIT_S`) to exit and requires status 35 (`PANIC_EXIT_STATUS`); then it checks the dump
+needles.
 
 Planned (ROADMAP §10.7, §11.7), the event rule. The panic path signals pvpanic
 ([§2.5](INVARIANTS.md#25-panic-policy) steps 6 and 7), QEMU runs with `-action panic=pause`, and the harness

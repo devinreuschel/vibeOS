@@ -68,6 +68,22 @@ PANIC_SIGNATURES: tuple[str, ...] = (
 
 # End of the dump. expect_panic waits for this so backtrace/logrec are in the log.
 PANIC_DONE = "vibeOS: panic: halted"
+# How long QEMU has after PANIC_DONE to exit with PANIC_EXIT_STATUS.
+PANIC_EXIT_S = 10.0
+
+# The line that opens a dump, mirroring the headers `src/log/panic.rs` writes:
+# `panic` (the bare `PANIC_BANNER`), `begin_dump`'s `panic: reentered`,
+# `exception_vec`, and `exception_halt` for each kind `src/arch/x86_64/idt.rs`
+# passes it. Anchored at the start, so a `vibeOS: logrec:` replay never counts.
+DUMP_BANNER_RE = re.compile(
+    r"^vibeOS: (?:panic:(?: reentered)?$"
+    r"|exception: vector \d+ rip=0x"
+    r"|(?:#UD|nmi|#DB|#GP|#PF|#DF|#MC) rip=0x)"
+)
+
+
+def is_dump_banner(line: str) -> bool:
+    return DUMP_BANNER_RE.match(line) is not None
 
 
 class HarnessError(Exception):
@@ -719,9 +735,11 @@ def run_qemu_and_check(
     On success (all markers seen in order), issues `quit` through the QEMU
     monitor so the process exits quickly.
 
-    `expect_panic=True` inverts the panic scanner: exactly one panic
-    signature must appear, treated as success. Markers are still checked
-    against the lines observed *before* the panic banner.
+    `expect_panic=True`: the dump starts at the first line with a panic
+    signature or a dump banner. Markers and `exactly_before` counts see only
+    the lines before it, so the dump's logrec replay cannot satisfy one. The
+    dump must hold exactly one banner and reach `PANIC_DONE`; QEMU must then
+    exit within `PANIC_EXIT_S` with `PANIC_EXIT_STATUS`; then `dump_needles`.
 
     `line_source` replaces QEMU (C-LINESOURCE): the PATH and ISO checks are
     skipped and the lines, exit status and stderr come from the source.
@@ -732,10 +750,15 @@ def run_qemu_and_check(
 
     result = RunResult()
     marker_idx = 0
-    panic_seen: str | None = None
+    dump_at: int | None = None  # index in result.lines of the dump's first line
+    banners = 0
     panic_done = False
     exact = {m.exactly_before[0]: m.exactly_before[1] for m in markers if m.exactly_before}
     counts = dict.fromkeys(exact, 0)
+
+    def fail(msg: str) -> HarnessError:
+        src.kill()
+        return HarnessError(msg)
 
     try:
         while True:
@@ -749,41 +772,43 @@ def run_qemu_and_check(
                 break
 
             result.lines.append(line)
+            sig = next((s for s in panic_signatures if s in line), None)
 
-            if not expect_panic:
-                for sig in panic_signatures:
-                    if sig in line:
-                        result.panic_line = line
-                        src.kill()
-                        raise HarnessError(
-                            f"panic signature {sig!r} in: {line!r}"
-                        )
-            else:
-                for sig in panic_signatures:
-                    if sig in line and panic_seen is None:
-                        panic_seen = line
-                        result.panic_line = line
-                if PANIC_DONE in line:
+            if dump_at is None and sig is not None and not expect_panic:
+                result.panic_line = line
+                raise fail(f"panic signature {sig!r} in: {line!r}")
+            if dump_at is None and expect_panic and (sig is not None or is_dump_banner(line)):
+                dump_at = len(result.lines) - 1
+                result.panic_line = line
+                if marker_idx < len(markers):
+                    raise fail(
+                        f"missing marker {markers[marker_idx].name!r} before the first "
+                        f"panic signature: {line!r}{serial_tail(result.lines)}"
+                    )
+
+            if dump_at is not None:
+                if is_dump_banner(line):
+                    banners += 1
+                    if banners > 1:
+                        raise fail(f"expected one dump banner, saw {banners}: {line!r}")
+                if PANIC_DONE in line and not panic_done:
                     panic_done = True
+                    src.set_deadline(time.monotonic() + PANIC_EXIT_S)
+                continue
 
-            # Counted before the first panic signature only, so a dump's
-            # logrec replay of earlier lines is not counted again.
-            if panic_seen is None:
-                for needle, n in exact.items():
-                    if needle in line:
-                        counts[needle] += 1
-                        if counts[needle] > n:
-                            src.kill()
-                            raise HarnessError(
-                                f"extra {needle!r} line ({counts[needle]} seen, "
-                                f"expected exactly {n}): {line}"
-                            )
+            for needle, n in exact.items():
+                if needle in line:
+                    counts[needle] += 1
+                    if counts[needle] > n:
+                        raise fail(
+                            f"extra {needle!r} line ({counts[needle]} seen, "
+                            f"expected exactly {n}): {line}"
+                        )
 
             if marker_idx < len(markers) and markers[marker_idx].matches(line):
                 eb = markers[marker_idx].exactly_before
                 if eb is not None and counts[eb[0]] != eb[1]:
-                    src.kill()
-                    raise HarnessError(
+                    raise fail(
                         f"{counts[eb[0]]} {eb[0]!r} lines before "
                         f"{markers[marker_idx].name!r}, expected exactly {eb[1]}"
                     )
@@ -793,16 +818,15 @@ def run_qemu_and_check(
                     # Done. Ask QEMU to exit; kill hard if it drags its feet.
                     src.quit()
                     break
-
-            if expect_panic and panic_seen is not None and marker_idx == len(markers):
-                # Wait for the dump trailer so backtrace / logrec are captured.
-                if panic_done:
-                    src.kill()
-                    break
     finally:
         result.exit_code = _reap(src)
         result.stderr = src.stderr_text()
 
+    if result.timed_out and panic_done:
+        raise HarnessError(
+            f"QEMU did not exit within {PANIC_EXIT_S:g} s of {PANIC_DONE!r}"
+            f"{_qemu_report(result, exited=False)}"
+        )
     if result.timed_out:
         missing = (
             markers[marker_idx].name if marker_idx < len(markers) else "none"
@@ -819,13 +843,24 @@ def run_qemu_and_check(
             f"{_qemu_report(result, exited=True)}"
         )
 
-    if expect_panic and panic_seen is None:
-        raise HarnessError("expected a panic signature; none seen")
-
-    if expect_panic and dump_needles:
-        dump = dump_after_panic(result.lines, panic_signatures)
-        check_dump_needles(dump, dump_needles)
-
+    if not expect_panic:
+        return result
+    if dump_at is None:
+        raise HarnessError(
+            f"expected a panic signature; none seen{_qemu_report(result, exited=True)}"
+        )
+    if not panic_done:
+        raise HarnessError(
+            f"dump ended before {PANIC_DONE!r}{_qemu_report(result, exited=True)}"
+        )
+    if banners != 1:
+        raise HarnessError(f"expected one dump banner, saw {banners}{serial_tail(result.lines)}")
+    if result.exit_code != PANIC_EXIT_STATUS:
+        raise HarnessError(
+            f"panic exit status {result.exit_code}, expected {PANIC_EXIT_STATUS}"
+            f"{_qemu_report(result, exited=True)}"
+        )
+    check_dump_needles(result.lines[dump_at:], dump_needles)
     return result
 
 
@@ -1155,6 +1190,8 @@ def run_qemu_console_input(
 # isa-debug-exit at 0xf4: host status = (value << 1) | 1. DESIGN §8.2.
 ISA_DEBUG_PASS = 33  # write 0x10
 ISA_DEBUG_FAIL = 35  # write 0x11
+# The `panic_exit` build writes 0x11 after `panic: halted`.
+PANIC_EXIT_STATUS = ISA_DEBUG_FAIL
 
 KTEST_BEGIN = "vibeOS: ktest: begin"
 KTEST_END = "vibeOS: ktest: end"
