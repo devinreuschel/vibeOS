@@ -334,6 +334,51 @@ class TestConsoleInput(unittest.TestCase):
         self.assertTrue(src.killed)
 
 
+class TestConsoleTail(unittest.TestCase):
+    """The console boot reads serial 3 s past its last reply."""
+
+    def test_panic_after_last_reply_fails(self) -> None:
+        src = FakeLineSource.from_lines(
+            CONSOLE_OK_LINES + ["vibeOS: vibefs: commit", "vibeOS: panic:"], end="timeout"
+        )
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        msg = str(cm.exception)
+        self.assertIn("in the 3.0 s after the last reply: vibeOS: panic:", msg)
+        self.assertTrue(src.killed)
+        self.assertFalse(src.quit_sent)
+
+    def test_extra_panic_counts_in_tail(self) -> None:
+        cfg = QemuConfig(iso="fake.iso", extra_panic=("vibeOS: sched: overdue",))
+        src = FakeLineSource.from_lines(
+            CONSOLE_OK_LINES + ["vibeOS: sched: overdue tid 7"], end="timeout"
+        )
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(cfg, line_source=src)
+        self.assertIn("overdue tid 7", str(cm.exception))
+
+    def test_timeout_passes_and_quits(self) -> None:
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES + ["chatter"], end="timeout")
+        t0 = time.monotonic()
+        result = run_qemu_console_input(FAKE_CFG, line_source=src)
+        self.assertTrue(src.quit_sent)
+        self.assertFalse(src.killed)
+        self.assertEqual(result.lines[-1], "chatter")
+        self.assertEqual(len(src.deadlines), 1)
+        self.assertGreaterEqual(src.deadlines[0], t0 + 2.9)
+
+    def test_eof_in_tail_fails_with_status(self) -> None:
+        src = FakeLineSource.from_lines(
+            CONSOLE_OK_LINES, end="eof", exit_code=3, stderr="qemu: gone"
+        )
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        msg = str(cm.exception)
+        self.assertIn("QEMU exited in the 3.0 s after the last reply", msg)
+        self.assertIn("status 3", msg)
+        self.assertIn("qemu: gone", msg)
+
+
 class TestPanicSignatureScan(unittest.TestCase):
     def test_matches_exception_mnemonic(self) -> None:
         self.assertTrue(contains_panic("cpu halted on #PF at ..."))

@@ -1006,6 +1006,36 @@ def run_qemu_inject_mce(
 SERIAL_ECHO_TOKEN = "serial-ok"
 PS2_ECHO_TOKEN = "ps2-ok"
 SHELL_READY_NEEDLE = "vibeOS: shell ready"
+# Writeback, deferred reclaim and vibefs commits run on after `shell ready`
+# (DESIGN §8.3), so the console boot keeps reading this long past its last reply.
+CONSOLE_TAIL_S = 3.0
+
+
+def _console_tail(
+    src: LineSource, result: RunResult, sigs: tuple[str, ...], window_s: float
+) -> None:
+    """Read serial for `window_s`: fail on a panic signature or on QEMU's exit."""
+    src.set_deadline(time.monotonic() + window_s)
+    while True:
+        kind, line = src.next_event()
+        if kind == "timeout":
+            return
+        if kind == "eof":
+            result.exit_code = _reap(src)
+            result.stderr = src.stderr_text()
+            raise HarnessError(
+                f"console input: QEMU exited in the {window_s} s after the last reply"
+                f"{_qemu_report(result, exited=True)}"
+            )
+        result.lines.append(line)
+        for sig in sigs:
+            if sig in line:
+                result.panic_line = line
+                src.kill()
+                raise HarnessError(
+                    f"panic signature {sig!r} in the {window_s} s after the last reply: "
+                    f"{line}"
+                )
 
 
 def run_qemu_console_input(
@@ -1069,6 +1099,8 @@ def run_qemu_console_input(
             if saw_serial and not saw_ps2 and line.strip() == PS2_ECHO_TOKEN:
                 saw_ps2 = True
                 result.matched.append("ps2_echo")
+                # A later reply step goes before the tail.
+                _console_tail(src, result, panic_signatures, CONSOLE_TAIL_S)
                 src.quit()
                 break
     finally:

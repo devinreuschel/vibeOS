@@ -220,8 +220,8 @@ sits between `console ok` and `shell ready` so `lspci` is registered before the 
 `block: vda <n> sectors` and `vdapN` when the ktest disk is present (not on the production e2e `pc`
 set). The same blind spot follows the last marker: writeback, deferred reclaim, and vibefs commits
 keep running after `shell ready`, and a panic there is invisible to a harness that stops reading at
-it. Planned (ROADMAP §10.2): the console-input boot keeps reading serial for 3 s after its last
-reply and fails on a panic signature in that window.
+it. So the console-input boot keeps reading serial for 3 s after its last reply (`CONSOLE_TAIL_S`)
+and fails on a panic signature in that window, or on QEMU's exit, before it quits QEMU.
 
 With `-smp N`, additionally:
 
