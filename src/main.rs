@@ -96,7 +96,7 @@ use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init};
 use drivers::virtio_blk_init;
 use fs::{fat_init, file_init, fs_init, vibefs_init};
 use irq::{ipi_init, irq_init};
-use log::{diag, ksyms, log_init, panic, serial};
+use log::{diag, log_init, panic, serial};
 use mm::{heap_init, kva_init, paging_init, pmm_init};
 use proc::{addr_space_init, proc_init, syscall_init, user_init};
 use sched::{sched_init, thread_init, work_init};

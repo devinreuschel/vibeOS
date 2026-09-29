@@ -539,12 +539,13 @@ harness's order depend on scheduling; and Linux's variable-length descriptor and
 96-byte records do not need and which loom models less easily.
 
 Symbols come from a two-pass link (Makefile `KERNEL_VARIANT`): `nm` output from the first link fills
-an in-image `.rodata` table (`KSYMS`) that the second link builds in. Rule: every function has the same address
-in both links. Not yet enforced: nothing compares them, and in the panic-test build the
-reference to the filled table compiles larger than the empty one and shifts every later function, so
-that ISO's table mis-names frames (ROADMAP §10.2, F084). Planned (ROADMAP §10.2, F084): `KSYMS`
-moves to its own `.ksyms` section, which the kernel finds only through the linker-defined
-`__ksyms_start` and `__ksyms_end`, so the code that reads it is the same size empty and filled.
+an in-image table (`KSYMS`) that the second link builds in. Rule: every function has the same address
+in both links. `gen_ksyms.py` emits `KSYMS` as a `#[used]` static in its own `.ksyms` section, which
+`linker.ld` places after `.rodata` and no kernel code names: `log::ksyms::lookup` finds the entries
+only through the linker-defined `__ksyms_start` and `__ksyms_end`, never through a slice whose length
+is a compile-time constant, so the code that reads the table is the same size empty and filled. Every
+`KERNEL_VARIANT` recipe then reruns `gen_ksyms.py --check` on the final ELF and fails when the table
+differs from the one it linked (ROADMAP §10.2, F084).
 Frame pointers come from `-C force-frame-pointers=yes` in `.cargo/config.toml` (§3.1); there is no
 target JSON.
 

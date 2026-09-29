@@ -221,7 +221,8 @@ with. Two requirements that are easy to get wrong:
   without mapping code writable.
 
 Export at minimum: `__kernel_vma_start`, `__kernel_vma_end`, and per-section start/end pairs for
-`.text`, `.rodata`, `.data`, `.bss`.
+`.text`, `.rodata`, `.data`, `.bss`, and `__ksyms_start` and `__ksyms_end` around the `.ksyms`
+section, which sits after `.rodata` and before `__rodata_end`, so paging maps it (§2.5).
 
 ## 3.5 Profiles
 
@@ -240,14 +241,54 @@ not rely on the optimizer. Planned (ROADMAP §10.2): a `make check` script bound
 frame at a value recorded here. The bound is a screen for one oversized frame; §4.5's measured
 budget is what bounds a whole path.
 
+Neither profile writes a host path into what ships. Every cargo build the Makefile runs for a shipped
+artifact goes through `CARGO_SHIP`, which sets Cargo's `trim-paths = "all"` for the profile being
+built (`-Ztrim-paths --config 'profile.<name>.trim-paths="all"'`). Cargo then passes rustc a
+`--remap-path-prefix` for the checkout, the sysroot and `$CARGO_HOME`, so panic `Location` strings,
+DWARF, and the ThinLTO `.llvm.<hash>` names `gen_ksyms.py` copies into the ksyms table carry none.
+Trim-paths is unstable on the pinned nightly, so the setting lives on the command line: a manifest's
+`cargo-features = ["trim-paths"]` would stop every stable cargo, the MSRV check's included, from
+reading the workspace. It moves into `Cargo.toml`'s profiles once Cargo stabilizes it. Host tools do
+not ship and build without it.
+
 ## 3.6 ISO and QEMU
+
+`make` builds every variant in the one `target/`, copies each variant's ELF to
+`build/kernels/vibeos-<variant>.elf`, and writes `build/vibeos.iso` and `build/vibeos-<variant>.iso`;
+`make isos` builds them all. Each ISO recipe reads only its own named ELF, so a test build cannot be
+packaged as production. The repository root holds no build product.
 
 `make` stages `build/iso_root_<variant>/` with the kernel ELF, `limine.conf`, and the Limine BIOS
 and UEFI artifacts, then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid
 means the same image boots BIOS and UEFI, which matters for real hardware later.
 
 The Makefile lists every `.rs` and `.asm` under `src/` and `crates/core/src/` as a prerequisite. A hand-maintained short list
-produced stale ISOs when new subsystem directories appeared.
+produced stale ISOs when new subsystem directories appeared. The host tools (`mkfs-vibefs`,
+`fsck-vibefs` and the other hostlib binaries) and `build/initrd.fat` build from `vibeos-core` too, so
+their rules list `$(HOSTLIB_DEPS)`: every kernel source, `Cargo.lock`, the manifests, and
+`tests/hostlib/src/bin/*.rs`.
+
+Builds are reproducible: two builds of one commit give byte-identical kernels, initrd and ISOs
+(ROADMAP §10.2, F151, F152). No build time or builder identity lands in them. The Makefile exports
+`SOURCE_DATE_EPOCH`: the caller's value, else the commit's time (`git log -1 --format=%ct`), else
+`1262304000`. `mkinitrd` stamps the files it adds with that time, in destination order whatever the
+`--add` order. `mkiso.sh` stages every file above its time pin, which sets each staged path's times to
+the epoch, and runs `xorriso` with `-r`, so Rock Ridge records uid and gid 0, and with
+`--modification-date` and `--set_all_file_dates` at the epoch's UTC time, which also fixes the volume
+UUID. No identifier is random either: `--gpt_disk_guid` is a constant in `mkiso.sh`, from which xorriso
+derives the partition GUIDs, and after `limine bios-install`, which seeds the MBR disk signature at
+`0x1B8` from `time(NULL)`, `scripts/iso_disk_id.py` overwrites it with the first 4 bytes of the SHA-256
+of the image with those bytes zeroed. That is safe because `limine.conf` names its files with `boot():`,
+never by disk signature. The xorriso version lands in the volume descriptor, so `mkiso.sh` records it
+beside each ISO as `<iso>.xorriso-version`, which a release publishes. An incremental build keeps the
+epoch of the commit it last rebuilt a file at; compare clean builds.
+
+`make repro` does (`scripts/repro_build.py`, run by a scheduled job): it clones the commit twice, at
+checkout paths of different lengths, each with its own `CARGO_HOME` and `RUSTUP_HOME`, a copy of
+`limine/` and no `CARGO_TARGET_DIR`, runs `./setup.sh` and `make isos` in each, and fails unless every
+`build/kernels/*.elf`, `build/*.iso` and `build/initrd.fat` matches byte for byte and holds none of the
+checkouts, `$HOME`, or either `CARGO_HOME` or `RUSTUP_HOME`. `REPRO_ARGS=--share-rustup` reuses the
+caller's toolchain for a local run; `REPRO_ARGS=--scan-only` only scans this checkout's `build/`.
 
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP
 rather than discovering AP bugs only in CI. Full flag set in [section 8.4](TESTING.md#84-qemu-flags).
