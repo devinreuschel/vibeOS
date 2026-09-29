@@ -8,9 +8,14 @@ id; a later attempt of the run replaces its file.
 
 Modes (one `if` branch each in `main`):
 
+- default: the completeness check. It fails, naming each, on any `ci` run on
+  `main` since the history landed that has no record, and on a tombstoned run
+  a gate entry needs as proof of the gated commit.
 - `--event PATH`: the `workflow_run` writer. It reads only the run id from the
   event file, checks the workflow's name, path and repository against
   `WORKFLOWS`, and builds the record from the Actions API.
+- `--backfill [--limit N]`: records, or tombstones, for listed `ci` runs on
+  `main` that neither the branch nor an archive holds, newest first.
 
 Trust rules: a fork's pull request sets a run's branch, title and artifacts, so
 no run field reaches a shell line (subprocesses take argv lists), commit
@@ -36,10 +41,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import zipfile
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -74,6 +80,11 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
 }
 
 ARCH_TOKENS = ("x86_64", "aarch64")
+HISTORY_WORKFLOW = ".github/workflows/ci-history.yml"
+MAIN = "main"
+MAIN_EVENTS = frozenset({"push", "workflow_dispatch"})
+BACKFILL_LIMIT = 200
+GATE_MAP = re.compile(r"^(phase-\d+|common)\.toml$")
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 
@@ -397,7 +408,12 @@ def read_artifacts(api: Api, repo: str, run_id: int) -> Artifacts:
     """The run's `results-*`, `runner-*` and `commit-input` artifacts, each at
     most `MAX_ARTIFACT_BYTES` as listed and as downloaded."""
     arts = Artifacts()
-    for a in paged(api, f"/repos/{repo}/actions/runs/{run_id}/artifacts", "artifacts"):
+    try:
+        listed = list(paged(api, f"/repos/{repo}/actions/runs/{run_id}/artifacts", "artifacts"))
+    except ApiError as e:
+        arts.warnings.append(f"run {run_id}: artifacts not listed (HTTP {e.status})")
+        return arts
+    for a in listed:
         name, aid, size = a.get("name"), a.get("id"), a.get("size_in_bytes")
         if not isinstance(name, str) or not isinstance(aid, int) or a.get("expired"):
             continue
@@ -681,20 +697,20 @@ class HistoryRepo:
                 continue
             for p in sorted(d.glob("*.json")):
                 rec = self._read(p, key)
-                if rec is not None:
+                if rec is None:
+                    self.invalid.append(str(p.relative_to(self.workdir)))
+                else:
                     yield rec
 
-    def _read(self, p: Path, key: str) -> dict[str, Any] | None:
-        rel = str(p.relative_to(self.workdir))
+    @staticmethod
+    def _read(p: Path, key: str) -> dict[str, Any] | None:
         if not p.stem.isdigit():
-            self.invalid.append(rel)
             return None
         try:
             obj = json.loads(p.read_bytes())
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            obj = None
+            return None
         if not valid_record(obj, key, int(p.stem)):
-            self.invalid.append(rel)
             return None
         assert isinstance(obj, dict)
         return obj
@@ -708,6 +724,202 @@ class HistoryRepo:
     def has(self, workflow: str, run_id: int) -> bool:
         p = self.workdir / record_path(workflow, run_id)
         return p.is_file() and self._read(p, workflow) is not None
+
+
+# --- completeness -------------------------------------------------------------
+
+
+def landing_commit(api: Api, repo: str) -> tuple[str, datetime] | None:
+    """The oldest commit reachable from `main` that touches the history
+    workflow, and its committer date; None before the history lands."""
+    oldest: dict[str, Any] | None = None
+    for c in paged(api, f"/repos/{repo}/commits", "commits",
+                   {"sha": MAIN, "path": HISTORY_WORKFLOW}):
+        oldest = c
+    if oldest is None:
+        return None
+    sha = oldest.get("sha")
+    commit = oldest.get("commit")
+    committer = commit.get("committer") if isinstance(commit, dict) else None
+    when = parse_time(committer.get("date")) if isinstance(committer, dict) else None
+    if not isinstance(sha, str) or when is None:
+        raise HistoryError("the landing commit has no sha or date")
+    return sha, when
+
+
+def descends(api: Api, repo: str, base: str, sha: str) -> bool:
+    """`sha` is `base` or a descendant of it (the Compare API)."""
+    body = api.json(f"/repos/{repo}/compare/{base}...{sha}")
+    return isinstance(body, dict) and body.get("status") in ("ahead", "identical")
+
+
+def on_main(run: Mapping[str, Any], repo: str) -> bool:
+    """A push or dispatch run of `main` in this repository, completed. A fork's
+    pull request from its own `main` is not one."""
+    return (
+        run.get("head_branch") == MAIN
+        and run.get("event") in MAIN_EVENTS
+        and head_repo(run) == repo
+        and run.get("status") == "completed"
+    )
+
+
+def _months(start: date, end: date) -> Iterator[tuple[date, date]]:
+    """Calendar-month windows covering `start..end`, newest first."""
+    first = end.replace(day=1)
+    while first >= start.replace(day=1):
+        nxt = (first + timedelta(days=32)).replace(day=1)
+        yield max(first, start), min(nxt - timedelta(days=1), end)
+        first = (first - timedelta(days=1)).replace(day=1)
+
+
+def main_runs(
+    api: Api,
+    repo: str,
+    workflow: str,
+    since: datetime | None = None,
+    now: datetime | None = None,
+) -> Iterator[dict[str, Any]]:
+    """The workflow's completed runs on `main`, newest first, listed one month
+    of `created` at a time (a filtered list returns at most 1,000 runs). With
+    no `since`, from the workflow's creation."""
+    file = WORKFLOWS[workflow].path.rsplit("/", 1)[-1]
+    base = f"/repos/{repo}/actions/workflows/{file}"
+    if since is None:
+        since = parse_time(api.json(base).get("created_at"))
+        if since is None:
+            raise HistoryError(f"{file}: no created_at")
+    end = (now or datetime.now(UTC)).date()
+    for lo, hi in _months(since.date(), end):
+        params = {"branch": MAIN, "created": f"{lo.isoformat()}..{hi.isoformat()}"}
+        for run in paged(api, f"{base}/runs", "workflow_runs", params):
+            if on_main(run, repo):
+                yield run
+
+
+def gate_job_entries(gates_dir: Path) -> set[str]:
+    """The `WORKFLOWS` keys named by `job = {workflow, job}` entries of the
+    gate maps (`phase-<N>.toml`, `common.toml`; C-GATEMAP). `ci` and `ci.yml`
+    name the same workflow. Empty until a gate map exists."""
+    out: set[str] = set()
+    if not gates_dir.is_dir():
+        return out
+    by_name = {k: k for k in WORKFLOWS}
+    for k, spec in WORKFLOWS.items():
+        by_name[spec.path.rsplit("/", 1)[-1]] = k
+        by_name[spec.path] = k
+    for p in sorted(gates_dir.iterdir()):
+        if not GATE_MAP.match(p.name):
+            continue
+        try:
+            data = tomllib.loads(p.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            raise HistoryError(f"{p}: {e}") from e
+        lines = data.get("line", [])
+        for line in lines if isinstance(lines, list) else []:
+            entries = line.get("entry", []) if isinstance(line, dict) else []
+            for entry in entries if isinstance(entries, list) else []:
+                job = entry.get("job") if isinstance(entry, dict) else None
+                wf = job.get("workflow") if isinstance(job, dict) else None
+                if isinstance(wf, str):
+                    key = by_name.get(wf) or by_name.get(wf.removesuffix(".yaml") + ".yml")
+                    if key is not None:
+                        out.add(key)
+    return out
+
+
+def check_complete(
+    api: Api,
+    repo: str,
+    history: HistoryRepo,
+    gated: str | None,
+    workflows_needed: set[str],
+    workflow: str = "ci",
+    now: datetime | None = None,
+) -> list[str]:
+    """One line per `workflow` run on `main` since the history landed that has
+    no valid record or tombstone, and per tombstoned run a gate entry needs:
+    one that proves `gated` (`gatelib.run_proves_commit`) when no full record
+    with conclusion `success` proves it."""
+    landing = landing_commit(api, repo)
+    if landing is None:
+        return []
+    base, landed = landing
+    records = history.records(workflow)
+    held = {r["run_id"]: r for r in records}
+    proven = bool(gated) and any(
+        "tombstone" not in r
+        and r.get("conclusion") == "success"
+        and gatelib.run_proves_commit(r, gated or "")
+        for r in records
+    )
+    problems: list[str] = []
+    for run in main_runs(api, repo, workflow, landed, now):
+        run_id = run.get("id")
+        created = parse_time(run.get("created_at"))
+        if not isinstance(run_id, int) or created is None or created < landed:
+            continue
+        rec = held.get(run_id)
+        if rec is None:
+            if history.has(workflow, run_id):
+                continue  # archived
+            head = str(run.get("head_sha", ""))
+            if HEX40.fullmatch(head) and descends(api, repo, base, head):
+                problems.append(
+                    f"{workflow} run {run_id} ({head[:12]}, {run.get('created_at')}) "
+                    "has no record on ci-history"
+                )
+            continue
+        if (
+            "tombstone" in rec
+            and workflow in workflows_needed
+            and gated
+            and gatelib.run_proves_commit(rec, gated)
+            and not proven
+        ):
+            problems.append(
+                f"{workflow} run {run_id} is a tombstone ({rec['tombstone']}) but a gate "
+                f"entry needs it as proof of {gated[:12]}"
+            )
+    return problems
+
+
+# --- backfill -----------------------------------------------------------------
+
+
+def backfill(
+    api: Api, repo: str, history: HistoryRepo, limit: int = BACKFILL_LIMIT,
+    workflow: str = "ci", now: datetime | None = None,
+) -> tuple[int, int]:
+    """Write, in one commit, the record of each listed `workflow` run on `main`
+    that neither the branch nor an archive holds, or a tombstone when its jobs
+    are gone (404, 410, or none), newest first, at most `limit` of them.
+    Returns (records, tombstones)."""
+    files: dict[str, bytes] = {}
+    written = tombs = 0
+    for run in main_runs(api, repo, workflow, None, now):
+        if written + tombs >= limit:
+            break
+        run_id = run.get("id")
+        if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
+            continue
+        if history.has(workflow, run_id):
+            continue
+        try:
+            rec = build_record(api, repo, workflow, run_id)
+        except ApiError as e:
+            if e.status not in (404, 410):
+                raise
+            rec = tombstone(run, workflow, f"the jobs API returned {e.status}")
+        if not rec["jobs"] and "tombstone" not in rec:
+            rec = tombstone(run, workflow, "the jobs API returned no jobs")
+        if "tombstone" in rec:
+            tombs += 1
+        else:
+            written += 1
+        files[record_path(workflow, run_id)] = encode(rec)
+    history.commit_files(files, f"backfill {workflow}: {written} records, {tombs} tombstones")
+    return written, tombs
 
 
 # --- output -------------------------------------------------------------------
@@ -743,16 +955,36 @@ def _repository() -> str:
     return m.group(1)
 
 
+def local_head() -> str | None:
+    """`git rev-parse HEAD` when the tool runs inside a checkout of the tree."""
+    top = gatelib.git(ROOT, "rev-parse", "--show-toplevel", check=False).strip()
+    if not top or Path(top).resolve() != ROOT:
+        return None
+    return gatelib.git(ROOT, "rev-parse", "HEAD", check=False).strip() or None
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         prog="ci_history.py",
-        description="CI history on the ci-history branch (ROADMAP §10.9).",
+        description="CI history on the ci-history branch (ROADMAP §10.9). With no mode, "
+        "the completeness check: fail on a ci run on main since the history landed "
+        "that has no record.",
     )
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument(
         "--event", metavar="PATH", type=Path,
         help="record the workflow_run event's run (the history workflow's record job)",
     )
+    mode.add_argument(
+        "--backfill", action="store_true",
+        help="record listed ci runs on main the history lacks, or tombstone them",
+    )
+    ap.add_argument("--limit", type=int, default=BACKFILL_LIMIT,
+                    help=f"--backfill: at most N runs (default {BACKFILL_LIMIT})")
+    ap.add_argument("--gated", metavar="SHA",
+                    help="default mode: the gated commit (default: HEAD of this checkout)")
+    ap.add_argument("--gates", metavar="DIR", type=Path,
+                    help="default mode: the gate maps' directory (default tests/gates)")
     ap.add_argument("--history", metavar="DIR", type=Path, help="work tree of the branch")
     ap.add_argument("--remote", metavar="URL", help="remote holding the branch")
     return ap.parse_args(argv)
@@ -783,8 +1015,21 @@ def main(argv: list[str] | None = None) -> int:
                 + [f"warning: {w}" for w in warnings]
             )
             return 0
-        print("ci_history: no mode given; see --help", file=sys.stderr)
-        return 2
+        repo = _repository()
+        api = GhApi()
+        history = HistoryRepo(workdir, args.remote or default_remote())
+        if args.backfill:
+            history.open(depth=1)
+            written, tombs = backfill(api, repo, history, args.limit)
+            summary([f"ci-history backfill: {written} records, {tombs} tombstones"])
+            return 0
+        history.open(depth=1)
+        gated = args.gated or local_head()
+        needed = gate_job_entries(args.gates or gatelib.GATES)
+        problems = check_complete(api, repo, history, gated, needed)
+        summary([f"ci-history: {p}" for p in problems]
+                or ["ci-history: every ci run on main since the history landed has a record"])
+        return 1 if problems else 0
     except HistoryError as e:
         print(f"ci_history: {e}", file=sys.stderr)
         return 1

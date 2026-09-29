@@ -12,10 +12,11 @@ import json
 import os
 import subprocess
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -51,11 +52,14 @@ class StubApi:
             raise v
         if v is None:
             raise ApiError(path, 404, "Not Found (HTTP 404)")
-        if isinstance(v, dict) and "page" in p:
-            for key, items in v.items():
-                if isinstance(items, list):
-                    page, per = int(p["page"]), int(p["per_page"])
-                    return {**v, key: items[(page - 1) * per: page * per]}
+        if "page" in p:
+            page, per = int(p["page"]), int(p["per_page"])
+            if isinstance(v, list):
+                return v[(page - 1) * per: page * per]
+            if isinstance(v, dict):
+                for key, items in v.items():
+                    if isinstance(items, list):
+                        return {**v, key: items[(page - 1) * per: page * per]}
         return v
 
     def raw(self, path: str, max_bytes: int) -> bytes:
@@ -541,6 +545,240 @@ class TestWriter(GitIsolated):
         parents = self.gitrun("rev-list", "--parents", "-n1", "ci-history",
                               cwd=self.remote).split()
         self.assertEqual(parents[1:], [root])
+
+
+NOW = datetime(2026, 4, 15, tzinfo=UTC)
+LANDED = "2026-03-01T12:00:00Z"
+LANDING_SHA = "c" * 40
+
+
+class ApiWorld:
+    """The runs, commits and jobs the stub API serves for the completeness
+    check and the backfill."""
+
+    def __init__(self) -> None:
+        self.runs: list[dict[str, Any]] = []
+        self.jobs: dict[int, Any] = {}
+        self.descendants: set[str] = set()
+        self.landed = True
+
+    def add(self, run: dict[str, Any], jobs: Any = None) -> dict[str, Any]:
+        self.runs.append(run)
+        self.jobs[run["id"]] = two_jobs() if jobs is None else jobs
+        return run
+
+    def list_runs(self, p: Mapping[str, str | int]) -> dict[str, Any]:
+        lo, hi = str(p["created"]).split("..")
+        assert p["branch"] == "main"
+        out = [r for r in self.runs if lo <= r["created_at"][:10] <= hi]
+        out.sort(key=lambda r: r["created_at"], reverse=True)
+        return {"total_count": len(out), "workflow_runs": out}
+
+    def api(self) -> StubApi:
+        routes: dict[str, Any] = {
+            f"/repos/{REPO}": {"default_branch": "main"},
+            f"/repos/{REPO}/actions/workflows/ci.yml": {"created_at": "2025-11-20T00:00:00Z"},
+            f"/repos/{REPO}/actions/workflows/ci.yml/runs": self.list_runs,
+            f"/repos/{REPO}/commits": [
+                {"sha": "d" * 40, "commit": {"committer": {"date": "2026-03-20T00:00:00Z"}}},
+                {"sha": LANDING_SHA, "commit": {"committer": {"date": LANDED}}},
+            ] if self.landed else [],
+        }
+        for r in self.runs:
+            base = f"/repos/{REPO}/actions/runs/{r['id']}"
+            routes[base] = r
+            j = self.jobs[r["id"]]
+            routes[f"{base}/jobs"] = j if isinstance(j, Exception) else {"jobs": j}
+            routes[f"{base}/artifacts"] = {"artifacts": []}
+            status = "ahead" if r["head_sha"] in self.descendants else "diverged"
+            routes[f"/repos/{REPO}/compare/{LANDING_SHA}...{r['head_sha']}"] = {"status": status}
+        return StubApi(routes)
+
+
+class TestComplete(GitIsolated):
+    def setUp(self) -> None:
+        super().setUp()
+        self.world = ApiWorld()
+        self.h = self.history()
+
+    def check(self, gated: str | None = None, needed: set[str] | None = None) -> list[str]:
+        return ci_history.check_complete(
+            self.world.api(), REPO, self.h, gated, needed or set(), now=NOW
+        )
+
+    def put(self, rec: dict[str, Any]) -> None:
+        self.h.commit_files(
+            {ci_history.record_path(rec["workflow"], rec["run_id"]): ci_history.encode(rec)},
+            "put",
+        )
+
+    def full(self, run: dict[str, Any]) -> dict[str, Any]:
+        return {**ci_history.run_fields(run, "ci"), "jobs": [{"name": "check"}]}
+
+    def test_missing_main_run_fails(self) -> None:
+        a = self.world.add(run_obj(301, sha=SHA, created="2026-03-05T00:00:00Z"))
+        self.world.add(run_obj(302, sha=SHA2, created="2026-04-02T00:00:00Z"))
+        self.world.descendants |= {SHA, SHA2}
+        self.put(self.full(a))
+        problems = self.check()
+        self.assertEqual(len(problems), 1)
+        self.assertIn("run 302", problems[0])
+        # the landing is unknown before the workflow lands: nothing to check
+        self.world.landed = False
+        self.assertEqual(self.check(), [])
+
+    def test_pre_landing_runs_ignored(self) -> None:
+        # created before the landing commit's date, or not a descendant of it
+        self.world.add(run_obj(311, sha=SHA, created="2026-02-10T00:00:00Z"))
+        self.world.add(run_obj(312, sha=SHA2, created="2026-03-10T00:00:00Z"))
+        self.world.descendants |= {SHA}
+        api = self.world.api()
+        self.assertEqual(
+            ci_history.check_complete(api, REPO, self.h, None, set(), now=NOW), []
+        )
+        compares = [p for p, _ in api.calls if "/compare/" in p]
+        self.assertEqual(compares, [f"/repos/{REPO}/compare/{LANDING_SHA}...{SHA2}"])
+
+    def test_pull_request_runs_ignored(self) -> None:
+        self.world.descendants |= {SHA}
+        self.world.add(run_obj(321, event="pull_request", created="2026-03-10T00:00:00Z"))
+        # a fork's pull request from its own `main`
+        self.world.add(run_obj(322, event="pull_request", head_repo="fork/vibeOS",
+                               created="2026-03-10T00:00:00Z"))
+        self.world.add(run_obj(323, head_repo="fork/vibeOS", created="2026-03-10T00:00:00Z"))
+        self.world.add(run_obj(324, branch="topic", created="2026-03-10T00:00:00Z"))
+        self.world.add(run_obj(325, status="in_progress", created="2026-03-10T00:00:00Z"))
+        self.assertEqual(self.check(), [])
+        self.world.add(run_obj(326, event="workflow_dispatch", created="2026-03-10T00:00:00Z"))
+        self.assertEqual(len(self.check()), 1)
+
+    def test_tombstone_accepted(self) -> None:
+        run = self.world.add(run_obj(331, created="2026-03-10T00:00:00Z"))
+        self.world.descendants |= {SHA}
+        self.put(ci_history.tombstone(run, "ci", "the jobs API returned 410"))
+        self.assertEqual(self.check(), [])
+        # a gate names ci, but the tombstoned run is not the gated commit's
+        self.assertEqual(self.check(gated=SHA2, needed={"ci"}), [])
+
+    def test_tombstone_rejected_when_gate_needs_run(self) -> None:
+        gates = self.tmp / "gates"
+        gates.mkdir()
+        (gates / "phase-10.toml").write_text(textwrap.dedent("""\
+            [[line]]
+            key = "exit gate"
+            [[line.entry]]
+            job = {workflow = "ci", job = "check"}
+            [[line.entry]]
+            cmd = "make check"
+        """), encoding="utf-8")
+        (gates / "phase-10-needs.toml").write_text("[[box]]\n", encoding="utf-8")
+        needed = ci_history.gate_job_entries(gates)
+        self.assertEqual(needed, {"ci"})
+        run = self.world.add(run_obj(341, created="2026-03-10T00:00:00Z"))
+        self.world.descendants |= {SHA}
+        self.put(ci_history.tombstone(run, "ci", "the jobs API returned 404"))
+        problems = self.check(gated=SHA, needed=needed)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("tombstone", problems[0])
+        # no gate names ci: accepted
+        self.assertEqual(self.check(gated=SHA, needed=set()), [])
+        # a full, successful record proves the same commit: accepted
+        again = self.world.add(run_obj(342, created="2026-03-11T00:00:00Z"))
+        self.put(self.full(again))
+        self.assertEqual(self.check(gated=SHA, needed=needed), [])
+
+    def test_gate_job_entries(self) -> None:
+        gates = self.tmp / "g"
+        self.assertEqual(ci_history.gate_job_entries(gates), set())
+        gates.mkdir()
+        (gates / "common.toml").write_text(
+            '[[line]]\nkey = "k"\n[[line.entry]]\njob = {workflow = "release.yml", job = "b"}\n',
+            encoding="utf-8",
+        )
+        (gates / "phase-11.toml").write_text(
+            '[[line]]\nkey = "k"\n[[line.entry]]\njob = {workflow = "ci.yml", job = "b"}\n',
+            encoding="utf-8",
+        )
+        self.assertEqual(ci_history.gate_job_entries(gates), {"ci", "release"})
+        (gates / "phase-12.toml").write_text("not = [toml", encoding="utf-8")
+        with self.assertRaises(HistoryError):
+            ci_history.gate_job_entries(gates)
+
+    def test_invalid_record_counts_as_missing(self) -> None:
+        run = self.world.add(run_obj(351, created="2026-03-10T00:00:00Z"))
+        self.world.descendants |= {SHA}
+        bad = {**self.full(run), "schema": 2}
+        self.h.commit_files({"runs/ci/351.json": ci_history.encode(bad)}, "bad")
+        self.assertEqual(len(self.check()), 1)
+        self.assertEqual(self.h.invalid, ["runs/ci/351.json"])
+        self.h.commit_files({"runs/ci/351.json": b"{not json"}, "worse")
+        self.assertEqual(len(self.check()), 1)
+        # a record of another run under this run's name
+        self.h.commit_files(
+            {"runs/ci/351.json": ci_history.encode(self.full(run_obj(999)))}, "wrong id"
+        )
+        self.assertEqual(len(self.check()), 1)
+
+    def test_month_windows(self) -> None:
+        wins = list(ci_history._months(datetime(2025, 12, 20).date(),
+                                       datetime(2026, 2, 3).date()))
+        self.assertEqual([(a.isoformat(), b.isoformat()) for a, b in wins], [
+            ("2026-02-01", "2026-02-03"), ("2026-01-01", "2026-01-31"),
+            ("2025-12-20", "2025-12-31"),
+        ])
+
+
+class TestBackfill(GitIsolated):
+    def setUp(self) -> None:
+        super().setUp()
+        self.world = ApiWorld()
+        self.h = self.history()
+
+    def backfill(self, limit: int = 200) -> tuple[int, int]:
+        return ci_history.backfill(self.world.api(), REPO, self.h, limit, now=NOW)
+
+    def test_backfill_writes_missing(self) -> None:
+        self.world.add(run_obj(401, created="2025-12-01T00:00:00Z"))  # before the landing
+        self.world.add(run_obj(402, created="2026-03-10T00:00:00Z"))
+        self.world.add(run_obj(403, event="pull_request", created="2026-03-10T00:00:00Z"))
+        held = self.world.add(run_obj(404, created="2026-04-01T00:00:00Z"))
+        self.h.commit_files({"runs/ci/404.json": ci_history.encode(
+            ci_history.tombstone(held, "ci", "kept"))}, "held")
+        self.assertEqual(self.backfill(), (2, 0))
+        self.assertEqual(self.remote_files(),
+                         {"runs/ci/401.json", "runs/ci/402.json", "runs/ci/404.json"})
+        self.assertEqual(self.remote_show("runs/ci/404.json")["tombstone"], "kept")
+        self.assertEqual(len(self.remote_show("runs/ci/402.json")["jobs"]), 2)
+        msg = self.gitrun("log", "-1", "--format=%s", "ci-history", cwd=self.remote)
+        self.assertEqual(msg, "backfill ci: 2 records, 0 tombstones")
+        self.assertEqual(self.backfill(), (0, 0))
+
+    def test_backfill_tombstone_when_jobs_gone(self) -> None:
+        self.world.add(run_obj(411, created="2026-03-10T00:00:00Z"),
+                       ApiError("jobs", 404, "Not Found (HTTP 404)"))
+        self.world.add(run_obj(412, created="2026-03-11T00:00:00Z"),
+                       ApiError("jobs", 410, "Gone (HTTP 410)"))
+        self.world.add(run_obj(413, created="2026-03-12T00:00:00Z"), [])
+        self.assertEqual(self.backfill(), (0, 3))
+        for rid, reason in ((411, "404"), (412, "410"), (413, "no jobs")):
+            rec = self.remote_show(f"runs/ci/{rid}.json")
+            self.assertEqual(rec["jobs"], [])
+            self.assertIn(reason, rec["tombstone"])
+            self.assertEqual(rec["head_sha"], SHA)
+        # any other API failure is an error, not a tombstone
+        self.world.add(run_obj(414, created="2026-03-13T00:00:00Z"),
+                       ApiError("jobs", 502, "Bad Gateway (HTTP 502)"))
+        with self.assertRaises(ApiError):
+            self.backfill()
+
+    def test_backfill_limit(self) -> None:
+        for i in range(5):
+            self.world.add(run_obj(430 + i, created=f"2026-03-1{i}T00:00:00Z"))
+        self.assertEqual(self.backfill(limit=2), (2, 0))
+        # newest first
+        self.assertEqual(self.remote_files(), {"runs/ci/434.json", "runs/ci/433.json"})
+        self.assertEqual(self.backfill(limit=2), (2, 0))
+        self.assertEqual(self.backfill(limit=2), (1, 0))
 
 
 if __name__ == "__main__":
