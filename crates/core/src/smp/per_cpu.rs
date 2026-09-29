@@ -260,6 +260,25 @@ const _: () = {
     assert!(offset_of!(PerCpu, ready_head) == 40);
 };
 
+// The fields the core tool reads beyond the pin block above (docs/
+// VMCOREINFO.md, "Types the core tool reads"): the run queue, and the APIC
+// id through `remote`. Outside `cfg(loom)`, whose atomics differ in size.
+// `dead_stack` and `stack_cache` hold frame tokens (`pmm::Frames`), 16
+// bytes each with debug assertions and 8 without, so `remote` and the size
+// move with the profile.
+#[cfg(not(loom))]
+const _: () = {
+    use core::mem::{align_of, size_of};
+    const DEBUG: bool = cfg!(debug_assertions);
+    assert!(size_of::<PerCpu>() == if DEBUG { 2096 } else { 1328 });
+    assert!(align_of::<PerCpu>() == 8);
+    assert!(offset_of!(PerCpu, runq) == 152);
+    assert!(offset_of!(PerCpu, remote) == if DEBUG { 2088 } else { 1320 });
+    assert!(size_of::<PerCpuRemote>() == 64);
+    assert!(align_of::<PerCpuRemote>() == 64);
+    assert!(offset_of!(PerCpuRemote, apic_id) == 48);
+};
+
 // The tests build `static` views, which need the `const` constructor.
 #[cfg(all(test, not(loom)))]
 mod tests {

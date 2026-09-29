@@ -294,6 +294,7 @@ extern "C" fn boot_rest() -> ! {
     unsafe { syscall_init::init_bsp() };
     proc_init::init();
     crate::marker!(marker::PER_CPU_BSP);
+    crate::log::vmcoreinfo_init::publish();
 
     acpi_init::report();
 

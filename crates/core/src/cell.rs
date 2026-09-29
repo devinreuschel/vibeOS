@@ -131,6 +131,7 @@ impl CellHooks for crate::arch::stub::Arch {}
 /// Data shared across CPUs as a lock should use `SpinMutex`. `A` is the
 /// port: its [`InterruptMask`] masks, and its [`PerCpuBase::cpu_id`] names
 /// the owner.
+#[repr(C)]
 pub struct IrqCell<T, A> {
     data: UnsafeCell<T>,
     /// 0 free, else the owner's `cpu_id + 1`.
@@ -147,6 +148,20 @@ pub struct IrqCell<T, A> {
 // `Send` is the auto trait: `UnsafeCell<T>` with that `PhantomData` is
 // `Send` exactly when `T: Send`.
 unsafe impl<T: Send, A: Send> Sync for IrqCell<T, A> {}
+
+// The layout the core tool reads in the log ring's cell (docs/VMCOREINFO.md):
+// `data` at 0, then the owner word right after it, as `#[repr(C)]` places
+// them for any payload. `log`'s block asserts `KernelLog`'s size, which with
+// these fixes its `owner` at the logger's size. Beside the type because its
+// fields are private.
+#[cfg(not(loom))]
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    type K = IrqCell<[u64; 3], ()>;
+    assert!(offset_of!(K, data) == 0);
+    assert!(offset_of!(K, owner) == 24);
+    assert!(size_of::<K>() == 32);
+};
 
 /// `IrqCell`'s initial value, one body for both constructors.
 macro_rules! irq_cell_new {

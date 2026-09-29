@@ -35,7 +35,7 @@ impl Stage {
     }
 }
 
-static LOG: IrqCell<Logger<RING_CAP, MSG_CAP>> = IrqCell::new(Logger::new());
+static LOG: vibeos::log::KernelLog<crate::arch::current::Arch> = IrqCell::new(Logger::new());
 /// Per-CPU: set while this CPU is inside `emit` so serial capture does
 /// not store a duplicate.
 static EMITTING: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
@@ -48,6 +48,12 @@ static RUNTIME: AtomicU8 = AtomicU8::new(DEFAULT_RUNTIME_MAX as u8);
 static SINK_DROPS: AtomicU64 = AtomicU64::new(0);
 /// Records `log_fmt` dropped because its CPU was already inside `log_fmt`.
 static REENTRY_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// The address of the log ring's static, which VMCOREINFO's
+/// `SYMBOL(vibeos_log)` carries (docs/VMCOREINFO.md).
+pub(crate) fn ring_root() -> u64 {
+    core::ptr::from_ref(&LOG).addr() as u64
+}
 
 fn cpu_index() -> usize {
     per_cpu_init::try_current()

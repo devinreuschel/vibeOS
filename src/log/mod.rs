@@ -19,3 +19,4 @@ pub(crate) mod log_init;
 pub(crate) mod panic;
 pub(crate) mod serial;
 pub(crate) mod trace_init;
+pub(crate) mod vmcoreinfo_init;

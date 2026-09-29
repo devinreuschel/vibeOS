@@ -120,6 +120,15 @@ pub fn is_live() -> bool {
     LIVE.load(Ordering::Acquire)
 }
 
+/// The `PerCpu` array's base address and length, which VMCOREINFO's
+/// `SYMBOL(vibeos_cpus)` and `LENGTH(vibeos_cpus)` carry
+/// (docs/VMCOREINFO.md); `(0, 0)` before `init_bsp`. `CPUS` keeps the boxed
+/// slice in place for good once set.
+pub(crate) fn table_root() -> (u64, u64) {
+    CPUS.try_get()
+        .map_or((0, 0), |c| (c.as_ptr().addr() as u64, c.len() as u64))
+}
+
 pub fn cpu_count() -> usize {
     CPUS.try_get().map(|c| c.len()).unwrap_or(0)
 }
