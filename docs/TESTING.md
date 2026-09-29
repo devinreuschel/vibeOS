@@ -389,7 +389,7 @@ number of images checked, and the trace's write and flush counts.
 | Context | Flags |
 |---------|-------|
 | e2e | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -no-reboot -display none -serial stdio -monitor unix:...,server=on,wait=off -accel tcg` (`harness.qemu_argv`) |
-| `make run`, `make run-panic` | e2e's argv from `tests/harness/run_interactive.py` (`run`, `panic`), which builds it with `env_config` and `harness.qemu_argv` and adds no `-monitor`: `make run` opens a display window instead of `-display none`, and `make run-panic` boots `build/vibeos-panic.iso` with `-display none`. COM1 is the terminal (`-serial stdio`), and the launcher ignores `SIGINT` while QEMU runs |
+| `make run`, `make run-panic`, `make debug` | e2e's argv from `tests/harness/run_interactive.py` (`run`, `panic`, `debug`), which builds it with `env_config` and `harness.qemu_argv` and adds no `-monitor`: `make run` opens a display window instead of `-display none`, `make run-panic` boots `build/vibeos-panic.iso` with `-display none`, and `make debug` is `make run` plus `-s -S`. COM1 is the terminal (`-serial stdio`), and the launcher ignores `SIGINT` while QEMU runs |
 | ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
@@ -406,7 +406,7 @@ its line does not expect still fails the run.
 
 All `VIBEOS_*` overrides are read in `tests/harness/harness.py` (`env_config` / `env_flag` /
 `env_int`), which holds their only defaults. Drivers do not parse the environment, and the Makefile
-sets none of them: `make run` and `make run-panic` honour the same settings through
+sets none of them: `make run`, `make run-panic` and `make debug` honour the same settings through
 `run_interactive.py`.
 
 | Variable | Default | Who honours it |
@@ -439,6 +439,16 @@ sets none of them: `make run` and `make run-panic` honour the same settings thro
 boots. Homebrew's code-only `edk2-x86_64-code.fd` is refused and needs `-drive if=pflash` instead.
 `make test-e2e-uefi` prints a skip message when `OVMF` does not exist and then runs the harness
 anyway, because the check and the run are separate recipe lines (ROADMAP §10.2, F079).
+
+`make debug` builds the production ISO and starts it as `make run` does, with `-s -S`: QEMU opens a
+gdb stub on TCP port 1234 (every interface, as `-s` does) and holds the CPUs until gdb continues.
+The launcher first writes `build/debug/symbols.gdb`, which loads the kernel ELF
+(`build/kernels/vibeos-default.elf`) with `file` and each initrd program in the Makefile's
+`DEBUG_USER_ELFS` with `add-symbol-file <elf> -o 0`. From the repository root, in a second terminal,
+`gdb -x scripts/vibeos.gdb` (Homebrew's `x86_64-elf-gdb` on macOS) sources that file and connects.
+The kernel is not in memory when QEMU starts, so set a hardware breakpoint (`hbreak _start`) and
+`continue`; a software `break` would be written into memory Limine later overwrites. Today's user
+ELFs carry no symbols, so gdb warns that they add none.
 
 ## 8.5 Make targets
 

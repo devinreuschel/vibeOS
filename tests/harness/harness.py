@@ -491,6 +491,9 @@ class QemuConfig:
     qemu_version: str | None = None
     # A display window (`make run`, `make debug`); False adds `-display none`.
     display: bool = False
+    # `-s -S`: a gdb stub on tcp::1234 and the CPUs halted until it continues
+    # (`make debug`).
+    gdb: bool = False
 
 
 @dataclass
@@ -788,6 +791,8 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
     argv += _accel_args(cfg)
     if not cfg.hpet:
         argv += list(HPET_OFF_MACHINE)
+    if cfg.gdb:
+        argv += ["-s", "-S"]
     if cfg.bios:
         argv += ["-bios", cfg.bios]
         argv += list(OVMF_BOOT_ARGS)

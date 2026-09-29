@@ -131,7 +131,7 @@ $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_C
 
 KERNEL_ELF := build/kernels/vibeos-default.elf
 
-.PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic clean distclean setup layout prebuilt \
+.PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
@@ -148,6 +148,7 @@ help:
 	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
 	  '  run                   boot production ISO in a QEMU window, COM1 on the terminal (VIBEOS_* apply)' \
 	  '  run-panic             boot panic-test ISO, no window, COM1 on the terminal' \
+	  '  debug                 as run, halted with a gdb stub on :1234; then gdb -x scripts/vibeos.gdb' \
 	  '  layout                objdump sections + __kernel_ symbols' \
 	  '  test-unit             vibeos-core host tests (any host triple)' \
 	  '  test-harness          python unit tests for the harness' \
@@ -306,6 +307,15 @@ run: $(ISO)
 
 run-panic: $(ISO_PANIC)
 	python3 tests/harness/run_interactive.py panic
+
+# The initrd's programs, whose symbols `make debug` loads beside the kernel's.
+DEBUG_USER_ELFS := $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+
+# QEMU halted with a gdb stub on :1234 (`-s -S`); attach with
+# `gdb -x scripts/vibeos.gdb` from this directory (DESIGN §8.4).
+debug: $(ISO) $(KERNEL_ELF) $(DEBUG_USER_ELFS)
+	python3 tests/harness/run_interactive.py debug --kernel-elf $(KERNEL_ELF) \
+	    $(foreach e,$(DEBUG_USER_ELFS),--user-elf $(e))
 
 layout: $(KERNEL_ELF)
 	@echo "== sections =="

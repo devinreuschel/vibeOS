@@ -1,5 +1,6 @@
-"""Tests of `tests/harness/run_interactive.py`, the launcher behind `make run`
-and `make run-panic` (ROADMAP §10.2)."""
+"""Tests of `tests/harness/run_interactive.py`, the launcher behind `make run`,
+`make run-panic` and `make debug` (ROADMAP §10.1, §10.2), and of
+`scripts/vibeos.gdb`."""
 
 from __future__ import annotations
 
@@ -47,8 +48,8 @@ def _opt(argv: list[str], flag: str) -> str:
 
 
 class TestInteractiveLauncher(unittest.TestCase):
-    """`make run` and `make run-panic` start QEMU through the launcher, with
-    the drivers' argv and every `VIBEOS_*` setting."""
+    """`make run`, `make run-panic` and `make debug` start QEMU through the
+    launcher, with the drivers' argv and every `VIBEOS_*` setting."""
 
     def test_makefile_has_no_qemu_command_line(self) -> None:
         text = MAKEFILE.read_text(encoding="utf-8")
@@ -59,7 +60,7 @@ class TestInteractiveLauncher(unittest.TestCase):
             )
 
     def test_make_targets_call_the_launcher(self) -> None:
-        for target, mode in (("run", "run"), ("run-panic", "panic")):
+        for target, mode in (("run", "run"), ("run-panic", "panic"), ("debug", "debug")):
             recipe = _recipe(target)
             self.assertIn(f"python3 tests/harness/run_interactive.py {mode}", recipe)
             self.assertNotIn("VIBEOS_ISO", recipe)
@@ -87,6 +88,15 @@ class TestInteractiveLauncher(unittest.TestCase):
         self.assertEqual(_opt(argv, "-display"), "none")
         self.assertEqual(argv.count("-display"), 1)
         self.assertEqual(_opt(argv, "-serial"), "stdio")
+        self.assertNotIn("-monitor", argv)
+
+    def test_debug_argv(self) -> None:
+        with overlay_env({}, clear=True):
+            argv = run_interactive.interactive_argv("debug")
+        self.assertEqual(_opt(argv, "-cdrom"), "build/vibeos.iso")
+        self.assertNotIn("-display", argv)
+        self.assertIn("-s", argv)
+        self.assertIn("-S", argv)
         self.assertNotIn("-monitor", argv)
 
     def test_settings_reach_argv(self) -> None:
@@ -176,6 +186,63 @@ class TestInteractiveLauncher(unittest.TestCase):
         with mock.patch("shutil.which", return_value=None):
             with self.assertRaisesRegex(HarnessError, "qemu-system-x86_64"):
                 run_interactive.launch(argv, None)
+
+
+class TestDebugTarget(unittest.TestCase):
+    """`make debug`: QEMU `-s -S` through the launcher, and a gdb script that
+    loads the kernel ELF and the user ELFs."""
+
+    def test_gdb_stub_window_and_settings(self) -> None:
+        env = {"VIBEOS_SMP": "3", "VIBEOS_MEM": "64M", "VIBEOS_QEMU_ACCEL": ""}
+        with overlay_env(env, clear=True):
+            argv = run_interactive.interactive_argv("debug")
+        i = argv.index("-s")
+        self.assertEqual(argv[i : i + 2], ["-s", "-S"])
+        self.assertNotIn("-display", argv)
+        self.assertEqual(_opt(argv, "-serial"), "stdio")
+        self.assertEqual(_opt(argv, "-smp"), "3")
+        self.assertEqual(_opt(argv, "-m"), "64M")
+        self.assertNotIn("-accel", argv)
+
+    def test_write_gdb_symbols(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "sub", "symbols.gdb")
+            run_interactive.write_gdb_symbols(path, "k.elf", ["user/a", "user/b"])
+            text = Path(path).read_text(encoding="utf-8")
+        self.assertEqual(
+            text.splitlines(),
+            [
+                f"file {os.path.abspath('k.elf')}",
+                f"add-symbol-file {os.path.abspath('user/a')} -o 0",
+                f"add-symbol-file {os.path.abspath('user/b')} -o 0",
+            ],
+        )
+
+    def test_make_n_debug(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+        out = subprocess.run(
+            ["make", "-n", "-o", "build/vibeos.iso",
+             "-o", "build/kernels/vibeos-default.elf",
+             "-o", "user/hello", "-o", "user/init", "-o", "user/sh", "-o", "user/tests",
+             "debug"],
+            cwd=ROOT, env=env, capture_output=True, text=True, check=True,
+        ).stdout.replace("\\\n", " ")
+        line = next(ln for ln in out.splitlines() if "run_interactive.py debug" in ln)
+        args = line.split()
+        self.assertEqual(args[args.index("--kernel-elf") + 1], "build/kernels/vibeos-default.elf")
+        users = [args[i + 1] for i, a in enumerate(args) if a == "--user-elf"]
+        self.assertEqual(users, ["user/hello", "user/init", "user/sh", "user/tests"])
+
+    def test_gdb_script(self) -> None:
+        lines = [
+            ln.strip()
+            for ln in (ROOT / "scripts/vibeos.gdb").read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        self.assertIn(f"source {run_interactive.GDB_SYMBOLS}", lines)
+        self.assertEqual(lines[-1], f"target remote localhost:{run_interactive.GDB_PORT}")
+        self.assertLess(lines.index(f"source {run_interactive.GDB_SYMBOLS}"), len(lines) - 1)
+        self.assertIn("set architecture i386:x86-64", lines)
 
 
 if __name__ == "__main__":
