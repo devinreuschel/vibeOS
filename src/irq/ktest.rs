@@ -439,7 +439,7 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     if irq_init::set_affinity(vec, ap).is_err() {
         return fail("affinity", Some(vec));
     }
-    match apic_init::gsi_masked(gsi) {
+    match crate::arch::ktest::gsi_masked(gsi) {
         Some(false) => {}
         Some(true) => return fail("masked before free", Some(vec)),
         None => return fail("gsi not on ioapic", Some(vec)),
@@ -454,7 +454,7 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     if irq_init::free_vector(vec).is_err() {
         return fail("free", Some(vec));
     }
-    match apic_init::gsi_masked(gsi) {
+    match crate::arch::ktest::gsi_masked(gsi) {
         Some(true) => {}
         Some(false) => return fail("gsi live after free", None),
         None => return fail("gsi vanished", None),
