@@ -35,7 +35,7 @@ impl Stage {
     }
 }
 
-static LOG: IrqCell<Logger<RING_CAP, MSG_CAP>> = IrqCell::new(Logger::new());
+static LOG: vibeos::log::KernelLog<crate::arch::current::Arch> = IrqCell::new(Logger::new());
 /// Per-CPU: set while this CPU is inside `emit` so serial capture does
 /// not store a duplicate.
 static EMITTING: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];

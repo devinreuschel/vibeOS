@@ -95,6 +95,40 @@ Planned keys, not yet emitted:
 `vibeos::log::vmcoreinfo::KEYS` lists the emitted keys in order; its host test `keys_documented`
 fails unless each appears in the table above and `render` emits exactly those keys in order.
 
+## Types the core tool reads
+
+The tool reads these types from a core with the layouts vibeos-core gives them, so they are
+`#[repr(C)]` (`ThreadState` is `#[repr(u32)]`: its tag is a `u32` at offset 0, 0 to 4 in
+declaration order: `Ready`, `Running`, `Sleeping`, `Blocked`, `Dead`). A
+`#[cfg(not(loom))] const _` block beside each type asserts its size, its alignment and the offset of
+every field listed here, as literals, and compiles into the kernel and into every hostlib build, so
+the kernel and the tool, built on Linux or macOS, cannot disagree. A change to one of these fields
+changes its assertion in the same commit, and the tool with it.
+
+Debug assertions change two of these layouts: a frame token (`pmm::Frames`) records its allocation
+site with them, so `Tcb`'s fields after `stack`, and `PerCpu`'s `remote`, sit at other offsets in a
+debug build than in a release build. The assertions pin both, and the tool reads a core with the
+layout of the profile the kernel was built with.
+
+| Type | File | Fields the tool reads | Assertions |
+|---|---|---|---|
+| `KernelLog` (`IrqCell<KernelLogger, _>`) | `crates/core/src/cell.rs` | `data` (at 0), `owner` (right after `data`) | size in `log/mod.rs`; field order in `cell.rs` |
+| `KernelLogger` (`Logger<RING_CAP, MSG_CAP>`) | `crates/core/src/log/mod.rs` | `ring`, `filter` | `log/mod.rs` |
+| `Ring<RING_CAP, MSG_CAP>` | `crates/core/src/log/mod.rs` | `recs`, `head`, `len`, `dropped`, `written` | `log/mod.rs` |
+| `Record<MSG_CAP>` | `crates/core/src/log/mod.rs` | `timestamp`, `cpu_id`, `level`, `len`, `msg` | `log/mod.rs` |
+| `Filter` | `crates/core/src/log/mod.rs` | `max` | `log/mod.rs` |
+| `TcbSlot` | `crates/core/src/sched/thread.rs` | pointer-sized: null, or a `Tcb` pointer | `sched/thread.rs` |
+| `Tcb` | `crates/core/src/sched/thread.rs` | `id`, `state`, `context`, `cpu`, `pid` | `sched/thread.rs` |
+| `ThreadState` | `crates/core/src/sched/thread.rs` | the tag; `Sleeping`'s deadline and `Blocked`'s queue at offset 8 | `sched/thread.rs` |
+| `CpuContext` | `crates/core/src/sched/thread.rs` | every register slot | `sched/thread.rs` |
+| `PerCpu` | `crates/core/src/smp/per_cpu.rs` | `cpu_id`, `current`, `idle`, `runq`, `remote` | `smp/per_cpu.rs` (the pin block for `cpu_id`, `current` and `idle`) |
+| `PerCpuRemote` | `crates/core/src/smp/per_cpu.rs` | `apic_id` | `smp/per_cpu.rs` |
+| `ReadyQueue` | `crates/core/src/sched/mod.rs` | `buf`, `head`, `len` | `sched/mod.rs` |
+
+The APIC id is `PerCpuRemote.apic_id`, which the tool reaches through `PerCpu.remote`; `PerCpu`
+has no `apic_id` field of its own. `KernelLog`'s port parameter is only named, so its layout is the
+same for every port.
+
 ## Build id
 
 The kernel link passes `--build-id=sha1` (`.cargo/config.toml`), so lld writes a 20-byte

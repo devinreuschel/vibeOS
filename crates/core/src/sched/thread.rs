@@ -57,6 +57,7 @@ impl CpuAffinity {
     }
 }
 
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
     Ready,
@@ -354,6 +355,50 @@ const _: () = {
     assert!(size_of::<CpuContext>() == 72);
     assert!(size_of::<ThreadId>() == 4);
     assert!(offset_of!(Tcb, fpu) % 16 == 0);
+};
+
+/// One slot of the kernel's TCB table (`thread_init`'s `Sched.slots`): null,
+/// or a pointer to a `Tcb`. The core tool reads the table through
+/// `SYMBOL(vibeos_tcbs)` (docs/VMCOREINFO.md).
+pub type TcbSlot = Option<crate::kalloc::TryBox<Tcb>>;
+
+// The layout the core tool reads (docs/VMCOREINFO.md, "Types the core tool
+// reads"), in the kernel and in every hostlib build (ROADMAP §10.7).
+// Outside `cfg(loom)`, whose atomics differ in size. `Tcb.stack` holds
+// `MAX_STACK_PAGES` frame tokens (`pmm::Frames`), each 16 bytes with debug
+// assertions, which record its allocation site, and 8 without, so the
+// fields after it move with the profile.
+#[cfg(not(loom))]
+const _: () = {
+    use core::mem::align_of;
+    const DEBUG: bool = cfg!(debug_assertions);
+    /// `s`'s tag: a `#[repr(u32)]` enum starts with its `u32` tag.
+    const fn tag(s: &ThreadState) -> u32 {
+        // SAFETY: `ThreadState` is `#[repr(u32)]` (its definition, above),
+        // so every variant begins with an initialized `u32` tag at offset 0
+        // and `s` is aligned for it; established here.
+        unsafe { *core::ptr::from_ref(s).cast::<u32>() }
+    }
+    assert!(tag(&ThreadState::Ready) == 0);
+    assert!(tag(&ThreadState::Running) == 1);
+    assert!(
+        tag(&ThreadState::Sleeping {
+            deadline: Instant { ns: 0 }
+        }) == 2
+    );
+    assert!(tag(&ThreadState::Blocked { wq: 0 }) == 3);
+    assert!(tag(&ThreadState::Dead) == 4);
+    assert!(size_of::<ThreadState>() == 16);
+    assert!(align_of::<ThreadState>() == 8);
+    assert!(size_of::<Tcb>() == if DEBUG { 1280 } else { 1024 });
+    assert!(align_of::<Tcb>() == 16);
+    assert!(offset_of!(Tcb, id) == 0);
+    assert!(offset_of!(Tcb, state) == 24);
+    assert!(offset_of!(Tcb, context) == if DEBUG { 584 } else { 328 });
+    assert!(offset_of!(Tcb, cpu) == if DEBUG { 688 } else { 432 });
+    assert!(offset_of!(Tcb, pid) == if DEBUG { 1264 } else { 1008 });
+    assert!(size_of::<CpuContext>() == 72);
+    assert!(size_of::<TcbSlot>() == size_of::<usize>());
 };
 
 /// SysV: `rsp % 16 == 8` on function entry. `stack_top` must be 16-aligned.

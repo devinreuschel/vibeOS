@@ -113,6 +113,7 @@ pub const fn allowed(level: Level, runtime_max: Level, compile_max: Level) -> bo
 }
 
 /// Runtime max level. Store is `Release`; emit/dmesg load `Acquire`.
+#[repr(C)]
 pub struct Filter {
     max: AtomicU8,
 }
@@ -137,6 +138,7 @@ impl Filter {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct Record<const M: usize> {
     /// Monotonic milliseconds from the seqlock clock, or raw TSC before
@@ -180,6 +182,7 @@ impl<const M: usize> Record<M> {
 }
 
 /// Fixed ring. Wrap overwrites the oldest record.
+#[repr(C)]
 pub struct Ring<const N: usize, const M: usize> {
     recs: [Record<M>; N],
     /// Next write index.
@@ -305,6 +308,7 @@ impl<'a, const N: usize, const M: usize> Iterator for LastN<'a, N, M> {
 }
 
 /// Ring + filter used by host tests and (by value) the kernel cell.
+#[repr(C)]
 pub struct Logger<const N: usize, const M: usize> {
     pub ring: Ring<N, M>,
     pub filter: Filter,
@@ -340,6 +344,51 @@ impl<const N: usize, const M: usize> Default for Logger<N, M> {
         Self::new()
     }
 }
+
+/// The kernel's log instantiation, which the core tool reads through
+/// `SYMBOL(vibeos_log)` (docs/VMCOREINFO.md).
+pub type KernelLogger = Logger<RING_CAP, MSG_CAP>;
+/// The type of the kernel's log static over its port `A`. `A` is only
+/// named (`PhantomData<fn() -> A>`), so every port gives one layout.
+pub type KernelLog<A> = crate::cell::IrqCell<KernelLogger, A>;
+
+// The layout the core tool reads (docs/VMCOREINFO.md, "Types the core tool
+// reads"), in the kernel and in every hostlib build (ROADMAP §10.7). A
+// `Record` is 112 bytes: `timestamp`, three bytes, `MSG_CAP` text bytes,
+// padded to 8. Outside `cfg(loom)`, whose atomics differ in size.
+#[cfg(not(loom))]
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    type Rec = Record<MSG_CAP>;
+    type KRing = Ring<RING_CAP, MSG_CAP>;
+    assert!(MSG_CAP == 96);
+    assert!(size_of::<Rec>() == 112);
+    assert!(align_of::<Rec>() == 8);
+    assert!(offset_of!(Rec, timestamp) == 0);
+    assert!(offset_of!(Rec, cpu_id) == 8);
+    assert!(offset_of!(Rec, level) == 9);
+    assert!(offset_of!(Rec, len) == 10);
+    assert!(offset_of!(Rec, msg) == 11);
+    assert!(size_of::<Level>() == 1);
+    assert!(size_of::<KRing>() == RING_CAP * 112 + 32);
+    assert!(align_of::<KRing>() == 8);
+    assert!(offset_of!(KRing, recs) == 0);
+    assert!(offset_of!(KRing, head) == RING_CAP * 112);
+    assert!(offset_of!(KRing, len) == RING_CAP * 112 + 8);
+    assert!(offset_of!(KRing, dropped) == RING_CAP * 112 + 16);
+    assert!(offset_of!(KRing, written) == RING_CAP * 112 + 24);
+    assert!(size_of::<Filter>() == 1);
+    assert!(align_of::<Filter>() == 1);
+    assert!(offset_of!(Filter, max) == 0);
+    assert!(size_of::<KernelLogger>() == RING_CAP * 112 + 40);
+    assert!(align_of::<KernelLogger>() == 8);
+    assert!(offset_of!(KernelLogger, ring) == 0);
+    assert!(offset_of!(KernelLogger, filter) == RING_CAP * 112 + 32);
+    // With `cell.rs`'s block (`data` at 0, `owner` right after it), this
+    // puts the cell's `owner` at `RING_CAP * 112 + 40`.
+    assert!(size_of::<KernelLog<()>>() == RING_CAP * 112 + 48);
+    assert!(align_of::<KernelLog<()>>() == 8);
+};
 
 /// A per-site rate limit (C-RATELIMIT): DESIGN §2.5's "a counter plus a
 /// log line at most once a second". `klog_ratelimited!` keeps one in a
