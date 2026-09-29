@@ -117,9 +117,11 @@ The mechanism:
   alias chosen by `cfg(target_arch)` in the kernel crate, where a compile-time item checks that the
   port implements the seam traits built so far. `make check` also builds `vibeos-core` as the kernel
   links it, without `std`, for the host, where no port exists, so only a type parameter reaches one.
-  `vibeos-core` contains no `cfg(target_arch)` and no
-  assembly, test modules included (ROADMAP Phase 10 gate); `scripts/check_core_stable.py` enforces
-  it from ROADMAP §10.3's A2 box.
+  `vibeos-core` contains no `cfg(target_arch)` and no assembly (ROADMAP Phase 10 gate):
+  `scripts/check_core_stable.py` fails on `asm!`, `global_asm!`, `naked_asm!`, or a `target_arch`
+  token outside comments in any file of the crate, its test modules and the files its `#[path]`
+  attributes name (`src/cell.rs`) included. A host test of a port's assembly lives in
+  `tests/hostlib`, outside the crate.
 - The atomics seam is the one exception: a module selected by `cfg(loom)` (ROADMAP §10.8), because
   loom replaces types, not functions.
 
