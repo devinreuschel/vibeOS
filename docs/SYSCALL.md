@@ -15,8 +15,7 @@ for a note with only an id, search ROADMAP.md for the id.
 
 Index: [DESIGN.md](DESIGN.md) §1.4. Landed: [ROADMAP.md](ROADMAP.md) §9.3–§9.8,
 except the boxes the kernel review reopened there. Open: ROADMAP §10.4
-(errno table, file tables, VFS dispatch), §10.5 (generated syscall table),
-§10.6 (entry paths and user memory), §10.7 (tracing), §10.10 (kernel stack
+(errno table, file tables, VFS dispatch), §10.6 (entry paths and user memory), §10.7 (tracing), §10.10 (kernel stack
 reclaim and IPI acks), §10.11 (vibefs file size), §11.6 (the aarch64
 convention, tagged pointers, and `FS_BASE`), §12.3 (copy-on-write `fork`),
 §13.1 (shared open files), §13.7 (process-group `kill` and `wait4`), §13.8
@@ -46,17 +45,20 @@ implements: a process runs with CS `0x33`, SS `0x2b`, and DS, ES, FS, and GS
 FS, and GS. Today ring 3 runs with CS `0x23` and SS, DS, ES, FS, and GS
 `0x1B`.
 
-The rule ROADMAP §10.5 implements for numbers and arguments, as Linux's
-entry code reads them: the number is `eax` sign-extended, so the high half
-of `rax` is ignored, and on aarch64 it is the low 32 bits of `x8`, read as
-unsigned (ROADMAP §11.6); a number that names no call after that step
-returns `-ENOSYS`. Each argument reaches its handler converted to the width
-and signedness of its C type in Linux's prototype, on both architectures,
-so `read` with `rdi` `0xFFFF_FFFF_0000_0003` reads descriptor 3 and `kill`
-with `rdi` `0x1_0000_0005` signals pid 5, as on Linux. An unknown flag bit
-is ignored where Linux's call ignores it (`open`) and returns `EINVAL` where
-Linux's call rejects it (`openat2`, `clone3`, `renameat2`). Today dispatch
-matches all 64 bits of `rax`, and only `kill`'s `pid` is truncated (§3.1).
+Numbers and arguments are read as Linux's entry code reads them (ROADMAP
+§10.5): the number is `eax` sign-extended, so the high half of `rax` is
+ignored, and on aarch64 it is the low 32 bits of `x8`, read as unsigned
+(ROADMAP §11.6); a number that names no call after that step returns
+`-ENOSYS` (`syscall::NrTable::lookup`). Each argument reaches its handler
+converted to the width and signedness of the C type its §3 row declares,
+as in Linux's prototype, on both architectures: `int` and `pid_t` to 32
+bits signed, `unsigned int` to 32 bits, `long` and `off_t` to 64 bits
+signed, `umode_t` to 16 bits, and `unsigned long`, `size_t`, and a
+pointer whole. So `read` with `rdi` `0xFFFF_FFFF_0000_0003` reads
+descriptor 3, `kill` with `rdi` `0x1_0000_0005` signals pid 5, and `wait4`
+with `rdi` `0xFFFF_FFFF` waits for any child, as on Linux. An unknown flag
+bit is ignored where Linux's call ignores it (`open`) and returns `EINVAL`
+where Linux's call rejects it (`openat2`, `clone3`, `renameat2`).
 
 A syscall preserves the x87 and SSE state. The kernel never touches those
 registers (it is soft-float, and `make` rejects a kernel ELF with an FP or
@@ -188,8 +190,10 @@ F083) replaces them with one `KError` table that generates §2.
 
 ## 3. Syscalls
 
-`proc_init::dispatch_frame` dispatches with a `match` on `rax`, and each
-handler checks its own pointers. One table,
+`proc_init::dispatch_frame` looks the number up in the generated
+`syscall::x86_64::TABLE` and calls the row's handler, a method of
+`syscall::Handlers` that takes each argument in its C type and returns
+`Result<usize, KError>`; dispatch encodes an error as `-errno`. One table,
 `crates/core/src/proc/syscalls.toml`, holds each call's number per
 architecture, its arguments' C types in order, and its pointer arguments;
 `scripts/gen_syscalls.py` writes from it the kernel's table
@@ -310,7 +314,7 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
 - `wait4`: `pid > 0` waits for that child, any `pid < 0` for any child, and
   `pid == 0` returns `ECHILD`; Linux reads 0 and `pid < -1` as process
   groups. Only `WNOHANG` is read; other option bits are accepted and ignored, and `r10`
-  (`rusage`) never reaches the handler (F149; ROADMAP §13.7)
+  (`rusage`) is not read (F149; ROADMAP §13.7)
 - `kill`: signal 0 returns `EINVAL`, where Linux checks existence and
   permission (F149; ROADMAP §13.7). Signals 32 to 64 return `EINVAL` until
   ROADMAP §13.8 adds real-time signals. `pid` is truncated to 32 bits, and

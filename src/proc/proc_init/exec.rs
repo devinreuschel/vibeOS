@@ -27,37 +27,37 @@ fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, i32> {
 // Out of line: `dispatch_frame` keeps only the running syscall's frame,
 // and a preempted body carries an interrupt and a switch on top of it.
 #[inline(never)]
-pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> i64 {
+pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     let Some(frame) = frame else {
-        return syscall::neg(EINVAL);
+        return Err(KError::from_errno(EINVAL));
     };
     let ppid = current_pid();
     if ppid == 0 {
-        return syscall::neg(EINVAL);
+        return Err(KError::from_errno(EINVAL));
     }
     let Some(src) = current_space() else {
-        return syscall::neg(EFAULT);
+        return Err(KError::from_errno(EFAULT));
     };
     let meta = with_table(|t| t.get(ppid).map(|p| (p.fds, p.cwd, p.creds)));
     let Some((fds, cwd, creds)) = meta else {
-        return syscall::neg(ESRCH);
+        return Err(KError::from_errno(ESRCH));
     };
     let Some(fds) = dup_table(fds) else {
-        return syscall::neg(EMFILE);
+        return Err(KError::from_errno(EMFILE));
     };
     let Some(pid) = alloc_pid(0) else {
         close_all_fds(&mut { fds });
-        return syscall::neg(EAGAIN);
+        return Err(KError::from_errno(EAGAIN));
     };
     let Some(slot) = space_slot() else {
         close_all_fds(&mut { fds });
         with_sched_table(|s, t| release_pid(s, t, pid));
-        return syscall::neg(ENOMEM);
+        return Err(KError::from_errno(ENOMEM));
     };
     let Some(cloned) = addr_space_init::clone_full(src) else {
         close_all_fds(&mut { fds });
         with_sched_table(|s, t| release_pid(s, t, pid));
-        return syscall::neg(ENOMEM);
+        return Err(KError::from_errno(ENOMEM));
     };
     let cr3 = cloned.root().as_u64();
     let mut child = *frame;
@@ -71,7 +71,7 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> i64 {
             addr_space_init::teardown(boxed.into_inner());
             close_all_fds(&mut { fds });
             with_sched_table(|s, t| release_pid(s, t, pid));
-            return syscall::neg(spawn_errno(e));
+            return Err(KError::from_errno(spawn_errno(e)));
         }
     };
     with_table(|t| {
@@ -87,56 +87,61 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> i64 {
     });
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
-    pid as i64
+    Ok(pid as usize)
 }
 
 // Out of line: `dispatch_frame` keeps only the running syscall's frame,
 // and a preempted body carries an interrupt and a switch on top of it.
 #[inline(never)]
-pub(super) fn sys_execve(path: u64, argv: u64, envp: u64, frame: Option<&mut UserFrame>) -> i64 {
+pub(super) fn sys_execve(
+    path: u64,
+    argv: u64,
+    envp: u64,
+    frame: Option<&mut UserFrame>,
+) -> SysResult {
     let Some(frame) = frame else {
-        return syscall::neg(EINVAL);
+        return Err(KError::from_errno(EINVAL));
     };
     let pid = current_pid();
     if pid == 0 {
-        return syscall::neg(EINVAL);
+        return Err(KError::from_errno(EINVAL));
     }
     let mut pbuf = [0u8; vibeos::fs::MAX_PATH];
     let n = match copy_user_str(path, &mut pbuf) {
         Ok(n) => n,
-        Err(e) => return syscall::neg(e),
+        Err(e) => return Err(KError::from_errno(e)),
     };
     let Ok(path_s) = core::str::from_utf8(&pbuf[..n]) else {
-        return syscall::neg(EINVAL);
+        return Err(KError::from_errno(EINVAL));
     };
     let argv_v = match copy_cvec(argv) {
         Ok(v) => v,
-        Err(e) => return syscall::neg(e),
+        Err(e) => return Err(KError::from_errno(e)),
     };
     let _ = envp;
     let Ok(mut argv_s) = TryVec::<&str>::try_with_capacity(argv_v.len().max(1)) else {
-        return syscall::neg(ENOMEM);
+        return Err(KError::from_errno(ENOMEM));
     };
     if argv_v.is_empty() {
         if argv_s.try_push(path_s).is_err() {
-            return syscall::neg(ENOMEM);
+            return Err(KError::from_errno(ENOMEM));
         }
     } else {
         for a in argv_v.iter() {
             let Ok(s) = core::str::from_utf8(a) else {
-                return syscall::neg(EINVAL);
+                return Err(KError::from_errno(EINVAL));
             };
             if argv_s.try_push(s).is_err() {
-                return syscall::neg(ENOMEM);
+                return Err(KError::from_errno(ENOMEM));
             }
         }
     }
     let Some(slot) = space_slot() else {
-        return syscall::neg(ENOMEM);
+        return Err(KError::from_errno(ENOMEM));
     };
     let loaded = match user_init::load_path(path_s, &argv_s, &[]) {
         Ok(l) => l,
-        Err(e) => return syscall::neg(load_errno(e)),
+        Err(e) => return Err(KError::from_errno(load_errno(e))),
     };
     let name = intern_name(path_s);
     let entry = loaded.entry;
@@ -157,7 +162,7 @@ pub(super) fn sys_execve(path: u64, argv: u64, envp: u64, frame: Option<&mut Use
         if let Some(b) = boxed {
             addr_space_init::teardown(b.into_inner());
         }
-        return syscall::neg(ESRCH);
+        return Err(KError::from_errno(ESRCH));
     };
     let mut i = 0usize;
     while i < MAX_FDS {
@@ -187,7 +192,7 @@ pub(super) fn sys_execve(path: u64, argv: u64, envp: u64, frame: Option<&mut Use
     // (`user_init::load_image`), so the next ring-3 `fs:` access reaches its
     // TLS block; established by `user_init::setup_tls`.
     unsafe { crate::x86::wrmsr(crate::x86::IA32_FS_BASE, fs) };
-    0
+    Ok(0)
 }
 
 /// Run `f` on the calling process's own address space, after the table
@@ -209,56 +214,57 @@ fn with_own_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
 }
 
 /// Anonymous private `mmap` (SYSCALL.md §3.1).
-pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> i64 {
+pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> SysResult {
     let req = match mmap_request(addr, len, prot, flags, off) {
         Ok(r) => r,
-        Err(MmapError::Inval) => return syscall::neg(EINVAL),
-        Err(MmapError::NoMem) => return syscall::neg(ENOMEM),
+        Err(MmapError::Inval) => return Err(KError::from_errno(EINVAL)),
+        Err(MmapError::NoMem) => return Err(KError::from_errno(ENOMEM)),
         Err(MmapError::NotAnon) => {
-            let e = if lookup_fd(fd).is_none() {
+            let e = if lookup_fd(fd as u32).is_none() {
                 EBADF
             } else {
                 ENODEV
             };
-            return syscall::neg(e);
+            return Err(KError::from_errno(e));
         }
     };
     match with_own_space(|s| addr_space_init::mmap(s, &req)) {
-        None => syscall::neg(EINVAL),
-        Some(Ok(va)) => va as i64,
-        Some(Err(AsError::Overlap)) => syscall::neg(EEXIST),
-        Some(Err(AsError::NullGuard)) => syscall::neg(EPERM),
-        Some(Err(AsError::Misaligned)) => syscall::neg(EINVAL),
-        Some(Err(_)) => syscall::neg(ENOMEM),
+        None => Err(KError::from_errno(EINVAL)),
+        Some(Ok(va)) => Ok(va as usize),
+        Some(Err(AsError::Overlap)) => Err(KError::from_errno(EEXIST)),
+        Some(Err(AsError::NullGuard)) => Err(KError::from_errno(EPERM)),
+        Some(Err(AsError::Misaligned)) => Err(KError::from_errno(EINVAL)),
+        Some(Err(_)) => Err(KError::from_errno(ENOMEM)),
     }
 }
 
 /// `munmap` (SYSCALL.md §3.1): allocates nothing.
-pub(super) fn sys_munmap(addr: u64, len: u64) -> i64 {
+pub(super) fn sys_munmap(addr: u64, len: usize) -> SysResult {
+    let len = len as u64;
     if !addr.is_multiple_of(PAGE_SIZE_4K) || len == 0 {
-        return syscall::neg(EINVAL);
+        return Err(KError::from_errno(EINVAL));
     }
     let Some(len) = len
         .checked_add(PAGE_SIZE_4K - 1)
         .map(|l| l & !(PAGE_SIZE_4K - 1))
         .filter(|&l| addr.checked_add(l).is_some_and(|e| e <= USER_MAP_END))
     else {
-        return syscall::neg(EINVAL);
+        return Err(KError::from_errno(EINVAL));
     };
     // SAFETY: every leaf of the caller's space was mapped from the buddy by
     // `addr_space_init::map_anon` or `addr_space_init::brk`, and `unmap`
     // supplies the flush, here.
     match with_own_space(|s| unsafe { addr_space_init::unmap(s, addr, len) }) {
-        None => syscall::neg(EINVAL),
-        Some(Ok(())) => 0,
-        Some(Err(AsError::NoRegionSlot)) => syscall::neg(ENOMEM),
-        Some(Err(_)) => syscall::neg(EINVAL),
+        None => Err(KError::from_errno(EINVAL)),
+        Some(Ok(())) => Ok(0),
+        Some(Err(AsError::NoRegionSlot)) => Err(KError::from_errno(ENOMEM)),
+        Some(Err(_)) => Err(KError::from_errno(EINVAL)),
     }
 }
 
 /// `brk`: the new break, or the current one on failure; 0 for pid 0.
-pub(super) fn sys_brk(want: u64) -> i64 {
-    with_own_space(|s| addr_space_init::brk(s, want)).unwrap_or(0) as i64
+pub(super) fn sys_brk(want: u64) -> SysResult {
+    Ok(with_own_space(|s| addr_space_init::brk(s, want)).unwrap_or(0) as usize)
 }
 
 fn p_space_ref(pid: u32) -> Option<&'static AddressSpace> {

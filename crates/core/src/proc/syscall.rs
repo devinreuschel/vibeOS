@@ -53,8 +53,8 @@ pub const E2BIG: i32 = 7;
 /// Linux `ENOEXEC`.
 pub const ENOEXEC: i32 = 8;
 
-pub const F_GETFD: u64 = 1;
-pub const F_SETFD: u64 = 2;
+pub const F_GETFD: u32 = 1;
+pub const F_SETFD: u32 = 2;
 
 pub const fn neg(errno: i32) -> i64 {
     -(errno as i64)
@@ -80,6 +80,7 @@ pub const fn encode(r: SysResult) -> i64 {
 mod tests {
     use super::*;
     use crate::addr_space::UserMemError;
+    use crate::kerror::KError;
 
     #[test]
     fn errno_linux_values() {
@@ -164,5 +165,114 @@ mod tests {
         assert_eq!(x86_64::TABLE.lookup(SYS_GETPID), Some(Sys::Getpid));
         assert_eq!(x86_64::TABLE.lookup(0xC0FFEE), None);
         assert_eq!(x86_64::TABLE.lookup(u64::MAX), None);
+    }
+    /// The value a handler of C type `ty` must see for register
+    /// `0xFFFF_FFFF_8000_0001 + i` (`high`) or `0xDEAD_BEEF_0000_0003 + i`.
+    fn want(ty: CType, high: bool, i: u64) -> Val {
+        let (i32v, i64v, full) = if high {
+            (-2_147_483_647, -2_147_483_647, 0xFFFF_FFFF_8000_0001u64)
+        } else {
+            (3, -0x2152_4110_FFFF_FFFD, 0xDEAD_BEEF_0000_0003u64)
+        };
+        let (lo32, lo16) = if high { (0x8000_0001u32, 1u16) } else { (3, 3) };
+        let n = i as i32;
+        match ty {
+            CType::Int | CType::PidT => Val::I32(i32v + n),
+            CType::UInt => Val::U32(lo32 + i as u32),
+            CType::Long | CType::OffT => Val::I64(i64v + i64::from(n)),
+            CType::ULong => Val::U64(full + i),
+            CType::SizeT => Val::Usize((full + i) as usize),
+            CType::UmodeT => Val::U16(lo16 + i as u16),
+            CType::Ptr => Val::Ptr(full + i),
+        }
+    }
+
+    #[test]
+    fn dispatch_args_c_types() {
+        for row in &ROWS {
+            type Dispatch = fn(&mut Recorder, u64, &[u64; 6]) -> SysResult;
+            let arches: [(Option<u32>, Dispatch); 2] = [
+                (row.x86_64, x86_64::dispatch::<Recorder>),
+                (row.aarch64, aarch64::dispatch::<Recorder>),
+            ];
+            for (nr, dispatch) in arches {
+                let Some(nr) = nr else { continue };
+                for high in [true, false] {
+                    let base = if high {
+                        0xFFFF_FFFF_8000_0001u64
+                    } else {
+                        0xDEAD_BEEF_0000_0003u64
+                    };
+                    let regs: [u64; 6] = core::array::from_fn(|i| base + i as u64);
+                    let mut rec = Recorder::default();
+                    assert_eq!(
+                        dispatch(&mut rec, u64::from(nr), &regs),
+                        Ok(0),
+                        "{}",
+                        row.name
+                    );
+                    assert_eq!(rec.sys, Some(row.sys), "{}", row.name);
+                    for (i, a) in row.args.iter().enumerate() {
+                        let got = rec.args[i];
+                        let w = want(a.ty, high, i as u64);
+                        assert_eq!(got, Some(w), "{}.{} high={high}", row.name, a.name);
+                    }
+                    for slot in &rec.args[row.arity()..] {
+                        assert_eq!(*slot, None, "{}", row.name);
+                    }
+                }
+            }
+        }
+        // SYSCALL.md §1's examples.
+        let mut rec = Recorder::default();
+        let regs = [0xFFFF_FFFF_0000_0003, 0x1000, 1, 0, 0, 0];
+        assert_eq!(x86_64::dispatch(&mut rec, SYS_READ, &regs), Ok(0));
+        assert_eq!(rec.args[0], Some(Val::U32(3)));
+        let regs = [0x1_0000_0005, 9, 0, 0, 0, 0];
+        assert_eq!(x86_64::dispatch(&mut rec, SYS_KILL, &regs), Ok(0));
+        assert_eq!(rec.args[0], Some(Val::I32(5)));
+        let regs = [0xFFFF_FFFF, 0, 0, 0, 0, 0];
+        assert_eq!(x86_64::dispatch(&mut rec, SYS_WAIT4, &regs), Ok(0));
+        assert_eq!(rec.args[0], Some(Val::I32(-1)));
+    }
+
+    #[test]
+    fn dispatch_nr_eax_sign_extended() {
+        let regs = [0; 6];
+        let nosys = Err(KError::from_errno(ENOSYS));
+        let mut rec = Recorder::default();
+        assert_eq!(
+            x86_64::dispatch(&mut rec, 0xFFFF_FFFF_0000_0001, &regs),
+            Ok(0)
+        );
+        assert_eq!(rec.sys, Some(Sys::Write));
+        assert_eq!(x86_64::dispatch(&mut rec, 0x1_0000_0027, &regs), Ok(0));
+        assert_eq!(rec.sys, Some(Sys::Getpid));
+        // Negative as `eax`, and x32's bit 30 (LINUX.md `no-32bit`).
+        for nr in [0x8000_0000, 0xFFFF_FFFF, 0x4000_0001, u64::MAX] {
+            let mut rec = Recorder::default();
+            assert_eq!(x86_64::dispatch(&mut rec, nr, &regs), nosys, "{nr:#x}");
+            assert_eq!(rec.sys, None, "{nr:#x}");
+        }
+        assert_eq!(
+            aarch64::TABLE.lookup(0xFFFF_FFFF_0000_0040),
+            Some(Sys::Write)
+        );
+        assert_eq!(aarch64::TABLE.lookup(0x8000_0040), None);
+        let mut rec = Recorder::default();
+        assert_eq!(aarch64::dispatch(&mut rec, 0x8000_0040, &regs), nosys);
+        // A row with no number on an architecture is ENOSYS there.
+        assert_eq!(aarch64::call(&mut rec, Sys::Open, &regs), nosys);
+        assert_eq!(aarch64::call(&mut rec, Sys::Fork, &regs), nosys);
+    }
+
+    #[test]
+    fn sysresult_encode() {
+        assert_eq!(encode(Ok(0)), 0);
+        assert_eq!(encode(Ok(42)), 42);
+        assert_eq!(encode(Ok(0x7FFF_F7FF_F000)), 0x7FFF_F7FF_F000);
+        assert_eq!(encode(Err(KError::from_errno(EBADF))), -9);
+        assert_eq!(encode(Err(KError::from_errno(ENOSYS))), -38);
+        assert_eq!(encode(Err(KError::from_errno(4095))), -4095);
     }
 }
