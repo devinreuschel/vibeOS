@@ -243,6 +243,45 @@ pub fn held_mask() -> u8 {
     }
 }
 
+/// A blocking call from a device's hard-IRQ top half fails at the call
+/// (invariant I2): `Sched::begin_wait` and a voluntary `schedule` call it
+/// with IF off, where the per-CPU read is stable. In every build.
+#[track_caller]
+pub fn assert_not_hard_irq() {
+    let hard = crate::irq::hardirq::in_hard_irq();
+    #[cfg(feature = "kernel_tests")]
+    if hard {
+        testing::trip(testing::SleepTrip::HardIrq);
+    }
+    assert!(
+        !hard,
+        "blocking call in hard-IRQ context at {}",
+        Location::caller()
+    );
+}
+
+/// Every call that may sleep calls this first, before it takes any lock
+/// (DESIGN §2.9 rule 4): it asserts that this CPU is not in a device's
+/// hard-IRQ top half (invariant I2). The flag is read inside a short
+/// `InterruptGuard`, which drops before the assertion, so a caught panic
+/// leaks nothing.
+#[track_caller]
+pub fn might_sleep() {
+    let hard = {
+        let _irq = InterruptGuard::enter();
+        crate::irq::hardirq::in_hard_irq()
+    };
+    #[cfg(feature = "kernel_tests")]
+    if hard {
+        testing::trip(testing::SleepTrip::HardIrq);
+    }
+    assert!(
+        !hard,
+        "sleeping call in hard-IRQ context at {}",
+        Location::caller()
+    );
+}
+
 /// A context switch leaves this CPU holding no ranked lock. `HELD` is per
 /// CPU, so a lock held across `switch_context` would be charged to the
 /// thread that runs next (invariant I1). Called first in
@@ -454,6 +493,9 @@ pub mod testing {
     /// to `arch::catch::catch_panic`, so a test reads this instead.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SleepTrip {
+        /// `sync_init::might_sleep` or `assert_not_hard_irq`: a sleeping or
+        /// blocking call from a device's hard-IRQ top half.
+        HardIrq = 2,
         /// `sync_init::assert_switch_clean`: a ranked lock held across a
         /// context switch.
         SwitchHeld = 1,
@@ -471,6 +513,7 @@ pub mod testing {
     pub fn take_trip() -> Option<SleepTrip> {
         match TRIP.swap(0, Ordering::Relaxed) {
             1 => Some(SleepTrip::SwitchHeld),
+            2 => Some(SleepTrip::HardIrq),
             _ => None,
         }
     }

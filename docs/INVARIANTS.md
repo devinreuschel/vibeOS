@@ -250,7 +250,10 @@ instead. The panic path (§2.5) is the one exception: it reads the log ring and 
 taking their locks.
 
 The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
-([section 5.4](INTERRUPTS.md#54-irq-registration), ROADMAP §6.6). The timer interrupt's top half also expires
+([section 5.4](INTERRUPTS.md#54-irq-registration), ROADMAP §6.6). A blocking call from a device top half fails at the call:
+`park`, `Sched::begin_wait`, and a voluntary `schedule` assert that `hardirq::IN_ISR` is clear,
+`schedule_preempt` is the one switch interrupt context makes, and `IN_ISR` is set only around
+`irq_init::dispatch`. The timer interrupt's top half also expires
 deadline timers whose action is a wake or a signal, at most 32 wakes per interrupt
 ([§6.5](TIME.md#65-timers-and-timeouts)). A last put of a counted object runs the object's release in place
 only where [§2.11](#211-object-lifetimes) rule 6 allows it; anywhere else the release is deferred to
@@ -667,7 +670,7 @@ that review cites means the review's text.
 | # | Invariant | Established at | Status | Holds today |
 |---|-----------|----------------|--------|-------------|
 | I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter`, `IrqCell::with`, `thread_init::switch_now` | enforced at runtime, per CPU | Partly: `switch_now` asserts that no ranked lock is held across a context switch, but an `IrqCell` or a rank-0 `SpinMutex` held across one is not counted and stays unchecked (ROADMAP §13.12) |
-| I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
+| I2 | Hard-IRQ context never blocks or allocates (§2.2) | `hardirq::IN_ISR`, `sync_init::might_sleep`, `sync_init::assert_not_hard_irq` (in `park`, `Sched::begin_wait`, and a voluntary `schedule`) | enforced for blocking in a device top half; documented otherwise | Partly: allocation in a top half is unchecked, and the timer, IPI, and keyboard handlers do not set `IN_ISR`, so a block in one of them is unchecked too |
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `syscall_init::first_return` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `syscall_init::first_return` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/x86_64/idt.rs` | enforced by construction: `idt::init` points every gate at a stub it generates, and `scripts/check_entry.py` fails on an `x86-interrupt` handler outside `src/arch/` | Yes |

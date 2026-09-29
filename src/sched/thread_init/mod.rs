@@ -186,6 +186,7 @@ impl Sched {
 
     /// Enqueue wait → Blocked. Still holding SCHED. Caller drops, then `schedule`.
     pub(crate) fn begin_wait(&mut self, wq: &mut WaitQueue, deadline: Instant) {
+        crate::sync_init::assert_not_hard_irq();
         let id = current_id();
         wq.enqueue(id);
         self.timeouts.insert(id, deadline);
@@ -322,6 +323,9 @@ pub fn schedule_preempt() {
 /// [`apply_if_on_resume`]. `InterruptGuard` stays on the outgoing stack.
 fn schedule_inner(from_irq: bool) {
     let _irq = InterruptGuard::enter();
+    if !from_irq {
+        crate::sync_init::assert_not_hard_irq();
+    }
     crate::ipi_init::drain_inbox();
     let now = Instant {
         ns: time_init::now_ns(),
@@ -1166,6 +1170,7 @@ pub fn sleep_ms(ms: u64) {
 
 /// Park until `deadline` (or a far-future sentinel). Sleep path only.
 pub fn park(deadline: Option<Instant>) {
+    crate::sync_init::might_sleep();
     let d = effective_deadline(deadline);
     let id = current_id();
     with_sched(|s| {

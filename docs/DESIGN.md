@@ -183,7 +183,7 @@ children, need no row.
 | mm | `mm/{mod,pmm,paging,heap,kva}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
 | time | `time/mod.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
-| irq | `irq/{mod,ipi}.rs` | `irq/{mod,irq_init,ipi_init}.rs` |
+| irq | `irq/{mod,ipi}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
 | sched | `sched/{mod,thread,wait,work,fpu}.rs` | `sched/{mod,sched_init,work_init}.rs`, `sched/thread_init/{mod,testing}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |

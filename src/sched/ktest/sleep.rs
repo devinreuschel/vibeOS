@@ -2,15 +2,20 @@
 //! one assertion under `arch::catch::catch_panic` and reads which one fired
 //! from `sync_init::testing::take_trip`.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use vibeos::lock::{Held, RANK_BUDDY};
+use vibeos::time::Instant;
 
+use crate::apic_init;
 use crate::arch;
-use crate::ktest::{Outcome, sleep_until};
+use crate::irq::hardirq;
+use crate::irq_init;
+use crate::ktest::{Outcome, sleep_until, spin_until_ns};
 use crate::per_cpu_init;
 use crate::sync_init::{self, SpinMutex};
 use crate::thread_init;
+use crate::time_init;
 use crate::x86;
 
 static SWITCH_HELPER_RAN: AtomicBool = AtomicBool::new(false);
@@ -114,4 +119,125 @@ pub(crate) fn lock_across_switch_asserts() -> Outcome {
         return o;
     }
     Outcome::Ok
+}
+
+/// Clears this CPU's `IN_ISR` when dropped, so a test that sets it cannot
+/// leave it set on an early return.
+struct IsrFlag;
+
+impl IsrFlag {
+    /// Set this CPU's `IN_ISR`. IF must be off until the flag drops.
+    fn set() -> Self {
+        hardirq::testing::set_in_isr(true);
+        IsrFlag
+    }
+}
+
+impl Drop for IsrFlag {
+    fn drop(&mut self) {
+        hardirq::testing::set_in_isr(false);
+    }
+}
+
+/// ROADMAP §10.3 (F110): with `IN_ISR` set, `park` and a voluntary
+/// `yield_now` fail at the call.
+pub(crate) fn block_in_hard_irq_asserts() -> Outcome {
+    use sync_init::testing::SleepTrip;
+    let saved = Saved::now();
+    let g = x86::InterruptGuard::enter();
+    let nest = per_cpu_init::irq_nest();
+    let _ = sync_init::testing::take_trip();
+    let flag = IsrFlag::set();
+    let deadline = Instant {
+        ns: time_init::now_ns().saturating_add(1_000_000),
+    };
+    let park_hit = arch::catch::catch_panic(|| thread_init::park(Some(deadline)));
+    let park_trip = sync_init::testing::take_trip();
+    saved.restore_locks(nest);
+    let yield_hit = arch::catch::catch_panic(thread_init::yield_now);
+    let yield_trip = sync_init::testing::take_trip();
+    // `schedule_inner`'s guard never dropped.
+    saved.restore_locks(nest);
+    drop(flag);
+    let still = irq_init::in_hard_irq();
+    drop(g);
+    for (what, hit, trip) in [
+        ("park", park_hit, park_trip),
+        ("yield_now", yield_hit, yield_trip),
+    ] {
+        if !hit {
+            return crate::fail_fmt!("{what}: no panic");
+        }
+        if trip != Some(SleepTrip::HardIrq) {
+            return crate::fail_fmt!("{what}: trip {:?}, want HardIrq", trip);
+        }
+    }
+    if still {
+        return Outcome::Fail("IN_ISR still set");
+    }
+    if let Err(o) = saved.check() {
+        return o;
+    }
+    Outcome::Ok
+}
+
+/// What `irq_init::in_hard_irq` said in the top half (`TOP_HARD`) and the
+/// bottom half (`BOTTOM_HARD`): 0 not run, 1 false, 2 true.
+static TOP_HARD: AtomicU8 = AtomicU8::new(0);
+static BOTTOM_HARD: AtomicU8 = AtomicU8::new(0);
+
+fn hard_state() -> u8 {
+    if irq_init::in_hard_irq() { 2 } else { 1 }
+}
+
+fn top_half() {
+    TOP_HARD.store(hard_state(), Ordering::Release);
+}
+
+fn bottom_half() {
+    BOTTOM_HARD.store(hard_state(), Ordering::Release);
+}
+
+/// ROADMAP §10.3 (F110): `in_hard_irq()` is true in a device top half and
+/// false in its threaded bottom half. A self-IPI on an allocated vector
+/// enters through the same stub and `irq_init::dispatch` as a device's MSI.
+pub(crate) fn in_hard_irq_top_bottom() -> Outcome {
+    TOP_HARD.store(0, Ordering::Release);
+    BOTTOM_HARD.store(0, Ordering::Release);
+    let g = x86::InterruptGuard::enter();
+    let me = thread_init::current_cpu();
+    let v = match irq_init::allocate_vector(me) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    if irq_init::set_threaded(v, Some(top_half), bottom_half).is_err() {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("set_threaded");
+    }
+    if apic_init::send_ipi_cpu(me, v).is_err() {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("send_ipi_cpu");
+    }
+    drop(g);
+    let done = spin_until_ns(
+        || TOP_HARD.load(Ordering::Acquire) != 0 && BOTTOM_HARD.load(Ordering::Acquire) != 0,
+        500_000_000,
+    );
+    if irq_init::free_vector(v).is_err() {
+        return Outcome::Fail("free_vector");
+    }
+    if !done {
+        return crate::fail_fmt!(
+            "top {} bottom {}: a half did not run",
+            TOP_HARD.load(Ordering::Acquire),
+            BOTTOM_HARD.load(Ordering::Acquire)
+        );
+    }
+    match (
+        TOP_HARD.load(Ordering::Acquire),
+        BOTTOM_HARD.load(Ordering::Acquire),
+    ) {
+        (2, 1) => Outcome::Ok,
+        (t, b) => crate::fail_fmt!("in_hard_irq: top {t} bottom {b}, want 2 1"),
+    }
 }

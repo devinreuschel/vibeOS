@@ -492,6 +492,14 @@ pub(crate) const TESTS: &[Test] = &[
         "lock_across_switch_asserts",
         sched::ktest::lock_across_switch_asserts,
     ),
+    test(
+        "block_in_hard_irq_asserts",
+        sched::ktest::block_in_hard_irq_asserts,
+    ),
+    test(
+        "in_hard_irq_top_bottom",
+        sched::ktest::in_hard_irq_top_bottom,
+    ),
     test("exec_huge_memsz", proc::ktest::test_exec_huge_memsz).deadline(60_000),
     test(
         "brk_mmap_munmap_user",

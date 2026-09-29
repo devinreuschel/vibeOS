@@ -4,7 +4,7 @@
 //! allocate and block. Allocate is refused in a hard-IRQ (the dispatcher
 //! flag, not `InterruptGuard`).
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
 use vibeos::dev::Device;
@@ -17,6 +17,7 @@ use vibeos::sched::FAR_DEADLINE;
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
+use super::hardirq;
 use crate::apic_init;
 use crate::arch;
 use crate::pci_init;
@@ -53,7 +54,6 @@ pub(super) fn with_irq<R>(f: impl FnOnce(&mut IrqState) -> R) -> R {
     f(&mut g)
 }
 static HANDLERS: [AtomicUsize; irq::POOL_LEN] = [const { AtomicUsize::new(0) }; irq::POOL_LEN];
-static IN_ISR: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
 
 #[derive(Clone, Copy)]
 enum Route {
@@ -96,28 +96,14 @@ pub(super) fn handler_slot(vec: u8) -> Option<usize> {
     pool_index(vec)
 }
 
-pub fn in_hard_irq() -> bool {
-    let cpu = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
-    if (cpu as usize) < IN_ISR.len() {
-        IN_ISR[cpu as usize].load(Ordering::Relaxed)
-    } else {
-        false
-    }
-}
-
-fn set_in_isr(on: bool) {
-    let cpu = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
-    if (cpu as usize) < IN_ISR.len() {
-        IN_ISR[cpu as usize].store(on, Ordering::Relaxed);
-    }
-}
+pub use super::hardirq::in_hard_irq;
 
 fn device_irq(frame: &mut arch::idt::TrapFrame) {
     dispatch(frame.vector as u8);
 }
 
 pub fn dispatch(vec: u8) {
-    set_in_isr(true);
+    hardirq::set(true);
     if let Some(i) = handler_slot(vec) {
         let (top, work) = with_irq(|s| (s.th.top[i], s.th.work[i]));
         if work != 0 || top != 0 {
@@ -148,7 +134,7 @@ pub fn dispatch(vec: u8) {
         }
     }
     apic_init::eoi_for(vec);
-    set_in_isr(false);
+    hardirq::set(false);
 }
 
 pub fn allocate_vector(cpu: u32) -> Result<u8, IrqError> {

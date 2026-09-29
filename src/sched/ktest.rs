@@ -3,7 +3,9 @@
 mod hooks;
 mod sleep;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
-pub(crate) use sleep::lock_across_switch_asserts;
+pub(crate) use sleep::{
+    block_in_hard_irq_asserts, in_hard_irq_top_bottom, lock_across_switch_asserts,
+};
 
 use alloc::boxed::Box;
 use core::fmt;
