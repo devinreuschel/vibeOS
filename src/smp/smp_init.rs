@@ -282,8 +282,8 @@ fn start_one(a: ApAlloc) {
         published,
         ..
     } = a;
-    // The `Box` keeps `CpuTables` in place when `tables` moves.
-    let tables_ptr = tables.tables.as_ref() as *const CpuTables as *mut CpuTables;
+    // The `TryBox` keeps `CpuTables` in place when `tables` moves.
+    let tables_ptr = &*tables.tables as *const CpuTables as *mut CpuTables;
     // Room for one is reserved above, so this push allocates nothing and
     // cannot fail; it moves the tables before INIT, while no AP runs on
     // them.

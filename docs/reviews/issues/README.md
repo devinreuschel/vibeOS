@@ -20,7 +20,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [D1](D1-heap-backed-tables.md) | Heap-allocate the growable fixed-capacity tables (Phase 10) | High | L | III | Q3, A3 | `in progress (#194)` |
 | [D2](D2-driver-instances.md) | Driver and volume instances instead of module singletons | Medium | L | III | A1, Q3 | `proposed` |
 | [D3](D3-bootinfo.md) | Capture boot information once (`BootInfo`) | Low | S | I | Q3 | `implemented (#90, #91)` |
-| [E1](E1-parser-robustness-lints.md) | Lock in parser robustness with restriction lints | Low | S | II | Q1 | `in progress (#86, #194)` |
+| [E1](E1-parser-robustness-lints.md) | Lock in parser robustness with restriction lints | Low | S | II | Q1 | `implemented (#86, #194)` |
 | [E2](E2-kerror-errno.md) | One `KError` (errno-shaped) ahead of the syscall boundary | Medium | M | III | A3 | `proposed` |
 | [E3](E3-emit-paths.md) | Make the marker-vs-log rule explicit; one macro per intent | Low | S | II | — | `implemented (#83)` |
 | [C1](C1-pin-toolchain-and-inputs.md) | Pin every external input: nightly date, action SHAs, Limine commit | High | S | I | — | `implemented (#77)` |
@@ -40,8 +40,8 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [DOC1](DOC1-top-of-funnel-docs.md) | README, DESIGN header, module map, MIT LICENSE | High | S | I | — | `implemented (#78)` |
 | [DOC2](DOC2-split-design-doc.md) | Split `DESIGN.md`; as-built in tables, not prose | Medium | M | III | A1 (helpful) | `in progress (#194)` |
 | [DOC3](DOC3-agents-md.md) | Version the agent instructions in the repo (`AGENTS.md`) | High | S | I | — | `implemented (#78)` |
-| [DOC4](DOC4-changelog-style.md) | Keep `CHANGELOG.md` short and user-facing | Low | S | I | B3 | `in progress (#81)` |
-| [DX1](DX1-make-check-and-lint-config.md) | A fast local gate (`make check`) and formatter/linter configuration | Medium | S | I | Q1, B1, A2 | `in progress (#76)` |
+| [DOC4](DOC4-changelog-style.md) | Keep `CHANGELOG.md` short and user-facing | Low | S | I | B3 | `implemented (#81, #194)` |
+| [DX1](DX1-make-check-and-lint-config.md) | A fast local gate (`make check`) and formatter/linter configuration | Medium | S | I | Q1, B1, A2 | `implemented (#76, #194)` |
 | [R1](R1-repo-tidy.md) | Tidy the root, `tests/`, and remote branches | Low | S | I | B1, T2 | `in progress (#78, #79)` |
 | [O1](O1-phase9-resume-note.md) | Note the Phase 9 pause and resume; research notes deferred | Low | S | II | — | `superseded: Phase 9 did not pause, so there is no resume to note; research notes stay deferred` |
 

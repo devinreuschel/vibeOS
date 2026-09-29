@@ -1,5 +1,11 @@
 //! Host mkfs.vibefs. Same format module as the kernel.
 
+#![allow(
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "host tool: `alloc`'s growing calls may panic, and a failed allocation ends this host process, not the kernel (DESIGN §4.4)"
+)]
+
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -7,8 +13,6 @@ use std::process::ExitCode;
 
 use vibeos::vibefs::{self, MemDisk, Vol};
 
-#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut label: &[u8] = b"vibeos";

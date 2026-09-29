@@ -6,7 +6,6 @@
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::console::BackendId;
 use vibeos::fb::CHUNK;
 use vibeos::kbd::DecodedKey;
 use vibeos::marker;
@@ -19,35 +18,9 @@ use crate::serial::Serial;
 use crate::thread_init;
 use crate::x86::{self, InterruptGuard};
 
-static SERIAL_ON: AtomicBool = AtomicBool::new(false);
-static FB_ON: AtomicBool = AtomicBool::new(false);
-static LIVE: AtomicBool = AtomicBool::new(false);
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn live() -> bool {
-    LIVE.load(Ordering::Acquire)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn set_enabled(id: BackendId, on: bool) {
-    match id {
-        BackendId::Serial => SERIAL_ON.store(on, Ordering::Release),
-        BackendId::Framebuffer => {
-            if on && !fb_init::ready() {
-                return;
-            }
-            FB_ON.store(on, Ordering::Release);
-        }
-    }
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn enabled(id: BackendId) -> bool {
-    match id {
-        BackendId::Serial => SERIAL_ON.load(Ordering::Acquire),
-        BackendId::Framebuffer => FB_ON.load(Ordering::Acquire),
-    }
-}
+pub(super) static SERIAL_ON: AtomicBool = AtomicBool::new(false);
+pub(super) static FB_ON: AtomicBool = AtomicBool::new(false);
+pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
 
 /// Fan-out, one [`CHUNK`] at a time: serial under its TX lock, then the
 /// framebuffer's grid under the console lock, never nested (ranks SERIAL
@@ -124,16 +97,22 @@ fn wait_key_loop() -> DecodedKey {
             thread_init::yield_now();
             continue;
         }
+        // SAFETY: `cli` only changes IF, which this wait loop owns: it holds no
+        // lock and no `InterruptGuard` here; established here.
         unsafe {
             core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
         }
         if let Some(k) = read() {
+            // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
+            // lock and no `InterruptGuard` here; established here.
             unsafe {
                 core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
             }
             return k;
         }
         if !per_cpu_init::current().runq.is_empty() {
+            // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
+            // lock and no `InterruptGuard` here; established here.
             unsafe {
                 core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
             }
@@ -142,6 +121,9 @@ fn wait_key_loop() -> DecodedKey {
         }
         #[cfg(feature = "kernel_tests")]
         testing::HALTS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: `sti; hlt` only enables interrupts and halts until one
+        // arrives, and `sti`'s one-instruction shadow keeps a wake-up IRQ from
+        // landing before the `hlt`; this loop holds no lock; established here.
         unsafe {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
         }

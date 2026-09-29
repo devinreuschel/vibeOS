@@ -4,8 +4,6 @@
 //! allocate and block. Allocate is refused in a hard-IRQ (the dispatcher
 //! flag, not `InterruptGuard`).
 
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
@@ -28,10 +26,10 @@ use crate::thread_init;
 
 type Handler = fn();
 
-struct IrqState {
+pub(super) struct IrqState {
     pool: VectorPool,
     routes: [Route; irq::POOL_LEN],
-    th: Threaded,
+    pub(super) th: Threaded,
 }
 
 static IRQ: SpinMutex<IrqState> = SpinMutex::with_rank(
@@ -50,7 +48,7 @@ static IRQ: SpinMutex<IrqState> = SpinMutex::with_rank(
 );
 
 /// Run `f` on the vector pool, routes and threaded state.
-fn with_irq<R>(f: impl FnOnce(&mut IrqState) -> R) -> R {
+pub(super) fn with_irq<R>(f: impl FnOnce(&mut IrqState) -> R) -> R {
     let mut g = IRQ.lock();
     f(&mut g)
 }
@@ -60,31 +58,41 @@ static IN_ISR: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
 #[derive(Clone, Copy)]
 enum Route {
     None,
+    #[cfg_attr(
+        not(feature = "kernel_tests"),
+        expect(
+            dead_code,
+            reason = "ROADMAP §6.3 legacy INTx fallback; only the in-guest tests route one yet"
+        )
+    )]
     IoApic {
         gsi: u32,
         trigger: Trigger,
         polarity: Polarity,
     },
-    #[allow(dead_code)] // enable_msi; virtio/C will arm it
+    #[expect(
+        dead_code,
+        reason = "ROADMAP §6.3 MSI configuration: only `enable_msi` builds it"
+    )]
     Msi,
     Msix,
 }
 
-struct Threaded {
+pub(super) struct Threaded {
     wq: WaitQueue,
-    pending: [bool; irq::POOL_LEN],
-    top: [usize; irq::POOL_LEN],
-    work: [usize; irq::POOL_LEN],
+    pub(super) pending: [bool; irq::POOL_LEN],
+    pub(super) top: [usize; irq::POOL_LEN],
+    pub(super) work: [usize; irq::POOL_LEN],
     started: bool,
 }
 
 static THREAD_CPU: AtomicU32 = AtomicU32::new(0);
 
-fn with_pool<R>(f: impl FnOnce(&mut VectorPool) -> R) -> R {
+pub(super) fn with_pool<R>(f: impl FnOnce(&mut VectorPool) -> R) -> R {
     with_irq(|s| f(&mut s.pool))
 }
 
-fn handler_slot(vec: u8) -> Option<usize> {
+pub(super) fn handler_slot(vec: u8) -> Option<usize> {
     pool_index(vec)
 }
 
@@ -114,6 +122,9 @@ pub fn dispatch(vec: u8) {
         let (top, work) = with_irq(|s| (s.th.top[i], s.th.work[i]));
         if work != 0 || top != 0 {
             if top != 0 {
+                // SAFETY: invariant: a nonzero `th.top` slot holds a `fn()`;
+                // established by `irq::irq_init::set_threaded`, its only
+                // nonzero store.
                 let h: Handler = unsafe { core::mem::transmute(top) };
                 h();
             }
@@ -128,6 +139,9 @@ pub fn dispatch(vec: u8) {
         } else {
             let p = HANDLERS[i].load(Ordering::Acquire);
             if p != 0 {
+                // SAFETY: invariant: a nonzero `HANDLERS` slot holds a
+                // `fn()`; established by `irq::irq_init::set_handler`, its
+                // only nonzero store.
                 let h: Handler = unsafe { core::mem::transmute(p) };
                 h();
             }
@@ -169,6 +183,13 @@ pub fn free_vector(vec: u8) -> Result<(), IrqError> {
     })
 }
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §6.3 legacy INTx fallback; only the in-guest tests route one yet"
+    )
+)]
 pub fn set_handler(vec: u8, h: Handler) -> Result<(), IrqError> {
     let Some(i) = handler_slot(vec) else {
         return Err(IrqError::BadVector);
@@ -213,6 +234,9 @@ fn take_work() -> Option<Handler> {
                     st.th.pending[i] = false;
                     let p = st.th.work[i];
                     if p != 0 {
+                        // SAFETY: invariant: a nonzero `th.work` slot holds a
+                        // `fn()`; established by `irq::irq_init::set_threaded`,
+                        // its only nonzero store.
                         let h: Handler = unsafe { core::mem::transmute(p) };
                         return Some(h);
                     }
@@ -251,12 +275,26 @@ pub fn start_threaded() {
     });
 }
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §6.3 interrupt affinity API; only the in-guest tests call it yet"
+    )
+)]
 pub fn cpu_of(vec: u8) -> Option<u32> {
     with_pool(|p| p.cpu_of(vec))
 }
 
 /// Record dest CPU. IOAPIC routes are rewritten. MSI/MSI-X callers
 /// reprogram the message from [`cpu_of`].
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §6.3 interrupt affinity API; only the in-guest tests call it yet"
+    )
+)]
 pub fn set_affinity(vec: u8, cpu: u32) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
@@ -282,10 +320,24 @@ pub fn set_affinity(vec: u8, cpu: u32) -> Result<(), IrqError> {
     Ok(())
 }
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §6.3: `set_affinity` and `route_intx` resolve a CPU's APIC id"
+    )
+)]
 fn apic_id(cpu: u32) -> Option<u8> {
     per_cpu_init::cpu(cpu).map(|c| c.apic_id.load(Ordering::Relaxed) as u8)
 }
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §6.3 legacy INTx fallback; only the in-guest tests route one yet"
+    )
+)]
 pub fn route_intx(
     gsi: u32,
     vec: u8,
@@ -319,7 +371,10 @@ pub fn mask_intx(bdf: Bdf, disable: bool) {
     pci_init::cfg_write_command(bdf, cmd);
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "ROADMAP §6.3 MSI configuration; no driver arms MSI yet"
+)]
 pub fn enable_msi(bdf: Bdf, cap: u8, vector: u8, apic_id: u8) -> Result<(), IrqError> {
     if !in_pool(vector) {
         return Err(IrqError::BadVector);
@@ -342,7 +397,10 @@ pub fn enable_msi(bdf: Bdf, cap: u8, vector: u8, apic_id: u8) -> Result<(), IrqE
     Ok(())
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "ROADMAP §6.3 MSI configuration; no driver arms MSI yet"
+)]
 pub fn disable_msi(bdf: Bdf, cap: u8) {
     let mut hw = pci_init::HwCfg;
     pci::set_msi_enable(&mut hw, bdf, cap, false);
@@ -361,9 +419,17 @@ fn msix_table_va(dev: &Device, cap: &pci::MsixCap, index: u16) -> Option<u64> {
     Some(r.mapped_va.wrapping_add(cap.table_off as u64))
 }
 
-fn write_msix_entry(table_va: u64, index: u16, e: MsixEntry) {
+/// Program MSI-X table entry `index`.
+///
+/// # Safety
+/// `table_va` is an MSI-X table that [`msix_table_va`] returned for an
+/// index of at least `index`, so entry `index` lies in a mapped UC BAR
+/// (invariant I228).
+unsafe fn write_msix_entry(table_va: u64, index: u16, e: MsixEntry) {
     let base = table_va.wrapping_add((index as u64) * 16);
     let w = e.to_dwords();
+    // SAFETY: this fn's `# Safety` (here): the entry's four dwords are
+    // mapped, aligned device registers.
     unsafe {
         let p = base as *mut u32;
         // Mask first, then addr/data, then the caller's mask bit.
@@ -396,11 +462,16 @@ pub fn enable_msix(
         return Err(IrqError::NoRoute);
     };
     pci_init::enable_mem_master(dev.addr);
-    write_msix_entry(
-        table,
-        table_index,
-        MsixEntry::for_lapic(vector, apic_id, false),
-    );
+    // SAFETY: invariant I228, established by `irq::irq_init::msix_table_va`:
+    // it returned `table` for `table_index`, so the entry lies inside the
+    // mapped BAR.
+    unsafe {
+        write_msix_entry(
+            table,
+            table_index,
+            MsixEntry::for_lapic(vector, apic_id, false),
+        );
+    }
     mask_intx(dev.addr, true);
     pci::set_msix_enable(&mut hw, dev.addr, cap_off, true, false);
     if let Some(i) = handler_slot(vector) {
@@ -419,7 +490,16 @@ pub fn disable_msix(dev: &Device) {
 
 /// Reserve keyboard `0x30`, install pool stubs `0x31..=0x7F`.
 pub fn init() {
-    let _ = with_pool(|p| p.reserve(vectors::KBD, 0));
+    // A fresh pool always has the keyboard's vector free; a failure means
+    // the pool is wrong, and the keyboard alone is left without its vector.
+    if let Err(e) = with_pool(|p| p.reserve(vectors::KBD, 0)) {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "vibeOS: irq: keyboard vector {:#x} not reserved: {:?}",
+            vectors::KBD,
+            e
+        );
+    }
     install_pool_stubs();
 }
 
@@ -427,21 +507,5 @@ fn install_pool_stubs() {
     // 0x30 is the keyboard's. The dispatcher owns the rest of the pool.
     for v in vectors::DEVICE_VEC_START..=vectors::DEVICE_VEC_END {
         arch::idt::set_handler(v, device_irq);
-    }
-}
-
-#[cfg(feature = "kernel_tests")]
-pub fn allocated_count() -> usize {
-    with_pool(|p| p.allocated())
-}
-
-#[cfg(feature = "kernel_tests")]
-pub fn has_threaded(vec: u8) -> bool {
-    match handler_slot(vec) {
-        Some(i) => with_irq(|s| {
-            let t = &s.th;
-            t.top[i] != 0 || t.work[i] != 0 || t.pending[i]
-        }),
-        None => false,
     }
 }

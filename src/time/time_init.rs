@@ -8,10 +8,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use vibeos::acpi::HpetInfo;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::time::{
-    CalibSource, FS_PER_MS, IO_WAIT_PORT, Instant, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES,
-    PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE, TickClock, WallOrigin, bcd_to_bin,
-    hpet_period_ok, monotonic_max, next_deadline, tsc_per_ms_from_hpet, tsc_per_ms_from_pit,
-    unix_from_civil, wall_unix_s,
+    CalibSource, FS_PER_MS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2,
+    PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE, TickClock, WallOrigin, bcd_to_bin, hpet_period_ok,
+    monotonic_max, tsc_per_ms_from_hpet, tsc_per_ms_from_pit, unix_from_civil, wall_unix_s,
 };
 
 use crate::acpi_init;
@@ -41,13 +40,13 @@ const RTC_DM_BINARY: u8 = 1 << 2;
 const RTC_24H: u8 = 1 << 1;
 const RTC_NMI_OFF: u8 = 0x80;
 
-struct TimeState {
+pub(super) struct TimeState {
     clock: TickClock,
     ticks: AtomicU64,
     tsc_per_ms: u64,
-    source: CalibSource,
-    use_rdtscp: bool,
-    invariant_tsc: bool,
+    pub(super) source: CalibSource,
+    pub(super) use_rdtscp: bool,
+    pub(super) invariant_tsc: bool,
     rtc: Option<WallOrigin>,
 }
 
@@ -65,7 +64,7 @@ impl TimeState {
     }
 }
 
-static STATE: BootCell<TimeState> = BootCell::new();
+pub(super) static STATE: BootCell<TimeState> = BootCell::new();
 /// Highest `now_ns` published. TCG has no invariant TSC; `hlt` can make
 /// interpolation step backwards even with a stable seqlock pair.
 static LAST_NS: AtomicU64 = AtomicU64::new(0);
@@ -75,6 +74,9 @@ fn publish_ns(n: u64) -> u64 {
 }
 
 fn io_wait() {
+    // SAFETY: invariant I229, established at `time::time_init::init`: port
+    // 0x80 is the delay port, a write to it has no effect any module
+    // relies on.
     unsafe { x86::outb(IO_WAIT_PORT, 0) };
 }
 
@@ -109,17 +111,31 @@ pub fn read_tsc() -> u64 {
     rdtsc_ser(STATE.try_get().is_some_and(|s| s.use_rdtscp))
 }
 
-fn hpet_read(va: u64, off: u64) -> u64 {
+/// # Safety
+/// `va` is the physmap address of the HPET register block, mapped UC
+/// (invariant I228), and `off` an 8-byte-aligned register offset in it.
+unsafe fn hpet_read(va: u64, off: u64) -> u64 {
+    // SAFETY: this fn's `# Safety` (here): `va + off` is a mapped, aligned
+    // HPET register.
     unsafe { ((va.wrapping_add(off)) as *const u64).read_volatile() }
 }
 
-fn hpet_write(va: u64, off: u64, val: u64) {
+/// # Safety
+/// As for [`hpet_read`].
+unsafe fn hpet_write(va: u64, off: u64, val: u64) {
+    // SAFETY: this fn's `# Safety` (here): `va + off` is a mapped, aligned
+    // HPET register.
     unsafe { ((va.wrapping_add(off)) as *mut u64).write_volatile(val) };
 }
 
-fn hpet_enable(va: u64) {
-    let cfg = hpet_read(va, HPET_GEN_CFG);
-    hpet_write(va, HPET_GEN_CFG, (cfg & !HPET_LEGACY) | HPET_ENABLE);
+/// # Safety
+/// `va` as for [`hpet_read`].
+unsafe fn hpet_enable(va: u64) {
+    // SAFETY: this fn's `# Safety` (here); GEN_CFG is register 0x10.
+    unsafe {
+        let cfg = hpet_read(va, HPET_GEN_CFG);
+        hpet_write(va, HPET_GEN_CFG, (cfg & !HPET_LEGACY) | HPET_ENABLE);
+    }
 }
 
 fn hpet_va(hpet: &HpetInfo) -> u64 {
@@ -133,29 +149,48 @@ pub(crate) fn hpet_ready() -> Option<(u64, u32)> {
         return None;
     }
     let va = hpet_va(&hpet);
-    hpet_enable(va);
+    // SAFETY: invariant I228, established at `acpi::acpi_init::init`: it
+    // stores a nonzero `period_fs` only after UC-patching the HPET page,
+    // and `hpet_period_ok` rejected zero just above.
+    unsafe { hpet_enable(va) };
     Some((va, hpet.period_fs))
 }
 
-pub(crate) fn hpet_read_main(va: u64) -> u64 {
-    hpet_read(va, HPET_MAIN)
+/// The HPET main counter.
+///
+/// # Safety
+/// `va` is the address [`hpet_ready`] returned.
+pub(crate) unsafe fn hpet_read_main(va: u64) -> u64 {
+    // SAFETY: this fn's `# Safety` (here): `hpet_ready` returns only a UC
+    // HPET block (invariant I228).
+    unsafe { hpet_read(va, HPET_MAIN) }
 }
 
-fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
+pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     if !hpet_period_ok(hpet.period_fs) {
         return None;
     }
     let va = hpet_va(hpet);
+    // Every HPET access below relies on invariant I228, established at
+    // `acpi::acpi_init::init`: it stores a nonzero `period_fs` only after
+    // UC-patching the HPET page, and `hpet_period_ok` rejected zero above.
+    let main = || {
+        // SAFETY: invariant I228, established at `acpi::acpi_init::init`,
+        // as stated above `main`.
+        unsafe { hpet_read(va, HPET_MAIN) }
+    };
     let want = (PIT_CALIB_MS as u128 * FS_PER_MS) / hpet.period_fs as u128;
     let want = u64::try_from(want).ok()?;
     if want == 0 {
         return None;
     }
-    hpet_enable(va);
-    let probe = hpet_read(va, HPET_MAIN);
+    // SAFETY: invariant I228, established at `acpi::acpi_init::init`, as
+    // stated above `main`.
+    unsafe { hpet_enable(va) };
+    let probe = main();
     let mut saw = false;
     for _ in 0..100_000 {
-        if hpet_read(va, HPET_MAIN) != probe {
+        if main() != probe {
             saw = true;
             break;
         }
@@ -164,11 +199,11 @@ fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     if !saw {
         return None;
     }
-    let start = hpet_read(va, HPET_MAIN);
+    let start = main();
     let t0 = rdtsc_ser(use_rdtscp);
     let mut spins = 0u64;
     loop {
-        let now = hpet_read(va, HPET_MAIN);
+        let now = main();
         if now.wrapping_sub(start) >= want {
             break;
         }
@@ -179,26 +214,15 @@ fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
         core::hint::spin_loop();
     }
     let t1 = rdtsc_ser(use_rdtscp);
-    let elapsed = hpet_read(va, HPET_MAIN).wrapping_sub(start);
+    let elapsed = main().wrapping_sub(start);
     tsc_per_ms_from_hpet(t1.wrapping_sub(t0), elapsed, hpet.period_fs)
 }
 
 /// Channel 2 one-shot, gated through 0x61. Does not touch channel 0.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn measure_pit_ch2() -> Option<u64> {
-    let use_rdtscp = STATE.try_get().is_some_and(|s| s.use_rdtscp);
-    calibrate_pit(use_rdtscp)
-}
-
-/// Fresh HPET window. ktest compares this to PIT under the same SMP load;
-/// boot `tsc_per_ms` was sampled before APs came up.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn measure_hpet() -> Option<u64> {
-    let hpet = acpi_init::info()?.hpet?;
-    calibrate_hpet(&hpet, STATE.try_get().is_some_and(|s| s.use_rdtscp))
-}
-
-fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
+pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
+    // SAFETY: invariant I229, established at `time::time_init::init`: the
+    // PIT and port 0x61 are this module's, and channel 2 feeds only this
+    // calibration.
     unsafe {
         let n61 = x86::inb(PIT_GATE);
         x86::outb(PIT_GATE, n61 & !0x01);
@@ -212,6 +236,8 @@ fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
     let t0 = rdtsc_ser(use_rdtscp);
     let mut spins = 0u64;
     loop {
+        // SAFETY: invariant I229, established at `time::time_init::init`, as
+        // for the writes above.
         if unsafe { x86::inb(PIT_GATE) } & (1 << 5) != 0 {
             break;
         }
@@ -227,11 +253,15 @@ fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
 
 fn program_pit_ch0() {
     for &(port, val) in PIT_CH0_WRITES {
+        // SAFETY: invariant I229, established at `time::time_init::init`:
+        // the PIT (and the delay port) are this module's.
         unsafe { x86::outb(port, val) };
     }
 }
 
 fn rtc_reg(reg: u8) -> u8 {
+    // SAFETY: invariant I229, established at `time::time_init::init`: CMOS
+    // is this module's, so no one else moves the index between the writes.
     unsafe {
         x86::outb(RTC_INDEX, reg | RTC_NMI_OFF);
         x86::inb(RTC_DATA)
@@ -346,26 +376,14 @@ pub fn tsc_per_ms() -> u64 {
     STATE.try_get().map(|s| s.tsc_per_ms).unwrap_or(0)
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn source() -> CalibSource {
-    STATE
-        .try_get()
-        .map(|s| s.source)
-        .unwrap_or(CalibSource::Pit)
-}
-
-/// CPUID.8000_0007H:EDX[8]. TCG leaves this clear; KVM and real silicon set it.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn tsc_invariant() -> bool {
-    STATE.try_get().is_some_and(|s| s.invariant_tsc)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn deadline_after(now: Instant) -> Instant {
-    next_deadline(now)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+/// Wall-clock seconds, RTC at boot plus uptime.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §10.4 FAT timestamps: `FatVol::now` follows `time_init::unix_time_s()`"
+    )
+)]
 pub fn unix_time_s() -> Option<u64> {
     let st = STATE.try_get()?;
     st.rtc.map(|o| wall_unix_s(o, now_ns()))
@@ -399,6 +417,9 @@ pub fn busy_wait_ms(ms: u64) {
 
 /// Master PIC EOI. Used by the PIT gate after `on_pit_tick`.
 pub fn eoi_pit() {
+    // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+    // the master 8259's EOI, which the IRQ0 path writes directly, is the
+    // row's named exception to the PIC's ownership.
     unsafe { x86::outb(PIC1_CMD, PIC_EOI) };
 }
 
@@ -435,15 +456,16 @@ pub unsafe fn init() {
                 source = CalibSource::Pit;
                 per_ms = Some(v);
             }
-            None => halt_time("vibeOS: time: calib failed"),
+            None => crate::boot::halt_with("vibeOS: time: calib failed"),
         }
     }
     let per_ms = match per_ms {
         Some(v) => v,
-        None => halt_time("vibeOS: time: calib failed"),
+        None => crate::boot::halt_with("vibeOS: time: calib failed"),
     };
 
     st.tsc_per_ms = per_ms;
+    crate::arch::x86_64::publish_tsc_per_ms(per_ms);
     st.source = source;
     st.clock.write(0, rdtsc_ser(use_rdtscp));
 
@@ -456,14 +478,13 @@ pub unsafe fn init() {
         });
     }
     // Re-enable NMI after CMOS index bit 7.
+    // SAFETY: invariant I229, established here: CMOS is this module's.
     unsafe { x86::outb(RTC_INDEX, 0x0D) };
 
     crate::marker!("vibeOS: time: calibrated {} {}/ms", source.as_str(), per_ms);
     crate::marker!("vibeOS: time: tsc {}/ms", per_ms);
+    // SAFETY: invariant I22, established at `cell::BootCell::set`: the one
+    // write, on the BSP before SMP (`time::time_init::init`'s `# Safety`
+    // runs it before IRQs are on), and no reader sees `STATE` until then.
     unsafe { STATE.set(st) };
-}
-
-fn halt_time(msg: &str) -> ! {
-    crate::marker!(msg);
-    x86::halt();
 }

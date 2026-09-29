@@ -5,7 +5,6 @@ use vibeos::ipi::SHOOT_RANGES;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 
 use super::WAIT_NS;
-use crate::ipi_init;
 use crate::ktest::Outcome;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -45,7 +44,7 @@ pub(crate) fn dead_list_batched_rounds() -> Outcome {
             }
         }
     }
-    let r0 = ipi_init::testing::rounds_sent();
+    let r0 = crate::irq::ktest::rounds_sent();
     {
         // IF off: this CPU's worker cannot run until every stack is on
         // the list, so it takes all of them at once.
@@ -61,7 +60,7 @@ pub(crate) fn dead_list_batched_rounds() -> Outcome {
         }
         thread_init::yield_now();
     }
-    let rounds = ipi_init::testing::rounds_sent().wrapping_sub(r0);
+    let rounds = crate::irq::ktest::rounds_sent().wrapping_sub(r0);
     let most = PARKED_STACKS.div_ceil(SHOOT_RANGES) as u64;
     if rounds > most {
         return crate::fail_fmt!(

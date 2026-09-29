@@ -1,11 +1,14 @@
 //! In-guest tests for console (kernel_tests only). Rows: the list in crate::ktest.
 
+mod hooks;
+
+pub(crate) use hooks::*;
+
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::console::BackendId;
 use vibeos::fb::PIECE_BYTES;
 
-use crate::console_init;
 use crate::fb_init::{self, testing as fb_testing};
 use crate::ktest::user::{self, Image, Layout, user_code};
 use crate::ktest::{Outcome, cpu_remote, free_frames_owned, sleep_until_s19, spin_until};
@@ -18,10 +21,10 @@ pub(crate) fn test_fb_bgrx_roundtrip() -> Outcome {
         return Outcome::Fail("no framebuffer");
     }
     let color = vibeos::fb::pack_bgrx(0x11, 0x22, 0x33);
-    if !crate::fb_init::put_pixel(0, 0, color) {
+    if !put_pixel(0, 0, color) {
         return Outcome::Fail("put origin");
     }
-    match crate::fb_init::get_pixel(0, 0) {
+    match get_pixel(0, 0) {
         Some(got) if got == color => Outcome::Ok,
         Some(_) => Outcome::Fail("pixel mismatch"),
         None => Outcome::Fail("get origin"),
@@ -29,10 +32,10 @@ pub(crate) fn test_fb_bgrx_roundtrip() -> Outcome {
 }
 
 pub(crate) fn test_fb_pitch() -> Outcome {
-    let Some(pitch) = crate::fb_init::pitch() else {
+    let Some(pitch) = pitch() else {
         return Outcome::Fail("no pitch");
     };
-    let Some(width) = crate::fb_init::width() else {
+    let Some(width) = width() else {
         return Outcome::Fail("no width");
     };
     // Must not assume pitch == width*4. QEMU often equals; still use pitch.
@@ -40,10 +43,10 @@ pub(crate) fn test_fb_pitch() -> Outcome {
         return Outcome::Fail("pitch smaller than width*4");
     }
     let color = vibeos::fb::pack_bgrx(0x44, 0x55, 0x66);
-    if !crate::fb_init::put_pixel(0, 1, color) {
+    if !put_pixel(0, 1, color) {
         return Outcome::Fail("put row1");
     }
-    match crate::fb_init::get_pixel(0, 1) {
+    match get_pixel(0, 1) {
         Some(got) if got == color => Outcome::Ok,
         Some(_) => Outcome::Fail("row1 mismatch"),
         None => Outcome::Fail("get row1"),
@@ -55,7 +58,7 @@ pub(crate) fn test_fb_cr_home() -> Outcome {
         return Outcome::Fail("no framebuffer");
     }
     crate::fb_init::write(b"\n");
-    let Some((col, row)) = crate::fb_init::cursor() else {
+    let Some((col, row)) = cursor() else {
         return Outcome::Fail("no cursor");
     };
     if col != 0 {
@@ -79,11 +82,11 @@ pub(crate) fn test_fb_cr_home() -> Outcome {
         return Outcome::Fail("X glyph empty");
     };
     let (ox, oy) = vibeos::fb::glyph_origin(0, row);
-    let Some(lit) = crate::fb_init::get_pixel(ox + gx, oy + gy) else {
+    let Some(lit) = get_pixel(ox + gx, oy + gy) else {
         return Outcome::Fail("get lit");
     };
     crate::fb_init::write(b"\r ");
-    match crate::fb_init::get_pixel(ox + gx, oy + gy) {
+    match get_pixel(ox + gx, oy + gy) {
         Some(after) if after != lit => Outcome::Ok,
         Some(_) => Outcome::Fail("CR did not home"),
         None => Outcome::Fail("get after"),
@@ -91,16 +94,16 @@ pub(crate) fn test_fb_cr_home() -> Outcome {
 }
 
 pub(crate) fn test_kbd_gsi_unmasked() -> Outcome {
-    if crate::kbd_init::pic_fallback() {
+    if pic_fallback() {
         if crate::apic_init::owns_tick() {
             return Outcome::Fail("pic fallback after pic masked");
         }
         return Outcome::Skip("pic fallback");
     }
-    let Some(gsi) = crate::kbd_init::gsi() else {
+    let Some(gsi) = gsi() else {
         return Outcome::Fail("no keyboard gsi");
     };
-    match crate::apic_init::gsi_masked(gsi) {
+    match crate::arch::ktest::gsi_masked(gsi) {
         Some(false) => Outcome::Ok,
         Some(true) => Outcome::Fail("keyboard gsi still masked"),
         None => Outcome::Fail("gsi not on ioapic"),
@@ -108,10 +111,10 @@ pub(crate) fn test_kbd_gsi_unmasked() -> Outcome {
 }
 
 pub(crate) fn test_kbd_8042_clock() -> Outcome {
-    if !crate::kbd_init::live() {
+    if !kbd_live() {
         return Outcome::Fail("kbd not live");
     }
-    let Some(cfg) = crate::kbd_init::read_cfg() else {
+    let Some(cfg) = read_cfg() else {
         return Outcome::Fail("cfg read failed");
     };
     if !vibeos::kbd::cfg_clock1_on(cfg) {
@@ -126,14 +129,14 @@ pub(crate) fn test_kbd_8042_clock() -> Outcome {
 /// 0xD2 → IRQ1 → decoder → PS/2 ring. Serial mux cannot satisfy this.
 /// Device clock is `kbd_8042_clock` / sendkey.
 pub(crate) fn test_kbd_ps2_irq() -> Outcome {
-    if !crate::kbd_init::live() {
+    if !kbd_live() {
         return Outcome::Fail("kbd not live");
     }
     let mut n = 64u32;
     while n > 0 && crate::console_init::read().is_some() {
         n -= 1;
     }
-    if !crate::kbd_init::inject_scancode(0x1E) {
+    if !inject_scancode(0x1E) {
         return Outcome::Fail("0xD2 inject");
     }
     let t0 = crate::time_init::now_us();
@@ -150,33 +153,33 @@ pub(crate) fn test_kbd_ps2_irq() -> Outcome {
 
 pub(crate) fn test_console_mux() -> Outcome {
     use vibeos::console::BackendId;
-    if !crate::console_init::live() {
+    if !live() {
         return Outcome::Fail("mux not live");
     }
-    if !crate::console_init::enabled(BackendId::Serial) {
+    if !enabled(BackendId::Serial) {
         return Outcome::Fail("serial off");
     }
-    if crate::fb_init::ready() && !crate::console_init::enabled(BackendId::Framebuffer) {
+    if crate::fb_init::ready() && !enabled(BackendId::Framebuffer) {
         return Outcome::Fail("fb off");
     }
     crate::console_init::write(b"");
-    crate::console_init::set_enabled(BackendId::Framebuffer, false);
-    if crate::console_init::enabled(BackendId::Framebuffer) {
-        crate::console_init::set_enabled(BackendId::Framebuffer, true);
+    set_enabled(BackendId::Framebuffer, false);
+    if enabled(BackendId::Framebuffer) {
+        set_enabled(BackendId::Framebuffer, true);
         return Outcome::Fail("disable failed");
     }
-    crate::console_init::set_enabled(BackendId::Framebuffer, true);
-    if crate::fb_init::ready() && !crate::console_init::enabled(BackendId::Framebuffer) {
+    set_enabled(BackendId::Framebuffer, true);
+    if crate::fb_init::ready() && !enabled(BackendId::Framebuffer) {
         return Outcome::Fail("re-enable failed");
     }
     Outcome::Ok
 }
 
 pub(crate) fn test_kbd_ring_drain() -> Outcome {
-    if !crate::kbd_init::live() {
+    if !kbd_live() {
         return Outcome::Fail("kbd not live");
     }
-    crate::kbd_init::push_for_test(vibeos::kbd::DecodedKey::Char(b'q'));
+    push_for_test(vibeos::kbd::DecodedKey::Char(b'q'));
     match crate::console_init::read() {
         Some(vibeos::kbd::DecodedKey::Char(b'q')) => Outcome::Ok,
         Some(_) => Outcome::Fail("wrong key"),
@@ -222,21 +225,21 @@ struct SerialOff(bool);
 
 impl SerialOff {
     fn new() -> Self {
-        let was = console_init::enabled(BackendId::Serial);
-        console_init::set_enabled(BackendId::Serial, false);
+        let was = enabled(BackendId::Serial);
+        set_enabled(BackendId::Serial, false);
         SerialOff(was)
     }
 }
 
 impl Drop for SerialOff {
     fn drop(&mut self) {
-        console_init::set_enabled(BackendId::Serial, self.0);
+        set_enabled(BackendId::Serial, self.0);
     }
 }
 
 /// The framebuffer console is up and `console_init::write` reaches it.
 fn fb_console_on() -> bool {
-    fb_init::ready() && console_init::enabled(BackendId::Framebuffer)
+    fb_init::ready() && enabled(BackendId::Framebuffer)
 }
 
 static NL_PIDS: AtomicU64 = AtomicU64::new(0);
@@ -354,23 +357,23 @@ fn console_if_off_write() -> Outcome {
         return Outcome::Fail("Z has no lit pixel");
     };
     fb_init::write(b"\n");
-    let Some((col, row)) = fb_init::cursor() else {
+    let Some((col, row)) = cursor() else {
         return Outcome::Fail("no cursor");
     };
     let (ox, oy) = vibeos::fb::glyph_origin(col, row);
     let (x, y) = (ox + u32::from(gx), oy + u32::from(gy));
-    let Some(bg) = fb_init::get_pixel(x, y) else {
+    let Some(bg) = get_pixel(x, y) else {
         return Outcome::Fail("cursor cell off screen");
     };
     {
         let _g = x86::InterruptGuard::enter();
         fb_init::write(b"Z");
     }
-    if fb_init::get_pixel(x, y) != Some(bg) {
+    if get_pixel(x, y) != Some(bg) {
         return Outcome::Fail("a write with IF off drew its glyph");
     }
     fb_init::write(b"");
-    if fb_init::get_pixel(x, y) == Some(bg) {
+    if get_pixel(x, y) == Some(bg) {
         return Outcome::Fail("the next write with IF on left Z undrawn");
     }
     fb_init::write(b"\n");

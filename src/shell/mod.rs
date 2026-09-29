@@ -1,6 +1,9 @@
 //! Shell: the kernel half of subsystem `shell` (DESIGN §1.3).
 
 pub(crate) mod cmds;
+// Tab completion: the REPL's, which only `kernel_shell` builds that are not
+// `kernel_tests` builds run.
+#[cfg(all(feature = "kernel_shell", not(feature = "kernel_tests")))]
 pub(crate) mod complete;
 #[cfg(feature = "kernel_tests")]
 #[allow(

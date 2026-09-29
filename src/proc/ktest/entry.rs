@@ -33,6 +33,9 @@ pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
     };
     // Above the 512 MiB GLOBAL low-identity window (DESIGN §4.1).
     let va = 0x0000_0000_4000_0000u64;
+    // SAFETY: `addr_space_init::map_anon` checks the range is in the user
+    // half and clear of every region of this fresh space before it maps;
+    // established by `addr_space_init::map_anon`.
     if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K * 2, UserPerms::RW) }
         .is_err()
     {
@@ -42,13 +45,17 @@ pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
     // thread has IF=1 and `as_cr3 == 0`, so a switch away and back in this
     // window would reload the kernel CR3 under the user VA below.
     let irqs_off = x86::InterruptGuard::enter();
-    addr_space_init::load_cr3(&space);
+    super::load_cr3(&space);
     x86::invlpg(va);
     // User PTE: SMAP would #PF a kernel store/load via this VA.
     x86::stac();
+    // SAFETY: `va` is a mapped, writable, 8-byte aligned page of `space`,
+    // which CR3 holds with IF=0 and SMAP lifted, so the store and load reach
+    // that page's frame and nothing else; established here.
     unsafe {
         (va as *mut u64).write_volatile(0x1111_2222_3333_4444);
     }
+    // SAFETY: as for the store above; established here.
     let got = unsafe { (va as *const u64).read_volatile() };
     x86::clac();
     if got != 0x1111_2222_3333_4444 {
@@ -57,6 +64,9 @@ pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
         addr_space_init::teardown(space);
         return Outcome::Fail("readback");
     }
+    // SAFETY: the range's leaves came from the buddy through `map_anon`
+    // above, and `addr_space_init::unmap` flushes this CPU, the only one
+    // with `space` loaded; established here.
     if unsafe { addr_space_init::unmap(&mut space, va, PAGE_SIZE_4K * 2) }.is_err() {
         addr_space_init::load_kernel_cr3();
         drop(irqs_off);
@@ -80,6 +90,9 @@ pub(crate) fn test_user_ptr_helpers() -> Outcome {
         return Outcome::Fail("create");
     };
     let va = 0x0000_0000_4000_0000u64;
+    // SAFETY: `addr_space_init::map_anon` checks the range is in the user
+    // half and clear of every region of this fresh space before it maps;
+    // established by `addr_space_init::map_anon`.
     if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
         addr_space_init::teardown(space);
         return Outcome::Fail("map");
@@ -124,16 +137,16 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
     // test_addrspace_map_unmap_teardown): a switch away and back would reload
     // the kernel CR3 between the load and the read.
     let irqs_off = x86::InterruptGuard::enter();
-    addr_space_init::load_cr3(&a);
+    super::load_cr3(&a);
     let cr3_a = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
-    if !addr_space_init::cr3_was_skipped(&a) {
+    if !super::cr3_was_skipped(&a) {
         addr_space_init::load_kernel_cr3();
         drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("a not recorded");
     }
-    addr_space_init::load_cr3(&a);
+    super::load_cr3(&a);
     if (x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK) != cr3_a {
         addr_space_init::load_kernel_cr3();
         drop(irqs_off);
@@ -141,7 +154,7 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
         addr_space_init::teardown(b);
         return Outcome::Fail("skip mutated cr3");
     }
-    addr_space_init::load_cr3(&b);
+    super::load_cr3(&b);
     let cr3_b = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
     if cr3_b == cr3_a {
         addr_space_init::load_kernel_cr3();

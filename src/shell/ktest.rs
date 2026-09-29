@@ -3,19 +3,37 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::ktest::Outcome;
+use crate::shell_init;
 use crate::thread_init;
 use crate::time_init;
 
+/// Registered commands.
+pub(crate) fn command_count() -> usize {
+    shell_init::with_reg(|r| r.len())
+}
+
+/// `name` is a registered command.
+pub(crate) fn has_command(name: &str) -> bool {
+    shell_init::with_reg(|r| r.lookup(name).is_some())
+}
+
+/// The builtins `shell_init::init` registers.
+pub(crate) fn builtin_names() -> [&'static str; 10] {
+    [
+        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot", "poweroff",
+    ]
+}
+
 pub(crate) fn test_shell_registry() -> Outcome {
-    for name in crate::shell_init::builtin_names() {
-        if !crate::shell_init::has_command(name) {
+    for name in builtin_names() {
+        if !has_command(name) {
             return Outcome::Fail("missing builtin");
         }
     }
-    if crate::shell_init::command_count() < 10 {
+    if command_count() < 10 {
         return Outcome::Fail("registry short");
     }
-    if crate::shell_init::has_command("not-a-cmd") {
+    if has_command("not-a-cmd") {
         return Outcome::Fail("unknown present");
     }
     Outcome::Ok
@@ -75,10 +93,10 @@ fn lspci_stack_entry() {
 }
 
 pub(crate) fn test_lspci_cmd() -> Outcome {
-    if !crate::shell_init::has_command("lspci") {
+    if !has_command("lspci") {
         return Outcome::Fail("no lspci");
     }
-    if !crate::shell_init::has_command("devices") {
+    if !has_command("devices") {
         return Outcome::Fail("no devices");
     }
     // Shell stacks are 16 KiB. lspci on _start would miss a full

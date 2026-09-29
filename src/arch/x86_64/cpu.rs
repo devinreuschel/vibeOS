@@ -15,6 +15,8 @@ use crate::x86;
 /// Caller vouches that `port` is a valid I/O port for a byte write.
 #[inline]
 pub unsafe fn outb(port: u16, val: u8) {
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe {
         asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags))
     };
@@ -25,6 +27,8 @@ pub unsafe fn outb(port: u16, val: u8) {
 #[inline]
 pub unsafe fn inb(port: u16) -> u8 {
     let val: u8;
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe {
         asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack, preserves_flags))
     };
@@ -36,6 +40,7 @@ pub unsafe fn inb(port: u16) -> u8 {
 #[inline]
 pub fn read_cr3() -> u64 {
     let val: u64;
+    // SAFETY: `mov r, cr3` only reads CR3 into a register, as its `options` say; established here.
     unsafe { asm!("mov {}, cr3", out(reg) val, options(nomem, nostack, preserves_flags)) };
     val
 }
@@ -48,18 +53,17 @@ pub fn read_cr3() -> u64 {
 /// the current RIP and RSP.
 #[inline]
 pub unsafe fn write_cr3(cr3: u64) {
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe { asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags)) };
 }
 
 /// `invlpg` for a single virtual address. Cheap enough that every leaf
 /// edit calls it; DESIGN §4.3 requires it after any single-PTE change.
-///
-/// `#[allow(dead_code)]` because slice B only exercises this from the
-/// (phase-2-wired) MMIO patch path; phase 2 turns it into a used symbol
-/// without editing this file.
 #[inline]
-#[allow(dead_code)]
 pub fn invlpg(va: u64) {
+    // SAFETY: `invlpg` only drops TLB entries for one page, which never changes
+    // what a later access finds, only how long it takes; established here.
     unsafe { asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags)) };
 }
 
@@ -68,6 +72,8 @@ pub fn invlpg(va: u64) {
 pub fn rdmsr(msr: u32) -> u64 {
     let hi: u32;
     let lo: u32;
+    // SAFETY: `rdmsr` only reads an MSR into registers; an index the CPU lacks
+    // raises `#GP`, which halts the kernel rather than touching memory; established here.
     unsafe {
         asm!(
             "rdmsr",
@@ -88,6 +94,8 @@ pub fn rdmsr(msr: u32) -> u64 {
 pub unsafe fn wrmsr(msr: u32, val: u64) {
     let lo = (val & 0xFFFF_FFFF) as u32;
     let hi = (val >> 32) as u32;
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe {
         asm!(
             "wrmsr",
@@ -114,18 +122,11 @@ pub const FMASK_SYSCALL: u64 = 0x47700;
 
 pub const CR0_PE: u64 = 1 << 0;
 pub const CR0_MP: u64 = 1 << 1;
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub const CR0_EM: u64 = 1 << 2;
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub const CR0_TS: u64 = 1 << 3;
 pub const CR0_ET: u64 = 1 << 4;
 pub const CR0_NE: u64 = 1 << 5;
 pub const CR0_WP: u64 = 1 << 16;
 pub const CR0_AM: u64 = 1 << 18;
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub const CR0_NW: u64 = 1 << 29;
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub const CR0_CD: u64 = 1 << 30;
 pub const CR0_PG: u64 = 1 << 31;
 pub const CR4_PAE: u64 = 1 << 5;
 pub const CR4_MCE: u64 = 1 << 6;
@@ -154,6 +155,13 @@ static SMAP_LIVE: AtomicBool = AtomicBool::new(false);
 
 /// `stac`/`clac` are #UD when SMAP is not present. `arch::cpu::init_control_regs` sets this.
 #[inline]
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §9.1 `stac`/`clac` helpers; §10.6's user accessors call them"
+    )
+)]
 pub fn smap_live() -> bool {
     SMAP_LIVE.load(Ordering::Acquire)
 }
@@ -165,21 +173,39 @@ pub fn set_smap_live(on: bool) {
 
 /// Set `RFLAGS.AC`. No-op when SMAP is unsupported.
 #[inline]
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §9.1 `stac`/`clac` helpers; §10.6's user accessors call them"
+    )
+)]
 pub fn stac() {
     if !smap_live() {
         return;
     }
+    // SAFETY: `stac` only changes RFLAGS.AC, and `smap_live` is set only
+    // once CR4.SMAP is on, so the instruction is defined; established
+    // at `arch::x86_64::cpu::init_control_regs`.
     unsafe { asm!("stac", options(nomem, nostack)) };
 }
 
 /// Clear `RFLAGS.AC`. No-op when SMAP is unsupported.
 #[inline]
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §9.1 `stac`/`clac` helpers; §10.6's user accessors call them"
+    )
+)]
 pub fn clac() {
     if !smap_live() {
         return;
     }
+    // SAFETY: `clac` only changes RFLAGS.AC, and `smap_live` is set only
+    // once CR4.SMAP is on, so the instruction is defined; established
+    // at `arch::x86_64::cpu::init_control_regs`.
     unsafe { asm!("clac", options(nomem, nostack)) };
 }
 
@@ -210,6 +236,7 @@ pub fn rdrand64() -> Option<u64> {
     while tries < 10 {
         let val: u64;
         let ok: u8;
+        // SAFETY: `rdrand` and `setc` only write the two named registers and flags; established here.
         unsafe {
             asm!(
                 "rdrand {val}",
@@ -228,9 +255,10 @@ pub fn rdrand64() -> Option<u64> {
 }
 
 #[inline]
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn read_cr0() -> u64 {
     let val: u64;
+    // SAFETY: `mov r, cr0` only reads CR0 into a register, as its `options`
+    // say; established here.
     unsafe { asm!("mov {}, cr0", out(reg) val, options(nomem, nostack, preserves_flags)) };
     val
 }
@@ -239,12 +267,15 @@ pub fn read_cr0() -> u64 {
 /// Caller vouches CR0 bits are valid for this CPU.
 #[inline]
 pub unsafe fn write_cr0(val: u64) {
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe { asm!("mov cr0, {}", in(reg) val, options(nostack, preserves_flags)) };
 }
 
 #[inline]
 pub fn read_cr4() -> u64 {
     let val: u64;
+    // SAFETY: `mov r, cr4` only reads CR4 into a register, as its `options` say; established here.
     unsafe { asm!("mov {}, cr4", out(reg) val, options(nomem, nostack, preserves_flags)) };
     val
 }
@@ -253,19 +284,18 @@ pub fn read_cr4() -> u64 {
 /// Caller vouches CR4 bits are valid for this CPU.
 #[inline]
 pub unsafe fn write_cr4(val: u64) {
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe { asm!("mov cr4, {}", in(reg) val, options(nostack, preserves_flags)) };
 }
 
 /// Read `rsp`. Used by paging bring-up to find which top-level PML4
 /// entry covers Limine's boot stack, so the switch to our own PML4
 /// survives the following `mov cr3`.
-///
-/// `#[allow(dead_code)]` for the panic-test build, which never reaches
-/// paging init.
 #[inline]
-#[allow(dead_code)]
 pub fn read_rsp() -> u64 {
     let val: u64;
+    // SAFETY: `mov r, rsp` only copies RSP into a register; established here.
     unsafe { asm!("mov {}, rsp", out(reg) val, options(nomem, nostack, preserves_flags)) };
     val
 }
@@ -273,6 +303,7 @@ pub fn read_rsp() -> u64 {
 #[inline]
 pub fn read_rbp() -> u64 {
     let val: u64;
+    // SAFETY: `mov r, rbp` only copies RBP into a register; established here.
     unsafe { asm!("mov {}, rbp", out(reg) val, options(nomem, nostack, preserves_flags)) };
     val
 }
@@ -281,6 +312,7 @@ pub fn read_rbp() -> u64 {
 #[inline]
 pub fn read_rip() -> u64 {
     let val: u64;
+    // SAFETY: `lea r, [rip]` only computes an address into a register; established here.
     unsafe { asm!("lea {}, [rip]", out(reg) val, options(nomem, nostack, preserves_flags)) };
     val
 }
@@ -292,6 +324,7 @@ pub fn read_rip() -> u64 {
 #[inline]
 pub fn halt() -> ! {
     loop {
+        // SAFETY: `cli; hlt` stops this CPU with interrupts off and touches no memory; established here.
         unsafe { asm!("cli; hlt", options(nomem, nostack)) };
     }
 }
@@ -355,6 +388,8 @@ pub struct InterruptGuard {
 impl InterruptGuard {
     pub fn enter() -> Self {
         let rflags: u64;
+        // SAFETY: `pushfq; pop; cli` reads RFLAGS through one stack slot it
+        // pops again and clears IF; established here.
         unsafe {
             asm!(
                 "pushfq",
@@ -374,6 +409,8 @@ impl Drop for InterruptGuard {
     fn drop(&mut self) {
         run_hook(&NEST_LEAVE);
         if self.restore {
+            // SAFETY: IF was 1 when this guard entered (here), so turning it
+            // back on restores the state its holder found.
             unsafe { asm!("sti", options(nomem, nostack)) };
         }
     }
@@ -382,8 +419,9 @@ impl Drop for InterruptGuard {
 /// # Safety
 /// Caller vouches that `port` is a valid I/O port for a 16-bit write.
 #[inline]
-#[allow(dead_code)]
 pub unsafe fn outw(port: u16, val: u16) {
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe {
         asm!(
             "out dx, ax",
@@ -395,27 +433,11 @@ pub unsafe fn outw(port: u16, val: u16) {
 }
 
 /// # Safety
-/// Caller vouches that `port` is a valid I/O port for a 16-bit read.
-#[inline]
-#[allow(dead_code)]
-pub unsafe fn inw(port: u16) -> u16 {
-    let val: u16;
-    unsafe {
-        asm!(
-            "in ax, dx",
-            out("ax") val,
-            in("dx") port,
-            options(nomem, nostack, preserves_flags)
-        )
-    };
-    val
-}
-
-/// # Safety
 /// Caller vouches that `port` is a valid I/O port for a 32-bit write.
 #[inline]
-#[allow(dead_code)]
 pub unsafe fn outl(port: u16, val: u32) {
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe {
         asm!(
             "out dx, eax",
@@ -431,6 +453,8 @@ pub unsafe fn outl(port: u16, val: u32) {
 #[inline]
 pub unsafe fn inl(port: u16) -> u32 {
     let val: u32;
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe {
         asm!(
             "in eax, dx",
@@ -439,33 +463,6 @@ pub unsafe fn inl(port: u16) -> u32 {
             options(nomem, nostack, preserves_flags)
         )
     };
-    val
-}
-
-/// Read `cr2` (page-fault address). Used by the ktest scoped #PF catcher.
-#[inline]
-#[allow(dead_code)]
-pub fn read_cr2() -> u64 {
-    let val: u64;
-    unsafe { asm!("mov {}, cr2", out(reg) val, options(nomem, nostack, preserves_flags)) };
-    val
-}
-
-/// Current code selector. The ktest IDT needs it for gate descriptors.
-#[inline]
-#[allow(dead_code)]
-pub fn read_cs() -> u16 {
-    let val: u16;
-    unsafe { asm!("mov {0:x}, cs", out(reg) val, options(nomem, nostack, preserves_flags)) };
-    val
-}
-
-/// Task register. In-guest GDT test checks we `ltr`'d the TSS selector.
-#[inline]
-#[allow(dead_code)]
-pub fn read_tr() -> u16 {
-    let val: u16;
-    unsafe { asm!("str {0:x}", out(reg) val, options(nomem, nostack, preserves_flags)) };
     val
 }
 
@@ -481,6 +478,8 @@ pub struct DtPtr {
 /// immediately after, including the code selector used by `retfq`.
 #[inline]
 pub unsafe fn lgdt(ptr: &DtPtr) {
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe {
         asm!(
             "lgdt [{}]",
@@ -495,6 +494,8 @@ pub unsafe fn lgdt(ptr: &DtPtr) {
 /// be masked at the controller.
 #[inline]
 pub unsafe fn lidt(ptr: &DtPtr) {
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe {
         asm!(
             "lidt [{}]",
@@ -504,10 +505,35 @@ pub unsafe fn lidt(ptr: &DtPtr) {
     };
 }
 
+/// Load DS, ES, SS, FS and GS with `sel`. `mov gs` zeroes `GS_BASE`.
+///
+/// # Safety
+/// `sel` is a valid data selector in the loaded GDT, and the caller writes
+/// `GS_BASE` back before anything reads a `gs:` operand, with IF=0 in
+/// between when it runs at CPL 0.
+#[inline]
+pub unsafe fn load_data_segs(sel: u16) {
+    // SAFETY: this fn's `# Safety` (here) is the instructions' one
+    // requirement; their `options` state everything else they touch.
+    unsafe {
+        asm!(
+            "mov ds, {0:x}",
+            "mov es, {0:x}",
+            "mov ss, {0:x}",
+            "mov fs, {0:x}",
+            "mov gs, {0:x}",
+            in(reg) sel,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
 /// # Safety
 /// `sel` must index an available 64-bit TSS descriptor in the current GDT.
 #[inline]
 pub unsafe fn ltr(sel: u16) {
+    // SAFETY: this fn's `# Safety` (here) is the instruction's one
+    // requirement; its `options` state everything else it touches.
     unsafe { asm!("ltr {0:x}", in(reg) sel, options(nomem, nostack, preserves_flags)) };
 }
 
@@ -524,6 +550,7 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
 /// `IA32_TSC_DEADLINE`. `lfence;rdtsc` / `rdtscp` do not count.
 #[inline]
 pub fn mfence() {
+    // SAFETY: `mfence` only orders this CPU's memory accesses; established here.
     unsafe { asm!("mfence", options(nostack, preserves_flags)) };
 }
 
@@ -533,6 +560,7 @@ pub fn mfence() {
 pub fn lfence_rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
+    // SAFETY: `lfence; rdtsc` only orders loads and reads the TSC into EDX:EAX; established here.
     unsafe {
         asm!(
             "lfence",
@@ -550,6 +578,7 @@ pub fn lfence_rdtsc() -> u64 {
 pub fn rdtscp() -> u64 {
     let lo: u32;
     let hi: u32;
+    // SAFETY: `rdtscp` only reads the TSC and `TSC_AUX` into the named registers; established here.
     unsafe {
         asm!(
             "rdtscp",
@@ -564,24 +593,29 @@ pub fn rdtscp() -> u64 {
 
 #[inline]
 pub fn sti() {
+    // SAFETY: `sti` only sets IF; every interrupt then enters through the IDT's
+    // stubs, which preserve the interrupted state; established here.
     unsafe { asm!("sti", options(nomem, nostack, preserves_flags)) };
 }
 
 #[inline]
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn cli() {
+    // SAFETY: `cli` only clears IF; established here.
     unsafe { asm!("cli", options(nomem, nostack, preserves_flags)) };
 }
 
 /// One `hlt`. Returns when the next interrupt (or NMI) arrives.
 #[inline]
 pub fn hlt_once() {
+    // SAFETY: `hlt` waits for the next interrupt, which returns through the IDT's
+    // stubs with the interrupted state intact; established here.
     unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
 }
 
 #[inline]
 pub fn rflags() -> u64 {
     let v: u64;
+    // SAFETY: `pushfq; pop` reads RFLAGS through one stack slot it pops again; established here.
     unsafe {
         asm!(
             "pushfq",
@@ -632,7 +666,7 @@ pub struct ControlRegs {
 static CONTROL_CR0: AtomicU64 = AtomicU64::new(0);
 static CONTROL_CR4: AtomicU64 = AtomicU64::new(0);
 
-fn stored_control_regs() -> Option<ControlRegs> {
+pub(crate) fn stored_control_regs() -> Option<ControlRegs> {
     // Acquire: pairs with the Release store of CR0 in `init_control_regs`,
     // so CR4 is the value stored before it.
     let cr0 = CONTROL_CR0.load(Ordering::Acquire);
@@ -709,10 +743,4 @@ pub fn init_control_regs() {
             regs.cr4
         );
     }
-}
-
-/// The values `init_control_regs` writes, once the BSP has computed them.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn control_regs() -> Option<ControlRegs> {
-    stored_control_regs()
 }

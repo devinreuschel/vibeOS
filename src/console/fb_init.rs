@@ -28,28 +28,28 @@ const BANNER_FG: u32 = pack_bgrx(0xF0, 0xE0, 0x88);
 const BANNER: &[u8] = b" vibeOS";
 
 /// The framebuffer's hardware fields, from the bootloader.
-struct Fb {
+pub(super) struct Fb {
     base: u64,
-    width: u32,
+    pub(super) width: u32,
     height: u32,
-    pitch: u64,
+    pub(super) pitch: u64,
     size: u64,
 }
 
 /// What the console lock guards.
-struct Console {
-    grid: TextGrid,
+pub(super) struct Console {
+    pub(super) grid: TextGrid,
     /// The byte each text cell shows on the framebuffer, row-major by
     /// screen position, so a redraw skips a cell that already shows its
     /// grid byte without reading VRAM.
     shown: [u8; MAX_CELLS],
-    fb: Option<Fb>,
+    pub(super) fb: Option<Fb>,
 }
 
 static READY: AtomicBool = AtomicBool::new(false);
 /// The console lock: the RAM text grid and the framebuffer it is drawn
 /// to. Held for one chunk's grid update or one redraw piece at a time.
-static CONSOLE: SpinMutex<Console> = SpinMutex::with_rank(
+pub(super) static CONSOLE: SpinMutex<Console> = SpinMutex::with_rank(
     Console {
         grid: TextGrid::empty(),
         shown: [0; MAX_CELLS],
@@ -60,6 +60,8 @@ static CONSOLE: SpinMutex<Console> = SpinMutex::with_rank(
 static FB_PHYS: AtomicU64 = AtomicU64::new(0);
 static FB_LEN: AtomicU64 = AtomicU64::new(0);
 
+/// The framebuffer console is up; the REPL and the in-guest tests ask.
+#[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
 pub fn ready() -> bool {
     READY.load(Ordering::Acquire)
 }
@@ -118,7 +120,7 @@ impl Fb {
 
     /// The one bound on every framebuffer access: `(x, y)` inside the
     /// mode and its 4 bytes inside the mapped `size`.
-    fn pixel_ptr(&self, x: u32, y: u32) -> Option<*mut u32> {
+    pub(super) fn pixel_ptr(&self, x: u32, y: u32) -> Option<*mut u32> {
         let off = pixel_offset(x, y, self.width, self.height, self.pitch)?;
         if off.checked_add(4)? > self.size {
             return None;
@@ -126,7 +128,7 @@ impl Fb {
         Some(self.base.wrapping_add(off) as *mut u32)
     }
 
-    fn put_pixel(&self, x: u32, y: u32, color: u32) {
+    pub(super) fn put_pixel(&self, x: u32, y: u32, color: u32) {
         let Some(p) = self.pixel_ptr(x, y) else {
             return;
         };
@@ -137,7 +139,9 @@ impl Fb {
         unsafe { p.write_volatile(color) };
     }
 
-    fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
+    /// The pixel at `(x, y)`; the in-guest tests' read-back.
+    #[cfg(feature = "kernel_tests")]
+    pub(super) fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
         let p = self.pixel_ptr(x, y)?;
         // SAFETY: invariant: as in `put_pixel`; established by
         // `fb_init::Fb::pixel_ptr`.
@@ -265,43 +269,6 @@ pub fn write(bytes: &[u8]) {
         }
         rest = tail;
     }
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn put_pixel(x: u32, y: u32, color: u32) -> bool {
-    let c = CONSOLE.lock();
-    let Some(fb) = c.fb.as_ref() else {
-        return false;
-    };
-    if fb.pixel_ptr(x, y).is_none() {
-        return false;
-    }
-    fb.put_pixel(x, y, color);
-    true
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn get_pixel(x: u32, y: u32) -> Option<u32> {
-    let c = CONSOLE.lock();
-    c.fb.as_ref()?.get_pixel(x, y)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn pitch() -> Option<u64> {
-    let c = CONSOLE.lock();
-    c.fb.as_ref().map(|f| f.pitch)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn width() -> Option<u32> {
-    let c = CONSOLE.lock();
-    c.fb.as_ref().map(|f| f.width)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn cursor() -> Option<(u32, u32)> {
-    let c = CONSOLE.lock();
-    c.fb.as_ref().map(|_| c.grid.cursor())
 }
 
 /// In-guest test counters. `kernel_tests` only (AGENTS.md rule 9).

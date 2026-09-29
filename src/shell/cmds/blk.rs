@@ -15,6 +15,10 @@ pub(crate) const COMMANDS: &[Command] = &[Command {
 
 fn cmd_blk(_args: &[&str]) {
     let st = block_init::state().as_str();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+    )]
     let _ = writeln!(
         Console,
         "vibeOS: blk: {} {} {} sectors {st} io {}",
@@ -23,7 +27,19 @@ fn cmd_blk(_args: &[&str]) {
         RAM0_SECTORS,
         block_init::io_reqs()
     );
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+    )]
     let _ = crate::virtio_blk_init::shell_line(&mut Console);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+    )]
     let _ = crate::part_init::shell_lines(&mut Console);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
+    )]
     let _ = crate::cache_init::shell_line(&mut Console);
 }

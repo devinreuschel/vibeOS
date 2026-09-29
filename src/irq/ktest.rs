@@ -4,6 +4,7 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
+use vibeos::ipi::MAX_IPI_CPUS;
 use vibeos::irq::{self, IrqError};
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::pci::{Bdf, CFG_COMMAND, CMD_INTX_DISABLE};
@@ -35,14 +36,14 @@ pub(crate) fn test_reschedule_ipi_wake_ap() -> Outcome {
         return Outcome::Skip("no AP");
     };
     WAKE_FLAG.store(0, Ordering::SeqCst);
-    let before = ipi_init::reschedule_count();
+    let before = reschedule_count();
     let Ok(_h) = thread_init::spawn_on("wake-ap", wake_ap_entry, ap) else {
         return Outcome::Fail("spawn");
     };
     if !spin_until_ns(|| WAKE_FLAG.load(Ordering::SeqCst) != 0, 500_000_000) {
         return Outcome::Fail("idle AP not woken");
     }
-    let after = ipi_init::reschedule_count();
+    let after = reschedule_count();
     if after <= before {
         return Outcome::Fail("no reschedule IPI");
     }
@@ -61,12 +62,12 @@ pub(crate) fn test_call_function_ipi() -> Outcome {
         return Outcome::Skip("no AP");
     };
     CALL_CPU.store(0xFFFF, Ordering::SeqCst);
-    let before = ipi_init::call_count();
+    let before = call_count();
     ipi_init::call_cpu(ap, call_mark, core::ptr::null_mut(), true);
     if CALL_CPU.load(Ordering::SeqCst) != ap {
         return Outcome::Fail("call-function did not run on AP");
     }
-    if ipi_init::call_count() <= before {
+    if call_count() <= before {
         return Outcome::Fail("call count stuck");
     }
     Outcome::Ok
@@ -177,7 +178,7 @@ fn on_intx_no_ack() {
 }
 
 pub(crate) fn test_irq_pool() -> Outcome {
-    let n0 = irq_init::allocated_count();
+    let n0 = allocated_count();
     let v = match irq_init::allocate_vector(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
@@ -196,7 +197,7 @@ pub(crate) fn test_irq_pool() -> Outcome {
     }
     match irq_init::free_vector(v) {
         Ok(()) => {
-            if irq_init::allocated_count() != n0 {
+            if allocated_count() != n0 {
                 Outcome::Fail("count")
             } else {
                 Outcome::Ok
@@ -209,7 +210,7 @@ pub(crate) fn test_irq_pool() -> Outcome {
 fn irq_th_nop() {}
 
 pub(crate) fn test_irq_free_threaded() -> Outcome {
-    let n0 = irq_init::allocated_count();
+    let n0 = allocated_count();
     let v = match irq_init::allocate_vector(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
@@ -218,14 +219,14 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
         let _ = irq_init::free_vector(v);
         return Outcome::Fail("set_threaded");
     }
-    if !irq_init::has_threaded(v) {
+    if !has_threaded(v) {
         let _ = irq_init::free_vector(v);
         return Outcome::Fail("threaded not armed");
     }
     if irq_init::free_vector(v).is_err() {
         return Outcome::Fail("free");
     }
-    if irq_init::has_threaded(v) {
+    if has_threaded(v) {
         return Outcome::Fail("threaded after free");
     }
     let v2 = match irq_init::allocate_vector(0) {
@@ -236,7 +237,7 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
         let _ = irq_init::free_vector(v2);
         return Outcome::Fail("realloc other vec");
     }
-    if irq_init::has_threaded(v2) {
+    if has_threaded(v2) {
         let _ = irq_init::free_vector(v2);
         return Outcome::Fail("recycle threaded");
     }
@@ -244,14 +245,14 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
         let _ = irq_init::free_vector(v2);
         return Outcome::Fail("set_handler");
     }
-    if irq_init::has_threaded(v2) {
+    if has_threaded(v2) {
         let _ = irq_init::free_vector(v2);
         return Outcome::Fail("handler still threaded");
     }
     if irq_init::free_vector(v2).is_err() {
         return Outcome::Fail("free2");
     }
-    if irq_init::allocated_count() != n0 {
+    if allocated_count() != n0 {
         return Outcome::Fail("count");
     }
     Outcome::Ok
@@ -437,7 +438,7 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     if irq_init::set_affinity(vec, ap).is_err() {
         return fail("affinity", Some(vec));
     }
-    match apic_init::gsi_masked(gsi) {
+    match crate::arch::ktest::gsi_masked(gsi) {
         Some(false) => {}
         Some(true) => return fail("masked before free", Some(vec)),
         None => return fail("gsi not on ioapic", Some(vec)),
@@ -452,7 +453,7 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     if irq_init::free_vector(vec).is_err() {
         return fail("free", Some(vec));
     }
-    match apic_init::gsi_masked(gsi) {
+    match crate::arch::ktest::gsi_masked(gsi) {
         Some(true) => {}
         Some(false) => return fail("gsi live after free", None),
         None => return fail("gsi vanished", None),
@@ -617,7 +618,7 @@ pub(crate) fn lifetime_shootdown_ack_late() -> Outcome {
         kva_init::free_stack(stack);
         return Outcome::Fail("threads did not settle");
     }
-    let late0 = ipi_init::ack_late_count();
+    let late0 = ack_late_count();
     HOLD.store(0, Ordering::Release);
     let th = spawn_thread_on("ack-hold", ack_hold, h);
     if !wait_ms(|| HOLD.load(Ordering::Acquire) != 0, 2_000) {
@@ -627,7 +628,7 @@ pub(crate) fn lifetime_shootdown_ack_late() -> Outcome {
     let t0 = time_init::read_tsc();
     kva_init::free_stack(stack);
     let waited_ms = time_init::read_tsc().wrapping_sub(t0) / k;
-    let late = ipi_init::ack_late_count().wrapping_sub(late0);
+    let late = ack_late_count().wrapping_sub(late0);
     if !wait_ms(
         || {
             HOLD.load(Ordering::Acquire) == 2
@@ -800,8 +801,88 @@ pub(crate) fn shootdown_ack_while_busy() -> Outcome {
 /// `sched_init::init` installed the reschedule IPI's hook
 /// (`ipi_init::set_reschedule_hook`), so a reschedule IPI preempts.
 pub(crate) fn test_reschedule_hook_installed() -> Outcome {
-    if !crate::ipi_init::reschedule_hook_installed() {
+    if !reschedule_hook_installed() {
         return Outcome::Fail("reschedule hook unset");
     }
     Outcome::Ok
+}
+
+// ---- hooks the tests read (Q2): counters production keeps, and the
+// switch-tail shootdown count P10-S08's test uses ----
+
+/// Reschedule IPIs this kernel has taken since boot.
+pub(crate) fn reschedule_count() -> u64 {
+    ipi_init::RESCHED_COUNT.load(Ordering::Relaxed)
+}
+
+/// Shootdown requests this kernel has serviced since boot.
+pub(crate) fn shootdown_count() -> u64 {
+    ipi_init::SHOOT_COUNT.load(Ordering::Relaxed)
+}
+
+/// Call-function requests this kernel has serviced since boot.
+pub(crate) fn call_count() -> u64 {
+    ipi_init::CALL_COUNT.load(Ordering::Relaxed)
+}
+
+/// Late periods `ipi_init::wait_acks` has logged since boot.
+pub(crate) fn ack_late_count() -> u64 {
+    ipi_init::ACK_LATE.load(Ordering::Relaxed)
+}
+
+/// Whether the reschedule hook is set.
+pub(crate) fn reschedule_hook_installed() -> bool {
+    !ipi_init::RESCHED.load(Ordering::Acquire).is_null()
+}
+
+/// Vectors allocated from the device pool.
+pub(crate) fn allocated_count() -> usize {
+    irq_init::with_pool(|p| p.allocated())
+}
+
+/// Whether `vec` has a threaded handler or pending threaded work.
+pub(crate) fn has_threaded(vec: u8) -> bool {
+    match irq_init::handler_slot(vec) {
+        Some(i) => irq_init::with_irq(|s| {
+            let t = &s.th;
+            t.top[i] != 0 || t.work[i] != 0 || t.pending[i]
+        }),
+        None => false,
+    }
+}
+
+/// Per CPU: inside a switch tail. Owner CPU only, IF=0.
+static IN_TAIL: [AtomicBool; MAX_IPI_CPUS] = [const { AtomicBool::new(false) }; MAX_IPI_CPUS];
+/// Shootdowns started while their CPU's `IN_TAIL` was set.
+static FROM_TAIL: AtomicU64 = AtomicU64::new(0);
+/// Shootdown rounds started by any CPU: with another CPU online, each is
+/// one IPI broadcast and one wait for acks.
+static ROUNDS: AtomicU64 = AtomicU64::new(0);
+
+/// This CPU enters a switch tail. IF=0.
+pub(crate) fn tail_enter() {
+    IN_TAIL[ipi_init::my_index()].store(true, Ordering::Relaxed);
+}
+
+/// This CPU leaves its switch tail. IF=0.
+pub(crate) fn tail_leave() {
+    IN_TAIL[ipi_init::my_index()].store(false, Ordering::Relaxed);
+}
+
+/// Shootdowns sent from a switch tail since boot.
+pub(crate) fn shootdowns_from_tail() -> u64 {
+    FROM_TAIL.load(Ordering::Acquire)
+}
+
+/// Shootdown rounds started since boot.
+pub(crate) fn rounds_sent() -> u64 {
+    ROUNDS.load(Ordering::Acquire)
+}
+
+/// `ipi_init::shootdown_round`'s count, IF=0.
+pub(crate) fn note_shootdown() {
+    ROUNDS.fetch_add(1, Ordering::AcqRel);
+    if IN_TAIL[ipi_init::my_index()].load(Ordering::Relaxed) {
+        FROM_TAIL.fetch_add(1, Ordering::AcqRel);
+    }
 }
