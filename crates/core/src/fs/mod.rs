@@ -38,10 +38,6 @@ mod inode;
 pub mod kernfs;
 mod mount;
 mod ramfs;
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod vibefs;
 mod walk;
 
