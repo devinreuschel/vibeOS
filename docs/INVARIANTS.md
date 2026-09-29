@@ -750,7 +750,8 @@ Small portable types in `vibeos-core` carry these stores and loads, each method 
 no caller naming one, so ROADMAP §10.8's loom models run the kernel's own code. A cross-CPU wake is a
 hand-off: `vibeos::irq::ipi::WakeInbox::push` sets the slot's bit and then its word's summary bit
 with Release read-modify-writes, and the owner CPU's `WakeInbox::drain`, masked, takes them with
-Acquire swaps.
+Acquire swaps. Rule 1's completion store is `vibeos::block::DoneWord::publish` (a Release store, in
+`IoWaiter::finish`), and its reader is `DoneWord::poll` (an Acquire load).
 
 Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
 
