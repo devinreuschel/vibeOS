@@ -10,6 +10,7 @@
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
+use vibeos::fmt_util::StackBuf;
 use vibeos::log::{
     COMPILE_MAX, DEFAULT_RUNTIME_MAX, DUMP_LAST, Level, Logger, MSG_CAP, RING_CAP, Record, allowed,
 };
@@ -148,16 +149,13 @@ pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
     }
     let mut buf = [0u8; MSG_CAP];
     let n = {
-        let mut w = StackBuf {
-            buf: &mut buf,
-            pos: 0,
-        };
+        let mut w = StackBuf::new(&mut buf);
         #[expect(
             clippy::let_underscore_must_use,
             reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter record and nothing to act on (DESIGN §2.5)"
         )]
         let _ = w.write_fmt(args);
-        w.pos
+        w.len()
     };
     let msg = &buf[..n];
     // `false` means the runtime filter kept it out of the ring, not a failure.
@@ -180,22 +178,6 @@ pub fn sink_drops() -> u64 {
 /// Records `log_fmt` dropped on re-entry from its own CPU.
 pub fn reentry_drops() -> u64 {
     REENTRY_DROPS.load(Ordering::Relaxed)
-}
-
-struct StackBuf<'a> {
-    buf: &'a mut [u8],
-    pos: usize,
-}
-
-impl fmt::Write for StackBuf<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let src = s.as_bytes();
-        let space = self.buf.len().saturating_sub(self.pos);
-        let n = src.len().min(space);
-        self.buf[self.pos..self.pos + n].copy_from_slice(&src[..n]);
-        self.pos += n;
-        Ok(())
-    }
 }
 
 /// Install the serial capture (`serial::set_capture_hook`). `_start` calls
