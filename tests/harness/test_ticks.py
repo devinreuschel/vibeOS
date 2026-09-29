@@ -184,7 +184,9 @@ class TestCommitMsg(RepoCase):
         self.stage("beta box")
         for msg, needle in (("t", "ticked with no"),
                             ("t\n\nProves: make nothing -- beta box", "proof not found"),
-                            ("t\n# Proves: make lint -- beta box", "ticked with no")):
+                            ("t\n# Proves: make lint -- beta box", "ticked with no"),
+                            ("t\n\nProves: tests/harness/none.py::test_x -- beta box",
+                             "proof not found")):
             with self.subTest(msg=msg):
                 self.assertErrors(check_ticks.check_message(msg, self.repo.path), needle)
 

@@ -1113,6 +1113,8 @@ def check_message(message: str, repo: Path = gatelib.ROOT) -> Report:
     gone = set(removed)
     c = Commit("staged", message)
     c.ticks = [Tick(c.sha, n, x) for n, x in added if x not in gone and x not in at_head]
+    # No commit follows the one being made, so no later rename moves its paths.
+    ck.head, ck._moved = "HEAD", {c.sha: []}
     ck.report.ticks = len(c.ticks)
     ck.check_commit(c)
     return ck.report

@@ -484,13 +484,58 @@ why = """no edge: its lands-with clauses ("a fix lands with the list entry it re
 "a new check land with the code they check") are about a fix and a check, not a box; \
 the box's owner extends this row"""
 
+# P10-S40 (harness matcher): edges #93 §9.2 D-06 found missing.
+
+[[box]]
+key = "the expect-panic e2e matches markers"
+needs = [
+  "the marker-order unit tests drive",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "the harness's SMP check counts"
+needs = [
+  "the marker-order unit tests drive",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "the console-input e2e boot keeps"
+needs = [
+  "the marker-order unit tests drive",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "when QEMU exits before the"
+needs = [
+  "the marker-order unit tests drive",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "serial shows `vibeOS: serial online`"
+needs = [
+  "`run_e2e.py` fails when a kernel",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "a shell-less `meminfo` dump on"
+needs = [
+  "e2e checks the boot log's",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Closes rows (How to read this): the box named by `key` lands all the work
 # of each box in `closes`, and the commit that ticks it ticks them.
 
 [[box]]
 key = "`run_e2e.py` fails when a kernel line comes before `vibeOS: serial online`"
+needs = ["the marker-order unit tests drive"]
 closes = ["serial shows `vibeOS: serial online` as the kernel's first serial line"]
-why = "reopened by design review J136"
+why = "reopened by design review J136; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "e2e checks the boot log's `vibeOS: meminfo:` lines"
