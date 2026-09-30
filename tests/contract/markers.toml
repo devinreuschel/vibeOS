@@ -1238,6 +1238,15 @@ arch = "both"
 source = "kernel"
 section = "§10.3"
 
+# §10.4 Tables, VFS, errors
+
+[[marker]]
+text = "vibeOS: limits: no memory for the <name> tables"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.4"
+
 # §10.5 User runtime
 
 # The `reboot` syscall's line before it powers the machine off or restarts

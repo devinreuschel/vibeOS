@@ -40,7 +40,7 @@ fn pseudo(v: &mut Vfs, k: &Kfs) {
 }
 
 pub(crate) fn boot() -> (Vfs, Kfs) {
-    let mut v = Vfs::new(crate::fs::host_words());
+    let mut v = crate::fs::host_vfs();
     v.mount_root_fs(crate::fs::testfs::ramfs()).unwrap();
     let k = kernfs();
     pseudo(&mut v, &k);
@@ -49,7 +49,7 @@ pub(crate) fn boot() -> (Vfs, Kfs) {
 
 #[test]
 fn mount_pseudo_on_keyed_root() {
-    let mut v = Vfs::new(crate::fs::host_words());
+    let mut v = crate::fs::host_vfs();
     v.mount_root_fs(crate::fs::testfs::keyfs_new()).unwrap();
     pseudo(&mut v, &kernfs());
     assert_eq!(v.stat(None, "/dev").unwrap().kind, InodeKind::Dir);
@@ -385,6 +385,7 @@ fn console_write_captured() {
 fn fixed_tables_match_limits() {
     let k = std::boxed::Box::new(KernState::new());
     assert_eq!(k.nodes.len(), crate::limits::MAX_KERN_NODES);
+    assert_eq!(k.skins.len(), crate::limits::MAX_KERN_MOUNTS);
 }
 
 /// Read `n` bytes of `path` at `off`.

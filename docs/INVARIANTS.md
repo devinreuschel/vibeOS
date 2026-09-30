@@ -159,7 +159,8 @@ the work queues (`work_init::ST`) at SCHED, each taken through `lock_nested` und
 which serializes their wait queues; the KVA free-list (`kva_init::KVA`) at PT, through `lock_nested`
 under the page-table lock; and the IRQ vector pool and routes (`irq_init::IRQ`), the APIC state
 (`apic_init::STATE`), the keyboard ring (`kbd_init::KBD`), and the ECAM window (`pci_init::ECAM`) at
-DEVICE. The VFS tables are static, so bring-up allocates nothing under them. Filesystems get
+DEVICE. The VFS tables are heap tables that `fs_init::init_tables` allocates once before `irq:
+enabled` and nothing grows (ROADMAP §10.4, D1), so bring-up allocates nothing under them. Filesystems get
 no spin rank of their own; adding one changes this list and `crates/core/src/sync/lock.rs` in the same commit.
 
 The VFS lock is a `BlockingMutex` at level 1's mount-table position.

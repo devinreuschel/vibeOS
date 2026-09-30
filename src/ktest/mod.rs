@@ -396,12 +396,16 @@ fn registry_main() {
     ) else {
         bad_repeat(repeat_arg);
     };
-    crate::marker!("vibeOS: ktest: begin {n}");
     if n == 0 {
+        crate::marker!("vibeOS: ktest: begin {n}");
         crate::marker!("vibeOS: ktest: end");
         qemu_exit(EXIT_FAIL);
     }
+    // Setup, before `begin`: its cost scales with the thread table and the
+    // KVA node pool (ROADMAP §10.4), and the first test starts right after
+    // `begin`.
     quiesce_frames();
+    crate::marker!("vibeOS: ktest: begin {n}");
     let freq = Arch::freq_hz().unwrap_or(0);
     let mut failed = false;
     let mut runs: u32 = 0;
@@ -529,13 +533,11 @@ pub(crate) fn quiesce_frames() {
     if !settle_threads() {
         crate::marker!("vibeOS: ktest:   warm-up: threads did not settle");
     }
-    let mut buf = [thread_init::ThreadInfo {
-        id: ThreadId::NONE,
-        name: "",
-        state: ThreadState::Dead,
-        cpu: 0,
-    }; vibeos::thread::MAX_THREADS];
-    let empty = (vibeos::thread::MAX_THREADS - thread_init::snapshot(&mut buf))
+    let mut filled = 0usize;
+    thread_init::each_thread(|_| filled += 1);
+    let empty = thread_init::table_usage()
+        .1
+        .saturating_sub(filled)
         .saturating_sub(EMPTY_SLOT_RESERVE);
     // Under the guard none of these runs, dies, and frees its slot for the
     // next spawn before every empty slot has a Tcb.
@@ -601,19 +603,12 @@ pub(crate) fn settle_threads() -> bool {
     let me = thread_init::current_id();
     let t0 = time_init::uptime_ms();
     loop {
-        let mut buf = [thread_init::ThreadInfo {
-            id: ThreadId::NONE,
-            name: "",
-            state: ThreadState::Dead,
-            cpu: 0,
-        }; vibeos::thread::MAX_THREADS];
-        let n = thread_init::snapshot(&mut buf);
-        let busy = thread_init::stacks_in_flight() != 0
-            || buf[..n].iter().any(|t| {
-                t.id != me
-                    && t.name != "idle"
-                    && matches!(t.state, ThreadState::Ready | ThreadState::Running)
-            });
+        let mut busy = thread_init::stacks_in_flight() != 0;
+        thread_init::each_thread(|t| {
+            busy |= t.id != me
+                && t.name != "idle"
+                && matches!(t.state, ThreadState::Ready | ThreadState::Running);
+        });
         if !busy {
             break true;
         }

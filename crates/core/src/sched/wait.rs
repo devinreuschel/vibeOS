@@ -9,40 +9,145 @@ use crate::sched::{ReadyQueue, TimeoutQueue, effective_deadline};
 use crate::thread::ThreadId;
 use crate::time::Instant;
 
+/// A thread's links in the wait queue it is on: the owner of the threads
+/// (the kernel's scheduler, one per thread-table slot) keeps one for each,
+/// so a [`WaitQueue`] holds any number of waiters in three words and needs
+/// no table of its own (ROADMAP §10.4, D1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaitLink {
+    next: ThreadId,
+    prev: ThreadId,
+    /// The queue's address, or 0 when on none.
+    on: usize,
+}
+
+impl WaitLink {
+    /// On no queue.
+    pub const NONE: Self = Self {
+        next: ThreadId::NONE,
+        prev: ThreadId::NONE,
+        on: 0,
+    };
+
+    /// Whether this thread is on some wait queue.
+    pub fn queued(&self) -> bool {
+        self.on != 0
+    }
+}
+
+/// Where a [`WaitQueue`] finds each thread's [`WaitLink`]: `None` for an
+/// id that names no thread. Every queue operation runs under the one lock
+/// that serializes both (SCHED in the kernel).
+pub trait WaitLinks {
+    fn link(&mut self, id: ThreadId) -> Option<&mut WaitLink>;
+}
+
 /// FIFO of blocked `ThreadId`s. One per mutex / rwlock / chan end / etc.
+/// Intrusive: the waiters are linked through their [`WaitLink`]s, so the
+/// queue must not move while it holds one, as its cookie names it.
 pub struct WaitQueue {
-    waiters: ReadyQueue,
+    head: ThreadId,
+    tail: ThreadId,
+    len: usize,
 }
 
 impl WaitQueue {
     pub const fn new() -> Self {
         Self {
-            waiters: ReadyQueue::empty(),
+            head: ThreadId::NONE,
+            tail: ThreadId::NONE,
+            len: 0,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.waiters.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.waiters.is_empty()
+        self.len == 0
     }
 
-    pub fn contains(&self, id: ThreadId) -> bool {
-        self.waiters.contains(id)
+    pub fn contains(&self, id: ThreadId, links: &mut impl WaitLinks) -> bool {
+        let me = self.addr();
+        links.link(id).is_some_and(|l| l.on == me)
     }
 
-    pub fn enqueue(&mut self, id: ThreadId) {
-        self.waiters.push_back(id);
+    /// Append `id`. Once only: a thread already on this queue stays where
+    /// it is.
+    #[allow(
+        clippy::panic,
+        reason = "invariant: a waiter is a live thread its owner has a link for, on one queue at a time (`wait::WaitLinks`)"
+    )]
+    pub fn enqueue(&mut self, id: ThreadId, links: &mut impl WaitLinks) {
+        assert!(!id.is_none(), "wait: enqueue NONE");
+        let me = self.addr();
+        let tail = self.tail;
+        let Some(l) = links.link(id) else {
+            panic!("wait: enqueue of unknown thread {}", id.0);
+        };
+        if l.on == me {
+            return;
+        }
+        assert!(l.on == 0, "wait: thread on two queues");
+        *l = WaitLink {
+            next: ThreadId::NONE,
+            prev: tail,
+            on: me,
+        };
+        match links.link(tail) {
+            Some(t) if !tail.is_none() => t.next = id,
+            _ => self.head = id,
+        }
+        self.tail = id;
+        self.len += 1;
     }
 
-    pub fn dequeue(&mut self) -> Option<ThreadId> {
-        self.waiters.pop_front()
+    /// Take the waiter at the front.
+    pub fn dequeue(&mut self, links: &mut impl WaitLinks) -> Option<ThreadId> {
+        let id = self.head;
+        if id.is_none() {
+            return None;
+        }
+        self.unlink(id, links);
+        Some(id)
     }
 
-    pub fn remove(&mut self, id: ThreadId) -> bool {
-        self.waiters.remove(id)
+    /// Take `id` out, wherever it is. False when it is not on this queue.
+    pub fn remove(&mut self, id: ThreadId, links: &mut impl WaitLinks) -> bool {
+        if id.is_none() || !self.contains(id, links) {
+            return false;
+        }
+        self.unlink(id, links);
+        true
+    }
+
+    /// Unlink `id`, which is on this queue.
+    #[allow(
+        clippy::panic,
+        reason = "invariant: every thread on a queue has a link, set by `enqueue` (`wait::WaitLinks`)"
+    )]
+    fn unlink(&mut self, id: ThreadId, links: &mut impl WaitLinks) {
+        let Some(l) = links.link(id) else {
+            panic!("wait: queued thread {} has no link", id.0);
+        };
+        let WaitLink { next, prev, .. } = *l;
+        *l = WaitLink::NONE;
+        match links.link(prev) {
+            Some(p) if !prev.is_none() => p.next = next,
+            _ => self.head = next,
+        }
+        match links.link(next) {
+            Some(n) if !next.is_none() => n.prev = prev,
+            _ => self.tail = prev,
+        }
+        self.len -= 1;
+    }
+
+    /// This queue's address, which a waiter's link records to name the
+    /// queue it is on: only compared, never turned back into a pointer.
+    fn addr(&self) -> usize {
+        core::ptr::from_ref(self).addr()
     }
 
     /// This queue's address, with its provenance exposed: a Blocked
@@ -64,12 +169,13 @@ impl Default for WaitQueue {
 /// Enqueue, leave the ready FIFO, arm the deadline. Not runnable.
 pub fn begin_wait(
     wq: &mut WaitQueue,
+    links: &mut impl WaitLinks,
     ready: &mut ReadyQueue,
     timeouts: &mut TimeoutQueue,
     id: ThreadId,
     deadline: Instant,
 ) {
-    wq.enqueue(id);
+    wq.enqueue(id, links);
     ready.remove(id);
     timeouts.insert(id, deadline);
 }
@@ -77,8 +183,12 @@ pub fn begin_wait(
 /// Dequeue one waiter and drop its timeout. Caller places it (local
 /// ready or remote inbox). Host tests use [`wake_one`] which also
 /// pushes the global FIFO.
-pub fn take_one(wq: &mut WaitQueue, timeouts: &mut TimeoutQueue) -> Option<ThreadId> {
-    let id = wq.dequeue()?;
+pub fn take_one(
+    wq: &mut WaitQueue,
+    links: &mut impl WaitLinks,
+    timeouts: &mut TimeoutQueue,
+) -> Option<ThreadId> {
+    let id = wq.dequeue(links)?;
     timeouts.remove(id);
     Some(id)
 }
@@ -86,17 +196,23 @@ pub fn take_one(wq: &mut WaitQueue, timeouts: &mut TimeoutQueue) -> Option<Threa
 /// Dequeue one waiter, drop its timeout, put it on ready.
 pub fn wake_one(
     wq: &mut WaitQueue,
+    links: &mut impl WaitLinks,
     ready: &mut ReadyQueue,
     timeouts: &mut TimeoutQueue,
 ) -> Option<ThreadId> {
-    let id = take_one(wq, timeouts)?;
+    let id = take_one(wq, links, timeouts)?;
     ready.push_back(id);
     Some(id)
 }
 
-pub fn wake_all(wq: &mut WaitQueue, ready: &mut ReadyQueue, timeouts: &mut TimeoutQueue) -> usize {
+pub fn wake_all(
+    wq: &mut WaitQueue,
+    links: &mut impl WaitLinks,
+    ready: &mut ReadyQueue,
+    timeouts: &mut TimeoutQueue,
+) -> usize {
     let mut n = 0usize;
-    while wake_one(wq, ready, timeouts).is_some() {
+    while wake_one(wq, links, ready, timeouts).is_some() {
         n += 1;
     }
     n
@@ -346,9 +462,56 @@ mod tests {
         Instant { ns }
     }
 
-    fn assert_not_queued_and_ready(wq: &WaitQueue, ready: &ReadyQueue, id: ThreadId) {
+    /// Each test thread's link, indexed by its id.
+    struct Links([WaitLink; 16]);
+
+    impl Links {
+        fn new() -> Self {
+            Self([WaitLink::NONE; 16])
+        }
+    }
+
+    impl WaitLinks for Links {
+        fn link(&mut self, id: ThreadId) -> Option<&mut WaitLink> {
+            self.0.get_mut(id.0 as usize)
+        }
+    }
+
+    #[test]
+    fn intrusive_queue_order_and_unlink() {
+        let mut links = Links::new();
+        let mut a = WaitQueue::new();
+        let mut b = WaitQueue::new();
+        for n in 1..=4 {
+            a.enqueue(tid(n), &mut links);
+        }
+        a.enqueue(tid(2), &mut links);
+        assert_eq!(a.len(), 4);
+        assert!(a.remove(tid(3), &mut links));
+        assert!(!a.remove(tid(3), &mut links));
+        assert!(!b.remove(tid(1), &mut links));
+        assert!(links.0[1].queued() && !links.0[3].queued());
+        b.enqueue(tid(3), &mut links);
+        assert!(b.contains(tid(3), &mut links) && !a.contains(tid(3), &mut links));
+        assert!(a.remove(tid(4), &mut links));
+        a.enqueue(tid(5), &mut links);
+        assert_eq!(a.dequeue(&mut links), Some(tid(1)));
+        assert_eq!(a.dequeue(&mut links), Some(tid(2)));
+        assert_eq!(a.dequeue(&mut links), Some(tid(5)));
+        assert_eq!(a.dequeue(&mut links), None);
+        assert!(a.is_empty());
+        assert_eq!(b.dequeue(&mut links), Some(tid(3)));
+        assert!(links.0.iter().all(|l| *l == WaitLink::NONE));
+    }
+
+    fn assert_not_queued_and_ready(
+        wq: &WaitQueue,
+        links: &mut Links,
+        ready: &ReadyQueue,
+        id: ThreadId,
+    ) {
         assert!(
-            !(wq.contains(id) && ready.contains(id)),
+            !(wq.contains(id, links) && ready.contains(id)),
             "tid {} on wait queue and ready",
             id.0
         );
@@ -357,17 +520,42 @@ mod tests {
     #[test]
     fn wait_fifo_wake_one_all() {
         let mut wq = WaitQueue::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
-        begin_wait(&mut wq, &mut ready, &mut timeouts, tid(2), at(50));
-        begin_wait(&mut wq, &mut ready, &mut timeouts, tid(3), at(50));
-        begin_wait(&mut wq, &mut ready, &mut timeouts, tid(4), at(50));
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
+        begin_wait(
+            &mut wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(2),
+            at(50),
+        );
+        begin_wait(
+            &mut wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(3),
+            at(50),
+        );
+        begin_wait(
+            &mut wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(4),
+            at(50),
+        );
         assert_eq!(wq.len(), 3);
         assert!(!ready.contains(tid(2)));
-        assert_eq!(wake_one(&mut wq, &mut ready, &mut timeouts), Some(tid(2)));
+        assert_eq!(
+            wake_one(&mut wq, &mut links, &mut ready, &mut timeouts),
+            Some(tid(2))
+        );
         assert!(ready.contains(tid(2)));
-        assert!(!wq.contains(tid(2)));
-        assert_eq!(wake_all(&mut wq, &mut ready, &mut timeouts), 2);
+        assert!(!wq.contains(tid(2), &mut links));
+        assert_eq!(wake_all(&mut wq, &mut links, &mut ready, &mut timeouts), 2);
         assert!(wq.is_empty());
         assert_eq!(ready.len(), 3);
     }
@@ -375,20 +563,21 @@ mod tests {
     #[test]
     fn lost_wakeup_enqueue_before_unlock() {
         let mut m = MutexModel::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
         let a = tid(1);
         let b = tid(2);
         assert!(m.try_acquire(a));
         // B fails the predicate under the same lock, then enqueues.
         assert!(!m.try_acquire(b));
-        begin_wait(&mut m.wq, &mut ready, &mut timeouts, b, at(100));
-        assert_not_queued_and_ready(&m.wq, &ready, b);
-        assert!(m.wq.contains(b));
+        begin_wait(&mut m.wq, &mut links, &mut ready, &mut timeouts, b, at(100));
+        assert_not_queued_and_ready(&m.wq, &mut links, &ready, b);
+        assert!(m.wq.contains(b, &mut links));
         m.release();
-        let woke = wake_one(&mut m.wq, &mut ready, &mut timeouts);
+        let woke = wake_one(&mut m.wq, &mut links, &mut ready, &mut timeouts);
         assert_eq!(woke, Some(b));
-        assert!(!m.wq.contains(b));
+        assert!(!m.wq.contains(b, &mut links));
         assert!(ready.contains(b));
         assert!(!m.held);
         assert!(m.try_acquire(b));
@@ -397,16 +586,17 @@ mod tests {
     #[test]
     fn timeout_unlinks_waiter() {
         let mut wq = WaitQueue::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
         let idle = tid(0);
         let a = tid(1);
-        begin_wait(&mut wq, &mut ready, &mut timeouts, a, at(10));
+        begin_wait(&mut wq, &mut links, &mut ready, &mut timeouts, a, at(10));
         let n = wake_expired(&mut timeouts, &mut ready, at(10), |id| {
-            wq.remove(id);
+            wq.remove(id, &mut links);
         });
         assert_eq!(n, 1);
-        assert!(!wq.contains(a));
+        assert!(!wq.contains(a, &mut links));
         assert_eq!(take_next(&mut ready, idle), a);
         assert_eq!(crate::thread::WaitOutcome::Timeout.name(), "timeout");
         assert_eq!(crate::thread::WaitOutcome::Woken.name(), "woken");
@@ -415,10 +605,12 @@ mod tests {
     #[test]
     fn far_deadline_not_expired() {
         let mut wq = WaitQueue::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
         begin_wait(
             &mut wq,
+            &mut links,
             &mut ready,
             &mut timeouts,
             tid(1),
@@ -427,23 +619,44 @@ mod tests {
         assert_eq!(timeouts.next_deadline(), Some(FAR_DEADLINE));
         let n = wake_expired(&mut timeouts, &mut ready, at(1_000_000), |_| {});
         assert_eq!(n, 0);
-        assert!(wq.contains(tid(1)));
+        assert!(wq.contains(tid(1), &mut links));
     }
 
     #[test]
     fn mutex_second_locker_waits() {
         let mut m = MutexModel::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
         assert!(m.try_acquire(tid(1)));
         assert!(!m.try_acquire(tid(2)));
-        begin_wait(&mut m.wq, &mut ready, &mut timeouts, tid(2), at(9));
-        begin_wait(&mut m.wq, &mut ready, &mut timeouts, tid(3), at(9));
+        begin_wait(
+            &mut m.wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(2),
+            at(9),
+        );
+        begin_wait(
+            &mut m.wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(3),
+            at(9),
+        );
         m.release();
-        assert_eq!(wake_one(&mut m.wq, &mut ready, &mut timeouts), Some(tid(2)));
+        assert_eq!(
+            wake_one(&mut m.wq, &mut links, &mut ready, &mut timeouts),
+            Some(tid(2))
+        );
         assert!(m.try_acquire(tid(2)));
         m.release();
-        assert_eq!(wake_one(&mut m.wq, &mut ready, &mut timeouts), Some(tid(3)));
+        assert_eq!(
+            wake_one(&mut m.wq, &mut links, &mut ready, &mut timeouts),
+            Some(tid(3))
+        );
         assert!(wq_empty_means_unlock_without_waiter(&mut m));
     }
 
@@ -468,14 +681,22 @@ mod tests {
     #[test]
     fn rwlock_writer_preference() {
         let mut r = RwLockModel::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
         assert!(r.try_read());
-        begin_wait(&mut r.write_wq, &mut ready, &mut timeouts, tid(2), at(1));
+        begin_wait(
+            &mut r.write_wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(2),
+            at(1),
+        );
         assert!(!r.try_read());
         r.drop_read();
         assert_eq!(
-            wake_one(&mut r.write_wq, &mut ready, &mut timeouts),
+            wake_one(&mut r.write_wq, &mut links, &mut ready, &mut timeouts),
             Some(tid(2))
         );
         assert!(r.try_write(tid(2)));
@@ -484,16 +705,34 @@ mod tests {
     #[test]
     fn rwlock_writer_timeout_wakes_readers() {
         let mut r = RwLockModel::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
         assert!(r.try_read());
-        begin_wait(&mut r.write_wq, &mut ready, &mut timeouts, tid(2), at(5));
-        begin_wait(&mut r.read_wq, &mut ready, &mut timeouts, tid(3), at(50));
+        begin_wait(
+            &mut r.write_wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(2),
+            at(5),
+        );
+        begin_wait(
+            &mut r.read_wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(3),
+            at(50),
+        );
         assert_eq!(r.after_writer_wait_timeout(), WriterTimeoutWake::None);
-        r.write_wq.remove(tid(2));
+        r.write_wq.remove(tid(2), &mut links);
         timeouts.remove(tid(2));
         assert_eq!(r.after_writer_wait_timeout(), WriterTimeoutWake::Readers);
-        assert_eq!(wake_all(&mut r.read_wq, &mut ready, &mut timeouts), 1);
+        assert_eq!(
+            wake_all(&mut r.read_wq, &mut links, &mut ready, &mut timeouts),
+            1
+        );
         assert!(ready.contains(tid(3)));
         r.drop_read();
         assert!(r.try_read());
@@ -502,15 +741,30 @@ mod tests {
     #[test]
     fn rwlock_writer_timeout_wakes_next_writer() {
         let mut r = RwLockModel::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
-        begin_wait(&mut r.write_wq, &mut ready, &mut timeouts, tid(2), at(5));
-        begin_wait(&mut r.write_wq, &mut ready, &mut timeouts, tid(3), at(50));
-        r.write_wq.remove(tid(2));
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
+        begin_wait(
+            &mut r.write_wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(2),
+            at(5),
+        );
+        begin_wait(
+            &mut r.write_wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(3),
+            at(50),
+        );
+        r.write_wq.remove(tid(2), &mut links);
         timeouts.remove(tid(2));
         assert_eq!(r.after_writer_wait_timeout(), WriterTimeoutWake::NextWriter);
         assert_eq!(
-            wake_one(&mut r.write_wq, &mut ready, &mut timeouts),
+            wake_one(&mut r.write_wq, &mut links, &mut ready, &mut timeouts),
             Some(tid(3))
         );
     }
@@ -518,14 +772,25 @@ mod tests {
     #[test]
     fn semaphore_tokens() {
         let mut s = SemaModel::new(2);
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
         assert!(s.try_acquire());
         assert!(s.try_acquire());
         assert!(!s.try_acquire());
-        begin_wait(&mut s.wq, &mut ready, &mut timeouts, tid(3), at(1));
+        begin_wait(
+            &mut s.wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(3),
+            at(1),
+        );
         s.release();
-        assert_eq!(wake_one(&mut s.wq, &mut ready, &mut timeouts), Some(tid(3)));
+        assert_eq!(
+            wake_one(&mut s.wq, &mut links, &mut ready, &mut timeouts),
+            Some(tid(3))
+        );
         assert!(s.try_acquire());
         assert_eq!(s.count, 0);
     }
@@ -540,37 +805,73 @@ mod tests {
     #[test]
     fn cond_notify_uses_same_queue() {
         let mut c = CondModel::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
-        begin_wait(&mut c.wq, &mut ready, &mut timeouts, tid(1), at(8));
-        begin_wait(&mut c.wq, &mut ready, &mut timeouts, tid(2), at(8));
-        assert_eq!(wake_one(&mut c.wq, &mut ready, &mut timeouts), Some(tid(1)));
-        assert_eq!(wake_all(&mut c.wq, &mut ready, &mut timeouts), 1);
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
+        begin_wait(
+            &mut c.wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(1),
+            at(8),
+        );
+        begin_wait(
+            &mut c.wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(2),
+            at(8),
+        );
+        assert_eq!(
+            wake_one(&mut c.wq, &mut links, &mut ready, &mut timeouts),
+            Some(tid(1))
+        );
+        assert_eq!(
+            wake_all(&mut c.wq, &mut links, &mut ready, &mut timeouts),
+            1
+        );
         assert!(c.wq.is_empty());
     }
 
     #[test]
     fn channel_bounded_mpsc_order() {
         let mut ch = ChannelModel::<u32, 2>::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
         assert!(ch.try_send(1).is_ok());
         assert!(ch.try_send(2).is_ok());
         assert_eq!(ch.try_send(3), Err(3));
-        begin_wait(&mut ch.send_wq, &mut ready, &mut timeouts, tid(9), at(1));
+        begin_wait(
+            &mut ch.send_wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(9),
+            at(1),
+        );
         assert_eq!(ch.try_recv(), Some(1));
         assert_eq!(
-            wake_one(&mut ch.send_wq, &mut ready, &mut timeouts),
+            wake_one(&mut ch.send_wq, &mut links, &mut ready, &mut timeouts),
             Some(tid(9))
         );
         assert!(ch.try_send(3).is_ok());
         assert_eq!(ch.try_recv(), Some(2));
         assert_eq!(ch.try_recv(), Some(3));
         assert!(ch.try_recv().is_none());
-        begin_wait(&mut ch.recv_wq, &mut ready, &mut timeouts, tid(4), at(1));
+        begin_wait(
+            &mut ch.recv_wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(4),
+            at(1),
+        );
         assert!(ch.try_send(7).is_ok());
         assert_eq!(
-            wake_one(&mut ch.recv_wq, &mut ready, &mut timeouts),
+            wake_one(&mut ch.recv_wq, &mut links, &mut ready, &mut timeouts),
             Some(tid(4))
         );
         assert_eq!(ch.try_recv(), Some(7));
@@ -579,10 +880,18 @@ mod tests {
     #[test]
     fn take_one_does_not_touch_ready() {
         let mut wq = WaitQueue::new();
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
-        begin_wait(&mut wq, &mut ready, &mut timeouts, tid(1), at(1));
-        assert_eq!(take_one(&mut wq, &mut timeouts), Some(tid(1)));
+        let mut ready = ReadyQueue::try_new(16).unwrap();
+        let mut links = Links::new();
+        let mut timeouts = TimeoutQueue::try_new(16).unwrap();
+        begin_wait(
+            &mut wq,
+            &mut links,
+            &mut ready,
+            &mut timeouts,
+            tid(1),
+            at(1),
+        );
+        assert_eq!(take_one(&mut wq, &mut links, &mut timeouts), Some(tid(1)));
         assert!(ready.is_empty());
         assert!(timeouts.is_empty());
     }
