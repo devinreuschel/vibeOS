@@ -1370,3 +1370,23 @@ needs = [
   "on a timeout, or on",  # L1410
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1412
+[[box]]
+key = "a hostlib core tool reads"
+needs = [
+  "the log ring, TCB, and",  # L1413
+  "one VMCOREINFO note, in Linux's",  # L1414
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1418
+[[box]]
+key = "a `hang_test` feature build in"
+needs = [
+  "on a timeout, or on",  # L1410
+  "the harness reads QEMU's QMP",  # L1411
+  "a hostlib core tool reads",  # L1412
+  "timestamps from the §10.3 cycle",  # L1417
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
