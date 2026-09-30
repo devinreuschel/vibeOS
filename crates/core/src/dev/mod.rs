@@ -15,7 +15,8 @@ pub mod virtio;
 
 use core::any::Any;
 use core::fmt;
-use core::ops::Deref;
+use core::iter::once;
+use core::ops::{Deref, Range};
 
 use crate::kalloc::{AllocError, TryArc};
 use crate::pci::{Bar, BarKind, Bdf, CapSet, FuncInfo, MAX_BARS, MAX_SCAN};
@@ -223,6 +224,30 @@ pub fn instance<V: Any + Send + Sync>(v: V) -> Result<Instance, AllocError> {
 /// Whether `a` and `b` are the same instance.
 pub fn same_instance(a: &Instance, b: &Instance) -> bool {
     core::ptr::addr_eq(&**a as *const (dyn Any + Send + Sync), &**b)
+}
+
+/// Whether `[addr, addr + len)` overlaps any of `ranges`. Ends saturate
+/// at `u64::MAX`, and an empty range overlaps nothing. The one overlap
+/// check (AGENTS.md rule 10): [`Registry::claim`] runs it against other
+/// claims and RAM, and the kernel's `pci_init::map_mmio` against RAM.
+pub fn overlaps_any(addr: u64, len: u64, ranges: impl IntoIterator<Item = Range<u64>>) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let end = addr.saturating_add(len);
+    ranges
+        .into_iter()
+        .any(|r| r.start < r.end && addr < r.end && r.start < end)
+}
+
+/// The index in `funcs` of the bridge whose secondary bus is the bus of
+/// `funcs[i]`: that function's parent. `None` on the root bus, or when no
+/// scanned bridge leads to it.
+pub fn parent_bridge(funcs: &[FuncInfo], i: usize) -> Option<usize> {
+    let bus = funcs.get(i)?.bdf.bus;
+    funcs
+        .iter()
+        .position(|f| f.is_bridge() && f.secondary_bus != 0 && f.secondary_bus == bus)
 }
 
 /// A PCI function's record. Not `Copy` or `Clone`: the registry holds the
@@ -576,10 +601,6 @@ impl Registry {
         true
     }
 
-    fn range_overlap(a: u64, alen: u64, b: u64, blen: u64) -> bool {
-        alen != 0 && blen != 0 && a < b.saturating_add(blen) && b < a.saturating_add(alen)
-    }
-
     /// Claim BAR `bar` of `dev` for its driver.
     pub fn claim(&mut self, dev: &DevRef, bar: u8) -> Result<(), ClaimError> {
         if bar as usize >= MAX_BARS {
@@ -600,7 +621,11 @@ impl Registry {
         while i < self.n_claim {
             if let Some(c) = self.claims[i]
                 && c.mem == mem
-                && Self::range_overlap(c.addr, c.size, res.addr, res.size)
+                && overlaps_any(
+                    res.addr,
+                    res.size,
+                    once(c.addr..c.addr.saturating_add(c.size)),
+                )
             {
                 return Err(ClaimError::Overlap);
             }
@@ -741,6 +766,7 @@ impl Default for Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::iter::once;
     use core::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
@@ -1040,6 +1066,58 @@ mod tests {
         let d = r.push(d).unwrap();
         assert!(r.bound(&d).is_none());
         assert!(r.instance(&d).is_none());
+    }
+
+    #[test]
+    fn overlaps_any_edges() {
+        // Adjacent ranges do not overlap; one shared byte does.
+        assert!(!overlaps_any(0x1000, 0x1000, once(0x2000..0x3000)));
+        assert!(!overlaps_any(0x2000, 0x1000, once(0x1000..0x2000)));
+        assert!(overlaps_any(0x1FFF, 2, once(0x2000..0x3000)));
+        assert!(overlaps_any(0x2FFF, 1, once(0x2000..0x3000)));
+        // Zero length on either side overlaps nothing.
+        assert!(!overlaps_any(0x2000, 0, once(0x1000..0x3000)));
+        assert!(!overlaps_any(0x2000, 0x10, once(0x2000..0x2000)));
+        // A range ending at u64::MAX saturates rather than wrapping.
+        assert!(overlaps_any(
+            u64::MAX - 0xF,
+            0x100,
+            once(u64::MAX - 1..u64::MAX)
+        ));
+        assert!(!overlaps_any(u64::MAX - 0xF, 0x100, once(0..0x1000)));
+        assert!(overlaps_any(0, u64::MAX, once(u64::MAX - 1..u64::MAX)));
+        // Any of several.
+        assert!(overlaps_any(0x5000, 0x10, [0..0x1000, 0x4000..0x6000]));
+        assert!(!overlaps_any(0x3000, 0x10, [0..0x1000, 0x4000..0x6000]));
+        assert!(!overlaps_any(0x3000, 0x10, core::iter::empty()));
+    }
+
+    #[test]
+    fn parent_bridge_behind_bridge() {
+        let mut host = FuncInfo::empty();
+        host.bdf = Bdf::new(0, 0, 0);
+        let mut bridge = FuncInfo::empty();
+        bridge.bdf = Bdf::new(0, 0x1e, 0);
+        bridge.header = 0x01;
+        bridge.secondary_bus = 1;
+        let mut child = FuncInfo::empty();
+        child.bdf = Bdf::new(1, 2, 0);
+        let mut bridge2 = FuncInfo::empty();
+        bridge2.bdf = Bdf::new(1, 3, 0);
+        bridge2.header = 0x01;
+        bridge2.secondary_bus = 2;
+        let mut grandchild = FuncInfo::empty();
+        grandchild.bdf = Bdf::new(2, 0, 0);
+        let mut orphan = FuncInfo::empty();
+        orphan.bdf = Bdf::new(5, 0, 0);
+        let funcs = [host, bridge, child, bridge2, grandchild, orphan];
+        assert_eq!(parent_bridge(&funcs, 0), None);
+        assert_eq!(parent_bridge(&funcs, 1), None);
+        assert_eq!(parent_bridge(&funcs, 2), Some(1));
+        assert_eq!(parent_bridge(&funcs, 3), Some(1));
+        assert_eq!(parent_bridge(&funcs, 4), Some(3));
+        assert_eq!(parent_bridge(&funcs, 5), None);
+        assert_eq!(parent_bridge(&funcs, 6), None);
     }
 
     #[test]
