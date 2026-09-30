@@ -198,3 +198,8 @@ smp = 1
 name = "rng_pool_no_dup"
 reason = "one CPU"
 smp = 1
+
+[[skip]]
+name = "serial_lines_whole"
+reason = "no AP"
+smp = 1
