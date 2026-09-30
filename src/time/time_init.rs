@@ -10,11 +10,12 @@ use vibeos::acpi::HpetInfo;
 use vibeos::arch::CycleCounter;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::time::{
-    CalibSource, Candidates, ClockWriter, ClocksourceId, Counter, FS_PER_MS, IO_WAIT_PORT,
-    PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CALIB_WINDOWS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD,
-    PIT_CMD_CH2_ONESHOT, PIT_GATE, PM_TIMER_HZ, PitWindow, Snapshot, TickClock, WallOrigin,
-    bcd_to_bin, hpet_counter_width, hpet_hz, hpet_period_ok, monotonic_max, rank,
-    tsc_per_ms_from_hpet, tsc_per_ms_from_pit_windows, unix_from_civil, wall_unix_s,
+    Bracketed, CalibSource, Candidates, ClockWriter, ClocksourceId, Counter, FS_PER_MS,
+    HPET_CALIB_READS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CALIB_WINDOWS,
+    PIT_CH0_WRITES, PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE, PM_TIMER_HZ, PitWindow,
+    Snapshot, TickClock, WallOrigin, bcd_to_bin, hpet_counter_width, hpet_hz, hpet_period_ok,
+    monotonic_max, rank, tsc_per_ms_from_hpet_brackets, tsc_per_ms_from_pit_windows,
+    unix_from_civil, wall_unix_s,
 };
 
 use crate::acpi_init;
@@ -282,12 +283,32 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     if !saw {
         return None;
     }
-    let start = main();
-    let t0 = rdtsc_ser(use_rdtscp);
+    // Each end is the HPET read the TSC brackets most tightly of
+    // `HPET_CALIB_READS`, placed by its bracket's middle
+    // (`vibeos::time::tsc_per_ms_from_hpet_brackets`): under TCG a stall
+    // between an HPET read and its TSC read moved the rate.
+    let bracketed = || {
+        let read = || {
+            let tsc_lo = rdtsc_ser(use_rdtscp);
+            let counter = main();
+            let tsc_hi = rdtsc_ser(use_rdtscp);
+            Bracketed {
+                tsc_lo,
+                counter,
+                tsc_hi,
+            }
+        };
+        let mut best = read();
+        for _ in 1..HPET_CALIB_READS {
+            best = best.narrower(read());
+        }
+        best
+    };
+    let start = bracketed();
     let mut spins = 0u64;
     loop {
         let now = main();
-        if now.wrapping_sub(start) >= want {
+        if now.wrapping_sub(start.counter) >= want {
             break;
         }
         spins += 1;
@@ -296,9 +317,7 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
         }
         core::hint::spin_loop();
     }
-    let t1 = rdtsc_ser(use_rdtscp);
-    let elapsed = main().wrapping_sub(start);
-    tsc_per_ms_from_hpet(t1.wrapping_sub(t0), elapsed, hpet.period_fs)
+    tsc_per_ms_from_hpet_brackets(start, bracketed(), hpet.period_fs)
 }
 
 /// `tsc_per_ms` from PIT channel 2 one-shots, gated through 0x61; channel 0

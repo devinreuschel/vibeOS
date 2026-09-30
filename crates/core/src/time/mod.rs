@@ -109,6 +109,53 @@ pub fn tsc_per_ms_from_pit(tsc_delta: u64, count: u16) -> Option<u64> {
     tsc_per_ms_sane(v).then_some(v)
 }
 
+/// Reads of a reference counter each calibration end takes, keeping the
+/// one the TSC brackets most tightly (`time_init::calibrate_hpet`).
+pub const HPET_CALIB_READS: usize = 16;
+
+/// A reference counter read between two TSC reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bracketed {
+    pub tsc_lo: u64,
+    pub counter: u64,
+    pub tsc_hi: u64,
+}
+
+impl Bracketed {
+    /// TSC cycles between the reads around the counter read; `u64::MAX`
+    /// for reversed reads, so the narrowest pick never keeps one.
+    pub fn width(self) -> u64 {
+        self.tsc_hi.checked_sub(self.tsc_lo).unwrap_or(u64::MAX)
+    }
+
+    /// The TSC at the counter read, as the middle of its bracket.
+    pub fn tsc_mid(self) -> u64 {
+        self.tsc_lo.saturating_add(self.width() / 2)
+    }
+
+    /// The narrower of two reads, `self` on a tie.
+    pub fn narrower(self, other: Bracketed) -> Bracketed {
+        if other.width() < self.width() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// `tsc_per_ms` from HPET reads `a` and `b` of `period_fs`, each placed on
+/// the TSC by its bracket's middle, so a TSC read and its HPET read no
+/// longer need to be adjacent: a vCPU stall between them widens a bracket
+/// the narrowest pick drops, instead of moving the rate. None when the
+/// brackets are reversed or the rate is poison.
+pub fn tsc_per_ms_from_hpet_brackets(a: Bracketed, b: Bracketed, period_fs: u32) -> Option<u64> {
+    if a.width() == u64::MAX || b.width() == u64::MAX {
+        return None;
+    }
+    let tsc = b.tsc_mid().checked_sub(a.tsc_mid())?;
+    tsc_per_ms_from_hpet(tsc, b.counter.wrapping_sub(a.counter), period_fs)
+}
+
 /// PIT channel 2 windows a calibration measures (`time_init::calibrate_pit`).
 pub const PIT_CALIB_WINDOWS: usize = 5;
 /// A window counts only when the TSC brackets its start and its end within
@@ -754,6 +801,37 @@ mod tests {
         // More windows than the median holds: the first PIT_CALIB_WINDOWS tight.
         let many = [good(k); PIT_CALIB_WINDOWS + 3];
         assert!(near(rate(&many), k));
+    }
+
+    #[test]
+    fn hpet_brackets_place_reads_by_their_middle() {
+        let br = |tsc_lo, counter, tsc_hi| Bracketed {
+            tsc_lo,
+            counter,
+            tsc_hi,
+        };
+        // 10 ms of a 100 MHz HPET against a 2.5 GHz TSC, brackets of 2 us.
+        let a = br(1_000, 500, 6_000);
+        let b = br(25_001_000, 1_000_500, 25_006_000);
+        assert_eq!(
+            tsc_per_ms_from_hpet_brackets(a, b, 10_000_000),
+            Some(2_500_000)
+        );
+        // The old reading (TSC after the first HPET read, before the last)
+        // is short by both brackets; the middles are not.
+        let short = tsc_per_ms_from_hpet(b.tsc_lo - a.tsc_hi, 1_000_000, 10_000_000);
+        assert!(short.is_some_and(|v| v < 2_500_000));
+        // The narrowest of several reads wins; a stalled one loses.
+        let stalled = br(1_000, 500, 1_000_000);
+        assert_eq!(stalled.narrower(a), a);
+        assert_eq!(a.narrower(stalled), a);
+        assert_eq!(a.tsc_mid(), 3_500);
+        // A reversed bracket is no read.
+        let rev = br(10, 5, 5);
+        assert_eq!(rev.width(), u64::MAX);
+        assert_eq!(a.narrower(rev), a);
+        assert_eq!(tsc_per_ms_from_hpet_brackets(rev, b, 10_000_000), None);
+        assert_eq!(tsc_per_ms_from_hpet_brackets(b, a, 10_000_000), None);
     }
 
     #[test]

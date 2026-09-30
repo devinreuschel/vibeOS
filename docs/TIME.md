@@ -42,7 +42,10 @@ therefore brackets each end with TSC reads (before and after the gate write; bef
 that found OUT low and after the one that found it high), keeps only a window whose brackets are
 within 0.05% of its length (`PitWindow::tight_len`), measures until five are kept or ten ran, and
 takes their median (`time::tsc_per_ms_from_pit_windows`); with none kept it takes the median of all.
-That costs 50 ms of boot where the HPET is absent.
+That costs 50 ms of boot where the HPET is absent. The HPET window's ends are counter reads, so
+`calibrate_hpet` takes each as the read the TSC brackets most tightly of 16 (TSC, HPET, TSC) triples
+and places it by its bracket's middle (`time::tsc_per_ms_from_hpet_brackets`); reading the TSC only
+after the first HPET read and before the last one read the rate low, by up to 0.5% under TCG.
 
 Parse the ACPI HPET table properly: reject an address of zero and reject a generic address structure
 that claims I/O space rather than system memory. Both appear in the wild and both produce a
