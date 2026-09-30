@@ -50,6 +50,7 @@ them each run has its printed deadline plus 5 s, and each gap 5 s
 from __future__ import annotations
 
 import atexit
+import glob
 import math
 import os
 import random
@@ -166,6 +167,9 @@ class RunResult:
     # The QMP event that ended the run under its declaration
     # (`GUEST_PANICKED` for an expected panic); empty otherwise.
     end: str = ""
+    # The core tool's report on the run's guest core (`core_report`), or
+    # the line that says why there is none; empty when no core was taken.
+    report: str = ""
 
 
 def serial_tail(lines: list[str], n: int = 40) -> str:
@@ -175,6 +179,99 @@ def serial_tail(lines: list[str], n: int = 40) -> str:
     tail = lines[-n:]
     body = "\n".join(tail)
     return f"\n--- serial tail {len(tail)}/{len(lines)} ---\n{body}"
+
+
+def failure_tail(result: RunResult) -> str:
+    """A failed run's tail: the serial tail, then the core tool's report."""
+    return serial_tail(result.lines) + result.report
+
+
+# The core tool (ROADMAP §10.7, TESTING.md §8.3): `make vmcore` builds it for
+# the host in the kernel's profile; `VIBEOS_VMCORE` names the build to use
+# (the Makefile's forensics tier passes its own).
+VMCORE_TIMEOUT_S = 300.0
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def vmcore_tool() -> str | None:
+    """The `vmcore` binary: `VIBEOS_VMCORE` when set, else the host build
+    under `target/<triple>/debug/` (then `release/`); None when there is
+    none."""
+    named = os.environ.get("VIBEOS_VMCORE", "")
+    if named:
+        return named if os.path.isfile(named) and os.access(named, os.X_OK) else None
+    for profile in ("debug", "release"):
+        hits = sorted(glob.glob(os.path.join(_REPO_ROOT, "target", "*", profile, "vmcore")))
+        for h in hits:
+            if os.access(h, os.X_OK):
+                return h
+    return None
+
+
+def run_vmcore(
+    core: str | os.PathLike[str],
+    elf: str | os.PathLike[str],
+    extra: Sequence[str] = (),
+    *,
+    timeout_s: float = VMCORE_TIMEOUT_S,
+) -> tuple[int, str, str]:
+    """`vmcore report` on `core` with `elf` and `extra` arguments: its exit
+    status, stdout and stderr. A `.zst` core streams through `zstd -dc`, so
+    no uncompressed core touches the disk."""
+    tool = vmcore_tool()
+    if tool is None:
+        raise HarnessError("no vmcore tool (run `make vmcore`, or set VIBEOS_VMCORE)")
+    argv = [tool, "report", "--elf", os.fspath(elf), *extra]
+    path = os.fspath(core)
+    try:
+        if not path.endswith(".zst"):
+            proc = subprocess.run(
+                [*argv, "--core", path], capture_output=True, timeout=timeout_s, check=False
+            )
+        else:
+            unzip = subprocess.Popen(
+                ["zstd", "-dc", "--", path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            assert unzip.stdout is not None
+            try:
+                proc = subprocess.run(
+                    [*argv, "--core", "-"],
+                    stdin=unzip.stdout,
+                    capture_output=True,
+                    timeout=timeout_s,
+                    check=False,
+                )
+            finally:
+                unzip.stdout.close()
+                if unzip.poll() is None:
+                    unzip.kill()
+                unzip.wait()
+    except OSError as e:
+        raise HarnessError(f"vmcore: cannot run: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise HarnessError(f"vmcore: no report within {timeout_s:g} s") from e
+    return (
+        proc.returncode,
+        proc.stdout.decode("utf-8", errors="replace"),
+        proc.stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def core_report(core: str | os.PathLike[str], elf: str | os.PathLike[str]) -> str:
+    """The core tool's report on a guest core, as a block to print after a
+    failed run's serial tail (`failure_tail`), or one line naming why there
+    is none."""
+    if vmcore_tool() is None:
+        return "\n--- no core report: no vmcore tool (run `make vmcore`, or set VIBEOS_VMCORE) ---"
+    if not os.path.isfile(elf):
+        return f"\n--- no core report: no kernel ELF at {os.fspath(elf)} ---"
+    try:
+        rc, out, err = run_vmcore(core, elf)
+    except HarnessError as e:
+        return f"\n--- no core report: {e} ---"
+    if rc != 0:
+        return f"\n--- no core report: vmcore exited {rc}: {err.strip()} ---"
+    return "\n--- core report ---\n" + out.rstrip("\n")
 
 
 def panic_signature(raw: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> str | None:
