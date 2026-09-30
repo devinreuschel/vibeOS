@@ -45,8 +45,7 @@ Serialize around `rdtsc`. Out-of-order execution can move the read across the in
 
 The BSP calibrates `tsc_per_ms` once (`time_init::init`), and every CPU uses that value through
 `time_init::tsc_per_ms()`: delays, the TSC-deadline arm, and `now_ns` when the TSC is the clocksource
-(§6.4). Each CPU's `PerCpu.tsc_per_ms`
-holds a copy that only an in-guest test reads (ROADMAP §10.7 deletes it, F111). The LAPIC periodic
+(§6.4). The LAPIC periodic
 count is also measured once, on the BSP, and `apic_init::arm_ap` reuses it on every AP. Both assume
 one TSC rate and one LAPIC timer rate on every CPU. `time_init::init` checks the invariant TSC CPUID
 bit and prints `vibeOS: time: invariant tsc absent` when it is clear, because everything downstream

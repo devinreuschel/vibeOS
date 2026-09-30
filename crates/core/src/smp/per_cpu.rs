@@ -169,7 +169,6 @@ pub struct PerCpu {
     pub idle_id: ThreadId,
     pub current: *mut Tcb,
     pub idle: *mut Tcb,
-    pub tsc_per_ms: u64,
     /// TSC cycles spent in this CPU's idle thread.
     pub idle_tsc: u64,
     /// TSC at the start of the current slice.
@@ -239,7 +238,6 @@ impl PerCpu {
             idle_id: ThreadId::NONE,
             current: core::ptr::null_mut(),
             idle: core::ptr::null_mut(),
-            tsc_per_ms: 0,
             idle_tsc: 0,
             slice_tsc: 0,
             switch_scratch: CpuContext::empty(),
@@ -287,10 +285,10 @@ const _: () = {
 const _: () = {
     use core::mem::{align_of, size_of};
     const DEBUG: bool = cfg!(debug_assertions);
-    assert!(size_of::<PerCpu>() == if DEBUG { 1872 } else { 1104 });
+    assert!(size_of::<PerCpu>() == if DEBUG { 1864 } else { 1096 });
     assert!(align_of::<PerCpu>() == 8);
-    assert!(offset_of!(PerCpu, runq) == 144);
-    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1864 } else { 1096 });
+    assert!(offset_of!(PerCpu, runq) == 136);
+    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1856 } else { 1088 });
     assert!(size_of::<PerCpuRemote>() == 256);
     assert!(align_of::<PerCpuRemote>() == 64);
     assert!(offset_of!(PerCpuRemote, apic_id) == 168);

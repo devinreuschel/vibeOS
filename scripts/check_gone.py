@@ -257,6 +257,14 @@ GONE: list[tuple[str, str]] = [
     ("relink", "dead scheduler and bring-up state"),
     ("crates/core/src/sched/thread.rs: pub next", "dead scheduler and bring-up state"),
     ("crates/core/src/sched/thread.rs: pub prev", "dead scheduler and bring-up state"),
+    ("crates/core/src/smp/per_cpu.rs: pub tsc_per_ms", "dead scheduler and bring-up state"),
+    ("set_tsc_per_ms", "dead scheduler and bring-up state"),
+    ("PARAM_IDT", "dead scheduler and bring-up state"),
+    ("PARAM_IDT_LEN", "dead scheduler and bring-up state"),
+    ("pack_idtr", "dead scheduler and bring-up state"),
+    ("idtr_pack_limit_then_base", "dead scheduler and bring-up state"),
+    ("cpu_lock_order", "dead scheduler and bring-up state"),
+    ("cpu_pair_lower_id_first", "dead scheduler and bring-up state"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

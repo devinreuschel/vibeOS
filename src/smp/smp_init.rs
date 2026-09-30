@@ -16,8 +16,8 @@ use vibeos::marker;
 use vibeos::paging::HHDM_BASE;
 use vibeos::per_cpu::PerCpu;
 use vibeos::smp::{
-    INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_IDT, PARAM_OFF, PARAM_STACK, PATCH_SITES,
-    READY_TIMEOUT_MS, SIPI_WAIT_MS, blob_fits, pack_idtr, patch_blob, sipi_vector,
+    INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_OFF, PARAM_STACK, PATCH_SITES, READY_TIMEOUT_MS,
+    SIPI_WAIT_MS, blob_fits, patch_blob, sipi_vector,
 };
 use vibeos::thread::ThreadId;
 
@@ -165,7 +165,7 @@ fn install_blob(page: u64) -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn patch_params(page: u64, cr3: u64, stack_top: u64, entry: u64, idt_limit: u16, idt_base: u64) {
+fn patch_params(page: u64, cr3: u64, stack_top: u64, entry: u64) {
     // SAFETY: `write_u64`'s contract; `page` is the trampoline page, each
     // `PARAM_*` offset plus 8 lies inside it, and `start_one` patches before
     // this AP's INIT with no other AP starting (`smp::smp_init::start_one`).
@@ -173,14 +173,6 @@ fn patch_params(page: u64, cr3: u64, stack_top: u64, entry: u64, idt_limit: u16,
         write_u64(page, PARAM_CR3, cr3);
         write_u64(page, PARAM_STACK, stack_top);
         write_u64(page, PARAM_ENTRY, entry);
-    }
-    let packed = pack_idtr(idt_limit, idt_base);
-    for (i, &b) in packed.iter().enumerate() {
-        // SAFETY: as for `write_u64`: `PARAM_IDT + i` is below
-        // `PARAM_IDT + PARAM_IDT_LEN`, inside the trampoline page, which the
-        // physmap maps writable (invariant I14), before the AP's INIT
-        // (`smp::smp_init::start_one`).
-        unsafe { tramp_va(page).add(PARAM_IDT + i).write_volatile(b) };
     }
 }
 
@@ -234,7 +226,6 @@ pub(super) fn alloc_ap_resources(
                 cpu.idle_id = idle_id;
                 cpu.idle = idle_ptr;
                 per_cpu_init::set_current_thread(cpu, idle_ptr);
-                cpu.tsc_per_ms = time_init::tsc_per_ms();
                 cpu.timer_mode = apic_init::timer_mode();
                 cpu.remote.ready.store(false, Ordering::Relaxed);
                 core::sync::atomic::compiler_fence(Ordering::SeqCst);
@@ -420,7 +411,6 @@ fn start_one(a: ApAlloc, page: u64) {
     }
     let stack_top = a.stack_top;
     let entry = ap_entry as *const () as usize as u64;
-    let (idt_limit, idt_base) = arch::idt::pointer();
 
     let cpu_ptr = match per_cpu_init::slot_ptr(cpu_id) {
         Some(p) => p,
@@ -462,7 +452,7 @@ fn start_one(a: ApAlloc, page: u64) {
     });
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
 
-    patch_params(page, cr3, stack_top, entry, idt_limit, idt_base);
+    patch_params(page, cr3, stack_top, entry);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     x86::mfence();
 
@@ -541,7 +531,6 @@ extern "C" fn ap_entry() -> ! {
     // SAFETY: `enable_ap`'s contract; the BSP mapped the LAPIC page UC at
     // boot, and IF is 0; established here.
     unsafe { apic_init::enable_ap() };
-    cpu.tsc_per_ms = time_init::tsc_per_ms();
     cpu.timer_mode = apic_init::timer_mode();
     apic_init::arm_ap();
     tsc_warp_target();

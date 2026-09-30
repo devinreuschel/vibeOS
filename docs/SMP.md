@@ -136,7 +136,6 @@ The BSP patches parameters into the tail of the blob:
 | `0xD0` | CR3 for the AP |
 | `0xD8` | Stack top |
 | `0xE0` | 64-bit Rust entry point |
-| `0xE8` | IDT pointer, 10 bytes. `patch_params` writes it and the blob never reads it; `ap_entry` loads the IDT after `GS_BASE` (ROADMAP §10.7 deletes it, F111). |
 
 Two correctness requirements:
 
@@ -173,7 +172,7 @@ For each enabled APIC ID that is not the BSP:
 
 On the AP side (`smp_init::ap_entry`), in order: `cli`; load the per-CPU GDT and TSS; set `GS_BASE`
 and `KERNEL_GS_BASE` (`per_cpu_init::install_gs`); write CR0 and CR4 whole (`arch::cpu::init_control_regs`), program the
-syscall MSRs and the FPU, and set RSP0 (`syscall_init::init_ap`); load the shared IDT; enable the LAPIC; copy the BSP's `tsc_per_ms` and timer mode into `PerCpu`; arm the
+syscall MSRs and the FPU, and set RSP0 (`syscall_init::init_ap`); load the shared IDT; enable the LAPIC; copy the BSP's timer mode into `PerCpu`; arm the
 LAPIC timer with the BSP's calibration (`apic_init::arm_ap`); run the TSC warp test against the
 BSP; mark the CPU online and print
 `vibeOS: sched: cpu<i> ready`; publish the ready flag; `sti`; enter the idle loop.
@@ -233,7 +232,7 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
 - `current`, `idle`, and `idle_id`
 - `runq`, this CPU's ready FIFO (owner only, IRQs off)
 - `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
-- `tsc_per_ms` (a copy of the BSP's value, [section 6.2](TIME.md#62-calibrating-the-tsc)) and `timer_mode`
+- `timer_mode`
 - `kernel_rsp0`, which the context switch updates; `tables`, this CPU's `gdt::CpuTables` (opaque in `vibeos-core`), through whose `set_rsp0` it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
 - `syscall_scratch`: one word, the user RSP between `syscall` and the entry's stack switch, which
   copies it into the user frame. It is per CPU, not per thread, so it is valid only while IF=0; the
@@ -460,8 +459,7 @@ The global lock order is in [section 2.1](INVARIANTS.md#21-lock-order) and the o
   on (ROADMAP §13.10; that CPU moves it on a reschedule IPI), and CPU offlining (ROADMAP §19.6) all
   move threads this way. Work stealing, if ROADMAP §19.4's numbers keep it, takes threads from a
   lock-free deque with a loom model, never from a locked remote run queue. No code locks two CPUs'
-  run queues. Planned (ROADMAP §10.7): `lock::cpu_lock_order`, which only its own test calls, is
-  deleted.
+  run queues.
 - A lock taken from an ISR is taken with interrupts disabled in every other context too. The scheduler
   lock is the canonical case: the timer ISR calls into the scheduler, so any holder with interrupts
   enabled deadlocks the moment its own timer fires.

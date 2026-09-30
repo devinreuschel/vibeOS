@@ -524,7 +524,7 @@ and a monotonic clock nobody has to distrust.
 - [x] `lfence` before `rdtsc`, or use `rdtscp`
 - [x] calibrate against the HPET main counter over ~10 ms when available
 - [x] fall back to PIT channel 2 with a count of 11932
-- [x] `tsc_per_ms` calibrated once on the BSP and read by every CPU through `time_init::tsc_per_ms()`; `PerCpu.tsc_per_ms` holds a copy that only an in-guest test reads (F027, F111)
+- [x] `tsc_per_ms` calibrated once on the BSP and read by every CPU through `time_init::tsc_per_ms()` (F027, F111)
 - [x] sanity-check the result against a plausible range and refuse a value that would poison every delay downstream
 - [x] `busy_wait_ms` on the TSC, using `hlt` when interrupts are enabled
 
@@ -656,7 +656,7 @@ comes before drivers rather than after.
 ### 4.4 AP trampoline
 - [x] `trampoline.S` via `global_asm!` into `.trampoline`, copied to the page §10.6 chooses from the memory map; blob fits below the param block
 - [x] real mode to protected mode to long mode, setting `EFER.LME` and `EFER.NXE`
-- [x] parameter block at the documented offsets: CR3, stack top, entry point, IDT pointer
+- [x] parameter block at the documented offsets: CR3, stack top, entry point
 - [x] each parameter written with `write_volatile`, `compiler_fence(SeqCst)` before the SIPI
 - [x] the trampoline page (§10.6) identity mapped, executable, and permanently excluded from the PMM
 - [x] a static assertion that the blob fits below its parameter block
@@ -674,7 +674,7 @@ comes before drivers rather than after.
 - [x] `KERNEL_GS_BASE` set to the same value at bring-up; since §9.1, `swapgs` exchanges it with the user GS base, and syscall entry saves the user RSP in `syscall_scratch` (F148)
 - [x] heap-allocated array sized from the actual MADT CPU count
 - [ ] `per_cpu!` accessors safe from interrupt context, including a device-pool or keyboard interrupt taken at CPL 3. Reopened by the kernel review (F004); lands in §10.6.
-- [x] contents: cpu id, APIC id, ready queue, wake inbox, idle handle, current thread, local ticks, context switches, `tsc_per_ms`, timer mode
+- [x] contents: cpu id, APIC id, ready queue, wake inbox, idle handle, current thread, local ticks, context switches, timer mode
 - [x] in-guest identity tests on both BSP and AP
 
 ### 4.7 Locking audit
@@ -692,7 +692,6 @@ comes before drivers rather than after.
 - [x] cross-CPU wake through the target's inbox plus a reschedule IPI, never a remote queue lock
 - [x] one idle thread per CPU with its own stack
 - [x] global sleep queue under one lock for now
-- [x] when locking two CPU-local structures, lower `cpu_id` first
 - [x] in-guest: cross-CPU spawn roundtrip, reschedule IPI delivery, waking an idle AP
 
 ### 4.9 IPIs
@@ -1435,7 +1434,7 @@ retry root-causing and Phases 11 to 13 debug their hangs with it.
 - [x] after `begin_dump`, every panic-path write to COM1, the `reentered` line included, goes through the raw serial layer's `write_owner` (A4, §10.3; DESIGN §2.5 step 1) with IF already off and no `InterruptGuard`. Today those writes take an `InterruptGuard`, so after an `irq nest underflow` panic every write fails the guard's assertion again and the dump prints `reentered` without end. A `panic_test` variant underflows `irq_nest`, and the harness finds the original panic message and the panic exit that §10.2's expect-panic e2e requires (F071)
 - [x] the panic backtrace follows `rbp` only into a known stack: the current thread's KVA stack, the recorded boot-stack bounds, or this CPU's IST and RSP0 stacks. Today `stackish()` also accepts the `ioremap` window and every address below `0x2000_0000`, so a walk can read an MMIO register that clears on read. `vibeos_syscall_entry` zeroes `rbp` before `call vibeos_syscall_stub`, so the chain ends at the syscall boundary instead of following the user's `rbp`. Host tests cover the range check; an in-guest test walks the chain from inside a syscall made with a nonzero user `rbp` and stops at the entry (F139)
 - [x] the blocked-thread sweep finds lost timeouts: a thread that blocks with a deadline records it in its TCB (`ThreadState::Blocked` gains `deadline`, `FAR_DEADLINE` when there is none, as `Sleeping` already has one), and every `SWEEP_TICKS` ticks CPU 0's `schedule_inner` reports each `Blocked` or `Sleeping` thread whose recorded deadline is at least `OVERDUE_NS` past, which happens only when its timeout entry was lost or never queued. The check is a portable function over the thread table with a host test, and `TimeoutQueue::overdue` and its `overdue_scan` test are deleted. The scan runs under SCHED with interrupts off; if it measures above 20 µs at 1,024 threads under TCG, it moves to a low-priority kernel thread that scans 64 TCBs at a time. Today the sweep scans the timeout queue after `pop_expired_into` has drained every entry it could return, so it never reports, and a lateness check at pop time would report only a stall of every CPU's scheduler, which §25.5's lockup detectors report. An in-guest test blocks a thread with a 100 ms deadline, removes its timeout entry through a `kernel_tests` hook, and finds `sched: overdue tid <id>` within 8 s; the harness registers that line as a failure line, which fails any run whose test does not declare it (F111)
-- [ ] dead scheduler and bring-up state deleted: `relink`, which runs under `SCHED` on every schedule, with `Tcb.prev` and `Tcb.next`, which nothing reads, and `PerCpu.ready_head`, which only the `per_cpu_bsp` in-guest test reads; `PerCpu.tsc_per_ms`, which only the `per_cpu_identity` in-guest test reads; and the trampoline's `PARAM_IDT` with `smp::pack_idtr`, which `smp_init` writes and the trampoline never reads; and `lock::cpu_lock_order` with its test, which nothing else calls, since DESIGN §7.7 moves threads only through inboxes, together with §4.8's line "when locking two CPU-local structures, lower `cpu_id` first". §10.2 deletes `per_cpu_bsp`'s `ready_head` assertion and its harness retry, since `ready_head` is a stale snapshot, not an invariant (F074, F111)
+- [x] dead scheduler and bring-up state deleted: `relink`, which runs under `SCHED` on every schedule, with `Tcb.prev` and `Tcb.next`, which nothing reads, and `PerCpu.ready_head`, which only the `per_cpu_bsp` in-guest test reads; `PerCpu.tsc_per_ms`, which only the `per_cpu_identity` in-guest test reads; and the trampoline's `PARAM_IDT` with `smp::pack_idtr`, which `smp_init` writes and the trampoline never reads; and `lock::cpu_lock_order` with its test, which nothing else calls, since DESIGN §7.7 moves threads only through inboxes, together with §4.8's line "when locking two CPU-local structures, lower `cpu_id` first". §10.2 deletes `per_cpu_bsp`'s `ready_head` assertion and its harness retry, since `ready_head` is a stale snapshot, not an invariant (F074, F111)
 - [x] syscall tracing can be switched on: `vibeos.strace=1` on the §10.2 command line calls `syscall_init::set_trace(true)` and SYSCALL.md §6 names the option. An e2e boot with `vibeos.strace=1` finds a `user: syscall write` line for the first user `write` (F150)
 - [ ] a syscall count per process: the per-TCB `syscall_count`, summed over a process's threads, is reported through syscall 500 and the `/bin/sh` `ps` built-in, which §13.9 moves to `/proc/<pid>/vibeos/syscalls`, since Linux's `/proc/<pid>/syscall` already means something else. Today nothing reads the per-TCB count. The global `SYSCALLS` counter, bumped on every entry and never read, is deleted. An in-guest test finds a process's count grown by the number of syscalls it made (F150)
 
