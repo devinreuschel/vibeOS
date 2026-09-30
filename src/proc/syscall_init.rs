@@ -87,6 +87,10 @@ global_asm!(
         sti
 
         lea rdi, [rsp + {pad}]
+        // The frame holds the user rbp; a null rbp ends the kernel's
+        // frame-pointer chain here, so a backtrace from the body stops at
+        // this entry instead of following the user's (DESIGN §2.5 step 4).
+        xor ebp, ebp
         call vibeos_syscall_stub
         // IF is off from here to sysretq or iretq (AGENTS.md rule 2).
         cli
@@ -747,6 +751,8 @@ pub unsafe extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     // kernel stack, which only this thread's syscall path refers to
     // (this fn's `# Safety`).
     let frame = unsafe { &mut *frame };
+    #[cfg(feature = "kernel_tests")]
+    crate::log::ktest::syscall_walk_probe(frame.rbp);
     let nr = <Arch as SyscallAbi>::nr(frame);
     vibeos::trace!(SyscallEnter, nr, <Arch as SyscallAbi>::arg(frame, 0));
     // Acquire: pairs with the Release store in `set_syscall_handler`.

@@ -1249,3 +1249,48 @@ needs = [
   "a device's resources are claimed",  # L1509
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the panic dump owns COM1"
+needs = [
+  "the expect-panic e2e matches markers",  # L1258
+  "every two-way dependency between kernel",  # L1282
+  "an IST vector taken at",  # L1384
+  "every IDT vector enters through",  # L1392
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "the panic backtrace follows `rbp`"
+needs = [
+  "one ring-3 entry model: `/hello`",  # L1402
+  "boot runs on a guarded",  # L1404
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "a panic on any CPU"
+needs = [
+  "the second ksyms link leaves",  # L1253
+  "the panic e2e requires the",  # L1254
+  "the panic dump owns COM1",  # L1419
+  "an exception dump's backtrace starts",  # L1420
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "broadcast the halt IPI first"
+needs = [
+  "the panic dump owns COM1",  # L1419
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "symbolized backtrace: keep a symbol"
+needs = [
+  "the second ksyms link leaves",  # L1253
+  "the panic e2e requires the",  # L1254
+  "an exception dump's backtrace starts",  # L1420
+  "the panic backtrace follows `rbp`",  # L1422
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

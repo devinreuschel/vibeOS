@@ -21,9 +21,10 @@ use vibeos::uart::*;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
 
-/// Set once a CPU starts stopping the others for a panic dump
-/// (`ipi_init::halt_others`) or takes the halt IPI. From then on the
-/// serial writes skip the TX lock and the log capture.
+/// Set by the panic dump's owner before it stops the others
+/// (`ipi_init::stop_others`). From then on a serial write or log append on
+/// any other CPU stops that CPU ([`stop_if_halting`]), and the owner's
+/// writes skip the TX lock and the log capture.
 pub static HALTING: AtomicBool = AtomicBool::new(false);
 
 /// Set while the last bytes on the UART were user output that did not end
@@ -37,8 +38,9 @@ const NO_OWNER: u32 = u32::MAX;
 /// The CPU that owns the panic dump, or `NO_OWNER`.
 static DUMP_OWNER: AtomicU32 = AtomicU32::new(NO_OWNER);
 
-/// ROADMAP §10.7's stop primitive, once it installs itself: parks a CPU
-/// that must not write while the owner dumps.
+/// The stop primitive's stop routine (`ipi_init::stop_hook`, installed by
+/// `ipi_init::init`): stops a CPU that must not write while the owner
+/// dumps. A fn pointer, so this layer names nothing above arch.
 static STOP_HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 /// Bring COM1 up: DLAB dance, 115200 8N1, FIFO on. Safe to run again;
@@ -134,11 +136,7 @@ pub fn owner_cpu() -> Option<u32> {
     (o != NO_OWNER).then_some(o)
 }
 
-/// Install the stop hook (ROADMAP §10.7's stop primitive).
-#[allow(
-    dead_code,
-    reason = "C-RAWSERIAL: ROADMAP §10.7's stop primitive is its first caller"
-)]
+/// Install the stop hook (DESIGN §2.5 step 1's stop primitive).
 pub fn set_stop_hook(f: fn()) {
     // Release: pairs with the Acquire load in `run_stop_hook`.
     STOP_HOOK.store(f as *mut (), Ordering::Release);
@@ -158,17 +156,15 @@ fn run_stop_hook() {
     f();
 }
 
-fn is_owner() -> bool {
+/// Whether this CPU owns the panic dump.
+pub fn is_owner() -> bool {
     owner_cpu() == Some(this_cpu())
 }
 
-/// Write `line` as one framed kernel line, only on the dump's owner. Any
-/// other CPU runs the stop hook if one is set, and otherwise returns
-/// without writing.
-#[allow(
-    dead_code,
-    reason = "C-RAWSERIAL: ROADMAP §10.7 routes the panic path's writes through it"
-)]
+/// Write `line` as one framed kernel line, only on the dump's owner: no
+/// lock and no `InterruptGuard`, so the dump writes whatever this CPU held
+/// or faulted in (DESIGN §2.5 step 1). Any other CPU runs the stop hook if
+/// one is set, and otherwise returns without writing.
 pub fn write_owner(line: &[u8]) {
     if is_owner() {
         put_line(line);
@@ -177,19 +173,15 @@ pub fn write_owner(line: &[u8]) {
     }
 }
 
-/// A kernel line once `HALTING` is set: on the owner it writes; elsewhere
-/// it runs the stop hook, and if none is set or it returns, writes unlocked.
-pub fn write_after_halt(line: &[u8]) {
-    if !is_owner() {
-        run_stop_hook();
+/// Once `HALTING` is set, stop this CPU unless it owns the dump: run the
+/// stop hook, and `cli; hlt` for good if none is set or it returns. Returns
+/// while `HALTING` is clear, and on the owner.
+pub fn stop_if_halting() {
+    // Acquire: pairs with the Release store in `ipi_init::stop_others`.
+    if !HALTING.load(Ordering::Acquire) || is_owner() {
+        return;
     }
-    put_line(line);
-}
-
-/// User console bytes once `HALTING` is set, as [`write_after_halt`].
-pub fn user_after_halt(bytes: &[u8]) {
-    if !is_owner() {
-        run_stop_hook();
-    }
-    put_user(bytes);
+    run_stop_hook();
+    #[cfg(target_arch = "x86_64")]
+    x86::halt();
 }
