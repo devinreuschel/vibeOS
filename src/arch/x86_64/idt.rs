@@ -539,6 +539,12 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     if matches!(v, vectors::NP | vectors::SS | vectors::GP) {
         user_return_fault(frame);
     }
+    // The irqoff tracer: an entry that interrupted IF=1 code opens a
+    // stretch at this vector. After `user_return_fault`, which runs on the
+    // user GS; its frame (an exit `iretq`) has IF=0 anyway.
+    if frame.iret.rflags & RFLAGS_IF != 0 {
+        crate::sched::irqoff::off(crate::sched::irqoff::Site::vector(v));
+    }
     #[cfg(feature = "kernel_tests")]
     if frame.user_mode() {
         testing::on_cpl3_entry(frame);
@@ -565,7 +571,14 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     if frame.user_mode() {
         exit_to_user(frame);
     }
+    // The stub's `iretq` returns to IF=1.
+    if frame.iret.rflags & RFLAGS_IF != 0 {
+        crate::sched::irqoff::on();
+    }
 }
+
+/// RFLAGS.IF.
+const RFLAGS_IF: u64 = 1 << 9;
 
 /// Vectors 0 to 31 that do not enter through an IST stack, and `#DB`,
 /// whose CPL-3 frame the stub has moved off its IST stack. NMI and `#MC`

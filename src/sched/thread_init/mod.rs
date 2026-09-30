@@ -635,6 +635,12 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             on_switch(cpu, old_ptr, new_ptr);
         }
     });
+    // The switch asm turns IF on for a thread whose `irq_nest` is 0.
+    // SAFETY: invariant I9, as above: `new_ptr` is a live entry of `SCHED`
+    // this CPU was given; established by `thread_init::spawn_inner`.
+    if unsafe { (*new_ptr).irq_nest } == 0 {
+        crate::sched::irqoff::on();
+    }
     // SAFETY: both TCBs are live entries of `SCHED` that this CPU runs
     // or was given, established at `thread_init::schedule_inner` and
     // `thread_init::switch_to`, and IF=0 under their `InterruptGuard`,
@@ -809,8 +815,10 @@ pub fn halt_if_idle() {
         unsafe {
             core::arch::asm!("cli", options(nostack, preserves_flags));
         }
+        crate::sched::irqoff::off_here();
         crate::ipi_init::drain_inbox();
         if !per_cpu_init::current().runq.is_empty() {
+            crate::sched::irqoff::on();
             // SAFETY: `sti` restores the IF=1 this idle loop runs with;
             // established here.
             #[cfg(target_arch = "x86_64")]
@@ -819,6 +827,7 @@ pub fn halt_if_idle() {
             }
             return;
         }
+        crate::sched::irqoff::on();
         // SAFETY: `sti; hlt` as one pair: the interrupt shadow keeps a
         // wake-up IPI from landing between them (DESIGN §7.8); established
         // here.

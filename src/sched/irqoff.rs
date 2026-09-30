@@ -40,6 +40,18 @@ pub fn on() {
     tracer::on();
 }
 
+/// [`off`] for the asm stubs: `site` is a vector site (`0x100 | vector`)
+/// or a syscall site. Defined in every build, so the stubs' `sym`
+/// operands resolve; the stubs call it only in an `irqoff` build.
+pub extern "C" fn vibeos_irqoff_off_site(site: u64) {
+    off(Site::from_stub(site));
+}
+
+/// [`on`] for the asm stubs, as [`vibeos_irqoff_off_site`].
+pub extern "C" fn vibeos_irqoff_on() {
+    on();
+}
+
 /// Time spent while this lives is subtracted from the open stretch: one
 /// of the waits rule 2 exempts (the shootdown and call-function waits, a
 /// spinlock's spin).
