@@ -2,6 +2,7 @@
 
 mod counted;
 mod depth;
+mod fill;
 mod hooks;
 mod reclaim;
 mod registry;
@@ -11,6 +12,7 @@ pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use depth::{
     record, report, stack_depth_exit_scan, stack_depth_planted, wait_exit_depth,
 };
+pub(crate) use fill::fill_threads;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 pub(crate) use reclaim::dead_list_batched_rounds;
 pub(crate) use registry::{test_ktest_fail_fmt, test_ktest_helpers, test_ktest_rows};

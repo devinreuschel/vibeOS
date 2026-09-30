@@ -224,6 +224,7 @@ GONE: list[tuple[str, str]] = [
     ("with_intx_disabled", "a driver turns on its own device (DESIGN §12.3)"),
     ("fail_status", "a driver turns on its own device (DESIGN §12.3)"),
     ("fail_armed", "a driver turns on its own device (DESIGN §12.3)"),
+    ("abandon_ap_idle", "a full thread table is an error, not a panic"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

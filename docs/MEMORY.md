@@ -620,7 +620,11 @@ its allocations fails, it records the error where a later call reports it, retri
 bound, or drops that work with a counter and a log line at most once a second, as
 [§2.5](INVARIANTS.md#25-panic-policy)'s rule that nothing is silently swallowed requires. A driver probe that
 fails leaves its device unbound and logs why. A CPU whose idle thread or workers cannot be allocated
-stays offline (ROADMAP §10.4, F037).
+stays offline: AP bring-up spawns them before it starts the CPU, frees what it took on a failure,
+and logs the `SpawnError` (ROADMAP §10.4, F037). A kernel thread that does not start degrades
+the service it runs: without `irqth` threaded interrupts stay unstarted, and without `blk-wb` the
+cache writes dirty pages only on a flush or an eviction and its shell line says `writeback none`;
+each logs one error.
 
 A slab allocator for hot object types (TCBs, file descriptors, inodes, network buffers) lands in
 ROADMAP §19.9; general allocation stays on the heap, which ROADMAP §12.6 makes a constant-time TLSF

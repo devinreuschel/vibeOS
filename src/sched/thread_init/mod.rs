@@ -35,7 +35,9 @@ use crate::sync_init::{self, SleepCtx, SpinMutex};
 use crate::time_init;
 use crate::x86::InterruptGuard;
 
+mod ap;
 mod boot;
+pub use ap::{abandon_unstarted, adopt_ap_idle};
 #[cfg(feature = "kernel_tests")]
 pub(crate) use boot::BOOT_STACK_PAGES;
 pub(crate) use boot::bootstrap_stack;
@@ -758,7 +760,7 @@ fn cached_stack() -> Option<GuardedStack> {
 
 /// Keep a stack a failed spawn did not use: this CPU's cache if it has
 /// room and the stack is default-size, else free it.
-fn return_stack(stack: GuardedStack) {
+pub(crate) fn return_stack(stack: GuardedStack) {
     let pages = stack.pages();
     let refused = if pages == DEFAULT_STACK_PAGES {
         per_cpu_init::with_current(|cpu| cpu.stack_cache.put(stack).err())
@@ -840,6 +842,27 @@ pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> Result<ThreadHandl
         entry,
         CpuAffinity::Pinned(cpu),
         true,
+        0,
+        0,
+        0,
+        DEFAULT_STACK_PAGES,
+    )
+}
+
+/// A thread pinned to CPU `cpu`, parked: not runnable until
+/// [`make_ready`], so no CPU runs it before then and `cpu` need not be
+/// online yet (AP bring-up spawns a CPU's workers before it starts it).
+/// [`abandon_unstarted`] retires one that never started.
+pub fn spawn_parked_on(
+    name: &'static str,
+    entry: fn(),
+    cpu: u32,
+) -> Result<ThreadHandle, SpawnError> {
+    spawn_inner(
+        name,
+        entry,
+        CpuAffinity::Pinned(cpu),
+        false,
         0,
         0,
         0,
@@ -953,81 +976,30 @@ pub fn make_ready(id: ThreadId) {
     });
 }
 
-/// AP idle: running on `stack` already. No synthetic frame, not on the FIFO.
-/// `Err(stack)` hands the stack back when no TCB slot is free.
-#[allow(
-    clippy::result_large_err,
-    reason = "the stack comes back by value so the caller frees it once; a Box would allocate on the failure path"
-)]
-pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, GuardedStack> {
-    // Built without the stack, which the AP is running on: a failed
-    // allocation must not drop it.
-    let tcb = TryBox::try_new(Tcb {
-        id: ThreadId(0),
-        name: "idle",
-        state: ThreadState::Running,
-        on_cpu: OnCpu::new_set(),
-        stack: None,
-        context: CpuContext::empty(),
-        entry: ap_idle_entry,
-        next: None,
-        prev: None,
-        affinity: CpuAffinity::Pinned(cpu_id),
-        cpu: cpu_id,
-        irq_nest: 0,
-        switches: 0,
-        run_tsc: 0,
-        wait_outcome: WaitOutcome::Woken,
-        as_cr3: 0,
-        fpu: fpu_template(),
-        fp_cpu: None,
-        syscall_count: 0,
-        pid: 0,
-        no_reclaim: AtomicU32::new(0),
-    });
-    let Ok(mut tcb) = tcb else {
-        return Err(stack);
-    };
-    let placed = with_sched(|s| {
-        let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
-            // Dropped after SCHED is released: no heap free under it.
-            return Err((tcb, stack));
-        };
-        let Some(raw) = s.alloc_id() else {
-            return Err((tcb, stack));
-        };
-        let id = ThreadId(raw);
-        tcb.id = id;
-        tcb.stack = Some(stack);
-        s.slots[slot] = Some(tcb);
-        s.bind(id, slot);
-        Ok(id)
-    });
-    match placed {
-        Ok(id) => Ok(id),
-        Err((tcb, stack)) => {
-            drop(tcb);
-            Err(stack)
-        }
-    }
+/// `spawn_inner`'s reuse test for a slot's TCB: Dead, and no CPU still
+/// switching off it.
+fn dead_reusable(t: &Tcb) -> bool {
+    t.state == ThreadState::Dead && t.on_cpu.is_clear()
 }
 
-/// Timeout path: TCB never ran. Return the stack so the caller can free it.
-pub fn abandon_ap_idle(id: ThreadId) -> Option<GuardedStack> {
+/// Whether a spawn could take `slot`: empty, or a reusable Dead TCB.
+fn slot_reusable(slot: Option<&Tcb>) -> bool {
+    slot.is_none_or(dead_reusable)
+}
+
+/// The thread table's use: slots a spawn could not take (by
+/// [`slot_reusable`], `spawn_inner`'s own test), and its length.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn table_usage() -> (usize, usize) {
     with_sched(|s| {
-        s.timeouts.remove(id);
-        let t = s.get_mut(id)?;
-        t.state = ThreadState::Dead;
-        t.stack.take()
+        let cap = s.slots.len();
+        let free = s
+            .slots
+            .iter()
+            .filter(|x| slot_reusable(x.as_deref()))
+            .count();
+        (cap - free, cap)
     })
-}
-
-#[allow(
-    clippy::panic,
-    reason = "invariant: an AP idle TCB is adopted Running and never started, so nothing enters its `entry` (`thread_init::adopt_ap_idle`)"
-)]
-fn ap_idle_entry() {
-    panic!("ap idle entry called");
 }
 
 fn choose_cpu(affinity: CpuAffinity) -> u32 {
@@ -1091,10 +1063,10 @@ fn spawn_inner(
     // The Dead TCB's old tid leaves the index and the timeout queue and
     // goes back to the allocator; the new thread takes a new tid.
     let reused = with_sched(|s| {
-        let slot = s.slots.iter().position(|x| match x.as_ref() {
-            Some(t) => t.state == ThreadState::Dead && t.on_cpu.is_clear(),
-            None => false,
-        })?;
+        let slot = s
+            .slots
+            .iter()
+            .position(|x| x.as_deref().is_some_and(dead_reusable))?;
         let old = s.slots[slot].as_deref()?.id;
         let ks = stack.take()?;
         let Some(raw) = s.new_tid(pid) else {
