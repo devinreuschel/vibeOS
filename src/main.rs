@@ -278,6 +278,12 @@ fn normal_boot_tail() -> ! {
     // below: the GDT is loaded and the PIC masks every line, as `per_cpu_init::init_bsp` requires; established here.
     unsafe { per_cpu_init::init_bsp() };
     log::trace_init::init();
+    // The thread tables (ROADMAP §10.4, D1), before the bootstrap thread
+    // takes slot 0. Before `irq: enabled`, where DESIGN §4.4 allows a
+    // boot-time halt.
+    if thread_init::init_tables().is_err() {
+        crate::boot::halt_with("vibeOS: limits: no memory for the thread tables");
+    }
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // in `boot_rest`: `GS_BASE` is the BSP's `PerCpu` (`per_cpu_init::init_bsp` above) and KVA is up, first call, as `thread_init::init_bootstrap` requires; established here.
     unsafe { thread_init::init_bootstrap(boot_rest) }

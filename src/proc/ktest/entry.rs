@@ -9,7 +9,7 @@ use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::paging::{PAGE_SIZE_4K, USER_END};
 use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::syscall::SYS_KILL;
-use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
+use vibeos::thread::ThreadState;
 use vibeos::vectors;
 
 use crate::addr_space_init;
@@ -1166,27 +1166,21 @@ struct Stuck;
 
 impl core::fmt::Display for Stuck {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let mut buf = [thread_init::ThreadInfo {
-            id: ThreadId::NONE,
-            name: "",
-            state: ThreadState::Dead,
-            cpu: 0,
-        }; MAX_THREADS];
-        let n = thread_init::snapshot(&mut buf);
-        for t in &buf[..n] {
-            if !matches!(t.name, "fork_wait" | "user" | "/hello") {
-                continue;
+        let mut r = Ok(());
+        thread_init::each_thread(|t| {
+            if r.is_err() || !matches!(t.name, "fork_wait" | "user" | "/hello") {
+                return;
             }
             let st = match t.state {
                 ThreadState::Ready => "R",
                 ThreadState::Running => "run",
                 ThreadState::Sleeping { .. } => "S",
                 ThreadState::Blocked { .. } => "B",
-                ThreadState::Dead => continue,
+                ThreadState::Dead => return,
             };
-            write!(f, " {}:{}{}@{}", t.id.raw(), t.name, st, t.cpu)?;
-        }
-        Ok(())
+            r = write!(f, " {}:{}{}@{}", t.id.raw(), t.name, st, t.cpu);
+        });
+        r
     }
 }
 

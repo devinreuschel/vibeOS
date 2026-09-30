@@ -270,10 +270,10 @@ const _: () = {
 const _: () = {
     use core::mem::{align_of, size_of};
     const DEBUG: bool = cfg!(debug_assertions);
-    assert!(size_of::<PerCpu>() == if DEBUG { 2096 } else { 1328 });
+    assert!(size_of::<PerCpu>() == if DEBUG { 1880 } else { 1112 });
     assert!(align_of::<PerCpu>() == 8);
     assert!(offset_of!(PerCpu, runq) == 152);
-    assert!(offset_of!(PerCpu, remote) == if DEBUG { 2088 } else { 1320 });
+    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1872 } else { 1104 });
     assert!(size_of::<PerCpuRemote>() == 64);
     assert!(align_of::<PerCpuRemote>() == 64);
     assert!(offset_of!(PerCpuRemote, apic_id) == 48);
@@ -380,6 +380,7 @@ mod tests {
         let mut p = PerCpu::new(&R);
         p.publish_runq_len();
         assert_eq!(R.runq_len.load(Ordering::Relaxed), 0);
+        p.runq = crate::sched::ReadyQueue::try_new(4).unwrap();
         p.runq.push_back(ThreadId(3));
         p.runq.push_back(ThreadId(4));
         assert_eq!(R.runq_len.load(Ordering::Relaxed), 0);

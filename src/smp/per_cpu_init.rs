@@ -17,7 +17,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use vibeos::per_cpu::{PerCpu, PerCpuRemote};
-use vibeos::thread::Tcb;
+use vibeos::sched::ReadyQueue;
+use vibeos::thread::{MAX_THREADS, Tcb};
 
 use crate::acpi_init;
 use crate::cell::BootCell;
@@ -84,7 +85,14 @@ pub unsafe fn init_bsp() {
     let mut v = Vec::with_capacity(n);
     i = 0;
     while i < n {
-        v.push(PerCpu::new(&remote[i]));
+        let mut cpu = PerCpu::new(&remote[i]);
+        // Each run queue holds every thread (ROADMAP §10.4, D1). Before
+        // `irq: enabled`, where DESIGN §4.4 allows a boot-time halt.
+        cpu.runq = match ReadyQueue::try_new(MAX_THREADS) {
+            Ok(q) => q,
+            Err(_) => crate::boot::halt_with("vibeOS: limits: no memory for the runq tables"),
+        };
+        v.push(cpu);
         i += 1;
     }
     let mut boxed = v.into_boxed_slice();

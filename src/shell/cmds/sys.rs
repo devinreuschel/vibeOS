@@ -7,7 +7,6 @@ use vibeos::acpi::{GAS_SYSTEM_IO, GAS_SYSTEM_MEMORY, Gas};
 use vibeos::kbd::DecodedKey;
 use vibeos::log::Level;
 use vibeos::shell::Command;
-use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
 use crate::acpi_init;
 use crate::console_init::{self, Console};
@@ -15,7 +14,7 @@ use crate::diag;
 use crate::log_init;
 use crate::paging_init;
 use crate::per_cpu_init;
-use crate::thread_init::{self, ThreadInfo};
+use crate::thread_init;
 use crate::x86;
 
 pub(crate) const COMMANDS: &[Command] = &[
@@ -171,16 +170,9 @@ fn dmesg_follow(view: Level) {
 
 fn cmd_ps(_args: &[&str]) {
     crate::proc_init::write_ps(&mut Console);
-    let mut buf = [ThreadInfo {
-        id: ThreadId::NONE,
-        name: "",
-        state: ThreadState::Dead,
-        cpu: 0,
-    }; MAX_THREADS];
-    let n = thread_init::snapshot(&mut buf);
-    let mut i = 0usize;
-    while i < n {
-        let t = buf[i];
+    // A chunk of threads per SCHED section, printed with the lock dropped
+    // (`thread_init::each_thread`).
+    thread_init::each_thread(|t| {
         #[expect(
             clippy::let_underscore_must_use,
             reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
@@ -193,8 +185,7 @@ fn cmd_ps(_args: &[&str]) {
             t.state.name(),
             t.name
         );
-        i += 1;
-    }
+    });
 }
 
 #[allow(

@@ -17,6 +17,8 @@
 //! - on-disk formats: vibefs `MAX_*`, fat `MAX_CLUS_BYTES`, part
 //!   `MAX_EBR_DEPTH`.
 
+use crate::kalloc::{AllocError, TryVec};
+
 /// Thread table slots (`thread_init`'s scheduler, `sched` run and timeout queues).
 pub const MAX_THREADS: usize = 64;
 /// Process table slots (`proc_init`), init's included: room for the 16 live
@@ -93,6 +95,41 @@ pub const MAX_BOOT_MODULES: usize = 4;
 /// `PT_LOAD` segments in one image (`elf::Image`).
 pub const MAX_ELF_LOADS: usize = 8;
 
+/// A table of `len` entries, each from `fill`, in one allocation of
+/// exactly that capacity: the one constructor of every heap table these
+/// limits size (ROADMAP §10.4, D1). A table is built once at its full
+/// length and never grown, so a cap stays a constant and never becomes an
+/// array type.
+pub fn table<T>(len: usize, mut fill: impl FnMut() -> T) -> Result<TryVec<T>, AllocError> {
+    let mut v = TryVec::try_with_capacity(len)?;
+    let mut i = 0usize;
+    while i < len {
+        // The capacity reserved above holds `len` entries, so no push
+        // reallocates.
+        v.try_push(fill())?;
+        i += 1;
+    }
+    Ok(v)
+}
+
 const _: () = assert!(EXEC_IMAGE_MAX > 192 * 1024 * 1024);
 const _: () = assert!(PID_WRAP < PID_MAX);
 const _: () = assert!(MAX_KVA_RANGES <= u16::MAX as usize);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_is_full_length_and_exact() {
+        let mut n = 0u32;
+        let t = table(5, || {
+            n += 1;
+            n
+        })
+        .unwrap();
+        assert_eq!(&t[..], &[1, 2, 3, 4, 5]);
+        assert!(t.capacity() >= 5);
+        assert!(table(0, || 0u8).unwrap().is_empty());
+    }
+}

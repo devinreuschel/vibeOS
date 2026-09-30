@@ -14,9 +14,9 @@
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::ipi::{home_cpu, pick_cpu};
-use vibeos::kalloc::TryBox;
+use vibeos::kalloc::{AllocError, TryBox, TryVec};
 use vibeos::kva::DEFAULT_STACK_PAGES;
-use vibeos::limits::PID_MAX;
+use vibeos::limits::{self, PID_MAX};
 use vibeos::lock::RANK_SCHED;
 use vibeos::per_cpu::PerCpu;
 use vibeos::proc::pid::{IdIndex, PidAlloc};
@@ -27,8 +27,9 @@ use vibeos::thread::{
     apply_if_on_resume, prepare_thread,
 };
 use vibeos::time::Instant;
-use vibeos::wait::{self, WaitQueue};
+use vibeos::wait::{WaitLink, WaitLinks, WaitQueue};
 
+use crate::cell::BootCell;
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
 use crate::sync_init::{self, SleepCtx, SpinMutex};
@@ -37,11 +38,17 @@ use crate::x86::InterruptGuard;
 
 mod ap;
 mod boot;
+mod table;
 pub use ap::{abandon_unstarted, adopt_ap_idle};
 #[cfg(feature = "kernel_tests")]
 pub(crate) use boot::BOOT_STACK_PAGES;
 pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
+pub(crate) use table::table_root;
+#[cfg(feature = "kernel_tests")]
+pub(crate) use table::table_usage;
+use table::{dead_reusable, slot_reusable};
+pub use table::{each_thread, init_tables};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.
@@ -146,15 +153,24 @@ impl ThreadHandle {
 /// stay short.
 const TID_INDEX_CAP: usize = (2 * MAX_THREADS).next_power_of_two();
 
+/// The scheduler's tables. `slots`, `places`, `links` and `timeouts` are
+/// heap tables of `limits::MAX_THREADS` entries, which [`init_tables`]
+/// allocates before `init_bootstrap` and nothing grows, moves or frees
+/// after (ROADMAP §10.4, D1); [`Sched::empty`] holds none.
 pub(crate) struct Sched {
-    slots: [Option<TryBox<Tcb>>; MAX_THREADS],
+    slots: TryVec<Option<TryBox<Tcb>>>,
     /// Tids, shared with pids (`proc_init`): a tid is never a slot index.
     pids: PidAlloc,
     /// Each live TCB's tid to its slot in `slots`.
     index: IdIndex<TID_INDEX_CAP>,
     timeouts: TimeoutQueue,
-    /// Wakes recorded under SCHED, placed after it drops: (cpu, id, slot).
-    places: [(u32, ThreadId, u32); MAX_THREADS],
+    /// Each slot's thread's links in the wait queue it is on
+    /// (`wait::WaitLinks`).
+    links: TryVec<WaitLink>,
+    /// Wakes recorded under SCHED, placed after it drops: (cpu, id, slot),
+    /// `place_head..place_n` still to place.
+    places: TryVec<(u32, ThreadId, u32)>,
+    place_head: usize,
     place_n: usize,
     /// The context the current `with_sched` section was entered from, which
     /// `begin_wait` checks: it runs under SCHED with IF off and cannot read
@@ -164,12 +180,13 @@ pub(crate) struct Sched {
 
 /// Each thread-table slot's tid, `u32::MAX` for none: what a wake-inbox
 /// bit (a slot) names when its CPU drains it ([`tid_of_slot`]). Stored with
-/// Release under SCHED ([`publish_slot`]) whenever a slot takes a TCB.
-static SLOT_TID: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(u32::MAX) }; MAX_THREADS];
+/// Release under SCHED ([`publish_slot`]) whenever a slot takes a TCB. A
+/// table of `limits::MAX_THREADS` words, set by [`init_tables`].
+static SLOT_TID: BootCell<TryVec<AtomicU32>> = BootCell::new();
 
 /// Record that `slot` now holds thread `id`. Under SCHED.
 fn publish_slot(slot: usize, id: ThreadId) {
-    if let Some(t) = SLOT_TID.get(slot) {
+    if let Some(t) = SLOT_TID.try_get().and_then(|v| v.get(slot)) {
         // Release: pairs with the Acquire load in `tid_of_slot`.
         t.store(id.0, Ordering::Release);
     }
@@ -180,18 +197,20 @@ fn publish_slot(slot: usize, id: ThreadId) {
 /// it runs, so the slot is not reused while the bit is set.
 pub(crate) fn tid_of_slot(slot: usize) -> Option<ThreadId> {
     // Acquire: pairs with the Release store in `publish_slot`.
-    let raw = SLOT_TID.get(slot)?.load(Ordering::Acquire);
+    let raw = SLOT_TID.try_get()?.get(slot)?.load(Ordering::Acquire);
     (raw != u32::MAX).then_some(ThreadId(raw))
 }
 
 impl Sched {
     const fn empty() -> Self {
         Self {
-            slots: [const { None }; MAX_THREADS],
+            slots: TryVec::new(),
             pids: PidAlloc::new(PID_MAX),
             index: IdIndex::new(),
             timeouts: TimeoutQueue::empty(),
-            places: [(0, ThreadId::NONE, 0); MAX_THREADS],
+            links: TryVec::new(),
+            places: TryVec::new(),
+            place_head: 0,
             place_n: 0,
             waiter: SleepCtx::UNCHECKED,
         }
@@ -254,6 +273,9 @@ impl Sched {
         // Invariant: the index holds one entry per live TCB, at most
         // `MAX_THREADS`, and has twice that room; `id` is below `PID_MAX`.
         assert!(self.index.insert(id.raw(), slot), "tid index full");
+        if let Some(l) = self.links.get_mut(slot) {
+            *l = WaitLink::NONE;
+        }
         publish_slot(slot, id);
     }
 
@@ -283,14 +305,34 @@ impl Sched {
     }
 
     fn place(&mut self, cpu: u32, id: ThreadId) {
-        if self.place_n >= MAX_THREADS {
-            return;
-        }
         let Some(slot) = self.slot_of(id) else {
             return;
         };
-        self.places[self.place_n] = (cpu, id, slot as u32);
-        self.place_n += 1;
+        // A placed thread is Ready and cannot be woken again before its
+        // place is delivered and it runs, so each pending entry is a
+        // distinct live thread and `places`, one entry per slot, has room.
+        if let Some(p) = self.places.get_mut(self.place_n) {
+            *p = (cpu, id, slot as u32);
+            self.place_n += 1;
+        }
+    }
+
+    /// Move up to `out.len()` recorded wakes into `out`, oldest first; how
+    /// many.
+    fn take_places(&mut self, out: &mut [(u32, ThreadId, u32)]) -> usize {
+        let mut n = 0usize;
+        while n < out.len() && self.place_head < self.place_n {
+            if let (Some(o), Some(p)) = (out.get_mut(n), self.places.get(self.place_head)) {
+                *o = *p;
+            }
+            self.place_head += 1;
+            n += 1;
+        }
+        if self.place_head == self.place_n {
+            self.place_head = 0;
+            self.place_n = 0;
+        }
+        n
     }
 
     fn place_home(&mut self, id: ThreadId) {
@@ -310,7 +352,7 @@ impl Sched {
         sync_init::assert_not_hard_irq();
         self.waiter.check();
         let id = current_id();
-        wq.enqueue(id);
+        wq.enqueue(id, self);
         self.timeouts.insert(id, deadline);
         let cookie = wq.cookie();
         if let Some(t) = self.get_mut(id) {
@@ -320,7 +362,8 @@ impl Sched {
     }
 
     pub(crate) fn wake_one(&mut self, wq: &mut WaitQueue) -> Option<ThreadId> {
-        let id = wait::take_one(wq, &mut self.timeouts)?;
+        let id = wq.dequeue(self)?;
+        self.timeouts.remove(id);
         if let Some(t) = self.get_mut(id) {
             t.state = ThreadState::Ready;
             t.wait_outcome = WaitOutcome::Woken;
@@ -348,8 +391,16 @@ impl Sched {
             // that is touched only under SCHED, held here, and stays put
             // while a thread waits on it; established by
             // `thread_init::Sched::begin_wait`.
-            unsafe { &mut *(cookie as *mut WaitQueue) }.remove(id);
+            unsafe { &mut *(cookie as *mut WaitQueue) }.remove(id, self);
         }
+    }
+}
+
+/// A thread's wait-queue link is its slot's entry in `links`.
+impl WaitLinks for Sched {
+    fn link(&mut self, id: ThreadId) -> Option<&mut WaitLink> {
+        let slot = self.slot_of(id)?;
+        self.links.get_mut(slot)
     }
 }
 
@@ -441,6 +492,12 @@ pub fn schedule_preempt() {
     schedule_inner(true);
 }
 
+/// Expired timeouts `schedule_inner` takes per pass, and recorded wakes
+/// `with_sched` places per lock hold: small batches, so neither frame
+/// scales with `limits::MAX_THREADS`.
+const EXPIRE_BATCH: usize = 32;
+const PLACE_BATCH: usize = 32;
+
 /// IF-on-resume is applied to the incoming TCB before `popfq`. See
 /// [`apply_if_on_resume`]. `InterruptGuard` stays on the outgoing stack.
 fn schedule_inner(from_irq: bool) {
@@ -460,23 +517,27 @@ fn schedule_inner(from_irq: bool) {
     let mut n_overdue = 0usize;
 
     let cur_state = with_sched(|s| {
-        let mut expired = [ThreadId::NONE; MAX_THREADS];
-        let n = s.timeouts.pop_expired_into(now, &mut expired);
-        let mut i = 0;
-        while i < n {
-            let id = expired[i];
-            s.unlink_wait(id);
-            if let Some(t) = s.get_mut(id) {
-                match t.state {
-                    ThreadState::Sleeping { .. } | ThreadState::Blocked { .. } => {
-                        t.state = ThreadState::Ready;
-                        t.wait_outcome = WaitOutcome::Timeout;
+        // In batches, so the frame stays small on top of a preempted
+        // syscall body's stack whatever the thread count.
+        let mut expired = [ThreadId::NONE; EXPIRE_BATCH];
+        loop {
+            let n = s.timeouts.pop_expired_into(now, &mut expired);
+            for &id in expired.iter().take(n) {
+                s.unlink_wait(id);
+                if let Some(t) = s.get_mut(id) {
+                    match t.state {
+                        ThreadState::Sleeping { .. } | ThreadState::Blocked { .. } => {
+                            t.state = ThreadState::Ready;
+                            t.wait_outcome = WaitOutcome::Timeout;
+                        }
+                        ThreadState::Ready | ThreadState::Running | ThreadState::Dead => {}
                     }
-                    ThreadState::Ready | ThreadState::Running | ThreadState::Dead => {}
                 }
+                s.place_home(id);
             }
-            s.place_home(id);
-            i += 1;
+            if n < EXPIRE_BATCH {
+                break;
+            }
         }
 
         if !from_irq {
@@ -626,18 +687,21 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
 
 fn relink(s: &mut Sched) {
     per_cpu_init::with_current(|cpu| {
+        // Each id's neighbours, read from the run queue in place.
         let n = cpu.runq.len();
-        let mut ids = [ThreadId::NONE; MAX_THREADS];
         let mut i = 0;
         while i < n {
-            ids[i] = cpu.runq.at(i);
-            i += 1;
-        }
-        i = 0;
-        while i < n {
-            let prev = if i == 0 { None } else { Some(ids[i - 1]) };
-            let next = if i + 1 == n { None } else { Some(ids[i + 1]) };
-            if let Some(t) = s.get_mut(ids[i]) {
+            let prev = if i == 0 {
+                None
+            } else {
+                Some(cpu.runq.at(i - 1))
+            };
+            let next = if i + 1 == n {
+                None
+            } else {
+                Some(cpu.runq.at(i + 1))
+            };
+            if let Some(t) = s.get_mut(cpu.runq.at(i)) {
                 t.prev = prev;
                 t.next = next;
             }
@@ -976,32 +1040,6 @@ pub fn make_ready(id: ThreadId) {
     });
 }
 
-/// `spawn_inner`'s reuse test for a slot's TCB: Dead, and no CPU still
-/// switching off it.
-fn dead_reusable(t: &Tcb) -> bool {
-    t.state == ThreadState::Dead && t.on_cpu.is_clear()
-}
-
-/// Whether a spawn could take `slot`: empty, or a reusable Dead TCB.
-fn slot_reusable(slot: Option<&Tcb>) -> bool {
-    slot.is_none_or(dead_reusable)
-}
-
-/// The thread table's use: slots a spawn could not take (by
-/// [`slot_reusable`], `spawn_inner`'s own test), and its length.
-#[cfg(feature = "kernel_tests")]
-pub(crate) fn table_usage() -> (usize, usize) {
-    with_sched(|s| {
-        let cap = s.slots.len();
-        let free = s
-            .slots
-            .iter()
-            .filter(|x| slot_reusable(x.as_deref()))
-            .count();
-        (cap - free, cap)
-    })
-}
-
 fn choose_cpu(affinity: CpuAffinity) -> u32 {
     let mask = per_cpu_init::online_mask();
     let mut rr = SPAWN_RR.load(Ordering::Relaxed);
@@ -1233,16 +1271,6 @@ pub fn park(deadline: Option<Instant>) {
     schedule();
 }
 
-/// The TCB slot array's base address and length, which VMCOREINFO's
-/// `SYMBOL(vibeos_tcbs)` and `LENGTH(vibeos_tcbs)` carry
-/// (docs/VMCOREINFO.md). `SCHED` is a static, so the array never moves; the
-/// binding fails to compile if the slot type stops being `TcbSlot`.
-pub(crate) fn table_root() -> (u64, u64) {
-    let s = SCHED.lock();
-    let slots: &[vibeos::thread::TcbSlot] = &s.slots[..];
-    (slots.as_ptr().addr() as u64, slots.len() as u64)
-}
-
 /// Hold SCHED for `f`. IF is off for the whole call (IRQ-aware lock).
 #[cfg(feature = "kernel_tests")]
 pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
@@ -1255,22 +1283,27 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     // Dropped last, once the places are delivered.
     #[cfg(feature = "kernel_tests")]
     let _window = testing::window_enter();
-    let (r, places, n) = {
+    // The wakes `f` recorded, placed after SCHED drops, at most
+    // `PLACE_BATCH` per lock hold: the rest wait in `places`, where this
+    // call, or any other SCHED holder's, takes them next.
+    let mut batch = [(0u32, ThreadId::NONE, 0u32); PLACE_BATCH];
+    let (r, mut n) = {
         let mut s = SCHED.lock();
         s.waiter = ctx;
         let r = f(&mut s);
-        let n = s.place_n;
-        let p = s.places;
-        s.place_n = 0;
-        (r, p, n)
+        let n = s.take_places(&mut batch);
+        (r, n)
     };
-    let mut i = 0;
-    while i < n {
-        #[cfg(feature = "kernel_tests")]
-        testing::place_stall(places[i].1);
-        let (cpu, id, slot) = places[i];
-        crate::ipi_init::place_ready(cpu, id, slot as usize);
-        i += 1;
+    loop {
+        for &(cpu, id, slot) in batch.iter().take(n) {
+            #[cfg(feature = "kernel_tests")]
+            testing::place_stall(id);
+            crate::ipi_init::place_ready(cpu, id, slot as usize);
+        }
+        if n < PLACE_BATCH {
+            break;
+        }
+        n = SCHED.lock().take_places(&mut batch);
     }
     r
 }
@@ -1394,36 +1427,6 @@ pub use testing::{cpu_of, exited, name, state, try_state};
 
 pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
     SCHED.lock().ptr(id)
-}
-
-#[derive(Clone, Copy)]
-pub struct ThreadInfo {
-    pub id: ThreadId,
-    pub name: &'static str,
-    pub state: ThreadState,
-    pub cpu: u32,
-}
-
-/// Snapshot under SCHED, then drop the lock. `ps` must not hold SCHED
-/// across console writes.
-pub fn snapshot(out: &mut [ThreadInfo]) -> usize {
-    with_sched(|s| {
-        let mut n = 0usize;
-        let mut i = 0usize;
-        while i < MAX_THREADS && n < out.len() {
-            if let Some(t) = s.slots[i].as_ref() {
-                out[n] = ThreadInfo {
-                    id: t.id,
-                    name: t.name,
-                    state: t.state,
-                    cpu: t.cpu,
-                };
-                n += 1;
-            }
-            i += 1;
-        }
-        n
-    })
 }
 
 /// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.

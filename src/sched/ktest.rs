@@ -31,7 +31,7 @@ use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::pmm::{Frames, MAX_ORDER};
 use vibeos::proc::{SIGKILL, wait_exited, wait_signaled};
 use vibeos::syscall::SYS_KILL;
-use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
+use vibeos::thread::{ThreadId, ThreadState};
 
 use crate::apic_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
@@ -993,12 +993,16 @@ static SPAWNERS_DONE: AtomicU32 = AtomicU32::new(0);
 
 static SPAWN_BAD: AtomicBool = AtomicBool::new(false);
 
+/// Tid buckets [`SPAWNED`] and [`RAN`] count in: any number works, since
+/// a tid lands in the same bucket in both.
+const TID_BUCKETS: usize = 256;
+
 /// Per tid bucket ([`tid_bucket`]): spawns that returned a tid in it, and
 /// runs of a child with one. Tids are not reused before the allocator
 /// wraps, so a child that ran twice or not at all shows as a mismatch.
-static SPAWNED: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
+static SPAWNED: [AtomicU32; TID_BUCKETS] = [const { AtomicU32::new(0) }; TID_BUCKETS];
 
-static RAN: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
+static RAN: [AtomicU32; TID_BUCKETS] = [const { AtomicU32::new(0) }; TID_BUCKETS];
 
 /// Hold a TCB slot, asleep on CPU 0, until released.
 fn filler_entry() {
@@ -1018,7 +1022,7 @@ fn filler_entry() {
 
 /// `id`'s bucket in [`SPAWNED`] and [`RAN`].
 fn tid_bucket(id: ThreadId) -> usize {
-    id.raw() as usize % MAX_THREADS
+    id.raw() as usize % TID_BUCKETS
 }
 
 fn child_entry() {

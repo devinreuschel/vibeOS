@@ -1215,6 +1215,15 @@ arch = "both"
 source = "user"
 section = "§10.2"
 
+# §10.4 Tables, VFS, errors
+
+[[marker]]
+text = "vibeOS: limits: no memory for the <name> tables"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.4"
+
 # §10.6 Entry paths and user memory
 
 # The AP trampoline page `boot::capture` chose from the memory map, before
