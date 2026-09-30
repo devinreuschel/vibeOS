@@ -392,6 +392,48 @@ pub fn sig_name(sig: u32) -> &'static str {
     }
 }
 
+/// How pid 1 ended, for the line the kernel prints before it panics
+/// (ROADMAP §10.5, F068): `exited <n>`, `killed SIG<name>`, or, for a
+/// fault, `killed SIG<name> addr=0x<hex>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitExit {
+    /// `exit` with this status.
+    Exited(u32),
+    /// A signal that was not a fault.
+    Killed(u32),
+    /// A fault's signal, and the faulting address: CR2 for a page fault,
+    /// the faulting RIP for any other.
+    Faulted { sig: u32, addr: u64 },
+}
+
+impl InitExit {
+    /// From init's wait status and, when a fault ended it, the address.
+    pub const fn from_wait(status: u32, fault: Option<u64>) -> Self {
+        if wifexited(status) {
+            return Self::Exited(wexitstatus(status));
+        }
+        match fault {
+            Some(addr) => Self::Faulted {
+                sig: wtermsig(status),
+                addr,
+            },
+            None => Self::Killed(wtermsig(status)),
+        }
+    }
+}
+
+impl core::fmt::Display for InitExit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Exited(n) => write!(f, "exited {n}"),
+            Self::Killed(sig) => write!(f, "killed SIG{}", sig_name(sig)),
+            Self::Faulted { sig, addr } => {
+                write!(f, "killed SIG{} addr=0x{addr:x}", sig_name(sig))
+            }
+        }
+    }
+}
+
 /// Open `O_CLOEXEC` becomes per-fd `FD_CLOEXEC`.
 pub const fn fd_flags_from_open(oflags: u32) -> u32 {
     if oflags & O_CLOEXEC != 0 {
@@ -501,6 +543,28 @@ mod tests {
         assert!(!kill_delivers(INIT_PID, SIGKILL, true));
         assert!(!kill_delivers(INIT_PID, SIGSTOP, true));
         assert!(kill_delivers(INIT_PID, SIGTERM, true));
+    }
+
+    /// The three forms of pid 1's exit line (F068).
+    #[test]
+    fn init_exit_line_format() {
+        extern crate std;
+        use std::string::ToString;
+        let line = |st, fault| InitExit::from_wait(st, fault).to_string();
+        assert_eq!(line(wait_exited(0), None), "exited 0");
+        assert_eq!(line(wait_exited(3), None), "exited 3");
+        assert_eq!(line(wait_signaled(SIGKILL), None), "killed SIGKILL");
+        assert_eq!(
+            line(wait_signaled(SIGSEGV), Some(0x1000)),
+            "killed SIGSEGV addr=0x1000"
+        );
+        assert_eq!(
+            InitExit::from_wait(wait_signaled(SIGSEGV), Some(0x1000)),
+            InitExit::Faulted {
+                sig: SIGSEGV,
+                addr: 0x1000
+            }
+        );
     }
 
     #[test]

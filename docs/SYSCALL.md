@@ -510,7 +510,10 @@ Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
 - `/hello` (`user/src/bin/hello.rs`) — write + exit 42 (Slice B proof)
 - `/sbin/init` (`user/src/bin/init.rs`) — post-init kernel job: `fork`/`exec`
   `/bin/tests`, printing `init: /bin/tests exited <status>` on fd 2 when its
-  wait status is nonzero, then `/bin/sh`, then reap
+  wait status is nonzero, then `/bin/sh`, then reap. Its exit, by `exit` or by
+  a signal, panics the kernel after the line
+  `vibeOS: init: pid 1 <how>` (`exited <n>`, `killed SIG<name>`, or
+  `killed SIG<name> addr=0x<hex>` for a fault; INVARIANTS.md §2.5)
 - `/bin/tests` (`user/src/bin/tests.rs`) — syscall / `EFAULT` /
   `fork`+`exec`+`wait` / fault-kill runner. Its cases, in `user/src/tests/`,
   run through `vibeos_user::utest::Runner`, which prints the ktest protocol

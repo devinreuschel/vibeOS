@@ -614,7 +614,11 @@ default action. The default action, the only one today, ends the process and pri
 `kill` drops a signal sent to pid 1 unless init has a handler for it, never `SIGKILL` or
 `SIGSTOP`, and none before ROADMAP §13.8 (`proc::kill_delivers`). When init exits, by `exit` or by a signal,
 the kernel panics with a line naming the exit status, or the signal and, for a fault, the faulting
-address, as Linux panics when init dies. Planned: ROADMAP §10.5 (F068). Not yet enforced: the
+address, as Linux panics when init dies: `finish_exit` prints `vibeOS: init: pid 1 exited <n>`,
+`killed SIG<name>` or `killed SIG<name> addr=0x<hex>` (CR2 for `#PF`, else the faulting RIP) before
+any teardown, then panics (F068). The line is the `failure` row `vibeOS: init: pid 1 <text>` of
+`tests/contract/markers.toml`, and `make test-e2e-init-fault` boots an initrd whose `/sbin/init`
+stores to `0x1000` and requires it. Not yet enforced: the
 entry-path windows of §5.10 (ROADMAP §10.6, F006, F007). Every ring-3 trap takes its signal from
 §5.2's table through `proc_init::sig_for_vec`, a ring-3 `#DB` included. An NMI dumps and halts on its IST stack; from
 ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
