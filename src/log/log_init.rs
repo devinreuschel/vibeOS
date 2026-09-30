@@ -55,6 +55,8 @@ pub(crate) fn ring_root() -> u64 {
     core::ptr::from_ref(&LOG).addr() as u64
 }
 
+/// This CPU's `EMITTING` and `STAGE` slot. IF=0 callers only, so the slot
+/// stays this CPU's while the caller uses it (DESIGN §2.9 rule 5).
 fn cpu_index() -> usize {
     per_cpu_init::try_current()
         .map(|c| c.cpu_id as usize)
@@ -78,10 +80,9 @@ pub fn timestamp() -> u64 {
     }
 }
 
+/// The record prefix's CPU: a hint, exact while IF=0.
 fn cpu_id() -> u8 {
-    per_cpu_init::try_current()
-        .map(|c| c.cpu_id as u8)
-        .unwrap_or(0)
+    crate::arch::cpu_id_hint() as u8
 }
 
 fn with_logger<R>(f: impl FnOnce(&mut Logger<RING_CAP, MSG_CAP>) -> R) -> R {
@@ -112,6 +113,7 @@ pub unsafe fn with_logger_unlocked<R>(f: impl FnOnce(&Logger<RING_CAP, MSG_CAP>)
     f(unsafe { &*LOG.as_ptr() })
 }
 
+/// Whether this CPU is inside `log_fmt`. IF=0 callers only.
 pub fn is_emitting() -> bool {
     EMITTING[cpu_index()].load(Ordering::Relaxed)
 }
@@ -223,13 +225,13 @@ pub fn init() {
 /// before a framebuffer exists. Caller holds IRQs off (`Serial::write_line`
 /// / `write_fmt`); `STAGE` is CPU-local and must not outlive that.
 pub fn capture_serial(bytes: &[u8]) {
+    let _irq = InterruptGuard::enter();
     if crate::serial::raw::HALTING.load(Ordering::Acquire) || is_emitting() {
         return;
     }
     if !allowed(Level::Info, runtime(), COMPILE_MAX) {
         return;
     }
-    let _irq = InterruptGuard::enter();
     let i = cpu_index();
     STAGE[i].with(|st| {
         for &b in bytes {

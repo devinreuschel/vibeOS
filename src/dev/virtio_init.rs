@@ -692,7 +692,7 @@ pub fn rng_request() -> Result<(), VirtioError> {
     } else {
         q.vq.add(payload, RNG_PAYLOAD as u32, virtio::DESC_F_WRITE)?;
     }
-    let old = q.vq.last_avail;
+    let old = q.vq.last_avail();
     q.vq.publish();
     q.qdma.sync_for_device::<Arch>();
     if q.vq.should_kick(old) {

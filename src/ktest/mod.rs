@@ -447,15 +447,18 @@ fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
     }
     // A test that needs interrupts off takes its own guard and drops it
     // before it returns.
+    // The depth is read with IF=0, so it is this CPU's (DESIGN §2.9 rule 5).
     let if_on = x86::interrupts_enabled();
-    let nest = per_cpu_init::irq_nest();
+    x86::cli();
+    let cpu = per_cpu_init::current();
+    let nest = cpu.irq_nest.load(Ordering::Relaxed);
     if !if_on || nest != 0 {
-        per_cpu_init::current().irq_nest.store(0, Ordering::Relaxed);
-        x86::sti();
+        cpu.irq_nest.store(0, Ordering::Relaxed);
         if !matches!(outcome, Outcome::Fail(_) | Outcome::FailFmt(_)) {
             outcome = crate::fail_fmt!("left IF={} irq_nest={}", u8::from(if_on), nest);
         }
     }
+    x86::sti();
     match outcome {
         Outcome::Ok => {
             crate::marker!("vibeOS: ktest: ok {name} ({us} us)");
@@ -750,6 +753,19 @@ pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
 }
 
 pub(crate) fn dying_entry() {}
+
+/// Set this CPU's `irq_nest` to `n` after an `arch::catch` longjmp skipped
+/// the guards that would have dropped it. The store runs with IF=0, so it
+/// lands on the slot of the CPU the caller runs on (DESIGN §2.9 rule 5),
+/// and IF is left as the caller had it.
+pub(crate) fn restore_irq_nest(n: u32) {
+    let if_on = x86::interrupts_enabled();
+    x86::cli();
+    per_cpu_init::current().irq_nest.store(n, Ordering::Relaxed);
+    if if_on {
+        x86::sti();
+    }
+}
 
 pub(crate) fn second_cpu() -> Option<u32> {
     let mask = per_cpu_init::online_mask();
