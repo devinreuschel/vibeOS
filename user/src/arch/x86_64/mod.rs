@@ -4,6 +4,7 @@
 //! stack). A system call takes its number in RAX and its arguments in RDI,
 //! RSI, RDX, R10, R8 and R9, returns in RAX, and clobbers RCX and R11.
 
+pub mod stat;
 pub mod sys;
 
 use core::arch::{asm, naked_asm};

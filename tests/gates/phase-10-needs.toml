@@ -1156,6 +1156,33 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
+# L1357
+[[box]]
+key = "`getdents64`, `fstat`, and `nanosleep`, which"
+needs = [
+  "every path syscall resolves through",  # L1326
+  "no padding reaches user memory",  # L1378
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1359
+[[box]]
+key = "an allocator over `brk`, so"
+needs = [
+  "a `no_std` Rust crate under",  # L1350
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1008
+[[box]]
+key = "`brk`, anonymous `mmap`/`munmap`, `getdents64`, `fstat`,"
+needs = [
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+  "`getdents64`, `fstat`, and `nanosleep`, which",  # L1357
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # L1344
 [[box]]
 key = "the E2 table gives each"

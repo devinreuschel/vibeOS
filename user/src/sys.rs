@@ -4,6 +4,7 @@
 //! `Errno` Linux returns as `-errno`. The calls themselves live in the `arch`
 //! module; the portable types are here.
 
+pub use crate::arch::stat::Stat;
 pub use crate::arch::sys::*;
 
 /// A Linux error number, as a failed system call returns it negated.

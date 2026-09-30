@@ -4,6 +4,7 @@ pub mod apic;
 pub mod desc;
 pub mod paging;
 pub mod pic;
+pub mod stat;
 pub mod syscall;
 pub mod trap;
 pub mod uart;

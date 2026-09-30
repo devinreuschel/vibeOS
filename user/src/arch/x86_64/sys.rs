@@ -23,6 +23,8 @@ pub mod nr {
     pub const SYS_OPEN: usize = 2;
     /// `close`.
     pub const SYS_CLOSE: usize = 3;
+    /// `fstat`.
+    pub const SYS_FSTAT: usize = 5;
     /// `lseek`.
     pub const SYS_LSEEK: usize = 8;
     /// `mmap`.
@@ -37,6 +39,8 @@ pub mod nr {
     pub const SYS_DUP: usize = 32;
     /// `dup2`.
     pub const SYS_DUP2: usize = 33;
+    /// `nanosleep`.
+    pub const SYS_NANOSLEEP: usize = 35;
     /// `getpid`.
     pub const SYS_GETPID: usize = 39;
     /// `fork`.
@@ -53,6 +57,10 @@ pub mod nr {
     pub const SYS_FCNTL: usize = 72;
     /// `getppid`.
     pub const SYS_GETPPID: usize = 110;
+    /// `reboot`.
+    pub const SYS_REBOOT: usize = 169;
+    /// `getdents64`.
+    pub const SYS_GETDENTS64: usize = 217;
     /// `psinfo`.
     pub const SYS_PSINFO: usize = 500;
 }
@@ -68,6 +76,8 @@ pub enum Sys {
     Open,
     /// `close`.
     Close,
+    /// `fstat`.
+    Fstat,
     /// `lseek`.
     Lseek,
     /// `mmap`.
@@ -82,6 +92,8 @@ pub enum Sys {
     Dup,
     /// `dup2`.
     Dup2,
+    /// `nanosleep`.
+    Nanosleep,
     /// `getpid`.
     Getpid,
     /// `fork`.
@@ -98,17 +110,22 @@ pub enum Sys {
     Fcntl,
     /// `getppid`.
     Getppid,
+    /// `reboot`.
+    Reboot,
+    /// `getdents64`.
+    Getdents64,
     /// `psinfo`.
     Psinfo,
 }
 
 impl Sys {
     /// Every call, in table order.
-    pub const ALL: [Sys; 20] = [
+    pub const ALL: [Sys; 24] = [
         Sys::Read,
         Sys::Write,
         Sys::Open,
         Sys::Close,
+        Sys::Fstat,
         Sys::Lseek,
         Sys::Mmap,
         Sys::Munmap,
@@ -116,6 +133,7 @@ impl Sys {
         Sys::SchedYield,
         Sys::Dup,
         Sys::Dup2,
+        Sys::Nanosleep,
         Sys::Getpid,
         Sys::Fork,
         Sys::Execve,
@@ -124,6 +142,8 @@ impl Sys {
         Sys::Kill,
         Sys::Fcntl,
         Sys::Getppid,
+        Sys::Reboot,
+        Sys::Getdents64,
         Sys::Psinfo,
     ];
 
@@ -134,6 +154,7 @@ impl Sys {
             b"write" => Some(Sys::Write),
             b"open" => Some(Sys::Open),
             b"close" => Some(Sys::Close),
+            b"fstat" => Some(Sys::Fstat),
             b"lseek" => Some(Sys::Lseek),
             b"mmap" => Some(Sys::Mmap),
             b"munmap" => Some(Sys::Munmap),
@@ -141,6 +162,7 @@ impl Sys {
             b"sched_yield" => Some(Sys::SchedYield),
             b"dup" => Some(Sys::Dup),
             b"dup2" => Some(Sys::Dup2),
+            b"nanosleep" => Some(Sys::Nanosleep),
             b"getpid" => Some(Sys::Getpid),
             b"fork" => Some(Sys::Fork),
             b"execve" => Some(Sys::Execve),
@@ -149,6 +171,8 @@ impl Sys {
             b"kill" => Some(Sys::Kill),
             b"fcntl" => Some(Sys::Fcntl),
             b"getppid" => Some(Sys::Getppid),
+            b"reboot" => Some(Sys::Reboot),
+            b"getdents64" => Some(Sys::Getdents64),
             b"psinfo" => Some(Sys::Psinfo),
             _ => None,
         }
@@ -161,6 +185,7 @@ impl Sys {
             Sys::Write => "write",
             Sys::Open => "open",
             Sys::Close => "close",
+            Sys::Fstat => "fstat",
             Sys::Lseek => "lseek",
             Sys::Mmap => "mmap",
             Sys::Munmap => "munmap",
@@ -168,6 +193,7 @@ impl Sys {
             Sys::SchedYield => "sched_yield",
             Sys::Dup => "dup",
             Sys::Dup2 => "dup2",
+            Sys::Nanosleep => "nanosleep",
             Sys::Getpid => "getpid",
             Sys::Fork => "fork",
             Sys::Execve => "execve",
@@ -176,6 +202,8 @@ impl Sys {
             Sys::Kill => "kill",
             Sys::Fcntl => "fcntl",
             Sys::Getppid => "getppid",
+            Sys::Reboot => "reboot",
+            Sys::Getdents64 => "getdents64",
             Sys::Psinfo => "psinfo",
         }
     }
@@ -187,6 +215,7 @@ impl Sys {
             Sys::Write => nr::SYS_WRITE,
             Sys::Open => nr::SYS_OPEN,
             Sys::Close => nr::SYS_CLOSE,
+            Sys::Fstat => nr::SYS_FSTAT,
             Sys::Lseek => nr::SYS_LSEEK,
             Sys::Mmap => nr::SYS_MMAP,
             Sys::Munmap => nr::SYS_MUNMAP,
@@ -194,6 +223,7 @@ impl Sys {
             Sys::SchedYield => nr::SYS_SCHED_YIELD,
             Sys::Dup => nr::SYS_DUP,
             Sys::Dup2 => nr::SYS_DUP2,
+            Sys::Nanosleep => nr::SYS_NANOSLEEP,
             Sys::Getpid => nr::SYS_GETPID,
             Sys::Fork => nr::SYS_FORK,
             Sys::Execve => nr::SYS_EXECVE,
@@ -202,6 +232,8 @@ impl Sys {
             Sys::Kill => nr::SYS_KILL,
             Sys::Fcntl => nr::SYS_FCNTL,
             Sys::Getppid => nr::SYS_GETPPID,
+            Sys::Reboot => nr::SYS_REBOOT,
+            Sys::Getdents64 => nr::SYS_GETDENTS64,
             Sys::Psinfo => nr::SYS_PSINFO,
         }
     }
@@ -213,6 +245,7 @@ impl Sys {
             Sys::Write => &["fd", "buf", "count"],
             Sys::Open => &["pathname", "flags", "mode"],
             Sys::Close => &["fd"],
+            Sys::Fstat => &["fd", "statbuf"],
             Sys::Lseek => &["fd", "offset", "whence"],
             Sys::Mmap => &["addr", "length", "prot", "flags", "fd", "offset"],
             Sys::Munmap => &["addr", "length"],
@@ -220,6 +253,7 @@ impl Sys {
             Sys::SchedYield => &[],
             Sys::Dup => &["oldfd"],
             Sys::Dup2 => &["oldfd", "newfd"],
+            Sys::Nanosleep => &["rqtp", "rmtp"],
             Sys::Getpid => &[],
             Sys::Fork => &[],
             Sys::Execve => &["pathname", "argv", "envp"],
@@ -228,6 +262,8 @@ impl Sys {
             Sys::Kill => &["pid", "sig"],
             Sys::Fcntl => &["fd", "cmd", "arg"],
             Sys::Getppid => &[],
+            Sys::Reboot => &["magic1", "magic2", "cmd", "arg"],
+            Sys::Getdents64 => &["fd", "dirent", "count"],
             Sys::Psinfo => &["buf", "len"],
         }
     }
@@ -270,6 +306,18 @@ pub fn close(fd: u32) -> Result<usize, Errno> {
     // SAFETY: the kernel's `syscall` convention; the kernel writes through
     // none of its pointers, established here by the table row.
     result(unsafe { syscall1(nr::SYS_CLOSE, fd as usize) })
+}
+
+/// `fstat(unsigned int fd, struct stat *statbuf)`: x86_64's 144-byte `struct stat`; see SYSCALL.md
+/// §3.1.
+///
+/// # Safety
+///
+/// The kernel writes 144 bytes through `statbuf`: no live Rust reference may cover them.
+pub unsafe fn fstat(fd: u32, statbuf: *mut c_void) -> Result<usize, Errno> {
+    // SAFETY: the kernel's `syscall` convention, and this fn's `# Safety`
+    // contract for what the call writes, established here by its caller.
+    result(unsafe { syscall2(nr::SYS_FSTAT, fd as usize, statbuf as usize) })
 }
 
 /// `lseek(unsigned int fd, off_t offset, unsigned int whence)`.
@@ -358,6 +406,14 @@ pub fn dup2(oldfd: u32, newfd: u32) -> Result<usize, Errno> {
     result(unsafe { syscall2(nr::SYS_DUP2, oldfd as usize, newfd as usize) })
 }
 
+/// `nanosleep(const struct __kernel_timespec *rqtp, struct __kernel_timespec *rmtp)`:
+/// `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1.
+pub fn nanosleep(rqtp: *const c_void, rmtp: *mut c_void) -> Result<usize, Errno> {
+    // SAFETY: the kernel's `syscall` convention; the kernel writes through
+    // none of its pointers, established here by the table row.
+    result(unsafe { syscall2(nr::SYS_NANOSLEEP, rqtp as usize, rmtp as usize) })
+}
+
 /// `getpid()`: `0` if the caller is not a process.
 pub fn getpid() -> Result<usize, Errno> {
     // SAFETY: the kernel's `syscall` convention; the kernel writes through
@@ -443,6 +499,41 @@ pub fn getppid() -> Result<usize, Errno> {
     // SAFETY: the kernel's `syscall` convention; the kernel writes through
     // none of its pointers, established here by the table row.
     result(unsafe { syscall0(nr::SYS_GETPPID) })
+}
+
+/// `reboot(int magic1, int magic2, unsigned int cmd, void *arg)`: power off and restart; see
+/// SYSCALL.md §3.1.
+pub fn reboot(magic1: i32, magic2: i32, cmd: u32, arg: *mut c_void) -> Result<usize, Errno> {
+    // SAFETY: the kernel's `syscall` convention; the kernel writes through
+    // none of its pointers, established here by the table row.
+    result(unsafe {
+        syscall4(
+            nr::SYS_REBOOT,
+            magic1 as isize as usize,
+            magic2 as isize as usize,
+            cmd as usize,
+            arg as usize,
+        )
+    })
+}
+
+/// `getdents64(unsigned int fd, struct linux_dirent64 *dirent, unsigned int count)`: at most 512
+/// bytes a call; see SYSCALL.md §3.1.
+///
+/// # Safety
+///
+/// The kernel writes up to `count` bytes through `dirent`: no live Rust reference may cover them.
+pub unsafe fn getdents64(fd: u32, dirent: *mut c_void, count: u32) -> Result<usize, Errno> {
+    // SAFETY: the kernel's `syscall` convention, and this fn's `# Safety`
+    // contract for what the call writes, established here by its caller.
+    result(unsafe {
+        syscall3(
+            nr::SYS_GETDENTS64,
+            fd as usize,
+            dirent as usize,
+            count as usize,
+        )
+    })
 }
 
 /// `psinfo(char *buf, size_t len)`: vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`).
