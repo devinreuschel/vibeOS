@@ -628,6 +628,8 @@ fn trace_record(rank: u8, count: u8) {
     }
     TRACE_RC[i].store(u16::from(rank) << 8 | u16::from(count), Ordering::Relaxed);
     TRACE_AT[i].store(
+        // The trace reads it back as a shared `&Location` only.
+        // PROVENANCE: nothing writes through the pointer.
         core::ptr::from_ref(Location::caller()).cast_mut(),
         Ordering::Relaxed,
     );

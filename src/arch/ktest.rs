@@ -490,6 +490,8 @@ pub(crate) fn test_cpu_hardening() -> Outcome {
                 snap.cr0.store(x86::read_cr0(), Ordering::SeqCst);
                 snap.cr4.store(x86::read_cr4(), Ordering::SeqCst);
             } else {
+                // `read_cr_remote` stores only to `snap`'s atomics, through `&`.
+                // PROVENANCE: nothing writes through the pointer.
                 ipi_init::call_cpu(cpu, read_cr_remote, &snap as *const _ as *mut (), true);
             }
         }
@@ -1355,7 +1357,10 @@ pub(crate) fn cpu_control_regs() -> Outcome {
         // `call_mask` skips the caller, so the local read and the calls
         // must see the same CPU: no migration in between.
         let _irq = x86::InterruptGuard::enter();
+        // `snap_cr` stores only to `snaps`' atomics, through `&`.
+        // PROVENANCE: nothing writes through the pointer.
         snap_cr(&snaps as *const _ as *mut ());
+        // PROVENANCE: nothing writes through the pointer, as above.
         ipi_init::call_mask(mask, snap_cr, &snaps as *const _ as *mut (), true);
     }
     for (c, s) in snaps.iter().enumerate() {

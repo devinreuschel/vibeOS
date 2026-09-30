@@ -341,12 +341,15 @@ impl Sched {
             _ => 0,
         };
         if cookie != 0 {
+            // The cookie's provenance was exposed from `&mut WaitQueue`
+            // (`WaitQueue::cookie`), so the rebuilt pointer may write.
+            let wq = core::ptr::with_exposed_provenance_mut::<WaitQueue>(cookie);
             // SAFETY: invariant: a Blocked thread's `wq` cookie is the address
             // of the `WaitQueue` it waits on, which lives in a lock's model
             // that is touched only under SCHED, held here, and stays put
             // while a thread waits on it; established by
             // `thread_init::Sched::begin_wait`.
-            unsafe { &mut *(cookie as *mut WaitQueue) }.remove(id);
+            unsafe { &mut *wq }.remove(id);
         }
     }
 }

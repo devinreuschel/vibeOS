@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use vibeos::addr_space::AddressSpace;
 use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
-use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
+use vibeos::desc::{KERNEL_CS, STAR_SYSRET, USER_CS_RPL, USER_DS_RPL};
 use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
@@ -17,7 +17,7 @@ use vibeos::thread::{Fxsave, Tcb};
 use vibeos::vectors;
 
 use crate::arch::current::Arch;
-use crate::arch::gdt;
+use crate::arch::gdt::{self, CpuTables};
 use crate::arch::idt::TrapFrame;
 use crate::cell::BootCell;
 use crate::per_cpu_init;
@@ -284,7 +284,7 @@ pub unsafe fn init_bsp() {
     crate::arch::idt::set_user_return_hook(fp_user_return);
     crate::thread_init::set_switch_hooks(on_switch, fpu_template);
     per_cpu_init::with_current(|cpu| {
-        cpu.tss = gdt::bsp_tss_ptr();
+        cpu.tables = gdt::bsp_tables().cast();
         let top = gdt::bsp_rsp0_top();
         cpu.fallback_rsp0 = top;
         cpu.kernel_rsp0 = top;
@@ -303,13 +303,14 @@ pub unsafe fn init_bsp() {
 /// AP: `tables` is this CPU's GDT/TSS. Call after `install_gs`.
 ///
 /// # Safety
-/// `tss` is this CPU's live TSS; `rsp0` is its kernel stack top.
-pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
+/// `tables` is this CPU's loaded `CpuTables`, live while it runs; `rsp0`
+/// is its kernel stack top.
+pub unsafe fn init_ap(tables: *const CpuTables, rsp0: u64) {
     // SAFETY: the AP loaded its GDT and `GS_BASE` before this call (this
     // fn's contract, `syscall_init::init_ap`).
     unsafe { init_cpu() };
     per_cpu_init::with_current(|cpu| {
-        cpu.tss = tss;
+        cpu.tables = tables.cast();
         cpu.fallback_rsp0 = rsp0;
         cpu.kernel_rsp0 = rsp0;
         cpu.remote
@@ -467,18 +468,24 @@ pub fn fpu_template() -> Fxsave {
 }
 
 /// Update TSS.RSP0 + `kernel_rsp0` for `tcb`. Every context switch.
-/// Caller already holds `&mut PerCpu` (IRQ-off).
-pub fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
+///
+/// # Safety
+/// `cpu` is this CPU's own `PerCpu`, held with IF=0 (`on_switch` holds it
+/// so), and `cpu.tables` is null or the `CpuTables` this CPU loaded, which
+/// `syscall_init::init_bsp` and `syscall_init::init_ap` establish.
+pub unsafe fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
     let top = match &tcb.stack {
         Some(s) => s.top().as_u64(),
         None => cpu.fallback_rsp0,
     };
     cpu.kernel_rsp0 = top;
-    if !cpu.tss.is_null() {
-        // SAFETY: invariant: a non-null `cpu.tss` is this CPU's own live TSS,
-        // which only this CPU writes, and the caller holds `&mut PerCpu`;
-        // established by `syscall_init::init_bsp` and `syscall_init::init_ap`.
-        unsafe { (*cpu.tss).set_rsp0(top) };
+    let tables = cpu.tables.cast::<CpuTables>();
+    if !tables.is_null() {
+        // SAFETY: `CpuTables::set_rsp0`'s contract: `tables` is the tables
+        // this CPU loaded and IF=0, both by this fn's `# Safety`,
+        // established by `syscall_init::init_bsp` and
+        // `syscall_init::init_ap` and by the caller's IF=0 stretch.
+        unsafe { (*tables).set_rsp0(top) };
     }
 }
 
@@ -535,7 +542,9 @@ pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     if !new.is_null() {
         // SAFETY: invariant: `new` is the live TCB this CPU is switching to,
         // and the caller holds this CPU's `&mut PerCpu` with IF=0, as
-        // `switch_cr3_for` requires; established by `thread_init::switch_now`.
+        // `set_rsp0_for` and `switch_cr3_for` require, with `cpu.tables` as
+        // `init_bsp` or `init_ap` set it; established by
+        // `thread_init::switch_now`.
         unsafe {
             set_rsp0_for(cpu, &*new);
             switch_cr3_for(cpu, &*new);
@@ -675,6 +684,8 @@ pub fn peek_user_as() -> Option<&'static AddressSpace> {
 
 pub fn set_user_as(space: &AddressSpace) {
     CURRENT_AS.store(
+        // `current_as` turns it back into a shared `&AddressSpace` only.
+        // PROVENANCE: nothing writes through the pointer.
         space as *const AddressSpace as *mut AddressSpace,
         Ordering::Release,
     );

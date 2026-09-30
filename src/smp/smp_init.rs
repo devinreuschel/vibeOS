@@ -402,8 +402,10 @@ fn start_one(a: ApAlloc, page: u64) {
         published,
         ..
     } = a;
-    // The `TryBox` keeps `CpuTables` in place when `tables` moves.
-    let tables_ptr = &*tables.tables as *const CpuTables as *mut CpuTables;
+    // The heap block `alloc_ap_tables` leaked keeps `CpuTables` in place
+    // when `tables` moves, and its pointer keeps the allocation's
+    // provenance.
+    let tables_ptr = tables.tables.as_ptr();
     // Room for one is reserved above, so this push allocates nothing and
     // cannot fail; it moves the tables before INIT, while no AP runs on
     // them.
@@ -464,10 +466,11 @@ extern "C" fn ap_entry() -> ! {
         let st = &mut *STARTING.as_ptr();
         (st.cpu, st.cpu_tables)
     };
-    // SAFETY: `tables_ptr` is this AP's `CpuTables`, boxed in the
-    // `ApTables` that `LIVE_TABLES` holds for good, and no other CPU touches
-    // it (`smp::smp_init::start_one`).
-    let tables = unsafe { &mut *tables_ptr };
+    // SAFETY: `tables_ptr` is this AP's `CpuTables`, the heap block of the
+    // `ApTables` that `LIVE_TABLES` holds for good, which `init` filled
+    // before INIT; this AP only reads it until `set_rsp0` writes through
+    // the `UnsafeCell`. Established at `smp::smp_init::start_one`.
+    let tables = unsafe { &*tables_ptr };
     // SAFETY: `cpu` is this AP's `PerCpu` slot (`per_cpu_init::slot_ptr`);
     // the BSP's `with_cpu` scope on it ended before INIT, and from here this
     // AP is its one owner (invariants I120 and I21, established at
@@ -483,9 +486,10 @@ extern "C" fn ap_entry() -> ! {
     // so no ISR reads `gs:[0]` first (invariant I4, established here).
     unsafe { per_cpu_init::install_gs(cpu) };
     // `init_ap` writes this CPU's CR0 and CR4 (`arch::cpu::init_control_regs`).
-    // SAFETY: `init_ap`'s contract; the TSS `tables.load` just loaded is this
-    // CPU's live TSS, and `rsp0` its kernel stack top; established here.
-    unsafe { crate::syscall_init::init_ap(tables.tss_ptr(), tables.rsp0()) };
+    // SAFETY: `init_ap`'s contract; `tables_ptr` is the `CpuTables`
+    // `tables.load` just loaded on this CPU, live while it runs, and `rsp0`
+    // its kernel stack top; established here.
+    unsafe { crate::syscall_init::init_ap(tables_ptr, tables.rsp0()) };
     // SAFETY: `idt::load`'s contract; the BSP filled the shared IDT at boot,
     // before `smp_init::init` runs, and the GDT above matches KERNEL_CS and
     // the IST TSS; established here.
