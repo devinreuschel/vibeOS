@@ -50,7 +50,13 @@ mkdir -p "$staging/LICENSES"
 cp "$root/LICENSE" "$staging/LICENSES/LICENSE"
 python3 "$root/scripts/gen_notices.py" --out "$staging/LICENSES/THIRD-PARTY-NOTICES.txt" \
     --limine-dir "$limine_dir"
-cp "$kernel_elf" "$staging/boot/vibeos"
+# The image's kernel is the ELF without its DWARF sections: Limine reads the
+# whole executable into one buffer before it loads it, and with 13 MB of debug
+# info a 128 MiB guest under current OVMF runs Limine out of memory
+# ("High memory allocator: Out of memory"). The kernel's own symbol table is
+# the loaded `.ksyms` section, which stays; build/kernels/*.elf keep their
+# debug info for gdb and guest cores.
+"${OBJCOPY:-llvm-objcopy}" --strip-debug "$kernel_elf" "$staging/boot/vibeos"
 # The initrd, which limine.conf's module_path: loads as a Limine module.
 cp "$initrd" "$staging/boot/initrd.fat"
 cp "$root/limine.conf" "$staging/boot/"

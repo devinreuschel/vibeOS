@@ -297,7 +297,7 @@ jobs:
             jobs: 1
           - arch: x86_64
             tier: e2e-2
-            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-e2e-panic-stop test-e2e-power
+            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power
             jobs: 1
           - arch: x86_64
             tier: in-guest-1
