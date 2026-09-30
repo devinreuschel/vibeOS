@@ -30,8 +30,10 @@ use crate::proc::elf::{EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, EM_X86_64, PHDR_SIZE,
 
 pub use crate::acpi::PhysMem;
 
+pub mod sig;
 #[cfg(any(test, feature = "std"))]
 pub mod synth;
+pub mod tables;
 pub mod walk;
 
 /// Frames a backtrace holds at most: the dump's own cap.
@@ -64,6 +66,8 @@ pub const NT_PRSTATUS: u32 = 1;
 const ELFCLASS32: u8 = 1;
 const SHDR_SIZE: usize = 64;
 const SYM_SIZE: usize = 24;
+/// The canonical kernel half: VAs a frame pointer may name.
+const KERNEL_HALF: u64 = 0xFFFF_8000_0000_0000;
 
 /// Why the tool refuses a core or an ELF, or cannot decode a table. Each
 /// has one message ([`VmError::as_str`]); the binary adds the values.
@@ -767,5 +771,7 @@ impl PhysMem for SliceCore<'_> {
     }
 }
 
-#[cfg(test)]
+// The tests build `static` kernel views, which need the `const`
+// constructors (C-ATOMICS).
+#[cfg(all(test, not(loom)))]
 mod tests;

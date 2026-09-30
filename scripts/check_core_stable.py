@@ -55,6 +55,8 @@ PARSERS: tuple[tuple[str, str, str], ...] = (
     ("log/vmcoreinfo.rs", "inner", ""),
     ("log/vmcore/mod.rs", "inner", ""),
     ("log/vmcore/walk.rs", "inner", ""),
+    ("log/vmcore/tables.rs", "inner", ""),
+    ("log/vmcore/sig.rs", "inner", ""),
 )
 # Rows whose attribute the sweep that owns the module adds (ROADMAP §10.1),
 # as `path` or `path::target`. A pending row whose attribute exists fails.

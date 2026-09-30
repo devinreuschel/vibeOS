@@ -96,7 +96,12 @@ pub const TARGETS: &[Target] = &[
     Target {
         name: "vmcore",
         run: vmcore,
-        covers: &["log/vmcore/mod.rs", "log/vmcore/walk.rs"],
+        covers: &[
+            "log/vmcore/mod.rs",
+            "log/vmcore/walk.rs",
+            "log/vmcore/tables.rs",
+            "log/vmcore/sig.rs",
+        ],
     },
     Target {
         name: "vmcoreinfo_parse",

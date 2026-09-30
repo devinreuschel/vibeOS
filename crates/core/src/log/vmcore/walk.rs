@@ -6,7 +6,11 @@
 
 use core::marker::PhantomData;
 
-use super::{ET_CORE, PAGE, PT_NOTE, Phdr, PhysMem, SHDR_SIZE, VmError, add, offset, put_all};
+use super::{
+    BT_MAX, ET_CORE, KERNEL_HALF, PAGE, PT_NOTE, Phdr, PhysMem, SHDR_SIZE, VmError, add, offset,
+    put_all,
+};
+use crate::log::backtrace::{self, StackRange};
 use crate::paging::{PageFlags, PageTable, VirtAddr, is_canonical};
 use crate::proc::elf::{EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, EM_X86_64, PHDR_SIZE, PT_LOAD};
 
@@ -226,6 +230,36 @@ impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
             self.walk_table(pa, level.saturating_sub(1), i, v, left, emit)?;
         }
         Ok(())
+    }
+
+    /// The frame-pointer backtrace from `rip`/`rbp`: at most [`BT_MAX`]
+    /// return addresses into `out`, `rip` first. The walk is the dump's
+    /// (`backtrace::walk`): `rbp` only rising, 8-aligned and inside the
+    /// canonical kernel half, a read the core cannot serve ending it as a
+    /// zero return does, and a return outside `in_text` ending it.
+    pub fn unwind(
+        &self,
+        rip: u64,
+        rbp: u64,
+        in_text: impl Fn(u64) -> bool,
+        out: &mut [u64; BT_MAX],
+    ) -> usize {
+        let half = [StackRange::new(KERNEL_HALF, u64::MAX)];
+        let mut n = 0usize;
+        backtrace::walk(
+            rip,
+            rbp,
+            &half,
+            in_text,
+            |a| self.u64_at(a).unwrap_or(0),
+            |f| {
+                if let Some(slot) = out.get_mut(n) {
+                    *slot = f;
+                    n = n.saturating_add(1);
+                }
+            },
+        );
+        n
     }
 }
 // ----------------------------------------------------------- virtual core
