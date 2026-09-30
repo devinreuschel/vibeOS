@@ -359,6 +359,14 @@ pub const fn forced(sig: u32) -> bool {
     sig == SIGKILL || sig == SIGSTOP
 }
 
+/// Whether `kill` delivers `sig` to `target` (ROADMAP §10.5, F068). Pid 1
+/// gets only a signal it has a handler for, as on Linux, and never
+/// `SIGKILL` or `SIGSTOP`: no process can kill or stop init. Any other
+/// process gets every signal.
+pub const fn kill_delivers(target: u32, sig: u32, has_handler: bool) -> bool {
+    target != INIT_PID || (has_handler && !forced(sig))
+}
+
 pub fn sig_name(sig: u32) -> &'static str {
     match sig {
         SIGHUP => "HUP",
@@ -479,6 +487,20 @@ mod tests {
         let _ = O_CLOEXEC;
         assert_eq!(fd_flags_from_open(O_CLOEXEC), FD_CLOEXEC);
         assert_eq!(fd_flags_from_open(0), 0);
+    }
+
+    /// Pid 1 drops every signal it has no handler for, and `SIGKILL` and
+    /// `SIGSTOP` even with one; pid 2 gets them all (F068).
+    #[test]
+    fn init_signal_filter() {
+        for sig in 1..=31 {
+            assert!(!kill_delivers(INIT_PID, sig, false), "sig {sig} to pid 1");
+            assert!(kill_delivers(2, sig, false), "sig {sig} to pid 2");
+            assert!(kill_delivers(2, sig, true), "sig {sig} to pid 2, handled");
+        }
+        assert!(!kill_delivers(INIT_PID, SIGKILL, true));
+        assert!(!kill_delivers(INIT_PID, SIGSTOP, true));
+        assert!(kill_delivers(INIT_PID, SIGTERM, true));
     }
 
     #[test]

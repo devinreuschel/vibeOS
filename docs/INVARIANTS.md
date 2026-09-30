@@ -610,7 +610,9 @@ the signal §5.2 gives the vector (§11.5 the exception class, on aarch64), and 
 running. The signal's action then applies, as on Linux: from ROADMAP §13.8 a handler may catch it,
 from §17.4 a tracer sees it first, and a fault signal the process blocks or ignores still takes its
 default action. The default action, the only one today, ends the process and prints
-`user: pid N killed SIG<name>`. Pid 1 is the exception. When init exits, by `exit` or by a signal,
+`user: pid N killed SIG<name>`. Pid 1 is the exception. No process can kill or stop init:
+`kill` drops a signal sent to pid 1 unless init has a handler for it, never `SIGKILL` or
+`SIGSTOP`, and none before ROADMAP §13.8 (`proc::kill_delivers`). When init exits, by `exit` or by a signal,
 the kernel panics with a line naming the exit status, or the signal and, for a fault, the faulting
 address, as Linux panics when init dies. Planned: ROADMAP §10.5 (F068). Not yet enforced: the
 entry-path windows of §5.10 (ROADMAP §10.6, F006, F007). Every ring-3 trap takes its signal from

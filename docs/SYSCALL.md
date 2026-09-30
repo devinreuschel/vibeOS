@@ -329,11 +329,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   signals, for 0, the caller's process group, for -1, every process the
   caller may signal except pid 1 and the caller, and for any other negative
   `pid`, process group `-pid` (F149; ROADMAP §13.7). A `pid` that names a
-  zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A
-  default-terminate or default-stop signal to pid 1 kills or stops init,
-  after which an orphan has no reaper and is freed when it exits (`exit`
-  below); Linux delivers to init only the signals it handles (F068; ROADMAP
-  §10.5)
+  zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A signal sent
+  to pid 1 is dropped, and `kill` returns 0, unless init has a handler for
+  it, as Linux does; none can exist before ROADMAP §13.8, and never for
+  `SIGKILL` or `SIGSTOP` (F068)
 - `exit`: the caller's children go to the reaper `proc::reaper_for` picks:
   pid 1 while init is live or stopped; otherwise none, so a child reads
   `getppid()` 0 and is freed when it exits (a zombie child at once), as in

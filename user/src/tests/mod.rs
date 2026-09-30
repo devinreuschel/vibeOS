@@ -7,6 +7,7 @@ use core::sync::atomic::AtomicUsize;
 use vibeos_user::utest;
 
 mod console;
+mod pid1;
 mod process;
 mod syscalls;
 
@@ -22,4 +23,5 @@ pub const SUITES: &[fn(&mut utest::Runner)] = &[
     syscalls::run, // write, getpid, dup
     process::run,  // fork, execve, wait4, a fault, the table's limit
     console::run,  // forged kernel lines
+    pid1::run,     // init cannot be killed or stopped
 ];

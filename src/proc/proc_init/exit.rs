@@ -198,6 +198,12 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
             if p.state == ProcState::Unused || p.state == ProcState::Zombie {
                 return Err(KError::Srch);
             }
+            // `false`: no process has a handler until ROADMAP §13.8's
+            // `rt_sigaction`, so a signal to init is dropped here, with no
+            // pending bit, state change or wake, and `kill` returns 0.
+            if !kill_delivers(target, sig, false) {
+                return Ok(false);
+            }
             match default_action(sig) {
                 SigAct::Ign => {
                     if sig == SIGCHLD {
@@ -223,13 +229,13 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
                     s.wake_all(&mut p.stop_wq);
                 }
             }
-            Ok(())
+            Ok(true)
         })
     });
     match r {
         Err(e) => Err(e),
-        Ok(()) => {
-            if target == self_pid && default_action(sig) == SigAct::Term {
+        Ok(delivered) => {
+            if delivered && target == self_pid && default_action(sig) == SigAct::Term {
                 finish_exit(wait_signaled(sig), true);
             }
             Ok(0)
