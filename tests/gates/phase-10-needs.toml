@@ -1190,3 +1190,19 @@ needs = [
   "`vibeos.ktest=<glob>` runs only the matching",  # L1228
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1509
+[[box]]
+key = "a device's resources are claimed"
+needs = [
+  "driver and volume state as",  # L1340
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L805
+[[box]]
+key = "resource tracking so two drivers"
+needs = [
+  "a device's resources are claimed",  # L1509
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
