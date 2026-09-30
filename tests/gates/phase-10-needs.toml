@@ -150,8 +150,14 @@ why = "claim: the PerCpu impl's SAFETY line names the rule the F039 split establ
 
 [[box]]
 key = "allocated at init from a `limits` module; a cap is a constant"
-needs = ["one `limits` module in `vibeos-core` names every"]
-why = "claim: the tables take their sizes from the limits constants"
+needs = [
+  "one `limits` module in `vibeos-core` names every",
+  "the cross-CPU wake inbox holds",  # L1317
+  "a full thread table is",  # L1318
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+  "`spawn_inner` returns `Result` instead of",  # L1475
+]
+why = "claim: the tables take their sizes from the limits constants; claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
 [[box]]
 key = "exec returns `ENOMEM` for an image whose page-rounded"
@@ -1316,5 +1322,25 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (ext
 key = "the other safe functions that"
 needs = [
   "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1298
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "on a timeout, or on"
+needs = [
+  "no workflow expands a `${{",  # L1204
+  "a kernel command line: `cmdline:`",  # L1227
+  "the expect-panic e2e matches markers",  # L1258
+  "the harness reads QEMU's QMP",  # L1411
+  "a hostlib core tool reads",  # L1412
+  "one VMCOREINFO note, in Linux's",  # L1414
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+[[box]]
+key = "the harness reads QEMU's QMP"
+needs = [
+  "the expect-panic e2e matches markers",  # L1258
+  "on a timeout, or on",  # L1410
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

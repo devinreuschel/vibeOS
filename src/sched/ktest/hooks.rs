@@ -13,7 +13,7 @@ use crate::work_init;
 /// thread in that slot would run where it is dequeued instead of moving.
 pub(crate) fn set_requeue_next_cpu(on: bool) {
     if on {
-        for a in ARRIVED.iter() {
+        for a in ARRIVED.try_get().map_or(&[][..], |v| &v[..]) {
             a.store(false, Ordering::Relaxed);
         }
     }

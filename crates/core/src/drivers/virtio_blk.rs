@@ -63,7 +63,7 @@ pub const CFG_MAX_DISCARD_SEG: u16 = 40;
 pub const CFG_DISCARD_ALIGN: u16 = 44;
 
 /// Disks past `vdz` get no name.
-pub const MAX_DISKS: u8 = 26;
+pub use crate::limits::MAX_VIRTIO_DISKS as MAX_DISKS;
 
 /// The name of the `index`th virtio-blk disk in bind order, written into
 /// `out`: `vda` for 0 up to `vdz` for 25, `None` from 26 on.

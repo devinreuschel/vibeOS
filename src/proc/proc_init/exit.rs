@@ -10,17 +10,9 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
     if pid == 0 {
         thread_init::exit_current();
     }
-    // Close the files before the exit is published below (`Zombie`, the
-    // waiter's wake): a waiter that reads the status finds them closed, as
-    // Linux closes a task's files before it notifies its parent.
-    let mut fds = with_table(|t| {
-        t.get_mut(pid).map_or(FdTable::empty(), |p| {
-            let fds = p.fds;
-            p.fds = FdTable::empty();
-            fds
-        })
-    });
-    close_all_fds(&mut fds);
+    // The files first, in batches off the table lock, while the slot is
+    // still this process's: once it is a zombie its parent may free it.
+    close_all_fds(pid, "exit");
     let (old, ppid, tid) = thread_init::with_sched(|s| {
         table_locked(|t| {
             if reparent_children(s, t, pid)
@@ -82,8 +74,7 @@ fn reparent_children(s: &mut Sched, t: &mut Table, dead: u32) -> bool {
     let reaper = reaper_for(init);
     let mut adopted = false;
     let mut i = 0usize;
-    while i < MAX_PROCS {
-        let p = &mut t.procs[i];
+    while let Some(p) = t.procs.get_mut(i) {
         if p.state != ProcState::Unused && p.ppid == dead && p.pid != dead {
             match reaper {
                 Some(r) => {
@@ -163,27 +154,18 @@ enum WaitAct {
 }
 
 fn find_zombie(t: &Table, parent: u32, want: i64) -> Option<(u32, u32, ThreadId)> {
-    let mut i = 0usize;
-    while i < MAX_PROCS {
-        let p = &t.procs[i];
-        if p.state == ProcState::Zombie && p.ppid == parent && (want < 0 || want == p.pid as i64) {
-            return Some((p.pid, p.wait_status, p.tid));
-        }
-        i += 1;
-    }
-    None
+    t.procs
+        .iter()
+        .find(|p| {
+            p.state == ProcState::Zombie && p.ppid == parent && (want < 0 || want == p.pid as i64)
+        })
+        .map(|p| (p.pid, p.wait_status, p.tid))
 }
 
 fn has_child(t: &Table, parent: u32, want: i64) -> bool {
-    let mut i = 0usize;
-    while i < MAX_PROCS {
-        let p = &t.procs[i];
-        if p.state != ProcState::Unused && p.ppid == parent && (want < 0 || want == p.pid as i64) {
-            return true;
-        }
-        i += 1;
-    }
-    false
+    t.procs.iter().any(|p| {
+        p.state != ProcState::Unused && p.ppid == parent && (want < 0 || want == p.pid as i64)
+    })
 }
 
 pub(super) fn reap_zombie(s: &mut Sched, t: &mut Table, pid: u32) {
@@ -264,25 +246,50 @@ pub(super) fn sys_psinfo(buf: u64, len: usize) -> SysResult {
     }
 }
 
+/// Processes `format_ps` copies out of the table per lock hold.
+const PS_CHUNK: usize = 16;
+
 fn format_ps(out: &mut [u8]) -> usize {
-    let snap = with_table(|t| {
-        let mut s = [(0u32, 0u32, ProcState::Unused, ""); MAX_PROCS];
-        let mut n = 0usize;
-        let mut i = 0usize;
-        while i < MAX_PROCS {
-            let p = &t.procs[i];
-            if p.state != ProcState::Unused {
-                s[n] = (p.pid, p.ppid, p.state, p.name);
-                n += 1;
-            }
-            i += 1;
-        }
-        (s, n)
-    });
     // One `<pid> <ppid> <state> <name>\n` line per process, whole lines
     // only, written with `fmt_util` into `out` (no allocation, DESIGN §4.4).
+    // The table is read a chunk at a time, each under its own lock hold.
     let mut w = 0usize;
-    for &(pid, ppid, st, name) in snap.0.iter().take(snap.1) {
+    let mut start = 0usize;
+    loop {
+        let (snap, n, next) = with_table(|t| {
+            let mut s = [(0u32, 0u32, ProcState::Unused, ""); PS_CHUNK];
+            let mut n = 0usize;
+            let mut i = start;
+            while n < s.len() {
+                let Some(p) = t.procs.get(i) else {
+                    break;
+                };
+                if p.state != ProcState::Unused
+                    && let Some(e) = s.get_mut(n)
+                {
+                    *e = (p.pid, p.ppid, p.state, p.name);
+                    n += 1;
+                }
+                i += 1;
+            }
+            (s, n, i)
+        });
+        let done = write_ps_lines(out, &mut w, snap.get(..n).unwrap_or(&[]));
+        if n < snap.len() || !done {
+            return w;
+        }
+        start = next;
+    }
+}
+
+/// Append one line per entry of `snap` to `out` at `*w`, whole lines only.
+/// True when every line fit.
+fn write_ps_lines(
+    out: &mut [u8],
+    w: &mut usize,
+    snap: &[(u32, u32, ProcState, &'static str)],
+) -> bool {
+    for &(pid, ppid, st, name) in snap {
         let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
         let parts: [&[u8]; 8] = [
             fmt_util::write_dec(u64::from(pid), &mut a),
@@ -295,17 +302,17 @@ fn format_ps(out: &mut [u8]) -> usize {
             b"\n",
         ];
         let len = parts.iter().map(|p| p.len()).sum::<usize>();
-        let Some(mut dst) = out.get_mut(w..).and_then(|r| r.get_mut(..len)) else {
-            break;
+        let Some(mut dst) = out.get_mut(*w..).and_then(|r| r.get_mut(..len)) else {
+            return false;
         };
         for p in parts {
             let (head, rest) = dst.split_at_mut(p.len());
             head.copy_from_slice(p);
             dst = rest;
         }
-        w += len;
+        *w += len;
     }
-    w
+    true
 }
 
 pub fn write_ps(w: &mut impl Write) {

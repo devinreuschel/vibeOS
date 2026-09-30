@@ -684,7 +684,7 @@ const BUSY_NS: u64 = 2_000_000_000;
 const SLOW_NS: u64 = 1_000_000_000;
 
 /// Rounds one shooter runs at most.
-const MAX_ROUNDS: u32 = 10_000;
+const ROUND_LIMIT: u32 = 10_000;
 
 /// Set while the registry dumps the log ring and spins.
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -713,7 +713,7 @@ fn shooter() {
     STARTED.fetch_add(1, Ordering::AcqRel);
     let mut overlapped = false;
     let mut rounds = 0u32;
-    while !STOP.load(Ordering::Acquire) && rounds < MAX_ROUNDS {
+    while !STOP.load(Ordering::Acquire) && rounds < ROUND_LIMIT {
         rounds += 1;
         let Some(f) = alloc_frames_owned(0) else {
             ERRS.fetch_add(1, Ordering::AcqRel);

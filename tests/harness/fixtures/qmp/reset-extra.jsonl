@@ -1,0 +1,8 @@
+{"argv": ["qemu-system-x86_64", "-machine", "pc", "-accel", "tcg", "-bios", "<64 KiB of hlt>", "-m", "32M", "-display", "none", "-nodefaults", "-device", "pvpanic", "-action", "panic=pause", "-S", "-qmp", "unix:<sock>,server=on,wait=off", "-qtest", "unix:<sock>,server=on,wait=off"], "query-version": {"package": "Debian 1:8.2.2+ds-0ubuntu1.18", "qemu": {"major": 8, "micro": 2, "minor": 2}}, "script": ["qmp cont", "qtest outb 0x505 0x1", "qmp cont", "qtest outb 0xcf9 0x6", "qtest outb 0xcf9 0x6", "qmp quit"]}
+{"event": "RESUME"}
+{"data": {"action": "pause"}, "event": "GUEST_PANICKED"}
+{"event": "STOP"}
+{"event": "RESUME"}
+{"data": {"guest": true, "reason": "guest-reset"}, "event": "RESET"}
+{"data": {"guest": true, "reason": "guest-reset"}, "event": "RESET"}
+{"data": {"guest": false, "reason": "host-qmp-quit"}, "event": "SHUTDOWN"}

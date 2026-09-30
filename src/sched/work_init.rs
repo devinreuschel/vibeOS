@@ -10,6 +10,7 @@ use vibeos::ipi::MAX_IPI_CPUS;
 use vibeos::kalloc::{DeferList, Deferred};
 use vibeos::lock::RANK_SCHED;
 use vibeos::sched::FAR_DEADLINE;
+use vibeos::thread::ThreadId;
 use vibeos::wait::WaitQueue;
 use vibeos::work::{WorkClass, WorkItem, WorkQueues};
 
@@ -17,7 +18,7 @@ use crate::irq_init;
 use crate::kva_init;
 use crate::per_cpu_init;
 use crate::sync_init::{self, SpinMutex};
-use crate::thread_init;
+use crate::thread_init::{self, SpawnError};
 
 struct State {
     q: WorkQueues,
@@ -208,22 +209,45 @@ fn worker() {
     }
 }
 
-/// One worker per online CPU, then the threaded-IRQ bottom half.
+/// A CPU's per-CPU kernel threads, parked until the CPU is online: its
+/// workqueue worker.
+pub(crate) struct CpuWorkers {
+    wq: ThreadId,
+}
+
+/// Spawn CPU `cpu`'s workers pinned and parked ([`thread_init::spawn_parked_on`]):
+/// AP bring-up makes them before it starts the CPU, so a full thread table
+/// leaves the CPU offline instead of online with no worker (ROADMAP §10.4,
+/// F037). On failure nothing is left behind.
+pub(crate) fn spawn_cpu_workers(cpu: u32) -> Result<CpuWorkers, SpawnError> {
+    let wq = thread_init::spawn_parked_on("wq", worker, cpu)?;
+    Ok(CpuWorkers { wq: wq.id() })
+}
+
+/// Make `w`'s workers runnable, once their CPU is online.
+pub(crate) fn start_cpu_workers(w: &CpuWorkers) {
+    thread_init::make_ready(w.wq);
+}
+
+/// Retire workers [`spawn_cpu_workers`] made for a CPU that did not come
+/// up. None of them ever ran, so each slot is free again.
+pub(crate) fn abandon_cpu_workers(w: CpuWorkers) {
+    if let Some(stack) = thread_init::abandon_unstarted(w.wq, false) {
+        thread_init::return_stack(stack);
+    }
+}
+
+/// CPU 0's workers, then the threaded-IRQ bottom half. Each AP's workers
+/// come up with it (`smp_init::alloc_ap_resources`).
 pub fn init() {
     thread_init::set_kick_hook(kick_dead_stacks);
-    let n = per_cpu_init::cpu_count().max(1);
-    let mut cpu = 0u32;
-    while cpu < n as u32 {
-        if per_cpu_init::is_online(cpu)
-            && let Err(e) = thread_init::spawn_on("wq", worker, cpu)
-        {
-            crate::klog!(
-                vibeos::log::Level::Error,
-                "work: cpu{cpu} worker not started: {}",
-                e.as_str()
-            );
-        }
-        cpu += 1;
+    match spawn_cpu_workers(0) {
+        Ok(w) => start_cpu_workers(&w),
+        Err(e) => crate::klog!(
+            vibeos::log::Level::Error,
+            "work: cpu0 worker not started: {}",
+            e.as_str()
+        ),
     }
     irq_init::start_threaded();
     LIVE.store(true, Ordering::Release);
