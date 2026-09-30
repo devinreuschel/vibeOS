@@ -368,16 +368,6 @@ pub fn route_intx(
     Ok(())
 }
 
-pub fn mask_intx(bdf: Bdf, disable: bool) {
-    let mut cmd = pci_init::cfg_read16(bdf, pci::CFG_COMMAND);
-    cmd = if disable {
-        pci::with_intx_disabled(cmd)
-    } else {
-        cmd & !pci::CMD_INTX_DISABLE
-    };
-    pci_init::cfg_write_command(bdf, cmd);
-}
-
 #[expect(
     dead_code,
     reason = "ROADMAP §6.3 MSI configuration; no driver arms MSI yet"
@@ -386,7 +376,6 @@ pub fn enable_msi(bdf: Bdf, cap: u8, vector: u8, apic_id: u8) -> Result<(), IrqE
     if !in_pool(vector) {
         return Err(IrqError::BadVector);
     }
-    pci_init::enable_mem_master(bdf);
     let mut hw = pci_init::HwCfg;
     let msi = pci::read_msi_cap(&mut hw, bdf, cap);
     pci::write_msi_message(
@@ -396,7 +385,6 @@ pub fn enable_msi(bdf: Bdf, cap: u8, vector: u8, apic_id: u8) -> Result<(), IrqE
         msi_message_addr(apic_id),
         msi_message_data(vector) as u16,
     );
-    mask_intx(bdf, true);
     pci::set_msi_enable(&mut hw, bdf, cap, true);
     if let Some(i) = handler_slot(vector) {
         with_irq(|s| s.routes[i] = Route::Msi);
@@ -448,6 +436,9 @@ unsafe fn write_msix_entry(table_va: u64, index: u16, e: MsixEntry) {
     }
 }
 
+/// Program MSI-X entry `table_index` for `vector` on `apic_id` and enable
+/// MSI-X. It writes no `COMMAND` bit; the driver sets memory decode, bus
+/// mastering and INTx disable (DEVICES.md §12.3).
 pub fn enable_msix(
     dev: &Device,
     table_index: u16,
@@ -468,7 +459,6 @@ pub fn enable_msix(
     let Some(table) = msix_table_va(dev, &cap, table_index) else {
         return Err(IrqError::NoRoute);
     };
-    pci_init::enable_mem_master(dev.addr);
     // SAFETY: invariant I228, established by `irq::irq_init::msix_table_va`:
     // it returned `table` for `table_index`, so the entry lies inside the
     // mapped BAR.
@@ -479,7 +469,6 @@ pub fn enable_msix(
             MsixEntry::for_lapic(vector, apic_id, false),
         );
     }
-    mask_intx(dev.addr, true);
     pci::set_msix_enable(&mut hw, dev.addr, cap_off, true, false);
     if let Some(i) = handler_slot(vector) {
         with_irq(|s| s.routes[i] = Route::Msix);
