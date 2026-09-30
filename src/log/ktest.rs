@@ -608,9 +608,9 @@ pub(crate) fn syscall_walk_probe(user_rbp: u64) {
         return;
     }
     // IF=0: the known stacks read this CPU's per-CPU state.
-    let _irq = crate::x86::InterruptGuard::enter();
-    let rip = crate::x86::read_rip();
-    let rbp = crate::x86::read_rbp();
+    let _irq = crate::arch::current::InterruptGuard::enter();
+    let rip = crate::arch::current::instruction_pointer();
+    let rbp = crate::arch::current::frame_pointer();
     let mut last = 0u64;
     let mut low = false;
     let (n, end) = crate::panic::walk_known(rip, rbp, |a| {

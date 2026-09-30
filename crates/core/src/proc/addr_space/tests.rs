@@ -1,5 +1,6 @@
 use super::*;
-use crate::paging::{PTE_ADDR_MASK, UserFreeStats, physmap_flags};
+use crate::arch::stub::Arch;
+use crate::paging::{UserFreeStats, physmap_flags};
 use crate::pmm::testing::Pool;
 
 /// Frames the pool has handed out and not had back.
@@ -9,7 +10,7 @@ fn used(pool: &Pool) -> usize {
 }
 
 /// The root's token moves into the mapper, which is never torn down.
-fn kernel_mapper(pool: &mut Pool) -> Mapper {
+fn kernel_mapper(pool: &mut Pool) -> Mapper<Arch> {
     let root = PhysAddr(pool.alloc_frame().unwrap().into_entry());
     // SAFETY: `root` is an owned frame fresh from `pool`, zeroed on the next line before any walk,
     // and `pool.hhdm()` maps every pool frame writable; established here.
@@ -114,8 +115,8 @@ fn map_unmap_teardown_balances_frames() {
     // through its HHDM; established here.
     let mut aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
     assert_eq!(
-        aspace.mapper().pml4_entry(KERNEL_PML4_FIRST),
-        kernel.pml4_entry(KERNEL_PML4_FIRST)
+        aspace.mapper().pml4_entry(Arch::KERNEL_ROOT_FIRST),
+        kernel.pml4_entry(Arch::KERNEL_ROOT_FIRST)
     );
     let user_va = 0x0000_0000_0040_0000u64;
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
@@ -197,7 +198,6 @@ fn user_ptr_helpers() {
     // from `pool`; established here.
     unsafe { aspace.teardown_pool(&mut pool) };
     assert_eq!(used(&pool), before);
-    let _ = PTE_ADDR_MASK;
     let _ = UserFreeStats {
         leaves: 0,
         tables: 0,
@@ -263,8 +263,8 @@ fn kernel_half_not_owned() {
     // through its HHDM; established here.
     let mut aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
     assert_eq!(
-        aspace.mapper().pml4_entry(256) & PTE_ADDR_MASK,
-        kernel.pml4_entry(256) & PTE_ADDR_MASK
+        Arch::entry_phys(aspace.mapper().pml4_entry(256)),
+        Arch::entry_phys(kernel.pml4_entry(256))
     );
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
@@ -572,7 +572,7 @@ fn addr_space_brk_grow_shrink() {
     assert_eq!(a.brk_plan(USER_MAP_END + 1), BrkPlan::Current);
     assert_eq!(a.brk_plan(b), BrkPlan::SamePage);
     // Grow into the first page, then within it, then across two more.
-    let grow = |a: &mut AddressSpace, pool: &mut Pool, want: u64| match a.brk_plan(want) {
+    let grow = |a: &mut AddressSpace<Arch>, pool: &mut Pool, want: u64| match a.brk_plan(want) {
         BrkPlan::Grow { va, len } => {
             a.heap_grow_check(va, len).unwrap();
             // SAFETY: the heap range `brk_plan` returned lies clear of every mapped page, and
@@ -784,7 +784,7 @@ fn mmap_request_decodes_flags() {
 }
 
 /// Record a `PROT_NONE` reservation, as the kernel's `mmap` does.
-fn reserve(a: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
+fn reserve(a: &mut AddressSpace<Arch>, va: u64, len: u64) -> Result<(), AsError> {
     a.check_new_region(va, len)?;
     a.insert_region(Region {
         start: va,

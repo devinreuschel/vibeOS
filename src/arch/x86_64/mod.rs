@@ -1,6 +1,7 @@
 //! The x86_64 port: its kernel half (DESIGN §1.3).
 
 pub(crate) mod apic_init;
+mod boot;
 #[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,
@@ -18,6 +19,8 @@ pub mod cpu;
 pub mod gdt;
 pub mod gs;
 pub mod idt;
+mod ipi;
+pub(crate) mod mmu;
 pub mod percpu;
 pub mod pic;
 mod trampoline;
@@ -45,9 +48,10 @@ use core::sync::atomic::{compiler_fence, fence};
 
 use vibeos::arch::x86_64::trap::Abi;
 use vibeos::arch::{
-    Barriers, ContextSwitch, CycleCounter, InterruptMask, MmioWidth, PerCpuBase, SyscallAbi,
+    Barriers, ContextSwitch, CycleCounter, InterruptMask, MmioWidth, PerCpuBase, Port, SyscallAbi,
 };
-use vibeos::atomic::statics::{AtomicU64, Ordering};
+use vibeos::atomic::statics::{AtomicBool, AtomicU64, Ordering};
+use vibeos::proc::syscall_table::{Handlers, NrTable, SysResult};
 use vibeos::sched::thread::{CpuContext, Tcb, apply_if_on_resume, prepare_thread};
 
 /// The x86_64 port's hardware half: the seam traits (PORTABILITY §11.1) on
@@ -57,11 +61,53 @@ pub struct Arch;
 /// TSC ticks per millisecond, 0 until `time_init`'s calibration publishes it.
 static TSC_PER_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Whether [`CycleCounter::now`] reads with `rdtscp`, which `time_init`
+/// sets once it has seen the CPU has it.
+static USE_RDTSCP: AtomicBool = AtomicBool::new(false);
+
 /// Publish the calibrated TSC rate for [`CycleCounter::freq_hz`]. The
 /// calibration in `time_init` calls it once.
 pub fn publish_tsc_per_ms(v: u64) {
     // Release: pairs with the Acquire load in `freq_hz`.
     TSC_PER_MS.store(v, Ordering::Release);
+}
+
+/// Make [`CycleCounter::now`] read with `rdtscp` from here on; `time_init`
+/// calls it once, when [`has_rdtscp`] holds.
+pub fn publish_rdtscp(on: bool) {
+    // Relaxed: the flag only picks which serialized read of the same
+    // counter runs; either is right, so it orders nothing.
+    USE_RDTSCP.store(on, Ordering::Relaxed);
+}
+
+/// CPUID.8000_0001H:EDX[27]: the CPU has `rdtscp`.
+pub fn has_rdtscp() -> bool {
+    let (max, _, _, _) = cpu::cpuid(0x8000_0000, 0);
+    if max < 0x8000_0001 {
+        return false;
+    }
+    let (_, _, _, edx) = cpu::cpuid(0x8000_0001, 0);
+    edx & (1 << 27) != 0
+}
+
+/// CPUID.8000_0007H:EDX[8]: the TSC runs at a constant rate in every
+/// state.
+pub fn invariant_tsc() -> bool {
+    let (max, _, _, _) = cpu::cpuid(0x8000_0000, 0);
+    if max < 0x8000_0007 {
+        return false;
+    }
+    let (_, _, _, edx) = cpu::cpuid(0x8000_0007, 0);
+    edx & (1 << 8) != 0
+}
+
+/// A serialized TSC read: `rdtscp` when `use_rdtscp`, else `lfence; rdtsc`.
+pub fn rdtsc_ser(use_rdtscp: bool) -> u64 {
+    if use_rdtscp {
+        cpu::rdtscp()
+    } else {
+        cpu::lfence_rdtsc()
+    }
 }
 
 impl InterruptMask for Arch {
@@ -87,7 +133,7 @@ impl InterruptMask for Arch {
 impl CycleCounter for Arch {
     #[inline]
     fn now() -> u64 {
-        cpu::lfence_rdtsc()
+        rdtsc_ser(USE_RDTSCP.load(Ordering::Relaxed))
     }
 
     #[inline]
@@ -213,6 +259,9 @@ impl PerCpuBase for Arch {
     }
 }
 
+/// Every seam trait, which `arch::current`'s `assert_port` checks.
+impl Port for Arch {}
+
 /// Forwarded to the pure half's `Abi`, where the x86_64 syscall ABI lives.
 impl SyscallAbi for Arch {
     type Frame = <Abi as SyscallAbi>::Frame;
@@ -255,5 +304,15 @@ impl SyscallAbi for Arch {
     #[inline]
     fn restart(f: &mut Self::Frame) {
         Abi::restart(f);
+    }
+
+    #[inline]
+    fn table() -> &'static NrTable {
+        Abi::table()
+    }
+
+    #[inline]
+    fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
+        Abi::dispatch(h, raw_nr, regs)
     }
 }

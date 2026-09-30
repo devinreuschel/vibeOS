@@ -6,7 +6,6 @@ use core::mem::{offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::addr_space::AddressSpace;
 use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET, USER_CS_RPL, USER_DS_RPL};
@@ -16,7 +15,7 @@ use vibeos::syscall::UserFrame;
 use vibeos::thread::{Fxsave, Tcb};
 use vibeos::vectors;
 
-use crate::arch::current::Arch;
+use crate::arch::current::{AddressSpace, Arch};
 use crate::arch::gdt::{self, CpuTables};
 use crate::arch::idt::TrapFrame;
 use crate::cell::BootCell;

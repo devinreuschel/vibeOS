@@ -10,7 +10,7 @@
 pub(crate) fn nest_trip() {
     crate::marker!("vibeOS: boot: panic-nest armed");
     // IF=0, as in the guard's own `drop`, which reads this CPU's slot.
-    crate::x86::cli();
+    crate::arch::current::irq_disable();
     crate::per_cpu_init::irq_nest_leave();
 }
 
@@ -29,8 +29,9 @@ mod stop {
     use vibeos::apic::IpiMode;
     use vibeos::lock::RANK_DEVICE;
 
+    use crate::arch::current;
     use crate::sync_init::SpinMutex;
-    use crate::{apic_init, ipi_init, per_cpu_init, thread_init, time_init, x86};
+    use crate::{apic_init, ipi_init, per_cpu_init, thread_init, time_init};
 
     /// CPUs the scenario needs: the panicking pair and one per other way.
     const CPUS: u32 = 5;
@@ -58,7 +59,7 @@ mod stop {
         while !GATE.load(Ordering::Acquire) {
             core::hint::spin_loop();
         }
-        x86::cli();
+        current::irq_disable();
     }
 
     fn ready(cpu: usize) {
@@ -99,7 +100,7 @@ mod stop {
         ready(3);
         // CPU 0 holds it until the panic: a serviced spin with IF=0.
         let _g = HELD.lock();
-        x86::halt();
+        current::halt();
     }
 
     fn cpu4() {

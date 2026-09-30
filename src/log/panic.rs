@@ -9,8 +9,8 @@
 //!
 //! From the `cli` in `begin_dump` on, every line is one
 //! `serial::raw::write_owner` call, built in a stack buffer ([`line`],
-//! [`out`]): the dump takes no lock and no `InterruptGuard`, so a panic
-//! inside a guard's bookkeeping or with a lock held still dumps once
+//! [`out`]): the dump takes no lock and enters no interrupt guard, so a
+//! panic inside a guard's bookkeeping or with a lock held still dumps once
 //! (DESIGN §2.5 steps 1-3).
 
 use core::fmt::{self, Write};
@@ -28,6 +28,7 @@ use vibeos::symtab;
 
 use crate::per_cpu_init;
 use crate::serial::raw;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 unsafe extern "C" {
@@ -35,8 +36,6 @@ unsafe extern "C" {
     static __kernel_vma_end: u8;
 }
 
-#[cfg(feature = "panic_exit")]
-const ISA_DEBUG_EXIT: u16 = 0xF4;
 #[cfg(feature = "panic_exit")]
 const EXIT_PANIC: u32 = 0x11;
 
@@ -145,7 +144,7 @@ pub(crate) fn symbol_name(addr: u64) -> Option<&'static str> {
 /// finds the dump claimed runs the stop routine with `regs` (`panic`) and
 /// writes nothing.
 fn begin_dump(regs: CrashRegs) {
-    x86::cli();
+    crate::arch::current::irq_disable();
     if !raw::claim_dump() {
         if raw::is_owner() {
             raw::write_owner(b"vibeOS: panic: reentered");
@@ -191,8 +190,8 @@ fn report_cpus() {
 }
 
 /// One dump line, which `f` builds in a `LINE_CAP` stack buffer (cut with
-/// `...` when longer), in one `raw::write_owner`: no lock, no
-/// `InterruptGuard` (DESIGN §2.5 step 1).
+/// `...` when longer), in one `raw::write_owner`: no lock, no interrupt
+/// guard (DESIGN §2.5 step 1).
 pub(crate) fn line(f: impl FnOnce(&mut StackBuf<'_>)) {
     let mut buf = [0u8; LINE_CAP];
     let mut w = StackBuf::new(&mut buf);
@@ -217,6 +216,7 @@ fn hex(w: &mut StackBuf<'_>, n: u64) {
     w.push_bytes(fmt_util::write_hex(n, &mut b));
 }
 
+#[cfg(target_arch = "x86_64")]
 fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
     line(|w| {
         w.push_bytes(b"vibeOS: regs: rbp=0x");
@@ -296,13 +296,9 @@ fn dump_backtrace(rip: u64, rbp: u64) {
 fn finish() -> ! {
     raw::write_owner(b"vibeOS: panic: halted");
     #[cfg(feature = "panic_exit")]
-    // SAFETY: `panic_exit` builds run under QEMU with isa-debug-exit at
-    // port 0xF4, whose write ends the VM; established by the harness's
-    // `-device isa-debug-exit`, which `panic::ISA_DEBUG_EXIT` names.
-    unsafe {
-        x86::outl(ISA_DEBUG_EXIT, EXIT_PANIC);
-    }
-    x86::halt();
+    crate::arch::current::qemu_exit(EXIT_PANIC);
+    #[cfg(not(feature = "panic_exit"))]
+    crate::arch::current::halt();
 }
 
 fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
@@ -323,11 +319,14 @@ fn panic(info: &PanicInfo) -> ! {
     crate::arch::catch::on_panic();
     // IF=0 before anything else: a second panicking CPU must reach
     // `begin_dump` without taking an interrupt (DESIGN §2.5 step 1).
-    x86::cli();
-    let rip = x86::read_rip();
-    let rbp = x86::read_rbp();
-    let rsp = x86::read_rsp();
-    let rflags = x86::rflags();
+    crate::arch::current::irq_disable();
+    #[cfg(target_arch = "x86_64")]
+    let (rip, rbp, rsp, rflags) = (
+        x86::read_rip(),
+        x86::read_rbp(),
+        x86::read_rsp(),
+        x86::rflags(),
+    );
     begin_dump(CrashRegs {
         rip,
         rsp,
@@ -359,6 +358,7 @@ fn write_where(info: &PanicInfo) {
 }
 
 /// ` rip=0x.. cs=0x.. rflags=0x.. rsp=0x.. ss=0x..[ err=0x..][ cr2=0x..]`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn frame_fields(
     w: &mut StackBuf<'_>,
     frame: &InterruptFrame,
@@ -389,6 +389,7 @@ pub(crate) fn frame_fields(
 /// frame and `rbp` its `rbp` as the entry stub saved it (the trap frame's
 /// user words), where the `vibeOS: regs:` line and the backtrace start
 /// (DESIGN §2.5 step 4, F070).
+#[cfg(target_arch = "x86_64")]
 pub fn exception_halt(
     kind: &[u8],
     frame: &InterruptFrame,
@@ -411,6 +412,7 @@ pub fn exception_halt(
     finish();
 }
 
+#[cfg(target_arch = "x86_64")]
 /// [`exception_halt`] for a vector with no mnemonic.
 pub fn exception_vec(
     n: u8,

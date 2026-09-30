@@ -157,6 +157,7 @@ pub(crate) fn frames_settle(before: usize) -> bool {
 /// `NAME` is unique in the crate.
 macro_rules! user_code {
     ($name:ident, $asm:literal) => {
+        #[cfg(target_arch = "x86_64")]
         ::core::arch::global_asm!(concat!(
             ".pushsection .rodata.vibeos_user_code, \"a\", @progbits\n.balign 16\n",
             ".global vibeos_user_code_",

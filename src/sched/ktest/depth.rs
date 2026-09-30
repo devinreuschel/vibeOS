@@ -111,7 +111,7 @@ fn plant_recurse(n: u32) -> u32 {
 fn plant_worker() {
     // IF=0 through the recursion, so no top half lands at depth: the
     // deepest word written is the recursion's own.
-    let _g = crate::x86::InterruptGuard::enter();
+    let _g = crate::arch::current::InterruptGuard::enter();
     let v = plant_recurse(core::hint::black_box(PLANT_LEVELS));
     PLANT_SINK.store(v, Ordering::Relaxed);
 }
