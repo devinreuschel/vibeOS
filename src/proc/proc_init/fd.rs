@@ -173,7 +173,7 @@ fn unread(id: FileId, n: usize) {
         file_init::close(f).and(r)
     });
     match r {
-        Ok(_) | Err(FsError::NotSupp) => {}
+        Ok(_) | Err(FsError::SPipe) => {}
         Err(e) => crate::klog_ratelimited!(
             1000,
             vibeos::log::Level::Warn,

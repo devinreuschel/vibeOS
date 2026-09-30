@@ -261,10 +261,10 @@ pub(crate) fn test_fat_initrd() -> Outcome {
     if fid::unlink_path("/kt/w.txt", false).is_err() {
         return Outcome::Fail("unlink");
     }
-    if symlink_path(b"/s", b"/kt").err() != Some(FsError::NotSupp) {
+    if symlink_path(b"/s", b"/kt").err() != Some(FsError::Perm) {
         return Outcome::Fail("symlink supp");
     }
-    if link_path(b"/hello.txt", b"/h2").err() != Some(FsError::NotSupp) {
+    if link_path(b"/hello.txt", b"/h2").err() != Some(FsError::Perm) {
         return Outcome::Fail("link supp");
     }
     if file_init::sync_fs().is_err() {

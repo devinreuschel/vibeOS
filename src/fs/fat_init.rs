@@ -310,7 +310,7 @@ impl InodeOps for FatOps {
         let is_dir = match kind {
             InodeKind::Reg => false,
             InodeKind::Dir => true,
-            InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
+            InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => return Err(FsError::Perm),
         };
         with_vol(vol_of(cx)?, |v, d| {
             let (w, _) = words(dir)?;

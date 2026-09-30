@@ -36,6 +36,8 @@ pub enum FsError {
     SPipe,
     /// The two paths are on different mounts.
     XDev,
+    /// The filesystem does not let a regular file be made here.
+    Acces,
 }
 
 /// A filesystem error's Linux errno at the syscall boundary (SYSCALL.md §2).
@@ -60,6 +62,7 @@ impl From<FsError> for crate::kerror::KError {
             FsError::Perm => Self::Perm,
             FsError::SPipe => Self::SPipe,
             FsError::XDev => Self::XDev,
+            FsError::Acces => Self::Acces,
             FsError::NoMem => Self::NoMem,
             FsError::Again => Self::Again,
         }
@@ -90,6 +93,7 @@ impl FsError {
             FsError::Perm => "not permitted",
             FsError::SPipe => "cannot seek",
             FsError::XDev => "cross-device",
+            FsError::Acces => "access denied",
         }
     }
 }

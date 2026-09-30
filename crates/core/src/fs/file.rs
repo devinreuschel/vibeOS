@@ -488,8 +488,14 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         Ok(n)
     }
 
+    /// Move open file `f`'s offset, when its inode can seek (`check_seek`).
     pub fn seek(&self, f: &FileRef, pos: SeekFrom) -> Result<u64, FsError> {
-        self.with(|v| v.file_seek(f.id, pos))
+        let mut c = self.with(|v| v.file_islot(f.id).and_then(|i| v.call(i)))?;
+        let r = c.run(|o, cx, n| o.check_seek(cx, n));
+        self.step(|v| {
+            v.finish(c, false);
+            r.and_then(|()| v.file_seek(f.id, pos))
+        })
     }
 
     pub fn stat(&self, f: &FileRef) -> Result<Stat, FsError> {

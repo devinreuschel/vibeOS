@@ -565,8 +565,10 @@ fn ops_keyed_backend_via_super_ops() {
     assert_eq!(with_store(id, |s| s.evicts), 1);
     v.mkdir(None, "/n", 0o755).unwrap();
     v.mount(None, "/n", &NoOpsFs).unwrap();
-    assert_eq!(v.stat(None, "/n/x").unwrap_err(), FsError::NotSupp);
-    assert_eq!(v.creat(None, "/n/y", 0o644).unwrap_err(), FsError::NotSupp);
+    // A superblock without ops runs `NoOps`: each operation is missing,
+    // with Linux's errno for it.
+    assert_eq!(v.stat(None, "/n/x").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.creat(None, "/n/y", 0o644).unwrap_err(), FsError::Acces);
     assert_eq!(v.stat(None, "/n").unwrap().kind, InodeKind::Dir);
     assert_dcache_sound(&v);
 }
@@ -1014,6 +1016,7 @@ mod fs_error_errno_per_variant {
         perm: Perm => 1,
         spipe: SPipe => 29,
         xdev: XDev => 18,
+        acces: Acces => 13,
     }
 }
 
@@ -1133,4 +1136,114 @@ fn fs_error_conditions_errno() {
         let e = v.read(&mut d, ino, 0, &mut out).unwrap_err();
         assert_eq!(errno(e), 5, "{e:?}");
     }
+}
+
+/// An operation a filesystem or an object does not support returns the
+/// errno Linux returns for that operation (ROADMAP §10.4, A3, E2, F083):
+/// each `InodeOps` default, on `NoOps`; FAT's `symlink` and `link`; a
+/// `rename` and a `link` across mounts; a write of an object that cannot be
+/// written; `readlink` of a regular file; and `lseek` of `/dev/tty`.
+#[test]
+fn inode_ops_unsupported_errno() {
+    use crate::kerror::KError;
+    let errno = |e: FsError| KError::from(e).errno();
+
+    // Each default, on a filesystem that overrides none.
+    let ops: &dyn InodeOps = &NoOps;
+    let mut private = [0u64; 2];
+    let mut cx = OpCx {
+        sb: 0,
+        fstype: FsType::Ram,
+        private: &mut private,
+        now: 0,
+        vol: None,
+    };
+    let (mut a, mut b) = (Inode::EMPTY, Inode::EMPTY);
+    let mut buf = [0u8; 4];
+    let mut de = Dirent::EMPTY;
+    assert_eq!(errno(ops.lookup(&mut cx, &a, b"x").unwrap_err()), 20);
+    for (kind, want) in [
+        (InodeKind::Reg, 13),
+        (InodeKind::Dir, 1),
+        (InodeKind::Lnk, 1),
+        (InodeKind::Chr, 1),
+        (InodeKind::Blk, 1),
+    ] {
+        let e = ops
+            .create(&mut cx, &mut a, b"x", kind, 0o644, Some(b"t"))
+            .unwrap_err();
+        assert_eq!(errno(e), want, "{kind:?}");
+    }
+    assert_eq!(errno(ops.unlink(&mut cx, &mut a, b"x").unwrap_err()), 1);
+    assert_eq!(errno(ops.rmdir(&mut cx, &mut a, b"x").unwrap_err()), 1);
+    assert_eq!(
+        errno(ops.link(&mut cx, &mut a, b"x", &mut b).unwrap_err()),
+        1
+    );
+    let e = ops.rename(&mut cx, &mut a, b"x", &mut b, b"y").unwrap_err();
+    assert_eq!(errno(e), 1);
+    assert_eq!(
+        errno(ops.read(&mut cx, &mut a, 0, &mut buf).unwrap_err()),
+        22
+    );
+    assert_eq!(errno(ops.write(&mut cx, &mut a, 0, b"x").unwrap_err()), 22);
+    assert_eq!(
+        errno(ops.write_append(&mut cx, &mut a, b"x").unwrap_err()),
+        22
+    );
+    assert_eq!(errno(ops.truncate(&mut cx, &mut a, 0).unwrap_err()), 22);
+    assert_eq!(errno(ops.readdir(&mut cx, &a, 0, &mut de).unwrap_err()), 20);
+    assert_eq!(errno(ops.readlink(&mut cx, &a, &mut buf).unwrap_err()), 22);
+    assert_eq!(ops.getattr(&mut cx, &mut a), Ok(()));
+    assert_eq!(ops.sync(&mut cx), Ok(()));
+    assert_eq!(ops.evict(&mut cx, &a), Ok(()));
+    assert_eq!(ops.check_seek(&mut cx, &a), Ok(()));
+    ops.kill_sb(&mut cx);
+
+    // FAT's `symlink` and `link`, through the core adapter: `EPERM`, as on
+    // Linux's vfat.
+    let mut img = vec![0u8; 64 * 1024];
+    crate::fs::fat::mkfs(&mut img, b"PERM").unwrap();
+    {
+        let mut d = crate::fs::fat::MemDisk::new(&mut img, crate::fs::fat::SEC as u32).unwrap();
+        let mut fv = crate::fs::fat::FatVol::mount(&mut d).unwrap();
+        fv.create(&mut d, fv.info.root_clus, b"a", false).unwrap();
+        fv.sync(&mut d).unwrap();
+    }
+    let mut v = ram();
+    v.mkdir(None, "/fat", 0o755).unwrap();
+    v.mount(None, "/fat", crate::fs::fat::tests::FatHostOps::new(img))
+        .unwrap();
+    assert_eq!(errno(v.symlink(None, "/fat/s", "/x").unwrap_err()), 1);
+    assert_eq!(errno(v.link(None, "/fat/a", "/fat/b").unwrap_err()), 1);
+
+    // Across mounts, ramfs to tmpfs and back: `EXDEV`.
+    let (mut v, _k) = crate::fs::kernfs::tests::boot();
+    v.creat(None, "/r", 0o644).unwrap();
+    v.creat(None, "/tmp/t", 0o644).unwrap();
+    assert_eq!(errno(v.rename(None, "/r", "/tmp/r2").unwrap_err()), 18);
+    assert_eq!(errno(v.link(None, "/r", "/tmp/r3").unwrap_err()), 18);
+    assert_eq!(errno(v.rename(None, "/tmp/t", "/t2").unwrap_err()), 18);
+
+    // A write of an object that cannot be written: `EINVAL`.
+    let f = v.open_path(None, "/proc/1/cmdline", O_RDWR, 0).unwrap();
+    assert_eq!(errno(v.write(&f, b"x").unwrap_err()), 22);
+    v.close(f).unwrap();
+
+    // `readlink` of a regular file, on ramfs and on tmpfs: `EINVAL`.
+    for path in ["/r", "/tmp/t"] {
+        let p = v.resolve(None, path, true).unwrap();
+        let mut c = v.call(v.islot(p).unwrap()).unwrap();
+        let r = c.run(|o, cx, n| o.readlink(cx, n, &mut buf));
+        v.finish(c, false);
+        assert_eq!(errno(r.unwrap_err()), 22, "{path}");
+    }
+
+    // `lseek` of `/dev/tty`: `ESPIPE`; `/dev/null` seeks.
+    let f = v.open_path(None, "/dev/tty", O_RDWR, 0).unwrap();
+    assert_eq!(errno(v.seek(&f, 0, SEEK_CUR).unwrap_err()), 29);
+    v.close(f).unwrap();
+    let f = v.open_path(None, "/dev/null", O_RDWR, 0).unwrap();
+    assert_eq!(v.seek(&f, 0, SEEK_CUR), Ok(0));
+    v.close(f).unwrap();
 }

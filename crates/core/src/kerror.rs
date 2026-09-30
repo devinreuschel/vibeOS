@@ -52,7 +52,7 @@ macro_rules! errno_table {
 }
 
 errno_table! {
-    Perm = 1, "EPERM", "`mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0)";
+    Perm = 1, "EPERM", "`mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0); making a symlink, a device node, or a directory, a hard link, a rename, or a removal that the filesystem cannot make, as FAT's `symlink` and `link` (no syscall makes one yet)";
     NoEnt = 2, "ENOENT", "`open`/`execve` missing path";
     Srch = 3, "ESRCH", "`kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1)";
     Io = 5, "EIO", "device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs";
@@ -62,25 +62,25 @@ errno_table! {
     Child = 10, "ECHILD", "`wait4` with no matching child";
     Again = 11, "EAGAIN", "`fork` with every process-table slot in use, zombies included (`MAX_PROCS` is 18), or no pid free (pids and tids share one allocator, up to 32,767, then from 300)";
     NoMem = 12, "ENOMEM", "AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4)";
-    Acces = 13, "EACCES", "defined; no syscall returns it";
+    Acces = 13, "EACCES", "`open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys`";
     Fault = 14, "EFAULT", "bad user pointer / length";
     Busy = 16, "EBUSY", "defined; no syscall returns it";
     Exist = 17, "EEXIST", "`O_EXCL`; `mmap` with `MAP_FIXED_NOREPLACE` (or `MAP_FIXED`, §3.1) over a mapping";
-    XDev = 18, "EXDEV", "defined; no syscall returns it";
+    XDev = 18, "EXDEV", "a `rename` or `link` across mounts (no syscall makes one yet)";
     NoDev = 19, "ENODEV", "a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4";
     NotDir = 20, "ENOTDIR", "";
     IsDir = 21, "EISDIR", "";
-    Inval = 22, "EINVAL", "`lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1";
+    Inval = 22, "EINVAL", "`lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written";
     NFile = 23, "ENFILE", "`open` or `execve` with the system-wide open-file table full";
     MFile = 24, "EMFILE", "per-process fd table full (`open`, `dup`)";
     FBig = 27, "EFBIG", "a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit";
     NoSpc = 28, "ENOSPC", "`write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent";
-    SPipe = 29, "ESPIPE", "`lseek` on the console";
+    SPipe = 29, "ESPIPE", "`lseek` on the console, `/dev/console`, or `/dev/tty`";
     NameTooLong = 36, "ENAMETOOLONG", "path of 256 bytes or more; name above 64 bytes; an `execve` argv or envp string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255";
     NoSys = 38, "ENOSYS", "unknown number";
     NotEmpty = 39, "ENOTEMPTY", "defined; no syscall returns it";
     Loop = 40, "ELOOP", "`open` or `execve` through too many symbolic links";
-    OpNotSupp = 95, "EOPNOTSUPP", "`open`, `read`, `write`, or `lseek` on an object that does not support the operation";
+    OpNotSupp = 95, "EOPNOTSUPP", "defined; no syscall returns it. It is left for the cases Linux gives it, such as an extended-attribute namespace a mount refuses (ROADMAP §14.8)";
 }
 
 #[cfg(test)]

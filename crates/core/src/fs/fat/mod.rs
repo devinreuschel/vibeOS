@@ -5,8 +5,9 @@
 //! copies before a dirent may point at the clusters. `sync` uses disk
 //! [`Disk::flush`], not a barrier.
 //!
-//! FAT has no POSIX perms/symlinks/hard links: those ops return
-//! [`FatError::NotSupp`]. Do not fake success.
+//! FAT has no POSIX perms, symlinks, device nodes or hard links: making
+//! one returns [`FsError::Perm`](super::FsError::Perm), as Linux's vfat
+//! does. Do not fake success.
 //!
 //! A byte parser (ROADMAP §10.1): every index into disk data is a checked
 //! access that returns [`FatError`], and all arithmetic is `checked_*`.
@@ -432,4 +433,4 @@ fn name_is_dotdot(n: &[u8]) -> bool {
     reason = "host tests: a panic fails the test, not the kernel"
 )]
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

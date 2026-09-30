@@ -308,21 +308,38 @@ impl<T> Guarded<T> for std::sync::Mutex<T> {
 /// holds a count on for the call, and runs with the VFS lock dropped
 /// ([`FileApi`]); what it changes in a copy's public fields is written
 /// back after it.
+///
+/// A default is the operation missing, and returns Linux's errno for that
+/// operation (ROADMAP §10.4, A3, E2): making an object or a link, or
+/// removing or renaming one, is `Perm`, except a regular file, whose
+/// creation is `Acces`, as `open(O_CREAT)` in Linux's `/proc`; reading,
+/// writing, truncating, or reading a link of an object that cannot is
+/// `Inval`; looking up or listing in a non-directory is `NotDir`; `sync`
+/// with nothing to write, `getattr`, `evict` and `check_seek` succeed.
 pub trait InodeOps: Sync {
-    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError>;
+    fn lookup(&self, _cx: &mut OpCx<'_>, _dir: &Inode, _name: &[u8]) -> Result<InodeInfo, FsError> {
+        Err(FsError::NotDir)
+    }
     fn create(
         &self,
-        cx: &mut OpCx<'_>,
-        dir: &mut Inode,
-        name: &[u8],
+        _cx: &mut OpCx<'_>,
+        _dir: &mut Inode,
+        _name: &[u8],
         kind: InodeKind,
-        mode: u16,
-        target: Option<&[u8]>,
-    ) -> Result<InodeInfo, FsError>;
-    fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError>;
+        _mode: u16,
+        _target: Option<&[u8]>,
+    ) -> Result<InodeInfo, FsError> {
+        Err(match kind {
+            InodeKind::Reg => FsError::Acces,
+            InodeKind::Dir | InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => FsError::Perm,
+        })
+    }
+    fn unlink(&self, _cx: &mut OpCx<'_>, _dir: &mut Inode, _name: &[u8]) -> Result<(), FsError> {
+        Err(FsError::Perm)
+    }
     /// Remove the empty directory `name` from `dir`.
     fn rmdir(&self, _cx: &mut OpCx<'_>, _dir: &mut Inode, _name: &[u8]) -> Result<(), FsError> {
-        Err(FsError::NotSupp)
+        Err(FsError::Perm)
     }
     /// Give `target` the further name `name` in `dir`.
     fn link(
@@ -332,7 +349,7 @@ pub trait InodeOps: Sync {
         _name: &[u8],
         _target: &mut Inode,
     ) -> Result<(), FsError> {
-        Err(FsError::NotSupp)
+        Err(FsError::Perm)
     }
     /// Move `oname` in `odir` to `nname` in `ndir`. The moved inode's new
     /// key when the move changed it, as FAT's dirent-location key does.
@@ -346,22 +363,26 @@ pub trait InodeOps: Sync {
         _ndir: &mut Inode,
         _nname: &[u8],
     ) -> Result<Option<Key>, FsError> {
-        Err(FsError::NotSupp)
+        Err(FsError::Perm)
     }
     fn read(
         &self,
-        cx: &mut OpCx<'_>,
-        ino: &mut Inode,
-        off: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, FsError>;
+        _cx: &mut OpCx<'_>,
+        _ino: &mut Inode,
+        _off: u64,
+        _buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        Err(FsError::Inval)
+    }
     fn write(
         &self,
-        cx: &mut OpCx<'_>,
-        ino: &mut Inode,
-        off: u64,
-        buf: &[u8],
-    ) -> Result<usize, FsError>;
+        _cx: &mut OpCx<'_>,
+        _ino: &mut Inode,
+        _off: u64,
+        _buf: &[u8],
+    ) -> Result<usize, FsError> {
+        Err(FsError::Inval)
+    }
     /// Write `buf` at the end of the file, as `O_APPEND` does; the count
     /// written and the offset written at. A backend that serializes its
     /// writes reads the size in the same section as the write.
@@ -374,14 +395,18 @@ pub trait InodeOps: Sync {
         let off = ino.size;
         self.write(cx, ino, off, buf).map(|n| (n, off))
     }
-    fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError>;
+    fn truncate(&self, _cx: &mut OpCx<'_>, _ino: &mut Inode, _size: u64) -> Result<(), FsError> {
+        Err(FsError::Inval)
+    }
     fn readdir(
         &self,
-        cx: &mut OpCx<'_>,
-        dir: &Inode,
-        cookie: u64,
-        out: &mut Dirent,
-    ) -> Result<Option<u64>, FsError>;
+        _cx: &mut OpCx<'_>,
+        _dir: &Inode,
+        _cookie: u64,
+        _out: &mut Dirent,
+    ) -> Result<Option<u64>, FsError> {
+        Err(FsError::NotDir)
+    }
     fn getattr(&self, _cx: &mut OpCx<'_>, _ino: &mut Inode) -> Result<(), FsError> {
         Ok(())
     }
@@ -405,7 +430,18 @@ pub trait InodeOps: Sync {
     }
     /// Drop the backend state of an unmounted superblock.
     fn kill_sb(&self, _cx: &mut OpCx<'_>) {}
+    /// Whether `ino` can seek: `SPipe` for an object that cannot, as a
+    /// console, which `lseek` then refuses.
+    fn check_seek(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> Result<(), FsError> {
+        Ok(())
+    }
 }
+
+/// The ops of a superblock whose filesystem has none: every operation is
+/// the trait's default, the missing operation's errno.
+pub struct NoOps;
+
+impl InodeOps for NoOps {}
 
 /// Mount-time half of a filesystem: its ops pointer, and the root inode
 /// `fill_super` reports after setting up the superblock's private words.
