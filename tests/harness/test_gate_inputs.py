@@ -6,7 +6,9 @@ import contextlib
 import io
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
+from urllib.parse import unquote
 
 from scripts import check_gate_inputs as cgi
 from scripts.check_gate_inputs import (
@@ -545,6 +547,119 @@ class TestCiPass(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(cgi.main(["--ci-pass"]), 1)
         self.assertIn("`tier` concluded 'cancelled'", err.getvalue())
+
+
+def good_rules(rid: int = 7) -> list[dict[str, Any]]:
+    def rule(t: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        r: dict[str, Any] = {"type": t, "ruleset_source_type": "Repository",
+                             "ruleset_source": "o/r", "ruleset_id": rid}
+        if params is not None:
+            r["parameters"] = params
+        return r
+    return [
+        rule("deletion"),
+        rule("non_fast_forward"),
+        rule("pull_request", {"required_approving_review_count": 0}),
+        rule("required_status_checks", {"strict_required_status_checks_policy": False,
+                                        "required_status_checks": [
+                                            {"context": "check", "integration_id": 15368},
+                                            {"context": "ci-pass", "integration_id": 15368}]}),
+    ]
+
+
+class StubApi:
+    def __init__(self, branches: dict[str, list[dict[str, Any]]],
+                 rulesets: dict[int, dict[str, Any]]) -> None:
+        self.branches = branches
+        self.rulesets = rulesets
+        self.paths: list[str] = []
+
+    def __call__(self, path: str) -> Any:
+        self.paths.append(path)
+        if path == "user":
+            return {"login": "owner-login"}
+        prefix = "repos/{owner}/{repo}/"
+        assert path.startswith(prefix), path
+        rest = path[len(prefix):]
+        if rest.startswith("rules/branches/"):
+            return self.branches.get(unquote(rest[len("rules/branches/"):]), [])
+        if rest.startswith("rulesets/"):
+            return self.rulesets[int(rest[len("rulesets/"):])]
+        raise AssertionError(path)
+
+
+def ruleset(**over: Any) -> dict[str, Any]:
+    rs: dict[str, Any] = {"id": 7, "name": "main and release branches", "target": "branch",
+                          "enforcement": "active", "bypass_actors": []}
+    rs.update(over)
+    return rs
+
+
+class TestRulesets(unittest.TestCase):
+    def errs(self, rules: list[dict[str, Any]] | None = None,
+             rs: dict[str, Any] | None = None) -> list[str]:
+        api = StubApi({"main": good_rules() if rules is None else rules},
+                      {7: ruleset() if rs is None else rs})
+        return cgi.ruleset_errors(api, ["main"])
+
+    def test_matching_rules_pass(self) -> None:
+        self.assertEqual(self.errs(), [])
+
+    def test_missing_ci_pass_check_fails(self) -> None:
+        rules = good_rules()
+        rules[3]["parameters"]["required_status_checks"].pop()
+        errs = self.errs(rules)
+        self.assertEqual(len(errs), 1)
+        self.assertIn("required checks ['check'], want ['check', 'ci-pass']", errs[0])
+        rules[3]["parameters"]["required_status_checks"] = [
+            {"context": "check", "integration_id": 15368}, {"context": "ci-pass",
+                                                            "integration_id": 1}]
+        self.assertIn("not GitHub Actions", self.errs(rules)[0])
+
+    def test_bypass_actor_fails(self) -> None:
+        errs = self.errs(rs=ruleset(bypass_actors=[{"actor_id": 5, "actor_type":
+                                                    "RepositoryRole", "bypass_mode": "always"}]))
+        self.assertEqual(len(errs), 1)
+        self.assertIn("1 bypass actor(s)", errs[0])
+
+    def test_force_push_allowed_fails(self) -> None:
+        errs = self.errs([r for r in good_rules() if r["type"] != "non_fast_forward"])
+        self.assertEqual(errs, ["branch main: no `non_fast_forward` rule"])
+
+    def test_deletion_allowed_fails(self) -> None:
+        errs = self.errs([r for r in good_rules() if r["type"] != "deletion"])
+        self.assertEqual(errs, ["branch main: no `deletion` rule"])
+
+    def test_no_pull_request_rule_fails(self) -> None:
+        errs = self.errs([r for r in good_rules() if r["type"] != "pull_request"])
+        self.assertEqual(errs, ["branch main: no `pull_request` rule"])
+
+    def test_extra_rule_fails(self) -> None:
+        errs = self.errs(good_rules() + [{"type": "required_signatures", "ruleset_id": 7}])
+        self.assertEqual(errs, ["branch main: rule `required_signatures` beyond the four the "
+                                "box names"])
+
+    def test_evaluate_enforcement_fails(self) -> None:
+        errs = self.errs(rs=ruleset(enforcement="evaluate"))
+        self.assertEqual(len(errs), 1)
+        self.assertIn("enforcement 'evaluate'", errs[0])
+
+    def test_bypass_actors_unreadable_fails(self) -> None:
+        rs = ruleset()
+        del rs["bypass_actors"]
+        errs = self.errs(rs=rs)
+        self.assertEqual(len(errs), 1)
+        self.assertIn("bypass_actors unreadable as owner-login", errs[0])
+
+    def test_release_branch_checked(self) -> None:
+        api = StubApi({"main": good_rules(), "release/v1": good_rules()[:3]}, {7: ruleset()})
+        errs = cgi.ruleset_errors(api, ["main", "release/v1"])
+        self.assertEqual(errs, ["branch release/v1: no `required_status_checks` rule"])
+        self.assertIn("repos/{owner}/{repo}/rules/branches/release%2Fv1", api.paths)
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="main\nrelease/v1\nrelease-x\n"
+                                                              "release/v2\n")
+            self.assertEqual(cgi.release_branches(), ["release/v1", "release/v2"])
 
 
 if __name__ == "__main__":

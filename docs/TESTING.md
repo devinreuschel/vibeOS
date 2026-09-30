@@ -1019,8 +1019,11 @@ when `<what changed>` is a `**Severity:** ...` line, `check_review_refs.py` read
 finding's own. `release.yml`'s `build` job writes `check_gate_inputs.py --summary --tag <tag>` to its
 summary right after checking out the tag's commit, before any upload and so before any key job:
 every input changed since the previous `v*` tag, the floor at both ends, and the `Gate-change:` lines
-of the commits that changed each. Planned (ROADMAP §10.9): rulesets require `check` and `ci-pass`, one job that needs
-every per-push job, on `main`, which today requires no check.
+of the commits that changed each. The owner applies the rulesets
+([RELEASING.md](RELEASING.md#repository-rulesets)): `main` and each `release/v*` branch require a pull
+request and the `check` and `ci-pass` checks, and block force pushes and deletion, with no bypass
+actor; `check_gate_inputs.py --rulesets` reads them with the owner's `gh` login. Until the owner
+applies them, `main` requires no check.
 
 Planned (ROADMAP §38.1): `make verify` checks the Verus proofs and TLA+ specifications on every push
 that changes `vibeos-core` or `docs/specs/`. From the `phase-38` tag, a change that adds an operation

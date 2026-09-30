@@ -15,6 +15,11 @@ holds the `vibeos-core` coverage floor. Modes:
 - `--ci-pass`: ci.yml's `ci-pass` job. `NEEDS` is `toJSON(needs)` and
   `SKIPPABLE` the jobs gated on the event; it fails unless each job succeeded,
   or skipped when it is SKIPPABLE.
+- `--rulesets`: reads through `gh api` the rules active on `main` and each
+  `release/v*` branch, and fails unless they are ROADMAP §10.9's: a pull
+  request, the `check` and `ci-pass` checks, no force push, no deletion, from
+  `active` rulesets with no bypass actor. Only a ruleset admin can read
+  `bypass_actors`, so the owner runs it (docs/RELEASING.md).
 - `--summary (--tag TAG | --since REV) [--head REV]`: markdown for release.yml's
   `build` job summary: every input changed since the `v*` tag before TAG (or
   the root of history) or since REV, the floor at both ends, and the
@@ -60,9 +65,11 @@ import re
 import subprocess
 import sys
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -756,6 +763,93 @@ def ci_pass_verdict(needs: dict[str, Any], skippable: set[str]) -> list[str]:
     return errors
 
 
+# --- rulesets --------------------------------------------------------------
+
+RULE_TYPES = frozenset({"pull_request", "required_status_checks", "non_fast_forward",
+                        "deletion"})
+REQUIRED_CONTEXTS = frozenset({"check", CI_PASS})
+ACTIONS_APP = 15368  # GitHub Actions' integration id
+RELEASE_BRANCH = re.compile(r"^release/v")
+
+Api = Callable[[str], Any]
+
+
+def gh_api(path: str) -> Any:
+    """`gh api <path>` as JSON; `{owner}` and `{repo}` are the current repository."""
+    r = subprocess.run(["gh", "api", path], capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        raise gatelib.GateError(f"gh api {path}: {r.stderr.strip()}")
+    return json.loads(r.stdout or "null")
+
+
+def release_branches() -> list[str]:
+    r = subprocess.run(["gh", "api", "--paginate", "repos/{owner}/{repo}/branches?per_page=100",
+                        "--jq", ".[].name"], capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        raise gatelib.GateError(f"gh api branches: {r.stderr.strip()}")
+    return [b for b in r.stdout.split() if RELEASE_BRANCH.match(b)]
+
+
+def ruleset_errors(api: Api, branches: list[str]) -> list[str]:
+    """ROADMAP §10.9, the rulesets box: the rules active on each branch are
+    exactly a pull request, the `check` and `ci-pass` status checks (from GitHub
+    Actions when an integration is named), no force push and no deletion; and
+    each ruleset behind them is `active` with an empty bypass list, which only
+    an admin login can read."""
+    errors: list[str] = []
+    rulesets: set[int] = set()
+    for branch in branches:
+        where = f"branch {branch}"
+        rules = api(f"repos/{{owner}}/{{repo}}/rules/branches/{quote(branch, safe='')}")
+        if not isinstance(rules, list):
+            errors.append(f"{where}: the rules API returned no list")
+            continue
+        types = [r.get("type") for r in rules if isinstance(r, dict)]
+        for t in sorted(RULE_TYPES - set(types)):
+            errors.append(f"{where}: no `{t}` rule")
+        for t in sorted({str(x) for x in types} - RULE_TYPES):
+            errors.append(f"{where}: rule `{t}` beyond the four the box names")
+        contexts: set[str] = set()
+        for r in rules:
+            if not isinstance(r, dict):
+                continue
+            rid = r.get("ruleset_id")
+            if isinstance(rid, int):
+                rulesets.add(rid)
+            if r.get("type") != "required_status_checks":
+                continue
+            params = r.get("parameters") or {}
+            for c in params.get("required_status_checks") or []:
+                ctx = c.get("context")
+                contexts.add(str(ctx))
+                app = c.get("integration_id")
+                if app is not None and app != ACTIONS_APP:
+                    errors.append(f"{where}: check `{ctx}` required from app {app}, "
+                                  f"not GitHub Actions ({ACTIONS_APP})")
+        if "required_status_checks" in types and contexts != REQUIRED_CONTEXTS:
+            errors.append(f"{where}: required checks {sorted(contexts)}, want "
+                          f"{sorted(REQUIRED_CONTEXTS)}")
+    login: str | None = None
+    for rid in sorted(rulesets):
+        rs = api(f"repos/{{owner}}/{{repo}}/rulesets/{rid}")
+        name = rs.get("name", rid) if isinstance(rs, dict) else rid
+        where = f"ruleset {name!r} ({rid})"
+        if not isinstance(rs, dict):
+            errors.append(f"{where}: not readable")
+            continue
+        if rs.get("enforcement") != "active":
+            errors.append(f"{where}: enforcement {rs.get('enforcement')!r}, not 'active'")
+        if "bypass_actors" not in rs:
+            if login is None:
+                user = api("user")
+                login = str(user.get("login")) if isinstance(user, dict) else "?"
+            errors.append(f"{where}: bypass_actors unreadable as {login}; run --rulesets "
+                          f"with the owner's gh login (ruleset admin)")
+        elif rs["bypass_actors"]:
+            errors.append(f"{where}: {len(rs['bypass_actors'])} bypass actor(s); the list "
+                          f"must be empty")
+    return errors
+
 
 # --- release summary -------------------------------------------------------
 
@@ -868,6 +962,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--floor", action="store_true", help="print the coverage floor")
     ap.add_argument("--ci-pass", action="store_true",
                     help="ci.yml's ci-pass verdict from the NEEDS and SKIPPABLE variables")
+    ap.add_argument("--rulesets", action="store_true",
+                    help="the rules active on main and each release/v* branch (gh api)")
     ap.add_argument("--summary", action="store_true",
                     help="markdown: the inputs changed since the previous release (or --since)")
     ap.add_argument("--tag", help="--summary: the release tag; since the `v*` tag before it")
@@ -888,6 +984,16 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(errors), file=sys.stderr)
             return 1
         print(f"check_gate_inputs: {CI_PASS} ok ({len(needs)} jobs)")
+        return 0
+    if args.rulesets:
+        try:
+            errors = ruleset_errors(gh_api, ["main", *release_branches()])
+        except (gatelib.GateError, json.JSONDecodeError, OSError) as e:
+            errors = [str(e)]
+        if errors:
+            print("\n".join(errors), file=sys.stderr)
+            return 1
+        print("check_gate_inputs: rulesets ok")
         return 0
     if args.summary:
         if (args.tag is None) == (args.since is None):
