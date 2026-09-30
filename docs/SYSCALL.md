@@ -329,11 +329,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   signals, for 0, the caller's process group, for -1, every process the
   caller may signal except pid 1 and the caller, and for any other negative
   `pid`, process group `-pid` (F149; ROADMAP §13.7). A `pid` that names a
-  zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A
-  default-terminate or default-stop signal to pid 1 kills or stops init,
-  after which an orphan has no reaper and is freed when it exits (`exit`
-  below); Linux delivers to init only the signals it handles (F068; ROADMAP
-  §10.5)
+  zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A signal sent
+  to pid 1 is dropped, and `kill` returns 0, unless init has a handler for
+  it, as Linux does; none can exist before ROADMAP §13.8, and never for
+  `SIGKILL` or `SIGSTOP` (F068)
 - `exit`: the caller's children go to the reaper `proc::reaper_for` picks:
   pid 1 while init is live or stopped; otherwise none, so a child reads
   `getppid()` 0 and is freed when it exits (a zombie child at once), as in
@@ -511,12 +510,25 @@ Linux's `/proc/<pid>/syscall` already means something else (F150).
 
 ## 7. First userspace
 
-Static ELF64, no libc, hand-written `syscall` stubs. Initrd:
+Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
+`make user` to `build/user/<name>` (below). Initrd:
 
-- `/hello` — write + exit 42 (Slice B proof)
-- `/sbin/init` — post-init kernel job: `fork`/`exec` tests then `/bin/sh`, then reap
-- `/bin/tests` — syscall / `EFAULT` / `fork`+`exec`+`wait` / fault-kill runner
-- `/bin/sh` — interactive shell; prints `vibeOS: shell ready` then `vibeos>`
+- `/hello` (`user/src/bin/hello.rs`) — write + exit 42 (Slice B proof)
+- `/sbin/init` (`user/src/bin/init.rs`) — post-init kernel job: `fork`/`exec`
+  `/bin/tests`, printing `init: /bin/tests exited <status>` on fd 2 when its
+  wait status is nonzero, then `/bin/sh`, then reap. Its exit, by `exit` or by
+  a signal, panics the kernel after the line
+  `vibeOS: init: pid 1 <how>` (`exited <n>`, `killed SIG<name>`, or
+  `killed SIG<name> addr=0x<hex>` for a fault; INVARIANTS.md §2.5)
+- `/bin/tests` (`user/src/bin/tests.rs`) — syscall / `EFAULT` /
+  `fork`+`exec`+`wait` / fault-kill runner. Its cases, in `user/src/tests/`,
+  run through `vibeos_user::utest::Runner`, which prints the ktest protocol
+  with `utest:` (`vibeOS: utest: begin <n>`, `run <name> <deadline_ms>`,
+  `ok <name>`, `FAIL <name>: <why>`, `skip <name>: <reason>`, `end`);
+  `user: tests begin` comes first, and `user: tests ok` (status 0) or
+  `user: tests fail` (status 1) last
+- `/bin/sh` (`user/src/bin/sh.rs`) — interactive shell; prints
+  `vibeOS: shell ready` then `vibeos>`
 
 Stack: `argc`, `argv`, `envp`, and `auxv`. Init's `argv` and `envp` come
 from the kernel command line (BOOT.md §3.2), at most 8 of each; `execve`
@@ -535,13 +547,14 @@ VAs are `check_user_va`'d. Exit status is the kernel-reported low 8 bits
 
 The Rust user runtime (`vibeos-user`, ROADMAP §10.5) is built, and
 `kernel_tests` kernels embed its programs for the in-guest tests
-(`Image::UserBin`; `user_runtime` runs `ktest_rt` in ring 3); the initrd
-programs stay assembly until §10.5 ports them. `_start`, in `user/src/arch/<arch>/`,
+(`Image::UserBin`; `user_runtime` runs `ktest_rt` in ring 3). `_start`, in `user/src/arch/<arch>/`,
 passes the initial stack pointer to `rt::start`, which reads `argc`,
 `argv`, `envp` and `auxv` into an `env::Env`, calls the program's
 `main!` function, and exits with its return value as the status. A panic
 writes `panicked at <file>:<line>:<col>:` and the message, one line
-each, to fd 2 in one `write` (cut at 512 bytes) and exits with status 101. Each program
+each, to fd 2 in one `write` (cut at 512 bytes) and exits with status 101. The runtime's `#[global_allocator]`
+(`user/src/alloc.rs`) grows the heap with `brk`, so `alloc`'s `Box`, `Vec`
+and `String` work in user programs. Each program
 links as a static non-PIE `ET_EXEC` at `0x4000_0000` for
 `x86_64-unknown-linux-musl`, with no libc and no crt objects (BOOT.md
 §3.1).

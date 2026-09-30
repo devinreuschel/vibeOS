@@ -67,6 +67,45 @@ struct Range {
     len: u64,
 }
 
+/// Order `v` by `start`: an in-place heapsort, with no recursion and a
+/// frame of a few words. `core`'s unstable sort recurses, with a small-sort
+/// scratch buffer in its frames, and took about 5 KiB of a 16 KiB kernel
+/// stack sorting a full node pool, past a worker's DESIGN §4.5 budget once
+/// an interrupt landed on top.
+fn sort_by_start(v: &mut [Range]) {
+    let n = v.len();
+    let mut i = n / 2;
+    while i > 0 {
+        i -= 1;
+        sift_down(v, i, n);
+    }
+    let mut end = n;
+    while end > 1 {
+        end -= 1;
+        v.swap(0, end);
+        sift_down(v, 0, end);
+    }
+}
+
+/// Restore the max-heap order of `v[..end]` below `root`.
+fn sift_down(v: &mut [Range], mut root: usize, end: usize) {
+    loop {
+        // `end <= v.len() <= MAX_RANGES`, far from overflow.
+        let mut child = 2 * root + 1;
+        if child >= end {
+            return;
+        }
+        if child + 1 < end && v[child + 1].start > v[child].start {
+            child += 1;
+        }
+        if v[root].start >= v[child].start {
+            return;
+        }
+        v.swap(root, child);
+        root = child;
+    }
+}
+
 /// Snapshot for `meminfo`. `used` is bytes currently reserved (including
 /// guard pages), not necessarily mapped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,7 +306,7 @@ impl Kva {
                 n += 1;
             }
         }
-        self.nodes[..n].sort_unstable_by_key(|r| r.start);
+        sort_by_start(&mut self.nodes[..n]);
         let mut w = 0usize;
         for r in 0..n {
             if w > 0 {
@@ -487,6 +526,25 @@ mod tests {
         k.coalesce_all();
         assert_eq!(k.free_list(), std::vec![(KVA_START, 64 * PAGE_SIZE)]);
         assert_eq!(k.stats().used, 0);
+    }
+
+    #[test]
+    fn sort_by_start_orders_like_std() {
+        for n in [0usize, 1, 2, 3, 17, 64, MAX_RANGES] {
+            // A fixed scramble of distinct starts, with some runs and repeats.
+            let mut v: std::vec::Vec<Range> = (0..n as u64)
+                .map(|i| Range {
+                    start: (i.wrapping_mul(0x9E37_79B9) % 1021) * PAGE_SIZE,
+                    len: i + 1,
+                })
+                .collect();
+            let mut want = v.clone();
+            want.sort_by_key(|r| r.start);
+            sort_by_start(&mut v);
+            let got: std::vec::Vec<u64> = v.iter().map(|r| r.start).collect();
+            let want: std::vec::Vec<u64> = want.iter().map(|r| r.start).collect();
+            assert_eq!(got, want, "n = {n}");
+        }
     }
 
     #[test]

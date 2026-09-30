@@ -371,7 +371,7 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] `CARGO_TARGET_DIR` pinned to `./target`
 - [x] kernel prerequisites from a `find` over `src/`, never a hand-written list
 - [x] ISO staging: kernel ELF, `limine.conf`, BIOS and UEFI Limine artifacts, `xorriso` hybrid image, `limine bios-install`
-- [x] `setup.sh`: fetch the Limine binary branch, verify `qemu-system-x86_64`, `xorriso`, `nasm`, `python3`; never rewrite project files
+- [x] `setup.sh`: fetch the Limine binary branch, verify `qemu-system-x86_64`, `xorriso`, `python3`; never rewrite project files
 - [x] `make run` uses `-smp 2` so the default loop is multiprocessor from day one
 
 ### 0.6 Test harness
@@ -1035,7 +1035,7 @@ limitations.
 - [x] a process tree: when a spawned process exits, `finish_exit` reparents its children to the reaper `proc::reaper_for` picks (pid 1 while init is live or stopped) and wakes init's wait queue when init adopts one (F068, F127)
 - [x] a bound (`run_path`) process that exits or is killed reparents its children: §10.6's one ring-3 entry model box deleted the bound model, `finish_exit`'s bound branch included, so every exit runs `reparent_children` (F127)
 - [x] an orphan goes to pid 1 only while init is live or stopped and is otherwise freed when it exits (F068)
-- [ ] init's own exit panics the kernel with a registered failure line; lands in §10.5 (F068)
+- [x] init's own exit panics the kernel with a registered failure line (F068)
 - [x] zombie state until reaped, and a defined resource release point
 - [x] uid and gid present from the start even if nothing enforces them yet, because retrofitting credentials is painful
 
@@ -1048,7 +1048,7 @@ limitations.
 - [x] `exit`: release resources, become a zombie, signal the parent
 - [x] `wait4`: block for a child, return its status, reap it, with `WNOHANG`
 - [x] orphan reaping by `/sbin/init` in the production image; the `kernel_tests` and `kernel_shell` builds start no init (F068)
-- [ ] `/bin/tests` fork limit: a fork loop gets `-EAGAIN` once the process table is full and fails on any other result; today the bomb in `user/tests.asm` also passes after 32 forks that all succeed, and on any error after the first. Reopened by the kernel review (F077); lands in §10.5.
+- [ ] `/bin/tests` fork limit: a fork loop gets `-EAGAIN` once the process table is full and fails on any other result; today the bomb in `/bin/tests` also passes after 32 forks that all succeed, and on any error after the first. Reopened by the kernel review (F077); lands in §10.5.
 - [ ] `/bin/tests` exec chain: a child `execve`s a second program, which `execve`s a third, and the parent's `wait4` returns the third program's exit status. Reopened by the kernel review (F077); lands in §10.5.
 - [ ] `/bin/tests` wait ordering: `wait4` on a child that has not exited blocks until it exits, and `wait4` on a zombie child returns its status at once. Reopened by the kernel review (F077); lands in §10.5.
 - [ ] `/bin/tests` orphan reparenting: a grandchild whose parent has exited sees `getppid() == 1`, and init reaps it. Reopened by the kernel review (F077); lands in §10.5.
@@ -1061,7 +1061,7 @@ limitations.
 - [ ] `SIGFPE` from a user x87 `#MF` and a SIMD `#XM`, with `CR0.NE` and `CR4.OSXMMEXCPT` set on every CPU; today neither bit is set, so an unmasked x87 exception raises the masked IRQ13 and is dropped, and on KVM and hardware an unmasked SIMD exception raises `#UD` and gets `SIGILL`. Reopened by the kernel review (F026); lands in §10.6.
 - [x] `SIGCHLD` on child exit
 - [x] default actions: terminate, ignore, stop
-- [ ] a signal whose default action terminates or stops is dropped when sent to pid 1, as Linux drops a signal init has no handler for; today any ring-3 process can kill or stop init; lands in §10.5 (F068)
+- [x] a signal whose default action terminates or stops is dropped when sent to pid 1, as Linux drops a signal init has no handler for (F068)
 - [ ] user-installed handlers, masking, and queueing; lands in §13.8
 
 ### 9.8 First userspace
@@ -1371,9 +1371,9 @@ the work its claim rests on has landed is the failure KERNEL_REVIEW.md §5 found
 - [x] `reboot` (power off and restart), so the user `/bin/sh` keeps the `poweroff` and `reboot` the Phase 5 kernel shell had; x86_64 uses the ACPI and reset paths, and §11.4 puts PSCI behind the same call
 - [x] an allocator over `brk`, so `alloc` works in userspace
 - [ ] `utest_ok` / `utest_fail` / `utest_skip` on serial, asserted by `tests/harness` like the `ktest_*` protocol in `make test-e2e`, `make test-e2e-uefi`, `make test-e2e-pit`, and `make test-e2e-highmem`, where `/bin/tests` runs as a forked child of `/sbin/init`; a failing user test fails `make test`; the `utest_*` lines carry §10.2's `begin` and `run` lines and `tests/harness/skips.toml` rows, and the harness gives them the §10.2 count and progress deadline, the only deadline a user test has (F073)
-- [ ] `/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello` rewritten in the crate; the assembly sources and `mkuserelf.py` deleted
-- [ ] a signal cannot kill or stop pid 1: `sys_kill` to pid 1 delivers only signals init has a handler for, as Linux does, so none until §13.8's `rt_sigaction`; `/bin/tests` sends `SIGKILL` to pid 1, and the boot still reaches `shell ready` (F068)
-- [ ] pid 1's exit panics the kernel with a registered failure line naming its status: its exit status, or the signal that ended init and, for a fault, the faulting address; a harness case boots an initrd whose `/sbin/init` stores to address `0x1000` and finds that line naming `SIGSEGV` and `0x1000` (F068)
+- [x] `/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello` rewritten in the crate; the assembly sources and `mkuserelf.py` deleted
+- [x] a signal cannot kill or stop pid 1: `sys_kill` to pid 1 delivers only signals init has a handler for, as Linux does, so none until §13.8's `rt_sigaction`; `/bin/tests` sends `SIGKILL` to pid 1, and the boot still reaches `shell ready` (F068)
+- [x] pid 1's exit panics the kernel with a registered failure line naming its status: its exit status, or the signal that ended init and, for a fault, the faulting address; a harness case boots an initrd whose `/sbin/init` stores to address `0x1000` and finds that line naming `SIGSEGV` and `0x1000` (F068)
 - [x] a host-tested `vibeos-core` helper picks an orphan's reaper: pid 1 while its slot is live or stopped, and otherwise none, in which case the orphan's zombie is freed when it exits (F068)
 - [ ] the Rust `/sbin/init` checks every `fork`, `execve`, and `wait4` result: a nonzero `/bin/tests` status prints `init: /bin/tests exited <status>` on fd 2, which the harness fails the run on; on `ECHILD` or a failed `/bin/sh` start it writes a diagnostic to fd 2, yields, and starts `/bin/sh` again, and after three failed starts it exits non-zero, which the kernel turns into the pid 1 panic above; a harness case boots an initrd without `/bin/sh` and expects the diagnostic and that panic (F073, F128)
 - [ ] `/bin/tests` provokes every errno SYSCALL.md lists for each syscall and asserts it; each pointer argument of `read`, `write`, `open`, `execve` (path, argv, envp), `wait4` (status), `psinfo` (syscall 500), and the §10.5 additions gets a kernel-half address, an unmapped page, a range crossing `USER_MAP_END` and one crossing `USER_END`, a read-only page as a destination, a huge length, and NULL where SYSCALL.md does not allow it, and each returns `-EFAULT`; the `USER_MAP_END` and read-only cases need §10.6's `USER_MAP_END` and accessor boxes, so this box lands after them (F077)

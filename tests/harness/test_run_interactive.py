@@ -248,15 +248,17 @@ class TestDebugTarget(unittest.TestCase):
         out = subprocess.run(
             ["make", "-n", "-o", "build/vibeos.iso",
              "-o", "build/kernels/vibeos-default.elf",
-             "-o", "user/hello", "-o", "user/init", "-o", "user/sh", "-o", "user/tests",
-             "debug"],
+             "-o", str(ROOT / "build/user/.stamp"), "debug"],
             cwd=ROOT, env=env, capture_output=True, text=True, check=True,
         ).stdout.replace("\\\n", " ")
         line = next(ln for ln in out.splitlines() if "run_interactive.py debug" in ln)
         args = line.split()
         self.assertEqual(args[args.index("--kernel-elf") + 1], "build/kernels/vibeos-default.elf")
         users = [args[i + 1] for i, a in enumerate(args) if a == "--user-elf"]
-        self.assertEqual(users, ["user/hello", "user/init", "user/sh", "user/tests"])
+        # The initrd's programs before the strip (C-USERBINS).
+        self.assertEqual([os.path.basename(u) for u in users], ["hello", "init", "sh", "tests"])
+        for u in users:
+            self.assertIn("/x86_64-unknown-linux-musl/", u)
 
     def test_gdb_script(self) -> None:
         lines = [

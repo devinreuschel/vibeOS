@@ -267,6 +267,10 @@ GONE: list[tuple[str, str]] = [
     ("cpu_pair_lower_id_first", "dead scheduler and bring-up state"),
     ("SYSCALLS", "a syscall count per process: the"),
     ("src/proc/syscall_init.rs: fn syscall_count", "a syscall count per process: the"),
+    ("mkuserelf", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
+    ("scripts/mkuserelf.py", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
+    ("user/hello.asm", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
+    ("user/sh.asm", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
