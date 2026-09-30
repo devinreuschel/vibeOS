@@ -77,15 +77,16 @@ instructions only, and aarch64's table carries the same kind bit. Rejected: a pe
 count (Linux's `pagefault_disable`), which adds per-thread state to the fault path and puts the
 choice away from the instruction that faults.
 
-Each CPU gets its own GDT and TSS (`gdt::CpuTables`): the BSP's lives in a `BootCell`, and
-`gdt::alloc_ap_tables` allocates each AP's. TSS.RSP0 is the stack an interrupt or exception from
-ring 3 lands on. `syscall` does not read the TSS; its entry loads `PerCpu.kernel_rsp0`.
-`syscall_init::set_rsp0_for` sets both to the incoming thread's stack top on every switch (the
-per-CPU `fallback_rsp0` for a thread with no stack of its own); the CPU never writes RSP0. Planned
-(ROADMAP §10.3, F089): the TSS sits in an `UnsafeCell` inside `CpuTables`, and `CpuTables::set_rsp0`,
-an `unsafe fn` that only the owning CPU calls with IF=0, is its one writer after `load`; today
-`set_rsp0_for` writes through `gdt::bsp_tss_ptr`, a `*mut Tss` cast from a shared reference. The TSS
-also holds the IST array.
+Each CPU gets its own GDT and TSS (`gdt::CpuTables`): the BSP's lives in a `BootCell`, filled for
+its final address before the cell is set, and `gdt::alloc_ap_tables` allocates each AP's and keeps
+it as the pointer `TryBox::into_raw` returns, which `free_ap_tables` hands back to
+`TryBox::from_raw`. TSS.RSP0 is the stack an interrupt or exception from ring 3 lands on. `syscall`
+does not read the TSS; its entry loads `PerCpu.kernel_rsp0`. `syscall_init::set_rsp0_for` sets both
+to the incoming thread's stack top on every switch (the per-CPU `fallback_rsp0` for a thread with no
+stack of its own); the CPU never writes RSP0. The TSS sits in an `UnsafeCell` inside `CpuTables`,
+and `CpuTables::set_rsp0`, an `unsafe fn` that only the owning CPU calls with IF=0, is its one
+writer after `load`: `set_rsp0_for` reaches it through `PerCpu.tables`, which `syscall_init::init_bsp`
+and `init_ap` set (ROADMAP §10.3, F089). The TSS also holds the IST array.
 
 | Gate IST field | `IstSlot` (index) | Use |
 |----------------|-------------------|-----|

@@ -8,6 +8,13 @@
   GENERIC_IMPL_FILES. None is for a type in NO_UNSAFE_IMPL.
 - `static mut` only in catch; no `&'static mut` return; no
   `static_mut_refs` allow.
+- A provenance cast, `.cast_mut()`, `as *const` followed by `as *mut` in
+  one statement, or `addr_of!(..) as *mut`, carries a `// PROVENANCE:`
+  comment on its line or the line above, saying where write provenance
+  comes from or that nothing writes through the pointer (ROADMAP §10.3,
+  F089). Statements are read with comments stripped, so a cast split over
+  lines still matches; the line is the statement's first, and a statement
+  over several lines may carry the comment on any of them up to the cast.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ MUST_BE_UNSAFE: list[tuple[str, str]] = [
     ("src/smp/per_cpu_init.rs", "with_cpu"),
     ("src/proc/addr_space_init.rs", "load_cr3_u64"),
     ("src/proc/syscall_init.rs", "switch_cr3_for"),
+    ("src/arch/x86_64/gdt.rs", "set_rsp0"),
 ]
 
 # The only files that may hold a generic `unsafe impl` of `Send` or `Sync`
@@ -353,6 +361,66 @@ def legacy_errors(path: str, text: str) -> list[str]:
     return errors
 
 
+_CAST_MUT = re.compile(r"\.\s*cast_mut\s*\(\s*\)")
+# `as *const` then `as *mut`, with no statement boundary between them.
+_CONST_THEN_MUT = re.compile(r"\bas\s*\*\s*const\b[^;{}]*?\bas\s*\*\s*mut\b")
+_ADDR_OF = re.compile(r"\baddr_of!\s*\(")
+_AS_MUT = re.compile(r"\s*as\s*\*\s*mut\b")
+_PROVENANCE = "// PROVENANCE:"
+
+
+def provenance_casts(code: str) -> list[tuple[int, int, str]]:
+    """(start, end, form) of each provenance cast in `code`, comments and
+    literals already blanked."""
+    found: list[tuple[int, int, str]] = []
+    for m in _CAST_MUT.finditer(code):
+        found.append((m.start(), m.end(), ".cast_mut()"))
+    for m in _CONST_THEN_MUT.finditer(code):
+        found.append((m.start(), m.end(), "as *const .. as *mut"))
+    for m in _ADDR_OF.finditer(code):
+        depth, i = 1, m.end()
+        while i < len(code) and depth:
+            if code[i] == "(":
+                depth += 1
+            elif code[i] == ")":
+                depth -= 1
+            i += 1
+        tail = _AS_MUT.match(code, i) if depth == 0 else None
+        if tail:
+            found.append((m.start(), tail.end(), "addr_of!(..) as *mut"))
+    return sorted(found)
+
+
+def statement_start(code: str, pos: int) -> int:
+    """The first non-blank character of the statement holding `pos`: after
+    the last `;`, `{` or `}` before it."""
+    i = max(code.rfind(c, 0, pos) for c in ";{}") + 1
+    while i < pos and code[i].isspace():
+        i += 1
+    return i
+
+
+def provenance_errors(path: str, text: str) -> list[str]:
+    """Each provenance cast in `text` without a `// PROVENANCE:` comment on
+    a line of its statement up to the cast, or on the line above that
+    statement."""
+    code = strip_comments(text)
+    lines = text.splitlines()
+    errors: list[str] = []
+    for start, end, form in provenance_casts(code):
+        first, last = line_of(code, statement_start(code, start)), line_of(code, end)
+        noted = any(
+            _PROVENANCE in lines[n - 1] for n in range(max(first - 1, 1), last + 1)
+            if n <= len(lines)
+        )
+        if not noted:
+            errors.append(
+                f"{path}:{first}: provenance cast {form} without a `{_PROVENANCE}` comment "
+                "on its line or the line above (ROADMAP §10.3, F089)"
+            )
+    return errors
+
+
 # The kernel's sources and vibeos-core's.
 SCAN_ROOTS: tuple[str, ...] = ("src", "crates/core/src")
 
@@ -371,6 +439,7 @@ def main() -> int:
     for path, text in files.items():
         errors += legacy_errors(path, text)
         errors += impl_errors(path, text)
+        errors += provenance_errors(path, text)
     errors += must_be_unsafe_errors(files)
     if errors:
         print("\n".join(errors), file=sys.stderr)
