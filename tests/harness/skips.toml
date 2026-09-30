@@ -203,3 +203,8 @@ smp = 1
 name = "serial_lines_whole"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "shootdown_ack_while_busy"
+reason = "no AP"
+smp = 1
