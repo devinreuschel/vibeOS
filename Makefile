@@ -110,7 +110,7 @@ build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@
 $(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
+	LIMINE_DIR=$$(LIMINE_DIR) OBJCOPY=$$(OBJCOPY) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
 endif
 endef
 
@@ -147,7 +147,7 @@ ifneq ($(VIBEOS_PREBUILT),1)
 # The production ELF with the faulting init's initrd (ROADMAP §10.5): its
 # panic ends the run through pvpanic, as every production panic does.
 $(ISO_INIT_FAULT): $(KERNEL_ELF) $(INITRD_INIT_FAULT) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$(LIMINE_DIR) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ build/iso_root_init-fault
+	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ build/iso_root_init-fault
 endif
 
 # The Rust user programs (ROADMAP §10.5, C-USERBINS): each user/src/bin/<name>.rs
@@ -203,6 +203,8 @@ help:
 	  '  check                 fast local gate (clippy/unit/harness/python)' \
 	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
 	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
+	  '  fuzz-check            tests/fuzz: fmt, clippy, build every target, replay every committed input' \
+	  '  fuzz                  every cargo-fuzz target for FUZZ_TIME s (FUZZ_TARGETS=, FUZZ_SANITIZER=none|address)' \
 	  '  all / iso             kernel + build/vibeos.iso (hybrid BIOS/UEFI)' \
 	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
 	  '  user                  Rust user programs, as build/user/<name> (ROADMAP §10.5)' \
@@ -300,6 +302,7 @@ check:
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
 	$(MAKE) models-quick
 	$(MAKE) test-harness
+	$(MAKE) fuzz-check
 	$(MAKE) check-python
 	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
 	python3 scripts/gen_syscalls.py --check
@@ -314,7 +317,8 @@ check:
 	python3 scripts/doc_refs.py
 	@if command -v cargo-deny >/dev/null 2>&1; then \
 	    set -x; \
-	    cargo deny --workspace check licenses bans sources; \
+	    cargo deny --workspace check licenses bans sources && \
+	    cargo deny --manifest-path $(FUZZ_DIR)/Cargo.toml check licenses bans sources; \
 	else \
 	    $(call missing_tool,cargo-deny,cargo deny check licenses bans sources,cargo install cargo-deny --locked --version $(CARGO_DENY_PIN)); \
 	fi
@@ -378,7 +382,8 @@ isos: $(ISOS)
 # v* release images (ROADMAP §10.1, §10.2; BOOT.md §3.5): the production ISO in
 # the release profile, copied to OUT. The ISO and named-ELF paths do not name
 # the profile, so a newer dev build would be reused: remove, rebuild, verify
-# that the image's kernel is the release link's output.
+# that the image's kernel is the release link's output, less its DWARF
+# sections (scripts/mkiso.sh strips them).
 RELEASE_ELF := $(CARGO_TARGET_DIR)/$(TARGET)/release/vibeos
 release-artifacts:
 	@if [ -z "$(OUT)" ]; then echo "release-artifacts: set OUT=<dir>" >&2; exit 2; fi
@@ -388,7 +393,8 @@ release-artifacts:
 	mkdir -p "$(OUT)" && cp $(ISO) "$(OUT)/vibeos.iso"
 	rm -f build/release-kernel.elf
 	xorriso -osirrox on -indev "$(OUT)/vibeos.iso" -extract /boot/vibeos build/release-kernel.elf
-	cmp build/release-kernel.elf $(RELEASE_ELF)
+	$(OBJCOPY) --strip-debug $(RELEASE_ELF) build/release-kernel.stripped.elf
+	cmp build/release-kernel.elf build/release-kernel.stripped.elf
 
 # Two clean builds of one commit, compared byte for byte (ROADMAP §10.2,
 # DESIGN §3.6). REPRO_ARGS: see scripts/repro_build.py.
@@ -591,3 +597,57 @@ clean:
 
 distclean: clean
 	rm -rf $(LIMINE_DIR)
+
+# Fuzz targets for vibeos-core's byte parsers (C-FUZZ, TESTING.md §8.1). The
+# crate is its own workspace with its own target dir; each cargo command
+# passes the host triple, since .cargo/config.toml defaults to the kernel's.
+FUZZ_DIR := tests/fuzz
+FUZZ_TARGET_DIR := $(CURDIR)/target/fuzz
+# `make fuzz`'s output: its growing corpus and crash artifacts.
+FUZZ_OUT := $(CURDIR)/build/fuzz
+# Seconds per target, and per input before libFuzzer calls it a hang.
+FUZZ_TIME ?= 60
+FUZZ_UNIT_TIMEOUT ?= 10
+FUZZ_TARGETS ?= $(sort $(basename $(notdir $(wildcard $(FUZZ_DIR)/fuzz_targets/*.rs))))
+# AddressSanitizer is not usable with Rust on macOS hosts.
+FUZZ_SANITIZER ?= $(if $(filter Darwin,$(shell uname -s)),none,address)
+CARGO_FUZZ_VERSION := 0.13.2
+
+.PHONY: fuzz fuzz-check
+# Its own target dir, exported to every cargo and cargo-fuzz command below.
+fuzz fuzz-check: export CARGO_TARGET_DIR := $(FUZZ_TARGET_DIR)
+
+# `make check`'s fuzz step: fmt, clippy, a build of every target, and
+# `cargo test`, which replays every committed corpus and regression input
+# (no fuzzing).
+fuzz-check:
+	cargo fmt --manifest-path $(FUZZ_DIR)/Cargo.toml --check
+	cargo clippy --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --all-targets --target $(HOST_TRIPLE) -- -D warnings
+	cargo build --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --bins --target $(HOST_TRIPLE)
+	cargo test --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --target $(HOST_TRIPLE)
+
+# Run every target for FUZZ_TIME seconds. New inputs go to $(FUZZ_OUT)/corpus
+# only (libFuzzer writes to its first corpus directory), so the committed
+# corpus and regressions never grow here. A failing target does not stop the
+# rest; the recipe fails at the end, naming each with its artifacts.
+fuzz:
+	@v=$$(cargo fuzz --version 2>/dev/null | sed -n 's/^cargo-fuzz //p'); \
+	if [ "$$v" != "$(CARGO_FUZZ_VERSION)" ]; then \
+	    echo "fuzz: cargo-fuzz $(CARGO_FUZZ_VERSION) not installed (found: $${v:-none}); cargo install cargo-fuzz --locked --version $(CARGO_FUZZ_VERSION)" >&2; \
+	    exit 1; \
+	fi
+	cargo fuzz build --fuzz-dir $(FUZZ_DIR) --sanitizer $(FUZZ_SANITIZER)
+	@failed=""; \
+	for t in $(FUZZ_TARGETS); do \
+	    mkdir -p $(FUZZ_OUT)/corpus/$$t $(FUZZ_OUT)/artifacts/$$t $(FUZZ_DIR)/regressions/$$t; \
+	    echo "fuzz: $$t for $(FUZZ_TIME) s"; \
+	    cargo fuzz run --fuzz-dir $(FUZZ_DIR) --sanitizer $(FUZZ_SANITIZER) $$t \
+	        $(FUZZ_OUT)/corpus/$$t $(FUZZ_DIR)/corpus/$$t $(FUZZ_DIR)/regressions/$$t -- \
+	        -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_UNIT_TIMEOUT) -rss_limit_mb=2048 \
+	        -artifact_prefix=$(FUZZ_OUT)/artifacts/$$t/ || failed="$$failed $$t"; \
+	done; \
+	if [ -n "$$failed" ]; then \
+	    for t in $$failed; do echo "fuzz: FAIL $$t: artifacts in $(FUZZ_OUT)/artifacts/$$t" >&2; done; \
+	    exit 1; \
+	fi; \
+	echo "fuzz: ok ($(words $(FUZZ_TARGETS)) targets, $(FUZZ_TIME) s each)"
