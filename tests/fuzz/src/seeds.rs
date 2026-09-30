@@ -6,10 +6,17 @@
 
 use vibeos::acpi;
 use vibeos::block::part::{self, GptHeaderInfo};
+use vibeos::boot::cmdline;
+use vibeos::elf;
 use vibeos::fat::{self, FatInode, FatVol};
 use vibeos::fs::InodeKind;
+use vibeos::log::vmcoreinfo;
+use vibeos::pci;
+use vibeos::shell::MAX_TOKENS;
 use vibeos::vibefs::{self, Vol};
+use vibeos::virtio;
 
+use crate::cfgspace::FakeCfg;
 use crate::image::{FLAG_4K, FLAG_FIX_CRC, Sparse};
 use crate::physmem::BASE;
 
@@ -56,6 +63,37 @@ pub fn corpus() -> Vec<Seed> {
         "vibefs",
         Sparse::encode_image(0, &vibefs_image(), vibefs::BLOCK),
     ));
+    out.push(seed("pci_enumerate", "bus", pci_bus()));
+    out.push(seed(
+        "virtio_caps",
+        "virtio-blk",
+        FakeCfg::encode(&[(0, 0, &virtio_blk_cfg())]),
+    ));
+    out.push(seed(
+        "shell_tokenize",
+        "quotes",
+        line(MAX_TOKENS, "echo 'a b' \"c\" d"),
+    ));
+    out.push(seed(
+        "shell_tokenize",
+        "unclosed",
+        line(MAX_TOKENS, "echo \"abc"),
+    ));
+    let words: Vec<String> = (0..=MAX_TOKENS).map(|i| format!("w{i}")).collect();
+    out.push(seed(
+        "shell_tokenize",
+        "too-many",
+        line(MAX_TOKENS, &words.join(" ")),
+    ));
+    out.push(seed("kbd_decode", "session", kbd_session()));
+    out.push(seed("elf_parse", "tiny", tiny_elf()));
+    for (name, data) in elf_fixtures() {
+        out.push(seed("elf_parse", &name, data));
+    }
+    out.push(seed("cmdline_parse", "options", cmdline_seed()));
+    out.push(seed("vmcoreinfo_parse", "note", vmcoreinfo_note()));
+    out.push(seed("vmcoreinfo_parse", "build-id", build_id_note()));
+    out.push(seed("vmcoreinfo_parse", "fw-cfg", fw_cfg_vmcoreinfo()));
     out
 }
 
@@ -397,4 +435,282 @@ pub fn vibefs_image() -> Vec<u8> {
         v.sync(&mut d).expect("sync");
     }
     img
+}
+
+// ------------------ PCI and virtio ------------------
+
+/// A type-0 or type-1 header: vendor, device, class, subclass, header type.
+fn cfg_header(vendor: u16, device: u16, class: u8, sub: u8, header: u8) -> [u8; 256] {
+    let mut c = [0u8; 256];
+    c[0..2].copy_from_slice(&vendor.to_le_bytes());
+    c[2..4].copy_from_slice(&device.to_le_bytes());
+    c[0x0A] = sub;
+    c[0x0B] = class;
+    c[0x0E] = header;
+    c
+}
+
+fn put32(c: &mut [u8; 256], off: usize, v: u32) {
+    c[off..off + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+/// Chain the capability at `at` (id, next) into `c`'s list after `prev`:
+/// sets STATUS.CAPS, and CAP_PTR when `prev` is 0.
+fn cap(c: &mut [u8; 256], prev: usize, at: usize, id: u8) {
+    c[0x06] |= 0x10;
+    if prev == 0 {
+        c[0x34] = at as u8;
+    } else {
+        c[prev + 1] = at as u8;
+    }
+    c[at] = id;
+    c[at + 1] = 0;
+}
+
+/// A modern virtio-blk function (1AF4:1042): a 64-bit BAR 4, its four
+/// vendor capabilities (common, notify, ISR, device) and an MSI-X cap.
+pub fn virtio_blk_cfg() -> [u8; 256] {
+    let mut c = cfg_header(virtio::VENDOR_ID, virtio::DEV_BLK_MODERN, 0x01, 0x00, 0);
+    c[0x2C..0x2E].copy_from_slice(&virtio::VENDOR_ID.to_le_bytes());
+    c[0x2E..0x30].copy_from_slice(&2u16.to_le_bytes());
+    put32(&mut c, 0x14, 0xFEBD_0000);
+    put32(&mut c, 0x20, 0xFE00_000C);
+    put32(&mut c, 0x24, 0);
+    c[0x3D] = 1;
+    let caps: [(u8, u32, u32, u32); 4] = [
+        (virtio::PCI_CAP_COMMON, 0x0000, 0x1000, 0),
+        (virtio::PCI_CAP_ISR, 0x1000, 0x1000, 0),
+        (virtio::PCI_CAP_DEVICE, 0x2000, 0x1000, 0),
+        (virtio::PCI_CAP_NOTIFY, 0x3000, 0x1000, 4),
+    ];
+    let mut prev = 0usize;
+    let mut at = 0x40usize;
+    for (ty, off, len, mult) in caps {
+        cap(&mut c, prev, at, pci::CAP_VENDOR);
+        let clen = if ty == virtio::PCI_CAP_NOTIFY { 20 } else { 16 };
+        c[at + 2] = clen;
+        c[at + 3] = ty;
+        c[at + 4] = 4;
+        put32(&mut c, at + 8, off);
+        put32(&mut c, at + 12, len);
+        if ty == virtio::PCI_CAP_NOTIFY {
+            put32(&mut c, at + 16, mult);
+        }
+        prev = at;
+        at += 0x14;
+    }
+    cap(&mut c, prev, at, pci::CAP_MSIX);
+    c[at + 2..at + 4].copy_from_slice(&1u16.to_le_bytes());
+    put32(&mut c, at + 4, 0x0000_0001);
+    put32(&mut c, at + 8, 0x0000_0801);
+    c
+}
+
+/// Bus 0: a host bridge, a PCI-to-PCI bridge to bus 1 with a NIC behind it
+/// (an MSI cap), a function with a 64-bit BAR, and the virtio-blk function.
+fn pci_bus() -> Vec<u8> {
+    let host = cfg_header(0x8086, 0x29C0, 0x06, 0x00, 0);
+    let mut bridge = cfg_header(0x1B36, 0x000C, 0x06, 0x04, pci::HEADER_BRIDGE);
+    bridge[0x18] = 0;
+    bridge[0x19] = 1;
+    bridge[0x1A] = 1;
+    let mut nic = cfg_header(0x8086, 0x100E, 0x02, 0x00, 0);
+    put32(&mut nic, 0x10, 0xFEB8_0000);
+    put32(&mut nic, 0x14, 0xC001);
+    cap(&mut nic, 0, 0x50, pci::CAP_MSI);
+    nic[0x52..0x54].copy_from_slice(&pci::MSI_CTL_64BIT.to_le_bytes());
+    let mut wide = cfg_header(0x1234, 0x1111, 0x03, 0x00, pci::HEADER_MULTI);
+    put32(&mut wide, 0x10, 0xFD00_000C);
+    put32(&mut wide, 0x14, 0x0000_0010);
+    let wide_fn1 = cfg_header(0x1234, 0x1112, 0x03, 0x80, 0);
+    let blk = virtio_blk_cfg();
+    FakeCfg::encode(&[
+        (0, 0x00, &host),
+        (0, 0x08, &bridge),
+        (1, 0x00, &nic),
+        (0, 0x10, &wide),
+        (0, 0x11, &wide_fn1),
+        (0, 0x18, &blk),
+    ])
+}
+
+// ------------------ shell and keyboard ------------------
+
+/// A `shell_tokenize` input: the slot count, then the line.
+fn line(slots: usize, s: &str) -> Vec<u8> {
+    let mut v = vec![slots as u8];
+    v.extend_from_slice(s.as_bytes());
+    v
+}
+
+/// The set-1 make and break of each key in `keys`.
+fn taps(keys: &[u8]) -> Vec<u8> {
+    keys.iter().flat_map(|&k| [k, k | 0x80]).collect()
+}
+
+/// `ls -l` and Enter; shift; E0 Up to recall it and Enter; E1 Pause;
+/// Ctrl-C; Caps Lock around a letter.
+fn kbd_session() -> Vec<u8> {
+    const L: u8 = 0x26;
+    const S: u8 = 0x1F;
+    const SPACE: u8 = 0x39;
+    const MINUS: u8 = 0x0C;
+    const ENTER: u8 = 0x1C;
+    const LSHIFT: u8 = 0x2A;
+    const CTRL: u8 = 0x1D;
+    const C: u8 = 0x2E;
+    const A: u8 = 0x1E;
+    const CAPS: u8 = 0x3A;
+    let mut v = taps(&[L, S, SPACE, MINUS, L, ENTER]);
+    v.push(LSHIFT);
+    v.extend(taps(&[L, S]));
+    v.push(LSHIFT | 0x80);
+    v.extend(taps(&[ENTER]));
+    v.extend_from_slice(&[0xE0, 0x48, 0xE0, 0xC8]);
+    v.extend_from_slice(&[0xE0, 0x4B, 0xE0, 0xCB]);
+    v.extend(taps(&[ENTER]));
+    v.extend_from_slice(&[0xE1, 0x1D, 0x45, 0xE1, 0x9D, 0xC5]);
+    v.push(CTRL);
+    v.extend(taps(&[C]));
+    v.push(CTRL | 0x80);
+    v.extend(taps(&[CAPS, A, CAPS, A, ENTER]));
+    v
+}
+
+// ------------------ ELF ------------------
+
+/// A static ELF: a `PT_LOAD` of the whole file at 0x40_0000, a `PT_TLS`
+/// inside it, and a non-executable `PT_GNU_STACK`.
+fn tiny_elf() -> Vec<u8> {
+    let phnum = 3u16;
+    let code_off = elf::EHDR_SIZE + elf::PHDR_SIZE * usize::from(phnum);
+    let tls_off = code_off + 16;
+    let len = tls_off + 16;
+    let base = 0x40_0000u64;
+    let mut f = vec![0u8; len];
+    f[0..4].copy_from_slice(&[elf::ELFMAG0, b'E', b'L', b'F']);
+    f[4] = elf::ELFCLASS64;
+    f[5] = elf::ELFDATA2LSB;
+    f[6] = elf::EV_CURRENT;
+    f[16..18].copy_from_slice(&elf::ET_EXEC.to_le_bytes());
+    f[18..20].copy_from_slice(&elf::EM_X86_64.to_le_bytes());
+    f[20..24].copy_from_slice(&1u32.to_le_bytes());
+    f[24..32].copy_from_slice(&(base + code_off as u64).to_le_bytes());
+    f[32..40].copy_from_slice(&(elf::EHDR_SIZE as u64).to_le_bytes());
+    f[52..54].copy_from_slice(&(elf::EHDR_SIZE as u16).to_le_bytes());
+    f[54..56].copy_from_slice(&(elf::PHDR_SIZE as u16).to_le_bytes());
+    f[56..58].copy_from_slice(&phnum.to_le_bytes());
+    // (type, flags, offset, vaddr, filesz, memsz, align)
+    let phdrs: [(u32, u32, u64, u64, u64, u64, u64); 3] = [
+        (
+            elf::PT_LOAD,
+            elf::PF_R | elf::PF_X,
+            0,
+            base,
+            len as u64,
+            len as u64,
+            0x1000,
+        ),
+        (
+            elf::PT_TLS,
+            elf::PF_R,
+            tls_off as u64,
+            base + tls_off as u64,
+            16,
+            32,
+            8,
+        ),
+        (elf::PT_GNU_STACK, elf::PF_R | elf::PF_W, 0, 0, 0, 0, 16),
+    ];
+    for (i, (ty, fl, off, va, fsz, msz, al)) in phdrs.into_iter().enumerate() {
+        let p = elf::EHDR_SIZE + i * elf::PHDR_SIZE;
+        f[p..p + 4].copy_from_slice(&ty.to_le_bytes());
+        f[p + 4..p + 8].copy_from_slice(&fl.to_le_bytes());
+        f[p + 8..p + 16].copy_from_slice(&off.to_le_bytes());
+        f[p + 16..p + 24].copy_from_slice(&va.to_le_bytes());
+        f[p + 24..p + 32].copy_from_slice(&va.to_le_bytes());
+        f[p + 32..p + 40].copy_from_slice(&fsz.to_le_bytes());
+        f[p + 40..p + 48].copy_from_slice(&msz.to_le_bytes());
+        f[p + 48..p + 56].copy_from_slice(&al.to_le_bytes());
+    }
+    // `jmp .` at the entry, then the TLS init image.
+    f[code_off] = 0xEB;
+    f[code_off + 1] = 0xFE;
+    f[tls_off..tls_off + 8].copy_from_slice(b"tlsinit!");
+    f
+}
+
+/// P10-S72's fixture binaries, `tests/fixtures/elf/*` files that start with
+/// the ELF magic, by name.
+fn elf_fixtures() -> Vec<(String, Vec<u8>)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/elf");
+    let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
+        .expect("tests/fixtures/elf")
+        .map(|e| e.expect("read_dir entry").path())
+        .filter_map(|p| {
+            let data = std::fs::read(&p).ok()?;
+            let name = p.file_name()?.to_string_lossy().into_owned();
+            data.starts_with(b"\x7fELF").then_some((name, data))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+// ------------------ command line and notes ------------------
+
+/// Every option `cmdline::OPTIONS` lists (BOOT.md §3.2) with a value, a
+/// `sysctl.` word, a dotted unknown word, undotted `name=value` words, a
+/// quoted value, then `--` and init's arguments.
+pub fn cmdline_seed() -> Vec<u8> {
+    let mut s = String::new();
+    for (i, o) in cmdline::OPTIONS.iter().enumerate() {
+        s.push_str(&format!("{}={} ", o.name, i + 1));
+    }
+    s.push_str("sysctl.kernel.printk=4 unknown.dotted=1 vendor.flag HOME=/ TERM=\"vt 100\" ");
+    s.push_str("single -- --init-arg vibeos.strace=0");
+    s.into_bytes()
+}
+
+/// A VMCOREINFO note as `render` writes it.
+fn vmcoreinfo_note() -> Vec<u8> {
+    let info = vmcoreinfo::Info {
+        osrelease: "0.8.0",
+        build_id: &[0xAB; 20],
+        page_size: 4096,
+        pgt_root: 0x10_0000,
+        pgt_levels: 4,
+        log: 0xFFFF_FFFF_8010_0000,
+        tcbs: 0xFFFF_FFFF_8020_0000,
+        tcbs_len: 64,
+        cpus: 0xFFFF_FFFF_8030_0000,
+        cpus_len: 64,
+    };
+    let mut out = vec![0u8; vmcoreinfo::NOTE_MAX];
+    let n = vmcoreinfo::render(&info, &mut out).expect("render");
+    out.truncate(n);
+    out
+}
+
+/// A GNU build-id note: `namesz` 4, `descsz` 20, type 3, `GNU\0`, the id.
+fn build_id_note() -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(&4u32.to_le_bytes());
+    v.extend_from_slice(&20u32.to_le_bytes());
+    v.extend_from_slice(&vmcoreinfo::NT_GNU_BUILD_ID.to_le_bytes());
+    v.extend_from_slice(b"GNU\0");
+    v.extend_from_slice(&[0x5A; 20]);
+    v
+}
+
+/// QEMU's `etc/vmcoreinfo` payload naming an ELF note at 0x1000.
+fn fw_cfg_vmcoreinfo() -> Vec<u8> {
+    vmcoreinfo::FwCfgVmcoreinfo {
+        host_format: vmcoreinfo::FORMAT_ELF,
+        guest_format: vmcoreinfo::FORMAT_ELF,
+        size: 256,
+        paddr: 0x1000,
+    }
+    .to_le_bytes()
+    .to_vec()
 }

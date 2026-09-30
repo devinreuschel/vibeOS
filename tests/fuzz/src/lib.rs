@@ -44,9 +44,29 @@ pub const TARGETS: &[Target] = &[
         covers: &["acpi/mod.rs"],
     },
     Target {
+        name: "cmdline_parse",
+        run: cmdline_parse,
+        covers: &[
+            "boot/cmdline.rs",
+            "boot/mod.rs::parse_fw_cfg_dir_count",
+            "boot/mod.rs::parse_fw_cfg_dir_entry",
+            "boot/mod.rs::fw_cfg_dma_access",
+        ],
+    },
+    Target {
+        name: "elf_parse",
+        run: elf_parse,
+        covers: &["proc/elf.rs"],
+    },
+    Target {
         name: "fat_mount",
         run: fat_mount,
         covers: &["fs/fat/mod.rs"],
+    },
+    Target {
+        name: "kbd_decode",
+        run: kbd_decode,
+        covers: &["console/kbd.rs::Decoder::feed", "shell/mod.rs::tokenize"],
     },
     Target {
         name: "part_parse",
@@ -54,9 +74,29 @@ pub const TARGETS: &[Target] = &[
         covers: &["block/part.rs"],
     },
     Target {
+        name: "pci_enumerate",
+        run: pci_enumerate,
+        covers: &["dev/pci.rs"],
+    },
+    Target {
+        name: "shell_tokenize",
+        run: shell_tokenize,
+        covers: &["shell/mod.rs::tokenize"],
+    },
+    Target {
         name: "vibefs_mount",
         run: vibefs_mount,
         covers: &["fs/vibefs/mod.rs"],
+    },
+    Target {
+        name: "virtio_caps",
+        run: virtio_caps,
+        covers: &["dev/virtio.rs::read_modern_caps", "dev/pci.rs"],
+    },
+    Target {
+        name: "vmcoreinfo_parse",
+        run: vmcoreinfo_parse,
+        covers: &["log/vmcoreinfo.rs"],
     },
 ];
 
@@ -83,4 +123,39 @@ pub fn fat_mount(data: &[u8]) {
 /// `vibefs::mount` over a [`image::Sparse`] image, then a walk and `fsck`.
 pub fn vibefs_mount(data: &[u8]) {
     targets::vibefs::mount(data);
+}
+
+/// `cmdline::parse` and its accessors, then the fw_cfg directory encodings.
+pub fn cmdline_parse(data: &[u8]) {
+    targets::cmdline::parse(data);
+}
+
+/// `elf::parse` on the input as a whole file.
+pub fn elf_parse(data: &[u8]) {
+    targets::elf::parse(data);
+}
+
+/// Set-1 scancodes through `kbd::Decoder` into the shell's line editor.
+pub fn kbd_decode(data: &[u8]) {
+    targets::shell::kbd(data);
+}
+
+/// `pci::enumerate` over a [`cfgspace::FakeCfg`].
+pub fn pci_enumerate(data: &[u8]) {
+    targets::pci::enumerate(data);
+}
+
+/// `shell::tokenize` on the input as a line.
+pub fn shell_tokenize(data: &[u8]) {
+    targets::shell::tokenize(data);
+}
+
+/// `virtio::read_modern_caps` over a [`cfgspace::FakeCfg`].
+pub fn virtio_caps(data: &[u8]) {
+    targets::pci::virtio_caps(data);
+}
+
+/// The VMCOREINFO and build-id note readers.
+pub fn vmcoreinfo_parse(data: &[u8]) {
+    targets::vmcoreinfo::parse(data);
 }

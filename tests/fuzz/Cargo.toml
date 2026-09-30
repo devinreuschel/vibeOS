@@ -38,8 +38,29 @@ doc = false
 bench = false
 
 [[bin]]
+name = "cmdline_parse"
+path = "fuzz_targets/cmdline_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "elf_parse"
+path = "fuzz_targets/elf_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fat_mount"
 path = "fuzz_targets/fat_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kbd_decode"
+path = "fuzz_targets/kbd_decode.rs"
 test = false
 doc = false
 bench = false
@@ -52,8 +73,36 @@ doc = false
 bench = false
 
 [[bin]]
+name = "pci_enumerate"
+path = "fuzz_targets/pci_enumerate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shell_tokenize"
+path = "fuzz_targets/shell_tokenize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "vibefs_mount"
 path = "fuzz_targets/vibefs_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "virtio_caps"
+path = "fuzz_targets/virtio_caps.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vmcoreinfo_parse"
+path = "fuzz_targets/vmcoreinfo_parse.rs"
 test = false
 doc = false
 bench = false

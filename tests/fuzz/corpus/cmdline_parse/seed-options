@@ -1,0 +1,1 @@
+vibeos.strace=1 loglevel=2 vibeos.ktest=3 vibeos.ktest_repeat=4 sysctl.kernel.printk=4 unknown.dotted=1 vendor.flag HOME=/ TERM="vt 100" single -- --init-arg vibeos.strace=0

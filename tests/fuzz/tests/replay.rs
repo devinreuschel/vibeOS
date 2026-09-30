@@ -15,7 +15,10 @@ use std::thread;
 use std::time::Duration;
 
 use vibeos::block::part;
-use vibeos::{acpi, fat, vibefs};
+use vibeos::boot::cmdline;
+use vibeos::pci::Bdf;
+use vibeos::{acpi, elf, fat, pci, shell, vibefs, virtio};
+use vibeos_fuzz::cfgspace::FakeCfg;
 use vibeos_fuzz::image::{FLAG_4K, Sparse};
 use vibeos_fuzz::physmem::{BASE, FlatMem};
 use vibeos_fuzz::{TARGETS, seeds};
@@ -189,7 +192,8 @@ fn seeds_are_committed_and_accepted() {
             t.name
         );
     }
-    accept_step2();
+    accept_storage();
+    accept_devices();
 }
 
 /// The data of the seed `target/seed-<name>`.
@@ -201,7 +205,8 @@ fn seed_data(target: &str, name: &str) -> Vec<u8> {
         .data
 }
 
-fn accept_step2() {
+/// The ACPI, partition and filesystem seeds reach the parsers' results.
+fn accept_storage() {
     // ACPI: each root table yields the MADT, HPET, FADT PM timer and MCFG.
     for (name, xsdt) in [("xsdt", true), ("rsdt", false)] {
         let data = seed_data("acpi_walk", name);
@@ -268,4 +273,105 @@ fn accept_step2() {
     v.walk(&mut d, b"/dir/inner.txt").expect("vibefs walk");
     let r = vibefs::fsck(&mut d).expect("fsck");
     assert_eq!(r.errors, 0);
+}
+
+/// The device, shell, ELF and command-line seeds reach the parsers' results.
+fn accept_devices() {
+    let mut cfg = FakeCfg::parse(&seed_data("pci_enumerate", "bus"));
+    let mut out = vec![pci::FuncInfo::empty(); pci::MAX_SCAN];
+    let n = pci::enumerate(&mut cfg, 0, &mut out);
+    assert_eq!(
+        n, 6,
+        "host bridge, bridge, NIC behind it, two functions, virtio-blk"
+    );
+    assert!(
+        out[..n]
+            .iter()
+            .any(|f| f.bdf == Bdf::new(1, 0, 0) && f.caps.msi.is_some())
+    );
+    assert!(
+        out[..n]
+            .iter()
+            .any(|f| f.bars[0].kind == pci::BarKind::Mem64)
+    );
+    let mut cfg = FakeCfg::parse(&seed_data("virtio_caps", "virtio-blk"));
+    let caps = virtio::read_modern_caps(&mut cfg, Bdf::new(0, 0, 0));
+    assert!(caps.is_complete() && caps.device.is_some());
+    assert_eq!(caps.notify.map(|c| c.notify_off_multiplier), Some(4));
+    let mut slots = [""; shell::MAX_TOKENS];
+    let data = seed_data("shell_tokenize", "quotes");
+    let line = std::str::from_utf8(&data[1..]).unwrap();
+    assert_eq!(shell::tokenize(line, &mut slots), Ok(4));
+    assert_eq!(&slots[..4], ["echo", "a b", "c", "d"]);
+    for s in seeds::corpus().iter().filter(|s| s.target == "elf_parse") {
+        elf::parse(&s.data).unwrap_or_else(|e| panic!("{}: {e:?}", s.name));
+    }
+    let tiny = elf::parse(&seed_data("elf_parse", "tiny")).unwrap();
+    assert!(tiny.tls.is_some() && !tiny.stack_exec);
+    let data = seed_data("cmdline_parse", "options");
+    let c = cmdline::parse(&data);
+    for (i, o) in cmdline::OPTIONS.iter().enumerate() {
+        assert_eq!(
+            c.get(o.name),
+            Some(format!("{}", i + 1).as_bytes()),
+            "{}",
+            o.name
+        );
+    }
+    assert_eq!(c.init_env().count(), 2);
+}
+
+/// The quoted rows of `scripts/check_core_stable.py`'s `PARSERS` table, as
+/// `path`, or `path::target` for a `fn` row.
+fn listed_parsers() -> Vec<String> {
+    let py = fs::read_to_string(root().join("../../scripts/check_core_stable.py"))
+        .expect("scripts/check_core_stable.py");
+    let mut rows = Vec::new();
+    let mut inside = false;
+    for line in py.lines() {
+        if line.starts_with("PARSERS:") {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if line.starts_with(')') {
+            break;
+        }
+        let q: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+        let [path, kind, target] = q[..] else {
+            panic!("check_core_stable.py: PARSERS row this scan cannot read: {line}");
+        };
+        rows.push(if kind == "fn" {
+            format!("{path}::{target}")
+        } else {
+            path.to_owned()
+        });
+    }
+    assert!(!rows.is_empty(), "check_core_stable.py: no PARSERS table");
+    rows
+}
+
+#[test]
+fn every_listed_parser_has_a_target() {
+    let covered: BTreeSet<&str> = TARGETS
+        .iter()
+        .flat_map(|t| t.covers.iter().copied())
+        .collect();
+    let listed = listed_parsers();
+    let missing: Vec<&String> = listed
+        .iter()
+        .filter(|p| !covered.contains(p.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "PARSERS rows no Target.covers names (C-FUZZ: add a target): {missing:?}"
+    );
+    for c in &covered {
+        assert!(
+            listed.iter().any(|p| p == c),
+            "Target.covers names {c}, which is not a PARSERS row"
+        );
+    }
 }
