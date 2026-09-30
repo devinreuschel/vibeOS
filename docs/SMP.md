@@ -220,8 +220,12 @@ One `PerCpu` struct per CPU. In ring 0, `GS_BASE` holds its address. While the C
 without knowing which CPU you are on. Taking that reference is legal only with IF=0, and the
 reference dies with the IF=0 stretch ([§2.9](INVARIANTS.md#29-preemption-and-interrupt-state) rule 5). `current`
 is never read through it: `arch::current_tcb()` loads `current` with one `gs`-relative instruction,
-and `arch::cpu_id_hint()` loads `cpu_id` the same way for callers that tolerate a stale id. Rule;
-not yet enforced: ROADMAP §10.3 (F039).
+and `arch::cpu_id_hint()` loads `cpu_id` the same way for callers that tolerate a stale id (the log
+prefix, virtio-blk's queue choice, the panic dump, a new thread's placement). Both live in
+`arch::x86_64::percpu`, with the per-CPU-live flag, and return null or 0 before it is set. Debug
+builds assert IF=0 in `per_cpu_init::current()` and `try_current()` from `irq: enabled` on, and
+`scripts/check_current.py` rejects a read of `PerCpu.current` outside `src/arch/` (ROADMAP §10.3,
+F039).
 
 Contents (`crates/core/src/smp/per_cpu.rs`):
 
@@ -231,7 +235,7 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
   only an in-guest test reads (ROADMAP §10.7 deletes it, F111)
 - `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `tsc_per_ms` (a copy of the BSP's value, [section 6.2](TIME.md#62-calibrating-the-tsc)) and `timer_mode`
-- `kernel_rsp0`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
+- `kernel_rsp0`, which the context switch updates; `tables`, this CPU's `gdt::CpuTables` (opaque in `vibeos-core`), through whose `set_rsp0` it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
 - `syscall_scratch`: one word, the user RSP between `syscall` and the entry's stack switch, which
   copies it into the user frame. It is per CPU, not per thread, so it is valid only while IF=0; the
   entry's `sti` follows the copy. No exit writes it: the exit keeps the return value and its
@@ -279,7 +283,7 @@ incoming thread can take IRQs and `with_current`. `with_cpu` is an `unsafe fn` f
 running: `smp_init` uses it before an AP's SIPI, and after a SIPI it clears only the view.
 `ap_entry` holds its slot's `&mut` from `STARTING` until it publishes `ready`. `current()` and
 `try_current()` return `&'static PerCpu`, which must not be live across a `with_current*` scope or a
-preemption point. Rule; not yet enforced: ROADMAP §10.3's `current` box (F039).
+preemption point; both assert IF=0 in debug builds from `irq: enabled` on (ROADMAP §10.3, F039).
 
 ### Per-thread CPU state
 
@@ -298,7 +302,7 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | both | `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
 | x86_64 | user GPRs, RIP, RSP, RFLAGS, CS, SS, and the original syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](INTERRUPTS.md#510-privilege-transitions)), saved by every entry from ring 3 | the RSP0 switch, which gives each thread its own entry stack | switched: the syscall entry and every generated stub for a CS.RPL 3 frame save all 21 words of `UserFrame` at the top of the thread's kernel stack, and every return to ring 3 restores from it; `thread_init::spawn_user` writes a new thread's |
 | x86_64 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched, by the binding as built: `PerCpu.fp_owner` and `Tcb.fp_cpu`, whose transitions are `vibeos::fpu`. `syscall_init::switch_fpu` in `on_switch` saves a live state with `fp_save` and loads nothing; `vibeos_fp_user_return` runs with IF=0 after the syscall exit's `cli`, in `idt::exit_to_user` after a `cli`, and in a new thread's first return, which enters the syscall exit after its `cli`, and loads with `fp_load` when the registers hold another thread's state. The syscall entry and exit neither save nor restore it. A new TCB, and one `fill_tcb` reuses, starts with `fp_cpu` empty, and `thread_init::fp_invalidate` empties it for a write to `Tcb.fpu`. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §10.6, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
-| x86_64 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, which every thread has, the bootstrap thread included (`thread_init::init_bootstrap`); `fallback_rsp0` only for a thread without one | `set_rsp0_for` in `on_switch` | switched |
+| x86_64 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, which every thread has, the bootstrap thread included (`thread_init::init_bootstrap`); `fallback_rsp0` only for a thread without one | `set_rsp0_for` in `on_switch`, through `CpuTables::set_rsp0` on `PerCpu.tables` | switched |
 | x86_64 | CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
 | x86_64 | FS_BASE (user TLS) | not saved | nothing | not switched. `syscall_init::first_return` (from `Proc.fs_base`) and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §11.6, F022). |
 | x86_64 | user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3); from then on it is per thread, and while the thread is in the kernel it is in `KERNEL_GS_BASE` whichever vector it entered by, IST vectors included ([section 5.10](INTERRUPTS.md#510-privilege-transitions) rule 3), where the switch away reads it |

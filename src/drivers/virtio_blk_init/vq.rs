@@ -20,12 +20,11 @@ pub(super) fn clamp_qsize(hw: u16) -> u16 {
 }
 
 pub(super) fn prefer_vq() -> usize {
-    let cpu = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
-    cpu as usize
+    crate::arch::cpu_id_hint() as usize
 }
 
 pub(super) fn vq_has_room(v: &Vq, need: u16) -> bool {
-    v.vq.num_free >= need
+    v.vq.num_free() >= need
 }
 
 pub(super) fn pick_vq(blk: &Blk, need: u16) -> Option<usize> {

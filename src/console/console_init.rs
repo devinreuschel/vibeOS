@@ -95,7 +95,7 @@ fn wait_key_loop() -> DecodedKey {
         if let Some(k) = read() {
             return k;
         }
-        if !per_cpu_init::current().runq.is_empty() {
+        if !per_cpu_init::with_current(|c| c.runq.is_empty()) {
             thread_init::yield_now();
             continue;
         }

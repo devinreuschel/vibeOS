@@ -263,7 +263,7 @@ impl VirtioBlk {
                 return Issued::Full(req);
             }
         };
-        let old = v.vq.last_avail;
+        let old = v.vq.last_avail();
         let head = match v.vq.add_chain(&chain[..nchain]) {
             Ok(h) => h,
             Err(_) => {

@@ -45,8 +45,13 @@ impl WaitQueue {
         self.waiters.remove(id)
     }
 
-    pub fn cookie(&self) -> usize {
-        self as *const WaitQueue as usize
+    /// This queue's address, with its provenance exposed: a Blocked
+    /// thread records it, and the kernel's unlink rebuilds the `*mut
+    /// WaitQueue` with `ptr::with_exposed_provenance_mut`, so the write it
+    /// makes derives from this `&mut`, not from a `&self` (ROADMAP §10.3,
+    /// F089).
+    pub fn cookie(&mut self) -> usize {
+        core::ptr::from_mut(self).expose_provenance()
     }
 }
 
@@ -584,8 +589,9 @@ mod tests {
 
     #[test]
     fn cookie_is_address() {
-        let wq = WaitQueue::new();
-        assert_eq!(wq.cookie(), &wq as *const WaitQueue as usize);
+        let mut wq = WaitQueue::new();
+        let at = core::ptr::from_ref(&wq).addr();
+        assert_eq!(wq.cookie(), at);
         assert_eq!(deadline_of(None), FAR_DEADLINE);
         enqueue_runnable(
             &mut ReadyQueue::empty(),

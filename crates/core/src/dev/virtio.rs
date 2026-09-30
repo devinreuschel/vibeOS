@@ -431,12 +431,12 @@ unsafe impl Send for RingPtr {}
 pub struct SplitQueue<A: Barriers> {
     layout: SplitLayout,
     base: RingPtr,
-    pub last_used: u16,
+    last_used: u16,
     free_head: u16,
-    pub num_free: u16,
+    num_free: u16,
     pub event_idx: bool,
     /// Avail idx last published. Kick uses this as `old`.
-    pub last_avail: u16,
+    last_avail: u16,
     _port: PhantomData<fn() -> A>,
 }
 
@@ -460,8 +460,26 @@ impl<A: Barriers> SplitQueue<A> {
         }
     }
 
+    // The layout and the cursors are private, with these read accessors,
+    // so the safe methods reach only the ring memory `new`'s contract
+    // covers (ROADMAP §10.3, F042).
     pub fn layout(&self) -> SplitLayout {
         self.layout
+    }
+
+    /// The used index this queue has consumed up to.
+    pub fn last_used(&self) -> u16 {
+        self.last_used
+    }
+
+    /// Descriptors free for `add`.
+    pub fn num_free(&self) -> u16 {
+        self.num_free
+    }
+
+    /// The avail index last published, which a kick passes as `old`.
+    pub fn last_avail(&self) -> u16 {
+        self.last_avail
     }
 
     /// Byte offset `off` of a `len`-byte ring field, checked against the
@@ -1043,7 +1061,7 @@ mod tests {
         while n < 20 {
             let da = data_off;
             q.add(da, 8, DESC_F_WRITE).unwrap();
-            let old = q.last_avail;
+            let old = q.last_avail();
             let new = q.publish();
             // The device asks for a kick at `old` (the first buffer since the
             // last kick) and not at `new` (already notified past it).
@@ -1060,7 +1078,7 @@ mod tests {
             assert_eq!(q.get_used(), None);
             n += 1;
         }
-        assert_eq!(q.num_free, 4);
+        assert_eq!(q.num_free(), 4);
         assert_eq!(q.avail_idx(), 20);
         assert_eq!(q.used_idx(), 20);
     }
@@ -1093,7 +1111,7 @@ mod tests {
             let mut q = queue(layout, base, event_idx);
             q.init();
             q.add(data_off, 8, DESC_F_WRITE).unwrap();
-            let old = q.last_avail;
+            let old = q.last_avail();
             dma::trace::start();
             q.publish();
             let _ = q.should_kick(old);
@@ -1155,7 +1173,7 @@ mod tests {
         }
         q.wr16(q.layout.used_flags(), USED_F_NO_NOTIFY);
         q.add(data_off, 4, DESC_F_WRITE).unwrap();
-        let old = q.last_avail;
+        let old = q.last_avail();
         q.publish();
         assert!(!q.should_kick(old));
     }
@@ -1196,7 +1214,7 @@ mod tests {
                 },
             ])
             .unwrap();
-        assert_eq!(q.num_free, 5);
+        assert_eq!(q.num_free(), 5);
         assert_eq!(q.desc_flags(head) & DESC_F_NEXT, DESC_F_NEXT);
         let d1 = q.desc_next(head);
         assert_eq!(q.desc_flags(d1) & DESC_F_NEXT, DESC_F_NEXT);
@@ -1215,7 +1233,7 @@ mod tests {
         let u = q.get_used().unwrap();
         assert_eq!(u.id, head);
         assert_eq!(u.len, 513);
-        assert_eq!(q.num_free, 8);
+        assert_eq!(q.num_free(), 8);
         assert_eq!(q.get_used(), None);
     }
 }

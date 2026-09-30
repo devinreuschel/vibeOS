@@ -20,6 +20,7 @@ use vibeos::per_cpu::{PerCpu, PerCpuRemote};
 use vibeos::thread::Tcb;
 
 use crate::acpi_init;
+use crate::arch::x86_64::percpu;
 use crate::cell::BootCell;
 use crate::x86;
 use crate::x86::InterruptGuard;
@@ -44,7 +45,6 @@ static REMOTE: BootCell<Box<[PerCpuRemote]>> = BootCell::new();
 // from its atomic fields alone; `scripts/check_cells.py` rejects an
 // `unsafe impl` of `Send` or `Sync` for it (invariant I120).
 crate::cell::assert_impl!(PerCpuRemote: Sync);
-static LIVE: AtomicBool = AtomicBool::new(false);
 /// Bit `cpu_id`. MADTs with >64 CPUs need a wider mask later.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
 static WITH_BUSY: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
@@ -112,12 +112,12 @@ pub unsafe fn init_bsp() {
     // set contract); established here: `init_bsp` runs once on the BSP.
     unsafe { CPUS.set(boxed) };
     x86::set_per_cpu_hooks(irq_nest_enter, irq_nest_leave, cpu_index_hook);
-    LIVE.store(true, Ordering::Release);
+    percpu::mark_live();
     ONLINE.store(1, Ordering::Release);
 }
 
 pub fn is_live() -> bool {
-    LIVE.load(Ordering::Acquire)
+    percpu::is_live()
 }
 
 /// The `PerCpu` array's base address and length, which VMCOREINFO's
@@ -145,8 +145,32 @@ pub fn slot_ptr(id: u32) -> Option<*mut PerCpu> {
     CPUS.try_get()?.get(id as usize).map(|c| c.self_ptr)
 }
 
+/// Set by [`arm_if_checks`]: from here on [`current`] and [`try_current`]
+/// assert IF=0 in debug builds.
+static IF_CHECKS: AtomicBool = AtomicBool::new(false);
+
+/// Arm the IF=0 assertion of [`current`] and [`try_current`] (DESIGN §2.9
+/// rule 5). `sched_init::init` calls it once, before `irq: enabled`.
+pub fn arm_if_checks() {
+    // Release: pairs with the Acquire load in `if_checks_armed`.
+    IF_CHECKS.store(true, Ordering::Release);
+}
+
+/// Whether [`arm_if_checks`] ran.
+pub fn if_checks_armed() -> bool {
+    // Acquire: pairs with the Release store in `arm_if_checks`.
+    IF_CHECKS.load(Ordering::Acquire)
+}
+
 /// `gs:[0]` == `self_ptr`. Only after [`init_bsp`] (and AP `install_gs`).
+/// IF=0 only once [`arm_if_checks`] ran: with IF=1 the thread may move to
+/// another CPU and keep a reference to the one it left.
+#[track_caller]
 pub fn current() -> &'static PerCpu {
+    debug_assert!(
+        !if_checks_armed() || !x86::interrupts_enabled(),
+        "per_cpu: access with IF=1 (INVARIANTS §2.9 rule 5)"
+    );
     assert!(is_live(), "per_cpu: not live");
     let p = gs_self();
     assert!(!p.is_null(), "per_cpu: gs null");
@@ -158,7 +182,14 @@ pub fn current() -> &'static PerCpu {
     unsafe { &*p }
 }
 
+/// [`current`], or `None` before the area is live. IF=0 only, as
+/// [`current`] is.
+#[track_caller]
 pub fn try_current() -> Option<&'static PerCpu> {
+    debug_assert!(
+        !if_checks_armed() || !x86::interrupts_enabled(),
+        "per_cpu: access with IF=1 (INVARIANTS §2.9 rule 5)"
+    );
     if !is_live() {
         return None;
     }
@@ -292,12 +323,18 @@ pub fn irq_nest_leave() {
     }
 }
 
-/// `x86::cpu_index`'s hook: this CPU's `cpu_id` once the area is live.
+/// `x86::cpu_index`'s hook: this CPU's `cpu_id` once the area is live,
+/// read with [`percpu::cpu_id_hint`]: exact while IF=0, a hint with IF=1.
 fn cpu_index_hook() -> Option<u32> {
-    try_current().map(|c| c.cpu_id)
+    is_live().then(percpu::cpu_id_hint)
 }
 
+/// This CPU's `InterruptGuard` depth. 0 with IF=1: every guard holds IF=0
+/// while it lives (SMP.md §7.5), so only an IF=0 caller reads the slot.
 pub fn irq_nest() -> u32 {
+    if x86::interrupts_enabled() {
+        return 0;
+    }
     try_current()
         .map(|c| c.irq_nest.load(Ordering::Relaxed))
         .unwrap_or(0)
@@ -323,8 +360,10 @@ pub fn set_current_thread(cpu: &mut PerCpu, tcb: *mut Tcb) {
     cpu.current = tcb;
 }
 
+/// The running thread's TCB: [`crate::arch::current_tcb`], one load that
+/// preemption cannot split, at any IF.
 pub fn current_thread() -> *mut Tcb {
-    current().current
+    crate::arch::current_tcb()
 }
 
 pub fn set_tsc_per_ms(v: u64) {
@@ -357,7 +396,8 @@ pub fn is_online(cpu_id: u32) -> bool {
     online_mask() & (1u64 << cpu_id) != 0
 }
 
-/// Field access that is safe from an ISR once `GS_BASE` is live.
+/// Field access that is safe from an ISR once `GS_BASE` is live. IF=0
+/// only, as [`current`] is.
 #[macro_export]
 macro_rules! per_cpu {
     ($field:ident) => {

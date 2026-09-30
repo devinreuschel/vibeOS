@@ -161,7 +161,7 @@ fn dmesg_follow(view: Level) {
             }
             seen = now;
         }
-        if !per_cpu_init::current().runq.is_empty() {
+        if !per_cpu_init::with_current(|c| c.runq.is_empty()) {
             thread_init::yield_now();
         } else {
             thread_init::sleep_ms(10);

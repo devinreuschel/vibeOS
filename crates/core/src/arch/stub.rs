@@ -438,6 +438,9 @@ impl PerCpuBase for Arch {
     fn cpu_id() -> u32 {
         with(|s| s.cpu_id)
     }
+    fn current_tcb() -> *mut crate::thread::Tcb {
+        core::ptr::null_mut()
+    }
 }
 
 impl SyscallAbi for Arch {
