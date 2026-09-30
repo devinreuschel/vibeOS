@@ -7,6 +7,7 @@ use vibeos::thread::{CpuAffinity, GuardedStack, MAX_THREADS, Tcb, ThreadId, Thre
 use vibeos::kalloc::{AllocError, TryVec};
 use vibeos::limits;
 
+pub(crate) use super::sweep::SWEEP_CHUNK;
 use super::{runnable_on, with_sched};
 use crate::cell::BootCell;
 
@@ -350,24 +351,36 @@ pub(super) fn preempt_before_places(places: usize) {
     }
 }
 
-/// One run of the blocked-thread sweep's scan, as `schedule_inner` runs
-/// it: under SCHED, with IF off, over every TCB, into an
-/// `OVERDUE_REPORT`-entry buffer, without moving the sweep's cursor.
-/// Returns the TSC cycles it took and the TCBs it scanned.
-pub fn time_sweep_scan() -> (u64, usize) {
+/// One run of the blocked-thread sweep's scan, as its thread runs it: a
+/// `SWEEP_CHUNK`-slot chunk per SCHED hold, IF off, over every slot. Hands
+/// `hold` the TSC cycles each hold's scan took; returns the TCBs scanned.
+pub fn time_sweep_scan(mut hold: impl FnMut(u64)) -> usize {
     let now = vibeos::time::Instant {
         ns: time_init::now_ns(),
     };
-    with_sched(|s| {
-        let mut out = [ThreadId::NONE; vibeos::sched::OVERDUE_REPORT];
-        let threads = s.slots.iter().flatten().map(|t| (t.id, t.state));
-        let n = threads.clone().count();
-        let t0 = time_init::read_tsc();
-        let found = vibeos::sched::find_overdue(threads, now, s.sweep_from, &mut out);
-        let t1 = time_init::read_tsc();
-        core::hint::black_box(found);
-        (t1.wrapping_sub(t0), n)
-    })
+    let mut tcbs = 0usize;
+    let mut base = 0usize;
+    while base < MAX_THREADS {
+        let (cycles, n) = with_sched(|s| {
+            let end = base
+                .saturating_add(super::sweep::SWEEP_CHUNK)
+                .min(s.slots.len());
+            let n = s
+                .slots
+                .get(base..end)
+                .map_or(0, |c| c.iter().flatten().count());
+            let mut out = [ThreadId::NONE; vibeos::sched::OVERDUE_REPORT];
+            let t0 = time_init::read_tsc();
+            let found = super::sweep::scan_chunk(s, base, now, ThreadId(0), &mut out);
+            let t1 = time_init::read_tsc();
+            core::hint::black_box(found);
+            (t1.wrapping_sub(t0), n)
+        });
+        hold(cycles);
+        tcbs += n;
+        base = base.saturating_add(super::sweep::SWEEP_CHUNK);
+    }
+    tcbs
 }
 
 #[allow(

@@ -20,10 +20,7 @@ use vibeos::limits::{self, PID_MAX};
 use vibeos::lock::RANK_SCHED;
 use vibeos::per_cpu::PerCpu;
 use vibeos::proc::pid::{IdIndex, PidAlloc};
-use vibeos::sched::{
-    OVERDUE_REPORT, SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, find_overdue,
-    take_next,
-};
+use vibeos::sched::{TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{
     CpuAffinity, CpuContext, Fxsave, MAX_THREADS, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome,
@@ -41,12 +38,14 @@ use crate::time_init;
 
 mod ap;
 mod boot;
+mod sweep;
 mod table;
 pub use ap::{abandon_unstarted, adopt_ap_idle};
 #[cfg(feature = "kernel_tests")]
 pub(crate) use boot::BOOT_STACK_PAGES;
 pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
+pub use sweep::start_sweep;
 pub(crate) use table::table_root;
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
@@ -200,12 +199,6 @@ pub(crate) struct Sched {
     /// `begin_wait` checks: it runs under SCHED with IF off and cannot read
     /// IF or `HELD` itself.
     waiter: SleepCtx,
-    /// CPU 0's tick count at which its `schedule` next runs the
-    /// blocked-thread sweep (DESIGN §6.5).
-    next_sweep: u64,
-    /// The sweep's cursor: the tid the next sweep starts from
-    /// (`sched::find_overdue`).
-    sweep_from: ThreadId,
 }
 
 /// Each thread-table slot's tid, `u32::MAX` for none: what a wake-inbox
@@ -243,8 +236,6 @@ impl Sched {
             place_head: 0,
             place_n: 0,
             waiter: SleepCtx::UNCHECKED,
-            next_sweep: 0,
-            sweep_from: ThreadId(0),
         }
     }
 
@@ -551,10 +542,6 @@ fn schedule_inner(from_irq: bool) {
     let cur = current_id();
     let me = per_cpu_init::current().cpu_id;
 
-    // The blocked-thread sweep's finds, printed once SCHED drops.
-    let mut overdue = [ThreadId::NONE; OVERDUE_REPORT];
-    let mut n_overdue = 0usize;
-
     let cur_state = with_sched(|s| {
         // In batches, so the frame stays small on top of a preempted
         // syscall body's stack whatever the thread count.
@@ -579,21 +566,6 @@ fn schedule_inner(from_irq: bool) {
             }
         }
 
-        // The blocked-thread sweep (DESIGN §6.5): CPU 0, on the tick and
-        // the voluntary path alike, since an idle CPU 0 enters only from
-        // the tick. After the expiry above, so a thread still waiting past
-        // its deadline lost its timeout entry.
-        if me == 0 {
-            let ticks = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
-            if ticks >= s.next_sweep {
-                s.next_sweep = ticks.saturating_add(SWEEP_TICKS);
-                let threads = s.slots.iter().flatten().map(|t| (t.id, t.state));
-                let (n, next) = find_overdue(threads, now, s.sweep_from, &mut overdue);
-                s.sweep_from = next;
-                n_overdue = n;
-            }
-        }
-
         let st = s.get(cur).map(|t| t.state).unwrap_or(ThreadState::Dead);
         if let Some(t) = s.get_mut(cur) {
             match t.state {
@@ -606,11 +578,6 @@ fn schedule_inner(from_irq: bool) {
         }
         st
     });
-
-    // A failure path, which DESIGN §2.2 lets the tick path log.
-    for id in overdue.iter().take(n_overdue) {
-        crate::marker!("vibeOS: sched: overdue tid {}", id.raw());
-    }
 
     let mut next = per_cpu_init::with_current(|cpu| {
         enqueue_runnable(&mut cpu.runq, cur, idle, cur_state);
