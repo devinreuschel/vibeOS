@@ -9,7 +9,7 @@ fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, KError> {
     while i < 16 {
         let ptr_va = va.checked_add(i * 8).ok_or(KError::Fault)?;
         let mut raw = [0u8; 8];
-        uaccess_init::copy_from_user(&mut raw, ptr_va).map_err(|_| KError::Fault)?;
+        uaccess_init::copy_from_user(&mut raw, ptr_va).map_err(KError::from)?;
         let p = u64::from_le_bytes(raw);
         if p == 0 {
             return Ok(v);
@@ -71,7 +71,7 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
             addr_space_init::teardown(boxed.into_inner());
             close_all_fds(&mut { fds });
             with_sched_table(|s, t| release_pid(s, t, pid));
-            return Err(spawn_errno(e));
+            return Err(KError::from(e));
         }
     };
     with_table(|t| {
@@ -145,7 +145,7 @@ pub(super) fn sys_execve(
     }
     let loaded = match user_init::load_path(path_s, &argv_s, &[]) {
         Ok(l) => l,
-        Err(e) => return Err(load_errno(e)),
+        Err(e) => return Err(KError::from(e)),
     };
     let name = intern_name(path_s);
     let entry = loaded.entry;

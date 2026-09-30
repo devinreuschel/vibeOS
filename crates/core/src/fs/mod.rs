@@ -117,6 +117,28 @@ pub enum FsError {
     Again,
 }
 
+/// A filesystem error's Linux errno at the syscall boundary (SYSCALL.md §2).
+impl From<FsError> for crate::kerror::KError {
+    fn from(e: FsError) -> Self {
+        match e {
+            FsError::NotFound => Self::NoEnt,
+            FsError::Exists => Self::Exist,
+            FsError::NotDir => Self::NotDir,
+            FsError::IsDir => Self::IsDir,
+            FsError::Inval => Self::Inval,
+            FsError::NoSpace => Self::MFile,
+            FsError::NameTooLong => Self::NameTooLong,
+            FsError::Busy => Self::Busy,
+            FsError::Badf => Self::BadF,
+            FsError::Io => Self::Io,
+            FsError::FileTooBig => Self::FBig,
+            FsError::NoMem => Self::NoMem,
+            FsError::Again => Self::Again,
+            FsError::Loop | FsError::NotEmpty | FsError::NotSupp => Self::Inval,
+        }
+    }
+}
+
 impl FsError {
     pub fn as_str(self) -> &'static str {
         match self {

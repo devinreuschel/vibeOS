@@ -97,6 +97,25 @@ pub enum Error {
     NoMem,
 }
 
+/// The errno of the `FsError` a vibefs error becomes (`to_fs`).
+impl From<Error> for crate::kerror::KError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::Inval | Error::Corrupt => Self::Inval,
+            Error::Io => Self::Io,
+            Error::NoSpace => Self::MFile,
+            Error::NotFound => Self::NoEnt,
+            Error::Exists => Self::Exist,
+            Error::NotDir => Self::NotDir,
+            Error::IsDir => Self::IsDir,
+            Error::NotEmpty | Error::NotSupp => Self::Inval,
+            Error::NameTooLong => Self::NameTooLong,
+            Error::FileTooBig => Self::FBig,
+            Error::NoMem => Self::NoMem,
+        }
+    }
+}
+
 impl Error {
     pub fn as_str(self) -> &'static str {
         match self {

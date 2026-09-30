@@ -183,9 +183,9 @@ fn devfs_random_hardware_only() {
         }
         v.close(fid).unwrap();
     }
-    // `fs_errno` maps `Again` to Linux's EAGAIN.
+    // The `KError` table maps `Again` to Linux's EAGAIN.
     assert_eq!(FsError::Again.as_str(), "again");
-    assert_eq!(crate::syscall::EAGAIN, 11);
+    assert_eq!(crate::kerror::KError::from(FsError::Again).errno(), 11);
 }
 
 /// A registry of the fake disk `fake` (64 sectors) and its partition

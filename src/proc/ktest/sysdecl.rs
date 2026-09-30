@@ -2,8 +2,9 @@
 //! only, ROADMAP §10.5): `sysdecl`, embedded from `make user` (C-USERBINS),
 //! run in ring 3. Rows: the list in crate::ktest.
 
+use vibeos::kerror::KError;
 use vibeos::proc::{wexitstatus, wifexited};
-use vibeos::syscall::{EBADF, ECHILD, EFAULT, PtrKind, ROWS};
+use vibeos::syscall::{PtrKind, ROWS};
 
 use crate::ktest::Outcome;
 use crate::ktest::user::{self, Image};
@@ -39,11 +40,12 @@ pub(crate) fn syscall_ptr_decl_efault() -> Outcome {
                     Ok(st) => st,
                     Err(o) => return o,
                 };
-                if st != EFAULT as u32 {
+                if st != KError::Fault.errno() as u32 {
                     return crate::fail_fmt!(
-                        "{}.{} {bad}: exit {st}, want EFAULT ({EFAULT})",
+                        "{}.{} {bad}: exit {st}, want EFAULT ({})",
                         row.name,
-                        arg.name
+                        arg.name,
+                        KError::Fault.errno()
                     );
                 }
                 cases += 1;
@@ -60,8 +62,8 @@ pub(crate) fn syscall_ptr_decl_efault() -> Outcome {
 /// before the buffer (SYSCALL.md §3).
 pub(crate) fn read_ebadf_before_efault() -> Outcome {
     match run(&["sysdecl", "order-read"]) {
-        Ok(st) if st == EBADF as u32 => Outcome::Ok,
-        Ok(st) => crate::fail_fmt!("exit {st}, want EBADF ({EBADF})"),
+        Ok(st) if st == KError::BadF.errno() as u32 => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("exit {st}, want EBADF ({})", KError::BadF.errno()),
         Err(o) => o,
     }
 }
@@ -70,8 +72,8 @@ pub(crate) fn read_ebadf_before_efault() -> Outcome {
 /// child is looked for before the status is copied (SYSCALL.md §3).
 pub(crate) fn wait4_echild_before_efault() -> Outcome {
     match run(&["sysdecl", "order-wait4"]) {
-        Ok(st) if st == ECHILD as u32 => Outcome::Ok,
-        Ok(st) => crate::fail_fmt!("exit {st}, want ECHILD ({ECHILD})"),
+        Ok(st) if st == KError::Child.errno() as u32 => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("exit {st}, want ECHILD ({})", KError::Child.errno()),
         Err(o) => o,
     }
 }

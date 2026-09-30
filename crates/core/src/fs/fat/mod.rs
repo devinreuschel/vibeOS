@@ -66,6 +66,24 @@ pub enum FatError {
     NoMem,
 }
 
+/// The errno of the `FsError` a FAT error becomes (`to_fs`).
+impl From<FatError> for crate::kerror::KError {
+    fn from(e: FatError) -> Self {
+        match e {
+            FatError::Inval | FatError::Corrupt => Self::Inval,
+            FatError::Io => Self::Io,
+            FatError::NoSpace => Self::MFile,
+            FatError::NotFound => Self::NoEnt,
+            FatError::Exists => Self::Exist,
+            FatError::NotDir => Self::NotDir,
+            FatError::IsDir => Self::IsDir,
+            FatError::NotEmpty | FatError::NotSupp => Self::Inval,
+            FatError::NameTooLong => Self::NameTooLong,
+            FatError::NoMem => Self::NoMem,
+        }
+    }
+}
+
 impl FatError {
     pub fn as_str(self) -> &'static str {
         match self {

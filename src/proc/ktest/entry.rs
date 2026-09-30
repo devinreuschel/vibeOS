@@ -6,6 +6,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
+use vibeos::kerror::KError;
 use vibeos::paging::{PAGE_SIZE_4K, USER_END};
 use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::syscall::SYS_KILL;
@@ -233,11 +234,11 @@ pub(crate) fn test_syscall_dispatch() -> Outcome {
         return Outcome::Fail("yield");
     }
     if proc_init::dispatch(vibeos::syscall::SYS_WRITE, [3, 0, 1, 0, 0, 0])
-        != vibeos::syscall::neg(vibeos::syscall::EBADF)
+        != vibeos::syscall::encode(Err(KError::BadF))
     {
         return Outcome::Fail("ebadf");
     }
-    if proc_init::dispatch(0xC0FFEE, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
+    if proc_init::dispatch(0xC0FFEE, [0; 6]) != vibeos::syscall::encode(Err(KError::NoSys)) {
         return Outcome::Fail("enosys");
     }
     // The number is `eax` sign-extended (SYSCALL.md §1): the high half of
@@ -248,11 +249,11 @@ pub(crate) fn test_syscall_dispatch() -> Outcome {
     if proc_init::dispatch(
         0x1_0000_0000 | vibeos::syscall::SYS_WRITE,
         [3, 0, 1, 0, 0, 0],
-    ) != vibeos::syscall::neg(vibeos::syscall::EBADF)
+    ) != vibeos::syscall::encode(Err(KError::BadF))
     {
         return Outcome::Fail("write, high half set");
     }
-    if proc_init::dispatch(0x8000_0000, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
+    if proc_init::dispatch(0x8000_0000, [0; 6]) != vibeos::syscall::encode(Err(KError::NoSys)) {
         return Outcome::Fail("negative eax");
     }
     Outcome::Ok

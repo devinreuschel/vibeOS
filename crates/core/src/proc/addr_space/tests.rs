@@ -192,7 +192,6 @@ fn user_ptr_helpers() {
     aspace.read_bytes(va, &mut got).unwrap();
     assert_eq!(&got, b"\0\0cd");
     assert_eq!(aspace.write_bytes(0, b"x"), Err(UserMemError::NullGuard));
-    let _ = UserMemError::Kernel.errno();
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
     unsafe { aspace.teardown_pool(&mut pool) };
@@ -288,7 +287,7 @@ fn user_mem_error_is_efault() {
             | UserMemError::Kernel
             | UserMemError::Overflow
             | UserMemError::Unmapped
-            | UserMemError::NullGuard => assert_eq!(e.errno(), 14),
+            | UserMemError::NullGuard => assert_eq!(crate::kerror::KError::from(e).errno(), 14),
         }
     }
 }

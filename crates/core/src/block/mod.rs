@@ -61,6 +61,20 @@ pub enum BlockError {
     Exists,
 }
 
+/// A block request's errno: Linux's for each condition.
+impl From<BlockError> for crate::kerror::KError {
+    fn from(e: BlockError) -> Self {
+        match e {
+            BlockError::Inval => Self::Inval,
+            BlockError::Io | BlockError::Failed => Self::Io,
+            BlockError::QueueFull => Self::Again,
+            BlockError::NoMem => Self::NoMem,
+            BlockError::Gone => Self::NoDev,
+            BlockError::Exists => Self::Exist,
+        }
+    }
+}
+
 impl BlockError {
     pub fn as_str(self) -> &'static str {
         match self {

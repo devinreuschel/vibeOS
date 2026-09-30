@@ -38,6 +38,18 @@ pub enum PatchError {
     Overflow,
 }
 
+/// A trampoline patch that does not fit is a bad argument.
+impl From<PatchError> for crate::kerror::KError {
+    fn from(e: PatchError) -> Self {
+        match e {
+            PatchError::Unaligned
+            | PatchError::OutOfRange
+            | PatchError::Short
+            | PatchError::Overflow => Self::Inval,
+        }
+    }
+}
+
 /// Whether `page` can hold the trampoline: 4 KiB aligned, above frame 0,
 /// and wholly below 1 MiB.
 fn page_ok(page: u64) -> Result<(), PatchError> {

@@ -114,6 +114,21 @@ pub enum AsError {
     Map(MapError),
 }
 
+/// An address-space error's errno: Linux's for each condition, as `mmap` returns it.
+impl From<AsError> for crate::kerror::KError {
+    fn from(e: AsError) -> Self {
+        match e {
+            AsError::Misaligned | AsError::Overflow | AsError::KernelRange | AsError::NotMapped => {
+                Self::Inval
+            }
+            AsError::NullGuard => Self::Perm,
+            AsError::Overlap | AsError::AlreadyMapped => Self::Exist,
+            AsError::OutOfFrames | AsError::NoRegionSlot | AsError::NoVaSpace => Self::NoMem,
+            AsError::Map(m) => Self::from(m),
+        }
+    }
+}
+
 /// What `brk(want)` does, from [`AddressSpace::brk_plan`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrkPlan {
@@ -159,6 +174,17 @@ pub enum MmapError {
     NotAnon,
 }
 
+/// An `mmap` request's errno; a file mapping, which `sys_mmap` refines by the fd, is no device.
+impl From<MmapError> for crate::kerror::KError {
+    fn from(e: MmapError) -> Self {
+        match e {
+            MmapError::Inval => Self::Inval,
+            MmapError::NoMem => Self::NoMem,
+            MmapError::NotAnon => Self::NoDev,
+        }
+    }
+}
+
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserMemError {
@@ -169,10 +195,20 @@ pub enum UserMemError {
     NullGuard,
 }
 
-impl UserMemError {
-    /// Linux `EFAULT`. User misuse, never a panic.
-    pub const EFAULT: i32 = 14;
+/// A user range that is not the caller's is `EFAULT`: user misuse, never a panic.
+impl From<UserMemError> for crate::kerror::KError {
+    fn from(e: UserMemError) -> Self {
+        match e {
+            UserMemError::NonCanonical
+            | UserMemError::Kernel
+            | UserMemError::Overflow
+            | UserMemError::Unmapped
+            | UserMemError::NullGuard => Self::Fault,
+        }
+    }
+}
 
+impl UserMemError {
     /// Which bound a range that `uaccess::user_range_ok` refused breaks.
     /// Only meaningful for a refused range.
     pub const fn refused(ptr: u64, len: u64) -> Self {
@@ -193,16 +229,6 @@ impl UserMemError {
             return Self::Kernel;
         }
         Self::NullGuard
-    }
-
-    pub const fn errno(self) -> i32 {
-        match self {
-            Self::NonCanonical
-            | Self::Kernel
-            | Self::Overflow
-            | Self::Unmapped
-            | Self::NullGuard => Self::EFAULT,
-        }
     }
 }
 

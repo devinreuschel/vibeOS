@@ -8,6 +8,7 @@ use vibeos::elf::{
 };
 use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
+use vibeos::kerror::KError;
 use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
@@ -35,6 +36,24 @@ pub enum LoadError {
     Spawn(SpawnError),
     /// A kernel heap allocation failed (DESIGN §4.4).
     NoMem,
+}
+
+/// A load's errno: the loader's, the filesystem's, or the address space's
+/// error, as `execve` returns it.
+impl From<LoadError> for KError {
+    fn from(e: LoadError) -> Self {
+        match e {
+            LoadError::Fs(f) => KError::from(f),
+            LoadError::Elf(ElfError::ImageTooBig) => KError::NoMem,
+            LoadError::Elf(e) => KError::from(e),
+            LoadError::As(_) => KError::NoMem,
+            LoadError::Mem(m) => KError::from(m),
+            LoadError::Empty => KError::NoExec,
+            LoadError::NoProc => KError::Again,
+            LoadError::Spawn(s) => KError::from(s),
+            LoadError::NoMem => KError::NoMem,
+        }
+    }
 }
 
 impl LoadError {

@@ -127,7 +127,7 @@ pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
                                 }
                                 Err(e) => {
                                     return if done == 0 {
-                                        Err(fs_errno(e))
+                                        Err(KError::from(e))
                                     } else {
                                         Ok(done as usize)
                                     };
@@ -238,7 +238,7 @@ pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
                     }
                     byte_count(c as u64)
                 }
-                Err(e) => Err(fs_errno(e)),
+                Err(e) => Err(KError::from(e)),
             }
         }
     }
@@ -275,7 +275,7 @@ pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
                 }
             }
         }
-        Err(e) => Err(fs_errno(e)),
+        Err(e) => Err(KError::from(e)),
     }
 }
 
@@ -285,7 +285,7 @@ pub(super) fn sys_close(fd: u32) -> SysResult {
     match old {
         Some(s) => match close_fd_slot(s) {
             Ok(()) => Ok(0),
-            Err(e) => Err(fs_errno(e)),
+            Err(e) => Err(KError::from(e)),
         },
         None => Err(KError::BadF),
     }
@@ -304,7 +304,7 @@ pub(super) fn sys_lseek(fd: u32, off: i64, whence: u32) -> SysResult {
             });
             match r {
                 Ok(n) => Ok(n as usize),
-                Err(e) => Err(fs_errno(e)),
+                Err(e) => Err(KError::from(e)),
             }
         }
         FdKind::Console => Err(KError::Inval),

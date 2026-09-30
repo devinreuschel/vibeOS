@@ -167,6 +167,13 @@ const DEAD: usize = 1 << (usize::BITS - 1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dead;
 
+/// An object removed under its operation gate is no longer a device.
+impl From<Dead> for crate::kerror::KError {
+    fn from(_: Dead) -> Self {
+        Self::NoDev
+    }
+}
+
 /// DESIGN §2.11 rule 3's operation gate: the count of operations in
 /// progress on an object that can be removed while references to it
 /// remain, and a dead mark. Every operation through a reference

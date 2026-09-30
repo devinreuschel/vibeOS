@@ -150,6 +150,13 @@ impl Fd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FdError;
 
+/// A bad or unusable descriptor is `EBADF`.
+impl From<FdError> for crate::kerror::KError {
+    fn from(_: FdError) -> Self {
+        Self::BadF
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FdTable {
     slots: [Fd; MAX_FDS],

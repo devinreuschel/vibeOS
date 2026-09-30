@@ -159,6 +159,18 @@ pub enum ProbeError {
     NoMemory,
 }
 
+/// A probe's errno: Linux's for each condition.
+impl From<ProbeError> for crate::kerror::KError {
+    fn from(e: ProbeError) -> Self {
+        match e {
+            ProbeError::Busy => Self::Busy,
+            ProbeError::NoResource => Self::NoDev,
+            ProbeError::Failed => Self::Io,
+            ProbeError::NoMemory => Self::NoMem,
+        }
+    }
+}
+
 impl ProbeError {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -183,6 +195,17 @@ pub enum ClaimError {
     Already,
     Overlap,
     BadIndex,
+}
+
+/// A claimed resource is busy; an empty slot is no device; a bad index, a bad argument.
+impl From<ClaimError> for crate::kerror::KError {
+    fn from(e: ClaimError) -> Self {
+        match e {
+            ClaimError::Empty => Self::NoDev,
+            ClaimError::Already | ClaimError::Overlap => Self::Busy,
+            ClaimError::BadIndex => Self::Inval,
+        }
+    }
 }
 
 impl ClaimError {

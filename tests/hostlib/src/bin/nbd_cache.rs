@@ -58,8 +58,9 @@ const CMD_WRITE: u16 = 1;
 const CMD_DISC: u16 = 2;
 const CMD_FLUSH: u16 = 3;
 
-const EIO: u32 = 5;
-const EINVAL: u32 = 22;
+/// The NBD protocol's error values, `NBD_EIO` and `NBD_EINVAL`.
+const NBD_EIO: u32 = 5;
+const NBD_EINVAL: u32 = 22;
 
 /// A flush is replied `1 + xorshift(seed) % FLUSH_DELAY_MAX_MS` ms after it arrives.
 const FLUSH_DELAY_MAX_MS: u64 = 20;
@@ -286,14 +287,14 @@ impl Server {
             };
         if !valid {
             self.breach = true;
-            return self.reply(s, id, cookie, EINVAL, &[]);
+            return self.reply(s, id, cookie, NBD_EINVAL, &[]);
         }
         match cmd {
             CMD_READ => {
                 let mut v = vec![0u8; len as usize];
                 let err = match self.image.read_exact_at(&mut v, off) {
                     Ok(()) => 0,
-                    Err(_) => EIO,
+                    Err(_) => NBD_EIO,
                 };
                 self.reply(s, id, cookie, err, &v)
             }
@@ -306,7 +307,7 @@ impl Server {
                 self.data.write_all(payload)?;
                 let err = match self.image.write_all_at(payload, off) {
                     Ok(()) => 0,
-                    Err(_) => EIO,
+                    Err(_) => NBD_EIO,
                 };
                 self.reply(s, id, cookie, err, &[])
             }
@@ -743,13 +744,13 @@ mod tests {
         let (mut c, h) = f.spawn(1);
         go(&mut c);
         req(&mut c, CMD_FLAG_FUA, CMD_WRITE, 1, 0, 1, b"a");
-        assert_eq!(rep(&mut c), (EINVAL, 1));
+        assert_eq!(rep(&mut c), (NBD_EINVAL, 1));
         req(&mut c, 0, CMD_TRIM, 2, 0, 512, &[]);
-        assert_eq!(rep(&mut c), (EINVAL, 2));
+        assert_eq!(rep(&mut c), (NBD_EINVAL, 2));
         req(&mut c, 0, 77, 3, 0, 0, &[]);
-        assert_eq!(rep(&mut c), (EINVAL, 3));
+        assert_eq!(rep(&mut c), (NBD_EINVAL, 3));
         req(&mut c, 0, CMD_READ, 4, 4000, 512, &[]);
-        assert_eq!(rep(&mut c), (EINVAL, 4));
+        assert_eq!(rep(&mut c), (NBD_EINVAL, 4));
         drop(c);
         let (_, srv) = h.join().unwrap();
         assert!(srv.breach);

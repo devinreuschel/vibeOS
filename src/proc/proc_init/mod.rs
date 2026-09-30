@@ -9,7 +9,6 @@ use core::mem::MaybeUninit;
 
 use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
 use vibeos::arch::x86_64::trap::{self as x86_trap, Abi};
-use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
@@ -38,10 +37,10 @@ use crate::proc::uaccess_init;
 use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::syscall_init;
-use crate::thread_init::{self, Sched, SpawnError};
+use crate::thread_init::{self, Sched};
+use crate::user_init;
 #[cfg(not(feature = "vibefs_crash"))]
-use crate::user_init::Loaded;
-use crate::user_init::{self, LoadError};
+use crate::user_init::{LoadError, Loaded};
 
 mod exec;
 mod exit;
@@ -181,48 +180,6 @@ fn intern_name(path: &str) -> &'static str {
         b"tests" => "tests",
         b"hello" => "hello",
         _ => "user",
-    }
-}
-
-fn fs_errno(e: FsError) -> KError {
-    match e {
-        FsError::NotFound => KError::NoEnt,
-        FsError::Exists => KError::Exist,
-        FsError::NotDir => KError::NotDir,
-        FsError::IsDir => KError::IsDir,
-        FsError::Inval => KError::Inval,
-        FsError::NoSpace => KError::MFile,
-        FsError::NameTooLong => KError::NameTooLong,
-        FsError::Busy => KError::Busy,
-        FsError::Badf => KError::BadF,
-        FsError::Io => KError::Io,
-        FsError::FileTooBig => KError::FBig,
-        FsError::NoMem => KError::NoMem,
-        FsError::Again => KError::Again,
-        FsError::Loop | FsError::NotEmpty | FsError::NotSupp => KError::Inval,
-    }
-}
-
-fn load_errno(e: LoadError) -> KError {
-    match e {
-        LoadError::Fs(f) => fs_errno(f),
-        LoadError::Elf(ElfError::ImageTooBig) => KError::NoMem,
-        LoadError::Elf(_) => KError::NoExec,
-        LoadError::As(_) => KError::NoMem,
-        LoadError::Mem(_) => KError::Fault,
-        LoadError::Empty => KError::NoExec,
-        LoadError::NoProc => KError::Again,
-        LoadError::Spawn(e) => spawn_errno(e),
-        LoadError::NoMem => KError::NoMem,
-    }
-}
-
-/// Linux's errno for a thread `fork` or a new process could not get:
-/// `EAGAIN` for a full thread table, `ENOMEM` for a kernel stack.
-fn spawn_errno(e: SpawnError) -> KError {
-    match e {
-        SpawnError::NoSlot => KError::Again,
-        SpawnError::NoMemory => KError::NoMem,
     }
 }
 
@@ -721,7 +678,7 @@ fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, KError> {
     match uaccess_init::strncpy_from_user(out, va) {
         Ok(n) if n == out.len() => Err(KError::NameTooLong),
         Ok(n) => Ok(n),
-        Err(_) => Err(KError::Fault),
+        Err(f) => Err(KError::from(f)),
     }
 }
 

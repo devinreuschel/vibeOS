@@ -1,4 +1,4 @@
-//! Syscall numbers, errno, and the dispatch table's types. ROADMAP §9.3,
+//! Syscall numbers and the dispatch table's types. ROADMAP §9.3,
 //! §10.5.
 //!
 //! The table itself is generated from `syscalls.toml` into
@@ -8,57 +8,8 @@
 
 pub use crate::arch::x86_64::trap::UserFrame;
 
-/// Linux `EPERM`.
-pub const EPERM: i32 = 1;
-/// Linux `ENOENT`.
-pub const ENOENT: i32 = 2;
-/// Linux `ESRCH`.
-pub const ESRCH: i32 = 3;
-/// Linux `ECHILD`.
-pub const ECHILD: i32 = 10;
-/// Linux `EAGAIN`.
-pub const EAGAIN: i32 = 11;
-/// Linux `ENOMEM`.
-pub const ENOMEM: i32 = 12;
-/// Linux `EACCES`.
-pub const EACCES: i32 = 13;
-/// Linux `EFAULT`.
-pub const EFAULT: i32 = 14;
-/// Linux `EBADF`.
-pub const EBADF: i32 = 9;
-/// Linux `EBUSY`.
-pub const EBUSY: i32 = 16;
-/// Linux `EEXIST`.
-pub const EEXIST: i32 = 17;
-/// Linux `ENODEV`.
-pub const ENODEV: i32 = 19;
-/// Linux `ENOTDIR`.
-pub const ENOTDIR: i32 = 20;
-/// Linux `EISDIR`.
-pub const EISDIR: i32 = 21;
-/// Linux `EINVAL`.
-pub const EINVAL: i32 = 22;
-/// Linux `EMFILE`.
-pub const EMFILE: i32 = 24;
-/// Linux `EFBIG`.
-pub const EFBIG: i32 = 27;
-/// Linux `ENOSYS`.
-pub const ENOSYS: i32 = 38;
-/// Linux `ENAMETOOLONG`.
-pub const ENAMETOOLONG: i32 = 36;
-/// Linux `EIO`.
-pub const EIO: i32 = 5;
-/// Linux `E2BIG`.
-pub const E2BIG: i32 = 7;
-/// Linux `ENOEXEC`.
-pub const ENOEXEC: i32 = 8;
-
 pub const F_GETFD: u32 = 1;
 pub const F_SETFD: u32 = 2;
-
-pub const fn neg(errno: i32) -> i64 {
-    -(errno as i64)
-}
 
 pub use crate::proc::syscall_table::x86_64::nr::*;
 pub use crate::proc::syscall_table::{
@@ -72,39 +23,14 @@ pub use crate::proc::syscall_table::{Recorder, Val};
 pub const fn encode(r: SysResult) -> i64 {
     match r {
         Ok(v) => v as i64,
-        Err(e) => neg(e.errno()),
+        Err(e) => -(e.errno() as i64),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addr_space::UserMemError;
     use crate::kerror::KError;
-
-    #[test]
-    fn errno_linux_values() {
-        assert_eq!(EPERM, 1);
-        assert_eq!(ENOENT, 2);
-        assert_eq!(ESRCH, 3);
-        assert_eq!(EIO, 5);
-        assert_eq!(E2BIG, 7);
-        assert_eq!(ENOEXEC, 8);
-        assert_eq!(EBADF, 9);
-        assert_eq!(ECHILD, 10);
-        assert_eq!(EAGAIN, 11);
-        assert_eq!(ENOMEM, 12);
-        assert_eq!(EACCES, 13);
-        assert_eq!(EFAULT, 14);
-        assert_eq!(ENODEV, 19);
-        assert_eq!(EINVAL, 22);
-        assert_eq!(EMFILE, 24);
-        assert_eq!(EFBIG, 27);
-        assert_eq!(ENAMETOOLONG, 36);
-        assert_eq!(ENOSYS, 38);
-        assert_eq!(neg(ENOSYS), -38);
-        assert_eq!(UserMemError::EFAULT, EFAULT);
-    }
 
     #[test]
     fn syscall_table_invariants() {

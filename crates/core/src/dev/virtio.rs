@@ -88,6 +88,18 @@ pub enum VirtioError {
     NoMemory,
 }
 
+/// A virtio setup error's errno: Linux's for each condition.
+impl From<VirtioError> for crate::kerror::KError {
+    fn from(e: VirtioError) -> Self {
+        match e {
+            VirtioError::NoVersion1 | VirtioError::NoCaps | VirtioError::Features => Self::NoDev,
+            VirtioError::BadQueue | VirtioError::Notify | VirtioError::Failed => Self::Io,
+            VirtioError::NoDesc => Self::Again,
+            VirtioError::NoMemory => Self::NoMem,
+        }
+    }
+}
+
 impl VirtioError {
     pub fn as_str(self) -> &'static str {
         match self {
