@@ -76,6 +76,7 @@ errno_table! {
     FBig = 27, "EFBIG", "a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit";
     NoSpc = 28, "ENOSPC", "`write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent";
     SPipe = 29, "ESPIPE", "`lseek` on the console, `/dev/console`, or `/dev/tty`";
+    RoFs = 30, "EROFS", "defined; no syscall returns it: a write to a read-only virtio-blk device fails with it in the block layer";
     NameTooLong = 36, "ENAMETOOLONG", "path of 256 bytes or more; name above 64 bytes; an `execve` argv or envp string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255";
     NoSys = 38, "ENOSYS", "unknown number";
     NotEmpty = 39, "ENOTEMPTY", "defined; no syscall returns it";
@@ -116,6 +117,7 @@ mod tests {
             (KError::FBig, 27, "EFBIG"),
             (KError::NoSpc, 28, "ENOSPC"),
             (KError::SPipe, 29, "ESPIPE"),
+            (KError::RoFs, 30, "EROFS"),
             (KError::NameTooLong, 36, "ENAMETOOLONG"),
             (KError::NoSys, 38, "ENOSYS"),
             (KError::NotEmpty, 39, "ENOTEMPTY"),

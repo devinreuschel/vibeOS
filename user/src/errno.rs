@@ -56,6 +56,8 @@ impl Errno {
     pub const ENOSPC: Errno = Errno(28);
     /// Linux `ESPIPE`.
     pub const ESPIPE: Errno = Errno(29);
+    /// Linux `EROFS`.
+    pub const EROFS: Errno = Errno(30);
     /// Linux `ENAMETOOLONG`.
     pub const ENAMETOOLONG: Errno = Errno(36);
     /// Linux `ENOSYS`.

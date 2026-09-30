@@ -82,6 +82,7 @@ impl From<BlockError> for crate::kerror::KError {
             BlockError::NoMem => Self::NoMem,
             BlockError::Gone => Self::NoDev,
             BlockError::Exists => Self::Exist,
+            BlockError::ReadOnly => Self::RoFs,
         }
     }
 }

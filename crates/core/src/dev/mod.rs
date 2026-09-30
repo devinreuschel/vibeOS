@@ -204,13 +204,15 @@ pub enum ClaimError {
     Full,
 }
 
-/// A claimed resource is busy; an empty slot is no device; a bad index, a bad argument.
+/// A claimed resource, or a BAR over RAM, is busy; an empty slot is no
+/// device; a bad index, a bad argument; a full claims table, no memory.
 impl From<ClaimError> for crate::kerror::KError {
     fn from(e: ClaimError) -> Self {
         match e {
             ClaimError::Empty => Self::NoDev,
-            ClaimError::Already | ClaimError::Overlap => Self::Busy,
+            ClaimError::Already | ClaimError::Overlap | ClaimError::Ram => Self::Busy,
             ClaimError::BadIndex => Self::Inval,
+            ClaimError::Full => Self::NoMem,
         }
     }
 }

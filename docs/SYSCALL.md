@@ -157,6 +157,7 @@ names, Linux values:
 | `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit |
 | `ENOSPC` | 28 | `write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent |
 | `ESPIPE` | 29 | `lseek` on the console, `/dev/console`, or `/dev/tty` |
+| `EROFS` | 30 | defined; no syscall returns it: a write to a read-only virtio-blk device fails with it in the block layer |
 | `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv or envp string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
 | `ENOTEMPTY` | 39 | defined; no syscall returns it |
