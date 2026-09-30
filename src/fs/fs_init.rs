@@ -21,16 +21,23 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use vibeos::dev::Instance;
 use vibeos::fs::kernfs::{KernFs, KernSkin, KernState};
 use vibeos::fs::{
-    FileApi, FsError, FsType, Guarded, Hooks, RamFs, RamState, Vfs, WordsTable, words_table,
+    FileApi, FsError, FsType, Guarded, Hooks, RamFs, RamState, Vfs, VfsSizes, WordsTable,
+    words_table,
 };
+use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
 
+use crate::cell::BootCell;
 use crate::fs::StoreLock;
 use crate::sync::blocking_init::BlockingMutex;
 
-/// Each inode slot's size, link count and private words (`InodeWords`).
-static INODE_WORDS: WordsTable = words_table();
-static VFS: BlockingMutex<Vfs> = BlockingMutex::new(Vfs::new(&INODE_WORDS));
+/// Each inode slot's size, link count and private words (`InodeWords`):
+/// a heap table of `limits::MAX_INODES`, set by [`init_tables`].
+static INODE_WORDS: BootCell<WordsTable> = BootCell::new();
+/// The VFS, built by [`init_tables`] before `irq: enabled` with its tables
+/// at `VfsSizes::KERNEL` (ROADMAP §10.4, D1): this cell is its one
+/// construction site.
+static VFS: BootCell<BlockingMutex<Vfs>> = BootCell::new();
 /// Every ramfs instance's nodes: the root when FAT is not live, and each
 /// `mount ramfs`.
 pub static RAMFS: RamFs<StoreLock<RamState>> =
@@ -43,6 +50,25 @@ pub static PROCFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsTyp
 pub static TMPFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Tmp);
 pub static SYSFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Sys);
 static LIVE: AtomicBool = AtomicBool::new(false);
+
+/// Allocate the VFS's tables at `VfsSizes::KERNEL` and its inode words, and
+/// install them. Once, on the BSP before `irq: enabled` and before any file
+/// is opened; on failure nothing is installed, and the caller halts the
+/// boot.
+pub fn init_tables() -> Result<(), AllocError> {
+    let words = words_table(VfsSizes::KERNEL.inodes)?;
+    // SAFETY: `BootCell::set`'s contract: its one write, on the BSP before
+    // `smp: done` and before any reader, since no VFS exists yet to hand
+    // out an inode's words; established here, called once from
+    // `main::boot_rest`.
+    unsafe { INODE_WORDS.set(words) };
+    let vfs = Vfs::new(&VfsSizes::KERNEL, INODE_WORDS.get())?;
+    // SAFETY: `BootCell::set`'s contract: the VFS cell's one write, on the
+    // BSP before `smp: done` and before any reader of `fs_init::api` or
+    // `fs_init::with`; established here.
+    unsafe { VFS.set(BlockingMutex::new(vfs)) };
+    Ok(())
+}
 
 /// Make the root: the FAT initrd when `root_is_fat`, else a ramfs.
 /// The File API module's `init` runs the rest of the bring-up.
@@ -70,7 +96,7 @@ pub fn live() -> bool {
 /// The File API over the VFS (C-FILEAPI), with the in-guest tests'
 /// hooks in a `kernel_tests` build.
 pub fn api() -> FileApi<'static, BlockingMutex<Vfs>> {
-    FileApi::with_hooks(&VFS, hooks())
+    FileApi::with_hooks(VFS.get(), hooks())
 }
 
 /// The File API's `write_window` stall, a `fn()`, for the in-guest tests
@@ -115,7 +141,7 @@ fn hooks() -> Hooks {
 /// never calls a backend: every `Vfs` method that reaches one runs
 /// through [`api`].
 pub fn with<R>(f: impl FnOnce(&mut Vfs) -> R) -> R {
-    let mut g = VFS.lock();
+    let mut g = VFS.get().lock();
     f(&mut g)
 }
 

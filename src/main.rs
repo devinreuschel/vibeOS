@@ -285,6 +285,12 @@ fn normal_boot_tail() -> ! {
     // below: the GDT is loaded and the PIC masks every line, as `per_cpu_init::init_bsp` requires; established here.
     unsafe { per_cpu_init::init_bsp() };
     log::trace_init::init();
+    // The thread tables (ROADMAP §10.4, D1), before the bootstrap thread
+    // takes slot 0. Before `irq: enabled`, where DESIGN §4.4 allows a
+    // boot-time halt.
+    if thread_init::init_tables().is_err() {
+        crate::boot::halt_with("vibeOS: limits: no memory for the thread tables");
+    }
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // in `boot_rest`: `GS_BASE` is the BSP's `PerCpu` (`per_cpu_init::init_bsp` above) and KVA is up, first call, as `thread_init::init_bootstrap` requires; established here.
     unsafe { thread_init::init_bootstrap(boot_rest) }
@@ -332,6 +338,16 @@ extern "C" fn boot_rest() -> ! {
     diag::uptime();
 
     diag::meminfo();
+
+    // The process table with its descriptor rows, then the VFS's tables and
+    // inode words (ROADMAP §10.4, D1): before `irq: enabled`, where DESIGN
+    // §4.4 allows a boot-time halt, and after the clocks are calibrated.
+    if proc_init::init_tables().is_err() {
+        crate::boot::halt_with("vibeOS: limits: no memory for the process tables");
+    }
+    if fs_init::init_tables().is_err() {
+        crate::boot::halt_with("vibeOS: limits: no memory for the vfs tables");
+    }
 
     // DESIGN §3.3 steps 14 then 16. Idle must exist before the timer
     // can preempt. `irq: enabled` is IF-on + scheduler armed; IRQ0 was

@@ -11,7 +11,7 @@ use vibeos::addr_space::{AsError, MmapError, mmap_request};
 #[cfg(target_arch = "x86_64")]
 use vibeos::arch::x86_64::trap as x86_trap;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
-use vibeos::kalloc::{TryBox, TryVec};
+use vibeos::kalloc::{AllocError, TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::kerror::KError;
 use vibeos::lock::RANK_SCHED;
@@ -56,7 +56,7 @@ use exec::{sys_brk, sys_execve, sys_fork, sys_mmap, sys_munmap};
 use exit::reap_zombie;
 use exit::{finish_exit, sys_exit, sys_kill, sys_psinfo, sys_wait4};
 use fd::{
-    close_all_fds, close_dropped, dup_table, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
+    addref_fds, close_all_fds, close_where, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
     sys_lseek, sys_open, sys_read, sys_write,
 };
 use floor::{sys_fstat, sys_getdents64, sys_nanosleep, sys_reboot};
@@ -101,6 +101,30 @@ impl Proc {
             stop_wq: WaitQueue::new(),
         }
     }
+
+    /// Make this slot `Unused` again in place, as [`Proc::empty`] but for
+    /// the descriptor row, which stays allocated and is cleared. Under the
+    /// table lock, so it frees nothing: the files are closed and the space
+    /// taken before a slot is released, and no thread waits on its queues.
+    fn reset(&mut self) {
+        debug_assert!(self.space.is_none(), "proc: slot reset with a space");
+        debug_assert!(self.wait_wq.is_empty() && self.stop_wq.is_empty());
+        self.state = ProcState::Unused;
+        self.pid = 0;
+        self.ppid = 0;
+        self.tid = ThreadId::NONE;
+        self.name = "";
+        self.creds = Creds::ROOT;
+        self.cwd = Cwd::root();
+        self.fds.reset();
+        self.wait_status = 0;
+        self.pending = 0;
+        self.autoreap = false;
+        self.space = None;
+        self.fs_base = 0;
+        self.wait_wq = WaitQueue::new();
+        self.stop_wq = WaitQueue::new();
+    }
 }
 
 /// Entries in the pid-to-slot index: twice the process table, so probe
@@ -109,8 +133,11 @@ const PROC_INDEX_CAP: usize = (2 * MAX_PROCS).next_power_of_two();
 
 /// The process table. A pid is not a slot index (DESIGN §2.11 rule 4): it
 /// comes from `thread_init`'s id allocator, and `index` maps it to its slot.
+/// `procs` is a heap table of `limits::MAX_PROCS` slots, each with its
+/// `limits::MAX_FDS` descriptor row, which [`init_tables`] allocates before
+/// `irq: enabled`; nothing grows or frees them after (ROADMAP §10.4, D1).
 struct Table {
-    procs: [Proc; MAX_PROCS],
+    procs: TryVec<Proc>,
     index: IdIndex<PROC_INDEX_CAP>,
     /// The kernel's wait queue, on which [`wait_kernel`] sleeps for ppid-0
     /// processes.
@@ -120,7 +147,7 @@ struct Table {
 impl Table {
     const fn empty() -> Self {
         Self {
-            procs: [const { Proc::empty() }; MAX_PROCS],
+            procs: TryVec::new(),
             index: IdIndex::new(),
             kernel_wq: WaitQueue::new(),
         }
@@ -143,6 +170,25 @@ impl Table {
         self.procs.get_mut(i)
     }
 
+    /// Copy `from`'s descriptor row into `to`'s, both processes in the
+    /// table. False if either is not.
+    fn copy_fds(&mut self, from: u32, to: u32) -> bool {
+        let (Some(i), Some(j)) = (self.slot_of(from), self.slot_of(to)) else {
+            return false;
+        };
+        if i == j {
+            return true;
+        }
+        let (lo, hi) = self.procs.split_at_mut(i.max(j));
+        let (a, b) = match (lo.get_mut(i.min(j)), hi.first_mut()) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return false,
+        };
+        let (src, dst) = if i < j { (&*a, b) } else { (&*b, a) };
+        dst.fds.copy_from(&src.fds);
+        true
+    }
+
     /// The wait queue a child of `ppid` wakes: the kernel's for ppid 0.
     fn parent_wq(&mut self, ppid: u32) -> Option<&mut WaitQueue> {
         if ppid == 0 {
@@ -154,6 +200,45 @@ impl Table {
 }
 
 static TABLE: SpinMutex<Table> = SpinMutex::with_rank(Table::empty(), RANK_SCHED);
+
+/// Allocate the process table: `limits::MAX_PROCS` slots, each with a
+/// descriptor row of `limits::MAX_FDS`, and install it. Once, on the BSP
+/// before `irq: enabled`, before any process exists. On failure nothing is
+/// installed, and the caller halts the boot.
+pub fn init_tables() -> Result<(), AllocError> {
+    let mut procs = TryVec::try_with_capacity(MAX_PROCS)?;
+    let mut i = 0usize;
+    while i < MAX_PROCS {
+        let mut p = Proc::empty();
+        p.fds = FdTable::try_new(MAX_FDS)?;
+        procs.try_push(p)?;
+        i += 1;
+    }
+    let old = with_table(|t| core::mem::replace(&mut t.procs, procs));
+    // The empty table, dropped after the locks: no heap free under them.
+    drop(old);
+    Ok(())
+}
+
+/// The descriptor row's length in each process-table slot (the first's;
+/// `init_tables` gives each the same).
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn fd_row_capacity() -> usize {
+    with_table(|t| t.procs.first().map_or(0, |p| p.fds.capacity()))
+}
+
+/// The process table's use: slots not `Unused`, and its length.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn table_usage() -> (usize, usize) {
+    with_table(|t| {
+        let used = t
+            .procs
+            .iter()
+            .filter(|p| p.state != ProcState::Unused)
+            .count();
+        (used, t.procs.len())
+    })
+}
 
 /// Run `f` on the process table. Callers hold SCHED, which serializes its wait queues.
 fn table_locked<R>(f: impl FnOnce(&mut Table) -> R) -> R {
@@ -259,21 +344,24 @@ fn release_pid(s: &mut Sched, t: &mut Table, pid: u32) {
         return;
     };
     if let Some(p) = t.procs.get_mut(i) {
-        *p = Proc::empty();
+        p.reset();
     }
     s.free_id(pid);
 }
 
+/// Set up `pid`'s slot, which `alloc_pid` took, for a new image: fds 0 to
+/// 2 on the console and the rest closed.
+#[cfg(not(feature = "vibefs_crash"))]
 fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str) {
     let Some(p) = t.get_mut(pid) else {
         return;
     };
-    *p = Proc::empty();
+    p.reset();
     p.state = ProcState::Live;
     p.pid = pid;
     p.ppid = ppid;
     p.name = name;
-    p.fds = FdTable::stdio();
+    p.fds.set_stdio();
 }
 
 fn user_thread_entry() {
@@ -768,7 +856,6 @@ pub fn try_user_fault(f: &TrapFrame) {
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-    use vibeos::proc::MAX_PROCS;
     use vibeos::syscall::{SYS_GETPID, UserFrame};
 
     use crate::arch::idt::TrapFrame;
@@ -819,14 +906,17 @@ pub(crate) mod testing {
         KILL_LINES.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// `getpid` counts per bucket `pid % MAX_PROCS` (a pid is not a slot
-    /// index), each tagged with the pid it counts for: a pid that finds
-    /// another's tag starts the bucket again.
-    static GETPID_TAGS: [AtomicU32; MAX_PROCS] = [const { AtomicU32::new(0) }; MAX_PROCS];
-    static GETPIDS: [AtomicU64; MAX_PROCS] = [const { AtomicU64::new(0) }; MAX_PROCS];
+    /// Buckets `getpid` counts in.
+    const GETPID_BUCKETS: usize = 64;
+
+    /// `getpid` counts per bucket `pid % GETPID_BUCKETS` (a pid is not a
+    /// slot index), each tagged with the pid it counts for: a pid that
+    /// finds another's tag starts the bucket again.
+    static GETPID_TAGS: [AtomicU32; GETPID_BUCKETS] = [const { AtomicU32::new(0) }; GETPID_BUCKETS];
+    static GETPIDS: [AtomicU64; GETPID_BUCKETS] = [const { AtomicU64::new(0) }; GETPID_BUCKETS];
 
     fn getpid_bucket(pid: u32) -> usize {
-        pid as usize % MAX_PROCS
+        pid as usize % GETPID_BUCKETS
     }
 
     /// `getpid` calls `pid` has made since its bucket last changed hands.

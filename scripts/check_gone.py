@@ -250,6 +250,7 @@ GONE: list[tuple[str, str]] = [
     ("EXIT_PANIC", "on a timeout, or on"),
     ("tests/harness/run_e2e.py: ISA_DEBUG_EXIT", "on a timeout, or on"),
     ("drain_panic_tail", "on a timeout, or on"),
+    ("abandon_ap_idle", "a full thread table is an error, not a panic"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

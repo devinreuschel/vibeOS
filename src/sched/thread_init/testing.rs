@@ -4,7 +4,11 @@ use vibeos::sched::stack_depth::{self, Deepest};
 use vibeos::sched::take_next;
 use vibeos::thread::{CpuAffinity, GuardedStack, MAX_THREADS, Tcb, ThreadId, ThreadState};
 
+use vibeos::kalloc::{AllocError, TryVec};
+use vibeos::limits;
+
 use super::{runnable_on, with_sched};
+use crate::cell::BootCell;
 
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -96,9 +100,19 @@ pub(in crate::sched) static REQUEUE: AtomicBool = AtomicBool::new(false);
 /// Moves the hook has made since boot (`sched::ktest::requeues`).
 pub(in crate::sched) static REQUEUES: AtomicU64 = AtomicU64::new(0);
 /// Per thread-table slot: set when its thread was moved, cleared by the
-/// dequeue that runs it.
-pub(in crate::sched) static ARRIVED: [AtomicBool; MAX_THREADS] =
-    [const { AtomicBool::new(false) }; MAX_THREADS];
+/// dequeue that runs it. A table of `limits::MAX_THREADS` flags, which
+/// [`init_tables`] allocates with the scheduler's.
+pub(in crate::sched) static ARRIVED: BootCell<TryVec<AtomicBool>> = BootCell::new();
+
+/// Allocate [`ARRIVED`]. Once, from `thread_init::init_tables`.
+pub(super) fn init_tables() -> Result<(), AllocError> {
+    let t = limits::table(MAX_THREADS, || AtomicBool::new(false))?;
+    // SAFETY: `BootCell::set`'s contract: its one write, on the BSP before
+    // `smp: done` and before the requeue hook can run; established by
+    // `thread_init::init_tables`, its one caller.
+    unsafe { ARRIVED.set(t) };
+    Ok(())
+}
 
 /// A `CpuAffinity::Any` kernel thread, a thread the requeue hook may
 /// move, that does not run until [`queue_here`] queues it on a CPU. It
@@ -155,7 +169,7 @@ pub(super) fn next_online_cpu(me: u32) -> Option<u32> {
 
 /// Thread-table slot `slot`'s thread was moved. Under SCHED.
 pub(super) fn moved(slot: usize) {
-    if let Some(a) = ARRIVED.get(slot) {
+    if let Some(a) = ARRIVED.try_get().and_then(|v| v.get(slot)) {
         a.store(true, Ordering::Release);
     }
     REQUEUES.fetch_add(1, Ordering::Relaxed);
@@ -165,7 +179,8 @@ pub(super) fn moved(slot: usize) {
 /// clears it. Under SCHED.
 pub(super) fn take_arrived(slot: usize) -> bool {
     ARRIVED
-        .get(slot)
+        .try_get()
+        .and_then(|v| v.get(slot))
         .is_some_and(|a| a.swap(false, Ordering::AcqRel))
 }
 
