@@ -10,7 +10,18 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
     if pid == 0 {
         thread_init::exit_current();
     }
-    let (old, ppid, fds, tid) = thread_init::with_sched(|s| {
+    // Close the files before the exit is published below (`Zombie`, the
+    // waiter's wake): a waiter that reads the status finds them closed, as
+    // Linux closes a task's files before it notifies its parent.
+    let mut fds = with_table(|t| {
+        t.get_mut(pid).map_or(FdTable::empty(), |p| {
+            let fds = p.fds;
+            p.fds = FdTable::empty();
+            fds
+        })
+    });
+    close_all_fds(&mut fds);
+    let (old, ppid, tid) = thread_init::with_sched(|s| {
         table_locked(|t| {
             if reparent_children(s, t, pid)
                 && let Some(init) = t.get_mut(INIT_PID)
@@ -18,17 +29,15 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
                 s.wake_all(&mut init.wait_wq);
             }
             let p = t.get_mut(pid);
-            let (space, ppid, fds, tid, autoreap) = match p {
+            let (space, ppid, tid, autoreap) = match p {
                 Some(p) => {
                     p.state = ProcState::Zombie;
                     p.wait_status = wait_status;
                     p.pending = 0;
                     let space = p.space.take();
-                    let fds = p.fds;
-                    p.fds = FdTable::empty();
-                    (space, p.ppid, fds, p.tid, p.autoreap)
+                    (space, p.ppid, p.tid, p.autoreap)
                 }
-                None => (None, 0, FdTable::empty(), ThreadId::NONE, false),
+                None => (None, 0, ThreadId::NONE, false),
             };
             if autoreap {
                 // No reaper (ROADMAP §10.5): nobody waits, so free the slot now.
@@ -42,11 +51,9 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
                     s.wake_all(wq);
                 }
             }
-            (space, ppid, fds, tid)
+            (space, ppid, tid)
         })
     });
-    let mut fds = fds;
-    close_all_fds(&mut fds);
     let _ = ppid;
     if let Some(space) = old {
         // The TCB stops naming the root before the kernel root is loaded,
