@@ -30,7 +30,7 @@ use vibeos::virtio_blk::{
     CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
     F_FLUSH, F_MQ, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
     logical_capacity, map_status, nq_from_config, pack_discard, pack_header, pick_blk_size,
-    pick_features, sector_for_lba,
+    pick_features, queue_size, sector_for_lba,
 };
 
 use crate::arch::{self, current::Arch};
@@ -52,7 +52,7 @@ use irq::{blk_top, blk_work};
 #[cfg(feature = "kernel_tests")]
 pub use issue::submit;
 use issue::{Blk, N_SLOTS, SLOT_STRIDE};
-use vq::{FREE, MAX_QSIZE, MAX_VQ, Vq, clamp_qsize};
+use vq::{FREE, MAX_QSIZE, MAX_VQ, Vq};
 
 /// One bound virtio-blk function: what the driver keeps for it. The PCI
 /// registry slot of the device owns it as a `dev::Instance`; the block
@@ -445,11 +445,10 @@ fn setup(
 
         w16(common, COMMON_OFF_QSEL, qi as u16);
         let hw_qs = r16(common, COMMON_OFF_QSIZE);
-        let qsz = clamp_qsize(hw_qs);
-        if qsz == 0 {
+        let Ok(qsz) = queue_size(hw_qs, MAX_QSIZE as u16) else {
             fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::BadQueue);
-        }
+        };
         w16(common, COMMON_OFF_QSIZE, qsz);
         if qi == 0 {
             q0sz = qsz;

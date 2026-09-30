@@ -128,6 +128,26 @@ pub fn map_status(st: u8) -> Result<(), BlockError> {
     }
 }
 
+/// The fewest descriptors a queue needs: one read or write chain is a
+/// header, a data segment, and a status byte.
+pub const MIN_QSIZE: u16 = 3;
+
+/// The queue size to program for a device queue of `hw` entries: the
+/// largest power of two no larger than `hw` or `max`, which
+/// `SplitLayout::new` requires. `BadQueue` when that is below
+/// [`MIN_QSIZE`], where every request would stay `Full`.
+pub fn queue_size(hw: u16, max: u16) -> Result<u16, virtio::VirtioError> {
+    let n = hw.min(max);
+    if n == 0 {
+        return Err(virtio::VirtioError::BadQueue);
+    }
+    let q = 1u16 << n.ilog2();
+    if q < MIN_QSIZE {
+        return Err(virtio::VirtioError::BadQueue);
+    }
+    Ok(q)
+}
+
 pub fn nq_from_config(feat: u64, cfg_num_queues: u16, common_num_queues: u16) -> u16 {
     let offered = if feat & F_MQ != 0 {
         cfg_num_queues.max(1)
@@ -232,6 +252,19 @@ mod tests {
         assert_eq!(nq_from_config(F_MQ, 4, 8), 4);
         assert_eq!(nq_from_config(F_MQ, 8, 2), 2);
         assert_eq!(nq_from_config(F_MQ, 0, 4), 1);
+    }
+
+    #[test]
+    fn queue_size_below_3_rejected() {
+        for hw in [0u16, 1, 2, 3] {
+            assert_eq!(queue_size(hw, 64), Err(virtio::VirtioError::BadQueue));
+        }
+        assert_eq!(queue_size(4, 64), Ok(4));
+        assert_eq!(queue_size(48, 64), Ok(32));
+        assert_eq!(queue_size(64, 64), Ok(64));
+        assert_eq!(queue_size(256, 64), Ok(64));
+        assert_eq!(queue_size(256, 2), Err(virtio::VirtioError::BadQueue));
+        assert_eq!(queue_size(u16::MAX, u16::MAX), Ok(1 << 15));
     }
 
     #[test]

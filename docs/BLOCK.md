@@ -281,7 +281,9 @@ runs on MSI-X, where virtio 1.2 §4.1.4.5.2 says a driver should not read ISR (R
 `F_MQ`: one virtqueue per online CPU, capped by the device `num_queues` and by
 `MAX_VQ` (8). Requests on different queues are not ordered against each other
 ([section 10.2](#102-ordering-flush-and-fua)). Without `F_MQ`, a single
-request queue. Data goes through 16 bounce slots of 8 KiB shared by the
+request queue. Each queue gets the largest power of two no larger than the
+device's queue size or 64; a device queue that gives fewer than 3 descriptors,
+one read or write chain, fails the probe (`queue_size`, `MIN_QSIZE`). Data goes through 16 bounce slots of 8 KiB shared by the
 device's queues; a request over 8 KiB is
 `Inval`, including one the block queue merged past that size (ROADMAP §12.5,
 F119). Flush and discard go to the device when those features are negotiated;
