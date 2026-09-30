@@ -1,7 +1,8 @@
 //! Load a static ELF, from the filesystem or from memory, into a new
 //! address space. ROADMAP §9.4 / §9.8.
 
-use vibeos::addr_space::{AddressSpace, AsError, UserMemError, UserPerms};
+use vibeos::addr_space::{AsError, UserMemError, UserPerms};
+use vibeos::arch::CycleCounter;
 use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, Builder, EHDR_SIZE, ElfError, Image, PHDR_SIZE,
@@ -11,9 +12,9 @@ use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
+use crate::arch::current::{AddressSpace, Arch};
 use crate::file_init;
 use crate::thread_init::SpawnError;
-use crate::x86;
 
 const STACK_PAGES: u64 = 32;
 const STACK_TOP: u64 = 0x0000_0000_8000_0000;
@@ -268,7 +269,7 @@ fn setup_tls<S: ImageSource>(
 }
 
 fn at_random() -> [u8; 16] {
-    let t = x86::lfence_rdtsc();
+    let t = <Arch as CycleCounter>::now();
     let mix = t.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut b = [0u8; 16];
     b[..8].copy_from_slice(&t.to_le_bytes());

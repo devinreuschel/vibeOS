@@ -18,6 +18,7 @@ use vibeos::atomic::statics::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use vibeos::log::line;
 use vibeos::uart::*;
 
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 /// Set once a CPU starts stopping the others for a panic dump
@@ -42,6 +43,7 @@ static STOP_HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 /// Bring COM1 up: DLAB dance, 115200 8N1, FIFO on. Safe to run again;
 /// the panic path re-runs it since the panic may itself be in serial.
+#[cfg(target_arch = "x86_64")]
 pub fn init() {
     // SAFETY: invariant: COM1's registers are the I/O ports
     // `COM1_BASE + REG_*` on every PC-compatible machine QEMU models, and
@@ -57,6 +59,7 @@ pub fn init() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn write_byte(b: u8) {
     // Bounded THRE poll; drop on cap rather than spin forever (DESIGN §9.6).
     let mut spin = TX_POLL_CAP;
@@ -94,6 +97,7 @@ pub fn put_user(bytes: &[u8]) {
 }
 
 /// Poll COM1 RX. No lock; a caller racing another reader holds IRQs off.
+#[cfg(target_arch = "x86_64")]
 pub fn try_read_byte() -> Option<u8> {
     // SAFETY: invariant: `COM1_BASE + REG_LSR` and `+ REG_DATA` are COM1's
     // status and data ports; established by `vibeos::uart::COM1_BASE`.
@@ -107,6 +111,7 @@ pub fn try_read_byte() -> Option<u8> {
 }
 
 /// This CPU's index. Before the per-CPU area is live only the BSP runs.
+#[cfg(target_arch = "x86_64")]
 fn this_cpu() -> u32 {
     x86::cpu_index().unwrap_or(0)
 }

@@ -15,7 +15,6 @@ use crate::ktest::{Outcome, Test, test};
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init::{self, STATE};
-use crate::x86;
 
 /// A fresh PIT channel 2 calibration (`tsc_per_ms`).
 pub(crate) fn measure_pit_ch2() -> Option<u64> {
@@ -63,7 +62,7 @@ pub(crate) fn test_pit_tick_rate() -> Outcome {
     if apic_init::timer_mode() != TimerMode::Pit {
         return Outcome::Fail("pit does not drive the tick");
     }
-    if !x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         return Outcome::Fail("IF off");
     }
     let k = time_init::tsc_per_ms();

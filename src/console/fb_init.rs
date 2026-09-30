@@ -16,9 +16,9 @@ use vibeos::fb::{CHUNK, MAX_CELLS, TextGrid, glyph_origin, pack_bgrx, pixel_offs
 use vibeos::font::{self, FONT_H, FONT_W};
 use vibeos::lock::RANK_DEVICE;
 
+use crate::arch::current::interrupts_enabled;
 use crate::boot::FbInfo;
 use crate::sync_init::SpinMutex;
-use crate::x86;
 
 const BANNER_ROWS: u32 = 1;
 const BG: u32 = pack_bgrx(0x12, 0x12, 0x18);
@@ -261,7 +261,7 @@ pub fn write(bytes: &[u8]) {
             #[cfg(feature = "kernel_tests")]
             testing::on_chunk(_st);
         }
-        if x86::interrupts_enabled() {
+        if interrupts_enabled() {
             redraw();
         }
         if tail.is_empty() {

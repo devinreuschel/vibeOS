@@ -23,15 +23,16 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use vibeos::lock::RANK_PT;
 use vibeos::marker;
 use vibeos::paging::{
-    self, FrameAlloc, IoremapWindow, MapError, MapMode, Mapper, PAGE_SIZE_2M, PAGE_SIZE_4K,
-    PageFlags, PageSize, PhysAddr, VirtAddr,
+    self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_2M, PAGE_SIZE_4K, PageFlags,
+    PageSize, PhysAddr, VirtAddr,
 };
 use vibeos::pmm::Frames;
 
+use crate::arch::current::{Arch, Mapper, enable_nx, flush_local_global, stack_pointer};
 use crate::boot::{self, BootInfo};
 use crate::pmm_init;
 use crate::sync_init::{SpinMutex, SpinMutexGuard};
-use crate::x86;
+use vibeos::arch::PageTable;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
 
@@ -205,7 +206,7 @@ pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapErr
     let hhdm_end = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(len);
     let mut va = HHDM_BASE.wrapping_add(phys.as_u64());
     while va < hhdm_end {
-        x86::invlpg(va);
+        Arch::flush_local(VirtAddr(va));
         paging::tlb_shootdown_others(VirtAddr(va));
         off += PAGE_SIZE_4K;
         va = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(off);
@@ -219,19 +220,15 @@ pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapErr
 /// thread may have switched it).
 pub(crate) fn current_mapper() -> MapperGuard {
     let pt = PT.lock();
-    let cr3 = {
+    let root = {
         let k = kernel_cr3();
-        if k != 0 {
-            k
-        } else {
-            x86::read_cr3() & paging::PTE_ADDR_MASK
-        }
+        if k != 0 { k } else { Arch::root().as_u64() }
     };
     // SAFETY: the kernel PML4 that `paging_init::install` built (or, before
     // it, the boot tables CR3 holds) is never freed, and PT is held for the
     // guard's life, so this is the only live `Mapper` over it; established
     // here.
-    let mapper = unsafe { Mapper::new(PhysAddr(cr3), HHDM_BASE) };
+    let mapper = unsafe { Mapper::new(PhysAddr(root), HHDM_BASE) };
     MapperGuard { mapper, pt }
 }
 
@@ -253,7 +250,7 @@ pub unsafe fn map_4k_locked(
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
     }
-    x86::invlpg(va.as_u64());
+    Arch::flush_local(va);
     Ok(())
 }
 
@@ -286,7 +283,7 @@ pub unsafe fn map_2m_locked(
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size2M, MapMode::Fresh, &mut alloc)?;
     }
-    x86::invlpg(va.as_u64());
+    Arch::flush_local(va);
     Ok(())
 }
 
@@ -381,7 +378,7 @@ pub unsafe fn unmap_4k_locked(pt: &mut MapperGuard, va: VirtAddr) -> Option<(Phy
     // `invlpg`, and the caller shoots the other CPUs down before it uses
     // `va` (this fn's `# Safety` contract, established here).
     let r = unsafe { pt.unmap_page(va) }?;
-    x86::invlpg(va.as_u64());
+    Arch::flush_local(va);
     Some(r)
 }
 
@@ -466,10 +463,10 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     };
     let root = PhysAddr(root.into_entry());
     let hhdm_ptr = root.as_u64().wrapping_add(HHDM_BASE) as *mut u64;
-    for i in 0..paging::PTES_PER_TABLE {
+    for i in 0..Arch::ENTRIES {
         // SAFETY: `root` is the order-0 buddy frame above, which Limine's
         // HHDM maps writable at `HHDM_BASE` (invariant I14, established at
-        // `mm::pmm_init::init`); `i < 512` words stay inside it.
+        // `mm::pmm_init::init`); `i < Arch::ENTRIES` words stay inside it.
         unsafe { hhdm_ptr.add(i).write_volatile(0) };
     }
     // SAFETY: `Mapper::new`'s contract; `root` is the zeroed PML4 above,
@@ -638,7 +635,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // (typically Limine puts the stack in HHDM), the switch survives on
     // its own. Otherwise copy the covering PML4 entry from Limine's
     // active tables so the stack VA stays live across `mov cr3`.
-    let rsp = x86::read_rsp();
+    let rsp = stack_pointer();
     let duplicated = if mapper.translate(VirtAddr(rsp)).is_none() {
         // SAFETY: `duplicate_pml4_entry_from_current`'s contract; boot has
         // not yet written CR3, so Limine's tables are still installed
@@ -654,13 +651,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // rather than treated as reserved-bit violations. DESIGN §7.3's AP
     // pitfall (missed NXE -> fault on first kernel page) applies here
     // too: our own kernel .rodata / .data / .bss all carry NX.
-    let efer = x86::rdmsr(x86::IA32_EFER);
-    if efer & x86::EFER_NXE == 0 {
-        // SAFETY: setting EFER.NXE only enables the NX bit in PTEs; every
-        // table live now (Limine's) and the new ones treat NX as intended,
-        // established here.
-        unsafe { x86::wrmsr(x86::IA32_EFER, efer | x86::EFER_NXE) };
-    }
+    enable_nx();
 
     // ---- 6. Install ----
     KERNEL_CR3.store(mapper.root().as_u64(), Ordering::Release);
@@ -668,7 +659,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // pointer computed as `phys + HHDM_BASE` stays valid, invariant I14),
     // the low identity window and the boot stack, so execution continues
     // across the switch; established here.
-    unsafe { x86::write_cr3(mapper.root().as_u64()) };
+    unsafe { Arch::set_root(mapper.root()) };
     MAP_END.store(map_end, Ordering::Relaxed);
 
     PagingReport {
@@ -722,33 +713,14 @@ pub unsafe fn teardown_identity(keep: Option<u64>) {
             va += size;
         }
     }
-    flush_tlb_all_local();
+    flush_local_global();
     crate::ipi_init::call_mask(u64::MAX, flush_tlb_all_ipi, core::ptr::null_mut(), true);
 }
 
-/// Drop every TLB entry on this CPU, global ones included: toggle
-/// `CR4.PGE` when it is set, else reload CR3 (Intel SDM Vol. 3A §4.10.4.1).
-fn flush_tlb_all_local() {
-    let cr4 = x86::read_cr4();
-    if cr4 & x86::CR4_PGE != 0 {
-        // SAFETY: clearing and restoring `CR4.PGE` changes nothing but
-        // which TLB entries survive; every other CR4 bit is written back as
-        // read; established here.
-        unsafe {
-            x86::write_cr4(cr4 & !x86::CR4_PGE);
-            x86::write_cr4(cr4);
-        }
-    } else {
-        // SAFETY: reloading CR3 with its own value keeps the same tables;
-        // established here.
-        unsafe { x86::write_cr3(x86::read_cr3()) };
-    }
-}
-
-/// [`flush_tlb_all_local`] on a CPU `teardown_identity` calls through
+/// `flush_local_global` on a CPU `teardown_identity` calls through
 /// `ipi_init::call_mask`: it takes no lock and allocates nothing.
 fn flush_tlb_all_ipi(_: *mut ()) {
-    flush_tlb_all_local();
+    flush_local_global();
 }
 
 /// Print the phase-1 §1.2 exit marker and the diagnostic follow-ups.
@@ -849,9 +821,8 @@ fn physmap_extent(info: &BootInfo) -> u64 {
     reason = "boot protocol invariant (DESIGN §3.3): Limine's PML4 maps the boot stack"
 )]
 unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
-    let cr3 = x86::read_cr3() & paging::PTE_ADDR_MASK;
-    let src = cr3.wrapping_add(HHDM_BASE) as *const u64;
-    let idx = va.index(4);
+    let src = Arch::root().as_u64().wrapping_add(HHDM_BASE) as *const u64;
+    let idx = Arch::index(va, Arch::LEVELS);
     // SAFETY: CR3 still holds Limine's PML4 (this fn's `# Safety` contract,
     // established here), which Limine's HHDM maps at `HHDM_BASE`, and
     // `idx < 512`.
