@@ -351,6 +351,48 @@ pub(super) fn preempt_before_places(places: usize) {
     }
 }
 
+/// The last tid the blocked-thread sweep printed, `u32::MAX` for none.
+static LAST_OVERDUE: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Whole sweeps finished since boot.
+static SWEEPS: AtomicU64 = AtomicU64::new(0);
+
+/// Called by the sweep once it has printed `id`'s overdue line.
+pub(super) fn overdue_printed(id: ThreadId) {
+    // Release: pairs with the Acquire load in `ktest_last_overdue`, after
+    // the print.
+    LAST_OVERDUE.store(id.raw(), Ordering::Release);
+}
+
+/// Called by the sweep once it has scanned the whole table and printed
+/// every find.
+pub(super) fn sweep_done() {
+    SWEEPS.fetch_add(1, Ordering::AcqRel);
+}
+
+/// The last thread the blocked-thread sweep reported, set after its line
+/// is printed; `ThreadId::NONE` before any.
+pub fn ktest_last_overdue() -> ThreadId {
+    ThreadId(LAST_OVERDUE.load(Ordering::Acquire))
+}
+
+/// Whole sweeps finished since boot: a count read after a change the
+/// sweep must see has grown once every sweep that began before it is done.
+pub fn ktest_sweeps() -> u64 {
+    SWEEPS.load(Ordering::Acquire)
+}
+
+/// Remove `id`'s timeout entry while it is `Blocked`, as a lost entry
+/// would be, so only the sweep can notice it. False when `id` is not
+/// Blocked or its entry is gone already (its timeout fired).
+pub fn ktest_drop_timeout(id: ThreadId) -> bool {
+    with_sched(|s| {
+        matches!(
+            s.get(id).map(|t| t.state),
+            Some(ThreadState::Blocked { .. })
+        ) && s.timeouts.remove(id)
+    })
+}
+
 /// One run of the blocked-thread sweep's scan, as its thread runs it: a
 /// `SWEEP_CHUNK`-slot chunk per SCHED hold, IF off, over every slot. Hands
 /// `hold` the TSC cycles each hold's scan took; returns the TCBs scanned.

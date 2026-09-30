@@ -1,6 +1,12 @@
 //! The blocked-thread sweep's tests (ROADMAP §10.7, DESIGN §6.5).
 
-use crate::ktest::Outcome;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use vibeos::thread::ThreadState;
+use vibeos::time::Instant;
+
+use crate::ktest::{Outcome, sleep_until};
+use crate::sync::blocking_init::Semaphore;
 use crate::thread_init;
 use crate::time_init;
 
@@ -45,5 +51,77 @@ pub(crate) fn sched_sweep_cost() -> Outcome {
     if spawned == 0 {
         return Outcome::Fail("no filler spawned");
     }
+    Outcome::Ok
+}
+
+/// The semaphore [`lost_worker`] waits on, at 0.
+static LOST_SEM: Semaphore = Semaphore::new(0);
+/// [`lost_worker`]'s end: 0 still waiting, 1 woken, 2 timed out.
+static LOST_END: AtomicU32 = AtomicU32::new(0);
+/// How long [`lost_worker`]'s wait lasts.
+const LOST_WAIT_MS: u64 = 100;
+/// How long after the block the sweep has to report it: `OVERDUE_NS`
+/// past a 100 ms deadline, plus a sweep period and slack.
+const LOST_REPORT_MS: u64 = 8_000;
+
+fn lost_worker() {
+    let deadline = Instant {
+        ns: time_init::now_ns().saturating_add(LOST_WAIT_MS * 1_000_000),
+    };
+    let end = if LOST_SEM.acquire_until(Some(deadline)).is_some() {
+        1
+    } else {
+        2
+    };
+    LOST_END.store(end, Ordering::Release);
+}
+
+/// A thread blocked with a 100 ms deadline whose timeout entry a
+/// `kernel_tests` hook removes is reported as `vibeOS: sched: overdue tid
+/// <id>` within 8 s of blocking (F111). The harness registers that line as
+/// a failure line; this test declares it (`tests/harness/declared.py`).
+pub(crate) fn sched_overdue_lost_timeout() -> Outcome {
+    LOST_END.store(0, Ordering::Relaxed);
+    let Ok(h) = thread_init::spawn("lost-timeout", lost_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let id = h.id();
+    let blocked = || {
+        matches!(
+            thread_init::try_state(id),
+            Some(ThreadState::Blocked { .. })
+        )
+    };
+    if !sleep_until(blocked, LOST_WAIT_MS / 2) {
+        return Outcome::Fail("worker never blocked");
+    }
+    let t0 = time_init::now_ns();
+    if !thread_init::ktest_drop_timeout(id) {
+        return Outcome::Fail("timeout fired before removal");
+    }
+    let reported = sleep_until(|| thread_init::ktest_last_overdue() == id, LOST_REPORT_MS);
+    let waited_ms = time_init::now_ns().saturating_sub(t0) / 1_000_000;
+    LOST_SEM.release();
+    let sweeps = thread_init::ktest_sweeps();
+    let woke = sleep_until(
+        || LOST_END.load(Ordering::Acquire) != 0 && thread_init::exited(id),
+        2_000,
+    );
+    // Every sweep that saw the worker blocked has printed before the run
+    // ends: its line stays inside this test's window.
+    let settled = sleep_until(|| thread_init::ktest_sweeps() > sweeps, 3_000);
+    if !reported {
+        return crate::fail_fmt!("no overdue report within {} ms", waited_ms);
+    }
+    if !woke {
+        return Outcome::Fail("worker not woken by the release");
+    }
+    if LOST_END.load(Ordering::Acquire) != 1 {
+        return Outcome::Fail("worker's wait timed out");
+    }
+    if !settled {
+        return Outcome::Fail("no sweep finished after the release");
+    }
+    crate::ktest_info!("reported {} ms after the block", waited_ms);
     Outcome::Ok
 }

@@ -24,7 +24,7 @@ pub(crate) use sleep::{
     block_in_hard_irq_asserts, in_hard_irq_top_bottom, lock_across_switch_asserts,
     sleep_under_spinlock_asserts,
 };
-pub(crate) use sweep::sched_sweep_cost;
+pub(crate) use sweep::{sched_overdue_lost_timeout, sched_sweep_cost};
 
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -1309,5 +1309,8 @@ pub(crate) const TESTS: &[Test] = &[
         .once(),
     test("sched_sweep_cost", sched_sweep_cost)
         .deadline(60_000)
+        .once(),
+    test("sched_overdue_lost_timeout", sched_overdue_lost_timeout)
+        .deadline(15_000)
         .once(),
 ];

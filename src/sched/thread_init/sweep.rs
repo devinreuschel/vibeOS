@@ -57,6 +57,8 @@ fn sweep_once() {
             // A failure path, printed with SCHED dropped.
             for id in out.iter().take(n) {
                 crate::marker!("vibeOS: sched: overdue tid {}", id.raw());
+                #[cfg(feature = "kernel_tests")]
+                super::testing::overdue_printed(*id);
             }
             // A full buffer: more overdue threads past the last one in
             // this chunk, which the next pass starts after.
@@ -68,6 +70,8 @@ fn sweep_once() {
         base = base.saturating_add(SWEEP_CHUNK);
         super::yield_now();
     }
+    #[cfg(feature = "kernel_tests")]
+    super::testing::sweep_done();
 }
 
 /// The overdue threads among slots `base..base + SWEEP_CHUNK` whose tid is

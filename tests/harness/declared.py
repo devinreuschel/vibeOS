@@ -23,7 +23,10 @@ from collections.abc import Iterable
 from tests.harness import registry
 
 # Test name -> the registry texts of the failure lines it provokes.
-DECLARED: dict[str, tuple[str, ...]] = {}
+DECLARED: dict[str, tuple[str, ...]] = {
+    # A thread whose timeout entry a hook removed (ROADMAP §10.7, F111).
+    "sched_overdue_lost_timeout": ("vibeOS: sched: overdue tid <n>",),
+}
 
 
 def _pattern(text: str) -> re.Pattern[str]:
