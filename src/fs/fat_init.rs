@@ -13,9 +13,9 @@
 //! inode is the `Vfs` inode keyed by its dirent location; its first
 //! cluster and size are its slot's words (`Inode::words`), which only FAT
 //! reads and writes, under the volume lock and with no VFS lock: FAT
-//! never takes the VFS lock under a volume. The routing table
-//! (`route`) serves path syscalls until ROADMAP §10.4 routes them
-//! through `Vfs`.
+//! never takes the VFS lock under a volume. FAT resolves one name per
+//! `InodeOps::lookup` and never sees `.` or `..`, which `Vfs` resolves
+//! itself.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
@@ -24,8 +24,8 @@ use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, Node, SEC};
 use vibeos::fs::{
-    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, InodeRef, Key,
-    MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
+    Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -534,8 +534,8 @@ impl FileSystem for FatFs {
         })
     }
 
-    /// Record the superblock and route `at` to the volume, for the path
-    /// syscalls' walk.
+    /// Record the superblock, and `at` and the volume in the mount table
+    /// (`MNTS`).
     fn on_mount(&self, cx: &mut OpCx<'_>, at: &[u8]) {
         if let Ok(v) = vol_of(cx) {
             v.sb.store(cx.sb, Ordering::Release);
@@ -543,12 +543,12 @@ impl FileSystem for FatFs {
         if at != b"/" && register_mnt(cx.vol.cloned(), at).is_err() {
             crate::klog!(
                 vibeos::log::Level::Warn,
-                "vibeOS: fat: no route for a mount"
+                "vibeOS: fat: no mount-table slot for a mount"
             );
         }
     }
 
-    /// Drop `at`'s route. After the superblock's last mount, which is the
+    /// Drop `at`'s mount-table entry. After the superblock's last mount, which is the
     /// last to show the volume (one superblock per volume), sync the
     /// volume, retire it, and take it from its device's entry; the
     /// superblock's own reference goes when its slot is freed.
@@ -637,23 +637,6 @@ pub fn init() {
     LIVE.store(root.is_ok(), Ordering::Release);
 }
 
-/// Walk `path` on volume `vol` and count a reference to the `Vfs` inode it
-/// names, with the volume held: busy flag first, then the VFS lock, never
-/// the reverse. A cached inode keeps its words; the walk's dirent never
-/// overwrites them. For the path syscalls until ROADMAP §10.4 routes
-/// them through `Vfs`.
-pub fn walk_iget(vol: &Instance, path: &[u8]) -> Result<InodeRef, FsError> {
-    let v = as_fat(vol)?;
-    let sb = v.sb.load(Ordering::Acquire);
-    if sb == NO_SB {
-        return Err(FsError::Io);
-    }
-    with_vol(v, |fv, d| {
-        let n = fv.walk(d, path)?;
-        fs_init::with(|vfs| vfs.iget_key(sb, &node_info(&n)))
-    })
-}
-
 pub fn sync(vol: &FatVolume) -> Result<(), FsError> {
     with_vol(vol, |v, d| Ok(v.sync(d)?))
 }
@@ -669,7 +652,8 @@ pub fn df(vol: &FatVolume) -> Result<(FsType, u64, u64, u32), FsError> {
     })
 }
 
-/// The root superblock's FAT volume: the initrd's.
+/// The root superblock's FAT volume: the initrd's (test-only).
+#[cfg(feature = "kernel_tests")]
 pub fn root_volume() -> Result<Instance, FsError> {
     fs_init::with(|v| v.root().and_then(|p| v.volume_of(p)))
 }
@@ -687,36 +671,6 @@ pub fn initrd_geometry() -> Option<(u64, u64)> {
     .flatten()
 }
 
-/// `(vol, strip)`: skip `strip` bytes of `path`; if nothing remains, walk
-/// `"/"`. `None` is the root volume.
-pub fn route(path: &[u8]) -> (Option<Instance>, usize) {
-    let g = MNTS.lock();
-    let mut best = 0usize;
-    let mut vol = None;
-    for m in g.iter() {
-        if m.used {
-            let n = m.len as usize;
-            let p = &m.path[..n];
-            if (path == p || (path.len() > n && path[..n] == p[..] && path[n] == b'/')) && n >= best
-            {
-                best = n;
-                vol = m.vol.as_ref();
-            }
-        }
-    }
-    (vol.cloned(), best)
-}
-
-pub fn routed_rest(path: &[u8], strip: usize) -> &[u8] {
-    if strip == 0 {
-        if path.is_empty() { b"/" } else { path }
-    } else if strip >= path.len() {
-        b"/"
-    } else {
-        &path[strip..]
-    }
-}
-
 fn register_mnt(vol: Option<Instance>, p: &[u8]) -> Result<(), FsError> {
     if p.is_empty() || p.len() > MNT_PATH {
         return Err(FsError::NameTooLong);
@@ -730,7 +684,7 @@ fn register_mnt(vol: Option<Instance>, p: &[u8]) -> Result<(), FsError> {
     Ok(())
 }
 
-/// Take `p`'s route out; the caller drops its volume reference unlocked.
+/// Take `p`'s mount-table entry out; the caller drops its volume reference unlocked.
 fn unregister_mnt(p: &[u8]) -> Option<Instance> {
     let mut g = MNTS.lock();
     let m = g

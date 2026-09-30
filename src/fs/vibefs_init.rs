@@ -11,8 +11,8 @@
 //! [`VibeOps`] is the one way to a volume's files: `Vfs`'s File API calls
 //! it with the VFS lock dropped, so it waits for the volume lock. The size
 //! vibefs keeps is stored in the inode slot's words (`Inode::words`)
-//! under the volume lock, with no VFS lock. The routing table (`route`) serves path syscalls until
-//! ROADMAP §10.4 routes them through `Vfs`.
+//! under the volume lock, with no VFS lock. vibefs resolves one name per
+//! `InodeOps::lookup`; `Vfs` resolves `.` and `..` itself.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -20,8 +20,8 @@ use vibeos::block::BlockError;
 use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fs::{
-    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, InodeRef, Key,
-    MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFMT,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
+    Name, OpCx, S_IFDIR_MODE, S_IFMT,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -474,8 +474,8 @@ impl FileSystem for VibeFs {
         vibefs::MAX_FILE_SIZE
     }
 
-    /// Record the superblock and route `at` to the volume, for the path
-    /// syscalls' walk.
+    /// Record the superblock, and `at` and the volume in the mount table
+    /// (`MNTS`).
     fn on_mount(&self, cx: &mut OpCx<'_>, at: &[u8]) {
         if let Ok(v) = vol_of(cx) {
             v.sb.store(cx.sb, Ordering::Release);
@@ -483,12 +483,12 @@ impl FileSystem for VibeFs {
         if register_mnt(cx.vol.cloned(), at).is_err() {
             crate::klog!(
                 vibeos::log::Level::Warn,
-                "vibeOS: vibefs: no route for a mount"
+                "vibeOS: vibefs: no mount-table slot for a mount"
             );
         }
     }
 
-    /// Drop `at`'s route. After the superblock's last mount, which is the
+    /// Drop `at`'s mount-table entry. After the superblock's last mount, which is the
     /// last to show the volume (one superblock per volume), sync the
     /// volume, retire it, and take a device's from its entry; the
     /// superblock's own reference goes when its slot is freed, and with it
@@ -544,21 +544,6 @@ fn new_volume(
     .map_err(|_| FsError::NoMem)
 }
 
-/// Walk `path` on volume `vol` and count a reference to the `Vfs` inode it
-/// names, with the volume held: busy flag first, then the VFS lock. For
-/// the path syscalls until ROADMAP §10.4 routes them through `Vfs`.
-pub fn walk_iget(vol: &Instance, path: &[u8]) -> Result<InodeRef, FsError> {
-    let v = as_vibe(vol)?;
-    let sb = v.sb.load(Ordering::Acquire);
-    if sb == NO_SB {
-        return Err(FsError::Io);
-    }
-    with_vol(v, |fv, d| {
-        let n = fv.walk(d, path).map_err(Error::to_fs)?;
-        fs_init::with(|vfs| vfs.iget_key(sb, &node_info(&n)))
-    })
-}
-
 pub fn sync(vol: &VibeVolume) -> Result<(), FsError> {
     with_slot(vol, |v, d| v.sync(d)).map_err(Error::to_fs)
 }
@@ -569,38 +554,6 @@ pub fn df(vol: &VibeVolume) -> Result<(FsType, u64, u64, u32), FsError> {
         Ok((FsType::Vibe, tot, free, n))
     })
     .map_err(Error::to_fs)
-}
-
-/// `(vol, strip)`: strip==0 means no vibe mount on this path.
-pub fn route(path: &[u8]) -> (Option<Instance>, usize) {
-    let g = MNTS.lock();
-    let mut best = 0usize;
-    let mut vol = None;
-    for m in g.iter() {
-        if m.used {
-            let n = m.len as usize;
-            let p = &m.path[..n];
-            if (path == p || (path.len() > n && path[..n] == p[..] && path[n] == b'/')) && n >= best
-            {
-                best = n;
-                vol = m.vol.as_ref();
-            }
-        }
-    }
-    match vol {
-        Some(v) => (Some(v.clone()), best),
-        None => (None, 0),
-    }
-}
-
-pub fn routed_rest(path: &[u8], strip: usize) -> &[u8] {
-    if strip == 0 {
-        if path.is_empty() { b"/" } else { path }
-    } else if strip >= path.len() {
-        b"/"
-    } else {
-        &path[strip..]
-    }
 }
 
 fn register_mnt(vol: Option<Instance>, p: &[u8]) -> Result<(), FsError> {
@@ -617,7 +570,7 @@ fn register_mnt(vol: Option<Instance>, p: &[u8]) -> Result<(), FsError> {
 }
 
 /// Plant commit defect `p` in the volume mounted at `at`, found by its
-/// route as `unregister_mnt` finds it at umount (test-only: the
+/// mount-table entry as `unregister_mnt` finds it at umount (test-only: the
 /// `vibefs_crash` build, docs/VIBEFS.md §12).
 #[cfg(feature = "vibefs_crash")]
 pub(crate) fn set_plant(at: &[u8], p: vibefs::Plant) -> Result<(), FsError> {
@@ -635,7 +588,7 @@ pub(crate) fn set_plant(at: &[u8], p: vibefs::Plant) -> Result<(), FsError> {
     .map_err(Error::to_fs)
 }
 
-/// Take `p`'s route out; the caller drops its volume reference unlocked.
+/// Take `p`'s mount-table entry out; the caller drops its volume reference unlocked.
 fn unregister_mnt(p: &[u8]) -> Option<Instance> {
     let mut g = MNTS.lock();
     let m = g

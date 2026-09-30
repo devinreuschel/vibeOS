@@ -367,6 +367,10 @@ impl WalkCall {
         match self.need {
             Need::Lookup => {
                 let name = w.comp();
+                debug_assert!(
+                    !name_is_dot(name) && !name_is_dotdot(name),
+                    "a backend lookup never sees `.` or `..`"
+                );
                 WalkReply::Found(self.call.run(|o, cx, d| o.lookup(cx, d, name)))
             }
             Need::Readlink => {

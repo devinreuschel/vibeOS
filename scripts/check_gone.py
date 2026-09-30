@@ -208,6 +208,16 @@ GONE: list[tuple[str, str]] = [
     ("src/fs/vibefs_init.rs: static IMAGE", "driver and volume state as"),
     ("CALIB_BAND_TCG", "`tsc_calib_source` measures PIT channel 2 once"),
     ("calib_band", "`tsc_calib_source` measures PIT channel 2 once"),
+    ("walk_abs", "every path syscall resolves through `Vfs`"),
+    ("vol_parent", "every path syscall resolves through `Vfs`"),
+    ("routed_rest", "every path syscall resolves through `Vfs`"),
+    ("open_routed", "every path syscall resolves through `Vfs`"),
+    ("walk_iget", "every path syscall resolves through `Vfs`"),
+    ("src/fs/fat_init.rs: fn route", "every path syscall resolves through `Vfs`"),
+    ("src/fs/fat_init.rs: fn walk", "every path syscall resolves through `Vfs`"),
+    ("src/fs/vibefs_init.rs: fn route", "every path syscall resolves through `Vfs`"),
+    ("src/fs/vibefs_init.rs: fn walk", "every path syscall resolves through `Vfs`"),
+    ("crates/core/src/fs/fat/vol.rs: fn walk", "every path syscall resolves through `Vfs`"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

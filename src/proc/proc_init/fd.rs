@@ -244,7 +244,7 @@ pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
     }
 }
 
-pub(super) fn sys_open(path: u64, flags: i32, _mode: u16) -> SysResult {
+pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
     let mut buf = [0u8; vibeos::fs::MAX_PATH];
     let n = match copy_user_str(path, &mut buf) {
         Ok(n) => n,
@@ -253,7 +253,8 @@ pub(super) fn sys_open(path: u64, flags: i32, _mode: u16) -> SysResult {
     if core::str::from_utf8(&buf[..n]).is_err() {
         return Err(KError::from_errno(EINVAL));
     }
-    match file_init::open_routed(&buf[..n], OpenFlags::from_bits(flags as u32), 0) {
+    let mode = u32::from(mode) & 0o7777;
+    match file_init::open(&buf[..n], OpenFlags::from_bits(flags as u32), mode) {
         Ok(f) => {
             let id = f.into_raw();
             let slot = Fd {
