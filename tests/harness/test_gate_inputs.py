@@ -460,5 +460,92 @@ class TestSummary(unittest.TestCase):
         self.assertIn("Gate-change: scripts/check_x.py: new, box -- first", text)
 
 
+CI_PASS_YML = """name: ci
+jobs:
+  check:
+    runs-on: ubuntu-26.04
+  build:
+    runs-on: ubuntu-26.04
+  ticks:
+    if: ${{ github.event_name == 'pull_request' && !cancelled() }}
+    needs: [build]
+  ci-pass:
+    if: always()
+    needs: [check, build, ticks]
+    steps:
+      - name: every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          SKIPPABLE: ticks
+        run: python3 scripts/check_gate_inputs.py --ci-pass
+"""
+
+
+class TestCiPass(unittest.TestCase):
+    def test_needs_every_job(self) -> None:
+        self.assertEqual(cgi.ci_pass_errors(CI_PASS_YML), [])
+        real = (cgi.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertEqual(cgi.ci_pass_errors(real), [])
+
+    def test_missing_job_fails(self) -> None:
+        errs = cgi.ci_pass_errors(CI_PASS_YML.replace("[check, build, ticks]", "[check, ticks]"))
+        self.assertEqual(len(errs), 1)
+        self.assertIn("does not need job `build`", errs[0])
+        real = (cgi.ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        cut = real.replace("needs: [check, build, tier, ticks]", "needs: [check, build, ticks]")
+        self.assertNotEqual(cut, real)
+        self.assertTrue(any("does not need job `tier`" in e for e in cgi.ci_pass_errors(cut)))
+        files = dict(BASE)
+        files[".github/workflows/ci.yml"] = cut
+        errs = static_errors(Path("/nonexistent"), DictTree(files))
+        self.assertTrue(any("does not need job `tier`" in e for e in errs), errs)
+        errs = cgi.ci_pass_errors(CI_PASS_YML.replace("  ci-pass:", "  other:"))
+        self.assertIn("no `ci-pass` job", errs[0])
+
+    def test_requires_always(self) -> None:
+        for cond in ("${{ !cancelled() }}", "success()"):
+            errs = cgi.ci_pass_errors(CI_PASS_YML.replace("if: always()", f"if: {cond}"))
+            self.assertEqual(len(errs), 1, cond)
+            self.assertIn("lacks `if: always()`", errs[0])
+        self.assertEqual(cgi.ci_pass_errors(
+            CI_PASS_YML.replace("if: always()", "if: ${{ always() }}")), [])
+
+    def test_skippable_must_be_event_gated(self) -> None:
+        errs = cgi.ci_pass_errors(CI_PASS_YML.replace("SKIPPABLE: ticks", "SKIPPABLE: ticks build"))
+        self.assertEqual(len(errs), 1)
+        self.assertIn("SKIPPABLE names `build`", errs[0])
+        errs = cgi.ci_pass_errors(CI_PASS_YML.replace("SKIPPABLE: ticks", "SKIPPABLE: nope"))
+        self.assertIn("which is no job", errs[0])
+
+    def test_verdict_success(self) -> None:
+        needs = {"check": {"result": "success", "outputs": {}},
+                 "ticks": {"result": "success", "outputs": {}}}
+        self.assertEqual(cgi.ci_pass_verdict(needs, {"ticks"}), [])
+        self.assertEqual(cgi.ci_pass_verdict(needs, set()), [])
+
+    def test_verdict_failure_fails(self) -> None:
+        needs = {"check": {"result": "failure"}, "build": {"result": "success"}}
+        self.assertEqual(cgi.ci_pass_verdict(needs, set()),
+                         ["ci-pass: job `check` concluded 'failure'"])
+        self.assertTrue(cgi.ci_pass_verdict({}, set()))
+
+    def test_verdict_skipped_only_when_skippable(self) -> None:
+        needs = {"check": {"result": "success"}, "ticks": {"result": "skipped"}}
+        self.assertEqual(cgi.ci_pass_verdict(needs, {"ticks"}), [])
+        self.assertTrue(cgi.ci_pass_verdict(needs, set()))
+        tier = {"check": {"result": "failure"}, "tier": {"result": "skipped"}}
+        self.assertEqual(len(cgi.ci_pass_verdict(tier, {"ticks"})), 2)
+
+    def test_verdict_cancelled_fails(self) -> None:
+        needs = {"ticks": {"result": "cancelled"}}
+        self.assertEqual(cgi.ci_pass_verdict(needs, {"ticks"}),
+                         ["ci-pass: job `ticks` concluded 'cancelled'"])
+        env = {"NEEDS": '{"tier": {"result": "cancelled"}}', "SKIPPABLE": "ticks"}
+        with mock.patch.dict("os.environ", env), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(cgi.main(["--ci-pass"]), 1)
+        self.assertIn("`tier` concluded 'cancelled'", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

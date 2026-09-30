@@ -12,6 +12,9 @@ holds the `vibeos-core` coverage floor. Modes:
   merge base with the head (default `HEAD`). The `check` job runs it on every
   pull request.
 - `--floor`: print the floor, which the `check` job's llvm-cov step reads.
+- `--ci-pass`: ci.yml's `ci-pass` job. `NEEDS` is `toJSON(needs)` and
+  `SKIPPABLE` the jobs gated on the event; it fails unless each job succeeded,
+  or skipped when it is SKIPPABLE.
 - `--summary (--tag TAG | --since REV) [--head REV]`: markdown for release.yml's
   `build` job summary: every input changed since the `v*` tag before TAG (or
   the root of history) or since REV, the floor at both ends, and the
@@ -20,7 +23,10 @@ holds the `vibeos-core` coverage floor. Modes:
 Static rules: `inputs.toml` follows its schema; each `path` exists, each
 `recipe` is a Makefile rule and each `table` a table of its file; every file the
 ROADMAP §10.9 box enumerates (`REQUIRED`) is listed; the floor is an integer 0
-to 100; and no workflow holds a `--fail-under-lines <digits>` literal.
+to 100; no workflow holds a `--fail-under-lines <digits>` literal; and ci.yml's
+`ci-pass` job needs every other job, runs `if: always()`, and lists in
+`SKIPPABLE` only jobs whose `if:` tests `github.event_name`, so regrouping the
+tiers never changes a ruleset (`ci_pass_errors`).
 
 Diff rules, over the merge base to the head, on the union of both sides'
 inputs (the head's alone when the base has no `inputs.toml`):
@@ -48,6 +54,8 @@ warning and satisfies nothing.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import subprocess
 import sys
@@ -59,7 +67,7 @@ from typing import Any, Protocol
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts import gatelib  # noqa: E402
+from scripts import check_workflows, gatelib  # noqa: E402
 
 INPUTS = "tests/gates/inputs.toml"
 CI_YML = ".github/workflows/ci.yml"
@@ -649,6 +657,9 @@ def static_errors(root: Path, tree: Tree | None = None) -> list[str]:
     for kind, path, part in REQUIRED_PARTS:
         if path in have and (path, part) not in listed:
             errors.append(f"{INPUTS}: the {kind} {path} {part!r} is not listed")
+    ci = text_of(tree, CI_YML)
+    if ci is not None:
+        errors += ci_pass_errors(ci)
     for f in sorted(have):
         if not f.startswith(WORKFLOWS):
             continue
@@ -656,6 +667,92 @@ def static_errors(root: Path, tree: Tree | None = None) -> list[str]:
             if FLOOR_LITERAL.search(raw):
                 errors.append(f"{f}:{n}: a `--fail-under-lines` literal; read the floor with "
                               f"`check_gate_inputs.py --floor`")
+    return errors
+
+
+# --- ci-pass ---------------------------------------------------------------
+
+CI_PASS = "ci-pass"
+EXPR = re.compile(r"^\$\{\{\s*(.*?)\s*\}\}$")
+
+
+def _expr(value: str | None) -> str:
+    v = (value or "").strip()
+    m = EXPR.match(v)
+    return m.group(1) if m else v
+
+
+def _words(value: str | None) -> list[str]:
+    return [w for w in re.split(r"[\s,]+", value or "") if w]
+
+
+def ci_pass_errors(ci_yml: str) -> list[str]:
+    """ci.yml's `ci-pass` job needs every other job, runs `if: always()` (GitHub
+    counts a skipped required check as passing), runs `check_gate_inputs.py
+    --ci-pass` with `NEEDS`, and lists in `SKIPPABLE` only jobs whose `if:`
+    tests `github.event_name`."""
+    try:
+        wf = check_workflows.parse(ci_yml, CI_YML)
+    except check_workflows.Unsupported as e:
+        return [str(e)]
+    jobs_node = wf.get("jobs")
+    jobs = {j.key: j for j in (jobs_node.children if jobs_node is not None else [])
+            if j.key is not None}
+    job = jobs.get(CI_PASS)
+    if job is None:
+        return [f"{CI_YML}: no `{CI_PASS}` job (ROADMAP §10.9, the rulesets box)"]
+    where = f"{CI_YML}:{job.line}: `{CI_PASS}`"
+    errors: list[str] = []
+    needs_node = job.get("needs")
+    needs = set(needs_node.scalars()) if needs_node is not None else set()
+    others = set(jobs) - {CI_PASS}
+    for name in sorted(others - needs):
+        errors.append(f"{where} does not need job `{name}`")
+    for name in sorted(needs - others):
+        errors.append(f"{where} needs `{name}`, which is no job")
+    cond = job.get("if")
+    if cond is None or _expr(cond.value) != "always()":
+        errors.append(f"{where} lacks `if: always()`")
+    steps_node = job.get("steps")
+    steps = steps_node.items if steps_node is not None else []
+    env: dict[str, str] = {}
+    runs: list[str] = []
+    for holder in [job, *steps]:
+        env_node = holder.get("env")
+        for var in env_node.children if env_node is not None else []:
+            if var.key is not None:
+                env[var.key] = var.value or ""
+        run = holder.get("run")
+        if run is not None:
+            runs.append(run.value or "")
+    if not any("check_gate_inputs.py --ci-pass" in r for r in runs):
+        errors.append(f"{where} runs no `check_gate_inputs.py --ci-pass` step")
+    if "toJSON(needs)" not in env.get("NEEDS", "").replace(" ", ""):
+        errors.append(f"{where} sets no `NEEDS: ${{{{ toJSON(needs) }}}}`")
+    for name in _words(env.get("SKIPPABLE")):
+        other = jobs.get(name)
+        if other is None:
+            errors.append(f"{where}: SKIPPABLE names `{name}`, which is no job")
+            continue
+        test = other.get("if")
+        if test is None or "github.event_name" not in (test.value or ""):
+            errors.append(f"{where}: SKIPPABLE names `{name}`, whose `if:` does not test "
+                          f"github.event_name")
+    return errors
+
+
+def ci_pass_verdict(needs: dict[str, Any], skippable: set[str]) -> list[str]:
+    """`ci-pass`'s verdict from `toJSON(needs)`: each job succeeded, or skipped
+    when it is SKIPPABLE."""
+    if not needs:
+        return [f"{CI_PASS}: NEEDS names no job"]
+    errors: list[str] = []
+    for name in sorted(needs):
+        v = needs[name]
+        result = v.get("result") if isinstance(v, dict) else None
+        if result == "success" or (result == "skipped" and name in skippable):
+            continue
+        errors.append(f"{CI_PASS}: job `{name}` concluded {result!r}")
     return errors
 
 
@@ -769,12 +866,29 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base", help="diff against this revision's merge base with the head")
     ap.add_argument("--head", default="HEAD", help="the pull request's head (default HEAD)")
     ap.add_argument("--floor", action="store_true", help="print the coverage floor")
+    ap.add_argument("--ci-pass", action="store_true",
+                    help="ci.yml's ci-pass verdict from the NEEDS and SKIPPABLE variables")
     ap.add_argument("--summary", action="store_true",
                     help="markdown: the inputs changed since the previous release (or --since)")
     ap.add_argument("--tag", help="--summary: the release tag; since the `v*` tag before it")
     ap.add_argument("--since", help="--summary: since this revision")
     args = ap.parse_args(argv)
     root = ROOT
+    if args.ci_pass:
+        try:
+            needs = json.loads(os.environ.get("NEEDS", "{}"))
+        except json.JSONDecodeError as e:
+            print(f"check_gate_inputs: NEEDS is not JSON: {e}", file=sys.stderr)
+            return 1
+        if not isinstance(needs, dict):
+            print("check_gate_inputs: NEEDS is not an object", file=sys.stderr)
+            return 1
+        errors = ci_pass_verdict(needs, set(_words(os.environ.get("SKIPPABLE"))))
+        if errors:
+            print("\n".join(errors), file=sys.stderr)
+            return 1
+        print(f"check_gate_inputs: {CI_PASS} ok ({len(needs)} jobs)")
+        return 0
     if args.summary:
         if (args.tag is None) == (args.since is None):
             ap.error("--summary takes exactly one of --tag and --since")

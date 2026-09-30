@@ -445,3 +445,26 @@ jobs:
         run: >-
           python3 scripts/check_ticks.py --base "$BASE_SHA" --head "$HEAD_SHA"
           --run-commit "$RUN_SHA" --results build/ci-results --summary "$GITHUB_STEP_SUMMARY"
+
+  # The one check the rulesets require besides `check` (ROADMAP §10.9): it
+  # needs every other job and fails unless each succeeded, so regrouping the
+  # tiers never changes a ruleset. `if: always()`, since GitHub counts a
+  # skipped required check as passing; `ticks` runs only on a pull request,
+  # so it may skip. A job added here goes in `needs:`, and in SKIPPABLE when
+  # its `if:` tests the event (scripts/check_gate_inputs.py).
+  ci-pass:
+    name: ci-pass
+    if: always()
+    needs: [check, build, tier, ticks]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          SKIPPABLE: ticks
+        run: python3 scripts/check_gate_inputs.py --ci-pass
