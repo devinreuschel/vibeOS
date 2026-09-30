@@ -99,6 +99,7 @@ pub const NAMED: &[(&str, u8)] = &[
     ("PF", PF),
     ("MF", MF),
     ("AC", AC),
+    ("MC", MC),
     ("XF", XF),
     ("VE", VE),
     ("CP", CP),
@@ -143,6 +144,12 @@ mod tests {
                 assert_ne!(va, vb, "{a} and {b} both claimed vector {va:#x}");
             }
         }
+    }
+
+    #[test]
+    fn named_includes_mc() {
+        assert!(NAMED.contains(&("MC", 0x12)));
+        assert_eq!(MC, 0x12);
     }
 
     #[test]

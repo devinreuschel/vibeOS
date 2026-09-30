@@ -42,6 +42,7 @@ pub mod part;
 
 use crate::atomic::{AtomicU32, Ordering};
 use crate::fmt_util;
+use crate::sync::variant::{self, Site};
 
 pub const DEFAULT_BLOCK_SIZE: u32 = 512;
 pub const DEFAULT_RETRY_BUDGET: u8 = 3;
@@ -905,8 +906,12 @@ impl DoneWord {
     pub fn publish(&self, status: u32) {
         debug_assert!(status != Self::PENDING, "DoneWord::publish(PENDING)");
         // Release: pairs with the Acquire load in `poll`, so the waiter sees
-        // everything the completer did before it.
-        self.0.store(status, Ordering::Release);
+        // everything the completer did before it. Relaxed only in the loom
+        // model's variant (ROADMAP §10.8).
+        self.0.store(
+            status,
+            variant::pick(Site::IoDoneRelaxed, Ordering::Release, Ordering::Relaxed),
+        );
     }
 
     /// The published status, or `None` while pending.
@@ -1476,3 +1481,7 @@ mod tests {
         assert_eq!(r.waiters[1], 22);
     }
 }
+
+// The `IoWaiter` completion's loom model (ROADMAP §10.8).
+#[cfg(all(test, loom))]
+mod loom_models;

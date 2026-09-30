@@ -191,6 +191,10 @@ pub mod testing {
             return;
         }
         let max = k.saturating_mul(u64::from(STALL_MAX_US.load(Ordering::Relaxed))) / 1000;
+        // With IF=0 (a completion in an IRQ) the stall is a deliberate
+        // IF-off stretch; with IF=1 it holds none and takes no guard.
+        let _hold = (!crate::arch::current::interrupts_enabled())
+            .then(|| crate::sched::irqoff::deliberate("iowaiter finish stall"));
         let r0 = RETURNS.load(Ordering::Acquire);
         let t0 = time_init::read_tsc();
         while RETURNS.load(Ordering::Acquire) == r0 && time_init::read_tsc().wrapping_sub(t0) < max

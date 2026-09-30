@@ -1238,6 +1238,59 @@ arch = "both"
 source = "kernel"
 section = "§10.3"
 
+# The IF-off tracer's lines, printed only by the `irqoff` build (and its
+# kernel_tests twin) that `make test-irqoff` boots; `tests/harness/irqoff.py`
+# parses them. `<site>` never holds a space, and `<reason>` comes last.
+
+[[marker]]
+text = "vibeOS: irqoff: on bound <n> ns"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: no reporter"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: over <site> n <n> max <n> ns"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: site <site> n <n> over <n> max <n> ns p99 <n> ns"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: deliberate <site> n <n> max <n> ns <reason>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: unmatched <site> n <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: dropped <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
 # §10.4 Tables, VFS, errors
 
 [[marker]]

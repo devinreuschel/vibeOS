@@ -998,6 +998,10 @@ pub(crate) mod testing {
             return;
         }
         STALL_IN.store(true, Ordering::Release);
+        // With IF=0 the stall is a deliberate IF-off stretch; with IF=1 it
+        // holds none and takes no guard.
+        let _hold = (!crate::arch::current::interrupts_enabled())
+            .then(|| crate::sched::irqoff::deliberate("stop stall"));
         let t0 = time_init::now_ns();
         while !STALL_RELEASE.load(Ordering::Acquire)
             && time_init::now_ns().saturating_sub(t0) < 1_000_000_000

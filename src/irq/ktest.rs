@@ -133,6 +133,8 @@ fn obs_stall() {
     if until == 0 {
         return;
     }
+    // An IRQ handler: IF is already off, and this marks its stretch.
+    let _hold = crate::sched::irqoff::deliberate("msix observer stall");
     while time_init::now_ns() < until {
         core::hint::spin_loop();
     }
@@ -584,7 +586,7 @@ static HOLD: AtomicU32 = AtomicU32::new(0);
 /// CPU acks no shootdown until it lets the pending `0xFC` in.
 fn ack_hold() {
     let k = time_init::tsc_per_ms();
-    let g = crate::arch::current::InterruptGuard::enter();
+    let g = crate::sched::irqoff::deliberate("3 s shootdown ack hold");
     HOLD.store(1, Ordering::Release);
     let t0 = time_init::read_tsc();
     let span = k.saturating_mul(HOLD_MS);

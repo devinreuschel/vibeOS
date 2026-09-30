@@ -9,6 +9,7 @@ use core::mem::{offset_of, size_of};
 use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
+use crate::sync::variant::{self, Site};
 use crate::time::Instant;
 
 /// Global TCB table size. UP today; phase 4 still addresses by id.
@@ -233,7 +234,15 @@ impl OnCpu {
     pub fn clear(&self) {
         // Release: pairs with the Acquire load in `is_clear`, so a CPU that
         // sees the flag clear sees every save into the TCB before it.
-        self.0.store(false, Ordering::Release);
+        // Relaxed only in the loom model's variant (ROADMAP §10.8).
+        self.0.store(
+            false,
+            variant::pick(
+                Site::OnCpuClearRelaxed,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ),
+        );
     }
 
     /// True once no CPU runs or is switching off the thread: `spawn_inner`'s
@@ -534,5 +543,77 @@ mod tests {
         assert_eq!(ThreadId::BOOTSTRAP.raw(), 0);
         assert!(ThreadId::NONE.is_none());
         assert_eq!(size_of::<ThreadId>(), 4);
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_models {
+    extern crate std;
+
+    use super::*;
+    use crate::sync::variant::{Bound, check};
+    use loom::cell::UnsafeCell;
+    use loom::sync::Arc;
+    use loom::thread;
+
+    /// A thread-table slot as the model sees it: the flag and, for the
+    /// TCB, a witness both sides write.
+    struct Slot {
+        on_cpu: OnCpu,
+        tcb: UnsafeCell<u32>,
+    }
+
+    // SAFETY: `tcb` is written by the exiting CPU before it clears
+    // `on_cpu`, and by the spawning CPU only after it finds the flag
+    // clear; the models check, through loom, that the flag orders the two.
+    // Established here.
+    unsafe impl Sync for Slot {}
+
+    /// The exiting CPU writes the TCB, standing for the saves
+    /// `switch_context` makes into it (DESIGN §7.5), then clears the flag
+    /// as `thread_init::finish_switch`'s tail does once `switch_context`
+    /// has returned. Main, as `thread_init::spawn_inner` reusing the Dead
+    /// slot, checks the flag, yielding while it is set, and rewrites the
+    /// TCB once it is clear. Bound: 2 threads (the exiting CPU 1 save and
+    /// 1 clear, main checks until clear and 1 rewrite), 3 preemptions.
+    fn on_cpu_model(v: Option<Site>) {
+        let bound = Bound {
+            threads: 2,
+            preemptions: 3,
+        };
+        check(v, bound, || {
+            let s = Arc::new(Slot {
+                on_cpu: OnCpu::new_set(),
+                tcb: UnsafeCell::new(0),
+            });
+            let exiting = {
+                let s = s.clone();
+                thread::spawn(move || {
+                    // SAFETY: the flag is set, so no other CPU writes the TCB
+                    // until the clear below; established by
+                    // `thread::OnCpu::clear`.
+                    s.tcb.with_mut(|p| unsafe { *p = 1 });
+                    s.on_cpu.clear();
+                })
+            };
+            while !s.on_cpu.is_clear() {
+                thread::yield_now();
+            }
+            // SAFETY: the flag is clear, so the exiting CPU has made its last
+            // access to the TCB; established by `thread::OnCpu::is_clear`.
+            s.tcb.with_mut(|p| unsafe { *p = 2 });
+            exiting.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn loom_on_cpu_handoff() {
+        on_cpu_model(None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Causality violation")]
+    fn loom_on_cpu_relaxed_clear_races_fails() {
+        on_cpu_model(Some(Site::OnCpuClearRelaxed));
     }
 }

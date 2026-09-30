@@ -16,8 +16,9 @@ pub mod lock;
 /// is a [`Site`](variant::Site); the code there takes
 /// [`pick`](variant::pick)'s answer, which outside `cfg(loom)` is always
 /// the kernel's choice, so no build but a model's can take the other. A
-/// model weakens one site for its run with `weaken`. A later slice adds
-/// one `Site` per variant.
+/// model weakens one site for its run with `weaken`, or runs through
+/// [`check`](variant::check), which also fixes the model's bound. A later
+/// slice adds one `Site` per variant.
 pub mod variant {
     /// A site a loom variant weakens.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,13 +29,28 @@ pub mod variant {
         /// `sync::OpGate::enter` reads the dead mark before it counts
         /// itself in.
         OpGateCountFirst = 2,
+        /// `time::TickClock`'s sequence bump is one `fetch_add(1, AcqRel)`
+        /// with neither fence.
+        SeqlockBumpAcqRel = 3,
+        /// `time::TickClock`'s sequence bump drops its leading
+        /// `fence(Release)`.
+        SeqlockLeadingFence = 4,
+        /// `irq::ipi::WakeInbox::push` sets the word's summary bit before
+        /// the slot's bit.
+        InboxSummaryFirst = 5,
+        /// `cell::IrqCell::with` releases the owner word with `Relaxed`.
+        IrqCellUnlockRelaxed = 6,
+        /// `block::DoneWord::publish` stores the status with `Relaxed`.
+        IoDoneRelaxed = 7,
+        /// `thread::OnCpu::clear` stores with `Relaxed`.
+        OnCpuClearRelaxed = 8,
     }
 
     /// `kernel` at `site`, or `weak` while a loom model has weakened it.
     #[inline(always)]
     pub fn pick<T>(site: Site, kernel: T, weak: T) -> T {
         #[cfg(loom)]
-        if WEAKENED.load(crate::atomic::statics::Ordering::Relaxed) == site as u8 {
+        if weakened(site) {
             return weak;
         }
         #[cfg(not(loom))]
@@ -42,16 +58,26 @@ pub mod variant {
         kernel
     }
 
-    /// The weakened site, or 0. `core`'s atomic: the switch is set outside
-    /// the model's threads, and loom must not schedule it.
+    // The weakened site, or 0. A `std` thread-local, not the seam's (loom's
+    // under `cfg(loom)`): loom runs a model's threads on the test's own OS
+    // thread, so every model thread sees the run's site, loom schedules
+    // nothing on it, and libtest's concurrent tests keep their own.
     #[cfg(loom)]
-    static WEAKENED: crate::atomic::statics::AtomicU8 = crate::atomic::statics::AtomicU8::new(0);
+    std::thread_local! {
+        static WEAKENED: core::cell::Cell<u8> = const { core::cell::Cell::new(0) };
+    }
+
+    /// True while the running model has weakened `site`.
+    #[cfg(loom)]
+    pub fn weakened(site: Site) -> bool {
+        WEAKENED.with(|w| w.get() == site as u8)
+    }
 
     /// Weaken `site` until the returned guard drops, which also happens as
     /// a failing model unwinds.
     #[cfg(loom)]
     pub fn weaken(site: Site) -> Weakened {
-        WEAKENED.store(site as u8, crate::atomic::statics::Ordering::Relaxed);
+        WEAKENED.with(|w| w.set(site as u8));
         Weakened(())
     }
 
@@ -62,7 +88,71 @@ pub mod variant {
     #[cfg(loom)]
     impl Drop for Weakened {
         fn drop(&mut self) {
-            WEAKENED.store(0, crate::atomic::statics::Ordering::Relaxed);
+            WEAKENED.with(|w| w.set(0));
+        }
+    }
+
+    /// A model's stated bound (ROADMAP §10.8's preamble): the threads it
+    /// runs, main included, and the preemptions loom explores per
+    /// execution.
+    #[cfg(loom)]
+    #[derive(Clone, Copy, Debug)]
+    pub struct Bound {
+        pub threads: usize,
+        pub preemptions: usize,
+    }
+
+    /// Run `f` as a loom model with `variant`'s site weakened (none for the
+    /// base model), exploring every interleaving within `bound`. The bound
+    /// is set here, so `LOOM_MAX_PREEMPTIONS`, `LOOM_MAX_PERMUTATIONS` and
+    /// `LOOM_MAX_DURATION` cannot change what is checked. The site is
+    /// cleared on return and as a failing model unwinds.
+    #[cfg(loom)]
+    pub fn check(variant: Option<Site>, bound: Bound, f: impl Fn() + Sync + Send + 'static) {
+        let _w = variant.map(weaken);
+        let mut b = loom::model::Builder::new();
+        b.max_threads = bound.threads;
+        b.preemption_bound = Some(bound.preemptions);
+        b.max_permutations = None;
+        b.max_duration = None;
+        b.check(f);
+    }
+
+    #[cfg(all(test, loom))]
+    mod loom_models {
+        extern crate std;
+
+        use super::*;
+        use crate::atomic::statics::{AtomicUsize, Ordering};
+        use loom::thread;
+
+        /// Loom executions that saw `weakened` answer as expected; `core`'s
+        /// atomic, outside the model.
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+
+        /// Each execution spawns one loom thread, which reports whether it
+        /// sees `site` weakened; every execution must agree with `want`.
+        fn reach(variant: Option<Site>, want: bool) {
+            SEEN.store(0, Ordering::Relaxed);
+            let bound = Bound {
+                threads: 2,
+                preemptions: 1,
+            };
+            check(variant, bound, move || {
+                let t = thread::spawn(|| weakened(Site::SeqlockBumpAcqRel));
+                assert_eq!(t.join().unwrap(), want);
+                assert_eq!(weakened(Site::SeqlockBumpAcqRel), want);
+                SEEN.fetch_add(1, Ordering::Relaxed);
+            });
+            assert!(SEEN.load(Ordering::Relaxed) >= 1);
+            assert!(!weakened(Site::SeqlockBumpAcqRel), "check clears the site");
+        }
+
+        #[test]
+        fn loom_variant_reaches_model_threads() {
+            reach(Some(Site::SeqlockBumpAcqRel), true);
+            reach(None, false);
+            reach(Some(Site::OnCpuClearRelaxed), false);
         }
     }
 }

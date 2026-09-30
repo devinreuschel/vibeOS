@@ -426,8 +426,14 @@ why = "text: lands with or after the box above; claim: missing edge found by the
 
 [[box]]
 key = "an IF-off tracer in an `irqoff` build variant"
-needs = ["the in-guest registry runs in production's interrupt context"]
-why = "text: lands after §10.2's box that moves the in-guest registry to IF=1"
+needs = [
+  "the in-guest registry runs in production's interrupt context",
+  "an `arch` module boundary built",  # L1277
+  "the seam proven by a",  # L1279
+  "`now_ns` is computed from one",  # L1310
+  "every IDT vector enters through",  # L1392
+]
+why = "text: lands after §10.2's box that moves the in-guest registry to IF=1; claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
 [[box]]
 key = "the vector table's registration rules hold"
@@ -1398,3 +1404,13 @@ needs = [
   "a syscall count per process:",  # L1440
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1435
+[[box]]
+key = "loom models: the seqlock against"
+needs = [
+  "portable code reaches atomics, fences,",  # L1433
+  "the §10.4 wake inbox's push",  # L1434
+  "`TickClock::write` bumps `seq` to odd",  # L1436
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
