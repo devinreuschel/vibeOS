@@ -3,20 +3,20 @@
 //! Each volume is an instance ([`FatVolume`], DESIGN §12.1 rule 1) on the
 //! heap: the initrd's is owned by the root superblock, a device's by its
 //! block registry entry (`blockdev_init::set_holder`), and the superblock
-//! that shows it holds a reference. A busy flag (not the IRQ-off mutex) is
-//! held across I/O so RANK_DEVICE is not nested with the cache (DESIGN
-//! §2.1 / #62 ACK). `sync` uses cache/device Flush (DESIGN §10.2).
+//! that shows it holds a reference. Each volume is one `BlockingMutex`
+//! (DESIGN §2.1's level 4) that owns it, held across its I/O and taken
+//! with a plain `lock()`: contention waits and never fails an operation.
+//! `sync` uses cache/device Flush (DESIGN §10.2).
 //!
 //! [`FatOps`] is the one way to a volume's files: `Vfs`'s File API calls
-//! it with the VFS lock dropped, so it waits for the busy flag. A FAT
+//! it with the VFS lock dropped, so it waits for the volume lock. A FAT
 //! inode is the `Vfs` inode keyed by its dirent location; its first
 //! cluster and size are its slot's words (`Inode::words`), which only FAT
-//! reads and writes, inside the busy section and with no VFS lock: FAT
+//! reads and writes, under the volume lock and with no VFS lock: FAT
 //! never takes the VFS lock under a volume. The routing table
 //! (`route`) serves path syscalls until ROADMAP §10.4 routes them
 //! through `Vfs`.
 
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use vibeos::block::BlockError;
@@ -32,8 +32,8 @@ use vibeos::lock::RANK_DEVICE;
 
 use crate::block::blockdev_init;
 use crate::fs_init;
+use crate::sync::blocking_init::BlockingMutex;
 use crate::sync_init::SpinMutex;
-use crate::thread_init;
 
 /// A cache error as FAT sees it: a refused heap allocation stays
 /// `NoMem` (ENOMEM), anything else is `Io`.
@@ -52,33 +52,21 @@ enum Media {
     Dev(BlockRef),
 }
 
-/// One FAT volume. Its `vol` cell belongs to the one thread holding
-/// `busy`, or, before the instance is shared, to the path building it
-/// (invariant I236). The volume is mounted in place (`FatVol::mount_in`),
-/// never moved: it holds its cluster buffer and FAT cache, too large for a
+/// One FAT volume, behind its lock. The volume is mounted in place on the
+/// heap (`FatVol::mount_in`) before the lock wraps its box, and never
+/// moved: it holds its cluster buffer and FAT cache, too large for a
 /// kernel stack (DESIGN §4.5).
 pub(crate) struct FatVolume {
     media: Media,
+    /// Cleared, under the lock, when the volume is retired: every later op
+    /// fails with `Io`.
     pub(super) used: AtomicBool,
-    pub(super) busy: AtomicBool,
     /// The root directory's first cluster, from the BPB at mount.
     root_clu: AtomicU32,
     /// The `Vfs` superblock the volume is mounted as, [`NO_SB`] until then.
     sb: AtomicU8,
-    vol: UnsafeCell<TryBox<FatVol>>,
+    vol: BlockingMutex<TryBox<FatVol>>,
 }
-
-// SAFETY: invariant I236: one thread at a time reaches a volume's `vol`
-// cell, through the busy flag `fs::fat_init::grab` takes, or the building
-// path before the instance is shared, and its contents are `Send`
-// (asserted below); established by `fs::fat_init::grab`.
-unsafe impl Sync for FatVolume {}
-
-const _: () = {
-    const fn send<T: Send>() {}
-    send::<FatVol>();
-    send::<Media>();
-};
 
 /// A fresh volume's state, copied into each new instance in place.
 static FAT_VOL_INIT: FatVol = FatVol::new();
@@ -235,60 +223,18 @@ impl Disk for Io<'_> {
     }
 }
 
-/// Take `v`'s busy flag, waiting for its holder.
-fn grab(v: &FatVolume) -> Result<(), FatError> {
-    if !v.used.load(Ordering::Acquire) {
-        return Err(FatError::Io);
-    }
-    let mut n = 0u32;
-    while v
-        .busy
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        n = n.saturating_add(1);
-        if n > 1_000_000 {
-            return Err(FatError::Io);
-        }
-        thread_init::yield_now();
-    }
-    if !v.used.load(Ordering::Acquire) {
-        v.busy.store(false, Ordering::Release);
-        return Err(FatError::Io);
-    }
-    Ok(())
-}
-
-fn drop_busy(v: &FatVolume) {
-    v.busy.store(false, Ordering::Release);
-}
-
-/// Run `f` on volume `v`, whose busy flag the caller took, and drop the
-/// flag.
-fn with_grabbed<R>(
-    v: &FatVolume,
-    f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
-) -> Result<R, FsError> {
-    // SAFETY: invariant I236: the busy flag of `v`, which the caller took
-    // and which is dropped only below, makes this thread the one accessor
-    // of the volume's `vol` cell until `drop_busy`; established by
-    // `fs::fat_init::grab`.
-    let r = unsafe {
-        let mut io = Io { back: &v.media };
-        f(&mut *v.vol.get(), &mut io)
-    };
-    drop_busy(v);
-    r
-}
-
-/// Run `f` on volume `v`, waiting for its busy flag. Never under the VFS
-/// lock.
+/// Run `f` on volume `v` under its lock, waiting for the holder; `Io`
+/// once the volume is retired. Never under the VFS lock.
 fn with_vol<R>(
     v: &FatVolume,
     f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
 ) -> Result<R, FsError> {
-    grab(v)?;
-    with_grabbed(v, f)
+    let mut g = v.vol.lock();
+    if !v.used.load(Ordering::Acquire) {
+        return Err(FsError::Io);
+    }
+    let mut io = Io { back: &v.media };
+    f(&mut g, &mut io)
 }
 
 /// A volume not mounted in `Vfs`.
@@ -624,16 +570,7 @@ impl FileSystem for FatFs {
                 e.as_str()
             );
         }
-        if let Err(e) = drop_slot(vol) {
-            crate::klog_ratelimited!(
-                1000,
-                vibeos::log::Level::Warn,
-                "vibeOS: fat: volume of {} still held at umount, kept: {}",
-                mnt,
-                e.as_str()
-            );
-            return;
-        }
+        drop_slot(vol);
         if let Media::Dev(r) = &vol.media {
             drop(blockdev_init::take_holder(r));
         }
@@ -647,38 +584,40 @@ pub fn live() -> bool {
 /// A new volume instance on `media`, mounted in place: the heap copy of a
 /// fresh volume is this thread's alone until the instance is shared.
 fn new_volume(media: Media) -> Result<Instance, FsError> {
-    let fv = crate::fs::boxed_copy(&FAT_VOL_INIT).map_err(|_| FsError::NoMem)?;
-    let mut v = FatVolume {
+    let mut fv = crate::fs::boxed_copy(&FAT_VOL_INIT).map_err(|_| FsError::NoMem)?;
+    fv.mount_in(&mut Io { back: &media })?;
+    let root = fv.info.root_clus;
+    vibeos::dev::instance(FatVolume {
         media,
-        used: AtomicBool::new(false),
-        busy: AtomicBool::new(false),
-        root_clu: AtomicU32::new(0),
+        used: AtomicBool::new(true),
+        root_clu: AtomicU32::new(root),
         sb: AtomicU8::new(NO_SB),
-        vol: UnsafeCell::new(fv),
-    };
-    let mut io = Io { back: &v.media };
-    let fat = v.vol.get_mut();
-    fat.mount_in(&mut io)?;
-    let root = fat.info.root_clus;
-    v.root_clu.store(root, Ordering::Release);
-    v.used.store(true, Ordering::Release);
-    vibeos::dev::instance(v).map_err(|_| FsError::NoMem)
+        vol: BlockingMutex::new(fv),
+    })
+    .map_err(|_| FsError::NoMem)
 }
 
-/// A used volume that nothing mounts or reaches, for the busy-flag test
-/// `fs_drop_slot_busy_keeps_slot` (test-only).
+/// A used volume that nothing mounts or reaches, for the volume-lock test
+/// `fs_drop_slot_waits_for_holder` (test-only).
 #[cfg(feature = "kernel_tests")]
 pub(super) fn spare_volume() -> Result<Instance, FsError> {
     let fv = crate::fs::boxed_copy(&FAT_VOL_INIT).map_err(|_| FsError::NoMem)?;
     vibeos::dev::instance(FatVolume {
         media: Media::Initrd,
         used: AtomicBool::new(true),
-        busy: AtomicBool::new(false),
         root_clu: AtomicU32::new(0),
         sb: AtomicU8::new(NO_SB),
-        vol: UnsafeCell::new(fv),
+        vol: BlockingMutex::new(fv),
     })
     .map_err(|_| FsError::NoMem)
+}
+
+/// Run `f` holding volume `v`'s lock, as another holder would
+/// (test-only: `fs_drop_slot_waits_for_holder`).
+#[cfg(feature = "kernel_tests")]
+pub(super) fn hold<R>(v: &FatVolume, f: impl FnOnce() -> R) -> R {
+    let _g = v.vol.lock();
+    f()
 }
 
 /// Mount the initrd module as the root, or leave `LIVE` false when Limine
@@ -802,20 +741,13 @@ fn unregister_mnt(p: &[u8]) -> Option<Instance> {
     m.vol.take()
 }
 
-/// Retire volume `vol`: clear it and its `used` flag, so every later op
-/// fails. When `grab` cannot take its busy flag the volume is left as it
-/// is, still owned by its holder, and the error is returned.
-pub(super) fn drop_slot(vol: &FatVolume) -> Result<(), FatError> {
-    grab(vol)?;
-    // SAFETY: invariant I236: `grab` above took the volume's busy flag,
-    // which is dropped only below; established by `fs::fat_init::grab`.
-    unsafe {
-        (*vol.vol.get()).clear();
-    }
+/// Retire volume `vol`: clear it and its `used` flag under its lock,
+/// waiting for any holder, so every later op fails.
+pub(super) fn drop_slot(vol: &FatVolume) {
+    let mut g = vol.vol.lock();
+    g.clear();
     vol.used.store(false, Ordering::Release);
     vol.sb.store(NO_SB, Ordering::Release);
-    drop_busy(vol);
-    Ok(())
 }
 
 /// Mount the FAT volume on block device `name` on `at`. A device whose

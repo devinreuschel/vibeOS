@@ -3,16 +3,17 @@
 //! Each volume is an instance ([`VibeVolume`], DESIGN §12.1 rule 1) on the
 //! heap: a memory-backed one, with its own heap image, is owned by the
 //! superblock that shows it, and a device's by its block registry entry
-//! (`blockdev_init::set_holder`). Busy flag (not IRQ-off mutex) across I/O
-//! (DESIGN §2.1). `sync` uses disk `Flush`.
+//! (`blockdev_init::set_holder`). Each volume is one `BlockingMutex`
+//! (DESIGN §2.1's level 4) that owns it, held across its I/O and taken
+//! with a plain `lock()`: contention waits and never fails an operation.
+//! `sync` uses disk `Flush`.
 //!
 //! [`VibeOps`] is the one way to a volume's files: `Vfs`'s File API calls
-//! it with the VFS lock dropped, so it waits for the busy flag. The size
+//! it with the VFS lock dropped, so it waits for the volume lock. The size
 //! vibefs keeps is stored in the inode slot's words (`Inode::words`)
-//! inside the busy section, with no VFS lock. The routing table (`route`) serves path syscalls until
+//! under the volume lock, with no VFS lock. The routing table (`route`) serves path syscalls until
 //! ROADMAP §10.4 routes them through `Vfs`.
 
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use vibeos::block::BlockError;
@@ -28,8 +29,8 @@ use vibeos::vibefs::{self, BLOCK, Disk, Error, Node, ROOT_INO, Vol};
 
 use crate::block::blockdev_init;
 use crate::fs_init;
+use crate::sync::blocking_init::BlockingMutex;
 use crate::sync_init::SpinMutex;
-use crate::thread_init;
 
 /// A cache error as vibefs sees it: a refused heap allocation stays
 /// `NoMem` (ENOMEM), anything else is `Io`.
@@ -57,30 +58,18 @@ enum Media {
     Dev(BlockRef),
 }
 
-/// One vibefs volume. Its `vol` cell belongs to the one thread holding
-/// `busy`, or, before the instance is shared, to the path building it
-/// (invariant I236). Built and mounted in place, never moved: it is too
-/// large for a kernel stack (DESIGN §4.5).
+/// One vibefs volume, behind its lock. Built and mounted in place on the
+/// heap before the lock wraps its box, never moved: it is too large for a
+/// kernel stack (DESIGN §4.5).
 pub(crate) struct VibeVolume {
     media: Media,
+    /// Cleared, under the lock, when the volume is retired: every later op
+    /// fails with `Io`.
     pub(super) used: AtomicBool,
-    pub(super) busy: AtomicBool,
     /// The `Vfs` superblock the volume is mounted as, [`NO_SB`] until then.
     sb: AtomicU8,
-    vol: UnsafeCell<TryBox<Vol>>,
+    vol: BlockingMutex<TryBox<Vol>>,
 }
-
-// SAFETY: invariant I236: one thread at a time reaches a volume's `vol`
-// cell, through the busy flag `fs::vibefs_init::grab` takes, or the
-// building path before the instance is shared, and its contents are
-// `Send` (asserted below); established by `fs::vibefs_init::grab`.
-unsafe impl Sync for VibeVolume {}
-
-const _: () = {
-    const fn send<T: Send>() {}
-    send::<Vol>();
-    send::<Media>();
-};
 
 /// A fresh volume's state, copied into each new instance in place.
 static VOL_INIT: Vol = Vol::new();
@@ -202,60 +191,18 @@ impl Disk for Io<'_> {
     }
 }
 
-/// Take `v`'s busy flag, waiting for its holder.
-fn grab(v: &VibeVolume) -> Result<(), Error> {
-    if !v.used.load(Ordering::Acquire) {
-        return Err(Error::Io);
-    }
-    let mut n = 0u32;
-    while v
-        .busy
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        n = n.saturating_add(1);
-        if n > 1_000_000 {
-            return Err(Error::Io);
-        }
-        thread_init::yield_now();
-    }
-    if !v.used.load(Ordering::Acquire) {
-        v.busy.store(false, Ordering::Release);
-        return Err(Error::Io);
-    }
-    Ok(())
-}
-
-fn drop_busy(v: &VibeVolume) {
-    v.busy.store(false, Ordering::Release);
-}
-
-/// Run `f` on volume `v`, whose busy flag the caller took, and drop the
-/// flag.
-fn with_grabbed<R, E>(
-    v: &VibeVolume,
-    f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, E>,
-) -> Result<R, E> {
-    // SAFETY: invariant I236: the busy flag of `v`, which the caller took
-    // and which is dropped only below, makes this thread the one accessor
-    // of the volume's `vol` cell until `drop_busy`; established by
-    // `fs::vibefs_init::grab`.
-    let r = unsafe {
-        let mut io = Io { back: &v.media };
-        f(&mut *v.vol.get(), &mut io)
-    };
-    drop_busy(v);
-    r
-}
-
-/// Run `f` on volume `v`, waiting for its busy flag. Never under the VFS
-/// lock.
+/// Run `f` on volume `v` under its lock, waiting for the holder; `Io`
+/// once the volume is retired. Never under the VFS lock.
 pub(super) fn with_slot<R>(
     v: &VibeVolume,
     f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, Error>,
 ) -> Result<R, Error> {
-    grab(v)?;
-    with_grabbed(v, f)
+    let mut g = v.vol.lock();
+    if !v.used.load(Ordering::Acquire) {
+        return Err(Error::Io);
+    }
+    let mut io = Io { back: &v.media };
+    f(&mut g, &mut io)
 }
 
 /// The one conversion from a vibefs inode's fields to its `Vfs` inode:
@@ -287,14 +234,18 @@ fn node_info(n: &Node) -> InodeInfo {
     inode_info(n.ino, n.kind, n.mode, n.nlink, n.size, n.mtime)
 }
 
-/// Run `f` on volume `v`, waiting for its busy flag, with the VFS lock
-/// dropped; a vibefs error becomes its `FsError`.
+/// Run `f` on volume `v` under its lock, with the VFS lock dropped; a
+/// vibefs error becomes its `FsError`.
 fn with_vol<R>(
     v: &VibeVolume,
     f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, FsError>,
 ) -> Result<R, FsError> {
-    grab(v).map_err(Error::to_fs)?;
-    with_grabbed(v, f)
+    let mut g = v.vol.lock();
+    if !v.used.load(Ordering::Acquire) {
+        return Err(FsError::Io);
+    }
+    let mut io = Io { back: &v.media };
+    f(&mut g, &mut io)
 }
 
 /// The vibefs volume instance `i` is; `Io` for any other.
@@ -561,16 +512,7 @@ impl FileSystem for VibeFs {
             );
         }
         vol.sb.store(NO_SB, Ordering::Release);
-        if let Err(e) = drop_slot(vol) {
-            crate::klog_ratelimited!(
-                1000,
-                vibeos::log::Level::Warn,
-                "vibeOS: vibefs: volume of {} still held at umount, kept: {}",
-                mnt,
-                e.as_str()
-            );
-            return;
-        }
+        drop_slot(vol);
         if let Media::Dev(r) = &vol.media {
             drop(blockdev_init::take_holder(r));
         }
@@ -591,18 +533,15 @@ fn new_volume(
     media: Media,
     mount: impl FnOnce(&mut Vol, &mut Io) -> Result<(), Error>,
 ) -> Result<Instance, FsError> {
-    let vol = crate::fs::boxed_copy(&VOL_INIT).map_err(|_| FsError::NoMem)?;
-    let mut v = VibeVolume {
+    let mut vol = crate::fs::boxed_copy(&VOL_INIT).map_err(|_| FsError::NoMem)?;
+    mount(&mut vol, &mut Io { back: &media }).map_err(Error::to_fs)?;
+    vibeos::dev::instance(VibeVolume {
         media,
-        used: AtomicBool::new(false),
-        busy: AtomicBool::new(false),
+        used: AtomicBool::new(true),
         sb: AtomicU8::new(NO_SB),
-        vol: UnsafeCell::new(vol),
-    };
-    let mut io = Io { back: &v.media };
-    mount(v.vol.get_mut(), &mut io).map_err(Error::to_fs)?;
-    v.used.store(true, Ordering::Release);
-    vibeos::dev::instance(v).map_err(|_| FsError::NoMem)
+        vol: BlockingMutex::new(vol),
+    })
+    .map_err(|_| FsError::NoMem)
 }
 
 /// Walk `path` on volume `vol` and count a reference to the `Vfs` inode it
@@ -707,14 +646,11 @@ fn unregister_mnt(p: &[u8]) -> Option<Instance> {
     m.vol.take()
 }
 
-/// Retire volume `vol`: its `used` flag clears, so every later op fails.
-/// When `grab` cannot take its busy flag the volume is left as it is,
-/// still owned by its holder, and the error is returned.
-pub(super) fn drop_slot(vol: &VibeVolume) -> Result<(), Error> {
-    grab(vol)?;
+/// Retire volume `vol`: its `used` flag clears under its lock, waiting
+/// for any holder, so every later op fails.
+pub(super) fn drop_slot(vol: &VibeVolume) {
+    let _g = vol.vol.lock();
     vol.used.store(false, Ordering::Release);
-    drop_busy(vol);
-    Ok(())
 }
 
 /// Mount a fresh memory-backed vibefs on `at`: a new instance with its own
@@ -736,7 +672,7 @@ pub fn mount_mem(at: &str) -> Result<(), FsError> {
 }
 
 /// A used memory volume that nothing mounts or reaches, for the
-/// busy-flag test `fs_drop_slot_busy_keeps_slot` (test-only).
+/// volume-lock test `fs_drop_slot_waits_for_holder` (test-only).
 #[cfg(feature = "kernel_tests")]
 pub(super) fn spare_volume() -> Result<Instance, FsError> {
     let img = crate::fs::boxed_zeroed::<IMAGE_BYTES>().map_err(|_| FsError::NoMem)?;
@@ -744,11 +680,18 @@ pub(super) fn spare_volume() -> Result<Instance, FsError> {
     vibeos::dev::instance(VibeVolume {
         media: Media::Mem(SpinMutex::with_rank(img, RANK_DEVICE)),
         used: AtomicBool::new(true),
-        busy: AtomicBool::new(false),
         sb: AtomicU8::new(NO_SB),
-        vol: UnsafeCell::new(vol),
+        vol: BlockingMutex::new(vol),
     })
     .map_err(|_| FsError::NoMem)
+}
+
+/// Run `f` holding volume `v`'s lock, as another holder would
+/// (test-only: `fs_drop_slot_waits_for_holder`).
+#[cfg(feature = "kernel_tests")]
+pub(super) fn hold<R>(v: &VibeVolume, f: impl FnOnce() -> R) -> R {
+    let _g = v.vol.lock();
+    f()
 }
 
 /// Make a fresh vibefs on block device `name`, which nothing may hold

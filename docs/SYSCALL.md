@@ -134,7 +134,7 @@ names, Linux values:
 | `EPERM` | 1 | `mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0) |
 | `ENOENT` | 2 | `open`/`execve` missing path |
 | `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
-| `EIO` | 5 | device I/O error; a FAT or vibefs volume still busy after 1,000,000 yields |
+| `EIO` | 5 | device I/O error |
 | `E2BIG` | 7 | `execve` argv or envp with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
@@ -169,8 +169,6 @@ F083) replaces them with one `KError` table that generates §2.
   (F083, F052, F057; ROADMAP §10.4)
 - FAT and vibefs map `Corrupt` to `FsError::Inval`, so a failed checksum or
   bad magic returns `EINVAL` (Linux `EIO`) (F083; ROADMAP §10.4)
-- a FAT or vibefs operation that waits 1,000,000 yields for its busy volume
-  fails with `EIO`; Linux waits (F060; ROADMAP §10.4)
 - `lseek` on the console returns `EINVAL` (Linux `ESPIPE`, 29) (F083;
   ROADMAP §10.4)
 - `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` fd return `EINVAL`

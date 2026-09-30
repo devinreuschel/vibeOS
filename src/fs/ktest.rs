@@ -22,7 +22,7 @@ use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use ops::{test_vfs_backends_via_ops, test_vfs_fat_one_inode};
 pub(crate) use routing::test_vfs_unlink_drops_parent_dentry;
-pub(crate) use slots::test_fs_drop_slot_busy_keeps_slot;
+pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
 
 use crate::fat_init;
@@ -666,7 +666,8 @@ fn stale_writeback() -> Outcome {
     hooks::hold_next_write();
     crate::ktest::spawn_thread("f55-stale", stale_helper);
     let w = fid::write(a, b"x");
-    let deadline = time_init::now_ns().saturating_add(1_000_000_000);
+    let deadline =
+        time_init::now_ns().saturating_add(core::time::Duration::from_secs(1).as_nanos() as u64);
     while !STALE_DONE.load(Ordering::Acquire) && time_init::now_ns() < deadline {
         thread_init::yield_now();
     }
@@ -1379,10 +1380,9 @@ pub(crate) const TESTS: &[Test] = &[
     test("vfs_backends_via_ops", test_vfs_backends_via_ops),
     test("vfs_fat_one_inode", test_vfs_fat_one_inode),
     test(
-        "fs_drop_slot_busy_keeps_slot",
-        test_fs_drop_slot_busy_keeps_slot,
-    )
-    .deadline(26_000),
+        "fs_drop_slot_waits_for_holder",
+        test_fs_drop_slot_waits_for_holder,
+    ),
     test("fat_vda_16k_stack", fat_vda_16k_stack)
         .deadline(30_000)
         .opt_in()
