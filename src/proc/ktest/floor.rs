@@ -1,6 +1,6 @@
-//! In-guest tests of the ROADMAP §10.5 floor calls (kernel_tests only):
-//! `floorcheck`, embedded from `make user` (C-USERBINS), run in ring 3.
-//! Rows: the list in crate::ktest.
+//! In-guest tests of the ROADMAP §10.5 floor calls and the user heap
+//! (kernel_tests only): `floorcheck` and `heapcheck`, embedded from `make
+//! user` (C-USERBINS), run in ring 3. Rows: the list in crate::ktest.
 
 use vibeos::proc::{wexitstatus, wifexited};
 
@@ -83,4 +83,19 @@ pub(crate) fn reboot_power_off() -> Outcome {
 /// `reboot(RESTART)` resets the machine.
 pub(crate) fn reboot_restart() -> Outcome {
     reboot_ends("restart")
+}
+
+/// The heap test program.
+const HEAPCHECK: Image = Image::UserBin("heapcheck");
+
+/// The runtime's `#[global_allocator]` over `brk`: `Box`, `Vec` and
+/// `String` work, freed memory is reused without moving the break, 64- and
+/// 4096-byte alignment hold, `realloc` keeps its contents, and a request
+/// `brk` refuses returns null with the break unchanged.
+pub(crate) fn user_heap_over_brk() -> Outcome {
+    match user::run(&HEAPCHECK, &["heapcheck"]) {
+        Ok(st) if wifexited(st) && wexitstatus(st) == 0 => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("heapcheck: status {st:#x}, want exited 0"),
+        Err(e) => crate::fail_fmt!("heapcheck: spawn: {}", e.as_str()),
+    }
 }

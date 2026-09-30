@@ -69,4 +69,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("reboot_bad_args_einval", reboot_bad_args_einval),
     test("reboot_power_off", reboot_power_off).opt_in(),
     test("reboot_restart", reboot_restart).opt_in(),
+    test("user_heap_over_brk", user_heap_over_brk).deadline(60_000),
 ];

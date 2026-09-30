@@ -32,7 +32,9 @@ noticed.
 
 Inside the user half, the loader maps each `PT_LOAD` at its `p_vaddr`, and the `brk` heap starts on
 the page after the highest segment's end (`AddressSpace::set_brk_start`), as on Linux with
-randomization off; it is one region that grows and shrinks at its top. The 32 stack pages end at
+randomization off; it is one region that grows and shrinks at its top. Its caller in a Rust
+program is the user runtime's `#[global_allocator]` (`user/src/alloc.rs`), which grows the break
+in page multiples of at least 64 KiB and reuses what it frees without shrinking it. The 32 stack pages end at
 `0x8000_0000`, with the TLS block, when the image has one, in the pages just below them. Anonymous
 `mmap` places a request with no usable hint top-down from `MMAP_TOP` (`USER_MAP_END` − 128 MiB,
 `0x7FFF_F7FF_F000`, Linux's base without randomization), one region per call, never merged. Every

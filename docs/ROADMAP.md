@@ -1368,7 +1368,7 @@ the work its claim rests on has landed is the failure KERNEL_REVIEW.md §5 found
 - [x] `brk` and anonymous `mmap`/`munmap`, eagerly backed for now; Phase 12 makes them lazy without changing the interface
 - [x] `getdents64`, `fstat`, and `nanosleep`, which `ls` and `sleep` below need; the rest of the floor stays in §13.9
 - [x] `reboot` (power off and restart), so the user `/bin/sh` keeps the `poweroff` and `reboot` the Phase 5 kernel shell had; x86_64 uses the ACPI and reset paths, and §11.4 puts PSCI behind the same call
-- [ ] an allocator over `brk`, so `alloc` works in userspace
+- [x] an allocator over `brk`, so `alloc` works in userspace
 - [ ] `utest_ok` / `utest_fail` / `utest_skip` on serial, asserted by `tests/harness` like the `ktest_*` protocol in `make test-e2e`, `make test-e2e-uefi`, `make test-e2e-pit`, and `make test-e2e-highmem`, where `/bin/tests` runs as a forked child of `/sbin/init`; a failing user test fails `make test`; the `utest_*` lines carry §10.2's `begin` and `run` lines and `tests/harness/skips.toml` rows, and the harness gives them the §10.2 count and progress deadline, the only deadline a user test has (F073)
 - [ ] `/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello` rewritten in the crate; the assembly sources and `mkuserelf.py` deleted
 - [ ] a signal cannot kill or stop pid 1: `sys_kill` to pid 1 delivers only signals init has a handler for, as Linux does, so none until §13.8's `rt_sigaction`; `/bin/tests` sends `SIGKILL` to pid 1, and the boot still reaches `shell ready` (F068)
