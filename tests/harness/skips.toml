@@ -213,3 +213,8 @@ smp = 1
 name = "stop_cont_no_lost_wakeup"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "syscall_body_if_on"
+reason = "needs 2 CPUs"
+smp = 1
