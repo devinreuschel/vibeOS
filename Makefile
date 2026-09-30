@@ -219,6 +219,7 @@ help:
 	  '  test-unit             vibeos-core host tests (any host triple)' \
 	  '  models-quick          loom models (loom_*) at 3 preemptions, ROADMAP §10.8' \
 	  '  models                loom models and Kani proofs (needs ./setup.sh --kani)' \
+	  '  miri                  vibeos-core host tests under Miri' \
 	  '  test-harness          python unit tests for the harness' \
 	  '  test-e2e              boot contract on the production ISO' \
 	  '  test-e2e-uefi         same, UEFI firmware from the probe on pflash; none installed: skip (fail under CI)' \
@@ -457,6 +458,15 @@ models:
 	  [ "$$found" = "$(KANI_VERSION)" ] || { echo "models: need kani-verifier $(KANI_VERSION) (KANI_VERSION in setup.sh), found '$${found:-none}'; run ./setup.sh --kani" >&2; exit 1; }
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)/loom RUSTFLAGS="--cfg loom -D warnings" cargo test -p vibeos-core --lib --features std --release --target $(HOST_TRIPLE) -- loom_ --test-threads=1
 	CARGO_BUILD_TARGET=$(HOST_TRIPLE) CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false cargo kani -p vibeos-core --features std -Z stubbing
+
+# ROADMAP §10.8: vibeos-core's host tests under Miri, the --lib and --doc
+# sets test-unit runs. Tests leak their 'static backends on purpose
+# (fs::testfs::ramfs), so a leak is not an error here; undefined behaviour
+# is. A test Miri cannot run carries `cfg_attr(miri, ignore = "<reason>")`.
+.PHONY: miri
+miri:
+	MIRIFLAGS=-Zmiri-ignore-leaks cargo miri test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
+	MIRIFLAGS=-Zmiri-ignore-leaks cargo miri test -p vibeos-core --doc --features std --target $(HOST_TRIPLE)
 
 test-harness:
 	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v

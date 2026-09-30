@@ -92,6 +92,16 @@ the reader can compare against.
 A single-threaded test cannot observe a race. Simulate the interrupt-context writer explicitly, or
 accept that the real coverage is in-guest.
 
+**Miri (ROADMAP §10.8).** `make miri` runs the host tests under Miri (`cargo miri test`, `miri`
+being a `rust-toolchain.toml` component), which reports undefined behaviour the tests' own asserts
+cannot see: a read of freed or uninitialized memory, a write through a shared reference, a data race.
+It passes `-Zmiri-ignore-leaks`, because tests leak their `'static` backends on purpose
+(`fs::testfs::ramfs`). A test Miri cannot run (it spawns a process, runs assembly or calls FFI, or
+cannot finish even with its input scaled down) carries `#[cfg_attr(miri, ignore = "<reason>")]`; one
+that only runs long scales its input with `cfg!(miri)` instead, which keeps its claim. Each Miri
+finding is fixed with a regression test: a fixed test is its own, and a library fix gets a host test
+named `miri_<what>` that fails under `make miri` before the fix.
+
 **Fuzzing (C-FUZZ, ROADMAP §10.2).** `tests/fuzz` is a cargo-fuzz crate, `vibeos-fuzz`, outside the
 Cargo workspace (the root `Cargo.toml` excludes it), so the kernel build and the MSRV check never
 read `libfuzzer-sys`; `make check` runs `cargo deny` on it as a second workspace, against the same
@@ -752,7 +762,8 @@ command without its `LOOM_MAX_PREEMPTIONS=3`), then every Kani harness in `vibeo
 kani -p vibeos-core --features std`, built for the host). It needs `kani-verifier` at the
 `KANI_VERSION` that `setup.sh` pins, since Kani brings its own compiler; `./setup.sh --kani`
 installs exactly that release, and `make models` fails, naming both, when `cargo kani` reports
-another version or none. It is not part of `make check`.
+another version or none. `make miri` runs `vibeos-core`'s host tests, the `--lib` and `--doc` sets
+`make test-unit` runs, under Miri (§8.1). Neither is part of `make check`.
 
 `make gate PHASE=N` (`scripts/gate.py`) is the phase exit gate the maintainer runs before tagging
 (ROADMAP §10.9). It prints one row per exit-gate line, `PASS`, `FAIL` or `TAG  L<line>  <text>`, each
