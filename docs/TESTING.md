@@ -64,8 +64,9 @@ A single-threaded test cannot observe a race. Simulate the interrupt-context wri
 accept that the real coverage is in-guest.
 
 **Fuzzing (C-FUZZ, ROADMAP §10.2).** `tests/fuzz` is a cargo-fuzz crate, `vibeos-fuzz`, outside the
-Cargo workspace (the root `Cargo.toml` excludes it), so the kernel build, the MSRV check and
-`cargo deny` never read `libfuzzer-sys`; it has its own `Cargo.lock` and profiles, which keep
+Cargo workspace (the root `Cargo.toml` excludes it), so the kernel build and the MSRV check never
+read `libfuzzer-sys`; `make check` runs `cargo deny` on it as a second workspace, against the same
+`deny.toml`. It has its own `Cargo.lock` and profiles, which keep
 `overflow-checks` and `debug-assertions` on so a fuzzer panics where the kernel would (DESIGN §3.5).
 It holds one target per byte-slice parser in `vibeos-core`, each a `fuzz_targets/<t>.rs` over one
 `pub fn <t>(data: &[u8])` and a row of `vibeos_fuzz::TARGETS`: `acpi_walk`, `acpi_tables`,

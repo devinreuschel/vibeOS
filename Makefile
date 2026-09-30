@@ -311,7 +311,8 @@ check:
 	python3 scripts/doc_refs.py
 	@if command -v cargo-deny >/dev/null 2>&1; then \
 	    set -x; \
-	    cargo deny --workspace check licenses bans sources; \
+	    cargo deny --workspace check licenses bans sources && \
+	    cargo deny --manifest-path $(FUZZ_DIR)/Cargo.toml check licenses bans sources; \
 	else \
 	    $(call missing_tool,cargo-deny,cargo deny check licenses bans sources,cargo install cargo-deny --locked --version $(CARGO_DENY_PIN)); \
 	fi

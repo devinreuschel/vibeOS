@@ -282,7 +282,10 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   port under §14.10, keeping its own license and NOTICE. That policy, which `make check` runs as
   `cargo deny check licenses bans sources`, admits crates from crates.io only, under the notice-only
   licenses above or Apache-2.0 or Unicode-3.0, and only when `deny.toml`'s `[bans]` allow list names
-  the crate with the reason it is in the graph; another license needs an edit here first.
+  the crate with the reason it is in the graph; another license needs an edit here first. One such
+  edit: `libfuzzer-sys`, which only the `tests/fuzz` workspace uses and no image links, may also
+  carry NCSA, LLVM's notice-only license for the libFuzzer source it bundles, as a `deny.toml`
+  exception for that crate alone.
 - Cryptographic primitives and the TLS state machine are depended on, never written in-tree: pinned,
   widely reviewed crates behind one facade, `vibeos-crypto`, under ROADMAP §10.9's `deny.toml`
   policy, with RustCrypto and dalek for the primitives and rustls for TLS (ROADMAP §13.10, §14.7,
