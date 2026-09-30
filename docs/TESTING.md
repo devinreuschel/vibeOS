@@ -63,6 +63,38 @@ the reader can compare against.
 A single-threaded test cannot observe a race. Simulate the interrupt-context writer explicitly, or
 accept that the real coverage is in-guest.
 
+**Fuzzing (C-FUZZ, ROADMAP §10.2).** `tests/fuzz` is a cargo-fuzz crate, `vibeos-fuzz`, outside the
+Cargo workspace (the root `Cargo.toml` excludes it), so the kernel build, the MSRV check and
+`cargo deny` never read `libfuzzer-sys`; it has its own `Cargo.lock` and profiles, which keep
+`overflow-checks` and `debug-assertions` on so a fuzzer panics where the kernel would (DESIGN §3.5).
+It holds one target per byte-slice parser in `vibeos-core`, each a `fuzz_targets/<t>.rs` over one
+`pub fn <t>(data: &[u8])` and a row of `vibeos_fuzz::TARGETS`: `acpi_walk`, `acpi_tables`,
+`part_parse`, `fat_mount`, `vibefs_mount`, `pci_enumerate`, `virtio_caps`, `shell_tokenize`,
+`kbd_decode`, `elf_parse`, `cmdline_parse` and `vmcoreinfo_parse`. Most take the input as raw
+bytes; three encodings model hardware: `Sparse`, a disk of 512- or 4096-byte units named by index
+(flag bit 0 recomputes the GPT CRCs, bit 1 selects 4096-byte partition sectors), `FakeCfg`, PCI
+config-space records of bus, devfn and 256 bytes, and `FlatMem`, the input as physical memory at
+`0xE0000` for `acpi::walk`. `corpus/<t>/seed-*` holds only the output of `cargo run --example
+seeds`, built with the parsers' own builders; `regressions/<t>/` holds crash inputs. `make check`
+runs `make fuzz-check`: rustfmt, clippy, a build of every target, and `cargo test`, which replays
+every committed corpus and regression input on its own thread with a 10 s bound, checks that
+`TARGETS`, the `[[bin]]`s, `fuzz_targets/` and `corpus/` agree, that the generator's output is
+committed and accepted, and that every row of `scripts/check_core_stable.py`'s `PARSERS` table is
+named by a target's `covers`; it fuzzes nothing. `make fuzz` runs each target (`FUZZ_TARGETS`,
+default all) for `FUZZ_TIME` seconds (default 60) with `FUZZ_UNIT_TIMEOUT` (10 s) per input and the
+`FUZZ_SANITIZER` (`address`, and `none` on macOS, where AddressSanitizer is unusable), writing new
+inputs to `build/fuzz/corpus/<t>` and crashes to `build/fuzz/artifacts/<t>`; it needs the pinned
+cargo-fuzz (`CARGO_FUZZ_VERSION`) and names the install command when that is missing. The weekly
+`smp-stress.yml` job runs it. A crash: reproduce it with `cargo fuzz run --fuzz-dir tests/fuzz <t>
+<file>`, minimize it with `cargo fuzz tmin --fuzz-dir tests/fuzz <t> <file>`, fix the parser, and
+commit the minimized input under `regressions/<t>/` (no file extension: the root `.gitignore`
+drops `*.bin` and its kin) in the fix's commit. A parser added or changed later gets its target,
+its `TARGETS` row, its seed and its `check_core_stable.py` row in the parser's own commit. The
+harness caps (2^20 units for partitions and FAT, 4096 blocks for vibefs, 64 PCI records, 256 nodes,
+depth 8 and 64 KiB per file in the filesystem walks) bound the harness, not the parser: a real disk
+can be larger. `vibefs_mount` fixes no checksum, because vibefs v1 trusts any checksum-valid block
+(F061, ROADMAP §14.8), so it reaches only what a valid checksum lets through.
+
 ## 8.2 In-guest tests
 
 A second kernel build with `--features kernel_tests` that boots normally, runs a registry of test
@@ -646,7 +678,7 @@ unit tests, the `release_assert_` host tests again with debug assertions off, ha
 ruff and mypy; a production-feature link under the `hookcheck`
 profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q2's `nm` check; then every
 `scripts/check_*.py`; then `cargo deny check licenses bans sources` against `deny.toml`, ROADMAP §10.9's
-dependency policy). Right after the `vibeos-core` clippy lines it builds `vibeos-core` with its MSRV
+dependency policy; and the `tests/fuzz` build and replay (§8.1)). Right after the `vibeos-core` clippy lines it builds `vibeos-core` with its MSRV
 (`make check-msrv`: `cargo +<MSRV> check` for the host with `std` and for `x86_64-unknown-none`, under
 `RUSTFLAGS=--cap-lints=warn`, so it proves only that the crate builds). A missing `ruff`, `mypy`, `cargo-deny`,
 `fsck.fat` or MSRV toolchain fails it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`, which skips that check and

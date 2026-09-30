@@ -199,6 +199,7 @@ help:
 	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
 	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
 	  '  fuzz-check            tests/fuzz: fmt, clippy, build every target, replay every committed input' \
+	  '  fuzz                  every cargo-fuzz target for FUZZ_TIME s (FUZZ_TARGETS=, FUZZ_SANITIZER=none|address)' \
 	  '  all / iso             kernel + build/vibeos.iso (hybrid BIOS/UEFI)' \
 	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
 	  '  user                  Rust user programs, as build/user/<name> (ROADMAP §10.5)' \
@@ -585,6 +586,15 @@ distclean: clean
 # passes the host triple, since .cargo/config.toml defaults to the kernel's.
 FUZZ_DIR := tests/fuzz
 FUZZ_TARGET_DIR := $(CURDIR)/target/fuzz
+# `make fuzz`'s output: its growing corpus and crash artifacts.
+FUZZ_OUT := $(CURDIR)/build/fuzz
+# Seconds per target, and per input before libFuzzer calls it a hang.
+FUZZ_TIME ?= 60
+FUZZ_UNIT_TIMEOUT ?= 10
+FUZZ_TARGETS ?= $(sort $(basename $(notdir $(wildcard $(FUZZ_DIR)/fuzz_targets/*.rs))))
+# AddressSanitizer is not usable with Rust on macOS hosts.
+FUZZ_SANITIZER ?= $(if $(filter Darwin,$(shell uname -s)),none,address)
+CARGO_FUZZ_VERSION := 0.13.2
 
 .PHONY: fuzz fuzz-check
 # Its own target dir, exported to every cargo and cargo-fuzz command below.
@@ -598,3 +608,29 @@ fuzz-check:
 	cargo clippy --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --all-targets --target $(HOST_TRIPLE) -- -D warnings
 	cargo build --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --bins --target $(HOST_TRIPLE)
 	cargo test --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --target $(HOST_TRIPLE)
+
+# Run every target for FUZZ_TIME seconds. New inputs go to $(FUZZ_OUT)/corpus
+# only (libFuzzer writes to its first corpus directory), so the committed
+# corpus and regressions never grow here. A failing target does not stop the
+# rest; the recipe fails at the end, naming each with its artifacts.
+fuzz:
+	@v=$$(cargo fuzz --version 2>/dev/null | sed -n 's/^cargo-fuzz //p'); \
+	if [ "$$v" != "$(CARGO_FUZZ_VERSION)" ]; then \
+	    echo "fuzz: cargo-fuzz $(CARGO_FUZZ_VERSION) not installed (found: $${v:-none}); cargo install cargo-fuzz --locked --version $(CARGO_FUZZ_VERSION)" >&2; \
+	    exit 1; \
+	fi
+	cargo fuzz build --fuzz-dir $(FUZZ_DIR) --sanitizer $(FUZZ_SANITIZER)
+	@failed=""; \
+	for t in $(FUZZ_TARGETS); do \
+	    mkdir -p $(FUZZ_OUT)/corpus/$$t $(FUZZ_OUT)/artifacts/$$t $(FUZZ_DIR)/regressions/$$t; \
+	    echo "fuzz: $$t for $(FUZZ_TIME) s"; \
+	    cargo fuzz run --fuzz-dir $(FUZZ_DIR) --sanitizer $(FUZZ_SANITIZER) $$t \
+	        $(FUZZ_OUT)/corpus/$$t $(FUZZ_DIR)/corpus/$$t $(FUZZ_DIR)/regressions/$$t -- \
+	        -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_UNIT_TIMEOUT) -rss_limit_mb=2048 \
+	        -artifact_prefix=$(FUZZ_OUT)/artifacts/$$t/ || failed="$$failed $$t"; \
+	done; \
+	if [ -n "$$failed" ]; then \
+	    for t in $$failed; do echo "fuzz: FAIL $$t: artifacts in $(FUZZ_OUT)/artifacts/$$t" >&2; done; \
+	    exit 1; \
+	fi; \
+	echo "fuzz: ok ($(words $(FUZZ_TARGETS)) targets, $(FUZZ_TIME) s each)"
