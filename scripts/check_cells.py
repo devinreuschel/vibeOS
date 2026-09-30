@@ -40,6 +40,13 @@ MUST_BE_UNSAFE: list[tuple[str, str]] = [
     ("src/proc/addr_space_init.rs", "load_cr3_u64"),
     ("src/proc/syscall_init.rs", "switch_cr3_for"),
     ("src/arch/x86_64/gdt.rs", "set_rsp0"),
+    ("src/proc/syscall_init.rs", "on_switch"),
+    ("src/proc/syscall_init.rs", "switch_fpu"),
+    ("src/proc/syscall_init.rs", "set_rsp0_for"),
+    ("src/proc/syscall_init.rs", "vibeos_syscall_stub"),
+    ("src/sched/thread_init/mod.rs", "on_switch"),
+    ("crates/core/src/dev/virtio.rs", "SplitQueue::new"),
+    ("crates/core/src/dev/virtio.rs", "write_indirect_write"),
 ]
 
 # The only files that may hold a generic `unsafe impl` of `Send` or `Sync`

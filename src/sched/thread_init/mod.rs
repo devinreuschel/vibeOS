@@ -50,9 +50,10 @@ static SWITCH_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 /// starts with `Fxsave::empty()`.
 static FPU_TEMPLATE_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Install the context-switch and FP-template hooks.
+/// Install the context-switch and FP-template hooks. `on_switch` has
+/// `syscall_init::on_switch`'s `# Safety` contract.
 pub fn set_switch_hooks(
-    on_switch: fn(&mut PerCpu, *mut Tcb, *mut Tcb),
+    on_switch: unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb),
     fpu_template: fn() -> Fxsave,
 ) {
     // Release: pairs with the Acquire loads in `on_switch` and
@@ -61,17 +62,26 @@ pub fn set_switch_hooks(
     FPU_TEMPLATE_HOOK.store(fpu_template as *mut (), Ordering::Release);
 }
 
-fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
+/// Run the switch hook.
+///
+/// # Safety
+/// `syscall_init::on_switch`'s contract: `old` and `new` are null or live
+/// TCBs, `new` runs next on this CPU, IF=0, and `cpu` is this CPU's
+/// `PerCpu`.
+unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     // Acquire: pairs with the Release store in `set_switch_hooks`.
     let p = SWITCH_HOOK.load(Ordering::Acquire);
     if p.is_null() {
         return;
     }
-    // SAFETY: invariant: a non-null `SWITCH_HOOK` holds a
-    // `fn(&mut PerCpu, *mut Tcb, *mut Tcb)`; established by
+    // SAFETY: invariant: a non-null `SWITCH_HOOK` holds an
+    // `unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb)`; established by
     // `thread_init::set_switch_hooks`, its only store.
-    let f = unsafe { core::mem::transmute::<*mut (), fn(&mut PerCpu, *mut Tcb, *mut Tcb)>(p) };
-    f(cpu, old, new);
+    let f =
+        unsafe { core::mem::transmute::<*mut (), unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb)>(p) };
+    // SAFETY: the hook's contract is this fn's `# Safety`, which
+    // `thread_init::switch_now` establishes.
+    unsafe { f(cpu, old, new) };
 }
 
 fn fpu_template() -> Fxsave {
@@ -593,8 +603,10 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
         // SAFETY: invariant I9: both TCBs stay in `SCHED`; `old_ptr` is this
         // CPU's running thread and `new_ptr` the one `schedule_inner` or
         // `switch_to` set Running for this CPU under SCHED, so no other CPU
-        // writes these fields until the switch tail clears `on_cpu`;
-        // established by `thread_init::schedule_inner`.
+        // writes these fields until the switch tail clears `on_cpu`. The
+        // same facts, IF=0 under the callers' guard, and `cpu` being this
+        // CPU's `PerCpu` from `with_current_switch` meet `on_switch`'s
+        // `# Safety`. Established by `thread_init::schedule_inner`.
         unsafe {
             (*old_ptr).run_tsc = (*old_ptr).run_tsc.wrapping_add(delta);
             (*old_ptr).switches = (*old_ptr).switches.wrapping_add(1);

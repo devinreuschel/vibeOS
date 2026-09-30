@@ -24,7 +24,7 @@ pub(super) fn prefer_vq() -> usize {
 }
 
 pub(super) fn vq_has_room(v: &Vq, need: u16) -> bool {
-    v.vq.num_free >= need
+    v.vq.num_free() >= need
 }
 
 pub(super) fn pick_vq(blk: &Blk, need: u16) -> Option<usize> {

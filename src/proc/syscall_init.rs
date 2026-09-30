@@ -516,13 +516,19 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
 /// The switch away from `old`: save its FP state if this CPU's registers
 /// hold it (the FP binding, DESIGN §7.5). Loads nothing: the next return
 /// to ring 3 does.
-pub fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
+///
+/// # Safety
+/// `cpu` is this CPU's own `PerCpu`, held with IF=0, and `old` is null or
+/// the live TCB this CPU is switching off (invariant I9), which no other
+/// CPU writes until the switch tail clears its `on_cpu`; the caller,
+/// `thread_init::switch_now` through [`on_switch`], establishes both.
+pub unsafe fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
     if !FPU_READY.load(Ordering::Acquire) || old.is_null() {
         return;
     }
-    // SAFETY: invariant: `old` is the TCB this CPU is switching off, live
+    // SAFETY: invariant I9: `old` is the TCB this CPU is switching off, live
     // until the switch tail clears its `on_cpu`, with IF=0; established
-    // by `thread_init::switch_now`.
+    // by this fn's `# Safety`, which `thread_init::switch_now` meets.
     let old = unsafe { &mut *old };
     if fpu::switch_away(
         cpu.fp_owner,
@@ -536,15 +542,24 @@ pub fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
 }
 
 /// Hardware side of a context switch: FPU, RSP0, CR3. Call before
-/// `switch_context`. Caller already holds `&mut PerCpu` (IRQ-off).
-pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
-    switch_fpu(cpu, old);
+/// `switch_context`.
+///
+/// # Safety
+/// `old` and `new` are null or live TCBs (invariant I9), `new` the one
+/// that runs next on this CPU, IF=0, and `cpu` is this CPU's `PerCpu`
+/// with `cpu.tables` as `init_bsp` or `init_ap` set it;
+/// `thread_init::switch_now` establishes each, inside
+/// `with_current_switch`.
+pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
+    // SAFETY: `switch_fpu`'s contract, which this fn's `# Safety` covers;
+    // established by `thread_init::switch_now`.
+    unsafe { switch_fpu(cpu, old) };
     if !new.is_null() {
-        // SAFETY: invariant: `new` is the live TCB this CPU is switching to,
-        // and the caller holds this CPU's `&mut PerCpu` with IF=0, as
+        // SAFETY: invariant I9: `new` is the live TCB this CPU is switching
+        // to, and `cpu` this CPU's `PerCpu` held with IF=0, as
         // `set_rsp0_for` and `switch_cr3_for` require, with `cpu.tables` as
-        // `init_bsp` or `init_ap` set it; established by
-        // `thread_init::switch_now`.
+        // `init_bsp` or `init_ap` set it; established by this fn's
+        // `# Safety`, which `thread_init::switch_now` meets.
         unsafe {
             set_rsp0_for(cpu, &*new);
             switch_cr3_for(cpu, &*new);
@@ -717,12 +732,21 @@ pub fn set_syscall_handler(f: fn(&mut UserFrame) -> i64) {
     HANDLER.store(f as *mut (), Ordering::Release);
 }
 
+/// The syscall entry's Rust half: the one place the user frame's raw
+/// pointer becomes `&mut UserFrame`, which the handler
+/// (`proc_init::syscall`) takes.
+///
+/// # Safety
+/// `frame` is the user frame `vibeos_syscall_entry` built at the top of
+/// this thread's kernel stack (invariant I25), which nothing else refers
+/// to while the syscall runs; that entry asm is the only caller.
 #[unsafe(no_mangle)]
-pub extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
+pub unsafe extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     bump_counter();
     // SAFETY: invariant I25; the frame is the one
-    // syscall_init::vibeos_syscall_entry built at the top of this thread's
-    // kernel stack, which only this thread's syscall path refers to.
+    // `syscall_init::vibeos_syscall_entry` built at the top of this thread's
+    // kernel stack, which only this thread's syscall path refers to
+    // (this fn's `# Safety`).
     let frame = unsafe { &mut *frame };
     let nr = <Arch as SyscallAbi>::nr(frame);
     vibeos::trace!(SyscallEnter, nr, <Arch as SyscallAbi>::arg(frame, 0));

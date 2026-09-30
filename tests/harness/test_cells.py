@@ -90,6 +90,26 @@ class TestMustBeUnsafe(unittest.TestCase):
         # ROADMAP §10.3 (F089): the TSS's one writer after `load`.
         self.assertIn(("src/arch/x86_64/gdt.rs", "set_rsp0"), check_cells.MUST_BE_UNSAFE)
 
+    def test_pointer_writers_listed(self) -> None:
+        # ROADMAP §10.3 (F042): the safe functions that wrote through a
+        # caller's pointer, each now an `unsafe fn`.
+        for entry in [("src/proc/syscall_init.rs", "on_switch"),
+                      ("src/proc/syscall_init.rs", "switch_fpu"),
+                      ("src/proc/syscall_init.rs", "set_rsp0_for"),
+                      ("src/proc/syscall_init.rs", "vibeos_syscall_stub"),
+                      ("crates/core/src/dev/virtio.rs", "SplitQueue::new"),
+                      ("crates/core/src/dev/virtio.rs", "write_indirect_write")]:
+            self.assertIn(entry, check_cells.MUST_BE_UNSAFE)
+
+    def test_extern_c_entry_must_be_unsafe(self) -> None:
+        entry = [("src/a.rs", "stub")]
+        self.assertEqual(
+            self.errs('#[unsafe(no_mangle)]\npub extern "C" fn stub(f: *mut F) -> i64 { 0 }\n',
+                      entry),
+            ["src/a.rs:2: stub must be declared `unsafe fn`"])
+        self.assertEqual(
+            self.errs('pub unsafe extern "C" fn stub(f: *mut F) -> i64 { 0 }\n', entry), [])
+
     def test_tree_passes(self) -> None:
         self.assertEqual(must_be_unsafe_errors(check_cells.read_tree()), [])
 
