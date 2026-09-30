@@ -18,6 +18,7 @@ pub mod cpu;
 pub mod gdt;
 pub mod gs;
 pub mod idt;
+pub mod percpu;
 pub mod pic;
 pub mod power;
 mod trampoline;
@@ -41,7 +42,6 @@ macro_rules! switch_sti {
 pub mod switch;
 
 use core::arch::asm;
-use core::mem::offset_of;
 use core::sync::atomic::{compiler_fence, fence};
 
 use vibeos::arch::x86_64::trap::Abi;
@@ -49,8 +49,7 @@ use vibeos::arch::{
     Barriers, ContextSwitch, CycleCounter, InterruptMask, MmioWidth, PerCpuBase, SyscallAbi,
 };
 use vibeos::atomic::statics::{AtomicU64, Ordering};
-use vibeos::sched::thread::{CpuContext, apply_if_on_resume, prepare_thread};
-use vibeos::smp::per_cpu::PerCpu;
+use vibeos::sched::thread::{CpuContext, Tcb, apply_if_on_resume, prepare_thread};
 
 /// The x86_64 port's hardware half: the seam traits (PORTABILITY §11.1) on
 /// one zero-sized type. Kernel code names it as `arch::current::Arch`.
@@ -202,27 +201,16 @@ impl Barriers for Arch {
     unsafe fn sync_for_cpu(_start: *const u8, _len: usize) {}
 }
 
+/// The fast path: one `gs`-relative load each ([`percpu`]).
 impl PerCpuBase for Arch {
-    #[inline]
+    #[inline(always)]
     fn cpu_id() -> u32 {
-        if cpu::rdmsr(cpu::IA32_GS_BASE) == 0 {
-            return 0;
-        }
-        let id: u32;
-        // SAFETY: invariant I4, established at
-        // `smp::per_cpu_init::init_bsp` (on an AP,
-        // `smp::per_cpu_init::install_gs`): a nonzero `GS_BASE` is this
-        // CPU's `PerCpu`, so the load reads its `cpu_id` and touches no stack
-        // or flags.
-        unsafe {
-            asm!(
-                "mov {id:e}, dword ptr gs:[{off}]",
-                id = out(reg) id,
-                off = const offset_of!(PerCpu, cpu_id),
-                options(nostack, preserves_flags, readonly),
-            );
-        }
-        id
+        percpu::cpu_id_hint()
+    }
+
+    #[inline(always)]
+    fn current_tcb() -> *mut Tcb {
+        percpu::current_tcb()
     }
 }
 

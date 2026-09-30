@@ -274,6 +274,12 @@ vector (`virtio_blk_init::queue_vector`), mounts `vda` through the File API, wri
 is on, so the virtio-blk top half lands on the write path. The test requires at least 64 self-IPIs
 and no send error, at least as many new top-half runs, and the worker's exit depth within budget;
 the boot requires its `ok` line and the stack check as every boot does.
+Then the two virtio-blk failure boots (ROADMAP §10.11, F046), each through `_single_test_boot`
+with its own device tuple, whose `vda` is a 4 MiB pattern image (`harness.make_pattern_disk`, every
+byte of sector n `(n & 0xFF) ^ 0xA5`, so no GPT is stamped and no partition marker is required):
+the opt-in `vblk_readonly` on a `readonly=on` image (`_vblk_readonly_boot`), and the opt-in
+`vblk_bad_sector` on an image behind QEMU's `blkdebug`, which fails every read of sector 4096
+(`_vblk_bad_sector_boot`). Each boot requires its one `ok` line.
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.

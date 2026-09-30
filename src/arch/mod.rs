@@ -16,4 +16,5 @@ pub mod x86_64;
 
 #[cfg(feature = "kernel_tests")]
 pub use x86_64::catch;
+pub use x86_64::percpu::{cpu_id_hint, current_tcb};
 pub use x86_64::{cpu, gdt, gs, idt, pic, power};

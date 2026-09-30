@@ -121,21 +121,21 @@ fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
 }
 
 fn dump_thread() {
-    let (cpu, tid, name) = match per_cpu_init::try_current() {
-        None => (0u32, 0u32, "<early>"),
-        Some(c) => {
-            if c.current.is_null() {
-                (c.cpu_id, 0, "<none>")
-            } else {
-                // SAFETY: invariant I9: a non-null `current` names a `Tcb`
-                // that stays in `SCHED`; the other CPUs are sent the stop
-                // IPI first (`panic::begin_dump`), and this reads two
-                // fields set before the thread ran; established by
-                // `thread_init::switch_now`.
-                let t = unsafe { &*c.current };
-                (c.cpu_id, t.id.raw(), t.name)
-            }
-        }
+    // The panic may come with IF=1: the id is a hint and the thread one
+    // load (DESIGN §2.9 rule 5).
+    let cpu = crate::arch::cpu_id_hint();
+    let cur = crate::arch::current_tcb();
+    let (tid, name) = if !per_cpu_init::is_live() {
+        (0u32, "<early>")
+    } else if cur.is_null() {
+        (0, "<none>")
+    } else {
+        // SAFETY: invariant I9: a non-null `current` names a `Tcb` that
+        // stays in `SCHED`; the other CPUs are sent the stop IPI first
+        // (`panic::begin_dump`), and this reads two fields set before the
+        // thread ran; established by `thread_init::switch_now`.
+        let t = unsafe { &*cur };
+        (t.id.raw(), t.name)
     };
     #[expect(
         clippy::let_underscore_must_use,
