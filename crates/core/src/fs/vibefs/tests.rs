@@ -258,6 +258,9 @@ fn crash_at_each_write_is_consistent() {
         v.sync(&mut c).unwrap();
         assert!(c.ops > 4);
         let total = c.ops;
+        // Under Miri each crash point's replay, fsck and mount take tens of
+        // seconds; three points spread over the run keep every step's code.
+        let stride = if cfg!(miri) { total.div_ceil(3) } else { 1 };
         let mut i = 1u64;
         while i <= total {
             let mut img = base.clone();
@@ -289,7 +292,7 @@ fn crash_at_each_write_is_consistent() {
             assert_eq!(r.errors, 0, "crash at op {i} left a corrupt live tree");
             let mut vol = Vol::new();
             mount(&mut disk, &mut vol).expect("mount after crash");
-            i += 1;
+            i += stride;
         }
     }
 }
@@ -337,6 +340,10 @@ fn crash_decode(b: &[u8]) -> Option<u32> {
 
 #[test]
 fn crash_workload_seeded_points() {
+    // Under Miri one commit takes seconds: 3 commits and 2 crash points
+    // keep the path (the 200-commit fit is the native run's claim).
+    let iters = if cfg!(miri) { 3 } else { CRASH_ITERS };
+    let points = if cfg!(miri) { 2 } else { 1000 };
     // 256 KiB: `run_vibefs_crash.IMAGE_BYTES`, the guest's image.
     let mut base = fresh(256 * 1024);
     {
@@ -351,13 +358,13 @@ fn crash_workload_seeded_points() {
         let mut c = CrashDisk::seeded(&mut img, u64::MAX, 1).unwrap();
         let mut v = Vol::new();
         mount(&mut c, &mut v).unwrap();
-        for n in 1..=CRASH_ITERS {
+        for n in 1..=iters {
             crash_iter(&mut v, &mut c, n).unwrap_or_else(|e| panic!("probe iteration {n}: {e:?}"));
         }
         c.ops
     };
     let mut rng = 0x5eed_c0de_u64;
-    for _ in 0..1000 {
+    for _ in 0..points {
         let p = 1 + xorshift64(&mut rng) % total;
         let seed_p = xorshift64(&mut rng);
         let mut img = base.clone();
@@ -366,7 +373,7 @@ fn crash_workload_seeded_points() {
             let mut c = CrashDisk::seeded(&mut img, p, seed_p).unwrap();
             let mut v = Vol::new();
             mount(&mut c, &mut v).unwrap();
-            for n in 1..=CRASH_ITERS {
+            for n in 1..=iters {
                 if c.ops >= p {
                     break;
                 }
@@ -521,8 +528,10 @@ fn sessions_64_no_leak() {
     });
     let free = with_vol(&mut b, |v, _| v.df().1);
     let warn0 = fsck_of(&mut b).warnings;
+    // Under Miri a session's mount, commit and fsck take tens of seconds.
+    let sessions = if cfg!(miri) { 2 } else { 64 };
     let mut s = 1u32;
-    while s <= 64 {
+    while s <= sessions {
         with_vol(&mut b, |v, d| {
             assert_eq!(v.df().1, free, "free bytes at session {s}");
             let ino = v.lookup(d, ROOT_INO, b"f").unwrap().ino;
@@ -539,7 +548,7 @@ fn sessions_64_no_leak() {
         let ino = v.lookup(d, ROOT_INO, b"f").unwrap().ino;
         let mut out = [0u8; 300];
         assert_eq!(v.read(d, ino, 0, &mut out).unwrap(), 300);
-        assert_eq!(out, payload(64));
+        assert_eq!(out, payload(sessions));
     });
 }
 
@@ -551,8 +560,10 @@ fn commit_free_count_constant() {
         assert_eq!(v.write(d, ino, 0, &payload(0)).unwrap(), 300);
         v.sync(d).unwrap();
         let free = v.free_count();
+        // Under Miri a commit takes seconds.
+        let commits = if cfg!(miri) { 4 } else { 200 };
         let mut i = 1u32;
-        while i <= 200 {
+        while i <= commits {
             assert_eq!(v.write(d, ino, 0, &payload(i)).unwrap(), 300);
             v.sync(d)
                 .unwrap_or_else(|e| panic!("sync at commit {i}: {e:?}"));
@@ -569,6 +580,10 @@ fn commit_free_count_constant() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "63 nested mkdirs and two commits run past 10 minutes under Miri, and the 70-block count needs all 63"
+)]
 fn nested_dirs_63_commit_remount() {
     let mut b = fresh(256 * BLOCK);
     with_vol(&mut b, |v, d| {
@@ -668,6 +683,10 @@ fn slot_of(v: &mut Vol, d: &mut MemDisk, dir: u32, name: &[u8]) -> (usize, usize
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "a fresh image, commit and fsck per planted defect run past 10 minutes under Miri, and the claim is every defect"
+)]
 fn fsck_reports_each_planted_defect() {
     let expect = |what: &str, r: FsckReport, class: Defect, n: Option<u32>| {
         assert!(r.count(class) > 0, "{what}: no {} in {r:?}", class.as_str());

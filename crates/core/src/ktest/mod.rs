@@ -325,6 +325,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "walks 4.3 million rows to reach the u32 overflow, hours under Miri"
+    )]
     fn run_count_overflow() {
         let rows = core::iter::repeat_n(("x", false, false), 4_294_968);
         assert_eq!(run_count(rows, &Selection::all(), REPEAT_MAX), None);

@@ -25,7 +25,12 @@ fn allow_missing_tools() -> bool {
 
 /// Require host `fsck.fat -n` to report `buf` clean (ROADMAP Phase 8 exit gate).
 /// A skipped check prints its line once per process.
+/// Miri cannot spawn a process, so under `make miri` the check is skipped
+/// and the test's own image checks still run.
 fn fsck(buf: &[u8]) {
+    if cfg!(miri) {
+        return;
+    }
     static SKIPPED: std::sync::Once = std::sync::Once::new();
     if !run_fsck("fsck.fat", buf, allow_missing_tools()) {
         // libtest captures `eprintln!` from a passing test; a direct write to
@@ -82,12 +87,14 @@ fn run_fsck(prog: &str, buf: &[u8], allow: bool) -> bool {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns a process, which Miri cannot run")]
 #[should_panic(expected = "not installed")]
 fn fsck_missing_tool_fails() {
     run_fsck("vibeos-no-such-fsck", &fresh(IMG), false);
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns a process, which Miri cannot run")]
 fn fsck_missing_tool_skipped_when_allowed() {
     assert!(!run_fsck("vibeos-no-such-fsck", &fresh(IMG), true));
 }

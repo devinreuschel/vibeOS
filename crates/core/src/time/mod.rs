@@ -780,12 +780,14 @@ mod tests {
                 }
             })
         };
-        thread::sleep(Duration::from_millis(50));
+        // Miri's virtual clock gives the reader about 26 reads in 50 ms.
+        let (run_ms, min_reads) = if cfg!(miri) { (500, 100) } else { (50, 1_000) };
+        thread::sleep(Duration::from_millis(run_ms));
         stop.store(true, Ordering::Relaxed);
         let _ = w.join();
         let _ = r.join();
         assert_eq!(bad.load(Ordering::Relaxed), 0);
-        assert!(reads.load(Ordering::Relaxed) > 1_000);
+        assert!(reads.load(Ordering::Relaxed) > min_reads);
     }
 
     /// An independent evaluation of the clocksource formula.
