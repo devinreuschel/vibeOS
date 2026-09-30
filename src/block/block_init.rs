@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use vibeos::block::blockdev::Backing;
 use vibeos::block::{
-    BlockDevice, BlockError, Completion, DeviceState, DoneWord, MAX_QUEUE, Op, Queue, Ramdisk,
+    BlockDevice, BlockError, Completion, DRAIN_BATCH, DeviceState, DoneWord, Op, Queue, Ramdisk,
     Request,
 };
 use vibeos::kalloc::TryBox;
@@ -34,6 +34,7 @@ const ST_INVAL: u32 = 2;
 const ST_IO: u32 = 3;
 const ST_FAILED: u32 = 4;
 const ST_QFULL: u32 = 5;
+const ST_RO: u32 = 6;
 const _: () = assert!(ST_PEND == DoneWord::PENDING);
 
 static Q: SpinMutex<Queue> = SpinMutex::with_rank(Queue::new(), RANK_DEVICE);
@@ -66,6 +67,7 @@ fn pack(r: Result<(), BlockError>) -> u32 {
             ST_FAILED
         }
         Err(BlockError::QueueFull) => ST_QFULL,
+        Err(BlockError::ReadOnly) => ST_RO,
     }
 }
 
@@ -76,6 +78,7 @@ fn unpack(v: u32) -> Result<(), BlockError> {
         ST_IO => Err(BlockError::Io),
         ST_FAILED => Err(BlockError::Failed),
         ST_QFULL => Err(BlockError::QueueFull),
+        ST_RO => Err(BlockError::ReadOnly),
         ST_PEND => Err(BlockError::Io),
         _ => Err(BlockError::Io),
     }
@@ -246,7 +249,7 @@ fn execute(req: &Request) -> Result<(), BlockError> {
 fn drain_failed(q_prep: fn(&mut Queue)) {
     let mut first = true;
     loop {
-        let mut dump = [None; MAX_QUEUE];
+        let mut dump = [None; DRAIN_BATCH];
         let n = {
             let mut q = Q.lock();
             if first {
@@ -276,7 +279,7 @@ fn fail_rest() {
 /// Retire `req`'s dispatch in `Q`, then wake its waiters after the lock
 /// drops, unless the queue defers the report to an emulated-`Fua` `Flush`.
 fn finish(mut req: Request, res: Result<(), BlockError>) {
-    let seq = u64::from(req.seq);
+    let seq = req.seq;
     let mut q = Q.lock();
     match res {
         Ok(()) => {

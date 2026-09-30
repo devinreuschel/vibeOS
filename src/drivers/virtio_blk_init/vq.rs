@@ -11,21 +11,12 @@ pub(super) struct Vq {
     pub(super) inflight: [u8; MAX_QSIZE],
 }
 
-pub(super) fn clamp_qsize(hw: u16) -> u16 {
-    let n = hw.min(MAX_QSIZE as u16);
-    if n == 0 {
-        return 0;
-    }
-    1u16 << (15u32 - n.leading_zeros())
-}
-
 pub(super) fn prefer_vq() -> usize {
-    let cpu = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
-    cpu as usize
+    crate::arch::cpu_id_hint() as usize
 }
 
 pub(super) fn vq_has_room(v: &Vq, need: u16) -> bool {
-    v.vq.num_free >= need
+    v.vq.num_free() >= need
 }
 
 pub(super) fn pick_vq(blk: &Blk, need: u16) -> Option<usize> {

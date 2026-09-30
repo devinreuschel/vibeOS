@@ -8,7 +8,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::arch::CycleCounter;
-use vibeos::dev::{DevRef, Device};
+use vibeos::dev::DevRef;
 use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::PhysAddr;
@@ -447,15 +447,18 @@ fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
     }
     // A test that needs interrupts off takes its own guard and drops it
     // before it returns.
+    // The depth is read with IF=0, so it is this CPU's (DESIGN §2.9 rule 5).
     let if_on = x86::interrupts_enabled();
-    let nest = per_cpu_init::irq_nest();
+    x86::cli();
+    let cpu = per_cpu_init::current();
+    let nest = cpu.irq_nest.load(Ordering::Relaxed);
     if !if_on || nest != 0 {
-        per_cpu_init::current().irq_nest.store(0, Ordering::Relaxed);
-        x86::sti();
+        cpu.irq_nest.store(0, Ordering::Relaxed);
         if !matches!(outcome, Outcome::Fail(_) | Outcome::FailFmt(_)) {
             outcome = crate::fail_fmt!("left IF={} irq_nest={}", u8::from(if_on), nest);
         }
     }
+    x86::sti();
     match outcome {
         Outcome::Ok => {
             crate::marker!("vibeOS: ktest: ok {name} ({us} us)");
@@ -751,6 +754,19 @@ pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
 
 pub(crate) fn dying_entry() {}
 
+/// Set this CPU's `irq_nest` to `n` after an `arch::catch` longjmp skipped
+/// the guards that would have dropped it. The store runs with IF=0, so it
+/// lands on the slot of the CPU the caller runs on (DESIGN §2.9 rule 5),
+/// and IF is left as the caller had it.
+pub(crate) fn restore_irq_nest(n: u32) {
+    let if_on = x86::interrupts_enabled();
+    x86::cli();
+    per_cpu_init::current().irq_nest.store(n, Ordering::Relaxed);
+    if if_on {
+        x86::sti();
+    }
+}
+
 pub(crate) fn second_cpu() -> Option<u32> {
     let mask = per_cpu_init::online_mask();
     let mut i = 1u32;
@@ -784,9 +800,9 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
 }
 
 pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
-    // SAFETY: invariant: every caller passes a device's BAR 0 VA, which
-    // `pci_init` mapped uncached, and a register offset inside that BAR;
-    // established by `ktest::bar0_va`.
+    // SAFETY: invariant I484: every caller passes a device's BAR 0 VA,
+    // which the `bar-test` driver claimed and mapped uncached, and a
+    // register offset inside that BAR; established by `ktest::bar0_va`.
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32) }
 }
 
@@ -798,13 +814,12 @@ pub(crate) fn mmio_w32(va: u64, off: u32, val: u32) {
 pub(crate) const EDU_IDENT: u32 = 0x00;
 pub(crate) const EDU_IDENT_VAL: u32 = 0x0100_00ED;
 
-pub(crate) fn bar0_va(dev: &Device) -> Option<u64> {
-    let r = dev.resources[0];
-    if r.mapped_va != 0 {
-        Some(r.mapped_va)
-    } else {
-        None
-    }
+/// BAR 0's VA for edu or e1000e, which the `kernel_tests` driver
+/// `bar-test` claims and maps (binding it on first use); `None` when that
+/// driver does not hold the BAR.
+pub(crate) fn bar0_va(dev: &DevRef) -> Option<u64> {
+    crate::dev::ktest::bind_bar_test_driver();
+    crate::dev_init::bar_va(dev, 0)
 }
 
 pub(crate) fn find_edu() -> Option<DevRef> {

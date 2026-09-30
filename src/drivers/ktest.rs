@@ -663,6 +663,129 @@ pub(crate) fn test_virtio_probe_fail_quiesces() -> Outcome {
     rng_fail_after_qenable_case()
 }
 
+// ---- vda as a pattern image in its own boot (`run_ktest.py`'s
+// `_vblk_readonly_boot` and `_vblk_bad_sector_boot`).
+
+/// Every byte of sector n of the pattern image is `(n & 0xFF) ^
+/// PATTERN_XOR`. Harness twin: `harness.VBLK_PATTERN_XOR`.
+const PATTERN_XOR: u8 = 0xA5;
+/// The sector the read-only test reads and tries to write. The harness
+/// has no twin: any sector of the pattern image serves.
+const RO_SECTOR: u64 = 100;
+/// The sector whose reads QEMU's `blkdebug` fails. Harness twin:
+/// `harness.VBLK_BAD_SECTOR`.
+const BAD_SECTOR: u64 = 4096;
+
+/// vda's registry handle; its `_dev` calls reach the driver below the
+/// page cache, as `block_vblk_rw`'s do.
+fn vda_ref() -> Result<vibeos::block::blockdev::BlockRef, &'static str> {
+    crate::block::blockdev_init::lookup(b"vda").ok_or("no vda")
+}
+
+/// Read sector `lba` of the pattern image and check it.
+fn pattern_read(d: &vibeos::block::blockdev::BlockRef, lba: u64) -> Result<(), &'static str> {
+    let mut buf = [0u8; 512];
+    d.read_dev(lba, &mut buf)
+        .map_err(|_| "pattern read failed")?;
+    let want = (lba as u8) ^ PATTERN_XOR;
+    if buf.iter().any(|&b| b != want) {
+        return Err("sector does not hold the pattern: vda is not the pattern image");
+    }
+    Ok(())
+}
+
+fn io_reqs() -> u64 {
+    vda(|b| b.io_reqs()).unwrap_or(0)
+}
+
+fn vda_ready() -> bool {
+    vda(|b| b.state() == DeviceState::Ready).unwrap_or(false)
+}
+
+fn readonly_steps() -> Result<(), &'static str> {
+    if vda(|b| b.features() & vibeos::virtio_blk::F_RO) != Some(vibeos::virtio_blk::F_RO) {
+        return Err("F_RO not negotiated: vda is not a readonly=on disk");
+    }
+    let d = vda_ref()?;
+    pattern_read(&d, RO_SECTOR)?;
+    let before = io_reqs();
+    let buf = [0x5Au8; 512];
+    match d.write_dev(RO_SECTOR, &buf) {
+        Err(BlockError::ReadOnly) => {}
+        Ok(()) => return Err("write to a read-only device succeeded"),
+        Err(_) => return Err("write to a read-only device: wrong error"),
+    }
+    if io_reqs() != before {
+        return Err("the refused write reached the device");
+    }
+    match d.discard(RO_SECTOR, 1) {
+        Err(BlockError::ReadOnly) => {}
+        Ok(()) => return Err("discard on a read-only device succeeded"),
+        Err(_) => return Err("discard on a read-only device: wrong error"),
+    }
+    if io_reqs() != before {
+        return Err("the refused discard reached the device");
+    }
+    pattern_read(&d, RO_SECTOR)?;
+    if !vda_ready() {
+        return Err("vda not Ready after a refused write");
+    }
+    Ok(())
+}
+
+/// virtio-blk `F_RO` (ROADMAP §10.11, F046): a write and a discard fail
+/// at once with `ReadOnly`, and reads go on. Opt-in: its boot's vda is a
+/// `readonly=on` pattern image.
+pub(crate) fn vblk_readonly() -> Outcome {
+    if !vda_live() {
+        return Outcome::Fail("no virtio-blk");
+    }
+    match readonly_steps() {
+        Ok(()) => Outcome::Ok,
+        Err(why) => Outcome::Fail(why),
+    }
+}
+
+fn bad_sector_steps() -> Result<(), &'static str> {
+    let d = vda_ref()?;
+    if d.logical_block_size() != Ok(512) {
+        return Err("vda's logical block size is not 512");
+    }
+    pattern_read(&d, BAD_SECTOR - 1)?;
+    pattern_read(&d, BAD_SECTOR + 1)?;
+    let before = io_reqs();
+    let mut buf = [0u8; 512];
+    match d.read_dev(BAD_SECTOR, &mut buf) {
+        Err(BlockError::Io) => {}
+        Ok(()) => return Err("bad sector read succeeded: vda has no blkdebug fault"),
+        Err(_) => return Err("bad sector read: wrong error"),
+    }
+    let tries = io_reqs().wrapping_sub(before);
+    if tries < 1 + u64::from(vibeos::block::DEFAULT_RETRY_BUDGET) {
+        return Err("bad sector read failed before its retry budget was spent");
+    }
+    if !vda_ready() {
+        return Err("vda not Ready after one sector's read failed");
+    }
+    for lba in [0, BAD_SECTOR - 1, BAD_SECTOR + 1] {
+        pattern_read(&d, lba)?;
+    }
+    Ok(())
+}
+
+/// A virtio-blk request that exhausts its retries fails alone (ROADMAP
+/// §10.11, F046). Opt-in: its boot's vda fails every read of
+/// [`BAD_SECTOR`] through QEMU's `blkdebug`.
+pub(crate) fn vblk_bad_sector() -> Outcome {
+    if !vda_live() {
+        return Outcome::Fail("no virtio-blk");
+    }
+    match bad_sector_steps() {
+        Ok(()) => Outcome::Ok,
+        Err(why) => Outcome::Fail(why),
+    }
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -677,4 +800,6 @@ pub(crate) const TESTS: &[Test] = &[
         "virtio_probe_fail_quiesces",
         test_virtio_probe_fail_quiesces,
     ),
+    test("vblk_readonly", vblk_readonly).opt_in(),
+    test("vblk_bad_sector", vblk_bad_sector).opt_in(),
 ];

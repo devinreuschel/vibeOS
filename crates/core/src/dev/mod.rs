@@ -1,12 +1,19 @@
 //! Device model and driver registry. ROADMAP §6.1.
 //!
-//! Scan fills a device list; [`Registry::bind_all`] matches drivers by
-//! id and probes in dependency order. Resource claims are exclusive.
+//! Scan fills a device list; the kernel's binder, `dev_init::bind_all`,
+//! matches drivers by id and probes in dependency order, one device at a
+//! time under that device's lock. [`Registry::bind_all`] is the host
+//! tests' binder.
 //!
 //! Each device is a counted entry ([`DevRef`], DESIGN §12.1 rule 1): its
 //! record never changes after [`Registry::push`], and the registry slot
-//! owns what changes, the claims, the bound driver's name and the
-//! driver's per-device state ([`Instance`]).
+//! owns what changes: its parent, its [`DevState`], the bound driver, the
+//! driver's per-device state ([`Instance`]) and its BARs' claims.
+//!
+//! A BAR is claimed through [`Registry::claim`], which refuses a range
+//! that overlaps another claim or RAM, and mapped only by the driver that
+//! holds its [`BarClaim`], in `probe` (DESIGN §12.3 rule 8): nothing maps
+//! a BAR at enumeration.
 
 pub mod dma;
 pub mod entropy;
@@ -15,7 +22,7 @@ pub mod virtio;
 
 use core::any::Any;
 use core::fmt;
-use core::ops::Deref;
+use core::ops::{Deref, Range};
 
 use crate::kalloc::{AllocError, TryArc};
 use crate::pci::{Bar, BarKind, Bdf, CapSet, FuncInfo, MAX_BARS, MAX_SCAN};
@@ -105,8 +112,6 @@ pub struct Resource {
     pub addr: u64,
     pub size: u64,
     pub prefetchable: bool,
-    /// Kernel VA after ioremap / physmap. 0 = not mapped.
-    pub mapped_va: u64,
 }
 
 impl Resource {
@@ -116,7 +121,6 @@ impl Resource {
         addr: 0,
         size: 0,
         prefetchable: false,
-        mapped_va: 0,
     };
 
     pub fn from_bar(bar_index: u8, bar: Bar) -> Self {
@@ -134,7 +138,6 @@ impl Resource {
             addr: bar.addr,
             size: bar.size,
             prefetchable: bar.prefetchable,
-            mapped_va: 0,
         }
     }
 
@@ -195,6 +198,10 @@ pub enum ClaimError {
     Already,
     Overlap,
     BadIndex,
+    /// A memory BAR overlaps a RAM-typed range of the boot memory map.
+    Ram,
+    /// The claims table is full.
+    Full,
 }
 
 /// A claimed resource is busy; an empty slot is no device; a bad index, a bad argument.
@@ -215,6 +222,8 @@ impl ClaimError {
             ClaimError::Already => "already claimed",
             ClaimError::Overlap => "overlap",
             ClaimError::BadIndex => "bad index",
+            ClaimError::Ram => "ram",
+            ClaimError::Full => "table full",
         }
     }
 }
@@ -246,6 +255,30 @@ pub fn instance<V: Any + Send + Sync>(v: V) -> Result<Instance, AllocError> {
 /// Whether `a` and `b` are the same instance.
 pub fn same_instance(a: &Instance, b: &Instance) -> bool {
     core::ptr::addr_eq(&**a as *const (dyn Any + Send + Sync), &**b)
+}
+
+/// Whether `[addr, addr + len)` overlaps any of `ranges`. Ends saturate
+/// at `u64::MAX`, and an empty range overlaps nothing. The one overlap
+/// check (AGENTS.md rule 10): [`Registry::claim`] runs it against other
+/// claims and RAM, and the kernel's `pci_init::map_mmio` against RAM.
+pub fn overlaps_any(addr: u64, len: u64, ranges: impl IntoIterator<Item = Range<u64>>) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let end = addr.saturating_add(len);
+    ranges
+        .into_iter()
+        .any(|r| r.start < r.end && addr < r.end && r.start < end)
+}
+
+/// The index in `funcs` of the bridge whose secondary bus is the bus of
+/// `funcs[i]`: that function's parent. `None` on the root bus, or when no
+/// scanned bridge leads to it.
+pub fn parent_bridge(funcs: &[FuncInfo], i: usize) -> Option<usize> {
+    let bus = funcs.get(i)?.bdf.bus;
+    funcs
+        .iter()
+        .position(|f| f.is_bridge() && f.secondary_bus != 0 && f.secondary_bus == bus)
 }
 
 /// A PCI function's record. Not `Copy` or `Clone`: the registry holds the
@@ -423,20 +456,130 @@ impl fmt::Debug for DevRef {
     }
 }
 
+/// A claim on one BAR of one device, which [`Registry::claim`] grants and
+/// only [`Registry::release`] ends (DESIGN §12.3 rule 8). Not `Copy` or
+/// `Clone` (AGENTS.md rule 6), with no public constructor, so a mapping
+/// made through it names a range the claims table holds. Dropping one
+/// without `release` keeps its range reserved, which fails safe.
+///
+/// ```compile_fail
+/// fn gone(c: vibeos::dev::BarClaim) -> u64 {
+///     let moved = c;
+///     drop(moved);
+///     c.phys() // `c` was moved
+/// }
+/// ```
+#[must_use]
+#[derive(Debug, PartialEq, Eq)]
+pub struct BarClaim {
+    dev: u64,
+    /// The claiming device's address, for the lines its mapping logs.
+    at: Bdf,
+    bar: u8,
+    mem: bool,
+    addr: u64,
+    size: u64,
+    prefetchable: bool,
+}
+
+impl BarClaim {
+    /// The id of the claiming device's entry ([`DevRef::id`]).
+    pub fn dev(&self) -> u64 {
+        self.dev
+    }
+
+    /// The claiming device's bus address.
+    pub fn bdf(&self) -> Bdf {
+        self.at
+    }
+
+    pub fn bar(&self) -> u8 {
+        self.bar
+    }
+
+    /// The BAR's bus address.
+    pub fn phys(&self) -> u64 {
+        self.addr
+    }
+
+    pub fn len(&self) -> u64 {
+        self.size
+    }
+
+    /// Never true: [`Registry::claim`] refuses an empty BAR.
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    pub fn is_mem(&self) -> bool {
+        self.mem
+    }
+
+    pub fn prefetchable(&self) -> bool {
+        self.prefetchable
+    }
+}
+
+/// Where a device is in its life (DESIGN §12.1 rule 3). The binder moves
+/// it `Present` → `Probing` → `Bound`, or back to `Present` on a failed
+/// probe; a removal moves it `Bound` → `Removing` → `Present`. `Resetting`,
+/// `Failed`, `Suspended` and `Dead` belong to later phases' error handling,
+/// suspend and removal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevState {
+    Present,
+    Probing,
+    Bound,
+    Resetting,
+    Failed,
+    Suspended,
+    Removing,
+    Dead,
+}
+
+impl DevState {
+    pub fn name(self) -> &'static str {
+        match self {
+            DevState::Present => "present",
+            DevState::Probing => "probing",
+            DevState::Bound => "bound",
+            DevState::Resetting => "resetting",
+            DevState::Failed => "failed",
+            DevState::Suspended => "suspended",
+            DevState::Removing => "removing",
+            DevState::Dead => "dead",
+        }
+    }
+}
+
+/// A row of the claims table: which device's BAR holds which range.
 #[derive(Clone, Copy)]
 struct Claim {
+    dev: u64,
+    bar: u8,
     mem: bool,
     addr: u64,
     size: u64,
 }
 
+/// A claim the device's entry holds, with the VA its driver mapped it at.
+struct HeldBar {
+    claim: BarClaim,
+    va: Option<u64>,
+}
+
 /// A registry slot: the entry, and what changes about it after `push`.
 struct Slot {
     dev: DevRef,
-    claimed: [bool; MAX_BARS],
-    /// The bound driver's slot in `drivers`; set only while unbound. An
-    /// index, not the name, keeps the table under 4 KiB.
-    bound: Option<u8>,
+    /// Each BAR's claim, once its driver holds it.
+    bars: [Option<HeldBar>; MAX_BARS],
+    /// The id of the bridge or root port the device sits behind; `None`
+    /// on the root bus.
+    parent: Option<u64>,
+    state: DevState,
+    /// The driver's slot in `drivers` while the device is `Probing`,
+    /// `Bound` or `Removing`. An index, not the name, keeps the slot small.
+    drv: Option<u8>,
     /// The bound driver's per-device state, owned here.
     inst: Option<Instance>,
 }
@@ -450,8 +593,8 @@ pub struct Registry {
     next_id: u64,
     drivers: [Option<&'static dyn Driver>; MAX_DRIVERS],
     n_drv: usize,
+    /// Every live claim; a released row is reused.
     claims: [Option<Claim>; MAX_CLAIMS],
-    n_claim: usize,
 }
 
 impl Registry {
@@ -463,7 +606,6 @@ impl Registry {
             drivers: [None; MAX_DRIVERS],
             n_drv: 0,
             claims: [None; MAX_CLAIMS],
-            n_claim: 0,
         }
     }
 
@@ -487,15 +629,17 @@ impl Registry {
         id
     }
 
-    /// Publish `dev`, built under an id [`take_id`](Self::take_id) gave.
-    /// `AllocError` when the table is full; `dev` is dropped here then, so
-    /// a caller passes a clone.
-    pub fn insert(&mut self, dev: DevRef) -> Result<(), AllocError> {
+    /// Publish `dev`, built under an id [`take_id`](Self::take_id) gave,
+    /// behind the device with id `parent`. `AllocError` when the table is
+    /// full; `dev` is dropped here then, so a caller passes a clone.
+    pub fn insert(&mut self, dev: DevRef, parent: Option<u64>) -> Result<(), AllocError> {
         let slot = self.slots.get_mut(self.n_dev).ok_or(AllocError)?;
         *slot = Some(Slot {
             dev,
-            claimed: [false; MAX_BARS],
-            bound: None,
+            bars: [const { None }; MAX_BARS],
+            parent,
+            state: DevState::Present,
+            drv: None,
             inst: None,
         });
         self.n_dev += 1;
@@ -511,7 +655,7 @@ impl Registry {
             return Err(AllocError);
         }
         let r = DevRef::try_new(self.take_id(), d)?;
-        self.insert(r.clone())?;
+        self.insert(r.clone(), None)?;
         Ok(r)
     }
 
@@ -545,28 +689,105 @@ impl Registry {
         self.driver_at(i as usize).map(|d| d.name())
     }
 
+    /// The index of `dev`'s slot, in registration order; it never moves.
+    pub fn index_of(&self, dev: &DevRef) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|s| s.dev.same(dev)))
+    }
+
+    /// `dev`'s parent bridge or root port.
+    pub fn parent(&self, dev: &DevRef) -> Option<DevRef> {
+        self.slot_of(dev)
+            .and_then(|s| s.parent)
+            .and_then(|id| self.by_id(id))
+    }
+
+    /// `dev`'s state; `None` for a device not in the table.
+    pub fn state(&self, dev: &DevRef) -> Option<DevState> {
+        self.slot_of(dev).map(|s| s.state)
+    }
+
     /// The name of the driver bound to `dev`.
     pub fn bound(&self, dev: &DevRef) -> Option<&'static str> {
         self.slot_of(dev)
-            .and_then(|s| s.bound)
+            .filter(|s| s.state == DevState::Bound)
+            .and_then(|s| s.drv)
             .and_then(|i| self.driver_name(i))
     }
 
     /// Record the registered driver `name` as `dev`'s, owning `inst`. Only
-    /// an unbound device binds, to a registered driver; `false` otherwise,
-    /// and `inst` is dropped.
-    pub fn bind(&mut self, dev: &DevRef, name: &'static str, inst: Option<Instance>) -> bool {
+    /// a `Present` device, or one `Probing` with that driver, binds;
+    /// otherwise `inst` comes back, for the caller to drop unlocked.
+    pub fn bind(
+        &mut self,
+        dev: &DevRef,
+        name: &'static str,
+        inst: Option<Instance>,
+    ) -> Result<(), Option<Instance>> {
         let Some(di) = (0..self.n_drv).find(|&i| self.driver_name(i as u8) == Some(name)) else {
-            return false;
+            return Err(inst);
         };
+        let di = di as u8;
         match self.slot_of_mut(dev) {
-            Some(s) if s.bound.is_none() => {
-                s.bound = Some(di as u8);
+            Some(s)
+                if s.state == DevState::Present
+                    || (s.state == DevState::Probing && s.drv == Some(di)) =>
+            {
+                s.state = DevState::Bound;
+                s.drv = Some(di);
                 s.inst = inst;
-                true
+                Ok(())
             }
-            _ => false,
+            _ => Err(inst),
         }
+    }
+
+    /// Move a `Present` `dev` to `Probing` by the driver in slot `drv`,
+    /// returning that driver; `None`, and no change, otherwise.
+    pub fn begin_probe(&mut self, dev: &DevRef, drv: u8) -> Option<&'static dyn Driver> {
+        let d = self.driver_at(drv as usize)?;
+        let s = self.slot_of_mut(dev)?;
+        if s.state != DevState::Present {
+            return None;
+        }
+        s.state = DevState::Probing;
+        s.drv = Some(drv);
+        Some(d)
+    }
+
+    /// Return a `Probing` `dev` to `Present` after its probe failed.
+    pub fn abort_probe(&mut self, dev: &DevRef) {
+        if let Some(s) = self.slot_of_mut(dev)
+            && s.state == DevState::Probing
+        {
+            s.state = DevState::Present;
+            s.drv = None;
+        }
+    }
+
+    /// Move a `Bound` `dev` to `Removing`, returning its driver.
+    pub fn begin_remove(&mut self, dev: &DevRef) -> Option<&'static dyn Driver> {
+        let s = self.slot_of(dev)?;
+        if s.state != DevState::Bound {
+            return None;
+        }
+        let d = s.drv.and_then(|i| self.driver_at(i as usize))?;
+        let s = self.slot_of_mut(dev)?;
+        s.state = DevState::Removing;
+        Some(d)
+    }
+
+    /// Return a `Removing` `dev` to `Present`, handing back its driver's
+    /// instance for the caller to drop with the table unlocked.
+    pub fn finish_remove(&mut self, dev: &DevRef) -> Option<Instance> {
+        let s = self.slot_of_mut(dev)?;
+        if s.state != DevState::Removing {
+            return None;
+        }
+        s.state = DevState::Present;
+        s.drv = None;
+        s.inst.take()
     }
 
     /// A reference to `dev`'s driver instance.
@@ -574,11 +795,12 @@ impl Registry {
         self.slot_of(dev).and_then(|s| s.inst.clone())
     }
 
-    /// Whether BAR `bar` of `dev` is claimed.
+    /// Whether the claims table holds BAR `bar` of `dev`.
     pub fn is_claimed(&self, dev: &DevRef, bar: u8) -> bool {
-        self.slot_of(dev)
-            .and_then(|s| s.claimed.get(bar as usize).copied())
-            .unwrap_or(false)
+        self.claims
+            .iter()
+            .flatten()
+            .any(|c| c.dev == dev.id() && c.bar == bar)
     }
 
     pub fn register(&mut self, drv: &'static dyn Driver) -> bool {
@@ -599,49 +821,112 @@ impl Registry {
         true
     }
 
-    fn range_overlap(a: u64, alen: u64, b: u64, blen: u64) -> bool {
-        alen != 0 && blen != 0 && a < b.saturating_add(blen) && b < a.saturating_add(alen)
-    }
-
-    /// Claim BAR `bar` of `dev` for its driver.
-    pub fn claim(&mut self, dev: &DevRef, bar: u8) -> Result<(), ClaimError> {
-        if bar as usize >= MAX_BARS {
-            return Err(ClaimError::BadIndex);
-        }
+    /// Claim BAR `bar` of `dev` for its driver. Refused, in this order:
+    /// `BadIndex` (no such BAR or entry), `Empty`, `Already` (the table
+    /// holds this BAR), `Ram` (a memory BAR over any of `ram`, the boot
+    /// memory map's RAM-typed ranges), `Overlap` (a claim of the same
+    /// kind), `Full`. The kernel calls it with its table locked, so the
+    /// check and the record are one step (DESIGN §12.3 rule 8).
+    pub fn claim(
+        &mut self,
+        dev: &DevRef,
+        bar: u8,
+        ram: impl IntoIterator<Item = Range<u64>>,
+    ) -> Result<BarClaim, ClaimError> {
         let Some(s) = self.slot_of(dev) else {
             return Err(ClaimError::BadIndex);
         };
-        let res = s.dev.resources[bar as usize];
+        let Some(&res) = s.dev.resources.get(bar as usize) else {
+            return Err(ClaimError::BadIndex);
+        };
         if res.is_empty() {
             return Err(ClaimError::Empty);
         }
-        if s.claimed[bar as usize] {
+        let id = dev.id();
+        if self.is_claimed(dev, bar) {
             return Err(ClaimError::Already);
         }
         let mem = matches!(res.kind, ResourceKind::Memory);
-        let mut i = 0usize;
-        while i < self.n_claim {
-            if let Some(c) = self.claims[i]
-                && c.mem == mem
-                && Self::range_overlap(c.addr, c.size, res.addr, res.size)
-            {
-                return Err(ClaimError::Overlap);
-            }
-            i += 1;
+        if mem && overlaps_any(res.addr, res.size, ram) {
+            return Err(ClaimError::Ram);
         }
-        if self.n_claim >= MAX_CLAIMS {
+        let taken = self
+            .claims
+            .iter()
+            .flatten()
+            .filter(|c| c.mem == mem)
+            .map(|c| c.addr..c.addr.saturating_add(c.size));
+        if overlaps_any(res.addr, res.size, taken) {
             return Err(ClaimError::Overlap);
         }
-        self.claims[self.n_claim] = Some(Claim {
+        let row = self
+            .claims
+            .iter_mut()
+            .find(|c| c.is_none())
+            .ok_or(ClaimError::Full)?;
+        *row = Some(Claim {
+            dev: id,
+            bar,
             mem,
             addr: res.addr,
             size: res.size,
         });
-        self.n_claim += 1;
-        if let Some(s) = self.slot_of_mut(dev) {
-            s.claimed[bar as usize] = true;
+        Ok(BarClaim {
+            dev: id,
+            at: dev.addr,
+            bar,
+            mem,
+            addr: res.addr,
+            size: res.size,
+            prefetchable: res.prefetchable,
+        })
+    }
+
+    /// End `claim`: its row is free for the next claim.
+    pub fn release(&mut self, claim: BarClaim) {
+        for row in self.claims.iter_mut() {
+            if row.is_some_and(|c| c.dev == claim.dev && c.bar == claim.bar) {
+                *row = None;
+            }
         }
+    }
+
+    /// Give `claim` to its device's entry, mapped at `va`. Refused, with
+    /// the claim handed back, when the entry is gone or already holds that
+    /// BAR.
+    pub fn hold(&mut self, claim: BarClaim, va: Option<u64>) -> Result<(), BarClaim> {
+        let id = claim.dev;
+        let Some(held) = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|s| s.dev.id() == id)
+            .and_then(|s| s.bars.get_mut(claim.bar as usize))
+        else {
+            return Err(claim);
+        };
+        if held.is_some() {
+            return Err(claim);
+        }
+        *held = Some(HeldBar { claim, va });
         Ok(())
+    }
+
+    /// The VA BAR `bar` of `dev` is mapped at, while its entry holds it.
+    pub fn bar_va(&self, dev: &DevRef, bar: u8) -> Option<u64> {
+        self.slot_of(dev)
+            .and_then(|s| s.bars.get(bar as usize))
+            .and_then(Option::as_ref)
+            .and_then(|h| h.va)
+    }
+
+    /// Take BAR `bar`'s claim and VA back from `dev`'s entry, to unmap and
+    /// then [`release`](Self::release) it.
+    pub fn take_bar(&mut self, dev: &DevRef, bar: u8) -> Option<(BarClaim, Option<u64>)> {
+        self.slot_of_mut(dev)
+            .and_then(|s| s.bars.get_mut(bar as usize))
+            .and_then(Option::take)
+            .map(|h| (h.claim, h.va))
     }
 
     pub fn driver_at(&self, i: usize) -> Option<&'static dyn Driver> {
@@ -699,7 +984,7 @@ impl Registry {
                 if w >= out.len() {
                     break;
                 }
-                if s.bound.is_none() && s.dev.matches_driver(drv) {
+                if s.state == DevState::Present && s.dev.matches_driver(drv) {
                     out[w] = Some((idx[di], s.dev.clone()));
                     w += 1;
                 }
@@ -729,14 +1014,17 @@ impl Registry {
             while dv < self.n_dev {
                 let job = self
                     .slot(dv)
-                    .filter(|s| s.bound.is_none() && s.dev.matches_driver(drv))
+                    .filter(|s| s.state == DevState::Present && s.dev.matches_driver(drv))
                     .map(|s| s.dev.clone());
                 if let Some(dev) = job {
                     enable(&dev);
                     // A failed probe leaves the device unbound for a later
                     // driver; the kernel's `dev_init::bind_all` also logs it.
                     if let Ok(inst) = drv.probe(&dev) {
-                        self.bind(&dev, drv.name(), inst);
+                        // A `Present` device and a registered driver: it
+                        // binds, so nothing comes back.
+                        let refused = self.bind(&dev, drv.name(), inst);
+                        drop(refused);
                     }
                 }
                 dv += 1;
@@ -748,8 +1036,12 @@ impl Registry {
     /// Each device's `devices` lines, with its binding and claims.
     pub fn write_tree(&self, f: &mut impl fmt::Write) -> fmt::Result {
         for s in self.slots.iter().flatten() {
-            let bound = s.bound.and_then(|i| self.driver_name(i));
-            s.dev.write_tree(bound, &s.claimed, f)?;
+            let bound = s
+                .drv
+                .filter(|_| s.state == DevState::Bound)
+                .and_then(|i| self.driver_name(i));
+            let claimed = core::array::from_fn(|b| s.bars.get(b).is_some_and(Option::is_some));
+            s.dev.write_tree(bound, &claimed, f)?;
         }
         Ok(())
     }
@@ -762,313 +1054,4 @@ impl Default for Registry {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use core::sync::atomic::{AtomicU32, Ordering};
-
-    #[test]
-    fn probe_error_no_memory_str() {
-        assert_eq!(ProbeError::NoMemory.as_str(), "no memory");
-        assert_eq!(
-            ProbeError::from(crate::kalloc::AllocError),
-            ProbeError::NoMemory
-        );
-        assert_eq!(crate::virtio::VirtioError::NoMemory.as_str(), "no memory");
-    }
-
-    struct D {
-        name: &'static str,
-        ids: &'static [IdMatch],
-        order: u8,
-        probes: AtomicU32,
-        bar: u8,
-    }
-
-    impl Driver for D {
-        fn name(&self) -> &'static str {
-            self.name
-        }
-        fn ids(&self) -> &'static [IdMatch] {
-            self.ids
-        }
-        fn order(&self) -> u8 {
-            self.order
-        }
-        fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
-            self.probes.fetch_add(1, Ordering::SeqCst);
-            if self.bar != 0xFF {
-                if dev.resources[self.bar as usize].is_empty() {
-                    return Err(ProbeError::NoResource);
-                }
-                return Ok(None);
-            }
-            Ok(None)
-        }
-        fn remove(&self, _dev: &DevRef) {}
-    }
-
-    fn nic() -> Device {
-        let mut d = Device::empty();
-        d.addr = Bdf::new(0, 3, 0);
-        d.vendor = 0x8086;
-        d.device_id = 0x100e;
-        d.class = 0x02;
-        d.subclass = 0;
-        d.resources[0] = Resource {
-            kind: ResourceKind::Memory,
-            bar: 0,
-            addr: 0xFEB8_0000,
-            size: 0x20000,
-            prefetchable: false,
-            mapped_va: 0,
-        };
-        d.resources[1] = Resource {
-            kind: ResourceKind::Io,
-            bar: 1,
-            addr: 0xC000,
-            size: 0x40,
-            prefetchable: false,
-            mapped_va: 0,
-        };
-        d
-    }
-
-    fn vga() -> Device {
-        let mut d = Device::empty();
-        d.addr = Bdf::new(0, 2, 0);
-        d.vendor = 0x1234;
-        d.device_id = 0x1111;
-        d.class = 0x03;
-        d.resources[0] = Resource {
-            kind: ResourceKind::Memory,
-            bar: 0,
-            addr: 0xFD00_0000,
-            size: 0x100_0000,
-            prefetchable: true,
-            mapped_va: 0,
-        };
-        d
-    }
-
-    #[test]
-    fn id_match_vendor_device_and_class() {
-        let id = IdMatch::vid_did(0x8086, 0x100e);
-        assert!(id.matches(0x8086, 0x100e, 0x02, 0));
-        assert!(!id.matches(0x8086, 0x1237, 0x06, 0));
-        let any = IdMatch::any_vendor(0x8086);
-        assert!(any.matches(0x8086, 0x1237, 0x06, 0));
-        assert!(!any.matches(0x1234, 0x1111, 0x03, 0));
-        let cls = IdMatch::class(0x03, Some(0x00));
-        assert!(cls.matches(0x1234, 0x1111, 0x03, 0x00));
-        assert!(!cls.matches(0x1234, 0x1111, 0x02, 0x00));
-    }
-
-    #[test]
-    fn claim_rejects_second_and_overlap() {
-        let mut r = Registry::new();
-        let d0 = r.push(nic()).unwrap();
-        let d1 = r.push(vga()).unwrap();
-        r.claim(&d0, 0).unwrap();
-        assert_eq!(r.claim(&d0, 0), Err(ClaimError::Already));
-        assert_eq!(r.claim(&d0, 9), Err(ClaimError::BadIndex));
-        // Same range from a cloned resource on another slot: overlap.
-        let mut clone = nic();
-        clone.addr = Bdf::new(0, 4, 0);
-        let d2 = r.push(clone).unwrap();
-        assert_eq!(r.claim(&d2, 0), Err(ClaimError::Overlap));
-        r.claim(&d0, 1).unwrap();
-        r.claim(&d1, 0).unwrap();
-        assert!(r.is_claimed(&d0, 0));
-        assert!(!r.is_claimed(&d2, 0));
-        let stray = DevRef::try_new(99, nic()).unwrap();
-        assert_eq!(r.claim(&stray, 0), Err(ClaimError::BadIndex));
-        assert_eq!(ClaimError::Already.as_str(), "already claimed");
-        assert_eq!(ProbeError::Busy.as_str(), "busy");
-        assert_eq!(ResourceKind::Memory.name(), "mem");
-    }
-
-    static E1000_IDS: &[IdMatch] = &[IdMatch::vid_did(0x8086, 0x100e)];
-    static VGA_IDS: &[IdMatch] = &[IdMatch::vid_did(0x1234, 0x1111)];
-    static CLASS_NET: &[IdMatch] = &[IdMatch::class(0x02, None)];
-
-    static LATE: D = D {
-        name: "late-nic",
-        ids: CLASS_NET,
-        order: 50,
-        probes: AtomicU32::new(0),
-        bar: 0xFF,
-    };
-    static EARLY: D = D {
-        name: "early-nic",
-        ids: E1000_IDS,
-        order: 10,
-        probes: AtomicU32::new(0),
-        bar: 0,
-    };
-    static VGA: D = D {
-        name: "vga",
-        ids: VGA_IDS,
-        order: 10,
-        probes: AtomicU32::new(0),
-        bar: 0,
-    };
-
-    #[test]
-    fn bind_order_by_dependency_not_register_order() {
-        LATE.probes.store(0, Ordering::SeqCst);
-        EARLY.probes.store(0, Ordering::SeqCst);
-        VGA.probes.store(0, Ordering::SeqCst);
-        let mut r = Registry::new();
-        let d0 = r.push(nic()).unwrap();
-        let d1 = r.push(vga()).unwrap();
-        // Register late first; early must still win the nic.
-        assert!(r.register(&LATE));
-        assert!(r.register(&EARLY));
-        assert!(r.register(&VGA));
-        let mut jobs: [Option<(u8, DevRef)>; MAX_DEVICES] = [const { None }; MAX_DEVICES];
-        let nj = r.collect_bind_jobs(&mut jobs);
-        assert!(nj >= 2);
-        let (drv0, dev0) = jobs[0].as_ref().unwrap();
-        assert_eq!(r.driver_at(*drv0 as usize).unwrap().name(), "early-nic");
-        assert!(dev0.same(&d0));
-        drop(jobs);
-        let mut enables = 0u32;
-        r.bind_all(|_| enables += 1);
-        assert_eq!(enables, 2);
-        assert_eq!(r.bound(&d0), Some("early-nic"));
-        assert_eq!(r.bound(&d1), Some("vga"));
-        assert_eq!(EARLY.probes.load(Ordering::SeqCst), 1);
-        assert_eq!(LATE.probes.load(Ordering::SeqCst), 0);
-        assert_eq!(VGA.probes.load(Ordering::SeqCst), 1);
-        // A bound device does not bind again.
-        assert!(!r.bind(&d0, "late-nic", None));
-        r.claim(&d0, 0).unwrap();
-        let mut tree = String::new();
-        r.write_tree(&mut tree).unwrap();
-        assert!(tree.contains("early-nic"));
-        assert!(tree.contains("00:03.0"));
-        assert!(tree.contains("bar0 mem"));
-        assert!(tree.contains(" claimed"));
-    }
-
-    #[test]
-    fn registry_holds_references() {
-        // The table holds counted entries, not records by value, so it
-        // fits a shell stack with room to spare.
-        let reg = core::mem::size_of::<Registry>();
-        assert!(reg < 4096, "Registry {reg} should be under 4 KiB");
-        let mut r = Registry::new();
-        let d = r.push(nic()).unwrap();
-        let g = r.get(0).unwrap();
-        assert_eq!(g.id(), d.id());
-        assert!(g.same(&d));
-        assert_eq!(g.vendor, 0x8086);
-        assert!(r.get(1).is_none());
-    }
-
-    #[test]
-    fn devref_ids_never_reused() {
-        let mut r = Registry::new();
-        let a = r.push(nic()).unwrap();
-        let b = r.push(vga()).unwrap();
-        let c = r.push(nic()).unwrap();
-        assert_eq!((a.id(), b.id(), c.id()), (1, 2, 3));
-        for (i, want) in [&a, &b, &c].into_iter().enumerate() {
-            let got = r.get(i).unwrap();
-            assert_eq!(got.id(), want.id());
-            assert!(r.by_id(want.id()).unwrap().same(want));
-        }
-        assert!(r.by_id(4).is_none());
-        // An id taken for an entry built outside the table is not reused.
-        let id = r.take_id();
-        assert_eq!(id, 4);
-        assert_eq!(r.push(vga()).unwrap().id(), 5);
-    }
-
-    static DROPS: AtomicU32 = AtomicU32::new(0);
-
-    /// A driver's per-device state, counting its drops.
-    struct Counted(u64);
-
-    impl Drop for Counted {
-        fn drop(&mut self) {
-            DROPS.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    /// A driver with no state of its own: each probe returns a new
-    /// instance for the registry to own.
-    struct Stateless;
-
-    impl Driver for Stateless {
-        fn name(&self) -> &'static str {
-            "stateless"
-        }
-        fn ids(&self) -> &'static [IdMatch] {
-            E1000_IDS
-        }
-        fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
-            Ok(Some(instance(Counted(dev.id()))?))
-        }
-        fn remove(&self, _dev: &DevRef) {}
-    }
-
-    static STATELESS: Stateless = Stateless;
-
-    #[test]
-    fn probe_instance_owned_by_entry() {
-        assert_eq!(core::mem::size_of::<Stateless>(), 0);
-        DROPS.store(0, Ordering::SeqCst);
-        let mut r = Registry::new();
-        let d0 = r.push(nic()).unwrap();
-        let mut n2 = nic();
-        n2.addr = Bdf::new(0, 4, 0);
-        let d1 = r.push(n2).unwrap();
-        assert!(r.register(&STATELESS));
-        r.bind_all(|_| {});
-        let i0 = r.instance(&d0).unwrap();
-        let i1 = r.instance(&d1).unwrap();
-        let c0 = i0.downcast_ref::<Counted>().unwrap();
-        let c1 = i1.downcast_ref::<Counted>().unwrap();
-        assert_eq!((c0.0, c1.0), (d0.id(), d1.id()));
-        assert!(!core::ptr::eq(c0, c1));
-        assert!(!same_instance(&i0, &i1));
-        assert!(same_instance(&i0, &r.instance(&d0).unwrap()));
-        drop((i0, i1));
-        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
-        drop(r);
-        assert_eq!(DROPS.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn from_func_copies_bars_and_caps() {
-        let mut info = FuncInfo::empty();
-        info.bdf = Bdf::new(0, 2, 0);
-        info.vendor = 0x1234;
-        info.device = 0x1111;
-        info.class = 0x03;
-        info.bars[0] = Bar {
-            kind: BarKind::Mem32,
-            prefetchable: true,
-            addr: 0xFD00_0000,
-            size: 0x1000,
-        };
-        info.caps.msi = Some(0x50);
-        let d = Device::from_func(info);
-        assert_eq!(d.vendor, 0x1234);
-        assert_eq!(d.resources[0].kind, ResourceKind::Memory);
-        assert_eq!(d.resources[0].size, 0x1000);
-        assert_eq!(d.caps.msi, Some(0x50));
-        let mut r = Registry::new();
-        let d = r.push(d).unwrap();
-        assert!(r.bound(&d).is_none());
-        assert!(r.instance(&d).is_none());
-    }
-
-    #[test]
-    fn fixed_tables_match_limits() {
-        let r = Registry::new();
-        assert_eq!(r.drivers.len(), crate::limits::MAX_DRIVERS);
-        assert_eq!(r.claims.len(), crate::limits::MAX_CLAIMS);
-    }
-}
+mod tests;

@@ -4,7 +4,7 @@
 //! OASIS virtio-blk constants. Kernel MMIO / VQ / IRQ live in
 //! `virtio_blk_init`.
 
-use crate::block::BlockError;
+use crate::block::{BlockError, Op};
 use crate::virtio::{self, F_EVENT_IDX, F_INDIRECT_DESC, F_VERSION_1};
 
 /// virtio-blk feature bits (device-specific, not transport).
@@ -19,8 +19,11 @@ pub const F_CONFIG_WCE: u64 = 1 << 11;
 pub const F_MQ: u64 = 1 << 12;
 pub const F_DISCARD: u64 = 1 << 13;
 
-/// Transport + blk features we will accept. Never [`F_RO`].
+/// Transport + blk features we will accept. [`F_RO`] is accepted: the
+/// driver then sends the device no write or discard (virtio 1.2
+/// §5.2.6.1), see [`refuse_read_only`].
 pub const OFFER: u64 = F_VERSION_1
+    | F_RO
     | F_INDIRECT_DESC
     | F_EVENT_IDX
     | F_SIZE_MAX
@@ -128,6 +131,44 @@ pub fn map_status(st: u8) -> Result<(), BlockError> {
     }
 }
 
+/// `ReadOnly` for a write or discard on a device that negotiated
+/// [`F_RO`], before anything is queued; reads and flushes go on.
+pub fn refuse_read_only(feat: u64, op: Op) -> Result<(), BlockError> {
+    if feat & F_RO != 0 && op.writes_media() {
+        return Err(BlockError::ReadOnly);
+    }
+    Ok(())
+}
+
+/// Whether a request that failed for good (its retry budget spent, or an
+/// error no retry helps) also fails the device: only when the device has
+/// set `DEVICE_NEEDS_RESET` in `status` (virtio 1.2 §2.1.1). Otherwise
+/// the request completes with its own error and the device stays `Ready`
+/// (DESIGN §10.3).
+pub fn exhausted_fails_device(status: u8) -> bool {
+    status & virtio::STATUS_NEEDS_RESET != 0
+}
+
+/// The fewest descriptors a queue needs: one read or write chain is a
+/// header, a data segment, and a status byte.
+pub const MIN_QSIZE: u16 = 3;
+
+/// The queue size to program for a device queue of `hw` entries: the
+/// largest power of two no larger than `hw` or `max`, which
+/// `SplitLayout::new` requires. `BadQueue` when that is below
+/// [`MIN_QSIZE`], where every request would stay `Full`.
+pub fn queue_size(hw: u16, max: u16) -> Result<u16, virtio::VirtioError> {
+    let n = hw.min(max);
+    if n == 0 {
+        return Err(virtio::VirtioError::BadQueue);
+    }
+    let q = 1u16 << n.ilog2();
+    if q < MIN_QSIZE {
+        return Err(virtio::VirtioError::BadQueue);
+    }
+    Ok(q)
+}
+
 pub fn nq_from_config(feat: u64, cfg_num_queues: u16, common_num_queues: u16) -> u16 {
     let offered = if feat & F_MQ != 0 {
         cfg_num_queues.max(1)
@@ -217,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn version1_required_and_no_ro() {
+    fn version1_required_and_ro_accepted() {
         assert_eq!(
             pick_features(F_FLUSH | F_BLK_SIZE),
             Err(virtio::VirtioError::NoVersion1)
@@ -227,11 +268,50 @@ mod tests {
         assert_eq!(f & F_FLUSH, F_FLUSH);
         assert_eq!(f & F_MQ, F_MQ);
         assert_eq!(f & F_DISCARD, F_DISCARD);
-        assert_eq!(f & F_RO, 0);
+        assert_eq!(f & F_RO, F_RO);
         assert_eq!(nq_from_config(0, 8, 8), 1);
         assert_eq!(nq_from_config(F_MQ, 4, 8), 4);
         assert_eq!(nq_from_config(F_MQ, 8, 2), 2);
         assert_eq!(nq_from_config(F_MQ, 0, 4), 1);
+    }
+
+    #[test]
+    fn read_only_refuses_write_and_discard() {
+        for op in [Op::Write, Op::Discard] {
+            assert_eq!(refuse_read_only(F_RO, op), Err(BlockError::ReadOnly));
+            assert_eq!(refuse_read_only(F_FLUSH, op), Ok(()));
+        }
+        for op in [Op::Read, Op::Flush] {
+            assert_eq!(refuse_read_only(F_RO | F_FLUSH, op), Ok(()));
+        }
+        assert!(!BlockError::ReadOnly.retryable());
+        assert_eq!(BlockError::ReadOnly.as_str(), "read-only");
+    }
+
+    #[test]
+    fn exhausted_request_fails_device_only_on_needs_reset() {
+        use crate::virtio::{
+            STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK,
+            STATUS_NEEDS_RESET,
+        };
+        let live = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK;
+        assert!(!exhausted_fails_device(0));
+        assert!(!exhausted_fails_device(live));
+        assert!(exhausted_fails_device(live | STATUS_NEEDS_RESET));
+        assert!(exhausted_fails_device(STATUS_NEEDS_RESET));
+    }
+
+    #[test]
+    fn queue_size_below_3_rejected() {
+        for hw in [0u16, 1, 2, 3] {
+            assert_eq!(queue_size(hw, 64), Err(virtio::VirtioError::BadQueue));
+        }
+        assert_eq!(queue_size(4, 64), Ok(4));
+        assert_eq!(queue_size(48, 64), Ok(32));
+        assert_eq!(queue_size(64, 64), Ok(64));
+        assert_eq!(queue_size(256, 64), Ok(64));
+        assert_eq!(queue_size(256, 2), Err(virtio::VirtioError::BadQueue));
+        assert_eq!(queue_size(u16::MAX, u16::MAX), Ok(1 << 15));
     }
 
     #[test]

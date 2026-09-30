@@ -208,6 +208,8 @@ GONE: list[tuple[str, str]] = [
     ("src/fs/vibefs_init.rs: static IMAGE", "driver and volume state as"),
     ("CALIB_BAND_TCG", "`tsc_calib_source` measures PIT channel 2 once"),
     ("calib_band", "`tsc_calib_source` measures PIT channel 2 once"),
+    ("bsp_tss_ptr", "the kernel writes the TSS"),
+    ("tss_ptr", "the kernel writes the TSS"),
     ("walk_abs", "every path syscall resolves through `Vfs`"),
     ("vol_parent", "every path syscall resolves through `Vfs`"),
     ("routed_rest", "every path syscall resolves through `Vfs`"),
@@ -231,6 +233,10 @@ GONE: list[tuple[str, str]] = [
     ("to_fs", "`fat::FatError` and `vibefs::Error`, two copies"),
     ("crates/core/src/fs/fat/tests.rs: fn error_strings", "the E2 table gives each"),
     ("error_strings_cover", "the E2 table gives each"),
+    ("claim_bars", "a device's resources are claimed"),
+    ("map_func_bars", "a device's resources are claimed"),
+    ("keep_wb", "a device's resources are claimed"),
+    ("mapped_va", "a device's resources are claimed"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

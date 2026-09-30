@@ -10,6 +10,7 @@
 pub mod x86_64;
 
 use crate::paging::{PhysAddr, VirtAddr};
+use crate::thread::Tcb;
 
 /// Declared once, in `crate::trap` (ROADMAP §10.3, §10.6).
 pub use crate::trap::SyscallAbi;
@@ -140,6 +141,10 @@ pub trait PerCpuBase {
     /// This CPU's id: exact while interrupts are masked, and 0 before the
     /// per-CPU area is live.
     fn cpu_id() -> u32;
+    /// The running thread's TCB, read in one instruction that preemption
+    /// cannot split (DESIGN §2.9 rule 5); null before the per-CPU area and
+    /// the bootstrap thread are live.
+    fn current_tcb() -> *mut Tcb;
 }
 
 /// Raw user-memory copies, inside the port's user-access window (SMAP, PAN).

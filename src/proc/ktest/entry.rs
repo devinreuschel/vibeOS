@@ -411,9 +411,7 @@ pub(crate) fn teardown_live_root_asserts() -> Outcome {
         let dup = unsafe { ptr::read(&*keep) };
         addr_space_init::teardown(dup);
     });
-    per_cpu_init::current()
-        .irq_nest
-        .store(nest0, Ordering::Relaxed);
+    crate::ktest::restore_irq_nest(nest0);
     thread_init::set_pid_cr3(id, 0, 0);
     PARK.release();
     let died = wait_ms(
@@ -1226,7 +1224,8 @@ fn wait_run(cpu: u32) -> Outcome {
 /// holds each run's first ring-3 entries in the window after GS is
 /// loaded for ring 3 (ROADMAP §10.2, F021).
 pub(crate) fn user_fork_wait_stall() -> Outcome {
-    let here = per_cpu_init::current().cpu_id;
+    // The registry is pinned, so the hint is its CPU.
+    let here = thread_init::current_cpu();
     let out = run_on(here);
     if !matches!(out, Outcome::Ok) {
         return out;

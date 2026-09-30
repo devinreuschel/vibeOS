@@ -26,10 +26,7 @@ pub(crate) fn load_cr3(space: &AddressSpace) {
 /// This CPU's recorded root is `space`'s: a [`load_cr3`] of it skipped the
 /// write.
 pub(crate) fn cr3_was_skipped(space: &AddressSpace) -> bool {
-    crate::per_cpu_init::current()
-        .remote
-        .as_cr3
-        .load(Ordering::Relaxed)
+    crate::per_cpu_init::with_current(|c| c.remote.as_cr3.load(Ordering::Relaxed))
         == space.root().as_u64()
 }
 

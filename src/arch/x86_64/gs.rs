@@ -34,11 +34,11 @@ pub fn from_user(cs: u64) -> bool {
 /// back. `KERNEL_GS_BASE` is written first, so an NMI in the window, which
 /// swaps by the sign of `GS_BASE`, also lands on `PerCpu`.
 pub fn force_kernel() {
+    let _irq = x86::InterruptGuard::enter();
     let Some(cpu) = per_cpu_init::try_current() else {
         return;
     };
     let ptr = cpu.self_ptr as u64;
-    let _irq = x86::InterruptGuard::enter();
     // SAFETY: invariant I4, established here: both GS MSRs get this CPU's
     // `PerCpu` (`per_cpu_init::try_current`), with IF=0 until `GS_BASE` is
     // written back, and `KERNEL_DS` is the kernel data selector of the GDT

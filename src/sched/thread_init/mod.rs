@@ -50,9 +50,10 @@ static SWITCH_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 /// starts with `Fxsave::empty()`.
 static FPU_TEMPLATE_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Install the context-switch and FP-template hooks.
+/// Install the context-switch and FP-template hooks. `on_switch` has
+/// `syscall_init::on_switch`'s `# Safety` contract.
 pub fn set_switch_hooks(
-    on_switch: fn(&mut PerCpu, *mut Tcb, *mut Tcb),
+    on_switch: unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb),
     fpu_template: fn() -> Fxsave,
 ) {
     // Release: pairs with the Acquire loads in `on_switch` and
@@ -61,17 +62,26 @@ pub fn set_switch_hooks(
     FPU_TEMPLATE_HOOK.store(fpu_template as *mut (), Ordering::Release);
 }
 
-fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
+/// Run the switch hook.
+///
+/// # Safety
+/// `syscall_init::on_switch`'s contract: `old` and `new` are null or live
+/// TCBs, `new` runs next on this CPU, IF=0, and `cpu` is this CPU's
+/// `PerCpu`.
+unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     // Acquire: pairs with the Release store in `set_switch_hooks`.
     let p = SWITCH_HOOK.load(Ordering::Acquire);
     if p.is_null() {
         return;
     }
-    // SAFETY: invariant: a non-null `SWITCH_HOOK` holds a
-    // `fn(&mut PerCpu, *mut Tcb, *mut Tcb)`; established by
+    // SAFETY: invariant: a non-null `SWITCH_HOOK` holds an
+    // `unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb)`; established by
     // `thread_init::set_switch_hooks`, its only store.
-    let f = unsafe { core::mem::transmute::<*mut (), fn(&mut PerCpu, *mut Tcb, *mut Tcb)>(p) };
-    f(cpu, old, new);
+    let f =
+        unsafe { core::mem::transmute::<*mut (), unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb)>(p) };
+    // SAFETY: the hook's contract is this fn's `# Safety`, which
+    // `thread_init::switch_now` establishes.
+    unsafe { f(cpu, old, new) };
 }
 
 fn fpu_template() -> Fxsave {
@@ -352,12 +362,15 @@ impl Sched {
             _ => 0,
         };
         if cookie != 0 {
+            // The cookie's provenance was exposed from `&mut WaitQueue`
+            // (`WaitQueue::cookie`), so the rebuilt pointer may write.
+            let wq = core::ptr::with_exposed_provenance_mut::<WaitQueue>(cookie);
             // SAFETY: invariant: a Blocked thread's `wq` cookie is the address
             // of the `WaitQueue` it waits on, which lives in a lock's model
             // that is touched only under SCHED, held here, and stays put
             // while a thread waits on it; established by
             // `thread_init::Sched::begin_wait`.
-            unsafe { &mut *(cookie as *mut WaitQueue) }.remove(id);
+            unsafe { &mut *wq }.remove(id);
         }
     }
 }
@@ -601,8 +614,10 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
         // SAFETY: invariant I9: both TCBs stay in `SCHED`; `old_ptr` is this
         // CPU's running thread and `new_ptr` the one `schedule_inner` or
         // `switch_to` set Running for this CPU under SCHED, so no other CPU
-        // writes these fields until the switch tail clears `on_cpu`;
-        // established by `thread_init::schedule_inner`.
+        // writes these fields until the switch tail clears `on_cpu`. The
+        // same facts, IF=0 under the callers' guard, and `cpu` being this
+        // CPU's `PerCpu` from `with_current_switch` meet `on_switch`'s
+        // `# Safety`. Established by `thread_init::schedule_inner`.
         unsafe {
             (*old_ptr).run_tsc = (*old_ptr).run_tsc.wrapping_add(delta);
             (*old_ptr).switches = (*old_ptr).switches.wrapping_add(1);
@@ -1374,8 +1389,10 @@ pub fn switch_to(id: ThreadId) {
     finish_switch();
 }
 
+/// The running thread's id, through [`crate::arch::current_tcb`]'s one
+/// load, at any IF (DESIGN §2.9 rule 5).
 pub fn current_id() -> ThreadId {
-    let p = per_cpu_init::current_thread();
+    let p = crate::arch::current_tcb();
     assert!(!p.is_null(), "no current thread");
     // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`, and
     // `id` changes only while its slot is Dead, never while it runs;
@@ -1383,8 +1400,10 @@ pub fn current_id() -> ThreadId {
     unsafe { (*p).id }
 }
 
+/// The running thread's pid (0 with no current thread), through
+/// [`crate::arch::current_tcb`]'s one load, at any IF.
 pub fn current_pid() -> u32 {
-    let p = per_cpu_init::current_thread();
+    let p = crate::arch::current_tcb();
     if p.is_null() {
         0
     } else {
@@ -1417,15 +1436,11 @@ pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
     })
 }
 
+/// The CPU this thread runs on: exact while IF=0, a hint with IF=1
+/// (`arch::cpu_id_hint`), which is enough to place a new thread. A caller
+/// that needs the exact id reads it with IF=0.
 pub fn current_cpu() -> u32 {
-    per_cpu_init::current().cpu_id
-}
-
-#[cfg(feature = "kernel_tests")]
-pub fn current_tcb() -> *mut Tcb {
-    let p = per_cpu_init::current_thread();
-    assert!(!p.is_null(), "no current thread");
-    p
+    crate::arch::cpu_id_hint()
 }
 
 #[cfg(feature = "kernel_tests")]

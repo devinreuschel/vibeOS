@@ -143,7 +143,7 @@ static NOISE_EXITED: AtomicU32 = AtomicU32::new(0);
 static WHOLE_DONE: AtomicBool = AtomicBool::new(false);
 
 fn this_cpu() -> u32 {
-    per_cpu_init::try_current().map_or(0, |c| c.cpu_id)
+    thread_init::current_cpu()
 }
 
 fn serial_noise() {

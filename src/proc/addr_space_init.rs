@@ -324,8 +324,15 @@ impl fmt::Debug for RootHolder {
 /// or any TCB's saved root. Returns with no lock held, so the caller's
 /// assertion never fires under PT or SCHED.
 fn root_holder(root: u64) -> Option<RootHolder> {
-    let here = per_cpu_init::try_current().map_or(0, |c| c.cpu_id);
-    if x86::read_cr3() & PTE_ADDR_MASK == root {
+    // One IF=0 stretch: the id and CR3 name one CPU.
+    let (here, cr3) = {
+        let _irq = x86::InterruptGuard::enter();
+        (
+            per_cpu_init::try_current().map_or(0, |c| c.cpu_id),
+            x86::read_cr3(),
+        )
+    };
+    if cr3 & PTE_ADDR_MASK == root {
         return Some(RootHolder::Cr3 { cpu: here });
     }
     let mut id = 0u32;
