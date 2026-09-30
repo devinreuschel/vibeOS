@@ -130,7 +130,8 @@ pub struct Cache<const N: usize> {
     data: [[u8; PAGE]; N],
     hand: usize,
     last: CacheKey,
-    seq: u32,
+    /// Sequential page reads in a row, for readahead.
+    run: u32,
     pub stats: CacheStats,
 }
 
@@ -144,7 +145,7 @@ impl<const N: usize> Cache<N> {
                 dev: u64::MAX,
                 offset: u64::MAX,
             },
-            seq: 0,
+            run: 0,
             stats: CacheStats {
                 hits: 0,
                 misses: 0,
@@ -275,11 +276,11 @@ impl<const N: usize> Cache<N> {
             self.last.dev == key.dev && self.last.offset.saturating_add(PAGE as u64) == key.offset;
         self.last = key;
         if seq {
-            self.seq = self.seq.saturating_add(1);
+            self.run = self.run.saturating_add(1);
         } else {
-            self.seq = 0;
+            self.run = 0;
         }
-        seq && self.seq >= 1
+        seq && self.run >= 1
     }
 
     pub fn copy_page(&self, slot: usize, dst: &mut [u8]) -> Result<(), BlockError> {
@@ -429,7 +430,7 @@ impl<const N: usize> Cache<N> {
     }
 
     pub fn want_readahead(&self) -> Option<CacheKey> {
-        if self.seq == 0 || READAHEAD_PAGES == 0 {
+        if self.run == 0 || READAHEAD_PAGES == 0 {
             return None;
         }
         Some(self.last.next_page())

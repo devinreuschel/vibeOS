@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use vibeos::block::blockdev::Backing;
 use vibeos::block::{
-    BlockDevice, BlockError, Completion, DeviceState, DoneWord, MAX_QUEUE, Op, Queue, Ramdisk,
+    BlockDevice, BlockError, Completion, DRAIN_BATCH, DeviceState, DoneWord, Op, Queue, Ramdisk,
     Request,
 };
 use vibeos::kalloc::TryBox;
@@ -246,7 +246,7 @@ fn execute(req: &Request) -> Result<(), BlockError> {
 fn drain_failed(q_prep: fn(&mut Queue)) {
     let mut first = true;
     loop {
-        let mut dump = [None; MAX_QUEUE];
+        let mut dump = [None; DRAIN_BATCH];
         let n = {
             let mut q = Q.lock();
             if first {
@@ -276,7 +276,7 @@ fn fail_rest() {
 /// Retire `req`'s dispatch in `Q`, then wake its waiters after the lock
 /// drops, unless the queue defers the report to an emulated-`Fua` `Flush`.
 fn finish(mut req: Request, res: Result<(), BlockError>) {
-    let seq = u64::from(req.seq);
+    let seq = req.seq;
     let mut q = Q.lock();
     match res {
         Ok(()) => {

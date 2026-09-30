@@ -309,7 +309,7 @@ impl VirtioBlk {
                             break;
                         }
                     };
-                    let seq = u64::from(req.seq);
+                    let seq = req.seq;
                     match self.issue(blk, req) {
                         Issued::Device { qi, kick } => {
                             self.io_reqs.fetch_add(1, Ordering::Relaxed);
@@ -371,7 +371,7 @@ impl VirtioBlk {
         self.state
             .store(DeviceState::Failed.as_u8(), Ordering::Release);
         loop {
-            let mut dump = [None; MAX_QUEUE];
+            let mut dump = [None; DRAIN_BATCH];
             let n = {
                 let mut g = self.st.lock();
                 let Some(blk) = g.as_deref_mut() else {
@@ -396,7 +396,7 @@ impl VirtioBlk {
     /// Retire `req`'s dispatch under the queue lock, drop it, then wake. A retry goes
     /// back on the queue for [`harvest`](Self::harvest)'s closing [`pump`](Self::pump).
     pub(super) fn finish(&self, mut req: Request, res: Result<(), BlockError>) {
-        let seq = u64::from(req.seq);
+        let seq = req.seq;
         let mut g = self.st.lock();
         let Some(blk) = g.as_deref_mut() else {
             drop(g);

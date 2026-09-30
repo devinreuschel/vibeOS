@@ -64,9 +64,9 @@ Rule: the block layer does not order requests. Requests in flight complete in
 any order, on any queue. A caller that needs one write durable, or visible to a
 later read, before another starts waits for its completion before it submits the
 other. The block layer keeps two orders of its own: it never dispatches a write
-while an older write to an overlapping range is queued or in flight (ROADMAP
-§10.11), and a zoned device has at most one write in flight per sequential zone
-(ROADMAP §29.1).
+or discard while an older write or discard to an overlapping range is queued or
+in flight, and never merges one past it; and a zoned device has at most one
+write in flight per sequential zone (ROADMAP §29.1).
 
 `Flush` makes durable every write whose completion was reported before the
 `Flush` was submitted, as virtio 1.2 §5.2.6.2's FLUSH, NVMe's Flush, SCSI's
@@ -109,9 +109,6 @@ reason, and virtio keeps its barrier feature only in the legacy interface.
 Rejected: a device-wide `Barrier` that every later request waits behind; and a
 fence per queue, since one filesystem writes from every CPU's queue and would
 wait for completions anyway.
-
-Not yet: C-LOOK can reorder overlapping writes whatever their seq, and sequence
-numbers are `u32` (ROADMAP §10.11, F043).
 
 ## 10.3 Failure
 

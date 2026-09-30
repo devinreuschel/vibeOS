@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, 
 
 use vibeos::block::blockdev::Backing;
 use vibeos::block::{
-    BlockDevice, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Request,
+    BlockDevice, BlockError, Completion, DRAIN_BATCH, DeviceState, Op, Queue, Request,
 };
 use vibeos::dev::{ClaimError, DevRef, Device, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
