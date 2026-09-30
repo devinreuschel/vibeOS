@@ -746,13 +746,13 @@ pub fn init_control_regs() {
 
 /// The isa-debug-exit port the harness gives every test boot
 /// (`-device isa-debug-exit,iobase=0xf4`).
-#[cfg(any(feature = "kernel_tests", feature = "panic_exit"))]
+#[cfg(feature = "kernel_tests")]
 const ISA_DEBUG_EXIT: u16 = 0xF4;
 
 /// End the QEMU run with exit status `(code << 1) | 1` through
 /// isa-debug-exit, and halt if no such device took the write: the one
-/// isa-debug-exit writer, for the test and `panic_exit` builds.
-#[cfg(any(feature = "kernel_tests", feature = "panic_exit"))]
+/// isa-debug-exit writer, for the test build's verdict.
+#[cfg(feature = "kernel_tests")]
 pub fn qemu_exit(code: u32) -> ! {
     // SAFETY: invariant: port 0xF4 is the harness's isa-debug-exit device,
     // whose write ends the VM, and no device on a machine without it

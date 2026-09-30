@@ -674,6 +674,22 @@ pub(crate) fn test_backtrace_syscall_boundary() -> Outcome {
     }
 }
 
+/// L1410: the boot probe found QEMU's pvpanic through fw_cfg's
+/// `etc/pvpanic-port` and read a mask with the panicked event (bit 0),
+/// which every harness boot's `-device pvpanic` supports.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn test_pvpanic_found() -> Outcome {
+    use vibeos::log::pvpanic::PANICKED;
+    match crate::log::pvpanic_init::found() {
+        None => Outcome::Fail("no pvpanic device found at boot"),
+        Some((0, _)) => Outcome::Fail("pvpanic port 0"),
+        Some((port, mask)) if mask & PANICKED == 0 => {
+            crate::fail_fmt!("pvpanic port {port:#x} events {mask:#x}: no panicked event")
+        }
+        Some(_) => Outcome::Ok,
+    }
+}
+
 pub(crate) const TESTS: &[Test] = &[
     test("log_boot_level", test_log_boot_level),
     test("log_boot_captured", test_log_boot_captured).once(),
@@ -690,4 +706,6 @@ pub(crate) const TESTS: &[Test] = &[
         "backtrace_syscall_boundary",
         test_backtrace_syscall_boundary,
     ),
+    #[cfg(target_arch = "x86_64")]
+    test("pvpanic_found", test_pvpanic_found),
 ];
