@@ -13,9 +13,8 @@ use vibeos::time::{
     Bracketed, CalibSource, Candidates, ClockWriter, ClocksourceId, Counter, FS_PER_MS,
     HPET_CALIB_READS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CALIB_WINDOWS,
     PIT_CH0_WRITES, PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE, PM_TIMER_HZ, PitWindow,
-    Snapshot, TickClock, WallOrigin, bcd_to_bin, hpet_counter_width, hpet_hz, hpet_period_ok,
-    monotonic_max, rank, tsc_per_ms_from_hpet_brackets, tsc_per_ms_from_pit_windows,
-    unix_from_civil, wall_unix_s,
+    Snapshot, TickClock, WallOrigin, bcd_to_bin, hpet_hz, hpet_period_ok, monotonic_max, rank,
+    tsc_per_ms_from_hpet_brackets, tsc_per_ms_from_pit_windows, unix_from_civil, wall_unix_s,
 };
 
 use crate::acpi_init;
@@ -27,7 +26,6 @@ use crate::paging_init;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
 
-const HPET_GCAP_ID: u64 = 0x00;
 const HPET_GEN_CFG: u64 = 0x10;
 const HPET_MAIN: u64 = 0xF0;
 const HPET_ENABLE: u64 = 1;
@@ -176,15 +174,24 @@ pub(crate) fn hpet_ready() -> Option<(u64, u32)> {
     Some((va, hpet.period_fs))
 }
 
-/// The HPET main counter.
+/// The HPET main counter's low 32 bits, in one 4-byte read. An 8-byte
+/// read can tear: QEMU serves it as two 4-byte halves, and one that
+/// straddles the low word's wrap (every 42.9 s at 100 MHz) pairs the new
+/// high word with the old low word, 2^32 ticks in the future, which
+/// `LAST_NS` then held for 42.9 s. Every user treats the counter as 32 bits
+/// wide and masks its deltas, as Linux's HPET clocksource does.
 ///
 /// # Safety
 /// `va` is the address [`hpet_ready`] returned.
 pub(crate) unsafe fn hpet_read_main(va: u64) -> u64 {
     // SAFETY: this fn's `# Safety` (here): `hpet_ready` returns only a UC
-    // HPET block (invariant I228).
-    unsafe { hpet_read(va, HPET_MAIN) }
+    // HPET block (invariant I228), and the main counter's low half is the
+    // 4-byte register at `HPET_MAIN`.
+    u64::from(unsafe { ((va.wrapping_add(HPET_MAIN)) as *const u32).read_volatile() })
 }
+
+/// The width the kernel reads the HPET main counter at ([`hpet_read_main`]).
+pub(crate) const HPET_READ_WIDTH: u32 = 32;
 
 /// The ACPI PM timer's `TMR_VAL`.
 #[cfg(target_arch = "x86_64")]
@@ -210,18 +217,13 @@ fn read_raw(st: &TimeState, id: ClocksourceId) -> u64 {
     }
 }
 
-/// The HPET main counter as a clocksource: a sane period, the width
-/// `GCAP_ID` reports, and a counter that moves within 100,000 spins.
+/// The HPET main counter as a clocksource: a sane period, 32 bits wide
+/// whatever `GCAP_ID` reports ([`hpet_read_main`]), and a counter that
+/// moves within 100,000 spins. CPU 0's tick reads it every millisecond,
+/// far inside its 21.5 s half wrap at 100 MHz.
 fn hpet_counter() -> Option<(Counter, u64)> {
     let (va, period_fs) = hpet_ready()?;
-    // SAFETY: invariant I228, established at `acpi::acpi_init::init`:
-    // `hpet_ready` returned a UC HPET block, and GCAP_ID is register 0.
-    let gcap = unsafe { hpet_read(va, HPET_GCAP_ID) };
-    let c = Counter::new(
-        ClocksourceId::Hpet,
-        hpet_hz(period_fs)?,
-        hpet_counter_width(gcap),
-    )?;
+    let c = Counter::new(ClocksourceId::Hpet, hpet_hz(period_fs)?, HPET_READ_WIDTH)?;
     let main = || {
         // SAFETY: invariant I228, established at `acpi::acpi_init::init`:
         // `va` is the UC block `hpet_ready` returned.
@@ -261,7 +263,7 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     let main = || {
         // SAFETY: invariant I228, established at `acpi::acpi_init::init`,
         // as stated above `main`.
-        unsafe { hpet_read(va, HPET_MAIN) }
+        unsafe { hpet_read_main(va) }
     };
     let want = (PIT_CALIB_MS as u128 * FS_PER_MS) / hpet.period_fs as u128;
     let want = u64::try_from(want).ok()?;
@@ -308,7 +310,7 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     let mut spins = 0u64;
     loop {
         let now = main();
-        if now.wrapping_sub(start.counter) >= want {
+        if now.wrapping_sub(start.counter) & u64::from(u32::MAX) >= want {
             break;
         }
         spins += 1;

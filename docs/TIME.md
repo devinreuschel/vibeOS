@@ -186,8 +186,11 @@ publishes a provisional choice, since the AP warp tests run later, inside `smp_i
 `time_init::confirm_clocksource`, which `kmain` calls right after it, ranks again, switches on CPU 0
 through `ClockWriter::switch` (no step in `now_ns`) if the answer changed, and prints
 `vibeOS: time: clocksource <tsc|hpet|acpi_pm>`, Linux's names. A boot with no candidate halts with
-`vibeOS: time: no clocksource`; there is no tick-count fallback. The HPET is 64 bits wide when
-`GCAP_ID` bit 13 is set, else 32 (42.9 s at 100 MHz); the PM timer is 24 bits, or 32 with the FADT's
+`vibeOS: time: no clocksource`; there is no tick-count fallback. The kernel reads the HPET
+main counter's low 32 bits in one 4-byte access and treats it as 32 bits wide whatever `GCAP_ID` bit 13
+says, as Linux does: QEMU serves an 8-byte read as two halves, and one that straddled the low word's
+wrap (every 42.9 s at 100 MHz) read 2^32 ticks ahead, which `LAST_NS` then held for 42.9 s, stalling
+every timed wait; the PM timer is 24 bits, or 32 with the FADT's
 `TMR_VAL_EXT`, and QEMU's `pc` FADT is revision 1, with no `X_` fields, so its timer is found at
 `PM_TMR_BLK`.
 

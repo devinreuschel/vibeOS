@@ -143,7 +143,8 @@ impl Bracketed {
     }
 }
 
-/// `tsc_per_ms` from HPET reads `a` and `b` of `period_fs`, each placed on
+/// `tsc_per_ms` from HPET reads `a` and `b` of `period_fs`, 32 bits wide as
+/// the kernel reads the counter (`time_init::hpet_read_main`), each placed on
 /// the TSC by its bracket's middle, so a TSC read and its HPET read no
 /// longer need to be adjacent: a vCPU stall between them widens a bracket
 /// the narrowest pick drops, instead of moving the rate. None when the
@@ -153,7 +154,8 @@ pub fn tsc_per_ms_from_hpet_brackets(a: Bracketed, b: Bracketed, period_fs: u32)
         return None;
     }
     let tsc = b.tsc_mid().checked_sub(a.tsc_mid())?;
-    tsc_per_ms_from_hpet(tsc, b.counter.wrapping_sub(a.counter), period_fs)
+    let ticks = b.counter.wrapping_sub(a.counter) & u64::from(u32::MAX);
+    tsc_per_ms_from_hpet(tsc, ticks, period_fs)
 }
 
 /// PIT channel 2 windows a calibration measures (`time_init::calibrate_pit`).
@@ -826,6 +828,13 @@ mod tests {
         assert_eq!(stalled.narrower(a), a);
         assert_eq!(a.narrower(stalled), a);
         assert_eq!(a.tsc_mid(), 3_500);
+        // The window straddles the 32-bit counter's wrap: still 10 ms.
+        let wa = br(1_000, 0xFFFF_0000, 6_000);
+        let wb = br(25_001_000, 1_000_000 - 0x1_0000, 25_006_000);
+        assert_eq!(
+            tsc_per_ms_from_hpet_brackets(wa, wb, 10_000_000),
+            Some(2_500_000)
+        );
         // A reversed bracket is no read.
         let rev = br(10, 5, 5);
         assert_eq!(rev.width(), u64::MAX);
