@@ -178,3 +178,8 @@ smp = 1
 name = "preempt_gpr_canaries"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "preempt_two_threads"
+reason = "no AP"
+smp = 1
