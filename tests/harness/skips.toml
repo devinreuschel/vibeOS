@@ -223,3 +223,8 @@ smp = 1
 name = "tlb_shootdown_remote"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "trace_tracepoints_fire"
+reason = "needs a second cpu"
+smp = 1
