@@ -1,0 +1,4 @@
+{"argv": ["qemu-system-x86_64", "-machine", "pc", "-accel", "tcg", "-bios", "<64 KiB of hlt>", "-m", "32M", "-display", "none", "-nodefaults", "-device", "pvpanic", "-action", "panic=pause", "-S", "-qmp", "unix:<sock>,server=on,wait=off", "-qtest", "unix:<sock>,server=on,wait=off", "-no-reboot"], "query-version": {"package": "Debian 1:8.2.2+ds-0ubuntu1.18", "qemu": {"major": 8, "micro": 2, "minor": 2}}, "script": ["qmp cont", "qtest outb 0x505 0x2", "qtest outb 0xcf9 0x6"]}
+{"event": "RESUME"}
+{"data": {"action": "run"}, "event": "GUEST_CRASHLOADED"}
+{"data": {"guest": true, "reason": "guest-reset"}, "event": "SHUTDOWN"}

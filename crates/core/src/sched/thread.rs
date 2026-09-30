@@ -101,8 +101,7 @@ impl WaitOutcome {
     }
 }
 
-/// Most pages one guarded kernel stack maps (the guard page not counted).
-pub const MAX_STACK_PAGES: usize = 32;
+pub use crate::limits::MAX_STACK_PAGES;
 
 /// A guarded kernel stack: `pages` mapped pages above one unmapped guard
 /// page at `guard` (default 4×4 KiB, DESIGN §4.5), and the order-0

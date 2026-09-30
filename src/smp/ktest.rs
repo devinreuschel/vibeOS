@@ -10,11 +10,11 @@ use crate::apic_init;
 use crate::arch;
 use crate::ipi_init;
 use crate::ktest::{
-    Outcome, Test, cpu_remote, quiescent_free_frames, registry_tid, sleep_until, spin_until_ns,
-    test,
+    FrameCount, Outcome, Test, cpu_remote, quiescent_free_frames, registry_tid, sleep_until,
+    spin_until_ns, test,
 };
 use crate::per_cpu_init;
-use crate::sched::ktest::{RequeueGuard, set_requeue_next_cpu};
+use crate::sched::ktest::{RequeueGuard, fill_threads, set_requeue_next_cpu};
 use crate::sched_init;
 use crate::smp_init;
 use crate::thread_init;
@@ -241,9 +241,13 @@ pub(crate) fn test_failed_ap_cleanup() -> Outcome {
     // First-fit KVA may map a fresh PT page on the first IST/stack wave.
     // unmap_4k does not return that PT. Warm up, then the measured wave
     // must restore the frame count (ROADMAP failed-AP exit gate).
-    exercise_fail_cleanup();
+    if !exercise_fail_cleanup() {
+        return Outcome::Fail("warm-up bring-up allocation failed");
+    }
     let n0 = quiescent_free_frames();
-    exercise_fail_cleanup();
+    if !exercise_fail_cleanup() {
+        return Outcome::Fail("bring-up allocation failed");
+    }
     let n1 = quiescent_free_frames();
     if n0 != n1 {
         crate::marker!("vibeOS: ktest:   frames {n0} -> {n1}");
@@ -251,6 +255,55 @@ pub(crate) fn test_failed_ap_cleanup() -> Outcome {
     } else {
         Outcome::Ok
     }
+}
+
+/// AP bring-up on a full thread table (ROADMAP §10.4, F037): with no slot
+/// for the idle thread, and then with one slot, which the idle thread takes
+/// while its worker finds none, the allocation fails, frees what it took
+/// (the idle thread's slot included, free again), and nothing panics.
+pub(crate) fn ap_bringup_full_thread_table() -> Outcome {
+    // Warm up as `failed_ap_cleanup` does, and fill the table once, so the
+    // baseline holds every TCB box and heap page a full table takes (a Dead
+    // slot keeps its box for reuse).
+    if !exercise_fail_cleanup() {
+        return Outcome::Fail("warm-up bring-up allocation failed");
+    }
+    if !fill_threads(0).release() {
+        return Outcome::Fail("warm-up fillers did not exit");
+    }
+    let frames0 = FrameCount::quiescent();
+    let fill = fill_threads(0);
+    if fill.last != Some(thread_init::SpawnError::NoSlot) {
+        let spawned = fill.spawned;
+        if !fill.release() {
+            return Outcome::Fail("fillers did not exit");
+        }
+        return crate::fail_fmt!("fill stopped without NoSlot after {spawned} threads");
+    }
+    let ok = !exercise_fail_cleanup();
+    if !fill.release() {
+        return Outcome::Fail("fillers did not exit");
+    }
+    if !ok {
+        return Outcome::Fail("bring-up allocated on a full table");
+    }
+    let fill = fill_threads(1);
+    let (used0, cap) = thread_init::table_usage();
+    let ok = !exercise_fail_cleanup();
+    let (used1, _) = thread_init::table_usage();
+    if !fill.release() {
+        return Outcome::Fail("fillers did not exit");
+    }
+    if used0 + 1 != cap {
+        return crate::fail_fmt!("fill_threads(1) left {used0} of {cap} used");
+    }
+    if !ok {
+        return Outcome::Fail("bring-up allocated with one free slot");
+    }
+    if used1 != used0 {
+        return crate::fail_fmt!("failed bring-up left {used1} used, was {used0}");
+    }
+    frames0.unchanged(&FrameCount::quiescent())
 }
 
 /// How long [`percpu_remote_view`] waits for this CPU's `ticks` to move.
@@ -570,9 +623,15 @@ pub(crate) fn percpu_ticks_advance() -> Outcome {
 
 /// Allocate the same resources as bring-up, then take the timeout free
 /// path. Frame count must return to baseline (injectable fault).
-pub fn exercise_fail_cleanup() {
-    if let Some(a) = smp_init::alloc_ap_resources(0xFE, 0xFE, false) {
-        smp_init::free_ap_resources(a, false);
+/// Allocate and free a bring-up's resources for CPU `0xFE`, which never
+/// starts. True when the allocation succeeded.
+pub fn exercise_fail_cleanup() -> bool {
+    match smp_init::alloc_ap_resources(0xFE, 0xFE, false) {
+        Ok(a) => {
+            smp_init::free_ap_resources(a, false);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -593,6 +652,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("per_cpu_identity", test_per_cpu_identity),
     test("trampoline_page", test_trampoline_page),
     test("failed_ap_cleanup", test_failed_ap_cleanup),
+    test("ap_bringup_full_thread_table", ap_bringup_full_thread_table).deadline(60_000),
     test("percpu_remote_view", percpu_remote_view),
     test("percpu_ticks_advance", percpu_ticks_advance),
     test("current_at_if1", current_at_if1),

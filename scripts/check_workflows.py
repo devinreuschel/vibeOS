@@ -13,6 +13,7 @@ Output: `path:line: [rule] message` per problem, or `check_workflows: ok`.
 
 from __future__ import annotations
 
+import fnmatch
 import re
 import sys
 import tomllib
@@ -1320,6 +1321,79 @@ def rule_release_one_image(tree: Tree) -> list[Problem]:
         out.append(Problem(RELEASE, 1, "release_one_image", msg))
     return out
 
+SECRET_EXPR_RE = re.compile(r"\$\{\{[^}]*\bsecrets\s*[.\[]")
+# An upload path that holds a guest core, a memory dump or a QEMU command line.
+CORE_PATH_RE = re.compile(
+    r"(^|/)cores?(/|$)|\.core(\.zst)?$|vmcore|(^|/)[^/]*dump[^/]*(/|$)|qemu[-_]argv"
+)
+CORES_DIR = "build/cores"
+
+
+def names_secret(wf: Node) -> bool:
+    """An `environment:` key, `secrets.`/`secrets[` in an expression, or
+    `secrets: inherit` anywhere in the workflow."""
+    for n in wf.walk():
+        if n.key == "environment":
+            return True
+        if n.key == "secrets" and n.value == "inherit":
+            return True
+        if n.value is not None and SECRET_EXPR_RE.search(n.value):
+            return True
+    return False
+
+
+def _covers_cores(path: str) -> bool:
+    """`path` is `build/cores`, a directory above it, or a glob matching either."""
+    p = path.strip()
+    while p.startswith("./"):
+        p = p[2:]
+    p = p.rstrip("/") or "."
+    if p in (".", CORES_DIR) or CORES_DIR.startswith(p + "/"):
+        return True
+    return any(fnmatch.fnmatchcase(d, p) for d in (CORES_DIR, "build"))
+
+
+def _core_paths(path: str, p: Node) -> list[Problem]:
+    """A `path:` input's entries that may hold a core, a dump or a QEMU argv."""
+    entries = (p.value or "").split("\n") if p.kind == "scalar" else p.scalars()
+    out = []
+    for entry in entries:
+        e = entry.strip()
+        if not e or e.startswith("!"):
+            continue
+        if CORE_PATH_RE.search(e) or _covers_cores(e):
+            out.append(
+                Problem(
+                    path,
+                    p.line,
+                    "no_core_upload_with_secrets",
+                    f"uploads {e!r}, which may hold a guest core, a memory dump or a QEMU "
+                    "command line, in a workflow that names a secret or an environment",
+                )
+            )
+    return out
+
+
+def rule_no_core_upload_with_secrets(tree: Tree) -> list[Problem]:
+    """L1410: a workflow that names an environment or a secret uploads no guest
+    core, memory dump or QEMU command line (the core artifact is public, DESIGN §1.5)."""
+    out = []
+    for path, wf in tree.workflows.items():
+        if not names_secret(wf):
+            continue
+        for job in _jobs(wf):
+            steps = job.get("steps")
+            for st in steps.items if steps is not None else []:
+                uses = st.get("uses")
+                if uses is None or not (uses.value or "").startswith("actions/upload-artifact@"):
+                    continue
+                with_ = st.get("with")
+                p = with_.get("path") if with_ is not None else None
+                if p is not None:
+                    out += _core_paths(path, p)
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
     rule_permissions,
@@ -1342,6 +1416,7 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_release_no_workflow_write,
     rule_release_privileged_jobs,
     rule_release_one_image,
+    rule_no_core_upload_with_secrets,
 ]
 
 

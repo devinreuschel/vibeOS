@@ -31,6 +31,8 @@ use crate::thread_init;
 
 static CACHE: SpinMutex<Cache<DEFAULT_PAGES>> = SpinMutex::with_rank(Cache::new(), RANK_DEVICE);
 static LIVE: AtomicBool = AtomicBool::new(false);
+/// Whether `init` started `blk-wb`, the writeback thread.
+static WRITEBACK: AtomicBool = AtomicBool::new(false);
 
 /// One wait queue per cache slot, for threads waiting out its writeback.
 struct SlotWaits([UnsafeCell<WaitQueue>; DEFAULT_PAGES]);
@@ -467,7 +469,7 @@ pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {
     let s = stats();
     writeln!(
         f,
-        "vibeOS: cache: hits {} misses {} dirty {} device {} evicts {}",
+        "vibeOS: cache: hits {} misses {} dirty {} device {} evicts {}{}",
         s.hits,
         s.misses,
         {
@@ -475,18 +477,27 @@ pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {
             c.dirty_count()
         },
         s.device_reqs(),
-        s.evicts
+        s.evicts,
+        if WRITEBACK.load(Ordering::Acquire) {
+            ""
+        } else {
+            " writeback none"
+        }
     )
 }
 
 pub fn init() {
     LIVE.store(true, Ordering::Release);
-    if let Err(e) = thread_init::spawn("blk-wb", writeback_main) {
-        crate::klog!(
+    match thread_init::spawn("blk-wb", writeback_main) {
+        Ok(_) => WRITEBACK.store(true, Ordering::Release),
+        // The cache runs without it: flushes and evictions still write
+        // dirty pages, and the shell line says there is no writer thread
+        // (MEMORY.md §4.4).
+        Err(e) => crate::klog!(
             vibeos::log::Level::Error,
             "cache: blk-wb spawn failed: {}",
             e.as_str()
-        );
+        ),
     }
 }
 

@@ -367,6 +367,20 @@ every HEAP hold is bounded however fragmented the heap is
 ([§2.9](INVARIANTS.md#29-preemption-and-interrupt-state) rule 2). Today `alloc` walks the address-ordered free
 list first-fit, `dealloc` walks it to insert, and `realloc` copies under the lock.
 
+The kernel's growable tables are heap tables whose lengths come from `vibeos::limits`, each built
+once at its full length by `limits::table` and never grown, so a cap is a constant and never an
+array type (ROADMAP §10.4, D1): 1024 threads, 256 processes with 256 descriptors each, 1024 open
+files, 1024 inodes, 1024 dentries, 16 mounts, and 256 regions per address space. The global tables
+are allocated before `irq: enabled`, where a failure halts the boot with `vibeOS: limits: no memory
+for the <name> tables`: the thread tables (`thread_init::init_tables`, before the bootstrap thread
+takes slot 0) and each CPU's run queue (`per_cpu_init::init_bsp`), then the process table with each
+slot's descriptor row (`proc_init::init_tables`), then the VFS's tables and inode words
+(`fs_init::init_tables`). Nothing frees them, and a slot is reset in place, so no table is
+allocated or freed under the scheduler or process-table lock. An address space's region table is
+allocated with the space, before the page-table lock its construction holds, and a failure takes
+the constructor's out-of-memory path, which gives `ENOMEM`. A full table is an error, not a panic:
+a spawn returns `SpawnError::NoSlot`, `fork` `EAGAIN`, `open` `EMFILE`, and `mmap` `ENOMEM`.
+
 Planned (ROADMAP §12.6): the heap region is sized at boot from installed memory, so a heap allocation
 fails only when frames run out. The two limits must be one because the failure policy below treats
 every failure as a shortage of memory. A fixed region smaller than RAM would fail allocations while
@@ -622,7 +636,11 @@ its allocations fails, it records the error where a later call reports it, retri
 bound, or drops that work with a counter and a log line at most once a second, as
 [§2.5](INVARIANTS.md#25-panic-policy)'s rule that nothing is silently swallowed requires. A driver probe that
 fails leaves its device unbound and logs why. A CPU whose idle thread or workers cannot be allocated
-stays offline (ROADMAP §10.4, F037).
+stays offline: AP bring-up spawns them before it starts the CPU, frees what it took on a failure,
+and logs the `SpawnError` (ROADMAP §10.4, F037). A kernel thread that does not start degrades
+the service it runs: without `irqth` threaded interrupts stay unstarted, and without `blk-wb` the
+cache writes dirty pages only on a flush or an eviction and its shell line says `writeback none`;
+each logs one error.
 
 A slab allocator for hot object types (TCBs, file descriptors, inodes, network buffers) lands in
 ROADMAP §19.9; general allocation stays on the heap, which ROADMAP §12.6 makes a constant-time TLSF

@@ -33,6 +33,8 @@ need xorriso
 need nasm
 need python3
 need cargo
+# The harness compresses guest cores with zstd (ROADMAP §10.7).
+need zstd
 
 pyver=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
