@@ -133,3 +133,8 @@ smp = 1
 name = "fp_migrate_counter"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "intx_fallback"
+reason = "no AP"
+smp = 1
