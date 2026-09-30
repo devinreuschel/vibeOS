@@ -389,6 +389,7 @@ def strace_main() -> int:
 # variant, and the check its dump must pass.
 PANIC_VARIANTS = {
     "nest": ("panic-nest", panic_dump.check_nest),
+    "stop": ("panic-stop", panic_dump.check_stop),
 }
 
 

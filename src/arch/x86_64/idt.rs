@@ -748,7 +748,24 @@ fn invalid_opcode(frame: &mut TrapFrame) {
     crate::panic::exception_halt(b"#UD", &frame.iret, None, None);
 }
 
+/// The interrupted registers a frame saved, for the stop primitive's
+/// crash-register slot (DESIGN §2.5 step 1).
+fn crash_regs(frame: &TrapFrame) -> vibeos::irq::stop::CrashRegs {
+    vibeos::irq::stop::CrashRegs {
+        rip: frame.iret.rip,
+        rsp: frame.iret.rsp,
+        rbp: frame.rbp,
+        rflags: frame.iret.rflags,
+    }
+}
+
 fn nmi(frame: &mut TrapFrame) {
+    // The stop primitive decides first, before any write or lock: the
+    // dump's owner may be inside `write_owner` (DESIGN §2.5 step 1). It
+    // halts or stops this CPU, or returns `Return` on the owner.
+    if crate::ipi_init::nmi_stop(crash_regs(frame)) == vibeos::irq::stop::NmiAction::Return {
+        return;
+    }
     // It runs inside whatever this CPU held: no lock (DESIGN §2.2).
     let _lockless = crate::sync_init::lockless_section();
     crate::panic::exception_halt(b"nmi", &frame.iret, None, None);
@@ -872,9 +889,9 @@ fn ipi_call(_frame: &mut TrapFrame) {
     crate::ipi_init::on_call_ipi();
 }
 
-fn ipi_halt(_frame: &mut TrapFrame) {
+fn ipi_halt(frame: &mut TrapFrame) {
     crate::apic_init::eoi();
-    crate::ipi_init::on_halt_ipi();
+    crate::ipi_init::on_stop_ipi(crash_regs(frame));
 }
 
 pub fn pointer() -> (u16, u64) {

@@ -1,7 +1,7 @@
 //! Panic and exception dump. ROADMAP §5.6, DESIGN §2.5.
 //!
 //! Binding order:
-//! 1. `cli`, claim the dump, stop the other CPUs (halt IPI 0xFE)
+//! 1. `cli`, claim the dump, stop the other CPUs (`ipi_init::stop_others`)
 //! 2. Re-init serial from scratch
 //! 3. Print location/message; regs, current thread, last N log records
 //! 4. Symbolized backtrace when frame pointers exist
@@ -18,6 +18,7 @@ use core::panic::PanicInfo;
 
 use vibeos::desc::InterruptFrame;
 use vibeos::fmt_util::{self, StackBuf};
+use vibeos::irq::stop::{CrashRegs, StopHow};
 use vibeos::log::DUMP_LAST;
 use vibeos::log::line::LINE_CAP;
 use vibeos::marker;
@@ -76,27 +77,55 @@ fn stackish(p: u64) -> bool {
     false
 }
 
-/// Claim the dump, then halt the others, then re-init serial. The owner
-/// re-entering writes a one-liner and halts (or isa-debug-exit) without
-/// walking the ring again; any other CPU that finds the dump claimed
-/// halts without writing.
-fn begin_dump() {
+/// Claim the dump, then stop the others, then re-init serial (DESIGN §2.5
+/// step 1). The owner re-entering writes a one-liner and halts (or
+/// isa-debug-exit) without walking the ring again; any other CPU that
+/// finds the dump claimed runs the stop routine with `regs` (`panic`) and
+/// writes nothing.
+fn begin_dump(regs: CrashRegs) {
     x86::cli();
     if !raw::claim_dump() {
         if raw::is_owner() {
             raw::write_owner(b"vibeOS: panic: reentered");
             finish();
         }
-        x86::halt();
+        crate::ipi_init::stop_this_cpu(StopHow::Panic, regs);
     }
-    crate::ipi_init::halt_others();
-    // SAFETY: DESIGN §2.5 step 1, established at `ipi_init::halt_others`:
-    // the other CPUs are sent the stop IPI before the log cell is taken
-    // from its holder. `halt_others` does not wait, and a CPU spinning
-    // with IF=0 can miss the IPI until ROADMAP §10.7's stop primitive
-    // (F135), so this is the dump's accepted risk, not a proof.
+    crate::ipi_init::stop_others();
+    // SAFETY: DESIGN §2.5 step 1, established at `ipi_init::stop_others`:
+    // every other online CPU has acknowledged its stop and halted with
+    // IF=0, or is reported `not stopped` after the NMI, before the log
+    // cell is taken from its holder. A CPU left `not stopped` loops
+    // without polling, which DESIGN §2.9 rule 2 makes a bug; that CPU is
+    // the dump's accepted risk.
     unsafe { crate::log_init::force_unlock() };
     raw::init();
+}
+
+/// Each other online CPU, in id order: `vibeOS: panic: cpu N stopped
+/// (<how>)` and its `cpu N regs:` slot, or `vibeOS: panic: cpu N not
+/// stopped` (DESIGN §2.5 step 1).
+fn report_cpus() {
+    let owner = raw::owner_cpu();
+    let online = per_cpu_init::online_mask();
+    for c in 0..64u32 {
+        if online & (1u64 << c) == 0 || Some(c) == owner {
+            continue;
+        }
+        match crate::ipi_init::cpu_stop_state(c) {
+            Some((Some(how), r)) => {
+                out(format_args!(
+                    "vibeOS: panic: cpu {c} stopped ({})",
+                    how.as_str()
+                ));
+                out(format_args!(
+                    "vibeOS: panic: cpu {c} regs: rip=0x{:016x} rsp=0x{:016x} rbp=0x{:016x} rflags=0x{:016x}",
+                    r.rip, r.rsp, r.rbp, r.rflags
+                ));
+            }
+            _ => out(format_args!("vibeOS: panic: cpu {c} not stopped")),
+        }
+    }
 }
 
 /// One dump line, which `f` builds in a `LINE_CAP` stack buffer (cut with
@@ -245,13 +274,13 @@ fn finish() -> ! {
 fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
     dump_regs(rbp, rsp, rflags, rip);
     dump_thread();
-    // SAFETY: DESIGN §2.5 step 1, established at `ipi_init::halt_others`
-    // (called by `begin_dump` before every `dump_common`): the other CPUs
-    // were sent the stop IPI. `halt_others` does not wait, and a CPU
-    // spinning with IF=0 can miss the IPI until ROADMAP §10.7's stop
-    // primitive (F135).
+    // SAFETY: DESIGN §2.5 step 1, established at `ipi_init::stop_others`
+    // (called by `begin_dump` before every `dump_common`): every other
+    // CPU has stopped, or is reported `not stopped`, and `begin_dump`
+    // took the log cell from its holder.
     unsafe { crate::log_init::dump_tail(DUMP_LAST, out) };
     dump_backtrace(rip, rbp);
+    report_cpus();
 }
 
 #[panic_handler]
@@ -265,10 +294,17 @@ fn panic(info: &PanicInfo) -> ! {
     let rbp = x86::read_rbp();
     let rsp = x86::read_rsp();
     let rflags = x86::rflags();
-    begin_dump();
+    begin_dump(CrashRegs {
+        rip,
+        rsp,
+        rbp,
+        rflags,
+    });
 
     raw::write_owner(marker::PANIC_BANNER.as_bytes());
     write_where(info);
+    #[cfg(feature = "panic_stop_test")]
+    crate::log::panic_test::after_panic_message();
 
     dump_common(rip, rbp, rsp, rflags);
     finish();
@@ -321,7 +357,12 @@ pub fn exception_halt(
     err: Option<u64>,
     cr2: Option<u64>,
 ) -> ! {
-    begin_dump();
+    begin_dump(CrashRegs {
+        rip: frame.rip,
+        rsp: frame.rsp,
+        rbp: x86::read_rbp(),
+        rflags: frame.rflags,
+    });
     line(|w| {
         w.push_bytes(b"vibeOS: ");
         w.push_bytes(kind);
@@ -332,7 +373,12 @@ pub fn exception_halt(
 }
 
 pub fn exception_vec(n: u8, frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>) -> ! {
-    begin_dump();
+    begin_dump(CrashRegs {
+        rip: frame.rip,
+        rsp: frame.rsp,
+        rbp: x86::read_rbp(),
+        rflags: frame.rflags,
+    });
     line(|w| {
         w.push_bytes(b"vibeOS: exception: vector ");
         let mut b = [0u8; 4];

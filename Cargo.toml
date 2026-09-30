@@ -51,6 +51,11 @@ panic_exit = []
 # `InterruptGuard` (ROADMAP §10.7, F071).
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 panic_nest_test = []
+# After a full boot at -smp 5, panic on two CPUs while three others print,
+# wait on a lock, and spin, so the dump's stop primitive stops each
+# (ROADMAP §10.7, F135).
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+panic_stop_test = []
 # Write-loop kernel for QEMU-kill crash consistency (docs/VIBEFS.md §12).
 # Its own named ELF and ISO; never the production image.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.

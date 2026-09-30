@@ -160,6 +160,9 @@ fn push_record(level: Level, msg: &[u8]) -> bool {
 /// IRQ-off for the whole emit so `EMITTING` / try-write cannot race a
 /// preempting thread on this CPU.
 pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
+    // A non-owner CPU appending once `HALTING` is set stops here (DESIGN
+    // §2.5 step 1).
+    crate::serial::raw::stop_if_halting();
     if !allowed(level, runtime(), COMPILE_MAX) {
         return;
     }
@@ -225,8 +228,9 @@ pub fn init() {
 /// before a framebuffer exists. Caller holds IRQs off (`Serial::write_line`
 /// / `write_fmt`); `STAGE` is CPU-local and must not outlive that.
 pub fn capture_serial(bytes: &[u8]) {
+    crate::serial::raw::stop_if_halting();
     let _irq = InterruptGuard::enter();
-    if crate::serial::raw::HALTING.load(Ordering::Acquire) || is_emitting() {
+    if is_emitting() {
         return;
     }
     if !allowed(Level::Info, runtime(), COMPILE_MAX) {
