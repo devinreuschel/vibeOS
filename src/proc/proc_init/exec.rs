@@ -2,29 +2,45 @@ use super::*;
 use vibeos::elf::{self, ExecArgs};
 use vibeos::limits::RLIMIT_STACK_DEFAULT;
 
-fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, KError> {
-    let mut v = TryVec::new();
+/// Append the NULL-ended vector of C strings at user address `va` to
+/// `args`: `argv`'s strings, or `envp`'s when `env`. A NULL `va` is an
+/// empty vector. Each pointer is one 8-byte copy; each string comes in
+/// 256-byte chunks up to its NUL, which stop at page boundaries, so a
+/// string that ends before an unmapped page copies. A fault is `EFAULT`;
+/// a string or a block over Linux's limits is `E2BIG`, and a buffer that
+/// cannot grow `ENOMEM` (SYSCALL.md §3.1).
+#[inline(never)]
+fn copy_cvec(va: u64, args: &mut ExecArgs, env: bool) -> Result<(), KError> {
     if va == 0 {
-        return Ok(v);
+        return Ok(());
     }
     let mut i = 0u64;
-    while i < 16 {
-        let ptr_va = va.checked_add(i * 8).ok_or(KError::Fault)?;
+    loop {
+        let ptr_va = i
+            .checked_mul(8)
+            .and_then(|o| va.checked_add(o))
+            .ok_or(KError::Fault)?;
         let mut raw = [0u8; 8];
         uaccess_init::copy_from_user(&mut raw, ptr_va).map_err(KError::from)?;
         let p = u64::from_le_bytes(raw);
         if p == 0 {
-            return Ok(v);
+            return Ok(());
         }
-        let mut buf = [0u8; 256];
-        let n = copy_user_str(p, &mut buf)?;
-        let mut s = TryVec::try_with_capacity(n).map_err(|_| KError::NoMem)?;
-        s.try_extend_from_slice(&buf[..n])
-            .map_err(|_| KError::NoMem)?;
-        v.try_push(s).map_err(|_| KError::NoMem)?;
+        args.begin(env)?;
+        let mut chunk = [0u8; 256];
+        let mut off = 0u64;
+        loop {
+            let at = p.checked_add(off).ok_or(KError::Fault)?;
+            let n = uaccess_init::strncpy_from_user(&mut chunk, at).map_err(KError::from)?;
+            args.extend(chunk.get(..n).unwrap_or(&[]))?;
+            if n < chunk.len() {
+                break;
+            }
+            off += n as u64;
+        }
+        args.end()?;
         i += 1;
     }
-    Err(KError::TooBig)
 }
 
 // Out of line: `dispatch_frame` keeps only the running syscall's frame,
@@ -130,18 +146,12 @@ pub(super) fn sys_execve(
     // The path's and the arguments' bytes go through as they are: only
     // NUL ends one, as on Linux.
     let path_b = &pbuf[..n];
-    let argv_v = copy_cvec(argv)?;
-    // Copied, so its pointers are checked and its limits hold, and dropped:
-    // the new stack gets an empty environment until ROADMAP §10.5's envp box.
-    copy_cvec(envp)?;
+    // Every argument is copied before the load starts, so a refused one
+    // returns to the old image (DESIGN §4.4).
     let mut args = ExecArgs::new(elf::arg_space_limit(RLIMIT_STACK_DEFAULT));
-    if argv_v.is_empty() {
-        args.push_arg(path_b).map_err(KError::from)?;
-    }
-    for a in argv_v.iter() {
-        args.push_arg(a).map_err(KError::from)?;
-    }
-    args.finish_argv().map_err(KError::from)?;
+    copy_cvec(argv, &mut args, false)?;
+    args.finish_argv()?;
+    copy_cvec(envp, &mut args, true)?;
     let loaded = match user_init::load_path(path_b, &args) {
         Ok(l) => l,
         Err(e) => return Err(KError::from(e)),
