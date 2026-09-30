@@ -2,15 +2,17 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::time::{
-    CALIB_BAND_INVARIANT, CalibSource, Instant, TICK_NS, calib_in_band, interpolate_ns,
-    next_deadline, unix_from_civil,
+    CALIB_BAND_INVARIANT, CalibSource, ClocksourceId, Counter, Instant, Snapshot, TICK_NS,
+    calib_in_band, next_deadline, ns_at, unix_from_civil,
 };
 
 use vibeos::apic::TimerMode;
 
 use crate::acpi_init;
 use crate::apic_init;
+use crate::arch::current::InterruptGuard;
 use crate::ktest::{Outcome, Test, test};
 use crate::per_cpu_init;
 use crate::thread_init;
@@ -86,35 +88,47 @@ pub(crate) fn test_pit_tick_rate() -> Outcome {
 // ---------------------------------------------------------------------------
 // The clock tests (ROADMAP §10.2, F100). Readers on every CPU read the
 // seqlock clock without `LAST_NS`'s clamp and match each read against the
-// tick records CPU 0 publishes here before each `TickClock::write`, a
-// channel the seqlock does not guard (DESIGN §6.4).
+// snapshots CPU 0 publishes here before each `TickClock::write`, a channel
+// the seqlock does not guard (DESIGN §6.4).
 
-/// Slots in the tick record ring. [`check`] reports [`Check::Stale`] after
+/// Slots in the snapshot ring. [`check`] reports [`Check::Stale`] after
 /// [`STALE_MS`], within which at most one tick per ms cannot wrap it.
 pub(crate) const PUB_RING: usize = 1024;
 /// A sample older than this is [`Check::Stale`], never a mismatch.
 const STALE_MS: u64 = 500;
-/// Generation of the newest tick record.
+/// The generation the next [`publish_tick`] takes.
+static PUB_NEXT: AtomicU64 = AtomicU64::new(0);
+/// Generation of the newest snapshot record.
 static PUB_GEN: AtomicU64 = AtomicU64::new(0);
-/// Each generation's tick TSC, in slot `gen % PUB_RING`.
-static PUB_TSC: [AtomicU64; PUB_RING] = [const { AtomicU64::new(0) }; PUB_RING];
-/// The planted tear: a stalled read takes its tick and its TSC stamp from
-/// two `TickClock::read` calls, as a skipped seqlock retry would.
+/// Each generation's snapshot, in slot `gen % PUB_RING`: its clocksource
+/// id, cycles and ns.
+static PUB_ID: [AtomicU64; PUB_RING] = [const { AtomicU64::new(0) }; PUB_RING];
+static PUB_CYCLES: [AtomicU64; PUB_RING] = [const { AtomicU64::new(0) }; PUB_RING];
+static PUB_NS: [AtomicU64; PUB_RING] = [const { AtomicU64::new(0) }; PUB_RING];
+/// The planted tear: a stalled read takes its base ns and its base cycles
+/// from two `TickClock::read` calls, as a skipped seqlock retry would.
 static TEAR: AtomicBool = AtomicBool::new(false);
 
-/// Record generation `generation`'s tick TSC. Called by `time_init::init`
-/// (generation 0) and by CPU 0's tick before its `TickClock::write`, the
-/// one writer.
-pub(crate) fn publish_tick(generation: u64, tsc: u64) {
-    if let Some(slot) = PUB_TSC.get((generation % PUB_RING as u64) as usize) {
+/// Record the next generation's snapshot. Called by `time_init::publish`
+/// before each `TickClock::write`, which only CPU 0 makes (the init write,
+/// each tick, and a clocksource switch), so generations never race.
+pub(crate) fn publish_tick(snap: Snapshot) {
+    // Relaxed: the one writer's own counter.
+    let generation = PUB_NEXT.fetch_add(1, Ordering::Relaxed);
+    let slot = (generation % PUB_RING as u64) as usize;
+    if let (Some(id), Some(cycles), Some(ns)) =
+        (PUB_ID.get(slot), PUB_CYCLES.get(slot), PUB_NS.get(slot))
+    {
         // Relaxed: published by the Release store to `PUB_GEN` below.
-        slot.store(tsc, Ordering::Relaxed);
+        id.store(snap.id as u64, Ordering::Relaxed);
+        cycles.store(snap.cycles, Ordering::Relaxed);
+        ns.store(snap.ns, Ordering::Relaxed);
     }
     // Release: pairs with the Acquire load in `published_gen`.
     PUB_GEN.store(generation, Ordering::Release);
 }
 
-/// The newest published tick generation.
+/// The newest published generation.
 pub(crate) fn published_gen() -> u64 {
     // Acquire: pairs with the Release store in `publish_tick`, so the slots
     // of every generation up to the one returned are visible.
@@ -132,8 +146,9 @@ pub(crate) fn set_tear(on: bool) {
 pub(crate) struct Sample {
     /// The reading, in ns since boot.
     pub ns: u64,
-    /// The TSC the reading interpolated from.
-    pub cycles: u64,
+    /// The clocksource read the reading converted, and its counter.
+    pub raw: u64,
+    pub id: ClocksourceId,
     /// [`published_gen`] before and after the read.
     pub gen_before: u64,
     pub gen_after: u64,
@@ -154,39 +169,47 @@ fn stall(from: u64, tsc_per_ms: u64) {
 
 /// Read the clock through `TickClock::now_ns_with`, never
 /// `time_init::now_ns`, so `LAST_NS` hides nothing. With `stall`, the
-/// first TSC sample waits inside the seqlock window for two ticks, so the
+/// clocksource read waits inside the seqlock window for two ticks, so the
 /// read retries; with the planted tear set, a stalled read pairs one
-/// generation's tick with a later one's TSC stamp instead.
+/// generation's base ns with a later one's base cycles instead.
 pub(crate) fn now_ns_unclamped(stall_read: bool) -> Option<Sample> {
     let clock = time_init::tick_clock()?;
     let k = time_init::tsc_per_ms();
     let tsc_start = time_init::read_tsc();
     let gen_before = published_gen();
-    let (ns, cycles, retried) = if stall_read && TEAR.load(Ordering::Relaxed) {
-        let (tick, _) = clock.read();
+    let (ns, raw, id, retried) = if stall_read && TEAR.load(Ordering::Relaxed) {
+        let a = clock.read()?;
         stall(published_gen(), k);
-        let (_, tsc) = clock.read();
-        let t = time_init::read_tsc();
-        (interpolate_ns(tick, tsc, t, k), t, false)
+        let b = clock.read()?;
+        let c = time_init::counter(b.id)?;
+        let raw = time_init::read_counter(b.id)?;
+        let torn = Snapshot {
+            cycles: b.cycles,
+            ..a
+        };
+        (ns_at(torn, c, raw), raw, b.id, false)
     } else {
         let mut calls = 0u32;
-        let mut cycles = 0u64;
+        let mut raw = 0u64;
+        let mut id = ClocksourceId::Tsc;
         let ns = clock.now_ns_with(
-            || {
+            |which| {
                 calls = calls.saturating_add(1);
                 if stall_read && calls == 1 {
                     stall(published_gen(), k);
                 }
-                cycles = time_init::read_tsc();
-                cycles
+                raw = time_init::read_counter(which).unwrap_or(0);
+                id = which;
+                raw
             },
-            k,
+            time_init::counter,
         );
-        (ns, cycles, calls > 1)
+        (ns, raw, id, calls > 1)
     };
     Some(Sample {
         ns,
-        cycles,
+        raw,
+        id,
         gen_before,
         gen_after: published_gen(),
         tsc_start,
@@ -207,19 +230,21 @@ pub(crate) enum Check {
     Stale,
 }
 
-/// The reading generation `generation` gives at TSC `t`: the clock's
-/// interpolation, recomputed here rather than by calling it, so that a
-/// regression in it fails the match too.
-fn expected_ns(generation: u64, tsc_gen: u64, t: u64, tsc_per_ms: u64) -> u64 {
-    let base = u128::from(generation).saturating_mul(1_000_000);
-    let extra = u128::from(t.saturating_sub(tsc_gen)).saturating_mul(1_000_000)
-        / u128::from(tsc_per_ms.max(1));
-    u64::try_from(base.saturating_add(extra)).unwrap_or(u64::MAX)
+/// The reading a snapshot of `id` with base `cycles` and `ns` gives at
+/// raw read `raw`: the clocksource formula, recomputed here rather than by
+/// calling `ns_at`, so that a regression in it fails the match too.
+fn expected_ns(id: ClocksourceId, cycles: u64, ns: u64, raw: u64) -> Option<u64> {
+    let c = time_init::counter(id)?;
+    let delta = raw.wrapping_sub(cycles) & c.mask();
+    let extra = u128::from(delta).saturating_mul(u128::from(c.scale.mult)) >> c.scale.shift;
+    let v = u128::from(ns).saturating_add(extra);
+    Some(u64::try_from(v).unwrap_or(u64::MAX))
 }
 
 /// Match `s` within `tol_ns` against each generation it could have read:
 /// the clock may still hold `gen_before - 1`, since a record is published
-/// before its seqlock write, and holds at most `gen_after`.
+/// before its seqlock write, and holds at most `gen_after`. A generation of
+/// another clocksource than the read's cannot match.
 pub(crate) fn check(s: &Sample, tol_ns: u64) -> Check {
     let k = time_init::tsc_per_ms();
     let lo = s.gen_before.saturating_sub(1);
@@ -229,16 +254,29 @@ pub(crate) fn check(s: &Sample, tol_ns: u64) -> Check {
     let mut nearest: Option<(u64, u64)> = None;
     let mut generation = lo;
     while generation <= s.gen_after {
-        if let Some(slot) = PUB_TSC.get((generation % PUB_RING as u64) as usize) {
+        let slot = (generation % PUB_RING as u64) as usize;
+        if let (Some(id), Some(cycles), Some(ns)) =
+            (PUB_ID.get(slot), PUB_CYCLES.get(slot), PUB_NS.get(slot))
+        {
             // Relaxed: `gen_after` came from `published_gen`'s Acquire load,
             // which makes every slot up to it visible.
-            let want = expected_ns(generation, slot.load(Ordering::Relaxed), s.cycles, k);
-            let diff = want.abs_diff(s.ns);
-            if diff <= tol_ns {
-                return Check::Match;
-            }
-            if nearest.is_none_or(|(d, _)| diff < d) {
-                nearest = Some((diff, want));
+            let id = ClocksourceId::from_u64(id.load(Ordering::Relaxed));
+            let want = id.filter(|&i| i == s.id).and_then(|i| {
+                expected_ns(
+                    i,
+                    cycles.load(Ordering::Relaxed),
+                    ns.load(Ordering::Relaxed),
+                    s.raw,
+                )
+            });
+            if let Some(want) = want {
+                let diff = want.abs_diff(s.ns);
+                if diff <= tol_ns {
+                    return Check::Match;
+                }
+                if nearest.is_none_or(|(d, _)| diff < d) {
+                    nearest = Some((diff, want));
+                }
             }
         }
         generation = generation.saturating_add(1);
@@ -259,9 +297,8 @@ const READS: u32 = 10_000;
 const STALL_EVERY: u32 = 500;
 /// A read matches a published generation within this. The checker and the
 /// clock compute the same integer formula from the same generation, so a
-/// good read matches exactly; 1 µs leaves room for a rounding step in the
-/// interpolation, and a torn pair moves the reading by the TSC time between
-/// two ticks, about 1 ms.
+/// good read matches exactly; a torn pair moves the reading by the time
+/// between two ticks, about 1 ms, far outside 1 µs.
 const CLOCK_TOL_NS: u64 = 1_000;
 /// Ticks that must be published during a run.
 const MIN_TICKS: u64 = 10;
@@ -614,24 +651,6 @@ pub(crate) fn test_tsc_calib_source() -> Outcome {
     }
 }
 
-pub(crate) fn test_uptime_sides() -> Outcome {
-    time_init::busy_wait_ms(30);
-    let tick = time_init::uptime_ms();
-    let us = time_init::now_us();
-    if tick == 0 {
-        return Outcome::Fail("tick still 0");
-    }
-    let tick_us = tick.saturating_mul(1000);
-    let lo = tick_us.saturating_mul(50) / 100;
-    let hi = tick_us.saturating_mul(150) / 100 + 2000;
-    if us >= lo && us <= hi {
-        Outcome::Ok
-    } else {
-        crate::marker!("vibeOS: ktest:   tick {tick} ms tsc {us} us");
-        Outcome::Fail("tick and tsc sides diverged")
-    }
-}
-
 /// Seconds in a mean Gregorian year, to name the year a bad RTC reads.
 const MEAN_YEAR_S: u64 = 31_556_952;
 
@@ -666,6 +685,158 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     Outcome::Ok
 }
 
+// ---------------------------------------------------------------------------
+// clocksource_if_off_50ms (ROADMAP §10.3, F027)
+
+/// How long CPU 0 holds IF off, in ns of the reference counter.
+const IF_OFF_NS: u64 = 50_000_000;
+/// How long after the window the body waits for two ticks, in ns of the
+/// reference counter.
+const TICK_WAIT_NS: u64 = 20_000_000;
+/// How long the test waits for its body, in ms.
+const IF_OFF_WAIT_MS: u64 = 1_000;
+
+/// 0 while the body runs; then 1, with [`IF_OFF_VALS`] set, or `2 + i` for
+/// failure `i` of [`IF_OFF_ERRS`].
+static IF_OFF_STATE: AtomicU32 = AtomicU32::new(0);
+static IF_OFF_ERRS: [&str; 5] = [
+    "no clocksource",
+    "no reference counter",
+    "no clock read",
+    "not on cpu0",
+    "no tick within 20 ms of the window",
+];
+/// Δ`now_ns` and Δreference across the IF-off window, then across the
+/// window and the two ticks after it; the reference's id.
+static IF_OFF_VALS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static IF_OFF_REF: AtomicU64 = AtomicU64::new(0);
+
+/// A counter to measure the clocksource against: the TSC under the HPET or
+/// the PM timer; under the TSC, the HPET, else the PM timer.
+fn reference(cs: ClocksourceId) -> Option<Counter> {
+    let order: &[ClocksourceId] = match cs {
+        ClocksourceId::Tsc => &[ClocksourceId::Hpet, ClocksourceId::AcpiPm],
+        ClocksourceId::Hpet | ClocksourceId::AcpiPm => &[ClocksourceId::Tsc],
+    };
+    order.iter().find_map(|&id| time_init::counter(id))
+}
+
+/// One unclamped `now_ns`, through the hook that skips `LAST_NS`.
+fn now_raw() -> Option<u64> {
+    now_ns_unclamped(false).map(|s| s.ns)
+}
+
+/// The IF-off measurement, on CPU 0. Ok: (Δnow, Δref) over the window,
+/// (Δnow, Δref) over the window and the two ticks after it, and the
+/// reference's id. Err: an index into [`IF_OFF_ERRS`].
+fn if_off_measure() -> Result<([u64; 4], ClocksourceId), usize> {
+    let cs = time_init::clocksource().ok_or(0usize)?;
+    let rc = reference(cs).ok_or(1usize)?;
+    let read = || time_init::read_counter(rc.id).ok_or(2usize);
+    let since = |from: u64, to: u64| rc.scale.to_ns(rc.delta(to, from));
+    let (r0, n0, n1, r1) = {
+        let _off = InterruptGuard::enter();
+        if thread_init::current_cpu() != 0 {
+            return Err(3);
+        }
+        // Reference, clock, spin, clock, reference: the clock's interval
+        // sits inside the reference's.
+        let r0 = read()?;
+        let n0 = now_raw().ok_or(2usize)?;
+        loop {
+            if since(r0, read()?) >= IF_OFF_NS {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        let n1 = now_raw().ok_or(2usize)?;
+        let r1 = read()?;
+        (r0, n0, n1, r1)
+    };
+    // IF is back on: the tick resumes. A clock that counted ticks lost the
+    // window's here.
+    let t0 = time_init::ticks();
+    while time_init::ticks() < t0.saturating_add(2) {
+        if since(r1, read()?) > TICK_WAIT_NS {
+            return Err(4);
+        }
+        core::hint::spin_loop();
+    }
+    let n2 = now_raw().ok_or(2usize)?;
+    let r2 = read()?;
+    let vals = [
+        n1.saturating_sub(n0),
+        since(r0, r1),
+        n2.saturating_sub(n0),
+        since(r0, r2),
+    ];
+    Ok((vals, rc.id))
+}
+
+fn if_off_body() {
+    let state = match if_off_measure() {
+        Ok((vals, id)) => {
+            for (slot, v) in IF_OFF_VALS.iter().zip(vals) {
+                // Relaxed: published by the Release store to the state.
+                slot.store(v, Ordering::Relaxed);
+            }
+            IF_OFF_REF.store(id as u64, Ordering::Relaxed);
+            1
+        }
+        Err(i) => 2u32.saturating_add(i as u32),
+    };
+    // Release: pairs with the Acquire load in the test.
+    IF_OFF_STATE.store(state, Ordering::Release);
+}
+
+/// `now` within 1% of `reference`.
+fn within_1pct(now: u64, reference: u64) -> bool {
+    now.abs_diff(reference) <= reference / 100
+}
+
+/// CPU 0 holds IF off for 50 ms of a counter that is not the clocksource,
+/// and `now_ns` advances by the same within 1%, across the window and again
+/// once two ticks have followed it (F027).
+pub(crate) fn test_clocksource_if_off_50ms() -> Outcome {
+    // Relaxed: the spawn below publishes it to the body.
+    IF_OFF_STATE.store(0, Ordering::Relaxed);
+    let opts = thread_init::SpawnOpts {
+        stack_pages: DEFAULT_STACK_PAGES,
+        cpu: Some(0),
+    };
+    if thread_init::spawn_opts("clock-ifoff", if_off_body, opts).is_err() {
+        return Outcome::Fail("spawn");
+    }
+    let start = time_init::now_ns();
+    // Acquire: pairs with the Release store in `if_off_body`.
+    let state = loop {
+        let st = IF_OFF_STATE.load(Ordering::Acquire);
+        if st != 0 {
+            break st;
+        }
+        if time_init::now_ns().saturating_sub(start) > IF_OFF_WAIT_MS.saturating_mul(1_000_000) {
+            return Outcome::Fail("body did not finish within 1 s");
+        }
+        thread_init::sleep_ms(1);
+    };
+    if state != 1 {
+        let i = state.saturating_sub(2) as usize;
+        return Outcome::Fail(IF_OFF_ERRS.get(i).copied().unwrap_or("bad state"));
+    }
+    // Relaxed: after the Acquire load of the state.
+    let v = |i: usize| IF_OFF_VALS.get(i).map_or(0, |a| a.load(Ordering::Relaxed));
+    let rid =
+        ClocksourceId::from_u64(IF_OFF_REF.load(Ordering::Relaxed)).map_or("?", |c| c.as_str());
+    let (dn, dr, dn2, dr2) = (v(0), v(1), v(2), v(3));
+    if !within_1pct(dn, dr) {
+        return crate::fail_fmt!("if off: now_ns +{dn} ns, {rid} +{dr} ns");
+    }
+    if !within_1pct(dn2, dr2) {
+        return crate::fail_fmt!("after ticks: now_ns +{dn2} ns, {rid} +{dr2} ns");
+    }
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -674,6 +845,6 @@ pub(crate) const TESTS: &[Test] = &[
     test("now_us_under_yields", test_now_us_under_yields),
     test("now_us_planted_tear", test_now_us_planted_tear),
     test("tsc_calib_source", test_tsc_calib_source),
-    test("uptime_sides", test_uptime_sides),
     test("rtc_offset", test_rtc_offset),
+    test("clocksource_if_off_50ms", test_clocksource_if_off_50ms),
 ];

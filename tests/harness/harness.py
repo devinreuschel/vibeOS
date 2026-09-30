@@ -932,6 +932,16 @@ def expected_lapic_mode(
     return "tsc-deadline"
 
 
+def expected_clocksource(*, hpet: bool = True, accel: str | None = None) -> str:
+    """The clocksource the kernel must name in `time: clocksource <name>`
+    (DESIGN §6.4): `tsc` under KVM, whose guests the harness gives an
+    invariant TSC; else `hpet`, or `acpi_pm` with HPET off, since TCG never
+    reports an invariant TSC."""
+    if _accel_name(accel) == "kvm":
+        return "tsc"
+    return "hpet" if hpet else "acpi_pm"
+
+
 def _accel_args(cfg: QemuConfig) -> list[str]:
     """`-accel tcg` unless overridden. Empty env/config skips the flag."""
     accel = _accel_name(cfg.accel)
@@ -2200,6 +2210,7 @@ def boot_contract_markers(
         hpet=hpet,
         smp=smp,
         lapic_mode=expected_lapic_mode(cpu=cpu, hpet=hpet, accel=accel),
+        clocksource=expected_clocksource(hpet=hpet, accel=accel),
         gp_test=gp,
         panic_nest_test=panic_variant == "nest",
         panic_stop_test=panic_variant == "stop",

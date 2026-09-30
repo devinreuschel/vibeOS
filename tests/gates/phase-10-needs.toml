@@ -1294,3 +1294,11 @@ needs = [
   "the panic backtrace follows `rbp`",  # L1422
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L556
+[[box]]
+key = "`sleep_ms(50)` returns within 50 to"
+needs = [
+  "`now_ns` is computed from one",  # L1310
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
