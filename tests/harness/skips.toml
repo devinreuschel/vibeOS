@@ -173,3 +173,8 @@ smp = 1
 name = "per_cpu_identity"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "preempt_gpr_canaries"
+reason = "needs 2 CPUs"
+smp = 1
