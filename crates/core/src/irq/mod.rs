@@ -5,6 +5,7 @@
 //! Phase 19 affinity rebalance share one table.
 
 pub mod ipi;
+pub mod stop;
 
 use crate::vectors;
 
