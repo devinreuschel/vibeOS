@@ -4,10 +4,10 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use vibeos::addr_space::AddressSpace;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET};
 
 use crate::addr_space_init;
+use crate::arch::current::AddressSpace;
 use crate::pmm_init;
 use crate::x86::{self, EFER_SCE, IA32_EFER, IA32_STAR};
 

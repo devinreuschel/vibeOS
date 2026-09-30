@@ -13,13 +13,14 @@
 use core::cell::RefCell;
 use core::mem::size_of;
 
+use super::x86_64::paging;
 use super::{
     Barriers, BootHandover, ContextSwitch, CycleCounter, InterruptMask, Ipi, IpiSend, MmioWidth,
     PageTable, PerCpuBase, Port, SyscallAbi, UserAccess,
 };
 use crate::atomic::statics::AtomicU32;
 use crate::atomic::{Ordering, fence};
-use crate::paging::{PhysAddr, VirtAddr};
+use crate::paging::{PageFlags, PhysAddr, VirtAddr};
 
 /// Events the log keeps; later ones are counted in [`EventLog::dropped`].
 pub const LOG_CAP: usize = 256;
@@ -361,7 +362,24 @@ impl CycleCounter for Arch {
     }
 }
 
+/// The x86_64 pure half's format, so host tests walk the tables the kernel
+/// builds; the root register and TLB calls are recorded.
 impl PageTable for Arch {
+    const LEVELS: u8 = paging::LEVELS;
+    const ENTRIES: usize = paging::PTES_PER_TABLE;
+    const KERNEL_ROOT_FIRST: usize = paging::KERNEL_PML4_FIRST;
+    fn index(va: VirtAddr, level: u8) -> usize {
+        paging::index(va, level)
+    }
+    fn make_entry(pa: PhysAddr, flags: PageFlags) -> u64 {
+        paging::make_pte(pa, flags)
+    }
+    fn entry_phys(entry: u64) -> PhysAddr {
+        paging::pte_phys(entry)
+    }
+    fn entry_flags(entry: u64) -> PageFlags {
+        paging::pte_flags(entry)
+    }
     fn root() -> PhysAddr {
         with(|s| PhysAddr::new(s.root))
     }

@@ -1420,7 +1420,9 @@ pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
         s.slots
             .iter()
             .flatten()
-            .find(|t| t.as_cr3 & vibeos::paging::PTE_ADDR_MASK == root)
+            // A saved root is a table address, as `spawn_user` and
+            // `set_pid_cr3` store it.
+            .find(|t| t.as_cr3 == root)
             .map(|t| t.id)
     })
 }

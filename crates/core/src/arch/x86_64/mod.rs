@@ -2,6 +2,7 @@
 
 pub mod apic;
 pub mod desc;
+pub mod paging;
 pub mod pic;
 pub mod trap;
 pub mod uart;

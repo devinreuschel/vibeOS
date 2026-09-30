@@ -9,11 +9,14 @@
 
 pub mod x86_64;
 
-use crate::paging::{PhysAddr, VirtAddr};
 use crate::thread::Tcb;
 
 /// Declared once, in `crate::trap` (ROADMAP §10.3, §10.6).
 pub use crate::trap::SyscallAbi;
+
+/// Declared once, in `crate::paging`, beside the `Mapper` that walks through
+/// it, so the page-table module uses no port type (ROADMAP §10.3).
+pub use crate::paging::PageTable;
 
 /// The four inter-processor interrupts (SMP §7.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,23 +81,6 @@ pub trait CycleCounter {
     fn now() -> u64;
     /// Counts per second; `None` until measured.
     fn freq_hz() -> Option<u64>;
-}
-
-/// The page-table root register and this CPU's TLB.
-pub trait PageTable {
-    /// The root this CPU runs on.
-    fn root() -> PhysAddr;
-    /// Switch this CPU to `root`.
-    ///
-    /// # Safety
-    ///
-    /// `root` is a complete top-level table that maps this CPU's code, its
-    /// stack, and everything it touches after the switch.
-    unsafe fn set_root(root: PhysAddr);
-    /// Drop this CPU's translation of the page holding `va`.
-    fn flush_local(va: VirtAddr);
-    /// Drop this CPU's non-global translations.
-    fn flush_local_all();
 }
 
 /// DMA ordering, MMIO accessors, and cache maintenance for DMA (DESIGN §4.7).

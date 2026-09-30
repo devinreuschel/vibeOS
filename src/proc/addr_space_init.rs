@@ -4,12 +4,14 @@ use core::fmt;
 use core::sync::atomic::Ordering;
 
 use vibeos::addr_space::{
-    AddressSpace, AsError, Backing, BrkPlan, FrameFree, MmapReq, Region, TeardownStats, UserPerms,
+    AsError, Backing, BrkPlan, FrameFree, MmapReq, Region, TeardownStats, UserPerms,
 };
-use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PTE_ADDR_MASK};
+use vibeos::arch::PageTable;
+use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K};
 use vibeos::pmm::Frames;
 use vibeos::thread::ThreadId;
 
+use crate::arch::current::{AddressSpace, Arch};
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
@@ -173,7 +175,7 @@ unsafe fn unmap_chunks(space: &mut AddressSpace, va: u64, len: u64) -> Result<()
 /// A flush for `space`'s pages: `invlpg` when it is this CPU's CR3,
 /// nothing otherwise.
 fn local_flush(space: &AddressSpace) -> impl FnMut(u64) + use<> {
-    let loaded = x86::read_cr3() & PTE_ADDR_MASK == space.root().as_u64();
+    let loaded = Arch::root() == space.root();
     move |va| {
         if loaded {
             x86::invlpg(va);
@@ -329,17 +331,18 @@ fn root_holder(root: u64) -> Option<RootHolder> {
         let _irq = x86::InterruptGuard::enter();
         (
             per_cpu_init::try_current().map_or(0, |c| c.cpu_id),
-            x86::read_cr3(),
+            Arch::root().as_u64(),
         )
     };
-    if cr3 & PTE_ADDR_MASK == root {
+    if cr3 == root {
         return Some(RootHolder::Cr3 { cpu: here });
     }
     let mut id = 0u32;
     while (id as usize) < per_cpu_init::cpu_count() {
         if let Some(r) = per_cpu_init::cpu(id) {
             let loaded = r.as_cr3.load(Ordering::Acquire);
-            if loaded != 0 && loaded & PTE_ADDR_MASK == root {
+            // A recorded root is a table address, as `load_cr3_u64` stores it.
+            if loaded != 0 && loaded == root {
                 return Some(RootHolder::Cr3 { cpu: id });
             }
         }
@@ -402,7 +405,7 @@ pub fn load_kernel_cr3() {
 
 /// Full AS copy for fork. Caller must not be running on `src`'s CR3
 /// teardown path; clone allocates a new PML4.
-pub fn clone_full(src: &vibeos::addr_space::AddressSpace) -> Option<AddressSpace> {
+pub fn clone_full(src: &AddressSpace) -> Option<AddressSpace> {
     let kernel = paging_init::current_mapper();
     let mut pool = BuddyPool;
     // SAFETY: `kernel` is the live kernel mapper and the buddy hands out

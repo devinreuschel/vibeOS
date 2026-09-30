@@ -23,15 +23,17 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use vibeos::lock::RANK_PT;
 use vibeos::marker;
 use vibeos::paging::{
-    self, FrameAlloc, IoremapWindow, MapError, MapMode, Mapper, PAGE_SIZE_2M, PAGE_SIZE_4K,
-    PageFlags, PageSize, PhysAddr, VirtAddr,
+    self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_2M, PAGE_SIZE_4K, PageFlags,
+    PageSize, PhysAddr, VirtAddr,
 };
 use vibeos::pmm::Frames;
 
+use crate::arch::current::{Arch, Mapper};
 use crate::boot::{self, BootInfo};
 use crate::pmm_init;
 use crate::sync_init::{SpinMutex, SpinMutexGuard};
 use crate::x86;
+use vibeos::arch::PageTable;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
 
@@ -221,11 +223,7 @@ pub(crate) fn current_mapper() -> MapperGuard {
     let pt = PT.lock();
     let cr3 = {
         let k = kernel_cr3();
-        if k != 0 {
-            k
-        } else {
-            x86::read_cr3() & paging::PTE_ADDR_MASK
-        }
+        if k != 0 { k } else { Arch::root().as_u64() }
     };
     // SAFETY: the kernel PML4 that `paging_init::install` built (or, before
     // it, the boot tables CR3 holds) is never freed, and PT is held for the
@@ -466,10 +464,10 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     };
     let root = PhysAddr(root.into_entry());
     let hhdm_ptr = root.as_u64().wrapping_add(HHDM_BASE) as *mut u64;
-    for i in 0..paging::PTES_PER_TABLE {
+    for i in 0..Arch::ENTRIES {
         // SAFETY: `root` is the order-0 buddy frame above, which Limine's
         // HHDM maps writable at `HHDM_BASE` (invariant I14, established at
-        // `mm::pmm_init::init`); `i < 512` words stay inside it.
+        // `mm::pmm_init::init`); `i < Arch::ENTRIES` words stay inside it.
         unsafe { hhdm_ptr.add(i).write_volatile(0) };
     }
     // SAFETY: `Mapper::new`'s contract; `root` is the zeroed PML4 above,
@@ -849,9 +847,8 @@ fn physmap_extent(info: &BootInfo) -> u64 {
     reason = "boot protocol invariant (DESIGN §3.3): Limine's PML4 maps the boot stack"
 )]
 unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
-    let cr3 = x86::read_cr3() & paging::PTE_ADDR_MASK;
-    let src = cr3.wrapping_add(HHDM_BASE) as *const u64;
-    let idx = va.index(4);
+    let src = Arch::root().as_u64().wrapping_add(HHDM_BASE) as *const u64;
+    let idx = Arch::index(va, Arch::LEVELS);
     // SAFETY: CR3 still holds Limine's PML4 (this fn's `# Safety` contract,
     // established here), which Limine's HHDM maps at `HHDM_BASE`, and
     // `idx < 512`.

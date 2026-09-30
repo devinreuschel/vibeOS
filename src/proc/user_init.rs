@@ -1,7 +1,7 @@
 //! Load a static ELF, from the filesystem or from memory, into a new
 //! address space. ROADMAP §9.4 / §9.8.
 
-use vibeos::addr_space::{AddressSpace, AsError, UserMemError, UserPerms};
+use vibeos::addr_space::{AsError, UserMemError, UserPerms};
 use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, Builder, EHDR_SIZE, ElfError, Image, PHDR_SIZE,
@@ -11,6 +11,7 @@ use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
+use crate::arch::current::AddressSpace;
 use crate::file_init;
 use crate::thread_init::SpawnError;
 use crate::x86;

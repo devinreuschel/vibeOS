@@ -7,7 +7,7 @@
 use core::fmt::Write;
 use core::mem::MaybeUninit;
 
-use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
+use vibeos::addr_space::{AsError, MmapError, mmap_request};
 use vibeos::arch::x86_64::trap::{self as x86_trap, Abi};
 use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
@@ -35,6 +35,7 @@ use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
 use crate::addr_space_init;
+use crate::arch::current::AddressSpace;
 use crate::arch::idt::TrapFrame;
 use crate::console_init;
 use crate::file_init;

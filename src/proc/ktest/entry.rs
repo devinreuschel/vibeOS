@@ -6,6 +6,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
+use vibeos::arch::PageTable;
 use vibeos::paging::{PAGE_SIZE_4K, USER_END};
 use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::syscall::SYS_KILL;
@@ -15,6 +16,7 @@ use vibeos::vectors;
 use crate::addr_space_init;
 use crate::apic_init;
 use crate::arch;
+use crate::arch::current::Arch;
 use crate::arch::idt::testing as idt_testing;
 use crate::ktest::user::{self, DEFAULT, Image, Layout, user_code};
 use crate::ktest::{Outcome, quiescent_free_frames, spawn_thread};
@@ -138,7 +140,7 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
     // the kernel CR3 between the load and the read.
     let irqs_off = x86::InterruptGuard::enter();
     super::load_cr3(&a);
-    let cr3_a = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
+    let cr3_a = <Arch as PageTable>::root().as_u64();
     if !super::cr3_was_skipped(&a) {
         addr_space_init::load_kernel_cr3();
         drop(irqs_off);
@@ -147,7 +149,7 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
         return Outcome::Fail("a not recorded");
     }
     super::load_cr3(&a);
-    if (x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK) != cr3_a {
+    if (<Arch as PageTable>::root().as_u64()) != cr3_a {
         addr_space_init::load_kernel_cr3();
         drop(irqs_off);
         addr_space_init::teardown(a);
@@ -155,7 +157,7 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
         return Outcome::Fail("skip mutated cr3");
     }
     super::load_cr3(&b);
-    let cr3_b = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
+    let cr3_b = <Arch as PageTable>::root().as_u64();
     if cr3_b == cr3_a {
         addr_space_init::load_kernel_cr3();
         drop(irqs_off);
