@@ -168,3 +168,8 @@ smp = 1
 name = "msix_cpu_publish_last"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "per_cpu_identity"
+reason = "no AP"
+smp = 1
