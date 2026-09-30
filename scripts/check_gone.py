@@ -228,6 +228,7 @@ GONE: list[tuple[str, str]] = [
     ("fs_errno", "one `KError` with `From` for"),
     ("load_errno", "one `KError` with `From` for"),
     ("spawn_errno", "one `KError` with `From` for"),
+    ("to_fs", "`fat::FatError` and `vibefs::Error`, two copies"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

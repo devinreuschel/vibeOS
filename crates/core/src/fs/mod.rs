@@ -115,6 +115,9 @@ pub enum FsError {
     /// Nothing to return now, and the caller may try again: `/dev/random`
     /// when no hardware source has a byte (ROADMAP §10.12).
     Again,
+    /// On-disk data failed a check: a bad checksum, magic, or structure
+    /// (FAT, vibefs).
+    Corrupt,
 }
 
 /// A filesystem error's Linux errno at the syscall boundary (SYSCALL.md §2).
@@ -134,7 +137,7 @@ impl From<FsError> for crate::kerror::KError {
             FsError::FileTooBig => Self::FBig,
             FsError::NoMem => Self::NoMem,
             FsError::Again => Self::Again,
-            FsError::Loop | FsError::NotEmpty | FsError::NotSupp => Self::Inval,
+            FsError::Loop | FsError::NotEmpty | FsError::NotSupp | FsError::Corrupt => Self::Inval,
         }
     }
 }
@@ -158,6 +161,7 @@ impl FsError {
             FsError::FileTooBig => "file too big",
             FsError::NoMem => "no memory",
             FsError::Again => "again",
+            FsError::Corrupt => "corrupt",
         }
     }
 }

@@ -339,9 +339,7 @@ pub(crate) fn test_vibefs() -> Outcome {
         }
         Err(_) => return Outcome::Fail("extent open"),
     }
-    let snap = with_vibe_mem(|m| {
-        vibefs_init::with_slot(m, |v, d| v.snapshot(d, b"s0")).map_err(|e| e.to_fs())
-    });
+    let snap = with_vibe_mem(|m| vibefs_init::with_slot(m, |v, d| v.snapshot(d, b"s0")));
     if snap.is_err() {
         return Outcome::Fail("snap");
     }

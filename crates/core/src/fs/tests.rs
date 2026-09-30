@@ -938,3 +938,22 @@ fn file_ref_generation_rejects_stale_id() {
     api.close(b).unwrap();
     assert!(vfs.lock().unwrap().file_table().iter().all(|f| !f.0));
 }
+
+/// FAT's and vibefs's errors are `FsError` itself (E2, F083): each binding
+/// compiles only while the aliases name the one type, and both convert to
+/// `KError` through its one `From`.
+#[test]
+fn disk_errors_are_fs_error() {
+    let f: FsError = crate::fs::fat::FatError::Corrupt;
+    let v: FsError = crate::fs::vibefs::Error::Corrupt;
+    assert_eq!(f, v);
+    assert_eq!(f.as_str(), "corrupt");
+    assert_eq!(
+        crate::kerror::KError::from(f),
+        crate::kerror::KError::from(FsError::Corrupt)
+    );
+    assert_eq!(
+        crate::kerror::KError::from(v).errno(),
+        crate::kerror::KError::from(FsError::Corrupt).errno()
+    );
+}

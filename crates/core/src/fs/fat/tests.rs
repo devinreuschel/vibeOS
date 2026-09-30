@@ -1,4 +1,5 @@
 use super::*;
+use crate::fs::FsError;
 
 /// The image size most tests format: 64 KiB.
 const IMG: usize = 64 * 1024;
@@ -415,8 +416,6 @@ fn truncate_zero_dirent_cluster() {
 #[test]
 fn error_strings() {
     assert_eq!(FatError::NotSupp.as_str(), "not supp");
-    assert_eq!(FatError::NotSupp.to_fs(), FsError::NotSupp);
-    assert_eq!(FatError::Corrupt.to_fs(), FsError::Inval);
 }
 
 #[test]

@@ -13,7 +13,7 @@
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use crate::fs::{FsError, InodeKind};
+use crate::fs::InodeKind;
 
 mod chain;
 mod dirent;
@@ -48,82 +48,9 @@ const LFN_CHARS: usize = 13;
 /// A directory holds at most 65,536 entries.
 const MAX_DIR_BYTES: u32 = 65_536 * ENT_U32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum FatError {
-    Inval,
-    Io,
-    Corrupt,
-    NoSpace,
-    NotFound,
-    Exists,
-    NotDir,
-    IsDir,
-    NotEmpty,
-    NameTooLong,
-    NotSupp,
-    /// A kernel heap allocation below the volume failed.
-    NoMem,
-}
-
-/// The errno of the `FsError` a FAT error becomes (`to_fs`).
-impl From<FatError> for crate::kerror::KError {
-    fn from(e: FatError) -> Self {
-        match e {
-            FatError::Inval | FatError::Corrupt => Self::Inval,
-            FatError::Io => Self::Io,
-            FatError::NoSpace => Self::MFile,
-            FatError::NotFound => Self::NoEnt,
-            FatError::Exists => Self::Exist,
-            FatError::NotDir => Self::NotDir,
-            FatError::IsDir => Self::IsDir,
-            FatError::NotEmpty | FatError::NotSupp => Self::Inval,
-            FatError::NameTooLong => Self::NameTooLong,
-            FatError::NoMem => Self::NoMem,
-        }
-    }
-}
-
-impl FatError {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FatError::Inval => "inval",
-            FatError::Io => "io",
-            FatError::Corrupt => "corrupt",
-            FatError::NoSpace => "no space",
-            FatError::NotFound => "not found",
-            FatError::Exists => "exists",
-            FatError::NotDir => "not dir",
-            FatError::IsDir => "is dir",
-            FatError::NotEmpty => "not empty",
-            FatError::NameTooLong => "name too long",
-            FatError::NotSupp => "not supp",
-            FatError::NoMem => "no memory",
-        }
-    }
-
-    pub fn to_fs(self) -> FsError {
-        match self {
-            FatError::Inval | FatError::Corrupt => FsError::Inval,
-            FatError::Io => FsError::Io,
-            FatError::NoSpace => FsError::NoSpace,
-            FatError::NotFound => FsError::NotFound,
-            FatError::Exists => FsError::Exists,
-            FatError::NotDir => FsError::NotDir,
-            FatError::IsDir => FsError::IsDir,
-            FatError::NotEmpty => FsError::NotEmpty,
-            FatError::NameTooLong => FsError::NameTooLong,
-            FatError::NotSupp => FsError::NotSupp,
-            FatError::NoMem => FsError::NoMem,
-        }
-    }
-}
-
-impl From<FatError> for FsError {
-    fn from(e: FatError) -> Self {
-        e.to_fs()
-    }
-}
+/// FAT's errors are the filesystem's (E2, F083): one type, one `From` into
+/// `KError`.
+pub type FatError = super::FsError;
 
 /// Byte-oriented FAT sectors. `flush` is a durable write (DESIGN §10.2).
 pub trait Disk {
