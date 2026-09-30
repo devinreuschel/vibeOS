@@ -17,7 +17,7 @@ use crate::time::Instant;
 pub struct WaitLink {
     next: ThreadId,
     prev: ThreadId,
-    /// The queue's [`WaitQueue::cookie`], or 0 when on none.
+    /// The queue's address, or 0 when on none.
     on: usize,
 }
 
@@ -69,7 +69,7 @@ impl WaitQueue {
     }
 
     pub fn contains(&self, id: ThreadId, links: &mut impl WaitLinks) -> bool {
-        let me = self.cookie();
+        let me = self.addr();
         links.link(id).is_some_and(|l| l.on == me)
     }
 
@@ -81,7 +81,7 @@ impl WaitQueue {
     )]
     pub fn enqueue(&mut self, id: ThreadId, links: &mut impl WaitLinks) {
         assert!(!id.is_none(), "wait: enqueue NONE");
-        let me = self.cookie();
+        let me = self.addr();
         let tail = self.tail;
         let Some(l) = links.link(id) else {
             panic!("wait: enqueue of unknown thread {}", id.0);
@@ -142,6 +142,12 @@ impl WaitQueue {
             _ => self.tail = prev,
         }
         self.len -= 1;
+    }
+
+    /// This queue's address, which a waiter's link records to name the
+    /// queue it is on: only compared, never turned back into a pointer.
+    fn addr(&self) -> usize {
+        core::ptr::from_ref(self).addr()
     }
 
     /// This queue's address, with its provenance exposed: a Blocked
