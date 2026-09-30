@@ -438,7 +438,8 @@ the `0xFD` handler's drain maps each slot to its tid through `thread_init`'s slo
 publishes with Release under `SCHED` whenever a slot takes a TCB. A bit is set only for a Ready
 thread, which cannot die before it runs, so a slot is not reused while its bit is set. Rejected: an
 intrusive MPSC list, which needs a queued flag in each TCB against double insertion and a larger
-model. Planned: ROADMAP §10.8's loom model of push and drain.
+model. ROADMAP §10.8's loom model `loom_wake_inbox_three_pushers` runs push from three CPUs against
+the owner's drains ([TESTING.md §8](TESTING.md#8-testing)).
 
 ## 7.7 Locking with more than one CPU
 

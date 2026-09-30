@@ -1037,7 +1037,6 @@ mod loom_models {
     }
 
     /// A read's pair number; a read that mixes two writes fails.
-    #[allow(clippy::panic, reason = "a torn read is the model's failure")]
     fn published(r: Option<Snapshot>) -> u64 {
         match r {
             Some(s) if (1..=2).contains(&s.cycles) && s == pair(s.cycles) => s.cycles,
