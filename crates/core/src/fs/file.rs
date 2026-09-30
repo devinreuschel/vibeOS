@@ -333,7 +333,7 @@ impl Vfs {
                 let up = match f.dslot {
                     Some(d) => {
                         let (mut m, mut ds) = (f.mount, d);
-                        self.dotdot(&mut m, &mut ds);
+                        self.dotdot(None, &mut m, &mut ds);
                         self.inodes[self.d_islot(ds)? as usize].ino
                     }
                     None => ino.ino,
@@ -384,14 +384,14 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// that is not there, `O_TRUNC` empties a regular file.
     pub fn open(
         &self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &[u8],
         flags: OpenFlags,
         mode: u32,
     ) -> Result<FileRef, FsError> {
         let follow = !flags.has(O_NOFOLLOW);
         if flags.has(O_CREAT) {
-            match self.walk(cwd, path, follow) {
+            match self.walk(base, path, follow) {
                 Ok(p) => {
                     self.put_path(p);
                     if flags.has(O_EXCL) {
@@ -401,9 +401,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                 Err(FsError::NotFound) => {
                     let mode = file_mode(mode) | S_IFREG;
                     if (self.hooks.open_race)() {
-                        self.create(cwd, path, InodeKind::Reg, mode, None)?;
+                        self.create(base, path, InodeKind::Reg, mode, None)?;
                     }
-                    match self.create(cwd, path, InodeKind::Reg, mode, None) {
+                    match self.create(base, path, InodeKind::Reg, mode, None) {
                         Ok(()) => {}
                         // Created since the walk: without O_EXCL, open it.
                         Err(FsError::Exists) if !flags.has(O_EXCL) => {}
@@ -413,7 +413,7 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                 Err(e) => return Err(e),
             }
         }
-        let p = self.walk(cwd, path, follow)?;
+        let p = self.walk(base, path, follow)?;
         let id = self.step(|v| {
             let r = v.open(p, flags);
             v.path_put(p);
@@ -573,8 +573,8 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     /// Set the size of the regular file `path` names.
-    pub fn truncate(&self, cwd: Option<PathRef>, path: &[u8], size: u64) -> Result<(), FsError> {
-        let p = self.walk(cwd, path, true)?;
+    pub fn truncate(&self, base: Option<WalkBase>, path: &[u8], size: u64) -> Result<(), FsError> {
+        let p = self.walk(base, path, true)?;
         let r = self
             .with(|v| v.islot(p).and_then(|i| v.truncate_begin(i)))
             .and_then(|mut c| {

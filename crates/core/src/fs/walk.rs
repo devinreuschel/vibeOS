@@ -1,5 +1,161 @@
 use super::*;
 
+/// Where a walk starts: an absolute path at `root`, a relative one at
+/// `cwd`, and `..` stays put at `root` (path_resolution(7)). A process's
+/// base names the directories its root and working-directory
+/// [`DirRef`]s hold; `None` in a walk means the namespace root for both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalkBase {
+    pub root: PathRef,
+    pub cwd: PathRef,
+}
+
+/// A counted reference to a directory: one count on its mount, which
+/// `umount`'s busy check sees, and one on its dentry, the count a child
+/// dentry pins its parent with (DESIGN §2.11 rule 2), so neither is
+/// evicted while it lives. A process's root and working directory are
+/// each one. Hand it to [`Vfs::dir_put`]: dropping it leaks both counts,
+/// and a debug build panics.
+#[must_use]
+#[derive(Debug)]
+pub struct DirRef {
+    at: PathRef,
+}
+
+impl DirRef {
+    /// The directory this reference holds.
+    pub fn at(&self) -> PathRef {
+        self.at
+    }
+}
+
+impl Drop for DirRef {
+    #[allow(
+        clippy::panic,
+        reason = "a dropped DirRef leaks a mount and a dentry count; debug builds panic, as a dropped Frames does (DESIGN §4.2)"
+    )]
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            // A host test that fails while it holds a reference unwinds
+            // through here; a second panic would abort the test binary.
+            #[cfg(any(test, feature = "std"))]
+            if std::thread::panicking() {
+                return;
+            }
+            panic!(
+                "fs: dropped DirRef on mount {} dentry {}",
+                self.at.mount, self.at.dslot
+            );
+        }
+    }
+}
+
+impl Vfs {
+    /// A reference to the namespace root.
+    pub fn dir_root(&mut self) -> Result<DirRef, FsError> {
+        let r = self.root()?;
+        self.path_get(r)?;
+        Ok(DirRef { at: r })
+    }
+
+    /// Another reference to directory `at`, which a reference already
+    /// holds, as `fork` copies a parent's.
+    pub fn dir_dup(&mut self, at: PathRef) -> Result<DirRef, FsError> {
+        debug_assert!(
+            self.dentry_refs(at) != 0
+                && self
+                    .mounts
+                    .get(at.mount as usize)
+                    .is_some_and(|m| m.used && m.refs != 0),
+            "dir_dup of a directory nothing holds"
+        );
+        self.path_get(at)?;
+        Ok(DirRef { at })
+    }
+
+    /// Drop a reference. A dentry that lost its name while it was held
+    /// is freed at its last put, and a release this queues runs at the
+    /// driver's next step ([`FileApi::dir_put`]).
+    pub fn dir_put(&mut self, r: DirRef) {
+        self.path_put(r.at);
+        core::mem::forget(r);
+    }
+
+    /// The holders of `at`'s dentry: its children, the mounts on it, the
+    /// superblock for a root, and every held path and reference.
+    pub fn dentry_refs(&self, at: PathRef) -> u32 {
+        self.dentries
+            .get(at.dslot as usize)
+            .map_or(0, |d| u32::from(d.refs))
+    }
+
+    /// The path from `base`'s root (the namespace root when none) to the
+    /// directory `at`, into `out`, crossing mountpoints; its length.
+    /// `NotFound` when a dentry on the way lost its name, `NameTooLong`
+    /// when `out` is too short. A directory outside the root is named
+    /// from the namespace root.
+    pub fn dir_path(
+        &self,
+        base: Option<WalkBase>,
+        at: PathRef,
+        out: &mut [u8],
+    ) -> Result<usize, FsError> {
+        let mut root = match base {
+            Some(b) => b.root,
+            None => self.root()?,
+        };
+        self.follow_mount(&mut root.mount, &mut root.dslot);
+        let (mut m, mut d) = (at.mount, at.dslot);
+        let mut end = out.len();
+        let mut n = 0usize;
+        while (m, d) != (root.mount, root.dslot) {
+            n += 1;
+            if n > self.dentries.len().saturating_add(self.mounts.len()) {
+                return Err(FsError::Loop);
+            }
+            let mt = self.mounts.get(m as usize).ok_or(FsError::Io)?;
+            if !mt.used {
+                return Err(FsError::NotFound);
+            }
+            if mt.root_dslot == d {
+                match mt.parent {
+                    None => break,
+                    Some(p) => {
+                        m = p;
+                        d = mt.mp_dslot;
+                        continue;
+                    }
+                }
+            }
+            let de = self.dentries.get(d as usize).ok_or(FsError::Io)?;
+            if !de.used || de.dead || de.negative {
+                return Err(FsError::NotFound);
+            }
+            let name = de.name.as_bytes();
+            let start = end
+                .checked_sub(name.len())
+                .and_then(|e| e.checked_sub(1))
+                .ok_or(FsError::NameTooLong)?;
+            let dst = out.get_mut(start..end).ok_or(FsError::NameTooLong)?;
+            if let Some((slash, rest)) = dst.split_first_mut() {
+                *slash = b'/';
+                rest.copy_from_slice(name);
+            }
+            end = start;
+            d = de.parent;
+        }
+        if end == out.len() {
+            let first = out.first_mut().ok_or(FsError::NameTooLong)?;
+            *first = b'/';
+            return Ok(1);
+        }
+        let len = out.len() - end;
+        out.copy_within(end.., 0);
+        Ok(len)
+    }
+}
+
 impl Vfs {
     /// A create's call on directory `dir`, having dropped the negative
     /// dentries a new name makes stale.
@@ -315,7 +471,10 @@ impl Vfs {
 pub struct Walker {
     rem: [u8; MAX_PATH],
     rem_len: usize,
-    cwd: Option<PathRef>,
+    base: Option<WalkBase>,
+    /// The base's root, with the mounts on it followed: where an
+    /// absolute walk or link starts, and where `..` stays put.
+    root: PathRef,
     mount: u8,
     dslot: u16,
     depth: u32,
@@ -383,9 +542,11 @@ impl WalkCall {
 }
 
 impl Walker {
-    /// A walk of `path` from `cwd` (the root when none, or when `path` is
-    /// absolute); `follow_last` follows a symlink in the last component.
-    pub fn new(cwd: Option<PathRef>, path: &[u8], follow_last: bool) -> Result<Self, FsError> {
+    /// A walk of `path` from `base` (the namespace root for both its root
+    /// and its working directory when none): an absolute path from its
+    /// root, a relative one from its working directory; `follow_last`
+    /// follows a symlink in the last component.
+    pub fn new(base: Option<WalkBase>, path: &[u8], follow_last: bool) -> Result<Self, FsError> {
         if path.is_empty() {
             return Err(FsError::Inval);
         }
@@ -397,7 +558,8 @@ impl Walker {
         Ok(Self {
             rem,
             rem_len: path.len(),
-            cwd,
+            base,
+            root: PathRef { mount: 0, dslot: 0 },
             mount: 0,
             dslot: 0,
             depth: 0,
@@ -420,15 +582,17 @@ impl Walker {
     /// call.
     pub fn step(&mut self, v: &mut Vfs) -> Result<WalkStep, FsError> {
         if !self.started {
-            let (m, d) = match self.cwd {
-                Some(p) if !self.jump_root => (p.mount, p.dslot),
-                _ => {
+            let (mut root, start) = match self.base {
+                Some(b) => (b.root, b.cwd),
+                None => {
                     let r = v.root()?;
-                    (r.mount, r.dslot)
+                    (r, r)
                 }
             };
-            self.mount = m;
-            self.dslot = d;
+            v.follow_mount(&mut root.mount, &mut root.dslot);
+            self.root = root;
+            self.mount = start.mount;
+            self.dslot = start.dslot;
             v.follow_mount(&mut self.mount, &mut self.dslot);
             self.started = true;
         }
@@ -442,9 +606,8 @@ impl Walker {
                 i += 1;
             }
             if self.jump_root {
-                let r = v.root()?;
-                self.mount = r.mount;
-                self.dslot = r.dslot;
+                self.mount = self.root.mount;
+                self.dslot = self.root.dslot;
                 self.jump_root = false;
             }
             if i == self.rem_len {
@@ -476,7 +639,7 @@ impl Walker {
                 continue;
             }
             if name_is_dotdot(self.comp()) {
-                v.dotdot(&mut self.mount, &mut self.dslot);
+                v.dotdot(Some(self.root), &mut self.mount, &mut self.dslot);
                 shift_down(&mut self.rem, &mut self.rem_len, j);
                 continue;
             }
@@ -585,11 +748,11 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// Resolve `path` to a held path; [`Self::put_path`] releases it.
     pub fn walk(
         &self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &[u8],
         follow: bool,
     ) -> Result<PathRef, FsError> {
-        let mut w = Walker::new(cwd, path, follow)?;
+        let mut w = Walker::new(base, path, follow)?;
         let mut reply: Option<(WalkCall, WalkReply)> = None;
         loop {
             let st = self.step(|v| {
@@ -608,22 +771,74 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         }
     }
 
+    /// Resolve `name`, one component, in the held directory `dir`.
+    fn walk_in(&self, dir: PathRef, name: &[u8], follow: bool) -> Result<PathRef, FsError> {
+        let base = WalkBase {
+            root: dir,
+            cwd: dir,
+        };
+        self.walk(Some(base), name, follow)
+    }
+
     pub fn put_path(&self, p: PathRef) {
         self.step(|v| v.path_put(p));
+    }
+
+    /// A reference to the directory `path` names from `base`: `NotDir`
+    /// when it names something else.
+    pub fn dir_get(&self, base: Option<WalkBase>, path: &[u8]) -> Result<DirRef, FsError> {
+        let p = self.walk(base, path, true)?;
+        match self.with(|v| v.kind_of(p)) {
+            Ok(InodeKind::Dir) => Ok(DirRef { at: p }),
+            r => {
+                self.put_path(p);
+                Err(r.err().unwrap_or(FsError::NotDir))
+            }
+        }
+    }
+
+    /// A reference to the namespace root.
+    pub fn dir_root(&self) -> Result<DirRef, FsError> {
+        self.with(|v| v.dir_root())
+    }
+
+    /// Another reference to directory `at`, which a reference holds.
+    pub fn dir_dup(&self, at: PathRef) -> Result<DirRef, FsError> {
+        self.with(|v| v.dir_dup(at))
+    }
+
+    /// Drop a reference, running any release its put queued.
+    pub fn dir_put(&self, r: DirRef) {
+        self.step(|v| v.dir_put(r));
+    }
+
+    /// [`Vfs::dir_path`] under the lock.
+    pub fn dir_path(
+        &self,
+        base: Option<WalkBase>,
+        at: PathRef,
+        out: &mut [u8],
+    ) -> Result<usize, FsError> {
+        self.with(|v| v.dir_path(base, at, out))
+    }
+
+    /// [`Vfs::dentry_refs`] under the lock.
+    pub fn dentry_refs(&self, at: PathRef) -> u32 {
+        self.with(|v| v.dentry_refs(at))
     }
 
     /// Resolve `path`'s parent to a held directory and name its last
     /// component, which is neither `.` nor `..`.
     fn walk_parent<'p>(
         &self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &'p [u8],
     ) -> Result<(PathRef, &'p [u8]), FsError> {
         let (parent, name) = split_basename(path)?;
         if name_is_dot(name) || name_is_dotdot(name) {
             return Err(FsError::Inval);
         }
-        let dir = self.walk(cwd, parent, true)?;
+        let dir = self.walk(base, parent, true)?;
         match self.with(|v| v.kind_of(dir)) {
             Ok(InodeKind::Dir) => Ok((dir, name)),
             r => {
@@ -636,11 +851,11 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// `stat` (`follow`) or `lstat` of `path`.
     pub fn stat_path(
         &self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &[u8],
         follow: bool,
     ) -> Result<Stat, FsError> {
-        let p = self.walk(cwd, path, follow)?;
+        let p = self.walk(base, path, follow)?;
         let r = self.with(|v| v.islot(p)).and_then(|i| self.stat_islot(i));
         self.put_path(p);
         r
@@ -649,13 +864,13 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// Create `path` as a `kind` node; `Exists` when it is there.
     pub fn create(
         &self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &[u8],
         kind: InodeKind,
         mode: u16,
         target: Option<&[u8]>,
     ) -> Result<(), FsError> {
-        let (dir, name) = self.walk_parent(cwd, path)?;
+        let (dir, name) = self.walk_parent(base, path)?;
         let r = self.with(|v| v.create_begin(dir, name)).and_then(|mut c| {
             let res = c.run(|o, cx, d| o.create(cx, d, name, kind, mode, target));
             self.step(|v| v.create_commit(dir, name, c, res))
@@ -664,15 +879,20 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         r
     }
 
-    pub fn mkdir(&self, cwd: Option<PathRef>, path: &[u8], mode: u32) -> Result<(), FsError> {
-        self.create(cwd, path, InodeKind::Dir, file_mode(mode) | S_IFDIR, None)
+    pub fn mkdir(&self, base: Option<WalkBase>, path: &[u8], mode: u32) -> Result<(), FsError> {
+        self.create(base, path, InodeKind::Dir, file_mode(mode) | S_IFDIR, None)
     }
 
-    pub fn symlink(&self, cwd: Option<PathRef>, path: &[u8], target: &[u8]) -> Result<(), FsError> {
+    pub fn symlink(
+        &self,
+        base: Option<WalkBase>,
+        path: &[u8],
+        target: &[u8],
+    ) -> Result<(), FsError> {
         if target.is_empty() {
             return Err(FsError::Inval);
         }
-        self.create(cwd, path, InodeKind::Lnk, S_IFLNK_MODE, Some(target))
+        self.create(base, path, InodeKind::Lnk, S_IFLNK_MODE, Some(target))
     }
 
     /// Create `name` in the directory `dir` names, found by a walk
@@ -698,17 +918,17 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         self.step(|v| v.create_in_commit(name, c, res))
     }
 
-    pub fn unlink(&self, cwd: Option<PathRef>, path: &[u8]) -> Result<(), FsError> {
-        self.remove(cwd, path, false)
+    pub fn unlink(&self, base: Option<WalkBase>, path: &[u8]) -> Result<(), FsError> {
+        self.remove(base, path, false)
     }
 
-    pub fn rmdir(&self, cwd: Option<PathRef>, path: &[u8]) -> Result<(), FsError> {
-        self.remove(cwd, path, true)
+    pub fn rmdir(&self, base: Option<WalkBase>, path: &[u8]) -> Result<(), FsError> {
+        self.remove(base, path, true)
     }
 
-    fn remove(&self, cwd: Option<PathRef>, path: &[u8], rmdir: bool) -> Result<(), FsError> {
-        let (dir, name) = self.walk_parent(cwd, path)?;
-        let r = self.walk(Some(dir), name, false).and_then(|victim| {
+    fn remove(&self, base: Option<WalkBase>, path: &[u8], rmdir: bool) -> Result<(), FsError> {
+        let (dir, name) = self.walk_parent(base, path)?;
+        let r = self.walk_in(dir, name, false).and_then(|victim| {
             let (mut c, vi) = self.step(|v| v.remove_begin(dir, name, victim, rmdir))?;
             let res = c.run(|o, cx, d| {
                 if rmdir {
@@ -723,9 +943,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         r
     }
 
-    pub fn rename(&self, cwd: Option<PathRef>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
-        let (od, oname) = self.walk_parent(cwd, old)?;
-        let r = self.walk_parent(cwd, new).and_then(|(nd, nname)| {
+    pub fn rename(&self, base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
+        let (od, oname) = self.walk_parent(base, old)?;
+        let r = self.walk_parent(base, new).and_then(|(nd, nname)| {
             let r = self.rename_in((od, oname), (nd, nname));
             self.put_path(nd);
             r
@@ -735,8 +955,8 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     fn rename_in(&self, o: (PathRef, &[u8]), n: (PathRef, &[u8])) -> Result<(), FsError> {
-        let src = self.walk(Some(o.0), o.1, false)?;
-        let tgt = match self.walk(Some(n.0), n.1, false) {
+        let src = self.walk_in(o.0, o.1, false)?;
+        let tgt = match self.walk_in(n.0, n.1, false) {
             Ok(t) => Some(t),
             Err(FsError::NotFound) => None,
             Err(e) => {
@@ -751,10 +971,10 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     /// Hard link `new` to the regular file `old` names.
-    pub fn link(&self, cwd: Option<PathRef>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
-        let src = self.walk(cwd, old, true)?;
+    pub fn link(&self, base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
+        let src = self.walk(base, old, true)?;
         let r = match self.with(|v| v.kind_of(src)) {
-            Ok(InodeKind::Reg) => self.walk_parent(cwd, new).and_then(|(nd, name)| {
+            Ok(InodeKind::Reg) => self.walk_parent(base, new).and_then(|(nd, name)| {
                 let r = self
                     .with(|v| v.link_begin(src, nd))
                     .and_then(|(mut d, mut t)| {

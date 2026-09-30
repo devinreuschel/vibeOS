@@ -442,7 +442,13 @@ impl Vfs {
         }
     }
 
-    pub(super) fn dotdot(&self, mount: &mut u8, dslot: &mut u16) {
+    /// Step from `(mount, dslot)` to its parent: nowhere at `root` (the
+    /// walk's base root, with its mounts followed) or at the namespace
+    /// root, and from a mount's root to the parent of its mountpoint.
+    pub(super) fn dotdot(&self, root: Option<PathRef>, mount: &mut u8, dslot: &mut u16) {
+        if root.is_some_and(|r| r.mount == *mount && r.dslot == *dslot) {
+            return;
+        }
         let m = *mount;
         if self.mounts[m as usize].root_dslot == *dslot {
             match self.mounts[m as usize].parent {
@@ -477,14 +483,14 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// one keeps its own.
     pub fn mount_fs(
         &self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         at: &[u8],
         fs: &'static dyn FileSystem,
         dev: Option<u64>,
         ro: bool,
         vol: Option<Instance>,
     ) -> Result<Mounted, FsError> {
-        let p = self.walk(cwd, at, true)?;
+        let p = self.walk(base, at, true)?;
         let r = self.mount_at(Some(p), at, fs, dev, ro, vol);
         self.put_path(p);
         r
@@ -542,10 +548,10 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
 
     /// Unmount the mount whose root `at` names; the superblock's last
     /// mount releases it, its hooks run with the lock dropped.
-    pub fn umount(&self, cwd: Option<PathRef>, at: &[u8]) -> Result<(), FsError> {
+    pub fn umount(&self, base: Option<WalkBase>, at: &[u8]) -> Result<(), FsError> {
         let mut tries = 0usize;
         loop {
-            let p = self.walk(cwd, at, true)?;
+            let p = self.walk(base, at, true)?;
             match self.step(|v| v.umount_step(p))? {
                 UmountStep::Release(mut c) => {
                     let ok = c.run(|o, cx, n| o.evict(cx, n)).is_ok();

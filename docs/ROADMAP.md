@@ -919,7 +919,7 @@ limitations.
 - [x] path resolution with a bounded symlink depth
 - [ ] `File` with an offset and flags, and a descriptor table that Phase 9 hands to processes. Reopened by the kernel review (F057, F086); lands in §10.4.
 - [x] reference counting and a defined lifetime for an unlinked-but-open file opened through `Vfs`, which serves ramfs and kernfs files (F013, F067)
-- [ ] inode and dentry caches with eviction, since an unbounded cache is a slow memory leak. Reopened by the kernel review (F065); lands in §10.4.
+- [x] inode and dentry caches with eviction, since an unbounded cache is a slow memory leak (F065)
 
 ### 8.2 FAT32 read
 - [x] BPB parsing and validation (F064)

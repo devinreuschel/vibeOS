@@ -49,7 +49,7 @@ pub use ramfs::{RamFs, RamState};
 pub use sizes::VfsSizes;
 #[cfg(test)]
 pub(crate) use sizes::{SMALL, host_vfs};
-pub use walk::{WalkCall, WalkReply, WalkStep, Walker, split_basename};
+pub use walk::{DirRef, WalkBase, WalkCall, WalkReply, WalkStep, Walker, split_basename};
 
 use crate::atomic::statics::{AtomicU64, Ordering};
 use crate::dev::{Instance, same_instance};
@@ -825,8 +825,10 @@ impl Super {
 }
 
 /// A mount of a superblock on a directory (DESIGN §2.11). It holds one
-/// count on its superblock; `refs` counts the open files, child mounts
-/// and held paths that reach the filesystem through this mount. A
+/// count on its superblock; `refs` counts the open files, child mounts,
+/// held paths and directory references ([`DirRef`]: working directories
+/// and roots) that reach the filesystem through this mount, and
+/// `umount` is `Busy` while it is not zero. A
 /// mountpoint is found by its parent mount and dentry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Mount {
@@ -1189,7 +1191,8 @@ impl Hooks {
 /// The File API over a [`Vfs`] behind lock `L` (C-FILEAPI): every method
 /// is a loop of short locked steps and backend calls made with the lock
 /// dropped, and every release a step queues runs with it dropped too.
-/// Paths are absolute or relative to `cwd`.
+/// An absolute path starts at its base's root, a relative one at its
+/// working directory ([`WalkBase`]).
 pub struct FileApi<'l, L: Guarded<Vfs>> {
     lock: &'l L,
     hooks: Hooks,
@@ -1277,11 +1280,11 @@ impl Vfs {
 
     pub(crate) fn mount(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         at: &str,
         fs: &'static dyn FileSystem,
     ) -> Result<u8, FsError> {
-        self.api(|a| a.mount_fs(cwd, at.as_bytes(), fs, None, false, None))
+        self.api(|a| a.mount_fs(base, at.as_bytes(), fs, None, false, None))
             .map(|m| m.mount)
     }
 
@@ -1295,19 +1298,28 @@ impl Vfs {
         self.api(|a| a.mount_fs(None, at.as_bytes(), fs, Some(dev), ro, None))
     }
 
-    pub(crate) fn umount(&mut self, cwd: Option<PathRef>, at: &str) -> Result<(), FsError> {
-        self.api(|a| a.umount(cwd, at.as_bytes()))
+    pub(crate) fn umount(&mut self, base: Option<WalkBase>, at: &str) -> Result<(), FsError> {
+        self.api(|a| a.umount(base, at.as_bytes()))
+    }
+
+    /// [`FileApi::dir_get`] on this `Vfs`.
+    pub(crate) fn dir_get(
+        &mut self,
+        base: Option<WalkBase>,
+        path: &str,
+    ) -> Result<DirRef, FsError> {
+        self.api(|a| a.dir_get(base, path.as_bytes()))
     }
 
     /// The path `path` resolves to, not held.
     pub(crate) fn resolve(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         follow: bool,
     ) -> Result<PathRef, FsError> {
         self.api(|a| {
-            let p = a.walk(cwd, path.as_bytes(), follow)?;
+            let p = a.walk(base, path.as_bytes(), follow)?;
             a.put_path(p);
             Ok(p)
         })
@@ -1323,86 +1335,86 @@ impl Vfs {
         })
     }
 
-    pub(crate) fn stat(&mut self, cwd: Option<PathRef>, path: &str) -> Result<Stat, FsError> {
-        self.api(|a| a.stat_path(cwd, path.as_bytes(), true))
+    pub(crate) fn stat(&mut self, base: Option<WalkBase>, path: &str) -> Result<Stat, FsError> {
+        self.api(|a| a.stat_path(base, path.as_bytes(), true))
     }
 
-    pub(crate) fn lstat(&mut self, cwd: Option<PathRef>, path: &str) -> Result<Stat, FsError> {
-        self.api(|a| a.stat_path(cwd, path.as_bytes(), false))
+    pub(crate) fn lstat(&mut self, base: Option<WalkBase>, path: &str) -> Result<Stat, FsError> {
+        self.api(|a| a.stat_path(base, path.as_bytes(), false))
     }
 
     pub(crate) fn mkdir(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         mode: u16,
     ) -> Result<(), FsError> {
-        self.api(|a| a.mkdir(cwd, path.as_bytes(), u32::from(mode)))
+        self.api(|a| a.mkdir(base, path.as_bytes(), u32::from(mode)))
     }
 
     pub(crate) fn creat(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         mode: u16,
     ) -> Result<(), FsError> {
-        self.api(|a| a.create(cwd, path.as_bytes(), InodeKind::Reg, mode | S_IFREG, None))
+        self.api(|a| a.create(base, path.as_bytes(), InodeKind::Reg, mode | S_IFREG, None))
     }
 
     pub(crate) fn symlink(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         target: &str,
     ) -> Result<(), FsError> {
-        self.api(|a| a.symlink(cwd, path.as_bytes(), target.as_bytes()))
+        self.api(|a| a.symlink(base, path.as_bytes(), target.as_bytes()))
     }
 
-    pub(crate) fn unlink(&mut self, cwd: Option<PathRef>, path: &str) -> Result<(), FsError> {
-        self.api(|a| a.unlink(cwd, path.as_bytes()))
+    pub(crate) fn unlink(&mut self, base: Option<WalkBase>, path: &str) -> Result<(), FsError> {
+        self.api(|a| a.unlink(base, path.as_bytes()))
     }
 
-    pub(crate) fn rmdir(&mut self, cwd: Option<PathRef>, path: &str) -> Result<(), FsError> {
-        self.api(|a| a.rmdir(cwd, path.as_bytes()))
+    pub(crate) fn rmdir(&mut self, base: Option<WalkBase>, path: &str) -> Result<(), FsError> {
+        self.api(|a| a.rmdir(base, path.as_bytes()))
     }
 
     pub(crate) fn link(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         old: &str,
         new: &str,
     ) -> Result<(), FsError> {
-        self.api(|a| a.link(cwd, old.as_bytes(), new.as_bytes()))
+        self.api(|a| a.link(base, old.as_bytes(), new.as_bytes()))
     }
 
     pub(crate) fn rename(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         old: &str,
         new: &str,
     ) -> Result<(), FsError> {
-        self.api(|a| a.rename(cwd, old.as_bytes(), new.as_bytes()))
+        self.api(|a| a.rename(base, old.as_bytes(), new.as_bytes()))
     }
 
     pub(crate) fn truncate(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         size: u64,
     ) -> Result<(), FsError> {
-        self.api(|a| a.truncate(cwd, path.as_bytes(), size))
+        self.api(|a| a.truncate(base, path.as_bytes(), size))
     }
 
     pub(crate) fn open_path(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         flags: u32,
         mode: u16,
     ) -> Result<FileRef, FsError> {
         self.api(|a| {
             a.open(
-                cwd,
+                base,
                 path.as_bytes(),
                 OpenFlags::from_bits(flags),
                 u32::from(mode),
