@@ -149,6 +149,7 @@ pub extern "C" fn _start() -> ! {
         arch::current::halt();
     }
     crate::marker!(marker::LIMINE_OK);
+    crate::log::pvpanic_init::probe();
 
     // With `--features panic_test`, prove the panic path end to end.
     // Kept before PMM init so the panic path still exercises only the
