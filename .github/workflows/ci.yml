@@ -31,7 +31,19 @@ jobs:
       # vibeos-core FAT tests spawn fsck.fat. No QEMU / Limine / setup.sh (T3).
       APT_PACKAGES: dosfstools
     steps:
+      # Full history: check_gate_inputs.py needs the pull request's merge base.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # A pull request does not quietly change the gates that judge it
+      # (ROADMAP §10.9): gate inputs against its merge base.
+      - name: gate inputs
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check_gate_inputs.py --base "$BASE_SHA" --head "$HEAD_SHA"
 
       # Host packages from a cache keyed by the runner image and the package
       # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
@@ -126,12 +138,15 @@ jobs:
             cargo install cargo-llvm-cov --locked --version 0.9.1
           fi
 
-      # Floor 87% (DESIGN §8.6, which records the measured figure). Ratchet only upward.
+      # The floor is `[coverage] floor` in tests/gates/inputs.toml, which
+      # check_gate_inputs.py keeps from falling (DESIGN §8.6 records the
+      # measured figure). Ratchet only upward.
       - name: vibeos-core llvm-cov floor
         run: |
           HOST=$(rustc -vV | sed -n 's/^host: //p')
+          FLOOR=$(python3 scripts/check_gate_inputs.py --floor)
           time cargo llvm-cov -p vibeos-core --lib --features std --target "$HOST" \
-            --html --output-dir coverage --fail-under-lines 87
+            --html --output-dir coverage --fail-under-lines "$FLOOR"
 
       - name: upload vibeos-core coverage HTML
         if: always()
@@ -430,3 +445,26 @@ jobs:
         run: >-
           python3 scripts/check_ticks.py --base "$BASE_SHA" --head "$HEAD_SHA"
           --run-commit "$RUN_SHA" --results build/ci-results --summary "$GITHUB_STEP_SUMMARY"
+
+  # The one check the rulesets require besides `check` (ROADMAP §10.9): it
+  # needs every other job and fails unless each succeeded, so regrouping the
+  # tiers never changes a ruleset. `if: always()`, since GitHub counts a
+  # skipped required check as passing; `ticks` runs only on a pull request,
+  # so it may skip. A job added here goes in `needs:`, and in SKIPPABLE when
+  # its `if:` tests the event (scripts/check_gate_inputs.py).
+  ci-pass:
+    name: ci-pass
+    if: always()
+    needs: [check, build, tier, ticks]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          SKIPPABLE: ticks
+        run: python3 scripts/check_gate_inputs.py --ci-pass

@@ -15,7 +15,6 @@ use crate::ktest::{Outcome, Test, spawn_thread, test};
 use crate::part_init;
 use crate::thread_init;
 use crate::time_init;
-use crate::virtio_blk_init;
 
 // ---- Hooks the block tests arm. Their state stays in the production
 // files as `pub(in crate::block)` items.
@@ -355,7 +354,7 @@ pub(crate) fn test_block_part_mbr() -> Outcome {
 }
 
 pub(crate) fn test_block_part_gpt() -> Outcome {
-    if !virtio_blk_init::live() {
+    if !crate::drivers::ktest::vda_live() {
         return Outcome::Skip("no virtio-blk");
     }
     let Some(disk) = blockdev_init::lookup(b"vda") else {
@@ -927,17 +926,17 @@ pub(crate) fn block_fua_write() -> Outcome {
     if !matches!(r, Outcome::Ok) {
         return r;
     }
-    if !virtio_blk_init::live() {
+    if !crate::drivers::ktest::vda_live() {
         return Outcome::Ok;
     }
-    if virtio_blk_init::logical_block_size() != 512 {
+    if crate::drivers::ktest::vda(|b| b.logical_block_size()) != Some(512) {
         return Outcome::Skip("vda not 512");
     }
     fua_roundtrip(
         crate::drivers::ktest::persist_lba().saturating_add(1),
-        virtio_blk_init::read,
-        virtio_blk_init::write,
-        virtio_blk_init::write_fua,
+        crate::drivers::ktest::vda_read,
+        crate::drivers::ktest::vda_write,
+        crate::drivers::ktest::vda_write_fua,
         crate::drivers::ktest::flushes,
     )
 }

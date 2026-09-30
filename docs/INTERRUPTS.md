@@ -213,8 +213,12 @@ Drivers do not write to the IDT. They ask for a vector:
 ```rust
 let vec = irq::allocate_vector(cpu)?;     // from the §5.3 device pool
 irq::set_handler(vec, my_handler);
-// or: irq::set_threaded(vec, Some(top_half), thread_fn);
+// or: irq::set_threaded(vec, Some(top_half), thread_fn, Some(inst));
 ```
+
+Both threaded halves get the vector's context, a driver instance (`inst`, a `dev::Instance`) the vector
+holds a reference to until it is set again or freed, so a driver with several devices keeps no table
+of them (DEVICES.md §12.1 rule 1).
 
 The kernel binary exposes this as `irq_init::allocate_vector`. Allocate is refused
 inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `hardirq::IN_ISR` flag around the handler. The
@@ -231,7 +235,7 @@ an `IrqId` records its chip and its hardware number on that chip (its hwirq):
 let irq = irq::map_wired(&spec)?;      // a device-tree `interrupts` specifier or an ACPI GSI
 let irqs = irq::alloc_msi(&dev, n)?;   // MSI or MSI-X, through the device's MSI parent
 let tick = irq::map_percpu(&spec)?;    // a LAPIC LVT or a GIC PPI: one IrqId on every CPU
-irq::set_threaded(irq, Some(top_half), thread_fn);
+irq::set_threaded(irq, Some(top_half), thread_fn, Some(inst));
 irq::set_affinity(irq, cpu)?;
 ```
 
@@ -353,7 +357,7 @@ and one bottom-half thread per CPU, in which one device's blocked handler still 
 another device's on that CPU.
 
 `set_threaded` is refused inside a hard-IRQ. The top half is optional:
-`set_threaded(vec, None, work)` is accepted, and `dispatch` EOIs before the bottom half runs, so on a
+`set_threaded(vec, None, work, ctx)` is accepted, and `dispatch` EOIs before the bottom half runs, so on a
 level-triggered INTx route a device that nothing quiets raises the line again at once (ROADMAP §15.2,
 F099). The softirq stand-in is the high-prio workqueue: IRQ context enqueues a `fn(usize)` and
 wakes workers. Planned (ROADMAP §19.4): its workers, one per CPU, run in the fair class at nice -20,

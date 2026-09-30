@@ -58,7 +58,7 @@ per-architecture uapi (ROADMAP §13.10).
 | Panic stop | port module | IPI `0xFE`, then NMI (§7.6) | SGI; pseudo-NMI from ROADMAP §25.5 | §10.7, §25.5 |
 | Unwinder | port module | `rbp` chain | `x29` chain | §10.7, §11.7 |
 | Signal frame, sigreturn trampoline, vDSO counter read, ELF machine, TLS variant, and HWCAP | pure half: layouts | `rt_sigframe`, `EM_X86_64`, TLS variant II | `rt_sigframe` and the vDSO's `__kernel_rt_sigreturn`, `EM_AARCH64`, TLS variant I, `AT_HWCAP` | §11.6, §13.8, §13.10 |
-| Crash-dump page-table publication | port module | none: QEMU walks x86_64 page tables | the TTBR1 root in a `VMCOREINFO` note | §11.7 |
+| Crash-dump page-table publication | port module | the kernel PML4's physical address and level count in the `VMCOREINFO` note | the TTBR1 root in a `VMCOREINFO` note | §10.7, §11.7 |
 | Hypervisor | port module | VMX or SVM | EL2 with VHE | Phase 21 |
 
 The page-table format is the largest pure half. Descriptor encoding and decoding, the walk, `map`,

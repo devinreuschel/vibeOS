@@ -36,6 +36,14 @@ the first rule only. A DEPARTURES entry fails when its key names no box or sever
 when that box does not cite the id, or when the finding passes without it. The
 bare mode (no option) runs these rules.
 
+Errata, in every mode. A finding's `####` heading and `**Severity:**` line are never
+edited: a correction is a line under `## Errata`, the review's last `## ` heading, of the
+form `- <YYYY-MM-DD> · <Fnnn> · <what changed> -- <why>`, dates in order. When `<what
+changed>` is a `**Severity:** ...` line, `apply_errata` puts it in place of that finding's
+own severity line (the latest erratum wins) before any rule reads the review; other text
+(a location) changes nothing. An unknown id, a malformed line, and `## Errata` not being
+last fail.
+
 Design reviews, in every mode. An id that follows the words `design review` (any
 case, the two words split by any whitespace, a line break included) in `docs/`,
 `AGENTS.md`, or `README.md` needs a row in docs/reviews/DESIGN_REVIEWS.md: a table
@@ -55,6 +63,7 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,9 +89,9 @@ from scripts.gatelib import (  # noqa: E402
 )
 
 __all__ = [
-    "DEPARTURES", "Citation", "DocHeading", "Finding", "check", "check_design_reviews",
-    "check_needs", "check_placement", "design_review_ids", "doc_headings", "parse_review",
-    "parse_roadmap", "tag_phase", "wave",
+    "DEPARTURES", "Citation", "DocHeading", "Finding", "apply_errata", "check",
+    "check_design_reviews", "check_needs", "check_placement", "design_review_ids",
+    "doc_headings", "parse_review", "parse_roadmap", "tag_phase", "wave",
 ]
 
 # A lands clause in box text: "lands after", "land before", "lands with or after".
@@ -268,6 +277,63 @@ def latent_tag(rest: str) -> str | None:
     return rest[start:]
 
 
+# KERNEL_REVIEW.md's corrections (ROADMAP §10.9, the gate-inputs box): the last
+# `## ` heading, and under it one erratum per non-blank line.
+ERRATA_HEADING = re.compile(r"^## Errata\s*$")
+ERRATUM = re.compile(r"^- (\d{4}-\d{2}-\d{2}) · (F\d{3}) · (\S.*?) -- (\S.*)$")
+
+
+def apply_errata(text: str) -> tuple[str, list[str]]:
+    """The review with each erratum's `**Severity:**` text in place of its finding's
+    own severity line (the latest erratum wins), and the errata's errors. Other
+    errata (a location) change nothing. No `## Errata` heading means no errata."""
+    lines = text.splitlines()
+    tops = [n for n, raw in enumerate(lines) if raw.startswith("## ")]
+    at = [n for n in tops if ERRATA_HEADING.match(lines[n])]
+    if not at:
+        return text, []
+    errors: list[str] = []
+    start = at[0]
+    if len(at) > 1 or tops[-1] != start:
+        errors.append(f"KERNEL_REVIEW.md:{start + 1}: `## Errata` is not the last `## ` heading")
+    severity_at: dict[str, int] = {}
+    current: str | None = None
+    for n, raw in enumerate(lines[:start]):
+        m = HEADING.match(raw)
+        if m:
+            current = m.group(1)
+            continue
+        if current is not None and SEVERITY.match(raw):
+            severity_at[current] = n
+            current = None
+    last: date | None = None
+    for n in range(start + 1, len(lines)):
+        raw = lines[n]
+        if not raw.strip():
+            continue
+        where = f"KERNEL_REVIEW.md:{n + 1}"
+        e = ERRATUM.match(raw)
+        if e is None:
+            errors.append(f"{where}: not `- <YYYY-MM-DD> · <Fnnn> · <what changed> -- <why>`")
+            continue
+        try:
+            day = date.fromisoformat(e.group(1))
+        except ValueError:
+            errors.append(f"{where}: {e.group(1)} is not a date")
+            continue
+        if last is not None and day < last:
+            errors.append(f"{where}: {e.group(1)} is before the erratum above it")
+        last = day
+        fid, change = e.group(2), e.group(3)
+        if fid not in severity_at:
+            errors.append(f"{where}: {fid} is not a finding with a severity line")
+            continue
+        if SEVERITY.match(change):
+            lines[severity_at[fid]] = change
+    out = "\n".join(lines)
+    return (out + "\n" if text.endswith("\n") else out), errors
+
+
 def parse_review(text: str) -> dict[str, Finding]:
     """`gatelib.parse_review`'s findings, each with its LATENT tag."""
     tags: dict[str, str | None] = {}
@@ -444,14 +510,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--wave", type=int, choices=[1], help="fail while a box of this wave is open")
     ap.add_argument("--print-wave", type=int, choices=[1], help="print this wave's boxes")
     args = ap.parse_args(argv)
-    review_text = REVIEW.read_text(encoding="utf-8")
+    review_text, errata_errors = apply_errata(REVIEW.read_text(encoding="utf-8"))
     findings = parse_review(review_text)
     if not findings:
         print(f"check_review_refs: no findings parsed from {REVIEW}", file=sys.stderr)
         return 1
     roadmap_text = ROADMAP.read_text(encoding="utf-8")
     cites = parse_roadmap(roadmap_text)
-    errors = check(findings, cites, args.closed)
+    errors = errata_errors + check(findings, cites, args.closed)
     load_errors: list[str] = []
     needs = load_all_needs(GATES, load_errors)
     errors += load_errors + check_needs(roadmap_text, needs)

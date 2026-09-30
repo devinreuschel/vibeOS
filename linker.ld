@@ -55,6 +55,15 @@ SECTIONS
         __ex_table_end = .;
     } :rodata
 
+    /* The linker's GNU build-id note (--build-id=sha1), which the
+     * VMCOREINFO note carries (docs/VMCOREINFO.md). Kept ahead of the
+     * /DISCARD/ rule for .note.*, read-only inside __rodata_*. */
+    .note.gnu.build-id : ALIGN(4) {
+        __build_id_start = .;
+        KEEP(*(.note.gnu.build-id))
+        __build_id_end = .;
+    } :rodata
+
     /* Inside __rodata_* so paging maps it (copied to 0x8000, not executed here). */
     .trampoline : ALIGN(16) {
         __trampoline_start = .;

@@ -387,7 +387,7 @@ const CELL_CASES: &[CellCase] = &[
         count: 1,
     },
     CellCase {
-        name: "vibefs_init::IMAGE",
+        name: "vibefs_init::Media::Mem image",
         take: crate::fs::ktest::probe_image,
         file: "src/fs/vibefs_init.rs",
         rank: RANK_DEVICE,

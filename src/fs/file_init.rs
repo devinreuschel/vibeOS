@@ -15,6 +15,7 @@
 
 use vibeos::block::MAX_BLOCKDEVS;
 use vibeos::block::blockdev::BlockRef;
+use vibeos::dev::Instance;
 use vibeos::fs::{
     DirEntry, FileId, FileRef, FileSystem, FsError, InodeKind, InodeRef, MAX_NAME, MAX_PATH,
     O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, OpenFlags, S_IFREG, SeekFrom, Stat, split_basename,
@@ -176,10 +177,10 @@ pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], ro: bool) -> Result<()
     let (buf, n) = join_cwd(target)?;
     let at = core::str::from_utf8(&buf[..n]).map_err(|_| FsError::Inval)?;
     match fstype {
-        b"fat32" => fat_init::mount_dev(src, at, ro).map(|_| ()),
-        b"vibefs" => vibefs_init::mount_dev(src, at, ro).map(|_| ()),
+        b"fat32" => fat_init::mount_dev(src, at, ro),
+        b"vibefs" => vibefs_init::mount_dev(src, at, ro),
         b"ramfs" => fs_init::api()
-            .mount_fs(None, at.as_bytes(), &fs_init::RAMFS, None, ro)
+            .mount_fs(None, at.as_bytes(), &fs_init::RAMFS, None, ro, None)
             .map(|_| ()),
         _ => Err(FsError::Inval),
     }
@@ -261,48 +262,53 @@ pub fn creat(path: &[u8]) -> Result<(), FsError> {
 /// The volume a routed path is on, the rest of the path within it, and
 /// the backend's walk.
 struct Routed<'a> {
-    vol: u8,
+    vol: Instance,
     rest: &'a [u8],
-    walk_iget: fn(u8, &[u8]) -> Result<InodeRef, FsError>,
+    walk_iget: fn(&Instance, &[u8]) -> Result<InodeRef, FsError>,
 }
 
 /// The volume serving absolute path `pb`: the longest mount prefix of
-/// the FAT and vibefs route tables, the initrd by default.
-fn route(pb: &[u8]) -> Routed<'_> {
+/// the FAT and vibefs route tables, the root's FAT volume by default.
+fn route(pb: &[u8]) -> Result<Routed<'_>, FsError> {
     let (vv, vs) = vibefs_init::route(pb);
     let (fv, fs) = fat_init::route(pb);
-    if vs > fs {
-        Routed {
-            vol: vv,
+    if let Some(vol) = vv
+        && vs > fs
+    {
+        return Ok(Routed {
+            vol,
             rest: vibefs_init::routed_rest(pb, vs),
             walk_iget: vibefs_init::walk_iget,
-        }
-    } else {
-        Routed {
-            vol: fv,
-            rest: fat_init::routed_rest(pb, fs),
-            walk_iget: fat_init::walk_iget,
-        }
+        });
     }
+    let vol = match fv {
+        Some(v) => v,
+        None => fat_init::root_volume().map_err(|_| FsError::Io)?,
+    };
+    Ok(Routed {
+        vol,
+        rest: fat_init::routed_rest(pb, fs),
+        walk_iget: fat_init::walk_iget,
+    })
 }
 
 /// A counted reference to the `Vfs` inode absolute path `pb` names,
 /// walked by its backend.
 fn walk_abs(pb: &[u8]) -> Result<InodeRef, FsError> {
-    let r = route(pb);
-    (r.walk_iget)(r.vol, r.rest)
+    let r = route(pb)?;
+    (r.walk_iget)(&r.vol, r.rest)
 }
 
 /// A counted reference to the directory absolute path `pb` is in, and
 /// its last component.
 fn vol_parent(pb: &[u8]) -> Result<(InodeRef, &[u8]), FsError> {
-    let r = route(pb);
+    let r = route(pb)?;
     let (parent, name) = split_basename(r.rest)?;
     if name.len() > MAX_NAME {
         return Err(FsError::NameTooLong);
     }
     let pth: &[u8] = if parent.is_empty() { b"/" } else { parent };
-    let dir = (r.walk_iget)(r.vol, pth)?;
+    let dir = (r.walk_iget)(&r.vol, pth)?;
     Ok((dir, name))
 }
 
@@ -352,7 +358,6 @@ pub(super) static ROUTED: core::sync::atomic::AtomicU32 = core::sync::atomic::At
 /// and sysfs, and vibefs on `/vibe`, and last the working directory.
 pub fn init() {
     fat_init::init();
-    vibefs_init::init();
     fs_init::init(fat_init::live());
     if fs_init::live() {
         if let Err(e) = mount_pseudo() {
@@ -370,12 +375,7 @@ pub fn init() {
 }
 
 fn attach_vibefs() {
-    if !vibefs_init::live() {
-        return;
-    }
-    if let Err(e) =
-        mkdir(b"/vibe", 0o755).and_then(|()| vibefs_init::mount_mem("/vibe").map(|_| ()))
-    {
+    if let Err(e) = mkdir(b"/vibe", 0o755).and_then(|()| vibefs_init::mount_mem("/vibe")) {
         crate::klog!(Level::Warn, "vibeOS: fs: /vibe not mounted: {}", e.as_str());
     }
 }
@@ -392,7 +392,7 @@ fn mount_pseudo() -> Result<(), FsError> {
     ];
     for (at, fs) in skins {
         mkdir(at, 0o755)?;
-        fs_init::api().mount_fs(None, at, fs, None, false)?;
+        fs_init::api().mount_fs(None, at, fs, None, false, None)?;
     }
     Ok(())
 }
@@ -444,7 +444,7 @@ fn populate_sysfs() {
     while let Some(d) = dev_init::get(i) {
         let mut name = [0u8; 8];
         let bdf = bdf_name(d.addr.bus, d.addr.device, d.addr.function, &mut name);
-        let drv = d.bound.map(|s| s.as_bytes());
+        let drv = dev_init::bound(&d).map(|s| s.as_bytes());
         if let Err(e) = fs_init::KERNFS.sysfs_add_device(bdf, d.vendor, d.device_id, d.class, drv) {
             failed = failed.saturating_add(1);
             last = Some(e);

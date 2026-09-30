@@ -40,6 +40,9 @@ from tests.harness.harness import (
 )
 
 DISK_BYTES = 4 * 1024 * 1024
+# The main boot's second virtio-blk disk (`vdb`, 2048 sectors), blank, for
+# `block_two_disk_instances`.
+DISK2_BYTES = 1 * 1024 * 1024
 
 # `serial_lines_whole` (ROADMAP §10.2, F138): CPU 0 prints SERIAL_WHOLE_N
 # numbered lines while every AP prints noise lines; each ends in SERIAL_PAD.
@@ -695,8 +698,11 @@ def main(argv: list[str] | None = None) -> int:
     results.Results(env.tier)
     skip_persist = env_flag("VIBEOS_SKIP_PERSIST")
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+    disk2 = make_disk(DISK2_BYTES, "vibeos-vblk2-")
     try:
-        cfg = env.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
+        cfg = env.qemu(
+            extra=ktest_devices(disk, env.smp, extra_disks=(disk2,)), boot_order="d"
+        )
         try:
             raw = _ktest_boot(
                 cfg, env.timeout, persist_reboot=False, label=env.tier, scale=env.timeout_scale
@@ -720,10 +726,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print("[ktest] persist reboot: intact", file=sys.stderr)
     finally:
-        try:
-            os.unlink(disk)
-        except OSError:
-            pass
+        for path in (disk, disk2):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     if args.hpet_off:
         try:

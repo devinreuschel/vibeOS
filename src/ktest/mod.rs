@@ -8,7 +8,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::arch::CycleCounter;
-use vibeos::dev::Device;
+use vibeos::dev::{DevRef, Device};
 use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::PhysAddr;
@@ -807,7 +807,7 @@ pub(crate) fn bar0_va(dev: &Device) -> Option<u64> {
     }
 }
 
-pub(crate) fn find_edu() -> Option<(usize, Device)> {
+pub(crate) fn find_edu() -> Option<DevRef> {
     // QEMU 8.x edu is 1234:11e8 (old QEMU vendor). Later trees use 1b36:11e8.
     crate::dev::ktest::find_id(0x1234, 0x11e8)
         .or_else(|| crate::dev::ktest::find_id(0x1b36, 0x11e8))

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from scripts.check_workflows import (
     CI,
+    RELEASE,
     ROOT,
     TEMPORARY,
     Node,
@@ -32,10 +33,16 @@ from scripts.check_workflows import (
     rule_no_expr_in_run,
     rule_permissions,
     rule_qemu_pin,
+    rule_release_no_cache,
+    rule_release_no_workflow_write,
+    rule_release_one_image,
+    rule_release_privileged_jobs,
+    rule_release_triggers,
     rule_row_lane,
     rule_runs_on,
     rule_tiers,
     rule_upstream,
+    shell_commands,
 )
 
 WF = ".github/workflows/x.yml"
@@ -840,6 +847,313 @@ class TestLaneMap(unittest.TestCase):
 
     def test_map_that_lists_the_workflow_passes(self) -> None:
         self.assertEqual(rule_lane_map(sched_tree()), [])
+
+
+# ROADMAP §10.1 (L1206, L1207): release.yml's rules. 8522be2's file, before the
+# dispatch shape: a tag trigger, a workflow-wide write, caches, one job that
+# checks out and publishes the ktest ISO.
+OLD_RELEASE = """\
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build ISO and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 xorriso nasm ovmf dosfstools
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: rust-src, llvm-tools, rustfmt, clippy
+          targets: x86_64-unknown-none
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cache limine binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: limine
+          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+
+      - name: setup
+        run: ./setup.sh
+
+      - name: build production ISO
+        run: make iso
+
+      - name: e2e (BIOS)
+        run: make test-e2e
+
+      - name: build ktest ISO
+        run: make vibeos-ktest.iso
+
+      - name: changelog section
+        run: python3 scripts/changelog_section.py --tag "${{ github.ref_name }}" > /tmp/release-body.md
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: |
+            vibeos.iso
+            vibeos-ktest.iso
+          body_path: /tmp/release-body.md
+          fail_on_unmatched_files: true
+"""  # noqa: E501 -- the file as it was, one line of it past 100 columns
+
+REL_ON = """\
+on:
+  workflow_dispatch:
+    inputs:
+      tag: {description: "release tag", required: true, type: string}
+"""
+
+REL_PUBLISH = """\
+  publish:
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write # publishes
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: {name: release, path: dist}
+      - working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: dist/vibeos.iso
+          fail_on_unmatched_files: true
+"""
+
+
+def release_yml(
+    on: str = REL_ON, perms: str = "permissions:\n  contents: read\n", jobs: str = ""
+) -> str:
+    build = """\
+  build:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read # reads ci's runs
+    steps:
+      - run: make release-artifacts OUT=dist
+"""
+    return f"name: release\n{on}{perms}jobs:\n{build}{jobs or REL_PUBLISH}"
+
+
+def release_rules(text: str) -> list[str]:
+    t = Tree(workflows={RELEASE: parse(text, RELEASE)})
+    return [p.rule for rule in RELEASE_RULES for p in rule(t)]
+
+
+GH_RELEASE = "softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3"
+CHECKOUT = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0"
+
+RELEASE_RULES = (
+    rule_release_triggers,
+    rule_release_no_cache,
+    rule_release_no_workflow_write,
+    rule_release_privileged_jobs,
+    rule_release_one_image,
+)
+
+
+def job(body: str, head: str = "    permissions:\n      contents: write # publishes\n") -> str:
+    return f"  publish:\n    needs: build\n    runs-on: ubuntu-26.04\n{head}    steps:\n{body}"
+
+
+def step_run(script: str) -> str:
+    lines = "".join(f"          {ln}\n" for ln in script.splitlines())
+    return f"      - run: |\n{lines}"
+
+
+class ReleaseRulesTest(unittest.TestCase):
+    def assert_only(self, text: str, rule: str) -> None:
+        got = release_rules(text)
+        self.assertTrue(got, f"no problem; wanted {rule}")
+        self.assertEqual(set(got), {rule}, got)
+
+    def test_good_release_passes(self) -> None:
+        self.assertEqual(release_rules(release_yml()), [])
+
+    def test_repository_release_yml_passes(self) -> None:
+        t = load_tree(ROOT)
+        self.assertEqual([str(p) for r in RELEASE_RULES for p in r(t)], [])
+
+    def test_rules_apply_only_to_release_yml(self) -> None:
+        t = Tree(workflows={WF: wf(OLD_RELEASE)})
+        self.assertEqual([p for r in RELEASE_RULES for p in r(t)], [])
+
+    # release_no_cache
+    def test_cache_actions_fail(self) -> None:
+        for uses in ("actions/cache", "actions/cache/restore"):
+            extra = job(
+                f"      - uses: {uses}@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0\n"
+                "        with: {path: x, key: y}\n"
+                f"      - uses: {GH_RELEASE}\n"
+                "        with: {files: dist/vibeos.iso}\n",
+                head="",
+            )
+            self.assert_only(release_yml(jobs=extra), "release_no_cache")
+
+    def test_with_cache_fails(self) -> None:
+        extra = job(
+            "      - uses: actions/setup-python@0000000000000000000000000000000000000000 # v5\n"
+            "        with: {python-version: '3.12', cache: pip}\n"
+            f"      - uses: {GH_RELEASE}\n"
+            "        with: {files: dist/vibeos.iso}\n",
+            head="",
+        )
+        self.assert_only(release_yml(jobs=extra), "release_no_cache")
+
+    # release_triggers
+    def test_other_triggers_fail(self) -> None:
+        for on in (
+            REL_ON + "  push:\n    tags: [\"v*\"]\n",
+            REL_ON + "  schedule:\n    - cron: \"1 2 * * *\"\n",
+            "on: [workflow_dispatch, push]\n",
+        ):
+            self.assertIn("release_triggers", release_rules(release_yml(on=on)), on)
+        self.assert_only(release_yml(on=REL_ON + "  release:\n"), "release_triggers")
+
+    def test_dispatch_without_required_tag_fails(self) -> None:
+        for on in (
+            "on:\n  workflow_dispatch:\n",
+            "on: workflow_dispatch\n",
+            "on:\n  workflow_dispatch:\n    inputs:\n      version: {required: true}\n",
+            "on:\n  workflow_dispatch:\n    inputs:\n      tag: {required: false}\n",
+        ):
+            self.assert_only(release_yml(on=on), "release_triggers")
+
+    # release_no_workflow_write
+    def test_workflow_write_fails(self) -> None:
+        for perms in (
+            "permissions:\n  contents: write # publishes\n",
+            "permissions: write-all\n",
+        ):
+            self.assertIn(
+                "release_no_workflow_write", release_rules(release_yml(perms=perms)), perms
+            )
+
+    # release_privileged_jobs
+    def test_write_job_checkout_fails(self) -> None:
+        body = (
+            f"      - uses: {CHECKOUT}\n"
+            + REL_PUBLISH.split("    steps:\n", 1)[1]
+        )
+        self.assert_only(release_yml(jobs=job(body)), "release_privileged_jobs")
+
+    def test_write_job_scripts_fail(self) -> None:
+        for script in (
+            "./setup.sh",
+            "make release-artifacts OUT=dist",
+            "python3 scripts/changelog_section.py --tag \"$TAG\"",
+            "bash x.sh",
+            "echo $(./x)",
+            "echo `./x`",
+            "cd dist && FOO=1 ./x",
+            "sha256sum -c SHA256SUMS | tee log",
+            "ls \\\n  -l && make",
+        ):
+            body = step_run(script) + REL_PUBLISH.split("    steps:\n", 1)[1]
+            self.assert_only(release_yml(jobs=job(body)), "release_privileged_jobs")
+
+    def test_write_all_job_is_privileged(self) -> None:
+        body = step_run("make x") + REL_PUBLISH.split("    steps:\n", 1)[1]
+        text = release_yml(jobs=job(body, head="    permissions: write-all\n"))
+        self.assert_only(text, "release_privileged_jobs")
+
+    def test_release_environment_job_is_privileged(self) -> None:
+        for env in ("    environment: release\n", "    environment: {name: release}\n"):
+            for body in (
+                f"      - uses: {CHECKOUT}\n",
+                step_run("python3 x.py"),
+            ):
+                sign = f"  sign:\n    runs-on: ubuntu-26.04\n{env}    steps:\n{body}"
+                text = release_yml(jobs=REL_PUBLISH + sign)
+                self.assert_only(text, "release_privileged_jobs")
+
+    def test_local_action_fails(self) -> None:
+        body = "      - uses: ./.github/actions/x\n" + REL_PUBLISH.split("    steps:\n", 1)[1]
+        self.assert_only(release_yml(jobs=job(body)), "release_privileged_jobs")
+
+    def test_allowed_commands_pass(self) -> None:
+        for script in (
+            "sha256sum -c SHA256SUMS",
+            "# a comment naming ./x\ncd dist; ls -l || echo none",
+            "LC_ALL=C sha256sum -c SHA256SUMS && test -s vibeos.iso",
+        ):
+            body = step_run(script) + REL_PUBLISH.split("    steps:\n", 1)[1]
+            self.assertEqual(release_rules(release_yml(jobs=job(body))), [], script)
+
+    def test_unprivileged_job_may_build(self) -> None:
+        text = release_yml(jobs=REL_PUBLISH + "  other:\n    runs-on: ubuntu-26.04\n"
+                           "    steps:\n" + step_run("./setup.sh && make"))
+        self.assertEqual(release_rules(text), [])
+
+    def test_shell_commands(self) -> None:
+        self.assertEqual(
+            shell_commands("A=1 B=2 make x && cd d || ls; a | b\n# c\nfoo \\\n  bar"),
+            ["make", "cd", "ls", "a", "b", "foo"],
+        )
+
+    # release_one_image
+    def test_ktest_iso_asset_fails(self) -> None:
+        text = release_yml().replace(
+            "files: dist/vibeos.iso",
+            "files: |\n            dist/vibeos.iso\n            dist/vibeos-ktest.iso",
+        )
+        self.assert_only(text, "release_one_image")
+
+    def test_missing_vibeos_iso_fails(self) -> None:
+        text = release_yml().replace("files: dist/vibeos.iso", "files: dist/notes.md")
+        self.assert_only(text, "release_one_image")
+
+    def test_non_image_assets_pass(self) -> None:
+        text = release_yml().replace(
+            "files: dist/vibeos.iso",
+            "files: |\n            dist/vibeos.iso\n            dist/THIRD-PARTY-NOTICES.txt",
+        )
+        self.assertEqual(release_rules(text), [])
+
+    def test_publish_without_needs_build_fails(self) -> None:
+        text = release_yml().replace("    needs: build\n", "")
+        self.assert_only(text, "release_one_image")
+
+    def test_8522be2_release_yml_fails_each_rule(self) -> None:
+        got = set(release_rules(OLD_RELEASE))
+        self.assertEqual(
+            got,
+            {
+                "release_triggers",
+                "release_no_cache",
+                "release_no_workflow_write",
+                "release_privileged_jobs",
+                "release_one_image",
+            },
+        )
 
 
 class TestTree(unittest.TestCase):

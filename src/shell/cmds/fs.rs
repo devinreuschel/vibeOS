@@ -10,12 +10,13 @@ use vibeos::fs::{
 use vibeos::shell::Command;
 
 use crate::console_init::Console;
-use crate::fat_init;
+use crate::fat_init::{self, FatVolume};
 use crate::file_init::{
     child_path, close, cwd_copy, join_cwd, list_dir, mkdir, mkdir_p, mount, open, read, rename,
     rmdir, set_cwd, stat_path, sync_fs, umount, unlink, write,
 };
-use crate::vibefs_init;
+use crate::fs_init;
+use crate::vibefs_init::{self, VibeVolume};
 
 pub(crate) const COMMANDS: &[Command] = &[
     Command {
@@ -322,7 +323,12 @@ fn cmd_stat(args: &[&str]) {
 }
 
 fn cmd_df(_args: &[&str]) {
-    match fat_init::df(fat_init::VOL_INITRD) {
+    let root = fs_init::volume_at(b"/");
+    let fat = root
+        .as_ref()
+        .map_err(|e| *e)
+        .and_then(|v| v.downcast_ref::<FatVolume>().ok_or(FsError::Inval));
+    match fat.and_then(fat_init::df) {
         Ok((ft, tot, free, nclus)) => {
             #[expect(
                 clippy::let_underscore_must_use,
@@ -339,8 +345,11 @@ fn cmd_df(_args: &[&str]) {
         }
         Err(e) => err_line("df", e),
     }
+    let vibe = fs_init::volume_at(b"/vibe");
     if vibefs_init::live()
-        && let Ok((ft, tot, free, nblk)) = vibefs_init::df(vibefs_init::VOL_MEM)
+        && let Ok(v) = vibe.as_ref()
+        && let Some(v) = v.downcast_ref::<VibeVolume>()
+        && let Ok((ft, tot, free, nblk)) = vibefs_init::df(v)
     {
         #[expect(
             clippy::let_underscore_must_use,

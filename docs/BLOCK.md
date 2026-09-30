@@ -5,7 +5,7 @@ Index: [DESIGN.md](DESIGN.md). This file holds DESIGN §10, and its headings kee
 Phase 7. Portable types live in `crates/core/src/block/mod.rs`, `crates/core/src/block/part.rs`, and
 `crates/core/src/block/cache.rs`. Kernel ramdisk, waiters, and the boot marker live in
 `src/block/block_init.rs`. virtio-blk packing is `crates/core/src/drivers/virtio_blk.rs`;
-the driver is `src/drivers/virtio_blk_init.rs`. Partition children are
+the driver is the directory `src/drivers/virtio_blk_init/`. Partition children are
 `src/block/part_init.rs`. The write-back cache is `src/block/cache_init.rs`.
 
 ## 10.1 Completions
@@ -266,7 +266,9 @@ blocks. Discard on ramdisk validates the range and otherwise no-ops.
 ## 10.4 virtio-blk
 
 Modern virtio-blk (`1af4:1042`, `VERSION_1` required) binds by id on the
-Phase 6 transport. Config reads capacity (512-byte units), `blk_size` (512
+Phase 6 transport. Each bound function is its own instance (`VirtioBlk`), owned by its PCI
+registry entry and named `vda`, `vdb`, … in bind order, with its own queues, bounce slots and
+vectors; the driver keeps no list of them (DEVICES.md §12.1 rule 1). Config reads capacity (512-byte units), `blk_size` (512
 if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
 descriptor chain: header + data (or discard range) + status. The status
 byte is device-writable DMA, never a stack slot. Completions harvest the

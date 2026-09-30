@@ -61,7 +61,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import IO, NamedTuple
@@ -525,6 +525,10 @@ def _reap(src: LineSource) -> int | None:
 # QEMU 10 dropped `-no-hpet`. `pc,hpet=off` is the machine property on
 # 8.x (where -no-hpet is only deprecated) and on 10.x.
 HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
+# On every x86_64 boot (DESIGN §8.4): `pvpanic` for the panic path's event
+# and `vmcoreinfo` so `dump-guest-memory` copies the kernel's VMCOREINFO
+# note into a core (docs/VMCOREINFO.md). Neither is a PCI device.
+FORENSICS_DEVICES = ("-device", "pvpanic", "-device", "vmcoreinfo")
 # The only defaults of the QEMU settings: the Makefile sets none, and
 # `make run` reads them through `run_interactive.py` (ROADMAP §10.2).
 DEFAULT_SMP = 2
@@ -760,11 +764,15 @@ def virtio_blk_args(
     discard: bool = True,
     nbd: bool = False,
     cache: str = "writeback",
+    extra: Sequence[str] = (),
 ) -> tuple[str, ...]:
-    """The virtio-blk drive. With `nbd`, `disk` is the unix socket of the
-    volatile-cache device (`nbd-cache`), served with no discard and a
-    volatile write cache on the device (`write-cache=on`), so a guest flush
-    reaches the server under every `cache` mode."""
+    """The virtio-blk drive, then one more drive per `extra` image. With
+    `nbd`, `disk` is the unix socket of the volatile-cache device
+    (`nbd-cache`), served with no discard and a volatile write cache on the
+    device (`write-cache=on`), so a guest flush reaches the server under
+    every `cache` mode. Extra disk `k` (from 1) is drive `vibehd<k>`, a raw
+    image with the same queues and `discard`; the guest binds the drives in
+    this order, as `vda`, `vdb`, …."""
     if cache not in NBD_CACHE_MODES:
         raise HarnessError(f"cache={cache!r}: not one of {NBD_CACHE_MODES}")
     device = f"virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues={smp}"
@@ -778,10 +786,19 @@ def virtio_blk_args(
         drive = f"file={disk},if=none,id=vibehd,format=raw,cache={cache}"
         if discard:
             drive += ",discard=unmap"
-    return ("-drive", drive, "-device", device)
+    args: tuple[str, ...] = ("-drive", drive, "-device", device)
+    for k, path in enumerate(extra, start=1):
+        d = f"file={path},if=none,id=vibehd{k},format=raw,cache={cache}"
+        if discard:
+            d += ",discard=unmap"
+        dev = f"virtio-blk-pci,drive=vibehd{k},disable-legacy=on,num-queues={smp}"
+        args += ("-drive", d, "-device", dev)
+    return args
 
 
-def ktest_devices(disk: str, smp: int) -> tuple[str, ...]:
+def ktest_devices(disk: str, smp: int, *, extra_disks: Sequence[str] = ()) -> tuple[str, ...]:
+    """The in-guest registry's devices: `disk` is `vda`, and each of
+    `extra_disks` a further virtio-blk disk after it."""
     return (
         "-device",
         "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -791,7 +808,7 @@ def ktest_devices(disk: str, smp: int) -> tuple[str, ...]:
         "edu",
         "-device",
         "virtio-rng-pci,disable-legacy=on",
-    ) + virtio_blk_args(disk, smp)
+    ) + virtio_blk_args(disk, smp, extra=extra_disks)
 
 
 def kill_delay(rng: random.Random) -> float:
@@ -1107,6 +1124,7 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
     if words:
         # QEMU's option syntax reads `,,` as one comma inside a value.
         argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]
+    argv += list(FORENSICS_DEVICES)
     argv += list(cfg.extra)
     ensure_qemu_pinned(argv[0], cfg.qemu_version)
     return argv

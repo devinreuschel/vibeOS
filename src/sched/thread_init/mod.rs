@@ -1261,6 +1261,16 @@ pub fn park(deadline: Option<Instant>) {
     schedule();
 }
 
+/// The TCB slot array's base address and length, which VMCOREINFO's
+/// `SYMBOL(vibeos_tcbs)` and `LENGTH(vibeos_tcbs)` carry
+/// (docs/VMCOREINFO.md). `SCHED` is a static, so the array never moves; the
+/// binding fails to compile if the slot type stops being `TcbSlot`.
+pub(crate) fn table_root() -> (u64, u64) {
+    let s = SCHED.lock();
+    let slots: &[vibeos::thread::TcbSlot] = &s.slots[..];
+    (slots.as_ptr().addr() as u64, slots.len() as u64)
+}
+
 /// Hold SCHED for `f`. IF is off for the whole call (IRQ-aware lock).
 #[cfg(feature = "kernel_tests")]
 pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {

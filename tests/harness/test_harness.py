@@ -5,6 +5,7 @@ Runs under `python3 -m unittest discover`. Standard-library only.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import platform
 import socket
@@ -23,6 +24,7 @@ import tests.harness.run_ktest as run_ktest
 from tests.harness import frame, results
 from tests.harness.harness import (
     AP_ONLINE,
+    FORENSICS_DEVICES,
     HPET_OFF_MACHINE,
     ISA_DEBUG_FAIL,
     ISA_DEBUG_PASS,
@@ -49,6 +51,7 @@ from tests.harness.harness import (
     is_dump_banner,
     iter_lines_with_deadline,
     kernel_text,
+    ktest_devices,
     mce_monitor_cmd,
     overlay_env,
     qemu_argv,
@@ -1408,6 +1411,33 @@ class TestQemuArgv(unittest.TestCase):
         self.assertNotIn("-fw_cfg", argv)
         self.assertFalse(any("if=pflash" in a for a in argv))
 
+    def test_forensics_devices_on_every_boot(self) -> None:
+        self.assertEqual(
+            FORENSICS_DEVICES, ("-device", "pvpanic", "-device", "vmcoreinfo")
+        )
+        with _firmware() as fw:
+            cfgs = [
+                QemuConfig(iso="x.iso"),
+                QemuConfig(iso="x.iso", firmware=fw),
+                QemuConfig(iso="x.iso", hpet=False),
+            ]
+            argvs = [qemu_argv(c, "/tmp/mon") for c in cfgs]
+        for argv in argvs:
+            devices = [argv[i + 1] for i, a in enumerate(argv) if a == "-device"]
+            self.assertEqual(devices.count("pvpanic"), 1, argv)
+            self.assertEqual(devices.count("vmcoreinfo"), 1, argv)
+
+    def test_ktest_argv_has_forensics_devices(self) -> None:
+        cfg = QemuConfig(iso="x.iso", extra=ktest_devices("disk.img", 2))
+        argv = qemu_argv(cfg, "/tmp/mon")
+        devices = [argv[i + 1] for i, a in enumerate(argv) if a == "-device"]
+        self.assertEqual(devices.count("pvpanic"), 1)
+        self.assertEqual(devices.count("vmcoreinfo"), 1)
+        extra = list(ktest_devices("disk.img", 2))
+        self.assertEqual(argv[-len(extra) :], extra)
+        i = argv.index("vmcoreinfo")
+        self.assertEqual(argv[i - 3 : i + 1], list(FORENSICS_DEVICES))
+
     def test_display_none_by_default(self) -> None:
         argv = qemu_argv(QemuConfig(iso="x.iso"), None)
         i = argv.index("-display")
@@ -2005,6 +2035,38 @@ class TestDevicePresets(unittest.TestCase):
             self.assertIn("write-cache=on", blob)
             self.assertNotIn("discard", blob)
         self.assertNotIn("write-cache", " ".join(virtio_blk_args("/d", 2)))
+
+    def test_virtio_blk_args_extra_disks(self) -> None:
+        from tests.harness.harness import virtio_blk_args
+
+        for discard in (True, False):
+            args = virtio_blk_args("/a", 3, discard=discard, extra=("/b",))
+            drives = [args[i + 1] for i, a in enumerate(args) if a == "-drive"]
+            devices = [args[i + 1] for i, a in enumerate(args) if a == "-device"]
+            self.assertEqual(len(drives), 2)
+            self.assertEqual(len(devices), 2)
+            self.assertEqual(args[0], "-drive")
+            self.assertEqual(args[2], "-device")
+            self.assertIn("file=/a,", drives[0])
+            self.assertIn("id=vibehd,", drives[0])
+            self.assertIn("file=/b,", drives[1])
+            self.assertIn("id=vibehd1,", drives[1])
+            self.assertIn("drive=vibehd,", devices[0])
+            self.assertIn("drive=vibehd1,", devices[1])
+            for d in devices:
+                self.assertIn("num-queues=3", d)
+                self.assertIn("disable-legacy=on", d)
+            for d in drives:
+                self.assertEqual("discard=unmap" in d, discard)
+
+    def test_ktest_devices_extra_disk(self) -> None:
+        from tests.harness.harness import ktest_devices
+
+        args = ktest_devices("/first.img", 2, extra_disks=("/second.img",))
+        blob = " ".join(args)
+        self.assertLess(blob.index("file=/first.img"), blob.index("file=/second.img"))
+        self.assertIn("id=vibehd1", blob)
+        self.assertNotIn("/second.img", " ".join(ktest_devices("/first.img", 2)))
 
     def test_virtio_blk_rejects_unsafe_cache(self) -> None:
         from tests.harness.harness import virtio_blk_args
@@ -2866,7 +2928,11 @@ class TestHpetOffBoot(unittest.TestCase):
         )
 
     def cfg(self, cpu: str = "max") -> QemuConfig:
-        return run_ktest.hpet_off_config(self.env(cpu), "disk.img")
+        # No QEMU pin: a fixture config is not built by `env_config`, and the
+        # check job has no QEMU to pin (`harness.ensure_qemu_pinned`).
+        return dataclasses.replace(
+            run_ktest.hpet_off_config(self.env(cpu), "disk.img"), qemu_version=None
+        )
 
     def check(self, *texts: str, exit_code: int = ISA_DEBUG_PASS) -> None:
         run_ktest.check_hpet_off_boot([K(t) for t in texts], exit_code, self.cfg())

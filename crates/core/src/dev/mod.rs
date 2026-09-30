@@ -2,14 +2,22 @@
 //!
 //! Scan fills a device list; [`Registry::bind_all`] matches drivers by
 //! id and probes in dependency order. Resource claims are exclusive.
+//!
+//! Each device is a counted entry ([`DevRef`], DESIGN §12.1 rule 1): its
+//! record never changes after [`Registry::push`], and the registry slot
+//! owns what changes, the claims, the bound driver's name and the
+//! driver's per-device state ([`Instance`]).
 
 pub mod dma;
 pub mod entropy;
 pub mod pci;
 pub mod virtio;
 
+use core::any::Any;
 use core::fmt;
+use core::ops::Deref;
 
+use crate::kalloc::{AllocError, TryArc};
 use crate::pci::{Bar, BarKind, Bdf, CapSet, FuncInfo, MAX_BARS, MAX_SCAN};
 
 pub const MAX_DEVICES: usize = MAX_SCAN;
@@ -99,7 +107,6 @@ pub struct Resource {
     pub prefetchable: bool,
     /// Kernel VA after ioremap / physmap. 0 = not mapped.
     pub mapped_va: u64,
-    pub claimed: bool,
 }
 
 impl Resource {
@@ -110,7 +117,6 @@ impl Resource {
         size: 0,
         prefetchable: false,
         mapped_va: 0,
-        claimed: false,
     };
 
     pub fn from_bar(bar_index: u8, bar: Bar) -> Self {
@@ -129,7 +135,6 @@ impl Resource {
             size: bar.size,
             prefetchable: bar.prefetchable,
             mapped_va: 0,
-            claimed: false,
         }
     }
 
@@ -198,11 +203,37 @@ pub trait Driver: Send + Sync {
     fn order(&self) -> u8 {
         100
     }
-    fn probe(&self, dev: &mut Device) -> Result<(), ProbeError>;
-    fn remove(&self, dev: &mut Device);
+    /// Bind `dev`. `Ok(Some(inst))` hands the driver's per-device state
+    /// to the device's registry slot, which owns it from then on; a driver
+    /// keeps no list of its devices (DESIGN §12.1 rule 1).
+    fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError>;
+    fn remove(&self, dev: &DevRef);
 }
 
-#[derive(Clone, Copy, Debug)]
+/// A driver's per-device state, type-erased: the one owner type a
+/// registry slot holds. Built with `TryArc::try_new_unsize(v, |p| p)`;
+/// every holder clones this value and downcasts with `downcast_ref`.
+pub type Instance = TryArc<dyn Any + Send + Sync>;
+
+/// Wrap `v` as an [`Instance`].
+pub fn instance<V: Any + Send + Sync>(v: V) -> Result<Instance, AllocError> {
+    TryArc::<dyn Any + Send + Sync>::try_new_unsize(v, |p| p)
+}
+
+/// Whether `a` and `b` are the same instance.
+pub fn same_instance(a: &Instance, b: &Instance) -> bool {
+    core::ptr::addr_eq(&**a as *const (dyn Any + Send + Sync), &**b)
+}
+
+/// A PCI function's record. Not `Copy` or `Clone`: the registry holds the
+/// one copy behind a [`DevRef`] (DESIGN §12.1 rule 1).
+///
+/// ```compile_fail
+/// let a = vibeos::dev::Device::empty();
+/// let b = a;
+/// let c = a; // `Device` is not `Copy`
+/// ```
+#[derive(Debug)]
 pub struct Device {
     pub addr: Bdf,
     pub vendor: u16,
@@ -214,7 +245,6 @@ pub struct Device {
     pub resources: [Resource; MAX_BARS],
     pub irq: IrqBind,
     pub caps: CapSet,
-    pub bound: Option<&'static str>,
 }
 
 impl Device {
@@ -230,7 +260,6 @@ impl Device {
             resources: [Resource::EMPTY; MAX_BARS],
             irq: IrqBind { pin: 0, line: 0 },
             caps: CapSet::empty(),
-            bound: None,
         }
     }
 
@@ -255,7 +284,6 @@ impl Device {
                 line: info.irq_line,
             },
             caps: info.caps,
-            bound: None,
         }
     }
 
@@ -287,8 +315,15 @@ impl Device {
         Ok(())
     }
 
-    pub fn write_tree(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        let drv = self.bound.unwrap_or("-");
+    /// The `devices` line of this record, bound to `bound`, with the BARs
+    /// `claimed` marks.
+    pub fn write_tree(
+        &self,
+        bound: Option<&str>,
+        claimed: &[bool; MAX_BARS],
+        f: &mut impl fmt::Write,
+    ) -> fmt::Result {
+        let drv = bound.unwrap_or("-");
         write!(
             f,
             "{} {:04x}:{:04x} {} drv={drv}",
@@ -312,12 +347,56 @@ impl Device {
                     r.kind.name(),
                     r.addr,
                     r.size,
-                    if r.claimed { " claimed" } else { "" }
+                    if claimed[b] { " claimed" } else { "" }
                 )?;
             }
             b += 1;
         }
         Ok(())
+    }
+}
+
+/// A device's record under the id it was registered with. Immutable after
+/// [`Registry::push`]; shared through [`DevRef`].
+pub struct DevEntry {
+    id: u64,
+    info: Device,
+}
+
+/// A counted reference to a registered device. Its id is never reused
+/// within a boot. Derefs to the device's record.
+#[derive(Clone)]
+pub struct DevRef(TryArc<DevEntry>);
+
+impl DevRef {
+    /// Build an unregistered entry for `info` under `id`.
+    pub fn try_new(id: u64, info: Device) -> Result<Self, AllocError> {
+        TryArc::try_new(DevEntry { id, info }).map(DevRef)
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0.id
+    }
+
+    /// Whether `other` names the same entry.
+    pub fn same(&self, other: &DevRef) -> bool {
+        self.0.id == other.0.id
+    }
+}
+
+impl Deref for DevRef {
+    type Target = Device;
+    fn deref(&self) -> &Device {
+        &self.0.info
+    }
+}
+
+impl fmt::Debug for DevRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DevRef")
+            .field("id", &self.0.id)
+            .field("addr", &self.0.info.addr)
+            .finish()
     }
 }
 
@@ -328,9 +407,24 @@ struct Claim {
     size: u64,
 }
 
+/// A registry slot: the entry, and what changes about it after `push`.
+struct Slot {
+    dev: DevRef,
+    claimed: [bool; MAX_BARS],
+    /// The bound driver's slot in `drivers`; set only while unbound. An
+    /// index, not the name, keeps the table under 4 KiB.
+    bound: Option<u8>,
+    /// The bound driver's per-device state, owned here.
+    inst: Option<Instance>,
+}
+
+/// The device table. It holds counted entries and the instances their
+/// drivers returned, never a record by value.
 pub struct Registry {
-    devices: [Device; MAX_DEVICES],
+    slots: [Option<Slot>; MAX_DEVICES],
     n_dev: usize,
+    /// The next entry's id; ids start at 1 and never repeat.
+    next_id: u64,
     drivers: [Option<&'static dyn Driver>; MAX_DRIVERS],
     n_drv: usize,
     claims: [Option<Claim>; MAX_CLAIMS],
@@ -340,23 +434,14 @@ pub struct Registry {
 impl Registry {
     pub const fn new() -> Self {
         Self {
-            devices: [Device::empty(); MAX_DEVICES],
+            slots: [const { None }; MAX_DEVICES],
             n_dev: 0,
+            next_id: 1,
             drivers: [None; MAX_DRIVERS],
             n_drv: 0,
             claims: [None; MAX_CLAIMS],
             n_claim: 0,
         }
-    }
-
-    pub fn snapshot(&self, out: &mut [Device]) -> usize {
-        let n = self.n_dev.min(out.len());
-        let mut i = 0usize;
-        while i < n {
-            out[i] = self.devices[i];
-            i += 1;
-        }
-        n
     }
 
     pub fn len(&self) -> usize {
@@ -371,29 +456,106 @@ impl Registry {
         self.n_drv
     }
 
-    pub fn get(&self, i: usize) -> Option<&Device> {
-        if i < self.n_dev {
-            Some(&self.devices[i])
-        } else {
-            None
-        }
+    /// Take the next entry id. Ids are handed out once each, so an entry
+    /// built outside the table's lock with one is still unique.
+    pub fn take_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        id
     }
 
-    pub fn get_mut(&mut self, i: usize) -> Option<&mut Device> {
-        if i < self.n_dev {
-            Some(&mut self.devices[i])
-        } else {
-            None
-        }
-    }
-
-    pub fn push(&mut self, d: Device) -> bool {
-        if self.n_dev >= MAX_DEVICES {
-            return false;
-        }
-        self.devices[self.n_dev] = d;
+    /// Publish `dev`, built under an id [`take_id`](Self::take_id) gave.
+    /// `AllocError` when the table is full; `dev` is dropped here then, so
+    /// a caller passes a clone.
+    pub fn insert(&mut self, dev: DevRef) -> Result<(), AllocError> {
+        let slot = self.slots.get_mut(self.n_dev).ok_or(AllocError)?;
+        *slot = Some(Slot {
+            dev,
+            claimed: [false; MAX_BARS],
+            bound: None,
+            inst: None,
+        });
         self.n_dev += 1;
-        true
+        Ok(())
+    }
+
+    /// Register `d` under a fresh id. Allocates: the kernel takes an id
+    /// under its lock, builds the entry outside it and [`insert`]s it.
+    ///
+    /// [`insert`]: Self::insert
+    pub fn push(&mut self, d: Device) -> Result<DevRef, AllocError> {
+        if self.n_dev >= MAX_DEVICES {
+            return Err(AllocError);
+        }
+        let r = DevRef::try_new(self.take_id(), d)?;
+        self.insert(r.clone())?;
+        Ok(r)
+    }
+
+    fn slot(&self, i: usize) -> Option<&Slot> {
+        self.slots.get(i).and_then(Option::as_ref)
+    }
+
+    fn slot_of(&self, dev: &DevRef) -> Option<&Slot> {
+        self.slots.iter().flatten().find(|s| s.dev.same(dev))
+    }
+
+    fn slot_of_mut(&mut self, dev: &DevRef) -> Option<&mut Slot> {
+        self.slots.iter_mut().flatten().find(|s| s.dev.same(dev))
+    }
+
+    /// A reference to device `i`, in registration order.
+    pub fn get(&self, i: usize) -> Option<DevRef> {
+        self.slot(i).map(|s| s.dev.clone())
+    }
+
+    /// A reference to the device with id `id`.
+    pub fn by_id(&self, id: u64) -> Option<DevRef> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|s| s.dev.id() == id)
+            .map(|s| s.dev.clone())
+    }
+
+    fn driver_name(&self, i: u8) -> Option<&'static str> {
+        self.driver_at(i as usize).map(|d| d.name())
+    }
+
+    /// The name of the driver bound to `dev`.
+    pub fn bound(&self, dev: &DevRef) -> Option<&'static str> {
+        self.slot_of(dev)
+            .and_then(|s| s.bound)
+            .and_then(|i| self.driver_name(i))
+    }
+
+    /// Record the registered driver `name` as `dev`'s, owning `inst`. Only
+    /// an unbound device binds, to a registered driver; `false` otherwise,
+    /// and `inst` is dropped.
+    pub fn bind(&mut self, dev: &DevRef, name: &'static str, inst: Option<Instance>) -> bool {
+        let Some(di) = (0..self.n_drv).find(|&i| self.driver_name(i as u8) == Some(name)) else {
+            return false;
+        };
+        match self.slot_of_mut(dev) {
+            Some(s) if s.bound.is_none() => {
+                s.bound = Some(di as u8);
+                s.inst = inst;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A reference to `dev`'s driver instance.
+    pub fn instance(&self, dev: &DevRef) -> Option<Instance> {
+        self.slot_of(dev).and_then(|s| s.inst.clone())
+    }
+
+    /// Whether BAR `bar` of `dev` is claimed.
+    pub fn is_claimed(&self, dev: &DevRef, bar: u8) -> bool {
+        self.slot_of(dev)
+            .and_then(|s| s.claimed.get(bar as usize).copied())
+            .unwrap_or(false)
     }
 
     pub fn register(&mut self, drv: &'static dyn Driver) -> bool {
@@ -418,18 +580,19 @@ impl Registry {
         alen != 0 && blen != 0 && a < b.saturating_add(blen) && b < a.saturating_add(alen)
     }
 
-    pub fn claim(&mut self, dev_i: usize, bar: u8) -> Result<(), ClaimError> {
+    /// Claim BAR `bar` of `dev` for its driver.
+    pub fn claim(&mut self, dev: &DevRef, bar: u8) -> Result<(), ClaimError> {
         if bar as usize >= MAX_BARS {
             return Err(ClaimError::BadIndex);
         }
-        if dev_i >= self.n_dev {
+        let Some(s) = self.slot_of(dev) else {
             return Err(ClaimError::BadIndex);
-        }
-        let res = self.devices[dev_i].resources[bar as usize];
+        };
+        let res = s.dev.resources[bar as usize];
         if res.is_empty() {
             return Err(ClaimError::Empty);
         }
-        if res.claimed {
+        if s.claimed[bar as usize] {
             return Err(ClaimError::Already);
         }
         let mem = matches!(res.kind, ResourceKind::Memory);
@@ -452,7 +615,9 @@ impl Registry {
             size: res.size,
         });
         self.n_claim += 1;
-        self.devices[dev_i].resources[bar as usize].claimed = true;
+        if let Some(s) = self.slot_of_mut(dev) {
+            s.claimed[bar as usize] = true;
+        }
         Ok(())
     }
 
@@ -490,9 +655,10 @@ impl Registry {
         n
     }
 
-    /// `(driver_slot, device_slot)` in bind order. Probe outside the
-    /// registry lock: drivers may alloc and take RANK_DEVICE.
-    pub fn collect_bind_jobs(&self, out: &mut [(u8, u8)]) -> usize {
+    /// `(driver_slot, device)` in bind order. Probe outside the registry
+    /// lock: drivers may alloc and take RANK_DEVICE. The caller drops the
+    /// references with the lock dropped.
+    pub fn collect_bind_jobs(&self, out: &mut [Option<(u8, DevRef)>]) -> usize {
         let mut order = [0u8; MAX_DRIVERS];
         let mut idx = [0u8; MAX_DRIVERS];
         let n = self.sorted_driver_idx(&mut idx, &mut order);
@@ -506,21 +672,23 @@ impl Registry {
                     continue;
                 }
             };
-            let mut dv = 0usize;
-            while dv < self.n_dev && w < out.len() {
-                if self.devices[dv].bound.is_none() && self.devices[dv].matches_driver(drv) {
-                    out[w] = (idx[di], dv as u8);
+            for s in self.slots.iter().flatten() {
+                if w >= out.len() {
+                    break;
+                }
+                if s.bound.is_none() && s.dev.matches_driver(drv) {
+                    out[w] = Some((idx[di], s.dev.clone()));
                     w += 1;
                 }
-                dv += 1;
             }
             di += 1;
         }
         w
     }
 
-    /// Match unbound devices to drivers. `enable` runs before `probe`
-    /// (command bits, etc). Drivers are sorted by [`Driver::order`].
+    /// Match unbound devices to drivers (the host binder). `enable` runs
+    /// before `probe` (command bits, etc). Drivers are sorted by
+    /// [`Driver::order`].
     pub fn bind_all(&mut self, mut enable: impl FnMut(&Device)) {
         let mut order = [0u8; MAX_DRIVERS];
         let mut idx = [0u8; MAX_DRIVERS];
@@ -536,12 +704,16 @@ impl Registry {
             };
             let mut dv = 0usize;
             while dv < self.n_dev {
-                if self.devices[dv].bound.is_none() && self.devices[dv].matches_driver(drv) {
-                    enable(&self.devices[dv]);
+                let job = self
+                    .slot(dv)
+                    .filter(|s| s.bound.is_none() && s.dev.matches_driver(drv))
+                    .map(|s| s.dev.clone());
+                if let Some(dev) = job {
+                    enable(&dev);
                     // A failed probe leaves the device unbound for a later
                     // driver; the kernel's `dev_init::bind_all` also logs it.
-                    if drv.probe(&mut self.devices[dv]).is_ok() {
-                        self.devices[dv].bound = Some(drv.name())
+                    if let Ok(inst) = drv.probe(&dev) {
+                        self.bind(&dev, drv.name(), inst);
                     }
                 }
                 dv += 1;
@@ -550,11 +722,11 @@ impl Registry {
         }
     }
 
+    /// Each device's `devices` lines, with its binding and claims.
     pub fn write_tree(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        let mut i = 0usize;
-        while i < self.n_dev {
-            self.devices[i].write_tree(f)?;
-            i += 1;
+        for s in self.slots.iter().flatten() {
+            let bound = s.bound.and_then(|i| self.driver_name(i));
+            s.dev.write_tree(bound, &s.claimed, f)?;
         }
         Ok(())
     }
@@ -599,25 +771,17 @@ mod tests {
         fn order(&self) -> u8 {
             self.order
         }
-        fn probe(&self, dev: &mut Device) -> Result<(), ProbeError> {
+        fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
             self.probes.fetch_add(1, Ordering::SeqCst);
             if self.bar != 0xFF {
-                let mut i = 0usize;
-                while i < MAX_BARS {
-                    if dev.resources[i].bar == self.bar && !dev.resources[i].is_empty() {
-                        if dev.resources[i].claimed {
-                            return Err(ProbeError::Busy);
-                        }
-                        dev.resources[i].claimed = true;
-                        return Ok(());
-                    }
-                    i += 1;
+                if dev.resources[self.bar as usize].is_empty() {
+                    return Err(ProbeError::NoResource);
                 }
-                return Err(ProbeError::NoResource);
+                return Ok(None);
             }
-            Ok(())
+            Ok(None)
         }
-        fn remove(&self, _dev: &mut Device) {}
+        fn remove(&self, _dev: &DevRef) {}
     }
 
     fn nic() -> Device {
@@ -634,7 +798,6 @@ mod tests {
             size: 0x20000,
             prefetchable: false,
             mapped_va: 0,
-            claimed: false,
         };
         d.resources[1] = Resource {
             kind: ResourceKind::Io,
@@ -643,7 +806,6 @@ mod tests {
             size: 0x40,
             prefetchable: false,
             mapped_va: 0,
-            claimed: false,
         };
         d
     }
@@ -661,7 +823,6 @@ mod tests {
             size: 0x100_0000,
             prefetchable: true,
             mapped_va: 0,
-            claimed: false,
         };
         d
     }
@@ -682,19 +843,22 @@ mod tests {
     #[test]
     fn claim_rejects_second_and_overlap() {
         let mut r = Registry::new();
-        assert!(r.push(nic()));
-        assert!(r.push(vga()));
-        r.claim(0, 0).unwrap();
-        assert_eq!(r.claim(0, 0), Err(ClaimError::Already));
-        assert_eq!(r.claim(0, 9), Err(ClaimError::BadIndex));
+        let d0 = r.push(nic()).unwrap();
+        let d1 = r.push(vga()).unwrap();
+        r.claim(&d0, 0).unwrap();
+        assert_eq!(r.claim(&d0, 0), Err(ClaimError::Already));
+        assert_eq!(r.claim(&d0, 9), Err(ClaimError::BadIndex));
         // Same range from a cloned resource on another slot: overlap.
         let mut clone = nic();
         clone.addr = Bdf::new(0, 4, 0);
-        assert!(r.push(clone));
-        assert_eq!(r.claim(2, 0), Err(ClaimError::Overlap));
-        r.claim(0, 1).unwrap();
-        r.claim(1, 0).unwrap();
-        assert!(r.get(0).unwrap().resources[0].claimed);
+        let d2 = r.push(clone).unwrap();
+        assert_eq!(r.claim(&d2, 0), Err(ClaimError::Overlap));
+        r.claim(&d0, 1).unwrap();
+        r.claim(&d1, 0).unwrap();
+        assert!(r.is_claimed(&d0, 0));
+        assert!(!r.is_claimed(&d2, 0));
+        let stray = DevRef::try_new(99, nic()).unwrap();
+        assert_eq!(r.claim(&stray, 0), Err(ClaimError::BadIndex));
         assert_eq!(ClaimError::Already.as_str(), "already claimed");
         assert_eq!(ProbeError::Busy.as_str(), "busy");
         assert_eq!(ResourceKind::Memory.name(), "mem");
@@ -732,45 +896,125 @@ mod tests {
         EARLY.probes.store(0, Ordering::SeqCst);
         VGA.probes.store(0, Ordering::SeqCst);
         let mut r = Registry::new();
-        r.push(nic());
-        r.push(vga());
+        let d0 = r.push(nic()).unwrap();
+        let d1 = r.push(vga()).unwrap();
         // Register late first; early must still win the nic.
         assert!(r.register(&LATE));
         assert!(r.register(&EARLY));
         assert!(r.register(&VGA));
-        let mut jobs = [(0u8, 0u8); MAX_DEVICES];
+        let mut jobs: [Option<(u8, DevRef)>; MAX_DEVICES] = [const { None }; MAX_DEVICES];
         let nj = r.collect_bind_jobs(&mut jobs);
         assert!(nj >= 2);
-        assert_eq!(r.driver_at(jobs[0].0 as usize).unwrap().name(), "early-nic");
+        let (drv0, dev0) = jobs[0].as_ref().unwrap();
+        assert_eq!(r.driver_at(*drv0 as usize).unwrap().name(), "early-nic");
+        assert!(dev0.same(&d0));
+        drop(jobs);
         let mut enables = 0u32;
         r.bind_all(|_| enables += 1);
         assert_eq!(enables, 2);
-        assert_eq!(r.get(0).unwrap().bound, Some("early-nic"));
-        assert_eq!(r.get(1).unwrap().bound, Some("vga"));
+        assert_eq!(r.bound(&d0), Some("early-nic"));
+        assert_eq!(r.bound(&d1), Some("vga"));
         assert_eq!(EARLY.probes.load(Ordering::SeqCst), 1);
         assert_eq!(LATE.probes.load(Ordering::SeqCst), 0);
         assert_eq!(VGA.probes.load(Ordering::SeqCst), 1);
+        // A bound device does not bind again.
+        assert!(!r.bind(&d0, "late-nic", None));
+        r.claim(&d0, 0).unwrap();
         let mut tree = String::new();
         r.write_tree(&mut tree).unwrap();
         assert!(tree.contains("early-nic"));
         assert!(tree.contains("00:03.0"));
         assert!(tree.contains("bar0 mem"));
+        assert!(tree.contains(" claimed"));
     }
 
     #[test]
-    fn one_device_fits_shell_stack_full_table_does_not() {
-        // Shell stacks are 16 KiB. Copy one Device at a time; a full
-        // [Device; MAX_DEVICES] plus a second Registry overflows.
-        let one = core::mem::size_of::<Device>();
-        let table = core::mem::size_of::<[Device; MAX_DEVICES]>();
+    fn registry_holds_references() {
+        // The table holds counted entries, not records by value, so it
+        // fits a shell stack with room to spare.
         let reg = core::mem::size_of::<Registry>();
-        assert!(one < 2048, "one Device {one}");
-        assert!(
-            table + reg > 16 * 1024,
-            "table {table} + registry {reg} should exceed 16KiB"
-        );
-        // cmd_devices stacked both; even lspci's table plus frame is tight.
-        assert!(reg > 16 * 1024, "Registry {reg} should exceed 16KiB");
+        assert!(reg < 4096, "Registry {reg} should be under 4 KiB");
+        let mut r = Registry::new();
+        let d = r.push(nic()).unwrap();
+        let g = r.get(0).unwrap();
+        assert_eq!(g.id(), d.id());
+        assert!(g.same(&d));
+        assert_eq!(g.vendor, 0x8086);
+        assert!(r.get(1).is_none());
+    }
+
+    #[test]
+    fn devref_ids_never_reused() {
+        let mut r = Registry::new();
+        let a = r.push(nic()).unwrap();
+        let b = r.push(vga()).unwrap();
+        let c = r.push(nic()).unwrap();
+        assert_eq!((a.id(), b.id(), c.id()), (1, 2, 3));
+        for (i, want) in [&a, &b, &c].into_iter().enumerate() {
+            let got = r.get(i).unwrap();
+            assert_eq!(got.id(), want.id());
+            assert!(r.by_id(want.id()).unwrap().same(want));
+        }
+        assert!(r.by_id(4).is_none());
+        // An id taken for an entry built outside the table is not reused.
+        let id = r.take_id();
+        assert_eq!(id, 4);
+        assert_eq!(r.push(vga()).unwrap().id(), 5);
+    }
+
+    static DROPS: AtomicU32 = AtomicU32::new(0);
+
+    /// A driver's per-device state, counting its drops.
+    struct Counted(u64);
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A driver with no state of its own: each probe returns a new
+    /// instance for the registry to own.
+    struct Stateless;
+
+    impl Driver for Stateless {
+        fn name(&self) -> &'static str {
+            "stateless"
+        }
+        fn ids(&self) -> &'static [IdMatch] {
+            E1000_IDS
+        }
+        fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+            Ok(Some(instance(Counted(dev.id()))?))
+        }
+        fn remove(&self, _dev: &DevRef) {}
+    }
+
+    static STATELESS: Stateless = Stateless;
+
+    #[test]
+    fn probe_instance_owned_by_entry() {
+        assert_eq!(core::mem::size_of::<Stateless>(), 0);
+        DROPS.store(0, Ordering::SeqCst);
+        let mut r = Registry::new();
+        let d0 = r.push(nic()).unwrap();
+        let mut n2 = nic();
+        n2.addr = Bdf::new(0, 4, 0);
+        let d1 = r.push(n2).unwrap();
+        assert!(r.register(&STATELESS));
+        r.bind_all(|_| {});
+        let i0 = r.instance(&d0).unwrap();
+        let i1 = r.instance(&d1).unwrap();
+        let c0 = i0.downcast_ref::<Counted>().unwrap();
+        let c1 = i1.downcast_ref::<Counted>().unwrap();
+        assert_eq!((c0.0, c1.0), (d0.id(), d1.id()));
+        assert!(!core::ptr::eq(c0, c1));
+        assert!(!same_instance(&i0, &i1));
+        assert!(same_instance(&i0, &r.instance(&d0).unwrap()));
+        drop((i0, i1));
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        drop(r);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -792,7 +1036,10 @@ mod tests {
         assert_eq!(d.resources[0].kind, ResourceKind::Memory);
         assert_eq!(d.resources[0].size, 0x1000);
         assert_eq!(d.caps.msi, Some(0x50));
-        assert!(d.bound.is_none());
+        let mut r = Registry::new();
+        let d = r.push(d).unwrap();
+        assert!(r.bound(&d).is_none());
+        assert!(r.instance(&d).is_none());
     }
 
     #[test]

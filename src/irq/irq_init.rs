@@ -4,10 +4,11 @@
 //! allocate and block. Allocate is refused in a hard-IRQ (the dispatcher
 //! flag, not `InterruptGuard`).
 
+use core::any::Any;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
-use vibeos::dev::Device;
+use vibeos::dev::{Device, Instance};
 use vibeos::irq::{
     self, IrqError, MsixEntry, VectorPool, in_pool, msi_message_addr, msi_message_data, pool_index,
 };
@@ -27,6 +28,11 @@ use crate::thread_init;
 
 type Handler = fn();
 
+/// A threaded handler half. It gets the context its vector was set with
+/// (a driver instance, DESIGN §12.1 rule 1), so no driver keeps a table of
+/// its devices to find the one that interrupted.
+pub type ThreadedFn = fn(Option<&(dyn Any + Send + Sync)>);
+
 pub(super) struct IrqState {
     pool: VectorPool,
     routes: [Route; irq::POOL_LEN],
@@ -40,8 +46,9 @@ static IRQ: SpinMutex<IrqState> = SpinMutex::with_rank(
         th: Threaded {
             wq: WaitQueue::new(),
             pending: [false; irq::POOL_LEN],
-            top: [0; irq::POOL_LEN],
-            work: [0; irq::POOL_LEN],
+            top: [None; irq::POOL_LEN],
+            work: [None; irq::POOL_LEN],
+            ctx: [const { None }; irq::POOL_LEN],
             started: false,
         },
     },
@@ -81,8 +88,10 @@ enum Route {
 pub(super) struct Threaded {
     wq: WaitQueue,
     pub(super) pending: [bool; irq::POOL_LEN],
-    pub(super) top: [usize; irq::POOL_LEN],
-    pub(super) work: [usize; irq::POOL_LEN],
+    pub(super) top: [Option<ThreadedFn>; irq::POOL_LEN],
+    pub(super) work: [Option<ThreadedFn>; irq::POOL_LEN],
+    /// Each vector's context, which both halves get a reference to.
+    pub(super) ctx: [Option<Instance>; irq::POOL_LEN],
     started: bool,
 }
 
@@ -105,14 +114,10 @@ fn device_irq(frame: &mut arch::idt::TrapFrame) {
 pub fn dispatch(vec: u8) {
     hardirq::set(true);
     if let Some(i) = handler_slot(vec) {
-        let (top, work) = with_irq(|s| (s.th.top[i], s.th.work[i]));
-        if work != 0 || top != 0 {
-            if top != 0 {
-                // SAFETY: invariant: a nonzero `th.top` slot holds a `fn()`;
-                // established by `irq::irq_init::set_threaded`, its only
-                // nonzero store.
-                let h: Handler = unsafe { core::mem::transmute(top) };
-                h();
+        let (top, work, ctx) = with_irq(|s| (s.th.top[i], s.th.work[i], s.th.ctx[i].clone()));
+        if work.is_some() || top.is_some() {
+            if let Some(h) = top {
+                h(ctx.as_deref());
             }
             thread_init::with_sched(|sched| {
                 with_irq(|s| {
@@ -122,6 +127,9 @@ pub fn dispatch(vec: u8) {
                     }
                 });
             });
+            // A count, never the last while the vector holds its own; a
+            // last put in hard IRQ defers (DESIGN §2.11 rule 6).
+            drop(ctx);
         } else {
             let p = HANDLERS[i].load(Ordering::Acquire);
             if p != 0 {
@@ -157,16 +165,20 @@ pub fn free_vector(vec: u8) -> Result<(), IrqError> {
     if let Some(gsi) = gsi {
         apic_init::mask_gsi(gsi);
     }
-    with_irq(|s| {
+    let (res, ctx) = with_irq(|s| {
+        let mut ctx = None;
         if let Some(i) = handler_slot(vec) {
             HANDLERS[i].store(0, Ordering::Release);
             s.routes[i] = Route::None;
-            s.th.top[i] = 0;
-            s.th.work[i] = 0;
+            s.th.top[i] = None;
+            s.th.work[i] = None;
+            ctx = s.th.ctx[i].take();
             s.th.pending[i] = false;
         }
-        s.pool.free(vec)
-    })
+        (s.pool.free(vec), ctx)
+    });
+    drop(ctx);
+    res
 }
 
 #[cfg_attr(
@@ -185,20 +197,29 @@ pub fn set_handler(vec: u8, h: Handler) -> Result<(), IrqError> {
 }
 
 /// Top half runs in hard IRQ (ack only). `work` runs in the IRQ thread.
-pub fn set_threaded(vec: u8, top: Option<Handler>, work: Handler) -> Result<(), IrqError> {
+/// Both get `ctx`, which the vector holds a reference to until it is set
+/// again or freed.
+pub fn set_threaded(
+    vec: u8,
+    top: Option<ThreadedFn>,
+    work: ThreadedFn,
+    ctx: Option<Instance>,
+) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
     let Some(i) = handler_slot(vec) else {
         return Err(IrqError::BadVector);
     };
-    thread_init::with_sched(|_| {
+    let old = thread_init::with_sched(|_| {
         with_irq(|s| {
-            s.th.top[i] = top.map(|f| f as usize).unwrap_or(0);
-            s.th.work[i] = work as usize;
+            s.th.top[i] = top;
+            s.th.work[i] = Some(work);
             s.th.pending[i] = false;
-        });
+            core::mem::replace(&mut s.th.ctx[i], ctx)
+        })
     });
+    drop(old);
     Ok(())
 }
 
@@ -211,20 +232,16 @@ fn last_online_cpu() -> u32 {
     if m == 0 { 0 } else { 63 - m.leading_zeros() }
 }
 
-fn take_work() -> Option<Handler> {
+/// The next pending vector's bottom half and a reference to its context.
+fn take_work() -> Option<(ThreadedFn, Option<Instance>)> {
     thread_init::with_sched(|s| {
         with_irq(|st| {
             let mut i = 0usize;
             while i < irq::POOL_LEN {
                 if st.th.pending[i] {
                     st.th.pending[i] = false;
-                    let p = st.th.work[i];
-                    if p != 0 {
-                        // SAFETY: invariant: a nonzero `th.work` slot holds a
-                        // `fn()`; established by `irq::irq_init::set_threaded`,
-                        // its only nonzero store.
-                        let h: Handler = unsafe { core::mem::transmute(p) };
-                        return Some(h);
+                    if let Some(h) = st.th.work[i] {
+                        return Some((h, st.th.ctx[i].clone()));
                     }
                 }
                 i += 1;
@@ -239,7 +256,10 @@ fn irq_thread() {
     let _nr = crate::sync_init::no_reclaim();
     loop {
         match take_work() {
-            Some(h) => h(),
+            Some((h, ctx)) => {
+                h(ctx.as_deref());
+                drop(ctx);
+            }
             None => thread_init::schedule(),
         }
     }

@@ -31,7 +31,7 @@ fn cmd_blk(_args: &[&str]) {
         clippy::let_underscore_must_use,
         reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
     )]
-    let _ = crate::virtio_blk_init::shell_line(&mut Console);
+    let _ = crate::virtio_blk_init::shell_lines(&mut Console);
     #[expect(
         clippy::let_underscore_must_use,
         reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"

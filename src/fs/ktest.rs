@@ -210,8 +210,8 @@ pub(crate) fn test_fat_initrd() -> Outcome {
     if !fat_init::live() {
         return Outcome::Fail("not live");
     }
-    if fat_init::NVOL.load(Ordering::Acquire) == 0 {
-        return Outcome::Fail("nvol");
+    if with_root_fat(|_| Ok(())).is_err() {
+        return Outcome::Fail("no root volume");
     }
     match fid::stat_path("/hello.txt") {
         Ok(s) if s.kind == InodeKind::Reg && s.size > 0 => {}
@@ -268,8 +268,8 @@ pub(crate) fn test_vibefs() -> Outcome {
     if !vibefs_init::live() {
         return Outcome::Fail("not live");
     }
-    if vibefs_init::NVOL.load(Ordering::Acquire) == 0 {
-        return Outcome::Fail("nvol");
+    if with_vibe_mem(|_| Ok(())).is_err() {
+        return Outcome::Fail("no /vibe volume");
     }
     match fid::stat_path("/vibe") {
         Ok(s) if s.kind == InodeKind::Dir => {}
@@ -330,7 +330,10 @@ pub(crate) fn test_vibefs() -> Outcome {
         }
         Err(_) => return Outcome::Fail("extent open"),
     }
-    if vibefs_init::with_slot(vibefs_init::VOL_MEM, |v, d| v.snapshot(d, b"s0")).is_err() {
+    let snap = with_vibe_mem(|m| {
+        vibefs_init::with_slot(m, |v, d| v.snapshot(d, b"s0")).map_err(|e| e.to_fs())
+    });
+    if snap.is_err() {
         return Outcome::Fail("snap");
     }
     if file_init::sync_fs().is_err() {
@@ -828,7 +831,25 @@ pub(crate) fn test_inode_size_shared_across_opens() -> Outcome {
 
 /// Free bytes on the FAT initrd.
 fn fat_free() -> Result<u64, FsError> {
-    fat_init::df(fat_init::VOL_INITRD).map(|(_, _, free, _)| free)
+    with_root_fat(fat_init::df).map(|(_, _, free, _)| free)
+}
+
+/// Run `f` on the root's FAT volume, the initrd's.
+fn with_root_fat<R>(
+    f: impl FnOnce(&fat_init::FatVolume) -> Result<R, FsError>,
+) -> Result<R, FsError> {
+    let v = fat_init::root_volume()?;
+    f(v.downcast_ref::<fat_init::FatVolume>()
+        .ok_or(FsError::Inval)?)
+}
+
+/// Run `f` on the memory vibefs volume at `/vibe`.
+pub(super) fn with_vibe_mem<R>(
+    f: impl FnOnce(&vibefs_init::VibeVolume) -> Result<R, FsError>,
+) -> Result<R, FsError> {
+    let v = fs_init::volume_at(b"/vibe")?;
+    f(v.downcast_ref::<vibefs_init::VibeVolume>()
+        .ok_or(FsError::Inval)?)
 }
 
 pub(crate) fn test_fat_unlinked_open_frees_at_close() -> Outcome {
@@ -1138,7 +1159,7 @@ fn mkdir_s11() -> Step<()> {
 
 /// Free bytes on the initrd volume, read outside the VFS lock.
 fn initrd_free() -> Step<u64> {
-    fat_init::df(fat_init::VOL_INITRD)
+    with_root_fat(fat_init::df)
         .map(|(_, _, free, _)| free)
         .map_err(|e| ("df", e))
 }
@@ -1303,9 +1324,10 @@ pub(crate) fn probe_initrd() {
     super::fat_init::with_initrd(|_| ());
 }
 
-/// Take `vibefs_init::IMAGE` as a volume read does (`cross_cpu_cells_ranked`).
+/// Take the `/vibe` memory volume's image lock as a volume read does
+/// (`cross_cpu_cells_ranked`).
 pub(crate) fn probe_image() {
-    super::vibefs_init::with_image(|_| ());
+    let _ = super::vibefs_init::probe_image_at(b"/vibe");
 }
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
