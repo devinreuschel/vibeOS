@@ -501,3 +501,84 @@ class TestDesignReviews(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ERRATA_REVIEW = REVIEW + "\n## 8. Guardrails\n\ntext\n\n## Errata\n\n"
+
+
+class TestErrata(unittest.TestCase):
+    def apply(self, errata: str) -> tuple[dict[str, Finding], list[str]]:
+        text, errors = check_review_refs.apply_errata(ERRATA_REVIEW + errata)
+        return parse_review(text), errors
+
+    def test_erratum_severity_read_before_finding_line(self) -> None:
+        roadmap = "## Phase 10: C\n- [ ] open (F001)\n- [x] done (F002, F003)\n"
+        erratum = "- 2026-10-01 · F001 · **Severity:** MEDIUM · **Confidence:** Confirmed -- " \
+                  "the window needs a KVM guest\n"
+
+        def run(review: str) -> tuple[int, str]:
+            err = io.StringIO()
+            with contextlib.ExitStack() as st:
+                st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                st.enter_context(contextlib.redirect_stderr(err))
+                m = st.enter_context(mock.patch.object(check_review_refs, "ROADMAP"))
+                m.read_text.return_value = roadmap
+                st.enter_context(mock.patch.object(check_review_refs, "load_all_needs",
+                                                   return_value=[]))
+                rv = st.enter_context(mock.patch.object(check_review_refs, "REVIEW"))
+                rv.read_text.return_value = review
+                rc = check_review_refs.main(["--closed"])
+            return rc, err.getvalue()
+
+        rc, err = run(ERRATA_REVIEW)
+        self.assertEqual(rc, 1)
+        self.assertIn("F001 (CRITICAL) cited by an open box", err)
+        self.assertEqual(run(ERRATA_REVIEW + erratum), (0, ""))
+
+    def test_erratum_adds_latent(self) -> None:
+        f, errors = self.apply("- 2026-10-01 · F001 · **Severity:** CRITICAL · LATENT (Phase 12 "
+                               "SMP) · **Confidence:** Confirmed -- unreachable until Phase 12\n")
+        self.assertEqual(errors, [])
+        self.assertTrue(f["F001"].latent)
+        self.assertEqual(f["F001"].tag, "Phase 12 SMP")
+
+    def test_latest_erratum_wins(self) -> None:
+        f, errors = self.apply("- 2026-10-01 · F003 · **Severity:** HIGH -- first reading\n"
+                               "- 2026-10-01 · F003 · **Severity:** MEDIUM -- second reading\n")
+        self.assertEqual(errors, [])
+        self.assertEqual(f["F003"].severity, "MEDIUM")
+        self.assertEqual(f["F001"].severity, "CRITICAL")
+
+    def test_erratum_unknown_finding_fails(self) -> None:
+        _, errors = self.apply("- 2026-10-01 · F099 · **Severity:** LOW -- no such finding\n")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("F099 is not a finding", errors[0])
+
+    def test_malformed_erratum_fails(self) -> None:
+        for bad in ("F001 is medium now\n",
+                    "- 2026-10-01 · F001 · **Severity:** LOW\n",
+                    "- 01-10-2026 · F001 · **Severity:** LOW -- why\n",
+                    "- 2026-13-01 · F001 · **Severity:** LOW -- why\n",
+                    "- F001 · **Severity:** LOW -- no date\n"):
+            f, errors = self.apply(bad)
+            self.assertEqual(len(errors), 1, bad)
+            self.assertEqual(f["F001"].severity, "CRITICAL")
+
+    def test_errata_not_last_section_fails(self) -> None:
+        text = REVIEW + "\n## Errata\n\n## 9. After\n"
+        _, errors = check_review_refs.apply_errata(text)
+        self.assertEqual(len(errors), 2)
+        self.assertIn("`## Errata` is not the last", errors[0])
+        self.assertEqual(check_review_refs.apply_errata(REVIEW), (REVIEW, []))
+
+    def test_free_text_erratum_changes_nothing(self) -> None:
+        text, errors = check_review_refs.apply_errata(
+            ERRATA_REVIEW + "- 2026-10-01 · F002 · Location: src/a.rs:10 -- line moved\n")
+        self.assertEqual(errors, [])
+        self.assertEqual(parse_review(text), parse_review(REVIEW))
+
+    def test_errata_dates_in_order(self) -> None:
+        _, errors = self.apply("- 2026-10-02 · F003 · **Severity:** HIGH -- first\n"
+                               "- 2026-10-01 · F003 · **Severity:** MEDIUM -- second\n")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("before the erratum above it", errors[0])
