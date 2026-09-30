@@ -382,6 +382,10 @@ fn fill_stack(space: &AddressSpace, img: &Image, args: &ExecArgs) -> Result<u64,
 /// An argument block holding `argv` and `envp` as given, at the default
 /// limit (SYSCALL.md §3.1): the kernel's own spawns' (`spawn_elf`, and
 /// C-RING3's `load_image`).
+#[cfg_attr(
+    feature = "vibefs_crash",
+    allow(dead_code, reason = "the vibefs_crash build spawns no process")
+)]
 pub fn exec_args(argv: &[&[u8]], envp: &[&[u8]]) -> Result<ExecArgs, LoadError> {
     let mut args = ExecArgs::new(elf::arg_space_limit(RLIMIT_STACK_DEFAULT));
     for a in argv {
