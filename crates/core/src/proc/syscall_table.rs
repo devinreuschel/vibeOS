@@ -183,6 +183,8 @@ pub enum Sys {
     Fcntl,
     /// `getppid`.
     Getppid,
+    /// `reboot`.
+    Reboot,
     /// `getdents64`.
     Getdents64,
     /// `psinfo`.
@@ -191,7 +193,7 @@ pub enum Sys {
 
 impl Sys {
     /// Every syscall, in table order.
-    pub const ALL: [Sys; 23] = [
+    pub const ALL: [Sys; 24] = [
         Sys::Read,
         Sys::Write,
         Sys::Open,
@@ -213,6 +215,7 @@ impl Sys {
         Sys::Kill,
         Sys::Fcntl,
         Sys::Getppid,
+        Sys::Reboot,
         Sys::Getdents64,
         Sys::Psinfo,
     ];
@@ -224,7 +227,7 @@ impl Sys {
 }
 
 /// The rows, in [`Sys`] order.
-pub static ROWS: [Row; 23] = [
+pub static ROWS: [Row; 24] = [
     Row {
         sys: Sys::Read,
         name: "read",
@@ -647,6 +650,39 @@ pub static ROWS: [Row; 23] = [
         aarch64: Some(173),
     },
     Row {
+        sys: Sys::Reboot,
+        name: "reboot",
+        args: &[
+            Arg {
+                name: "magic1",
+                ty: CType::Int,
+                ptr: None,
+            },
+            Arg {
+                name: "magic2",
+                ty: CType::Int,
+                ptr: None,
+            },
+            Arg {
+                name: "cmd",
+                ty: CType::UInt,
+                ptr: None,
+            },
+            Arg {
+                name: "arg",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::CStr,
+                    dir: Dir::In,
+                    nullable: false,
+                    when: "for `RESTART2` only, after the uid, magic and command checks",
+                }),
+            },
+        ],
+        x86_64: Some(169),
+        aarch64: Some(142),
+    },
+    Row {
         sys: Sys::Getdents64,
         name: "getdents64",
         args: &[
@@ -752,6 +788,8 @@ pub trait Handlers {
     fn fcntl(&mut self, fd: u32, cmd: u32, arg: u64) -> SysResult;
     /// `getppid`.
     fn getppid(&mut self) -> SysResult;
+    /// `reboot`.
+    fn reboot(&mut self, magic1: i32, magic2: i32, cmd: u32, arg: u64) -> SysResult;
     /// `getdents64`.
     fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult;
     /// `psinfo`.
@@ -807,6 +845,8 @@ pub mod x86_64 {
         pub const SYS_FCNTL: u64 = 72;
         /// `getppid`.
         pub const SYS_GETPPID: u64 = 110;
+        /// `reboot`.
+        pub const SYS_REBOOT: u64 = 169;
         /// `getdents64`.
         pub const SYS_GETDENTS64: u64 = 217;
         /// `psinfo`.
@@ -836,6 +876,7 @@ pub mod x86_64 {
         t[nr::SYS_KILL as usize] = Some(Sys::Kill);
         t[nr::SYS_FCNTL as usize] = Some(Sys::Fcntl);
         t[nr::SYS_GETPPID as usize] = Some(Sys::Getppid);
+        t[nr::SYS_REBOOT as usize] = Some(Sys::Reboot);
         t[nr::SYS_GETDENTS64 as usize] = Some(Sys::Getdents64);
         t[nr::SYS_PSINFO as usize] = Some(Sys::Psinfo);
         t
@@ -868,6 +909,7 @@ pub mod x86_64 {
             Sys::Kill => h.kill(regs[0] as i32, regs[1] as i32),
             Sys::Fcntl => h.fcntl(regs[0] as u32, regs[1] as u32, regs[2]),
             Sys::Getppid => h.getppid(),
+            Sys::Reboot => h.reboot(regs[0] as i32, regs[1] as i32, regs[2] as u32, regs[3]),
             Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
             Sys::Psinfo => h.psinfo(regs[0], regs[1] as usize),
         }
@@ -926,6 +968,8 @@ pub mod aarch64 {
         pub const SYS_FCNTL: u64 = 25;
         /// `getppid`.
         pub const SYS_GETPPID: u64 = 173;
+        /// `reboot`.
+        pub const SYS_REBOOT: u64 = 142;
         /// `getdents64`.
         pub const SYS_GETDENTS64: u64 = 61;
     }
@@ -950,6 +994,7 @@ pub mod aarch64 {
         t[nr::SYS_KILL as usize] = Some(Sys::Kill);
         t[nr::SYS_FCNTL as usize] = Some(Sys::Fcntl);
         t[nr::SYS_GETPPID as usize] = Some(Sys::Getppid);
+        t[nr::SYS_REBOOT as usize] = Some(Sys::Reboot);
         t[nr::SYS_GETDENTS64 as usize] = Some(Sys::Getdents64);
         t
     };
@@ -978,6 +1023,7 @@ pub mod aarch64 {
             Sys::Kill => h.kill(regs[0] as i32, regs[1] as i32),
             Sys::Fcntl => h.fcntl(regs[0] as u32, regs[1] as u32, regs[2]),
             Sys::Getppid => h.getppid(),
+            Sys::Reboot => h.reboot(regs[0] as i32, regs[1] as i32, regs[2] as u32, regs[3]),
             Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
             Sys::Open | Sys::Dup2 | Sys::Fork | Sys::Psinfo => Err(KError::ENOSYS),
         }
@@ -1153,6 +1199,18 @@ impl Handlers for Recorder {
 
     fn getppid(&mut self) -> SysResult {
         self.record(Sys::Getppid, &[])
+    }
+
+    fn reboot(&mut self, magic1: i32, magic2: i32, cmd: u32, arg: u64) -> SysResult {
+        self.record(
+            Sys::Reboot,
+            &[
+                Val::I32(magic1),
+                Val::I32(magic2),
+                Val::U32(cmd),
+                Val::Ptr(arg),
+            ],
+        )
     }
 
     fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult {

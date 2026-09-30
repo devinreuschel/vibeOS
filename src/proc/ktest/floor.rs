@@ -54,3 +54,33 @@ pub(crate) fn floor_syscalls_from_user() -> Outcome {
         Err(o) => o,
     }
 }
+
+/// `reboot`'s argument checks from ring 3: bad magic numbers, an unknown
+/// command and `HALT` are `EINVAL`, `RESTART2` with an unmapped `arg` is
+/// `EFAULT`, and `CAD_ON` and `CAD_OFF` return 0 (SYSCALL.md §3.1).
+pub(crate) fn reboot_bad_args_einval() -> Outcome {
+    match run_case("reboot-einval") {
+        Ok(()) => Outcome::Ok,
+        Err(o) => o,
+    }
+}
+
+/// `floorcheck <case>`, whose `reboot` call ends the machine: its return
+/// is the failure. Opt-in; `make test-e2e-power` runs it and checks the
+/// line and QEMU's exit.
+fn reboot_ends(case: &str) -> Outcome {
+    match user::run(&FLOORCHECK, &["floorcheck", case]) {
+        Ok(st) => crate::fail_fmt!("reboot returned: {case}: status {st:#x}"),
+        Err(e) => crate::fail_fmt!("{case}: spawn: {}", e.as_str()),
+    }
+}
+
+/// `reboot(POWER_OFF)` turns the machine off.
+pub(crate) fn reboot_power_off() -> Outcome {
+    reboot_ends("poweroff")
+}
+
+/// `reboot(RESTART)` resets the machine.
+pub(crate) fn reboot_restart() -> Outcome {
+    reboot_ends("restart")
+}

@@ -240,6 +240,7 @@ from its handler (F150).
 | 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | default actions only |
 | 72 | 25 | `fcntl` | 3 | `unsigned int fd`, `unsigned int cmd`, `unsigned long arg` | — | `F_GETFD` and `F_SETFD` (`FD_CLOEXEC`) only |
 | 110 | 173 | `getppid` | 0 | — | — | — |
+| 169 | 142 | `reboot` | 4 | `int magic1`, `int magic2`, `unsigned int cmd`, `void *arg` | `arg`: C string, for `RESTART2` only, after the uid, magic and command checks | power off and restart; see SYSCALL.md §3.1 |
 | 217 | 61 | `getdents64` | 3 | `unsigned int fd`, `struct linux_dirent64 *dirent`, `unsigned int count` | `dirent`: out, `count` bytes, after the `fd` lookup and the first record's fit | at most 512 bytes a call; see SYSCALL.md §3.1 |
 | 500 | — | `psinfo` | 2 | `char *buf`, `size_t len` | `buf`: out, `len` bytes, before anything else | vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`) |
 
@@ -373,6 +374,22 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   since nothing can interrupt the sleep with `EINTR` before ROADMAP §13.8
   gives signals handlers; a stop and continue resumes the sleep, as Linux
   restarts it
+- `reboot`: checks, in this order, that the caller's effective uid is 0
+  (`EPERM` otherwise: root holds `CAP_SYS_BOOT` until ROADMAP §18.6), that
+  `magic1` is `0xfee1dead` and `magic2` one of reboot(2)'s four values
+  (`EINVAL`), and then the command. `POWER_OFF` prints `vibeOS: reboot:
+  power off` and powers off; `RESTART` prints `vibeOS: reboot: restart` and
+  restarts; `RESTART2` reads its `arg` string (`EFAULT` if it cannot) and
+  restarts, ignoring the string, as x86_64 does; `CAD_ON` and `CAD_OFF`
+  return 0 and change nothing, since the keyboard has no Ctrl-Alt-Del
+  action. `HALT` is `EINVAL`, where Linux halts: vibeOS has no halt outside
+  the panic stop. `KEXEC`, `SW_SUSPEND` and any other value are `EINVAL`, as
+  on a Linux built without them. There is no implicit sync, as on Linux
+  (reboot(2)). On x86_64 a power-off writes ACPI S5 through the FADT's
+  `SLEEP_CONTROL_REG` with a hard-coded `SLP_TYP` of 5, then QEMU's PM1a
+  ports `0x604` and `0xB004`; a restart writes the FADT's reset register,
+  then pulses the 8042, then writes `0xCF9` (`arch::x86_64::power`; ROADMAP
+  §20.2 reads `_S5` and the PM1 control block, F097)
 - `read`, the `wait4` status, and `psinfo` write user memory without
   checking the page's W bit (§5; F023, ROADMAP §10.6)
 

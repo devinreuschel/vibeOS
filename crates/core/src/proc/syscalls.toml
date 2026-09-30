@@ -244,6 +244,18 @@ args = []
 note = ""
 
 [[syscall]]
+name = "reboot"
+x86_64 = 169
+aarch64 = 142
+args = [
+  { name = "magic1", type = "int" },
+  { name = "magic2", type = "int" },
+  { name = "cmd", type = "unsigned int" },
+  { name = "arg", type = "void *", ptr = "cstr", when = "for `RESTART2` only, after the uid, magic and command checks" },
+]
+note = "power off and restart; see SYSCALL.md §3.1"
+
+[[syscall]]
 name = "getdents64"
 x86_64 = 217
 aarch64 = 61

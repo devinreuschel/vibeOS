@@ -57,6 +57,8 @@ pub mod nr {
     pub const SYS_FCNTL: usize = 72;
     /// `getppid`.
     pub const SYS_GETPPID: usize = 110;
+    /// `reboot`.
+    pub const SYS_REBOOT: usize = 169;
     /// `getdents64`.
     pub const SYS_GETDENTS64: usize = 217;
     /// `psinfo`.
@@ -108,6 +110,8 @@ pub enum Sys {
     Fcntl,
     /// `getppid`.
     Getppid,
+    /// `reboot`.
+    Reboot,
     /// `getdents64`.
     Getdents64,
     /// `psinfo`.
@@ -116,7 +120,7 @@ pub enum Sys {
 
 impl Sys {
     /// Every call, in table order.
-    pub const ALL: [Sys; 23] = [
+    pub const ALL: [Sys; 24] = [
         Sys::Read,
         Sys::Write,
         Sys::Open,
@@ -138,6 +142,7 @@ impl Sys {
         Sys::Kill,
         Sys::Fcntl,
         Sys::Getppid,
+        Sys::Reboot,
         Sys::Getdents64,
         Sys::Psinfo,
     ];
@@ -166,6 +171,7 @@ impl Sys {
             b"kill" => Some(Sys::Kill),
             b"fcntl" => Some(Sys::Fcntl),
             b"getppid" => Some(Sys::Getppid),
+            b"reboot" => Some(Sys::Reboot),
             b"getdents64" => Some(Sys::Getdents64),
             b"psinfo" => Some(Sys::Psinfo),
             _ => None,
@@ -196,6 +202,7 @@ impl Sys {
             Sys::Kill => "kill",
             Sys::Fcntl => "fcntl",
             Sys::Getppid => "getppid",
+            Sys::Reboot => "reboot",
             Sys::Getdents64 => "getdents64",
             Sys::Psinfo => "psinfo",
         }
@@ -225,6 +232,7 @@ impl Sys {
             Sys::Kill => nr::SYS_KILL,
             Sys::Fcntl => nr::SYS_FCNTL,
             Sys::Getppid => nr::SYS_GETPPID,
+            Sys::Reboot => nr::SYS_REBOOT,
             Sys::Getdents64 => nr::SYS_GETDENTS64,
             Sys::Psinfo => nr::SYS_PSINFO,
         }
@@ -254,6 +262,7 @@ impl Sys {
             Sys::Kill => &["pid", "sig"],
             Sys::Fcntl => &["fd", "cmd", "arg"],
             Sys::Getppid => &[],
+            Sys::Reboot => &["magic1", "magic2", "cmd", "arg"],
             Sys::Getdents64 => &["fd", "dirent", "count"],
             Sys::Psinfo => &["buf", "len"],
         }
@@ -490,6 +499,22 @@ pub fn getppid() -> Result<usize, Errno> {
     // SAFETY: the kernel's `syscall` convention; the kernel writes through
     // none of its pointers, established here by the table row.
     result(unsafe { syscall0(nr::SYS_GETPPID) })
+}
+
+/// `reboot(int magic1, int magic2, unsigned int cmd, void *arg)`: power off and restart; see
+/// SYSCALL.md §3.1.
+pub fn reboot(magic1: i32, magic2: i32, cmd: u32, arg: *mut c_void) -> Result<usize, Errno> {
+    // SAFETY: the kernel's `syscall` convention; the kernel writes through
+    // none of its pointers, established here by the table row.
+    result(unsafe {
+        syscall4(
+            nr::SYS_REBOOT,
+            magic1 as isize as usize,
+            magic2 as isize as usize,
+            cmd as usize,
+            arg as usize,
+        )
+    })
 }
 
 /// `getdents64(unsigned int fd, struct linux_dirent64 *dirent, unsigned int count)`: at most 512

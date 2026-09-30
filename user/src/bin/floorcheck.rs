@@ -13,6 +13,10 @@
 //!   call's errors.
 //! - `sleepkill`: a child sleeping 10 s is killed with `SIGKILL` after
 //!   100 ms; the kernel test checks the run takes under 5 s.
+//! - `reboot-einval`: `reboot`'s argument checks, and the commands that
+//!   change nothing.
+//! - `poweroff` and `restart`: `reboot` powers the machine off or restarts
+//!   it, so the case never ends; if the call returns, it fails.
 
 #![no_std]
 #![no_main]
@@ -73,6 +77,9 @@ fn main(env: &Env) -> i32 {
         Some(b"fstat") => ("fstat", case_fstat()),
         Some(b"nanosleep") => ("nanosleep", case_nanosleep()),
         Some(b"sleepkill") => ("sleepkill", case_sleepkill()),
+        Some(b"reboot-einval") => ("reboot-einval", case_reboot_einval()),
+        Some(b"poweroff") => ("poweroff", case_reboot_ends(CMD_POWER_OFF)),
+        Some(b"restart") => ("restart", case_reboot_ends(CMD_RESTART)),
         _ => ("?", Err("unknown case")),
     };
     match r {
@@ -479,4 +486,65 @@ fn case_sleepkill() -> Check {
         term_signal(status) == Some(SIGKILL),
         "wait4 did not report SIGKILL",
     )
+}
+
+// ---- reboot ----
+
+// reboot(2)'s magic numbers and commands.
+const MAGIC1: i32 = 0xfee1_dead_u32 as i32;
+const MAGIC2: [i32; 4] = [672_274_793, 85_072_278, 369_367_448, 537_993_216];
+const CMD_RESTART: u32 = 0x0123_4567;
+const CMD_HALT: u32 = 0xcdef_0123;
+const CMD_CAD_ON: u32 = 0x89ab_cdef;
+const CMD_CAD_OFF: u32 = 0;
+const CMD_POWER_OFF: u32 = 0x4321_fedc;
+const CMD_RESTART2: u32 = 0xa1b2_c3d4;
+
+fn reboot(magic1: i32, magic2: i32, cmd: u32, arg: *mut c_void) -> Result<usize, Errno> {
+    sys::reboot(magic1, magic2, cmd, arg)
+}
+
+fn case_reboot_einval() -> Check {
+    let none = core::ptr::null_mut();
+    let m2 = MAGIC2[0];
+    ensure(
+        reboot(0x0fee_1dea, m2, CMD_CAD_OFF, none) == Err(EINVAL),
+        "a bad magic1 did not give EINVAL",
+    )?;
+    ensure(
+        reboot(MAGIC1, 0x2812_1968, CMD_CAD_OFF, none) == Err(EINVAL),
+        "a bad magic2 did not give EINVAL",
+    )?;
+    ensure(
+        reboot(MAGIC1, m2, 0x1234_5678, none) == Err(EINVAL),
+        "cmd 0x12345678 did not give EINVAL",
+    )?;
+    ensure(
+        reboot(MAGIC1, m2, CMD_HALT, none) == Err(EINVAL),
+        "HALT did not give EINVAL",
+    )?;
+    let bad = unmapped_page()?;
+    ensure(
+        reboot(MAGIC1, m2, CMD_RESTART2, bad as *mut c_void) == Err(EFAULT),
+        "RESTART2 with an unmapped arg did not give EFAULT",
+    )?;
+    for m2 in MAGIC2 {
+        ensure(
+            reboot(MAGIC1, m2, CMD_CAD_ON, none) == Ok(0),
+            "CAD_ON did not return 0",
+        )?;
+        ensure(
+            reboot(MAGIC1, m2, CMD_CAD_OFF, none) == Ok(0),
+            "CAD_OFF did not return 0",
+        )?;
+    }
+    Ok(())
+}
+
+/// `reboot(cmd)`, which must not return.
+fn case_reboot_ends(cmd: u32) -> Check {
+    match reboot(MAGIC1, MAGIC2[0], cmd, core::ptr::null_mut()) {
+        Ok(_) => Err("reboot returned 0"),
+        Err(_) => Err("reboot returned an error"),
+    }
 }

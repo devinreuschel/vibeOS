@@ -1,13 +1,14 @@
 //! The ROADMAP §10.5 floor calls the userland needs beyond the fd and
-//! process calls: `getdents64`, `fstat` and `nanosleep`. Each handler looks
+//! process calls: `getdents64`, `fstat`, `nanosleep` and `reboot`. Each handler looks
 //! up what it needs, encodes through `vibeos::proc::uabi`, and copies
 //! through `uaccess_init` (SYSCALL.md §3.1).
 
-use vibeos::proc::uabi::{self, Dirent64Writer};
+use vibeos::proc::uabi::{self, Dirent64Writer, RebootCmd};
 use vibeos::time::Instant;
 
 use super::*;
 use crate::arch::current::UserStat;
+use crate::arch::power;
 use crate::time_init;
 
 /// The most `getdents64` writes in one call: its kernel buffer. A record
@@ -153,4 +154,42 @@ pub(super) fn sys_nanosleep(rqtp: u64, _rmtp: u64) -> SysResult {
         }
     }
     Ok(0)
+}
+
+/// `reboot(magic1, magic2, cmd, arg)`, in Linux's order: `EPERM` unless
+/// the caller's effective uid is 0 (root holds `CAP_SYS_BOOT` until ROADMAP
+/// §18.6), then `uabi::reboot_decode`'s magic and command checks. A power-off
+/// or restart prints its line and does not return; `CAD_ON` and `CAD_OFF`
+/// change nothing, since the keyboard has no Ctrl-Alt-Del action. There is
+/// no implicit sync, as on Linux (reboot(2)).
+pub(super) fn sys_reboot(magic1: i32, magic2: i32, cmd: u32, arg: u64) -> SysResult {
+    let pid = current_pid();
+    let euid = if pid == 0 {
+        0
+    } else {
+        with_table(|t| t.get(pid).map(|p| p.creds.euid)).ok_or(KError::from_errno(ESRCH))?
+    };
+    if euid != 0 {
+        return Err(KError::from_errno(EPERM));
+    }
+    match uabi::reboot_decode(magic1, magic2, cmd)? {
+        RebootCmd::CadOn | RebootCmd::CadOff => Ok(0),
+        RebootCmd::PowerOff => {
+            crate::marker!("vibeOS: reboot: power off");
+            power::power_off()
+        }
+        RebootCmd::Restart => {
+            crate::marker!("vibeOS: reboot: restart");
+            power::restart()
+        }
+        RebootCmd::Restart2 => {
+            // The command string is read, as Linux reads it, and ignored, as
+            // x86_64 ignores it.
+            let mut buf = [0u8; 256];
+            uaccess_init::strncpy_from_user(&mut buf, arg)
+                .map_err(|_| KError::from_errno(EFAULT))?;
+            crate::marker!("vibeOS: reboot: restart");
+            power::restart()
+        }
+    }
 }

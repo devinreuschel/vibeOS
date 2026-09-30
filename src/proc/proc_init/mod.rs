@@ -62,7 +62,7 @@ use fd::{
     close_all_fds, close_dropped, dup_table, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
     sys_lseek, sys_open, sys_read, sys_write,
 };
-use floor::{sys_fstat, sys_getdents64, sys_nanosleep};
+use floor::{sys_fstat, sys_getdents64, sys_nanosleep, sys_reboot};
 
 struct Proc {
     state: ProcState,
@@ -641,6 +641,10 @@ impl Handlers for Ctx<'_> {
 
     fn getppid(&mut self) -> SysResult {
         Ok(with_table(|t| t.get(current_pid()).map(|p| p.ppid).unwrap_or(0)) as usize)
+    }
+
+    fn reboot(&mut self, magic1: i32, magic2: i32, cmd: u32, arg: u64) -> SysResult {
+        sys_reboot(magic1, magic2, cmd, arg)
     }
 
     fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult {

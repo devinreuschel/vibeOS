@@ -66,4 +66,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("read_ebadf_before_efault", read_ebadf_before_efault),
     test("wait4_echild_before_efault", wait4_echild_before_efault),
     test("floor_syscalls_from_user", floor_syscalls_from_user).deadline(60_000),
+    test("reboot_bad_args_einval", reboot_bad_args_einval),
+    test("reboot_power_off", reboot_power_off).opt_in(),
+    test("reboot_restart", reboot_restart).opt_in(),
 ];
