@@ -45,10 +45,10 @@ pub(crate) use boot::BOOT_STACK_PAGES;
 pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
 pub(crate) use table::table_root;
-#[cfg(feature = "kernel_tests")]
-pub(crate) use table::table_usage;
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
+#[cfg(feature = "kernel_tests")]
+pub(crate) use table::{table_usage, timeouts_capacity};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.

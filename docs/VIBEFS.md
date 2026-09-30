@@ -616,6 +616,9 @@ device's trace carries every write and flush the guest sent.
   `NoSpace` after the calls it covers returned (§10), and a full one may
   be unable to commit an unlink
 - POSIX ACLs, xattrs
+- More than §3's counts: v1's caps (`vibefs::MAX_INODES` and the rest) are limits of the format,
+  not of the kernel, whose own tables `limits` sizes (ROADMAP §10.4). `scripts/check_limits.py`
+  names each with §3 as the bound that sizes it
 
 ---
 

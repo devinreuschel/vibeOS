@@ -221,6 +221,13 @@ pub fn init_tables() -> Result<(), AllocError> {
     Ok(())
 }
 
+/// The descriptor row's length in each process-table slot (the first's;
+/// `init_tables` gives each the same).
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn fd_row_capacity() -> usize {
+    with_table(|t| t.procs.first().map_or(0, |p| p.fds.capacity()))
+}
+
 /// The process table's use: slots not `Unused`, and its length.
 #[cfg(feature = "kernel_tests")]
 pub(crate) fn table_usage() -> (usize, usize) {

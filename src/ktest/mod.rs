@@ -394,12 +394,16 @@ fn registry_main() {
     ) else {
         bad_repeat(repeat_arg);
     };
-    crate::marker!("vibeOS: ktest: begin {n}");
     if n == 0 {
+        crate::marker!("vibeOS: ktest: begin {n}");
         crate::marker!("vibeOS: ktest: end");
         qemu_exit(EXIT_FAIL);
     }
+    // Setup, before `begin`: its cost scales with the thread table and the
+    // KVA node pool (ROADMAP §10.4), and the first test starts right after
+    // `begin`.
     quiesce_frames();
+    crate::marker!("vibeOS: ktest: begin {n}");
     let freq = Arch::freq_hz().unwrap_or(0);
     let mut failed = false;
     let mut runs: u32 = 0;

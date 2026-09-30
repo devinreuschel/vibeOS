@@ -19,23 +19,28 @@
 
 use crate::kalloc::{AllocError, TryVec};
 
+// The eight table lengths below are the Phase 10 exit gate's (ROADMAP
+// §10.4, D1), and `scripts/check_limits.py` holds them to it: each sizes a
+// heap table built once by [`table`], never an array type.
+
 /// Thread table slots (`thread_init`'s scheduler, `sched` run and timeout queues).
-pub const MAX_THREADS: usize = 64;
-/// Process table slots (`proc_init`), init's included: room for the 16 live
-/// processes besides init that ROADMAP §10.10's `exit_burst` runs.
-pub const MAX_PROCS: usize = 18;
+pub const MAX_THREADS: usize = 1024;
+/// Process table slots (`proc_init`), init's and zombies included.
+pub const MAX_PROCS: usize = 256;
 /// File descriptors per process (`proc::FdTable`, `fs::FdTable`).
-pub const MAX_FDS: usize = 16;
-/// Open-file table slots, system-wide (`fs::Vfs` files, `file_init`'s table).
-pub const MAX_OPEN_FILES: usize = 16;
+pub const MAX_FDS: usize = 256;
+/// Open-file table slots, system-wide (`fs::Vfs` files).
+pub const MAX_OPEN_FILES: usize = 1024;
 /// In-core inode slots (`fs::Vfs`).
-pub const MAX_INODES: usize = 48;
+pub const MAX_INODES: usize = 1024;
 /// Dentry cache slots (`fs::Vfs`).
-pub const MAX_DENTRIES: usize = 48;
+pub const MAX_DENTRIES: usize = 1024;
 /// Mount and superblock slots (`fs::Vfs`).
-pub const MAX_MOUNTS: usize = 8;
-/// Mapped regions per address space (`addr_space::AddressSpace`).
-pub const MAX_REGIONS: usize = 32;
+pub const MAX_MOUNTS: usize = 16;
+/// Mapped regions per address space (`addr_space::AddressSpace`): Linux's
+/// `vm.max_map_count` is far larger, and `mmap` past this returns `ENOMEM`
+/// as Linux's does past its count.
+pub const MAX_REGIONS: usize = 256;
 /// Cap on an executable image's page-rounded `PT_LOAD` plus `PT_TLS` bytes,
 /// which `elf::parse` checks before anything is mapped (ROADMAP §10.6,
 /// F009). 1 GiB: above the 192 MiB that the exec test loads into its

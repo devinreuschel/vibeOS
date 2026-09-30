@@ -274,9 +274,9 @@ const _: () = {
     assert!(align_of::<PerCpu>() == 8);
     assert!(offset_of!(PerCpu, runq) == 152);
     assert!(offset_of!(PerCpu, remote) == if DEBUG { 1872 } else { 1104 });
-    assert!(size_of::<PerCpuRemote>() == 64);
+    assert!(size_of::<PerCpuRemote>() == 192);
     assert!(align_of::<PerCpuRemote>() == 64);
-    assert!(offset_of!(PerCpuRemote, apic_id) == 48);
+    assert!(offset_of!(PerCpuRemote, apic_id) == 168);
 };
 
 // The tests build `static` views, which need the `const` constructor.

@@ -39,6 +39,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_code_layout", test_user_code_layout),
     test("orphan_freed_no_init", test_orphan_freed_no_init),
     test("fork_full_thread_table", fork_full_thread_table).deadline(60_000),
+    test("limits_heap_backed", limits_heap_backed).deadline(60_000),
     test("teardown_live_root_asserts", teardown_live_root_asserts),
     test("console_read_exit", test_console_read_exit).deadline(30_000),
     test("user_entry_irq", test_user_entry_irq).deadline(120_000),

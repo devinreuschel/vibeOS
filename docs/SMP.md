@@ -253,7 +253,7 @@ sized by a `MAX_CPUS` guess, and installs the BSP at slot 0; each AP installs it
 `per_cpu_init::install_gs`. `current` and `idle` are `*mut Tcb`. The other per-CPU tables are static
 and cap the CPU count at 64: the MADT `apic_ids` array (`acpi::MAX_CPUS`), `hardirq::IN_ISR`,
 `ipi_init::SHOOT`, `per_cpu_init::WITH_BUSY`, `sync_init::HELD`, `log_init::EMITTING` and `log_init::STAGE`, and the `u64` online mask. The thread table limits it further: boot takes 2N+3 of
-its `limits::MAX_THREADS` slots at `-smp N`. `smp_init::alloc_ap_resources` creates an AP's idle
+its 1024 slots (`limits::MAX_THREADS`) at `-smp N`. `smp_init::alloc_ap_resources` creates an AP's idle
 thread and its per-CPU workers (the `wq` worker, pinned and parked by
 `work_init::spawn_cpu_workers`) before it starts the AP, and makes the workers runnable only after the
 AP reports `ready`. When one of them finds no slot or no memory it releases what it took, the AP

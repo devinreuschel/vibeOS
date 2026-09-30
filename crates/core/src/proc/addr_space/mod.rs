@@ -312,6 +312,11 @@ impl AddressSpace {
         self.pt_frames
     }
 
+    /// Region slots: the table's length, used or not.
+    pub fn region_capacity(&self) -> usize {
+        self.regions.len()
+    }
+
     pub fn regions(&self) -> impl Iterator<Item = Region> + '_ {
         self.regions.iter().filter_map(|r| *r)
     }

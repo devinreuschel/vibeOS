@@ -133,3 +133,9 @@ pub fn each_thread(mut f: impl FnMut(&ThreadInfo)) {
 
 /// Threads [`each_thread`] reads per SCHED section.
 pub const SNAPSHOT_CHUNK: usize = 16;
+
+/// The scheduler's timeout queue's capacity.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn timeouts_capacity() -> usize {
+    with_sched(|s| s.timeouts.capacity())
+}
