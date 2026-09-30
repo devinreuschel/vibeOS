@@ -49,7 +49,8 @@ impl PanicText {
 }
 
 /// `line` cut at its first `\n` and at [`PANIC_LINE_CAP`] bytes, back to a
-/// UTF-8 boundary.
+/// UTF-8 boundary, without trailing ASCII whitespace (a cut can end on the
+/// space before a field).
 pub fn first_line(line: &[u8]) -> &[u8] {
     let end = line.iter().position(|&b| b == b'\n').unwrap_or(line.len());
     let mut end = end.min(PANIC_LINE_CAP);
@@ -57,7 +58,12 @@ pub fn first_line(line: &[u8]) -> &[u8] {
     while end > 0 && end < line.len() && line.get(end).is_some_and(|b| b & 0xC0 == 0x80) {
         end = end.saturating_sub(1);
     }
-    line.get(..end).unwrap_or(&[])
+    let cut = line.get(..end).unwrap_or(&[]);
+    let keep = cut
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(0, |i| i.saturating_add(1));
+    cut.get(..keep).unwrap_or(&[])
 }
 
 impl PanicLine {

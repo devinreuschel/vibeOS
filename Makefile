@@ -198,7 +198,7 @@ endif
 .PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
-        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi test-qmp
+        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics
 
 help:
 	@printf '%s\n' \
@@ -237,6 +237,7 @@ help:
 	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
 	  '  test-qmp              QMP event streams re-recorded and compared; one guest core checked' \
+	  '  test-forensics        hang_test ISO at -smp 4: core after 5 s, core tool report/export/virt; #GP, 9 GiB' \
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
 	  '  test-lapic-fallback   in-guest tests, TSC-deadline off' \
@@ -482,7 +483,7 @@ vmcore: $(VMCORE)
 # drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
 # run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
 PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) \
-	$(KERNEL_ELFS) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
+	$(ISO_HANG) $(KERNEL_ELFS) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
 
 prebuilt: $(PREBUILT_FILES)
 	mkdir -p build
@@ -566,6 +567,13 @@ test-e2e-init-fault: $(ISO_INIT_FAULT)
 test-qmp: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 tests/harness/run_qmp.py
 
+# The forensics tier (ROADMAP §10.7, TESTING.md §8.5): the hang_test ISO at
+# -smp 4, its core 5 s after the armed marker, and the core tool's report,
+# trace export and virtual core; the BUILD-ID refusal, a #GP core, and a
+# 9 GiB guest's core through the pipe. Its cores stay in build/forensics/.
+test-forensics: $(ISO_HANG) $(ISO_GP) $(VMCORE)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_HANG) VIBEOS_VMCORE=$(VMCORE) python3 tests/harness/run_forensics.py
+
 test-kernel: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py --hpet-off
 
@@ -594,7 +602,7 @@ test-vibefs-crash-plants: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NB
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py \
 	    --plants leak,early_super
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)

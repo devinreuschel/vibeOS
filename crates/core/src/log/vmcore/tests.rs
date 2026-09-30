@@ -565,6 +565,12 @@ fn panic_line_publishes_len_last() {
     let mut uni = std::vec![b'a'; PANIC_LINE_CAP - 1];
     uni.extend_from_slice("é".as_bytes());
     assert_eq!(first_line(&uni).len(), PANIC_LINE_CAP - 1);
+    // A cut that ends on a field's space drops it, and so does a line's
+    // own trailing whitespace.
+    let mut spaced = std::vec![b'x'; PANIC_LINE_CAP - 1];
+    spaced.extend_from_slice(b" err=0x8");
+    assert_eq!(first_line(&spaced), &spaced[..PANIC_LINE_CAP - 1]);
+    assert_eq!(first_line(b"boom \t\r\nnext"), b"boom");
     // The bytes a core holds decode the same, and `len` is the word at 0:
     // before it is set the line reads as absent whatever the bytes hold.
     let mut raw = [0u8; size_of::<PanicLine>()];
