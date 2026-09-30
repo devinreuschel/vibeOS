@@ -405,11 +405,11 @@ pub extern "C" fn vibeos_fp_user_return() {
         return;
     }
     per_cpu_init::with_current(|cpu| {
-        let t = cpu.current;
+        let t = crate::arch::current_tcb();
         if t.is_null() {
             return;
         }
-        // SAFETY: invariant: `cpu.current` is the TCB this CPU runs, live
+        // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live
         // and touched only by this CPU while it runs, and IF=0 keeps it
         // current; established by `thread_init::switch_now`.
         let tcb = unsafe { &mut *t };
@@ -436,11 +436,11 @@ pub fn current_fp_words() -> Option<(u32, u32, u32)> {
         return None;
     }
     per_cpu_init::with_current(|cpu| {
-        let t = cpu.current;
+        let t = crate::arch::current_tcb();
         if t.is_null() {
             return None;
         }
-        // SAFETY: invariant: `cpu.current` is the TCB this CPU runs, live
+        // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live
         // and touched only by this CPU while it runs, and `with_current`'s
         // IF=0 keeps it current; established by `thread_init::switch_now`.
         let tcb = unsafe { &mut *t };

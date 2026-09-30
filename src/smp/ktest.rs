@@ -50,10 +50,11 @@ pub(crate) fn test_per_cpu_bsp() -> Outcome {
     if thread_init::name(cpu.idle_id) != "idle" {
         return Outcome::Fail("idle name");
     }
-    if core::ptr::eq(cpu.idle, cpu.current) {
+    let current = arch::current_tcb();
+    if core::ptr::eq(cpu.idle, current) {
         return Outcome::Fail("idle == current");
     }
-    if cpu.current.is_null() || cpu.idle.is_null() {
+    if current.is_null() || cpu.idle.is_null() {
         return Outcome::Fail("current or idle null");
     }
     if !sched_init::is_live() {
@@ -140,7 +141,7 @@ fn identity_on_ap(_: *mut ()) {
     let ok = core::ptr::eq(c.self_ptr, per_cpu_init::gs_self())
         && per_cpu_init::slot_ptr(id) == Some(c.self_ptr)
         && !c.idle.is_null()
-        && !c.current.is_null()
+        && !arch::current_tcb().is_null()
         && c.tsc_per_ms != 0
         && per_cpu_init::cpu(id).is_some_and(|r| core::ptr::eq(r, c.remote));
     if !ok {

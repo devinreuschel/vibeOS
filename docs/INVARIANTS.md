@@ -705,7 +705,7 @@ that review cites means the review's text.
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/x86_64/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes: the generated stubs save CR2 and DR6 before any body turns IF on |
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
-| I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `per_cpu_init`; the syscall stub's `gs:[current]` load | documented | Partly: the syscall stub reads `current` in one load, but `current_thread`, `current_id`, `current_pid`, and `per_cpu!` load `gs:[0]` and then the field, and `current()` hands out `&'static PerCpu` at any IF; no preempted thread changes CPU yet (ROADMAP §10.3, F039) |
+| I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `arch::x86_64::percpu` (`current_tcb`, `cpu_id_hint`), `per_cpu_init::current` | enforced (debug builds assert IF=0 in `current()` and `try_current()` from `irq: enabled` on; `scripts/check_current.py`) | Yes: `current_thread`, `current_id` and `current_pid` wrap `arch::current_tcb()`, and `current_at_if1` and `current_migrate_if1` read `current` with IF=1 (ROADMAP §10.3, F039) |
 | I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; clippy's `let_underscore_must_use` and `unused_result_ok`, denied workspace-wide | enforced in part (the lints, outside modules whose `mod` line carries an audit-pending allow) | No: modules not yet audited carry an audit-pending allow, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.12, F115; §13.9, F124) |
 | I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 does not: pending signals are acted on only at syscall entry and after the `wait4` sleep (ROADMAP §10.6, F033) |
 | I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](PORTABILITY.md#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
@@ -839,11 +839,13 @@ and a bound.
    reference. Every other per-CPU access, taking a `&PerCpu` and indexing a per-CPU table by CPU id
    included, happens with IF=0 (`with_current`, `IrqCell`), and the reference does not outlive that
    stretch, because a preemption with IF=1 can move the thread to another CPU between the lookup and
-   the use. Rule; not yet enforced: ROADMAP §10.3 (F039). `per_cpu_init::current_thread`,
-   `thread_init::current_id` and `current_pid`, and the `per_cpu!` macro load `gs:[0]` and then the
-   field, and `per_cpu_init::current()` and `try_current()` return a `&'static PerCpu` at any IF.
-   The split read is latent while no preempted thread changes CPU: user threads stay pinned, and
-   §13.10's `sched_setaffinity`, §19.4's balancing, and §19.6's offlining move preempted threads.
+   the use. `per_cpu_init::current_thread`, `thread_init::current_id` and `current_pid` are
+   wrappers over `arch::current_tcb()`. Enforced (ROADMAP §10.3, F039): from `irq: enabled` on,
+   `per_cpu_init::current()` and `try_current()`, and so the `per_cpu!` macro, assert IF=0 in debug
+   builds (`per_cpu_init::arm_if_checks`); `scripts/check_current.py` fails on a read of
+   `PerCpu.current` outside `src/arch/`; and the in-guest tests `current_at_if1` and
+   `current_migrate_if1` read `current` with IF=1, the second while the `kernel_tests` requeue hook
+   moves each preempted thread to the next online CPU.
 
 Why this model: a syscall body that runs with IF=0 cannot acknowledge a TLB shootdown (F011) or
 take the tick (F044), so every long syscall (`fork`'s copy, `execve`'s load, a large `read`)

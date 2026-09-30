@@ -538,7 +538,7 @@ fn context_bits(stack_bytes: u64) -> u32 {
     // (`thread_init::SCHED`) until it exits, and only
     // `thread_init::spawn_inner` and `thread_init::thread_exit` write its
     // `stack`, neither of which runs for this thread while it runs here.
-    let stack = unsafe { &(*thread_init::current_tcb()).stack };
+    let stack = unsafe { &(*crate::arch::current_tcb()).stack };
     let guarded = match stack {
         Some(ks) => {
             let rsp = x86::read_rsp();
@@ -578,7 +578,7 @@ pub(crate) fn ktest_context() -> Outcome {
         // SAFETY: as in `context_bits`: a running thread's `Tcb` stays in
         // the TCB table, and only `thread_init::spawn_inner` and
         // `thread_init::thread_exit` write its `stack`.
-        let stack = unsafe { &(*thread_init::current_tcb()).stack };
+        let stack = unsafe { &(*crate::arch::current_tcb()).stack };
         return match stack {
             Some(ks) if (ks.pages() as u64) * PAGE_SIZE_4K != REGISTRY_STACK_BYTES => {
                 Outcome::Fail("registry stack not 64 KiB")

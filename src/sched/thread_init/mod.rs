@@ -1363,8 +1363,10 @@ pub fn switch_to(id: ThreadId) {
     finish_switch();
 }
 
+/// The running thread's id, through [`crate::arch::current_tcb`]'s one
+/// load, at any IF (DESIGN §2.9 rule 5).
 pub fn current_id() -> ThreadId {
-    let p = per_cpu_init::current_thread();
+    let p = crate::arch::current_tcb();
     assert!(!p.is_null(), "no current thread");
     // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`, and
     // `id` changes only while its slot is Dead, never while it runs;
@@ -1372,8 +1374,10 @@ pub fn current_id() -> ThreadId {
     unsafe { (*p).id }
 }
 
+/// The running thread's pid (0 with no current thread), through
+/// [`crate::arch::current_tcb`]'s one load, at any IF.
 pub fn current_pid() -> u32 {
-    let p = per_cpu_init::current_thread();
+    let p = crate::arch::current_tcb();
     if p.is_null() {
         0
     } else {
@@ -1411,13 +1415,6 @@ pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
 /// that needs the exact id reads it with IF=0.
 pub fn current_cpu() -> u32 {
     crate::arch::cpu_id_hint()
-}
-
-#[cfg(feature = "kernel_tests")]
-pub fn current_tcb() -> *mut Tcb {
-    let p = per_cpu_init::current_thread();
-    assert!(!p.is_null(), "no current thread");
-    p
 }
 
 #[cfg(feature = "kernel_tests")]

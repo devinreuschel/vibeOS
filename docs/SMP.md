@@ -220,8 +220,12 @@ One `PerCpu` struct per CPU. In ring 0, `GS_BASE` holds its address. While the C
 without knowing which CPU you are on. Taking that reference is legal only with IF=0, and the
 reference dies with the IF=0 stretch ([§2.9](INVARIANTS.md#29-preemption-and-interrupt-state) rule 5). `current`
 is never read through it: `arch::current_tcb()` loads `current` with one `gs`-relative instruction,
-and `arch::cpu_id_hint()` loads `cpu_id` the same way for callers that tolerate a stale id. Rule;
-not yet enforced: ROADMAP §10.3 (F039).
+and `arch::cpu_id_hint()` loads `cpu_id` the same way for callers that tolerate a stale id (the log
+prefix, virtio-blk's queue choice, the panic dump, a new thread's placement). Both live in
+`arch::x86_64::percpu`, with the per-CPU-live flag, and return null or 0 before it is set. Debug
+builds assert IF=0 in `per_cpu_init::current()` and `try_current()` from `irq: enabled` on, and
+`scripts/check_current.py` rejects a read of `PerCpu.current` outside `src/arch/` (ROADMAP §10.3,
+F039).
 
 Contents (`crates/core/src/smp/per_cpu.rs`):
 
@@ -279,7 +283,7 @@ incoming thread can take IRQs and `with_current`. `with_cpu` is an `unsafe fn` f
 running: `smp_init` uses it before an AP's SIPI, and after a SIPI it clears only the view.
 `ap_entry` holds its slot's `&mut` from `STARTING` until it publishes `ready`. `current()` and
 `try_current()` return `&'static PerCpu`, which must not be live across a `with_current*` scope or a
-preemption point. Rule; not yet enforced: ROADMAP §10.3's `current` box (F039).
+preemption point; both assert IF=0 in debug builds from `irq: enabled` on (ROADMAP §10.3, F039).
 
 ### Per-thread CPU state
 

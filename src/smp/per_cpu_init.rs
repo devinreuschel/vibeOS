@@ -360,8 +360,10 @@ pub fn set_current_thread(cpu: &mut PerCpu, tcb: *mut Tcb) {
     cpu.current = tcb;
 }
 
+/// The running thread's TCB: [`crate::arch::current_tcb`], one load that
+/// preemption cannot split, at any IF.
 pub fn current_thread() -> *mut Tcb {
-    current().current
+    crate::arch::current_tcb()
 }
 
 pub fn set_tsc_per_ms(v: u64) {
