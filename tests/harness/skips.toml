@@ -79,3 +79,12 @@ name = "tsc_calib_source"
 reason = "no invariant tsc"
 accel = "kvm"
 cpu = "qemu64,-tsc-deadline"
+
+# One CPU: `make test-irqoff` boots TCG with `-icount shift=0` and `-smp 1`
+# (ROADMAP §10.3, TESTING.md §8.2), where each test that needs a second
+# CPU skips with its own reason.
+
+[[skip]]
+name = "alloc_stress_smp"
+reason = "no AP"
+smp = 1
