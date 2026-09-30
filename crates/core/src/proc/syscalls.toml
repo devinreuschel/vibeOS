@@ -161,6 +161,16 @@ args = [
 note = ""
 
 [[syscall]]
+name = "nanosleep"
+x86_64 = 35
+aarch64 = 101
+args = [
+  { name = "rqtp", type = "const struct __kernel_timespec *", ptr = "fixed", size = 16, dir = "in", when = "before anything else" },
+  { name = "rmtp", type = "struct __kernel_timespec *", unread = "ROADMAP §13.8" },
+]
+note = "`CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1"
+
+[[syscall]]
 name = "getpid"
 x86_64 = 39
 aarch64 = 172

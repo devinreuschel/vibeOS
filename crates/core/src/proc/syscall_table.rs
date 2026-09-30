@@ -165,6 +165,8 @@ pub enum Sys {
     Dup,
     /// `dup2`.
     Dup2,
+    /// `nanosleep`.
+    Nanosleep,
     /// `getpid`.
     Getpid,
     /// `fork`.
@@ -189,7 +191,7 @@ pub enum Sys {
 
 impl Sys {
     /// Every syscall, in table order.
-    pub const ALL: [Sys; 22] = [
+    pub const ALL: [Sys; 23] = [
         Sys::Read,
         Sys::Write,
         Sys::Open,
@@ -202,6 +204,7 @@ impl Sys {
         Sys::SchedYield,
         Sys::Dup,
         Sys::Dup2,
+        Sys::Nanosleep,
         Sys::Getpid,
         Sys::Fork,
         Sys::Execve,
@@ -221,7 +224,7 @@ impl Sys {
 }
 
 /// The rows, in [`Sys`] order.
-pub static ROWS: [Row; 22] = [
+pub static ROWS: [Row; 23] = [
     Row {
         sys: Sys::Read,
         name: "read",
@@ -467,6 +470,34 @@ pub static ROWS: [Row; 22] = [
         aarch64: None,
     },
     Row {
+        sys: Sys::Nanosleep,
+        name: "nanosleep",
+        args: &[
+            Arg {
+                name: "rqtp",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Fixed { size: 16 },
+                    dir: Dir::In,
+                    nullable: false,
+                    when: "before anything else",
+                }),
+            },
+            Arg {
+                name: "rmtp",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Unread,
+                    dir: Dir::In,
+                    nullable: false,
+                    when: "not read (ROADMAP §13.8)",
+                }),
+            },
+        ],
+        x86_64: Some(35),
+        aarch64: Some(101),
+    },
+    Row {
         sys: Sys::Getpid,
         name: "getpid",
         args: &[],
@@ -703,6 +734,8 @@ pub trait Handlers {
     fn dup(&mut self, oldfd: u32) -> SysResult;
     /// `dup2`.
     fn dup2(&mut self, oldfd: u32, newfd: u32) -> SysResult;
+    /// `nanosleep`.
+    fn nanosleep(&mut self, rqtp: u64, rmtp: u64) -> SysResult;
     /// `getpid`.
     fn getpid(&mut self) -> SysResult;
     /// `fork`.
@@ -756,6 +789,8 @@ pub mod x86_64 {
         pub const SYS_DUP: u64 = 32;
         /// `dup2`.
         pub const SYS_DUP2: u64 = 33;
+        /// `nanosleep`.
+        pub const SYS_NANOSLEEP: u64 = 35;
         /// `getpid`.
         pub const SYS_GETPID: u64 = 39;
         /// `fork`.
@@ -792,6 +827,7 @@ pub mod x86_64 {
         t[nr::SYS_SCHED_YIELD as usize] = Some(Sys::SchedYield);
         t[nr::SYS_DUP as usize] = Some(Sys::Dup);
         t[nr::SYS_DUP2 as usize] = Some(Sys::Dup2);
+        t[nr::SYS_NANOSLEEP as usize] = Some(Sys::Nanosleep);
         t[nr::SYS_GETPID as usize] = Some(Sys::Getpid);
         t[nr::SYS_FORK as usize] = Some(Sys::Fork);
         t[nr::SYS_EXECVE as usize] = Some(Sys::Execve);
@@ -823,6 +859,7 @@ pub mod x86_64 {
             Sys::SchedYield => h.sched_yield(),
             Sys::Dup => h.dup(regs[0] as u32),
             Sys::Dup2 => h.dup2(regs[0] as u32, regs[1] as u32),
+            Sys::Nanosleep => h.nanosleep(regs[0], regs[1]),
             Sys::Getpid => h.getpid(),
             Sys::Fork => h.fork(),
             Sys::Execve => h.execve(regs[0], regs[1], regs[2]),
@@ -873,6 +910,8 @@ pub mod aarch64 {
         pub const SYS_SCHED_YIELD: u64 = 124;
         /// `dup`.
         pub const SYS_DUP: u64 = 23;
+        /// `nanosleep`.
+        pub const SYS_NANOSLEEP: u64 = 101;
         /// `getpid`.
         pub const SYS_GETPID: u64 = 172;
         /// `execve`.
@@ -903,6 +942,7 @@ pub mod aarch64 {
         t[nr::SYS_BRK as usize] = Some(Sys::Brk);
         t[nr::SYS_SCHED_YIELD as usize] = Some(Sys::SchedYield);
         t[nr::SYS_DUP as usize] = Some(Sys::Dup);
+        t[nr::SYS_NANOSLEEP as usize] = Some(Sys::Nanosleep);
         t[nr::SYS_GETPID as usize] = Some(Sys::Getpid);
         t[nr::SYS_EXECVE as usize] = Some(Sys::Execve);
         t[nr::SYS_EXIT as usize] = Some(Sys::Exit);
@@ -930,6 +970,7 @@ pub mod aarch64 {
             Sys::Brk => h.brk(regs[0]),
             Sys::SchedYield => h.sched_yield(),
             Sys::Dup => h.dup(regs[0] as u32),
+            Sys::Nanosleep => h.nanosleep(regs[0], regs[1]),
             Sys::Getpid => h.getpid(),
             Sys::Execve => h.execve(regs[0], regs[1], regs[2]),
             Sys::Exit => h.exit(regs[0] as i32),
@@ -1065,6 +1106,10 @@ impl Handlers for Recorder {
 
     fn dup2(&mut self, oldfd: u32, newfd: u32) -> SysResult {
         self.record(Sys::Dup2, &[Val::U32(oldfd), Val::U32(newfd)])
+    }
+
+    fn nanosleep(&mut self, rqtp: u64, rmtp: u64) -> SysResult {
+        self.record(Sys::Nanosleep, &[Val::Ptr(rqtp), Val::Ptr(rmtp)])
     }
 
     fn getpid(&mut self) -> SysResult {

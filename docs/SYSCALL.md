@@ -231,6 +231,7 @@ from its handler (F150).
 | 24 | 124 | `sched_yield` | 0 | — | — | — |
 | 32 | 23 | `dup` | 1 | `unsigned int oldfd` | — | CLOEXEC cleared on the new fd |
 | 33 | — | `dup2` | 2 | `unsigned int oldfd`, `unsigned int newfd` | — | — |
+| 35 | 101 | `nanosleep` | 2 | `const struct __kernel_timespec *rqtp`, `struct __kernel_timespec *rmtp` | `rqtp`: in, 16 bytes, before anything else; `rmtp`: not read (ROADMAP §13.8) | `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1 |
 | 39 | 172 | `getpid` | 0 | — | — | `0` if the caller is not a process |
 | 57 | — | `fork` | 0 | — | — | full address-space copy; the child returns 0 |
 | 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `argv` and `envp` at most 15 strings of at most 255 bytes each; `envp` copied and dropped |
@@ -350,6 +351,28 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   512 bytes and copies at most `rsi` of those bytes. Number 500 is in the
   range Linux allocates next (F149); ROADMAP §13.9 deletes the call when
   `ps` moves to `procfs`
+- `getdents64`: writes whole `linux_dirent64` records, `.` and `..`
+  first, and returns at most 512 bytes per call, which its 512-byte kernel
+  buffer bounds; `EINVAL` when the first record does not fit in `count`,
+  and 0 at the end. `d_off` is the cookie of the next entry: `lseek(fd,
+  d_off, SEEK_SET)` resumes at that entry, and 0 rewinds. The position moves
+  only after the copy succeeds, so an `EFAULT` leaves it where it was. The
+  position is read and stored in two steps, so an overlapping call on an
+  open file shared through `fork` or `dup` can lose an update until
+  ROADMAP §13.1 (F055); entries added or removed between calls may repeat
+  or be skipped, which POSIX leaves unspecified. The console is `ENOTDIR`
+- `fstat`: x86_64's 144-byte `struct stat` for any descriptor, the console
+  a character device (`S_IFCHR | 0620`). `st_dev` and `st_rdev` are 0 until
+  ROADMAP §23.3, and `st_uid` and `st_gid` 0 until ROADMAP §13.9; the times
+  are whole seconds, their nanosecond fields 0; `st_blksize` is 4096 and
+  `st_blocks` is ⌈size/512⌉
+- `nanosleep`: sleeps until a `CLOCK_MONOTONIC` deadline, rounded up to the
+  next scheduler tick, and `SIGKILL` ends the sleeper at once. `EINVAL` when
+  `tv_nsec` is outside 0 to 999,999,999 or `tv_sec` is negative. A deadline
+  past 2^64 ns sleeps as long as the clock runs. `rmtp` is never written,
+  since nothing can interrupt the sleep with `EINTR` before ROADMAP §13.8
+  gives signals handlers; a stop and continue resumes the sleep, as Linux
+  restarts it
 - `read`, the `wait4` status, and `psinfo` write user memory without
   checking the page's W bit (§5; F023, ROADMAP §10.6)
 

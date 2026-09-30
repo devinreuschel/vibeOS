@@ -1,12 +1,14 @@
 //! The ROADMAP §10.5 floor calls the userland needs beyond the fd and
-//! process calls: `getdents64` and `fstat`. Each handler looks up the
-//! descriptor, calls the File API, encodes through `vibeos::proc::uabi`,
-//! and copies through `uaccess_init` (SYSCALL.md §3.1).
+//! process calls: `getdents64`, `fstat` and `nanosleep`. Each handler looks
+//! up what it needs, encodes through `vibeos::proc::uabi`, and copies
+//! through `uaccess_init` (SYSCALL.md §3.1).
 
 use vibeos::proc::uabi::{self, Dirent64Writer};
+use vibeos::time::Instant;
 
 use super::*;
 use crate::arch::current::UserStat;
+use crate::time_init;
 
 /// The most `getdents64` writes in one call: its kernel buffer. A record
 /// is at most 88 bytes (`MAX_NAME` 64), so one always fits.
@@ -88,5 +90,67 @@ pub(super) fn sys_fstat(fd: u32, statbuf: u64) -> SysResult {
     };
     let out = UserStat::from_fields(&fields);
     uaccess_init::copy_to_user_val(statbuf, &out).map_err(|_| KError::from_errno(EFAULT))?;
+    Ok(0)
+}
+
+/// What one pass of `nanosleep`'s loop found.
+enum Nap {
+    /// A signal whose action is not "ignore" is pending: act on it first.
+    Signal,
+    /// The thread is on `wait_wq` until the deadline.
+    Wait,
+}
+
+/// True when `p` has a signal `apply_pending` acts on: a stop, or a
+/// pending signal other than `SIGCHLD` and `SIGCONT`, which it ignores.
+fn signal_acts(p: &Proc) -> bool {
+    p.state == ProcState::Stopped || p.pending & !(bit(SIGCHLD) | bit(SIGCONT)) != 0
+}
+
+/// `nanosleep(rqtp, rmtp)`: sleep until the `CLOCK_MONOTONIC` deadline
+/// `rqtp` gives, on the caller's `wait_wq`, which `sys_kill` wakes, so a
+/// `SIGKILL` ends the sleep at once. A wakeup is not the deadline (a child's
+/// exit wakes `wait_wq` too), so it loops to the deadline as `sys_wait4`
+/// loops. `rmtp` is never written: no handler can interrupt the sleep
+/// before ROADMAP §13.8.
+pub(super) fn sys_nanosleep(rqtp: u64, _rmtp: u64) -> SysResult {
+    let mut ts = [0u8; 16];
+    uaccess_init::copy_from_user(&mut ts, rqtp).map_err(|_| KError::from_errno(EFAULT))?;
+    let (sec, nsec) = ts.split_at(8);
+    let word = |b: &[u8]| b.try_into().map(i64::from_le_bytes);
+    let (Ok(sec), Ok(nsec)) = (word(sec), word(nsec)) else {
+        return Err(KError::from_errno(EFAULT));
+    };
+    let deadline = uabi::timespec_deadline(time_init::now_ns(), sec, nsec)?;
+    let pid = current_pid();
+    if pid == 0 {
+        // A kernel-side `dispatch` probe: no process, so no signal to end
+        // the sleep early.
+        thread_init::park(Some(Instant { ns: deadline }));
+        return Ok(0);
+    }
+    while time_init::now_ns() < deadline {
+        let nap = thread_init::with_sched(|s| {
+            table_locked(|t| {
+                let me = t.get_mut(pid)?;
+                if signal_acts(me) {
+                    return Some(Nap::Signal);
+                }
+                s.begin_wait(&mut me.wait_wq, Instant { ns: deadline });
+                Some(Nap::Wait)
+            })
+        });
+        match nap {
+            Some(Nap::Signal) => apply_pending(None),
+            Some(Nap::Wait) => {
+                thread_init::schedule();
+                if let Some(s) = current_space() {
+                    set_as(s);
+                }
+                apply_pending(None);
+            }
+            None => return Err(KError::from_errno(ESRCH)),
+        }
+    }
     Ok(0)
 }

@@ -9,6 +9,10 @@
 //!   directory position.
 //! - `fstat`: `fstat` on a file, a directory, the console, `/dev/null`, and
 //!   its errors.
+//! - `nanosleep`: a 50 ms sleep, which the kernel test times, and the
+//!   call's errors.
+//! - `sleepkill`: a child sleeping 10 s is killed with `SIGKILL` after
+//!   100 ms; the kernel test checks the run takes under 5 s.
 
 #![no_std]
 #![no_main]
@@ -43,6 +47,9 @@ const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFCHR: u32 = 0o020000;
 
+// From signal(7).
+const SIGKILL: i32 = 9;
+
 // `lseek`'s whence, from lseek(2).
 const SEEK_SET: u32 = 0;
 
@@ -64,6 +71,8 @@ fn main(env: &Env) -> i32 {
     let (name, r): (&str, Check) = match env.arg(1) {
         Some(b"getdents") => ("getdents", case_getdents()),
         Some(b"fstat") => ("fstat", case_fstat()),
+        Some(b"nanosleep") => ("nanosleep", case_nanosleep()),
+        Some(b"sleepkill") => ("sleepkill", case_sleepkill()),
         _ => ("?", Err("unknown case")),
     };
     match r {
@@ -406,4 +415,68 @@ fn case_fstat() -> Check {
     // established here.
     let r = unsafe { sys::fstat(1, text as *mut c_void) };
     ensure(r == Err(EFAULT), "a read-only statbuf did not give EFAULT")
+}
+
+// ---- nanosleep ----
+
+/// A `struct __kernel_timespec`: seconds, then nanoseconds.
+type Timespec = [i64; 2];
+
+fn nanosleep(ts: &Timespec) -> Result<usize, Errno> {
+    sys::nanosleep(ts.as_ptr().cast::<c_void>(), core::ptr::null_mut())
+}
+
+fn case_nanosleep() -> Check {
+    ensure(
+        nanosleep(&[0, 50_000_000]) == Ok(0),
+        "50 ms did not return 0",
+    )?;
+    for (ts, what) in [
+        ([0, 1_000_000_000], "nsec 10^9 did not give EINVAL"),
+        ([0, -1], "nsec -1 did not give EINVAL"),
+        ([-1, 0], "sec -1 did not give EINVAL"),
+    ] {
+        ensure(nanosleep(&ts) == Err(EINVAL), what)?;
+    }
+    let null = sys::nanosleep(core::ptr::null(), core::ptr::null_mut());
+    ensure(null == Err(EFAULT), "a NULL rqtp did not give EFAULT")?;
+    let bad = unmapped_page()?;
+    let r = sys::nanosleep(bad as *const c_void, core::ptr::null_mut());
+    ensure(r == Err(EFAULT), "an unmapped rqtp did not give EFAULT")?;
+    ensure(nanosleep(&[0, 0]) == Ok(0), "{0,0} did not return 0")?;
+    let ts: Timespec = [0, 1_000_000];
+    let r = sys::nanosleep(ts.as_ptr().cast::<c_void>(), bad as *mut c_void);
+    ensure(r == Ok(0), "1 ms with an unmapped rmtp did not return 0")
+}
+
+/// `WIFSIGNALED` and `WTERMSIG`, from wait(2).
+fn term_signal(status: i32) -> Option<i32> {
+    let sig = status & 0x7f;
+    (sig != 0 && sig != 0x7f).then_some(sig)
+}
+
+fn case_sleepkill() -> Check {
+    let child = match sys::fork() {
+        Ok(0) => {
+            if nanosleep(&[10, 0]).is_err() {
+                rt::exit(2);
+            }
+            rt::exit(3);
+        }
+        Ok(pid) => i32::try_from(pid).map_err(|_| "fork: pid")?,
+        Err(_) => return Err("fork"),
+    };
+    let slept = nanosleep(&[0, 100_000_000]);
+    let killed = sys::kill(child, SIGKILL);
+    let mut status = 0i32;
+    // SAFETY: the kernel writes 4 bytes into `status`, which no other
+    // reference covers during the call; established here.
+    let waited = unsafe { sys::wait4(child, &raw mut status, 0, core::ptr::null_mut()) };
+    ensure(slept == Ok(0), "the parent's 100 ms did not return 0")?;
+    ensure(killed == Ok(0), "kill did not return 0")?;
+    ensure(waited == Ok(child as usize), "wait4 did not reap the child")?;
+    ensure(
+        term_signal(status) == Some(SIGKILL),
+        "wait4 did not report SIGKILL",
+    )
 }

@@ -62,7 +62,7 @@ use fd::{
     close_all_fds, close_dropped, dup_table, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
     sys_lseek, sys_open, sys_read, sys_write,
 };
-use floor::{sys_fstat, sys_getdents64};
+use floor::{sys_fstat, sys_getdents64, sys_nanosleep};
 
 struct Proc {
     state: ProcState,
@@ -593,6 +593,10 @@ impl Handlers for Ctx<'_> {
             thread_init::yield_now();
         }
         Ok(0)
+    }
+
+    fn nanosleep(&mut self, rqtp: u64, rmtp: u64) -> SysResult {
+        sys_nanosleep(rqtp, rmtp)
     }
 
     fn dup(&mut self, oldfd: u32) -> SysResult {

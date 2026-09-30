@@ -39,6 +39,8 @@ pub mod nr {
     pub const SYS_DUP: usize = 32;
     /// `dup2`.
     pub const SYS_DUP2: usize = 33;
+    /// `nanosleep`.
+    pub const SYS_NANOSLEEP: usize = 35;
     /// `getpid`.
     pub const SYS_GETPID: usize = 39;
     /// `fork`.
@@ -88,6 +90,8 @@ pub enum Sys {
     Dup,
     /// `dup2`.
     Dup2,
+    /// `nanosleep`.
+    Nanosleep,
     /// `getpid`.
     Getpid,
     /// `fork`.
@@ -112,7 +116,7 @@ pub enum Sys {
 
 impl Sys {
     /// Every call, in table order.
-    pub const ALL: [Sys; 22] = [
+    pub const ALL: [Sys; 23] = [
         Sys::Read,
         Sys::Write,
         Sys::Open,
@@ -125,6 +129,7 @@ impl Sys {
         Sys::SchedYield,
         Sys::Dup,
         Sys::Dup2,
+        Sys::Nanosleep,
         Sys::Getpid,
         Sys::Fork,
         Sys::Execve,
@@ -152,6 +157,7 @@ impl Sys {
             b"sched_yield" => Some(Sys::SchedYield),
             b"dup" => Some(Sys::Dup),
             b"dup2" => Some(Sys::Dup2),
+            b"nanosleep" => Some(Sys::Nanosleep),
             b"getpid" => Some(Sys::Getpid),
             b"fork" => Some(Sys::Fork),
             b"execve" => Some(Sys::Execve),
@@ -181,6 +187,7 @@ impl Sys {
             Sys::SchedYield => "sched_yield",
             Sys::Dup => "dup",
             Sys::Dup2 => "dup2",
+            Sys::Nanosleep => "nanosleep",
             Sys::Getpid => "getpid",
             Sys::Fork => "fork",
             Sys::Execve => "execve",
@@ -209,6 +216,7 @@ impl Sys {
             Sys::SchedYield => nr::SYS_SCHED_YIELD,
             Sys::Dup => nr::SYS_DUP,
             Sys::Dup2 => nr::SYS_DUP2,
+            Sys::Nanosleep => nr::SYS_NANOSLEEP,
             Sys::Getpid => nr::SYS_GETPID,
             Sys::Fork => nr::SYS_FORK,
             Sys::Execve => nr::SYS_EXECVE,
@@ -237,6 +245,7 @@ impl Sys {
             Sys::SchedYield => &[],
             Sys::Dup => &["oldfd"],
             Sys::Dup2 => &["oldfd", "newfd"],
+            Sys::Nanosleep => &["rqtp", "rmtp"],
             Sys::Getpid => &[],
             Sys::Fork => &[],
             Sys::Execve => &["pathname", "argv", "envp"],
@@ -386,6 +395,14 @@ pub fn dup2(oldfd: u32, newfd: u32) -> Result<usize, Errno> {
     // SAFETY: the kernel's `syscall` convention; the kernel writes through
     // none of its pointers, established here by the table row.
     result(unsafe { syscall2(nr::SYS_DUP2, oldfd as usize, newfd as usize) })
+}
+
+/// `nanosleep(const struct __kernel_timespec *rqtp, struct __kernel_timespec *rmtp)`:
+/// `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1.
+pub fn nanosleep(rqtp: *const c_void, rmtp: *mut c_void) -> Result<usize, Errno> {
+    // SAFETY: the kernel's `syscall` convention; the kernel writes through
+    // none of its pointers, established here by the table row.
+    result(unsafe { syscall2(nr::SYS_NANOSLEEP, rqtp as usize, rmtp as usize) })
 }
 
 /// `getpid()`: `0` if the caller is not a process.
