@@ -186,7 +186,7 @@ children, need no row.
 |---|---|---|
 | crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `kerror.rs`, `trap.rs`, `atomic.rs`, `cell.rs` (`BootCell`, `IrqCell`, `CellHooks`) | `main.rs`, `cell.rs` (the kernel's names for the cells and its `CellHooks` impl) |
 | boot | `boot/{mod,cmdline}.rs` | `boot/{mod,fw_cfg_init}.rs` (`BootInfo`, Limine requests, fw_cfg) |
-| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,trap,uart,vectors}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S` |
+| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,trap,uart,vectors}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,boot,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S` |
 | mm | `mm/{mod,pmm,paging,heap,kva}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
 | time | `time/mod.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |

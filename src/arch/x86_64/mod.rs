@@ -1,6 +1,7 @@
 //! The x86_64 port: its kernel half (DESIGN §1.3).
 
 pub(crate) mod apic_init;
+mod boot;
 #[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,

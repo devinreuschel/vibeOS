@@ -11,7 +11,9 @@ use limine::request::{
     HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
 };
 
+use crate::arch::current::Arch;
 use crate::cell::BootCell;
+use vibeos::arch::BootHandover;
 use vibeos::boot::cmdline::{self, CMDLINE_MAX, Cmdline, CmdlineBuf, Escaped, SYSCTLS};
 use vibeos::limits::MAX_BOOT_MODULES;
 use vibeos::log::Level;
@@ -260,7 +262,6 @@ pub fn capture() -> &'static BootInfo {
     let rsdp = RSDP
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: rsdp missing"));
-    // Base revision 3 hands back a physical RSDP, other revisions an HHDM VA.
     let rsdp_raw = rsdp.address as u64;
     let kernel_len = (&raw const __kernel_vma_end as u64) - (&raw const __kernel_vma_start as u64);
     let (modules, nmod) = module_ranges();
@@ -278,7 +279,7 @@ pub fn capture() -> &'static BootInfo {
         INFO.set(BootInfo {
             kernel_phys: exec.physical_base..exec.physical_base + kernel_len,
             trampoline_page,
-            rsdp_phys: rsdp_raw.checked_sub(HHDM_BASE).unwrap_or(rsdp_raw),
+            rsdp_phys: <Arch as BootHandover>::table_phys(rsdp_raw, HHDM_BASE),
             memmap: memmap.entries(),
             fb: FRAMEBUFFER.response(),
             modules,

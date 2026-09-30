@@ -111,6 +111,7 @@ use time::time_init;
 
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
+use vibeos::arch::BootHandover;
 use vibeos::marker;
 
 // The linker groups these three into `.limine_requests` (see linker.ld).
@@ -122,7 +123,8 @@ static REQ_START: RequestsStartMarker = RequestsStartMarker::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests")]
-static BASE_REV: BaseRevision = BaseRevision::with_revision(3);
+static BASE_REV: BaseRevision =
+    BaseRevision::with_revision(<arch::current::Arch as BootHandover>::BASE_REVISION);
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]

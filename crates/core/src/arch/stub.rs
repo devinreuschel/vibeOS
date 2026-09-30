@@ -303,10 +303,16 @@ pub fn take_events() -> EventLog {
     with(|s| core::mem::replace(&mut s.log, EventLog::EMPTY))
 }
 
+/// Revision 0; a table address at or above the direct map is translated,
+/// any other is taken as physical.
 impl BootHandover for Arch {
     type Info = Boot;
+    const BASE_REVISION: u64 = 0;
     fn info() -> &'static Boot {
         &BOOT
+    }
+    fn table_phys(raw: u64, hhdm_offset: u64) -> u64 {
+        raw.checked_sub(hhdm_offset).unwrap_or(raw)
     }
 }
 
