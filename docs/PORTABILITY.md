@@ -6,14 +6,13 @@ x86_64 and aarch64 are peers from ROADMAP Phase 11; x86_64 came first and is the
 ports disagree about the kernel's own behaviour; for anything a user program can observe, each
 architecture's reference is Linux on that architecture (ROADMAP, How to read this). This section is the
 contract for the seam between them. `docs/ARCH.md` (ROADMAP §10.3) maps each row of the §11.1 table to
-the modules that implement it in each port. Planned: ROADMAP §10.3 builds the seam and Phase 11 the
-aarch64 port. Built so far: the seam traits and `Port` in `vibeos-core`'s `arch/mod.rs`, the stub port
-in `arch/stub.rs`, and the x86_64 port's zero-sized type with its `Barriers`, `ContextSwitch`,
-`CycleCounter`, `InterruptMask`, `PerCpuBase`, and `SyscallAbi` impls, which kernel code names as
-`arch::current::Arch`; the other impls, `impl Port` for it, and `docs/ARCH.md` are planned in ROADMAP
-§10.3. The one port is x86_64's, in
-the kernel crate's `src/arch/` and in `vibeos-core`'s `desc.rs`, `pic.rs`, and `vectors.rs`. The rest of
-this section is the design those lines build.
+the modules that implement it in each port. The seam is built (ROADMAP §10.3): the seam traits and
+`Port` are in `vibeos-core`'s `arch/mod.rs`, the stub port in `arch/stub.rs`, the x86_64 port's pure
+half in `vibeos-core`'s `arch/x86_64/`, and its hardware half in the kernel crate's
+`src/arch/x86_64/`, whose zero-sized `Arch` implements every trait and which kernel code names as
+`arch::current::Arch`. The x86_64 code left in shared kernel modules is fenced with
+`#[cfg(target_arch = "x86_64")]` and listed in `docs/ARCH.md`, which `scripts/check_arch.py` keeps
+true. Planned: Phase 11 the aarch64 port.
 
 ## 11.1 The seam
 
@@ -36,7 +35,7 @@ per-architecture uapi (ROADMAP §13.10).
 | Interrupt controller and IRQ identity | port module: finding the root controller, with the vector entry and the IPI send in their own rows; each controller is an `IrqChip` object (§5.4), not a seam trait | 8259, I/O APIC, and LAPIC MSI chips; a hwirq is an IDT vector (§5.3) | GICv2 or GICv3 distributor and redistributor chips, ITS or GICv2m; a hwirq is an INTID | §11.3 |
 | IPI send and its ordering | trait (`IpiSend`) | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
 | Timer and cycle counter | trait (`CycleCounter`) | TSC, or the HPET or ACPI PM timer as the clocksource (§6.4); LAPIC timer | `CNTVCT_EL0`; generic timer | §10.3, §11.3 |
-| Page-table format and attributes | trait (`PageTable`); encodings in the pure half | 4-level tables, PAT bits | 4 KiB granule, 48-bit VA, MAIR, break-before-make | §10.3, §11.2 |
+| Page-table format and attributes | trait (`PageTable`); encodings in the pure half; `PageFlags` keeps x86_64's bit values until ROADMAP §11.2 | 4-level tables, PAT bits | 4 KiB granule, 48-bit VA, MAIR, break-before-make | §10.3, §11.2 |
 | TLB maintenance and address-space ids | trait (`PageTable`) | `invlpg` and the shootdown IPI (§7.9); no PCID | broadcast `tlbi ...is`; ASIDs from §11.2's generation allocator | §10.3, §11.2 |
 | Cache maintenance and DMA coherence | trait (`Barriers`) | none: coherent | per-device coherence from `dma-coherent` or `_CCA`; `dc cvac` and `dc ivac` to the Point of Coherency for non-coherent devices (§4.7); `dc` and `ic` for code | §10.3, §11.2 |
 | Barriers (`dma_wmb`, `dma_rmb`, `dma_mb`) and MMIO accessors | trait (`Barriers`) | `mfence`, `sfence`, `lfence`; plain loads and stores; accessors carry a compiler barrier (§4.7) | `dmb oshst`, `dmb oshld`, `dmb osh`; `dmb oshst` before an `mmio_write` and `dmb oshld` after an `mmio_read` (§4.7) | §10.3, §11.2 |
@@ -112,10 +111,15 @@ The mechanism:
   holds several seam users still takes one parameter and bounds it by the umbrella trait `Port`,
   whose supertraits are the table's traits, so a second port parameter never spreads into the types
   that hold it. The kernel crate names the concrete types once, in `arch::current` (for example
-  `type AddressSpace = vibeos::AddressSpace<Arch>`), so kernel code never spells the parameter.
+  `type AddressSpace = vibeos::proc::addr_space::AddressSpace<Arch>`), so kernel code never spells
+  the parameter.
 - The kernel binary names its port once, as `arch::current::Arch` in `src/arch/current.rs`, a type
-  alias chosen by `cfg(target_arch)` in the kernel crate, where a compile-time item checks that the
-  port implements the seam traits built so far. `make check` also builds `vibeos-core` as the kernel
+  alias chosen by `cfg(target_arch)` in the kernel crate, where `const _: () =
+  vibeos::arch::assert_port::<Arch>();` checks at compile time that the port implements every seam
+  trait, as `arch/stub.rs` checks the stub. `arch::current` also re-exports, under
+  `cfg(target_arch)`, the port-neutral names shared kernel code calls instead of a port path (the
+  interrupt guard, `halt`, `qemu_exit`, `hw_rng64`, `user_tls`, `set_user_tls`, `stack_pointer`,
+  `enable_nx`, and the like). `make check` also builds `vibeos-core` as the kernel
   links it, without `std`, for the host, where no port exists, so only a type parameter reaches one.
   `vibeos-core` contains no `cfg(target_arch)` and no assembly (ROADMAP Phase 10 gate):
   `scripts/check_core_stable.py` fails on `asm!`, `global_asm!`, `naked_asm!`, or a `target_arch`
@@ -209,7 +213,9 @@ that table; its
 rows in `docs/ARCH.md`; a harness profile; and its marker list (ROADMAP §11.7). It changes no shared
 module. ROADMAP §11.8's riscv64 stretch measures that: a port that needs a change outside its three
 `arch/` directories, or a concern the table lacks, has found a seam defect, and the fix lands in the
-seam (a new row or a changed trait), not as a special case in portable code.
+seam (a new row or a changed trait), not as a special case in portable code. `scripts/check_arch.py`
+fails until the port's `docs/ARCH.md` rows name its files, and a fenced site in a shared module is a
+seam defect the port removes by moving that code behind the seam.
 
 ## 11.4 EL0 and ring-3 environment
 
