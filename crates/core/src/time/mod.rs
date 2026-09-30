@@ -374,12 +374,53 @@ pub const fn hpet_counter_width(gcap: u64) -> u32 {
     if gcap & (1 << 13) != 0 { 64 } else { 32 }
 }
 
-/// Seqlock over (tick, tsc snapshot). Writer: bump, write both, bump,
-/// release. Reader: acquire, retry until a stable even sequence. DESIGN §6.4.
-pub struct TickClock {
-    seq: AtomicU64,
+/// One copy of the latch's payload: a tick and the TSC at that tick.
+struct Payload {
     tick: AtomicU64,
     tsc: AtomicU64,
+}
+
+impl Payload {
+    #[cfg(not(loom))]
+    const fn new() -> Self {
+        Self {
+            tick: AtomicU64::new(0),
+            tsc: AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(loom)]
+    fn new() -> Self {
+        Self {
+            tick: AtomicU64::new(0),
+            tsc: AtomicU64::new(0),
+        }
+    }
+
+    fn store(&self, tick: u64, tsc: u64) {
+        // Relaxed: ordered by the fences around the sequence bumps.
+        self.tick.store(tick, Ordering::Relaxed);
+        self.tsc.store(tsc, Ordering::Relaxed);
+    }
+
+    fn load(&self) -> (u64, u64) {
+        // Relaxed: ordered by the reader's `fence(Acquire)`.
+        (
+            self.tick.load(Ordering::Relaxed),
+            self.tsc.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Latched seqlock over (tick, tsc snapshot), DESIGN §6.4. The one writer
+/// (CPU 0's tick) bumps `seq` to odd and stores copy 0, then bumps it to
+/// even and stores copy 1. A reader reads the copy the low bit of `seq`
+/// names, which is never the one being stored, so it never waits for the
+/// writer and retries only when `seq` moved under it.
+pub struct TickClock {
+    seq: AtomicU64,
+    copy0: Payload,
+    copy1: Payload,
 }
 
 impl TickClock {
@@ -389,8 +430,8 @@ impl TickClock {
     pub const fn new() -> Self {
         Self {
             seq: AtomicU64::new(0),
-            tick: AtomicU64::new(0),
-            tsc: AtomicU64::new(0),
+            copy0: Payload::new(),
+            copy1: Payload::new(),
         }
     }
 
@@ -398,39 +439,61 @@ impl TickClock {
     pub fn new() -> Self {
         Self {
             seq: AtomicU64::new(0),
-            tick: AtomicU64::new(0),
-            tsc: AtomicU64::new(0),
+            copy0: Payload::new(),
+            copy1: Payload::new(),
         }
     }
 
-    /// ISR path. No alloc, no logging.
-    ///
-    /// Odd bump is `fetch_add(AcqRel)`, not Relaxed load/store. Relaxed
-    /// lets the compiler publish (tick, tsc) while seq still looks even.
-    /// Release on that RMW is the wrong side of the increment (it orders
-    /// writes *before* it). Acquire keeps the payload stores after seq is
-    /// odd. Even bump is Release.
-    pub fn write(&self, tick: u64, tsc: u64) {
-        self.seq.fetch_add(1, Ordering::AcqRel);
-        self.tick.store(tick, Ordering::Relaxed);
-        self.tsc.store(tsc, Ordering::Relaxed);
-        self.seq.fetch_add(1, Ordering::Release);
+    /// One sequence bump. The CPU 0 tick is the only writer, so a Relaxed
+    /// `fetch_add` suffices for the count itself.
+    fn bump(&self) {
+        // Release: orders the stores of the copy written before this bump
+        // ahead of it, for a reader whose Acquire load of `seq` sees the
+        // bump and then reads that copy.
+        fence(Ordering::Release);
+        self.seq.fetch_add(1, Ordering::Relaxed);
+        // Release: pairs with the reader's `fence(Acquire)` after its
+        // payload loads. A reader that loaded any store made after this
+        // fence sees this bump in its re-check of `seq` and retries.
+        fence(Ordering::Release);
     }
 
-    /// Stable (tick, tsc_at_tick). Retries on odd or changed sequence.
+    /// First half of [`TickClock::write`]: `seq` goes odd, so readers read
+    /// copy 1 while copy 0 is stored.
+    fn write_copy0(&self, tick: u64, tsc: u64) {
+        self.bump();
+        self.copy0.store(tick, tsc);
+    }
+
+    /// Second half: `seq` goes even, so readers read copy 0 while copy 1
+    /// is stored.
+    fn write_copy1(&self, tick: u64, tsc: u64) {
+        self.bump();
+        self.copy1.store(tick, tsc);
+    }
+
+    /// ISR path. No alloc, no logging. One writer at a time.
+    pub fn write(&self, tick: u64, tsc: u64) {
+        self.write_copy0(tick, tsc);
+        self.write_copy1(tick, tsc);
+    }
+
+    /// The copy `seq` value `s` names: copy 1 while the writer stores
+    /// copy 0 (odd), else copy 0.
+    fn copy(&self, s: u64) -> &Payload {
+        if s & 1 == 0 { &self.copy0 } else { &self.copy1 }
+    }
+
+    /// Stable (tick, tsc_at_tick). Retries only when `seq` changed.
     pub fn read(&self) -> (u64, u64) {
         loop {
             let s1 = self.seq.load(Ordering::Acquire);
-            if s1 & 1 != 0 {
-                continue;
-            }
-            let tick = self.tick.load(Ordering::Relaxed);
-            let tsc = self.tsc.load(Ordering::Relaxed);
+            let v = self.copy(s1).load();
             // Payload loads must not move past the seq re-check.
             fence(Ordering::Acquire);
             let s2 = self.seq.load(Ordering::Relaxed);
             if s1 == s2 {
-                return (tick, tsc);
+                return v;
             }
         }
     }
@@ -464,13 +527,9 @@ impl TickClock {
     ) -> u64 {
         loop {
             let s1 = self.seq.load(Ordering::Acquire);
-            if s1 & 1 != 0 {
-                continue;
-            }
-            let tick = self.tick.load(Ordering::Relaxed);
-            let tsc = self.tsc.load(Ordering::Relaxed);
-            let tsc_now = read_tsc();
+            let (tick, tsc) = self.copy(s1).load();
             fence(Ordering::Acquire);
+            let tsc_now = read_tsc();
             let s2 = self.seq.load(Ordering::Relaxed);
             if s1 == s2 {
                 return interp(tick, tsc, tsc_now, tsc_per_ms);
@@ -713,6 +772,20 @@ mod tests {
             torn, expected,
             "torn mix must not accidentally equal the independent timestamp"
         );
+    }
+
+    /// F098: a reader that interrupts the writer between its two copies
+    /// (`seq` odd) returns the older value instead of waiting.
+    #[test]
+    fn latch_read_mid_write_returns_older() {
+        let clock = TickClock::new();
+        clock.write(1, 100);
+        clock.write_copy0(2, 200);
+        assert_eq!(clock.seq.load(Ordering::Relaxed) & 1, 1);
+        assert_eq!(clock.read(), (1, 100));
+        assert_eq!(clock.now_us_with(|| 100, 1_000), 1_000);
+        clock.write_copy1(2, 200);
+        assert_eq!(clock.read(), (2, 200));
     }
 
     #[test]

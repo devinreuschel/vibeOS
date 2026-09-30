@@ -101,18 +101,23 @@ that tick. Read them unprotected and you eventually get one from before an inter
 after, producing a timestamp that goes backwards. That is not hypothetical; it happened.
 
 Publish them as a latched seqlock, which keeps two copies of the fields so that no reader waits for
-the writer. The writer bumps the sequence and issues `fence(Release)`, stores copy 0, bumps the
-sequence and issues `fence(Release)` again, and stores copy 1. The reader loads the sequence with
+the writer. The writer, CPU 0's tick and nothing else, makes each bump `fence(Release)`, a Relaxed
+`fetch_add(1)` on the sequence, and `fence(Release)` again: it bumps the sequence to odd and stores
+copy 0, then bumps it to even and stores copy 1. The trailing fence pairs with the reader's
+`fence(Acquire)`, so a reader that loaded any store made after a bump sees that bump when it reloads
+the sequence; the leading fence orders the previous copy's stores before the bump, for a reader whose
+Acquire load of the sequence sees the bump and then reads that copy (Linux's
+`raw_write_seqcount_latch` has a write barrier on both sides). The reader loads the sequence with
 Acquire, loads the copy its low bit names (copy 1 while it is odd, when the writer is storing copy
 0), issues `fence(Acquire)`, reloads the sequence, and retries only when it changed. A plain seqlock
 reader retries while the sequence is odd, so one that interrupted the writer on its own CPU, in an
 NMI, `#MC`, or `#DB` handler, a pseudo-NMI (ROADMAP §25.5), or the panic path, would spin forever;
 the latched reader reads the copy the writer is not storing and returns. So `now_ns` may be read
 from any context, a log record's timestamp included (§2.5). Linux's NMI-safe clock,
-`ktime_get_mono_fast_ns`, is built the same way. Rule; not yet enforced: `TickClock` keeps one copy,
-and `TickClock::write` has no release fence after the odd bump, and the release half of its
-`fetch_add(AcqRel)` orders only earlier accesses. x86's locked `fetch_add` is a full barrier and
-hides that; aarch64 with LL/SC atomics does not (ROADMAP §10.8, F098).
+`ktime_get_mono_fast_ns`, is built the same way. x86's locked `fetch_add` is a full barrier and would
+hide a missing fence; aarch64 with LL/SC atomics does not, so the fences are written out (ROADMAP
+§10.8, F098). The host test `latch_read_mid_write_returns_older` stops the writer between its two
+copies and reads the older value.
 
 Two warnings about testing this. A test that computes the expected "now" from the same tick value it
 just read is monotonic by construction and passes even with torn reads, so the test needs an
