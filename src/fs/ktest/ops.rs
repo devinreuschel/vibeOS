@@ -61,9 +61,9 @@ pub(crate) fn test_vfs_backends_via_ops() -> Outcome {
     if !fat_init::live() || !vibefs_init::live() {
         return Outcome::Fail("needs FAT and vibefs live");
     }
-    let (opens, routed) = hooks::open_counts();
+    let opens = hooks::open_counts();
     let r = backends_via_ops();
-    let (opens2, routed2) = hooks::open_counts();
+    let opens2 = hooks::open_counts();
     let mut clean = Ok(());
     for p in [&b"/vibe/vo_src"[..], b"/vo_copy", b"/vibe/vo_h"] {
         match file_init::unlink(p) {
@@ -82,9 +82,6 @@ pub(crate) fn test_vfs_backends_via_ops() -> Outcome {
             "Vfs::open ran {} times, want >= {want}",
             opens2.wrapping_sub(opens)
         );
-    }
-    if routed2 != routed {
-        return crate::fail_fmt!("{} routed opens, want 0", routed2.wrapping_sub(routed));
     }
     Outcome::Ok
 }

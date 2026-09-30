@@ -148,8 +148,8 @@ on every call, whether or not the heap grows. Growth takes PT and then BUDDY aft
 (`heap_init::grow_for`), so the frame allocation it makes can enter direct reclaim with nothing held
 ([§4.4](MEMORY.md#44-kernel-heap) rule 1).
 
-Filesystem spinlocks take `RANK_DEVICE`: today the VFS lock, which also guards the open-file table,
-the ramfs and kernfs store locks, each backend's mount and slot-allocation locks, the working
+Filesystem spinlocks take `RANK_DEVICE`: the ramfs and kernfs store locks (tmpfs's data ops run
+under kernfs's), each backend's mount and slot-allocation locks, the working
 directory (`file_init::CWD`), and the initrd and vibefs images (`fat_init::INITRD`,
 `vibefs_init::IMAGE`). The rank order therefore forbids heap allocation under them and
 allows logging.
@@ -162,7 +162,7 @@ under the page-table lock; and the IRQ vector pool and routes (`irq_init::IRQ`),
 DEVICE. The VFS tables are static, so bring-up allocates nothing under them. Filesystems get
 no spin rank of their own; adding one changes this list and `crates/core/src/sync/lock.rs` in the same commit.
 
-After ROADMAP §10.4's A3 work, the VFS lock is a `BlockingMutex` at level 1's mount-table position.
+The VFS lock is a `BlockingMutex` at level 1's mount-table position.
 It guards the namespace tables (mounts, dentries, and the inode and open-file tables) and is held
 for a lookup, an insert, or a removal. It is never held across a backend's data I/O, a wait on a
 pipe, TTY, socket, or page, or a user copy. A lookup returns counted inode and file references
@@ -176,15 +176,14 @@ writeback threads reach a file's backend through the counted page-cache referenc
 the page holds, and never take the VFS lock. Each FAT and vibefs volume is a level-4 `BlockingMutex`
 that owns the volume and that nothing force-clears. It is taken with a plain `lock()`, as Linux
 takes FAT's `fat_lock`, and contention never fails an operation; from ROADMAP §12.6 only a page
-fill's acquire of it is killable, and ends early on a fatal signal (above).
+fill's acquire of it is killable, and ends early on a fatal signal (above). A backend never takes the
+VFS lock while it holds a volume lock: what data I/O changes in an inode (its size and private
+words) sits in the inode slot's words outside the VFS lock, which the backend reaches through the
+inode it is handed.
 
 Why: a lock that every file operation takes and that backends block under serializes all file I/O
 behind one block wait, deadlocks a named-pipe read against its writer, and leaves the fault path,
-which holds the page it fills busy (level 3), no legal way to fill a file page. Rule; not yet
-enforced: the VFS lock is a `RANK_DEVICE` spinlock that the File API drops before any FAT or block
-wait, and each FAT and vibefs volume sits behind a busy flag whose waiter yields and fails the
-operation with `EIO` after 1,000,000 yields, and which `drop_slot` force-clears (ROADMAP §10.4,
-F060).
+which holds the page it fills busy (level 3), no legal way to fill a file page.
 
 A socket has two locks, as Linux's `lock_sock` and `bh_lock_sock` do. Its spinlock, at the SOCK
 rank, guards the protocol state and the socket's queues; network receive and timer callbacks
@@ -724,7 +723,7 @@ that review cites means the review's text.
 | I233 | A virtio `SplitQueue`'s `base` is 16-byte aligned and valid for `layout.total` bytes for the queue's life, and only the queue and its device reach that memory | `virtio::SplitQueue::new` (its `# Safety` contract; the kernel passes a `dma_init::alloc` buffer); `virtio::SplitQueue::field` checks each offset against `layout.total` | enforced in part (the offset check; the buffer's life is the caller's contract) | Yes |
 | I234 | A VA `pci_init::map_mmio` returns maps its BAR or ECAM page, uncached unless the BAR overlaps a framebuffer, which stays write-back: an ECAM page for the rest of the boot, a BAR while its claim is held, and `pci_init::unmap_bar` removes an ioremap BAR only after its driver has stopped the device | `pci_init::map_mmio` (the UC physmap patch or `ioremap`); `dev_init::claim_mem_bars` records a BAR's VA in the entry that holds its claim, and `dev_init::release_bars` takes it back | documented | Partly: a BAR below `map_end` keeps its physmap leaf after `unmap_bar` (ROADMAP §11.2) |
 | I235 | A block `Request`'s segments name memory valid for their lengths that nothing else touches until the request's completion runs | `virtio_blk_init::VirtioBlk::build` and `block_init`'s submit paths, whose callers keep the buffer until `IoWaiter::wait` returns or the completion runs | documented | Yes: every in-tree submitter waits on its `IoWaiter` before it reuses the buffer |
-| I236 | A volume instance's `vol` cell (`fs::fat_init::FatVolume`, `fs::vibefs_init::VibeVolume`) is touched only by the one thread holding the volume's `busy` flag, which `grab`'s compare-exchange sets and a Release store clears, or, before the instance is shared, by the one boot or mount path building it | `fs::fat_init::grab`, `fs::vibefs_init::grab` | enforced at runtime (busy flag) | Yes: `drop_slot` no longer writes a slot whose `grab` failed |
+| I236 | A volume instance's volume (`fs::fat_init::FatVolume`, `fs::vibefs_init::VibeVolume`) is reached only through its `BlockingMutex`, which owns it, or, before the instance is shared, by the one boot or mount path building it | `fs::fat_init::new_volume`, `fs::vibefs_init::new_volume` | enforced by the type (the lock owns the volume) | Yes: `drop_slot` retires a volume under its lock, waiting for its holder |
 | I244 | QEMU's fw_cfg ports (the selector 0x510, the data byte 0x511, the DMA address 0x514-0x51B) are touched only by `boot::fw_cfg_init`, only after CPUID.1:ECX[31] reports a hypervisor, so bare metal never sees a write to them, and by one CPU at a time: `boot::capture` before `smp: done`, then boot-time callers and the in-guest registry. The selector is device-global and unlocked, so a caller that can race takes a ranked lock first (§2.1) | `boot::fw_cfg_init::probe` (the CPUID check before any port access), `boot::fw_cfg_init::select` | enforced in part (`select` debug-asserts the hypervisor bit; one CPU at a time is by convention) | Yes |
 | I484 | A device's memory BAR is mapped only through a live `BarClaim`, which `Registry::claim` grants under `REG` only when the BAR overlaps no other claim and no RAM-typed range of the boot memory map (DEVICES.md §12.3) | `dev::Registry::claim`, `pci_init::map_bar` | enforced | Partly: a BAR below `map_end` stays reachable through its physmap leaf, and ECAM pages are mapped through `map_mmio` with no claim (ROADMAP §11.2) |
 

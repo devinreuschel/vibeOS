@@ -6,8 +6,12 @@ pub const TMPFS_BACK_PAGES: usize = 16;
 
 pub const TMPFS_BACK_BYTES: usize = PAGE * TMPFS_BACK_PAGES;
 
+/// `tmp_back` as the cache's backend. A read of a page no extent holds
+/// fails, so a readahead never caches a free run: [`tmp_alloc_run`] can
+/// hand one out without invalidating it.
 struct SliceBack<'a> {
     data: RefCell<&'a mut [u8]>,
+    bits: u64,
 }
 
 impl Backend for SliceBack<'_> {
@@ -19,6 +23,13 @@ impl Backend for SliceBack<'_> {
             .unwrap_or(true)
         {
             return Err(BlockError::Inval);
+        }
+        let mut pg = o / PAGE;
+        while pg * PAGE < o + buf.len() {
+            if !bit_get(self.bits, pg) {
+                return Err(BlockError::Inval);
+            }
+            pg += 1;
         }
         buf.copy_from_slice(&d[o..o + buf.len()]);
         Ok(())
@@ -81,7 +92,10 @@ fn tmp_alloc_run(k: &mut KernState, n: usize) -> Result<u16, FsError> {
             k.tmp_bits = b;
             let start = i * PAGE;
             k.tmp_back[start..start + n * PAGE].fill(0);
-            tmp_invalidate_pages(k, i as u16, n as u16);
+            debug_assert!(
+                (i..i + n).all(|p| k.tmp_cache.find(tmp_key(p)).is_none()),
+                "a free tmpfs run is never cached"
+            );
             return Ok(i as u16);
         }
         i += 1;
@@ -89,7 +103,20 @@ fn tmp_alloc_run(k: &mut KernState, n: usize) -> Result<u16, FsError> {
     Err(FsError::NoSpace)
 }
 
+fn tmp_key(page: usize) -> CacheKey {
+    CacheKey::page(TMPFS_DEV, (page * PAGE) as u64)
+}
+
+/// Free the run's pages and drop them from the cache without writeback:
+/// only for backing that an unlink ([`tmp_free_extent`]) or a shrink
+/// ([`tmp_truncate`]) frees.
 fn tmp_free_run(k: &mut KernState, start: u16, n: u16) {
+    tmp_invalidate_pages(k, start, n);
+    tmp_release_bits(k, start, n);
+}
+
+/// Mark the run's pages free in the bitmap.
+fn tmp_release_bits(k: &mut KernState, start: u16, n: u16) {
     if n == 0 {
         return;
     }
@@ -103,14 +130,12 @@ fn tmp_free_run(k: &mut KernState, start: u16, n: u16) {
         j += 1;
     }
     k.tmp_bits = b;
-    tmp_invalidate_pages(k, start, n);
 }
 
 fn tmp_invalidate_pages(k: &mut KernState, start: u16, n: u16) {
     let mut j = 0u16;
     while j < n {
-        let off = (start as u64 + j as u64) * PAGE as u64;
-        k.tmp_cache.invalidate(CacheKey::page(TMPFS_DEV, off));
+        k.tmp_cache.invalidate(tmp_key(start as usize + j as usize));
         j += 1;
     }
 }
@@ -170,20 +195,38 @@ fn tmp_ensure(k: &mut KernState, inst: u32, ino: u32, new_size: u64) -> Result<(
         k.tmp_bits = b;
         let off = (start + have) * PAGE;
         k.tmp_back[off..off + extra * PAGE].fill(0);
-        tmp_invalidate_pages(k, (start + have) as u16, extra as u16);
+        debug_assert!(
+            (start + have..start + need).all(|p| k.tmp_cache.find(tmp_key(p)).is_none()),
+            "a free tmpfs run is never cached"
+        );
         k.nodes[idx].extent_pages = need as u16;
         return Ok(());
     }
+    // Move: the old run's dirty cache pages go back to `tmp_back` and
+    // leave the cache before the copy, so the copy carries every write.
     let newp = tmp_alloc_run(k, need)?;
     let old = k.nodes[idx].extent_page as usize;
     let oldn = have;
     let dst = newp as usize * PAGE;
     let src = old * PAGE;
-    if oldn > 0 {
-        let nbytes = oldn * PAGE;
-        k.tmp_back.copy_within(src..src + nbytes, dst);
+    let nbytes = oldn * PAGE;
+    let back = SliceBack {
+        data: RefCell::new(&mut k.tmp_back[..]),
+        bits: k.tmp_bits,
+    };
+    let ev = cache::cached_evict_range(
+        &mut k.tmp_cache,
+        &back,
+        TMPFS_DEV,
+        src as u64,
+        nbytes as u64,
+    );
+    if ev.is_err() {
+        tmp_release_bits(k, newp, need as u16);
+        return Err(FsError::Io);
     }
-    tmp_free_run(k, old as u16, oldn as u16);
+    k.tmp_back.copy_within(src..src + nbytes, dst);
+    tmp_release_bits(k, old as u16, oldn as u16);
     k.nodes[idx].extent_page = newp;
     k.nodes[idx].extent_pages = need as u16;
     Ok(())
@@ -207,6 +250,7 @@ fn tmp_rw_cache(
     let cache = &mut k.tmp_cache;
     let back = SliceBack {
         data: RefCell::new(&mut k.tmp_back[..]),
+        bits: k.tmp_bits,
     };
     let r = if write {
         cache::cached_write(cache, &back, TMPFS_DEV, byte_off, src)

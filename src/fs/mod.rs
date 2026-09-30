@@ -20,7 +20,22 @@ pub mod ktest;
 pub(crate) mod vibefs_crash;
 pub(crate) mod vibefs_init;
 
+use vibeos::fs::Guarded;
 use vibeos::kalloc::{AllocError, TryBox};
+
+use crate::sync_init::SpinMutex;
+
+/// The lock a ramfs or kernfs store sits behind: a RANK_DEVICE spinlock
+/// (DESIGN §2.1), never nested, under which tmpfs's data ops run. The VFS
+/// lock is `fs_init`'s sleeping `BlockingMutex`, never this.
+pub(crate) type StoreLock<T> = SpinMutex<T>;
+
+impl<T: Send> Guarded<T> for SpinMutex<T> {
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut g = self.lock();
+        f(&mut g)
+    }
+}
 
 /// A heap copy of `src`, made in place: a volume is too large for a kernel
 /// stack (DESIGN §4.5), so it is never built or moved by value. `T` is

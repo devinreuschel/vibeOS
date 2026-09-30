@@ -2,7 +2,7 @@ use super::testfs::*;
 use super::*;
 
 fn ram() -> Vfs {
-    let mut v = Vfs::new();
+    let mut v = Vfs::new(crate::fs::host_words());
     v.mount_root_fs(ramfs()).unwrap();
     v
 }
@@ -154,7 +154,7 @@ fn mount_crossing_dotdot() {
 #[test]
 fn unlinked_open_keeps_data_until_close() {
     let fs = ramfs();
-    let mut v = Vfs::new();
+    let mut v = Vfs::new(crate::fs::host_words());
     v.mount_root_fs(fs).unwrap();
     let fid = v.open_path(None, "/f", O_RDWR | O_CREAT, 0o644).unwrap();
     assert_eq!(v.write(&fid, b"hello").unwrap(), 5);
@@ -314,7 +314,7 @@ fn ramfs_rename_and_link() {
 #[test]
 fn fixed_tables_match_limits() {
     use crate::limits;
-    let v = Vfs::new();
+    let v = Vfs::new(crate::fs::host_words());
     assert_eq!(v.inodes.len(), limits::MAX_INODES);
     assert_eq!(v.dentries.len(), limits::MAX_DENTRIES);
     assert_eq!(v.supers.len(), limits::MAX_MOUNTS);
@@ -594,11 +594,12 @@ fn ops_inode_ref_api() {
     let h = r1.handle();
     assert_eq!(h, r2.handle(), "one inode per key");
     assert_eq!(v.inode(h).unwrap().size, 9, "the cached inode wins");
-    let w = v.inode_words(h).unwrap();
-    assert_eq!((w.key, w.private, w.size), ([42, 0, 0], [5, 6], 9));
-    v.set_inode_words(h, [7, 8], 11).unwrap();
-    assert_eq!(v.inode(h).unwrap().private, [7, 8]);
-    assert_eq!(v.inode(h).unwrap().size, 11);
+    let w = v.inode(h).unwrap().words().unwrap();
+    assert_eq!((w.private(), w.size(), w.nlink()), ([5, 6], 9, 1));
+    w.set_private([7, 8]);
+    w.set_size(11);
+    assert_eq!(v.inode(h).unwrap().words().unwrap().private(), [7, 8]);
+    assert_eq!(v.inode(h).unwrap().stat().size, 11);
     assert_eq!(v.inodes_with_key(sb, [42, 0, 0]), 1);
     v.rekey(sb, [42, 0, 0], [43, 0, 0]).unwrap();
     assert_eq!(v.inode(h).unwrap().key, [43, 0, 0]);
@@ -780,8 +781,9 @@ fn two_mounts_one_dentry_per_name() {
 /// A `Vfs` behind a `std::sync::Mutex`, as the kernel's is behind its
 /// spinlock, with a ramfs root and `/blk`.
 fn locked_vfs() -> &'static std::sync::Mutex<Vfs> {
-    let vfs: &'static std::sync::Mutex<Vfs> =
-        std::boxed::Box::leak(std::boxed::Box::new(std::sync::Mutex::new(Vfs::new())));
+    let vfs: &'static std::sync::Mutex<Vfs> = std::boxed::Box::leak(std::boxed::Box::new(
+        std::sync::Mutex::new(Vfs::new(crate::fs::host_words())),
+    ));
     let api = FileApi::new(vfs);
     api.mount_root(ramfs(), None, false, None).unwrap();
     api.mkdir(None, b"/blk", 0o755).unwrap();

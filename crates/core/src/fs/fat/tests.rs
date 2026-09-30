@@ -1205,3 +1205,182 @@ fn fat_rw_across_clusters_volume_buffer() {
     assert!(cb >= SEC);
     fsck(&b);
 }
+
+/// A FAT volume over a memory disk as a `Vfs` filesystem, for host tests:
+/// its `lookup` is one [`FatVol::lookup`] and the conversion the kernel's
+/// `FatOps` makes (key `[dir_clu, dir_off, 0]`, private words
+/// `[first_clu, dirent]`); it panics on `.` or `..`, which `Vfs` must
+/// resolve itself. Every other op refuses.
+struct FatHostOps {
+    vol: std::sync::Mutex<(Box<FatVol>, MemDisk<'static>)>,
+}
+
+impl FatHostOps {
+    fn new(img: Vec<u8>) -> &'static Self {
+        let buf = Box::leak(img.into_boxed_slice());
+        let mut disk = MemDisk::new(buf, SEC as u32).unwrap();
+        let mut vol = Box::new(FatVol::new());
+        vol.mount_in(&mut disk).unwrap();
+        Box::leak(Box::new(Self {
+            vol: std::sync::Mutex::new((vol, disk)),
+        }))
+    }
+}
+
+fn host_info(n: &Node) -> crate::fs::InodeInfo {
+    let dir = n.kind == InodeKind::Dir;
+    crate::fs::InodeInfo {
+        key: [n.dir_clu, n.dir_off, 0],
+        ino: stat_ino(n.dir_clu, n.dir_off),
+        kind: n.kind,
+        mode: if dir {
+            crate::fs::S_IFDIR_MODE
+        } else {
+            crate::fs::S_IFREG_MODE
+        },
+        nlink: if dir { 2 } else { 1 },
+        size: u64::from(n.size),
+        atime: n.mtime,
+        mtime: n.mtime,
+        ctime: n.mtime,
+        private: [
+            u64::from(n.clu),
+            (u64::from(n.dir_clu) << 32) | u64::from(n.dir_off),
+        ],
+    }
+}
+
+impl crate::fs::InodeOps for FatHostOps {
+    fn lookup(
+        &self,
+        _cx: &mut crate::fs::OpCx<'_>,
+        dir: &crate::fs::Inode,
+        name: &[u8],
+    ) -> Result<crate::fs::InodeInfo, FsError> {
+        assert!(name != b"." && name != b"..", "FAT looked up {name:?}");
+        let clu = dir.words()?.private()[0] as u32;
+        let mut g = self.vol.lock().unwrap();
+        let (v, d) = &mut *g;
+        Ok(host_info(&v.lookup(d, clu, name)?))
+    }
+    fn create(
+        &self,
+        _cx: &mut crate::fs::OpCx<'_>,
+        _dir: &mut crate::fs::Inode,
+        _name: &[u8],
+        _kind: InodeKind,
+        _mode: u16,
+        _target: Option<&[u8]>,
+    ) -> Result<crate::fs::InodeInfo, FsError> {
+        Err(FsError::NotSupp)
+    }
+    fn unlink(
+        &self,
+        _cx: &mut crate::fs::OpCx<'_>,
+        _dir: &mut crate::fs::Inode,
+        _name: &[u8],
+    ) -> Result<(), FsError> {
+        Err(FsError::NotSupp)
+    }
+    fn read(
+        &self,
+        _cx: &mut crate::fs::OpCx<'_>,
+        _ino: &mut crate::fs::Inode,
+        _off: u64,
+        _buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        Err(FsError::NotSupp)
+    }
+    fn write(
+        &self,
+        _cx: &mut crate::fs::OpCx<'_>,
+        _ino: &mut crate::fs::Inode,
+        _off: u64,
+        _buf: &[u8],
+    ) -> Result<usize, FsError> {
+        Err(FsError::NotSupp)
+    }
+    fn truncate(
+        &self,
+        _cx: &mut crate::fs::OpCx<'_>,
+        _ino: &mut crate::fs::Inode,
+        _size: u64,
+    ) -> Result<(), FsError> {
+        Err(FsError::NotSupp)
+    }
+    fn readdir(
+        &self,
+        _cx: &mut crate::fs::OpCx<'_>,
+        _dir: &crate::fs::Inode,
+        _cookie: u64,
+        _out: &mut crate::fs::Dirent,
+    ) -> Result<Option<u64>, FsError> {
+        Err(FsError::NotSupp)
+    }
+}
+
+impl crate::fs::FileSystem for FatHostOps {
+    fn name(&self) -> &'static str {
+        "fat32"
+    }
+    fn fstype(&self) -> crate::fs::FsType {
+        crate::fs::FsType::Fat
+    }
+    fn ops(&'static self) -> Option<&'static dyn crate::fs::InodeOps> {
+        Some(self)
+    }
+    fn fill_super(&self, cx: &mut crate::fs::OpCx<'_>) -> Result<crate::fs::InodeInfo, FsError> {
+        let root = self.vol.lock().unwrap().0.info.root_clus;
+        Ok(crate::fs::InodeInfo {
+            key: [0, 0, 0],
+            ino: ROOT_INO,
+            kind: InodeKind::Dir,
+            mode: crate::fs::S_IFDIR_MODE,
+            nlink: 2,
+            size: 0,
+            atime: cx.now,
+            mtime: cx.now,
+            ctime: cx.now,
+            private: [u64::from(root), 0],
+        })
+    }
+}
+
+/// `..` from a 20-deep FAT directory, walked through `Vfs` over one
+/// `lookup` per name, reaches each ancestor in turn, and `/` past the
+/// root (F124: the old walker kept a 16-entry stack).
+#[test]
+fn vfs_fat_dotdot_deep() {
+    const DEPTH: usize = 20;
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let mut dir = v.info.root_clus;
+        for i in 1..=DEPTH {
+            dir = v
+                .create(d, dir, format!("d{i}").as_bytes(), true)
+                .unwrap()
+                .clu;
+        }
+        v.sync(d).unwrap();
+    });
+    let fs = FatHostOps::new(b);
+    let mut vfs = crate::fs::Vfs::new(crate::fs::host_words());
+    vfs.mount_root_fs(fs).unwrap();
+    let mut paths = vec![String::from("/")];
+    let mut p = String::new();
+    for i in 1..=DEPTH {
+        p.push_str(&format!("/d{i}"));
+        paths.push(p.clone());
+    }
+    let ancestors: Vec<u32> = paths
+        .iter()
+        .map(|q| vfs.stat(None, q).unwrap().ino)
+        .collect();
+    for k in 1..=DEPTH + 1 {
+        let q = format!("{}{}", paths[DEPTH], "/..".repeat(k));
+        let want = ancestors[DEPTH.saturating_sub(k)];
+        let got = vfs.stat(None, &q).unwrap();
+        assert_eq!(got.kind, InodeKind::Dir, "{q}");
+        assert_eq!(got.ino, want, "{q} reached the wrong directory");
+    }
+}
