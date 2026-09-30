@@ -602,6 +602,32 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
+[[box]]
+key = "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"
+needs = [
+  "the `/bin/tests` stall after `user:",  # L1240
+  "removed: the loader maps segments from the file",  # L1320
+  "a `no_std` Rust crate under",  # L1350
+  "built for `<arch>-unknown-linux-musl`, §24.3's user",  # L1351
+  "syscall stubs generated from one",  # L1352
+  "the initrd is sized by",  # L1370
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "init's own exit panics the"
+needs = [
+  "pid 1's exit panics the",  # L1363
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "a signal whose default action"
+needs = [
+  "a signal cannot kill or",  # L1362
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Closes rows (How to read this): the box named by `key` lands all the work
 # of each box in `closes`, and the commit that ticks it ticks them.
 
