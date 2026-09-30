@@ -12,7 +12,8 @@
 //! across the driver's callback.
 
 use vibeos::dev::{
-    BarClaim, ClaimError, DevRef, DevState, Device, Driver, Instance, MAX_DEVICES, Registry,
+    BarClaim, ClaimError, DevRef, DevState, Device, Driver, Instance, MAX_DEVICES, ProbeError,
+    Registry, ResourceKind,
 };
 use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
@@ -20,6 +21,7 @@ use vibeos::log::Level;
 use vibeos::pci::Bdf;
 
 use crate::boot;
+use crate::pci_init;
 use crate::sync::blocking_init::BlockingMutex;
 use crate::sync_init::SpinMutex;
 
@@ -56,7 +58,8 @@ pub fn register_driver(drv: &'static dyn Driver) -> bool {
 /// Probe each `Present` device a registered driver matches, in
 /// [`Driver::order`]. Each probe runs under the device's lock with [`REG`]
 /// dropped: the device is `Probing` meanwhile, then `Bound` to the driver
-/// and owning the instance it returned, or `Present` again on an error.
+/// and owning the instance it returned, or `Present` again on an error,
+/// with any BAR it claimed unmapped and released.
 pub fn bind_all() {
     let mut jobs: [Option<(u8, DevRef)>; MAX_DEVICES] = [const { None }; MAX_DEVICES];
     let n = REG.lock().collect_bind_jobs(&mut jobs);
@@ -80,6 +83,7 @@ pub fn bind_all() {
             }
             // The device is `Present` again, for a later driver.
             Err(e) => {
+                release_bars(dev);
                 REG.lock().abort_probe(dev);
                 crate::klog!(
                     Level::Warn,
@@ -101,13 +105,6 @@ pub fn get(i: usize) -> Option<DevRef> {
 }
 
 /// The device at `bdf`.
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "C-INSTANCES lookup: ROADMAP §10.12's claims (P10-S96) look a device up by address"
-    )
-)]
 pub fn find_bdf(bdf: Bdf) -> Option<DevRef> {
     let mut i = 0usize;
     while let Some(d) = get(i) {
@@ -190,9 +187,115 @@ pub fn release(claim: BarClaim) {
     REG.lock().release(claim)
 }
 
+/// The VA BAR `bar` of `dev` is mapped at, while its entry holds it.
+pub fn bar_va(dev: &DevRef, bar: u8) -> Option<u64> {
+    REG.lock().bar_va(dev, bar)
+}
+
+/// Claim every non-empty memory BAR of `dev`, map each one under the cap
+/// through [`pci_init::map_bar`], and give each claim to `dev`'s entry; a
+/// BAR above the cap is held with no VA. A driver's `probe` calls it
+/// before it touches its device. On an error nothing this call claimed
+/// stays claimed or mapped: `Busy` when another claim holds a range,
+/// `NoResource` for RAM, a full table or a failed mapping.
+pub fn claim_mem_bars(dev: &DevRef) -> Result<(), ProbeError> {
+    let mut bar = 0u8;
+    while let Some(r) = dev.resources.get(bar as usize) {
+        let this = bar;
+        bar = bar.saturating_add(1);
+        if r.is_empty() || !matches!(r.kind, ResourceKind::Memory) {
+            continue;
+        }
+        let claimed = match claim(dev, this) {
+            Ok(c) => c,
+            Err(e) => {
+                release_bars(dev);
+                return Err(match e {
+                    ClaimError::Already | ClaimError::Overlap => ProbeError::Busy,
+                    ClaimError::Ram
+                    | ClaimError::Full
+                    | ClaimError::Empty
+                    | ClaimError::BadIndex => ProbeError::NoResource,
+                });
+            }
+        };
+        // Mapped with REG dropped: `map_bar` takes the page-table lock. A
+        // BAR above the cap is held with no VA, and `map_bar` logs it.
+        let va = pci_init::map_bar(&claimed);
+        if va.is_none() && vibeos::pci::bar_map_allowed(claimed.len()) {
+            release(claimed);
+            release_bars(dev);
+            return Err(ProbeError::NoResource);
+        }
+        if let Err(back) = hold(claimed, va) {
+            if let Some(va) = va {
+                // SAFETY: invariant I484: `va` is where `map_bar` just
+                // mapped `back`, and nothing has used it; established
+                // here.
+                unsafe { pci_init::unmap_bar(&back, va) };
+            }
+            release(back);
+            release_bars(dev);
+            return Err(ProbeError::Busy);
+        }
+    }
+    Ok(())
+}
+
+/// Unmap each BAR `dev`'s entry holds, then release its claim. A driver's
+/// `remove` ends with it, after it stopped the device, and the binder
+/// calls it after a failed probe.
+pub fn release_bars(dev: &DevRef) {
+    let mut bar = 0u8;
+    while (bar as usize) < vibeos::pci::MAX_BARS {
+        let taken = REG.lock().take_bar(dev, bar);
+        bar = bar.saturating_add(1);
+        let Some((claim, va)) = taken else {
+            continue;
+        };
+        if let Some(va) = va {
+            // SAFETY: invariant I484: `va` is where `map_bar` mapped
+            // `claim` for `dev`'s driver, which has quiesced the device and
+            // dropped its VAs (its `remove`, or a probe that failed after
+            // its own stop), so nothing touches it; established by
+            // `dev_init::claim_mem_bars`.
+            unsafe { pci_init::unmap_bar(&claim, va) };
+        }
+        release(claim);
+    }
+}
+
 /// Whether BAR `bar` of `dev` is claimed.
 pub fn is_claimed(dev: &DevRef, bar: u8) -> bool {
     REG.lock().is_claimed(dev, bar)
+}
+
+/// Remove `dev`'s driver under the device's lock: `Bound` → `Removing`,
+/// the driver's `remove`, its BARs unmapped and released, then `Present`.
+/// `false` when `dev` was not bound.
+#[cfg(feature = "kernel_tests")]
+pub fn unbind(dev: &DevRef) -> bool {
+    let Some(lock) = dev_lock(dev) else {
+        return false;
+    };
+    let _serial = lock.lock();
+    let Some(drv) = REG.lock().begin_remove(dev) else {
+        return false;
+    };
+    drv.remove(dev);
+    release_bars(dev);
+    let inst = REG.lock().finish_remove(dev);
+    drop(inst);
+    true
+}
+
+/// Register `d`, a record no driver matches (vendor `0xFFFE`, class
+/// `0xFF`), for a claim test; its id, or `None` when the table is full.
+#[cfg(feature = "kernel_tests")]
+pub fn push_test_device(mut d: Device) -> Option<u64> {
+    d.vendor = 0xFFFE;
+    d.class = 0xFF;
+    push(d, None).ok().map(|r| r.id())
 }
 
 /// Bind any drivers already registered.

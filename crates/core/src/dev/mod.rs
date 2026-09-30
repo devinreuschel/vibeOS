@@ -9,6 +9,11 @@
 //! record never changes after [`Registry::push`], and the registry slot
 //! owns what changes: its parent, its [`DevState`], the bound driver, the
 //! driver's per-device state ([`Instance`]) and its BARs' claims.
+//!
+//! A BAR is claimed through [`Registry::claim`], which refuses a range
+//! that overlaps another claim or RAM, and mapped only by the driver that
+//! holds its [`BarClaim`], in `probe` (DESIGN §12.3 rule 8): nothing maps
+//! a BAR at enumeration.
 
 pub mod dma;
 pub mod entropy;
@@ -107,8 +112,6 @@ pub struct Resource {
     pub addr: u64,
     pub size: u64,
     pub prefetchable: bool,
-    /// Kernel VA after ioremap / physmap. 0 = not mapped.
-    pub mapped_va: u64,
 }
 
 impl Resource {
@@ -118,7 +121,6 @@ impl Resource {
         addr: 0,
         size: 0,
         prefetchable: false,
-        mapped_va: 0,
     };
 
     pub fn from_bar(bar_index: u8, bar: Bar) -> Self {
@@ -136,7 +138,6 @@ impl Resource {
             addr: bar.addr,
             size: bar.size,
             prefetchable: bar.prefetchable,
-            mapped_va: 0,
         }
     }
 
@@ -449,6 +450,8 @@ impl fmt::Debug for DevRef {
 #[derive(Debug, PartialEq, Eq)]
 pub struct BarClaim {
     dev: u64,
+    /// The claiming device's address, for the lines its mapping logs.
+    at: Bdf,
     bar: u8,
     mem: bool,
     addr: u64,
@@ -460,6 +463,11 @@ impl BarClaim {
     /// The id of the claiming device's entry ([`DevRef::id`]).
     pub fn dev(&self) -> u64 {
         self.dev
+    }
+
+    /// The claiming device's bus address.
+    pub fn bdf(&self) -> Bdf {
+        self.at
     }
 
     pub fn bar(&self) -> u8 {
@@ -842,6 +850,7 @@ impl Registry {
         });
         Ok(BarClaim {
             dev: id,
+            at: dev.addr,
             bar,
             mem,
             addr: res.addr,

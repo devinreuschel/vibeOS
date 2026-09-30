@@ -8,7 +8,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::arch::CycleCounter;
-use vibeos::dev::{DevRef, Device};
+use vibeos::dev::DevRef;
 use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::PhysAddr;
@@ -784,9 +784,9 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
 }
 
 pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
-    // SAFETY: invariant: every caller passes a device's BAR 0 VA, which
-    // `pci_init` mapped uncached, and a register offset inside that BAR;
-    // established by `ktest::bar0_va`.
+    // SAFETY: invariant I484: every caller passes a device's BAR 0 VA,
+    // which the `bar-test` driver claimed and mapped uncached, and a
+    // register offset inside that BAR; established by `ktest::bar0_va`.
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32) }
 }
 
@@ -798,13 +798,12 @@ pub(crate) fn mmio_w32(va: u64, off: u32, val: u32) {
 pub(crate) const EDU_IDENT: u32 = 0x00;
 pub(crate) const EDU_IDENT_VAL: u32 = 0x0100_00ED;
 
-pub(crate) fn bar0_va(dev: &Device) -> Option<u64> {
-    let r = dev.resources[0];
-    if r.mapped_va != 0 {
-        Some(r.mapped_va)
-    } else {
-        None
-    }
+/// BAR 0's VA for edu or e1000e, which the `kernel_tests` driver
+/// `bar-test` claims and maps (binding it on first use); `None` when that
+/// driver does not hold the BAR.
+pub(crate) fn bar0_va(dev: &DevRef) -> Option<u64> {
+    crate::dev::ktest::bind_bar_test_driver();
+    crate::dev_init::bar_va(dev, 0)
 }
 
 pub(crate) fn find_edu() -> Option<DevRef> {

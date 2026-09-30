@@ -1,17 +1,20 @@
 //! PCI config (CF8 + ECAM) and bus scan. ROADMAP §6.2.
 //!
 //! Legacy `0xCF8`/`0xCFC` for bus 0 when there is no MCFG. Beyond bus 0,
-//! MCFG → ECAM (DESIGN §7.1). Scan fills the device list; drivers bind
-//! later. Memory BARs are mapped through ioremap or a capped physmap —
-//! never a multi-TiB page walk (DESIGN §4.1).
+//! MCFG → ECAM (DESIGN §7.1). Scan fills the device list, with each
+//! function's parent bridge, and maps no BAR. A driver maps a memory BAR
+//! it has claimed, in its `probe`, through [`map_bar`] (DESIGN §12.3 rule
+//! 8): through ioremap or the capped physmap, never a multi-TiB page walk
+//! (DESIGN §4.1).
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::dev::{self, DevRef, Device};
+use vibeos::dev::{self, BarClaim, DevRef, Device};
+use vibeos::ipi::{SHOOT_RANGE_PAGES, SHOOT_RANGES, ShootRange};
 use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
-use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
+use vibeos::paging::{IOREMAP_BASE, IOREMAP_LEN, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
 use crate::acpi_init;
@@ -92,18 +95,22 @@ fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
     }
 }
 
-fn map_mmio(phys: u64, len: u64, keep_wb: bool) -> Option<u64> {
+/// Map `[phys, phys + len)` for the kernel: uncached through the physmap
+/// below `map_end`, or through ioremap above it; a range that overlaps a
+/// framebuffer stays write-back on the physmap. Reached only from
+/// [`map_bar`], through a live claim (invariant I484), and from `ecam_va`.
+fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     if phys == 0 || len == 0 {
         return None;
     }
     let end = phys.checked_add(len)?;
-    // VGA BAR0 aliases the Limine FB. It stays WB on the physmap.
-    // UC-patch or ioremap would alias the console UC (DESIGN §4.1 / §9.2).
+    // A BAR that aliases the Limine FB stays WB on the physmap: a UC patch
+    // or an ioremap would alias the console UC (DESIGN §4.1 / §9.2).
     // Limine's surface (and thus map_end) is often smaller than the BAR
-    // (16 MiB); fill missing physmap leaves as WB so BAR0 is mapped.
-    if keep_wb || fb_init::overlaps_phys(phys, len) {
-        // SAFETY: `ensure_physmap_wb`'s contract; this BAR is VGA memory or
-        // overlaps the framebuffer, which stays WB on the physmap and is never
+    // (16 MiB); fill missing physmap leaves as WB so the BAR is mapped.
+    if fb_init::overlaps_phys(phys, len) {
+        // SAFETY: `ensure_physmap_wb`'s contract; this range overlaps the
+        // framebuffer, which stays WB on the physmap and is never
         // UC-patched or ioremapped (invariant I17, established here).
         if unsafe { paging_init::ensure_physmap_wb(PhysAddr(phys), len) }
             || phys < paging_init::map_end()
@@ -124,10 +131,94 @@ fn map_mmio(phys: u64, len: u64, keep_wb: bool) -> Option<u64> {
         let _ = patched;
         Some(paging_init::HHDM_BASE.wrapping_add(phys))
     } else {
-        // SAFETY: the range is a BAR the scan read from config space, above
-        // the physmap, which only this mapping reaches; established by
-        // `pci_init::map_func_bars`, the one caller that passes BARs.
+        // SAFETY: invariant I484: the range is a BAR its caller holds a
+        // claim on, which overlaps no other claim and no RAM, or an ECAM
+        // page, above the physmap, which only this mapping reaches;
+        // established by `dev::Registry::claim` and `pci_init::ecam_va`.
         unsafe { paging_init::ioremap(PhysAddr(phys), len) }.map(|v| v.as_u64())
+    }
+}
+
+/// Map the BAR `claim` holds, for the driver that claimed it; `None` for
+/// an I/O BAR, one above the 32 MiB cap (§9.2), which is claimed but not
+/// mapped, or a failed mapping.
+pub fn map_bar(claim: &BarClaim) -> Option<u64> {
+    if !claim.is_mem() {
+        return None;
+    }
+    if !bar_map_allowed(claim.len()) {
+        crate::marker!(
+            "vibeOS: pci: skip bar {} size {:#x}",
+            claim.bdf(),
+            claim.len()
+        );
+        return None;
+    }
+    map_mmio(claim.phys(), claim.len())
+}
+
+/// Unmap the BAR `claim` holds from `va`, where [`map_bar`] mapped it. An
+/// ioremap VA loses its leaves, on every CPU, before this returns; the
+/// window never hands the VA out again (DESIGN §4.1). A physmap VA stays
+/// mapped, uncached or write-back as `map_bar` left it, until ROADMAP
+/// §11.2 makes the physmap RAM-only.
+///
+/// # Safety
+/// `va` is what `map_bar(claim)` returned, and nothing touches it any
+/// more: the driver has stopped its device and dropped every copy of it.
+pub unsafe fn unmap_bar(claim: &BarClaim, va: u64) {
+    let window = IOREMAP_BASE..IOREMAP_BASE.saturating_add(IOREMAP_LEN);
+    if !window.contains(&va) {
+        return;
+    }
+    let start = va & !(PAGE_SIZE_4K - 1);
+    let head = va - start;
+    let Some(end) = head
+        .checked_add(claim.len())
+        .and_then(|l| l.checked_add(PAGE_SIZE_4K - 1))
+        .map(|l| start.saturating_add(l & !(PAGE_SIZE_4K - 1)))
+    else {
+        return;
+    };
+    let end = end.min(window.end);
+    paging_init::with_pt(|pt| {
+        let mut v = start;
+        while v < end {
+            // SAFETY: `unmap_4k_locked`'s contract: nothing uses the BAR's
+            // VA any more (this fn's `# Safety` contract), and the
+            // shootdown below runs before this fn returns; established by
+            // `pci_init::unmap_bar`.
+            let step = match unsafe { paging_init::unmap_4k_locked(pt, VirtAddr(v)) } {
+                Some((_, size)) => size.bytes(),
+                None => PAGE_SIZE_4K,
+            };
+            v = v.saturating_add(step);
+        }
+    });
+    // Every 4 KiB page of the span, 32 pages a range, a round of ranges at
+    // a time; an `invlpg` of any page of a 2 MiB leaf drops that leaf.
+    let mut ranges = [ShootRange::page(start); SHOOT_RANGES];
+    let mut n = 0usize;
+    let mut v = start;
+    while v < end {
+        let pages = ((end - v) / PAGE_SIZE_4K).min(SHOOT_RANGE_PAGES);
+        let Some(r) = ShootRange::new(v, pages) else {
+            break;
+        };
+        if let Some(slot) = ranges.get_mut(n) {
+            *slot = r;
+            n += 1;
+        }
+        if n == SHOOT_RANGES {
+            vibeos::paging::tlb_shootdown_ranges(&ranges);
+            n = 0;
+        }
+        v = v.saturating_add(pages * PAGE_SIZE_4K);
+    }
+    if let Some(rest) = ranges.get(..n)
+        && !rest.is_empty()
+    {
+        vibeos::paging::tlb_shootdown_ranges(rest);
     }
 }
 
@@ -166,7 +257,7 @@ fn ecam_va(phys: u64) -> Option<u64> {
     }) {
         return Some(va);
     }
-    let va = map_mmio(page, PAGE_SIZE_4K, false)?;
+    let va = map_mmio(page, PAGE_SIZE_4K)?;
     with_ecam(|e| {
         let slot = pci::ecam_cache_slot(e.n, ECAM_CACHE);
         if e.n < ECAM_CACHE {
@@ -236,32 +327,9 @@ impl CfgIo for HwCfg {
     }
 }
 
-fn map_func_bars(info: &FuncInfo, dev: &mut Device) {
-    let mut i = 0usize;
-    while i < pci::MAX_BARS {
-        let bar = info.bars[i];
-        if !bar.kind.is_mem() || bar.addr == 0 || bar.size == 0 {
-            i += 1;
-            continue;
-        }
-        if !bar_map_allowed(bar.size) {
-            crate::marker!("vibeOS: pci: skip bar {} size {:#x}", info.bdf, bar.size);
-            i += 1;
-            continue;
-        }
-        // Class 03.00 BAR0 is the scanout aperture. Keep it WB even when
-        // Limine's FB record does not overlap the full BAR.
-        let keep_wb = i == 0 && info.class == 0x03 && info.subclass == 0x00;
-        if let Some(va) = map_mmio(bar.addr, bar.size, keep_wb) {
-            dev.resources[i].mapped_va = va;
-        }
-        i += 1;
-    }
-}
-
-/// Scan, map memory BARs, publish each device through `publish` (the
-/// device registry's `dev_init::push`, which `_start` passes), emit
-/// `pci: N devices`.
+/// Scan, publish each device behind its parent bridge through `publish`
+/// (the device registry's `dev_init::push`, which `_start` passes), emit
+/// `pci: N devices`. Maps no BAR: each driver maps what it claims.
 pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
     if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
         with_ecam(|e| {
@@ -290,8 +358,7 @@ pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
         let parent = dev::parent_bridge(scanned, i)
             .and_then(|p| ids.get(p).copied())
             .filter(|&id| id != 0);
-        let mut dev = Device::from_func(info);
-        map_func_bars(&info, &mut dev);
+        let dev = Device::from_func(info);
         #[expect(
             clippy::let_underscore_must_use,
             reason = "a write to Serial cannot fail (DESIGN §2.5)"

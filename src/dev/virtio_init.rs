@@ -4,12 +4,12 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::dev::{ClaimError, DevRef, Device, Driver, IdMatch, Instance, ProbeError};
+use vibeos::dev::{DevRef, Device, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
-use vibeos::pci::{Bdf, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM, MAX_BARS};
+use vibeos::pci::{Bdf, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::virtio::{
     self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
     COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER, COMMON_OFF_QENABLE, COMMON_OFF_QMSIX,
@@ -126,16 +126,15 @@ fn w64(va: u64, off: u16, v: u64) {
     w32(va, off + 4, (v >> 32) as u32);
 }
 
-fn region(dev: &Device, cap: PciCap) -> Option<u64> {
-    let bir = cap.bar as usize;
-    if bir >= MAX_BARS {
+/// The VA of capability `cap`'s region, inside a BAR the probe claimed
+/// and mapped (`dev_init::claim_mem_bars`).
+fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
+    let r = dev.resources.get(cap.bar as usize)?;
+    if (cap.offset as u64) >= r.size {
         return None;
     }
-    let r = dev.resources[bir];
-    if r.mapped_va == 0 || (cap.offset as u64) >= r.size {
-        return None;
-    }
-    Some(r.mapped_va.wrapping_add(cap.offset as u64))
+    let va = dev_init::bar_va(dev, cap.bar)?;
+    Some(va.wrapping_add(cap.offset as u64))
 }
 
 fn clamp_qsize(hw: u16) -> u16 {
@@ -361,7 +360,7 @@ fn kick(doorbell: u64) {
     }
 }
 
-fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
+fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
     let notify_cap = caps.notify.ok_or(VirtioError::NoCaps)?;
     let isr_cap = caps.isr.ok_or(VirtioError::NoCaps)?;
@@ -532,34 +531,6 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
     Ok(())
 }
 
-/// Claim each BAR a capability in `caps` lives in. Several capabilities
-/// share a BAR, so `Already` on one this device claimed is success.
-fn claim_bars(dev: &DevRef, caps: &ModernCaps) -> Result<(), ProbeError> {
-    for c in [caps.common, caps.notify, caps.isr, caps.device]
-        .into_iter()
-        .flatten()
-    {
-        let i = c.bar as usize;
-        if i >= MAX_BARS || dev.resources[i].is_empty() {
-            continue;
-        }
-        match dev_init::claim(dev, c.bar) {
-            Ok(claim) => {
-                if let Err(claim) = dev_init::hold(claim, None) {
-                    dev_init::release(claim);
-                    return Err(ProbeError::Busy);
-                }
-            }
-            Err(ClaimError::Already) => {}
-            Err(ClaimError::Overlap) => return Err(ProbeError::Busy),
-            Err(ClaimError::Empty | ClaimError::BadIndex | ClaimError::Ram | ClaimError::Full) => {
-                return Err(ProbeError::NoResource);
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(crate) struct RngDriver;
 
 static RNG_IDS: &[IdMatch] = &[
@@ -596,11 +567,11 @@ impl Driver for RngDriver {
             crate::marker!("vibeOS: virtio: missing modern caps");
             return Err(ProbeError::NoResource);
         }
-        claim_bars(dev, &caps)?;
-        match setup(dev, caps) {
+        dev_init::claim_mem_bars(dev)?;
+        let r = match setup(dev, caps) {
             Ok(()) => {
                 BOUND.store(true, Ordering::Release);
-                Ok(None)
+                return Ok(None);
             }
             Err(VirtioError::NoVersion1) => {
                 crate::marker!("vibeOS: virtio: no VERSION_1");
@@ -610,7 +581,10 @@ impl Driver for RngDriver {
                 crate::marker!("vibeOS: virtio: probe {}", e.as_str());
                 Err(ProbeError::Failed)
             }
-        }
+        };
+        // `setup` stopped the device before it failed, so its BARs go.
+        dev_init::release_bars(dev);
+        r
     }
     /// DEVICES.md §12.2 rule 7's one quiesce. The queue leaves `Q` first,
     /// so the bottom half finds nothing to harvest, and the top half no
@@ -644,6 +618,8 @@ impl Driver for RngDriver {
         }
         IN_FLIGHT.store(false, Ordering::Release);
         DEV_KEY.store(0, Ordering::Release);
+        // The device is stopped and every VA into its BARs dropped.
+        dev_init::release_bars(dev);
         BOUND.store(false, Ordering::Release);
     }
 }

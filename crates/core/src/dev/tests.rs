@@ -58,7 +58,6 @@ fn nic() -> Device {
         addr: 0xFEB8_0000,
         size: 0x20000,
         prefetchable: false,
-        mapped_va: 0,
     };
     d.resources[1] = Resource {
         kind: ResourceKind::Io,
@@ -66,7 +65,6 @@ fn nic() -> Device {
         addr: 0xC000,
         size: 0x40,
         prefetchable: false,
-        mapped_va: 0,
     };
     d
 }
@@ -83,7 +81,6 @@ fn vga() -> Device {
         addr: 0xFD00_0000,
         size: 0x100_0000,
         prefetchable: true,
-        mapped_va: 0,
     };
     d
 }
@@ -224,6 +221,7 @@ fn claim_release_frees_range() {
     let (c, _) = r.take_bar(&d1, 0).unwrap();
     let dup = BarClaim {
         dev: c.dev,
+        at: c.at,
         bar: c.bar,
         mem: c.mem,
         addr: c.addr,
@@ -254,7 +252,6 @@ fn claim_table_full_is_full() {
                 addr: 0x1_0000_0000 + (i * MAX_BARS as u64 + b as u64) * 0x1000,
                 size: 0x1000,
                 prefetchable: false,
-                mapped_va: 0,
             };
         }
         let d = r.push(d).unwrap();
@@ -358,9 +355,9 @@ fn registry_holds_references() {
     // (`dev_init::REG`) built in a const and used in place, and no
     // caller copies it. The bound keeps its growth in view.
     let reg = core::mem::size_of::<Registry>();
-    assert!(reg < 24 * 1024, "Registry {reg} should be under 24 KiB");
+    assert!(reg < 32 * 1024, "Registry {reg} should be under 32 KiB");
     let claim = core::mem::size_of::<BarClaim>();
-    assert!(claim <= 32, "BarClaim {claim} should be at most 32 bytes");
+    assert!(claim <= 40, "BarClaim {claim} should be at most 40 bytes");
     let mut r = Registry::new();
     let d = r.push(nic()).unwrap();
     let g = r.get(0).unwrap();
