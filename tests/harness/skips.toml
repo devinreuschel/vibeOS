@@ -88,3 +88,8 @@ cpu = "qemu64,-tsc-deadline"
 name = "alloc_stress_smp"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "call_function_ipi"
+reason = "no AP"
+smp = 1
