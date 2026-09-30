@@ -194,7 +194,7 @@ children, need no row.
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
 | sched | `sched/{mod,thread,wait,work,fpu,stack_depth}.rs` | `sched/{mod,sched_init,work_init}.rs`, `sched/thread_init/{boot,mod,testing}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
-| log | `log/{mod,backtrace,line,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs` | `log/{mod,log_init,panic,panic_test,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |
+| log | `log/{mod,backtrace,line,pvpanic,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs` | `log/{mod,log_init,panic,panic_test,pvpanic_init,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
 | shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
 | dev | `dev/{mod,pci,dma,virtio,entropy,tests}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |

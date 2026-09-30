@@ -5,6 +5,7 @@ Runs under `python3 -m unittest discover`. Standard-library only.
 
 from __future__ import annotations
 
+import dataclasses
 import unittest
 
 import tests.harness.run_e2e as run_e2e
@@ -13,7 +14,6 @@ from tests.harness import frame, registry
 from tests.harness.harness import (
     ISA_DEBUG_PASS,
     PANIC_DONE,
-    PANIC_EXIT_STATUS,
     PANIC_SIGNATURES,
     HarnessError,
     Marker,
@@ -24,6 +24,7 @@ from tests.harness.harness import (
     run_qemu_console_input,
 )
 from tests.harness.linesource import FakeLineSource
+from tests.harness.qmp import FakeQmp
 from tests.harness.results import Results
 
 PAD = run_ktest.SERIAL_PAD
@@ -254,14 +255,18 @@ class PanicSignatureTests(unittest.TestCase):
 
     def test_panic_done_framed_only(self) -> None:
         boot = [K(ONLINE), K("vibeOS: panic:"), K("vibeOS: panic: msg: x")]
-        src = FakeLineSource.from_lines(boot + [K(PANIC_DONE)], exit_code=PANIC_EXIT_STATUS)
+        cfg = dataclasses.replace(FAKE_CFG, expect="panic")
+        panicked: dict[int, list[dict[str, object]]] = {
+            4: [{"event": "GUEST_PANICKED", "data": {"action": "pause"}}]
+        }
+        src = FakeLineSource.from_lines(boot + [K(PANIC_DONE)])
         run_qemu_and_check(
-            FAKE_CFG, [Marker(ONLINE, "a")], expect_panic=True, line_source=src
+            cfg, [Marker(ONLINE, "a")], line_source=src, qmp=FakeQmp([], after_line=panicked)
         )
-        src = FakeLineSource.from_lines(boot + [PANIC_DONE], exit_code=PANIC_EXIT_STATUS)
+        src = FakeLineSource.from_lines(boot + [PANIC_DONE])
         with self.assertRaisesRegex(HarnessError, "dump ended before"):
             run_qemu_and_check(
-                FAKE_CFG, [Marker(ONLINE, "a")], expect_panic=True, line_source=src
+                cfg, [Marker(ONLINE, "a")], line_source=src, qmp=FakeQmp([], after_line=panicked)
             )
 
 

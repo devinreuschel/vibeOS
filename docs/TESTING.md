@@ -123,9 +123,8 @@ fussiness: an ISO recipe that packaged whatever ELF the last build left in `targ
 feature-enabled ELF into the production ISO, and the difference is not visible from the outside.
 Each variant's recipe removes its named ELF first, builds with `--artifact-dir`, so a parallel
 build of another variant cannot swap the file, and writes the named ELF last. The panic-dump, `#GP`,
-panic-nest and panic-stop ISOs are `--features panic_test --features panic_exit`, `--features gp_test
---features panic_exit`, `--features panic_nest_test --features panic_exit` and `--features
-panic_stop_test --features panic_exit` (underscores in features; Cargo
+panic-nest and panic-stop ISOs are `--features panic_test`, `--features gp_test`, `--features
+panic_nest_test` and `--features panic_stop_test` (underscores in features; Cargo
 features in this crate do not use hyphens, and the variant names do not use underscores).
 
 ```
@@ -443,8 +442,8 @@ The in-guest runner's failure lines fail a `make test-kernel` run, matched on fr
 and two `failure` rows fail the run as soon as they print: the deadline failure signature
 `vibeOS: ktest: FAIL <name>: deadline`, which a timer tick prints before it panics, and
 `vibeOS: ktest: bad option <key>=<value>`, printed before `begin`. The deadline trip boot expects
-both its failure and its panic (`run_qemu_until_exit(..., expect_fail=True)`) and checks them
-itself.
+both its failure and its panic (`run_qemu_until_exit(..., expect_fail=True)`, declared
+`expect="panic"`) and checks them itself.
 
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
 fd 2, and a fuzzer writes random bytes. The harness scans framed lines only (§2.6), and fails on
@@ -469,29 +468,37 @@ prints `vibeOS: panic_stop: line <n>` with IF=0, CPU 3 waits with IF=0 on a lock
 4 spins with IF=0, and requires the other of CPUs 0 and 1 `stopped (panic)`, CPUs 2 and 3
 `stopped (poll)`, CPU 4 `stopped (nmi)`, no numbered line after the first `vibeOS: panic:` line (a
 `logrec:` replay does not count), and `vibeOS: panic_stop: owner nmi returned`, which the owner prints
-once the NMI it sends itself after its message has come back (F135). `panic_exit` writes isa-debug-exit
-`0x11` so QEMU leaves instead of sitting in `hlt`. The harness reads through `vibeOS: panic: halted`,
-so the dump (regs, thread, last log records, backtrace) is in the captured log, then gives QEMU up to
-10 s (`PANIC_EXIT_S`) to exit and requires status 35 (`PANIC_EXIT_STATUS`); then it checks the dump
-needles.
+once the NMI it sends itself after its message has come back (F135). After the dump the kernel
+writes pvpanic's panicked event, and QEMU pauses the guest (`-action panic=pause`). The harness
+reads through `vibeOS: panic: halted`, so the dump (regs, thread, last log records, backtrace) is in
+the captured log, then gives QEMU up to 10 s (`PANIC_EXIT_S`) to report QMP `GUEST_PANICKED`, the
+run's end; it reads serial on for 0.5 s after the event, since the QMP socket can beat the serial
+pipe, checks the dump needles, and quits QEMU through QMP. A failed check keeps the guest core.
 
-Planned (ROADMAP §10.7, §11.7), the event rule. The panic path signals pvpanic
+The event rule (ROADMAP §10.7), as built on x86_64 (`tests/harness/qmp.py`, C-QMP; aarch64's
+`pvpanic-pci` is planned, ROADMAP §11.7). The panic path signals pvpanic
 ([§2.5](INVARIANTS.md#25-panic-policy) steps 6 and 7), QEMU runs with `-action panic=pause`, and the harness
-reads QEMU's QMP events. Each run declares the end it expects: none, the default; a panic, for the
-expected-panic e2e; `expect=reset`, for a line whose guest resets and boots again; or
-`expect=capture`, for a line whose panic reaches a capture kernel. `GUEST_PANICKED` pauses the
-guest: a run that expects no panic takes a guest core, quits, and fails; the expected-panic e2e
-checks its dump needles and quits; an `expect=reset` run sends `cont`. QEMU reports
+reads QEMU's QMP events: every boot starts halted (`-S`) with a QMP socket, and the harness
+connects, negotiates and only then sends `cont`, so no event is lost (`qmp.Session`, which all
+three runners drive). Each run declares the end it expects (`QemuConfig.expect`): `none`, the
+default; `panic`, for the expected-panic e2e, the `#GP` e2e, the panic-path variants and the
+in-guest deadline trip; `reset`, for a line whose guest resets and boots again, with the `RESET`
+events it allows in `QemuConfig.resets`; or `capture`, for a line whose panic reaches a capture
+kernel. No Phase 10 run declares `reset` or `capture`; the later lines below use the machinery.
+`GUEST_PANICKED` pauses the guest: a run that expects no panic takes a guest core, quits, and
+fails; the expected-panic e2e checks its dump needles and quits; an `expect=reset` run sends
+`cont`. QEMU reports
 `GUEST_CRASHLOADED` without pausing: a run not declared `expect=capture` stops the guest, takes a
 core, and fails, and an `expect=capture` run waits for the capture kernel's
 `vibeOS: vmcore: written <n> bytes` line and its reset, which ends QEMU under `-no-reboot`. A panic
 signature with no event, from a panic before the kernel has found its pvpanic device, fails a run
 that expects no panic at once, and the harness takes the core after `vibeOS: panic: halted` or
 10 s, whichever comes first. An `expect=reset` run boots without `-no-reboot`, fails on more QMP
-`RESET` events than its line expects, and is judged by the markers its line names. `expect=reset`
-and `expect=capture` runs take a core only when they fail: a core taken after a crash jump still
-describes the crashed kernel, because a kernel entered through the crash path never writes QEMU's
-`vmcoreinfo` device (ROADMAP §10.7).
+`RESET` events than its line expects, and is judged by the markers its line names. Every timeout
+takes a core. `expect=reset` and `expect=capture` runs take a core only when they fail: a core taken
+after a crash jump still describes the crashed kernel, because a kernel entered through the crash
+path never writes QEMU's `vmcoreinfo` device (ROADMAP §10.7). `tests/harness/test_qmp.py` replays
+QMP event streams recorded from QEMU for each declaration (below).
 
 On success, exit through the QEMU monitor's `quit` rather than waiting for the timeout. Two seconds
 versus forty five, on every CI run and every local invocation.
@@ -509,6 +516,29 @@ serial lines carry only the guest's output. When QEMU exits before the last mark
 the missing marker, QEMU's exit status, and the last 20 lines of its stderr, then the serial tail, so
 a firmware QEMU could not load reads as that and not only as `missing marker 'serial_online'`
 (F079); a timeout shows the stderr lines too when there are any.
+
+When a run times out, or panics where the event rule (§8.3, Failing fast) says so, the harness
+takes a guest core before it quits QEMU (`qmp.take_core`): it stops the guest, then QMP
+`dump-guest-memory` with `"paging": false` and no format writes a physical ELF core, one
+`NT_PRSTATUS` note per CPU and the kernel's VMCOREINFO note ([VMCOREINFO.md](VMCOREINFO.md)) beside
+the memory. Never `-p`, whose mappings come from each vCPU's page tables at the time of the dump,
+and never a kdump format, which `gdb` cannot read. The harness hands QEMU the write end of a pipe
+through QMP `getfd` and dumps to `fd:vibeos-core` while host `zstd` compresses the read end, so no
+uncompressed core touches the disk. Each such run gets a directory,
+`build/cores/<arch>-<tier>/<seq>-<label>/`, with `core.zst`, `kernel.elf` (the named ELF behind the
+ISO, `build/kernels/vibeos-<variant>.elf`) and `qemu-argv.txt`. `make test-qmp`
+(`tests/harness/run_qmp.py`) re-records the QMP event streams `tests/harness/test_qmp.py` replays
+(`tests/harness/fixtures/qmp/`, one per declaration, a `GUEST_CRASHLOADED` stream and an extra
+`RESET` among them) on the QEMU it runs on and fails on any difference, checks that
+`-machine q35`'s fw_cfg lists `etc/pvpanic-port`, and takes one core of the production ISO and
+checks its notes. `python3 tests/harness/run_qmp.py --record tests/harness/fixtures/qmp`
+regenerates the streams; the recorder drives QEMU through a qtest socket beside TCG with 64 KiB of
+`hlt` as its firmware. When a tier fails, CI uploads its `build/cores/` as one artifact,
+`cores-<arch>-<tier>` (the `tier` job's last step, `if: failure()`; the build job's
+`prebuilt-<arch>` carries the named ELFs), which is public like every artifact of this repository
+(DESIGN §1.5). So a job in a workflow that names an environment or a secret uploads no core, memory
+dump or QEMU command line: `scripts/check_workflows.py` (`rule_no_core_upload_with_secrets`) fails
+on one that does.
 
 Every driver classifies each serial line through `tests/harness/frame.py` (DESIGN §2.6): a framed line
 is the kernel's and is matched with its frame stripped, an unframed line is a user program's or the
@@ -572,9 +602,9 @@ number of images checked, and the trace's write and flush counts.
 
 | Context | Flags |
 |---------|-------|
-| e2e | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -no-reboot -display none -serial stdio -monitor unix:...,server=on,wait=off -accel tcg -device pvpanic -device vmcoreinfo` (`harness.qemu_argv`; the two forensics devices, `FORENSICS_DEVICES`, are on every x86_64 boot: `vmcoreinfo` takes the kernel's note, [VMCOREINFO.md](VMCOREINFO.md)) |
+| e2e | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -no-reboot -display none -serial stdio -monitor unix:...,server=on,wait=off -qmp unix:...,server=on,wait=off -S -accel tcg -device pvpanic -device vmcoreinfo -action panic=pause` (`harness.qemu_argv`; the two forensics devices, `FORENSICS_DEVICES`, are on every x86_64 boot: `vmcoreinfo` takes the kernel's note, [VMCOREINFO.md](VMCOREINFO.md); every harness boot starts halted, `-S`, until `cont` on its QMP socket, and `-action panic=pause`, `PANIC_ACTION`, keeps a panicked guest up for its core, §8.3) |
 | UEFI (`VIBEOS_BIOS=uefi`, `make test-e2e-uefi`) | as e2e plus `-drive if=pflash,format=raw,unit=0,readonly=on,file=<code>` and `-drive if=pflash,format=raw,unit=1,file=<copy>`, where `<copy>` is a fresh copy of the pair's variable-store template made for each QEMU start (`harness.new_vars_copy`, in one per-process temporary directory that exit removes), and `-boot order=d,menu=off` with `-fw_cfg` entries turning off OVMF's PXE and setup (`harness.OVMF_BOOT_ARGS`). A comma in a path is doubled. Never `-bios` |
-| `make run`, `make run-panic`, `make debug` | e2e's argv, so with `-device pvpanic` and `-device vmcoreinfo`, from `tests/harness/run_interactive.py` (`run`, `panic`, `debug`), which builds it with `env_config` and `harness.qemu_argv` and adds no `-monitor`: `make run` opens a display window instead of `-display none`, `make run-panic` boots `build/vibeos-panic.iso` with `-display none`, and `make debug` is `make run` plus `-s -S`. COM1 is the terminal (`-serial stdio`), and the launcher ignores `SIGINT` while QEMU runs |
+| `make run`, `make run-panic`, `make debug` | e2e's argv, so with `-device pvpanic` and `-device vmcoreinfo`, from `tests/harness/run_interactive.py` (`run`, `panic`, `debug`), which builds it with `env_config` and `harness.qemu_argv` and adds no `-monitor`, `-qmp` or `-S`: `make run` opens a display window instead of `-display none`, `make run-panic` boots `build/vibeos-panic.iso` with `-display none`, and `make debug` is `make run` plus `-s -S`. COM1 is the terminal (`-serial stdio`), and the launcher ignores `SIGINT` while QEMU runs |
 | ktest | as e2e (so with `-device pvpanic` and `-device vmcoreinfo`) plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, a second virtio-rng at `00:1d.0` (`-device virtio-rng-pci,disable-legacy=on,addr=0x1d`, which the driver refuses since one is bound: `rng_second_probe_refused`), a virtio-blk at `00:1e.0` on a 1 MiB `null-co` node (`-blockdev driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on` + `-device virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e`), whose probe a `kernel_tests` hook fails after `QENABLE` at every boot (`virtio_probe_fail_quiesces`), two virtio-blk disks (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`, then the same for a blank 1 MiB `vibehd1`, which binds as `vdb`; the proof boots take only the first, `harness.ktest_devices(..., extra_disks=...)`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`); neither forensics device is PCI. After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` (`LAPIC_FALLBACK_CPU` in the Makefile) |
@@ -592,9 +622,9 @@ asks for invariant TSC (`+invtsc` or `invtsc=on`) fails when the guest prints `v
 invariant tsc absent` (DESIGN §2.6), recording the `invariant_tsc` results marker either way.
 
 `-no-reboot` matters: a triple fault otherwise reboots and loops, and the serial log fills with
-repeated boot attempts instead of stopping at the interesting one. Planned (ROADMAP §10.7): a run
-declared `expect=reset` (§8.3) boots without it and counts QMP `RESET` events instead, so a reset
-its line does not expect still fails the run.
+repeated boot attempts instead of stopping at the interesting one. A run declared
+`expect="reset"` (§8.3) boots without it (`qemu_argv`) and counts QMP `RESET` events instead, so a
+reset beyond the run's `QemuConfig.resets` still fails it.
 
 All `VIBEOS_*` overrides are read in `tests/harness/harness.py` (`env_config` / `env_flag` /
 `env_int`), which holds their only defaults. Drivers do not parse the environment, and the Makefile
@@ -757,7 +787,7 @@ includes its `cargo test` of the host tools, the one tier that needs the toolcha
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
-| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest` | 40 |
+| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest`, `test-qmp` | 40 |
 | x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-strace`, `test-e2e-panic-stop`, `test-e2e-power` | 40 |
 | x86_64 | in-guest-1 | `test-kernel` | 64 |
 | x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
@@ -770,7 +800,7 @@ each pass 40 s alone and cannot split below a target.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`); on a pull request, `scripts/check_gate_inputs.py` against its merge base; then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines <floor>`, the floor in `tests/gates/inputs.toml`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test` and `panic_stop_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test` and `panic_stop_test`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
 | `ci-pass` | every per-push run | `needs:` every other job, `if: always()`; fails unless each succeeded, a job gated on the event being allowed to skip (`scripts/check_gate_inputs.py --ci-pass`, which the job runs with `NEEDS: ${{ toJSON(needs) }}` and `SKIPPABLE: ticks`; its static rules fail when the job misses one, lacks `if: always()`, or lists in `SKIPPABLE` a job whose `if:` does not test `github.event_name`) |
