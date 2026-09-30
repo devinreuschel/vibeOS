@@ -1,4 +1,6 @@
 use super::*;
+use vibeos::elf::{self, ExecArgs};
+use vibeos::limits::RLIMIT_STACK_DEFAULT;
 
 fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, KError> {
     let mut v = TryVec::new();
@@ -132,21 +134,15 @@ pub(super) fn sys_execve(
     // Copied, so its pointers are checked and its limits hold, and dropped:
     // the new stack gets an empty environment until ROADMAP §10.5's envp box.
     copy_cvec(envp)?;
-    let Ok(mut argv_b) = TryVec::<&[u8]>::try_with_capacity(argv_v.len().max(1)) else {
-        return Err(KError::NoMem);
-    };
+    let mut args = ExecArgs::new(elf::arg_space_limit(RLIMIT_STACK_DEFAULT));
     if argv_v.is_empty() {
-        if argv_b.try_push(path_b).is_err() {
-            return Err(KError::NoMem);
-        }
-    } else {
-        for a in argv_v.iter() {
-            if argv_b.try_push(a).is_err() {
-                return Err(KError::NoMem);
-            }
-        }
+        args.push_arg(path_b).map_err(KError::from)?;
     }
-    let loaded = match user_init::load_path(path_b, &argv_b, &[]) {
+    for a in argv_v.iter() {
+        args.push_arg(a).map_err(KError::from)?;
+    }
+    args.finish_argv().map_err(KError::from)?;
+    let loaded = match user_init::load_path(path_b, &args) {
         Ok(l) => l,
         Err(e) => return Err(KError::from(e)),
     };

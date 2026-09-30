@@ -5,6 +5,14 @@
 use crate::limits::EXEC_IMAGE_MAX;
 use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END, is_canonical};
 
+mod stack;
+
+pub use stack::{
+    AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_EXECFN, AT_FLAGS, AT_GID, AT_NULL,
+    AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_RANDOM, AT_SECURE, AT_UID, ArgError, Auxv, ExecArgs,
+    StackImage, arg_space_limit, initial_stack_len,
+};
+
 // ROADMAP §10.6's exec box: an image under the cap but larger than the
 // default 128 MiB guest (192 MiB of `p_memsz`) must reach the loader.
 const _: () = assert!(EXEC_IMAGE_MAX > 192 << 20);
@@ -31,23 +39,6 @@ pub const EHDR_SIZE: usize = 64;
 pub const PHDR_SIZE: usize = 56;
 
 pub use crate::limits::MAX_ELF_LOADS as MAX_LOADS;
-
-pub const AT_NULL: u64 = 0;
-pub const AT_PHDR: u64 = 3;
-pub const AT_PHENT: u64 = 4;
-pub const AT_PHNUM: u64 = 5;
-pub const AT_PAGESZ: u64 = 6;
-pub const AT_BASE: u64 = 7;
-pub const AT_FLAGS: u64 = 8;
-pub const AT_ENTRY: u64 = 9;
-pub const AT_UID: u64 = 11;
-pub const AT_EUID: u64 = 12;
-pub const AT_GID: u64 = 13;
-pub const AT_EGID: u64 = 14;
-pub const AT_CLKTCK: u64 = 17;
-pub const AT_SECURE: u64 = 23;
-pub const AT_RANDOM: u64 = 25;
-pub const AT_EXECFN: u64 = 31;
 
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,12 +165,6 @@ pub struct Image {
     pub phentsize: u16,
     pub phnum: u16,
     pub phdr_va: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Auxv {
-    pub tag: u64,
-    pub val: u64,
 }
 
 pub fn page_down(x: u64) -> u64 {
@@ -543,99 +528,21 @@ impl Image {
     }
 }
 
-/// Fill `mem` as `[stack_top - mem.len(), stack_top)`. Returns user RSP.
+/// Lay out the initial stack below the 16-aligned `stack_top`, top down:
+/// 8 zero bytes; [`ExecArgs::strings`] at `strings_va`; the 16 `random`
+/// bytes, 16-aligned; then the table at RSP, 16-aligned: `argc`, the
+/// `argv` pointers and NULL, the `envp` pointers and NULL, `aux`,
+/// `AT_RANDOM` and `AT_NULL`. `table` receives `[rsp, strings_va)`, the
+/// random bytes and padding included, and must be exactly that long; the
+/// caller writes it at RSP and the strings at `strings_va`.
 pub fn build_initial_stack(
     stack_top: u64,
-    mem: &mut [u8],
-    argv: &[&[u8]],
-    envp: &[&[u8]],
+    args: &ExecArgs,
     aux: &[Auxv],
     random: &[u8; 16],
-) -> Result<u64, ElfError> {
-    if mem.is_empty() {
-        return Err(ElfError::Stack);
-    }
-    mem.fill(0);
-    let base = stack_top
-        .checked_sub(mem.len() as u64)
-        .ok_or(ElfError::Stack)?;
-    let mut sp = mem.len();
-
-    /// Copy `bytes` and a NUL below `*sp`; the offset of the copy.
-    fn push(mem: &mut [u8], sp: &mut usize, bytes: &[u8]) -> Result<usize, ElfError> {
-        let n = bytes.len().checked_add(1).ok_or(ElfError::Stack)?;
-        let lo = sp.checked_sub(n).ok_or(ElfError::Stack)?;
-        let (body, nul) = mem
-            .get_mut(lo..*sp)
-            .ok_or(ElfError::Stack)?
-            .split_at_mut(bytes.len());
-        body.copy_from_slice(bytes);
-        nul.fill(0);
-        *sp = lo;
-        Ok(lo)
-    }
-
-    let mut argv_off = [0usize; 8];
-    if argv.len() > argv_off.len() {
-        return Err(ElfError::Stack);
-    }
-    for (off, a) in argv_off.iter_mut().zip(argv) {
-        *off = push(mem, &mut sp, a)?;
-    }
-    let mut env_off = [0usize; 8];
-    if envp.len() > env_off.len() {
-        return Err(ElfError::Stack);
-    }
-    for (off, e) in env_off.iter_mut().zip(envp) {
-        *off = push(mem, &mut sp, e)?;
-    }
-    let random_off = sp.checked_sub(random.len()).ok_or(ElfError::Stack)?;
-    mem.get_mut(random_off..sp)
-        .ok_or(ElfError::Stack)?
-        .copy_from_slice(random);
-    sp = random_off;
-
-    // argc, argv[] and NULL, envp[] and NULL, then the auxv pairs with
-    // AT_RANDOM and AT_NULL.
-    let words = argv
-        .len()
-        .checked_add(envp.len())
-        .and_then(|n| n.checked_add(3))
-        .and_then(|n| aux.len().checked_add(2)?.checked_mul(2)?.checked_add(n))
-        .ok_or(ElfError::Stack)?;
-    let ptr_bytes = words.checked_mul(8).ok_or(ElfError::Stack)?;
-    // 16-byte aligned, with the vector below everything pushed so far.
-    let rsp_off = sp.checked_sub(ptr_bytes).ok_or(ElfError::Stack)? & !0xf;
-
-    fn poke_u64(mem: &mut [u8], off: &mut usize, v: u64) -> Result<(), ElfError> {
-        let e = off.checked_add(8).ok_or(ElfError::Stack)?;
-        mem.get_mut(*off..e)
-            .ok_or(ElfError::Stack)?
-            .copy_from_slice(&v.to_le_bytes());
-        *off = e;
-        Ok(())
-    }
-    let va = |off: usize| base.checked_add(off as u64).ok_or(ElfError::Stack);
-
-    let mut o = rsp_off;
-    poke_u64(mem, &mut o, argv.len() as u64)?;
-    for &off in argv_off.iter().take(argv.len()) {
-        poke_u64(mem, &mut o, va(off)?)?;
-    }
-    poke_u64(mem, &mut o, 0)?;
-    for &off in env_off.iter().take(envp.len()) {
-        poke_u64(mem, &mut o, va(off)?)?;
-    }
-    poke_u64(mem, &mut o, 0)?;
-    for a in aux {
-        poke_u64(mem, &mut o, a.tag)?;
-        poke_u64(mem, &mut o, a.val)?;
-    }
-    poke_u64(mem, &mut o, AT_RANDOM)?;
-    poke_u64(mem, &mut o, va(random_off)?)?;
-    poke_u64(mem, &mut o, AT_NULL)?;
-    poke_u64(mem, &mut o, 0)?;
-    va(rsp_off)
+    table: &mut [u8],
+) -> Result<StackImage, ElfError> {
+    stack::build(stack_top, args, aux, random, table).ok_or(ElfError::Stack)
 }
 
 #[cfg(test)]
@@ -841,32 +748,6 @@ mod tests {
     }
 
     #[test]
-    fn stack_argv_auxv() {
-        let mut mem = [0u8; 512];
-        let top = 0x0000_0000_8000_0000u64;
-        let aux = [
-            Auxv {
-                tag: AT_PAGESZ,
-                val: 4096,
-            },
-            Auxv {
-                tag: AT_ENTRY,
-                val: 0x4000_0000,
-            },
-        ];
-        let rsp = build_initial_stack(top, &mut mem, &[b"/hello"], &[], &aux, &[0x11; 16]).unwrap();
-        assert_eq!(rsp & 0xf, 0);
-        let base = top - mem.len() as u64;
-        let off = (rsp - base) as usize;
-        let argc = u64::from_le_bytes(mem[off..off + 8].try_into().unwrap());
-        assert_eq!(argc, 1);
-        let argv0 = u64::from_le_bytes(mem[off + 8..off + 16].try_into().unwrap());
-        let s_off = (argv0 - base) as usize;
-        assert_eq!(&mem[s_off..s_off + 6], b"/hello");
-        assert_eq!(mem[s_off + 6], 0);
-    }
-
-    #[test]
     fn error_names_exhaustive() {
         for e in [
             ElfError::Truncated,
@@ -973,33 +854,6 @@ mod tests {
         let elf = build_elf(0x4000_0000, &[0x90, 0xC3], &[]);
         let img = parse(&elf).unwrap();
         assert_eq!(img.loads.len(), crate::limits::MAX_ELF_LOADS);
-    }
-
-    /// A stack whose top is below its own length has no user VA for its
-    /// base; `base + off` used to overflow and panic (ROADMAP §10.1, E1).
-    #[test]
-    fn elf_rejects_stack_top_below_len() {
-        let mut mem = [0u8; 4096];
-        let got = build_initial_stack(0x100, &mut mem, &[b"/hello"], &[], &[], &[0; 16]);
-        assert_eq!(got, Err(ElfError::Stack));
-        let top = 0x7000_0000u64;
-        assert!(build_initial_stack(top, &mut mem, &[b"/hello"], &[], &[], &[0; 16]).is_ok());
-    }
-
-    /// A stack too small for the strings, the random bytes or the vector
-    /// is refused at each step, never indexed out of bounds.
-    #[test]
-    fn elf_rejects_stack_too_small() {
-        let top = 0x7000_0000u64;
-        for len in [1usize, 7, 8, 16, 24, 64, 90] {
-            let mut mem = std::vec![0u8; len];
-            let got = build_initial_stack(top, &mut mem, &[b"/hello"], &[b"A=B"], &[], &[0; 16]);
-            assert_eq!(got, Err(ElfError::Stack), "len {len}");
-        }
-        let too_many: [&[u8]; 9] = [b"a"; 9];
-        let mut mem = [0u8; 4096];
-        let got = build_initial_stack(top, &mut mem, &too_many, &[], &[], &[0; 16]);
-        assert_eq!(got, Err(ElfError::Stack));
     }
 
     const STATIC_LLD: &[u8] = include_bytes!(concat!(

@@ -414,9 +414,10 @@ pub fn start_init() {
     }
 }
 
-/// Start the ELF at `path` with `argv` (`[path]` when empty) and `envp`
-/// as a new process with parent `ppid` (0: the kernel, which reaps it with
-/// [`wait_kernel`]).
+/// Start the ELF at `path` with `argv` and `envp` as a new process with
+/// parent `ppid` (0: the kernel, which reaps it with [`wait_kernel`]). An
+/// empty `argv` starts it with `argc` 1 and an empty `argv[0]`, as
+/// `execve` does.
 #[cfg(not(feature = "vibefs_crash"))]
 pub(crate) fn spawn_elf(
     path: &[u8],
@@ -425,8 +426,9 @@ pub(crate) fn spawn_elf(
     prefer: u32,
     ppid: u32,
 ) -> Result<u32, LoadError> {
+    let args = user_init::exec_args(argv, envp)?;
     start_loaded(
-        user_init::load_path(path, argv, envp)?,
+        user_init::load_path(path, &args)?,
         prefer,
         ppid,
         intern_name(path),
