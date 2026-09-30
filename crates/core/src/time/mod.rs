@@ -1,9 +1,9 @@
 //! Timekeeping arithmetic, seqlock, and PIT/TSC constants. DESIGN §6.
 //!
-//! Portable half: interpolation, seqlock, deadline math, wall-clock offset.
+//! Portable half: the clocksource arithmetic and ranking, the latched
+//! seqlock that publishes the clock, deadline math, wall-clock offset.
 //! Port I/O, HPET MMIO, and the IRQ0 handler live in the binary crate.
 
-use crate::arch::CycleCounter;
 use crate::atomic::{AtomicU64, Ordering, fence, statics};
 
 /// PIT input frequency in Hz. DESIGN §6.1.
@@ -117,35 +117,6 @@ pub const fn calib_in_band(reference: u64, sample: u64, lo_pct: u64, hi_pct: u64
     let lo = reference.saturating_mul(lo_pct) / 100;
     let hi = reference.saturating_mul(hi_pct) / 100;
     sample >= lo && sample <= hi
-}
-
-/// Tick milliseconds plus TSC interpolation since that tick.
-/// Wrapping TSC delta; saturates at `u64::MAX`.
-///
-/// A delta with the high bit set is TSC behind the snapshot (TCG/`hlt`
-/// without invariant TSC), not a 2^64-cycle jump. Do not cap extra at one
-/// tick: ktest holds IF off for long stretches and `spin_until_ns` has to
-/// keep moving on TSC alone. Late-tick overshoot is clamped by
-/// [`monotonic_max`] in the kernel publisher.
-pub fn interpolate_us(tick_ms: u64, tsc_at_tick: u64, tsc_now: u64, tsc_per_ms: u64) -> u64 {
-    interpolate(tick_ms, tsc_at_tick, tsc_now, tsc_per_ms, 1_000)
-}
-
-pub fn interpolate_ns(tick_ms: u64, tsc_at_tick: u64, tsc_now: u64, tsc_per_ms: u64) -> u64 {
-    interpolate(tick_ms, tsc_at_tick, tsc_now, tsc_per_ms, 1_000_000)
-}
-
-fn interpolate(tick_ms: u64, tsc_at_tick: u64, tsc_now: u64, tsc_per_ms: u64, per_ms: u128) -> u64 {
-    let base = (tick_ms as u128).saturating_mul(per_ms);
-    if tsc_per_ms == 0 {
-        return clamp_u64(base);
-    }
-    let delta = tsc_now.wrapping_sub(tsc_at_tick);
-    if delta & (1u64 << 63) != 0 {
-        return clamp_u64(base);
-    }
-    let extra = (delta as u128).saturating_mul(per_ms) / tsc_per_ms as u128;
-    clamp_u64(base.saturating_add(extra))
 }
 
 /// `fetch_max` then return the larger of previous and `n`. `last` is a
@@ -374,49 +345,66 @@ pub const fn hpet_counter_width(gcap: u64) -> u32 {
     if gcap & (1 << 13) != 0 { 64 } else { 32 }
 }
 
-/// One copy of the latch's payload: a tick and the TSC at that tick.
+/// One copy of the latch's payload: a [`Snapshot`], its id as a word.
 struct Payload {
-    tick: AtomicU64,
-    tsc: AtomicU64,
+    id: AtomicU64,
+    cycles: AtomicU64,
+    ns: AtomicU64,
 }
 
 impl Payload {
     #[cfg(not(loom))]
     const fn new() -> Self {
         Self {
-            tick: AtomicU64::new(0),
-            tsc: AtomicU64::new(0),
+            id: AtomicU64::new(0),
+            cycles: AtomicU64::new(0),
+            ns: AtomicU64::new(0),
         }
     }
 
     #[cfg(loom)]
     fn new() -> Self {
         Self {
-            tick: AtomicU64::new(0),
-            tsc: AtomicU64::new(0),
+            id: AtomicU64::new(0),
+            cycles: AtomicU64::new(0),
+            ns: AtomicU64::new(0),
         }
     }
 
-    fn store(&self, tick: u64, tsc: u64) {
+    fn store(&self, s: Snapshot) {
         // Relaxed: ordered by the fences around the sequence bumps.
-        self.tick.store(tick, Ordering::Relaxed);
-        self.tsc.store(tsc, Ordering::Relaxed);
+        self.id.store(s.id as u64, Ordering::Relaxed);
+        self.cycles.store(s.cycles, Ordering::Relaxed);
+        self.ns.store(s.ns, Ordering::Relaxed);
     }
 
-    fn load(&self) -> (u64, u64) {
+    /// The raw words: id, cycles, ns. The id is 0 before the first write.
+    fn load(&self) -> (u64, u64, u64) {
         // Relaxed: ordered by the reader's `fence(Acquire)`.
         (
-            self.tick.load(Ordering::Relaxed),
-            self.tsc.load(Ordering::Relaxed),
+            self.id.load(Ordering::Relaxed),
+            self.cycles.load(Ordering::Relaxed),
+            self.ns.load(Ordering::Relaxed),
         )
     }
 }
 
-/// Latched seqlock over (tick, tsc snapshot), DESIGN §6.4. The one writer
-/// (CPU 0's tick) bumps `seq` to odd and stores copy 0, then bumps it to
-/// even and stores copy 1. A reader reads the copy the low bit of `seq`
-/// names, which is never the one being stored, so it never waits for the
-/// writer and retries only when `seq` moved under it.
+/// The snapshot a payload's words hold; None before the first write.
+fn decode((id, cycles, ns): (u64, u64, u64)) -> Option<Snapshot> {
+    Some(Snapshot {
+        id: ClocksourceId::from_u64(id)?,
+        cycles,
+        ns,
+    })
+}
+
+/// The clock: a latched seqlock over the clocksource's [`Snapshot`],
+/// DESIGN §6.4. The one writer (CPU 0's tick) bumps `seq` to odd and
+/// stores copy 0, then bumps it to even and stores copy 1. A reader reads
+/// the copy the low bit of `seq` names, which is never the one being
+/// stored, so it never waits for the writer and retries only when `seq`
+/// moved under it. The id travels with its base, so a clocksource switch
+/// and its base publish as one value.
 pub struct TickClock {
     seq: AtomicU64,
     copy0: Payload,
@@ -460,22 +448,22 @@ impl TickClock {
 
     /// First half of [`TickClock::write`]: `seq` goes odd, so readers read
     /// copy 1 while copy 0 is stored.
-    fn write_copy0(&self, tick: u64, tsc: u64) {
+    fn write_copy0(&self, s: Snapshot) {
         self.bump();
-        self.copy0.store(tick, tsc);
+        self.copy0.store(s);
     }
 
     /// Second half: `seq` goes even, so readers read copy 0 while copy 1
     /// is stored.
-    fn write_copy1(&self, tick: u64, tsc: u64) {
+    fn write_copy1(&self, s: Snapshot) {
         self.bump();
-        self.copy1.store(tick, tsc);
+        self.copy1.store(s);
     }
 
     /// ISR path. No alloc, no logging. One writer at a time.
-    pub fn write(&self, tick: u64, tsc: u64) {
-        self.write_copy0(tick, tsc);
-        self.write_copy1(tick, tsc);
+    pub fn write(&self, s: Snapshot) {
+        self.write_copy0(s);
+        self.write_copy1(s);
     }
 
     /// The copy `seq` value `s` names: copy 1 while the writer stores
@@ -484,8 +472,9 @@ impl TickClock {
         if s & 1 == 0 { &self.copy0 } else { &self.copy1 }
     }
 
-    /// Stable (tick, tsc_at_tick). Retries only when `seq` changed.
-    pub fn read(&self) -> (u64, u64) {
+    /// The published snapshot; None before the first write. Retries only
+    /// when `seq` changed.
+    pub fn read(&self) -> Option<Snapshot> {
         loop {
             let s1 = self.seq.load(Ordering::Acquire);
             let v = self.copy(s1).load();
@@ -493,47 +482,36 @@ impl TickClock {
             fence(Ordering::Acquire);
             let s2 = self.seq.load(Ordering::Relaxed);
             if s1 == s2 {
-                return v;
+                return decode(v);
             }
         }
     }
 
-    /// `now_us` with `read_tsc` sampled *after* the snapshot and before
-    /// the sequence re-check, so a writer mid-read forces a retry.
-    pub fn now_us_with<F: FnMut() -> u64>(&self, mut read_tsc: F, tsc_per_ms: u64) -> u64 {
-        self.now_with(&mut read_tsc, tsc_per_ms, interpolate_us)
-    }
-
-    pub fn now_ns_with<F: FnMut() -> u64>(&self, mut read_tsc: F, tsc_per_ms: u64) -> u64 {
-        self.now_with(&mut read_tsc, tsc_per_ms, interpolate_ns)
-    }
-
-    /// Nanoseconds since tick 0, read through port `A`'s cycle counter
-    /// (PORTABILITY §11.1), which counts `per_ms` per millisecond.
-    pub fn now_ns<A: CycleCounter>(&self, per_ms: u64) -> u64 {
-        self.now_ns_with(A::now, per_ms)
-    }
-
-    /// [`TickClock::now_ns`] in microseconds.
-    pub fn now_us<A: CycleCounter>(&self, per_ms: u64) -> u64 {
-        self.now_us_with(A::now, per_ms)
-    }
-
-    fn now_with<F: FnMut() -> u64>(
+    /// Nanoseconds since boot: the published snapshot and a read of the
+    /// counter it names, `read_raw(id)`, which `counter(id)` describes
+    /// ([`ns_at`]). The read comes after the payload loads and before the
+    /// sequence re-check, so a write in between forces a retry. 0 before
+    /// the first write; the snapshot's own `ns` if `counter` knows no such
+    /// id.
+    pub fn now_ns_with(
         &self,
-        read_tsc: &mut F,
-        tsc_per_ms: u64,
-        interp: fn(u64, u64, u64, u64) -> u64,
+        mut read_raw: impl FnMut(ClocksourceId) -> u64,
+        counter: impl Fn(ClocksourceId) -> Option<Counter>,
     ) -> u64 {
         loop {
             let s1 = self.seq.load(Ordering::Acquire);
-            let (tick, tsc) = self.copy(s1).load();
+            let v = self.copy(s1).load();
             fence(Ordering::Acquire);
-            let tsc_now = read_tsc();
+            let snap = decode(v);
+            let raw = snap.map(|s| read_raw(s.id));
             let s2 = self.seq.load(Ordering::Relaxed);
-            if s1 == s2 {
-                return interp(tick, tsc, tsc_now, tsc_per_ms);
+            if s1 != s2 {
+                continue;
             }
+            return match (snap, raw) {
+                (Some(s), Some(raw)) => counter(s.id).map_or(s.ns, |c| ns_at(s, c, raw)),
+                _ => 0,
+            };
         }
     }
 }
@@ -592,46 +570,6 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    std::thread_local! {
-        static FAKE_CYCLES: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
-    }
-
-    /// A counter a test sets: each read returns the value last stored.
-    struct FakeCounter;
-
-    impl CycleCounter for FakeCounter {
-        fn now() -> u64 {
-            FAKE_CYCLES.with(|c| c.get())
-        }
-        fn freq_hz() -> Option<u64> {
-            None
-        }
-    }
-
-    #[test]
-    fn tickclock_now_ns_reads_the_port_counter() {
-        let c = TickClock::new();
-        c.write(5, 10_000);
-        FAKE_CYCLES.with(|f| f.set(10_500));
-        // 5 ticks of 1 ms, then 500 cycles at 1000 per ms: 5.5 ms.
-        assert_eq!(c.now_ns::<FakeCounter>(1000), 5_500_000);
-        assert_eq!(
-            c.now_ns::<FakeCounter>(1000),
-            c.now_ns_with(|| 10_500, 1000)
-        );
-        FAKE_CYCLES.with(|f| f.set(10_750));
-        assert_eq!(c.now_ns::<FakeCounter>(1000), 5_750_000);
-    }
-
-    #[test]
-    fn tickclock_now_us_reads_the_port_counter() {
-        let c = TickClock::new();
-        c.write(2, 4_000);
-        FAKE_CYCLES.with(|f| f.set(4_250));
-        assert_eq!(c.now_us::<FakeCounter>(1000), 2_250);
-        assert_eq!(c.now_us::<FakeCounter>(1000), c.now_us_with(|| 4_250, 1000));
-    }
-
     #[test]
     fn pit_divisor_is_1khz() {
         assert_eq!(PIT_HZ / PIT_DIVISOR as u64, PIT_TICK_HZ);
@@ -642,42 +580,16 @@ mod tests {
         assert_eq!(PIT_CH0_WRITES[3], (PIT_CH0, (1193u16 >> 8) as u8));
     }
 
+    /// A late base can put one read above the next base; `monotonic_max`
+    /// holds the high water.
     #[test]
-    fn interpolate_zero_and_exact_ms() {
-        let k = 2_500_000;
-        assert_eq!(interpolate_us(0, 100, 100, k), 0);
-        assert_eq!(interpolate_us(5, 0, 0, k), 5_000);
-        assert_eq!(interpolate_us(5, 0, k, k), 6_000);
-        assert_eq!(interpolate_ns(5, 0, k, k), 6_000_000);
-        assert_eq!(interpolate_us(1, 0, 0, 0), 1_000);
-    }
-
-    /// Late tick overshoots; kernel [`monotonic_max`] holds the high water.
-    #[test]
-    fn interpolate_late_tick_overshoots_next_base() {
-        let k = 1_000_000;
-        let late = interpolate_us(5, 0, k * 5 / 2, k);
-        let after = interpolate_us(6, k * 5 / 2, k * 5 / 2, k);
-        assert_eq!(late, 7_500);
-        assert_eq!(after, 6_000);
-        assert!(after < late);
-        assert_eq!(interpolate_us(5, 100, 99, k), 5_000);
+    fn monotonic_max_holds_high_water() {
         let last = AtomicU64::new(0);
-        assert_eq!(monotonic_max(&last, late), late);
-        assert_eq!(monotonic_max(&last, after), late);
+        assert_eq!(monotonic_max(&last, 7_500), 7_500);
+        assert_eq!(monotonic_max(&last, 6_000), 7_500);
         assert_eq!(monotonic_max(&last, 8_000), 8_000);
-    }
-
-    #[test]
-    fn interpolate_near_u64_max() {
-        let k = 1_000_000;
-        let tick = u64::MAX / 1000;
-        let us = interpolate_us(tick, 0, 0, k);
-        assert_eq!(us, tick.saturating_mul(1000));
-        assert_eq!(interpolate_us(u64::MAX, 0, 0, k), u64::MAX);
-        assert_eq!(interpolate_ns(u64::MAX, 0, 0, k), u64::MAX);
-        // wrapping TSC across u64::MAX: one tick of delta
-        assert_eq!(interpolate_us(0, u64::MAX, 0, 1000), 1);
+        assert_eq!(monotonic_max(&last, u64::MAX), u64::MAX);
+        assert_eq!(monotonic_max(&last, 0), u64::MAX);
     }
 
     #[test]
@@ -737,37 +649,47 @@ mod tests {
         assert_eq!(wall_unix_s(origin, 8_000_000_000), 1_003);
     }
 
+    /// A 1 GHz counter, so a cycle is a nanosecond.
+    fn ghz() -> Counter {
+        Counter::new(ClocksourceId::Tsc, 1_000_000_000, 64).unwrap()
+    }
+
+    fn snap(cycles: u64, ns: u64) -> Snapshot {
+        Snapshot {
+            id: ClocksourceId::Tsc,
+            cycles,
+            ns,
+        }
+    }
+
     /// DESIGN §8.1: the writer publishes an independent timestamp. A torn
-    /// (tick, tsc) pair must not match that value. Seqlock retry must.
+    /// (base, cycles) pair must not match that value. Seqlock retry must.
     #[test]
     fn now_us_seqlock_retry_under_simulated_writer() {
         let clock = TickClock::new();
-        const K: u64 = 1_000_000;
-        // Independent published pairs. Writer's second pair is the
-        // timestamp we compare against — not a value derived from the
+        // Independent published snapshots. The writer's second one is the
+        // timestamp we compare against, not a value derived from the
         // possibly-torn first read.
-        const TICK0: u64 = 1;
-        const TSC0: u64 = 100;
-        const TICK1: u64 = 2;
-        const TSC1: u64 = 200;
-        clock.write(TICK0, TSC0);
+        let first = snap(100, 1_000_000);
+        let second = snap(200, 2_000_000);
+        clock.write(first);
 
         let mut samples = 0u32;
-        let got = clock.now_us_with(
-            || {
+        let got = clock.now_ns_with(
+            |_| {
                 samples += 1;
                 if samples == 1 {
-                    clock.write(TICK1, TSC1);
+                    clock.write(second);
                     return 10_000;
                 }
                 250
             },
-            K,
+            |_| Some(ghz()),
         );
         assert_eq!(samples, 2, "reader must retry after the simulated ISR");
-        let expected = interpolate_us(TICK1, TSC1, 250, K);
+        let expected = ns_at(second, ghz(), 250);
         assert_eq!(got, expected);
-        let torn = interpolate_us(TICK0, TSC0, 10_000, K);
+        let torn = ns_at(first, ghz(), 10_000);
         assert_ne!(
             torn, expected,
             "torn mix must not accidentally equal the independent timestamp"
@@ -779,22 +701,32 @@ mod tests {
     #[test]
     fn latch_read_mid_write_returns_older() {
         let clock = TickClock::new();
-        clock.write(1, 100);
-        clock.write_copy0(2, 200);
+        assert_eq!(clock.read(), None);
+        assert_eq!(clock.now_ns_with(|_| 5, |_| Some(ghz())), 0);
+        let a = snap(100, 1_000);
+        let b = snap(200, 2_000);
+        clock.write(a);
+        clock.write_copy0(b);
         assert_eq!(clock.seq.load(Ordering::Relaxed) & 1, 1);
-        assert_eq!(clock.read(), (1, 100));
-        assert_eq!(clock.now_us_with(|| 100, 1_000), 1_000);
-        clock.write_copy1(2, 200);
-        assert_eq!(clock.read(), (2, 200));
+        assert_eq!(clock.read(), Some(a));
+        assert_eq!(clock.now_ns_with(|_| 150, |_| Some(ghz())), 1_050);
+        clock.write_copy1(b);
+        assert_eq!(clock.read(), Some(b));
+        assert_eq!(clock.now_ns_with(|_| 250, |_| Some(ghz())), 2_050);
     }
 
     #[test]
     fn seqlock_read_stable_pair() {
         let clock = TickClock::new();
-        clock.write(42, 99);
-        assert_eq!(clock.read(), (42, 99));
-        clock.write(43, 100);
-        assert_eq!(clock.read(), (43, 100));
+        clock.write(snap(42, 99));
+        assert_eq!(clock.read(), Some(snap(42, 99)));
+        let pm = Snapshot {
+            id: ClocksourceId::AcpiPm,
+            cycles: 43,
+            ns: 100,
+        };
+        clock.write(pm);
+        assert_eq!(clock.read(), Some(pm));
     }
 
     #[test]
@@ -805,9 +737,9 @@ mod tests {
         let reads = Arc::new(AtomicU64::new(0));
         const K: u64 = 1_000;
         const MAGIC: u64 = 7;
-        // Default (0, 0) is even-seq but fails MAGIC. Seed so a reader
-        // that wins the first timeslice is not counted as a tear.
-        clock.write(1, 1u64.wrapping_mul(K).wrapping_add(MAGIC));
+        // Each snapshot's ns is a fixed function of its cycles. Seed so a
+        // reader that wins the first timeslice is not counted as a tear.
+        clock.write(snap(1, 1u64.wrapping_mul(K).wrapping_add(MAGIC)));
 
         let w = {
             let clock = clock.clone();
@@ -815,7 +747,7 @@ mod tests {
             thread::spawn(move || {
                 let mut i = 2u64;
                 while !stop.load(Ordering::Relaxed) {
-                    clock.write(i, i.wrapping_mul(K).wrapping_add(MAGIC));
+                    clock.write(snap(i, i.wrapping_mul(K).wrapping_add(MAGIC)));
                     i = i.wrapping_add(1);
                     if i == 0 {
                         i = 1;
@@ -831,9 +763,9 @@ mod tests {
             let reads = reads.clone();
             thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    let (tick, tsc) = clock.read();
+                    let s = clock.read();
                     reads.fetch_add(1, Ordering::Relaxed);
-                    if tsc != tick.wrapping_mul(K).wrapping_add(MAGIC) {
+                    if s.is_none_or(|s| s.ns != s.cycles.wrapping_mul(K).wrapping_add(MAGIC)) {
                         bad.fetch_add(1, Ordering::Relaxed);
                     }
                 }

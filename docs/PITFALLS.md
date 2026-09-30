@@ -288,11 +288,13 @@ The tick counter and the TSC snapshot were read as two independent relaxed loads
 under a seqlock, release on write, acquire on read, retry on an odd or changed sequence.
 
 **Timestamps go backwards after `hlt` on TCG.**
-QEMU TCG does not set the invariant-TSC CPUID bit. Interpolation can overshoot a late tick, then the
-counter moves and `now_us` drops, even with a stable seqlock pair. A wrapping TSC-behind-snapshot
-delta looks like ~2^64 cycles. Rule: treat a high-bit wrapping delta as extra 0, and never publish a
-`now_ns` below the last reading. Do not cap extra at one tick: across a stretch with IF off, which a
-test may hold on purpose, timeouts must still advance on TSC alone.
+QEMU TCG does not set the invariant-TSC CPUID bit. When `now_ns` interpolated from a tick count, a
+reading could overshoot a late tick, then the tick moved and `now_us` dropped, even with a stable
+seqlock pair, and ticks lost while IF was off stayed lost. Rule: time comes from one free-running
+clocksource, never from a count of timer interrupts, so an IF-off stretch, which a test may hold on
+purpose, loses nothing; a counter narrower than 64 bits is read at least once per half wrap, and a
+reader masks its delta to the counter's width; never publish a `now_ns` below the last reading
+(DESIGN §6.4).
 
 **`sleep_ms(50)` and PIT-vs-HPET calib flake on TCG SMP.**
 TCG has no invariant TSC. Boot HPET calibration runs before APs; a later PIT channel 2 window sees a

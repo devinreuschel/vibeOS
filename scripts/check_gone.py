@@ -230,6 +230,10 @@ GONE: list[tuple[str, str]] = [
     ("map_func_bars", "a device's resources are claimed"),
     ("keep_wb", "a device's resources are claimed"),
     ("mapped_va", "a device's resources are claimed"),
+    ("interpolate_us", "`now_ns` is computed from one free-running counter"),
+    ("interpolate_ns", "`now_ns` is computed from one free-running counter"),
+    ("now_us_with", "`now_ns` is computed from one free-running counter"),
+    ("uptime_sides", "`now_ns` is computed from one free-running counter"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

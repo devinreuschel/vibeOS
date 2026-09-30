@@ -60,7 +60,7 @@ pub fn uptime() {
 }
 
 pub fn uptime_to(w: &mut impl Write) {
-    let tick = time_init::uptime_ms();
+    let tick = time_init::ticks();
     let us = time_init::now_us();
     #[expect(
         clippy::let_underscore_must_use,

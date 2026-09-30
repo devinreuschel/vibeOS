@@ -532,8 +532,8 @@ and a monotonic clock nobody has to distrust.
 - [x] the clock's snapshot published under a latched seqlock with two copies: each bump is `fetch_add(1, Relaxed)` between two `fence(Release)`s, so no reader waits for the writer (§10.8, F098)
 - [x] the reader loads the copy the sequence's low bit names and retries only when the sequence changed, with acquire ordering
 - [x] `uptime_ms`, `now_us`, `now_ns` built on it
-- [x] the interpolation arithmetic lives in the library half and is host-tested including near `u64::MAX`
-- [x] the host test `seqlock_threaded_writer_never_tears` writes each tick and TSC pair with a fixed relation between them, so a torn read fails it (F100)
+- [x] the clocksource arithmetic, `base_ns + ((read - base_cycles) mod 2^width) * mult >> shift` in `u128`, lives in the library half and is host-tested including near `u64::MAX`
+- [x] the host test `seqlock_threaded_writer_never_tears` writes each snapshot with a fixed relation between its cycle and nanosecond fields, so a torn read fails it (F100)
 - [x] `time::next_deadline(instant)` defined and host-tested (`next_deadline_is_1ms_ahead`); no timer path calls it, and every timer mode runs a fixed 1 ms period (tickless idle is §19.6)
 - [x] RTC read once at boot for wall clock, tracked forward with the monotonic clock plus an offset
 

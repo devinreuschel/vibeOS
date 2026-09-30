@@ -395,7 +395,7 @@ kind = "contract"
 arch = "x86_64"
 source = "kernel"
 section = "§2.2"
-order = 300
+order = 310
 name = "gp_test_armed"
 when = ["gp_test", "!panic_test"]
 
@@ -780,7 +780,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§5.3"
-order = 250
+order = 260
 name = "console_ok"
 when = ["!panic_test"]
 
@@ -860,7 +860,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§6.2"
-order = 260
+order = 270
 name = "pci_devices"
 when = ["!panic_test"]
 
@@ -933,7 +933,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.1"
-order = 270
+order = 280
 name = "block_ramdisk"
 when = ["!panic_test"]
 
@@ -998,7 +998,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.3"
-order = 280
+order = 290
 name = "block_ram0p1"
 when = ["!panic_test"]
 
@@ -1008,7 +1008,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.3"
-order = 290
+order = 300
 name = "block_ram0p2"
 when = ["!panic_test"]
 
@@ -1068,7 +1068,7 @@ kind = "contract"
 arch = "both"
 source = "user"
 section = "§9.8"
-order = 320
+order = 330
 name = "shell_ready"
 when = ["!gp_test", "!panic_test"]
 
@@ -1088,7 +1088,7 @@ kind = "contract"
 arch = "both"
 source = "user"
 section = "§9.8"
-order = 310
+order = 320
 name = "user_tests_ok"
 when = ["!gp_test", "!panic_test"]
 
@@ -1214,6 +1214,28 @@ kind = "diagnostic"
 arch = "both"
 source = "user"
 section = "§10.2"
+
+# §10.3 Portable core and the architecture seam
+
+# The clocksource `time_init::confirm_clocksource` chose once the AP warp
+# tests ran (DESIGN §6.4). The harness binds `<clocksource>`: `hpet` under
+# TCG, `acpi_pm` with HPET off, `tsc` under KVM.
+[[marker]]
+text = "vibeOS: time: clocksource <clocksource>"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.3"
+order = 250
+name = "time_clocksource"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: time: no clocksource"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.3"
 
 # §10.6 Entry paths and user memory
 
