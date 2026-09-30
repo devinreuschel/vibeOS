@@ -1276,6 +1276,23 @@ arch = "both"
 source = "kernel"
 section = "§10.12"
 
+# A virtio device stopped after a failed probe or in `remove`: its reset
+# did not complete within the poll cap, or its bus mastering stayed on and
+# the memory it was given is kept.
+[[marker]]
+text = "vibeOS: virtio: <addr> reset timeout"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.12"
+
+[[marker]]
+text = "vibeOS: virtio: <addr> bus master stuck, <n> frames kept"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.12"
+
 # §12.5 Unified page cache
 
 # A driver's fail-fast loop recovering a stuck device. A test that provokes

@@ -158,6 +158,12 @@ impl DmaBuffer {
         self.len
     }
 
+    /// Frames the block holds, which a buffer kept past a stuck device
+    /// counts (DESIGN §12.3).
+    pub fn frame_count(&self) -> usize {
+        self.frames.count()
+    }
+
     /// Never true: a buffer covers at least the bytes asked for.
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -413,6 +419,7 @@ mod tests {
         assert_eq!(buf.device().0, buf.phys());
         assert_ne!(buf.device().0, buf.virt());
         assert_eq!(buf.virt(), virt_of(buf.phys()));
+        assert_eq!(buf.frame_count(), 1);
         free_to_buddy::<Stub>(&mut p.buddy, buf);
     }
 

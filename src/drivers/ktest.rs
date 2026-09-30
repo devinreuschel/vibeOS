@@ -642,6 +642,27 @@ pub(crate) fn test_block_two_disk_instances() -> Outcome {
     }
 }
 
+/// ROADMAP §10.12 (F116): a virtio probe that fails after `QENABLE`
+/// resets its device and turns bus mastering off before its frames go
+/// back. The virtio-blk function at `PROBE_BLK_BDF` failed at boot; the
+/// rng half removes and re-probes the bound rng.
+pub(crate) fn test_virtio_probe_fail_quiesces() -> Outcome {
+    use crate::dev::ktest::{PROBE_BLK_BDF, probe_fails_quiesced, rng_fail_after_qenable_case};
+    use vibeos::dev::Driver;
+
+    let Some(d) = crate::dev_init::find_bdf(PROBE_BLK_BDF) else {
+        return Outcome::Fail("no virtio-blk at 00:1e.0");
+    };
+    if crate::dev_init::bound(&d).is_some() {
+        return Outcome::Fail("reserved virtio-blk bound");
+    }
+    let probe = || virtio_blk_init::BLK_DRV.probe(&d).is_ok();
+    if let Err(why) = probe_fails_quiesced(PROBE_BLK_BDF, probe) {
+        return Outcome::Fail(why);
+    }
+    rng_fail_after_qenable_case()
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -652,4 +673,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_vblk_mq", test_block_vblk_mq),
     test("block_persist", test_block_persist),
     test("block_two_disk_instances", test_block_two_disk_instances).deadline(30_000),
+    test(
+        "virtio_probe_fail_quiesces",
+        test_virtio_probe_fail_quiesces,
+    ),
 ];

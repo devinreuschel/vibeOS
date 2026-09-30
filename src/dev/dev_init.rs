@@ -80,9 +80,12 @@ pub fn get(i: usize) -> Option<DevRef> {
 }
 
 /// The device at `bdf`.
-#[expect(
-    dead_code,
-    reason = "C-INSTANCES lookup: ROADMAP §10.12's claims (P10-S96) look a device up by address"
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "C-INSTANCES lookup: ROADMAP §10.12's claims (P10-S96) look a device up by address"
+    )
 )]
 pub fn find_bdf(bdf: Bdf) -> Option<DevRef> {
     let mut i = 0usize;
