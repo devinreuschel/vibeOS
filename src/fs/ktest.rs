@@ -12,12 +12,14 @@ use vibeos::proc::wait_exited;
 mod hooks;
 mod initrd;
 mod ops;
+mod routing;
 mod slots;
 mod stack16k;
 
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use ops::{test_vfs_backends_via_ops, test_vfs_fat_one_inode};
+pub(crate) use routing::test_vfs_unlink_drops_parent_dentry;
 pub(crate) use slots::test_fs_drop_slot_busy_keeps_slot;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
 
@@ -1375,4 +1377,8 @@ pub(crate) const TESTS: &[Test] = &[
         .deadline(30_000)
         .opt_in()
         .once(),
+    test(
+        "vfs_unlink_drops_parent_dentry",
+        test_vfs_unlink_drops_parent_dentry,
+    ),
 ];
