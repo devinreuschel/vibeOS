@@ -47,6 +47,10 @@ gp_test = []
 # Panic dump ends with QEMU isa-debug-exit (nonzero) instead of an infinite hlt.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 panic_exit = []
+# After a full boot, underflow `irq_nest` so the dump must write without an
+# `InterruptGuard` (ROADMAP §10.7, F071).
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+panic_nest_test = []
 # Write-loop kernel for QEMU-kill crash consistency (docs/VIBEFS.md §12).
 # Its own named ELF and ISO; never the production image.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.

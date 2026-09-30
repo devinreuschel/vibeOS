@@ -1,23 +1,30 @@
 //! Panic and exception dump. ROADMAP §5.6, DESIGN §2.5.
 //!
 //! Binding order:
-//! 1. Broadcast halt IPI 0xFE (Fixed, not NMI)
+//! 1. `cli`, claim the dump, stop the other CPUs (halt IPI 0xFE)
 //! 2. Re-init serial from scratch
 //! 3. Print location/message; regs, current thread, last N log records
 //! 4. Symbolized backtrace when frame pointers exist
 //! 5. `hlt` loop, or QEMU isa-debug-exit under `panic_exit`
+//!
+//! From the `cli` in `begin_dump` on, every line is one
+//! `serial::raw::write_owner` call, built in a stack buffer ([`line`],
+//! [`out`]): the dump takes no lock and no `InterruptGuard`, so a panic
+//! inside a guard's bookkeeping or with a lock held still dumps once
+//! (DESIGN §2.5 steps 1-3).
 
-use core::fmt::Write;
+use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 
 use vibeos::desc::InterruptFrame;
 use vibeos::fmt_util::{self, StackBuf};
 use vibeos::log::DUMP_LAST;
+use vibeos::log::line::LINE_CAP;
 use vibeos::marker;
 use vibeos::symtab;
 
 use crate::per_cpu_init;
-use crate::serial::{self, Serial};
+use crate::serial::raw;
 use crate::x86;
 
 unsafe extern "C" {
@@ -69,14 +76,18 @@ fn stackish(p: u64) -> bool {
     false
 }
 
-/// Halt others first, then re-init serial. Re-entry dumps a one-liner and
-/// `hlt`s (or isa-debug-exit) without walking the ring again.
+/// Claim the dump, then halt the others, then re-init serial. The owner
+/// re-entering writes a one-liner and halts (or isa-debug-exit) without
+/// walking the ring again; any other CPU that finds the dump claimed
+/// halts without writing.
 fn begin_dump() {
     x86::cli();
-    if !crate::serial::raw::claim_dump() {
-        Serial::init();
-        Serial::write_line(b"vibeOS: panic: reentered\n");
-        finish();
+    if !raw::claim_dump() {
+        if raw::is_owner() {
+            raw::write_owner(b"vibeOS: panic: reentered");
+            finish();
+        }
+        x86::halt();
     }
     crate::ipi_init::halt_others();
     // SAFETY: DESIGN §2.5 step 1, established at `ipi_init::halt_others`:
@@ -85,18 +96,28 @@ fn begin_dump() {
     // with IF=0 can miss the IPI until ROADMAP §10.7's stop primitive
     // (F135), so this is the dump's accepted risk, not a proof.
     unsafe { crate::log_init::force_unlock() };
-    Serial::init();
+    raw::init();
 }
 
-/// One dump line, which `f` builds in one stack buffer, in one write.
-fn dump_line(f: impl FnOnce(&mut StackBuf<'_>)) {
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "a write to Serial cannot fail (DESIGN §2.5)"
-    )]
-    let _ = serial::write_line_with(|w| {
-        f(w);
-        Ok(())
+/// One dump line, which `f` builds in a `LINE_CAP` stack buffer (cut with
+/// `...` when longer), in one `raw::write_owner`: no lock, no
+/// `InterruptGuard` (DESIGN §2.5 step 1).
+pub(crate) fn line(f: impl FnOnce(&mut StackBuf<'_>)) {
+    let mut buf = [0u8; LINE_CAP];
+    let mut w = StackBuf::new(&mut buf);
+    f(&mut w);
+    w.mark_cut();
+    raw::write_owner(w.as_bytes());
+}
+
+/// One formatted dump line, as [`line`].
+pub(crate) fn out(args: fmt::Arguments<'_>) {
+    line(|w| {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter line and nothing to act on (DESIGN §2.5)"
+        )]
+        let _ = w.write_fmt(args);
     });
 }
 
@@ -106,7 +127,7 @@ fn hex(w: &mut StackBuf<'_>, n: u64) {
 }
 
 fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
-    dump_line(|w| {
+    line(|w| {
         w.push_bytes(b"vibeOS: regs: rbp=0x");
         hex(w, rbp);
         w.push_bytes(b" rsp=0x");
@@ -137,11 +158,9 @@ fn dump_thread() {
         let t = unsafe { &*cur };
         (t.id.raw(), t.name)
     };
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "a write to Serial cannot fail (DESIGN §2.5)"
-    )]
-    let _ = writeln!(Serial, "vibeOS: panic: thread cpu={cpu} tid={tid} {name}");
+    out(format_args!(
+        "vibeOS: panic: thread cpu={cpu} tid={tid} {name}"
+    ));
 }
 
 fn in_image(p: u64) -> bool {
@@ -159,7 +178,7 @@ fn hex_trim(w: &mut StackBuf<'_>, n: u64) {
 }
 
 fn print_frame_addr(addr: u64) {
-    dump_line(|w| {
+    line(|w| {
         w.push_bytes(b"  0x");
         hex(w, addr);
         if let Some(e) = crate::log::ksyms::lookup(addr) {
@@ -179,7 +198,7 @@ fn print_frame_addr(addr: u64) {
 }
 
 fn dump_backtrace(rip: u64, rbp: u64) {
-    Serial::write_line(b"vibeOS: backtrace:\n");
+    raw::write_owner(b"vibeOS: backtrace:");
     let mut rip = rip;
     let mut rbp = rbp;
     let mut n = 0usize;
@@ -212,7 +231,7 @@ fn dump_backtrace(rip: u64, rbp: u64) {
 }
 
 fn finish() -> ! {
-    Serial::write_line(b"vibeOS: panic: halted\n");
+    raw::write_owner(b"vibeOS: panic: halted");
     #[cfg(feature = "panic_exit")]
     // SAFETY: `panic_exit` builds run under QEMU with isa-debug-exit at
     // port 0xF4, whose write ends the VM; established by the harness's
@@ -231,7 +250,7 @@ fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
     // were sent the stop IPI. `halt_others` does not wait, and a CPU
     // spinning with IF=0 can miss the IPI until ROADMAP §10.7's stop
     // primitive (F135).
-    unsafe { crate::log_init::dump_tail(DUMP_LAST) };
+    unsafe { crate::log_init::dump_tail(DUMP_LAST, out) };
     dump_backtrace(rip, rbp);
 }
 
@@ -239,37 +258,34 @@ fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
 fn panic(info: &PanicInfo) -> ! {
     #[cfg(feature = "kernel_tests")]
     crate::arch::catch::on_panic();
+    // IF=0 before anything else: a second panicking CPU must reach
+    // `begin_dump` without taking an interrupt (DESIGN §2.5 step 1).
+    x86::cli();
     let rip = x86::read_rip();
     let rbp = x86::read_rbp();
     let rsp = x86::read_rsp();
     let rflags = x86::rflags();
     begin_dump();
 
-    Serial::write_line(marker::PANIC_BANNER.as_bytes());
-
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "a write to Serial cannot fail (DESIGN §2.5)"
-    )]
-    let _ = write_where(info);
+    raw::write_owner(marker::PANIC_BANNER.as_bytes());
+    write_where(info);
 
     dump_common(rip, rbp, rsp, rflags);
     finish();
 }
 
-/// The panic's location and message lines, as one `fmt::Result`.
-fn write_where(info: &PanicInfo) -> core::fmt::Result {
+/// The panic's location and message lines.
+fn write_where(info: &PanicInfo) {
     match info.location() {
-        Some(loc) => writeln!(
-            Serial,
+        Some(loc) => out(format_args!(
             "vibeOS: panic: at {}:{}:{}",
             loc.file(),
             loc.line(),
             loc.column()
-        )?,
-        None => Serial::write_line(b"vibeOS: panic: at <unknown>\n"),
+        )),
+        None => raw::write_owner(b"vibeOS: panic: at <unknown>"),
     }
-    writeln!(Serial, "vibeOS: panic: msg: {}", info.message())
+    out(format_args!("vibeOS: panic: msg: {}", info.message()));
 }
 
 /// ` rip=0x.. cs=0x.. rflags=0x.. rsp=0x.. ss=0x..[ err=0x..][ cr2=0x..]`.
@@ -306,7 +322,7 @@ pub fn exception_halt(
     cr2: Option<u64>,
 ) -> ! {
     begin_dump();
-    dump_line(|w| {
+    line(|w| {
         w.push_bytes(b"vibeOS: ");
         w.push_bytes(kind);
         frame_fields(w, frame, err, cr2);
@@ -317,7 +333,7 @@ pub fn exception_halt(
 
 pub fn exception_vec(n: u8, frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>) -> ! {
     begin_dump();
-    dump_line(|w| {
+    line(|w| {
         w.push_bytes(b"vibeOS: exception: vector ");
         let mut b = [0u8; 4];
         w.push_bytes(fmt_util::write_dec(n as u64, &mut b));

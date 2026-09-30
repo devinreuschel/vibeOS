@@ -20,7 +20,8 @@
 #            is in this order.
 #   name     contract rows only: the name the harness reports the marker by.
 #   when     contract rows only, optional: terms that must all hold, from
-#            `hpet`, `pit`, `smp>1`, `gp_test` and `panic_test`, each
+#            `hpet`, `pit`, `smp>1`, `gp_test`, `panic_test` and
+#            `panic_nest_test`, each
 #            optionally prefixed with `!`. Absent means every configuration.
 #   repeat   contract rows only, optional: `"per_ap"`. Consecutive per-AP
 #            rows form a group that repeats for each AP `i` in `1..N`, with
@@ -1070,7 +1071,7 @@ source = "user"
 section = "§9.8"
 order = 320
 name = "shell_ready"
-when = ["!gp_test", "!panic_test"]
+when = ["!gp_test", "!panic_test", "!panic_nest_test"]
 
 # `/bin/tests`' lines.
 [[marker]]
@@ -1090,7 +1091,7 @@ source = "user"
 section = "§9.8"
 order = 310
 name = "user_tests_ok"
-when = ["!gp_test", "!panic_test"]
+when = ["!gp_test", "!panic_test", "!panic_nest_test"]
 
 [[marker]]
 text = "user: tests fail"
@@ -1265,6 +1266,18 @@ section = "§10.7"
 order = 230
 name = "smp_tsc_skew"
 when = ["smp>1", "!panic_test"]
+
+# The panic-path variants' trips (TESTING.md §8.3), after `/hello` where
+# the gp-test trips; each build's contract ends at its armed line.
+[[marker]]
+text = "vibeOS: boot: panic-nest armed"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+order = 330
+name = "panic_nest_armed"
+when = ["panic_nest_test", "!panic_test"]
 
 # §10.12 Drivers and devices
 

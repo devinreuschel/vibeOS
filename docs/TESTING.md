@@ -88,9 +88,10 @@ Built in the one `target/` like every variant, but copied to its own named ELF,
 fussiness: an ISO recipe that packaged whatever ELF the last build left in `target/` could put a
 feature-enabled ELF into the production ISO, and the difference is not visible from the outside.
 Each variant's recipe removes its named ELF first, builds with `--artifact-dir`, so a parallel
-build of another variant cannot swap the file, and writes the named ELF last. The panic-dump and `#GP` ISOs
-are `--features panic_test --features panic_exit` and `--features gp_test --features panic_exit`
-(underscores everywhere; Cargo features in this crate do not use hyphens).
+build of another variant cannot swap the file, and writes the named ELF last. The panic-dump, `#GP` and
+panic-nest ISOs are `--features panic_test --features panic_exit`, `--features gp_test --features
+panic_exit` and `--features panic_nest_test --features panic_exit` (underscores in features; Cargo
+features in this crate do not use hyphens, and the variant names do not use underscores).
 
 ```
 vibeOS: ktest: begin <n>
@@ -707,7 +708,7 @@ includes its `cargo test` of the host tools, the one tier that needs the toolcha
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
-| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic` | 32 |
+| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest` | 40 |
 | x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-strace` | 30 |
 | x86_64 | in-guest-1 | `test-kernel` | 64 |
 | x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |

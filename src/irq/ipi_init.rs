@@ -398,13 +398,26 @@ pub fn on_halt_ipi() -> ! {
 
 /// Broadcast halt so others stop before we trash the log.
 /// Fixed IPI `0xFE`, not NMI (DESIGN §2.5 / §7.6).
+/// Each IPI goes through `apic_init::send_ipi`, which records no trace
+/// event: `trace!` takes an `InterruptGuard`, which the dump path never
+/// does (DESIGN §2.5 step 1).
 pub fn halt_others() {
     crate::serial::raw::HALTING.store(true, Ordering::Release);
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "DESIGN §2.5: no failure anyone could act on: the panic path halts next"
-    )]
-    let _ = apic_init::send_ipi_all_ex_self(vectors::IPI_HALT);
+    let me = my_index() as u32;
+    let online = per_cpu_init::online_mask();
+    for c in 0..64u32 {
+        if c == me || online & (1u64 << c) == 0 {
+            continue;
+        }
+        if let Some(pc) = per_cpu_init::cpu(c) {
+            let apic = pc.apic_id.load(Ordering::Relaxed) as u8;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "DESIGN §2.5: no failure anyone could act on: the panic path halts next"
+            )]
+            let _ = apic_init::send_ipi(apic, vectors::IPI_HALT, vibeos::apic::IpiMode::Fixed);
+        }
+    }
 }
 
 /// Run `f(arg)` on every online CPU in `mask` except self. Always waits

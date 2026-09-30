@@ -424,7 +424,12 @@ Binding order (do not invert):
    - Only the owner writes COM1. Built: A4's raw serial layer (ROADMAP §10.3, `serial::raw`) holds
      `HALTING`, the owner's CPU id (`claim_dump` and `owner_cpu`, which replace the `DUMPING` flag),
      and `write_owner`, a write that takes no lock and no `InterruptGuard` and writes only on the
-     owner. Planned (ROADMAP §10.7): once `HALTING` is set, a serial write or log append on any other
+     owner. From the `cli` that opens `panic::begin_dump`, every dump line, `vibeOS: panic: reentered`
+     included, is one `write_owner` call, built in a stack buffer (`panic::line`, `panic::out`), and
+     nothing on the dump path creates an `InterruptGuard` (no `IrqCell::with`, `marker!`, `klog!` or
+     `Serial`) or takes a lock, so a panic inside a guard's own bookkeeping, such as an `irq_nest`
+     underflow, dumps once (ROADMAP §10.7, F071). Once `HALTING` is set, a `Serial` write on the owner
+     goes through `write_owner` too. Planned (ROADMAP §10.7): once `HALTING` is set, a serial write or log append on any other
      CPU runs the stop routine instead, through the hook the stop primitive installs with
      `serial::raw::set_stop_hook`; until then such a write goes out without the TX lock.
 
@@ -436,8 +441,10 @@ Binding order (do not invert):
    record the other CPUs' registers; keying the NMI handler on the global `HALTING` flag, under which
    any NMI halts the dumping CPU mid-dump; and dropping other CPUs' writes after `HALTING`, which
    leaves the writer running.
-2. Re-initialize serial from scratch (the panic may be *in* the serial path).
-3. Print location and message; dump registers, the current thread, and the last N log records.
+2. Re-initialize serial from scratch, once, on the owner (`serial::raw::init`): the panic may be *in*
+   the serial path.
+3. Print location and message; dump registers, the current thread, and the last N log records, each
+   line one `write_owner` call (`log_init::dump_tail` writes the log tail through `panic::out`).
    From ROADMAP §19.5, every record serial has not printed goes out first (the log contract below),
    unless a capture kernel is loaded (step 6), whose vmcore holds the ring.
 4. Symbolized backtrace when frame pointers exist (in-image sorted table, binary search, no alloc).
@@ -631,7 +638,7 @@ The markers are a contract with the harness, not an interface for software outsi
 §39.1 classes them `internal`, so a release may change one, with its row in the same commit.
 
 `marker!` for registered lines of every kind (ROADMAP, How to read this); `klog!` for everything
-else; `PlainSerial` only for `dmesg` and panic dumps. `marker!` writes serial before it returns; from
+else; `PlainSerial` only for `dmesg`; the panic dump writes through `serial::raw::write_owner` (§2.5 step 1). `marker!` writes serial before it returns; from
 ROADMAP §19.5 a `klog!` line reaches serial when a printer thread gets to it
 ([§2.5](#25-panic-policy)).
 

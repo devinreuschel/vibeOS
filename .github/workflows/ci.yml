@@ -243,6 +243,7 @@ jobs:
           cargo clippy --bin vibeos --features vibefs_crash -- -D warnings
           cargo clippy --bin vibeos --features panic_test --features panic_exit -- -D warnings
           cargo clippy --bin vibeos --features gp_test --features panic_exit -- -D warnings
+          cargo clippy --bin vibeos --features panic_nest_test --features panic_exit -- -D warnings
           cargo clippy --bin vibeos --features kernel_shell -- -D warnings
 
       # The Rust user programs (ROADMAP §10.5): links through rust-lld with no
@@ -291,7 +292,7 @@ jobs:
         include:
           - arch: x86_64
             tier: e2e-1
-            targets: test-e2e test-e2e-uefi test-e2e-panic
+            targets: test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest
             jobs: 1
           - arch: x86_64
             tier: e2e-2

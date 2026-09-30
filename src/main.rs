@@ -404,6 +404,8 @@ extern "C" fn boot_rest() -> ! {
 
     #[cfg(feature = "gp_test")]
     gp_test_trip();
+    #[cfg(feature = "panic_nest_test")]
+    crate::log::panic_test::nest_trip();
 
     // `shell ready` is last. gp-test trips after ramdisk so a #GP dump
     // still has a clean contract through `block: …`. Every build registers

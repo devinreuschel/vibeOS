@@ -17,7 +17,7 @@ use vibeos::log::{
 
 use crate::cell::IrqCell;
 use crate::per_cpu_init;
-use crate::serial::{PlainSerial, Serial};
+use crate::serial::PlainSerial;
 use crate::time_init;
 use crate::x86::InterruptGuard;
 
@@ -343,12 +343,15 @@ pub fn write_record(w: &mut impl Write, r: &vibeos::log::Record<MSG_CAP>) {
     );
 }
 
-/// Last N records for the panic dump. Caller holds no log lock.
+/// Last N records for the panic dump, each one line through `out`, the
+/// dump's writer (`panic::out`, over `serial::raw::write_owner`: no lock,
+/// no `InterruptGuard`), which the caller passes so this module does not
+/// name the panic module (DESIGN §1.2).
 ///
 /// # Safety
 /// The contracts of [`force_unlock`] and [`with_logger_unlocked`]: panic
 /// path only, after `panic::begin_dump`, with no other writer of `LOG`.
-pub unsafe fn dump_tail(n: usize) {
+pub unsafe fn dump_tail(n: usize, out: fn(fmt::Arguments<'_>)) {
     // SAFETY: the holder never touches `LOG` again (panic path, after
     // `begin_dump`); established by `log_init::dump_tail`'s `# Safety`
     // contract.
@@ -358,37 +361,27 @@ pub unsafe fn dump_tail(n: usize) {
     // `log_init::dump_tail`'s `# Safety` contract.
     unsafe {
         with_logger_unlocked(|l| {
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "a write to Serial cannot fail (DESIGN §2.5)"
-            )]
-            let _ = writeln!(
-                Serial,
+            out(format_args!(
                 "vibeOS: log: last {} ({} dropped, {} sink, {} reentry)",
                 n.min(l.ring.len()),
                 l.ring.dropped(),
                 sink_drops(),
                 reentry_drops()
-            );
+            ));
             let unit = if time_init::tsc_per_ms() != 0 {
                 "ms"
             } else {
                 "tsc"
             };
             for r in l.ring.last_n(n) {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "a write to Serial cannot fail (DESIGN §2.5)"
-                )]
-                let _ = writeln!(
-                    Serial,
+                out(format_args!(
                     "vibeOS: logrec: {}{} cpu{} {} {}",
                     r.timestamp,
                     unit,
                     r.cpu_id,
                     r.level.as_str(),
                     r.msg_str()
-                );
+                ));
             }
         });
     }

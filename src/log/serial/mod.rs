@@ -7,7 +7,8 @@
 //! its argument as one line, so a caller that builds a line from pieces
 //! uses [`write_line_with`]. Polled TX with a bounded THRE wait; a dead
 //! UART drops the byte rather than wedging the panic handler (DESIGN
-//! §9.6). Once `raw::HALTING` is set the writes skip the lock so a holder
+//! §9.6). Once `raw::HALTING` is set the dump's owner writes through
+//! `raw::write_owner`, with no TX lock and no `InterruptGuard`, so a holder
 //! cannot stall the dump. `klog!` uses try-lock + drop. The port I/O, the
 //! halt flag and the dump owner live in [`raw`], which takes no lock and
 //! calls nothing above arch.
@@ -79,6 +80,10 @@ impl Serial {
     /// `console_init::write` is the only caller.
     pub fn write_user(bytes: &[u8]) {
         if halting() {
+            if raw::is_owner() {
+                raw::put_user(bytes);
+                return;
+            }
             let _irq = InterruptGuard::enter();
             raw::user_after_halt(bytes);
             return;
@@ -96,6 +101,10 @@ impl Serial {
     /// one try-lock; the line is dropped if TX is busy. Not captured.
     pub fn try_write_bytes(bytes: &[u8]) -> bool {
         if halting() {
+            if raw::is_owner() {
+                raw::write_owner(bytes);
+                return true;
+            }
             let _irq = InterruptGuard::enter();
             raw::write_after_halt(bytes);
             return true;
@@ -111,11 +120,16 @@ impl Serial {
 /// Write one whole line, `\n` included, under one TX hold, after one
 /// capture into the log ring when `capture` is set.
 fn emit(line: &[u8], capture: bool) {
-    let _irq = InterruptGuard::enter();
     if halting() {
+        if raw::is_owner() {
+            raw::write_owner(line);
+            return;
+        }
+        let _irq = InterruptGuard::enter();
         raw::write_after_halt(line);
         return;
     }
+    let _irq = InterruptGuard::enter();
     if capture {
         self::capture(line);
     }
@@ -214,7 +228,8 @@ pub fn line(msg: &str) {
 ///
 /// `marker!(marker::X)` / `marker!("vibeOS: …")` for a full line;
 /// `marker!("vibeOS: … {}", x)` for formatted contract lines.
-/// `klog!` is filtered. `PlainSerial` is only for `dmesg` and panic dumps.
+/// `klog!` is filtered. `PlainSerial` is only for `dmesg`; the panic dump
+/// writes through `raw::write_owner`.
 #[macro_export]
 macro_rules! marker {
     ($fmt:literal $(, $($arg:tt)*)?) => {{

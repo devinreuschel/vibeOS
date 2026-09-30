@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 
-from tests.harness import frame, results
+from tests.harness import frame, panic_dump, results
 from tests.harness.harness import (
     BOOT_ALLOWANCE_S,
     MCE_MCG_STATUS,
@@ -385,8 +385,24 @@ def strace_main() -> int:
     return results.run_main(_strace)
 
 
+# `VIBEOS_PANIC_VARIANT`: a panic-path build (ROADMAP §10.7), its ISO
+# variant, and the check its dump must pass.
+PANIC_VARIANTS = {
+    "nest": ("panic-nest", panic_dump.check_nest),
+}
+
+
 def main() -> int:
-    env = env_config(default_iso=default_iso(), default_timeout=BOOT_ALLOWANCE_S)
+    panic_variant = env_str("VIBEOS_PANIC_VARIANT", "")
+    if panic_variant and panic_variant not in PANIC_VARIANTS:
+        print(
+            f"[e2e] FAIL: VIBEOS_PANIC_VARIANT={panic_variant!r}, expected one of "
+            f"{sorted(PANIC_VARIANTS)}",
+            file=sys.stderr,
+        )
+        return 1
+    iso = default_iso(PANIC_VARIANTS[panic_variant][0]) if panic_variant else default_iso()
+    env = env_config(default_iso=iso, default_timeout=BOOT_ALLOWANCE_S)
     if env_flag("VIBEOS_MCE_TEST"):
         return _mce_main(env)
     res = results.Results(env.tier)
@@ -395,7 +411,7 @@ def main() -> int:
     expect_pit = env_flag("VIBEOS_EXPECT_PIT")
 
     extra: tuple[str, ...] = ()
-    if expect_panic or gp_test:
+    if expect_panic or gp_test or panic_variant:
         extra = ISA_DEBUG_EXIT
 
     cfg = env.qemu(extra=extra, hpet=not expect_pit)
@@ -412,6 +428,10 @@ def main() -> int:
             ("  0x", "boot_rest"),
             "vibeOS: panic: halted",
         )
+    elif panic_variant:
+        markers = boot_contract_markers(cpu=env.cpu, smp=env.smp, panic_variant=panic_variant)
+        expect_panic = True
+        dump_needles = ("vibeOS: backtrace:", "vibeOS: panic: halted")
     elif expect_panic:
         markers = halt_test_markers()
         dump_needles = (
@@ -458,6 +478,15 @@ def main() -> int:
         print(f"[e2e] FAIL: {e}", file=sys.stderr)
         return 1
     print("[e2e]   . serial online is the first kernel line", file=sys.stderr)
+    if panic_variant:
+        try:
+            PANIC_VARIANTS[panic_variant][1](result.lines)
+        except HarnessError as e:
+            res.record("marker", f"panic_{panic_variant}_dump", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", f"panic_{panic_variant}_dump", "passed")
+        print(f"[e2e]   . panic-{panic_variant} dump ok", file=sys.stderr)
     if not expect_panic and not gp_test:
         try:
             _check_pci_qemu_set(result.lines)

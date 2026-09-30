@@ -153,17 +153,15 @@ fn run_stop_hook() {
     f();
 }
 
-fn is_owner() -> bool {
+/// Whether this CPU owns the panic dump.
+pub fn is_owner() -> bool {
     owner_cpu() == Some(this_cpu())
 }
 
-/// Write `line` as one framed kernel line, only on the dump's owner. Any
-/// other CPU runs the stop hook if one is set, and otherwise returns
-/// without writing.
-#[allow(
-    dead_code,
-    reason = "C-RAWSERIAL: ROADMAP §10.7 routes the panic path's writes through it"
-)]
+/// Write `line` as one framed kernel line, only on the dump's owner: no
+/// lock and no `InterruptGuard`, so the dump writes whatever this CPU held
+/// or faulted in (DESIGN §2.5 step 1). Any other CPU runs the stop hook if
+/// one is set, and otherwise returns without writing.
 pub fn write_owner(line: &[u8]) {
     if is_owner() {
         put_line(line);
