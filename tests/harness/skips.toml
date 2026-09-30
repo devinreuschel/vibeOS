@@ -228,3 +228,8 @@ smp = 1
 name = "trace_tracepoints_fire"
 reason = "needs a second cpu"
 smp = 1
+
+[[skip]]
+name = "user_device_irq"
+reason = "needs 2 CPUs"
+smp = 1
