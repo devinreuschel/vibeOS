@@ -224,7 +224,6 @@ GONE: list[tuple[str, str]] = [
     ("with_intx_disabled", "a driver turns on its own device (DESIGN §12.3)"),
     ("fail_status", "a driver turns on its own device (DESIGN §12.3)"),
     ("fail_armed", "a driver turns on its own device (DESIGN §12.3)"),
-    ("errno_linux_values", "one `KError` with `From` for"),
     ("from_errno", "one `KError` with `From` for"),
     ("fs_errno", "one `KError` with `From` for"),
     ("load_errno", "one `KError` with `From` for"),

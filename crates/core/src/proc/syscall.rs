@@ -32,6 +32,19 @@ mod tests {
     use super::*;
     use crate::kerror::KError;
 
+    /// Every errno of the `KError` table reaches ring 3 as Linux's
+    /// `-errno`, in the error range userspace tests for (SYSCALL.md §2).
+    #[test]
+    fn errno_linux_values() {
+        for &e in KError::ALL {
+            let r = encode(Err(e));
+            assert_eq!(r, -i64::from(e.errno()), "{}", e.name());
+            assert!((-4095..0).contains(&r), "{}", e.name());
+        }
+        assert_eq!(encode(Err(KError::BadF)), -9);
+        assert_eq!(encode(Err(KError::NoSys)), -38);
+    }
+
     #[test]
     fn syscall_table_invariants() {
         for (tab, arch) in [(&x86_64::TABLE, 0), (&aarch64::TABLE, 1)] {
