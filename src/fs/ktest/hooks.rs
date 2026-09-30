@@ -76,10 +76,9 @@ fn write_window() {
     }
 }
 
-/// `(Vfs::open` opens, routed opens) so far.
-pub(super) fn open_counts() -> (u32, u32) {
-    let v = fs_init::with(|v| v.stats.opens);
-    (v, file_init::ROUTED.load(Ordering::Acquire))
+/// `Vfs::open` opens so far.
+pub(super) fn open_counts() -> u32 {
+    fs_init::with(|v| v.stats.opens)
 }
 
 /// Each open-file slot's `(used, refs, gen)`.

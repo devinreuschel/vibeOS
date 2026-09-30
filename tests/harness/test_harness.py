@@ -1995,6 +1995,20 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("virtio-blk-pci", blob)
         self.assertIn("discard=unmap", blob)
 
+    def test_ktest_devices_probe_functions(self) -> None:
+        from tests.harness.harness import ktest_devices
+
+        args = ktest_devices("/tmp/disk.img", 2)
+        devices = [args[i + 1] for i, a in enumerate(args) if a == "-device"]
+        rngs = [d for d in devices if d.startswith("virtio-rng-pci")]
+        self.assertEqual(len(rngs), 2)
+        self.assertIn("addr=0x1d", rngs[1])
+        self.assertNotIn("addr=", rngs[0])
+        blob = " ".join(args)
+        self.assertIn("driver=null-co,node-name=probeblk", blob)
+        self.assertIn("virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e", devices)
+        self.assertEqual(sum("addr=0x1e" in d for d in devices), 1)
+
     def test_ktest_qemu_argv_boot_and_queues(self) -> None:
         from tests.harness.harness import ktest_devices, qemu_argv
 

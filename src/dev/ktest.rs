@@ -4,7 +4,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use vibeos::dev::{ClaimError, DevRef, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::O_RDWR;
-use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_MASTER, CMD_MEM};
+use vibeos::lock::RANK_DEVICE;
+use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 
 use vibeos::kalloc::TryBox;
 use vibeos::pci::CfgIo;
@@ -22,6 +23,7 @@ use crate::ktest::{
 use crate::log_init;
 use crate::paging_init;
 use crate::pci_init;
+use crate::sync_init::SpinMutex;
 use crate::thread_init;
 use crate::virtio_init;
 
@@ -157,7 +159,7 @@ pub(crate) fn test_pci_cfg_rw() -> Outcome {
         return Outcome::Fail("host device");
     }
     let prev = cfg_read32(bdf, CFG_COMMAND) as u16;
-    pci_init::enable_mem_master(bdf);
+    pci_init::update_command(bdf, CMD_MEM | CMD_MASTER, 0);
     let now = cfg_read32(bdf, CFG_COMMAND) as u16;
     cfg_write32(bdf, CFG_COMMAND, prev as u32);
     if now & (CMD_MEM | CMD_MASTER) != CMD_MEM | CMD_MASTER {
@@ -309,7 +311,7 @@ pub(crate) fn test_dma_edu() -> Outcome {
     if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
         return Outcome::Fail("edu ident");
     }
-    pci_init::enable_mem_master(dev.addr);
+    pci_init::update_command(dev.addr, CMD_MEM | CMD_MASTER, 0);
     let Some(src) = dma_init::alloc(DmaAlloc::dma32(64)) else {
         return Outcome::Fail("src");
     };
@@ -787,6 +789,222 @@ pub(crate) fn rng_refill_after_empty_completion() -> Outcome {
     Outcome::Ok
 }
 
+/// The second virtio-rng function `tests/harness/harness.py: ktest_devices`
+/// adds, in a slot after the first rng in bus order, so it is refused.
+pub(crate) const SPARE_RNG_BDF: Bdf = Bdf::new(0, 0x1d, 0);
+
+/// Every virtio-rng function in the registry, in registration order.
+fn rng_functions() -> ([Option<DevRef>; 4], usize) {
+    let mut out: [Option<DevRef>; 4] = [const { None }; 4];
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while let Some(d) = dev_init::get(i) {
+        i += 1;
+        let rng = d.vendor == 0x1af4 && (d.device_id == 0x1044 || d.device_id == 0x1004);
+        if !rng {
+            continue;
+        }
+        if let Some(slot) = out.get_mut(n) {
+            *slot = Some(d);
+        }
+        n += 1;
+    }
+    (out, n)
+}
+
+/// ROADMAP §10.12 (F121): a second virtio-rng function is refused, and
+/// the refusal touches neither the device nor the first one's state.
+pub(crate) fn rng_second_probe_refused() -> Outcome {
+    let (fns, n) = rng_functions();
+    if n != 2 {
+        return crate::fail_fmt!("{n} virtio-rng functions, want 2");
+    }
+    let Some(spare) = fns.iter().flatten().find(|d| d.addr == SPARE_RNG_BDF) else {
+        return Outcome::Fail("no rng at 00:1d.0");
+    };
+    let Some(first) = fns.iter().flatten().find(|d| d.addr != SPARE_RNG_BDF) else {
+        return Outcome::Fail("no first rng");
+    };
+    if dev_init::bound(spare).is_some() {
+        return Outcome::Fail("spare rng bound");
+    }
+    if dev_init::bound(first) != Some("virtio-rng") {
+        return Outcome::Fail("first rng unbound");
+    }
+    let cmd0 = pci_init::cfg_read16(SPARE_RNG_BDF, CFG_COMMAND);
+    let isr0 = virtio_init::ISR_VA.load(Ordering::Acquire);
+    let q0 = rng_qdma_device();
+    let r = virtio_init::RNG_DRV.probe(spare);
+    if r.is_ok() {
+        return Outcome::Fail("second probe bound");
+    }
+    if pci_init::cfg_read16(SPARE_RNG_BDF, CFG_COMMAND) != cmd0 {
+        return Outcome::Fail("refused probe wrote COMMAND");
+    }
+    if virtio_init::ISR_VA.load(Ordering::Acquire) != isr0 {
+        return Outcome::Fail("ISR_VA changed");
+    }
+    if rng_qdma_device() != q0 {
+        return Outcome::Fail("queue changed");
+    }
+    if !virtio_init::rng_bound() {
+        return Outcome::Fail("BOUND cleared");
+    }
+    let c0 = rng_completions();
+    if virtio_init::rng_request().is_err() {
+        return Outcome::Fail("request");
+    }
+    if !spin_until_ns(|| rng_completions() > c0, 2_000_000_000) {
+        return Outcome::Fail("first rng no completion");
+    }
+    Outcome::Ok
+}
+
+// ---- The fail-after-`QENABLE` hook both virtio probes call, and what
+// `virtio_init::stop_device` saw (ROADMAP §10.12, F116; AGENTS rule 9:
+// `kernel_tests` only).
+
+/// The virtio-blk function `tests/harness/harness.py: ktest_devices`
+/// reserves: its probe fails after `QENABLE` at every boot, so it stays
+/// unbound for `virtio_probe_fail_quiesces`.
+pub(crate) const PROBE_BLK_BDF: Bdf = Bdf::new(0, 0x1e, 0);
+
+/// The armed function, as `virtio_init::bdf_key`; 0 for none.
+static FAIL_ARMED: vibeos::atomic::statics::AtomicU64 = vibeos::atomic::statics::AtomicU64::new(0);
+
+/// Whether the probe of `bdf` fails right after it enables its first
+/// queue: always for [`PROBE_BLK_BDF`], and for the armed function.
+pub(crate) fn fail_after_qenable(bdf: Bdf) -> bool {
+    bdf == PROBE_BLK_BDF || FAIL_ARMED.load(Ordering::Acquire) == virtio_init::bdf_key(bdf)
+}
+
+/// Arm the hook for `bdf`, or disarm it with `None`.
+pub(crate) fn arm_fail_after_qenable(bdf: Option<Bdf>) {
+    FAIL_ARMED.store(bdf.map_or(0, virtio_init::bdf_key), Ordering::Release);
+}
+
+/// What `virtio_init::stop_device` read back, before the caller freed
+/// anything: device status, COMMAND, and the free frames then.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Quiesced {
+    pub bdf: Bdf,
+    pub reset_ok: bool,
+    pub status: u8,
+    pub command: u16,
+    pub free_frames: usize,
+}
+
+/// The last [`Quiesced`]. A leaf: nothing is locked under it.
+static QUIESCED: SpinMutex<Option<Quiesced>> = SpinMutex::with_rank(None, RANK_DEVICE);
+
+/// Record a stop. `stop_device` calls it with no device lock held, and the
+/// free-frame count (the buddy lock) comes before [`QUIESCED`]'s.
+pub(crate) fn record_quiesce(bdf: Bdf, reset_ok: bool, status: u8, command: u16) {
+    let free_frames = crate::ktest::free_frames();
+    *QUIESCED.lock() = Some(Quiesced {
+        bdf,
+        reset_ok,
+        status,
+        command,
+        free_frames,
+    });
+}
+
+/// The last recorded stop, clearing it.
+pub(crate) fn take_quiesce() -> Option<Quiesced> {
+    QUIESCED.lock().take()
+}
+
+/// Check a probe of `bdf` that failed after `QENABLE`: `stop_device` saw
+/// status 0 and bus mastering off before the probe's frames went back
+/// (fewer free than `before`), and they all went back by `after`.
+pub(crate) fn check_quiesce(
+    q: Option<Quiesced>,
+    bdf: Bdf,
+    before: usize,
+    after: usize,
+) -> Result<(), &'static str> {
+    let Some(q) = q else {
+        return Err("no stop recorded");
+    };
+    if q.bdf != bdf {
+        return Err("stop recorded for another function");
+    }
+    if !q.reset_ok || q.status != 0 {
+        return Err("status not 0 before the free");
+    }
+    if q.command & CMD_MASTER != 0 {
+        return Err("bus mastering on before the free");
+    }
+    if q.free_frames >= before {
+        return Err("frames freed before the stop");
+    }
+    if after != before {
+        return Err("frames not returned");
+    }
+    if pci_init::cfg_read16(bdf, CFG_COMMAND) & CMD_MASTER != 0 {
+        return Err("bus mastering on after the probe");
+    }
+    Ok(())
+}
+
+/// Fail the probe of `bdf` twice through `probe`, the first warming the
+/// heap, and check the second's stop.
+pub(crate) fn probe_fails_quiesced(bdf: Bdf, probe: impl Fn() -> bool) -> Result<(), &'static str> {
+    if probe() {
+        return Err("first probe bound");
+    }
+    let _ = take_quiesce();
+    let before = quiescent_free_frames();
+    let bound = probe();
+    let q = take_quiesce();
+    let after = quiescent_free_frames();
+    if bound {
+        return Err("second probe bound");
+    }
+    check_quiesce(q, bdf, before, after)
+}
+
+/// The virtio-rng half of `virtio_probe_fail_quiesces` (ROADMAP §10.12,
+/// F116): remove the bound rng, fail its probe after `QENABLE` twice, then
+/// bind it again and use it.
+pub(crate) fn rng_fail_after_qenable_case() -> Outcome {
+    let (fns, _) = rng_functions();
+    let Some(d) = fns.iter().flatten().find(|d| d.addr != SPARE_RNG_BDF) else {
+        return Outcome::Fail("no bound rng");
+    };
+    if !virtio_init::rng_bound() {
+        return Outcome::Fail("rng unbound");
+    }
+    virtio_init::RNG_DRV.remove(d);
+    if virtio_init::rng_bound() {
+        return Outcome::Fail("BOUND after remove");
+    }
+    arm_fail_after_qenable(Some(d.addr));
+    let failed = probe_fails_quiesced(d.addr, || virtio_init::RNG_DRV.probe(d).is_ok());
+    arm_fail_after_qenable(None);
+    // Bind it again whatever the checks found, for the tests after this.
+    let rebound = virtio_init::RNG_DRV.probe(d).is_ok();
+    if let Err(why) = failed {
+        return Outcome::Fail(why);
+    }
+    if !rebound || !virtio_init::rng_bound() {
+        return Outcome::Fail("rng not bound again");
+    }
+    let want = CMD_MEM | CMD_MASTER | CMD_INTX_DISABLE;
+    if pci_init::cfg_read16(d.addr, CFG_COMMAND) & want != want {
+        return Outcome::Fail("driver did not turn its device on");
+    }
+    let c0 = rng_completions();
+    if virtio_init::rng_request().is_err() {
+        return Outcome::Fail("request");
+    }
+    if !spin_until_ns(|| rng_completions() > c0, 2_000_000_000) {
+        return Outcome::Fail("rng no completion after rebind");
+    }
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -806,4 +1024,5 @@ pub(crate) const TESTS: &[Test] = &[
         rng_refill_after_empty_completion,
     ),
     test("dev_probe_alloc_fail", test_dev_probe_alloc_fail),
+    test("rng_second_probe_refused", rng_second_probe_refused),
 ];

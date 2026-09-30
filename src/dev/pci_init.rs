@@ -311,16 +311,24 @@ fn scan_line(info: &FuncInfo) -> core::fmt::Result {
     })
 }
 
-pub fn enable_mem_master(bdf: Bdf) {
+/// Set `set` and clear `clear` in `bdf`'s COMMAND and return COMMAND as
+/// read back. The write leaves the RW1C STATUS half alone. This is the
+/// kernel's one COMMAND writer: each driver turns on its own device
+/// (DESIGN §12.3), and neither the binder nor MSI setup writes COMMAND.
+pub fn update_command(bdf: Bdf, set: u16, clear: u16) -> u16 {
     let mut hw = HwCfg;
     let cmd = pci::read16(&mut hw, bdf, CFG_COMMAND);
-    pci::write_command(&mut hw, bdf, pci::enable_mem_master(cmd));
+    pci::write_command(&mut hw, bdf, pci::command_update(cmd, set, clear));
+    pci::read16(&mut hw, bdf, CFG_COMMAND)
 }
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "only the in-guest tests read a config word outside a driver yet"
+    )
+)]
 pub fn cfg_read16(bdf: Bdf, offset: u16) -> u16 {
     pci::read16(&mut HwCfg, bdf, offset)
-}
-
-pub fn cfg_write_command(bdf: Bdf, cmd: u16) {
-    pci::write_command(&mut HwCfg, bdf, cmd)
 }

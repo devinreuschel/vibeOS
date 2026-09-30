@@ -63,7 +63,13 @@ fn pattern(i: usize) -> u8 {
 /// Format a 256 KiB FAT32 image and write it to `vda` LBA 0 to 511
 /// through the block cache the mount reads, then flush.
 fn write_image() -> Result<(), &'static str> {
-    let r = blockdev_init::lookup(b"vda").ok_or("no vda")?;
+    fat_image_to(b"vda")
+}
+
+/// Format a 256 KiB FAT32 image and write it to block device `dev`'s LBA
+/// 0 to 511 through the block cache a mount reads, then flush.
+pub(super) fn fat_image_to(dev: &[u8]) -> Result<(), &'static str> {
+    let r = blockdev_init::lookup(dev).ok_or("no block device")?;
     let mut img: TryVec<u8> =
         TryVec::try_with_capacity(IMG_SECTORS * SEC).map_err(|_| "image alloc")?;
     let zero = [0u8; SEC];

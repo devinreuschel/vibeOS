@@ -2,23 +2,31 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use vibeos::dev::Instance;
 use vibeos::fs::{
     FileId, FsError, InodeKind, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC,
     O_WRONLY, OpenFlags, SEEK_CUR, SEEK_END, SEEK_SET, Stat,
 };
 use vibeos::limits::MAX_OPEN_FILES;
+use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::wait_exited;
 
 mod hooks;
 mod initrd;
+mod lock;
 mod ops;
+mod routing;
 mod slots;
 mod stack16k;
 
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
+pub(crate) use lock::{test_fat_vol_wait_no_eio, test_vfs_io_off_lock};
 pub(crate) use ops::{test_vfs_backends_via_ops, test_vfs_fat_one_inode};
-pub(crate) use slots::test_fs_drop_slot_busy_keeps_slot;
+pub(crate) use routing::{
+    test_fat_initrd_dev_no_null, test_vfs_unlink_drops_parent_dentry, test_vfs_user_dev_nodes,
+};
+pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
 
 use crate::fat_init;
@@ -26,6 +34,7 @@ use crate::file_init;
 use crate::fs_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{Outcome, Test, fid, test};
+use crate::sync_init::SpinMutex;
 use crate::thread_init;
 use crate::time_init;
 use crate::vibefs_init;
@@ -661,7 +670,8 @@ fn stale_writeback() -> Outcome {
     hooks::hold_next_write();
     crate::ktest::spawn_thread("f55-stale", stale_helper);
     let w = fid::write(a, b"x");
-    let deadline = time_init::now_ns().saturating_add(1_000_000_000);
+    let deadline =
+        time_init::now_ns().saturating_add(core::time::Duration::from_secs(1).as_nanos() as u64);
     while !STALE_DONE.load(Ordering::Acquire) && time_init::now_ns() < deadline {
         thread_init::yield_now();
     }
@@ -1324,10 +1334,52 @@ pub(crate) fn probe_initrd() {
     super::fat_init::with_initrd(|_| ());
 }
 
+/// Armed by `vfs_io_off_lock`: the next FAT read op on a device volume
+/// waits at [`fat_read_hook`], holding only that volume's lock.
+pub(crate) static FAT_READ_HOLD: AtomicBool = AtomicBool::new(false);
+/// Set while a FAT read waits at [`fat_read_hook`].
+pub(crate) static FAT_READ_HELD: AtomicBool = AtomicBool::new(false);
+/// Ends a wait at [`fat_read_hook`].
+pub(crate) static FAT_READ_RELEASE: AtomicBool = AtomicBool::new(false);
+/// Milliseconds each device-backed FAT block request sleeps first, 0 for
+/// none (`fat_vol_wait_no_eio`).
+pub(crate) static BLK_DELAY_MS: AtomicU32 = AtomicU32::new(0);
+/// Block requests [`blk_request_hook`] has delayed.
+pub(crate) static BLK_DELAYED: AtomicU32 = AtomicU32::new(0);
+
+/// `FatOps`' read on a device volume, under the volume lock and with the
+/// VFS lock dropped: when [`FAT_READ_HOLD`] is armed, disarm it and wait,
+/// at most 10 s, for [`FAT_READ_RELEASE`].
+pub(crate) fn fat_read_hook() {
+    if !FAT_READ_HOLD.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    FAT_READ_HELD.store(true, Ordering::Release);
+    let _released = crate::ktest::sleep_until(|| FAT_READ_RELEASE.load(Ordering::Acquire), 10_000);
+    FAT_READ_HELD.store(false, Ordering::Release);
+}
+
+/// `fat_init`'s `Io::read` and `Io::write` on a block device, under the
+/// volume lock: sleep [`BLK_DELAY_MS`] first.
+pub(crate) fn blk_request_hook() {
+    let ms = BLK_DELAY_MS.load(Ordering::Acquire);
+    if ms != 0 {
+        BLK_DELAYED.fetch_add(1, Ordering::Relaxed);
+        thread_init::sleep_ms(u64::from(ms));
+    }
+}
+
+/// The `/vibe` memory volume, recorded at its mount for [`probe_image`],
+/// which runs with IRQs off and so cannot take the sleeping VFS lock.
+pub(crate) static VIBE_MEM: SpinMutex<Option<Instance>> = SpinMutex::with_rank(None, RANK_DEVICE);
+
 /// Take the `/vibe` memory volume's image lock as a volume read does
 /// (`cross_cpu_cells_ranked`).
 pub(crate) fn probe_image() {
-    let _ = super::vibefs_init::probe_image_at(b"/vibe");
+    let v = VIBE_MEM.lock().clone();
+    if let Some(i) = v {
+        let _ = super::vibefs_init::probe_image_of(&i);
+    }
 }
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
@@ -1367,12 +1419,19 @@ pub(crate) const TESTS: &[Test] = &[
     test("vfs_backends_via_ops", test_vfs_backends_via_ops),
     test("vfs_fat_one_inode", test_vfs_fat_one_inode),
     test(
-        "fs_drop_slot_busy_keeps_slot",
-        test_fs_drop_slot_busy_keeps_slot,
-    )
-    .deadline(26_000),
+        "fs_drop_slot_waits_for_holder",
+        test_fs_drop_slot_waits_for_holder,
+    ),
     test("fat_vda_16k_stack", fat_vda_16k_stack)
         .deadline(30_000)
         .opt_in()
         .once(),
+    test(
+        "vfs_unlink_drops_parent_dentry",
+        test_vfs_unlink_drops_parent_dentry,
+    ),
+    test("vfs_user_dev_nodes", test_vfs_user_dev_nodes),
+    test("fat_initrd_dev_no_null", test_fat_initrd_dev_no_null),
+    test("vfs_io_off_lock", test_vfs_io_off_lock),
+    test("fat_vol_wait_no_eio", test_fat_vol_wait_no_eio).deadline(60_000),
 ];
