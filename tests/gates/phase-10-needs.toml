@@ -1138,3 +1138,19 @@ needs = [
   "the §10.4 wake inbox's push",  # L1434
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1487
+[[box]]
+key = "virtio-blk negotiates `F_RO`: a write"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1488
+[[box]]
+key = "a virtio-blk request that exhausts"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
