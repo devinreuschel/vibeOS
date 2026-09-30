@@ -23,6 +23,7 @@ mod ipi;
 pub(crate) mod mmu;
 pub mod percpu;
 pub mod pic;
+pub mod power;
 mod trampoline;
 pub(crate) mod uaccess;
 

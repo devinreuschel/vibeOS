@@ -1005,7 +1005,7 @@ limitations.
 - [x] a dispatch table indexed by number, with an arity and a validation policy per entry, that syscall dispatch reads, each declared pointer argument checked by its handler where it first copies through it, after Linux's earlier checks (SYSCALL.md §3) (F150)
 - [x] first set wired for proof: `write`, `exit`, `getpid`, `sched_yield`
 - [x] remainder: `read`, `open`, `close`, `lseek`, `fork`, `execve`, `wait4`, `getppid`, `dup`, `dup2`, `kill`, `fcntl`
-- [ ] `brk`, anonymous `mmap`/`munmap`, `getdents64`, `fstat`, and `nanosleep`; lands in §10.5
+- [x] `brk`, anonymous `mmap`/`munmap`, `getdents64`, `fstat`, and `nanosleep`
 - [ ] `openat`, `dup3`, and fork-shaped `clone`; lands in §11.6
 - [ ] `stat` and the rest of the POSIX floor; lands in §13.9
 - [x] errno numbers equal Linux's for every name the `KError` table (`vibeos::kerror`) defines (F083)
@@ -1367,9 +1367,9 @@ the work its claim rests on has landed is the failure KERNEL_REVIEW.md §5 found
 - [ ] `execve` copies the caller's `envp` strings onto the new image's initial stack after `argv`, so the crate's environment parsing sees them; today `sys_execve` discards `envp` and `user_init::fill_stack` passes an empty one; a `/bin/tests` case execs a program with the environment `K=v`, and the program exits 0 only when its environment holds `K=v`; `argv` and `envp` take Linux's limits, as execve(2) states them, instead of today's 15 entries of at most 255 bytes: a string longer than `MAX_ARG_STRLEN` (131,072 bytes with its NUL) returns `E2BIG`, and so do strings and pointers together over max(128 KiB, min(`RLIMIT_STACK` / 4, 6 MiB)), with `RLIMIT_STACK` at Linux's 8 MiB default until §13.9's `setrlimit`; both are copied through per-call buffers from §10.4's `kalloc`, so a failed allocation returns `ENOMEM`, and the initial stack is sized to hold them; an empty `argv` starts the image with `argc` 1 and an empty `argv[0]`, as Linux does. SYSCALL.md §2 and §3.1 describe the limits and the empty `argv` as built in the same commit. `/bin/tests` execs a program with 10,000 one-byte arguments, which runs; one with an argument of 131,071 bytes, which runs, and one of 131,072 bytes, which gets `E2BIG`; and one with an empty `argv`, which finds `argc` 1 and `argv[0]` empty
 - [x] `elf::parse` host tests also cover checked-in static binaries linked by `ld.lld` and by GNU `ld`
 - [x] `brk` and anonymous `mmap`/`munmap`, eagerly backed for now; Phase 12 makes them lazy without changing the interface
-- [ ] `getdents64`, `fstat`, and `nanosleep`, which `ls` and `sleep` below need; the rest of the floor stays in §13.9
-- [ ] `reboot` (power off and restart), so the user `/bin/sh` keeps the `poweroff` and `reboot` the Phase 5 kernel shell had; x86_64 uses the ACPI and reset paths, and §11.4 puts PSCI behind the same call
-- [ ] an allocator over `brk`, so `alloc` works in userspace
+- [x] `getdents64`, `fstat`, and `nanosleep`, which `ls` and `sleep` below need; the rest of the floor stays in §13.9
+- [x] `reboot` (power off and restart), so the user `/bin/sh` keeps the `poweroff` and `reboot` the Phase 5 kernel shell had; x86_64 uses the ACPI and reset paths, and §11.4 puts PSCI behind the same call
+- [x] an allocator over `brk`, so `alloc` works in userspace
 - [ ] `utest_ok` / `utest_fail` / `utest_skip` on serial, asserted by `tests/harness` like the `ktest_*` protocol in `make test-e2e`, `make test-e2e-uefi`, `make test-e2e-pit`, and `make test-e2e-highmem`, where `/bin/tests` runs as a forked child of `/sbin/init`; a failing user test fails `make test`; the `utest_*` lines carry §10.2's `begin` and `run` lines and `tests/harness/skips.toml` rows, and the harness gives them the §10.2 count and progress deadline, the only deadline a user test has (F073)
 - [ ] `/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello` rewritten in the crate; the assembly sources and `mkuserelf.py` deleted
 - [ ] a signal cannot kill or stop pid 1: `sys_kill` to pid 1 delivers only signals init has a handler for, as Linux does, so none until §13.8's `rt_sigaction`; `/bin/tests` sends `SIGKILL` to pid 1, and the boot still reaches `shell ready` (F068)

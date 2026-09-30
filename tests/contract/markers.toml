@@ -1225,6 +1225,24 @@ arch = "both"
 source = "kernel"
 section = "§10.4"
 
+# §10.5 User runtime
+
+# The `reboot` syscall's line before it powers the machine off or restarts
+# it (`make test-e2e-power`).
+[[marker]]
+text = "vibeOS: reboot: power off"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: reboot: restart"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.5"
+
 # §10.6 Entry paths and user memory
 
 # The AP trampoline page `boot::capture` chose from the memory map, before
