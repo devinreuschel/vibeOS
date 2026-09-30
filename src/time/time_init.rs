@@ -20,6 +20,7 @@ use crate::arch::current::{Arch, interrupts_enabled, wait_for_interrupt};
 use crate::arch::x86_64::{has_rdtscp, invariant_tsc, rdtsc_ser};
 use crate::cell::BootCell;
 use crate::paging_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 const HPET_GEN_CFG: u64 = 0x10;
@@ -77,6 +78,7 @@ fn publish_ns(n: u64) -> u64 {
     monotonic_max(&LAST_NS, n)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn io_wait() {
     // SAFETY: invariant I229, established at `time::time_init::init`: port
     // 0x80 is the delay port, a write to it has no effect any module
@@ -198,6 +200,7 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
 }
 
 /// Channel 2 one-shot, gated through 0x61. Does not touch channel 0.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
     // SAFETY: invariant I229, established at `time::time_init::init`: the
     // PIT and port 0x61 are this module's, and channel 2 feeds only this
@@ -230,6 +233,7 @@ pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
     tsc_per_ms_from_pit(t1.wrapping_sub(t0), PIT_CALIB_COUNT)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn program_pit_ch0() {
     for &(port, val) in PIT_CH0_WRITES {
         // SAFETY: invariant I229, established at `time::time_init::init`:
@@ -238,6 +242,7 @@ fn program_pit_ch0() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rtc_reg(reg: u8) -> u8 {
     // SAFETY: invariant I229, established at `time::time_init::init`: CMOS
     // is this module's, so no one else moves the index between the writes.
@@ -430,6 +435,7 @@ pub fn busy_wait_ms(ms: u64) {
 }
 
 /// Master PIC EOI. Used by the PIT gate after `on_pit_tick`.
+#[cfg(target_arch = "x86_64")]
 pub fn eoi_pit() {
     // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
     // the master 8259's EOI, which the IRQ0 path writes directly, is the
@@ -494,8 +500,11 @@ pub unsafe fn init() {
         });
     }
     // Re-enable NMI after CMOS index bit 7.
+    #[cfg(target_arch = "x86_64")]
     // SAFETY: invariant I229, established here: CMOS is this module's.
-    unsafe { x86::outb(RTC_INDEX, 0x0D) };
+    unsafe {
+        x86::outb(RTC_INDEX, 0x0D);
+    }
 
     crate::marker!("vibeOS: time: calibrated {} {}/ms", source.as_str(), per_ms);
     crate::marker!("vibeOS: time: tsc {}/ms", per_ms);

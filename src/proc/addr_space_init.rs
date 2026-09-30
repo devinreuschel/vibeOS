@@ -307,7 +307,7 @@ pub(crate) mod testing {
 enum RootHolder {
     /// CPU `cpu` has it loaded (CR3; TTBR0 on aarch64), or last recorded
     /// loading it.
-    Cr3 { cpu: u32 },
+    Loaded { cpu: u32 },
     /// That thread's `Tcb.as_cr3` names it.
     Tcb(ThreadId),
 }
@@ -315,7 +315,7 @@ enum RootHolder {
 impl fmt::Debug for RootHolder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RootHolder::Cr3 { cpu } => write!(f, "Cr3 {{ cpu: {cpu} }}"),
+            RootHolder::Loaded { cpu } => write!(f, "Loaded {{ cpu: {cpu} }}"),
             RootHolder::Tcb(id) => write!(f, "Tcb({})", id.0),
         }
     }
@@ -334,7 +334,7 @@ fn root_holder(root: u64) -> Option<RootHolder> {
         )
     };
     if live == root {
-        return Some(RootHolder::Cr3 { cpu: here });
+        return Some(RootHolder::Loaded { cpu: here });
     }
     let mut id = 0u32;
     while (id as usize) < per_cpu_init::cpu_count() {
@@ -342,7 +342,7 @@ fn root_holder(root: u64) -> Option<RootHolder> {
             let loaded = r.as_cr3.load(Ordering::Acquire);
             // A recorded root is a table address, as `load_cr3_u64` stores it.
             if loaded != 0 && loaded == root {
-                return Some(RootHolder::Cr3 { cpu: id });
+                return Some(RootHolder::Loaded { cpu: id });
             }
         }
         id += 1;

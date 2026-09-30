@@ -73,6 +73,7 @@ fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cf8_read32(bdf: Bdf, offset: u16) -> u32 {
     let addr = pci::cf8_addr(bdf.bus, bdf.device, bdf.function, offset);
     // SAFETY: invariant: ports 0xCF8 and 0xCFC are the PCI type-1 config
@@ -85,6 +86,7 @@ fn cf8_read32(bdf: Bdf, offset: u16) -> u32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
     let addr = pci::cf8_addr(bdf.bus, bdf.device, bdf.function, offset);
     // SAFETY: as in `cf8_read32`; established by `pci_init::with_cfg`.

@@ -794,6 +794,7 @@ pub fn halt_if_idle() {
     loop {
         // SAFETY: `cli` touches only IF; the `sti` below or the idle loop's
         // next pass turns it back on; established here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("cli", options(nostack, preserves_flags));
         }
@@ -801,6 +802,7 @@ pub fn halt_if_idle() {
         if !per_cpu_init::current().runq.is_empty() {
             // SAFETY: `sti` restores the IF=1 this idle loop runs with;
             // established here.
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 core::arch::asm!("sti", options(nostack, preserves_flags));
             }
@@ -809,6 +811,7 @@ pub fn halt_if_idle() {
         // SAFETY: `sti; hlt` as one pair: the interrupt shadow keeps a
         // wake-up IPI from landing between them (DESIGN §7.8); established
         // here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
         }
@@ -916,7 +919,7 @@ pub fn spawn_user(
     name: &'static str,
     entry: fn(),
     pid: u32,
-    cr3: u64,
+    root: u64,
     frame: &UserFrame,
 ) -> Result<ThreadHandle, SpawnError> {
     let h = spawn_inner(
@@ -926,7 +929,7 @@ pub fn spawn_user(
         false,
         0,
         pid,
-        cr3,
+        root,
         DEFAULT_STACK_PAGES,
     )?;
     let tramp = trampoline as *const () as u64;
@@ -1404,11 +1407,11 @@ pub fn current_pid() -> u32 {
     }
 }
 
-pub fn set_pid_cr3(id: ThreadId, pid: u32, cr3: u64) {
+pub fn set_pid_cr3(id: ThreadId, pid: u32, root: u64) {
     with_sched(|s| {
         if let Some(t) = s.get_mut(id) {
             t.pid = pid;
-            t.as_cr3 = cr3;
+            t.as_cr3 = root;
         }
     });
 }

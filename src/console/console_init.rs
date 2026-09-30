@@ -101,12 +101,14 @@ fn wait_key_loop() -> DecodedKey {
         }
         // SAFETY: `cli` only changes IF, which this wait loop owns: it holds no
         // lock and no `InterruptGuard` here; established here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("cli", options(nostack, preserves_flags));
         }
         if let Some(k) = read() {
             // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
             // lock and no `InterruptGuard` here; established here.
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 core::arch::asm!("sti", options(nostack, preserves_flags));
             }
@@ -115,6 +117,7 @@ fn wait_key_loop() -> DecodedKey {
         if !per_cpu_init::current().runq.is_empty() {
             // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
             // lock and no `InterruptGuard` here; established here.
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 core::arch::asm!("sti", options(nostack, preserves_flags));
             }
@@ -126,6 +129,7 @@ fn wait_key_loop() -> DecodedKey {
         // SAFETY: `sti; hlt` only enables interrupts and halts until one
         // arrives, and `sti`'s one-instruction shadow keeps a wake-up IRQ from
         // landing before the `hlt`; this loop holds no lock; established here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
         }

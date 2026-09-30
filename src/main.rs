@@ -90,6 +90,7 @@ mod time;
 mod ktest;
 
 use acpi::acpi_init;
+#[cfg(target_arch = "x86_64")]
 use arch::x86_64::{apic_init, cpu as x86};
 use block::{block_init, cache_init, part_init};
 use console::{console_init, fb_init, kbd_init};
@@ -434,6 +435,7 @@ extern "C" fn boot_rest() -> ! {
 }
 
 #[cfg(feature = "gp_test")]
+#[cfg(target_arch = "x86_64")]
 fn gp_test_trip() {
     crate::marker!("vibeOS: boot: gp-test armed");
     // Kernel code selector with RPL=3 into DS: not a data segment, #GP.

@@ -19,6 +19,7 @@ use vibeos::limits::MAX_BOOT_MODULES;
 use vibeos::log::Level;
 use vibeos::paging::HHDM_BASE;
 
+#[cfg(target_arch = "x86_64")]
 pub mod fw_cfg_init;
 
 #[cfg(feature = "kernel_tests")]

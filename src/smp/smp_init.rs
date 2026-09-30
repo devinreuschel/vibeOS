@@ -32,6 +32,7 @@ use crate::log::trace_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 unsafe extern "C" {
@@ -160,6 +161,7 @@ fn install_blob(page: u64) -> bool {
     true
 }
 
+#[cfg(target_arch = "x86_64")]
 fn patch_params(page: u64, cr3: u64, stack_top: u64, entry: u64, idt_limit: u16, idt_base: u64) {
     // SAFETY: `write_u64`'s contract; `page` is the trampoline page, each
     // `PARAM_*` offset plus 8 lies inside it, and `start_one` patches before
@@ -368,6 +370,7 @@ fn report_tsc_warp() {
 
 /// Start the AP `a` describes from trampoline page `page` and wait for it.
 /// Every failure prints its line and frees what `a` holds.
+#[cfg(target_arch = "x86_64")]
 fn start_one(a: ApAlloc, page: u64) {
     let cpu_id = a.cpu_id;
     let apic_id = a.apic_id;
@@ -455,6 +458,7 @@ fn start_one(a: ApAlloc, page: u64) {
     crate::marker!(marker::SMP_AP_ONLINE);
 }
 
+#[cfg(target_arch = "x86_64")]
 extern "C" fn ap_entry() -> ! {
     x86::cli();
     // GS is still 0. IrqCell.with / InterruptGuard would `gs:[0]` via
@@ -538,7 +542,7 @@ pub unsafe fn init() {
     // page. Kernel invariant: boot runs on the bootstrap thread's KVA stack
     // (`thread_init::init_bootstrap`), outside the window.
     let window = crate::paging_init::identity_window();
-    let rsp = x86::read_rsp();
+    let rsp = crate::arch::current::stack_pointer();
     assert!(
         !window.contains(&rsp),
         "smp: rsp {rsp:#x} in the identity window"

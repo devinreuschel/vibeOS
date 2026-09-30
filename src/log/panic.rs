@@ -18,6 +18,7 @@ use vibeos::symtab;
 
 use crate::per_cpu_init;
 use crate::serial::{self, Serial};
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 unsafe extern "C" {
@@ -103,6 +104,7 @@ fn hex(w: &mut StackBuf<'_>, n: u64) {
     w.push_bytes(fmt_util::write_hex(n, &mut b));
 }
 
+#[cfg(target_arch = "x86_64")]
 fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
     dump_line(|w| {
         w.push_bytes(b"vibeOS: regs: rbp=0x");
@@ -233,10 +235,13 @@ fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
 fn panic(info: &PanicInfo) -> ! {
     #[cfg(feature = "kernel_tests")]
     crate::arch::catch::on_panic();
-    let rip = x86::read_rip();
-    let rbp = x86::read_rbp();
-    let rsp = x86::read_rsp();
-    let rflags = x86::rflags();
+    #[cfg(target_arch = "x86_64")]
+    let (rip, rbp, rsp, rflags) = (
+        x86::read_rip(),
+        x86::read_rbp(),
+        x86::read_rsp(),
+        x86::rflags(),
+    );
     begin_dump();
 
     Serial::write_line(marker::PANIC_BANNER.as_bytes());
@@ -267,6 +272,7 @@ fn write_where(info: &PanicInfo) -> core::fmt::Result {
 }
 
 /// ` rip=0x.. cs=0x.. rflags=0x.. rsp=0x.. ss=0x..[ err=0x..][ cr2=0x..]`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn frame_fields(
     w: &mut StackBuf<'_>,
     frame: &InterruptFrame,
@@ -293,6 +299,7 @@ pub(crate) fn frame_fields(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn exception_halt(
     kind: &[u8],
     frame: &InterruptFrame,
@@ -309,6 +316,7 @@ pub fn exception_halt(
     finish();
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn exception_vec(n: u8, frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>) -> ! {
     begin_dump();
     dump_line(|w| {
