@@ -15,6 +15,35 @@ The routing rule: if it can be a host test, it must be. Pushing logic into the l
 crate so it becomes host-testable is the highest-leverage thing available, and the old tree's biggest
 weakness was that nearly everything lived behind `main.rs` and was therefore untestable.
 
+**Loom models.** ROADMAP §10.8's loom models run the kernel's own `vibeos-core` primitives under
+`--cfg loom`, where `vibeos::atomic` is loom's, and check every interleaving up to the bound each
+model states. Each is a `#[cfg(all(test, loom))]` unit test named `loom_*` in a `loom_models` module
+beside its primitive. Each model has a variant that weakens one ordering or moves one step at a
+named `vibeos::sync::variant::Site`, whose code outside `cfg(loom)` is always the kernel's; the
+variant is a `should_panic` test, named `_fails`, that passes only when loom finds the failure. The
+bound is set in code through `variant::check`, so the `LOOM_MAX_*` environment cannot shrink it; the
+first two models below take `LOOM_MAX_PREEMPTIONS`, which `make models-quick` sets to 3. Where a
+model cannot run a kernel-half step (`switch_context`'s saves, `wake_all` under `SCHED`,
+`dmesg_write`'s loop), it writes a loom `UnsafeCell` witness in its place.
+
+| Primitive (file under `crates/core/src/`) | Base test | Variant test: the site it switches | Bound |
+|---|---|---|---|
+| `TryArc` count (`kalloc.rs`) | `loom_tryarc_count` | `loom_tryarc_count_relaxed_dec_fails`: `TryArcDecrement`, the put decrements Relaxed | 3 threads, `LOOM_MAX_PREEMPTIONS` |
+| `OpGate` (`sync/mod.rs`) | `loom_opgate` | `loom_opgate_check_first_fails`: `OpGateCountFirst`, `enter` reads the dead mark first | 2 threads, `LOOM_MAX_PREEMPTIONS` |
+| `TickClock` latch (`time/mod.rs`) | `loom_seqlock_latch`: pairs whose words all derive from one number, so a mixed read fails `seqlock: torn read` | `loom_seqlock_acqrel_bump_tears_fails`: `SeqlockBumpAcqRel`, the bump is one AcqRel `fetch_add` with no fences; `loom_seqlock_no_leading_fence_tears_fails`: `SeqlockLeadingFence`, the bump drops its leading `fence(Release)` | 2 threads (1 write, 2 reads), 3 preemptions |
+| `WakeInbox` (`irq/ipi.rs`) | `loom_wake_inbox_three_pushers`: each slot delivered exactly once | `loom_wake_inbox_summary_first_loses_id_fails`: `InboxSummaryFirst`, push sets the summary bit first | 4 threads (3 pushes, 2 drains), 2 preemptions |
+| `IrqCell` over the log ring (`cell.rs`, `log/mod.rs`) | `loom_log_ring_writers_dmesg`: records whole, each writer's in order, none twice | `loom_log_ring_relaxed_unlock_races_fails`: `IrqCellUnlockRelaxed`, the unlock store is Relaxed | 3 threads (2 writers of 2 emits, 1 reader), 1 preemption |
+| `DoneWord` (`block/mod.rs`; model in `block/loom_models.rs`) | `loom_io_done_publish_last` | `loom_io_done_relaxed_races_fails`: `IoDoneRelaxed`, `publish` stores Relaxed | 2 threads, 3 preemptions |
+| `OnCpu` (`sched/thread.rs`) | `loom_on_cpu_handoff` | `loom_on_cpu_relaxed_clear_races_fails`: `OnCpuClearRelaxed`, `clear` stores Relaxed | 2 threads, 3 preemptions |
+
+`make models-quick`, part of `make check`, runs them all. By hand:
+
+```sh
+HOST=$(rustc -vV | sed -n 's/^host: //p')
+RUSTFLAGS="--cfg loom -D warnings" CARGO_TARGET_DIR=target/loom \
+  cargo test -p vibeos-core --lib --features std --target "$HOST" --release -- loom_
+```
+
 ## 8.1 Host unit tests
 
 Anything in `crates/core/src/lib.rs` and its submodules, compiled as `vibeos-core` on the host. No hardware
