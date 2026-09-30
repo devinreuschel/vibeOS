@@ -14,6 +14,7 @@ use vibeos::ipi::{MAX_IPI_CPUS, SHOOT_RANGES, ShootRange, all_acked, waiter_mask
 use vibeos::irq::stop::{self, CrashRegs, NmiAction, StopBudget, StopHow};
 use vibeos::log::Level;
 use vibeos::paging::VirtAddr;
+use vibeos::per_cpu::PerCpuRemote;
 use vibeos::thread::ThreadId;
 use vibeos::vectors;
 
@@ -447,15 +448,31 @@ pub fn stop_this_cpu(how: StopHow, regs: CrashRegs) -> ! {
             )
             .is_ok()
         {
-            for (w, v) in r.crash.iter().zip(regs.to_words()) {
-                w.store(v, Ordering::Relaxed);
-            }
+            write_slot(r, regs);
             // Release: the acknowledgement is this CPU's last store; the
             // owner reads the slot after it with Acquire (AGENTS.md rule 5).
             r.stopped.store(how.code(), Ordering::Release);
         }
     }
     current::halt();
+}
+
+/// Store `regs` in `r`'s crash-register slot (`irq::stop::CRASH_*`).
+fn write_slot(r: &PerCpuRemote, regs: CrashRegs) {
+    for (w, v) in r.crash.iter().zip(regs.to_words()) {
+        w.store(v, Ordering::Relaxed);
+    }
+}
+
+/// The dump owner's slot save: its own entry registers, without stopping
+/// it, so the core tool walks the owner from where the dump began, as it
+/// walks each stopped CPU from its slot (ROADMAP §10.7). Nothing on the
+/// live system reads the owner's slot (`cpu_stop_state` names only how the
+/// others stopped). IF=0 callers only: the dump's owner.
+pub fn save_crash_regs(regs: CrashRegs) {
+    if let Some(r) = per_cpu_init::cpu(my_index() as u32) {
+        write_slot(r, regs);
+    }
 }
 
 /// The raw serial layer's stop hook: a serial write or log append on a CPU

@@ -67,6 +67,7 @@ from tests.harness.harness import (
     HarnessError,
     QemuConfig,
     RunResult,
+    core_report,
     serial_tail,
 )
 
@@ -722,10 +723,13 @@ class Session:
                 save_run_files(d, argv, self.cfg.iso)
                 self.core = take_core(self.qmp, d)
                 note = f"\n--- guest core: {self.core} ---"
+                result.report = core_report(self.core, d / "kernel.elf")
             except (HarnessError, OSError) as e:
                 note = f"\n--- guest core not taken: {e} ---"
         self._quit(source)
-        raise HarnessError(msg + note)
+        # The message ends in the serial tail its caller built; the core
+        # tool's report follows it (`harness.failure_tail`'s order).
+        raise HarnessError(msg + note + result.report)
 
     def _quit(self, source: _Source) -> None:
         if self.qmp is not None:

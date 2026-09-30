@@ -390,6 +390,8 @@ extern "C" fn boot_rest() -> ! {
     unsafe { smp_init::init() };
     time_init::confirm_clocksource();
     diag::cpus();
+    #[cfg(feature = "hang_test")]
+    crate::smp::hang_test::arm();
 
     // DESIGN §3.3 live: after smp: done. Handler, 8042, then unmask IRQ1.
     crate::console_init::init();

@@ -783,7 +783,7 @@ source = "kernel"
 section = "§5.3"
 order = 260
 name = "console_ok"
-when = ["!panic_test"]
+when = ["!panic_test", "!hang_test"]
 
 # The console-input boot's replies, typed on COM1 and through PS/2.
 [[marker]]
@@ -863,7 +863,7 @@ source = "kernel"
 section = "§6.2"
 order = 270
 name = "pci_devices"
-when = ["!panic_test"]
+when = ["!panic_test", "!hang_test"]
 
 # One scan line per function: `lspci`'s form.
 [[marker]]
@@ -936,7 +936,7 @@ source = "kernel"
 section = "§7.1"
 order = 280
 name = "block_ramdisk"
-when = ["!panic_test"]
+when = ["!panic_test", "!hang_test"]
 
 # Every device's line, `vda` and the partition children included.
 [[marker]]
@@ -1001,7 +1001,7 @@ source = "kernel"
 section = "§7.3"
 order = 290
 name = "block_ram0p1"
-when = ["!panic_test"]
+when = ["!panic_test", "!hang_test"]
 
 [[marker]]
 text = "vibeOS: block: ram0p2 <n> sectors"
@@ -1011,7 +1011,7 @@ source = "kernel"
 section = "§7.3"
 order = 300
 name = "block_ram0p2"
-when = ["!panic_test"]
+when = ["!panic_test", "!hang_test"]
 
 # §7.4 Cache
 
@@ -1071,7 +1071,7 @@ source = "user"
 section = "§9.8"
 order = 330
 name = "shell_ready"
-when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test"]
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test"]
 
 # `/bin/tests`' lines.
 [[marker]]
@@ -1091,7 +1091,7 @@ source = "user"
 section = "§9.8"
 order = 320
 name = "user_tests_ok"
-when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test"]
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test"]
 
 [[marker]]
 text = "user: tests fail"
@@ -1444,6 +1444,19 @@ section = "§10.7"
 order = 350
 name = "panic_stop_armed"
 when = ["panic_stop_test", "!panic_test"]
+
+# The hang_test build's hang (TESTING.md §8.3): once `smp: done` and the
+# clocksource line, one CPU holds a spinlock and every CPU spins with IF=0,
+# so its contract ends here and the forensics tier takes a core.
+[[marker]]
+text = "vibeOS: hang_test: armed"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+order = 360
+name = "hang_test_armed"
+when = ["hang_test", "!panic_test"]
 
 # The panic-stop build's CPU 2 prints these until the dump stops it.
 [[marker]]
