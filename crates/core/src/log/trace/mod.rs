@@ -883,9 +883,9 @@ pub const fn traced_vector(v: u8) -> Option<Event> {
 
 /// The dispatcher's entry tracepoint, after the stub's GS decision.
 #[inline]
-pub fn trap_enter(v: u8, cr2: u64, error_code: u64) {
+pub fn trap_enter(v: u8, fault_addr: u64, error_code: u64) {
     match traced_vector(v) {
-        Some(Event::PageFault) => emit(Event::PageFault, cr2, error_code),
+        Some(Event::PageFault) => emit(Event::PageFault, fault_addr, error_code),
         Some(Event::IrqEnter) => emit(Event::IrqEnter, u64::from(v), 0),
         _ => {}
     }

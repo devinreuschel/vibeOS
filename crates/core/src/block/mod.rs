@@ -9,6 +9,10 @@
 //! - The queue orders nothing on its own. A caller that needs one write
 //!   durable or visible before another starts waits for its completion
 //!   first. There is no fence op.
+//! - One order it keeps: [`Queue::pick`] never dispatches a write or
+//!   discard while an older write or discard to an overlapping range is
+//!   queued or in flight, and a merge never carries a newer one past it.
+//!   Reads stay unordered.
 //! - [`Op::Flush`] makes durable every write whose completion was reported
 //!   before the `Flush` was submitted. [`Queue::pick`] returns a queued
 //!   `Flush` before any read, write, or discard, whatever is in flight, and
@@ -42,6 +46,10 @@ use crate::fmt_util;
 pub const DEFAULT_BLOCK_SIZE: u32 = 512;
 pub const DEFAULT_RETRY_BUDGET: u8 = 3;
 pub const MAX_QUEUE: usize = 32;
+/// Requests a failing driver takes off its queue per [`Queue::drain`]
+/// round, which keeps its on-stack batch within DESIGN §4.5's frame
+/// budget.
+pub const DRAIN_BATCH: usize = 8;
 pub const MAX_SEGS: usize = 8;
 pub use crate::limits::MAX_BLOCKDEVS;
 
@@ -59,6 +67,24 @@ pub enum BlockError {
     Gone,
     /// A device of that name or id is already registered.
     Exists,
+    /// A write or discard to a read-only device (virtio-blk `F_RO`). Not
+    /// retried: the device refuses every such request.
+    ReadOnly,
+}
+
+/// A block request's errno: Linux's for each condition.
+impl From<BlockError> for crate::kerror::KError {
+    fn from(e: BlockError) -> Self {
+        match e {
+            BlockError::Inval => Self::Inval,
+            BlockError::Io | BlockError::Failed => Self::Io,
+            BlockError::QueueFull => Self::Again,
+            BlockError::NoMem => Self::NoMem,
+            BlockError::Gone => Self::NoDev,
+            BlockError::Exists => Self::Exist,
+            BlockError::ReadOnly => Self::RoFs,
+        }
+    }
 }
 
 impl BlockError {
@@ -71,6 +97,7 @@ impl BlockError {
             BlockError::NoMem => "no memory",
             BlockError::Gone => "gone",
             BlockError::Exists => "exists",
+            BlockError::ReadOnly => "read-only",
         }
     }
 
@@ -134,6 +161,12 @@ impl Op {
     pub fn needs_buf(self) -> bool {
         matches!(self, Op::Read | Op::Write)
     }
+
+    /// A write or a discard: it changes the media, so it keeps its order
+    /// against an older overlapping one (module docs).
+    pub fn writes_media(self) -> bool {
+        matches!(self, Op::Write | Op::Discard)
+    }
 }
 
 /// A disk driver's operations, which its `blockdev::BlockRef` owns; a
@@ -170,6 +203,11 @@ impl Bio {
     pub fn end_lba(self) -> u64 {
         self.lba.saturating_add(self.nsect as u64)
     }
+
+    /// Both ranges share a sector.
+    pub fn overlaps(self, other: Bio) -> bool {
+        self.lba < other.end_lba() && other.lba < self.end_lba()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,7 +226,7 @@ pub struct Request {
     pub segs: [Seg; MAX_SEGS],
     pub nseg: u8,
     pub retries_left: u8,
-    pub seq: u32,
+    pub seq: u64,
     /// Caller cookies (kernel: `IoWaiter` pointers). 0 = none.
     pub waiters: [usize; MAX_SEGS],
     pub nwait: u8,
@@ -359,10 +397,6 @@ enum FlightState {
 #[derive(Clone, Copy, Debug)]
 struct Flight {
     seq: u64,
-    #[allow(
-        dead_code,
-        reason = "the overlapping-write order reads it (ROADMAP §10.11, F043)"
-    )]
     bio: Bio,
     emulated_fua: bool,
     state: FlightState,
@@ -375,7 +409,7 @@ struct Flight {
 pub struct Queue {
     slots: [Option<Request>; MAX_QUEUE],
     n: usize,
-    next_seq: u32,
+    next_seq: u64,
     last_lba: u64,
     /// Dispatches not yet retired by `complete`, `abort`, or `requeue`.
     flights: [Option<Flight>; MAX_QUEUE],
@@ -420,9 +454,46 @@ impl Queue {
         n
     }
 
+    /// A write or discard that overlaps a write or discard in flight, or
+    /// a queued one with a smaller seq, waits (module docs).
+    fn blocked(&self, r: &Request) -> bool {
+        if !r.bio.op.writes_media() {
+            return false;
+        }
+        let mut i = 0usize;
+        while i < MAX_QUEUE {
+            if let Some(f) = self.flights[i]
+                && f.state == FlightState::Dispatched
+                && f.bio.op.writes_media()
+                && f.bio.overlaps(r.bio)
+            {
+                return true;
+            }
+            if let Some(q) = self.slots[i]
+                && q.seq < r.seq
+                && q.bio.op.writes_media()
+                && q.bio.overlaps(r.bio)
+            {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// A write or discard that overlaps a queued or in-flight write or
+    /// discard does not merge: the merge keeps the smaller seq, which
+    /// would carry it past an older one it overlaps.
     fn try_merge(&mut self, req: &Request) -> bool {
         if !req.bio.op.can_merge() {
             return false;
+        }
+        if req.bio.op.writes_media() {
+            let mut probe = *req;
+            probe.seq = u64::MAX;
+            if self.blocked(&probe) {
+                return false;
+            }
         }
         let mut i = 0usize;
         while i < MAX_QUEUE {
@@ -450,8 +521,10 @@ impl Queue {
         Err(BlockError::QueueFull)
     }
 
-    fn fresh_seq(&mut self) -> u32 {
+    fn fresh_seq(&mut self) -> u64 {
         let seq = self.next_seq;
+        // 2^64 submissions do not happen in one boot, so seq order is
+        // submission order.
         self.next_seq = self.next_seq.wrapping_add(1);
         seq
     }
@@ -468,7 +541,7 @@ impl Queue {
             return Err(BlockError::QueueFull);
         }
         req.seq = self.fresh_seq();
-        crate::trace!(BlockSubmit, u64::from(req.seq), req.bio.lba);
+        crate::trace!(BlockSubmit, req.seq, req.bio.lba);
         if self.try_merge(&req) {
             return Ok(());
         }
@@ -525,7 +598,7 @@ impl Queue {
     /// Put a failed I/O back without a new seq. Retires its dispatch
     /// whether or not the queue takes it back.
     pub fn requeue(&mut self, req: Request) -> Result<(), BlockError> {
-        self.retire(u64::from(req.seq));
+        self.retire(req.seq);
         if self.failed {
             return Err(BlockError::Failed);
         }
@@ -561,13 +634,14 @@ impl Queue {
     }
 
     /// Next dispatchable request, recorded in the in-flight table. `None`
-    /// if idle or the table is full. An emulated-`Fua` write's `Flush`
-    /// first, then the lowest-seq queued [`Op::Flush`], then C-LOOK over
-    /// the rest.
+    /// if idle, the table is full, or every queued request waits for an
+    /// older overlapping write. An emulated-`Fua` write's `Flush` first,
+    /// then the lowest-seq queued [`Op::Flush`], then C-LOOK over the
+    /// rest that are not blocked.
     pub fn pick(&mut self) -> Option<Request> {
         if let Some((i, r)) = self.due_flush() {
             self.flights[i] = Some(Flight {
-                seq: u64::from(r.seq),
+                seq: r.seq,
                 bio: r.bio,
                 emulated_fua: false,
                 state: FlightState::Dispatched,
@@ -580,7 +654,7 @@ impl Queue {
             return None;
         }
         let free = self.flights.iter().position(Option::is_none)?;
-        let mut flush: Option<(u32, usize)> = None;
+        let mut flush: Option<(u64, usize)> = None;
         let mut best_fwd: Option<(u64, usize)> = None;
         let mut best_wrap: Option<(u64, usize)> = None;
         let mut i = 0usize;
@@ -591,7 +665,7 @@ impl Queue {
                         Some((s, _)) if r.seq >= s => {}
                         _ => flush = Some((r.seq, i)),
                     }
-                } else {
+                } else if !self.blocked(&r) {
                     let lba = r.bio.lba;
                     if lba >= self.last_lba {
                         match best_fwd {
@@ -620,7 +694,7 @@ impl Queue {
             r
         };
         self.flights[free] = Some(Flight {
-            seq: u64::from(r.seq),
+            seq: r.seq,
             bio: r.bio,
             emulated_fua: r.fua && !self.native_fua,
             state: FlightState::Dispatched,
@@ -633,7 +707,7 @@ impl Queue {
     /// Hand back every queued request, then each pending emulated-`Fua`
     /// `Flush`, up to `out.len()`. Callers loop until it returns 0 and
     /// complete waiters after dropping the lock.
-    pub fn drain(&mut self, out: &mut [Option<Request>; MAX_QUEUE]) -> usize {
+    pub fn drain(&mut self, out: &mut [Option<Request>]) -> usize {
         let mut n = 0usize;
         let mut i = 0usize;
         while i < MAX_QUEUE && n < out.len() {
@@ -977,6 +1051,90 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_write_waits_for_older() {
+        let mut q = Queue::new();
+        // C-LOOK from LBA 50 dispatches the writes at LBA 100 first.
+        q.last_lba = 50;
+        q.submit(wr(100, 1, 1)).unwrap();
+        q.submit(rd(0, 1, 2)).unwrap();
+        q.submit(wr(100, 1, 3)).unwrap();
+        let w1 = q.pick().unwrap();
+        assert_eq!(w1.segs[0].ptr, 1);
+        // The read goes while the first write is in flight; the second
+        // write waits for it.
+        let r = q.pick().unwrap();
+        assert_eq!(r.bio.op, Op::Read);
+        assert!(q.pick().is_none());
+        assert_eq!(q.complete(w1.seq), Completion::Report);
+        let w2 = q.pick().unwrap();
+        assert_eq!(w2.segs[0].ptr, 3);
+        assert!(w2.seq > w1.seq);
+    }
+
+    #[test]
+    fn merge_never_jumps_an_older_overlapping_write() {
+        let mut q = Queue::new();
+        q.submit(wr(102, 1, 1)).unwrap();
+        q.submit(wr(100, 1, 2)).unwrap();
+        // W[100..102) would front-merge into the seq-0 write at 102 and
+        // take its seq, older than the seq-1 write at 100 it overlaps.
+        q.submit(wr(100, 2, 3)).unwrap();
+        assert_eq!(q.len(), 3);
+        let a = q.pick().unwrap();
+        assert_eq!(a.segs[0].ptr, 2);
+        let b = q.pick().unwrap();
+        assert_eq!(b.segs[0].ptr, 1);
+        assert!(q.pick().is_none());
+        assert_eq!(q.complete(a.seq), Completion::Report);
+        let c = q.pick().unwrap();
+        assert_eq!(c.segs[0].ptr, 3);
+        assert!(c.seq > a.seq);
+        assert_eq!(q.complete(b.seq), Completion::Report);
+        assert_eq!(q.complete(c.seq), Completion::Report);
+        // A write that overlaps nothing still merges.
+        q.submit(wr(200, 1, 4)).unwrap();
+        q.submit(wr(201, 1, 5)).unwrap();
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn overlapping_discard_waits_for_older_write() {
+        let mut q = Queue::new();
+        q.submit(wr(100, 8, 1)).unwrap();
+        q.submit(Request::new(Op::Discard, 104, 8)).unwrap();
+        q.submit(rd(104, 1, 2)).unwrap();
+        q.submit(wr(110, 1, 3)).unwrap();
+        let w = q.pick().unwrap();
+        assert_eq!(w.segs[0].ptr, 1);
+        // The read is not ordered; the discard waits for the write, and
+        // the write after the discard waits for the discard.
+        assert_eq!(q.pick().unwrap().bio.op, Op::Read);
+        assert!(q.pick().is_none());
+        assert_eq!(q.complete(w.seq), Completion::Report);
+        let d = q.pick().unwrap();
+        assert_eq!(d.bio.op, Op::Discard);
+        assert!(q.pick().is_none());
+        q.abort(d.seq);
+        assert_eq!(q.pick().unwrap().segs[0].ptr, 3);
+    }
+
+    #[test]
+    fn seq_past_u32_max_keeps_order() {
+        let mut q = Queue::new();
+        q.next_seq = u64::from(u32::MAX);
+        q.submit(wr(100, 1, 1)).unwrap();
+        q.submit(wr(100, 1, 2)).unwrap();
+        let w1 = q.pick().unwrap();
+        assert_eq!(w1.segs[0].ptr, 1);
+        assert_eq!(w1.seq, u64::from(u32::MAX));
+        assert!(q.pick().is_none());
+        assert_eq!(q.complete(w1.seq), Completion::Report);
+        let w2 = q.pick().unwrap();
+        assert_eq!(w2.segs[0].ptr, 2);
+        assert_eq!(w2.seq, u64::from(u32::MAX) + 1);
+    }
+
+    #[test]
     fn flush_holds_up_no_later_request() {
         let mut q = Queue::new();
         q.submit(wr(3, 1, 1)).unwrap();
@@ -991,9 +1149,9 @@ mod tests {
         // The read is dispatched while the Flush is still in flight.
         assert_eq!(q.pick().unwrap().bio.op, Op::Read);
         assert_eq!(q.in_flight(), 3);
-        assert_eq!(q.complete(u64::from(f.seq)), Completion::Report);
+        assert_eq!(q.complete(f.seq), Completion::Report);
         assert!(q.pick().is_none());
-        assert_eq!(q.complete(u64::from(w.seq)), Completion::Report);
+        assert_eq!(q.complete(w.seq), Completion::Report);
         assert_eq!(q.in_flight(), 1);
     }
 
@@ -1007,14 +1165,14 @@ mod tests {
         assert!(q.pick().is_none());
         // The write completed, but it is not reported until a Flush sent
         // after that completion completes.
-        assert_eq!(q.complete(u64::from(w.seq)), Completion::Deferred);
+        assert_eq!(q.complete(w.seq), Completion::Deferred);
         let f = q.pick().unwrap();
         assert_eq!(f.bio.op, Op::Flush);
         assert_ne!(f.seq, w.seq);
         assert_eq!(f.nwait, 1);
         assert_eq!(f.waiters[0], 77);
         assert!(q.pick().is_none());
-        assert_eq!(q.complete(u64::from(f.seq)), Completion::Report);
+        assert_eq!(q.complete(f.seq), Completion::Report);
         assert_eq!(q.in_flight(), 0);
     }
 
@@ -1025,7 +1183,7 @@ mod tests {
         q.submit(wr(4, 1, 1).with_waiter(5).with_fua()).unwrap();
         let w = q.pick().unwrap();
         assert!(w.fua);
-        assert_eq!(q.complete(u64::from(w.seq)), Completion::Report);
+        assert_eq!(q.complete(w.seq), Completion::Report);
         assert!(q.pick().is_none());
         assert_eq!(q.in_flight(), 0);
     }
@@ -1035,7 +1193,7 @@ mod tests {
         let mut q = Queue::new();
         q.submit(wr(4, 1, 1).with_fua()).unwrap();
         let w = q.pick().unwrap();
-        q.abort(u64::from(w.seq));
+        q.abort(w.seq);
         assert!(q.pick().is_none());
         assert_eq!(q.in_flight(), 0);
     }
@@ -1066,7 +1224,7 @@ mod tests {
         q.submit(wr(4, 1, 1).with_waiter(9).with_fua()).unwrap();
         let w = q.pick().unwrap();
         q.submit(rd(0, 1, 2)).unwrap();
-        assert_eq!(q.complete(u64::from(w.seq)), Completion::Deferred);
+        assert_eq!(q.complete(w.seq), Completion::Deferred);
         let mut out = [None; MAX_QUEUE];
         assert_eq!(q.drain(&mut out), 2);
         assert_eq!(out[0].unwrap().bio.op, Op::Read);
@@ -1089,7 +1247,7 @@ mod tests {
         let again = q.pick().unwrap();
         assert_eq!(again.seq, w.seq);
         assert_eq!(q.in_flight(), 1);
-        assert_eq!(q.complete(u64::from(again.seq)), Completion::Report);
+        assert_eq!(q.complete(again.seq), Completion::Report);
         assert_eq!(q.in_flight(), 0);
         // An unknown seq is a report, never a panic.
         assert_eq!(q.complete(12345), Completion::Report);

@@ -16,7 +16,6 @@ use crate::ktest::{
 };
 use crate::kva_init;
 use crate::proc_init::testing as proc_testing;
-use crate::x86;
 
 pub(crate) fn test_fb_bgrx_roundtrip() -> Outcome {
     if !crate::fb_init::ready() {
@@ -368,7 +367,7 @@ fn console_if_off_write() -> Outcome {
         return Outcome::Fail("cursor cell off screen");
     };
     {
-        let _g = x86::InterruptGuard::enter();
+        let _g = crate::arch::current::InterruptGuard::enter();
         fb_init::write(b"Z");
     }
     if get_pixel(x, y) != Some(bg) {

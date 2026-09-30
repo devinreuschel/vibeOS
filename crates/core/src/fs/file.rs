@@ -151,7 +151,7 @@ impl Vfs {
             .files
             .iter()
             .position(|f| !f.used)
-            .ok_or(FsError::NoSpace)?;
+            .ok_or(FsError::NFile)?;
         let mrefs = self.mounts[mount as usize]
             .refs
             .checked_add(1)
@@ -224,7 +224,7 @@ impl Vfs {
     fn read_begin(&mut self, id: FileId) -> Result<(Call, u64), FsError> {
         let f = self.files[self.file_slot(id)?];
         if !f.flags.reads() {
-            return Err(FsError::Inval);
+            return Err(FsError::Badf);
         }
         Ok((self.call(f.islot)?, f.offset))
     }
@@ -257,7 +257,7 @@ impl Vfs {
     fn write_begin(&mut self, id: FileId) -> Result<(Call, u64, bool), FsError> {
         let f = self.files[self.file_slot(id)?];
         if !f.flags.writes() {
-            return Err(FsError::Inval);
+            return Err(FsError::Badf);
         }
         if self.inodes[f.islot as usize].kind == InodeKind::Dir {
             return Err(FsError::IsDir);
@@ -490,8 +490,14 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         Ok(n)
     }
 
+    /// Move open file `f`'s offset, when its inode can seek (`check_seek`).
     pub fn seek(&self, f: &FileRef, pos: SeekFrom) -> Result<u64, FsError> {
-        self.with(|v| v.file_seek(f.id, pos))
+        let mut c = self.with(|v| v.file_islot(f.id).and_then(|i| v.call(i)))?;
+        let r = c.run(|o, cx, n| o.check_seek(cx, n));
+        self.step(|v| {
+            v.finish(c, false);
+            r.and_then(|()| v.file_seek(f.id, pos))
+        })
     }
 
     pub fn stat(&self, f: &FileRef) -> Result<Stat, FsError> {

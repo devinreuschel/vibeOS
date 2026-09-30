@@ -221,14 +221,14 @@ pub fn wait_window_held() -> bool {
 pub(super) fn window_enter() -> Option<WindowGuard> {
     let armed = WINDOW_TID.load(Ordering::Acquire);
     (armed != u32::MAX && armed == super::current_id().raw()).then(|| WindowGuard {
-        _irq: crate::x86::InterruptGuard::enter(),
+        _irq: crate::arch::current::InterruptGuard::enter(),
     })
 }
 
 /// [`window_enter`]'s guard: on drop it runs [`wait_window`], then turns
 /// IF back on.
 pub(super) struct WindowGuard {
-    _irq: crate::x86::InterruptGuard,
+    _irq: crate::arch::current::InterruptGuard,
 }
 
 impl Drop for WindowGuard {

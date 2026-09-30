@@ -14,7 +14,6 @@ use core::mem::offset_of;
 use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::apic::TimerMode;
-use crate::desc::Tss;
 use crate::ipi::ThreadInbox;
 use crate::sched::ReadyQueue;
 use crate::thread::{CpuContext, GuardedStack, Tcb, ThreadId};
@@ -164,8 +163,11 @@ pub struct PerCpu {
     pub runq: ReadyQueue,
     /// Kernel stack top used by `syscall` and written into TSS.RSP0.
     pub kernel_rsp0: u64,
-    /// Current CPU TSS. RSP0 updates go through here.
-    pub tss: *mut Tss,
+    /// This CPU's descriptor tables, opaque here: the port's `CpuTables`
+    /// (x86_64: `arch::x86_64::gdt::CpuTables`), through which the switch
+    /// writes TSS.RSP0 (`syscall_init::set_rsp0_for`). Null until the port
+    /// attaches them.
+    pub tables: *const (),
     /// Dedicated TSS stack from GDT init. Used when the TCB has no stack
     /// (bootstrap).
     pub fallback_rsp0: u64,
@@ -228,7 +230,7 @@ impl PerCpu {
             timer_mode: TimerMode::Pit,
             runq: ReadyQueue::empty(),
             kernel_rsp0: 0,
-            tss: core::ptr::null_mut(),
+            tables: core::ptr::null(),
             fallback_rsp0: 0,
             tail_prev: core::ptr::null_mut(),
             dead_stack: None,
@@ -308,7 +310,7 @@ mod tests {
         assert_eq!(p.timer_mode, TimerMode::Pit);
         assert!(core::ptr::eq(p.remote, &R));
         assert_eq!(p.syscall_scratch, 0);
-        assert!(p.tss.is_null());
+        assert!(p.tables.is_null());
         assert_eq!(p.kernel_rsp0, 0);
         assert_eq!(p.remote.as_cr3.load(Ordering::Relaxed), 0);
         assert!(p.tail_prev.is_null());

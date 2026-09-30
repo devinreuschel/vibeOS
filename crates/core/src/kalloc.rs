@@ -16,10 +16,7 @@ extern crate alloc;
 
 use crate::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence, statics};
 use crate::sync::variant;
-use alloc::boxed::Box;
-use alloc::collections::TryReserveError;
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, collections::TryReserveError, string::String, vec::Vec};
 use core::alloc::Layout;
 use core::borrow::Borrow;
 use core::cmp::Ordering as CmpOrdering;
@@ -29,10 +26,15 @@ use core::mem::{self, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 
-/// A heap allocation failed. Callers map it to `ENOMEM` (or the errno
-/// Linux returns there) at the syscall boundary (DESIGN §4.4).
+/// A heap allocation failed: `ENOMEM` at the syscall boundary (DESIGN §4.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AllocError;
+
+impl From<AllocError> for crate::kerror::KError {
+    fn from(_: AllocError) -> Self {
+        Self::NoMem
+    }
+}
 
 impl fmt::Display for AllocError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -563,8 +565,7 @@ impl Drop for Deferred {
 /// push allocates nothing; any CPU and context may push. `queued` says a
 /// release item is queued or running, so callers queue at most one: `push`
 /// and `claim` set it and say whether the caller must queue one, `unclaim`
-/// hands that duty back, and `release_all` clears it before it takes the
-/// list.
+/// hands that duty back, and `release_all` clears it before taking the list.
 pub struct DeferList {
     head: AtomicPtr<Header>,
     queued: AtomicBool,

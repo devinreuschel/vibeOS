@@ -345,7 +345,12 @@ pub(super) fn kern_create(
     target: Option<&[u8]>,
 ) -> Result<InodeInfo, FsError> {
     if x.ty != FsType::Tmp {
-        return Err(FsError::NotSupp);
+        // devfs, procfs and sysfs make nothing: a regular file is
+        // `Acces`, as `open(O_CREAT)` in Linux's `/proc`, the rest `Perm`.
+        return Err(match kind {
+            InodeKind::Reg => FsError::Acces,
+            InodeKind::Dir | InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => FsError::Perm,
+        });
     }
     let (k, now, inst) = (&mut *k, x.now, x.inst);
     let dir_ino = dir.key[0];
@@ -355,7 +360,7 @@ pub(super) fn kern_create(
     }
     match kind {
         InodeKind::Reg | InodeKind::Dir | InodeKind::Lnk => {}
-        InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
+        InodeKind::Chr | InodeKind::Blk => return Err(FsError::Perm),
     }
     if kind == InodeKind::Lnk {
         let t = target.ok_or(FsError::Inval)?;
@@ -388,7 +393,7 @@ pub(super) fn kern_create(
             touch_dir(k, inst, dir_ino, now);
             ino
         }
-        InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
+        InodeKind::Chr | InodeKind::Blk => return Err(FsError::Perm),
     };
     if let Some(n) = kern_get(k, inst, dir_ino) {
         n.meta_into(dir);
@@ -405,7 +410,7 @@ pub(super) fn kern_unlink(
     name: &[u8],
 ) -> Result<(), FsError> {
     if x.ty != FsType::Tmp {
-        return Err(FsError::NotSupp);
+        return Err(FsError::Perm);
     }
     let (k, t, inst) = (&mut *k, x.now, x.inst);
     let dir_ino = dir.key[0];
@@ -580,7 +585,7 @@ pub(super) fn kern_readlink(
             buf[..n].copy_from_slice(&t[..n]);
             Ok(n)
         }
-        KernKind::Dir | KernKind::ProcFdDir => Err(FsError::IsDir),
+        // `readlink` of anything but a symlink is `EINVAL`, as Linux's.
         _ => Err(FsError::Inval),
     }
 }

@@ -471,7 +471,6 @@ pub(crate) fn test_cpu_hardening() -> Outcome {
     x86::stac();
     x86::clac();
 
-    let me = per_cpu_init::current().cpu_id;
     let mask = per_cpu_init::online_mask();
     let mut cpu = 0u32;
     while cpu < 64 {
@@ -483,11 +482,18 @@ pub(crate) fn test_cpu_hardening() -> Outcome {
             cr0: AtomicU64::new(0),
             cr4: AtomicU64::new(0),
         };
-        if cpu == me {
-            snap.cr0.store(x86::read_cr0(), Ordering::SeqCst);
-            snap.cr4.store(x86::read_cr4(), Ordering::SeqCst);
-        } else {
-            ipi_init::call_cpu(cpu, read_cr_remote, &snap as *const _ as *mut (), true);
+        {
+            // IF=0: the id and the local reads name one CPU (DESIGN §2.9
+            // rule 5); `call_cpu` waits for its ack with IF=0 anyway.
+            let _g = x86::InterruptGuard::enter();
+            if cpu == per_cpu_init::current().cpu_id {
+                snap.cr0.store(x86::read_cr0(), Ordering::SeqCst);
+                snap.cr4.store(x86::read_cr4(), Ordering::SeqCst);
+            } else {
+                // `read_cr_remote` stores only to `snap`'s atomics, through `&`.
+                // PROVENANCE: nothing writes through the pointer.
+                ipi_init::call_cpu(cpu, read_cr_remote, &snap as *const _ as *mut (), true);
+            }
         }
         let cr0 = snap.cr0.load(Ordering::SeqCst);
         let cr4 = snap.cr4.load(Ordering::SeqCst);
@@ -1351,7 +1357,10 @@ pub(crate) fn cpu_control_regs() -> Outcome {
         // `call_mask` skips the caller, so the local read and the calls
         // must see the same CPU: no migration in between.
         let _irq = x86::InterruptGuard::enter();
+        // `snap_cr` stores only to `snaps`' atomics, through `&`.
+        // PROVENANCE: nothing writes through the pointer.
         snap_cr(&snaps as *const _ as *mut ());
+        // PROVENANCE: nothing writes through the pointer, as above.
         ipi_init::call_mask(mask, snap_cr, &snaps as *const _ as *mut (), true);
     }
     for (c, s) in snaps.iter().enumerate() {
@@ -1442,6 +1451,7 @@ pub(crate) fn test_force_kernel_irq_window() -> Outcome {
     if left != 0 {
         return Outcome::Fail("force_kernel did not reach its window");
     }
+    let _g = x86::InterruptGuard::enter();
     let Some(cpu) = per_cpu_init::try_current() else {
         return Outcome::Fail("per-CPU area gone");
     };

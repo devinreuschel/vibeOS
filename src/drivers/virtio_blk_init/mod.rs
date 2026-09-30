@@ -10,14 +10,14 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, 
 
 use vibeos::block::blockdev::Backing;
 use vibeos::block::{
-    BlockDevice, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Request,
+    BlockDevice, BlockError, Completion, DRAIN_BATCH, DeviceState, Op, Queue, Request,
 };
-use vibeos::dev::{ClaimError, DevRef, Device, Driver, IdMatch, Instance, ProbeError};
+use vibeos::dev::{DevRef, Device, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
-use vibeos::pci::{CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM, MAX_BARS};
+use vibeos::pci::{CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::virtio::{
     self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
     COMMON_OFF_NUM_QUEUES, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER,
@@ -29,8 +29,8 @@ use vibeos::virtio::{
 use vibeos::virtio_blk::{
     CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
     F_FLUSH, F_MQ, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
-    logical_capacity, map_status, nq_from_config, pack_discard, pack_header, pick_blk_size,
-    pick_features, sector_for_lba,
+    exhausted_fails_device, logical_capacity, map_status, nq_from_config, pack_discard,
+    pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only, sector_for_lba,
 };
 
 use crate::arch::{self, current::Arch};
@@ -52,7 +52,7 @@ use irq::{blk_top, blk_work};
 #[cfg(feature = "kernel_tests")]
 pub use issue::submit;
 use issue::{Blk, N_SLOTS, SLOT_STRIDE};
-use vq::{FREE, MAX_QSIZE, MAX_VQ, Vq, clamp_qsize};
+use vq::{FREE, MAX_QSIZE, MAX_VQ, Vq};
 
 /// One bound virtio-blk function: what the driver keeps for it. The PCI
 /// registry slot of the device owns it as a `dev::Instance`; the block
@@ -89,6 +89,8 @@ pub(crate) struct VirtioBlk {
     max_discard: AtomicU32,
     io_reqs: AtomicU64,
     flushes: AtomicU64,
+    /// The common-config VA, which `needs_reset` reads; 0 before `setup`.
+    common: AtomicU64,
     /// The vectors the probe allocated, one per queue (or one for all),
     /// each as `QUEUE_VEC_LIVE | cpu << 8 | vector`; 0 for none.
     queue_vecs: [AtomicU64; MAX_VQ],
@@ -127,6 +129,7 @@ impl VirtioBlk {
             max_discard: AtomicU32::new(0),
             io_reqs: AtomicU64::new(0),
             flushes: AtomicU64::new(0),
+            common: AtomicU64::new(0),
             queue_vecs: [const { AtomicU64::new(0) }; MAX_VQ],
             #[cfg(feature = "kernel_tests")]
             inject_unsupp: AtomicU32::new(0),
@@ -197,16 +200,15 @@ fn w64(va: u64, off: u16, v: u64) {
     w32(va, off + 4, (v >> 32) as u32);
 }
 
-fn region(dev: &Device, cap: PciCap) -> Option<u64> {
-    let bir = cap.bar as usize;
-    if bir >= MAX_BARS {
+/// The VA of capability `cap`'s region, inside a BAR the probe claimed
+/// and mapped (`dev_init::claim_mem_bars`).
+fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
+    let r = dev.resources.get(cap.bar as usize)?;
+    if (cap.offset as u64) >= r.size {
         return None;
     }
-    let r = dev.resources[bir];
-    if r.mapped_va == 0 || (cap.offset as u64) >= r.size {
-        return None;
-    }
-    Some(r.mapped_va.wrapping_add(cap.offset as u64))
+    let va = dev_init::bar_va(dev, cap.bar)?;
+    Some(va.wrapping_add(cap.offset as u64))
 }
 
 fn read_features(common: u64) -> u64 {
@@ -275,7 +277,7 @@ fn msix_table_size(dev: &Device) -> u16 {
 fn setup(
     blk: &VirtioBlk,
     inst: &Instance,
-    dev: &Device,
+    dev: &DevRef,
     caps: ModernCaps,
 ) -> Result<(), VirtioError> {
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
@@ -445,11 +447,10 @@ fn setup(
 
         w16(common, COMMON_OFF_QSEL, qi as u16);
         let hw_qs = r16(common, COMMON_OFF_QSIZE);
-        let qsz = clamp_qsize(hw_qs);
-        if qsz == 0 {
+        let Ok(qsz) = queue_size(hw_qs, MAX_QSIZE as u16) else {
             fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::BadQueue);
-        }
+        };
         w16(common, COMMON_OFF_QSIZE, qsz);
         if qi == 0 {
             q0sz = qsz;
@@ -534,6 +535,7 @@ fn setup(
     w8(common, COMMON_OFF_STATUS, st | STATUS_DRIVER_OK);
 
     blk.isr.store(isr, Ordering::Release);
+    blk.common.store(common, Ordering::Release);
     blk.features.store(feat, Ordering::Release);
     blk.blk_size.store(blk_size, Ordering::Release);
     blk.cap.store(capacity, Ordering::Release);
@@ -588,28 +590,6 @@ fn setup(
     Ok(())
 }
 
-/// Claim each BAR a capability in `caps` lives in. Several capabilities
-/// share a BAR, so `Already` on one this device claimed is success.
-fn claim_bars(dev: &DevRef, caps: &ModernCaps) -> Result<(), ProbeError> {
-    for c in [caps.common, caps.notify, caps.isr, caps.device]
-        .into_iter()
-        .flatten()
-    {
-        let i = c.bar as usize;
-        if i >= MAX_BARS || dev.resources[i].is_empty() {
-            continue;
-        }
-        match dev_init::claim(dev, c.bar) {
-            Ok(()) | Err(ClaimError::Already) => {}
-            Err(ClaimError::Overlap) => return Err(ProbeError::Busy),
-            Err(ClaimError::Empty | ClaimError::BadIndex) => {
-                return Err(ProbeError::NoResource);
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(crate) struct BlkDriver;
 
 static BLK_IDS: &[IdMatch] = &[
@@ -648,23 +628,42 @@ impl Driver for BlkDriver {
             );
             return Err(ProbeError::Busy);
         };
-        claim_bars(dev, &caps)?;
-        let inst = vibeos::dev::instance(VirtioBlk::new(dev.clone(), name))?;
-        let blk = inst.downcast_ref::<VirtioBlk>().ok_or(ProbeError::Failed)?;
-        match setup(blk, &inst, dev, caps) {
-            Ok(()) => Ok(Some(inst)),
-            Err(VirtioError::NoVersion1) => {
-                crate::marker!("vibeOS: virtio: blk no VERSION_1");
-                Err(ProbeError::Failed)
-            }
-            Err(VirtioError::NoMemory) => Err(ProbeError::NoMemory),
-            Err(e) => {
-                crate::marker!("vibeOS: virtio: blk probe {}", e.as_str());
-                Err(ProbeError::Failed)
-            }
+        dev_init::claim_mem_bars(dev)?;
+        let r = probe_claimed(dev, name, caps);
+        if r.is_err() {
+            // Nothing reached the device, or `setup` stopped it before it
+            // failed: its BARs go.
+            dev_init::release_bars(dev);
+        }
+        r
+    }
+    /// virtio-blk has no stop step in `remove` yet (DEVICES.md §12.2 rule
+    /// 7; ROADMAP §20.9), so it keeps its BARs' claims and mappings: they
+    /// stay reserved, and live for the device it leaves running.
+    fn remove(&self, _dev: &DevRef) {}
+}
+
+/// The rest of [`BlkDriver::probe`], once `dev`'s BARs are claimed and
+/// mapped.
+fn probe_claimed(
+    dev: &DevRef,
+    name: &str,
+    caps: ModernCaps,
+) -> Result<Option<Instance>, ProbeError> {
+    let inst = vibeos::dev::instance(VirtioBlk::new(dev.clone(), name))?;
+    let blk = inst.downcast_ref::<VirtioBlk>().ok_or(ProbeError::Failed)?;
+    match setup(blk, &inst, dev, caps) {
+        Ok(()) => Ok(Some(inst)),
+        Err(VirtioError::NoVersion1) => {
+            crate::marker!("vibeOS: virtio: blk no VERSION_1");
+            Err(ProbeError::Failed)
+        }
+        Err(VirtioError::NoMemory) => Err(ProbeError::NoMemory),
+        Err(e) => {
+            crate::marker!("vibeOS: virtio: blk probe {}", e.as_str());
+            Err(ProbeError::Failed)
         }
     }
-    fn remove(&self, _dev: &DevRef) {}
 }
 
 pub fn init() {
@@ -768,6 +767,8 @@ impl VirtioBlk {
                 }
             }
         }
+        // After the range checks, so a bad range is still `Inval`.
+        refuse_read_only(self.features.load(Ordering::Acquire), op)?;
         Ok(req)
     }
 

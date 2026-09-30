@@ -82,8 +82,9 @@ fn my_queue() -> usize {
 /// Wake this CPU's worker to free its dead stacks. IF=0 or IF=1; takes
 /// SCHED, so never under it.
 pub(crate) fn kick_dead_stacks() {
-    let me = my_queue();
     thread_init::with_sched(|s| {
+        // Under SCHED, IF=0: `me` is the CPU this runs on.
+        let me = my_queue();
         with_st(|st| {
             s.wake_all(&mut st.wq[me]);
         })
@@ -107,7 +108,10 @@ fn release_list_of(cpu: usize) -> (usize, &'static DeferList) {
     }
 }
 
+/// The list of the CPU this runs on when it reads the id. A push is safe
+/// from any CPU, so a caller with IF=1 may push to the one it left.
 fn this_release_list() -> (usize, &'static DeferList) {
+    let _irq = crate::arch::current::InterruptGuard::enter();
     release_list_of(per_cpu_init::try_current().map_or(0, |c| c.cpu_id as usize))
 }
 

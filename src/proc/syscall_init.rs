@@ -6,18 +6,17 @@ use core::mem::{offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::addr_space::AddressSpace;
 use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
-use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
+use vibeos::desc::{KERNEL_CS, STAR_SYSRET, USER_CS_RPL, USER_DS_RPL};
 use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{Fxsave, Tcb};
 use vibeos::vectors;
 
-use crate::arch::current::Arch;
-use crate::arch::gdt;
+use crate::arch::current::{AddressSpace, Arch};
+use crate::arch::gdt::{self, CpuTables};
 use crate::arch::idt::TrapFrame;
 use crate::cell::BootCell;
 use crate::per_cpu_init;
@@ -39,7 +38,7 @@ const F_RIP: usize = PAD + offset_of!(UserFrame, rip);
 /// From `orig_rax`, where the 15 GPR pops leave RSP, to the `rsp` slot.
 const ORIG_TO_RSP: usize = offset_of!(UserFrame, rsp) - offset_of!(UserFrame, orig_rax);
 /// The value Linux shows in the `rax` slot at a syscall-entry stop.
-const ENOSYS_RET: i64 = -(vibeos::syscall::ENOSYS as i64);
+const ENOSYS_RET: i64 = -(vibeos::kerror::KError::NoSys.errno() as i64);
 
 const _: () = {
     // 21 words and the pad: RSP is 16-byte aligned at the `call`.
@@ -284,7 +283,7 @@ pub unsafe fn init_bsp() {
     crate::arch::idt::set_user_return_hook(fp_user_return);
     crate::thread_init::set_switch_hooks(on_switch, fpu_template);
     per_cpu_init::with_current(|cpu| {
-        cpu.tss = gdt::bsp_tss_ptr();
+        cpu.tables = gdt::bsp_tables().cast();
         let top = gdt::bsp_rsp0_top();
         cpu.fallback_rsp0 = top;
         cpu.kernel_rsp0 = top;
@@ -303,13 +302,14 @@ pub unsafe fn init_bsp() {
 /// AP: `tables` is this CPU's GDT/TSS. Call after `install_gs`.
 ///
 /// # Safety
-/// `tss` is this CPU's live TSS; `rsp0` is its kernel stack top.
-pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
+/// `tables` is this CPU's loaded `CpuTables`, live while it runs; `rsp0`
+/// is its kernel stack top.
+pub unsafe fn init_ap(tables: *const CpuTables, rsp0: u64) {
     // SAFETY: the AP loaded its GDT and `GS_BASE` before this call (this
     // fn's contract, `syscall_init::init_ap`).
     unsafe { init_cpu() };
     per_cpu_init::with_current(|cpu| {
-        cpu.tss = tss;
+        cpu.tables = tables.cast();
         cpu.fallback_rsp0 = rsp0;
         cpu.kernel_rsp0 = rsp0;
         cpu.remote
@@ -405,11 +405,11 @@ pub extern "C" fn vibeos_fp_user_return() {
         return;
     }
     per_cpu_init::with_current(|cpu| {
-        let t = cpu.current;
+        let t = crate::arch::current_tcb();
         if t.is_null() {
             return;
         }
-        // SAFETY: invariant: `cpu.current` is the TCB this CPU runs, live
+        // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live
         // and touched only by this CPU while it runs, and IF=0 keeps it
         // current; established by `thread_init::switch_now`.
         let tcb = unsafe { &mut *t };
@@ -436,11 +436,11 @@ pub fn current_fp_words() -> Option<(u32, u32, u32)> {
         return None;
     }
     per_cpu_init::with_current(|cpu| {
-        let t = cpu.current;
+        let t = crate::arch::current_tcb();
         if t.is_null() {
             return None;
         }
-        // SAFETY: invariant: `cpu.current` is the TCB this CPU runs, live
+        // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live
         // and touched only by this CPU while it runs, and `with_current`'s
         // IF=0 keeps it current; established by `thread_init::switch_now`.
         let tcb = unsafe { &mut *t };
@@ -467,18 +467,24 @@ pub fn fpu_template() -> Fxsave {
 }
 
 /// Update TSS.RSP0 + `kernel_rsp0` for `tcb`. Every context switch.
-/// Caller already holds `&mut PerCpu` (IRQ-off).
-pub fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
+///
+/// # Safety
+/// `cpu` is this CPU's own `PerCpu`, held with IF=0 (`on_switch` holds it
+/// so), and `cpu.tables` is null or the `CpuTables` this CPU loaded, which
+/// `syscall_init::init_bsp` and `syscall_init::init_ap` establish.
+pub unsafe fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
     let top = match &tcb.stack {
         Some(s) => s.top().as_u64(),
         None => cpu.fallback_rsp0,
     };
     cpu.kernel_rsp0 = top;
-    if !cpu.tss.is_null() {
-        // SAFETY: invariant: a non-null `cpu.tss` is this CPU's own live TSS,
-        // which only this CPU writes, and the caller holds `&mut PerCpu`;
-        // established by `syscall_init::init_bsp` and `syscall_init::init_ap`.
-        unsafe { (*cpu.tss).set_rsp0(top) };
+    let tables = cpu.tables.cast::<CpuTables>();
+    if !tables.is_null() {
+        // SAFETY: `CpuTables::set_rsp0`'s contract: `tables` is the tables
+        // this CPU loaded and IF=0, both by this fn's `# Safety`,
+        // established by `syscall_init::init_bsp` and
+        // `syscall_init::init_ap` and by the caller's IF=0 stretch.
+        unsafe { (*tables).set_rsp0(top) };
     }
 }
 
@@ -509,13 +515,19 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
 /// The switch away from `old`: save its FP state if this CPU's registers
 /// hold it (the FP binding, DESIGN §7.5). Loads nothing: the next return
 /// to ring 3 does.
-pub fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
+///
+/// # Safety
+/// `cpu` is this CPU's own `PerCpu`, held with IF=0, and `old` is null or
+/// the live TCB this CPU is switching off (invariant I9), which no other
+/// CPU writes until the switch tail clears its `on_cpu`; the caller,
+/// `thread_init::switch_now` through [`on_switch`], establishes both.
+pub unsafe fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
     if !FPU_READY.load(Ordering::Acquire) || old.is_null() {
         return;
     }
-    // SAFETY: invariant: `old` is the TCB this CPU is switching off, live
+    // SAFETY: invariant I9: `old` is the TCB this CPU is switching off, live
     // until the switch tail clears its `on_cpu`, with IF=0; established
-    // by `thread_init::switch_now`.
+    // by this fn's `# Safety`, which `thread_init::switch_now` meets.
     let old = unsafe { &mut *old };
     if fpu::switch_away(
         cpu.fp_owner,
@@ -529,13 +541,24 @@ pub fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
 }
 
 /// Hardware side of a context switch: FPU, RSP0, CR3. Call before
-/// `switch_context`. Caller already holds `&mut PerCpu` (IRQ-off).
-pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
-    switch_fpu(cpu, old);
+/// `switch_context`.
+///
+/// # Safety
+/// `old` and `new` are null or live TCBs (invariant I9), `new` the one
+/// that runs next on this CPU, IF=0, and `cpu` is this CPU's `PerCpu`
+/// with `cpu.tables` as `init_bsp` or `init_ap` set it;
+/// `thread_init::switch_now` establishes each, inside
+/// `with_current_switch`.
+pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
+    // SAFETY: `switch_fpu`'s contract, which this fn's `# Safety` covers;
+    // established by `thread_init::switch_now`.
+    unsafe { switch_fpu(cpu, old) };
     if !new.is_null() {
-        // SAFETY: invariant: `new` is the live TCB this CPU is switching to,
-        // and the caller holds this CPU's `&mut PerCpu` with IF=0, as
-        // `switch_cr3_for` requires; established by `thread_init::switch_now`.
+        // SAFETY: invariant I9: `new` is the live TCB this CPU is switching
+        // to, and `cpu` this CPU's `PerCpu` held with IF=0, as
+        // `set_rsp0_for` and `switch_cr3_for` require, with `cpu.tables` as
+        // `init_bsp` or `init_ap` set it; established by this fn's
+        // `# Safety`, which `thread_init::switch_now` meets.
         unsafe {
             set_rsp0_for(cpu, &*new);
             switch_cr3_for(cpu, &*new);
@@ -675,6 +698,8 @@ pub fn peek_user_as() -> Option<&'static AddressSpace> {
 
 pub fn set_user_as(space: &AddressSpace) {
     CURRENT_AS.store(
+        // `current_as` turns it back into a shared `&AddressSpace` only.
+        // PROVENANCE: nothing writes through the pointer.
         space as *const AddressSpace as *mut AddressSpace,
         Ordering::Release,
     );
@@ -706,12 +731,21 @@ pub fn set_syscall_handler(f: fn(&mut UserFrame) -> i64) {
     HANDLER.store(f as *mut (), Ordering::Release);
 }
 
+/// The syscall entry's Rust half: the one place the user frame's raw
+/// pointer becomes `&mut UserFrame`, which the handler
+/// (`proc_init::syscall`) takes.
+///
+/// # Safety
+/// `frame` is the user frame `vibeos_syscall_entry` built at the top of
+/// this thread's kernel stack (invariant I25), which nothing else refers
+/// to while the syscall runs; that entry asm is the only caller.
 #[unsafe(no_mangle)]
-pub extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
+pub unsafe extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     bump_counter();
     // SAFETY: invariant I25; the frame is the one
-    // syscall_init::vibeos_syscall_entry built at the top of this thread's
-    // kernel stack, which only this thread's syscall path refers to.
+    // `syscall_init::vibeos_syscall_entry` built at the top of this thread's
+    // kernel stack, which only this thread's syscall path refers to
+    // (this fn's `# Safety`).
     let frame = unsafe { &mut *frame };
     let nr = <Arch as SyscallAbi>::nr(frame);
     vibeos::trace!(SyscallEnter, nr, <Arch as SyscallAbi>::arg(frame, 0));

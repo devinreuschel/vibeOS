@@ -18,6 +18,7 @@ use vibeos::symtab;
 
 use crate::per_cpu_init;
 use crate::serial::{self, Serial};
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 unsafe extern "C" {
@@ -25,8 +26,6 @@ unsafe extern "C" {
     static __kernel_vma_end: u8;
 }
 
-#[cfg(feature = "panic_exit")]
-const ISA_DEBUG_EXIT: u16 = 0xF4;
 #[cfg(feature = "panic_exit")]
 const EXIT_PANIC: u32 = 0x11;
 const BT_MAX: usize = 24;
@@ -72,7 +71,7 @@ fn stackish(p: u64) -> bool {
 /// Halt others first, then re-init serial. Re-entry dumps a one-liner and
 /// `hlt`s (or isa-debug-exit) without walking the ring again.
 fn begin_dump() {
-    x86::cli();
+    crate::arch::current::irq_disable();
     if !crate::serial::raw::claim_dump() {
         Serial::init();
         Serial::write_line(b"vibeOS: panic: reentered\n");
@@ -105,6 +104,7 @@ fn hex(w: &mut StackBuf<'_>, n: u64) {
     w.push_bytes(fmt_util::write_hex(n, &mut b));
 }
 
+#[cfg(target_arch = "x86_64")]
 fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
     dump_line(|w| {
         w.push_bytes(b"vibeOS: regs: rbp=0x");
@@ -121,21 +121,21 @@ fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
 }
 
 fn dump_thread() {
-    let (cpu, tid, name) = match per_cpu_init::try_current() {
-        None => (0u32, 0u32, "<early>"),
-        Some(c) => {
-            if c.current.is_null() {
-                (c.cpu_id, 0, "<none>")
-            } else {
-                // SAFETY: invariant I9: a non-null `current` names a `Tcb`
-                // that stays in `SCHED`; the other CPUs are sent the stop
-                // IPI first (`panic::begin_dump`), and this reads two
-                // fields set before the thread ran; established by
-                // `thread_init::switch_now`.
-                let t = unsafe { &*c.current };
-                (c.cpu_id, t.id.raw(), t.name)
-            }
-        }
+    // The panic may come with IF=1: the id is a hint and the thread one
+    // load (DESIGN §2.9 rule 5).
+    let cpu = crate::arch::cpu_id_hint();
+    let cur = crate::arch::current_tcb();
+    let (tid, name) = if !per_cpu_init::is_live() {
+        (0u32, "<early>")
+    } else if cur.is_null() {
+        (0, "<none>")
+    } else {
+        // SAFETY: invariant I9: a non-null `current` names a `Tcb` that
+        // stays in `SCHED`; the other CPUs are sent the stop IPI first
+        // (`panic::begin_dump`), and this reads two fields set before the
+        // thread ran; established by `thread_init::switch_now`.
+        let t = unsafe { &*cur };
+        (t.id.raw(), t.name)
     };
     #[expect(
         clippy::let_underscore_must_use,
@@ -214,13 +214,9 @@ fn dump_backtrace(rip: u64, rbp: u64) {
 fn finish() -> ! {
     Serial::write_line(b"vibeOS: panic: halted\n");
     #[cfg(feature = "panic_exit")]
-    // SAFETY: `panic_exit` builds run under QEMU with isa-debug-exit at
-    // port 0xF4, whose write ends the VM; established by the harness's
-    // `-device isa-debug-exit`, which `panic::ISA_DEBUG_EXIT` names.
-    unsafe {
-        x86::outl(ISA_DEBUG_EXIT, EXIT_PANIC);
-    }
-    x86::halt();
+    crate::arch::current::qemu_exit(EXIT_PANIC);
+    #[cfg(not(feature = "panic_exit"))]
+    crate::arch::current::halt();
 }
 
 fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
@@ -239,10 +235,13 @@ fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
 fn panic(info: &PanicInfo) -> ! {
     #[cfg(feature = "kernel_tests")]
     crate::arch::catch::on_panic();
-    let rip = x86::read_rip();
-    let rbp = x86::read_rbp();
-    let rsp = x86::read_rsp();
-    let rflags = x86::rflags();
+    #[cfg(target_arch = "x86_64")]
+    let (rip, rbp, rsp, rflags) = (
+        x86::read_rip(),
+        x86::read_rbp(),
+        x86::read_rsp(),
+        x86::rflags(),
+    );
     begin_dump();
 
     Serial::write_line(marker::PANIC_BANNER.as_bytes());
@@ -273,6 +272,7 @@ fn write_where(info: &PanicInfo) -> core::fmt::Result {
 }
 
 /// ` rip=0x.. cs=0x.. rflags=0x.. rsp=0x.. ss=0x..[ err=0x..][ cr2=0x..]`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn frame_fields(
     w: &mut StackBuf<'_>,
     frame: &InterruptFrame,
@@ -299,6 +299,7 @@ pub(crate) fn frame_fields(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn exception_halt(
     kind: &[u8],
     frame: &InterruptFrame,
@@ -315,6 +316,7 @@ pub fn exception_halt(
     finish();
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn exception_vec(n: u8, frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>) -> ! {
     begin_dump();
     dump_line(|w| {

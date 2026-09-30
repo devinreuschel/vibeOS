@@ -147,10 +147,25 @@ impl Fd {
     }
 }
 
-/// Fd table is full or the number is out of range.
+/// Why an fd-table call failed.
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FdError;
+pub enum FdError {
+    /// The number is out of range or names no open file.
+    Badf,
+    /// Every slot is in use.
+    Full,
+}
+
+/// A bad descriptor is `EBADF`; a full table, `EMFILE`, as Linux's.
+impl From<FdError> for crate::kerror::KError {
+    fn from(e: FdError) -> Self {
+        match e {
+            FdError::Badf => Self::BadF,
+            FdError::Full => Self::MFile,
+        }
+    }
+}
 
 /// A process's descriptors: a heap row of a fixed length,
 /// `limits::MAX_FDS` for a process-table slot's, built once by
@@ -219,7 +234,7 @@ impl FdTable {
     }
 
     pub fn set(&mut self, fd: u32, slot: Fd) -> Result<(), FdError> {
-        let s = self.slots.get_mut(fd as usize).ok_or(FdError)?;
+        let s = self.slots.get_mut(fd as usize).ok_or(FdError::Badf)?;
         *s = slot;
         Ok(())
     }
@@ -229,7 +244,7 @@ impl FdTable {
             .slots
             .iter()
             .position(|s| !s.is_open())
-            .ok_or(FdError)?;
+            .ok_or(FdError::Full)?;
         self.slots[i] = slot;
         Ok(i as u32)
     }
@@ -245,7 +260,7 @@ impl FdTable {
 
     /// New fd, CLOEXEC cleared (Linux `dup`).
     pub fn dup(&mut self, old: u32) -> Result<u32, FdError> {
-        let s = self.get(old).ok_or(FdError)?;
+        let s = self.get(old).ok_or(FdError::Badf)?;
         self.alloc(Fd {
             kind: s.kind,
             flags: s.flags & !FD_CLOEXEC,
@@ -256,12 +271,12 @@ impl FdTable {
     /// Returns the slot that occupied `new` (to drop the file).
     pub fn dup2(&mut self, old: u32, new: u32) -> Result<Option<Fd>, FdError> {
         if old == new {
-            let _ = self.get(old).ok_or(FdError)?;
+            let _ = self.get(old).ok_or(FdError::Badf)?;
             return Ok(None);
         }
-        let s = self.get(old).ok_or(FdError)?;
+        let s = self.get(old).ok_or(FdError::Badf)?;
         if new as usize >= self.slots.len() {
-            return Err(FdError);
+            return Err(FdError::Badf);
         }
         let displaced = self.close(new);
         self.slots[new as usize] = Fd {
@@ -432,6 +447,26 @@ pub const fn fd_flags_from_open(oflags: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `dup` on a full table is `EMFILE`, and on a closed fd `EBADF`, as
+    /// Linux's (ROADMAP §10.4, E2).
+    #[test]
+    fn fd_table_full_is_emfile() {
+        let mut t = FdTable::stdio(MAX_FDS).unwrap();
+        for _ in 3..MAX_FDS {
+            t.dup(0).unwrap();
+        }
+        let e = t.dup(0).unwrap_err();
+        assert_eq!(e, FdError::Full);
+        assert_eq!(crate::kerror::KError::from(e).errno(), 24);
+        assert_eq!(t.alloc(Fd::EMPTY), Err(FdError::Full));
+        assert!(t.close(5).is_some());
+        let e = t.dup(5).unwrap_err();
+        assert_eq!(e, FdError::Badf);
+        assert_eq!(crate::kerror::KError::from(e), crate::kerror::KError::BadF);
+        assert_eq!(t.dup(MAX_FDS as u32), Err(FdError::Badf));
+        assert_eq!(t.dup(0), Ok(5));
+    }
 
     #[test]
     fn wait_status_linux_shape() {

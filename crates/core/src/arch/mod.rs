@@ -9,10 +9,22 @@
 
 pub mod x86_64;
 
-use crate::paging::{PhysAddr, VirtAddr};
+/// The reference port's pure-half items that portable code and the kernel
+/// name directly, until a second port's kernel builds (ROADMAP Phase 11): the
+/// x86_64 descriptor, vector, 8259, APIC and UART encodings, its user frame,
+/// and its syscall numbers (`docs/ARCH.md`).
+pub use x86_64::syscall::nr as syscall_nr;
+pub use x86_64::trap::UserFrame;
+pub use x86_64::{apic, desc, pic, uart, vectors};
+
+use crate::thread::Tcb;
 
 /// Declared once, in `crate::trap` (ROADMAP §10.3, §10.6).
 pub use crate::trap::SyscallAbi;
+
+/// Declared once, in `crate::paging`, beside the `Mapper` that walks through
+/// it, so the page-table module uses no port type (ROADMAP §10.3).
+pub use crate::paging::PageTable;
 
 /// The four inter-processor interrupts (SMP §7.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,9 +53,16 @@ impl MmioWidth for u64 {}
 /// The machine state the boot handshake hands over, normalized.
 pub trait BootHandover {
     type Info: 'static;
+    /// The boot protocol revision the port asks its loader for (Limine's
+    /// base revision).
+    const BASE_REVISION: u64;
     /// The handover record. Valid only after entry has captured it, which
     /// every caller outside the entry path is.
     fn info() -> &'static Self::Info;
+    /// The physical address of a firmware table the loader handed over as
+    /// `raw`: a physical address, or an address in the loader's direct map
+    /// at `hhdm_offset`, as the port's revision gives it.
+    fn table_phys(raw: u64, hhdm_offset: u64) -> u64;
 }
 
 /// This CPU's interrupt mask.
@@ -77,23 +96,6 @@ pub trait CycleCounter {
     fn now() -> u64;
     /// Counts per second; `None` until measured.
     fn freq_hz() -> Option<u64>;
-}
-
-/// The page-table root register and this CPU's TLB.
-pub trait PageTable {
-    /// The root this CPU runs on.
-    fn root() -> PhysAddr;
-    /// Switch this CPU to `root`.
-    ///
-    /// # Safety
-    ///
-    /// `root` is a complete top-level table that maps this CPU's code, its
-    /// stack, and everything it touches after the switch.
-    unsafe fn set_root(root: PhysAddr);
-    /// Drop this CPU's translation of the page holding `va`.
-    fn flush_local(va: VirtAddr);
-    /// Drop this CPU's non-global translations.
-    fn flush_local_all();
 }
 
 /// DMA ordering, MMIO accessors, and cache maintenance for DMA (DESIGN §4.7).
@@ -140,6 +142,10 @@ pub trait PerCpuBase {
     /// This CPU's id: exact while interrupts are masked, and 0 before the
     /// per-CPU area is live.
     fn cpu_id() -> u32;
+    /// The running thread's TCB, read in one instruction that preemption
+    /// cannot split (DESIGN §2.9 rule 5); null before the per-CPU area and
+    /// the bootstrap thread are live.
+    fn current_tcb() -> *mut Tcb;
 }
 
 /// Raw user-memory copies, inside the port's user-access window (SMAP, PAN).
@@ -178,7 +184,8 @@ pub trait ContextSwitch {
 }
 
 /// A complete port: every seam trait. Each port implements `Port` for its
-/// type with an empty impl, so the compiler names any missing supertrait there.
+/// type with an empty impl, so the compiler names any missing supertrait there,
+/// and asserts it with [`assert_port`].
 pub trait Port:
     BootHandover
     + InterruptMask
@@ -192,6 +199,10 @@ pub trait Port:
     + ContextSwitch
 {
 }
+
+/// Compiles only for a complete port: `const _: () = assert_port::<Arch>();`
+/// beside each port's `Arch` checks it at build time.
+pub const fn assert_port<A: Port>() {}
 
 #[cfg(any(test, feature = "std"))]
 pub mod stub;

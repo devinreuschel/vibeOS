@@ -2,7 +2,9 @@
 
 pub mod apic;
 pub mod desc;
+pub mod paging;
 pub mod pic;
+pub mod syscall;
 pub mod trap;
 pub mod uart;
 pub mod vectors;

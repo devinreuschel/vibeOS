@@ -42,6 +42,18 @@ pub enum RankError {
     Overflow { rank: u8 },
 }
 
+/// A lock-rank violation is a bad argument.
+impl From<RankError> for crate::kerror::KError {
+    fn from(e: RankError) -> Self {
+        match e {
+            RankError::SameRank { .. }
+            | RankError::Order { .. }
+            | RankError::Lockless
+            | RankError::Overflow { .. } => Self::Inval,
+        }
+    }
+}
+
 impl core::fmt::Display for RankError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {

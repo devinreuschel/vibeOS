@@ -99,7 +99,7 @@ fn reparent_children(s: &mut Sched, t: &mut Table, dead: u32) -> bool {
 pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
     let self_pid = current_pid();
     if self_pid == 0 {
-        return Err(KError::from_errno(ECHILD));
+        return Err(KError::Child);
     }
     let want = i64::from(pid);
     let nohang = options as u64 & WNOHANG != 0;
@@ -112,13 +112,13 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
                     return WaitAct::Done(cpid, st);
                 }
                 if !has_child(t, self_pid, want) {
-                    return WaitAct::Err(ECHILD);
+                    return WaitAct::Err(KError::Child);
                 }
                 if nohang {
                     return WaitAct::Done(0, 0);
                 }
                 let Some(me) = t.get_mut(self_pid) else {
-                    return WaitAct::Err(ECHILD);
+                    return WaitAct::Err(KError::Child);
                 };
                 s.begin_wait(&mut me.wait_wq, FAR_DEADLINE);
                 WaitAct::Sleep
@@ -131,11 +131,11 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
                 // reaped, and a failed copy returns `EFAULT` without
                 // undoing that, as Linux's does (SYSCALL.md §5).
                 if status != 0 && uaccess_init::copy_to_user_val(status, &st).is_err() {
-                    return Err(KError::from_errno(EFAULT));
+                    return Err(KError::Fault);
                 }
                 return Ok(cpid as usize);
             }
-            WaitAct::Err(e) => return Err(KError::from_errno(e)),
+            WaitAct::Err(e) => return Err(e),
             WaitAct::Sleep => {
                 thread_init::schedule();
                 if let Some(s) = current_space() {
@@ -149,7 +149,7 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
 
 enum WaitAct {
     Done(u32, u32),
-    Err(i32),
+    Err(KError),
     Sleep,
 }
 
@@ -175,17 +175,17 @@ pub(super) fn reap_zombie(s: &mut Sched, t: &mut Table, pid: u32) {
 pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
     let sig = sig as u32;
     if sig == 0 || sig > 31 {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     }
     let target = pid as u32;
     let self_pid = current_pid();
     let r = thread_init::with_sched(|s| {
         table_locked(|t| {
             let Some(p) = t.get_mut(target) else {
-                return Err(ESRCH);
+                return Err(KError::Srch);
             };
             if p.state == ProcState::Unused || p.state == ProcState::Zombie {
-                return Err(ESRCH);
+                return Err(KError::Srch);
             }
             match default_action(sig) {
                 SigAct::Ign => {
@@ -216,7 +216,7 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
         })
     });
     match r {
-        Err(e) => Err(KError::from_errno(e)),
+        Err(e) => Err(e),
         Ok(()) => {
             if target == self_pid && default_action(sig) == SigAct::Term {
                 finish_exit(wait_signaled(sig), true);
@@ -232,7 +232,7 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
 pub(super) fn sys_psinfo(buf: u64, len: usize) -> SysResult {
     let len = len as u64;
     if !user_range_ok(buf, len) {
-        return Err(KError::from_errno(EFAULT));
+        return Err(KError::Fault);
     }
     let mut tmp = [0u8; 512];
     let n = format_ps(&mut tmp);
@@ -241,7 +241,7 @@ pub(super) fn sys_psinfo(buf: u64, len: usize) -> SysResult {
         return Ok(0);
     }
     match uaccess_init::copy_to_user_partial(buf, &tmp[..take]) {
-        0 => Err(KError::from_errno(EFAULT)),
+        0 => Err(KError::Fault),
         c => Ok(c),
     }
 }

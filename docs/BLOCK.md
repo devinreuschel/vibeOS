@@ -64,9 +64,9 @@ Rule: the block layer does not order requests. Requests in flight complete in
 any order, on any queue. A caller that needs one write durable, or visible to a
 later read, before another starts waits for its completion before it submits the
 other. The block layer keeps two orders of its own: it never dispatches a write
-while an older write to an overlapping range is queued or in flight (ROADMAP
-§10.11), and a zoned device has at most one write in flight per sequential zone
-(ROADMAP §29.1).
+or discard while an older write or discard to an overlapping range is queued or
+in flight, and never merges one past it; and a zoned device has at most one
+write in flight per sequential zone (ROADMAP §29.1).
 
 `Flush` makes durable every write whose completion was reported before the
 `Flush` was submitted, as virtio 1.2 §5.2.6.2's FLUSH, NVMe's Flush, SCSI's
@@ -110,17 +110,12 @@ Rejected: a device-wide `Barrier` that every later request waits behind; and a
 fence per queue, since one filesystem writes from every CPU's queue and would
 wait for completions anyway.
 
-Not yet: C-LOOK can reorder overlapping writes whatever their seq, and sequence
-numbers are `u32` (ROADMAP §10.11, F043).
-
 ## 10.3 Failure
 
 Rule: an I/O error is retried within the request's retry budget, `DEFAULT_RETRY_BUDGET` (3) extra
 attempts, which step 5 below shares with resets. A request that exhausts it completes with its
 error, and the device stays `Bound`. `Inval` (range, size) is not retried and uses no budget. No
-infinite retry loop. Submits to a `Failed` device return `Failed`. Not yet enforced: a virtio-blk
-request that exhausts its budget makes the device `Failed` and fails every queued request with it
-(ROADMAP §10.11, F046).
+infinite retry loop. Submits to a `Failed` device return `Failed`.
 
 Rule: every request has a deadline, 30 s by default and settable per device, as Linux's block layer
 has, and the device gives a request back before anything touches its buffer (§2.11 rule 3: stop the
@@ -266,7 +261,13 @@ blocks. Discard on ramdisk validates the range and otherwise no-ops.
 ## 10.4 virtio-blk
 
 Modern virtio-blk (`1af4:1042`, `VERSION_1` required) binds by id on the
-Phase 6 transport. Each bound function is its own instance (`VirtioBlk`), owned by its PCI
+Phase 6 transport. `F_RO` is accepted: on a read-only device a write or
+discard fails with `ReadOnly` before it is queued, with no retry, and reads
+and flushes go on (virtio 1.2 §5.2.6.1). A request that fails for good, its
+retry budget spent or its error not retryable, completes with its own error
+and the device stays `Ready`; until ROADMAP §12.5's error handler resets a
+device, the driver fails the device and every queued request only when the
+device status has `DEVICE_NEEDS_RESET` (`exhausted_fails_device`). Each bound function is its own instance (`VirtioBlk`), owned by its PCI
 registry entry and named `vda`, `vdb`, … in bind order, with its own queues, bounce slots and
 vectors; the driver keeps no list of them (DEVICES.md §12.1 rule 1). Config reads capacity (512-byte units), `blk_size` (512
 if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
@@ -281,7 +282,9 @@ runs on MSI-X, where virtio 1.2 §4.1.4.5.2 says a driver should not read ISR (R
 `F_MQ`: one virtqueue per online CPU, capped by the device `num_queues` and by
 `MAX_VQ` (8). Requests on different queues are not ordered against each other
 ([section 10.2](#102-ordering-flush-and-fua)). Without `F_MQ`, a single
-request queue. Data goes through 16 bounce slots of 8 KiB shared by the
+request queue. Each queue gets the largest power of two no larger than the
+device's queue size or 64; a device queue that gives fewer than 3 descriptors,
+one read or write chain, fails the probe (`queue_size`, `MIN_QSIZE`). Data goes through 16 bounce slots of 8 KiB shared by the
 device's queues; a request over 8 KiB is
 `Inval`, including one the block queue merged past that size (ROADMAP §12.5,
 F119). Flush and discard go to the device when those features are negotiated;

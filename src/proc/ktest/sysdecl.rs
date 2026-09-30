@@ -1,10 +1,14 @@
 //! In-guest tests of the syscall table's pointer declarations (kernel_tests
 //! only, ROADMAP §10.5): `sysdecl`, embedded from `make user` (C-USERBINS),
-//! run in ring 3. Rows: the list in crate::ktest.
+//! run in ring 3; and of the syscall layer's own errnos (ROADMAP §10.4):
+//! `errno_checks`. Rows: the list in crate::ktest.
 
+use vibeos::arch::SyscallAbi;
+use vibeos::kerror::KError;
 use vibeos::proc::{wexitstatus, wifexited};
-use vibeos::syscall::{EBADF, ECHILD, EFAULT, PtrKind, ROWS};
+use vibeos::syscall::{PtrKind, ROWS};
 
+use crate::arch::current::Arch;
 use crate::ktest::Outcome;
 use crate::ktest::user::{self, Image};
 
@@ -29,7 +33,10 @@ fn run(argv: &[&str]) -> Result<u32, Outcome> {
 /// declaration cannot drift from its handler (F150).
 pub(crate) fn syscall_ptr_decl_efault() -> Outcome {
     let mut cases = 0u32;
-    for row in ROWS.iter().filter(|r| r.x86_64.is_some()) {
+    for row in ROWS
+        .iter()
+        .filter(|r| <Arch as SyscallAbi>::table().number(r.sys).is_some())
+    {
         for arg in row.args {
             if !arg.ptr.is_some_and(|p| p.kind != PtrKind::Unread) {
                 continue;
@@ -39,11 +46,12 @@ pub(crate) fn syscall_ptr_decl_efault() -> Outcome {
                     Ok(st) => st,
                     Err(o) => return o,
                 };
-                if st != EFAULT as u32 {
+                if st != KError::Fault.errno() as u32 {
                     return crate::fail_fmt!(
-                        "{}.{} {bad}: exit {st}, want EFAULT ({EFAULT})",
+                        "{}.{} {bad}: exit {st}, want EFAULT ({})",
                         row.name,
-                        arg.name
+                        arg.name,
+                        KError::Fault.errno()
                     );
                 }
                 cases += 1;
@@ -60,8 +68,8 @@ pub(crate) fn syscall_ptr_decl_efault() -> Outcome {
 /// before the buffer (SYSCALL.md §3).
 pub(crate) fn read_ebadf_before_efault() -> Outcome {
     match run(&["sysdecl", "order-read"]) {
-        Ok(st) if st == EBADF as u32 => Outcome::Ok,
-        Ok(st) => crate::fail_fmt!("exit {st}, want EBADF ({EBADF})"),
+        Ok(st) if st == KError::BadF.errno() as u32 => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("exit {st}, want EBADF ({})", KError::BadF.errno()),
         Err(o) => o,
     }
 }
@@ -70,8 +78,23 @@ pub(crate) fn read_ebadf_before_efault() -> Outcome {
 /// child is looked for before the status is copied (SYSCALL.md §3).
 pub(crate) fn wait4_echild_before_efault() -> Outcome {
     match run(&["sysdecl", "order-wait4"]) {
-        Ok(st) if st == ECHILD as u32 => Outcome::Ok,
-        Ok(st) => crate::fail_fmt!("exit {st}, want ECHILD ({ECHILD})"),
+        Ok(st) if st == KError::Child.errno() as u32 => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("exit {st}, want ECHILD ({})", KError::Child.errno()),
         Err(o) => o,
+    }
+}
+
+/// The syscall layer's own checks return Linux's errno (ROADMAP §10.4,
+/// E2): `errno_checks` runs each case in ring 3 and exits 0, or with the
+/// number of the case that failed.
+pub(crate) fn syscall_errno_checks() -> Outcome {
+    match user::run(&Image::UserBin("errno_checks"), &["errno_checks"]) {
+        Ok(st) if wifexited(st) && wexitstatus(st) == 0 => Outcome::Ok,
+        Ok(st) if wifexited(st) => {
+            let n = wexitstatus(st);
+            crate::fail_fmt!("case {n}")
+        }
+        Ok(st) => crate::fail_fmt!("killed, status {st:#x}"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
     }
 }

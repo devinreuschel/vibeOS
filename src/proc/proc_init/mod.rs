@@ -7,9 +7,9 @@
 use core::fmt::Write;
 use core::mem::MaybeUninit;
 
-use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
-use vibeos::arch::x86_64::trap::{self as x86_trap, Abi};
-use vibeos::elf::ElfError;
+use vibeos::addr_space::{AsError, MmapError, mmap_request};
+#[cfg(target_arch = "x86_64")]
+use vibeos::arch::x86_64::trap as x86_trap;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kalloc::{AllocError, TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
@@ -24,17 +24,14 @@ use vibeos::proc::{
     fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
-use vibeos::syscall::{
-    self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, EMFILE,
-    ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, EPERM, ESRCH, F_GETFD, F_SETFD,
-    Handlers, SysResult, UserFrame,
-};
+use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult, UserFrame};
 use vibeos::thread::ThreadId;
 use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, SyscallAbi, TrapKind};
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
 use crate::addr_space_init;
+use crate::arch::current::{AddressSpace, Arch};
 use crate::arch::idt::TrapFrame;
 use crate::console_init;
 use crate::file_init;
@@ -42,10 +39,10 @@ use crate::proc::uaccess_init;
 use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::syscall_init;
-use crate::thread_init::{self, Sched, SpawnError};
+use crate::thread_init::{self, Sched};
+use crate::user_init;
 #[cfg(not(feature = "vibefs_crash"))]
-use crate::user_init::Loaded;
-use crate::user_init::{self, LoadError};
+use crate::user_init::{LoadError, Loaded};
 
 mod exec;
 mod exit;
@@ -258,8 +255,7 @@ fn with_sched_table<R>(f: impl FnOnce(&mut Sched, &mut Table) -> R) -> R {
     thread_init::with_sched(|s| table_locked(|t| f(s, t)))
 }
 
-fn intern_name(path: &str) -> &'static str {
-    let b = path.as_bytes();
+fn intern_name(b: &[u8]) -> &'static str {
     let mut i = b.len();
     while i > 0 && b[i - 1] != b'/' {
         i -= 1;
@@ -270,48 +266,6 @@ fn intern_name(path: &str) -> &'static str {
         b"tests" => "tests",
         b"hello" => "hello",
         _ => "user",
-    }
-}
-
-fn fs_errno(e: FsError) -> i32 {
-    match e {
-        FsError::NotFound => ENOENT,
-        FsError::Exists => EEXIST,
-        FsError::NotDir => ENOTDIR,
-        FsError::IsDir => EISDIR,
-        FsError::Inval => EINVAL,
-        FsError::NoSpace => EMFILE,
-        FsError::NameTooLong => ENAMETOOLONG,
-        FsError::Busy => EBUSY,
-        FsError::Badf => EBADF,
-        FsError::Io => EIO,
-        FsError::FileTooBig => EFBIG,
-        FsError::NoMem => ENOMEM,
-        FsError::Again => EAGAIN,
-        FsError::Loop | FsError::NotEmpty | FsError::NotSupp => EINVAL,
-    }
-}
-
-fn load_errno(e: LoadError) -> i32 {
-    match e {
-        LoadError::Fs(f) => fs_errno(f),
-        LoadError::Elf(ElfError::ImageTooBig) => ENOMEM,
-        LoadError::Elf(_) => ENOEXEC,
-        LoadError::As(_) => ENOMEM,
-        LoadError::Mem(_) => EFAULT,
-        LoadError::Empty => ENOEXEC,
-        LoadError::NoProc => EAGAIN,
-        LoadError::Spawn(e) => spawn_errno(e),
-        LoadError::NoMem => ENOMEM,
-    }
-}
-
-/// Linux's errno for a thread `fork` or a new process could not get:
-/// `EAGAIN` for a full thread table, `ENOMEM` for a kernel stack.
-fn spawn_errno(e: SpawnError) -> i32 {
-    match e {
-        SpawnError::NoSlot => EAGAIN,
-        SpawnError::NoMemory => ENOMEM,
     }
 }
 
@@ -446,7 +400,7 @@ pub fn start_init() {
             INIT_ENVP_MAX
         );
     }
-    match spawn_elf("/sbin/init", v.argv(), v.envp(), INIT_PID, 0) {
+    match spawn_elf(b"/sbin/init", v.argv(), v.envp(), INIT_PID, 0) {
         Ok(_) => {}
         Err(e) => {
             #[expect(
@@ -463,7 +417,7 @@ pub fn start_init() {
 /// [`wait_kernel`]).
 #[cfg(not(feature = "vibefs_crash"))]
 pub(crate) fn spawn_elf(
-    path: &str,
+    path: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
     prefer: u32,
@@ -482,10 +436,7 @@ pub(crate) fn spawn_elf(
 /// The in-guest tests' ring-3 entry (C-RING3).
 #[cfg(feature = "kernel_tests")]
 pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, LoadError> {
-    let name = match argv.first().map(|a| core::str::from_utf8(a)) {
-        Some(Ok(a)) => intern_name(a),
-        _ => "user",
-    };
+    let name = argv.first().map_or("user", |a| intern_name(a));
     start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
 }
 
@@ -510,11 +461,11 @@ fn start_loaded(
             return Err(LoadError::NoProc);
         }
     };
-    let cr3 = loaded.space.root().as_u64();
+    let root = loaded.space.root().as_u64();
     let frame = UserFrame::new_user(loaded.entry, loaded.rsp);
     let fs = loaded.fs;
     let boxed = loaded.space;
-    let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3, &frame) {
+    let h = match thread_init::spawn_user(name, user_thread_entry, pid, root, &frame) {
         Ok(h) => h,
         Err(e) => {
             with_sched_table(|s, t| release_pid(s, t, pid));
@@ -597,13 +548,11 @@ pub fn syscall(frame: &mut UserFrame) -> i64 {
     #[cfg(feature = "kernel_tests")]
     testing::on_entry(frame);
     apply_pending(Some(&mut *frame));
-    let nr = Abi::nr(frame);
-    let args: [u64; 6] = core::array::from_fn(|i| Abi::arg(frame, i));
+    let nr = Arch::nr(frame);
+    let args: [u64; 6] = core::array::from_fn(|i| Arch::arg(frame, i));
     let ret = syscall::encode(dispatch_frame(nr, args, Some(frame)));
     if syscall_init::trace_enabled() {
-        let name = syscall::x86_64::TABLE
-            .lookup(nr)
-            .map_or("?", |s| s.row().name);
+        let name = Arch::table().lookup(nr).map_or("?", |s| s.row().name);
         #[expect(
             clippy::let_underscore_must_use,
             reason = "a write to Serial cannot fail (DESIGN §2.5)"
@@ -620,7 +569,7 @@ pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
 }
 
 fn dispatch_frame(nr: u64, args: [u64; 6], frame: Option<&mut UserFrame>) -> SysResult {
-    syscall::x86_64::dispatch(&mut Ctx { frame }, nr, &args)
+    Arch::dispatch(&mut Ctx { frame }, nr, &args)
 }
 
 /// The running syscall's context: the user frame, which `fork` copies and
@@ -809,11 +758,11 @@ fn sys_getpid() -> SysResult {
     Ok(pid as usize)
 }
 
-fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, i32> {
+fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, KError> {
     match uaccess_init::strncpy_from_user(out, va) {
-        Ok(n) if n == out.len() => Err(ENAMETOOLONG),
+        Ok(n) if n == out.len() => Err(KError::NameTooLong),
         Ok(n) => Ok(n),
-        Err(f) => Err(f.errno()),
+        Err(f) => Err(KError::from(f)),
     }
 }
 
@@ -821,6 +770,7 @@ fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, i32> {
 /// decode of the vector and error code, the cause refined from the frame's
 /// DR6 (`#DB`) or the thread's FSW and MXCSR (`#MF`, `#XM`), then the one
 /// table in `vibeos::trap` (DESIGN §5.2). `None`: not a ring-3 fault.
+#[cfg(target_arch = "x86_64")]
 fn sig_for_vec(f: &TrapFrame) -> Option<(u32, i32)> {
     let kind = match x86_trap::decode(f.vector as u8, f.error_code) {
         TrapKind::Debug(_) => TrapKind::Debug(vectors::dr6_cause(f.dr6)),
@@ -857,6 +807,7 @@ pub fn try_user_fault(f: &TrapFrame) {
     // runs with IF=1, and a thread that ran on this CPU between two writes
     // would land inside this line in the CPU's log capture stage.
     let (name, rip, err) = (sig_name(sig), f.user().rip, f.error_code);
+    #[cfg(target_arch = "x86_64")]
     #[expect(
         clippy::let_underscore_must_use,
         reason = "a write to Serial cannot fail (DESIGN §2.5)"
@@ -894,23 +845,25 @@ pub(crate) mod testing {
     use crate::thread_init;
     use crate::time_init;
 
-    /// `cr2` of the `#PF` whose kill line yields once; 0 for none.
+    /// The fault address of the `#PF` whose kill line yields once; 0 for
+    /// none.
     static KILL_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
     /// Kill lines `try_user_fault` has finished writing since boot.
     static KILL_LINES: AtomicU64 = AtomicU64::new(0);
 
-    /// The next CPL-3 `#PF` at `cr2` that ends in a kill yields in
+    /// The next CPL-3 `#PF` at `fault_addr` that ends in a kill yields in
     /// `try_user_fault` once its kill line is written, until another kill
     /// line is written, for at most 1 s of TSC time: a kill line written
     /// in pieces would take the other line inside it.
-    pub(crate) fn arm_kill_line_yield(cr2: u64) {
-        KILL_YIELD_CR2.store(cr2, Ordering::Release);
+    pub(crate) fn arm_kill_line_yield(fault_addr: u64) {
+        KILL_YIELD_CR2.store(fault_addr, Ordering::Release);
     }
 
     pub(crate) fn disarm_kill_line_yield() {
         KILL_YIELD_CR2.store(0, Ordering::Release);
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(super) fn kill_line_yield(f: &TrapFrame) {
         let armed = KILL_YIELD_CR2.load(Ordering::Acquire);
         if armed == 0
@@ -1155,9 +1108,10 @@ pub(crate) mod testing {
         if c != 0 {
             frame.rcx = c;
         }
+        #[cfg(target_arch = "x86_64")]
         if APIC_ARMED.load(Ordering::Acquire) {
             // One IF=0 stretch: the `PerCpu` read and CPUID see one CPU.
-            let _g = crate::x86::InterruptGuard::enter();
+            let _g = crate::arch::current::InterruptGuard::enter();
             let mine = per_cpu_init::current()
                 .remote
                 .apic_id

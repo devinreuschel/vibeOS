@@ -6,15 +6,25 @@ architecture, its arguments' C types in order, and its pointer declarations
 (the file's header gives the schema). This script writes, from it:
 
 - `crates/core/src/proc/syscall_table.rs`: `Sys`, `ROWS`, `trait Handlers`,
-  and per architecture the numbers, the `TABLE` dispatch indexes and the
-  typed `call`/`dispatch`, plus the host tests' `Recorder`;
+  aarch64's numbers, the `TABLE` dispatch indexes and the typed
+  `call`/`dispatch`, plus the host tests' `Recorder`;
+- `crates/core/src/arch/x86_64/syscall.rs`: the same for x86_64, in its
+  port's pure half, which `SyscallAbi::dispatch` reaches (PORTABILITY
+  §11.1);
 - `user/src/arch/x86_64/sys.rs`: the numbers, `Sys::from_name`, and one
   stub per row with an x86_64 number;
 - the block between `<!-- gen_syscalls: begin syscall-table -->` and
   `<!-- gen_syscalls: end syscall-table -->` in docs/SYSCALL.md §3.
 
+From the `errno_table! { … }` block of `crates/core/src/kerror.rs` (ROADMAP
+§10.4, C-KERROR), one row per line, `Variant = N, "ENAME", "Used text";`:
+
+- the block between `<!-- gen_syscalls: begin errno-table -->` and
+  `<!-- gen_syscalls: end errno-table -->` in docs/SYSCALL.md §2;
+- `user/src/errno.rs`: the user runtime's `Errno::ENAME` constants.
+
 `EMITTERS` is the registry of outputs: a whole file, or a marked block in a
-document. A later emitter (SYSCALL.md §2's errno table) is one more entry.
+document.
 
     gen_syscalls.py [--check]
 
@@ -37,8 +47,11 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 TABLE = Path("crates/core/src/proc/syscalls.toml")
 KERNEL_OUT = Path("crates/core/src/proc/syscall_table.rs")
+X86_OUT = Path("crates/core/src/arch/x86_64/syscall.rs")
 USER_OUT = Path("user/src/arch/x86_64/sys.rs")
 SYSCALL_MD = Path("docs/SYSCALL.md")
+KERROR = Path("crates/core/src/kerror.rs")
+USER_ERRNO_OUT = Path("user/src/errno.rs")
 
 MAX_ARGS = 6
 
@@ -83,11 +96,8 @@ pub struct Row {
     pub sys: Sys,
     pub name: &'static str,
     /// The arguments, in canonical (x86_64) register order; the arity is
-    /// their count.
+    /// their count. Each architecture's number is in its [`NrTable`].
     pub args: &'static [Arg],
-    /// The number on each architecture, `None` where Linux has none.
-    pub x86_64: Option<u32>,
-    pub aarch64: Option<u32>,
 }
 
 impl Row {
@@ -201,6 +211,12 @@ impl NrTable {
     pub const fn slots(&self) -> &'static [Option<Sys>] {
         self.slots
     }
+
+    /// `sys`'s number in this table; `None` where Linux has none.
+    pub fn number(&self, sys: Sys) -> Option<u64> {
+        let n = self.slots.iter().position(|s| *s == Some(sys))?;
+        u64::try_from(n).ok()
+    }
 }
 """
 
@@ -266,9 +282,20 @@ class Row:
         return self.x86_64 if arch == "x86_64" else self.aarch64
 
 
+@dataclass(frozen=True)
+class ErrnoRow:
+    """One row of the `KError` table."""
+
+    variant: str
+    value: int
+    name: str
+    used: str
+
+
 @dataclass
 class Table:
     rows: list[Row] = field(default_factory=list)
+    errno: list[ErrnoRow] = field(default_factory=list)
 
 
 def parse_ctype(text: str, where: str) -> CType:
@@ -438,6 +465,90 @@ def parse(text: str) -> Table:
     return table
 
 
+# ----------------------------------------------------------- errno table
+
+ERRNO_OPEN = "errno_table! {"
+ERRNO_ROW = re.compile(
+    r'^\s*([A-Z][A-Za-z0-9]*)\s*=\s*([0-9]+),\s*"(E[A-Z0-9]+)",\s*"((?:[^"\\]|\\.)*)";\s*$'
+)
+
+
+def parse_errno_table(text: str, where: str) -> list[ErrnoRow]:
+    """The rows of the one `errno_table! { … }` invocation in `text`.
+
+    Every line inside the block but a blank line or a `//` comment must be a
+    row; each variant, value and name appears once, and a value is 1 to 4095.
+    """
+    lines = text.splitlines()
+    opens = [i for i, ln in enumerate(lines) if ln.rstrip() == ERRNO_OPEN]
+    if len(opens) != 1:
+        raise TableError(f"{where}: want one line {ERRNO_OPEN!r}, found {len(opens)}")
+    rows: list[ErrnoRow] = []
+    for n in range(opens[0] + 1, len(lines)):
+        raw = lines[n]
+        if raw.rstrip() == "}":
+            break
+        body = raw.strip()
+        if not body or body.startswith("//"):
+            continue
+        m = ERRNO_ROW.match(raw)
+        if m is None:
+            raise TableError(f"{where}:{n + 1}: not an errno row: {body!r}")
+        used = re.sub(r"\\(.)", r"\1", m.group(4))
+        rows.append(ErrnoRow(m.group(1), int(m.group(2)), m.group(3), used))
+    else:
+        raise TableError(f"{where}: {ERRNO_OPEN!r} block has no closing '}}' line")
+    for attr in ("variant", "value", "name"):
+        seen: set[object] = set()
+        for r in rows:
+            v = getattr(r, attr)
+            if v in seen:
+                raise TableError(f"{where}: {r.name}: {attr} {v!r} repeated")
+            seen.add(v)
+    for r in rows:
+        if not 1 <= r.value <= 4095:
+            raise TableError(f"{where}: {r.name}: value {r.value} outside 1 to 4095")
+    if not rows:
+        raise TableError(f"{where}: the errno table has no rows")
+    return rows
+
+
+def load_errno_table(path: Path) -> list[ErrnoRow]:
+    """The `KError` table's rows from the Rust file at `path`."""
+    return parse_errno_table(path.read_text(encoding="utf-8"), str(path))
+
+
+def emit_errno_table(rows: Sequence[ErrnoRow]) -> str:
+    """SYSCALL.md §2's errno table, in value order, for its marked block."""
+    out = ["| Name | Value | Used |", "|------|------:|------|"]
+    for r in sorted(rows, key=lambda r: r.value):
+        out.append(f"| `{r.name}` | {r.value} |" + (f" {r.used} |" if r.used else " |"))
+    return "\n" + "\n".join(out) + "\n\n"
+
+
+def render_errno_md(table: Table) -> str:
+    return emit_errno_table(table.errno)
+
+
+def render_user_errno(table: Table) -> str:
+    out = [
+        f"// @generated by scripts/gen_syscalls.py from {KERROR.as_posix()}.",
+        "// Do not edit: change the table and run the script (ROADMAP §10.4).",
+        "",
+        "//! Linux's errno values, as the kernel's `KError` table defines them",
+        "//! (C-KERROR): `Errno::EBADF` is what a call that fails with `EBADF`",
+        "//! returns.",
+        "",
+        "use crate::sys::Errno;",
+        "",
+        "impl Errno {",
+    ]
+    for r in sorted(table.errno, key=lambda r: r.value):
+        out += [f"    /// Linux `{r.name}`.", f"    pub const {r.name}: Errno = Errno({r.value});"]
+    out.append("}")
+    return "\n".join(out) + "\n"
+
+
 # ---------------------------------------------------------------- kernel
 
 
@@ -489,6 +600,7 @@ def kernel_params(row: Row) -> str:
 
 
 def render_arch(table: Table, arch: str, rule: str, doc: str) -> list[str]:
+    """`arch`'s numbers, `TABLE`, `call` and `dispatch` as an inline `pub mod`."""
     rows = [r for r in table.rows if r.nr(arch) is not None]
     size = max((r.nr(arch) or 0) for r in rows) + 1
     out = [
@@ -537,7 +649,7 @@ def render_arch(table: Table, arch: str, rule: str, doc: str) -> list[str]:
         out += rust_list("            ", f"Sys::{r.variant} => h.{r.name}(", call_args, ")", ",")
     if no_nr:
         pat = " | ".join(f"Sys::{r.variant}" for r in no_nr)
-        out.append(f"            {pat} => Err(KError::ENOSYS),")
+        out.append(f"            {pat} => Err(KError::NoSys),")
     out += [
         "        }",
         "    }",
@@ -548,12 +660,40 @@ def render_arch(table: Table, arch: str, rule: str, doc: str) -> list[str]:
         " -> SysResult {",
         "        match TABLE.lookup(raw_nr) {",
         "            Some(sys) => call(h, sys, regs),",
-        "            None => Err(KError::ENOSYS),",
+        "            None => Err(KError::NoSys),",
         "        }",
         "    }",
         "}",
     ]
     return out
+
+
+def render_x86(table: Table) -> str:
+    """x86_64's module as its own file in the port's pure half: `render_arch`'s
+    module body, dedented, importing the shared types from the table."""
+    body = render_arch(
+        table,
+        "x86_64",
+        "SignExtendEax",
+        "x86_64: the number is `eax` sign-extended (SYSCALL.md §1).",
+    )[2:-1]
+    body = [ln[4:] if ln.startswith("    ") else ln for ln in body]
+    body[0:2] = [
+        "use crate::kerror::KError;",
+        "use crate::proc::syscall_table::{Handlers, NrRule, NrTable, Sys, SysResult};",
+    ]
+    out = [
+        f"// {GENERATED}.",
+        "// Do not edit: change the table and run the script (ROADMAP §10.5).",
+        "",
+        "//! The x86_64 syscall numbers, the table dispatch indexes, and the typed",
+        "//! `call`/`dispatch` (SYSCALL.md §1, §3): the pure half of the `SyscallAbi`",
+        "//! row (PORTABILITY §11.1). The number is `eax` sign-extended.",
+        "",
+    ]
+    out += body
+    out.append("")
+    return "\n".join(out)
 
 
 def val_variant(t: CType) -> str:
@@ -636,9 +776,6 @@ def render_kernel(table: Table) -> str:
             out.append("        ],")
         else:
             out.append("        args: &[],")
-        for arch in ("x86_64", "aarch64"):
-            nr = r.nr(arch)
-            out.append(f"        {arch}: {'None' if nr is None else f'Some({nr})'},")
         out.append("    },")
     out += [
         "];",
@@ -658,13 +795,6 @@ def render_kernel(table: Table) -> str:
         else:
             out.append(sig)
     out += ["}", ""]
-    out += render_arch(
-        table,
-        "x86_64",
-        "SignExtendEax",
-        "x86_64: the number is `eax` sign-extended (SYSCALL.md §1).",
-    )
-    out.append("")
     out += render_arch(
         table,
         "aarch64",
@@ -976,8 +1106,11 @@ class Emitter:
 
 EMITTERS: list[Emitter] = [
     Emitter(KERNEL_OUT, render_kernel),
+    Emitter(X86_OUT, render_x86),
     Emitter(USER_OUT, render_user),
     Emitter(SYSCALL_MD, render_md, "syscall-table"),
+    Emitter(SYSCALL_MD, render_errno_md, "errno-table"),
+    Emitter(USER_ERRNO_OUT, render_user_errno),
 ]
 
 
@@ -996,6 +1129,7 @@ def splice(doc: str, block: str, body: str, path: Path) -> str:
 def generate(text: str, root: Path = ROOT) -> dict[Path, str]:
     """Every output's text, by path relative to `root`, from table `text`."""
     table = parse(text)
+    table.errno = load_errno_table(root / KERROR)
     outputs: dict[Path, str] = {}
     for em in EMITTERS:
         body = em.render(table)

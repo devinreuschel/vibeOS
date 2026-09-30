@@ -6,12 +6,12 @@
 //! entries flushed on every CPU, so a user map in its range aliases
 //! nothing; only the trampoline page stays, not global.
 
+use crate::arch::PageTable;
 use crate::kalloc::{AllocError, TryVec};
 use crate::limits;
 use crate::paging::{
-    FrameAlloc, KERNEL_PML4_FIRST, MapError, MapMode, Mapper, NULL_GUARD_LEN, PAGE_SIZE_4K,
-    PTES_PER_TABLE, PageFlags, PageSize, PhysAddr, Probe, USER_MAP_END, VirtAddr, is_canonical,
-    user_leaf_flags,
+    FrameAlloc, MapError, MapMode, Mapper, NULL_GUARD_LEN, PAGE_SIZE_4K, PageFlags, PageSize,
+    PhysAddr, Probe, USER_MAP_END, VirtAddr, is_canonical, user_leaf_flags,
 };
 use crate::pmm::Frames;
 use crate::proc::uaccess::user_range_ok;
@@ -116,6 +116,21 @@ pub enum AsError {
     Map(MapError),
 }
 
+/// An address-space error's errno: Linux's for each condition, as `mmap` returns it.
+impl From<AsError> for crate::kerror::KError {
+    fn from(e: AsError) -> Self {
+        match e {
+            AsError::Misaligned | AsError::Overflow | AsError::KernelRange | AsError::NotMapped => {
+                Self::Inval
+            }
+            AsError::NullGuard => Self::Perm,
+            AsError::Overlap | AsError::AlreadyMapped => Self::Exist,
+            AsError::OutOfFrames | AsError::NoRegionSlot | AsError::NoVaSpace => Self::NoMem,
+            AsError::Map(m) => Self::from(m),
+        }
+    }
+}
+
 /// What `brk(want)` does, from [`AddressSpace::brk_plan`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrkPlan {
@@ -161,6 +176,17 @@ pub enum MmapError {
     NotAnon,
 }
 
+/// An `mmap` request's errno; a file mapping, which `sys_mmap` refines by the fd, is no device.
+impl From<MmapError> for crate::kerror::KError {
+    fn from(e: MmapError) -> Self {
+        match e {
+            MmapError::Inval => Self::Inval,
+            MmapError::NoMem => Self::NoMem,
+            MmapError::NotAnon => Self::NoDev,
+        }
+    }
+}
+
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserMemError {
@@ -171,10 +197,20 @@ pub enum UserMemError {
     NullGuard,
 }
 
-impl UserMemError {
-    /// Linux `EFAULT`. User misuse, never a panic.
-    pub const EFAULT: i32 = 14;
+/// A user range that is not the caller's is `EFAULT`: user misuse, never a panic.
+impl From<UserMemError> for crate::kerror::KError {
+    fn from(e: UserMemError) -> Self {
+        match e {
+            UserMemError::NonCanonical
+            | UserMemError::Kernel
+            | UserMemError::Overflow
+            | UserMemError::Unmapped
+            | UserMemError::NullGuard => Self::Fault,
+        }
+    }
+}
 
+impl UserMemError {
     /// Which bound a range that `uaccess::user_range_ok` refused breaks.
     /// Only meaningful for a refused range.
     pub const fn refused(ptr: u64, len: u64) -> Self {
@@ -196,16 +232,6 @@ impl UserMemError {
         }
         Self::NullGuard
     }
-
-    pub const fn errno(self) -> i32 {
-        match self {
-            Self::NonCanonical
-            | Self::Kernel
-            | Self::Overflow
-            | Self::Unmapped
-            | Self::NullGuard => Self::EFAULT,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -226,8 +252,8 @@ pub fn region_table() -> Result<RegionTable, AllocError> {
     limits::table(MAX_REGIONS, || None)
 }
 
-pub struct AddressSpace {
-    mapper: Mapper,
+pub struct AddressSpace<A: PageTable> {
+    mapper: Mapper<A>,
     regions: RegionTable,
     user_frames: usize,
     pt_frames: usize,
@@ -253,7 +279,7 @@ unsafe impl<A: FrameAlloc> FrameAlloc for Counting<'_, A> {
     }
 }
 
-impl AddressSpace {
+impl<A: PageTable> AddressSpace<A> {
     /// New PML4, kernel half shared from `kernel`, with the table in
     /// `regions`, one from [`region_table`], as its region slots: taken only
     /// on success, so a failure leaves it for the caller to drop after the
@@ -266,9 +292,9 @@ impl AddressSpace {
     /// # Safety
     /// `kernel` is the live kernel mapper. `alloc` returns owned frames
     /// reachable through `kernel.hhdm_offset()`.
-    pub unsafe fn new<A: FrameAlloc>(
-        kernel: &Mapper,
-        alloc: &mut A,
+    pub unsafe fn new<F: FrameAlloc>(
+        kernel: &Mapper<A>,
+        alloc: &mut F,
         regions: &mut Option<RegionTable>,
     ) -> Option<Self> {
         regions.as_ref()?;
@@ -296,7 +322,7 @@ impl AddressSpace {
         Some(space)
     }
 
-    pub fn mapper(&self) -> &Mapper {
+    pub fn mapper(&self) -> &Mapper<A> {
         &self.mapper
     }
 
@@ -323,12 +349,12 @@ impl AddressSpace {
 
     /// # Safety
     /// `alloc` returns owned frames; `va` is the user half and not already mapped.
-    pub unsafe fn map_anon<A: FrameAlloc + FrameFree>(
+    pub unsafe fn map_anon<F: FrameAlloc + FrameFree>(
         &mut self,
         va: u64,
         len: u64,
         perms: UserPerms,
-        alloc: &mut A,
+        alloc: &mut F,
     ) -> Result<(), AsError> {
         self.check_new_region(va, len)?;
         // SAFETY: `check_new_region` found `[va, va+len)` in the user half
@@ -387,12 +413,12 @@ impl AddressSpace {
     /// # Safety
     /// No page of `[va, va+len)` is mapped in this space, and `alloc`
     /// returns owned frames.
-    pub unsafe fn map_pages<A: FrameAlloc + FrameFree>(
+    pub unsafe fn map_pages<F: FrameAlloc + FrameFree>(
         &mut self,
         va: u64,
         len: u64,
         perms: UserPerms,
-        alloc: &mut A,
+        alloc: &mut F,
     ) -> Result<(), AsError> {
         check_map_range(va, len)?;
         let flags = perms.flags();
@@ -465,11 +491,11 @@ impl AddressSpace {
     /// # Safety
     /// Every leaf in the range holds an order-0 token that `pool` may take
     /// back, and `flush` removes the page from every TLB that may hold it.
-    pub unsafe fn unmap_pages<A: FrameFree>(
+    pub unsafe fn unmap_pages<F: FrameFree>(
         &mut self,
         va: u64,
         len: u64,
-        pool: &mut A,
+        pool: &mut F,
         flush: &mut dyn FnMut(u64),
     ) -> Result<(), AsError> {
         check_map_range(va, len)?;
@@ -894,7 +920,7 @@ pub unsafe trait FrameFree {
     fn free_frame(&mut self, f: Frames);
 }
 
-impl AddressSpace {
+impl<A: PageTable> AddressSpace<A> {
     /// `munmap` of `[va, va+len)`: every region in the range is trimmed,
     /// split or removed, and each of its leaves is cleared, flushed with
     /// `flush(va)` after its PTE is cleared, and freed to `pool`. Holes and
@@ -906,11 +932,11 @@ impl AddressSpace {
     /// # Safety
     /// Every leaf in the range holds an order-0 token that `pool` may take
     /// back, and `flush` removes the page from every TLB that may hold it.
-    pub unsafe fn unmap_free<A: FrameFree>(
+    pub unsafe fn unmap_free<F: FrameFree>(
         &mut self,
         va: u64,
         len: u64,
-        pool: &mut A,
+        pool: &mut F,
         flush: &mut dyn FnMut(u64),
     ) -> Result<(), AsError> {
         if !va.is_multiple_of(PAGE_SIZE_4K) || !len.is_multiple_of(PAGE_SIZE_4K) {
@@ -973,7 +999,7 @@ impl AddressSpace {
 
     /// # Safety
     /// `pool` may recycle every user/PT/PML4 frame this space still owns.
-    pub unsafe fn teardown_pool<A: FrameFree>(&mut self, pool: &mut A) -> TeardownStats {
+    pub unsafe fn teardown_pool<F: FrameFree>(&mut self, pool: &mut F) -> TeardownStats {
         let mut free = |f: Frames| pool.free_frame(f);
         // SAFETY: the caller hands every frame this space owns to `pool`
         // and uses the space no more (this fn's contract,
@@ -988,12 +1014,12 @@ impl AddressSpace {
     ///
     /// # Safety
     /// `kernel` is the live kernel mapper. `alloc` supplies owned frames.
-    pub unsafe fn clone_anon<A: FrameAlloc + FrameFree>(
+    pub unsafe fn clone_anon<F: FrameAlloc + FrameFree>(
         &self,
-        kernel: &Mapper,
-        alloc: &mut A,
+        kernel: &Mapper<A>,
+        alloc: &mut F,
         regions: &mut Option<RegionTable>,
-    ) -> Result<AddressSpace, AsError> {
+    ) -> Result<AddressSpace<A>, AsError> {
         // SAFETY: `kernel` is the live kernel mapper and `alloc` hands out
         // owned frames (this fn's contract,
         // `addr_space::AddressSpace::clone_anon`), as `new` requires.
@@ -1053,11 +1079,6 @@ unsafe impl FrameFree for crate::pmm::testing::Pool {
         self.buddy.free(f);
     }
 }
-
-const _: () = {
-    assert!(KERNEL_PML4_FIRST == 256);
-    assert!(PTES_PER_TABLE == 512);
-};
 
 #[cfg(test)]
 mod tests;

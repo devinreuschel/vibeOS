@@ -413,6 +413,16 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         self.op(cx, |k, x| kern_readlink(k, x, ino, buf))
     }
 
+    /// The console and the tty cannot seek (`ESPIPE`), as Linux's.
+    fn check_seek(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+        self.op(cx, |k, x| {
+            match kern_get(k, x.inst, ino.key[0]).map(|n| n.kind) {
+                Some(KernKind::Console | KernKind::Tty) => Err(FsError::SPipe),
+                _ => Ok(()),
+            }
+        })
+    }
+
     fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
         self.op(cx, |k, x| kern_try_free(k, x.inst, ino.key[0]));
         Ok(())
@@ -459,4 +469,4 @@ fn copy_off(src: &[u8], off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

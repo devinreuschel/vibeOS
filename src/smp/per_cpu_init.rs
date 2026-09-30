@@ -21,12 +21,8 @@ use vibeos::sched::ReadyQueue;
 use vibeos::thread::{MAX_THREADS, Tcb};
 
 use crate::acpi_init;
+use crate::arch::current::{InterruptGuard, interrupts_enabled, percpu, set_per_cpu_hooks};
 use crate::cell::BootCell;
-use crate::x86;
-use crate::x86::InterruptGuard;
-
-pub const IA32_GS_BASE: u32 = 0xC000_0101;
-pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 #[allow(
     clippy::disallowed_types,
@@ -45,14 +41,12 @@ static REMOTE: BootCell<Box<[PerCpuRemote]>> = BootCell::new();
 // from its atomic fields alone; `scripts/check_cells.py` rejects an
 // `unsafe impl` of `Send` or `Sync` for it (invariant I120).
 crate::cell::assert_impl!(PerCpuRemote: Sync);
-static LIVE: AtomicBool = AtomicBool::new(false);
 /// Bit `cpu_id`. MADTs with >64 CPUs need a wider mask later.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
 static WITH_BUSY: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
 
 fn apic_id() -> u32 {
-    let (_, ebx, _, _) = x86::cpuid(1, 0);
-    ebx >> 24
+    percpu::hw_cpu_id()
 }
 
 fn madt_cpu_count() -> usize {
@@ -105,27 +99,21 @@ pub unsafe fn init_bsp() {
     }
     remote[0].apic_id.store(apic_id(), Ordering::Relaxed);
     remote[0].ready.store(true, Ordering::Release);
-    let ptr = boxed[0].self_ptr as u64;
-    // SAFETY: `ptr` is slot 0's address, the BSP's `PerCpu`, and the heap
-    // keeps the boxed slice in place for good once `CPUS` holds it; the GDT
-    // load already did the `mov gs`, and no ISR reads `gs:[0]` yet (this
-    // fn's `# Safety` contract), so both bases name this CPU's area from
-    // here on (invariant I4, established here).
-    unsafe {
-        x86::wrmsr(IA32_GS_BASE, ptr);
-        x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
-    }
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    // SAFETY: slot 0 is the BSP's `PerCpu`, and the heap keeps the boxed
+    // slice in place for good once `CPUS` holds it; the GDT load already
+    // did the `mov gs`, and no ISR reads `gs:[0]` yet (this fn's `# Safety`
+    // contract), as `percpu::install_base` requires; established here.
+    unsafe { percpu::install_base(boxed[0].self_ptr) };
     // SAFETY: single writer before `smp: done`, no reader yet (BootCell's
     // set contract); established here: `init_bsp` runs once on the BSP.
     unsafe { CPUS.set(boxed) };
-    x86::set_per_cpu_hooks(irq_nest_enter, irq_nest_leave, cpu_index_hook);
-    LIVE.store(true, Ordering::Release);
+    set_per_cpu_hooks(irq_nest_enter, irq_nest_leave, cpu_index_hook);
+    percpu::mark_live();
     ONLINE.store(1, Ordering::Release);
 }
 
 pub fn is_live() -> bool {
-    LIVE.load(Ordering::Acquire)
+    percpu::is_live()
 }
 
 /// The `PerCpu` array's base address and length, which VMCOREINFO's
@@ -153,8 +141,32 @@ pub fn slot_ptr(id: u32) -> Option<*mut PerCpu> {
     CPUS.try_get()?.get(id as usize).map(|c| c.self_ptr)
 }
 
+/// Set by [`arm_if_checks`]: from here on [`current`] and [`try_current`]
+/// assert IF=0 in debug builds.
+static IF_CHECKS: AtomicBool = AtomicBool::new(false);
+
+/// Arm the IF=0 assertion of [`current`] and [`try_current`] (DESIGN §2.9
+/// rule 5). `sched_init::init` calls it once, before `irq: enabled`.
+pub fn arm_if_checks() {
+    // Release: pairs with the Acquire load in `if_checks_armed`.
+    IF_CHECKS.store(true, Ordering::Release);
+}
+
+/// Whether [`arm_if_checks`] ran.
+pub fn if_checks_armed() -> bool {
+    // Acquire: pairs with the Release store in `arm_if_checks`.
+    IF_CHECKS.load(Ordering::Acquire)
+}
+
 /// `gs:[0]` == `self_ptr`. Only after [`init_bsp`] (and AP `install_gs`).
+/// IF=0 only once [`arm_if_checks`] ran: with IF=1 the thread may move to
+/// another CPU and keep a reference to the one it left.
+#[track_caller]
 pub fn current() -> &'static PerCpu {
+    debug_assert!(
+        !if_checks_armed() || !interrupts_enabled(),
+        "per_cpu: access with IF=1 (INVARIANTS §2.9 rule 5)"
+    );
     assert!(is_live(), "per_cpu: not live");
     let p = gs_self();
     assert!(!p.is_null(), "per_cpu: gs null");
@@ -166,7 +178,14 @@ pub fn current() -> &'static PerCpu {
     unsafe { &*p }
 }
 
+/// [`current`], or `None` before the area is live. IF=0 only, as
+/// [`current`] is.
+#[track_caller]
 pub fn try_current() -> Option<&'static PerCpu> {
+    debug_assert!(
+        !if_checks_armed() || !interrupts_enabled(),
+        "per_cpu: access with IF=1 (INVARIANTS §2.9 rule 5)"
+    );
     if !is_live() {
         return None;
     }
@@ -205,7 +224,7 @@ pub fn with_current<R>(f: impl FnOnce(&mut PerCpu) -> R) -> R {
 #[inline(always)]
 pub fn with_current_switch<R>(f: impl FnOnce(&mut PerCpu) -> R) -> R {
     assert!(
-        !x86::interrupts_enabled(),
+        !interrupts_enabled(),
         "per_cpu: with_current_switch with IF on"
     );
     assert!(is_live(), "per_cpu: not live");
@@ -273,15 +292,10 @@ unsafe fn with_ptr<R>(p: *mut PerCpu, f: impl FnOnce(&mut PerCpu) -> R) -> R {
 /// `cpu` is this CPU's `PerCpu`. Call after `mov gs` (GDT load) and
 /// before `sti` / any ISR that reads `gs:[0]`.
 pub unsafe fn install_gs(cpu: &PerCpu) {
-    let ptr = cpu.self_ptr as u64;
-    // SAFETY: `cpu` is this CPU's `PerCpu`, after `mov gs` and before any
-    // ISR reads `gs:[0]` (this fn's `# Safety` contract), so both bases name
-    // this CPU's area from here on (invariant I4, established here).
-    unsafe {
-        x86::wrmsr(IA32_GS_BASE, ptr);
-        x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
-    }
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    // SAFETY: `cpu` is this CPU's `PerCpu`, which `CPUS` keeps in place,
+    // after `mov gs` and before any ISR reads `gs:[0]` (this fn's `# Safety`
+    // contract), as `percpu::install_base` requires; established here.
+    unsafe { percpu::install_base(cpu.self_ptr) };
 }
 
 /// InterruptGuard nesting. A no-op only before [`init_bsp`] sets `LIVE`;
@@ -300,39 +314,33 @@ pub fn irq_nest_leave() {
     }
 }
 
-/// `x86::cpu_index`'s hook: this CPU's `cpu_id` once the area is live.
+/// `arch::current::cpu_index`'s hook: this CPU's `cpu_id` once the area is live,
+/// read with [`percpu::cpu_id_hint`]: exact while IF=0, a hint with IF=1.
 fn cpu_index_hook() -> Option<u32> {
-    try_current().map(|c| c.cpu_id)
+    is_live().then(percpu::cpu_id_hint)
 }
 
+/// This CPU's `InterruptGuard` depth. 0 with IF=1: every guard holds IF=0
+/// while it lives (SMP.md §7.5), so only an IF=0 caller reads the slot.
 pub fn irq_nest() -> u32 {
+    if interrupts_enabled() {
+        return 0;
+    }
     try_current()
         .map(|c| c.irq_nest.load(Ordering::Relaxed))
         .unwrap_or(0)
 }
 
-pub fn gs_self() -> *mut PerCpu {
-    let ptr: u64;
-    // SAFETY: an 8-byte load at `GS_BASE` that touches no stack or flags;
-    // once `init_bsp` (on an AP, `install_gs`) ran, `GS_BASE` is this CPU's
-    // `PerCpu`, whose first field is `self_ptr` (invariant I4, established
-    // at `smp::per_cpu_init::init_bsp`), and every caller runs after that.
-    unsafe {
-        core::arch::asm!(
-            "mov {}, qword ptr gs:[0]",
-            out(reg) ptr,
-            options(nostack, preserves_flags),
-        );
-    }
-    ptr as *mut PerCpu
-}
+pub use crate::arch::current::percpu::gs_self;
 
 pub fn set_current_thread(cpu: &mut PerCpu, tcb: *mut Tcb) {
     cpu.current = tcb;
 }
 
+/// The running thread's TCB: [`crate::arch::current_tcb`], one load that
+/// preemption cannot split, at any IF.
 pub fn current_thread() -> *mut Tcb {
-    current().current
+    crate::arch::current_tcb()
 }
 
 pub fn set_tsc_per_ms(v: u64) {
@@ -365,7 +373,8 @@ pub fn is_online(cpu_id: u32) -> bool {
     online_mask() & (1u64 << cpu_id) != 0
 }
 
-/// Field access that is safe from an ISR once `GS_BASE` is live.
+/// Field access that is safe from an ISR once `GS_BASE` is live. IF=0
+/// only, as [`current`] is.
 #[macro_export]
 macro_rules! per_cpu {
     ($field:ident) => {
