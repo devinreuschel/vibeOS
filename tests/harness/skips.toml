@@ -208,3 +208,8 @@ smp = 1
 name = "shootdown_ack_while_busy"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "stop_cont_no_lost_wakeup"
+reason = "needs 2 CPUs"
+smp = 1
