@@ -50,7 +50,7 @@ use vibeos::arch::x86_64::trap::Abi;
 use vibeos::arch::{
     Barriers, ContextSwitch, CycleCounter, InterruptMask, MmioWidth, PerCpuBase, SyscallAbi,
 };
-use vibeos::atomic::statics::{AtomicU64, Ordering};
+use vibeos::atomic::statics::{AtomicBool, AtomicU64, Ordering};
 use vibeos::sched::thread::{CpuContext, Tcb, apply_if_on_resume, prepare_thread};
 
 /// The x86_64 port's hardware half: the seam traits (PORTABILITY §11.1) on
@@ -60,11 +60,53 @@ pub struct Arch;
 /// TSC ticks per millisecond, 0 until `time_init`'s calibration publishes it.
 static TSC_PER_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Whether [`CycleCounter::now`] reads with `rdtscp`, which `time_init`
+/// sets once it has seen the CPU has it.
+static USE_RDTSCP: AtomicBool = AtomicBool::new(false);
+
 /// Publish the calibrated TSC rate for [`CycleCounter::freq_hz`]. The
 /// calibration in `time_init` calls it once.
 pub fn publish_tsc_per_ms(v: u64) {
     // Release: pairs with the Acquire load in `freq_hz`.
     TSC_PER_MS.store(v, Ordering::Release);
+}
+
+/// Make [`CycleCounter::now`] read with `rdtscp` from here on; `time_init`
+/// calls it once, when [`has_rdtscp`] holds.
+pub fn publish_rdtscp(on: bool) {
+    // Relaxed: the flag only picks which serialized read of the same
+    // counter runs; either is right, so it orders nothing.
+    USE_RDTSCP.store(on, Ordering::Relaxed);
+}
+
+/// CPUID.8000_0001H:EDX[27]: the CPU has `rdtscp`.
+pub fn has_rdtscp() -> bool {
+    let (max, _, _, _) = cpu::cpuid(0x8000_0000, 0);
+    if max < 0x8000_0001 {
+        return false;
+    }
+    let (_, _, _, edx) = cpu::cpuid(0x8000_0001, 0);
+    edx & (1 << 27) != 0
+}
+
+/// CPUID.8000_0007H:EDX[8]: the TSC runs at a constant rate in every
+/// state.
+pub fn invariant_tsc() -> bool {
+    let (max, _, _, _) = cpu::cpuid(0x8000_0000, 0);
+    if max < 0x8000_0007 {
+        return false;
+    }
+    let (_, _, _, edx) = cpu::cpuid(0x8000_0007, 0);
+    edx & (1 << 8) != 0
+}
+
+/// A serialized TSC read: `rdtscp` when `use_rdtscp`, else `lfence; rdtsc`.
+pub fn rdtsc_ser(use_rdtscp: bool) -> u64 {
+    if use_rdtscp {
+        cpu::rdtscp()
+    } else {
+        cpu::lfence_rdtsc()
+    }
 }
 
 impl InterruptMask for Arch {
@@ -90,7 +132,7 @@ impl InterruptMask for Arch {
 impl CycleCounter for Arch {
     #[inline]
     fn now() -> u64 {
-        cpu::lfence_rdtsc()
+        rdtsc_ser(USE_RDTSCP.load(Ordering::Relaxed))
     }
 
     #[inline]

@@ -6,6 +6,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::acpi::HpetInfo;
+use vibeos::arch::CycleCounter;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::time::{
     CalibSource, FS_PER_MS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2,
@@ -14,6 +15,9 @@ use vibeos::time::{
 };
 
 use crate::acpi_init;
+use crate::arch::current::Arch;
+#[cfg(target_arch = "x86_64")]
+use crate::arch::x86_64::{has_rdtscp, invariant_tsc, rdtsc_ser};
 use crate::cell::BootCell;
 use crate::paging_init;
 use crate::x86;
@@ -80,35 +84,10 @@ fn io_wait() {
     unsafe { x86::outb(IO_WAIT_PORT, 0) };
 }
 
-fn has_rdtscp() -> bool {
-    let (max, _, _, _) = x86::cpuid(0x8000_0000, 0);
-    if max < 0x8000_0001 {
-        return false;
-    }
-    let (_, _, _, edx) = x86::cpuid(0x8000_0001, 0);
-    edx & (1 << 27) != 0
-}
-
-fn invariant_tsc() -> bool {
-    let (max, _, _, _) = x86::cpuid(0x8000_0000, 0);
-    if max < 0x8000_0007 {
-        return false;
-    }
-    let (_, _, _, edx) = x86::cpuid(0x8000_0007, 0);
-    edx & (1 << 8) != 0
-}
-
-fn rdtsc_ser(use_rdtscp: bool) -> u64 {
-    if use_rdtscp {
-        x86::rdtscp()
-    } else {
-        x86::lfence_rdtsc()
-    }
-}
-
-/// Serialized TSC. IRQ0 and `now_us` both use this.
+/// The port's cycle counter (the serialized TSC). IRQ0 and `now_us` both
+/// use this.
 pub fn read_tsc() -> u64 {
-    rdtsc_ser(STATE.try_get().is_some_and(|s| s.use_rdtscp))
+    <Arch as CycleCounter>::now()
 }
 
 /// # Safety
@@ -376,10 +355,7 @@ pub fn now_ns() -> u64 {
     let Some(st) = STATE.try_get() else {
         return 0;
     };
-    publish_ns(
-        st.clock
-            .now_ns_with(|| rdtsc_ser(st.use_rdtscp), st.tsc_per_ms),
-    )
+    publish_ns(st.clock.now_ns::<Arch>(st.tsc_per_ms))
 }
 
 pub fn tsc_per_ms() -> u64 {
@@ -503,6 +479,7 @@ pub unsafe fn init() {
     };
 
     st.tsc_per_ms = per_ms;
+    #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::publish_tsc_per_ms(per_ms);
     st.source = source;
     let tsc0 = rdtsc_ser(use_rdtscp);
@@ -524,6 +501,8 @@ pub unsafe fn init() {
     crate::marker!("vibeOS: time: tsc {}/ms", per_ms);
     #[cfg(feature = "kernel_tests")]
     super::ktest::publish_tick(0, tsc0);
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::x86_64::publish_rdtscp(use_rdtscp);
     // SAFETY: invariant I22, established at `cell::BootCell::set`: the one
     // write, on the BSP before SMP (`time::time_init::init`'s `# Safety`
     // runs it before IRQs are on), and no reader sees `STATE` until then.
