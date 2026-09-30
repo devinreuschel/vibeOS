@@ -233,3 +233,8 @@ smp = 1
 name = "user_device_irq"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "user_entry_irq"
+reason = "needs 2 CPUs"
+smp = 1
