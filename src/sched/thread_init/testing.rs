@@ -215,9 +215,8 @@ pub fn wait_window_held() -> bool {
 
 /// Called by `with_sched` before it takes SCHED: IF off for each section
 /// of [`arm_wait_window`]'s thread until the returned guard drops, after
-/// the section's places are delivered. SCHED's own guard would turn IF
-/// back on as it drops, and a tick between that and the hold would switch
-/// the thread off `Blocked`, so that it reached the hold only once woken.
+/// the section's places are delivered and before `with_sched`'s own guard
+/// drops, so no tick switches the thread off `Blocked` before the hold.
 pub(super) fn window_enter() -> Option<WindowGuard> {
     let armed = WINDOW_TID.load(Ordering::Acquire);
     (armed != u32::MAX && armed == super::current_id().raw()).then(|| WindowGuard {

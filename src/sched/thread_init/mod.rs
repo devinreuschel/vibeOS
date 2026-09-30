@@ -1307,8 +1307,15 @@ pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Run `f` under SCHED, then place the wakes it recorded. IF stays off
+/// from before SCHED is taken until every recorded wake is placed, so a
+/// caller that `f` left `Blocked` is not switched off with those wakes
+/// still in this frame's batch (DESIGN §2.9 rule 1, F034).
 pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
+    // The entering context, which `begin_wait` checks: read before the
+    // guard turns IF off.
     let ctx = sync_init::sleep_ctx();
+    let _irq = InterruptGuard::enter();
     // Dropped last, once the places are delivered.
     #[cfg(feature = "kernel_tests")]
     let _window = testing::window_enter();
