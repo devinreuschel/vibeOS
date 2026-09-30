@@ -33,7 +33,16 @@ hold on both architectures.
 ## 6.2 Calibrating the TSC
 
 Read the reference counter, spin for a known interval, read again, divide. The reference is the HPET
-main counter when ACPI provides an HPET table, otherwise PIT channel 2 over a 10 ms window.
+main counter when ACPI provides an HPET table, otherwise PIT channel 2 over 10 ms windows.
+
+A PIT window's ends are events, not counter reads: the gate write starts the one-shot and a poll of
+port `0x61` finds its end, so a vCPU or SMI stall between either and its TSC read lengthens or
+shortens the window unseen; under TCG one window moved the rate by up to 4%. `calibrate_pit`
+therefore brackets each end with TSC reads (before and after the gate write; before the last poll
+that found OUT low and after the one that found it high), keeps only a window whose brackets are
+within 0.05% of its length (`PitWindow::tight_len`), measures until five are kept or ten ran, and
+takes their median (`time::tsc_per_ms_from_pit_windows`); with none kept it takes the median of all.
+That costs 50 ms of boot where the HPET is absent.
 
 Parse the ACPI HPET table properly: reject an address of zero and reject a generic address structure
 that claims I/O space rather than system memory. Both appear in the wild and both produce a

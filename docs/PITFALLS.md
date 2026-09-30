@@ -300,7 +300,10 @@ reader masks its delta to the counter's width; never publish a `now_ns` below th
 TCG has no invariant TSC. Boot HPET calibration runs before APs; a later PIT channel 2 window sees a
 different apparent TSC rate, and LAPIC periodic ticks coalesce, which once put `uptime_ms` during a
 sleep outside 50–100 ms when it counted ticks. Rule: a timing check measures once and holds one band; it is never retried against a fresh
-sample, and it gets no wider band where it flakes (§9.8). The PIT-vs-HPET cross-check holds its
+sample, and it gets no wider band where it flakes (§9.8). The calibration is a measurement, not such
+a check: one 10 ms PIT window under TCG read up to 4% off when the vCPU stalled at either end, so
+`calibrate_pit` brackets each window's ends with TSC reads, drops a window whose brackets are loose,
+and takes the median of the rest (DESIGN §6.2). The PIT-vs-HPET cross-check holds its
 75–125% band only where the TSC is invariant, so without the CPUID bit it skips with the reason
 `no invariant tsc`, and the ROADMAP §10.1 KVM leg, whose guest has the bit, runs it. `uptime_ms`
 is clocksource time, so coalesced ticks lose none of it, and `sleep_ms_50` holds 50–100 ms of it in

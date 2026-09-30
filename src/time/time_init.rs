@@ -11,10 +11,10 @@ use vibeos::arch::CycleCounter;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::time::{
     CalibSource, Candidates, ClockWriter, ClocksourceId, Counter, FS_PER_MS, IO_WAIT_PORT,
-    PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE,
-    PM_TIMER_HZ, Snapshot, TickClock, WallOrigin, bcd_to_bin, hpet_counter_width, hpet_hz,
-    hpet_period_ok, monotonic_max, rank, tsc_per_ms_from_hpet, tsc_per_ms_from_pit,
-    unix_from_civil, wall_unix_s,
+    PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CALIB_WINDOWS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD,
+    PIT_CMD_CH2_ONESHOT, PIT_GATE, PM_TIMER_HZ, PitWindow, Snapshot, TickClock, WallOrigin,
+    bcd_to_bin, hpet_counter_width, hpet_hz, hpet_period_ok, monotonic_max, rank,
+    tsc_per_ms_from_hpet, tsc_per_ms_from_pit_windows, unix_from_civil, wall_unix_s,
 };
 
 use crate::acpi_init;
@@ -301,9 +301,43 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     tsc_per_ms_from_hpet(t1.wrapping_sub(t0), elapsed, hpet.period_fs)
 }
 
-/// Channel 2 one-shot, gated through 0x61. Does not touch channel 0.
+/// `tsc_per_ms` from PIT channel 2 one-shots, gated through 0x61; channel 0
+/// is not touched. It measures windows until [`PIT_CALIB_WINDOWS`] are
+/// tight or twice that many ran, and takes their median
+/// (`vibeos::time::tsc_per_ms_from_pit_windows`): under TCG a vCPU stall at
+/// either end of one 10 ms window moved the rate by up to 4%.
 #[cfg(target_arch = "x86_64")]
 pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
+    let mut windows = [PitWindow {
+        start_lo: 0,
+        start_hi: 0,
+        end_lo: 0,
+        end_hi: 0,
+    }; PIT_CALIB_WINDOWS * 2];
+    let mut n = 0usize;
+    let mut tight = 0usize;
+    for slot in windows.iter_mut() {
+        let Some(w) = pit_window(use_rdtscp) else {
+            continue;
+        };
+        *slot = w;
+        n = n.saturating_add(1);
+        if w.tight_len().is_some() {
+            tight = tight.saturating_add(1);
+            if tight >= PIT_CALIB_WINDOWS {
+                break;
+            }
+        }
+    }
+    tsc_per_ms_from_pit_windows(windows.get(..n)?, PIT_CALIB_COUNT)
+}
+
+/// One PIT channel 2 one-shot of [`PIT_CALIB_COUNT`] ticks, bracketed by
+/// the TSC: reads on both sides of the gate write, and on both sides of the
+/// poll that finds OUT high with the read before the last poll that found
+/// it low. None if OUT never rises.
+#[cfg(target_arch = "x86_64")]
+fn pit_window(use_rdtscp: bool) -> Option<PitWindow> {
     // SAFETY: invariant I229, established at `time::time_init::init`: the
     // PIT and port 0x61 are this module's, and channel 2 feeds only this
     // calibration.
@@ -314,25 +348,38 @@ pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
         x86::outb(PIT_CH2, (PIT_CALIB_COUNT & 0xFF) as u8);
         io_wait();
         x86::outb(PIT_CH2, (PIT_CALIB_COUNT >> 8) as u8);
-        let n61 = x86::inb(PIT_GATE);
-        x86::outb(PIT_GATE, (n61 & !0x02) | 0x01);
     }
-    let t0 = rdtsc_ser(use_rdtscp);
+    // SAFETY: invariant I229, established at `time::time_init::init`: the
+    // PIT and port 0x61 are this module's.
+    let n61 = unsafe { x86::inb(PIT_GATE) };
+    let start_lo = rdtsc_ser(use_rdtscp);
+    // SAFETY: invariant I229, established at `time::time_init::init`: the
+    // PIT and port 0x61 are this module's; the gate starts the one-shot.
+    unsafe { x86::outb(PIT_GATE, (n61 & !0x02) | 0x01) };
+    let start_hi = rdtsc_ser(use_rdtscp);
+    let mut before_low = start_hi;
     let mut spins = 0u64;
     loop {
-        // SAFETY: invariant I229, established at `time::time_init::init`, as
-        // for the writes above.
-        if unsafe { x86::inb(PIT_GATE) } & (1 << 5) != 0 {
-            break;
+        let before = rdtsc_ser(use_rdtscp);
+        // SAFETY: invariant I229, established at `time::time_init::init`:
+        // port 0x61 is this module's.
+        let out = unsafe { x86::inb(PIT_GATE) } & (1 << 5) != 0;
+        let after = rdtsc_ser(use_rdtscp);
+        if out {
+            return Some(PitWindow {
+                start_lo,
+                start_hi,
+                end_lo: before_low,
+                end_hi: after,
+            });
         }
+        before_low = before;
         spins += 1;
         if spins > CALIB_SPIN_CAP {
             return None;
         }
         core::hint::spin_loop();
     }
-    let t1 = rdtsc_ser(use_rdtscp);
-    tsc_per_ms_from_pit(t1.wrapping_sub(t0), PIT_CALIB_COUNT)
 }
 
 #[cfg(target_arch = "x86_64")]
