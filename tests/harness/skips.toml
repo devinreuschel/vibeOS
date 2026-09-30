@@ -98,3 +98,8 @@ smp = 1
 name = "catch_ignores_other_cpu"
 reason = "one CPU"
 smp = 1
+
+[[skip]]
+name = "console_write_newlines"
+reason = "needs 2 CPUs"
+smp = 1
