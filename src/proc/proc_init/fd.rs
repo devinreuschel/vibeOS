@@ -244,7 +244,7 @@ pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
     }
 }
 
-pub(super) fn sys_open(path: u64, flags: i32, _mode: u16) -> SysResult {
+pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
     let mut buf = [0u8; vibeos::fs::MAX_PATH];
     let n = match copy_user_str(path, &mut buf) {
         Ok(n) => n,
@@ -253,7 +253,8 @@ pub(super) fn sys_open(path: u64, flags: i32, _mode: u16) -> SysResult {
     if core::str::from_utf8(&buf[..n]).is_err() {
         return Err(KError::from_errno(EINVAL));
     }
-    match file_init::open_routed(&buf[..n], OpenFlags::from_bits(flags as u32), 0) {
+    let mode = u32::from(mode) & 0o7777;
+    match file_init::open(&buf[..n], OpenFlags::from_bits(flags as u32), mode) {
         Ok(f) => {
             let id = f.into_raw();
             let slot = Fd {
@@ -314,70 +315,81 @@ pub(super) fn sys_lseek(fd: u32, off: i64, whence: u32) -> SysResult {
     }
 }
 
+/// Drop a count [`hold_file`] took, where the call that took it failed
+/// and already reports its own error (DESIGN §2.5).
+fn drop_held(s: Fd) {
+    if let Some(id) = file_id(s) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
+        )]
+        let _ = file_init::close(FileRef::from_raw(id));
+    }
+}
+
+/// `old`'s slot in this process's table, with one more count on its file
+/// for the copy `dup` or `dup2` makes. The count is taken with the table
+/// lock dropped, since the VFS lock sleeps (DESIGN §2.1).
+fn hold_file(pid: u32, old: u32) -> Option<Fd> {
+    let s = with_table(|t| t.get(pid).and_then(|p| p.fds.get(old)))?;
+    if let Some(id) = file_id(s) {
+        file_init::addref(id).ok()?;
+    }
+    Some(s)
+}
+
 pub(super) fn sys_dup(old: u32) -> SysResult {
     let pid = current_pid();
+    let Some(s) = hold_file(pid, old) else {
+        return Err(KError::from_errno(EBADF));
+    };
+    // The slot may have changed while the table lock was dropped: the
+    // copy is made only of the slot the count was taken for.
     let r = with_table(|t| {
         let p = t.get_mut(pid)?;
-        let s = p.fds.get(old)?;
-        if let Some(id) = file_id(s) {
-            file_init::addref(id).ok()?;
+        if p.fds.get(old) != Some(s) {
+            return None;
         }
-        match p.fds.dup(old) {
-            Ok(n) => Some(n),
-            Err(_) => {
-                if let Some(id) = file_id(s) {
-                    #[expect(
-                        clippy::let_underscore_must_use,
-                        reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
-                    )]
-                    let _ = file_init::close(FileRef::from_raw(id));
-                }
-                None
-            }
-        }
+        p.fds.dup(old).ok()
     });
     match r {
         Some(n) => Ok(n as usize),
-        None => Err(KError::from_errno(EBADF)),
+        None => {
+            drop_held(s);
+            Err(KError::from_errno(EBADF))
+        }
     }
 }
 
 pub(super) fn sys_dup2(old: u32, new: u32) -> SysResult {
     let pid = current_pid();
+    if old == new {
+        return match with_table(|t| t.get(pid).and_then(|p| p.fds.get(old))) {
+            Some(_) => Ok(new as usize),
+            None => Err(KError::from_errno(EBADF)),
+        };
+    }
+    let Some(s) = hold_file(pid, old) else {
+        return Err(KError::from_errno(EBADF));
+    };
     let r = with_table(|t| {
         let p = t.get_mut(pid)?;
-        if old == new {
-            let _ = p.fds.get(old)?;
-            return Some((new, None));
-        }
-        let s = p.fds.get(old)?;
-        if let Some(id) = file_id(s)
-            && file_init::addref(id).is_err()
-        {
+        if p.fds.get(old) != Some(s) {
             return None;
         }
-        match p.fds.dup2(old, new) {
-            Ok(displaced) => Some((new, displaced)),
-            Err(_) => {
-                if let Some(id) = file_id(s) {
-                    #[expect(
-                        clippy::let_underscore_must_use,
-                        reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
-                    )]
-                    let _ = file_init::close(FileRef::from_raw(id));
-                }
-                None
-            }
-        }
+        p.fds.dup2(old, new).ok()
     });
     match r {
-        Some((n, disp)) => {
+        Some(disp) => {
             if let Some(d) = disp {
                 close_dropped(d, "dup2 displaced fd");
             }
-            Ok(n as usize)
+            Ok(new as usize)
         }
-        None => Err(KError::from_errno(EBADF)),
+        None => {
+            drop_held(s);
+            Err(KError::from_errno(EBADF))
+        }
     }
 }
 

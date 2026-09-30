@@ -134,7 +134,7 @@ names, Linux values:
 | `EPERM` | 1 | `mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0) |
 | `ENOENT` | 2 | `open`/`execve` missing path |
 | `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
-| `EIO` | 5 | device I/O error; a FAT or vibefs volume still busy after 1,000,000 yields |
+| `EIO` | 5 | device I/O error |
 | `E2BIG` | 7 | `execve` argv or envp with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
@@ -169,8 +169,6 @@ F083) replaces them with one `KError` table that generates §2.
   (F083, F052, F057; ROADMAP §10.4)
 - FAT and vibefs map `Corrupt` to `FsError::Inval`, so a failed checksum or
   bad magic returns `EINVAL` (Linux `EIO`) (F083; ROADMAP §10.4)
-- a FAT or vibefs operation that waits 1,000,000 yields for its busy volume
-  fails with `EIO`; Linux waits (F060; ROADMAP §10.4)
 - `lseek` on the console returns `EINVAL` (Linux `ESPIPE`, 29) (F083;
   ROADMAP §10.4)
 - `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` fd return `EINVAL`
@@ -378,12 +376,14 @@ ROADMAP §10.4).
   `file_init::CWD`, which only the debug shell's `cd` changes;
   `Proc::cwd` is copied on `fork` and never read, and there is no `chdir`
   (F057, F086; ROADMAP §10.4, with `chdir` in §13.9)
-- a path goes to FAT or vibefs by byte-prefix match on the path as passed,
-  never through the VFS. To a process, `/dev`, `/proc`, `/tmp`, and `/sys`
-  are FAT directories: `open("/dev/null")` returns `ENOENT`, and with
-  `O_CREAT` creates a FAT file. `/./vibe/f`, `//vibe/f`, and `/VIBE/f`
-  reach the FAT `vibe` directory that the vibefs mount hides, and
-  `/vibe/./f` returns `EINVAL` (F056, F086; ROADMAP §10.4)
+- `open` and `execve` resolve a path through the VFS walker, one component
+  at a time, crossing mounts, so a process reaches every mounted
+  filesystem: `open("/dev/null")` opens devfs's `null`, and `/proc`,
+  `/tmp`, `/sys`, and `/vibe` are procfs, tmpfs, sysfs, and vibefs.
+  `.` and `..` resolve in the VFS, never in a backend. Still wrong: FAT
+  matches names without regard to case but the dentry cache does not, so
+  `/VIBE/f` reaches the FAT `vibe` directory under the vibefs mount rather
+  than the mount (F056; ROADMAP §10.4)
 - `read`, `write`, and `lseek` copy the slot out, drop the table lock for
   the I/O, and write back only the offset. `refs` and `used` change only
   in `addref` and `close`, under the table lock, and the `close` that

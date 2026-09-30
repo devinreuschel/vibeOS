@@ -134,11 +134,12 @@ impl Vfs {
     fn unlink_inode(&mut self, i: u16) {
         let now = self.now;
         let v = &mut self.inodes[i as usize];
-        v.nlink = if v.kind == InodeKind::Dir {
+        let n = if v.kind == InodeKind::Dir {
             0
         } else {
             v.nlink.saturating_sub(1)
         };
+        v.set_nlink(n);
         v.ctime = now;
     }
 
@@ -366,6 +367,10 @@ impl WalkCall {
         match self.need {
             Need::Lookup => {
                 let name = w.comp();
+                debug_assert!(
+                    !name_is_dot(name) && !name_is_dotdot(name),
+                    "a backend lookup never sees `.` or `..`"
+                );
                 WalkReply::Found(self.call.run(|o, cx, d| o.lookup(cx, d, name)))
             }
             Need::Readlink => {

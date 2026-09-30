@@ -376,7 +376,7 @@ fn load_path_inner<A: AsRef<[u8]>>(
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
-    let file = file_init::open_routed(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
+    let file = file_init::open(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
         .map_err(LoadError::Fs)?;
     let mut src = FileImage {
         file,
