@@ -13,6 +13,7 @@ use vibeos::proc::wait_exited;
 
 mod hooks;
 mod initrd;
+mod lock;
 mod ops;
 mod routing;
 mod slots;
@@ -20,6 +21,7 @@ mod stack16k;
 
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
+pub(crate) use lock::{test_fat_vol_wait_no_eio, test_vfs_io_off_lock};
 pub(crate) use ops::{test_vfs_backends_via_ops, test_vfs_fat_one_inode};
 pub(crate) use routing::{
     test_fat_initrd_dev_no_null, test_vfs_unlink_drops_parent_dentry, test_vfs_user_dev_nodes,
@@ -1332,6 +1334,41 @@ pub(crate) fn probe_initrd() {
     super::fat_init::with_initrd(|_| ());
 }
 
+/// Armed by `vfs_io_off_lock`: the next FAT read op on a device volume
+/// waits at [`fat_read_hook`], holding only that volume's lock.
+pub(crate) static FAT_READ_HOLD: AtomicBool = AtomicBool::new(false);
+/// Set while a FAT read waits at [`fat_read_hook`].
+pub(crate) static FAT_READ_HELD: AtomicBool = AtomicBool::new(false);
+/// Ends a wait at [`fat_read_hook`].
+pub(crate) static FAT_READ_RELEASE: AtomicBool = AtomicBool::new(false);
+/// Milliseconds each device-backed FAT block request sleeps first, 0 for
+/// none (`fat_vol_wait_no_eio`).
+pub(crate) static BLK_DELAY_MS: AtomicU32 = AtomicU32::new(0);
+/// Block requests [`blk_request_hook`] has delayed.
+pub(crate) static BLK_DELAYED: AtomicU32 = AtomicU32::new(0);
+
+/// `FatOps`' read on a device volume, under the volume lock and with the
+/// VFS lock dropped: when [`FAT_READ_HOLD`] is armed, disarm it and wait,
+/// at most 10 s, for [`FAT_READ_RELEASE`].
+pub(crate) fn fat_read_hook() {
+    if !FAT_READ_HOLD.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    FAT_READ_HELD.store(true, Ordering::Release);
+    let _released = crate::ktest::sleep_until(|| FAT_READ_RELEASE.load(Ordering::Acquire), 10_000);
+    FAT_READ_HELD.store(false, Ordering::Release);
+}
+
+/// `fat_init`'s `Io::read` and `Io::write` on a block device, under the
+/// volume lock: sleep [`BLK_DELAY_MS`] first.
+pub(crate) fn blk_request_hook() {
+    let ms = BLK_DELAY_MS.load(Ordering::Acquire);
+    if ms != 0 {
+        BLK_DELAYED.fetch_add(1, Ordering::Relaxed);
+        thread_init::sleep_ms(u64::from(ms));
+    }
+}
+
 /// The `/vibe` memory volume, recorded at its mount for [`probe_image`],
 /// which runs with IRQs off and so cannot take the sleeping VFS lock.
 pub(crate) static VIBE_MEM: SpinMutex<Option<Instance>> = SpinMutex::with_rank(None, RANK_DEVICE);
@@ -1395,4 +1432,6 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("vfs_user_dev_nodes", test_vfs_user_dev_nodes),
     test("fat_initrd_dev_no_null", test_fat_initrd_dev_no_null),
+    test("vfs_io_off_lock", test_vfs_io_off_lock),
+    test("fat_vol_wait_no_eio", test_fat_vol_wait_no_eio).deadline(60_000),
 ];

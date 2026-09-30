@@ -184,7 +184,11 @@ impl Disk for Io<'_> {
                 }
                 Ok(())
             }),
-            Media::Dev(r) => r.read(u64::from(lba), buf).map_err(fat_io_err),
+            Media::Dev(r) => {
+                #[cfg(feature = "kernel_tests")]
+                crate::fs::ktest::blk_request_hook();
+                r.read(u64::from(lba), buf).map_err(fat_io_err)
+            }
         }
     }
 
@@ -208,6 +212,8 @@ impl Disk for Io<'_> {
                 Ok(())
             }),
             Media::Dev(r) => {
+                #[cfg(feature = "kernel_tests")]
+                crate::fs::ktest::blk_request_hook();
                 #[cfg(feature = "kernel_tests")]
                 crate::fs::ktest::on_cache_write();
                 r.write(u64::from(lba), buf).map_err(fat_io_err)
@@ -350,7 +356,12 @@ impl InodeOps for FatOps {
         off: u64,
         buf: &mut [u8],
     ) -> Result<usize, FsError> {
-        with_vol(vol_of(cx)?, |v, d| {
+        let vol = vol_of(cx)?;
+        with_vol(vol, |v, d| {
+            #[cfg(feature = "kernel_tests")]
+            if matches!(vol.media, Media::Dev(_)) {
+                crate::fs::ktest::fat_read_hook();
+            }
             let (w, _) = words(ino)?;
             Ok(v.read_ino(d, &w, off, buf)?)
         })
