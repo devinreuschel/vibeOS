@@ -186,7 +186,7 @@ children, need no row.
 |---|---|---|
 | crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `kerror.rs`, `trap.rs`, `atomic.rs`, `cell.rs` (`BootCell`, `IrqCell`, `CellHooks`) | `main.rs`, `cell.rs` (the kernel's names for the cells and its `CellHooks` impl) |
 | boot | `boot/{mod,cmdline}.rs` | `boot/{mod,fw_cfg_init}.rs` (`BootInfo`, Limine requests, fw_cfg) |
-| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,syscall,trap,uart,vectors}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,boot,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S` |
+| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,stat,syscall,trap,uart,vectors}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,boot,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,power,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S` |
 | mm | `mm/{mod,pmm,paging,heap,kva}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
 | time | `time/mod.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
@@ -201,7 +201,7 @@ children, need no row.
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/mod.rs`, `drivers/virtio_blk_init/{mod,vq,issue,irq}.rs` |
 | block | `block/{mod,part,cache,blockdev}.rs` | `block/{mod,block_init,blockdev_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,error,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
-| proc | `proc/{mod,elf,pid,syscall,syscall_table,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
+| proc | `proc/{mod,elf,pid,syscall,syscall_table,uabi,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit,floor}.rs` |
 | ktest | `ktest/mod.rs` (selection by `vibeos.ktest=`, run counts, deadlines) | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 
 **In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel
