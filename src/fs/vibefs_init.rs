@@ -275,7 +275,7 @@ fn vol_of<'a>(cx: &OpCx<'a>) -> Result<&'a VibeVolume, FsError> {
 impl InodeOps for VibeOps {
     fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let n = v.lookup(d, dir.key[0], name).map_err(Error::to_fs)?;
+            let n = v.lookup(d, dir.key[0], name)?;
             Ok(node_info(&n))
         })
     }
@@ -290,23 +290,17 @@ impl InodeOps for VibeOps {
         target: Option<&[u8]>,
     ) -> Result<InodeInfo, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let n = v
-                .create(d, dir.key[0], name, kind, mode, target)
-                .map_err(Error::to_fs)?;
+            let n = v.create(d, dir.key[0], name, kind, mode, target)?;
             Ok(node_info(&n))
         })
     }
 
     fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
-        with_vol(vol_of(cx)?, |v, d| {
-            v.unlink(d, dir.key[0], name, false).map_err(Error::to_fs)
-        })
+        with_vol(vol_of(cx)?, |v, d| v.unlink(d, dir.key[0], name, false))
     }
 
     fn rmdir(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
-        with_vol(vol_of(cx)?, |v, d| {
-            v.unlink(d, dir.key[0], name, true).map_err(Error::to_fs)
-        })
+        with_vol(vol_of(cx)?, |v, d| v.unlink(d, dir.key[0], name, true))
     }
 
     /// An inode's key is its number, which a rename keeps.
@@ -319,8 +313,7 @@ impl InodeOps for VibeOps {
         nname: &[u8],
     ) -> Result<Option<Key>, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            v.rename(d, odir.key[0], oname, ndir.key[0], nname)
-                .map_err(Error::to_fs)?;
+            v.rename(d, odir.key[0], oname, ndir.key[0], nname)?;
             Ok(None)
         })
     }
@@ -332,9 +325,7 @@ impl InodeOps for VibeOps {
         off: u64,
         buf: &mut [u8],
     ) -> Result<usize, FsError> {
-        with_vol(vol_of(cx)?, |v, d| {
-            v.read(d, ino.key[0], off, buf).map_err(Error::to_fs)
-        })
+        with_vol(vol_of(cx)?, |v, d| v.read(d, ino.key[0], off, buf))
     }
 
     fn write(
@@ -360,7 +351,7 @@ impl InodeOps for VibeOps {
     fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
         let (key, ino): (u32, &Inode) = (ino.key[0], ino);
         with_vol(vol_of(cx)?, |v, d| {
-            v.truncate(d, key, size).map_err(Error::to_fs)?;
+            v.truncate(d, key, size)?;
             store_size(ino, size)
         })
     }
@@ -378,7 +369,7 @@ impl InodeOps for VibeOps {
             let mut c = cookie;
             let mut n = Node::EMPTY;
             loop {
-                let Some(next) = v.readdir(d, dir.key[0], c, &mut n).map_err(Error::to_fs)? else {
+                let Some(next) = v.readdir(d, dir.key[0], c, &mut n)? else {
                     return Ok(None);
                 };
                 c = next;
@@ -398,14 +389,12 @@ impl InodeOps for VibeOps {
 
     fn getattr(&self, cx: &mut OpCx<'_>, ino: &mut Inode) -> Result<(), FsError> {
         let key = ino.key[0];
-        ino.size = with_vol(vol_of(cx)?, |v, _| v.file_size(key).map_err(Error::to_fs))?;
+        ino.size = with_vol(vol_of(cx)?, |v, _| v.file_size(key))?;
         Ok(())
     }
 
     fn readlink(&self, cx: &mut OpCx<'_>, ino: &Inode, buf: &mut [u8]) -> Result<usize, FsError> {
-        with_vol(vol_of(cx)?, |v, d| {
-            v.readlink(d, ino.key[0], buf).map_err(Error::to_fs)
-        })
+        with_vol(vol_of(cx)?, |v, d| v.readlink(d, ino.key[0], buf))
     }
 
     fn sync(&self, cx: &mut OpCx<'_>) -> Result<(), FsError> {
@@ -426,10 +415,10 @@ fn write_at(
     with_vol(vol, |v, d| {
         let pos = match off {
             Some(o) => o,
-            None => v.file_size(key).map_err(Error::to_fs)?,
+            None => v.file_size(key)?,
         };
-        let n = v.write(d, key, pos, buf).map_err(Error::to_fs)?;
-        store_size(ino, v.file_size(key).map_err(Error::to_fs)?)?;
+        let n = v.write(d, key, pos, buf)?;
+        store_size(ino, v.file_size(key)?)?;
         Ok((n, pos))
     })
 }
@@ -534,7 +523,7 @@ fn new_volume(
     mount: impl FnOnce(&mut Vol, &mut Io) -> Result<(), Error>,
 ) -> Result<Instance, FsError> {
     let mut vol = crate::fs::boxed_copy(&VOL_INIT).map_err(|_| FsError::NoMem)?;
-    mount(&mut vol, &mut Io { back: &media }).map_err(Error::to_fs)?;
+    mount(&mut vol, &mut Io { back: &media })?;
     vibeos::dev::instance(VibeVolume {
         media,
         used: AtomicBool::new(true),
@@ -545,7 +534,7 @@ fn new_volume(
 }
 
 pub fn sync(vol: &VibeVolume) -> Result<(), FsError> {
-    with_slot(vol, |v, d| v.sync(d)).map_err(Error::to_fs)
+    with_slot(vol, |v, d| v.sync(d))
 }
 
 pub fn df(vol: &VibeVolume) -> Result<(FsType, u64, u64, u32), FsError> {
@@ -553,7 +542,6 @@ pub fn df(vol: &VibeVolume) -> Result<(FsType, u64, u64, u32), FsError> {
         let (tot, free, n) = v.df();
         Ok((FsType::Vibe, tot, free, n))
     })
-    .map_err(Error::to_fs)
 }
 
 fn register_mnt(vol: Option<Instance>, p: &[u8]) -> Result<(), FsError> {
@@ -585,7 +573,6 @@ pub(crate) fn set_plant(at: &[u8], p: vibefs::Plant) -> Result<(), FsError> {
         v.set_plant(p);
         Ok(())
     })
-    .map_err(Error::to_fs)
 }
 
 /// Take `p`'s mount-table entry out; the caller drops its volume reference unlocked.
@@ -658,8 +645,8 @@ pub fn mkfs_dev(name: &str) -> Result<(), FsError> {
     let mut vol = crate::fs::boxed_copy(&VOL_INIT).map_err(|_| FsError::NoMem)?;
     let media = Media::Dev(r);
     let mut io = Io { back: &media };
-    vibefs::mkfs(&mut io, name.as_bytes(), &mut vol).map_err(Error::to_fs)?;
-    vibefs::Disk::flush(&mut io).map_err(Error::to_fs)
+    vibefs::mkfs(&mut io, name.as_bytes(), &mut vol)?;
+    vibefs::Disk::flush(&mut io)
 }
 
 /// Whether `r` carries a vibefs. Out of line, so its block buffer's frame

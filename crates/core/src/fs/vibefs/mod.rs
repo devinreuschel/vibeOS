@@ -10,7 +10,7 @@
     reason = "vibefs v1 predates the parser deny; ROADMAP §14.8's v2 is written under it and retires this allow"
 )]
 
-use crate::fs::{FsError, InodeKind};
+use crate::fs::InodeKind;
 use crate::part::crc32_ieee;
 
 mod commit;
@@ -78,61 +78,9 @@ const KIND_REG_U: u8 = KIND_REG;
 const KIND_DIR_U: u8 = KIND_DIR;
 const KIND_LNK_U: u8 = KIND_LNK;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum Error {
-    Inval,
-    Io,
-    Corrupt,
-    NoSpace,
-    NotFound,
-    Exists,
-    NotDir,
-    IsDir,
-    NotEmpty,
-    NameTooLong,
-    NotSupp,
-    FileTooBig,
-    /// A kernel heap allocation below the volume failed.
-    NoMem,
-}
-
-impl Error {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Error::Inval => "inval",
-            Error::Io => "io",
-            Error::Corrupt => "corrupt",
-            Error::NoSpace => "no space",
-            Error::NotFound => "not found",
-            Error::Exists => "exists",
-            Error::NotDir => "not dir",
-            Error::IsDir => "is dir",
-            Error::NotEmpty => "not empty",
-            Error::NameTooLong => "name too long",
-            Error::NotSupp => "not supp",
-            Error::FileTooBig => "file too big",
-            Error::NoMem => "no memory",
-        }
-    }
-
-    pub fn to_fs(self) -> FsError {
-        match self {
-            Error::Inval | Error::Corrupt => FsError::Inval,
-            Error::Io => FsError::Io,
-            Error::NoSpace => FsError::NoSpace,
-            Error::NotFound => FsError::NotFound,
-            Error::Exists => FsError::Exists,
-            Error::NotDir => FsError::NotDir,
-            Error::IsDir => FsError::IsDir,
-            Error::NotEmpty => FsError::NotEmpty,
-            Error::NameTooLong => FsError::NameTooLong,
-            Error::NotSupp => FsError::NotSupp,
-            Error::FileTooBig => FsError::FileTooBig,
-            Error::NoMem => FsError::NoMem,
-        }
-    }
-}
+/// vibefs's errors are the filesystem's (E2, F083): one type, one `From`
+/// into `KError`.
+pub type Error = super::FsError;
 
 pub trait Disk {
     fn nblocks(&self) -> u32;

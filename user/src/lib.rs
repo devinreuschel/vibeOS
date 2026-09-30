@@ -18,6 +18,7 @@ extern crate vibeos_user_mem;
 
 mod arch;
 pub mod env;
+mod errno;
 pub mod io;
 pub mod rt;
 pub mod sys;

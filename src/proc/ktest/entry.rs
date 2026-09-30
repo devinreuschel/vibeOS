@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::arch::PageTable;
+use vibeos::kerror::KError;
 use vibeos::paging::{PAGE_SIZE_4K, USER_END};
 use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::syscall::SYS_KILL;
@@ -213,7 +214,7 @@ pub(crate) fn test_ring3_syscall_enosys() -> Outcome {
 
 pub(crate) fn test_ring3_hello_exit() -> Outcome {
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf("/hello", &[], &[], 0, 0) {
+    let pid = match proc_init::spawn_elf(b"/hello", &[], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
     };
@@ -237,11 +238,11 @@ pub(crate) fn test_syscall_dispatch() -> Outcome {
         return Outcome::Fail("yield");
     }
     if proc_init::dispatch(vibeos::syscall::SYS_WRITE, [3, 0, 1, 0, 0, 0])
-        != vibeos::syscall::neg(vibeos::syscall::EBADF)
+        != vibeos::syscall::encode(Err(KError::BadF))
     {
         return Outcome::Fail("ebadf");
     }
-    if proc_init::dispatch(0xC0FFEE, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
+    if proc_init::dispatch(0xC0FFEE, [0; 6]) != vibeos::syscall::encode(Err(KError::NoSys)) {
         return Outcome::Fail("enosys");
     }
     // The number is `eax` sign-extended (SYSCALL.md §1): the high half of
@@ -252,11 +253,11 @@ pub(crate) fn test_syscall_dispatch() -> Outcome {
     if proc_init::dispatch(
         0x1_0000_0000 | vibeos::syscall::SYS_WRITE,
         [3, 0, 1, 0, 0, 0],
-    ) != vibeos::syscall::neg(vibeos::syscall::EBADF)
+    ) != vibeos::syscall::encode(Err(KError::BadF))
     {
         return Outcome::Fail("write, high half set");
     }
-    if proc_init::dispatch(0x8000_0000, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
+    if proc_init::dispatch(0x8000_0000, [0; 6]) != vibeos::syscall::encode(Err(KError::NoSys)) {
         return Outcome::Fail("negative eax");
     }
     Outcome::Ok
@@ -342,7 +343,7 @@ pub(crate) fn test_syscall_ptr_validate() -> Outcome {
 
 pub(crate) fn test_user_syscalls() -> Outcome {
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf("/bin/tests", &[], &[], 0, 0) {
+    let pid = match proc_init::spawn_elf(b"/bin/tests", &[], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
     };

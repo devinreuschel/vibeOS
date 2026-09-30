@@ -47,9 +47,12 @@ impl FatVol {
         if buf.is_empty() {
             return Ok(0);
         }
-        let end = off.checked_add(buf.len() as u64).ok_or(FatError::NoSpace)?;
+        // A FAT file ends below 4 GiB: its size is 32 bits.
+        let end = off
+            .checked_add(buf.len() as u64)
+            .ok_or(FatError::FileTooBig)?;
         if end > u32::MAX as u64 {
-            return Err(FatError::NoSpace);
+            return Err(FatError::FileTooBig);
         }
         let need = end as u32;
         let old_first = *first;

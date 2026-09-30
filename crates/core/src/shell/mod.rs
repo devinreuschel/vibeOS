@@ -27,6 +27,16 @@ pub enum TokenError {
     TooMany,
 }
 
+/// Too many words is `E2BIG`, as for `execve`; an unclosed quote, a bad argument.
+impl From<TokenError> for crate::kerror::KError {
+    fn from(e: TokenError) -> Self {
+        match e {
+            TokenError::UnclosedQuote => Self::Inval,
+            TokenError::TooMany => Self::TooBig,
+        }
+    }
+}
+
 impl TokenError {
     pub fn as_str(self) -> &'static str {
         match self {
