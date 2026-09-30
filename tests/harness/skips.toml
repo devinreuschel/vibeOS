@@ -158,3 +158,8 @@ smp = 1
 name = "lifetime_shootdown_ack_late"
 reason = "one CPU"
 smp = 1
+
+[[skip]]
+name = "msix_cpu"
+reason = "no AP"
+smp = 1
