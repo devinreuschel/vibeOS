@@ -162,6 +162,218 @@ fn clamp_u64(v: u128) -> u64 {
     }
 }
 
+/// The ACPI PM timer's rate in Hz (ACPI 6.5 §4.8.3.3).
+pub const PM_TIMER_HZ: u64 = 3_579_545;
+
+/// A free-running counter the clock can read: the clocksource candidates
+/// DESIGN §6.4 ranks, with Linux's clocksource names.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClocksourceId {
+    Tsc = 1,
+    Hpet = 2,
+    AcpiPm = 3,
+}
+
+impl ClocksourceId {
+    /// The name the `time: clocksource <name>` line prints.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ClocksourceId::Tsc => "tsc",
+            ClocksourceId::Hpet => "hpet",
+            ClocksourceId::AcpiPm => "acpi_pm",
+        }
+    }
+
+    /// The id whose discriminant is `v`, as a seqlock payload word holds it.
+    pub const fn from_u64(v: u64) -> Option<Self> {
+        match v {
+            1 => Some(ClocksourceId::Tsc),
+            2 => Some(ClocksourceId::Hpet),
+            3 => Some(ClocksourceId::AcpiPm),
+            _ => None,
+        }
+    }
+}
+
+/// Cycles to nanoseconds as `cycles * mult >> shift`, evaluated in `u128`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scale {
+    pub mult: u64,
+    pub shift: u32,
+}
+
+impl Scale {
+    /// The shift every [`Scale::from_hz`] uses: `mult` keeps 32 fractional
+    /// bits of ns per cycle, under 1 ns of error per 2^32 cycles.
+    pub const SHIFT: u32 = 32;
+
+    /// The scale of a counter running at `hz`. None for 0 Hz, or a rate so
+    /// high that `mult` would be 0.
+    pub fn from_hz(hz: u64) -> Option<Scale> {
+        if hz == 0 {
+            return None;
+        }
+        let mult = (1_000_000_000u128 << Self::SHIFT) / u128::from(hz);
+        let mult = u64::try_from(mult).ok()?;
+        (mult != 0).then_some(Scale {
+            mult,
+            shift: Self::SHIFT,
+        })
+    }
+
+    /// `cycles` in nanoseconds, saturating at `u64::MAX`.
+    pub fn to_ns(self, cycles: u64) -> u64 {
+        let v = u128::from(cycles).saturating_mul(u128::from(self.mult));
+        clamp_u64(v.checked_shr(self.shift).unwrap_or(0))
+    }
+}
+
+/// One clocksource: its id, its rate as a [`Scale`], and how many low bits
+/// of a raw read count (24 or 32 for the PM timer, 32 or 64 for the HPET,
+/// 64 for the TSC).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Counter {
+    pub id: ClocksourceId,
+    pub scale: Scale,
+    pub width: u32,
+}
+
+impl Counter {
+    /// None for a width outside 1..=64 or a rate [`Scale::from_hz`] refuses.
+    pub fn new(id: ClocksourceId, hz: u64, width: u32) -> Option<Counter> {
+        if !(1..=64).contains(&width) {
+            return None;
+        }
+        Some(Counter {
+            id,
+            scale: Scale::from_hz(hz)?,
+            width,
+        })
+    }
+
+    /// The bits of a raw read that count.
+    pub const fn mask(self) -> u64 {
+        if self.width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << self.width).wrapping_sub(1)
+        }
+    }
+
+    /// Cycles from `base` to `now`, modulo 2^width: correct across at most
+    /// one wrap, which is why a narrow counter is read every half wrap.
+    pub const fn delta(self, now: u64, base: u64) -> u64 {
+        now.wrapping_sub(base) & self.mask()
+    }
+}
+
+/// What the clock publishes: the counter `id` read `cycles` at `ns` since
+/// boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub id: ClocksourceId,
+    pub cycles: u64,
+    pub ns: u64,
+}
+
+/// Nanoseconds since boot at raw read `raw_now` of `c`, the counter `s`
+/// names: `s.ns + ((raw_now - s.cycles) mod 2^width) * mult >> shift` in
+/// `u128`, saturating.
+pub fn ns_at(s: Snapshot, c: Counter, raw_now: u64) -> u64 {
+    s.ns.saturating_add(c.scale.to_ns(c.delta(raw_now, s.cycles)))
+}
+
+/// The one writer's state (CPU 0's tick). Each [`Snapshot`] it returns is
+/// `ns0 + to_ns(ext)`, where `ext` is the whole cycle count since `ns0`,
+/// so rounding in one base never carries into the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockWriter {
+    counter: Counter,
+    last_raw: u64,
+    ext: u64,
+    ns0: u64,
+}
+
+impl ClockWriter {
+    /// A writer whose counter `c` read `raw` at `ns`.
+    pub const fn new(c: Counter, raw: u64, ns: u64) -> Self {
+        Self {
+            counter: c,
+            last_raw: raw & c.mask(),
+            ext: 0,
+            ns0: ns,
+        }
+    }
+
+    pub const fn counter(&self) -> Counter {
+        self.counter
+    }
+
+    /// The snapshot as of the last read.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            id: self.counter.id,
+            cycles: self.last_raw,
+            ns: self.ns0.saturating_add(self.counter.scale.to_ns(self.ext)),
+        }
+    }
+
+    /// Take a new read `raw` of the counter. At least one read per half
+    /// wrap keeps every wrap counted.
+    pub fn advance(&mut self, raw: u64) -> Snapshot {
+        let d = self.counter.delta(raw, self.last_raw);
+        self.ext = self.ext.saturating_add(d);
+        self.last_raw = raw & self.counter.mask();
+        self.snapshot()
+    }
+
+    /// Move to counter `to` with no step: the old counter read `raw_old`
+    /// and `to` read `raw_new` at the same instant, and the new base is the
+    /// time a reader of the old counter gets at `raw_old`.
+    pub fn switch(&mut self, to: Counter, raw_old: u64, raw_new: u64) -> Snapshot {
+        self.ns0 = ns_at(self.snapshot(), self.counter, raw_old);
+        self.counter = to;
+        self.ext = 0;
+        self.last_raw = raw_new & to.mask();
+        self.snapshot()
+    }
+}
+
+/// What a port found at boot, for [`rank`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Candidates {
+    pub tsc: Option<Counter>,
+    pub tsc_invariant: bool,
+    pub tsc_warp_ok: bool,
+    pub hpet: Option<Counter>,
+    pub pm: Option<Counter>,
+}
+
+/// The clocksource (DESIGN §6.4): the TSC when CPUID reports it invariant
+/// and no warp test saw it step backward, then the HPET main counter, then
+/// the ACPI PM timer. None: no candidate.
+pub fn rank(c: &Candidates) -> Option<Counter> {
+    let tsc = c.tsc.filter(|_| c.tsc_invariant && c.tsc_warp_ok);
+    tsc.or(c.hpet).or(c.pm)
+}
+
+/// The HPET main counter's rate for a `period_fs` [`hpet_period_ok`]
+/// accepts.
+pub fn hpet_hz(period_fs: u32) -> Option<u64> {
+    if !hpet_period_ok(period_fs) {
+        return None;
+    }
+    let hz = 1_000_000_000_000_000u64.checked_div(u64::from(period_fs))?;
+    (hz != 0).then_some(hz)
+}
+
+/// The HPET main counter's width from `GCAP_ID`: 64 bits when
+/// `COUNT_SIZE_CAP` (bit 13) is set, else 32.
+pub const fn hpet_counter_width(gcap: u64) -> u32 {
+    if gcap & (1 << 13) != 0 { 64 } else { 32 }
+}
+
 /// Seqlock over (tick, tsc snapshot). Writer: bump, write both, bump,
 /// release. Reader: acquire, retry until a stable even sequence. DESIGN §6.4.
 pub struct TickClock {
@@ -560,6 +772,227 @@ mod tests {
         let _ = r.join();
         assert_eq!(bad.load(Ordering::Relaxed), 0);
         assert!(reads.load(Ordering::Relaxed) > 1_000);
+    }
+
+    /// An independent evaluation of the clocksource formula.
+    fn formula(s: Snapshot, c: Counter, raw: u64) -> u64 {
+        let mask: u128 = if c.width >= 64 {
+            u128::from(u64::MAX)
+        } else {
+            (1u128 << c.width) - 1
+        };
+        let d = (u128::from(raw) + (1u128 << 64) - u128::from(s.cycles)) & mask;
+        let v = u128::from(s.ns) + ((d * u128::from(c.scale.mult)) >> c.scale.shift);
+        v.min(u128::from(u64::MAX)) as u64
+    }
+
+    #[test]
+    fn scale_from_hz_one_second() {
+        for hz in [PM_TIMER_HZ, 100_000_000, 2_500_000_000] {
+            let ns = Scale::from_hz(hz).unwrap().to_ns(hz);
+            assert!(ns.abs_diff(1_000_000_000) <= 2, "{hz} Hz: {ns}");
+        }
+        assert_eq!(Scale::from_hz(0), None);
+        assert_eq!(Counter::new(ClocksourceId::Tsc, 1_000, 0), None);
+        assert_eq!(Counter::new(ClocksourceId::Tsc, 1_000, 65), None);
+    }
+
+    #[test]
+    fn ns_at_matches_u128_formula() {
+        for width in [24u32, 32, 64] {
+            let c = Counter::new(ClocksourceId::AcpiPm, PM_TIMER_HZ, width).unwrap();
+            let m = c.mask();
+            let cases = [
+                (0u64, 0u64),
+                (5, 1_000),
+                (m - 10, 20),
+                (m, 0),
+                (100, 99),
+                (m / 2, m / 2 + 12_345),
+            ];
+            for (cycles, raw) in cases {
+                let s = Snapshot {
+                    id: c.id,
+                    cycles,
+                    ns: 7_000_000_000,
+                };
+                assert_eq!(
+                    ns_at(s, c, raw),
+                    formula(s, c, raw),
+                    "w{width} {cycles} {raw}"
+                );
+            }
+            // Wrapped: raw < cycles is one wrap on, not a backward step.
+            let s = Snapshot {
+                id: c.id,
+                cycles: m - 9,
+                ns: 0,
+            };
+            assert_eq!(ns_at(s, c, 0), c.scale.to_ns(10));
+        }
+    }
+
+    #[test]
+    fn cycles_to_ns_near_u64_max() {
+        let c = Counter::new(ClocksourceId::Tsc, 1_000, 64).unwrap();
+        // One cycle is 1 ms, so u64::MAX cycles overflow u64 ns.
+        assert_eq!(c.scale.to_ns(u64::MAX), u64::MAX);
+        let s = Snapshot {
+            id: c.id,
+            cycles: 0,
+            ns: u64::MAX - 5,
+        };
+        assert_eq!(ns_at(s, c, 1), u64::MAX);
+        assert_eq!(ns_at(s, c, 0), u64::MAX - 5);
+        let mut w = ClockWriter::new(c, 0, u64::MAX - 1);
+        assert_eq!(w.advance(u64::MAX).ns, u64::MAX);
+        assert_eq!(w.advance(u64::MAX - 1).ns, u64::MAX);
+    }
+
+    #[test]
+    fn wrap24_ten_wraps_read_every_half_wrap_loses_none() {
+        let c = Counter::new(ClocksourceId::AcpiPm, PM_TIMER_HZ, 24).unwrap();
+        let half = 1u64 << 23;
+        let start = 0x00AB_CDEFu64;
+        let mut w = ClockWriter::new(c, start, 0);
+        let mut total = 0u64;
+        let mut last = w.snapshot();
+        for _ in 0..20 {
+            total += half;
+            last = w.advance((start + total) & c.mask());
+        }
+        assert_eq!(total >> 24, 10, "ten wraps");
+        assert_eq!(last.ns, c.scale.to_ns(total));
+        // A reader between two reads: within 1 ns of the whole count.
+        let mid = total + half / 2;
+        let got = ns_at(last, c, (start + mid) & c.mask());
+        assert!(got.abs_diff(c.scale.to_ns(mid)) <= 1, "{got}");
+
+        // Control: one read per full wrap and a bit loses a wrap each time.
+        let mut lossy = ClockWriter::new(c, start, 0);
+        let step = (1u64 << 24) + 5;
+        let snap = lossy.advance((start + step) & c.mask());
+        assert_eq!(snap.ns, c.scale.to_ns(5));
+        assert!(snap.ns < c.scale.to_ns(step));
+    }
+
+    #[test]
+    fn writer_switch_is_continuous() {
+        let hpet = Counter::new(ClocksourceId::Hpet, 100_000_000, 64).unwrap();
+        let tsc = Counter::new(ClocksourceId::Tsc, 2_500_000_000, 64).unwrap();
+        let mut w = ClockWriter::new(hpet, 1_000, 0);
+        let s = w.advance(1_000 + 100_000_000); // 1 s
+        assert_eq!(s.ns, 1_000_000_000);
+        let before = ns_at(s, hpet, 1_000 + 150_000_000); // 1.5 s
+        let t = w.switch(tsc, 1_000 + 150_000_000, 77);
+        assert_eq!(t.id, ClocksourceId::Tsc);
+        assert_eq!(t.cycles, 77);
+        assert_eq!(t.ns, before);
+        assert_eq!(w.counter(), tsc);
+        // 2.5e9 TSC cycles later is one more second.
+        let u = w.advance(77 + 2_500_000_000);
+        assert!(u.ns.abs_diff(before + 1_000_000_000) <= 1, "{}", u.ns);
+    }
+
+    fn counters() -> (Counter, Counter, Counter) {
+        (
+            Counter::new(ClocksourceId::Tsc, 2_000_000_000, 64).unwrap(),
+            Counter::new(ClocksourceId::Hpet, 100_000_000, 64).unwrap(),
+            Counter::new(ClocksourceId::AcpiPm, PM_TIMER_HZ, 24).unwrap(),
+        )
+    }
+
+    #[test]
+    fn rank_prefers_tsc_then_hpet_then_pm() {
+        let (tsc, hpet, pm) = counters();
+        let mut c = Candidates {
+            tsc: Some(tsc),
+            tsc_invariant: true,
+            tsc_warp_ok: true,
+            hpet: Some(hpet),
+            pm: Some(pm),
+        };
+        assert_eq!(rank(&c), Some(tsc));
+        c.tsc = None;
+        assert_eq!(rank(&c), Some(hpet));
+        c.hpet = None;
+        assert_eq!(rank(&c), Some(pm));
+    }
+
+    #[test]
+    fn rank_needs_invariant_warp_clean_tsc() {
+        let (tsc, hpet, pm) = counters();
+        let base = Candidates {
+            tsc: Some(tsc),
+            tsc_invariant: true,
+            tsc_warp_ok: true,
+            hpet: Some(hpet),
+            pm: Some(pm),
+        };
+        let not_inv = Candidates {
+            tsc_invariant: false,
+            ..base
+        };
+        assert_eq!(rank(&not_inv), Some(hpet));
+        let warped = Candidates {
+            tsc_warp_ok: false,
+            ..base
+        };
+        assert_eq!(rank(&warped), Some(hpet));
+        let only_tsc = Candidates {
+            tsc_warp_ok: false,
+            hpet: None,
+            ..base
+        };
+        assert_eq!(rank(&only_tsc), Some(pm));
+    }
+
+    #[test]
+    fn rank_none_without_candidates() {
+        let (tsc, _, _) = counters();
+        let none = Candidates {
+            tsc: None,
+            tsc_invariant: true,
+            tsc_warp_ok: true,
+            hpet: None,
+            pm: None,
+        };
+        assert_eq!(rank(&none), None);
+        // A TSC that is not invariant is no candidate.
+        let bad_tsc = Candidates {
+            tsc: Some(tsc),
+            tsc_invariant: false,
+            ..none
+        };
+        assert_eq!(rank(&bad_tsc), None);
+    }
+
+    #[test]
+    fn hpet_counter_width_from_gcap() {
+        assert_eq!(hpet_counter_width(0), 32);
+        assert_eq!(hpet_counter_width(1 << 13), 64);
+        // QEMU's GCAP_ID: 10 ns period, 64-bit, legacy capable, vendor 0x8086.
+        assert_eq!(hpet_counter_width(0x0098_9680_8086_A201), 64);
+        assert_eq!(hpet_hz(10_000_000), Some(100_000_000));
+        assert_eq!(hpet_hz(69_841_279), Some(14_318_179));
+        assert_eq!(hpet_hz(0), None);
+        assert_eq!(hpet_hz(HPET_PERIOD_FS_MAX + 1), None);
+    }
+
+    #[test]
+    fn clocksource_names() {
+        assert_eq!(ClocksourceId::Tsc.as_str(), "tsc");
+        assert_eq!(ClocksourceId::Hpet.as_str(), "hpet");
+        assert_eq!(ClocksourceId::AcpiPm.as_str(), "acpi_pm");
+        for id in [
+            ClocksourceId::Tsc,
+            ClocksourceId::Hpet,
+            ClocksourceId::AcpiPm,
+        ] {
+            assert_eq!(ClocksourceId::from_u64(id as u64), Some(id));
+        }
+        assert_eq!(ClocksourceId::from_u64(0), None);
+        assert_eq!(ClocksourceId::from_u64(4), None);
     }
 
     #[test]
