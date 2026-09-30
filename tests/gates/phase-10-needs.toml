@@ -1047,6 +1047,17 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
+# L1340
+[[box]]
+key = "driver and volume state as"
+needs = [
+  "`vibeos-core` gains `kalloc` (`TryBox`, `TryVec`,",  # L1321
+  "counted objects follow DESIGN §2.11",  # L1323
+  "every path syscall resolves through `Vfs`",  # L1326
+  "one registry of counted block-device",  # L1342
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra); no driver module keeps a list of them holds once 1326 deletes the route tables"
+
 # L476
 [[box]]
 key = "the PIT tick runs at"

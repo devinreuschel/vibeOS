@@ -1,73 +1,64 @@
-//! In-guest tests of the FAT and vibefs volume slots (invariant I236).
+//! In-guest tests of the FAT and vibefs volume instances' busy flags
+//! (invariant I236).
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::fat_init;
+use crate::fat_init::{self, FatVolume};
 use crate::ktest::Outcome;
-use crate::vibefs_init;
+use crate::vibefs_init::{self, VibeVolume};
 
-/// A claimed slot: its id and its `used` and `busy` flags.
-type Claimed = (u8, &'static AtomicBool, &'static AtomicBool);
-
-/// Claim the first free FAT slot past slot 0 as `mount_dev` does, under
-/// `ALLOC`, and hold its busy flag.
-fn claim_fat() -> Option<Claimed> {
-    let _g = fat_init::ALLOC.lock();
-    let (id, s) = fat_init::SLOTS
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(_, s)| !s.used.load(Ordering::Acquire))?;
-    s.busy.store(true, Ordering::Release);
-    s.used.store(true, Ordering::Release);
-    Some((id as u8, &s.used, &s.busy))
+/// Take a volume's busy flag as another holder would.
+fn hold(busy: &AtomicBool) -> bool {
+    busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
 }
 
-/// [`claim_fat`] for a vibefs slot.
-fn claim_vibefs() -> Option<Claimed> {
-    let _g = vibefs_init::ALLOC.lock();
-    let (id, s) = vibefs_init::SLOTS
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(_, s)| !s.used.load(Ordering::Acquire))?;
-    s.busy.store(true, Ordering::Release);
-    s.used.store(true, Ordering::Release);
-    Some((id as u8, &s.used, &s.busy))
-}
-
-/// `drop_slot` on the used slot `c`, whose busy flag this thread holds as
+/// `drop_slot` on a used volume whose busy flag this thread holds as
 /// another holder would: `grab` gives up after 1,000,000 yields, the error
-/// comes back, and the slot keeps both flags. Then the slot is freed.
-/// `Ok(false)` when there was no slot to claim.
-fn busy_keeps(c: Option<Claimed>, drop_slot: fn(u8) -> bool) -> Result<bool, &'static str> {
-    let Some((id, used, busy)) = c else {
-        return Ok(false);
-    };
-    let dropped = drop_slot(id);
+/// comes back, and the volume keeps both flags. Then the flag is dropped.
+fn busy_keeps(
+    used: &AtomicBool,
+    busy: &AtomicBool,
+    drop_slot: impl FnOnce() -> bool,
+) -> Result<(), &'static str> {
+    if !used.load(Ordering::Acquire) {
+        return Err("volume not in use");
+    }
+    if !hold(busy) {
+        return Err("volume busy");
+    }
+    let dropped = drop_slot();
     let kept = used.load(Ordering::Acquire) && busy.load(Ordering::Acquire);
-    used.store(false, Ordering::Release);
     busy.store(false, Ordering::Release);
     if dropped {
-        return Err("drop_slot succeeded on a slot another thread holds");
+        return Err("drop_slot succeeded on a volume another thread holds");
     }
     if !kept {
-        return Err("drop_slot changed a slot whose grab failed");
+        return Err("drop_slot changed a volume whose grab failed");
     }
-    Ok(true)
+    Ok(())
 }
 
+/// A spare FAT and a spare vibefs volume, which no other thread reaches,
+/// each held busy while `drop_slot` runs on it.
 pub(crate) fn test_fs_drop_slot_busy_keeps_slot() -> Outcome {
-    let fat = match busy_keeps(claim_fat(), |id| fat_init::drop_slot(id).is_ok()) {
-        Ok(ran) => ran,
-        Err(e) => return Outcome::Fail(e),
+    let Ok(fat) = fat_init::spare_volume() else {
+        return Outcome::Fail("no spare FAT volume");
     };
-    let vibe = match busy_keeps(claim_vibefs(), |id| vibefs_init::drop_slot(id).is_ok()) {
-        Ok(ran) => ran,
-        Err(e) => return Outcome::Fail(e),
+    let Some(f) = fat.downcast_ref::<FatVolume>() else {
+        return Outcome::Fail("spare FAT volume type");
     };
-    if !fat && !vibe {
-        return Outcome::Skip("no free FAT or vibefs slot");
+    if let Err(e) = busy_keeps(&f.used, &f.busy, || fat_init::drop_slot(f).is_ok()) {
+        return Outcome::Fail(e);
     }
-    Outcome::Ok
+    let Ok(vibe) = vibefs_init::spare_volume() else {
+        return Outcome::Fail("no spare vibefs volume");
+    };
+    let Some(v) = vibe.downcast_ref::<VibeVolume>() else {
+        return Outcome::Fail("spare vibefs volume type");
+    };
+    match busy_keeps(&v.used, &v.busy, || vibefs_init::drop_slot(v).is_ok()) {
+        Ok(()) => Outcome::Ok,
+        Err(e) => Outcome::Fail(e),
+    }
 }

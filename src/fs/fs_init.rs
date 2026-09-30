@@ -13,8 +13,9 @@
 use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use vibeos::dev::Instance;
 use vibeos::fs::kernfs::{KernFs, KernSkin, KernState};
-use vibeos::fs::{FileApi, FsType, Guarded, Hooks, RamFs, RamState, Vfs};
+use vibeos::fs::{FileApi, FsError, FsType, Guarded, Hooks, RamFs, RamState, Vfs};
 use vibeos::lock::RANK_DEVICE;
 
 use crate::sync_init::SpinMutex;
@@ -39,7 +40,7 @@ pub fn init(root_is_fat: bool) {
     if root_is_fat {
         LIVE.store(true, Ordering::Release);
     } else {
-        let ok = api().mount_root(&RAMFS, None, false).is_ok();
+        let ok = api().mount_root(&RAMFS, None, false, None).is_ok();
         LIVE.store(ok, Ordering::Release);
     }
 }
@@ -103,4 +104,14 @@ fn hooks() -> Hooks {
 pub fn with<R>(f: impl FnOnce(&mut Vfs) -> R) -> R {
     let mut g = VFS.lock();
     f(&mut g)
+}
+
+/// A reference to the volume instance of the filesystem mounted at `path`
+/// (`Vfs::volume_of`); `Inval` for one without.
+pub fn volume_at(path: &[u8]) -> Result<Instance, FsError> {
+    let api = api();
+    let p = api.walk(None, path, true)?;
+    let v = with(|v| v.volume_of(p));
+    api.put_path(p);
+    v
 }

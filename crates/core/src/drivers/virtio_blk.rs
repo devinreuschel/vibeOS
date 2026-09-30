@@ -59,7 +59,18 @@ pub const CFG_MAX_DISCARD_SECTORS: u16 = 36;
 pub const CFG_MAX_DISCARD_SEG: u16 = 40;
 pub const CFG_DISCARD_ALIGN: u16 = 44;
 
-pub const NAME: &str = "vda";
+/// Disks past `vdz` get no name.
+pub const MAX_DISKS: u8 = 26;
+
+/// The name of the `index`th virtio-blk disk in bind order, written into
+/// `out`: `vda` for 0 up to `vdz` for 25, `None` from 26 on.
+pub fn disk_name(index: u8, out: &mut [u8; 4]) -> Option<&str> {
+    if index >= MAX_DISKS {
+        return None;
+    }
+    *out = [b'v', b'd', b'a' + index, 0];
+    core::str::from_utf8(out.get(..3)?).ok()
+}
 
 pub fn pick_features(device: u64) -> Result<u64, virtio::VirtioError> {
     virtio::pick_features(device, OFFER)
@@ -225,8 +236,19 @@ mod tests {
 
     #[test]
     fn marker_vda() {
+        let mut out = [0u8; 4];
         let mut s = String::new();
-        write_marker(&mut s, NAME, 8192).unwrap();
+        write_marker(&mut s, disk_name(0, &mut out).unwrap(), 8192).unwrap();
         assert_eq!(s, "vibeOS: block: vda 8192 sectors");
+    }
+
+    #[test]
+    fn disk_names_vda_to_vdz() {
+        let mut out = [0u8; 4];
+        assert_eq!(disk_name(0, &mut out), Some("vda"));
+        assert_eq!(disk_name(1, &mut out), Some("vdb"));
+        assert_eq!(disk_name(25, &mut out), Some("vdz"));
+        assert_eq!(disk_name(26, &mut out), None);
+        assert_eq!(disk_name(u8::MAX, &mut out), None);
     }
 }

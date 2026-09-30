@@ -64,12 +64,13 @@ per hotplug or reread and which §2.11 rejects for every object; a flat registry
 per-driver number, which cannot express a hub tree, subtree removal, or an IOMMU before the devices
 it translates; and Linux's kobject core, which is more than this needs.
 
-Rule; not yet enforced: the registry is a fixed array of `Copy` PCI records with no parent or state,
-bound in a per-driver `order()` (ROADMAP §6.1). `dev_init::bind_all` probes a copy of each record
-and writes it back, and it turns on memory decode and bus mastering before `probe`, as `irq_init`'s
-MSI and MSI-X setup does again. `pci_init` maps every memory BAR of every function at enumeration,
-before any claim ([§3.3](BOOT.md#33-_start-order)). ROADMAP §10.4 (D2) and §10.12 land rules 1 to 4 and 8 for PCI and block
-devices, §11.5 and §20.7 apply rule 8 to device-tree and ACPI devices, §18.1 lands rule 6, and
+Rule; not yet enforced: the registry is a fixed array of counted PCI entries (`DevRef`, an id never
+reused within a boot) that own their driver's instance, with no parent or state, bound in a
+per-driver `order()` (ROADMAP §6.1). No record is `Copy`. `dev_init::bind_all` passes `probe` a
+`DevRef` and binds the instance it returns to the entry, and it turns on memory decode and bus
+mastering before `probe`, as `irq_init`'s MSI and MSI-X setup does again. `pci_init` maps every
+memory BAR of every function at enumeration, before any claim ([§3.3](BOOT.md#33-_start-order)).
+ROADMAP §10.12 lands rules 2 and 3 and the claims for PCI and block devices, §11.5 and §20.7 apply rule 8 to device-tree and ACPI devices, §18.1 lands rule 6, and
 §20.2, §20.3, §20.9, and §25.4 land rules 5 and 7 for suspend, hubs, removal, and shutdown.
 
 ## 12.4 Removal

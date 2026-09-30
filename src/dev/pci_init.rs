@@ -8,7 +8,8 @@
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::dev::Device;
+use vibeos::dev::{DevRef, Device};
+use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
@@ -261,7 +262,7 @@ fn map_func_bars(info: &FuncInfo, dev: &mut Device) {
 /// Scan, map memory BARs, publish each device through `publish` (the
 /// device registry's `dev_init::push`, which `_start` passes), emit
 /// `pci: N devices`.
-pub fn init(publish: fn(Device) -> bool) {
+pub fn init(publish: fn(Device) -> Result<DevRef, AllocError>) {
     if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
         with_ecam(|e| {
             e.base = m.ecam_base;
@@ -288,11 +289,11 @@ pub fn init(publish: fn(Device) -> bool) {
             reason = "a write to Serial cannot fail (DESIGN §2.5)"
         )]
         let _ = scan_line(&info);
-        if !publish(dev) {
+        if publish(dev).is_err() {
             crate::klog_ratelimited!(
                 1000,
                 vibeos::log::Level::Warn,
-                "vibeOS: pci: registry full, {} not published",
+                "vibeOS: pci: registry or heap full, {} not published",
                 info.bdf
             );
         }

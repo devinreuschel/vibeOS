@@ -31,6 +31,21 @@ impl Vfs {
         self.sb_live(sb)?;
         Ok(self.supers[sb as usize].private)
     }
+
+    /// A reference to the volume instance of the superblock `p` is on;
+    /// `Inval` for one whose backend gave none.
+    pub fn volume_of(&self, p: PathRef) -> Result<Instance, FsError> {
+        let sb = self.sb_of_mount(p.mount)?;
+        self.sb_live(sb)?;
+        self.supers[sb as usize].vol.clone().ok_or(FsError::Inval)
+    }
+
+    /// Whether a mounted superblock shows volume `vol`.
+    pub fn shows_volume(&self, vol: &Instance) -> bool {
+        self.supers
+            .iter()
+            .any(|s| s.live() && s.vol.as_ref().is_some_and(|v| same_instance(v, vol)))
+    }
 }
 
 impl Vfs {
@@ -58,6 +73,7 @@ impl Vfs {
         fs: &'static dyn FileSystem,
         dev: Option<u64>,
         ro: bool,
+        vol: Option<Instance>,
     ) -> Result<MountStep, FsError> {
         self.mountpoint_ok(at)?;
         if let Some(d) = dev
@@ -95,6 +111,7 @@ impl Vfs {
             dev,
             ro,
             maxbytes: fs.max_bytes(),
+            vol,
             ..Super::EMPTY
         };
         let call = match self.sb_call(sb) {
@@ -455,7 +472,9 @@ impl Vfs {
 
 impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// Mount `fs` on directory `at` (C-FILEAPI `mount`'s core); see
-    /// [`Vfs::super_of_dev`] for a device already mounted.
+    /// [`Vfs::super_of_dev`] for a device already mounted. A new
+    /// superblock holds `vol`, the backend's volume instance; a shared
+    /// one keeps its own.
     pub fn mount_fs(
         &self,
         cwd: Option<PathRef>,
@@ -463,21 +482,23 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         fs: &'static dyn FileSystem,
         dev: Option<u64>,
         ro: bool,
+        vol: Option<Instance>,
     ) -> Result<Mounted, FsError> {
         let p = self.walk(cwd, at, true)?;
-        let r = self.mount_at(Some(p), at, fs, dev, ro);
+        let r = self.mount_at(Some(p), at, fs, dev, ro, vol);
         self.put_path(p);
         r
     }
 
-    /// Mount `fs` as the root.
+    /// Mount `fs` as the root, holding `vol`.
     pub fn mount_root(
         &self,
         fs: &'static dyn FileSystem,
         dev: Option<u64>,
         ro: bool,
+        vol: Option<Instance>,
     ) -> Result<Mounted, FsError> {
-        self.mount_at(None, b"/", fs, dev, ro)
+        self.mount_at(None, b"/", fs, dev, ro, vol)
     }
 
     fn mount_at(
@@ -487,8 +508,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         fs: &'static dyn FileSystem,
         dev: Option<u64>,
         ro: bool,
+        vol: Option<Instance>,
     ) -> Result<Mounted, FsError> {
-        let (m, mut call) = match self.with(|v| v.mount_begin(at, fs, dev, ro))? {
+        let (m, mut call) = match self.with(|v| v.mount_begin(at, fs, dev, ro, vol))? {
             MountStep::Done(m, call) => (m, call),
             MountStep::Fill(mut f) => {
                 let res = f.call.run(|_, _, cx| fs.fill_super(cx));

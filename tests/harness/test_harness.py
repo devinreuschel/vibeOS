@@ -2036,6 +2036,38 @@ class TestDevicePresets(unittest.TestCase):
             self.assertNotIn("discard", blob)
         self.assertNotIn("write-cache", " ".join(virtio_blk_args("/d", 2)))
 
+    def test_virtio_blk_args_extra_disks(self) -> None:
+        from tests.harness.harness import virtio_blk_args
+
+        for discard in (True, False):
+            args = virtio_blk_args("/a", 3, discard=discard, extra=("/b",))
+            drives = [args[i + 1] for i, a in enumerate(args) if a == "-drive"]
+            devices = [args[i + 1] for i, a in enumerate(args) if a == "-device"]
+            self.assertEqual(len(drives), 2)
+            self.assertEqual(len(devices), 2)
+            self.assertEqual(args[0], "-drive")
+            self.assertEqual(args[2], "-device")
+            self.assertIn("file=/a,", drives[0])
+            self.assertIn("id=vibehd,", drives[0])
+            self.assertIn("file=/b,", drives[1])
+            self.assertIn("id=vibehd1,", drives[1])
+            self.assertIn("drive=vibehd,", devices[0])
+            self.assertIn("drive=vibehd1,", devices[1])
+            for d in devices:
+                self.assertIn("num-queues=3", d)
+                self.assertIn("disable-legacy=on", d)
+            for d in drives:
+                self.assertEqual("discard=unmap" in d, discard)
+
+    def test_ktest_devices_extra_disk(self) -> None:
+        from tests.harness.harness import ktest_devices
+
+        args = ktest_devices("/first.img", 2, extra_disks=("/second.img",))
+        blob = " ".join(args)
+        self.assertLess(blob.index("file=/first.img"), blob.index("file=/second.img"))
+        self.assertIn("id=vibehd1", blob)
+        self.assertNotIn("/second.img", " ".join(ktest_devices("/first.img", 2)))
+
     def test_virtio_blk_rejects_unsafe_cache(self) -> None:
         from tests.harness.harness import virtio_blk_args
 

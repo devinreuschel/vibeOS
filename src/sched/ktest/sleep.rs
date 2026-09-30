@@ -191,11 +191,11 @@ fn hard_state() -> u8 {
     if irq_init::in_hard_irq() { 2 } else { 1 }
 }
 
-fn top_half() {
+fn top_half(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     TOP_HARD.store(hard_state(), Ordering::Release);
 }
 
-fn bottom_half() {
+fn bottom_half(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     BOTTOM_HARD.store(hard_state(), Ordering::Release);
 }
 
@@ -211,7 +211,7 @@ pub(crate) fn in_hard_irq_top_bottom() -> Outcome {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
-    if irq_init::set_threaded(v, Some(top_half), bottom_half).is_err() {
+    if irq_init::set_threaded(v, Some(top_half), bottom_half, None).is_err() {
         let _ = irq_init::free_vector(v);
         return Outcome::Fail("set_threaded");
     }

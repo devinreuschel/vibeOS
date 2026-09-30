@@ -72,10 +72,6 @@ pub const MAX_WALK: u32 = 80;
 pub const MAX_KVA_RANGES: usize = MAX_THREADS + 8 * crate::acpi::MAX_CPUS + 64;
 /// Pages one deferred unmap batch holds (`kva_init`).
 pub const MAX_UNMAP_PAGES: usize = 32;
-/// Mounted FAT volumes (`fat_init`).
-pub const MAX_FAT_VOLS: usize = 2;
-/// Mounted vibefs volumes (`vibefs_init`).
-pub const MAX_VIBEFS_VOLS: usize = 2;
 /// In-core inode slots per FAT volume (`fat::FatVol`).
 pub const MAX_FAT_INODES: usize = 96;
 /// Partitions per disk (`part::Table`, `part_init`).

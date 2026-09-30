@@ -2,6 +2,8 @@
 
 use core::fmt::Write;
 
+use vibeos::dev::DevRef;
+use vibeos::pci::MAX_BARS;
 use vibeos::shell::Command;
 
 use crate::console_init::Console;
@@ -20,8 +22,8 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
 ];
 
-/// One Device at a time: a full [Device; MAX] (and a second Registry)
-/// overflows the 16 KiB shell stack. Drop RANK_DEVICE before FB print.
+/// One device at a time, each printed from its reference with RANK_DEVICE
+/// dropped, before the FB print.
 fn cmd_lspci(_args: &[&str]) {
     let mut i = 0usize;
     while let Some(d) = dev_init::get(i) {
@@ -46,7 +48,12 @@ fn cmd_devices(_args: &[&str]) {
             clippy::let_underscore_must_use,
             reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
         )]
-        let _ = d.write_tree(&mut Console);
+        let _ = d.write_tree(dev_init::bound(&d), &claimed(&d), &mut Console);
         i += 1;
     }
+}
+
+/// Which of `d`'s BARs are claimed.
+fn claimed(d: &DevRef) -> [bool; MAX_BARS] {
+    core::array::from_fn(|b| dev_init::is_claimed(d, b as u8))
 }

@@ -140,6 +140,7 @@ impl Vfs {
             fstype: self.fstype(sb),
             private: self.supers[sb as usize].private,
             now: self.now,
+            vol: self.supers[sb as usize].vol.clone(),
             before: n,
             ino: n,
         }
@@ -155,13 +156,15 @@ impl Vfs {
     pub(super) fn sb_call(&mut self, sb: u8) -> Result<SbCall, FsError> {
         let s = &mut self.supers[sb as usize];
         s.busy = s.busy.checked_add(1).ok_or(FsError::NoSpace)?;
+        let (fs, ops, vol) = (s.fs, s.ops, s.vol.clone());
         Ok(SbCall {
-            fs: s.fs,
-            ops: s.ops,
+            fs,
+            ops,
             sb,
             fstype: self.fstype(sb),
             private: self.supers[sb as usize].private,
             now: self.now,
+            vol,
         })
     }
 
