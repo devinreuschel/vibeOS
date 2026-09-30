@@ -51,8 +51,6 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         stack: None,
         context: CpuContext::empty(),
         entry: ap_idle_entry,
-        next: None,
-        prev: None,
         affinity: CpuAffinity::Pinned(cpu_id),
         cpu: cpu_id,
         irq_nest: 0,
@@ -101,8 +99,6 @@ fn fill_ap_idle(tcb: &mut Tcb, cpu_id: u32) {
     tcb.on_cpu.set();
     tcb.context = CpuContext::empty();
     tcb.entry = ap_idle_entry;
-    tcb.next = None;
-    tcb.prev = None;
     tcb.affinity = CpuAffinity::Pinned(cpu_id);
     tcb.cpu = cpu_id;
     tcb.irq_nest = 0;

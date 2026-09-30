@@ -604,7 +604,6 @@ fn schedule_inner(from_irq: bool) {
                 t.state = ThreadState::Running;
                 t.cpu = me;
             }
-            relink(s);
             Some((s.ptr(cur), s.ptr(cand), cur, cand))
         });
         match picked {
@@ -691,37 +690,6 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             &(*new_ptr).context,
         )
     };
-}
-
-fn relink(s: &mut Sched) {
-    per_cpu_init::with_current(|cpu| {
-        // Each id's neighbours, read from the run queue in place.
-        let n = cpu.runq.len();
-        let mut i = 0;
-        while i < n {
-            let prev = if i == 0 {
-                None
-            } else {
-                Some(cpu.runq.at(i - 1))
-            };
-            let next = if i + 1 == n {
-                None
-            } else {
-                Some(cpu.runq.at(i + 1))
-            };
-            if let Some(t) = s.get_mut(cpu.runq.at(i)) {
-                t.prev = prev;
-                t.next = next;
-            }
-            i += 1;
-        }
-        let front = cpu.runq.front();
-        let head = match front {
-            Some(id) => s.ptr(id),
-            None => core::ptr::null_mut(),
-        };
-        cpu.ready_head = head;
-    });
 }
 
 /// The switch tail: runs on this CPU after every `switch_context` returns,
@@ -1157,8 +1125,6 @@ fn spawn_inner(
         stack: None,
         context: CpuContext::empty(),
         entry,
-        next: None,
-        prev: None,
         affinity,
         cpu,
         irq_nest: first_nest,
@@ -1242,8 +1208,6 @@ fn fill_tcb(
     tcb.state = ThreadState::Ready;
     tcb.stack = Some(ks);
     tcb.entry = entry;
-    tcb.next = None;
-    tcb.prev = None;
     tcb.affinity = affinity;
     tcb.cpu = cpu;
     tcb.irq_nest = irq_nest;
@@ -1381,7 +1345,6 @@ pub fn switch_to(id: ThreadId) {
             t.state = ThreadState::Running;
             t.cpu = me;
         }
-        relink(s);
         (s.ptr(old_id), s.ptr(id))
     });
     switch_now(old_ptr, new_ptr);

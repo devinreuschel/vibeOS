@@ -252,7 +252,7 @@ impl Default for OnCpu {
     }
 }
 
-/// Global TCB. `next`/`prev` are the run-queue links Slice B fills.
+/// Global TCB.
 #[repr(C, align(16))]
 pub struct Tcb {
     pub id: ThreadId,
@@ -271,9 +271,6 @@ pub struct Tcb {
     pub stack: Option<GuardedStack>,
     pub context: CpuContext,
     pub entry: fn(),
-    /// Intrusive ready-list link. Slice B; phase 4 is per-CPU.
-    pub next: Option<ThreadId>,
-    pub prev: Option<ThreadId>,
     pub affinity: CpuAffinity,
     pub cpu: u32,
     /// `InterruptGuard` depth frozen while this thread is off-CPU.
@@ -398,13 +395,13 @@ const _: () = {
     assert!(tag(&ThreadState::Dead) == 4);
     assert!(size_of::<ThreadState>() == 24);
     assert!(align_of::<ThreadState>() == 8);
-    assert!(size_of::<Tcb>() == if DEBUG { 1280 } else { 1024 });
+    assert!(size_of::<Tcb>() == if DEBUG { 1264 } else { 1008 });
     assert!(align_of::<Tcb>() == 16);
     assert!(offset_of!(Tcb, id) == 0);
     assert!(offset_of!(Tcb, state) == 24);
     assert!(offset_of!(Tcb, context) == if DEBUG { 592 } else { 336 });
-    assert!(offset_of!(Tcb, cpu) == if DEBUG { 696 } else { 440 });
-    assert!(offset_of!(Tcb, pid) == if DEBUG { 1264 } else { 1008 });
+    assert!(offset_of!(Tcb, cpu) == if DEBUG { 680 } else { 424 });
+    assert!(offset_of!(Tcb, pid) == if DEBUG { 1248 } else { 992 });
     assert!(size_of::<CpuContext>() == 72);
     assert!(size_of::<TcbSlot>() == size_of::<usize>());
 };

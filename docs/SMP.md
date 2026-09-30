@@ -231,8 +231,7 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
 
 - `self_ptr` and logical CPU id
 - `current`, `idle`, and `idle_id`
-- `runq`, this CPU's ready FIFO (owner only, IRQs off), and `ready_head`, a copy of its head that
-  only an in-guest test reads (ROADMAP §10.7 deletes it, F111)
+- `runq`, this CPU's ready FIFO (owner only, IRQs off)
 - `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `tsc_per_ms` (a copy of the BSP's value, [section 6.2](TIME.md#62-calibrating-the-tsc)) and `timer_mode`
 - `kernel_rsp0`, which the context switch updates; `tables`, this CPU's `gdt::CpuTables` (opaque in `vibeos-core`), through whose `set_rsp0` it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)

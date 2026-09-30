@@ -16,7 +16,8 @@ A row is one of:
   matches it, and a plain path also when its text appears in a file;
 - a definition, `<path>: <kind> <name>` (`src/fs/fat_init.rs: fn route`),
   which fails only when that file still defines `<name>` as `<kind>`, so the
-  bare word stays legal elsewhere.
+  bare word stays legal elsewhere; kind `pub` names a public struct field
+  (`crates/core/src/sched/thread.rs: pub next`).
 A file whose basename equals a row fails too.
 
 A deleting commit adds its rows here and names this script in its `Proves:`
@@ -253,6 +254,9 @@ GONE: list[tuple[str, str]] = [
     ("tests/harness/run_e2e.py: ISA_DEBUG_EXIT", "on a timeout, or on"),
     ("drain_panic_tail", "on a timeout, or on"),
     ("abandon_ap_idle", "a full thread table is an error, not a panic"),
+    ("relink", "dead scheduler and bring-up state"),
+    ("crates/core/src/sched/thread.rs: pub next", "dead scheduler and bring-up state"),
+    ("crates/core/src/sched/thread.rs: pub prev", "dead scheduler and bring-up state"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
@@ -261,7 +265,7 @@ EXEMPT = frozenset({"scripts/check_gone.py", "tests/harness/test_gone.py"})
 GATE_MAP = re.compile(r"^tests/gates/phase-\d+\.toml$")
 GATE_KEY = re.compile(r'^key = (?:"""[\s\S]*?"""|"[^"\n]*")', re.M)
 DEFINITION = re.compile(r"^(\S+): (fn|struct|enum|union|trait|type|const|static|mod|macro"
-                        r"|def|class) ([A-Za-z_][A-Za-z0-9_]*)$")
+                        r"|def|class|pub) ([A-Za-z_][A-Za-z0-9_]*)$")
 GLOB_CHARS = frozenset("*?[")
 
 
