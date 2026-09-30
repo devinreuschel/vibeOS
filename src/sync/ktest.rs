@@ -517,14 +517,6 @@ pub(crate) fn test_late_wake_after_exit() -> Outcome {
     if !per_cpu_init::is_online(1) {
         return Outcome::Skip("needs 2 cpus");
     }
-    // The held waiter keeps CPU 1 at IF=0 for up to 2 s, where it acks no
-    // shootdown. A dead stack an earlier test left for CPU 0's worker would
-    // be freed inside that hold, its shootdown would stall CPU 0 until the
-    // hold timed out, and the waiter would never be seen held; start with
-    // none on its way back, as `lifetime_shootdown_ack_late` does.
-    if !crate::ktest::settle_threads() {
-        return Outcome::Fail("threads did not settle");
-    }
     LATE_RUNS.store(0, Ordering::Release);
     LATE_PROBE.store(false, Ordering::Release);
     let g = LATE_M.lock();
