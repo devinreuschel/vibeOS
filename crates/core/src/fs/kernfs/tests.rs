@@ -382,3 +382,46 @@ fn fixed_tables_match_limits() {
     let k = std::boxed::Box::new(KernState::new());
     assert_eq!(k.nodes.len(), crate::limits::MAX_KERN_NODES);
 }
+
+/// Read `n` bytes of `path` at `off`.
+fn read_at(v: &mut Vfs, path: &str, off: u64, n: usize) -> Vec<u8> {
+    let f = v.open_path(None, path, O_RDWR, 0).unwrap();
+    v.seek(&f, off as i64, SEEK_SET).unwrap();
+    let mut out = vec![0u8; n];
+    assert_eq!(v.read(&f, &mut out).unwrap(), n);
+    v.close(f).unwrap();
+    out
+}
+
+/// Write `data` to `path` at `off`, creating it.
+fn write_at(v: &mut Vfs, path: &str, off: u64, data: &[u8]) {
+    let f = v.open_path(None, path, O_RDWR | O_CREAT, 0o644).unwrap();
+    v.seek(&f, off as i64, SEEK_SET).unwrap();
+    assert_eq!(v.write(&f, data).unwrap(), data.len());
+    v.close(f).unwrap();
+}
+
+#[test]
+fn tmpfs_extent_move_keeps_data() {
+    let (mut v, _k) = boot();
+    let head = *b"AAAAaaaa";
+    let pg = PAGE as u64;
+    write_at(&mut v, "/tmp/a", 0, &head);
+    // B takes the page after A's, so A's growth moves its extent.
+    write_at(&mut v, "/tmp/b", 0, b"B");
+    write_at(&mut v, "/tmp/a", pg + 3, b"grow");
+    assert_eq!(read_at(&mut v, "/tmp/a", 0, 8), head);
+    assert_eq!(read_at(&mut v, "/tmp/a", pg + 3, 4), b"grow");
+    assert_eq!(read_at(&mut v, "/tmp/a", 8, 64), vec![0u8; 64]);
+    assert_eq!(read_at(&mut v, "/tmp/b", 0, 1), b"B");
+    // C takes the page after A's new run; a truncate grows A past it.
+    write_at(&mut v, "/tmp/c", 0, b"C");
+    v.truncate(None, "/tmp/a", 3 * pg + 1).unwrap();
+    assert_eq!(v.stat(None, "/tmp/a").unwrap().size, 3 * pg + 1);
+    assert_eq!(read_at(&mut v, "/tmp/a", 0, 8), head);
+    assert_eq!(read_at(&mut v, "/tmp/a", pg + 3, 4), b"grow");
+    assert_eq!(read_at(&mut v, "/tmp/a", pg + 7, 64), vec![0u8; 64]);
+    assert_eq!(read_at(&mut v, "/tmp/a", 3 * pg, 1), [0u8]);
+    assert_eq!(read_at(&mut v, "/tmp/b", 0, 1), b"B");
+    assert_eq!(read_at(&mut v, "/tmp/c", 0, 1), b"C");
+}
