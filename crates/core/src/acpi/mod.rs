@@ -425,6 +425,60 @@ pub struct FadtInfo {
     pub reset_value: u8,
     pub sleep_control: Gas,
     pub sleep_status: Gas,
+    /// The ACPI PM timer, when the FADT names a usable block.
+    pub pm_timer: Option<PmTimer>,
+}
+
+/// The ACPI PM timer's `TMR_VAL` port and how many bits of it count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PmTimer {
+    pub port: u16,
+    /// 24, or 32 with the FADT's `TMR_VAL_EXT` flag.
+    pub width: u8,
+}
+
+/// FADT `PM_TMR_BLK`, a u32 port (ACPI 6.5 §5.2.9).
+const FADT_PM_TMR_BLK: usize = 76;
+/// FADT `PM_TMR_LEN`, a u8: 4 when `PM_TMR_BLK` is a timer.
+const FADT_PM_TMR_LEN: usize = 91;
+/// FADT `Flags`, a u32.
+const FADT_FLAGS: usize = 112;
+/// FADT `X_PM_TMR_BLK`, a GAS.
+const FADT_X_PM_TMR_BLK: usize = 208;
+/// `Flags` bit 8: the PM timer counts 32 bits, not 24.
+const FADT_TMR_VAL_EXT: u32 = 1 << 8;
+
+/// The PM timer of a FADT whose first `n` bytes are in `bytes`:
+/// `X_PM_TMR_BLK` when it holds a nonzero address, which must then be a
+/// SystemIO port, else `PM_TMR_BLK` when `PM_TMR_LEN` is 4 (ACPI's rule for
+/// a zero extended field). None for a missing, zero, non-port or truncated
+/// block.
+fn fadt_pm_timer(bytes: &[u8], n: usize) -> Option<PmTimer> {
+    let flags = if n >= 116 {
+        read_unaligned_u32(bytes, FADT_FLAGS).unwrap_or(0)
+    } else {
+        0
+    };
+    let width = if flags & FADT_TMR_VAL_EXT != 0 {
+        32
+    } else {
+        24
+    };
+    let x = if n >= 220 {
+        parse_gas(bytes, FADT_X_PM_TMR_BLK).ok()
+    } else {
+        None
+    };
+    let port = match x.filter(|g| g.address != 0) {
+        Some(g) if g.space_id == GAS_SYSTEM_IO => u16::try_from(g.address).ok()?,
+        Some(_) | None => {
+            if n < 92 || read_unaligned_u8(bytes, FADT_PM_TMR_LEN)? != 4 {
+                return None;
+            }
+            u16::try_from(read_unaligned_u32(bytes, FADT_PM_TMR_BLK)?).ok()?
+        }
+    };
+    (port != 0).then_some(PmTimer { port, width })
 }
 
 impl FadtInfo {
@@ -446,7 +500,9 @@ pub fn parse_fadt(bytes: &[u8]) -> Result<FadtInfo, AcpiError> {
         reset_value: 0,
         sleep_control: Gas::empty(),
         sleep_status: Gas::empty(),
+        pm_timer: None,
     };
+    info.pm_timer = fadt_pm_timer(bytes, n);
     // IAPC_BOOT_ARCH is the u16 at 109, so it needs 111 bytes.
     if n >= 111 {
         info.iapc_boot_arch = read_unaligned_u16(bytes, 109).unwrap_or(0);
@@ -901,6 +957,100 @@ mod tests {
         assert_eq!(f.reset.address, 0xCF);
         assert_eq!(f.reset_value, 0x06);
         assert_eq!(f.sleep_control.address, 0x404);
+    }
+
+    /// A FADT of `len` bytes with `PM_TMR_BLK` = `blk`, `PM_TMR_LEN` = 4
+    /// and `Flags` = `flags` where they fit.
+    fn fadt_pm(len: usize, blk: u32, flags: u32) -> Vec<u8> {
+        let mut extra = vec![0u8; len - SDT_HEADER_LEN];
+        let at = |off: usize| off - SDT_HEADER_LEN;
+        extra[at(76)..at(80)].copy_from_slice(&blk.to_le_bytes());
+        extra[at(91)] = 4;
+        if len >= 116 {
+            extra[at(112)..at(116)].copy_from_slice(&flags.to_le_bytes());
+        }
+        extra
+    }
+
+    fn set_x_pm(extra: &mut [u8], space: u8, addr: u64) {
+        let at = 208 - SDT_HEADER_LEN;
+        extra[at] = space;
+        extra[at + 1] = 32;
+        extra[at + 4..at + 12].copy_from_slice(&addr.to_le_bytes());
+    }
+
+    #[test]
+    fn fadt_pm_timer_x_block_preferred() {
+        let mut extra = fadt_pm(268, 0x608, 0);
+        set_x_pm(&mut extra, GAS_SYSTEM_IO, 0xB008);
+        let f = parse_fadt(&sdt(SIG_FADT, &extra)).unwrap();
+        assert_eq!(
+            f.pm_timer,
+            Some(PmTimer {
+                port: 0xB008,
+                width: 24
+            })
+        );
+    }
+
+    #[test]
+    fn fadt_pm_timer_legacy_block_rev1() {
+        // QEMU `pc` (PIIX4): a 116-byte revision-1 FADT with no `X_` fields.
+        let f = parse_fadt(&sdt(SIG_FADT, &fadt_pm(116, 0x608, 0))).unwrap();
+        assert_eq!(
+            f.pm_timer,
+            Some(PmTimer {
+                port: 0x608,
+                width: 24
+            })
+        );
+        // A zero `X_PM_TMR_BLK` falls back to the legacy block too.
+        let f = parse_fadt(&sdt(SIG_FADT, &fadt_pm(268, 0x608, 0))).unwrap();
+        assert_eq!(
+            f.pm_timer,
+            Some(PmTimer {
+                port: 0x608,
+                width: 24
+            })
+        );
+    }
+
+    #[test]
+    fn fadt_pm_timer_width_ext() {
+        let f = parse_fadt(&sdt(SIG_FADT, &fadt_pm(244, 0x608, 1 << 8))).unwrap();
+        assert_eq!(
+            f.pm_timer,
+            Some(PmTimer {
+                port: 0x608,
+                width: 32
+            })
+        );
+    }
+
+    #[test]
+    fn fadt_pm_timer_rejects_bad_blocks() {
+        let none = |extra: &[u8]| parse_fadt(&sdt(SIG_FADT, extra)).unwrap().pm_timer;
+        // Zero block.
+        assert_eq!(none(&fadt_pm(116, 0, 0)), None);
+        // Above 0xFFFF, legacy and extended.
+        assert_eq!(none(&fadt_pm(116, 0x1_0000, 0)), None);
+        let mut x_big = fadt_pm(268, 0x608, 0);
+        set_x_pm(&mut x_big, GAS_SYSTEM_IO, 0x1_0000);
+        assert_eq!(none(&x_big), None);
+        // PM_TMR_LEN != 4.
+        let mut short_len = fadt_pm(116, 0x608, 0);
+        short_len[91 - SDT_HEADER_LEN] = 2;
+        assert_eq!(none(&short_len), None);
+        // A memory-space `X_` block with no legacy one.
+        let mut mem = fadt_pm(268, 0, 0);
+        set_x_pm(&mut mem, GAS_SYSTEM_MEMORY, 0xFED0_0000);
+        assert_eq!(none(&mem), None);
+        // Truncated before `PM_TMR_LEN`, and a table whose length overstates
+        // its bytes.
+        assert_eq!(none(&fadt_pm(116, 0x608, 0)[..50]), None);
+        let mut lying = sdt(SIG_FADT, &fadt_pm(268, 0x608, 0));
+        lying.truncate(80);
+        assert_eq!(parse_fadt(&lying).map(|f| f.pm_timer), Ok(None));
     }
 
     #[test]
