@@ -153,3 +153,8 @@ smp = 1
 name = "lifetime_console_write_acks_shootdown"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "lifetime_shootdown_ack_late"
+reason = "one CPU"
+smp = 1
