@@ -156,6 +156,19 @@ impl Table {
 
 static TABLE: SpinMutex<Table> = SpinMutex::with_rank(Table::empty(), RANK_SCHED);
 
+/// The process table's use: slots not `Unused`, and its length.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn table_usage() -> (usize, usize) {
+    with_table(|t| {
+        let used = t
+            .procs
+            .iter()
+            .filter(|p| p.state != ProcState::Unused)
+            .count();
+        (used, t.procs.len())
+    })
+}
+
 /// Run `f` on the process table. Callers hold SCHED, which serializes its wait queues.
 fn table_locked<R>(f: impl FnOnce(&mut Table) -> R) -> R {
     // pair order: thread_init::SCHED, then TABLE
