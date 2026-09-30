@@ -398,7 +398,7 @@ what was written. Planned (ROADMAP §13.8, §17.4): nothing reads another thread
 | `0xFB` | Call function. Run a closure on a target CPU, optionally waiting for completion. |
 | `0xFC` | TLB shootdown. |
 | `0xFD` | Reschedule. Target CPU re-evaluates its run queue, waking from `hlt` if idle. |
-| `0xFE` | Panic stop, Fixed delivery: the IPI of §2.5 step 1. Today `ipi_init::halt_others` broadcasts it and does not wait, and a CPU spinning with IF=0 (in `SpinMutex::lock` or `wait_acks`) never takes it, so another CPU can write to COM1 during the dump. Planned (ROADMAP §10.7, F135): the dump owner sets each CPU's stop request word before the IPI, and a CPU spinning with IF=0 stops at its next `service_incoming` poll. |
+| `0xFE` | Panic stop, Fixed delivery: the IPI of [§2.5](INVARIANTS.md#25-panic-policy) step 1 (ROADMAP §10.7, F135). The dump owner (`ipi_init::stop_others`) sets each other online CPU's stop request word, then sends it this IPI to its APIC id, through `apic_init::send_ipi`, which records no trace event; the body (`ipi_init::on_stop_ipi`) saves the interrupted registers and stops (`stopped (ipi)`). A CPU spinning with IF=0 (in `SpinMutex::lock` or `wait_acks`) stops at its next `service_incoming` poll instead, and one that neither polls nor writes gets NMI after 100 ms. |
 
 The reschedule IPI is what makes cross-CPU wakeups work without ever locking a remote run queue: push
 onto the target's inbox, send `0xFD`, done. `0xFD` then takes SCHED IRQ-off via `schedule_preempt`.
