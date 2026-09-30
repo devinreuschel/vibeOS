@@ -247,9 +247,6 @@ pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
 pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
     let mut buf = [0u8; vibeos::fs::MAX_PATH];
     let n = copy_user_str(path, &mut buf)?;
-    if core::str::from_utf8(&buf[..n]).is_err() {
-        return Err(KError::Inval);
-    }
     let mode = u32::from(mode) & 0o7777;
     match file_init::open(&buf[..n], OpenFlags::from_bits(flags as u32), mode) {
         Ok(f) => {
@@ -262,16 +259,19 @@ pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
                 flags: fd_flags_from_open(flags as u32),
             };
             let pid = current_pid();
-            let r = with_table(|t| t.get_mut(pid).and_then(|p| p.fds.alloc(slot).ok()));
+            let r = with_table(|t| match t.get_mut(pid) {
+                Some(p) => p.fds.alloc(slot).map_err(KError::from),
+                None => Err(KError::MFile),
+            });
             match r {
-                Some(fd) => Ok(fd as usize),
-                None => {
+                Ok(fd) => Ok(fd as usize),
+                Err(e) => {
                     #[expect(
                         clippy::let_underscore_must_use,
                         reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
                     )]
                     let _ = file_init::close(FileRef::from_raw(id));
-                    Err(KError::MFile)
+                    Err(e)
                 }
             }
         }
@@ -341,19 +341,20 @@ pub(super) fn sys_dup(old: u32) -> SysResult {
         return Err(KError::BadF);
     };
     // The slot may have changed while the table lock was dropped: the
-    // copy is made only of the slot the count was taken for.
+    // copy is made only of the slot the count was taken for. A full table
+    // is `EMFILE`, as Linux's.
     let r = with_table(|t| {
-        let p = t.get_mut(pid)?;
+        let p = t.get_mut(pid).ok_or(KError::BadF)?;
         if p.fds.get(old) != Some(s) {
-            return None;
+            return Err(KError::BadF);
         }
-        p.fds.dup(old).ok()
+        p.fds.dup(old).map_err(KError::from)
     });
     match r {
-        Some(n) => Ok(n as usize),
-        None => {
+        Ok(n) => Ok(n as usize),
+        Err(e) => {
             drop_held(s);
-            Err(KError::BadF)
+            Err(e)
         }
     }
 }

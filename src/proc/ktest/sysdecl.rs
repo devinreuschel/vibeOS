@@ -1,6 +1,7 @@
 //! In-guest tests of the syscall table's pointer declarations (kernel_tests
 //! only, ROADMAP §10.5): `sysdecl`, embedded from `make user` (C-USERBINS),
-//! run in ring 3. Rows: the list in crate::ktest.
+//! run in ring 3; and of the syscall layer's own errnos (ROADMAP §10.4):
+//! `errno_checks`. Rows: the list in crate::ktest.
 
 use vibeos::kerror::KError;
 use vibeos::proc::{wexitstatus, wifexited};
@@ -75,5 +76,20 @@ pub(crate) fn wait4_echild_before_efault() -> Outcome {
         Ok(st) if st == KError::Child.errno() as u32 => Outcome::Ok,
         Ok(st) => crate::fail_fmt!("exit {st}, want ECHILD ({})", KError::Child.errno()),
         Err(o) => o,
+    }
+}
+
+/// The syscall layer's own checks return Linux's errno (ROADMAP §10.4,
+/// E2): `errno_checks` runs each case in ring 3 and exits 0, or with the
+/// number of the case that failed.
+pub(crate) fn syscall_errno_checks() -> Outcome {
+    match user::run(&Image::UserBin("errno_checks"), &["errno_checks"]) {
+        Ok(st) if wifexited(st) && wexitstatus(st) == 0 => Outcome::Ok,
+        Ok(st) if wifexited(st) => {
+            let n = wexitstatus(st);
+            crate::fail_fmt!("case {n}")
+        }
+        Ok(st) => crate::fail_fmt!("killed, status {st:#x}"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
     }
 }

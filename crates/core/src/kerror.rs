@@ -58,7 +58,7 @@ errno_table! {
     Io = 5, "EIO", "device I/O error";
     TooBig = 7, "E2BIG", "`execve` argv or envp with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK`";
     NoExec = 8, "ENOEXEC", "malformed ELF, `ET_DYN`, or `PT_INTERP`";
-    BadF = 9, "EBADF", "closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd";
+    BadF = 9, "EBADF", "closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd";
     Child = 10, "ECHILD", "`wait4` with no matching child";
     Again = 11, "EAGAIN", "`fork` with every process-table slot in use, zombies included (`MAX_PROCS` is 18), or no pid free (pids and tids share one allocator, up to 32,767, then from 300)";
     NoMem = 12, "ENOMEM", "AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4)";
@@ -72,7 +72,7 @@ errno_table! {
     IsDir = 21, "EISDIR", "";
     Inval = 22, "EINVAL", "`lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; the non-Linux cases in §2.1";
     NFile = 23, "ENFILE", "defined; no syscall returns it";
-    MFile = 24, "EMFILE", "per-process fd table full (`open`); the non-Linux cases in §2.1";
+    MFile = 24, "EMFILE", "per-process fd table full (`open`, `dup`); the non-Linux cases in §2.1";
     FBig = 27, "EFBIG", "a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3)";
     NoSpc = 28, "ENOSPC", "defined; no syscall returns it";
     SPipe = 29, "ESPIPE", "defined; no syscall returns it";

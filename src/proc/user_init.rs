@@ -378,7 +378,7 @@ fn fill_stack(
 /// `[path]` when empty) and `envp` on its initial stack. Caller installs
 /// it only after this returns.
 pub fn load_path<A: AsRef<[u8]>>(
-    path: &str,
+    path: &[u8],
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
@@ -391,12 +391,11 @@ pub fn load_path<A: AsRef<[u8]>>(
 }
 
 fn load_path_inner<A: AsRef<[u8]>>(
-    path: &str,
+    path: &[u8],
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
-    let file = file_init::open(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
-        .map_err(LoadError::Fs)?;
+    let file = file_init::open(path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
     let mut src = FileImage {
         file,
         len: 0,
@@ -418,7 +417,7 @@ fn load_path_inner<A: AsRef<[u8]>>(
 #[inline(never)]
 fn load_file<A: AsRef<[u8]>>(
     src: &mut FileImage,
-    path: &str,
+    path: &[u8],
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
@@ -430,9 +429,7 @@ fn load_file<A: AsRef<[u8]>>(
     let mut argv_b =
         TryVec::<&[u8]>::try_with_capacity(argv.len().max(1)).map_err(|_| LoadError::NoMem)?;
     if argv.is_empty() {
-        argv_b
-            .try_push(path.as_bytes())
-            .map_err(|_| LoadError::NoMem)?;
+        argv_b.try_push(path).map_err(|_| LoadError::NoMem)?;
     }
     for a in argv {
         argv_b.try_push(a.as_ref()).map_err(|_| LoadError::NoMem)?;

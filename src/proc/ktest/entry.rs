@@ -210,7 +210,7 @@ pub(crate) fn test_ring3_syscall_enosys() -> Outcome {
 
 pub(crate) fn test_ring3_hello_exit() -> Outcome {
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf("/hello", &[], &[], 0, 0) {
+    let pid = match proc_init::spawn_elf(b"/hello", &[], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
     };
@@ -339,7 +339,7 @@ pub(crate) fn test_syscall_ptr_validate() -> Outcome {
 
 pub(crate) fn test_user_syscalls() -> Outcome {
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf("/bin/tests", &[], &[], 0, 0) {
+    let pid = match proc_init::spawn_elf(b"/bin/tests", &[], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
     };

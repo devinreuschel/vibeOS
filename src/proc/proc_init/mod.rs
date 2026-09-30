@@ -168,8 +168,7 @@ fn with_sched_table<R>(f: impl FnOnce(&mut Sched, &mut Table) -> R) -> R {
     thread_init::with_sched(|s| table_locked(|t| f(s, t)))
 }
 
-fn intern_name(path: &str) -> &'static str {
-    let b = path.as_bytes();
+fn intern_name(b: &[u8]) -> &'static str {
     let mut i = b.len();
     while i > 0 && b[i - 1] != b'/' {
         i -= 1;
@@ -311,7 +310,7 @@ pub fn start_init() {
             INIT_ENVP_MAX
         );
     }
-    match spawn_elf("/sbin/init", v.argv(), v.envp(), INIT_PID, 0) {
+    match spawn_elf(b"/sbin/init", v.argv(), v.envp(), INIT_PID, 0) {
         Ok(_) => {}
         Err(e) => {
             #[expect(
@@ -328,7 +327,7 @@ pub fn start_init() {
 /// [`wait_kernel`]).
 #[cfg(not(feature = "vibefs_crash"))]
 pub(crate) fn spawn_elf(
-    path: &str,
+    path: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
     prefer: u32,
@@ -347,10 +346,7 @@ pub(crate) fn spawn_elf(
 /// The in-guest tests' ring-3 entry (C-RING3).
 #[cfg(feature = "kernel_tests")]
 pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, LoadError> {
-    let name = match argv.first().map(|a| core::str::from_utf8(a)) {
-        Some(Ok(a)) => intern_name(a),
-        _ => "user",
-    };
+    let name = argv.first().map_or("user", |a| intern_name(a));
     start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
 }
 

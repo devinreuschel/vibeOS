@@ -139,7 +139,7 @@ names, Linux values:
 | `EIO` | 5 | device I/O error |
 | `E2BIG` | 7 | `execve` argv or envp with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
-| `EBADF` | 9 | closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
+| `EBADF` | 9 | closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
 | `EAGAIN` | 11 | `fork` with every process-table slot in use, zombies included (`MAX_PROCS` is 18), or no pid free (pids and tids share one allocator, up to 32,767, then from 300) |
 | `ENOMEM` | 12 | AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4) |
@@ -153,7 +153,7 @@ names, Linux values:
 | `EISDIR` | 21 | |
 | `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; the non-Linux cases in §2.1 |
 | `ENFILE` | 23 | defined; no syscall returns it |
-| `EMFILE` | 24 | per-process fd table full (`open`); the non-Linux cases in §2.1 |
+| `EMFILE` | 24 | per-process fd table full (`open`, `dup`); the non-Linux cases in §2.1 |
 | `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3) |
 | `ENOSPC` | 28 | defined; no syscall returns it |
 | `ESPIPE` | 29 | defined; no syscall returns it |
@@ -181,12 +181,6 @@ through its `From` impl, and the `KError` table generates §2 (ROADMAP §10.4).
   bad magic returns `EINVAL` (Linux `EIO`) (F083; ROADMAP §10.4)
 - `lseek` on the console returns `EINVAL` (Linux `ESPIPE`, 29) (F083;
   ROADMAP §10.4)
-- `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` fd return `EINVAL`
-  (Linux `EBADF`) (ROADMAP §10.4)
-- `open` and `execve` return `EINVAL` for a path or argument that is not
-  UTF-8; Linux hands a path's bytes to the filesystem and accepts any
-  argument byte but NUL (ROADMAP §10.4)
-- `dup` with a full fd table returns `EBADF` (Linux `EMFILE`) (ROADMAP §10.4)
 - `ENFILE`, `ENOSPC`, `ESPIPE`, `ENOTEMPTY`, and `ELOOP` are not
   defined in `crates/core/src/proc/syscall.rs` (F083; ROADMAP §10.4)
 - `fork` near memory exhaustion: a kernel stack that cannot be allocated

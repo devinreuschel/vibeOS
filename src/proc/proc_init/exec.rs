@@ -119,35 +119,32 @@ pub(super) fn sys_execve(
     }
     let mut pbuf = [0u8; vibeos::fs::MAX_PATH];
     let n = copy_user_str(path, &mut pbuf)?;
-    let Ok(path_s) = core::str::from_utf8(&pbuf[..n]) else {
-        return Err(KError::Inval);
-    };
+    // The path's and the arguments' bytes go through as they are: only
+    // NUL ends one, as on Linux.
+    let path_b = &pbuf[..n];
     let argv_v = copy_cvec(argv)?;
     // Copied, so its pointers are checked and its limits hold, and dropped:
     // the new stack gets an empty environment until ROADMAP §10.5's envp box.
     copy_cvec(envp)?;
-    let Ok(mut argv_s) = TryVec::<&str>::try_with_capacity(argv_v.len().max(1)) else {
+    let Ok(mut argv_b) = TryVec::<&[u8]>::try_with_capacity(argv_v.len().max(1)) else {
         return Err(KError::NoMem);
     };
     if argv_v.is_empty() {
-        if argv_s.try_push(path_s).is_err() {
+        if argv_b.try_push(path_b).is_err() {
             return Err(KError::NoMem);
         }
     } else {
         for a in argv_v.iter() {
-            let Ok(s) = core::str::from_utf8(a) else {
-                return Err(KError::Inval);
-            };
-            if argv_s.try_push(s).is_err() {
+            if argv_b.try_push(a).is_err() {
                 return Err(KError::NoMem);
             }
         }
     }
-    let loaded = match user_init::load_path(path_s, &argv_s, &[]) {
+    let loaded = match user_init::load_path(path_b, &argv_b, &[]) {
         Ok(l) => l,
         Err(e) => return Err(KError::from(e)),
     };
-    let name = intern_name(path_s);
+    let name = intern_name(path_b);
     let entry = loaded.entry;
     let rsp = loaded.rsp;
     let fs = loaded.fs;

@@ -222,7 +222,7 @@ impl Vfs {
     fn read_begin(&mut self, id: FileId) -> Result<(Call, u64), FsError> {
         let f = self.files[self.file_slot(id)?];
         if !f.flags.reads() {
-            return Err(FsError::Inval);
+            return Err(FsError::Badf);
         }
         Ok((self.call(f.islot)?, f.offset))
     }
@@ -255,7 +255,7 @@ impl Vfs {
     fn write_begin(&mut self, id: FileId) -> Result<(Call, u64, bool), FsError> {
         let f = self.files[self.file_slot(id)?];
         if !f.flags.writes() {
-            return Err(FsError::Inval);
+            return Err(FsError::Badf);
         }
         if self.inodes[f.islot as usize].kind == InodeKind::Dir {
             return Err(FsError::IsDir);
