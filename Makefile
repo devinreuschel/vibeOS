@@ -110,7 +110,7 @@ build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@
 $(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
+	LIMINE_DIR=$$(LIMINE_DIR) OBJCOPY=$$(OBJCOPY) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
 endif
 endef
 
@@ -147,7 +147,7 @@ ifneq ($(VIBEOS_PREBUILT),1)
 # The production ELF with the faulting init's initrd (ROADMAP §10.5): its
 # panic ends the run through pvpanic, as every production panic does.
 $(ISO_INIT_FAULT): $(KERNEL_ELF) $(INITRD_INIT_FAULT) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$(LIMINE_DIR) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ build/iso_root_init-fault
+	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ build/iso_root_init-fault
 endif
 
 # The Rust user programs (ROADMAP §10.5, C-USERBINS): each user/src/bin/<name>.rs
@@ -380,7 +380,8 @@ isos: $(ISOS)
 # v* release images (ROADMAP §10.1, §10.2; BOOT.md §3.5): the production ISO in
 # the release profile, copied to OUT. The ISO and named-ELF paths do not name
 # the profile, so a newer dev build would be reused: remove, rebuild, verify
-# that the image's kernel is the release link's output.
+# that the image's kernel is the release link's output, less its DWARF
+# sections (scripts/mkiso.sh strips them).
 RELEASE_ELF := $(CARGO_TARGET_DIR)/$(TARGET)/release/vibeos
 release-artifacts:
 	@if [ -z "$(OUT)" ]; then echo "release-artifacts: set OUT=<dir>" >&2; exit 2; fi
@@ -390,7 +391,8 @@ release-artifacts:
 	mkdir -p "$(OUT)" && cp $(ISO) "$(OUT)/vibeos.iso"
 	rm -f build/release-kernel.elf
 	xorriso -osirrox on -indev "$(OUT)/vibeos.iso" -extract /boot/vibeos build/release-kernel.elf
-	cmp build/release-kernel.elf $(RELEASE_ELF)
+	$(OBJCOPY) --strip-debug $(RELEASE_ELF) build/release-kernel.stripped.elf
+	cmp build/release-kernel.elf build/release-kernel.stripped.elf
 
 # Two clean builds of one commit, compared byte for byte (ROADMAP §10.2,
 # DESIGN §3.6). REPRO_ARGS: see scripts/repro_build.py.

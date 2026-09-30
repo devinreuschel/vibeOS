@@ -361,6 +361,13 @@ never by disk signature. The xorriso version lands in the volume descriptor, so 
 beside each ISO as `<iso>.xorriso-version`, which a release publishes. An incremental build keeps the
 epoch of the commit it last rebuilt a file at; compare clean builds.
 
+The ISO's `/boot/vibeos` is the kernel ELF less its DWARF sections (`objcopy --strip-debug` in
+`mkiso.sh`): Limine reads the whole executable into one buffer before it loads it, and a 128 MiB
+UEFI guest under current OVMF has no room for 13 MB of debug info. The kernel's symbol table is its
+loaded `.ksyms` section, which stays; `build/kernels/*.elf` keep the debug info for gdb and guest
+cores, and `make release-artifacts` compares the image's kernel with the release link's output
+stripped the same way.
+
 `make repro` does (`scripts/repro_build.py`, run by a scheduled job): it clones the commit twice, at
 checkout paths of different lengths, each with its own `CARGO_HOME` and `RUSTUP_HOME`, a copy of
 `limine/` and no `CARGO_TARGET_DIR`, runs `./setup.sh` and `make isos` in each, and fails unless every
