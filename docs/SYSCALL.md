@@ -524,6 +524,13 @@ Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
   `user: tests fail` (status 1) last
 - `/bin/sh` (`user/src/bin/sh.rs`) — interactive shell; prints
   `vibeOS: shell ready` then `vibeos>`
+- `/bin/envcheck` (`user/src/bin/envcheck.rs`) — exits 0 when its
+  environment holds `K=v`, else 1 (`/bin/tests`' `exec_env_*` cases)
+- `/bin/argcheck` (`user/src/bin/argcheck.rs`) — checks its `argv` against
+  the mode its environment's `ARGCHECK` names: `empty` (`argc` 1 and an
+  empty `argv[0]`) or `<n>:<m>` (`argc` `n`, every later argument `m`
+  bytes); exits 0 when it holds, 2 for a bad mode, 3 for `argc`, 4 for
+  `argv[0]`, 5 for a length (`/bin/tests`' `exec_*` argument cases)
 
 Stack: `argc`, `argv`, `envp`, and `auxv`. Init's `argv` and `envp` come
 from the kernel command line (BOOT.md §3.2), at most 8 of each; `execve`
