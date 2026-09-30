@@ -1266,6 +1266,16 @@ order = 230
 name = "smp_tsc_skew"
 when = ["smp>1", "!panic_test"]
 
+# §10.12 Drivers and devices
+
+# A second virtio-rng function, refused before the probe touches it.
+[[marker]]
+text = "vibeOS: virtio: rng <addr> already bound"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.12"
+
 # §12.5 Unified page cache
 
 # A driver's fail-fast loop recovering a stuck device. A test that provokes

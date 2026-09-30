@@ -787,6 +787,77 @@ pub(crate) fn rng_refill_after_empty_completion() -> Outcome {
     Outcome::Ok
 }
 
+/// The second virtio-rng function `tests/harness/harness.py: ktest_devices`
+/// adds, in a slot after the first rng in bus order, so it is refused.
+pub(crate) const SPARE_RNG_BDF: Bdf = Bdf::new(0, 0x1d, 0);
+
+/// Every virtio-rng function in the registry, in registration order.
+fn rng_functions() -> ([Option<DevRef>; 4], usize) {
+    let mut out: [Option<DevRef>; 4] = [const { None }; 4];
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while let Some(d) = dev_init::get(i) {
+        i += 1;
+        let rng = d.vendor == 0x1af4 && (d.device_id == 0x1044 || d.device_id == 0x1004);
+        if !rng {
+            continue;
+        }
+        if let Some(slot) = out.get_mut(n) {
+            *slot = Some(d);
+        }
+        n += 1;
+    }
+    (out, n)
+}
+
+/// ROADMAP §10.12 (F121): a second virtio-rng function is refused, and
+/// the refusal touches neither the device nor the first one's state.
+pub(crate) fn rng_second_probe_refused() -> Outcome {
+    let (fns, n) = rng_functions();
+    if n != 2 {
+        return crate::fail_fmt!("{n} virtio-rng functions, want 2");
+    }
+    let Some(spare) = fns.iter().flatten().find(|d| d.addr == SPARE_RNG_BDF) else {
+        return Outcome::Fail("no rng at 00:1d.0");
+    };
+    let Some(first) = fns.iter().flatten().find(|d| d.addr != SPARE_RNG_BDF) else {
+        return Outcome::Fail("no first rng");
+    };
+    if dev_init::bound(spare).is_some() {
+        return Outcome::Fail("spare rng bound");
+    }
+    if dev_init::bound(first) != Some("virtio-rng") {
+        return Outcome::Fail("first rng unbound");
+    }
+    let cmd0 = pci_init::cfg_read16(SPARE_RNG_BDF, CFG_COMMAND);
+    let isr0 = virtio_init::ISR_VA.load(Ordering::Acquire);
+    let q0 = rng_qdma_device();
+    let r = virtio_init::RNG_DRV.probe(spare);
+    if r.is_ok() {
+        return Outcome::Fail("second probe bound");
+    }
+    if pci_init::cfg_read16(SPARE_RNG_BDF, CFG_COMMAND) != cmd0 {
+        return Outcome::Fail("refused probe wrote COMMAND");
+    }
+    if virtio_init::ISR_VA.load(Ordering::Acquire) != isr0 {
+        return Outcome::Fail("ISR_VA changed");
+    }
+    if rng_qdma_device() != q0 {
+        return Outcome::Fail("queue changed");
+    }
+    if !virtio_init::rng_bound() {
+        return Outcome::Fail("BOUND cleared");
+    }
+    let c0 = rng_completions();
+    if virtio_init::rng_request().is_err() {
+        return Outcome::Fail("request");
+    }
+    if !spin_until_ns(|| rng_completions() > c0, 2_000_000_000) {
+        return Outcome::Fail("first rng no completion");
+    }
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -806,4 +877,5 @@ pub(crate) const TESTS: &[Test] = &[
         rng_refill_after_empty_completion,
     ),
     test("dev_probe_alloc_fail", test_dev_probe_alloc_fail),
+    test("rng_second_probe_refused", rng_second_probe_refused),
 ];

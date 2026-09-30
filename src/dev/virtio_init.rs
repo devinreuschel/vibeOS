@@ -43,7 +43,7 @@ struct Q {
 }
 
 static Q: SpinMutex<Option<Q>> = SpinMutex::with_rank(None, RANK_DEVICE);
-static ISR_VA: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ISR_VA: AtomicU64 = AtomicU64::new(0);
 pub(super) static TOP_HITS: AtomicU32 = AtomicU32::new(0);
 pub(super) static THREAD_HITS: AtomicU32 = AtomicU32::new(0);
 pub(super) static COMPLETIONS: AtomicU32 = AtomicU32::new(0);
@@ -465,14 +465,14 @@ fn claim_bars(dev: &DevRef, caps: &ModernCaps) -> Result<(), ProbeError> {
     Ok(())
 }
 
-struct RngDriver;
+pub(crate) struct RngDriver;
 
 static RNG_IDS: &[IdMatch] = &[
     IdMatch::vid_did(VENDOR_ID, DEV_RNG_MODERN),
     IdMatch::vid_did(VENDOR_ID, DEV_RNG_LEGACY),
 ];
 
-static RNG_DRV: RngDriver = RngDriver;
+pub(crate) static RNG_DRV: RngDriver = RngDriver;
 
 impl Driver for RngDriver {
     fn name(&self) -> &'static str {
@@ -486,7 +486,16 @@ impl Driver for RngDriver {
     }
     /// virtio-rng stays one device with module state (ROADMAP §10.12), so
     /// the registry owns no instance of it.
+    /// A second function is refused before anything touches it, so it
+    /// cannot overwrite `Q` and `ISR_VA` and orphan the first device's
+    /// queue and vector (ROADMAP §10.12, F121). The check is a load:
+    /// `dev_init::bind_all` probes one device at a time, and a concurrent
+    /// binder would need a claim (a compare-exchange) instead.
     fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+        if BOUND.load(Ordering::Acquire) {
+            crate::marker!("vibeOS: virtio: rng {} already bound", dev.addr);
+            return Err(ProbeError::Busy);
+        }
         let caps = virtio::read_modern_caps(&mut pci_init::HwCfg, dev.addr);
         if !caps.is_complete() {
             crate::marker!("vibeOS: virtio: missing modern caps");

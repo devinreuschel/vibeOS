@@ -798,7 +798,8 @@ def virtio_blk_args(
 
 def ktest_devices(disk: str, smp: int, *, extra_disks: Sequence[str] = ()) -> tuple[str, ...]:
     """The in-guest registry's devices: `disk` is `vda`, and each of
-    `extra_disks` a further virtio-blk disk after it."""
+    `extra_disks` a further virtio-blk disk after it. A second virtio-rng
+    sits at `00:1d.0`."""
     return (
         "-device",
         "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -808,6 +809,10 @@ def ktest_devices(disk: str, smp: int, *, extra_disks: Sequence[str] = ()) -> tu
         "edu",
         "-device",
         "virtio-rng-pci,disable-legacy=on",
+        # A second virtio-rng in a high slot, after the first in bus order,
+        # which the driver refuses (`dev::ktest::SPARE_RNG_BDF`).
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
     ) + virtio_blk_args(disk, smp, extra=extra_disks)
 
 
