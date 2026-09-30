@@ -5,6 +5,7 @@
 //! Port I/O, HPET MMIO, and the IRQ0 handler live in the binary crate.
 
 use crate::atomic::{AtomicU64, Ordering, fence, statics};
+use crate::sync::variant::{self, Site};
 
 /// PIT input frequency in Hz. DESIGN §6.1.
 pub const PIT_HZ: u64 = 1_193_182;
@@ -435,10 +436,18 @@ impl TickClock {
     /// One sequence bump. The CPU 0 tick is the only writer, so a Relaxed
     /// `fetch_add` suffices for the count itself.
     fn bump(&self) {
-        // Release: orders the stores of the copy written before this bump
-        // ahead of it, for a reader whose Acquire load of `seq` sees the
-        // bump and then reads that copy.
-        fence(Ordering::Release);
+        // The loom models' variants (ROADMAP §10.8): F098's lone AcqRel
+        // `fetch_add`, and the bump without its leading fence.
+        if variant::pick(Site::SeqlockBumpAcqRel, false, true) {
+            self.seq.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        if variant::pick(Site::SeqlockLeadingFence, true, false) {
+            // Release: orders the stores of the copy written before this
+            // bump ahead of it, for a reader whose Acquire load of `seq`
+            // sees the bump and then reads that copy.
+            fence(Ordering::Release);
+        }
         self.seq.fetch_add(1, Ordering::Relaxed);
         // Release: pairs with the reader's `fence(Acquire)` after its
         // payload loads. A reader that loaded any store made after this
@@ -1004,5 +1013,81 @@ mod tests {
     fn calib_source_names() {
         assert_eq!(CalibSource::Hpet.as_str(), "hpet");
         assert_eq!(CalibSource::Pit.as_str(), "pit");
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_models {
+    extern crate std;
+
+    use super::*;
+    use crate::sync::variant::{Bound, check};
+    use loom::sync::Arc;
+    use loom::thread;
+
+    /// Write `t`'s pair: every word derives from `t`, so the id, `cycles`
+    /// and `ns` (an independent timestamp, `t * 1_000 + 7`) of one write
+    /// match only each other.
+    fn pair(t: u64) -> Snapshot {
+        Snapshot {
+            id: ClocksourceId::from_u64(t).unwrap(),
+            cycles: t,
+            ns: t * 1_000 + 7,
+        }
+    }
+
+    /// A read's pair number; a read that mixes two writes fails.
+    fn published(r: Option<Snapshot>) -> u64 {
+        match r {
+            Some(s) if (1..=2).contains(&s.cycles) && s == pair(s.cycles) => s.cycles,
+            _ => panic!("seqlock: torn read"),
+        }
+    }
+
+    /// The `TickClock` latch against its one writer. Main publishes pair(1)
+    /// before the spawn, so both copies hold a published pair (`new`'s
+    /// zero words are none); the writer thread then writes pair(2), which
+    /// bumps `seq` twice and overwrites each copy once, while main reads
+    /// twice. Every read is a published pair, and after the join the read
+    /// is pair(2). Bound: 2 threads (the writer 1 write, main 2 reads),
+    /// 3 preemptions. A second write multiplies the run time about 70-fold
+    /// at this bound; both variants tear within one.
+    fn seqlock_model(v: Option<Site>) {
+        let bound = Bound {
+            threads: 2,
+            preemptions: 3,
+        };
+        check(v, bound, || {
+            let c = Arc::new(TickClock::new());
+            c.write(pair(1));
+            let w = {
+                let c = c.clone();
+                thread::spawn(move || {
+                    c.write(pair(2));
+                })
+            };
+            for _ in 0..2 {
+                published(c.read());
+            }
+            w.join().unwrap();
+            assert_eq!(published(c.read()), 2);
+        });
+    }
+
+    #[test]
+    fn loom_seqlock_latch() {
+        seqlock_model(None);
+    }
+
+    #[test]
+    #[should_panic(expected = "seqlock: torn read")]
+    fn loom_seqlock_acqrel_bump_tears_fails() {
+        seqlock_model(Some(Site::SeqlockBumpAcqRel));
+    }
+
+    #[test]
+    #[should_panic(expected = "seqlock: torn read")]
+    fn loom_seqlock_no_leading_fence_tears_fails() {
+        seqlock_model(Some(Site::SeqlockLeadingFence));
     }
 }

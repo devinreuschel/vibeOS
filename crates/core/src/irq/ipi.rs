@@ -5,6 +5,7 @@
 
 use crate::arch::InterruptMask;
 use crate::atomic::{AtomicU64, Ordering};
+use crate::sync::variant::{self, Site};
 use crate::thread::{CpuAffinity, MAX_THREADS};
 
 /// Matches the 64-bit online mask. PerCpu is heap-sized from MADT.
@@ -57,11 +58,20 @@ impl<const WORDS: usize> WakeInbox<WORDS> {
         let Some(word) = self.words.get(w) else {
             return false;
         };
+        // The loom model's variant sets the summary bit first (ROADMAP
+        // §10.8): a drain between the two finds the word empty.
+        let early = variant::pick(Site::InboxSummaryFirst, false, true);
+        if early {
+            self.summary.fetch_or(1u64 << w, Ordering::Release);
+        }
         // Release: pairs with the drain's Acquire swap of this word.
         word.fetch_or(1u64 << (slot % 64), Ordering::Release);
-        // Release, after the word bit: pairs with the drain's Acquire swap
-        // of the summary, so a drain that sees this bit sees the slot's.
-        self.summary.fetch_or(1u64 << w, Ordering::Release);
+        if !early {
+            // Release, after the word bit: pairs with the drain's Acquire
+            // swap of the summary, so a drain that sees this bit sees the
+            // slot's.
+            self.summary.fetch_or(1u64 << w, Ordering::Release);
+        }
         true
     }
 
@@ -422,5 +432,72 @@ mod tests {
         assert_eq!(home_cpu(CpuAffinity::Pinned(1), 3, 0b1111), 1);
         assert_eq!(home_cpu(CpuAffinity::Pinned(5), 3, 0b1111), 3);
         assert_eq!(home_cpu(CpuAffinity::Any, 7, 0b1), 0);
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_models {
+    extern crate std;
+
+    use super::*;
+    use crate::arch::stub::Arch;
+    use crate::sync::variant::{Bound, check};
+    use loom::sync::Arc;
+    use loom::thread;
+    use std::vec::Vec;
+
+    /// The pushed slots: two in word 0 and one in word 1.
+    const IDS: [usize; 3] = [1, 2, 65];
+
+    /// Take every queued slot as the owner CPU does, masked.
+    fn drain(inbox: &WakeInbox<2>, got: &mut Vec<usize>) {
+        let _masked = <Arch as InterruptMask>::save_disable();
+        inbox.drain::<Arch>(|slot| got.push(slot));
+    }
+
+    /// Three CPUs each push one slot while main, the owner CPU, drains;
+    /// main drains again after the joins. Over both drains each slot is
+    /// delivered exactly once. Bound: 4 threads (3 pushers of one push
+    /// each, main 2 drains), 2 preemptions.
+    fn inbox_model(v: Option<Site>) {
+        let bound = Bound {
+            threads: 4,
+            preemptions: 2,
+        };
+        check(v, bound, || {
+            let inbox = Arc::new(WakeInbox::<2>::new());
+            let pushers: Vec<_> = IDS
+                .iter()
+                .map(|&id| {
+                    let inbox = inbox.clone();
+                    thread::spawn(move || assert!(inbox.push(id)))
+                })
+                .collect();
+            let mut got = Vec::new();
+            drain(&inbox, &mut got);
+            for p in pushers {
+                p.join().unwrap();
+            }
+            drain(&inbox, &mut got);
+            for id in IDS {
+                match got.iter().filter(|&&g| g == id).count() {
+                    0 => panic!("inbox: ThreadId lost"),
+                    1 => {}
+                    _ => panic!("inbox: ThreadId delivered twice"),
+                }
+            }
+            assert_eq!(got.len(), IDS.len());
+        });
+    }
+
+    #[test]
+    fn loom_wake_inbox_three_pushers() {
+        inbox_model(None);
+    }
+
+    #[test]
+    #[should_panic(expected = "inbox: ThreadId lost")]
+    fn loom_wake_inbox_summary_first_loses_id_fails() {
+        inbox_model(Some(Site::InboxSummaryFirst));
     }
 }

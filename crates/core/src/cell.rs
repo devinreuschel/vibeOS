@@ -22,6 +22,7 @@ use core::mem::MaybeUninit;
 
 use crate::arch::{InterruptMask, PerCpuBase};
 use crate::atomic::{AtomicU8, AtomicU32, Ordering};
+use crate::sync::variant::{self, Site};
 
 const UNSET: u8 = 0;
 const SET: u8 = 1;
@@ -253,8 +254,16 @@ impl<T, A: InterruptMask + PerCpuBase + CellHooks> IrqCell<T, A> {
         impl Drop for Unlock<'_> {
             fn drop(&mut self) {
                 // Release: pairs with the next holder's Acquire
-                // compare-exchange in `with`.
-                self.0.store(0, Ordering::Release);
+                // compare-exchange in `with`. Relaxed only in the log ring
+                // loom model's variant (ROADMAP §10.8).
+                self.0.store(
+                    0,
+                    variant::pick(
+                        Site::IrqCellUnlockRelaxed,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    ),
+                );
             }
         }
         // Declared after `_irq`, so it drops first: the owner word is free

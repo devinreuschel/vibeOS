@@ -624,3 +624,115 @@ mod tests {
         assert_eq!(r.check(0, 1000), None);
     }
 }
+
+#[cfg(all(test, loom))]
+mod loom_models {
+    extern crate std;
+
+    use super::*;
+    use crate::arch::stub::Arch;
+    use crate::cell::IrqCell;
+    use crate::sync::variant::{Bound, Site, check};
+    use loom::cell::UnsafeCell;
+    use loom::sync::Arc;
+    use loom::thread;
+    use std::vec::Vec;
+
+    /// The log ring's lock, as `log_init`'s cell holds it, with a witness
+    /// every critical section writes: the ring itself is plain memory loom
+    /// cannot see, so the witness is what shows an unordered hand-off.
+    type LogCell = IrqCell<(Logger<2, 4>, UnsafeCell<u32>), Arch>;
+
+    /// Run `f` on the ring under the lock, writing the witness first.
+    fn locked<R>(cell: &LogCell, f: impl FnOnce(&mut Logger<2, 4>) -> R) -> R {
+        cell.with(|(log, witness)| {
+            // SAFETY: the cell's owner word makes this the one holder, so no
+            // other thread touches the witness until the unlock; loom
+            // reports it if the unlock fails to order the next holder after
+            // this write. Established by `cell::IrqCell::with`.
+            witness.with_mut(|p| unsafe { *p += 1 });
+            f(log)
+        })
+    }
+
+    /// Writer `w`'s `k`th record: every field derives from `(w, k)`.
+    fn rec(w: u8, k: u8) -> Record<4> {
+        Record::from_msg(
+            u64::from(w) * 10 + u64::from(k),
+            w,
+            Level::Info,
+            &[w, k, w, k],
+        )
+    }
+
+    /// A record's `(writer, k)`; a record that mixes two fails.
+    fn whole(r: &Record<4>) -> (u8, u8) {
+        let (w, k) = (r.cpu_id, (r.timestamp % 10) as u8);
+        if r.timestamp != u64::from(w) * 10 + u64::from(k) || r.msg() != [w, k, w, k] {
+            panic!("log ring: torn record");
+        }
+        (w, k)
+    }
+
+    /// Two writers emit two records each into a ring of two, which wraps,
+    /// while main reads it as `log_init::dmesg_write` does: one `with` for
+    /// the length, then one per index. A concurrent wrap may skip records
+    /// (the ring drops its oldest), so the reader checks each record
+    /// whole, each writer's in order, and none twice. After the joins,
+    /// 4 were written and 2 dropped. Bound: 3 threads (2 writers of 2
+    /// emits each, main up to 4 critical sections), 1 preemption. At 2,
+    /// loom switches between the two spinning writers without charging a
+    /// preemption while the holder waits preempted, and no schedule ends
+    /// within its branch limit.
+    fn log_ring_model(v: Option<Site>) {
+        let bound = Bound {
+            threads: 3,
+            preemptions: 1,
+        };
+        check(v, bound, || {
+            let cell: Arc<LogCell> = Arc::new(IrqCell::new((Logger::new(), UnsafeCell::new(0))));
+            let writers: Vec<_> = [1u8, 2]
+                .into_iter()
+                .map(|w| {
+                    let cell = cell.clone();
+                    thread::spawn(move || {
+                        for k in 1..=2 {
+                            assert!(locked(&cell, |log| log.emit(rec(w, k))));
+                        }
+                    })
+                })
+                .collect();
+            let len = locked(&cell, |log| log.ring.len());
+            let mut seen: Vec<(u8, u8)> = Vec::new();
+            for i in 0..len {
+                let Some(r) = locked(&cell, |log| log.ring.get(i).copied()) else {
+                    continue;
+                };
+                let (w, k) = whole(&r);
+                if seen.contains(&(w, k)) {
+                    panic!("log ring: record twice");
+                }
+                if seen.iter().any(|&(sw, sk)| sw == w && sk > k) {
+                    panic!("log ring: out of order");
+                }
+                seen.push((w, k));
+            }
+            for t in writers {
+                t.join().unwrap();
+            }
+            let (written, dropped) = locked(&cell, |log| (log.ring.written(), log.ring.dropped()));
+            assert_eq!((written, dropped), (4, 2));
+        });
+    }
+
+    #[test]
+    fn loom_log_ring_writers_dmesg() {
+        log_ring_model(None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Causality violation")]
+    fn loom_log_ring_relaxed_unlock_races_fails() {
+        log_ring_model(Some(Site::IrqCellUnlockRelaxed));
+    }
+}
