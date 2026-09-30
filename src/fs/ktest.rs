@@ -21,7 +21,9 @@ mod stack16k;
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use ops::{test_vfs_backends_via_ops, test_vfs_fat_one_inode};
-pub(crate) use routing::test_vfs_unlink_drops_parent_dentry;
+pub(crate) use routing::{
+    test_fat_initrd_dev_no_null, test_vfs_unlink_drops_parent_dentry, test_vfs_user_dev_nodes,
+};
 pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
 
@@ -1391,4 +1393,6 @@ pub(crate) const TESTS: &[Test] = &[
         "vfs_unlink_drops_parent_dentry",
         test_vfs_unlink_drops_parent_dentry,
     ),
+    test("vfs_user_dev_nodes", test_vfs_user_dev_nodes),
+    test("fat_initrd_dev_no_null", test_fat_initrd_dev_no_null),
 ];

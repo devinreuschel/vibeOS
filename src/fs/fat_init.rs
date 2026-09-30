@@ -637,6 +637,29 @@ pub fn init() {
     LIVE.store(root.is_ok(), Ordering::Release);
 }
 
+/// Whether the directory `dirs` names from the root of volume `vol`
+/// holds `name`, compared as FAT compares names (without regard to case):
+/// one `FatVol::lookup` per name under the volume lock (test-only:
+/// `fat_initrd_dev_no_null`).
+#[cfg(feature = "kernel_tests")]
+pub fn ktest_dir_has(vol: &Instance, dirs: &[&[u8]], name: &[u8]) -> Result<bool, FsError> {
+    with_vol(as_fat(vol)?, |fv, d| {
+        let mut clu = fv.info.root_clus;
+        for dn in dirs {
+            let n = fv.lookup(d, clu, dn)?;
+            if n.kind != InodeKind::Dir {
+                return Err(FsError::NotDir);
+            }
+            clu = n.clu;
+        }
+        match fv.lookup(d, clu, name) {
+            Ok(_) => Ok(true),
+            Err(FatError::NotFound) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    })
+}
+
 pub fn sync(vol: &FatVolume) -> Result<(), FsError> {
     with_vol(vol, |v, d| Ok(v.sync(d)?))
 }
