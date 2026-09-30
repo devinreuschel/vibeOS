@@ -29,8 +29,8 @@ use vibeos::virtio::{
 use vibeos::virtio_blk::{
     CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
     F_FLUSH, F_MQ, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
-    logical_capacity, map_status, nq_from_config, pack_discard, pack_header, pick_blk_size,
-    pick_features, queue_size, refuse_read_only, sector_for_lba,
+    exhausted_fails_device, logical_capacity, map_status, nq_from_config, pack_discard,
+    pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only, sector_for_lba,
 };
 
 use crate::arch::{self, current::Arch};
@@ -89,6 +89,8 @@ pub(crate) struct VirtioBlk {
     max_discard: AtomicU32,
     io_reqs: AtomicU64,
     flushes: AtomicU64,
+    /// The common-config VA, which `needs_reset` reads; 0 before `setup`.
+    common: AtomicU64,
     /// The vectors the probe allocated, one per queue (or one for all),
     /// each as `QUEUE_VEC_LIVE | cpu << 8 | vector`; 0 for none.
     queue_vecs: [AtomicU64; MAX_VQ],
@@ -127,6 +129,7 @@ impl VirtioBlk {
             max_discard: AtomicU32::new(0),
             io_reqs: AtomicU64::new(0),
             flushes: AtomicU64::new(0),
+            common: AtomicU64::new(0),
             queue_vecs: [const { AtomicU64::new(0) }; MAX_VQ],
             #[cfg(feature = "kernel_tests")]
             inject_unsupp: AtomicU32::new(0),
@@ -533,6 +536,7 @@ fn setup(
     w8(common, COMMON_OFF_STATUS, st | STATUS_DRIVER_OK);
 
     blk.isr.store(isr, Ordering::Release);
+    blk.common.store(common, Ordering::Release);
     blk.features.store(feat, Ordering::Release);
     blk.blk_size.store(blk_size, Ordering::Release);
     blk.cap.store(capacity, Ordering::Release);

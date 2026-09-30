@@ -140,6 +140,15 @@ pub fn refuse_read_only(feat: u64, op: Op) -> Result<(), BlockError> {
     Ok(())
 }
 
+/// Whether a request that failed for good (its retry budget spent, or an
+/// error no retry helps) also fails the device: only when the device has
+/// set `DEVICE_NEEDS_RESET` in `status` (virtio 1.2 §2.1.1). Otherwise
+/// the request completes with its own error and the device stays `Ready`
+/// (DESIGN §10.3).
+pub fn exhausted_fails_device(status: u8) -> bool {
+    status & virtio::STATUS_NEEDS_RESET != 0
+}
+
 /// The fewest descriptors a queue needs: one read or write chain is a
 /// header, a data segment, and a status byte.
 pub const MIN_QSIZE: u16 = 3;
@@ -277,6 +286,19 @@ mod tests {
         }
         assert!(!BlockError::ReadOnly.retryable());
         assert_eq!(BlockError::ReadOnly.as_str(), "read-only");
+    }
+
+    #[test]
+    fn exhausted_request_fails_device_only_on_needs_reset() {
+        use crate::virtio::{
+            STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK,
+            STATUS_NEEDS_RESET,
+        };
+        let live = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK;
+        assert!(!exhausted_fails_device(0));
+        assert!(!exhausted_fails_device(live));
+        assert!(exhausted_fails_device(live | STATUS_NEEDS_RESET));
+        assert!(exhausted_fails_device(STATUS_NEEDS_RESET));
     }
 
     #[test]

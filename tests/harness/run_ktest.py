@@ -16,6 +16,7 @@ from tests.harness.harness import (
     BOOT_ALLOWANCE_S,
     PANIC_DONE,
     TIMEOUT_SCALE,
+    VBLK_BAD_SECTOR,
     EnvConfig,
     HarnessError,
     KtestDeadlines,
@@ -38,6 +39,7 @@ from tests.harness.harness import (
     parse_ktest_line,
     qemu_argv,
     run_qemu_until_exit,
+    write_blkdebug_config,
 )
 
 DISK_BYTES = 4 * 1024 * 1024
@@ -571,6 +573,30 @@ def _vblk_readonly_boot(env: EnvConfig) -> None:
             pass
 
 
+VBLK_BAD_SECTOR_TEST = "vblk_bad_sector"
+
+
+def _vblk_bad_sector_boot(env: EnvConfig) -> None:
+    """`vblk_bad_sector` alone on a pattern image behind `blkdebug`, which
+    fails every read of `VBLK_BAD_SECTOR`: that read fails alone, after
+    its retries, and the disk stays `Ready`."""
+    disk = make_pattern_disk(DISK_BYTES, "vibeos-vblk-bad-")
+    conf = None
+    try:
+        conf = write_blkdebug_config(VBLK_BAD_SECTOR, "vibeos-blkdebug-")
+        devices = ktest_devices(disk, env.smp, blkdebug=conf)
+        raw = _single_test_boot(env, VBLK_BAD_SECTOR_TEST, "vblk bad sector", devices=devices)
+        check_select_run(raw.lines, {VBLK_BAD_SECTOR_TEST: 1}, ())
+    finally:
+        for path in (disk, conf):
+            if path is None:
+                continue
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
     """The report on stderr: passes out of runs, the ten slowest runs, the
     info lines, then the exit status."""
@@ -793,6 +819,7 @@ def main(argv: list[str] | None = None) -> int:
     proofs.append(("planted stack boot", _planted_boot))
     proofs.append(("fat 16k stack boot", _fat_boot))
     proofs.append(("vblk readonly boot", _vblk_readonly_boot))
+    proofs.append(("vblk bad sector boot", _vblk_bad_sector_boot))
     for label, proof in proofs:
         try:
             proof(env)

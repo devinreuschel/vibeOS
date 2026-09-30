@@ -367,6 +367,21 @@ impl VirtioBlk {
         }
     }
 
+    /// Whether the device has set `DEVICE_NEEDS_RESET` (virtio 1.2
+    /// §2.1.1). Until ROADMAP §12.5's error handler resets it, that is the
+    /// one failure that fails the device.
+    pub(super) fn needs_reset(&self) -> bool {
+        let common = self.common.load(Ordering::Acquire);
+        common != 0 && exhausted_fails_device(r8(common, COMMON_OFF_STATUS))
+    }
+
+    /// [`fail_rest`](Self::fail_rest), only when [`needs_reset`](Self::needs_reset).
+    fn fail_if_needs_reset(&self) {
+        if self.needs_reset() {
+            self.fail_rest();
+        }
+    }
+
     pub(super) fn fail_rest(&self) {
         self.state
             .store(DeviceState::Failed.as_u8(), Ordering::Release);
@@ -414,22 +429,23 @@ impl VirtioBlk {
             Err(e) if e.retryable() && req.retries_left > 0 => {
                 req.retries_left -= 1;
                 let requeued = blk.q.requeue(req);
+                let failed = blk.q.failed;
                 drop(g);
                 if requeued.is_err() {
-                    block_init::complete_waiters(&req, Err(BlockError::Failed));
-                    self.fail_rest();
+                    // A full queue fails this request alone, with its own
+                    // error; `Failed` only when the queue already failed.
+                    let err = if failed { BlockError::Failed } else { e };
+                    block_init::complete_waiters(&req, Err(err));
+                    self.fail_if_needs_reset();
                 }
             }
-            Err(e) if e.retryable() => {
-                blk.q.abort(seq);
-                drop(g);
-                block_init::complete_waiters(&req, Err(BlockError::Failed));
-                self.fail_rest();
-            }
+            // A spent budget, or an error no retry helps, fails the
+            // request alone (DESIGN §10.3).
             Err(e) => {
                 blk.q.abort(seq);
                 drop(g);
                 block_init::complete_waiters(&req, Err(e));
+                self.fail_if_needs_reset();
             }
         }
     }

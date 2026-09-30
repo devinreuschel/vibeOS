@@ -115,9 +115,7 @@ wait for completions anyway.
 Rule: an I/O error is retried within the request's retry budget, `DEFAULT_RETRY_BUDGET` (3) extra
 attempts, which step 5 below shares with resets. A request that exhausts it completes with its
 error, and the device stays `Bound`. `Inval` (range, size) is not retried and uses no budget. No
-infinite retry loop. Submits to a `Failed` device return `Failed`. Not yet enforced: a virtio-blk
-request that exhausts its budget makes the device `Failed` and fails every queued request with it
-(ROADMAP §10.11, F046).
+infinite retry loop. Submits to a `Failed` device return `Failed`.
 
 Rule: every request has a deadline, 30 s by default and settable per device, as Linux's block layer
 has, and the device gives a request back before anything touches its buffer (§2.11 rule 3: stop the
@@ -265,7 +263,11 @@ blocks. Discard on ramdisk validates the range and otherwise no-ops.
 Modern virtio-blk (`1af4:1042`, `VERSION_1` required) binds by id on the
 Phase 6 transport. `F_RO` is accepted: on a read-only device a write or
 discard fails with `ReadOnly` before it is queued, with no retry, and reads
-and flushes go on (virtio 1.2 §5.2.6.1). Each bound function is its own instance (`VirtioBlk`), owned by its PCI
+and flushes go on (virtio 1.2 §5.2.6.1). A request that fails for good, its
+retry budget spent or its error not retryable, completes with its own error
+and the device stays `Ready`; until ROADMAP §12.5's error handler resets a
+device, the driver fails the device and every queued request only when the
+device status has `DEVICE_NEEDS_RESET` (`exhausted_fails_device`). Each bound function is its own instance (`VirtioBlk`), owned by its PCI
 registry entry and named `vda`, `vdb`, … in bind order, with its own queues, bounce slots and
 vectors; the driver keeps no list of them (DEVICES.md §12.1 rule 1). Config reads capacity (512-byte units), `blk_size` (512
 if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
