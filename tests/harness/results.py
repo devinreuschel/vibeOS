@@ -146,6 +146,21 @@ class Results:
         return path
 
 
+def _renumber(prev: list[Any], rows: list[Any]) -> list[Any]:
+    """Section rows that carry an int `boot` continue after `prev`'s boots,
+    so two drivers' boots stay apart."""
+    boots = [r["boot"] for r in prev if isinstance(r, dict) and isinstance(r.get("boot"), int)]
+    if not boots:
+        return rows
+    base = max(boots) + 1
+    return [
+        {**r, "boot": r["boot"] + base}
+        if isinstance(r, dict) and isinstance(r.get("boot"), int)
+        else r
+        for r in rows
+    ]
+
+
 def _append(path: Path, data: dict[str, Any]) -> dict[str, Any]:
     """`data` merged into the file at `path` from an earlier driver of the
     same tier and commit (a Makefile recipe that runs two drivers sets
@@ -173,7 +188,7 @@ def _append(path: Path, data: dict[str, Any]) -> dict[str, Any]:
                 for v, names in merged.items()
             }
         elif isinstance(value, list) and isinstance(prev, list):
-            out[key] = prev + value
+            out[key] = prev + _renumber(prev, value)
         else:
             out[key] = value
     return out

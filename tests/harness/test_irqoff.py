@@ -175,18 +175,19 @@ class ResultsSection(unittest.TestCase):
             os.environ.pop("VIBEOS_RESULTS_APPEND", None)
             first = results.Results("test-irqoff", out_dir=Path(d))
             first.record("ktest", "a", "passed")
-            first.add_section("irqoff", [{"site": "vec0xf0"}])
-            first.add_section("irqoff", [{"site": "vec0x20"}])
+            first.add_section("irqoff", [{"site": "vec0xf0", "boot": 0}])
+            first.add_section("irqoff", [{"site": "vec0x20", "boot": 1}])
             first.write()
             os.environ["VIBEOS_RESULTS_APPEND"] = "1"
             second = results.Results("test-irqoff", out_dir=Path(d))
             second.record("marker", "irq_enabled", "passed")
-            second.add_section("irqoff", [{"site": "syscall:entry"}])
+            second.add_section("irqoff", [{"site": "syscall:entry", "boot": 0}])
             data = json.loads(second.write().read_text())
             self.assertEqual(data["schema"], 1)
             self.assertEqual(
                 [r["site"] for r in data["irqoff"]], ["vec0xf0", "vec0x20", "syscall:entry"]
             )
+            self.assertEqual([r["boot"] for r in data["irqoff"]], [0, 1, 2])
             self.assertEqual(data["ktest"]["passed"], ["a"])
             self.assertEqual(data["marker"]["passed"], ["irq_enabled"])
 
