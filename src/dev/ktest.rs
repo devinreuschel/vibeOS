@@ -788,6 +788,26 @@ pub(crate) fn test_dev_bar_claims() -> Outcome {
     }
 }
 
+/// ROADMAP §10.12 (F115): `map_mmio` refuses a page of usable RAM, and
+/// that page's physmap leaf stays write-back.
+pub(crate) fn test_map_mmio_refuses_ram() -> Outcome {
+    let Some(page) = usable_page() else {
+        return Outcome::Fail("no usable page above 1 MiB");
+    };
+    if let Some(va) = pci_init::map_mmio(page, 0x1000) {
+        return crate::fail_fmt!("usable page {page:#x} mapped at {va:#x}");
+    }
+    let Some((_, _, flags)) =
+        paging_init::translate(VirtAddr(paging_init::HHDM_BASE.wrapping_add(page)))
+    else {
+        return crate::fail_fmt!("usable page {page:#x} not on the physmap");
+    };
+    if flags.contains(PageFlags::PCD) || flags.contains(PageFlags::PWT) {
+        return crate::fail_fmt!("usable page {page:#x} physmap leaf not write-back");
+    }
+    Outcome::Ok
+}
+
 /// Test hooks in virtio-rng's pool path (AGENTS rule 9: `kernel_tests`
 /// only). `virtio_init::publish_pool` calls [`on_publish`](rng_hooks::on_publish)
 /// with each completion's payload, and `virtio_init::rng_take` calls
@@ -1255,4 +1275,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("dev_probe_alloc_fail", test_dev_probe_alloc_fail),
     test("rng_second_probe_refused", rng_second_probe_refused),
     test("dev_bar_claims", test_dev_bar_claims).once(),
+    test("map_mmio_refuses_ram", test_map_mmio_refuses_ram),
 ];

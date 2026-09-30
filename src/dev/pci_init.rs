@@ -18,6 +18,7 @@ use vibeos::paging::{IOREMAP_BASE, IOREMAP_LEN, PAGE_SIZE_4K, PhysAddr, VirtAddr
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
 use crate::acpi_init;
+use crate::boot;
 use crate::fb_init;
 use crate::paging_init;
 use crate::sync_init::SpinMutex;
@@ -97,10 +98,16 @@ fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
 
 /// Map `[phys, phys + len)` for the kernel: uncached through the physmap
 /// below `map_end`, or through ioremap above it; a range that overlaps a
-/// framebuffer stays write-back on the physmap. Reached only from
-/// [`map_bar`], through a live claim (invariant I484), and from `ecam_va`.
-fn map_mmio(phys: u64, len: u64) -> Option<u64> {
+/// framebuffer stays write-back on the physmap. `None` for a range that
+/// overlaps a RAM-typed range of the boot memory map, checked before
+/// anything is patched or mapped (DESIGN §12.3 rule 8), and when the UC
+/// patch fails. Reached only from [`map_bar`], through a live claim
+/// (invariant I484), from `ecam_va`, and from the in-guest tests.
+pub(super) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     if phys == 0 || len == 0 {
+        return None;
+    }
+    if dev::overlaps_any(phys, len, boot::info().ram_ranges()) {
         return None;
     }
     let end = phys.checked_add(len)?;
@@ -120,15 +127,11 @@ fn map_mmio(phys: u64, len: u64) -> Option<u64> {
         return None;
     }
     if end <= paging_init::map_end() {
+        // A failed patch leaves some of the range write-back: refuse it.
         // SAFETY: `paging_init::install` ran at boot, long before the PCI
         // scan, and `end <= map_end()`, so the physmap covers the range;
         // established by `paging_init::map_end`.
-        let patched = unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) };
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "fixed by ROADMAP §10.12: `pci_init::map_mmio` refuses a range that overlaps a RAM-typed range"
-        )]
-        let _ = patched;
+        unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) }.ok()?;
         Some(paging_init::HHDM_BASE.wrapping_add(phys))
     } else {
         // SAFETY: invariant I484: the range is a BAR its caller holds a
