@@ -56,6 +56,7 @@ class Results:
             for kind in KINDS
         }
         self.retries: list[dict[str, str]] = []
+        self.sections: dict[str, list[dict[str, Any]]] = {}
         _current = self
 
     @property
@@ -98,6 +99,13 @@ class Results:
         with open(summary, "a", encoding="utf-8") as f:
             f.write(_retry_line(self.tier, label, failure_line) + "\n")
 
+    def add_section(self, name: str, rows: list[dict[str, Any]]) -> None:
+        """Add rows to the optional top-level list `name` (C-RESULTS: S50's
+        `irqoff`). Boots append; the schema stays 1."""
+        if name in ("schema", "commit", "dirty", "arch", "tier", "qemu", "retries", *KINDS):
+            raise ValueError(f"section {name!r} is a schema key")
+        self.sections.setdefault(name, []).extend(rows)
+
     def add_boot(self, argv: list[str], cfg: QemuConfig, exit_code: int | None) -> None:
         self.qemu.append(
             {
@@ -125,13 +133,65 @@ class Results:
                 for kind, lists in self.sets.items()
             },
             "retries": self.retries,
+            **self.sections,
         }
 
     def write(self) -> Path:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         path = self.path
-        path.write_text(json.dumps(self.as_dict(), indent=2) + "\n", encoding="utf-8")
+        data = self.as_dict()
+        if os.environ.get("VIBEOS_RESULTS_APPEND") == "1":
+            data = _append(path, data)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         return path
+
+
+def _renumber(prev: list[Any], rows: list[Any]) -> list[Any]:
+    """Section rows that carry an int `boot` continue after `prev`'s boots,
+    so two drivers' boots stay apart."""
+    boots = [r["boot"] for r in prev if isinstance(r, dict) and isinstance(r.get("boot"), int)]
+    if not boots:
+        return rows
+    base = max(boots) + 1
+    return [
+        {**r, "boot": r["boot"] + base}
+        if isinstance(r, dict) and isinstance(r.get("boot"), int)
+        else r
+        for r in rows
+    ]
+
+
+def _append(path: Path, data: dict[str, Any]) -> dict[str, Any]:
+    """`data` merged into the file at `path` from an earlier driver of the
+    same tier and commit (a Makefile recipe that runs two drivers sets
+    `VIBEOS_RESULTS_APPEND=1` on the second): boots, retries and sections
+    append, name lists union, and a name that failed in either is failed."""
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return data
+    if not isinstance(old, dict) or (old.get("tier"), old.get("commit")) != (
+        data["tier"],
+        data["commit"],
+    ):
+        return data
+    out = dict(old)
+    for key, value in data.items():
+        prev = old.get(key)
+        if key in KINDS and isinstance(prev, dict):
+            merged: dict[str, set[str]] = {v: set(prev.get(v, [])) for v in value}
+            for v, names in value.items():
+                merged[v] |= set(names)
+            failed = merged.get("failed", set())
+            out[key] = {
+                v: sorted(names if v == "failed" else names - failed)
+                for v, names in merged.items()
+            }
+        elif isinstance(value, list) and isinstance(prev, list):
+            out[key] = prev + _renumber(prev, value)
+        else:
+            out[key] = value
+    return out
 
 
 def _retry_line(tier: str, label: str, failure_line: str) -> str:

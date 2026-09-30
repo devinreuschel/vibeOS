@@ -189,6 +189,9 @@ fn service_calls() {
 /// the CPUs that have not acked and counts it in [`ack_late_count`]; a CPU
 /// that never acks is a hang for ROADMAP §10.7's forensics.
 fn wait_acks(waiters: u64, acked: &AtomicU64) {
+    // Rule 2's exemption (INVARIANTS.md §2.9): the irqoff tracer
+    // subtracts this wait from the stretch.
+    let _x = crate::sched::irqoff::exempt();
     if waiters == 0 {
         return;
     }
@@ -621,12 +624,16 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
     if waiters == 0 {
         return;
     }
-    while CALL_BUSY
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
     {
-        service_incoming();
-        core::hint::spin_loop();
+        // The wait for the call slot is exempt too (rule 2).
+        let _x = crate::sched::irqoff::exempt();
+        while CALL_BUSY
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            service_incoming();
+            core::hint::spin_loop();
+        }
     }
     CALL.func.store(f as *mut (), Ordering::Relaxed);
     CALL.arg.store(arg, Ordering::Relaxed);

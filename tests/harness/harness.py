@@ -1485,6 +1485,7 @@ def run_qemu_and_check(
         if marker_idx < len(markers):
             missing = markers[marker_idx].name
             fail(f"missing marker {missing!r} after {len(result.lines)} lines{report()}")
+        _irqoff_observe(cfg, result.lines)
         if expect_panic:
             if dump_at is None:
                 fail(f"expected a panic signature; none seen{report()}")
@@ -2355,7 +2356,16 @@ def run_qemu_until_exit(
         except subprocess.TimeoutExpired:
             proc.kill()
             result.exit_code = proc.wait()
+    _irqoff_observe(cfg, result.lines)
     return result
+
+
+def _irqoff_observe(cfg: QemuConfig, lines: list[str]) -> None:
+    """Hand a boot's lines to `irqoff.observe` (ROADMAP §10.3), imported here
+    because it imports this module."""
+    from tests.harness import irqoff
+
+    irqoff.observe(cfg, lines)
 
 
 # The boot contract: the `contract` rows of the registry, in order

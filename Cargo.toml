@@ -58,6 +58,10 @@ panic_stop_test = []
 # Its own named ELF and ISO; never the production image.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 vibefs_crash = ["vibeos/crash_plant"]
+# IF-off tracer (ROADMAP §10.3, INVARIANTS.md §2.9 rule 2). Measurement build
+# only; never a published image.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+irqoff = []
 
 [lints]
 workspace = true
