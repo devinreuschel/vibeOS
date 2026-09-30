@@ -1323,6 +1323,8 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
         let n = s.take_places(&mut batch);
         (r, n)
     };
+    #[cfg(feature = "kernel_tests")]
+    testing::preempt_before_places(n);
     loop {
         for &(cpu, id, slot) in batch.iter().take(n) {
             #[cfg(feature = "kernel_tests")]
@@ -1454,7 +1456,7 @@ pub fn current_cpu() -> u32 {
 }
 
 #[cfg(feature = "kernel_tests")]
-pub use testing::{cpu_of, exited, name, state, try_state};
+pub use testing::{cpu_of, exited, ktest_preempt_before_places, name, state, try_state};
 
 pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
     SCHED.lock().ptr(id)

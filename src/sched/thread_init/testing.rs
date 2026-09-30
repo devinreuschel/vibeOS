@@ -303,6 +303,51 @@ pub(super) fn place_stall(id: ThreadId) {
     }
 }
 
+/// Thread whose next `with_sched` that records a wake
+/// [`preempt_before_places`] preempts, or `u32::MAX`.
+static PREEMPT_TID: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Most [`preempt_before_places`] spins for its IPI, in ms of TSC time.
+const PREEMPT_SPIN_MS: u64 = 1;
+
+/// Arm a one-shot for thread `id`, which calls it on itself: its next
+/// `with_sched` that records a wake sends this CPU a reschedule IPI
+/// between dropping SCHED and placing the wakes, and spins up to 1 ms
+/// for it to land, as a tick at that point would (F034).
+pub fn ktest_preempt_before_places(id: ThreadId) {
+    PREEMPT_TID.store(id.raw(), Ordering::Release);
+}
+
+/// Called by `with_sched` after SCHED drops, before it places the `places`
+/// wakes its section recorded.
+pub(super) fn preempt_before_places(places: usize) {
+    if places == 0 {
+        return;
+    }
+    let me = super::current_id().raw();
+    if PREEMPT_TID
+        .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    // The armed thread is pinned (its test spawns it with a CPU), so the
+    // hint is its CPU.
+    let cpu = super::current_cpu();
+    // `place_ready`'s sender.
+    let sent = <crate::arch::current::Arch as vibeos::arch::IpiSend>::send(
+        cpu,
+        vibeos::arch::Ipi::Reschedule,
+    );
+    if sent.is_err() {
+        return;
+    }
+    let end = time_init::read_tsc()
+        .saturating_add(PREEMPT_SPIN_MS.saturating_mul(time_init::tsc_per_ms()));
+    while time_init::read_tsc() < end {
+        core::hint::spin_loop();
+    }
+}
+
 #[allow(
     clippy::expect_used,
     reason = "invariant: a test asks only about a thread it keeps from being reaped, and a thread's tid names its TCB until a spawn reuses its Dead slot (`thread_init::spawn_inner`)"
