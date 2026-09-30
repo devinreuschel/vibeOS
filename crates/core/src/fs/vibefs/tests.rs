@@ -580,10 +580,7 @@ fn commit_free_count_constant() {
 }
 
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "63 nested mkdirs and two commits run past 10 minutes under Miri, and the 70-block count needs all 63"
-)]
+#[cfg_attr(miri, ignore = "63 nested mkdirs run past 10 minutes under Miri")]
 fn nested_dirs_63_commit_remount() {
     let mut b = fresh(256 * BLOCK);
     with_vol(&mut b, |v, d| {
@@ -683,10 +680,7 @@ fn slot_of(v: &mut Vol, d: &mut MemDisk, dir: u32, name: &[u8]) -> (usize, usize
 }
 
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "a fresh image, commit and fsck per planted defect run past 10 minutes under Miri, and the claim is every defect"
-)]
+#[cfg_attr(miri, ignore = "one image per defect runs past 10 minutes under Miri")]
 fn fsck_reports_each_planted_defect() {
     let expect = |what: &str, r: FsckReport, class: Defect, n: Option<u32>| {
         assert!(r.count(class) > 0, "{what}: no {} in {r:?}", class.as_str());
