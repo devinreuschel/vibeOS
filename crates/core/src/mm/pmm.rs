@@ -458,9 +458,12 @@ impl Buddy {
         unsafe { self.push_free(phys, order) };
     }
 
-    /// Order whose block covers `bytes` and is aligned to `align`.
+    /// Order whose block covers `bytes` and is aligned to `align`. `None`
+    /// for an empty size, a size above the largest block (refused before
+    /// rounding, so `next_power_of_two` cannot overflow; F103), an
+    /// alignment that is not a power of two, or a block above `MAX_ORDER`.
     pub fn order_for(bytes: u64, align: u64) -> Option<u8> {
-        if bytes == 0 {
+        if bytes == 0 || bytes > PAGE_SIZE << MAX_ORDER {
             return None;
         }
         let align = if align == 0 { PAGE_SIZE } else { align };
@@ -1284,5 +1287,55 @@ mod tests {
         );
         // No exclusions at all.
         assert_eq!(clipped(3 * P..4 * P, &[]), vec![(3 * P, 4 * P)]);
+    }
+
+    /// F103: above 2^63 `next_power_of_two` overflowed; the size is now
+    /// refused before it rounds.
+    #[test]
+    fn order_for_u64_max_is_none() {
+        assert_eq!(Buddy::order_for(u64::MAX, 0), None);
+        assert_eq!(Buddy::order_for(u64::MAX, PAGE_SIZE), None);
+    }
+
+    #[test]
+    fn order_for_above_2_pow_63_is_none() {
+        assert_eq!(Buddy::order_for((1 << 63) + 1, 0), None);
+        assert_eq!(Buddy::order_for((1 << 63) + 1, PAGE_SIZE), None);
+    }
+
+    #[test]
+    fn order_for_largest_block_edge() {
+        let largest = PAGE_SIZE << MAX_ORDER;
+        assert_eq!(Buddy::order_for(largest, 0), Some(MAX_ORDER as u8));
+        assert_eq!(Buddy::order_for(largest + 1, 0), None);
+    }
+}
+
+// ------------------ Kani proofs (ROADMAP §10.8) ------------------
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// `order_for` never panics (Kani's overflow checks), and a `Some`
+    /// order is at most `MAX_ORDER`, its block covers `bytes`, and the
+    /// block, aligned to its own size, is `align`-aligned.
+    ///
+    /// Bound: every pair of 64-bit `(bytes, align)`; the function has no
+    /// loop.
+    #[kani::proof]
+    fn order_for_covers_and_aligns() {
+        let bytes: u64 = kani::any();
+        let align: u64 = kani::any();
+        let got = Buddy::order_for(bytes, align);
+        kani::cover!(got.is_none(), "refused");
+        kani::cover!(got == Some(0), "order 0");
+        kani::cover!(got == Some(MAX_ORDER as u8), "largest order");
+        if let Some(order) = got {
+            assert!(order as usize <= MAX_ORDER);
+            let block = PAGE_SIZE << order;
+            assert!(block >= bytes);
+            assert!(align == 0 || block % align == 0);
+        }
     }
 }
