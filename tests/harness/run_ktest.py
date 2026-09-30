@@ -16,6 +16,7 @@ from tests.harness.harness import (
     BOOT_ALLOWANCE_S,
     PANIC_DONE,
     TIMEOUT_SCALE,
+    VBLK_BAD_SECTOR,
     EnvConfig,
     HarnessError,
     KtestDeadlines,
@@ -34,9 +35,11 @@ from tests.harness.harness import (
     ktest_lines,
     ktest_summary,
     make_disk,
+    make_pattern_disk,
     parse_ktest_line,
     qemu_argv,
     run_qemu_until_exit,
+    write_blkdebug_config,
 )
 
 DISK_BYTES = 4 * 1024 * 1024
@@ -326,6 +329,7 @@ def _ktest_boot(
     label: str = "ktest",
     enforce_stack: bool = True,
     scale: float = TIMEOUT_SCALE,
+    parts: bool = True,
 ) -> RunResult:
     """One ktest QEMU. It never retries (ROADMAP §10.2, F021).
 
@@ -335,8 +339,10 @@ def _ktest_boot(
     that differs from `tests/harness/skips.toml` (`skips.check_skips`), or a
     stack depth report `check_stack_depth` refuses (unless not
     `enforce_stack`) raises `HarnessError` from this one boot. The persist
-    lines are required only when the boot ran `block_persist`. The stack
-    lines go to the job summary under `label`.
+    lines are required only when the boot ran `block_persist`, and the
+    `vdap1`/`vdap2` lines only with `parts`, which a boot whose `vda` is
+    not the blank disk the guest stamps a GPT on turns off. The stack lines
+    go to the job summary under `label`.
     """
     raw = run_qemu_until_exit(cfg, timeout_s=timeout, progress=KtestDeadlines(timeout, scale))
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
@@ -358,6 +364,8 @@ def _ktest_boot(
         _check_serial_frame(raw.lines)
     check_boot_cpu(klines, cfg)
     _require_line(klines, _block_name("vda"), "missing virtio-blk marker")
+    if not parts:
+        return raw
     _require_line(klines, _block_name("vdap1"), "missing vdap1 marker")
     persist = ran(raw.lines, PERSIST_TEST)
     if persist_reboot:
@@ -429,14 +437,18 @@ def _proof_boot(
     repeat: int | None,
     cmdline: str = "",
     enforce_stack: bool = True,
+    devices: tuple[str, ...] | None = None,
 ) -> RunResult:
-    """One proof boot on a fresh disk, with its own selection."""
+    """One proof boot on a fresh disk, with its own selection. `devices`
+    replaces the fresh disk's `ktest_devices`: the caller owns its disk,
+    and the boot requires no partition markers."""
     penv = dataclasses.replace(
         env, ktest=ktest, ktest_repeat=repeat, cmdline=f"{env.cmdline} {cmdline}".strip()
     )
-    disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+    disk = make_disk(DISK_BYTES, "vibeos-vblk-") if devices is None else None
     try:
-        cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
+        extra = ktest_devices(disk, env.smp) if disk is not None else devices or ()
+        cfg = penv.qemu(extra=extra, boot_order="d")
         raw = _ktest_boot(
             cfg,
             env.timeout,
@@ -444,12 +456,14 @@ def _proof_boot(
             label=f"{env.tier} {label}",
             enforce_stack=enforce_stack,
             scale=env.timeout_scale,
+            parts=devices is None,
         )
     finally:
-        try:
-            os.unlink(disk)
-        except OSError:
-            pass
+        if disk is not None:
+            try:
+                os.unlink(disk)
+            except OSError:
+                pass
     print(f"[ktest] {label}:", file=sys.stderr)
     print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
     return raw
@@ -497,10 +511,18 @@ def check_planted(report: StackReport) -> None:
 
 
 def _single_test_boot(
-    env: EnvConfig, test: str, label: str, *, enforce_stack: bool = True
+    env: EnvConfig,
+    test: str,
+    label: str,
+    *,
+    enforce_stack: bool = True,
+    devices: tuple[str, ...] | None = None,
 ) -> RunResult:
-    """One boot of test `test` alone (`VIBEOS_KTEST`), on a fresh disk."""
-    return _proof_boot(env, label, ktest=test, repeat=None, enforce_stack=enforce_stack)
+    """One boot of test `test` alone (`VIBEOS_KTEST`), on a fresh disk, or
+    on `devices` when given (`_proof_boot`)."""
+    return _proof_boot(
+        env, label, ktest=test, repeat=None, enforce_stack=enforce_stack, devices=devices
+    )
 
 
 def _planted_boot(env: EnvConfig) -> None:
@@ -528,6 +550,51 @@ def _fat_boot(env: EnvConfig) -> None:
     boot, and its `ok` line is required."""
     raw = _single_test_boot(env, FAT_STACK_TEST, "fat 16k stack")
     check_select_run(raw.lines, {FAT_STACK_TEST: 1}, ())
+
+
+# The virtio-blk failure boots (ROADMAP §10.11, F046): each runs one opt-in
+# test whose `vda` is a 4 MiB pattern image, whose LBA 0 is not zero, so
+# the guest stamps no GPT on it.
+VBLK_READONLY_TEST = "vblk_readonly"
+
+
+def _vblk_readonly_boot(env: EnvConfig) -> None:
+    """`vblk_readonly` alone on a `readonly=on` pattern image: a write
+    and a discard fail with `ReadOnly`, and reads go on."""
+    disk = make_pattern_disk(DISK_BYTES, "vibeos-vblk-ro-")
+    try:
+        devices = ktest_devices(disk, env.smp, readonly=True)
+        raw = _single_test_boot(env, VBLK_READONLY_TEST, "vblk readonly", devices=devices)
+        check_select_run(raw.lines, {VBLK_READONLY_TEST: 1}, ())
+    finally:
+        try:
+            os.unlink(disk)
+        except OSError:
+            pass
+
+
+VBLK_BAD_SECTOR_TEST = "vblk_bad_sector"
+
+
+def _vblk_bad_sector_boot(env: EnvConfig) -> None:
+    """`vblk_bad_sector` alone on a pattern image behind `blkdebug`, which
+    fails every read of `VBLK_BAD_SECTOR`: that read fails alone, after
+    its retries, and the disk stays `Ready`."""
+    disk = make_pattern_disk(DISK_BYTES, "vibeos-vblk-bad-")
+    conf = None
+    try:
+        conf = write_blkdebug_config(VBLK_BAD_SECTOR, "vibeos-blkdebug-")
+        devices = ktest_devices(disk, env.smp, blkdebug=conf)
+        raw = _single_test_boot(env, VBLK_BAD_SECTOR_TEST, "vblk bad sector", devices=devices)
+        check_select_run(raw.lines, {VBLK_BAD_SECTOR_TEST: 1}, ())
+    finally:
+        for path in (disk, conf):
+            if path is None:
+                continue
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
@@ -751,6 +818,8 @@ def main(argv: list[str] | None = None) -> int:
         proofs.append(("deadline trip boot", ktest_deadline_trip))
     proofs.append(("planted stack boot", _planted_boot))
     proofs.append(("fat 16k stack boot", _fat_boot))
+    proofs.append(("vblk readonly boot", _vblk_readonly_boot))
+    proofs.append(("vblk bad sector boot", _vblk_bad_sector_boot))
     for label, proof in proofs:
         try:
             proof(env)
