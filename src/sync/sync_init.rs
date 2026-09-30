@@ -67,6 +67,8 @@ unsafe impl<T: Send> Sync for SpinMutex<T> {}
 // the `SpinLock` holds only atomics. Established here.
 unsafe impl<T: Send> Send for SpinMutex<T> {}
 
+/// `!Send` through its `InterruptGuard`, and `Sync` only when `T: Sync`,
+/// as `std::sync::MutexGuard` is (ROADMAP §10.3, F038).
 pub struct SpinMutexGuard<'a, T> {
     mutex: &'a SpinMutex<T>,
     owner: usize,
@@ -74,6 +76,16 @@ pub struct SpinMutexGuard<'a, T> {
     rank: u8,
     _irq: InterruptGuard,
 }
+
+// SAFETY: std's `MutexGuard` rule: a shared guard hands out only `&T`
+// (`Deref`), which `T: Sync` makes safe to share, and `T: Send` is the
+// bound rule 6 asks of a type that shares `&T`; established here.
+unsafe impl<T: Send + Sync> Sync for SpinMutexGuard<'_, T> {}
+
+vibeos::assert_not_impl!(InterruptGuard: Send);
+vibeos::assert_not_impl!(SpinMutexGuard<'static, u8>: Send);
+vibeos::assert_not_impl!(SpinMutexGuard<'static, core::cell::Cell<u8>>: Sync);
+vibeos::assert_impl!(SpinMutexGuard<'static, u8>: Sync);
 
 impl<T> SpinMutex<T> {
     pub const fn with_rank(v: T, rank: u8) -> Self {
