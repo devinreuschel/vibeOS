@@ -1134,7 +1134,7 @@ fn spawn_inner(
         as_cr3,
         fpu: fpu_template(),
         fp_cpu: None,
-        syscall_count: 0,
+        syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid,
         no_reclaim: AtomicU32::new(0),
     });
@@ -1218,7 +1218,8 @@ fn fill_tcb(
     tcb.fpu = fpu_template();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
-    tcb.syscall_count = 0;
+    // Relaxed: a statistic, reset before the thread first runs.
+    tcb.syscall_count.store(0, Ordering::Relaxed);
     tcb.pid = pid;
     prepare_thread(&mut tcb.context, top, tramp);
     // SAFETY: `prepare_thread` put `context.rsp` 8 bytes below `top`,
@@ -1383,6 +1384,22 @@ pub fn set_pid_cr3(id: ThreadId, pid: u32, root: u64) {
             t.pid = pid;
             t.as_cr3 = root;
         }
+    });
+}
+
+/// Add each live thread's syscall count to its process's entry of `sums`,
+/// `(pid, sum)` pairs sorted by pid (`vibeos::proc::sum_syscalls`), in one
+/// pass over the thread table under SCHED. Dead TCBs are skipped.
+pub fn sum_syscalls(sums: &mut [(u32, u64)]) {
+    with_sched(|s| {
+        let threads = s
+            .slots
+            .iter()
+            .flatten()
+            .filter(|t| t.state != ThreadState::Dead)
+            // Relaxed: the count is a statistic and pairs with nothing.
+            .map(|t| (t.pid, t.syscall_count.load(Ordering::Relaxed)));
+        vibeos::proc::sum_syscalls(sums, threads);
     });
 }
 

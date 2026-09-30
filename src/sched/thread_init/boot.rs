@@ -51,7 +51,7 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         as_cr3: 0,
         fpu: fpu_template(),
         fp_cpu: None,
-        syscall_count: 0,
+        syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid: 0,
         no_reclaim: AtomicU32::new(0),
     });

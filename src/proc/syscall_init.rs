@@ -4,7 +4,7 @@
 use core::arch::global_asm;
 use core::mem::{offset_of, size_of};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
@@ -653,7 +653,6 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
 
 static TRACE: AtomicBool = AtomicBool::new(false);
 static CURRENT_AS: AtomicPtr<AddressSpace> = AtomicPtr::new(ptr::null_mut());
-static SYSCALLS: AtomicU64 = AtomicU64::new(0);
 
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Release);
@@ -661,25 +660,6 @@ pub fn set_trace(on: bool) {
 
 pub fn trace_enabled() -> bool {
     TRACE.load(Ordering::Acquire)
-}
-
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    allow(
-        dead_code,
-        reason = "P10-S86 adds its procfs caller; mm::ktest reads it today"
-    )
-)]
-pub fn syscall_count() -> u64 {
-    let t = per_cpu_init::current_thread();
-    if !t.is_null() {
-        // SAFETY: invariant: a non-null current thread is this CPU's live
-        // TCB, and only this CPU writes its `syscall_count` (`bump_counter`);
-        // established by `per_cpu_init::set_current_thread`.
-        unsafe { (*t).syscall_count }
-    } else {
-        SYSCALLS.load(Ordering::Relaxed)
-    }
 }
 
 fn current_as() -> Option<&'static AddressSpace> {
@@ -714,13 +694,14 @@ pub fn clear_user_as() {
 }
 
 fn bump_counter() {
-    SYSCALLS.fetch_add(1, Ordering::Relaxed);
     let t = per_cpu_init::current_thread();
     if !t.is_null() {
-        // SAFETY: invariant: a non-null current thread is this CPU's live
-        // TCB, and only the thread itself, on this CPU, writes its
-        // `syscall_count`; established by `per_cpu_init::set_current_thread`.
-        unsafe { (*t).syscall_count = (*t).syscall_count.wrapping_add(1) };
+        // SAFETY: invariant I9: a non-null current thread is this CPU's
+        // live TCB, which stays in `SCHED`; established by
+        // `per_cpu_init::set_current_thread`.
+        let n = unsafe { &(*t).syscall_count };
+        // Relaxed: the count is a statistic and pairs with nothing.
+        n.fetch_add(1, Ordering::Relaxed);
     }
 }
 

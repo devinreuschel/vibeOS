@@ -6,7 +6,7 @@
 
 use core::mem::{offset_of, size_of};
 
-use crate::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
 use crate::time::Instant;
@@ -289,8 +289,11 @@ pub struct Tcb {
     /// until its first return to user mode and after any write to `fpu`
     /// (DESIGN §7.5, the FP binding; `vibeos::fpu`).
     pub fp_cpu: Option<u32>,
-    /// Syscall counter. Aggregated per-process in Slice C.
-    pub syscall_count: u64,
+    /// Syscalls this thread has entered. Its own entry bumps it
+    /// (`syscall_init::bump_counter`); other threads read it for the
+    /// per-process sum (`thread_init::sum_syscalls`), so it is atomic. A
+    /// statistic: its Relaxed accesses order nothing.
+    pub syscall_count: AtomicU64,
     /// 0 = kernel thread. Process pid otherwise.
     pub pid: u32,
     /// Nonzero while this thread is a no-reclaim thread, which releases no

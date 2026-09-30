@@ -265,6 +265,8 @@ GONE: list[tuple[str, str]] = [
     ("idtr_pack_limit_then_base", "dead scheduler and bring-up state"),
     ("cpu_lock_order", "dead scheduler and bring-up state"),
     ("cpu_pair_lower_id_first", "dead scheduler and bring-up state"),
+    ("SYSCALLS", "a syscall count per process: the"),
+    ("src/proc/syscall_init.rs: fn syscall_count", "a syscall count per process: the"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
