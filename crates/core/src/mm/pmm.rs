@@ -1314,28 +1314,4 @@ mod tests {
 // ------------------ Kani proofs (ROADMAP §10.8) ------------------
 
 #[cfg(kani)]
-mod kani_proofs {
-    use super::*;
-
-    /// `order_for` never panics (Kani's overflow checks), and a `Some`
-    /// order is at most `MAX_ORDER`, its block covers `bytes`, and the
-    /// block, aligned to its own size, is `align`-aligned.
-    ///
-    /// Bound: every pair of 64-bit `(bytes, align)`; the function has no
-    /// loop.
-    #[kani::proof]
-    fn order_for_covers_and_aligns() {
-        let bytes: u64 = kani::any();
-        let align: u64 = kani::any();
-        let got = Buddy::order_for(bytes, align);
-        kani::cover!(got.is_none(), "refused");
-        kani::cover!(got == Some(0), "order 0");
-        kani::cover!(got == Some(MAX_ORDER as u8), "largest order");
-        if let Some(order) = got {
-            assert!(order as usize <= MAX_ORDER);
-            let block = PAGE_SIZE << order;
-            assert!(block >= bytes);
-            assert!(align == 0 || block % align == 0);
-        }
-    }
-}
+mod kani_proofs;
