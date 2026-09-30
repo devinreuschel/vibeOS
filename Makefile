@@ -41,6 +41,8 @@ ISO_PANIC_NEST   := build/vibeos-panic-nest.iso
 ISO_PANIC_STOP   := build/vibeos-panic-stop.iso
 ISO_KTEST        := build/vibeos-ktest.iso
 ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
+ISO_IRQOFF       := build/vibeos-irqoff.iso
+ISO_KTEST_IRQOFF := build/vibeos-ktest-irqoff.iso
 ISO_INIT_FAULT   := build/vibeos-init-fault.iso
 ISO_HANG         := build/vibeos-hang.iso
 
@@ -144,6 +146,11 @@ $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
 $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
 # hang: every CPU hangs after smp: done, for the forensics tier's cores
 $(eval $(call KERNEL_VARIANT,hang,--features hang_test,$(ISO_HANG)))
+# irqoff: production features plus the IF-off tracer (ROADMAP §10.3); measurement only
+$(eval $(call KERNEL_VARIANT,irqoff,--features irqoff,$(ISO_IRQOFF)))
+# ktest-irqoff: the in-guest registry plus the IF-off tracer; measurement only
+$(eval $(call KERNEL_VARIANT,ktest-irqoff,--features kernel_tests --features irqoff,$(ISO_KTEST_IRQOFF)))
+
 KERNEL_ELF := build/kernels/vibeos-default.elf
 
 ifneq ($(VIBEOS_PREBUILT),1)
@@ -193,12 +200,15 @@ $(USER_STAMP): $(USER_SRCS) user/Cargo.toml user/mem/Cargo.toml Cargo.toml Cargo
 build/kernels/vibeos-ktest.elf: $(USER_STAMP)
 build/kernels/vibeos-ktest.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
 build/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
+build/kernels/vibeos-ktest-irqoff.elf: $(USER_STAMP)
+build/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
+build/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_DIR := $(USER_OUT)
 endif
 
 .PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
-        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics
+        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff
 
 help:
 	@printf '%s\n' \
@@ -241,6 +251,7 @@ help:
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
 	  '  test-lapic-fallback   in-guest tests, TSC-deadline off' \
+	  '  test-irqoff           test-kernel and test-e2e in the IF-off tracer build (nightly)' \
 	  '  test-vibefs-crash     QEMU-kill + host fsck-vibefs' \
 	  '  test-smp-stress       -smp 4 in-guest tier (weekly CI)' \
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
@@ -601,6 +612,17 @@ test-vibefs-crash-plants: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NB
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) \
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py \
 	    --plants leak,early_super
+
+# IF-off tracer (ROADMAP §10.3). TCG: -icount shift=0, one CPU, so guest ns =
+# instructions; KVM takes neither (it rejects -icount) and records max and p99
+# with no threshold. Unset VIBEOS_QEMU_ACCEL is the harness's default, TCG.
+# Not in `test`: the nightly job runs it. The e2e driver appends to the ktest
+# driver's results file (VIBEOS_RESULTS_APPEND), which starts empty.
+IRQOFF_ENV = $(if $(filter tcg,$(or $(VIBEOS_QEMU_ACCEL),tcg)),VIBEOS_SMP=1 VIBEOS_QEMU_EXTRA="-icount shift=0 $(VIBEOS_QEMU_EXTRA)")
+test-irqoff: $(ISO_KTEST_IRQOFF) $(ISO_IRQOFF) $(MKFS_VIBEFS)
+	rm -f build/results/x86_64-$@.json
+	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_ISO=$(ISO_KTEST_IRQOFF) python3 tests/harness/run_ktest.py
+	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_RESULTS_APPEND=1 VIBEOS_ISO=$(ISO_IRQOFF) VIBEOS_MKFS=$(MKFS_VIBEFS) python3 tests/harness/run_e2e.py
 
 test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 

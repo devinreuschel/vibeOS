@@ -6,6 +6,7 @@
 //! without changing callers. Kernel `schedule` / idle live in the binary crate.
 
 pub mod fpu;
+pub mod irqoff;
 pub mod stack_depth;
 pub mod thread;
 pub mod wait;
