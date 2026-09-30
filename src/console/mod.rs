@@ -2,6 +2,7 @@
 
 pub(crate) mod console_init;
 pub(crate) mod fb_init;
+#[cfg(target_arch = "x86_64")]
 pub(crate) mod kbd_init;
 #[cfg(feature = "kernel_tests")]
 #[allow(

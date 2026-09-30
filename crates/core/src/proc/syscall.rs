@@ -3,18 +3,18 @@
 //!
 //! The table itself is generated from `syscalls.toml` into
 //! [`crate::proc::syscall_table`] (C-SYSTABLE), and its items are re-exported
-//! here, with the x86_64 `SYS_*` numbers. Handlers live in the kernel half
+//! here, with the reference port's `SYS_*` numbers (`arch::syscall_nr`); each
+//! port's dispatch is `SyscallAbi::dispatch`. Handlers live in the kernel half
 //! (`proc_init`); `vibeos_syscall_stub` is the one entry path.
 
-pub use crate::arch::x86_64::trap::UserFrame;
+pub use crate::arch::UserFrame;
 
 pub const F_GETFD: u32 = 1;
 pub const F_SETFD: u32 = 2;
 
-pub use crate::proc::syscall_table::x86_64::nr::*;
+pub use crate::arch::syscall_nr::*;
 pub use crate::proc::syscall_table::{
     Arg, CType, Dir, Handlers, NrRule, NrTable, Ptr, PtrKind, ROWS, Row, Sys, SysResult, aarch64,
-    x86_64,
 };
 #[cfg(test)]
 pub use crate::proc::syscall_table::{Recorder, Val};
@@ -30,6 +30,8 @@ pub const fn encode(r: SysResult) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arch::SyscallAbi;
+    use crate::arch::stub::Arch;
     use crate::kerror::KError;
 
     /// Every errno of the `KError` table reaches ring 3 as Linux's
@@ -47,20 +49,20 @@ mod tests {
 
     #[test]
     fn syscall_table_invariants() {
-        for (tab, arch) in [(&x86_64::TABLE, 0), (&aarch64::TABLE, 1)] {
+        // The stub port's table is x86_64's.
+        for tab in [Arch::table(), &aarch64::TABLE] {
             let mut seen = [0usize; Sys::ALL.len()];
             for (nr, slot) in tab.slots().iter().enumerate() {
                 let Some(sys) = slot else { continue };
                 let row = sys.row();
-                let want = if arch == 0 { row.x86_64 } else { row.aarch64 };
-                assert_eq!(want, Some(nr as u32), "{} slot {nr}", row.name);
+                assert_eq!(tab.number(*sys), Some(nr as u64), "{} slot {nr}", row.name);
+                assert_eq!(tab.lookup(nr as u64), Some(*sys), "{} slot {nr}", row.name);
                 seen[*sys as usize] += 1;
             }
             for row in &ROWS {
-                let has = if arch == 0 { row.x86_64 } else { row.aarch64 };
                 assert_eq!(
                     seen[row.sys as usize],
-                    usize::from(has.is_some()),
+                    usize::from(tab.number(row.sys).is_some()),
                     "{}",
                     row.name
                 );
@@ -101,9 +103,9 @@ mod tests {
         assert!(declared(Sys::Write, "buf"));
         assert!(declared(Sys::Psinfo, "buf"));
         assert!(!declared(Sys::Wait4, "rusage"));
-        assert_eq!(x86_64::TABLE.lookup(SYS_GETPID), Some(Sys::Getpid));
-        assert_eq!(x86_64::TABLE.lookup(0xC0FFEE), None);
-        assert_eq!(x86_64::TABLE.lookup(u64::MAX), None);
+        assert_eq!(Arch::table().lookup(SYS_GETPID), Some(Sys::Getpid));
+        assert_eq!(Arch::table().lookup(0xC0FFEE), None);
+        assert_eq!(Arch::table().lookup(u64::MAX), None);
     }
     /// The value a handler of C type `ty` must see for register
     /// `0xFFFF_FFFF_8000_0001 + i` (`high`) or `0xDEAD_BEEF_0000_0003 + i`.
@@ -130,9 +132,12 @@ mod tests {
     fn dispatch_args_c_types() {
         for row in &ROWS {
             type Dispatch = fn(&mut Recorder, u64, &[u64; 6]) -> SysResult;
-            let arches: [(Option<u32>, Dispatch); 2] = [
-                (row.x86_64, x86_64::dispatch::<Recorder>),
-                (row.aarch64, aarch64::dispatch::<Recorder>),
+            let arches: [(Option<u64>, Dispatch); 2] = [
+                (Arch::table().number(row.sys), Arch::dispatch::<Recorder>),
+                (
+                    aarch64::TABLE.number(row.sys),
+                    aarch64::dispatch::<Recorder>,
+                ),
             ];
             for (nr, dispatch) in arches {
                 let Some(nr) = nr else { continue };
@@ -144,12 +149,7 @@ mod tests {
                     };
                     let regs: [u64; 6] = core::array::from_fn(|i| base + i as u64);
                     let mut rec = Recorder::default();
-                    assert_eq!(
-                        dispatch(&mut rec, u64::from(nr), &regs),
-                        Ok(0),
-                        "{}",
-                        row.name
-                    );
+                    assert_eq!(dispatch(&mut rec, nr, &regs), Ok(0), "{}", row.name);
                     assert_eq!(rec.sys, Some(row.sys), "{}", row.name);
                     for (i, a) in row.args.iter().enumerate() {
                         let got = rec.args[i];
@@ -165,13 +165,13 @@ mod tests {
         // SYSCALL.md §1's examples.
         let mut rec = Recorder::default();
         let regs = [0xFFFF_FFFF_0000_0003, 0x1000, 1, 0, 0, 0];
-        assert_eq!(x86_64::dispatch(&mut rec, SYS_READ, &regs), Ok(0));
+        assert_eq!(Arch::dispatch(&mut rec, SYS_READ, &regs), Ok(0));
         assert_eq!(rec.args[0], Some(Val::U32(3)));
         let regs = [0x1_0000_0005, 9, 0, 0, 0, 0];
-        assert_eq!(x86_64::dispatch(&mut rec, SYS_KILL, &regs), Ok(0));
+        assert_eq!(Arch::dispatch(&mut rec, SYS_KILL, &regs), Ok(0));
         assert_eq!(rec.args[0], Some(Val::I32(5)));
         let regs = [0xFFFF_FFFF, 0, 0, 0, 0, 0];
-        assert_eq!(x86_64::dispatch(&mut rec, SYS_WAIT4, &regs), Ok(0));
+        assert_eq!(Arch::dispatch(&mut rec, SYS_WAIT4, &regs), Ok(0));
         assert_eq!(rec.args[0], Some(Val::I32(-1)));
     }
 
@@ -181,16 +181,16 @@ mod tests {
         let nosys = Err(KError::NoSys);
         let mut rec = Recorder::default();
         assert_eq!(
-            x86_64::dispatch(&mut rec, 0xFFFF_FFFF_0000_0001, &regs),
+            Arch::dispatch(&mut rec, 0xFFFF_FFFF_0000_0001, &regs),
             Ok(0)
         );
         assert_eq!(rec.sys, Some(Sys::Write));
-        assert_eq!(x86_64::dispatch(&mut rec, 0x1_0000_0027, &regs), Ok(0));
+        assert_eq!(Arch::dispatch(&mut rec, 0x1_0000_0027, &regs), Ok(0));
         assert_eq!(rec.sys, Some(Sys::Getpid));
         // Negative as `eax`, and x32's bit 30 (LINUX.md `no-32bit`).
         for nr in [0x8000_0000, 0xFFFF_FFFF, 0x4000_0001, u64::MAX] {
             let mut rec = Recorder::default();
-            assert_eq!(x86_64::dispatch(&mut rec, nr, &regs), nosys, "{nr:#x}");
+            assert_eq!(Arch::dispatch(&mut rec, nr, &regs), nosys, "{nr:#x}");
             assert_eq!(rec.sys, None, "{nr:#x}");
         }
         assert_eq!(

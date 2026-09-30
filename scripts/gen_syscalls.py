@@ -6,8 +6,11 @@ architecture, its arguments' C types in order, and its pointer declarations
 (the file's header gives the schema). This script writes, from it:
 
 - `crates/core/src/proc/syscall_table.rs`: `Sys`, `ROWS`, `trait Handlers`,
-  and per architecture the numbers, the `TABLE` dispatch indexes and the
-  typed `call`/`dispatch`, plus the host tests' `Recorder`;
+  aarch64's numbers, the `TABLE` dispatch indexes and the typed
+  `call`/`dispatch`, plus the host tests' `Recorder`;
+- `crates/core/src/arch/x86_64/syscall.rs`: the same for x86_64, in its
+  port's pure half, which `SyscallAbi::dispatch` reaches (PORTABILITY
+  §11.1);
 - `user/src/arch/x86_64/sys.rs`: the numbers, `Sys::from_name`, and one
   stub per row with an x86_64 number;
 - the block between `<!-- gen_syscalls: begin syscall-table -->` and
@@ -44,6 +47,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 TABLE = Path("crates/core/src/proc/syscalls.toml")
 KERNEL_OUT = Path("crates/core/src/proc/syscall_table.rs")
+X86_OUT = Path("crates/core/src/arch/x86_64/syscall.rs")
 USER_OUT = Path("user/src/arch/x86_64/sys.rs")
 SYSCALL_MD = Path("docs/SYSCALL.md")
 KERROR = Path("crates/core/src/kerror.rs")
@@ -92,11 +96,8 @@ pub struct Row {
     pub sys: Sys,
     pub name: &'static str,
     /// The arguments, in canonical (x86_64) register order; the arity is
-    /// their count.
+    /// their count. Each architecture's number is in its [`NrTable`].
     pub args: &'static [Arg],
-    /// The number on each architecture, `None` where Linux has none.
-    pub x86_64: Option<u32>,
-    pub aarch64: Option<u32>,
 }
 
 impl Row {
@@ -209,6 +210,12 @@ impl NrTable {
     /// The table, indexed by number.
     pub const fn slots(&self) -> &'static [Option<Sys>] {
         self.slots
+    }
+
+    /// `sys`'s number in this table; `None` where Linux has none.
+    pub fn number(&self, sys: Sys) -> Option<u64> {
+        let n = self.slots.iter().position(|s| *s == Some(sys))?;
+        u64::try_from(n).ok()
     }
 }
 """
@@ -593,6 +600,7 @@ def kernel_params(row: Row) -> str:
 
 
 def render_arch(table: Table, arch: str, rule: str, doc: str) -> list[str]:
+    """`arch`'s numbers, `TABLE`, `call` and `dispatch` as an inline `pub mod`."""
     rows = [r for r in table.rows if r.nr(arch) is not None]
     size = max((r.nr(arch) or 0) for r in rows) + 1
     out = [
@@ -658,6 +666,34 @@ def render_arch(table: Table, arch: str, rule: str, doc: str) -> list[str]:
         "}",
     ]
     return out
+
+
+def render_x86(table: Table) -> str:
+    """x86_64's module as its own file in the port's pure half: `render_arch`'s
+    module body, dedented, importing the shared types from the table."""
+    body = render_arch(
+        table,
+        "x86_64",
+        "SignExtendEax",
+        "x86_64: the number is `eax` sign-extended (SYSCALL.md §1).",
+    )[2:-1]
+    body = [ln[4:] if ln.startswith("    ") else ln for ln in body]
+    body[0:2] = [
+        "use crate::kerror::KError;",
+        "use crate::proc::syscall_table::{Handlers, NrRule, NrTable, Sys, SysResult};",
+    ]
+    out = [
+        f"// {GENERATED}.",
+        "// Do not edit: change the table and run the script (ROADMAP §10.5).",
+        "",
+        "//! The x86_64 syscall numbers, the table dispatch indexes, and the typed",
+        "//! `call`/`dispatch` (SYSCALL.md §1, §3): the pure half of the `SyscallAbi`",
+        "//! row (PORTABILITY §11.1). The number is `eax` sign-extended.",
+        "",
+    ]
+    out += body
+    out.append("")
+    return "\n".join(out)
 
 
 def val_variant(t: CType) -> str:
@@ -740,9 +776,6 @@ def render_kernel(table: Table) -> str:
             out.append("        ],")
         else:
             out.append("        args: &[],")
-        for arch in ("x86_64", "aarch64"):
-            nr = r.nr(arch)
-            out.append(f"        {arch}: {'None' if nr is None else f'Some({nr})'},")
         out.append("    },")
     out += [
         "];",
@@ -762,13 +795,6 @@ def render_kernel(table: Table) -> str:
         else:
             out.append(sig)
     out += ["}", ""]
-    out += render_arch(
-        table,
-        "x86_64",
-        "SignExtendEax",
-        "x86_64: the number is `eax` sign-extended (SYSCALL.md §1).",
-    )
-    out.append("")
     out += render_arch(
         table,
         "aarch64",
@@ -1080,6 +1106,7 @@ class Emitter:
 
 EMITTERS: list[Emitter] = [
     Emitter(KERNEL_OUT, render_kernel),
+    Emitter(X86_OUT, render_x86),
     Emitter(USER_OUT, render_user),
     Emitter(SYSCALL_MD, render_md, "syscall-table"),
     Emitter(SYSCALL_MD, render_errno_md, "errno-table"),

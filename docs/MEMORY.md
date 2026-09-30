@@ -863,9 +863,10 @@ can be observed before an earlier Normal store, `mmio_write` runs `dmb oshst` be
 `mmio_read` runs `dmb oshld` after its load, as Linux's arm64 `writel` and `readl` do. Neither
 orders an earlier load before a device write: a driver that reads a buffer and then writes a
 doorbell that hands the buffer back runs `dma_mb` first. A `_relaxed` accessor carries no barrier
-and is used only where a comment says why no ordering is needed. Rule; not yet enforced: drivers
-write MMIO with `write_volatile` directly, and the accessors arrive with ROADMAP §10.3's seam and
-§11.2.
+and is used only where a comment says why no ordering is needed. Rule; not yet enforced: the
+seam's `Barriers` trait carries `mmio_read` and `mmio_write` (ROADMAP §10.3), and each port
+implements them, but drivers still write MMIO with `write_volatile` directly until they convert in
+ROADMAP §11.2.
 
 Planned (ROADMAP §11.2): DMA coherence is a property of each device, from firmware: the device-tree
 `dma-coherent` property on the device or a parent bus (ROADMAP §11.5), or ACPI `_CCA` and the IORT

@@ -17,7 +17,6 @@ use crate::sync::blocking_init::{BlockingMutex, RwLock, Semaphore};
 use crate::sync_init::{self, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
-use crate::x86;
 
 static SWITCH_HELPER_RAN: AtomicBool = AtomicBool::new(false);
 
@@ -37,7 +36,7 @@ impl Saved {
     fn now() -> Self {
         Self {
             nest: per_cpu_init::irq_nest(),
-            if_on: x86::interrupts_enabled(),
+            if_on: crate::arch::current::interrupts_enabled(),
             held: sync_init::testing::held(),
         }
     }
@@ -55,11 +54,13 @@ impl Saved {
     }
 
     fn check(&self) -> Result<(), Outcome> {
-        if per_cpu_init::irq_nest() != self.nest || x86::interrupts_enabled() != self.if_on {
+        if per_cpu_init::irq_nest() != self.nest
+            || crate::arch::current::interrupts_enabled() != self.if_on
+        {
             return Err(crate::fail_fmt!(
                 "irq_nest {} IF {}, want {} {}",
                 per_cpu_init::irq_nest(),
-                u8::from(x86::interrupts_enabled()),
+                u8::from(crate::arch::current::interrupts_enabled()),
                 self.nest,
                 u8::from(self.if_on)
             ));
@@ -79,7 +80,7 @@ pub(crate) fn lock_across_switch_asserts() -> Outcome {
     let saved = Saved::now();
     // IF off from the spawn to the yield, so no tick runs the helper first:
     // a lone thread's yield re-picks it and never reaches `switch_now`.
-    let g = x86::InterruptGuard::enter();
+    let g = crate::arch::current::InterruptGuard::enter();
     if thread_init::spawn_here("switch_helper", switch_helper_entry).is_err() {
         return Outcome::Fail("spawn");
     }
@@ -143,7 +144,7 @@ impl Drop for IsrFlag {
 pub(crate) fn block_in_hard_irq_asserts() -> Outcome {
     use sync_init::testing::SleepTrip;
     let saved = Saved::now();
-    let g = x86::InterruptGuard::enter();
+    let g = crate::arch::current::InterruptGuard::enter();
     let nest = per_cpu_init::irq_nest();
     let _ = sync_init::testing::take_trip();
     let flag = IsrFlag::set();
@@ -203,7 +204,7 @@ fn bottom_half(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
 pub(crate) fn in_hard_irq_top_bottom() -> Outcome {
     TOP_HARD.store(0, Ordering::Release);
     BOTTOM_HARD.store(0, Ordering::Release);
-    let g = x86::InterruptGuard::enter();
+    let g = crate::arch::current::InterruptGuard::enter();
     let me = thread_init::current_cpu();
     let v = match irq_init::allocate_vector(me) {
         Ok(v) => v,
@@ -293,7 +294,7 @@ pub(crate) fn sleep_under_spinlock_asserts() -> Outcome {
         let trip = sync_init::testing::take_trip();
         saved.restore_locks(nest);
         if saved.if_on {
-            x86::sti();
+            crate::arch::current::irq_enable();
         }
         if !hit {
             return crate::fail_fmt!("{what}: no panic under a spinlock");
@@ -302,7 +303,7 @@ pub(crate) fn sleep_under_spinlock_asserts() -> Outcome {
             return crate::fail_fmt!("{what}: trip {:?}, want Held", trip);
         }
     }
-    let g = x86::InterruptGuard::enter();
+    let g = crate::arch::current::InterruptGuard::enter();
     let nest = per_cpu_init::irq_nest();
     let hit = arch::catch::catch_panic(sleep_mutex_lock);
     let trip = sync_init::testing::take_trip();

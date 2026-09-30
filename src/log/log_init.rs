@@ -15,11 +15,11 @@ use vibeos::log::{
     COMPILE_MAX, DEFAULT_RUNTIME_MAX, DUMP_LAST, Level, Logger, MSG_CAP, RING_CAP, Record, allowed,
 };
 
+use crate::arch::current::InterruptGuard;
 use crate::cell::IrqCell;
 use crate::per_cpu_init;
 use crate::serial::{PlainSerial, Serial};
 use crate::time_init;
-use crate::x86::InterruptGuard;
 
 struct Stage {
     buf: [u8; MSG_CAP],

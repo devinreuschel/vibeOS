@@ -8,8 +8,10 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::apic::IpiError;
+use vibeos::arch::{InterruptMask, Ipi, IpiSend, PageTable};
 use vibeos::ipi::{MAX_IPI_CPUS, SHOOT_RANGES, ShootRange, all_acked, waiter_mask};
 use vibeos::log::Level;
+use vibeos::paging::VirtAddr;
 use vibeos::thread::ThreadId;
 use vibeos::vectors;
 
@@ -18,7 +20,6 @@ use crate::arch::current::Arch;
 use crate::per_cpu_init;
 use crate::sync_init;
 use crate::time_init;
-use crate::x86;
 
 /// One CPU's shootdown round: `n` packed [`ShootRange`]s in `ranges`.
 struct Slot {
@@ -129,7 +130,7 @@ fn service_shootdowns() {
                     let r = ShootRange::from_raw(r.load(Ordering::Relaxed));
                     let mut p = 0u64;
                     while p < r.pages() {
-                        x86::invlpg(r.start().wrapping_add(p << 12));
+                        Arch::flush_local(VirtAddr(r.start().wrapping_add(p << 12)));
                         p += 1;
                     }
                 }
@@ -185,7 +186,7 @@ fn wait_acks(waiters: u64, acked: &AtomicU64) {
     if waiters == 0 {
         return;
     }
-    assert!(!x86::interrupts_enabled(), "ipi: ack wait with IF on");
+    assert!(!Arch::enabled(), "ipi: ack wait with IF on");
     let k = time_init::tsc_per_ms();
     let period = k.saturating_mul(1000);
     let start = time_init::read_tsc();
@@ -260,7 +261,7 @@ pub fn shootdown_ranges(ranges: &[ShootRange]) {
 
 /// One round for at most [`SHOOT_RANGES`] ranges.
 fn shootdown_round(ranges: &[ShootRange]) {
-    let _irq = x86::InterruptGuard::enter();
+    let _irq = crate::arch::current::InterruptGuard::enter();
     #[cfg(feature = "kernel_tests")]
     crate::irq::ktest::note_shootdown();
     let me = my_index() as u32;
@@ -278,10 +279,7 @@ fn shootdown_round(ranges: &[ShootRange]) {
     slot.acked.store(0, Ordering::Relaxed);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     slot.waiters.store(waiters, Ordering::Release);
-    note_send(
-        "shootdown",
-        apic_init::send_ipi_all_ex_self(vectors::IPI_SHOOTDOWN),
-    );
+    note_send("shootdown", Arch::send_others(Ipi::Shootdown));
     wait_acks(waiters, &slot.acked);
     slot.waiters.store(0, Ordering::Release);
 }
@@ -303,7 +301,7 @@ fn inbox_push(cpu: u32, slot: usize) {
 /// inbox + 0xFD. Never a remote queue lock. IRQ-off for the local runq.
 pub fn place_ready(cpu: u32, id: ThreadId, slot: usize) {
     vibeos::trace!(Wake, u64::from(id.0), u64::from(cpu));
-    let _irq = crate::x86::InterruptGuard::enter();
+    let _irq = crate::arch::current::InterruptGuard::enter();
     let me = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
     let cpu = if cpu == me || per_cpu_init::is_online(cpu) {
         cpu
@@ -317,10 +315,7 @@ pub fn place_ready(cpu: u32, id: ThreadId, slot: usize) {
         return;
     }
     inbox_push(cpu, slot);
-    note_send(
-        "reschedule",
-        apic_init::send_ipi_cpu(cpu, vectors::IPI_RESCHEDULE),
-    );
+    note_send("reschedule", Arch::send(cpu, Ipi::Reschedule));
 }
 
 /// A wake-inbox slot's tid: `thread_init::tid_of_slot`, which
@@ -393,7 +388,7 @@ pub fn on_call_ipi() {
 
 pub fn on_halt_ipi() -> ! {
     crate::serial::raw::HALTING.store(true, Ordering::Release);
-    x86::halt();
+    crate::arch::current::halt();
 }
 
 /// Broadcast halt so others stop before we trash the log.
@@ -414,7 +409,7 @@ pub fn halt_others() {
 pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
     // IF=0 before `my_index`, so `me` stays this CPU's id (DESIGN §2.9
     // rule 5).
-    let _irq = x86::InterruptGuard::enter();
+    let _irq = crate::arch::current::InterruptGuard::enter();
     let me = my_index() as u32;
     let waiters = waiter_mask(mask & per_cpu_init::online_mask(), me);
     if waiters == 0 {
@@ -435,7 +430,7 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
     let mut c = 0u32;
     while c < 64 {
         if waiters & (1u64 << c) != 0 {
-            note_send("call", apic_init::send_ipi_cpu(c, vectors::IPI_CALL));
+            note_send("call", Arch::send(c, Ipi::Call));
         }
         c += 1;
     }

@@ -60,11 +60,11 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
         with_sched_table(|s, t| release_pid(s, t, pid));
         return Err(KError::NoMem);
     };
-    let cr3 = boxed.root().as_u64();
+    let root = boxed.root().as_u64();
     let mut child = *frame;
     child.rax = 0;
-    let fs = crate::x86::rdmsr(crate::x86::IA32_FS_BASE);
-    let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3, &child) {
+    let fs = crate::arch::current::user_tls();
+    let h = match thread_init::spawn_user("user", user_thread_entry, pid, root, &child) {
         Ok(h) => h,
         Err(e) => {
             // Nothing names the clone's root yet: no thread was made.
@@ -149,7 +149,7 @@ pub(super) fn sys_execve(
     let rsp = loaded.rsp;
     let fs = loaded.fs;
     let mut boxed = Some(loaded.space);
-    let cr3 = boxed.as_ref().map(|s| s.root().as_u64()).unwrap_or(0);
+    let root = boxed.as_ref().map(|s| s.root().as_u64()).unwrap_or(0);
     let old = with_table(|t| {
         let p = t.get_mut(pid)?;
         let gone = p.fds.apply_cloexec();
@@ -157,9 +157,9 @@ pub(super) fn sys_execve(
         p.fs_base = fs;
         let old = p.space.take();
         p.space = boxed.take();
-        Some((old, gone, p.tid, cr3))
+        Some((old, gone, p.tid, root))
     });
-    let Some((old, gone, tid, cr3)) = old else {
+    let Some((old, gone, tid, root)) = old else {
         if let Some(b) = boxed {
             addr_space_init::teardown(b.into_inner());
         }
@@ -175,12 +175,12 @@ pub(super) fn sys_execve(
     if let Some(s) = p_space_ref(pid) {
         set_as(s);
     }
-    thread_init::set_pid_cr3(tid, pid, cr3);
+    thread_init::set_pid_cr3(tid, pid, root);
     // SAFETY: invariant I128, established at `addr_space_init::teardown`:
     // `cr3` is the root of the space `create` built and `p.space` now owns,
     // and `set_pid_cr3` recorded it in this thread's TCB on the line above,
     // here.
-    unsafe { addr_space_init::load_cr3_u64(cr3) };
+    unsafe { addr_space_init::load_cr3_u64(root) };
     if let Some(old) = old {
         addr_space_init::teardown(old.into_inner());
     }
@@ -188,11 +188,11 @@ pub(super) fn sys_execve(
         orig_rax: frame.orig_rax,
         ..UserFrame::new_user(entry, rsp)
     };
-    // SAFETY: FS_BASE is an architectural MSR, and `fs` is the new image's
-    // thread pointer, a canonical user address the loader chose
-    // (`user_init::load_image`), so the next ring-3 `fs:` access reaches its
-    // TLS block; established by `user_init::setup_tls`.
-    unsafe { crate::x86::wrmsr(crate::x86::IA32_FS_BASE, fs) };
+    // SAFETY: `fs` is the new image's thread pointer, a canonical user
+    // address the loader chose (`user_init::load_image`), as
+    // `set_user_tls` requires, so the next ring-3 TLS access reaches its
+    // block; established by `user_init::setup_tls`.
+    unsafe { crate::arch::current::set_user_tls(fs) };
     Ok(0)
 }
 

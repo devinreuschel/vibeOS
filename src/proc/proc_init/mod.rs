@@ -7,8 +7,9 @@
 use core::fmt::Write;
 use core::mem::MaybeUninit;
 
-use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
-use vibeos::arch::x86_64::trap::{self as x86_trap, Abi};
+use vibeos::addr_space::{AsError, MmapError, mmap_request};
+#[cfg(target_arch = "x86_64")]
+use vibeos::arch::x86_64::trap as x86_trap;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
@@ -30,6 +31,7 @@ use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
 use crate::addr_space_init;
+use crate::arch::current::{AddressSpace, Arch};
 use crate::arch::idt::TrapFrame;
 use crate::console_init;
 use crate::file_init;
@@ -371,11 +373,11 @@ fn start_loaded(
             return Err(LoadError::NoProc);
         }
     };
-    let cr3 = loaded.space.root().as_u64();
+    let root = loaded.space.root().as_u64();
     let frame = UserFrame::new_user(loaded.entry, loaded.rsp);
     let fs = loaded.fs;
     let boxed = loaded.space;
-    let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3, &frame) {
+    let h = match thread_init::spawn_user(name, user_thread_entry, pid, root, &frame) {
         Ok(h) => h,
         Err(e) => {
             with_sched_table(|s, t| release_pid(s, t, pid));
@@ -458,13 +460,11 @@ pub fn syscall(frame: &mut UserFrame) -> i64 {
     #[cfg(feature = "kernel_tests")]
     testing::on_entry(frame);
     apply_pending(Some(&mut *frame));
-    let nr = Abi::nr(frame);
-    let args: [u64; 6] = core::array::from_fn(|i| Abi::arg(frame, i));
+    let nr = Arch::nr(frame);
+    let args: [u64; 6] = core::array::from_fn(|i| Arch::arg(frame, i));
     let ret = syscall::encode(dispatch_frame(nr, args, Some(frame)));
     if syscall_init::trace_enabled() {
-        let name = syscall::x86_64::TABLE
-            .lookup(nr)
-            .map_or("?", |s| s.row().name);
+        let name = Arch::table().lookup(nr).map_or("?", |s| s.row().name);
         #[expect(
             clippy::let_underscore_must_use,
             reason = "a write to Serial cannot fail (DESIGN §2.5)"
@@ -481,7 +481,7 @@ pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
 }
 
 fn dispatch_frame(nr: u64, args: [u64; 6], frame: Option<&mut UserFrame>) -> SysResult {
-    syscall::x86_64::dispatch(&mut Ctx { frame }, nr, &args)
+    Arch::dispatch(&mut Ctx { frame }, nr, &args)
 }
 
 /// The running syscall's context: the user frame, which `fork` copies and
@@ -682,6 +682,7 @@ fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, KError> {
 /// decode of the vector and error code, the cause refined from the frame's
 /// DR6 (`#DB`) or the thread's FSW and MXCSR (`#MF`, `#XM`), then the one
 /// table in `vibeos::trap` (DESIGN §5.2). `None`: not a ring-3 fault.
+#[cfg(target_arch = "x86_64")]
 fn sig_for_vec(f: &TrapFrame) -> Option<(u32, i32)> {
     let kind = match x86_trap::decode(f.vector as u8, f.error_code) {
         TrapKind::Debug(_) => TrapKind::Debug(vectors::dr6_cause(f.dr6)),
@@ -718,6 +719,7 @@ pub fn try_user_fault(f: &TrapFrame) {
     // runs with IF=1, and a thread that ran on this CPU between two writes
     // would land inside this line in the CPU's log capture stage.
     let (name, rip, err) = (sig_name(sig), f.user().rip, f.error_code);
+    #[cfg(target_arch = "x86_64")]
     #[expect(
         clippy::let_underscore_must_use,
         reason = "a write to Serial cannot fail (DESIGN §2.5)"
@@ -756,23 +758,25 @@ pub(crate) mod testing {
     use crate::thread_init;
     use crate::time_init;
 
-    /// `cr2` of the `#PF` whose kill line yields once; 0 for none.
+    /// The fault address of the `#PF` whose kill line yields once; 0 for
+    /// none.
     static KILL_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
     /// Kill lines `try_user_fault` has finished writing since boot.
     static KILL_LINES: AtomicU64 = AtomicU64::new(0);
 
-    /// The next CPL-3 `#PF` at `cr2` that ends in a kill yields in
+    /// The next CPL-3 `#PF` at `fault_addr` that ends in a kill yields in
     /// `try_user_fault` once its kill line is written, until another kill
     /// line is written, for at most 1 s of TSC time: a kill line written
     /// in pieces would take the other line inside it.
-    pub(crate) fn arm_kill_line_yield(cr2: u64) {
-        KILL_YIELD_CR2.store(cr2, Ordering::Release);
+    pub(crate) fn arm_kill_line_yield(fault_addr: u64) {
+        KILL_YIELD_CR2.store(fault_addr, Ordering::Release);
     }
 
     pub(crate) fn disarm_kill_line_yield() {
         KILL_YIELD_CR2.store(0, Ordering::Release);
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(super) fn kill_line_yield(f: &TrapFrame) {
         let armed = KILL_YIELD_CR2.load(Ordering::Acquire);
         if armed == 0
@@ -1014,9 +1018,10 @@ pub(crate) mod testing {
         if c != 0 {
             frame.rcx = c;
         }
+        #[cfg(target_arch = "x86_64")]
         if APIC_ARMED.load(Ordering::Acquire) {
             // One IF=0 stretch: the `PerCpu` read and CPUID see one CPU.
-            let _g = crate::x86::InterruptGuard::enter();
+            let _g = crate::arch::current::InterruptGuard::enter();
             let mine = per_cpu_init::current()
                 .remote
                 .apic_id

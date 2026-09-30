@@ -22,8 +22,8 @@ use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_SERIAL;
 use vibeos::log::line::LINE_CAP;
 
+use crate::arch::current::InterruptGuard;
 use crate::sync_init::SpinMutex;
-use crate::x86::InterruptGuard;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TX: SpinMutex<()> = SpinMutex::with_rank((), RANK_SERIAL);

@@ -20,6 +20,7 @@ pub(crate) use uaccess::*;
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
+    #[cfg(target_arch = "x86_64")]
     test(
         "addrspace_map_unmap_teardown",
         test_addrspace_map_unmap_teardown,

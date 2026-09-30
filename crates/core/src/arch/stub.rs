@@ -13,13 +13,15 @@
 use core::cell::RefCell;
 use core::mem::size_of;
 
+use super::x86_64::{paging, syscall};
 use super::{
     Barriers, BootHandover, ContextSwitch, CycleCounter, InterruptMask, Ipi, IpiSend, MmioWidth,
     PageTable, PerCpuBase, Port, SyscallAbi, UserAccess,
 };
 use crate::atomic::statics::AtomicU32;
 use crate::atomic::{Ordering, fence};
-use crate::paging::{PhysAddr, VirtAddr};
+use crate::paging::{PageFlags, PhysAddr, VirtAddr};
+use crate::proc::syscall_table::{Handlers, NrTable, SysResult};
 
 /// Events the log keeps; later ones are counted in [`EventLog::dropped`].
 pub const LOG_CAP: usize = 256;
@@ -310,10 +312,16 @@ pub fn take_events() -> EventLog {
     with(|s| core::mem::replace(&mut s.log, EventLog::EMPTY))
 }
 
+/// Revision 0; a table address at or above the direct map is translated,
+/// any other is taken as physical.
 impl BootHandover for Arch {
     type Info = Boot;
+    const BASE_REVISION: u64 = 0;
     fn info() -> &'static Boot {
         &BOOT
+    }
+    fn table_phys(raw: u64, hhdm_offset: u64) -> u64 {
+        raw.checked_sub(hhdm_offset).unwrap_or(raw)
     }
 }
 
@@ -369,7 +377,24 @@ impl CycleCounter for Arch {
     }
 }
 
+/// The x86_64 pure half's format, so host tests walk the tables the kernel
+/// builds; the root register and TLB calls are recorded.
 impl PageTable for Arch {
+    const LEVELS: u8 = paging::LEVELS;
+    const ENTRIES: usize = paging::PTES_PER_TABLE;
+    const KERNEL_ROOT_FIRST: usize = paging::KERNEL_PML4_FIRST;
+    fn index(va: VirtAddr, level: u8) -> usize {
+        paging::index(va, level)
+    }
+    fn make_entry(pa: PhysAddr, flags: PageFlags) -> u64 {
+        paging::make_pte(pa, flags)
+    }
+    fn entry_phys(entry: u64) -> PhysAddr {
+        paging::pte_phys(entry)
+    }
+    fn entry_flags(entry: u64) -> PageFlags {
+        paging::pte_flags(entry)
+    }
     fn root() -> PhysAddr {
         with(|s| PhysAddr::new(s.root))
     }
@@ -479,6 +504,13 @@ impl SyscallAbi for Arch {
     fn restart(f: &mut Frame) {
         f.ip = f.ip.wrapping_sub(SYSCALL_INSN_LEN);
     }
+    /// x86_64's numbers, so host tests dispatch the kernel's table.
+    fn table() -> &'static NrTable {
+        &syscall::TABLE
+    }
+    fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
+        syscall::dispatch(h, raw_nr, regs)
+    }
 }
 
 impl UserAccess for Arch {
@@ -527,6 +559,8 @@ impl ContextSwitch for Arch {
 }
 
 impl Port for Arch {}
+
+const _: () = super::assert_port::<Arch>();
 
 #[cfg(test)]
 mod tests {

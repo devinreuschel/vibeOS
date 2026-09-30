@@ -3,6 +3,7 @@
 //! Portable half: interpolation, seqlock, deadline math, wall-clock offset.
 //! Port I/O, HPET MMIO, and the IRQ0 handler live in the binary crate.
 
+use crate::arch::CycleCounter;
 use crate::atomic::{AtomicU64, Ordering, fence, statics};
 
 /// PIT input frequency in Hz. DESIGN §6.1.
@@ -232,6 +233,17 @@ impl TickClock {
         self.now_with(&mut read_tsc, tsc_per_ms, interpolate_ns)
     }
 
+    /// Nanoseconds since tick 0, read through port `A`'s cycle counter
+    /// (PORTABILITY §11.1), which counts `per_ms` per millisecond.
+    pub fn now_ns<A: CycleCounter>(&self, per_ms: u64) -> u64 {
+        self.now_ns_with(A::now, per_ms)
+    }
+
+    /// [`TickClock::now_ns`] in microseconds.
+    pub fn now_us<A: CycleCounter>(&self, per_ms: u64) -> u64 {
+        self.now_us_with(A::now, per_ms)
+    }
+
     fn now_with<F: FnMut() -> u64>(
         &self,
         read_tsc: &mut F,
@@ -308,6 +320,46 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::thread;
     use std::time::Duration;
+
+    std::thread_local! {
+        static FAKE_CYCLES: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
+
+    /// A counter a test sets: each read returns the value last stored.
+    struct FakeCounter;
+
+    impl CycleCounter for FakeCounter {
+        fn now() -> u64 {
+            FAKE_CYCLES.with(|c| c.get())
+        }
+        fn freq_hz() -> Option<u64> {
+            None
+        }
+    }
+
+    #[test]
+    fn tickclock_now_ns_reads_the_port_counter() {
+        let c = TickClock::new();
+        c.write(5, 10_000);
+        FAKE_CYCLES.with(|f| f.set(10_500));
+        // 5 ticks of 1 ms, then 500 cycles at 1000 per ms: 5.5 ms.
+        assert_eq!(c.now_ns::<FakeCounter>(1000), 5_500_000);
+        assert_eq!(
+            c.now_ns::<FakeCounter>(1000),
+            c.now_ns_with(|| 10_500, 1000)
+        );
+        FAKE_CYCLES.with(|f| f.set(10_750));
+        assert_eq!(c.now_ns::<FakeCounter>(1000), 5_750_000);
+    }
+
+    #[test]
+    fn tickclock_now_us_reads_the_port_counter() {
+        let c = TickClock::new();
+        c.write(2, 4_000);
+        FAKE_CYCLES.with(|f| f.set(4_250));
+        assert_eq!(c.now_us::<FakeCounter>(1000), 2_250);
+        assert_eq!(c.now_us::<FakeCounter>(1000), c.now_us_with(|| 4_250, 1000));
+    }
 
     #[test]
     fn pit_divisor_is_1khz() {
