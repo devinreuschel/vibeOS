@@ -131,13 +131,13 @@ ISOS :=
 # default: no extra features
 $(eval $(call KERNEL_VARIANT,default,,$(ISO)))
 # panic: deliberate panic-test dump
-$(eval $(call KERNEL_VARIANT,panic,--features panic_test --features panic_exit,$(ISO_PANIC)))
+$(eval $(call KERNEL_VARIANT,panic,--features panic_test,$(ISO_PANIC)))
 # gp: deliberate #GP after IDT
-$(eval $(call KERNEL_VARIANT,gp,--features gp_test --features panic_exit,$(ISO_GP)))
+$(eval $(call KERNEL_VARIANT,gp,--features gp_test,$(ISO_GP)))
 # panic-nest: an `irq_nest` underflow after boot, dumped without a guard
-$(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test --features panic_exit,$(ISO_PANIC_NEST)))
+$(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test,$(ISO_PANIC_NEST)))
 # panic-stop: two CPUs panic at -smp 5; the dump stops the other three
-$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test --features panic_exit,$(ISO_PANIC_STOP)))
+$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_STOP)))
 # ktest: in-guest registry, never packaged as production
 $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
 # vibefs-crash: write-loop kernel for QEMU-kill fsck

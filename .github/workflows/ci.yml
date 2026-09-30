@@ -241,10 +241,10 @@ jobs:
         run: |
           cargo clippy --bin vibeos --features kernel_tests -- -D warnings
           cargo clippy --bin vibeos --features vibefs_crash -- -D warnings
-          cargo clippy --bin vibeos --features panic_test --features panic_exit -- -D warnings
-          cargo clippy --bin vibeos --features gp_test --features panic_exit -- -D warnings
-          cargo clippy --bin vibeos --features panic_nest_test --features panic_exit -- -D warnings
-          cargo clippy --bin vibeos --features panic_stop_test --features panic_exit -- -D warnings
+          cargo clippy --bin vibeos --features panic_test -- -D warnings
+          cargo clippy --bin vibeos --features gp_test -- -D warnings
+          cargo clippy --bin vibeos --features panic_nest_test -- -D warnings
+          cargo clippy --bin vibeos --features panic_stop_test -- -D warnings
           cargo clippy --bin vibeos --features kernel_shell -- -D warnings
 
       # The Rust user programs (ROADMAP §10.5): links through rust-lld with no

@@ -654,7 +654,8 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
     penv = dataclasses.replace(env, ktest=TRIP_TEST, ktest_repeat=None)
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     try:
-        cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
+        # The trip panics on purpose: QMP's `GUEST_PANICKED` ends it too.
+        cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d", expect="panic")
         try:
             raw = run_qemu_until_exit(
                 cfg,

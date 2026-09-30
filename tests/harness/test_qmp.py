@@ -8,6 +8,7 @@ fails here once `make test-qmp` re-records them.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -27,9 +28,15 @@ from tests.harness.harness import (
     PANIC_ACTION,
     EnvConfig,
     HarnessError,
+    Marker,
     QemuConfig,
+    overlay_env,
     qemu_argv,
+    run_qemu_and_check,
+    run_qemu_console_input,
+    run_qemu_until_exit,
 )
+from tests.harness.linesource import FakeLineSource
 from tests.harness.qmp import (
     NO_EVENT_CORE_S,
     VMCORE_WRITTEN,
@@ -500,3 +507,156 @@ class TestQemuArgvQmp(unittest.TestCase):
         cfg = env.qemu(expect="reset", resets=2)
         self.assertEqual((cfg.expect, cfg.resets), ("reset", 2))
         self.assertEqual(env.qemu().expect, "none")
+
+
+def K(text: str) -> str:
+    """A kernel line: framed (DESIGN §2.6)."""
+    return "\x1e" + text
+
+
+PANICKED: qmp.Event = {"event": "GUEST_PANICKED", "data": {"action": "pause"}}
+FAKE_CFG = QemuConfig(iso="fake.iso")
+ONLINE = "vibeOS: serial online"
+DUMP = [K("vibeOS: panic:"), K("vibeOS: panic: msg: boom"), K("vibeOS: panic: halted")]
+
+
+class TestRunnerHooks(unittest.TestCase):
+    """The three runners drive a `qmp.Session` (C-QMP): `cont` at spawn,
+    the event rule on each line and when idle, a core at a timeout or an
+    undeclared panic, and the expected panic's `GUEST_PANICKED` end."""
+
+    def core_dir(self, root: Path) -> Path:
+        dirs = sorted(root.glob("*/*-*"))
+        self.assertEqual(len(dirs), 1, dirs)
+        return dirs[0]
+
+    def test_check_conts_first_and_quits_on_the_contract(self) -> None:
+        fake = FakeQmp([])
+        src = FakeLineSource.from_lines([K(ONLINE)])
+        result = run_qemu_and_check(FAKE_CFG, [Marker(ONLINE, "a")], line_source=src, qmp=fake)
+        self.assertEqual(result.matched, ["a"])
+        self.assertEqual(fake.names(), ["cont"])
+        self.assertTrue(src.quit_sent)
+        self.assertTrue(fake.closed)
+
+    def test_check_undeclared_panic_event_takes_core(self) -> None:
+        fake = FakeQmp([], after_line={1: [PANICKED]}, dump=elf_core(2))
+        src = FakeLineSource.from_lines([K(ONLINE), K("vibeOS: x")], end="timeout", exit_code=None)
+        with cores_in_tmp("test-e2e") as root:
+            with self.assertRaises(HarnessError) as cm:
+                run_qemu_and_check(
+                    FAKE_CFG, [Marker(ONLINE, "a"), Marker("never", "b")], line_source=src, qmp=fake
+                )
+            d = self.core_dir(root)
+            self.assertEqual(sorted(p.name for p in d.iterdir())[0], "core.zst")
+            self.assertTrue((d / "qemu-argv.txt").is_file())
+        msg = str(cm.exception)
+        self.assertIn("GUEST_PANICKED in a run declared expect=none", msg)
+        self.assertIn("--- guest core:", msg)
+        self.assertEqual(fake.names(), ["cont", "stop", "getfd", "dump-guest-memory", "quit"])
+        self.assertTrue(src.killed)
+
+    def test_check_signature_core_follows_halted(self) -> None:
+        fake = FakeQmp([], dump=elf_core(1))
+        lines = [K(ONLINE), *DUMP, K("after the dump")]
+        src = FakeLineSource.from_lines(lines, end="timeout", exit_code=None)
+        with cores_in_tmp():
+            with self.assertRaises(HarnessError) as cm:
+                run_qemu_and_check(
+                    FAKE_CFG, [Marker(ONLINE, "a"), Marker("never", "b")], line_source=src, qmp=fake
+                )
+        msg = str(cm.exception)
+        self.assertIn("panic signature", msg)
+        # The core waited for the dump's end, and read no further.
+        self.assertIn("panic: msg: boom", msg)
+        self.assertIn("vibeOS: panic: halted", msg)
+        self.assertNotIn("after the dump", msg)
+        self.assertEqual(src.next_event(), ("line", K("after the dump")))
+        self.assertIn("dump-guest-memory", fake.names())
+
+    def test_check_timeout_takes_core(self) -> None:
+        fake = FakeQmp([], dump=elf_core(1))
+        src = FakeLineSource.from_lines([K(ONLINE)], end="timeout", exit_code=None)
+        with cores_in_tmp():
+            with self.assertRaises(HarnessError) as cm:
+                run_qemu_and_check(
+                    FAKE_CFG, [Marker(ONLINE, "a"), Marker("never", "b")], line_source=src, qmp=fake
+                )
+        self.assertIn("timed out after", str(cm.exception))
+        self.assertIn("--- guest core:", str(cm.exception))
+        self.assertEqual(fake.names()[:2], ["cont", "stop"])
+
+    def test_check_expected_panic_ends_on_event(self) -> None:
+        fake = FakeQmp([], after_line={4: [PANICKED]})
+        src = FakeLineSource.from_lines([K(ONLINE), *DUMP], exit_code=0)
+        cfg = dataclasses.replace(FAKE_CFG, expect="panic")
+        result = run_qemu_and_check(cfg, [Marker(ONLINE, "a")], line_source=src, qmp=fake)
+        self.assertEqual(result.end, "GUEST_PANICKED")
+        # The paused guest is quit through QMP once the checks pass.
+        self.assertEqual(fake.names(), ["cont", "quit"])
+        self.assertFalse(src.killed)
+
+    def test_check_expected_panic_event_before_dump_lines(self) -> None:
+        # QMP can beat the serial pipe: the dump's tail is drained after it.
+        fake = FakeQmp([], after_line={2: [PANICKED]})
+        src = FakeLineSource.from_lines([K(ONLINE), *DUMP], exit_code=None)
+        cfg = dataclasses.replace(FAKE_CFG, expect="panic")
+        result = run_qemu_and_check(
+            cfg, [Marker(ONLINE, "a")], line_source=src, qmp=fake, dump_needles=("halted",)
+        )
+        self.assertEqual(result.lines[-1], K("vibeOS: panic: halted"))
+
+    def test_console_idle_event_takes_core(self) -> None:
+        fake = FakeQmp([PANICKED], dump=elf_core(1))
+        src = FakeLineSource([("line", K(ONLINE)), ("idle", "")], exit_code=None)
+        with cores_in_tmp("test-ps2") as root:
+            with self.assertRaises(HarnessError) as cm:
+                run_qemu_console_input(FAKE_CFG, line_source=src, qmp=fake)
+            self.assertIn("-console", self.core_dir(root).name)
+        self.assertIn("GUEST_PANICKED", str(cm.exception))
+        self.assertEqual(fake.names()[0], "cont")
+
+    def test_console_user_failure_takes_no_core(self) -> None:
+        fake = FakeQmp([], dump=elf_core(1))
+        src = FakeLineSource.from_lines([K(ONLINE), "user: tests fail x"], exit_code=None)
+        with cores_in_tmp() as root:
+            with self.assertRaises(HarnessError):
+                run_qemu_console_input(FAKE_CFG, line_source=src, qmp=fake)
+            self.assertEqual(list(root.glob("*/*-*")), [])
+        self.assertNotIn("dump-guest-memory", fake.names())
+
+    def _script(self, d: str, body: str) -> tuple[QemuConfig, str]:
+        qemu = os.path.join(d, "qemu-system-x86_64")
+        with open(qemu, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\n" + body)
+        os.chmod(qemu, 0o755)
+        iso = os.path.join(d, "x.iso")
+        open(iso, "wb").close()
+        return QemuConfig(iso=iso, accel=""), d + os.pathsep + os.environ.get("PATH", "")
+
+    def test_until_exit_undeclared_panic_takes_core(self) -> None:
+        fake = FakeQmp([], dump=elf_core(2))
+        with tempfile.TemporaryDirectory() as d, cores_in_tmp("test-kernel") as root:
+            cfg, path = self._script(
+                d,
+                "printf '\\036vibeOS: panic:\\n\\036vibeOS: panic: halted\\n'\nexec sleep 30\n",
+            )
+            with overlay_env({"PATH": path}):
+                with self.assertRaises(HarnessError) as cm:
+                    run_qemu_until_exit(cfg, timeout_s=20, qmp=fake)
+            self.assertTrue((self.core_dir(root) / "core.zst").is_file())
+        self.assertIn("panic signature", str(cm.exception))
+        self.assertEqual(fake.names(), ["cont", "stop", "getfd", "dump-guest-memory", "quit"])
+
+    def test_until_exit_expected_panic_ends_on_event(self) -> None:
+        fake = FakeQmp([], after_line={2: [PANICKED]})
+        with tempfile.TemporaryDirectory() as d:
+            cfg, path = self._script(
+                d,
+                "printf '\\036vibeOS: panic:\\n\\036vibeOS: panic: halted\\n'\nexec sleep 30\n",
+            )
+            cfg = dataclasses.replace(cfg, expect="panic")
+            with overlay_env({"PATH": path}):
+                r = run_qemu_until_exit(cfg, timeout_s=20, qmp=fake)
+        self.assertEqual(r.end, "GUEST_PANICKED")
+        self.assertEqual(fake.names(), ["cont", "quit"])

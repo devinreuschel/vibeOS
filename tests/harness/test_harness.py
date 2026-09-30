@@ -33,7 +33,6 @@ from tests.harness.harness import (
     MCE_UC_STATUS,
     OVMF_BOOT_ARGS,
     PANIC_EXIT_S,
-    PANIC_EXIT_STATUS,
     VBLK_BAD_SECTOR,
     VBLK_PATTERN_XOR,
     DeadlineReader,
@@ -47,7 +46,6 @@ from tests.harness.harness import (
     boot_contract_markers,
     check_mce_dump,
     contains_panic,
-    drain_panic_tail,
     effective_accel_name,
     halt_test_markers,
     is_dump_banner,
@@ -65,6 +63,7 @@ from tests.harness.harness import (
     write_blkdebug_config,
 )
 from tests.harness.linesource import FakeLineSource
+from tests.harness.qmp import FakeQmp
 
 
 def K(text: str) -> str:
@@ -280,8 +279,9 @@ class TestMarkerOrder(unittest.TestCase):
             )
         self.assertIn("panicked at", str(cm.exception))
         self.assertTrue(src.killed)
-        # Fails at the signature: the line after it is never read.
-        self.assertEqual(src.next_event(), ("line", K("vibeOS: boot: phase1 done")))
+        # Fails at the signature, and reads on only for the dump the core
+        # waits on (`vibeOS: panic: halted`): no marker after it matches.
+        self.assertEqual(src.next_event(), ("eof", ""))
 
     def test_and_contains_wrong_shape_fails(self) -> None:
         # The pmm marker must not accept a line that lacks the prefix.
@@ -401,7 +401,7 @@ class TestSmpApCount(unittest.TestCase):
         self.assertIn("before 'smp_done', expected exactly 2", str(cm.exception))
 
 
-# A real `make test-e2e-panic` boot's serial (the panic_exit build).
+# A real `make test-e2e-panic` boot's serial.
 PANIC_BOOT = [
     "limine: Loading executable `boot():/boot/vibeos`...",
     K("vibeOS: serial online"),
@@ -443,7 +443,8 @@ BANNER_KINDS = (
 
 
 class TestExpectPanic(unittest.TestCase):
-    """expect_panic: pre-panic markers, one banner, exit status 35 (F141)."""
+    """expect="panic": pre-panic markers, one banner, then QMP
+    `GUEST_PANICKED` (F141, ROADMAP §10.7)."""
 
     def expect(
         self,
@@ -451,16 +452,21 @@ class TestExpectPanic(unittest.TestCase):
         *,
         markers: list[Marker] | None = None,
         end: str = "eof",
-        exit_code: int | None = PANIC_EXIT_STATUS,
+        exit_code: int | None = 0,
         needles: tuple[str | tuple[str, ...], ...] = (),
+        event: bool = True,
     ) -> tuple[RunResult, FakeLineSource]:
         src = FakeLineSource.from_lines(lines, end=end, exit_code=exit_code)
+        # The kernel's pvpanic write follows its last line.
+        after: dict[int, list[dict[str, object]]] = {
+            len(lines): [{"event": "GUEST_PANICKED", "data": {"action": "pause"}}]
+        }
         result = run_qemu_and_check(
-            FAKE_CFG,
+            dataclasses.replace(FAKE_CFG, expect="panic"),
             halt_test_markers() if markers is None else markers,
-            expect_panic=True,
             dump_needles=needles,
             line_source=src,
+            qmp=FakeQmp([], after_line=after if event else None),
         )
         return result, src
 
@@ -468,14 +474,13 @@ class TestExpectPanic(unittest.TestCase):
         result, src = self.expect(PANIC_BOOT + PANIC_DUMP, needles=PANIC_NEEDLES)
         self.assertEqual(result.matched, ["serial_online", "limine_ok", "panic_test_armed"])
         self.assertEqual(result.panic_line, K("vibeOS: panic:"))
-        self.assertEqual(result.exit_code, 35)
+        self.assertEqual(result.end, "GUEST_PANICKED")
         self.assertFalse(src.killed)
         self.assertFalse(src.quit_sent)
 
     def test_exit_wait_deadline(self) -> None:
         t0 = time.monotonic()
         _, src = self.expect(PANIC_BOOT + PANIC_DUMP)
-        self.assertEqual(len(src.deadlines), 1)
         self.assertGreaterEqual(src.deadlines[0], t0 + PANIC_EXIT_S - 0.1)
 
     def test_marker_only_in_logrec_replay_fails(self) -> None:
@@ -495,21 +500,21 @@ class TestExpectPanic(unittest.TestCase):
         result, _ = self.expect(lines, markers=markers)
         self.assertEqual(result.matched, ["smp_done"])
 
-    def test_exit_zero_fails(self) -> None:
+    def test_exit_without_event_fails(self) -> None:
         with self.assertRaises(HarnessError) as cm:
-            self.expect(PANIC_BOOT + PANIC_DUMP, exit_code=0)
-        self.assertIn("panic exit status 0, expected 35", str(cm.exception))
+            self.expect(PANIC_BOOT + PANIC_DUMP, event=False)
+        self.assertIn("panic run ended without QMP GUEST_PANICKED", str(cm.exception))
 
     def test_halted_then_timeout_fails(self) -> None:
         with self.assertRaises(HarnessError) as cm:
-            self.expect(PANIC_BOOT + PANIC_DUMP, end="timeout", exit_code=None)
+            self.expect(PANIC_BOOT + PANIC_DUMP, end="timeout", exit_code=None, event=False)
         self.assertIn(
-            "QEMU did not exit within 10 s of 'vibeOS: panic: halted'", str(cm.exception)
+            "no GUEST_PANICKED within 10 s of 'vibeOS: panic: halted'", str(cm.exception)
         )
 
     def test_dump_ended_before_halted_fails(self) -> None:
         with self.assertRaises(HarnessError) as cm:
-            self.expect(PANIC_BOOT + PANIC_DUMP[:-1], exit_code=1)
+            self.expect(PANIC_BOOT + PANIC_DUMP[:-1], exit_code=1, event=False)
         msg = str(cm.exception)
         self.assertIn("dump ended before 'vibeOS: panic: halted'", msg)
         self.assertIn("QEMU exited with status 1", msg)
@@ -910,36 +915,6 @@ class TestDeadlineReader(unittest.TestCase):
         finally:
             os.close(r)
             os.close(w)
-
-    def test_drain_panic_tail_stops_at_halted(self) -> None:
-        r, w = os.pipe()
-        try:
-            os.write(
-                w,
-                b"\x1emsg: ipi: ack timeout waiters=0xd\n"
-                b"vibeOS: panic: halted\n"
-                b"\x1evibeOS: panic: halted\n"
-                b"ignored\n",
-            )
-            os.close(w)
-            w = -1
-            result = RunResult(lines=[K("vibeOS: panic:")])
-            reader = DeadlineReader(r, time.monotonic() + 1.0)
-            drain_panic_tail(reader, result, window_s=0.5)
-            # A user program's `panic: halted` does not end the drain.
-            self.assertEqual(
-                result.lines,
-                [
-                    K("vibeOS: panic:"),
-                    K("msg: ipi: ack timeout waiters=0xd"),
-                    "vibeOS: panic: halted",
-                    K("vibeOS: panic: halted"),
-                ],
-            )
-        finally:
-            os.close(r)
-            if w != -1:
-                os.close(w)
 
 
 class TestKtestProtocol(unittest.TestCase):
@@ -2218,7 +2193,10 @@ class TestDevicePresets(unittest.TestCase):
             path = d + os.pathsep + os.environ.get("PATH", "")
             with overlay_env({"PATH": path}):
                 r = run_qemu_until_exit(
-                    QemuConfig(iso=iso, accel=""), timeout_s=20, kill_after=kill_after
+                    QemuConfig(iso=iso, accel=""),
+                    timeout_s=20,
+                    kill_after=kill_after,
+                    qmp=FakeQmp([]),
                 )
         self.assertIn("vibeOS: vibefs: wr 2", r.lines)
         self.assertEqual(r.exit_code, -signal.SIGKILL)
@@ -2244,8 +2222,8 @@ class TestDevicePresets(unittest.TestCase):
             cfg = QemuConfig(iso=iso, accel="")
             with overlay_env({"PATH": path}):
                 with self.assertRaisesRegex(HarnessError, "deadline"):
-                    run_qemu_until_exit(cfg, timeout_s=20)
-                r = run_qemu_until_exit(cfg, timeout_s=20, expect_fail=True)
+                    run_qemu_until_exit(cfg, timeout_s=20, qmp=FakeQmp([]))
+                r = run_qemu_until_exit(cfg, timeout_s=20, expect_fail=True, qmp=FakeQmp([]))
         self.assertEqual(r.lines[-1], "\x1evibeOS: panic: halted")
         self.assertEqual(r.panic_line, "\x1evibeOS: ktest: FAIL t: deadline")
 
@@ -2695,15 +2673,6 @@ class TestKtestVerdict(unittest.TestCase):
         finally:
             os.close(r)
             os.close(w)
-        r, w = os.pipe()
-        try:
-            os.write(w, K("msg: x\n").encode() + b"\x1e  0xffff")
-            result = RunResult(lines=[K("vibeOS: panic:")])
-            drain_panic_tail(DeadlineReader(r, time.monotonic()), result, window_s=0.3)
-            self.assertEqual(result.lines, [K("vibeOS: panic:"), K("msg: x"), K("  0xffff")])
-        finally:
-            os.close(r)
-            os.close(w)
 
     @staticmethod
     def _boot(*body: str, n: int = 2) -> list[str]:
@@ -2822,7 +2791,12 @@ class TestKtestVerdict(unittest.TestCase):
             t0 = time.monotonic()
             with overlay_env({"PATH": path}):
                 with self.assertRaises(HarnessError) as cm:
-                    run_qemu_until_exit(cfg, timeout_s=30.0, progress=KtestDeadlines(5.0, 0.05))
+                    run_qemu_until_exit(
+                        cfg,
+                        timeout_s=30.0,
+                        progress=KtestDeadlines(5.0, 0.05),
+                        qmp=FakeQmp([]),
+                    )
             elapsed = time.monotonic() - t0
         msg = str(cm.exception)
         self.assertIn("ktest hung in slow", msg)

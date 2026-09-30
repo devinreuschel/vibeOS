@@ -242,6 +242,10 @@ GONE: list[tuple[str, str]] = [
     ("map_func_bars", "a device's resources are claimed"),
     ("keep_wb", "a device's resources are claimed"),
     ("mapped_va", "a device's resources are claimed"),
+    ("panic_exit", "on a timeout, or on"),
+    ("EXIT_PANIC", "on a timeout, or on"),
+    ("tests/harness/run_e2e.py: ISA_DEBUG_EXIT", "on a timeout, or on"),
+    ("drain_panic_tail", "on a timeout, or on"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

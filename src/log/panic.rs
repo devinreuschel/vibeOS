@@ -5,7 +5,8 @@
 //! 2. Re-init serial from scratch
 //! 3. Print location/message; regs, current thread, last N log records
 //! 4. Symbolized backtrace when frame pointers exist
-//! 5. `hlt` loop, or QEMU isa-debug-exit under `panic_exit`
+//! 5. pvpanic's panicked event where boot found the device
+//!    (`pvpanic_init::signal`, DESIGN §2.5 step 7), then the `hlt` loop
 //!
 //! From the `cli` in `begin_dump` on, every line is one
 //! `serial::raw::write_owner` call, built in a stack buffer ([`line`],
@@ -35,9 +36,6 @@ unsafe extern "C" {
     static __kernel_vma_start: u8;
     static __kernel_vma_end: u8;
 }
-
-#[cfg(feature = "panic_exit")]
-const EXIT_PANIC: u32 = 0x11;
 
 fn kstart() -> u64 {
     // SAFETY: `__kernel_vma_start` is a linker symbol; only its address is
@@ -139,8 +137,8 @@ pub(crate) fn symbol_name(addr: u64) -> Option<&'static str> {
 }
 
 /// Claim the dump, then stop the others, then re-init serial (DESIGN §2.5
-/// step 1). The owner re-entering writes a one-liner and halts (or
-/// isa-debug-exit) without walking the ring again; any other CPU that
+/// step 1). The owner re-entering writes a one-liner and halts (after the
+/// pvpanic write) without walking the ring again; any other CPU that
 /// finds the dump claimed runs the stop routine with `regs` (`panic`) and
 /// writes nothing.
 fn begin_dump(regs: CrashRegs) {
@@ -293,11 +291,13 @@ fn dump_backtrace(rip: u64, rbp: u64) {
     walk_known(rip, rbp, print_frame_addr);
 }
 
+/// The dump's end, then DESIGN §2.5 step 7: pvpanic's panicked event,
+/// written only after the whole dump is on COM1, since the host may pause
+/// or end the guest on it, then the halt.
 fn finish() -> ! {
     raw::write_owner(b"vibeOS: panic: halted");
-    #[cfg(feature = "panic_exit")]
-    crate::arch::current::qemu_exit(EXIT_PANIC);
-    #[cfg(not(feature = "panic_exit"))]
+    #[cfg(target_arch = "x86_64")]
+    crate::log::pvpanic_init::signal(vibeos::log::pvpanic::Step::Halt);
     crate::arch::current::halt();
 }
 
