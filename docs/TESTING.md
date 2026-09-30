@@ -719,7 +719,7 @@ each pass 40 s alone and cannot split below a target.
 
 | Job | When | What |
 |---|---|---|
-| `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
+| `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`); on a pull request, `scripts/check_gate_inputs.py` against its merge base; then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines <floor>`, the floor in `tests/gates/inputs.toml`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
 | `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
@@ -989,23 +989,34 @@ workaround are the proof, since a gate never needs a new account (ROADMAP, How t
 its Reproducer, Versions, Workaround, or Upstream field, or when the Workaround's path does not
 exist (`rule_upstream`). No Phase 10 failure has been traced to a QEMU bug.
 
-Line-coverage floor for `vibeos-core` is **87%** (`--fail-under-lines 87` in
-`.github/workflows/ci.yml`). Measured 87.53% at `6cbe4fe` with `cargo llvm-cov -p vibeos-core --lib
+Line-coverage floor for `vibeos-core` is **87%** (`[coverage] floor` in `tests/gates/inputs.toml`,
+read through `check_gate_inputs.py --floor`). Measured 87.53% at `6cbe4fe` with `cargo llvm-cov -p vibeos-core --lib
 --features std --target $HOST`, the command the `check` job runs. Ratchet the integer only upward.
 Coverage is still not a percentage target for the kernel: every bug that gets fixed gets a test that
 would have caught it, in the cheapest tier that can catch it. Every entry in
 [section 9](PITFALLS.md#9-pitfalls) names the rule that guards it, and where that rule is only an invariant in
 code with no test, that is a weaker guarantee and should be visible as such.
 
-Rule; not yet enforced: a pull request does not quietly change the gates that judge it. From ROADMAP
-§10.9, `tests/gates/inputs.toml` lists the gate inputs (the check scripts and their tests, the gate
-maps, every expected-failure and skip list, `deny.toml`, the workflows, the Makefile's `check` and
-`gate` recipes, and KERNEL_REVIEW.md) and holds the floor above; `scripts/check_gate_inputs.py`
-compares each pull request with its merge base and fails when it lowers the floor, adds an
-expected-failure or skip entry or edits or removes another input without a `Gate-change:` trailer, or
-edits a finding's heading or severity line; and rulesets require `check` and `ci-pass`, one job that
-needs every per-push job, on `main`. Today the floor is a literal in the workflow a pull request can
-edit, the check scripts judge the pull request that edits them, and `main` requires no check.
+**Gate inputs.** A pull request does not quietly change the gates that judge it (ROADMAP §10.9).
+`tests/gates/inputs.toml` lists the gate inputs (each check script and its test, `gatelib.py`,
+`ci_history.py`, `gate.py`, `release_check.py` and `doc_refs.py`, the gate maps and needs files and
+itself, every expected-failure and skip list, `tests/contract/markers.toml`, `deny.toml`, the
+workflows, the Makefile's `check` and `gate` recipes, KERNEL_REVIEW.md, and the lint settings:
+`clippy.toml`, `[workspace.lints]`, and `pyproject.toml`'s `[tool.ruff]` and `[tool.mypy]`) and holds
+the floor above. `scripts/check_gate_inputs.py` compares the pull request's head with its merge base
+(the `check` job on every pull request; `make check` against `origin/main` when that ref exists,
+otherwise its static rules only) and fails when the pull request lowers the floor, which no trailer
+allows; adds or changes a skip or expected-failure entry with no `Gate-change: <list> <entry>
+<class>: <reason>` trailer, the class one of the list's condition fields and one the entry sets;
+edits or removes any other input (a recipe or table: its text) with no `Gate-change: <path>: <rule or
+gate line it serves> -- <why>` trailer; or changes a `#### Fnnn` heading or `**Severity:**` line of
+KERNEL_REVIEW.md outside its `## Errata` section, with or without a trailer. Adding an input, raising
+the floor, and removing a list entry need no trailer. A trailer counts from any non-merge commit of
+the pull request. A correction to the review is a line under `## Errata`, its last `## ` heading,
+`- <YYYY-MM-DD> · <Fnnn> · <what changed> -- <why>` with dates in order, committed with a trailer;
+when `<what changed>` is a `**Severity:** ...` line, `check_review_refs.py` reads it in place of the
+finding's own. Planned (ROADMAP §10.9): rulesets require `check` and `ci-pass`, one job that needs
+every per-push job, on `main`, which today requires no check.
 
 Planned (ROADMAP §38.1): `make verify` checks the Verus proofs and TLA+ specifications on every push
 that changes `vibeos-core` or `docs/specs/`. From the `phase-38` tag, a change that adds an operation
