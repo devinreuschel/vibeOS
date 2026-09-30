@@ -94,6 +94,11 @@ pub const TARGETS: &[Target] = &[
         covers: &["dev/virtio.rs::read_modern_caps", "dev/pci.rs"],
     },
     Target {
+        name: "vmcore",
+        run: vmcore,
+        covers: &["log/vmcore/mod.rs", "log/vmcore/walk.rs"],
+    },
+    Target {
         name: "vmcoreinfo_parse",
         run: vmcoreinfo_parse,
         covers: &["log/vmcoreinfo.rs"],
@@ -153,6 +158,11 @@ pub fn shell_tokenize(data: &[u8]) {
 /// `virtio::read_modern_caps` over a [`cfgspace::FakeCfg`].
 pub fn virtio_caps(data: &[u8]) {
     targets::pci::virtio_caps(data);
+}
+
+/// The core tool's readers on the input as a kernel ELF and as a core.
+pub fn vmcore(data: &[u8]) {
+    targets::vmcore::parse(data);
 }
 
 /// The VMCOREINFO and build-id note readers.

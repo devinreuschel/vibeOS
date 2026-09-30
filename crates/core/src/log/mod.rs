@@ -15,6 +15,7 @@ pub mod backtrace;
 pub mod line;
 pub mod pvpanic;
 pub mod trace;
+pub mod vmcore;
 pub mod vmcoreinfo;
 
 /// Compile-time ceiling. Records above this are not formatted or stored.
