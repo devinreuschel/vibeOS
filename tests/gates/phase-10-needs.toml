@@ -185,6 +185,7 @@ needs = [
   "`/dev/random` and `/dev/urandom` return only hardware bytes",
   "the dentry cache never resolves through a reused slot",
   "tmpfs keeps written data when a file's extent moves",
+  "FAT and vibefs behind `InodeOps`;",  # L1324
 ]
 why = "text: lands after the /dev/random, dentry-cache (F065) and tmpfs (F066) boxes"
 
@@ -1138,3 +1139,11 @@ needs = [
   "the §10.4 wake inbox's push",  # L1434
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L942
+[[box]]
+key = "`tmpfs` on a private four-page"
+needs = [
+  "tmpfs keeps written data when",  # L1333
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
