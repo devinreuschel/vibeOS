@@ -94,7 +94,7 @@ impl Vol {
             None
         };
         if kind == InodeKind::Chr || kind == InodeKind::Blk {
-            return Err(Error::NotSupp);
+            return Err(Error::Perm);
         }
         let slot = self.alloc_ino_slot()?;
         let de = self.alloc_dent()?;

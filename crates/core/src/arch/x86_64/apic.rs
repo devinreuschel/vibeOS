@@ -96,6 +96,17 @@ pub enum IpiError {
     NoRoute,
 }
 
+/// An IPI that timed out is a device failure; one not ready yet may be retried.
+impl From<IpiError> for crate::kerror::KError {
+    fn from(e: IpiError) -> Self {
+        match e {
+            IpiError::DeliveryPendingTimeout => Self::Io,
+            IpiError::NotReady => Self::Again,
+            IpiError::NoRoute => Self::NoDev,
+        }
+    }
+}
+
 impl IpiError {
     pub const fn as_str(self) -> &'static str {
         match self {

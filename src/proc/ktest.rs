@@ -64,4 +64,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("syscall_ptr_decl_efault", syscall_ptr_decl_efault),
     test("read_ebadf_before_efault", read_ebadf_before_efault),
     test("wait4_echild_before_efault", wait4_echild_before_efault),
+    test("syscall_errno_checks", syscall_errno_checks),
 ];

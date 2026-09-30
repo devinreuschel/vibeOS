@@ -13,16 +13,14 @@ pub use zerocopy::{Immutable, IntoBytes};
 
 use crate::arch::UserAccess;
 use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END};
-use crate::proc::syscall::EFAULT;
 
 /// A user copy that the range check refused or that faulted before its end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fault;
 
-impl Fault {
-    /// Linux `EFAULT`.
-    pub const fn errno(self) -> i32 {
-        EFAULT
+impl From<Fault> for crate::kerror::KError {
+    fn from(_: Fault) -> Self {
+        Self::Fault
     }
 }
 
@@ -433,7 +431,7 @@ mod tests {
         assert_eq!(copy_from_user::<Fake>(&mut [], 0), Ok(()));
         assert_eq!(copy_to_user::<Fake>(USER_MAP_END, &[]), Err(Fault));
         assert_eq!(calls(), 0);
-        assert_eq!(Fault.errno(), 14);
+        assert_eq!(crate::kerror::KError::from(Fault).errno(), 14);
     }
 
     #[test]

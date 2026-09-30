@@ -1156,6 +1156,41 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
+# L1344
+[[box]]
+key = "the E2 table gives each"
+needs = [
+  "one `KError` with `From` for",  # L1343
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1345
+[[box]]
+key = "an operation that a filesystem"
+needs = [
+  "FAT and vibefs behind `InodeOps`;",  # L1324
+  "one `KError` with `From` for",  # L1343
+  "the E2 table gives each",  # L1344
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1347
+[[box]]
+key = "`fat::FatError` and `vibefs::Error`, two copies"
+needs = [
+  "one `KError` with `From` for",  # L1343
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1012
+[[box]]
+key = "each error condition returns the"
+needs = [
+  "the E2 table gives each",  # L1344
+  "`fat::FatError` and `vibefs::Error`, two copies",  # L1347
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # L1487
 [[box]]
 key = "virtio-blk negotiates `F_RO`: a write"

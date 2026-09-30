@@ -27,6 +27,18 @@ pub enum IrqError {
     NoRoute,
 }
 
+/// An IRQ request's errno: no vector left is `ENOSPC`, as Linux's vector matrix returns.
+impl From<IrqError> for crate::kerror::KError {
+    fn from(e: IrqError) -> Self {
+        match e {
+            IrqError::Exhausted => Self::NoSpc,
+            IrqError::InIrq | IrqError::BadVector | IrqError::BadCpu => Self::Inval,
+            IrqError::Busy => Self::Busy,
+            IrqError::NoRoute => Self::NoDev,
+        }
+    }
+}
+
 impl IrqError {
     pub fn as_str(self) -> &'static str {
         match self {

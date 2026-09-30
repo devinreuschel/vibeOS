@@ -111,6 +111,6 @@ pub fn call<H: Handlers + ?Sized>(h: &mut H, sys: Sys, regs: &[u64; 6]) -> SysRe
 pub fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
     match TABLE.lookup(raw_nr) {
         Some(sys) => call(h, sys, regs),
-        None => Err(KError::ENOSYS),
+        None => Err(KError::NoSys),
     }
 }

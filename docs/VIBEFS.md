@@ -377,7 +377,7 @@ new size in the last kept block and in the inline area, and a later
 extension exposes them (F125; ROADMAP §13.9).
 
 v1 always stores an extent CRC. A mismatch on read is `Corrupt`: the caller
-gets an error, not the bad bytes (a syscall sees `EINVAL`, SYSCALL.md §2.1).
+gets an error, not the bad bytes (a syscall sees `EIO`).
 A write into a block whose extent fails its CRC returns `Corrupt` and
 changes nothing. `fsck` lists the inode and extent. It does not copy the
 corrupt payload into a new extent and call the volume clean. From
