@@ -350,6 +350,10 @@ pub(super) fn preempt_before_places(places: usize) {
     if sent.is_err() {
         return;
     }
+    // A deliberate IF-off hold under `with_sched`'s guard (C-IRQOFF-GUARD);
+    // the IPI lands once IF comes back on, before the place loop when
+    // `with_sched` holds no guard of its own.
+    let _hold = crate::sched::irqoff::deliberate("preempt-before-places IPI wait");
     let end = time_init::read_tsc()
         .saturating_add(PREEMPT_SPIN_MS.saturating_mul(time_init::tsc_per_ms()));
     while time_init::read_tsc() < end {
