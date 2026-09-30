@@ -528,6 +528,130 @@ impl Image {
     }
 }
 
+/// A run of whole pages the loader maps with one set of permissions
+/// (ROADMAP §10.6, F031).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageRun {
+    pub start: u64,
+    pub len: u64,
+    pub write: bool,
+    pub exec: bool,
+}
+
+/// The pages an image's `PT_LOAD`s cover, as disjoint runs sorted by
+/// address: at most two per segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadPlan {
+    runs: [PageRun; 2 * MAX_LOADS],
+    n: usize,
+}
+
+impl LoadPlan {
+    /// The runs, disjoint and in address order.
+    pub fn runs(&self) -> &[PageRun] {
+        self.runs.get(..self.n).unwrap_or(&[])
+    }
+}
+
+/// The runs that map `img`'s `PT_LOAD`s as Linux maps them: each page
+/// takes the permissions of the last segment in program-header order that
+/// covers it, as each later `PT_LOAD` maps over the ones before it, and
+/// neighbours with equal permissions merge.
+pub fn load_plan(img: &Image) -> LoadPlan {
+    let empty = PageRun {
+        start: 0,
+        len: 0,
+        write: false,
+        exec: false,
+    };
+    let mut plan = LoadPlan {
+        runs: [empty; 2 * MAX_LOADS],
+        n: 0,
+    };
+    // Each segment's page span; `parse` checked none overflows.
+    let span = |s: &LoadSeg| (page_down(s.vaddr), page_up(s.vaddr.saturating_add(s.memsz)));
+    // Every span edge, sorted and unique: between two neighbours, the
+    // same segments cover every page.
+    let mut edges = [0u64; 2 * MAX_LOADS];
+    let mut ne = 0usize;
+    for s in img.loads().iter().filter(|s| s.memsz != 0) {
+        let (lo, hi) = span(s);
+        for e in [lo, hi] {
+            if edges.get(..ne).is_some_and(|d| d.contains(&e)) {
+                continue;
+            }
+            if let Some(slot) = edges.get_mut(ne) {
+                *slot = e;
+                ne = ne.saturating_add(1);
+            }
+        }
+    }
+    let edges = edges.get_mut(..ne).unwrap_or(&mut []);
+    edges.sort_unstable();
+    for w in edges.windows(2) {
+        let (Some(&a), Some(&b)) = (w.first(), w.get(1)) else {
+            continue;
+        };
+        let top = img.loads().iter().rev().filter(|s| s.memsz != 0).find(|s| {
+            let (lo, hi) = span(s);
+            lo <= a && b <= hi
+        });
+        let Some(top) = top else {
+            continue;
+        };
+        let len = b.saturating_sub(a);
+        let last = plan.n.checked_sub(1).and_then(|i| plan.runs.get_mut(i));
+        match last {
+            Some(r)
+                if r.start.saturating_add(r.len) == a
+                    && r.write == top.write
+                    && r.exec == top.exec =>
+            {
+                r.len = r.len.saturating_add(len);
+            }
+            _ => {
+                if let Some(slot) = plan.runs.get_mut(plan.n) {
+                    *slot = PageRun {
+                        start: a,
+                        len,
+                        write: top.write,
+                        exec: top.exec,
+                    };
+                    plan.n = plan.n.saturating_add(1);
+                }
+            }
+        }
+    }
+    plan
+}
+
+/// Where [`load_segments`] maps an image: the kernel's address space, or a
+/// host test's fake.
+pub trait LoadTarget {
+    type Error;
+    /// Map `run`'s pages with its permissions, zeroed. Runs never overlap.
+    fn map_zeroed(&mut self, run: PageRun) -> Result<(), Self::Error>;
+    /// Copy `seg`'s `filesz` file bytes to its `vaddr`, into pages
+    /// already mapped.
+    fn copy(&mut self, seg: LoadSeg) -> Result<(), Self::Error>;
+}
+
+/// Map `img`'s `PT_LOAD`s into `t` as Linux does (ROADMAP §10.6, F031):
+/// each run of [`load_plan`] mapped and zeroed once, then each segment's
+/// file bytes copied in, so a page two segments share holds both
+/// segments' bytes.
+pub fn load_segments<T: LoadTarget>(img: &Image, t: &mut T) -> Result<(), T::Error> {
+    for run in load_plan(img).runs() {
+        t.map_zeroed(*run)?;
+    }
+    for seg in img.loads() {
+        if seg.filesz != 0 {
+            t.copy(*seg)?;
+        }
+    }
+    Ok(())
+}
+
 /// Lay out the initial stack below the 16-aligned `stack_top`, top down:
 /// 8 zero bytes; [`ExecArgs::strings`] at `strings_va`; the 16 `random`
 /// bytes, 16-aligned; then the table at RSP, 16-aligned: `argc`, the
@@ -1063,5 +1187,210 @@ mod tests {
         assert_eq!(img.loads().len(), 1);
         img.nload = MAX_LOADS + 1;
         assert!(img.loads().is_empty());
+    }
+
+    /// A fake address space: pages mapped by `map_zeroed`, which refuses
+    /// a page mapped twice, and the file bytes `copy` writes.
+    struct FakeTarget<'a> {
+        file: &'a [u8],
+        pages: std::collections::BTreeMap<u64, (bool, bool, Vec<u8>)>,
+        maps: usize,
+    }
+
+    impl<'a> FakeTarget<'a> {
+        fn new(file: &'a [u8]) -> Self {
+            FakeTarget {
+                file,
+                pages: std::collections::BTreeMap::new(),
+                maps: 0,
+            }
+        }
+
+        fn byte(&self, va: u64) -> u8 {
+            let p = &self.pages[&page_down(va)];
+            p.2[(va - page_down(va)) as usize]
+        }
+
+        /// `(write, exec)` of the page holding `va`.
+        fn perms(&self, va: u64) -> (bool, bool) {
+            let p = &self.pages[&page_down(va)];
+            (p.0, p.1)
+        }
+    }
+
+    impl LoadTarget for FakeTarget<'_> {
+        type Error = &'static str;
+
+        fn map_zeroed(&mut self, run: PageRun) -> Result<(), Self::Error> {
+            assert_eq!(run.start % PAGE_SIZE_4K, 0);
+            assert_eq!(run.len % PAGE_SIZE_4K, 0);
+            assert!(run.len > 0);
+            self.maps += 1;
+            let mut va = run.start;
+            while va < run.start + run.len {
+                let page = (run.write, run.exec, vec![0u8; PAGE_SIZE_4K as usize]);
+                if self.pages.insert(va, page).is_some() {
+                    return Err("overlapping map");
+                }
+                va += PAGE_SIZE_4K;
+            }
+            Ok(())
+        }
+
+        fn copy(&mut self, seg: LoadSeg) -> Result<(), Self::Error> {
+            for i in 0..seg.filesz {
+                let b = self.file[(seg.offset + i) as usize];
+                let va = seg.vaddr + i;
+                let p = self
+                    .pages
+                    .get_mut(&page_down(va))
+                    .ok_or("copy to unmapped")?;
+                p.2[(va - page_down(va)) as usize] = b;
+            }
+            Ok(())
+        }
+    }
+
+    /// An image of `loads` over a file whose byte at offset `o` is `o`.
+    fn plan_image(loads: &[LoadSeg]) -> (Image, Vec<u8>) {
+        let mut img = parse(&build_elf(0x4000_0000, &[0x90, 0xC3], &[])).unwrap();
+        img.loads[..loads.len()].copy_from_slice(loads);
+        img.nload = loads.len();
+        let len = loads.iter().map(|s| s.offset + s.filesz).max().unwrap();
+        let file = (0..len).map(|o| o as u8).collect();
+        (img, file)
+    }
+
+    fn run(start: u64, len: u64, write: bool, exec: bool) -> PageRun {
+        PageRun {
+            start,
+            len,
+            write,
+            exec,
+        }
+    }
+
+    #[test]
+    fn load_plan_shared_page_rx_rw() {
+        const B: u64 = 0x4000_0000;
+        let (img, file) = plan_image(&[
+            seg(B, 0, 0x1010, 0x1010, false, true),
+            seg(B + 0x1010, 0x1010, 8, 8, true, false),
+        ]);
+        assert_eq!(
+            load_plan(&img).runs(),
+            &[
+                run(B, 0x1000, false, true),
+                run(B + 0x1000, 0x1000, true, false)
+            ]
+        );
+        let mut t = FakeTarget::new(&file);
+        load_segments(&img, &mut t).unwrap();
+        assert_eq!(t.maps, 2);
+        // The shared page is RW and not executable, and holds both
+        // segments' bytes.
+        assert_eq!(t.perms(B + 0x1000), (true, false));
+        assert_eq!(t.perms(B), (false, true));
+        for va in B..B + 0x1018 {
+            assert_eq!(t.byte(va), (va - B) as u8, "{va:#x}");
+        }
+        assert_eq!(t.byte(B + 0x1018), 0);
+    }
+
+    #[test]
+    fn load_plan_second_segment_past_shared_page() {
+        const B: u64 = 0x4000_0000;
+        // RX to the middle of its second page; RW from there through two
+        // more pages, with bss past its file bytes.
+        let (img, file) = plan_image(&[
+            seg(B, 0, 0x1800, 0x1800, false, true),
+            seg(B + 0x1800, 0x1800, 0x900, 0x1900, true, false),
+        ]);
+        assert_eq!(
+            load_plan(&img).runs(),
+            &[
+                run(B, 0x1000, false, true),
+                run(B + 0x1000, 0x3000, true, false)
+            ]
+        );
+        let mut t = FakeTarget::new(&file);
+        load_segments(&img, &mut t).unwrap();
+        assert_eq!(t.maps, 2);
+        for va in B..B + 0x2100 {
+            assert_eq!(t.byte(va), (va - B) as u8, "{va:#x}");
+        }
+        for va in B + 0x2100..B + 0x4000 {
+            assert_eq!(t.byte(va), 0, "{va:#x}");
+        }
+        assert_eq!(t.perms(B + 0x3fff), (true, false));
+    }
+
+    #[test]
+    fn load_plan_shared_page_fixture() {
+        const SHARED: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/elf/shared_page.elf"
+        ));
+        const B: u64 = 0x4000_0000;
+        let img = parse(SHARED).unwrap();
+        assert_eq!(img.entry, B + 0x100);
+        assert_eq!(
+            load_plan(&img).runs(),
+            &[
+                run(B, 0x1000, false, true),
+                run(B + 0x1000, 0x1000, true, false)
+            ]
+        );
+        let mut t = FakeTarget::new(SHARED);
+        load_segments(&img, &mut t).unwrap();
+        // The RX tail's constant and the RW value both survive.
+        let word = |va: u64| u64::from_le_bytes(core::array::from_fn(|i| t.byte(va + i as u64)));
+        assert_eq!(word(B + 0x1000).to_le_bytes(), *b"_RX_SHER");
+        assert_eq!(word(B + 0x1010).to_le_bytes(), *b"_RW_DATA");
+        assert_eq!(t.perms(B + 0x1000), (true, false));
+    }
+
+    #[test]
+    fn load_plan_separate_pages() {
+        // A linked binary's segments start on their own pages: every page
+        // takes its one segment's permissions and file bytes, and runs
+        // merge only neighbours with equal permissions (lld's two RW
+        // segments).
+        for bin in [STATIC_LLD, STATIC_GNULD] {
+            let img = parse(bin).unwrap();
+            let loads: Vec<_> = img.loads().iter().filter(|s| s.memsz != 0).collect();
+            let runs = load_plan(&img).runs().to_vec();
+            assert!(runs.len() <= loads.len());
+            for w in runs.windows(2) {
+                assert!(w[0].start + w[0].len <= w[1].start);
+            }
+            let mut t = FakeTarget::new(bin);
+            load_segments(&img, &mut t).unwrap();
+            for s in &loads {
+                let mut va = page_down(s.vaddr);
+                while va < page_up(s.vaddr + s.memsz) {
+                    assert_eq!(t.perms(va), (s.write, s.exec), "{va:#x}");
+                    va += PAGE_SIZE_4K;
+                }
+                for i in 0..s.filesz {
+                    assert_eq!(t.byte(s.vaddr + i), bin[(s.offset + i) as usize]);
+                }
+            }
+            let pages: u64 = runs.iter().map(|r| r.len / PAGE_SIZE_4K).sum();
+            assert_eq!(pages, t.pages.len() as u64);
+        }
+        // Two segments a page apart with equal permissions stay two runs.
+        const B: u64 = 0x4000_0000;
+        let (img, _) = plan_image(&[
+            seg(B, 0, 0x10, 0x10, true, false),
+            seg(B + 0x2000, 0x10, 0x10, 0x10, true, false),
+        ]);
+        assert_eq!(
+            load_plan(&img).runs(),
+            &[
+                run(B, 0x1000, true, false),
+                run(B + 0x2000, 0x1000, true, false)
+            ]
+        );
     }
 }

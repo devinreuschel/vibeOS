@@ -51,7 +51,7 @@ DATA_LEN = 8
 PAGE = 0x1000
 
 # The RX segment's tail in the shared page, and the RW segment's value.
-CONST = 0x5245_4853_5F58_525F  # "_RX_SHRE" little-endian
+CONST = 0x5245_4853_5F58_525F  # "_RX_SHER" little-endian
 DATA = 0x4154_4144_5F57_525F  # "_RW_DATA" little-endian
 
 NAMES = {False: "shared_page.elf", True: "shared_page_jump.elf"}
