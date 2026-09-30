@@ -45,8 +45,10 @@ pub(crate) fn test_reschedule_ipi_wake_ap() -> Outcome {
     if !spin_until_ns(|| WAKE_FLAG.load(Ordering::SeqCst) != 0, 500_000_000) {
         return Outcome::Fail("idle AP not woken");
     }
-    let after = reschedule_count();
-    if after <= before {
+    // The spawn pushes to the AP's inbox before it sends the IPI, and any
+    // pass of the AP's scheduler drains that inbox, so the thread can run
+    // before the AP takes the IPI.
+    if !spin_until_ns(|| reschedule_count() > before, 500_000_000) {
         return Outcome::Fail("no reschedule IPI");
     }
     Outcome::Ok
@@ -1041,7 +1043,9 @@ pub(crate) fn wake_inbox_and_kva_pool() -> Outcome {
     if tid != h.id().raw() || tid < 64 {
         return crate::fail_fmt!("target ran as tid {tid}, spawned as {}", h.id().raw());
     }
-    if reschedule_count() <= before {
+    // As in `test_reschedule_ipi_wake_ap`: the target can run before its
+    // CPU takes the IPI that follows the inbox push.
+    if !spin_until_ns(|| reschedule_count() > before, 500_000_000) {
         return Outcome::Fail("no reschedule IPI");
     }
     Outcome::Ok
