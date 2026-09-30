@@ -14,7 +14,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use vibeos_fuzz::TARGETS;
+use vibeos::block::part;
+use vibeos::{acpi, fat, vibefs};
+use vibeos_fuzz::image::{FLAG_4K, Sparse};
+use vibeos_fuzz::physmem::{BASE, FlatMem};
+use vibeos_fuzz::{TARGETS, seeds};
 
 /// How long one input may run before the replay calls it a hang.
 const UNIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -145,4 +149,123 @@ fn targets_match_bins_and_dirs() {
             t.name
         );
     }
+}
+
+#[test]
+fn seeds_are_committed_and_accepted() {
+    // The generator's output is committed byte for byte, with no stray seed.
+    let mut want = BTreeSet::new();
+    for s in seeds::corpus().into_iter().chain(seeds::regressions()) {
+        let dir = if s.name.starts_with("seed-") {
+            "corpus"
+        } else {
+            "regressions"
+        };
+        let path = root().join(dir).join(s.target).join(&s.name);
+        let have = fs::read(&path).unwrap_or_default();
+        assert!(
+            have == s.data,
+            "{dir}/{}/{} differs from the generator: run the seeds example",
+            s.target,
+            s.name
+        );
+        want.insert(format!("{}/{}", s.target, s.name));
+    }
+    for t in subdirs(&root().join("corpus")) {
+        for f in files(&root().join("corpus").join(&t)) {
+            let name = f.file_name().unwrap().to_string_lossy().into_owned();
+            if name.starts_with("seed-") {
+                assert!(
+                    want.contains(&format!("{t}/{name}")),
+                    "corpus/{t}/{name}: no generator seed"
+                );
+            }
+        }
+    }
+    for t in TARGETS {
+        assert!(
+            seeds::corpus().iter().any(|s| s.target == t.name),
+            "{}: no seed",
+            t.name
+        );
+    }
+    accept_step2();
+}
+
+/// The data of the seed `target/seed-<name>`.
+fn seed_data(target: &str, name: &str) -> Vec<u8> {
+    seeds::corpus()
+        .into_iter()
+        .find(|s| s.target == target && s.name == format!("seed-{name}"))
+        .unwrap_or_else(|| panic!("no seed {target}/seed-{name}"))
+        .data
+}
+
+fn accept_step2() {
+    // ACPI: each root table yields the MADT, HPET, FADT PM timer and MCFG.
+    for (name, xsdt) in [("xsdt", true), ("rsdt", false)] {
+        let data = seed_data("acpi_walk", name);
+        let info = acpi::walk(&FlatMem::new(&data), BASE).expect("acpi walk");
+        assert_eq!(info.used_xsdt, xsdt, "{name}");
+        let madt = info.madt.expect("madt");
+        assert_eq!(
+            (madt.cpu_count, madt.ioapic_count, madt.iso_count),
+            (2, 1, 2)
+        );
+        assert_eq!(madt.lapic_base, 0xFEE0_0000);
+        assert!(info.hpet.is_some() && info.mcfg.is_some(), "{name}");
+        let pm = info.fadt.and_then(|f| f.pm_timer).expect("pm timer");
+        assert_eq!((pm.port, pm.width), (0x608, 32));
+    }
+    assert!(acpi::parse_madt(&seed_data("acpi_tables", "madt")).is_ok());
+    assert!(acpi::parse_rsdp(&seed_data("acpi_tables", "rsdp")).is_ok());
+    // Partitions: the EBR chain's two logicals after three primaries, and
+    // both GPTs' two entries.
+    let table = |name: &str| {
+        let data = seed_data("part_parse", name);
+        let unit = if data[0] & FLAG_4K != 0 { 4096 } else { 512 };
+        let img = Sparse::parse(&data, unit, 1 << 20).unwrap();
+        let mut sector = vec![0u8; 4096];
+        let mut scratch = vec![0u8; 128 * 128];
+        part::parse(
+            u64::from(img.count()),
+            unit as u32,
+            img.reader(),
+            &mut sector,
+            &mut scratch,
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"))
+    };
+    let t = table("mbr-extended");
+    assert_eq!(t.origin, part::TableOrigin::Mbr);
+    assert_eq!(t.n, 5);
+    for name in ["gpt", "gpt-4k"] {
+        let t = table(name);
+        assert_eq!(
+            t.origin,
+            part::TableOrigin::Gpt { used_backup: false },
+            "{name}"
+        );
+        assert_eq!(t.n, 2, "{name}");
+    }
+    // FAT and vibefs mount, and hold their files.
+    let data = seed_data("fat_mount", "fat32");
+    let mut d = Sparse::parse(&data, fat::SEC, 1 << 20).unwrap();
+    let mut vol = Box::new(fat::FatVol::new());
+    vol.mount_in(&mut d).expect("fat mount");
+    let root = vol.root().clu;
+    for name in [
+        &b"BIG.BIN"[..],
+        b"A long file name.txt",
+        "fichier-\u{e9}t\u{e9}.txt".as_bytes(),
+    ] {
+        vol.lookup(&mut d, root, name).expect("fat lookup");
+    }
+    let data = seed_data("vibefs_mount", "vibefs");
+    let mut d = Sparse::parse(&data, vibefs::BLOCK, 4096).unwrap();
+    let mut v = Box::new(vibefs::Vol::new());
+    vibefs::mount(&mut d, &mut v).expect("vibefs mount");
+    v.walk(&mut d, b"/dir/inner.txt").expect("vibefs walk");
+    let r = vibefs::fsck(&mut d).expect("fsck");
+    assert_eq!(r.errors, 0);
 }

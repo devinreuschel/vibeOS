@@ -23,6 +23,41 @@ name = "vibeos_fuzz"
 libfuzzer-sys = "0.4"
 vibeos = { path = "../../crates/core", package = "vibeos-core", features = ["std"] }
 
+[[bin]]
+name = "acpi_tables"
+path = "fuzz_targets/acpi_tables.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "acpi_walk"
+path = "fuzz_targets/acpi_walk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fat_mount"
+path = "fuzz_targets/fat_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "part_parse"
+path = "fuzz_targets/part_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vibefs_mount"
+path = "fuzz_targets/vibefs_mount.rs"
+test = false
+doc = false
+bench = false
+
 # The root profiles do not reach this workspace: panic where the kernel would
 # (DESIGN §3.5), on an overflow as on a failed debug assertion.
 [profile.dev]

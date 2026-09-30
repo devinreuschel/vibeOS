@@ -18,6 +18,8 @@
 pub mod cfgspace;
 pub mod image;
 pub mod physmem;
+pub mod seeds;
+mod targets;
 
 /// One fuzz target: `name` is its `[[bin]]`, its `fuzz_targets/<name>.rs`
 /// stem and its `corpus/<name>/` and `regressions/<name>/` directories;
@@ -30,4 +32,55 @@ pub struct Target {
 }
 
 /// Every target, in `fuzz_targets/` order.
-pub const TARGETS: &[Target] = &[];
+pub const TARGETS: &[Target] = &[
+    Target {
+        name: "acpi_tables",
+        run: acpi_tables,
+        covers: &["acpi/mod.rs"],
+    },
+    Target {
+        name: "acpi_walk",
+        run: acpi_walk,
+        covers: &["acpi/mod.rs"],
+    },
+    Target {
+        name: "fat_mount",
+        run: fat_mount,
+        covers: &["fs/fat/mod.rs"],
+    },
+    Target {
+        name: "part_parse",
+        run: part_parse,
+        covers: &["block/part.rs"],
+    },
+    Target {
+        name: "vibefs_mount",
+        run: vibefs_mount,
+        covers: &["fs/vibefs/mod.rs"],
+    },
+];
+
+/// `acpi::walk` over the input as memory, the RSDP at [`physmem::BASE`].
+pub fn acpi_walk(data: &[u8]) {
+    targets::acpi::walk(data);
+}
+
+/// Every ACPI table parser on the input as one table.
+pub fn acpi_tables(data: &[u8]) {
+    targets::acpi::tables(data);
+}
+
+/// `part::parse` over a [`image::Sparse`] image.
+pub fn part_parse(data: &[u8]) {
+    targets::part::parse(data);
+}
+
+/// `FatVol::mount` over a [`image::Sparse`] image, then a walk and a write.
+pub fn fat_mount(data: &[u8]) {
+    targets::fat::mount(data);
+}
+
+/// `vibefs::mount` over a [`image::Sparse`] image, then a walk and `fsck`.
+pub fn vibefs_mount(data: &[u8]) {
+    targets::vibefs::mount(data);
+}
