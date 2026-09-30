@@ -32,8 +32,10 @@ Things that belong here and are easy to get wrong, so should have tests from the
   to its initial value after a random alloc/free sequence, double free detection.
 - ACPI: RSDP v1 and v2 checksum rejection, table length validation, HPET generic address structure
   rejecting I/O space and zero addresses, MADT entry iteration over truncated tables.
-- Timekeeping: the `now_us` interpolation formula, seqlock retry under a simulated concurrent writer,
-  monotonicity, overflow near `u64::MAX`, HPET/PIT agreement bands (invariant vs TCG).
+- Timekeeping: the clocksource conversion against an independent `u128` evaluation, a 24-bit counter
+  through ten wraps read every half wrap, the ranking, the latch (a reader that stops the writer between
+  its copies reads the older one) and seqlock retry under a simulated concurrent writer, monotonicity,
+  overflow near `u64::MAX`, HPET/PIT agreement bands (invariant vs TCG).
 - ICR delivery-pending poll: returns true when the bit clears, false at the iteration cap.
 - Vector table: no two named vectors are equal.
 - Scan code decoding: make and break codes, `0xE0` prefixes, modifier state, unknown codes returning
