@@ -242,6 +242,10 @@ GONE: list[tuple[str, str]] = [
     ("map_func_bars", "a device's resources are claimed"),
     ("keep_wb", "a device's resources are claimed"),
     ("mapped_va", "a device's resources are claimed"),
+    ("mkuserelf", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
+    ("scripts/mkuserelf.py", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
+    ("user/hello.asm", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
+    ("user/sh.asm", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

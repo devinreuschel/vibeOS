@@ -30,7 +30,6 @@ need make
 need cc
 need qemu-system-x86_64
 need xorriso
-need nasm
 need python3
 need cargo
 

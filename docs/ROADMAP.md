@@ -371,7 +371,7 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] `CARGO_TARGET_DIR` pinned to `./target`
 - [x] kernel prerequisites from a `find` over `src/`, never a hand-written list
 - [x] ISO staging: kernel ELF, `limine.conf`, BIOS and UEFI Limine artifacts, `xorriso` hybrid image, `limine bios-install`
-- [x] `setup.sh`: fetch the Limine binary branch, verify `qemu-system-x86_64`, `xorriso`, `nasm`, `python3`; never rewrite project files
+- [x] `setup.sh`: fetch the Limine binary branch, verify `qemu-system-x86_64`, `xorriso`, `python3`; never rewrite project files
 - [x] `make run` uses `-smp 2` so the default loop is multiprocessor from day one
 
 ### 0.6 Test harness
@@ -1049,7 +1049,7 @@ limitations.
 - [x] `exit`: release resources, become a zombie, signal the parent
 - [x] `wait4`: block for a child, return its status, reap it, with `WNOHANG`
 - [x] orphan reaping by `/sbin/init` in the production image; the `kernel_tests` and `kernel_shell` builds start no init (F068)
-- [ ] `/bin/tests` fork limit: a fork loop gets `-EAGAIN` once the process table is full and fails on any other result; today the bomb in `user/tests.asm` also passes after 32 forks that all succeed, and on any error after the first. Reopened by the kernel review (F077); lands in §10.5.
+- [ ] `/bin/tests` fork limit: a fork loop gets `-EAGAIN` once the process table is full and fails on any other result; today the bomb in `/bin/tests` also passes after 32 forks that all succeed, and on any error after the first. Reopened by the kernel review (F077); lands in §10.5.
 - [ ] `/bin/tests` exec chain: a child `execve`s a second program, which `execve`s a third, and the parent's `wait4` returns the third program's exit status. Reopened by the kernel review (F077); lands in §10.5.
 - [ ] `/bin/tests` wait ordering: `wait4` on a child that has not exited blocks until it exits, and `wait4` on a zombie child returns its status at once. Reopened by the kernel review (F077); lands in §10.5.
 - [ ] `/bin/tests` orphan reparenting: a grandchild whose parent has exited sees `getppid() == 1`, and init reaps it. Reopened by the kernel review (F077); lands in §10.5.
@@ -1371,7 +1371,7 @@ the work its claim rests on has landed is the failure KERNEL_REVIEW.md §5 found
 - [x] `reboot` (power off and restart), so the user `/bin/sh` keeps the `poweroff` and `reboot` the Phase 5 kernel shell had; x86_64 uses the ACPI and reset paths, and §11.4 puts PSCI behind the same call
 - [x] an allocator over `brk`, so `alloc` works in userspace
 - [ ] `utest_ok` / `utest_fail` / `utest_skip` on serial, asserted by `tests/harness` like the `ktest_*` protocol in `make test-e2e`, `make test-e2e-uefi`, `make test-e2e-pit`, and `make test-e2e-highmem`, where `/bin/tests` runs as a forked child of `/sbin/init`; a failing user test fails `make test`; the `utest_*` lines carry §10.2's `begin` and `run` lines and `tests/harness/skips.toml` rows, and the harness gives them the §10.2 count and progress deadline, the only deadline a user test has (F073)
-- [ ] `/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello` rewritten in the crate; the assembly sources and `mkuserelf.py` deleted
+- [x] `/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello` rewritten in the crate; the assembly sources and `mkuserelf.py` deleted
 - [ ] a signal cannot kill or stop pid 1: `sys_kill` to pid 1 delivers only signals init has a handler for, as Linux does, so none until §13.8's `rt_sigaction`; `/bin/tests` sends `SIGKILL` to pid 1, and the boot still reaches `shell ready` (F068)
 - [ ] pid 1's exit panics the kernel with a registered failure line naming its status: its exit status, or the signal that ended init and, for a fault, the faulting address; a harness case boots an initrd whose `/sbin/init` stores to address `0x1000` and finds that line naming `SIGSEGV` and `0x1000` (F068)
 - [x] a host-tested `vibeos-core` helper picks an orphan's reaper: pid 1 while its slot is live or stopped, and otherwise none, in which case the orphan's zombie is freed when it exits (F068)

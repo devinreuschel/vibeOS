@@ -54,14 +54,9 @@ KERNEL_SRCS := $(shell find src crates/core/src -type f \( -name '*.rs' -o -name
 # (ROADMAP §10.2, F143).
 HOSTLIB_DEPS := $(KERNEL_SRCS) Cargo.lock Cargo.toml crates/core/Cargo.toml tests/hostlib/Cargo.toml \
 	$(wildcard tests/hostlib/src/bin/*.rs)
-USER_HELLO  := user/hello
-USER_INIT   := user/init
-USER_SH     := user/sh
-USER_TESTS  := user/tests
 INITRD := $(CURDIR)/build/initrd.fat
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
-	scripts/gen_ksyms.py scripts/mkuserelf.py scripts/mkiso.sh \
-	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc \
+	scripts/gen_ksyms.py scripts/mkiso.sh \
 	.cargo/config.toml Cargo.lock
 # What mkiso.sh's /LICENSES/ notices are generated from (ROADMAP §10.9); the
 # crate graph comes from Cargo.lock, which the ELF already depends on.
@@ -354,21 +349,6 @@ $(INITRD): $(HOSTLIB_DEPS) $(USER_STAMP)
 	    --add $(USER_OUT)/sh:/bin/sh \
 	    --add $(USER_OUT)/tests:/bin/tests
 
-user/%.bin: user/%.asm user/sys.inc
-	nasm -f bin -I user/ -o $@ $<
-
-user/hello: user/hello.bin scripts/mkuserelf.py
-	python3 scripts/mkuserelf.py user/hello.bin $@
-
-user/init: user/init.bin scripts/mkuserelf.py
-	python3 scripts/mkuserelf.py user/init.bin $@
-
-user/sh: user/sh.bin scripts/mkuserelf.py
-	python3 scripts/mkuserelf.py user/sh.bin $@
-
-user/tests: user/tests.bin scripts/mkuserelf.py
-	python3 scripts/mkuserelf.py user/tests.bin $@
-
 iso: $(ISO)
 
 isos: $(ISOS)
@@ -572,9 +552,7 @@ gate:
 # Keeps build/results/.
 clean:
 	rm -rf build/kernels build/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
-	    $(INITRD) \
-	    user/hello user/hello.bin user/init user/init.bin user/sh user/sh.bin \
-	    user/tests user/tests.bin
+	    $(INITRD) $(USER_OUT)
 	$(CARGO) clean
 
 distclean: clean

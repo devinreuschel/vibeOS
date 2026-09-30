@@ -959,7 +959,7 @@ pub(crate) fn test_user_tf_repin() -> Outcome {
     Outcome::Ok
 }
 
-// `user/tests.asm` from its `dup(1)` on (ROADMAP §10.2, F021), for
+// The assembly `/bin/tests`' sequence from its `dup(1)` on (ROADMAP §10.2, F021), for
 // FORK_WAIT_ROUNDS rounds: (1) dup(1), a zero-length write, close; (2) fork,
 // the child exits 7, wait4(pid) wants 0x0700; (3) fork, the child execs
 // /hello, wait4(pid) wants 0x2A00; (4) fork, the child loads from address
@@ -1222,7 +1222,7 @@ fn wait_run(cpu: u32) -> Outcome {
     }
 }
 
-/// `user/tests.asm`'s fork, wait4, execve, fault and fork-bomb sequence
+/// The assembly `/bin/tests`' fork, wait4, execve, fault and fork-bomb sequence
 /// after `user: dup ok` finishes on every spawning CPU, the registry's and
 /// a second one, while `syscall_init::testing::fork_wait_stall_point`
 /// holds each run's first ring-3 entries in the window after GS is
