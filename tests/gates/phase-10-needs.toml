@@ -1318,3 +1318,13 @@ needs = [
   "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1298
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1435
+[[box]]
+key = "loom models: the seqlock against"
+needs = [
+  "portable code reaches atomics, fences,",  # L1433
+  "the §10.4 wake inbox's push",  # L1434
+  "`TickClock::write` bumps `seq` to odd",  # L1436
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
