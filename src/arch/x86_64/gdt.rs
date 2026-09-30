@@ -1,11 +1,16 @@
 //! Per-CPU GDT + TSS + IST. DESIGN §5.1.
 //!
-//! One [`CpuTables`] instance per CPU later; today the BSP keeps its
-//! tables in a static so the GDT/TSS addresses never move. IST stacks
-//! come from the KVA allocator (guarded), which is why this runs after
-//! `kva: ready` rather than before PMM.
+//! One [`CpuTables`] per CPU: the BSP's in the `BSP` `BootCell`, each AP's
+//! in a heap block `smp_init` holds as a raw pointer, so the GDT/TSS
+//! addresses never move while the CPU runs. The CPU reads the TSS; after
+//! `load`, software writes only its RSP0, through
+//! [`CpuTables::set_rsp0`] on the owning CPU with IF=0 (ROADMAP §10.3,
+//! F089). IST stacks come from the KVA allocator (guarded), which is why
+//! this runs after `kva: ready` rather than before PMM.
 
-use core::mem::size_of;
+use core::cell::UnsafeCell;
+use core::mem::{offset_of, size_of};
+use core::ptr::NonNull;
 
 use vibeos::desc::{GDT_LIMIT, Gdt, IstSlot, KERNEL_CS, KERNEL_DS, TSS_SEL, Tss};
 use vibeos::kalloc::TryBox;
@@ -20,29 +25,43 @@ use crate::x86::{self, DtPtr};
 const IST_PAGES: usize = 4;
 const RSP0_PAGES: usize = 4;
 
-/// GDT+TSS for one CPU. Phase 4 allocates one of these per AP.
+/// GDT+TSS for one CPU. The TSS sits in an `UnsafeCell`: after `load`
+/// the tables are shared as `&CpuTables`, and [`CpuTables::set_rsp0`] is
+/// the TSS's one writer.
 #[repr(C, align(16))]
 pub struct CpuTables {
     gdt: Gdt,
-    tss: Tss,
+    tss: UnsafeCell<Tss>,
 }
+
+// SAFETY: invariant I22's `Sync` part for the `BSP` cell: after `load` the
+// TSS is written only by `CpuTables::set_rsp0`, whose contract is the CPU
+// that loaded the tables with IF=0, and its one caller,
+// `syscall_init::set_rsp0_for`, runs on that CPU inside `on_switch` with
+// IF=0; every other access reads. Established by
+// `arch::x86_64::gdt::CpuTables::set_rsp0`.
+unsafe impl Sync for CpuTables {}
 
 impl CpuTables {
     pub const fn empty() -> Self {
         Self {
             gdt: Gdt::empty(),
-            tss: Tss::empty(),
+            tss: UnsafeCell::new(Tss::empty()),
         }
     }
 
-    pub fn init(&mut self, ist_tops: [u64; 4], rsp0: u64) {
-        self.tss = Tss::empty();
-        self.tss.set_rsp0(rsp0);
-        self.tss.set_ist(IstSlot::DoubleFault, ist_tops[0]);
-        self.tss.set_ist(IstSlot::Nmi, ist_tops[1]);
-        self.tss.set_ist(IstSlot::MachineCheck, ist_tops[2]);
-        self.tss.set_ist(IstSlot::Debug, ist_tops[3]);
-        let tss_base = core::ptr::addr_of!(self.tss) as u64;
+    /// Fill the tables for their final address `at`, where they are loaded
+    /// and never move: the GDT's TSS descriptor names `at`'s TSS, so `self`
+    /// may be built elsewhere and moved to `at` before `load`.
+    pub fn init(&mut self, at: *const CpuTables, ist_tops: [u64; 4], rsp0: u64) {
+        let tss = self.tss.get_mut();
+        *tss = Tss::empty();
+        tss.set_rsp0(rsp0);
+        tss.set_ist(IstSlot::DoubleFault, ist_tops[0]);
+        tss.set_ist(IstSlot::Nmi, ist_tops[1]);
+        tss.set_ist(IstSlot::MachineCheck, ist_tops[2]);
+        tss.set_ist(IstSlot::Debug, ist_tops[3]);
+        let tss_base = (at.addr() as u64).wrapping_add(offset_of!(CpuTables, tss) as u64);
         self.gdt = Gdt::with_tss(tss_base, (size_of::<Tss>() - 1) as u16);
     }
 
@@ -70,15 +89,29 @@ impl CpuTables {
         }
     }
 
-    pub fn tss_ptr(&mut self) -> *mut Tss {
-        core::ptr::addr_of_mut!(self.tss)
+    pub fn rsp0(&self) -> u64 {
+        // SAFETY: the pointer comes from the `UnsafeCell` behind `&self`, so
+        // it is valid for reads, and only `set_rsp0` writes the TSS, on the
+        // owning CPU with IF=0, which this read on that CPU does not
+        // overlap; `read_unaligned` needs no alignment in the packed `Tss`.
+        // Established by `arch::x86_64::gdt::CpuTables::set_rsp0`.
+        unsafe { core::ptr::addr_of!((*self.tss.get()).rsp[0]).read_unaligned() }
     }
 
-    pub fn rsp0(&self) -> u64 {
-        // SAFETY: the pointer comes from `&self`, so it is valid for reads;
-        // `read_unaligned` needs no alignment in the packed `Tss`;
-        // established here.
-        unsafe { core::ptr::addr_of!(self.tss.rsp[0]).read_unaligned() }
+    /// Write TSS.RSP0, the stack the CPU loads on a ring-3 to ring-0
+    /// change: the TSS's one writer after `load`.
+    ///
+    /// # Safety
+    /// Runs on the CPU that loaded these tables, with IF=0, so no other
+    /// software access to the TSS runs meanwhile, and the CPU reads RSP0
+    /// only on a ring change, which this ring-0 IF=0 stretch rules out.
+    pub unsafe fn set_rsp0(&self, top: u64) {
+        // SAFETY: the pointer comes from the `UnsafeCell`, so it carries
+        // write provenance, and this fn's `# Safety` makes the write the
+        // TSS's only access; `write_unaligned` needs no alignment in the
+        // packed `Tss`. Established by `CpuTables::set_rsp0`'s callers,
+        // `syscall_init::set_rsp0_for`.
+        unsafe { core::ptr::addr_of_mut!((*self.tss.get()).rsp[0]).write_unaligned(top) };
     }
 }
 
@@ -99,12 +132,22 @@ pub(crate) struct Bsp {
 
 pub(crate) static BSP: BootCell<Bsp> = BootCell::new();
 
-/// Per-AP GDT/TSS plus the IST/RSP0 stacks they point at.
+/// Per-AP GDT/TSS plus the IST/RSP0 stacks they point at. `tables` is
+/// the pointer `TryBox::into_raw` returned, so every pointer the AP takes
+/// from it keeps the allocation's write provenance; [`free_ap_tables`]
+/// frees it with `TryBox::from_raw`.
 pub struct ApTables {
-    pub tables: TryBox<CpuTables>,
+    pub tables: NonNull<CpuTables>,
     pub ist: [GuardedStack; 4],
     pub rsp0: GuardedStack,
 }
+
+// SAFETY: `tables` owns its heap block as the `TryBox` it came from did,
+// so moving an `ApTables` moves that ownership, which `CpuTables: Send`
+// allows; the AP that runs on the tables reads them through a pointer
+// `smp_init::start_one` hands it one AP at a time. Established by
+// `arch::x86_64::gdt::alloc_ap_tables`.
+unsafe impl Send for ApTables {}
 
 /// Allocate per-CPU GDT/TSS and guarded IST/RSP0 stacks. Caller `load`s.
 pub fn alloc_ap_tables() -> Option<ApTables> {
@@ -154,7 +197,9 @@ pub fn alloc_ap_tables() -> Option<ApTables> {
         }
         return None;
     };
+    let at: *const CpuTables = &*tables;
     tables.init(
+        at,
         [
             ist[0].top().as_u64(),
             ist[1].top().as_u64(),
@@ -163,6 +208,14 @@ pub fn alloc_ap_tables() -> Option<ApTables> {
         ],
         rsp0.top().as_u64(),
     );
+    // A box's pointer is never null, so the `None` arm only frees.
+    let Some(tables) = NonNull::new(TryBox::into_raw(tables)) else {
+        kva_init::free_stack(rsp0);
+        for s in ist {
+            kva_init::free_stack(s);
+        }
+        return None;
+    };
     Some(ApTables { tables, ist, rsp0 })
 }
 
@@ -172,7 +225,12 @@ pub fn free_ap_tables(t: ApTables) {
     for s in ist {
         kva_init::free_stack(s);
     }
-    drop(tables);
+    // SAFETY: `tables` came from `TryBox::into_raw` in `alloc_ap_tables`,
+    // and this `ApTables`, consumed here, was its only owner; no CPU runs
+    // on the tables any more (`smp_init` frees them only for an AP that
+    // never started or was abandoned). Established by
+    // `arch::x86_64::gdt::alloc_ap_tables`.
+    drop(unsafe { TryBox::from_raw(tables.as_ptr()) });
 }
 
 /// Allocate IST + RSP0 stacks, fill GDT/TSS, load them.
@@ -199,32 +257,32 @@ pub unsafe fn init_bsp() {
         ist[3].top().as_u64(),
     ];
     let rsp0_top = rsp0.top().as_u64();
-    let bsp = Bsp {
+    let mut bsp = Bsp {
         tables: CpuTables::empty(),
         ist,
         rsp0,
     };
-    // `tables.init` writes the TSS base into the GDT. Do that after
-    // `set` so the base is the BootCell address, not this stack slot.
+    // `init` writes the TSS base into the GDT: the base is the tables'
+    // final address in the cell, not this stack slot, and it is filled
+    // before `set`, so nothing takes `&mut` to the cell after publication.
+    // SAFETY: a place expression on the cell's payload address, which
+    // builds no reference and reads nothing; established here.
+    let at = unsafe { core::ptr::addr_of!((*BSP.as_ptr()).tables) };
+    bsp.tables.init(at, ist_tops, rsp0_top);
     // SAFETY: invariant I22, established at `cell::BootCell::set`: the one
     // write, on the BSP before SMP (this fn's `# Safety`).
     unsafe { BSP.set(bsp) };
-    // SAFETY: no reader has seen `BSP` yet (single CPU, IRQs off, the cell
-    // set just above), so this is the only reference to it while `init`
-    // fills the tables in place; established here.
-    let p = unsafe { &mut *BSP.as_ptr() };
-    p.tables.init(ist_tops, rsp0_top);
-    // SAFETY: invariant I230, established here: `p.tables` lives in the
-    // `BSP` static, so it never moves or is freed, and `init` just filled
-    // it; IRQs are off (this fn's `# Safety`).
-    unsafe { p.tables.load() };
+    // SAFETY: invariant I230, established here: the tables live in the
+    // `BSP` static, at the address `init` filled them for, so they never
+    // move or are freed; IRQs are off (this fn's `# Safety`).
+    unsafe { BSP.get().tables.load() };
 }
 
-/// TSS for the BSP. Call after [`init_bsp`]. The CPU only reads
-/// `TSS.RSP0`; software writes it on each switch through this pointer
-/// (`syscall_init::set_rsp0_for`).
-pub fn bsp_tss_ptr() -> *mut Tss {
-    core::ptr::addr_of!(BSP.get().tables.tss) as *mut Tss
+/// The BSP's tables, for `PerCpu.tables`. Call after [`init_bsp`].
+/// `syscall_init::set_rsp0_for` writes TSS.RSP0 through it with
+/// [`CpuTables::set_rsp0`], which takes `&self`.
+pub fn bsp_tables() -> *const CpuTables {
+    core::ptr::from_ref(&BSP.get().tables)
 }
 
 pub fn bsp_rsp0_top() -> u64 {

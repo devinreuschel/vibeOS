@@ -4,6 +4,7 @@
 //! CPU from values the BSP computes once from CPUID (DESIGN §5.1, §11.4).
 
 use core::arch::asm;
+use core::marker::PhantomData;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
@@ -374,8 +375,12 @@ pub fn cpu_index() -> Option<u32> {
 /// `irq_nest` on the per-CPU area tracks live `InterruptGuard` depth
 /// on this CPU. `switch_to` swaps it with the TCB because the guard
 /// object stays on the outgoing stack.
+///
+/// `!Send`, as `std::sync::MutexGuard` is: the IF state it restores
+/// belongs to the CPU that entered it (ROADMAP §10.3, F038).
 pub struct InterruptGuard {
     restore: bool,
+    _not_send: PhantomData<*const ()>,
 }
 
 impl InterruptGuard {
@@ -394,6 +399,7 @@ impl InterruptGuard {
         run_hook(&NEST_ENTER);
         Self {
             restore: rflags & (1 << 9) != 0,
+            _not_send: PhantomData,
         }
     }
 }

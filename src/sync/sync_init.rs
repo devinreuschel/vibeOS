@@ -67,6 +67,8 @@ unsafe impl<T: Send> Sync for SpinMutex<T> {}
 // the `SpinLock` holds only atomics. Established here.
 unsafe impl<T: Send> Send for SpinMutex<T> {}
 
+/// `!Send` through its `InterruptGuard`, and `Sync` only when `T: Sync`,
+/// as `std::sync::MutexGuard` is (ROADMAP §10.3, F038).
 pub struct SpinMutexGuard<'a, T> {
     mutex: &'a SpinMutex<T>,
     owner: usize,
@@ -74,6 +76,16 @@ pub struct SpinMutexGuard<'a, T> {
     rank: u8,
     _irq: InterruptGuard,
 }
+
+// SAFETY: std's `MutexGuard` rule: a shared guard hands out only `&T`
+// (`Deref`), which `T: Sync` makes safe to share, and `T: Send` is the
+// bound rule 6 asks of a type that shares `&T`; established here.
+unsafe impl<T: Send + Sync> Sync for SpinMutexGuard<'_, T> {}
+
+vibeos::assert_not_impl!(InterruptGuard: Send);
+vibeos::assert_not_impl!(SpinMutexGuard<'static, u8>: Send);
+vibeos::assert_not_impl!(SpinMutexGuard<'static, core::cell::Cell<u8>>: Sync);
+vibeos::assert_impl!(SpinMutexGuard<'static, u8>: Sync);
 
 impl<T> SpinMutex<T> {
     pub const fn with_rank(v: T, rank: u8) -> Self {
@@ -223,8 +235,10 @@ fn held_slot() -> Option<&'static AtomicU64> {
     HELD.get(lock_cpu())
 }
 
-/// This CPU's held locks. `Held::EMPTY` before per-CPU data is live.
+/// This CPU's held locks. `Held::EMPTY` before per-CPU data is live. The
+/// slot is read with IF=0, so it is this CPU's (DESIGN §2.9 rule 5).
 pub fn held() -> Held {
+    let _irq = InterruptGuard::enter();
     match held_slot() {
         // Relaxed: only this CPU writes its slot.
         Some(h) => Held::from_raw(h.load(Ordering::Relaxed)),
@@ -386,6 +400,8 @@ pub(crate) fn may_take_sched() -> bool {
     if halting() {
         return false;
     }
+    // IF=0 for the slot read, so it is this CPU's (DESIGN §2.9 rule 5).
+    let _irq = InterruptGuard::enter();
     let Some(slot) = held_slot() else {
         return false;
     };
@@ -397,7 +413,7 @@ pub(crate) fn may_take_sched() -> bool {
 /// The current thread's `Tcb`, or `None` before per-CPU data is live and
 /// before the bootstrap thread is installed.
 fn current_tcb() -> Option<NonNull<Tcb>> {
-    NonNull::new(per_cpu_init::try_current()?.current)
+    NonNull::new(crate::arch::current_tcb())
 }
 
 /// Whether a counted object may be released in place here (DESIGN §2.11
@@ -612,6 +628,8 @@ fn trace_record(rank: u8, count: u8) {
     }
     TRACE_RC[i].store(u16::from(rank) << 8 | u16::from(count), Ordering::Relaxed);
     TRACE_AT[i].store(
+        // The trace reads it back as a shared `&Location` only.
+        // PROVENANCE: nothing writes through the pointer.
         core::ptr::from_ref(Location::caller()).cast_mut(),
         Ordering::Relaxed,
     );

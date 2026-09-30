@@ -92,11 +92,13 @@ fn send_failed(what: &str, e: IpiError) {
     );
 }
 
+/// This CPU's bit. IF=0 callers only (DESIGN §2.9 rule 5).
 fn my_bit() -> u64 {
     let id = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
     if id >= 64 { 0 } else { 1u64 << id }
 }
 
+/// This CPU's index. IF=0 callers only (DESIGN §2.9 rule 5).
 pub(super) fn my_index() -> usize {
     per_cpu_init::try_current()
         .map(|c| c.cpu_id as usize)
@@ -410,12 +412,14 @@ pub fn halt_others() {
 /// contract). IRQ-off for publish → IPI → ack → clear; inbound still
 /// polls `service_incoming`.
 pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
+    // IF=0 before `my_index`, so `me` stays this CPU's id (DESIGN §2.9
+    // rule 5).
+    let _irq = x86::InterruptGuard::enter();
     let me = my_index() as u32;
     let waiters = waiter_mask(mask & per_cpu_init::online_mask(), me);
     if waiters == 0 {
         return;
     }
-    let _irq = x86::InterruptGuard::enter();
     while CALL_BUSY
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()

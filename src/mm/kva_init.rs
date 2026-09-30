@@ -405,9 +405,15 @@ unsafe fn free_stack_shootdown(stack: GuardedStack) {
 }
 
 /// Unmap `n` pages, drop PT, shootdown. Frees nothing: the caller owns
-/// the frames and frees them after this returns.
-fn unmap_shootdown(va: VirtAddr, n: usize) {
-    let n = n.min(MAX_UNMAP);
+/// the frames and frees them after this returns. `n` is at most
+/// `MAX_UNMAP`, a kernel invariant no input reaches: `vmap` rejects a
+/// larger block and a stack is at most `MAX_STACK_PAGES` (the const
+/// assertion above).
+pub(super) fn unmap_shootdown(va: VirtAddr, n: usize) {
+    assert!(
+        n <= MAX_UNMAP,
+        "kva: unmap_shootdown of {n} pages, over MAX_UNMAP"
+    );
     // SAFETY: `unmap_only_locked`'s contract; the shootdown below runs
     // before this fn returns, and every caller frees the frames and the VA
     // only after that, established here.

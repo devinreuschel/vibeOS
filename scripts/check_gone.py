@@ -208,6 +208,8 @@ GONE: list[tuple[str, str]] = [
     ("src/fs/vibefs_init.rs: static IMAGE", "driver and volume state as"),
     ("CALIB_BAND_TCG", "`tsc_calib_source` measures PIT channel 2 once"),
     ("calib_band", "`tsc_calib_source` measures PIT channel 2 once"),
+    ("bsp_tss_ptr", "the kernel writes the TSS"),
+    ("tss_ptr", "the kernel writes the TSS"),
     ("walk_abs", "every path syscall resolves through `Vfs`"),
     ("vol_parent", "every path syscall resolves through `Vfs`"),
     ("routed_rest", "every path syscall resolves through `Vfs`"),

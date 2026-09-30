@@ -11,6 +11,7 @@
 //! each `&mut` to a model unique.
 
 use core::cell::UnsafeCell;
+use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 
@@ -57,9 +58,21 @@ unsafe impl<T: Send> Sync for BlockingMutex<T> {}
 // established here.
 unsafe impl<T: Send> Send for BlockingMutex<T> {}
 
+/// `!Send`, and `Sync` only when `T: Sync`, as `std::sync::MutexGuard`
+/// is (ROADMAP §10.3, F038).
 pub struct BlockingMutexGuard<'a, T> {
     mutex: &'a BlockingMutex<T>,
+    _not_send: PhantomData<*const ()>,
 }
+
+// SAFETY: std's `MutexGuard` rule: a shared guard hands out only `&T`
+// (`Deref`), which `T: Sync` makes safe to share, and `T: Send` is the
+// bound rule 6 asks of a type that shares `&T`; established here.
+unsafe impl<T: Send + Sync> Sync for BlockingMutexGuard<'_, T> {}
+
+vibeos::assert_not_impl!(BlockingMutexGuard<'static, u8>: Send);
+vibeos::assert_not_impl!(BlockingMutexGuard<'static, core::cell::Cell<u8>>: Sync);
+vibeos::assert_impl!(BlockingMutexGuard<'static, u8>: Sync);
 
 impl<T> BlockingMutex<T> {
     pub const fn new(v: T) -> Self {
@@ -89,7 +102,10 @@ impl<T> BlockingMutex<T> {
             st.try_acquire(me())
         });
         if got {
-            Some(BlockingMutexGuard { mutex: self })
+            Some(BlockingMutexGuard {
+                mutex: self,
+                _not_send: PhantomData,
+            })
         } else {
             None
         }
@@ -115,7 +131,12 @@ impl<T> BlockingMutex<T> {
                 Err(true)
             });
             match got {
-                Ok(()) => return Some(BlockingMutexGuard { mutex: self }),
+                Ok(()) => {
+                    return Some(BlockingMutexGuard {
+                        mutex: self,
+                        _not_send: PhantomData,
+                    });
+                }
                 Err(false) => return None,
                 Err(true) => {
                     if wait_resume() == WaitOutcome::Timeout {
