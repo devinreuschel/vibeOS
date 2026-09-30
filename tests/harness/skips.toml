@@ -148,3 +148,8 @@ smp = 1
 name = "late_wake_after_exit"
 reason = "needs 2 cpus"
 smp = 1
+
+[[skip]]
+name = "lifetime_console_write_acks_shootdown"
+reason = "needs 2 CPUs"
+smp = 1
