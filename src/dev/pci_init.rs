@@ -8,6 +8,8 @@
 //! (DESIGN §4.1).
 
 use core::fmt::Write;
+#[cfg(feature = "kernel_tests")]
+use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::dev::{self, BarClaim, DevRef, Device};
@@ -63,6 +65,10 @@ fn with_ecam<R>(f: impl FnOnce(&mut Ecam) -> R) -> R {
 static CFG_LOCK: AtomicBool = AtomicBool::new(false);
 /// Set once the scan has run; `dev::ktest::pci_live` reads it.
 pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
+/// The online-CPU mask while the scan sized the BARs; 0 before it runs.
+/// `dev::ktest::test_pci_scan_bsp_only` reads it.
+#[cfg(feature = "kernel_tests")]
+pub(super) static SCAN_ONLINE: AtomicU64 = AtomicU64::new(0);
 
 fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
     let _irq = InterruptGuard::enter();
@@ -354,6 +360,8 @@ pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
 
     let mut found = [FuncInfo::empty(); MAX_SCAN];
     let n = pci::enumerate(&mut HwCfg, 0, &mut found);
+    #[cfg(feature = "kernel_tests")]
+    SCAN_ONLINE.store(crate::per_cpu_init::online_mask(), Ordering::Release);
     let scanned = found.get(..n).unwrap_or(&[]);
     // Each published function's entry id, by scan index; 0 for none. The
     // scan is depth first, so a bridge is published before what is behind

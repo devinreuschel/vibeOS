@@ -132,6 +132,19 @@ pub(crate) fn test_pci_qemu_set() -> Outcome {
     Outcome::Ok
 }
 
+/// The boot scan sized every BAR while the BSP ran alone. A sizing write
+/// moves a live BAR, and QEMU's TCG can send another CPU's MMIO through a
+/// stale TLB entry meanwhile: a LAPIC EOI lost that way leaves the timer
+/// vector in service, and that CPU takes no IPI again (ROADMAP §10.2).
+pub(crate) fn test_pci_scan_bsp_only() -> Outcome {
+    // Acquire: pairs with the scan's Release store.
+    match pci_init::SCAN_ONLINE.load(Ordering::Acquire) {
+        0 => Outcome::Fail("scan has not run"),
+        1 => Outcome::Ok,
+        _ => Outcome::Fail("scan sized BARs with an AP online"),
+    }
+}
+
 /// No driver binds the VGA function, so nothing claims or maps its BAR0:
 /// the scan maps no BAR. The framebuffer that aliases it is on the
 /// physmap write-back, never uncached (§9.2).
@@ -1258,6 +1271,7 @@ pub(crate) fn rng_fail_after_qenable_case() -> Outcome {
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("pci_qemu_set", test_pci_qemu_set),
+    test("pci_scan_bsp_only", test_pci_scan_bsp_only),
     test("pci_bar_map", test_pci_bar_map),
     test("pci_cfg_rw", test_pci_cfg_rw),
     test("pci_claim_exclusive", test_pci_claim_exclusive).once(),
