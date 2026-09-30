@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
+use vibeos::limits::MAX_UNMAP_PAGES;
 use vibeos::paging::{self, PageFlags, PageSize, PhysAddr, VirtAddr, heap_flags};
 use vibeos::pmm::Frames;
 
@@ -680,6 +681,26 @@ const VMAP_ORDER: u8 = 5;
 
 const VMAP_PAGES: u64 = 1 << VMAP_ORDER;
 
+/// `unmap_shootdown` over `MAX_UNMAP` pages hits its assertion before it
+/// takes PT, where it clamped silently before (ROADMAP §10.3, F107).
+pub(crate) fn unmap_shootdown_over_max_asserts() -> Outcome {
+    let n = MAX_UNMAP_PAGES + 1;
+    let len = n as u64 * PAGE_SIZE;
+    let Some(va) = alloc_va(len) else {
+        return Outcome::Fail("kva alloc");
+    };
+    let nest = per_cpu_init::irq_nest();
+    let hit = crate::arch::catch::catch_panic(|| kva_init::unmap_shootdown(va, n));
+    free_va(va, len);
+    if !hit {
+        return Outcome::Fail("no assertion");
+    }
+    if per_cpu_init::irq_nest() != nest {
+        return Outcome::Fail("irq_nest changed");
+    }
+    Outcome::Ok
+}
+
 /// A 32-frame `vmap` maps the handle's own frames, and `vunmap` unmaps all
 /// 32 pages and returns exactly the span it mapped to the KVA free list.
 pub(crate) fn vmap_32_frames_unmapped() -> Outcome {
@@ -969,5 +990,9 @@ pub(crate) const TESTS: &[Test] = &[
     test("frames_none_leaked", frames_none_leaked),
     test("current_mapper_holds_pt", current_mapper_holds_pt),
     test("vmap_32_frames_unmapped", vmap_32_frames_unmapped),
+    test(
+        "unmap_shootdown_over_max_asserts",
+        unmap_shootdown_over_max_asserts,
+    ),
     test("kernel_va0_faults", kernel_va0_faults),
 ];
