@@ -103,3 +103,8 @@ smp = 1
 name = "console_write_newlines"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "cross_cpu_spawn"
+reason = "no AP"
+smp = 1
