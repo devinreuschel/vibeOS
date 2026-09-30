@@ -218,3 +218,8 @@ smp = 1
 name = "syscall_body_if_on"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "tlb_shootdown_remote"
+reason = "no AP"
+smp = 1
