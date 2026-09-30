@@ -51,6 +51,7 @@ use vibeos::arch::{
     Barriers, ContextSwitch, CycleCounter, InterruptMask, MmioWidth, PerCpuBase, Port, SyscallAbi,
 };
 use vibeos::atomic::statics::{AtomicBool, AtomicU64, Ordering};
+use vibeos::proc::syscall_table::{Handlers, NrTable, SysResult};
 use vibeos::sched::thread::{CpuContext, Tcb, apply_if_on_resume, prepare_thread};
 
 /// The x86_64 port's hardware half: the seam traits (PORTABILITY §11.1) on
@@ -303,5 +304,15 @@ impl SyscallAbi for Arch {
     #[inline]
     fn restart(f: &mut Self::Frame) {
         Abi::restart(f);
+    }
+
+    #[inline]
+    fn table() -> &'static NrTable {
+        Abi::table()
+    }
+
+    #[inline]
+    fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
+        Abi::dispatch(h, raw_nr, regs)
     }
 }

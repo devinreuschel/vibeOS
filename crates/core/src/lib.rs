@@ -62,7 +62,7 @@ pub mod sync;
 pub mod time;
 pub mod trap;
 
-pub use arch::x86_64::{apic, desc, pic, uart, vectors};
+pub use arch::{apic, desc, pic, uart, vectors};
 pub use block::{cache, part};
 pub use console::{fb, font, kbd};
 pub use dev::{dma, entropy, pci, virtio};

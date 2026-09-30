@@ -9,6 +9,14 @@
 
 pub mod x86_64;
 
+/// The reference port's pure-half items that portable code and the kernel
+/// name directly, until a second port's kernel builds (ROADMAP Phase 11): the
+/// x86_64 descriptor, vector, 8259, APIC and UART encodings, its user frame,
+/// and its syscall numbers (`docs/ARCH.md`).
+pub use x86_64::syscall::nr as syscall_nr;
+pub use x86_64::trap::UserFrame;
+pub use x86_64::{apic, desc, pic, uart, vectors};
+
 use crate::thread::Tcb;
 
 /// Declared once, in `crate::trap` (ROADMAP §10.3, §10.6).

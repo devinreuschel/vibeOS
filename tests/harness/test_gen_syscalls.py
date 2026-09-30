@@ -18,6 +18,7 @@ from scripts.gen_syscalls import (
     SYSCALL_MD,
     TABLE,
     USER_OUT,
+    X86_OUT,
     TableError,
     generate,
     main,
@@ -102,14 +103,18 @@ class GenerateTest(unittest.TestCase):
 
     def test_emits_every_output(self) -> None:
         self.assertEqual(set(self.out), {e.path for e in EMITTERS})
-        self.assertEqual(set(self.out), {KERNEL_OUT, USER_OUT, SYSCALL_MD})
+        self.assertEqual(set(self.out), {KERNEL_OUT, X86_OUT, USER_OUT, SYSCALL_MD})
         kernel = self.out[KERNEL_OUT]
+        x86 = self.out[X86_OUT]
         self.assertTrue(kernel.startswith("// @generated"))
-        self.assertIn("pub const SYS_READ: u64 = 0;", kernel)
+        self.assertTrue(x86.startswith("// @generated"))
+        self.assertIn("pub const SYS_READ: u64 = 0;", x86)
+        self.assertIn("pub const SYS_READ: u64 = 63;", kernel)
+        self.assertNotIn("pub mod x86_64", kernel)
         self.assertIn("fn read(&mut self, fd: u32, buf: u64, count: usize) -> SysResult;", kernel)
         self.assertIn("kind: PtrKind::Buf { len_from: 2 },", kernel)
         self.assertIn("kind: PtrKind::Unread,", kernel)
-        self.assertIn("NrRule::SignExtendEax", kernel)
+        self.assertIn("NrRule::SignExtendEax", x86)
         self.assertIn("NrRule::Low32", kernel)
         # `open` has no aarch64 number: aarch64's `call` returns ENOSYS for it.
         self.assertIn("Sys::Open => Err(KError::ENOSYS),", kernel)
@@ -154,7 +159,7 @@ class GenerateTest(unittest.TestCase):
 
     def test_clone_aarch64_order_swaps_registers(self) -> None:
         kernel = self.out[KERNEL_OUT]
-        x86 = kernel[kernel.index("pub mod x86_64") : kernel.index("pub mod aarch64")]
+        x86 = self.out[X86_OUT]
         arm = kernel[kernel.index("pub mod aarch64") :]
         want_x86 = "h.clone(regs[0], regs[1], regs[2], regs[3], regs[4])"
         want_arm = "h.clone(regs[0], regs[1], regs[2], regs[4], regs[3])"
@@ -167,8 +172,7 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(clone.aarch64_order, (0, 1, 2, 4, 3))
 
     def test_c_type_casts(self) -> None:
-        kernel = self.out[KERNEL_OUT]
-        x86 = kernel[kernel.index("pub mod x86_64") : kernel.index("pub mod aarch64")]
+        x86 = self.out[X86_OUT]
         self.assertIn("h.read(regs[0] as u32, regs[1], regs[2] as usize)", x86)
         self.assertIn("h.open(regs[0], regs[1] as i32, regs[2] as u16)", x86)
         self.assertIn("h.wait4(regs[0] as i32, regs[1], regs[2] as i32, regs[3])", x86)
@@ -344,7 +348,7 @@ class ValidationTest(unittest.TestCase):
 
     def test_script_docstring_names_its_outputs(self) -> None:
         doc = gen_syscalls.__doc__ or ""
-        for p in (KERNEL_OUT, USER_OUT):
+        for p in (KERNEL_OUT, X86_OUT, USER_OUT):
             self.assertIn(str(p), doc)
         self.assertTrue(re.search(r"--check", doc))
 

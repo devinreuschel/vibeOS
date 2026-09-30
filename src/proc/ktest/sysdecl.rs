@@ -2,9 +2,11 @@
 //! only, ROADMAP §10.5): `sysdecl`, embedded from `make user` (C-USERBINS),
 //! run in ring 3. Rows: the list in crate::ktest.
 
+use vibeos::arch::SyscallAbi;
 use vibeos::proc::{wexitstatus, wifexited};
 use vibeos::syscall::{EBADF, ECHILD, EFAULT, PtrKind, ROWS};
 
+use crate::arch::current::Arch;
 use crate::ktest::Outcome;
 use crate::ktest::user::{self, Image};
 
@@ -29,7 +31,10 @@ fn run(argv: &[&str]) -> Result<u32, Outcome> {
 /// declaration cannot drift from its handler (F150).
 pub(crate) fn syscall_ptr_decl_efault() -> Outcome {
     let mut cases = 0u32;
-    for row in ROWS.iter().filter(|r| r.x86_64.is_some()) {
+    for row in ROWS
+        .iter()
+        .filter(|r| <Arch as SyscallAbi>::table().number(r.sys).is_some())
+    {
         for arg in row.args {
             if !arg.ptr.is_some_and(|p| p.kind != PtrKind::Unread) {
                 continue;

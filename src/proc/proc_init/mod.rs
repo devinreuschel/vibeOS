@@ -515,9 +515,7 @@ pub fn syscall(frame: &mut UserFrame) -> i64 {
     let args: [u64; 6] = core::array::from_fn(|i| Arch::arg(frame, i));
     let ret = syscall::encode(dispatch_frame(nr, args, Some(frame)));
     if syscall_init::trace_enabled() {
-        let name = syscall::x86_64::TABLE
-            .lookup(nr)
-            .map_or("?", |s| s.row().name);
+        let name = Arch::table().lookup(nr).map_or("?", |s| s.row().name);
         #[expect(
             clippy::let_underscore_must_use,
             reason = "a write to Serial cannot fail (DESIGN §2.5)"
@@ -534,7 +532,7 @@ pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
 }
 
 fn dispatch_frame(nr: u64, args: [u64; 6], frame: Option<&mut UserFrame>) -> SysResult {
-    syscall::x86_64::dispatch(&mut Ctx { frame }, nr, &args)
+    Arch::dispatch(&mut Ctx { frame }, nr, &args)
 }
 
 /// The running syscall's context: the user frame, which `fork` copies and

@@ -13,7 +13,7 @@
 use core::cell::RefCell;
 use core::mem::size_of;
 
-use super::x86_64::paging;
+use super::x86_64::{paging, syscall};
 use super::{
     Barriers, BootHandover, ContextSwitch, CycleCounter, InterruptMask, Ipi, IpiSend, MmioWidth,
     PageTable, PerCpuBase, Port, SyscallAbi, UserAccess,
@@ -21,6 +21,7 @@ use super::{
 use crate::atomic::statics::AtomicU32;
 use crate::atomic::{Ordering, fence};
 use crate::paging::{PageFlags, PhysAddr, VirtAddr};
+use crate::proc::syscall_table::{Handlers, NrTable, SysResult};
 
 /// Events the log keeps; later ones are counted in [`EventLog::dropped`].
 pub const LOG_CAP: usize = 256;
@@ -494,6 +495,13 @@ impl SyscallAbi for Arch {
     /// `ret`, so it needs no restoring.
     fn restart(f: &mut Frame) {
         f.ip = f.ip.wrapping_sub(SYSCALL_INSN_LEN);
+    }
+    /// x86_64's numbers, so host tests dispatch the kernel's table.
+    fn table() -> &'static NrTable {
+        &syscall::TABLE
+    }
+    fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
+        syscall::dispatch(h, raw_nr, regs)
     }
 }
 
