@@ -145,8 +145,32 @@ pub fn slot_ptr(id: u32) -> Option<*mut PerCpu> {
     CPUS.try_get()?.get(id as usize).map(|c| c.self_ptr)
 }
 
+/// Set by [`arm_if_checks`]: from here on [`current`] and [`try_current`]
+/// assert IF=0 in debug builds.
+static IF_CHECKS: AtomicBool = AtomicBool::new(false);
+
+/// Arm the IF=0 assertion of [`current`] and [`try_current`] (DESIGN §2.9
+/// rule 5). `sched_init::init` calls it once, before `irq: enabled`.
+pub fn arm_if_checks() {
+    // Release: pairs with the Acquire load in `if_checks_armed`.
+    IF_CHECKS.store(true, Ordering::Release);
+}
+
+/// Whether [`arm_if_checks`] ran.
+pub fn if_checks_armed() -> bool {
+    // Acquire: pairs with the Release store in `arm_if_checks`.
+    IF_CHECKS.load(Ordering::Acquire)
+}
+
 /// `gs:[0]` == `self_ptr`. Only after [`init_bsp`] (and AP `install_gs`).
+/// IF=0 only once [`arm_if_checks`] ran: with IF=1 the thread may move to
+/// another CPU and keep a reference to the one it left.
+#[track_caller]
 pub fn current() -> &'static PerCpu {
+    debug_assert!(
+        !if_checks_armed() || !x86::interrupts_enabled(),
+        "per_cpu: access with IF=1 (INVARIANTS §2.9 rule 5)"
+    );
     assert!(is_live(), "per_cpu: not live");
     let p = gs_self();
     assert!(!p.is_null(), "per_cpu: gs null");
@@ -158,7 +182,14 @@ pub fn current() -> &'static PerCpu {
     unsafe { &*p }
 }
 
+/// [`current`], or `None` before the area is live. IF=0 only, as
+/// [`current`] is.
+#[track_caller]
 pub fn try_current() -> Option<&'static PerCpu> {
+    debug_assert!(
+        !if_checks_armed() || !x86::interrupts_enabled(),
+        "per_cpu: access with IF=1 (INVARIANTS §2.9 rule 5)"
+    );
     if !is_live() {
         return None;
     }
@@ -363,7 +394,8 @@ pub fn is_online(cpu_id: u32) -> bool {
     online_mask() & (1u64 << cpu_id) != 0
 }
 
-/// Field access that is safe from an ISR once `GS_BASE` is live.
+/// Field access that is safe from an ISR once `GS_BASE` is live. IF=0
+/// only, as [`current`] is.
 #[macro_export]
 macro_rules! per_cpu {
     ($field:ident) => {

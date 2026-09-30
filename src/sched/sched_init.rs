@@ -31,6 +31,7 @@ pub unsafe fn init() {
     });
     crate::ipi_init::set_reschedule_hook(thread_init::schedule_preempt);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    per_cpu_init::arm_if_checks();
     LIVE.store(true, Ordering::Release);
 }
 
