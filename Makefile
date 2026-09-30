@@ -216,6 +216,7 @@ help:
 	  '  run-panic             boot panic-test ISO, no window, COM1 on the terminal' \
 	  '  debug                 as run, halted with a gdb stub on :1234; then gdb -x scripts/vibeos.gdb' \
 	  '  layout                objdump sections + __kernel_ symbols' \
+	  '  vmcore                the core tool: vmcore report --core <file|-> --elf <kernel.elf>' \
 	  '  test-unit             vibeos-core host tests (any host triple)' \
 	  '  models-quick          loom models (loom_*) at 3 preemptions, ROADMAP §10.8' \
 	  '  test-harness          python unit tests for the harness' \
@@ -452,10 +453,20 @@ FSCK_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/fsck-vibefs
 NBD_CACHE := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/nbd-cache
 VIBEFS_CAT := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/vibefs-cat
 
+# The core tool (ROADMAP §10.7) decodes kernel types whose layout differs with
+# debug assertions (docs/VMCOREINFO.md), so it builds in the kernel's profile.
+VMCORE := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/$(if $(filter release,$(CARGO_PROFILE)),release,debug)/vmcore
+
 ifneq ($(VIBEOS_PREBUILT),1)
 $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT): $(HOSTLIB_DEPS)
 	cargo build -p vibeos-hostlib-tests --bins --target $(HOST_TRIPLE)
+
+$(VMCORE): $(HOSTLIB_DEPS)
+	cargo build -p vibeos-hostlib-tests --bin vmcore --target $(HOST_TRIPLE) $(CARGO_FLAGS)
 endif
+
+.PHONY: vmcore
+vmcore: $(VMCORE)
 
 # What a tier job downloads instead of building (DESIGN §8.6): every ISO and
 # every host tool a `test-*` recipe lists. Recursive `=`, so it follows the
