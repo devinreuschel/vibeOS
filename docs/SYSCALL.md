@@ -129,6 +129,8 @@ only where Linux's does, as Linux's `F_GETOWN` returns a process group as a
 negative number, which is why glibc reads it through `F_GETOWN_EX`. Linux
 names, Linux values:
 
+<!-- gen_syscalls: begin errno-table -->
+
 | Name | Value | Used |
 |------|------:|------|
 | `EPERM` | 1 | `mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0) |
@@ -145,22 +147,30 @@ names, Linux values:
 | `EFAULT` | 14 | bad user pointer / length |
 | `EBUSY` | 16 | defined; no syscall returns it |
 | `EEXIST` | 17 | `O_EXCL`; `mmap` with `MAP_FIXED_NOREPLACE` (or `MAP_FIXED`, §3.1) over a mapping |
+| `EXDEV` | 18 | defined; no syscall returns it |
 | `ENODEV` | 19 | a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4 |
 | `ENOTDIR` | 20 | |
 | `EISDIR` | 21 | |
 | `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; the non-Linux cases in §2.1 |
+| `ENFILE` | 23 | defined; no syscall returns it |
 | `EMFILE` | 24 | per-process fd table full (`open`); the non-Linux cases in §2.1 |
 | `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3) |
+| `ENOSPC` | 28 | defined; no syscall returns it |
+| `ESPIPE` | 29 | defined; no syscall returns it |
 | `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv or envp string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
+| `ENOTEMPTY` | 39 | defined; no syscall returns it |
+| `ELOOP` | 40 | defined; no syscall returns it |
+| `EOPNOTSUPP` | 95 | defined; no syscall returns it |
+
+<!-- gen_syscalls: end errno-table -->
 
 Unknown numbers return `-ENOSYS`.
 
 ### 2.1 Differences from Linux
 
-The mapping is `proc_init::fs_errno` plus the FAT and vibefs error
-conversions (`FatError::to_fs`, `vibefs::Error::to_fs`). ROADMAP §10.4 (E2;
-F083) replaces them with one `KError` table that generates §2.
+The mapping is `vibeos::kerror`: each module error converts to one `KError`
+through its `From` impl, and the `KError` table generates §2 (ROADMAP §10.4).
 
 - `FsError::NoSpace` maps to `EMFILE`, so `EMFILE` also means a full
   system-wide open-file table (Linux `ENFILE`, 23), a volume out of blocks,

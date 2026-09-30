@@ -39,7 +39,7 @@ const F_RIP: usize = PAD + offset_of!(UserFrame, rip);
 /// From `orig_rax`, where the 15 GPR pops leave RSP, to the `rsp` slot.
 const ORIG_TO_RSP: usize = offset_of!(UserFrame, rsp) - offset_of!(UserFrame, orig_rax);
 /// The value Linux shows in the `rax` slot at a syscall-entry stop.
-const ENOSYS_RET: i64 = -(vibeos::syscall::ENOSYS as i64);
+const ENOSYS_RET: i64 = -(vibeos::kerror::KError::NoSys.errno() as i64);
 
 const _: () = {
     // 21 words and the pad: RSP is 16-byte aligned at the `call`.

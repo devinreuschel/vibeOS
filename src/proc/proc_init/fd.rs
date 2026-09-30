@@ -96,13 +96,13 @@ pub(super) fn lookup_fd(fd: u32) -> Option<Fd> {
 pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
     let len = len as u64;
     let Some(slot) = lookup_fd(fd) else {
-        return Err(KError::from_errno(EBADF));
+        return Err(KError::BadF);
     };
     match slot.kind {
-        FdKind::None => Err(KError::from_errno(EBADF)),
+        FdKind::None => Err(KError::BadF),
         FdKind::Console | FdKind::File { .. } => {
             if !user_range_ok(buf, len) {
-                return Err(KError::from_errno(EFAULT));
+                return Err(KError::Fault);
             }
             if len == 0 {
                 return Ok(0);
@@ -127,14 +127,14 @@ pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
                                 }
                                 Err(e) => {
                                     return if done == 0 {
-                                        Err(KError::from_errno(fs_errno(e)))
+                                        Err(fs_errno(e))
                                     } else {
                                         Ok(done as usize)
                                     };
                                 }
                             }
                         }
-                        FdKind::None => return Err(KError::from_errno(EBADF)),
+                        FdKind::None => return Err(KError::BadF),
                     }
                 }
                 done += c as u64;
@@ -155,7 +155,7 @@ pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
 /// or `EFAULT` when it moved none (SYSCALL.md §5).
 fn byte_count(done: u64) -> SysResult {
     if done == 0 {
-        Err(KError::from_errno(EFAULT))
+        Err(KError::Fault)
     } else {
         Ok(done as usize)
     }
@@ -196,16 +196,16 @@ fn key_byte(k: DecodedKey) -> Option<u8> {
 pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
     let len = len as u64;
     let Some(slot) = lookup_fd(fd) else {
-        return Err(KError::from_errno(EBADF));
+        return Err(KError::BadF);
     };
     if !user_range_ok(buf, len) {
-        return Err(KError::from_errno(EFAULT));
+        return Err(KError::Fault);
     }
     if len == 0 {
         return Ok(0);
     }
     match slot.kind {
-        FdKind::None => Err(KError::from_errno(EBADF)),
+        FdKind::None => Err(KError::BadF),
         FdKind::Console => {
             let mut n = 0u64;
             while n < len {
@@ -238,7 +238,7 @@ pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
                     }
                     byte_count(c as u64)
                 }
-                Err(e) => Err(KError::from_errno(fs_errno(e))),
+                Err(e) => Err(fs_errno(e)),
             }
         }
     }
@@ -246,12 +246,9 @@ pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
 
 pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
     let mut buf = [0u8; vibeos::fs::MAX_PATH];
-    let n = match copy_user_str(path, &mut buf) {
-        Ok(n) => n,
-        Err(e) => return Err(KError::from_errno(e)),
-    };
+    let n = copy_user_str(path, &mut buf)?;
     if core::str::from_utf8(&buf[..n]).is_err() {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     }
     let mode = u32::from(mode) & 0o7777;
     match file_init::open(&buf[..n], OpenFlags::from_bits(flags as u32), mode) {
@@ -274,11 +271,11 @@ pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
                         reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
                     )]
                     let _ = file_init::close(FileRef::from_raw(id));
-                    Err(KError::from_errno(EMFILE))
+                    Err(KError::MFile)
                 }
             }
         }
-        Err(e) => Err(KError::from_errno(fs_errno(e))),
+        Err(e) => Err(fs_errno(e)),
     }
 }
 
@@ -288,15 +285,15 @@ pub(super) fn sys_close(fd: u32) -> SysResult {
     match old {
         Some(s) => match close_fd_slot(s) {
             Ok(()) => Ok(0),
-            Err(e) => Err(KError::from_errno(fs_errno(e))),
+            Err(e) => Err(fs_errno(e)),
         },
-        None => Err(KError::from_errno(EBADF)),
+        None => Err(KError::BadF),
     }
 }
 
 pub(super) fn sys_lseek(fd: u32, off: i64, whence: u32) -> SysResult {
     let Some(slot) = lookup_fd(fd) else {
-        return Err(KError::from_errno(EBADF));
+        return Err(KError::BadF);
     };
     match slot.kind {
         FdKind::File { fid, r#gen } => {
@@ -307,11 +304,11 @@ pub(super) fn sys_lseek(fd: u32, off: i64, whence: u32) -> SysResult {
             });
             match r {
                 Ok(n) => Ok(n as usize),
-                Err(e) => Err(KError::from_errno(fs_errno(e))),
+                Err(e) => Err(fs_errno(e)),
             }
         }
-        FdKind::Console => Err(KError::from_errno(EINVAL)),
-        FdKind::None => Err(KError::from_errno(EBADF)),
+        FdKind::Console => Err(KError::Inval),
+        FdKind::None => Err(KError::BadF),
     }
 }
 
@@ -341,7 +338,7 @@ fn hold_file(pid: u32, old: u32) -> Option<Fd> {
 pub(super) fn sys_dup(old: u32) -> SysResult {
     let pid = current_pid();
     let Some(s) = hold_file(pid, old) else {
-        return Err(KError::from_errno(EBADF));
+        return Err(KError::BadF);
     };
     // The slot may have changed while the table lock was dropped: the
     // copy is made only of the slot the count was taken for.
@@ -356,7 +353,7 @@ pub(super) fn sys_dup(old: u32) -> SysResult {
         Some(n) => Ok(n as usize),
         None => {
             drop_held(s);
-            Err(KError::from_errno(EBADF))
+            Err(KError::BadF)
         }
     }
 }
@@ -366,11 +363,11 @@ pub(super) fn sys_dup2(old: u32, new: u32) -> SysResult {
     if old == new {
         return match with_table(|t| t.get(pid).and_then(|p| p.fds.get(old))) {
             Some(_) => Ok(new as usize),
-            None => Err(KError::from_errno(EBADF)),
+            None => Err(KError::BadF),
         };
     }
     let Some(s) = hold_file(pid, old) else {
-        return Err(KError::from_errno(EBADF));
+        return Err(KError::BadF);
     };
     let r = with_table(|t| {
         let p = t.get_mut(pid)?;
@@ -388,7 +385,7 @@ pub(super) fn sys_dup2(old: u32, new: u32) -> SysResult {
         }
         None => {
             drop_held(s);
-            Err(KError::from_errno(EBADF))
+            Err(KError::BadF)
         }
     }
 }
@@ -397,10 +394,10 @@ pub(super) fn sys_fcntl(fd: u32, cmd: u32, arg: u64) -> SysResult {
     let pid = current_pid();
     with_table(|t| {
         let Some(p) = t.get_mut(pid) else {
-            return Err(KError::from_errno(ESRCH));
+            return Err(KError::Srch);
         };
         let Some(mut s) = p.fds.get(fd) else {
-            return Err(KError::from_errno(EBADF));
+            return Err(KError::BadF);
         };
         match cmd {
             F_GETFD => Ok(s.flags as usize),
@@ -408,10 +405,10 @@ pub(super) fn sys_fcntl(fd: u32, cmd: u32, arg: u64) -> SysResult {
                 s.flags = (arg as u32) & FD_CLOEXEC;
                 match p.fds.set(fd, s) {
                     Ok(()) => Ok(0),
-                    Err(_) => Err(KError::from_errno(EBADF)),
+                    Err(_) => Err(KError::BadF),
                 }
             }
-            _ => Err(KError::from_errno(EINVAL)),
+            _ => Err(KError::Inval),
         }
     })
 }

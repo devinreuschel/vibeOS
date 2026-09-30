@@ -173,7 +173,7 @@ GONE: list[tuple[str, str]] = [
     ("INITRD_RO", "the initrd is sized by"),
     ("INITRD_BYTES", "the initrd is sized by"),
     ("MAX_ELF", "`MAX_ELF` removed: the loader maps"),
-    ("TooBig", "`MAX_ELF` removed: the loader maps"),
+    ("LoadError::TooBig", "`MAX_ELF` removed: the loader maps"),
     ("src/proc/user_init.rs: fn read_path", "`MAX_ELF` removed: the loader maps"),
     ("src/ktest/mod.rs: const SUITES", "the in-guest registry split per subsystem"),
     ("SyscallInfo", "syscall dispatch indexes the generated"),

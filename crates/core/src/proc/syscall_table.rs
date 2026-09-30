@@ -772,7 +772,7 @@ pub mod x86_64 {
     pub fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
         match TABLE.lookup(raw_nr) {
             Some(sys) => call(h, sys, regs),
-            None => Err(KError::ENOSYS),
+            None => Err(KError::NoSys),
         }
     }
 }
@@ -861,7 +861,7 @@ pub mod aarch64 {
             Sys::Kill => h.kill(regs[0] as i32, regs[1] as i32),
             Sys::Fcntl => h.fcntl(regs[0] as u32, regs[1] as u32, regs[2]),
             Sys::Getppid => h.getppid(),
-            Sys::Open | Sys::Dup2 | Sys::Fork | Sys::Psinfo => Err(KError::ENOSYS),
+            Sys::Open | Sys::Dup2 | Sys::Fork | Sys::Psinfo => Err(KError::NoSys),
         }
     }
 
@@ -870,7 +870,7 @@ pub mod aarch64 {
     pub fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
         match TABLE.lookup(raw_nr) {
             Some(sys) => call(h, sys, regs),
-            None => Err(KError::ENOSYS),
+            None => Err(KError::NoSys),
         }
     }
 }

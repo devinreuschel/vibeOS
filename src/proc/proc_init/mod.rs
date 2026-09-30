@@ -24,11 +24,7 @@ use vibeos::proc::{
     fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
-use vibeos::syscall::{
-    self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, EMFILE,
-    ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, EPERM, ESRCH, F_GETFD, F_SETFD,
-    Handlers, SysResult, UserFrame,
-};
+use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult, UserFrame};
 use vibeos::thread::ThreadId;
 use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, SyscallAbi, TrapKind};
 use vibeos::vectors;
@@ -188,45 +184,45 @@ fn intern_name(path: &str) -> &'static str {
     }
 }
 
-fn fs_errno(e: FsError) -> i32 {
+fn fs_errno(e: FsError) -> KError {
     match e {
-        FsError::NotFound => ENOENT,
-        FsError::Exists => EEXIST,
-        FsError::NotDir => ENOTDIR,
-        FsError::IsDir => EISDIR,
-        FsError::Inval => EINVAL,
-        FsError::NoSpace => EMFILE,
-        FsError::NameTooLong => ENAMETOOLONG,
-        FsError::Busy => EBUSY,
-        FsError::Badf => EBADF,
-        FsError::Io => EIO,
-        FsError::FileTooBig => EFBIG,
-        FsError::NoMem => ENOMEM,
-        FsError::Again => EAGAIN,
-        FsError::Loop | FsError::NotEmpty | FsError::NotSupp => EINVAL,
+        FsError::NotFound => KError::NoEnt,
+        FsError::Exists => KError::Exist,
+        FsError::NotDir => KError::NotDir,
+        FsError::IsDir => KError::IsDir,
+        FsError::Inval => KError::Inval,
+        FsError::NoSpace => KError::MFile,
+        FsError::NameTooLong => KError::NameTooLong,
+        FsError::Busy => KError::Busy,
+        FsError::Badf => KError::BadF,
+        FsError::Io => KError::Io,
+        FsError::FileTooBig => KError::FBig,
+        FsError::NoMem => KError::NoMem,
+        FsError::Again => KError::Again,
+        FsError::Loop | FsError::NotEmpty | FsError::NotSupp => KError::Inval,
     }
 }
 
-fn load_errno(e: LoadError) -> i32 {
+fn load_errno(e: LoadError) -> KError {
     match e {
         LoadError::Fs(f) => fs_errno(f),
-        LoadError::Elf(ElfError::ImageTooBig) => ENOMEM,
-        LoadError::Elf(_) => ENOEXEC,
-        LoadError::As(_) => ENOMEM,
-        LoadError::Mem(_) => EFAULT,
-        LoadError::Empty => ENOEXEC,
-        LoadError::NoProc => EAGAIN,
+        LoadError::Elf(ElfError::ImageTooBig) => KError::NoMem,
+        LoadError::Elf(_) => KError::NoExec,
+        LoadError::As(_) => KError::NoMem,
+        LoadError::Mem(_) => KError::Fault,
+        LoadError::Empty => KError::NoExec,
+        LoadError::NoProc => KError::Again,
         LoadError::Spawn(e) => spawn_errno(e),
-        LoadError::NoMem => ENOMEM,
+        LoadError::NoMem => KError::NoMem,
     }
 }
 
 /// Linux's errno for a thread `fork` or a new process could not get:
 /// `EAGAIN` for a full thread table, `ENOMEM` for a kernel stack.
-fn spawn_errno(e: SpawnError) -> i32 {
+fn spawn_errno(e: SpawnError) -> KError {
     match e {
-        SpawnError::NoSlot => EAGAIN,
-        SpawnError::NoMemory => ENOMEM,
+        SpawnError::NoSlot => KError::Again,
+        SpawnError::NoMemory => KError::NoMem,
     }
 }
 
@@ -721,11 +717,11 @@ fn sys_getpid() -> SysResult {
     Ok(pid as usize)
 }
 
-fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, i32> {
+fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, KError> {
     match uaccess_init::strncpy_from_user(out, va) {
-        Ok(n) if n == out.len() => Err(ENAMETOOLONG),
+        Ok(n) if n == out.len() => Err(KError::NameTooLong),
         Ok(n) => Ok(n),
-        Err(f) => Err(f.errno()),
+        Err(_) => Err(KError::Fault),
     }
 }
 

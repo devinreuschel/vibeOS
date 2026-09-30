@@ -1,27 +1,28 @@
 use super::*;
 
-fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, i32> {
+fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, KError> {
     let mut v = TryVec::new();
     if va == 0 {
         return Ok(v);
     }
     let mut i = 0u64;
     while i < 16 {
-        let ptr_va = va.checked_add(i * 8).ok_or(EFAULT)?;
+        let ptr_va = va.checked_add(i * 8).ok_or(KError::Fault)?;
         let mut raw = [0u8; 8];
-        uaccess_init::copy_from_user(&mut raw, ptr_va).map_err(|f| f.errno())?;
+        uaccess_init::copy_from_user(&mut raw, ptr_va).map_err(|_| KError::Fault)?;
         let p = u64::from_le_bytes(raw);
         if p == 0 {
             return Ok(v);
         }
         let mut buf = [0u8; 256];
         let n = copy_user_str(p, &mut buf)?;
-        let mut s = TryVec::try_with_capacity(n).map_err(|_| ENOMEM)?;
-        s.try_extend_from_slice(&buf[..n]).map_err(|_| ENOMEM)?;
-        v.try_push(s).map_err(|_| ENOMEM)?;
+        let mut s = TryVec::try_with_capacity(n).map_err(|_| KError::NoMem)?;
+        s.try_extend_from_slice(&buf[..n])
+            .map_err(|_| KError::NoMem)?;
+        v.try_push(s).map_err(|_| KError::NoMem)?;
         i += 1;
     }
-    Err(E2BIG)
+    Err(KError::TooBig)
 }
 
 // Out of line: `dispatch_frame` keeps only the running syscall's frame,
@@ -29,35 +30,35 @@ fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, i32> {
 #[inline(never)]
 pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     let Some(frame) = frame else {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     };
     let ppid = current_pid();
     if ppid == 0 {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     }
     let Some(src) = current_space() else {
-        return Err(KError::from_errno(EFAULT));
+        return Err(KError::Fault);
     };
     let meta = with_table(|t| t.get(ppid).map(|p| (p.fds, p.cwd, p.creds)));
     let Some((fds, cwd, creds)) = meta else {
-        return Err(KError::from_errno(ESRCH));
+        return Err(KError::Srch);
     };
     let Some(fds) = dup_table(fds) else {
-        return Err(KError::from_errno(EMFILE));
+        return Err(KError::MFile);
     };
     let Some(pid) = alloc_pid(0) else {
         close_all_fds(&mut { fds });
-        return Err(KError::from_errno(EAGAIN));
+        return Err(KError::Again);
     };
     let Some(slot) = space_slot() else {
         close_all_fds(&mut { fds });
         with_sched_table(|s, t| release_pid(s, t, pid));
-        return Err(KError::from_errno(ENOMEM));
+        return Err(KError::NoMem);
     };
     let Some(boxed) = clone_into(slot, src) else {
         close_all_fds(&mut { fds });
         with_sched_table(|s, t| release_pid(s, t, pid));
-        return Err(KError::from_errno(ENOMEM));
+        return Err(KError::NoMem);
     };
     let cr3 = boxed.root().as_u64();
     let mut child = *frame;
@@ -70,7 +71,7 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
             addr_space_init::teardown(boxed.into_inner());
             close_all_fds(&mut { fds });
             with_sched_table(|s, t| release_pid(s, t, pid));
-            return Err(KError::from_errno(spawn_errno(e)));
+            return Err(spawn_errno(e));
         }
     };
     with_table(|t| {
@@ -110,49 +111,41 @@ pub(super) fn sys_execve(
     frame: Option<&mut UserFrame>,
 ) -> SysResult {
     let Some(frame) = frame else {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     };
     let pid = current_pid();
     if pid == 0 {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     }
     let mut pbuf = [0u8; vibeos::fs::MAX_PATH];
-    let n = match copy_user_str(path, &mut pbuf) {
-        Ok(n) => n,
-        Err(e) => return Err(KError::from_errno(e)),
-    };
+    let n = copy_user_str(path, &mut pbuf)?;
     let Ok(path_s) = core::str::from_utf8(&pbuf[..n]) else {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     };
-    let argv_v = match copy_cvec(argv) {
-        Ok(v) => v,
-        Err(e) => return Err(KError::from_errno(e)),
-    };
+    let argv_v = copy_cvec(argv)?;
     // Copied, so its pointers are checked and its limits hold, and dropped:
     // the new stack gets an empty environment until ROADMAP §10.5's envp box.
-    if let Err(e) = copy_cvec(envp) {
-        return Err(KError::from_errno(e));
-    }
+    copy_cvec(envp)?;
     let Ok(mut argv_s) = TryVec::<&str>::try_with_capacity(argv_v.len().max(1)) else {
-        return Err(KError::from_errno(ENOMEM));
+        return Err(KError::NoMem);
     };
     if argv_v.is_empty() {
         if argv_s.try_push(path_s).is_err() {
-            return Err(KError::from_errno(ENOMEM));
+            return Err(KError::NoMem);
         }
     } else {
         for a in argv_v.iter() {
             let Ok(s) = core::str::from_utf8(a) else {
-                return Err(KError::from_errno(EINVAL));
+                return Err(KError::Inval);
             };
             if argv_s.try_push(s).is_err() {
-                return Err(KError::from_errno(ENOMEM));
+                return Err(KError::NoMem);
             }
         }
     }
     let loaded = match user_init::load_path(path_s, &argv_s, &[]) {
         Ok(l) => l,
-        Err(e) => return Err(KError::from_errno(load_errno(e))),
+        Err(e) => return Err(load_errno(e)),
     };
     let name = intern_name(path_s);
     let entry = loaded.entry;
@@ -173,7 +166,7 @@ pub(super) fn sys_execve(
         if let Some(b) = boxed {
             addr_space_init::teardown(b.into_inner());
         }
-        return Err(KError::from_errno(ESRCH));
+        return Err(KError::Srch);
     };
     let mut i = 0usize;
     while i < MAX_FDS {
@@ -228,24 +221,24 @@ fn with_own_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
 pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> SysResult {
     let req = match mmap_request(addr, len, prot, flags, off) {
         Ok(r) => r,
-        Err(MmapError::Inval) => return Err(KError::from_errno(EINVAL)),
-        Err(MmapError::NoMem) => return Err(KError::from_errno(ENOMEM)),
+        Err(MmapError::Inval) => return Err(KError::Inval),
+        Err(MmapError::NoMem) => return Err(KError::NoMem),
         Err(MmapError::NotAnon) => {
             let e = if lookup_fd(fd as u32).is_none() {
-                EBADF
+                KError::BadF
             } else {
-                ENODEV
+                KError::NoDev
             };
-            return Err(KError::from_errno(e));
+            return Err(e);
         }
     };
     match with_own_space(|s| addr_space_init::mmap(s, &req)) {
-        None => Err(KError::from_errno(EINVAL)),
+        None => Err(KError::Inval),
         Some(Ok(va)) => Ok(va as usize),
-        Some(Err(AsError::Overlap)) => Err(KError::from_errno(EEXIST)),
-        Some(Err(AsError::NullGuard)) => Err(KError::from_errno(EPERM)),
-        Some(Err(AsError::Misaligned)) => Err(KError::from_errno(EINVAL)),
-        Some(Err(_)) => Err(KError::from_errno(ENOMEM)),
+        Some(Err(AsError::Overlap)) => Err(KError::Exist),
+        Some(Err(AsError::NullGuard)) => Err(KError::Perm),
+        Some(Err(AsError::Misaligned)) => Err(KError::Inval),
+        Some(Err(_)) => Err(KError::NoMem),
     }
 }
 
@@ -253,23 +246,23 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
 pub(super) fn sys_munmap(addr: u64, len: usize) -> SysResult {
     let len = len as u64;
     if !addr.is_multiple_of(PAGE_SIZE_4K) || len == 0 {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     }
     let Some(len) = len
         .checked_add(PAGE_SIZE_4K - 1)
         .map(|l| l & !(PAGE_SIZE_4K - 1))
         .filter(|&l| addr.checked_add(l).is_some_and(|e| e <= USER_MAP_END))
     else {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     };
     // SAFETY: every leaf of the caller's space was mapped from the buddy by
     // `addr_space_init::map_anon` or `addr_space_init::brk`, and `unmap`
     // supplies the flush, here.
     match with_own_space(|s| unsafe { addr_space_init::unmap(s, addr, len) }) {
-        None => Err(KError::from_errno(EINVAL)),
+        None => Err(KError::Inval),
         Some(Ok(())) => Ok(0),
-        Some(Err(AsError::NoRegionSlot)) => Err(KError::from_errno(ENOMEM)),
-        Some(Err(_)) => Err(KError::from_errno(EINVAL)),
+        Some(Err(AsError::NoRegionSlot)) => Err(KError::NoMem),
+        Some(Err(_)) => Err(KError::Inval),
     }
 }
 

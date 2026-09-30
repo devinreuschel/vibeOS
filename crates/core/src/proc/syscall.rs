@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn dispatch_nr_eax_sign_extended() {
         let regs = [0; 6];
-        let nosys = Err(KError::from_errno(ENOSYS));
+        let nosys = Err(KError::NoSys);
         let mut rec = Recorder::default();
         assert_eq!(
             x86_64::dispatch(&mut rec, 0xFFFF_FFFF_0000_0001, &regs),
@@ -271,8 +271,8 @@ mod tests {
         assert_eq!(encode(Ok(0)), 0);
         assert_eq!(encode(Ok(42)), 42);
         assert_eq!(encode(Ok(0x7FFF_F7FF_F000)), 0x7FFF_F7FF_F000);
-        assert_eq!(encode(Err(KError::from_errno(EBADF))), -9);
-        assert_eq!(encode(Err(KError::from_errno(ENOSYS))), -38);
-        assert_eq!(encode(Err(KError::from_errno(4095))), -4095);
+        assert_eq!(encode(Err(KError::BadF)), -9);
+        assert_eq!(encode(Err(KError::NoSys)), -38);
+        assert_eq!(encode(Err(KError::OpNotSupp)), -95);
     }
 }
