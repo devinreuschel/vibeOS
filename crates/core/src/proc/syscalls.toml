@@ -79,6 +79,16 @@ args = [
 note = ""
 
 [[syscall]]
+name = "fstat"
+x86_64 = 5
+aarch64 = 80
+args = [
+  { name = "fd", type = "unsigned int" },
+  { name = "statbuf", type = "struct stat *", ptr = "fixed", size = 144, dir = "out", when = "after the `fd` lookup" },
+]
+note = "x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1"
+
+[[syscall]]
 name = "lseek"
 x86_64 = 8
 aarch64 = 62
@@ -222,6 +232,17 @@ x86_64 = 110
 aarch64 = 173
 args = []
 note = ""
+
+[[syscall]]
+name = "getdents64"
+x86_64 = 217
+aarch64 = 61
+args = [
+  { name = "fd", type = "unsigned int" },
+  { name = "dirent", type = "struct linux_dirent64 *", ptr = "buf", len = "count", dir = "out", when = "after the `fd` lookup and the first record's fit" },
+  { name = "count", type = "unsigned int" },
+]
+note = "at most 512 bytes a call; see SYSCALL.md §3.1"
 
 [[syscall]]
 name = "psinfo"

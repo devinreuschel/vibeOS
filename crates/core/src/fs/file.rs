@@ -528,7 +528,22 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         f: &FileRef,
         cb: &mut dyn FnMut(&DirEntry) -> bool,
     ) -> Result<(), FsError> {
-        let mut cookie = 0u64;
+        self.readdir_from(f, 0, &mut |d, _| cb(d)).map(|_| ())
+    }
+
+    /// Report the entries of open directory `f` from cookie `start` (`.`
+    /// at 0, `..` at 1, the backend's cookies after them) to `emit`, each
+    /// with the cookie of the entry after it, until `emit` returns false or
+    /// the entries run out. Returns the cookie of the first entry not
+    /// consumed: the one `emit` refused, or the end. The file position does
+    /// not move. `emit` runs with the lock dropped.
+    pub fn readdir_from(
+        &self,
+        f: &FileRef,
+        start: u64,
+        emit: &mut dyn FnMut(&DirEntry, u64) -> bool,
+    ) -> Result<u64, FsError> {
+        let mut cookie = start;
         loop {
             let (ent, next) = match self.with(|v| v.readdir_step(f.id, cookie))? {
                 Rd::Entry(d, next) => (d, next),
@@ -537,15 +552,15 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                     let r = c.run(|o, cx, d| o.readdir(cx, d, bc, &mut out));
                     self.step(|v| v.finish(c, false));
                     match r? {
-                        None => return Ok(()),
+                        None => return Ok(cookie),
                         Some(n) => (out, n.checked_add(2).ok_or(FsError::Io)?),
                     }
                 }
             };
-            cookie = next;
-            if !cb(&ent) {
-                return Ok(());
+            if !emit(&ent, next) {
+                return Ok(cookie);
             }
+            cookie = next;
         }
     }
 

@@ -8,6 +8,11 @@ use vibeos::arch::{Barriers, ContextSwitch, CycleCounter, InterruptMask, PerCpuB
 #[cfg(target_arch = "x86_64")]
 pub type Arch = super::x86_64::Arch;
 
+/// This build's port's `struct stat`, which `fstat` copies out, so `proc`
+/// never names the port.
+#[cfg(target_arch = "x86_64")]
+pub type UserStat = vibeos::arch::x86_64::stat::Stat;
+
 /// The IRQ-off exclusive cell over this build's port (DESIGN §2.3).
 pub type IrqCell<T> = vibeos::cell::IrqCell<T, Arch>;
 

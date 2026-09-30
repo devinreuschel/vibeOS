@@ -805,6 +805,65 @@ fn names_of<L: Guarded<Vfs>>(api: &FileApi<'_, L>, dir: &[u8]) -> Vec<Vec<u8>> {
 }
 
 #[test]
+fn readdir_from_resumes_at_a_cookie() {
+    let vfs = locked_vfs();
+    let api = FileApi::new(vfs);
+    for n in [b"/a".as_slice(), b"/b", b"/c"] {
+        api.mkdir(None, n, 0o755).unwrap();
+    }
+    let f = api
+        .open(None, b"/", OpenFlags::from_bits(O_RDONLY | O_DIRECTORY), 0)
+        .unwrap();
+    // Every entry with the cookie after it, from 0.
+    let mut all = Vec::new();
+    let end = api
+        .readdir_from(&f, 0, &mut |d, next| {
+            all.push((d.name.as_bytes().to_vec(), next));
+            true
+        })
+        .unwrap();
+    let names: Vec<&[u8]> = all.iter().map(|(n, _)| n.as_slice()).collect();
+    assert_eq!(&names[..2], &[b".".as_slice(), b".."]);
+    assert_eq!(all.len(), 2 + 4, "`.`, `..`, blk, a, b, c");
+    assert_eq!(
+        end,
+        all.last().unwrap().1,
+        "the end cookie is the last next"
+    );
+    // Refusing an entry returns its own cookie, so a resume starts there.
+    let mut seen = 0;
+    let at = api
+        .readdir_from(&f, 0, &mut |_, _| {
+            seen += 1;
+            seen <= 3
+        })
+        .unwrap();
+    assert_eq!(at, all[2].1, "the fourth entry's cookie");
+    let mut rest = Vec::new();
+    let end2 = api
+        .readdir_from(&f, at, &mut |d, _| {
+            rest.push(d.name.as_bytes().to_vec());
+            true
+        })
+        .unwrap();
+    let want: Vec<Vec<u8>> = all[3..].iter().map(|(n, _)| n.clone()).collect();
+    assert_eq!(rest, want);
+    assert_eq!(end2, end);
+    // Past the end: nothing, and the same cookie back.
+    let mut none = 0;
+    assert_eq!(
+        api.readdir_from(&f, end, &mut |_, _| {
+            none += 1;
+            true
+        })
+        .unwrap(),
+        end
+    );
+    assert_eq!(none, 0);
+    api.close(f).unwrap();
+}
+
+#[test]
 fn backend_ops_run_with_vfs_lock_dropped() {
     let vfs = locked_vfs();
     let fs: &'static LockedFs = std::boxed::Box::leak(std::boxed::Box::new(LockedFs {

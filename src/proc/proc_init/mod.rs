@@ -50,6 +50,7 @@ use crate::user_init::{self, LoadError};
 mod exec;
 mod exit;
 mod fd;
+mod floor;
 
 pub use exit::write_ps;
 
@@ -61,6 +62,7 @@ use fd::{
     close_all_fds, close_dropped, dup_table, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
     sys_lseek, sys_open, sys_read, sys_write,
 };
+use floor::{sys_fstat, sys_getdents64};
 
 struct Proc {
     state: ProcState,
@@ -558,6 +560,10 @@ impl Handlers for Ctx<'_> {
         sys_close(fd)
     }
 
+    fn fstat(&mut self, fd: u32, statbuf: u64) -> SysResult {
+        sys_fstat(fd, statbuf)
+    }
+
     fn lseek(&mut self, fd: u32, offset: i64, whence: u32) -> SysResult {
         sys_lseek(fd, offset, whence)
     }
@@ -631,6 +637,10 @@ impl Handlers for Ctx<'_> {
 
     fn getppid(&mut self) -> SysResult {
         Ok(with_table(|t| t.get(current_pid()).map(|p| p.ppid).unwrap_or(0)) as usize)
+    }
+
+    fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult {
+        sys_getdents64(fd, dirent, count)
     }
 
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult {

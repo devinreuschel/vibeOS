@@ -3,6 +3,7 @@ use crate::ktest::{Test, test};
 
 mod entry;
 mod exec;
+mod floor;
 mod hooks;
 mod lifecycle;
 mod runtime;
@@ -11,6 +12,7 @@ mod uaccess;
 
 pub(crate) use entry::*;
 pub(crate) use exec::*;
+pub(crate) use floor::*;
 pub(crate) use hooks::*;
 pub(crate) use lifecycle::*;
 pub(crate) use runtime::*;
@@ -63,4 +65,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("syscall_ptr_decl_efault", syscall_ptr_decl_efault),
     test("read_ebadf_before_efault", read_ebadf_before_efault),
     test("wait4_echild_before_efault", wait4_echild_before_efault),
+    test("floor_syscalls_from_user", floor_syscalls_from_user).deadline(60_000),
 ];

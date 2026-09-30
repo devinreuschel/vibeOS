@@ -149,6 +149,8 @@ pub enum Sys {
     Open,
     /// `close`.
     Close,
+    /// `fstat`.
+    Fstat,
     /// `lseek`.
     Lseek,
     /// `mmap`.
@@ -179,17 +181,20 @@ pub enum Sys {
     Fcntl,
     /// `getppid`.
     Getppid,
+    /// `getdents64`.
+    Getdents64,
     /// `psinfo`.
     Psinfo,
 }
 
 impl Sys {
     /// Every syscall, in table order.
-    pub const ALL: [Sys; 20] = [
+    pub const ALL: [Sys; 22] = [
         Sys::Read,
         Sys::Write,
         Sys::Open,
         Sys::Close,
+        Sys::Fstat,
         Sys::Lseek,
         Sys::Mmap,
         Sys::Munmap,
@@ -205,6 +210,7 @@ impl Sys {
         Sys::Kill,
         Sys::Fcntl,
         Sys::Getppid,
+        Sys::Getdents64,
         Sys::Psinfo,
     ];
 
@@ -215,7 +221,7 @@ impl Sys {
 }
 
 /// The rows, in [`Sys`] order.
-pub static ROWS: [Row; 20] = [
+pub static ROWS: [Row; 22] = [
     Row {
         sys: Sys::Read,
         name: "read",
@@ -310,6 +316,29 @@ pub static ROWS: [Row; 20] = [
         }],
         x86_64: Some(3),
         aarch64: Some(57),
+    },
+    Row {
+        sys: Sys::Fstat,
+        name: "fstat",
+        args: &[
+            Arg {
+                name: "fd",
+                ty: CType::UInt,
+                ptr: None,
+            },
+            Arg {
+                name: "statbuf",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Fixed { size: 144 },
+                    dir: Dir::Out,
+                    nullable: false,
+                    when: "after the `fd` lookup",
+                }),
+            },
+        ],
+        x86_64: Some(5),
+        aarch64: Some(80),
     },
     Row {
         sys: Sys::Lseek,
@@ -587,6 +616,34 @@ pub static ROWS: [Row; 20] = [
         aarch64: Some(173),
     },
     Row {
+        sys: Sys::Getdents64,
+        name: "getdents64",
+        args: &[
+            Arg {
+                name: "fd",
+                ty: CType::UInt,
+                ptr: None,
+            },
+            Arg {
+                name: "dirent",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Buf { len_from: 2 },
+                    dir: Dir::Out,
+                    nullable: false,
+                    when: "after the `fd` lookup and the first record's fit",
+                }),
+            },
+            Arg {
+                name: "count",
+                ty: CType::UInt,
+                ptr: None,
+            },
+        ],
+        x86_64: Some(217),
+        aarch64: Some(61),
+    },
+    Row {
         sys: Sys::Psinfo,
         name: "psinfo",
         args: &[
@@ -622,6 +679,8 @@ pub trait Handlers {
     fn open(&mut self, pathname: u64, flags: i32, mode: u16) -> SysResult;
     /// `close`.
     fn close(&mut self, fd: u32) -> SysResult;
+    /// `fstat`.
+    fn fstat(&mut self, fd: u32, statbuf: u64) -> SysResult;
     /// `lseek`.
     fn lseek(&mut self, fd: u32, offset: i64, whence: u32) -> SysResult;
     /// `mmap`.
@@ -660,6 +719,8 @@ pub trait Handlers {
     fn fcntl(&mut self, fd: u32, cmd: u32, arg: u64) -> SysResult;
     /// `getppid`.
     fn getppid(&mut self) -> SysResult;
+    /// `getdents64`.
+    fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult;
     /// `psinfo`.
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult;
 }
@@ -679,6 +740,8 @@ pub mod x86_64 {
         pub const SYS_OPEN: u64 = 2;
         /// `close`.
         pub const SYS_CLOSE: u64 = 3;
+        /// `fstat`.
+        pub const SYS_FSTAT: u64 = 5;
         /// `lseek`.
         pub const SYS_LSEEK: u64 = 8;
         /// `mmap`.
@@ -709,6 +772,8 @@ pub mod x86_64 {
         pub const SYS_FCNTL: u64 = 72;
         /// `getppid`.
         pub const SYS_GETPPID: u64 = 110;
+        /// `getdents64`.
+        pub const SYS_GETDENTS64: u64 = 217;
         /// `psinfo`.
         pub const SYS_PSINFO: u64 = 500;
     }
@@ -719,6 +784,7 @@ pub mod x86_64 {
         t[nr::SYS_WRITE as usize] = Some(Sys::Write);
         t[nr::SYS_OPEN as usize] = Some(Sys::Open);
         t[nr::SYS_CLOSE as usize] = Some(Sys::Close);
+        t[nr::SYS_FSTAT as usize] = Some(Sys::Fstat);
         t[nr::SYS_LSEEK as usize] = Some(Sys::Lseek);
         t[nr::SYS_MMAP as usize] = Some(Sys::Mmap);
         t[nr::SYS_MUNMAP as usize] = Some(Sys::Munmap);
@@ -734,6 +800,7 @@ pub mod x86_64 {
         t[nr::SYS_KILL as usize] = Some(Sys::Kill);
         t[nr::SYS_FCNTL as usize] = Some(Sys::Fcntl);
         t[nr::SYS_GETPPID as usize] = Some(Sys::Getppid);
+        t[nr::SYS_GETDENTS64 as usize] = Some(Sys::Getdents64);
         t[nr::SYS_PSINFO as usize] = Some(Sys::Psinfo);
         t
     };
@@ -748,6 +815,7 @@ pub mod x86_64 {
             Sys::Write => h.write(regs[0] as u32, regs[1], regs[2] as usize),
             Sys::Open => h.open(regs[0], regs[1] as i32, regs[2] as u16),
             Sys::Close => h.close(regs[0] as u32),
+            Sys::Fstat => h.fstat(regs[0] as u32, regs[1]),
             Sys::Lseek => h.lseek(regs[0] as u32, regs[1] as i64, regs[2] as u32),
             Sys::Mmap => h.mmap(regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]),
             Sys::Munmap => h.munmap(regs[0], regs[1] as usize),
@@ -763,6 +831,7 @@ pub mod x86_64 {
             Sys::Kill => h.kill(regs[0] as i32, regs[1] as i32),
             Sys::Fcntl => h.fcntl(regs[0] as u32, regs[1] as u32, regs[2]),
             Sys::Getppid => h.getppid(),
+            Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
             Sys::Psinfo => h.psinfo(regs[0], regs[1] as usize),
         }
     }
@@ -790,6 +859,8 @@ pub mod aarch64 {
         pub const SYS_WRITE: u64 = 64;
         /// `close`.
         pub const SYS_CLOSE: u64 = 57;
+        /// `fstat`.
+        pub const SYS_FSTAT: u64 = 80;
         /// `lseek`.
         pub const SYS_LSEEK: u64 = 62;
         /// `mmap`.
@@ -816,6 +887,8 @@ pub mod aarch64 {
         pub const SYS_FCNTL: u64 = 25;
         /// `getppid`.
         pub const SYS_GETPPID: u64 = 173;
+        /// `getdents64`.
+        pub const SYS_GETDENTS64: u64 = 61;
     }
 
     const SLOTS: [Option<Sys>; 261] = {
@@ -823,6 +896,7 @@ pub mod aarch64 {
         t[nr::SYS_READ as usize] = Some(Sys::Read);
         t[nr::SYS_WRITE as usize] = Some(Sys::Write);
         t[nr::SYS_CLOSE as usize] = Some(Sys::Close);
+        t[nr::SYS_FSTAT as usize] = Some(Sys::Fstat);
         t[nr::SYS_LSEEK as usize] = Some(Sys::Lseek);
         t[nr::SYS_MMAP as usize] = Some(Sys::Mmap);
         t[nr::SYS_MUNMAP as usize] = Some(Sys::Munmap);
@@ -836,6 +910,7 @@ pub mod aarch64 {
         t[nr::SYS_KILL as usize] = Some(Sys::Kill);
         t[nr::SYS_FCNTL as usize] = Some(Sys::Fcntl);
         t[nr::SYS_GETPPID as usize] = Some(Sys::Getppid);
+        t[nr::SYS_GETDENTS64 as usize] = Some(Sys::Getdents64);
         t
     };
 
@@ -848,6 +923,7 @@ pub mod aarch64 {
             Sys::Read => h.read(regs[0] as u32, regs[1], regs[2] as usize),
             Sys::Write => h.write(regs[0] as u32, regs[1], regs[2] as usize),
             Sys::Close => h.close(regs[0] as u32),
+            Sys::Fstat => h.fstat(regs[0] as u32, regs[1]),
             Sys::Lseek => h.lseek(regs[0] as u32, regs[1] as i64, regs[2] as u32),
             Sys::Mmap => h.mmap(regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]),
             Sys::Munmap => h.munmap(regs[0], regs[1] as usize),
@@ -861,6 +937,7 @@ pub mod aarch64 {
             Sys::Kill => h.kill(regs[0] as i32, regs[1] as i32),
             Sys::Fcntl => h.fcntl(regs[0] as u32, regs[1] as u32, regs[2]),
             Sys::Getppid => h.getppid(),
+            Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
             Sys::Open | Sys::Dup2 | Sys::Fork | Sys::Psinfo => Err(KError::ENOSYS),
         }
     }
@@ -935,6 +1012,10 @@ impl Handlers for Recorder {
 
     fn close(&mut self, fd: u32) -> SysResult {
         self.record(Sys::Close, &[Val::U32(fd)])
+    }
+
+    fn fstat(&mut self, fd: u32, statbuf: u64) -> SysResult {
+        self.record(Sys::Fstat, &[Val::U32(fd), Val::Ptr(statbuf)])
     }
 
     fn lseek(&mut self, fd: u32, offset: i64, whence: u32) -> SysResult {
@@ -1027,6 +1108,13 @@ impl Handlers for Recorder {
 
     fn getppid(&mut self) -> SysResult {
         self.record(Sys::Getppid, &[])
+    }
+
+    fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult {
+        self.record(
+            Sys::Getdents64,
+            &[Val::U32(fd), Val::Ptr(dirent), Val::U32(count)],
+        )
     }
 
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult {

@@ -129,6 +129,11 @@ fn setup(sys: Sys, b: &mut Bufs) -> Setup {
             Err(_) => Setup::Failed,
         },
         Sys::Psinfo => Setup::Regs([byte, 64, 0, 0, 0, 0]),
+        Sys::Fstat => Setup::Regs([1, byte, 0, 0, 0, 0]),
+        Sys::Getdents64 => match sys::open(c"/".as_ptr().cast(), sys::O_RDONLY, 0) {
+            Ok(fd) => Setup::Regs([fd, byte, 64, 0, 0, 0]),
+            Err(_) => Setup::Failed,
+        },
         Sys::Close
         | Sys::Lseek
         | Sys::Mmap

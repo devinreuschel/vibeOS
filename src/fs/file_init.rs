@@ -136,6 +136,18 @@ pub fn readdir(f: &FileRef, cb: &mut dyn FnMut(&DirEntry) -> bool) -> Result<(),
     fs_init::api().readdir(f, cb)
 }
 
+/// Report the entries of open directory `f` from cookie `cookie` to
+/// `emit`, each with the cookie after it, until `emit` returns false or
+/// the entries run out; the cookie of the first entry not consumed. The
+/// file position does not move, and `emit` runs with the VFS lock dropped.
+pub fn readdir_from(
+    f: &FileRef,
+    cookie: u64,
+    emit: &mut dyn FnMut(&DirEntry, u64) -> bool,
+) -> Result<u64, FsError> {
+    fs_init::api().readdir_from(f, cookie, emit)
+}
+
 /// Make directory `path`; one already there is kept.
 pub fn mkdir(path: &[u8], mode: u32) -> Result<(), FsError> {
     match with_abs(path, |p| fs_init::api().mkdir(None, p, mode)) {

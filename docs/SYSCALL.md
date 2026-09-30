@@ -223,6 +223,7 @@ from its handler (F150).
 | 1 | 64 | `write` | 3 | `unsigned int fd`, `const char *buf`, `size_t count` | `buf`: in, `count` bytes, after the `fd` lookup | — |
 | 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `pathname` at most 255 bytes |
 | 3 | 57 | `close` | 1 | `unsigned int fd` | — | — |
+| 5 | 80 | `fstat` | 2 | `unsigned int fd`, `struct stat *statbuf` | `statbuf`: out, 144 bytes, after the `fd` lookup | x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1 |
 | 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | — |
 | 9 | 222 | `mmap` | 6 | `unsigned long addr`, `unsigned long length`, `unsigned long prot`, `unsigned long flags`, `unsigned long fd`, `unsigned long offset` | — | anonymous and private only; returns the address |
 | 11 | 215 | `munmap` | 2 | `unsigned long addr`, `size_t length` | — | — |
@@ -238,6 +239,7 @@ from its handler (F150).
 | 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | default actions only |
 | 72 | 25 | `fcntl` | 3 | `unsigned int fd`, `unsigned int cmd`, `unsigned long arg` | — | `F_GETFD` and `F_SETFD` (`FD_CLOEXEC`) only |
 | 110 | 173 | `getppid` | 0 | — | — | — |
+| 217 | 61 | `getdents64` | 3 | `unsigned int fd`, `struct linux_dirent64 *dirent`, `unsigned int count` | `dirent`: out, `count` bytes, after the `fd` lookup and the first record's fit | at most 512 bytes a call; see SYSCALL.md §3.1 |
 | 500 | — | `psinfo` | 2 | `char *buf`, `size_t len` | `buf`: out, `len` bytes, before anything else | vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`) |
 
 <!-- gen_syscalls: end syscall-table -->
