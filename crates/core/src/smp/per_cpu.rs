@@ -261,6 +261,12 @@ impl PerCpu {
         }
     }
 
+    /// The offsets of `current` and `idle`, which the core tool
+    /// (`log::vmcore`) decodes from a dump's bytes: a dead CPU's words, not
+    /// the live read `arch::current_tcb` makes.
+    pub const CORE_CURRENT: usize = offset_of!(PerCpu, current);
+    pub const CORE_IDLE: usize = offset_of!(PerCpu, idle);
+
     /// Store `runq.len()` into `remote.runq_len` (Relaxed). Called at the
     /// end of every `&mut PerCpu` scope; a run-queue change made outside
     /// one leaves the published length stale until the next scope ends.

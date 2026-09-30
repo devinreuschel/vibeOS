@@ -56,6 +56,8 @@ allow = [
     { crate = "vibeos-hostlib-tests", reason = "workspace member: host tools and host tests" },
     { crate = "vibeos-user", reason = "workspace member: the user runtime and user programs, ROADMAP §10.5" },
     { crate = "vibeos-user-mem", reason = "workspace member: vibeos-user's mem functions" },
+    # The core tool (ROADMAP §10.7).
+    { crate = "rustc-demangle", reason = "vibeos-hostlib-tests dependency: the vmcore tool demangles kernel symbol names" },
     # The kernel.
     { crate = "limine", reason = "vibeos dependency: the Limine boot protocol" },
     # zerocopy (ROADMAP §10.6).

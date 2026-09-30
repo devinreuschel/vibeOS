@@ -10,6 +10,10 @@ use vibeos::boot::cmdline;
 use vibeos::elf;
 use vibeos::fat::{self, FatInode, FatVol};
 use vibeos::fs::InodeKind;
+use vibeos::log::vmcore::{
+    self,
+    synth::{SymDef, Synth, kernel_elf},
+};
 use vibeos::log::vmcoreinfo;
 use vibeos::pci;
 use vibeos::shell::MAX_TOKENS;
@@ -91,6 +95,8 @@ pub fn corpus() -> Vec<Seed> {
         out.push(seed("elf_parse", &name, data));
     }
     out.push(seed("cmdline_parse", "options", cmdline_seed()));
+    out.push(seed("vmcore", "core", vmcore_core()));
+    out.push(seed("vmcore", "elf", vmcore_elf()));
     out.push(seed("vmcoreinfo_parse", "note", vmcoreinfo_note()));
     out.push(seed("vmcoreinfo_parse", "build-id", build_id_note()));
     out.push(seed("vmcoreinfo_parse", "fw-cfg", fw_cfg_vmcoreinfo()));
@@ -670,6 +676,59 @@ pub fn cmdline_seed() -> Vec<u8> {
     s.push_str("sysctl.kernel.printk=4 unknown.dotted=1 vendor.flag HOME=/ TERM=\"vt 100\" ");
     s.push_str("single -- --init-arg vibeos.strace=0");
     s.into_bytes()
+}
+
+/// The kernel VA of the core seed's one mapped page run.
+const VMCORE_KBASE: u64 = 0xFFFF_FFFF_8000_0000;
+
+/// A 64 KiB physical core: a four-level table mapping 16 KiB at
+/// [`VMCORE_KBASE`], a two-frame `rbp` chain there, a VMCOREINFO note whose
+/// roots lie in that run, and two `NT_PRSTATUS` notes.
+fn vmcore_core() -> Vec<u8> {
+    let mut s = Synth::new(&[(0, 0x1_0000)]);
+    for i in 0..4u64 {
+        s.map(VMCORE_KBASE + i * 0x1000, 0x1000 + i * 0x1000, 0x1000, 0);
+    }
+    let fp = VMCORE_KBASE + 0x100;
+    s.write_phys(0x1100, &(fp + 0x40).to_le_bytes());
+    s.write_phys(0x1108, &(VMCORE_KBASE + 0x20).to_le_bytes());
+    s.write_phys(0x1148, &(VMCORE_KBASE + 0x30).to_le_bytes());
+    let info = vmcoreinfo::Info {
+        osrelease: "0.8.0",
+        build_id: &[0xAB; 20],
+        page_size: 4096,
+        pgt_root: s.root,
+        pgt_levels: 4,
+        log: VMCORE_KBASE + 0x10,
+        tcbs: fp,
+        tcbs_len: 4,
+        cpus: VMCORE_KBASE + 0x2000,
+        cpus_len: 2,
+    };
+    s.vmcoreinfo(&info);
+    s.cpu(1, VMCORE_KBASE + 0x10, fp + 0x800, fp);
+    s.cpu(2, VMCORE_KBASE + 0x18, fp + 0x900, 0);
+    s.build()
+}
+
+/// A kernel ELF with a build id, `.text` at [`VMCORE_KBASE`] and two
+/// symbols.
+fn vmcore_elf() -> Vec<u8> {
+    let syms = [
+        SymDef {
+            name: "_ZN6vibeos3smp9hang_test4hold17h0123456789abcdefE",
+            value: VMCORE_KBASE + 0x10,
+            size: 0x10,
+            kind: vmcore::STT_FUNC,
+        },
+        SymDef {
+            name: "VIBEOS_TRACE",
+            value: VMCORE_KBASE + 0x2000,
+            size: 0x40,
+            kind: vmcore::STT_OBJECT,
+        },
+    ];
+    kernel_elf(&[0xAB; 20], VMCORE_KBASE, &[0xC3; 0x40], &syms)
 }
 
 /// A VMCOREINFO note as `render` writes it.

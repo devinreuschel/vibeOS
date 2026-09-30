@@ -246,6 +246,7 @@ jobs:
           cargo clippy --bin vibeos --features panic_nest_test -- -D warnings
           cargo clippy --bin vibeos --features panic_stop_test -- -D warnings
           cargo clippy --bin vibeos --features kernel_shell -- -D warnings
+          cargo clippy --bin vibeos --features hang_test -- -D warnings
 
       # The Rust user programs (ROADMAP §10.5): links through rust-lld with no
       # C compiler, and checks each ELF with scripts/check_user_elf.py.
@@ -314,6 +315,10 @@ jobs:
           - arch: x86_64
             tier: vibefs-crash
             targets: test-vibefs-crash
+            jobs: 1
+          - arch: x86_64
+            tier: forensics
+            targets: test-forensics
             jobs: 1
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin

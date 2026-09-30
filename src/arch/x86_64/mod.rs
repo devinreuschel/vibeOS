@@ -116,6 +116,7 @@ impl InterruptMask for Arch {
     type Saved = cpu::InterruptGuard;
 
     #[inline]
+    #[track_caller]
     fn save_disable() -> cpu::InterruptGuard {
         cpu::InterruptGuard::enter()
     }

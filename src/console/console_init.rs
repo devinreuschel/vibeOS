@@ -105,7 +105,9 @@ fn wait_key_loop() -> DecodedKey {
         unsafe {
             core::arch::asm!("cli", options(nostack, preserves_flags));
         }
+        crate::sched::irqoff::off_here();
         if let Some(k) = read() {
+            crate::sched::irqoff::on();
             // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
             // lock and no `InterruptGuard` here; established here.
             #[cfg(target_arch = "x86_64")]
@@ -115,6 +117,7 @@ fn wait_key_loop() -> DecodedKey {
             return k;
         }
         if !per_cpu_init::current().runq.is_empty() {
+            crate::sched::irqoff::on();
             // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
             // lock and no `InterruptGuard` here; established here.
             #[cfg(target_arch = "x86_64")]
@@ -126,6 +129,7 @@ fn wait_key_loop() -> DecodedKey {
         }
         #[cfg(feature = "kernel_tests")]
         testing::HALTS.fetch_add(1, Ordering::Relaxed);
+        crate::sched::irqoff::on();
         // SAFETY: `sti; hlt` only enables interrupts and halts until one
         // arrives, and `sti`'s one-instruction shadow keeps a wake-up IRQ from
         // landing before the `hlt`; this loop holds no lock; established here.

@@ -46,7 +46,9 @@ from tests.harness.harness import (
     boot_contract_markers,
     check_mce_dump,
     contains_panic,
+    core_report,
     effective_accel_name,
+    failure_tail,
     halt_test_markers,
     is_dump_banner,
     iter_lines_with_deadline,
@@ -159,6 +161,55 @@ def check_fake(
     """Run `run_qemu_and_check` over `lines` through a `FakeLineSource`."""
     src = FakeLineSource.from_lines(lines, end=end, exit_code=exit_code, stderr=stderr)
     return run_qemu_and_check(FAKE_CFG, markers, line_source=src, **kw), src
+
+
+class TestCoreReport(unittest.TestCase):
+    """The core tool's report after a failed run's serial tail (ROADMAP
+    §10.7): `failure_tail` and `core_report`."""
+
+    def test_failure_tail_puts_report_after_serial_tail(self) -> None:
+        r = RunResult(lines=["a", "last serial line"])
+        r.report = "\n--- core report ---\nsig: timeout @ x < y < z"
+        tail = failure_tail(r)
+        self.assertIn("--- serial tail 2/2 ---", tail)
+        self.assertLess(tail.index("last serial line"), tail.index("--- core report ---"))
+        self.assertTrue(tail.endswith("sig: timeout @ x < y < z"))
+        self.assertEqual(failure_tail(RunResult()), " (no serial)")
+
+    def test_core_report_names_missing_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as d, overlay_env(
+            {"VIBEOS_VMCORE": os.path.join(d, "no-such-vmcore")}
+        ):
+            msg = core_report(os.path.join(d, "core.zst"), os.path.join(d, "kernel.elf"))
+        want = "no vmcore tool (run `make vmcore`, or set VIBEOS_VMCORE)"
+        self.assertEqual(msg, f"\n--- no core report: {want} ---")
+
+    def test_core_report_pipes_zstd(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            # A stub `zstd -dc -- <file>` that prints the file, and a stub
+            # tool that prints its argv and the core it read on stdin.
+            zstd = os.path.join(d, "zstd")
+            with open(zstd, "w", encoding="utf-8") as f:
+                f.write('#!/bin/sh\n[ "$1" = -dc ] && [ "$2" = -- ] || exit 9\nexec cat "$3"\n')
+            tool = os.path.join(d, "vmcore")
+            with open(tool, "w", encoding="utf-8") as f:
+                f.write('#!/bin/sh\necho "args: $*"\necho "stdin: $(cat)"\n')
+            for p in (zstd, tool):
+                os.chmod(p, 0o755)
+            core = os.path.join(d, "core.zst")
+            with open(core, "w", encoding="utf-8") as f:
+                f.write("CORE-BYTES")
+            elf = os.path.join(d, "kernel.elf")
+            with open(elf, "w", encoding="utf-8") as f:
+                f.write("ELF")
+            path = d + os.pathsep + os.environ.get("PATH", "")
+            with overlay_env({"PATH": path, "VIBEOS_VMCORE": tool}):
+                msg = core_report(core, elf)
+                missing = core_report(core, os.path.join(d, "none.elf"))
+        self.assertTrue(msg.startswith("\n--- core report ---\n"), msg)
+        self.assertIn(f"args: report --elf {elf} --core -", msg)
+        self.assertIn("stdin: CORE-BYTES", msg)
+        self.assertIn("no kernel ELF at", missing)
 
 
 class TestVirtioBlkDriveOptions(unittest.TestCase):
