@@ -1,0 +1,122 @@
+{
+ "files": [
+  {
+   "name": "bios-geometry",
+   "select": 32,
+   "size": 0
+  },
+  {
+   "name": "bootorder",
+   "select": 33,
+   "size": 0
+  },
+  {
+   "name": "etc/acpi/rsdp",
+   "select": 34,
+   "size": 20
+  },
+  {
+   "name": "etc/acpi/tables",
+   "select": 35,
+   "size": 131072
+  },
+  {
+   "name": "etc/boot-fail-wait",
+   "select": 36,
+   "size": 4
+  },
+  {
+   "name": "etc/e820",
+   "select": 37,
+   "size": 40
+  },
+  {
+   "name": "etc/pvpanic-port",
+   "select": 38,
+   "size": 2
+  },
+  {
+   "name": "etc/smbios/smbios-anchor",
+   "select": 39,
+   "size": 24
+  },
+  {
+   "name": "etc/smbios/smbios-tables",
+   "select": 40,
+   "size": 315
+  },
+  {
+   "name": "etc/smi/features-ok",
+   "select": 41,
+   "size": 1
+  },
+  {
+   "name": "etc/smi/requested-features",
+   "select": 42,
+   "size": 8
+  },
+  {
+   "name": "etc/smi/supported-features",
+   "select": 43,
+   "size": 8
+  },
+  {
+   "name": "etc/system-states",
+   "select": 44,
+   "size": 6
+  },
+  {
+   "name": "etc/table-loader",
+   "select": 45,
+   "size": 4096
+  },
+  {
+   "name": "etc/tpm/log",
+   "select": 46,
+   "size": 0
+  },
+  {
+   "name": "genroms/kvmvapic.bin",
+   "select": 47,
+   "size": 9216
+  }
+ ],
+ "header": {
+  "argv": [
+   "qemu-system-x86_64",
+   "-machine",
+   "q35",
+   "-accel",
+   "tcg",
+   "-bios",
+   "<64 KiB of hlt>",
+   "-m",
+   "32M",
+   "-display",
+   "none",
+   "-nodefaults",
+   "-device",
+   "pvpanic",
+   "-action",
+   "panic=pause",
+   "-S",
+   "-qmp",
+   "unix:<sock>,server=on,wait=off",
+   "-qtest",
+   "unix:<sock>,server=on,wait=off",
+   "-no-reboot"
+  ],
+  "query-version": {
+   "package": "Debian 1:8.2.2+ds-0ubuntu1.18",
+   "qemu": {
+    "major": 8,
+    "micro": 2,
+    "minor": 2
+   }
+  },
+  "script": [
+   "qtest outw 0x510 0x19",
+   "qtest inb 0x511 (repeated)"
+  ]
+ }
+}

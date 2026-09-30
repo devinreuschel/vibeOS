@@ -723,7 +723,7 @@ includes its `cargo test` of the host tools, the one tier that needs the toolcha
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
-| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest` | 40 |
+| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest`, `test-qmp` | 40 |
 | x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-strace`, `test-e2e-panic-stop` | 40 |
 | x86_64 | in-guest-1 | `test-kernel` | 64 |
 | x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |

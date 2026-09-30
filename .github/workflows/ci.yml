@@ -293,7 +293,7 @@ jobs:
         include:
           - arch: x86_64
             tier: e2e-1
-            targets: test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest
+            targets: test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-qmp
             jobs: 1
           - arch: x86_64
             tier: e2e-2

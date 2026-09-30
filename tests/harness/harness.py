@@ -156,6 +156,9 @@ class RunResult:
     # skipped test's reason.
     ktest_runs: list[str] = field(default_factory=list)
     ktest_skips: dict[str, str] = field(default_factory=dict)
+    # The QMP event that ended the run under its declaration
+    # (`GUEST_PANICKED` for an expected panic); empty otherwise.
+    end: str = ""
 
 
 def serial_tail(lines: list[str], n: int = 40) -> str:
@@ -320,14 +323,17 @@ class DeadlineReader:
                          shows where it stopped; ("timeout", "") follows
       ("timeout", "")  - the deadline arrived
       ("eof", "")      - the pipe closed
+      ("idle", "")     - with `idle_s`: no complete line within `idle_s` of
+                         the call, so the caller can poll QMP (`qmp.Session`)
 
     A loop that tests only for `timeout` and `eof` takes a partial line as
     a line.
     """
 
-    def __init__(self, fd: int, deadline: float) -> None:
+    def __init__(self, fd: int, deadline: float, *, idle_s: float | None = None) -> None:
         self._fd = fd
         self._deadline = deadline
+        self._idle_s = idle_s
         self._buf = bytearray()
         os.set_blocking(fd, False)
 
@@ -348,17 +354,21 @@ class DeadlineReader:
         if line is not None:
             return ("line", line)
 
+        idle_at = math.inf if self._idle_s is None else time.monotonic() + self._idle_s
         while True:
-            remaining = self._deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = self._deadline - now
             if remaining <= 0:
                 if self._buf:
                     tail = bytes(self._buf).rstrip(b"\r").decode("utf-8", errors="replace")
                     self._buf.clear()
                     return ("partial", tail)
                 return ("timeout", "")
+            if now >= idle_at:
+                return ("idle", "")
 
             # Cap select's own wait so the deadline is honored precisely.
-            r, _, _ = select.select([self._fd], [], [], min(remaining, 0.5))
+            r, _, _ = select.select([self._fd], [], [], min(remaining, idle_at - now, 0.5))
             if not r:
                 # No data; loop and re-check the deadline.
                 continue
@@ -403,6 +413,7 @@ class QemuProcess:
     stderr goes to a temporary file, which cannot fill and stall QEMU the
     way a second pipe can. `stdin=True` gives the guest's COM1 a pipe for
     `send_input`. `monitor_sock` is the HMP socket `monitor` and `quit` use.
+    `idle_s` makes `next_event` report `idle` (`DeadlineReader`).
     """
 
     def __init__(
@@ -412,7 +423,9 @@ class QemuProcess:
         *,
         monitor_sock: str | None = None,
         stdin: bool = False,
+        idle_s: float | None = None,
     ) -> None:
+        self.argv = list(argv)
         self._err = tempfile.TemporaryFile()
         self._proc = subprocess.Popen(
             argv,
@@ -422,7 +435,7 @@ class QemuProcess:
             bufsize=0,
         )
         assert self._proc.stdout is not None
-        self._reader = DeadlineReader(self._proc.stdout.fileno(), deadline)
+        self._reader = DeadlineReader(self._proc.stdout.fileno(), deadline, idle_s=idle_s)
         self._monitor_sock = monitor_sock
         self._mon: socket.socket | None = None
         self._stderr: str | None = None  # set, and the files closed, at exit
@@ -488,16 +501,28 @@ def _file_text(f: IO[bytes]) -> str:
     return os.pread(fd, os.fstat(fd).st_size, 0).decode("utf-8", errors="replace")
 
 
-def _start_qemu(cfg: QemuConfig, deadline: float, *, stdin: bool = False) -> QemuProcess:
-    """Check PATH and the ISO, then start QEMU with a monitor socket."""
+def _start_qemu(
+    cfg: QemuConfig, deadline: float, *, stdin: bool = False, qmp_sock: str | None = None
+) -> QemuProcess:
+    """Check PATH and the ISO, then start QEMU with a monitor socket, and
+    with `qmp_sock` a QMP socket, halted until `qmp.Session.start`."""
     if not shutil.which("qemu-system-x86_64"):
         raise HarnessError("qemu-system-x86_64 not on PATH")
     if not os.path.exists(cfg.iso):
         raise HarnessError(f"ISO missing: {cfg.iso}")
     monitor_sock = _pick_monitor_path()
     return QemuProcess(
-        qemu_argv(cfg, monitor_sock), deadline, monitor_sock=monitor_sock, stdin=stdin
+        qemu_argv(cfg, monitor_sock, qmp_sock=qmp_sock),
+        deadline,
+        monitor_sock=monitor_sock,
+        stdin=stdin,
+        idle_s=IDLE_S if qmp_sock is not None else None,
     )
+
+
+# How long a source waits for serial before it reports `idle`, so a run's
+# `qmp.Session` polls QMP while the guest is quiet or paused.
+IDLE_S = 0.2
 
 
 def _qemu_report(result: RunResult, *, exited: bool) -> str:
@@ -578,6 +603,11 @@ class QemuConfig:
     # `-s -S`: a gdb stub on tcp::1234 and the CPUs halted until it continues
     # (`make debug`).
     gdb: bool = False
+    # The end the run expects (DESIGN §8.3's event rule, `qmp.EXPECTS`):
+    # `none`, `panic`, `reset` (boots without `-no-reboot`) or `capture`.
+    expect: str = "none"
+    # The QMP `RESET` events an `expect="reset"` run allows.
+    resets: int = 0
 
 
 @dataclass
@@ -619,6 +649,8 @@ class EnvConfig:
         boot_order: str | None = None,
         extra_panic: tuple[str, ...] = (),
         cmdline: str = "",
+        expect: str = "none",
+        resets: int = 0,
     ) -> QemuConfig:
         return QemuConfig(
             iso=self.iso,
@@ -633,6 +665,8 @@ class EnvConfig:
             extra_panic=extra_panic,
             qemu_version=self.qemu_version,
             cmdline=self.fw_cfg_cmdline(cmdline),
+            expect=expect,
+            resets=resets,
         )
 
 
@@ -1176,21 +1210,33 @@ def fw_cfg_cmdline_words(cfg: QemuConfig) -> str:
     return " ".join(p for p in parts if p)
 
 
-def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
+# Every boot pauses on pvpanic's panicked event instead of QEMU's default
+# `shutdown`, so the guest stays up for a core (DESIGN §8.4, ROADMAP §10.7).
+PANIC_ACTION = ("-action", "panic=pause")
+
+
+def qemu_argv(
+    cfg: QemuConfig, monitor_sock: str | None, *, qmp_sock: str | None = None
+) -> list[str]:
+    """QEMU's argv for `cfg`. `qmp_sock` adds a QMP server there and `-S`:
+    the CPUs wait for the harness's `cont` (`qmp.Session.start`)."""
     argv = [
         "qemu-system-x86_64",
         "-cdrom", cfg.iso,
         "-m", cfg.mem,
         "-smp", str(cfg.smp),
         "-cpu", cfg.cpu,
-        "-no-reboot",
     ]
+    if cfg.expect != "reset":
+        argv += ["-no-reboot"]
     if not cfg.display:
         # QEMU keeps the last `-display`, so there is only ever this one.
         argv += ["-display", "none"]
     argv += ["-serial", "stdio"]
     if monitor_sock is not None:
         argv += ["-monitor", f"unix:{monitor_sock},server=on,wait=off"]
+    if qmp_sock is not None:
+        argv += ["-qmp", f"unix:{qmp_sock},server=on,wait=off", "-S"]
     argv += _accel_args(cfg)
     if not cfg.hpet:
         argv += list(HPET_OFF_MACHINE)
@@ -1206,6 +1252,7 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
         # QEMU's option syntax reads `,,` as one comma inside a value.
         argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]
     argv += list(FORENSICS_DEVICES)
+    argv += list(PANIC_ACTION)
     argv += list(cfg.extra)
     ensure_qemu_pinned(argv[0], cfg.qemu_version)
     return argv

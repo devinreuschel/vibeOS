@@ -190,7 +190,7 @@ endif
 .PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
-        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi
+        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi test-qmp
 
 help:
 	@printf '%s\n' \
@@ -223,6 +223,7 @@ help:
 	  '  test-e2e-highmem      boot contract with 9 GiB, past the physmap cap' \
 	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
+	  '  test-qmp              QMP event streams re-recorded and compared; one guest core checked' \
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
 	  '  test-lapic-fallback   in-guest tests, TSC-deadline off' \
@@ -521,6 +522,12 @@ test-e2e-highmem: $(ISO)
 test-e2e-strace: $(ISO)
 	VIBEOS_TIER=test-e2e-strace VIBEOS_ISO=$(ISO) VIBEOS_CMDLINE=vibeos.strace=1 python3 -c 'from tests.harness.run_e2e import strace_main; raise SystemExit(strace_main())'
 
+# The QMP event streams tests/harness/test_qmp.py replays, re-recorded on
+# this QEMU and compared with tests/harness/fixtures/qmp/, then a guest core
+# of the production ISO (DESIGN §8.3, ROADMAP §10.7).
+test-qmp: $(ISO)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 tests/harness/run_qmp.py
+
 test-kernel: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py --hpet-off
 
@@ -549,7 +556,7 @@ test-vibefs-crash-plants: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NB
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py \
 	    --plants leak,early_super
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-qmp test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
