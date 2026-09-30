@@ -6,6 +6,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::acpi::HpetInfo;
+use vibeos::arch::CycleCounter;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::time::{
     CalibSource, FS_PER_MS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2,
@@ -14,8 +15,12 @@ use vibeos::time::{
 };
 
 use crate::acpi_init;
+use crate::arch::current::{Arch, interrupts_enabled, wait_for_interrupt};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::x86_64::{has_rdtscp, invariant_tsc, rdtsc_ser};
 use crate::cell::BootCell;
 use crate::paging_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 const HPET_GEN_CFG: u64 = 0x10;
@@ -73,6 +78,7 @@ fn publish_ns(n: u64) -> u64 {
     monotonic_max(&LAST_NS, n)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn io_wait() {
     // SAFETY: invariant I229, established at `time::time_init::init`: port
     // 0x80 is the delay port, a write to it has no effect any module
@@ -80,35 +86,10 @@ fn io_wait() {
     unsafe { x86::outb(IO_WAIT_PORT, 0) };
 }
 
-fn has_rdtscp() -> bool {
-    let (max, _, _, _) = x86::cpuid(0x8000_0000, 0);
-    if max < 0x8000_0001 {
-        return false;
-    }
-    let (_, _, _, edx) = x86::cpuid(0x8000_0001, 0);
-    edx & (1 << 27) != 0
-}
-
-fn invariant_tsc() -> bool {
-    let (max, _, _, _) = x86::cpuid(0x8000_0000, 0);
-    if max < 0x8000_0007 {
-        return false;
-    }
-    let (_, _, _, edx) = x86::cpuid(0x8000_0007, 0);
-    edx & (1 << 8) != 0
-}
-
-fn rdtsc_ser(use_rdtscp: bool) -> u64 {
-    if use_rdtscp {
-        x86::rdtscp()
-    } else {
-        x86::lfence_rdtsc()
-    }
-}
-
-/// Serialized TSC. IRQ0 and `now_us` both use this.
+/// The port's cycle counter (the serialized TSC). IRQ0 and `now_us` both
+/// use this.
 pub fn read_tsc() -> u64 {
-    rdtsc_ser(STATE.try_get().is_some_and(|s| s.use_rdtscp))
+    <Arch as CycleCounter>::now()
 }
 
 /// # Safety
@@ -219,6 +200,7 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
 }
 
 /// Channel 2 one-shot, gated through 0x61. Does not touch channel 0.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
     // SAFETY: invariant I229, established at `time::time_init::init`: the
     // PIT and port 0x61 are this module's, and channel 2 feeds only this
@@ -251,6 +233,7 @@ pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
     tsc_per_ms_from_pit(t1.wrapping_sub(t0), PIT_CALIB_COUNT)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn program_pit_ch0() {
     for &(port, val) in PIT_CH0_WRITES {
         // SAFETY: invariant I229, established at `time::time_init::init`:
@@ -259,6 +242,7 @@ fn program_pit_ch0() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rtc_reg(reg: u8) -> u8 {
     // SAFETY: invariant I229, established at `time::time_init::init`: CMOS
     // is this module's, so no one else moves the index between the writes.
@@ -376,10 +360,7 @@ pub fn now_ns() -> u64 {
     let Some(st) = STATE.try_get() else {
         return 0;
     };
-    publish_ns(
-        st.clock
-            .now_ns_with(|| rdtsc_ser(st.use_rdtscp), st.tsc_per_ms),
-    )
+    publish_ns(st.clock.now_ns::<Arch>(st.tsc_per_ms))
 }
 
 pub fn tsc_per_ms() -> u64 {
@@ -438,9 +419,9 @@ pub fn busy_wait_ms(ms: u64) {
     let start = read_tsc();
     let target = (start as u128).saturating_add(ms as u128 * k as u128);
     while (read_tsc() as u128) < target {
-        if x86::interrupts_enabled() {
+        if interrupts_enabled() {
             let before = read_tsc();
-            x86::hlt_once();
+            wait_for_interrupt();
             if (read_tsc() as u128) <= before as u128 {
                 while (read_tsc() as u128) < target {
                     core::hint::spin_loop();
@@ -454,6 +435,7 @@ pub fn busy_wait_ms(ms: u64) {
 }
 
 /// Master PIC EOI. Used by the PIT gate after `on_pit_tick`.
+#[cfg(target_arch = "x86_64")]
 pub fn eoi_pit() {
     // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
     // the master 8259's EOI, which the IRQ0 path writes directly, is the
@@ -503,6 +485,7 @@ pub unsafe fn init() {
     };
 
     st.tsc_per_ms = per_ms;
+    #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::publish_tsc_per_ms(per_ms);
     st.source = source;
     let tsc0 = rdtsc_ser(use_rdtscp);
@@ -517,13 +500,18 @@ pub unsafe fn init() {
         });
     }
     // Re-enable NMI after CMOS index bit 7.
+    #[cfg(target_arch = "x86_64")]
     // SAFETY: invariant I229, established here: CMOS is this module's.
-    unsafe { x86::outb(RTC_INDEX, 0x0D) };
+    unsafe {
+        x86::outb(RTC_INDEX, 0x0D);
+    }
 
     crate::marker!("vibeOS: time: calibrated {} {}/ms", source.as_str(), per_ms);
     crate::marker!("vibeOS: time: tsc {}/ms", per_ms);
     #[cfg(feature = "kernel_tests")]
     super::ktest::publish_tick(0, tsc0);
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::x86_64::publish_rdtscp(use_rdtscp);
     // SAFETY: invariant I22, established at `cell::BootCell::set`: the one
     // write, on the BSP before SMP (`time::time_init::init`'s `# Safety`
     // runs it before IRQs are on), and no reader sees `STATE` until then.

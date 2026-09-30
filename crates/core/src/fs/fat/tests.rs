@@ -1,4 +1,5 @@
 use super::*;
+use crate::fs::FsError;
 
 /// The image size most tests format: 64 KiB.
 const IMG: usize = 64 * 1024;
@@ -410,13 +411,6 @@ fn truncate_zero_dirent_cluster() {
         v.sync(d).unwrap();
     });
     fsck(&b);
-}
-
-#[test]
-fn error_strings() {
-    assert_eq!(FatError::NotSupp.as_str(), "not supp");
-    assert_eq!(FatError::NotSupp.to_fs(), FsError::NotSupp);
-    assert_eq!(FatError::Corrupt.to_fs(), FsError::Inval);
 }
 
 #[test]
@@ -1210,13 +1204,13 @@ fn fat_rw_across_clusters_volume_buffer() {
 /// its `lookup` is one [`FatVol::lookup`] and the conversion the kernel's
 /// `FatOps` makes (key `[dir_clu, dir_off, 0]`, private words
 /// `[first_clu, dirent]`); it panics on `.` or `..`, which `Vfs` must
-/// resolve itself. Every other op refuses.
-struct FatHostOps {
+/// resolve itself. Every other op is the `InodeOps` default: missing.
+pub(crate) struct FatHostOps {
     vol: std::sync::Mutex<(Box<FatVol>, MemDisk<'static>)>,
 }
 
 impl FatHostOps {
-    fn new(img: Vec<u8>) -> &'static Self {
+    pub(crate) fn new(img: Vec<u8>) -> &'static Self {
         let buf = Box::leak(img.into_boxed_slice());
         let mut disk = MemDisk::new(buf, SEC as u32).unwrap();
         let mut vol = Box::new(FatVol::new());
@@ -1262,60 +1256,6 @@ impl crate::fs::InodeOps for FatHostOps {
         let mut g = self.vol.lock().unwrap();
         let (v, d) = &mut *g;
         Ok(host_info(&v.lookup(d, clu, name)?))
-    }
-    fn create(
-        &self,
-        _cx: &mut crate::fs::OpCx<'_>,
-        _dir: &mut crate::fs::Inode,
-        _name: &[u8],
-        _kind: InodeKind,
-        _mode: u16,
-        _target: Option<&[u8]>,
-    ) -> Result<crate::fs::InodeInfo, FsError> {
-        Err(FsError::NotSupp)
-    }
-    fn unlink(
-        &self,
-        _cx: &mut crate::fs::OpCx<'_>,
-        _dir: &mut crate::fs::Inode,
-        _name: &[u8],
-    ) -> Result<(), FsError> {
-        Err(FsError::NotSupp)
-    }
-    fn read(
-        &self,
-        _cx: &mut crate::fs::OpCx<'_>,
-        _ino: &mut crate::fs::Inode,
-        _off: u64,
-        _buf: &mut [u8],
-    ) -> Result<usize, FsError> {
-        Err(FsError::NotSupp)
-    }
-    fn write(
-        &self,
-        _cx: &mut crate::fs::OpCx<'_>,
-        _ino: &mut crate::fs::Inode,
-        _off: u64,
-        _buf: &[u8],
-    ) -> Result<usize, FsError> {
-        Err(FsError::NotSupp)
-    }
-    fn truncate(
-        &self,
-        _cx: &mut crate::fs::OpCx<'_>,
-        _ino: &mut crate::fs::Inode,
-        _size: u64,
-    ) -> Result<(), FsError> {
-        Err(FsError::NotSupp)
-    }
-    fn readdir(
-        &self,
-        _cx: &mut crate::fs::OpCx<'_>,
-        _dir: &crate::fs::Inode,
-        _cookie: u64,
-        _out: &mut crate::fs::Dirent,
-    ) -> Result<Option<u64>, FsError> {
-        Err(FsError::NotSupp)
     }
 }
 

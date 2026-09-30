@@ -65,6 +65,17 @@ pub enum PartError {
     NoMemory,
 }
 
+/// A partition table that cannot be read is an I/O error; an empty slot, no device.
+impl From<PartError> for crate::kerror::KError {
+    fn from(e: PartError) -> Self {
+        match e {
+            PartError::Truncated | PartError::BadCrc | PartError::Invalid => Self::Io,
+            PartError::Empty => Self::NoDev,
+            PartError::NoMemory => Self::NoMem,
+        }
+    }
+}
+
 impl PartError {
     pub fn as_str(self) -> &'static str {
         match self {

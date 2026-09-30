@@ -743,3 +743,51 @@ pub fn init_control_regs() {
         );
     }
 }
+
+/// The isa-debug-exit port the harness gives every test boot
+/// (`-device isa-debug-exit,iobase=0xf4`).
+#[cfg(any(feature = "kernel_tests", feature = "panic_exit"))]
+const ISA_DEBUG_EXIT: u16 = 0xF4;
+
+/// End the QEMU run with exit status `(code << 1) | 1` through
+/// isa-debug-exit, and halt if no such device took the write: the one
+/// isa-debug-exit writer, for the test and `panic_exit` builds.
+#[cfg(any(feature = "kernel_tests", feature = "panic_exit"))]
+pub fn qemu_exit(code: u32) -> ! {
+    // SAFETY: invariant: port 0xF4 is the harness's isa-debug-exit device,
+    // whose write ends the VM, and no device on a machine without it
+    // answers there; established by the `-device isa-debug-exit` the
+    // harness passes, which `arch::x86_64::cpu::ISA_DEBUG_EXIT` names.
+    unsafe { outl(ISA_DEBUG_EXIT, code) };
+    halt();
+}
+
+/// One word from the hardware RNG (`RDRAND`), or `None` when the CPU has
+/// none or it failed ten times.
+#[inline]
+pub fn hw_rng64() -> Option<u64> {
+    rdrand64()
+}
+
+/// The user TLS register (`FS_BASE`) this CPU holds now.
+#[inline]
+pub fn user_tls() -> u64 {
+    rdmsr(IA32_FS_BASE)
+}
+
+/// Load the user TLS register (`FS_BASE`) with `v`.
+///
+/// # Safety
+/// `v` is a canonical address: a non-canonical `FS_BASE` write faults.
+#[inline]
+pub unsafe fn set_user_tls(v: u64) {
+    // SAFETY: `FS_BASE` is an architectural MSR, and `v` is canonical (this
+    // fn's `# Safety` contract, established here); ring 0 never reads `fs:`.
+    unsafe { wrmsr(IA32_FS_BASE, v) };
+}
+
+/// This thread's stack pointer now.
+#[inline]
+pub fn stack_pointer() -> u64 {
+    read_rsp()
+}

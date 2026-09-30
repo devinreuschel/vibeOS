@@ -97,7 +97,7 @@ impl Vfs {
     /// Prepare a backend call on inode `islot`, which it counts.
     pub(super) fn call(&mut self, islot: u16) -> Result<Call, FsError> {
         let sb = self.inodes[islot as usize].sb;
-        let ops = self.supers[sb as usize].ops.ok_or(FsError::NotSupp)?;
+        let ops = self.supers[sb as usize].ops.unwrap_or(&NoOps);
         self.ihold(islot)?;
         Ok(self.raw_call(islot, ops))
     }

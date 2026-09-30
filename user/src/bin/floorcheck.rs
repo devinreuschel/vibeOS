@@ -34,12 +34,6 @@ use vibeos_user::{eprintln, rt};
 
 vibeos_user::main!(main);
 
-// Linux's errno values, from `include/uapi/asm-generic/errno-base.h`.
-const EBADF: Errno = Errno(9);
-const EFAULT: Errno = Errno(14);
-const ENOTDIR: Errno = Errno(20);
-const EINVAL: Errno = Errno(22);
-
 // `d_type` values, from inode(7).
 const DT_CHR: u8 = 2;
 const DT_DIR: u8 = 4;
@@ -284,13 +278,16 @@ fn case_getdents() -> Check {
     let mut buf = [0u8; 512];
     let r = getdents(file, &mut buf);
     close(file);
-    ensure(r == Err(ENOTDIR), "a regular file did not give ENOTDIR")?;
     ensure(
-        getdents(1, &mut buf) == Err(ENOTDIR),
+        r == Err(Errno::ENOTDIR),
+        "a regular file did not give ENOTDIR",
+    )?;
+    ensure(
+        getdents(1, &mut buf) == Err(Errno::ENOTDIR),
         "fd 1 did not give ENOTDIR",
     )?;
     ensure(
-        getdents(99, &mut buf) == Err(EBADF),
+        getdents(99, &mut buf) == Err(Errno::EBADF),
         "fd 99 did not give EBADF",
     )?;
     let dev = open(DEV)?;
@@ -312,7 +309,7 @@ fn getdents_root(fd: u32) -> Check {
     rewind(fd)?;
     let mut one = [0u8; 1];
     ensure(
-        getdents(fd, &mut one) == Err(EINVAL),
+        getdents(fd, &mut one) == Err(Errno::EINVAL),
         "count 1 did not give EINVAL",
     )?;
     let bad = unmapped_page()?;
@@ -320,7 +317,10 @@ fn getdents_root(fd: u32) -> Check {
     // SAFETY: `bad` is unmapped (`unmapped_page` above), so the kernel
     // writes nothing; established here.
     let r = unsafe { sys::getdents64(fd, bad as *mut c_void, len) };
-    ensure(r == Err(EFAULT), "an unmapped buffer did not give EFAULT")?;
+    ensure(
+        r == Err(Errno::EFAULT),
+        "an unmapped buffer did not give EFAULT",
+    )?;
     let mut buf = [0u8; 512];
     let (_, off, _, name, k) = first(fd, &mut buf)?;
     ensure(
@@ -410,18 +410,24 @@ fn case_fstat() -> Check {
         st.is_ok_and(|s| fmt(&s) == S_IFCHR),
         "/dev/null is not S_IFCHR",
     )?;
-    ensure(stat(99) == Err(EBADF), "fd 99 did not give EBADF")?;
+    ensure(stat(99) == Err(Errno::EBADF), "fd 99 did not give EBADF")?;
     let bad = unmapped_page()?;
     // SAFETY: `bad` is unmapped (`unmapped_page` above), so the kernel
     // writes nothing; established here.
     let r = unsafe { sys::fstat(1, bad as *mut c_void) };
-    ensure(r == Err(EFAULT), "an unmapped statbuf did not give EFAULT")?;
+    ensure(
+        r == Err(Errno::EFAULT),
+        "an unmapped statbuf did not give EFAULT",
+    )?;
     let text = rt::entry_address();
     // SAFETY: the program's text is mapped read-only (the loader follows
     // its segment flags), so the kernel's write faults and writes nothing;
     // established here.
     let r = unsafe { sys::fstat(1, text as *mut c_void) };
-    ensure(r == Err(EFAULT), "a read-only statbuf did not give EFAULT")
+    ensure(
+        r == Err(Errno::EFAULT),
+        "a read-only statbuf did not give EFAULT",
+    )
 }
 
 // ---- nanosleep ----
@@ -443,13 +449,19 @@ fn case_nanosleep() -> Check {
         ([0, -1], "nsec -1 did not give EINVAL"),
         ([-1, 0], "sec -1 did not give EINVAL"),
     ] {
-        ensure(nanosleep(&ts) == Err(EINVAL), what)?;
+        ensure(nanosleep(&ts) == Err(Errno::EINVAL), what)?;
     }
     let null = sys::nanosleep(core::ptr::null(), core::ptr::null_mut());
-    ensure(null == Err(EFAULT), "a NULL rqtp did not give EFAULT")?;
+    ensure(
+        null == Err(Errno::EFAULT),
+        "a NULL rqtp did not give EFAULT",
+    )?;
     let bad = unmapped_page()?;
     let r = sys::nanosleep(bad as *const c_void, core::ptr::null_mut());
-    ensure(r == Err(EFAULT), "an unmapped rqtp did not give EFAULT")?;
+    ensure(
+        r == Err(Errno::EFAULT),
+        "an unmapped rqtp did not give EFAULT",
+    )?;
     ensure(nanosleep(&[0, 0]) == Ok(0), "{0,0} did not return 0")?;
     let ts: Timespec = [0, 1_000_000];
     let r = sys::nanosleep(ts.as_ptr().cast::<c_void>(), bad as *mut c_void);
@@ -508,24 +520,24 @@ fn case_reboot_einval() -> Check {
     let none = core::ptr::null_mut();
     let m2 = MAGIC2[0];
     ensure(
-        reboot(0x0fee_1dea, m2, CMD_CAD_OFF, none) == Err(EINVAL),
+        reboot(0x0fee_1dea, m2, CMD_CAD_OFF, none) == Err(Errno::EINVAL),
         "a bad magic1 did not give EINVAL",
     )?;
     ensure(
-        reboot(MAGIC1, 0x2812_1968, CMD_CAD_OFF, none) == Err(EINVAL),
+        reboot(MAGIC1, 0x2812_1968, CMD_CAD_OFF, none) == Err(Errno::EINVAL),
         "a bad magic2 did not give EINVAL",
     )?;
     ensure(
-        reboot(MAGIC1, m2, 0x1234_5678, none) == Err(EINVAL),
+        reboot(MAGIC1, m2, 0x1234_5678, none) == Err(Errno::EINVAL),
         "cmd 0x12345678 did not give EINVAL",
     )?;
     ensure(
-        reboot(MAGIC1, m2, CMD_HALT, none) == Err(EINVAL),
+        reboot(MAGIC1, m2, CMD_HALT, none) == Err(Errno::EINVAL),
         "HALT did not give EINVAL",
     )?;
     let bad = unmapped_page()?;
     ensure(
-        reboot(MAGIC1, m2, CMD_RESTART2, bad as *mut c_void) == Err(EFAULT),
+        reboot(MAGIC1, m2, CMD_RESTART2, bad as *mut c_void) == Err(Errno::EFAULT),
         "RESTART2 with an unmapped arg did not give EFAULT",
     )?;
     for m2 in MAGIC2 {

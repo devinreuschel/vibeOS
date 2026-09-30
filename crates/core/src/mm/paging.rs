@@ -34,6 +34,8 @@
 
 #![allow(clippy::identity_op)] // PTE masks read as `x << n` even when n is 0
 
+use core::marker::PhantomData;
+
 use crate::atomic::statics::{AtomicPtr, Ordering};
 use crate::ipi::ShootRange;
 use crate::pmm::Frames;
@@ -41,7 +43,6 @@ use crate::pmm::Frames;
 pub const PAGE_SHIFT: u32 = 12;
 pub const PAGE_SIZE_4K: u64 = 1 << PAGE_SHIFT;
 pub const PAGE_SIZE_2M: u64 = 1 << 21;
-pub const PTES_PER_TABLE: usize = 512;
 
 /// User canonical half, exclusive end. DESIGN §4.1.
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -54,8 +55,6 @@ pub const USER_MAP_END: u64 = USER_END - PAGE_SIZE_4K;
 const _: () = assert!(USER_MAP_END == 0x0000_7FFF_FFFF_F000);
 /// First page of the user half stays unmapped (null deref). ROADMAP §9.2.
 pub const NULL_GUARD_LEN: u64 = PAGE_SIZE_4K;
-/// PML4 indices `KERNEL_PML4_FIRST..512` are the shared kernel half.
-pub const KERNEL_PML4_FIRST: usize = 256;
 
 /// HHDM base for the kernel's physmap (MEMORY.md §4.1). The same VA Limine
 /// already gave, so the switch to the kernel's PML4 invalidates no pointer
@@ -105,12 +104,6 @@ impl VirtAddr {
     pub const fn is_aligned(self, align: u64) -> bool {
         (self.0 & (align - 1)) == 0
     }
-
-    /// PML4/PDPT/PD/PT indices for this VA. Level 4 down to 1.
-    pub const fn index(self, level: u8) -> usize {
-        let shift = 12 + 9 * (level as u32 - 1);
-        ((self.0 >> shift) & 0x1FF) as usize
-    }
 }
 
 /// Which page size a leaf entry maps.
@@ -130,7 +123,10 @@ impl PageSize {
 }
 
 /// PTE flag set. Held as a raw u64 so table entries round-trip losslessly
-/// (including the OS-reserved bits phase 12 will want for e.g. CoW).
+/// (including the OS-reserved bits phase 12 will want for e.g. CoW). The
+/// values are x86_64's, so that port's `PageTable` encoding is the identity
+/// on them; another port maps them to its own bits in `make_entry` and
+/// `entry_flags` (PORTABILITY §11.1).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct PageFlags(pub u64);
@@ -166,26 +162,44 @@ impl PageFlags {
     }
 }
 
-/// Physical-address mask for a PTE. Bits 12..=51 are the frame address on
-/// current hardware; bits 0..12 and 52..63 are flags / reserved / NX.
-pub const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-
-/// Compose a raw PTE from `(phys, flags)`.
-#[inline]
-pub const fn make_pte(phys: PhysAddr, flags: PageFlags) -> u64 {
-    (phys.0 & PTE_ADDR_MASK) | (flags.0 & !PTE_ADDR_MASK)
-}
-
-/// Extract the physical frame address a PTE points at.
-#[inline]
-pub const fn pte_phys(entry: u64) -> PhysAddr {
-    PhysAddr(entry & PTE_ADDR_MASK)
-}
-
-/// Extract just the flag bits from a PTE.
-#[inline]
-pub const fn pte_flags(entry: u64) -> PageFlags {
-    PageFlags(entry & !PTE_ADDR_MASK)
+/// The page-table format, the root register and this CPU's TLB: the
+/// `PageTable` seam trait, which `crate::arch` re-exports (PORTABILITY
+/// §11.1).
+///
+/// The format is the port's pure half (`arch::<name>::paging`), which the
+/// portable `Mapper` walks through these items; `PageFlags` keeps x86_64's
+/// bit values, so on that port `make_entry` and `entry_flags` pass the flag
+/// bits through unchanged.
+pub trait PageTable {
+    /// Levels of the walk; the root is level `LEVELS`, leaves of the
+    /// smallest page are level 1.
+    const LEVELS: u8;
+    /// Entries in one table.
+    const ENTRIES: usize;
+    /// Root slots `KERNEL_ROOT_FIRST..ENTRIES` are the kernel half every
+    /// address space shares.
+    const KERNEL_ROOT_FIRST: usize;
+    /// The index `va` selects in a table at `level`, below `ENTRIES`.
+    fn index(va: VirtAddr, level: u8) -> usize;
+    /// An entry that maps `pa` with `flags`.
+    fn make_entry(pa: PhysAddr, flags: PageFlags) -> u64;
+    /// The physical address `entry` points at.
+    fn entry_phys(entry: u64) -> PhysAddr;
+    /// The flags of `entry`.
+    fn entry_flags(entry: u64) -> PageFlags;
+    /// The root this CPU runs on.
+    fn root() -> PhysAddr;
+    /// Switch this CPU to `root`.
+    ///
+    /// # Safety
+    ///
+    /// `root` is a complete top-level table that maps this CPU's code, its
+    /// stack, and everything it touches after the switch.
+    unsafe fn set_root(root: PhysAddr);
+    /// Drop this CPU's translation of the page holding `va`.
+    fn flush_local(va: VirtAddr);
+    /// Drop this CPU's non-global translations.
+    fn flush_local_all();
 }
 
 /// Frame allocator abstraction. Hands out order-0 [`Frames`], one
@@ -220,6 +234,20 @@ pub enum MapError {
     NonCanonical,
 }
 
+/// A mapping request's errno: Linux's for each condition.
+impl From<MapError> for crate::kerror::KError {
+    fn from(e: MapError) -> Self {
+        match e {
+            MapError::OutOfFrames => Self::NoMem,
+            MapError::AlreadyMapped => Self::Exist,
+            MapError::Misaligned
+            | MapError::NotMapped
+            | MapError::PageSizeMismatch
+            | MapError::NonCanonical => Self::Inval,
+        }
+    }
+}
+
 /// Whether `map_page` may overwrite an existing present leaf.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MapMode {
@@ -237,23 +265,29 @@ pub const fn is_canonical(va: u64) -> bool {
     hi == 0 || hi == 0x1_FFFF
 }
 
-/// Mapper over a single PML4 root.
+/// Mapper over a single root table, in the format port `A`'s pure half
+/// encodes (PORTABILITY §11.1).
 ///
 /// Auto-`Send + Sync`, since it holds only a root address and an offset,
 /// so nothing in the type serializes a root: callers do, through the
 /// page-table lock (DESIGN §2.1 puts page tables first in the lock order).
-pub struct Mapper {
+pub struct Mapper<A: PageTable> {
     root: PhysAddr,
     hhdm_offset: u64,
+    _port: PhantomData<fn() -> A>,
 }
 
-impl Mapper {
+impl<A: PageTable> Mapper<A> {
     /// # Safety
     /// `root` must point at a zeroed, page-aligned PML4 frame that the
     /// caller owns for the lifetime of this `Mapper`. `hhdm_offset` must
     /// map every table frame's phys addr to a writable virt.
     pub const unsafe fn new(root: PhysAddr, hhdm_offset: u64) -> Self {
-        Self { root, hhdm_offset }
+        Self {
+            root,
+            hhdm_offset,
+            _port: PhantomData,
+        }
     }
 
     pub fn root(&self) -> PhysAddr {
@@ -277,14 +311,14 @@ impl Mapper {
     /// `phys` must be real, non-conflicting memory. Caller vouches that
     /// no other mapping already reaches this range unless `mode` is
     /// `Remap`.
-    pub unsafe fn map_page<A: FrameAlloc>(
+    pub unsafe fn map_page<F: FrameAlloc>(
         &mut self,
         va: VirtAddr,
         pa: PhysAddr,
         flags: PageFlags,
         size: PageSize,
         mode: MapMode,
-        alloc: &mut A,
+        alloc: &mut F,
     ) -> Result<(), MapError> {
         if !is_canonical(va.0) {
             return Err(MapError::NonCanonical);
@@ -305,17 +339,17 @@ impl Mapper {
 
         // Walk levels 4 down to leaf_level+1: at each, ensure a child
         // table exists.
-        let mut level = 4;
+        let mut level = A::LEVELS;
         while level > leaf_level {
-            let idx = va.index(level);
+            let idx = A::index(va, level);
             // SAFETY: `table_phys` is this root or a table the walk found
-            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512` stays inside it.
+            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < A::ENTRIES` (`arch::PageTable::index`) stays inside it.
             let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
             // SAFETY: `entry_ptr` points into a live table, as above
             // (`mm::paging::Mapper::new`'s contract).
             let entry = unsafe { entry_ptr.read_volatile() };
 
-            if entry & PageFlags::PRESENT == 0 {
+            if !A::entry_flags(entry).contains(PageFlags::PRESENT) {
                 let f = alloc.alloc_frame().ok_or(MapError::OutOfFrames)?;
                 debug_assert_eq!(f.order(), 0, "paging: FrameAlloc gave order {}", f.order());
                 // The table's token moves into the entry written below;
@@ -334,36 +368,36 @@ impl Mapper {
                 // `&mut self` makes this the root's one writer, and for the
                 // kernel root the page-table lock is held (invariant I226,
                 // established at `mm::paging_init::current_mapper`).
-                unsafe { entry_ptr.write_volatile(make_pte(new, interior)) };
+                unsafe { entry_ptr.write_volatile(A::make_entry(new, interior)) };
                 table_phys = new;
             } else {
-                if entry & PageFlags::HUGE != 0 {
+                if A::entry_flags(entry).contains(PageFlags::HUGE) {
                     // The walk hit an existing huge/large leaf where we
                     // expected an interior table. That means the caller
                     // is trying to map a 4 KiB page inside an existing
                     // 2 MiB region without splitting.
                     return Err(MapError::PageSizeMismatch);
                 }
-                table_phys = pte_phys(entry);
+                table_phys = A::entry_phys(entry);
             }
             level -= 1;
         }
 
         // Now at the level holding the leaf slot.
-        let idx = va.index(leaf_level);
+        let idx = A::index(va, leaf_level);
         // SAFETY: `table_phys` is a table the walk above reached, and
-        // every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
+        // every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < A::ENTRIES` (`arch::PageTable::index`).
         let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
         // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract).
         let existing = unsafe { entry_ptr.read_volatile() };
-        if existing & PageFlags::PRESENT != 0 {
+        if A::entry_flags(existing).contains(PageFlags::PRESENT) {
             match mode {
                 MapMode::Fresh => return Err(MapError::AlreadyMapped),
                 MapMode::Remap => {}
             }
             // If existing leaf was a 4K entry but we're placing a 2M leaf
             // (or the other way round), refuse. Not our job to split.
-            let existing_huge = (existing & PageFlags::HUGE) != 0;
+            let existing_huge = A::entry_flags(existing).contains(PageFlags::HUGE);
             let want_huge = matches!(size, PageSize::Size2M);
             if existing_huge != want_huge {
                 return Err(MapError::PageSizeMismatch);
@@ -379,7 +413,7 @@ impl Mapper {
         // established here), and the page-table lock covers a kernel-root
         // write (invariant I226, established at
         // `mm::paging_init::current_mapper`).
-        unsafe { entry_ptr.write_volatile(make_pte(pa, leaf_flags)) };
+        unsafe { entry_ptr.write_volatile(A::make_entry(pa, leaf_flags)) };
         Ok(())
     }
 
@@ -389,14 +423,14 @@ impl Mapper {
     ///
     /// # Safety
     /// Same contract as `map_page`.
-    pub unsafe fn map_range<A: FrameAlloc>(
+    pub unsafe fn map_range<F: FrameAlloc>(
         &mut self,
         va: VirtAddr,
         pa: PhysAddr,
         len: u64,
         flags: PageFlags,
         mode: MapMode,
-        alloc: &mut A,
+        alloc: &mut F,
     ) -> Result<(), MapError> {
         if len == 0 {
             return Ok(());
@@ -436,25 +470,25 @@ impl Mapper {
     /// for a kernel-half VA, `tlb_shootdown_others` (DESIGN §4.3, §7.9).
     pub unsafe fn unmap_page(&mut self, va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
         let mut table_phys = self.root;
-        let mut level = 4;
+        let mut level = A::LEVELS;
         while level >= 1 {
-            let idx = va.index(level);
+            let idx = A::index(va, level);
             // SAFETY: `table_phys` is this root or a table the walk found
-            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
+            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < A::ENTRIES` (`arch::PageTable::index`).
             let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
             // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract).
             let entry = unsafe { entry_ptr.read_volatile() };
-            if entry & PageFlags::PRESENT == 0 {
+            if !A::entry_flags(entry).contains(PageFlags::PRESENT) {
                 return None;
             }
-            let is_leaf = level == 1 || (entry & PageFlags::HUGE) != 0;
+            let is_leaf = level == 1 || A::entry_flags(entry).contains(PageFlags::HUGE);
             if is_leaf {
                 let size = if level == 1 {
                     PageSize::Size4K
                 } else {
                     PageSize::Size2M
                 };
-                let phys = pte_phys(entry);
+                let phys = A::entry_phys(entry);
                 // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract),
                 // and the page-table lock covers a kernel-root write
                 // (invariant I226, established at
@@ -462,7 +496,7 @@ impl Mapper {
                 unsafe { entry_ptr.write_volatile(0) };
                 return Some((phys, size));
             }
-            table_phys = pte_phys(entry);
+            table_phys = A::entry_phys(entry);
             level -= 1;
         }
         None
@@ -472,27 +506,27 @@ impl Mapper {
     /// unmapped. Does not consult the TLB (host-testable).
     pub fn translate(&self, va: VirtAddr) -> Option<(PhysAddr, PageSize, PageFlags)> {
         let mut table_phys = self.root;
-        let mut level = 4;
+        let mut level = A::LEVELS;
         while level >= 1 {
-            let idx = va.index(level);
+            let idx = A::index(va, level);
             // SAFETY: `table_phys` is this root or a table the walk found
-            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
+            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < A::ENTRIES` (`arch::PageTable::index`).
             let entry = unsafe { self.table_ptr(table_phys).add(idx).read_volatile() };
-            if entry & PageFlags::PRESENT == 0 {
+            if !A::entry_flags(entry).contains(PageFlags::PRESENT) {
                 return None;
             }
-            let is_leaf = level == 1 || (entry & PageFlags::HUGE) != 0;
+            let is_leaf = level == 1 || A::entry_flags(entry).contains(PageFlags::HUGE);
             if is_leaf {
                 let size = if level == 1 {
                     PageSize::Size4K
                 } else {
                     PageSize::Size2M
                 };
-                let page_base = pte_phys(entry).0;
+                let page_base = A::entry_phys(entry).0;
                 let offset = va.0 & (size.bytes() - 1);
-                return Some((PhysAddr(page_base + offset), size, pte_flags(entry)));
+                return Some((PhysAddr(page_base + offset), size, A::entry_flags(entry)));
             }
-            table_phys = pte_phys(entry);
+            table_phys = A::entry_phys(entry);
             level -= 1;
         }
         None
@@ -529,22 +563,25 @@ impl Mapper {
                 PageSize::Size2M => 2,
             };
             let mut table_phys = self.root;
-            let mut level = 4;
+            let mut level = A::LEVELS;
             while level > leaf_level {
-                let idx = va.index(level);
+                let idx = A::index(va, level);
                 // SAFETY: `translate` just walked this path to a present
-                // leaf, so each table on it is live, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
+                // leaf, so each table on it is live, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < A::ENTRIES` (`arch::PageTable::index`).
                 let entry = unsafe { self.table_ptr(table_phys).add(idx).read_volatile() };
-                table_phys = pte_phys(entry);
+                table_phys = A::entry_phys(entry);
                 level -= 1;
             }
-            let idx = va.index(leaf_level);
+            let idx = A::index(va, leaf_level);
             // SAFETY: as above, `table_phys` holds the present leaf
             // `translate` found (`mm::paging::Mapper::new`'s contract).
             let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
             // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract).
             let entry = unsafe { entry_ptr.read_volatile() };
-            let patched = entry | PageFlags::PCD | PageFlags::PWT;
+            let patched = A::make_entry(
+                A::entry_phys(entry),
+                A::entry_flags(entry).with(PageFlags::PCD | PageFlags::PWT),
+            );
             // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract); the
             // caller walks the tables the CPU uses (this fn's `# Safety`
             // contract, established here) under the page-table lock
@@ -568,16 +605,16 @@ impl Mapper {
             return Probe::Skip(PAGE_SIZE_4K);
         }
         let mut table_phys = self.root;
-        let mut level: u8 = 4;
+        let mut level: u8 = A::LEVELS;
         loop {
-            let idx = va.index(level);
+            let idx = A::index(va, level);
             // SAFETY: `table_phys` is this root or a table the walk found
-            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
+            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < A::ENTRIES` (`arch::PageTable::index`).
             let entry = unsafe { self.table_ptr(table_phys).add(idx).read_volatile() };
-            if entry & PageFlags::PRESENT == 0 {
+            if !A::entry_flags(entry).contains(PageFlags::PRESENT) {
                 return Probe::Skip(slot_remaining(va.0, level));
             }
-            let is_leaf = level == 1 || (entry & PageFlags::HUGE) != 0;
+            let is_leaf = level == 1 || A::entry_flags(entry).contains(PageFlags::HUGE);
             if is_leaf {
                 let size = if level == 1 {
                     PageSize::Size4K
@@ -585,12 +622,12 @@ impl Mapper {
                     PageSize::Size2M
                 };
                 return Probe::Mapped {
-                    pa: pte_phys(entry),
+                    pa: A::entry_phys(entry),
                     size,
-                    flags: pte_flags(entry),
+                    flags: A::entry_flags(entry),
                 };
             }
-            table_phys = pte_phys(entry);
+            table_phys = A::entry_phys(entry);
             level -= 1;
         }
     }
@@ -668,34 +705,34 @@ impl Mapper {
         }
     }
 
-    /// Copy PML4[`KERNEL_PML4_FIRST`..] from `src`. Those entries point
+    /// Copy root slots `A::KERNEL_ROOT_FIRST..` from `src`. Those entries point
     /// at the same kernel PDPTs; later leaf maps in the kernel half are
-    /// visible to every address space. Do not copy `0..KERNEL_PML4_FIRST`
+    /// visible to every address space. Do not copy `0..A::KERNEL_ROOT_FIRST`
     /// (low identity stays on the kernel CR3 only).
-    pub fn copy_kernel_half_from(&mut self, src: &Mapper) {
+    pub fn copy_kernel_half_from(&mut self, src: &Mapper<A>) {
         let src_ptr = src.table_ptr(src.root);
         let dst_ptr = self.table_ptr(self.root);
-        let mut i = KERNEL_PML4_FIRST;
-        while i < PTES_PER_TABLE {
+        let mut i = A::KERNEL_ROOT_FIRST;
+        while i < A::ENTRIES {
             // SAFETY: `src`'s root is a live PML4 reached at its offset
-            // (`mm::paging::Mapper::new`'s contract), and `i < 512`.
+            // (`mm::paging::Mapper::new`'s contract), and `i < A::ENTRIES`.
             let e = unsafe { src_ptr.add(i).read_volatile() };
             // SAFETY: this root is a live PML4 reached at `hhdm_offset`
             // (`mm::paging::Mapper::new`'s contract), and `&mut self` makes this its one writer;
-            // `i < 512`.
+            // `i < A::ENTRIES`.
             unsafe { dst_ptr.add(i).write_volatile(e) };
             i += 1;
         }
     }
 
     pub fn pml4_entry(&self, idx: usize) -> u64 {
-        assert!(idx < PTES_PER_TABLE, "paging: pml4_entry index {idx}");
+        assert!(idx < A::ENTRIES, "paging: pml4_entry index {idx}");
         // SAFETY: the root is a live PML4 reached at `hhdm_offset`
         // (`mm::paging::Mapper::new`'s contract), and the assert keeps `idx` inside it.
         unsafe { self.table_ptr(self.root).add(idx).read_volatile() }
     }
 
-    /// Walk the user half (`PML4[0..KERNEL_PML4_FIRST)`), clear every
+    /// Walk the user half (root slots `0..A::KERNEL_ROOT_FIRST`), clear every
     /// present entry and hand `free` the frame each one held, leaves and
     /// interior tables alike; leave kernel-half entries untouched. Does
     /// not free `self.root`.
@@ -716,7 +753,7 @@ impl Mapper {
         // SAFETY: `free_level`'s contract; the root is this mapper's live
         // PML4 (`mm::paging::Mapper::new`'s contract), and this fn's `# Safety` contract covers
         // its user half, established here.
-        unsafe { self.free_level(self.root, 4, true, free, &mut stats) };
+        unsafe { self.free_level(self.root, A::LEVELS, true, free, &mut stats) };
         stats
     }
 
@@ -726,7 +763,7 @@ impl Mapper {
     /// # Safety
     /// `table` is a live table of this mapper at `level`, reached at
     /// `hhdm_offset`, and each present entry it covers (below
-    /// `KERNEL_PML4_FIRST` when `pml4`) holds an order-0 frame whose
+    /// `A::KERNEL_ROOT_FIRST` when `pml4`) holds an order-0 frame whose
     /// [`Frames`] was consumed into it with `into_entry` and that no other
     /// token names, as [`Mapper::free_user_half`] requires.
     unsafe fn free_level<F: FnMut(Frames)>(
@@ -738,22 +775,22 @@ impl Mapper {
         stats: &mut UserFreeStats,
     ) {
         let ptr = self.table_ptr(table);
-        let end = if pml4 && level == 4 {
-            KERNEL_PML4_FIRST
+        let end = if pml4 && level == A::LEVELS {
+            A::KERNEL_ROOT_FIRST
         } else {
-            PTES_PER_TABLE
+            A::ENTRIES
         };
         let mut i = 0usize;
         while i < end {
             // SAFETY: `table` is live by this fn's `# Safety` contract,
-            // established here, and `i < 512`.
+            // established here, and `i < A::ENTRIES`.
             let e = unsafe { ptr.add(i).read_volatile() };
-            if e & PageFlags::PRESENT == 0 {
+            if !A::entry_flags(e).contains(PageFlags::PRESENT) {
                 i += 1;
                 continue;
             }
-            let child = pte_phys(e);
-            let huge = (e & PageFlags::HUGE) != 0;
+            let child = A::entry_phys(e);
+            let huge = A::entry_flags(e).contains(PageFlags::HUGE);
             let leaf = level == 1 || huge;
             if leaf {
                 assert!(level == 1 && !huge, "addrspace: unexpected huge user leaf");
@@ -785,9 +822,9 @@ impl Mapper {
     /// `hhdm_offset`.
     pub unsafe fn zero_frame(&self, phys: PhysAddr) {
         let ptr = self.table_ptr(phys);
-        for i in 0..PTES_PER_TABLE {
+        for i in 0..A::ENTRIES {
             // SAFETY: `phys` is an owned page reached at `hhdm_offset` by
-            // this fn's `# Safety` contract, established here; `i < 512`
+            // this fn's `# Safety` contract, established here; `i < A::ENTRIES`
             // words stay inside it.
             unsafe { ptr.add(i).write_volatile(0) };
         }
@@ -978,6 +1015,7 @@ unsafe impl FrameAlloc for crate::pmm::testing::Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arch::stub::Arch;
     use crate::pmm::testing::Pool;
 
     #[test]
@@ -989,13 +1027,13 @@ mod tests {
 
     /// A mapper over a fresh root from `pool`. The root's token moves
     /// into the mapper, which the test never tears down.
-    fn fresh_mapper(pool: &mut Pool) -> Mapper {
+    fn fresh_mapper(pool: &mut Pool) -> Mapper<Arch> {
         let root = PhysAddr(pool.alloc_frame().unwrap().into_entry());
         // Zero via the HHDM physmap.
         let ptr = root.0.wrapping_add(pool.hhdm()) as *mut u64;
-        for i in 0..PTES_PER_TABLE {
+        for i in 0..<Arch as PageTable>::ENTRIES {
             // SAFETY: `root` is an order-0 frame of the pool's host memory,
-            // reached at `pool.hhdm()`, and `i < 512` words stay inside it,
+            // reached at `pool.hhdm()`, and `i < A::ENTRIES` words stay inside it,
             // established here.
             unsafe { ptr.add(i).write_volatile(0) };
         }
@@ -1006,29 +1044,6 @@ mod tests {
     }
 
     #[test]
-    fn indexing_matches_hardware_layout() {
-        // 0x1_2345_6789_abcd: pick out per-level indices.
-        let v = VirtAddr(0x0000_1234_5678_9abc);
-        // l1 = bits 12..21, l2 = 21..30, l3 = 30..39, l4 = 39..48.
-        assert_eq!(
-            v.index(1),
-            ((0x0000_1234_5678_9abcu64 >> 12) & 0x1FF) as usize
-        );
-        assert_eq!(
-            v.index(2),
-            ((0x0000_1234_5678_9abcu64 >> 21) & 0x1FF) as usize
-        );
-        assert_eq!(
-            v.index(3),
-            ((0x0000_1234_5678_9abcu64 >> 30) & 0x1FF) as usize
-        );
-        assert_eq!(
-            v.index(4),
-            ((0x0000_1234_5678_9abcu64 >> 39) & 0x1FF) as usize
-        );
-    }
-
-    #[test]
     fn canonical_check() {
         assert!(is_canonical(0x0000_7FFF_FFFF_FFFF));
         assert!(is_canonical(0xFFFF_8000_0000_0000));
@@ -1036,17 +1051,6 @@ mod tests {
         // Middle of the non-canonical hole.
         assert!(!is_canonical(0x0000_8000_0000_0000));
         assert!(!is_canonical(0xFFFF_7FFF_FFFF_FFFF));
-    }
-
-    #[test]
-    fn make_pte_round_trip() {
-        let phys = PhysAddr(0x0000_0000_ABCD_E000);
-        let f = PageFlags::present().with(PageFlags::WRITABLE | PageFlags::NX);
-        let entry = make_pte(phys, f);
-        assert_eq!(pte_phys(entry), phys);
-        assert_eq!(pte_flags(entry).0, f.0);
-        // NX bit lives at 63 and must survive the round trip.
-        assert!(pte_flags(entry).contains(PageFlags::NX));
     }
 
     #[test]

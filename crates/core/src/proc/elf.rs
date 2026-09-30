@@ -74,6 +74,32 @@ pub enum ElfError {
     ImageTooBig,
 }
 
+/// An image the loader refuses is `ENOEXEC`.
+impl From<ElfError> for crate::kerror::KError {
+    fn from(e: ElfError) -> Self {
+        match e {
+            ElfError::Truncated
+            | ElfError::BadMagic
+            | ElfError::BadClass
+            | ElfError::BadEndian
+            | ElfError::BadVersion
+            | ElfError::BadMachine
+            | ElfError::BadType
+            | ElfError::BadPhentsize
+            | ElfError::HasInterp
+            | ElfError::FileszGtMemsz
+            | ElfError::BadAlign
+            | ElfError::KernelVa
+            | ElfError::NullGuard
+            | ElfError::TooManyLoads
+            | ElfError::NoLoad
+            | ElfError::Overlap
+            | ElfError::Stack
+            | ElfError::ImageTooBig => Self::NoExec,
+        }
+    }
+}
+
 impl ElfError {
     pub fn as_str(self) -> &'static str {
         match self {

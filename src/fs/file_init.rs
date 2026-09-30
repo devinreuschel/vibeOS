@@ -5,7 +5,7 @@
 //! [`fs_init::api`], which calls a backend only with the VFS lock dropped,
 //! so a backend may wait for its volume and its disk. Relative paths are
 //! joined with the shell's working directory. `sync` issues a block Flush
-//! (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`; vibefs stores
+//! (DESIGN §10.2). FAT rejects symlink/link with `Perm`; vibefs stores
 //! POSIX mode and symlinks (docs/VIBEFS.md).
 //!
 //! Path syscalls (`open`, `execve`'s image) resolve through `Vfs` like

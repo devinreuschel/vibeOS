@@ -110,7 +110,7 @@ fn release_list_of(cpu: usize) -> (usize, &'static DeferList) {
 /// The list of the CPU this runs on when it reads the id. A push is safe
 /// from any CPU, so a caller with IF=1 may push to the one it left.
 fn this_release_list() -> (usize, &'static DeferList) {
-    let _irq = crate::x86::InterruptGuard::enter();
+    let _irq = crate::arch::current::InterruptGuard::enter();
     release_list_of(per_cpu_init::try_current().map_or(0, |c| c.cpu_id as usize))
 }
 

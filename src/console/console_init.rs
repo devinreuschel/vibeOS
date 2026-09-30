@@ -10,13 +10,13 @@ use vibeos::fb::CHUNK;
 use vibeos::kbd::DecodedKey;
 use vibeos::marker;
 
+use crate::arch::current::{InterruptGuard, interrupts_enabled, irq_disable, irq_enable};
 use crate::fb_init;
 use crate::kbd_init;
 use crate::log_init;
 use crate::per_cpu_init;
 use crate::serial::Serial;
 use crate::thread_init;
-use crate::x86::{self, InterruptGuard};
 
 pub(super) static SERIAL_ON: AtomicBool = AtomicBool::new(false);
 pub(super) static FB_ON: AtomicBool = AtomicBool::new(false);
@@ -77,12 +77,12 @@ pub fn read() -> Option<DecodedKey> {
 /// body that calls this returns to an exit that must run with IF=0
 /// (AGENTS.md rule 2).
 pub fn wait_key() -> DecodedKey {
-    let if_on = x86::interrupts_enabled();
+    let if_on = interrupts_enabled();
     let k = wait_key_loop();
     if if_on {
-        x86::sti();
+        irq_enable();
     } else {
-        x86::cli();
+        irq_disable();
     }
     k
 }
@@ -101,12 +101,14 @@ fn wait_key_loop() -> DecodedKey {
         }
         // SAFETY: `cli` only changes IF, which this wait loop owns: it holds no
         // lock and no `InterruptGuard` here; established here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("cli", options(nostack, preserves_flags));
         }
         if let Some(k) = read() {
             // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
             // lock and no `InterruptGuard` here; established here.
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 core::arch::asm!("sti", options(nostack, preserves_flags));
             }
@@ -115,6 +117,7 @@ fn wait_key_loop() -> DecodedKey {
         if !per_cpu_init::current().runq.is_empty() {
             // SAFETY: `sti` only changes IF, which this wait loop owns: it holds no
             // lock and no `InterruptGuard` here; established here.
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 core::arch::asm!("sti", options(nostack, preserves_flags));
             }
@@ -126,6 +129,7 @@ fn wait_key_loop() -> DecodedKey {
         // SAFETY: `sti; hlt` only enables interrupts and halts until one
         // arrives, and `sti`'s one-instruction shadow keeps a wake-up IRQ from
         // landing before the `hlt`; this loop holds no lock; established here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
         }

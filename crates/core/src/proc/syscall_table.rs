@@ -18,11 +18,8 @@ pub struct Row {
     pub sys: Sys,
     pub name: &'static str,
     /// The arguments, in canonical (x86_64) register order; the arity is
-    /// their count.
+    /// their count. Each architecture's number is in its [`NrTable`].
     pub args: &'static [Arg],
-    /// The number on each architecture, `None` where Linux has none.
-    pub x86_64: Option<u32>,
-    pub aarch64: Option<u32>,
 }
 
 impl Row {
@@ -135,6 +132,12 @@ impl NrTable {
     /// The table, indexed by number.
     pub const fn slots(&self) -> &'static [Option<Sys>] {
         self.slots
+    }
+
+    /// `sys`'s number in this table; `None` where Linux has none.
+    pub fn number(&self, sys: Sys) -> Option<u64> {
+        let n = self.slots.iter().position(|s| *s == Some(sys))?;
+        u64::try_from(n).ok()
     }
 }
 
@@ -253,8 +256,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(0),
-        aarch64: Some(63),
     },
     Row {
         sys: Sys::Write,
@@ -281,8 +282,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(1),
-        aarch64: Some(64),
     },
     Row {
         sys: Sys::Open,
@@ -309,8 +308,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(2),
-        aarch64: None,
     },
     Row {
         sys: Sys::Close,
@@ -320,8 +317,6 @@ pub static ROWS: [Row; 24] = [
             ty: CType::UInt,
             ptr: None,
         }],
-        x86_64: Some(3),
-        aarch64: Some(57),
     },
     Row {
         sys: Sys::Fstat,
@@ -343,8 +338,6 @@ pub static ROWS: [Row; 24] = [
                 }),
             },
         ],
-        x86_64: Some(5),
-        aarch64: Some(80),
     },
     Row {
         sys: Sys::Lseek,
@@ -366,8 +359,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(8),
-        aarch64: Some(62),
     },
     Row {
         sys: Sys::Mmap,
@@ -404,8 +395,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(9),
-        aarch64: Some(222),
     },
     Row {
         sys: Sys::Munmap,
@@ -422,8 +411,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(11),
-        aarch64: Some(215),
     },
     Row {
         sys: Sys::Brk,
@@ -433,15 +420,11 @@ pub static ROWS: [Row; 24] = [
             ty: CType::ULong,
             ptr: None,
         }],
-        x86_64: Some(12),
-        aarch64: Some(214),
     },
     Row {
         sys: Sys::SchedYield,
         name: "sched_yield",
         args: &[],
-        x86_64: Some(24),
-        aarch64: Some(124),
     },
     Row {
         sys: Sys::Dup,
@@ -451,8 +434,6 @@ pub static ROWS: [Row; 24] = [
             ty: CType::UInt,
             ptr: None,
         }],
-        x86_64: Some(32),
-        aarch64: Some(23),
     },
     Row {
         sys: Sys::Dup2,
@@ -469,8 +450,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(33),
-        aarch64: None,
     },
     Row {
         sys: Sys::Nanosleep,
@@ -497,22 +476,16 @@ pub static ROWS: [Row; 24] = [
                 }),
             },
         ],
-        x86_64: Some(35),
-        aarch64: Some(101),
     },
     Row {
         sys: Sys::Getpid,
         name: "getpid",
         args: &[],
-        x86_64: Some(39),
-        aarch64: Some(172),
     },
     Row {
         sys: Sys::Fork,
         name: "fork",
         args: &[],
-        x86_64: Some(57),
-        aarch64: None,
     },
     Row {
         sys: Sys::Execve,
@@ -549,8 +522,6 @@ pub static ROWS: [Row; 24] = [
                 }),
             },
         ],
-        x86_64: Some(59),
-        aarch64: Some(221),
     },
     Row {
         sys: Sys::Exit,
@@ -560,8 +531,6 @@ pub static ROWS: [Row; 24] = [
             ty: CType::Int,
             ptr: None,
         }],
-        x86_64: Some(60),
-        aarch64: Some(93),
     },
     Row {
         sys: Sys::Wait4,
@@ -598,8 +567,6 @@ pub static ROWS: [Row; 24] = [
                 }),
             },
         ],
-        x86_64: Some(61),
-        aarch64: Some(260),
     },
     Row {
         sys: Sys::Kill,
@@ -616,8 +583,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(62),
-        aarch64: Some(129),
     },
     Row {
         sys: Sys::Fcntl,
@@ -639,15 +604,11 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(72),
-        aarch64: Some(25),
     },
     Row {
         sys: Sys::Getppid,
         name: "getppid",
         args: &[],
-        x86_64: Some(110),
-        aarch64: Some(173),
     },
     Row {
         sys: Sys::Reboot,
@@ -679,8 +640,6 @@ pub static ROWS: [Row; 24] = [
                 }),
             },
         ],
-        x86_64: Some(169),
-        aarch64: Some(142),
     },
     Row {
         sys: Sys::Getdents64,
@@ -707,8 +666,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(217),
-        aarch64: Some(61),
     },
     Row {
         sys: Sys::Psinfo,
@@ -730,8 +687,6 @@ pub static ROWS: [Row; 24] = [
                 ptr: None,
             },
         ],
-        x86_64: Some(500),
-        aarch64: None,
     },
 ];
 
@@ -794,135 +749,6 @@ pub trait Handlers {
     fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult;
     /// `psinfo`.
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult;
-}
-
-/// x86_64: the number is `eax` sign-extended (SYSCALL.md §1).
-pub mod x86_64 {
-    use super::{Handlers, NrRule, NrTable, Sys, SysResult};
-    use crate::kerror::KError;
-
-    /// The x86_64 numbers.
-    pub mod nr {
-        /// `read`.
-        pub const SYS_READ: u64 = 0;
-        /// `write`.
-        pub const SYS_WRITE: u64 = 1;
-        /// `open`.
-        pub const SYS_OPEN: u64 = 2;
-        /// `close`.
-        pub const SYS_CLOSE: u64 = 3;
-        /// `fstat`.
-        pub const SYS_FSTAT: u64 = 5;
-        /// `lseek`.
-        pub const SYS_LSEEK: u64 = 8;
-        /// `mmap`.
-        pub const SYS_MMAP: u64 = 9;
-        /// `munmap`.
-        pub const SYS_MUNMAP: u64 = 11;
-        /// `brk`.
-        pub const SYS_BRK: u64 = 12;
-        /// `sched_yield`.
-        pub const SYS_SCHED_YIELD: u64 = 24;
-        /// `dup`.
-        pub const SYS_DUP: u64 = 32;
-        /// `dup2`.
-        pub const SYS_DUP2: u64 = 33;
-        /// `nanosleep`.
-        pub const SYS_NANOSLEEP: u64 = 35;
-        /// `getpid`.
-        pub const SYS_GETPID: u64 = 39;
-        /// `fork`.
-        pub const SYS_FORK: u64 = 57;
-        /// `execve`.
-        pub const SYS_EXECVE: u64 = 59;
-        /// `exit`.
-        pub const SYS_EXIT: u64 = 60;
-        /// `wait4`.
-        pub const SYS_WAIT4: u64 = 61;
-        /// `kill`.
-        pub const SYS_KILL: u64 = 62;
-        /// `fcntl`.
-        pub const SYS_FCNTL: u64 = 72;
-        /// `getppid`.
-        pub const SYS_GETPPID: u64 = 110;
-        /// `reboot`.
-        pub const SYS_REBOOT: u64 = 169;
-        /// `getdents64`.
-        pub const SYS_GETDENTS64: u64 = 217;
-        /// `psinfo`.
-        pub const SYS_PSINFO: u64 = 500;
-    }
-
-    const SLOTS: [Option<Sys>; 501] = {
-        let mut t = [None; 501];
-        t[nr::SYS_READ as usize] = Some(Sys::Read);
-        t[nr::SYS_WRITE as usize] = Some(Sys::Write);
-        t[nr::SYS_OPEN as usize] = Some(Sys::Open);
-        t[nr::SYS_CLOSE as usize] = Some(Sys::Close);
-        t[nr::SYS_FSTAT as usize] = Some(Sys::Fstat);
-        t[nr::SYS_LSEEK as usize] = Some(Sys::Lseek);
-        t[nr::SYS_MMAP as usize] = Some(Sys::Mmap);
-        t[nr::SYS_MUNMAP as usize] = Some(Sys::Munmap);
-        t[nr::SYS_BRK as usize] = Some(Sys::Brk);
-        t[nr::SYS_SCHED_YIELD as usize] = Some(Sys::SchedYield);
-        t[nr::SYS_DUP as usize] = Some(Sys::Dup);
-        t[nr::SYS_DUP2 as usize] = Some(Sys::Dup2);
-        t[nr::SYS_NANOSLEEP as usize] = Some(Sys::Nanosleep);
-        t[nr::SYS_GETPID as usize] = Some(Sys::Getpid);
-        t[nr::SYS_FORK as usize] = Some(Sys::Fork);
-        t[nr::SYS_EXECVE as usize] = Some(Sys::Execve);
-        t[nr::SYS_EXIT as usize] = Some(Sys::Exit);
-        t[nr::SYS_WAIT4 as usize] = Some(Sys::Wait4);
-        t[nr::SYS_KILL as usize] = Some(Sys::Kill);
-        t[nr::SYS_FCNTL as usize] = Some(Sys::Fcntl);
-        t[nr::SYS_GETPPID as usize] = Some(Sys::Getppid);
-        t[nr::SYS_REBOOT as usize] = Some(Sys::Reboot);
-        t[nr::SYS_GETDENTS64 as usize] = Some(Sys::Getdents64);
-        t[nr::SYS_PSINFO as usize] = Some(Sys::Psinfo);
-        t
-    };
-
-    /// The table dispatch indexes by number.
-    pub static TABLE: NrTable = NrTable::new(NrRule::SignExtendEax, &SLOTS);
-
-    /// Call `sys`'s handler, each register cut to its argument's C type.
-    pub fn call<H: Handlers + ?Sized>(h: &mut H, sys: Sys, regs: &[u64; 6]) -> SysResult {
-        match sys {
-            Sys::Read => h.read(regs[0] as u32, regs[1], regs[2] as usize),
-            Sys::Write => h.write(regs[0] as u32, regs[1], regs[2] as usize),
-            Sys::Open => h.open(regs[0], regs[1] as i32, regs[2] as u16),
-            Sys::Close => h.close(regs[0] as u32),
-            Sys::Fstat => h.fstat(regs[0] as u32, regs[1]),
-            Sys::Lseek => h.lseek(regs[0] as u32, regs[1] as i64, regs[2] as u32),
-            Sys::Mmap => h.mmap(regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]),
-            Sys::Munmap => h.munmap(regs[0], regs[1] as usize),
-            Sys::Brk => h.brk(regs[0]),
-            Sys::SchedYield => h.sched_yield(),
-            Sys::Dup => h.dup(regs[0] as u32),
-            Sys::Dup2 => h.dup2(regs[0] as u32, regs[1] as u32),
-            Sys::Nanosleep => h.nanosleep(regs[0], regs[1]),
-            Sys::Getpid => h.getpid(),
-            Sys::Fork => h.fork(),
-            Sys::Execve => h.execve(regs[0], regs[1], regs[2]),
-            Sys::Exit => h.exit(regs[0] as i32),
-            Sys::Wait4 => h.wait4(regs[0] as i32, regs[1], regs[2] as i32, regs[3]),
-            Sys::Kill => h.kill(regs[0] as i32, regs[1] as i32),
-            Sys::Fcntl => h.fcntl(regs[0] as u32, regs[1] as u32, regs[2]),
-            Sys::Getppid => h.getppid(),
-            Sys::Reboot => h.reboot(regs[0] as i32, regs[1] as i32, regs[2] as u32, regs[3]),
-            Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
-            Sys::Psinfo => h.psinfo(regs[0], regs[1] as usize),
-        }
-    }
-
-    /// Look `raw_nr` up as Linux reads it and call its handler; a
-    /// number that names no row is `ENOSYS`.
-    pub fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
-        match TABLE.lookup(raw_nr) {
-            Some(sys) => call(h, sys, regs),
-            None => Err(KError::ENOSYS),
-        }
-    }
 }
 
 /// aarch64: the number is the low 32 bits of `x8`, unsigned (ROADMAP §11.6).
@@ -1025,7 +851,7 @@ pub mod aarch64 {
             Sys::Getppid => h.getppid(),
             Sys::Reboot => h.reboot(regs[0] as i32, regs[1] as i32, regs[2] as u32, regs[3]),
             Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
-            Sys::Open | Sys::Dup2 | Sys::Fork | Sys::Psinfo => Err(KError::ENOSYS),
+            Sys::Open | Sys::Dup2 | Sys::Fork | Sys::Psinfo => Err(KError::NoSys),
         }
     }
 
@@ -1034,7 +860,7 @@ pub mod aarch64 {
     pub fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
         match TABLE.lookup(raw_nr) {
             Some(sys) => call(h, sys, regs),
-            None => Err(KError::ENOSYS),
+            None => Err(KError::NoSys),
         }
     }
 }

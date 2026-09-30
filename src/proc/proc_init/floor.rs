@@ -8,25 +8,20 @@ use vibeos::time::Instant;
 
 use super::*;
 use crate::arch::current::UserStat;
-use crate::arch::power;
+use crate::arch::current::power;
 use crate::time_init;
 
 /// The most `getdents64` writes in one call: its kernel buffer. A record
 /// is at most 88 bytes (`MAX_NAME` 64), so one always fits.
 const GETDENTS_MAX: usize = 512;
 
-/// `e` as the syscall's error.
-fn fs_err(e: FsError) -> KError {
-    KError::from_errno(fs_errno(e))
-}
-
 /// Run `f` on open file `id` under a count of this syscall's own.
 fn with_file<R>(id: FileId, f: impl FnOnce(&FileRef) -> Result<R, KError>) -> Result<R, KError> {
-    let file = file_init::fget(id).map_err(fs_err)?;
+    let file = file_init::fget(id).map_err(KError::from)?;
     let r = f(&file);
     let c = file_init::close(file);
     let n = r?;
-    c.map_err(fs_err)?;
+    c.map_err(KError::from)?;
     Ok(n)
 }
 
@@ -35,11 +30,11 @@ fn with_file<R>(id: FileId, f: impl FnOnce(&FileRef) -> Result<R, KError>) -> Re
 /// moves only after the copy succeeds.
 pub(super) fn sys_getdents64(fd: u32, dirent: u64, count: u32) -> SysResult {
     let Some(slot) = lookup_fd(fd) else {
-        return Err(KError::from_errno(EBADF));
+        return Err(KError::BadF);
     };
     match slot.kind {
-        FdKind::None => Err(KError::from_errno(EBADF)),
-        FdKind::Console => Err(KError::from_errno(ENOTDIR)),
+        FdKind::None => Err(KError::BadF),
+        FdKind::Console => Err(KError::NotDir),
         FdKind::File { fid, r#gen } => {
             with_file(FileId { fid, r#gen }, |f| getdents_on(f, dirent, count))
         }
@@ -47,7 +42,7 @@ pub(super) fn sys_getdents64(fd: u32, dirent: u64, count: u32) -> SysResult {
 }
 
 fn getdents_on(f: &FileRef, dirent: u64, count: u32) -> SysResult {
-    let pos = file_init::seek(f, SeekFrom::Current(0)).map_err(fs_err)?;
+    let pos = file_init::seek(f, SeekFrom::Current(0)).map_err(KError::from)?;
     let mut buf = [0u8; GETDENTS_MAX];
     let cap = usize::try_from(count).map_or(GETDENTS_MAX, |c| c.min(GETDENTS_MAX));
     let mut refused = false;
@@ -58,18 +53,14 @@ fn getdents_on(f: &FileRef, dirent: u64, count: u32) -> SysResult {
             refused = !ok;
             ok
         })
-        .map_err(fs_err)?;
+        .map_err(KError::from)?;
         (w.len(), next)
     };
     if n == 0 {
-        return if refused {
-            Err(KError::from_errno(EINVAL))
-        } else {
-            Ok(0)
-        };
+        return if refused { Err(KError::Inval) } else { Ok(0) };
     }
-    uaccess_init::copy_to_user(dirent, &buf[..n]).map_err(|_| KError::from_errno(EFAULT))?;
-    file_init::seek(f, SeekFrom::Start(next)).map_err(fs_err)?;
+    uaccess_init::copy_to_user(dirent, &buf[..n]).map_err(KError::from)?;
+    file_init::seek(f, SeekFrom::Start(next)).map_err(KError::from)?;
     Ok(n)
 }
 
@@ -77,20 +68,20 @@ fn getdents_on(f: &FileRef, dirent: u64, count: u32) -> SysResult {
 /// console reads as a character device.
 pub(super) fn sys_fstat(fd: u32, statbuf: u64) -> SysResult {
     let Some(slot) = lookup_fd(fd) else {
-        return Err(KError::from_errno(EBADF));
+        return Err(KError::BadF);
     };
     let fields = match slot.kind {
-        FdKind::None => return Err(KError::from_errno(EBADF)),
+        FdKind::None => return Err(KError::BadF),
         FdKind::Console => uabi::console_stat_fields(),
         FdKind::File { fid, r#gen } => {
             let st = with_file(FileId { fid, r#gen }, |f| {
-                file_init::stat(f).map_err(fs_err)
+                file_init::stat(f).map_err(KError::from)
             })?;
             uabi::stat_fields(&st)
         }
     };
     let out = UserStat::from_fields(&fields);
-    uaccess_init::copy_to_user_val(statbuf, &out).map_err(|_| KError::from_errno(EFAULT))?;
+    uaccess_init::copy_to_user_val(statbuf, &out).map_err(KError::from)?;
     Ok(0)
 }
 
@@ -116,11 +107,11 @@ fn signal_acts(p: &Proc) -> bool {
 /// before ROADMAP §13.8.
 pub(super) fn sys_nanosleep(rqtp: u64, _rmtp: u64) -> SysResult {
     let mut ts = [0u8; 16];
-    uaccess_init::copy_from_user(&mut ts, rqtp).map_err(|_| KError::from_errno(EFAULT))?;
+    uaccess_init::copy_from_user(&mut ts, rqtp).map_err(KError::from)?;
     let (sec, nsec) = ts.split_at(8);
     let word = |b: &[u8]| b.try_into().map(i64::from_le_bytes);
     let (Ok(sec), Ok(nsec)) = (word(sec), word(nsec)) else {
-        return Err(KError::from_errno(EFAULT));
+        return Err(KError::Fault);
     };
     let deadline = uabi::timespec_deadline(time_init::now_ns(), sec, nsec)?;
     let pid = current_pid();
@@ -150,7 +141,7 @@ pub(super) fn sys_nanosleep(rqtp: u64, _rmtp: u64) -> SysResult {
                 }
                 apply_pending(None);
             }
-            None => return Err(KError::from_errno(ESRCH)),
+            None => return Err(KError::Srch),
         }
     }
     Ok(0)
@@ -167,10 +158,10 @@ pub(super) fn sys_reboot(magic1: i32, magic2: i32, cmd: u32, arg: u64) -> SysRes
     let euid = if pid == 0 {
         0
     } else {
-        with_table(|t| t.get(pid).map(|p| p.creds.euid)).ok_or(KError::from_errno(ESRCH))?
+        with_table(|t| t.get(pid).map(|p| p.creds.euid)).ok_or(KError::Srch)?
     };
     if euid != 0 {
-        return Err(KError::from_errno(EPERM));
+        return Err(KError::Perm);
     }
     match uabi::reboot_decode(magic1, magic2, cmd)? {
         RebootCmd::CadOn | RebootCmd::CadOff => Ok(0),
@@ -186,8 +177,7 @@ pub(super) fn sys_reboot(magic1: i32, magic2: i32, cmd: u32, arg: u64) -> SysRes
             // The command string is read, as Linux reads it, and ignored, as
             // x86_64 ignores it.
             let mut buf = [0u8; 256];
-            uaccess_init::strncpy_from_user(&mut buf, arg)
-                .map_err(|_| KError::from_errno(EFAULT))?;
+            uaccess_init::strncpy_from_user(&mut buf, arg).map_err(KError::from)?;
             crate::marker!("vibeOS: reboot: restart");
             power::restart()
         }

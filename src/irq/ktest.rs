@@ -26,7 +26,6 @@ use crate::per_cpu_init;
 use crate::sync::blocking_init::Semaphore;
 use crate::thread_init;
 use crate::time_init;
-use crate::x86;
 
 static WAKE_FLAG: AtomicU64 = AtomicU64::new(0);
 
@@ -583,7 +582,7 @@ static HOLD: AtomicU32 = AtomicU32::new(0);
 /// CPU acks no shootdown until it lets the pending `0xFC` in.
 fn ack_hold() {
     let k = time_init::tsc_per_ms();
-    let g = x86::InterruptGuard::enter();
+    let g = crate::arch::current::InterruptGuard::enter();
     HOLD.store(1, Ordering::Release);
     let t0 = time_init::read_tsc();
     let span = k.saturating_mul(HOLD_MS);
@@ -778,7 +777,7 @@ pub(crate) fn shootdown_ack_while_busy() -> Outcome {
 
     // The traced busy stretch: a full dmesg replay through the console,
     // then CPU-bound work that never polls for IPIs. No guard is held.
-    let if_on = x86::interrupts_enabled();
+    let if_on = crate::arch::current::interrupts_enabled();
     let t0 = time_init::now_ns();
     let dumped = crate::shell_init::dispatch_line("dmesg trace");
     while time_init::now_ns().saturating_sub(t0) < BUSY_NS {

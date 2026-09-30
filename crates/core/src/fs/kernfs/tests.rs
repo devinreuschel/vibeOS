@@ -8,7 +8,7 @@ use std::sync::Mutex;
 type Store = Mutex<KernState>;
 
 /// A kernfs store of its own, which the test leaks, and its skins.
-struct Kfs {
+pub(crate) struct Kfs {
     fs: &'static KernFs<Store>,
     skins: [&'static KernSkin<Store>; 4],
 }
@@ -39,7 +39,7 @@ fn pseudo(v: &mut Vfs, k: &Kfs) {
     }
 }
 
-fn boot() -> (Vfs, Kfs) {
+pub(crate) fn boot() -> (Vfs, Kfs) {
     let mut v = Vfs::new(crate::fs::host_words());
     v.mount_root_fs(crate::fs::testfs::ramfs()).unwrap();
     let k = kernfs();
@@ -183,9 +183,9 @@ fn devfs_random_hardware_only() {
         }
         v.close(fid).unwrap();
     }
-    // `fs_errno` maps `Again` to Linux's EAGAIN.
+    // The `KError` table maps `Again` to Linux's EAGAIN.
     assert_eq!(FsError::Again.as_str(), "again");
-    assert_eq!(crate::syscall::EAGAIN, 11);
+    assert_eq!(crate::kerror::KError::from(FsError::Again).errno(), 11);
 }
 
 /// A registry of the fake disk `fake` (64 sectors) and its partition
@@ -330,7 +330,11 @@ fn procfs_stubs_with_only_kernel_thread() {
     assert_eq!(v.stat(None, "/proc/1/fd").unwrap().kind, InodeKind::Dir);
     assert_eq!(
         v.mkdir(None, "/proc/nope", 0o755).unwrap_err(),
-        FsError::NotSupp
+        FsError::Perm
+    );
+    assert_eq!(
+        v.creat(None, "/proc/nope", 0o644).unwrap_err(),
+        FsError::Acces
     );
 }
 

@@ -7,8 +7,8 @@ use core::sync::atomic::Ordering;
 use vibeos::console::BackendId;
 use vibeos::kbd::{CMD_READ_CFG, CMD_WRITE_KBD_OUT, DecodedKey};
 
+use crate::arch::current::InterruptGuard;
 use crate::console::{console_init, fb_init, kbd_init};
-use crate::x86::InterruptGuard;
 
 // --- console_init
 

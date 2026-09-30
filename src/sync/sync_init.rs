@@ -19,8 +19,8 @@ use vibeos::lock::{Held, RANK_SCHED, RankError};
 use vibeos::sync::SpinLock;
 use vibeos::thread::Tcb;
 
+use crate::arch::current::InterruptGuard;
 use crate::per_cpu_init;
-use crate::x86::InterruptGuard;
 
 /// What `SpinMutex::lock` runs on each failed try: the IPI inbox's
 /// `service_incoming`, which the IPI module's `init` sets before the first
@@ -298,7 +298,7 @@ impl SleepCtx {
     /// read inside a short `InterruptGuard`, so both name the CPU the
     /// guard pinned, and it drops before anything asserts on them.
     pub fn now() -> SleepCtx {
-        let if_on = crate::x86::interrupts_enabled();
+        let if_on = crate::arch::current::interrupts_enabled();
         let _irq = InterruptGuard::enter();
         SleepCtx {
             hard_irq: crate::irq::hardirq::in_hard_irq(),
@@ -421,7 +421,7 @@ fn current_tcb() -> Option<NonNull<Tcb>> {
 /// current thread is not a no-reclaim thread. Before per-CPU data is live
 /// IF alone decides. `kalloc::set_release_context` installs it.
 pub(crate) fn may_release_here() -> bool {
-    if !crate::x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         return false;
     }
     if held_mask() != 0 {

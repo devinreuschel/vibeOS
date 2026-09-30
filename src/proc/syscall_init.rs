@@ -6,7 +6,6 @@ use core::mem::{offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::addr_space::AddressSpace;
 use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET, USER_CS_RPL, USER_DS_RPL};
@@ -16,7 +15,7 @@ use vibeos::syscall::UserFrame;
 use vibeos::thread::{Fxsave, Tcb};
 use vibeos::vectors;
 
-use crate::arch::current::Arch;
+use crate::arch::current::{AddressSpace, Arch};
 use crate::arch::gdt::{self, CpuTables};
 use crate::arch::idt::TrapFrame;
 use crate::cell::BootCell;
@@ -39,7 +38,7 @@ const F_RIP: usize = PAD + offset_of!(UserFrame, rip);
 /// From `orig_rax`, where the 15 GPR pops leave RSP, to the `rsp` slot.
 const ORIG_TO_RSP: usize = offset_of!(UserFrame, rsp) - offset_of!(UserFrame, orig_rax);
 /// The value Linux shows in the `rax` slot at a syscall-entry stop.
-const ENOSYS_RET: i64 = -(vibeos::syscall::ENOSYS as i64);
+const ENOSYS_RET: i64 = -(vibeos::kerror::KError::NoSys.errno() as i64);
 
 const _: () = {
     // 21 words and the pad: RSP is 16-byte aligned at the `call`.

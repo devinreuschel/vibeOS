@@ -15,7 +15,7 @@ for a note with only an id, search ROADMAP.md for the id.
 
 Index: [DESIGN.md](DESIGN.md) §1.4. Landed: [ROADMAP.md](ROADMAP.md) §9.3–§9.8,
 except the boxes the kernel review reopened there. Open: ROADMAP §10.4
-(errno table, file tables, VFS dispatch), §10.6 (entry paths and user memory), §10.7 (tracing), §10.10 (kernel stack
+(file tables, VFS dispatch), §10.6 (entry paths and user memory), §10.7 (tracing), §10.10 (kernel stack
 reclaim and IPI acks), §10.11 (vibefs file size), §11.6 (the aarch64
 convention, tagged pointers, and `FS_BASE`), §12.3 (copy-on-write `fork`),
 §13.1 (shared open files), §13.7 (process-group `kill` and `wait4`), §13.8
@@ -129,56 +129,50 @@ only where Linux's does, as Linux's `F_GETOWN` returns a process group as a
 negative number, which is why glibc reads it through `F_GETOWN_EX`. Linux
 names, Linux values:
 
+<!-- gen_syscalls: begin errno-table -->
+
 | Name | Value | Used |
 |------|------:|------|
-| `EPERM` | 1 | `mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0) |
+| `EPERM` | 1 | `mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0); making a symlink, a device node, or a directory, a hard link, a rename, or a removal that the filesystem cannot make, as FAT's `symlink` and `link` (no syscall makes one yet) |
 | `ENOENT` | 2 | `open`/`execve` missing path |
 | `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
-| `EIO` | 5 | device I/O error |
+| `EIO` | 5 | device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs |
 | `E2BIG` | 7 | `execve` argv or envp with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
-| `EBADF` | 9 | closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
+| `EBADF` | 9 | closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
 | `EAGAIN` | 11 | `fork` with every process-table slot in use, zombies included (`MAX_PROCS` is 18), or no pid free (pids and tids share one allocator, up to 32,767, then from 300) |
 | `ENOMEM` | 12 | AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4) |
-| `EACCES` | 13 | defined; no syscall returns it |
+| `EACCES` | 13 | `open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys` |
 | `EFAULT` | 14 | bad user pointer / length |
 | `EBUSY` | 16 | defined; no syscall returns it |
 | `EEXIST` | 17 | `O_EXCL`; `mmap` with `MAP_FIXED_NOREPLACE` (or `MAP_FIXED`, §3.1) over a mapping |
+| `EXDEV` | 18 | a `rename` or `link` across mounts (no syscall makes one yet) |
 | `ENODEV` | 19 | a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4 |
 | `ENOTDIR` | 20 | |
 | `EISDIR` | 21 | |
-| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; the non-Linux cases in §2.1 |
-| `EMFILE` | 24 | per-process fd table full (`open`); the non-Linux cases in §2.1 |
-| `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3) |
+| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written |
+| `ENFILE` | 23 | `open` or `execve` with the system-wide open-file table full |
+| `EMFILE` | 24 | per-process fd table full (`open`, `dup`) |
+| `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit |
+| `ENOSPC` | 28 | `write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent |
+| `ESPIPE` | 29 | `lseek` on the console, `/dev/console`, or `/dev/tty` |
+| `EROFS` | 30 | defined; no syscall returns it: a write to a read-only virtio-blk device fails with it in the block layer |
 | `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv or envp string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
+| `ENOTEMPTY` | 39 | defined; no syscall returns it |
+| `ELOOP` | 40 | `open` or `execve` through too many symbolic links |
+| `EOPNOTSUPP` | 95 | defined; no syscall returns it. It is left for the cases Linux gives it, such as an extended-attribute namespace a mount refuses (ROADMAP §14.8) |
+
+<!-- gen_syscalls: end errno-table -->
 
 Unknown numbers return `-ENOSYS`.
 
 ### 2.1 Differences from Linux
 
-The mapping is `proc_init::fs_errno` plus the FAT and vibefs error
-conversions (`FatError::to_fs`, `vibefs::Error::to_fs`). ROADMAP §10.4 (E2;
-F083) replaces them with one `KError` table that generates §2.
+The mapping is `vibeos::kerror`: each module error converts to one `KError`
+through its `From` impl, and the `KError` table generates §2 (ROADMAP §10.4).
 
-- `FsError::NoSpace` maps to `EMFILE`, so `EMFILE` also means a full
-  system-wide open-file table (Linux `ENFILE`, 23), a volume out of blocks,
-  inodes, or directory entries, or a vibefs file that needs a fifth extent
-  (Linux `ENOSPC`, 28), and a FAT file that would pass 4 GiB (Linux `EFBIG`, 27)
-  (F083, F052, F057; ROADMAP §10.4)
-- FAT and vibefs map `Corrupt` to `FsError::Inval`, so a failed checksum or
-  bad magic returns `EINVAL` (Linux `EIO`) (F083; ROADMAP §10.4)
-- `lseek` on the console returns `EINVAL` (Linux `ESPIPE`, 29) (F083;
-  ROADMAP §10.4)
-- `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` fd return `EINVAL`
-  (Linux `EBADF`) (ROADMAP §10.4)
-- `open` and `execve` return `EINVAL` for a path or argument that is not
-  UTF-8; Linux hands a path's bytes to the filesystem and accepts any
-  argument byte but NUL (ROADMAP §10.4)
-- `dup` with a full fd table returns `EBADF` (Linux `EMFILE`) (ROADMAP §10.4)
-- `ENFILE`, `ENOSPC`, `ESPIPE`, `ENOTEMPTY`, and `ELOOP` are not
-  defined in `crates/core/src/proc/syscall.rs` (F083; ROADMAP §10.4)
 - `fork` near memory exhaustion: a kernel stack that cannot be allocated
   returns `ENOMEM` and frees the clone, but the child's TCB box and the
   boxed address space panic when the heap cannot grow, until ROADMAP
@@ -261,8 +255,8 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. `O_CREAT` and
   `O_TRUNC` take effect before the open-file slot and the fd are allocated, so with
   a full open-file or fd table `open(O_TRUNC)` truncates the file and then
-  fails with `EMFILE` (F057;
-  ROADMAP §10.4)
+  fails with `ENFILE` for a full open-file table or `EMFILE` for a full fd
+  table (F057; ROADMAP §10.4)
 - `lseek`: `SEEK_END` reads the size from the file's inode (FAT's
   counted in-core inode or the vibefs inode), so it sees writes through
   any descriptor. On a vibefs file a resulting offset above 2^44 − 4096
@@ -408,7 +402,7 @@ reference to FAT's in-core inode, or a vibefs inode number), the offset,
 and the open flags, so fds that `dup` or `fork` copied share one offset,
 and separate opens of one FAT file share its size and first cluster.
 While the table is full, every `open` and every `execve` (which needs a
-slot to read the image) fails with `EMFILE` in every process (F057;
+slot to read the image) fails with `ENFILE` in every process (F057;
 ROADMAP §10.4).
 
 - `dup` / `dup2` copy the slot and clear `FD_CLOEXEC` on the new fd

@@ -30,6 +30,16 @@ pub enum DmaError {
     SgFull,
 }
 
+/// A bad DMA request is a bad argument; an exhausted pool or list, no memory.
+impl From<DmaError> for crate::kerror::KError {
+    fn from(e: DmaError) -> Self {
+        match e {
+            DmaError::Size | DmaError::Align | DmaError::Boundary => Self::Inval,
+            DmaError::Exhausted | DmaError::SgFull => Self::NoMem,
+        }
+    }
+}
+
 impl DmaError {
     pub fn as_str(self) -> &'static str {
         match self {

@@ -18,11 +18,13 @@ use vibeos::paging::{IOREMAP_BASE, IOREMAP_LEN, PAGE_SIZE_4K, PhysAddr, VirtAddr
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
 use crate::acpi_init;
+use crate::arch::current::InterruptGuard;
 use crate::boot;
 use crate::fb_init;
 use crate::paging_init;
 use crate::sync_init::SpinMutex;
-use crate::x86::{self, InterruptGuard};
+#[cfg(target_arch = "x86_64")]
+use crate::x86;
 
 const CFG_ADDR: u16 = 0xCF8;
 const CFG_DATA: u16 = 0xCFC;
@@ -75,6 +77,7 @@ fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cf8_read32(bdf: Bdf, offset: u16) -> u32 {
     let addr = pci::cf8_addr(bdf.bus, bdf.device, bdf.function, offset);
     // SAFETY: invariant: ports 0xCF8 and 0xCFC are the PCI type-1 config
@@ -87,6 +90,7 @@ fn cf8_read32(bdf: Bdf, offset: u16) -> u32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
     let addr = pci::cf8_addr(bdf.bus, bdf.device, bdf.function, offset);
     // SAFETY: as in `cf8_read32`; established by `pci_init::with_cfg`.

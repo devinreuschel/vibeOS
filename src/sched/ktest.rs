@@ -46,6 +46,7 @@ use crate::sched_init;
 use crate::thread_init::{self, SpawnError};
 use crate::time_init;
 use crate::work_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 static SENTINEL: AtomicU64 = AtomicU64::new(0);
@@ -55,7 +56,7 @@ fn sentinel_entry() {
 }
 
 pub(crate) fn test_spawn_sentinel() -> Outcome {
-    let _g = x86::InterruptGuard::enter();
+    let _g = crate::arch::current::InterruptGuard::enter();
     SENTINEL.store(0, Ordering::SeqCst);
     let nest0 = per_cpu_init::irq_nest();
     let Ok(h) = thread_init::spawn_here("sentinel", sentinel_entry) else {
@@ -101,7 +102,7 @@ fn thread_b() {
 }
 
 pub(crate) fn test_switch_two_threads() -> Outcome {
-    let _g = x86::InterruptGuard::enter();
+    let _g = crate::arch::current::InterruptGuard::enter();
     STEPS.store(0, Ordering::SeqCst);
     let nest0 = per_cpu_init::irq_nest();
     let Ok(a) = thread_init::spawn_here("a", thread_a) else {
@@ -141,7 +142,7 @@ fn yielder_entry() {
 }
 
 pub(crate) fn test_yield_now_switches() -> Outcome {
-    let _g = x86::InterruptGuard::enter();
+    let _g = crate::arch::current::InterruptGuard::enter();
     YIELD_FLAG.store(0, Ordering::SeqCst);
     let Ok(_h) = thread_init::spawn_here("yielder", yielder_entry) else {
         return Outcome::Fail("spawn");
@@ -267,7 +268,7 @@ pub(crate) fn test_idle_runs() -> Outcome {
 pub(crate) fn test_reap_returns_frames() -> Outcome {
     let before = quiescent_free_frames();
     {
-        let _g = x86::InterruptGuard::enter();
+        let _g = crate::arch::current::InterruptGuard::enter();
         let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
             return Outcome::Fail("spawn");
         };
@@ -349,6 +350,7 @@ pub(crate) fn test_reap_many_via_idle() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
     let nest0 = per_cpu_init::irq_nest();
     // The registry is pinned, so the hint is its CPU, whose remote view any
@@ -371,11 +373,11 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
     // lock and the lock's `cli` is not one that ran under SCHED.
     let (inner, held) = thread_init::with_sched_lock(|| {
         let held = me.ticks.load(Ordering::Relaxed);
-        if x86::interrupts_enabled() {
+        if crate::arch::current::interrupts_enabled() {
             return (Outcome::Fail("SCHED left IF on"), held);
         }
         time_init::busy_wait_ms(20);
-        if x86::interrupts_enabled() {
+        if crate::arch::current::interrupts_enabled() {
             return (Outcome::Fail("IF on during hold"), held);
         }
         if me.ticks.load(Ordering::Relaxed) != held {
@@ -412,7 +414,7 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
 const SPAWN_EXIT_N: usize = 2000;
 
 fn spawn_until_dead(name: &'static str) -> Outcome {
-    let _g = x86::InterruptGuard::enter();
+    let _g = crate::arch::current::InterruptGuard::enter();
     let Ok(h) = thread_init::spawn_here(name, dying_entry) else {
         return Outcome::Fail("spawn");
     };
@@ -528,7 +530,7 @@ static CTX_DONE: AtomicBool = AtomicBool::new(false);
 /// `alloc_guarded_stack` of `stack_bytes`, whose guard page is unmapped.
 fn context_bits(stack_bytes: u64) -> u32 {
     let mut bits = 0;
-    if !x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         bits |= CTX_IF_OFF;
     }
     if per_cpu_init::irq_nest() != 0 {
@@ -541,7 +543,7 @@ fn context_bits(stack_bytes: u64) -> u32 {
     let stack = unsafe { &(*crate::arch::current_tcb()).stack };
     let guarded = match stack {
         Some(ks) => {
-            let rsp = x86::read_rsp();
+            let rsp = crate::arch::current::stack_pointer();
             rsp > ks.guard().as_u64() + PAGE_SIZE_4K
                 && rsp <= ks.top().as_u64()
                 && paging_init::translate(ks.guard()).is_none()
@@ -566,7 +568,7 @@ fn ctx_worker() {
 /// The registry, and a `spawn_here` worker it starts, run with IF on,
 /// `irq_nest` 0, and a guarded KVA stack (ROADMAP §10.2, F075).
 pub(crate) fn ktest_context() -> Outcome {
-    if !x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         return Outcome::Fail("registry IF off");
     }
     if per_cpu_init::irq_nest() != 0 {
@@ -668,7 +670,7 @@ pub(crate) fn spawn_stack_oom() -> Outcome {
     let mut held: [Option<Frames>; OOM_HOLD] = [const { None }; OOM_HOLD];
     // IF off on this CPU keeps the drained window short.
     let (drained, r) = {
-        let _g = x86::InterruptGuard::enter();
+        let _g = crate::arch::current::InterruptGuard::enter();
         let drained = drain_buddy(&mut held);
         let r = if drained {
             Some(thread_init::spawn("oom", dying_entry_s08))
@@ -1340,6 +1342,7 @@ fn fp_spawner() {
 /// A new process never sees another process's XMM state at its first
 /// instruction, and a yielding process keeps its own.
 pub(crate) fn test_fp_no_leak() -> Outcome {
+    #[cfg(target_arch = "x86_64")]
     if x86::read_cr0() & x86::CR0_TS != 0 {
         return Outcome::Fail("CR0.TS set");
     }
@@ -1459,6 +1462,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("idle_runs", test_idle_runs),
     test("reap_returns_frames", test_reap_returns_frames),
     test("reap_many_via_idle", test_reap_many_via_idle),
+    #[cfg(target_arch = "x86_64")]
     test("sched_lock_timer_irq", test_sched_lock_timer_irq),
     test("spawn_exit_thousands", test_spawn_exit_thousands),
     test("cross_cpu_spawn", test_cross_cpu_spawn),

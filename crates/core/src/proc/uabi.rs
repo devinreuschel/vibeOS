@@ -11,7 +11,6 @@
 
 use crate::fs::{InodeKind, S_IFBLK, S_IFCHR, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, Stat};
 use crate::kerror::KError;
-use crate::proc::syscall::EINVAL;
 use crate::sched::FAR_DEADLINE;
 
 // `d_type` values, from inode(7) (not errnos).
@@ -196,7 +195,7 @@ const NSEC_MAX: i64 = 999_999_999;
 /// is [`FAR_DEADLINE`].
 pub fn timespec_deadline(now_ns: u64, sec: i64, nsec: i64) -> Result<u64, KError> {
     if sec < 0 || !(0..=NSEC_MAX).contains(&nsec) {
-        return Err(KError::from_errno(EINVAL));
+        return Err(KError::Inval);
     }
     // Both are non-negative after the check above.
     let (sec, nsec) = (sec as u64, nsec as u64);
@@ -240,7 +239,7 @@ pub enum RebootCmd {
 /// divergence; `KEXEC` and `SW_SUSPEND`, as on a Linux built without them;
 /// and any unknown value).
 pub fn reboot_decode(magic1: i32, magic2: i32, cmd: u32) -> Result<RebootCmd, KError> {
-    let einval = KError::from_errno(EINVAL);
+    let einval = KError::Inval;
     if magic1 as u32 != REBOOT_MAGIC1 || !REBOOT_MAGIC2.contains(&(magic2 as u32)) {
         return Err(einval);
     }
@@ -363,7 +362,7 @@ mod tests {
 
     #[test]
     fn timespec_rejects_what_linux_rejects() {
-        let e = Err(KError::from_errno(EINVAL));
+        let e = Err(KError::Inval);
         assert_eq!(timespec_deadline(0, 0, -1), e);
         assert_eq!(timespec_deadline(0, 0, 1_000_000_000), e);
         assert_eq!(timespec_deadline(0, -1, 0), e);
@@ -386,7 +385,7 @@ mod tests {
     #[test]
     fn reboot_decode_matches_linux() {
         let m1 = REBOOT_MAGIC1 as i32;
-        let einval = Err(KError::from_errno(EINVAL));
+        let einval = Err(KError::Inval);
         for m2 in [672274793, 85072278, 369367448, 537993216] {
             assert_eq!(reboot_decode(m1, m2, 0x4321fedc), Ok(RebootCmd::PowerOff));
             assert_eq!(reboot_decode(m1, m2, 0x01234567), Ok(RebootCmd::Restart));

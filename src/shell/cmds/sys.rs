@@ -207,7 +207,7 @@ fn cmd_reboot(_args: &[&str]) {
         reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
     )]
     let _ = writeln!(Console, "vibeOS: reboot");
-    crate::arch::power::restart();
+    crate::arch::current::power::restart();
 }
 
 fn cmd_poweroff(_args: &[&str]) {
@@ -216,5 +216,5 @@ fn cmd_poweroff(_args: &[&str]) {
         reason = "a write to the console cannot fail: `Console::write_str` always returns `Ok` (DESIGN §2.5)"
     )]
     let _ = writeln!(Console, "vibeOS: poweroff");
-    crate::arch::power::power_off();
+    crate::arch::current::power::power_off();
 }

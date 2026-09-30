@@ -6,12 +6,14 @@ use core::alloc::Layout;
 use core::fmt;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use vibeos::arch::PageTable;
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
 use vibeos::limits::MAX_UNMAP_PAGES;
 use vibeos::paging::{self, PageFlags, PageSize, PhysAddr, VirtAddr, heap_flags};
 use vibeos::pmm::Frames;
 
+use crate::arch::current::Arch;
 use crate::diag;
 use crate::ktest::{
     Outcome, Test, alloc_frame, alloc_frames_owned, catch_alloc_error, catch_fault, free_frame,
@@ -22,7 +24,6 @@ use crate::kva_init;
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::thread_init;
-use crate::x86;
 
 // ------------------ tests ------------------
 
@@ -71,6 +72,7 @@ pub(crate) fn test_map_unmap() -> Outcome {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_nx_enforcement() -> Outcome {
     let Some(va) = alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
@@ -241,6 +243,7 @@ pub(crate) fn test_heap_oom() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_stack_guard() -> Outcome {
     let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
@@ -388,7 +391,7 @@ pub(crate) fn test_mmio_uc_flags() -> Outcome {
             )
         }
     };
-    x86::invlpg(leaf_va.as_u64());
+    <Arch as PageTable>::flush_local(leaf_va);
     paging::tlb_shootdown_others(leaf_va);
     if restored.is_err() {
         return Outcome::Fail("restore map_page");
@@ -689,14 +692,14 @@ pub(crate) fn unmap_shootdown_over_max_asserts() -> Outcome {
     let Some(va) = alloc_va(len) else {
         return Outcome::Fail("kva alloc");
     };
-    let if_on = x86::interrupts_enabled();
+    let if_on = crate::arch::current::interrupts_enabled();
     let nest = per_cpu_init::irq_nest();
     let hit = crate::arch::catch::catch_panic(|| kva_init::unmap_shootdown(va, n));
     free_va(va, len);
     if !hit {
         return Outcome::Fail("no assertion");
     }
-    if x86::interrupts_enabled() != if_on || per_cpu_init::irq_nest() != nest {
+    if crate::arch::current::interrupts_enabled() != if_on || per_cpu_init::irq_nest() != nest {
         return Outcome::Fail("irq_nest or IF changed");
     }
     Outcome::Ok
@@ -818,7 +821,7 @@ pub(crate) mod fail_after {
 
     use vibeos::thread::ThreadId;
 
-    use crate::x86::InterruptGuard;
+    use crate::arch::current::InterruptGuard;
     use crate::{per_cpu_init, syscall_init, thread_init};
 
     /// Which allocations the hook counts.
@@ -913,6 +916,7 @@ static VA0_RESULT: AtomicU64 = AtomicU64::new(0);
 
 /// Read VA 0 under `catch_fault` with an asm load (a Rust null
 /// dereference is UB) and classify the result.
+#[cfg(target_arch = "x86_64")]
 fn va0_probe() -> u64 {
     let fault = catch_fault(|| {
         // SAFETY: the load reads VA 0, which the identity teardown leaves
@@ -977,12 +981,14 @@ pub(crate) fn kernel_va0_faults() -> Outcome {
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("map_unmap", test_map_unmap),
+    #[cfg(target_arch = "x86_64")]
     test("nx_enforcement", test_nx_enforcement),
     test("heap_box", test_heap_box),
     test("heap_reuse", test_heap_reuse),
     test("heap_align", test_heap_align),
     test("heap_growth", test_heap_growth),
     test("heap_oom", test_heap_oom),
+    #[cfg(target_arch = "x86_64")]
     test("stack_guard", test_stack_guard),
     test("kva_roundtrip", test_kva_roundtrip),
     test("kva_deferred", test_kva_deferred),

@@ -106,6 +106,18 @@ pub enum NoteError {
     WrongType,
 }
 
+/// A note that does not parse is a bad argument.
+impl From<NoteError> for crate::kerror::KError {
+    fn from(e: NoteError) -> Self {
+        match e {
+            NoteError::TooSmall
+            | NoteError::Truncated
+            | NoteError::WrongName
+            | NoteError::WrongType => Self::Inval,
+        }
+    }
+}
+
 impl NoteError {
     pub fn as_str(self) -> &'static str {
         match self {
