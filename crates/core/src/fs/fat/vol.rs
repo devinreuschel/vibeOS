@@ -114,40 +114,6 @@ impl FatVol {
         n
     }
 
-    pub fn walk<D: Disk>(&mut self, d: &mut D, path: &[u8]) -> Result<Node, FatError> {
-        if path.is_empty() {
-            return Err(FatError::Inval);
-        }
-        let mut node = self.root();
-        let mut stack = [0u32; 16];
-        let mut sp = 0usize;
-        for comp in path.split(|&c| c == b'/') {
-            if comp.is_empty() || name_is_dot(comp) {
-                continue;
-            }
-            if name_is_dotdot(comp) {
-                match sp.checked_sub(1) {
-                    None => node = self.root(),
-                    Some(up) => {
-                        sp = up;
-                        let clu = *stack.get(up).ok_or(FatError::Corrupt)?;
-                        node = self.node_from_clu(clu, InodeKind::Dir, 0, 0, 0)?;
-                    }
-                }
-            } else {
-                if node.kind != InodeKind::Dir {
-                    return Err(FatError::NotDir);
-                }
-                if let Some(slot) = stack.get_mut(sp) {
-                    *slot = node.clu;
-                    sp = sp.checked_add(1).ok_or(FatError::Corrupt)?;
-                }
-                node = self.lookup(d, node.clu, comp)?;
-            }
-        }
-        Ok(node)
-    }
-
     pub fn lookup<D: Disk>(&mut self, d: &mut D, dir: u32, name: &[u8]) -> Result<Node, FatError> {
         if name_is_dot(name) {
             return self.node_from_clu(dir, InodeKind::Dir, 0, 0, 0);

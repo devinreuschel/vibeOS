@@ -1,7 +1,12 @@
-//! The VFS instance. ROADMAP §8.1 / §8.4 / §8.6.
+//! The VFS instance. ROADMAP §8.1 / §8.4 / §8.6 / §10.4.
 //!
-//! RANK_DEVICE (DESIGN §2.1), as are the ramfs and kernfs store locks
-//! ([`RAMFS`], [`KERNFS`]), never nested. [`init`] makes the root: the FAT
+//! The VFS lock is a `BlockingMutex` over the namespace tables (DESIGN
+//! §2.1's sleeping tier, level 1): it is taken only from thread context
+//! with IF=1 and no spinlock held, and never under a volume lock. The
+//! ramfs and kernfs store locks ([`RAMFS`], [`KERNFS`]) are RANK_DEVICE
+//! spinlocks, never nested; tmpfs's data ops run under kernfs's. The
+//! inode words data I/O changes live in [`INODE_WORDS`], outside the
+//! lock. [`init`] makes the root: the FAT
 //! initrd when it is live, otherwise ramfs. The File API module's `init`
 //! runs the bring-up around it: the backends first, then kernfs skins on
 //! `/dev` `/proc` `/tmp` `/sys` and vibefs on `/vibe`, each mountpoint made
@@ -15,23 +20,28 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::dev::Instance;
 use vibeos::fs::kernfs::{KernFs, KernSkin, KernState};
-use vibeos::fs::{FileApi, FsError, FsType, Guarded, Hooks, RamFs, RamState, Vfs};
+use vibeos::fs::{
+    FileApi, FsError, FsType, Guarded, Hooks, RamFs, RamState, Vfs, WordsTable, words_table,
+};
 use vibeos::lock::RANK_DEVICE;
 
-use crate::sync_init::SpinMutex;
+use crate::fs::StoreLock;
+use crate::sync::blocking_init::BlockingMutex;
 
-static VFS: SpinMutex<Vfs> = SpinMutex::with_rank(Vfs::new(), RANK_DEVICE);
+/// Each inode slot's size, link count and private words (`InodeWords`).
+static INODE_WORDS: WordsTable = words_table();
+static VFS: BlockingMutex<Vfs> = BlockingMutex::new(Vfs::new(&INODE_WORDS));
 /// Every ramfs instance's nodes: the root when FAT is not live, and each
 /// `mount ramfs`.
-pub static RAMFS: RamFs<SpinMutex<RamState>> =
-    RamFs::new(SpinMutex::with_rank(RamState::new(), RANK_DEVICE));
+pub static RAMFS: RamFs<StoreLock<RamState>> =
+    RamFs::new(StoreLock::with_rank(RamState::new(), RANK_DEVICE));
 /// The kernfs store the four pseudo filesystems share.
-pub static KERNFS: KernFs<SpinMutex<KernState>> =
-    KernFs::new(SpinMutex::with_rank(KernState::new(), RANK_DEVICE));
-pub static DEVFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType::Dev);
-pub static PROCFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType::Proc);
-pub static TMPFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType::Tmp);
-pub static SYSFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType::Sys);
+pub static KERNFS: KernFs<StoreLock<KernState>> =
+    KernFs::new(StoreLock::with_rank(KernState::new(), RANK_DEVICE));
+pub static DEVFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Dev);
+pub static PROCFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Proc);
+pub static TMPFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Tmp);
+pub static SYSFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Sys);
 static LIVE: AtomicBool = AtomicBool::new(false);
 
 /// Make the root: the FAT initrd when `root_is_fat`, else a ramfs.
@@ -45,7 +55,8 @@ pub fn init(root_is_fat: bool) {
     }
 }
 
-impl<T: Send> Guarded<T> for SpinMutex<T> {
+/// Sleeps: thread context only (DESIGN §2.1).
+impl<T: Send> Guarded<T> for BlockingMutex<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         let mut g = self.lock();
         f(&mut g)
@@ -58,7 +69,7 @@ pub fn live() -> bool {
 
 /// The File API over the VFS (C-FILEAPI), with the in-guest tests'
 /// hooks in a `kernel_tests` build.
-pub fn api() -> FileApi<'static, SpinMutex<Vfs>> {
+pub fn api() -> FileApi<'static, BlockingMutex<Vfs>> {
     FileApi::with_hooks(&VFS, hooks())
 }
 
@@ -99,8 +110,10 @@ fn hooks() -> Hooks {
     Hooks::NONE
 }
 
-/// Run `f` under the VFS lock. `f` never calls a backend: every `Vfs`
-/// method that reaches one runs through [`api`].
+/// Run `f` under the VFS lock. It sleeps for the lock: never from IRQ
+/// context, with IF=0, under a spinlock, or under a volume lock. `f`
+/// never calls a backend: every `Vfs` method that reaches one runs
+/// through [`api`].
 pub fn with<R>(f: impl FnOnce(&mut Vfs) -> R) -> R {
     let mut g = VFS.lock();
     f(&mut g)

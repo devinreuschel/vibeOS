@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use vibeos::fat::{FatInode, FatVol, INITRD_FREE_BYTES, MemDisk, SEC};
+use vibeos::fat::{FatInode, FatVol, INITRD_FREE_BYTES, MemDisk, Node, SEC};
 
 fn tmp(name: &str) -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("mkinitrd-{}-{name}", std::process::id()))
@@ -82,10 +82,10 @@ fn mkinitrd_sizes_from_contents() {
             (INITRD_FREE_BYTES..=INITRD_FREE_BYTES + 4096).contains(&free),
             "{tag}: {free} bytes free"
         );
-        let hello = vol.walk(&mut disk, b"/hello.txt").unwrap();
+        let hello = lookup_path(&mut vol, &mut disk, b"/hello.txt");
         assert_eq!(hello.size, 18, "{tag}: /hello.txt");
         for &(name, len) in files {
-            let n = vol.walk(&mut disk, format!("/{name}").as_bytes()).unwrap();
+            let n = lookup_path(&mut vol, &mut disk, format!("/{name}").as_bytes());
             assert_eq!(n.size as usize, len, "{tag}: /{name}");
             let mut got = vec![0u8; len];
             let got_n = vol
@@ -98,4 +98,14 @@ fn mkinitrd_sizes_from_contents() {
             );
         }
     }
+}
+
+/// The node `path` names, one `FatVol::lookup` per component from the
+/// root, as `Vfs` resolves a FAT path.
+fn lookup_path(vol: &mut FatVol, disk: &mut MemDisk<'_>, path: &[u8]) -> Node {
+    let mut n = vol.root();
+    for comp in path.split(|&c| c == b'/').filter(|c| !c.is_empty()) {
+        n = vol.lookup(disk, n.clu, comp).unwrap();
+    }
+    n
 }

@@ -3,21 +3,20 @@
 //! Each volume is an instance ([`FatVolume`], DESIGN §12.1 rule 1) on the
 //! heap: the initrd's is owned by the root superblock, a device's by its
 //! block registry entry (`blockdev_init::set_holder`), and the superblock
-//! that shows it holds a reference. A busy flag (not the IRQ-off mutex) is
-//! held across I/O so RANK_DEVICE is not nested with the cache (DESIGN
-//! §2.1 / #62 ACK). `sync` uses cache/device Flush (DESIGN §10.2).
+//! that shows it holds a reference. Each volume is one `BlockingMutex`
+//! (DESIGN §2.1's level 4) that owns it, held across its I/O and taken
+//! with a plain `lock()`: contention waits and never fails an operation.
+//! `sync` uses cache/device Flush (DESIGN §10.2).
 //!
 //! [`FatOps`] is the one way to a volume's files: `Vfs`'s File API calls
-//! it with the VFS lock dropped, so it waits for the busy flag. A FAT
+//! it with the VFS lock dropped, so it waits for the volume lock. A FAT
 //! inode is the `Vfs` inode keyed by its dirent location; its first
-//! cluster and size are `Vfs` inode words that only FAT reads and writes,
-//! inside the busy section, through short VFS-lock sections
-//! (`Vfs::inode_words`, `Vfs::set_inode_words`): the busy flag first, the
-//! VFS lock second, never the reverse (C-FILEAPI). The routing table
-//! (`route`) serves path syscalls until ROADMAP §10.4 routes them
-//! through `Vfs`.
+//! cluster and size are its slot's words (`Inode::words`), which only FAT
+//! reads and writes, under the volume lock and with no VFS lock: FAT
+//! never takes the VFS lock under a volume. FAT resolves one name per
+//! `InodeOps::lookup` and never sees `.` or `..`, which `Vfs` resolves
+//! itself.
 
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use vibeos::block::BlockError;
@@ -25,16 +24,16 @@ use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, Node, SEC};
 use vibeos::fs::{
-    Dirent, FileSystem, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps,
-    InodeRef, Key, MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
+    Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 
 use crate::block::blockdev_init;
 use crate::fs_init;
+use crate::sync::blocking_init::BlockingMutex;
 use crate::sync_init::SpinMutex;
-use crate::thread_init;
 
 /// A cache error as FAT sees it: a refused heap allocation stays
 /// `NoMem` (ENOMEM), anything else is `Io`.
@@ -53,33 +52,21 @@ enum Media {
     Dev(BlockRef),
 }
 
-/// One FAT volume. Its `vol` cell belongs to the one thread holding
-/// `busy`, or, before the instance is shared, to the path building it
-/// (invariant I236). The volume is mounted in place (`FatVol::mount_in`),
-/// never moved: it holds its cluster buffer and FAT cache, too large for a
+/// One FAT volume, behind its lock. The volume is mounted in place on the
+/// heap (`FatVol::mount_in`) before the lock wraps its box, and never
+/// moved: it holds its cluster buffer and FAT cache, too large for a
 /// kernel stack (DESIGN §4.5).
 pub(crate) struct FatVolume {
     media: Media,
+    /// Cleared, under the lock, when the volume is retired: every later op
+    /// fails with `Io`.
     pub(super) used: AtomicBool,
-    pub(super) busy: AtomicBool,
     /// The root directory's first cluster, from the BPB at mount.
     root_clu: AtomicU32,
     /// The `Vfs` superblock the volume is mounted as, [`NO_SB`] until then.
     sb: AtomicU8,
-    vol: UnsafeCell<TryBox<FatVol>>,
+    vol: BlockingMutex<TryBox<FatVol>>,
 }
-
-// SAFETY: invariant I236: one thread at a time reaches a volume's `vol`
-// cell, through the busy flag `fs::fat_init::grab` takes, or the building
-// path before the instance is shared, and its contents are `Send`
-// (asserted below); established by `fs::fat_init::grab`.
-unsafe impl Sync for FatVolume {}
-
-const _: () = {
-    const fn send<T: Send>() {}
-    send::<FatVol>();
-    send::<Media>();
-};
 
 /// A fresh volume's state, copied into each new instance in place.
 static FAT_VOL_INIT: FatVol = FatVol::new();
@@ -197,7 +184,11 @@ impl Disk for Io<'_> {
                 }
                 Ok(())
             }),
-            Media::Dev(r) => r.read(u64::from(lba), buf).map_err(fat_io_err),
+            Media::Dev(r) => {
+                #[cfg(feature = "kernel_tests")]
+                crate::fs::ktest::blk_request_hook();
+                r.read(u64::from(lba), buf).map_err(fat_io_err)
+            }
         }
     }
 
@@ -222,6 +213,8 @@ impl Disk for Io<'_> {
             }),
             Media::Dev(r) => {
                 #[cfg(feature = "kernel_tests")]
+                crate::fs::ktest::blk_request_hook();
+                #[cfg(feature = "kernel_tests")]
                 crate::fs::ktest::on_cache_write();
                 r.write(u64::from(lba), buf).map_err(fat_io_err)
             }
@@ -236,60 +229,18 @@ impl Disk for Io<'_> {
     }
 }
 
-/// Take `v`'s busy flag, waiting for its holder.
-fn grab(v: &FatVolume) -> Result<(), FatError> {
-    if !v.used.load(Ordering::Acquire) {
-        return Err(FatError::Io);
-    }
-    let mut n = 0u32;
-    while v
-        .busy
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        n = n.saturating_add(1);
-        if n > 1_000_000 {
-            return Err(FatError::Io);
-        }
-        thread_init::yield_now();
-    }
-    if !v.used.load(Ordering::Acquire) {
-        v.busy.store(false, Ordering::Release);
-        return Err(FatError::Io);
-    }
-    Ok(())
-}
-
-fn drop_busy(v: &FatVolume) {
-    v.busy.store(false, Ordering::Release);
-}
-
-/// Run `f` on volume `v`, whose busy flag the caller took, and drop the
-/// flag.
-fn with_grabbed<R>(
-    v: &FatVolume,
-    f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
-) -> Result<R, FsError> {
-    // SAFETY: invariant I236: the busy flag of `v`, which the caller took
-    // and which is dropped only below, makes this thread the one accessor
-    // of the volume's `vol` cell until `drop_busy`; established by
-    // `fs::fat_init::grab`.
-    let r = unsafe {
-        let mut io = Io { back: &v.media };
-        f(&mut *v.vol.get(), &mut io)
-    };
-    drop_busy(v);
-    r
-}
-
-/// Run `f` on volume `v`, waiting for its busy flag. Never under the VFS
-/// lock.
+/// Run `f` on volume `v` under its lock, waiting for the holder; `Io`
+/// once the volume is retired. Never under the VFS lock.
 fn with_vol<R>(
     v: &FatVolume,
     f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
 ) -> Result<R, FsError> {
-    grab(v)?;
-    with_grabbed(v, f)
+    let mut g = v.vol.lock();
+    if !v.used.load(Ordering::Acquire) {
+        return Err(FsError::Io);
+    }
+    let mut io = Io { back: &v.media };
+    f(&mut g, &mut io)
 }
 
 /// A volume not mounted in `Vfs`.
@@ -330,8 +281,8 @@ pub fn inode_info(
 /// FAT's [`InodeOps`], behind a FAT superblock's `ops` pointer. The
 /// superblock's private words are `[vol, 0]`; an inode's are
 /// `[first_clu, (dir_clu << 32) | dir_off]`. Every op runs with the VFS
-/// lock dropped and reads the inode's words from `Vfs` inside the busy
-/// section, never from the copy it is handed.
+/// lock dropped and reads the inode's size and words from its slot's
+/// words inside the busy section, never from the copy it is handed.
 pub struct FatOps;
 
 /// The volume the superblock of `cx` shows.
@@ -342,7 +293,7 @@ fn vol_of<'a>(cx: &OpCx<'a>) -> Result<&'a FatVolume, FsError> {
 impl InodeOps for FatOps {
     fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let (w, _) = words(dir.handle())?;
+            let (w, _) = words(dir)?;
             Ok(node_info(&v.lookup(d, w.first_clu, name)?))
         })
     }
@@ -362,7 +313,7 @@ impl InodeOps for FatOps {
             InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
         };
         with_vol(vol_of(cx)?, |v, d| {
-            let (w, _) = words(dir.handle())?;
+            let (w, _) = words(dir)?;
             Ok(node_info(&v.create(d, w.first_clu, name, is_dir)?))
         })
     }
@@ -391,8 +342,8 @@ impl InodeOps for FatOps {
         nname: &[u8],
     ) -> Result<Option<Key>, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let (o, _) = words(odir.handle())?;
-            let (n, _) = words(ndir.handle())?;
+            let (o, _) = words(odir)?;
+            let (n, _) = words(ndir)?;
             let m = v.rename(d, o.first_clu, oname, n.first_clu, nname)?;
             Ok((m.from != m.to).then_some([m.to.0, m.to.1, 0]))
         })
@@ -405,8 +356,13 @@ impl InodeOps for FatOps {
         off: u64,
         buf: &mut [u8],
     ) -> Result<usize, FsError> {
-        with_vol(vol_of(cx)?, |v, d| {
-            let (w, _) = words(ino.handle())?;
+        let vol = vol_of(cx)?;
+        with_vol(vol, |v, d| {
+            #[cfg(feature = "kernel_tests")]
+            if matches!(vol.media, Media::Dev(_)) {
+                crate::fs::ktest::fat_read_hook();
+            }
+            let (w, _) = words(ino)?;
             Ok(v.read_ino(d, &w, off, buf)?)
         })
     }
@@ -418,7 +374,7 @@ impl InodeOps for FatOps {
         off: u64,
         buf: &[u8],
     ) -> Result<usize, FsError> {
-        write_at(vol_of(cx)?, ino.handle(), off, false, buf).map(|(n, _)| n)
+        write_at(vol_of(cx)?, ino, off, false, buf).map(|(n, _)| n)
     }
 
     /// The size `O_APPEND` writes at is read in the write's busy section.
@@ -428,15 +384,15 @@ impl InodeOps for FatOps {
         ino: &mut Inode,
         buf: &[u8],
     ) -> Result<(usize, u64), FsError> {
-        write_at(vol_of(cx)?, ino.handle(), 0, true, buf)
+        write_at(vol_of(cx)?, ino, 0, true, buf)
     }
 
     fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
-        let h = ino.handle();
+        let ino: &Inode = ino;
         with_vol(vol_of(cx)?, |v, d| {
-            let (mut w, linked) = words(h)?;
+            let (mut w, linked) = words(ino)?;
             let r = v.truncate_ino(d, &mut w, linked, size);
-            store(h, &w)?;
+            store(ino, &w)?;
             Ok(r?)
         })
     }
@@ -450,7 +406,7 @@ impl InodeOps for FatOps {
         out: &mut Dirent,
     ) -> Result<Option<u64>, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let (w, _) = words(dir.handle())?;
+            let (w, _) = words(dir)?;
             let mut c = cookie;
             let mut n = Node::EMPTY;
             loop {
@@ -475,7 +431,7 @@ impl InodeOps for FatOps {
 
     fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let (w, linked) = words(ino.handle())?;
+            let (w, linked) = words(ino)?;
             if linked {
                 return Ok(());
             }
@@ -487,7 +443,7 @@ impl InodeOps for FatOps {
 /// Remove `name` from `dir`, a directory when `rmdir`.
 fn remove(vol: &FatVolume, dir: &Inode, name: &[u8], rmdir: bool) -> Result<(), FsError> {
     with_vol(vol, |v, d| {
-        let (w, _) = words(dir.handle())?;
+        let (w, _) = words(dir)?;
         v.unlink(d, w.first_clu, name, rmdir)?;
         Ok(())
     })
@@ -498,15 +454,15 @@ fn remove(vol: &FatVolume, dir: &Inode, name: &[u8], rmdir: bool) -> Result<(), 
 /// back even when the write fails: the chain may have grown.
 fn write_at(
     vol: &FatVolume,
-    h: InodeHandle,
+    ino: &Inode,
     off: u64,
     append: bool,
     buf: &[u8],
 ) -> Result<(usize, u64), FsError> {
     with_vol(vol, |v, d| {
-        let (mut w, linked) = words(h)?;
+        let (mut w, linked) = words(ino)?;
         let r = v.write_ino(d, &mut w, linked, off, append, buf);
-        store(h, &w)?;
+        store(ino, &w)?;
         Ok(r?)
     })
 }
@@ -526,27 +482,31 @@ fn dirent_word(dir_clu: u32, dir_off: u32) -> u64 {
     (u64::from(dir_clu) << 32) | u64::from(dir_off)
 }
 
-/// The words of the inode `h` names as `Vfs` holds them now, and whether
-/// it still has its dirent. Called inside the busy section.
-fn words(h: InodeHandle) -> Result<(FatInode, bool), FsError> {
-    let w = fs_init::with(|vfs| vfs.inode_words(h))?;
+/// The words of inode `ino` as its slot holds them now
+/// ([`Inode::words`]), and whether it still has its dirent: its key and
+/// kind from the op's copy, its first cluster, size and link count from
+/// the slot's words. Called inside the volume section; no VFS lock.
+fn words(ino: &Inode) -> Result<(FatInode, bool), FsError> {
+    let w = ino.words()?;
     Ok((
         FatInode {
-            dir_clu: w.key[0],
-            dir_off: w.key[1],
-            first_clu: w.private[0] as u32,
-            size: w.size,
-            kind: w.kind,
+            dir_clu: ino.key[0],
+            dir_off: ino.key[1],
+            first_clu: w.private()[0] as u32,
+            size: w.size(),
+            kind: ino.kind,
         },
-        w.nlink != 0,
+        w.nlink() != 0,
     ))
 }
 
-/// Store a FAT inode's words back into its `Vfs` inode, inside the busy
-/// section they were read in.
-fn store(h: InodeHandle, w: &FatInode) -> Result<(), FsError> {
-    let private = [u64::from(w.first_clu), dirent_word(w.dir_clu, w.dir_off)];
-    fs_init::with(|vfs| vfs.set_inode_words(h, private, w.size))
+/// Store a FAT inode's first cluster, dirent and size into its slot's
+/// words, inside the volume section they were read in.
+fn store(ino: &Inode, w: &FatInode) -> Result<(), FsError> {
+    let words = ino.words()?;
+    words.set_private([u64::from(w.first_clu), dirent_word(w.dir_clu, w.dir_off)]);
+    words.set_size(w.size);
+    Ok(())
 }
 
 /// FAT32's registration. A superblock holds its volume instance; its
@@ -585,8 +545,8 @@ impl FileSystem for FatFs {
         })
     }
 
-    /// Record the superblock and route `at` to the volume, for the path
-    /// syscalls' walk.
+    /// Record the superblock, and `at` and the volume in the mount table
+    /// (`MNTS`).
     fn on_mount(&self, cx: &mut OpCx<'_>, at: &[u8]) {
         if let Ok(v) = vol_of(cx) {
             v.sb.store(cx.sb, Ordering::Release);
@@ -594,12 +554,12 @@ impl FileSystem for FatFs {
         if at != b"/" && register_mnt(cx.vol.cloned(), at).is_err() {
             crate::klog!(
                 vibeos::log::Level::Warn,
-                "vibeOS: fat: no route for a mount"
+                "vibeOS: fat: no mount-table slot for a mount"
             );
         }
     }
 
-    /// Drop `at`'s route. After the superblock's last mount, which is the
+    /// Drop `at`'s mount-table entry. After the superblock's last mount, which is the
     /// last to show the volume (one superblock per volume), sync the
     /// volume, retire it, and take it from its device's entry; the
     /// superblock's own reference goes when its slot is freed.
@@ -621,16 +581,7 @@ impl FileSystem for FatFs {
                 e.as_str()
             );
         }
-        if let Err(e) = drop_slot(vol) {
-            crate::klog_ratelimited!(
-                1000,
-                vibeos::log::Level::Warn,
-                "vibeOS: fat: volume of {} still held at umount, kept: {}",
-                mnt,
-                e.as_str()
-            );
-            return;
-        }
+        drop_slot(vol);
         if let Media::Dev(r) = &vol.media {
             drop(blockdev_init::take_holder(r));
         }
@@ -644,38 +595,40 @@ pub fn live() -> bool {
 /// A new volume instance on `media`, mounted in place: the heap copy of a
 /// fresh volume is this thread's alone until the instance is shared.
 fn new_volume(media: Media) -> Result<Instance, FsError> {
-    let fv = crate::fs::boxed_copy(&FAT_VOL_INIT).map_err(|_| FsError::NoMem)?;
-    let mut v = FatVolume {
+    let mut fv = crate::fs::boxed_copy(&FAT_VOL_INIT).map_err(|_| FsError::NoMem)?;
+    fv.mount_in(&mut Io { back: &media })?;
+    let root = fv.info.root_clus;
+    vibeos::dev::instance(FatVolume {
         media,
-        used: AtomicBool::new(false),
-        busy: AtomicBool::new(false),
-        root_clu: AtomicU32::new(0),
+        used: AtomicBool::new(true),
+        root_clu: AtomicU32::new(root),
         sb: AtomicU8::new(NO_SB),
-        vol: UnsafeCell::new(fv),
-    };
-    let mut io = Io { back: &v.media };
-    let fat = v.vol.get_mut();
-    fat.mount_in(&mut io)?;
-    let root = fat.info.root_clus;
-    v.root_clu.store(root, Ordering::Release);
-    v.used.store(true, Ordering::Release);
-    vibeos::dev::instance(v).map_err(|_| FsError::NoMem)
+        vol: BlockingMutex::new(fv),
+    })
+    .map_err(|_| FsError::NoMem)
 }
 
-/// A used volume that nothing mounts or reaches, for the busy-flag test
-/// `fs_drop_slot_busy_keeps_slot` (test-only).
+/// A used volume that nothing mounts or reaches, for the volume-lock test
+/// `fs_drop_slot_waits_for_holder` (test-only).
 #[cfg(feature = "kernel_tests")]
 pub(super) fn spare_volume() -> Result<Instance, FsError> {
     let fv = crate::fs::boxed_copy(&FAT_VOL_INIT).map_err(|_| FsError::NoMem)?;
     vibeos::dev::instance(FatVolume {
         media: Media::Initrd,
         used: AtomicBool::new(true),
-        busy: AtomicBool::new(false),
         root_clu: AtomicU32::new(0),
         sb: AtomicU8::new(NO_SB),
-        vol: UnsafeCell::new(fv),
+        vol: BlockingMutex::new(fv),
     })
     .map_err(|_| FsError::NoMem)
+}
+
+/// Run `f` holding volume `v`'s lock, as another holder would
+/// (test-only: `fs_drop_slot_waits_for_holder`).
+#[cfg(feature = "kernel_tests")]
+pub(super) fn hold<R>(v: &FatVolume, f: impl FnOnce() -> R) -> R {
+    let _g = v.vol.lock();
+    f()
 }
 
 /// Mount the initrd module as the root, or leave `LIVE` false when Limine
@@ -695,20 +648,26 @@ pub fn init() {
     LIVE.store(root.is_ok(), Ordering::Release);
 }
 
-/// Walk `path` on volume `vol` and count a reference to the `Vfs` inode it
-/// names, with the volume held: busy flag first, then the VFS lock, never
-/// the reverse. A cached inode keeps its words; the walk's dirent never
-/// overwrites them. For the path syscalls until ROADMAP §10.4 routes
-/// them through `Vfs`.
-pub fn walk_iget(vol: &Instance, path: &[u8]) -> Result<InodeRef, FsError> {
-    let v = as_fat(vol)?;
-    let sb = v.sb.load(Ordering::Acquire);
-    if sb == NO_SB {
-        return Err(FsError::Io);
-    }
-    with_vol(v, |fv, d| {
-        let n = fv.walk(d, path)?;
-        fs_init::with(|vfs| vfs.iget_key(sb, &node_info(&n)))
+/// Whether the directory `dirs` names from the root of volume `vol`
+/// holds `name`, compared as FAT compares names (without regard to case):
+/// one `FatVol::lookup` per name under the volume lock (test-only:
+/// `fat_initrd_dev_no_null`).
+#[cfg(feature = "kernel_tests")]
+pub fn ktest_dir_has(vol: &Instance, dirs: &[&[u8]], name: &[u8]) -> Result<bool, FsError> {
+    with_vol(as_fat(vol)?, |fv, d| {
+        let mut clu = fv.info.root_clus;
+        for dn in dirs {
+            let n = fv.lookup(d, clu, dn)?;
+            if n.kind != InodeKind::Dir {
+                return Err(FsError::NotDir);
+            }
+            clu = n.clu;
+        }
+        match fv.lookup(d, clu, name) {
+            Ok(_) => Ok(true),
+            Err(FatError::NotFound) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     })
 }
 
@@ -727,7 +686,8 @@ pub fn df(vol: &FatVolume) -> Result<(FsType, u64, u64, u32), FsError> {
     })
 }
 
-/// The root superblock's FAT volume: the initrd's.
+/// The root superblock's FAT volume: the initrd's (test-only).
+#[cfg(feature = "kernel_tests")]
 pub fn root_volume() -> Result<Instance, FsError> {
     fs_init::with(|v| v.root().and_then(|p| v.volume_of(p)))
 }
@@ -745,36 +705,6 @@ pub fn initrd_geometry() -> Option<(u64, u64)> {
     .flatten()
 }
 
-/// `(vol, strip)`: skip `strip` bytes of `path`; if nothing remains, walk
-/// `"/"`. `None` is the root volume.
-pub fn route(path: &[u8]) -> (Option<Instance>, usize) {
-    let g = MNTS.lock();
-    let mut best = 0usize;
-    let mut vol = None;
-    for m in g.iter() {
-        if m.used {
-            let n = m.len as usize;
-            let p = &m.path[..n];
-            if (path == p || (path.len() > n && path[..n] == p[..] && path[n] == b'/')) && n >= best
-            {
-                best = n;
-                vol = m.vol.as_ref();
-            }
-        }
-    }
-    (vol.cloned(), best)
-}
-
-pub fn routed_rest(path: &[u8], strip: usize) -> &[u8] {
-    if strip == 0 {
-        if path.is_empty() { b"/" } else { path }
-    } else if strip >= path.len() {
-        b"/"
-    } else {
-        &path[strip..]
-    }
-}
-
 fn register_mnt(vol: Option<Instance>, p: &[u8]) -> Result<(), FsError> {
     if p.is_empty() || p.len() > MNT_PATH {
         return Err(FsError::NameTooLong);
@@ -788,7 +718,7 @@ fn register_mnt(vol: Option<Instance>, p: &[u8]) -> Result<(), FsError> {
     Ok(())
 }
 
-/// Take `p`'s route out; the caller drops its volume reference unlocked.
+/// Take `p`'s mount-table entry out; the caller drops its volume reference unlocked.
 fn unregister_mnt(p: &[u8]) -> Option<Instance> {
     let mut g = MNTS.lock();
     let m = g
@@ -799,20 +729,13 @@ fn unregister_mnt(p: &[u8]) -> Option<Instance> {
     m.vol.take()
 }
 
-/// Retire volume `vol`: clear it and its `used` flag, so every later op
-/// fails. When `grab` cannot take its busy flag the volume is left as it
-/// is, still owned by its holder, and the error is returned.
-pub(super) fn drop_slot(vol: &FatVolume) -> Result<(), FatError> {
-    grab(vol)?;
-    // SAFETY: invariant I236: `grab` above took the volume's busy flag,
-    // which is dropped only below; established by `fs::fat_init::grab`.
-    unsafe {
-        (*vol.vol.get()).clear();
-    }
+/// Retire volume `vol`: clear it and its `used` flag under its lock,
+/// waiting for any holder, so every later op fails.
+pub(super) fn drop_slot(vol: &FatVolume) {
+    let mut g = vol.vol.lock();
+    g.clear();
     vol.used.store(false, Ordering::Release);
     vol.sb.store(NO_SB, Ordering::Release);
-    drop_busy(vol);
-    Ok(())
 }
 
 /// Mount the FAT volume on block device `name` on `at`. A device whose
