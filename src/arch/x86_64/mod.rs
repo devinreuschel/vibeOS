@@ -19,6 +19,7 @@ pub mod gdt;
 pub mod gs;
 pub mod idt;
 pub mod pic;
+pub mod power;
 mod trampoline;
 pub(crate) mod uaccess;
 
