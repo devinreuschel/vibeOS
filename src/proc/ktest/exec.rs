@@ -9,7 +9,7 @@ use vibeos::elf::ElfError;
 use vibeos::fs::{FsError, O_CREAT, O_TRUNC, O_WRONLY};
 use vibeos::kbd::DecodedKey;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
-use vibeos::proc::{SIGSEGV, wait_exited, wait_signaled, wexitstatus, wifexited};
+use vibeos::proc::{SIGILL, SIGSEGV, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::syscall::SYS_GETPID;
 use vibeos::vectors;
 
@@ -115,8 +115,10 @@ pub(crate) fn test_user_code_layout() -> Outcome {
     Outcome::Ok
 }
 
-// fork(); the parent exits at once with the child's pid (100 if fork
-// failed). The orphaned child spins on getppid() + sched_yield() (at most
+// fork(); the parent exits at once with the child's pid, whose low 8 bits
+// are all its exit status keeps, or runs `ud2` (SIGILL) if fork failed: no
+// exit status can stand for that, since any low byte is some pid's once the
+// pid allocator passes 255. The orphaned child spins on getppid() + sched_yield() (at most
 // 100,000 times) until it reads 0, then exits 0 (1 on timeout).
 user_code!(
     ORPHAN_FORK,
@@ -146,9 +148,6 @@ user_code!(
     syscall
     ud2
 3:
-    mov edi, 100
-    mov eax, 60
-    syscall
     ud2
 4:
     xor edi, edi
@@ -180,13 +179,13 @@ impl PsBuf {
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("<invalid utf-8>")
     }
 
-    /// The `ps` line for `pid`, if listed.
-    fn line_of(&self, pid: u32) -> Option<&str> {
+    /// The `ps` line of a pid whose low 8 bits are `low`, if one is listed.
+    fn line_of_low8(&self, low: u32) -> Option<&str> {
         self.as_str().lines().find(|l| {
             l.strip_prefix("vibeOS: ps: ")
                 .and_then(|r| r.split(' ').next())
                 .and_then(|p| p.parse::<u32>().ok())
-                == Some(pid)
+                .is_some_and(|p| p & 0xff == low)
         })
     }
 }
@@ -206,17 +205,18 @@ pub(crate) fn test_orphan_freed_no_init() -> Outcome {
         Ok(st) => st,
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     };
+    if st == wait_signaled(SIGILL) {
+        return Outcome::Fail("fork failed");
+    }
     if !wifexited(st) {
         return crate::fail_fmt!("parent status {st:#x}, want exited");
     }
+    // The child's pid, modulo 256.
     let child = wexitstatus(st);
-    if child == 100 {
-        return Outcome::Fail("fork failed");
-    }
     let deadline = time_init::now_ns().saturating_add(5_000_000_000);
     loop {
         let snap = ps();
-        let Some(line) = snap.line_of(child) else {
+        let Some(line) = snap.line_of_low8(child) else {
             break;
         };
         if time_init::now_ns() >= deadline {
