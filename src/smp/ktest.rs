@@ -19,14 +19,13 @@ use crate::sched_init;
 use crate::smp_init;
 use crate::thread_init;
 use crate::time_init;
-use crate::x86;
 
 pub(crate) fn test_per_cpu_bsp() -> Outcome {
     if !per_cpu_init::is_live() {
         return Outcome::Fail("per_cpu not live");
     }
     // IF=0 for the per-CPU reads (DESIGN §2.9 rule 5).
-    let _g = x86::InterruptGuard::enter();
+    let _g = crate::arch::current::InterruptGuard::enter();
     let cpu = per_cpu_init::current();
     if cpu.cpu_id != 0 {
         return Outcome::Fail("cpu_id not 0");
@@ -71,7 +70,7 @@ pub(crate) fn test_per_cpu_identity() -> Outcome {
     // IF=0 for the per-CPU reads (DESIGN §2.9 rule 5); the guard drops
     // before the IPI below.
     let bsp_apic = {
-        let _g = x86::InterruptGuard::enter();
+        let _g = crate::arch::current::InterruptGuard::enter();
         let bsp = per_cpu_init::current();
         if bsp.cpu_id != 0 {
             return Outcome::Fail("not on bsp");
@@ -302,7 +301,7 @@ pub(crate) fn percpu_remote_view() -> Outcome {
     }
 
     {
-        let _g = x86::InterruptGuard::enter();
+        let _g = crate::arch::current::InterruptGuard::enter();
         let me = per_cpu_init::current();
         if !cpu_remote(me.cpu_id).is_some_and(|r| core::ptr::eq(r, me.remote)) {
             return Outcome::Fail("cpu(me) is not PerCpu.remote");
@@ -313,7 +312,7 @@ pub(crate) fn percpu_remote_view() -> Outcome {
         }
     }
 
-    if !x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         return Outcome::Fail("registry runs with IF off");
     }
     // The registry thread is pinned to CPU 0, so the hint stays this CPU.
@@ -334,7 +333,7 @@ pub(crate) fn percpu_remote_view() -> Outcome {
 /// `per_cpu_init::current`, and finds them equal to its TCB's; in a debug
 /// build `per_cpu_init::current()` itself trips it.
 pub(crate) fn current_at_if1() -> Outcome {
-    if !x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         return Outcome::Fail("registry runs with IF off");
     }
     if !per_cpu_init::if_checks_armed() {
@@ -372,7 +371,7 @@ pub(crate) fn current_at_if1() -> Outcome {
         if !hit {
             return Outcome::Fail("per_cpu_init::current() at IF=1 did not assert");
         }
-        if !x86::interrupts_enabled() || per_cpu_init::irq_nest() != 0 {
+        if !crate::arch::current::interrupts_enabled() || per_cpu_init::irq_nest() != 0 {
             return Outcome::Fail("the caught assertion left IF or irq_nest changed");
         }
     }
@@ -536,7 +535,7 @@ pub(crate) fn percpu_ticks_advance() -> Outcome {
     if mode == TimerMode::Pit {
         return Outcome::Skip("pit owns tick");
     }
-    if !x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         return Outcome::Fail("registry runs with IF off");
     }
     let n = per_cpu_init::cpu_count().min(MAX_CPUS) as u32;

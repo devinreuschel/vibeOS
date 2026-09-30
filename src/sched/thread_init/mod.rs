@@ -29,11 +29,11 @@ use vibeos::thread::{
 use vibeos::time::Instant;
 use vibeos::wait::{self, WaitQueue};
 
+use crate::arch::current::InterruptGuard;
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
 use crate::sync_init::{self, SleepCtx, SpinMutex};
 use crate::time_init;
-use crate::x86::InterruptGuard;
 
 mod boot;
 #[cfg(feature = "kernel_tests")]
@@ -381,7 +381,7 @@ extern "C" fn trampoline() {
     finish_switch();
     per_cpu_init::irq_nest_leave();
     if per_cpu_init::irq_nest() == 0 {
-        crate::x86::sti();
+        crate::arch::current::irq_enable();
     }
     // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`,
     // and `entry` is written only before the thread first runs; established
@@ -673,7 +673,7 @@ fn relink(s: &mut Sched) {
 /// allocates, or sends a shootdown.
 pub(crate) fn finish_switch() {
     debug_assert!(
-        !crate::x86::interrupts_enabled(),
+        !crate::arch::current::interrupts_enabled(),
         "finish_switch with IF on"
     );
     #[cfg(feature = "kernel_tests")]
@@ -728,7 +728,7 @@ pub(crate) fn take_dead_stacks() -> u64 {
 /// Free this CPU's dead list now, as its worker would: IF=1 only
 /// (`kva_init::free_parked`). True if a stack was freed.
 fn reclaim_dead_stacks_here() -> bool {
-    if !crate::x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         return false;
     }
     let head = take_dead_stacks();
@@ -794,6 +794,7 @@ pub fn halt_if_idle() {
     loop {
         // SAFETY: `cli` touches only IF; the `sti` below or the idle loop's
         // next pass turns it back on; established here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("cli", options(nostack, preserves_flags));
         }
@@ -801,6 +802,7 @@ pub fn halt_if_idle() {
         if !per_cpu_init::current().runq.is_empty() {
             // SAFETY: `sti` restores the IF=1 this idle loop runs with;
             // established here.
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 core::arch::asm!("sti", options(nostack, preserves_flags));
             }
@@ -809,6 +811,7 @@ pub fn halt_if_idle() {
         // SAFETY: `sti; hlt` as one pair: the interrupt shadow keeps a
         // wake-up IPI from landing between them (DESIGN §7.8); established
         // here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
         }
@@ -916,7 +919,7 @@ pub fn spawn_user(
     name: &'static str,
     entry: fn(),
     pid: u32,
-    cr3: u64,
+    root: u64,
     frame: &UserFrame,
 ) -> Result<ThreadHandle, SpawnError> {
     let h = spawn_inner(
@@ -926,7 +929,7 @@ pub fn spawn_user(
         false,
         0,
         pid,
-        cr3,
+        root,
         DEFAULT_STACK_PAGES,
     )?;
     let tramp = trampoline as *const () as u64;
@@ -1404,11 +1407,11 @@ pub fn current_pid() -> u32 {
     }
 }
 
-pub fn set_pid_cr3(id: ThreadId, pid: u32, cr3: u64) {
+pub fn set_pid_cr3(id: ThreadId, pid: u32, root: u64) {
     with_sched(|s| {
         if let Some(t) = s.get_mut(id) {
             t.pid = pid;
-            t.as_cr3 = cr3;
+            t.as_cr3 = root;
         }
     });
 }
@@ -1420,7 +1423,9 @@ pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
         s.slots
             .iter()
             .flatten()
-            .find(|t| t.as_cr3 & vibeos::paging::PTE_ADDR_MASK == root)
+            // A saved root is a table address, as `spawn_user` and
+            // `set_pid_cr3` store it.
+            .find(|t| t.as_cr3 == root)
             .map(|t| t.id)
     })
 }

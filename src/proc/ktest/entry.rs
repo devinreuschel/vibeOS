@@ -6,6 +6,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
+use vibeos::arch::PageTable;
 use vibeos::paging::{PAGE_SIZE_4K, USER_END};
 use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::syscall::SYS_KILL;
@@ -15,6 +16,7 @@ use vibeos::vectors;
 use crate::addr_space_init;
 use crate::apic_init;
 use crate::arch;
+use crate::arch::current::Arch;
 use crate::arch::idt::testing as idt_testing;
 use crate::ktest::user::{self, DEFAULT, Image, Layout, user_code};
 use crate::ktest::{Outcome, quiescent_free_frames, spawn_thread};
@@ -24,8 +26,10 @@ use crate::sync::blocking_init::Semaphore;
 use crate::syscall_init::testing as entry_testing;
 use crate::thread_init;
 use crate::time_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
     let before = quiescent_free_frames();
     let Some(mut space) = addr_space_init::create() else {
@@ -44,7 +48,7 @@ pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
     // IF stays off while this thread runs on `space`'s CR3: the registry
     // thread has IF=1 and `as_cr3 == 0`, so a switch away and back in this
     // window would reload the kernel CR3 under the user VA below.
-    let irqs_off = x86::InterruptGuard::enter();
+    let irqs_off = crate::arch::current::InterruptGuard::enter();
     super::load_cr3(&space);
     x86::invlpg(va);
     // User PTE: SMAP would #PF a kernel store/load via this VA.
@@ -136,9 +140,9 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
     // IF stays off while this thread runs on a user CR3 (see
     // test_addrspace_map_unmap_teardown): a switch away and back would reload
     // the kernel CR3 between the load and the read.
-    let irqs_off = x86::InterruptGuard::enter();
+    let irqs_off = crate::arch::current::InterruptGuard::enter();
     super::load_cr3(&a);
-    let cr3_a = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
+    let cr3_a = <Arch as PageTable>::root().as_u64();
     if !super::cr3_was_skipped(&a) {
         addr_space_init::load_kernel_cr3();
         drop(irqs_off);
@@ -147,7 +151,7 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
         return Outcome::Fail("a not recorded");
     }
     super::load_cr3(&a);
-    if (x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK) != cr3_a {
+    if (<Arch as PageTable>::root().as_u64()) != cr3_a {
         addr_space_init::load_kernel_cr3();
         drop(irqs_off);
         addr_space_init::teardown(a);
@@ -155,7 +159,7 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
         return Outcome::Fail("skip mutated cr3");
     }
     super::load_cr3(&b);
-    let cr3_b = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
+    let cr3_b = <Arch as PageTable>::root().as_u64();
     if cr3_b == cr3_a {
         addr_space_init::load_kernel_cr3();
         drop(irqs_off);
@@ -401,7 +405,7 @@ pub(crate) fn teardown_live_root_asserts() -> Outcome {
     thread_init::set_pid_cr3(id, 0, root);
     let keep = ManuallyDrop::new(space);
     let nest0 = per_cpu_init::irq_nest();
-    let if0 = x86::interrupts_enabled();
+    let if0 = crate::arch::current::interrupts_enabled();
     let hit = arch::catch::catch_panic(|| {
         // SAFETY: the assertion is `teardown`'s first act, so on a hit this
         // copy dies unused in the frame the longjmp abandons; on a miss
@@ -421,7 +425,7 @@ pub(crate) fn teardown_live_root_asserts() -> Outcome {
         return Outcome::Fail("teardown freed a root a parked TCB names");
     }
     addr_space_init::teardown(ManuallyDrop::into_inner(keep));
-    if x86::interrupts_enabled() != if0 {
+    if crate::arch::current::interrupts_enabled() != if0 {
         return Outcome::Fail("IF changed across the caught assertion");
     }
     if !died {

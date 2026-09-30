@@ -12,6 +12,8 @@ use core::arch::asm;
 use core::mem::offset_of;
 
 use vibeos::atomic::statics::{AtomicBool, Ordering};
+
+use super::cpu;
 use vibeos::smp::per_cpu::PerCpu;
 use vibeos::thread::Tcb;
 
@@ -89,4 +91,43 @@ pub fn cpu_id_hint() -> u32 {
         );
     }
     id
+}
+
+/// Point `GS_BASE` and `KERNEL_GS_BASE` at `ptr`, this CPU's `PerCpu`.
+///
+/// # Safety
+/// `ptr` is this CPU's `PerCpu`, which stays in place for good; the GDT
+/// load already did the `mov gs`, and no ISR reads `gs:[0]` yet.
+pub unsafe fn install_base(ptr: *mut PerCpu) {
+    // SAFETY: `ptr` is this CPU's `PerCpu`, after `mov gs` and before any
+    // ISR reads `gs:[0]` (this fn's `# Safety` contract), so both bases name
+    // this CPU's area from here on (invariant I4, established here).
+    unsafe {
+        cpu::wrmsr(cpu::IA32_GS_BASE, ptr as u64);
+        cpu::wrmsr(cpu::IA32_KERNEL_GS_BASE, ptr as u64);
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// This CPU's hardware id: its initial APIC ID (CPUID.01H:EBX[31:24]).
+pub fn hw_cpu_id() -> u32 {
+    let (_, ebx, _, _) = cpu::cpuid(1, 0);
+    ebx >> 24
+}
+
+/// `GS_BASE`'s `PerCpu`, read through its `self_ptr` at `gs:[0]`.
+pub fn gs_self() -> *mut PerCpu {
+    let ptr: u64;
+    // SAFETY: an 8-byte load at `GS_BASE` that touches no stack or flags;
+    // once `init_bsp` (on an AP, `install_gs`) ran, `GS_BASE` is this CPU's
+    // `PerCpu`, whose first field is `self_ptr` (invariant I4, established
+    // at `smp::per_cpu_init::init_bsp`), and every caller runs after that.
+    unsafe {
+        asm!(
+            "mov {}, qword ptr gs:[0]",
+            out(reg) ptr,
+            options(nostack, preserves_flags),
+        );
+    }
+    ptr as *mut PerCpu
 }

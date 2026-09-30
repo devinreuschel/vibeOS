@@ -16,6 +16,7 @@ use crate::log_init;
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::thread_init::{self, ThreadInfo};
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 pub(crate) const COMMANDS: &[Command] = &[
@@ -205,6 +206,7 @@ fn cmd_panic(_args: &[&str]) {
     panic!("shell: panic");
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cmd_reboot(_args: &[&str]) {
     #[expect(
         clippy::let_underscore_must_use,
@@ -219,6 +221,7 @@ fn cmd_reboot(_args: &[&str]) {
     x86::halt();
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cmd_poweroff(_args: &[&str]) {
     #[expect(
         clippy::let_underscore_must_use,
@@ -262,6 +265,7 @@ fn try_acpi_sleep_s5() {
     write_gas(fadt.sleep_control, (5 << 2) | (1 << 5));
 }
 
+#[cfg(target_arch = "x86_64")]
 fn write_gas(gas: Gas, val: u8) {
     match gas.space_id {
         GAS_SYSTEM_IO => {
@@ -291,6 +295,7 @@ fn write_gas(gas: Gas, val: u8) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn pulse_8042() {
     let mut n = 100_000u32;
     while n > 0 {

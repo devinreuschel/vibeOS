@@ -8,7 +8,6 @@ use vibeos::thread::ThreadId;
 use super::{RequeueGuard, set_requeue_next_cpu};
 use crate::ktest::{Outcome, second_cpu, sleep_until};
 use crate::thread_init;
-use crate::x86;
 
 /// The CPU each `requeue_mover_*` first ran on, `u32::MAX` before it
 /// runs. A mover starts with IF off (`testing::spawn_parked_any`), so
@@ -49,7 +48,7 @@ pub(crate) fn test_requeue_moves_each_dequeue() -> Outcome {
     {
         // IF off from the first queueing until the hook is on: no dequeue
         // here runs either thread before then.
-        let _irq = x86::InterruptGuard::enter();
+        let _irq = crate::arch::current::InterruptGuard::enter();
         for id in ids {
             thread_init::testing::queue_here(id);
         }
