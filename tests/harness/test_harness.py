@@ -1155,8 +1155,10 @@ BLOCK_MARKERS = (
     "vibeOS: block: vda 8192 sectors",
     "vibeOS: block: vdap1 128 sectors",
     "vibeOS: block: vdap2 7647 sectors",
-    # And the timer line `run_ktest.check_boot_cpu` requires of a TCG boot.
+    # And the timer and clocksource lines `run_ktest.check_boot_cpu` and
+    # `run_ktest.check_clocksource` require of a TCG boot.
     "vibeOS: time: lapic_timer ok (periodic)",
+    "vibeOS: time: clocksource hpet",
 )
 
 
@@ -2994,14 +2996,20 @@ class TestSkips(unittest.TestCase):
 
 
 class TestHpetOffBoot(unittest.TestCase):
-    """`make test-kernel`'s hpet=off boot (ROADMAP §10.2): the PIT drives the
-    tick, and `vibeos.ktest=` limits it to `HPET_OFF_KTEST`."""
+    """`make test-kernel`'s hpet=off boot (ROADMAP §10.2, §10.3): the PIT
+    drives the tick, the PM timer is the clocksource, and `vibeos.ktest=`
+    limits it to `HPET_OFF_KTEST`."""
 
     GOOD = (
         "vibeOS: time: lapic_timer ok (pit)",
-        "vibeOS: ktest: begin 1",
+        "vibeOS: time: clocksource acpi_pm",
+        "vibeOS: ktest: begin 3",
         "vibeOS: ktest: run pit_tick_rate 10000",
         "vibeOS: ktest: ok pit_tick_rate (80000 us)",
+        "vibeOS: ktest: run clocksource_if_off_50ms 10000",
+        "vibeOS: ktest: ok clocksource_if_off_50ms (53000 us)",
+        "vibeOS: ktest: run sleep_ms_50 10000",
+        "vibeOS: ktest: ok sleep_ms_50 (51000 us)",
         "vibeOS: ktest: end",
     )
 
@@ -3041,23 +3049,29 @@ class TestHpetOffBoot(unittest.TestCase):
 
     def test_selection_overrides_env(self) -> None:
         cfg = self.cfg()
-        self.assertEqual(run_ktest.ktest_selection(cfg), "pit_tick_rate")
+        want = "pit_tick_rate,clocksource_if_off_50ms,sleep_ms_50"
+        self.assertEqual(run_ktest.ktest_selection(cfg), want)
         argv = qemu_argv(cfg, None)
         fw = next(a for a in argv if a.startswith("name=opt/vibeos/cmdline,"))
         self.assertIn("vibeos.ktest_repeat=3", fw)
-        self.assertTrue(fw.endswith(" vibeos.ktest=pit_tick_rate"), fw)
+        # QEMU's option syntax doubles a comma inside a value.
+        self.assertTrue(fw.endswith(f" vibeos.ktest={want.replace(',', ',,')}"), fw)
 
     def test_check_passes_without_block_lines(self) -> None:
         self.check(*self.GOOD)
 
     def test_check_refuses(self) -> None:
         periodic = ("vibeOS: time: lapic_timer ok (periodic)", *self.GOOD[1:])
-        skip = (*self.GOOD[:3], "vibeOS: ktest: skip pit_tick_rate: why", self.GOOD[4])
-        fail = (*self.GOOD[:3], "vibeOS: ktest: FAIL pit_tick_rate: no", self.GOOD[4])
-        missing = (self.GOOD[0], "vibeOS: ktest: begin 1", "vibeOS: ktest: run x 10000",
+        hpet = (self.GOOD[0], "vibeOS: time: clocksource hpet", *self.GOOD[2:])
+        no_cs = (self.GOOD[0], *self.GOOD[2:])
+        skip = (*self.GOOD[:4], "vibeOS: ktest: skip pit_tick_rate: why", *self.GOOD[5:])
+        fail = (*self.GOOD[:4], "vibeOS: ktest: FAIL pit_tick_rate: no", *self.GOOD[5:])
+        missing = (*self.GOOD[:2], "vibeOS: ktest: begin 1", "vibeOS: ktest: run x 10000",
                    "vibeOS: ktest: ok x (1 us)", "vibeOS: ktest: end")
         for why, lines in (
             ("periodic", periodic),
+            ("hpet clocksource", hpet),
+            ("no clocksource line", no_cs),
             ("skip", skip),
             ("FAIL", fail),
             ("missing", missing),

@@ -2,15 +2,17 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::time::{
-    CALIB_BAND_INVARIANT, CalibSource, ClocksourceId, Instant, Snapshot, TICK_NS, calib_in_band,
-    next_deadline, ns_at, unix_from_civil,
+    CALIB_BAND_INVARIANT, CalibSource, ClocksourceId, Counter, Instant, Snapshot, TICK_NS,
+    calib_in_band, next_deadline, ns_at, unix_from_civil,
 };
 
 use vibeos::apic::TimerMode;
 
 use crate::acpi_init;
 use crate::apic_init;
+use crate::arch::current::InterruptGuard;
 use crate::ktest::{Outcome, Test, test};
 use crate::per_cpu_init;
 use crate::thread_init;
@@ -683,6 +685,158 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     Outcome::Ok
 }
 
+// ---------------------------------------------------------------------------
+// clocksource_if_off_50ms (ROADMAP §10.3, F027)
+
+/// How long CPU 0 holds IF off, in ns of the reference counter.
+const IF_OFF_NS: u64 = 50_000_000;
+/// How long after the window the body waits for two ticks, in ns of the
+/// reference counter.
+const TICK_WAIT_NS: u64 = 20_000_000;
+/// How long the test waits for its body, in ms.
+const IF_OFF_WAIT_MS: u64 = 1_000;
+
+/// 0 while the body runs; then 1, with [`IF_OFF_VALS`] set, or `2 + i` for
+/// failure `i` of [`IF_OFF_ERRS`].
+static IF_OFF_STATE: AtomicU32 = AtomicU32::new(0);
+static IF_OFF_ERRS: [&str; 5] = [
+    "no clocksource",
+    "no reference counter",
+    "no clock read",
+    "not on cpu0",
+    "no tick within 20 ms of the window",
+];
+/// Δ`now_ns` and Δreference across the IF-off window, then across the
+/// window and the two ticks after it; the reference's id.
+static IF_OFF_VALS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static IF_OFF_REF: AtomicU64 = AtomicU64::new(0);
+
+/// A counter to measure the clocksource against: the TSC under the HPET or
+/// the PM timer; under the TSC, the HPET, else the PM timer.
+fn reference(cs: ClocksourceId) -> Option<Counter> {
+    let order: &[ClocksourceId] = match cs {
+        ClocksourceId::Tsc => &[ClocksourceId::Hpet, ClocksourceId::AcpiPm],
+        ClocksourceId::Hpet | ClocksourceId::AcpiPm => &[ClocksourceId::Tsc],
+    };
+    order.iter().find_map(|&id| time_init::counter(id))
+}
+
+/// One unclamped `now_ns`, through the hook that skips `LAST_NS`.
+fn now_raw() -> Option<u64> {
+    now_ns_unclamped(false).map(|s| s.ns)
+}
+
+/// The IF-off measurement, on CPU 0. Ok: (Δnow, Δref) over the window,
+/// (Δnow, Δref) over the window and the two ticks after it, and the
+/// reference's id. Err: an index into [`IF_OFF_ERRS`].
+fn if_off_measure() -> Result<([u64; 4], ClocksourceId), usize> {
+    let cs = time_init::clocksource().ok_or(0usize)?;
+    let rc = reference(cs).ok_or(1usize)?;
+    let read = || time_init::read_counter(rc.id).ok_or(2usize);
+    let since = |from: u64, to: u64| rc.scale.to_ns(rc.delta(to, from));
+    let (r0, n0, n1, r1) = {
+        let _off = InterruptGuard::enter();
+        if thread_init::current_cpu() != 0 {
+            return Err(3);
+        }
+        // Reference, clock, spin, clock, reference: the clock's interval
+        // sits inside the reference's.
+        let r0 = read()?;
+        let n0 = now_raw().ok_or(2usize)?;
+        loop {
+            if since(r0, read()?) >= IF_OFF_NS {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        let n1 = now_raw().ok_or(2usize)?;
+        let r1 = read()?;
+        (r0, n0, n1, r1)
+    };
+    // IF is back on: the tick resumes. A clock that counted ticks lost the
+    // window's here.
+    let t0 = time_init::ticks();
+    while time_init::ticks() < t0.saturating_add(2) {
+        if since(r1, read()?) > TICK_WAIT_NS {
+            return Err(4);
+        }
+        core::hint::spin_loop();
+    }
+    let n2 = now_raw().ok_or(2usize)?;
+    let r2 = read()?;
+    let vals = [
+        n1.saturating_sub(n0),
+        since(r0, r1),
+        n2.saturating_sub(n0),
+        since(r0, r2),
+    ];
+    Ok((vals, rc.id))
+}
+
+fn if_off_body() {
+    let state = match if_off_measure() {
+        Ok((vals, id)) => {
+            for (slot, v) in IF_OFF_VALS.iter().zip(vals) {
+                // Relaxed: published by the Release store to the state.
+                slot.store(v, Ordering::Relaxed);
+            }
+            IF_OFF_REF.store(id as u64, Ordering::Relaxed);
+            1
+        }
+        Err(i) => 2u32.saturating_add(i as u32),
+    };
+    // Release: pairs with the Acquire load in the test.
+    IF_OFF_STATE.store(state, Ordering::Release);
+}
+
+/// `now` within 1% of `reference`.
+fn within_1pct(now: u64, reference: u64) -> bool {
+    now.abs_diff(reference) <= reference / 100
+}
+
+/// CPU 0 holds IF off for 50 ms of a counter that is not the clocksource,
+/// and `now_ns` advances by the same within 1%, across the window and again
+/// once two ticks have followed it (F027).
+pub(crate) fn test_clocksource_if_off_50ms() -> Outcome {
+    // Relaxed: the spawn below publishes it to the body.
+    IF_OFF_STATE.store(0, Ordering::Relaxed);
+    let opts = thread_init::SpawnOpts {
+        stack_pages: DEFAULT_STACK_PAGES,
+        cpu: Some(0),
+    };
+    if thread_init::spawn_opts("clock-ifoff", if_off_body, opts).is_err() {
+        return Outcome::Fail("spawn");
+    }
+    let start = time_init::now_ns();
+    // Acquire: pairs with the Release store in `if_off_body`.
+    let state = loop {
+        let st = IF_OFF_STATE.load(Ordering::Acquire);
+        if st != 0 {
+            break st;
+        }
+        if time_init::now_ns().saturating_sub(start) > IF_OFF_WAIT_MS.saturating_mul(1_000_000) {
+            return Outcome::Fail("body did not finish within 1 s");
+        }
+        thread_init::sleep_ms(1);
+    };
+    if state != 1 {
+        let i = state.saturating_sub(2) as usize;
+        return Outcome::Fail(IF_OFF_ERRS.get(i).copied().unwrap_or("bad state"));
+    }
+    // Relaxed: after the Acquire load of the state.
+    let v = |i: usize| IF_OFF_VALS.get(i).map_or(0, |a| a.load(Ordering::Relaxed));
+    let rid =
+        ClocksourceId::from_u64(IF_OFF_REF.load(Ordering::Relaxed)).map_or("?", |c| c.as_str());
+    let (dn, dr, dn2, dr2) = (v(0), v(1), v(2), v(3));
+    if !within_1pct(dn, dr) {
+        return crate::fail_fmt!("if off: now_ns +{dn} ns, {rid} +{dr} ns");
+    }
+    if !within_1pct(dn2, dr2) {
+        return crate::fail_fmt!("after ticks: now_ns +{dn2} ns, {rid} +{dr2} ns");
+    }
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -692,4 +846,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("now_us_planted_tear", test_now_us_planted_tear),
     test("tsc_calib_source", test_tsc_calib_source),
     test("rtc_offset", test_rtc_offset),
+    test("clocksource_if_off_50ms", test_clocksource_if_off_50ms),
 ];
