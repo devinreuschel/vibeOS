@@ -25,23 +25,23 @@ use vibeos::fs::{
 };
 use vibeos::lock::RANK_DEVICE;
 
+use crate::fs::StoreLock;
 use crate::sync::blocking_init::BlockingMutex;
-use crate::sync_init::SpinMutex;
 
 /// Each inode slot's size, link count and private words (`InodeWords`).
 static INODE_WORDS: WordsTable = words_table();
 static VFS: BlockingMutex<Vfs> = BlockingMutex::new(Vfs::new(&INODE_WORDS));
 /// Every ramfs instance's nodes: the root when FAT is not live, and each
 /// `mount ramfs`.
-pub static RAMFS: RamFs<SpinMutex<RamState>> =
-    RamFs::new(SpinMutex::with_rank(RamState::new(), RANK_DEVICE));
+pub static RAMFS: RamFs<StoreLock<RamState>> =
+    RamFs::new(StoreLock::with_rank(RamState::new(), RANK_DEVICE));
 /// The kernfs store the four pseudo filesystems share.
-pub static KERNFS: KernFs<SpinMutex<KernState>> =
-    KernFs::new(SpinMutex::with_rank(KernState::new(), RANK_DEVICE));
-pub static DEVFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType::Dev);
-pub static PROCFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType::Proc);
-pub static TMPFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType::Tmp);
-pub static SYSFS: KernSkin<SpinMutex<KernState>> = KernSkin::new(&KERNFS, FsType::Sys);
+pub static KERNFS: KernFs<StoreLock<KernState>> =
+    KernFs::new(StoreLock::with_rank(KernState::new(), RANK_DEVICE));
+pub static DEVFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Dev);
+pub static PROCFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Proc);
+pub static TMPFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Tmp);
+pub static SYSFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Sys);
 static LIVE: AtomicBool = AtomicBool::new(false);
 
 /// Make the root: the FAT initrd when `root_is_fat`, else a ramfs.
@@ -52,13 +52,6 @@ pub fn init(root_is_fat: bool) {
     } else {
         let ok = api().mount_root(&RAMFS, None, false, None).is_ok();
         LIVE.store(ok, Ordering::Release);
-    }
-}
-
-impl<T: Send> Guarded<T> for SpinMutex<T> {
-    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        let mut g = self.lock();
-        f(&mut g)
     }
 }
 
