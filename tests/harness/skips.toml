@@ -253,3 +253,8 @@ smp = 1
 name = "vfs_io_off_lock"
 reason = "needs a second cpu"
 smp = 1
+
+[[skip]]
+name = "wake_inbox_and_kva_pool"
+reason = "no AP"
+smp = 1
