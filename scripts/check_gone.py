@@ -218,6 +218,12 @@ GONE: list[tuple[str, str]] = [
     ("src/fs/vibefs_init.rs: fn route", "every path syscall resolves through `Vfs`"),
     ("src/fs/vibefs_init.rs: fn walk", "every path syscall resolves through `Vfs`"),
     ("crates/core/src/fs/fat/vol.rs: fn walk", "every path syscall resolves through `Vfs`"),
+    ("enable_mem_master", "a driver turns on its own device (DESIGN §12.3)"),
+    ("mask_intx", "a driver turns on its own device (DESIGN §12.3)"),
+    ("cfg_write_command", "a driver turns on its own device (DESIGN §12.3)"),
+    ("with_intx_disabled", "a driver turns on its own device (DESIGN §12.3)"),
+    ("fail_status", "a driver turns on its own device (DESIGN §12.3)"),
+    ("fail_armed", "a driver turns on its own device (DESIGN §12.3)"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

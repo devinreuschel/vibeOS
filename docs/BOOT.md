@@ -226,8 +226,8 @@ Step 17b enumerates PCI (ECAM where the first MCFG allocation covers the bus, el
 memory BARs under the 32 MiB cap, fills the device registry, and emits
 `pci: N devices`. Workqueue workers and the threaded-IRQ bottom half start
 next. Drivers register, then bind after the scan, not inline. Virtio-rng
-matches by id when a modern virtio device is present (ktest adds one; e2e
-does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
+matches by id when a modern virtio device is present (ktest adds two, and
+the driver refuses the second; e2e does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
 Partition scan stamps an MBR on `ram0`. Only a `kernel_tests` build stamps a GPT, and only on a `vda`
 whose table fails to parse or has no entries and whose LBA 0–33 and last 33 sectors all read back as
 zeros; the production kernel never writes `vda` here ([section 10.5](BLOCK.md#105-partitions); ROADMAP
