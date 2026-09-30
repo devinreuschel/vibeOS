@@ -108,3 +108,8 @@ smp = 1
 name = "cross_cpu_spawn"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "current_migrate_if1"
+reason = "needs 2 CPUs"
+smp = 1
