@@ -248,3 +248,8 @@ smp = 1
 name = "user_tf_repin"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "vfs_io_off_lock"
+reason = "needs a second cpu"
+smp = 1
