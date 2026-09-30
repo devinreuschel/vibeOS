@@ -143,3 +143,8 @@ smp = 1
 name = "intx_free_masks"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "late_wake_after_exit"
+reason = "needs 2 cpus"
+smp = 1
