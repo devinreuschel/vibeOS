@@ -66,8 +66,12 @@ pub enum ThreadState {
         deadline: Instant,
     },
     /// Blocked on a wait queue. `wq` is the `WaitQueue` address, or 0.
+    /// `deadline` is the one its timeout entry holds, `FAR_DEADLINE` when
+    /// the wait has none, which the blocked-thread sweep checks
+    /// (`sched::find_overdue`).
     Blocked {
         wq: usize,
+        deadline: Instant,
     },
     Dead,
 }
@@ -385,16 +389,21 @@ const _: () = {
             deadline: Instant { ns: 0 }
         }) == 2
     );
-    assert!(tag(&ThreadState::Blocked { wq: 0 }) == 3);
+    assert!(
+        tag(&ThreadState::Blocked {
+            wq: 0,
+            deadline: Instant { ns: 0 }
+        }) == 3
+    );
     assert!(tag(&ThreadState::Dead) == 4);
-    assert!(size_of::<ThreadState>() == 16);
+    assert!(size_of::<ThreadState>() == 24);
     assert!(align_of::<ThreadState>() == 8);
     assert!(size_of::<Tcb>() == if DEBUG { 1280 } else { 1024 });
     assert!(align_of::<Tcb>() == 16);
     assert!(offset_of!(Tcb, id) == 0);
     assert!(offset_of!(Tcb, state) == 24);
-    assert!(offset_of!(Tcb, context) == if DEBUG { 584 } else { 328 });
-    assert!(offset_of!(Tcb, cpu) == if DEBUG { 688 } else { 432 });
+    assert!(offset_of!(Tcb, context) == if DEBUG { 592 } else { 336 });
+    assert!(offset_of!(Tcb, cpu) == if DEBUG { 696 } else { 440 });
     assert!(offset_of!(Tcb, pid) == if DEBUG { 1264 } else { 1008 });
     assert!(size_of::<CpuContext>() == 72);
     assert!(size_of::<TcbSlot>() == size_of::<usize>());
@@ -509,7 +518,14 @@ mod tests {
             .name(),
             "sleeping"
         );
-        assert_eq!(ThreadState::Blocked { wq: 0 }.name(), "blocked");
+        assert_eq!(
+            ThreadState::Blocked {
+                wq: 0,
+                deadline: Instant { ns: 1 }
+            }
+            .name(),
+            "blocked"
+        );
         assert_eq!(ThreadState::Dead.name(), "dead");
         assert_eq!(WaitOutcome::Woken.name(), "woken");
         assert_eq!(WaitOutcome::Timeout.name(), "timeout");

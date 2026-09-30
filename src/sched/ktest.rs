@@ -9,6 +9,7 @@ mod reclaim;
 mod registry;
 mod requeue;
 mod sleep;
+mod sweep;
 pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use dead_slot::lifetime_dead_slot_on_cpu;
 pub(crate) use depth::{
@@ -23,6 +24,7 @@ pub(crate) use sleep::{
     block_in_hard_irq_asserts, in_hard_irq_top_bottom, lock_across_switch_asserts,
     sleep_under_spinlock_asserts,
 };
+pub(crate) use sweep::sched_sweep_cost;
 
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -1304,5 +1306,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("stack_depth_exit_scan", stack_depth_exit_scan),
     test("stack_depth_planted", stack_depth_planted)
         .opt_in()
+        .once(),
+    test("sched_sweep_cost", sched_sweep_cost)
+        .deadline(60_000)
         .once(),
 ];

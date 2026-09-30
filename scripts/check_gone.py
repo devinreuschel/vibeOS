@@ -138,6 +138,8 @@ GONE: list[tuple[str, str]] = [
     ("_retry_hang", "the harness retries nothing"),
     ("retryable_ktest_failure", "the harness retries nothing"),
     ("silent_user_syscalls_hang", "the harness retries nothing"),
+    ("overdue_scan", "the blocked-thread sweep finds lost"),
+    ("crates/core/src/sched/mod.rs: fn overdue", "the blocked-thread sweep finds lost"),
     ("check_markers_in_order", "the marker-order unit tests drive"),
     ("is_halting", "every two-way dependency between kernel modules"),
     ("halt_others", "the panic dump owns COM1"),

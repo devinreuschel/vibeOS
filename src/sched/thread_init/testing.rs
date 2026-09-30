@@ -136,7 +136,10 @@ pub fn spawn_parked_any(
     )?;
     with_sched(|s| {
         if let Some(t) = s.get_mut(h.id()) {
-            t.state = ThreadState::Blocked { wq: 0 };
+            t.state = ThreadState::Blocked {
+                wq: 0,
+                deadline: vibeos::sched::FAR_DEADLINE,
+            };
         }
     });
     Ok(h)
@@ -345,6 +348,26 @@ pub(super) fn preempt_before_places(places: usize) {
     while time_init::read_tsc() < end {
         core::hint::spin_loop();
     }
+}
+
+/// One run of the blocked-thread sweep's scan, as `schedule_inner` runs
+/// it: under SCHED, with IF off, over every TCB, into an
+/// `OVERDUE_REPORT`-entry buffer, without moving the sweep's cursor.
+/// Returns the TSC cycles it took and the TCBs it scanned.
+pub fn time_sweep_scan() -> (u64, usize) {
+    let now = vibeos::time::Instant {
+        ns: time_init::now_ns(),
+    };
+    with_sched(|s| {
+        let mut out = [ThreadId::NONE; vibeos::sched::OVERDUE_REPORT];
+        let threads = s.slots.iter().flatten().map(|t| (t.id, t.state));
+        let n = threads.clone().count();
+        let t0 = time_init::read_tsc();
+        let found = vibeos::sched::find_overdue(threads, now, s.sweep_from, &mut out);
+        let t1 = time_init::read_tsc();
+        core::hint::black_box(found);
+        (t1.wrapping_sub(t0), n)
+    })
 }
 
 #[allow(

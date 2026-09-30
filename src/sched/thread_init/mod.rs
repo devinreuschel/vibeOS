@@ -20,7 +20,10 @@ use vibeos::limits::{self, PID_MAX};
 use vibeos::lock::RANK_SCHED;
 use vibeos::per_cpu::PerCpu;
 use vibeos::proc::pid::{IdIndex, PidAlloc};
-use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
+use vibeos::sched::{
+    OVERDUE_REPORT, SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, find_overdue,
+    take_next,
+};
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{
     CpuAffinity, CpuContext, Fxsave, MAX_THREADS, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome,
@@ -197,6 +200,12 @@ pub(crate) struct Sched {
     /// `begin_wait` checks: it runs under SCHED with IF off and cannot read
     /// IF or `HELD` itself.
     waiter: SleepCtx,
+    /// CPU 0's tick count at which its `schedule` next runs the
+    /// blocked-thread sweep (DESIGN §6.5).
+    next_sweep: u64,
+    /// The sweep's cursor: the tid the next sweep starts from
+    /// (`sched::find_overdue`).
+    sweep_from: ThreadId,
 }
 
 /// Each thread-table slot's tid, `u32::MAX` for none: what a wake-inbox
@@ -234,6 +243,8 @@ impl Sched {
             place_head: 0,
             place_n: 0,
             waiter: SleepCtx::UNCHECKED,
+            next_sweep: 0,
+            sweep_from: ThreadId(0),
         }
     }
 
@@ -377,7 +388,10 @@ impl Sched {
         self.timeouts.insert(id, deadline);
         let cookie = wq.cookie();
         if let Some(t) = self.get_mut(id) {
-            t.state = ThreadState::Blocked { wq: cookie };
+            t.state = ThreadState::Blocked {
+                wq: cookie,
+                deadline,
+            };
             t.wait_outcome = WaitOutcome::Woken;
         }
     }
@@ -403,7 +417,7 @@ impl Sched {
 
     fn unlink_wait(&mut self, id: ThreadId) {
         let cookie = match self.get(id).map(|t| t.state) {
-            Some(ThreadState::Blocked { wq }) => wq,
+            Some(ThreadState::Blocked { wq, .. }) => wq,
             _ => 0,
         };
         if cookie != 0 {
@@ -537,7 +551,8 @@ fn schedule_inner(from_irq: bool) {
     let cur = current_id();
     let me = per_cpu_init::current().cpu_id;
 
-    let mut overdue = [ThreadId::NONE; 4];
+    // The blocked-thread sweep's finds, printed once SCHED drops.
+    let mut overdue = [ThreadId::NONE; OVERDUE_REPORT];
     let mut n_overdue = 0usize;
 
     let cur_state = with_sched(|s| {
@@ -564,15 +579,18 @@ fn schedule_inner(from_irq: bool) {
             }
         }
 
-        if !from_irq {
+        // The blocked-thread sweep (DESIGN §6.5): CPU 0, on the tick and
+        // the voluntary path alike, since an idle CPU 0 enters only from
+        // the tick. After the expiry above, so a thread still waiting past
+        // its deadline lost its timeout entry.
+        if me == 0 {
             let ticks = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
-            if ticks.is_multiple_of(SWEEP_TICKS) {
-                for t in s.timeouts.overdue(now) {
-                    if n_overdue < overdue.len() {
-                        overdue[n_overdue] = t.id;
-                        n_overdue += 1;
-                    }
-                }
+            if ticks >= s.next_sweep {
+                s.next_sweep = ticks.saturating_add(SWEEP_TICKS);
+                let threads = s.slots.iter().flatten().map(|t| (t.id, t.state));
+                let (n, next) = find_overdue(threads, now, s.sweep_from, &mut overdue);
+                s.sweep_from = next;
+                n_overdue = n;
             }
         }
 
@@ -589,12 +607,9 @@ fn schedule_inner(from_irq: bool) {
         st
     });
 
-    if n_overdue != 0 {
-        let mut i = 0;
-        while i < n_overdue {
-            crate::marker!("vibeOS: sched: overdue tid {}", overdue[i].raw());
-            i += 1;
-        }
+    // A failure path, which DESIGN §2.2 lets the tick path log.
+    for id in overdue.iter().take(n_overdue) {
+        crate::marker!("vibeOS: sched: overdue tid {}", id.raw());
     }
 
     let mut next = per_cpu_init::with_current(|cpu| {
