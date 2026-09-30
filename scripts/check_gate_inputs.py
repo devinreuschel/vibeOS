@@ -12,6 +12,10 @@ holds the `vibeos-core` coverage floor. Modes:
   merge base with the head (default `HEAD`). The `check` job runs it on every
   pull request.
 - `--floor`: print the floor, which the `check` job's llvm-cov step reads.
+- `--summary (--tag TAG | --since REV) [--head REV]`: markdown for release.yml's
+  `build` job summary: every input changed since the `v*` tag before TAG (or
+  the root of history) or since REV, the floor at both ends, and the
+  `Gate-change:` lines of the commits that changed each.
 
 Static rules: `inputs.toml` follows its schema; each `path` exists, each
 `recipe` is a Makefile rule and each `table` a table of its file; every file the
@@ -655,6 +659,86 @@ def static_errors(root: Path, tree: Tree | None = None) -> list[str]:
     return errors
 
 
+
+# --- release summary -------------------------------------------------------
+
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def previous_tag(root: Path, tag: str) -> str | None:
+    """The `v*` tag before `tag`'s commit, or None at the root of history."""
+    r = gatelib.git(root, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*",
+                    f"{tag}^{{commit}}^", check=False).strip()
+    return r or None
+
+
+def changed_inputs(since: Tree, head: Tree, changed: list[tuple[str, str]]) -> list[Item]:
+    """The inputs of either side that differ between them: a file changed, or a
+    recipe or table whose text changed."""
+    items: dict[tuple[str, str | None], Item] = {}
+    for tree in (head, since):
+        inputs = inputs_at(tree)
+        if inputs is not None:
+            for it in expand(inputs, tree):
+                _put(items, it)
+    paths = {p for _, p in changed}
+    out: list[Item] = []
+    for key in sorted(items, key=lambda k: (k[0], k[1] or "")):
+        it = items[key]
+        if it.kind in ("recipe", "table"):
+            if part_of(since, it) != part_of(head, it):
+                out.append(it)
+        elif it.path in paths:
+            out.append(it)
+    return out
+
+
+def summary(root: Path, since: str | None, head: str, label: str | None = None) -> str:
+    """Markdown: every gate input changed from `since` (None: the root of
+    history) to `head`, the floor at both ends, and under each input the
+    `Gate-change:` lines of each commit that changed it: those naming its path,
+    or all the commit's lines when none does."""
+    base = since if since is not None else EMPTY_TREE
+    changed: list[tuple[str, str]] = []
+    for raw in gatelib.git(root, "diff", "--no-renames", "--name-status", base, head).split("\n"):
+        if raw:
+            s, _, p = raw.partition("\t")
+            changed.append((s, p))
+    since_tree: Tree = GitTree(root, since) if since is not None else _EmptyTree()
+    head_tree = GitTree(root, head)
+    items = changed_inputs(since_tree, head_tree, changed)
+    head_sha = gatelib.git(root, "rev-parse", "--short", f"{head}^{{commit}}").strip()
+    start = label or (since if since is not None else "the root of history")
+    lines = [f"## Gate inputs changed since {start}", ""]
+    lines.append(f"Coverage floor: {floor_at(since_tree)} at {start}, {floor_at(head_tree)} "
+                 f"at {head_sha}.")
+    lines.append("")
+    if not items:
+        lines.append("No gate input changed.")
+    rng = f"{since}..{head}" if since is not None else head
+    for it in items:
+        lines.append(f"- {it.name}")
+        shas = gatelib.git(root, "log", "--no-merges", "--format=%H", rng, "--",
+                           it.path).split()
+        for sha in reversed(shas):
+            found = gatelib.message_lines(sha, TAG, root)
+            if not found:
+                lines.append(f"  - `{sha[:10]}` no `{TAG}:` line")
+                continue
+            naming = [t for t in found if t.split(":", 1)[0].split()[:1] == [it.path]]
+            for t in naming or found:
+                lines.append(f"  - `{sha[:10]}` {TAG}: {t}")
+    return "\n".join(lines) + "\n"
+
+
+class _EmptyTree:
+    def read(self, path: str) -> bytes | None:
+        return None
+
+    def files(self) -> list[str]:
+        return []
+
+
 # --- main ------------------------------------------------------------------
 
 
@@ -685,8 +769,27 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base", help="diff against this revision's merge base with the head")
     ap.add_argument("--head", default="HEAD", help="the pull request's head (default HEAD)")
     ap.add_argument("--floor", action="store_true", help="print the coverage floor")
+    ap.add_argument("--summary", action="store_true",
+                    help="markdown: the inputs changed since the previous release (or --since)")
+    ap.add_argument("--tag", help="--summary: the release tag; since the `v*` tag before it")
+    ap.add_argument("--since", help="--summary: since this revision")
     args = ap.parse_args(argv)
     root = ROOT
+    if args.summary:
+        if (args.tag is None) == (args.since is None):
+            ap.error("--summary takes exactly one of --tag and --since")
+        try:
+            if args.tag is not None:
+                head = args.head if args.head != "HEAD" else f"{args.tag}^{{commit}}"
+                since = previous_tag(root, args.tag)
+                label = since
+            else:
+                head, since, label = args.head, args.since, args.since
+            print(summary(root, since, head, label), end="")
+        except (gatelib.GateError, InputsError) as e:
+            print(f"check_gate_inputs: {e}", file=sys.stderr)
+            return 1
+        return 0
     if args.floor:
         try:
             floor = floor_at(WorkTree(root))

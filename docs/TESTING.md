@@ -1015,7 +1015,10 @@ the floor, and removing a list entry need no trailer. A trailer counts from any 
 the pull request. A correction to the review is a line under `## Errata`, its last `## ` heading,
 `- <YYYY-MM-DD> · <Fnnn> · <what changed> -- <why>` with dates in order, committed with a trailer;
 when `<what changed>` is a `**Severity:** ...` line, `check_review_refs.py` reads it in place of the
-finding's own. Planned (ROADMAP §10.9): rulesets require `check` and `ci-pass`, one job that needs
+finding's own. `release.yml`'s `build` job writes `check_gate_inputs.py --summary --tag <tag>` to its
+summary right after checking out the tag's commit, before any upload and so before any key job:
+every input changed since the previous `v*` tag, the floor at both ends, and the `Gate-change:` lines
+of the commits that changed each. Planned (ROADMAP §10.9): rulesets require `check` and `ci-pass`, one job that needs
 every per-push job, on `main`, which today requires no check.
 
 Planned (ROADMAP §38.1): `make verify` checks the Verus proofs and TLA+ specifications on every push

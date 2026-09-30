@@ -419,5 +419,46 @@ class TestGit(unittest.TestCase):
         self.assertIn("scripts/check_x.py: modified", err.getvalue())
 
 
+class TestSummary(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repo = TempRepo()
+        self.addCleanup(self.repo.cleanup)
+
+    def test_summary_lists_changed_inputs_and_trailers(self) -> None:
+        self.repo.commit("base", dict(BASE))
+        self.repo.git("tag", "-a", "v0.8.0", "-m", "0.8.0")
+        self.repo.commit("edit\n\nGate-change: scripts/check_x.py: box 1 -- y\n"
+                         "Gate-change: pyproject.toml: box 2 -- lint",
+                         {"scripts/check_x.py": "print('y')\n",
+                          "pyproject.toml": PYPROJECT.replace("100", "120")})
+        self.repo.commit("floor", {INPUTS: floor(88), "src.rs": "fn main() {}\n"})
+        self.repo.git("tag", "-a", "v0.9.0", "-m", "0.9.0")
+        out = io.StringIO()
+        with mock.patch.object(cgi, "ROOT", self.repo.path), contextlib.redirect_stdout(out):
+            rc = cgi.main(["--summary", "--tag", "v0.9.0"])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("## Gate inputs changed since v0.8.0", text)
+        self.assertIn("Coverage floor: 87 at v0.8.0, 88 at", text)
+        items = [x for x in text.splitlines() if x.startswith("- ")]
+        self.assertEqual(items, ["- pyproject.toml [tool.ruff]", "- scripts/check_x.py",
+                                 f"- {INPUTS}"])
+        self.assertIn("Gate-change: scripts/check_x.py: box 1 -- y", text)
+        self.assertIn("Gate-change: pyproject.toml: box 2 -- lint", text)
+        self.assertIn("no `Gate-change:` line", text)
+        self.assertNotIn("src.rs", text)
+
+    def test_summary_without_previous_tag(self) -> None:
+        self.repo.commit("base\n\nGate-change: scripts/check_x.py: new, box -- first",
+                         dict(BASE))
+        self.repo.git("tag", "-a", "v0.8.0", "-m", "0.8.0")
+        self.assertIsNone(cgi.previous_tag(self.repo.path, "v0.8.0"))
+        text = cgi.summary(self.repo.path, None, "v0.8.0")
+        self.assertIn("since the root of history", text)
+        self.assertIn("Coverage floor: None at the root of history, 87 at", text)
+        self.assertIn("- scripts/check_x.py", text)
+        self.assertIn("Gate-change: scripts/check_x.py: new, box -- first", text)
+
+
 if __name__ == "__main__":
     unittest.main()
