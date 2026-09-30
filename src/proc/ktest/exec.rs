@@ -1363,3 +1363,42 @@ pub(crate) fn test_brk_mmap_munmap_user() -> Outcome {
     }
     out
 }
+
+/// `scripts/mkelf_shared.py`'s images: an RX and an RW `PT_LOAD` that
+/// share the page at `0x4000_1000` (ROADMAP §10.6, F031).
+const SHARED_PAGE: &[u8] = include_bytes!("../../../tests/fixtures/elf/shared_page.elf");
+const SHARED_PAGE_JUMP: &[u8] = include_bytes!("../../../tests/fixtures/elf/shared_page_jump.elf");
+
+/// ROADMAP §10.6 (F031): a program whose RX segment's tail and RW segment
+/// share a page reads the RX constant and the RW value from that page and
+/// exits 0; a wrong byte in it is exit 1.
+pub(crate) fn test_elf_shared_page() -> Outcome {
+    let st = match user::run(&Image::Elf(SHARED_PAGE), &["shared_page"]) {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    if st == wait_exited(1) {
+        return Outcome::Fail("a segment's bytes are missing from the shared page");
+    }
+    if st != wait_exited(0) {
+        return crate::fail_fmt!("status {st:#x}, want exited 0");
+    }
+    Outcome::Ok
+}
+
+/// ROADMAP §10.6 (F031): the shared page takes the later RW segment's
+/// permissions, so a jump into it ends in `SIGSEGV`, as on Linux; exit 0
+/// means the code there ran.
+pub(crate) fn test_elf_shared_page_jump() -> Outcome {
+    let st = match user::run(&Image::Elf(SHARED_PAGE_JUMP), &["shared_page_jump"]) {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    if st == wait_exited(0) {
+        return Outcome::Fail("code in the shared RW page ran");
+    }
+    if st != wait_signaled(SIGSEGV) {
+        return crate::fail_fmt!("status {st:#x}, want SIGSEGV");
+    }
+    Outcome::Ok
+}

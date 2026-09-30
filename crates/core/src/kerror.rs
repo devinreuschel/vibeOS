@@ -56,12 +56,12 @@ errno_table! {
     NoEnt = 2, "ENOENT", "`open`/`execve` missing path";
     Srch = 3, "ESRCH", "`kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1)";
     Io = 5, "EIO", "device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs";
-    TooBig = 7, "E2BIG", "`execve` argv or envp with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK`";
+    TooBig = 7, "E2BIG", "`execve`: a string over 131,072 bytes with its NUL, or strings and pointers together over max(128 KiB, min(`RLIMIT_STACK`/4, 6 MiB)), 2 MiB at the fixed 8 MiB `RLIMIT_STACK` (§3.1)";
     NoExec = 8, "ENOEXEC", "malformed ELF, `ET_DYN`, or `PT_INTERP`";
     BadF = 9, "EBADF", "closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd";
     Child = 10, "ECHILD", "`wait4` with no matching child";
     Again = 11, "EAGAIN", "`fork` with every process-table slot in use, zombies included (`limits::MAX_PROCS` is 256), or no pid free (pids and tids share one allocator, up to 32,767, then from 300), or the thread table has no free slot (ROADMAP §10.4, F037)";
-    NoMem = 12, "ENOMEM", "AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table (256 regions, `limits::MAX_REGIONS`, where Linux's `vm.max_map_count` allows 65,530; ROADMAP §10.4), a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4)";
+    NoMem = 12, "ENOMEM", "AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table (256 regions, `limits::MAX_REGIONS`, where Linux's `vm.max_map_count` allows 65,530; ROADMAP §10.4), a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4), `execve` argument buffers included";
     Acces = 13, "EACCES", "`open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys`";
     Fault = 14, "EFAULT", "bad user pointer / length";
     Busy = 16, "EBUSY", "defined; no syscall returns it";
@@ -77,7 +77,7 @@ errno_table! {
     NoSpc = 28, "ENOSPC", "`write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent";
     SPipe = 29, "ESPIPE", "`lseek` on the console, `/dev/console`, or `/dev/tty`";
     RoFs = 30, "EROFS", "defined; no syscall returns it: a write to a read-only virtio-blk device fails with it in the block layer";
-    NameTooLong = 36, "ENAMETOOLONG", "path of 256 bytes or more; name above 64 bytes; an `execve` argv or envp string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255";
+    NameTooLong = 36, "ENAMETOOLONG", "path of 256 bytes or more; name above 64 bytes. ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255";
     NoSys = 38, "ENOSYS", "unknown number";
     NotEmpty = 39, "ENOTEMPTY", "defined; no syscall returns it";
     Loop = 40, "ELOOP", "`open` or `execve` through too many symbolic links";

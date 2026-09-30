@@ -712,10 +712,25 @@ key = "pid 1's exit panics the kernel"
 closes = ["init's own exit panics the kernel"]
 why = "the §9.5 deferral box"
 
+# L1354
 [[box]]
 key = "`execve` copies the caller's `envp` strings"
+needs = [
+  "a kernel command line: `cmdline:`",  # L1227
+  "one `limits` module in `vibeos-core`",  # L1315
+  "`vibeos-core` gains `kalloc` (`TryBox`, `TryVec`,",  # L1321
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+]
 closes = ["`execve` copies the caller's `envp` onto the new image's initial stack"]
-why = "the §9.4 deferral box"
+why = "the §9.4 deferral box; claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1023
+[[box]]
+key = "`execve` copies the caller's `envp` onto"
+needs = [
+  "`execve` copies the caller's `envp` strings",  # L1354
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "`elf::parse` host tests also cover checked-in static binaries"
