@@ -9,6 +9,7 @@ use vibeos::elf::{
 };
 use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
+use vibeos::kerror::KError;
 use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
@@ -36,6 +37,24 @@ pub enum LoadError {
     Spawn(SpawnError),
     /// A kernel heap allocation failed (DESIGN §4.4).
     NoMem,
+}
+
+/// A load's errno: the loader's, the filesystem's, or the address space's
+/// error, as `execve` returns it.
+impl From<LoadError> for KError {
+    fn from(e: LoadError) -> Self {
+        match e {
+            LoadError::Fs(f) => KError::from(f),
+            LoadError::Elf(ElfError::ImageTooBig) => KError::NoMem,
+            LoadError::Elf(e) => KError::from(e),
+            LoadError::As(_) => KError::NoMem,
+            LoadError::Mem(m) => KError::from(m),
+            LoadError::Empty => KError::NoExec,
+            LoadError::NoProc => KError::Again,
+            LoadError::Spawn(s) => KError::from(s),
+            LoadError::NoMem => KError::NoMem,
+        }
+    }
 }
 
 impl LoadError {
@@ -360,7 +379,7 @@ fn fill_stack(
 /// `[path]` when empty) and `envp` on its initial stack. Caller installs
 /// it only after this returns.
 pub fn load_path<A: AsRef<[u8]>>(
-    path: &str,
+    path: &[u8],
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
@@ -373,12 +392,11 @@ pub fn load_path<A: AsRef<[u8]>>(
 }
 
 fn load_path_inner<A: AsRef<[u8]>>(
-    path: &str,
+    path: &[u8],
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
-    let file = file_init::open(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
-        .map_err(LoadError::Fs)?;
+    let file = file_init::open(path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
     let mut src = FileImage {
         file,
         len: 0,
@@ -400,7 +418,7 @@ fn load_path_inner<A: AsRef<[u8]>>(
 #[inline(never)]
 fn load_file<A: AsRef<[u8]>>(
     src: &mut FileImage,
-    path: &str,
+    path: &[u8],
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
@@ -412,9 +430,7 @@ fn load_file<A: AsRef<[u8]>>(
     let mut argv_b =
         TryVec::<&[u8]>::try_with_capacity(argv.len().max(1)).map_err(|_| LoadError::NoMem)?;
     if argv.is_empty() {
-        argv_b
-            .try_push(path.as_bytes())
-            .map_err(|_| LoadError::NoMem)?;
+        argv_b.try_push(path).map_err(|_| LoadError::NoMem)?;
     }
     for a in argv {
         argv_b.try_push(a.as_ref()).map_err(|_| LoadError::NoMem)?;

@@ -5,7 +5,7 @@
 //! [`fs_init::api`], which calls a backend only with the VFS lock dropped,
 //! so a backend may wait for its volume and its disk. Relative paths are
 //! joined with the shell's working directory. `sync` issues a block Flush
-//! (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`; vibefs stores
+//! (DESIGN §10.2). FAT rejects symlink/link with `Perm`; vibefs stores
 //! POSIX mode and symlinks (docs/VIBEFS.md).
 //!
 //! Path syscalls (`open`, `execve`'s image) resolve through `Vfs` like
@@ -134,6 +134,18 @@ pub fn stat(f: &FileRef) -> Result<Stat, FsError> {
 /// until `cb` returns false; `cb` runs with the VFS lock dropped.
 pub fn readdir(f: &FileRef, cb: &mut dyn FnMut(&DirEntry) -> bool) -> Result<(), FsError> {
     fs_init::api().readdir(f, cb)
+}
+
+/// Report the entries of open directory `f` from cookie `cookie` to
+/// `emit`, each with the cookie after it, until `emit` returns false or
+/// the entries run out; the cookie of the first entry not consumed. The
+/// file position does not move, and `emit` runs with the VFS lock dropped.
+pub fn readdir_from(
+    f: &FileRef,
+    cookie: u64,
+    emit: &mut dyn FnMut(&DirEntry, u64) -> bool,
+) -> Result<u64, FsError> {
+    fs_init::api().readdir_from(f, cookie, emit)
 }
 
 /// Make directory `path`; one already there is kept.

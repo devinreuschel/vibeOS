@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::fs::{FsError, O_RDONLY, OpenFlags};
 use vibeos::kalloc::{TryBox, TryVec};
+use vibeos::kerror::KError;
 use vibeos::proc::{SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, wait_exited, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 
@@ -849,8 +850,6 @@ user_code!(
 
 const CREAT_PATH: &[u8] = b"/vibe/s20";
 
-const ENOMEM: u32 = 12;
-
 const NONE: Seen = Seen {
     counted: 0,
     refused: 0,
@@ -893,7 +892,7 @@ fn nomem_loop(name: &str, prog: &'static [u8], ok: u32, min: usize) -> Outcome {
             return crate::fail_fmt!("{name} n={n}: status {st:#x}, not an exit");
         };
         if seen.refused > 0 {
-            if code != ENOMEM {
+            if code != KError::NoMem.errno() as u32 {
                 return crate::fail_fmt!("{name} n={n}: exit {code} with {seen:?}, want 12");
             }
             continue;

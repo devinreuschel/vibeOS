@@ -72,12 +72,15 @@ static MODULES: ModulesRequest = ModulesRequest::new();
 #[unsafe(link_section = ".limine_requests")]
 static CMDLINE_REQ: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 
-// 256 KiB for the steps before `thread_init::init_bootstrap` moves boot
-// onto its guarded KVA stack (MEMORY.md §4.5); Limine guarantees only
-// 64 KiB without it.
+/// The boot stack Limine gives `_start`: 256 KiB for the steps before
+/// `thread_init::init_bootstrap` moves boot onto its guarded KVA stack
+/// (MEMORY.md §4.5); Limine guarantees only 64 KiB without the request.
+/// `panic::note_boot_stack` records the stack's bounds from it.
+pub const LIMINE_STACK_BYTES: u64 = 256 * 1024;
+
 #[used]
 #[unsafe(link_section = ".limine_requests")]
-static STACK_SIZE: StackSizeRequest = StackSizeRequest::new(256 * 1024);
+static STACK_SIZE: StackSizeRequest = StackSizeRequest::new(LIMINE_STACK_BYTES);
 
 /// The fw_cfg file whose text follows Limine's command line.
 pub const FW_CFG_CMDLINE: &str = "opt/vibeos/cmdline";

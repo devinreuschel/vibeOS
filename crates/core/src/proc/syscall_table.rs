@@ -152,6 +152,8 @@ pub enum Sys {
     Open,
     /// `close`.
     Close,
+    /// `fstat`.
+    Fstat,
     /// `lseek`.
     Lseek,
     /// `mmap`.
@@ -166,6 +168,8 @@ pub enum Sys {
     Dup,
     /// `dup2`.
     Dup2,
+    /// `nanosleep`.
+    Nanosleep,
     /// `getpid`.
     Getpid,
     /// `fork`.
@@ -182,17 +186,22 @@ pub enum Sys {
     Fcntl,
     /// `getppid`.
     Getppid,
+    /// `reboot`.
+    Reboot,
+    /// `getdents64`.
+    Getdents64,
     /// `psinfo`.
     Psinfo,
 }
 
 impl Sys {
     /// Every syscall, in table order.
-    pub const ALL: [Sys; 20] = [
+    pub const ALL: [Sys; 24] = [
         Sys::Read,
         Sys::Write,
         Sys::Open,
         Sys::Close,
+        Sys::Fstat,
         Sys::Lseek,
         Sys::Mmap,
         Sys::Munmap,
@@ -200,6 +209,7 @@ impl Sys {
         Sys::SchedYield,
         Sys::Dup,
         Sys::Dup2,
+        Sys::Nanosleep,
         Sys::Getpid,
         Sys::Fork,
         Sys::Execve,
@@ -208,6 +218,8 @@ impl Sys {
         Sys::Kill,
         Sys::Fcntl,
         Sys::Getppid,
+        Sys::Reboot,
+        Sys::Getdents64,
         Sys::Psinfo,
     ];
 
@@ -218,7 +230,7 @@ impl Sys {
 }
 
 /// The rows, in [`Sys`] order.
-pub static ROWS: [Row; 20] = [
+pub static ROWS: [Row; 24] = [
     Row {
         sys: Sys::Read,
         name: "read",
@@ -305,6 +317,27 @@ pub static ROWS: [Row; 20] = [
             ty: CType::UInt,
             ptr: None,
         }],
+    },
+    Row {
+        sys: Sys::Fstat,
+        name: "fstat",
+        args: &[
+            Arg {
+                name: "fd",
+                ty: CType::UInt,
+                ptr: None,
+            },
+            Arg {
+                name: "statbuf",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Fixed { size: 144 },
+                    dir: Dir::Out,
+                    nullable: false,
+                    when: "after the `fd` lookup",
+                }),
+            },
+        ],
     },
     Row {
         sys: Sys::Lseek,
@@ -415,6 +448,32 @@ pub static ROWS: [Row; 20] = [
                 name: "newfd",
                 ty: CType::UInt,
                 ptr: None,
+            },
+        ],
+    },
+    Row {
+        sys: Sys::Nanosleep,
+        name: "nanosleep",
+        args: &[
+            Arg {
+                name: "rqtp",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Fixed { size: 16 },
+                    dir: Dir::In,
+                    nullable: false,
+                    when: "before anything else",
+                }),
+            },
+            Arg {
+                name: "rmtp",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Unread,
+                    dir: Dir::In,
+                    nullable: false,
+                    when: "not read (ROADMAP §13.8)",
+                }),
             },
         ],
     },
@@ -552,6 +611,63 @@ pub static ROWS: [Row; 20] = [
         args: &[],
     },
     Row {
+        sys: Sys::Reboot,
+        name: "reboot",
+        args: &[
+            Arg {
+                name: "magic1",
+                ty: CType::Int,
+                ptr: None,
+            },
+            Arg {
+                name: "magic2",
+                ty: CType::Int,
+                ptr: None,
+            },
+            Arg {
+                name: "cmd",
+                ty: CType::UInt,
+                ptr: None,
+            },
+            Arg {
+                name: "arg",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::CStr,
+                    dir: Dir::In,
+                    nullable: false,
+                    when: "for `RESTART2` only, after the uid, magic and command checks",
+                }),
+            },
+        ],
+    },
+    Row {
+        sys: Sys::Getdents64,
+        name: "getdents64",
+        args: &[
+            Arg {
+                name: "fd",
+                ty: CType::UInt,
+                ptr: None,
+            },
+            Arg {
+                name: "dirent",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Buf { len_from: 2 },
+                    dir: Dir::Out,
+                    nullable: false,
+                    when: "after the `fd` lookup and the first record's fit",
+                }),
+            },
+            Arg {
+                name: "count",
+                ty: CType::UInt,
+                ptr: None,
+            },
+        ],
+    },
+    Row {
         sys: Sys::Psinfo,
         name: "psinfo",
         args: &[
@@ -585,6 +701,8 @@ pub trait Handlers {
     fn open(&mut self, pathname: u64, flags: i32, mode: u16) -> SysResult;
     /// `close`.
     fn close(&mut self, fd: u32) -> SysResult;
+    /// `fstat`.
+    fn fstat(&mut self, fd: u32, statbuf: u64) -> SysResult;
     /// `lseek`.
     fn lseek(&mut self, fd: u32, offset: i64, whence: u32) -> SysResult;
     /// `mmap`.
@@ -607,6 +725,8 @@ pub trait Handlers {
     fn dup(&mut self, oldfd: u32) -> SysResult;
     /// `dup2`.
     fn dup2(&mut self, oldfd: u32, newfd: u32) -> SysResult;
+    /// `nanosleep`.
+    fn nanosleep(&mut self, rqtp: u64, rmtp: u64) -> SysResult;
     /// `getpid`.
     fn getpid(&mut self) -> SysResult;
     /// `fork`.
@@ -623,6 +743,10 @@ pub trait Handlers {
     fn fcntl(&mut self, fd: u32, cmd: u32, arg: u64) -> SysResult;
     /// `getppid`.
     fn getppid(&mut self) -> SysResult;
+    /// `reboot`.
+    fn reboot(&mut self, magic1: i32, magic2: i32, cmd: u32, arg: u64) -> SysResult;
+    /// `getdents64`.
+    fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult;
     /// `psinfo`.
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult;
 }
@@ -640,6 +764,8 @@ pub mod aarch64 {
         pub const SYS_WRITE: u64 = 64;
         /// `close`.
         pub const SYS_CLOSE: u64 = 57;
+        /// `fstat`.
+        pub const SYS_FSTAT: u64 = 80;
         /// `lseek`.
         pub const SYS_LSEEK: u64 = 62;
         /// `mmap`.
@@ -652,6 +778,8 @@ pub mod aarch64 {
         pub const SYS_SCHED_YIELD: u64 = 124;
         /// `dup`.
         pub const SYS_DUP: u64 = 23;
+        /// `nanosleep`.
+        pub const SYS_NANOSLEEP: u64 = 101;
         /// `getpid`.
         pub const SYS_GETPID: u64 = 172;
         /// `execve`.
@@ -666,6 +794,10 @@ pub mod aarch64 {
         pub const SYS_FCNTL: u64 = 25;
         /// `getppid`.
         pub const SYS_GETPPID: u64 = 173;
+        /// `reboot`.
+        pub const SYS_REBOOT: u64 = 142;
+        /// `getdents64`.
+        pub const SYS_GETDENTS64: u64 = 61;
     }
 
     const SLOTS: [Option<Sys>; 261] = {
@@ -673,12 +805,14 @@ pub mod aarch64 {
         t[nr::SYS_READ as usize] = Some(Sys::Read);
         t[nr::SYS_WRITE as usize] = Some(Sys::Write);
         t[nr::SYS_CLOSE as usize] = Some(Sys::Close);
+        t[nr::SYS_FSTAT as usize] = Some(Sys::Fstat);
         t[nr::SYS_LSEEK as usize] = Some(Sys::Lseek);
         t[nr::SYS_MMAP as usize] = Some(Sys::Mmap);
         t[nr::SYS_MUNMAP as usize] = Some(Sys::Munmap);
         t[nr::SYS_BRK as usize] = Some(Sys::Brk);
         t[nr::SYS_SCHED_YIELD as usize] = Some(Sys::SchedYield);
         t[nr::SYS_DUP as usize] = Some(Sys::Dup);
+        t[nr::SYS_NANOSLEEP as usize] = Some(Sys::Nanosleep);
         t[nr::SYS_GETPID as usize] = Some(Sys::Getpid);
         t[nr::SYS_EXECVE as usize] = Some(Sys::Execve);
         t[nr::SYS_EXIT as usize] = Some(Sys::Exit);
@@ -686,6 +820,8 @@ pub mod aarch64 {
         t[nr::SYS_KILL as usize] = Some(Sys::Kill);
         t[nr::SYS_FCNTL as usize] = Some(Sys::Fcntl);
         t[nr::SYS_GETPPID as usize] = Some(Sys::Getppid);
+        t[nr::SYS_REBOOT as usize] = Some(Sys::Reboot);
+        t[nr::SYS_GETDENTS64 as usize] = Some(Sys::Getdents64);
         t
     };
 
@@ -698,12 +834,14 @@ pub mod aarch64 {
             Sys::Read => h.read(regs[0] as u32, regs[1], regs[2] as usize),
             Sys::Write => h.write(regs[0] as u32, regs[1], regs[2] as usize),
             Sys::Close => h.close(regs[0] as u32),
+            Sys::Fstat => h.fstat(regs[0] as u32, regs[1]),
             Sys::Lseek => h.lseek(regs[0] as u32, regs[1] as i64, regs[2] as u32),
             Sys::Mmap => h.mmap(regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]),
             Sys::Munmap => h.munmap(regs[0], regs[1] as usize),
             Sys::Brk => h.brk(regs[0]),
             Sys::SchedYield => h.sched_yield(),
             Sys::Dup => h.dup(regs[0] as u32),
+            Sys::Nanosleep => h.nanosleep(regs[0], regs[1]),
             Sys::Getpid => h.getpid(),
             Sys::Execve => h.execve(regs[0], regs[1], regs[2]),
             Sys::Exit => h.exit(regs[0] as i32),
@@ -711,7 +849,9 @@ pub mod aarch64 {
             Sys::Kill => h.kill(regs[0] as i32, regs[1] as i32),
             Sys::Fcntl => h.fcntl(regs[0] as u32, regs[1] as u32, regs[2]),
             Sys::Getppid => h.getppid(),
-            Sys::Open | Sys::Dup2 | Sys::Fork | Sys::Psinfo => Err(KError::ENOSYS),
+            Sys::Reboot => h.reboot(regs[0] as i32, regs[1] as i32, regs[2] as u32, regs[3]),
+            Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
+            Sys::Open | Sys::Dup2 | Sys::Fork | Sys::Psinfo => Err(KError::NoSys),
         }
     }
 
@@ -720,7 +860,7 @@ pub mod aarch64 {
     pub fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
         match TABLE.lookup(raw_nr) {
             Some(sys) => call(h, sys, regs),
-            None => Err(KError::ENOSYS),
+            None => Err(KError::NoSys),
         }
     }
 }
@@ -787,6 +927,10 @@ impl Handlers for Recorder {
         self.record(Sys::Close, &[Val::U32(fd)])
     }
 
+    fn fstat(&mut self, fd: u32, statbuf: u64) -> SysResult {
+        self.record(Sys::Fstat, &[Val::U32(fd), Val::Ptr(statbuf)])
+    }
+
     fn lseek(&mut self, fd: u32, offset: i64, whence: u32) -> SysResult {
         self.record(
             Sys::Lseek,
@@ -836,6 +980,10 @@ impl Handlers for Recorder {
         self.record(Sys::Dup2, &[Val::U32(oldfd), Val::U32(newfd)])
     }
 
+    fn nanosleep(&mut self, rqtp: u64, rmtp: u64) -> SysResult {
+        self.record(Sys::Nanosleep, &[Val::Ptr(rqtp), Val::Ptr(rmtp)])
+    }
+
     fn getpid(&mut self) -> SysResult {
         self.record(Sys::Getpid, &[])
     }
@@ -877,6 +1025,25 @@ impl Handlers for Recorder {
 
     fn getppid(&mut self) -> SysResult {
         self.record(Sys::Getppid, &[])
+    }
+
+    fn reboot(&mut self, magic1: i32, magic2: i32, cmd: u32, arg: u64) -> SysResult {
+        self.record(
+            Sys::Reboot,
+            &[
+                Val::I32(magic1),
+                Val::I32(magic2),
+                Val::U32(cmd),
+                Val::Ptr(arg),
+            ],
+        )
+    }
+
+    fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult {
+        self.record(
+            Sys::Getdents64,
+            &[Val::U32(fd), Val::Ptr(dirent), Val::U32(count)],
+        )
     }
 
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult {

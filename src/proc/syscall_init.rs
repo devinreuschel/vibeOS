@@ -38,7 +38,7 @@ const F_RIP: usize = PAD + offset_of!(UserFrame, rip);
 /// From `orig_rax`, where the 15 GPR pops leave RSP, to the `rsp` slot.
 const ORIG_TO_RSP: usize = offset_of!(UserFrame, rsp) - offset_of!(UserFrame, orig_rax);
 /// The value Linux shows in the `rax` slot at a syscall-entry stop.
-const ENOSYS_RET: i64 = -(vibeos::syscall::ENOSYS as i64);
+const ENOSYS_RET: i64 = -(vibeos::kerror::KError::NoSys.errno() as i64);
 
 const _: () = {
     // 21 words and the pad: RSP is 16-byte aligned at the `call`.
@@ -87,6 +87,10 @@ global_asm!(
         sti
 
         lea rdi, [rsp + {pad}]
+        // The frame holds the user rbp; a null rbp ends the kernel's
+        // frame-pointer chain here, so a backtrace from the body stops at
+        // this entry instead of following the user's (DESIGN §2.5 step 4).
+        xor ebp, ebp
         call vibeos_syscall_stub
         // IF is off from here to sysretq or iretq (AGENTS.md rule 2).
         cli
@@ -747,6 +751,8 @@ pub unsafe extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     // kernel stack, which only this thread's syscall path refers to
     // (this fn's `# Safety`).
     let frame = unsafe { &mut *frame };
+    #[cfg(feature = "kernel_tests")]
+    crate::log::ktest::syscall_walk_probe(frame.rbp);
     let nr = <Arch as SyscallAbi>::nr(frame);
     vibeos::trace!(SyscallEnter, nr, <Arch as SyscallAbi>::arg(frame, 0));
     // Acquire: pairs with the Release store in `set_syscall_handler`.

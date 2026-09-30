@@ -10,7 +10,6 @@ use core::mem::MaybeUninit;
 use vibeos::addr_space::{AsError, MmapError, mmap_request};
 #[cfg(target_arch = "x86_64")]
 use vibeos::arch::x86_64::trap as x86_trap;
-use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
@@ -25,11 +24,7 @@ use vibeos::proc::{
     fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
-use vibeos::syscall::{
-    self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, EMFILE,
-    ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, EPERM, ESRCH, F_GETFD, F_SETFD,
-    Handlers, SysResult, UserFrame,
-};
+use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult, UserFrame};
 use vibeos::thread::ThreadId;
 use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, SyscallAbi, TrapKind};
 use vibeos::vectors;
@@ -44,14 +39,15 @@ use crate::proc::uaccess_init;
 use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::syscall_init;
-use crate::thread_init::{self, Sched, SpawnError};
+use crate::thread_init::{self, Sched};
+use crate::user_init;
 #[cfg(not(feature = "vibefs_crash"))]
-use crate::user_init::Loaded;
-use crate::user_init::{self, LoadError};
+use crate::user_init::{LoadError, Loaded};
 
 mod exec;
 mod exit;
 mod fd;
+mod floor;
 
 pub use exit::write_ps;
 
@@ -63,6 +59,7 @@ use fd::{
     close_all_fds, close_dropped, dup_table, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
     sys_lseek, sys_open, sys_read, sys_write,
 };
+use floor::{sys_fstat, sys_getdents64, sys_nanosleep, sys_reboot};
 
 struct Proc {
     state: ProcState,
@@ -175,8 +172,7 @@ fn with_sched_table<R>(f: impl FnOnce(&mut Sched, &mut Table) -> R) -> R {
     thread_init::with_sched(|s| table_locked(|t| f(s, t)))
 }
 
-fn intern_name(path: &str) -> &'static str {
-    let b = path.as_bytes();
+fn intern_name(b: &[u8]) -> &'static str {
     let mut i = b.len();
     while i > 0 && b[i - 1] != b'/' {
         i -= 1;
@@ -187,48 +183,6 @@ fn intern_name(path: &str) -> &'static str {
         b"tests" => "tests",
         b"hello" => "hello",
         _ => "user",
-    }
-}
-
-fn fs_errno(e: FsError) -> i32 {
-    match e {
-        FsError::NotFound => ENOENT,
-        FsError::Exists => EEXIST,
-        FsError::NotDir => ENOTDIR,
-        FsError::IsDir => EISDIR,
-        FsError::Inval => EINVAL,
-        FsError::NoSpace => EMFILE,
-        FsError::NameTooLong => ENAMETOOLONG,
-        FsError::Busy => EBUSY,
-        FsError::Badf => EBADF,
-        FsError::Io => EIO,
-        FsError::FileTooBig => EFBIG,
-        FsError::NoMem => ENOMEM,
-        FsError::Again => EAGAIN,
-        FsError::Loop | FsError::NotEmpty | FsError::NotSupp => EINVAL,
-    }
-}
-
-fn load_errno(e: LoadError) -> i32 {
-    match e {
-        LoadError::Fs(f) => fs_errno(f),
-        LoadError::Elf(ElfError::ImageTooBig) => ENOMEM,
-        LoadError::Elf(_) => ENOEXEC,
-        LoadError::As(_) => ENOMEM,
-        LoadError::Mem(_) => EFAULT,
-        LoadError::Empty => ENOEXEC,
-        LoadError::NoProc => EAGAIN,
-        LoadError::Spawn(e) => spawn_errno(e),
-        LoadError::NoMem => ENOMEM,
-    }
-}
-
-/// Linux's errno for a thread `fork` or a new process could not get:
-/// `EAGAIN` for a full thread table, `ENOMEM` for a kernel stack.
-fn spawn_errno(e: SpawnError) -> i32 {
-    match e {
-        SpawnError::NoSlot => EAGAIN,
-        SpawnError::NoMemory => ENOMEM,
     }
 }
 
@@ -360,7 +314,7 @@ pub fn start_init() {
             INIT_ENVP_MAX
         );
     }
-    match spawn_elf("/sbin/init", v.argv(), v.envp(), INIT_PID, 0) {
+    match spawn_elf(b"/sbin/init", v.argv(), v.envp(), INIT_PID, 0) {
         Ok(_) => {}
         Err(e) => {
             #[expect(
@@ -377,7 +331,7 @@ pub fn start_init() {
 /// [`wait_kernel`]).
 #[cfg(not(feature = "vibefs_crash"))]
 pub(crate) fn spawn_elf(
-    path: &str,
+    path: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
     prefer: u32,
@@ -396,10 +350,7 @@ pub(crate) fn spawn_elf(
 /// The in-guest tests' ring-3 entry (C-RING3).
 #[cfg(feature = "kernel_tests")]
 pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, LoadError> {
-    let name = match argv.first().map(|a| core::str::from_utf8(a)) {
-        Some(Ok(a)) => intern_name(a),
-        _ => "user",
-    };
+    let name = argv.first().map_or("user", |a| intern_name(a));
     start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
 }
 
@@ -558,6 +509,10 @@ impl Handlers for Ctx<'_> {
         sys_close(fd)
     }
 
+    fn fstat(&mut self, fd: u32, statbuf: u64) -> SysResult {
+        sys_fstat(fd, statbuf)
+    }
+
     fn lseek(&mut self, fd: u32, offset: i64, whence: u32) -> SysResult {
         sys_lseek(fd, offset, whence)
     }
@@ -587,6 +542,10 @@ impl Handlers for Ctx<'_> {
             thread_init::yield_now();
         }
         Ok(0)
+    }
+
+    fn nanosleep(&mut self, rqtp: u64, rmtp: u64) -> SysResult {
+        sys_nanosleep(rqtp, rmtp)
     }
 
     fn dup(&mut self, oldfd: u32) -> SysResult {
@@ -631,6 +590,14 @@ impl Handlers for Ctx<'_> {
 
     fn getppid(&mut self) -> SysResult {
         Ok(with_table(|t| t.get(current_pid()).map(|p| p.ppid).unwrap_or(0)) as usize)
+    }
+
+    fn reboot(&mut self, magic1: i32, magic2: i32, cmd: u32, arg: u64) -> SysResult {
+        sys_reboot(magic1, magic2, cmd, arg)
+    }
+
+    fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult {
+        sys_getdents64(fd, dirent, count)
     }
 
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult {
@@ -721,11 +688,11 @@ fn sys_getpid() -> SysResult {
     Ok(pid as usize)
 }
 
-fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, i32> {
+fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, KError> {
     match uaccess_init::strncpy_from_user(out, va) {
-        Ok(n) if n == out.len() => Err(ENAMETOOLONG),
+        Ok(n) if n == out.len() => Err(KError::NameTooLong),
         Ok(n) => Ok(n),
-        Err(f) => Err(f.errno()),
+        Err(f) => Err(KError::from(f)),
     }
 }
 

@@ -21,6 +21,13 @@ pub use super::x86_64::cpu::{
     user_tls,
 };
 
+// The registers the panic path saves for a CPU that stops (DESIGN §2.5
+// step 1): where it is, its frame pointer, and its flags.
+#[cfg(target_arch = "x86_64")]
+pub use super::x86_64::cpu::{
+    read_rbp as frame_pointer, read_rip as instruction_pointer, rflags as irq_flags,
+};
+
 /// The test and `panic_exit` builds' end of a QEMU run.
 #[cfg(all(
     target_arch = "x86_64",
@@ -28,10 +35,20 @@ pub use super::x86_64::cpu::{
 ))]
 pub use super::x86_64::cpu::qemu_exit;
 
+/// The power-off and reset port module (`power_off`, `restart`), which the
+/// `reboot` syscall and the kernel shell's `poweroff` and `reboot` call.
+#[cfg(target_arch = "x86_64")]
+pub use super::x86_64::power;
+
 /// The per-CPU base register's port module (`PerCpuBase`'s fast path, the
 /// base install and the hardware CPU id).
 #[cfg(target_arch = "x86_64")]
 pub use super::x86_64::percpu;
+
+/// This build's port's `struct stat`, which `fstat` copies out, so `proc`
+/// never names the port.
+#[cfg(target_arch = "x86_64")]
+pub type UserStat = vibeos::arch::x86_64::stat::Stat;
 
 /// The IRQ-off exclusive cell over this build's port (DESIGN §2.3).
 pub type IrqCell<T> = vibeos::cell::IrqCell<T, Arch>;

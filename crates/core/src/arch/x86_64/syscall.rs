@@ -18,6 +18,8 @@ pub mod nr {
     pub const SYS_OPEN: u64 = 2;
     /// `close`.
     pub const SYS_CLOSE: u64 = 3;
+    /// `fstat`.
+    pub const SYS_FSTAT: u64 = 5;
     /// `lseek`.
     pub const SYS_LSEEK: u64 = 8;
     /// `mmap`.
@@ -32,6 +34,8 @@ pub mod nr {
     pub const SYS_DUP: u64 = 32;
     /// `dup2`.
     pub const SYS_DUP2: u64 = 33;
+    /// `nanosleep`.
+    pub const SYS_NANOSLEEP: u64 = 35;
     /// `getpid`.
     pub const SYS_GETPID: u64 = 39;
     /// `fork`.
@@ -48,6 +52,10 @@ pub mod nr {
     pub const SYS_FCNTL: u64 = 72;
     /// `getppid`.
     pub const SYS_GETPPID: u64 = 110;
+    /// `reboot`.
+    pub const SYS_REBOOT: u64 = 169;
+    /// `getdents64`.
+    pub const SYS_GETDENTS64: u64 = 217;
     /// `psinfo`.
     pub const SYS_PSINFO: u64 = 500;
 }
@@ -58,6 +66,7 @@ const SLOTS: [Option<Sys>; 501] = {
     t[nr::SYS_WRITE as usize] = Some(Sys::Write);
     t[nr::SYS_OPEN as usize] = Some(Sys::Open);
     t[nr::SYS_CLOSE as usize] = Some(Sys::Close);
+    t[nr::SYS_FSTAT as usize] = Some(Sys::Fstat);
     t[nr::SYS_LSEEK as usize] = Some(Sys::Lseek);
     t[nr::SYS_MMAP as usize] = Some(Sys::Mmap);
     t[nr::SYS_MUNMAP as usize] = Some(Sys::Munmap);
@@ -65,6 +74,7 @@ const SLOTS: [Option<Sys>; 501] = {
     t[nr::SYS_SCHED_YIELD as usize] = Some(Sys::SchedYield);
     t[nr::SYS_DUP as usize] = Some(Sys::Dup);
     t[nr::SYS_DUP2 as usize] = Some(Sys::Dup2);
+    t[nr::SYS_NANOSLEEP as usize] = Some(Sys::Nanosleep);
     t[nr::SYS_GETPID as usize] = Some(Sys::Getpid);
     t[nr::SYS_FORK as usize] = Some(Sys::Fork);
     t[nr::SYS_EXECVE as usize] = Some(Sys::Execve);
@@ -73,6 +83,8 @@ const SLOTS: [Option<Sys>; 501] = {
     t[nr::SYS_KILL as usize] = Some(Sys::Kill);
     t[nr::SYS_FCNTL as usize] = Some(Sys::Fcntl);
     t[nr::SYS_GETPPID as usize] = Some(Sys::Getppid);
+    t[nr::SYS_REBOOT as usize] = Some(Sys::Reboot);
+    t[nr::SYS_GETDENTS64 as usize] = Some(Sys::Getdents64);
     t[nr::SYS_PSINFO as usize] = Some(Sys::Psinfo);
     t
 };
@@ -87,6 +99,7 @@ pub fn call<H: Handlers + ?Sized>(h: &mut H, sys: Sys, regs: &[u64; 6]) -> SysRe
         Sys::Write => h.write(regs[0] as u32, regs[1], regs[2] as usize),
         Sys::Open => h.open(regs[0], regs[1] as i32, regs[2] as u16),
         Sys::Close => h.close(regs[0] as u32),
+        Sys::Fstat => h.fstat(regs[0] as u32, regs[1]),
         Sys::Lseek => h.lseek(regs[0] as u32, regs[1] as i64, regs[2] as u32),
         Sys::Mmap => h.mmap(regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]),
         Sys::Munmap => h.munmap(regs[0], regs[1] as usize),
@@ -94,6 +107,7 @@ pub fn call<H: Handlers + ?Sized>(h: &mut H, sys: Sys, regs: &[u64; 6]) -> SysRe
         Sys::SchedYield => h.sched_yield(),
         Sys::Dup => h.dup(regs[0] as u32),
         Sys::Dup2 => h.dup2(regs[0] as u32, regs[1] as u32),
+        Sys::Nanosleep => h.nanosleep(regs[0], regs[1]),
         Sys::Getpid => h.getpid(),
         Sys::Fork => h.fork(),
         Sys::Execve => h.execve(regs[0], regs[1], regs[2]),
@@ -102,6 +116,8 @@ pub fn call<H: Handlers + ?Sized>(h: &mut H, sys: Sys, regs: &[u64; 6]) -> SysRe
         Sys::Kill => h.kill(regs[0] as i32, regs[1] as i32),
         Sys::Fcntl => h.fcntl(regs[0] as u32, regs[1] as u32, regs[2]),
         Sys::Getppid => h.getppid(),
+        Sys::Reboot => h.reboot(regs[0] as i32, regs[1] as i32, regs[2] as u32, regs[3]),
+        Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
         Sys::Psinfo => h.psinfo(regs[0], regs[1] as usize),
     }
 }
@@ -111,6 +127,6 @@ pub fn call<H: Handlers + ?Sized>(h: &mut H, sys: Sys, regs: &[u64; 6]) -> SysRe
 pub fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
     match TABLE.lookup(raw_nr) {
         Some(sys) => call(h, sys, regs),
-        None => Err(KError::ENOSYS),
+        None => Err(KError::NoSys),
     }
 }

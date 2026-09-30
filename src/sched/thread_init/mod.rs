@@ -130,6 +130,17 @@ pub enum SpawnError {
     NoMemory,
 }
 
+/// Linux's errno for a thread `fork` or a new process could not get: `EAGAIN` for a full thread
+/// table, `ENOMEM` for a kernel stack.
+impl From<SpawnError> for vibeos::kerror::KError {
+    fn from(e: SpawnError) -> Self {
+        match e {
+            SpawnError::NoSlot => Self::Again,
+            SpawnError::NoMemory => Self::NoMem,
+        }
+    }
+}
+
 impl SpawnError {
     pub fn as_str(self) -> &'static str {
         match self {

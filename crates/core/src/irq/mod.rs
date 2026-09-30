@@ -5,6 +5,7 @@
 //! Phase 19 affinity rebalance share one table.
 
 pub mod ipi;
+pub mod stop;
 
 use crate::vectors;
 
@@ -25,6 +26,18 @@ pub enum IrqError {
     BadCpu,
     Busy,
     NoRoute,
+}
+
+/// An IRQ request's errno: no vector left is `ENOSPC`, as Linux's vector matrix returns.
+impl From<IrqError> for crate::kerror::KError {
+    fn from(e: IrqError) -> Self {
+        match e {
+            IrqError::Exhausted => Self::NoSpc,
+            IrqError::InIrq | IrqError::BadVector | IrqError::BadCpu => Self::Inval,
+            IrqError::Busy => Self::Busy,
+            IrqError::NoRoute => Self::NoDev,
+        }
+    }
 }
 
 impl IrqError {

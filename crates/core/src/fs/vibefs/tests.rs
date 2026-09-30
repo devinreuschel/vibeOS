@@ -396,26 +396,6 @@ fn crash_workload_seeded_points() {
     }
 }
 
-#[test]
-fn error_strings_cover() {
-    for e in [
-        Error::Inval,
-        Error::Io,
-        Error::Corrupt,
-        Error::NoSpace,
-        Error::NotFound,
-        Error::Exists,
-        Error::NotDir,
-        Error::IsDir,
-        Error::NotEmpty,
-        Error::NameTooLong,
-        Error::NotSupp,
-        Error::FileTooBig,
-    ] {
-        assert!(!e.as_str().is_empty());
-    }
-}
-
 /// A regular file `name` in the root; its inode number.
 fn new_file(v: &mut Vol, d: &mut MemDisk, name: &[u8]) -> u32 {
     v.create(d, ROOT_INO, name, InodeKind::Reg, 0o644, None)

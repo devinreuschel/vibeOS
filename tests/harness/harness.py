@@ -2198,8 +2198,12 @@ def boot_contract_markers(
     accel: str | None = None,
     gp: bool = False,
     smp: int | None = None,
+    panic_variant: str = "",
 ) -> list[Marker]:
-    """Live e2e contract. Pins the LAPIC timer mode and SMP AP count."""
+    """Live e2e contract. Pins the LAPIC timer mode and SMP AP count.
+
+    `panic_variant` (`nest` or `stop`) selects that panic-path build's contract,
+    which ends at its armed line (`VIBEOS_PANIC_VARIANT`, run_e2e)."""
     if smp is None:
         smp = env_int("VIBEOS_SMP", DEFAULT_SMP)
     cfg = registry.BootConfig(
@@ -2208,6 +2212,8 @@ def boot_contract_markers(
         lapic_mode=expected_lapic_mode(cpu=cpu, hpet=hpet, accel=accel),
         clocksource=expected_clocksource(hpet=hpet, accel=accel),
         gp_test=gp,
+        panic_nest_test=panic_variant == "nest",
+        panic_stop_test=panic_variant == "stop",
     )
     return contract_markers(cfg)
 

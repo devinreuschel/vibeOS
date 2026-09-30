@@ -20,7 +20,8 @@
 #            is in this order.
 #   name     contract rows only: the name the harness reports the marker by.
 #   when     contract rows only, optional: terms that must all hold, from
-#            `hpet`, `pit`, `smp>1`, `gp_test` and `panic_test`, each
+#            `hpet`, `pit`, `smp>1`, `gp_test`, `panic_test`,
+#            `panic_nest_test` and `panic_stop_test`, each
 #            optionally prefixed with `!`. Absent means every configuration.
 #   repeat   contract rows only, optional: `"per_ap"`. Consecutive per-AP
 #            rows form a group that repeats for each AP `i` in `1..N`, with
@@ -1070,7 +1071,7 @@ source = "user"
 section = "§9.8"
 order = 330
 name = "shell_ready"
-when = ["!gp_test", "!panic_test"]
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test"]
 
 # `/bin/tests`' lines.
 [[marker]]
@@ -1090,7 +1091,7 @@ source = "user"
 section = "§9.8"
 order = 320
 name = "user_tests_ok"
-when = ["!gp_test", "!panic_test"]
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test"]
 
 [[marker]]
 text = "user: tests fail"
@@ -1237,6 +1238,24 @@ arch = "both"
 source = "kernel"
 section = "§10.3"
 
+# §10.5 User runtime
+
+# The `reboot` syscall's line before it powers the machine off or restarts
+# it (`make test-e2e-power`).
+[[marker]]
+text = "vibeOS: reboot: power off"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: reboot: restart"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.5"
+
 # §10.6 Entry paths and user memory
 
 # The AP trampoline page `boot::capture` chose from the memory map, before
@@ -1287,6 +1306,66 @@ section = "§10.7"
 order = 230
 name = "smp_tsc_skew"
 when = ["smp>1", "!panic_test"]
+
+# The panic-path variants' trips (TESTING.md §8.3), after `/hello` where
+# the gp-test trips; each build's contract ends at its armed line.
+[[marker]]
+text = "vibeOS: boot: panic-nest armed"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+order = 340
+name = "panic_nest_armed"
+when = ["panic_nest_test", "!panic_test"]
+
+[[marker]]
+text = "vibeOS: boot: panic-stop armed"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+order = 350
+name = "panic_stop_armed"
+when = ["panic_stop_test", "!panic_test"]
+
+# The panic-stop build's CPU 2 prints these until the dump stops it.
+[[marker]]
+text = "vibeOS: panic_stop: line <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+# The dump's report on each other online CPU (DESIGN §2.5 step 1), and the
+# panic-stop build's owner line after its own NMI came back.
+[[marker]]
+text = "vibeOS: panic: cpu <n> stopped (<how>)"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+[[marker]]
+text = "vibeOS: panic: cpu <n> not stopped"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+[[marker]]
+text = "vibeOS: panic: cpu <n> regs: <text>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+[[marker]]
+text = "vibeOS: panic_stop: owner nmi returned"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.7"
 
 # §10.12 Drivers and devices
 

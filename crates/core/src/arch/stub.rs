@@ -157,6 +157,14 @@ pub struct Context {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IpiRefused;
 
+/// A refused IPI is a delivery failure, an I/O error, as `IpiError`'s
+/// timeout.
+impl From<IpiRefused> for crate::kerror::KError {
+    fn from(_: IpiRefused) -> Self {
+        Self::Io
+    }
+}
+
 /// `InterruptMask::Saved` of the stub. Restores on drop, as x86_64's
 /// `InterruptGuard` does.
 #[must_use]

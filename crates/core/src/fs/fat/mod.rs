@@ -5,15 +5,16 @@
 //! copies before a dirent may point at the clusters. `sync` uses disk
 //! [`Disk::flush`], not a barrier.
 //!
-//! FAT has no POSIX perms/symlinks/hard links: those ops return
-//! [`FatError::NotSupp`]. Do not fake success.
+//! FAT has no POSIX perms, symlinks, device nodes or hard links: making
+//! one returns [`FsError::Perm`](super::FsError::Perm), as Linux's vfat
+//! does. Do not fake success.
 //!
 //! A byte parser (ROADMAP §10.1): every index into disk data is a checked
 //! access that returns [`FatError`], and all arithmetic is `checked_*`.
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use crate::fs::{FsError, InodeKind};
+use crate::fs::InodeKind;
 
 mod chain;
 mod dirent;
@@ -48,64 +49,9 @@ const LFN_CHARS: usize = 13;
 /// A directory holds at most 65,536 entries.
 const MAX_DIR_BYTES: u32 = 65_536 * ENT_U32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum FatError {
-    Inval,
-    Io,
-    Corrupt,
-    NoSpace,
-    NotFound,
-    Exists,
-    NotDir,
-    IsDir,
-    NotEmpty,
-    NameTooLong,
-    NotSupp,
-    /// A kernel heap allocation below the volume failed.
-    NoMem,
-}
-
-impl FatError {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FatError::Inval => "inval",
-            FatError::Io => "io",
-            FatError::Corrupt => "corrupt",
-            FatError::NoSpace => "no space",
-            FatError::NotFound => "not found",
-            FatError::Exists => "exists",
-            FatError::NotDir => "not dir",
-            FatError::IsDir => "is dir",
-            FatError::NotEmpty => "not empty",
-            FatError::NameTooLong => "name too long",
-            FatError::NotSupp => "not supp",
-            FatError::NoMem => "no memory",
-        }
-    }
-
-    pub fn to_fs(self) -> FsError {
-        match self {
-            FatError::Inval | FatError::Corrupt => FsError::Inval,
-            FatError::Io => FsError::Io,
-            FatError::NoSpace => FsError::NoSpace,
-            FatError::NotFound => FsError::NotFound,
-            FatError::Exists => FsError::Exists,
-            FatError::NotDir => FsError::NotDir,
-            FatError::IsDir => FsError::IsDir,
-            FatError::NotEmpty => FsError::NotEmpty,
-            FatError::NameTooLong => FsError::NameTooLong,
-            FatError::NotSupp => FsError::NotSupp,
-            FatError::NoMem => FsError::NoMem,
-        }
-    }
-}
-
-impl From<FatError> for FsError {
-    fn from(e: FatError) -> Self {
-        e.to_fs()
-    }
-}
+/// FAT's errors are the filesystem's (E2, F083): one type, one `From` into
+/// `KError`.
+pub type FatError = super::FsError;
 
 /// Byte-oriented FAT sectors. `flush` is a durable write (DESIGN §10.2).
 pub trait Disk {
@@ -487,4 +433,4 @@ fn name_is_dotdot(n: &[u8]) -> bool {
     reason = "host tests: a panic fails the test, not the kernel"
 )]
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -37,6 +37,8 @@ endif
 ISO              := build/vibeos.iso
 ISO_PANIC        := build/vibeos-panic.iso
 ISO_GP           := build/vibeos-gp.iso
+ISO_PANIC_NEST   := build/vibeos-panic-nest.iso
+ISO_PANIC_STOP   := build/vibeos-panic-stop.iso
 ISO_KTEST        := build/vibeos-ktest.iso
 ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
 
@@ -132,6 +134,10 @@ $(eval $(call KERNEL_VARIANT,default,,$(ISO)))
 $(eval $(call KERNEL_VARIANT,panic,--features panic_test --features panic_exit,$(ISO_PANIC)))
 # gp: deliberate #GP after IDT
 $(eval $(call KERNEL_VARIANT,gp,--features gp_test --features panic_exit,$(ISO_GP)))
+# panic-nest: an `irq_nest` underflow after boot, dumped without a guard
+$(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test --features panic_exit,$(ISO_PANIC_NEST)))
+# panic-stop: two CPUs panic at -smp 5; the dump stops the other three
+$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test --features panic_exit,$(ISO_PANIC_STOP)))
 # ktest: in-guest registry, never packaged as production
 $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
 # vibefs-crash: write-loop kernel for QEMU-kill fsck
@@ -182,7 +188,7 @@ build/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
 endif
 
 .PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
-        test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
+        test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi
 
@@ -209,6 +215,8 @@ help:
 	  '  test-e2e              boot contract on the production ISO' \
 	  '  test-e2e-uefi         same, UEFI firmware from the probe on pflash; none installed: skip (fail under CI)' \
 	  '  test-e2e-panic        panic-test dump contract' \
+	  '  test-e2e-panic-nest   irq_nest underflow: one dump, no reentered' \
+	  '  test-e2e-panic-stop   -smp 5: the dump stops every other CPU' \
 	  '  test-e2e-gp           #GP dump+halt contract' \
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
@@ -445,7 +453,7 @@ endif
 # every host tool a `test-*` recipe lists. Recursive `=`, so it follows the
 # variables' paths. The tar keeps the executable bit, which upload-artifact
 # drops, and holds paths relative to $(CURDIR).
-PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
 	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
 
 prebuilt: $(PREBUILT_FILES)
@@ -482,6 +490,16 @@ test-e2e-uefi: $(ISO)
 test-e2e-panic: $(ISO_PANIC)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
 
+# An `irq_nest` underflow after a full boot: the dump writes through
+# `write_owner` with no guard, so it prints once (ROADMAP §10.7, F071).
+test-e2e-panic-nest: $(ISO_PANIC_NEST)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC_NEST) VIBEOS_PANIC_VARIANT=nest python3 tests/harness/run_e2e.py
+
+# Two CPUs panic at once at -smp 5 while three others print, wait on a
+# lock, and spin with IF=0: the dump owner stops each (ROADMAP §10.7, F135).
+test-e2e-panic-stop: $(ISO_PANIC_STOP)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC_STOP) VIBEOS_SMP=5 VIBEOS_PANIC_VARIANT=stop python3 tests/harness/run_e2e.py
+
 test-e2e-gp: $(ISO_GP)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_GP) VIBEOS_GP_TEST=1 python3 tests/harness/run_e2e.py
 
@@ -502,6 +520,12 @@ test-e2e-highmem: $(ISO)
 # the syscall trace on; the echo shows limine.conf's words, then the harness's.
 test-e2e-strace: $(ISO)
 	VIBEOS_TIER=test-e2e-strace VIBEOS_ISO=$(ISO) VIBEOS_CMDLINE=vibeos.strace=1 python3 -c 'from tests.harness.run_e2e import strace_main; raise SystemExit(strace_main())'
+
+# Power-off and restart through the `reboot` syscall (ROADMAP §10.5): one
+# kernel_tests boot per opt-in row, each passing when the row's line prints
+# and QEMU exits by itself with status 0.
+test-e2e-power: $(ISO_KTEST)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_power.py
 
 test-kernel: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py --hpet-off
@@ -531,7 +555,7 @@ test-vibefs-crash-plants: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NB
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py \
 	    --plants leak,early_super
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-e2e-power test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)

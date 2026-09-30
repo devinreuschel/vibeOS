@@ -310,7 +310,7 @@ impl InodeOps for FatOps {
         let is_dir = match kind {
             InodeKind::Reg => false,
             InodeKind::Dir => true,
-            InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
+            InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => return Err(FsError::Perm),
         };
         with_vol(vol_of(cx)?, |v, d| {
             let (w, _) = words(dir)?;
@@ -363,7 +363,7 @@ impl InodeOps for FatOps {
                 crate::fs::ktest::fat_read_hook();
             }
             let (w, _) = words(ino)?;
-            Ok(v.read_ino(d, &w, off, buf)?)
+            v.read_ino(d, &w, off, buf)
         })
     }
 
@@ -393,7 +393,7 @@ impl InodeOps for FatOps {
             let (mut w, linked) = words(ino)?;
             let r = v.truncate_ino(d, &mut w, linked, size);
             store(ino, &w)?;
-            Ok(r?)
+            r
         })
     }
 
@@ -435,7 +435,7 @@ impl InodeOps for FatOps {
             if linked {
                 return Ok(());
             }
-            Ok(v.free_chain(d, w.first_clu)?)
+            v.free_chain(d, w.first_clu)
         })
     }
 }
@@ -463,7 +463,7 @@ fn write_at(
         let (mut w, linked) = words(ino)?;
         let r = v.write_ino(d, &mut w, linked, off, append, buf);
         store(ino, &w)?;
-        Ok(r?)
+        r
     })
 }
 
@@ -666,13 +666,13 @@ pub fn ktest_dir_has(vol: &Instance, dirs: &[&[u8]], name: &[u8]) -> Result<bool
         match fv.lookup(d, clu, name) {
             Ok(_) => Ok(true),
             Err(FatError::NotFound) => Ok(false),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e),
         }
     })
 }
 
 pub fn sync(vol: &FatVolume) -> Result<(), FsError> {
-    with_vol(vol, |v, d| Ok(v.sync(d)?))
+    with_vol(vol, |v, d| v.sync(d))
 }
 
 pub fn df(vol: &FatVolume) -> Result<(FsType, u64, u64, u32), FsError> {

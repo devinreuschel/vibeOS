@@ -234,6 +234,20 @@ pub enum MapError {
     NonCanonical,
 }
 
+/// A mapping request's errno: Linux's for each condition.
+impl From<MapError> for crate::kerror::KError {
+    fn from(e: MapError) -> Self {
+        match e {
+            MapError::OutOfFrames => Self::NoMem,
+            MapError::AlreadyMapped => Self::Exist,
+            MapError::Misaligned
+            | MapError::NotMapped
+            | MapError::PageSizeMismatch
+            | MapError::NonCanonical => Self::Inval,
+        }
+    }
+}
+
 /// Whether `map_page` may overwrite an existing present leaf.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MapMode {

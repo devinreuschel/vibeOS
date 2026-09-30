@@ -565,8 +565,10 @@ fn ops_keyed_backend_via_super_ops() {
     assert_eq!(with_store(id, |s| s.evicts), 1);
     v.mkdir(None, "/n", 0o755).unwrap();
     v.mount(None, "/n", &NoOpsFs).unwrap();
-    assert_eq!(v.stat(None, "/n/x").unwrap_err(), FsError::NotSupp);
-    assert_eq!(v.creat(None, "/n/y", 0o644).unwrap_err(), FsError::NotSupp);
+    // A superblock without ops runs `NoOps`: each operation is missing,
+    // with Linux's errno for it.
+    assert_eq!(v.stat(None, "/n/x").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.creat(None, "/n/y", 0o644).unwrap_err(), FsError::Acces);
     assert_eq!(v.stat(None, "/n").unwrap().kind, InodeKind::Dir);
     assert_dcache_sound(&v);
 }
@@ -805,6 +807,65 @@ fn names_of<L: Guarded<Vfs>>(api: &FileApi<'_, L>, dir: &[u8]) -> Vec<Vec<u8>> {
 }
 
 #[test]
+fn readdir_from_resumes_at_a_cookie() {
+    let vfs = locked_vfs();
+    let api = FileApi::new(vfs);
+    for n in [b"/a".as_slice(), b"/b", b"/c"] {
+        api.mkdir(None, n, 0o755).unwrap();
+    }
+    let f = api
+        .open(None, b"/", OpenFlags::from_bits(O_RDONLY | O_DIRECTORY), 0)
+        .unwrap();
+    // Every entry with the cookie after it, from 0.
+    let mut all = Vec::new();
+    let end = api
+        .readdir_from(&f, 0, &mut |d, next| {
+            all.push((d.name.as_bytes().to_vec(), next));
+            true
+        })
+        .unwrap();
+    let names: Vec<&[u8]> = all.iter().map(|(n, _)| n.as_slice()).collect();
+    assert_eq!(&names[..2], &[b".".as_slice(), b".."]);
+    assert_eq!(all.len(), 2 + 4, "`.`, `..`, blk, a, b, c");
+    assert_eq!(
+        end,
+        all.last().unwrap().1,
+        "the end cookie is the last next"
+    );
+    // Refusing an entry returns its own cookie, so a resume starts there.
+    let mut seen = 0;
+    let at = api
+        .readdir_from(&f, 0, &mut |_, _| {
+            seen += 1;
+            seen <= 3
+        })
+        .unwrap();
+    assert_eq!(at, all[2].1, "the fourth entry's cookie");
+    let mut rest = Vec::new();
+    let end2 = api
+        .readdir_from(&f, at, &mut |d, _| {
+            rest.push(d.name.as_bytes().to_vec());
+            true
+        })
+        .unwrap();
+    let want: Vec<Vec<u8>> = all[3..].iter().map(|(n, _)| n.clone()).collect();
+    assert_eq!(rest, want);
+    assert_eq!(end2, end);
+    // Past the end: nothing, and the same cookie back.
+    let mut none = 0;
+    assert_eq!(
+        api.readdir_from(&f, end, &mut |_, _| {
+            none += 1;
+            true
+        })
+        .unwrap(),
+        end
+    );
+    assert_eq!(none, 0);
+    api.close(f).unwrap();
+}
+
+#[test]
 fn backend_ops_run_with_vfs_lock_dropped() {
     let vfs = locked_vfs();
     let fs: &'static LockedFs = std::boxed::Box::leak(std::boxed::Box::new(LockedFs {
@@ -937,4 +998,311 @@ fn file_ref_generation_rejects_stale_id() {
     assert_eq!(api.seek(&b, SeekFrom::Current(0)).unwrap(), 0);
     api.close(b).unwrap();
     assert!(vfs.lock().unwrap().file_table().iter().all(|f| !f.0));
+}
+
+/// FAT's and vibefs's errors are `FsError` itself (E2, F083): each binding
+/// compiles only while the aliases name the one type, and both convert to
+/// `KError` through its one `From`.
+#[test]
+fn disk_errors_are_fs_error() {
+    let f: FsError = crate::fs::fat::FatError::Corrupt;
+    let v: FsError = crate::fs::vibefs::Error::Corrupt;
+    assert_eq!(f, v);
+    assert_eq!(f.as_str(), "corrupt");
+    assert_eq!(
+        crate::kerror::KError::from(f),
+        crate::kerror::KError::from(FsError::Corrupt)
+    );
+    assert_eq!(
+        crate::kerror::KError::from(v).errno(),
+        crate::kerror::KError::from(FsError::Corrupt).errno()
+    );
+}
+
+/// One test per `FsError` variant: its errno through the E2 table is
+/// Linux's for the condition (ROADMAP §10.4, E2, F083), and it names
+/// itself.
+mod fs_error_errno_per_variant {
+    use crate::fs::FsError;
+    use crate::kerror::KError;
+
+    macro_rules! per_variant {
+        ($($name:ident: $v:ident => $errno:literal,)*) => {
+            $(
+                #[test]
+                fn $name() {
+                    assert_eq!(KError::from(FsError::$v).errno(), $errno);
+                    assert!(!FsError::$v.as_str().is_empty());
+                }
+            )*
+
+            /// Each variant and Linux's errno for it, for
+            /// [`super::fs_error_errno_per_variant`].
+            pub(super) const ROWS: &[(FsError, i32)] = &[$((FsError::$v, $errno)),*];
+
+            /// Every variant has its test above: a new variant fails to
+            /// compile here until it gets one.
+            #[test]
+            fn every_variant_listed() {
+                for e in [$(FsError::$v),*] {
+                    match e {
+                        $(FsError::$v => {})*
+                    }
+                }
+            }
+        };
+    }
+
+    per_variant! {
+        not_found: NotFound => 2,
+        exists: Exists => 17,
+        not_dir: NotDir => 20,
+        is_dir: IsDir => 21,
+        inval: Inval => 22,
+        no_space: NoSpace => 28,
+        loop_: Loop => 40,
+        name_too_long: NameTooLong => 36,
+        not_empty: NotEmpty => 39,
+        busy: Busy => 16,
+        badf: Badf => 9,
+        not_supp: NotSupp => 95,
+        io: Io => 5,
+        file_too_big: FileTooBig => 27,
+        no_mem: NoMem => 12,
+        again: Again => 11,
+        corrupt: Corrupt => 5,
+        nfile: NFile => 23,
+        perm: Perm => 1,
+        spipe: SPipe => 29,
+        xdev: XDev => 18,
+        acces: Acces => 13,
+    }
+}
+
+/// The whole table at once: every `FsError` variant's errno is Linux's
+/// (the per-variant tests above name each one).
+#[test]
+fn fs_error_errno_per_variant() {
+    use crate::kerror::KError;
+    for &(e, want) in fs_error_errno_per_variant::ROWS {
+        assert_eq!(KError::from(e).errno(), want, "{e:?}");
+    }
+}
+
+/// Each E2 condition, driven through a real backend, returns Linux's errno
+/// (ROADMAP §9.3, §10.4, F052, F057, F083).
+#[test]
+fn fs_error_conditions_errno() {
+    use crate::fs::{fat, vibefs};
+    use crate::kerror::KError;
+    let errno = |e: FsError| KError::from(e).errno();
+
+    // A small FAT volume, written until a write fails: ENOSPC.
+    let mut img = vec![0u8; 64 * 1024];
+    fat::mkfs(&mut img, b"FULL").unwrap();
+    {
+        let mut d = fat::MemDisk::new(&mut img, fat::SEC as u32).unwrap();
+        let mut v = fat::FatVol::mount(&mut d).unwrap();
+        let node = v.create(&mut d, v.info.root_clus, b"fill", false).unwrap();
+        let mut n = fat::FatInode::of_node(&node);
+        let chunk = [0x5au8; 4096];
+        let mut off = 0u64;
+        let e = loop {
+            match v.write_ino(&mut d, &mut n, true, off, false, &chunk) {
+                Ok((k, _)) => off += k as u64,
+                Err(e) => break e,
+            }
+            assert!(off <= 64 * 1024, "the volume never filled");
+        };
+        assert_eq!(errno(e), 28, "{e:?}");
+        // A 2-byte write at `u32::MAX - 1` crosses FAT's 4 GiB file limit:
+        // EFBIG.
+        let e = v
+            .write_ino(&mut d, &mut n, true, u64::from(u32::MAX - 1), false, b"xy")
+            .unwrap_err();
+        assert_eq!(errno(e), 27, "{e:?}");
+    }
+
+    // The same on vibefs: ENOSPC.
+    let mut img = vec![0u8; 256 * 1024];
+    {
+        let mut d = vibefs::MemDisk::new(&mut img).unwrap();
+        let mut v = vibefs::Vol::new();
+        vibefs::mkfs(&mut d, b"full", &mut v).unwrap();
+        v.create(
+            &mut d,
+            vibefs::ROOT_INO,
+            b"fill",
+            InodeKind::Reg,
+            0o644,
+            None,
+        )
+        .unwrap();
+        let ino = v.lookup(&mut d, vibefs::ROOT_INO, b"fill").unwrap().ino;
+        let chunk = [0xa5u8; 4096];
+        let mut off = 0u64;
+        let e = loop {
+            match v.write(&mut d, ino, off, &chunk) {
+                Ok(k) => off += k as u64,
+                Err(e) => break e,
+            }
+            assert!(off <= 256 * 1024, "the volume never filled");
+        };
+        assert_eq!(errno(e), 28, "{e:?}");
+    }
+
+    // `open` on a host `Vfs` whose open-file table is full: ENFILE.
+    let mut v = ram();
+    let mut open = Vec::new();
+    let e = loop {
+        match v.open_path(None, "/f", O_RDWR | O_CREAT, 0o644) {
+            Ok(f) => open.push(f),
+            Err(e) => break e,
+        }
+        assert!(open.len() <= crate::fs::MAX_FILES, "the table never filled");
+    };
+    assert_eq!(errno(e), 23, "{e:?}");
+    for f in open {
+        v.close(f).unwrap();
+    }
+
+    // A vibefs read across an extent whose CRC fails: EIO.
+    let mut img = vec![0u8; 256 * 1024];
+    {
+        let mut d = vibefs::MemDisk::new(&mut img).unwrap();
+        let mut v = vibefs::Vol::new();
+        vibefs::mkfs(&mut d, b"crc", &mut v).unwrap();
+        v.create(&mut d, vibefs::ROOT_INO, b"x", InodeKind::Reg, 0o644, None)
+            .unwrap();
+        let ino = v.lookup(&mut d, vibefs::ROOT_INO, b"x").unwrap().ino;
+        v.write(&mut d, ino, 0, &[7u8; 200]).unwrap();
+        v.sync(&mut d).unwrap();
+    }
+    let (block, meta, sup) = (vibefs::BLOCK, vibefs::MAGIC_META, vibefs::MAGIC_SUPER);
+    let blk = (4..img.len() / block)
+        .find(|b| {
+            let m = u32::from_le_bytes(img[b * block..b * block + 4].try_into().unwrap());
+            m != meta && m != sup
+        })
+        .unwrap();
+    img[blk * block] ^= 0xff;
+    {
+        let mut d = vibefs::MemDisk::new(&mut img).unwrap();
+        let mut v = vibefs::Vol::new();
+        vibefs::mount(&mut d, &mut v).unwrap();
+        let ino = v.lookup(&mut d, vibefs::ROOT_INO, b"x").unwrap().ino;
+        let mut out = [0u8; 200];
+        let e = v.read(&mut d, ino, 0, &mut out).unwrap_err();
+        assert_eq!(errno(e), 5, "{e:?}");
+    }
+}
+
+/// An operation a filesystem or an object does not support returns the
+/// errno Linux returns for that operation (ROADMAP §10.4, A3, E2, F083):
+/// each `InodeOps` default, on `NoOps`; FAT's `symlink` and `link`; a
+/// `rename` and a `link` across mounts; a write of an object that cannot be
+/// written; `readlink` of a regular file; and `lseek` of `/dev/tty`.
+#[test]
+fn inode_ops_unsupported_errno() {
+    use crate::kerror::KError;
+    let errno = |e: FsError| KError::from(e).errno();
+
+    // Each default, on a filesystem that overrides none.
+    let ops: &dyn InodeOps = &NoOps;
+    let mut private = [0u64; 2];
+    let mut cx = OpCx {
+        sb: 0,
+        fstype: FsType::Ram,
+        private: &mut private,
+        now: 0,
+        vol: None,
+    };
+    let (mut a, mut b) = (Inode::EMPTY, Inode::EMPTY);
+    let mut buf = [0u8; 4];
+    let mut de = Dirent::EMPTY;
+    assert_eq!(errno(ops.lookup(&mut cx, &a, b"x").unwrap_err()), 20);
+    for (kind, want) in [
+        (InodeKind::Reg, 13),
+        (InodeKind::Dir, 1),
+        (InodeKind::Lnk, 1),
+        (InodeKind::Chr, 1),
+        (InodeKind::Blk, 1),
+    ] {
+        let e = ops
+            .create(&mut cx, &mut a, b"x", kind, 0o644, Some(b"t"))
+            .unwrap_err();
+        assert_eq!(errno(e), want, "{kind:?}");
+    }
+    assert_eq!(errno(ops.unlink(&mut cx, &mut a, b"x").unwrap_err()), 1);
+    assert_eq!(errno(ops.rmdir(&mut cx, &mut a, b"x").unwrap_err()), 1);
+    assert_eq!(
+        errno(ops.link(&mut cx, &mut a, b"x", &mut b).unwrap_err()),
+        1
+    );
+    let e = ops.rename(&mut cx, &mut a, b"x", &mut b, b"y").unwrap_err();
+    assert_eq!(errno(e), 1);
+    assert_eq!(
+        errno(ops.read(&mut cx, &mut a, 0, &mut buf).unwrap_err()),
+        22
+    );
+    assert_eq!(errno(ops.write(&mut cx, &mut a, 0, b"x").unwrap_err()), 22);
+    assert_eq!(
+        errno(ops.write_append(&mut cx, &mut a, b"x").unwrap_err()),
+        22
+    );
+    assert_eq!(errno(ops.truncate(&mut cx, &mut a, 0).unwrap_err()), 22);
+    assert_eq!(errno(ops.readdir(&mut cx, &a, 0, &mut de).unwrap_err()), 20);
+    assert_eq!(errno(ops.readlink(&mut cx, &a, &mut buf).unwrap_err()), 22);
+    assert_eq!(ops.getattr(&mut cx, &mut a), Ok(()));
+    assert_eq!(ops.sync(&mut cx), Ok(()));
+    assert_eq!(ops.evict(&mut cx, &a), Ok(()));
+    assert_eq!(ops.check_seek(&mut cx, &a), Ok(()));
+    ops.kill_sb(&mut cx);
+
+    // FAT's `symlink` and `link`, through the core adapter: `EPERM`, as on
+    // Linux's vfat.
+    let mut img = vec![0u8; 64 * 1024];
+    crate::fs::fat::mkfs(&mut img, b"PERM").unwrap();
+    {
+        let mut d = crate::fs::fat::MemDisk::new(&mut img, crate::fs::fat::SEC as u32).unwrap();
+        let mut fv = crate::fs::fat::FatVol::mount(&mut d).unwrap();
+        fv.create(&mut d, fv.info.root_clus, b"a", false).unwrap();
+        fv.sync(&mut d).unwrap();
+    }
+    let mut v = ram();
+    v.mkdir(None, "/fat", 0o755).unwrap();
+    v.mount(None, "/fat", crate::fs::fat::tests::FatHostOps::new(img))
+        .unwrap();
+    assert_eq!(errno(v.symlink(None, "/fat/s", "/x").unwrap_err()), 1);
+    assert_eq!(errno(v.link(None, "/fat/a", "/fat/b").unwrap_err()), 1);
+
+    // Across mounts, ramfs to tmpfs and back: `EXDEV`.
+    let (mut v, _k) = crate::fs::kernfs::tests::boot();
+    v.creat(None, "/r", 0o644).unwrap();
+    v.creat(None, "/tmp/t", 0o644).unwrap();
+    assert_eq!(errno(v.rename(None, "/r", "/tmp/r2").unwrap_err()), 18);
+    assert_eq!(errno(v.link(None, "/r", "/tmp/r3").unwrap_err()), 18);
+    assert_eq!(errno(v.rename(None, "/tmp/t", "/t2").unwrap_err()), 18);
+
+    // A write of an object that cannot be written: `EINVAL`.
+    let f = v.open_path(None, "/proc/1/cmdline", O_RDWR, 0).unwrap();
+    assert_eq!(errno(v.write(&f, b"x").unwrap_err()), 22);
+    v.close(f).unwrap();
+
+    // `readlink` of a regular file, on ramfs and on tmpfs: `EINVAL`.
+    for path in ["/r", "/tmp/t"] {
+        let p = v.resolve(None, path, true).unwrap();
+        let mut c = v.call(v.islot(p).unwrap()).unwrap();
+        let r = c.run(|o, cx, n| o.readlink(cx, n, &mut buf));
+        v.finish(c, false);
+        assert_eq!(errno(r.unwrap_err()), 22, "{path}");
+    }
+
+    // `lseek` of `/dev/tty`: `ESPIPE`; `/dev/null` seeks.
+    let f = v.open_path(None, "/dev/tty", O_RDWR, 0).unwrap();
+    assert_eq!(errno(v.seek(&f, 0, SEEK_CUR).unwrap_err()), 29);
+    v.close(f).unwrap();
+    let f = v.open_path(None, "/dev/null", O_RDWR, 0).unwrap();
+    assert_eq!(v.seek(&f, 0, SEEK_CUR), Ok(0));
+    v.close(f).unwrap();
 }

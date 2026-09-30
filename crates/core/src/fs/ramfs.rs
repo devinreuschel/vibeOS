@@ -401,7 +401,7 @@ fn ram_create(
     }
     match kind {
         InodeKind::Reg | InodeKind::Dir | InodeKind::Lnk => {}
-        InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
+        InodeKind::Chr | InodeKind::Blk => return Err(FsError::Perm),
     }
     let dir_node = dir.key[0];
     ram_dir_room(st, inst, dir_node, name)?;
@@ -512,7 +512,7 @@ fn ram_read(
             buf[..n].copy_from_slice(&r.data[start..start + n]);
             Ok(n)
         }
-        InodeKind::Chr | InodeKind::Blk => Err(FsError::NotSupp),
+        InodeKind::Chr | InodeKind::Blk => Err(FsError::Perm),
     }
 }
 
@@ -701,8 +701,8 @@ fn ram_readlink(st: &RamState, inst: u32, node: u32, buf: &mut [u8]) -> Result<u
             buf[..n].copy_from_slice(&r.data[..n]);
             Ok(n)
         }
-        InodeKind::Dir => Err(FsError::IsDir),
-        InodeKind::Reg | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
+        // `readlink` of anything but a symlink is `EINVAL`, as Linux's.
+        InodeKind::Dir | InodeKind::Reg | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
     }
 }
 

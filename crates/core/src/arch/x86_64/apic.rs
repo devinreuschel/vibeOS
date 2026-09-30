@@ -76,6 +76,11 @@ pub enum IpiMode {
     Fixed,
     Init,
     Sipi,
+    /// NMI delivery: edge, no level assert, and the vector field ignored
+    /// (sent as 0). The self shorthand is allowed only with Fixed delivery
+    /// (Intel SDM Vol. 3A, the ICR's valid-combinations table), so a CPU
+    /// sends its own NMI to its APIC id.
+    Nmi,
 }
 
 impl IpiMode {
@@ -84,6 +89,7 @@ impl IpiMode {
             IpiMode::Fixed => 0b000,
             IpiMode::Init => 0b101,
             IpiMode::Sipi => 0b110,
+            IpiMode::Nmi => 0b100,
         }
     }
 }
@@ -94,6 +100,17 @@ pub enum IpiError {
     DeliveryPendingTimeout,
     NotReady,
     NoRoute,
+}
+
+/// An IPI that timed out is a device failure; one not ready yet may be retried.
+impl From<IpiError> for crate::kerror::KError {
+    fn from(e: IpiError) -> Self {
+        match e {
+            IpiError::DeliveryPendingTimeout => Self::Io,
+            IpiError::NotReady => Self::Again,
+            IpiError::NoRoute => Self::NoDev,
+        }
+    }
 }
 
 impl IpiError {
@@ -204,6 +221,7 @@ pub const fn icr_low(vector: u8, mode: IpiMode) -> u32 {
             v |= ICR_LEVEL_ASSERT | ICR_TRIGGER_LEVEL;
         }
         IpiMode::Sipi => {}
+        IpiMode::Nmi => {}
     }
     v
 }
@@ -435,6 +453,25 @@ mod tests {
         assert_eq!(hi, 0);
         assert_eq!(lo & 0xFF, vectors::IPI_SHOOTDOWN as u32);
         assert_eq!(lo & ICR_SHORTHAND_ALL_EX_SELF, ICR_SHORTHAND_ALL_EX_SELF);
+    }
+
+    #[test]
+    fn icr_nmi_delivery_bits() {
+        assert_eq!(IpiMode::Nmi.delivery_bits(), 0b100);
+        let (hi, lo) = send_ipi_plan(3, 0, IpiMode::Nmi);
+        assert_eq!(hi, 3u32 << 24);
+        assert_eq!((lo >> 8) & 7, 0b100);
+        assert_eq!(lo & 0xFF, 0, "the vector field is ignored and sent as 0");
+        assert_eq!(
+            lo & (ICR_LEVEL_ASSERT | ICR_TRIGGER_LEVEL),
+            0,
+            "edge, no level assert"
+        );
+        assert_eq!(
+            lo & ICR_SHORTHAND_ALL_EX_SELF,
+            0,
+            "physical destination, no shorthand"
+        );
     }
 
     #[test]

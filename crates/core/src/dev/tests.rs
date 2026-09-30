@@ -386,6 +386,9 @@ fn devref_ids_never_reused() {
     assert_eq!(r.push(vga()).unwrap().id(), 5);
 }
 
+/// Drops of [`Counted`]. Only `probe_instance_owned_by_entry` makes a
+/// `Counted`: host tests run on parallel threads, so a second test that
+/// dropped one would race its counts.
 static DROPS: AtomicU32 = AtomicU32::new(0);
 
 /// A driver's per-device state, counting its drops.
@@ -415,6 +418,25 @@ impl Driver for Stateless {
 }
 
 static STATELESS: Stateless = Stateless;
+
+/// A driver like [`Stateless`] whose instance is a plain id, so a test can
+/// probe with it without touching [`DROPS`].
+struct Plain;
+
+impl Driver for Plain {
+    fn name(&self) -> &'static str {
+        "plain"
+    }
+    fn ids(&self) -> &'static [IdMatch] {
+        E1000_IDS
+    }
+    fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+        Ok(Some(instance(dev.id())?))
+    }
+    fn remove(&self, _dev: &DevRef) {}
+}
+
+static PLAIN: Plain = Plain;
 
 #[test]
 fn probe_instance_owned_by_entry() {
@@ -477,10 +499,10 @@ fn state_moves_through_probe_and_remove() {
     r.insert(d.clone(), Some(bridge.id())).unwrap();
     assert!(r.parent(&d).unwrap().same(&bridge));
     assert_eq!(r.index_of(&d), Some(1));
-    assert!(r.register(&STATELESS));
+    assert!(r.register(&PLAIN));
     assert!(r.register(&VGA));
     let di = (0..r.driver_count())
-        .find(|&i| r.driver_at(i).unwrap().name() == "stateless")
+        .find(|&i| r.driver_at(i).unwrap().name() == "plain")
         .unwrap() as u8;
     // Only a `Present` device starts a probe, and only once.
     let drv = r.begin_probe(&d, di).unwrap();
@@ -498,15 +520,15 @@ fn state_moves_through_probe_and_remove() {
     assert!(r.begin_probe(&d, di).is_some());
     assert!(r.bind(&d, "vga", None).is_err());
     let inst = drv.probe(&d).unwrap();
-    assert!(r.bind(&d, "stateless", inst).is_ok());
+    assert!(r.bind(&d, "plain", inst).is_ok());
     assert_eq!(r.state(&d), Some(DevState::Bound));
-    assert_eq!(r.bound(&d), Some("stateless"));
+    assert_eq!(r.bound(&d), Some("plain"));
     let mut jobs: [Option<(u8, DevRef)>; MAX_DEVICES] = [const { None }; MAX_DEVICES];
     assert_eq!(r.collect_bind_jobs(&mut jobs), 1);
     drop(jobs);
     // Removal hands back the instance and leaves the device `Present`.
     assert!(r.finish_remove(&d).is_none());
-    assert_eq!(r.begin_remove(&d).unwrap().name(), "stateless");
+    assert_eq!(r.begin_remove(&d).unwrap().name(), "plain");
     assert_eq!(r.state(&d), Some(DevState::Removing));
     assert!(r.bound(&d).is_none());
     assert!(r.begin_remove(&d).is_none());
