@@ -609,8 +609,7 @@ lints in every member. Not yet enforced: a module not yet audited carries
 `#[allow(<lint>, reason = "audit pending, ROADMAP §10.1")]` on its top-level `mod` line (on the item,
 in a crate root file), never as a crate-level attribute, until ROADMAP §10.1's sweep of that module
 removes it; `let _ =` drops a `Result` in more than 40 files, and the kernel review found dropped
-errors that ROADMAP §10.2 (F080), §10.11 (the tmpfs readahead eviction), and §13.9 (F124)
-fix.
+errors that ROADMAP §10.2 (F080) and §13.9 (F124) fix.
 
 Hardware events are also lost in three cases. An exception before `idt::init` (PMM, the CR3 switch,
 ACPI discovery, heap, KVA, GDT, PIC) goes to whatever IDT Limine left and resets or hangs with no
