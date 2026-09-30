@@ -3,7 +3,8 @@
 //! is the kernel's own module.
 
 use vibeos::arch::{
-    Barriers, ContextSwitch, CycleCounter, InterruptMask, PageTable, PerCpuBase, SyscallAbi,
+    Barriers, ContextSwitch, CycleCounter, InterruptMask, IpiSend, PageTable, PerCpuBase,
+    SyscallAbi,
 };
 
 /// This build's port, chosen by `cfg(target_arch)`.
@@ -30,7 +31,14 @@ pub type AddressSpace = vibeos::proc::addr_space::AddressSpace<Arch>;
 /// far. The bound becomes `Port` once the port implements every seam trait
 /// (ROADMAP §10.3).
 const fn implements_seam_core<
-    A: Barriers + ContextSwitch + CycleCounter + InterruptMask + PageTable + PerCpuBase + SyscallAbi,
+    A: Barriers
+        + ContextSwitch
+        + CycleCounter
+        + InterruptMask
+        + IpiSend
+        + PageTable
+        + PerCpuBase
+        + SyscallAbi,
 >() {
 }
 

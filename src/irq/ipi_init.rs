@@ -8,7 +8,7 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::apic::IpiError;
-use vibeos::arch::PageTable;
+use vibeos::arch::{Ipi, IpiSend, PageTable};
 use vibeos::ipi::{MAX_IPI_CPUS, SHOOT_RANGES, ShootRange, all_acked, waiter_mask};
 use vibeos::log::Level;
 use vibeos::paging::VirtAddr;
@@ -280,10 +280,7 @@ fn shootdown_round(ranges: &[ShootRange]) {
     slot.acked.store(0, Ordering::Relaxed);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     slot.waiters.store(waiters, Ordering::Release);
-    note_send(
-        "shootdown",
-        apic_init::send_ipi_all_ex_self(vectors::IPI_SHOOTDOWN),
-    );
+    note_send("shootdown", Arch::send_others(Ipi::Shootdown));
     wait_acks(waiters, &slot.acked);
     slot.waiters.store(0, Ordering::Release);
 }
@@ -319,10 +316,7 @@ pub fn place_ready(cpu: u32, id: ThreadId, slot: usize) {
         return;
     }
     inbox_push(cpu, slot);
-    note_send(
-        "reschedule",
-        apic_init::send_ipi_cpu(cpu, vectors::IPI_RESCHEDULE),
-    );
+    note_send("reschedule", Arch::send(cpu, Ipi::Reschedule));
 }
 
 /// A wake-inbox slot's tid: `thread_init::tid_of_slot`, which
@@ -437,7 +431,7 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
     let mut c = 0u32;
     while c < 64 {
         if waiters & (1u64 << c) != 0 {
-            note_send("call", apic_init::send_ipi_cpu(c, vectors::IPI_CALL));
+            note_send("call", Arch::send(c, Ipi::Call));
         }
         c += 1;
     }

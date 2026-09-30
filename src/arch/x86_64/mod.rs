@@ -18,6 +18,7 @@ pub mod cpu;
 pub mod gdt;
 pub mod gs;
 pub mod idt;
+mod ipi;
 pub(crate) mod mmu;
 pub mod percpu;
 pub mod pic;
