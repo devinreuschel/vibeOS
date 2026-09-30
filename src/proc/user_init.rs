@@ -6,7 +6,7 @@ use vibeos::arch::CycleCounter;
 use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, ArgError, Auxv, Builder, EHDR_SIZE, ElfError, ExecArgs,
-    Image, PHDR_SIZE,
+    Image, LoadSeg, LoadTarget, PHDR_SIZE, PageRun,
 };
 use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
@@ -220,33 +220,47 @@ fn copy_file_bytes<S: ImageSource>(
     Ok(())
 }
 
+/// The loader's [`LoadTarget`]: a new address space, filled from `src`.
+struct SpaceTarget<'a, S> {
+    space: &'a mut AddressSpace,
+    src: &'a mut S,
+}
+
+impl<S: ImageSource> LoadTarget for SpaceTarget<'_, S> {
+    type Error = LoadError;
+
+    fn map_zeroed(&mut self, run: PageRun) -> Result<(), LoadError> {
+        let perms = UserPerms::from_elf(run.write, run.exec);
+        // SAFETY: `addr_space_init::map_anon` checks the range is in the
+        // user half and clear of every region before it maps anything, and
+        // maps zeroed frames from the buddy; established by
+        // `addr_space_init::map_anon`.
+        unsafe { addr_space_init::map_anon(self.space, run.start, run.len, perms) }
+            .map_err(LoadError::As)
+    }
+
+    fn copy(&mut self, seg: LoadSeg) -> Result<(), LoadError> {
+        copy_file_bytes(self.space, self.src, seg.offset, seg.vaddr, seg.filesz)
+    }
+}
+
+/// Map `img`'s `PT_LOAD`s as Linux does: `elf::load_plan`'s runs, each
+/// mapped zeroed once with the permissions of the last segment covering
+/// it, then every segment's file bytes, so a page two segments share holds
+/// both (ROADMAP §10.6, F031). A run over any mapping is an error.
 #[inline(never)]
 fn map_loads<S: ImageSource>(
     space: &mut AddressSpace,
     img: &Image,
     src: &mut S,
 ) -> Result<(), LoadError> {
-    let mut top = 0u64;
-    for seg in img.loads() {
-        top = top.max(seg.vaddr.saturating_add(seg.memsz));
-        if seg.memsz == 0 {
-            continue;
-        }
-        let start = elf::page_down(seg.vaddr);
-        let end = elf::page_up(seg.vaddr.saturating_add(seg.memsz));
-        let len = end - start;
-        let perms = UserPerms::from_elf(seg.write, seg.exec);
-        // SAFETY: `addr_space_init::map_anon` checks the range is in the
-        // user half and clear of every region before it maps anything, and
-        // maps from the buddy; established by `addr_space_init::map_anon`.
-        match unsafe { addr_space_init::map_anon(space, start, len, perms) } {
-            Ok(()) | Err(AsError::Overlap) => {}
-            Err(e) => return Err(LoadError::As(e)),
-        }
-        if seg.filesz != 0 {
-            copy_file_bytes(space, src, seg.offset, seg.vaddr, seg.filesz)?;
-        }
-    }
+    elf::load_segments(img, &mut SpaceTarget { space, src })?;
+    let top = img
+        .loads()
+        .iter()
+        .map(|seg| seg.vaddr.saturating_add(seg.memsz))
+        .max()
+        .unwrap_or(0);
     // The heap starts on the page after the image, as on Linux with
     // randomization off.
     space.set_brk_start(elf::page_up(top));
