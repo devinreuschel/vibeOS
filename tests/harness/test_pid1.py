@@ -6,13 +6,9 @@ import unittest
 
 from tests.harness import frame
 from tests.harness.frame import FRAME
-from tests.harness.harness import (
-    PANIC_EXIT_STATUS,
-    HarnessError,
-    boot_contract_markers,
-    env_config,
-)
+from tests.harness.harness import HarnessError, boot_contract_markers, env_config
 from tests.harness.linesource import FakeLineSource
+from tests.harness.qmp import FakeQmp
 from tests.harness.run_pid1 import CASES, run_case
 
 NAME = "init_fault"
@@ -46,12 +42,15 @@ DUMP = [
 ]
 
 
-def run(
-    lines: list[str], *, end: str = "eof", exit_code: int | None = PANIC_EXIT_STATUS
-) -> None:
+def run(lines: list[str], *, end: str = "eof", panicked: bool = True) -> None:
+    """Run the case over `lines`; the kernel's pvpanic write, QMP's
+    `GUEST_PANICKED`, follows the last line unless `panicked` is false."""
     env = env_config(default_iso="fake.iso", default_timeout=60.0)
-    src = FakeLineSource.from_lines(lines, end=end, exit_code=exit_code)
-    run_case(NAME, env, line_source=src)
+    src = FakeLineSource.from_lines(lines, end=end, exit_code=0)
+    after: dict[int, list[dict[str, object]]] = {
+        len(lines): [{"event": "GUEST_PANICKED", "data": {"action": "pause"}}]
+    }
+    run_case(NAME, env, line_source=src, qmp=FakeQmp([], after_line=after if panicked else None))
 
 
 class RunCase(unittest.TestCase):
@@ -84,7 +83,12 @@ class RunCase(unittest.TestCase):
 
     def test_timeout_fails(self) -> None:
         with self.assertRaises(HarnessError):
-            run([*contract_lines(), FAULT], end="timeout", exit_code=None)
+            run([*contract_lines(), FAULT], end="timeout", panicked=False)
+
+    def test_no_guest_panicked_fails(self) -> None:
+        # The dump ended but the kernel's pvpanic write never arrived.
+        with self.assertRaises(HarnessError):
+            run([*contract_lines(), FAULT, PID1, *DUMP], end="timeout", panicked=False)
 
     def test_no_halt_after_line_fails(self) -> None:
         with self.assertRaises(HarnessError):

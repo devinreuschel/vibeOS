@@ -93,7 +93,7 @@ CARGO_SHIP = CARGO_INCREMENTAL=0 $(CARGO) -Ztrim-paths -Zunstable-options --conf
 # Two-pass ksyms: the first link has an empty table, nm fills it, and the
 # second link must not move .text: --check regenerates the table from the
 # final ELF and fails on any difference (DESIGN §2.5).
-# $(1)=variant name  $(2)=feature flags  $(3)=iso file  $(4)=initrd, if not $(INITRD)
+# $(1)=variant name  $(2)=feature flags  $(3)=iso file
 # Feature flags use repeated --features, never commas (those split $(call)).
 # $$ so $(CARGO_SHIP) is expanded when the recipe runs, not at $(eval) time.
 # `cp`, not `mv`: cargo may hard-link the artifact to its own copy.
@@ -109,8 +109,8 @@ build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@
-$(3): build/kernels/vibeos-$(1).elf $(or $(4),$(INITRD)) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $(or $(4),$(INITRD)) $$@ build/iso_root_$(1)
+$(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
+	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
 endif
 endef
 
@@ -130,22 +130,25 @@ ISOS :=
 # default: no extra features
 $(eval $(call KERNEL_VARIANT,default,,$(ISO)))
 # panic: deliberate panic-test dump
-$(eval $(call KERNEL_VARIANT,panic,--features panic_test --features panic_exit,$(ISO_PANIC)))
+$(eval $(call KERNEL_VARIANT,panic,--features panic_test,$(ISO_PANIC)))
 # gp: deliberate #GP after IDT
-$(eval $(call KERNEL_VARIANT,gp,--features gp_test --features panic_exit,$(ISO_GP)))
+$(eval $(call KERNEL_VARIANT,gp,--features gp_test,$(ISO_GP)))
 # panic-nest: an `irq_nest` underflow after boot, dumped without a guard
-$(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test --features panic_exit,$(ISO_PANIC_NEST)))
+$(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test,$(ISO_PANIC_NEST)))
 # panic-stop: two CPUs panic at -smp 5; the dump stops the other three
-$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test --features panic_exit,$(ISO_PANIC_STOP)))
+$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_STOP)))
 # ktest: in-guest registry, never packaged as production
 $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
 # vibefs-crash: write-loop kernel for QEMU-kill fsck
 $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
-# init-fault: production with `panic_exit`, so the dump ends QEMU, and the
-# faulting init's initrd (ROADMAP §10.5)
-$(eval $(call KERNEL_VARIANT,init-fault,--features panic_exit,$(ISO_INIT_FAULT),$(INITRD_INIT_FAULT)))
-
 KERNEL_ELF := build/kernels/vibeos-default.elf
+
+ifneq ($(VIBEOS_PREBUILT),1)
+# The production ELF with the faulting init's initrd (ROADMAP §10.5): its
+# panic ends the run through pvpanic, as every production panic does.
+$(ISO_INIT_FAULT): $(KERNEL_ELF) $(INITRD_INIT_FAULT) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
+	LIMINE_DIR=$(LIMINE_DIR) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ build/iso_root_init-fault
+endif
 
 # The Rust user programs (ROADMAP §10.5, C-USERBINS): each user/src/bin/<name>.rs
 # links as a static non-PIE ET_EXEC at 1 GiB for $(USER_TRIPLE), through rust-lld
@@ -192,7 +195,7 @@ endif
 .PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
-        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi
+        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi test-qmp
 
 help:
 	@printf '%s\n' \
@@ -226,6 +229,7 @@ help:
 	  '  test-e2e-init-fault   /sbin/init faults: pid 1 line, then the kernel panics' \
 	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
+	  '  test-qmp              QMP event streams re-recorded and compared; one guest core checked' \
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
 	  '  test-lapic-fallback   in-guest tests, TSC-deadline off' \
@@ -450,9 +454,10 @@ endif
 # What a tier job downloads instead of building (DESIGN §8.6): every ISO and
 # every host tool a `test-*` recipe lists. Recursive `=`, so it follows the
 # variables' paths. The tar keeps the executable bit, which upload-artifact
-# drops, and holds paths relative to $(CURDIR).
+# drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
+# run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
 PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) \
-	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
+	$(KERNEL_ELFS) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
 
 prebuilt: $(PREBUILT_FILES)
 	mkdir -p build
@@ -530,6 +535,12 @@ test-e2e-power: $(ISO_KTEST)
 test-e2e-init-fault: $(ISO_INIT_FAULT)
 	VIBEOS_TIER=test-e2e-init-fault VIBEOS_ISO=$(ISO_INIT_FAULT) python3 tests/harness/run_pid1.py init_fault
 
+# The QMP event streams tests/harness/test_qmp.py replays, re-recorded on
+# this QEMU and compared with tests/harness/fixtures/qmp/, then a guest core
+# of the production ISO (DESIGN §8.3, ROADMAP §10.7).
+test-qmp: $(ISO)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 tests/harness/run_qmp.py
+
 test-kernel: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py --hpet-off
 
@@ -558,7 +569,7 @@ test-vibefs-crash-plants: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NB
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py \
 	    --plants leak,early_super
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
@@ -573,7 +584,7 @@ gate:
 # Keeps build/results/.
 clean:
 	rm -rf build/kernels build/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
-	    $(INITRD) $(USER_OUT)
+	    $(INITRD) $(USER_OUT) $(ISO_INIT_FAULT) $(INITRD_INIT_FAULT)
 	$(CARGO) clean
 
 distclean: clean

@@ -63,7 +63,7 @@ Kernel target is built-in `x86_64-unknown-none` (B2); user programs build for `x
 
 `VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS` (`uefi` boots the probed UEFI firmware), `FW_X86_64` (the firmware code image `uefi` boots), `QEMU_EXTRA`. One reader, which holds the only defaults: `tests/harness/harness.py` (`env_config`); the Makefile sets none. `make run`, `make run-panic` and `make debug` honour the same settings: they start QEMU through `tests/harness/run_interactive.py`.
 
-macOS: `brew install qemu xorriso python dosfstools`. `make test-unit` runs `vibeos-core` on the
+macOS: `brew install qemu xorriso python dosfstools zstd`. `make test-unit` runs `vibeos-core` on the
 host triple (A2). The firmware probe finds Homebrew's `share/qemu/edk2-x86_64-code.fd` with
 `edk2-i386-vars.fd`, and UEFI boots load the code read-only on pflash with a per-run copy of the
 variable store, so `make test` needs no firmware argument; `VIBEOS_FW_X86_64` names another code

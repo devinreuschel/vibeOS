@@ -1344,3 +1344,23 @@ needs = [
   "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1298
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "on a timeout, or on"
+needs = [
+  "no workflow expands a `${{",  # L1204
+  "a kernel command line: `cmdline:`",  # L1227
+  "the expect-panic e2e matches markers",  # L1258
+  "the harness reads QEMU's QMP",  # L1411
+  "a hostlib core tool reads",  # L1412
+  "one VMCOREINFO note, in Linux's",  # L1414
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+[[box]]
+key = "the harness reads QEMU's QMP"
+needs = [
+  "the expect-panic e2e matches markers",  # L1258
+  "on a timeout, or on",  # L1410
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

@@ -473,7 +473,9 @@ Binding order (do not invert):
    with a trylock and never releases either; it sets an armed watchdog (ROADMAP §20.6) to its longest
    timeout and feeds it once; and it writes pvpanic's crash-loaded event (bit 1), which a host
    records without stopping the guest, where the kernel found a pvpanic device (ROADMAP §10.7,
-   §11.7) that lists that event. It flushes no log backlog, sends nothing over netconsole, and calls
+   §11.7) that lists that event: `vibeos::log::pvpanic::event_for(Step::CaptureJump, …)` makes
+   that choice and `log::pvpanic_init::signal` the write, as built; the jump that calls them is
+   planned (ROADMAP §25.4). It flushes no log backlog, sends nothing over netconsole, and calls
    no firmware. The crash handover passes runtime services, and ERST, on to the capture kernel only
    where that lock's trylock succeeded, and names the CPU the capture kernel starts on and the
    physical address of step 5's record. The capture kernel writes the vmcore, feeding that watchdog
@@ -483,13 +485,20 @@ Binding order (do not invert):
    passed, the copy in reserved RAM is the record. It never calls firmware its handover withheld,
    which a stopped CPU, or on GICv2 a CPU still running, may have been inside. Planned (ROADMAP
    §25.4, §25.6).
-7. Otherwise, halt or reset. Today: a `cli; hlt` loop, or QEMU `isa-debug-exit` under the
-   `panic_exit` test feature. Planned, in this order: send the dump over netconsole where one is
-   configured (ROADMAP §25.6); write the record to an EFI variable or to ERST under that store's
-   trylock (ROADMAP §25.6), last among the writes, since a firmware call has no time bound; write
-   pvpanic's panicked event (bit 0) where the kernel found the device, after which the host may
-   pause or end the guest; then, with `panic=<seconds>` (ROADMAP §22.2), wait and reset through the
-   ACPI or PSCI path of the `reboot` call, and otherwise `cli; hlt`.
+7. Otherwise, halt or reset. Today, after `vibeOS: panic: halted`, `panic::finish` writes
+   pvpanic's panicked event (bit 0), after which the host may pause or end the guest (the
+   harness's QEMU pauses, `-action panic=pause`), then runs a `cli; hlt` loop. The device is found
+   once at boot: `log::pvpanic_init::probe`, right after the Limine handshake, looks for fw_cfg's
+   `etc/pvpanic-port` only under a hypervisor (invariant I244), reads the port that file names
+   once for the events the device supports, and keeps both in one atomic; the write,
+   `pvpanic_init::signal`, is one Acquire load and at most one port write, with no lock, no
+   allocation and no interrupt guard, only at that port and only when that mask has bit 0 (ROADMAP
+   §10.7). Bare metal never probes fw_cfg, so no port is written there. Planned, before that
+   write and in this order: send the dump over netconsole where one is configured (ROADMAP
+   §25.6); write the record to an EFI variable or to ERST under that store's trylock (ROADMAP
+   §25.6), last among those writes, since a firmware call has no time bound; and after it, with
+   `panic=<seconds>` (ROADMAP §22.2), wait and reset through the ACPI or PSCI path of the `reboot`
+   call instead of the `cli; hlt`.
 
    Why two branches: a capture kernel exists to take the one complete dump, so nothing that can
    wait, or that lets a host stop the guest, runs before the jump. pvpanic's panicked event pauses

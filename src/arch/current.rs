@@ -28,11 +28,8 @@ pub use super::x86_64::cpu::{
     read_rbp as frame_pointer, read_rip as instruction_pointer, rflags as irq_flags,
 };
 
-/// The test and `panic_exit` builds' end of a QEMU run.
-#[cfg(all(
-    target_arch = "x86_64",
-    any(feature = "kernel_tests", feature = "panic_exit")
-))]
+/// The test build's end of a QEMU run.
+#[cfg(all(target_arch = "x86_64", feature = "kernel_tests"))]
 pub use super::x86_64::cpu::qemu_exit;
 
 /// The power-off and reset port module (`power_off`, `restart`), which the

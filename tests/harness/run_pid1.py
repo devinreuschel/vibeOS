@@ -6,8 +6,9 @@
 `--add` list with that one entry replaced; the faulting init is never in
 the production initrd, AGENTS.md rule 9). Each entry of `CASES` names the
 ISO variant it boots and the needles its run requires. A run goes through
-`run_qemu_and_check` with `expect_panic=True` and the boot contract's
-kernel rows, which all come before init starts; then the framed
+`run_qemu_and_check` with `expect="panic"` and the boot contract's
+kernel rows, which all come before init starts, and ends on QMP's
+`GUEST_PANICKED` from the kernel's pvpanic write; then the framed
 `vibeOS: init: pid 1 <how>` line must name the case's end, and
 `vibeOS: panic: halted` must follow it. The run fails on `user: tests ok`
 or `vibeOS: shell ready` (a working init ran), on the unframed
@@ -36,10 +37,7 @@ from tests.harness.harness import (
     serial_tail,
 )
 from tests.harness.linesource import LineSource
-
-# The variant builds with `panic_exit`, whose isa-debug-exit write ends QEMU
-# after the dump (run_e2e.py's panic modes add the same device).
-ISA_DEBUG_EXIT = ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
+from tests.harness.qmp import QmpLike
 
 # The registered line's head (markers.toml §10.5, `pid1_exit`).
 PID1_PREFIX = "vibeOS: init: pid 1 "
@@ -86,9 +84,14 @@ def check_pid1_lines(name: str, lines: list[str]) -> None:
         raise HarnessError(f"{name}: no {PANIC_DONE!r} after {want!r}{serial_tail(lines)}")
 
 
-def run_case(name: str, env: EnvConfig, line_source: LineSource | None = None) -> RunResult:
+def run_case(
+    name: str,
+    env: EnvConfig,
+    line_source: LineSource | None = None,
+    qmp: QmpLike | None = None,
+) -> RunResult:
     """Boot `name`'s ISO and check its pid-1 line (`HarnessError` on a failure)."""
-    cfg = env.qemu(extra=ISA_DEBUG_EXIT)
+    cfg = env.qemu(expect="panic")
     markers = [
         m
         for m in boot_contract_markers(cpu=env.cpu, smp=env.smp)
@@ -98,8 +101,8 @@ def run_case(name: str, env: EnvConfig, line_source: LineSource | None = None) -
         cfg,
         markers,
         timeout_s=env.timeout,
-        expect_panic=True,
         line_source=line_source,
+        qmp=qmp,
     )
     check_pid1_lines(name, result.lines)
     return result
@@ -113,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     name = args[0]
     env = env_config(default_iso=default_iso(CASES[name].variant), default_timeout=BOOT_ALLOWANCE_S)
     res = results.Results(env.tier)
-    cfg = env.qemu(extra=ISA_DEBUG_EXIT)
+    cfg = env.qemu(expect="panic")
     try:
         result = run_case(name, env)
     except HarnessError as e:
@@ -127,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     res.add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
     print(
         f"[pid1] ok: {name}: {PID1_PREFIX}{CASES[name].how}, then {PANIC_DONE!r}; "
-        f"QEMU exited {result.exit_code}",
+        f"the run ended on {result.end}",
         file=sys.stderr,
     )
     return 0
