@@ -12,7 +12,6 @@ use vibeos::apic::TimerMode;
 
 use crate::acpi_init;
 use crate::apic_init;
-use crate::arch::current::InterruptGuard;
 use crate::ktest::{Outcome, Test, test};
 use crate::per_cpu_init;
 use crate::thread_init;
@@ -735,7 +734,7 @@ fn if_off_measure() -> Result<([u64; 4], ClocksourceId), usize> {
     let read = || time_init::read_counter(rc.id).ok_or(2usize);
     let since = |from: u64, to: u64| rc.scale.to_ns(rc.delta(to, from));
     let (r0, n0, n1, r1) = {
-        let _off = InterruptGuard::enter();
+        let _off = crate::sched::irqoff::deliberate("clocksource 50 ms IF-off window");
         if thread_init::current_cpu() != 0 {
             return Err(3);
         }

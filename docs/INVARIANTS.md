@@ -822,10 +822,26 @@ and a bound.
    architectures it is called only where §7.9's calling contract allows. A long job holds its lock for one bounded chunk at a time and turns
    IF back on between chunks; a walk over a user address space's page tables holds the space's
    page-table lock for at most one leaf table (512 entries) at a time. ROADMAP §10.3's IF-off tracer
-   measures every stretch, and the bound is checked under TCG with `-icount shift=0` on one CPU,
-   where guest time advances 1 ns per instruction retired, so 100 µs of guest time is exactly the
-   bound whatever the host's load. Rule; not yet enforced: ROADMAP §12.6 turns the check on, and I31
-   lists the violations.
+   measures every stretch in the `irqoff` build (the `irqoff` Cargo feature; without it every hook
+   compiles to nothing). `sched::irqoff::off` reads the cycle counter where IF goes from 1 to 0:
+   `InterruptGuard::enter` (so every `SpinMutex` and `IrqCell` acquire), `cpu::cli`, the raw `cli`
+   of the idle loop and `wait_key`, each IDT entry stub whose interrupted RFLAGS had IF=1, and the
+   syscall entry and exit stubs. `on` reads it where IF returns to 1: `InterruptGuard`'s restoring
+   drop, `cpu::sti`, the idle and `wait_key` `sti; hlt` pairs, the switch into a thread whose
+   `irq_nest` is 0, the IDT exit to a frame with IF=1, and the syscall exit before `sysretq` or
+   `iretq`. The stretch between is logged against the site that turned IF off (its `file:line`
+   through `#[track_caller]`, `vec0xNN` for a stub, `syscall:entry` or `syscall:exit`) when it is
+   longer than 100,000 ns of cycle-counter time. The exemptions are subtracted or skipped: the hooks
+   do nothing once the panic dump's `HALTING` is set; a CPU arms at its first `sti`; time in
+   `wait_acks`, in `call_mask`'s slot wait and in `SpinMutex::lock`'s spin is subtracted; and an
+   in-guest test or test hook that holds IF off on purpose takes `sched::irqoff::deliberate`
+   (`kernel_tests` builds only), which marks its stretch so it is never over. The instructions from
+   `syscall` to the entry's first stamp and from the exit's last stamp to `sysretq` or `iretq`, and
+   an interrupt stub's few instructions before its dispatcher and after it, are not measured. The
+   bound is checked under TCG with `-icount shift=0` on one CPU (`make test-irqoff`), where guest
+   time advances 1 ns per instruction retired, so 100 µs of guest time is exactly the bound whatever
+   the host's load. Rule; not yet enforced: ROADMAP §12.6 turns the check on, and I31 lists the
+   violations.
 3. A syscall body runs with IF=1. After `swapgs`, the entry stub copies the user RSP from
    `PerCpu.syscall_scratch` into its frame on the thread's kernel stack, then runs `sti`; from there
    on the scratch belongs to whichever thread next enters on this CPU. The exit stub runs `cli`
