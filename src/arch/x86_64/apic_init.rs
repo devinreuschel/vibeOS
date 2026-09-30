@@ -599,10 +599,9 @@ pub fn on_timer_irq() {
     let cpu_id = crate::per_cpu_init::try_current()
         .map(|c| c.cpu_id)
         .unwrap_or(0);
-    let tsc = time_init::read_tsc();
     if cpu_id == 0 {
         TIMER_FIRES.fetch_add(1, Ordering::Relaxed);
-        time_init::on_hw_tick(tsc);
+        time_init::on_hw_tick();
     }
     eoi();
     rearm_deadline();

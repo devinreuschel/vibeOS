@@ -160,19 +160,12 @@ pub(crate) fn test_yield_now_switches() -> Outcome {
 
 pub(crate) fn test_sleep_ms_50() -> Outcome {
     let t0 = time_init::uptime_ms();
-    let u0 = time_init::now_us();
     thread_init::sleep_ms(50);
     let dt = time_init::uptime_ms().saturating_sub(t0);
-    let du = time_init::now_us().saturating_sub(u0) / 1_000;
     if (50..=100).contains(&dt) {
         return Outcome::Ok;
     }
-    // TCG: ticks coalesce under SMP; sleep is now_ns. Keep 50–100 on
-    // invariant TSC.
-    if !crate::time_init::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
-        return Outcome::Ok;
-    }
-    crate::marker!("vibeOS: ktest:   sleep_ms dt={dt} du={du}");
+    crate::marker!("vibeOS: ktest:   sleep_ms dt={dt}");
     Outcome::Fail("sleep_ms not 50-100ms")
 }
 

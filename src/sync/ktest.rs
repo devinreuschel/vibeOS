@@ -471,6 +471,8 @@ static LATE_M: BlockingMutex<u64> = BlockingMutex::new(0);
 /// Runs of [`late_wake_waiter`]'s entry.
 static LATE_RUNS: AtomicU32 = AtomicU32::new(0);
 static LATE_PROBE: AtomicBool = AtomicBool::new(false);
+/// Set by [`late_wake_call`] on the CPU the waiter is held on.
+static LATE_CALLED: AtomicBool = AtomicBool::new(false);
 /// Bound on each wait in [`test_late_wake_after_exit`].
 const LATE_WAIT_MS: u64 = 2_000;
 
@@ -484,6 +486,10 @@ fn late_wake_waiter() {
 
 fn late_wake_probe() {
     LATE_PROBE.store(true, Ordering::Release);
+}
+
+fn late_wake_call(_: *mut ()) {
+    LATE_CALLED.store(true, Ordering::Release);
 }
 
 /// Wait, bounded, until `pred` holds, yielding between looks.
@@ -530,6 +536,17 @@ pub(crate) fn test_late_wake_after_exit() -> Outcome {
         thread_init::testing::disarm_late_wake();
         drop(g);
         return Outcome::Fail("waiter did not block");
+    }
+    // The hold keeps serving other CPUs' IPIs, as every IF-off spin must:
+    // a call-function IPI to CPU 1 completes while the waiter is still
+    // held. A hold that starved it would stall its sender, such as a
+    // shootdown from this CPU, until the hold gave up.
+    LATE_CALLED.store(false, Ordering::Release);
+    crate::ipi_init::call_cpu(1, late_wake_call, core::ptr::null_mut(), true);
+    if !LATE_CALLED.load(Ordering::Acquire) || !thread_init::testing::wait_window_held() {
+        thread_init::testing::disarm_late_wake();
+        drop(g);
+        return Outcome::Fail("a call to the held CPU waited out the hold");
     }
     thread_init::testing::arm_late_wake(waiter);
     // The unlock's wake: its push to CPU 1 goes out after the waiter died.

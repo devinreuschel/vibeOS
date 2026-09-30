@@ -215,11 +215,13 @@ def load_rows(path: Path | str = REGISTRY_PATH) -> tuple[Row, ...]:
 @dataclass(frozen=True)
 class BootConfig:
     """What a boot's contract depends on: `smp` CPUs, HPET or the PIT, the
-    LAPIC timer mode the kernel prints (`<mode>`), and the test builds."""
+    LAPIC timer mode the kernel prints (`<mode>`), the clocksource it names
+    (`<clocksource>`), and the test builds."""
 
     hpet: bool
     smp: int
     lapic_mode: str
+    clocksource: str = ""
     gp_test: bool = False
     panic_test: bool = False
     panic_nest_test: bool = False
@@ -251,8 +253,8 @@ def contract(rows: Iterable[Row], cfg: BootConfig) -> list[tuple[Row, dict[str, 
     """`cfg`'s contract, in order: each contract row that holds, with its
     bindings. A run of consecutive per-AP rows is emitted once for each AP,
     `i` in `1..smp`, binding `<n>` to `i` and `<ap>` to `i - 1`; `<mode>` is
-    `cfg.lapic_mode` everywhere."""
-    base = {"mode": cfg.lapic_mode}
+    `cfg.lapic_mode` and `<clocksource>` is `cfg.clocksource` everywhere."""
+    base = {"mode": cfg.lapic_mode, "clocksource": cfg.clocksource}
     live = sorted(
         (r for r in rows if r.kind == "contract" and holds(r, cfg)),
         key=lambda r: r.order or 0,

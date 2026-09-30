@@ -14,9 +14,9 @@ hold on both architectures.
 |--------|----------|
 | PIT channel 0 | Bootstrap tick at ~1 kHz. Last-resort scheduler tick if the LAPIC timer cannot be used. |
 | PIT channel 2 | TSC calibration when there is no HPET. One-shot, gated through port `0x61`. |
-| HPET main counter | Preferred TSC calibration reference. Monotonic, known frequency from the ACPI table. Planned (ROADMAP §10.3): the clocksource when the TSC is not invariant (§6.4). |
-| ACPI PM timer | Planned (ROADMAP §10.3): the clocksource with neither an invariant TSC nor an HPET (§6.4). 3.579545 MHz, 24 or 32 bits, at the FADT's `X_PM_TMR_BLK`. |
-| TSC | Sub-millisecond timestamps, `busy_wait_ms`, deadline arithmetic. Planned (ROADMAP §10.3): the clocksource when invariant (§6.4). |
+| HPET main counter | Preferred TSC calibration reference. Monotonic, known frequency from the ACPI table. The clocksource, second in §6.4's rank: when the TSC is not an invariant, warp-clean one. |
+| ACPI PM timer | The clocksource, third in §6.4's rank: with neither an invariant TSC nor an HPET. 3.579545 MHz, 24 or 32 bits, at the FADT's `X_PM_TMR_BLK`, or `PM_TMR_BLK` when that is zero. |
+| TSC | `busy_wait_ms`, the TSC-deadline arm, trace timestamps. The clocksource, first in §6.4's rank: when CPUID reports it invariant and the warp test saw no backward step. |
 | LAPIC timer | Per-CPU preemption tick. TSC-deadline mode preferred. |
 | RTC / CMOS | Wall clock date and time, read once at boot. |
 
@@ -44,7 +44,8 @@ Serialize around `rdtsc`. Out-of-order execution can move the read across the in
 `lfence` before, or `rdtscp`, which serializes on its own and also gives the CPU number.
 
 The BSP calibrates `tsc_per_ms` once (`time_init::init`), and every CPU uses that value through
-`time_init::tsc_per_ms()`: delays, the TSC-deadline arm, and `now_ns`. Each CPU's `PerCpu.tsc_per_ms`
+`time_init::tsc_per_ms()`: delays, the TSC-deadline arm, and `now_ns` when the TSC is the clocksource
+(§6.4). Each CPU's `PerCpu.tsc_per_ms`
 holds a copy that only an in-guest test reads (ROADMAP §10.7 deletes it, F111). The LAPIC periodic
 count is also measured once, on the BSP, and `apic_init::arm_ap` reuses it on every AP. Both assume
 one TSC rate and one LAPIC timer rate on every CPU. `time_init::init` checks the invariant TSC CPUID
@@ -85,9 +86,9 @@ interrupts.
 ## 6.4 Timekeeping API
 
 ```rust
-uptime_ms() -> u64      // tick counter, cheap, coarse
-now_us()    -> u64      // tick counter plus TSC interpolation since the last tick
-now_ns()    -> u64      // same, finer, for tracing
+now_ns()    -> u64      // the clocksource since boot, clamped monotonic
+now_us()    -> u64      // now_ns() / 1_000
+uptime_ms() -> u64      // now_ns() / 1_000_000
 busy_wait_ms(ms: u64)   // TSC spin, hlt when interrupts are on. Boot and IPI delays only.
 sleep_ms(ms: u64)       // parks the calling thread. Everything after the scheduler exists uses this.
 ```
@@ -96,23 +97,29 @@ Planned (ROADMAP §19.4): `sleep_ms` becomes a wrapper over a sleep to a nanosec
 [§6.5](#65-timers-and-timeouts)'s deadline timers, since every blocking primitive already takes a
 nanosecond deadline.
 
-`now_us` reads two values that an interrupt handler writes: the tick counter and the TSC snapshot at
-that tick. Read them unprotected and you eventually get one from before an interrupt and one from
-after, producing a timestamp that goes backwards. That is not hypothetical; it happened.
+`now_ns` reads a snapshot that CPU 0's tick writes: the clocksource's id, a read of it, and the
+nanoseconds at that read. Read the fields unprotected and you eventually get one from before an
+interrupt and one from after, producing a timestamp that goes backwards. That is not hypothetical; it
+happened, when the fields were a tick count and a TSC stamp.
 
 Publish them as a latched seqlock, which keeps two copies of the fields so that no reader waits for
-the writer. The writer bumps the sequence and issues `fence(Release)`, stores copy 0, bumps the
-sequence and issues `fence(Release)` again, and stores copy 1. The reader loads the sequence with
+the writer. The writer, CPU 0's tick and nothing else, makes each bump `fence(Release)`, a Relaxed
+`fetch_add(1)` on the sequence, and `fence(Release)` again: it bumps the sequence to odd and stores
+copy 0, then bumps it to even and stores copy 1. The trailing fence pairs with the reader's
+`fence(Acquire)`, so a reader that loaded any store made after a bump sees that bump when it reloads
+the sequence; the leading fence orders the previous copy's stores before the bump, for a reader whose
+Acquire load of the sequence sees the bump and then reads that copy (Linux's
+`raw_write_seqcount_latch` has a write barrier on both sides). The reader loads the sequence with
 Acquire, loads the copy its low bit names (copy 1 while it is odd, when the writer is storing copy
 0), issues `fence(Acquire)`, reloads the sequence, and retries only when it changed. A plain seqlock
 reader retries while the sequence is odd, so one that interrupted the writer on its own CPU, in an
 NMI, `#MC`, or `#DB` handler, a pseudo-NMI (ROADMAP §25.5), or the panic path, would spin forever;
 the latched reader reads the copy the writer is not storing and returns. So `now_ns` may be read
 from any context, a log record's timestamp included (§2.5). Linux's NMI-safe clock,
-`ktime_get_mono_fast_ns`, is built the same way. Rule; not yet enforced: `TickClock` keeps one copy,
-and `TickClock::write` has no release fence after the odd bump, and the release half of its
-`fetch_add(AcqRel)` orders only earlier accesses. x86's locked `fetch_add` is a full barrier and
-hides that; aarch64 with LL/SC atomics does not (ROADMAP §10.8, F098).
+`ktime_get_mono_fast_ns`, is built the same way. x86's locked `fetch_add` is a full barrier and would
+hide a missing fence; aarch64 with LL/SC atomics does not, so the fences are written out (ROADMAP
+§10.8, F098). The host test `latch_read_mid_write_returns_older` stops the writer between its two
+copies and reads the older value.
 
 Two warnings about testing this. A test that computes the expected "now" from the same tick value it
 just read is monotonic by construction and passes even with torn reads, so the test needs an
@@ -121,12 +128,13 @@ so the in-guest coverage has to read the clock from threads that yield while a t
 it with that independent timestamp. The in-guest tests `now_us_monotonic` and `now_us_under_yields`
 do both. They read through `time::ktest::now_ns_unclamped`, a `kernel_tests` hook that calls
 `TickClock::now_ns_with` directly and so skips `LAST_NS`, and match each read within 1 µs against the
-tick records CPU 0 publishes, before each seqlock write, into a ring the seqlock does not guard. The raw
-reading may step back after a late tick, which `LAST_NS` hides from `now_ns`, so the tests check the
+snapshots CPU 0 publishes, before each seqlock write, into a ring the seqlock does not guard. The raw
+reading may land 1 ns above the next base, which `LAST_NS` hides from `now_ns`, so the tests check the
 match on the raw reading and check the clamped `now_us` for order. They run readers on every CPU that
 call `yield_now` while the timer fires, and every 500th read stalls inside the seqlock window until two
 ticks have been published, so the retry runs. `now_us_planted_tear` makes a stalled read pair one
-tick's count with a later tick's TSC stamp, as a skipped retry would, and requires both tests to fail.
+snapshot's nanoseconds with a later snapshot's cycles, as a skipped retry would, and requires both
+tests to fail.
 The host tests `now_us_seqlock_retry_under_simulated_writer` and `seqlock_threaded_writer_never_tears`
 still cover the retry in the portable half (ROADMAP §10.2, F100).
 
@@ -140,17 +148,18 @@ Once every CPU has its own LAPIC timer, "the tick count" stops having a single w
    and synchronized.
 3. A real distributed clock with cross-CPU synchronization and drift correction.
 
-The kernel runs option 1. Only CPU 0's timer interrupt advances the tick (`apic_init::on_timer_irq`
-calls `time_init::on_hw_tick` on CPU 0 alone), `now_ns` interpolates from it, and `LAST_NS` clamps it
-monotonic. Timer interrupts that arrive while one is already pending coalesce into one, so a CPU 0
-IF-off window longer than 1 ms loses ticks, and `now_ns` stays behind the TSC from then on. In
-TSC-deadline mode each rearm starts from a TSC read inside the ISR, so a period is 1 ms plus interrupt
-latency but counts as 1 ms (ROADMAP §10.3, F027).
-
-Option 2 is the destination, generalized: one clocksource, a free-running counter chosen at boot
-that every CPU reads, and `now_ns = base_ns + ((read() - base_cycles) mod 2^width) × mult >> shift`.
-The tick drives scheduling and timer expiry, and no count of timer interrupts enters the clock.
-Candidates, best first:
+Option 1 was the first kernel's: only CPU 0's timer interrupt advanced a tick count and `now_ns`
+interpolated from it, so a CPU 0 IF-off window longer than 1 ms, whose pending timer interrupts
+coalesce into one, lost time for good. The kernel runs option 2, generalized: one clocksource, a
+free-running counter chosen at boot that every CPU reads, and `now_ns = base_ns + ((read() -
+base_cycles) mod 2^width) × mult >> shift`, evaluated in `u128` by `vibeos::time::ns_at`. CPU 0's
+tick (`apic_init::on_timer_irq` calls `time_init::on_hw_tick` on CPU 0 alone) counts itself for
+diagnostics, reads the clocksource, and publishes the new base through the latch, with the
+clocksource's id, so a switch and its base publish as one value. `time::ClockWriter` computes each
+base from the whole count since the clock started, so rounding never accumulates, and `LAST_NS` clamps
+the result monotonic across the 1 ns a reader's split rounding can add. The tick drives scheduling and
+timer expiry, and no count of timer interrupts enters the clock: an IF-off window or a late
+TSC-deadline rearm loses no time (ROADMAP §10.3, F027). Candidates, best first:
 
 | Clocksource | Architecture and condition | Width | A read |
 |---|---|---|---|
@@ -160,16 +169,27 @@ Candidates, best first:
 | ACPI PM timer | x86_64 with the FADT's timer block | 24 or 32 | a port read: an exit under KVM |
 | `CNTVCT_EL0` | aarch64, always | at least 56 | an instruction after `isb` |
 
-A counter narrower than 64 bits is read at least once per half wrap. CPU 0's tick does it; once idle
-stops the tick (§6.6), the CPU that holds that duty hands it on before it stops its own tick, and no
-idle CPU sleeps past half the wrap, the bound Linux calls `max_idle_ns`. The boot marker
-`time: clocksource <name>` names the choice. The HPET and the PM timer cost an exit per read on KVM
-without an invariant TSC until the paravirtual clock lands; ROADMAP §19.3 measures the cost, and if
-it shows, those two read once per tick and interpolate from the TSC, which still loses no time when
-ticks coalesce. Planned: ROADMAP §10.3 (F027) moves x86_64 `now_ns` to this model, and §11.3 gives
-aarch64 the same function. Until then option 1 stalls and lags: after a CPU 0 IF-off stretch or deep
-idle, the `LAST_NS` clamp repeats one value until the interpolation catches up, and time then stays
-behind the TSC by the lost ticks. Trace timestamps are separate: ROADMAP §10.7's flight-recorder
+x86_64 builds the TSC, HPET and PM timer rows. `time_init::init` ranks them (`time::rank`) and
+publishes a provisional choice, since the AP warp tests run later, inside `smp_init::init`;
+`time_init::confirm_clocksource`, which `kmain` calls right after it, ranks again, switches on CPU 0
+through `ClockWriter::switch` (no step in `now_ns`) if the answer changed, and prints
+`vibeOS: time: clocksource <tsc|hpet|acpi_pm>`, Linux's names. A boot with no candidate halts with
+`vibeOS: time: no clocksource`; there is no tick-count fallback. The HPET is 64 bits wide when
+`GCAP_ID` bit 13 is set, else 32 (42.9 s at 100 MHz); the PM timer is 24 bits, or 32 with the FADT's
+`TMR_VAL_EXT`, and QEMU's `pc` FADT is revision 1, with no `X_` fields, so its timer is found at
+`PM_TMR_BLK`.
+
+A counter narrower than 64 bits is read at least once per half wrap. CPU 0's tick does it, every
+millisecond, against the 24-bit PM timer's half wrap of about 2.34 s. Rule: CPU 0 never holds IF off
+for longer than that where the PM timer is the clocksource, since a whole wrap in one IF-off stretch
+is lost silently; the PM-timer ktest boot runs only clock tests for that reason. Once idle stops the
+tick (§6.6), the CPU that holds that duty hands it on before it stops its own tick, and no idle CPU
+sleeps past half the wrap, the bound Linux calls `max_idle_ns`. The HPET and the PM timer cost an
+exit per read on KVM without an invariant TSC, and the HPET takes QEMU's global lock under TCG, on
+every `now_ns`, log records included, until the paravirtual clock lands; ROADMAP §19.3 measures the
+cost, and if it shows, those two read once per tick and interpolate from the TSC, which still loses
+no time when ticks coalesce. ROADMAP §11.3 gives aarch64 the same function over `CNTVCT_EL0`. Trace
+timestamps are separate: ROADMAP §10.7's flight-recorder
 records carry raw cycle-counter reads. A trace orders records across CPUs only when CPUID reports the
 TSC invariant and the bring-up warp test ([DESIGN §7.4](SMP.md#74-ap-bring-up-sequence)), whose
 result `vibeOS: smp: tsc skew <n> cycles` reports, saw no backward step (Linux's `check_tsc_warp`

@@ -331,12 +331,15 @@ fn entry_spawner() {
     ENTRY_SPAWNED.store(true, Ordering::Release);
 }
 
-/// Reschedule IPIs to CPU 0 about every 20 us until `ENTRY_STOP`.
+/// Reschedule IPIs to CPU 0 about every 100 us until `ENTRY_STOP`. Under
+/// TCG CPU 0 spends about 55 us on each, and a stream near that rate leaves
+/// the fork loop, whose ring-3 entries the IPIs are meant to interrupt, no
+/// time to run.
 fn entry_ipi_sender() {
     while !ENTRY_STOP.load(Ordering::Acquire) {
         // A failed send only thins the IPI stream.
         let _ = apic_init::send_ipi_cpu(0, vectors::IPI_RESCHEDULE);
-        let t = time_init::now_ns().saturating_add(20_000);
+        let t = time_init::now_ns().saturating_add(100_000);
         while time_init::now_ns() < t {
             core::hint::spin_loop();
         }
