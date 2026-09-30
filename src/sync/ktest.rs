@@ -31,9 +31,7 @@ pub(crate) fn test_irqcell_reentry_panics() -> Outcome {
     // closure resumes, so the holder never touches `C` again; established
     // here.
     unsafe { C.force_unlock() };
-    per_cpu_init::current()
-        .irq_nest
-        .store(nest0, Ordering::Relaxed);
+    crate::ktest::restore_irq_nest(nest0);
     if !hit {
         return Outcome::Fail("no panic");
     }
@@ -64,9 +62,7 @@ pub(crate) fn test_bootcell_set_once() -> Outcome {
     let hit = arch::catch::catch_panic(|| {
         let _ = U.get();
     });
-    per_cpu_init::current()
-        .irq_nest
-        .store(nest0, Ordering::Relaxed);
+    crate::ktest::restore_irq_nest(nest0);
     if !hit {
         return Outcome::Fail("unset get");
     }
@@ -138,9 +134,7 @@ pub(crate) fn test_rank_alloc_under_pt_asserts() -> Outcome {
         });
         // The longjmp skipped the `InterruptGuard` that `HEAP.lock()`
         // entered; PT's guard drop restores IF.
-        per_cpu_init::current()
-            .irq_nest
-            .store(nest_pt, Ordering::Relaxed);
+        crate::ktest::restore_irq_nest(nest_pt);
         // SAFETY: invariant: a rank refusal panics in
         // `sync_init::lock_enter` before the spin, so `HEAP` was never taken
         // and `held_pt`, the word with PT counted, is what this CPU holds;
@@ -191,9 +185,7 @@ pub(crate) fn test_rank_same_rank_lock_asserts() -> Outcome {
         let restore = || {
             // The longjmp skipped the `InterruptGuard` `RANK_B`'s acquire
             // entered; `RANK_A`'s guard drop restores IF.
-            per_cpu_init::current()
-                .irq_nest
-                .store(nest_a, Ordering::Relaxed);
+            crate::ktest::restore_irq_nest(nest_a);
             // SAFETY: invariant: a rank refusal panics in
             // `sync_init::lock_enter` before the spin, so `RANK_B` was never
             // taken and `held_a`, the word with `RANK_A` counted, is what
@@ -253,9 +245,7 @@ pub(crate) fn test_rank_lock_nested_keeps_outer() -> Outcome {
             // counted, is what it holds; established by
             // `sync_init::SpinMutex::lock_nested`.
             unsafe { sync_init::testing::restore_held(held_a) };
-            per_cpu_init::current()
-                .irq_nest
-                .store(nest_a, Ordering::Relaxed);
+            crate::ktest::restore_irq_nest(nest_a);
         }
         counts[1] = sync_init::testing::held().count(RANK_DEVICE);
     }

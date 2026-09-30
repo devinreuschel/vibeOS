@@ -45,9 +45,7 @@ impl Saved {
     /// Put back the held word and set `irq_nest` to `nest`, leaving IF
     /// off. Call with IF off, on the CPU `now` ran on.
     fn restore_locks(&self, nest: u32) {
-        per_cpu_init::current()
-            .irq_nest
-            .store(nest, Ordering::Relaxed);
+        crate::ktest::restore_irq_nest(nest);
         // SAFETY: `self.held` is what this CPU held before the caught
         // call, and every lock that call counted is a test-local `SpinMutex`
         // that is never unlocked or used again or one whose guard released

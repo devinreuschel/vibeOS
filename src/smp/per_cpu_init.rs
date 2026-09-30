@@ -20,6 +20,7 @@ use vibeos::per_cpu::{PerCpu, PerCpuRemote};
 use vibeos::thread::Tcb;
 
 use crate::acpi_init;
+use crate::arch::x86_64::percpu;
 use crate::cell::BootCell;
 use crate::x86;
 use crate::x86::InterruptGuard;
@@ -44,7 +45,6 @@ static REMOTE: BootCell<Box<[PerCpuRemote]>> = BootCell::new();
 // from its atomic fields alone; `scripts/check_cells.py` rejects an
 // `unsafe impl` of `Send` or `Sync` for it (invariant I120).
 crate::cell::assert_impl!(PerCpuRemote: Sync);
-static LIVE: AtomicBool = AtomicBool::new(false);
 /// Bit `cpu_id`. MADTs with >64 CPUs need a wider mask later.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
 static WITH_BUSY: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
@@ -112,12 +112,12 @@ pub unsafe fn init_bsp() {
     // set contract); established here: `init_bsp` runs once on the BSP.
     unsafe { CPUS.set(boxed) };
     x86::set_per_cpu_hooks(irq_nest_enter, irq_nest_leave, cpu_index_hook);
-    LIVE.store(true, Ordering::Release);
+    percpu::mark_live();
     ONLINE.store(1, Ordering::Release);
 }
 
 pub fn is_live() -> bool {
-    LIVE.load(Ordering::Acquire)
+    percpu::is_live()
 }
 
 /// The `PerCpu` array's base address and length, which VMCOREINFO's
@@ -292,12 +292,18 @@ pub fn irq_nest_leave() {
     }
 }
 
-/// `x86::cpu_index`'s hook: this CPU's `cpu_id` once the area is live.
+/// `x86::cpu_index`'s hook: this CPU's `cpu_id` once the area is live,
+/// read with [`percpu::cpu_id_hint`]: exact while IF=0, a hint with IF=1.
 fn cpu_index_hook() -> Option<u32> {
-    try_current().map(|c| c.cpu_id)
+    is_live().then(percpu::cpu_id_hint)
 }
 
+/// This CPU's `InterruptGuard` depth. 0 with IF=1: every guard holds IF=0
+/// while it lives (SMP.md §7.5), so only an IF=0 caller reads the slot.
 pub fn irq_nest() -> u32 {
+    if x86::interrupts_enabled() {
+        return 0;
+    }
     try_current()
         .map(|c| c.irq_nest.load(Ordering::Relaxed))
         .unwrap_or(0)

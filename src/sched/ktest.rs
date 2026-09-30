@@ -351,10 +351,15 @@ pub(crate) fn test_reap_many_via_idle() -> Outcome {
 
 pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
     let nest0 = per_cpu_init::irq_nest();
-    let t0 = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
+    // The registry is pinned, so the hint is its CPU, whose remote view any
+    // IF reads (DESIGN §7.5).
+    let Some(me) = per_cpu_init::cpu(thread_init::current_cpu()) else {
+        return Outcome::Fail("no remote view");
+    };
+    let t0 = me.ticks.load(Ordering::Relaxed);
     let wall0 = time_init::uptime_ms();
     loop {
-        if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != t0 {
+        if me.ticks.load(Ordering::Relaxed) != t0 {
             break;
         }
         if time_init::uptime_ms().saturating_sub(wall0) > 200 {
@@ -365,7 +370,7 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
     // Read under the lock, with IF off: a tick between a read before the
     // lock and the lock's `cli` is not one that ran under SCHED.
     let (inner, held) = thread_init::with_sched_lock(|| {
-        let held = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
+        let held = me.ticks.load(Ordering::Relaxed);
         if x86::interrupts_enabled() {
             return (Outcome::Fail("SCHED left IF on"), held);
         }
@@ -373,7 +378,7 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
         if x86::interrupts_enabled() {
             return (Outcome::Fail("IF on during hold"), held);
         }
-        if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != held {
+        if me.ticks.load(Ordering::Relaxed) != held {
             return (Outcome::Fail("timer ran under SCHED"), held);
         }
         (Outcome::Ok, held)
@@ -395,7 +400,7 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
             core::arch::asm!("int $0xF0");
         },
     }
-    if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) <= held {
+    if me.ticks.load(Ordering::Relaxed) <= held {
         return Outcome::Fail("forced timer IRQ did not run");
     }
     if per_cpu_init::irq_nest() != nest0 {
@@ -452,7 +457,8 @@ static XCPU_FLAG: AtomicU64 = AtomicU64::new(0);
 static XCPU_CPU: AtomicU32 = AtomicU32::new(0xFFFF);
 
 fn xcpu_entry() {
-    XCPU_CPU.store(per_cpu_init::current().cpu_id, Ordering::SeqCst);
+    // Pinned, so the hint is the CPU this thread runs on.
+    XCPU_CPU.store(thread_init::current_cpu(), Ordering::SeqCst);
     XCPU_FLAG.store(1, Ordering::SeqCst);
 }
 

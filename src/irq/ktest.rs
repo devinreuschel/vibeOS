@@ -141,7 +141,8 @@ fn obs_stall() {
 /// last, so a waiter that sees it also sees `CPU_HITS` and `IRQ_CPU`
 /// (AGENTS rule 5, F021).
 fn record_irq_cpu() {
-    let cpu = per_cpu_init::current().cpu_id;
+    // Exact: an IRQ handler runs with IF=0, and `obs_publisher` is pinned.
+    let cpu = thread_init::current_cpu();
     if (cpu as usize) < CPU_HITS.len() {
         CPU_HITS[cpu as usize].fetch_add(1, Ordering::SeqCst);
     }
@@ -604,7 +605,8 @@ pub(crate) fn lifetime_shootdown_ack_late() -> Outcome {
     if mask.count_ones() < 2 {
         return Outcome::Skip("one CPU");
     }
-    let me = per_cpu_init::current().cpu_id;
+    // The registry is pinned, so the hint is its CPU.
+    let me = thread_init::current_cpu();
     let others = mask & !(1u64 << me);
     // Prefer an AP, so the BSP's tick keeps running.
     let pick = if others & !1 != 0 {
@@ -728,7 +730,8 @@ fn shooter() {
 /// `service_incoming`, while every other online CPU loops `vmap`/`vunmap`
 /// shootdowns. No shootdown cycle may take 1 s.
 pub(crate) fn shootdown_ack_while_busy() -> Outcome {
-    let me = per_cpu_init::current().cpu_id;
+    // The registry is pinned, so the hint is its CPU.
+    let me = thread_init::current_cpu();
     let others = per_cpu_init::online_mask() & !(1u64 << me);
     if others == 0 {
         return Outcome::Skip("no AP");

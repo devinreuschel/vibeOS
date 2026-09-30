@@ -1406,8 +1406,11 @@ pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
     })
 }
 
+/// The CPU this thread runs on: exact while IF=0, a hint with IF=1
+/// (`arch::cpu_id_hint`), which is enough to place a new thread. A caller
+/// that needs the exact id reads it with IF=0.
 pub fn current_cpu() -> u32 {
-    per_cpu_init::current().cpu_id
+    crate::arch::cpu_id_hint()
 }
 
 #[cfg(feature = "kernel_tests")]

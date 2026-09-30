@@ -20,6 +20,8 @@ pub(crate) fn test_per_cpu_bsp() -> Outcome {
     if !per_cpu_init::is_live() {
         return Outcome::Fail("per_cpu not live");
     }
+    // IF=0 for the per-CPU reads (DESIGN §2.9 rule 5).
+    let _g = x86::InterruptGuard::enter();
     let cpu = per_cpu_init::current();
     if cpu.cpu_id != 0 {
         return Outcome::Fail("cpu_id not 0");
@@ -60,26 +62,31 @@ pub(crate) fn test_per_cpu_identity() -> Outcome {
     if n == 0 {
         return Outcome::Fail("cpu array empty");
     }
-    let bsp = per_cpu_init::current();
-    if bsp.cpu_id != 0 {
-        return Outcome::Fail("not on bsp");
-    }
-    if bsp.self_ptr as u64 != bsp as *const _ as u64 {
-        return Outcome::Fail("bsp self_ptr");
-    }
-    if per_cpu_init::gs_self() as u64 != bsp.self_ptr as u64 {
-        return Outcome::Fail("bsp gs:[0]");
-    }
-    if crate::per_cpu!(cpu_id) != 0 {
-        return Outcome::Fail("per_cpu! on bsp");
-    }
+    // IF=0 for the per-CPU reads (DESIGN §2.9 rule 5); the guard drops
+    // before the IPI below.
+    let bsp_apic = {
+        let _g = x86::InterruptGuard::enter();
+        let bsp = per_cpu_init::current();
+        if bsp.cpu_id != 0 {
+            return Outcome::Fail("not on bsp");
+        }
+        if bsp.self_ptr as u64 != bsp as *const _ as u64 {
+            return Outcome::Fail("bsp self_ptr");
+        }
+        if per_cpu_init::gs_self() as u64 != bsp.self_ptr as u64 {
+            return Outcome::Fail("bsp gs:[0]");
+        }
+        if crate::per_cpu!(cpu_id) != 0 {
+            return Outcome::Fail("per_cpu! on bsp");
+        }
+        bsp.remote.apic_id.load(Ordering::Relaxed)
+    };
     if !per_cpu_init::is_online(0) {
         return Outcome::Fail("bsp offline");
     }
     if n < 2 {
         return Outcome::Skip("no AP");
     }
-    let bsp_apic = bsp.remote.apic_id.load(Ordering::Relaxed);
     let mut aps = 0u64;
     let mut i = 1u32;
     while i < n as u32 {
@@ -303,12 +310,12 @@ pub(crate) fn percpu_remote_view() -> Outcome {
     if !x86::interrupts_enabled() {
         return Outcome::Fail("registry runs with IF off");
     }
-    let t0 = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
-    // The registry thread is pinned to CPU 0, so `current()` stays this CPU.
-    let moved = spin_until_ns(
-        || per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != t0,
-        TICK_WAIT_NS,
-    );
+    // The registry thread is pinned to CPU 0, so the hint stays this CPU.
+    let Some(me) = per_cpu_init::cpu(thread_init::current_cpu()) else {
+        return Outcome::Fail("no remote view");
+    };
+    let t0 = me.ticks.load(Ordering::Relaxed);
+    let moved = spin_until_ns(|| me.ticks.load(Ordering::Relaxed) != t0, TICK_WAIT_NS);
     if !moved {
         return Outcome::Fail("ticks did not advance with IF on");
     }

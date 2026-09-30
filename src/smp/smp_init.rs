@@ -555,10 +555,7 @@ pub unsafe fn init() {
 
 /// Start each MADT CPU but the BSP, one at a time, from `page`.
 fn start_aps(page: u64) {
-    let bsp_apic = per_cpu_init::current()
-        .remote
-        .apic_id
-        .load(Ordering::Relaxed) as u8;
+    let bsp_apic = per_cpu_init::with_current(|c| c.remote.apic_id.load(Ordering::Relaxed)) as u8;
     let Some(info) = acpi_init::info() else {
         return;
     };

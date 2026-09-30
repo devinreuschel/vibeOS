@@ -73,5 +73,5 @@ fn idle_main() {
 
 #[cfg(feature = "kernel_tests")]
 pub fn idle_tsc() -> u64 {
-    per_cpu_init::current().idle_tsc
+    per_cpu_init::with_current(|c| c.idle_tsc)
 }

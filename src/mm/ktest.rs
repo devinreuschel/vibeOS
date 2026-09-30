@@ -689,14 +689,15 @@ pub(crate) fn unmap_shootdown_over_max_asserts() -> Outcome {
     let Some(va) = alloc_va(len) else {
         return Outcome::Fail("kva alloc");
     };
+    let if_on = x86::interrupts_enabled();
     let nest = per_cpu_init::irq_nest();
     let hit = crate::arch::catch::catch_panic(|| kva_init::unmap_shootdown(va, n));
     free_va(va, len);
     if !hit {
         return Outcome::Fail("no assertion");
     }
-    if per_cpu_init::irq_nest() != nest {
-        return Outcome::Fail("irq_nest changed");
+    if x86::interrupts_enabled() != if_on || per_cpu_init::irq_nest() != nest {
+        return Outcome::Fail("irq_nest or IF changed");
     }
     Outcome::Ok
 }
@@ -935,7 +936,8 @@ fn va0_probe() -> u64 {
 }
 
 fn va0_entry() {
-    let cpu = u64::from(per_cpu_init::current().cpu_id);
+    // Pinned by `spawn_thread_on`, so the hint is this thread's CPU.
+    let cpu = u64::from(thread_init::current_cpu());
     // Release: publishes the result to `kernel_va0_faults`.
     VA0_RESULT.store(cpu << 32 | va0_probe(), Ordering::Release);
 }
@@ -944,7 +946,8 @@ fn va0_entry() {
 /// kernel read of VA 0 faults on every online CPU. `catch_fault`'s one
 /// jump buffer serves one CPU at a time, so the CPUs probe in turn.
 pub(crate) fn kernel_va0_faults() -> Outcome {
-    let me = per_cpu_init::current().cpu_id;
+    // The registry is pinned, so the hint is its CPU.
+    let me = thread_init::current_cpu();
     let online = per_cpu_init::online_mask();
     for cpu in (0..64u32).filter(|c| online & (1u64 << c) != 0) {
         let r = if cpu == me {
