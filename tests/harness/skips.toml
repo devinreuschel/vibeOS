@@ -193,3 +193,8 @@ smp = 1
 name = "reschedule_ipi_wake_ap"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "rng_pool_no_dup"
+reason = "one CPU"
+smp = 1
