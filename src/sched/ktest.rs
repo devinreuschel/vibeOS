@@ -416,7 +416,7 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
 const SPAWN_EXIT_N: usize = 2000;
 
 fn spawn_until_dead(name: &'static str) -> Outcome {
-    let _g = crate::arch::current::InterruptGuard::enter();
+    let _g = crate::sched::irqoff::deliberate("spawn with IF off until the thread is dead");
     let Ok(h) = thread_init::spawn_here(name, dying_entry) else {
         return Outcome::Fail("spawn");
     };
@@ -678,7 +678,7 @@ pub(crate) fn spawn_stack_oom() -> Outcome {
     let base = quiescent_free_frames();
     // IF off on this CPU keeps the drained window short.
     let (drained, r) = {
-        let _g = crate::arch::current::InterruptGuard::enter();
+        let _g = crate::sched::irqoff::deliberate("OOM test's drained-buddy window");
         let drained = drain_buddy(&mut held);
         let r = if drained {
             Some(thread_init::spawn("oom", dying_entry_s08))
