@@ -14,6 +14,7 @@
 //! 5. `execve` accepts an argument that is not UTF-8: a forked child runs
 //!    `/hello` (which exits 42) with one, and exits 100 + errno if
 //!    `execve` returns.
+//! 6. `lseek` on the console returns `ESPIPE`.
 
 #![no_std]
 #![no_main]
@@ -32,14 +33,17 @@ const RAW_MISSING: &core::ffi::CStr = c"/tmp/\xffx";
 /// The program case 5 runs, and its exit status.
 const HELLO: &core::ffi::CStr = c"/hello";
 const HELLO_EXIT: u8 = 42;
+/// Linux `SEEK_CUR`, from `include/uapi/linux/fs.h`.
+const SEEK_CUR: u32 = 1;
 
 fn main(_env: &Env) -> i32 {
-    let cases: [fn() -> bool; 5] = [
+    let cases: [fn() -> bool; 6] = [
         read_wronly_ebadf,
         write_rdonly_ebadf,
         dup_full_emfile,
         open_raw_bytes,
         execve_raw_arg,
+        lseek_console_espipe,
     ];
     for (i, case) in cases.iter().enumerate() {
         if !case() {
@@ -140,6 +144,11 @@ fn execve_raw_arg() -> bool {
     // reference covers, and nothing through the null rusage; established here.
     let r = unsafe { sys::wait4(pid as i32, &raw mut status, 0, core::ptr::null_mut()) };
     r == Ok(pid) && sys::exit_code(status as u32) == Some(HELLO_EXIT)
+}
+
+/// Case 6: fd 1 is the console.
+fn lseek_console_espipe() -> bool {
+    sys::lseek(1, 0, SEEK_CUR) == Err(Errno::ESPIPE)
 }
 
 /// Close `fd`; whether it closed.

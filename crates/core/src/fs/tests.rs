@@ -957,3 +957,180 @@ fn disk_errors_are_fs_error() {
         crate::kerror::KError::from(FsError::Corrupt).errno()
     );
 }
+
+/// One test per `FsError` variant: its errno through the E2 table is
+/// Linux's for the condition (ROADMAP §10.4, E2, F083), and it names
+/// itself.
+mod fs_error_errno_per_variant {
+    use crate::fs::FsError;
+    use crate::kerror::KError;
+
+    macro_rules! per_variant {
+        ($($name:ident: $v:ident => $errno:literal,)*) => {
+            $(
+                #[test]
+                fn $name() {
+                    assert_eq!(KError::from(FsError::$v).errno(), $errno);
+                    assert!(!FsError::$v.as_str().is_empty());
+                }
+            )*
+
+            /// Each variant and Linux's errno for it, for
+            /// [`super::fs_error_errno_per_variant`].
+            pub(super) const ROWS: &[(FsError, i32)] = &[$((FsError::$v, $errno)),*];
+
+            /// Every variant has its test above: a new variant fails to
+            /// compile here until it gets one.
+            #[test]
+            fn every_variant_listed() {
+                for e in [$(FsError::$v),*] {
+                    match e {
+                        $(FsError::$v => {})*
+                    }
+                }
+            }
+        };
+    }
+
+    per_variant! {
+        not_found: NotFound => 2,
+        exists: Exists => 17,
+        not_dir: NotDir => 20,
+        is_dir: IsDir => 21,
+        inval: Inval => 22,
+        no_space: NoSpace => 28,
+        loop_: Loop => 40,
+        name_too_long: NameTooLong => 36,
+        not_empty: NotEmpty => 39,
+        busy: Busy => 16,
+        badf: Badf => 9,
+        not_supp: NotSupp => 95,
+        io: Io => 5,
+        file_too_big: FileTooBig => 27,
+        no_mem: NoMem => 12,
+        again: Again => 11,
+        corrupt: Corrupt => 5,
+        nfile: NFile => 23,
+        perm: Perm => 1,
+        spipe: SPipe => 29,
+        xdev: XDev => 18,
+    }
+}
+
+/// The whole table at once: every `FsError` variant's errno is Linux's
+/// (the per-variant tests above name each one).
+#[test]
+fn fs_error_errno_per_variant() {
+    use crate::kerror::KError;
+    for &(e, want) in fs_error_errno_per_variant::ROWS {
+        assert_eq!(KError::from(e).errno(), want, "{e:?}");
+    }
+}
+
+/// Each E2 condition, driven through a real backend, returns Linux's errno
+/// (ROADMAP §9.3, §10.4, F052, F057, F083).
+#[test]
+fn fs_error_conditions_errno() {
+    use crate::fs::{fat, vibefs};
+    use crate::kerror::KError;
+    let errno = |e: FsError| KError::from(e).errno();
+
+    // A small FAT volume, written until a write fails: ENOSPC.
+    let mut img = vec![0u8; 64 * 1024];
+    fat::mkfs(&mut img, b"FULL").unwrap();
+    {
+        let mut d = fat::MemDisk::new(&mut img, fat::SEC as u32).unwrap();
+        let mut v = fat::FatVol::mount(&mut d).unwrap();
+        let node = v.create(&mut d, v.info.root_clus, b"fill", false).unwrap();
+        let mut n = fat::FatInode::of_node(&node);
+        let chunk = [0x5au8; 4096];
+        let mut off = 0u64;
+        let e = loop {
+            match v.write_ino(&mut d, &mut n, true, off, false, &chunk) {
+                Ok((k, _)) => off += k as u64,
+                Err(e) => break e,
+            }
+            assert!(off <= 64 * 1024, "the volume never filled");
+        };
+        assert_eq!(errno(e), 28, "{e:?}");
+        // A 2-byte write at `u32::MAX - 1` crosses FAT's 4 GiB file limit:
+        // EFBIG.
+        let e = v
+            .write_ino(&mut d, &mut n, true, u64::from(u32::MAX - 1), false, b"xy")
+            .unwrap_err();
+        assert_eq!(errno(e), 27, "{e:?}");
+    }
+
+    // The same on vibefs: ENOSPC.
+    let mut img = vec![0u8; 256 * 1024];
+    {
+        let mut d = vibefs::MemDisk::new(&mut img).unwrap();
+        let mut v = vibefs::Vol::new();
+        vibefs::mkfs(&mut d, b"full", &mut v).unwrap();
+        v.create(
+            &mut d,
+            vibefs::ROOT_INO,
+            b"fill",
+            InodeKind::Reg,
+            0o644,
+            None,
+        )
+        .unwrap();
+        let ino = v.lookup(&mut d, vibefs::ROOT_INO, b"fill").unwrap().ino;
+        let chunk = [0xa5u8; 4096];
+        let mut off = 0u64;
+        let e = loop {
+            match v.write(&mut d, ino, off, &chunk) {
+                Ok(k) => off += k as u64,
+                Err(e) => break e,
+            }
+            assert!(off <= 256 * 1024, "the volume never filled");
+        };
+        assert_eq!(errno(e), 28, "{e:?}");
+    }
+
+    // `open` on a host `Vfs` whose open-file table is full: ENFILE.
+    let mut v = ram();
+    let mut open = Vec::new();
+    let e = loop {
+        match v.open_path(None, "/f", O_RDWR | O_CREAT, 0o644) {
+            Ok(f) => open.push(f),
+            Err(e) => break e,
+        }
+        assert!(open.len() <= crate::fs::MAX_FILES, "the table never filled");
+    };
+    assert_eq!(errno(e), 23, "{e:?}");
+    for f in open {
+        v.close(f).unwrap();
+    }
+
+    // A vibefs read across an extent whose CRC fails: EIO.
+    let mut img = vec![0u8; 256 * 1024];
+    {
+        let mut d = vibefs::MemDisk::new(&mut img).unwrap();
+        let mut v = vibefs::Vol::new();
+        vibefs::mkfs(&mut d, b"crc", &mut v).unwrap();
+        v.create(&mut d, vibefs::ROOT_INO, b"x", InodeKind::Reg, 0o644, None)
+            .unwrap();
+        let ino = v.lookup(&mut d, vibefs::ROOT_INO, b"x").unwrap().ino;
+        v.write(&mut d, ino, 0, &[7u8; 200]).unwrap();
+        v.sync(&mut d).unwrap();
+    }
+    let (block, meta, sup) = (vibefs::BLOCK, vibefs::MAGIC_META, vibefs::MAGIC_SUPER);
+    let blk = (4..img.len() / block)
+        .find(|b| {
+            let m = u32::from_le_bytes(img[b * block..b * block + 4].try_into().unwrap());
+            m != meta && m != sup
+        })
+        .unwrap();
+    img[blk * block] ^= 0xff;
+    {
+        let mut d = vibefs::MemDisk::new(&mut img).unwrap();
+        let mut v = vibefs::Vol::new();
+        vibefs::mount(&mut d, &mut v).unwrap();
+        let ino = v.lookup(&mut d, vibefs::ROOT_INO, b"x").unwrap().ino;
+        let mut out = [0u8; 200];
+        let e = v.read(&mut d, ino, 0, &mut out).unwrap_err();
+        assert_eq!(errno(e), 5, "{e:?}");
+    }
+}

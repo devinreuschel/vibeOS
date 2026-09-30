@@ -414,11 +414,6 @@ fn truncate_zero_dirent_cluster() {
 }
 
 #[test]
-fn error_strings() {
-    assert_eq!(FatError::NotSupp.as_str(), "not supp");
-}
-
-#[test]
 fn fixed_tables_match_limits() {
     assert_eq!(Node::EMPTY.name.len(), crate::limits::MAX_NAME);
 }

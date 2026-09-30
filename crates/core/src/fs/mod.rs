@@ -32,6 +32,7 @@
 //!
 //! Tables are static; do not allocate under the lock. No FS work from hard IRQ (DESIGN §2.2).
 
+mod error;
 pub mod fat;
 mod file;
 mod inode;
@@ -41,6 +42,7 @@ mod ramfs;
 pub mod vibefs;
 mod walk;
 
+pub use error::FsError;
 pub use file::{FileId, FileRef, SeekFrom};
 pub use ramfs::{RamFs, RamState};
 pub use walk::{WalkCall, WalkReply, WalkStep, Walker, split_basename};
@@ -91,80 +93,6 @@ pub const O_CLOEXEC: u32 = 0x80000;
 pub const SEEK_SET: u32 = 0;
 pub const SEEK_CUR: u32 = 1;
 pub const SEEK_END: u32 = 2;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum FsError {
-    NotFound,
-    Exists,
-    NotDir,
-    IsDir,
-    Inval,
-    NoSpace,
-    Loop,
-    NameTooLong,
-    NotEmpty,
-    Busy,
-    Badf,
-    NotSupp,
-    Io,
-    /// Past a filesystem's maximum file size.
-    FileTooBig,
-    /// A kernel heap allocation failed (DESIGN §4.4).
-    NoMem,
-    /// Nothing to return now, and the caller may try again: `/dev/random`
-    /// when no hardware source has a byte (ROADMAP §10.12).
-    Again,
-    /// On-disk data failed a check: a bad checksum, magic, or structure
-    /// (FAT, vibefs).
-    Corrupt,
-}
-
-/// A filesystem error's Linux errno at the syscall boundary (SYSCALL.md §2).
-impl From<FsError> for crate::kerror::KError {
-    fn from(e: FsError) -> Self {
-        match e {
-            FsError::NotFound => Self::NoEnt,
-            FsError::Exists => Self::Exist,
-            FsError::NotDir => Self::NotDir,
-            FsError::IsDir => Self::IsDir,
-            FsError::Inval => Self::Inval,
-            FsError::NoSpace => Self::MFile,
-            FsError::NameTooLong => Self::NameTooLong,
-            FsError::Busy => Self::Busy,
-            FsError::Badf => Self::BadF,
-            FsError::Io => Self::Io,
-            FsError::FileTooBig => Self::FBig,
-            FsError::NoMem => Self::NoMem,
-            FsError::Again => Self::Again,
-            FsError::Loop | FsError::NotEmpty | FsError::NotSupp | FsError::Corrupt => Self::Inval,
-        }
-    }
-}
-
-impl FsError {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FsError::NotFound => "not found",
-            FsError::Exists => "exists",
-            FsError::NotDir => "not dir",
-            FsError::IsDir => "is dir",
-            FsError::Inval => "inval",
-            FsError::NoSpace => "no space",
-            FsError::Loop => "loop",
-            FsError::NameTooLong => "name too long",
-            FsError::NotEmpty => "not empty",
-            FsError::Busy => "busy",
-            FsError::Badf => "badf",
-            FsError::NotSupp => "not supp",
-            FsError::Io => "io",
-            FsError::FileTooBig => "file too big",
-            FsError::NoMem => "no memory",
-            FsError::Again => "again",
-            FsError::Corrupt => "corrupt",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InodeKind {

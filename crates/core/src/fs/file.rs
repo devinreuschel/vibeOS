@@ -149,7 +149,7 @@ impl Vfs {
             .files
             .iter()
             .position(|f| !f.used)
-            .ok_or(FsError::NoSpace)?;
+            .ok_or(FsError::NFile)?;
         let mrefs = self.mounts[mount as usize]
             .refs
             .checked_add(1)

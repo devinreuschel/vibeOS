@@ -307,7 +307,7 @@ pub(super) fn sys_lseek(fd: u32, off: i64, whence: u32) -> SysResult {
                 Err(e) => Err(KError::from(e)),
             }
         }
-        FdKind::Console => Err(KError::Inval),
+        FdKind::Console => Err(KError::SPipe),
         FdKind::None => Err(KError::BadF),
     }
 }

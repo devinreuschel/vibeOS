@@ -229,6 +229,8 @@ GONE: list[tuple[str, str]] = [
     ("load_errno", "one `KError` with `From` for"),
     ("spawn_errno", "one `KError` with `From` for"),
     ("to_fs", "`fat::FatError` and `vibefs::Error`, two copies"),
+    ("crates/core/src/fs/fat/tests.rs: fn error_strings", "the E2 table gives each"),
+    ("error_strings_cover", "the E2 table gives each"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
