@@ -417,6 +417,8 @@ fn registry_main() {
     // `n` and the loop ask the same two predicates.
     assert_eq!(runs, n, "ktest: runs made != begin count");
     crate::sched::ktest::report();
+    #[cfg(feature = "irqoff")]
+    crate::sched::irqoff::report();
     crate::marker!("vibeOS: ktest: end");
     qemu_exit(if failed { EXIT_FAIL } else { EXIT_PASS });
 }

@@ -351,6 +351,11 @@ extern "C" fn boot_rest() -> ! {
     );
     crate::marker!(marker::SCHED_CPU0);
     crate::marker!(marker::IRQ_ENABLED);
+    #[cfg(feature = "irqoff")]
+    crate::sched::irqoff::start(
+        |name, entry| thread_init::spawn(name, entry).is_ok(),
+        thread_init::sleep_ms,
+    );
 
     // DESIGN §3.3 step 17. After the scheduler: APs enter as idle.
     // IPI vectors are in the shared IDT; install the shootdown hook

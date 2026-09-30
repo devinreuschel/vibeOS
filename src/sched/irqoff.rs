@@ -11,6 +11,8 @@
 //! before a CPU's first `sti`, which arms it, so no hook reads `gs:` on an
 //! AP before its per-CPU base is loaded.
 
+#[cfg(feature = "irqoff")]
+pub use vibeos::sched::irqoff::BOUND_NS;
 pub use vibeos::sched::irqoff::Site;
 
 #[cfg(feature = "kernel_tests")]
@@ -100,10 +102,60 @@ pub fn deliberate(reason: &'static str) -> DeliberateGuard {
     DeliberateGuard { _irq: irq }
 }
 
+/// Print the bound and start the reporter thread, which prints what
+/// changed every 100 ms of guest time. `main` calls it right after
+/// `irq: enabled`, passing the scheduler's spawn (`true` when the thread
+/// started) and sleep: `thread_init` calls this module's hooks, so this
+/// module takes those two as arguments (DESIGN §1.2). A spawn failure is a
+/// recorded error state (DESIGN §2.5): the boot goes on, and only the
+/// ktest runner's report prints.
+#[cfg(feature = "irqoff")]
+pub fn start(spawn: fn(&'static str, fn()) -> bool, sleep_ms: fn(u64)) {
+    crate::marker!("vibeOS: irqoff: on bound {} ns", BOUND_NS);
+    // Release: pairs with the Acquire load in `reporter`, which runs only
+    // once the spawn below has read it.
+    SLEEP_MS.store(
+        sleep_ms as *mut (),
+        vibeos::atomic::statics::Ordering::Release,
+    );
+    if !spawn("irqoff", reporter) {
+        crate::marker!("vibeOS: irqoff: no reporter");
+    }
+}
+
+/// `start`'s `sleep_ms`, a `fn(u64)`.
+#[cfg(feature = "irqoff")]
+static SLEEP_MS: vibeos::atomic::statics::AtomicPtr<()> =
+    vibeos::atomic::statics::AtomicPtr::new(core::ptr::null_mut());
+
+#[cfg(feature = "irqoff")]
+fn reporter() {
+    // Acquire: pairs with the Release store in `start`.
+    let p = SLEEP_MS.load(vibeos::atomic::statics::Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `SLEEP_MS` holds a `fn(u64)`;
+    // established by `sched::irqoff::start`, its only store.
+    let sleep_ms = unsafe { core::mem::transmute::<*mut (), fn(u64)>(p) };
+    loop {
+        sleep_ms(100);
+        report();
+    }
+}
+
+/// Print, for each site whose counts changed since the last report, its
+/// cumulative lines (`over`, `site`, `deliberate`, `unmatched`), and
+/// `dropped` when the site table has turned sites away.
+#[cfg(feature = "irqoff")]
+pub fn report() {
+    tracer::report();
+}
+
 #[cfg(feature = "irqoff")]
 mod tracer {
     use vibeos::arch::{CycleCounter, InterruptMask};
-    use vibeos::atomic::statics::{AtomicBool, AtomicU64, Ordering};
+    use vibeos::atomic::statics::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use vibeos::sched::irqoff::{SiteTable, Stretch, close};
 
     use super::Site;
@@ -204,6 +256,10 @@ mod tracer {
             deliberate: cpu.deliberate.load(Ordering::Relaxed),
         };
         let c = close(&s, now, freq);
+        #[cfg(feature = "kernel_tests")]
+        if testing::take(c.ns, s.site, s.deliberate) {
+            return;
+        }
         if let Some(st) = SITES.get_or_insert(s.site) {
             st.record(c, s.deliberate);
         }
@@ -219,7 +275,9 @@ mod tracer {
             return;
         }
         cpu.deliberate.store(true, Ordering::Relaxed);
-        if let Some(st) = SITES.get_or_insert(site_of(bits)) {
+        if !testing::capturing()
+            && let Some(st) = SITES.get_or_insert(site_of(bits))
+        {
             st.set_reason(reason);
         }
     }
@@ -271,5 +329,138 @@ mod tracer {
             let e = cpu.exempt.load(Ordering::Relaxed);
             cpu.exempt.store(e.saturating_add(spent), Ordering::Relaxed);
         }
+    }
+
+    /// `dropped` as the last report printed it.
+    static REPORTED_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+    // Relaxed: counters; a report is a snapshot, and a racing record
+    // shows in the next one.
+    pub(super) fn report() {
+        for st in SITES.iter() {
+            let site = st.site();
+            let n = st.count.load(Ordering::Relaxed);
+            let over = st.over.load(Ordering::Relaxed);
+            let delib = st.deliberate.load(Ordering::Relaxed);
+            let unmatched = st.unmatched.load(Ordering::Relaxed);
+            let max = st.max_ns.load(Ordering::Relaxed);
+            if st.reported_over.swap(over, Ordering::Relaxed) != over {
+                crate::marker!("vibeOS: irqoff: over {} n {} max {} ns", site, over, max);
+            }
+            if st.reported_count.swap(n, Ordering::Relaxed) != n {
+                crate::marker!(
+                    "vibeOS: irqoff: site {} n {} over {} max {} ns p99 {} ns",
+                    site,
+                    n,
+                    over,
+                    max,
+                    st.hist.percentile(990)
+                );
+            }
+            if st.reported_deliberate.swap(delib, Ordering::Relaxed) != delib {
+                crate::marker!(
+                    "vibeOS: irqoff: deliberate {} n {} max {} ns {}",
+                    site,
+                    delib,
+                    st.deliberate_max_ns.load(Ordering::Relaxed),
+                    st.reason()
+                );
+            }
+            if st.reported_unmatched.swap(unmatched, Ordering::Relaxed) != unmatched {
+                crate::marker!("vibeOS: irqoff: unmatched {} n {}", site, unmatched);
+            }
+        }
+        let dropped = SITES.dropped();
+        if REPORTED_DROPPED.swap(dropped, Ordering::Relaxed) != dropped {
+            crate::marker!("vibeOS: irqoff: dropped {}", dropped);
+        }
+    }
+
+    /// The in-guest tests' capture (`sched::irqoff::testing`).
+    #[cfg(feature = "kernel_tests")]
+    pub(super) mod testing {
+        use super::{AtomicBool, AtomicU64, Ordering, Site};
+
+        static CAPTURE: AtomicBool = AtomicBool::new(false);
+        static NS: AtomicU64 = AtomicU64::new(0);
+        static SITE: AtomicU64 = AtomicU64::new(0);
+        static DELIBERATE: AtomicBool = AtomicBool::new(false);
+        static SET: AtomicBool = AtomicBool::new(false);
+
+        pub(in crate::sched::irqoff) fn capturing() -> bool {
+            // Acquire: pairs with the Release store in `begin`.
+            CAPTURE.load(Ordering::Acquire)
+        }
+
+        pub(in crate::sched::irqoff) fn begin() {
+            SET.store(false, Ordering::Relaxed);
+            NS.store(0, Ordering::Relaxed);
+            // Release: a hook that sees the capture on sees the reset.
+            CAPTURE.store(true, Ordering::Release);
+        }
+
+        pub(in crate::sched::irqoff) fn end() {
+            CAPTURE.store(false, Ordering::Release);
+        }
+
+        /// While capturing, keep the longest stretch that closes, out of
+        /// the tables; `true` when it was taken.
+        pub(in crate::sched::irqoff) fn take(ns: u64, site: Site, deliberate: bool) -> bool {
+            if !capturing() {
+                return false;
+            }
+            // Relaxed: the test reads the slot after its own stretch closed
+            // on its own CPU; a racing capture on another CPU is the test's
+            // to reject by site.
+            if !SET.load(Ordering::Relaxed) || ns > NS.load(Ordering::Relaxed) {
+                NS.store(ns, Ordering::Relaxed);
+                SITE.store(site.bits(), Ordering::Relaxed);
+                DELIBERATE.store(deliberate, Ordering::Relaxed);
+                SET.store(true, Ordering::Relaxed);
+            }
+            true
+        }
+
+        pub(in crate::sched::irqoff) fn last() -> Option<(u64, Site, bool)> {
+            if !SET.load(Ordering::Relaxed) {
+                return None;
+            }
+            // SAFETY: invariant: `SITE` holds `Site::bits` values only;
+            // established by `sched::irqoff::take` (the tracer's capture
+            // hook), its only store.
+            let site = unsafe { Site::from_bits(SITE.load(Ordering::Relaxed)) };
+            Some((
+                NS.load(Ordering::Relaxed),
+                site,
+                DELIBERATE.load(Ordering::Relaxed),
+            ))
+        }
+    }
+}
+
+/// The in-guest tests' view of the tracer: while a [`testing::CaptureGuard`]
+/// lives, the longest stretch that closes is kept for [`testing::last`]
+/// instead of the site tables, so a test's own over-bound stretch logs
+/// nothing.
+#[cfg(all(feature = "kernel_tests", feature = "irqoff"))]
+pub mod testing {
+    use super::Site;
+
+    pub struct CaptureGuard(());
+
+    pub fn capture() -> CaptureGuard {
+        super::tracer::testing::begin();
+        CaptureGuard(())
+    }
+
+    impl Drop for CaptureGuard {
+        fn drop(&mut self) {
+            super::tracer::testing::end();
+        }
+    }
+
+    /// The longest stretch closed since [`capture`]: ns, site, deliberate.
+    pub fn last() -> Option<(u64, Site, bool)> {
+        super::tracer::testing::last()
     }
 }

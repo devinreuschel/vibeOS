@@ -3,6 +3,8 @@
 mod counted;
 mod depth;
 mod hooks;
+#[cfg(feature = "irqoff")]
+mod irqoff;
 mod reclaim;
 mod registry;
 mod requeue;
@@ -12,6 +14,8 @@ pub(crate) use depth::{
     record, report, stack_depth_exit_scan, stack_depth_planted, wait_exit_depth,
 };
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
+#[cfg(feature = "irqoff")]
+pub(crate) use irqoff::{irqoff_deliberate_is_exempt, irqoff_logs_long_stretch};
 pub(crate) use reclaim::dead_list_batched_rounds;
 pub(crate) use registry::{test_ktest_fail_fmt, test_ktest_helpers, test_ktest_rows};
 pub(crate) use requeue::test_requeue_moves_each_dequeue;
@@ -1486,4 +1490,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("stack_depth_planted", stack_depth_planted)
         .opt_in()
         .once(),
+    #[cfg(feature = "irqoff")]
+    test("irqoff_logs_long_stretch", irqoff_logs_long_stretch),
+    #[cfg(feature = "irqoff")]
+    test("irqoff_deliberate_is_exempt", irqoff_deliberate_is_exempt),
 ];
