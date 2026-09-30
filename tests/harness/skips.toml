@@ -123,3 +123,8 @@ smp = 1
 name = "exit_burst"
 reason = "needs 2 cpus"
 smp = 1
+
+[[skip]]
+name = "force_kernel_irq_window"
+reason = "needs 2 CPUs"
+smp = 1
