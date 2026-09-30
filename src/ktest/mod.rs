@@ -642,6 +642,7 @@ pub(crate) fn free_frame(pa: PhysAddr) {
 }
 
 pub(crate) struct Fault {
+    #[cfg(target_arch = "x86_64")]
     pub(crate) cr2: u64,
     pub(crate) error: u64,
 }
@@ -651,6 +652,7 @@ pub(crate) fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
     // restore IF; the guard restores it.
     let _g = InterruptGuard::enter();
     arch::catch::catch(vectors::PF, f).map(|c| Fault {
+        #[cfg(target_arch = "x86_64")]
         cr2: c.cr2,
         error: c.error,
     })
@@ -985,6 +987,7 @@ pub(crate) mod fid {
 
 /// CPUID.01H:ECX[31] (a hypervisor is present) and leaf `0x4000_0000`
 /// naming it `KVMKVMKVM\0\0\0`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn on_kvm() -> bool {
     let (_, _, ecx1, _) = x86::cpuid(1, 0);
     if ecx1 & (1 << 31) == 0 {

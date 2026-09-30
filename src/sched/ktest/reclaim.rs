@@ -10,7 +10,6 @@ use crate::kva_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
-use crate::x86;
 
 /// Stacks [`dead_list_batched_rounds`] parks on CPU 0's dead list.
 const PARKED_STACKS: usize = 64;
@@ -48,7 +47,7 @@ pub(crate) fn dead_list_batched_rounds() -> Outcome {
     {
         // IF off: this CPU's worker cannot run until every stack is on
         // the list, so it takes all of them at once.
-        let _g = x86::InterruptGuard::enter();
+        let _g = crate::arch::current::InterruptGuard::enter();
         for s in stacks.iter_mut().filter_map(Option::take) {
             thread_init::testing::park_on_local_list(s);
         }
