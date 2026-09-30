@@ -30,7 +30,7 @@ use vibeos::virtio_blk::{
     CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
     F_FLUSH, F_MQ, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
     logical_capacity, map_status, nq_from_config, pack_discard, pack_header, pick_blk_size,
-    pick_features, queue_size, sector_for_lba,
+    pick_features, queue_size, refuse_read_only, sector_for_lba,
 };
 
 use crate::arch::{self, current::Arch};
@@ -767,6 +767,8 @@ impl VirtioBlk {
                 }
             }
         }
+        // After the range checks, so a bad range is still `Inval`.
+        refuse_read_only(self.features.load(Ordering::Acquire), op)?;
         Ok(req)
     }
 

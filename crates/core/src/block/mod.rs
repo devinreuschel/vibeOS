@@ -67,6 +67,9 @@ pub enum BlockError {
     Gone,
     /// A device of that name or id is already registered.
     Exists,
+    /// A write or discard to a read-only device (virtio-blk `F_RO`). Not
+    /// retried: the device refuses every such request.
+    ReadOnly,
 }
 
 impl BlockError {
@@ -79,6 +82,7 @@ impl BlockError {
             BlockError::NoMem => "no memory",
             BlockError::Gone => "gone",
             BlockError::Exists => "exists",
+            BlockError::ReadOnly => "read-only",
         }
     }
 

@@ -4,7 +4,7 @@
 //! OASIS virtio-blk constants. Kernel MMIO / VQ / IRQ live in
 //! `virtio_blk_init`.
 
-use crate::block::BlockError;
+use crate::block::{BlockError, Op};
 use crate::virtio::{self, F_EVENT_IDX, F_INDIRECT_DESC, F_VERSION_1};
 
 /// virtio-blk feature bits (device-specific, not transport).
@@ -19,8 +19,11 @@ pub const F_CONFIG_WCE: u64 = 1 << 11;
 pub const F_MQ: u64 = 1 << 12;
 pub const F_DISCARD: u64 = 1 << 13;
 
-/// Transport + blk features we will accept. Never [`F_RO`].
+/// Transport + blk features we will accept. [`F_RO`] is accepted: the
+/// driver then sends the device no write or discard (virtio 1.2
+/// §5.2.6.1), see [`refuse_read_only`].
 pub const OFFER: u64 = F_VERSION_1
+    | F_RO
     | F_INDIRECT_DESC
     | F_EVENT_IDX
     | F_SIZE_MAX
@@ -126,6 +129,15 @@ pub fn map_status(st: u8) -> Result<(), BlockError> {
         S_UNSUPP => Err(BlockError::Inval),
         _ => Err(BlockError::Io),
     }
+}
+
+/// `ReadOnly` for a write or discard on a device that negotiated
+/// [`F_RO`], before anything is queued; reads and flushes go on.
+pub fn refuse_read_only(feat: u64, op: Op) -> Result<(), BlockError> {
+    if feat & F_RO != 0 && op.writes_media() {
+        return Err(BlockError::ReadOnly);
+    }
+    Ok(())
 }
 
 /// The fewest descriptors a queue needs: one read or write chain is a
@@ -237,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn version1_required_and_no_ro() {
+    fn version1_required_and_ro_accepted() {
         assert_eq!(
             pick_features(F_FLUSH | F_BLK_SIZE),
             Err(virtio::VirtioError::NoVersion1)
@@ -247,11 +259,24 @@ mod tests {
         assert_eq!(f & F_FLUSH, F_FLUSH);
         assert_eq!(f & F_MQ, F_MQ);
         assert_eq!(f & F_DISCARD, F_DISCARD);
-        assert_eq!(f & F_RO, 0);
+        assert_eq!(f & F_RO, F_RO);
         assert_eq!(nq_from_config(0, 8, 8), 1);
         assert_eq!(nq_from_config(F_MQ, 4, 8), 4);
         assert_eq!(nq_from_config(F_MQ, 8, 2), 2);
         assert_eq!(nq_from_config(F_MQ, 0, 4), 1);
+    }
+
+    #[test]
+    fn read_only_refuses_write_and_discard() {
+        for op in [Op::Write, Op::Discard] {
+            assert_eq!(refuse_read_only(F_RO, op), Err(BlockError::ReadOnly));
+            assert_eq!(refuse_read_only(F_FLUSH, op), Ok(()));
+        }
+        for op in [Op::Read, Op::Flush] {
+            assert_eq!(refuse_read_only(F_RO | F_FLUSH, op), Ok(()));
+        }
+        assert!(!BlockError::ReadOnly.retryable());
+        assert_eq!(BlockError::ReadOnly.as_str(), "read-only");
     }
 
     #[test]

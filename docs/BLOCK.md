@@ -263,7 +263,9 @@ blocks. Discard on ramdisk validates the range and otherwise no-ops.
 ## 10.4 virtio-blk
 
 Modern virtio-blk (`1af4:1042`, `VERSION_1` required) binds by id on the
-Phase 6 transport. Each bound function is its own instance (`VirtioBlk`), owned by its PCI
+Phase 6 transport. `F_RO` is accepted: on a read-only device a write or
+discard fails with `ReadOnly` before it is queued, with no retry, and reads
+and flushes go on (virtio 1.2 §5.2.6.1). Each bound function is its own instance (`VirtioBlk`), owned by its PCI
 registry entry and named `vda`, `vdb`, … in bind order, with its own queues, bounce slots and
 vectors; the driver keeps no list of them (DEVICES.md §12.1 rule 1). Config reads capacity (512-byte units), `blk_size` (512
 if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
