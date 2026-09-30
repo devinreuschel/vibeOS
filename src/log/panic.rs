@@ -385,16 +385,21 @@ pub(crate) fn frame_fields(
     }
 }
 
+/// An exception's dump: `frame` is the interrupted context's hardware
+/// frame and `rbp` its `rbp` as the entry stub saved it (the trap frame's
+/// user words), where the `vibeOS: regs:` line and the backtrace start
+/// (DESIGN §2.5 step 4, F070).
 pub fn exception_halt(
     kind: &[u8],
     frame: &InterruptFrame,
+    rbp: u64,
     err: Option<u64>,
     cr2: Option<u64>,
 ) -> ! {
     begin_dump(CrashRegs {
         rip: frame.rip,
         rsp: frame.rsp,
-        rbp: x86::read_rbp(),
+        rbp,
         rflags: frame.rflags,
     });
     line(|w| {
@@ -402,15 +407,22 @@ pub fn exception_halt(
         w.push_bytes(kind);
         frame_fields(w, frame, err, cr2);
     });
-    dump_common(frame.rip, x86::read_rbp(), frame.rsp, frame.rflags);
+    dump_common(frame.rip, rbp, frame.rsp, frame.rflags);
     finish();
 }
 
-pub fn exception_vec(n: u8, frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>) -> ! {
+/// [`exception_halt`] for a vector with no mnemonic.
+pub fn exception_vec(
+    n: u8,
+    frame: &InterruptFrame,
+    rbp: u64,
+    err: Option<u64>,
+    cr2: Option<u64>,
+) -> ! {
     begin_dump(CrashRegs {
         rip: frame.rip,
         rsp: frame.rsp,
-        rbp: x86::read_rbp(),
+        rbp,
         rflags: frame.rflags,
     });
     line(|w| {
@@ -419,6 +431,6 @@ pub fn exception_vec(n: u8, frame: &InterruptFrame, err: Option<u64>, cr2: Optio
         w.push_bytes(fmt_util::write_dec(n as u64, &mut b));
         frame_fields(w, frame, err, cr2);
     });
-    dump_common(frame.rip, x86::read_rbp(), frame.rsp, frame.rflags);
+    dump_common(frame.rip, rbp, frame.rsp, frame.rflags);
     finish();
 }

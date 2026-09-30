@@ -97,3 +97,31 @@ def check_stop(raw: Iterable[str]) -> None:
         raise HarnessError("panic-stop: no backtrace frame")
     if OWNER_NMI not in lines:
         raise HarnessError(f"panic-stop: no {OWNER_NMI!r} line: the owner's own NMI did not return")
+
+
+def frame_symbols(raw: Iterable[str]) -> list[str]:
+    """The symbol of each backtrace frame line (`  0x<addr> <symbol>[+0x<off>]`),
+    in order; a frame the table did not name gives ""."""
+    out: list[str] = []
+    for t in frame.kernel_lines(raw):
+        if not t.startswith(FRAME_PREFIX):
+            continue
+        parts = t.split()
+        out.append(parts[1].split("+0x", 1)[0] if len(parts) > 1 else "")
+    return out
+
+
+def _names(sym: str, name: str) -> bool:
+    return sym == name or sym.endswith("::" + name)
+
+
+def check_frames_in_order(raw: Iterable[str], names: tuple[str, ...]) -> None:
+    """F070: the backtrace has a frame naming each of `names` (a function's
+    last path segment), each after the one naming the name before it."""
+    syms = frame_symbols(raw)
+    at = 0
+    for name in names:
+        i = next((j for j in range(at, len(syms)) if _names(syms[j], name)), None)
+        if i is None:
+            raise HarnessError(f"backtrace: no frame naming {name!r} in order {names!r}: {syms!r}")
+        at = i + 1

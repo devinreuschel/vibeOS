@@ -159,5 +159,45 @@ class TestCheckStop(unittest.TestCase):
             panic_dump.check_stop(STOP_BOOT + dump)
 
 
+GP_DUMP = k(
+    "vibeOS: #GP rip=0xffffffff8002b6b8 cs=0x8 rflags=0x2 rsp=0x1 ss=0x10 err=0x8",
+    "vibeOS: backtrace:",
+    "  0xffffffff8002b6b8 vibeos::gp_test_fault+0x8",
+    "  0xffffffff8002b6a2 vibeos::gp_test_trip+0x22",
+    "  0xffffffff8002bdc3 vibeos::boot_rest+0x423",
+    "vibeOS: panic: halted",
+)
+
+
+class TestFramesInOrder(unittest.TestCase):
+    def test_in_order_passes(self) -> None:
+        panic_dump.check_frames_in_order(GP_DUMP, ("gp_test_trip", "boot_rest"))
+        panic_dump.check_frames_in_order(GP_DUMP, ("gp_test_fault", "gp_test_trip", "boot_rest"))
+
+    def test_reversed_fails(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "gp_test_trip"):
+            panic_dump.check_frames_in_order(GP_DUMP, ("boot_rest", "gp_test_trip"))
+
+    def test_missing_frame_fails(self) -> None:
+        dump = [ln for ln in GP_DUMP if "gp_test_trip" not in ln]
+        with self.assertRaisesRegex(HarnessError, "gp_test_trip"):
+            panic_dump.check_frames_in_order(dump, ("gp_test_trip", "boot_rest"))
+
+    def test_segment_match_only(self) -> None:
+        # `gp_test_trip` does not match a frame for `xgp_test_trip`, nor a
+        # logrec replay or a user copy of a frame line.
+        dump = [ln.replace("vibeos::gp_test_trip", "vibeos::xgp_test_trip") for ln in GP_DUMP]
+        dump += k("vibeOS: logrec: 1ms cpu0 info   0x1 vibeos::gp_test_trip")
+        dump += ["  0xffffffff8002b6a2 vibeos::gp_test_trip+0x22"]
+        with self.assertRaises(HarnessError):
+            panic_dump.check_frames_in_order(dump, ("gp_test_trip", "boot_rest"))
+
+    def test_symbols(self) -> None:
+        self.assertEqual(
+            panic_dump.frame_symbols(GP_DUMP + k("  0x1")),
+            ["vibeos::gp_test_fault", "vibeos::gp_test_trip", "vibeos::boot_rest", ""],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

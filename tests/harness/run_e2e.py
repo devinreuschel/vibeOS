@@ -393,6 +393,10 @@ PANIC_VARIANTS = {
 }
 
 
+# The frames the `#GP` backtrace lists, in this order (ROADMAP §10.7, F070).
+GP_FRAMES = ("gp_test_trip", "boot_rest")
+
+
 def main() -> int:
     panic_variant = env_str("VIBEOS_PANIC_VARIANT", "")
     if panic_variant and panic_variant not in PANIC_VARIANTS:
@@ -425,7 +429,8 @@ def main() -> int:
             "vibeOS: backtrace:",
             "vibeOS: panic: thread",
             ("vibeOS: logrec:", "smp: done"),
-            # `gp_test_trip`'s caller: boot's tail on the bootstrap stack.
+            # `gp_test_trip`'s caller: boot's tail on the bootstrap stack,
+            # which `check_frames_in_order` below also puts after it.
             ("  0x", "boot_rest"),
             "vibeOS: panic: halted",
         )
@@ -479,6 +484,20 @@ def main() -> int:
         print(f"[e2e] FAIL: {e}", file=sys.stderr)
         return 1
     print("[e2e]   . serial online is the first kernel line", file=sys.stderr)
+    if gp_test:
+        # F070: the walk starts at the interrupted frame, so the function
+        # `gp_test_fault` returns to comes first, then its caller. Boot's
+        # tail since P10-S79 is `boot_rest`, on the bootstrap stack, which
+        # a stack switch enters: the walk ends there, above
+        # `normal_boot_tail`.
+        try:
+            panic_dump.check_frames_in_order(result.lines, GP_FRAMES)
+        except HarnessError as e:
+            res.record("marker", "gp_backtrace_order", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", "gp_backtrace_order", "passed")
+        print(f"[e2e]   . backtrace: {' then '.join(GP_FRAMES)}", file=sys.stderr)
     if panic_variant:
         try:
             PANIC_VARIANTS[panic_variant][1](result.lines)

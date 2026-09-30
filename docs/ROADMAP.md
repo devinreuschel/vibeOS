@@ -471,7 +471,7 @@ and a monotonic clock nobody has to distrust.
 **Exit gate**
 - [x] `gdt ok`, `pic: remapped`, `idt ok`, `acpi: xsdt <n> tables`, `time: tsc <n>/ms` in the order [DESIGN §3.3](BOOT.md#33-_start-order) specifies
 - [x] a kernel `int3` returns, and `int3_roundtrip` asserts that the `#BP` handler ran (F142)
-- [x] a deliberate `#GP` prints its interrupt frame (`rip`, `cs`, `rflags`, `rsp`, `ss`), the error code, `cr3`, and the handler's own `rbp` (F070), not the interrupted general-purpose registers, then `vibeOS: panic: halted` (`make test-e2e-gp`) (F141)
+- [x] a deliberate `#GP` prints its interrupt frame (`rip`, `cs`, `rflags`, `rsp`, `ss`), the error code, `cr3`, and the interrupted `rbp` (F070), not the interrupted general-purpose registers, then `vibeOS: panic: halted` (`make test-e2e-gp`) (F141)
 - [x] a deliberate stack overflow lands in the double fault handler on its IST stack, proven by an in-guest test
 - [x] the PIT tick runs at 1 kHz: `pit_tick_rate` counts 40 to 160 ticks over an 80 ms TSC busy-wait in a boot where the PIT drives the tick.
 - [x] TSC calibrated against the HPET when present, PIT channel 2 otherwise, both paths tested

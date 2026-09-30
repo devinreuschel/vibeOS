@@ -438,9 +438,22 @@ extern "C" fn boot_rest() -> ! {
     }
 }
 
+/// The gp-test trip: its own frame, and the fault one call below it, so
+/// the `#GP` backtrace, which starts at the interrupted frame, lists
+/// `gp_test_trip` and then its caller (F070).
 #[cfg(feature = "gp_test")]
+#[inline(never)]
 fn gp_test_trip() {
     crate::marker!("vibeOS: boot: gp-test armed");
+    gp_test_fault();
+    // Code after the call, so it is a call and not a tail jump that would
+    // leave this frame out of the chain.
+    core::hint::black_box(0u8);
+}
+
+#[cfg(feature = "gp_test")]
+#[inline(never)]
+fn gp_test_fault() {
     // Kernel code selector with RPL=3 into DS: not a data segment, #GP.
     // SAFETY: the test-only gp_test build's purpose: the load faults before
     // DS changes, and the #GP handler dumps and halts; established here.

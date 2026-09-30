@@ -726,7 +726,7 @@ fn default_body(frame: &mut TrapFrame) {
     }
     let err = vectors::pushes_error_code(n).then_some(err);
     x86::cli();
-    crate::panic::exception_vec(n, &frame.iret, err, cr2);
+    crate::panic::exception_vec(n, &frame.iret, frame.user().rbp, err, cr2);
 }
 
 fn breakpoint(frame: &mut TrapFrame) {
@@ -745,7 +745,7 @@ fn invalid_opcode(frame: &mut TrapFrame) {
         user_fault(frame);
     }
     x86::cli();
-    crate::panic::exception_halt(b"#UD", &frame.iret, None, None);
+    crate::panic::exception_halt(b"#UD", &frame.iret, frame.user().rbp, None, None);
 }
 
 /// The interrupted registers a frame saved, for the stop primitive's
@@ -768,7 +768,7 @@ fn nmi(frame: &mut TrapFrame) {
     }
     // It runs inside whatever this CPU held: no lock (DESIGN §2.2).
     let _lockless = crate::sync_init::lockless_section();
-    crate::panic::exception_halt(b"nmi", &frame.iret, None, None);
+    crate::panic::exception_halt(b"nmi", &frame.iret, frame.user().rbp, None, None);
 }
 
 /// A CPL-3 `#DB` (a single step, `int1`, a hardware breakpoint) kills the
@@ -789,7 +789,7 @@ fn debug_ex(frame: &mut TrapFrame) {
     // §2.2).
     let _lockless = crate::sync_init::lockless_section();
     x86::cli();
-    crate::panic::exception_halt(b"#DB", &frame.iret, None, None);
+    crate::panic::exception_halt(b"#DB", &frame.iret, frame.user().rbp, None, None);
 }
 
 /// A vector 11, 12 or 13 from ring 3 kills the process and does not
@@ -803,19 +803,37 @@ fn kill_if_user(frame: &mut TrapFrame) {
 fn segment_not_present(frame: &mut TrapFrame) {
     kill_if_user(frame);
     x86::cli();
-    crate::panic::exception_vec(vectors::NP, &frame.iret, Some(frame.error_code), None);
+    crate::panic::exception_vec(
+        vectors::NP,
+        &frame.iret,
+        frame.user().rbp,
+        Some(frame.error_code),
+        None,
+    );
 }
 
 fn stack_fault(frame: &mut TrapFrame) {
     kill_if_user(frame);
     x86::cli();
-    crate::panic::exception_vec(vectors::SS, &frame.iret, Some(frame.error_code), None);
+    crate::panic::exception_vec(
+        vectors::SS,
+        &frame.iret,
+        frame.user().rbp,
+        Some(frame.error_code),
+        None,
+    );
 }
 
 fn general_protection(frame: &mut TrapFrame) {
     kill_if_user(frame);
     x86::cli();
-    crate::panic::exception_halt(b"#GP", &frame.iret, Some(frame.error_code), None);
+    crate::panic::exception_halt(
+        b"#GP",
+        &frame.iret,
+        frame.user().rbp,
+        Some(frame.error_code),
+        None,
+    );
 }
 
 /// Reads CR2 from the frame: with IF=1 a preempting thread's fault can
@@ -834,17 +852,23 @@ fn page_fault(frame: &mut TrapFrame) {
         return;
     }
     x86::cli();
-    crate::panic::exception_halt(b"#PF", &frame.iret, Some(err), Some(cr2));
+    crate::panic::exception_halt(b"#PF", &frame.iret, frame.user().rbp, Some(err), Some(cr2));
 }
 
 fn double_fault(frame: &mut TrapFrame) {
-    crate::panic::exception_halt(b"#DF", &frame.iret, Some(frame.error_code), None);
+    crate::panic::exception_halt(
+        b"#DF",
+        &frame.iret,
+        frame.user().rbp,
+        Some(frame.error_code),
+        None,
+    );
 }
 
 fn machine_check(frame: &mut TrapFrame) {
     // It runs inside whatever this CPU held: no lock (DESIGN §2.2).
     let _lockless = crate::sync_init::lockless_section();
-    crate::panic::exception_halt(b"#MC", &frame.iret, None, None);
+    crate::panic::exception_halt(b"#MC", &frame.iret, frame.user().rbp, None, None);
 }
 
 fn pic_irq(frame: &mut TrapFrame) {

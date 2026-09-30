@@ -452,6 +452,10 @@ Binding order (do not invert):
    From ROADMAP §19.5, every record serial has not printed goes out first (the log contract below),
    unless a capture kernel is loaded (step 6), whose vmcore holds the ring.
 4. Symbolized backtrace when frame pointers exist (in-image sorted table, binary search, no alloc).
+   An exception's dump starts the walk, and its `vibeOS: regs:` line, at the interrupted frame: the
+   `rbp` the entry stub saved in the trap frame, which `panic::exception_halt` and
+   `panic::exception_vec` take from the IDT body, not the handler's own (ROADMAP §10.7, F070); a Rust
+   panic starts at the panic handler's own frame.
    The walk (`vibeos::log::backtrace::walk`, through `panic::walk_known`) follows `rbp` only into a
    known stack (`panic::known_stacks`): the current thread's KVA stack, the boot stack whose bounds
    `_start` records first (`panic::note_boot_stack`, the Limine stack request's size below the first
