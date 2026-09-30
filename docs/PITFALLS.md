@@ -288,24 +288,25 @@ The tick counter and the TSC snapshot were read as two independent relaxed loads
 under a seqlock, release on write, acquire on read, retry on an odd or changed sequence.
 
 **Timestamps go backwards after `hlt` on TCG.**
-QEMU TCG does not set the invariant-TSC CPUID bit. Interpolation can overshoot a late tick, then the
-counter moves and `now_us` drops, even with a stable seqlock pair. A wrapping TSC-behind-snapshot
-delta looks like ~2^64 cycles. Rule: treat a high-bit wrapping delta as extra 0, and never publish a
-`now_ns` below the last reading. Do not cap extra at one tick: across a stretch with IF off, which a
-test may hold on purpose, timeouts must still advance on TSC alone.
+QEMU TCG does not set the invariant-TSC CPUID bit. When `now_ns` interpolated from a tick count, a
+reading could overshoot a late tick, then the tick moved and `now_us` dropped, even with a stable
+seqlock pair, and ticks lost while IF was off stayed lost. Rule: time comes from one free-running
+clocksource, never from a count of timer interrupts, so an IF-off stretch, which a test may hold on
+purpose, loses nothing; a counter narrower than 64 bits is read at least once per half wrap, and a
+reader masks its delta to the counter's width; never publish a `now_ns` below the last reading
+(DESIGN §6.4).
 
 **`sleep_ms(50)` and PIT-vs-HPET calib flake on TCG SMP.**
 TCG has no invariant TSC. Boot HPET calibration runs before APs; a later PIT channel 2 window sees a
-different apparent TSC rate, and LAPIC periodic ticks coalesce so `uptime_ms` during a sleep is not
-50–100. Rule: a timing check measures once and holds one band; it is never retried against a fresh
+different apparent TSC rate, and LAPIC periodic ticks coalesce, which once put `uptime_ms` during a
+sleep outside 50–100 ms when it counted ticks. Rule: a timing check measures once and holds one band; it is never retried against a fresh
 sample, and it gets no wider band where it flakes (§9.8). The PIT-vs-HPET cross-check holds its
 75–125% band only where the TSC is invariant, so without the CPUID bit it skips with the reason
-`no invariant tsc`, and the ROADMAP §10.1 KVM leg, whose guest has the bit, runs it. Not yet
-enforced: `sleep_ms_50` accepts 40–400 ms of `now_us` when ticks coalesce (ROADMAP §10.3). Do not
-loosen the invariant-TSC path. Under KVM too, QEMU leaves the invariant-TSC bit out of `-cpu max`
-and `-cpu host` while the vCPU is migratable, its default, so the KVM leg asks for `+invtsc` and
-fails if the guest still reports none (ROADMAP §10.1). Planned (ROADMAP §10.3): `now_ns` stops
-counting ticks, and the coalescing allowance goes with it.
+`no invariant tsc`, and the ROADMAP §10.1 KVM leg, whose guest has the bit, runs it. `uptime_ms`
+is clocksource time, so coalesced ticks lose none of it, and `sleep_ms_50` holds 50–100 ms of it in
+every tier (DESIGN §6.4). Under KVM too, QEMU leaves the invariant-TSC bit out of `-cpu max` and
+`-cpu host` while the vCPU is migratable, its default, so the KVM leg asks for `+invtsc` and fails
+if the guest still reports none (ROADMAP §10.1).
 
 **Serial output from multiple CPUs is unreadable.**
 No lock on TX. Rule: lock serial TX, and write each line whole: format it, newline included, into one

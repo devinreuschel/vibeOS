@@ -362,9 +362,9 @@ pub(crate) fn test_lapic_timer_mode() -> Outcome {
 pub(crate) fn test_lapic_timer_rearm() -> Outcome {
     match apic_init::timer_mode() {
         TimerMode::Pit => {
-            let t0 = time_init::uptime_ms();
+            let t0 = crate::time::ktest::pit_irqs();
             time_init::busy_wait_ms(50);
-            let dt = time_init::uptime_ms().saturating_sub(t0);
+            let dt = crate::time::ktest::pit_irqs().saturating_sub(t0);
             if (20..=100).contains(&dt) {
                 Outcome::Ok
             } else {

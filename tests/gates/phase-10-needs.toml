@@ -1300,3 +1300,27 @@ needs = [
   "the panic backtrace follows `rbp`",  # L1422
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L556
+[[box]]
+key = "`sleep_ms(50)` returns within 50 to"
+needs = [
+  "`now_ns` is computed from one",  # L1310
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1303
+[[box]]
+key = "the kernel writes the TSS"
+needs = [
+  "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1298
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1308
+[[box]]
+key = "the other safe functions that"
+needs = [
+  "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1298
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

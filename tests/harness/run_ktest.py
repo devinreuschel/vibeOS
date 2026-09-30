@@ -297,6 +297,31 @@ def _hpet_on(cfg: QemuConfig) -> bool:
     return True
 
 
+CLOCKSOURCE_PREFIX = "vibeOS: time: clocksource "
+
+
+def expected_clocksource(cfg: QemuConfig) -> str:
+    """The clocksource a boot of `cfg` must name (DESIGN §6.4, ROADMAP
+    §10.3): `tsc` under KVM, whose guests the harness gives an invariant TSC,
+    so one without it fails instead of testing the HPET again; else `hpet`,
+    or `acpi_pm` with the HPET off. TCG never reports an invariant TSC."""
+    if effective_accel_name(cfg) == "kvm":
+        return "tsc"
+    return "hpet" if _hpet_on(cfg) else "acpi_pm"
+
+
+def check_clocksource(lines: list[str], cfg: QemuConfig) -> None:
+    """The boot's kernel lines hold `vibeOS: time: clocksource <name>` with
+    the name `expected_clocksource` gives for `cfg`. Raises `HarnessError`
+    naming the line it wanted and the one it got."""
+    want = expected_clocksource(cfg)
+    got = [ln for ln in frame.kernel_lines(lines) if ln.startswith(CLOCKSOURCE_PREFIX)]
+    if f"{CLOCKSOURCE_PREFIX}{want}" in got:
+        return
+    seen = got[0] if got else "no clocksource line"
+    raise HarnessError(f"expected {CLOCKSOURCE_PREFIX}{want}, got {seen!r}")
+
+
 def check_boot_cpu(lines: list[str], cfg: QemuConfig) -> None:
     """The boot's timer and TSC match its CPU string (ROADMAP §10.1, F078).
 
@@ -679,9 +704,12 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
     print(f"[ktest] deadline trip: {TRIP_TEST} failed on its deadline", file=sys.stderr)
 
 
-# The hpet=off boot (ROADMAP §10.2): with no HPET and no TSC-deadline the
-# PIT drives the tick, so the opt-in tests that need it run here alone.
-HPET_OFF_KTEST: tuple[str, ...] = ("pit_tick_rate",)
+# The hpet=off boot (ROADMAP §10.2, §10.3): with no HPET and no TSC-deadline
+# the PIT drives the tick and the ACPI PM timer is the clocksource under
+# TCG, so the opt-in tests that need the PIT and the clock tests that need
+# the PM timer run here alone. The PM timer's 24 bits wrap in 4.7 s, so no
+# test that holds CPU 0's interrupts off for seconds runs here.
+HPET_OFF_KTEST: tuple[str, ...] = ("pit_tick_rate", "clocksource_if_off_50ms", "sleep_ms_50")
 NO_TSC_DEADLINE = "-tsc-deadline"
 
 
@@ -707,8 +735,9 @@ def lapic_timer_line(cfg: QemuConfig) -> str:
 
 def check_hpet_off_boot(lines: list[str], exit_code: int | None, cfg: QemuConfig) -> None:
     """The hpet=off boot's verdict: the ktest verdict and skip comparison
-    for `cfg`, the `lapic_timer` marker naming `pit`, and an `ok` line for
-    each test in `HPET_OFF_KTEST`. No block or persist lines are required.
+    for `cfg`, the `lapic_timer` marker naming `pit`, the clocksource line
+    `check_clocksource` wants, and an `ok` line for each test in
+    `HPET_OFF_KTEST`. No block or persist lines are required.
     Raises `HarnessError("hpet=off boot: ...")`."""
     try:
         verdict = check_ktest_output(lines, exit_code)
@@ -721,6 +750,7 @@ def check_hpet_off_boot(lines: list[str], exit_code: int | None, cfg: QemuConfig
         )
         want = lapic_timer_line(cfg)
         _require_line(frame.kernel_lines(lines), lambda ln: ln == want, f"missing {want!r}")
+        check_clocksource(lines, cfg)
         oks = {o.name for o in ktest_summary(lines).oks}
         for name in HPET_OFF_KTEST:
             if name not in oks:
@@ -774,6 +804,7 @@ def main(argv: list[str] | None = None) -> int:
             raw = _ktest_boot(
                 cfg, env.timeout, persist_reboot=False, label=env.tier, scale=env.timeout_scale
             )
+            check_clocksource(raw.lines, cfg)
         except HarnessError as e:
             print(f"[ktest] FAIL: {e}", file=sys.stderr)
             return 1

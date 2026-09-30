@@ -376,6 +376,7 @@ extern "C" fn boot_rest() -> ! {
     // ready, and the trampoline page identity-mapped and kept from the PMM
     // (`pmm_init::init`), as `smp_init::init` requires; established here.
     unsafe { smp_init::init() };
+    time_init::confirm_clocksource();
     diag::cpus();
 
     // DESIGN §3.3 live: after smp: done. Handler, 8042, then unmask IRQ1.

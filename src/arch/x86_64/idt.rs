@@ -876,8 +876,7 @@ fn pic_irq(frame: &mut TrapFrame) {
 }
 
 fn pit_irq(_frame: &mut TrapFrame) {
-    let tsc = crate::time_init::read_tsc();
-    crate::time_init::on_pit_tick(tsc);
+    crate::time_init::on_pit_tick();
     crate::time_init::eoi_pit();
     crate::sched_init::on_timer_tick();
 }
