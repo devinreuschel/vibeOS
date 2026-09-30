@@ -191,7 +191,7 @@ children, need no row.
 | time | `time/mod.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
 | irq | `irq/{mod,ipi,stop}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |
-| smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
+| smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init,hang_test}.rs` |
 | sched | `sched/{mod,thread,wait,work,fpu,stack_depth}.rs` | `sched/{mod,sched_init,work_init}.rs`, `sched/thread_init/{ap,boot,mod,table,testing}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
 | log | `log/{mod,backtrace,line,pvpanic,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs`, `log/vmcore/{mod,sig,synth,tables,tests,walk}.rs` | `log/{mod,log_init,panic,panic_test,pvpanic_init,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |

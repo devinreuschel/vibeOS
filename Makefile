@@ -42,6 +42,7 @@ ISO_PANIC_STOP   := build/vibeos-panic-stop.iso
 ISO_KTEST        := build/vibeos-ktest.iso
 ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
 ISO_INIT_FAULT   := build/vibeos-init-fault.iso
+ISO_HANG         := build/vibeos-hang.iso
 
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
@@ -141,6 +142,8 @@ $(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_S
 $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
 # vibefs-crash: write-loop kernel for QEMU-kill fsck
 $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
+# hang: every CPU hangs after smp: done, for the forensics tier's cores
+$(eval $(call KERNEL_VARIANT,hang,--features hang_test,$(ISO_HANG)))
 KERNEL_ELF := build/kernels/vibeos-default.elf
 
 ifneq ($(VIBEOS_PREBUILT),1)

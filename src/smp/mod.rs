@@ -1,5 +1,7 @@
 //! SMP: the kernel half of subsystem `smp` (DESIGN §1.3).
 
+#[cfg(feature = "hang_test")]
+pub(crate) mod hang_test;
 #[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,
