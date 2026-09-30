@@ -6,6 +6,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::fs::{FsError, MAX_PATH};
+use vibeos::kalloc::TryVec;
 use vibeos::limits::MAX_OPEN_FILES;
 
 use crate::file_init;
@@ -81,9 +82,13 @@ pub(super) fn open_counts() -> u32 {
     fs_init::with(|v| v.stats.opens)
 }
 
-/// Each open-file slot's `(used, refs, gen)`.
-pub(super) fn table() -> [(bool, u16, u16); MAX_OPEN_FILES] {
-    fs_init::with(|v| v.file_table())
+/// Each open-file slot's `(used, refs, gen)`, in a heap table allocated
+/// before the VFS lock; `None` when it cannot be.
+pub(super) fn table() -> Option<TryVec<(bool, u16, u16)>> {
+    let mut t = vibeos::limits::table(MAX_OPEN_FILES, || (false, 0, 0)).ok()?;
+    let n = fs_init::with(|v| v.file_table(&mut t));
+    t.truncate(n);
+    Some(t)
 }
 
 /// `path` made absolute against the working directory.

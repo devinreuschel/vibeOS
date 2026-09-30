@@ -303,6 +303,11 @@ extern "C" fn boot_rest() -> ! {
     if proc_init::init_tables().is_err() {
         crate::boot::halt_with("vibeOS: limits: no memory for the process tables");
     }
+    // The VFS's tables and inode words (ROADMAP §10.4, D1); `fs_init::init`
+    // mounts the root after `irq: enabled`.
+    if fs_init::init_tables().is_err() {
+        crate::boot::halt_with("vibeOS: limits: no memory for the vfs tables");
+    }
     proc_init::init();
     crate::marker!(marker::PER_CPU_BSP);
     crate::log::vmcoreinfo_init::publish();

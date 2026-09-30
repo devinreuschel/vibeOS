@@ -49,7 +49,7 @@ impl Vfs {
         self.finish(c, true);
         res?;
         let mut i = 0usize;
-        while i < MAX_DENTRIES {
+        while i < self.dentries.len() {
             let d = self.dentries[i];
             if d.used
                 && d.negative

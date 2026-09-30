@@ -1364,7 +1364,7 @@ fn vfs_fat_dotdot_deep() {
         v.sync(d).unwrap();
     });
     let fs = FatHostOps::new(b);
-    let mut vfs = crate::fs::Vfs::new(crate::fs::host_words());
+    let mut vfs = crate::fs::host_vfs();
     vfs.mount_root_fs(fs).unwrap();
     let mut paths = vec![String::from("/")];
     let mut p = String::new();

@@ -38,15 +38,21 @@ mod inode;
 pub mod kernfs;
 mod mount;
 mod ramfs;
+mod sizes;
 pub mod vibefs;
 mod walk;
 
 pub use file::{FileId, FileRef, SeekFrom};
 pub use ramfs::{RamFs, RamState};
+pub use sizes::VfsSizes;
+#[cfg(test)]
+pub(crate) use sizes::{SMALL, host_vfs};
 pub use walk::{WalkCall, WalkReply, WalkStep, Walker, split_basename};
 
 use crate::atomic::statics::{AtomicU64, Ordering};
 use crate::dev::{Instance, same_instance};
+use crate::kalloc::{AllocError, TryVec};
+use crate::limits;
 
 pub use crate::limits::MAX_DENTRIES;
 pub use crate::limits::MAX_FDS;
@@ -571,12 +577,13 @@ impl PartialEq for InodeWords {
 impl Eq for InodeWords {}
 
 /// One [`InodeWords`] per inode slot, which a [`Vfs`] borrows for its
-/// life: a `static` in the kernel, a leaked allocation in host tests.
-pub type WordsTable = [InodeWords; MAX_INODES];
+/// life as a `&'static [InodeWords]`: a heap table the kernel keeps in a
+/// `BootCell`, a leaked one in host tests.
+pub type WordsTable = TryVec<InodeWords>;
 
-/// A table of zeroed words, for a `static`.
-pub const fn words_table() -> WordsTable {
-    [const { InodeWords::new() }; MAX_INODES]
+/// A table of `n` zeroed words.
+pub fn words_table(n: usize) -> Result<WordsTable, AllocError> {
+    limits::table(n, InodeWords::new)
 }
 
 /// Where an unhashed, unreferenced inode is in its release.
@@ -920,38 +927,44 @@ impl OpenFlags {
     }
 }
 
-/// Phase 9 hangs an [`FdTable`] on a process. Slice A owns the shape.
-#[derive(Clone, Copy)]
+/// Phase 9 hangs an [`FdTable`] on a process. Slice A owns the shape. A
+/// heap row of a fixed length, built by [`FdTable::try_new`];
+/// [`FdTable::new`] has no room.
 pub struct FdTable {
-    fds: [u16; MAX_FDS],
+    fds: TryVec<u16>,
 }
 
 impl FdTable {
+    /// A table with no room, for a `const` initializer.
     pub const fn new() -> Self {
-        Self { fds: [0; MAX_FDS] }
+        Self { fds: TryVec::new() }
+    }
+
+    /// A table of `len` closed descriptors.
+    pub fn try_new(len: usize) -> Result<Self, AllocError> {
+        Ok(Self {
+            fds: limits::table(len, || 0)?,
+        })
     }
 
     pub fn install(&mut self, fid: u16) -> Result<u32, FsError> {
         if fid as usize >= MAX_FILES {
             return Err(FsError::Badf);
         }
-        let mut i = 0usize;
-        while i < MAX_FDS {
-            if self.fds[i] == 0 {
-                self.fds[i] = fid + 1;
-                return Ok(i as u32);
-            }
-            i += 1;
-        }
-        Err(FsError::NoSpace)
+        let i = self
+            .fds
+            .iter()
+            .position(|&f| f == 0)
+            .ok_or(FsError::NoSpace)?;
+        self.fds[i] = fid + 1;
+        Ok(i as u32)
     }
 
     pub fn get(&self, fd: u32) -> Result<u16, FsError> {
-        let i = fd as usize;
-        if i >= MAX_FDS || self.fds[i] == 0 {
-            return Err(FsError::Badf);
+        match self.fds.get(fd as usize) {
+            Some(&f) if f != 0 => Ok(f - 1),
+            _ => Err(FsError::Badf),
         }
-        Ok(self.fds[i] - 1)
     }
 
     pub fn take(&mut self, fd: u32) -> Result<u16, FsError> {
@@ -972,13 +985,15 @@ impl Default for FdTable {
     }
 }
 
+/// The VFS's namespace tables: heap tables of the lengths [`Vfs::new`]
+/// was given, built once and never grown (ROADMAP §10.4, D1).
 pub struct Vfs {
-    inodes: [Inode; MAX_INODES],
-    words: &'static WordsTable,
-    dentries: [Dentry; MAX_DENTRIES],
-    supers: [Super; MAX_MOUNTS],
-    mounts: [Mount; MAX_MOUNTS],
-    files: [File; MAX_FILES],
+    inodes: TryVec<Inode>,
+    words: &'static [InodeWords],
+    dentries: TryVec<Dentry>,
+    supers: TryVec<Super>,
+    mounts: TryVec<Mount>,
+    files: TryVec<File>,
     ihand: u16,
     dhand: u16,
     pub now: u64,
@@ -986,15 +1001,17 @@ pub struct Vfs {
 }
 
 impl Vfs {
-    /// An empty VFS whose inode slots' words are `words`'s.
-    pub const fn new(words: &'static WordsTable) -> Self {
-        Self {
-            inodes: [Inode::EMPTY; MAX_INODES],
+    /// An empty VFS with tables of `sizes`' lengths, whose inode slots'
+    /// words are `words`'s: one per inode slot, so the inode table is
+    /// `sizes.inodes` long or `words.len()`, whichever is shorter.
+    pub fn new(sizes: &VfsSizes, words: &'static [InodeWords]) -> Result<Self, AllocError> {
+        Ok(Self {
+            inodes: limits::table(sizes.inodes.min(words.len()), || Inode::EMPTY)?,
             words,
-            dentries: [Dentry::EMPTY; MAX_DENTRIES],
-            supers: [Super::EMPTY; MAX_MOUNTS],
-            mounts: [Mount::EMPTY; MAX_MOUNTS],
-            files: [File::EMPTY; MAX_FILES],
+            dentries: limits::table(sizes.dentries, || Dentry::EMPTY)?,
+            supers: limits::table(sizes.mounts, || Super::EMPTY)?,
+            mounts: limits::table(sizes.mounts, || Mount::EMPTY)?,
+            files: limits::table(sizes.files, || File::EMPTY)?,
             ihand: 0,
             dhand: 0,
             now: 0,
@@ -1003,7 +1020,7 @@ impl Vfs {
                 i_evicts: 0,
                 opens: 0,
             },
-        }
+        })
     }
 }
 
@@ -1236,12 +1253,6 @@ fn name_is_dot(n: &[u8]) -> bool {
 
 fn name_is_dotdot(n: &[u8]) -> bool {
     n.len() == 2 && n[0] == b'.' && n[1] == b'.'
-}
-
-/// A words table of its own for a host test's `Vfs`, leaked.
-#[cfg(test)]
-pub(crate) fn host_words() -> &'static WordsTable {
-    std::boxed::Box::leak(std::boxed::Box::new(words_table()))
 }
 
 /// The VFS with no lock around it, for host tests that drive one `Vfs`

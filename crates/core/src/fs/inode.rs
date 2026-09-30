@@ -43,7 +43,7 @@ impl Vfs {
     /// dentry cache requires.
     pub fn drop_negatives(&mut self, sb: u8) {
         let mut i = 0usize;
-        while i < MAX_DENTRIES {
+        while i < self.dentries.len() {
             let d = &self.dentries[i];
             if d.used && d.sb == sb && d.negative {
                 self.dentry_evict(i as u16);
@@ -157,7 +157,7 @@ impl Vfs {
     /// here.
     pub(super) fn take_release(&mut self) -> Option<Call> {
         let mut i = 0usize;
-        while i < MAX_INODES {
+        while i < self.inodes.len() {
             let n = &self.inodes[i];
             if n.used && n.rel == Rel::Queued {
                 match self.supers[n.sb as usize].ops {
@@ -277,7 +277,7 @@ impl Vfs {
     /// stays reserved until the backend's `evict` returns.
     pub(super) fn iput(&mut self, islot: u16) {
         let i = islot as usize;
-        if i >= MAX_INODES || !self.inodes[i].used || self.inodes[i].refs == 0 {
+        if i >= self.inodes.len() || !self.inodes[i].used || self.inodes[i].refs == 0 {
             return;
         }
         let n = &mut self.inodes[i];
@@ -289,15 +289,15 @@ impl Vfs {
 
     fn inode_alloc(&mut self) -> Result<u16, FsError> {
         let mut i = 0usize;
-        while i < MAX_INODES {
+        while i < self.inodes.len() {
             if !self.inodes[i].used {
                 return Ok(i as u16);
             }
             i += 1;
         }
         let mut n = 0usize;
-        while n < MAX_INODES * 2 {
-            let s = self.ihand as usize % MAX_INODES;
+        while n < self.inodes.len() * 2 {
+            let s = self.ihand as usize % self.inodes.len();
             self.ihand = self.ihand.wrapping_add(1);
             if !self.inodes[s].used {
                 return Ok(s as u16);
@@ -317,7 +317,7 @@ impl Vfs {
             n += 1;
         }
         let mut s = 0usize;
-        while s < MAX_INODES {
+        while s < self.inodes.len() {
             if self.inode_evict(s as u16) {
                 return Ok(s as u16);
             }
@@ -341,7 +341,7 @@ impl Vfs {
     /// The hashed inode of `sb` keyed `key`.
     pub(super) fn hashed(&self, sb: u8, key: Key) -> Option<u16> {
         let mut i = 0usize;
-        while i < MAX_INODES {
+        while i < self.inodes.len() {
             let n = &self.inodes[i];
             if n.used && n.sb == sb && n.key == key && n.nlink != 0 {
                 return Some(i as u16);
@@ -362,7 +362,7 @@ impl Vfs {
     /// descendants holds, releasing their counts on it without a put.
     pub(super) fn drop_dentries_of(&mut self, i: u16) {
         let mut d = 0usize;
-        while d < MAX_DENTRIES {
+        while d < self.dentries.len() {
             let e = self.dentries[d];
             if e.used && !e.negative && e.islot == i && !e.is_root(d as u16) {
                 if e.refs != 0 && e.refs == self.child_count(d as u16) {
@@ -384,15 +384,15 @@ impl Vfs {
 
     pub(super) fn dentry_force_alloc(&mut self) -> Result<u16, FsError> {
         let mut i = 0usize;
-        while i < MAX_DENTRIES {
+        while i < self.dentries.len() {
             if !self.dentries[i].used {
                 return Ok(i as u16);
             }
             i += 1;
         }
         let mut n = 0usize;
-        while n < MAX_DENTRIES * 2 {
-            let s = self.dhand as usize % MAX_DENTRIES;
+        while n < self.dentries.len() * 2 {
+            let s = self.dhand as usize % self.dentries.len();
             self.dhand = self.dhand.wrapping_add(1);
             if !self.dentries[s].used {
                 return Ok(s as u16);
@@ -410,7 +410,7 @@ impl Vfs {
             return Ok(s as u16);
         }
         let mut s = 0usize;
-        while s < MAX_DENTRIES {
+        while s < self.dentries.len() {
             if self.dentries[s].used && self.dentries[s].refs == 0 {
                 self.dentry_evict(s as u16);
                 return Ok(s as u16);
@@ -443,7 +443,7 @@ impl Vfs {
         loop {
             let mut hit = false;
             let mut i = 0usize;
-            while i < MAX_DENTRIES {
+            while i < self.dentries.len() {
                 let d = &self.dentries[i];
                 if d.used && d.refs == 0 && i as u16 != top && self.below(i as u16, top) {
                     self.dentry_evict(i as u16);
@@ -461,7 +461,7 @@ impl Vfs {
     fn below(&self, slot: u16, top: u16) -> bool {
         let mut cur = slot;
         let mut n = 0usize;
-        while n < MAX_DENTRIES {
+        while n < self.dentries.len() {
             let d = &self.dentries[cur as usize];
             if !d.used || d.is_root(cur) {
                 return false;
@@ -497,7 +497,7 @@ impl Vfs {
     fn child_count(&self, slot: u16) -> u16 {
         let mut n = 0u16;
         let mut i = 0usize;
-        while i < MAX_DENTRIES {
+        while i < self.dentries.len() {
             let d = &self.dentries[i];
             if d.used && d.parent == slot && !d.is_root(i as u16) {
                 n = n.saturating_add(1);
@@ -529,7 +529,7 @@ impl Vfs {
 
     pub(super) fn dcache_peek(&self, sb: u8, parent: u16, name: &[u8]) -> Option<u16> {
         let mut i = 0usize;
-        while i < MAX_DENTRIES {
+        while i < self.dentries.len() {
             let d = &self.dentries[i];
             if d.used
                 && !d.dead
@@ -603,7 +603,7 @@ impl Vfs {
 
     pub(super) fn dcache_drop_neg_in_dir(&mut self, sb: u8, parent: u16) {
         let mut i = 0usize;
-        while i < MAX_DENTRIES {
+        while i < self.dentries.len() {
             let d = &self.dentries[i];
             if d.used && d.sb == sb && d.parent == parent && d.negative && !d.is_root(i as u16) {
                 self.dentry_evict(i as u16);

@@ -64,13 +64,15 @@ impl Vfs {
         Ok((n.sb, n.key))
     }
 
-    /// Each open-file slot's `(used, refs, gen)`.
-    pub fn file_table(&self) -> [(bool, u16, u16); MAX_FILES] {
-        let mut out = [(false, 0u16, 0u16); MAX_FILES];
+    /// Each open-file slot's `(used, refs, gen)`, into `out` from slot 0:
+    /// how many slots it wrote, the shorter of `out` and the table.
+    pub fn file_table(&self, out: &mut [(bool, u16, u16)]) -> usize {
+        let mut n = 0usize;
         for (o, f) in out.iter_mut().zip(self.files.iter()) {
             *o = (f.used, f.refs, f.r#gen);
+            n += 1;
         }
-        out
+        n
     }
 
     /// Open a file on the resolved dentry `p` (C-FILEAPI's `open`
