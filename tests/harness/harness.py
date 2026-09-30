@@ -64,7 +64,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import IO, TYPE_CHECKING, NamedTuple, NoReturn
 
 from tests.harness import frame, registry
@@ -1711,7 +1711,6 @@ def check_mce_dump(
 def run_qemu_inject_mce(
     cfg: QemuConfig,
     markers: list[Marker],
-    *,
     cmd: str,
     timeout_s: float,
     dump_needles: tuple[str | tuple[str, ...], ...] = MCE_DUMP_NEEDLES,
@@ -1722,75 +1721,76 @@ def run_qemu_inject_mce(
     After it the lines are collected until a kernel line holds `PANIC_DONE`,
     EOF, or `MCE_DUMP_WAIT_S`, and `check_mce_dump` judges them. Never
     retries.
+
+    The boot runs under a `qmp.Session` declared `expect=panic`, since the
+    `#MC` dump is the run's expected end (C-QMP): QEMU starts halted with a
+    QMP socket, `cmd` goes through QMP's `human-monitor-command`, and a
+    timeout, a failing line or a failed dump check takes a guest core before
+    QEMU stops (ROADMAP §10.7).
     """
-    if not shutil.which("qemu-system-x86_64"):
-        raise HarnessError("qemu-system-x86_64 not on PATH")
-    if not os.path.exists(cfg.iso):
-        raise HarnessError(f"ISO missing: {cfg.iso}")
+    from tests.harness import qmp as qmpmod
 
-    monitor_sock = _pick_monitor_path()
-    argv = qemu_argv(cfg, monitor_sock)
+    cfg = replace(cfg, expect="panic")
     panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
-
-    err = tempfile.TemporaryFile()
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=err,
-        stdin=subprocess.DEVNULL,
-        bufsize=1,
-        text=True,
-    )
-    assert proc.stdout is not None
+    session = qmpmod.Session(cfg, "mce")
+    src = _start_qemu(cfg, time.monotonic() + timeout_s, qmp_sock=session.sock)
+    argv = _argv_of(src)
 
     result = RunResult()
     stream = frame.Stream()
     marker_idx = 0
-    reader = DeadlineReader(proc.stdout.fileno(), time.monotonic() + timeout_s)
     after: list[str] = []
     reply = ""
-    exited: int | None = None
     try:
+        session.start()
         while marker_idx < len(markers):
-            kind, line = reader.next_event()
+            kind, line = src.next_event()
+            if kind == "idle":
+                continue
             if kind == "timeout":
-                result.timed_out = True
                 missing = markers[marker_idx].name
-                raise HarnessError(
+                session.timeout(
+                    src,
+                    result,
+                    argv,
                     f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} "
-                    f"markers; missing {missing!r}{serial_tail(result.lines)}"
+                    f"markers; missing {missing!r}{serial_tail(result.lines)}",
                 )
             if kind == "eof":
-                try:
-                    result.exit_code = proc.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    result.exit_code = None
-                result.stderr = _file_text(err)
-                raise HarnessError(
+                result.exit_code = _reap(src)
+                result.stderr = src.stderr_text()
+                session.fail(
+                    src,
+                    result,
+                    argv,
                     f"missing marker {markers[marker_idx].name!r} after "
-                    f"{len(result.lines)} lines{_qemu_report(result, exited=True)}"
+                    f"{len(result.lines)} lines{_qemu_report(result, exited=True)}",
                 )
             result.lines.append(line)
             why = run_failure(line, stream, panic_signatures)
             if why is not None:
                 result.panic_line = line
-                raise HarnessError(f"{why[0]} in: {why[1]!r}")
+                msg = f"{why[0]} in: {why[1]!r}{serial_tail(result.lines)}"
+                session.fail(src, result, argv, msg)
             if markers[marker_idx].matches(line):
                 result.matched.append(markers[marker_idx].name)
                 marker_idx += 1
 
-        with _connect_monitor(monitor_sock) as mon:
-            mon.sendall((cmd + "\n").encode())
-            reply = _monitor_reply(mon, 2.0)
+        assert session.qmp is not None
+        try:
+            out = session.qmp.execute("human-monitor-command", {"command-line": cmd})
+            reply = out if isinstance(out, str) else repr(out)
+        except qmpmod.QmpError as e:
+            reply = str(e)
 
-        reader.set_deadline(time.monotonic() + MCE_DUMP_WAIT_S)
+        src.set_deadline(time.monotonic() + MCE_DUMP_WAIT_S)
+        exited: int | None = None
         while True:
-            kind, line = reader.next_event()
+            kind, line = src.next_event()
+            if kind == "idle":
+                continue
             if kind == "eof":
-                try:
-                    exited = proc.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    exited = None
+                exited = _reap(src)
                 break
             if kind == "timeout":
                 break
@@ -1798,20 +1798,20 @@ def run_qemu_inject_mce(
             after.append(line)
             if PANIC_DONE in (kernel_text(line) or ""):
                 break
-    finally:
-        if proc.poll() is None:
-            proc.kill()
         try:
-            result.exit_code = proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            result.exit_code = proc.wait()
-
-    check_mce_dump(after, exit_code=exited, reply=reply, needles=dump_needles)
-    result.panic_line = next(
-        (ln for ln in after if "vibeOS: panic:" in (kernel_text(ln) or "")), None
-    )
-    return result
+            check_mce_dump(after, exit_code=exited, reply=reply, needles=dump_needles)
+        except HarnessError as e:
+            session.fail(src, result, argv, str(e))
+        session.ended = "pass"
+        result.panic_line = next(
+            (ln for ln in after if "vibeOS: panic:" in (kernel_text(ln) or "")), None
+        )
+        return result
+    finally:
+        session.close()
+        if result.exit_code is None:
+            result.exit_code = _reap(src)
+            result.stderr = src.stderr_text()
 
 
 SERIAL_ECHO_TOKEN = "serial-ok"
