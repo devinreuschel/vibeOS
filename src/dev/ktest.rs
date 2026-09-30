@@ -157,7 +157,7 @@ pub(crate) fn test_pci_cfg_rw() -> Outcome {
         return Outcome::Fail("host device");
     }
     let prev = cfg_read32(bdf, CFG_COMMAND) as u16;
-    pci_init::enable_mem_master(bdf);
+    pci_init::update_command(bdf, CMD_MEM | CMD_MASTER, 0);
     let now = cfg_read32(bdf, CFG_COMMAND) as u16;
     cfg_write32(bdf, CFG_COMMAND, prev as u32);
     if now & (CMD_MEM | CMD_MASTER) != CMD_MEM | CMD_MASTER {
@@ -309,7 +309,7 @@ pub(crate) fn test_dma_edu() -> Outcome {
     if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
         return Outcome::Fail("edu ident");
     }
-    pci_init::enable_mem_master(dev.addr);
+    pci_init::update_command(dev.addr, CMD_MEM | CMD_MASTER, 0);
     let Some(src) = dma_init::alloc(DmaAlloc::dma32(64)) else {
         return Outcome::Fail("src");
     };

@@ -12,7 +12,6 @@ use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
 use vibeos::pci::Bdf;
 
-use crate::pci_init;
 use crate::sync_init::SpinMutex;
 
 /// The device registry. `dev::ktest` reads it for its hooks.
@@ -47,7 +46,6 @@ pub fn bind_all() {
         let Some(drv) = drv else {
             continue;
         };
-        pci_init::enable_mem_master(dev.addr);
         match drv.probe(dev) {
             Ok(inst) => {
                 let mut g = REG.lock();

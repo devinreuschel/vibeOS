@@ -8,7 +8,7 @@ use vibeos::ipi::MAX_IPI_CPUS;
 use vibeos::irq::{self, IrqError};
 use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
-use vibeos::pci::{Bdf, CFG_COMMAND, CMD_INTX_DISABLE};
+use vibeos::pci::{Bdf, CFG_COMMAND, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::thread::ThreadState;
 use vibeos::vectors;
 
@@ -297,16 +297,27 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     }
     reset_irq_obs();
     IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    // Decode on, bus mastering and INTx disable off, so a COMMAND write by
+    // `enable_msix` shows; `saved` goes back at the end.
+    let saved = pci_init::cfg_read16(dev.addr, CFG_COMMAND);
+    let before = pci_init::update_command(dev.addr, CMD_MEM, CMD_MASTER | CMD_INTX_DISABLE);
+    let restore = || {
+        pci_init::update_command(dev.addr, saved, !saved);
+    };
     if let Err(e) = irq_init::enable_msix(&dev, 0, vec, cpu.apic_id.load(Ordering::Relaxed) as u8) {
         let _ = irq_init::free_vector(vec);
+        restore();
         return Outcome::Fail(e.as_str());
     }
-    let cmd = pci_init::cfg_read16(dev.addr, CFG_COMMAND);
-    if cmd & CMD_INTX_DISABLE == 0 {
+    if pci_init::cfg_read16(dev.addr, CFG_COMMAND) != before {
         irq_init::disable_msix(&dev);
         let _ = irq_init::free_vector(vec);
-        return Outcome::Fail("intx live");
+        restore();
+        return Outcome::Fail("msix wrote command");
     }
+    // The test is the driver: an MSI-X message is a bus-master write
+    // (DESIGN §4.7), and INTx goes off while MSI-X is armed.
+    pci_init::update_command(dev.addr, CMD_MASTER | CMD_INTX_DISABLE, 0);
     mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
     mmio_w32(mmio, E1000_IVAR, E1000_IVAR_OTHER0);
     mmio_w32(mmio, E1000_IMS, E1000_ICR_LSC | E1000_ICR_OTHER);
@@ -316,6 +327,7 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     irq_init::disable_msix(&dev);
     let _ = irq_init::free_vector(vec);
     IRQ_MMIO.store(0, Ordering::SeqCst);
+    restore();
     if !fired {
         return Outcome::Fail("no msix");
     }
@@ -360,7 +372,7 @@ pub(crate) fn test_intx_fallback() -> Outcome {
         return Outcome::Fail("handler");
     }
     let gsi = line as u32;
-    irq_init::mask_intx(dev.addr, false);
+    pci_init::update_command(dev.addr, 0, CMD_INTX_DISABLE);
     if irq_init::route_intx(gsi, vec, 0, Trigger::Level, Polarity::Low).is_err() {
         let _ = irq_init::free_vector(vec);
         return Outcome::Fail("route");
@@ -379,7 +391,7 @@ pub(crate) fn test_intx_fallback() -> Outcome {
         mmio_w32(mmio, EDU_ACK, st);
     }
     apic_init::mask_gsi(gsi);
-    irq_init::mask_intx(dev.addr, true);
+    pci_init::update_command(dev.addr, CMD_INTX_DISABLE, 0);
     let _ = irq_init::free_vector(vec);
     IRQ_MMIO.store(0, Ordering::SeqCst);
     if !fired {
@@ -397,7 +409,7 @@ fn edu_intx_teardown(bdf: Bdf, gsi: u32, vec: Option<u8>, mmio: u64) {
         mmio_w32(mmio, EDU_ACK, st);
     }
     apic_init::mask_gsi(gsi);
-    irq_init::mask_intx(bdf, true);
+    pci_init::update_command(bdf, CMD_INTX_DISABLE, 0);
     if let Some(v) = vec {
         let _ = irq_init::free_vector(v);
     }
@@ -436,7 +448,7 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     if irq_init::set_handler(vec, on_intx_no_ack).is_err() {
         return fail("handler", Some(vec));
     }
-    irq_init::mask_intx(dev.addr, false);
+    pci_init::update_command(dev.addr, 0, CMD_INTX_DISABLE);
     if irq_init::route_intx(gsi, vec, 0, Trigger::Level, Polarity::Low).is_err() {
         return fail("route", Some(vec));
     }

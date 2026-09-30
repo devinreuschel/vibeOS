@@ -208,6 +208,10 @@ GONE: list[tuple[str, str]] = [
     ("src/fs/vibefs_init.rs: static IMAGE", "driver and volume state as"),
     ("CALIB_BAND_TCG", "`tsc_calib_source` measures PIT channel 2 once"),
     ("calib_band", "`tsc_calib_source` measures PIT channel 2 once"),
+    ("enable_mem_master", "a driver turns on its own device (DESIGN §12.3)"),
+    ("mask_intx", "a driver turns on its own device (DESIGN §12.3)"),
+    ("cfg_write_command", "a driver turns on its own device (DESIGN §12.3)"),
+    ("with_intx_disabled", "a driver turns on its own device (DESIGN §12.3)"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

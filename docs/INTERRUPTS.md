@@ -295,8 +295,9 @@ routes are rewritten immediately; MSI/MSI-X callers reprogram the message from
 MSI message address is `0xFEE0_0000 | (apic_id << 12)` (physical dest, RH=0). Data is
 the vector (fixed, edge). MSI-X table entries live in a BAR (BIR + offset from the
 capability). The dispatcher writes mask, then addr/data, then the caller's mask bit,
-sets COMMAND.INTX# disable, and enables MSI-X. Leaving INTx unmasked while MSI-X is
-armed duplicates IRQs.
+and enables MSI-X; it writes no `COMMAND` bit, since the driver sets INTx disable and
+bus mastering itself ([§12.3](DEVICES.md#123-resources)). Leaving INTx unmasked while
+MSI-X is armed duplicates IRQs.
 
 INTx remains the fallback when a function has neither MSI nor MSI-X: route the GSI
 through the I/O APIC (PCI is level, active low). Keyboard keeps hardcoded vector

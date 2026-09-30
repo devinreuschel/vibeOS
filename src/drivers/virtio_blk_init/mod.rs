@@ -17,7 +17,7 @@ use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
-use vibeos::pci::MAX_BARS;
+use vibeos::pci::{CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM, MAX_BARS};
 use vibeos::virtio::{
     self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
     COMMON_OFF_NUM_QUEUES, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER,
@@ -286,9 +286,14 @@ fn setup(
     let notify_base = region(dev, notify_cap).ok_or(VirtioError::NoCaps)?;
     let isr = region(dev, isr_cap).ok_or(VirtioError::NoCaps)?;
     let cfg = region(dev, cfg_cap).ok_or(VirtioError::NoCaps)?;
+    // Memory decode before the first touch, with bus mastering off, which
+    // firmware can leave on; bus mastering only once the reset completed
+    // (DESIGN §12.3).
+    pci_init::update_command(dev.addr, CMD_MEM, CMD_MASTER);
     if !reset(common) {
         return Err(VirtioError::Failed);
     }
+    pci_init::update_command(dev.addr, CMD_MASTER, 0);
     w8(common, COMMON_OFF_STATUS, STATUS_ACKNOWLEDGE);
     w8(
         common,
@@ -351,6 +356,8 @@ fn setup(
     let mut nvec = 0usize;
 
     w16(common, COMMON_OFF_MSIX_CFG, MSI_NO_VECTOR);
+    // INTx off before the first MSI-X entry is armed, or both deliver.
+    pci_init::update_command(dev.addr, CMD_INTX_DISABLE, 0);
 
     if !per_q_msix {
         let cpu = irq_init::threaded_cpu();
