@@ -226,6 +226,10 @@ GONE: list[tuple[str, str]] = [
     ("with_intx_disabled", "a driver turns on its own device (DESIGN §12.3)"),
     ("fail_status", "a driver turns on its own device (DESIGN §12.3)"),
     ("fail_armed", "a driver turns on its own device (DESIGN §12.3)"),
+    ("claim_bars", "a device's resources are claimed"),
+    ("map_func_bars", "a device's resources are claimed"),
+    ("keep_wb", "a device's resources are claimed"),
+    ("mapped_va", "a device's resources are claimed"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
