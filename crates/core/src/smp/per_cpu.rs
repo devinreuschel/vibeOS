@@ -75,9 +75,10 @@ impl Default for StackCache {
     }
 }
 
-/// The part of one CPU's state that other CPUs read. Two cache lines per
-/// CPU: the scheduler's words, then the stop primitive's (DESIGN §2.5
-/// step 1). Every field is atomic, so `&PerCpuRemote` may alias anything and
+/// The part of one CPU's state that other CPUs read, in four cache lines
+/// per CPU: the scheduler's words, whose wake inbox holds a bit per slot of
+/// the 1024-slot thread table (ROADMAP §10.4), then the stop primitive's
+/// (DESIGN §2.5 step 1). Every field is atomic, so `&PerCpuRemote` may alias anything and
 /// the type is `Sync` with no `unsafe impl` (`scripts/check_cells.py`).
 #[repr(C, align(64))]
 pub struct PerCpuRemote {
@@ -290,16 +291,16 @@ const _: () = {
 const _: () = {
     use core::mem::{align_of, size_of};
     const DEBUG: bool = cfg!(debug_assertions);
-    assert!(size_of::<PerCpu>() == if DEBUG { 2096 } else { 1328 });
+    assert!(size_of::<PerCpu>() == if DEBUG { 1880 } else { 1112 });
     assert!(align_of::<PerCpu>() == 8);
     assert!(offset_of!(PerCpu, runq) == 152);
-    assert!(offset_of!(PerCpu, remote) == if DEBUG { 2088 } else { 1320 });
-    assert!(size_of::<PerCpuRemote>() == 128);
+    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1872 } else { 1104 });
+    assert!(size_of::<PerCpuRemote>() == 256);
     assert!(align_of::<PerCpuRemote>() == 64);
-    assert!(offset_of!(PerCpuRemote, apic_id) == 48);
-    assert!(offset_of!(PerCpuRemote, stop_req) == 64);
-    assert!(offset_of!(PerCpuRemote, stopped) == 68);
-    assert!(offset_of!(PerCpuRemote, crash) == 72);
+    assert!(offset_of!(PerCpuRemote, apic_id) == 168);
+    assert!(offset_of!(PerCpuRemote, stop_req) == 184);
+    assert!(offset_of!(PerCpuRemote, stopped) == 188);
+    assert!(offset_of!(PerCpuRemote, crash) == 192);
 };
 
 // The tests build `static` views, which need the `const` constructor.
@@ -399,8 +400,8 @@ mod tests {
         assert_eq!(R.stop_req.load(Ordering::Relaxed), 0);
         assert_eq!(R.stopped.load(Ordering::Relaxed), crate::irq::stop::RUNNING);
         assert!(R.crash.iter().all(|w| w.load(Ordering::Relaxed) == 0));
-        // The stop words follow the scheduler's cache line (C-PERCPU).
-        assert_eq!(offset_of!(PerCpuRemote, stop_req), 64);
+        // The stop words follow the scheduler's words (C-PERCPU).
+        assert!(offset_of!(PerCpuRemote, stop_req) > offset_of!(PerCpuRemote, as_cr3));
         assert!(offset_of!(PerCpuRemote, crash) > offset_of!(PerCpuRemote, stopped));
         let d = PerCpuRemote::default();
         assert_eq!(d.ticks.load(Ordering::Relaxed), 0);
@@ -409,6 +410,7 @@ mod tests {
         let mut p = PerCpu::new(&R);
         p.publish_runq_len();
         assert_eq!(R.runq_len.load(Ordering::Relaxed), 0);
+        p.runq = crate::sched::ReadyQueue::try_new(4).unwrap();
         p.runq.push_back(ThreadId(3));
         p.runq.push_back(ThreadId(4));
         assert_eq!(R.runq_len.load(Ordering::Relaxed), 0);

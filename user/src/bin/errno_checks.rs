@@ -74,9 +74,13 @@ fn write_rdonly_ebadf() -> bool {
     close(fd) && r == Err(Errno::EBADF)
 }
 
+/// Descriptors a process holds: the kernel's `limits::MAX_FDS` (SYSCALL.md
+/// §4), so case 3's copies all fit before `dup` fails.
+const FD_SLOTS: usize = 256;
+
 /// Case 3: `dup(0)` until it fails, then close every copy.
 fn dup_full_emfile() -> bool {
-    let mut fds = [0usize; 64];
+    let mut fds = [0usize; FD_SLOTS];
     let mut n = 0usize;
     let r = loop {
         match sys::dup(0) {

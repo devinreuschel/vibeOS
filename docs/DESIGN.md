@@ -192,15 +192,15 @@ children, need no row.
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
 | irq | `irq/{mod,ipi,stop}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
-| sched | `sched/{mod,thread,wait,work,fpu,stack_depth,irqoff}.rs` | `sched/{mod,sched_init,work_init,irqoff}.rs`, `sched/thread_init/{boot,mod,testing}.rs` |
+| sched | `sched/{mod,thread,wait,work,fpu,stack_depth,irqoff}.rs` | `sched/{mod,sched_init,work_init,irqoff}.rs`, `sched/thread_init/{ap,boot,mod,table,testing}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
-| log | `log/{mod,backtrace,line,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs` | `log/{mod,log_init,panic,panic_test,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |
+| log | `log/{mod,backtrace,line,pvpanic,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs` | `log/{mod,log_init,panic,panic_test,pvpanic_init,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
 | shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
 | dev | `dev/{mod,pci,dma,virtio,entropy,tests}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/mod.rs`, `drivers/virtio_blk_init/{mod,vq,issue,irq}.rs` |
 | block | `block/{mod,part,cache,blockdev}.rs` | `block/{mod,block_init,blockdev_init,part_init,cache_init}.rs` |
-| fs | `fs/{mod,error,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
+| fs | `fs/{mod,error,inode,mount,walk,file,ramfs,sizes,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
 | proc | `proc/{mod,elf,pid,syscall,syscall_table,uabi,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit,floor}.rs` |
 | ktest | `ktest/mod.rs` (selection by `vibeos.ktest=`, run counts, deadlines) | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 
@@ -282,7 +282,10 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   port under §14.10, keeping its own license and NOTICE. That policy, which `make check` runs as
   `cargo deny check licenses bans sources`, admits crates from crates.io only, under the notice-only
   licenses above or Apache-2.0 or Unicode-3.0, and only when `deny.toml`'s `[bans]` allow list names
-  the crate with the reason it is in the graph; another license needs an edit here first.
+  the crate with the reason it is in the graph; another license needs an edit here first. One such
+  edit: `libfuzzer-sys`, which only the `tests/fuzz` workspace uses and no image links, may also
+  carry NCSA, LLVM's notice-only license for the libFuzzer source it bundles, as a `deny.toml`
+  exception for that crate alone.
 - Cryptographic primitives and the TLS state machine are depended on, never written in-tree: pinned,
   widely reviewed crates behind one facade, `vibeos-crypto`, under ROADMAP §10.9's `deny.toml`
   policy, with RustCrypto and dalek for the primitives and rustls for TLS (ROADMAP §13.10, §14.7,

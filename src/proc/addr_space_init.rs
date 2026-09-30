@@ -39,13 +39,16 @@ unsafe impl FrameFree for BuddyPool {
 
 /// New user address space. Kernel half shared from the boot PML4.
 pub fn create() -> Option<AddressSpace> {
+    // The region table before PT, which the heap ranks before; declared
+    // first, so a table a failure leaves here drops after `kernel`.
+    let mut regions = vibeos::addr_space::region_table().ok();
     let kernel = paging_init::current_mapper();
     let mut pool = BuddyPool;
     // SAFETY: `kernel` is the live kernel mapper and the buddy hands out
     // owned frames writable through its HHDM offset, as
     // `addr_space::AddressSpace::new` requires; established by
     // `paging_init::current_mapper`.
-    unsafe { AddressSpace::new(&kernel, &mut pool) }
+    unsafe { AddressSpace::new(&kernel, &mut pool, &mut regions) }
 }
 
 /// Pages one hold of `PT` maps or unmaps: one leaf table's worth. A chunk
@@ -405,10 +408,12 @@ pub fn load_kernel_cr3() {
 /// Full AS copy for fork. Caller must not be running on `src`'s CR3
 /// teardown path; clone allocates a new PML4.
 pub fn clone_full(src: &AddressSpace) -> Option<AddressSpace> {
+    // As in `create`: the table first, dropped after `kernel` on a failure.
+    let mut regions = vibeos::addr_space::region_table().ok();
     let kernel = paging_init::current_mapper();
     let mut pool = BuddyPool;
     // SAFETY: `kernel` is the live kernel mapper and the buddy hands out
     // owned frames, as `addr_space::AddressSpace::clone_anon` requires;
     // established by `paging_init::current_mapper`.
-    unsafe { src.clone_anon(&kernel, &mut pool) }.ok()
+    unsafe { src.clone_anon(&kernel, &mut pool, &mut regions) }.ok()
 }

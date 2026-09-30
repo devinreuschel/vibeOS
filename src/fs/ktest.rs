@@ -7,7 +7,7 @@ use vibeos::fs::{
     FileId, FsError, InodeKind, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC,
     O_WRONLY, OpenFlags, SEEK_CUR, SEEK_END, SEEK_SET, Stat,
 };
-use vibeos::limits::MAX_OPEN_FILES;
+use vibeos::kalloc::TryVec;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::wait_exited;
 
@@ -349,9 +349,15 @@ pub(crate) fn test_vibefs() -> Outcome {
     Outcome::Ok
 }
 
-/// Each open-file slot's `(used, refs)`.
-fn holders() -> [(bool, u16); MAX_OPEN_FILES] {
-    hooks::table().map(|(used, refs, _)| (used, refs))
+/// Each open-file slot's `(used, refs)`; `None` when the table cannot be
+/// allocated.
+fn holders() -> Option<TryVec<(bool, u16)>> {
+    let t = hooks::table()?;
+    let mut out = TryVec::try_with_capacity(t.len()).ok()?;
+    for &(used, refs, _) in t.iter() {
+        out.try_push((used, refs)).ok()?;
+    }
+    Some(out)
 }
 
 /// Read up to `out.len()` bytes of `path` from offset 0; the count read.
@@ -508,7 +514,9 @@ pub(crate) fn test_file_table_fork_churn() -> Outcome {
     if unlink_quiet("/f55a.txt").is_err() || unlink_quiet("/f55b.txt").is_err() {
         return Outcome::Fail("unlink before");
     }
-    let base = holders();
+    let Some(base) = holders() else {
+        return Outcome::Fail("no memory for the file table copy");
+    };
     hooks::set_write_yield(true);
     let st = user::run(&Image::Code(F55_CHURN, DEFAULT), &["f55churn"]);
     hooks::set_write_yield(false);
@@ -524,10 +532,7 @@ pub(crate) fn test_file_table_fork_churn() -> Outcome {
     Outcome::Ok
 }
 
-fn check_churn(
-    st: Result<u32, crate::user_init::LoadError>,
-    base: &[(bool, u16); MAX_OPEN_FILES],
-) -> Outcome {
+fn check_churn(st: Result<u32, crate::user_init::LoadError>, base: &[(bool, u16)]) -> Outcome {
     let st = match st {
         Ok(st) => st,
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
@@ -552,17 +557,16 @@ fn check_churn(
         }
         Err(e) => return crate::fail_fmt!("f55b: {}", e.as_str()),
     }
-    let now = holders();
-    let mut i = 0usize;
-    while i < now.len() {
-        if now[i] != base[i] {
-            return crate::fail_fmt!(
-                "slot {i}: (used, refs) {:?}, baseline {:?}",
-                now[i],
-                base[i]
-            );
+    let Some(now) = holders() else {
+        return Outcome::Fail("no memory for the file table copy");
+    };
+    for (i, (n, b)) in now.iter().zip(base.iter()).enumerate() {
+        if n != b {
+            return crate::fail_fmt!("slot {i}: (used, refs) {n:?}, baseline {b:?}");
         }
-        i += 1;
+    }
+    if now.len() != base.len() {
+        return Outcome::Fail("file table changed length");
     }
     Outcome::Ok
 }

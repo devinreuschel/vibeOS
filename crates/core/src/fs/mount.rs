@@ -322,7 +322,7 @@ impl Vfs {
             return Err(FsError::Busy);
         }
         let mut d = 0usize;
-        while d < MAX_DENTRIES {
+        while d < self.dentries.len() {
             let e = &self.dentries[d];
             if e.used && e.sb == sb && e.refs > self.expected_holds(d as u16) {
                 return Err(FsError::Busy);
@@ -330,7 +330,7 @@ impl Vfs {
             d += 1;
         }
         let mut n = 0usize;
-        while n < MAX_INODES {
+        while n < self.inodes.len() {
             let ino = &self.inodes[n];
             if ino.used
                 && ino.sb == sb
@@ -348,7 +348,7 @@ impl Vfs {
     /// their inode references, and its inodes. No backend is called.
     fn sb_clear(&mut self, sb: u8) {
         let mut d = 0usize;
-        while d < MAX_DENTRIES {
+        while d < self.dentries.len() {
             let e = self.dentries[d];
             if e.used && e.sb == sb {
                 if !e.negative {
@@ -360,7 +360,7 @@ impl Vfs {
             d += 1;
         }
         let mut n = 0usize;
-        while n < MAX_INODES {
+        while n < self.inodes.len() {
             if self.inodes[n].used && self.inodes[n].sb == sb {
                 self.inode_clear(n);
             }
@@ -372,7 +372,7 @@ impl Vfs {
     /// call.
     fn sync_begin(&mut self, from: u8) -> Option<SbCall> {
         let mut i = from as usize;
-        while i < MAX_MOUNTS {
+        while i < self.supers.len() {
             let s = &self.supers[i];
             if s.live() && s.ops.is_some() {
                 return self.sb_call(i as u8).ok();
@@ -420,7 +420,7 @@ impl Vfs {
 
     fn child_mount(&self, mount: u8, dslot: u16) -> Option<u8> {
         let mut i = 0u8;
-        while i < MAX_MOUNTS as u8 {
+        while i < self.mounts.len() as u8 {
             let m = &self.mounts[i as usize];
             if m.used && m.parent == Some(mount) && m.mp_dslot == dslot {
                 return Some(i);

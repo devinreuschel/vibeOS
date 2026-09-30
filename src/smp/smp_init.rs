@@ -30,8 +30,9 @@ use crate::cell::IrqCell;
 use crate::kva_init;
 use crate::log::trace_init;
 use crate::per_cpu_init;
-use crate::thread_init;
+use crate::thread_init::{self, SpawnError};
 use crate::time_init;
+use crate::work_init::{self, CpuWorkers};
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
 
@@ -80,6 +81,8 @@ pub(super) struct ApAlloc {
     /// The idle stack's top, read before the stack moves into its TCB.
     stack_top: u64,
     idle_id: ThreadId,
+    /// The AP's per-CPU workers, parked until it is online.
+    workers: CpuWorkers,
     published: bool,
 }
 
@@ -181,13 +184,22 @@ fn patch_params(page: u64, cr3: u64, stack_top: u64, entry: u64, idt_limit: u16,
     }
 }
 
-pub(super) fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc> {
-    let tables = gdt::alloc_ap_tables()?;
+/// Everything AP `cpu_id` needs before it starts: its GDT, TSS and IST
+/// stacks, its idle thread on a fresh stack, and its per-CPU workers,
+/// parked. On any failure it releases what it took and returns `Err`, with
+/// the `SpawnError` when a thread found no slot or no memory; the CPU then
+/// stays offline (ROADMAP §10.4, F037).
+pub(super) fn alloc_ap_resources(
+    cpu_id: u32,
+    apic_id: u8,
+    publish: bool,
+) -> Result<ApAlloc, Option<SpawnError>> {
+    let tables = gdt::alloc_ap_tables().ok_or(None)?;
     let stack = match kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES) {
         Ok(s) => s,
         Err(_) => {
             gdt::free_ap_tables(tables);
-            return None;
+            return Err(None);
         }
     };
     let stack_top = stack.top().as_u64();
@@ -196,7 +208,17 @@ pub(super) fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Opt
         Err(stack) => {
             kva_init::free_stack(stack);
             gdt::free_ap_tables(tables);
-            return None;
+            return Err(Some(SpawnError::NoSlot));
+        }
+    };
+    let workers = match work_init::spawn_cpu_workers(cpu_id) {
+        Ok(w) => w,
+        Err(e) => {
+            if let Some(stack) = thread_init::abandon_unstarted(idle_id, false) {
+                kva_init::free_stack(stack);
+            }
+            gdt::free_ap_tables(tables);
+            return Err(Some(e));
         }
     };
     let idle_ptr = thread_init::tcb_ptr(idle_id);
@@ -219,12 +241,13 @@ pub(super) fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Opt
             })
         };
     }
-    Some(ApAlloc {
+    Ok(ApAlloc {
         cpu_id,
         apic_id,
         tables,
         stack_top,
         idle_id,
+        workers,
         published: publish,
     })
 }
@@ -238,16 +261,23 @@ pub(super) fn free_ap_resources(a: ApAlloc, sipi_sent: bool) {
         cpu_id,
         tables,
         idle_id,
+        workers,
         published,
         ..
     } = a;
-    free_ap_slot(cpu_id, idle_id, published, sipi_sent);
+    free_ap_slot(cpu_id, idle_id, workers, published, sipi_sent);
     gdt::free_ap_tables(tables);
 }
 
 /// [`free_ap_resources`] but for the tables, for a `start_one` failure
 /// after the tables moved into `LIVE_TABLES`.
-fn free_ap_slot(cpu_id: u32, idle_id: ThreadId, published: bool, sipi_sent: bool) {
+fn free_ap_slot(
+    cpu_id: u32,
+    idle_id: ThreadId,
+    workers: CpuWorkers,
+    published: bool,
+    sipi_sent: bool,
+) {
     if published {
         if let Some(r) = per_cpu_init::cpu(cpu_id) {
             r.ready.store(false, Ordering::Relaxed);
@@ -267,18 +297,26 @@ fn free_ap_slot(cpu_id: u32, idle_id: ThreadId, published: bool, sipi_sent: bool
             };
         }
     }
-    if let Some(stack) = thread_init::abandon_ap_idle(idle_id) {
+    // The workers were never made ready, whatever the AP did.
+    work_init::abandon_cpu_workers(workers);
+    if let Some(stack) = thread_init::abandon_unstarted(idle_id, sipi_sent) {
         kva_init::free_stack(stack);
     }
 }
 
 /// Take the tables `start_one` moved into `LIVE_TABLES` back out and free
 /// them with the rest of the AP's resources.
-fn free_live_ap(cpu_id: u32, idle_id: ThreadId, published: bool, sipi_sent: bool) {
+fn free_live_ap(
+    cpu_id: u32,
+    idle_id: ThreadId,
+    workers: CpuWorkers,
+    published: bool,
+    sipi_sent: bool,
+) {
     // `start_one` pushed this AP's tables last, and only it pushes, one AP
     // at a time; `None` would mean there is nothing to free.
     let tables = LIVE_TABLES.with(|live| live.pop());
-    free_ap_slot(cpu_id, idle_id, published, sipi_sent);
+    free_ap_slot(cpu_id, idle_id, workers, published, sipi_sent);
     if let Some(t) = tables {
         gdt::free_ap_tables(t);
     }
@@ -402,6 +440,7 @@ fn start_one(a: ApAlloc, page: u64) {
     let ApAlloc {
         tables,
         idle_id,
+        workers,
         published,
         ..
     } = a;
@@ -414,7 +453,7 @@ fn start_one(a: ApAlloc, page: u64) {
     // them.
     if LIVE_TABLES.with(|live| live.try_push(tables)).is_err() {
         crate::marker!("vibeOS: smp: apic {apic_id} alloc failed");
-        free_ap_slot(cpu_id, idle_id, published, false);
+        free_ap_slot(cpu_id, idle_id, workers, published, false);
         return;
     }
     STARTING.with(|starting| {
@@ -429,7 +468,7 @@ fn start_one(a: ApAlloc, page: u64) {
 
     if apic_init::send_ipi(apic_id, 0, IpiMode::Init).is_err() {
         crate::marker!("vibeOS: smp: INIT failed");
-        free_live_ap(cpu_id, idle_id, published, false);
+        free_live_ap(cpu_id, idle_id, workers, published, false);
         return;
     }
     time_init::busy_wait_ms(INIT_WAIT_MS);
@@ -451,10 +490,11 @@ fn start_one(a: ApAlloc, page: u64) {
     tsc_warp_source();
     if !wait_ready(cpu_id) {
         crate::marker!("vibeOS: smp: apic {apic_id} timed out");
-        free_live_ap(cpu_id, idle_id, published, true);
+        free_live_ap(cpu_id, idle_id, workers, published, true);
         return;
     }
 
+    work_init::start_cpu_workers(&workers);
     crate::marker!(marker::SMP_AP_ONLINE);
 }
 
@@ -582,10 +622,20 @@ fn start_aps(page: u64) {
         if logical as usize >= per_cpu_init::cpu_count() {
             break;
         }
-        let Some(alloc) = alloc_ap_resources(logical, apic_id, true) else {
-            crate::marker!("vibeOS: smp: apic {apic_id} alloc failed");
-            logical += 1;
-            continue;
+        let alloc = match alloc_ap_resources(logical, apic_id, true) {
+            Ok(a) => a,
+            Err(e) => {
+                crate::marker!("vibeOS: smp: apic {apic_id} alloc failed");
+                if let Some(e) = e {
+                    crate::klog!(
+                        vibeos::log::Level::Warn,
+                        "smp: apic {apic_id} stays offline: {}",
+                        e.as_str()
+                    );
+                }
+                logical += 1;
+                continue;
+            }
         };
         start_one(alloc, page);
         logical += 1;

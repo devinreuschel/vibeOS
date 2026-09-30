@@ -45,8 +45,6 @@ PCI_GOLDEN = (
     "8086:100e",  # e1000 (QEMU default NIC)
 )
 
-ISA_DEBUG_EXIT = ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
-
 
 def _check_pci_qemu_set(raw: list[str]) -> None:
     """lspci-adjacent boot dump must name the default QEMU `pc` devices."""
@@ -88,7 +86,7 @@ def check_first_kernel_line(lines: list[str]) -> None:
         return
 
 
-# The lines `/bin/tests` writes to fd 1 and to fd 2 (`user/tests.asm`), each
+# The lines `/bin/tests` writes to fd 1 and to fd 2 (`console_forged_lines`), each
 # starting with the frame byte, as the console prints them: unframed, each
 # 0x1E as `?` (DESIGN §2.6).
 FORGED_LINES = (
@@ -415,11 +413,10 @@ def main() -> int:
     gp_test = env_flag("VIBEOS_GP_TEST")
     expect_pit = env_flag("VIBEOS_EXPECT_PIT")
 
-    extra: tuple[str, ...] = ()
-    if expect_panic or gp_test or panic_variant:
-        extra = ISA_DEBUG_EXIT
-
-    cfg = env.qemu(extra=extra, hpet=not expect_pit)
+    # The panic, `#GP` and panic-variant builds end on QMP `GUEST_PANICKED`,
+    # which the kernel's pvpanic write raises after the dump (DESIGN §8.3).
+    expect = "panic" if expect_panic or gp_test or panic_variant else "none"
+    cfg = env.qemu(hpet=not expect_pit, expect=expect)
     dump_needles: tuple[str | tuple[str, ...], ...] = ()
     if gp_test:
         markers = boot_contract_markers(cpu=env.cpu, gp=True, smp=env.smp)
@@ -460,7 +457,6 @@ def main() -> int:
             cfg,
             markers,
             timeout_s=env.timeout,
-            expect_panic=expect_panic,
             dump_needles=dump_needles,
         )
     except HarnessError as e:
@@ -477,7 +473,7 @@ def main() -> int:
         print(f"[e2e]   . {name}", file=sys.stderr)
     if expect_panic and result.panic_line:
         print(f"[e2e]   . panic seen: {result.panic_line!r}", file=sys.stderr)
-        print(f"[e2e]   . panic exit status {result.exit_code}", file=sys.stderr)
+        print(f"[e2e]   . ended on QMP {result.end}", file=sys.stderr)
     try:
         check_first_kernel_line(result.lines)
     except HarnessError as e:

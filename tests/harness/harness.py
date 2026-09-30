@@ -64,11 +64,16 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import IO, NamedTuple
+from typing import IO, TYPE_CHECKING, NamedTuple, NoReturn
 
 from tests.harness import frame, registry
 from tests.harness.frame import kernel_text as kernel_text
 from tests.harness.linesource import LineSource
+
+if TYPE_CHECKING:
+    # `qmp` imports this module; the runners import it when they run.
+    from tests.harness.qmp import QmpLike
+    from tests.harness.qmp import Session as QmpSession
 
 # The rows of the marker registry, `tests/contract/markers.toml` (ROADMAP
 # §10.2): the contract lists and the failure lists below are built from them.
@@ -85,9 +90,11 @@ PANIC_SIGNATURES: tuple[str, ...] = registry.signatures(ROWS, {frame.KERNEL})
 # patterns: a kernel line one of them matches fails the run too.
 FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = registry.failure_patterns(ROWS, {frame.KERNEL})
 
-# End of the dump. expect_panic waits for this so backtrace/logrec are in the log.
+# End of the dump. An expected-panic run waits for this so backtrace/logrec
+# are in the log.
 PANIC_DONE = "vibeOS: panic: halted"
-# How long QEMU has after PANIC_DONE to exit with PANIC_EXIT_STATUS.
+# How long QEMU has after PANIC_DONE to report QMP `GUEST_PANICKED`, which
+# the kernel's pvpanic write raises right after it (`qmp.NO_EVENT_CORE_S`).
 PANIC_EXIT_S = 10.0
 
 # The line that opens a dump, mirroring the headers `src/log/panic.rs` writes:
@@ -156,6 +163,9 @@ class RunResult:
     # skipped test's reason.
     ktest_runs: list[str] = field(default_factory=list)
     ktest_skips: dict[str, str] = field(default_factory=dict)
+    # The QMP event that ended the run under its declaration
+    # (`GUEST_PANICKED` for an expected panic); empty otherwise.
+    end: str = ""
 
 
 def serial_tail(lines: list[str], n: int = 40) -> str:
@@ -320,14 +330,17 @@ class DeadlineReader:
                          shows where it stopped; ("timeout", "") follows
       ("timeout", "")  - the deadline arrived
       ("eof", "")      - the pipe closed
+      ("idle", "")     - with `idle_s`: no complete line within `idle_s` of
+                         the call, so the caller can poll QMP (`qmp.Session`)
 
     A loop that tests only for `timeout` and `eof` takes a partial line as
     a line.
     """
 
-    def __init__(self, fd: int, deadline: float) -> None:
+    def __init__(self, fd: int, deadline: float, *, idle_s: float | None = None) -> None:
         self._fd = fd
         self._deadline = deadline
+        self._idle_s = idle_s
         self._buf = bytearray()
         os.set_blocking(fd, False)
 
@@ -348,17 +361,21 @@ class DeadlineReader:
         if line is not None:
             return ("line", line)
 
+        idle_at = math.inf if self._idle_s is None else time.monotonic() + self._idle_s
         while True:
-            remaining = self._deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = self._deadline - now
             if remaining <= 0:
                 if self._buf:
                     tail = bytes(self._buf).rstrip(b"\r").decode("utf-8", errors="replace")
                     self._buf.clear()
                     return ("partial", tail)
                 return ("timeout", "")
+            if now >= idle_at:
+                return ("idle", "")
 
             # Cap select's own wait so the deadline is honored precisely.
-            r, _, _ = select.select([self._fd], [], [], min(remaining, 0.5))
+            r, _, _ = select.select([self._fd], [], [], min(remaining, idle_at - now, 0.5))
             if not r:
                 # No data; loop and re-check the deadline.
                 continue
@@ -403,6 +420,7 @@ class QemuProcess:
     stderr goes to a temporary file, which cannot fill and stall QEMU the
     way a second pipe can. `stdin=True` gives the guest's COM1 a pipe for
     `send_input`. `monitor_sock` is the HMP socket `monitor` and `quit` use.
+    `idle_s` makes `next_event` report `idle` (`DeadlineReader`).
     """
 
     def __init__(
@@ -412,7 +430,9 @@ class QemuProcess:
         *,
         monitor_sock: str | None = None,
         stdin: bool = False,
+        idle_s: float | None = None,
     ) -> None:
+        self.argv = list(argv)
         self._err = tempfile.TemporaryFile()
         self._proc = subprocess.Popen(
             argv,
@@ -422,7 +442,7 @@ class QemuProcess:
             bufsize=0,
         )
         assert self._proc.stdout is not None
-        self._reader = DeadlineReader(self._proc.stdout.fileno(), deadline)
+        self._reader = DeadlineReader(self._proc.stdout.fileno(), deadline, idle_s=idle_s)
         self._monitor_sock = monitor_sock
         self._mon: socket.socket | None = None
         self._stderr: str | None = None  # set, and the files closed, at exit
@@ -488,16 +508,34 @@ def _file_text(f: IO[bytes]) -> str:
     return os.pread(fd, os.fstat(fd).st_size, 0).decode("utf-8", errors="replace")
 
 
-def _start_qemu(cfg: QemuConfig, deadline: float, *, stdin: bool = False) -> QemuProcess:
-    """Check PATH and the ISO, then start QEMU with a monitor socket."""
+def _start_qemu(
+    cfg: QemuConfig, deadline: float, *, stdin: bool = False, qmp_sock: str | None = None
+) -> QemuProcess:
+    """Check PATH and the ISO, then start QEMU with a monitor socket, and
+    with `qmp_sock` a QMP socket, halted until `qmp.Session.start`."""
     if not shutil.which("qemu-system-x86_64"):
         raise HarnessError("qemu-system-x86_64 not on PATH")
     if not os.path.exists(cfg.iso):
         raise HarnessError(f"ISO missing: {cfg.iso}")
     monitor_sock = _pick_monitor_path()
     return QemuProcess(
-        qemu_argv(cfg, monitor_sock), deadline, monitor_sock=monitor_sock, stdin=stdin
+        qemu_argv(cfg, monitor_sock, qmp_sock=qmp_sock),
+        deadline,
+        monitor_sock=monitor_sock,
+        stdin=stdin,
+        idle_s=IDLE_S if qmp_sock is not None else None,
     )
+
+
+# How long a source waits for serial before it reports `idle`, so a run's
+# `qmp.Session` polls QMP while the guest is quiet or paused.
+IDLE_S = 0.2
+
+
+def _argv_of(src: object) -> list[str]:
+    """The argv a source started QEMU with; empty for a fake."""
+    argv = getattr(src, "argv", None)
+    return list(argv) if isinstance(argv, list) else []
 
 
 def _qemu_report(result: RunResult, *, exited: bool) -> str:
@@ -578,6 +616,11 @@ class QemuConfig:
     # `-s -S`: a gdb stub on tcp::1234 and the CPUs halted until it continues
     # (`make debug`).
     gdb: bool = False
+    # The end the run expects (DESIGN §8.3's event rule, `qmp.EXPECTS`):
+    # `none`, `panic`, `reset` (boots without `-no-reboot`) or `capture`.
+    expect: str = "none"
+    # The QMP `RESET` events an `expect="reset"` run allows.
+    resets: int = 0
 
 
 @dataclass
@@ -619,6 +662,8 @@ class EnvConfig:
         boot_order: str | None = None,
         extra_panic: tuple[str, ...] = (),
         cmdline: str = "",
+        expect: str = "none",
+        resets: int = 0,
     ) -> QemuConfig:
         return QemuConfig(
             iso=self.iso,
@@ -633,6 +678,8 @@ class EnvConfig:
             extra_panic=extra_panic,
             qemu_version=self.qemu_version,
             cmdline=self.fw_cfg_cmdline(cmdline),
+            expect=expect,
+            resets=resets,
         )
 
 
@@ -1186,21 +1233,33 @@ def fw_cfg_cmdline_words(cfg: QemuConfig) -> str:
     return " ".join(p for p in parts if p)
 
 
-def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
+# Every boot pauses on pvpanic's panicked event instead of QEMU's default
+# `shutdown`, so the guest stays up for a core (DESIGN §8.4, ROADMAP §10.7).
+PANIC_ACTION = ("-action", "panic=pause")
+
+
+def qemu_argv(
+    cfg: QemuConfig, monitor_sock: str | None, *, qmp_sock: str | None = None
+) -> list[str]:
+    """QEMU's argv for `cfg`. `qmp_sock` adds a QMP server there and `-S`:
+    the CPUs wait for the harness's `cont` (`qmp.Session.start`)."""
     argv = [
         "qemu-system-x86_64",
         "-cdrom", cfg.iso,
         "-m", cfg.mem,
         "-smp", str(cfg.smp),
         "-cpu", cfg.cpu,
-        "-no-reboot",
     ]
+    if cfg.expect != "reset":
+        argv += ["-no-reboot"]
     if not cfg.display:
         # QEMU keeps the last `-display`, so there is only ever this one.
         argv += ["-display", "none"]
     argv += ["-serial", "stdio"]
     if monitor_sock is not None:
         argv += ["-monitor", f"unix:{monitor_sock},server=on,wait=off"]
+    if qmp_sock is not None:
+        argv += ["-qmp", f"unix:{qmp_sock},server=on,wait=off", "-S"]
     argv += _accel_args(cfg)
     if not cfg.hpet:
         argv += list(HPET_OFF_MACHINE)
@@ -1216,6 +1275,7 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
         # QEMU's option syntax reads `,,` as one comma inside a value.
         argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]
     argv += list(FORENSICS_DEVICES)
+    argv += list(PANIC_ACTION)
     argv += list(cfg.extra)
     ensure_qemu_pinned(argv[0], cfg.qemu_version)
     return argv
@@ -1238,32 +1298,50 @@ def run_qemu_and_check(
     timeout_s: float = 45.0,
     panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
     extra_panic: tuple[str, ...] = (),
-    expect_panic: bool = False,
     dump_needles: tuple[str | tuple[str, ...], ...] = (),
     line_source: LineSource | None = None,
+    qmp: QmpLike | None = None,
 ) -> RunResult:
     """Boot the ISO, stream serial, and assert the boot contract.
 
     On success (all markers seen in order), issues `quit` through the QEMU
     monitor so the process exits quickly.
 
-    `expect_panic=True`: the dump starts at the first line with a panic
+    QMP drives the run (`qmp.Session`, DESIGN §8.3's event rule): QEMU
+    starts halted and continues once QMP is up, a timeout takes a guest
+    core, and a panic signature in a run that expects none fails it, with
+    the core taken after `PANIC_DONE` or `qmp.NO_EVENT_CORE_S`.
+
+    `cfg.expect == "panic"`: the dump starts at the first line with a panic
     signature or a dump banner. Markers and `exactly_before` counts see only
     the lines before it, so the dump's logrec replay cannot satisfy one. The
-    dump must hold exactly one banner and reach `PANIC_DONE`; QEMU must then
-    exit within `PANIC_EXIT_S` with `PANIC_EXIT_STATUS`; then `dump_needles`.
+    dump must hold exactly one banner and reach `PANIC_DONE`; QMP must then
+    report `GUEST_PANICKED` within `PANIC_EXIT_S`; then `dump_needles`. A
+    failed expected-panic run keeps its core.
 
     `line_source` replaces QEMU (C-LINESOURCE): the PATH and ISO checks are
-    skipped and the lines, exit status and stderr come from the source.
+    skipped and the lines, exit status and stderr come from the source, and
+    QMP from `qmp` (a `qmp.FakeQmp`; none scripted by default).
 
     Panic signatures, the dump and `PANIC_DONE` match only kernel lines
     (framed, DESIGN §2.6); each marker matches its own source's lines.
     Limine's panic line before the first framed line, and a
     `frame.USER_FAILURES` line before the dump, fail the run.
     """
+    from tests.harness import qmp as qmpmod
+
+    expect_panic = cfg.expect == "panic"
     panic_signatures = _panic_sigs(cfg, panic_signatures, extra_panic)
     deadline = time.monotonic() + timeout_s
-    src = line_source if line_source is not None else _start_qemu(cfg, deadline)
+    if qmp is None and line_source is not None:
+        qmp = qmpmod.FakeQmp([])
+    session = qmpmod.Session(cfg, "boot", qmp)
+    src = (
+        line_source
+        if line_source is not None
+        else _start_qemu(cfg, deadline, qmp_sock=session.sock)
+    )
+    argv = _argv_of(src)
 
     result = RunResult()
     stream = frame.Stream()
@@ -1274,124 +1352,160 @@ def run_qemu_and_check(
     exact = {m.exactly_before[0]: m.exactly_before[1] for m in markers if m.exactly_before}
     counts = dict.fromkeys(exact, 0)
 
-    def fail(msg: str) -> HarnessError:
-        src.kill()
-        return HarnessError(msg)
+    def fail(msg: str) -> NoReturn:
+        session.fail(src, result, argv, msg)
 
+    def report() -> str:
+        return _qemu_report(result, exited=result.exit_code is not None)
+
+    def dump_line(i: int, line: str, text: str, ktext: str | None, sig: str | None) -> bool:
+        """The expected-panic dump's bookkeeping for line `i`; True once
+        the line belongs to the dump."""
+        nonlocal dump_at, banners, panic_done
+        if dump_at is None and expect_panic and (sig is not None or is_dump_banner(line)):
+            dump_at = i
+            result.panic_line = line
+            if marker_idx < len(markers):
+                fail(
+                    f"missing marker {markers[marker_idx].name!r} before the first "
+                    f"panic signature: {text!r}{serial_tail(result.lines)}"
+                )
+        if dump_at is None:
+            return False
+        if is_dump_banner(line):
+            banners += 1
+            if banners > 1:
+                fail(f"expected one dump banner, saw {banners}: {line!r}")
+        if ktext is not None and PANIC_DONE in ktext and not panic_done:
+            panic_done = True
+            src.set_deadline(time.monotonic() + PANIC_EXIT_S)
+        return True
+
+    def classify(line: str) -> tuple[str, str | None, str | None]:
+        """Feed `line` to the frame stream; fail on Limine's panic and, before
+        the dump, on a user failure. Its text, kernel text and signature."""
+        limine = stream.limine_panic(line)
+        framed, text = stream.feed(line)
+        if limine:
+            result.panic_line = line
+            fail(f"Limine panic before the kernel in: {text!r}")
+        ufail = frame.user_failure(line)
+        if dump_at is None and ufail is not None:
+            result.panic_line = line
+            fail(f"user failure {ufail!r} in: {text!r}")
+        return text, (text if framed else None), panic_signature(line, panic_signatures)
+
+    def take(i: int, line: str, text: str, ktext: str | None, sig: str | None) -> bool:
+        """Line `i` against the dump, the counts and the markers; True once
+        the last marker matched and QEMU was asked to quit."""
+        nonlocal marker_idx
+        if dump_line(i, line, text, ktext, sig):
+            return False
+        for needle, n in exact.items():
+            ntext = frame.text_for(frame.source_of(needle), line)
+            if ntext is not None and needle in ntext:
+                counts[needle] += 1
+                if counts[needle] > n:
+                    fail(
+                        f"extra {needle!r} line ({counts[needle]} seen, "
+                        f"expected exactly {n}): {line}"
+                    )
+        if marker_idx < len(markers) and markers[marker_idx].matches(line):
+            eb = markers[marker_idx].exactly_before
+            if eb is not None and counts[eb[0]] != eb[1]:
+                fail(
+                    f"{counts[eb[0]]} {eb[0]!r} lines before "
+                    f"{markers[marker_idx].name!r}, expected exactly {eb[1]}"
+                )
+            result.matched.append(markers[marker_idx].name)
+            marker_idx += 1
+            if marker_idx == len(markers) and not expect_panic:
+                # Done. Ask QEMU to exit; kill hard if it drags its feet.
+                src.quit()
+                return True
+        return False
+
+    drained_from: int | None = None  # the first line `settle` read after the end
     try:
+        session.start()
         while True:
             kind, line = src.next_event()
+            if kind == "idle":
+                d = session.idle()
+                if d:
+                    drained_from = len(result.lines)
+                    session.settle(src, result, d, argv)
+                if session.ended == "pass":
+                    break
+                continue
             if kind == "timeout":
-                result.timed_out = True
-                src.kill()
-                break
+                result.stderr = src.stderr_text()
+                missing = markers[marker_idx].name if marker_idx < len(markers) else "none"
+                session.timeout(
+                    src,
+                    result,
+                    argv,
+                    f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers; "
+                    f"missing {missing!r}{_qemu_report(result, exited=False)}",
+                )
             if kind == "eof":
                 # QEMU closed its stdout (usually because it exited).
+                result.exit_code = _reap(src)
+                result.stderr = src.stderr_text()
                 break
 
             result.lines.append(line)
-            limine = stream.limine_panic(line)
-            framed, text = stream.feed(line)
-            if limine:
-                result.panic_line = line
-                raise fail(f"Limine panic before the kernel in: {text!r}")
-            ktext = text if framed else None
-            sig = panic_signature(line, panic_signatures)
-            ufail = frame.user_failure(line)
-            if dump_at is None and ufail is not None:
-                result.panic_line = line
-                raise fail(f"user failure {ufail!r} in: {text!r}")
+            text, ktext, sig = classify(line)
+            d = session.line(
+                line,
+                panic=sig is not None and dump_at is None,
+                halted=ktext is not None and PANIC_DONE in ktext,
+            )
+            if d and d.end != "pass":
+                why = None
+                if sig is not None and not expect_panic:
+                    result.panic_line = line
+                    why = f"panic signature {sig!r} in: {text!r}"
+                session.settle(src, result, d, argv, why=why)
+            done = take(len(result.lines) - 1, line, text, ktext, sig)
+            if d.end == "pass":
+                drained_from = len(result.lines)
+                session.settle(src, result, d, argv)
+                break
+            if done:
+                break
 
-            if dump_at is None and sig is not None and not expect_panic:
-                result.panic_line = line
-                raise fail(f"panic signature {sig!r} in: {text!r}")
-            if dump_at is None and expect_panic and (sig is not None or is_dump_banner(line)):
-                dump_at = len(result.lines) - 1
-                result.panic_line = line
-                if marker_idx < len(markers):
-                    raise fail(
-                        f"missing marker {markers[marker_idx].name!r} before the first "
-                        f"panic signature: {text!r}{serial_tail(result.lines)}"
-                    )
+        if drained_from is not None:
+            # The serial `settle` read after the event, which may still hold
+            # the dump's last lines (the serial pipe and QMP race).
+            for i in range(drained_from, len(result.lines)):
+                line = result.lines[i]
+                take(i, line, *classify(line))
 
-            if dump_at is not None:
-                if is_dump_banner(line):
-                    banners += 1
-                    if banners > 1:
-                        raise fail(f"expected one dump banner, saw {banners}: {line!r}")
-                if ktext is not None and PANIC_DONE in ktext and not panic_done:
-                    panic_done = True
-                    src.set_deadline(time.monotonic() + PANIC_EXIT_S)
-                continue
-
-            for needle, n in exact.items():
-                ntext = frame.text_for(frame.source_of(needle), line)
-                if ntext is not None and needle in ntext:
-                    counts[needle] += 1
-                    if counts[needle] > n:
-                        raise fail(
-                            f"extra {needle!r} line ({counts[needle]} seen, "
-                            f"expected exactly {n}): {line}"
-                        )
-
-            if marker_idx < len(markers) and markers[marker_idx].matches(line):
-                eb = markers[marker_idx].exactly_before
-                if eb is not None and counts[eb[0]] != eb[1]:
-                    raise fail(
-                        f"{counts[eb[0]]} {eb[0]!r} lines before "
-                        f"{markers[marker_idx].name!r}, expected exactly {eb[1]}"
-                    )
-                result.matched.append(markers[marker_idx].name)
-                marker_idx += 1
-                if marker_idx == len(markers) and not expect_panic:
-                    # Done. Ask QEMU to exit; kill hard if it drags its feet.
-                    src.quit()
-                    break
-    finally:
-        result.exit_code = _reap(src)
-        result.stderr = src.stderr_text()
-
-    if result.timed_out and panic_done:
-        raise HarnessError(
-            f"QEMU did not exit within {PANIC_EXIT_S:g} s of {PANIC_DONE!r}"
-            f"{_qemu_report(result, exited=False)}"
-        )
-    if result.timed_out:
-        missing = (
-            markers[marker_idx].name if marker_idx < len(markers) else "none"
-        )
-        raise HarnessError(
-            f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers; "
-            f"missing {missing!r}{_qemu_report(result, exited=False)}"
-        )
-
-    if marker_idx < len(markers):
-        missing = markers[marker_idx].name
-        raise HarnessError(
-            f"missing marker {missing!r} after {len(result.lines)} lines"
-            f"{_qemu_report(result, exited=True)}"
-        )
-    _irqoff_observe(cfg, result.lines)
-
-    if not expect_panic:
+        if marker_idx < len(markers):
+            missing = markers[marker_idx].name
+            fail(f"missing marker {missing!r} after {len(result.lines)} lines{report()}")
+        _irqoff_observe(cfg, result.lines)
+        if expect_panic:
+            if dump_at is None:
+                fail(f"expected a panic signature; none seen{report()}")
+            assert dump_at is not None
+            if not panic_done:
+                fail(f"dump ended before {PANIC_DONE!r}{report()}")
+            if banners != 1:
+                fail(f"expected one dump banner, saw {banners}{serial_tail(result.lines)}")
+            if session.ended != "pass":
+                fail(f"panic run ended without QMP GUEST_PANICKED{report()}")
+            try:
+                check_dump_needles(result.lines[dump_at:], dump_needles)
+            except HarnessError as e:
+                fail(str(e))
         return result
-    if dump_at is None:
-        raise HarnessError(
-            f"expected a panic signature; none seen{_qemu_report(result, exited=True)}"
-        )
-    if not panic_done:
-        raise HarnessError(
-            f"dump ended before {PANIC_DONE!r}{_qemu_report(result, exited=True)}"
-        )
-    if banners != 1:
-        raise HarnessError(f"expected one dump banner, saw {banners}{serial_tail(result.lines)}")
-    if result.exit_code != PANIC_EXIT_STATUS:
-        raise HarnessError(
-            f"panic exit status {result.exit_code}, expected {PANIC_EXIT_STATUS}"
-            f"{_qemu_report(result, exited=True)}"
-        )
-    check_dump_needles(result.lines[dump_at:], dump_needles)
-    return result
+    finally:
+        session.close()
+        if result.exit_code is None:
+            result.exit_code = _reap(src)
+            result.stderr = src.stderr_text()
 
 
 # Injected machine check (ROADMAP §10.6): QEMU's HMP `mce` operands.
@@ -1612,17 +1726,59 @@ SHELL_READY_NEEDLE = "vibeOS: shell ready"
 CONSOLE_TAIL_S = 3.0
 
 
-def _console_tail(
+def _console_line(
+    session: QmpSession,
     src: LineSource,
     result: RunResult,
+    argv: list[str],
+    line: str,
+    sigs: tuple[str, ...],
+    stream: frame.Stream,
+    tail_s: float | None = None,
+) -> None:
+    """One console-boot line: a failing line (`run_failure`) fails the run,
+    a panic signature through the session's event rule, which takes the
+    core after the dump; the line then goes to the session."""
+    result.lines.append(line)
+    why = run_failure(line, stream, sigs)
+    if why is None:
+        msg = None
+    elif tail_s is None:
+        msg = f"{why[0]} in: {why[1]!r}"
+    else:
+        msg = f"{why[0]} in the {tail_s} s after the last reply: {why[1]}"
+    if why is not None:
+        result.panic_line = line
+    d = session.line(
+        line,
+        panic=panic_signature(line, sigs) is not None,
+        halted=PANIC_DONE in (kernel_text(line) or ""),
+    )
+    if d:
+        session.settle(src, result, d, argv, why=msg)
+    if msg is not None:
+        session.fail(src, result, argv, msg)
+
+
+def _console_tail(
+    session: QmpSession,
+    src: LineSource,
+    result: RunResult,
+    argv: list[str],
     sigs: tuple[str, ...],
     window_s: float,
     stream: frame.Stream,
 ) -> None:
     """Read serial for `window_s`: fail on a failing line (`run_failure`) or on QEMU's exit."""
-    src.set_deadline(time.monotonic() + window_s)
+    end = time.monotonic() + window_s
+    src.set_deadline(end)
     while True:
         kind, line = src.next_event()
+        if kind == "idle":
+            d = session.idle()
+            if d:
+                session.settle(src, result, d, argv)
+            continue
         if kind == "timeout":
             return
         if kind == "eof":
@@ -1632,12 +1788,7 @@ def _console_tail(
                 f"console input: QEMU exited in the {window_s} s after the last reply"
                 f"{_qemu_report(result, exited=True)}"
             )
-        result.lines.append(line)
-        why = run_failure(line, stream, sigs)
-        if why is not None:
-            result.panic_line = line
-            src.kill()
-            raise HarnessError(f"{why[0]} in the {window_s} s after the last reply: {why[1]}")
+        _console_line(session, src, result, argv, line, sigs, stream, tail_s=window_s)
 
 
 def run_qemu_console_input(
@@ -1645,23 +1796,31 @@ def run_qemu_console_input(
     timeout_s: float = 45.0,
     *,
     line_source: LineSource | None = None,
+    qmp: QmpLike | None = None,
 ) -> RunResult:
     """Boot, then type via COM1 and via PS/2 (`sendkey`). Both must echo.
 
     `-display none` still has an i8042; QEMU `sendkey` injects set-1
     scancodes on IRQ1, the same path as a focused QEMU window.
-    `line_source` replaces QEMU as in `run_qemu_and_check`.
+    `line_source` and `qmp` replace QEMU as in `run_qemu_and_check`, and
+    QMP drives the run the same way (`qmp.Session`).
 
     `shell ready` and the replies are `/bin/sh`'s, so they match only
     unframed lines; panic signatures match only kernel lines (DESIGN §2.6).
     """
+    from tests.harness import qmp as qmpmod
+
     panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
     deadline = time.monotonic() + timeout_s
+    if qmp is None and line_source is not None:
+        qmp = qmpmod.FakeQmp([])
+    session = qmpmod.Session(cfg, "console", qmp)
     src = (
         line_source
         if line_source is not None
-        else _start_qemu(cfg, deadline, stdin=True)
+        else _start_qemu(cfg, deadline, stdin=True, qmp_sock=session.sock)
     )
+    argv = _argv_of(src)
 
     result = RunResult()
     stream = frame.Stream()
@@ -1669,21 +1828,31 @@ def run_qemu_console_input(
     saw_serial = False
     saw_ps2 = False
 
+    def missing(report: str) -> str:
+        """The first step the run has not seen."""
+        if not saw_ready:
+            when = f"after {timeout_s}s" if result.timed_out else "before QEMU exited"
+            return f"console input: no shell ready {when}; matched={result.matched}{report}"
+        if not saw_serial:
+            return f"console input: serial echo missing{report}"
+        return f"console input: PS/2 sendkey echo missing (i8042){report}"
+
     try:
+        session.start()
         while True:
             kind, line = src.next_event()
+            if kind == "idle":
+                d = session.idle()
+                if d:
+                    session.settle(src, result, d, argv)
+                continue
             if kind == "timeout":
                 result.timed_out = True
-                src.kill()
-                break
+                result.stderr = src.stderr_text()
+                session.timeout(src, result, argv, missing(_qemu_report(result, exited=False)))
             if kind == "eof":
                 break
-            result.lines.append(line)
-            why = run_failure(line, stream, panic_signatures)
-            if why is not None:
-                result.panic_line = line
-                src.kill()
-                raise HarnessError(f"{why[0]} in: {why[1]!r}")
+            _console_line(session, src, result, argv, line, panic_signatures, stream)
             utext = frame.user_text(line)
             if utext is None:
                 continue
@@ -1707,31 +1876,25 @@ def run_qemu_console_input(
                 saw_ps2 = True
                 result.matched.append("ps2_echo")
                 # A later reply step goes before the tail.
-                _console_tail(src, result, panic_signatures, CONSOLE_TAIL_S, stream)
+                _console_tail(
+                    session, src, result, argv, panic_signatures, CONSOLE_TAIL_S, stream
+                )
                 src.quit()
                 break
     finally:
-        result.exit_code = _reap(src)
-        result.stderr = src.stderr_text()
+        session.close()
+        if result.exit_code is None:
+            result.exit_code = _reap(src)
+            result.stderr = src.stderr_text()
 
-    report = _qemu_report(result, exited=not result.timed_out)
-    if not saw_ready:
-        when = f"after {timeout_s}s" if result.timed_out else "before QEMU exited"
-        raise HarnessError(
-            f"console input: no shell ready {when}; matched={result.matched}{report}"
-        )
-    if not saw_serial:
-        raise HarnessError(f"console input: serial echo missing{report}")
     if not saw_ps2:
-        raise HarnessError(f"console input: PS/2 sendkey echo missing (i8042){report}")
+        raise HarnessError(missing(_qemu_report(result, exited=True)))
     return result
 
 
 # isa-debug-exit at 0xf4: host status = (value << 1) | 1. DESIGN §8.2.
 ISA_DEBUG_PASS = 33  # write 0x10
 ISA_DEBUG_FAIL = 35  # write 0x11
-# The `panic_exit` build writes 0x11 after `panic: halted`.
-PANIC_EXIT_STATUS = ISA_DEBUG_FAIL
 
 
 # ktest protocol (DESIGN §8.2, C-KTEST-PROTO): one kernel line per event.
@@ -1855,28 +2018,6 @@ def ktest_summary(lines: Iterable[str]) -> KtestSummary:
         elif k.kind == "info":
             s.infos.append(k)
     return s
-
-# After a panic banner, keep reading this long so the dump's `msg:` line and
-# the backtrace land in the HarnessError and the results file.
-PANIC_DRAIN_S = 0.4
-
-
-def drain_panic_tail(
-    reader: DeadlineReader, result: RunResult, window_s: float = PANIC_DRAIN_S
-) -> None:
-    """Read a bit more after the banner so `msg:` is in the HarnessError."""
-    reader.set_deadline(time.monotonic() + window_s)
-    while True:
-        kind, line = reader.next_event()
-        if kind == "partial":
-            result.lines.append(line)
-            continue
-        if kind != "line":
-            return
-        result.lines.append(line)
-        if PANIC_DONE in (kernel_text(line) or ""):
-            return
-
 
 def check_ktest_output(
     lines: Iterable[str],
@@ -2047,6 +2188,29 @@ class KtestDeadlines:
         )
 
 
+class _ProcSource:
+    """`run_qemu_until_exit`'s QEMU child as the source `qmp.Session` reads."""
+
+    def __init__(self, proc: subprocess.Popen[str], reader: DeadlineReader) -> None:
+        self._proc = proc
+        self._reader = reader
+
+    def next_event(self) -> tuple[str, str]:
+        return self._reader.next_event()
+
+    def set_deadline(self, deadline: float) -> None:
+        self._reader.set_deadline(deadline)
+
+    def kill(self) -> None:
+        self._proc.kill()
+
+    def wait(self, timeout: float) -> int | None:
+        try:
+            return self._proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+
+
 def run_qemu_until_exit(
     cfg: QemuConfig,
     timeout_s: float = 60.0,
@@ -2056,6 +2220,7 @@ def run_qemu_until_exit(
     *,
     expect_fail: bool = False,
     progress: KtestDeadlines | None = None,
+    qmp: QmpLike | None = None,
 ) -> RunResult:
     """Boot the ISO and wait for QEMU to exit (isa-debug-exit).
 
@@ -2065,19 +2230,29 @@ def run_qemu_until_exit(
     last run line (`KtestDeadlines.hung_message`). A partial line at the
     deadline goes into the serial tail, never to `progress` or the checks.
 
+    QMP drives the run (`qmp.Session`): a timeout takes a guest core; a
+    panic signature in a run that expects none fails it, with the core
+    after the dump; `cfg.expect == "panic"` ends at QMP `GUEST_PANICKED`,
+    with the serial read on for the dump's tail. `qmp` replaces the socket
+    (unit tests): QEMU then starts without `-qmp` and `-S`.
+
     `kill_after(line)` may return seconds-until-SIGKILL. The first non-None
-    wins (vibefs crash consistency). A kill is not a harness timeout. It gets
-    the raw line; a failing line (`run_failure`) ends the run, unless
-    `expect_fail` is set: an expect-fail boot (`run_ktest`'s deadline trip)
-    reads on through its failure and panic lines and checks them itself.
+    wins (vibefs crash consistency). A kill is not a harness timeout and
+    takes no core. It gets the raw line; a failing line (`run_failure`)
+    ends the run, unless `expect_fail` is set: an expect-fail boot
+    (`run_ktest`'s deadline trip) reads on through its failure and panic
+    lines and checks them itself.
     """
+    from tests.harness import qmp as qmpmod
+
     if not shutil.which("qemu-system-x86_64"):
         raise HarnessError("qemu-system-x86_64 not on PATH")
     if not os.path.exists(cfg.iso):
         raise HarnessError(f"ISO missing: {cfg.iso}")
 
+    session = qmpmod.Session(cfg, "boot", qmp)
     monitor_sock = _pick_monitor_path()
-    argv = qemu_argv(cfg, monitor_sock)
+    argv = qemu_argv(cfg, monitor_sock, qmp_sock=session.sock)
     panic_signatures = _panic_sigs(cfg, panic_signatures, extra_panic)
 
     proc = subprocess.Popen(
@@ -2094,7 +2269,8 @@ def run_qemu_until_exit(
     t0 = time.monotonic()
     deadline = progress.start(t0) if progress is not None else t0 + timeout_s
     kill_at: float | None = None
-    reader = DeadlineReader(proc.stdout.fileno(), deadline)
+    reader = DeadlineReader(proc.stdout.fileno(), deadline, idle_s=IDLE_S)
+    src = _ProcSource(proc, reader)
     stream = frame.Stream()
 
     def take(line: str) -> None:
@@ -2105,13 +2281,34 @@ def run_qemu_until_exit(
                 result.panic_line = line
         elif why is not None:
             result.panic_line = line
-            drain_panic_tail(reader, result)
-            proc.kill()
-            raise HarnessError(f"{why[0]} in: {why[1]!r}{serial_tail(result.lines)}")
+        sig = panic_signature(line, panic_signatures) is not None
+        # A run that declares a panic's end expects its signatures; the
+        # event rule judges it (DESIGN §8.3).
+        expected = expect_fail or (sig and cfg.expect != "none")
+        msg = None if why is None or expected else f"{why[0]} in: {why[1]!r}"
+        d = session.line(
+            line,
+            panic=sig and not expect_fail,
+            halted=PANIC_DONE in (kernel_text(line) or ""),
+        )
+        if d and d.end != "pass":
+            session.settle(src, result, d, argv, why=msg)
+        if msg is not None:
+            session.fail(src, result, argv, f"{msg}{serial_tail(result.lines)}")
+        if d.end == "pass":
+            session.settle(src, result, d, argv)
 
     try:
+        session.start()
         while True:
             kind, line = reader.next_event()
+            if kind == "idle":
+                d = session.idle()
+                if d:
+                    session.settle(src, result, d, argv)
+                if session.ended == "pass":
+                    break
+                continue
             if kind == "timeout":
                 now = time.monotonic()
                 if kill_at is not None and now < deadline:
@@ -2124,13 +2321,17 @@ def run_qemu_until_exit(
                         if kind == "partial":
                             result.lines.append(line)
                             continue
+                        if kind == "idle":
+                            continue
                         if kind != "line":
                             break
                         take(line)
                     break
-                result.timed_out = True
-                proc.kill()
-                break
+                if progress is not None:
+                    why = f"{progress.hung_message()}; {len(result.lines)} lines"
+                else:
+                    why = f"timed out after {timeout_s}s; {len(result.lines)} lines"
+                session.timeout(src, result, argv, f"{why}{serial_tail(result.lines)}")
             if kind == "eof":
                 break
             if kind == "partial":
@@ -2138,6 +2339,8 @@ def run_qemu_until_exit(
                 result.lines.append(line)
                 continue
             take(line)
+            if session.ended == "pass":
+                break
             if progress is not None:
                 deadline = progress.on_line(line, time.monotonic())
                 reader.set_deadline(deadline if kill_at is None else min(deadline, kill_at))
@@ -2147,21 +2350,12 @@ def run_qemu_until_exit(
                     kill_at = time.monotonic() + delay
                     reader.set_deadline(min(deadline, kill_at))
     finally:
+        session.close()
         try:
             result.exit_code = proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             proc.kill()
             result.exit_code = proc.wait()
-
-    if result.timed_out and progress is not None:
-        raise HarnessError(
-            f"{progress.hung_message()}; {len(result.lines)} lines{serial_tail(result.lines)}"
-        )
-    if result.timed_out:
-        raise HarnessError(
-            f"timed out after {timeout_s}s; {len(result.lines)} lines"
-            f"{serial_tail(result.lines)}"
-        )
     _irqoff_observe(cfg, result.lines)
     return result
 

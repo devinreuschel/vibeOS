@@ -1,7 +1,9 @@
 //! In-guest tests for sched (kernel_tests only). Rows: [`TESTS`].
 
 mod counted;
+mod dead_slot;
 mod depth;
+mod fill;
 mod hooks;
 #[cfg(feature = "irqoff")]
 mod irqoff;
@@ -10,9 +12,11 @@ mod registry;
 mod requeue;
 mod sleep;
 pub(crate) use counted::test_counted_deferred_release;
+pub(crate) use dead_slot::lifetime_dead_slot_on_cpu;
 pub(crate) use depth::{
     record, report, stack_depth_exit_scan, stack_depth_planted, wait_exit_depth,
 };
+pub(crate) use fill::fill_threads;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 #[cfg(feature = "irqoff")]
 pub(crate) use irqoff::{irqoff_deliberate_is_exempt, irqoff_logs_long_stretch};
@@ -33,7 +37,7 @@ use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::pmm::{Frames, MAX_ORDER};
 use vibeos::proc::{SIGKILL, wait_exited, wait_signaled};
 use vibeos::syscall::SYS_KILL;
-use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
+use vibeos::thread::{ThreadId, ThreadState};
 
 use crate::apic_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
@@ -614,8 +618,10 @@ pub(crate) fn ktest_context() -> Outcome {
 
 fn dying_entry_s08() {}
 
-/// Most blocks [`spawn_stack_oom`] holds while the buddy is drained.
-const OOM_HOLD: usize = 96;
+/// Most blocks [`spawn_stack_oom`] holds while the buddy is drained: the
+/// free memory the heap-sized tables leave (ROADMAP §10.4) splits into a
+/// few hundred blocks.
+const OOM_HOLD: usize = 1024;
 
 /// One default kernel stack's frames: fewer than this left, a spawn fails.
 const STACK_FRAMES: usize = vibeos::kva::DEFAULT_STACK_PAGES;
@@ -626,7 +632,7 @@ fn buddy_free() -> usize {
 
 /// Take blocks from the buddy, highest order first, until fewer than
 /// [`STACK_FRAMES`] frames are free. False if `held` filled first.
-fn drain_buddy(held: &mut [Option<Frames>; OOM_HOLD]) -> bool {
+fn drain_buddy(held: &mut [Option<Frames>]) -> bool {
     let mut n = 0usize;
     let mut order = MAX_ORDER as u8;
     loop {
@@ -648,7 +654,7 @@ fn drain_buddy(held: &mut [Option<Frames>; OOM_HOLD]) -> bool {
     }
 }
 
-fn release_buddy(held: &mut [Option<Frames>; OOM_HOLD]) {
+fn release_buddy(held: &mut [Option<Frames>]) {
     pmm_init::with_buddy(|b| {
         for slot in held.iter_mut() {
             if let Some(f) = slot.take() {
@@ -664,8 +670,12 @@ fn release_buddy(held: &mut [Option<Frames>; OOM_HOLD]) {
 pub(crate) fn spawn_stack_oom() -> Outcome {
     // A cached stack would let the spawn succeed with the buddy empty.
     thread_init::testing::drain_local_stack_cache();
+    // The hold table is allocated before the drain, on the heap: it is too
+    // large for a test's stack.
+    let Ok(mut held) = vibeos::limits::table(OOM_HOLD, || None) else {
+        return Outcome::Fail("no memory for the hold table");
+    };
     let base = quiescent_free_frames();
-    let mut held: [Option<Frames>; OOM_HOLD] = [const { None }; OOM_HOLD];
     // IF off on this CPU keeps the drained window short.
     let (drained, r) = {
         let _g = crate::arch::current::InterruptGuard::enter();
@@ -748,7 +758,7 @@ pub(crate) fn fork_oom() -> Outcome {
 }
 
 /// CPUs the switch-tail tests need: CPU 0 exits, CPUs 1 to 3 churn or spawn.
-const TAIL_CPUS: u32 = 4;
+pub(super) const TAIL_CPUS: u32 = 4;
 
 /// Thread exits [`lifetime_stack_reclaim`] makes on CPU 0.
 const RECLAIM_EXITS: usize = 10_000;
@@ -757,15 +767,15 @@ const RECLAIM_EXITS: usize = 10_000;
 const EXIT_BATCH: usize = 16;
 
 /// Exits held open by the exit-stall hook, and for how long each.
-const STALL_EXITS: u32 = 100;
+pub(super) const STALL_EXITS: u32 = 100;
 
-const STALL_MS: u64 = 10;
+pub(super) const STALL_MS: u64 = 10;
 
 /// Churn threads per churning CPU.
 const CHURN_PER_CPU: u32 = 2;
 
 /// Bound on waiting for one batch to die or the churn threads to stop.
-const WAIT_NS: u64 = 10_000_000_000;
+pub(super) const WAIT_NS: u64 = 10_000_000_000;
 
 static CHURN_STOP: AtomicBool = AtomicBool::new(false);
 
@@ -774,7 +784,7 @@ static CHURN_DONE: AtomicU32 = AtomicU32::new(0);
 /// Churn switches, per CPU.
 static CHURN: [AtomicU64; TAIL_CPUS as usize] = [const { AtomicU64::new(0) }; TAIL_CPUS as usize];
 
-fn tail_cpus_online() -> bool {
+pub(super) fn tail_cpus_online() -> bool {
     per_cpu_init::online_mask().count_ones() >= TAIL_CPUS
 }
 
@@ -974,197 +984,6 @@ pub(crate) fn exit_burst() -> Outcome {
     }
     if bad != 0 {
         return crate::fail_fmt!("{bad} of {BURST} processes did not exit 0");
-    }
-    Outcome::Ok
-}
-
-/// Dead slots left for CPU 0's exits once the fillers hold the rest.
-const FREE_SLOTS: u32 = 4;
-
-/// Spawns each spawner on CPUs 1 to 3 makes.
-const SPAWNS_PER_CPU: u32 = 400;
-
-static FILL_LIVE: AtomicU32 = AtomicU32::new(0);
-
-/// Fillers told to exit, taken one at a time.
-static FILL_RELEASE: AtomicU32 = AtomicU32::new(0);
-
-static FILL_ALL: AtomicBool = AtomicBool::new(false);
-
-static SPAWN_GO: AtomicBool = AtomicBool::new(false);
-
-static SPAWNERS_DONE: AtomicU32 = AtomicU32::new(0);
-
-static SPAWN_BAD: AtomicBool = AtomicBool::new(false);
-
-/// Per tid bucket ([`tid_bucket`]): spawns that returned a tid in it, and
-/// runs of a child with one. Tids are not reused before the allocator
-/// wraps, so a child that ran twice or not at all shows as a mismatch.
-static SPAWNED: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
-
-static RAN: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
-
-/// Hold a TCB slot, asleep on CPU 0, until released.
-fn filler_entry() {
-    FILL_LIVE.fetch_add(1, Ordering::AcqRel);
-    loop {
-        if FILL_ALL.load(Ordering::Acquire)
-            || FILL_RELEASE
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-                .is_ok()
-        {
-            break;
-        }
-        thread_init::sleep_ms(2);
-    }
-    FILL_LIVE.fetch_sub(1, Ordering::AcqRel);
-}
-
-/// `id`'s bucket in [`SPAWNED`] and [`RAN`].
-fn tid_bucket(id: ThreadId) -> usize {
-    id.raw() as usize % MAX_THREADS
-}
-
-fn child_entry() {
-    if let Some(r) = RAN.get(tid_bucket(thread_init::current_id())) {
-        r.fetch_add(1, Ordering::AcqRel);
-    }
-}
-
-/// On CPUs 1 to 3: spawn children onto CPU 0 as fast as slots come free.
-fn slot_spawner() {
-    while !SPAWN_GO.load(Ordering::Acquire) {
-        thread_init::yield_now();
-    }
-    let t0 = time_init::now_ns();
-    let mut n = 0u32;
-    while n < SPAWNS_PER_CPU {
-        match thread_init::spawn_on("child", child_entry, 0) {
-            Ok(h) => {
-                if let Some(s) = SPAWNED.get(tid_bucket(h.id())) {
-                    s.fetch_add(1, Ordering::AcqRel);
-                }
-                n += 1;
-            }
-            // A free slot comes with CPU 0's next exit, and KVA for a stack
-            // with its worker's next free: `Kva::alloc` refuses once
-            // `MAX_KVA_RANGES - 2` ranges are live, and the burst parks
-            // dead stacks on CPU 0's dead list faster than it frees them.
-            Err(SpawnError::NoSlot | SpawnError::NoMemory) => thread_init::yield_now(),
-        }
-        if time_init::now_ns().saturating_sub(t0) > 6 * WAIT_NS {
-            SPAWN_BAD.store(true, Ordering::Release);
-            break;
-        }
-    }
-    SPAWNERS_DONE.fetch_add(1, Ordering::AcqRel);
-}
-
-fn wait_for(pred: impl Fn() -> bool, ns: u64) -> bool {
-    let t0 = time_init::now_ns();
-    while !pred() {
-        if time_init::now_ns().saturating_sub(t0) > ns {
-            return false;
-        }
-        thread_init::sleep_ms(1);
-    }
-    true
-}
-
-/// Let every filler go and wait for them, bounded.
-fn release_fillers() -> bool {
-    FILL_ALL.store(true, Ordering::Release);
-    wait_for(|| FILL_LIVE.load(Ordering::Acquire) == 0, WAIT_NS)
-}
-
-/// A spawn reuses a `Dead` TCB slot only once its CPU has switched off it
-/// (ROADMAP §10.10, F012): fillers hold every slot but four, so the only
-/// Dead slots are CPU 0's exits, held open for 10 ms on the first 100;
-/// spawners on CPUs 1 to 3 respawn into them, and every child runs its
-/// entry exactly once.
-pub(crate) fn lifetime_dead_slot_on_cpu() -> Outcome {
-    if !tail_cpus_online() {
-        return Outcome::Skip("needs 4 cpus");
-    }
-    for (s, r) in SPAWNED.iter().zip(RAN.iter()) {
-        s.store(0, Ordering::Relaxed);
-        r.store(0, Ordering::Relaxed);
-    }
-    FILL_LIVE.store(0, Ordering::Release);
-    FILL_RELEASE.store(0, Ordering::Release);
-    FILL_ALL.store(false, Ordering::Release);
-    SPAWN_GO.store(false, Ordering::Release);
-    SPAWNERS_DONE.store(0, Ordering::Release);
-    SPAWN_BAD.store(false, Ordering::Release);
-
-    // The spawners take their slots before the fillers take the rest.
-    let mut spawners = 0u32;
-    for cpu in 1..TAIL_CPUS {
-        if let Err(e) = thread_init::spawn_on("slot-spawner", slot_spawner, cpu) {
-            SPAWN_GO.store(true, Ordering::Release);
-            SPAWN_BAD.store(true, Ordering::Release);
-            let _done = wait_for(
-                || SPAWNERS_DONE.load(Ordering::Acquire) == spawners,
-                WAIT_NS,
-            );
-            return crate::fail_fmt!("spawner: {}", e.as_str());
-        }
-        spawners += 1;
-    }
-    // Fill every free slot, then let four fillers exit on CPU 0.
-    let mut fillers = 0u32;
-    loop {
-        match thread_init::spawn_on("filler", filler_entry, 0) {
-            Ok(_) => fillers += 1,
-            Err(SpawnError::NoSlot) => break,
-            Err(SpawnError::NoMemory) => {
-                SPAWN_GO.store(true, Ordering::Release);
-                let _released = release_fillers();
-                return Outcome::Fail("filler spawn: no memory");
-            }
-        }
-    }
-    let fill_target = fillers;
-    if !wait_for(|| FILL_LIVE.load(Ordering::Acquire) == fill_target, WAIT_NS) {
-        SPAWN_GO.store(true, Ordering::Release);
-        let _released = release_fillers();
-        return Outcome::Fail("fillers did not start");
-    }
-    FILL_RELEASE.store(FREE_SLOTS.min(fillers), Ordering::Release);
-    let left = fill_target.saturating_sub(FREE_SLOTS);
-    if !wait_for(|| FILL_LIVE.load(Ordering::Acquire) == left, WAIT_NS) {
-        SPAWN_GO.store(true, Ordering::Release);
-        let _released = release_fillers();
-        return Outcome::Fail("fillers did not exit");
-    }
-
-    thread_init::testing::arm_exit_stall(0, STALL_EXITS, STALL_MS);
-    SPAWN_GO.store(true, Ordering::Release);
-    let done = wait_for(
-        || SPAWNERS_DONE.load(Ordering::Acquire) == spawners,
-        6 * WAIT_NS,
-    );
-    let sum = |a: &[AtomicU32]| a.iter().map(|x| x.load(Ordering::Acquire)).sum::<u32>();
-    let ran = wait_for(|| sum(&RAN) >= sum(&SPAWNED), WAIT_NS);
-    thread_init::testing::disarm_exit_stall();
-    let released = release_fillers();
-    if !done {
-        return Outcome::Fail("spawners did not finish");
-    }
-    if SPAWN_BAD.load(Ordering::Acquire) {
-        return Outcome::Fail("a spawner gave up");
-    }
-    for (bucket, (s, r)) in SPAWNED.iter().zip(RAN.iter()).enumerate() {
-        let (s, r) = (s.load(Ordering::Acquire), r.load(Ordering::Acquire));
-        if s != r {
-            return crate::fail_fmt!("tid bucket {bucket}: spawned {s}, ran {r}");
-        }
-    }
-    if !ran {
-        return Outcome::Fail("children did not run");
-    }
-    if !released {
-        return Outcome::Fail("fillers did not exit at the end");
     }
     Outcome::Ok
 }

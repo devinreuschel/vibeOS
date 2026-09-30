@@ -2,7 +2,7 @@ use super::testfs::*;
 use super::*;
 
 fn ram() -> Vfs {
-    let mut v = Vfs::new(crate::fs::host_words());
+    let mut v = crate::fs::host_vfs();
     v.mount_root_fs(ramfs()).unwrap();
     v
 }
@@ -154,7 +154,7 @@ fn mount_crossing_dotdot() {
 #[test]
 fn unlinked_open_keeps_data_until_close() {
     let fs = ramfs();
-    let mut v = Vfs::new(crate::fs::host_words());
+    let mut v = crate::fs::host_vfs();
     v.mount_root_fs(fs).unwrap();
     let fid = v.open_path(None, "/f", O_RDWR | O_CREAT, 0o644).unwrap();
     assert_eq!(v.write(&fid, b"hello").unwrap(), 5);
@@ -188,7 +188,9 @@ fn fd_dup_shares_offset() {
     assert_eq!(v.read(&fid2, &mut buf).unwrap(), 4);
     assert_eq!(&buf, b"abcd");
     v.close(fid2).unwrap();
-    assert!(!v.file_table()[id.fid as usize].0, "the last close frees");
+    let mut t = [(false, 0, 0); SMALL.files];
+    assert_eq!(v.file_table(&mut t), SMALL.files);
+    assert!(!t[id.fid as usize].0, "the last close frees");
 }
 
 #[test]
@@ -314,13 +316,26 @@ fn ramfs_rename_and_link() {
 #[test]
 fn fixed_tables_match_limits() {
     use crate::limits;
-    let v = Vfs::new(crate::fs::host_words());
+    // The kernel's sizes are the limits, and a VFS built at them has
+    // tables of those lengths (ROADMAP §10.4, D1).
+    let k = VfsSizes::KERNEL;
+    assert_eq!(k.inodes, limits::MAX_INODES);
+    assert_eq!(k.dentries, limits::MAX_DENTRIES);
+    assert_eq!(k.mounts, limits::MAX_MOUNTS);
+    assert_eq!(k.files, limits::MAX_OPEN_FILES);
+    let words = std::boxed::Box::leak(std::boxed::Box::new(words_table(k.inodes).unwrap()));
+    let v = Vfs::new(&k, words).unwrap();
+    assert_eq!(v.sizes(), k);
     assert_eq!(v.inodes.len(), limits::MAX_INODES);
     assert_eq!(v.dentries.len(), limits::MAX_DENTRIES);
     assert_eq!(v.supers.len(), limits::MAX_MOUNTS);
     assert_eq!(v.mounts.len(), limits::MAX_MOUNTS);
     assert_eq!(v.files.len(), limits::MAX_OPEN_FILES);
-    assert_eq!(FdTable::new().fds.len(), limits::MAX_FDS);
+    assert_eq!(crate::fs::host_vfs().sizes(), crate::fs::SMALL);
+    assert_eq!(
+        FdTable::try_new(limits::MAX_FDS).unwrap().fds.len(),
+        limits::MAX_FDS
+    );
 }
 
 /// Negative lookups of fresh names under `dir` until the dentry cache
@@ -344,7 +359,7 @@ fn dcache_f065_evicted_parent_keeps_mount() {
     let marker = v.stat(None, "/a/m/marker").unwrap().ino;
     assert_dcache_sound(&v);
     let mut seq = 0u32;
-    while v.stats.d_evicts < 2 * MAX_DENTRIES as u32 {
+    while v.stats.d_evicts < 2 * v.dentries.len() as u32 {
         press(&mut v, "", 8, &mut seq);
         assert_eq!(v.stat(None, "/a/m/marker").unwrap().ino, marker);
         assert_dcache_sound(&v);
@@ -385,7 +400,7 @@ fn dcache_f065_reused_slot_never_aliases() {
 /// used, positive and in the same superblock.
 fn assert_dcache_sound(v: &Vfs) {
     let mut i = 0usize;
-    while i < MAX_DENTRIES {
+    while i < v.dentries.len() {
         let d = &v.dentries[i];
         if d.used {
             assert_eq!(d.refs, v.expected_holds(i as u16), "dentry {i}'s holders");
@@ -480,18 +495,24 @@ fn dcache_f065_umount_checks_before_state() {
     let f = v.resolve(None, "/m/f", true).unwrap();
     let held = v.iref(f).unwrap();
     v.resolve(None, "/m", true).unwrap();
-    let before = (v.dentries, v.inodes, v.mounts);
+    let before = (v.dentries.to_vec(), v.inodes.to_vec(), v.mounts.to_vec());
     assert_eq!(v.umount(None, "/m").unwrap_err(), FsError::Busy);
-    assert_eq!((v.dentries, v.inodes, v.mounts), before);
+    assert_eq!(
+        (v.dentries.to_vec(), v.inodes.to_vec(), v.mounts.to_vec()),
+        before
+    );
     v.put_ref(held);
     assert_eq!(v.stat(None, "/m/f").unwrap().kind, InodeKind::Reg);
     v.creat(None, "/m/g", 0o644).unwrap();
     let g = v.resolve(None, "/m/g", true).unwrap();
     v.dget(g.dslot).unwrap();
     v.resolve(None, "/m", true).unwrap();
-    let before = (v.dentries, v.inodes, v.mounts);
+    let before = (v.dentries.to_vec(), v.inodes.to_vec(), v.mounts.to_vec());
     assert_eq!(v.umount(None, "/m").unwrap_err(), FsError::Busy);
-    assert_eq!((v.dentries, v.inodes, v.mounts), before);
+    assert_eq!(
+        (v.dentries.to_vec(), v.inodes.to_vec(), v.mounts.to_vec()),
+        before
+    );
     assert_eq!(v.stat(None, "/m/g").unwrap().kind, InodeKind::Reg);
     v.dput(g.dslot);
     assert_dcache_sound(&v);
@@ -697,7 +718,7 @@ fn second_mount_of_device_shares_super() {
 #[test]
 fn ro_mismatch_on_mounted_device_is_busy() {
     let (mut v, _) = dev_on_a();
-    let before = v.mounts;
+    let before = v.mounts.to_vec();
     assert_eq!(
         mount_dev(&mut v, "/b", keyfs_new(), 7, true).unwrap_err(),
         FsError::Busy,
@@ -708,7 +729,7 @@ fn ro_mismatch_on_mounted_device_is_busy() {
         FsError::Busy,
         "another filesystem type"
     );
-    assert_eq!(v.mounts, before, "no mount made");
+    assert_eq!(v.mounts.to_vec(), before, "no mount made");
     let b = v.resolve(None, "/b", true).unwrap();
     assert_eq!(b.mount, 0, "/b stays uncovered");
     assert!(
@@ -784,7 +805,7 @@ fn two_mounts_one_dentry_per_name() {
 /// spinlock, with a ramfs root and `/blk`.
 fn locked_vfs() -> &'static std::sync::Mutex<Vfs> {
     let vfs: &'static std::sync::Mutex<Vfs> = std::boxed::Box::leak(std::boxed::Box::new(
-        std::sync::Mutex::new(Vfs::new(crate::fs::host_words())),
+        std::sync::Mutex::new(crate::fs::host_vfs()),
     ));
     let api = FileApi::new(vfs);
     api.mount_root(ramfs(), None, false, None).unwrap();
@@ -997,7 +1018,9 @@ fn file_ref_generation_rejects_stale_id() {
     assert_eq!(b.id().fid, a.id().fid);
     assert_eq!(api.seek(&b, SeekFrom::Current(0)).unwrap(), 0);
     api.close(b).unwrap();
-    assert!(vfs.lock().unwrap().file_table().iter().all(|f| !f.0));
+    let mut t = [(false, 0, 0); SMALL.files];
+    vfs.lock().unwrap().file_table(&mut t);
+    assert!(t.iter().all(|f| !f.0));
 }
 
 /// FAT's and vibefs's errors are `FsError` itself (E2, F083): each binding

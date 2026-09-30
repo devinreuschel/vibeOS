@@ -43,6 +43,7 @@ ISO_KTEST        := build/vibeos-ktest.iso
 ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
 ISO_IRQOFF       := build/vibeos-irqoff.iso
 ISO_KTEST_IRQOFF := build/vibeos-ktest-irqoff.iso
+ISO_INIT_FAULT   := build/vibeos-init-fault.iso
 
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
@@ -56,14 +57,12 @@ KERNEL_SRCS := $(shell find src crates/core/src -type f \( -name '*.rs' -o -name
 # (ROADMAP §10.2, F143).
 HOSTLIB_DEPS := $(KERNEL_SRCS) Cargo.lock Cargo.toml crates/core/Cargo.toml tests/hostlib/Cargo.toml \
 	$(wildcard tests/hostlib/src/bin/*.rs)
-USER_HELLO  := user/hello
-USER_INIT   := user/init
-USER_SH     := user/sh
-USER_TESTS  := user/tests
 INITRD := $(CURDIR)/build/initrd.fat
+# The production initrd with `/sbin/init` from `user/src/bin/init_fault.rs`,
+# for `make test-e2e-init-fault` only (AGENTS.md rule 9).
+INITRD_INIT_FAULT := $(CURDIR)/build/initrd-init_fault.fat
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
-	scripts/gen_ksyms.py scripts/mkuserelf.py scripts/mkiso.sh \
-	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc \
+	scripts/gen_ksyms.py scripts/mkiso.sh \
 	.cargo/config.toml Cargo.lock
 # What mkiso.sh's /LICENSES/ notices are generated from (ROADMAP §10.9); the
 # crate graph comes from Cargo.lock, which the ELF already depends on.
@@ -113,7 +112,7 @@ build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@
 $(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
+	LIMINE_DIR=$$(LIMINE_DIR) OBJCOPY=$$(OBJCOPY) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
 endif
 endef
 
@@ -133,13 +132,13 @@ ISOS :=
 # default: no extra features
 $(eval $(call KERNEL_VARIANT,default,,$(ISO)))
 # panic: deliberate panic-test dump
-$(eval $(call KERNEL_VARIANT,panic,--features panic_test --features panic_exit,$(ISO_PANIC)))
+$(eval $(call KERNEL_VARIANT,panic,--features panic_test,$(ISO_PANIC)))
 # gp: deliberate #GP after IDT
-$(eval $(call KERNEL_VARIANT,gp,--features gp_test --features panic_exit,$(ISO_GP)))
+$(eval $(call KERNEL_VARIANT,gp,--features gp_test,$(ISO_GP)))
 # panic-nest: an `irq_nest` underflow after boot, dumped without a guard
-$(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test --features panic_exit,$(ISO_PANIC_NEST)))
+$(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test,$(ISO_PANIC_NEST)))
 # panic-stop: two CPUs panic at -smp 5; the dump stops the other three
-$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test --features panic_exit,$(ISO_PANIC_STOP)))
+$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_STOP)))
 # ktest: in-guest registry, never packaged as production
 $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
 # vibefs-crash: write-loop kernel for QEMU-kill fsck
@@ -150,6 +149,13 @@ $(eval $(call KERNEL_VARIANT,irqoff,--features irqoff,$(ISO_IRQOFF)))
 $(eval $(call KERNEL_VARIANT,ktest-irqoff,--features kernel_tests --features irqoff,$(ISO_KTEST_IRQOFF)))
 
 KERNEL_ELF := build/kernels/vibeos-default.elf
+
+ifneq ($(VIBEOS_PREBUILT),1)
+# The production ELF with the faulting init's initrd (ROADMAP §10.5): its
+# panic ends the run through pvpanic, as every production panic does.
+$(ISO_INIT_FAULT): $(KERNEL_ELF) $(INITRD_INIT_FAULT) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
+	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ build/iso_root_init-fault
+endif
 
 # The Rust user programs (ROADMAP §10.5, C-USERBINS): each user/src/bin/<name>.rs
 # links as a static non-PIE ET_EXEC at 1 GiB for $(USER_TRIPLE), through rust-lld
@@ -198,8 +204,8 @@ endif
 
 .PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
-        test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
-        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi test-irqoff
+        test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
+        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi test-qmp test-irqoff
 
 help:
 	@printf '%s\n' \
@@ -207,6 +213,8 @@ help:
 	  '  check                 fast local gate (clippy/unit/harness/python)' \
 	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
 	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
+	  '  fuzz-check            tests/fuzz: fmt, clippy, build every target, replay every committed input' \
+	  '  fuzz                  every cargo-fuzz target for FUZZ_TIME s (FUZZ_TARGETS=, FUZZ_SANITIZER=none|address)' \
 	  '  all / iso             kernel + build/vibeos.iso (hybrid BIOS/UEFI)' \
 	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
 	  '  user                  Rust user programs, as build/user/<name> (ROADMAP §10.5)' \
@@ -230,8 +238,10 @@ help:
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
 	  '  test-e2e-highmem      boot contract with 9 GiB, past the physmap cap' \
+	  '  test-e2e-init-fault   /sbin/init faults: pid 1 line, then the kernel panics' \
 	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
+	  '  test-qmp              QMP event streams re-recorded and compared; one guest core checked' \
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
 	  '  test-lapic-fallback   in-guest tests, TSC-deadline off' \
@@ -303,6 +313,7 @@ check:
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
 	$(MAKE) models-quick
 	$(MAKE) test-harness
+	$(MAKE) fuzz-check
 	$(MAKE) check-python
 	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
 	python3 scripts/gen_syscalls.py --check
@@ -317,7 +328,8 @@ check:
 	python3 scripts/doc_refs.py
 	@if command -v cargo-deny >/dev/null 2>&1; then \
 	    set -x; \
-	    cargo deny --workspace check licenses bans sources; \
+	    cargo deny --workspace check licenses bans sources && \
+	    cargo deny --manifest-path $(FUZZ_DIR)/Cargo.toml check licenses bans sources; \
 	else \
 	    $(call missing_tool,cargo-deny,cargo deny check licenses bans sources,cargo install cargo-deny --locked --version $(CARGO_DENY_PIN)); \
 	fi
@@ -355,28 +367,22 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-$(INITRD): $(HOSTLIB_DEPS) $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+# The production initrd: the Rust programs `make user` built (C-USERBINS).
+$(INITRD): $(HOSTLIB_DEPS) $(USER_STAMP)
 	mkdir -p $(dir $@)
 	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
-	    --add $(abspath $(USER_HELLO)):/hello \
-	    --add $(abspath $(USER_INIT)):/sbin/init \
-	    --add $(abspath $(USER_SH)):/bin/sh \
-	    --add $(abspath $(USER_TESTS)):/bin/tests
+	    --add $(USER_OUT)/hello:/hello \
+	    --add $(USER_OUT)/init:/sbin/init \
+	    --add $(USER_OUT)/sh:/bin/sh \
+	    --add $(USER_OUT)/tests:/bin/tests
 
-user/%.bin: user/%.asm user/sys.inc
-	nasm -f bin -I user/ -o $@ $<
-
-user/hello: user/hello.bin scripts/mkuserelf.py
-	python3 scripts/mkuserelf.py user/hello.bin $@
-
-user/init: user/init.bin scripts/mkuserelf.py
-	python3 scripts/mkuserelf.py user/init.bin $@
-
-user/sh: user/sh.bin scripts/mkuserelf.py
-	python3 scripts/mkuserelf.py user/sh.bin $@
-
-user/tests: user/tests.bin scripts/mkuserelf.py
-	python3 scripts/mkuserelf.py user/tests.bin $@
+$(INITRD_INIT_FAULT): $(HOSTLIB_DEPS) $(USER_STAMP)
+	mkdir -p $(dir $@)
+	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
+	    --add $(USER_OUT)/hello:/hello \
+	    --add $(USER_OUT)/init_fault:/sbin/init \
+	    --add $(USER_OUT)/sh:/bin/sh \
+	    --add $(USER_OUT)/tests:/bin/tests
 
 iso: $(ISO)
 
@@ -385,7 +391,8 @@ isos: $(ISOS)
 # v* release images (ROADMAP §10.1, §10.2; BOOT.md §3.5): the production ISO in
 # the release profile, copied to OUT. The ISO and named-ELF paths do not name
 # the profile, so a newer dev build would be reused: remove, rebuild, verify
-# that the image's kernel is the release link's output.
+# that the image's kernel is the release link's output, less its DWARF
+# sections (scripts/mkiso.sh strips them).
 RELEASE_ELF := $(CARGO_TARGET_DIR)/$(TARGET)/release/vibeos
 release-artifacts:
 	@if [ -z "$(OUT)" ]; then echo "release-artifacts: set OUT=<dir>" >&2; exit 2; fi
@@ -395,7 +402,8 @@ release-artifacts:
 	mkdir -p "$(OUT)" && cp $(ISO) "$(OUT)/vibeos.iso"
 	rm -f build/release-kernel.elf
 	xorriso -osirrox on -indev "$(OUT)/vibeos.iso" -extract /boot/vibeos build/release-kernel.elf
-	cmp build/release-kernel.elf $(RELEASE_ELF)
+	$(OBJCOPY) --strip-debug $(RELEASE_ELF) build/release-kernel.stripped.elf
+	cmp build/release-kernel.elf build/release-kernel.stripped.elf
 
 # Two clean builds of one commit, compared byte for byte (ROADMAP §10.2,
 # DESIGN §3.6). REPRO_ARGS: see scripts/repro_build.py.
@@ -416,12 +424,13 @@ run: $(ISO)
 run-panic: $(ISO_PANIC)
 	python3 tests/harness/run_interactive.py panic
 
-# The initrd's programs, whose symbols `make debug` loads beside the kernel's.
-DEBUG_USER_ELFS := $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+# The initrd's programs before the strip, whose symbols `make debug` loads
+# beside the kernel's.
+DEBUG_USER_ELFS := $(addprefix $(USER_ELF_DIR)/,hello init sh tests)
 
 # QEMU halted with a gdb stub on :1234 (`-s -S`); attach with
 # `gdb -x scripts/vibeos.gdb` from this directory (DESIGN §8.4).
-debug: $(ISO) $(KERNEL_ELF) $(DEBUG_USER_ELFS)
+debug: $(ISO) $(KERNEL_ELF) $(USER_STAMP)
 	python3 tests/harness/run_interactive.py debug --kernel-elf $(KERNEL_ELF) \
 	    $(foreach e,$(DEBUG_USER_ELFS),--user-elf $(e))
 
@@ -462,9 +471,10 @@ endif
 # What a tier job downloads instead of building (DESIGN §8.6): every ISO and
 # every host tool a `test-*` recipe lists. Recursive `=`, so it follows the
 # variables' paths. The tar keeps the executable bit, which upload-artifact
-# drops, and holds paths relative to $(CURDIR).
-PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
-	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
+# drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
+# run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) \
+	$(KERNEL_ELFS) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
 
 prebuilt: $(PREBUILT_FILES)
 	mkdir -p build
@@ -537,6 +547,17 @@ test-e2e-strace: $(ISO)
 test-e2e-power: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_power.py
 
+# Pid 1's end panics the kernel with its registered line (ROADMAP §10.5,
+# F068): the init-fault ISO's `/sbin/init` stores to 0x1000.
+test-e2e-init-fault: $(ISO_INIT_FAULT)
+	VIBEOS_TIER=test-e2e-init-fault VIBEOS_ISO=$(ISO_INIT_FAULT) python3 tests/harness/run_pid1.py init_fault
+
+# The QMP event streams tests/harness/test_qmp.py replays, re-recorded on
+# this QEMU and compared with tests/harness/fixtures/qmp/, then a guest core
+# of the production ISO (DESIGN §8.3, ROADMAP §10.7).
+test-qmp: $(ISO)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 tests/harness/run_qmp.py
+
 test-kernel: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py --hpet-off
 
@@ -576,7 +597,7 @@ test-irqoff: $(ISO_KTEST_IRQOFF) $(ISO_IRQOFF) $(MKFS_VIBEFS)
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_ISO=$(ISO_KTEST_IRQOFF) python3 tests/harness/run_ktest.py
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_RESULTS_APPEND=1 VIBEOS_ISO=$(ISO_IRQOFF) VIBEOS_MKFS=$(MKFS_VIBEFS) python3 tests/harness/run_e2e.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-e2e-power test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
@@ -591,10 +612,62 @@ gate:
 # Keeps build/results/.
 clean:
 	rm -rf build/kernels build/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
-	    $(INITRD) \
-	    user/hello user/hello.bin user/init user/init.bin user/sh user/sh.bin \
-	    user/tests user/tests.bin
+	    $(INITRD) $(USER_OUT) $(ISO_INIT_FAULT) $(INITRD_INIT_FAULT)
 	$(CARGO) clean
 
 distclean: clean
 	rm -rf $(LIMINE_DIR)
+
+# Fuzz targets for vibeos-core's byte parsers (C-FUZZ, TESTING.md §8.1). The
+# crate is its own workspace with its own target dir; each cargo command
+# passes the host triple, since .cargo/config.toml defaults to the kernel's.
+FUZZ_DIR := tests/fuzz
+FUZZ_TARGET_DIR := $(CURDIR)/target/fuzz
+# `make fuzz`'s output: its growing corpus and crash artifacts.
+FUZZ_OUT := $(CURDIR)/build/fuzz
+# Seconds per target, and per input before libFuzzer calls it a hang.
+FUZZ_TIME ?= 60
+FUZZ_UNIT_TIMEOUT ?= 10
+FUZZ_TARGETS ?= $(sort $(basename $(notdir $(wildcard $(FUZZ_DIR)/fuzz_targets/*.rs))))
+# AddressSanitizer is not usable with Rust on macOS hosts.
+FUZZ_SANITIZER ?= $(if $(filter Darwin,$(shell uname -s)),none,address)
+CARGO_FUZZ_VERSION := 0.13.2
+
+.PHONY: fuzz fuzz-check
+# Its own target dir, exported to every cargo and cargo-fuzz command below.
+fuzz fuzz-check: export CARGO_TARGET_DIR := $(FUZZ_TARGET_DIR)
+
+# `make check`'s fuzz step: fmt, clippy, a build of every target, and
+# `cargo test`, which replays every committed corpus and regression input
+# (no fuzzing).
+fuzz-check:
+	cargo fmt --manifest-path $(FUZZ_DIR)/Cargo.toml --check
+	cargo clippy --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --all-targets --target $(HOST_TRIPLE) -- -D warnings
+	cargo build --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --bins --target $(HOST_TRIPLE)
+	cargo test --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --target $(HOST_TRIPLE)
+
+# Run every target for FUZZ_TIME seconds. New inputs go to $(FUZZ_OUT)/corpus
+# only (libFuzzer writes to its first corpus directory), so the committed
+# corpus and regressions never grow here. A failing target does not stop the
+# rest; the recipe fails at the end, naming each with its artifacts.
+fuzz:
+	@v=$$(cargo fuzz --version 2>/dev/null | sed -n 's/^cargo-fuzz //p'); \
+	if [ "$$v" != "$(CARGO_FUZZ_VERSION)" ]; then \
+	    echo "fuzz: cargo-fuzz $(CARGO_FUZZ_VERSION) not installed (found: $${v:-none}); cargo install cargo-fuzz --locked --version $(CARGO_FUZZ_VERSION)" >&2; \
+	    exit 1; \
+	fi
+	cargo fuzz build --fuzz-dir $(FUZZ_DIR) --sanitizer $(FUZZ_SANITIZER)
+	@failed=""; \
+	for t in $(FUZZ_TARGETS); do \
+	    mkdir -p $(FUZZ_OUT)/corpus/$$t $(FUZZ_OUT)/artifacts/$$t $(FUZZ_DIR)/regressions/$$t; \
+	    echo "fuzz: $$t for $(FUZZ_TIME) s"; \
+	    cargo fuzz run --fuzz-dir $(FUZZ_DIR) --sanitizer $(FUZZ_SANITIZER) $$t \
+	        $(FUZZ_OUT)/corpus/$$t $(FUZZ_DIR)/corpus/$$t $(FUZZ_DIR)/regressions/$$t -- \
+	        -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_UNIT_TIMEOUT) -rss_limit_mb=2048 \
+	        -artifact_prefix=$(FUZZ_OUT)/artifacts/$$t/ || failed="$$failed $$t"; \
+	done; \
+	if [ -n "$$failed" ]; then \
+	    for t in $$failed; do echo "fuzz: FAIL $$t: artifacts in $(FUZZ_OUT)/artifacts/$$t" >&2; done; \
+	    exit 1; \
+	fi; \
+	echo "fuzz: ok ($(words $(FUZZ_TARGETS)) targets, $(FUZZ_TIME) s each)"

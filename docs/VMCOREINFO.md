@@ -123,7 +123,7 @@ layout of the profile the kernel was built with.
 | `CpuContext` | `crates/core/src/sched/thread.rs` | every register slot | `sched/thread.rs` |
 | `PerCpu` | `crates/core/src/smp/per_cpu.rs` | `cpu_id`, `current`, `idle`, `runq`, `remote` | `smp/per_cpu.rs` (the pin block for `cpu_id`, `current` and `idle`) |
 | `PerCpuRemote` | `crates/core/src/smp/per_cpu.rs` | `apic_id` | `smp/per_cpu.rs` |
-| `ReadyQueue` | `crates/core/src/sched/mod.rs` | `buf`, `head`, `len` | `sched/mod.rs` |
+| `ReadyQueue` | `crates/core/src/sched/mod.rs` | `ids` (the address of its heap ring of `ThreadId`s), `cap` (the ring's length, `limits::MAX_THREADS`), `head`, `len` | `sched/mod.rs` |
 
 The APIC id is `PerCpuRemote.apic_id`, which the tool reaches through `PerCpu.remote`; `PerCpu`
 has no `apic_id` field of its own. `KernelLog`'s port parameter is only named, so its layout is the

@@ -12,7 +12,9 @@ pub mod thread;
 pub mod wait;
 pub mod work;
 
-use crate::thread::{MAX_THREADS, ThreadId, ThreadState};
+use crate::kalloc::{AllocError, TryVec};
+use crate::limits;
+use crate::thread::{ThreadId, ThreadState};
 use crate::time::Instant;
 
 /// Local timer ticks per slice. DESIGN §6.1. PIT is ~1 kHz, so ~10 ms.
@@ -32,44 +34,73 @@ pub fn effective_deadline(deadline: Option<Instant>) -> Instant {
 }
 
 /// FIFO round-robin of ready `ThreadId`s. Idle stays off this list.
+///
+/// A heap ring of a fixed capacity, `limits::MAX_THREADS` for a CPU's run
+/// queue, built once by [`ReadyQueue::try_new`] and never grown (ROADMAP
+/// §10.4, D1). [`ReadyQueue::empty`] has no room at all: a `const` value
+/// for a static until its table is allocated.
 #[repr(C)]
-#[derive(Clone, Copy)]
 pub struct ReadyQueue {
-    buf: [ThreadId; MAX_THREADS],
+    /// The address of `buf`'s first id, 0 for none, and its capacity: the
+    /// words the core tool reads the ring through (docs/VMCOREINFO.md),
+    /// since `buf`'s own layout is `alloc`'s. `buf` never moves once built.
+    ids: usize,
+    cap: usize,
     head: usize,
     len: usize,
+    buf: TryVec<ThreadId>,
 }
 
 // The layout the core tool reads (docs/VMCOREINFO.md, "Types the core tool
-// reads"): `MAX_THREADS` ids, then `head` and `len`.
+// reads"): the ring's address and capacity, then `head` and `len`.
 #[cfg(not(loom))]
 const _: () = {
-    use core::mem::{align_of, offset_of, size_of};
-    assert!(offset_of!(ReadyQueue, buf) == 0);
-    assert!(offset_of!(ReadyQueue, head) == MAX_THREADS * 4);
-    assert!(offset_of!(ReadyQueue, len) == MAX_THREADS * 4 + 8);
-    assert!(size_of::<ReadyQueue>() == MAX_THREADS * 4 + 16);
+    use core::mem::{align_of, offset_of};
+    assert!(offset_of!(ReadyQueue, ids) == 0);
+    assert!(offset_of!(ReadyQueue, cap) == 8);
+    assert!(offset_of!(ReadyQueue, head) == 16);
+    assert!(offset_of!(ReadyQueue, len) == 24);
     assert!(align_of::<ReadyQueue>() == 8);
 };
 
 impl ReadyQueue {
+    /// A queue with no room, for a `const` initializer.
     pub const fn empty() -> Self {
         Self {
-            buf: [ThreadId::NONE; MAX_THREADS],
+            ids: 0,
+            cap: 0,
             head: 0,
             len: 0,
+            buf: TryVec::new(),
         }
     }
 
-    pub fn len(self) -> usize {
+    /// A queue with room for `cap` ids.
+    pub fn try_new(cap: usize) -> Result<Self, AllocError> {
+        let buf = limits::table(cap, || ThreadId::NONE)?;
+        Ok(Self {
+            ids: buf.as_ptr().addr(),
+            cap: buf.len(),
+            head: 0,
+            len: 0,
+            buf,
+        })
+    }
+
+    /// Ids the queue can hold.
+    pub fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn len(&self) -> usize {
         self.len
     }
 
-    pub fn is_empty(self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    pub fn iter(self) -> impl Iterator<Item = ThreadId> {
+    pub fn iter(&self) -> impl Iterator<Item = ThreadId> + '_ {
         let mut i = 0usize;
         core::iter::from_fn(move || {
             if i >= self.len {
@@ -81,12 +112,18 @@ impl ReadyQueue {
         })
     }
 
-    pub fn at(self, i: usize) -> ThreadId {
-        assert!(i < self.len, "ready: index");
-        self.buf[(self.head + i) % MAX_THREADS]
+    /// The ring index of the `i`th id from the front. Only called with a
+    /// queue that holds at least one id, so the capacity is not 0.
+    fn index(&self, i: usize) -> usize {
+        (self.head + i) % self.buf.len()
     }
 
-    pub fn front(self) -> Option<ThreadId> {
+    pub fn at(&self, i: usize) -> ThreadId {
+        assert!(i < self.len, "ready: index");
+        self.buf[self.index(i)]
+    }
+
+    pub fn front(&self) -> Option<ThreadId> {
         if self.len == 0 {
             None
         } else {
@@ -94,15 +131,8 @@ impl ReadyQueue {
         }
     }
 
-    pub fn contains(self, id: ThreadId) -> bool {
-        let mut i = 0;
-        while i < self.len {
-            if self.at(i) == id {
-                return true;
-            }
-            i += 1;
-        }
-        false
+    pub fn contains(&self, id: ThreadId) -> bool {
+        self.iter().any(|x| x == id)
     }
 
     pub fn push_back(&mut self, id: ThreadId) {
@@ -110,8 +140,8 @@ impl ReadyQueue {
         if self.contains(id) {
             return;
         }
-        assert!(self.len < MAX_THREADS, "ready: full");
-        let i = (self.head + self.len) % MAX_THREADS;
+        assert!(self.len < self.buf.len(), "ready: full");
+        let i = self.index(self.len);
         self.buf[i] = id;
         self.len += 1;
     }
@@ -122,29 +152,22 @@ impl ReadyQueue {
         }
         let id = self.buf[self.head];
         self.buf[self.head] = ThreadId::NONE;
-        self.head = (self.head + 1) % MAX_THREADS;
+        self.head = self.index(1);
         self.len -= 1;
         Some(id)
     }
 
     pub fn remove(&mut self, id: ThreadId) -> bool {
-        let mut i = 0;
-        while i < self.len {
-            if self.at(i) == id {
-                break;
-            }
-            i += 1;
-        }
-        if i == self.len {
+        let Some(mut i) = self.iter().position(|x| x == id) else {
             return false;
-        }
+        };
         while i + 1 < self.len {
             let nxt = self.at(i + 1);
-            let slot = (self.head + i) % MAX_THREADS;
+            let slot = self.index(i);
             self.buf[slot] = nxt;
             i += 1;
         }
-        let last = (self.head + self.len - 1) % MAX_THREADS;
+        let last = self.index(self.len - 1);
         self.buf[last] = ThreadId::NONE;
         self.len -= 1;
         true
@@ -157,33 +180,50 @@ pub struct Timeout {
     pub deadline: Instant,
 }
 
-/// Sorted by deadline, then id. Sleep and wait share this list.
-#[derive(Clone, Copy)]
+const NO_TIMEOUT: Timeout = Timeout {
+    id: ThreadId::NONE,
+    deadline: FAR_DEADLINE,
+};
+
+/// Sorted by deadline, then id. Sleep and wait share this list. A heap
+/// table of a fixed capacity, `limits::MAX_THREADS` for the scheduler's,
+/// built by [`TimeoutQueue::try_new`]; [`TimeoutQueue::empty`] has no room.
 pub struct TimeoutQueue {
-    items: [Timeout; MAX_THREADS],
+    items: TryVec<Timeout>,
     len: usize,
 }
 
 impl TimeoutQueue {
+    /// A queue with no room, for a `const` initializer.
     pub const fn empty() -> Self {
         Self {
-            items: [Timeout {
-                id: ThreadId::NONE,
-                deadline: FAR_DEADLINE,
-            }; MAX_THREADS],
+            items: TryVec::new(),
             len: 0,
         }
     }
 
-    pub fn len(self) -> usize {
+    /// A queue with room for `cap` timeouts.
+    pub fn try_new(cap: usize) -> Result<Self, AllocError> {
+        Ok(Self {
+            items: limits::table(cap, || NO_TIMEOUT)?,
+            len: 0,
+        })
+    }
+
+    /// Timeouts the queue can hold.
+    pub fn capacity(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn len(&self) -> usize {
         self.len
     }
 
-    pub fn is_empty(self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    pub fn next_deadline(self) -> Option<Instant> {
+    pub fn next_deadline(&self) -> Option<Instant> {
         if self.len == 0 {
             None
         } else {
@@ -191,7 +231,7 @@ impl TimeoutQueue {
         }
     }
 
-    pub fn get(self, i: usize) -> Timeout {
+    pub fn get(&self, i: usize) -> Timeout {
         assert!(i < self.len, "timeout: index");
         self.items[i]
     }
@@ -199,7 +239,7 @@ impl TimeoutQueue {
     pub fn insert(&mut self, id: ThreadId, deadline: Instant) {
         assert!(!id.is_none(), "timeout: insert NONE");
         self.remove(id);
-        assert!(self.len < MAX_THREADS, "timeout: full");
+        assert!(self.len < self.items.len(), "timeout: full");
         let mut i = 0;
         while i < self.len {
             let t = self.items[i];
@@ -233,10 +273,7 @@ impl TimeoutQueue {
             i += 1;
         }
         self.len -= 1;
-        self.items[self.len] = Timeout {
-            id: ThreadId::NONE,
-            deadline: FAR_DEADLINE,
-        };
+        self.items[self.len] = NO_TIMEOUT;
         true
     }
 
@@ -249,6 +286,7 @@ impl TimeoutQueue {
         Some(id)
     }
 
+    /// Pop up to `out.len()` expired ids into `out`; how many.
     pub fn pop_expired_into(&mut self, now: Instant, out: &mut [ThreadId]) -> usize {
         let mut n = 0;
         while n < out.len() {
@@ -331,7 +369,7 @@ mod tests {
 
     #[test]
     fn ready_fifo_round_robin() {
-        let mut q = ReadyQueue::empty();
+        let mut q = ReadyQueue::try_new(8).unwrap();
         assert!(q.is_empty());
         q.push_back(tid(1));
         q.push_back(tid(2));
@@ -351,7 +389,7 @@ mod tests {
 
     #[test]
     fn ready_remove_middle() {
-        let mut q = ReadyQueue::empty();
+        let mut q = ReadyQueue::try_new(8).unwrap();
         q.push_back(tid(1));
         q.push_back(tid(2));
         q.push_back(tid(3));
@@ -364,7 +402,7 @@ mod tests {
 
     #[test]
     fn timeout_orders_by_deadline() {
-        let mut t = TimeoutQueue::empty();
+        let mut t = TimeoutQueue::try_new(8).unwrap();
         t.insert(tid(3), at(30));
         t.insert(tid(1), at(10));
         t.insert(tid(2), at(20));
@@ -379,7 +417,7 @@ mod tests {
 
     #[test]
     fn timeout_equal_deadlines_by_id() {
-        let mut t = TimeoutQueue::empty();
+        let mut t = TimeoutQueue::try_new(8).unwrap();
         t.insert(tid(5), at(10));
         t.insert(tid(2), at(10));
         t.insert(tid(9), at(10));
@@ -390,7 +428,7 @@ mod tests {
 
     #[test]
     fn timeout_rearm_moves_entry() {
-        let mut t = TimeoutQueue::empty();
+        let mut t = TimeoutQueue::try_new(8).unwrap();
         t.insert(tid(1), at(50));
         t.insert(tid(1), at(10));
         assert_eq!(t.len(), 1);
@@ -401,7 +439,7 @@ mod tests {
 
     #[test]
     fn timeout_far_future_stays() {
-        let mut t = TimeoutQueue::empty();
+        let mut t = TimeoutQueue::try_new(8).unwrap();
         t.insert(tid(1), FAR_DEADLINE);
         t.insert(tid(2), at(1));
         assert_eq!(t.pop_expired(at(1_000_000)), Some(tid(2)));
@@ -411,7 +449,7 @@ mod tests {
 
     #[test]
     fn overdue_scan() {
-        let mut t = TimeoutQueue::empty();
+        let mut t = TimeoutQueue::try_new(8).unwrap();
         t.insert(tid(1), at(10));
         t.insert(tid(2), at(10 + OVERDUE_NS));
         let v: Vec<_> = t.overdue(at(10 + OVERDUE_NS)).collect();
@@ -424,7 +462,7 @@ mod tests {
         let idle = tid(0);
         let a = tid(1);
         let b = tid(2);
-        let mut ready = ReadyQueue::empty();
+        let mut ready = ReadyQueue::try_new(8).unwrap();
         enqueue_runnable(&mut ready, a, idle, ThreadState::Running);
         enqueue_runnable(&mut ready, idle, idle, ThreadState::Running);
         ready.push_back(b);
@@ -440,8 +478,8 @@ mod tests {
     fn state_machine_sleep_timeout() {
         let idle = tid(0);
         let a = tid(1);
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(8).unwrap();
+        let mut timeouts = TimeoutQueue::try_new(8).unwrap();
         enqueue_runnable(
             &mut ready,
             a,
@@ -464,21 +502,22 @@ mod tests {
     fn blocked_timeout_uses_same_queue() {
         let idle = tid(0);
         let a = tid(1);
-        let mut ready = ReadyQueue::empty();
-        let mut timeouts = TimeoutQueue::empty();
+        let mut ready = ReadyQueue::try_new(8).unwrap();
+        let mut timeouts = TimeoutQueue::try_new(8).unwrap();
         let mut wq = crate::wait::WaitQueue::new();
-        wq.enqueue(a);
+        let mut links = [crate::wait::WaitLink::NONE; 2];
+        wq.enqueue(a, &mut Links(&mut links));
         timeouts.insert(a, effective_deadline(None));
         let n = wake_expired(&mut timeouts, &mut ready, at(1), |_| {});
         assert_eq!(n, 0);
-        assert!(wq.contains(a));
+        assert!(wq.contains(a, &mut Links(&mut links)));
         timeouts.remove(a);
         timeouts.insert(a, at(5));
         let n = wake_expired(&mut timeouts, &mut ready, at(5), |id| {
-            wq.remove(id);
+            wq.remove(id, &mut Links(&mut links));
         });
         assert_eq!(n, 1);
-        assert!(!wq.contains(a));
+        assert!(!wq.contains(a, &mut Links(&mut links)));
         assert_eq!(take_next(&mut ready, idle), a);
     }
 
@@ -493,10 +532,64 @@ mod tests {
         assert_eq!(effective_deadline(Some(at(3))).ns, 3);
     }
 
+    /// Links for thread ids `0..len`, for a host test's wait queue.
+    struct Links<'a>(&'a mut [crate::wait::WaitLink]);
+
+    impl crate::wait::WaitLinks for Links<'_> {
+        fn link(&mut self, id: ThreadId) -> Option<&mut crate::wait::WaitLink> {
+            self.0.get_mut(id.0 as usize)
+        }
+    }
+
+    #[test]
+    fn queues_hold_their_capacity() {
+        let mut r = ReadyQueue::try_new(3).unwrap();
+        assert_eq!(r.capacity(), 3);
+        for n in 1..=3 {
+            r.push_back(tid(n));
+        }
+        assert_eq!(r.len(), 3);
+        // Wrap the ring: the head moves and ids still come out in order.
+        assert_eq!(r.pop_front(), Some(tid(1)));
+        r.push_back(tid(4));
+        assert!(r.remove(tid(3)));
+        assert_eq!(r.iter().collect::<Vec<_>>(), [tid(2), tid(4)]);
+        let mut t = TimeoutQueue::try_new(2).unwrap();
+        t.insert(tid(1), at(1));
+        t.insert(tid(2), at(2));
+        assert_eq!(t.capacity(), 2);
+        assert_eq!(t.len(), 2);
+        assert_eq!(ReadyQueue::empty().capacity(), 0);
+        assert!(ReadyQueue::empty().pop_front().is_none());
+    }
+
+    /// The heap queues the kernel sizes from `limits` (ROADMAP §10.4, D1).
     #[test]
     fn fixed_tables_match_limits() {
         use crate::limits::MAX_THREADS;
-        assert_eq!(ReadyQueue::empty().buf.len(), MAX_THREADS);
-        assert_eq!(TimeoutQueue::empty().items.len(), MAX_THREADS);
+        assert_eq!(
+            ReadyQueue::try_new(MAX_THREADS).unwrap().capacity(),
+            MAX_THREADS
+        );
+        assert_eq!(
+            TimeoutQueue::try_new(MAX_THREADS).unwrap().capacity(),
+            MAX_THREADS
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ready: full")]
+    fn ready_full_asserts() {
+        let mut r = ReadyQueue::try_new(1).unwrap();
+        r.push_back(tid(1));
+        r.push_back(tid(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "timeout: full")]
+    fn timeout_full_asserts() {
+        let mut t = TimeoutQueue::try_new(1).unwrap();
+        t.insert(tid(1), at(1));
+        t.insert(tid(2), at(2));
     }
 }
