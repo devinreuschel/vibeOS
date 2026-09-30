@@ -8,4 +8,5 @@ pub mod part;
 pub mod pci;
 pub mod shell;
 pub mod vibefs;
+pub mod vmcore;
 pub mod vmcoreinfo;

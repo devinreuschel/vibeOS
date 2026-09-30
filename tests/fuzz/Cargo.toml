@@ -101,6 +101,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "vmcore"
+path = "fuzz_targets/vmcore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "vmcoreinfo_parse"
 path = "fuzz_targets/vmcoreinfo_parse.rs"
 test = false

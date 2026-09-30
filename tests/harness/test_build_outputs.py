@@ -24,6 +24,7 @@ VARIANTS = (
     "panic-stop",
     "ktest",
     "vibefs-crash",
+    "hang",
     "irqoff",
     "ktest-irqoff",
 )
