@@ -3,6 +3,7 @@
 pub mod apic;
 pub mod desc;
 pub mod pic;
+pub mod stat;
 pub mod trap;
 pub mod uart;
 pub mod vectors;

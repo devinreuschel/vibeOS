@@ -8,6 +8,7 @@ pub mod elf;
 pub mod pid;
 pub mod syscall;
 pub mod syscall_table;
+pub mod uabi;
 pub mod uaccess;
 
 use crate::fs::{MAX_PATH, O_CLOEXEC};
