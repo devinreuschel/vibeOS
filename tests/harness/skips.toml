@@ -113,3 +113,8 @@ smp = 1
 name = "current_migrate_if1"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "dead_list_batched_rounds"
+reason = "needs 2 cpus"
+smp = 1
