@@ -747,6 +747,13 @@ prints it. CI runs it as the `check` job before QEMU (DESIGN §8.6).
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.
 
+`make models` runs ROADMAP §10.8's models and proofs: every loom model (`make models-quick`'s
+command without its `LOOM_MAX_PREEMPTIONS=3`), then every Kani harness in `vibeos-core` (`cargo
+kani -p vibeos-core --features std`, built for the host). It needs `kani-verifier` at the
+`KANI_VERSION` that `setup.sh` pins, since Kani brings its own compiler; `./setup.sh --kani`
+installs exactly that release, and `make models` fails, naming both, when `cargo kani` reports
+another version or none. It is not part of `make check`.
+
 `make gate PHASE=N` (`scripts/gate.py`) is the phase exit gate the maintainer runs before tagging
 (ROADMAP §10.9). It prints one row per exit-gate line, `PASS`, `FAIL` or `TAG  L<line>  <text>`, each
 followed by its entries' results, then a `BOX  ROADMAP.md:<line>  rule A|B: <text>` row per box it
