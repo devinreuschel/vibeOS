@@ -21,6 +21,13 @@ pub use super::x86_64::cpu::{
     user_tls,
 };
 
+// The registers the panic path saves for a CPU that stops (DESIGN §2.5
+// step 1): where it is, its frame pointer, and its flags.
+#[cfg(target_arch = "x86_64")]
+pub use super::x86_64::cpu::{
+    read_rbp as frame_pointer, read_rip as instruction_pointer, rflags as irq_flags,
+};
+
 /// The test and `panic_exit` builds' end of a QEMU run.
 #[cfg(all(
     target_arch = "x86_64",

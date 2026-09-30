@@ -190,11 +190,11 @@ children, need no row.
 | mm | `mm/{mod,pmm,paging,heap,kva}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
 | time | `time/mod.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
-| irq | `irq/{mod,ipi}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |
+| irq | `irq/{mod,ipi,stop}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
 | sched | `sched/{mod,thread,wait,work,fpu,stack_depth}.rs` | `sched/{mod,sched_init,work_init}.rs`, `sched/thread_init/{ap,boot,mod,table,testing}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
-| log | `log/{mod,line,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs` | `log/{mod,log_init,panic,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |
+| log | `log/{mod,backtrace,line,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs` | `log/{mod,log_init,panic,panic_test,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
 | shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
 | dev | `dev/{mod,pci,dma,virtio,entropy,tests}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |

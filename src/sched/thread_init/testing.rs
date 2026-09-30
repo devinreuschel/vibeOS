@@ -239,7 +239,8 @@ impl Drop for WindowGuard {
 
 /// Holds the thread, IF off under [`window_enter`]'s guard, when its
 /// `with_sched` section left it `Blocked`: the wait's queueing is done and
-/// its `schedule` not yet.
+/// its `schedule` not yet. The hold serves other CPUs' shootdowns and
+/// calls, as every IF-off spin does, so none of them waits it out.
 fn wait_window() {
     let me = super::current_id();
     if !matches!(try_state(me), Some(ThreadState::Blocked { .. })) {
@@ -256,6 +257,7 @@ fn wait_window() {
     let end =
         time_init::read_tsc().saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
     while !WINDOW_GO.load(Ordering::Acquire) && time_init::read_tsc() < end {
+        crate::ipi_init::service_incoming();
         core::hint::spin_loop();
     }
     WINDOW_HELD.store(false, Ordering::Release);
