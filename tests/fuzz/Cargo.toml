@@ -1,0 +1,35 @@
+[package]
+name = "vibeos-fuzz"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# cargo-fuzz targets for vibeos-core's byte parsers (C-FUZZ, TESTING.md §8.1).
+# Its own workspace, excluded from the root one, so the kernel build, the MSRV
+# check and `cargo deny` never read libfuzzer-sys. The root `.cargo/config.toml`
+# defaults to the kernel triple, so plain cargo commands pass
+# `--target $(HOST_TRIPLE)`; cargo-fuzz passes the host triple itself.
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[lib]
+name = "vibeos_fuzz"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vibeos = { path = "../../crates/core", package = "vibeos-core", features = ["std"] }
+
+# The root profiles do not reach this workspace: panic where the kernel would
+# (DESIGN §3.5), on an overflow as on a failed debug assertion.
+[profile.dev]
+overflow-checks = true
+debug-assertions = true
+
+[profile.release]
+overflow-checks = true
+debug-assertions = true
+debug = 1

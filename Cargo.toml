@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/core", "tests/hostlib", "user", "user/mem"]
+exclude = ["tests/fuzz"]
 resolver = "3"
 
 # C-LINTS (ROADMAP §10.1): every member has `[lints] workspace = true`. A module

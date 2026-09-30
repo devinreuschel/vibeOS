@@ -198,6 +198,7 @@ help:
 	  '  check                 fast local gate (clippy/unit/harness/python)' \
 	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
 	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
+	  '  fuzz-check            tests/fuzz: fmt, clippy, build every target, replay every committed input' \
 	  '  all / iso             kernel + build/vibeos.iso (hybrid BIOS/UEFI)' \
 	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
 	  '  user                  Rust user programs, as build/user/<name> (ROADMAP §10.5)' \
@@ -293,6 +294,7 @@ check:
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
 	$(MAKE) models-quick
 	$(MAKE) test-harness
+	$(MAKE) fuzz-check
 	$(MAKE) check-python
 	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
 	python3 scripts/gen_syscalls.py --check
@@ -577,3 +579,22 @@ clean:
 
 distclean: clean
 	rm -rf $(LIMINE_DIR)
+
+# Fuzz targets for vibeos-core's byte parsers (C-FUZZ, TESTING.md §8.1). The
+# crate is its own workspace with its own target dir; each cargo command
+# passes the host triple, since .cargo/config.toml defaults to the kernel's.
+FUZZ_DIR := tests/fuzz
+FUZZ_TARGET_DIR := $(CURDIR)/target/fuzz
+
+.PHONY: fuzz fuzz-check
+# Its own target dir, exported to every cargo and cargo-fuzz command below.
+fuzz fuzz-check: export CARGO_TARGET_DIR := $(FUZZ_TARGET_DIR)
+
+# `make check`'s fuzz step: fmt, clippy, a build of every target, and
+# `cargo test`, which replays every committed corpus and regression input
+# (no fuzzing).
+fuzz-check:
+	cargo fmt --manifest-path $(FUZZ_DIR)/Cargo.toml --check
+	cargo clippy --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --all-targets --target $(HOST_TRIPLE) -- -D warnings
+	cargo build --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --bins --target $(HOST_TRIPLE)
+	cargo test --manifest-path $(FUZZ_DIR)/Cargo.toml --locked --target $(HOST_TRIPLE)
