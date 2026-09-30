@@ -62,6 +62,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: {ref: "${{ steps.gate.outputs.commit }}", fetch-depth: 0, persist-credentials: false}
 
+      # Every gate input changed since the previous `v*` tag, the floor at
+      # both ends, and the Gate-change: lines of the commits that changed
+      # them, before any upload and so before any key job (ROADMAP §10.9).
+      - name: gate inputs changed since the last release
+        env:
+          TAG: ${{ inputs.tag }}
+        run: python3 scripts/check_gate_inputs.py --summary --tag "$TAG" >> "$GITHUB_STEP_SUMMARY"
+
       - name: install host tools
         run: |
           sudo apt-get update
