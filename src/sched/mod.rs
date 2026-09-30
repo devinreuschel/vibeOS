@@ -1,5 +1,6 @@
 //! Scheduler: the kernel half of subsystem `sched` (DESIGN §1.3).
 
+pub mod irqoff;
 #[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,

@@ -47,6 +47,8 @@ pub(super) fn exit_stall() {
     {
         return;
     }
+    // IF is off here (`thread_exit`'s switch section).
+    let _hold = crate::sched::irqoff::deliberate("exit stall");
     let cycles = STALL_MS
         .load(Ordering::Relaxed)
         .saturating_mul(time_init::tsc_per_ms());
@@ -221,14 +223,14 @@ pub fn wait_window_held() -> bool {
 pub(super) fn window_enter() -> Option<WindowGuard> {
     let armed = WINDOW_TID.load(Ordering::Acquire);
     (armed != u32::MAX && armed == super::current_id().raw()).then(|| WindowGuard {
-        _irq: crate::arch::current::InterruptGuard::enter(),
+        _irq: crate::sched::irqoff::deliberate("late-wake window hold"),
     })
 }
 
 /// [`window_enter`]'s guard: on drop it runs [`wait_window`], then turns
 /// IF back on.
 pub(super) struct WindowGuard {
-    _irq: crate::arch::current::InterruptGuard,
+    _irq: crate::sched::irqoff::DeliberateGuard,
 }
 
 impl Drop for WindowGuard {
@@ -292,6 +294,10 @@ pub(super) fn place_stall(id: ThreadId) {
         return;
     }
     WINDOW_GO.store(true, Ordering::Release);
+    // With IF=0 the stall is a deliberate IF-off stretch; with IF=1 it
+    // holds none and takes no guard.
+    let _hold = (!crate::arch::current::interrupts_enabled())
+        .then(|| crate::sched::irqoff::deliberate("late-wake place stall"));
     let end =
         time_init::read_tsc().saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
     while time_init::read_tsc() < end {

@@ -346,6 +346,30 @@ the opt-in `vblk_readonly` on a `readonly=on` image (`_vblk_readonly_boot`), and
 `vblk_bad_sector` on an image behind QEMU's `blkdebug`, which fails every read of sector 4096
 (`_vblk_bad_sector_boot`). Each boot requires its one `ok` line.
 
+The IF-off tracer build (ROADMAP §10.3, [INVARIANTS.md §2.9](INVARIANTS.md#29-preemption-and-interrupt-state)
+rule 2). The `irqoff` Cargo feature is a measurement build, never a published image: the `irqoff`
+variant is production features plus `irqoff` (`build/vibeos-irqoff.iso`), and `ktest-irqoff` is
+`kernel_tests` plus `irqoff` (`build/vibeos-ktest-irqoff.iso`). `make test-irqoff` runs
+`run_ktest.py` on the second and `run_e2e.py` on the first, both with `VIBEOS_TIER=test-irqoff`;
+it is not part of `make test`, since the nightly job runs it. Under TCG it adds `-icount shift=0`
+and `VIBEOS_SMP=1`, so guest time counts instructions and 100,000 ns is exactly the rule's bound;
+under KVM (`VIBEOS_QEMU_ACCEL=kvm`) it adds neither and the numbers are wall time. The kernel
+prints `vibeOS: irqoff: on bound <n> ns` after `irq: enabled`, and a reporter thread prints each
+changed site's cumulative `site`, `over`, `deliberate` and `unmatched` lines every 100 ms of guest
+time; the ktest runner reports once more before `ktest: end`. The e2e driver quits QEMU at its last
+marker, so stretches after the last report of an e2e boot are not seen. `tests/harness/irqoff.py`
+reads every boot's lines: a `test-irqoff` boot without the `on` line is the wrong ISO and fails; it
+appends a table to `$GITHUB_STEP_SUMMARY` (under TCG the sites over the bound and the totals; under
+KVM every site's max and p99, with no threshold, since its host can deschedule a vCPU mid-stretch)
+and writes the rows to the results file's `irqoff` section, with the e2e driver appending to the
+ktest driver's file (`VIBEOS_RESULTS_APPEND=1`). A test or test hook that holds IF off on purpose
+takes `sched::irqoff::deliberate(reason)` (C-IRQOFF-GUARD, `kernel_tests` only), which marks its
+stretch so it is never over and prints it on a `deliberate` line; `irqoff_logs_long_stretch` and
+`irqoff_deliberate_is_exempt`, registered only in this build, check the tracer and the guard. A
+test longjmped out of by `arch::catch` skips its guards' drops, so its stretch shows as
+`unmatched`. Under `-smp 1` a test that needs a second CPU skips with its "no AP" reason, and each
+such skip has a `smp = 1` row in `tests/harness/skips.toml` (C-SKIPS).
+
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
 
