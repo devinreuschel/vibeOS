@@ -138,3 +138,8 @@ smp = 1
 name = "intx_fallback"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "intx_free_masks"
+reason = "no AP"
+smp = 1
