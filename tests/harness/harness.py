@@ -66,7 +66,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import IO, TYPE_CHECKING, NamedTuple, NoReturn
 
-from tests.harness import frame, registry
+from tests.harness import declared, frame, registry
 from tests.harness.frame import kernel_text as kernel_text
 from tests.harness.linesource import LineSource
 
@@ -2041,6 +2041,10 @@ def check_ktest_output(
     count of runs or results other than `begin`'s each fail, naming the
     test. Info lines are never results. The result carries the run names
     (`ktest_runs`) and the skips (`ktest_skips`, name to reason).
+
+    A failure line inside a run's window that `declared.DECLARED` lists for
+    that run's test is the test's expected output, not a failure; a run of
+    such a test that ends `ok` without each line it declares fails.
     """
     result = RunResult()
     result.exit_code = exit_code
@@ -2050,9 +2054,14 @@ def check_ktest_output(
     open_run: str | None = None
     results_seen = 0
     fails: list[str] = []
+    # The declared failure lines seen in the open run's window.
+    seen: list[str] = []
     for raw in lines:
         result.lines.append(raw)
         why = run_failure(raw, stream)
+        if why is not None and declared.is_declared(open_run, why[1]):
+            seen.append(why[1])
+            continue
         if why is not None:
             result.panic_line = raw
             raise HarnessError(f"{why[0]} in: {why[1]!r}")
@@ -2077,6 +2086,7 @@ def check_ktest_output(
             if open_run is not None:
                 raise HarnessError(f"ktest: run {open_run} has no result (next: run {k.name})")
             open_run = k.name
+            seen = []
             result.ktest_runs.append(k.name)
         elif k.kind in ("ok", "fail", "skip"):
             if open_run is None:
@@ -2085,6 +2095,9 @@ def check_ktest_output(
                 raise HarnessError(f"ktest: run {open_run} got a result for {k.name}")
             open_run = None
             results_seen += 1
+            gone = declared.missing(k.name, seen) if k.kind == "ok" else []
+            if gone:
+                raise HarnessError(f"ktest: {k.name} passed without its declared line {gone[0]!r}")
             if k.kind == "fail":
                 fails.append(frame.kernel_text(raw) or raw)
             elif k.kind == "skip":
@@ -2187,6 +2200,14 @@ class KtestDeadlines:
         )
 
 
+def declared_in_run(progress: KtestDeadlines | None, text: str) -> bool:
+    """Whether kernel text `text`, read while `progress` tracks a ktest
+    boot, is a failure line the open run's test declares (`declared`)."""
+    if progress is None or not progress.run_open:
+        return False
+    return declared.is_declared(progress.last_run, text)
+
+
 class _ProcSource:
     """`run_qemu_until_exit`'s QEMU child as the source `qmp.Session` reads."""
 
@@ -2275,12 +2296,16 @@ def run_qemu_until_exit(
     def take(line: str) -> None:
         result.lines.append(line)
         why = run_failure(line, stream, panic_signatures)
+        # A line the running test declares; `check_ktest_output` judges it.
+        mine = why is not None and declared_in_run(progress, why[1])
+        if mine:
+            why = None
         if why is not None and expect_fail:
             if result.panic_line is None:
                 result.panic_line = line
         elif why is not None:
             result.panic_line = line
-        sig = panic_signature(line, panic_signatures) is not None
+        sig = not mine and panic_signature(line, panic_signatures) is not None
         # A run that declares a panic's end expects its signatures; the
         # event rule judges it (DESIGN §8.3).
         expected = expect_fail or (sig and cfg.expect != "none")
