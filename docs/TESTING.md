@@ -499,7 +499,12 @@ ISO, `build/kernels/vibeos-<variant>.elf`) and `qemu-argv.txt`. `make test-qmp`
 `-machine q35`'s fw_cfg lists `etc/pvpanic-port`, and takes one core of the production ISO and
 checks its notes. `python3 tests/harness/run_qmp.py --record tests/harness/fixtures/qmp`
 regenerates the streams; the recorder drives QEMU through a qtest socket beside TCG with 64 KiB of
-`hlt` as its firmware.
+`hlt` as its firmware. When a tier fails, CI uploads its `build/cores/` as one artifact,
+`cores-<arch>-<tier>` (the `tier` job's last step, `if: failure()`; the build job's
+`prebuilt-<arch>` carries the named ELFs), which is public like every artifact of this repository
+(DESIGN §1.5). So a job in a workflow that names an environment or a secret uploads no core, memory
+dump or QEMU command line: `scripts/check_workflows.py` (`rule_no_core_upload_with_secrets`) fails
+on one that does.
 
 Every driver classifies each serial line through `tests/harness/frame.py` (DESIGN §2.6): a framed line
 is the kernel's and is matched with its frame stripped, an unframed line is a user program's or the

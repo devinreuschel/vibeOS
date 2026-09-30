@@ -453,9 +453,10 @@ endif
 # What a tier job downloads instead of building (DESIGN §8.6): every ISO and
 # every host tool a `test-*` recipe lists. Recursive `=`, so it follows the
 # variables' paths. The tar keeps the executable bit, which upload-artifact
-# drops, and holds paths relative to $(CURDIR).
+# drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
+# run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
 PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
-	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
+	$(KERNEL_ELFS) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
 
 prebuilt: $(PREBUILT_FILES)
 	mkdir -p build

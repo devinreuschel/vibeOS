@@ -30,6 +30,7 @@ from scripts.check_workflows import (
     rule_lane_capacity,
     rule_lane_map,
     rule_ledger_row,
+    rule_no_core_upload_with_secrets,
     rule_no_expr_in_run,
     rule_permissions,
     rule_qemu_pin,
@@ -1154,6 +1155,96 @@ class ReleaseRulesTest(unittest.TestCase):
                 "release_one_image",
             },
         )
+
+
+def upload(path: str, head: str = "") -> str:
+    """A workflow whose one job uploads `path`; `head` goes before `jobs:`."""
+    return f"""\
+        {head}
+        jobs:
+          a:
+            steps:
+              - name: upload
+                uses: actions/upload-artifact@{SHA} # v4
+                with:
+                  name: x
+                  path: '{path}'
+        """
+
+
+class TestNoCoreUploadWithSecrets(unittest.TestCase):
+    """L1410: no core, memory dump or QEMU command line beside a secret."""
+
+    SECRET = "env:\n          TOKEN: ${{ secrets.TOKEN }}"
+
+    def problems(self, text: str) -> list[tuple[int, str]]:
+        return rules(rule_no_core_upload_with_secrets(tree(text)))
+
+    def test_secret_workflow_uploading_cores_fails(self) -> None:
+        self.assertEqual(
+            self.problems(upload("build/cores/", self.SECRET)),
+            [(10, "no_core_upload_with_secrets")],
+        )
+
+    def test_environment_workflow_uploading_build_fails(self) -> None:
+        head = "env:\n          X: y"
+        env = "    a:\n            environment: release\n"
+        text = upload("build", head).replace("    a:\n", env)
+        self.assertEqual(len(self.problems(text)), 1)
+
+    def test_secret_workflow_uploading_results_passes(self) -> None:
+        self.assertEqual(self.problems(upload("build/results/", self.SECRET)), [])
+
+    def test_plain_workflow_uploading_cores_passes(self) -> None:
+        self.assertEqual(self.problems(upload("build/cores/", "env:\n          X: y")), [])
+
+    def test_every_forbidden_shape(self) -> None:
+        heads = (
+            self.SECRET,
+            "env:\n          T: ${{ secrets['T'] }}",
+        )
+        paths = (
+            "build/cores",
+            "./build/cores/x86_64-test-e2e",
+            "out/core/x",
+            "a/crash.core",
+            "a/crash.core.zst",
+            "build/vmcore.bin",
+            "build/dumps/",
+            "build/memdump.bin",
+            "build/qemu-argv.txt",
+            "build/qemu_argv",
+            "build",
+            "build/",
+            ".",
+            "**",
+            "build/*",
+        )
+        for head in heads:
+            for p in paths:
+                with self.subTest(head=head, path=p):
+                    self.assertEqual(len(self.problems(upload(p, head))), 1)
+        for p in ("build/results/", "dist", "build/runner.json", "build/prebuilt.tar"):
+            with self.subTest(path=p):
+                self.assertEqual(self.problems(upload(p, self.SECRET)), [])
+
+    def test_inherited_secrets_and_multiline_paths(self) -> None:
+        text = f"""\
+        jobs:
+          a:
+            secrets: inherit
+            steps:
+              - uses: actions/upload-artifact@{SHA} # v4
+                with:
+                  path: |
+                    build/results/
+                    !build/cores/
+                    build/cores/x
+        """
+        self.assertEqual(self.problems(text), [(7, "no_core_upload_with_secrets")])
+
+    def test_tree_workflows_pass(self) -> None:
+        self.assertEqual(rule_no_core_upload_with_secrets(load_tree(ROOT)), [])
 
 
 class TestTree(unittest.TestCase):

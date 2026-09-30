@@ -415,6 +415,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      # A failed tier's guest cores (ROADMAP §10.7, TESTING.md §8.3): each
+      # failed run's build/cores/<arch>-<tier>/<seq>-<label>/ holds core.zst,
+      # kernel.elf and qemu-argv.txt. The artifact is public (DESIGN §1.5), so
+      # no workflow that names a secret or an environment uploads one
+      # (scripts/check_workflows.py, rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-${{ matrix.arch }}-${{ matrix.tier }}
+          path: build/cores/
+          if-no-files-found: ignore
+
   # Every ROADMAP box a pull request ticks names its proof, and the proof
   # passed in the results files the tier jobs upload (ROADMAP §10.9).
   ticks:
