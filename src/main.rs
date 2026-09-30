@@ -130,6 +130,9 @@ static REQ_END: RequestsEndMarker = RequestsEndMarker::new();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    // First: the boot stack's bounds, so a backtrace can follow `rbp` on
+    // Limine's stack (DESIGN §2.5 step 4).
+    panic::note_boot_stack(x86::read_rsp());
     // Step 1: serial. Nothing before this is debuggable.
     serial::Serial::init();
     log_init::init();

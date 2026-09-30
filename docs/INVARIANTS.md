@@ -452,6 +452,15 @@ Binding order (do not invert):
    From ROADMAP §19.5, every record serial has not printed goes out first (the log contract below),
    unless a capture kernel is loaded (step 6), whose vmcore holds the ring.
 4. Symbolized backtrace when frame pointers exist (in-image sorted table, binary search, no alloc).
+   The walk (`vibeos::log::backtrace::walk`, through `panic::walk_known`) follows `rbp` only into a
+   known stack (`panic::known_stacks`): the current thread's KVA stack, the boot stack whose bounds
+   `_start` records first (`panic::note_boot_stack`, the Limine stack request's size below the first
+   RSP's page), and this CPU's four IST stacks and fallback RSP0 stack (`gdt::this_cpu_stacks`, the
+   IST tops read from the live TSS). It reads a frame record only after finding its 16 bytes, 8-byte
+   aligned, inside one of them, and ends on a null `rbp`, an unknown stack, a return address outside
+   the image, a frame that does not rise, or 24 frames. `vibeos_syscall_entry` zeroes `rbp` just
+   before it calls the Rust body, after the frame saved the user's, so a walk from inside a syscall
+   ends at the entry instead of following the user's `rbp` (ROADMAP §10.7, F139).
 5. Encode the panic record (ROADMAP §20.1) in a fixed buffer, and copy it to §20.1's reserved RAM
    region when one is configured. Memory stores only: no lock, no firmware call, nothing that waits.
    Planned (ROADMAP §20.1); today there is no record.

@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn known_stack_rejects_ioremap_and_low_user() {
         let s = [STACK];
-        // What `stackish` took: the ioremap window, low identity memory,
+        // What the old range check took: the ioremap window, low identity memory,
         // any user address.
         assert!(!on_known_stack(0xFFFF_E000_0000_0000, &s));
         assert!(!on_known_stack(0xFFFF_C000_0000_1000, &s));

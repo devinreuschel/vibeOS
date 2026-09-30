@@ -144,6 +144,7 @@ GONE: list[tuple[str, str]] = [
     ("on_halt_ipi", "the panic dump owns COM1"),
     ("write_after_halt", "the panic dump owns COM1"),
     ("user_after_halt", "the panic dump owns COM1"),
+    ("stackish", "the panic backtrace follows `rbp`"),
     ("DUMPING", "every two-way dependency between kernel modules"),
     ("write_bytes_raw", "every two-way dependency between kernel modules"),
     ("write_byte_raw", "every two-way dependency between kernel modules"),

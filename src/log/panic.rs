@@ -15,11 +15,13 @@
 
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::desc::InterruptFrame;
 use vibeos::fmt_util::{self, StackBuf};
 use vibeos::irq::stop::{CrashRegs, StopHow};
 use vibeos::log::DUMP_LAST;
+use vibeos::log::backtrace::{self, StackRange, WalkEnd};
 use vibeos::log::line::LINE_CAP;
 use vibeos::marker;
 use vibeos::symtab;
@@ -37,7 +39,6 @@ unsafe extern "C" {
 const ISA_DEBUG_EXIT: u16 = 0xF4;
 #[cfg(feature = "panic_exit")]
 const EXIT_PANIC: u32 = 0x11;
-const BT_MAX: usize = 24;
 
 fn kstart() -> u64 {
     // SAFETY: `__kernel_vma_start` is a linker symbol; only its address is
@@ -52,29 +53,90 @@ fn kend() -> u64 {
     unsafe { &__kernel_vma_end as *const u8 as u64 }
 }
 
-fn canonical_aligned(p: u64) -> bool {
-    if p == 0 || p & 7 != 0 {
-        return false;
-    }
-    let top = p >> 47;
-    top == 0 || top == 0x1FFFF
+/// The boot stack Limine handed `_start`, `[lo, hi)`, recorded by
+/// [`note_boot_stack`] before anything else runs; both 0 until then.
+static BOOT_STACK_LO: AtomicU64 = AtomicU64::new(0);
+static BOOT_STACK_HI: AtomicU64 = AtomicU64::new(0);
+
+/// Record the boot stack's bounds from `_start`'s first RSP: the 4 KiB
+/// page above it is the top, and the stack is the size the Limine request
+/// asks for (`boot::LIMINE_STACK_BYTES`). `_start`'s first statement, so
+/// a panic on Limine's stack walks it (DESIGN §2.5 step 4).
+pub fn note_boot_stack(rsp: u64) {
+    let hi = rsp.checked_add(0xFFF).map_or(rsp, |v| v & !0xFFF);
+    let lo = hi.saturating_sub(crate::boot::LIMINE_STACK_BYTES);
+    // Relaxed: written once on the BSP before any other CPU runs; the
+    // dump's reads are ordered by the stop that precedes them.
+    BOOT_STACK_LO.store(lo, Ordering::Relaxed);
+    BOOT_STACK_HI.store(hi, Ordering::Relaxed);
 }
 
-/// Boot stack (low ident), HHDM, heap, KVA, kernel image.
-fn stackish(p: u64) -> bool {
-    if !canonical_aligned(p) {
-        return false;
+/// The stacks a backtrace may follow `rbp` into (DESIGN §2.5 step 4): the
+/// current thread's KVA stack, the recorded boot stack, and this CPU's
+/// four IST stacks and fallback RSP0 stack. Fills `out` from the front
+/// and returns how many it filled. IF=0 callers only (DESIGN §2.9 rule 5).
+pub(crate) fn known_stacks(out: &mut [StackRange; 8]) -> usize {
+    let mut n = 0usize;
+    let mut push = |r: StackRange| {
+        if r.lo < r.hi
+            && let Some(slot) = out.get_mut(n)
+        {
+            *slot = r;
+            n += 1;
+        }
+    };
+    let cur = crate::arch::current_tcb();
+    if !cur.is_null() {
+        // SAFETY: invariant I9: a non-null `current` names a `Tcb` that
+        // stays in `SCHED` while it runs, and its `stack` is set before it
+        // first ran and dropped only after its CPU switched off it; this
+        // is that CPU, so the stack is live; established by
+        // `thread_init::switch_now`.
+        let t = unsafe { &*cur };
+        if let Some(st) = t.stack.as_ref() {
+            push(StackRange::new(st.base().as_u64(), st.top().as_u64()));
+        }
     }
-    if p < 0x2000_0000 {
-        return true;
+    push(StackRange::new(
+        BOOT_STACK_LO.load(Ordering::Relaxed),
+        BOOT_STACK_HI.load(Ordering::Relaxed),
+    ));
+    if let Some(cpu) = per_cpu_init::try_current() {
+        for (top, pages) in crate::arch::gdt::this_cpu_stacks(cpu) {
+            push(StackRange::below(top, pages));
+        }
     }
-    if (0xFFFF_8000_0000_0000..0xFFFF_E000_1000_0000).contains(&p) {
-        return true;
-    }
-    if p >= kstart() && p < kend() {
-        return true;
-    }
-    false
+    n
+}
+
+/// Walk the frame-pointer chain from `rip` and `rbp` through the known
+/// stacks only (`vibeos::log::backtrace::walk`), handing each frame's
+/// address to `out`. IF=0 callers only.
+pub(crate) fn walk_known(rip: u64, rbp: u64, out: impl FnMut(u64)) -> (usize, WalkEnd) {
+    let mut stacks = [StackRange::EMPTY; 8];
+    let n = known_stacks(&mut stacks);
+    let known = stacks.get(..n).unwrap_or(&[]);
+    let read = |a: u64| {
+        // SAFETY: `backtrace::walk` reads only a word of a frame record it
+        // found inside one of `known`, each a mapped stack: the current
+        // thread's (live while it runs), the boot stack Limine mapped, and
+        // this CPU's IST and RSP0 stacks, which invariant I230 keeps mapped
+        // while it is online; established by `panic::known_stacks` and
+        // `vibeos::log::backtrace::on_known_stack`.
+        unsafe { core::ptr::read_volatile(a as *const u64) }
+    };
+    backtrace::walk(rip, rbp, known, in_image, read, out)
+}
+
+/// The kernel symbol that holds `addr`, as the dump prints it: `None` for
+/// an address the table places more than 64 KiB past its symbol.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "the in-guest backtrace test is its only caller")
+)]
+pub(crate) fn symbol_name(addr: u64) -> Option<&'static str> {
+    let e = crate::log::ksyms::lookup(addr)?;
+    (symtab::offset(&e, addr) < 0x1_0000).then_some(e.name)
 }
 
 /// Claim the dump, then stop the others, then re-init serial (DESIGN §2.5
@@ -228,35 +290,7 @@ fn print_frame_addr(addr: u64) {
 
 fn dump_backtrace(rip: u64, rbp: u64) {
     raw::write_owner(b"vibeOS: backtrace:");
-    let mut rip = rip;
-    let mut rbp = rbp;
-    let mut n = 0usize;
-    while n < BT_MAX {
-        if !in_image(rip) {
-            if n == 0 && rip != 0 {
-                print_frame_addr(rip);
-            }
-            break;
-        }
-        print_frame_addr(rip);
-        if !stackish(rbp) {
-            break;
-        }
-        // SAFETY: `stackish` accepted `rbp`: 8-byte aligned and inside the
-        // boot stack, the physmap, heap, KVA or the kernel image, which are
-        // mapped, so the saved-RBP word reads without a fault; established
-        // by `panic::stackish`.
-        let prev = unsafe { core::ptr::read_volatile(rbp as *const u64) };
-        // SAFETY: as above, for the return-address word 8 bytes up, in the
-        // same mapped range; established by `panic::stackish`.
-        let ret = unsafe { core::ptr::read_volatile(rbp.wrapping_add(8) as *const u64) };
-        if prev == rbp || ret == 0 {
-            break;
-        }
-        rbp = prev;
-        rip = ret;
-        n += 1;
-    }
+    walk_known(rip, rbp, print_frame_addr);
 }
 
 fn finish() -> ! {

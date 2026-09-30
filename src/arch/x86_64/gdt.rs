@@ -14,6 +14,7 @@ use core::ptr::NonNull;
 
 use vibeos::desc::{GDT_LIMIT, Gdt, IstSlot, KERNEL_CS, KERNEL_DS, TSS_SEL, Tss};
 use vibeos::kalloc::TryBox;
+use vibeos::smp::per_cpu::PerCpu;
 
 use crate::cell::BootCell;
 use crate::kva_init::{self, GuardedStack};
@@ -96,6 +97,17 @@ impl CpuTables {
         // overlap; `read_unaligned` needs no alignment in the packed `Tss`.
         // Established by `arch::x86_64::gdt::CpuTables::set_rsp0`.
         unsafe { core::ptr::addr_of!((*self.tss.get()).rsp[0]).read_unaligned() }
+    }
+
+    /// The top of IST stack `slot`, as the live TSS holds it.
+    pub fn ist_top(&self, slot: IstSlot) -> u64 {
+        // SAFETY: as in `rsp0`: the pointer comes from the `UnsafeCell`
+        // behind `&self`, only `set_rsp0` writes the TSS after `load` and
+        // never its IST words, and `read_unaligned` needs no alignment in
+        // the packed `Tss`. Established by
+        // `arch::x86_64::gdt::CpuTables::set_rsp0`.
+        let ist = unsafe { core::ptr::addr_of!((*self.tss.get()).ist).read_unaligned() };
+        ist.get(slot.index()).copied().unwrap_or(0)
     }
 
     /// Write TSS.RSP0, the stack the CPU loads on a ring-3 to ring-0
@@ -283,6 +295,37 @@ pub unsafe fn init_bsp() {
 /// [`CpuTables::set_rsp0`], which takes `&self`.
 pub fn bsp_tables() -> *const CpuTables {
     core::ptr::from_ref(&BSP.get().tables)
+}
+
+/// The stacks `cpu`'s descriptor tables name, as `(top, mapped pages)`:
+/// its four IST stacks (#DF, NMI, #MC, #DB), with the tops read from its
+/// live TSS, then its fallback RSP0 stack. A top is 0 before the tables
+/// are attached. For the panic backtrace's known stacks (DESIGN §2.5 step
+/// 4); `cpu` is this CPU's own `PerCpu`, read with IF=0.
+pub fn this_cpu_stacks(cpu: &PerCpu) -> [(u64, usize); 5] {
+    let mut out = [(0u64, 0usize); 5];
+    let tables = cpu.tables.cast::<CpuTables>();
+    if !tables.is_null() {
+        // SAFETY: invariant I230, established at `arch::x86_64::gdt::init_bsp`
+        // and `smp::smp_init::start_one`: a non-null `PerCpu.tables` is the
+        // `CpuTables` this CPU loaded (`syscall_init::init_bsp`,
+        // `syscall_init::init_ap`), which never moves or is freed while
+        // the CPU is online, and a shared borrow only reads it.
+        let t = unsafe { &*tables };
+        let slots = [
+            IstSlot::DoubleFault,
+            IstSlot::Nmi,
+            IstSlot::MachineCheck,
+            IstSlot::Debug,
+        ];
+        for (o, slot) in out.iter_mut().zip(slots) {
+            *o = (t.ist_top(slot), IST_PAGES);
+        }
+    }
+    if let Some(o) = out.get_mut(4) {
+        *o = (cpu.fallback_rsp0, RSP0_PAGES);
+    }
+    out
 }
 
 pub fn bsp_rsp0_top() -> u64 {
