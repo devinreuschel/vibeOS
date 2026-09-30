@@ -13,6 +13,8 @@ Phase `<N>` releases as `v0.<m>.0`, numbered in closing order: `v0.8.0` to `v0.1
    - Phase `<N>`'s exit gate is closed on C, and C is on `main`.
    - The phases before it are tagged, in order: Phases 8 to 14 are tagged in closing order, and
      Phase 8 also needs the gate lines of Phases 0 to 7 (ROADMAP, How to read this, standing gates).
+   - The repository ruleset is applied as [Repository rulesets](#repository-rulesets) says, and
+     `python3 scripts/check_gate_inputs.py --rulesets`, run with your `gh` login, prints ok.
    - `CHANGELOG.md` at C has a `## [0.<m>.0]` section. `release.yml` publishes that section as the
      release notes and fails before any upload without it.
    - The gate passes on a clean checkout of C:
@@ -82,5 +84,59 @@ Phase `<N>` releases as `v0.<m>.0`, numbered in closing order: `v0.8.0` to `v0.1
    `vibeos-ktest.iso` with a write token and no `ci` check (F145).
 
 8. **Later.** ROADMAP §14.6 adds signing here, with a `sign` job in the `release` environment between
-   `build` and `publish`; the repository rulesets that protect the tags and `main` come from
-   P10-S90's steps.
+   `build` and `publish`. The branch ruleset that protects `main` and the release branches is
+   below.
+
+## Repository rulesets
+
+ROADMAP §10.9: `main`, and each release branch from the first one ROADMAP §22.1 cuts, requires a pull
+request and the `check` and `ci-pass` checks, and blocks force pushes and deletion, with no bypass
+actor. The owner applies this one branch ruleset, once, and nobody else changes it; agents never do
+([AGENTS.md](../AGENTS.md), Identity). `ci-pass` is the `ci.yml` job that needs every other job, so
+regrouping the CI tiers never changes the ruleset ([TESTING.md §8.6](TESTING.md#86-ci-and-coverage)).
+
+In Settings, Rules, Rulesets, New branch ruleset:
+
+- Name `main and release branches`, Enforcement status Active, and an empty bypass list.
+- Target branches: the default branch, and the pattern `refs/heads/release/v*`.
+- Only these rules: Restrict deletions; Require a pull request before merging (0 required approvals
+  for a sole maintainer); Require status checks to pass, with `check` and `ci-pass` from GitHub
+  Actions; Block force pushes.
+
+The same through the API:
+
+    gh api --method POST 'repos/{owner}/{repo}/rulesets' --input - <<'JSON'
+    {
+      "name": "main and release branches",
+      "target": "branch",
+      "enforcement": "active",
+      "bypass_actors": [],
+      "conditions": {
+        "ref_name": {"include": ["~DEFAULT_BRANCH", "refs/heads/release/v*"], "exclude": []}
+      },
+      "rules": [
+        {"type": "deletion"},
+        {"type": "non_fast_forward"},
+        {"type": "pull_request", "parameters": {
+          "required_approving_review_count": 0,
+          "dismiss_stale_reviews_on_push": false,
+          "require_code_owner_review": false,
+          "require_last_push_approval": false,
+          "required_review_thread_resolution": false}},
+        {"type": "required_status_checks", "parameters": {
+          "strict_required_status_checks_policy": false,
+          "required_status_checks": [
+            {"context": "check", "integration_id": 15368},
+            {"context": "ci-pass", "integration_id": 15368}]}}
+      ]
+    }
+    JSON
+
+Last, check the live rules with your own `gh` login, since only a ruleset admin can read
+`bypass_actors`:
+
+    python3 scripts/check_gate_inputs.py --rulesets
+
+It reads the rules active on `main` and on each `release/v*` branch and prints
+`check_gate_inputs: rulesets ok`, or names each difference. It is the proof of ROADMAP §10.9's
+rulesets box, recorded as a dev-host record (`make gate PHASE=10 RECORD=1`).
