@@ -345,13 +345,14 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-$(INITRD): $(HOSTLIB_DEPS) $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+# The production initrd: the Rust programs `make user` built (C-USERBINS).
+$(INITRD): $(HOSTLIB_DEPS) $(USER_STAMP)
 	mkdir -p $(dir $@)
 	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
-	    --add $(abspath $(USER_HELLO)):/hello \
-	    --add $(abspath $(USER_INIT)):/sbin/init \
-	    --add $(abspath $(USER_SH)):/bin/sh \
-	    --add $(abspath $(USER_TESTS)):/bin/tests
+	    --add $(USER_OUT)/hello:/hello \
+	    --add $(USER_OUT)/init:/sbin/init \
+	    --add $(USER_OUT)/sh:/bin/sh \
+	    --add $(USER_OUT)/tests:/bin/tests
 
 user/%.bin: user/%.asm user/sys.inc
 	nasm -f bin -I user/ -o $@ $<
@@ -406,12 +407,13 @@ run: $(ISO)
 run-panic: $(ISO_PANIC)
 	python3 tests/harness/run_interactive.py panic
 
-# The initrd's programs, whose symbols `make debug` loads beside the kernel's.
-DEBUG_USER_ELFS := $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+# The initrd's programs before the strip, whose symbols `make debug` loads
+# beside the kernel's.
+DEBUG_USER_ELFS := $(addprefix $(USER_ELF_DIR)/,hello init sh tests)
 
 # QEMU halted with a gdb stub on :1234 (`-s -S`); attach with
 # `gdb -x scripts/vibeos.gdb` from this directory (DESIGN §8.4).
-debug: $(ISO) $(KERNEL_ELF) $(DEBUG_USER_ELFS)
+debug: $(ISO) $(KERNEL_ELF) $(USER_STAMP)
 	python3 tests/harness/run_interactive.py debug --kernel-elf $(KERNEL_ELF) \
 	    $(foreach e,$(DEBUG_USER_ELFS),--user-elf $(e))
 
