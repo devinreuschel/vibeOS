@@ -118,3 +118,8 @@ smp = 1
 name = "dead_list_batched_rounds"
 reason = "needs 2 cpus"
 smp = 1
+
+[[skip]]
+name = "exit_burst"
+reason = "needs 2 cpus"
+smp = 1
