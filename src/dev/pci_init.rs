@@ -22,6 +22,7 @@ use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_all
 use crate::acpi_init;
 use crate::arch::current::InterruptGuard;
 use crate::boot;
+use crate::cell::BootCell;
 use crate::fb_init;
 use crate::paging_init;
 use crate::sync_init::SpinMutex;
@@ -340,16 +341,50 @@ impl CfgIo for HwCfg {
     }
 }
 
-/// Scan, publish each device behind its parent bridge through `publish`
-/// (the device registry's `dev_init::push`, which `_start` passes), emit
-/// `pci: N devices`. Maps no BAR: each driver maps what it claims.
-pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
+/// What [`scan`] found: `n` functions in scan order, BARs sized.
+struct Scan {
+    n: usize,
+    found: [FuncInfo; MAX_SCAN],
+}
+
+static SCAN: BootCell<Scan> = BootCell::new();
+
+/// Set up ECAM from MCFG, then enumerate every function and size its BARs
+/// (BOOT.md §3.3 step 15b), for [`init`] to publish. Before the first AP:
+/// sizing writes all-ones to a live BAR and puts it back, and each write
+/// moves the BAR in the guest's physical map. QEMU's TCG rebuilds its
+/// memory map for it and flushes the other vCPUs' TLBs only later, so
+/// their MMIO meanwhile can reach the wrong region: a LAPIC EOI lost that
+/// way leaves the timer vector in service, and that CPU never takes an
+/// IPI again (ROADMAP §10.2). With the BSP alone, no other CPU runs MMIO.
+///
+/// # Safety
+/// Once, on the BSP, before `smp_init::init` starts an AP
+/// (`BootCell::set`'s contract).
+pub unsafe fn scan() {
     if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
         with_ecam(|e| {
             e.base = m.ecam_base;
             e.start = m.start_bus;
             e.end = m.end_bus;
         });
+    }
+    let mut found = [FuncInfo::empty(); MAX_SCAN];
+    let n = pci::enumerate(&mut HwCfg, 0, &mut found);
+    #[cfg(feature = "kernel_tests")]
+    SCAN_ONLINE.store(crate::per_cpu_init::online_mask(), Ordering::Release);
+    // SAFETY: `BootCell::set`'s contract (invariant I22): this fn runs
+    // once, on the BSP, before any AP starts or any reader runs (this fn's
+    // `# Safety` contract); established here.
+    unsafe { SCAN.set(Scan { n, found }) };
+}
+
+/// Publish each function [`scan`] found behind its parent bridge through
+/// `publish` (the device registry's `dev_init::push`, which `_start`
+/// passes), emit `pci: N devices`. Maps no BAR: each driver maps what it
+/// claims.
+pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
+    if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
         crate::marker!(
             "vibeOS: pci: ecam {:#x} buses {}-{}",
             m.ecam_base,
@@ -358,10 +393,8 @@ pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
         );
     }
 
-    let mut found = [FuncInfo::empty(); MAX_SCAN];
-    let n = pci::enumerate(&mut HwCfg, 0, &mut found);
-    #[cfg(feature = "kernel_tests")]
-    SCAN_ONLINE.store(crate::per_cpu_init::online_mask(), Ordering::Release);
+    let s = SCAN.get();
+    let (n, found) = (s.n, &s.found);
     let scanned = found.get(..n).unwrap_or(&[]);
     // Each published function's entry id, by scan index; 0 for none. The
     // scan is depth first, so a bridge is published before what is behind
