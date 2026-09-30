@@ -1367,7 +1367,7 @@ the work its claim rests on has landed is the failure KERNEL_REVIEW.md §5 found
 - [x] `elf::parse` host tests also cover checked-in static binaries linked by `ld.lld` and by GNU `ld`
 - [x] `brk` and anonymous `mmap`/`munmap`, eagerly backed for now; Phase 12 makes them lazy without changing the interface
 - [x] `getdents64`, `fstat`, and `nanosleep`, which `ls` and `sleep` below need; the rest of the floor stays in §13.9
-- [ ] `reboot` (power off and restart), so the user `/bin/sh` keeps the `poweroff` and `reboot` the Phase 5 kernel shell had; x86_64 uses the ACPI and reset paths, and §11.4 puts PSCI behind the same call
+- [x] `reboot` (power off and restart), so the user `/bin/sh` keeps the `poweroff` and `reboot` the Phase 5 kernel shell had; x86_64 uses the ACPI and reset paths, and §11.4 puts PSCI behind the same call
 - [ ] an allocator over `brk`, so `alloc` works in userspace
 - [ ] `utest_ok` / `utest_fail` / `utest_skip` on serial, asserted by `tests/harness` like the `ktest_*` protocol in `make test-e2e`, `make test-e2e-uefi`, `make test-e2e-pit`, and `make test-e2e-highmem`, where `/bin/tests` runs as a forked child of `/sbin/init`; a failing user test fails `make test`; the `utest_*` lines carry §10.2's `begin` and `run` lines and `tests/harness/skips.toml` rows, and the harness gives them the §10.2 count and progress deadline, the only deadline a user test has (F073)
 - [ ] `/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello` rewritten in the crate; the assembly sources and `mkuserelf.py` deleted

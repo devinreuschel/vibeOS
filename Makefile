@@ -503,6 +503,12 @@ test-e2e-highmem: $(ISO)
 test-e2e-strace: $(ISO)
 	VIBEOS_TIER=test-e2e-strace VIBEOS_ISO=$(ISO) VIBEOS_CMDLINE=vibeos.strace=1 python3 -c 'from tests.harness.run_e2e import strace_main; raise SystemExit(strace_main())'
 
+# Power-off and restart through the `reboot` syscall (ROADMAP §10.5): one
+# kernel_tests boot per opt-in row, each passing when the row's line prints
+# and QEMU exits by itself with status 0.
+test-e2e-power: $(ISO_KTEST)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_power.py
+
 test-kernel: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py --hpet-off
 
@@ -531,7 +537,7 @@ test-vibefs-crash-plants: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NB
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py \
 	    --plants leak,early_super
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-e2e-power test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
