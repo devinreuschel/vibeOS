@@ -38,24 +38,30 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     let Some(src) = current_space() else {
         return Err(KError::from_errno(EFAULT));
     };
-    let meta = with_table(|t| t.get(ppid).map(|p| (p.fds, p.cwd, p.creds)));
-    let Some((fds, cwd, creds)) = meta else {
+    let meta = with_table(|t| t.get(ppid).map(|p| (p.cwd, p.creds)));
+    let Some((cwd, creds)) = meta else {
         return Err(KError::from_errno(ESRCH));
     };
-    let Some(fds) = dup_table(fds) else {
-        return Err(KError::from_errno(EMFILE));
-    };
     let Some(pid) = alloc_pid(0) else {
-        close_all_fds(&mut { fds });
         return Err(KError::from_errno(EAGAIN));
     };
+    // The parent's descriptors, copied row to row in the table, then a
+    // reference taken on each open file: no row leaves the table.
+    if !with_table(|t| t.copy_fds(ppid, pid)) {
+        with_sched_table(|s, t| release_pid(s, t, pid));
+        return Err(KError::from_errno(ESRCH));
+    }
+    if !addref_fds(pid) {
+        with_sched_table(|s, t| release_pid(s, t, pid));
+        return Err(KError::from_errno(EMFILE));
+    }
     let Some(slot) = space_slot() else {
-        close_all_fds(&mut { fds });
+        close_all_fds(pid, "fork");
         with_sched_table(|s, t| release_pid(s, t, pid));
         return Err(KError::from_errno(ENOMEM));
     };
     let Some(boxed) = clone_into(slot, src) else {
-        close_all_fds(&mut { fds });
+        close_all_fds(pid, "fork");
         with_sched_table(|s, t| release_pid(s, t, pid));
         return Err(KError::from_errno(ENOMEM));
     };
@@ -68,15 +74,15 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
         Err(e) => {
             // Nothing names the clone's root yet: no thread was made.
             addr_space_init::teardown(boxed.into_inner());
-            close_all_fds(&mut { fds });
+            close_all_fds(pid, "fork");
             with_sched_table(|s, t| release_pid(s, t, pid));
             return Err(KError::from_errno(spawn_errno(e)));
         }
     };
     with_table(|t| {
-        init_slot(t, pid, ppid, "user");
         if let Some(p) = t.get_mut(pid) {
-            p.fds = fds;
+            p.ppid = ppid;
+            p.name = "user";
             p.cwd = cwd;
             p.creds = creds;
             p.space = Some(boxed);
@@ -162,26 +168,19 @@ pub(super) fn sys_execve(
     let cr3 = boxed.as_ref().map(|s| s.root().as_u64()).unwrap_or(0);
     let old = with_table(|t| {
         let p = t.get_mut(pid)?;
-        let gone = p.fds.apply_cloexec();
         p.name = name;
         p.fs_base = fs;
         let old = p.space.take();
         p.space = boxed.take();
-        Some((old, gone, p.tid, cr3))
+        Some((old, p.tid, cr3))
     });
-    let Some((old, gone, tid, cr3)) = old else {
+    let Some((old, tid, cr3)) = old else {
         if let Some(b) = boxed {
             addr_space_init::teardown(b.into_inner());
         }
         return Err(KError::from_errno(ESRCH));
     };
-    let mut i = 0usize;
-    while i < MAX_FDS {
-        if let Some(fd) = gone[i] {
-            close_dropped(fd, "execve close-on-exec");
-        }
-        i += 1;
-    }
+    close_where(pid, "execve close-on-exec", Fd::cloexec);
     if let Some(s) = p_space_ref(pid) {
         set_as(s);
     }

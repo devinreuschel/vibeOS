@@ -51,38 +51,89 @@ pub(super) fn close_dropped(fd: Fd, why: &str) {
     }
 }
 
-pub(super) fn close_all_fds(fds: &mut FdTable) {
-    let mut i = 0u32;
-    while i < MAX_FDS as u32 {
-        if let Some(old) = fds.close(i) {
-            close_dropped(old, "exit");
+/// Descriptors one batch moves in or out of a row per table-lock hold, so
+/// no copy of a whole row (`limits::MAX_FDS` entries) leaves the table.
+const FD_BATCH: usize = 32;
+
+/// Close `pid`'s open descriptors that `pick` chooses, in batches: each
+/// batch leaves the row under one table-lock hold and is closed with the
+/// lock dropped, where the call that drops them has no one to report a
+/// failed close to (`why`: exit, exec's close-on-exec, a failed fork).
+pub(super) fn close_where(pid: u32, why: &str, pick: impl Fn(Fd) -> bool) {
+    let mut start = 0usize;
+    loop {
+        let mut out = [Fd::EMPTY; FD_BATCH];
+        let Some((n, next)) = with_table(|t| {
+            t.get_mut(pid)
+                .map(|p| p.fds.take_batch(start, &mut out, &pick))
+        }) else {
+            return;
+        };
+        for fd in out.iter().take(n) {
+            close_dropped(*fd, why);
         }
-        i += 1;
+        if n < out.len() {
+            return;
+        }
+        start = next;
     }
 }
 
-pub(super) fn dup_table(src: FdTable) -> Option<FdTable> {
-    let mut i = 0u32;
-    while i < MAX_FDS as u32 {
-        if let Some(id) = src.get(i).and_then(file_id)
-            && file_init::addref(id).is_err()
-        {
-            let mut j = 0u32;
-            while j < i {
-                if let Some(id) = src.get(j).and_then(file_id) {
-                    #[expect(
-                        clippy::let_underscore_must_use,
-                        reason = "cleanup after an error the caller already returns: a close that fails leaves nothing the failed call could report (DESIGN §2.5)"
-                    )]
-                    let _ = file_init::close(FileRef::from_raw(id));
-                }
-                j += 1;
+/// Close all of `pid`'s descriptors ([`close_where`]).
+pub(super) fn close_all_fds(pid: u32, why: &str) {
+    close_where(pid, why, |_| true);
+}
+
+/// Take a reference on each open file in `pid`'s row, a copy of its
+/// parent's (fork), in batches read under one table-lock hold each. On a
+/// failure, the entries that got no reference are cleared and the rest
+/// closed, so the row is empty, and false is returned.
+pub(super) fn addref_fds(pid: u32) -> bool {
+    let mut start = 0usize;
+    loop {
+        let mut ids = [(0u32, FileId { fid: 0, r#gen: 0 }); FD_BATCH];
+        let Some((n, more)) = with_table(|t| {
+            let p = t.get(pid)?;
+            let mut n = 0usize;
+            let mut more = false;
+            for (i, fd) in p.fds.iter().filter(|(i, _)| *i as usize >= start) {
+                let Some(id) = file_id(fd) else {
+                    continue;
+                };
+                let Some(slot) = ids.get_mut(n) else {
+                    more = true;
+                    break;
+                };
+                *slot = (i, id);
+                n += 1;
             }
-            return None;
+            Some((n, more))
+        }) else {
+            return false;
+        };
+        for &(i, id) in ids.iter().take(n) {
+            if file_init::addref(id).is_err() {
+                // Entries from `i` on hold no reference of this row's.
+                with_table(|t| {
+                    if let Some(p) = t.get_mut(pid) {
+                        let mut k = i;
+                        while (k as usize) < p.fds.capacity() {
+                            let _ = p.fds.close(k);
+                            k += 1;
+                        }
+                    }
+                });
+                close_all_fds(pid, "fork");
+                return false;
+            }
         }
-        i += 1;
+        if !more {
+            return true;
+        }
+        start = ids
+            .get(n.saturating_sub(1))
+            .map_or(start, |&(i, _)| i as usize + 1);
     }
-    Some(src)
 }
 
 pub(super) fn lookup_fd(fd: u32) -> Option<Fd> {

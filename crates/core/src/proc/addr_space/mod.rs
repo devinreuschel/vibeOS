@@ -6,6 +6,8 @@
 //! entries flushed on every CPU, so a user map in its range aliases
 //! nothing; only the trampoline page stays, not global.
 
+use crate::kalloc::{AllocError, TryVec};
+use crate::limits;
 use crate::paging::{
     FrameAlloc, KERNEL_PML4_FIRST, MapError, MapMode, Mapper, NULL_GUARD_LEN, PAGE_SIZE_4K,
     PTES_PER_TABLE, PageFlags, PageSize, PhysAddr, Probe, USER_MAP_END, VirtAddr, is_canonical,
@@ -212,9 +214,21 @@ pub struct TeardownStats {
     pub pt_frames: usize,
 }
 
+/// An address space's region slots: a fixed table of `MAX_REGIONS`, never
+/// grown, until ROADMAP §12.4's region tree replaces it (ROADMAP §10.4,
+/// D1).
+pub type RegionTable = TryVec<Option<Region>>;
+
+/// A table for one address space's regions, allocated before the caller
+/// takes the page-table lock that building the space holds: the heap ranks
+/// before it (DESIGN §2.1).
+pub fn region_table() -> Result<RegionTable, AllocError> {
+    limits::table(MAX_REGIONS, || None)
+}
+
 pub struct AddressSpace {
     mapper: Mapper,
-    regions: [Option<Region>; MAX_REGIONS],
+    regions: RegionTable,
     user_frames: usize,
     pt_frames: usize,
     /// Page after the image's highest `PT_LOAD`: where the heap starts.
@@ -240,7 +254,10 @@ unsafe impl<A: FrameAlloc> FrameAlloc for Counting<'_, A> {
 }
 
 impl AddressSpace {
-    /// New PML4, kernel half shared from `kernel`. `alloc` supplies the
+    /// New PML4, kernel half shared from `kernel`, with the table in
+    /// `regions`, one from [`region_table`], as its region slots: taken only
+    /// on success, so a failure leaves it for the caller to drop after the
+    /// page-table lock it holds (the heap ranks before it). `alloc` supplies the
     /// PML4 frame, whose token the mapper holds until [`teardown`] frees
     /// it last. `pt_frames` starts at 1 (the root).
     ///
@@ -249,8 +266,14 @@ impl AddressSpace {
     /// # Safety
     /// `kernel` is the live kernel mapper. `alloc` returns owned frames
     /// reachable through `kernel.hhdm_offset()`.
-    pub unsafe fn new<A: FrameAlloc>(kernel: &Mapper, alloc: &mut A) -> Option<Self> {
+    pub unsafe fn new<A: FrameAlloc>(
+        kernel: &Mapper,
+        alloc: &mut A,
+        regions: &mut Option<RegionTable>,
+    ) -> Option<Self> {
+        regions.as_ref()?;
         let root = PhysAddr(alloc.alloc_frame()?.into_entry());
+        let regions = regions.take()?;
         // SAFETY: `root` is an owned frame from `alloc`, writable through
         // `kernel`'s HHDM offset (this fn's contract), and this space owns it
         // until `teardown`; the mapper walks nothing before the zeroing
@@ -263,7 +286,7 @@ impl AddressSpace {
         unsafe { mapper.zero_frame(root) };
         let mut space = Self {
             mapper,
-            regions: [None; MAX_REGIONS],
+            regions,
             user_frames: 0,
             pt_frames: 1,
             brk_start: 0,
@@ -646,7 +669,7 @@ impl AddressSpace {
             user_frames: walked.leaves,
             pt_frames: walked.tables + 1,
         };
-        self.regions = [None; MAX_REGIONS];
+        self.regions.iter_mut().for_each(|r| *r = None);
         self.user_frames = 0;
         self.pt_frames = 0;
         let _ = walked;
@@ -955,6 +978,8 @@ impl AddressSpace {
     }
 
     /// Full copy of user regions (Phase 9 fork). New frames, same bytes.
+    /// `regions` is the new space's table, as for [`AddressSpace::new`],
+    /// and back in `regions` on a failure.
     ///
     /// # Safety
     /// `kernel` is the live kernel mapper. `alloc` supplies owned frames.
@@ -962,11 +987,13 @@ impl AddressSpace {
         &self,
         kernel: &Mapper,
         alloc: &mut A,
+        regions: &mut Option<RegionTable>,
     ) -> Result<AddressSpace, AsError> {
         // SAFETY: `kernel` is the live kernel mapper and `alloc` hands out
         // owned frames (this fn's contract,
         // `addr_space::AddressSpace::clone_anon`), as `new` requires.
-        let mut dst = unsafe { AddressSpace::new(kernel, alloc) }.ok_or(AsError::OutOfFrames)?;
+        let mut dst =
+            unsafe { AddressSpace::new(kernel, alloc, regions) }.ok_or(AsError::OutOfFrames)?;
         dst.brk_start = self.brk_start;
         dst.brk = self.brk;
         let rc = (|| {
@@ -1003,6 +1030,9 @@ impl AddressSpace {
                 // here, and every frame it holds came from `alloc`, which may
                 // take it back (`addr_space::FrameFree`).
                 let _ = unsafe { dst.teardown_pool(alloc) };
+                // The table goes back to the caller, which frees it after
+                // its page-table lock ([`AddressSpace::new`]).
+                *regions = Some(core::mem::take(&mut dst.regions));
                 Err(e)
             }
         }

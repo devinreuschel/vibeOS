@@ -11,6 +11,8 @@ pub mod syscall_table;
 pub mod uaccess;
 
 use crate::fs::{MAX_PATH, O_CLOEXEC};
+use crate::kalloc::{AllocError, TryVec};
+use crate::limits;
 
 pub use crate::limits::MAX_FDS;
 pub use crate::limits::MAX_PROCS;
@@ -150,74 +152,95 @@ impl Fd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FdError;
 
-#[derive(Clone, Copy, Debug)]
+/// A process's descriptors: a heap row of a fixed length,
+/// `limits::MAX_FDS` for a process-table slot's, built once by
+/// [`FdTable::try_new`] and never grown; [`FdTable::empty`] has no room.
+/// Not `Copy`: fork copies a row into another with [`FdTable::copy_from`].
+#[derive(Debug)]
 pub struct FdTable {
-    slots: [Fd; MAX_FDS],
+    slots: TryVec<Fd>,
 }
 
 impl FdTable {
+    /// A row with no room, for a `const` initializer.
     pub const fn empty() -> Self {
         Self {
-            slots: [Fd::EMPTY; MAX_FDS],
+            slots: TryVec::new(),
         }
     }
 
-    pub fn stdio() -> Self {
-        let mut t = Self::empty();
-        t.slots[0] = Fd {
-            kind: FdKind::Console,
-            flags: 0,
-        };
-        t.slots[1] = Fd {
-            kind: FdKind::Console,
-            flags: 0,
-        };
-        t.slots[2] = Fd {
-            kind: FdKind::Console,
-            flags: 0,
-        };
-        t
+    /// A row of `len` closed descriptors.
+    pub fn try_new(len: usize) -> Result<Self, AllocError> {
+        Ok(Self {
+            slots: limits::table(len, || Fd::EMPTY)?,
+        })
     }
 
-    pub fn get(self, fd: u32) -> Option<Fd> {
-        let i = fd as usize;
-        if i >= MAX_FDS || !self.slots[i].is_open() {
-            None
-        } else {
-            Some(self.slots[i])
+    /// Descriptors the row holds.
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Close every entry in place, returning nothing: for a row whose files
+    /// are already closed or were never opened.
+    pub fn reset(&mut self) {
+        self.slots.iter_mut().for_each(|s| *s = Fd::EMPTY);
+    }
+
+    /// Make this row a copy of `src`: its entries, then closed ones up to
+    /// this row's length. Entries past this row's length are dropped.
+    pub fn copy_from(&mut self, src: &FdTable) {
+        let mut i = 0usize;
+        while i < self.slots.len() {
+            self.slots[i] = src.slots.get(i).copied().unwrap_or(Fd::EMPTY);
+            i += 1;
         }
+    }
+
+    /// fds 0 to 2 on the console, in a row of `len`.
+    pub fn stdio(len: usize) -> Result<Self, AllocError> {
+        let mut t = Self::try_new(len)?;
+        t.set_stdio();
+        Ok(t)
+    }
+
+    /// Put fds 0 to 2 on the console; the rest are untouched.
+    pub fn set_stdio(&mut self) {
+        for s in self.slots.iter_mut().take(3) {
+            *s = Fd {
+                kind: FdKind::Console,
+                flags: 0,
+            };
+        }
+    }
+
+    pub fn get(&self, fd: u32) -> Option<Fd> {
+        self.slots.get(fd as usize).copied().filter(|s| s.is_open())
     }
 
     pub fn set(&mut self, fd: u32, slot: Fd) -> Result<(), FdError> {
-        let i = fd as usize;
-        if i >= MAX_FDS {
-            return Err(FdError);
-        }
-        self.slots[i] = slot;
+        let s = self.slots.get_mut(fd as usize).ok_or(FdError)?;
+        *s = slot;
         Ok(())
     }
 
     pub fn alloc(&mut self, slot: Fd) -> Result<u32, FdError> {
-        let mut i = 0u32;
-        while i < MAX_FDS as u32 {
-            if !self.slots[i as usize].is_open() {
-                self.slots[i as usize] = slot;
-                return Ok(i);
-            }
-            i += 1;
-        }
-        Err(FdError)
+        let i = self
+            .slots
+            .iter()
+            .position(|s| !s.is_open())
+            .ok_or(FdError)?;
+        self.slots[i] = slot;
+        Ok(i as u32)
     }
 
     /// Close and return the old slot. `None` if not open.
     pub fn close(&mut self, fd: u32) -> Option<Fd> {
-        let i = fd as usize;
-        if i >= MAX_FDS || !self.slots[i].is_open() {
+        let s = self.slots.get_mut(fd as usize)?;
+        if !s.is_open() {
             return None;
         }
-        let old = self.slots[i];
-        self.slots[i] = Fd::EMPTY;
-        Some(old)
+        Some(core::mem::replace(s, Fd::EMPTY))
     }
 
     /// New fd, CLOEXEC cleared (Linux `dup`).
@@ -237,7 +260,7 @@ impl FdTable {
             return Ok(None);
         }
         let s = self.get(old).ok_or(FdError)?;
-        if new as usize >= MAX_FDS {
+        if new as usize >= self.slots.len() {
             return Err(FdError);
         }
         let displaced = self.close(new);
@@ -248,23 +271,52 @@ impl FdTable {
         Ok(displaced)
     }
 
-    /// Drop CLOEXEC fds on exec. Returns the dropped fds for the caller
-    /// to close in the file table.
-    pub fn apply_cloexec(&mut self) -> [Option<Fd>; MAX_FDS] {
-        let mut gone = [None; MAX_FDS];
-        let mut i = 0usize;
-        while i < MAX_FDS {
-            if self.slots[i].is_open() && self.slots[i].cloexec() {
-                gone[i] = Some(self.slots[i]);
-                self.slots[i] = Fd::EMPTY;
+    /// Drop CLOEXEC fds on exec, handing each to `gone` for the caller to
+    /// close in the file table.
+    pub fn apply_cloexec(&mut self, mut gone: impl FnMut(Fd)) {
+        for s in self.slots.iter_mut() {
+            if s.is_open() && s.cloexec() {
+                gone(core::mem::replace(s, Fd::EMPTY));
+            }
+        }
+    }
+
+    /// Close the open entries from `start` on that `pick` chooses, at most
+    /// `out.len()` of them, moving each into `out`: how many, and where the
+    /// next batch starts (the row's length once it is done). The kernel
+    /// closes a row in batches this way, one lock hold each, so no copy of
+    /// the whole row leaves the process table.
+    pub fn take_batch(
+        &mut self,
+        start: usize,
+        out: &mut [Fd],
+        mut pick: impl FnMut(Fd) -> bool,
+    ) -> (usize, usize) {
+        let mut n = 0usize;
+        let mut i = start;
+        while n < out.len() {
+            let Some(s) = self.slots.get_mut(i) else {
+                break;
+            };
+            if s.is_open()
+                && pick(*s)
+                && let Some(o) = out.get_mut(n)
+            {
+                *o = core::mem::replace(s, Fd::EMPTY);
+                n += 1;
             }
             i += 1;
         }
-        gone
+        (n, i)
     }
 
-    pub fn iter(self) -> [Fd; MAX_FDS] {
+    /// The open entries, with their numbers.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, Fd)> + '_ {
         self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_open())
+            .map(|(i, s)| (i as u32, *s))
     }
 }
 
@@ -411,7 +463,7 @@ mod tests {
 
     #[test]
     fn fd_table_stdio_dup_cloexec() {
-        let mut t = FdTable::stdio();
+        let mut t = FdTable::stdio(8).unwrap();
         assert!(matches!(t.get(0).unwrap().kind, FdKind::Console));
         assert!(matches!(t.get(1).unwrap().kind, FdKind::Console));
         assert!(matches!(t.get(2).unwrap().kind, FdKind::Console));
@@ -427,9 +479,13 @@ mod tests {
             },
         )
         .unwrap();
-        let gone = t.apply_cloexec();
+        let mut gone = None;
+        t.apply_cloexec(|f| {
+            assert!(gone.is_none());
+            gone = Some(f);
+        });
         assert_eq!(
-            gone[4].map(|f| f.kind),
+            gone.map(|f| f.kind),
             Some(FdKind::File { fid: 7, r#gen: 2 })
         );
         assert!(t.get(4).is_none());
@@ -459,7 +515,6 @@ mod tests {
         assert_eq!(ProcState::Zombie.name(), "zombie");
         assert_eq!(Creds::ROOT.uid, 0);
         assert_eq!(INIT_PID, 1);
-        assert_eq!(MAX_PROCS, 18);
         let c = Cwd::root();
         assert_eq!(c.as_bytes(), b"/");
         assert_eq!(default_action(SIGCONT), SigAct::Cont);
@@ -467,9 +522,10 @@ mod tests {
 
     #[test]
     fn fd_table_full() {
-        let mut t = FdTable::empty();
+        let mut t = FdTable::try_new(5).unwrap();
+        assert_eq!(t.capacity(), 5);
         let mut n = 0u32;
-        while n < MAX_FDS as u32 {
+        while n < t.capacity() as u32 {
             t.alloc(Fd {
                 kind: FdKind::Console,
                 flags: 0,
@@ -496,7 +552,47 @@ mod tests {
     }
 
     #[test]
+    fn fd_table_rows_copy_and_batch() {
+        let mut a = FdTable::stdio(6).unwrap();
+        let file = |fid, flags| Fd {
+            kind: FdKind::File { fid, r#gen: 0 },
+            flags,
+        };
+        a.set(3, file(1, FD_CLOEXEC)).unwrap();
+        a.set(5, file(2, 0)).unwrap();
+        let mut b = FdTable::try_new(6).unwrap();
+        b.set(4, file(9, 0)).unwrap();
+        b.copy_from(&a);
+        assert_eq!(
+            b.iter().map(|(i, _)| i).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 5]
+        );
+        let mut out = [Fd::EMPTY; 2];
+        assert_eq!(b.take_batch(0, &mut out, Fd::cloexec), (1, 6));
+        assert_eq!(out[0], file(1, FD_CLOEXEC));
+        assert_eq!(b.take_batch(0, &mut out, |_| true), (2, 2));
+        assert_eq!(b.take_batch(2, &mut out, |_| true), (2, 6));
+        assert_eq!(
+            out,
+            [
+                Fd {
+                    kind: FdKind::Console,
+                    flags: 0
+                },
+                file(2, 0)
+            ]
+        );
+        assert_eq!(b.take_batch(6, &mut out, |_| true), (0, 6));
+        assert_eq!(b.iter().count(), 0);
+        a.reset();
+        assert_eq!(a.iter().count(), 0);
+        assert_eq!(FdTable::empty().capacity(), 0);
+        assert!(FdTable::empty().alloc(Fd::EMPTY).is_err());
+    }
+
+    #[test]
     fn fixed_tables_match_limits() {
-        assert_eq!(FdTable::empty().slots.len(), crate::limits::MAX_FDS);
+        let t = FdTable::try_new(crate::limits::MAX_FDS).unwrap();
+        assert_eq!(t.capacity(), crate::limits::MAX_FDS);
     }
 }

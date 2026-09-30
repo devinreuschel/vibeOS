@@ -298,6 +298,11 @@ extern "C" fn boot_rest() -> ! {
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the GDT is loaded and `GS_BASE` is the BSP's `PerCpu`, as `syscall_init::init_bsp` requires; established here.
     unsafe { syscall_init::init_bsp() };
+    // The process table and its descriptor rows (ROADMAP §10.4, D1), before
+    // `irq: enabled`, where DESIGN §4.4 allows a boot-time halt.
+    if proc_init::init_tables().is_err() {
+        crate::boot::halt_with("vibeOS: limits: no memory for the process tables");
+    }
     proc_init::init();
     crate::marker!(marker::PER_CPU_BSP);
     crate::log::vmcoreinfo_init::publish();
