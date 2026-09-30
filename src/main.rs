@@ -142,7 +142,7 @@ pub extern "C" fn _start() -> ! {
     // `is_supported()` returns false.
     if !BASE_REV.is_supported() {
         crate::marker!("vibeOS: limine: base revision unsupported");
-        x86::halt();
+        arch::current::halt();
     }
     crate::marker!(marker::LIMINE_OK);
 
@@ -321,7 +321,7 @@ extern "C" fn boot_rest() -> ! {
     // below: the IDT is live, the PIC remapped, the LAPIC and I/O APIC pages uncached (`acpi_init::init` above), as `apic_init::init` requires; established here.
     unsafe { apic_init::init() };
     crate::irq_init::init();
-    x86::sti();
+    arch::current::irq_enable();
     apic_init::prove();
     time_init::busy_wait_ms(20);
     diag::uptime();
@@ -429,7 +429,7 @@ extern "C" fn boot_rest() -> ! {
     #[cfg(not(any(feature = "kernel_tests", feature = "vibefs_crash")))]
     {
         thread_init::park(None);
-        x86::halt();
+        arch::current::halt();
     }
 }
 

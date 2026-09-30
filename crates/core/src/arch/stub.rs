@@ -544,6 +544,8 @@ impl ContextSwitch for Arch {
 
 impl Port for Arch {}
 
+const _: () = super::assert_port::<Arch>();
+
 #[cfg(test)]
 mod tests {
     use super::*;

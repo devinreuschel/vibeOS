@@ -1068,7 +1068,7 @@ pub(crate) mod testing {
         }
         if APIC_ARMED.load(Ordering::Acquire) {
             // One IF=0 stretch: the `PerCpu` read and CPUID see one CPU.
-            let _g = crate::x86::InterruptGuard::enter();
+            let _g = crate::arch::current::InterruptGuard::enter();
             let mine = per_cpu_init::current()
                 .remote
                 .apic_id

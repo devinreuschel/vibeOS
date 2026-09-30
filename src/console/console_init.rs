@@ -10,13 +10,13 @@ use vibeos::fb::CHUNK;
 use vibeos::kbd::DecodedKey;
 use vibeos::marker;
 
+use crate::arch::current::{InterruptGuard, interrupts_enabled, irq_disable, irq_enable};
 use crate::fb_init;
 use crate::kbd_init;
 use crate::log_init;
 use crate::per_cpu_init;
 use crate::serial::Serial;
 use crate::thread_init;
-use crate::x86::{self, InterruptGuard};
 
 pub(super) static SERIAL_ON: AtomicBool = AtomicBool::new(false);
 pub(super) static FB_ON: AtomicBool = AtomicBool::new(false);
@@ -77,12 +77,12 @@ pub fn read() -> Option<DecodedKey> {
 /// body that calls this returns to an exit that must run with IF=0
 /// (AGENTS.md rule 2).
 pub fn wait_key() -> DecodedKey {
-    let if_on = x86::interrupts_enabled();
+    let if_on = interrupts_enabled();
     let k = wait_key_loop();
     if if_on {
-        x86::sti();
+        irq_enable();
     } else {
-        x86::cli();
+        irq_disable();
     }
     k
 }

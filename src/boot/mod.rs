@@ -338,5 +338,5 @@ pub fn info() -> &'static BootInfo {
 /// rule).
 pub(crate) fn halt_with(msg: &str) -> ! {
     crate::marker!(msg);
-    crate::x86::halt();
+    crate::arch::current::halt();
 }

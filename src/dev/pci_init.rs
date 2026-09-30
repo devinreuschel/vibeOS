@@ -15,10 +15,12 @@ use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
 use crate::acpi_init;
+use crate::arch::current::InterruptGuard;
 use crate::fb_init;
 use crate::paging_init;
 use crate::sync_init::SpinMutex;
-use crate::x86::{self, InterruptGuard};
+#[cfg(target_arch = "x86_64")]
+use crate::x86;
 
 const CFG_ADDR: u16 = 0xCF8;
 const CFG_DATA: u16 = 0xCFC;

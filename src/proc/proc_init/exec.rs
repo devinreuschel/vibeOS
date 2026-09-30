@@ -62,7 +62,7 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     let cr3 = boxed.root().as_u64();
     let mut child = *frame;
     child.rax = 0;
-    let fs = crate::x86::rdmsr(crate::x86::IA32_FS_BASE);
+    let fs = crate::arch::current::user_tls();
     let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3, &child) {
         Ok(h) => h,
         Err(e) => {
@@ -198,11 +198,11 @@ pub(super) fn sys_execve(
         orig_rax: frame.orig_rax,
         ..UserFrame::new_user(entry, rsp)
     };
-    // SAFETY: FS_BASE is an architectural MSR, and `fs` is the new image's
-    // thread pointer, a canonical user address the loader chose
-    // (`user_init::load_image`), so the next ring-3 `fs:` access reaches its
-    // TLS block; established by `user_init::setup_tls`.
-    unsafe { crate::x86::wrmsr(crate::x86::IA32_FS_BASE, fs) };
+    // SAFETY: `fs` is the new image's thread pointer, a canonical user
+    // address the loader chose (`user_init::load_image`), as
+    // `set_user_tls` requires, so the next ring-3 TLS access reaches its
+    // block; established by `user_init::setup_tls`.
+    unsafe { crate::arch::current::set_user_tls(fs) };
     Ok(0)
 }
 

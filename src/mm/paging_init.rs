@@ -28,11 +28,10 @@ use vibeos::paging::{
 };
 use vibeos::pmm::Frames;
 
-use crate::arch::current::{Arch, Mapper, enable_nx, flush_local_global};
+use crate::arch::current::{Arch, Mapper, enable_nx, flush_local_global, stack_pointer};
 use crate::boot::{self, BootInfo};
 use crate::pmm_init;
 use crate::sync_init::{SpinMutex, SpinMutexGuard};
-use crate::x86;
 use vibeos::arch::PageTable;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
@@ -636,7 +635,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // (typically Limine puts the stack in HHDM), the switch survives on
     // its own. Otherwise copy the covering PML4 entry from Limine's
     // active tables so the stack VA stays live across `mov cr3`.
-    let rsp = x86::read_rsp();
+    let rsp = stack_pointer();
     let duplicated = if mapper.translate(VirtAddr(rsp)).is_none() {
         // SAFETY: `duplicate_pml4_entry_from_current`'s contract; boot has
         // not yet written CR3, so Limine's tables are still installed

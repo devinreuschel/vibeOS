@@ -26,8 +26,6 @@ unsafe extern "C" {
 }
 
 #[cfg(feature = "panic_exit")]
-const ISA_DEBUG_EXIT: u16 = 0xF4;
-#[cfg(feature = "panic_exit")]
 const EXIT_PANIC: u32 = 0x11;
 const BT_MAX: usize = 24;
 
@@ -72,7 +70,7 @@ fn stackish(p: u64) -> bool {
 /// Halt others first, then re-init serial. Re-entry dumps a one-liner and
 /// `hlt`s (or isa-debug-exit) without walking the ring again.
 fn begin_dump() {
-    x86::cli();
+    crate::arch::current::irq_disable();
     if !crate::serial::raw::claim_dump() {
         Serial::init();
         Serial::write_line(b"vibeOS: panic: reentered\n");
@@ -214,13 +212,9 @@ fn dump_backtrace(rip: u64, rbp: u64) {
 fn finish() -> ! {
     Serial::write_line(b"vibeOS: panic: halted\n");
     #[cfg(feature = "panic_exit")]
-    // SAFETY: `panic_exit` builds run under QEMU with isa-debug-exit at
-    // port 0xF4, whose write ends the VM; established by the harness's
-    // `-device isa-debug-exit`, which `panic::ISA_DEBUG_EXIT` names.
-    unsafe {
-        x86::outl(ISA_DEBUG_EXIT, EXIT_PANIC);
-    }
-    x86::halt();
+    crate::arch::current::qemu_exit(EXIT_PANIC);
+    #[cfg(not(feature = "panic_exit"))]
+    crate::arch::current::halt();
 }
 
 fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {

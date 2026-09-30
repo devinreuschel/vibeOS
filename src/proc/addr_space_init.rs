@@ -16,7 +16,6 @@ use crate::paging_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::thread_init;
-use crate::x86;
 
 struct BuddyPool;
 
@@ -328,7 +327,7 @@ impl fmt::Debug for RootHolder {
 fn root_holder(root: u64) -> Option<RootHolder> {
     // One IF=0 stretch: the id and CR3 name one CPU.
     let (here, live) = {
-        let _irq = x86::InterruptGuard::enter();
+        let _irq = crate::arch::current::InterruptGuard::enter();
         (
             per_cpu_init::try_current().map_or(0, |c| c.cpu_id),
             Arch::root().as_u64(),

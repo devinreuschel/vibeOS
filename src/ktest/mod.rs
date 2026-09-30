@@ -17,7 +17,9 @@ use vibeos::pmm::Frames;
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::vectors;
 
-use crate::arch::current::Arch;
+use crate::arch::current::{
+    Arch, InterruptGuard, interrupts_enabled, irq_disable, irq_enable, qemu_exit,
+};
 use crate::ipi_init;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -25,6 +27,7 @@ use crate::pmm_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init::{self, ThreadHandle};
 use crate::time_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 use crate::{
     acpi, arch, block, boot, console, dev, drivers, fs, irq, log, mm, proc, sched, shell, smp,
@@ -32,7 +35,6 @@ use crate::{
 };
 pub(crate) mod user;
 
-const ISA_DEBUG_EXIT: u16 = 0xF4;
 const EXIT_PASS: u32 = 0x10;
 const EXIT_FAIL: u32 = 0x11;
 
@@ -176,7 +178,7 @@ pub(crate) const TESTS: &[Test] = &[
 /// another CPU's tick can see its 500 ms deadline pass. `run_ktest.py`'s
 /// `ktest_deadline_trip` boot expects the FAIL line and the panic.
 fn test_ktest_deadline_hang() -> Outcome {
-    let _g = x86::InterruptGuard::enter();
+    let _g = InterruptGuard::enter();
     loop {
         core::hint::spin_loop();
     }
@@ -448,8 +450,8 @@ fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
     // A test that needs interrupts off takes its own guard and drops it
     // before it returns.
     // The depth is read with IF=0, so it is this CPU's (DESIGN §2.9 rule 5).
-    let if_on = x86::interrupts_enabled();
-    x86::cli();
+    let if_on = interrupts_enabled();
+    irq_disable();
     let cpu = per_cpu_init::current();
     let nest = cpu.irq_nest.load(Ordering::Relaxed);
     if !if_on || nest != 0 {
@@ -458,7 +460,7 @@ fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
             outcome = crate::fail_fmt!("left IF={} irq_nest={}", u8::from(if_on), nest);
         }
     }
-    x86::sti();
+    irq_enable();
     match outcome {
         Outcome::Ok => {
             crate::marker!("vibeOS: ktest: ok {name} ({us} us)");
@@ -481,14 +483,6 @@ fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
             true
         }
     }
-}
-
-fn qemu_exit(code: u32) -> ! {
-    // SAFETY: `ISA_DEBUG_EXIT` is the isa-debug-exit port the harness gives
-    // every kernel_tests guest, which no other code uses; the write ends the
-    // guest and touches no memory; established here.
-    unsafe { x86::outl(ISA_DEBUG_EXIT, code) };
-    x86::halt();
 }
 
 /// Pages per stack in [`quiesce_frames`]' KVA walk: 17 pages of VA a round,
@@ -546,7 +540,7 @@ pub(crate) fn quiesce_frames() {
     // Under the guard none of these runs, dies, and frees its slot for the
     // next spawn before every empty slot has a Tcb.
     {
-        let _g = x86::InterruptGuard::enter();
+        let _g = InterruptGuard::enter();
         let mut i = 0;
         while i < empty {
             if thread_init::spawn_here("warm", dying_entry).is_err() {
@@ -655,7 +649,7 @@ pub(crate) struct Fault {
 pub(crate) fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
     // A hit longjmps out of the #PF gate and skips the `iretq` that would
     // restore IF; the guard restores it.
-    let _g = x86::InterruptGuard::enter();
+    let _g = InterruptGuard::enter();
     arch::catch::catch(vectors::PF, f).map(|c| Fault {
         cr2: c.cr2,
         error: c.error,
@@ -759,11 +753,11 @@ pub(crate) fn dying_entry() {}
 /// lands on the slot of the CPU the caller runs on (DESIGN §2.9 rule 5),
 /// and IF is left as the caller had it.
 pub(crate) fn restore_irq_nest(n: u32) {
-    let if_on = x86::interrupts_enabled();
-    x86::cli();
+    let if_on = interrupts_enabled();
+    irq_disable();
     per_cpu_init::current().irq_nest.store(n, Ordering::Relaxed);
     if if_on {
-        x86::sti();
+        irq_enable();
     }
 }
 
@@ -783,7 +777,7 @@ pub(crate) fn second_cpu() -> Option<u32> {
 /// between `service_calls`' acked check and its ack would run the callback
 /// twice, so this holds IF off across the call.
 pub(crate) fn service_incoming_guarded() {
-    let _g = x86::InterruptGuard::enter();
+    let _g = InterruptGuard::enter();
     ipi_init::service_incoming();
 }
 

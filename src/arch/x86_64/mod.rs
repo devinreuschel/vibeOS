@@ -48,7 +48,7 @@ use core::sync::atomic::{compiler_fence, fence};
 
 use vibeos::arch::x86_64::trap::Abi;
 use vibeos::arch::{
-    Barriers, ContextSwitch, CycleCounter, InterruptMask, MmioWidth, PerCpuBase, SyscallAbi,
+    Barriers, ContextSwitch, CycleCounter, InterruptMask, MmioWidth, PerCpuBase, Port, SyscallAbi,
 };
 use vibeos::atomic::statics::{AtomicBool, AtomicU64, Ordering};
 use vibeos::sched::thread::{CpuContext, Tcb, apply_if_on_resume, prepare_thread};
@@ -257,6 +257,9 @@ impl PerCpuBase for Arch {
         percpu::current_tcb()
     }
 }
+
+/// Every seam trait, which `arch::current`'s `assert_port` checks.
+impl Port for Arch {}
 
 /// Forwarded to the pure half's `Abi`, where the x86_64 syscall ABI lives.
 impl SyscallAbi for Arch {

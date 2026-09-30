@@ -29,11 +29,11 @@ use vibeos::thread::{
 use vibeos::time::Instant;
 use vibeos::wait::{self, WaitQueue};
 
+use crate::arch::current::InterruptGuard;
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
 use crate::sync_init::{self, SleepCtx, SpinMutex};
 use crate::time_init;
-use crate::x86::InterruptGuard;
 
 mod boot;
 #[cfg(feature = "kernel_tests")]
@@ -381,7 +381,7 @@ extern "C" fn trampoline() {
     finish_switch();
     per_cpu_init::irq_nest_leave();
     if per_cpu_init::irq_nest() == 0 {
-        crate::x86::sti();
+        crate::arch::current::irq_enable();
     }
     // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`,
     // and `entry` is written only before the thread first runs; established
@@ -673,7 +673,7 @@ fn relink(s: &mut Sched) {
 /// allocates, or sends a shootdown.
 pub(crate) fn finish_switch() {
     debug_assert!(
-        !crate::x86::interrupts_enabled(),
+        !crate::arch::current::interrupts_enabled(),
         "finish_switch with IF on"
     );
     #[cfg(feature = "kernel_tests")]
@@ -728,7 +728,7 @@ pub(crate) fn take_dead_stacks() -> u64 {
 /// Free this CPU's dead list now, as its worker would: IF=1 only
 /// (`kva_init::free_parked`). True if a stack was freed.
 fn reclaim_dead_stacks_here() -> bool {
-    if !crate::x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         return false;
     }
     let head = take_dead_stacks();

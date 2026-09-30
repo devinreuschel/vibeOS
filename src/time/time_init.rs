@@ -15,7 +15,7 @@ use vibeos::time::{
 };
 
 use crate::acpi_init;
-use crate::arch::current::Arch;
+use crate::arch::current::{Arch, interrupts_enabled, wait_for_interrupt};
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86_64::{has_rdtscp, invariant_tsc, rdtsc_ser};
 use crate::cell::BootCell;
@@ -414,9 +414,9 @@ pub fn busy_wait_ms(ms: u64) {
     let start = read_tsc();
     let target = (start as u128).saturating_add(ms as u128 * k as u128);
     while (read_tsc() as u128) < target {
-        if x86::interrupts_enabled() {
+        if interrupts_enabled() {
             let before = read_tsc();
-            x86::hlt_once();
+            wait_for_interrupt();
             if (read_tsc() as u128) <= before as u128 {
                 while (read_tsc() as u128) < target {
                     core::hint::spin_loop();

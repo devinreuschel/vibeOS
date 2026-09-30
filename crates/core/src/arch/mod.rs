@@ -176,7 +176,8 @@ pub trait ContextSwitch {
 }
 
 /// A complete port: every seam trait. Each port implements `Port` for its
-/// type with an empty impl, so the compiler names any missing supertrait there.
+/// type with an empty impl, so the compiler names any missing supertrait there,
+/// and asserts it with [`assert_port`].
 pub trait Port:
     BootHandover
     + InterruptMask
@@ -190,6 +191,10 @@ pub trait Port:
     + ContextSwitch
 {
 }
+
+/// Compiles only for a complete port: `const _: () = assert_port::<Arch>();`
+/// beside each port's `Arch` checks it at build time.
+pub const fn assert_port<A: Port>() {}
 
 #[cfg(any(test, feature = "std"))]
 pub mod stub;

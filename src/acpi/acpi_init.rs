@@ -165,5 +165,5 @@ pub fn info() -> Option<&'static AcpiInfo> {
 
 fn halt_acpi(e: AcpiError) -> ! {
     crate::marker!("vibeOS: acpi: {}", e.as_str());
-    crate::x86::halt();
+    crate::arch::current::halt();
 }

@@ -8,7 +8,7 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::apic::IpiError;
-use vibeos::arch::{Ipi, IpiSend, PageTable};
+use vibeos::arch::{InterruptMask, Ipi, IpiSend, PageTable};
 use vibeos::ipi::{MAX_IPI_CPUS, SHOOT_RANGES, ShootRange, all_acked, waiter_mask};
 use vibeos::log::Level;
 use vibeos::paging::VirtAddr;
@@ -20,7 +20,6 @@ use crate::arch::current::Arch;
 use crate::per_cpu_init;
 use crate::sync_init;
 use crate::time_init;
-use crate::x86;
 
 /// One CPU's shootdown round: `n` packed [`ShootRange`]s in `ranges`.
 struct Slot {
@@ -187,7 +186,7 @@ fn wait_acks(waiters: u64, acked: &AtomicU64) {
     if waiters == 0 {
         return;
     }
-    assert!(!x86::interrupts_enabled(), "ipi: ack wait with IF on");
+    assert!(!Arch::enabled(), "ipi: ack wait with IF on");
     let k = time_init::tsc_per_ms();
     let period = k.saturating_mul(1000);
     let start = time_init::read_tsc();
@@ -262,7 +261,7 @@ pub fn shootdown_ranges(ranges: &[ShootRange]) {
 
 /// One round for at most [`SHOOT_RANGES`] ranges.
 fn shootdown_round(ranges: &[ShootRange]) {
-    let _irq = x86::InterruptGuard::enter();
+    let _irq = crate::arch::current::InterruptGuard::enter();
     #[cfg(feature = "kernel_tests")]
     crate::irq::ktest::note_shootdown();
     let me = my_index() as u32;
@@ -302,7 +301,7 @@ fn inbox_push(cpu: u32, slot: usize) {
 /// inbox + 0xFD. Never a remote queue lock. IRQ-off for the local runq.
 pub fn place_ready(cpu: u32, id: ThreadId, slot: usize) {
     vibeos::trace!(Wake, u64::from(id.0), u64::from(cpu));
-    let _irq = crate::x86::InterruptGuard::enter();
+    let _irq = crate::arch::current::InterruptGuard::enter();
     let me = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
     let cpu = if cpu == me || per_cpu_init::is_online(cpu) {
         cpu
@@ -389,7 +388,7 @@ pub fn on_call_ipi() {
 
 pub fn on_halt_ipi() -> ! {
     crate::serial::raw::HALTING.store(true, Ordering::Release);
-    x86::halt();
+    crate::arch::current::halt();
 }
 
 /// Broadcast halt so others stop before we trash the log.
@@ -410,7 +409,7 @@ pub fn halt_others() {
 pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
     // IF=0 before `my_index`, so `me` stays this CPU's id (DESIGN §2.9
     // rule 5).
-    let _irq = x86::InterruptGuard::enter();
+    let _irq = crate::arch::current::InterruptGuard::enter();
     let me = my_index() as u32;
     let waiters = waiter_mask(mask & per_cpu_init::online_mask(), me);
     if waiters == 0 {
