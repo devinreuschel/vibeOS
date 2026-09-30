@@ -359,12 +359,23 @@ impl Vfs {
     }
 
     /// Drop the dentries naming inode `i` that nothing but their own
-    /// descendants holds, releasing their counts on it without a put.
+    /// descendants holds, releasing their counts on it without a put;
+    /// the held ones lose their names.
     pub(super) fn drop_dentries_of(&mut self, i: u16) {
+        self.drop_dentries_except(i, None);
+    }
+
+    /// [`Self::drop_dentries_of`], but for dentry `keep`.
+    pub(super) fn drop_dentries_except(&mut self, i: u16, keep: Option<u16>) {
         let mut d = 0usize;
         while d < self.dentries.len() {
             let e = self.dentries[d];
-            if e.used && !e.negative && e.islot == i && !e.is_root(d as u16) {
+            if e.used
+                && !e.negative
+                && e.islot == i
+                && !e.is_root(d as u16)
+                && keep != Some(d as u16)
+            {
                 if e.refs != 0 && e.refs == self.child_count(d as u16) {
                     self.dentry_prune(d as u16);
                 }
@@ -458,7 +469,7 @@ impl Vfs {
     }
 
     /// Whether dentry `slot` lies strictly below `top`.
-    fn below(&self, slot: u16, top: u16) -> bool {
+    pub(super) fn below(&self, slot: u16, top: u16) -> bool {
         let mut cur = slot;
         let mut n = 0usize;
         while n < self.dentries.len() {
@@ -599,6 +610,20 @@ impl Vfs {
         if self.dentries[ds as usize].used {
             self.dentries[ds as usize].dead = true;
         }
+    }
+
+    /// Forget `name` in `parent` when nothing but its descendants holds
+    /// it, as a namespace change does before its backend call: a held
+    /// dentry keeps its name until the change succeeds.
+    pub(super) fn dcache_evict_name(&mut self, sb: u8, parent: u16, name: &[u8]) {
+        let Some(ds) = self.dcache_peek(sb, parent, name) else {
+            return;
+        };
+        let d = &self.dentries[ds as usize];
+        if d.refs != 0 && d.refs == self.child_count(ds) {
+            self.dentry_prune(ds);
+        }
+        self.dentry_evict(ds);
     }
 
     pub(super) fn dcache_drop_neg_in_dir(&mut self, sb: u8, parent: u16) {

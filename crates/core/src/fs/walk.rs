@@ -160,13 +160,14 @@ impl Vfs {
     /// A create's call on directory `dir`, having dropped the negative
     /// dentries a new name makes stale.
     fn create_begin(&mut self, dir: PathRef, name: &[u8]) -> Result<Call, FsError> {
+        self.hashed_dir(dir)?;
         let di = self.d_islot(dir.dslot)?;
         if self.inodes[di as usize].kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
         let sb = self.sb_of(dir.mount);
         self.dcache_drop_neg_in_dir(sb, dir.dslot);
-        self.dcache_drop_name(sb, dir.dslot, name);
+        self.dcache_evict_name(sb, dir.dslot, name);
         self.call(di)
     }
 
@@ -236,7 +237,7 @@ impl Vfs {
         let di = self.d_islot(dir.dslot)?;
         self.ihold(vi)?;
         let sb = self.sb_of(dir.mount);
-        self.dcache_drop_name(sb, dir.dslot, name);
+        self.dcache_evict_name(sb, dir.dslot, name);
         match self.call(di) {
             Ok(c) => Ok((c, vi)),
             Err(e) => {
@@ -323,8 +324,7 @@ impl Vfs {
             return Err(e);
         }
         let sb = self.sb_of(od.mount);
-        self.dcache_drop_name(sb, od.dslot, oname);
-        self.dcache_drop_name(sb, nd.dslot, nname);
+        self.dcache_evict_name(sb, nd.dslot, nname);
         let calls = self.d_islot(od.dslot).and_then(|o| {
             let a = self.call(o)?;
             match self.d_islot(nd.dslot).and_then(|n| self.call(n)) {
@@ -362,6 +362,8 @@ impl Vfs {
         if self.sb_of(od.mount) != self.sb_of(nd.mount) {
             return Err(FsError::XDev);
         }
+        self.hashed_dir(od)?;
+        self.hashed_dir(nd)?;
         if self.is_mountpoint(od, oname)
             || self.is_mountpoint(nd, nname)
             || src.mount != od.mount
@@ -370,6 +372,13 @@ impl Vfs {
             return Err(FsError::Busy);
         }
         let si = self.d_islot(src.dslot)?;
+        // A directory never moves below itself: its dentry would become
+        // its own ancestor.
+        if self.inodes[si as usize].kind == InodeKind::Dir
+            && (nd.dslot == src.dslot || self.below(nd.dslot, src.dslot))
+        {
+            return Err(FsError::Inval);
+        }
         let ti = match tgt {
             Some(t) => Some(self.d_islot(t.dslot)?),
             None => None,
@@ -377,8 +386,12 @@ impl Vfs {
         Ok((si, ti))
     }
 
-    /// Commit a rename: a replaced inode loses its link, a moved inode
-    /// the backend re-keyed moves in the hash, and the stale names go.
+    /// Commit a rename: a replaced inode loses its link, and the moved
+    /// inode's dentry moves to its new parent and name, held or not, as
+    /// Linux's `d_move` does, so a reference to it follows the move. The
+    /// replaced name's dentry is unhashed when held and evicted otherwise.
+    /// A moved inode the backend re-keyed moves in the hash, keeping that
+    /// dentry.
     fn rename_commit(
         &mut self,
         (od, oname): (PathRef, &[u8]),
@@ -390,17 +403,30 @@ impl Vfs {
         self.finish(a, true);
         self.finish(b, true);
         let r = res.map(|moved| {
-            if let Some(t) = tgt
-                && t != src
-            {
+            let sb = self.sb_of(od.mount);
+            if tgt == Some(src) {
+                // Two names of one file: the rename changed nothing.
+                self.dcache_drop_name(sb, od.dslot, oname);
+                self.dcache_drop_name(sb, nd.dslot, nname);
+                return;
+            }
+            if let Some(t) = tgt {
                 self.unlink_inode(t);
             }
-            if let Some(to) = moved {
-                self.rekey_slot(src, to);
+            let sd = self
+                .dcache_peek(sb, od.dslot, oname)
+                .filter(|&d| self.d_islot(d) == Ok(src));
+            if self.dcache_peek(sb, nd.dslot, nname) != sd {
+                self.dcache_drop_name(sb, nd.dslot, nname);
             }
-            let sb = self.sb_of(od.mount);
-            self.dcache_drop_name(sb, od.dslot, oname);
-            self.dcache_drop_name(sb, nd.dslot, nname);
+            if let Some(to) = moved {
+                self.rekey_keep(src, to, sd);
+            }
+            if let Some(d) = sd
+                && self.d_move(d, nd.dslot, nname).is_err()
+            {
+                self.dcache_drop_name(sb, od.dslot, oname);
+            }
             self.dcache_drop_neg_in_dir(sb, nd.dslot);
         });
         self.iput(src);
@@ -413,6 +439,12 @@ impl Vfs {
     /// Move inode `i` to key `to`, and drop the dentries that name it. A
     /// cached inode already at `to` leaves the hash.
     pub(super) fn rekey_slot(&mut self, i: u16, to: Key) {
+        self.rekey_keep(i, to, None);
+    }
+
+    /// [`Self::rekey_slot`], keeping dentry `keep`, which a rename moves
+    /// to the inode's new name.
+    fn rekey_keep(&mut self, i: u16, to: Key, keep: Option<u16>) {
         let sb = self.inodes[i as usize].sb;
         if self.inodes[i as usize].key == to {
             return;
@@ -422,13 +454,38 @@ impl Vfs {
         {
             self.unhash(t);
         }
-        self.drop_dentries_of(i);
+        self.drop_dentries_except(i, keep);
         self.inodes[i as usize].key = to;
+    }
+
+    /// Move dentry `d` to parent `np` under `name`: the parent pin moves
+    /// with it, from its old parent to the new one.
+    fn d_move(&mut self, d: u16, np: u16, name: &[u8]) -> Result<(), FsError> {
+        let nm = Name::from_bytes(name)?;
+        self.dget(np)?;
+        let e = &mut self.dentries[d as usize];
+        let old = e.parent;
+        e.parent = np;
+        e.name = nm;
+        e.clock = true;
+        self.dput(old);
+        Ok(())
+    }
+
+    /// `NotFound` for a directory whose dentry lost its name (an rmdir,
+    /// or a rename over it, while it was held): nothing is made in it,
+    /// and nothing is found in it.
+    fn hashed_dir(&self, dir: PathRef) -> Result<(), FsError> {
+        match self.dentries.get(dir.dslot as usize) {
+            Some(d) if d.used && !d.dead => Ok(()),
+            _ => Err(FsError::NotFound),
+        }
     }
 
     /// A hard link's calls: on directory `nd` and on the regular file
     /// `src` names.
     fn link_begin(&mut self, src: PathRef, nd: PathRef) -> Result<(Call, Call), FsError> {
+        self.hashed_dir(nd)?;
         let si = self.d_islot(src.dslot)?;
         if self.inodes[si as usize].kind != InodeKind::Reg {
             return Err(FsError::Perm);
@@ -647,6 +704,7 @@ impl Walker {
                 mount: self.mount,
                 dslot: self.dslot,
             };
+            v.hashed_dir(dir)?;
             let sb = v.sb_of(dir.mount);
             let child = match v.dcache_find(sb, dir.dslot, &self.comp[..clen]) {
                 Some(ds) if v.dentries[ds as usize].negative => return Err(FsError::NotFound),

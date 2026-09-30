@@ -1474,3 +1474,6 @@ mod testfs;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod walk_tests;
