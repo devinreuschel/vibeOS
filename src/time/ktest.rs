@@ -783,8 +783,15 @@ fn if_off_measure() -> Result<([u64; 4], ClocksourceId), usize> {
     // IF is back on: the tick resumes. A clock that counted ticks lost the
     // window's here.
     let t0 = time_init::ticks();
-    while time_init::ticks() < t0.saturating_add(2) {
-        if since(end.2, read()?) > TICK_WAIT_NS {
+    loop {
+        // Time first, then the tick count: a tick that preempts this
+        // thread between the two shows in the count, so a stretch off the
+        // CPU cannot read as a missing tick.
+        let late = since(end.2, read()?) > TICK_WAIT_NS;
+        if time_init::ticks() >= t0.saturating_add(2) {
+            break;
+        }
+        if late {
             return Err(4);
         }
         core::hint::spin_loop();
