@@ -2,7 +2,7 @@
 
 Index: [DESIGN.md](DESIGN.md). This file holds DESIGN §8, and its headings keep DESIGN's numbers.
 
-Three tiers. Each catches a class of bug the others cannot, and each is progressively slower, so the
+Each tier below catches a class of bug the others cannot, and each is progressively slower, so the
 decision of where a test goes matters.
 
 | Tier | Runs | Speed | Catches |
@@ -10,10 +10,19 @@ decision of where a test goes matters.
 | Host unit | `make test-unit` (`vibeos-core`, any host triple) | milliseconds | Algorithms: allocators, parsers, state machines, encodings, arithmetic |
 | In-guest (ktest) | QEMU, kernel built with the `kernel_tests` feature | seconds | Anything needing real hardware state: page tables, MMIO, interrupts, threads, SMP |
 | End to end | QEMU boot of the normal ISO, serial captured | ~10 s | Boot regressions, marker ordering, panics, subsystem interaction |
+| Models and proofs | `make models` (loom models and Kani proofs) and `make miri` (host tests under Miri), outside every per-push tier | minutes | Orderings and interleavings a stress test only samples (loom); every input up to a stated bound (Kani); undefined behaviour in host tests (Miri) |
 
 The routing rule: if it can be a host test, it must be. Pushing logic into the library half of the
 crate so it becomes host-testable is the highest-leverage thing available, and the old tree's biggest
 weakness was that nearly everything lived behind `main.rs` and was therefore untestable.
+
+A protocol whose correctness depends on an interleaving (a publish and its read, a lock-free
+hand-off, a seqlock) gets a loom model beside its code, with a variant that weakens one ordering or
+moves one step and passes only when loom finds the failure. A stress test alone is not enough.
+
+**Kani and Miri.** A Kani harness lives in a `#[cfg(kani)] mod kani_proofs` of the module it
+proves, and its doc comment states its bound; `make models` runs every one (§8.5). A host test Miri
+cannot run carries `#[cfg_attr(miri, ignore = "<reason>")]` (§8.1).
 
 **Loom models.** ROADMAP §10.8's loom models run the kernel's own `vibeos-core` primitives under
 `--cfg loom`, where `vibeos::atomic` is loom's, and check every interleaving up to the bound each
