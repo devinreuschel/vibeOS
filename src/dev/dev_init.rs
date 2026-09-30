@@ -5,27 +5,47 @@
 //! drivers returned (DESIGN §12.1 rule 1). Nothing is allocated under
 //! [`REG`]: [`push`] builds its entry before it takes the lock, and every
 //! reference a lookup returns is a clone the caller drops unlocked.
+//!
+//! [`bind_all`] is the kernel's binder. It probes one device at a time
+//! under that device's sleeping lock ([`DEV_LOCKS`], DESIGN §12.1 rule 3),
+//! taken with no other lock held and never under [`REG`], which it drops
+//! across the driver's callback.
 
-use vibeos::dev::{BarClaim, ClaimError, DevRef, Device, Driver, Instance, MAX_DEVICES, Registry};
+use vibeos::dev::{
+    BarClaim, ClaimError, DevRef, DevState, Device, Driver, Instance, MAX_DEVICES, Registry,
+};
 use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
 use vibeos::pci::Bdf;
 
 use crate::boot;
+use crate::sync::blocking_init::BlockingMutex;
 use crate::sync_init::SpinMutex;
 
 /// The device registry. `dev::ktest` reads it for its hooks.
 pub(super) static REG: SpinMutex<Registry> = SpinMutex::with_rank(Registry::new(), RANK_DEVICE);
 
-/// Register `d` under a fresh id. `AllocError` when the heap or the table
-/// is full.
-pub fn push(d: Device) -> Result<DevRef, AllocError> {
+/// One sleeping lock per registry slot, by slot index: it serializes
+/// `probe` and `remove` on that device (DESIGN §12.1 rule 3). Taken with
+/// IF=1 and no spinlock held, before [`REG`], never under it.
+static DEV_LOCKS: [BlockingMutex<()>; MAX_DEVICES] =
+    [const { BlockingMutex::new(()) }; MAX_DEVICES];
+
+/// `dev`'s lock; `None` for a device not in the table.
+fn dev_lock(dev: &DevRef) -> Option<&'static BlockingMutex<()>> {
+    let i = REG.lock().index_of(dev)?;
+    DEV_LOCKS.get(i)
+}
+
+/// Register `d` under a fresh id, behind the device with id `parent` (its
+/// bridge or root port). `AllocError` when the heap or the table is full.
+pub fn push(d: Device, parent: Option<u64>) -> Result<DevRef, AllocError> {
     let id = REG.lock().take_id();
     let r = DevRef::try_new(id, d)?;
     // A clone goes in, so a refused insert drops only a count under the
     // lock, and `r`'s own count after it.
-    REG.lock().insert(r.clone())?;
+    REG.lock().insert(r.clone(), parent)?;
     Ok(r)
 }
 
@@ -33,44 +53,44 @@ pub fn register_driver(drv: &'static dyn Driver) -> bool {
     REG.lock().register(drv)
 }
 
+/// Probe each `Present` device a registered driver matches, in
+/// [`Driver::order`]. Each probe runs under the device's lock with [`REG`]
+/// dropped: the device is `Probing` meanwhile, then `Bound` to the driver
+/// and owning the instance it returned, or `Present` again on an error.
 pub fn bind_all() {
     let mut jobs: [Option<(u8, DevRef)>; MAX_DEVICES] = [const { None }; MAX_DEVICES];
     let n = REG.lock().collect_bind_jobs(&mut jobs);
     for (drv_i, dev) in jobs.iter().take(n).flatten() {
-        let drv = {
-            let g = REG.lock();
-            match g.driver_at(*drv_i as usize) {
-                Some(drv) if g.bound(dev).is_none() => Some(drv),
-                _ => None,
-            }
+        let Some(lock) = dev_lock(dev) else {
+            continue;
         };
-        let Some(drv) = drv else {
+        let _serial = lock.lock();
+        // A device bound since the jobs were collected is no longer
+        // `Present`, and is left alone.
+        let Some(drv) = REG.lock().begin_probe(dev, *drv_i) else {
             continue;
         };
         match drv.probe(dev) {
             Ok(inst) => {
-                let mut g = REG.lock();
-                if g.bound(dev).is_none() {
-                    // An unbound device and a registered driver: it binds.
-                    g.bind(dev, drv.name(), inst);
-                } else {
-                    // Binding is serial, so this does not happen; were the
-                    // device bound meanwhile, it keeps its driver, and
-                    // `inst` is dropped with the lock dropped.
-                    drop(g);
-                    drop(inst);
-                }
+                // `Probing` under this driver, which only this lock's
+                // holder moves on: it binds. Were it refused, the instance
+                // comes back and is dropped with the table unlocked.
+                let refused = REG.lock().bind(dev, drv.name(), inst);
+                drop(refused);
             }
-            // The device stays unbound, its slot untouched.
-            Err(e) => crate::klog!(
-                Level::Warn,
-                "vibeOS: dev: probe {} {} {:04x}:{:04x} failed: {}",
-                drv.name(),
-                dev.addr,
-                dev.vendor,
-                dev.device_id,
-                e.as_str()
-            ),
+            // The device is `Present` again, for a later driver.
+            Err(e) => {
+                REG.lock().abort_probe(dev);
+                crate::klog!(
+                    Level::Warn,
+                    "vibeOS: dev: probe {} {} {:04x}:{:04x} failed: {}",
+                    drv.name(),
+                    dev.addr,
+                    dev.vendor,
+                    dev.device_id,
+                    e.as_str()
+                )
+            }
         }
     }
 }
@@ -116,6 +136,30 @@ pub fn find_id(vendor: u16, device: u16) -> Option<DevRef> {
         i += 1;
     }
     None
+}
+
+/// `dev`'s state (DESIGN §12.1 rule 3).
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "only the in-guest tests read a device's state until ROADMAP §20.9's removal"
+    )
+)]
+pub fn state(dev: &DevRef) -> Option<DevState> {
+    REG.lock().state(dev)
+}
+
+/// `dev`'s parent bridge or root port.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "only the in-guest tests read a parent until DESIGN §12.2's parent-first order (ROADMAP §20.x)"
+    )
+)]
+pub fn parent(dev: &DevRef) -> Option<DevRef> {
+    REG.lock().parent(dev)
 }
 
 /// The name of the driver bound to `dev`.

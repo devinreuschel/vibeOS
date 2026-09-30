@@ -197,7 +197,7 @@ children, need no row.
 | log | `log/{mod,line,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs` | `log/{mod,log_init,panic,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
 | shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
-| dev | `dev/{mod,pci,dma,virtio,entropy}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
+| dev | `dev/{mod,pci,dma,virtio,entropy,tests}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/mod.rs`, `drivers/virtio_blk_init/{mod,vq,issue,irq}.rs` |
 | block | `block/{mod,part,cache,blockdev}.rs` | `block/{mod,block_init,blockdev_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |

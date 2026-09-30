@@ -1,7 +1,7 @@
 //! In-guest tests for dev (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use vibeos::dev::{ClaimError, DevRef, Driver, IdMatch, Instance, ProbeError};
+use vibeos::dev::{ClaimError, DevRef, DevState, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::O_RDWR;
 use vibeos::lock::RANK_DEVICE;
@@ -241,10 +241,18 @@ pub(crate) fn test_pci_bind_order() -> Outcome {
         return Outcome::Fail("no host");
     };
     match dev_init::bound(&d) {
-        Some("host-bridge") => Outcome::Ok,
-        Some(_) => Outcome::Fail("wrong driver"),
-        None => Outcome::Fail("unbound"),
+        Some("host-bridge") => {}
+        Some(_) => return Outcome::Fail("wrong driver"),
+        None => return Outcome::Fail("unbound"),
     }
+    if dev_init::state(&d) != Some(DevState::Bound) {
+        return Outcome::Fail("host bridge not Bound");
+    }
+    // The host bridge sits on the root bus: no parent.
+    if dev_init::parent(&d).is_some() {
+        return Outcome::Fail("host bridge has a parent");
+    }
+    Outcome::Ok
 }
 
 pub(crate) fn test_dma_alloc() -> Outcome {
@@ -415,6 +423,9 @@ pub(crate) fn test_virtio_bind() -> Outcome {
         Some("virtio-rng") => {}
         Some(_) => return Outcome::Fail("wrong driver"),
         None => return Outcome::Fail("id match"),
+    }
+    if dev_init::state(&d) != Some(DevState::Bound) {
+        return Outcome::Fail("rng not Bound");
     }
     if rng_features() & F_VERSION_1 == 0 {
         return Outcome::Fail("no VERSION_1");

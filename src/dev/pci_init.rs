@@ -8,7 +8,7 @@
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::dev::{DevRef, Device};
+use vibeos::dev::{self, DevRef, Device};
 use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
@@ -262,7 +262,7 @@ fn map_func_bars(info: &FuncInfo, dev: &mut Device) {
 /// Scan, map memory BARs, publish each device through `publish` (the
 /// device registry's `dev_init::push`, which `_start` passes), emit
 /// `pci: N devices`.
-pub fn init(publish: fn(Device) -> Result<DevRef, AllocError>) {
+pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
     if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
         with_ecam(|e| {
             e.base = m.ecam_base;
@@ -279,9 +279,17 @@ pub fn init(publish: fn(Device) -> Result<DevRef, AllocError>) {
 
     let mut found = [FuncInfo::empty(); MAX_SCAN];
     let n = pci::enumerate(&mut HwCfg, 0, &mut found);
+    let scanned = found.get(..n).unwrap_or(&[]);
+    // Each published function's entry id, by scan index; 0 for none. The
+    // scan is depth first, so a bridge is published before what is behind
+    // it.
+    let mut ids = [0u64; MAX_SCAN];
     let mut i = 0usize;
     while i < n {
         let info = found[i];
+        let parent = dev::parent_bridge(scanned, i)
+            .and_then(|p| ids.get(p).copied())
+            .filter(|&id| id != 0);
         let mut dev = Device::from_func(info);
         map_func_bars(&info, &mut dev);
         #[expect(
@@ -289,13 +297,18 @@ pub fn init(publish: fn(Device) -> Result<DevRef, AllocError>) {
             reason = "a write to Serial cannot fail (DESIGN §2.5)"
         )]
         let _ = scan_line(&info);
-        if publish(dev).is_err() {
-            crate::klog_ratelimited!(
+        match publish(dev, parent) {
+            Ok(r) => {
+                if let Some(id) = ids.get_mut(i) {
+                    *id = r.id();
+                }
+            }
+            Err(_) => crate::klog_ratelimited!(
                 1000,
                 vibeos::log::Level::Warn,
                 "vibeOS: pci: registry or heap full, {} not published",
                 info.bdf
-            );
+            ),
         }
         i += 1;
     }
