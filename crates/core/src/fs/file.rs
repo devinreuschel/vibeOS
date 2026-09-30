@@ -301,7 +301,7 @@ impl Vfs {
         let n = match pos {
             SeekFrom::Start(o) => o,
             SeekFrom::Current(d) => rel(f.offset, d)?,
-            SeekFrom::End(d) => rel(ino.size, d)?,
+            SeekFrom::End(d) => rel(ino.cur_size(), d)?,
         };
         if n > self.supers[ino.sb as usize].maxbytes {
             return Err(FsError::Inval);

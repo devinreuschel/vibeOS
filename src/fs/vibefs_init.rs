@@ -8,9 +8,8 @@
 //!
 //! [`VibeOps`] is the one way to a volume's files: `Vfs`'s File API calls
 //! it with the VFS lock dropped, so it waits for the busy flag. The size
-//! vibefs keeps is stored in the `Vfs` inode inside the busy section:
-//! the busy flag first, the VFS lock second, never the reverse
-//! (C-FILEAPI). The routing table (`route`) serves path syscalls until
+//! vibefs keeps is stored in the inode slot's words (`Inode::words`)
+//! inside the busy section, with no VFS lock. The routing table (`route`) serves path syscalls until
 //! ROADMAP §10.4 routes them through `Vfs`.
 
 use core::cell::UnsafeCell;
@@ -20,8 +19,8 @@ use vibeos::block::BlockError;
 use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fs::{
-    Dirent, FileSystem, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps,
-    InodeRef, Key, MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFMT,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, InodeRef, Key,
+    MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFMT,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -111,15 +110,12 @@ fn with_image<R>(img: &Image, f: impl FnOnce(&mut [u8; IMAGE_BYTES]) -> R) -> R 
     f(&mut g)
 }
 
-/// Take the memory image of the volume at `at` as a volume read does
-/// (the in-guest test `cross_cpu_cells_ranked`); `false` when `at` shows no
+/// Take the memory image of volume `i` as a volume read does (the
+/// in-guest test `cross_cpu_cells_ranked`); `false` when `i` is no
 /// memory volume.
 #[cfg(feature = "kernel_tests")]
-pub(super) fn probe_image_at(at: &[u8]) -> bool {
-    let Ok(i) = fs_init::volume_at(at) else {
-        return false;
-    };
-    match as_vibe(&i).map(|v| &v.media) {
+pub(super) fn probe_image_of(i: &Instance) -> bool {
+    match as_vibe(i).map(|v| &v.media) {
         Ok(Media::Mem(img)) => {
             with_image(img, |_| ());
             true
@@ -306,19 +302,18 @@ fn as_vibe(i: &Instance) -> Result<&VibeVolume, FsError> {
     i.downcast_ref::<VibeVolume>().ok_or(FsError::Io)
 }
 
-/// Store the size of the inode `h` names, which vibefs keeps too, in its
-/// `Vfs` inode, inside the busy section it was read in.
-fn store_size(h: InodeHandle, size: u64) -> Result<(), FsError> {
-    fs_init::with(|vfs| {
-        let w = vfs.inode_words(h)?;
-        vfs.set_inode_words(h, w.private, size)
-    })
+/// Store the size vibefs keeps for `ino` in its slot's words
+/// ([`Inode::words`]), inside the volume section it was read in; no VFS
+/// lock.
+fn store_size(ino: &Inode, size: u64) -> Result<(), FsError> {
+    ino.words()?.set_size(size);
+    Ok(())
 }
 
 /// vibefs's [`InodeOps`], behind a vibefs superblock's `ops` pointer. The
 /// superblock holds the volume instance ([`OpCx::vol`]). Every op runs with the VFS
-/// lock dropped; the size vibefs keeps is stored in the `Vfs` inode in the
-/// op's busy section.
+/// lock dropped; the size vibefs keeps is stored in the inode slot's
+/// words in the op's busy section.
 pub struct VibeOps;
 
 /// The volume the superblock of `cx` shows.
@@ -412,10 +407,10 @@ impl InodeOps for VibeOps {
     }
 
     fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
-        let (key, h) = (ino.key[0], ino.handle());
+        let (key, ino): (u32, &Inode) = (ino.key[0], ino);
         with_vol(vol_of(cx)?, |v, d| {
             v.truncate(d, key, size).map_err(Error::to_fs)?;
-            store_size(h, size)
+            store_size(ino, size)
         })
     }
 
@@ -476,14 +471,14 @@ fn write_at(
     off: Option<u64>,
     buf: &[u8],
 ) -> Result<(usize, u64), FsError> {
-    let (key, h) = (ino.key[0], ino.handle());
+    let key = ino.key[0];
     with_vol(vol, |v, d| {
         let pos = match off {
             Some(o) => o,
             None => v.file_size(key).map_err(Error::to_fs)?,
         };
         let n = v.write(d, key, pos, buf).map_err(Error::to_fs)?;
-        store_size(h, v.file_size(key).map_err(Error::to_fs)?)?;
+        store_size(ino, v.file_size(key).map_err(Error::to_fs)?)?;
         Ok((n, pos))
     })
 }
@@ -731,6 +726,10 @@ pub fn mount_mem(at: &str) -> Result<(), FsError> {
         vibefs::mkfs(io, b"vibe", v)?;
         vibefs::mount(io, v)
     })?;
+    #[cfg(feature = "kernel_tests")]
+    if at == "/vibe" {
+        *crate::fs::ktest::VIBE_MEM.lock() = Some(vol.clone());
+    }
     fs_init::api().mount_fs(None, at.as_bytes(), &VIBE_FS, None, false, Some(vol))?;
     LIVE.store(true, Ordering::Release);
     Ok(())

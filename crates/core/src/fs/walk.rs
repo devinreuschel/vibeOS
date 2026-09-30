@@ -134,11 +134,12 @@ impl Vfs {
     fn unlink_inode(&mut self, i: u16) {
         let now = self.now;
         let v = &mut self.inodes[i as usize];
-        v.nlink = if v.kind == InodeKind::Dir {
+        let n = if v.kind == InodeKind::Dir {
             0
         } else {
             v.nlink.saturating_sub(1)
         };
+        v.set_nlink(n);
         v.ctime = now;
     }
 

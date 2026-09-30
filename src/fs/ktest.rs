@@ -2,11 +2,13 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use vibeos::dev::Instance;
 use vibeos::fs::{
     FileId, FsError, InodeKind, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC,
     O_WRONLY, OpenFlags, SEEK_CUR, SEEK_END, SEEK_SET, Stat,
 };
 use vibeos::limits::MAX_OPEN_FILES;
+use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::wait_exited;
 
 mod hooks;
@@ -28,6 +30,7 @@ use crate::file_init;
 use crate::fs_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{Outcome, Test, fid, test};
+use crate::sync_init::SpinMutex;
 use crate::thread_init;
 use crate::time_init;
 use crate::vibefs_init;
@@ -1326,10 +1329,17 @@ pub(crate) fn probe_initrd() {
     super::fat_init::with_initrd(|_| ());
 }
 
+/// The `/vibe` memory volume, recorded at its mount for [`probe_image`],
+/// which runs with IRQs off and so cannot take the sleeping VFS lock.
+pub(crate) static VIBE_MEM: SpinMutex<Option<Instance>> = SpinMutex::with_rank(None, RANK_DEVICE);
+
 /// Take the `/vibe` memory volume's image lock as a volume read does
 /// (`cross_cpu_cells_ranked`).
 pub(crate) fn probe_image() {
-    let _ = super::vibefs_init::probe_image_at(b"/vibe");
+    let v = VIBE_MEM.lock().clone();
+    if let Some(i) = v {
+        let _ = super::vibefs_init::probe_image_of(&i);
+    }
 }
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`

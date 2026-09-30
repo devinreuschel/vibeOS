@@ -10,10 +10,9 @@
 //! [`FatOps`] is the one way to a volume's files: `Vfs`'s File API calls
 //! it with the VFS lock dropped, so it waits for the busy flag. A FAT
 //! inode is the `Vfs` inode keyed by its dirent location; its first
-//! cluster and size are `Vfs` inode words that only FAT reads and writes,
-//! inside the busy section, through short VFS-lock sections
-//! (`Vfs::inode_words`, `Vfs::set_inode_words`): the busy flag first, the
-//! VFS lock second, never the reverse (C-FILEAPI). The routing table
+//! cluster and size are its slot's words (`Inode::words`), which only FAT
+//! reads and writes, inside the busy section and with no VFS lock: FAT
+//! never takes the VFS lock under a volume. The routing table
 //! (`route`) serves path syscalls until ROADMAP §10.4 routes them
 //! through `Vfs`.
 
@@ -25,8 +24,8 @@ use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, Node, SEC};
 use vibeos::fs::{
-    Dirent, FileSystem, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps,
-    InodeRef, Key, MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, InodeRef, Key,
+    MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -330,8 +329,8 @@ pub fn inode_info(
 /// FAT's [`InodeOps`], behind a FAT superblock's `ops` pointer. The
 /// superblock's private words are `[vol, 0]`; an inode's are
 /// `[first_clu, (dir_clu << 32) | dir_off]`. Every op runs with the VFS
-/// lock dropped and reads the inode's words from `Vfs` inside the busy
-/// section, never from the copy it is handed.
+/// lock dropped and reads the inode's size and words from its slot's
+/// words inside the busy section, never from the copy it is handed.
 pub struct FatOps;
 
 /// The volume the superblock of `cx` shows.
@@ -342,7 +341,7 @@ fn vol_of<'a>(cx: &OpCx<'a>) -> Result<&'a FatVolume, FsError> {
 impl InodeOps for FatOps {
     fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let (w, _) = words(dir.handle())?;
+            let (w, _) = words(dir)?;
             Ok(node_info(&v.lookup(d, w.first_clu, name)?))
         })
     }
@@ -362,7 +361,7 @@ impl InodeOps for FatOps {
             InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
         };
         with_vol(vol_of(cx)?, |v, d| {
-            let (w, _) = words(dir.handle())?;
+            let (w, _) = words(dir)?;
             Ok(node_info(&v.create(d, w.first_clu, name, is_dir)?))
         })
     }
@@ -391,8 +390,8 @@ impl InodeOps for FatOps {
         nname: &[u8],
     ) -> Result<Option<Key>, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let (o, _) = words(odir.handle())?;
-            let (n, _) = words(ndir.handle())?;
+            let (o, _) = words(odir)?;
+            let (n, _) = words(ndir)?;
             let m = v.rename(d, o.first_clu, oname, n.first_clu, nname)?;
             Ok((m.from != m.to).then_some([m.to.0, m.to.1, 0]))
         })
@@ -406,7 +405,7 @@ impl InodeOps for FatOps {
         buf: &mut [u8],
     ) -> Result<usize, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let (w, _) = words(ino.handle())?;
+            let (w, _) = words(ino)?;
             Ok(v.read_ino(d, &w, off, buf)?)
         })
     }
@@ -418,7 +417,7 @@ impl InodeOps for FatOps {
         off: u64,
         buf: &[u8],
     ) -> Result<usize, FsError> {
-        write_at(vol_of(cx)?, ino.handle(), off, false, buf).map(|(n, _)| n)
+        write_at(vol_of(cx)?, ino, off, false, buf).map(|(n, _)| n)
     }
 
     /// The size `O_APPEND` writes at is read in the write's busy section.
@@ -428,15 +427,15 @@ impl InodeOps for FatOps {
         ino: &mut Inode,
         buf: &[u8],
     ) -> Result<(usize, u64), FsError> {
-        write_at(vol_of(cx)?, ino.handle(), 0, true, buf)
+        write_at(vol_of(cx)?, ino, 0, true, buf)
     }
 
     fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
-        let h = ino.handle();
+        let ino: &Inode = ino;
         with_vol(vol_of(cx)?, |v, d| {
-            let (mut w, linked) = words(h)?;
+            let (mut w, linked) = words(ino)?;
             let r = v.truncate_ino(d, &mut w, linked, size);
-            store(h, &w)?;
+            store(ino, &w)?;
             Ok(r?)
         })
     }
@@ -450,7 +449,7 @@ impl InodeOps for FatOps {
         out: &mut Dirent,
     ) -> Result<Option<u64>, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let (w, _) = words(dir.handle())?;
+            let (w, _) = words(dir)?;
             let mut c = cookie;
             let mut n = Node::EMPTY;
             loop {
@@ -475,7 +474,7 @@ impl InodeOps for FatOps {
 
     fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
         with_vol(vol_of(cx)?, |v, d| {
-            let (w, linked) = words(ino.handle())?;
+            let (w, linked) = words(ino)?;
             if linked {
                 return Ok(());
             }
@@ -487,7 +486,7 @@ impl InodeOps for FatOps {
 /// Remove `name` from `dir`, a directory when `rmdir`.
 fn remove(vol: &FatVolume, dir: &Inode, name: &[u8], rmdir: bool) -> Result<(), FsError> {
     with_vol(vol, |v, d| {
-        let (w, _) = words(dir.handle())?;
+        let (w, _) = words(dir)?;
         v.unlink(d, w.first_clu, name, rmdir)?;
         Ok(())
     })
@@ -498,15 +497,15 @@ fn remove(vol: &FatVolume, dir: &Inode, name: &[u8], rmdir: bool) -> Result<(), 
 /// back even when the write fails: the chain may have grown.
 fn write_at(
     vol: &FatVolume,
-    h: InodeHandle,
+    ino: &Inode,
     off: u64,
     append: bool,
     buf: &[u8],
 ) -> Result<(usize, u64), FsError> {
     with_vol(vol, |v, d| {
-        let (mut w, linked) = words(h)?;
+        let (mut w, linked) = words(ino)?;
         let r = v.write_ino(d, &mut w, linked, off, append, buf);
-        store(h, &w)?;
+        store(ino, &w)?;
         Ok(r?)
     })
 }
@@ -526,27 +525,31 @@ fn dirent_word(dir_clu: u32, dir_off: u32) -> u64 {
     (u64::from(dir_clu) << 32) | u64::from(dir_off)
 }
 
-/// The words of the inode `h` names as `Vfs` holds them now, and whether
-/// it still has its dirent. Called inside the busy section.
-fn words(h: InodeHandle) -> Result<(FatInode, bool), FsError> {
-    let w = fs_init::with(|vfs| vfs.inode_words(h))?;
+/// The words of inode `ino` as its slot holds them now
+/// ([`Inode::words`]), and whether it still has its dirent: its key and
+/// kind from the op's copy, its first cluster, size and link count from
+/// the slot's words. Called inside the volume section; no VFS lock.
+fn words(ino: &Inode) -> Result<(FatInode, bool), FsError> {
+    let w = ino.words()?;
     Ok((
         FatInode {
-            dir_clu: w.key[0],
-            dir_off: w.key[1],
-            first_clu: w.private[0] as u32,
-            size: w.size,
-            kind: w.kind,
+            dir_clu: ino.key[0],
+            dir_off: ino.key[1],
+            first_clu: w.private()[0] as u32,
+            size: w.size(),
+            kind: ino.kind,
         },
-        w.nlink != 0,
+        w.nlink() != 0,
     ))
 }
 
-/// Store a FAT inode's words back into its `Vfs` inode, inside the busy
-/// section they were read in.
-fn store(h: InodeHandle, w: &FatInode) -> Result<(), FsError> {
-    let private = [u64::from(w.first_clu), dirent_word(w.dir_clu, w.dir_off)];
-    fs_init::with(|vfs| vfs.set_inode_words(h, private, w.size))
+/// Store a FAT inode's first cluster, dirent and size into its slot's
+/// words, inside the volume section they were read in.
+fn store(ino: &Inode, w: &FatInode) -> Result<(), FsError> {
+    let words = ino.words()?;
+    words.set_private([u64::from(w.first_clu), dirent_word(w.dir_clu, w.dir_off)]);
+    words.set_size(w.size);
+    Ok(())
 }
 
 /// FAT32's registration. A superblock holds its volume instance; its

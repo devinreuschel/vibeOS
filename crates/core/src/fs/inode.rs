@@ -31,33 +31,6 @@ impl Vfs {
         Ok(&self.inodes[i])
     }
 
-    /// The words of the inode `h` names, for a backend that keeps its
-    /// inode state in `Vfs` to read inside its own volume lock.
-    pub fn inode_words(&self, h: InodeHandle) -> Result<Words, FsError> {
-        let n = &self.inodes[self.slot_of(h)?];
-        Ok(Words {
-            key: n.key,
-            kind: n.kind,
-            nlink: n.nlink,
-            size: n.size,
-            private: n.private,
-        })
-    }
-
-    /// Store the private words and size of the inode `h` names, inside
-    /// the volume lock [`Self::inode_words`] was read under.
-    pub fn set_inode_words(
-        &mut self,
-        h: InodeHandle,
-        private: [u64; 2],
-        size: u64,
-    ) -> Result<(), FsError> {
-        let i = self.slot_of(h)?;
-        self.inodes[i].private = private;
-        self.inodes[i].size = size;
-        Ok(())
-    }
-
     /// Hashed inode slots of `sb` keyed `key`: one per file.
     pub fn inodes_with_key(&self, sb: u8, key: Key) -> usize {
         self.inodes
@@ -132,7 +105,7 @@ impl Vfs {
     /// A call on inode `islot` that takes no count: a release, whose slot
     /// its release state keeps.
     pub(super) fn raw_call(&self, islot: u16, ops: &'static dyn InodeOps) -> Call {
-        let n = self.inodes[islot as usize];
+        let n = self.inodes[islot as usize].fresh();
         let sb = n.sb;
         Call {
             ops,
@@ -251,7 +224,12 @@ impl Vfs {
             mtime: info.mtime,
             ctime: info.ctime,
             private: info.private,
+            words: Some(&self.words[slot as usize]),
         };
+        let w = &self.words[slot as usize];
+        w.set_size(info.size);
+        w.set_nlink(info.nlink);
+        w.set_private(info.private);
         Ok(slot)
     }
 
@@ -285,7 +263,7 @@ impl Vfs {
     pub(super) fn unhash(&mut self, i: u16) -> bool {
         self.drop_dentries_of(i);
         let n = &mut self.inodes[i as usize];
-        n.nlink = 0;
+        n.set_nlink(0);
         if n.refs == 0 && n.rel == Rel::No {
             self.inode_clear(i as usize);
             false

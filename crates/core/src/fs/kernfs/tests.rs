@@ -40,7 +40,7 @@ fn pseudo(v: &mut Vfs, k: &Kfs) {
 }
 
 fn boot() -> (Vfs, Kfs) {
-    let mut v = Vfs::new();
+    let mut v = Vfs::new(crate::fs::host_words());
     v.mount_root_fs(crate::fs::testfs::ramfs()).unwrap();
     let k = kernfs();
     pseudo(&mut v, &k);
@@ -49,7 +49,7 @@ fn boot() -> (Vfs, Kfs) {
 
 #[test]
 fn mount_pseudo_on_keyed_root() {
-    let mut v = Vfs::new();
+    let mut v = Vfs::new(crate::fs::host_words());
     v.mount_root_fs(crate::fs::testfs::keyfs_new()).unwrap();
     pseudo(&mut v, &kernfs());
     assert_eq!(v.stat(None, "/dev").unwrap().kind, InodeKind::Dir);
