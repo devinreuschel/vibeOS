@@ -706,6 +706,9 @@ mod tests {
         flushes: Mutex<u64>,
         writes_at: Mutex<std::collections::HashMap<u64, u64>>,
         fail_writes: Mutex<u32>,
+        /// Fail the next write at this offset, once.
+        fail_at: Mutex<Option<u64>>,
+        failed_at: Mutex<u64>,
     }
 
     impl Mem {
@@ -717,6 +720,8 @@ mod tests {
                 flushes: Mutex::new(0),
                 writes_at: Mutex::new(std::collections::HashMap::new()),
                 fail_writes: Mutex::new(0),
+                fail_at: Mutex::new(None),
+                failed_at: Mutex::new(0),
             }
         }
         fn writes_at(&self, off: u64) -> u64 {
@@ -743,6 +748,12 @@ mod tests {
                 let mut f = self.fail_writes.lock().unwrap();
                 if *f > 0 {
                     *f -= 1;
+                    return Err(BlockError::Io);
+                }
+                let mut at = self.fail_at.lock().unwrap();
+                if *at == Some(offset) {
+                    *at = None;
+                    *self.failed_at.lock().unwrap() += 1;
                     return Err(BlockError::Io);
                 }
             }
@@ -947,6 +958,40 @@ mod tests {
         assert_eq!(c.dirty_count(), 0);
         assert_eq!(*mem.flushes.lock().unwrap(), 1);
         assert_eq!(mem.get(0, 512), vec![7u8; 512]);
+    }
+
+    #[test]
+    fn readahead_evict_write_fail_keeps_dirty() {
+        let mem = Mem::new(PAGE * 16);
+        let mut c = Cache::<3>::new();
+        let p = PAGE as u64;
+        // Pages 0, 5, and 6 fill the cache dirty, so the readahead's only
+        // victims are dirty and the clock picks page 0's slot.
+        cached_write(&mut c, &mem, 0, 0, &[0x11u8; PAGE]).unwrap();
+        cached_write(&mut c, &mem, 0, 5 * p, &[0x55u8; PAGE]).unwrap();
+        cached_write(&mut c, &mem, 0, 6 * p, &[0x66u8; PAGE]).unwrap();
+        *mem.fail_at.lock().unwrap() = Some(0);
+        let mut out = [0u8; 512];
+        cached_read(&mut c, &mem, 0, 5 * p, &mut out).unwrap();
+        assert_eq!(*mem.failed_at.lock().unwrap(), 0);
+        // The page 6 read is sequential: its readahead of page 7 evicts
+        // page 0, whose write fails.
+        cached_read(&mut c, &mem, 0, 6 * p, &mut out).unwrap();
+        assert_eq!(*mem.failed_at.lock().unwrap(), 1);
+        assert_eq!(*mem.reads.lock().unwrap(), 0);
+        assert!(c.find(CacheKey::page(0, 7 * p)).is_none());
+        // Page 0 is still cached, unchanged, and dirty.
+        let mut page = [0u8; PAGE];
+        cached_read(&mut c, &mem, 0, 0, &mut page).unwrap();
+        assert_eq!(page, [0x11u8; PAGE]);
+        assert_eq!(*mem.reads.lock().unwrap(), 0);
+        assert_eq!(c.dirty_count(), 3);
+        let s0 = c.find(CacheKey::page(0, 0)).unwrap();
+        assert!(!c.in_writeback(s0));
+        cached_flush(&mut c, &mem, None).unwrap();
+        assert_eq!(c.dirty_count(), 0);
+        assert_eq!(mem.writes_at(0), 1);
+        assert_eq!(mem.get(0, PAGE), vec![0x11u8; PAGE]);
     }
 
     #[test]
