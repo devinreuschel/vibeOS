@@ -6,12 +6,13 @@
 //! [`REG`]: [`push`] builds its entry before it takes the lock, and every
 //! reference a lookup returns is a clone the caller drops unlocked.
 
-use vibeos::dev::{ClaimError, DevRef, Device, Driver, Instance, MAX_DEVICES, Registry};
+use vibeos::dev::{BarClaim, ClaimError, DevRef, Device, Driver, Instance, MAX_DEVICES, Registry};
 use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
 use vibeos::pci::Bdf;
 
+use crate::boot;
 use crate::sync_init::SpinMutex;
 
 /// The device registry. `dev::ktest` reads it for its hooks.
@@ -127,9 +128,22 @@ pub fn instance(dev: &DevRef) -> Option<Instance> {
     REG.lock().instance(dev)
 }
 
-/// Claim BAR `bar` of `dev`.
-pub fn claim(dev: &DevRef, bar: u8) -> Result<(), ClaimError> {
-    REG.lock().claim(dev, bar)
+/// Claim BAR `bar` of `dev`, checked against every other claim and the
+/// boot memory map's RAM-typed ranges with [`REG`] held (DESIGN §12.3
+/// rule 8).
+pub fn claim(dev: &DevRef, bar: u8) -> Result<BarClaim, ClaimError> {
+    REG.lock().claim(dev, bar, boot::info().ram_ranges())
+}
+
+/// Give `claim` to its device's entry, mapped at `va`; the claim comes
+/// back when the entry already holds that BAR.
+pub fn hold(claim: BarClaim, va: Option<u64>) -> Result<(), BarClaim> {
+    REG.lock().hold(claim, va)
+}
+
+/// End `claim`, after any mapping made through it is gone.
+pub fn release(claim: BarClaim) {
+    REG.lock().release(claim)
 }
 
 /// Whether BAR `bar` of `dev` is claimed.

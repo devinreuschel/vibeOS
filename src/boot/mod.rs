@@ -5,7 +5,10 @@
 
 use core::ops::Range;
 
-use limine::memmap::{Entry, MEMMAP_USABLE};
+use limine::memmap::{
+    Entry, MEMMAP_ACPI_NVS, MEMMAP_ACPI_RECLAIMABLE, MEMMAP_BOOTLOADER_RECLAIMABLE,
+    MEMMAP_EXECUTABLE_AND_MODULES, MEMMAP_USABLE,
+};
 use limine::request::{
     ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, FramebufferResponse,
     HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
@@ -120,6 +123,27 @@ impl BootInfo {
             .iter()
             .filter(|e| e.type_ == MEMMAP_USABLE)
             .map(|e| e.base..e.base + e.length)
+    }
+
+    /// The RAM-typed memmap ranges, physical: usable, bootloader
+    /// reclaimable, executable and modules, ACPI reclaimable and ACPI NVS.
+    /// No device range may overlap one (DESIGN §12.3 rule 8), so
+    /// `dev::Registry::claim` and `pci_init::map_mmio` check against them.
+    /// Ends saturate: the map is firmware input (AGENTS.md rule 4).
+    pub fn ram_ranges(&self) -> impl Iterator<Item = Range<u64>> {
+        self.memmap
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.type_,
+                    MEMMAP_USABLE
+                        | MEMMAP_BOOTLOADER_RECLAIMABLE
+                        | MEMMAP_EXECUTABLE_AND_MODULES
+                        | MEMMAP_ACPI_RECLAIMABLE
+                        | MEMMAP_ACPI_NVS
+                )
+            })
+            .map(|e| e.base..e.base.saturating_add(e.length))
     }
 
     /// Every framebuffer Limine mapped through the HHDM, in response order.

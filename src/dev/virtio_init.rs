@@ -544,9 +544,15 @@ fn claim_bars(dev: &DevRef, caps: &ModernCaps) -> Result<(), ProbeError> {
             continue;
         }
         match dev_init::claim(dev, c.bar) {
-            Ok(()) | Err(ClaimError::Already) => {}
+            Ok(claim) => {
+                if let Err(claim) = dev_init::hold(claim, None) {
+                    dev_init::release(claim);
+                    return Err(ProbeError::Busy);
+                }
+            }
+            Err(ClaimError::Already) => {}
             Err(ClaimError::Overlap) => return Err(ProbeError::Busy),
-            Err(ClaimError::Empty | ClaimError::BadIndex) => {
+            Err(ClaimError::Empty | ClaimError::BadIndex | ClaimError::Ram | ClaimError::Full) => {
                 return Err(ProbeError::NoResource);
             }
         }

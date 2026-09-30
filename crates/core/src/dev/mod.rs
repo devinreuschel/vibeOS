@@ -15,7 +15,6 @@ pub mod virtio;
 
 use core::any::Any;
 use core::fmt;
-use core::iter::once;
 use core::ops::{Deref, Range};
 
 use crate::kalloc::{AllocError, TryArc};
@@ -184,6 +183,10 @@ pub enum ClaimError {
     Already,
     Overlap,
     BadIndex,
+    /// A memory BAR overlaps a RAM-typed range of the boot memory map.
+    Ram,
+    /// The claims table is full.
+    Full,
 }
 
 impl ClaimError {
@@ -193,6 +196,8 @@ impl ClaimError {
             ClaimError::Already => "already claimed",
             ClaimError::Overlap => "overlap",
             ClaimError::BadIndex => "bad index",
+            ClaimError::Ram => "ram",
+            ClaimError::Full => "table full",
         }
     }
 }
@@ -425,17 +430,84 @@ impl fmt::Debug for DevRef {
     }
 }
 
+/// A claim on one BAR of one device, which [`Registry::claim`] grants and
+/// only [`Registry::release`] ends (DESIGN §12.3 rule 8). Not `Copy` or
+/// `Clone` (AGENTS.md rule 6), with no public constructor, so a mapping
+/// made through it names a range the claims table holds. Dropping one
+/// without `release` keeps its range reserved, which fails safe.
+///
+/// ```compile_fail
+/// fn gone(c: vibeos::dev::BarClaim) -> u64 {
+///     let moved = c;
+///     drop(moved);
+///     c.phys() // `c` was moved
+/// }
+/// ```
+#[must_use]
+#[derive(Debug, PartialEq, Eq)]
+pub struct BarClaim {
+    dev: u64,
+    bar: u8,
+    mem: bool,
+    addr: u64,
+    size: u64,
+    prefetchable: bool,
+}
+
+impl BarClaim {
+    /// The id of the claiming device's entry ([`DevRef::id`]).
+    pub fn dev(&self) -> u64 {
+        self.dev
+    }
+
+    pub fn bar(&self) -> u8 {
+        self.bar
+    }
+
+    /// The BAR's bus address.
+    pub fn phys(&self) -> u64 {
+        self.addr
+    }
+
+    pub fn len(&self) -> u64 {
+        self.size
+    }
+
+    /// Never true: [`Registry::claim`] refuses an empty BAR.
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    pub fn is_mem(&self) -> bool {
+        self.mem
+    }
+
+    pub fn prefetchable(&self) -> bool {
+        self.prefetchable
+    }
+}
+
+/// A row of the claims table: which device's BAR holds which range.
 #[derive(Clone, Copy)]
 struct Claim {
+    dev: u64,
+    bar: u8,
     mem: bool,
     addr: u64,
     size: u64,
 }
 
+/// A claim the device's entry holds, with the VA its driver mapped it at.
+struct HeldBar {
+    claim: BarClaim,
+    va: Option<u64>,
+}
+
 /// A registry slot: the entry, and what changes about it after `push`.
 struct Slot {
     dev: DevRef,
-    claimed: [bool; MAX_BARS],
+    /// Each BAR's claim, once its driver holds it.
+    bars: [Option<HeldBar>; MAX_BARS],
     /// The bound driver's slot in `drivers`; set only while unbound. An
     /// index, not the name, keeps the table under 4 KiB.
     bound: Option<u8>,
@@ -452,8 +524,8 @@ pub struct Registry {
     next_id: u64,
     drivers: [Option<&'static dyn Driver>; MAX_DRIVERS],
     n_drv: usize,
+    /// Every live claim; a released row is reused.
     claims: [Option<Claim>; MAX_CLAIMS],
-    n_claim: usize,
 }
 
 impl Registry {
@@ -465,7 +537,6 @@ impl Registry {
             drivers: [None; MAX_DRIVERS],
             n_drv: 0,
             claims: [None; MAX_CLAIMS],
-            n_claim: 0,
         }
     }
 
@@ -496,7 +567,7 @@ impl Registry {
         let slot = self.slots.get_mut(self.n_dev).ok_or(AllocError)?;
         *slot = Some(Slot {
             dev,
-            claimed: [false; MAX_BARS],
+            bars: [const { None }; MAX_BARS],
             bound: None,
             inst: None,
         });
@@ -576,11 +647,12 @@ impl Registry {
         self.slot_of(dev).and_then(|s| s.inst.clone())
     }
 
-    /// Whether BAR `bar` of `dev` is claimed.
+    /// Whether the claims table holds BAR `bar` of `dev`.
     pub fn is_claimed(&self, dev: &DevRef, bar: u8) -> bool {
-        self.slot_of(dev)
-            .and_then(|s| s.claimed.get(bar as usize).copied())
-            .unwrap_or(false)
+        self.claims
+            .iter()
+            .flatten()
+            .any(|c| c.dev == dev.id() && c.bar == bar)
     }
 
     pub fn register(&mut self, drv: &'static dyn Driver) -> bool {
@@ -601,49 +673,111 @@ impl Registry {
         true
     }
 
-    /// Claim BAR `bar` of `dev` for its driver.
-    pub fn claim(&mut self, dev: &DevRef, bar: u8) -> Result<(), ClaimError> {
-        if bar as usize >= MAX_BARS {
-            return Err(ClaimError::BadIndex);
-        }
+    /// Claim BAR `bar` of `dev` for its driver. Refused, in this order:
+    /// `BadIndex` (no such BAR or entry), `Empty`, `Already` (the table
+    /// holds this BAR), `Ram` (a memory BAR over any of `ram`, the boot
+    /// memory map's RAM-typed ranges), `Overlap` (a claim of the same
+    /// kind), `Full`. The kernel calls it with its table locked, so the
+    /// check and the record are one step (DESIGN §12.3 rule 8).
+    pub fn claim(
+        &mut self,
+        dev: &DevRef,
+        bar: u8,
+        ram: impl IntoIterator<Item = Range<u64>>,
+    ) -> Result<BarClaim, ClaimError> {
         let Some(s) = self.slot_of(dev) else {
             return Err(ClaimError::BadIndex);
         };
-        let res = s.dev.resources[bar as usize];
+        let Some(&res) = s.dev.resources.get(bar as usize) else {
+            return Err(ClaimError::BadIndex);
+        };
         if res.is_empty() {
             return Err(ClaimError::Empty);
         }
-        if s.claimed[bar as usize] {
+        let id = dev.id();
+        if self.is_claimed(dev, bar) {
             return Err(ClaimError::Already);
         }
         let mem = matches!(res.kind, ResourceKind::Memory);
-        let mut i = 0usize;
-        while i < self.n_claim {
-            if let Some(c) = self.claims[i]
-                && c.mem == mem
-                && overlaps_any(
-                    res.addr,
-                    res.size,
-                    once(c.addr..c.addr.saturating_add(c.size)),
-                )
-            {
-                return Err(ClaimError::Overlap);
-            }
-            i += 1;
+        if mem && overlaps_any(res.addr, res.size, ram) {
+            return Err(ClaimError::Ram);
         }
-        if self.n_claim >= MAX_CLAIMS {
+        let taken = self
+            .claims
+            .iter()
+            .flatten()
+            .filter(|c| c.mem == mem)
+            .map(|c| c.addr..c.addr.saturating_add(c.size));
+        if overlaps_any(res.addr, res.size, taken) {
             return Err(ClaimError::Overlap);
         }
-        self.claims[self.n_claim] = Some(Claim {
+        let row = self
+            .claims
+            .iter_mut()
+            .find(|c| c.is_none())
+            .ok_or(ClaimError::Full)?;
+        *row = Some(Claim {
+            dev: id,
+            bar,
             mem,
             addr: res.addr,
             size: res.size,
         });
-        self.n_claim += 1;
-        if let Some(s) = self.slot_of_mut(dev) {
-            s.claimed[bar as usize] = true;
+        Ok(BarClaim {
+            dev: id,
+            bar,
+            mem,
+            addr: res.addr,
+            size: res.size,
+            prefetchable: res.prefetchable,
+        })
+    }
+
+    /// End `claim`: its row is free for the next claim.
+    pub fn release(&mut self, claim: BarClaim) {
+        for row in self.claims.iter_mut() {
+            if row.is_some_and(|c| c.dev == claim.dev && c.bar == claim.bar) {
+                *row = None;
+            }
         }
+    }
+
+    /// Give `claim` to its device's entry, mapped at `va`. Refused, with
+    /// the claim handed back, when the entry is gone or already holds that
+    /// BAR.
+    pub fn hold(&mut self, claim: BarClaim, va: Option<u64>) -> Result<(), BarClaim> {
+        let id = claim.dev;
+        let Some(held) = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|s| s.dev.id() == id)
+            .and_then(|s| s.bars.get_mut(claim.bar as usize))
+        else {
+            return Err(claim);
+        };
+        if held.is_some() {
+            return Err(claim);
+        }
+        *held = Some(HeldBar { claim, va });
         Ok(())
+    }
+
+    /// The VA BAR `bar` of `dev` is mapped at, while its entry holds it.
+    pub fn bar_va(&self, dev: &DevRef, bar: u8) -> Option<u64> {
+        self.slot_of(dev)
+            .and_then(|s| s.bars.get(bar as usize))
+            .and_then(Option::as_ref)
+            .and_then(|h| h.va)
+    }
+
+    /// Take BAR `bar`'s claim and VA back from `dev`'s entry, to unmap and
+    /// then [`release`](Self::release) it.
+    pub fn take_bar(&mut self, dev: &DevRef, bar: u8) -> Option<(BarClaim, Option<u64>)> {
+        self.slot_of_mut(dev)
+            .and_then(|s| s.bars.get_mut(bar as usize))
+            .and_then(Option::take)
+            .map(|h| (h.claim, h.va))
     }
 
     pub fn driver_at(&self, i: usize) -> Option<&'static dyn Driver> {
@@ -751,7 +885,8 @@ impl Registry {
     pub fn write_tree(&self, f: &mut impl fmt::Write) -> fmt::Result {
         for s in self.slots.iter().flatten() {
             let bound = s.bound.and_then(|i| self.driver_name(i));
-            s.dev.write_tree(bound, &s.claimed, f)?;
+            let claimed = core::array::from_fn(|b| s.bars.get(b).is_some_and(Option::is_some));
+            s.dev.write_tree(bound, &claimed, f)?;
         }
         Ok(())
     }
@@ -866,28 +1001,183 @@ mod tests {
         assert!(!cls.matches(0x1234, 0x1111, 0x02, 0x00));
     }
 
+    /// No RAM: the claims that test overlap and slots, not RAM.
+    const NO_RAM: [Range<u64>; 0] = [];
+
     #[test]
     fn claim_rejects_second_and_overlap() {
         let mut r = Registry::new();
         let d0 = r.push(nic()).unwrap();
         let d1 = r.push(vga()).unwrap();
-        r.claim(&d0, 0).unwrap();
-        assert_eq!(r.claim(&d0, 0), Err(ClaimError::Already));
-        assert_eq!(r.claim(&d0, 9), Err(ClaimError::BadIndex));
+        let c0 = r.claim(&d0, 0, NO_RAM).unwrap();
+        assert_eq!(
+            (c0.dev(), c0.bar(), c0.phys(), c0.len()),
+            (d0.id(), 0, 0xFEB8_0000, 0x20000)
+        );
+        assert!(c0.is_mem() && !c0.prefetchable() && !c0.is_empty());
+        assert_eq!(r.claim(&d0, 0, NO_RAM), Err(ClaimError::Already));
+        assert_eq!(r.claim(&d0, 9, NO_RAM), Err(ClaimError::BadIndex));
+        assert_eq!(r.claim(&d0, 2, NO_RAM), Err(ClaimError::Empty));
         // Same range from a cloned resource on another slot: overlap.
         let mut clone = nic();
         clone.addr = Bdf::new(0, 4, 0);
         let d2 = r.push(clone).unwrap();
-        assert_eq!(r.claim(&d2, 0), Err(ClaimError::Overlap));
-        r.claim(&d0, 1).unwrap();
-        r.claim(&d1, 0).unwrap();
+        assert_eq!(r.claim(&d2, 0, NO_RAM), Err(ClaimError::Overlap));
+        // An I/O range never collides with a memory one.
+        let c1 = r.claim(&d0, 1, NO_RAM).unwrap();
+        assert!(!c1.is_mem());
+        assert_eq!(r.claim(&d2, 1, NO_RAM), Err(ClaimError::Overlap));
+        let c2 = r.claim(&d1, 0, NO_RAM).unwrap();
+        assert!(c2.prefetchable());
         assert!(r.is_claimed(&d0, 0));
         assert!(!r.is_claimed(&d2, 0));
         let stray = DevRef::try_new(99, nic()).unwrap();
-        assert_eq!(r.claim(&stray, 0), Err(ClaimError::BadIndex));
+        assert_eq!(r.claim(&stray, 0, NO_RAM), Err(ClaimError::BadIndex));
         assert_eq!(ClaimError::Already.as_str(), "already claimed");
+        assert_eq!(ClaimError::Ram.as_str(), "ram");
+        assert_eq!(ClaimError::Full.as_str(), "table full");
         assert_eq!(ProbeError::Busy.as_str(), "busy");
         assert_eq!(ResourceKind::Memory.name(), "mem");
+        r.release(c0);
+        r.release(c1);
+        r.release(c2);
+    }
+
+    #[test]
+    fn claim_refuses_ram_overlap() {
+        let mut r = Registry::new();
+        let d0 = r.push(nic()).unwrap();
+        let d1 = r.push(vga()).unwrap();
+        // Usable, bootloader-reclaimable and NVS-like ranges around the
+        // nic's BAR0 at 0xFEB8_0000..0xFEBA_0000.
+        let usable = 0..0x0800_0000u64;
+        let reclaim = 0x0800_0000..0x0900_0000u64;
+        let nvs = 0xFEB9_F000..0xFEBA_0000u64;
+        assert_eq!(
+            r.claim(&d0, 0, [usable.clone(), reclaim.clone(), nvs]),
+            Err(ClaimError::Ram)
+        );
+        assert!(!r.is_claimed(&d0, 0));
+        // RAM that ends one byte into the BAR overlaps; RAM that ends where
+        // the BAR starts does not.
+        assert_eq!(
+            r.claim(&d0, 0, once(0xFEB0_0000..0xFEB8_0001)),
+            Err(ClaimError::Ram)
+        );
+        let c = r.claim(&d0, 0, once(0xFEB0_0000..0xFEB8_0000)).unwrap();
+        r.release(c);
+        // An I/O BAR is not checked against RAM.
+        let io = r.claim(&d0, 1, once(0..0x1_0000u64)).unwrap();
+        assert!(!io.is_mem());
+        r.release(io);
+        // RAM is checked before other claims: a BAR that is both is `Ram`.
+        let v = r.claim(&d1, 0, [usable.clone(), reclaim.clone()]).unwrap();
+        let mut twin = vga();
+        twin.addr = Bdf::new(0, 5, 0);
+        let d2 = r.push(twin).unwrap();
+        assert_eq!(
+            r.claim(&d2, 0, once(0xFD00_0000..0xFD00_1000)),
+            Err(ClaimError::Ram)
+        );
+        assert_eq!(r.claim(&d2, 0, NO_RAM), Err(ClaimError::Overlap));
+        r.release(v);
+    }
+
+    #[test]
+    fn claim_release_frees_range() {
+        let mut r = Registry::new();
+        let d0 = r.push(nic()).unwrap();
+        let mut clone = nic();
+        clone.addr = Bdf::new(0, 4, 0);
+        let d1 = r.push(clone).unwrap();
+        let c = r.claim(&d0, 0, NO_RAM).unwrap();
+        assert_eq!(r.claim(&d1, 0, NO_RAM), Err(ClaimError::Overlap));
+        r.release(c);
+        assert!(!r.is_claimed(&d0, 0));
+        // The same range claims again, from either device.
+        let c = r.claim(&d1, 0, NO_RAM).unwrap();
+        r.release(c);
+        // A hold, take and release cycle frees the row too.
+        let c = r.claim(&d0, 0, NO_RAM).unwrap();
+        assert!(r.hold(c, Some(0xFFFF_E000_0000_0000)).is_ok());
+        assert_eq!(r.bar_va(&d0, 0), Some(0xFFFF_E000_0000_0000));
+        assert_eq!(r.bar_va(&d1, 0), None);
+        // A second hold of the same BAR hands its claim back.
+        let io = r.claim(&d0, 1, NO_RAM).unwrap();
+        assert!(r.hold(io, None).is_ok());
+        let (c, va) = r.take_bar(&d0, 0).unwrap();
+        assert_eq!(va, Some(0xFFFF_E000_0000_0000));
+        assert!(r.take_bar(&d0, 0).is_none());
+        assert_eq!(r.bar_va(&d0, 0), None);
+        assert!(r.is_claimed(&d0, 0));
+        r.release(c);
+        assert!(!r.is_claimed(&d0, 0));
+        let (io, va) = r.take_bar(&d0, 1).unwrap();
+        assert_eq!(va, None);
+        r.release(io);
+        // Every row is free again: the table takes MAX_CLAIMS claims.
+        let rows = r.claims.iter().filter(|c| c.is_none()).count();
+        assert_eq!(rows, MAX_CLAIMS);
+        // A claim for an entry that holds that BAR already comes back.
+        let c = r.claim(&d1, 0, NO_RAM).unwrap();
+        assert!(r.hold(c, None).is_ok());
+        let (c, _) = r.take_bar(&d1, 0).unwrap();
+        let dup = BarClaim {
+            dev: c.dev,
+            bar: c.bar,
+            mem: c.mem,
+            addr: c.addr,
+            size: c.size,
+            prefetchable: c.prefetchable,
+        };
+        assert!(r.hold(c, None).is_ok());
+        let back = r.hold(dup, None).unwrap_err();
+        assert_eq!(back.bar(), 0);
+        let (c, _) = r.take_bar(&d1, 0).unwrap();
+        r.release(c);
+        r.release(back);
+    }
+
+    #[test]
+    fn claim_table_full_is_full() {
+        let mut r = Registry::new();
+        let mut held = Vec::new();
+        let mut i = 0u64;
+        // Distinct 4 KiB memory BARs, six per device, until the table fills.
+        while held.len() < MAX_CLAIMS {
+            let mut d = Device::empty();
+            d.addr = Bdf::new(1, i as u8, 0);
+            for (b, res) in d.resources.iter_mut().enumerate() {
+                *res = Resource {
+                    kind: ResourceKind::Memory,
+                    bar: b as u8,
+                    addr: 0x1_0000_0000 + (i * MAX_BARS as u64 + b as u64) * 0x1000,
+                    size: 0x1000,
+                    prefetchable: false,
+                    mapped_va: 0,
+                };
+            }
+            let d = r.push(d).unwrap();
+            for b in 0..MAX_BARS as u8 {
+                if held.len() < MAX_CLAIMS {
+                    held.push(r.claim(&d, b, NO_RAM).unwrap());
+                }
+            }
+            i += 1;
+        }
+        let d = r.push(nic()).unwrap();
+        assert_eq!(r.claim(&d, 0, NO_RAM), Err(ClaimError::Full));
+        // Order: `Already` and `Overlap` come before `Full`.
+        let first = r.get(0).unwrap();
+        assert_eq!(r.claim(&first, 0, NO_RAM), Err(ClaimError::Already));
+        // A released row is reused.
+        let c = held.pop().unwrap();
+        r.release(c);
+        let c = r.claim(&d, 0, NO_RAM).unwrap();
+        r.release(c);
+        for c in held {
+            r.release(c);
+        }
     }
 
     static E1000_IDS: &[IdMatch] = &[IdMatch::vid_did(0x8086, 0x100e)];
@@ -945,7 +1235,11 @@ mod tests {
         assert_eq!(VGA.probes.load(Ordering::SeqCst), 1);
         // A bound device does not bind again.
         assert!(!r.bind(&d0, "late-nic", None));
-        r.claim(&d0, 0).unwrap();
+        let c = r.claim(&d0, 0, NO_RAM).unwrap();
+        let mut tree = String::new();
+        r.write_tree(&mut tree).unwrap();
+        assert!(!tree.contains(" claimed"));
+        assert!(r.hold(c, None).is_ok());
         let mut tree = String::new();
         r.write_tree(&mut tree).unwrap();
         assert!(tree.contains("early-nic"));
@@ -956,10 +1250,15 @@ mod tests {
 
     #[test]
     fn registry_holds_references() {
-        // The table holds counted entries, not records by value, so it
-        // fits a shell stack with room to spare.
+        // The table holds counted entries, not records by value. Each
+        // entry also holds its BARs' claims (six per device), which puts
+        // the table past a shell stack's share: the kernel's is a static
+        // (`dev_init::REG`) built in a const and used in place, and no
+        // caller copies it. The bound keeps its growth in view.
         let reg = core::mem::size_of::<Registry>();
-        assert!(reg < 4096, "Registry {reg} should be under 4 KiB");
+        assert!(reg < 24 * 1024, "Registry {reg} should be under 24 KiB");
+        let claim = core::mem::size_of::<BarClaim>();
+        assert!(claim <= 32, "BarClaim {claim} should be at most 32 bytes");
         let mut r = Registry::new();
         let d = r.push(nic()).unwrap();
         let g = r.get(0).unwrap();

@@ -184,13 +184,29 @@ pub(crate) fn test_pci_claim_exclusive() -> Outcome {
     if !found {
         return Outcome::Fail("e1000 no bar");
     }
-    if let Err(e) = dev_init::claim(&d, b) {
-        return Outcome::Fail(e.as_str());
+    let c = match dev_init::claim(&d, b) {
+        Ok(c) => c,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    let why = match dev_init::claim(&d, b) {
+        Err(ClaimError::Already) => None,
+        Err(_) => Some("wrong claim err"),
+        Ok(twice) => {
+            dev_init::release(twice);
+            Some("double claim")
+        }
+    };
+    dev_init::release(c);
+    if let Some(why) = why {
+        return Outcome::Fail(why);
     }
+    // A released claim frees its range: it claims again.
     match dev_init::claim(&d, b) {
-        Err(ClaimError::Already) => Outcome::Ok,
-        Err(_) => Outcome::Fail("wrong claim err"),
-        Ok(()) => Outcome::Fail("double claim"),
+        Ok(c) => {
+            dev_init::release(c);
+            Outcome::Ok
+        }
+        Err(e) => crate::fail_fmt!("claim after release: {}", e.as_str()),
     }
 }
 
