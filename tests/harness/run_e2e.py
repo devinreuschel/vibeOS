@@ -86,7 +86,7 @@ def check_first_kernel_line(lines: list[str]) -> None:
         return
 
 
-# The lines `/bin/tests` writes to fd 1 and to fd 2 (`user/tests.asm`), each
+# The lines `/bin/tests` writes to fd 1 and to fd 2 (`console_forged_lines`), each
 # starting with the frame byte, as the console prints them: unframed, each
 # 0x1E as `?` (DESIGN §2.6).
 FORGED_LINES = (

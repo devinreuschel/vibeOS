@@ -2,13 +2,19 @@ use super::*;
 use vibeos::fmt_util;
 
 pub(super) fn sys_exit(status: i32, _from_signal: bool) -> SysResult {
-    finish_exit(wait_exited(status as u32), false);
+    finish_exit(wait_exited(status as u32), None);
 }
 
-pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
+/// End the current process with `wait_status`; `fault` is the faulting
+/// address when a ring-3 fault ended it. Pid 1's end panics the kernel
+/// before anything is torn down ([`init_exited`]).
+pub(super) fn finish_exit(wait_status: u32, fault: Option<u64>) -> ! {
     let pid = current_pid();
     if pid == 0 {
         thread_init::exit_current();
+    }
+    if pid == INIT_PID {
+        init_exited(wait_status, fault);
     }
     // The files first, in batches off the table lock, while the slot is
     // still this process's: once it is a zombie its parent may free it.
@@ -58,6 +64,20 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
     }
     crate::arch::gs::force_kernel();
     thread_init::exit_current();
+}
+
+/// Pid 1 ended: print the registered line naming how, then panic, as Linux
+/// panics when init dies (INVARIANTS.md §2.5, F068).
+#[expect(
+    clippy::panic,
+    reason = "INVARIANTS.md §2.5: pid 1's exit panics the kernel, as Linux's does"
+)]
+fn init_exited(wait_status: u32, fault: Option<u64>) -> ! {
+    crate::marker!(
+        "vibeOS: init: pid 1 {}",
+        InitExit::from_wait(wait_status, fault)
+    );
+    panic!("pid 1 exited");
 }
 
 /// Give `dead`'s children to the reaper `reaper_for` picks (ROADMAP §10.5,
@@ -187,6 +207,12 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
             if p.state == ProcState::Unused || p.state == ProcState::Zombie {
                 return Err(KError::Srch);
             }
+            // `false`: no process has a handler until ROADMAP §13.8's
+            // `rt_sigaction`, so a signal to init is dropped here, with no
+            // pending bit, state change or wake, and `kill` returns 0.
+            if !kill_delivers(target, sig, false) {
+                return Ok(false);
+            }
             match default_action(sig) {
                 SigAct::Ign => {
                     if sig == SIGCHLD {
@@ -212,14 +238,14 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
                     s.wake_all(&mut p.stop_wq);
                 }
             }
-            Ok(())
+            Ok(true)
         })
     });
     match r {
         Err(e) => Err(e),
-        Ok(()) => {
-            if target == self_pid && default_action(sig) == SigAct::Term {
-                finish_exit(wait_signaled(sig), true);
+        Ok(delivered) => {
+            if delivered && target == self_pid && default_action(sig) == SigAct::Term {
+                finish_exit(wait_signaled(sig), None);
             }
             Ok(0)
         }

@@ -1265,6 +1265,60 @@ arch = "both"
 source = "kernel"
 section = "§10.5"
 
+# `/bin/tests`' utest protocol (C-USERTESTS): the ktest form with `utest:`,
+# printed from ring 3.
+[[marker]]
+text = "vibeOS: utest: begin <n>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: run <name> <n>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: ok <name>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: FAIL <name>: <text>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: skip <name>: <text>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: end"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+# Pid 1 ended (INVARIANTS.md §2.5, F068): `exited <n>`, `killed SIG<name>`,
+# or `killed SIG<name> addr=0x<hex>` for a fault; the kernel then panics
+# (`make test-e2e-init-fault`).
+[[marker]]
+text = "vibeOS: init: pid 1 <text>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.5"
+
 # §10.6 Entry paths and user memory
 
 # The AP trampoline page `boot::capture` chose from the memory map, before
