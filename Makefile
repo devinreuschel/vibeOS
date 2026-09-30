@@ -218,6 +218,7 @@ help:
 	  '  run                   boot production ISO in a QEMU window, COM1 on the terminal (VIBEOS_* apply)' \
 	  '  run-panic             boot panic-test ISO, no window, COM1 on the terminal' \
 	  '  debug                 as run, halted with a gdb stub on :1234; then gdb -x scripts/vibeos.gdb' \
+	  '                        CORE=<core.zst> [ELF=]: no QEMU; gdb opens that core instead' \
 	  '  layout                objdump sections + __kernel_ symbols' \
 	  '  vmcore                the core tool: vmcore report --core <file|-> --elf <kernel.elf>' \
 	  '  test-unit             vibeos-core host tests (any host triple)' \
@@ -423,9 +424,13 @@ DEBUG_USER_ELFS := $(addprefix $(USER_ELF_DIR)/,hello init sh tests)
 
 # QEMU halted with a gdb stub on :1234 (`-s -S`); attach with
 # `gdb -x scripts/vibeos.gdb` from this directory (DESIGN §8.4).
-debug: $(ISO) $(KERNEL_ELF) $(USER_STAMP)
-	python3 tests/harness/run_interactive.py debug --kernel-elf $(KERNEL_ELF) \
-	    $(foreach e,$(DEBUG_USER_ELFS),--user-elf $(e))
+# `make debug CORE=<core.zst> [ELF=<kernel.elf>]` starts no QEMU: the core
+# tool writes that guest core's virtually addressed core, which the same gdb
+# command opens (ROADMAP §10.7). ELF defaults to the production kernel.
+debug: $(if $(CORE),$(VMCORE),$(ISO) $(KERNEL_ELF) $(USER_STAMP))
+	$(if $(CORE),VIBEOS_VMCORE=$(VMCORE)) python3 tests/harness/run_interactive.py debug \
+	    --kernel-elf $(or $(ELF),$(KERNEL_ELF)) \
+	    $(if $(CORE),--core $(CORE),$(foreach e,$(DEBUG_USER_ELFS),--user-elf $(e)))
 
 layout: $(KERNEL_ELF)
 	@echo "== sections =="
