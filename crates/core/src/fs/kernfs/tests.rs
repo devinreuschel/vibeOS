@@ -381,6 +381,7 @@ fn console_write_captured() {
 fn fixed_tables_match_limits() {
     let k = std::boxed::Box::new(KernState::new());
     assert_eq!(k.nodes.len(), crate::limits::MAX_KERN_NODES);
+    assert_eq!(k.skins.len(), crate::limits::MAX_KERN_MOUNTS);
 }
 
 /// Read `n` bytes of `path` at `off`.

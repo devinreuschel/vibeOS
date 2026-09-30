@@ -12,11 +12,12 @@ use core::cell::RefCell;
 use crate::block::blockdev::BlockRef;
 use crate::block::{BlockError, MAX_BLOCKDEVS};
 use crate::cache::{self, Backend, Cache, CacheKey, CacheStats, PAGE};
+use crate::limits::MAX_KERN_MOUNTS;
 
 use super::{
     Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps,
-    MAX_KERN_NODES, MAX_MOUNTS, MAX_NAME, Name, OpCx, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE,
-    S_IFMT, S_IFREG_MODE,
+    MAX_KERN_NODES, MAX_NAME, Name, OpCx, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT,
+    S_IFREG_MODE,
 };
 
 mod devfs;
@@ -162,7 +163,7 @@ pub struct KernState {
     /// The clock the last op brought in.
     now: u64,
     next_inst: u32,
-    skins: [Skin; MAX_MOUNTS],
+    skins: [Skin; MAX_KERN_MOUNTS],
     cons_out: [u8; 64],
     cons_len: u8,
     /// The devices devfs block nodes name; a node's `tag` is its slot.
@@ -180,7 +181,7 @@ impl KernState {
             tmp_bits: 0,
             now: 0,
             next_inst: 0,
-            skins: [Skin::EMPTY; MAX_MOUNTS],
+            skins: [Skin::EMPTY; MAX_KERN_MOUNTS],
             cons_out: [0u8; 64],
             cons_len: 0,
             blk: [const { None }; MAX_BLOCKDEVS],

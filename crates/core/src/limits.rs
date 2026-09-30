@@ -1,21 +1,17 @@
 //! Every table size and resource cap the kernel enforces, by name (ROADMAP
-//! §10.4, D1). Today's fixed tables take their lengths from these constants,
-//! and the old names (`proc::MAX_FDS`, `fs::MAX_INODES`, ...) re-export them.
-//! A host test in each portable module that owns a fixed table checks its
-//! length against its name here (`fixed_tables_match_limits`).
+//! §10.4, D1). The growable tables are heap tables of these lengths, each
+//! built once by [`table`] and never grown, and the old names
+//! (`proc::MAX_FDS`, `fs::MAX_INODES`, ...) re-export them. A host test in
+//! each portable module that owns a table checks its length against its
+//! name here (`fixed_tables_match_limits`).
 //!
 //! What belongs here: a bound on how many kernel objects or bytes a workload
 //! can hold. What stays where it is, because hardware, a device queue, or an
-//! on-disk format sets it rather than the kernel's resource policy:
-//!
-//! - hardware: acpi `MAX_CPUS`, `MAX_IOAPICS`, `MAX_ISOS`; ipi
-//!   `MAX_IPI_CPUS`; pci `MAX_BARS`, `MAX_SCAN`, `MAX_CAP_WALK`,
-//!   `MAX_BAR_MAP`; dev `MAX_DEVICES`; pmm `MAX_ORDER`.
-//! - device-queue geometry: block `MAX_QUEUE`, `MAX_SEGS`; dma `MAX_SG`;
-//!   virtio `MAX_VENDOR_CAPS`, `MAX_CHAIN`; virtio_blk_init `MAX_VQ`,
-//!   `MAX_QSIZE`.
-//! - on-disk formats: vibefs `MAX_*`, fat `MAX_CLUS_BYTES`, part
-//!   `MAX_EBR_DEPTH`.
+//! on-disk format sets it rather than the kernel's resource policy, is each
+//! `MAX_*` that `scripts/check_limits.py`'s `ALLOW` names with that bound:
+//! acpi, ipi, pci, dev, pmm, the block, dma and virtio queue geometry, the
+//! framebuffer, and the vibefs, FAT and MBR formats. `make check` fails on
+//! any other `MAX_*` outside this module.
 
 use crate::kalloc::{AllocError, TryVec};
 
@@ -58,6 +54,9 @@ pub const PID_WRAP: u32 = 300;
 pub const MAX_RAM_NODES: usize = 64;
 /// Kernel pseudo-filesystem node slots (`fs::kernfs`).
 pub const MAX_KERN_NODES: usize = 128;
+/// Mounted instances one kernfs store holds, over its four skins
+/// (`fs::kernfs::KernState`).
+pub const MAX_KERN_MOUNTS: usize = 8;
 /// Bytes one ramfs file holds (`fs::RamNode` data).
 pub const MAX_TMPFS_FILE_BYTES: usize = 256;
 /// Entries one ramfs directory holds (`fs::RamNode` dents).
@@ -77,6 +76,15 @@ pub const MAX_WALK: u32 = 80;
 /// so `Kva::free` never runs out of nodes. `u16` links hold an index, hence
 /// the assert below.
 pub const MAX_KVA_RANGES: usize = MAX_THREADS + 8 * crate::acpi::MAX_CPUS + 64;
+/// Most pages one guarded kernel stack maps, the guard page not counted
+/// (`thread::GuardedStack`, `kva_init`).
+pub const MAX_STACK_PAGES: usize = 32;
+/// virtio-blk disks the driver names, `vda` to `vdz`
+/// (`drivers::virtio_blk::disk_name`); a disk past them gets no name.
+pub const MAX_VIRTIO_DISKS: u8 = 26;
+/// Lock ranks the per-CPU held set tracks: ranks 1 to `MAX_RANK`, rank 0
+/// untracked (`sync::lock`).
+pub const MAX_RANK: u8 = 8;
 /// Pages one deferred unmap batch holds (`kva_init`).
 pub const MAX_UNMAP_PAGES: usize = 32;
 /// In-core inode slots per FAT volume (`fat::FatVol`).

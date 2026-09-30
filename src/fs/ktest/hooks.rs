@@ -20,7 +20,7 @@ static RELEASE: AtomicBool = AtomicBool::new(false);
 static OPEN_RACE: AtomicBool = AtomicBool::new(false);
 
 /// The most `yield_now` calls any wait here makes.
-const MAX_YIELDS: u32 = 10_000;
+const YIELD_LIMIT: u32 = 10_000;
 
 /// Each `file_init::write` yields once between its backend I/O and
 /// its write-back to the open-file table.
@@ -66,7 +66,7 @@ fn write_window() {
     if HOLD.swap(false, Ordering::AcqRel) {
         HELD.store(true, Ordering::Release);
         let mut n = 0u32;
-        while !RELEASE.load(Ordering::Acquire) && n < MAX_YIELDS {
+        while !RELEASE.load(Ordering::Acquire) && n < YIELD_LIMIT {
             thread_init::yield_now();
             n += 1;
         }

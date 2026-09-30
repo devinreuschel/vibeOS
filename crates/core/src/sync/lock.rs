@@ -17,7 +17,7 @@ pub const RANK_DEVICE: u8 = 5;
 pub const RANK_SERIAL: u8 = 6;
 
 /// Highest rank `Held` counts. Ranks 1 to `MAX_RANK`; rank 0 is untracked.
-pub const MAX_RANK: u8 = 8;
+pub use crate::limits::MAX_RANK;
 
 /// Bits of one rank's count in [`Held`].
 const COUNT_BITS: u32 = 4;
