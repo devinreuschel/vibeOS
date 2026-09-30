@@ -21,6 +21,7 @@ use vibeos::wait::WaitQueue;
 use super::hardirq;
 use crate::apic_init;
 use crate::arch;
+use crate::dev_init;
 use crate::pci_init;
 use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
@@ -401,6 +402,9 @@ pub fn disable_msi(bdf: Bdf, cap: u8) {
     pci::set_msi_enable(&mut hw, bdf, cap, false);
 }
 
+/// The VA of `dev`'s MSI-X table, through the claim its driver holds on
+/// the BAR the table's BIR names; `None` when that BAR is not mapped
+/// through a claim or is too small for entry `index`.
 fn msix_table_va(dev: &Device, cap: &pci::MsixCap, index: u16) -> Option<u64> {
     let bir = cap.table_bir as usize;
     if bir >= pci::MAX_BARS {
@@ -408,10 +412,12 @@ fn msix_table_va(dev: &Device, cap: &pci::MsixCap, index: u16) -> Option<u64> {
     }
     let r = dev.resources[bir];
     let need = cap.table_off as u64 + (index as u64 + 1) * 16;
-    if r.mapped_va == 0 || r.size < need {
+    if r.size < need {
         return None;
     }
-    Some(r.mapped_va.wrapping_add(cap.table_off as u64))
+    let entry = dev_init::find_bdf(dev.addr)?;
+    let va = dev_init::bar_va(&entry, cap.table_bir)?;
+    Some(va.wrapping_add(cap.table_off as u64))
 }
 
 /// Program MSI-X table entry `index`.
