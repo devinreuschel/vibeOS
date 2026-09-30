@@ -188,3 +188,8 @@ smp = 1
 name = "requeue_moves_each_dequeue"
 reason = "needs 2 CPUs"
 smp = 1
+
+[[skip]]
+name = "reschedule_ipi_wake_ap"
+reason = "no AP"
+smp = 1
