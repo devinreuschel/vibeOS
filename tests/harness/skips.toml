@@ -183,3 +183,8 @@ smp = 1
 name = "preempt_two_threads"
 reason = "no AP"
 smp = 1
+
+[[skip]]
+name = "requeue_moves_each_dequeue"
+reason = "needs 2 CPUs"
+smp = 1
