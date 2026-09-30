@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 
 from scripts import check_cells
-from scripts.check_cells import impl_errors, must_be_unsafe_errors, unsafe_impls
+from scripts.check_cells import (
+    impl_errors,
+    must_be_unsafe_errors,
+    provenance_errors,
+    unsafe_impls,
+)
 
 ENTRY = [("src/a.rs", "force_unlock")]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "cells"
@@ -80,6 +85,30 @@ class TestMustBeUnsafe(unittest.TestCase):
                       ("src/log/log_init.rs", "dump_tail"),
                       ("src/smp/per_cpu_init.rs", "with_cpu")]:
             self.assertIn(entry, check_cells.MUST_BE_UNSAFE)
+
+    def test_set_rsp0_listed(self) -> None:
+        # ROADMAP §10.3 (F089): the TSS's one writer after `load`.
+        self.assertIn(("src/arch/x86_64/gdt.rs", "set_rsp0"), check_cells.MUST_BE_UNSAFE)
+
+    def test_pointer_writers_listed(self) -> None:
+        # ROADMAP §10.3 (F042): the safe functions that wrote through a
+        # caller's pointer, each now an `unsafe fn`.
+        for entry in [("src/proc/syscall_init.rs", "on_switch"),
+                      ("src/proc/syscall_init.rs", "switch_fpu"),
+                      ("src/proc/syscall_init.rs", "set_rsp0_for"),
+                      ("src/proc/syscall_init.rs", "vibeos_syscall_stub"),
+                      ("crates/core/src/dev/virtio.rs", "SplitQueue::new"),
+                      ("crates/core/src/dev/virtio.rs", "write_indirect_write")]:
+            self.assertIn(entry, check_cells.MUST_BE_UNSAFE)
+
+    def test_extern_c_entry_must_be_unsafe(self) -> None:
+        entry = [("src/a.rs", "stub")]
+        self.assertEqual(
+            self.errs('#[unsafe(no_mangle)]\npub extern "C" fn stub(f: *mut F) -> i64 { 0 }\n',
+                      entry),
+            ["src/a.rs:2: stub must be declared `unsafe fn`"])
+        self.assertEqual(
+            self.errs('pub unsafe extern "C" fn stub(f: *mut F) -> i64 { 0 }\n', entry), [])
 
     def test_tree_passes(self) -> None:
         self.assertEqual(must_be_unsafe_errors(check_cells.read_tree()), [])
@@ -251,6 +280,81 @@ class TestImplHeaders(unittest.TestCase):
         for path, text in check_cells.read_tree().items():
             with self.subTest(path=path):
                 self.assertEqual(impl_errors(path, text), [])
+
+
+
+class TestProvenanceCasts(unittest.TestCase):
+    """ROADMAP §10.3 (F089): each provenance cast says where write
+    provenance comes from, or that nothing writes through the pointer."""
+
+    PATH = "src/a.rs"
+
+    def errs(self, text: str) -> list[str]:
+        return provenance_errors(self.PATH, text)
+
+    # One line each, and each split over two lines.
+    ONE_LINE = {
+        "cast_mut": "let p = ptr::from_ref(&x).cast_mut();\n",
+        "const then mut": "let p = &x as *const T as *mut T;\n",
+        "addr_of as mut": "let p = core::ptr::addr_of!(X.f) as *mut u8;\n",
+    }
+    SPLIT = {
+        "cast_mut": "let p = ptr::from_ref(&x)\n    .cast_mut();\n",
+        "const then mut": "let p = &x as *const T\n    as *mut T;\n",
+        "addr_of as mut": "let p = addr_of!(X.f)\n    as *mut u8;\n",
+    }
+
+    def test_each_form_flagged(self) -> None:
+        for forms in (self.ONE_LINE, self.SPLIT):
+            for what, text in forms.items():
+                with self.subTest(what=what, lines=text.count("\n")):
+                    errs = self.errs(text)
+                    self.assertEqual(len(errs), 1, errs)
+                    self.assertTrue(errs[0].startswith(f"{self.PATH}:1: provenance cast"), errs)
+
+    def test_flagged_line_number(self) -> None:
+        errs = self.errs("fn f() {}\n\nlet p = &x as *const T as *mut T;\n")
+        self.assertEqual(len(errs), 1, errs)
+        self.assertTrue(errs[0].startswith(f"{self.PATH}:3:"), errs)
+
+    def test_comment_on_the_line_passes(self) -> None:
+        for text in self.ONE_LINE.values():
+            with self.subTest(text=text):
+                line = text.rstrip("\n") + " // PROVENANCE: nothing writes through it.\n"
+                self.assertEqual(self.errs(line), [])
+
+    def test_comment_on_the_line_above_passes(self) -> None:
+        for forms in (self.ONE_LINE, self.SPLIT):
+            for text in forms.values():
+                with self.subTest(text=text):
+                    self.assertEqual(self.errs("// PROVENANCE: from `&mut x`.\n" + text), [])
+
+    def test_comment_two_lines_above_fails(self) -> None:
+        for text in self.ONE_LINE.values():
+            with self.subTest(text=text):
+                errs = self.errs("// PROVENANCE: from `&mut x`.\n// more.\n" + text)
+                self.assertEqual(len(errs), 1, errs)
+
+    def test_nested_parentheses_in_addr_of(self) -> None:
+        text = "let p = addr_of!((*s.get()).f[(i + 1)]) as *mut u8;\n"
+        self.assertEqual(len(self.errs(text)), 1)
+        self.assertEqual(self.errs("let p = addr_of!((*s.get()).f[(i + 1)]) as *const u8;\n"), [])
+
+    def test_other_casts_pass(self) -> None:
+        for text in ("let a = &x as *const T as usize;\n",
+                     "let p = &mut x as *mut T;\n",
+                     "let p = ptr::from_mut(&mut x).cast::<u8>();\n",
+                     "let p = addr_of_mut!(X.f) as *mut u8;\n",
+                     "let a = p as *const T; let q = r as *mut U;\n",
+                     "// &x as *const T as *mut T\n",
+                     "let s = \"x.cast_mut()\";\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.errs(text), [])
+
+    def test_tree_passes(self) -> None:
+        for path, text in check_cells.read_tree().items():
+            with self.subTest(path=path):
+                self.assertEqual(provenance_errors(path, text), [])
 
 
 if __name__ == "__main__":

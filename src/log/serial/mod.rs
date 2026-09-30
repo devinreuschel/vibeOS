@@ -7,8 +7,10 @@
 //! its argument as one line, so a caller that builds a line from pieces
 //! uses [`write_line_with`]. Polled TX with a bounded THRE wait; a dead
 //! UART drops the byte rather than wedging the panic handler (DESIGN
-//! §9.6). Once `raw::HALTING` is set the writes skip the lock so a holder
-//! cannot stall the dump. `klog!` uses try-lock + drop. The port I/O, the
+//! §9.6). Once `raw::HALTING` is set a write on any CPU but the dump's
+//! owner stops that CPU (`raw::stop_if_halting`), and the owner writes
+//! through `raw::write_owner`, with no TX lock and no `InterruptGuard`, so
+//! a holder cannot stall the dump. `klog!` uses try-lock + drop. The port I/O, the
 //! halt flag and the dump owner live in [`raw`], which takes no lock and
 //! calls nothing above arch.
 
@@ -22,8 +24,8 @@ use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_SERIAL;
 use vibeos::log::line::LINE_CAP;
 
+use crate::arch::current::InterruptGuard;
 use crate::sync_init::SpinMutex;
-use crate::x86::InterruptGuard;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TX: SpinMutex<()> = SpinMutex::with_rank((), RANK_SERIAL);
@@ -79,8 +81,8 @@ impl Serial {
     /// `console_init::write` is the only caller.
     pub fn write_user(bytes: &[u8]) {
         if halting() {
-            let _irq = InterruptGuard::enter();
-            raw::user_after_halt(bytes);
+            raw::stop_if_halting();
+            raw::put_user(bytes);
             return;
         }
         let _g = TX.lock();
@@ -96,8 +98,8 @@ impl Serial {
     /// one try-lock; the line is dropped if TX is busy. Not captured.
     pub fn try_write_bytes(bytes: &[u8]) -> bool {
         if halting() {
-            let _irq = InterruptGuard::enter();
-            raw::write_after_halt(bytes);
+            raw::stop_if_halting();
+            raw::write_owner(bytes);
             return true;
         }
         let Some(_g) = TX.try_lock() else {
@@ -111,11 +113,12 @@ impl Serial {
 /// Write one whole line, `\n` included, under one TX hold, after one
 /// capture into the log ring when `capture` is set.
 fn emit(line: &[u8], capture: bool) {
-    let _irq = InterruptGuard::enter();
     if halting() {
-        raw::write_after_halt(line);
+        raw::stop_if_halting();
+        raw::write_owner(line);
         return;
     }
+    let _irq = InterruptGuard::enter();
     if capture {
         self::capture(line);
     }
@@ -214,7 +217,8 @@ pub fn line(msg: &str) {
 ///
 /// `marker!(marker::X)` / `marker!("vibeOS: …")` for a full line;
 /// `marker!("vibeOS: … {}", x)` for formatted contract lines.
-/// `klog!` is filtered. `PlainSerial` is only for `dmesg` and panic dumps.
+/// `klog!` is filtered. `PlainSerial` is only for `dmesg`; the panic dump
+/// writes through `raw::write_owner`.
 #[macro_export]
 macro_rules! marker {
     ($fmt:literal $(, $($arg:tt)*)?) => {{

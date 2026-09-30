@@ -134,11 +134,12 @@ impl Vfs {
     fn unlink_inode(&mut self, i: u16) {
         let now = self.now;
         let v = &mut self.inodes[i as usize];
-        v.nlink = if v.kind == InodeKind::Dir {
+        let n = if v.kind == InodeKind::Dir {
             0
         } else {
             v.nlink.saturating_sub(1)
         };
+        v.set_nlink(n);
         v.ctime = now;
     }
 
@@ -203,7 +204,7 @@ impl Vfs {
         tgt: Option<PathRef>,
     ) -> Result<(u16, Option<u16>), FsError> {
         if self.sb_of(od.mount) != self.sb_of(nd.mount) {
-            return Err(FsError::Inval);
+            return Err(FsError::XDev);
         }
         if self.is_mountpoint(od, oname)
             || self.is_mountpoint(nd, nname)
@@ -274,10 +275,10 @@ impl Vfs {
     fn link_begin(&mut self, src: PathRef, nd: PathRef) -> Result<(Call, Call), FsError> {
         let si = self.d_islot(src.dslot)?;
         if self.inodes[si as usize].kind != InodeKind::Reg {
-            return Err(FsError::Inval);
+            return Err(FsError::Perm);
         }
         if self.sb_of(src.mount) != self.sb_of(nd.mount) {
-            return Err(FsError::Inval);
+            return Err(FsError::XDev);
         }
         let d = self.call(self.d_islot(nd.dslot)?)?;
         match self.call(si) {
@@ -366,6 +367,10 @@ impl WalkCall {
         match self.need {
             Need::Lookup => {
                 let name = w.comp();
+                debug_assert!(
+                    !name_is_dot(name) && !name_is_dotdot(name),
+                    "a backend lookup never sees `.` or `..`"
+                );
                 WalkReply::Found(self.call.run(|o, cx, d| o.lookup(cx, d, name)))
             }
             Need::Readlink => {
@@ -759,7 +764,7 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                 self.put_path(nd);
                 r
             }),
-            Ok(_) => Err(FsError::Inval),
+            Ok(_) => Err(FsError::Perm),
             Err(e) => Err(e),
         };
         self.put_path(src);

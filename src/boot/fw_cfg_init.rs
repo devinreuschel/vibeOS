@@ -65,6 +65,18 @@ pub enum FwCfgError {
     Timeout,
 }
 
+/// A missing fw_cfg device or DMA is no device; a device failure or timeout, an I/O error.
+impl From<FwCfgError> for vibeos::kerror::KError {
+    fn from(e: FwCfgError) -> Self {
+        match e {
+            FwCfgError::Absent | FwCfgError::NoDma => Self::NoDev,
+            FwCfgError::NoMem => Self::NoMem,
+            FwCfgError::TooLong => Self::Inval,
+            FwCfgError::Device | FwCfgError::Timeout => Self::Io,
+        }
+    }
+}
+
 impl FwCfgError {
     pub fn as_str(self) -> &'static str {
         match self {

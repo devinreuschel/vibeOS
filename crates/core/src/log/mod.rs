@@ -11,6 +11,7 @@
 use crate::atomic::Ordering;
 use crate::atomic::statics::{AtomicU8, AtomicU64};
 
+pub mod backtrace;
 pub mod line;
 pub mod trace;
 pub mod vmcoreinfo;

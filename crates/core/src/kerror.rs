@@ -1,52 +1,144 @@
 //! The kernel's error type at the syscall boundary (ROADMAP §10.4, E2).
 //!
 //! A syscall handler returns `Result<usize, KError>`, and dispatch encodes
-//! an `Err` as `-errno` (SYSCALL.md §2). Today `KError` only carries a Linux
-//! errno; ROADMAP §10.4's `KError` box gives it its variants and a `From`
-//! for every module error.
+//! an `Err` as `-errno` (SYSCALL.md §2). Every module error converts into a
+//! `KError` through the `From` impl beside its type, and the one table
+//! below holds the Linux errno of each variant. The table is also the
+//! input `scripts/gen_syscalls.py` reads to generate SYSCALL.md §2 and the
+//! user runtime's errno constants: each row is
+//! `Variant = N, "ENAME", "Used text";`, one per line, and a later errno is
+//! a new row, never a `const` (`scripts/check_errors.py`).
+//!
+//! The names and numbers are Linux's, from `include/uapi/asm-generic/
+//! errno-base.h` and `include/uapi/asm-generic/errno.h` of the
+//! `docs/LINUX.md` baseline, which x86_64 and arm64 share. Only the names
+//! and numbers are taken.
+//!
+//! This module imports no other vibeos module, so `check_cycles.py` sees
+//! only edges into it.
 
-/// An error a syscall returns: a Linux errno, 1 to 4095.
-#[must_use]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KError {
-    errno: i32,
+/// Expand the errno table into [`KError`] and its accessors. rustc rejects
+/// a duplicate discriminant.
+macro_rules! errno_table {
+    ($($v:ident = $n:literal, $name:literal, $used:literal;)*) => {
+        /// An error a syscall returns: one Linux errno.
+        #[must_use]
+        #[repr(i32)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum KError {
+            $(
+                #[doc = concat!("Linux `", $name, "` (", stringify!($n), "). ", $used)]
+                $v = $n,
+            )*
+        }
+
+        impl KError {
+            /// Every variant, in table order.
+            pub const ALL: &[KError] = &[$(KError::$v),*];
+
+            /// The Linux errno, 1 to 4095.
+            pub const fn errno(self) -> i32 {
+                self as i32
+            }
+
+            /// Linux's name for the errno, such as `"EINVAL"`.
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(KError::$v => $name,)*
+                }
+            }
+        }
+    };
 }
 
-impl KError {
-    /// Linux `ENOSYS`: the number names no syscall. The syscall table's
-    /// dispatch returns it (ROADMAP §10.5).
-    pub const ENOSYS: KError = KError::from_errno(38);
-
-    /// The error for Linux errno `errno`.
-    ///
-    /// Callers pass the errno constants of `vibeos::syscall`, never a value
-    /// from input, so `errno` in 1 to 4095 is a kernel invariant (DESIGN
-    /// §9.4) and the assertion stays.
-    pub const fn from_errno(errno: i32) -> KError {
-        assert!(matches!(errno, 1..=4095), "errno out of range");
-        KError { errno }
-    }
-
-    /// The Linux errno, 1 to 4095.
-    pub const fn errno(self) -> i32 {
-        self.errno
-    }
+errno_table! {
+    Perm = 1, "EPERM", "`mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0); making a symlink, a device node, or a directory, a hard link, a rename, or a removal that the filesystem cannot make, as FAT's `symlink` and `link` (no syscall makes one yet)";
+    NoEnt = 2, "ENOENT", "`open`/`execve` missing path";
+    Srch = 3, "ESRCH", "`kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1)";
+    Io = 5, "EIO", "device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs";
+    TooBig = 7, "E2BIG", "`execve` argv or envp with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK`";
+    NoExec = 8, "ENOEXEC", "malformed ELF, `ET_DYN`, or `PT_INTERP`";
+    BadF = 9, "EBADF", "closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd";
+    Child = 10, "ECHILD", "`wait4` with no matching child";
+    Again = 11, "EAGAIN", "`fork` with every process-table slot in use, zombies included (`MAX_PROCS` is 18), or no pid free (pids and tids share one allocator, up to 32,767, then from 300)";
+    NoMem = 12, "ENOMEM", "AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4)";
+    Acces = 13, "EACCES", "`open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys`";
+    Fault = 14, "EFAULT", "bad user pointer / length";
+    Busy = 16, "EBUSY", "defined; no syscall returns it";
+    Exist = 17, "EEXIST", "`O_EXCL`; `mmap` with `MAP_FIXED_NOREPLACE` (or `MAP_FIXED`, §3.1) over a mapping";
+    XDev = 18, "EXDEV", "a `rename` or `link` across mounts (no syscall makes one yet)";
+    NoDev = 19, "ENODEV", "a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4";
+    NotDir = 20, "ENOTDIR", "";
+    IsDir = 21, "EISDIR", "";
+    Inval = 22, "EINVAL", "`lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written";
+    NFile = 23, "ENFILE", "`open` or `execve` with the system-wide open-file table full";
+    MFile = 24, "EMFILE", "per-process fd table full (`open`, `dup`)";
+    FBig = 27, "EFBIG", "a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit";
+    NoSpc = 28, "ENOSPC", "`write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent";
+    SPipe = 29, "ESPIPE", "`lseek` on the console, `/dev/console`, or `/dev/tty`";
+    RoFs = 30, "EROFS", "defined; no syscall returns it: a write to a read-only virtio-blk device fails with it in the block layer";
+    NameTooLong = 36, "ENAMETOOLONG", "path of 256 bytes or more; name above 64 bytes; an `execve` argv or envp string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255";
+    NoSys = 38, "ENOSYS", "unknown number";
+    NotEmpty = 39, "ENOTEMPTY", "defined; no syscall returns it";
+    Loop = 40, "ELOOP", "`open` or `execve` through too many symbolic links";
+    OpNotSupp = 95, "EOPNOTSUPP", "defined; no syscall returns it. It is left for the cases Linux gives it, such as an extended-attribute namespace a mount refuses (ROADMAP §14.8)";
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Each variant's number and name are Linux's (asm-generic `errno-base.h`
+    /// and `errno.h`, the same on x86_64 and arm64).
     #[test]
-    fn kerror_errno_range() {
-        assert_eq!(KError::from_errno(1).errno(), 1);
-        assert_eq!(KError::from_errno(38).errno(), 38);
-        assert_eq!(KError::from_errno(4095).errno(), 4095);
-        assert_eq!(KError::ENOSYS.errno(), crate::syscall::ENOSYS);
-        assert_eq!(KError::from_errno(14), KError::from_errno(14));
-        assert_ne!(KError::from_errno(9), KError::from_errno(10));
-        for bad in [0, -1, 4096, i32::MIN, i32::MAX] {
-            assert!(std::panic::catch_unwind(|| KError::from_errno(bad)).is_err());
+    fn kerror_values_match_linux() {
+        let linux: &[(KError, i32, &str)] = &[
+            (KError::Perm, 1, "EPERM"),
+            (KError::NoEnt, 2, "ENOENT"),
+            (KError::Srch, 3, "ESRCH"),
+            (KError::Io, 5, "EIO"),
+            (KError::TooBig, 7, "E2BIG"),
+            (KError::NoExec, 8, "ENOEXEC"),
+            (KError::BadF, 9, "EBADF"),
+            (KError::Child, 10, "ECHILD"),
+            (KError::Again, 11, "EAGAIN"),
+            (KError::NoMem, 12, "ENOMEM"),
+            (KError::Acces, 13, "EACCES"),
+            (KError::Fault, 14, "EFAULT"),
+            (KError::Busy, 16, "EBUSY"),
+            (KError::Exist, 17, "EEXIST"),
+            (KError::XDev, 18, "EXDEV"),
+            (KError::NoDev, 19, "ENODEV"),
+            (KError::NotDir, 20, "ENOTDIR"),
+            (KError::IsDir, 21, "EISDIR"),
+            (KError::Inval, 22, "EINVAL"),
+            (KError::NFile, 23, "ENFILE"),
+            (KError::MFile, 24, "EMFILE"),
+            (KError::FBig, 27, "EFBIG"),
+            (KError::NoSpc, 28, "ENOSPC"),
+            (KError::SPipe, 29, "ESPIPE"),
+            (KError::RoFs, 30, "EROFS"),
+            (KError::NameTooLong, 36, "ENAMETOOLONG"),
+            (KError::NoSys, 38, "ENOSYS"),
+            (KError::NotEmpty, 39, "ENOTEMPTY"),
+            (KError::Loop, 40, "ELOOP"),
+            (KError::OpNotSupp, 95, "EOPNOTSUPP"),
+        ];
+        assert_eq!(
+            linux.len(),
+            KError::ALL.len(),
+            "a row without a Linux value here"
+        );
+        for &(e, n, name) in linux {
+            assert_eq!(e.errno(), n, "{name}");
+            assert_eq!(e.name(), name);
+            assert!(KError::ALL.contains(&e), "{name} missing from ALL");
+        }
+        for (i, a) in KError::ALL.iter().enumerate() {
+            assert!((1..=4095).contains(&a.errno()), "{a:?}");
+            for b in &KError::ALL[i + 1..] {
+                assert_ne!(a.name(), b.name());
+            }
         }
     }
 }

@@ -31,6 +31,7 @@ pub unsafe fn init() {
     });
     crate::ipi_init::set_reschedule_hook(thread_init::schedule_preempt);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    per_cpu_init::arm_if_checks();
     LIVE.store(true, Ordering::Release);
 }
 
@@ -51,7 +52,7 @@ pub fn on_timer_tick() {
         // Single writer: only this CPU stores its `ticks`.
         let ticks = cpu.remote.ticks.load(Ordering::Relaxed).wrapping_add(1);
         cpu.remote.ticks.store(ticks, Ordering::Relaxed);
-        let idle = cpu.current == cpu.idle && !cpu.idle.is_null();
+        let idle = crate::arch::current_tcb() == cpu.idle && !cpu.idle.is_null();
         vibeos::sched::should_preempt(ticks, idle)
     });
     if preempt {
@@ -73,5 +74,5 @@ fn idle_main() {
 
 #[cfg(feature = "kernel_tests")]
 pub fn idle_tsc() -> u64 {
-    per_cpu_init::current().idle_tsc
+    per_cpu_init::with_current(|c| c.idle_tsc)
 }

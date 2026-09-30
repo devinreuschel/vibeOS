@@ -88,9 +88,11 @@ Built in the one `target/` like every variant, but copied to its own named ELF,
 fussiness: an ISO recipe that packaged whatever ELF the last build left in `target/` could put a
 feature-enabled ELF into the production ISO, and the difference is not visible from the outside.
 Each variant's recipe removes its named ELF first, builds with `--artifact-dir`, so a parallel
-build of another variant cannot swap the file, and writes the named ELF last. The panic-dump and `#GP` ISOs
-are `--features panic_test --features panic_exit` and `--features gp_test --features panic_exit`
-(underscores everywhere; Cargo features in this crate do not use hyphens).
+build of another variant cannot swap the file, and writes the named ELF last. The panic-dump, `#GP`,
+panic-nest and panic-stop ISOs are `--features panic_test --features panic_exit`, `--features gp_test
+--features panic_exit`, `--features panic_nest_test --features panic_exit` and `--features
+panic_stop_test --features panic_exit` (underscores in features; Cargo
+features in this crate do not use hyphens, and the variant names do not use underscores).
 
 ```
 vibeOS: ktest: begin <n>
@@ -274,6 +276,12 @@ vector (`virtio_blk_init::queue_vector`), mounts `vda` through the File API, wri
 is on, so the virtio-blk top half lands on the write path. The test requires at least 64 self-IPIs
 and no send error, at least as many new top-half runs, and the worker's exit depth within budget;
 the boot requires its `ok` line and the stack check as every boot does.
+Then the two virtio-blk failure boots (ROADMAP §10.11, F046), each through `_single_test_boot`
+with its own device tuple, whose `vda` is a 4 MiB pattern image (`harness.make_pattern_disk`, every
+byte of sector n `(n & 0xFF) ^ 0xA5`, so no GPT is stamped and no partition marker is required):
+the opt-in `vblk_readonly` on a `readonly=on` image (`_vblk_readonly_boot`), and the opt-in
+`vblk_bad_sector` on an image behind QEMU's `blkdebug`, which fails every read of sector 4096
+(`_vblk_bad_sector_boot`). Each boot requires its one `ok` line.
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
@@ -416,10 +424,18 @@ marker still unmatched there fails the run (F141). From that line on it counts d
 that opens a dump, and requires exactly one: the bare `vibeOS: panic:` of a Rust panic,
 `vibeOS: exception: vector <n> rip=0x…`, `vibeOS: <kind> rip=0x…` for `#UD`, `nmi`, `#DB`, `#GP`,
 `#PF`, `#DF`, and `#MC`, or `vibeOS: panic: reentered` (`DUMP_BANNER_RE`); the other signature lines
-of a dump do not count. Planned (ROADMAP §10.7, F135): before
-`panic: halted` the dump prints one `vibeOS: panic: cpu N stopped (ipi|poll|nmi|panic)` or
-`vibeOS: panic: cpu N not stopped` line for each other online CPU (§2.5 step 1), and the F135
-variant checks them. `panic_exit` writes isa-debug-exit
+of a dump do not count. Before `panic: halted` the dump prints one
+`vibeOS: panic: cpu N stopped (ipi|poll|nmi|panic)` line, with its `cpu N regs:` line, or one
+`vibeOS: panic: cpu N not stopped` line for each other online CPU (§2.5 step 1). Two panic-path
+variants boot the full contract through their armed line (`VIBEOS_PANIC_VARIANT`, `run_e2e`) and then
+run `tests/harness/panic_dump.py`'s check on the dump: `make test-e2e-panic-nest` (`nest`) underflows
+`irq_nest` and requires its own message, one banner, no `reentered` and one `halted` (ROADMAP §10.7,
+F071); `make test-e2e-panic-stop` (`stop`, `VIBEOS_SMP=5`) panics CPUs 0 and 1 at once while CPU 2
+prints `vibeOS: panic_stop: line <n>` with IF=0, CPU 3 waits with IF=0 on a lock CPU 0 holds, and CPU
+4 spins with IF=0, and requires the other of CPUs 0 and 1 `stopped (panic)`, CPUs 2 and 3
+`stopped (poll)`, CPU 4 `stopped (nmi)`, no numbered line after the first `vibeOS: panic:` line (a
+`logrec:` replay does not count), and `vibeOS: panic_stop: owner nmi returned`, which the owner prints
+once the NMI it sends itself after its message has come back (F135). `panic_exit` writes isa-debug-exit
 `0x11` so QEMU leaves instead of sitting in `hlt`. The harness reads through `vibeOS: panic: halted`,
 so the dump (regs, thread, last log records, backtrace) is in the captured log, then gives QEMU up to
 10 s (`PANIC_EXIT_S`) to exit and requires status 35 (`PANIC_EXIT_STATUS`); then it checks the dump
@@ -525,7 +541,7 @@ number of images checked, and the trace's write and flush counts.
 | e2e | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -no-reboot -display none -serial stdio -monitor unix:...,server=on,wait=off -accel tcg -device pvpanic -device vmcoreinfo` (`harness.qemu_argv`; the two forensics devices, `FORENSICS_DEVICES`, are on every x86_64 boot: `vmcoreinfo` takes the kernel's note, [VMCOREINFO.md](VMCOREINFO.md)) |
 | UEFI (`VIBEOS_BIOS=uefi`, `make test-e2e-uefi`) | as e2e plus `-drive if=pflash,format=raw,unit=0,readonly=on,file=<code>` and `-drive if=pflash,format=raw,unit=1,file=<copy>`, where `<copy>` is a fresh copy of the pair's variable-store template made for each QEMU start (`harness.new_vars_copy`, in one per-process temporary directory that exit removes), and `-boot order=d,menu=off` with `-fw_cfg` entries turning off OVMF's PXE and setup (`harness.OVMF_BOOT_ARGS`). A comma in a path is doubled. Never `-bios` |
 | `make run`, `make run-panic`, `make debug` | e2e's argv, so with `-device pvpanic` and `-device vmcoreinfo`, from `tests/harness/run_interactive.py` (`run`, `panic`, `debug`), which builds it with `env_config` and `harness.qemu_argv` and adds no `-monitor`: `make run` opens a display window instead of `-display none`, `make run-panic` boots `build/vibeos-panic.iso` with `-display none`, and `make debug` is `make run` plus `-s -S`. COM1 is the terminal (`-serial stdio`), and the launcher ignores `SIGINT` while QEMU runs |
-| ktest | as e2e (so with `-device pvpanic` and `-device vmcoreinfo`) plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, two virtio-blk disks (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`, then the same for a blank 1 MiB `vibehd1`, which binds as `vdb`; the proof boots take only the first, `harness.ktest_devices(..., extra_disks=...)`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`); neither forensics device is PCI. After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
+| ktest | as e2e (so with `-device pvpanic` and `-device vmcoreinfo`) plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, a second virtio-rng at `00:1d.0` (`-device virtio-rng-pci,disable-legacy=on,addr=0x1d`, which the driver refuses since one is bound: `rng_second_probe_refused`), a virtio-blk at `00:1e.0` on a 1 MiB `null-co` node (`-blockdev driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on` + `-device virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e`), whose probe a `kernel_tests` hook fails after `QENABLE` at every boot (`virtio_probe_fail_quiesces`), two virtio-blk disks (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`, then the same for a blank 1 MiB `vibehd1`, which binds as `vdb`; the proof boots take only the first, `harness.ktest_devices(..., extra_disks=...)`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`); neither forensics device is PCI. After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` (`LAPIC_FALLBACK_CPU` in the Makefile) |
 | KVM leg (nightly `kvm` job, §8.6) | `-accel kvm -cpu max,+invtsc` through `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, since QEMU leaves invariant TSC out of its default migratable vCPU even under KVM; `/dev/kvm` is opened to the runner user by GitHub's documented udev rule; the LAPIC fallback runs on `qemu64,+invtsc,-tsc-deadline` (`make test-lapic-fallback LAPIC_FALLBACK_CPU=…`), so the invariant-TSC check still applies and the mode is `periodic` |
@@ -707,8 +723,8 @@ includes its `cargo test` of the host tools, the one tier that needs the toolcha
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
-| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic` | 32 |
-| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-strace` | 30 |
+| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest` | 40 |
+| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-strace`, `test-e2e-panic-stop` | 40 |
 | x86_64 | in-guest-1 | `test-kernel` | 64 |
 | x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
 | x86_64 | in-guest-3 | `test-lapic-fallback` | 50 |
@@ -720,7 +736,7 @@ each pass 40 s alone and cannot split below a target.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`); on a pull request, `scripts/check_gate_inputs.py` against its merge base; then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines <floor>`, the floor in `tests/gates/inputs.toml`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test` and `panic_stop_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
 | `ci-pass` | every per-push run | `needs:` every other job, `if: always()`; fails unless each succeeded, a job gated on the event being allowed to skip (`scripts/check_gate_inputs.py --ci-pass`, which the job runs with `NEEDS: ${{ toJSON(needs) }}` and `SKIPPABLE: ticks`; its static rules fail when the job misses one, lacks `if: always()`, or lists in `SKIPPABLE` a job whose `if:` does not test `github.event_name`) |

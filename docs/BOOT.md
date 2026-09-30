@@ -179,7 +179,7 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 15 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver (step 17). |
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
-| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (§9.2). |
+| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Scan records each function's parent bridge and maps no BAR: a driver maps a memory BAR it has claimed, in its `probe`, through `pci_init::map_bar` (DEVICES.md §12.3); a BAR above 32 MiB is claimed but not mapped (§9.2). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. each virtio-blk function (`vda`, `vdb`, …) emits during its probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
 | 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. The FAT32 initrd Limine loaded as a module (§3.2), mounted read-write in place through the physmap, at `/` when live; with no module, or one past `map_end`, a ramfs root. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. a heap-backed vibefs instance at `/vibe` (Phase 8D). No serial marker: a root without `/sbin/init` shows as `user: init failed` and no `shell ready`. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
 | 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. The bootstrap thread spawns `/hello` and waits for it (`proc_init::spawn_elf`, `proc_init::wait_kernel`), `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests`, waits for it, and prints `init: /bin/tests exited <status>` on fd 2 when the wait status is nonzero, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/sh.asm`); the marker is not kernel-emitted; the harness requires `user: tests ok` before it (ROADMAP §10.2). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
@@ -222,12 +222,12 @@ initialized, then the keyboard GSI is unmasked. After LAPIC owns the tick the
 default PIC handler still halts on an unexpected line (§5.5 gives ROADMAP §10.6's change). The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
-Step 17b enumerates PCI (ECAM where the first MCFG allocation covers the bus, else CF8 on bus 0 only), maps
-memory BARs under the 32 MiB cap, fills the device registry, and emits
+Step 17b enumerates PCI (ECAM where the first MCFG allocation covers the bus, else CF8 on bus 0 only),
+fills the device registry, and emits
 `pci: N devices`. Workqueue workers and the threaded-IRQ bottom half start
 next. Drivers register, then bind after the scan, not inline. Virtio-rng
-matches by id when a modern virtio device is present (ktest adds one; e2e
-does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
+matches by id when a modern virtio device is present (ktest adds two, and
+the driver refuses the second; e2e does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
 Partition scan stamps an MBR on `ram0`. Only a `kernel_tests` build stamps a GPT, and only on a `vda`
 whose table fails to parse or has no entries and whose LBA 0–33 and last 33 sectors all read back as
 zeros; the production kernel never writes `vda` here ([section 10.5](BLOCK.md#105-partitions); ROADMAP

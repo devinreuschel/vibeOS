@@ -2,14 +2,14 @@
 //!
 //! Transport + virtio-rng. virtio-blk is `virtio_blk_init`. ROADMAP §6.5.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::dev::{ClaimError, DevRef, Device, Driver, IdMatch, Instance, ProbeError};
+use vibeos::dev::{DevRef, Device, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
-use vibeos::pci::MAX_BARS;
+use vibeos::pci::{Bdf, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::virtio::{
     self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
     COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER, COMMON_OFF_QENABLE, COMMON_OFF_QMSIX,
@@ -43,7 +43,7 @@ struct Q {
 }
 
 static Q: SpinMutex<Option<Q>> = SpinMutex::with_rank(None, RANK_DEVICE);
-static ISR_VA: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ISR_VA: AtomicU64 = AtomicU64::new(0);
 pub(super) static TOP_HITS: AtomicU32 = AtomicU32::new(0);
 pub(super) static THREAD_HITS: AtomicU32 = AtomicU32::new(0);
 pub(super) static COMPLETIONS: AtomicU32 = AtomicU32::new(0);
@@ -56,6 +56,13 @@ pub(super) static QDMA_DEV: AtomicU64 = AtomicU64::new(0);
 pub(super) static DATA_DEV: AtomicU64 = AtomicU64::new(0);
 pub(super) static DATA_VIRT: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// The bound device ([`bdf_key`], 0 for none), its common configuration
+/// and its vector (0 for none), which `remove` stops and frees.
+static DEV_KEY: AtomicU64 = AtomicU64::new(0);
+static COMMON_VA: AtomicU64 = AtomicU64::new(0);
+static VEC: AtomicU8 = AtomicU8::new(0);
+/// Frames kept because a device's bus mastering would not turn off.
+pub(crate) static KEPT_FRAMES: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const RNG_PAYLOAD: usize = 32;
 const RNG_PAYLOAD_OFF: usize = 16;
@@ -119,16 +126,15 @@ fn w64(va: u64, off: u16, v: u64) {
     w32(va, off + 4, (v >> 32) as u32);
 }
 
-fn region(dev: &Device, cap: PciCap) -> Option<u64> {
-    let bir = cap.bar as usize;
-    if bir >= MAX_BARS {
+/// The VA of capability `cap`'s region, inside a BAR the probe claimed
+/// and mapped (`dev_init::claim_mem_bars`).
+fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
+    let r = dev.resources.get(cap.bar as usize)?;
+    if (cap.offset as u64) >= r.size {
         return None;
     }
-    let r = dev.resources[bir];
-    if r.mapped_va == 0 || (cap.offset as u64) >= r.size {
-        return None;
-    }
-    Some(r.mapped_va.wrapping_add(cap.offset as u64))
+    let va = dev_init::bar_va(dev, cap.bar)?;
+    Some(va.wrapping_add(cap.offset as u64))
 }
 
 fn clamp_qsize(hw: u16) -> u16 {
@@ -154,32 +160,113 @@ fn write_features(common: u64, feat: u64) {
     w32(common, COMMON_OFF_DR, (feat >> 32) as u32);
 }
 
-fn reset(common: u64) -> bool {
+/// `bdf` as a nonzero word, for an atomic that names a device.
+pub(crate) fn bdf_key(bdf: Bdf) -> u64 {
+    1 << 63
+        | u64::from(bdf.segment) << 24
+        | u64::from(bdf.bus) << 16
+        | u64::from(bdf.device) << 8
+        | u64::from(bdf.function)
+}
+
+/// Reads of device status [`reset`] makes at most: DESIGN §9.6's cap on a
+/// poll of a device that may never answer.
+pub(crate) const RESET_POLLS: u32 = 1_000_000;
+
+/// Write device status 0 and poll until it reads 0, at most
+/// [`RESET_POLLS`] reads; whether it did.
+pub(crate) fn reset(common: u64) -> bool {
     w8(common, COMMON_OFF_STATUS, 0);
     let mut n = 0u32;
-    while r8(common, COMMON_OFF_STATUS) != 0 {
-        if n > 1_000_000 {
-            return false;
+    while n < RESET_POLLS {
+        if r8(common, COMMON_OFF_STATUS) == 0 {
+            return true;
         }
         n += 1;
         core::hint::spin_loop();
     }
-    true
+    false
 }
 
-fn fail_status(common: u64) {
-    let st = r8(common, COMMON_OFF_STATUS);
-    w8(common, COMMON_OFF_STATUS, st | virtio::STATUS_FAILED);
+/// How far [`stop_device`] got. Only `Stuck` keeps memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stopped {
+    /// Status read back 0, and bus mastering reads back off.
+    Reset,
+    /// The reset timed out, but bus mastering reads back off, so the
+    /// device can no longer reach memory.
+    MasterOff,
+    /// Bus mastering still reads back on: the device may still write the
+    /// memory it was given.
+    Stuck,
 }
 
-fn fail_armed(dev: &Device, common: u64, vec: u8) {
+/// Quiesce a virtio function that may hold queue addresses: device status
+/// 0, polled within [`RESET_POLLS`] reads, then `COMMAND.MASTER` cleared
+/// and read back (DESIGN §12.3). Run it with no spinlock held and IF as
+/// the caller left it, before any vector or memory the device was given
+/// is freed (INTERRUPTS.md §5.4).
+pub(crate) fn stop_device(bdf: Bdf, common: u64) -> Stopped {
+    let reset_ok = reset(common);
+    if !reset_ok {
+        crate::marker!("vibeOS: virtio: {} reset timeout", bdf);
+    }
+    let cmd = pci_init::update_command(bdf, 0, CMD_MASTER);
+    #[cfg(feature = "kernel_tests")]
+    crate::dev::ktest::record_quiesce(bdf, reset_ok, r8(common, COMMON_OFF_STATUS), cmd);
+    if cmd & CMD_MASTER != 0 {
+        Stopped::Stuck
+    } else if reset_ok {
+        Stopped::Reset
+    } else {
+        Stopped::MasterOff
+    }
+}
+
+/// Give `buf` back to the buddy allocator, or, after `Stuck`, keep it:
+/// forgotten, never dropped (C-FRAMES), and counted in [`KEPT_FRAMES`].
+/// The frames it kept.
+pub(crate) fn release(stopped: Stopped, buf: DmaBuffer) -> usize {
+    if stopped != Stopped::Stuck {
+        dma_init::free(buf);
+        return 0;
+    }
+    let n = buf.frame_count();
+    core::mem::forget(buf);
+    KEPT_FRAMES.fetch_add(n as u64, Ordering::Relaxed);
+    n
+}
+
+/// The line for a device whose bus mastering stayed on: its `kept` frames
+/// stay allocated (PITFALLS.md §9.6's action at the poll cap).
+pub(crate) fn report_stuck(bdf: Bdf, stopped: Stopped, kept: usize) {
+    if stopped == Stopped::Stuck {
+        crate::marker!(
+            "vibeOS: virtio: {} bus master stuck, {} frames kept",
+            bdf,
+            kept
+        );
+    }
+}
+
+/// The one unwind of a probe that fails once bus mastering is on, in
+/// INTERRUPTS.md §5.4's order: stop the device, turn MSI-X off and free
+/// `vec`, then free `bufs`, or keep them when the device is `Stuck`.
+fn fail_probe(dev: &Device, common: u64, vec: Option<u8>, bufs: [Option<DmaBuffer>; 2]) {
+    let stopped = stop_device(dev.addr, common);
     irq_init::disable_msix(dev);
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
-    )]
-    let _ = irq_init::free_vector(vec);
-    fail_status(common);
+    if let Some(v) = vec {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+        )]
+        let _ = irq_init::free_vector(v);
+    }
+    let mut kept = 0usize;
+    for b in bufs.into_iter().flatten() {
+        kept = kept.saturating_add(release(stopped, b));
+    }
+    report_stuck(dev.addr, stopped, kept);
 }
 
 /// The softirq half: proves a work item may allocate. The test observable
@@ -273,16 +360,21 @@ fn kick(doorbell: u64) {
     }
 }
 
-fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
+fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
     let notify_cap = caps.notify.ok_or(VirtioError::NoCaps)?;
     let isr_cap = caps.isr.ok_or(VirtioError::NoCaps)?;
     let common = region(dev, common_cap).ok_or(VirtioError::NoCaps)?;
     let notify_base = region(dev, notify_cap).ok_or(VirtioError::NoCaps)?;
     let isr = region(dev, isr_cap).ok_or(VirtioError::NoCaps)?;
+    // Memory decode before the first touch, with bus mastering off, which
+    // firmware can leave on; bus mastering only once the reset completed
+    // (DESIGN §12.3).
+    pci_init::update_command(dev.addr, CMD_MEM, CMD_MASTER);
     if !reset(common) {
         return Err(VirtioError::Failed);
     }
+    pci_init::update_command(dev.addr, CMD_MASTER, 0);
     w8(common, COMMON_OFF_STATUS, STATUS_ACKNOWLEDGE);
     w8(
         common,
@@ -293,7 +385,7 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
     let feat = match pick_features(device_feat, OFFER) {
         Ok(f) => f,
         Err(e) => {
-            fail_status(common);
+            fail_probe(dev, common, None, [None, None]);
             return Err(e);
         }
     };
@@ -304,38 +396,29 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
         STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
     );
     if r8(common, COMMON_OFF_STATUS) & STATUS_FEATURES_OK == 0 {
-        fail_status(common);
+        fail_probe(dev, common, None, [None, None]);
         return Err(VirtioError::Features);
     }
 
     let cpu = irq_init::threaded_cpu();
     let Some(pc) = per_cpu_init::cpu(cpu) else {
-        fail_status(common);
+        fail_probe(dev, common, None, [None, None]);
         return Err(VirtioError::Failed);
     };
     let vec = match irq_init::allocate_vector(cpu) {
         Ok(v) => v,
         Err(_) => {
-            fail_status(common);
+            fail_probe(dev, common, None, [None, None]);
             return Err(VirtioError::Failed);
         }
     };
     if irq_init::set_threaded(vec, Some(rng_top), rng_work, None).is_err() {
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
-        )]
-        let _ = irq_init::free_vector(vec);
-        fail_status(common);
+        fail_probe(dev, common, Some(vec), [None, None]);
         return Err(VirtioError::Failed);
     }
+    pci_init::update_command(dev.addr, CMD_INTX_DISABLE, 0);
     if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8) {
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
-        )]
-        let _ = irq_init::free_vector(vec);
-        fail_status(common);
+        fail_probe(dev, common, Some(vec), [None, None]);
         return match e {
             IrqError::NoRoute => Err(VirtioError::NoCaps),
             _ => Err(VirtioError::Failed),
@@ -347,21 +430,20 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
     let hw_qs = r16(common, COMMON_OFF_QSIZE);
     let qsz = clamp_qsize(hw_qs);
     if qsz == 0 {
-        fail_armed(dev, common, vec);
+        fail_probe(dev, common, Some(vec), [None, None]);
         return Err(VirtioError::BadQueue);
     }
     w16(common, COMMON_OFF_QSIZE, qsz);
     let Some(layout) = SplitLayout::new(qsz) else {
-        fail_armed(dev, common, vec);
+        fail_probe(dev, common, Some(vec), [None, None]);
         return Err(VirtioError::BadQueue);
     };
     let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
-        fail_armed(dev, common, vec);
+        fail_probe(dev, common, Some(vec), [None, None]);
         return Err(VirtioError::Failed);
     };
     let Some(data) = dma_init::alloc(DmaAlloc::dma32(64)) else {
-        dma_init::free(qdma);
-        fail_armed(dev, common, vec);
+        fail_probe(dev, common, Some(vec), [Some(qdma), None]);
         return Err(VirtioError::Failed);
     };
     // SAFETY: both buffers were just allocated, are `len()` bytes long at
@@ -397,6 +479,11 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
     );
     w16(common, COMMON_OFF_QMSIX, 0);
     w16(common, COMMON_OFF_QENABLE, 1);
+    #[cfg(feature = "kernel_tests")]
+    if crate::dev::ktest::fail_after_qenable(dev.addr) {
+        fail_probe(dev, common, Some(vec), [Some(qdma), Some(data)]);
+        return Err(VirtioError::Failed);
+    }
     let qoff = r16(common, COMMON_OFF_QNOTIFY);
     let Some(doorbell) = notify_addr(
         notify_base,
@@ -405,9 +492,7 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
         qoff,
         notify_cap.notify_off_multiplier,
     ) else {
-        dma_init::free(qdma);
-        dma_init::free(data);
-        fail_armed(dev, common, vec);
+        fail_probe(dev, common, Some(vec), [Some(qdma), Some(data)]);
         return Err(VirtioError::Notify);
     };
 
@@ -415,6 +500,9 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
     w8(common, COMMON_OFF_STATUS, st | STATUS_DRIVER_OK);
 
     ISR_VA.store(isr, Ordering::Release);
+    COMMON_VA.store(common, Ordering::Release);
+    VEC.store(vec, Ordering::Release);
+    DEV_KEY.store(bdf_key(dev.addr), Ordering::Release);
     FEATURES.store(feat, Ordering::Release);
     QDMA_DEV.store(qdma.device().as_u64(), Ordering::Release);
     DATA_DEV.store(data.device().as_u64(), Ordering::Release);
@@ -443,36 +531,14 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
     Ok(())
 }
 
-/// Claim each BAR a capability in `caps` lives in. Several capabilities
-/// share a BAR, so `Already` on one this device claimed is success.
-fn claim_bars(dev: &DevRef, caps: &ModernCaps) -> Result<(), ProbeError> {
-    for c in [caps.common, caps.notify, caps.isr, caps.device]
-        .into_iter()
-        .flatten()
-    {
-        let i = c.bar as usize;
-        if i >= MAX_BARS || dev.resources[i].is_empty() {
-            continue;
-        }
-        match dev_init::claim(dev, c.bar) {
-            Ok(()) | Err(ClaimError::Already) => {}
-            Err(ClaimError::Overlap) => return Err(ProbeError::Busy),
-            Err(ClaimError::Empty | ClaimError::BadIndex) => {
-                return Err(ProbeError::NoResource);
-            }
-        }
-    }
-    Ok(())
-}
-
-struct RngDriver;
+pub(crate) struct RngDriver;
 
 static RNG_IDS: &[IdMatch] = &[
     IdMatch::vid_did(VENDOR_ID, DEV_RNG_MODERN),
     IdMatch::vid_did(VENDOR_ID, DEV_RNG_LEGACY),
 ];
 
-static RNG_DRV: RngDriver = RngDriver;
+pub(crate) static RNG_DRV: RngDriver = RngDriver;
 
 impl Driver for RngDriver {
     fn name(&self) -> &'static str {
@@ -486,17 +552,26 @@ impl Driver for RngDriver {
     }
     /// virtio-rng stays one device with module state (ROADMAP §10.12), so
     /// the registry owns no instance of it.
+    /// A second function is refused before anything touches it, so it
+    /// cannot overwrite `Q` and `ISR_VA` and orphan the first device's
+    /// queue and vector (ROADMAP §10.12, F121). The check is a load:
+    /// `dev_init::bind_all` probes one device at a time, and a concurrent
+    /// binder would need a claim (a compare-exchange) instead.
     fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+        if BOUND.load(Ordering::Acquire) {
+            crate::marker!("vibeOS: virtio: rng {} already bound", dev.addr);
+            return Err(ProbeError::Busy);
+        }
         let caps = virtio::read_modern_caps(&mut pci_init::HwCfg, dev.addr);
         if !caps.is_complete() {
             crate::marker!("vibeOS: virtio: missing modern caps");
             return Err(ProbeError::NoResource);
         }
-        claim_bars(dev, &caps)?;
-        match setup(dev, caps) {
+        dev_init::claim_mem_bars(dev)?;
+        let r = match setup(dev, caps) {
             Ok(()) => {
                 BOUND.store(true, Ordering::Release);
-                Ok(None)
+                return Ok(None);
             }
             Err(VirtioError::NoVersion1) => {
                 crate::marker!("vibeOS: virtio: no VERSION_1");
@@ -506,9 +581,47 @@ impl Driver for RngDriver {
                 crate::marker!("vibeOS: virtio: probe {}", e.as_str());
                 Err(ProbeError::Failed)
             }
-        }
+        };
+        // `setup` stopped the device before it failed, so its BARs go.
+        dev_init::release_bars(dev);
+        r
     }
-    fn remove(&self, _dev: &DevRef) {}
+    /// DEVICES.md §12.2 rule 7's one quiesce. The queue leaves `Q` first,
+    /// so the bottom half finds nothing to harvest, and the top half no
+    /// ISR; then the device stops before its vector and memory go, and
+    /// `BOUND` clears last, when nothing of the device is left.
+    fn remove(&self, dev: &DevRef) {
+        if DEV_KEY.load(Ordering::Acquire) != bdf_key(dev.addr) {
+            return;
+        }
+        let q = Q.lock().take();
+        ISR_VA.store(0, Ordering::Release);
+        let common = COMMON_VA.swap(0, Ordering::AcqRel);
+        let stopped = if common != 0 {
+            stop_device(dev.addr, common)
+        } else {
+            Stopped::Reset
+        };
+        irq_init::disable_msix(dev);
+        let vec = VEC.swap(0, Ordering::AcqRel);
+        if vec != 0 && irq_init::free_vector(vec).is_err() {
+            crate::klog!(
+                vibeos::log::Level::Warn,
+                "vibeOS: virtio: rng {} vector {:#x} not freed",
+                dev.addr,
+                vec
+            );
+        }
+        if let Some(Q { qdma, data, .. }) = q {
+            let kept = release(stopped, qdma).saturating_add(release(stopped, data));
+            report_stuck(dev.addr, stopped, kept);
+        }
+        IN_FLIGHT.store(false, Ordering::Release);
+        DEV_KEY.store(0, Ordering::Release);
+        // The device is stopped and every VA into its BARs dropped.
+        dev_init::release_bars(dev);
+        BOUND.store(false, Ordering::Release);
+    }
 }
 
 pub fn init() {
@@ -579,7 +692,7 @@ pub fn rng_request() -> Result<(), VirtioError> {
     } else {
         q.vq.add(payload, RNG_PAYLOAD as u32, virtio::DESC_F_WRITE)?;
     }
-    let old = q.vq.last_avail;
+    let old = q.vq.last_avail();
     q.vq.publish();
     q.qdma.sync_for_device::<Arch>();
     if q.vq.should_kick(old) {

@@ -6,11 +6,14 @@ use core::alloc::Layout;
 use core::fmt;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use vibeos::arch::PageTable;
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
+use vibeos::limits::MAX_UNMAP_PAGES;
 use vibeos::paging::{self, PageFlags, PageSize, PhysAddr, VirtAddr, heap_flags};
 use vibeos::pmm::Frames;
 
+use crate::arch::current::Arch;
 use crate::diag;
 use crate::ktest::{
     Outcome, Test, alloc_frame, alloc_frames_owned, catch_alloc_error, catch_fault, free_frame,
@@ -21,7 +24,6 @@ use crate::kva_init;
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::thread_init;
-use crate::x86;
 
 // ------------------ tests ------------------
 
@@ -70,6 +72,7 @@ pub(crate) fn test_map_unmap() -> Outcome {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_nx_enforcement() -> Outcome {
     let Some(va) = alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
@@ -240,6 +243,7 @@ pub(crate) fn test_heap_oom() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_stack_guard() -> Outcome {
     let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
@@ -387,7 +391,7 @@ pub(crate) fn test_mmio_uc_flags() -> Outcome {
             )
         }
     };
-    x86::invlpg(leaf_va.as_u64());
+    <Arch as PageTable>::flush_local(leaf_va);
     paging::tlb_shootdown_others(leaf_va);
     if restored.is_err() {
         return Outcome::Fail("restore map_page");
@@ -680,6 +684,27 @@ const VMAP_ORDER: u8 = 5;
 
 const VMAP_PAGES: u64 = 1 << VMAP_ORDER;
 
+/// `unmap_shootdown` over `MAX_UNMAP` pages hits its assertion before it
+/// takes PT, where it clamped silently before (ROADMAP §10.3, F107).
+pub(crate) fn unmap_shootdown_over_max_asserts() -> Outcome {
+    let n = MAX_UNMAP_PAGES + 1;
+    let len = n as u64 * PAGE_SIZE;
+    let Some(va) = alloc_va(len) else {
+        return Outcome::Fail("kva alloc");
+    };
+    let if_on = crate::arch::current::interrupts_enabled();
+    let nest = per_cpu_init::irq_nest();
+    let hit = crate::arch::catch::catch_panic(|| kva_init::unmap_shootdown(va, n));
+    free_va(va, len);
+    if !hit {
+        return Outcome::Fail("no assertion");
+    }
+    if crate::arch::current::interrupts_enabled() != if_on || per_cpu_init::irq_nest() != nest {
+        return Outcome::Fail("irq_nest or IF changed");
+    }
+    Outcome::Ok
+}
+
 /// A 32-frame `vmap` maps the handle's own frames, and `vunmap` unmaps all
 /// 32 pages and returns exactly the span it mapped to the KVA free list.
 pub(crate) fn vmap_32_frames_unmapped() -> Outcome {
@@ -796,7 +821,7 @@ pub(crate) mod fail_after {
 
     use vibeos::thread::ThreadId;
 
-    use crate::x86::InterruptGuard;
+    use crate::arch::current::InterruptGuard;
     use crate::{per_cpu_init, syscall_init, thread_init};
 
     /// Which allocations the hook counts.
@@ -891,6 +916,7 @@ static VA0_RESULT: AtomicU64 = AtomicU64::new(0);
 
 /// Read VA 0 under `catch_fault` with an asm load (a Rust null
 /// dereference is UB) and classify the result.
+#[cfg(target_arch = "x86_64")]
 fn va0_probe() -> u64 {
     let fault = catch_fault(|| {
         // SAFETY: the load reads VA 0, which the identity teardown leaves
@@ -914,7 +940,8 @@ fn va0_probe() -> u64 {
 }
 
 fn va0_entry() {
-    let cpu = u64::from(per_cpu_init::current().cpu_id);
+    // Pinned by `spawn_thread_on`, so the hint is this thread's CPU.
+    let cpu = u64::from(thread_init::current_cpu());
     // Release: publishes the result to `kernel_va0_faults`.
     VA0_RESULT.store(cpu << 32 | va0_probe(), Ordering::Release);
 }
@@ -923,7 +950,8 @@ fn va0_entry() {
 /// kernel read of VA 0 faults on every online CPU. `catch_fault`'s one
 /// jump buffer serves one CPU at a time, so the CPUs probe in turn.
 pub(crate) fn kernel_va0_faults() -> Outcome {
-    let me = per_cpu_init::current().cpu_id;
+    // The registry is pinned, so the hint is its CPU.
+    let me = thread_init::current_cpu();
     let online = per_cpu_init::online_mask();
     for cpu in (0..64u32).filter(|c| online & (1u64 << c) != 0) {
         let r = if cpu == me {
@@ -953,12 +981,14 @@ pub(crate) fn kernel_va0_faults() -> Outcome {
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("map_unmap", test_map_unmap),
+    #[cfg(target_arch = "x86_64")]
     test("nx_enforcement", test_nx_enforcement),
     test("heap_box", test_heap_box),
     test("heap_reuse", test_heap_reuse),
     test("heap_align", test_heap_align),
     test("heap_growth", test_heap_growth),
     test("heap_oom", test_heap_oom),
+    #[cfg(target_arch = "x86_64")]
     test("stack_guard", test_stack_guard),
     test("kva_roundtrip", test_kva_roundtrip),
     test("kva_deferred", test_kva_deferred),
@@ -969,5 +999,9 @@ pub(crate) const TESTS: &[Test] = &[
     test("frames_none_leaked", frames_none_leaked),
     test("current_mapper_holds_pt", current_mapper_holds_pt),
     test("vmap_32_frames_unmapped", vmap_32_frames_unmapped),
+    test(
+        "unmap_shootdown_over_max_asserts",
+        unmap_shootdown_over_max_asserts,
+    ),
     test("kernel_va0_faults", kernel_va0_faults),
 ];

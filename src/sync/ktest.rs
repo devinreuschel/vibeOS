@@ -15,12 +15,11 @@ use crate::sync::blocking_init::{BlockingMutex, Channel, Condvar, RwLock, Semaph
 use crate::sync_init::{self, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
-use crate::x86;
 
 pub(crate) fn test_irqcell_reentry_panics() -> Outcome {
     static C: crate::cell::IrqCell<u32> = crate::cell::IrqCell::new(0);
     // The longjmp skips both `IrqCell` guards; this one restores IF.
-    let _g = x86::InterruptGuard::enter();
+    let _g = crate::arch::current::InterruptGuard::enter();
     let nest0 = per_cpu_init::irq_nest();
     let hit = arch::catch::catch_panic(|| {
         C.with(|_| {
@@ -31,9 +30,7 @@ pub(crate) fn test_irqcell_reentry_panics() -> Outcome {
     // closure resumes, so the holder never touches `C` again; established
     // here.
     unsafe { C.force_unlock() };
-    per_cpu_init::current()
-        .irq_nest
-        .store(nest0, Ordering::Relaxed);
+    crate::ktest::restore_irq_nest(nest0);
     if !hit {
         return Outcome::Fail("no panic");
     }
@@ -64,9 +61,7 @@ pub(crate) fn test_bootcell_set_once() -> Outcome {
     let hit = arch::catch::catch_panic(|| {
         let _ = U.get();
     });
-    per_cpu_init::current()
-        .irq_nest
-        .store(nest0, Ordering::Relaxed);
+    crate::ktest::restore_irq_nest(nest0);
     if !hit {
         return Outcome::Fail("unset get");
     }
@@ -77,7 +72,7 @@ pub(crate) fn test_spin_mutex() -> Outcome {
     let m = SpinMutex::new(0u64);
     {
         let mut g = m.lock();
-        if x86::interrupts_enabled() {
+        if crate::arch::current::interrupts_enabled() {
             return Outcome::Fail("lock left IF on");
         }
         *g = 42;
@@ -119,7 +114,7 @@ pub(crate) fn test_lock_spins() -> Outcome {
 /// ranks first (DESIGN §2.1).
 pub(crate) fn test_rank_alloc_under_pt_asserts() -> Outcome {
     let layout = Layout::new::<u8>();
-    let if0 = x86::interrupts_enabled();
+    let if0 = crate::arch::current::interrupts_enabled();
     let nest0 = per_cpu_init::irq_nest();
     let held0 = sync_init::testing::held();
     let fails0 = sync_init::testing::rank_failures();
@@ -138,9 +133,7 @@ pub(crate) fn test_rank_alloc_under_pt_asserts() -> Outcome {
         });
         // The longjmp skipped the `InterruptGuard` that `HEAP.lock()`
         // entered; PT's guard drop restores IF.
-        per_cpu_init::current()
-            .irq_nest
-            .store(nest_pt, Ordering::Relaxed);
+        crate::ktest::restore_irq_nest(nest_pt);
         // SAFETY: invariant: a rank refusal panics in
         // `sync_init::lock_enter` before the spin, so `HEAP` was never taken
         // and `held_pt`, the word with PT counted, is what this CPU holds;
@@ -155,7 +148,7 @@ pub(crate) fn test_rank_alloc_under_pt_asserts() -> Outcome {
     if fails != 1 {
         return crate::fail_fmt!("{} rank failures, want 1", fails);
     }
-    if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
+    if crate::arch::current::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
         return Outcome::Fail("IF or irq_nest changed");
     }
     if sync_init::testing::held() != held0 || sync_init::held_mask() != held0.mask() {
@@ -179,7 +172,7 @@ static RANK_B: SpinMutex<u32> = SpinMutex::with_rank(0, RANK_DEVICE);
 /// A second `RANK_DEVICE` lock taken with `lock` or `try_lock` while one is
 /// held fails the rank check (DESIGN §2.3's nesting rule).
 pub(crate) fn test_rank_same_rank_lock_asserts() -> Outcome {
-    let if0 = x86::interrupts_enabled();
+    let if0 = crate::arch::current::interrupts_enabled();
     let nest0 = per_cpu_init::irq_nest();
     let held0 = sync_init::testing::held();
     let fails0 = sync_init::testing::rank_failures();
@@ -191,9 +184,7 @@ pub(crate) fn test_rank_same_rank_lock_asserts() -> Outcome {
         let restore = || {
             // The longjmp skipped the `InterruptGuard` `RANK_B`'s acquire
             // entered; `RANK_A`'s guard drop restores IF.
-            per_cpu_init::current()
-                .irq_nest
-                .store(nest_a, Ordering::Relaxed);
+            crate::ktest::restore_irq_nest(nest_a);
             // SAFETY: invariant: a rank refusal panics in
             // `sync_init::lock_enter` before the spin, so `RANK_B` was never
             // taken and `held_a`, the word with `RANK_A` counted, is what
@@ -221,7 +212,7 @@ pub(crate) fn test_rank_same_rank_lock_asserts() -> Outcome {
     if RANK_B.is_locked() {
         return Outcome::Fail("RANK_B left held");
     }
-    if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
+    if crate::arch::current::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
         return Outcome::Fail("IF or irq_nest changed");
     }
     if sync_init::testing::held() != held0 || sync_init::held_mask() != held0.mask() {
@@ -231,7 +222,7 @@ pub(crate) fn test_rank_same_rank_lock_asserts() -> Outcome {
 }
 
 pub(crate) fn test_rank_lock_nested_keeps_outer() -> Outcome {
-    let if0 = x86::interrupts_enabled();
+    let if0 = crate::arch::current::interrupts_enabled();
     let nest0 = per_cpu_init::irq_nest();
     let held0 = sync_init::testing::held();
     let fails0 = sync_init::testing::rank_failures();
@@ -253,9 +244,7 @@ pub(crate) fn test_rank_lock_nested_keeps_outer() -> Outcome {
             // counted, is what it holds; established by
             // `sync_init::SpinMutex::lock_nested`.
             unsafe { sync_init::testing::restore_held(held_a) };
-            per_cpu_init::current()
-                .irq_nest
-                .store(nest_a, Ordering::Relaxed);
+            crate::ktest::restore_irq_nest(nest_a);
         }
         counts[1] = sync_init::testing::held().count(RANK_DEVICE);
     }
@@ -275,7 +264,7 @@ pub(crate) fn test_rank_lock_nested_keeps_outer() -> Outcome {
     if sync_init::testing::rank_failures() != fails0 {
         return Outcome::Fail("rank failure counted");
     }
-    if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
+    if crate::arch::current::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
         return Outcome::Fail("IF or irq_nest changed");
     }
     if RANK_B.is_locked() {
@@ -401,7 +390,7 @@ const CELL_CASES: &[CellCase] = &[
 pub(crate) fn test_cross_cpu_cells_ranked() -> Outcome {
     for c in CELL_CASES {
         let trace = {
-            let _irq = x86::InterruptGuard::enter();
+            let _irq = crate::arch::current::InterruptGuard::enter();
             sync_init::testing::trace_arm();
             (c.take)();
             sync_init::testing::trace_take()

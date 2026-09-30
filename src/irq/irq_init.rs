@@ -21,6 +21,7 @@ use vibeos::wait::WaitQueue;
 use super::hardirq;
 use crate::apic_init;
 use crate::arch;
+use crate::dev_init;
 use crate::pci_init;
 use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
@@ -368,16 +369,6 @@ pub fn route_intx(
     Ok(())
 }
 
-pub fn mask_intx(bdf: Bdf, disable: bool) {
-    let mut cmd = pci_init::cfg_read16(bdf, pci::CFG_COMMAND);
-    cmd = if disable {
-        pci::with_intx_disabled(cmd)
-    } else {
-        cmd & !pci::CMD_INTX_DISABLE
-    };
-    pci_init::cfg_write_command(bdf, cmd);
-}
-
 #[expect(
     dead_code,
     reason = "ROADMAP §6.3 MSI configuration; no driver arms MSI yet"
@@ -386,7 +377,6 @@ pub fn enable_msi(bdf: Bdf, cap: u8, vector: u8, apic_id: u8) -> Result<(), IrqE
     if !in_pool(vector) {
         return Err(IrqError::BadVector);
     }
-    pci_init::enable_mem_master(bdf);
     let mut hw = pci_init::HwCfg;
     let msi = pci::read_msi_cap(&mut hw, bdf, cap);
     pci::write_msi_message(
@@ -396,7 +386,6 @@ pub fn enable_msi(bdf: Bdf, cap: u8, vector: u8, apic_id: u8) -> Result<(), IrqE
         msi_message_addr(apic_id),
         msi_message_data(vector) as u16,
     );
-    mask_intx(bdf, true);
     pci::set_msi_enable(&mut hw, bdf, cap, true);
     if let Some(i) = handler_slot(vector) {
         with_irq(|s| s.routes[i] = Route::Msi);
@@ -413,6 +402,9 @@ pub fn disable_msi(bdf: Bdf, cap: u8) {
     pci::set_msi_enable(&mut hw, bdf, cap, false);
 }
 
+/// The VA of `dev`'s MSI-X table, through the claim its driver holds on
+/// the BAR the table's BIR names; `None` when that BAR is not mapped
+/// through a claim or is too small for entry `index`.
 fn msix_table_va(dev: &Device, cap: &pci::MsixCap, index: u16) -> Option<u64> {
     let bir = cap.table_bir as usize;
     if bir >= pci::MAX_BARS {
@@ -420,10 +412,12 @@ fn msix_table_va(dev: &Device, cap: &pci::MsixCap, index: u16) -> Option<u64> {
     }
     let r = dev.resources[bir];
     let need = cap.table_off as u64 + (index as u64 + 1) * 16;
-    if r.mapped_va == 0 || r.size < need {
+    if r.size < need {
         return None;
     }
-    Some(r.mapped_va.wrapping_add(cap.table_off as u64))
+    let entry = dev_init::find_bdf(dev.addr)?;
+    let va = dev_init::bar_va(&entry, cap.table_bir)?;
+    Some(va.wrapping_add(cap.table_off as u64))
 }
 
 /// Program MSI-X table entry `index`.
@@ -448,6 +442,9 @@ unsafe fn write_msix_entry(table_va: u64, index: u16, e: MsixEntry) {
     }
 }
 
+/// Program MSI-X entry `table_index` for `vector` on `apic_id` and enable
+/// MSI-X. It writes no `COMMAND` bit; the driver sets memory decode, bus
+/// mastering and INTx disable (DEVICES.md §12.3).
 pub fn enable_msix(
     dev: &Device,
     table_index: u16,
@@ -468,7 +465,6 @@ pub fn enable_msix(
     let Some(table) = msix_table_va(dev, &cap, table_index) else {
         return Err(IrqError::NoRoute);
     };
-    pci_init::enable_mem_master(dev.addr);
     // SAFETY: invariant I228, established by `irq::irq_init::msix_table_va`:
     // it returned `table` for `table_index`, so the entry lies inside the
     // mapped BAR.
@@ -479,7 +475,6 @@ pub fn enable_msix(
             MsixEntry::for_lapic(vector, apic_id, false),
         );
     }
-    mask_intx(dev.addr, true);
     pci::set_msix_enable(&mut hw, dev.addr, cap_off, true, false);
     if let Some(i) = handler_slot(vector) {
         with_irq(|s| s.routes[i] = Route::Msix);

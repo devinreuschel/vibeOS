@@ -14,7 +14,6 @@ use core::mem::offset_of;
 use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::apic::TimerMode;
-use crate::desc::Tss;
 use crate::ipi::ThreadInbox;
 use crate::sched::ReadyQueue;
 use crate::thread::{CpuContext, GuardedStack, Tcb, ThreadId};
@@ -76,8 +75,9 @@ impl Default for StackCache {
     }
 }
 
-/// The part of one CPU's state that other CPUs read. One cache line per
-/// CPU. Every field is atomic, so `&PerCpuRemote` may alias anything and
+/// The part of one CPU's state that other CPUs read. Two cache lines per
+/// CPU: the scheduler's words, then the stop primitive's (DESIGN §2.5
+/// step 1). Every field is atomic, so `&PerCpuRemote` may alias anything and
 /// the type is `Sync` with no `unsafe impl` (`scripts/check_cells.py`).
 #[repr(C, align(64))]
 pub struct PerCpuRemote {
@@ -101,6 +101,19 @@ pub struct PerCpuRemote {
     /// (Release); `addr_space_init::teardown` reads it. 0 until paging
     /// publishes the kernel root.
     pub as_cr3: AtomicU64,
+    /// The stop primitive's request word (`irq::stop::STOP`): the dump's
+    /// owner sets it (Release) before the stop IPI; this CPU's
+    /// `service_incoming` and NMI body read it (Acquire). `core`'s atomic
+    /// in every configuration, as the layout assertions below fix it
+    /// (C-ATOMICS).
+    pub stop_req: crate::atomic::statics::AtomicU32,
+    /// `irq::stop::RUNNING`, `STOPPING`, or the `StopHow::code` this CPU
+    /// stopped with: the stop routine's last store (Release) is the
+    /// acknowledgement the owner reads (Acquire).
+    pub stopped: crate::atomic::statics::AtomicU32,
+    /// The crash-register slot (`irq::stop::CRASH_*`), written by this CPU
+    /// before its `stopped` store and read by the owner after it.
+    pub crash: [crate::atomic::statics::AtomicU64; crate::irq::stop::CRASH_WORDS],
 }
 
 /// `PerCpuRemote`'s initial value, one body for both constructors.
@@ -114,6 +127,10 @@ macro_rules! remote_new {
             wake_inbox: ThreadInbox::new(),
             apic_id: AtomicU32::new(0),
             as_cr3: AtomicU64::new(0),
+            stop_req: crate::atomic::statics::AtomicU32::new(0),
+            stopped: crate::atomic::statics::AtomicU32::new(crate::irq::stop::RUNNING),
+            crash: [const { crate::atomic::statics::AtomicU64::new(0) };
+                crate::irq::stop::CRASH_WORDS],
         }
     };
 }
@@ -164,8 +181,11 @@ pub struct PerCpu {
     pub runq: ReadyQueue,
     /// Kernel stack top used by `syscall` and written into TSS.RSP0.
     pub kernel_rsp0: u64,
-    /// Current CPU TSS. RSP0 updates go through here.
-    pub tss: *mut Tss,
+    /// This CPU's descriptor tables, opaque here: the port's `CpuTables`
+    /// (x86_64: `arch::x86_64::gdt::CpuTables`), through which the switch
+    /// writes TSS.RSP0 (`syscall_init::set_rsp0_for`). Null until the port
+    /// attaches them.
+    pub tables: *const (),
     /// Dedicated TSS stack from GDT init. Used when the TCB has no stack
     /// (bootstrap).
     pub fallback_rsp0: u64,
@@ -228,7 +248,7 @@ impl PerCpu {
             timer_mode: TimerMode::Pit,
             runq: ReadyQueue::empty(),
             kernel_rsp0: 0,
-            tss: core::ptr::null_mut(),
+            tables: core::ptr::null(),
             fallback_rsp0: 0,
             tail_prev: core::ptr::null_mut(),
             dead_stack: None,
@@ -274,9 +294,12 @@ const _: () = {
     assert!(align_of::<PerCpu>() == 8);
     assert!(offset_of!(PerCpu, runq) == 152);
     assert!(offset_of!(PerCpu, remote) == if DEBUG { 2088 } else { 1320 });
-    assert!(size_of::<PerCpuRemote>() == 64);
+    assert!(size_of::<PerCpuRemote>() == 128);
     assert!(align_of::<PerCpuRemote>() == 64);
     assert!(offset_of!(PerCpuRemote, apic_id) == 48);
+    assert!(offset_of!(PerCpuRemote, stop_req) == 64);
+    assert!(offset_of!(PerCpuRemote, stopped) == 68);
+    assert!(offset_of!(PerCpuRemote, crash) == 72);
 };
 
 // The tests build `static` views, which need the `const` constructor.
@@ -308,7 +331,7 @@ mod tests {
         assert_eq!(p.timer_mode, TimerMode::Pit);
         assert!(core::ptr::eq(p.remote, &R));
         assert_eq!(p.syscall_scratch, 0);
-        assert!(p.tss.is_null());
+        assert!(p.tables.is_null());
         assert_eq!(p.kernel_rsp0, 0);
         assert_eq!(p.remote.as_cr3.load(Ordering::Relaxed), 0);
         assert!(p.tail_prev.is_null());
@@ -373,6 +396,12 @@ mod tests {
         assert!(R.wake_inbox.is_empty());
         assert_eq!(R.apic_id.load(Ordering::Relaxed), 0);
         assert_eq!(R.as_cr3.load(Ordering::Relaxed), 0);
+        assert_eq!(R.stop_req.load(Ordering::Relaxed), 0);
+        assert_eq!(R.stopped.load(Ordering::Relaxed), crate::irq::stop::RUNNING);
+        assert!(R.crash.iter().all(|w| w.load(Ordering::Relaxed) == 0));
+        // The stop words follow the scheduler's cache line (C-PERCPU).
+        assert_eq!(offset_of!(PerCpuRemote, stop_req), 64);
+        assert!(offset_of!(PerCpuRemote, crash) > offset_of!(PerCpuRemote, stopped));
         let d = PerCpuRemote::default();
         assert_eq!(d.ticks.load(Ordering::Relaxed), 0);
         assert!(!d.ready.load(Ordering::Relaxed));

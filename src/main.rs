@@ -90,6 +90,7 @@ mod time;
 mod ktest;
 
 use acpi::acpi_init;
+#[cfg(target_arch = "x86_64")]
 use arch::x86_64::{apic_init, cpu as x86};
 use block::{block_init, cache_init, part_init};
 use console::{console_init, fb_init, kbd_init};
@@ -111,6 +112,7 @@ use time::time_init;
 
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
+use vibeos::arch::BootHandover;
 use vibeos::marker;
 
 // The linker groups these three into `.limine_requests` (see linker.ld).
@@ -122,7 +124,8 @@ static REQ_START: RequestsStartMarker = RequestsStartMarker::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests")]
-static BASE_REV: BaseRevision = BaseRevision::with_revision(3);
+static BASE_REV: BaseRevision =
+    BaseRevision::with_revision(<arch::current::Arch as BootHandover>::BASE_REVISION);
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
@@ -130,6 +133,9 @@ static REQ_END: RequestsEndMarker = RequestsEndMarker::new();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    // First: the boot stack's bounds, so a backtrace can follow `rbp` on
+    // Limine's stack (DESIGN §2.5 step 4).
+    panic::note_boot_stack(crate::arch::current::stack_pointer());
     // Step 1: serial. Nothing before this is debuggable.
     serial::Serial::init();
     log_init::init();
@@ -140,7 +146,7 @@ pub extern "C" fn _start() -> ! {
     // `is_supported()` returns false.
     if !BASE_REV.is_supported() {
         crate::marker!("vibeOS: limine: base revision unsupported");
-        x86::halt();
+        arch::current::halt();
     }
     crate::marker!(marker::LIMINE_OK);
 
@@ -319,7 +325,7 @@ extern "C" fn boot_rest() -> ! {
     // below: the IDT is live, the PIC remapped, the LAPIC and I/O APIC pages uncached (`acpi_init::init` above), as `apic_init::init` requires; established here.
     unsafe { apic_init::init() };
     crate::irq_init::init();
-    x86::sti();
+    arch::current::irq_enable();
     apic_init::prove();
     time_init::busy_wait_ms(20);
     diag::uptime();
@@ -378,7 +384,7 @@ extern "C" fn boot_rest() -> ! {
     {
         use crate::serial::Serial;
         use core::fmt::Write;
-        match crate::proc_init::spawn_elf("/hello", &[], &[], 0, 0) {
+        match crate::proc_init::spawn_elf(b"/hello", &[], &[], 0, 0) {
             Ok(pid) => {
                 let st = crate::proc_init::wait_kernel(pid);
                 let code = if vibeos::proc::wifsignaled(st) {
@@ -404,6 +410,10 @@ extern "C" fn boot_rest() -> ! {
 
     #[cfg(feature = "gp_test")]
     gp_test_trip();
+    #[cfg(feature = "panic_nest_test")]
+    crate::log::panic_test::nest_trip();
+    #[cfg(feature = "panic_stop_test")]
+    crate::log::panic_test::stop_trip();
 
     // `shell ready` is last. gp-test trips after ramdisk so a #GP dump
     // still has a clean contract through `block: …`. Every build registers
@@ -427,13 +437,28 @@ extern "C" fn boot_rest() -> ! {
     #[cfg(not(any(feature = "kernel_tests", feature = "vibefs_crash")))]
     {
         thread_init::park(None);
-        x86::halt();
+        arch::current::halt();
     }
 }
 
+/// The gp-test trip: its own frame, and the fault one call below it, so
+/// the `#GP` backtrace, which starts at the interrupted frame, lists
+/// `gp_test_trip` and then its caller (F070).
 #[cfg(feature = "gp_test")]
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
 fn gp_test_trip() {
     crate::marker!("vibeOS: boot: gp-test armed");
+    gp_test_fault();
+    // Code after the call, so it is a call and not a tail jump that would
+    // leave this frame out of the chain.
+    core::hint::black_box(0u8);
+}
+
+#[cfg(feature = "gp_test")]
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+fn gp_test_fault() {
     // Kernel code selector with RPL=3 into DS: not a data segment, #GP.
     // SAFETY: the test-only gp_test build's purpose: the load faults before
     // DS changes, and the #GP handler dumps and halts; established here.

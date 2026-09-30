@@ -5,18 +5,24 @@
 
 use core::ops::Range;
 
-use limine::memmap::{Entry, MEMMAP_USABLE};
+use limine::memmap::{
+    Entry, MEMMAP_ACPI_NVS, MEMMAP_ACPI_RECLAIMABLE, MEMMAP_BOOTLOADER_RECLAIMABLE,
+    MEMMAP_EXECUTABLE_AND_MODULES, MEMMAP_USABLE,
+};
 use limine::request::{
     ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, FramebufferResponse,
     HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
 };
 
+use crate::arch::current::Arch;
 use crate::cell::BootCell;
+use vibeos::arch::BootHandover;
 use vibeos::boot::cmdline::{self, CMDLINE_MAX, Cmdline, CmdlineBuf, Escaped, SYSCTLS};
 use vibeos::limits::MAX_BOOT_MODULES;
 use vibeos::log::Level;
 use vibeos::paging::HHDM_BASE;
 
+#[cfg(target_arch = "x86_64")]
 pub mod fw_cfg_init;
 
 #[cfg(feature = "kernel_tests")]
@@ -66,12 +72,15 @@ static MODULES: ModulesRequest = ModulesRequest::new();
 #[unsafe(link_section = ".limine_requests")]
 static CMDLINE_REQ: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 
-// 256 KiB for the steps before `thread_init::init_bootstrap` moves boot
-// onto its guarded KVA stack (MEMORY.md §4.5); Limine guarantees only
-// 64 KiB without it.
+/// The boot stack Limine gives `_start`: 256 KiB for the steps before
+/// `thread_init::init_bootstrap` moves boot onto its guarded KVA stack
+/// (MEMORY.md §4.5); Limine guarantees only 64 KiB without the request.
+/// `panic::note_boot_stack` records the stack's bounds from it.
+pub const LIMINE_STACK_BYTES: u64 = 256 * 1024;
+
 #[used]
 #[unsafe(link_section = ".limine_requests")]
-static STACK_SIZE: StackSizeRequest = StackSizeRequest::new(256 * 1024);
+static STACK_SIZE: StackSizeRequest = StackSizeRequest::new(LIMINE_STACK_BYTES);
 
 /// The fw_cfg file whose text follows Limine's command line.
 pub const FW_CFG_CMDLINE: &str = "opt/vibeos/cmdline";
@@ -120,6 +129,27 @@ impl BootInfo {
             .iter()
             .filter(|e| e.type_ == MEMMAP_USABLE)
             .map(|e| e.base..e.base + e.length)
+    }
+
+    /// The RAM-typed memmap ranges, physical: usable, bootloader
+    /// reclaimable, executable and modules, ACPI reclaimable and ACPI NVS.
+    /// No device range may overlap one (DESIGN §12.3 rule 8), so
+    /// `dev::Registry::claim` and `pci_init::map_mmio` check against them.
+    /// Ends saturate: the map is firmware input (AGENTS.md rule 4).
+    pub fn ram_ranges(&self) -> impl Iterator<Item = Range<u64>> {
+        self.memmap
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.type_,
+                    MEMMAP_USABLE
+                        | MEMMAP_BOOTLOADER_RECLAIMABLE
+                        | MEMMAP_EXECUTABLE_AND_MODULES
+                        | MEMMAP_ACPI_RECLAIMABLE
+                        | MEMMAP_ACPI_NVS
+                )
+            })
+            .map(|e| e.base..e.base.saturating_add(e.length))
     }
 
     /// Every framebuffer Limine mapped through the HHDM, in response order.
@@ -260,7 +290,6 @@ pub fn capture() -> &'static BootInfo {
     let rsdp = RSDP
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: rsdp missing"));
-    // Base revision 3 hands back a physical RSDP, other revisions an HHDM VA.
     let rsdp_raw = rsdp.address as u64;
     let kernel_len = (&raw const __kernel_vma_end as u64) - (&raw const __kernel_vma_start as u64);
     let (modules, nmod) = module_ranges();
@@ -278,7 +307,7 @@ pub fn capture() -> &'static BootInfo {
         INFO.set(BootInfo {
             kernel_phys: exec.physical_base..exec.physical_base + kernel_len,
             trampoline_page,
-            rsdp_phys: rsdp_raw.checked_sub(HHDM_BASE).unwrap_or(rsdp_raw),
+            rsdp_phys: <Arch as BootHandover>::table_phys(rsdp_raw, HHDM_BASE),
             memmap: memmap.entries(),
             fb: FRAMEBUFFER.response(),
             modules,
@@ -337,5 +366,5 @@ pub fn info() -> &'static BootInfo {
 /// rule).
 pub(crate) fn halt_with(msg: &str) -> ! {
     crate::marker!(msg);
-    crate::x86::halt();
+    crate::arch::current::halt();
 }

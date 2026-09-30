@@ -9,7 +9,7 @@ pub fn write_all(fd: i32, mut buf: &[u8]) -> Result<(), Errno> {
         if n == 0 {
             // A write that takes nothing would loop forever; report it as
             // the I/O error Linux's `write(2)` uses.
-            return Err(Errno(5));
+            return Err(Errno::EIO);
         }
         buf = buf.get(n..).unwrap_or(&[]);
     }

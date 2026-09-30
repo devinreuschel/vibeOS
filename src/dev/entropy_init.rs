@@ -6,8 +6,8 @@
 use vibeos::entropy::{self, Source};
 use vibeos::log::Level;
 
+use crate::arch::current::hw_rng64;
 use crate::virtio_init;
-use crate::x86;
 
 fn hw_fill(buf: &mut [u8]) -> (usize, Option<Source>) {
     let mut i = 0usize;
@@ -25,9 +25,9 @@ fn hw_fill(buf: &mut [u8]) -> (usize, Option<Source>) {
             refill();
         }
     }
-    if i < buf.len() && x86::has_rdrand() {
+    if i < buf.len() {
         while i < buf.len() {
-            let Some(x) = x86::rdrand64() else {
+            let Some(x) = hw_rng64() else {
                 break;
             };
             let b = x.to_le_bytes();

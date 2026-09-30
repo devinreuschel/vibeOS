@@ -13,8 +13,8 @@ use vibeos::vibefs::Plant;
 /// `O_TRUNC`, 300 bytes of `(N + k) as u8`, close, `sync_fs`. Any error
 /// prints a registered failure line and halts, so the harness sees it.
 pub fn crash_loop() -> ! {
+    use crate::arch::current::halt;
     use crate::file_init;
-    use crate::x86;
 
     /// One committed iteration of `crash_loop`. The error is the text its
     /// failure line carries.
@@ -47,7 +47,7 @@ pub fn crash_loop() -> ! {
         Some(b"early_super") => Plant::EarlySuper,
         Some(_) => {
             crate::marker!("vibeOS: vibefs: bad crash_plant");
-            x86::halt();
+            halt();
         }
     };
     if let Err(e) = file_init::mkdir(b"/crash", 0o755)
@@ -55,11 +55,11 @@ pub fn crash_loop() -> ! {
         .and_then(|()| vibefs_init::set_plant(b"/crash", plant))
     {
         crate::marker!("vibeOS: vibefs: mount fail {}", e.as_str());
-        x86::halt();
+        halt();
     }
     if let Err(e) = crash_iter(0) {
         crate::marker!("vibeOS: vibefs: sync fail {e}");
-        x86::halt();
+        halt();
     }
     crate::marker!("vibeOS: vibefs: crash-ready");
     let mut n = 1u32;
@@ -67,7 +67,7 @@ pub fn crash_loop() -> ! {
         crate::marker!("vibeOS: vibefs: wr {n}");
         if let Err(e) = crash_iter(n) {
             crate::marker!("vibeOS: vibefs: sync fail {e}");
-            x86::halt();
+            halt();
         }
         n = n.wrapping_add(1);
         crate::thread_init::yield_now();

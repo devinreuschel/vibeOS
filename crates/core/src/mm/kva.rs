@@ -37,6 +37,18 @@ pub enum KvaError {
     Map,
 }
 
+/// Kernel virtual space or frames running out is no memory; a bad size, a bad argument.
+impl From<KvaError> for crate::kerror::KError {
+    fn from(e: KvaError) -> Self {
+        match e {
+            KvaError::Exhausted | KvaError::NoVa | KvaError::NoFrames | KvaError::Map => {
+                Self::NoMem
+            }
+            KvaError::Size => Self::Inval,
+        }
+    }
+}
+
 impl KvaError {
     pub fn as_str(self) -> &'static str {
         match self {

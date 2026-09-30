@@ -315,6 +315,8 @@ ADDED: tuple[str, ...] = (
     "vibeOS: vibefs: sync fail ",
     # §10.7: the blocked-thread sweep.
     "vibeOS: sched: overdue tid ",
+    # §10.7: the panic-stop owner's line, printed only inside its dump.
+    "vibeOS: panic_stop: owner nmi returned",
 )
 BRANCH_POINT_USER_FAILURES: tuple[str, ...] = ('user: tests fail',)
 # The user failures the registry adds: box 1249's line.

@@ -757,6 +757,50 @@ def make_disk(nbytes: int, prefix: str, *, directory: str | None = None) -> str:
     return path
 
 
+# The virtio-blk pattern image (`make_pattern_disk`): every byte of sector
+# n is `(n & 0xFF) ^ VBLK_PATTERN_XOR`. The kernel test twin is
+# `drivers::ktest::PATTERN_XOR`.
+VBLK_PATTERN_XOR = 0xA5
+# The sector whose reads `write_blkdebug_config` fails. The kernel test twin
+# is `drivers::ktest::BAD_SECTOR`.
+VBLK_BAD_SECTOR = 4096
+
+
+def make_pattern_disk(nbytes: int, prefix: str) -> str:
+    """A raw image of `nbytes` (a multiple of 512) in the pattern above, so
+    LBA 0 is never all zero and no `kernel_tests` GPT stamp writes it.
+    Caller unlinks."""
+    if nbytes % 512:
+        raise HarnessError(f"pattern disk: {nbytes} bytes is not whole sectors")
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".img")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            for n in range(nbytes // 512):
+                f.write(bytes([(n & 0xFF) ^ VBLK_PATTERN_XOR]) * 512)
+    except BaseException:
+        os.unlink(path)
+        raise
+    return path
+
+
+def write_blkdebug_config(sector: int, prefix: str) -> str:
+    """A QEMU `blkdebug` config that fails every read of `sector` with EIO.
+    `read_aio` fires in the raw format driver, so the drive keeps
+    `format=raw` over `blkdebug:`. Caller unlinks."""
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".conf")
+    with os.fdopen(fd, "w") as f:
+        f.write(
+            "[inject-error]\n"
+            'event = "read_aio"\n'
+            'iotype = "read"\n'
+            'errno = "5"\n'
+            f'sector = "{sector}"\n'
+            'once = "off"\n'
+            'immediately = "off"\n'
+        )
+    return path
+
+
 def virtio_blk_args(
     disk: str,
     smp: int,
@@ -765,6 +809,8 @@ def virtio_blk_args(
     nbd: bool = False,
     cache: str = "writeback",
     extra: Sequence[str] = (),
+    readonly: bool = False,
+    blkdebug: str | None = None,
 ) -> tuple[str, ...]:
     """The virtio-blk drive, then one more drive per `extra` image. With
     `nbd`, `disk` is the unix socket of the volatile-cache device
@@ -772,9 +818,17 @@ def virtio_blk_args(
     device (`write-cache=on`), so a guest flush reaches the server under
     every `cache` mode. Extra disk `k` (from 1) is drive `vibehd<k>`, a raw
     image with the same queues and `discard`; the guest binds the drives in
-    this order, as `vda`, `vdb`, …."""
+    this order, as `vda`, `vdb`, …. `readonly` and `blkdebug` (a config from
+    `write_blkdebug_config`) apply to the first drive: `readonly` opens it
+    `readonly=on` with no discard, so the device offers `F_RO`, and
+    `blkdebug` puts it behind QEMU's error injection, reporting each
+    injected error to the guest."""
     if cache not in NBD_CACHE_MODES:
         raise HarnessError(f"cache={cache!r}: not one of {NBD_CACHE_MODES}")
+    if nbd and (readonly or blkdebug):
+        raise HarnessError("readonly and blkdebug need an image, not nbd")
+    if blkdebug is not None and ":" in blkdebug + disk:
+        raise HarnessError("a blkdebug config or image path may not contain ':'")
     device = f"virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues={smp}"
     if nbd:
         drive = (
@@ -783,9 +837,14 @@ def virtio_blk_args(
         )
         device += ",write-cache=on"
     else:
-        drive = f"file={disk},if=none,id=vibehd,format=raw,cache={cache}"
-        if discard:
+        src = disk if blkdebug is None else f"blkdebug:{blkdebug}:{disk}"
+        drive = f"file={src},if=none,id=vibehd,format=raw,cache={cache}"
+        if readonly:
+            drive += ",readonly=on"
+        elif discard:
             drive += ",discard=unmap"
+        if blkdebug is not None:
+            drive += ",rerror=report,werror=report"
     args: tuple[str, ...] = ("-drive", drive, "-device", device)
     for k, path in enumerate(extra, start=1):
         d = f"file={path},if=none,id=vibehd{k},format=raw,cache={cache}"
@@ -796,9 +855,18 @@ def virtio_blk_args(
     return args
 
 
-def ktest_devices(disk: str, smp: int, *, extra_disks: Sequence[str] = ()) -> tuple[str, ...]:
+def ktest_devices(
+    disk: str,
+    smp: int,
+    *,
+    extra_disks: Sequence[str] = (),
+    readonly: bool = False,
+    blkdebug: str | None = None,
+) -> tuple[str, ...]:
     """The in-guest registry's devices: `disk` is `vda`, and each of
-    `extra_disks` a further virtio-blk disk after it."""
+    `extra_disks` a further virtio-blk disk after it. A second virtio-rng
+    sits at `00:1d.0`, and a virtio-blk whose probe fails at `00:1e.0`.
+    `readonly` and `blkdebug` go to `virtio_blk_args` for `vda`."""
     return (
         "-device",
         "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -808,7 +876,20 @@ def ktest_devices(disk: str, smp: int, *, extra_disks: Sequence[str] = ()) -> tu
         "edu",
         "-device",
         "virtio-rng-pci,disable-legacy=on",
-    ) + virtio_blk_args(disk, smp, extra=extra_disks)
+        # A second virtio-rng in a high slot, after the first in bus order,
+        # which the driver refuses (`dev::ktest::SPARE_RNG_BDF`).
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+    ) + virtio_blk_args(
+        disk, smp, extra=extra_disks, readonly=readonly, blkdebug=blkdebug
+    ) + (
+        # A virtio-blk function in a high slot whose probe the kernel_tests
+        # hook fails after QENABLE (`dev::ktest::PROBE_BLK_BDF`).
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e",
+    )
 
 
 def kill_delay(rng: random.Random) -> float:
@@ -2107,8 +2188,12 @@ def boot_contract_markers(
     accel: str | None = None,
     gp: bool = False,
     smp: int | None = None,
+    panic_variant: str = "",
 ) -> list[Marker]:
-    """Live e2e contract. Pins the LAPIC timer mode and SMP AP count."""
+    """Live e2e contract. Pins the LAPIC timer mode and SMP AP count.
+
+    `panic_variant` (`nest` or `stop`) selects that panic-path build's contract,
+    which ends at its armed line (`VIBEOS_PANIC_VARIANT`, run_e2e)."""
     if smp is None:
         smp = env_int("VIBEOS_SMP", DEFAULT_SMP)
     cfg = registry.BootConfig(
@@ -2116,6 +2201,8 @@ def boot_contract_markers(
         smp=smp,
         lapic_mode=expected_lapic_mode(cpu=cpu, hpet=hpet, accel=accel),
         gp_test=gp,
+        panic_nest_test=panic_variant == "nest",
+        panic_stop_test=panic_variant == "stop",
     )
     return contract_markers(cfg)
 

@@ -4,17 +4,18 @@ use core::fmt;
 use core::sync::atomic::Ordering;
 
 use vibeos::addr_space::{
-    AddressSpace, AsError, Backing, BrkPlan, FrameFree, MmapReq, Region, TeardownStats, UserPerms,
+    AsError, Backing, BrkPlan, FrameFree, MmapReq, Region, TeardownStats, UserPerms,
 };
-use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PTE_ADDR_MASK};
+use vibeos::arch::PageTable;
+use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pmm::Frames;
 use vibeos::thread::ThreadId;
 
+use crate::arch::current::{AddressSpace, Arch};
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::thread_init;
-use crate::x86;
 
 struct BuddyPool;
 
@@ -173,10 +174,10 @@ unsafe fn unmap_chunks(space: &mut AddressSpace, va: u64, len: u64) -> Result<()
 /// A flush for `space`'s pages: `invlpg` when it is this CPU's CR3,
 /// nothing otherwise.
 fn local_flush(space: &AddressSpace) -> impl FnMut(u64) + use<> {
-    let loaded = x86::read_cr3() & PTE_ADDR_MASK == space.root().as_u64();
+    let loaded = Arch::root() == space.root();
     move |va| {
         if loaded {
-            x86::invlpg(va);
+            Arch::flush_local(VirtAddr(va));
         }
     }
 }
@@ -306,7 +307,7 @@ pub(crate) mod testing {
 enum RootHolder {
     /// CPU `cpu` has it loaded (CR3; TTBR0 on aarch64), or last recorded
     /// loading it.
-    Cr3 { cpu: u32 },
+    Loaded { cpu: u32 },
     /// That thread's `Tcb.as_cr3` names it.
     Tcb(ThreadId),
 }
@@ -314,7 +315,7 @@ enum RootHolder {
 impl fmt::Debug for RootHolder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RootHolder::Cr3 { cpu } => write!(f, "Cr3 {{ cpu: {cpu} }}"),
+            RootHolder::Loaded { cpu } => write!(f, "Loaded {{ cpu: {cpu} }}"),
             RootHolder::Tcb(id) => write!(f, "Tcb({})", id.0),
         }
     }
@@ -324,16 +325,24 @@ impl fmt::Debug for RootHolder {
 /// or any TCB's saved root. Returns with no lock held, so the caller's
 /// assertion never fires under PT or SCHED.
 fn root_holder(root: u64) -> Option<RootHolder> {
-    let here = per_cpu_init::try_current().map_or(0, |c| c.cpu_id);
-    if x86::read_cr3() & PTE_ADDR_MASK == root {
-        return Some(RootHolder::Cr3 { cpu: here });
+    // One IF=0 stretch: the id and CR3 name one CPU.
+    let (here, live) = {
+        let _irq = crate::arch::current::InterruptGuard::enter();
+        (
+            per_cpu_init::try_current().map_or(0, |c| c.cpu_id),
+            Arch::root().as_u64(),
+        )
+    };
+    if live == root {
+        return Some(RootHolder::Loaded { cpu: here });
     }
     let mut id = 0u32;
     while (id as usize) < per_cpu_init::cpu_count() {
         if let Some(r) = per_cpu_init::cpu(id) {
             let loaded = r.as_cr3.load(Ordering::Acquire);
-            if loaded != 0 && loaded & PTE_ADDR_MASK == root {
-                return Some(RootHolder::Cr3 { cpu: id });
+            // A recorded root is a table address, as `load_cr3_u64` stores it.
+            if loaded != 0 && loaded == root {
+                return Some(RootHolder::Loaded { cpu: id });
             }
         }
         id += 1;
@@ -381,7 +390,7 @@ pub unsafe fn load_cr3_u64(want: u64) {
         // SAFETY: invariant I128: `want` is a PML4 that shares the kernel
         // half this code and stack run in and stays allocated while loaded
         // (this fn's contract, `addr_space_init::load_cr3_u64`).
-        unsafe { x86::write_cr3(want) };
+        unsafe { Arch::set_root(PhysAddr(want)) };
         cpu.remote.as_cr3.store(want, Ordering::Release);
     });
 }
@@ -395,7 +404,7 @@ pub fn load_kernel_cr3() {
 
 /// Full AS copy for fork. Caller must not be running on `src`'s CR3
 /// teardown path; clone allocates a new PML4.
-pub fn clone_full(src: &vibeos::addr_space::AddressSpace) -> Option<AddressSpace> {
+pub fn clone_full(src: &AddressSpace) -> Option<AddressSpace> {
     let kernel = paging_init::current_mapper();
     let mut pool = BuddyPool;
     // SAFETY: `kernel` is the live kernel mapper and the buddy hands out

@@ -5,20 +5,18 @@
 //! [`fs_init::api`], which calls a backend only with the VFS lock dropped,
 //! so a backend may wait for its volume and its disk. Relative paths are
 //! joined with the shell's working directory. `sync` issues a block Flush
-//! (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`; vibefs stores
+//! (DESIGN §10.2). FAT rejects symlink/link with `Perm`; vibefs stores
 //! POSIX mode and symlinks (docs/VIBEFS.md).
 //!
-//! Path syscalls keep their reach until ROADMAP §10.4 routes them through
-//! `Vfs`: [`open_routed`] resolves FAT and vibefs paths through the
-//! backends' route tables, then opens the inode it finds as a `Vfs` file,
-//! so reads, writes, seeks and closes share one table and one data path.
+//! Path syscalls (`open`, `execve`'s image) resolve through `Vfs` like
+//! every other caller here, one component at a time, so a process reaches
+//! every mounted filesystem, `/dev`, `/proc`, `/tmp` and `/sys` included.
 
 use vibeos::block::MAX_BLOCKDEVS;
 use vibeos::block::blockdev::BlockRef;
-use vibeos::dev::Instance;
 use vibeos::fs::{
-    DirEntry, FileId, FileRef, FileSystem, FsError, InodeKind, InodeRef, MAX_NAME, MAX_PATH,
-    O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, OpenFlags, S_IFREG, SeekFrom, Stat, split_basename,
+    DirEntry, FileId, FileRef, FileSystem, FsError, InodeKind, MAX_PATH, O_DIRECTORY, O_RDONLY,
+    OpenFlags, SeekFrom, Stat,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
@@ -247,7 +245,7 @@ pub fn mkdir_p(path: &[u8]) -> Result<(), FsError> {
 /// and the fs in-guest tests call it.
 #[cfg(feature = "kernel_tests")]
 pub fn creat(path: &[u8]) -> Result<(), FsError> {
-    use vibeos::fs::{O_TRUNC, O_WRONLY};
+    use vibeos::fs::{O_CREAT, O_TRUNC, O_WRONLY};
 
     let f = open(
         path,
@@ -256,102 +254,6 @@ pub fn creat(path: &[u8]) -> Result<(), FsError> {
     )?;
     close(f)
 }
-
-// ---- path syscalls, until ROADMAP §10.4 routes them through `Vfs` ----
-
-/// The volume a routed path is on, the rest of the path within it, and
-/// the backend's walk.
-struct Routed<'a> {
-    vol: Instance,
-    rest: &'a [u8],
-    walk_iget: fn(&Instance, &[u8]) -> Result<InodeRef, FsError>,
-}
-
-/// The volume serving absolute path `pb`: the longest mount prefix of
-/// the FAT and vibefs route tables, the root's FAT volume by default.
-fn route(pb: &[u8]) -> Result<Routed<'_>, FsError> {
-    let (vv, vs) = vibefs_init::route(pb);
-    let (fv, fs) = fat_init::route(pb);
-    if let Some(vol) = vv
-        && vs > fs
-    {
-        return Ok(Routed {
-            vol,
-            rest: vibefs_init::routed_rest(pb, vs),
-            walk_iget: vibefs_init::walk_iget,
-        });
-    }
-    let vol = match fv {
-        Some(v) => v,
-        None => fat_init::root_volume().map_err(|_| FsError::Io)?,
-    };
-    Ok(Routed {
-        vol,
-        rest: fat_init::routed_rest(pb, fs),
-        walk_iget: fat_init::walk_iget,
-    })
-}
-
-/// A counted reference to the `Vfs` inode absolute path `pb` names,
-/// walked by its backend.
-fn walk_abs(pb: &[u8]) -> Result<InodeRef, FsError> {
-    let r = route(pb)?;
-    (r.walk_iget)(&r.vol, r.rest)
-}
-
-/// A counted reference to the directory absolute path `pb` is in, and
-/// its last component.
-fn vol_parent(pb: &[u8]) -> Result<(InodeRef, &[u8]), FsError> {
-    let r = route(pb)?;
-    let (parent, name) = split_basename(r.rest)?;
-    if name.len() > MAX_NAME {
-        return Err(FsError::NameTooLong);
-    }
-    let pth: &[u8] = if parent.is_empty() { b"/" } else { parent };
-    let dir = (r.walk_iget)(&r.vol, pth)?;
-    Ok((dir, name))
-}
-
-/// Open `path` as the path syscalls do until ROADMAP §10.4: FAT and
-/// vibefs only, walked through the route tables, then opened as the
-/// `Vfs` file on the inode found.
-pub fn open_routed(path: &[u8], flags: OpenFlags, mode: u32) -> Result<FileRef, FsError> {
-    #[cfg(feature = "kernel_tests")] // counted for the in-guest test `vfs_backends_via_ops`
-    ROUTED.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-    let (buf, n) = join_cwd(path)?;
-    let pb = &buf[..n];
-    let api = fs_init::api();
-    let excl = flags.bits() & O_EXCL != 0;
-    if flags.bits() & O_CREAT != 0 {
-        match walk_abs(pb) {
-            Ok(r) => {
-                api.put(r);
-                if excl {
-                    return Err(FsError::Exists);
-                }
-            }
-            Err(FsError::NotFound) => {
-                let (dir, name) = vol_parent(pb)?;
-                let perm = (mode & 0o7777) as u16;
-                let r = api.create_in(&dir, name, InodeKind::Reg, perm | S_IFREG);
-                api.put(dir);
-                match r {
-                    Ok(()) => {}
-                    // Created since the walk: without O_EXCL, open it.
-                    Err(FsError::Exists) if !excl => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    api.open_inode(walk_abs(pb)?, flags)
-}
-
-/// Routed opens so far, which the in-guest test `vfs_backends_via_ops`
-/// compares with `Vfs`'s own count (`fs::ktest::open_counts`).
-#[cfg(feature = "kernel_tests")]
-pub(super) static ROUTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// The filesystem bring-up: the FAT and vibefs backends, the root
 /// (`fs_init::init`), then while it is live the pseudo filesystems, devfs

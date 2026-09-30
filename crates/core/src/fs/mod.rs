@@ -20,18 +20,19 @@
 //! can from the caches and returns counted references and the backend
 //! call to make ([`Call`], [`SbCall`], a [`Walker`] lookup); the driver
 //! drops the lock, makes the call, retakes the lock and commits. So no
-//! backend runs under the VFS lock, which until ROADMAP §10.4's VFS-lock
-//! box is an IRQ-off spinlock (DESIGN §2.1, §2.9 rule 2), and a backend
-//! may wait for its volume and its disk. A backend that keeps inode words
-//! in `Vfs` (FAT) reads and writes them in short locked sections of its
-//! own inside its volume lock ([`Vfs::inode_words`]): volume first, VFS
-//! second, never the reverse. The last put of an unlinked inode and the
-//! last unmount of a superblock run the backend with the lock dropped
-//! too; the slot stays reserved until the hook returns.
+//! backend runs under the VFS lock, the kernel's sleeping
+//! `BlockingMutex` over the namespace tables (DESIGN §2.1), and a backend
+//! may wait for its volume and its disk. The words data I/O changes (an
+//! inode's size, link count and private words, [`InodeWords`]) sit
+//! outside the lock: a backend reads and writes them through the inode it
+//! is handed ([`Inode::words`]) under its own volume lock, and never
+//! takes the VFS lock under a volume lock. The last put of an unlinked
+//! inode and the last unmount of a superblock run the backend with the
+//! lock dropped too; the slot stays reserved until the hook returns.
 //!
-//! Locks (kernel): RANK_DEVICE. Tables are static; do not allocate
-//! under the lock. No FS work from hard IRQ (DESIGN §2.2).
+//! Tables are static; do not allocate under the lock. No FS work from hard IRQ (DESIGN §2.2).
 
+mod error;
 pub mod fat;
 mod file;
 mod inode;
@@ -41,10 +42,12 @@ mod ramfs;
 pub mod vibefs;
 mod walk;
 
+pub use error::FsError;
 pub use file::{FileId, FileRef, SeekFrom};
 pub use ramfs::{RamFs, RamState};
 pub use walk::{WalkCall, WalkReply, WalkStep, Walker, split_basename};
 
+use crate::atomic::statics::{AtomicU64, Ordering};
 use crate::dev::{Instance, same_instance};
 
 pub use crate::limits::MAX_DENTRIES;
@@ -90,54 +93,6 @@ pub const O_CLOEXEC: u32 = 0x80000;
 pub const SEEK_SET: u32 = 0;
 pub const SEEK_CUR: u32 = 1;
 pub const SEEK_END: u32 = 2;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum FsError {
-    NotFound,
-    Exists,
-    NotDir,
-    IsDir,
-    Inval,
-    NoSpace,
-    Loop,
-    NameTooLong,
-    NotEmpty,
-    Busy,
-    Badf,
-    NotSupp,
-    Io,
-    /// Past a filesystem's maximum file size.
-    FileTooBig,
-    /// A kernel heap allocation failed (DESIGN §4.4).
-    NoMem,
-    /// Nothing to return now, and the caller may try again: `/dev/random`
-    /// when no hardware source has a byte (ROADMAP §10.12).
-    Again,
-}
-
-impl FsError {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FsError::NotFound => "not found",
-            FsError::Exists => "exists",
-            FsError::NotDir => "not dir",
-            FsError::IsDir => "is dir",
-            FsError::Inval => "inval",
-            FsError::NoSpace => "no space",
-            FsError::Loop => "loop",
-            FsError::NameTooLong => "name too long",
-            FsError::NotEmpty => "not empty",
-            FsError::Busy => "busy",
-            FsError::Badf => "badf",
-            FsError::NotSupp => "not supp",
-            FsError::Io => "io",
-            FsError::FileTooBig => "file too big",
-            FsError::NoMem => "no memory",
-            FsError::Again => "again",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InodeKind {
@@ -334,8 +289,8 @@ pub struct OpCx<'a> {
 }
 
 /// A lock a backend's store, or the [`Vfs`], sits behind: a seam over the
-/// kernel's `SpinMutex` and, in host tests, `std::sync::Mutex`, not a lock
-/// of its own.
+/// kernel's `SpinMutex` (the stores) and `BlockingMutex` (the VFS) and, in
+/// host tests, `std::sync::Mutex`, not a lock of its own.
 pub trait Guarded<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R;
 }
@@ -353,21 +308,38 @@ impl<T> Guarded<T> for std::sync::Mutex<T> {
 /// holds a count on for the call, and runs with the VFS lock dropped
 /// ([`FileApi`]); what it changes in a copy's public fields is written
 /// back after it.
+///
+/// A default is the operation missing, and returns Linux's errno for that
+/// operation (ROADMAP §10.4, A3, E2): making an object or a link, or
+/// removing or renaming one, is `Perm`, except a regular file, whose
+/// creation is `Acces`, as `open(O_CREAT)` in Linux's `/proc`; reading,
+/// writing, truncating, or reading a link of an object that cannot is
+/// `Inval`; looking up or listing in a non-directory is `NotDir`; `sync`
+/// with nothing to write, `getattr`, `evict` and `check_seek` succeed.
 pub trait InodeOps: Sync {
-    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError>;
+    fn lookup(&self, _cx: &mut OpCx<'_>, _dir: &Inode, _name: &[u8]) -> Result<InodeInfo, FsError> {
+        Err(FsError::NotDir)
+    }
     fn create(
         &self,
-        cx: &mut OpCx<'_>,
-        dir: &mut Inode,
-        name: &[u8],
+        _cx: &mut OpCx<'_>,
+        _dir: &mut Inode,
+        _name: &[u8],
         kind: InodeKind,
-        mode: u16,
-        target: Option<&[u8]>,
-    ) -> Result<InodeInfo, FsError>;
-    fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError>;
+        _mode: u16,
+        _target: Option<&[u8]>,
+    ) -> Result<InodeInfo, FsError> {
+        Err(match kind {
+            InodeKind::Reg => FsError::Acces,
+            InodeKind::Dir | InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => FsError::Perm,
+        })
+    }
+    fn unlink(&self, _cx: &mut OpCx<'_>, _dir: &mut Inode, _name: &[u8]) -> Result<(), FsError> {
+        Err(FsError::Perm)
+    }
     /// Remove the empty directory `name` from `dir`.
     fn rmdir(&self, _cx: &mut OpCx<'_>, _dir: &mut Inode, _name: &[u8]) -> Result<(), FsError> {
-        Err(FsError::NotSupp)
+        Err(FsError::Perm)
     }
     /// Give `target` the further name `name` in `dir`.
     fn link(
@@ -377,7 +349,7 @@ pub trait InodeOps: Sync {
         _name: &[u8],
         _target: &mut Inode,
     ) -> Result<(), FsError> {
-        Err(FsError::NotSupp)
+        Err(FsError::Perm)
     }
     /// Move `oname` in `odir` to `nname` in `ndir`. The moved inode's new
     /// key when the move changed it, as FAT's dirent-location key does.
@@ -391,22 +363,26 @@ pub trait InodeOps: Sync {
         _ndir: &mut Inode,
         _nname: &[u8],
     ) -> Result<Option<Key>, FsError> {
-        Err(FsError::NotSupp)
+        Err(FsError::Perm)
     }
     fn read(
         &self,
-        cx: &mut OpCx<'_>,
-        ino: &mut Inode,
-        off: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, FsError>;
+        _cx: &mut OpCx<'_>,
+        _ino: &mut Inode,
+        _off: u64,
+        _buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        Err(FsError::Inval)
+    }
     fn write(
         &self,
-        cx: &mut OpCx<'_>,
-        ino: &mut Inode,
-        off: u64,
-        buf: &[u8],
-    ) -> Result<usize, FsError>;
+        _cx: &mut OpCx<'_>,
+        _ino: &mut Inode,
+        _off: u64,
+        _buf: &[u8],
+    ) -> Result<usize, FsError> {
+        Err(FsError::Inval)
+    }
     /// Write `buf` at the end of the file, as `O_APPEND` does; the count
     /// written and the offset written at. A backend that serializes its
     /// writes reads the size in the same section as the write.
@@ -419,14 +395,18 @@ pub trait InodeOps: Sync {
         let off = ino.size;
         self.write(cx, ino, off, buf).map(|n| (n, off))
     }
-    fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError>;
+    fn truncate(&self, _cx: &mut OpCx<'_>, _ino: &mut Inode, _size: u64) -> Result<(), FsError> {
+        Err(FsError::Inval)
+    }
     fn readdir(
         &self,
-        cx: &mut OpCx<'_>,
-        dir: &Inode,
-        cookie: u64,
-        out: &mut Dirent,
-    ) -> Result<Option<u64>, FsError>;
+        _cx: &mut OpCx<'_>,
+        _dir: &Inode,
+        _cookie: u64,
+        _out: &mut Dirent,
+    ) -> Result<Option<u64>, FsError> {
+        Err(FsError::NotDir)
+    }
     fn getattr(&self, _cx: &mut OpCx<'_>, _ino: &mut Inode) -> Result<(), FsError> {
         Ok(())
     }
@@ -450,7 +430,18 @@ pub trait InodeOps: Sync {
     }
     /// Drop the backend state of an unmounted superblock.
     fn kill_sb(&self, _cx: &mut OpCx<'_>) {}
+    /// Whether `ino` can seek: `SPipe` for an object that cannot, as a
+    /// console, which `lseek` then refuses.
+    fn check_seek(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> Result<(), FsError> {
+        Ok(())
+    }
 }
+
+/// The ops of a superblock whose filesystem has none: every operation is
+/// the trait's default, the missing operation's errno.
+pub struct NoOps;
+
+impl InodeOps for NoOps {}
 
 /// Mount-time half of a filesystem: its ops pointer, and the root inode
 /// `fill_super` reports after setting up the superblock's private words.
@@ -500,15 +491,82 @@ pub struct InodeHandle {
     r#gen: u32,
 }
 
-/// The words a backend that keeps its inode state in `Vfs` reads and
-/// writes back ([`Vfs::inode_words`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Words {
-    pub key: Key,
-    pub kind: InodeKind,
-    pub nlink: u32,
-    pub size: u64,
-    pub private: [u64; 2],
+/// The words of one inode slot that change during data I/O: its size,
+/// its link count, and its backend's two private words. They sit beside
+/// [`Vfs`], outside its lock, one per inode slot: a backend reaches them
+/// through the inode an op is handed ([`Inode::words`]), whose slot the
+/// op's count keeps, and reads and writes them under its own volume lock
+/// with the VFS lock dropped (DESIGN §2.1). `Vfs` fills them when it
+/// fills the slot, writes back what an op changed in its copy, and reads
+/// the size and link count from them.
+#[derive(Debug)]
+pub struct InodeWords {
+    size: AtomicU64,
+    nlink: AtomicU64,
+    private: [AtomicU64; 2],
+}
+
+impl InodeWords {
+    pub const fn new() -> Self {
+        Self {
+            size: AtomicU64::new(0),
+            nlink: AtomicU64::new(0),
+            private: [AtomicU64::new(0), AtomicU64::new(0)],
+        }
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size.load(Ordering::Acquire)
+    }
+
+    pub fn set_size(&self, size: u64) {
+        self.size.store(size, Ordering::Release);
+    }
+
+    /// The link count, which only `Vfs` changes.
+    pub fn nlink(&self) -> u32 {
+        self.nlink.load(Ordering::Acquire) as u32
+    }
+
+    fn set_nlink(&self, n: u32) {
+        self.nlink.store(u64::from(n), Ordering::Release);
+    }
+
+    pub fn private(&self) -> [u64; 2] {
+        [
+            self.private[0].load(Ordering::Acquire),
+            self.private[1].load(Ordering::Acquire),
+        ]
+    }
+
+    pub fn set_private(&self, p: [u64; 2]) {
+        self.private[0].store(p[0], Ordering::Release);
+        self.private[1].store(p[1], Ordering::Release);
+    }
+}
+
+impl Default for InodeWords {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Two words are equal only as the same slot's words.
+impl PartialEq for InodeWords {
+    fn eq(&self, other: &Self) -> bool {
+        core::ptr::eq(self, other)
+    }
+}
+
+impl Eq for InodeWords {}
+
+/// One [`InodeWords`] per inode slot, which a [`Vfs`] borrows for its
+/// life: a `static` in the kernel, a leaked allocation in host tests.
+pub type WordsTable = [InodeWords; MAX_INODES];
+
+/// A table of zeroed words, for a `static`.
+pub const fn words_table() -> WordsTable {
+    [const { InodeWords::new() }; MAX_INODES]
 }
 
 /// Where an unhashed, unreferenced inode is in its release.
@@ -546,6 +604,8 @@ pub struct Inode {
     pub mtime: u64,
     pub ctime: u64,
     pub private: [u64; 2],
+    /// The slot's words while it is used; a copy carries its slot's.
+    words: Option<&'static InodeWords>,
 }
 
 impl Inode {
@@ -567,7 +627,40 @@ impl Inode {
         mtime: 0,
         ctime: 0,
         private: [0; 2],
+        words: None,
     };
+
+    /// The words of this inode's slot, which an op reads and writes under
+    /// its own lock ([`InodeWords`]); `Io` for an empty slot.
+    pub fn words(&self) -> Result<&'static InodeWords, FsError> {
+        self.words.ok_or(FsError::Io)
+    }
+
+    /// The size: its slot's word, which a backend may change with the
+    /// VFS lock dropped.
+    fn cur_size(&self) -> u64 {
+        self.words.map_or(self.size, InodeWords::size)
+    }
+
+    /// A copy with the size, link count and private words its slot's
+    /// words hold now.
+    fn fresh(&self) -> Inode {
+        let mut n = *self;
+        if let Some(w) = self.words {
+            n.size = w.size();
+            n.nlink = w.nlink();
+            n.private = w.private();
+        }
+        n
+    }
+
+    /// Set the link count, in the slot's words too.
+    fn set_nlink(&mut self, n: u32) {
+        self.nlink = n;
+        if let Some(w) = self.words {
+            w.set_nlink(n);
+        }
+    }
 
     /// The generation-checked name of the slot this inode, or the inode
     /// this is a copy of, occupies.
@@ -584,7 +677,7 @@ impl Inode {
             kind: self.kind,
             mode: self.mode,
             nlink: self.nlink,
-            size: self.size,
+            size: self.cur_size(),
             atime: self.atime,
             mtime: self.mtime,
             ctime: self.ctime,
@@ -605,10 +698,13 @@ impl Inode {
             self.mode = after.mode;
         }
         if after.nlink != before.nlink {
-            self.nlink = after.nlink;
+            self.set_nlink(after.nlink);
         }
         if after.size != before.size {
             self.size = after.size;
+            if let Some(w) = self.words {
+                w.set_size(after.size);
+            }
         }
         if after.atime != before.atime {
             self.atime = after.atime;
@@ -621,6 +717,9 @@ impl Inode {
         }
         if after.private != before.private {
             self.private = after.private;
+            if let Some(w) = self.words {
+                w.set_private(after.private);
+            }
         }
     }
 }
@@ -865,6 +964,7 @@ impl Default for FdTable {
 
 pub struct Vfs {
     inodes: [Inode; MAX_INODES],
+    words: &'static WordsTable,
     dentries: [Dentry; MAX_DENTRIES],
     supers: [Super; MAX_MOUNTS],
     mounts: [Mount; MAX_MOUNTS],
@@ -875,16 +975,12 @@ pub struct Vfs {
     pub stats: VfsStats,
 }
 
-impl Default for Vfs {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Vfs {
-    pub const fn new() -> Self {
+    /// An empty VFS whose inode slots' words are `words`'s.
+    pub const fn new(words: &'static WordsTable) -> Self {
         Self {
             inodes: [Inode::EMPTY; MAX_INODES],
+            words,
             dentries: [Dentry::EMPTY; MAX_DENTRIES],
             supers: [Super::EMPTY; MAX_MOUNTS],
             mounts: [Mount::EMPTY; MAX_MOUNTS],
@@ -1130,6 +1226,12 @@ fn name_is_dot(n: &[u8]) -> bool {
 
 fn name_is_dotdot(n: &[u8]) -> bool {
     n.len() == 2 && n[0] == b'.' && n[1] == b'.'
+}
+
+/// A words table of its own for a host test's `Vfs`, leaked.
+#[cfg(test)]
+pub(crate) fn host_words() -> &'static WordsTable {
+    std::boxed::Box::leak(std::boxed::Box::new(words_table()))
 }
 
 /// The VFS with no lock around it, for host tests that drive one `Vfs`

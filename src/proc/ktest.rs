@@ -20,6 +20,7 @@ pub(crate) use uaccess::*;
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
+    #[cfg(target_arch = "x86_64")]
     test(
         "addrspace_map_unmap_teardown",
         test_addrspace_map_unmap_teardown,
@@ -63,4 +64,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("syscall_ptr_decl_efault", syscall_ptr_decl_efault),
     test("read_ebadf_before_efault", read_ebadf_before_efault),
     test("wait4_echild_before_efault", wait4_echild_before_efault),
+    test("syscall_errno_checks", syscall_errno_checks),
 ];

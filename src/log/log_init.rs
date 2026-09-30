@@ -15,11 +15,11 @@ use vibeos::log::{
     COMPILE_MAX, DEFAULT_RUNTIME_MAX, DUMP_LAST, Level, Logger, MSG_CAP, RING_CAP, Record, allowed,
 };
 
+use crate::arch::current::InterruptGuard;
 use crate::cell::IrqCell;
 use crate::per_cpu_init;
-use crate::serial::{PlainSerial, Serial};
+use crate::serial::PlainSerial;
 use crate::time_init;
-use crate::x86::InterruptGuard;
 
 struct Stage {
     buf: [u8; MSG_CAP],
@@ -55,6 +55,8 @@ pub(crate) fn ring_root() -> u64 {
     core::ptr::from_ref(&LOG).addr() as u64
 }
 
+/// This CPU's `EMITTING` and `STAGE` slot. IF=0 callers only, so the slot
+/// stays this CPU's while the caller uses it (DESIGN §2.9 rule 5).
 fn cpu_index() -> usize {
     per_cpu_init::try_current()
         .map(|c| c.cpu_id as usize)
@@ -78,10 +80,9 @@ pub fn timestamp() -> u64 {
     }
 }
 
+/// The record prefix's CPU: a hint, exact while IF=0.
 fn cpu_id() -> u8 {
-    per_cpu_init::try_current()
-        .map(|c| c.cpu_id as u8)
-        .unwrap_or(0)
+    crate::arch::cpu_id_hint() as u8
 }
 
 fn with_logger<R>(f: impl FnOnce(&mut Logger<RING_CAP, MSG_CAP>) -> R) -> R {
@@ -112,6 +113,7 @@ pub unsafe fn with_logger_unlocked<R>(f: impl FnOnce(&Logger<RING_CAP, MSG_CAP>)
     f(unsafe { &*LOG.as_ptr() })
 }
 
+/// Whether this CPU is inside `log_fmt`. IF=0 callers only.
 pub fn is_emitting() -> bool {
     EMITTING[cpu_index()].load(Ordering::Relaxed)
 }
@@ -158,6 +160,9 @@ fn push_record(level: Level, msg: &[u8]) -> bool {
 /// IRQ-off for the whole emit so `EMITTING` / try-write cannot race a
 /// preempting thread on this CPU.
 pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
+    // A non-owner CPU appending once `HALTING` is set stops here (DESIGN
+    // §2.5 step 1).
+    crate::serial::raw::stop_if_halting();
     if !allowed(level, runtime(), COMPILE_MAX) {
         return;
     }
@@ -223,13 +228,14 @@ pub fn init() {
 /// before a framebuffer exists. Caller holds IRQs off (`Serial::write_line`
 /// / `write_fmt`); `STAGE` is CPU-local and must not outlive that.
 pub fn capture_serial(bytes: &[u8]) {
-    if crate::serial::raw::HALTING.load(Ordering::Acquire) || is_emitting() {
+    crate::serial::raw::stop_if_halting();
+    let _irq = InterruptGuard::enter();
+    if is_emitting() {
         return;
     }
     if !allowed(Level::Info, runtime(), COMPILE_MAX) {
         return;
     }
-    let _irq = InterruptGuard::enter();
     let i = cpu_index();
     STAGE[i].with(|st| {
         for &b in bytes {
@@ -341,12 +347,15 @@ pub fn write_record(w: &mut impl Write, r: &vibeos::log::Record<MSG_CAP>) {
     );
 }
 
-/// Last N records for the panic dump. Caller holds no log lock.
+/// Last N records for the panic dump, each one line through `out`, the
+/// dump's writer (`panic::out`, over `serial::raw::write_owner`: no lock,
+/// no `InterruptGuard`), which the caller passes so this module does not
+/// name the panic module (DESIGN §1.2).
 ///
 /// # Safety
 /// The contracts of [`force_unlock`] and [`with_logger_unlocked`]: panic
 /// path only, after `panic::begin_dump`, with no other writer of `LOG`.
-pub unsafe fn dump_tail(n: usize) {
+pub unsafe fn dump_tail(n: usize, out: fn(fmt::Arguments<'_>)) {
     // SAFETY: the holder never touches `LOG` again (panic path, after
     // `begin_dump`); established by `log_init::dump_tail`'s `# Safety`
     // contract.
@@ -356,37 +365,27 @@ pub unsafe fn dump_tail(n: usize) {
     // `log_init::dump_tail`'s `# Safety` contract.
     unsafe {
         with_logger_unlocked(|l| {
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "a write to Serial cannot fail (DESIGN §2.5)"
-            )]
-            let _ = writeln!(
-                Serial,
+            out(format_args!(
                 "vibeOS: log: last {} ({} dropped, {} sink, {} reentry)",
                 n.min(l.ring.len()),
                 l.ring.dropped(),
                 sink_drops(),
                 reentry_drops()
-            );
+            ));
             let unit = if time_init::tsc_per_ms() != 0 {
                 "ms"
             } else {
                 "tsc"
             };
             for r in l.ring.last_n(n) {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "a write to Serial cannot fail (DESIGN §2.5)"
-                )]
-                let _ = writeln!(
-                    Serial,
+                out(format_args!(
                     "vibeOS: logrec: {}{} cpu{} {} {}",
                     r.timestamp,
                     unit,
                     r.cpu_id,
                     r.level.as_str(),
                     r.msg_str()
-                );
+                ));
             }
         });
     }

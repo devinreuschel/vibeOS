@@ -1,10 +1,14 @@
 //! In-guest tests for dev (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use vibeos::dev::{ClaimError, DevRef, Driver, IdMatch, Instance, ProbeError};
+use vibeos::dev::{
+    ClaimError, DevRef, DevState, Driver, IdMatch, Instance, ProbeError, Resource, ResourceKind,
+};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::O_RDWR;
-use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_MASTER, CMD_MEM};
+use vibeos::lock::RANK_DEVICE;
+use vibeos::paging::{PAGE_SIZE_2M, PageFlags, VirtAddr};
+use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 
 use vibeos::kalloc::TryBox;
 use vibeos::pci::CfgIo;
@@ -22,6 +26,8 @@ use crate::ktest::{
 use crate::log_init;
 use crate::paging_init;
 use crate::pci_init;
+use crate::sync::blocking_init::BlockingMutex;
+use crate::sync_init::SpinMutex;
 use crate::thread_init;
 use crate::virtio_init;
 
@@ -126,6 +132,9 @@ pub(crate) fn test_pci_qemu_set() -> Outcome {
     Outcome::Ok
 }
 
+/// No driver binds the VGA function, so nothing claims or maps its BAR0:
+/// the scan maps no BAR. The framebuffer that aliases it is on the
+/// physmap write-back, never uncached (§9.2).
 pub(crate) fn test_pci_bar_map() -> Outcome {
     let Some(d) = find_id(0x1234, 0x1111) else {
         return Outcome::Fail("no vga");
@@ -137,12 +146,20 @@ pub(crate) fn test_pci_bar_map() -> Outcome {
     if r.size == 0 || r.size > pci::MAX_BAR_MAP {
         return Outcome::Fail("vga bar0 size");
     }
-    if r.mapped_va == 0 {
-        return Outcome::Fail("vga bar0 unmapped");
+    if dev_init::bound(&d).is_some() {
+        return Outcome::Fail("vga bound");
     }
-    // WB physmap alias, not an ioremap UC window over the console FB.
-    if r.mapped_va != paging_init::HHDM_BASE.wrapping_add(r.addr) {
-        return Outcome::Fail("vga bar0 not wb physmap");
+    if dev_init::is_claimed(&d, 0) {
+        return Outcome::Fail("vga bar0 claimed");
+    }
+    if dev_init::bar_va(&d, 0).is_some() {
+        return Outcome::Fail("vga bar0 mapped");
+    }
+    let va = paging_init::HHDM_BASE.wrapping_add(r.addr);
+    if let Some((_, _, flags)) = paging_init::translate(VirtAddr(va))
+        && (flags.contains(PageFlags::PCD) || flags.contains(PageFlags::PWT))
+    {
+        return Outcome::Fail("vga bar0 physmap leaf not write-back");
     }
     Outcome::Ok
 }
@@ -157,7 +174,7 @@ pub(crate) fn test_pci_cfg_rw() -> Outcome {
         return Outcome::Fail("host device");
     }
     let prev = cfg_read32(bdf, CFG_COMMAND) as u16;
-    pci_init::enable_mem_master(bdf);
+    pci_init::update_command(bdf, CMD_MEM | CMD_MASTER, 0);
     let now = cfg_read32(bdf, CFG_COMMAND) as u16;
     cfg_write32(bdf, CFG_COMMAND, prev as u32);
     if now & (CMD_MEM | CMD_MASTER) != CMD_MEM | CMD_MASTER {
@@ -182,13 +199,29 @@ pub(crate) fn test_pci_claim_exclusive() -> Outcome {
     if !found {
         return Outcome::Fail("e1000 no bar");
     }
-    if let Err(e) = dev_init::claim(&d, b) {
-        return Outcome::Fail(e.as_str());
+    let c = match dev_init::claim(&d, b) {
+        Ok(c) => c,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    let why = match dev_init::claim(&d, b) {
+        Err(ClaimError::Already) => None,
+        Err(_) => Some("wrong claim err"),
+        Ok(twice) => {
+            dev_init::release(twice);
+            Some("double claim")
+        }
+    };
+    dev_init::release(c);
+    if let Some(why) = why {
+        return Outcome::Fail(why);
     }
+    // A released claim frees its range: it claims again.
     match dev_init::claim(&d, b) {
-        Err(ClaimError::Already) => Outcome::Ok,
-        Err(_) => Outcome::Fail("wrong claim err"),
-        Ok(()) => Outcome::Fail("double claim"),
+        Ok(c) => {
+            dev_init::release(c);
+            Outcome::Ok
+        }
+        Err(e) => crate::fail_fmt!("claim after release: {}", e.as_str()),
     }
 }
 
@@ -223,10 +256,18 @@ pub(crate) fn test_pci_bind_order() -> Outcome {
         return Outcome::Fail("no host");
     };
     match dev_init::bound(&d) {
-        Some("host-bridge") => Outcome::Ok,
-        Some(_) => Outcome::Fail("wrong driver"),
-        None => Outcome::Fail("unbound"),
+        Some("host-bridge") => {}
+        Some(_) => return Outcome::Fail("wrong driver"),
+        None => return Outcome::Fail("unbound"),
     }
+    if dev_init::state(&d) != Some(DevState::Bound) {
+        return Outcome::Fail("host bridge not Bound");
+    }
+    // The host bridge sits on the root bus: no parent.
+    if dev_init::parent(&d).is_some() {
+        return Outcome::Fail("host bridge has a parent");
+    }
+    Outcome::Ok
 }
 
 pub(crate) fn test_dma_alloc() -> Outcome {
@@ -309,7 +350,7 @@ pub(crate) fn test_dma_edu() -> Outcome {
     if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
         return Outcome::Fail("edu ident");
     }
-    pci_init::enable_mem_master(dev.addr);
+    pci_init::update_command(dev.addr, CMD_MASTER, 0);
     let Some(src) = dma_init::alloc(DmaAlloc::dma32(64)) else {
         return Outcome::Fail("src");
     };
@@ -397,6 +438,9 @@ pub(crate) fn test_virtio_bind() -> Outcome {
         Some("virtio-rng") => {}
         Some(_) => return Outcome::Fail("wrong driver"),
         None => return Outcome::Fail("id match"),
+    }
+    if dev_init::state(&d) != Some(DevState::Bound) {
+        return Outcome::Fail("rng not Bound");
     }
     if rng_features() & F_VERSION_1 == 0 {
         return Outcome::Fail("no VERSION_1");
@@ -570,6 +614,196 @@ pub(crate) fn test_dev_probe_alloc_fail() -> Outcome {
     }
     if TryBox::try_new(0u64).is_err() {
         return Outcome::Fail("alloc after disarm");
+    }
+    Outcome::Ok
+}
+
+// ---- `bar-test`: the `kernel_tests` driver that claims and maps the BARs
+// of the functions no production driver binds, for the tests that drive
+// them (ROADMAP §10.12, F115).
+
+static BAR_TEST_IDS: &[IdMatch] = &[
+    IdMatch::vid_did(0x1234, 0x11e8), // edu, QEMU 8.x
+    IdMatch::vid_did(0x1b36, 0x11e8), // edu, later trees
+    IdMatch::vid_did(0x8086, 0x10d3), // e1000e
+];
+
+/// Claims and maps every memory BAR in `probe`, then turns on memory
+/// decode; `remove` turns bus mastering off and gives the BARs back.
+struct BarTestDrv;
+
+static BAR_TEST_DRV: BarTestDrv = BarTestDrv;
+
+impl Driver for BarTestDrv {
+    fn name(&self) -> &'static str {
+        "bar-test"
+    }
+    fn ids(&self) -> &'static [IdMatch] {
+        BAR_TEST_IDS
+    }
+    fn order(&self) -> u8 {
+        90
+    }
+    fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+        dev_init::claim_mem_bars(dev)?;
+        pci_init::update_command(dev.addr, CMD_MEM, 0);
+        Ok(None)
+    }
+    fn remove(&self, dev: &DevRef) {
+        pci_init::update_command(dev.addr, 0, CMD_MASTER);
+        dev_init::release_bars(dev);
+    }
+}
+
+/// Set once `bar-test` is registered and has had its bind.
+static BAR_TEST_BOUND: BlockingMutex<bool> = BlockingMutex::new(false);
+
+/// Register `bar-test` and bind it, once per boot; later calls return at
+/// once. A second registration is refused, which is fine.
+pub(crate) fn bind_bar_test_driver() {
+    let mut done = BAR_TEST_BOUND.lock();
+    if *done {
+        return;
+    }
+    let _ = dev_init::register_driver(&BAR_TEST_DRV);
+    dev_init::bind_all();
+    *done = true;
+}
+
+/// A page-aligned 4 KiB page inside a usable range above 1 MiB.
+pub(crate) fn usable_page() -> Option<u64> {
+    crate::boot::info().usable().find_map(|r| {
+        let start = r.start.max(0x10_0000).checked_add(0xFFF)? & !0xFFF;
+        (start.checked_add(0x1000)? <= r.end).then_some(start)
+    })
+}
+
+/// The id of the `kernel_tests` record whose BAR0 lies in usable RAM.
+static RAM_DEV_ID: vibeos::atomic::statics::AtomicU64 = vibeos::atomic::statics::AtomicU64::new(0);
+
+/// The `kernel_tests` record with BAR0 on a usable RAM page, registered
+/// on first use.
+fn ram_bar_device() -> Option<DevRef> {
+    let id = RAM_DEV_ID.load(Ordering::Acquire);
+    if id != 0 {
+        return dev_init::REG.lock().by_id(id);
+    }
+    let page = usable_page()?;
+    let mut d = vibeos::dev::Device::empty();
+    d.addr = Bdf::new(0, 0x1f, 7);
+    d.resources[0] = Resource {
+        kind: ResourceKind::Memory,
+        bar: 0,
+        addr: page,
+        size: 0x1000,
+        prefetchable: false,
+    };
+    let id = dev_init::push_test_device(d)?;
+    RAM_DEV_ID.store(id, Ordering::Release);
+    dev_init::REG.lock().by_id(id)
+}
+
+/// ROADMAP §10.12 (F115): every memory BAR of every bound device is in the
+/// claims table, a second claim of one is `Already`, a claim over usable
+/// RAM is `Ram`, and an unbound device keeps no claim.
+pub(crate) fn test_dev_bar_claims() -> Outcome {
+    bind_bar_test_driver();
+    let mut i = 0usize;
+    let mut held = 0usize;
+    while let Some(d) = dev_init::get(i) {
+        i += 1;
+        if dev_init::state(&d) != Some(DevState::Bound) {
+            continue;
+        }
+        for (b, r) in d.resources.iter().enumerate() {
+            if r.is_empty() || r.kind != ResourceKind::Memory {
+                continue;
+            }
+            if !dev_init::is_claimed(&d, b as u8) {
+                return crate::fail_fmt!("{} bar{b} bound but unclaimed", d.addr);
+            }
+            held += 1;
+        }
+    }
+    if held == 0 {
+        return Outcome::Fail("no bound device holds a memory BAR");
+    }
+    let Some(edu) = find_edu() else {
+        return Outcome::Skip("no edu");
+    };
+    if dev_init::bound(&edu) != Some("bar-test") {
+        return Outcome::Fail("edu not bound to bar-test");
+    }
+    match dev_init::claim(&edu, 0) {
+        Err(ClaimError::Already) => {}
+        Err(e) => return crate::fail_fmt!("second claim: {}", e.as_str()),
+        Ok(c) => {
+            dev_init::release(c);
+            return Outcome::Fail("second claim granted");
+        }
+    }
+    let Some(ram) = ram_bar_device() else {
+        return Outcome::Fail("no usable page or table full");
+    };
+    match dev_init::claim(&ram, 0) {
+        Err(ClaimError::Ram) => {}
+        Err(e) => return crate::fail_fmt!("claim over RAM: {}", e.as_str()),
+        Ok(c) => {
+            dev_init::release(c);
+            return Outcome::Fail("claim over RAM granted");
+        }
+    }
+    if !dev_init::unbind(&edu) {
+        return Outcome::Fail("unbind edu");
+    }
+    let left = (0..pci::MAX_BARS as u8).find(|&b| dev_init::is_claimed(&edu, b));
+    let mapped = dev_init::bar_va(&edu, 0).is_some();
+    let state = dev_init::state(&edu);
+    let fresh = dev_init::claim(&edu, 0);
+    let fresh_ok = fresh.is_ok();
+    if let Ok(c) = fresh {
+        dev_init::release(c);
+    }
+    // Bind it again whatever the checks found, for the tests after this.
+    dev_init::bind_all();
+    if let Some(b) = left {
+        return crate::fail_fmt!("edu bar{b} still claimed after unbind");
+    }
+    if mapped {
+        return Outcome::Fail("edu bar0 still mapped after unbind");
+    }
+    if state != Some(DevState::Present) {
+        return Outcome::Fail("edu not Present after unbind");
+    }
+    if !fresh_ok {
+        return Outcome::Fail("edu bar0 not claimable after unbind");
+    }
+    if dev_init::bound(&edu) != Some("bar-test") {
+        return Outcome::Fail("edu not bound again");
+    }
+    match bar0_va(&edu) {
+        Some(mmio) if mmio_r32(mmio, EDU_IDENT) == EDU_IDENT_VAL => Outcome::Ok,
+        Some(_) => Outcome::Fail("edu ident after rebind"),
+        None => Outcome::Fail("edu bar0 after rebind"),
+    }
+}
+
+/// ROADMAP §10.12 (F115): `map_mmio` refuses a page of usable RAM, and
+/// that page's physmap leaf stays write-back.
+pub(crate) fn test_map_mmio_refuses_ram() -> Outcome {
+    let Some(page) = usable_page() else {
+        return Outcome::Fail("no usable page above 1 MiB");
+    };
+    if let Some(va) = pci_init::map_mmio(page, 0x1000) {
+        return crate::fail_fmt!("usable page {page:#x} mapped at {va:#x}");
+    }
+    let Some((_, _, flags)) =
+        paging_init::translate(VirtAddr(paging_init::HHDM_BASE.wrapping_add(page)))
+    else {
+        return crate::fail_fmt!("usable page {page:#x} not on the physmap");
+    };
+    if flags.contains(PageFlags::PCD) || flags.contains(PageFlags::PWT) {
+        return crate::fail_fmt!("usable page {page:#x} physmap leaf not write-back");
     }
     Outcome::Ok
 }
@@ -787,6 +1021,239 @@ pub(crate) fn rng_refill_after_empty_completion() -> Outcome {
     Outcome::Ok
 }
 
+/// The second virtio-rng function `tests/harness/harness.py: ktest_devices`
+/// adds, in a slot after the first rng in bus order, so it is refused.
+pub(crate) const SPARE_RNG_BDF: Bdf = Bdf::new(0, 0x1d, 0);
+
+/// Every virtio-rng function in the registry, in registration order.
+fn rng_functions() -> ([Option<DevRef>; 4], usize) {
+    let mut out: [Option<DevRef>; 4] = [const { None }; 4];
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while let Some(d) = dev_init::get(i) {
+        i += 1;
+        let rng = d.vendor == 0x1af4 && (d.device_id == 0x1044 || d.device_id == 0x1004);
+        if !rng {
+            continue;
+        }
+        if let Some(slot) = out.get_mut(n) {
+            *slot = Some(d);
+        }
+        n += 1;
+    }
+    (out, n)
+}
+
+/// ROADMAP §10.12 (F121): a second virtio-rng function is refused, and
+/// the refusal touches neither the device nor the first one's state.
+pub(crate) fn rng_second_probe_refused() -> Outcome {
+    let (fns, n) = rng_functions();
+    if n != 2 {
+        return crate::fail_fmt!("{n} virtio-rng functions, want 2");
+    }
+    let Some(spare) = fns.iter().flatten().find(|d| d.addr == SPARE_RNG_BDF) else {
+        return Outcome::Fail("no rng at 00:1d.0");
+    };
+    let Some(first) = fns.iter().flatten().find(|d| d.addr != SPARE_RNG_BDF) else {
+        return Outcome::Fail("no first rng");
+    };
+    if dev_init::bound(spare).is_some() {
+        return Outcome::Fail("spare rng bound");
+    }
+    if dev_init::bound(first) != Some("virtio-rng") {
+        return Outcome::Fail("first rng unbound");
+    }
+    let cmd0 = pci_init::cfg_read16(SPARE_RNG_BDF, CFG_COMMAND);
+    let isr0 = virtio_init::ISR_VA.load(Ordering::Acquire);
+    let q0 = rng_qdma_device();
+    let r = virtio_init::RNG_DRV.probe(spare);
+    if r.is_ok() {
+        return Outcome::Fail("second probe bound");
+    }
+    if pci_init::cfg_read16(SPARE_RNG_BDF, CFG_COMMAND) != cmd0 {
+        return Outcome::Fail("refused probe wrote COMMAND");
+    }
+    if virtio_init::ISR_VA.load(Ordering::Acquire) != isr0 {
+        return Outcome::Fail("ISR_VA changed");
+    }
+    if rng_qdma_device() != q0 {
+        return Outcome::Fail("queue changed");
+    }
+    if !virtio_init::rng_bound() {
+        return Outcome::Fail("BOUND cleared");
+    }
+    let c0 = rng_completions();
+    if virtio_init::rng_request().is_err() {
+        return Outcome::Fail("request");
+    }
+    if !spin_until_ns(|| rng_completions() > c0, 2_000_000_000) {
+        return Outcome::Fail("first rng no completion");
+    }
+    Outcome::Ok
+}
+
+// ---- The fail-after-`QENABLE` hook both virtio probes call, and what
+// `virtio_init::stop_device` saw (ROADMAP §10.12, F116; AGENTS rule 9:
+// `kernel_tests` only).
+
+/// The virtio-blk function `tests/harness/harness.py: ktest_devices`
+/// reserves: its probe fails after `QENABLE` at every boot, so it stays
+/// unbound for `virtio_probe_fail_quiesces`.
+pub(crate) const PROBE_BLK_BDF: Bdf = Bdf::new(0, 0x1e, 0);
+
+/// The armed function, as `virtio_init::bdf_key`; 0 for none.
+static FAIL_ARMED: vibeos::atomic::statics::AtomicU64 = vibeos::atomic::statics::AtomicU64::new(0);
+
+/// Whether the probe of `bdf` fails right after it enables its first
+/// queue: always for [`PROBE_BLK_BDF`], and for the armed function.
+pub(crate) fn fail_after_qenable(bdf: Bdf) -> bool {
+    bdf == PROBE_BLK_BDF || FAIL_ARMED.load(Ordering::Acquire) == virtio_init::bdf_key(bdf)
+}
+
+/// Arm the hook for `bdf`, or disarm it with `None`.
+pub(crate) fn arm_fail_after_qenable(bdf: Option<Bdf>) {
+    FAIL_ARMED.store(bdf.map_or(0, virtio_init::bdf_key), Ordering::Release);
+}
+
+/// What `virtio_init::stop_device` read back, before the caller freed
+/// anything: device status, COMMAND, and the free frames then.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Quiesced {
+    pub bdf: Bdf,
+    pub reset_ok: bool,
+    pub status: u8,
+    pub command: u16,
+    pub free_frames: usize,
+}
+
+/// The last [`Quiesced`]. A leaf: nothing is locked under it.
+static QUIESCED: SpinMutex<Option<Quiesced>> = SpinMutex::with_rank(None, RANK_DEVICE);
+
+/// Record a stop. `stop_device` calls it with no device lock held, and the
+/// free-frame count (the buddy lock) comes before [`QUIESCED`]'s.
+pub(crate) fn record_quiesce(bdf: Bdf, reset_ok: bool, status: u8, command: u16) {
+    let free_frames = crate::ktest::free_frames();
+    *QUIESCED.lock() = Some(Quiesced {
+        bdf,
+        reset_ok,
+        status,
+        command,
+        free_frames,
+    });
+}
+
+/// The last recorded stop, clearing it.
+pub(crate) fn take_quiesce() -> Option<Quiesced> {
+    QUIESCED.lock().take()
+}
+
+/// Check a probe of `bdf` that failed after `QENABLE`: `stop_device` saw
+/// status 0 and bus mastering off before the probe's frames went back
+/// (fewer free than `before`), and they all went back by `after`.
+pub(crate) fn check_quiesce(
+    q: Option<Quiesced>,
+    bdf: Bdf,
+    before: usize,
+    after: usize,
+) -> Result<(), &'static str> {
+    let Some(q) = q else {
+        return Err("no stop recorded");
+    };
+    if q.bdf != bdf {
+        return Err("stop recorded for another function");
+    }
+    if !q.reset_ok || q.status != 0 {
+        return Err("status not 0 before the free");
+    }
+    if q.command & CMD_MASTER != 0 {
+        return Err("bus mastering on before the free");
+    }
+    if q.free_frames >= before {
+        return Err("frames freed before the stop");
+    }
+    if after != before {
+        return Err("frames not returned");
+    }
+    if pci_init::cfg_read16(bdf, CFG_COMMAND) & CMD_MASTER != 0 {
+        return Err("bus mastering on after the probe");
+    }
+    Ok(())
+}
+
+/// The ioremap window's cursor: the first VA it has not handed out.
+fn ioremap_next() -> u64 {
+    paging_init::with_pt(|pt| pt.window().next())
+}
+
+/// The page-table frames the ioremap window took while its cursor moved
+/// from `a` to `b`: one for each 2 MiB of window VA first reached. The
+/// window never hands VA out twice (DESIGN §4.1), so they stay.
+fn window_tables(a: u64, b: u64) -> usize {
+    let region = |next: u64| next.saturating_sub(1) / PAGE_SIZE_2M;
+    region(b).saturating_sub(region(a)) as usize
+}
+
+/// Fail the probe of `bdf` twice through `probe`, the first warming the
+/// heap, and check the second's stop. Each probe maps its BARs afresh
+/// (`dev_init::claim_mem_bars`), so a page table the window took for them
+/// counts as returned.
+pub(crate) fn probe_fails_quiesced(bdf: Bdf, probe: impl Fn() -> bool) -> Result<(), &'static str> {
+    if probe() {
+        return Err("first probe bound");
+    }
+    let _ = take_quiesce();
+    let before = quiescent_free_frames();
+    let window = ioremap_next();
+    let bound = probe();
+    let q = take_quiesce();
+    let after = quiescent_free_frames();
+    let tables = window_tables(window, ioremap_next());
+    if bound {
+        return Err("second probe bound");
+    }
+    check_quiesce(q, bdf, before, after.saturating_add(tables))
+}
+
+/// The virtio-rng half of `virtio_probe_fail_quiesces` (ROADMAP §10.12,
+/// F116): remove the bound rng, fail its probe after `QENABLE` twice, then
+/// bind it again and use it.
+pub(crate) fn rng_fail_after_qenable_case() -> Outcome {
+    let (fns, _) = rng_functions();
+    let Some(d) = fns.iter().flatten().find(|d| d.addr != SPARE_RNG_BDF) else {
+        return Outcome::Fail("no bound rng");
+    };
+    if !virtio_init::rng_bound() {
+        return Outcome::Fail("rng unbound");
+    }
+    virtio_init::RNG_DRV.remove(d);
+    if virtio_init::rng_bound() {
+        return Outcome::Fail("BOUND after remove");
+    }
+    arm_fail_after_qenable(Some(d.addr));
+    let failed = probe_fails_quiesced(d.addr, || virtio_init::RNG_DRV.probe(d).is_ok());
+    arm_fail_after_qenable(None);
+    // Bind it again whatever the checks found, for the tests after this.
+    let rebound = virtio_init::RNG_DRV.probe(d).is_ok();
+    if let Err(why) = failed {
+        return Outcome::Fail(why);
+    }
+    if !rebound || !virtio_init::rng_bound() {
+        return Outcome::Fail("rng not bound again");
+    }
+    let want = CMD_MEM | CMD_MASTER | CMD_INTX_DISABLE;
+    if pci_init::cfg_read16(d.addr, CFG_COMMAND) & want != want {
+        return Outcome::Fail("driver did not turn its device on");
+    }
+    let c0 = rng_completions();
+    if virtio_init::rng_request().is_err() {
+        return Outcome::Fail("request");
+    }
+    if !spin_until_ns(|| rng_completions() > c0, 2_000_000_000) {
+        return Outcome::Fail("rng no completion after rebind");
+    }
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -806,4 +1273,7 @@ pub(crate) const TESTS: &[Test] = &[
         rng_refill_after_empty_completion,
     ),
     test("dev_probe_alloc_fail", test_dev_probe_alloc_fail),
+    test("rng_second_probe_refused", rng_second_probe_refused),
+    test("dev_bar_claims", test_dev_bar_claims).once(),
+    test("map_mmio_refuses_ram", test_map_mmio_refuses_ram),
 ];

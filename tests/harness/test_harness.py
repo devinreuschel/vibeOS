@@ -34,6 +34,8 @@ from tests.harness.harness import (
     OVMF_BOOT_ARGS,
     PANIC_EXIT_S,
     PANIC_EXIT_STATUS,
+    VBLK_BAD_SECTOR,
+    VBLK_PATTERN_XOR,
     DeadlineReader,
     EnvConfig,
     HarnessError,
@@ -52,12 +54,15 @@ from tests.harness.harness import (
     iter_lines_with_deadline,
     kernel_text,
     ktest_devices,
+    make_pattern_disk,
     mce_monitor_cmd,
     overlay_env,
     qemu_argv,
     run_qemu_and_check,
     run_qemu_console_input,
     serial_tail,
+    virtio_blk_args,
+    write_blkdebug_config,
 )
 from tests.harness.linesource import FakeLineSource
 
@@ -155,6 +160,80 @@ def check_fake(
     """Run `run_qemu_and_check` over `lines` through a `FakeLineSource`."""
     src = FakeLineSource.from_lines(lines, end=end, exit_code=exit_code, stderr=stderr)
     return run_qemu_and_check(FAKE_CFG, markers, line_source=src, **kw), src
+
+
+class TestVirtioBlkDriveOptions(unittest.TestCase):
+    """`virtio_blk_args`' `readonly` and `blkdebug` options and the files
+    the two single-test virtio-blk boots use (ROADMAP §10.11)."""
+
+    def test_default_drive_unchanged(self) -> None:
+        self.assertEqual(
+            virtio_blk_args("/tmp/d.img", 2),
+            (
+                "-drive",
+                "file=/tmp/d.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+                "-device",
+                "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+            ),
+        )
+        self.assertEqual(
+            ktest_devices("/tmp/d.img", 2),
+            ktest_devices("/tmp/d.img", 2, readonly=False, blkdebug=None),
+        )
+
+    def test_readonly_drive(self) -> None:
+        args = virtio_blk_args("/tmp/d.img", 2, readonly=True, extra=("/tmp/e.img",))
+        self.assertEqual(
+            args[1], "file=/tmp/d.img,if=none,id=vibehd,format=raw,cache=writeback,readonly=on"
+        )
+        # Only the first drive is read-only.
+        self.assertIn("discard=unmap", args[5])
+        self.assertNotIn("readonly", args[5])
+        self.assertIn(args[1], ktest_devices("/tmp/d.img", 2, readonly=True))
+
+    def test_blkdebug_drive(self) -> None:
+        args = virtio_blk_args("/tmp/d.img", 1, blkdebug="/tmp/bd.conf")
+        self.assertEqual(
+            args[1],
+            "file=blkdebug:/tmp/bd.conf:/tmp/d.img,if=none,id=vibehd,format=raw,"
+            "cache=writeback,discard=unmap,rerror=report,werror=report",
+        )
+        self.assertIn(args[1], ktest_devices("/tmp/d.img", 1, blkdebug="/tmp/bd.conf"))
+        with self.assertRaises(HarnessError):
+            virtio_blk_args("/tmp/a:b.img", 1, blkdebug="/tmp/bd.conf")
+        with self.assertRaises(HarnessError):
+            virtio_blk_args("/tmp/sock", 1, nbd=True, readonly=True)
+
+    def test_blkdebug_config(self) -> None:
+        path = write_blkdebug_config(VBLK_BAD_SECTOR, "vibeos-test-bd-")
+        try:
+            self.assertNotIn(":", path)
+            with open(path) as f:
+                text = f.read()
+        finally:
+            os.unlink(path)
+        self.assertEqual(
+            text,
+            "[inject-error]\n"
+            'event = "read_aio"\n'
+            'iotype = "read"\n'
+            'errno = "5"\n'
+            'sector = "4096"\n'
+            'once = "off"\n'
+            'immediately = "off"\n',
+        )
+
+    def test_pattern_disk(self) -> None:
+        self.assertEqual(VBLK_PATTERN_XOR, 0xA5)
+        path = make_pattern_disk(3 * 512, "vibeos-test-pat-")
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        finally:
+            os.unlink(path)
+        self.assertEqual(data, b"\xa5" * 512 + b"\xa4" * 512 + b"\xa7" * 512)
+        with self.assertRaises(HarnessError):
+            make_pattern_disk(100, "vibeos-test-pat-")
 
 
 class TestMarkerOrder(unittest.TestCase):
@@ -1994,6 +2073,20 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("virtio-rng-pci", blob)
         self.assertIn("virtio-blk-pci", blob)
         self.assertIn("discard=unmap", blob)
+
+    def test_ktest_devices_probe_functions(self) -> None:
+        from tests.harness.harness import ktest_devices
+
+        args = ktest_devices("/tmp/disk.img", 2)
+        devices = [args[i + 1] for i, a in enumerate(args) if a == "-device"]
+        rngs = [d for d in devices if d.startswith("virtio-rng-pci")]
+        self.assertEqual(len(rngs), 2)
+        self.assertIn("addr=0x1d", rngs[1])
+        self.assertNotIn("addr=", rngs[0])
+        blob = " ".join(args)
+        self.assertIn("driver=null-co,node-name=probeblk", blob)
+        self.assertIn("virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e", devices)
+        self.assertEqual(sum("addr=0x1e" in d for d in devices), 1)
 
     def test_ktest_qemu_argv_boot_and_queues(self) -> None:
         from tests.harness.harness import ktest_devices, qemu_argv

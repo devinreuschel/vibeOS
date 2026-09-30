@@ -4,11 +4,12 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use vibeos::addr_space::AddressSpace;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET};
 
 use crate::addr_space_init;
+use crate::arch::current::AddressSpace;
 use crate::pmm_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86::{self, EFER_SCE, IA32_EFER, IA32_STAR};
 
 /// Load `space`'s root into CR3 unless this CPU already has it, and record
@@ -26,14 +27,12 @@ pub(crate) fn load_cr3(space: &AddressSpace) {
 /// This CPU's recorded root is `space`'s: a [`load_cr3`] of it skipped the
 /// write.
 pub(crate) fn cr3_was_skipped(space: &AddressSpace) -> bool {
-    crate::per_cpu_init::current()
-        .remote
-        .as_cr3
-        .load(Ordering::Relaxed)
+    crate::per_cpu_init::with_current(|c| c.remote.as_cr3.load(Ordering::Relaxed))
         == space.root().as_u64()
 }
 
 /// STAR holds the kernel and SYSRET selectors, and EFER.SCE is set.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn star_configured() -> bool {
     let star = x86::rdmsr(IA32_STAR);
     let efer = x86::rdmsr(IA32_EFER);

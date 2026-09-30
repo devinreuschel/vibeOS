@@ -130,7 +130,8 @@ pub struct Cache<const N: usize> {
     data: [[u8; PAGE]; N],
     hand: usize,
     last: CacheKey,
-    seq: u32,
+    /// Sequential page reads in a row, for readahead.
+    run: u32,
     pub stats: CacheStats,
 }
 
@@ -144,7 +145,7 @@ impl<const N: usize> Cache<N> {
                 dev: u64::MAX,
                 offset: u64::MAX,
             },
-            seq: 0,
+            run: 0,
             stats: CacheStats {
                 hits: 0,
                 misses: 0,
@@ -275,11 +276,11 @@ impl<const N: usize> Cache<N> {
             self.last.dev == key.dev && self.last.offset.saturating_add(PAGE as u64) == key.offset;
         self.last = key;
         if seq {
-            self.seq = self.seq.saturating_add(1);
+            self.run = self.run.saturating_add(1);
         } else {
-            self.seq = 0;
+            self.run = 0;
         }
-        seq && self.seq >= 1
+        seq && self.run >= 1
     }
 
     pub fn copy_page(&self, slot: usize, dst: &mut [u8]) -> Result<(), BlockError> {
@@ -429,7 +430,7 @@ impl<const N: usize> Cache<N> {
     }
 
     pub fn want_readahead(&self) -> Option<CacheKey> {
-        if self.seq == 0 || READAHEAD_PAGES == 0 {
+        if self.run == 0 || READAHEAD_PAGES == 0 {
             return None;
         }
         Some(self.last.next_page())
@@ -511,12 +512,42 @@ impl<const N: usize> Cache<N> {
         }
     }
 
-    /// Drop a page without writeback. tmpfs uses this when a file
-    /// frees or relocates backing so a later alloc cannot see stale data.
-    /// A slot in writeback keeps `F_WB` (see [`Cache::drop_dev`]).
+    /// Drop a page without writeback, only for backing that an unlink or
+    /// a shrink frees, so a later alloc cannot see stale data. A
+    /// relocation keeps its data: it uses [`cached_evict_range`], which
+    /// writes dirty pages back first. A slot in writeback keeps `F_WB`
+    /// (see [`Cache::drop_dev`]).
     pub fn invalidate(&mut self, key: CacheKey) {
         if let Some(i) = self.find(key) {
             self.meta[i].flags &= F_WB;
+        }
+    }
+
+    /// Copy page `key` into `dst` and clear its dirty bit when it is
+    /// valid, dirty, and not filling; its slot. A failed write of the copy
+    /// re-marks it with [`Cache::redirty`].
+    pub fn take_dirty_at(&mut self, key: CacheKey, dst: &mut [u8]) -> Option<usize> {
+        if dst.len() < PAGE {
+            return None;
+        }
+        let i = self.find(key)?;
+        let f = self.meta[i].flags;
+        if f & (F_VALID | F_DIRTY | F_FILL) != F_VALID | F_DIRTY {
+            return None;
+        }
+        dst[..PAGE].copy_from_slice(&self.data[i]);
+        self.meta[i].flags = f & !F_DIRTY;
+        Some(i)
+    }
+
+    /// Mark `slot` dirty again after the write of a copy
+    /// [`Cache::take_dirty_at`] took failed, if it still holds `key`.
+    pub fn redirty(&mut self, slot: usize, key: CacheKey) {
+        if let Some(m) = self.meta.get_mut(slot)
+            && m.key == key
+            && m.flags & F_VALID != 0
+        {
+            m.flags |= F_DIRTY;
         }
     }
 }
@@ -665,6 +696,38 @@ pub fn cached_write<B: Backend, const N: usize>(
     Ok(())
 }
 
+/// Write each dirty page of `dev` in `[off, off + len)` back to `b`, then
+/// drop it, as a relocation of the backing must before it copies the
+/// range. A write error re-marks the page dirty, keeps it, and returns.
+pub fn cached_evict_range<B: Backend, const N: usize>(
+    c: &mut Cache<N>,
+    b: &B,
+    dev: u64,
+    off: u64,
+    len: u64,
+) -> Result<(), BlockError> {
+    let end = off.checked_add(len).ok_or(BlockError::Inval)?;
+    let mut data = [0u8; PAGE];
+    let mut key = CacheKey::page(dev, off);
+    while key.offset < end {
+        if let Some(slot) = c.take_dirty_at(key, &mut data) {
+            let res = b.write(key.offset, &data);
+            if let Err(e) = res {
+                c.redirty(slot, key);
+                return Err(e);
+            }
+            c.stats.device_writes = c.stats.device_writes.saturating_add(1);
+        }
+        c.invalidate(key);
+        let next = key.next_page();
+        if next.offset == key.offset {
+            break;
+        }
+        key = next;
+    }
+    Ok(())
+}
+
 /// Write each dirty page, then send `b` a `Flush` once no dirty and no
 /// writeback slot is left (DESIGN §10.6). The host cannot wait, so a write
 /// already in flight is `Err(QueueFull)` and no `Flush` is sent.
@@ -706,6 +769,9 @@ mod tests {
         flushes: Mutex<u64>,
         writes_at: Mutex<std::collections::HashMap<u64, u64>>,
         fail_writes: Mutex<u32>,
+        /// Fail the next write at this offset, once.
+        fail_at: Mutex<Option<u64>>,
+        failed_at: Mutex<u64>,
     }
 
     impl Mem {
@@ -717,6 +783,8 @@ mod tests {
                 flushes: Mutex::new(0),
                 writes_at: Mutex::new(std::collections::HashMap::new()),
                 fail_writes: Mutex::new(0),
+                fail_at: Mutex::new(None),
+                failed_at: Mutex::new(0),
             }
         }
         fn writes_at(&self, off: u64) -> u64 {
@@ -743,6 +811,12 @@ mod tests {
                 let mut f = self.fail_writes.lock().unwrap();
                 if *f > 0 {
                     *f -= 1;
+                    return Err(BlockError::Io);
+                }
+                let mut at = self.fail_at.lock().unwrap();
+                if *at == Some(offset) {
+                    *at = None;
+                    *self.failed_at.lock().unwrap() += 1;
                     return Err(BlockError::Io);
                 }
             }
@@ -950,6 +1024,40 @@ mod tests {
     }
 
     #[test]
+    fn readahead_evict_write_fail_keeps_dirty() {
+        let mem = Mem::new(PAGE * 16);
+        let mut c = Cache::<3>::new();
+        let p = PAGE as u64;
+        // Pages 0, 5, and 6 fill the cache dirty, so the readahead's only
+        // victims are dirty and the clock picks page 0's slot.
+        cached_write(&mut c, &mem, 0, 0, &[0x11u8; PAGE]).unwrap();
+        cached_write(&mut c, &mem, 0, 5 * p, &[0x55u8; PAGE]).unwrap();
+        cached_write(&mut c, &mem, 0, 6 * p, &[0x66u8; PAGE]).unwrap();
+        *mem.fail_at.lock().unwrap() = Some(0);
+        let mut out = [0u8; 512];
+        cached_read(&mut c, &mem, 0, 5 * p, &mut out).unwrap();
+        assert_eq!(*mem.failed_at.lock().unwrap(), 0);
+        // The page 6 read is sequential: its readahead of page 7 evicts
+        // page 0, whose write fails.
+        cached_read(&mut c, &mem, 0, 6 * p, &mut out).unwrap();
+        assert_eq!(*mem.failed_at.lock().unwrap(), 1);
+        assert_eq!(*mem.reads.lock().unwrap(), 0);
+        assert!(c.find(CacheKey::page(0, 7 * p)).is_none());
+        // Page 0 is still cached, unchanged, and dirty.
+        let mut page = [0u8; PAGE];
+        cached_read(&mut c, &mem, 0, 0, &mut page).unwrap();
+        assert_eq!(page, [0x11u8; PAGE]);
+        assert_eq!(*mem.reads.lock().unwrap(), 0);
+        assert_eq!(c.dirty_count(), 3);
+        let s0 = c.find(CacheKey::page(0, 0)).unwrap();
+        assert!(!c.in_writeback(s0));
+        cached_flush(&mut c, &mem, None).unwrap();
+        assert_eq!(c.dirty_count(), 0);
+        assert_eq!(mem.writes_at(0), 1);
+        assert_eq!(mem.get(0, PAGE), vec![0x11u8; PAGE]);
+    }
+
+    #[test]
     fn invalidate_keeps_writeback() {
         let mem = Mem::new(PAGE * 8);
         let mut c = Cache::<2>::new();
@@ -989,5 +1097,43 @@ mod tests {
         let hi = CacheKey::page(1 << 40, 0);
         assert_ne!(hi, CacheKey::page(0, 0));
         assert_eq!(hi.dev, 1 << 40);
+    }
+
+    #[test]
+    fn cache_evict_range_writes_dirty() {
+        let mem = Mem::new(PAGE * 8);
+        let mut c = Cache::<4>::new();
+        cached_write(&mut c, &mem, 0, PAGE as u64, &[5u8; 16]).unwrap();
+        cached_write(&mut c, &mem, 0, 2 * PAGE as u64 + 9, &[6u8; 4]).unwrap();
+        cached_write(&mut c, &mem, 0, 3 * PAGE as u64, &[8u8; 4]).unwrap();
+        assert_eq!(mem.get(PAGE, 16), vec![0u8; 16]);
+        cached_evict_range(&mut c, &mem, 0, PAGE as u64, 2 * PAGE as u64).unwrap();
+        assert_eq!(mem.get(PAGE, 16), vec![5u8; 16]);
+        assert_eq!(mem.get(2 * PAGE + 9, 4), vec![6u8; 4]);
+        assert!(c.find(CacheKey::page(0, PAGE as u64)).is_none());
+        assert!(c.find(CacheKey::page(0, 2 * PAGE as u64)).is_none());
+        // Outside the range: still cached and dirty, not written.
+        assert!(c.find(CacheKey::page(0, 3 * PAGE as u64)).is_some());
+        assert_eq!(mem.get(3 * PAGE, 4), vec![0u8; 4]);
+        assert_eq!(c.dirty_count(), 1);
+    }
+
+    #[test]
+    fn cache_evict_range_keeps_dirty_on_error() {
+        let mem = Mem::new(PAGE * 8);
+        let mut c = Cache::<4>::new();
+        cached_write(&mut c, &mem, 0, 0, &[9u8; 32]).unwrap();
+        *mem.fail_writes.lock().unwrap() = 1;
+        assert_eq!(
+            cached_evict_range(&mut c, &mem, 0, 0, PAGE as u64),
+            Err(BlockError::Io)
+        );
+        let slot = c.find(CacheKey::page(0, 0)).unwrap();
+        assert!(!c.in_writeback(slot));
+        assert_eq!(c.dirty_count(), 1);
+        assert_eq!(mem.get(0, 32), vec![0u8; 32]);
+        cached_evict_range(&mut c, &mem, 0, 0, PAGE as u64).unwrap();
+        assert_eq!(mem.get(0, 32), vec![9u8; 32]);
+        assert!(c.find(CacheKey::page(0, 0)).is_none());
     }
 }

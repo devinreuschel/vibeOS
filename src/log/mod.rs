@@ -17,6 +17,8 @@ pub(crate) mod ksyms;
 pub mod ktest;
 pub(crate) mod log_init;
 pub(crate) mod panic;
+#[cfg(any(feature = "panic_stop_test", feature = "panic_nest_test"))]
+pub(crate) mod panic_test;
 pub(crate) mod serial;
 pub(crate) mod trace_init;
 pub(crate) mod vmcoreinfo_init;

@@ -77,15 +77,16 @@ instructions only, and aarch64's table carries the same kind bit. Rejected: a pe
 count (Linux's `pagefault_disable`), which adds per-thread state to the fault path and puts the
 choice away from the instruction that faults.
 
-Each CPU gets its own GDT and TSS (`gdt::CpuTables`): the BSP's lives in a `BootCell`, and
-`gdt::alloc_ap_tables` allocates each AP's. TSS.RSP0 is the stack an interrupt or exception from
-ring 3 lands on. `syscall` does not read the TSS; its entry loads `PerCpu.kernel_rsp0`.
-`syscall_init::set_rsp0_for` sets both to the incoming thread's stack top on every switch (the
-per-CPU `fallback_rsp0` for a thread with no stack of its own); the CPU never writes RSP0. Planned
-(ROADMAP §10.3, F089): the TSS sits in an `UnsafeCell` inside `CpuTables`, and `CpuTables::set_rsp0`,
-an `unsafe fn` that only the owning CPU calls with IF=0, is its one writer after `load`; today
-`set_rsp0_for` writes through `gdt::bsp_tss_ptr`, a `*mut Tss` cast from a shared reference. The TSS
-also holds the IST array.
+Each CPU gets its own GDT and TSS (`gdt::CpuTables`): the BSP's lives in a `BootCell`, filled for
+its final address before the cell is set, and `gdt::alloc_ap_tables` allocates each AP's and keeps
+it as the pointer `TryBox::into_raw` returns, which `free_ap_tables` hands back to
+`TryBox::from_raw`. TSS.RSP0 is the stack an interrupt or exception from ring 3 lands on. `syscall`
+does not read the TSS; its entry loads `PerCpu.kernel_rsp0`. `syscall_init::set_rsp0_for` sets both
+to the incoming thread's stack top on every switch (the per-CPU `fallback_rsp0` for a thread with no
+stack of its own); the CPU never writes RSP0. The TSS sits in an `UnsafeCell` inside `CpuTables`,
+and `CpuTables::set_rsp0`, an `unsafe fn` that only the owning CPU calls with IF=0, is its one
+writer after `load`: `set_rsp0_for` reaches it through `PerCpu.tables`, which `syscall_init::init_bsp`
+and `init_ap` set (ROADMAP §10.3, F089). The TSS also holds the IST array.
 
 | Gate IST field | `IstSlot` (index) | Use |
 |----------------|-------------------|-----|
@@ -141,7 +142,7 @@ fault, downstream of it.
 |--------|------|--------|--------|------------------|
 | `0x00` | `#DE` | dump, halt | `SIGFPE` | as the rule |
 | `0x01` | `#DB` | dump on IST, halt. Planned (ROADMAP §17.4, §18.4): three cases continue instead. A hit whose saved DR6 names only slots the current thread's tracer armed is dropped, as Linux drops a kernel-mode hit of a ptrace breakpoint; DR6.BS clears TF in the saved frame and logs once, as Linux does; in the ROADMAP §18.4 detector build a hit on a detector slot is reported | `SIGTRAP` (RFLAGS.TF, `int1`, a breakpoint or watchpoint the tracer armed); in the ROADMAP §18.4 detector build a hit on detector slots alone resumes with no signal and is counted | as the rule: the stub moves a CPL-3 frame off its IST stack, and the body runs with IF=1 and kills the process with `SIGTRAP` (§5.10 rule 3) |
-| `0x02` | NMI | dump on IST, halt. Planned (ROADMAP §10.7, F135): the handler first reads and clears its CPU's stop request word (§2.5 step 1): STOP stops the CPU, a CPU already stopped halts again at once, and an NMI with no request on the dump owner returns at once. Planned (ROADMAP §25.5): a backtrace or lockup request, and an external NMI on a CPU that is neither stopped nor the dump owner, are handled and return | not a ring-3 fault: the Ring 0 column applies | as the rule |
+| `0x02` | NMI | the handler first swaps its CPU's stop request word to 0 (`ipi_init::nmi_stop`, [§2.5](INVARIANTS.md#25-panic-policy) step 1, ROADMAP §10.7, F135), before any write or lock: a CPU already stopping or stopped halts again at once, an NMI on the dump owner returns at once, and STOP stops the CPU (`stopped (nmi)`); any other NMI dumps on IST and halts. Planned (ROADMAP §25.5): a backtrace or lockup request, and an external NMI on a CPU that is neither stopped nor the dump owner, are handled and return | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x03` | `#BP` | log, continue | `SIGTRAP` (`int3`) | as the rule |
 | `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | as the rule |
 | `0x06` | `#UD` | dump, halt | `SIGILL` | as the rule |
@@ -295,8 +296,9 @@ routes are rewritten immediately; MSI/MSI-X callers reprogram the message from
 MSI message address is `0xFEE0_0000 | (apic_id << 12)` (physical dest, RH=0). Data is
 the vector (fixed, edge). MSI-X table entries live in a BAR (BIR + offset from the
 capability). The dispatcher writes mask, then addr/data, then the caller's mask bit,
-sets COMMAND.INTX# disable, and enables MSI-X. Leaving INTx unmasked while MSI-X is
-armed duplicates IRQs.
+and enables MSI-X; it writes no `COMMAND` bit, since the driver sets INTx disable and
+bus mastering itself ([§12.3](DEVICES.md#123-resources)). Leaving INTx unmasked while
+MSI-X is armed duplicates IRQs.
 
 INTx remains the fallback when a function has neither MSI nor MSI-X: route the GSI
 through the I/O APIC (PCI is level, active low). Keyboard keeps hardcoded vector

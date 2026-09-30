@@ -4,7 +4,7 @@
 //! A leaf: the scheduler and the locks read it, and `irq_init` calls them,
 //! so the flag lives below both.
 
-use vibeos::arch::PerCpuBase;
+use vibeos::arch::{InterruptMask, PerCpuBase};
 use vibeos::atomic::statics::{AtomicBool, Ordering};
 
 use crate::arch::current::Arch;
@@ -19,10 +19,14 @@ fn slot() -> Option<&'static AtomicBool> {
     IN_ISR.get(Arch::cpu_id() as usize)
 }
 
-/// Whether this CPU runs a device's hard-IRQ top half. With IF on, the
-/// thread may move between the CPU id and the load; read it with IF off
-/// for an answer about the CPU the caller stays on.
+/// Whether this CPU runs a device's hard-IRQ top half. False with IF on,
+/// since a top half runs with IF off.
 pub fn in_hard_irq() -> bool {
+    // A top half runs with IF=0, so IF=1 answers alone, and an IF=0 read
+    // stays on the CPU whose slot it reads (DESIGN §2.9 rule 5).
+    if <Arch as InterruptMask>::enabled() {
+        return false;
+    }
     // Relaxed: only this CPU writes its slot.
     slot().is_some_and(|f| f.load(Ordering::Relaxed))
 }

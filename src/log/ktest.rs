@@ -1,9 +1,11 @@
 //! In-guest tests for log (kernel_tests only). Rows: [`TESTS`].
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::log::Level;
+use vibeos::log::backtrace::WalkEnd;
+use vibeos::paging::USER_MAP_END;
 
 use vibeos::log::trace::{self, Event, RecordData};
 use vibeos::vectors;
@@ -143,7 +145,7 @@ static NOISE_EXITED: AtomicU32 = AtomicU32::new(0);
 static WHOLE_DONE: AtomicBool = AtomicBool::new(false);
 
 fn this_cpu() -> u32 {
-    per_cpu_init::try_current().map_or(0, |c| c.cpu_id)
+    thread_init::current_cpu()
 }
 
 fn serial_noise() {
@@ -571,6 +573,107 @@ pub(crate) fn test_vmcoreinfo_published() -> Outcome {
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
+/// The user `rbp` `backtrace_syscall_boundary`'s program sets before its
+/// syscall, which the probe keys on.
+const WALK_RBP: u64 = 0x4000_0800;
+static WALK_ARMED: AtomicBool = AtomicBool::new(false);
+static WALK_DONE: AtomicBool = AtomicBool::new(false);
+static WALK_END: AtomicU32 = AtomicU32::new(0);
+static WALK_FRAMES: AtomicU32 = AtomicU32::new(0);
+static WALK_LAST: AtomicU64 = AtomicU64::new(0);
+static WALK_LOW: AtomicBool = AtomicBool::new(false);
+
+fn walk_end_code(e: WalkEnd) -> u32 {
+    match e {
+        WalkEnd::NullRbp => 1,
+        WalkEnd::UnknownStack => 2,
+        WalkEnd::OutsideImage => 3,
+        WalkEnd::NotRising => 4,
+        WalkEnd::DepthCap => 5,
+    }
+}
+
+/// `syscall_init::vibeos_syscall_stub`'s first line under `kernel_tests`:
+/// on the first syscall whose saved user `rbp` is [`WALK_RBP`] while the
+/// test is armed, walk the frame-pointer chain from here as the panic
+/// backtrace does (`panic::walk_known`) and record how it ended, the last
+/// frame, and whether any frame was a user address.
+#[inline(never)]
+pub(crate) fn syscall_walk_probe(user_rbp: u64) {
+    // Acquire: pairs with the test's Release store.
+    if user_rbp != WALK_RBP || !WALK_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    if WALK_DONE.load(Ordering::Acquire) {
+        return;
+    }
+    // IF=0: the known stacks read this CPU's per-CPU state.
+    let _irq = crate::arch::current::InterruptGuard::enter();
+    let rip = crate::arch::current::instruction_pointer();
+    let rbp = crate::arch::current::frame_pointer();
+    let mut last = 0u64;
+    let mut low = false;
+    let (n, end) = crate::panic::walk_known(rip, rbp, |a| {
+        last = a;
+        low |= a < USER_MAP_END;
+    });
+    WALK_END.store(walk_end_code(end), Ordering::Relaxed);
+    WALK_FRAMES.store(n as u32, Ordering::Relaxed);
+    WALK_LAST.store(last, Ordering::Relaxed);
+    WALK_LOW.store(low, Ordering::Relaxed);
+    // Release: the test reads the words above after it (Acquire).
+    WALK_DONE.store(true, Ordering::Release);
+}
+
+// A nonzero user rbp, getpid, then exit(0).
+user_code!(
+    WALK_GETPID,
+    "
+    mov rbp, 0x40000800
+    mov eax, 39
+    syscall
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+/// L1422: a walk from inside a syscall made with a nonzero user `rbp` ends
+/// on the null `rbp` the entry stored, at a last frame in the entry
+/// (`vibeos_syscall_entry`), with no frame below `USER_MAP_END`.
+pub(crate) fn test_backtrace_syscall_boundary() -> Outcome {
+    WALK_DONE.store(false, Ordering::Relaxed);
+    // Release: pairs with the probe's Acquire load.
+    WALK_ARMED.store(true, Ordering::Release);
+    let st = user::run(&Image::Code(WALK_GETPID, DEFAULT), &["walk_boundary"]);
+    WALK_ARMED.store(false, Ordering::Release);
+    match st {
+        Ok(0) => {}
+        Ok(s) => return crate::fail_fmt!("user program status {s:#x}, want 0"),
+        Err(_) => return Outcome::Fail("user program did not run"),
+    }
+    // Acquire: pairs with the probe's Release store.
+    if !WALK_DONE.load(Ordering::Acquire) {
+        return Outcome::Fail("the probe did not fire");
+    }
+    let end = WALK_END.load(Ordering::Relaxed);
+    let n = WALK_FRAMES.load(Ordering::Relaxed);
+    if end != walk_end_code(WalkEnd::NullRbp) {
+        return crate::fail_fmt!("walk ended with code {end} after {n} frames, want NullRbp");
+    }
+    if WALK_LOW.load(Ordering::Relaxed) {
+        return Outcome::Fail("a frame below USER_MAP_END");
+    }
+    let last = WALK_LAST.load(Ordering::Relaxed);
+    match crate::panic::symbol_name(last) {
+        Some("vibeos_syscall_entry") => Outcome::Ok,
+        other => {
+            crate::fail_fmt!("last of {n} frames {last:#x} is {other:?}, want vibeos_syscall_entry")
+        }
+    }
+}
+
 pub(crate) const TESTS: &[Test] = &[
     test("log_boot_level", test_log_boot_level),
     test("log_boot_captured", test_log_boot_captured).once(),
@@ -583,4 +686,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("trace_ring_own_cpu", test_trace_ring_own_cpu),
     test("trace_tracepoints_fire", test_trace_tracepoints_fire),
     test("vmcoreinfo_published", test_vmcoreinfo_published),
+    test(
+        "backtrace_syscall_boundary",
+        test_backtrace_syscall_boundary,
+    ),
 ];

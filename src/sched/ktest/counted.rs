@@ -11,7 +11,6 @@ use crate::sync_init::SpinMutex;
 use crate::thread_init;
 use crate::time_init;
 use crate::work_init;
-use crate::x86;
 
 /// Set while the test's spinlock section is open.
 static CDR_SECTION_OPEN: AtomicBool = AtomicBool::new(false);
@@ -41,7 +40,7 @@ struct CdrProbe;
 impl Drop for CdrProbe {
     fn drop(&mut self) {
         CDR_SAW_OPEN.store(CDR_SECTION_OPEN.load(Ordering::SeqCst), Ordering::SeqCst);
-        CDR_SAW_IF.store(x86::interrupts_enabled(), Ordering::SeqCst);
+        CDR_SAW_IF.store(crate::arch::current::interrupts_enabled(), Ordering::SeqCst);
         CDR_SAW_TID.store(thread_init::current_id().0, Ordering::SeqCst);
         CDR_RAN.store(true, Ordering::SeqCst);
     }

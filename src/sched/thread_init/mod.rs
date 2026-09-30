@@ -29,11 +29,11 @@ use vibeos::thread::{
 use vibeos::time::Instant;
 use vibeos::wait::{self, WaitQueue};
 
+use crate::arch::current::InterruptGuard;
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
 use crate::sync_init::{self, SleepCtx, SpinMutex};
 use crate::time_init;
-use crate::x86::InterruptGuard;
 
 mod boot;
 #[cfg(feature = "kernel_tests")]
@@ -50,9 +50,10 @@ static SWITCH_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 /// starts with `Fxsave::empty()`.
 static FPU_TEMPLATE_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Install the context-switch and FP-template hooks.
+/// Install the context-switch and FP-template hooks. `on_switch` has
+/// `syscall_init::on_switch`'s `# Safety` contract.
 pub fn set_switch_hooks(
-    on_switch: fn(&mut PerCpu, *mut Tcb, *mut Tcb),
+    on_switch: unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb),
     fpu_template: fn() -> Fxsave,
 ) {
     // Release: pairs with the Acquire loads in `on_switch` and
@@ -61,17 +62,26 @@ pub fn set_switch_hooks(
     FPU_TEMPLATE_HOOK.store(fpu_template as *mut (), Ordering::Release);
 }
 
-fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
+/// Run the switch hook.
+///
+/// # Safety
+/// `syscall_init::on_switch`'s contract: `old` and `new` are null or live
+/// TCBs, `new` runs next on this CPU, IF=0, and `cpu` is this CPU's
+/// `PerCpu`.
+unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     // Acquire: pairs with the Release store in `set_switch_hooks`.
     let p = SWITCH_HOOK.load(Ordering::Acquire);
     if p.is_null() {
         return;
     }
-    // SAFETY: invariant: a non-null `SWITCH_HOOK` holds a
-    // `fn(&mut PerCpu, *mut Tcb, *mut Tcb)`; established by
+    // SAFETY: invariant: a non-null `SWITCH_HOOK` holds an
+    // `unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb)`; established by
     // `thread_init::set_switch_hooks`, its only store.
-    let f = unsafe { core::mem::transmute::<*mut (), fn(&mut PerCpu, *mut Tcb, *mut Tcb)>(p) };
-    f(cpu, old, new);
+    let f =
+        unsafe { core::mem::transmute::<*mut (), unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb)>(p) };
+    // SAFETY: the hook's contract is this fn's `# Safety`, which
+    // `thread_init::switch_now` establishes.
+    unsafe { f(cpu, old, new) };
 }
 
 fn fpu_template() -> Fxsave {
@@ -118,6 +128,17 @@ pub enum SpawnError {
     NoSlot,
     /// The kernel stack could not be allocated.
     NoMemory,
+}
+
+/// Linux's errno for a thread `fork` or a new process could not get: `EAGAIN` for a full thread
+/// table, `ENOMEM` for a kernel stack.
+impl From<SpawnError> for vibeos::kerror::KError {
+    fn from(e: SpawnError) -> Self {
+        match e {
+            SpawnError::NoSlot => Self::Again,
+            SpawnError::NoMemory => Self::NoMem,
+        }
+    }
 }
 
 impl SpawnError {
@@ -341,12 +362,15 @@ impl Sched {
             _ => 0,
         };
         if cookie != 0 {
+            // The cookie's provenance was exposed from `&mut WaitQueue`
+            // (`WaitQueue::cookie`), so the rebuilt pointer may write.
+            let wq = core::ptr::with_exposed_provenance_mut::<WaitQueue>(cookie);
             // SAFETY: invariant: a Blocked thread's `wq` cookie is the address
             // of the `WaitQueue` it waits on, which lives in a lock's model
             // that is touched only under SCHED, held here, and stays put
             // while a thread waits on it; established by
             // `thread_init::Sched::begin_wait`.
-            unsafe { &mut *(cookie as *mut WaitQueue) }.remove(id);
+            unsafe { &mut *wq }.remove(id);
         }
     }
 }
@@ -368,7 +392,7 @@ extern "C" fn trampoline() {
     finish_switch();
     per_cpu_init::irq_nest_leave();
     if per_cpu_init::irq_nest() == 0 {
-        crate::x86::sti();
+        crate::arch::current::irq_enable();
     }
     // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`,
     // and `entry` is written only before the thread first runs; established
@@ -590,8 +614,10 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
         // SAFETY: invariant I9: both TCBs stay in `SCHED`; `old_ptr` is this
         // CPU's running thread and `new_ptr` the one `schedule_inner` or
         // `switch_to` set Running for this CPU under SCHED, so no other CPU
-        // writes these fields until the switch tail clears `on_cpu`;
-        // established by `thread_init::schedule_inner`.
+        // writes these fields until the switch tail clears `on_cpu`. The
+        // same facts, IF=0 under the callers' guard, and `cpu` being this
+        // CPU's `PerCpu` from `with_current_switch` meet `on_switch`'s
+        // `# Safety`. Established by `thread_init::schedule_inner`.
         unsafe {
             (*old_ptr).run_tsc = (*old_ptr).run_tsc.wrapping_add(delta);
             (*old_ptr).switches = (*old_ptr).switches.wrapping_add(1);
@@ -658,7 +684,7 @@ fn relink(s: &mut Sched) {
 /// allocates, or sends a shootdown.
 pub(crate) fn finish_switch() {
     debug_assert!(
-        !crate::x86::interrupts_enabled(),
+        !crate::arch::current::interrupts_enabled(),
         "finish_switch with IF on"
     );
     #[cfg(feature = "kernel_tests")]
@@ -713,7 +739,7 @@ pub(crate) fn take_dead_stacks() -> u64 {
 /// Free this CPU's dead list now, as its worker would: IF=1 only
 /// (`kva_init::free_parked`). True if a stack was freed.
 fn reclaim_dead_stacks_here() -> bool {
-    if !crate::x86::interrupts_enabled() {
+    if !crate::arch::current::interrupts_enabled() {
         return false;
     }
     let head = take_dead_stacks();
@@ -779,6 +805,7 @@ pub fn halt_if_idle() {
     loop {
         // SAFETY: `cli` touches only IF; the `sti` below or the idle loop's
         // next pass turns it back on; established here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("cli", options(nostack, preserves_flags));
         }
@@ -786,6 +813,7 @@ pub fn halt_if_idle() {
         if !per_cpu_init::current().runq.is_empty() {
             // SAFETY: `sti` restores the IF=1 this idle loop runs with;
             // established here.
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 core::arch::asm!("sti", options(nostack, preserves_flags));
             }
@@ -794,6 +822,7 @@ pub fn halt_if_idle() {
         // SAFETY: `sti; hlt` as one pair: the interrupt shadow keeps a
         // wake-up IPI from landing between them (DESIGN §7.8); established
         // here.
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
         }
@@ -901,7 +930,7 @@ pub fn spawn_user(
     name: &'static str,
     entry: fn(),
     pid: u32,
-    cr3: u64,
+    root: u64,
     frame: &UserFrame,
 ) -> Result<ThreadHandle, SpawnError> {
     let h = spawn_inner(
@@ -911,7 +940,7 @@ pub fn spawn_user(
         false,
         0,
         pid,
-        cr3,
+        root,
         DEFAULT_STACK_PAGES,
     )?;
     let tramp = trampoline as *const () as u64;
@@ -1363,8 +1392,10 @@ pub fn switch_to(id: ThreadId) {
     finish_switch();
 }
 
+/// The running thread's id, through [`crate::arch::current_tcb`]'s one
+/// load, at any IF (DESIGN §2.9 rule 5).
 pub fn current_id() -> ThreadId {
-    let p = per_cpu_init::current_thread();
+    let p = crate::arch::current_tcb();
     assert!(!p.is_null(), "no current thread");
     // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`, and
     // `id` changes only while its slot is Dead, never while it runs;
@@ -1372,8 +1403,10 @@ pub fn current_id() -> ThreadId {
     unsafe { (*p).id }
 }
 
+/// The running thread's pid (0 with no current thread), through
+/// [`crate::arch::current_tcb`]'s one load, at any IF.
 pub fn current_pid() -> u32 {
-    let p = per_cpu_init::current_thread();
+    let p = crate::arch::current_tcb();
     if p.is_null() {
         0
     } else {
@@ -1385,11 +1418,11 @@ pub fn current_pid() -> u32 {
     }
 }
 
-pub fn set_pid_cr3(id: ThreadId, pid: u32, cr3: u64) {
+pub fn set_pid_cr3(id: ThreadId, pid: u32, root: u64) {
     with_sched(|s| {
         if let Some(t) = s.get_mut(id) {
             t.pid = pid;
-            t.as_cr3 = cr3;
+            t.as_cr3 = root;
         }
     });
 }
@@ -1401,20 +1434,18 @@ pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
         s.slots
             .iter()
             .flatten()
-            .find(|t| t.as_cr3 & vibeos::paging::PTE_ADDR_MASK == root)
+            // A saved root is a table address, as `spawn_user` and
+            // `set_pid_cr3` store it.
+            .find(|t| t.as_cr3 == root)
             .map(|t| t.id)
     })
 }
 
+/// The CPU this thread runs on: exact while IF=0, a hint with IF=1
+/// (`arch::cpu_id_hint`), which is enough to place a new thread. A caller
+/// that needs the exact id reads it with IF=0.
 pub fn current_cpu() -> u32 {
-    per_cpu_init::current().cpu_id
-}
-
-#[cfg(feature = "kernel_tests")]
-pub fn current_tcb() -> *mut Tcb {
-    let p = per_cpu_init::current_thread();
-    assert!(!p.is_null(), "no current thread");
-    p
+    crate::arch::cpu_id_hint()
 }
 
 #[cfg(feature = "kernel_tests")]

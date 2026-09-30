@@ -560,12 +560,11 @@ fn scan_bus<C: CfgIo>(
     }
 }
 
-pub fn enable_mem_master(cmd: u16) -> u16 {
-    cmd | CMD_MEM | CMD_MASTER
-}
-
-pub fn with_intx_disabled(cmd: u16) -> u16 {
-    cmd | CMD_INTX_DISABLE
+/// `cmd` with the bits of `clear` cleared and those of `set` set, so a bit
+/// named in both ends set. `pci_init::update_command`, the one COMMAND
+/// writer, writes it: each driver turns on its own device (DESIGN §12.3).
+pub const fn command_update(cmd: u16, set: u16, clear: u16) -> u16 {
+    (cmd & !clear) | set
 }
 
 pub const MSI_CTL_ENABLE: u16 = 1 << 0;
@@ -956,6 +955,21 @@ mod tests {
     }
 
     #[test]
+    fn command_update_sets_and_clears() {
+        assert_eq!(command_update(0x0006, CMD_MEM, CMD_MASTER), 0x0002);
+        let all = CMD_MEM | CMD_MASTER | CMD_INTX_DISABLE;
+        assert_eq!(
+            command_update(all, 0, CMD_MASTER),
+            CMD_MEM | CMD_INTX_DISABLE
+        );
+        assert_eq!(command_update(0, CMD_MASTER, CMD_MASTER), CMD_MASTER);
+        assert_eq!(
+            command_update(CMD_MASTER, CMD_MASTER, CMD_MASTER),
+            CMD_MASTER
+        );
+    }
+
+    #[test]
     fn config_rw_dword_and_16() {
         let mut f = Fake::new();
         let b = Bdf::new(0, 1, 0);
@@ -966,7 +980,10 @@ mod tests {
         assert_eq!(read16(&mut f, b, CFG_COMMAND), 7);
         write16(&mut f, b, CFG_COMMAND, 0x0006);
         assert_eq!(read16(&mut f, b, CFG_COMMAND), 6);
-        assert_eq!(enable_mem_master(0), CMD_MEM | CMD_MASTER);
+        assert_eq!(
+            command_update(0, CMD_MEM | CMD_MASTER, 0),
+            CMD_MEM | CMD_MASTER
+        );
         f.put16(b, CFG_STATUS, 0xFFFF);
         write_command(&mut f, b, 0x0006);
         assert_eq!(read16(&mut f, b, CFG_COMMAND), 6);
@@ -1108,7 +1125,7 @@ mod tests {
         let ctl = read16(&mut f, b, 0x62);
         assert_ne!(ctl & MSIX_CTL_ENABLE, 0);
         assert_eq!(ctl & MSIX_CTL_MASKALL, 0);
-        assert_eq!(with_intx_disabled(0), CMD_INTX_DISABLE);
+        assert_eq!(command_update(0, CMD_INTX_DISABLE, 0), CMD_INTX_DISABLE);
         let parsed = MsixCap::parse(0xA0, 4 | MSIX_CTL_ENABLE, 0x1000 | 2, 0x2000);
         assert_eq!(parsed.table_bir, 2);
         assert_eq!(parsed.table_off, 0x1000);

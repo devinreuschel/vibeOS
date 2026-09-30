@@ -25,6 +25,8 @@ pub fn result(ret: isize) -> Result<usize, Errno> {
 pub const O_RDONLY: i32 = 0o0;
 /// Open for writing only.
 pub const O_WRONLY: i32 = 0o1;
+/// Open for reading and writing.
+pub const O_RDWR: i32 = 0o2;
 /// Create the file if it does not exist.
 pub const O_CREAT: i32 = 0o100;
 /// Truncate the file to length 0.

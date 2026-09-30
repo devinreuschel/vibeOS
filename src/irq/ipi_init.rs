@@ -1,5 +1,6 @@
-//! Fixed IPIs: reschedule, TLB shootdown, call-function, panic halt.
-//! ROADMAP §4.9–§4.10, DESIGN §7.6 / §7.9.
+//! Fixed IPIs: reschedule, TLB shootdown, call-function, and the panic
+//! stop primitive. ROADMAP §4.9–§4.10, §10.7, DESIGN §2.5 step 1, §7.6 /
+//! §7.9.
 //!
 //! Handlers are allocation-free. Shootdown and call-function take neither
 //! the page-table lock nor SCHED. A waiter with IF off polls inbound
@@ -7,18 +8,21 @@
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::apic::IpiError;
+use vibeos::apic::{IpiError, IpiMode};
+use vibeos::arch::{CycleCounter, InterruptMask, Ipi, IpiSend, PageTable};
 use vibeos::ipi::{MAX_IPI_CPUS, SHOOT_RANGES, ShootRange, all_acked, waiter_mask};
+use vibeos::irq::stop::{self, CrashRegs, NmiAction, StopBudget, StopHow};
 use vibeos::log::Level;
+use vibeos::paging::VirtAddr;
 use vibeos::thread::ThreadId;
 use vibeos::vectors;
 
 use crate::apic_init;
-use crate::arch::current::Arch;
+use crate::arch::current::{self, Arch};
 use crate::per_cpu_init;
+use crate::serial::raw;
 use crate::sync_init;
 use crate::time_init;
-use crate::x86;
 
 /// One CPU's shootdown round: `n` packed [`ShootRange`]s in `ranges`.
 struct Slot {
@@ -92,11 +96,13 @@ fn send_failed(what: &str, e: IpiError) {
     );
 }
 
+/// This CPU's bit. IF=0 callers only (DESIGN §2.9 rule 5).
 fn my_bit() -> u64 {
     let id = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
     if id >= 64 { 0 } else { 1u64 << id }
 }
 
+/// This CPU's index. IF=0 callers only (DESIGN §2.9 rule 5).
 pub(super) fn my_index() -> usize {
     per_cpu_init::try_current()
         .map(|c| c.cpu_id as usize)
@@ -105,7 +111,10 @@ pub(super) fn my_index() -> usize {
 }
 
 /// Run pending shootdown and call-function work. No alloc, no PT/SCHED.
+/// It reads this CPU's stop request first, so a CPU in a serviced spin
+/// stops for a panic before it serves any slot (DESIGN §2.5 step 1).
 pub fn service_incoming() {
+    poll_stop();
     service_shootdowns();
     service_calls();
 }
@@ -127,7 +136,7 @@ fn service_shootdowns() {
                     let r = ShootRange::from_raw(r.load(Ordering::Relaxed));
                     let mut p = 0u64;
                     while p < r.pages() {
-                        x86::invlpg(r.start().wrapping_add(p << 12));
+                        Arch::flush_local(VirtAddr(r.start().wrapping_add(p << 12)));
                         p += 1;
                     }
                 }
@@ -183,7 +192,7 @@ fn wait_acks(waiters: u64, acked: &AtomicU64) {
     if waiters == 0 {
         return;
     }
-    assert!(!x86::interrupts_enabled(), "ipi: ack wait with IF on");
+    assert!(!Arch::enabled(), "ipi: ack wait with IF on");
     let k = time_init::tsc_per_ms();
     let period = k.saturating_mul(1000);
     let start = time_init::read_tsc();
@@ -258,7 +267,7 @@ pub fn shootdown_ranges(ranges: &[ShootRange]) {
 
 /// One round for at most [`SHOOT_RANGES`] ranges.
 fn shootdown_round(ranges: &[ShootRange]) {
-    let _irq = x86::InterruptGuard::enter();
+    let _irq = crate::arch::current::InterruptGuard::enter();
     #[cfg(feature = "kernel_tests")]
     crate::irq::ktest::note_shootdown();
     let me = my_index() as u32;
@@ -276,10 +285,7 @@ fn shootdown_round(ranges: &[ShootRange]) {
     slot.acked.store(0, Ordering::Relaxed);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     slot.waiters.store(waiters, Ordering::Release);
-    note_send(
-        "shootdown",
-        apic_init::send_ipi_all_ex_self(vectors::IPI_SHOOTDOWN),
-    );
+    note_send("shootdown", Arch::send_others(Ipi::Shootdown));
     wait_acks(waiters, &slot.acked);
     slot.waiters.store(0, Ordering::Release);
 }
@@ -301,7 +307,7 @@ fn inbox_push(cpu: u32, slot: usize) {
 /// inbox + 0xFD. Never a remote queue lock. IRQ-off for the local runq.
 pub fn place_ready(cpu: u32, id: ThreadId, slot: usize) {
     vibeos::trace!(Wake, u64::from(id.0), u64::from(cpu));
-    let _irq = crate::x86::InterruptGuard::enter();
+    let _irq = crate::arch::current::InterruptGuard::enter();
     let me = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
     let cpu = if cpu == me || per_cpu_init::is_online(cpu) {
         cpu
@@ -315,10 +321,7 @@ pub fn place_ready(cpu: u32, id: ThreadId, slot: usize) {
         return;
     }
     inbox_push(cpu, slot);
-    note_send(
-        "reschedule",
-        apic_init::send_ipi_cpu(cpu, vectors::IPI_RESCHEDULE),
-    );
+    note_send("reschedule", Arch::send(cpu, Ipi::Reschedule));
 }
 
 /// A wake-inbox slot's tid: `thread_init::tid_of_slot`, which
@@ -389,20 +392,220 @@ pub fn on_call_ipi() {
     service_calls();
 }
 
-pub fn on_halt_ipi() -> ! {
-    crate::serial::raw::HALTING.store(true, Ordering::Release);
-    x86::halt();
+/// NMIs the panic dump's owner returned from (its own, from a self-NMI
+/// test, or any that lands mid-dump): the NMI body's `Return` arm.
+pub static OWNER_NMI_RETURNS: AtomicU64 = AtomicU64::new(0);
+
+/// How long the owner waits for acknowledgements before it sends NMI, and
+/// after it (DESIGN §2.5 step 1).
+const STOP_WAIT_MS: u64 = 100;
+const NMI_WAIT_MS: u64 = 10;
+
+/// The registers of the code that calls this: a stop that no trap
+/// delivered saves its own.
+#[inline(always)]
+fn here_regs() -> CrashRegs {
+    CrashRegs {
+        rip: current::instruction_pointer(),
+        rsp: current::stack_pointer(),
+        rbp: current::frame_pointer(),
+        rflags: current::irq_flags(),
+    }
 }
 
-/// Broadcast halt so others stop before we trash the log.
-/// Fixed IPI `0xFE`, not NMI (DESIGN §2.5 / §7.6).
-pub fn halt_others() {
-    crate::serial::raw::HALTING.store(true, Ordering::Release);
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "DESIGN §2.5: no failure anyone could act on: the panic path halts next"
-    )]
-    let _ = apic_init::send_ipi_all_ex_self(vectors::IPI_HALT);
+/// `service_incoming`'s first step: STOP in this CPU's request word stops
+/// it. IF=0 callers only, as every serviced spin is.
+#[inline]
+fn poll_stop() {
+    let Some(r) = per_cpu_init::cpu(my_index() as u32) else {
+        return;
+    };
+    // Acquire: pairs with the Release `fetch_or` in `stop_others`.
+    if r.stop_req.load(Ordering::Acquire) & stop::STOP != 0 {
+        stop_this_cpu(StopHow::Poll, here_regs());
+    }
+}
+
+/// The stop routine (DESIGN §2.5 step 1): mark this CPU stopping, save
+/// `regs` in its crash-register slot, store how it stopped (the
+/// acknowledgement), and halt with IF=0 for good. A CPU already stopping
+/// or stopped halts at once, so its slot is written once.
+pub fn stop_this_cpu(how: StopHow, regs: CrashRegs) -> ! {
+    current::irq_disable();
+    if let Some(r) = per_cpu_init::cpu(my_index() as u32) {
+        // Acquire on success: nothing this CPU writes to the slot moves
+        // above the claim.
+        if r.stopped
+            .compare_exchange(
+                stop::RUNNING,
+                stop::STOPPING,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            for (w, v) in r.crash.iter().zip(regs.to_words()) {
+                w.store(v, Ordering::Relaxed);
+            }
+            // Release: the acknowledgement is this CPU's last store; the
+            // owner reads the slot after it with Acquire (AGENTS.md rule 5).
+            r.stopped.store(how.code(), Ordering::Release);
+        }
+    }
+    current::halt();
+}
+
+/// The raw serial layer's stop hook: a serial write or log append on a CPU
+/// that is not the dump's owner once `HALTING` is set.
+fn stop_hook() {
+    stop_this_cpu(StopHow::Poll, here_regs());
+}
+
+/// The `0xFE` body: stop, saving the interrupted registers `regs` (the
+/// IDT body reads them from its trap frame, so this module does not name
+/// the IDT's frame type, DESIGN §1.2).
+pub fn on_stop_ipi(regs: CrashRegs) -> ! {
+    stop_this_cpu(StopHow::Ipi, regs);
+}
+
+/// The NMI body's first step, before it writes anything or takes any lock
+/// (the owner may be inside `write_owner`): swap this CPU's request word
+/// to 0 and act on `vibeos::irq::stop::nmi_action`. Halts on a CPU already
+/// stopping, stops on STOP, and returns `Return` on the dump's owner and
+/// `Dump` for any other NMI, which the caller dumps as before. `regs` are
+/// the interrupted registers from the NMI's trap frame.
+pub fn nmi_stop(regs: CrashRegs) -> NmiAction {
+    let (req, state) = match per_cpu_init::cpu(my_index() as u32) {
+        // AcqRel: the swap reads the owner's Release `fetch_or` and clears
+        // the request in one step.
+        Some(r) => (
+            r.stop_req.swap(0, Ordering::AcqRel),
+            r.stopped.load(Ordering::Acquire),
+        ),
+        None => (0, stop::RUNNING),
+    };
+    let action = stop::nmi_action(req, state, raw::is_owner());
+    match action {
+        NmiAction::Halt => current::halt(),
+        NmiAction::Stop => stop_this_cpu(StopHow::Nmi, regs),
+        NmiAction::Return => {
+            OWNER_NMI_RETURNS.fetch_add(1, Ordering::Relaxed);
+        }
+        NmiAction::Dump => {}
+    }
+    action
+}
+
+/// How CPU `cpu` stopped (`None` while it has not acknowledged) and its
+/// crash-register slot; `None` for a CPU with no per-CPU view.
+pub fn cpu_stop_state(cpu: u32) -> Option<(Option<StopHow>, CrashRegs)> {
+    let r = per_cpu_init::cpu(cpu)?;
+    // Acquire: pairs with the Release acknowledgement in `stop_this_cpu`,
+    // so the slot's words below are the ones stored before it.
+    let how = StopHow::from_code(r.stopped.load(Ordering::Acquire));
+    let mut words = [0u64; stop::CRASH_WORDS];
+    for (w, v) in words.iter_mut().zip(r.crash.iter()) {
+        *w = v.load(Ordering::Relaxed);
+    }
+    Some((how, CrashRegs::from_words(words)))
+}
+
+/// The CPUs of `mask` that have acknowledged a stop.
+fn stopped_mask(mask: u64) -> u64 {
+    let mut out = 0u64;
+    let mut m = mask;
+    while m != 0 {
+        let c = m.trailing_zeros();
+        m &= m - 1;
+        if matches!(cpu_stop_state(c), Some((Some(_), _))) {
+            out |= 1u64 << c;
+        }
+    }
+    out
+}
+
+/// Wait up to `ms` of counter time (or a poll bound before the counter is
+/// measured) for every CPU of `mask` to acknowledge; the CPUs still
+/// running when it ends.
+fn wait_stopped(mask: u64, ms: u64) -> u64 {
+    let budget = stop::stop_budget(<Arch as CycleCounter>::freq_hz(), ms);
+    let start = <Arch as CycleCounter>::now();
+    let mut spins = 0u64;
+    loop {
+        let left = mask & !stopped_mask(mask);
+        if left == 0 {
+            return 0;
+        }
+        let over = match budget {
+            StopBudget::Cycles(c) => <Arch as CycleCounter>::now().wrapping_sub(start) >= c,
+            StopBudget::Spins(n) => {
+                spins = spins.saturating_add(1);
+                spins >= n
+            }
+        };
+        if over {
+            return left;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Send `vector` with `mode` to CPU `cpu`. Through `apic_init::send_ipi`,
+/// which records no trace event: `trace!` takes an `InterruptGuard`, which
+/// the dump path never does (DESIGN §2.5 step 1).
+fn send_raw(cpu: u32, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
+    let Some(r) = per_cpu_init::cpu(cpu) else {
+        return Err(IpiError::NotReady);
+    };
+    apic_init::send_ipi(r.apic_id.load(Ordering::Relaxed) as u8, vector, mode)
+}
+
+/// Send NMI to each CPU of `mask`; a CPU whose NMI the LAPIC refused is
+/// left running, and the dump reports it `not stopped`.
+fn nmi_each(mask: u64) {
+    let mut m = mask;
+    while m != 0 {
+        let c = m.trailing_zeros();
+        m &= m - 1;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "DESIGN §2.5: a refused NMI leaves its CPU running, which the dump reports as `not stopped`, its recorded error state"
+        )]
+        let _ = send_raw(c, 0, IpiMode::Nmi);
+    }
+}
+
+/// The dump owner's stop primitive (DESIGN §2.5 step 1): set `HALTING`;
+/// for each other online CPU set STOP in its request word (Release) and
+/// send it `0xFE`; wait up to 100 ms for every acknowledgement; send NMI
+/// to each CPU still running, and wait 10 ms more. A CPU whose `0xFE` the
+/// LAPIC refused gets its NMI at once. The owner's own IF is off.
+pub fn stop_others() {
+    raw::HALTING.store(true, Ordering::Release);
+    let me = my_index() as u32;
+    let others = waiter_mask(per_cpu_init::online_mask(), me);
+    let mut refused = 0u64;
+    let mut m = others;
+    while m != 0 {
+        let c = m.trailing_zeros();
+        m &= m - 1;
+        if let Some(r) = per_cpu_init::cpu(c) {
+            // Release: pairs with the Acquire loads in `poll_stop` and the
+            // AcqRel swap in `nmi_stop`.
+            r.stop_req.fetch_or(stop::STOP, Ordering::Release);
+        }
+        if send_raw(c, vectors::IPI_HALT, IpiMode::Fixed).is_err() {
+            refused |= 1u64 << c;
+        }
+    }
+    nmi_each(refused);
+    let late = wait_stopped(others, STOP_WAIT_MS);
+    if late == 0 {
+        return;
+    }
+    nmi_each(late);
+    // The CPUs still running are reported `not stopped` by the dump.
+    wait_stopped(late, NMI_WAIT_MS);
 }
 
 /// Run `f(arg)` on every online CPU in `mask` except self. Always waits
@@ -410,12 +613,14 @@ pub fn halt_others() {
 /// contract). IRQ-off for publish → IPI → ack → clear; inbound still
 /// polls `service_incoming`.
 pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
+    // IF=0 before `my_index`, so `me` stays this CPU's id (DESIGN §2.9
+    // rule 5).
+    let _irq = crate::arch::current::InterruptGuard::enter();
     let me = my_index() as u32;
     let waiters = waiter_mask(mask & per_cpu_init::online_mask(), me);
     if waiters == 0 {
         return;
     }
-    let _irq = x86::InterruptGuard::enter();
     while CALL_BUSY
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
@@ -431,7 +636,7 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
     let mut c = 0u32;
     while c < 64 {
         if waiters & (1u64 << c) != 0 {
-            note_send("call", apic_init::send_ipi_cpu(c, vectors::IPI_CALL));
+            note_send("call", Arch::send(c, Ipi::Call));
         }
         c += 1;
     }
@@ -459,4 +664,5 @@ pub fn call_cpu(cpu: u32, f: fn(*mut ()), arg: *mut (), wait: bool) {
 pub fn init() {
     vibeos::paging::set_tlb_shootdown_hook(shootdown_ranges);
     crate::sync_init::set_spin_poll(service_incoming);
+    raw::set_stop_hook(stop_hook);
 }

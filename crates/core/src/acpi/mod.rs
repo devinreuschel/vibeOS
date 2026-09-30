@@ -54,6 +54,18 @@ pub enum AcpiError {
     NoRootTable,
 }
 
+/// A malformed firmware table is a bad argument; a missing HPET or root table, no device.
+impl From<AcpiError> for crate::kerror::KError {
+    fn from(e: AcpiError) -> Self {
+        match e {
+            AcpiError::Truncated | AcpiError::BadSignature | AcpiError::BadChecksum => Self::Inval,
+            AcpiError::HpetZeroAddress | AcpiError::HpetIoSpace | AcpiError::NoRootTable => {
+                Self::NoDev
+            }
+        }
+    }
+}
+
 impl AcpiError {
     pub fn as_str(self) -> &'static str {
         match self {

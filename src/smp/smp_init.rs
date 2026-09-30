@@ -32,6 +32,7 @@ use crate::log::trace_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
 unsafe extern "C" {
@@ -160,6 +161,7 @@ fn install_blob(page: u64) -> bool {
     true
 }
 
+#[cfg(target_arch = "x86_64")]
 fn patch_params(page: u64, cr3: u64, stack_top: u64, entry: u64, idt_limit: u16, idt_base: u64) {
     // SAFETY: `write_u64`'s contract; `page` is the trampoline page, each
     // `PARAM_*` offset plus 8 lies inside it, and `start_one` patches before
@@ -368,6 +370,7 @@ fn report_tsc_warp() {
 
 /// Start the AP `a` describes from trampoline page `page` and wait for it.
 /// Every failure prints its line and frees what `a` holds.
+#[cfg(target_arch = "x86_64")]
 fn start_one(a: ApAlloc, page: u64) {
     let cpu_id = a.cpu_id;
     let apic_id = a.apic_id;
@@ -402,8 +405,10 @@ fn start_one(a: ApAlloc, page: u64) {
         published,
         ..
     } = a;
-    // The `TryBox` keeps `CpuTables` in place when `tables` moves.
-    let tables_ptr = &*tables.tables as *const CpuTables as *mut CpuTables;
+    // The heap block `alloc_ap_tables` leaked keeps `CpuTables` in place
+    // when `tables` moves, and its pointer keeps the allocation's
+    // provenance.
+    let tables_ptr = tables.tables.as_ptr();
     // Room for one is reserved above, so this push allocates nothing and
     // cannot fail; it moves the tables before INIT, while no AP runs on
     // them.
@@ -453,6 +458,7 @@ fn start_one(a: ApAlloc, page: u64) {
     crate::marker!(marker::SMP_AP_ONLINE);
 }
 
+#[cfg(target_arch = "x86_64")]
 extern "C" fn ap_entry() -> ! {
     x86::cli();
     // GS is still 0. IrqCell.with / InterruptGuard would `gs:[0]` via
@@ -464,10 +470,11 @@ extern "C" fn ap_entry() -> ! {
         let st = &mut *STARTING.as_ptr();
         (st.cpu, st.cpu_tables)
     };
-    // SAFETY: `tables_ptr` is this AP's `CpuTables`, boxed in the
-    // `ApTables` that `LIVE_TABLES` holds for good, and no other CPU touches
-    // it (`smp::smp_init::start_one`).
-    let tables = unsafe { &mut *tables_ptr };
+    // SAFETY: `tables_ptr` is this AP's `CpuTables`, the heap block of the
+    // `ApTables` that `LIVE_TABLES` holds for good, which `init` filled
+    // before INIT; this AP only reads it until `set_rsp0` writes through
+    // the `UnsafeCell`. Established at `smp::smp_init::start_one`.
+    let tables = unsafe { &*tables_ptr };
     // SAFETY: `cpu` is this AP's `PerCpu` slot (`per_cpu_init::slot_ptr`);
     // the BSP's `with_cpu` scope on it ended before INIT, and from here this
     // AP is its one owner (invariants I120 and I21, established at
@@ -483,9 +490,10 @@ extern "C" fn ap_entry() -> ! {
     // so no ISR reads `gs:[0]` first (invariant I4, established here).
     unsafe { per_cpu_init::install_gs(cpu) };
     // `init_ap` writes this CPU's CR0 and CR4 (`arch::cpu::init_control_regs`).
-    // SAFETY: `init_ap`'s contract; the TSS `tables.load` just loaded is this
-    // CPU's live TSS, and `rsp0` its kernel stack top; established here.
-    unsafe { crate::syscall_init::init_ap(tables.tss_ptr(), tables.rsp0()) };
+    // SAFETY: `init_ap`'s contract; `tables_ptr` is the `CpuTables`
+    // `tables.load` just loaded on this CPU, live while it runs, and `rsp0`
+    // its kernel stack top; established here.
+    unsafe { crate::syscall_init::init_ap(tables_ptr, tables.rsp0()) };
     // SAFETY: `idt::load`'s contract; the BSP filled the shared IDT at boot,
     // before `smp_init::init` runs, and the GDT above matches KERNEL_CS and
     // the IST TSS; established here.
@@ -534,7 +542,7 @@ pub unsafe fn init() {
     // page. Kernel invariant: boot runs on the bootstrap thread's KVA stack
     // (`thread_init::init_bootstrap`), outside the window.
     let window = crate::paging_init::identity_window();
-    let rsp = x86::read_rsp();
+    let rsp = crate::arch::current::stack_pointer();
     assert!(
         !window.contains(&rsp),
         "smp: rsp {rsp:#x} in the identity window"
@@ -555,10 +563,7 @@ pub unsafe fn init() {
 
 /// Start each MADT CPU but the BSP, one at a time, from `page`.
 fn start_aps(page: u64) {
-    let bsp_apic = per_cpu_init::current()
-        .remote
-        .apic_id
-        .load(Ordering::Relaxed) as u8;
+    let bsp_apic = per_cpu_init::with_current(|c| c.remote.apic_id.load(Ordering::Relaxed)) as u8;
     let Some(info) = acpi_init::info() else {
         return;
     };

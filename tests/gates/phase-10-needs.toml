@@ -185,6 +185,7 @@ needs = [
   "`/dev/random` and `/dev/urandom` return only hardware bytes",
   "the dentry cache never resolves through a reused slot",
   "tmpfs keeps written data when a file's extent moves",
+  "FAT and vibefs behind `InodeOps`;",  # L1324
 ]
 why = "text: lands after the /dev/random, dentry-cache (F065) and tmpfs (F066) boxes"
 
@@ -806,6 +807,14 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
+# L1278
+[[box]]
+key = "every x86 assumption outside `arch/`"
+needs = [
+  "an `arch` module boundary built",  # L1277
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
 # L1279
 [[box]]
 key = "the seam proven by a"
@@ -1138,3 +1147,123 @@ needs = [
   "the §10.4 wake inbox's push",  # L1434
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L942
+[[box]]
+key = "`tmpfs` on a private four-page"
+needs = [
+  "tmpfs keeps written data when",  # L1333
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1344
+[[box]]
+key = "the E2 table gives each"
+needs = [
+  "one `KError` with `From` for",  # L1343
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1345
+[[box]]
+key = "an operation that a filesystem"
+needs = [
+  "FAT and vibefs behind `InodeOps`;",  # L1324
+  "one `KError` with `From` for",  # L1343
+  "the E2 table gives each",  # L1344
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1347
+[[box]]
+key = "`fat::FatError` and `vibefs::Error`, two copies"
+needs = [
+  "one `KError` with `From` for",  # L1343
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1012
+[[box]]
+key = "each error condition returns the"
+needs = [
+  "the E2 table gives each",  # L1344
+  "`fat::FatError` and `vibefs::Error`, two copies",  # L1347
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1487
+[[box]]
+key = "virtio-blk negotiates `F_RO`: a write"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1488
+[[box]]
+key = "a virtio-blk request that exhausts"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1509
+[[box]]
+key = "a device's resources are claimed"
+needs = [
+  "driver and volume state as",  # L1340
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L805
+[[box]]
+key = "resource tracking so two drivers"
+needs = [
+  "a device's resources are claimed",  # L1509
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the panic dump owns COM1"
+needs = [
+  "the expect-panic e2e matches markers",  # L1258
+  "every two-way dependency between kernel",  # L1282
+  "an IST vector taken at",  # L1384
+  "every IDT vector enters through",  # L1392
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "the panic backtrace follows `rbp`"
+needs = [
+  "one ring-3 entry model: `/hello`",  # L1402
+  "boot runs on a guarded",  # L1404
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "a panic on any CPU"
+needs = [
+  "the second ksyms link leaves",  # L1253
+  "the panic e2e requires the",  # L1254
+  "the panic dump owns COM1",  # L1419
+  "an exception dump's backtrace starts",  # L1420
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "broadcast the halt IPI first"
+needs = [
+  "the panic dump owns COM1",  # L1419
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "symbolized backtrace: keep a symbol"
+needs = [
+  "the second ksyms link leaves",  # L1253
+  "the panic e2e requires the",  # L1254
+  "an exception dump's backtrace starts",  # L1420
+  "the panic backtrace follows `rbp`",  # L1422
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
