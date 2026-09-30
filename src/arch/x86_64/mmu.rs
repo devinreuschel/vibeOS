@@ -60,3 +60,34 @@ impl PageTable for Arch {
         unsafe { cpu::write_cr3(cpu::read_cr3()) };
     }
 }
+
+/// Turn on the NX bit in page-table entries (EFER.NXE), so the kernel's NX
+/// leaves are honored rather than read as reserved-bit violations. Once, on
+/// the BSP before its first switch to the kernel root (DESIGN §7.3's AP
+/// pitfall applies: an AP sets it in the trampoline).
+pub fn enable_nx() {
+    let efer = cpu::rdmsr(cpu::IA32_EFER);
+    if efer & cpu::EFER_NXE == 0 {
+        // SAFETY: setting EFER.NXE only enables the NX bit in PTEs; every
+        // table live now (Limine's) and the new ones treat NX as intended,
+        // established here.
+        unsafe { cpu::wrmsr(cpu::IA32_EFER, efer | cpu::EFER_NXE) };
+    }
+}
+
+/// Drop every TLB entry on this CPU, global ones included: toggle
+/// `CR4.PGE` when it is set, else reload CR3 (Intel SDM Vol. 3A §4.10.4.1).
+pub fn flush_local_global() {
+    let cr4 = cpu::read_cr4();
+    if cr4 & cpu::CR4_PGE != 0 {
+        // SAFETY: clearing and restoring `CR4.PGE` changes nothing but
+        // which TLB entries survive; every other CR4 bit is written back as
+        // read; established here.
+        unsafe {
+            cpu::write_cr4(cr4 & !cpu::CR4_PGE);
+            cpu::write_cr4(cr4);
+        }
+    } else {
+        <Arch as PageTable>::flush_local_all();
+    }
+}

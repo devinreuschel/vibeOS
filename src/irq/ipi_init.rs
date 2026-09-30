@@ -8,8 +8,10 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::apic::IpiError;
+use vibeos::arch::PageTable;
 use vibeos::ipi::{MAX_IPI_CPUS, SHOOT_RANGES, ShootRange, all_acked, waiter_mask};
 use vibeos::log::Level;
+use vibeos::paging::VirtAddr;
 use vibeos::thread::ThreadId;
 use vibeos::vectors;
 
@@ -129,7 +131,7 @@ fn service_shootdowns() {
                     let r = ShootRange::from_raw(r.load(Ordering::Relaxed));
                     let mut p = 0u64;
                     while p < r.pages() {
-                        x86::invlpg(r.start().wrapping_add(p << 12));
+                        Arch::flush_local(VirtAddr(r.start().wrapping_add(p << 12)));
                         p += 1;
                     }
                 }

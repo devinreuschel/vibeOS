@@ -7,7 +7,7 @@ use vibeos::addr_space::{
     AsError, Backing, BrkPlan, FrameFree, MmapReq, Region, TeardownStats, UserPerms,
 };
 use vibeos::arch::PageTable;
-use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K};
+use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pmm::Frames;
 use vibeos::thread::ThreadId;
 
@@ -178,7 +178,7 @@ fn local_flush(space: &AddressSpace) -> impl FnMut(u64) + use<> {
     let loaded = Arch::root() == space.root();
     move |va| {
         if loaded {
-            x86::invlpg(va);
+            Arch::flush_local(VirtAddr(va));
         }
     }
 }
@@ -327,14 +327,14 @@ impl fmt::Debug for RootHolder {
 /// assertion never fires under PT or SCHED.
 fn root_holder(root: u64) -> Option<RootHolder> {
     // One IF=0 stretch: the id and CR3 name one CPU.
-    let (here, cr3) = {
+    let (here, live) = {
         let _irq = x86::InterruptGuard::enter();
         (
             per_cpu_init::try_current().map_or(0, |c| c.cpu_id),
             Arch::root().as_u64(),
         )
     };
-    if cr3 == root {
+    if live == root {
         return Some(RootHolder::Cr3 { cpu: here });
     }
     let mut id = 0u32;
@@ -391,7 +391,7 @@ pub unsafe fn load_cr3_u64(want: u64) {
         // SAFETY: invariant I128: `want` is a PML4 that shares the kernel
         // half this code and stack run in and stays allocated while loaded
         // (this fn's contract, `addr_space_init::load_cr3_u64`).
-        unsafe { x86::write_cr3(want) };
+        unsafe { Arch::set_root(PhysAddr(want)) };
         cpu.remote.as_cr3.store(want, Ordering::Release);
     });
 }

@@ -10,6 +10,10 @@ use vibeos::arch::{
 #[cfg(target_arch = "x86_64")]
 pub type Arch = super::x86_64::Arch;
 
+/// The page-table port items that are not `PageTable` methods.
+#[cfg(target_arch = "x86_64")]
+pub use super::x86_64::mmu::{enable_nx, flush_local_global};
+
 /// The IRQ-off exclusive cell over this build's port (DESIGN §2.3).
 pub type IrqCell<T> = vibeos::cell::IrqCell<T, Arch>;
 

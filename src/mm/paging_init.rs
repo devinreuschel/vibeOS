@@ -28,7 +28,7 @@ use vibeos::paging::{
 };
 use vibeos::pmm::Frames;
 
-use crate::arch::current::{Arch, Mapper};
+use crate::arch::current::{Arch, Mapper, enable_nx, flush_local_global};
 use crate::boot::{self, BootInfo};
 use crate::pmm_init;
 use crate::sync_init::{SpinMutex, SpinMutexGuard};
@@ -207,7 +207,7 @@ pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapErr
     let hhdm_end = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(len);
     let mut va = HHDM_BASE.wrapping_add(phys.as_u64());
     while va < hhdm_end {
-        x86::invlpg(va);
+        Arch::flush_local(VirtAddr(va));
         paging::tlb_shootdown_others(VirtAddr(va));
         off += PAGE_SIZE_4K;
         va = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(off);
@@ -221,7 +221,7 @@ pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapErr
 /// thread may have switched it).
 pub(crate) fn current_mapper() -> MapperGuard {
     let pt = PT.lock();
-    let cr3 = {
+    let root = {
         let k = kernel_cr3();
         if k != 0 { k } else { Arch::root().as_u64() }
     };
@@ -229,7 +229,7 @@ pub(crate) fn current_mapper() -> MapperGuard {
     // it, the boot tables CR3 holds) is never freed, and PT is held for the
     // guard's life, so this is the only live `Mapper` over it; established
     // here.
-    let mapper = unsafe { Mapper::new(PhysAddr(cr3), HHDM_BASE) };
+    let mapper = unsafe { Mapper::new(PhysAddr(root), HHDM_BASE) };
     MapperGuard { mapper, pt }
 }
 
@@ -251,7 +251,7 @@ pub unsafe fn map_4k_locked(
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
     }
-    x86::invlpg(va.as_u64());
+    Arch::flush_local(va);
     Ok(())
 }
 
@@ -284,7 +284,7 @@ pub unsafe fn map_2m_locked(
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size2M, MapMode::Fresh, &mut alloc)?;
     }
-    x86::invlpg(va.as_u64());
+    Arch::flush_local(va);
     Ok(())
 }
 
@@ -379,7 +379,7 @@ pub unsafe fn unmap_4k_locked(pt: &mut MapperGuard, va: VirtAddr) -> Option<(Phy
     // `invlpg`, and the caller shoots the other CPUs down before it uses
     // `va` (this fn's `# Safety` contract, established here).
     let r = unsafe { pt.unmap_page(va) }?;
-    x86::invlpg(va.as_u64());
+    Arch::flush_local(va);
     Some(r)
 }
 
@@ -652,13 +652,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // rather than treated as reserved-bit violations. DESIGN §7.3's AP
     // pitfall (missed NXE -> fault on first kernel page) applies here
     // too: our own kernel .rodata / .data / .bss all carry NX.
-    let efer = x86::rdmsr(x86::IA32_EFER);
-    if efer & x86::EFER_NXE == 0 {
-        // SAFETY: setting EFER.NXE only enables the NX bit in PTEs; every
-        // table live now (Limine's) and the new ones treat NX as intended,
-        // established here.
-        unsafe { x86::wrmsr(x86::IA32_EFER, efer | x86::EFER_NXE) };
-    }
+    enable_nx();
 
     // ---- 6. Install ----
     KERNEL_CR3.store(mapper.root().as_u64(), Ordering::Release);
@@ -666,7 +660,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // pointer computed as `phys + HHDM_BASE` stays valid, invariant I14),
     // the low identity window and the boot stack, so execution continues
     // across the switch; established here.
-    unsafe { x86::write_cr3(mapper.root().as_u64()) };
+    unsafe { Arch::set_root(mapper.root()) };
     MAP_END.store(map_end, Ordering::Relaxed);
 
     PagingReport {
@@ -720,33 +714,14 @@ pub unsafe fn teardown_identity(keep: Option<u64>) {
             va += size;
         }
     }
-    flush_tlb_all_local();
+    flush_local_global();
     crate::ipi_init::call_mask(u64::MAX, flush_tlb_all_ipi, core::ptr::null_mut(), true);
 }
 
-/// Drop every TLB entry on this CPU, global ones included: toggle
-/// `CR4.PGE` when it is set, else reload CR3 (Intel SDM Vol. 3A §4.10.4.1).
-fn flush_tlb_all_local() {
-    let cr4 = x86::read_cr4();
-    if cr4 & x86::CR4_PGE != 0 {
-        // SAFETY: clearing and restoring `CR4.PGE` changes nothing but
-        // which TLB entries survive; every other CR4 bit is written back as
-        // read; established here.
-        unsafe {
-            x86::write_cr4(cr4 & !x86::CR4_PGE);
-            x86::write_cr4(cr4);
-        }
-    } else {
-        // SAFETY: reloading CR3 with its own value keeps the same tables;
-        // established here.
-        unsafe { x86::write_cr3(x86::read_cr3()) };
-    }
-}
-
-/// [`flush_tlb_all_local`] on a CPU `teardown_identity` calls through
+/// `flush_local_global` on a CPU `teardown_identity` calls through
 /// `ipi_init::call_mask`: it takes no lock and allocates nothing.
 fn flush_tlb_all_ipi(_: *mut ()) {
-    flush_tlb_all_local();
+    flush_local_global();
 }
 
 /// Print the phase-1 §1.2 exit marker and the diagnostic follow-ups.

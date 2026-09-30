@@ -18,7 +18,7 @@ pub mod cpu;
 pub mod gdt;
 pub mod gs;
 pub mod idt;
-mod mmu;
+pub(crate) mod mmu;
 pub mod percpu;
 pub mod pic;
 mod trampoline;
