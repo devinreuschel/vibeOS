@@ -609,6 +609,12 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
     // The asm's own `cli` finds IF already off; this one tells the irqoff
     // tracer where the return's stretch began.
     crate::arch::current::irq_disable();
+    // The kernel_tests fork-wait stall spins inside the asm below with
+    // IF=0 and may read no `gs:` there, so its stretch is marked here.
+    #[cfg(feature = "kernel_tests")]
+    if testing::fork_wait_stall_armed() {
+        crate::sched::irqoff::deliberate_open("fork-wait stall");
+    }
     // SAFETY: invariant I25: `kernel_rsp0` is the top of this thread's
     // kernel stack, whose top 168 bytes are its user frame, and the pad
     // word below it is where `vibeos_syscall_return` expects RSP; IF=0
@@ -870,6 +876,11 @@ pub(crate) mod testing {
 
     /// First ring-3 entries [`fork_wait_stall_point`] still holds.
     static FORK_WAIT_STALLS: AtomicU32 = AtomicU32::new(0);
+
+    /// Whether [`fork_wait_stall_point`] still holds an entry.
+    pub(super) fn fork_wait_stall_armed() -> bool {
+        FORK_WAIT_STALLS.load(Ordering::Acquire) != 0
+    }
 
     /// How long [`fork_wait_stall_point`] holds one entry: two ticks of
     /// the 1 kHz timer.

@@ -152,6 +152,18 @@ pub fn report() {
     tracer::report();
 }
 
+/// Mark this CPU's open stretch deliberate without a guard, for a test
+/// hook that already runs with IF=0 and cannot take one (C-IRQOFF-GUARD's
+/// guard-less form): `syscall_init::first_return`'s fork-wait stall spins
+/// where no `gs:` may be read.
+#[cfg(feature = "kernel_tests")]
+pub fn deliberate_open(reason: &'static str) {
+    #[cfg(feature = "irqoff")]
+    tracer::mark_deliberate(reason);
+    #[cfg(not(feature = "irqoff"))]
+    let _ = reason;
+}
+
 #[cfg(feature = "irqoff")]
 mod tracer {
     use vibeos::arch::{CycleCounter, InterruptMask};

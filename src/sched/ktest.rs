@@ -373,6 +373,7 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
         if crate::arch::current::interrupts_enabled() {
             return (Outcome::Fail("SCHED left IF on"), held);
         }
+        let _hold = crate::sched::irqoff::deliberate("20 ms SCHED hold");
         time_init::busy_wait_ms(20);
         if crate::arch::current::interrupts_enabled() {
             return (Outcome::Fail("IF on during hold"), held);

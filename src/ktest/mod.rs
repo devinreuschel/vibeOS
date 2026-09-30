@@ -542,7 +542,7 @@ pub(crate) fn quiesce_frames() {
     // Under the guard none of these runs, dies, and frees its slot for the
     // next spawn before every empty slot has a Tcb.
     {
-        let _g = InterruptGuard::enter();
+        let _g = crate::sched::irqoff::deliberate("ktest TCB slot warm-up");
         let mut i = 0;
         while i < empty {
             if thread_init::spawn_here("warm", dying_entry).is_err() {

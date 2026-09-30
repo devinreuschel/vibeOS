@@ -58,6 +58,7 @@ fn cdr_case(rank: u8) -> Result<(), usize> {
     let lock = SpinMutex::with_rank((), rank);
     {
         let _g = lock.lock();
+        let _hold = crate::sched::irqoff::deliberate("5 ms counted-release lock hold");
         CDR_SECTION_OPEN.store(true, Ordering::SeqCst);
         drop(b);
         // Give a remote worker time to run anything queued at once.
