@@ -1,22 +1,61 @@
 //! File commands: `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `touch`, `stat`,
 //! `df`, `mount`, `umount`, `sync`, `cd` and `pwd` (ROADMAP §8.6), over
 //! `file_init`'s File API.
+//!
+//! The shell keeps its own working directory, a counted reference
+//! ([`CWD_REF`]), and every path command resolves from [`shell_base`]:
+//! a relative path from that directory, an absolute one from `/`. The
+//! shell's commands run on one thread at a time (the REPL, or the ktest
+//! registry), so a base a command copied stays live until it returns:
+//! only `cd`, on that thread, puts the reference it names.
 
 use core::fmt::Write;
 
 use vibeos::fs::{
-    FsError, InodeKind, MAX_NAME, MAX_PATH, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, OpenFlags,
+    DirRef, FsError, InodeKind, MAX_NAME, MAX_PATH, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
+    OpenFlags, PathRef, WalkBase,
 };
+use vibeos::lock::RANK_DEVICE;
 use vibeos::shell::Command;
 
 use crate::console_init::Console;
 use crate::fat_init::{self, FatVolume};
 use crate::file_init::{
-    child_path, close, cwd_copy, join_cwd, list_dir, mkdir, mkdir_p, mount, open, read, rename,
-    rmdir, set_cwd, stat_path, sync_fs, umount, unlink, write,
+    child_path, close, dir_get_at, dir_path, dir_put, list_dir, mkdir_at, mkdir_p_at, mount_at,
+    open_at, read, rename_at, rmdir_at, stat_at, sync_fs, umount_at, unlink_at, write,
 };
 use crate::fs_init;
+use crate::sync_init::SpinMutex;
 use crate::vibefs_init::{self, VibeVolume};
+
+/// The shell's working directory: a reference to it, or `None` for `/`.
+/// Never held across a File API call, which sleeps for the VFS lock.
+static CWD_REF: SpinMutex<Option<DirRef>> = SpinMutex::with_rank(None, RANK_DEVICE);
+
+/// The directory the shell's working-directory reference holds; `None`
+/// for `/`.
+pub(crate) fn shell_cwd() -> Option<PathRef> {
+    CWD_REF.lock().as_ref().map(DirRef::at)
+}
+
+/// The walk base of the shell's path commands: the namespace root, and
+/// its working directory. `None` means `/` for both.
+pub(crate) fn shell_base() -> Option<WalkBase> {
+    let cwd = shell_cwd()?;
+    let root = fs_init::with(|v| v.root()).ok()?;
+    Some(WalkBase { root, cwd })
+}
+
+/// Make the directory `path` names, from the shell's base, its working
+/// directory; the old reference is put after the lock is released.
+pub(crate) fn cd(path: &[u8]) -> Result<(), FsError> {
+    let new = dir_get_at(shell_base(), path)?;
+    let old = CWD_REF.lock().replace(new);
+    if let Some(o) = old {
+        dir_put(o);
+    }
+    Ok(())
+}
 
 pub(crate) const COMMANDS: &[Command] = &[
     Command {
@@ -110,7 +149,7 @@ fn cmd_ls(args: &[&str]) {
         }
         i += 1;
     }
-    let st = match stat_path(path.as_bytes()) {
+    let st = match stat_at(shell_base(), path.as_bytes()) {
         Ok(s) => s,
         Err(e) => {
             err_line("ls", e);
@@ -133,12 +172,12 @@ fn cmd_ls(args: &[&str]) {
         }
         return;
     }
-    let r = list_dir(path.as_bytes(), &mut |d| {
+    let r = list_dir(shell_base(), path.as_bytes(), &mut |d| {
         let name = d.name.as_bytes();
         if long {
             let mut child = [0u8; MAX_PATH];
             let size = child_path(path.as_bytes(), name, &mut child)
-                .and_then(|n| stat_path(&child[..n]))
+                .and_then(|n| stat_at(shell_base(), &child[..n]))
                 .map_or(0, |s| s.size);
             #[expect(
                 clippy::let_underscore_must_use,
@@ -161,7 +200,12 @@ fn cmd_cat(args: &[&str]) {
     }
     let mut i = 1usize;
     while i < args.len() {
-        match open(args[i].as_bytes(), OpenFlags::from_bits(O_RDONLY), 0) {
+        match open_at(
+            shell_base(),
+            args[i].as_bytes(),
+            OpenFlags::from_bits(O_RDONLY),
+            0,
+        ) {
             Ok(f) => {
                 let mut buf = [0u8; 512];
                 loop {
@@ -189,7 +233,12 @@ fn cmd_cp(args: &[&str]) {
         err_line("cp", FsError::Inval);
         return;
     }
-    let src = match open(args[1].as_bytes(), OpenFlags::from_bits(O_RDONLY), 0) {
+    let src = match open_at(
+        shell_base(),
+        args[1].as_bytes(),
+        OpenFlags::from_bits(O_RDONLY),
+        0,
+    ) {
         Ok(f) => f,
         Err(e) => {
             err_line("cp", e);
@@ -197,7 +246,7 @@ fn cmd_cp(args: &[&str]) {
         }
     };
     let dflags = OpenFlags::from_bits(O_WRONLY | O_CREAT | O_TRUNC);
-    match open(args[2].as_bytes(), dflags, 0o644) {
+    match open_at(shell_base(), args[2].as_bytes(), dflags, 0o644) {
         Ok(dst) => {
             let mut buf = [0u8; 512];
             loop {
@@ -231,7 +280,7 @@ fn cmd_mv(args: &[&str]) {
         err_line("mv", FsError::Inval);
         return;
     }
-    if let Err(e) = rename(args[1].as_bytes(), args[2].as_bytes()) {
+    if let Err(e) = rename_at(shell_base(), args[1].as_bytes(), args[2].as_bytes()) {
         err_line("mv", e);
     }
 }
@@ -248,7 +297,7 @@ fn cmd_rm(args: &[&str]) {
         let r = if rec {
             rm_r(args[i].as_bytes())
         } else {
-            unlink(args[i].as_bytes())
+            unlink_at(shell_base(), args[i].as_bytes())
         };
         if let Err(e) = r {
             err_line("rm", e);
@@ -267,9 +316,9 @@ fn cmd_mkdir(args: &[&str]) {
             continue;
         }
         let r = if p {
-            mkdir_p(args[i].as_bytes())
+            mkdir_p_at(shell_base(), args[i].as_bytes())
         } else {
-            mkdir(args[i].as_bytes(), 0o755)
+            mkdir_at(shell_base(), args[i].as_bytes(), 0o755)
         };
         if let Err(e) = r {
             err_line("mkdir", e);
@@ -285,7 +334,8 @@ fn cmd_touch(args: &[&str]) {
     }
     let mut i = 1usize;
     while i < args.len() {
-        match open(
+        match open_at(
+            shell_base(),
             args[i].as_bytes(),
             OpenFlags::from_bits(O_WRONLY | O_CREAT),
             0o644,
@@ -303,7 +353,7 @@ fn cmd_touch(args: &[&str]) {
 
 fn cmd_stat(args: &[&str]) {
     let path = args.get(1).copied().unwrap_or(".");
-    match stat_path(path.as_bytes()) {
+    match stat_at(shell_base(), path.as_bytes()) {
         Ok(s) => {
             #[expect(
                 clippy::let_underscore_must_use,
@@ -386,11 +436,12 @@ fn cmd_mount(args: &[&str]) {
             return;
         }
     };
-    if let Err(e) = mkdir_p(target.as_bytes()) {
+    if let Err(e) = mkdir_p_at(shell_base(), target.as_bytes()) {
         err_line("mount", e);
         return;
     }
-    match mount(
+    match mount_at(
+        shell_base(),
         source.as_bytes(),
         target.as_bytes(),
         args[1].as_bytes(),
@@ -419,7 +470,7 @@ fn cmd_umount(args: &[&str]) {
         err_line("umount", FsError::Inval);
         return;
     }
-    if let Err(e) = umount(args[1].as_bytes()) {
+    if let Err(e) = umount_at(shell_base(), args[1].as_bytes()) {
         err_line("umount", e);
     }
 }
@@ -432,41 +483,35 @@ fn cmd_sync(_args: &[&str]) {
 
 fn cmd_cd(args: &[&str]) {
     let path = args.get(1).copied().unwrap_or("/");
-    let (abs, n) = match join_cwd(path.as_bytes()) {
-        Ok(a) => a,
-        Err(e) => {
-            err_line("cd", e);
-            return;
-        }
-    };
-    match stat_path(path.as_bytes()) {
-        Ok(s) if s.kind == InodeKind::Dir => {
-            if n == 0 {
-                set_cwd(b"/");
-            } else {
-                set_cwd(&abs[..n]);
-            }
-        }
-        Ok(_) => err_line("cd", FsError::NotDir),
-        Err(e) => err_line("cd", e),
+    if let Err(e) = cd(path.as_bytes()) {
+        err_line("cd", e);
     }
 }
 
 fn cmd_pwd(_args: &[&str]) {
-    let (b, n) = cwd_copy();
-    crate::console_init::write(&b[..n]);
-    crate::console_init::write(b"\n");
+    let Some(cwd) = shell_cwd() else {
+        crate::console_init::write(b"/\n");
+        return;
+    };
+    let mut buf = [0u8; MAX_PATH];
+    match dir_path(None, cwd, &mut buf) {
+        Ok(n) => {
+            crate::console_init::write(buf.get(..n).unwrap_or(b"?"));
+            crate::console_init::write(b"\n");
+        }
+        Err(e) => err_line("pwd", e),
+    }
 }
 
 fn rm_r(path: &[u8]) -> Result<(), FsError> {
-    let st = stat_path(path)?;
+    let st = stat_at(shell_base(), path)?;
     if st.kind != InodeKind::Dir {
-        return unlink(path);
+        return unlink_at(shell_base(), path);
     }
     let mut kids: [[u8; MAX_NAME]; 16] = [[0; MAX_NAME]; 16];
     let mut klens = [0u8; 16];
     let mut nk = 0usize;
-    list_dir(path, &mut |d| {
+    list_dir(shell_base(), path, &mut |d| {
         let n = d.name.as_bytes();
         if nk < 16 {
             kids[nk][..n.len()].copy_from_slice(n);
@@ -481,5 +526,5 @@ fn rm_r(path: &[u8]) -> Result<(), FsError> {
         rm_r(&child[..n])?;
         i += 1;
     }
-    rmdir(path)
+    rmdir_at(shell_base(), path)
 }

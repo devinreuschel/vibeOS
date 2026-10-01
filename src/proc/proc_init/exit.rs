@@ -13,12 +13,29 @@ pub(super) fn finish_exit(wait_status: u32, fault: Option<u64>) -> ! {
     if pid == 0 {
         thread_init::exit_current();
     }
+    // An exit from a fault the syscall return path found
+    // (`syscall_init::vibeos_syscall_bad_rip`) arrives with IF=0, its GS
+    // already the kernel's (`try_user_fault`). It runs as a CPL-3 fault's
+    // body does, with IF=1 (DESIGN §2.9 rule 3): the puts below sleep for
+    // the VFS lock.
+    if !crate::arch::current::interrupts_enabled() {
+        crate::arch::current::irq_enable();
+    }
     if pid == INIT_PID {
         init_exited(wait_status, fault);
     }
     // The files first, in batches off the table lock, while the slot is
     // still this process's: once it is a zombie its parent may free it.
+    // Then its root and working directory, taken out under the table lock
+    // and put after it, since a put sleeps for the VFS lock.
     close_all_fds(pid, "exit");
+    let (root, cwd) = with_table(|t| match t.get_mut(pid) {
+        Some(p) => (p.root.take(), p.cwd.take()),
+        None => (None, None),
+    });
+    for r in [root, cwd].into_iter().flatten() {
+        file_init::dir_put(r);
+    }
     let (old, ppid, tid) = thread_init::with_sched(|s| {
         table_locked(|t| {
             if reparent_children(s, t, pid)

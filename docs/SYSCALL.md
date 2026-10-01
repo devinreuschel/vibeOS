@@ -252,11 +252,11 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   on a fatal signal; ROADMAP §12.5); a console read returns after a newline
   or `rdx` bytes
 - `open`: `mode` is ignored, and a vibefs file is created 0644 (F149;
-  ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. `O_CREAT` and
-  `O_TRUNC` take effect before the open-file slot and the fd are allocated, so with
-  a full open-file or fd table `open(O_TRUNC)` truncates the file and then
-  fails with `ENFILE` for a full open-file table or `EMFILE` for a full fd
-  table (F057; ROADMAP §10.4)
+  ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. `open`
+  reserves the descriptor (`EMFILE`) and the open-file slot (`ENFILE`)
+  before it creates or truncates, so a failed `open` changes no file; a
+  trailing `/` after a missing name fails with `ENOTDIR` unless the call is
+  `mkdir` (F057; ROADMAP §10.4)
 - `lseek`: `SEEK_END` reads the size from the file's inode (FAT's
   counted in-core inode or the vibefs inode), so it sees writes through
   any descriptor. On a vibefs file a resulting offset above 2^44 − 4096
@@ -417,18 +417,24 @@ ROADMAP §10.4).
 - `dup` / `dup2` copy the slot and clear `FD_CLOEXEC` on the new fd
 - `open` `O_CLOEXEC` becomes per-fd `FD_CLOEXEC`; `execve` drops those
 - open-file slots are refcounted so `dup`/`fork` share them
-- a relative path resolves against one kernel-global cwd,
-  `file_init::CWD`, which only the debug shell's `cd` changes;
-  `Proc::cwd` is copied on `fork` and never read, and there is no `chdir`
-  (F057, F086; ROADMAP §10.4, with `chdir` in §13.9)
+- a relative path resolves against the calling process's working
+  directory, a counted reference to a directory that `fork` copies and
+  exit drops (DESIGN §2.11); a process the kernel starts has `/` as its
+  root and working directory, and there is no `chdir` until ROADMAP
+  §13.9 (F057, F086)
 - `open` and `execve` resolve a path through the VFS walker, one component
   at a time, crossing mounts, so a process reaches every mounted
   filesystem: `open("/dev/null")` opens devfs's `null`, and `/proc`,
   `/tmp`, `/sys`, and `/vibe` are procfs, tmpfs, sysfs, and vibefs.
-  `.` and `..` resolve in the VFS, never in a backend. Still wrong: FAT
-  matches names without regard to case but the dentry cache does not, so
-  `/VIBE/f` reaches the FAT `vibe` directory under the vibefs mount rather
-  than the mount (F056; ROADMAP §10.4)
+  The walker follows path_resolution(7), with no string pass before it:
+  repeated slashes count as one, `.` is the directory reached so far, and
+  `..` is the physical parent of that directory, after any symlink before
+  it has been followed, stays put at the process's root, and at a mount's
+  root steps to the parent of the mountpoint. A component followed by `/`
+  must be a directory (a symlink there is followed), else the call fails
+  with `ENOTDIR`; only `mkdir` accepts a `/` after a name it creates. FAT
+  names compare without regard to case in the dentry cache too, so
+  `/VIBE/f` is `/vibe/f`, under the vibefs mount (F056; ROADMAP §10.4)
 - `read`, `write`, and `lseek` copy the slot out, drop the table lock for
   the I/O, and write back only the offset. `refs` and `used` change only
   in `addref` and `close`, under the table lock, and the `close` that

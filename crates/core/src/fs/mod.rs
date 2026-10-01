@@ -49,7 +49,7 @@ pub use ramfs::{RamFs, RamState};
 pub use sizes::VfsSizes;
 #[cfg(test)]
 pub(crate) use sizes::{SMALL, host_vfs};
-pub use walk::{WalkCall, WalkReply, WalkStep, Walker, split_basename};
+pub use walk::{DirRef, WalkBase, WalkCall, WalkReply, WalkStep, Walker, split_basename};
 
 use crate::atomic::statics::{AtomicU64, Ordering};
 use crate::dev::{Instance, same_instance};
@@ -259,6 +259,10 @@ pub struct VfsStats {
     pub i_evicts: u32,
     /// Files [`Vfs::open`] opened on a resolved dentry.
     pub opens: u32,
+    /// Superblock `sync`s that failed at their last unmount; the unmount
+    /// went on (DESIGN §2.5: a counter, and the caller's rate-limited
+    /// line).
+    pub sync_errs: u32,
 }
 
 /// A backend's identity for one of its inodes, unique within its
@@ -434,8 +438,19 @@ pub trait InodeOps: Sync {
     fn evict(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> Result<(), FsError> {
         Ok(())
     }
-    /// Drop the backend state of an unmounted superblock.
-    fn kill_sb(&self, _cx: &mut OpCx<'_>) {}
+    /// Release the backend state of a superblock whose last mount is
+    /// gone, after its `sync`: the volume it shows is retired here, and the
+    /// superblock's own count on the volume instance goes when its slot is
+    /// freed. Runs with the VFS lock dropped, never before the unmount
+    /// succeeded.
+    fn release(&self, _cx: &mut OpCx<'_>) {}
+    /// Whether the dentry cache's name `cached` is the name `asked` a
+    /// lookup gives: byte equality, or the backend's own rule, as FAT's
+    /// case-insensitive one, so a lookup by another spelling finds the
+    /// dentry a mount is on.
+    fn name_eq(&self, cached: &[u8], asked: &[u8]) -> bool {
+        cached == asked
+    }
     /// Whether `ino` can seek: `SPipe` for an object that cannot, as a
     /// console, which `lseek` then refuses.
     fn check_seek(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> Result<(), FsError> {
@@ -465,7 +480,7 @@ pub trait FileSystem: Sync {
     /// mount of a shared one.
     fn on_mount(&self, _cx: &mut OpCx<'_>, _at: &[u8]) {}
     /// After the mount on `at` is gone; `last` when it was the
-    /// superblock's last mount, before `kill_sb`.
+    /// superblock's last mount, before its `sync` and `release`.
     fn on_umount(&self, _cx: &mut OpCx<'_>, _at: &[u8], _last: bool) {}
 }
 
@@ -825,8 +840,10 @@ impl Super {
 }
 
 /// A mount of a superblock on a directory (DESIGN §2.11). It holds one
-/// count on its superblock; `refs` counts the open files, child mounts
-/// and held paths that reach the filesystem through this mount. A
+/// count on its superblock; `refs` counts the open files, child mounts,
+/// held paths and directory references ([`DirRef`]: working directories
+/// and roots) that reach the filesystem through this mount, and
+/// `umount` is `Busy` while it is not zero. A
 /// mountpoint is found by its parent mount and dentry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Mount {
@@ -865,10 +882,12 @@ pub struct Mounted {
 /// to its mount, and pins its dentry when it was opened by path. `gen`
 /// changes when the slot is freed, so a [`FileId`] to an earlier file is
 /// refused with `Badf` (C-FDGEN). The size lives in the inode, never
-/// here.
+/// here. A slot is free, `reserved` by an `open` that has not created or
+/// truncated anything yet, or `used`.
 #[derive(Clone, Copy)]
 struct File {
     used: bool,
+    reserved: bool,
     refs: u16,
     r#gen: u16,
     islot: u16,
@@ -881,6 +900,7 @@ struct File {
 impl File {
     const EMPTY: Self = Self {
         used: false,
+        reserved: false,
         refs: 0,
         r#gen: 0,
         islot: 0,
@@ -1009,6 +1029,7 @@ impl Vfs {
                 d_evicts: 0,
                 i_evicts: 0,
                 opens: 0,
+                sync_errs: 0,
             },
         })
     }
@@ -1068,7 +1089,7 @@ impl Call {
 
 /// A superblock hook prepared under the VFS lock and run with it dropped:
 /// `fill_super`, `on_mount`, `sync`, and the last unmount's `on_umount`
-/// and `kill_sb`. The superblock's `busy` count keeps its slot meanwhile.
+/// and `release`. The superblock's `busy` count keeps its slot meanwhile.
 pub struct SbCall {
     fs: Option<&'static dyn FileSystem>,
     ops: Option<&'static dyn InodeOps>,
@@ -1189,7 +1210,8 @@ impl Hooks {
 /// The File API over a [`Vfs`] behind lock `L` (C-FILEAPI): every method
 /// is a loop of short locked steps and backend calls made with the lock
 /// dropped, and every release a step queues runs with it dropped too.
-/// Paths are absolute or relative to `cwd`.
+/// An absolute path starts at its base's root, a relative one at its
+/// working directory ([`WalkBase`]).
 pub struct FileApi<'l, L: Guarded<Vfs>> {
     lock: &'l L,
     hooks: Hooks,
@@ -1277,11 +1299,11 @@ impl Vfs {
 
     pub(crate) fn mount(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         at: &str,
         fs: &'static dyn FileSystem,
     ) -> Result<u8, FsError> {
-        self.api(|a| a.mount_fs(cwd, at.as_bytes(), fs, None, false, None))
+        self.api(|a| a.mount_fs(base, at.as_bytes(), fs, None, false, None))
             .map(|m| m.mount)
     }
 
@@ -1295,19 +1317,28 @@ impl Vfs {
         self.api(|a| a.mount_fs(None, at.as_bytes(), fs, Some(dev), ro, None))
     }
 
-    pub(crate) fn umount(&mut self, cwd: Option<PathRef>, at: &str) -> Result<(), FsError> {
-        self.api(|a| a.umount(cwd, at.as_bytes()))
+    pub(crate) fn umount(&mut self, base: Option<WalkBase>, at: &str) -> Result<(), FsError> {
+        self.api(|a| a.umount(base, at.as_bytes()))
+    }
+
+    /// [`FileApi::dir_get`] on this `Vfs`.
+    pub(crate) fn dir_get(
+        &mut self,
+        base: Option<WalkBase>,
+        path: &str,
+    ) -> Result<DirRef, FsError> {
+        self.api(|a| a.dir_get(base, path.as_bytes()))
     }
 
     /// The path `path` resolves to, not held.
     pub(crate) fn resolve(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         follow: bool,
     ) -> Result<PathRef, FsError> {
         self.api(|a| {
-            let p = a.walk(cwd, path.as_bytes(), follow)?;
+            let p = a.walk(base, path.as_bytes(), follow)?;
             a.put_path(p);
             Ok(p)
         })
@@ -1323,86 +1354,86 @@ impl Vfs {
         })
     }
 
-    pub(crate) fn stat(&mut self, cwd: Option<PathRef>, path: &str) -> Result<Stat, FsError> {
-        self.api(|a| a.stat_path(cwd, path.as_bytes(), true))
+    pub(crate) fn stat(&mut self, base: Option<WalkBase>, path: &str) -> Result<Stat, FsError> {
+        self.api(|a| a.stat_path(base, path.as_bytes(), true))
     }
 
-    pub(crate) fn lstat(&mut self, cwd: Option<PathRef>, path: &str) -> Result<Stat, FsError> {
-        self.api(|a| a.stat_path(cwd, path.as_bytes(), false))
+    pub(crate) fn lstat(&mut self, base: Option<WalkBase>, path: &str) -> Result<Stat, FsError> {
+        self.api(|a| a.stat_path(base, path.as_bytes(), false))
     }
 
     pub(crate) fn mkdir(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         mode: u16,
     ) -> Result<(), FsError> {
-        self.api(|a| a.mkdir(cwd, path.as_bytes(), u32::from(mode)))
+        self.api(|a| a.mkdir(base, path.as_bytes(), u32::from(mode)))
     }
 
     pub(crate) fn creat(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         mode: u16,
     ) -> Result<(), FsError> {
-        self.api(|a| a.create(cwd, path.as_bytes(), InodeKind::Reg, mode | S_IFREG, None))
+        self.api(|a| a.create(base, path.as_bytes(), InodeKind::Reg, mode | S_IFREG, None))
     }
 
     pub(crate) fn symlink(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         target: &str,
     ) -> Result<(), FsError> {
-        self.api(|a| a.symlink(cwd, path.as_bytes(), target.as_bytes()))
+        self.api(|a| a.symlink(base, path.as_bytes(), target.as_bytes()))
     }
 
-    pub(crate) fn unlink(&mut self, cwd: Option<PathRef>, path: &str) -> Result<(), FsError> {
-        self.api(|a| a.unlink(cwd, path.as_bytes()))
+    pub(crate) fn unlink(&mut self, base: Option<WalkBase>, path: &str) -> Result<(), FsError> {
+        self.api(|a| a.unlink(base, path.as_bytes()))
     }
 
-    pub(crate) fn rmdir(&mut self, cwd: Option<PathRef>, path: &str) -> Result<(), FsError> {
-        self.api(|a| a.rmdir(cwd, path.as_bytes()))
+    pub(crate) fn rmdir(&mut self, base: Option<WalkBase>, path: &str) -> Result<(), FsError> {
+        self.api(|a| a.rmdir(base, path.as_bytes()))
     }
 
     pub(crate) fn link(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         old: &str,
         new: &str,
     ) -> Result<(), FsError> {
-        self.api(|a| a.link(cwd, old.as_bytes(), new.as_bytes()))
+        self.api(|a| a.link(base, old.as_bytes(), new.as_bytes()))
     }
 
     pub(crate) fn rename(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         old: &str,
         new: &str,
     ) -> Result<(), FsError> {
-        self.api(|a| a.rename(cwd, old.as_bytes(), new.as_bytes()))
+        self.api(|a| a.rename(base, old.as_bytes(), new.as_bytes()))
     }
 
     pub(crate) fn truncate(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         size: u64,
     ) -> Result<(), FsError> {
-        self.api(|a| a.truncate(cwd, path.as_bytes(), size))
+        self.api(|a| a.truncate(base, path.as_bytes(), size))
     }
 
     pub(crate) fn open_path(
         &mut self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         path: &str,
         flags: u32,
         mode: u16,
     ) -> Result<FileRef, FsError> {
         self.api(|a| {
             a.open(
-                cwd,
+                base,
                 path.as_bytes(),
                 OpenFlags::from_bits(flags),
                 u32::from(mode),
@@ -1462,3 +1493,6 @@ mod testfs;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod walk_tests;

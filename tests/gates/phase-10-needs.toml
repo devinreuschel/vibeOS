@@ -458,8 +458,11 @@ why = "text: lands with A3's lock-kind step, after the FAT stack-frame box below
 
 [[box]]
 key = "a process's working directory is a counted reference to a directory"
-needs = ["the dentry cache never resolves through a reused slot"]
-why = "text: lands after the dentry-cache box"
+needs = [
+  "the dentry cache never resolves through a reused slot",
+  "every path syscall resolves through",  # L1326
+]
+why = "text: lands after the dentry-cache box; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "a disk-backed FAT mount fits a 16 KiB kernel stack"
@@ -1447,5 +1450,63 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (sur
 key = "a syscall count per process,"
 needs = [
   "a syscall count per process:",  # L1440
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1328
+[[box]]
+key = "only the `Vfs` walker resolves"
+needs = [
+  "FAT and vibefs behind `InodeOps`;",  # L1324
+  "every path syscall resolves through",  # L1326
+  "a process's working directory is",  # L1327
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1332
+[[box]]
+key = "`umount` keeps volume state consistent:"
+needs = [
+  "FAT and vibefs behind `InodeOps`;",  # L1324
+  "a process's working directory is",  # L1327
+  "the dentry cache never resolves",  # L1331
+  "driver and volume state as",  # L1340
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1334
+[[box]]
+key = "`open` reserves the descriptor and"
+needs = [
+  "the E2 table gives each",  # L1344
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L920
+[[box]]
+key = "`File` with an offset and"
+needs = [
+  "threads, processes, descriptors, inodes, dentries,",  # L1316
+  "every path syscall resolves through",  # L1326
+  "a process's working directory is",  # L1327
+  "`open` reserves the descriptor and",  # L1334
+  "the E2 table gives each",  # L1344
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L922
+[[box]]
+key = "inode and dentry caches with"
+needs = [
+  "the dentry cache never resolves",  # L1331
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1032
+[[box]]
+key = "a relative path in a"
+needs = [
+  "every path syscall resolves through",  # L1326
+  "a process's working directory is",  # L1327
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
