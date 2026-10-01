@@ -294,11 +294,21 @@ purpose, loses nothing; a counter narrower than 64 bits is read at least once pe
 reader masks its delta to the counter's width; never publish a `now_ns` below the last reading
 (DESIGN §6.4).
 
+**Time stands still for 43 s, late in long runs.**
+The HPET main counter was read with one 8-byte load. QEMU serves it as two 4-byte halves, so a read
+that straddled the low word's wrap, every 42.9 s at 100 MHz, returned the new high word with the old
+low word: 2^32 ticks ahead. `now_ns` published it into `LAST_NS`, and every clamped reading, timed
+wakeup and timeout then waited 42.9 s for real time to catch up. Rule: read the HPET counter's low
+32 bits in one access and treat it as a 32-bit counter, as Linux does (DESIGN §6.4).
+
 **`sleep_ms(50)` and PIT-vs-HPET calib flake on TCG SMP.**
 TCG has no invariant TSC. Boot HPET calibration runs before APs; a later PIT channel 2 window sees a
 different apparent TSC rate, and LAPIC periodic ticks coalesce, which once put `uptime_ms` during a
 sleep outside 50–100 ms when it counted ticks. Rule: a timing check measures once and holds one band; it is never retried against a fresh
-sample, and it gets no wider band where it flakes (§9.8). The PIT-vs-HPET cross-check holds its
+sample, and it gets no wider band where it flakes (§9.8). The calibration is a measurement, not such
+a check: one 10 ms PIT window under TCG read up to 4% off when the vCPU stalled at either end, so
+`calibrate_pit` brackets each window's ends with TSC reads, drops a window whose brackets are loose,
+and takes the median of the rest (DESIGN §6.2). The PIT-vs-HPET cross-check holds its
 75–125% band only where the TSC is invariant, so without the CPUID bit it skips with the reason
 `no invariant tsc`, and the ROADMAP §10.1 KVM leg, whose guest has the bit, runs it. `uptime_ms`
 is clocksource time, so coalesced ticks lose none of it, and `sleep_ms_50` holds 50–100 ms of it in

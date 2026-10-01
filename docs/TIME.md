@@ -33,7 +33,19 @@ hold on both architectures.
 ## 6.2 Calibrating the TSC
 
 Read the reference counter, spin for a known interval, read again, divide. The reference is the HPET
-main counter when ACPI provides an HPET table, otherwise PIT channel 2 over a 10 ms window.
+main counter when ACPI provides an HPET table, otherwise PIT channel 2 over 10 ms windows.
+
+A PIT window's ends are events, not counter reads: the gate write starts the one-shot and a poll of
+port `0x61` finds its end, so a vCPU or SMI stall between either and its TSC read lengthens or
+shortens the window unseen; under TCG one window moved the rate by up to 4%. `calibrate_pit`
+therefore brackets each end with TSC reads (before and after the gate write; before the last poll
+that found OUT low and after the one that found it high), keeps only a window whose brackets are
+within 0.05% of its length (`PitWindow::tight_len`), measures until five are kept or ten ran, and
+takes their median (`time::tsc_per_ms_from_pit_windows`); with none kept it takes the median of all.
+That costs 50 ms of boot where the HPET is absent. The HPET window's ends are counter reads, so
+`calibrate_hpet` takes each as the read the TSC brackets most tightly of 16 (TSC, HPET, TSC) triples
+and places it by its bracket's middle (`time::tsc_per_ms_from_hpet_brackets`); reading the TSC only
+after the first HPET read and before the last one read the rate low, by up to 0.5% under TCG.
 
 Parse the ACPI HPET table properly: reject an address of zero and reject a generic address structure
 that claims I/O space rather than system memory. Both appear in the wild and both produce a
@@ -173,8 +185,11 @@ publishes a provisional choice, since the AP warp tests run later, inside `smp_i
 `time_init::confirm_clocksource`, which `kmain` calls right after it, ranks again, switches on CPU 0
 through `ClockWriter::switch` (no step in `now_ns`) if the answer changed, and prints
 `vibeOS: time: clocksource <tsc|hpet|acpi_pm>`, Linux's names. A boot with no candidate halts with
-`vibeOS: time: no clocksource`; there is no tick-count fallback. The HPET is 64 bits wide when
-`GCAP_ID` bit 13 is set, else 32 (42.9 s at 100 MHz); the PM timer is 24 bits, or 32 with the FADT's
+`vibeOS: time: no clocksource`; there is no tick-count fallback. The kernel reads the HPET
+main counter's low 32 bits in one 4-byte access and treats it as 32 bits wide whatever `GCAP_ID` bit 13
+says, as Linux does: QEMU serves an 8-byte read as two halves, and one that straddled the low word's
+wrap (every 42.9 s at 100 MHz) read 2^32 ticks ahead, which `LAST_NS` then held for 42.9 s, stalling
+every timed wait; the PM timer is 24 bits, or 32 with the FADT's
 `TMR_VAL_EXT`, and QEMU's `pc` FADT is revision 1, with no `X_` fields, so its timer is found at
 `PM_TMR_BLK`.
 

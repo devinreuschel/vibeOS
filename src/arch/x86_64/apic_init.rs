@@ -505,7 +505,8 @@ unsafe fn calib_periodic(va: u64) -> Option<u64> {
     let mut spins = 0u64;
     loop {
         let now = hpet_now();
-        if now.wrapping_sub(start_h) >= want {
+        // The HPET reads 32 bits wide (`time_init::hpet_read_main`).
+        if now.wrapping_sub(start_h) & u64::from(u32::MAX) >= want {
             break;
         }
         spins += 1;
