@@ -550,6 +550,13 @@ needs = [
 why = "text of the FP binding box: the F069 box below lands after it; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
+key = "one named fill API for"
+needs = [
+  "user-VA accessors replace the physmap",  # L1377
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
 key = "an address space is a two-count object"
 needs = [
   "user-VA accessors replace the physmap copy for syscalls",
