@@ -104,12 +104,6 @@ jobs:
         if: "!cancelled()"
         run: time make -k test-e2e-uefi test
 
-      # The crash test's planted defects, each of which the test must catch
-      # (ROADMAP §10.2, P10-S95); not a `make test` prerequisite.
-      - name: make test-vibefs-crash-plants
-        if: "!cancelled()"
-        run: make test-vibefs-crash-plants
-
       # A failed run's guest cores (ROADMAP §10.7, TESTING.md §8.3). This
       # workflow names no secret (rule_no_core_upload_with_secrets).
       - name: upload failed-run cores

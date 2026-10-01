@@ -323,6 +323,10 @@ jobs:
             targets: test-vibefs-crash
             jobs: 1
           - arch: x86_64
+            tier: vibefs-crash-plants
+            targets: test-vibefs-crash-plants
+            jobs: 1
+          - arch: x86_64
             tier: forensics
             targets: test-forensics
             jobs: 1
@@ -369,8 +373,9 @@ jobs:
             find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
           fi
 
-      # test-vibefs-crash's recipe runs `cargo test -p vibeos-hostlib-tests`
-      # before its boots, so that tier alone needs the toolchain.
+      # test-vibefs-crash's and test-vibefs-crash-plants' recipes run
+      # `cargo test -p vibeos-hostlib-tests` before their boots, so those
+      # tiers alone need the toolchain (the condition matches both).
       - name: install rust nightly
         if: contains(matrix.targets, 'test-vibefs-crash')
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -408,7 +413,6 @@ jobs:
           TARGETS: ${{ matrix.targets }}
           JOBS: ${{ matrix.jobs }}
           VIBEOS_QEMU_ACCEL: tcg
-          OVMF: /usr/share/ovmf/OVMF.fd
         run: make -k -j "$JOBS" --output-sync=target VIBEOS_PREBUILT=1 $TARGETS
 
       # Per-tier table and every harness retry, even after a failed step
