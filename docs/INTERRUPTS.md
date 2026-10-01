@@ -671,8 +671,13 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
     then sees the work, or stays pending across the IF=0 exit and is taken in user mode at once,
     where its own exit runs the check. A debug build asserts IF=0 at the check. A check made with
     IF=1 and followed by the `cli` lets the IPI be taken between the two, and the thread returns to
-    user mode with the work undone until the next tick. Rule; not yet enforced: ROADMAP §10.6
-    (F033). Today pending signals are acted on only at syscall entry and after the `wait4` sleep.
+    user mode with the work undone until the next tick. On x86_64 the check is
+    `syscall_init::exit_work`: the syscall exit calls it after its `cli` and return-value store,
+    `idt::exit_to_user` after its `cli` on every vector exit to CPL 3 but an NMI's, and both before
+    the FP check; the work it finds is a kill or a stop (`proc_init::exit_work_pending`), and a
+    reschedule runs in the interrupt body (the timer's and the reschedule IPI's), not here. `kill`
+    publishes a Term or Stop signal and then kicks the target's CPU (`ipi_init::kick`). In-guest
+    `signal_on_return` and `exit_work_ipi` cover it.
 12. Signal-handler entry, on both architectures. Delivery saves the interrupted context (the user
     frame above, after any syscall-restart rewind) and its FP state into Linux's signal frame on the
     user stack (ROADMAP §13.8), then rewrites the user frame so the return to user mode enters the

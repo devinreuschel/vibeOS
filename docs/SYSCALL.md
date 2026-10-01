@@ -109,6 +109,20 @@ returned with, and in debug builds each exit path checks IF before its
 `vibeos_exit_if_set`, a `ud2`, if IF is set. `console_init::wait_key`, which
 a console `read` blocks in, returns with the IF it was entered with.
 
+Every return to ring 3 acts on a pending kill or stop (DESIGN §5.10 rule
+11): after the `cli` and the return-value store, the syscall exit (and a new
+thread's first entry, which enters it) calls `syscall_init::exit_work`, and
+every vector's exit to CPL 3 calls it from `idt::exit_to_user` after that
+exit's `cli`, except an NMI's. With IF=0 it checks the current process
+(`proc_init::exit_work_pending`: `Stopped`, or `SIGKILL`, `SIGSTOP`, or a
+signal whose default action is Term or Stop pending); when it finds work it
+turns IF on, acts (`proc_init::do_exit_work`: a kill ends the process, a
+stop waits on `stop_wq`), turns IF off, and checks again, so a process that
+makes no syscall is killed or stopped at its next interrupt. Debug builds
+assert IF=0 at the check. `kill` of a Term or Stop signal sends the
+target's CPU the reschedule IPI after it publishes the signal, when the
+target is running on another CPU. Handler delivery is ROADMAP §13.8's.
+
 The top user page is never mapped: user mappings end at `USER_MAP_END`
 (`0x0000_7FFF_FFFF_F000`), and `execve` of an image with a segment above it
 fails with `ENOEXEC`, so a `syscall` in the last mappable page returns to a

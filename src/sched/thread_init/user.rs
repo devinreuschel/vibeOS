@@ -32,3 +32,14 @@ pub fn reset_user_segs() {
         crate::arch::gdt::load_user_segs(UserSegs::NULL);
     }
 }
+
+impl Sched {
+    /// The CPU `id` runs on, when it is `Running` there: where a signal's
+    /// sender sends the reschedule IPI that makes the target's exit work
+    /// see it (DESIGN §5.10 rule 11).
+    pub(crate) fn running_on(&self, id: ThreadId) -> Option<u32> {
+        self.get(id)
+            .filter(|t| t.state == ThreadState::Running)
+            .map(|t| t.cpu)
+    }
+}

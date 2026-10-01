@@ -111,6 +111,11 @@ global_asm!(
     // GS. `first_return` enters here too.
     .global vibeos_syscall_return
     vibeos_syscall_return:
+        // Exit work (DESIGN §5.10 rule 11): the last check for a pending
+        // kill or stop, with IF=0; it turns IF on only to do found work.
+        mov edi, {exit_syscall}
+        lea rsi, [rsp + {pad}]
+        call vibeos_exit_work
         // A non-canonical return RIP reaches neither sysretq nor iretq:
         // the process gets SIGSEGV (AGENTS.md rule 1).
         mov rcx, [rsp + {f_rip}]
@@ -228,7 +233,80 @@ global_asm!(
     site_exit = const crate::sched::irqoff::Site::SYSCALL_EXIT.bits(),
     user_cs = const USER_CS_RPL as u64,
     user_ss = const USER_DS_RPL as u64,
+    exit_syscall = const EXIT_SYSCALL,
 );
+
+/// [`exit_work`]'s `kind` for the syscall exit (and a new thread's first
+/// return); a vector exit passes its vector, below this.
+pub const EXIT_SYSCALL: u64 = 0x100;
+
+/// The process layer's exit-work hooks (DESIGN §1.2): whether the current
+/// process has a kill or stop to act on, read with IF=0, and the work
+/// itself, run with IF=1. `proc_init::init` sets both before the first
+/// ring-3 entry; unset, no exit has work.
+static EXIT_PENDING: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static EXIT_WORK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the exit-work hooks.
+pub fn set_exit_work_hooks(pending: fn() -> bool, work: fn(&mut UserFrame)) {
+    // Release: pairs with the Acquire loads in `exit_work`.
+    EXIT_WORK.store(work as *mut (), Ordering::Release);
+    EXIT_PENDING.store(pending as *mut (), Ordering::Release);
+}
+
+/// The syscall exit's call into [`exit_work`].
+///
+/// # Safety
+/// `frame` is the user frame the exit is returning over.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn vibeos_exit_work(kind: u64, frame: *mut UserFrame) {
+    // SAFETY: invariant I25: `frame` is this thread's user frame at the top
+    // of its kernel stack, which nothing else refers to at the exit;
+    // established by `syscall_init::vibeos_syscall_entry` or
+    // `thread_init::spawn_user`.
+    exit_work(kind, unsafe { &mut *frame });
+}
+
+/// Exit work on a return to ring 3 (DESIGN §5.10 rule 11): entered with
+/// IF=0 after the exit's `cli`; while the current process has a kill or a
+/// stop pending, turn IF on, act on it (a kill does not return), turn IF
+/// off, and check again. Returns with IF=0 once a check finds none. `kind`
+/// is [`EXIT_SYSCALL`] or the vector whose exit this is.
+pub fn exit_work(kind: u64, frame: &mut UserFrame) {
+    #[cfg(feature = "kernel_tests")]
+    crate::proc::ktest::exit_seen(frame);
+    // Acquire: pairs with the Release stores in `set_exit_work_hooks`.
+    let pending = EXIT_PENDING.load(Ordering::Acquire);
+    let work = EXIT_WORK.load(Ordering::Acquire);
+    if !pending.is_null() && !work.is_null() {
+        // SAFETY: invariant: non-null hooks hold a `fn() -> bool` and a
+        // `fn(&mut UserFrame)`; established by
+        // `syscall_init::set_exit_work_hooks`, their only stores.
+        let (pending, work) = unsafe {
+            (
+                core::mem::transmute::<*mut (), fn() -> bool>(pending),
+                core::mem::transmute::<*mut (), fn(&mut UserFrame)>(work),
+            )
+        };
+        loop {
+            debug_assert!(!x86::interrupts_enabled(), "exit work check with IF on");
+            if !pending() {
+                break;
+            }
+            #[cfg(feature = "kernel_tests")]
+            crate::proc::ktest::exit_work_found(kind);
+            x86::sti();
+            work(frame);
+            x86::cli();
+        }
+    }
+    #[cfg(feature = "kernel_tests")]
+    if kind == EXIT_SYSCALL {
+        crate::proc::ktest::exit_check_hook(frame);
+    }
+    #[cfg(not(feature = "kernel_tests"))]
+    let _ = kind;
+}
 
 /// The syscall exit's non-canonical-RIP path: kernel stack and GS, IF=0,
 /// the return value already stored. Kills the process with `SIGSEGV`
@@ -305,7 +383,7 @@ pub unsafe fn init_bsp() {
     // SAFETY: the GDT is loaded and `GS_BASE` is the BSP's `PerCpu` (this
     // fn's contract, `syscall_init::init_bsp`).
     unsafe { init_cpu() };
-    crate::arch::idt::set_user_return_hook(fp_user_return);
+    crate::arch::idt::set_user_return_hook(user_return);
     crate::thread_init::set_switch_hooks(on_switch, fpu_template);
     per_cpu_init::with_current(|cpu| {
         cpu.tables = gdt::bsp_tables().cast();
@@ -446,8 +524,13 @@ pub extern "C" fn vibeos_fp_user_return() {
     });
 }
 
-/// `vibeos_fp_user_return` as `arch::idt`'s user-return hook.
-fn fp_user_return() {
+/// `arch::idt`'s user-return hook, run by `idt::exit_to_user` after its
+/// `cli`: the exit work, except on an NMI's exit, which keeps IF=0 (DESIGN
+/// §5.10 rule 3), then the FP binding check.
+fn user_return(frame: &mut TrapFrame) {
+    if frame.vector != u64::from(vectors::NMI) {
+        exit_work(frame.vector, frame.user_mut());
+    }
     vibeos_fp_user_return();
 }
 

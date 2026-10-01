@@ -307,6 +307,13 @@ fn inbox_push(cpu: u32, slot: usize) {
     );
 }
 
+/// Send `cpu` the reschedule IPI with nothing queued: its interrupt exit
+/// then runs the exit work of DESIGN §5.10 rule 11 for whatever the caller
+/// published first. A failed send is counted and logged ([`note_send`]).
+pub fn kick(cpu: u32) {
+    note_send("reschedule", Arch::send(cpu, Ipi::Reschedule));
+}
+
 /// Place `id`, in thread-table slot `slot`, on `cpu`. Local: runq. Remote:
 /// inbox + 0xFD. Never a remote queue lock. IRQ-off for the local runq.
 pub fn place_ready(cpu: u32, id: ThreadId, slot: usize) {

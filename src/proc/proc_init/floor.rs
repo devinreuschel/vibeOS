@@ -95,7 +95,7 @@ enum Nap {
 
 /// True when `p` has a signal `apply_pending` acts on: a stop, or a
 /// pending signal other than `SIGCHLD` and `SIGCONT`, which it ignores.
-fn signal_acts(p: &Proc) -> bool {
+pub(super) fn signal_acts(p: &Proc) -> bool {
     p.state == ProcState::Stopped || p.pending & !(bit(SIGCHLD) | bit(SIGCONT)) != 0
 }
 

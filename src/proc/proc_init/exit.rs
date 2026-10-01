@@ -211,8 +211,15 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
             // `rt_sigaction`, so a signal to init is dropped here, with no
             // pending bit, state change or wake, and `kill` returns 0.
             if !kill_delivers(target, sig, false) {
-                return Ok(false);
+                return Ok((false, None));
             }
+            // A kill or stop the target's exit work must see: published by
+            // the pending bit or state below, then its CPU kicked once the
+            // locks are dropped (DESIGN §5.10 rule 11).
+            let kick = match default_action(sig) {
+                SigAct::Term | SigAct::Stop => s.running_on(p.tid),
+                SigAct::Ign | SigAct::Cont => None,
+            };
             match default_action(sig) {
                 SigAct::Ign => {
                     if sig == SIGCHLD {
@@ -238,12 +245,15 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
                     s.wake_all(&mut p.stop_wq);
                 }
             }
-            Ok(true)
+            Ok((true, kick))
         })
     });
     match r {
         Err(e) => Err(e),
-        Ok(delivered) => {
+        Ok((delivered, kick)) => {
+            if let Some(cpu) = kick.filter(|&c| c != thread_init::current_cpu()) {
+                crate::ipi_init::kick(cpu);
+            }
             if delivered && target == self_pid && default_action(sig) == SigAct::Term {
                 finish_exit(wait_signaled(sig), None);
             }

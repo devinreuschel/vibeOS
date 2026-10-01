@@ -3,6 +3,7 @@ use crate::ktest::{Test, test};
 
 mod entry;
 mod exec;
+mod exit_work;
 mod floor;
 mod hooks;
 mod lifecycle;
@@ -14,6 +15,7 @@ mod uaccess;
 
 pub(crate) use entry::*;
 pub(crate) use exec::*;
+pub(crate) use exit_work::*;
 pub(crate) use floor::*;
 pub(crate) use hooks::*;
 pub(crate) use lifecycle::*;
@@ -59,6 +61,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("elf_shared_page_jump", test_elf_shared_page_jump),
     test("brk_mmap_munmap_user", test_brk_mmap_munmap_user).deadline(30_000),
     test("stop_cont_no_lost_wakeup", test_stop_cont_no_lost_wakeup).deadline(30_000),
+    test("signal_on_return", test_signal_on_return).deadline(30_000),
+    test("exit_work_ipi", test_exit_work_ipi).deadline(30_000),
     test("syscall_body_if_on", test_syscall_body_if_on).deadline(30_000),
     test("kill_line_whole", test_kill_line_whole).deadline(30_000),
     test("kalloc_fail_after_hook", test_kalloc_fail_after_hook),
