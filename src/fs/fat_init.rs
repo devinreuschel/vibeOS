@@ -291,6 +291,12 @@ fn vol_of<'a>(cx: &OpCx<'a>) -> Result<&'a FatVolume, FsError> {
 }
 
 impl InodeOps for FatOps {
+    /// FAT compares names without regard to case, so the dentry cache
+    /// does too: `/VIBE` finds the `vibe` dentry a mount is on.
+    fn name_eq(&self, cached: &[u8], asked: &[u8]) -> bool {
+        vibeos::fs::fat::eq_ci(cached, asked)
+    }
+
     fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
             let (w, _) = words(dir)?;

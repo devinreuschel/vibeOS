@@ -140,9 +140,11 @@ fn mount_crossing_dotdot() {
     v.creat(None, "/mnt/x", 0o644).unwrap();
     let x = v.stat(None, "/mnt/x").unwrap();
     assert_eq!(x.kind, InodeKind::Reg);
-    let up = v.stat(None, "/mnt/x/..").unwrap();
+    // A file is no directory to step out of (path_resolution(7)).
+    assert_eq!(v.stat(None, "/mnt/x/..").unwrap_err(), FsError::NotDir);
+    let up = v.stat(None, "/mnt/.").unwrap();
     assert_eq!(up.ino, mnt_after.ino);
-    let root = v.stat(None, "/mnt/x/../..").unwrap();
+    let root = v.stat(None, "/mnt/./..").unwrap();
     assert_eq!(root.ino, v.stat(None, "/").unwrap().ino);
     let root2 = v.stat(None, "/mnt/..").unwrap();
     assert_eq!(root2.ino, root.ino);
@@ -709,7 +711,7 @@ fn second_mount_of_device_shares_super() {
         v.stat(None, "/a/f").unwrap().ino
     );
     assert_eq!(
-        v.stat(None, "/b/f/..").unwrap().ino,
+        v.stat(None, "/b/.").unwrap().ino,
         v.stat(None, "/a").unwrap().ino
     );
     let mut again = ram();
@@ -799,7 +801,7 @@ fn two_mounts_one_dentry_per_name() {
     v.umount(None, "/a").unwrap();
     assert_eq!(v.resolve(None, "/b/d/x", true).unwrap().dslot, bx.dslot);
     assert_eq!(
-        v.stat(None, "/b/d/x/../../..").unwrap().ino,
+        v.stat(None, "/b/d/../..").unwrap().ino,
         v.stat(None, "/").unwrap().ino
     );
     assert_dcache_sound(&v);

@@ -436,6 +436,13 @@ pub trait InodeOps: Sync {
     }
     /// Drop the backend state of an unmounted superblock.
     fn kill_sb(&self, _cx: &mut OpCx<'_>) {}
+    /// Whether the dentry cache's name `cached` is the name `asked` a
+    /// lookup gives: byte equality, or the backend's own rule, as FAT's
+    /// case-insensitive one, so a lookup by another spelling finds the
+    /// dentry a mount is on.
+    fn name_eq(&self, cached: &[u8], asked: &[u8]) -> bool {
+        cached == asked
+    }
     /// Whether `ino` can seek: `SPipe` for an object that cannot, as a
     /// console, which `lseek` then refuses.
     fn check_seek(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> Result<(), FsError> {

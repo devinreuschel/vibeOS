@@ -418,10 +418,15 @@ ROADMAP §10.4).
   at a time, crossing mounts, so a process reaches every mounted
   filesystem: `open("/dev/null")` opens devfs's `null`, and `/proc`,
   `/tmp`, `/sys`, and `/vibe` are procfs, tmpfs, sysfs, and vibefs.
-  `.` and `..` resolve in the VFS, never in a backend. Still wrong: FAT
-  matches names without regard to case but the dentry cache does not, so
-  `/VIBE/f` reaches the FAT `vibe` directory under the vibefs mount rather
-  than the mount (F056; ROADMAP §10.4)
+  The walker follows path_resolution(7), with no string pass before it:
+  repeated slashes count as one, `.` is the directory reached so far, and
+  `..` is the physical parent of that directory, after any symlink before
+  it has been followed, stays put at the process's root, and at a mount's
+  root steps to the parent of the mountpoint. A component followed by `/`
+  must be a directory (a symlink there is followed), else the call fails
+  with `ENOTDIR`; only `mkdir` accepts a `/` after a name it creates. FAT
+  names compare without regard to case in the dentry cache too, so
+  `/VIBE/f` is `/vibe/f`, under the vibefs mount (F056; ROADMAP §10.4)
 - `read`, `write`, and `lseek` copy the slot out, drop the table lock for
   the I/O, and write back only the offset. `refs` and `used` change only
   in `addref` and `close`, under the table lock, and the `close` that

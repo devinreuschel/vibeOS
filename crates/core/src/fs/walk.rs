@@ -205,6 +205,7 @@ impl Vfs {
         let (sb, dir) = (c.sb, c.ino.slot);
         self.finish(c, true);
         res?;
+        let ops = self.sb_ops(sb);
         let mut i = 0usize;
         while i < self.dentries.len() {
             let d = self.dentries[i];
@@ -212,7 +213,7 @@ impl Vfs {
                 && d.negative
                 && d.sb == sb
                 && !d.is_root(i as u16)
-                && d.name.eq_bytes(name)
+                && ops.name_eq(d.name.as_bytes(), name)
                 && self.d_islot(d.parent) == Ok(dir)
             {
                 self.dentry_evict(i as u16);
@@ -686,11 +687,10 @@ impl Walker {
             }
             self.comp[..clen].copy_from_slice(&self.rem[i..j]);
             self.clen = clen;
-            let mut k = j;
-            while k < self.rem_len && self.rem[k] == b'/' {
-                k += 1;
-            }
-            let last = k == self.rem_len;
+            // A component followed by `/`, the last one too, names a
+            // directory: a link there is followed even where the last
+            // component's would not be.
+            let dir_only = j < self.rem_len;
             if name_is_dot(self.comp()) {
                 shift_down(&mut self.rem, &mut self.rem_len, j);
                 continue;
@@ -715,13 +715,17 @@ impl Walker {
                 }
             };
             let islot = v.d_islot(child)?;
-            if v.inodes[islot as usize].kind == InodeKind::Lnk && (!last || self.follow_last) {
+            let kind = v.inodes[islot as usize].kind;
+            if kind == InodeKind::Lnk && (dir_only || self.follow_last) {
                 if self.depth >= MAX_SYMLINK {
                     return Err(FsError::Loop);
                 }
                 self.depth += 1;
                 let call = v.call(islot)?;
                 return self.pend(v, Need::Readlink, call, dir, j);
+            }
+            if dir_only && kind != InodeKind::Dir {
+                return Err(FsError::NotDir);
             }
             self.dslot = child;
             v.follow_mount(&mut self.mount, &mut self.dslot);
@@ -886,19 +890,20 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     /// Resolve `path`'s parent to a held directory and name its last
-    /// component, which is neither `.` nor `..`.
+    /// component, which is neither `.` nor `..`, and whether a `/`
+    /// follows it: a name that must be a directory.
     fn walk_parent<'p>(
         &self,
         base: Option<WalkBase>,
         path: &'p [u8],
-    ) -> Result<(PathRef, &'p [u8]), FsError> {
-        let (parent, name) = split_basename(path)?;
+    ) -> Result<(PathRef, &'p [u8], bool), FsError> {
+        let (parent, name, dir_only) = split_basename(path)?;
         if name_is_dot(name) || name_is_dotdot(name) {
             return Err(FsError::Inval);
         }
         let dir = self.walk(base, parent, true)?;
         match self.with(|v| v.kind_of(dir)) {
-            Ok(InodeKind::Dir) => Ok((dir, name)),
+            Ok(InodeKind::Dir) => Ok((dir, name, dir_only)),
             r => {
                 self.put_path(dir);
                 Err(r.err().unwrap_or(FsError::NotDir))
@@ -928,7 +933,12 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         mode: u16,
         target: Option<&[u8]>,
     ) -> Result<(), FsError> {
-        let (dir, name) = self.walk_parent(base, path)?;
+        let (dir, name, dir_only) = self.walk_parent(base, path)?;
+        // A `/` after the new name is for a directory only.
+        if dir_only && kind != InodeKind::Dir {
+            self.put_path(dir);
+            return Err(FsError::NotDir);
+        }
         let r = self.with(|v| v.create_begin(dir, name)).and_then(|mut c| {
             let res = c.run(|o, cx, d| o.create(cx, d, name, kind, mode, target));
             self.step(|v| v.create_commit(dir, name, c, res))
@@ -985,8 +995,12 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     fn remove(&self, base: Option<WalkBase>, path: &[u8], rmdir: bool) -> Result<(), FsError> {
-        let (dir, name) = self.walk_parent(base, path)?;
+        let (dir, name, dir_only) = self.walk_parent(base, path)?;
         let r = self.walk_in(dir, name, false).and_then(|victim| {
+            if dir_only && self.with(|v| v.kind_of(victim)) != Ok(InodeKind::Dir) {
+                self.put_path(victim);
+                return Err(FsError::NotDir);
+            }
             let (mut c, vi) = self.step(|v| v.remove_begin(dir, name, victim, rmdir))?;
             let res = c.run(|o, cx, d| {
                 if rmdir {
@@ -1002,9 +1016,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     pub fn rename(&self, base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
-        let (od, oname) = self.walk_parent(base, old)?;
-        let r = self.walk_parent(base, new).and_then(|(nd, nname)| {
-            let r = self.rename_in((od, oname), (nd, nname));
+        let (od, oname, o_dir) = self.walk_parent(base, old)?;
+        let r = self.walk_parent(base, new).and_then(|(nd, nname, n_dir)| {
+            let r = self.rename_in((od, oname), (nd, nname), o_dir || n_dir);
             self.put_path(nd);
             r
         });
@@ -1012,8 +1026,18 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         r
     }
 
-    fn rename_in(&self, o: (PathRef, &[u8]), n: (PathRef, &[u8])) -> Result<(), FsError> {
+    fn rename_in(
+        &self,
+        o: (PathRef, &[u8]),
+        n: (PathRef, &[u8]),
+        dir_only: bool,
+    ) -> Result<(), FsError> {
         let src = self.walk_in(o.0, o.1, false)?;
+        // A `/` after either name moves a directory only.
+        if dir_only && self.with(|v| v.kind_of(src)) != Ok(InodeKind::Dir) {
+            self.put_path(src);
+            return Err(FsError::NotDir);
+        }
         let tgt = match self.walk_in(n.0, n.1, false) {
             Ok(t) => Some(t),
             Err(FsError::NotFound) => None,
@@ -1032,16 +1056,22 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     pub fn link(&self, base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
         let src = self.walk(base, old, true)?;
         let r = match self.with(|v| v.kind_of(src)) {
-            Ok(InodeKind::Reg) => self.walk_parent(base, new).and_then(|(nd, name)| {
-                let r = self
-                    .with(|v| v.link_begin(src, nd))
-                    .and_then(|(mut d, mut t)| {
-                        let res = d.run2(&mut t, |o, cx, dir, tg| o.link(cx, dir, name, tg));
-                        self.step(|v| v.link_commit(nd, name, (d, t), res))
-                    });
-                self.put_path(nd);
-                r
-            }),
+            Ok(InodeKind::Reg) => self
+                .walk_parent(base, new)
+                .and_then(|(nd, name, dir_only)| {
+                    if dir_only {
+                        self.put_path(nd);
+                        return Err(FsError::NotDir);
+                    }
+                    let r = self
+                        .with(|v| v.link_begin(src, nd))
+                        .and_then(|(mut d, mut t)| {
+                            let res = d.run2(&mut t, |o, cx, dir, tg| o.link(cx, dir, name, tg));
+                            self.step(|v| v.link_commit(nd, name, (d, t), res))
+                        });
+                    self.put_path(nd);
+                    r
+                }),
             Ok(_) => Err(FsError::Perm),
             Err(e) => Err(e),
         };
@@ -1062,10 +1092,17 @@ fn shift_down(rem: &mut [u8; MAX_PATH], rem_len: &mut usize, from: usize) {
     *rem_len = n;
 }
 
+/// A link's target `target` followed by the rest of the path, `rest`,
+/// into `out`. A `/` that ended the path still ends it, so the name the
+/// link leads to must be a directory.
 fn join_path(target: &[u8], rest: &[u8], out: &mut [u8; MAX_PATH]) -> Result<usize, FsError> {
     let mut rest = rest;
+    let slash = !rest.is_empty();
     while rest.first() == Some(&b'/') {
         rest = &rest[1..];
+    }
+    if rest.is_empty() && slash {
+        rest = b"/";
     }
     if target.len() > MAX_PATH {
         return Err(FsError::NameTooLong);
@@ -1089,7 +1126,9 @@ fn join_path(target: &[u8], rest: &[u8], out: &mut [u8; MAX_PATH]) -> Result<usi
     Ok(n)
 }
 
-pub fn split_basename(path: &[u8]) -> Result<(&[u8], &[u8]), FsError> {
+/// `path`'s parent, its last component, and whether a `/` follows that
+/// component (it names a directory).
+pub fn split_basename(path: &[u8]) -> Result<(&[u8], &[u8], bool), FsError> {
     if path.is_empty() {
         return Err(FsError::Inval);
     }
@@ -1100,6 +1139,7 @@ pub fn split_basename(path: &[u8]) -> Result<(&[u8], &[u8]), FsError> {
     if end == 0 {
         return Err(FsError::Inval);
     }
+    let dir_only = end < path.len();
     let p = &path[..end];
     let mut slash: Option<usize> = None;
     let mut i = 0usize;
@@ -1110,8 +1150,8 @@ pub fn split_basename(path: &[u8]) -> Result<(&[u8], &[u8]), FsError> {
         i += 1;
     }
     match slash {
-        None => Ok((b".", p)),
-        Some(0) => Ok((b"/", &p[1..])),
-        Some(s) => Ok((&p[..s], &p[s + 1..])),
+        None => Ok((b".", p, dir_only)),
+        Some(0) => Ok((b"/", &p[1..], dir_only)),
+        Some(s) => Ok((&p[..s], &p[s + 1..], dir_only)),
     }
 }

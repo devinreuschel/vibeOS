@@ -538,7 +538,10 @@ impl Vfs {
         n
     }
 
+    /// The hashed dentry `name` names in `parent`, its names compared
+    /// through the superblock's [`InodeOps::name_eq`].
     pub(super) fn dcache_peek(&self, sb: u8, parent: u16, name: &[u8]) -> Option<u16> {
+        let ops = self.sb_ops(sb);
         let mut i = 0usize;
         while i < self.dentries.len() {
             let d = &self.dentries[i];
@@ -547,13 +550,21 @@ impl Vfs {
                 && d.sb == sb
                 && d.parent == parent
                 && !d.is_root(i as u16)
-                && d.name.eq_bytes(name)
+                && ops.name_eq(d.name.as_bytes(), name)
             {
                 return Some(i as u16);
             }
             i += 1;
         }
         None
+    }
+
+    /// The ops of superblock `sb`: [`NoOps`] when it has none.
+    pub(super) fn sb_ops(&self, sb: u8) -> &'static dyn InodeOps {
+        self.supers
+            .get(sb as usize)
+            .and_then(|s| s.ops)
+            .unwrap_or(&NoOps)
     }
 
     pub(super) fn dcache_find(&mut self, sb: u8, parent: u16, name: &[u8]) -> Option<u16> {

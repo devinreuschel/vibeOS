@@ -268,3 +268,130 @@ fn rename_mountpoint_busy() {
     v.rename(None, "/m", "/o").unwrap();
     assert_dcache_sound(&v);
 }
+
+#[test]
+fn walk_trailing_slash() {
+    let mut v = ram();
+    v.mkdir(None, "/a", 0o755).unwrap();
+    v.mkdir(None, "/a/b", 0o755).unwrap();
+    v.creat(None, "/f", 0o644).unwrap();
+    v.symlink(None, "/l", "a/b").unwrap();
+    v.symlink(None, "/lf", "f").unwrap();
+    let b = v.resolve(None, "/a/b", true).unwrap();
+    // Repeated slashes are one, `.` stays.
+    assert_eq!(v.resolve(None, "//a///b", true).unwrap(), b);
+    assert_eq!(v.resolve(None, "/./a/./b/.", true).unwrap(), b);
+    // A component followed by `/` names a directory, following a link
+    // even where the last component's would not be.
+    assert_eq!(v.resolve(None, "/a/b/", true).unwrap(), b);
+    assert_eq!(v.resolve(None, "/l/", false).unwrap(), b);
+    assert_eq!(v.lstat(None, "/l").unwrap().kind, InodeKind::Lnk);
+    assert_eq!(v.lstat(None, "/l/").unwrap().kind, InodeKind::Dir);
+    assert_eq!(v.stat(None, "/f/").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.stat(None, "/lf/").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.stat(None, "/f/x").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.stat(None, "/f/..").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.stat(None, "/nope/").unwrap_err(), FsError::NotFound);
+    // `..` after a link is the parent of the link's target.
+    v.creat(None, "/a/x", 0o644).unwrap();
+    assert_eq!(
+        v.stat(None, "/l/../x").unwrap().ino,
+        v.stat(None, "/a/x").unwrap().ino
+    );
+    // Only mkdir makes a name followed by `/`.
+    v.mkdir(None, "/n/", 0o755).unwrap();
+    assert_eq!(v.stat(None, "/n").unwrap().kind, InodeKind::Dir);
+    assert_eq!(v.creat(None, "/m/", 0o644).unwrap_err(), FsError::NotDir);
+    assert_eq!(
+        v.open_path(None, "/m/", O_WRONLY | O_CREAT, 0o644)
+            .unwrap_err(),
+        FsError::NotDir
+    );
+    assert_eq!(v.symlink(None, "/s/", "f").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.link(None, "/f", "/h/").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.stat(None, "/m").unwrap_err(), FsError::NotFound);
+    // A file named with `/` after it is not removed or moved.
+    assert_eq!(v.unlink(None, "/f/").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.rename(None, "/f/", "/g").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.rename(None, "/f", "/g/").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.stat(None, "/f").unwrap().kind, InodeKind::Reg);
+    v.rename(None, "/n/", "/o/").unwrap();
+    v.rmdir(None, "/o/").unwrap();
+    assert_dcache_sound(&v);
+}
+
+/// A ramfs whose names compare without regard to ASCII case in the
+/// dentry cache, as FAT's do.
+struct CiFs {
+    ram: &'static RamFs<std::sync::Mutex<RamState>>,
+}
+
+impl FileSystem for CiFs {
+    fn name(&self) -> &'static str {
+        "ci"
+    }
+    fn fstype(&self) -> FsType {
+        FsType::Ram
+    }
+    fn ops(&'static self) -> Option<&'static dyn InodeOps> {
+        Some(self)
+    }
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        self.ram.fill_super(cx)
+    }
+}
+
+impl InodeOps for CiFs {
+    fn name_eq(&self, cached: &[u8], asked: &[u8]) -> bool {
+        cached.eq_ignore_ascii_case(asked)
+    }
+    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
+        self.ram.lookup(cx, dir, name)
+    }
+    fn create(
+        &self,
+        cx: &mut OpCx<'_>,
+        dir: &mut Inode,
+        name: &[u8],
+        kind: InodeKind,
+        mode: u16,
+        target: Option<&[u8]>,
+    ) -> Result<InodeInfo, FsError> {
+        self.ram.create(cx, dir, name, kind, mode, target)
+    }
+    fn getattr(&self, cx: &mut OpCx<'_>, ino: &mut Inode) -> Result<(), FsError> {
+        self.ram.getattr(cx, ino)
+    }
+    fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+        self.ram.evict(cx, ino)
+    }
+}
+
+#[test]
+fn walk_case_fold_finds_mount_dentry() {
+    let mut v = crate::fs::host_vfs();
+    let ci: &'static CiFs = std::boxed::Box::leak(std::boxed::Box::new(CiFs { ram: ramfs() }));
+    v.mount_root_fs(ci).unwrap();
+    v.mkdir(None, "/vibe", 0o755).unwrap();
+    v.mount(None, "/vibe", ramfs()).unwrap();
+    v.creat(None, "/vibe/f", 0o644).unwrap();
+    let vibe = v.resolve(None, "/vibe", true).unwrap();
+    assert_ne!(vibe.mount, 0, "/vibe is the mount's root");
+    // Another spelling finds the dentry the mount is on, and so the mount.
+    assert_eq!(v.resolve(None, "/VIBE", true).unwrap(), vibe);
+    assert_eq!(v.resolve(None, "/ViBe/", true).unwrap(), vibe);
+    assert_eq!(
+        v.stat(None, "/VIBE/f").unwrap().ino,
+        v.stat(None, "/vibe/f").unwrap().ino
+    );
+    // The mounted ramfs compares bytes: `/vibe/F` is another name.
+    assert_eq!(v.stat(None, "/VIBE/F").unwrap_err(), FsError::NotFound);
+    let named = v
+        .dentries
+        .iter()
+        .filter(|d| d.used && d.name.as_bytes().eq_ignore_ascii_case(b"vibe"))
+        .count();
+    assert_eq!(named, 1, "one dentry for the name");
+    v.umount(None, "/VIBE").unwrap();
+    assert_dcache_sound(&v);
+}
