@@ -33,8 +33,8 @@ pub(crate) use routing::{
     test_fat_initrd_dev_no_null, test_vfs_unlink_drops_parent_dentry, test_vfs_user_dev_nodes,
 };
 pub(crate) use shell::{
-    test_shell_fs_commands, test_shell_ls_subdir, test_shell_mount_same_path_64,
-    test_shell_mount_umount, test_shell_rm_r_tree,
+    test_shell_fat32_image, test_shell_fs_commands, test_shell_ls_subdir,
+    test_shell_mount_same_path_64, test_shell_mount_umount, test_shell_rm_r_tree,
 };
 pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
@@ -1463,4 +1463,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("shell_mount_same_path_64", test_shell_mount_same_path_64),
     test("shell_mount_umount", test_shell_mount_umount),
     test("shell_fs_commands", test_shell_fs_commands),
+    test("shell_fat32_image", test_shell_fat32_image),
 ];

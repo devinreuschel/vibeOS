@@ -902,7 +902,7 @@ limitations.
 **Unlocks.** Loading binaries. A userspace that persists. Configuration.
 
 **Exit gate**
-- [ ] mount a FAT32 image and `ls`, `cat`, `mkdir`, `rm`, `cp` behave correctly. Reopened by the kernel review (F058, F126); lands in §10.4, and its proof mounts from a thread started with `spawn`'s 16 KiB stack.
+- [x] mount a FAT32 image and `ls`, `cat`, `mkdir`, `rm`, `cp` behave correctly; the proof mounts from a thread started with `spawn`'s 16 KiB stack (F058, F126)
 - [x] host tests write an image through the `vibeos-core` FAT code and require host `fsck.fat -n` to report it clean, and fail when `fsck.fat` is not installed unless `VIBEOS_ALLOW_MISSING_TOOLS=1` is set, which skips that check and prints it (F143)
 - [x] `/dev`, `/proc`, and `/tmp` populated by their respective filesystems in the `Vfs` mount table, which in-guest tests and the kernel shell's `ls` reach (F056, F086)
 - [ ] vibefs survives injected power loss during a write, verified by a crash-consistency test. Reopened by the kernel review (F014, F080); lands in §10.2 and §10.11.

@@ -818,3 +818,66 @@ fn fs_commands_vibe() -> Step<()> {
     }
     Ok(())
 }
+
+// ---- shell_fat32_image ----
+
+const V_AT: &str = "/kt61v";
+/// The file the test writes on the initrd and copies to the image.
+const V_SRC: &str = "/KT61V.TXT";
+const V_DATA: &[u8] = b"kt61 fat32 image\n";
+
+/// A FAT32 image on `vdap2` through the shell, from a thread on `spawn`'s
+/// 16 KiB stack: `mount`, `mkdir`, `cp` from the initrd, `cat`, `ls`,
+/// `rm`, `mkdir -p`, `touch`, `rm -r` and `umount`. Self-contained: it
+/// formats the partition first.
+pub(crate) fn test_shell_fat32_image() -> Outcome {
+    if !fat_init::live() {
+        return Outcome::Skip("no FAT initrd");
+    }
+    run_on_spawn_stack("kt61img", fat32_image)
+}
+
+fn fat32_image() -> Outcome {
+    let r = fat32_image_steps();
+    let _ = file_init::umount(V_AT.as_bytes());
+    let _ = file_init::rmdir(V_AT.as_bytes());
+    let _ = file_init::unlink(V_SRC.as_bytes());
+    match r {
+        Ok(()) => Outcome::Ok,
+        Err(o) => o,
+    }
+}
+
+fn fat32_image_steps() -> Step<()> {
+    fresh_fat_dev()?;
+    step("write /KT61V.TXT", put_file(V_SRC.as_bytes(), V_DATA))?;
+    let mut out = BufOut::new()?;
+    out.run(
+        "mount fat32 vdap2 /kt61v",
+        sh::mount,
+        &["mount", "fat32", FAT_DEV, V_AT],
+    )?;
+    out.run("mkdir /kt61v/d", sh::mkdir, &["mkdir", "/kt61v/d"])?;
+    out.run("cp to /kt61v/d/h", sh::cp, &["cp", V_SRC, "/kt61v/d/h"])?;
+    cat_is(&mut out, "cat /kt61v/d/h", "/kt61v/d/h", V_DATA)?;
+    out.run("ls /kt61v/d", sh::ls, &["ls", "/kt61v/d"])?;
+    if !out.has_line(b"h") {
+        return Err(Outcome::Fail("ls /kt61v/d does not list h"));
+    }
+    out.run("rm /kt61v/d/h", sh::rm, &["rm", "/kt61v/d/h"])?;
+    if !gone(b"/kt61v/d/h") {
+        return Err(Outcome::Fail("/kt61v/d/h is still there after rm"));
+    }
+    out.run(
+        "mkdir -p /kt61v/t/u",
+        sh::mkdir,
+        &["mkdir", "-p", "/kt61v/t/u"],
+    )?;
+    out.run("touch /kt61v/t/u/x", sh::touch, &["touch", "/kt61v/t/u/x"])?;
+    step("stat /kt61v/t/u/x", file_init::stat_path(b"/kt61v/t/u/x"))?;
+    out.run("rm -r /kt61v/t", sh::rm, &["rm", "-r", "/kt61v/t"])?;
+    if !gone(b"/kt61v/t") {
+        return Err(Outcome::Fail("/kt61v/t is still there after rm -r"));
+    }
+    out.run("umount /kt61v", sh::umount, &["umount", V_AT])
+}
