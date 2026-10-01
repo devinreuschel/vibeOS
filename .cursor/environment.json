@@ -1,5 +1,5 @@
 {
   "name": "vibeOS",
   "user": "ubuntu",
-  "install": "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 xorriso nasm ovmf dosfstools python3-pip && python3 -m pip install --user --break-system-packages ruff==0.16.9 mypy==2.3.1 && rustup component add rust-src llvm-tools && ./setup.sh"
+  "install": "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 xorriso ovmf dosfstools zstd python3-pip && python3 -m pip install --user --break-system-packages ruff==0.16.9 mypy==2.3.1 && rustup component add rust-src llvm-tools && cargo install cargo-deny --locked --version 0.20.2 && cargo install cargo-fuzz --locked --version 0.13.2 && ./setup.sh"
 }
