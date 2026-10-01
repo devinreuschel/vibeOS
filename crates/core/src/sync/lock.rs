@@ -210,11 +210,6 @@ impl Held {
     }
 }
 
-/// Two CPU-local locks: lower `cpu_id` first. DESIGN §7.7.
-pub const fn cpu_lock_order(a: u32, b: u32) -> (u32, u32) {
-    if a <= b { (a, b) } else { (b, a) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,12 +329,5 @@ mod tests {
         assert_eq!(out.leave_lockless(), out);
         assert!(out.check_cell().is_ok());
         assert!(out.acquire(RANK_DEVICE).is_ok());
-    }
-
-    #[test]
-    fn cpu_pair_lower_id_first() {
-        assert_eq!(cpu_lock_order(0, 3), (0, 3));
-        assert_eq!(cpu_lock_order(3, 0), (0, 3));
-        assert_eq!(cpu_lock_order(2, 2), (2, 2));
     }
 }

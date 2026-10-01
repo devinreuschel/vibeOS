@@ -16,7 +16,8 @@ A row is one of:
   matches it, and a plain path also when its text appears in a file;
 - a definition, `<path>: <kind> <name>` (`src/fs/fat_init.rs: fn route`),
   which fails only when that file still defines `<name>` as `<kind>`, so the
-  bare word stays legal elsewhere.
+  bare word stays legal elsewhere; kind `pub` names a public struct field
+  (`crates/core/src/sched/thread.rs: pub next`).
 A file whose basename equals a row fails too.
 
 A deleting commit adds its rows here and names this script in its `Proves:`
@@ -138,6 +139,8 @@ GONE: list[tuple[str, str]] = [
     ("_retry_hang", "the harness retries nothing"),
     ("retryable_ktest_failure", "the harness retries nothing"),
     ("silent_user_syscalls_hang", "the harness retries nothing"),
+    ("overdue_scan", "the blocked-thread sweep finds lost"),
+    ("crates/core/src/sched/mod.rs: fn overdue", "the blocked-thread sweep finds lost"),
     ("check_markers_in_order", "the marker-order unit tests drive"),
     ("is_halting", "every two-way dependency between kernel modules"),
     ("halt_others", "the panic dump owns COM1"),
@@ -251,6 +254,19 @@ GONE: list[tuple[str, str]] = [
     ("tests/harness/run_e2e.py: ISA_DEBUG_EXIT", "on a timeout, or on"),
     ("drain_panic_tail", "on a timeout, or on"),
     ("abandon_ap_idle", "a full thread table is an error, not a panic"),
+    ("relink", "dead scheduler and bring-up state"),
+    ("crates/core/src/sched/thread.rs: pub next", "dead scheduler and bring-up state"),
+    ("crates/core/src/sched/thread.rs: pub prev", "dead scheduler and bring-up state"),
+    ("crates/core/src/smp/per_cpu.rs: pub tsc_per_ms", "dead scheduler and bring-up state"),
+    ("set_tsc_per_ms", "dead scheduler and bring-up state"),
+    ("PARAM_IDT", "dead scheduler and bring-up state"),
+    ("PARAM_IDT_LEN", "dead scheduler and bring-up state"),
+    ("pack_idtr", "dead scheduler and bring-up state"),
+    ("idtr_pack_limit_then_base", "dead scheduler and bring-up state"),
+    ("cpu_lock_order", "dead scheduler and bring-up state"),
+    ("cpu_pair_lower_id_first", "dead scheduler and bring-up state"),
+    ("SYSCALLS", "a syscall count per process: the"),
+    ("src/proc/syscall_init.rs: fn syscall_count", "a syscall count per process: the"),
     ("mkuserelf", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
     ("scripts/mkuserelf.py", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
     ("user/hello.asm", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
@@ -269,7 +285,7 @@ EXEMPT = frozenset({"scripts/check_gone.py", "tests/harness/test_gone.py"})
 GATE_MAP = re.compile(r"^tests/gates/phase-\d+\.toml$")
 GATE_KEY = re.compile(r'^key = (?:"""[\s\S]*?"""|"[^"\n]*")', re.M)
 DEFINITION = re.compile(r"^(\S+): (fn|struct|enum|union|trait|type|const|static|mod|macro"
-                        r"|def|class) ([A-Za-z_][A-Za-z0-9_]*)$")
+                        r"|def|class|pub) ([A-Za-z_][A-Za-z0-9_]*)$")
 GLOB_CHARS = frozenset("*?[")
 
 

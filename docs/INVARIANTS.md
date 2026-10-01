@@ -824,7 +824,10 @@ and a bound.
    preempted or moved to another CPU: a per-CPU access (rule 5), a change to this CPU's registers
    that must match the running thread (FP state, `FS_BASE`), the [§7.9](SMP.md#79-tlb-shootdown)
    shootdown wait, the [§7.6](SMP.md#76-ipis) call-function wait, or the
-   [§7.11](SMP.md#711-cpu-offline-and-online) offline rendezvous; the scheduler's switch path; the
+   [§7.11](SMP.md#711-cpu-offline-and-online) offline rendezvous; the scheduler's switch path;
+   `thread_init::with_sched`'s delivery of the wakes its closure recorded, bounded by the fixed
+   `places` array, so a caller its closure blocked is not switched off before those wakes are
+   placed; the
    return-to-user sequences of [§5.10](INTERRUPTS.md#510-privilege-transitions) rule 4, which begin at rule 11's
    last exit-work check; the panic and halt paths
    (§2.5); and a CPU's bring-up before its first `sti` (the BSP before §3.3's step 13b, an AP

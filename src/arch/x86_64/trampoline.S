@@ -20,7 +20,7 @@
  * it (ROADMAP §10.6).
  *
  * Param block (BSP write_volatile through the physmap, not in this blob):
- *   0xD0 CR3, 0xD8 stack top, 0xE0 entry, 0xE8 IDTR (10 bytes).
+ *   0xD0 CR3, 0xD8 stack top, 0xE0 entry.
  * Do not lidt here: GS is still 0. ap_entry loads GDT, then GS, then IDT.
  */
 

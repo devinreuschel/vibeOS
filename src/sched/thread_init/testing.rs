@@ -7,6 +7,7 @@ use vibeos::thread::{CpuAffinity, GuardedStack, MAX_THREADS, Tcb, ThreadId, Thre
 use vibeos::kalloc::{AllocError, TryVec};
 use vibeos::limits;
 
+pub(crate) use super::sweep::SWEEP_CHUNK;
 use super::{runnable_on, with_sched};
 use crate::cell::BootCell;
 
@@ -138,7 +139,10 @@ pub fn spawn_parked_any(
     )?;
     with_sched(|s| {
         if let Some(t) = s.get_mut(h.id()) {
-            t.state = ThreadState::Blocked { wq: 0 };
+            t.state = ThreadState::Blocked {
+                wq: 0,
+                deadline: vibeos::sched::FAR_DEADLINE,
+            };
         }
     });
     Ok(h)
@@ -217,9 +221,8 @@ pub fn wait_window_held() -> bool {
 
 /// Called by `with_sched` before it takes SCHED: IF off for each section
 /// of [`arm_wait_window`]'s thread until the returned guard drops, after
-/// the section's places are delivered. SCHED's own guard would turn IF
-/// back on as it drops, and a tick between that and the hold would switch
-/// the thread off `Blocked`, so that it reached the hold only once woken.
+/// the section's places are delivered and before `with_sched`'s own guard
+/// drops, so no tick switches the thread off `Blocked` before the hold.
 pub(super) fn window_enter() -> Option<WindowGuard> {
     let armed = WINDOW_TID.load(Ordering::Acquire);
     (armed != u32::MAX && armed == super::current_id().raw()).then(|| WindowGuard {
@@ -307,6 +310,129 @@ pub(super) fn place_stall(id: ThreadId) {
         }
         core::hint::spin_loop();
     }
+}
+
+/// Thread whose next `with_sched` that records a wake
+/// [`preempt_before_places`] preempts, or `u32::MAX`.
+static PREEMPT_TID: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Most [`preempt_before_places`] spins for its IPI, in ms of TSC time.
+const PREEMPT_SPIN_MS: u64 = 1;
+
+/// Arm a one-shot for thread `id`, which calls it on itself: its next
+/// `with_sched` that records a wake sends this CPU a reschedule IPI
+/// between dropping SCHED and placing the wakes, and spins up to 1 ms
+/// for it to land, as a tick at that point would (F034).
+pub fn ktest_preempt_before_places(id: ThreadId) {
+    PREEMPT_TID.store(id.raw(), Ordering::Release);
+}
+
+/// Called by `with_sched` after SCHED drops, before it places the `places`
+/// wakes its section recorded.
+pub(super) fn preempt_before_places(places: usize) {
+    if places == 0 {
+        return;
+    }
+    let me = super::current_id().raw();
+    if PREEMPT_TID
+        .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    // The armed thread is pinned (its test spawns it with a CPU), so the
+    // hint is its CPU.
+    let cpu = super::current_cpu();
+    // `place_ready`'s sender.
+    let sent = <crate::arch::current::Arch as vibeos::arch::IpiSend>::send(
+        cpu,
+        vibeos::arch::Ipi::Reschedule,
+    );
+    if sent.is_err() {
+        return;
+    }
+    // A deliberate IF-off hold under `with_sched`'s guard (C-IRQOFF-GUARD);
+    // the IPI lands once IF comes back on, before the place loop when
+    // `with_sched` holds no guard of its own.
+    let _hold = crate::sched::irqoff::deliberate("preempt-before-places IPI wait");
+    let end = time_init::read_tsc()
+        .saturating_add(PREEMPT_SPIN_MS.saturating_mul(time_init::tsc_per_ms()));
+    while time_init::read_tsc() < end {
+        core::hint::spin_loop();
+    }
+}
+
+/// The last tid the blocked-thread sweep printed, `u32::MAX` for none.
+static LAST_OVERDUE: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Whole sweeps finished since boot.
+static SWEEPS: AtomicU64 = AtomicU64::new(0);
+
+/// Called by the sweep once it has printed `id`'s overdue line.
+pub(super) fn overdue_printed(id: ThreadId) {
+    // Release: pairs with the Acquire load in `ktest_last_overdue`, after
+    // the print.
+    LAST_OVERDUE.store(id.raw(), Ordering::Release);
+}
+
+/// Called by the sweep once it has scanned the whole table and printed
+/// every find.
+pub(super) fn sweep_done() {
+    SWEEPS.fetch_add(1, Ordering::AcqRel);
+}
+
+/// The last thread the blocked-thread sweep reported, set after its line
+/// is printed; `ThreadId::NONE` before any.
+pub fn ktest_last_overdue() -> ThreadId {
+    ThreadId(LAST_OVERDUE.load(Ordering::Acquire))
+}
+
+/// Whole sweeps finished since boot: a count read after a change the
+/// sweep must see has grown once every sweep that began before it is done.
+pub fn ktest_sweeps() -> u64 {
+    SWEEPS.load(Ordering::Acquire)
+}
+
+/// Remove `id`'s timeout entry while it is `Blocked`, as a lost entry
+/// would be, so only the sweep can notice it. False when `id` is not
+/// Blocked or its entry is gone already (its timeout fired).
+pub fn ktest_drop_timeout(id: ThreadId) -> bool {
+    with_sched(|s| {
+        matches!(
+            s.get(id).map(|t| t.state),
+            Some(ThreadState::Blocked { .. })
+        ) && s.timeouts.remove(id)
+    })
+}
+
+/// One run of the blocked-thread sweep's scan, as its thread runs it: a
+/// `SWEEP_CHUNK`-slot chunk per SCHED hold, IF off, over every slot. Hands
+/// `hold` the TSC cycles each hold's scan took; returns the TCBs scanned.
+pub fn time_sweep_scan(mut hold: impl FnMut(u64)) -> usize {
+    let now = vibeos::time::Instant {
+        ns: time_init::now_ns(),
+    };
+    let mut tcbs = 0usize;
+    let mut base = 0usize;
+    while base < MAX_THREADS {
+        let (cycles, n) = with_sched(|s| {
+            let end = base
+                .saturating_add(super::sweep::SWEEP_CHUNK)
+                .min(s.slots.len());
+            let n = s
+                .slots
+                .get(base..end)
+                .map_or(0, |c| c.iter().flatten().count());
+            let mut out = [ThreadId::NONE; vibeos::sched::OVERDUE_REPORT];
+            let t0 = time_init::read_tsc();
+            let found = super::sweep::scan_chunk(s, base, now, ThreadId(0), &mut out);
+            let t1 = time_init::read_tsc();
+            core::hint::black_box(found);
+            (t1.wrapping_sub(t0), n)
+        });
+        hold(cycles);
+        tcbs += n;
+        base = base.saturating_add(super::sweep::SWEEP_CHUNK);
+    }
+    tcbs
 }
 
 #[allow(

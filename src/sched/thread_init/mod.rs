@@ -21,7 +21,7 @@ use vibeos::limits::{self, PID_MAX};
 use vibeos::lock::RANK_SCHED;
 use vibeos::per_cpu::PerCpu;
 use vibeos::proc::pid::{IdIndex, PidAlloc};
-use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
+use vibeos::sched::{TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{
     CpuAffinity, CpuContext, Fxsave, MAX_THREADS, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome,
@@ -39,6 +39,7 @@ use crate::time_init;
 
 mod ap;
 mod boot;
+mod sweep;
 mod table;
 mod user;
 pub use ap::{abandon_unstarted, adopt_ap_idle};
@@ -46,6 +47,7 @@ pub use ap::{abandon_unstarted, adopt_ap_idle};
 pub(crate) use boot::BOOT_STACK_PAGES;
 pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
+pub use sweep::start_sweep;
 pub(crate) use table::table_root;
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
@@ -359,7 +361,10 @@ impl Sched {
         self.timeouts.insert(id, deadline);
         let cookie = wq.cookie();
         if let Some(t) = self.get_mut(id) {
-            t.state = ThreadState::Blocked { wq: cookie };
+            t.state = ThreadState::Blocked {
+                wq: cookie,
+                deadline,
+            };
             t.wait_outcome = WaitOutcome::Woken;
         }
     }
@@ -385,7 +390,7 @@ impl Sched {
 
     fn unlink_wait(&mut self, id: ThreadId) {
         let cookie = match self.get(id).map(|t| t.state) {
-            Some(ThreadState::Blocked { wq }) => wq,
+            Some(ThreadState::Blocked { wq, .. }) => wq,
             _ => 0,
         };
         if cookie != 0 {
@@ -519,9 +524,6 @@ fn schedule_inner(from_irq: bool) {
     let cur = current_id();
     let me = per_cpu_init::current().cpu_id;
 
-    let mut overdue = [ThreadId::NONE; 4];
-    let mut n_overdue = 0usize;
-
     let cur_state = with_sched(|s| {
         // In batches, so the frame stays small on top of a preempted
         // syscall body's stack whatever the thread count.
@@ -546,18 +548,6 @@ fn schedule_inner(from_irq: bool) {
             }
         }
 
-        if !from_irq {
-            let ticks = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
-            if ticks.is_multiple_of(SWEEP_TICKS) {
-                for t in s.timeouts.overdue(now) {
-                    if n_overdue < overdue.len() {
-                        overdue[n_overdue] = t.id;
-                        n_overdue += 1;
-                    }
-                }
-            }
-        }
-
         let st = s.get(cur).map(|t| t.state).unwrap_or(ThreadState::Dead);
         if let Some(t) = s.get_mut(cur) {
             match t.state {
@@ -570,14 +560,6 @@ fn schedule_inner(from_irq: bool) {
         }
         st
     });
-
-    if n_overdue != 0 {
-        let mut i = 0;
-        while i < n_overdue {
-            crate::marker!("vibeOS: sched: overdue tid {}", overdue[i].raw());
-            i += 1;
-        }
-    }
 
     let mut next = per_cpu_init::with_current(|cpu| {
         enqueue_runnable(&mut cpu.runq, cur, idle, cur_state);
@@ -604,7 +586,6 @@ fn schedule_inner(from_irq: bool) {
                 t.state = ThreadState::Running;
                 t.cpu = me;
             }
-            relink(s);
             Some((s.ptr(cur), s.ptr(cand), cur, cand))
         });
         match picked {
@@ -705,37 +686,6 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             &(*new_ptr).context,
         )
     };
-}
-
-fn relink(s: &mut Sched) {
-    per_cpu_init::with_current(|cpu| {
-        // Each id's neighbours, read from the run queue in place.
-        let n = cpu.runq.len();
-        let mut i = 0;
-        while i < n {
-            let prev = if i == 0 {
-                None
-            } else {
-                Some(cpu.runq.at(i - 1))
-            };
-            let next = if i + 1 == n {
-                None
-            } else {
-                Some(cpu.runq.at(i + 1))
-            };
-            if let Some(t) = s.get_mut(cpu.runq.at(i)) {
-                t.prev = prev;
-                t.next = next;
-            }
-            i += 1;
-        }
-        let front = cpu.runq.front();
-        let head = match front {
-            Some(id) => s.ptr(id),
-            None => core::ptr::null_mut(),
-        };
-        cpu.ready_head = head;
-    });
 }
 
 /// The switch tail: runs on this CPU after every `switch_context` returns,
@@ -1174,8 +1124,6 @@ fn spawn_inner(
         stack: None,
         context: CpuContext::empty(),
         entry,
-        next: None,
-        prev: None,
         affinity,
         cpu,
         irq_nest: first_nest,
@@ -1186,7 +1134,7 @@ fn spawn_inner(
         fpu: Fxsave::INITIAL,
         fp_cpu: None,
         user_segs: UserSegs::NULL,
-        syscall_count: 0,
+        syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid,
         no_reclaim: AtomicU32::new(0),
     });
@@ -1260,8 +1208,6 @@ fn fill_tcb(
     tcb.state = ThreadState::Ready;
     tcb.stack = Some(ks);
     tcb.entry = entry;
-    tcb.next = None;
-    tcb.prev = None;
     tcb.affinity = affinity;
     tcb.cpu = cpu;
     tcb.irq_nest = irq_nest;
@@ -1273,7 +1219,8 @@ fn fill_tcb(
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.user_segs = UserSegs::NULL;
-    tcb.syscall_count = 0;
+    // Relaxed: a statistic, reset before the thread first runs.
+    tcb.syscall_count.store(0, Ordering::Relaxed);
     tcb.pid = pid;
     prepare_thread(&mut tcb.context, top, tramp);
     // SAFETY: `prepare_thread` put `context.rsp` 8 bytes below `top`,
@@ -1308,8 +1255,15 @@ pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Run `f` under SCHED, then place the wakes it recorded. IF stays off
+/// from before SCHED is taken until every recorded wake is placed, so a
+/// caller that `f` left `Blocked` is not switched off with those wakes
+/// still in this frame's batch (DESIGN §2.9 rule 1, F034).
 pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
+    // The entering context, which `begin_wait` checks: read before the
+    // guard turns IF off.
     let ctx = sync_init::sleep_ctx();
+    let _irq = InterruptGuard::enter();
     // Dropped last, once the places are delivered.
     #[cfg(feature = "kernel_tests")]
     let _window = testing::window_enter();
@@ -1324,6 +1278,8 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
         let n = s.take_places(&mut batch);
         (r, n)
     };
+    #[cfg(feature = "kernel_tests")]
+    testing::preempt_before_places(n);
     loop {
         for &(cpu, id, slot) in batch.iter().take(n) {
             #[cfg(feature = "kernel_tests")]
@@ -1391,7 +1347,6 @@ pub fn switch_to(id: ThreadId) {
             t.state = ThreadState::Running;
             t.cpu = me;
         }
-        relink(s);
         (s.ptr(old_id), s.ptr(id))
     });
     switch_now(old_ptr, new_ptr);
@@ -1433,6 +1388,22 @@ pub fn set_pid_cr3(id: ThreadId, pid: u32, root: u64) {
     });
 }
 
+/// Add each live thread's syscall count to its process's entry of `sums`,
+/// `(pid, sum)` pairs sorted by pid (`vibeos::proc::sum_syscalls`), in one
+/// pass over the thread table under SCHED. Dead TCBs are skipped.
+pub fn sum_syscalls(sums: &mut [(u32, u64)]) {
+    with_sched(|s| {
+        let threads = s
+            .slots
+            .iter()
+            .flatten()
+            .filter(|t| t.state != ThreadState::Dead)
+            // Relaxed: the count is a statistic and pairs with nothing.
+            .map(|t| (t.pid, t.syscall_count.load(Ordering::Relaxed)));
+        vibeos::proc::sum_syscalls(sums, threads);
+    });
+}
+
 /// The first TCB, Dead ones included, whose saved root is `root`. Reads
 /// only; `addr_space_init::teardown` asks it before it frees a root.
 pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
@@ -1455,7 +1426,10 @@ pub fn current_cpu() -> u32 {
 }
 
 #[cfg(feature = "kernel_tests")]
-pub use testing::{cpu_of, exited, name, state, try_state};
+pub use testing::{
+    cpu_of, exited, ktest_drop_timeout, ktest_last_overdue, ktest_preempt_before_places,
+    ktest_sweeps, name, state, try_state,
+};
 
 pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
     SCHED.lock().ptr(id)

@@ -149,6 +149,10 @@ impl Store {
 }
 
 impl PhysMem for Store {
+    fn page_run(&self, addr: u64, max: u64) -> (bool, u64) {
+        vibeos::log::vmcore::page_run(self.segs.iter().map(|s| (s.paddr, s.memsz)), addr, max)
+    }
+
     fn read(&self, addr: u64, buf: &mut [u8]) -> bool {
         for (i, b) in buf.iter_mut().enumerate() {
             let Some(pa) = addr.checked_add(i as u64) else {
