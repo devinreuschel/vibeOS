@@ -57,7 +57,7 @@ pub type SplitQueue = vibeos::virtio::SplitQueue<Arch>;
 pub type Mapper = vibeos::mm::paging::Mapper<Arch>;
 
 /// A user address space over this build's port's page tables.
-pub type AddressSpace = vibeos::proc::addr_space::AddressSpace<Arch>;
+pub type AddressSpace<C = ()> = vibeos::proc::addr_space::AddressSpace<Arch, C>;
 
 /// Compile-time conformance: the port implements every seam trait.
 const _: () = vibeos::arch::assert_port::<Arch>();

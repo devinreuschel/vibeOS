@@ -248,11 +248,11 @@ fn capacities() -> Result<(), Outcome> {
     if vfs != want {
         return Err(crate::fail_fmt!("vfs {vfs:?}"));
     }
-    let Some(space) = addr_space_init::create() else {
+    let Ok(space) = addr_space_init::create() else {
         return Err(Outcome::Fail("no memory for an address space"));
     };
-    let regions = space.region_capacity();
-    addr_space_init::teardown(space);
+    let regions = space.mm().region_capacity();
+    drop(space);
     if regions != MAX_REGIONS {
         return Err(crate::fail_fmt!("regions {regions}"));
     }
@@ -324,9 +324,8 @@ fn user_tables_full() -> Result<(), Outcome> {
     let map = Image::Code(MAP_FILL, DEFAULT);
     let base = match user_init::load_image(&user::elf_bytes(&map), &[b"map-fill"]) {
         Ok(l) => {
-            let n = l.space.regions().count();
-            addr_space_init::teardown(l.space.into_inner());
-            n
+            // The space's last `users` put tears it down.
+            l.space.mm().regions().count()
         }
         Err(e) => return Err(crate::fail_fmt!("load: {}", e.as_str())),
     };

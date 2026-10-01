@@ -284,6 +284,18 @@ GONE: list[tuple[str, str]] = [
     ("seed_current_fpu", "x86_64 user FP state follows"),
     ("FPU_READY", "x86_64 user FP state follows"),
     ("fp_init_template", "x86_64 user FP state follows"),
+    ("CURRENT_AS", "an address space is a two-count object"),
+    ("clear_user_as", "an address space is a two-count object"),
+    ("current_as", "an address space is a two-count object"),
+    ("current_space", "an address space is a two-count object"),
+    ("p_space_ref", "an address space is a two-count object"),
+    ("peek_user_as", "an address space is a two-count object"),
+    ("set_user_as", "an address space is a two-count object"),
+    ("src/proc/proc_init/mod.rs: fn clear_as", "an address space is a two-count object"),
+    ("src/proc/proc_init/mod.rs: fn set_as", "an address space is a two-count object"),
+    ("src/proc/proc_init/mod.rs: fn space_of", "an address space is a two-count object"),
+    ("src/proc/proc_init/exec.rs: fn with_own_space", "an address space is a two-count object"),
+    ("src/proc/proc_init/mod.rs: fn space_slot", "an address space is a two-count object"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

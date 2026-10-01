@@ -220,7 +220,7 @@ why = "claim: the one stub holds the AC clear, the IST GS decision and the user-
 [[box]]
 key = "syscall bodies run with IF=1"
 needs = [
-  "`addr_space_init::teardown` asserts that no CPU's CR3",
+  "the root's free (`addr_space_init::SpaceCore`'s drop",
   "the open-file table never writes `refs` or `used` back from a snapshot",
   "stop and continue cannot lose a wakeup",
   "the syscall exit path runs",  # L1387

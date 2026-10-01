@@ -76,8 +76,10 @@ pub(super) fn finish_exit(wait_status: u32, fault: Option<u64>) -> ! {
         thread_init::set_pid_cr3(tid, 0, 0);
         crate::arch::gs::force_kernel();
         addr_space_init::load_kernel_cr3();
-        clear_as();
-        addr_space_init::teardown(space.into_inner());
+        // The thread's `users` put, after every lock: the last one tears
+        // the space down, and the core's free asserts the root is loaded
+        // and named nowhere (invariant I128).
+        drop(space);
     }
     crate::arch::gs::force_kernel();
     thread_init::exit_current();
@@ -175,9 +177,6 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
             WaitAct::Err(e) => return Err(e),
             WaitAct::Sleep => {
                 thread_init::schedule();
-                if let Some(s) = current_space() {
-                    set_as(s);
-                }
                 apply_pending(None);
             }
         }

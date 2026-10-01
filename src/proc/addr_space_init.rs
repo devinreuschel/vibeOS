@@ -1,12 +1,22 @@
-//! Kernel AddressSpace: buddy + PT lock. ROADMAP §9.2.
+//! Kernel address space: the counted object (DESIGN §2.11), the buddy and
+//! the PT lock. ROADMAP §9.2, §10.6.
+//!
+//! A space is a two-count object (ROADMAP §10.6, F019): [`Space`] is one
+//! `users` reference, held by the process's thread and by each pin, whose
+//! last put runs [`SpaceCore`]'s teardown (every user leaf and user page
+//! table back to the buddy); [`CoreRef`] is one core reference, held by
+//! each region and each `users` holder, whose last put frees the root,
+//! after asserting that no CPU and no TCB still holds it (invariant I128).
+//! Code reaches a running space only through a scoped guard
+//! (`proc_init::with_current_space`), never a `&'static`.
 
 use core::fmt;
+use core::ops::Deref;
 use core::sync::atomic::Ordering;
 
-use vibeos::addr_space::{
-    AsError, Backing, BrkPlan, FrameFree, MmapReq, Region, TeardownStats, UserPerms,
-};
+use vibeos::addr_space::{AsError, Backing, BrkPlan, FrameFree, MmapReq, Region, UserPerms};
 use vibeos::arch::PageTable;
+use vibeos::kalloc::{CoreArc, Teardown, UsersArc};
 use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pmm::Frames;
 use vibeos::thread::ThreadId;
@@ -15,6 +25,7 @@ use crate::arch::current::{AddressSpace, Arch};
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
+use crate::sync::blocking_init::{BlockingMutex, BlockingMutexGuard};
 use crate::thread_init;
 
 struct BuddyPool;
@@ -37,18 +48,132 @@ unsafe impl FrameFree for BuddyPool {
     }
 }
 
-/// New user address space. Kernel half shared from the boot PML4.
-pub fn create() -> Option<AddressSpace> {
+/// The portable space as the kernel keeps it: each region holds a
+/// [`CoreRef`].
+pub type Mm = AddressSpace<CoreRef>;
+
+/// A space's core: its root table and, under the `mm` lock, the portable
+/// space over it. ROADMAP §12.1 and §12.3 add the page-table lock and the
+/// CPU set here. Its drop frees the root and runs no teardown.
+pub struct SpaceCore {
+    /// The root table's frame; `None` only inside [`Drop::drop`].
+    root: Option<Frames>,
+    /// The regions and the page tables below the root. A sleeping lock:
+    /// it ranks before `PT`, which each chunk of work under it takes.
+    mm: BlockingMutex<Mm>,
+}
+
+/// One `users` reference to a space: the process's thread's, or a pin's.
+pub type Space = UsersArc<SpaceCore>;
+
+/// One core reference to a space: a region's, or a test's memory-only one.
+pub type CoreRef = CoreArc<SpaceCore>;
+
+/// A space no thread runs yet. Only [`create`] makes one and
+/// [`NewSpace::publish`] consumes it, so syscall code, which reaches a
+/// space only as `&Space` through a scoped guard, cannot hand a running
+/// space to the code that fills a new one.
+pub struct NewSpace(Space);
+
+impl NewSpace {
+    /// Hand the filled space to the process that will run it.
+    pub fn publish(self) -> Space {
+        self.0
+    }
+}
+
+impl Deref for NewSpace {
+    type Target = Space;
+    fn deref(&self) -> &Space {
+        &self.0
+    }
+}
+
+impl SpaceCore {
+    /// The root table's physical address.
+    pub fn root(&self) -> PhysAddr {
+        PhysAddr(self.root.as_ref().map_or(0, Frames::base))
+    }
+
+    /// The portable space, under its lock. Sleeps: never under a spinlock.
+    pub fn mm(&self) -> BlockingMutexGuard<'_, Mm> {
+        self.mm.lock()
+    }
+}
+
+impl Teardown for SpaceCore {
+    /// The last `users` put: every user leaf and every page-table page
+    /// below the root back to the buddy, and the regions cleared, which
+    /// drops their core references. The root stays for the core's free.
+    fn teardown(&self) {
+        let mut mm = self.mm.lock();
+        paging_init::with_pt(|_pt| {
+            let mut pool = BuddyPool;
+            // SAFETY: invariant I128: the last `users` reference is gone, so
+            // no thread runs this space and no pin walks it; its process's
+            // CR3 was switched away before that put (`proc_init::finish_exit`,
+            // `proc_init::sys_execve`), so no CPU walks these tables once they
+            // are freed; established by `kalloc::UsersArc`'s drop.
+            unsafe { mm.teardown_pool(&mut pool) };
+        });
+    }
+}
+
+impl Drop for SpaceCore {
+    /// The core's free: assert that no CPU has the root loaded and no TCB
+    /// names it (invariant I128), then free it to the buddy.
+    fn drop(&mut self) {
+        let Some(root) = self.root.take() else {
+            return;
+        };
+        let pa = root.base();
+        if let Some(h) = root_holder(pa) {
+            #[allow(
+                clippy::panic,
+                reason = "invariant I128: a root is freed only after every CPU and TCB has let it go; a holder is a kernel bug"
+            )]
+            {
+                // The root is not freed: a CPU may still walk it.
+                core::mem::forget(root);
+                panic!("addr_space: free of root {pa:#x} still loaded: {h:?}");
+            }
+        }
+        pmm_init::with_buddy(|b| b.free(root));
+    }
+}
+
+/// A new user address space: a root from the buddy, the kernel half
+/// shared from the kernel's, and the counted object around it. `ENOMEM`
+/// (`OutOfFrames`) when a frame or the heap runs out; nothing is left over.
+pub fn create() -> Result<NewSpace, AsError> {
     // The region table before PT, which the heap ranks before; declared
     // first, so a table a failure leaves here drops after `kernel`.
     let mut regions = vibeos::addr_space::region_table().ok();
-    let kernel = paging_init::current_mapper();
-    let mut pool = BuddyPool;
-    // SAFETY: `kernel` is the live kernel mapper and the buddy hands out
-    // owned frames writable through its HHDM offset, as
-    // `addr_space::AddressSpace::new` requires; established by
-    // `paging_init::current_mapper`.
-    unsafe { AddressSpace::new(&kernel, &mut pool, &mut regions) }
+    if regions.is_none() {
+        return Err(AsError::OutOfFrames);
+    }
+    let root = pmm_init::with_buddy(|b| b.alloc(0)).ok_or(AsError::OutOfFrames)?;
+    let pa = PhysAddr(root.base());
+    let mm = {
+        let kernel = paging_init::current_mapper();
+        // SAFETY: `kernel` is the live kernel mapper, and `pa` is the order-0
+        // frame just taken from the buddy, writable through the HHDM, which
+        // the core below owns for the space's life, as
+        // `addr_space::AddressSpace::new` requires; established here.
+        unsafe { AddressSpace::new(&kernel, pa, &mut regions) }
+    };
+    let Some(mm) = mm else {
+        pmm_init::with_buddy(|b| b.free(root));
+        return Err(AsError::OutOfFrames);
+    };
+    let core = SpaceCore {
+        root: Some(root),
+        mm: BlockingMutex::new(mm),
+    };
+    // A failed allocation drops `core`, whose drop frees the root.
+    UsersArc::try_new(core)
+        .map(NewSpace)
+        .map_err(|_| AsError::OutOfFrames)
 }
 
 /// Pages one hold of `PT` maps or unmaps: one leaf table's worth. A chunk
@@ -74,15 +199,29 @@ fn with_pt_chunk<R>(pages: u64, f: impl FnOnce() -> R) -> R {
     })
 }
 
-/// Map `[va, va+len)` with zeroed frames and record it as one region. Takes
-/// `PT` once per chunk ([`CHUNK_PAGES`]) and zeroes each chunk with `PT`
-/// dropped. On failure every page it mapped is unmapped and freed, also
-/// chunk by chunk, and no region is recorded.
+/// Map `[va, va+len)` of `space` with zeroed frames and record it as one
+/// region, under the space's `mm` lock. Takes `PT` once per chunk
+/// ([`CHUNK_PAGES`]) and zeroes each chunk with `PT` dropped. On failure
+/// every page it mapped is unmapped and freed, also chunk by chunk, and no
+/// region is recorded.
 ///
 /// # Safety
 /// Same contract as `AddressSpace::map_anon`.
-pub unsafe fn map_anon(
-    space: &mut AddressSpace,
+pub unsafe fn map_anon(space: &Space, va: u64, len: u64, perms: UserPerms) -> Result<(), AsError> {
+    let core = space.core();
+    let mut mm = space.mm();
+    // SAFETY: this fn's contract, `addr_space_init::map_anon`.
+    unsafe { map_anon_mm(&mut mm, core, va, len, perms) }
+}
+
+/// [`map_anon`] on a space whose `mm` lock the caller holds; the region
+/// holds `core`.
+///
+/// # Safety
+/// Same contract as `AddressSpace::map_anon`.
+unsafe fn map_anon_mm(
+    space: &mut Mm,
+    core: CoreRef,
     va: u64,
     len: u64,
     perms: UserPerms,
@@ -98,6 +237,7 @@ pub unsafe fn map_anon(
         len,
         perms,
         backing: Backing::Anonymous,
+        core,
     };
     if let Err(e) = space.insert_region(region) {
         // SAFETY: `map_chunks` just mapped the whole range from the buddy,
@@ -112,12 +252,7 @@ pub unsafe fn map_anon(
 ///
 /// # Safety
 /// No page of `[va, va+len)` is mapped in `space`.
-unsafe fn map_chunks(
-    space: &mut AddressSpace,
-    va: u64,
-    len: u64,
-    perms: UserPerms,
-) -> Result<(), AsError> {
+unsafe fn map_chunks(space: &mut Mm, va: u64, len: u64, perms: UserPerms) -> Result<(), AsError> {
     let end = va.checked_add(len).ok_or(AsError::Overflow)?;
     let mut cur = va;
     while cur < end {
@@ -156,7 +291,7 @@ unsafe fn map_chunks(
 /// # Safety
 /// Same contract as `AddressSpace::unmap_pages`, whose flush this fn
 /// supplies.
-unsafe fn unmap_chunks(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
+unsafe fn unmap_chunks(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError> {
     let end = va.checked_add(len).ok_or(AsError::Overflow)?;
     let mut flush = local_flush(space);
     let mut cur = va;
@@ -176,7 +311,7 @@ unsafe fn unmap_chunks(space: &mut AddressSpace, va: u64, len: u64) -> Result<()
 
 /// A flush for `space`'s pages: `invlpg` when it is this CPU's CR3,
 /// nothing otherwise.
-fn local_flush(space: &AddressSpace) -> impl FnMut(u64) + use<> {
+fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
     let loaded = Arch::root() == space.root();
     move |va| {
         if loaded {
@@ -194,7 +329,17 @@ fn local_flush(space: &AddressSpace) -> impl FnMut(u64) + use<> {
 /// # Safety
 /// Same contract as `AddressSpace::unmap_free`, whose flush this fn
 /// supplies.
-pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
+pub unsafe fn unmap(space: &Space, va: u64, len: u64) -> Result<(), AsError> {
+    let mut mm = space.mm();
+    // SAFETY: this fn's contract, `addr_space_init::unmap`.
+    unsafe { unmap_mm(&mut mm, va, len) }
+}
+
+/// [`unmap`] on a space whose `mm` lock the caller holds.
+///
+/// # Safety
+/// Same contract as [`unmap`].
+unsafe fn unmap_mm(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError> {
     let end = va.checked_add(len).ok_or(AsError::Overflow)?;
     if len == 0 {
         // SAFETY: an empty range touches no leaf, which
@@ -224,14 +369,17 @@ pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), A
 /// region, or more than the free frames cover. Growth maps zeroed pages in
 /// chunks like [`map_anon`]; shrinking unmaps the whole pages above the new
 /// break.
-pub fn brk(space: &mut AddressSpace, want: u64) -> u64 {
+pub fn brk(space: &Space, want: u64) -> u64 {
+    let core = space.core();
+    let mut mm = space.mm();
+    let space = &mut *mm;
     let moved = match space.brk_plan(want) {
         BrkPlan::Current => return space.brk(),
         BrkPlan::SamePage => Ok(()),
-        BrkPlan::Grow { va, len } => brk_grow(space, va, len, want),
+        BrkPlan::Grow { va, len } => brk_grow(space, core, va, len, want),
         // SAFETY: the heap's leaves were mapped from the buddy by
-        // `brk_grow`, here, and `unmap` supplies the flush.
-        BrkPlan::Shrink { va, len } => unsafe { unmap(space, va, len) },
+        // `brk_grow`, here, and `unmap_mm` supplies the flush.
+        BrkPlan::Shrink { va, len } => unsafe { unmap_mm(space, va, len) },
     };
     // A failed move leaves the break where it was, as brk(2) returns it.
     if moved.is_ok() {
@@ -240,13 +388,13 @@ pub fn brk(space: &mut AddressSpace, want: u64) -> u64 {
     space.brk()
 }
 
-fn brk_grow(space: &mut AddressSpace, va: u64, len: u64, want: u64) -> Result<(), AsError> {
+fn brk_grow(space: &mut Mm, core: CoreRef, va: u64, len: u64, want: u64) -> Result<(), AsError> {
     space.heap_grow_check(va, len)?;
     // SAFETY: `heap_grow_check` found `[va, va+len)` in the user half and
     // clear of every region, so no page in it is mapped (invariant of
     // `vibeos::addr_space::AddressSpace::insert_region`).
     unsafe { map_chunks(space, va, len, UserPerms::RW)? };
-    if let Err(e) = space.heap_grow_commit(va, len, want) {
+    if let Err(e) = space.heap_grow_commit(va, len, want, core) {
         // SAFETY: `map_chunks` just mapped the range from the buddy, here.
         unsafe { unmap_chunks(space, va, len)? };
         return Err(e);
@@ -257,7 +405,10 @@ fn brk_grow(space: &mut AddressSpace, va: u64, len: u64, want: u64) -> Result<()
 /// Anonymous `mmap` of `req` in `space`: places it (`AddressSpace::
 /// mmap_place`), then maps zeroed pages as [`map_anon`] does, or for
 /// `PROT_NONE` records a reservation with no frames. Returns the address.
-pub fn mmap(space: &mut AddressSpace, req: &MmapReq) -> Result<u64, AsError> {
+pub fn mmap(space: &Space, req: &MmapReq) -> Result<u64, AsError> {
+    let core = space.core();
+    let mut mm = space.mm();
+    let space = &mut *mm;
     let va = space.mmap_place(req)?;
     match req.perms {
         None => {
@@ -267,12 +418,13 @@ pub fn mmap(space: &mut AddressSpace, req: &MmapReq) -> Result<u64, AsError> {
                 len: req.len,
                 perms: UserPerms::READ,
                 backing: Backing::Reserved,
+                core,
             })?;
         }
-        // SAFETY: `map_anon` checks the range is in the user half and clear
-        // of every region, and maps from the buddy, which hands out owned
-        // frames (`addr_space_init::BuddyPool`).
-        Some(perms) => unsafe { map_anon(space, va, req.len, perms)? },
+        // SAFETY: `map_anon_mm` checks the range is in the user half and
+        // clear of every region, and maps from the buddy, which hands out
+        // owned frames (`addr_space_init::BuddyPool`).
+        Some(perms) => unsafe { map_anon_mm(space, core, va, req.len, perms)? },
     }
     Ok(va)
 }
@@ -306,7 +458,7 @@ pub(crate) mod testing {
     }
 }
 
-/// What still holds a root that [`teardown`] was asked to free.
+/// What still holds a root that a core's free was asked to free.
 enum RootHolder {
     /// CPU `cpu` has it loaded (CR3; TTBR0 on aarch64), or last recorded
     /// loading it.
@@ -353,28 +505,6 @@ fn root_holder(root: u64) -> Option<RootHolder> {
     thread_init::tcb_naming_root(root).map(RootHolder::Tcb)
 }
 
-/// Free `space`'s page tables and frames. Asserts first that no CPU has
-/// its root loaded and no TCB names it (invariant I128).
-pub fn teardown(mut space: AddressSpace) -> TeardownStats {
-    let root = space.root().as_u64();
-    if let Some(h) = root_holder(root) {
-        #[allow(
-            clippy::panic,
-            reason = "invariant I128: a root is torn down only after every CPU and TCB has let it go; a holder is a kernel bug"
-        )]
-        {
-            panic!("addr_space: teardown of root {root:#x} still loaded: {h:?}");
-        }
-    }
-    paging_init::with_pt(|_pt| {
-        let mut pool = BuddyPool;
-        // SAFETY: invariant I128, established here: `root_holder` found no
-        // CPU with the root loaded and no TCB naming it, so no CPU walks
-        // these tables once they are freed.
-        unsafe { space.teardown_pool(&mut pool) }
-    })
-}
-
 /// Load `want` into CR3 unless this CPU already has it (or it is 0), and
 /// record it in this CPU's `PerCpuRemote.as_cr3`.
 ///
@@ -384,7 +514,8 @@ pub fn teardown(mut space: AddressSpace) -> TeardownStats {
 /// built. That PML4 stays allocated while it is loaded. Unless `want` is
 /// the kernel root, the caller has recorded it in the current thread's
 /// `Tcb.as_cr3` before the call (`execve` does, through
-/// `thread_init::set_pid_cr3`), so [`teardown`] sees it (invariant I128).
+/// `thread_init::set_pid_cr3`), so the core's free sees it (invariant
+/// I128).
 pub unsafe fn load_cr3_u64(want: u64) {
     per_cpu_init::with_current(|cpu| {
         if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
@@ -405,15 +536,27 @@ pub fn load_kernel_cr3() {
     unsafe { load_cr3_u64(paging_init::kernel_cr3()) };
 }
 
-/// Full AS copy for fork. Caller must not be running on `src`'s CR3
-/// teardown path; clone allocates a new PML4.
-pub fn clone_full(src: &AddressSpace) -> Option<AddressSpace> {
-    // As in `create`: the table first, dropped after `kernel` on a failure.
-    let mut regions = vibeos::addr_space::region_table().ok();
-    let kernel = paging_init::current_mapper();
-    let mut pool = BuddyPool;
-    // SAFETY: `kernel` is the live kernel mapper and the buddy hands out
-    // owned frames, as `addr_space::AddressSpace::clone_anon` requires;
-    // established by `paging_init::current_mapper`.
-    unsafe { src.clone_anon(&kernel, &mut pool, &mut regions) }.ok()
+/// Full copy of `src` for fork: a new space with the same regions, break
+/// and bytes in new frames. `None` when a frame or the heap runs out;
+/// nothing is left over. Takes `src`'s `mm` lock and then the new space's:
+/// nothing else reaches an unpublished space, so the pair cannot deadlock.
+pub fn clone_full(src: &Space) -> Option<NewSpace> {
+    let dst = create().ok()?;
+    let core = dst.core();
+    let rc = {
+        let from = src.mm();
+        let mut to = dst.mm();
+        paging_init::with_pt(|_pt| {
+            let mut pool = BuddyPool;
+            // SAFETY: `to` is the new space `create` just built, never
+            // loaded and with nothing mapped, and the buddy hands out owned
+            // frames, as `addr_space::AddressSpace::clone_anon` requires;
+            // established here.
+            unsafe { from.clone_anon(&mut to, &core, &mut pool) }
+        })
+    };
+    drop(core);
+    // A failure drops `dst`, whose last `users` put tears down what it
+    // mapped.
+    rc.ok().map(|()| dst)
 }

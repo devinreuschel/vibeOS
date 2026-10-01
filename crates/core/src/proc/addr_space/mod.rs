@@ -91,12 +91,16 @@ pub enum Backing {
     Reserved,
 }
 
+/// A mapped or reserved range. `core` is the region's reference to its
+/// space's core (DESIGN §2.11, ROADMAP §10.6): `()` on the host, the
+/// kernel's counted core reference in the kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Region {
+pub struct Region<C = ()> {
     pub start: u64,
     pub len: u64,
     pub perms: UserPerms,
     pub backing: Backing,
+    pub core: C,
 }
 
 #[must_use]
@@ -243,18 +247,20 @@ pub struct TeardownStats {
 /// An address space's region slots: a fixed table of `MAX_REGIONS`, never
 /// grown, until ROADMAP §12.4's region tree replaces it (ROADMAP §10.4,
 /// D1).
-pub type RegionTable = TryVec<Option<Region>>;
+pub type RegionTable<C = ()> = TryVec<Option<Region<C>>>;
 
 /// A table for one address space's regions, allocated before the caller
 /// takes the page-table lock that building the space holds: the heap ranks
 /// before it (DESIGN §2.1).
-pub fn region_table() -> Result<RegionTable, AllocError> {
+pub fn region_table<C>() -> Result<RegionTable<C>, AllocError> {
     limits::table(MAX_REGIONS, || None)
 }
 
-pub struct AddressSpace<A: PageTable> {
+/// One user address space: the user half of a root table the caller owns,
+/// and its regions, each holding a `C` (DESIGN §2.11).
+pub struct AddressSpace<A: PageTable, C = ()> {
     mapper: Mapper<A>,
-    regions: RegionTable,
+    regions: RegionTable<C>,
     user_frames: usize,
     pt_frames: usize,
     /// Page after the image's highest `PT_LOAD`: where the heap starts.
@@ -279,36 +285,35 @@ unsafe impl<A: FrameAlloc> FrameAlloc for Counting<'_, A> {
     }
 }
 
-impl<A: PageTable> AddressSpace<A> {
-    /// New PML4, kernel half shared from `kernel`, with the table in
-    /// `regions`, one from [`region_table`], as its region slots: taken only
-    /// on success, so a failure leaves it for the caller to drop after the
-    /// page-table lock it holds (the heap ranks before it). `alloc` supplies the
-    /// PML4 frame, whose token the mapper holds until [`teardown`] frees
-    /// it last. `pt_frames` starts at 1 (the root).
+impl<A: PageTable, C> AddressSpace<A, C> {
+    /// A space over the root table `root`, which this fn zeroes and gives
+    /// the kernel half of `kernel`, with the table in `regions`, one from
+    /// [`region_table`], as its region slots: taken only on success, so a
+    /// failure leaves it for the caller to drop after the page-table lock
+    /// it holds (the heap ranks before it). The caller keeps owning `root`
+    /// and frees it after [`teardown`] (in the kernel, the space's core
+    /// does, ROADMAP §10.6). `pt_frames` starts at 1 (the root).
     ///
     /// [`teardown`]: AddressSpace::teardown
     ///
     /// # Safety
-    /// `kernel` is the live kernel mapper. `alloc` returns owned frames
-    /// reachable through `kernel.hhdm_offset()`.
-    pub unsafe fn new<F: FrameAlloc>(
+    /// `kernel` is the live kernel mapper. `root` is an order-0 frame the
+    /// caller owns, writable through `kernel.hhdm_offset()`, which nothing
+    /// else uses while this space lives.
+    pub unsafe fn new(
         kernel: &Mapper<A>,
-        alloc: &mut F,
-        regions: &mut Option<RegionTable>,
+        root: PhysAddr,
+        regions: &mut Option<RegionTable<C>>,
     ) -> Option<Self> {
-        regions.as_ref()?;
-        let root = PhysAddr(alloc.alloc_frame()?.into_entry());
         let regions = regions.take()?;
-        // SAFETY: `root` is an owned frame from `alloc`, writable through
-        // `kernel`'s HHDM offset (this fn's contract), and this space owns it
-        // until `teardown`; the mapper walks nothing before the zeroing
-        // below, so the root is zeroed before first use, as
-        // `paging::Mapper::new` requires.
+        // SAFETY: `root` is a frame the caller owns for this space's life,
+        // writable through `kernel`'s HHDM offset (this fn's contract); the
+        // mapper walks nothing before the zeroing below, so the root is
+        // zeroed before first use, as `paging::Mapper::new` requires.
         let mapper = unsafe { Mapper::new(root, kernel.hhdm_offset()) };
-        // SAFETY: `root` is the owned frame just taken from `alloc`,
-        // reachable through the HHDM offset (this fn's contract), as
-        // `paging::Mapper::zero_frame` requires; established here.
+        // SAFETY: `root` is the caller's frame, reachable through the HHDM
+        // offset (this fn's contract), as `paging::Mapper::zero_frame`
+        // requires; established by the caller.
         unsafe { mapper.zero_frame(root) };
         let mut space = Self {
             mapper,
@@ -343,8 +348,8 @@ impl<A: PageTable> AddressSpace<A> {
         self.regions.len()
     }
 
-    pub fn regions(&self) -> impl Iterator<Item = Region> + '_ {
-        self.regions.iter().filter_map(|r| *r)
+    pub fn regions(&self) -> impl Iterator<Item = &Region<C>> + '_ {
+        self.regions.iter().flatten()
     }
 
     /// # Safety
@@ -354,6 +359,7 @@ impl<A: PageTable> AddressSpace<A> {
         va: u64,
         len: u64,
         perms: UserPerms,
+        core: C,
         alloc: &mut F,
     ) -> Result<(), AsError> {
         self.check_new_region(va, len)?;
@@ -368,6 +374,7 @@ impl<A: PageTable> AddressSpace<A> {
             len,
             perms,
             backing: Backing::Anonymous,
+            core,
         };
         if let Err(e) = self.insert_region(region) {
             // SAFETY: `map_pages` just mapped every page of the range with
@@ -394,7 +401,7 @@ impl<A: PageTable> AddressSpace<A> {
 
     /// Record `r` in a free slot. Every mapped user leaf lies in a region
     /// once its mapping call returns.
-    pub fn insert_region(&mut self, r: Region) -> Result<(), AsError> {
+    pub fn insert_region(&mut self, r: Region<C>) -> Result<(), AsError> {
         let slot = self
             .regions
             .iter_mut()
@@ -593,9 +600,15 @@ impl<A: PageTable> AddressSpace<A> {
     }
 
     /// After `[va, va+len)` is mapped: extend the heap region that ends at
-    /// `va` over it (or record the range as a new region) and set the break
-    /// to `want`.
-    pub fn heap_grow_commit(&mut self, va: u64, len: u64, want: u64) -> Result<(), AsError> {
+    /// `va` over it (or record the range as a new region holding `core`)
+    /// and set the break to `want`.
+    pub fn heap_grow_commit(
+        &mut self,
+        va: u64,
+        len: u64,
+        want: u64,
+        core: C,
+    ) -> Result<(), AsError> {
         match self.heap_slot(va) {
             Some(i) => {
                 if let Some(r) = self.regions[i].as_mut() {
@@ -607,6 +620,7 @@ impl<A: PageTable> AddressSpace<A> {
                 len,
                 perms: UserPerms::RW,
                 backing: Backing::Anonymous,
+                core,
             })?,
         }
         self.brk = want;
@@ -618,7 +632,7 @@ impl<A: PageTable> AddressSpace<A> {
     /// `None` when the heap is empty, or a `munmap` removed its top page.
     fn heap_slot(&self, top: u64) -> Option<usize> {
         self.regions.iter().position(|r| {
-            r.is_some_and(|r| {
+            r.as_ref().is_some_and(|r| {
                 r.start >= self.brk_start
                     && r.start.saturating_add(r.len) == top
                     && r.backing == Backing::Anonymous
@@ -675,13 +689,15 @@ impl<A: PageTable> AddressSpace<A> {
         }
     }
 
-    /// Free every user leaf + user PT page + the PML4, the root last.
-    /// Kernel-half PDPTs are not touched. `free` must return frames to
-    /// `alloc`.
+    /// Free every user leaf and every user page-table page below the root,
+    /// and clear the regions, dropping each one's `C`. The root itself and
+    /// the kernel-half tables are not touched: the root's owner frees it
+    /// (ROADMAP §10.6). `free` must return frames to their allocator. The
+    /// stats count what was freed, so `pt_frames` leaves the root out.
     ///
     /// # Safety
-    /// The root is not loaded in any CR3, and nothing uses this space
-    /// again after it returns.
+    /// No CPU walks this space's user half again: the root is not loaded in
+    /// any CR3, and nothing maps through this space after it returns.
     pub unsafe fn teardown<F>(&mut self, free: &mut F) -> TeardownStats
     where
         F: FnMut(Frames),
@@ -691,19 +707,13 @@ impl<A: PageTable> AddressSpace<A> {
         // `paging::Mapper::free_user_half` requires; established by
         // `addr_space::AddressSpace::map_pages`.
         let walked = unsafe { self.mapper.free_user_half(free) };
-        // SAFETY: `AddressSpace::new` consumed the root's order-0 token
-        // into this mapper, and this space is not used again (this fn's
-        // `# Safety`), so the mapper's reference is the entry being
-        // cleared (the contract `pmm::Frames::from_entry` states).
-        free(unsafe { Frames::from_entry(self.mapper.root().as_u64(), 0) });
         let stats = TeardownStats {
             user_frames: walked.leaves,
-            pt_frames: walked.tables + 1,
+            pt_frames: walked.tables,
         };
         self.regions.iter_mut().for_each(|r| *r = None);
         self.user_frames = 0;
-        self.pt_frames = 0;
-        let _ = walked;
+        self.pt_frames = 1;
         stats
     }
 
@@ -920,7 +930,7 @@ pub unsafe trait FrameFree {
     fn free_frame(&mut self, f: Frames);
 }
 
-impl<A: PageTable> AddressSpace<A> {
+impl<A: PageTable, C: Clone> AddressSpace<A, C> {
     /// `munmap` of `[va, va+len)`: every region in the range is trimmed,
     /// split or removed, and each of its leaves is cleared, flushed with
     /// `flush(va)` after its PTE is cleared, and freed to `pool`. Holes and
@@ -960,35 +970,62 @@ impl<A: PageTable> AddressSpace<A> {
             return Err(AsError::NoRegionSlot);
         }
         let mut i = 0;
-        while i < MAX_REGIONS {
-            let Some(r) = self.regions[i] else {
+        while i < self.regions.len() {
+            let Some((start, r_len, perms, backing)) = self.regions[i]
+                .as_ref()
+                .map(|r| (r.start, r.len, r.perms, r.backing))
+            else {
                 i += 1;
                 continue;
             };
-            let r_end = r.start.saturating_add(r.len);
-            if r_end <= va || end <= r.start {
+            let r_end = start.saturating_add(r_len);
+            if r_end <= va || end <= start {
                 i += 1;
                 continue;
             }
-            let lo = r.start.max(va);
+            let lo = start.max(va);
             let hi = r_end.min(end);
-            if r.backing != Backing::Reserved {
+            if backing != Backing::Reserved {
                 // SAFETY: `[lo, hi)` lies in this region, whose leaves hold
                 // order-0 tokens from `pool`, and `flush` covers every TLB
                 // (this fn's contract, `addr_space::AddressSpace::unmap_free`).
                 unsafe { self.unmap_pages(lo, hi - lo, pool, flush)? };
             }
-            let below = (r.start < va).then(|| Region {
-                len: va - r.start,
-                ..r
-            });
-            let above = (end < r_end).then(|| Region {
-                start: end,
-                len: r_end - end,
-                ..r
-            });
-            self.regions[i] = below.or(above);
-            if let (Some(_), Some(up)) = (below, above) {
+            // The region leaves its slot whole; a part that stays keeps its
+            // core reference, and a split's upper part takes a clone.
+            let Some(old) = self.regions[i].take() else {
+                i += 1;
+                continue;
+            };
+            let below = (start < va).then(|| va - start);
+            let above = (end < r_end).then(|| r_end - end);
+            let (keep, up) = match (below, above) {
+                (Some(lo), Some(hi)) => {
+                    let core = old.core.clone();
+                    (
+                        Some(Region { len: lo, ..old }),
+                        Some(Region {
+                            start: end,
+                            len: hi,
+                            perms,
+                            backing,
+                            core,
+                        }),
+                    )
+                }
+                (Some(lo), None) => (Some(Region { len: lo, ..old }), None),
+                (None, Some(hi)) => (
+                    Some(Region {
+                        start: end,
+                        len: hi,
+                        ..old
+                    }),
+                    None,
+                ),
+                (None, None) => (None, None),
+            };
+            self.regions[i] = keep;
+            if let Some(up) = up {
                 // The first pass found a free slot for this split.
                 self.insert_region(up)?;
             }
@@ -1008,65 +1045,53 @@ impl<A: PageTable> AddressSpace<A> {
         unsafe { self.teardown(&mut free) }
     }
 
-    /// Full copy of user regions (Phase 9 fork). New frames, same bytes.
-    /// `regions` is the new space's table, as for [`AddressSpace::new`],
-    /// and back in `regions` on a failure.
+    /// Full copy of user regions into `dst`, a new space (Phase 9 fork):
+    /// new frames, same bytes, each region holding a clone of `core`, and
+    /// the break. On a failure `dst` keeps what was mapped so far, for its
+    /// owner to tear down.
     ///
     /// # Safety
-    /// `kernel` is the live kernel mapper. `alloc` supplies owned frames.
-    pub unsafe fn clone_anon<F: FrameAlloc + FrameFree>(
+    /// `dst` is new: nothing is mapped in it and no CPU has it loaded.
+    /// `alloc` supplies owned frames.
+    pub unsafe fn clone_anon<D: Clone, F: FrameAlloc + FrameFree>(
         &self,
-        kernel: &Mapper<A>,
+        dst: &mut AddressSpace<A, D>,
+        core: &D,
         alloc: &mut F,
-        regions: &mut Option<RegionTable>,
-    ) -> Result<AddressSpace<A>, AsError> {
-        // SAFETY: `kernel` is the live kernel mapper and `alloc` hands out
-        // owned frames (this fn's contract,
-        // `addr_space::AddressSpace::clone_anon`), as `new` requires.
-        let mut dst =
-            unsafe { AddressSpace::new(kernel, alloc, regions) }.ok_or(AsError::OutOfFrames)?;
+    ) -> Result<(), AsError> {
         dst.brk_start = self.brk_start;
         dst.brk = self.brk;
-        let rc = (|| {
-            let mut buf = [0u8; 256];
-            for r in self.regions() {
-                if r.len == 0 {
-                    continue;
-                }
-                if r.backing == Backing::Reserved {
-                    dst.check_new_region(r.start, r.len)?;
-                    dst.insert_region(r)?;
-                    continue;
-                }
-                // SAFETY: `dst` is new, so `[r.start, r.start+r.len)` is
-                // unmapped in it, and `alloc` hands out owned frames (this
-                // fn's contract, `addr_space::AddressSpace::clone_anon`).
-                unsafe { dst.map_anon(r.start, r.len, r.perms, alloc)? };
-                let mut off = 0u64;
-                while off < r.len {
-                    let n = (r.len - off).min(buf.len() as u64) as usize;
-                    self.read_bytes(r.start + off, &mut buf[..n])
-                        .map_err(|_| AsError::NotMapped)?;
-                    dst.write_bytes(r.start + off, &buf[..n])
-                        .map_err(|_| AsError::NotMapped)?;
-                    off += n as u64;
-                }
+        let mut buf = [0u8; 256];
+        for r in self.regions() {
+            if r.len == 0 {
+                continue;
             }
-            Ok(())
-        })();
-        match rc {
-            Ok(()) => Ok(dst),
-            Err(e) => {
-                // SAFETY: `dst` was never loaded in a CR3 and is dropped
-                // here, and every frame it holds came from `alloc`, which may
-                // take it back (`addr_space::FrameFree`).
-                let _ = unsafe { dst.teardown_pool(alloc) };
-                // The table goes back to the caller, which frees it after
-                // its page-table lock ([`AddressSpace::new`]).
-                *regions = Some(core::mem::take(&mut dst.regions));
-                Err(e)
+            if r.backing == Backing::Reserved {
+                dst.check_new_region(r.start, r.len)?;
+                dst.insert_region(Region {
+                    start: r.start,
+                    len: r.len,
+                    perms: r.perms,
+                    backing: r.backing,
+                    core: core.clone(),
+                })?;
+                continue;
+            }
+            // SAFETY: `dst` is new, so `[r.start, r.start+r.len)` is
+            // unmapped in it, and `alloc` hands out owned frames (this
+            // fn's contract, `addr_space::AddressSpace::clone_anon`).
+            unsafe { dst.map_anon(r.start, r.len, r.perms, core.clone(), alloc)? };
+            let mut off = 0u64;
+            while off < r.len {
+                let n = (r.len - off).min(buf.len() as u64) as usize;
+                self.read_bytes(r.start + off, &mut buf[..n])
+                    .map_err(|_| AsError::NotMapped)?;
+                dst.write_bytes(r.start + off, &buf[..n])
+                    .map_err(|_| AsError::NotMapped)?;
+                off += n as u64;
             }
         }
+        Ok(())
     }
 }
 

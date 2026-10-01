@@ -623,15 +623,12 @@ pub(crate) fn test_ac_clear_on_exception() -> Outcome {
         return Outcome::Skip("no SMAP");
     }
     let before = settled_frames();
-    let Some(mut space) = addr_space_init::create() else {
+    let Ok(space) = addr_space_init::create() else {
         return Outcome::Fail("create");
     };
     // SAFETY: invariant: `space` is a fresh address space that no CPU has
     // loaded, and the range is page-aligned user space; established here.
-    if unsafe { addr_space_init::map_anon(&mut space, USER_VA, PAGE_SIZE_4K, UserPerms::RW) }
-        .is_err()
-    {
-        addr_space_init::teardown(space);
+    if unsafe { addr_space_init::map_anon(&space, USER_VA, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
         return Outcome::Fail("map_anon");
     }
     BP_PROBE.reset();
@@ -650,7 +647,8 @@ pub(crate) fn test_ac_clear_on_exception() -> Outcome {
         addr_space_init::load_kernel_cr3();
         ac
     };
-    addr_space_init::teardown(space);
+    // The last `users` put, with the kernel CR3 back.
+    drop(space);
     if let Some(fail) = BP_PROBE.verdict() {
         return fail;
     }

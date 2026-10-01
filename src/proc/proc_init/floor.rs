@@ -136,9 +136,6 @@ pub(super) fn sys_nanosleep(rqtp: u64, _rmtp: u64) -> SysResult {
             Some(Nap::Signal) => apply_pending(None),
             Some(Nap::Wait) => {
                 thread_init::schedule();
-                if let Some(s) = current_space() {
-                    set_as(s);
-                }
                 apply_pending(None);
             }
             None => return Err(KError::Srch),

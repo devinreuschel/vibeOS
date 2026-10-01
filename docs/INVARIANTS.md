@@ -716,7 +716,7 @@ that review cites means the review's text.
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/x86_64/idt.rs` | enforced by construction: `idt::init` points every gate at a stub it generates, and `scripts/check_entry.py` fails on an `x86-interrupt` handler outside `src/arch/` | Yes |
 | I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: the I4 windows halt (ROADMAP §10.6) |
 | I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `vibeos::proc::uaccess` and `arch::x86_64::uaccess` | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: the physmap helpers remain for the loader and `clone_anon` until the fill-API box (ROADMAP §10.6, F023) |
-| I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
+| I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | `addr_space_init`'s counted object (`Space`, `SpaceCore`) and its `mm` lock; process model | the `mm` lock serializes region and table changes; one thread per space is assumed | Yes: only the owning thread changes a space, and a pin reaches it only under `mm`; no `&'static AddressSpace` exists (ROADMAP §10.6). Lock-free user copies and local-only `invlpg` depend on one thread per space. §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's address-space lock replaces `mm` |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed; slot reuse enforced by the in-guest `lifetime_dead_slot_on_cpu` | Yes: `spawn_inner` reuses a Dead slot only after an Acquire load finds its `Tcb.on_cpu` clear, which its CPU's `thread_init::finish_switch` clears with Release once `switch_context` has returned, and `thread_exit` stores `Dead` under SCHED (ROADMAP §10.10, F012) |
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `thread_init::finish_switch` | enforced by the in-guest `lifetime_stack_reclaim` | Yes: `thread_exit` parks the stack in its CPU's `PerCpu.dead_stack`, and only that CPU's switch tail, after `switch_context` has returned, moves it into the CPU's stack cache or onto its dead list, which that CPU's worker frees (ROADMAP §10.10, F012) |
 | I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter::finish` | enforced by the in-guest `lifetime_iowaiter_publish_last` | Yes: `finish` runs `wake_all` under SCHED, then stores `done` with Release as its last access (ROADMAP §10.10, F002); ROADMAP §10.8's loom model `loom_io_done_publish_last` checks that the store orders the completer's accesses before the waiter's return |
@@ -752,7 +752,7 @@ that review cites means the review's text.
 | I41 | No sleeping lock of levels 2 to 4 is held across a copy to or from user memory, and code that holds the address-space lock takes no level-1 lock (§2.1) | none yet | documented | Yes, vacuously: the address-space lock, page waits, and the filesystems' block-mapping locks arrive with ROADMAP §12.5 and §13.1, and ROADMAP §13.12's lock-dependency build reports a violation the first time one happens |
 | I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](MEMORY.md#44-kernel-heap)) | `vibeos::kalloc` on every path after `irq: enabled`; clippy's `disallowed-types` and `disallowed-macros` in `vibeos-core` and the kernel binary | enforced by clippy (ROADMAP §10.4) and the in-guest `kalloc_nomem` and `dev_probe_alloc_fail` tests | Partly: every allocation after `irq: enabled` is fallible (ROADMAP §10.4, F010); a full thread table still panics until ROADMAP §10.4's box that makes it an error |
 | I120 | Another CPU reads a CPU's per-CPU state only through its `PerCpuRemote`, whose fields are atomics, and takes `&mut` to another CPU's `PerCpu` only through `with_cpu` while that CPU is not running (§7.5) | `per_cpu_init::cpu`, `per_cpu_init::with_cpu` | enforced (the view type, its const assertion, and `check_cells.py`'s type and must-be-unsafe lists) | Yes, except an AP that accepted a SIPI and stalled past the ready timeout (ROADMAP §11.4, F032) |
-| I128 | A page-table root is freed only when no CPU has it loaded (CR3; TTBR0 on aarch64) and no TCB's `as_cr3` names it; a path that drops or replaces a thread's space records the replacement (or 0) in `as_cr3` and loads it before `teardown` | `addr_space_init::teardown` (assertion); `proc_init::finish_exit`, `proc_init::sys_execve` | enforced at runtime, every build | Yes |
+| I128 | A page-table root is freed only when no CPU has it loaded (CR3; TTBR0 on aarch64) and no TCB's `as_cr3` names it; a path that drops or replaces a thread's space records the replacement (or 0) in `as_cr3` and loads it before its `users` put | `addr_space_init::SpaceCore`'s drop, the root's free (assertion); `proc_init::finish_exit`, `proc_init::sys_execve` | enforced at runtime, every build | Yes |
 | I224 | A frame on a buddy free list is written only by the buddy, which reaches its node at `phys + hhdm_offset`; no other code holds a pointer into a free frame ([§4.2](MEMORY.md#42-physical-memory-buddy-allocator), [§9.2](PITFALLS.md#92-memory)) | `mm::pmm::Buddy::insert_region`, `mm::pmm::Buddy::free` | documented | Yes, unchecked: a stray write into a freed page corrupts the lists (§9.2) |
 | I225 | A block on the heap's free list is written only by `Heap`, and `[base, base + mapped)` is mapped writable before `Heap::init` or `Heap::extend` takes it ([§4.4](MEMORY.md#44-kernel-heap)) | `mm::heap::Heap::init`, `mm::heap::Heap::extend`, `mm::heap_init::grow_for` | documented | Yes |
 | I226 | The kernel root's page tables are written only while the PT lock is held, boot's `install` excepted ([§4.3](MEMORY.md#43-page-tables)) | `mm::paging_init::current_mapper` | enforced by `MapperGuard` | Yes; user roots follow invariant I8 |
@@ -1023,7 +1023,8 @@ covers the last store of a hand-off; these rules cover the rest.
    put runs a teardown before the memory goes, rule 3's operation gate, or a per-CPU count, is
    written once as a shared type, beside `TryArc` in `kalloc` or beside `BlockingMutex` in `sync`,
    with host tests and a loom model (ROADMAP §10.8), and then reused; no subsystem writes its own
-   (AGENTS.md rule 10). `&'static` refers only to what lives for the whole run: a static item, a
+   (AGENTS.md rule 10). The get-unless-zero count is `kalloc::UsersArc`, with `kalloc::CoreArc` for
+   the core references beneath it. `&'static` refers only to what lives for the whole run: a static item, a
    string literal, the contents of a `BootCell`, or memory allocated at boot and never freed. It
    never refers to heap memory a table owns, and it is never built from a raw pointer
    (AGENTS.md rule 6).
@@ -1079,7 +1080,9 @@ covers the last store of a hand-off; these rules cover the rest.
    form, for code that knows its put may be the last. A count whose release only returns memory to
    an allocator (a frame's, ROADMAP §12.1) follows that allocator's lock rank instead (§2.1). Any
    other count type says which rule it follows, and in debug builds its last put asserts that it may
-   release where it is. Linux defers the same way (`fput` through `delayed_fput`, and
+   release where it is. `kalloc::UsersArc`'s last put runs its teardown in place, never deferred,
+   and in debug builds asserts `TryArc`'s release-context test first; the core beneath it is a
+   `TryArc` and follows `TryArc`'s rule. Linux defers the same way (`fput` through `delayed_fput`, and
    `mmput_async`).
 
 An address space has two counts, as Linux's `mm_users` and `mm_count`. `users` counts the threads
@@ -1101,9 +1104,14 @@ borrows each region's core and takes that core's page-table lock, and a region i
 its core and its page tables. A walker that took `users` could drop the last one and run the
 teardown inside direct reclaim ([§4.4](MEMORY.md#44-kernel-heap) rule 2). Code running inside direct reclaim
 or the OOM killer releases nothing: a put there that may be the last hands the release to a
-workqueue worker. Rule; not yet enforced: an address space has one owner, its process-table slot,
-and is reached through `&'static` references (ROADMAP §10.6, F019), and one global `PT` lock serves
-every space until ROADMAP §12.1.
+workqueue worker. As built (ROADMAP §10.6, F019): `addr_space_init::Space` is a `kalloc::UsersArc`
+over `SpaceCore`, which holds the root frame and, under a sleeping `mm` lock, the regions and the
+page tables below the root; the process's thread holds one `users` reference in its process-table
+slot, and a pin is `CoreRef::pin`. Each region holds a `CoreRef`. The last `users` put frees every
+user leaf and table page under `PT` and clears the regions, and the core's free asserts that no CPU
+has the root loaded and no TCB names it (I128) before it frees the root. Code reaches a running
+space only through a scoped guard (`proc_init::with_current_space`), and no `&'static` refers to
+one. Until ROADMAP §12.1 one global `PT` lock serves every space, and the space holds no CPU set.
 
 Why: the kernel review's CRITICAL and HIGH lifetime findings (F002, F012, F019) each came from an
 object that one subsystem freed or reused while another could still reach it, under a scheme that
@@ -1120,8 +1128,7 @@ lockless readers only, and it adds a grace period to their objects' counts rathe
 them; everything else uses counts alone.
 
 Today the code breaks rules 1, 2, and 5: TCBs are never freed and their slots are rewritten in
-place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
-from table-owned boxes (ROADMAP §10.6, F019), and block completions point into stack frames
+place (I9; ROADMAP §10.10, F012), and block completions point into stack frames
 (ROADMAP §12.5, F042). `kalloc::TryArc` implements rule 6's deferred release, and `sync::OpGate`
 rule 3's operation gate (ROADMAP §10.4).
 
