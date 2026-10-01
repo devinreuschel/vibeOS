@@ -23,18 +23,19 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use vibeos::fat::{self, FatError, FatInode, FatVol, INITRD_FREE_BYTES, MemDisk, SEC};
+use vibeos::fat::{
+    self, FAT_EPOCH_UNIX, FAT_LAST_UNIX, FatError, FatInode, FatVol, INITRD_FREE_BYTES, MemDisk,
+    SEC,
+};
 
 /// The added files' time when `SOURCE_DATE_EPOCH` is unset, in
-/// `FatVol::now`'s unit (seconds since 1980-01-01 UTC).
-const NOW: u32 = 1_262_304_000;
+/// `FatVol::now`'s unit (unix seconds): 2010-01-01 00:00:00 UTC.
+const NOW: u64 = 1_262_304_000;
 
-/// Unix time of 1980-01-01 00:00 UTC, where `FatVol::now` counts from.
-const FAT_EPOCH_UNIX: u64 = 315_532_800;
-
-/// `SOURCE_DATE_EPOCH` (Unix seconds, decimal) in `FatVol::now`'s unit;
-/// `NOW` when unset.
-fn epoch(raw: Option<&str>) -> Result<u32, String> {
+/// `SOURCE_DATE_EPOCH` (unix seconds, decimal) as `FatVol::now`; `NOW`
+/// when unset. A time FAT cannot record, before 1980 or after 2107, is an
+/// error rather than a clamped stamp.
+fn epoch(raw: Option<&str>) -> Result<u64, String> {
     let Some(raw) = raw else {
         return Ok(NOW);
     };
@@ -46,10 +47,17 @@ fn epoch(raw: Option<&str>) -> Result<u32, String> {
     let unix: u64 = raw
         .parse()
         .map_err(|_| format!("SOURCE_DATE_EPOCH={raw} is out of range"))?;
-    let secs = unix.checked_sub(FAT_EPOCH_UNIX).ok_or_else(|| {
-        format!("SOURCE_DATE_EPOCH={raw} is before 1980, which FAT cannot record")
-    })?;
-    u32::try_from(secs).map_err(|_| format!("SOURCE_DATE_EPOCH={raw} is out of range"))
+    if unix < FAT_EPOCH_UNIX {
+        return Err(format!(
+            "SOURCE_DATE_EPOCH={raw} is before 1980, which FAT cannot record"
+        ));
+    }
+    if unix > FAT_LAST_UNIX {
+        return Err(format!(
+            "SOURCE_DATE_EPOCH={raw} is after 2107, which FAT cannot record"
+        ));
+    }
+    Ok(unix)
 }
 
 fn main() -> ExitCode {
@@ -133,7 +141,7 @@ fn main() -> ExitCode {
 /// The initrd image: `fat::mkinitrd`'s, plus `extras` (destination, bytes)
 /// added in destination order with their times at `now`, on the smallest
 /// image with `INITRD_FREE_BYTES` free after them.
-fn build_image(now: u32, mut extras: Vec<(&str, Vec<u8>)>) -> Result<Vec<u8>, FatError> {
+fn build_image(now: u64, mut extras: Vec<(&str, Vec<u8>)>) -> Result<Vec<u8>, FatError> {
     extras.sort_by(|a, b| a.0.cmp(b.0));
     // Pass 1: a scratch image with room for every file's data plus a
     // cluster per file and some for the directories; doubled while short.
@@ -163,7 +171,7 @@ fn build_image(now: u32, mut extras: Vec<(&str, Vec<u8>)>) -> Result<Vec<u8>, Fa
 
 /// Format `buf` with `fat::mkinitrd` and add `extras` in order; the synced
 /// volume, remounted so its free count is read back from the image.
-fn fill(buf: &mut [u8], now: u32, extras: &[(&str, Vec<u8>)]) -> Result<FatVol, FatError> {
+fn fill(buf: &mut [u8], now: u64, extras: &[(&str, Vec<u8>)]) -> Result<FatVol, FatError> {
     fat::mkinitrd(buf)?;
     let mut disk = MemDisk::new(buf, SEC as u32)?;
     let mut vol = FatVol::mount(&mut disk)?;
@@ -223,8 +231,9 @@ mod tests {
 
     #[test]
     fn epoch_parses_decimal() {
-        assert_eq!(epoch(Some("315532800")), Ok(0));
-        assert_eq!(epoch(Some("1577836800")), Ok(1_262_304_000));
+        assert_eq!(epoch(Some("315532800")), Ok(315_532_800));
+        assert_eq!(epoch(Some("1577836800")), Ok(1_577_836_800));
+        assert_eq!(epoch(Some("4354819198")), Ok(4_354_819_198));
     }
 
     #[test]
@@ -240,16 +249,16 @@ mod tests {
         ] {
             assert!(epoch(Some(bad)).is_err(), "{bad:?}");
         }
-        // Past what a u32 of seconds since 1980 holds.
-        assert!(epoch(Some("4610500096")).is_err());
+        // Past 2107-12-31 23:59:58, the last time FAT records.
+        assert!(epoch(Some("4354819199")).is_err());
     }
 
     #[test]
     fn same_epoch_same_image() {
-        let a = build_image(1_000_000, extras()).unwrap();
-        let b = build_image(1_000_000, extras()).unwrap();
+        let a = build_image(NOW, extras()).unwrap();
+        let b = build_image(NOW, extras()).unwrap();
         assert_eq!(a, b);
-        let c = build_image(2_000_000, extras()).unwrap();
+        let c = build_image(NOW + 1_000_000, extras()).unwrap();
         assert_ne!(a, c);
     }
 

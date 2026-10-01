@@ -230,7 +230,8 @@ impl Disk for Io<'_> {
 }
 
 /// Run `f` on volume `v` under its lock, waiting for the holder; `Io`
-/// once the volume is retired. Never under the VFS lock.
+/// once the volume is retired. `FatVol::now` is the wall clock
+/// (`fs_init::now`) for what `f` stamps. Never under the VFS lock.
 fn with_vol<R>(
     v: &FatVolume,
     f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
@@ -239,6 +240,7 @@ fn with_vol<R>(
     if !v.used.load(Ordering::Acquire) {
         return Err(FsError::Io);
     }
+    g.now = fs_init::now();
     let mut io = Io { back: &v.media };
     f(&mut g, &mut io)
 }

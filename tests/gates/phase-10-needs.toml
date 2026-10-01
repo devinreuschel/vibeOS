@@ -1543,3 +1543,55 @@ needs = [
   "a process's working directory is",  # L1327
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1336
+[[box]]
+key = "`ls` in the `kernel_shell` build"
+needs = [
+  "FAT and vibefs behind `InodeOps`;",  # L1324
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L906
+[[box]]
+key = "mount a FAT32 image and"
+needs = [
+  "`rm -r` in the `kernel_shell`",  # L1335
+  "`ls` in the `kernel_shell` build",  # L1336
+  "`mount` in the `kernel_shell` build",  # L1337
+  "`unlink_path` drops the name from",  # L1338
+  "a disk-backed FAT mount fits",  # L1341
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L929
+[[box]]
+key = "`readdir`, `stat`, timestamp conversion"
+needs = [
+  "FAT timestamps: `fat_datetime` counts years",  # L1339
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L961
+[[box]]
+key = "shell commands: `ls -l`, `cat`,"
+needs = [
+  "`rm -r` in the `kernel_shell`",  # L1335
+  "`ls` in the `kernel_shell` build",  # L1336
+  "`mount` in the `kernel_shell` build",  # L1337
+  "`unlink_path` drops the name from",  # L1338
+  "FAT and vibefs `rename` lose",  # L1501
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L962
+[[box]]
+key = "kernel shell commands `mount` and"
+needs = [
+  "a `make check` script reads",  # L1222
+  "the VFS lock guards the",  # L1325
+  "`umount` keeps volume state consistent:",  # L1332
+  "`mount` in the `kernel_shell` build",  # L1337
+  "a disk-backed FAT mount fits",  # L1341
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
