@@ -16,6 +16,17 @@ LIMINE_DIR="${LIMINE_DIR:-./limine}"
 ROOT=$(cd "$(dirname "$0")" && pwd)
 TOOLCHAIN_FILE="$ROOT/rust-toolchain.toml"
 
+# kani-verifier for `make models` (ROADMAP §10.8); it brings its own nightly.
+KANI_VERSION=0.68.0
+if [ "${1:-}" = "--kani" ]; then
+    # Host triple: .cargo/config.toml sets build.target to the kernel's.
+    host=$(rustc -vV | sed -n 's/^host: //p')
+    echo "setup: installing kani-verifier $KANI_VERSION for $host"
+    cargo install --locked kani-verifier --version "$KANI_VERSION" --target "$host"
+    cargo kani setup
+    exit 0
+fi
+
 need() {
     if ! command -v "$1" >/dev/null 2>&1; then
         echo "setup: missing required tool: $1" >&2
@@ -71,6 +82,13 @@ if command -v cargo-deny >/dev/null 2>&1; then
     fi
 else
     echo "setup: missing required tool: cargo-deny (make check fails without it unless VIBEOS_ALLOW_MISSING_TOOLS=1; $deny_install)" >&2
+fi
+# Reported, not required: only `make models` needs it.
+kani_found=$(cd "$ROOT" && cargo kani --version 2>/dev/null | sed -n 's/^Kani Rust Verifier \([^ ]*\).*/\1/p') || true
+if [ "$kani_found" = "$KANI_VERSION" ]; then
+    echo "setup: found kani-verifier ($kani_found)"
+else
+    echo "setup: kani-verifier $KANI_VERSION not installed (optional; make models needs it: ./setup.sh --kani)"
 fi
 if command -v fsck.fat >/dev/null 2>&1; then
     echo "setup: found fsck.fat ($(fsck.fat --help 2>&1 | head -n1))"
