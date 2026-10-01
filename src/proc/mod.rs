@@ -1,6 +1,7 @@
 //! Processes: the kernel half of subsystem `proc` (DESIGN §1.3).
 
 pub(crate) mod addr_space_init;
+pub(crate) mod fill_init;
 #[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,

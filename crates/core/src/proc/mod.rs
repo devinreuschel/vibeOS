@@ -5,6 +5,7 @@
 
 pub mod addr_space;
 pub mod elf;
+pub mod fill;
 pub mod pid;
 pub mod syscall;
 pub mod syscall_table;

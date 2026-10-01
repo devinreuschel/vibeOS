@@ -746,96 +746,6 @@ impl<A: PageTable, C> AddressSpace<A, C> {
         Ok(())
     }
 
-    /// Copy through HHDM after [`check_user_range`]. All-or-nothing.
-    pub fn read_bytes(&self, src: u64, dst: &mut [u8]) -> Result<(), UserMemError> {
-        if dst.is_empty() {
-            return Ok(());
-        }
-        self.check_user_range(src, dst.len() as u64)?;
-        // SAFETY: `dst` is `dst.len()` live, writable bytes, and
-        // `check_user_range` just found every page of the source mapped in
-        // this space, as `addr_space::AddressSpace::copy_via_hhdm` requires;
-        // established here.
-        unsafe { self.copy_via_hhdm(src, dst.as_mut_ptr(), dst.len(), false) }
-    }
-
-    /// Copy through HHDM after [`check_user_range`]. All-or-nothing.
-    /// Does not require the PTE to be writable (ELF load onto RX pages).
-    pub fn write_bytes(&self, dst: u64, src: &[u8]) -> Result<(), UserMemError> {
-        if src.is_empty() {
-            return Ok(());
-        }
-        self.check_user_range(dst, src.len() as u64)?;
-        // SAFETY: `src` is `src.len()` live bytes that a copy to user only
-        // reads (`to_user` is true, so the `*mut` is never written through),
-        // and `check_user_range` just found every page of the destination
-        // mapped in this space, as `addr_space::AddressSpace::copy_via_hhdm`
-        // requires; established here.
-        unsafe { self.copy_via_hhdm(dst, src.as_ptr() as *mut u8, src.len(), true) }
-    }
-
-    pub fn zero_bytes(&self, dst: u64, len: u64) -> Result<(), UserMemError> {
-        if len == 0 {
-            return Ok(());
-        }
-        self.check_user_range(dst, len)?;
-        let mut off = 0u64;
-        while off < len {
-            let va = dst + off;
-            let Some((pa, size, _)) = self.mapper.translate(VirtAddr(va)) else {
-                return Err(UserMemError::Unmapped);
-            };
-            let span = size.bytes();
-            let page_off = va & (span - 1);
-            let chunk = (span - page_off).min(len - off);
-            let ptr = (pa.as_u64().wrapping_add(self.mapper.hhdm_offset())) as *mut u8;
-            // SAFETY: `translate` found `va` mapped to `pa` in a page of
-            // `span` bytes, `chunk` stops at that page's end, and the HHDM
-            // maps every frame writable (`paging::FrameAlloc`), so
-            // `[ptr, ptr+chunk)` is one live frame's bytes; established here.
-            unsafe { core::ptr::write_bytes(ptr, 0, chunk as usize) };
-            off += chunk;
-        }
-        Ok(())
-    }
-
-    /// # Safety
-    /// `buf` is `len` live bytes; `va` is mapped in this space.
-    unsafe fn copy_via_hhdm(
-        &self,
-        va: u64,
-        buf: *mut u8,
-        len: usize,
-        to_user: bool,
-    ) -> Result<(), UserMemError> {
-        let mut off = 0usize;
-        while off < len {
-            let cur = va + off as u64;
-            let Some((pa, size, _)) = self.mapper.translate(VirtAddr(cur)) else {
-                return Err(UserMemError::Unmapped);
-            };
-            let span = size.bytes();
-            let page_off = cur & (span - 1);
-            let chunk = (span - page_off).min((len - off) as u64) as usize;
-            let user = (pa.as_u64().wrapping_add(self.mapper.hhdm_offset())) as *mut u8;
-            // SAFETY: `off + chunk <= len`, so `buf.add(off)` and its `chunk`
-            // bytes lie in the caller's `len` live bytes (this fn's contract,
-            // `addr_space::AddressSpace::copy_via_hhdm`); `translate` found
-            // `cur` mapped and `chunk` stops at its page's end, so `user` is
-            // `chunk` bytes of one frame through the HHDM; a user frame is
-            // never a kernel object, so the two do not overlap.
-            unsafe {
-                if to_user {
-                    core::ptr::copy_nonoverlapping(buf.add(off) as *const u8, user, chunk);
-                } else {
-                    core::ptr::copy_nonoverlapping(user as *const u8, buf.add(off), chunk);
-                }
-            }
-            off += chunk;
-        }
-        Ok(())
-    }
-
     fn overlaps(&self, va: u64, len: u64) -> bool {
         let end = va.saturating_add(len);
         self.regions.iter().flatten().any(|r| {
@@ -1034,8 +944,11 @@ impl<A: PageTable, C: Clone> AddressSpace<A, C> {
         Ok(())
     }
 
+    /// [`teardown`](AddressSpace::teardown), giving each frame to `pool`.
+    ///
     /// # Safety
-    /// `pool` may recycle every user/PT/PML4 frame this space still owns.
+    /// As for `teardown`, and `pool` may recycle every user leaf and table
+    /// page below the root.
     pub unsafe fn teardown_pool<F: FrameFree>(&mut self, pool: &mut F) -> TeardownStats {
         let mut free = |f: Frames| pool.free_frame(f);
         // SAFETY: the caller hands every frame this space owns to `pool`
@@ -1043,55 +956,6 @@ impl<A: PageTable, C: Clone> AddressSpace<A, C> {
         // `addr_space::AddressSpace::teardown_pool`), which is
         // `teardown`'s contract.
         unsafe { self.teardown(&mut free) }
-    }
-
-    /// Full copy of user regions into `dst`, a new space (Phase 9 fork):
-    /// new frames, same bytes, each region holding a clone of `core`, and
-    /// the break. On a failure `dst` keeps what was mapped so far, for its
-    /// owner to tear down.
-    ///
-    /// # Safety
-    /// `dst` is new: nothing is mapped in it and no CPU has it loaded.
-    /// `alloc` supplies owned frames.
-    pub unsafe fn clone_anon<D: Clone, F: FrameAlloc + FrameFree>(
-        &self,
-        dst: &mut AddressSpace<A, D>,
-        core: &D,
-        alloc: &mut F,
-    ) -> Result<(), AsError> {
-        dst.brk_start = self.brk_start;
-        dst.brk = self.brk;
-        let mut buf = [0u8; 256];
-        for r in self.regions() {
-            if r.len == 0 {
-                continue;
-            }
-            if r.backing == Backing::Reserved {
-                dst.check_new_region(r.start, r.len)?;
-                dst.insert_region(Region {
-                    start: r.start,
-                    len: r.len,
-                    perms: r.perms,
-                    backing: r.backing,
-                    core: core.clone(),
-                })?;
-                continue;
-            }
-            // SAFETY: `dst` is new, so `[r.start, r.start+r.len)` is
-            // unmapped in it, and `alloc` hands out owned frames (this
-            // fn's contract, `addr_space::AddressSpace::clone_anon`).
-            unsafe { dst.map_anon(r.start, r.len, r.perms, core.clone(), alloc)? };
-            let mut off = 0u64;
-            while off < r.len {
-                let n = (r.len - off).min(buf.len() as u64) as usize;
-                self.read_bytes(r.start + off, &mut buf[..n])
-                    .map_err(|_| AsError::NotMapped)?;
-                dst.write_bytes(r.start + off, &buf[..n])
-                    .map_err(|_| AsError::NotMapped)?;
-                off += n as u64;
-            }
-        }
-        Ok(())
     }
 }
 

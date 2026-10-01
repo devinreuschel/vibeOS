@@ -296,6 +296,12 @@ GONE: list[tuple[str, str]] = [
     ("src/proc/proc_init/mod.rs: fn space_of", "an address space is a two-count object"),
     ("src/proc/proc_init/exec.rs: fn with_own_space", "an address space is a two-count object"),
     ("src/proc/proc_init/mod.rs: fn space_slot", "an address space is a two-count object"),
+    ("clone_anon", "one named fill API for"),
+    ("copy_via_hhdm", "one named fill API for"),
+    ("crates/core/src/proc/addr_space/mod.rs: fn read_bytes", "one named fill API for"),
+    ("crates/core/src/proc/addr_space/mod.rs: fn write_bytes", "one named fill API for"),
+    ("crates/core/src/proc/addr_space/mod.rs: fn zero_bytes", "one named fill API for"),
+    ("src/proc/addr_space_init.rs: fn clone_full", "one named fill API for"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

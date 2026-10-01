@@ -35,6 +35,7 @@ use crate::arch::current::Arch;
 use crate::arch::idt::TrapFrame;
 use crate::console_init;
 use crate::file_init;
+use crate::fill_init;
 use crate::proc::uaccess_init;
 use crate::serial::Serial;
 use crate::sync_init::SpinMutex;

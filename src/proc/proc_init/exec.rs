@@ -80,9 +80,9 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     }
     // The parent's space, pinned for the copy; a parent with none is
     // `EFAULT`, a copy that runs out of memory `ENOMEM`.
-    let child_space = match with_current_space(addr_space_init::clone_full) {
-        Some(Some(c)) => Ok(c.publish()),
-        Some(None) => Err(KError::NoMem),
+    let child_space = match with_current_space(fill_init::clone_full) {
+        Some(Ok(c)) => Ok(c.publish()),
+        Some(Err(_)) => Err(KError::NoMem),
         None => Err(KError::Fault),
     };
     let space = match child_space {

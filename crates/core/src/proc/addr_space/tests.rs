@@ -2,6 +2,7 @@ use super::*;
 use crate::arch::stub::Arch;
 use crate::paging::{UserFreeStats, physmap_flags};
 use crate::pmm::testing::Pool;
+use crate::proc::fill;
 
 extern crate std;
 use std::sync::Arc;
@@ -51,15 +52,48 @@ unsafe fn free_space(a: &mut AddressSpace<Arch>, pool: &mut Pool) -> TeardownSta
     st
 }
 
-/// A fork copy of `a`, as the kernel's `clone_full` makes one.
+/// A page-table hold with nothing to lock: a host test's spaces are its own.
+struct NoHold;
+
+impl fill::PtHold for NoHold {
+    fn hold<R>(&mut self, _batch: fill::Batch, f: impl FnOnce() -> R) -> R {
+        f()
+    }
+}
+
+/// Write `bytes` at `va` of `a` through the fill API.
+fn poke(a: &AddressSpace<Arch>, va: u64, bytes: &[u8]) {
+    fill::write(a, &mut NoHold, va, bytes).unwrap();
+}
+
+/// Read `buf.len()` bytes at `va` of `a`, for the checks.
+fn peek(a: &AddressSpace<Arch>, va: u64, buf: &mut [u8]) {
+    for (k, byte) in buf.iter_mut().enumerate() {
+        let at = va + k as u64;
+        let (pa, _, _) = a.mapper().translate(VirtAddr(at)).unwrap();
+        let p = a.mapper().hhdm_offset().wrapping_add(pa.as_u64()) as *const u8;
+        // SAFETY: `translate` found `at` mapped to `pa`, a pool frame reachable through the
+        // pool's HHDM; established here.
+        *byte = unsafe { p.read() };
+    }
+}
+
+/// A fork copy of `a`, as the kernel's `fill_init::clone_full` makes one.
 fn clone_space(
     a: &AddressSpace<Arch>,
     kernel: &Mapper<Arch>,
     pool: &mut Pool,
 ) -> AddressSpace<Arch> {
     let mut c = new_space(kernel, pool);
-    // SAFETY: `c` is new and never loaded, and `pool` hands out owned frames; established here.
-    unsafe { a.clone_anon(&mut c, &(), pool) }.unwrap();
+    fill::clone_layout(a, &mut c, &(), |to, va, len, perms, core| {
+        // SAFETY: `clone_layout` maps each of `a`'s regions once into the new `c`, where no
+        // region overlaps another, and `pool` hands out owned frames; established here.
+        unsafe { to.map_anon(va, len, perms, core, pool) }
+    })
+    .unwrap();
+    for r in a.regions().filter(|r| r.backing == Backing::Anonymous) {
+        fill::copy(a, &c, &mut NoHold, r.start, r.len).unwrap();
+    }
     c
 }
 
@@ -222,14 +256,6 @@ fn user_ptr_helpers() {
     );
     assert!(aspace.check_user_range(va, 8).is_ok());
     assert!(aspace.check_user_range(va, 0).is_ok());
-    aspace.write_bytes(va, b"abcd").unwrap();
-    let mut got = [0u8; 4];
-    aspace.read_bytes(va, &mut got).unwrap();
-    assert_eq!(&got, b"abcd");
-    aspace.zero_bytes(va, 2).unwrap();
-    aspace.read_bytes(va, &mut got).unwrap();
-    assert_eq!(&got, b"\0\0cd");
-    assert_eq!(aspace.write_bytes(0, b"x"), Err(UserMemError::NullGuard));
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
     unsafe { free_space(&mut aspace, &mut pool) };
@@ -238,38 +264,6 @@ fn user_ptr_helpers() {
         leaves: 0,
         tables: 0,
     };
-}
-
-#[test]
-fn clone_anon_copies_bytes_not_frames() {
-    let mut pool = Pool::new(128);
-    let kernel = kernel_mapper(&mut pool);
-    let before = used(&pool);
-    let mut src = new_space(&kernel, &mut pool);
-    let va = 0x0000_0000_0040_0000u64;
-    // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
-    // anything, and `pool` hands out owned frames; established here.
-    unsafe {
-        src.map_anon(va, PAGE_SIZE_4K, UserPerms::RW, (), &mut pool)
-            .unwrap();
-    }
-    src.write_bytes(va, b"fork-me").unwrap();
-    let dst = clone_space(&src, &kernel, &mut pool);
-    let mut got = [0u8; 7];
-    dst.read_bytes(va, &mut got).unwrap();
-    assert_eq!(&got, b"fork-me");
-    src.write_bytes(va, b"parent!").unwrap();
-    dst.read_bytes(va, &mut got).unwrap();
-    assert_eq!(&got, b"fork-me");
-    // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
-    // from `pool`; established here.
-    unsafe {
-        let mut src = src;
-        free_space(&mut src, &mut pool);
-        let mut dst = dst;
-        free_space(&mut dst, &mut pool);
-    }
-    assert_eq!(used(&pool), before);
 }
 
 #[test]
@@ -381,8 +375,8 @@ fn addr_space_munmap_splits_region() {
         a.map_anon(BASE, 3 * P, UserPerms::RW, (), &mut pool)
             .unwrap()
     };
-    a.write_bytes(BASE, b"one").unwrap();
-    a.write_bytes(BASE + 2 * P, b"three").unwrap();
+    poke(&a, BASE, b"one");
+    poke(&a, BASE + 2 * P, b"three");
     // SAFETY: every leaf in the range came from `pool`, and a host test has no TLB to flush;
     // established here.
     unsafe { a.unmap_free(BASE + P, P, &mut pool, &mut nop).unwrap() };
@@ -395,9 +389,9 @@ fn addr_space_munmap_splits_region() {
     assert_eq!(a.check_user_range(BASE + P, 1), Err(UserMemError::Unmapped));
     let mut c = clone_space(&a, &kernel, &mut pool);
     let mut got = [0u8; 5];
-    c.read_bytes(BASE, &mut got[..3]).unwrap();
+    peek(&c, BASE, &mut got[..3]);
     assert_eq!(&got[..3], b"one");
-    c.read_bytes(BASE + 2 * P, &mut got).unwrap();
+    peek(&c, BASE + 2 * P, &mut got);
     assert_eq!(&got, b"three");
     assert_eq!(c.user_frames(), 2);
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
@@ -873,13 +867,13 @@ fn clone_keeps_brk_and_reservations() {
     // out owned frames; established here.
     unsafe { a.map_pages(va, len, UserPerms::RW, &mut pool).unwrap() };
     a.heap_grow_commit(va, len, BASE + 0x1800, ()).unwrap();
-    a.write_bytes(BASE + 0x1000, b"heap").unwrap();
+    poke(&a, BASE + 0x1000, b"heap");
     reserve(&mut a, BASE + 16 * P, 4 * P).unwrap();
     let mut c = clone_space(&a, &kernel, &mut pool);
     assert_eq!((c.brk_start(), c.brk()), (BASE, BASE + 0x1800));
     assert_eq!(c.user_frames(), 2);
     let mut got = [0u8; 4];
-    c.read_bytes(BASE + 0x1000, &mut got).unwrap();
+    peek(&c, BASE + 0x1000, &mut got);
     assert_eq!(&got, b"heap");
     let mut rs: Vec<(u64, u64, Backing)> =
         c.regions().map(|r| (r.start, r.len, r.backing)).collect();

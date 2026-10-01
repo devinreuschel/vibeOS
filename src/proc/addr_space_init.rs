@@ -19,6 +19,7 @@ use vibeos::arch::PageTable;
 use vibeos::kalloc::{CoreArc, Teardown, UsersArc};
 use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pmm::Frames;
+use vibeos::proc::fill::FILL_BATCH;
 use vibeos::thread::ThreadId;
 
 use crate::arch::current::{AddressSpace, Arch};
@@ -181,11 +182,109 @@ pub fn create() -> Result<NewSpace, AsError> {
 /// (ROADMAP §10.6, F009).
 pub const CHUNK_PAGES: u64 = 512;
 
+/// Pages one hold of `PT` maps: the fill API's batch, whose zeroed frames
+/// are prepared before the hold, in a 536-byte array on the stack.
+pub const MAP_CHUNK_PAGES: u64 = FILL_BATCH as u64;
+
 /// End of the chunk that starts at `cur`: at most [`CHUNK_PAGES`] pages,
 /// up to the next 2 MiB boundary or `end`, whichever comes first.
 fn chunk_end(cur: u64, end: u64) -> u64 {
+    chunk_end_of(cur, end, CHUNK_PAGES)
+}
+
+/// [`chunk_end`] for chunks of at most `pages` pages.
+fn chunk_end_of(cur: u64, end: u64, pages: u64) -> u64 {
     let span = CHUNK_PAGES * PAGE_SIZE_4K;
-    (cur & !(span - 1)).saturating_add(span).min(end)
+    let leaf = (cur & !(span - 1)).saturating_add(span);
+    leaf.min(cur.saturating_add(pages * PAGE_SIZE_4K)).min(end)
+}
+
+/// Frames a map chunk may take: one per page, and the three tables (PDPT,
+/// PD, PT) a chunk inside one leaf table can need below the root.
+const ZEROED_CAP: usize = FILL_BATCH + 3;
+
+/// Zeroed frames for one map chunk, taken from the buddy and zeroed with
+/// `PT` not held, so the chunk's hold only links them in (ROADMAP §10.6,
+/// DESIGN §2.9 rule 2). A frame is zeroed before any mapping names it, so
+/// no running space sees the write. Leftovers go back on drop.
+struct Zeroed {
+    pa: [u64; ZEROED_CAP],
+    n: usize,
+    next: usize,
+}
+
+impl Zeroed {
+    /// Up to `want` zeroed frames; fewer when the buddy runs out, and the
+    /// map then fails as it would have.
+    fn take(want: usize) -> Self {
+        let mut z = Zeroed {
+            pa: [0; ZEROED_CAP],
+            n: 0,
+            next: 0,
+        };
+        while z.n < want.min(ZEROED_CAP) {
+            let Some(f) = pmm_init::with_buddy(|b| b.alloc(0)) else {
+                break;
+            };
+            let pa = f.into_entry();
+            zero_frame(pa);
+            z.pa[z.n] = pa;
+            z.n += 1;
+        }
+        z
+    }
+}
+
+/// Zero the order-0 frame at `pa` through the physmap. Not a write to any
+/// address space: no mapping names the frame yet.
+fn zero_frame(pa: u64) {
+    let p = paging_init::HHDM_BASE.wrapping_add(pa) as *mut u8;
+    // SAFETY: `pa` is a buddy frame this caller just allocated and nothing
+    // else names, and the physmap maps every buddy frame writable at
+    // `HHDM_BASE`; established by `paging_init::install`.
+    unsafe { core::ptr::write_bytes(p, 0, PAGE_SIZE_4K as usize) };
+}
+
+// SAFETY: every frame `Zeroed` hands out is an order-0 buddy frame of RAM,
+// writable through the physmap (`addr_space_init::Zeroed::take`, or the
+// buddy for a fallback), as `paging::FrameAlloc` requires.
+unsafe impl FrameAlloc for Zeroed {
+    fn alloc_frame(&mut self) -> Option<Frames> {
+        if self.next < self.n {
+            let pa = self.pa[self.next];
+            self.next += 1;
+            // SAFETY: `pa` came from `into_entry` of an order-0 token in
+            // `Zeroed::take`, and only this slot held it, the contract
+            // `pmm::Frames::from_entry` states; established by
+            // `addr_space_init::Zeroed::take`.
+            return Some(unsafe { Frames::from_entry(pa, 0) });
+        }
+        // More than the chunk could need: zero it here, under the hold.
+        let f = pmm_init::with_buddy(|b| b.alloc(0))?;
+        zero_frame(f.base());
+        Some(f)
+    }
+}
+
+// SAFETY: `free_frame` gives a frame back to the buddy, which handed out
+// every frame `Zeroed` holds, as `addr_space::FrameFree` requires;
+// established here.
+unsafe impl FrameFree for Zeroed {
+    fn free_frame(&mut self, f: Frames) {
+        pmm_init::with_buddy(|b| b.free(f));
+    }
+}
+
+impl Drop for Zeroed {
+    fn drop(&mut self) {
+        while self.next < self.n {
+            let pa = self.pa[self.next];
+            self.next += 1;
+            // SAFETY: as in `alloc_frame`: an `into_entry` token only this
+            // slot held; established by `addr_space_init::Zeroed::take`.
+            pmm_init::with_buddy(|b| b.free(unsafe { Frames::from_entry(pa, 0) }));
+        }
+    }
 }
 
 /// Run `f` with `PT` held, for a chunk of `pages` pages.
@@ -201,7 +300,8 @@ fn with_pt_chunk<R>(pages: u64, f: impl FnOnce() -> R) -> R {
 
 /// Map `[va, va+len)` of `space` with zeroed frames and record it as one
 /// region, under the space's `mm` lock. Takes `PT` once per chunk
-/// ([`CHUNK_PAGES`]) and zeroes each chunk with `PT` dropped. On failure
+/// ([`MAP_CHUNK_PAGES`]), after zeroing that chunk's frames with `PT` not
+/// held. On failure
 /// every page it mapped is unmapped and freed, also chunk by chunk, and no
 /// region is recorded.
 ///
@@ -219,7 +319,7 @@ pub unsafe fn map_anon(space: &Space, va: u64, len: u64, perms: UserPerms) -> Re
 ///
 /// # Safety
 /// Same contract as `AddressSpace::map_anon`.
-unsafe fn map_anon_mm(
+pub(crate) unsafe fn map_anon_mm(
     space: &mut Mm,
     core: CoreRef,
     va: u64,
@@ -248,7 +348,8 @@ unsafe fn map_anon_mm(
     Ok(())
 }
 
-/// Map and zero `[va, va+len)` chunk by chunk; roll back on failure.
+/// Map `[va, va+len)` with zeroed frames, chunk by chunk ([`MAP_CHUNK_PAGES`]
+/// within one leaf table); roll back on failure.
 ///
 /// # Safety
 /// No page of `[va, va+len)` is mapped in `space`.
@@ -256,30 +357,27 @@ unsafe fn map_chunks(space: &mut Mm, va: u64, len: u64, perms: UserPerms) -> Res
     let end = va.checked_add(len).ok_or(AsError::Overflow)?;
     let mut cur = va;
     while cur < end {
-        let ce = chunk_end(cur, end);
+        let ce = chunk_end_of(cur, end, MAP_CHUNK_PAGES);
         let n = ce - cur;
-        let rc = with_pt_chunk(n / PAGE_SIZE_4K, || {
-            let mut pool = BuddyPool;
+        let pages = n / PAGE_SIZE_4K;
+        // The chunk's frames, zeroed before the hold; unused ones go back
+        // when `pool` drops, after it.
+        let mut pool = Zeroed::take(pages as usize + 3);
+        let rc = with_pt_chunk(pages, || {
             // SAFETY: `[cur, ce)` is inside the unmapped range this fn's
-            // contract names (`addr_space_init::map_chunks`), and the buddy
-            // hands out owned frames (`addr_space_init::BuddyPool`).
+            // contract names (`addr_space_init::map_chunks`), and `pool`
+            // hands out owned, zeroed buddy frames
+            // (`addr_space_init::Zeroed`).
             unsafe { space.map_pages(cur, n, perms, &mut pool) }
         });
-        // `map_pages` rolled its own chunk back; a failed zero leaves this
-        // chunk mapped, so it is rolled back with the rest.
-        let done = match rc {
-            Ok(()) => match space.zero_bytes(cur, n) {
-                Ok(()) => {
-                    cur = ce;
-                    continue;
-                }
-                Err(_) => (ce, AsError::NotMapped),
-            },
-            Err(e) => (cur, e),
-        };
-        // SAFETY: this call mapped `[va, done.0)` from the buddy, here.
-        unsafe { unmap_chunks(space, va, done.0 - va)? };
-        return Err(done.1);
+        drop(pool);
+        if let Err(e) = rc {
+            // `map_pages` rolled its own chunk back.
+            // SAFETY: this call mapped `[va, cur)` from the buddy, here.
+            unsafe { unmap_chunks(space, va, cur - va)? };
+            return Err(e);
+        }
+        cur = ce;
     }
     Ok(())
 }
@@ -510,8 +608,7 @@ fn root_holder(root: u64) -> Option<RootHolder> {
 ///
 /// # Safety
 /// `want` is 0, or the physical address of a PML4 whose kernel half is the
-/// kernel's: one that `paging_init::install`, [`create`] or [`clone_full`]
-/// built. That PML4 stays allocated while it is loaded. Unless `want` is
+/// kernel's: one that `paging_init::install` or [`create`] built. That PML4 stays allocated while it is loaded. Unless `want` is
 /// the kernel root, the caller has recorded it in the current thread's
 /// `Tcb.as_cr3` before the call (`execve` does, through
 /// `thread_init::set_pid_cr3`), so the core's free sees it (invariant
@@ -534,29 +631,4 @@ pub fn load_kernel_cr3() {
     // `paging_init::install` published and nothing frees; it is the kernel
     // root, so no TCB need name it.
     unsafe { load_cr3_u64(paging_init::kernel_cr3()) };
-}
-
-/// Full copy of `src` for fork: a new space with the same regions, break
-/// and bytes in new frames. `None` when a frame or the heap runs out;
-/// nothing is left over. Takes `src`'s `mm` lock and then the new space's:
-/// nothing else reaches an unpublished space, so the pair cannot deadlock.
-pub fn clone_full(src: &Space) -> Option<NewSpace> {
-    let dst = create().ok()?;
-    let core = dst.core();
-    let rc = {
-        let from = src.mm();
-        let mut to = dst.mm();
-        paging_init::with_pt(|_pt| {
-            let mut pool = BuddyPool;
-            // SAFETY: `to` is the new space `create` just built, never
-            // loaded and with nothing mapped, and the buddy hands out owned
-            // frames, as `addr_space::AddressSpace::clone_anon` requires;
-            // established here.
-            unsafe { from.clone_anon(&mut to, &core, &mut pool) }
-        })
-    };
-    drop(core);
-    // A failure drops `dst`, whose last `users` put tears down what it
-    // mapped.
-    rc.ok().map(|()| dst)
 }

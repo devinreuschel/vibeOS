@@ -25,7 +25,7 @@ const PF_USER: u64 = 1 << 2;
 const PF_FETCH: u64 = 1 << 4;
 
 /// A throwaway address space with `perms` at `va`, its page's first byte
-/// `byte` (written through the physmap), loaded with IF=0 while `probe`
+/// `byte` (written through the fill API), loaded with IF=0 while `probe`
 /// runs; then the kernel CR3 again and the space torn down. `Err` names
 /// the step that could not build the space.
 fn with_stray_page<R>(
@@ -34,7 +34,7 @@ fn with_stray_page<R>(
     byte: u8,
     probe: impl FnOnce() -> R,
 ) -> Result<R, &'static str> {
-    let Ok(space) = addr_space_init::create() else {
+    let Ok(mut space) = addr_space_init::create() else {
         return Err("create");
     };
     // SAFETY: invariant: `space` is a fresh address space that no CPU has
@@ -42,7 +42,7 @@ fn with_stray_page<R>(
     if unsafe { addr_space_init::map_anon(&space, va, PAGE_SIZE_4K, perms) }.is_err() {
         return Err("map_anon");
     }
-    if space.mm().write_bytes(va, &[byte]).is_err() {
+    if crate::fill_init::write(&mut space, va, &[byte]).is_err() {
         return Err("fill");
     }
     let r = {

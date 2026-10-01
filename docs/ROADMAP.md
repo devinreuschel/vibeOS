@@ -995,7 +995,7 @@ limitations.
 - [x] user mappings tracked as regions with permissions and a backing source, not just raw PTEs
 - [x] CR3 switch on context switch, skipped when the next thread shares the address space
 - [x] teardown freeing every user frame and page table page, verified against the frame count
-- [x] user pointer helpers: `AddressSpace::check_user_range` rejects a non-canonical, kernel-half, overflowing, or null-guard range and requires a present `USER` leaf on every page, and `read_bytes`, `write_bytes`, and `zero_bytes` copy through the physmap only after it passes (F023)
+- [x] user pointer helpers: `AddressSpace::check_user_range` rejects a non-canonical, kernel-half, overflowing, or null-guard range and requires a present `USER` leaf on every page, and the fill API's `physmap_write`, `physmap_zero`, and `physmap_copy` (`vibeos::proc::fill`) write through the physmap only after the same range check passes and a present `USER` leaf is found on every page (F023)
 - [x] user copies dereference the user address inside `stac`/`clac` and turn a fault into `EFAULT` through an exception-table fixup, so a write into a user page mapped without `WRITABLE` fails (F023)
 - [x] a guard region at address 0 so a null dereference faults rather than reading something
 

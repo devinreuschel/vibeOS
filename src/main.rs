@@ -101,7 +101,7 @@ use fs::{fat_init, file_init, fs_init, vibefs_init};
 use irq::{ipi_init, irq_init};
 use log::{diag, log_init, panic, serial};
 use mm::{heap_init, kva_init, paging_init, pmm_init};
-use proc::{addr_space_init, proc_init, syscall_init, user_init};
+use proc::{addr_space_init, fill_init, proc_init, syscall_init, user_init};
 use sched::{sched_init, thread_init, work_init};
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
 use shell::shell_init;

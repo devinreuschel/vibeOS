@@ -55,6 +55,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("limits_heap_backed", limits_heap_backed).deadline(60_000),
     test("teardown_live_root_asserts", teardown_live_root_asserts),
     test("as_pin_across_exit", as_pin_across_exit).deadline(30_000),
+    test("fill_pt_hold_bounded", fill_pt_hold_bounded).deadline(60_000),
     test("console_read_exit", test_console_read_exit).deadline(30_000),
     test("user_entry_irq", test_user_entry_irq).deadline(120_000),
     test("user_selectors", test_user_selectors),

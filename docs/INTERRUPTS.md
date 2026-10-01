@@ -58,9 +58,10 @@ kind in bit 0 of `data`. `linker.ld` keeps the section whole inside `__rodata_*`
 a recorded instruction with CR2 below `USER_MAP_END` resumes at its fixup, the `clac`, with RCX
 holding the bytes left, and the accessor reports the bytes it copied ([§5.2](#52-idt-and-exceptions)).
 Until ROADMAP §10.6's identity-teardown box removes the GLOBAL identity map of VA 0 to 512 MiB, the
-x86_64 methods also refuse a range that starts below 512 MiB. The ELF loader and `clone_anon` still
-copy through the HHDM physmap with `AddressSpace::read_bytes`/`write_bytes` after
-`check_user_range`, which ignore the PTE's `WRITABLE` bit, until ROADMAP §10.6's fill-API box.
+x86_64 methods also refuse a range that starts below 512 MiB. A space no thread runs, the ELF
+loader's and `fork`'s copy's, is written only through the fill API (`proc::fill_init` over
+`vibeos::proc::fill`, ROADMAP §10.6), which writes its frames through the HHDM physmap after a
+range check and a present user leaf on every page, and ignores the PTE's `WRITABLE` bit.
 `arch::cpu::init_control_regs` sets `CR0.WP`, and `CR4.SMEP`, `SMAP` and `UMIP` where CPUID reports
 them, on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
 

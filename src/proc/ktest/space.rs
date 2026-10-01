@@ -1,10 +1,12 @@
 //! In-guest tests for proc's address spaces (kernel_tests only): the
-//! two-count object (ROADMAP §10.6, F019). Rows: the parent `ktest.rs`'s
-//! `TESTS`.
+//! two-count object (ROADMAP §10.6, F019) and the fill API. Rows: the
+//! parent `ktest.rs`'s `TESTS`.
 
 use vibeos::proc::{SIGKILL, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 
+use crate::addr_space_init::testing as as_testing;
+use crate::fill_init::testing as fill_testing;
 use crate::ktest::user::{self, Image, Layout, user_code};
 use crate::ktest::{Outcome, free_frames, quiescent_free_frames, settle_threads};
 use crate::proc_init::{self, testing as proc_testing};
@@ -108,4 +110,88 @@ fn kill_and_reap(pid: u32) -> u32 {
         return u32::MAX;
     }
     user::wait(pid)
+}
+
+// Marks the first and last page of its 8 MiB bss, forks, and exits with
+// the child's status: the child exits 0 when it sees both marks, 1 when
+// not; a failed fork exits 2.
+user_code!(
+    FILL_FORK,
+    "
+    mov rax, 0x40001000
+    mov byte ptr [rax], 0x5a
+    mov rax, 0x407ff000
+    mov byte ptr [rax], 0xa5
+    mov eax, 57
+    syscall
+    test rax, rax
+    jz 2f
+    js 3f
+    sub rsp, 16
+    mov rdi, -1
+    mov rsi, rsp
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 61
+    syscall
+    mov edi, dword ptr [rsp]
+    shr edi, 8
+    and edi, 0xff
+    mov eax, 60
+    syscall
+    ud2
+2:
+    mov edi, 1
+    mov rax, 0x40001000
+    cmp byte ptr [rax], 0x5a
+    jne 4f
+    mov rax, 0x407ff000
+    cmp byte ptr [rax], 0xa5
+    jne 4f
+    xor edi, edi
+4:
+    mov eax, 60
+    syscall
+    ud2
+3:
+    mov edi, 2
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+/// The fill API holds `PT` for at most one leaf table at a time, with IF
+/// on between holds (ROADMAP §10.6): an exec and an 8 MiB fork copy take
+/// several bounded holds, none crossing a leaf table or ending with IF
+/// off, and the child sees the parent's bytes.
+pub(crate) fn fill_pt_hold_bounded() -> Outcome {
+    let before = quiescent_free_frames();
+    let layout = Layout {
+        vaddr: 0x4000_0000,
+        memsz: Some(8 << 20),
+        writable: true,
+    };
+    fill_testing::reset();
+    as_testing::reset_chunks();
+    let rc = user::run(&Image::Code(FILL_FORK, layout), &["fill-fork"]);
+    let s = fill_testing::stats();
+    let (install_holds, install_max) = as_testing::chunk_stats();
+    let st = match rc {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    if st != 0 {
+        return crate::fail_fmt!("status {st:#x}, want 0 (the child saw both marks)");
+    }
+    if s.holds < 4 || s.max_pages > 512 || s.crossed != 0 || s.if_off != 0 {
+        return crate::fail_fmt!("fill {s:?}");
+    }
+    if install_holds < 4 || install_max > 512 {
+        return crate::fail_fmt!("install: {install_holds} holds, max {install_max} pages");
+    }
+    if !user::frames_settle(before) {
+        return crate::fail_fmt!("free frames {}, want {before}", free_frames());
+    }
+    Outcome::Ok
 }
