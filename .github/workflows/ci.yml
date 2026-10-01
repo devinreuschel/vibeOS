@@ -1,13 +1,10 @@
 name: ci
 
-# ROADMAP §10.1: pushes to `main`, every pull request, and dispatch. TEMPORARY
-# (scripts/check_workflows.py): the Phase 10 integration branch (`phase-10`,
-# and the branch that stands in for it) and the `p10/**` slice branches also
-# run on push until P10-S98 empties the list, so a slice's race-proof test
-# commit runs red in CI before its fix (#93 §9 D-18).
+# ROADMAP §10.1: pushes to `main`, every pull request, and dispatch; never a
+# push to another branch (scripts/check_workflows.py, rule_ci_triggers).
 on:
   push:
-    branches: [main, phase-10, claude/phase-10-workflow-test-d2sfm3, "p10/**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

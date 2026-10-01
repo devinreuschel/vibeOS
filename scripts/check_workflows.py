@@ -24,10 +24,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = ".github/workflows"
 CI = f"{WORKFLOWS_DIR}/ci.yml"
-# Push branches ci.yml may name besides `main` until P10-S98 empties the list
-# and ticks ROADMAP §10.1's trigger box (#93 §9 D-18). The second entry is the
-# branch that stands in for `phase-10` while Phase 10 is integrated.
-TEMPORARY: tuple[str, ...] = ("phase-10", "claude/phase-10-workflow-test-d2sfm3", "p10/**")
 
 
 class Unsupported(Exception):
@@ -601,15 +597,9 @@ def rule_ci_triggers(tree: Tree) -> list[Problem]:
     else:
         branches = push.get("branches")
         names = branches.scalars() if branches is not None else []
-        want = {"main", *TEMPORARY}
-        if branches is None or set(names) != want or len(names) != len(want):
+        if branches is None or names != ["main"]:
             out.append(
-                Problem(
-                    CI,
-                    push.line,
-                    "ci_triggers",
-                    f"push branches {names} are not main plus TEMPORARY {list(TEMPORARY)}",
-                )
+                Problem(CI, push.line, "ci_triggers", f"push branches {names} are not [main]")
             )
     for event in ("push", "pull_request"):
         node = on.get(event)

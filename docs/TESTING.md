@@ -911,14 +911,11 @@ per-push tier.
 ## 8.6 CI and coverage
 
 `ci` runs on a push to `main`, on every pull request, and on `workflow_dispatch`, never on a push to
-another branch, with one temporary exception: until ROADMAP §10.1's trigger box is ticked, pushes to
-the Phase 10 integration branch (`phase-10`, and the branch that stands in for it) and to the
-`p10/**` slice branches run too, so a slice's race-proof test commit runs red before its fix
-(`TEMPORARY` in `scripts/check_workflows.py`). A pull request's runs share the concurrency group
+another branch. A pull request's runs share the concurrency group
 `ci-pr-<number>` and cancel superseded ones; every other run has a group of its own, `ci-run-<run
 id>`, so no run on `main` is cancelled or dropped as pending, and a fork's pull request from its own
 `main` shares nothing with `main`'s runs. `scripts/check_workflows.py` fails on `ci.yml` push branches
-other than `main` and the temporary list, on a `tags`, `branches-ignore` or `paths` filter, on a
+other than `main` alone, on a `tags`, `branches-ignore` or `paths` filter, on a
 missing `pull_request` or `workflow_dispatch` trigger, or on a group that is not built that way
 (`rule_ci_triggers`); on any `concurrency` group built from `github.head_ref` or `github.ref_name`
 (`rule_concurrency_group`); and on a workflow a §10.9 gate entry names that has no
