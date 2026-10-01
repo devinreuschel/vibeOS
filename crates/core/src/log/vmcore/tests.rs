@@ -743,7 +743,10 @@ fn vmcore_reads_kernel_layouts() {
         addr_of_mut!((*t1.p).affinity).write(CpuAffinity::Any);
         addr_of_mut!((*t1.p).entry).write(entry);
         addr_of_mut!((*t2.p).id).write(ThreadId(9));
-        addr_of_mut!((*t2.p).state).write(ThreadState::Blocked { wq: 0xABCD });
+        addr_of_mut!((*t2.p).state).write(ThreadState::Blocked {
+            wq: 0xABCD,
+            deadline: crate::sched::FAR_DEADLINE,
+        });
         addr_of_mut!((*t2.p).context).write(CpuContext::empty());
     }
     let slots: [u64; 4] = [t1.addr(), 0, t2.addr(), 0];
