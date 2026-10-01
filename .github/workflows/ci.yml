@@ -288,8 +288,8 @@ jobs:
   # One job per tier, each its own check name, running the Makefile's own
   # `make test-*` targets on the prebuilt files (DESIGN §8.6's tier table,
   # which scripts/check_workflows.py compares with this matrix). `jobs` is
-  # the QEMU runs in parallel inside a tier: 1 until the timing tests and the
-  # §10.2 retried failures are fixed (ROADMAP §10.1).
+  # the QEMU runs in parallel inside a tier (ROADMAP §10.1): 2, on the
+  # runner's 4 CPUs; a tier of one target runs one QEMU whatever it says.
   tier:
     name: tier (${{ matrix.arch }}, ${{ matrix.tier }})
     needs: [check, build]
@@ -301,35 +301,35 @@ jobs:
           - arch: x86_64
             tier: e2e-1
             targets: test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-qmp
-            jobs: 1
+            jobs: 2
           - arch: x86_64
             tier: e2e-2
             targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power
-            jobs: 1
+            jobs: 2
           - arch: x86_64
             tier: in-guest-1
             targets: test-kernel
-            jobs: 1
+            jobs: 2
           - arch: x86_64
             tier: in-guest-2
             targets: test-kernel-smp4
-            jobs: 1
+            jobs: 2
           - arch: x86_64
             tier: in-guest-3
             targets: test-lapic-fallback
-            jobs: 1
+            jobs: 2
           - arch: x86_64
             tier: vibefs-crash
             targets: test-vibefs-crash
-            jobs: 1
+            jobs: 2
           - arch: x86_64
             tier: vibefs-crash-plants
             targets: test-vibefs-crash-plants
-            jobs: 1
+            jobs: 2
           - arch: x86_64
             tier: forensics
             targets: test-forensics
-            jobs: 1
+            jobs: 2
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
     # and DESIGN §8.6 together.
