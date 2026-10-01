@@ -12,6 +12,7 @@ use vibeos::sched::stack_depth;
 
 use crate::fat_init;
 use crate::file_init;
+use crate::fs_init;
 use crate::ktest::{Outcome, sleep_until};
 use crate::shell::cmds::fs::{self as sh, Out};
 use crate::sync_init::SpinMutex;
@@ -403,6 +404,97 @@ fn ls_subdir() -> Step<()> {
     out.run("ls /dev", sh::ls, &["ls", "/dev"])?;
     if !out.has_line(b"null") {
         return Err(Outcome::Fail("ls /dev does not list null"));
+    }
+    Ok(())
+}
+
+// ---- shell_mount_same_path_64 ----
+
+const MNT_TOP: &str = "/kt61m";
+const MNT_AT: &str = "/kt61m/m";
+
+/// Dentries the VFS cache cannot evict (`Vfs::dentries_held`).
+fn held() -> usize {
+    fs_init::with(|v| v.dentries_held())
+}
+
+/// 64 `mount ramfs` of one path, from a thread on `spawn`'s 16 KiB stack:
+/// each mount stacks on the last until the mount table is full, the rest
+/// are `NoSpace`, and the dentries held grow by what the stacked mounts
+/// hold by design and no more; `k` unmounts give them all back.
+pub(crate) fn test_shell_mount_same_path_64() -> Outcome {
+    run_on_spawn_stack("kt61mnt", mount_same_path)
+}
+
+fn mount_same_path() -> Outcome {
+    let mut k = 0usize;
+    let r = mount_64(&mut k);
+    let mut left = 0usize;
+    while left < k && file_init::umount(MNT_AT.as_bytes()).is_ok() {
+        left += 1;
+    }
+    if let Ok(mut o) = BufOut::new() {
+        let _ = sh::rm(&["rm", "-r", MNT_TOP], &mut o);
+    }
+    match r {
+        Ok(()) => Outcome::Ok,
+        Err(o) => o,
+    }
+}
+
+/// The 64 mounts and their checks; `k` counts the mounts that succeeded
+/// and are still mounted.
+fn mount_64(k: &mut usize) -> Step<()> {
+    let mut out = BufOut::new()?;
+    out.run("mkdir -p /kt61m/m", sh::mkdir, &["mkdir", "-p", MNT_AT])?;
+    step("resolve /kt61m/m", file_init::stat_path(MNT_AT.as_bytes()))?;
+    let h0 = held();
+    for _ in 0..64 {
+        out.clear();
+        match sh::mount(&["mount", "ramfs", MNT_AT], &mut out) {
+            Ok(()) => *k = k.saturating_add(1),
+            Err(FsError::NoSpace) => {}
+            Err(e) => {
+                return Err(crate::fail_fmt!(
+                    "mount ramfs /kt61m/m: {}, not NoSpace",
+                    e.as_str()
+                ));
+            }
+        }
+    }
+    if *k == 0 {
+        return Err(Outcome::Fail("no mount ramfs /kt61m/m succeeded"));
+    }
+    // By design, each stacked mount holds its root dentry (the superblock's
+    // count), and the first one's mountpoint, /kt61m/m, becomes held once;
+    // every later mountpoint is the root of the mount below, held already.
+    let h1 = held();
+    let want = h0.saturating_add(*k).saturating_add(1);
+    crate::ktest_info!("{} of 64 mounts: dentries held {} -> {}", *k, h0, h1);
+    if h1 != want {
+        return Err(crate::fail_fmt!(
+            "{} mounts: {h1} dentries held, want {want} (h0 {h0})",
+            *k
+        ));
+    }
+    let null = step(
+        "open /dev/null",
+        file_init::open(
+            b"/dev/null",
+            vibeos::fs::OpenFlags::from_bits(vibeos::fs::O_RDONLY),
+            0,
+        ),
+    )?;
+    step("close /dev/null", file_init::close(null))?;
+    while *k > 0 {
+        out.run("umount /kt61m/m", sh::umount, &["umount", MNT_AT])?;
+        *k -= 1;
+    }
+    let h2 = held();
+    if h2 != h0 {
+        return Err(crate::fail_fmt!(
+            "{h2} dentries held after the unmounts, {h0} before"
+        ));
     }
     Ok(())
 }

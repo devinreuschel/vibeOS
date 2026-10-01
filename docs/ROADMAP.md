@@ -1347,7 +1347,7 @@ the work its claim rests on has landed is the failure KERNEL_REVIEW.md §5 found
 - [x] `open` reserves the descriptor and the open-file slot before it creates or truncates anything; an in-guest test calls `open(O_TRUNC)` with the open-file table full and gets `ENFILE`, and the file's size is unchanged (F057)
 - [x] `rm -r` in the `kernel_shell` build walks with a bounded explicit stack, builds child paths with a length check that returns `NameTooLong`, and removes every entry, not the first 16; an in-guest test runs it on a 20-entry, 8-deep tree (F126)
 - [x] `ls` in the `kernel_shell` build lists a FAT or vibefs subdirectory through the File API's `readdir`, which replaced `vfs_ls_snap`; an in-guest test runs `ls /etc` (F126)
-- [ ] `mount` in the `kernel_shell` build reuses the pinned dentry of an already-mounted path in `FileApi::mount_fs`; an in-guest test runs 64 `mount`s of one path from a thread started with `spawn`'s 16 KiB stack (F126)
+- [x] `mount` in the `kernel_shell` build reuses the pinned dentry of an already-mounted path in `FileApi::mount_fs`; an in-guest test runs 64 `mount`s of one path from a thread started with `spawn`'s 16 KiB stack (F126)
 - [x] `unlink_path` drops the name from the resolved parent, not `/` (F126)
 - [x] FAT timestamps: `fat_datetime` counts years from 1980 with the Gregorian leap rule, `fat_to_unix` is its inverse, and a host test round-trips every day from 1980 through 2107; `FatVol::now` and `Vfs::now` follow `time_init::unix_time_s()` instead of staying 0 (F123)
 - [ ] driver and volume state as instances owned by their device's registry entry (DESIGN §12.1), so a second disk is a second instance and no driver module keeps a list of them (D2)
