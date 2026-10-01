@@ -796,6 +796,11 @@ mod tests {
         assert_eq!(t.alloc(file(1)), Ok(4));
         assert_eq!(t.dup(0), Err(FdError::Full));
         assert_eq!(t.dup2(0, 3), Err(FdError::Busy));
+        // sys_dup2 returns it as EBUSY, not EBADF.
+        assert_eq!(
+            t.dup2(0, 3).map_err(crate::kerror::KError::from),
+            Err(crate::kerror::KError::Busy)
+        );
         assert_eq!(t.reserve(), Err(FdError::Full));
         // A fork's copy leaves it out.
         let mut c = FdTable::try_new(5).unwrap();
