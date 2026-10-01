@@ -15,6 +15,9 @@ from scripts.gen_syscalls import (
     EMITTERS,
     KERNEL_OUT,
     KERROR,
+    KTEST_SRC,
+    LIMITS,
+    PAGING,
     ROOT,
     SYSCALL_MD,
     TABLE,
@@ -41,6 +44,8 @@ args = [
   { name = "buf", type = "char *", ptr = "buf", len = "count", dir = "out", when = "late" },
   { name = "count", type = "size_t" },
 ]
+errors = ["EFAULT", "EINVAL"]
+ktest = { EINVAL = "some_ktest" }
 note = "a note"
 
 [[syscall]]
@@ -51,6 +56,7 @@ args = [
   { name = "flags", type = "int" },
   { name = "mode", type = "umode_t" },
 ]
+errors = ["EPERM", "EFAULT"]
 
 [[syscall]]
 name = "clone"
@@ -64,6 +70,7 @@ args = [
   { name = "tls", type = "unsigned long" },
 ]
 aarch64_order = ["flags", "stack", "parent_tid", "tls", "child_tid"]
+errors = ["EFAULT"]
 
 [[syscall]]
 name = "wait4"
@@ -75,6 +82,7 @@ args = [
   { name = "options", type = "int" },
   { name = "rusage", type = "struct rusage *", unread = "ROADMAP §13.7" },
 ]
+errors = ["EFAULT"]
 """
 
 DOC = """\
@@ -103,21 +111,46 @@ errno_table! {
     Perm = 1, "EPERM", "`mmap` below page 0";
 
     Inval = 22, "EINVAL", "a bad \\"argument\\"";
+    Fault = 14, "EFAULT", "bad user pointer";
 }
 """
 
 
+LIMITS_FIXTURE = "pub const MAX_PROCS: usize = 256;\n"
+PAGING_FIXTURE = """\
+pub const USER_END: u64 = 0x0000_8000_0000_0000;
+const _: () = assert!(USER_MAP_END == 0x0000_7FFF_FFFF_F000);
+"""
+KTEST_FIXTURE = 'const TESTS: &[Test] = &[test("some_ktest", run)];\n'
+
+
 def fixture_root(doc: str = DOC, kerror: str = KERROR_FIXTURE) -> Path:
     root = Path(tempfile.mkdtemp())
-    (root / SYSCALL_MD).parent.mkdir(parents=True)
-    (root / SYSCALL_MD).write_text(doc, encoding="utf-8")
-    (root / KERROR).parent.mkdir(parents=True)
-    (root / KERROR).write_text(kerror, encoding="utf-8")
+    for path, text in (
+        (SYSCALL_MD, doc),
+        (KERROR, kerror),
+        (LIMITS, LIMITS_FIXTURE),
+        (PAGING, PAGING_FIXTURE),
+        (KTEST_SRC / "ktest.rs", KTEST_FIXTURE),
+    ):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(text, encoding="utf-8")
+    return root
+
+
+def tree_root() -> Path:
+    """A copy of the tree's generator inputs and outputs, and `src/`."""
+    root = Path(tempfile.mkdtemp())
+    for p in [TABLE, KERROR, LIMITS, PAGING] + [e.path for e in EMITTERS]:
+        (root / p).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / p, root / p)
+    shutil.copytree(ROOT / KTEST_SRC, root / KTEST_SRC)
     return root
 
 
 def row(body: str, name: str = "x", nr: int = 1) -> str:
-    return f'[[syscall]]\nname = "{name}"\nx86_64 = {nr}\n{body}\n'
+    errors = "" if "errors =" in body else "\nerrors = []"
+    return f'[[syscall]]\nname = "{name}"\nx86_64 = {nr}\n{body}{errors}\n'
 
 
 class GenerateTest(unittest.TestCase):
@@ -225,6 +258,7 @@ class ErrnoTableTest(unittest.TestCase):
         self.assertIn(
             "<!-- gen_syscalls: begin errno-table -->\n\n| Name | Value | Used |\n"
             "|------|------:|------|\n| `EPERM` | 1 | `mmap` below page 0 |\n"
+            "| `EFAULT` | 14 | bad user pointer |\n"
             '| `EINVAL` | 22 | a bad "argument" |\n\n<!-- gen_syscalls: end errno-table -->',
             md,
         )
@@ -239,6 +273,7 @@ class ErrnoTableTest(unittest.TestCase):
             [
                 ErrnoRow("Perm", 1, "EPERM", "`mmap` below page 0"),
                 ErrnoRow("Inval", 22, "EINVAL", 'a bad "argument"'),
+                ErrnoRow("Fault", 14, "EFAULT", "bad user pointer"),
             ],
         )
 
@@ -262,11 +297,8 @@ class ErrnoTableTest(unittest.TestCase):
         self.assertEqual(by_name["ENOSYS"], 38)
 
     def test_check_fails_after_a_hand_edit_of_a_section_2_row(self) -> None:
-        root = Path(tempfile.mkdtemp())
+        root = tree_root()
         self.addCleanup(shutil.rmtree, root)
-        for p in [TABLE, KERROR] + [e.path for e in EMITTERS]:
-            (root / p).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(ROOT / p, root / p)
         md = root / SYSCALL_MD
         text = md.read_text(encoding="utf-8")
         row = "| `ENOSYS` | 38 | unknown number |"
@@ -278,6 +310,67 @@ class ErrnoTableTest(unittest.TestCase):
         self.assertIn(str(SYSCALL_MD), err.getvalue())
 
 
+class ErrorsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = fixture_root()
+        self.addCleanup(shutil.rmtree, self.root)
+
+    def test_errors_column(self) -> None:
+        md = generate(FIXTURE, self.root)[SYSCALL_MD]
+        self.assertIn("| pointer arguments | errors | notes |", md)
+        self.assertIn("| `EFAULT`, `EINVAL` (`some_ktest`) | a note |", md)
+        self.assertIn("| `EPERM`, `EFAULT` | — |", md)
+
+    def test_calls_emission(self) -> None:
+        user = generate(FIXTURE, self.root)[USER_OUT]
+        self.assertIn("pub const MAX_PROCS: usize = 256;", user)
+        self.assertIn("pub const USER_END: u64 = 0x0000_8000_0000_0000;", user)
+        self.assertIn("pub const USER_MAP_END: u64 = 0x0000_7FFF_FFFF_F000;", user)
+        self.assertIn("#[rustfmt::skip]\npub const CALLS: &[Call] = &[", user)
+        read = user[user.index("        sys: Sys::Read,") :]
+        read = read[: read.index("    },")]
+        self.assertIn("errors: &[Errno::EFAULT, Errno::EINVAL],", read)
+        self.assertIn('ktest: &[(Errno::EINVAL, "some_ktest")],', read)
+        self.assertIn(
+            'Ptr { arg: 1, name: "buf", kind: PtrKind::Buf, out: true, nullable: false, '
+            "len_from: Some(2), size: 0 },",
+            read,
+        )
+        # The unread rusage is no declaration; wstatus is.
+        wait4 = user[user.index("        sys: Sys::Wait4,") :]
+        self.assertIn('name: "wstatus", kind: PtrKind::Fixed, out: true', wait4)
+        self.assertNotIn('name: "rusage"', wait4)
+
+    def test_unknown_errno_fails(self) -> None:
+        text = FIXTURE.replace('errors = ["EPERM", "EFAULT"]', 'errors = ["ENOPE", "EFAULT"]')
+        with self.assertRaisesRegex(TableError, "open: errors names ENOPE, which KError lacks"):
+            generate(text, self.root)
+
+    def test_unknown_ktest_fails(self) -> None:
+        text = FIXTURE.replace('"some_ktest"', '"no_such_ktest"')
+        with self.assertRaisesRegex(TableError, "no registered in-guest test"):
+            generate(text, self.root)
+        (self.root / TABLE).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / TABLE).write_text(text, encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(main(["--check"], self.root), 1)
+        self.assertIn("no_such_ktest", err.getvalue())
+
+    def test_errors_rules(self) -> None:
+        ptr = '{ name = "p", type = "char *", ptr = "cstr", when = "w" }'
+        cases = [
+            (row(f"args = [{ptr}]\nerrors = []"), "lists EFAULT"),
+            (row('args = []\nerrors = ["EBADF", "EBADF"]'), "repeats an errno"),
+            (row('args = []\nerrors = ["bad"]'), "list of errno names"),
+            (row('args = []\nerrors = ["EBADF"]\nktest = { EIO = "t" }'), "does not list"),
+            ('[[syscall]]\nname = "x"\nx86_64 = 1\nargs = []\n', "list of errno names"),
+        ]
+        for text, want in cases:
+            with self.subTest(want=want), self.assertRaisesRegex(TableError, want):
+                parse(text)
+
+
 class CheckTest(unittest.TestCase):
     def test_check_passes_on_the_tree(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -286,11 +379,8 @@ class CheckTest(unittest.TestCase):
     def test_check_fails_on_a_changed_output(self) -> None:
         for em in EMITTERS:
             with self.subTest(path=str(em.path)):
-                root = Path(tempfile.mkdtemp())
+                root = tree_root()
                 self.addCleanup(shutil.rmtree, root)
-                for p in [TABLE, KERROR] + [e.path for e in EMITTERS]:
-                    (root / p).parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy(ROOT / p, root / p)
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(main(["--check"], root), 0)
                 target = root / em.path

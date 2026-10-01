@@ -547,3 +547,241 @@ pub unsafe fn psinfo(buf: *mut u8, len: usize) -> Result<usize, Errno> {
     // contract for what the call writes, established here by its caller.
     result(unsafe { syscall2(nr::SYS_PSINFO, buf as usize, len) })
 }
+
+/// `limits::MAX_PROCS`: the process table's slots, zombies included.
+pub const MAX_PROCS: usize = 256;
+/// The user canonical half's exclusive end (DESIGN §4.1).
+pub const USER_END: u64 = 0x0000_8000_0000_0000;
+/// The exclusive end of what a user mapping may cover (C-USERMAPEND).
+pub const USER_MAP_END: u64 = 0x0000_7FFF_FFFF_F000;
+
+/// How the kernel copies through a pointer argument (SYSCALL.md §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PtrKind {
+    /// A buffer whose length another argument holds.
+    Buf,
+    /// A fixed number of bytes.
+    Fixed,
+    /// A NUL-terminated string the kernel reads.
+    Cstr,
+    /// A NULL-terminated array of C strings the kernel reads.
+    Strvec,
+}
+
+/// One declared pointer argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ptr {
+    /// Its register index.
+    pub arg: usize,
+    /// Its name.
+    pub name: &'static str,
+    /// How the kernel copies through it.
+    pub kind: PtrKind,
+    /// Whether the kernel writes through it (`dir = "out"`).
+    pub out: bool,
+    /// Whether NULL is valid and copies nothing.
+    pub nullable: bool,
+    /// The register index of a `Buf`'s length.
+    pub len_from: Option<usize>,
+    /// A `Fixed` pointer's size in bytes.
+    pub size: usize,
+}
+
+/// One call's row: its errors and its declared pointers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Call {
+    /// The call.
+    pub sys: Sys,
+    /// Every errno its handler returns (SYSCALL.md §3).
+    pub errors: &'static [Errno],
+    /// The errnos only a kernel fault produces, each with the in-guest
+    /// test that provokes it.
+    pub ktest: &'static [(Errno, &'static str)],
+    /// Its pointer arguments, but those the kernel does not read yet.
+    pub ptrs: &'static [Ptr],
+}
+
+/// Every row with an x86_64 number, in table order.
+#[rustfmt::skip]
+pub const CALLS: &[Call] = &[
+    Call {
+        sys: Sys::Read,
+        errors: &[Errno::EBADF, Errno::EFAULT, Errno::EISDIR, Errno::EIO],
+        ktest: &[(Errno::EIO, "vblk_bad_sector")],
+        ptrs: &[
+            Ptr { arg: 1, name: "buf", kind: PtrKind::Buf, out: true, nullable: false, len_from: Some(2), size: 0 },
+        ],
+    },
+    Call {
+        sys: Sys::Write,
+        errors: &[Errno::EBADF, Errno::EFAULT, Errno::EINVAL, Errno::EFBIG, Errno::ENOSPC, Errno::EIO],
+        ktest: &[(Errno::EIO, "vblk_bad_sector")],
+        ptrs: &[
+            Ptr { arg: 1, name: "buf", kind: PtrKind::Buf, out: false, nullable: false, len_from: Some(2), size: 0 },
+        ],
+    },
+    Call {
+        sys: Sys::Open,
+        errors: &[Errno::EFAULT, Errno::ENAMETOOLONG, Errno::EINVAL, Errno::ENOENT, Errno::ENOTDIR, Errno::EISDIR, Errno::EEXIST, Errno::EACCES, Errno::ELOOP, Errno::EMFILE, Errno::ENFILE, Errno::ENOSPC, Errno::ENOMEM, Errno::EIO],
+        ktest: &[(Errno::EIO, "vblk_bad_sector"), (Errno::ENOMEM, "kalloc_nomem")],
+        ptrs: &[
+            Ptr { arg: 0, name: "pathname", kind: PtrKind::Cstr, out: false, nullable: false, len_from: None, size: 0 },
+        ],
+    },
+    Call {
+        sys: Sys::Close,
+        errors: &[Errno::EBADF],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Fstat,
+        errors: &[Errno::EBADF, Errno::EFAULT],
+        ktest: &[],
+        ptrs: &[
+            Ptr { arg: 1, name: "statbuf", kind: PtrKind::Fixed, out: true, nullable: false, len_from: None, size: 144 },
+        ],
+    },
+    Call {
+        sys: Sys::Lseek,
+        errors: &[Errno::EBADF, Errno::ESPIPE, Errno::EINVAL],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Mmap,
+        errors: &[Errno::EINVAL, Errno::EBADF, Errno::ENODEV, Errno::ENOMEM, Errno::EPERM, Errno::EEXIST],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Munmap,
+        errors: &[Errno::EINVAL, Errno::ENOMEM],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Brk,
+        errors: &[],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::SchedYield,
+        errors: &[],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Dup,
+        errors: &[Errno::EBADF, Errno::EMFILE],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Dup2,
+        errors: &[Errno::EBADF],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Nanosleep,
+        errors: &[Errno::EFAULT, Errno::EINVAL],
+        ktest: &[],
+        ptrs: &[
+            Ptr { arg: 0, name: "rqtp", kind: PtrKind::Fixed, out: false, nullable: false, len_from: None, size: 16 },
+        ],
+    },
+    Call {
+        sys: Sys::Getpid,
+        errors: &[],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Fork,
+        errors: &[Errno::EAGAIN, Errno::ENOMEM],
+        ktest: &[(Errno::ENOMEM, "fork_oom")],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Execve,
+        errors: &[Errno::EFAULT, Errno::ENAMETOOLONG, Errno::EINVAL, Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::ENFILE, Errno::E2BIG, Errno::ENOEXEC, Errno::ENOMEM],
+        ktest: &[],
+        ptrs: &[
+            Ptr { arg: 0, name: "pathname", kind: PtrKind::Cstr, out: false, nullable: false, len_from: None, size: 0 },
+            Ptr { arg: 1, name: "argv", kind: PtrKind::Strvec, out: false, nullable: true, len_from: None, size: 0 },
+            Ptr { arg: 2, name: "envp", kind: PtrKind::Strvec, out: false, nullable: true, len_from: None, size: 0 },
+        ],
+    },
+    Call {
+        sys: Sys::Exit,
+        errors: &[],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Wait4,
+        errors: &[Errno::ECHILD, Errno::EFAULT],
+        ktest: &[],
+        ptrs: &[
+            Ptr { arg: 1, name: "wstatus", kind: PtrKind::Fixed, out: true, nullable: true, len_from: None, size: 4 },
+        ],
+    },
+    Call {
+        sys: Sys::Kill,
+        errors: &[Errno::EINVAL, Errno::ESRCH],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Fcntl,
+        errors: &[Errno::EBADF, Errno::EINVAL],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Getppid,
+        errors: &[],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Reboot,
+        errors: &[Errno::EINVAL, Errno::EFAULT],
+        ktest: &[],
+        ptrs: &[
+            Ptr { arg: 3, name: "arg", kind: PtrKind::Cstr, out: false, nullable: false, len_from: None, size: 0 },
+        ],
+    },
+    Call {
+        sys: Sys::Getdents64,
+        errors: &[Errno::EBADF, Errno::ENOTDIR, Errno::ESPIPE, Errno::EINVAL, Errno::EFAULT],
+        ktest: &[],
+        ptrs: &[
+            Ptr { arg: 1, name: "dirent", kind: PtrKind::Buf, out: true, nullable: false, len_from: Some(2), size: 0 },
+        ],
+    },
+    Call {
+        sys: Sys::Psinfo,
+        errors: &[Errno::EFAULT],
+        ktest: &[],
+        ptrs: &[
+            Ptr { arg: 0, name: "buf", kind: PtrKind::Buf, out: true, nullable: false, len_from: Some(1), size: 0 },
+        ],
+    },
+];

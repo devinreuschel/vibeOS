@@ -13,15 +13,24 @@
 //! vibeOS: utest: ok <name>
 //! vibeOS: utest: FAIL <name>: <why>
 //! vibeOS: utest: skip <name>: <reason>
+//! vibeOS: utest: info <name>: <text>
 //! vibeOS: utest: end
 //! ```
 //!
 //! So a suite does its work only inside its cases' closures. Nothing in the
-//! guest enforces a case's deadline. A case that forks ends its child in
-//! `sys::exit`, never back in the runner.
+//! guest enforces a case's deadline: the harness's progress deadline, from
+//! the one each `run` line prints, is the only one (`tests/harness/utest.py`).
+//! A case that forks ends its child in `sys::exit`, never back in the
+//! runner ([`fork_child`]). An `info` line is a case's detail, never a
+//! result ([`info`]).
 
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::{self, Write};
 
+use crate::rt;
 use crate::sys::{self, Errno};
 
 /// A case's result.
@@ -35,7 +44,8 @@ pub enum Outcome {
     Skip(&'static str),
 }
 
-/// The deadline every case's `run` line names, in milliseconds.
+/// The deadline a case's `run` line names unless [`Runner::case_ms`] gives
+/// another, in milliseconds.
 pub const DEFAULT_DEADLINE_MS: u32 = 10_000;
 
 /// The longest protocol line, newline included: a longer one is cut.
@@ -47,6 +57,8 @@ pub struct Runner {
     counting: bool,
     count: u32,
     failed: u32,
+    // Every case's name, from the count pass.
+    names: Vec<&'static str>,
 }
 
 impl Runner {
@@ -56,6 +68,7 @@ impl Runner {
             counting: false,
             count: 0,
             failed: 0,
+            names: Vec::new(),
         }
     }
 
@@ -64,6 +77,7 @@ impl Runner {
     pub fn run_suites(&mut self, suites: &[fn(&mut Runner)]) {
         self.counting = true;
         self.count = 0;
+        self.names.clear();
         for suite in suites {
             suite(self);
         }
@@ -78,13 +92,21 @@ impl Runner {
     /// One case: in the count pass, count it; otherwise print its `run`
     /// line, run `f`, and print its result.
     pub fn case(&mut self, name: &'static str, f: impl FnOnce() -> Outcome) {
+        self.case_ms(name, DEFAULT_DEADLINE_MS, f);
+    }
+
+    /// [`Runner::case`] with a deadline of `deadline_ms` on its `run` line,
+    /// for a case that needs longer than [`DEFAULT_DEADLINE_MS`].
+    pub fn case_ms(&mut self, name: &'static str, deadline_ms: u32, f: impl FnOnce() -> Outcome) {
         if self.counting {
             self.count += 1;
+            // A failed push only makes `is_registered` miss the name.
+            if self.names.try_reserve(1).is_ok() {
+                self.names.push(name);
+            }
             return;
         }
-        line(format_args!(
-            "vibeOS: utest: run {name} {DEFAULT_DEADLINE_MS}"
-        ));
+        line(format_args!("vibeOS: utest: run {name} {deadline_ms}"));
         match f() {
             Outcome::Ok => line(format_args!("vibeOS: utest: ok {name}")),
             Outcome::Fail(why) => {
@@ -99,6 +121,94 @@ impl Runner {
     pub fn failed(&self) -> u32 {
         self.failed
     }
+
+    /// Whether a case named `name` runs in this run: complete once the
+    /// count pass is done, so a suite asks it outside its cases' closures.
+    pub fn is_registered(&self, name: &str) -> bool {
+        self.names.contains(&name)
+    }
+}
+
+/// Print `vibeOS: utest: info <name>: <args>`: a case's detail, never a
+/// result.
+pub fn info(name: &str, args: fmt::Arguments<'_>) {
+    line(format_args!("vibeOS: utest: info {name}: {args}"));
+}
+
+/// A failure whose text is formatted: the text lives until the process
+/// exits, which a failing case's run reaches soon.
+pub fn fail(args: fmt::Arguments<'_>) -> Outcome {
+    let mut s = String::new();
+    if s.write_fmt(args).is_err() {
+        return Outcome::Fail("a failure message did not format");
+    }
+    Outcome::Fail(s.leak())
+}
+
+/// What a call returned, for a failure message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Got(pub Result<usize, Errno>);
+
+impl fmt::Display for Got {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Ok(v) => write!(f, "{v}"),
+            Err(e) => write!(f, "-{}", e.0),
+        }
+    }
+}
+
+/// `Ok` when `r` is the error `want`; else what it was.
+pub fn expect_err(r: Result<usize, Errno>, want: Errno) -> Result<(), Got> {
+    if r == Err(want) { Ok(()) } else { Err(Got(r)) }
+}
+
+/// The value `r` succeeded with; else the error.
+pub fn expect_ok(r: Result<usize, Errno>) -> Result<usize, Got> {
+    r.map_err(|e| Got(Err(e)))
+}
+
+/// Fork a child that runs `f` and exits with its return value: it never
+/// returns to the caller, so it never touches the [`Runner`]. The child's
+/// pid, in the parent.
+pub fn fork_child(f: impl FnOnce() -> i32) -> Result<usize, Errno> {
+    match fork()? {
+        0 => rt::exit(f()),
+        pid => Ok(pid),
+    }
+}
+
+/// Wait for child `pid` (`wait4(pid, &status, 0)`): its status word.
+pub fn wait_status(pid: usize) -> Result<u32, Errno> {
+    let mut status = 0i32;
+    // SAFETY: `wait4` writes 4 bytes through `&raw mut status`, a local no
+    // reference covers, and nothing through the null rusage; established here.
+    let r = unsafe { sys::wait4(pid as i32, &raw mut status, 0, core::ptr::null_mut()) }?;
+    if r != pid {
+        return Err(Errno::ECHILD);
+    }
+    Ok(status as u32)
+}
+
+/// The exit code a status word holds (`WIFEXITED`, `WEXITSTATUS`).
+pub fn exited(status: u32) -> Option<u8> {
+    sys::exit_code(status)
+}
+
+/// The signal that ended the process (`WIFSIGNALED`, `WTERMSIG`).
+pub fn signaled(status: u32) -> Option<u8> {
+    let sig = (status & 0x7f) as u8;
+    (sig != 0 && sig != 0x7f).then_some(sig)
+}
+
+/// `SIGCONT`, from signal(7): continues a stopped process, and is harmless
+/// to a running one.
+pub const SIGCONT: i32 = 18;
+
+/// Whether child `pid` is a zombie: `kill(pid, SIGCONT)` returns `ESRCH`
+/// for one, as SYSCALL.md §3.1 documents.
+pub fn zombie(pid: usize) -> bool {
+    sys::kill(pid as i32, SIGCONT) == Err(Errno::ESRCH)
 }
 
 /// `fork`, out of line: the call's clobbers then cover every vector
