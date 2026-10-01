@@ -37,7 +37,7 @@ jobs:
     # migratable vCPU even under KVM, so the leg asks for it (ROADMAP §10.1).
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
-      APT_PACKAGES: qemu-system-x86 xorriso nasm dosfstools
+      APT_PACKAGES: qemu-system-x86 xorriso dosfstools
       VIBEOS_QEMU_ACCEL: kvm
       VIBEOS_QEMU_CPU: max,+invtsc
     steps:
@@ -175,7 +175,7 @@ jobs:
     # and DESIGN §8.6 together.
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
-      APT_PACKAGES: qemu-system-x86 xorriso nasm dosfstools
+      APT_PACKAGES: qemu-system-x86 xorriso dosfstools
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -282,7 +282,7 @@ jobs:
     # and DESIGN §8.6 together. setup.sh needs qemu-system-x86_64.
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
-      APT_PACKAGES: qemu-system-x86 xorriso nasm dosfstools
+      APT_PACKAGES: qemu-system-x86 xorriso dosfstools
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

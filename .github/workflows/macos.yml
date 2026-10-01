@@ -29,11 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # setup.sh requires QEMU, xorriso and nasm; fsck.fat (dosfstools) lands
+      # setup.sh requires QEMU and xorriso; fsck.fat (dosfstools) lands
       # in Homebrew's sbin, which is not on the runner's PATH.
       - name: install host tools
         run: |
-          brew install qemu xorriso nasm dosfstools
+          brew install qemu xorriso dosfstools
           echo "$(brew --prefix)/sbin" >> "$GITHUB_PATH"
 
       # The versions ci.yml's check job pins (ROADMAP §10.1, DX1).
@@ -74,7 +74,7 @@ jobs:
 
       - name: install host tools
         run: |
-          brew install qemu xorriso nasm dosfstools
+          brew install qemu xorriso dosfstools
           echo "$(brew --prefix)/sbin" >> "$GITHUB_PATH"
 
       - name: install rust

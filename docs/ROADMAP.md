@@ -386,7 +386,7 @@ rest of the project, which is the single most consequential decision in this pha
 
 ### 0.7 CI
 - [x] GitHub Actions on push and pull request, Linux runner
-- [x] install `qemu-system-x86`, `nasm`, `xorriso`; bootstrap Limine
+- [x] install `qemu-system-x86` and `xorriso`; bootstrap Limine
 - [x] `cargo fmt --check` and `cargo clippy -- -D warnings`, with the kernel linted once for each feature set an ISO is built with and with `kernel_shell` (§10.1); `make` compiles the kernel with `-D warnings`, which `[target.x86_64-unknown-none].rustflags` carries because that table shadows `[build]`'s and CI sets no `RUSTFLAGS` (F147)
 - [x] `check` job (`make check`, then an 87% line-coverage floor on `vibeos-core` from `cargo llvm-cov`) before the QEMU ladder
 - [x] run host units, harness units, ISO build, e2e
