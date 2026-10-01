@@ -37,10 +37,10 @@ and `clone` copy the parent's, and the context switch keeps each thread's
 ([section 7.5](SMP.md#75-per-cpu-data)), since ring 3 can load `0x2b` or 0 itself. Slot `0x20` stays null
 because it is Linux's compat code segment, and a far transfer or `rt_sigreturn` to `0x23` gets
 `SIGSEGV` (`docs/LINUX.md`, `no-compat-cs`). The kernel selectors are invisible to user code and keep
-their places. Rule; not yet enforced: ROADMAP §10.6. Today user data is `0x18`, user code `0x20`, and
-the TSS `0x28`, and `STAR.SYSRET_CS` is `0x10`, so ring 3 runs with CS `0x23`, which is Linux's compat
-code selector, and SS `0x1B`, and `syscall_init::first_return` loads `0x1B` into DS, ES, FS,
-and GS.
+their places. `vibeos::desc` holds the layout, `desc::star_value()` the STAR value both
+`syscall_init::init_cpu` and the in-guest `star_sysret_layout` use. The null DS, ES, FS, and GS are a
+rule not yet enforced: ROADMAP §10.6. Today `syscall_init::first_return` loads `0x2b` into DS, ES,
+FS, and GS.
 
 Syscalls reach user memory through `vibeos::proc::uaccess` and its kernel half
 `proc::uaccess_init` (ROADMAP §10.6): `copy_from_user`, `copy_to_user`, their `_partial` forms,

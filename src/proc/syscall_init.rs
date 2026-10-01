@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
-use vibeos::desc::{KERNEL_CS, STAR_SYSRET, USER_CS_RPL, USER_DS_RPL};
+use vibeos::desc::{USER_CS_RPL, USER_DS_RPL, star_value};
 use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
@@ -282,7 +282,7 @@ unsafe extern "C" {
 pub unsafe fn init_cpu() {
     crate::arch::cpu::init_control_regs();
     let entry = vibeos_syscall_entry as *const () as u64;
-    let star = ((STAR_SYSRET as u64) << 48) | ((KERNEL_CS as u64) << 32);
+    let star = star_value();
     // SAFETY: STAR, LSTAR, FMASK and EFER are architectural MSRs that
     // every x86_64 CPU has; STAR names the GDT's selectors and LSTAR the
     // entry stub, and EFER keeps its other bits. The GDT is loaded (this

@@ -84,7 +84,7 @@ Relevant MSRs across this section:
 | `0x1B` | `IA32_APIC_BASE`. Bit 11 global enable, bits 12–35 base, bit 8 BSP flag. |
 | `0x6E0` | `IA32_TSC_DEADLINE`. Write 0 to disarm. After an LVT timer write into TSC-deadline mode, `MFENCE` before this MSR. |
 | `0xC000_0080` | `IA32_EFER`. Bit 0 SCE, bit 8 LME, bit 11 NXE. |
-| `0xC000_0081` | `IA32_STAR`. `SYSCALL` loads CS `0x08`; `SYSRET` base `0x10` gives user SS `0x1B` and CS `0x23`. Planned (ROADMAP §10.6): base `0x23`, giving SS `0x2b` and CS `0x33`, as on Linux ([section 5.1](INTERRUPTS.md#51-gdt-and-tss)). |
+| `0xC000_0081` | `IA32_STAR`, `desc::star_value()` = `0x0023_0008_0000_0000`. `SYSCALL` loads CS `0x08` (SS `0x10`); `SYSRET` base `0x23` gives user SS `0x2b` and CS `0x33`, as on Linux ([section 5.1](INTERRUPTS.md#51-gdt-and-tss)). |
 | `0xC000_0082` | `IA32_LSTAR`. `vibeos_syscall_entry`. |
 | `0xC000_0084` | `IA32_FMASK`. `0x47700`: `SYSCALL` clears TF, IF, DF, IOPL, NT, and AC. |
 | `0xC000_0100` | `IA32_FS_BASE`. User TLS base, written by `syscall_init::first_return` and `execve`; not switched per thread ([section 7.5](#75-per-cpu-data)). |

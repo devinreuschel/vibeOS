@@ -39,11 +39,11 @@ convention, tagged pointers, and `FS_BASE`), §12.3 (copy-on-write `fork`),
 | return | `rax` | see §2 |
 | clobber | `rcx`, `r11` | RIP and RFLAGS |
 
-Segment selectors are ABI (DESIGN §5.1). The rule ROADMAP §10.6
-implements: a process runs with CS `0x33`, SS `0x2b`, and DS, ES, FS, and GS
-0, as on Linux; `execve` loads them, and `fork` copies the parent's DS, ES,
-FS, and GS. Today ring 3 runs with CS `0x23` and SS, DS, ES, FS, and GS
-`0x1B`.
+Segment selectors are ABI (DESIGN §5.1). A process runs with CS `0x33` and
+SS `0x2b`, as on Linux: `IA32_STAR`'s SYSRET base is `0x23`, and `sysretq`
+loads SS from +8 and CS from +16. The rule ROADMAP §10.6 implements: DS, ES,
+FS, and GS hold 0, `execve` loads them, and `fork` copies the parent's DS,
+ES, FS, and GS. Today ring 3 runs with `0x2b` in DS, ES, FS, and GS.
 
 Numbers and arguments are read as Linux's entry code reads them (ROADMAP
 §10.5): the number is `eax` sign-extended, so the high half of `rax` is

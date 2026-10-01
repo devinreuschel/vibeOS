@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use vibeos::desc::{KERNEL_CS, STAR_SYSRET};
+use vibeos::desc::star_value;
 
 use crate::addr_space_init;
 use crate::arch::current::AddressSpace;
@@ -31,14 +31,13 @@ pub(crate) fn cr3_was_skipped(space: &AddressSpace) -> bool {
         == space.root().as_u64()
 }
 
-/// STAR holds the kernel and SYSRET selectors, and EFER.SCE is set.
+/// STAR holds `desc::star_value()` (the kernel and Linux's SYSRET
+/// selectors), and EFER.SCE is set.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn star_configured() -> bool {
     let star = x86::rdmsr(IA32_STAR);
     let efer = x86::rdmsr(IA32_EFER);
-    let syscall_cs = ((star >> 32) & 0xFFFF) as u16;
-    let sysret_cs = ((star >> 48) & 0xFFFF) as u16;
-    syscall_cs == KERNEL_CS && sysret_cs == STAR_SYSRET && (efer & EFER_SCE) != 0
+    star == star_value() && (efer & EFER_SCE) != 0
 }
 
 // Frame counts around `user_init::load_path`, recorded by its inline hook
