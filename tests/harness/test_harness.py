@@ -37,6 +37,7 @@ from tests.harness.harness import (
     VBLK_PATTERN_XOR,
     DeadlineReader,
     EnvConfig,
+    Firmware,
     HarnessError,
     Marker,
     QemuConfig,
@@ -61,6 +62,7 @@ from tests.harness.harness import (
     run_qemu_and_check,
     run_qemu_console_input,
     serial_tail,
+    sh_power_command,
     virtio_blk_args,
     write_blkdebug_config,
 )
@@ -806,27 +808,45 @@ class TestQemuExitReport(unittest.TestCase):
 
 CONSOLE_OK_LINES = [
     "vibeOS: shell ready",
-    "$ echo serial-ok",
+    "vibeos> echo serial-ok",
     "serial-ok",
-    "$ echo ps2-ok",
+    "vibeos> false",
+    "sh: false: exit 1",
+    "vibeos> ps",
+    "1 0 run init",
+    "2 1 run sh",
+    "vibeos> echo ps2-ok",
     "ps2-ok",
 ]
+CONSOLE_INPUTS = [b"echo serial-ok\n", b"false\n", b"ps\n"]
 
 
 class TestConsoleInput(unittest.TestCase):
     """`run_qemu_console_input` driven through `FakeLineSource`."""
 
-    def test_serial_then_sendkey_then_quit(self) -> None:
+    def test_serial_then_sendkey_then_poweroff(self) -> None:
         src = FakeLineSource.from_lines(CONSOLE_OK_LINES, end="timeout")
         result = run_qemu_console_input(FAKE_CFG, line_source=src)
-        self.assertEqual(result.matched, ["shell_ready", "serial_echo", "ps2_echo"])
-        self.assertEqual(src.inputs, [b"echo serial-ok\n"])
+        self.assertEqual(
+            result.matched,
+            [
+                "shell_ready",
+                "serial_echo",
+                "sh_status",
+                "sh_ps",
+                "ps2_echo",
+                "sh_poweroff",
+                "console_input_sh",
+            ],
+        )
+        self.assertEqual(src.inputs, [*CONSOLE_INPUTS, b"poweroff\n"])
         self.assertEqual(len(src.monitor_cmds), 1)
         self.assertTrue(src.monitor_cmds[0].startswith("sendkey e-c-h-o-spc-p-s-2"))
-        self.assertTrue(src.quit_sent)
+        self.assertFalse(src.quit_sent)
+        self.assertEqual(result.exit_code, 0)
 
     def test_missing_ps2_echo_fails(self) -> None:
-        src = FakeLineSource.from_lines(CONSOLE_OK_LINES[:3])
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES[:9])
         with self.assertRaises(HarnessError) as cm:
             run_qemu_console_input(FAKE_CFG, line_source=src)
         self.assertIn("PS/2 sendkey echo missing", str(cm.exception))
@@ -862,15 +882,17 @@ class TestConsoleTail(unittest.TestCase):
             run_qemu_console_input(cfg, line_source=src)
         self.assertIn("overdue tid 7", str(cm.exception))
 
-    def test_timeout_passes_and_quits(self) -> None:
+    def test_timeout_passes_and_powers_off(self) -> None:
         src = FakeLineSource.from_lines(CONSOLE_OK_LINES + ["chatter"], end="timeout")
         t0 = time.monotonic()
         result = run_qemu_console_input(FAKE_CFG, line_source=src)
-        self.assertTrue(src.quit_sent)
+        self.assertFalse(src.quit_sent)
         self.assertFalse(src.killed)
         self.assertEqual(result.lines[-1], "chatter")
-        self.assertEqual(len(src.deadlines), 1)
+        # The tail's deadline, then the power command's.
+        self.assertEqual(len(src.deadlines), 2)
         self.assertGreaterEqual(src.deadlines[0], t0 + 2.9)
+        self.assertEqual(src.inputs[-1], b"poweroff\n")
 
     def test_eof_in_tail_fails_with_status(self) -> None:
         src = FakeLineSource.from_lines(
@@ -882,6 +904,75 @@ class TestConsoleTail(unittest.TestCase):
         self.assertIn("QEMU exited in the 3.0 s after the last reply", msg)
         self.assertIn("status 3", msg)
         self.assertIn("qemu: gone", msg)
+
+
+class TestConsoleInputShell(unittest.TestCase):
+    """The console boot's `/bin/sh` steps (ROADMAP §10.5): `PATH`, a status
+    line, `ps`, and the power built-in QEMU must exit 0 after."""
+
+    UEFI = dataclasses.replace(FAKE_CFG, firmware=Firmware("x86_64", "code.fd", "vars.fd"))
+
+    def test_sh_steps_in_order(self) -> None:
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES, end="timeout")
+        result = run_qemu_console_input(FAKE_CFG, line_source=src)
+        self.assertEqual(src.inputs, [*CONSOLE_INPUTS, b"poweroff\n"])
+        self.assertEqual(result.matched[-2:], ["sh_poweroff", "console_input_sh"])
+        # A step's reply before its command was typed does not count.
+        early = ["vibeOS: shell ready", "sh: false: exit 1", "1 0 run init", "serial-ok"]
+        src = FakeLineSource.from_lines(early, end="timeout")
+        with self.assertRaisesRegex(HarnessError, "missing 'sh: false: exit 1'"):
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        self.assertEqual(src.inputs, [b"echo serial-ok\n", b"false\n"])
+
+    def test_echoed_false_is_not_status(self) -> None:
+        lines = [*CONSOLE_OK_LINES[:4], "vibeos> sh: false: exit 1", *CONSOLE_OK_LINES[5:]]
+        src = FakeLineSource.from_lines(lines, end="timeout")
+        with self.assertRaisesRegex(HarnessError, "missing 'sh: false: exit 1'"):
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        self.assertNotIn(b"ps\n", src.inputs)
+        framed = [*CONSOLE_OK_LINES[:4], K("sh: false: exit 1"), *CONSOLE_OK_LINES[5:]]
+        src = FakeLineSource.from_lines(framed, end="timeout")
+        with self.assertRaisesRegex(HarnessError, "missing 'sh: false: exit 1'"):
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+
+    def test_missing_status_line_fails(self) -> None:
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES[:4])
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        msg = str(cm.exception)
+        self.assertIn("missing 'sh: false: exit 1'", msg)
+        self.assertIn("--- serial tail", msg)
+        self.assertIn("vibeos> false", msg)
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES[:6])
+        with self.assertRaisesRegex(HarnessError, "missing pid 1's `ps` line"):
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+
+    def test_uefi_ends_with_reboot(self) -> None:
+        self.assertEqual(sh_power_command(FAKE_CFG), "poweroff")
+        self.assertEqual(sh_power_command(self.UEFI), "reboot")
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES, end="timeout")
+        result = run_qemu_console_input(self.UEFI, line_source=src)
+        self.assertEqual(src.inputs[-1], b"reboot\n")
+        self.assertEqual(result.matched[-2:], ["sh_reboot", "console_input_sh"])
+
+    def test_qemu_must_exit_after_power_command(self) -> None:
+        # QEMU still runs SH_POWER_EXIT_S after the command: killed, failed.
+        events = [("line", ln) for ln in CONSOLE_OK_LINES]
+        events += [("timeout", ""), ("line", K("vibeOS: reboot: power off")), ("timeout", "")]
+        src = FakeLineSource(events, exit_code=None)
+        with self.assertRaisesRegex(HarnessError, "QEMU still ran 10.0 s after 'poweroff'"):
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        self.assertTrue(src.killed)
+        # QEMU exits, but not with status 0.
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES, end="timeout", exit_code=1)
+        with self.assertRaisesRegex(HarnessError, "QEMU exited 1 after 'poweroff', want 0"):
+            run_qemu_console_input(FAKE_CFG, line_source=src)
+        # A panic while powering off fails too.
+        events = [("line", ln) for ln in CONSOLE_OK_LINES]
+        events += [("timeout", ""), ("line", K("vibeOS: panic: x"))]
+        src = FakeLineSource(events, exit_code=0)
+        with self.assertRaisesRegex(HarnessError, "vibeOS: panic:"):
+            run_qemu_console_input(FAKE_CFG, line_source=src)
 
 
 class TestPanicSignatureScan(unittest.TestCase):
