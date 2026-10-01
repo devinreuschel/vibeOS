@@ -47,11 +47,37 @@ SECTIONS
         *(.rodata .rodata.*)
     } :rodata
 
+    /* The user accessors' exception-table records (INTERRUPTS §5.1): read
+     * only, and kept whole because nothing references them by symbol. */
+    __ex_table : ALIGN(4) {
+        __ex_table_start = .;
+        KEEP(*(__ex_table))
+        __ex_table_end = .;
+    } :rodata
+
+    /* The linker's GNU build-id note (--build-id=sha1), which the
+     * VMCOREINFO note carries (docs/VMCOREINFO.md). Kept ahead of the
+     * /DISCARD/ rule for .note.*, read-only inside __rodata_*. */
+    .note.gnu.build-id : ALIGN(4) {
+        __build_id_start = .;
+        KEEP(*(.note.gnu.build-id))
+        __build_id_end = .;
+    } :rodata
+
     /* Inside __rodata_* so paging maps it (copied to 0x8000, not executed here). */
     .trampoline : ALIGN(16) {
         __trampoline_start = .;
         KEEP(*(.trampoline))
         __trampoline_end = .;
+    } :rodata
+
+    /* The ksyms table (scripts/gen_ksyms.py). Inside __rodata_* so paging
+     * maps it; the kernel reads it only through these bounds, so the second
+     * ksyms link leaves .text where the first put it (DESIGN §2.5). */
+    .ksyms : ALIGN(8) {
+        __ksyms_start = .;
+        KEEP(*(.ksyms))
+        __ksyms_end = .;
     } :rodata
     __rodata_end = .;
 
@@ -76,6 +102,12 @@ SECTIONS
 
     . = ALIGN(4K);
     __kernel_vma_end = .;
+
+    /* Frame sizes from -Z emit-stack-sizes: INFO, so nothing maps or loads
+     * them; scripts/check_stack_sizes.py reads them from the ELF. */
+    .stack_sizes 0 (INFO) : {
+        KEEP(*(.stack_sizes))
+    }
 
     /DISCARD/ : {
         *(.eh_frame*)

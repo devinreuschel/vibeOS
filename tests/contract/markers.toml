@@ -1,0 +1,1631 @@
+# The marker registry (ROADMAP §10.2, TESTING.md §8.3): every line the kernel
+# prints with `marker!` and every line the harness matches, one `[[marker]]`
+# row each. `tests/harness/registry.py` loads it; `tests/harness/harness.py`
+# builds each configuration's contract list and every failure list from it;
+# `scripts/check_markers.py` (in `make check`) keeps it, `src/` and
+# `crates/core/src/marker.rs` in agreement.
+#
+# A row's keys:
+#   text     required. Placeholders are `<[a-z_]+>` and stand for the parts
+#            that vary; the text never starts with one.
+#   kind     `contract` (asserted in order), `diagnostic` (printed, not
+#            asserted), `failure` (the harness fails the run on it: a panic
+#            signature, a failure line, or a halt reason), or `test` (the
+#            ktest and utest protocol).
+#   arch     `both`, `x86_64` (a line that names x86 hardware), or `aarch64`.
+#   source   `kernel` (matched on framed lines, DESIGN §2.6), `user`
+#            (unframed), or `limine` (unframed, before the first framed line).
+#   section  `§N.M`, the ROADMAP `### N.M` section whose work prints the line.
+#   order    contract rows only: a unique int, in steps of 10; the contract
+#            is in this order.
+#   name     contract rows only: the name the harness reports the marker by.
+#   when     contract rows only, optional: terms that must all hold, from
+#            `hpet`, `pit`, `smp>1`, `gp_test`, `panic_test`,
+#            `panic_nest_test` and `panic_stop_test`, each
+#            optionally prefixed with `!`. Absent means every configuration.
+#   repeat   contract rows only, optional: `"per_ap"`. Consecutive per-AP
+#            rows form a group that repeats for each AP `i` in `1..N`, with
+#            `<n>` bound to `i` and `<ap>` to `i - 1` in text and name. The
+#            contract row after the group comes after exactly `N - 1` lines
+#            of the group's last row and before any other (F141).
+#   `<mode>` is bound by the harness to the LAPIC timer mode it expects.
+#
+# A failure row whose placeholders all follow its last literal fails a line
+# that holds the text before its first placeholder (its head signature);
+# any other failure row fails a line its pattern matches.
+#
+# C-MARKERS: a slice that prints a new line the harness should know adds its
+# row in the commit that first prints it, in the block of its ROADMAP
+# section below (blocks in ROADMAP section order), with a `Gate-change:`
+# trailer.
+
+# §0.3 Limine handshake
+
+[[marker]]
+text = "vibeOS: limine: rev 3 ok"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§0.3"
+order = 20
+name = "limine_ok"
+
+[[marker]]
+text = "vibeOS: limine: base revision unsupported"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.3"
+
+[[marker]]
+text = "vibeOS: limine: hhdm missing"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.3"
+
+[[marker]]
+text = "vibeOS: limine: memmap missing"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.3"
+
+[[marker]]
+text = "vibeOS: limine: executable_address missing"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.3"
+
+[[marker]]
+text = "vibeOS: limine: rsdp missing"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.3"
+
+# Limine's own panic line, before the kernel runs; Limine colours `PANIC`.
+[[marker]]
+text = "PANIC: <text>"
+kind = "failure"
+arch = "both"
+source = "limine"
+section = "§0.3"
+
+# §0.4 Serial and panic
+
+[[marker]]
+text = "vibeOS: serial online"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§0.4"
+order = 10
+name = "serial_online"
+
+[[marker]]
+text = "vibeOS: boot: panic-test armed"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§0.4"
+order = 30
+name = "panic_test_armed"
+when = ["panic_test"]
+
+[[marker]]
+text = "panicked at"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.4"
+
+[[marker]]
+text = "vibeOS: panic:"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.4"
+
+[[marker]]
+text = "vibeOS: panic: reentered"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.4"
+
+[[marker]]
+text = "vibeOS: panic: at <text>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.4"
+
+[[marker]]
+text = "vibeOS: panic: msg: <text>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.4"
+
+[[marker]]
+text = "vibeOS: panic: thread <text>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.4"
+
+[[marker]]
+text = "vibeOS: panic: halted"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§0.4"
+
+# §1.1 Buddy physical allocator
+
+[[marker]]
+text = "vibeOS: pmm: <n> free 4KiB frames"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§1.1"
+order = 40
+name = "pmm_free_frames"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: pmm: <n> total, largest order <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§1.1"
+
+# §1.2 Page tables
+
+[[marker]]
+text = "vibeOS: paging: cr3 ok"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§1.2"
+order = 50
+name = "paging_cr3_ok"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: paging: map_end <addr> (<n> MiB)"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§1.2"
+
+[[marker]]
+text = "vibeOS: paging: kernel .text <n> B, .rodata <n> B, .data+bss <n> B"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§1.2"
+
+[[marker]]
+text = "vibeOS: paging: bootloader stack pml4 entry duplicated"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§1.2"
+
+[[marker]]
+text = "vibeOS: paging: no frame for the PML4"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§1.2"
+
+[[marker]]
+text = "vibeOS: paging: physmap map failed"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§1.2"
+
+[[marker]]
+text = "vibeOS: paging: low identity map failed"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§1.2"
+
+[[marker]]
+text = "vibeOS: paging: kernel section map failed"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§1.2"
+
+# §1.3 MMIO attributes
+
+[[marker]]
+text = "vibeOS: paging: mmio uc"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§1.3"
+order = 60
+name = "paging_mmio_uc"
+when = ["!panic_test"]
+
+# §1.4 Kernel heap
+
+[[marker]]
+text = "vibeOS: heap ok"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§1.4"
+order = 70
+name = "heap_ok"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: heap: initial map failed"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§1.4"
+
+# §1.5 Kernel VA allocator
+
+[[marker]]
+text = "vibeOS: kva: ready"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§1.5"
+order = 80
+name = "kva_ready"
+when = ["!panic_test"]
+
+# §1.6 In-guest test infrastructure
+
+[[marker]]
+text = "vibeOS: ktest: begin <n>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§1.6"
+
+[[marker]]
+text = "vibeOS: ktest: ok <name> (<us> us)"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§1.6"
+
+[[marker]]
+text = "vibeOS: ktest: FAIL <name>: <why>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§1.6"
+
+[[marker]]
+text = "vibeOS: ktest: skip <name>: <reason>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§1.6"
+
+[[marker]]
+text = "vibeOS: ktest: end"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§1.6"
+
+# A test's indented detail lines.
+[[marker]]
+text = "vibeOS: ktest:   <text>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§1.6"
+
+# §2.1 GDT, TSS, IST
+
+[[marker]]
+text = "vibeOS: gdt ok"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§2.1"
+order = 90
+name = "gdt_ok"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: gdt: ist df stack allocation failed"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.1"
+
+[[marker]]
+text = "vibeOS: gdt: ist nmi stack allocation failed"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.1"
+
+[[marker]]
+text = "vibeOS: gdt: ist mc stack allocation failed"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.1"
+
+[[marker]]
+text = "vibeOS: gdt: ist db stack allocation failed"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.1"
+
+[[marker]]
+text = "vibeOS: gdt: tss rsp0 stack allocation failed"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.1"
+
+# §2.2 IDT and exceptions
+
+[[marker]]
+text = "vibeOS: idt ok"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+order = 110
+name = "idt_ok"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: boot: gp-test armed"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+order = 310
+name = "gp_test_armed"
+when = ["gp_test", "!panic_test"]
+
+# The exception mnemonics, matched anywhere in a kernel line (TESTING.md
+# §8.3, Failing fast), and the lines that open an exception dump.
+[[marker]]
+text = "#PF"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+
+[[marker]]
+text = "#GP"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+
+[[marker]]
+text = "#UD"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+
+[[marker]]
+text = "#DF"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+
+[[marker]]
+text = "double fault"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§2.2"
+
+[[marker]]
+text = "stack overflow"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§2.2"
+
+[[marker]]
+text = "vibeOS: nmi rip=<text>"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+
+[[marker]]
+text = "vibeOS: #DB rip=<text>"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+
+[[marker]]
+text = "vibeOS: #MC rip=<text>"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+
+[[marker]]
+text = "vibeOS: exception: vector <n> rip=<text>"
+kind = "failure"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+
+# `int3` is reported and survived.
+[[marker]]
+text = "vibeOS: #BP rip=<text>"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§2.2"
+
+# §2.3 8259 PIC
+
+[[marker]]
+text = "vibeOS: pic: remapped"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§2.3"
+order = 100
+name = "pic_remapped"
+when = ["!panic_test"]
+
+# §2.4 ACPI
+
+[[marker]]
+text = "vibeOS: acpi: xsdt <n> tables"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§2.4"
+order = 130
+name = "acpi_xsdt"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: acpi: <n> cpus, <n> ioapics, hpet <state>"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§2.4"
+
+# Every `acpi:` line, `halt_acpi`'s included: its head would fail every boot
+# as a signature.
+[[marker]]
+text = "vibeOS: acpi: <text>"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§2.4"
+
+# §2.6 TSC calibration
+
+[[marker]]
+text = "vibeOS: time: calibrated hpet <n>/ms"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§2.6"
+order = 140
+name = "time_calib_hpet"
+when = ["hpet", "!panic_test"]
+
+[[marker]]
+text = "vibeOS: time: calibrated pit <n>/ms"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§2.6"
+order = 150
+name = "time_calib_pit"
+when = ["pit", "!panic_test"]
+
+[[marker]]
+text = "vibeOS: time: tsc <n>/ms"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§2.6"
+order = 160
+name = "time_tsc"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: time: calibrated <source> <n>/ms"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§2.6"
+
+[[marker]]
+text = "vibeOS: time: invariant tsc absent"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§2.6"
+
+[[marker]]
+text = "vibeOS: time: hpet calib refused"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§2.6"
+
+[[marker]]
+text = "vibeOS: time: calib failed"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§2.6"
+
+# §3.1 Thread abstraction
+
+[[marker]]
+text = "vibeOS: thread: no memory for the bootstrap TCB"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§3.1"
+
+# §3.3 Scheduler
+
+[[marker]]
+text = "vibeOS: sched: cpu0 ready"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§3.3"
+order = 180
+name = "sched_cpu0"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: irq: enabled"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§3.3"
+order = 190
+name = "irq_enabled"
+when = ["!panic_test"]
+
+# §3.6 Idle
+
+[[marker]]
+text = "vibeOS: sched: no idle thread"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§3.6"
+
+# §4.1 LAPIC
+
+[[marker]]
+text = "vibeOS: lapic: enable bit clear"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.1"
+
+[[marker]]
+text = "vibeOS: lapic: svr enable failed"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.1"
+
+[[marker]]
+text = "vibeOS: lapic: error esr=<esr>"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.1"
+
+[[marker]]
+text = "vibeOS: lapic: thermal"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.1"
+
+# §4.3 LAPIC timer
+
+[[marker]]
+text = "vibeOS: time: lapic_timer ok (<mode>)"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§4.3"
+order = 170
+name = "lapic_timer_ok"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: time: tsc-deadline no ticks"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.3"
+
+[[marker]]
+text = "vibeOS: time: periodic no ticks"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.3"
+
+[[marker]]
+text = "vibeOS: time: periodic calib refused"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.3"
+
+# §4.5 AP bring-up
+
+[[marker]]
+text = "vibeOS: sched: cpu<n> ready"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§4.5"
+order = 210
+name = "sched_cpu<n>"
+when = ["!panic_test"]
+repeat = "per_ap"
+
+[[marker]]
+text = "vibeOS: smp: ap online"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§4.5"
+order = 220
+name = "smp_ap_online_<ap>"
+when = ["!panic_test"]
+repeat = "per_ap"
+
+[[marker]]
+text = "vibeOS: smp: done"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§4.5"
+order = 240
+name = "smp_done"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: smp: cr3 above 4GiB"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.5"
+
+[[marker]]
+text = "vibeOS: smp: apic <n> alloc failed"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.5"
+
+[[marker]]
+text = "vibeOS: smp: INIT failed"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.5"
+
+[[marker]]
+text = "vibeOS: smp: apic <n> timed out"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§4.5"
+
+# §4.6 Per-CPU data
+
+[[marker]]
+text = "vibeOS: per_cpu: bsp ready"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§4.6"
+order = 120
+name = "per_cpu_bsp"
+when = ["!panic_test"]
+
+# §5.2 PS/2 keyboard
+
+[[marker]]
+text = "vibeOS: kbd: 8042 init failed"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§5.2"
+
+[[marker]]
+text = "vibeOS: kbd: no ioapic route"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§5.2"
+
+# §5.3 Console multiplexer
+
+[[marker]]
+text = "vibeOS: console ok"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§5.3"
+order = 260
+name = "console_ok"
+when = ["!panic_test", "!hang_test"]
+
+# The console-input boot's replies, typed on COM1 and through PS/2.
+[[marker]]
+text = "serial-ok"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§5.3"
+
+[[marker]]
+text = "ps2-ok"
+kind = "diagnostic"
+arch = "x86_64"
+source = "user"
+section = "§5.3"
+
+# §5.5 Kernel log
+
+[[marker]]
+text = "vibeOS: dmesg: <text>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§5.5"
+
+[[marker]]
+text = "vibeOS: logrec: <text>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§5.5"
+
+# §5.6 Panic and diagnostics
+
+[[marker]]
+text = "vibeOS: backtrace:"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§5.6"
+
+[[marker]]
+text = "vibeOS: meminfo: total <n> frames, free <n>, used <n>, largest order <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§5.6"
+
+[[marker]]
+text = "vibeOS: meminfo: leaked <n> frames"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§5.6"
+
+[[marker]]
+text = "vibeOS: meminfo: heap used <n> B / capacity <n> B"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§5.6"
+
+[[marker]]
+text = "vibeOS: meminfo: kva used <n> B"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§5.6"
+
+# §6.2 PCI and PCIe
+
+[[marker]]
+text = "vibeOS: pci: <n> devices"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§6.2"
+order = 270
+name = "pci_devices"
+when = ["!panic_test", "!hang_test"]
+
+# One scan line per function: `lspci`'s form.
+[[marker]]
+text = "vibeOS: pci: <bdf> <vendor>:<device> <class>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§6.2"
+
+[[marker]]
+text = "vibeOS: pci: skip bar <bdf> size <size>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§6.2"
+
+[[marker]]
+text = "vibeOS: pci: ecam <addr> buses <n>-<n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§6.2"
+
+# §6.5 virtio
+
+[[marker]]
+text = "vibeOS: virtio: rng <addr> qsz=<n> feat=<feat> notify_off=<n>*<n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§6.5"
+
+[[marker]]
+text = "vibeOS: virtio: missing modern caps"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§6.5"
+
+[[marker]]
+text = "vibeOS: virtio: no VERSION_1"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§6.5"
+
+[[marker]]
+text = "vibeOS: virtio: probe <err>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§6.5"
+
+# §6.6 Deferred work
+
+[[marker]]
+text = "vibeOS: work: ready"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§6.6"
+
+# §7.1 Block layer
+
+[[marker]]
+text = "vibeOS: block: ram0 <n> sectors"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§7.1"
+order = 280
+name = "block_ramdisk"
+when = ["!panic_test", "!hang_test"]
+
+# Every device's line, `vda` and the partition children included.
+[[marker]]
+text = "vibeOS: block: <name> <n> sectors"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§7.1"
+
+# §7.2 virtio-blk
+
+[[marker]]
+text = "vibeOS: virtio: blk <name> <addr> qsz=<n> nq=<n> <mq> feat=<feat> bs=<n> topo=<n>/<n> discard=<n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§7.2"
+
+[[marker]]
+text = "vibeOS: virtio: blk missing modern caps"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§7.2"
+
+[[marker]]
+text = "vibeOS: virtio: blk no VERSION_1"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§7.2"
+
+[[marker]]
+text = "vibeOS: virtio: blk probe <err>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§7.2"
+
+# The ktest disk's persistence check across a reboot (`run_ktest.py`).
+[[marker]]
+text = "vibeOS: persist: wrote"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§7.2"
+
+[[marker]]
+text = "vibeOS: persist: intact"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§7.2"
+
+# §7.3 Partitions
+
+[[marker]]
+text = "vibeOS: block: ram0p1 <n> sectors"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§7.3"
+order = 290
+name = "block_ram0p1"
+when = ["!panic_test", "!hang_test"]
+
+[[marker]]
+text = "vibeOS: block: ram0p2 <n> sectors"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§7.3"
+order = 300
+name = "block_ram0p2"
+when = ["!panic_test", "!hang_test"]
+
+# §7.4 Cache
+
+[[marker]]
+text = "vibeOS: cache: hits <n> misses <n> device <n> raw <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§7.4"
+
+# §8.5 vibefs
+
+# The `vibefs_crash` build (`run_vibefs_crash.py`).
+[[marker]]
+text = "vibeOS: vibefs: bad crash_plant"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§8.5"
+
+[[marker]]
+text = "vibeOS: vibefs: mount fail <err>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§8.5"
+
+[[marker]]
+text = "vibeOS: vibefs: sync fail <err>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§8.5"
+
+[[marker]]
+text = "vibeOS: vibefs: crash-ready"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§8.5"
+
+[[marker]]
+text = "vibeOS: vibefs: wr <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§8.5"
+
+# §9.8 First userspace
+
+# `/bin/sh`'s; the `kernel_shell` build's framed copy matches no row side.
+[[marker]]
+text = "vibeOS: shell ready"
+kind = "contract"
+arch = "both"
+source = "user"
+section = "§9.8"
+order = 370
+name = "shell_ready"
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test"]
+
+# `/bin/tests`' lines.
+[[marker]]
+text = "user: tests begin"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§9.8"
+
+# `/bin/tests` passed: every e2e boot that reaches the shell requires it
+# (F073).
+[[marker]]
+text = "user: tests ok"
+kind = "contract"
+arch = "both"
+source = "user"
+section = "§9.8"
+order = 330
+name = "user_tests_ok"
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test"]
+
+[[marker]]
+text = "user: tests fail"
+kind = "failure"
+arch = "both"
+source = "user"
+section = "§9.8"
+
+# `/sbin/init`, on fd 2, when `/bin/tests`' wait status is nonzero.
+[[marker]]
+text = "init: /bin/tests exited <status>"
+kind = "failure"
+arch = "both"
+source = "user"
+section = "§9.8"
+
+# `/sbin/init`'s other fd-2 lines (ROADMAP §10.5): a child that did not
+# start, the shell's end, and a failed `wait4`. Three failed `/bin/sh`
+# starts in a row end init, which `pid1_exit`'s line reports. The comment
+# above each row is its name in #169; `name` is only for contract rows.
+# init_sh_start_failed
+[[marker]]
+text = "init: /bin/sh start failed: <why>"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+# init_tests_start_failed
+[[marker]]
+text = "init: /bin/tests start failed: <why>"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+# init_sh_ended
+[[marker]]
+text = "init: /bin/sh ended: <status>"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+# init_wait4_error
+[[marker]]
+text = "init: wait4: errno <n>"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "user: dup ok"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§9.8"
+
+# §10.2 Build and harness
+
+[[marker]]
+text = "vibeOS: boot: cmdline: <text>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+# The ktest runner protocol (TESTING.md §8.2, C-KTEST-PROTO): the line before
+# each run, a test's counters, a missed deadline (printed by the timer tick
+# that then panics), and a bad selection option (printed before `begin`).
+[[marker]]
+text = "vibeOS: ktest: run <name> <deadline_ms>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: info <name>: <text>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+# Kernel stack depth (TESTING.md §8.2): one line per stack size, then the
+# report line, just before `vibeOS: ktest: end`; run_ktest.py checks them.
+[[marker]]
+text = "vibeOS: stack: <size> used <used> of <budget> by tid <tid> <name>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: stack: report <n> sizes <lost> lost"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: FAIL <name>: deadline"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: bad option <key>=<value>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+# `serial_lines_whole` and `serial_frame` (`run_ktest.py`).
+[[marker]]
+text = "vibeOS: ktest: serial noise <text>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: serial whole <n> of <n> <text>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: serial frame <text>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+# The lines `/bin/tests` forges on fd 1 and fd 2, as the console prints them
+# (`run_e2e.py`'s `FORGED_LINES`): unframed, each 0x1E as `?`.
+[[marker]]
+text = "?vibeOS: ktest: FAIL forged"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.2"
+
+[[marker]]
+text = "?panicked at forged"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.2"
+
+[[marker]]
+text = "?#GP?forged"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.2"
+
+# §10.3 Portable core and the architecture seam
+
+# The clocksource `time_init::confirm_clocksource` chose once the AP warp
+# tests ran (DESIGN §6.4). The harness binds `<clocksource>`: `hpet` under
+# TCG, `acpi_pm` with HPET off, `tsc` under KVM.
+[[marker]]
+text = "vibeOS: time: clocksource <clocksource>"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.3"
+order = 250
+name = "time_clocksource"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: time: no clocksource"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+# The IF-off tracer's lines, printed only by the `irqoff` build (and its
+# kernel_tests twin) that `make test-irqoff` boots; `tests/harness/irqoff.py`
+# parses them. `<site>` never holds a space, and `<reason>` comes last.
+
+[[marker]]
+text = "vibeOS: irqoff: on bound <n> ns"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: no reporter"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: over <site> n <n> max <n> ns"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: site <site> n <n> over <n> max <n> ns p99 <n> ns"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: deliberate <site> n <n> max <n> ns <reason>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: unmatched <site> n <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+[[marker]]
+text = "vibeOS: irqoff: dropped <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.3"
+
+# §10.4 Tables, VFS, errors
+
+[[marker]]
+text = "vibeOS: limits: no memory for the <name> tables"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.4"
+
+# §10.5 User runtime
+
+# The `reboot` syscall's line before it powers the machine off or restarts
+# it (`make test-e2e-power`).
+[[marker]]
+text = "vibeOS: reboot: power off"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: reboot: restart"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.5"
+
+# `/bin/tests`' utest protocol (C-USERTESTS): the ktest form with `utest:`,
+# printed from ring 3.
+[[marker]]
+text = "vibeOS: utest: begin <n>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: run <name> <n>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: ok <name>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: FAIL <name>: <text>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: skip <name>: <text>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+# A case's detail, never a result (the ktest protocol's info line):
+# `errno_matrix` names each failing pair in one.
+[[marker]]
+text = "vibeOS: utest: info <name>: <text>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+[[marker]]
+text = "vibeOS: utest: end"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+# Pid 1 ended (INVARIANTS.md §2.5, F068): `exited <n>`, `killed SIG<name>`,
+# or `killed SIG<name> addr=0x<hex>` for a fault; the kernel then panics
+# (`make test-e2e-init-fault`).
+[[marker]]
+text = "vibeOS: init: pid 1 <text>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.5"
+
+# §10.6 Entry paths and user memory
+
+# The AP trampoline page `boot::capture` chose from the memory map, before
+# the first AP starts; with none, every AP is skipped.
+[[marker]]
+text = "vibeOS: smp: trampoline page <addr>"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.6"
+order = 200
+name = "smp_trampoline_page"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: smp: no trampoline page"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§10.6"
+
+# An interrupt no handler owns (DESIGN §5.2): at most once a second per vector.
+[[marker]]
+text = "vibeOS: irq: no handler for vector 0x<v> cpu <n> count <count>"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§10.6"
+
+# `/sbin/init`'s first line, on fd 2: it started with the psABI's initial FP
+# state (FCW 0x037F, MXCSR 0x1F80, XMM0 zero), whatever the firmware left
+# in the registers (F069, F129).
+[[marker]]
+text = "init: fp initial ok"
+kind = "contract"
+arch = "x86_64"
+source = "user"
+section = "§10.6"
+order = 320
+name = "init_fp_initial"
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test"]
+
+[[marker]]
+text = "init: fp initial wrong <text>"
+kind = "failure"
+arch = "x86_64"
+source = "user"
+section = "§10.6"
+
+# §10.7 Forensics and tracing
+
+# `vibeos.strace=1`: one line per syscall that returns.
+[[marker]]
+text = "user: syscall <name> nr=<n> = <ret>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+# The blocked-thread sweep. A test that provokes it declares it.
+[[marker]]
+text = "vibeOS: sched: overdue tid <n>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+# The AP bring-up TSC warp test's largest backward step (DESIGN §7.4),
+# printed before `smp: done` once an AP ran it.
+[[marker]]
+text = "vibeOS: smp: tsc skew <n> cycles"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+order = 230
+name = "smp_tsc_skew"
+when = ["smp>1", "!panic_test"]
+
+# The panic-path variants' trips (TESTING.md §8.3), after `/hello` where
+# the gp-test trips; each build's contract ends at its armed line.
+[[marker]]
+text = "vibeOS: boot: panic-nest armed"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+order = 340
+name = "panic_nest_armed"
+when = ["panic_nest_test", "!panic_test"]
+
+[[marker]]
+text = "vibeOS: boot: panic-stop armed"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+order = 350
+name = "panic_stop_armed"
+when = ["panic_stop_test", "!panic_test"]
+
+# The hang_test build's hang (TESTING.md §8.3): once `smp: done` and the
+# clocksource line, one CPU holds a spinlock and every CPU spins with IF=0,
+# so its contract ends here and the forensics tier takes a core.
+[[marker]]
+text = "vibeOS: hang_test: armed"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+order = 360
+name = "hang_test_armed"
+when = ["hang_test", "!panic_test"]
+
+# The panic-stop build's CPU 2 prints these until the dump stops it.
+[[marker]]
+text = "vibeOS: panic_stop: line <n>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+# The dump's report on each other online CPU (DESIGN §2.5 step 1), and the
+# panic-stop build's owner line after its own NMI came back.
+[[marker]]
+text = "vibeOS: panic: cpu <n> stopped (<how>)"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+[[marker]]
+text = "vibeOS: panic: cpu <n> not stopped"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+[[marker]]
+text = "vibeOS: panic: cpu <n> regs: <text>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+[[marker]]
+text = "vibeOS: panic_stop: owner nmi returned"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.7"
+
+# The pvpanic probe at boot (INVARIANTS §2.5 step 7): the port fw_cfg's
+# `etc/pvpanic-port` names and the events a read of it reports, or none.
+[[marker]]
+text = "vibeOS: pvpanic: port 0x<port> events 0x<mask>"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+
+[[marker]]
+text = "vibeOS: pvpanic: absent"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§10.7"
+
+# §10.12 Drivers and devices
+
+# A second virtio-rng function, refused before the probe touches it.
+[[marker]]
+text = "vibeOS: virtio: rng <addr> already bound"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.12"
+
+# A virtio device stopped after a failed probe or in `remove`: its reset
+# did not complete within the poll cap, or its bus mastering stayed on and
+# the memory it was given is kept.
+[[marker]]
+text = "vibeOS: virtio: <addr> reset timeout"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.12"
+
+[[marker]]
+text = "vibeOS: virtio: <addr> bus master stuck, <n> frames kept"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.12"
+
+# §12.5 Unified page cache
+
+# A driver's fail-fast loop recovering a stuck device. A test that provokes
+# one declares it.
+[[marker]]
+text = "vibeOS: block: <dev> timeout"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§12.5"
+
+[[marker]]
+text = "vibeOS: block: <dev> reset"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§12.5"

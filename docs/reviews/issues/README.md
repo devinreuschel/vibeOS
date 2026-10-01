@@ -8,41 +8,41 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 
 | ID | Title | Impact | Effort | Tier | Depends on | Status |
 |---|---|---|---|---|---|---|
-| [A1](A1-directory-per-subsystem.md) | Directory per subsystem, matching a corrected module map | High | L | III | Q1, A2 | `proposed` |
-| [A2](A2-portable-half-host-tests.md) | Make the portable half portable; host tests on any host | High | M | II | C1 | `in progress (#88)` |
-| [A3](A3-vfs-single-dispatch.md) | Make the VFS the only file-operation dispatch point | High | L | III | Q3 | `proposed` |
-| [A4](A4-break-module-cycles.md) | Break the mutual dependencies between kernel modules | Medium | M | III | A3, A1 | `proposed` |
-| [Q1](Q1-fmt-clippy-warnings-gates.md) | Land the promised gates: rustfmt, clippy, `-D warnings` | High | S | I | — | `in progress (#80)` |
-| [Q2](Q2-isolate-test-hooks.md) | Isolate `kernel_tests` scaffolding from production modules | Medium | M | II | Q1 | `proposed` |
+| [A1](A1-directory-per-subsystem.md) | Directory per subsystem, matching a corrected module map | High | L | III | Q1, A2 | `implemented (#194)` |
+| [A2](A2-portable-half-host-tests.md) | Make the portable half portable; host tests on any host | High | M | II | C1 | `implemented (#194)` |
+| [A3](A3-vfs-single-dispatch.md) | Make the VFS the only file-operation dispatch point | High | L | III | Q3 | `implemented (#194)` |
+| [A4](A4-break-module-cycles.md) | Break the mutual dependencies between kernel modules | Medium | M | III | A3, A1 | `implemented (#194)` |
+| [Q1](Q1-fmt-clippy-warnings-gates.md) | Land the promised gates: rustfmt, clippy, `-D warnings` | High | S | I | — | `implemented (#80, #194)` |
+| [Q2](Q2-isolate-test-hooks.md) | Isolate `kernel_tests` scaffolding from production modules | Medium | M | II | Q1 | `in progress (#194)` |
 | [Q3](Q3-boot-cell-primitive.md) | One boot-cell primitive; retire `static mut` and `&'static mut` accessors | Medium | S+M | II | — | `implemented (#87)` |
 | [Q4](Q4-naming-consistency.md) | Naming and feature-flag consistency | Low | S | II | — | `implemented (#83)` |
-| [Q5](Q5-split-monolithic-files.md) | Split monolithic files; add a size guard | Medium | M | III | A1, T1 | `proposed` |
-| [D1](D1-heap-backed-tables.md) | Heap-allocate the growable fixed-capacity tables (Phase 10) | High | L | III | Q3, A3 | `proposed` |
-| [D2](D2-driver-instances.md) | Driver and volume instances instead of module singletons | Medium | L | III | A1, Q3 | `proposed` |
+| [Q5](Q5-split-monolithic-files.md) | Split monolithic files; add a size guard | Medium | M | III | A1, T1 | `in progress (#194)` |
+| [D1](D1-heap-backed-tables.md) | Heap-allocate the growable fixed-capacity tables (Phase 10) | High | L | III | Q3, A3 | `implemented (#194)` |
+| [D2](D2-driver-instances.md) | Driver and volume instances instead of module singletons | Medium | L | III | A1, Q3 | `in progress (#194)` |
 | [D3](D3-bootinfo.md) | Capture boot information once (`BootInfo`) | Low | S | I | Q3 | `implemented (#90, #91)` |
-| [E1](E1-parser-robustness-lints.md) | Lock in parser robustness with restriction lints | Low | S | II | Q1 | `in progress (#86)` |
-| [E2](E2-kerror-errno.md) | One `KError` (errno-shaped) ahead of the syscall boundary | Medium | M | III | A3 | `proposed` |
+| [E1](E1-parser-robustness-lints.md) | Lock in parser robustness with restriction lints | Low | S | II | Q1 | `implemented (#86, #194)` |
+| [E2](E2-kerror-errno.md) | One `KError` (errno-shaped) ahead of the syscall boundary | Medium | M | III | A3 | `implemented (#194)` |
 | [E3](E3-emit-paths.md) | Make the marker-vs-log rule explicit; one macro per intent | Low | S | II | — | `implemented (#83)` |
 | [C1](C1-pin-toolchain-and-inputs.md) | Pin every external input: nightly date, action SHAs, Limine commit | High | S | I | — | `implemented (#77)` |
 | [C2](C2-centralize-env-config.md) | Centralize `VIBEOS_*` environment handling in the harness | Low | S | I | T2 | `implemented (#79)` |
-| [T1](T1-split-ktest-registry.md) | Split the in-guest registry; make failures self-diagnosing | Medium | M | II | Q2 | `proposed` |
+| [T1](T1-split-ktest-registry.md) | Split the in-guest registry; make failures self-diagnosing | Medium | M | II | Q2 | `implemented (#194)` |
 | [T2](T2-single-qemu-launcher.md) | One QEMU launcher for all drivers | Medium | S | I | — | `implemented (#79)` |
 | [T3](T3-fast-check-ci-job.md) | A fast `check` CI job ahead of the QEMU ladder; coverage floor | Medium | S | II | Q1, T2 | `implemented (#82)` |
-| [T4](T4-fuzz-parsers.md) | Fuzz the pure parsers now | Medium | S | II | A2 | `proposed` |
-| [P1](P1-build-multiplicity.md) | Cut the build multiplicity | Low | M | II | B1, B2 | `proposed` |
+| [T4](T4-fuzz-parsers.md) | Fuzz the pure parsers now | Medium | S | II | A2 | `in progress (#194)` |
+| [P1](P1-build-multiplicity.md) | Cut the build multiplicity | Low | M | II | B1, B2 | `implemented (#194)` |
 | [P2](P2-lock-hotspots-note.md) | Record the known single-lock hotspots as Phase 19 items | Low | S | II | — | `implemented (#83)` |
 | [S1](S1-pre-ring3-hardening.md) | Finish the pre-ring-3 hardening checklist | Medium | S | II | — | `implemented (#85)` |
 | [B1](B1-parametrize-makefile.md) | Parametrize the Makefile's ISO recipes; add `make check` | Medium | S | I | — | `implemented (#76)` |
 | [B2](B2-builtin-target-spike.md) | Replace the custom target JSON with built-in `x86_64-unknown-none` | Medium | M | II | C1 | `implemented (#84)` |
 | [B3](B3-tag-and-release.md) | Version, tag phases, and publish the ISO | Low | S | I | — | `implemented (#81)` |
 | [B4](B4-build-rs-inputs.md) | Simplify `build.rs` inputs and the initrd path | Low | S–M | II | B1 | `implemented (#89)` |
-| [I1](I1-macos-job-ovmf.md) | macOS CI job; find OVMF wherever it lives | Low | S | II | A2 | `proposed` |
+| [I1](I1-macos-job-ovmf.md) | macOS CI job; find OVMF wherever it lives | Low | S | II | A2 | `in progress (#194)` |
 | [DOC1](DOC1-top-of-funnel-docs.md) | README, DESIGN header, module map, MIT LICENSE | High | S | I | — | `implemented (#78)` |
-| [DOC2](DOC2-split-design-doc.md) | Split `DESIGN.md`; as-built in tables, not prose | Medium | M | III | A1 (helpful) | `proposed` |
+| [DOC2](DOC2-split-design-doc.md) | Split `DESIGN.md`; as-built in tables, not prose | Medium | M | III | A1 (helpful) | `implemented (#194)` |
 | [DOC3](DOC3-agents-md.md) | Version the agent instructions in the repo (`AGENTS.md`) | High | S | I | — | `implemented (#78)` |
-| [DOC4](DOC4-changelog-style.md) | Keep `CHANGELOG.md` short and user-facing | Low | S | I | B3 | `in progress (#81)` |
-| [DX1](DX1-make-check-and-lint-config.md) | A fast local gate (`make check`) and formatter/linter configuration | Medium | S | I | Q1, B1, A2 | `in progress (#76)` |
-| [R1](R1-repo-tidy.md) | Tidy the root, `tests/`, and remote branches | Low | S | I | B1, T2 | `in progress (#78, #79)` |
+| [DOC4](DOC4-changelog-style.md) | Keep `CHANGELOG.md` short and user-facing | Low | S | I | B3 | `implemented (#81, #194)` |
+| [DX1](DX1-make-check-and-lint-config.md) | A fast local gate (`make check`) and formatter/linter configuration | Medium | S | I | Q1, B1, A2 | `implemented (#76, #194)` |
+| [R1](R1-repo-tidy.md) | Tidy the root, `tests/`, and remote branches | Low | S | I | B1, T2 | `implemented (#78, #79, #194)` |
 | [O1](O1-phase9-resume-note.md) | Note the Phase 9 pause and resume; research notes deferred | Low | S | II | — | `superseded: Phase 9 did not pause, so there is no resume to note; research notes stay deferred` |
 
 Suggested order for tier I (all independent unless noted): DOC1, DOC3, C1, Q1, B1, T2 → C2, DX1, B3 → DOC4, D3, R1.

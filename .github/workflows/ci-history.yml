@@ -1,0 +1,84 @@
+name: ci-history
+
+# ROADMAP §10.9, DESIGN §8.6 (CI history): one JSON record per completed `ci`,
+# `release`, `nightly` or `smp-stress` run on the orphan `ci-history` branch,
+# and a daily backfill, completeness check and 500 MB rotation. GitHub runs `workflow_run` and
+# `schedule` from this file as it is on the default branch, with GITHUB_SHA
+# at that branch's last commit, so the tool fetched below is `main`'s, never
+# the triggering commit's. The event's run fields are set by whoever pushed
+# (a fork's pull request included): no step reads one; the tool reads only
+# the run id from the event file and the rest from the API.
+on:
+  workflow_run:
+    workflows: [ci, nightly, release, smp-stress]
+    types: [completed]
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+# Least privilege (ROADMAP §10.1): the workflow reads; each job names its grants.
+permissions:
+  contents: read
+
+jobs:
+  record:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    # Scheduled lane 6 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out, so no record is cancelled as pending.
+    concurrency:
+      group: sched-lane-6
+      queue: max
+    permissions:
+      contents: write  # push the run's record to ci-history (ROADMAP §10.9)
+      actions: read  # read the run's jobs, steps and artifacts
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # No checkout: the tool clones ci-history alone into $RUNNER_TEMP.
+      - name: fetch ci_history.py from the default branch
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tool/scripts"
+          for f in ci_history.py gatelib.py; do
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/$GITHUB_REPOSITORY/contents/scripts/$f?ref=$GITHUB_SHA" \
+              > "$RUNNER_TEMP/tool/scripts/$f"
+          done
+          gh auth setup-git
+      - name: record the run
+        run: python3 "$RUNNER_TEMP/tool/scripts/ci_history.py" --event "$GITHUB_EVENT_PATH"
+
+  daily:
+    if: github.event_name != 'workflow_run'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    # Scheduled lane 6 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out, so no record is cancelled as pending.
+    concurrency:
+      group: sched-lane-6
+      queue: max
+    permissions:
+      contents: write  # push backfilled records and the rotated branch to ci-history (ROADMAP §10.9)
+      actions: read  # list ci's runs and read their jobs, steps and artifacts
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # No checkout: the tool clones ci-history alone into $RUNNER_TEMP.
+      - name: fetch ci_history.py from the default branch
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tool/scripts"
+          for f in ci_history.py gatelib.py; do
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/$GITHUB_REPOSITORY/contents/scripts/$f?ref=$GITHUB_SHA" \
+              > "$RUNNER_TEMP/tool/scripts/$f"
+          done
+          gh auth setup-git
+      - name: packed size and rotation
+        run: python3 "$RUNNER_TEMP/tool/scripts/ci_history.py" --rotate
+      - name: backfill
+        run: python3 "$RUNNER_TEMP/tool/scripts/ci_history.py" --backfill --limit 200
+      - name: completeness
+        run: python3 "$RUNNER_TEMP/tool/scripts/ci_history.py"

@@ -1,6 +1,21 @@
 [workspace]
-members = ["crates/core", "tests/hostlib"]
+members = ["crates/core", "tests/hostlib", "user", "user/mem"]
+exclude = ["tests/fuzz"]
 resolver = "3"
+
+# C-LINTS (ROADMAP §10.1): every member has `[lints] workspace = true`, and every
+# module has had its sweep. A kept discard carries an `#[expect]` naming its
+# DESIGN §2.5 case.
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+let_underscore_must_use = "deny"
+unused_result_ok = "deny"
+
+# Cargo takes no lints table beside `[lints] workspace = true` in a member,
+# so loom's and Kani's cfgs (ROADMAP §10.8) are declared here.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(kani)"] }
 
 [package]
 name = "vibeos"
@@ -17,19 +32,44 @@ path = "src/main.rs"
 [features]
 default = []
 # Force a panic early in boot so the panic path can be exercised end to end.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
 panic_test = []
 # Second kernel build: run the in-guest test registry after init (DESIGN §8.2).
-# Packaged into its own Cargo target dir / ISO; never the production image.
+# Packaged from its own named ELF into its own ISO; never the production image.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+# release.yml still uploads vibeos-ktest.iso until ROADMAP §10.1's release box (F145).
 kernel_tests = []
 # Debug: keep the kernel interactive REPL instead of `/sbin/init`.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
 kernel_shell = []
 # After a full boot, trigger a #GP so the dump+halt path is e2e-tested.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
 gp_test = []
-# Panic dump ends with QEMU isa-debug-exit (nonzero) instead of an infinite hlt.
-panic_exit = []
+# After a full boot, underflow `irq_nest` so the dump must write without an
+# `InterruptGuard` (ROADMAP §10.7, F071).
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+panic_nest_test = []
+# After a full boot at -smp 5, panic on two CPUs while three others print,
+# wait on a lock, and spin, so the dump's stop primitive stops each
+# (ROADMAP §10.7, F135).
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+panic_stop_test = []
+# After `smp: done`, hang every CPU: one holds a spinlock with interrupts off
+# and the others spin on it, so the forensics tier takes a core of a real hang
+# (ROADMAP §10.7, `make test-forensics`).
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+hang_test = []
 # Write-loop kernel for QEMU-kill crash consistency (docs/VIBEFS.md §12).
-# Separate ISO / target dir; never the production image.
-vibefs_crash = []
+# Its own named ELF and ISO; never the production image.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+vibefs_crash = ["vibeos/crash_plant"]
+# IF-off tracer (ROADMAP §10.3, INVARIANTS.md §2.9 rule 2). Measurement build
+# only; never a published image.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+irqoff = []
+
+[lints]
+workspace = true
 
 [dependencies]
 limine = "0.6"

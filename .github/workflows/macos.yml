@@ -1,0 +1,125 @@
+name: macos
+
+# ROADMAP §10.2 (I1, F079): `make check`, and `make test` with Homebrew's
+# QEMU and its code-only edk2 firmware, on an Apple Silicon runner, daily
+# and on dispatch. The firmware probe (tests/harness/harness.py) finds
+# Homebrew's edk2-x86_64-code.fd and edk2-i386-vars.fd, which the UEFI tier
+# boots from pflash. No timeout override, skip or retry is set here
+# (AGENTS.md, Do not). Each job uploads build/results/ for the ticks job
+# (C-RESULTS).
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+# Least privilege: the jobs read the tree and write only artifacts, which use
+# the runner's own token.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: macos-15
+    timeout-minutes: 240
+    # Scheduled lane 9 (DESIGN §8.6): one job at a time, the rest queued.
+    concurrency:
+      group: sched-lane-9
+      queue: max
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # setup.sh requires QEMU, xorriso and zstd (the harness compresses
+      # guest cores with it); fsck.fat (dosfstools) lands in Homebrew's sbin,
+      # which is not on the runner's PATH.
+      - name: install host tools
+        run: |
+          brew install qemu xorriso dosfstools zstd
+          echo "$(brew --prefix)/sbin" >> "$GITHUB_PATH"
+
+      # The versions ci.yml's check job pins (ROADMAP §10.1, DX1).
+      - name: install python linters
+        run: |
+          python3 -m pip install --user --break-system-packages ruff==0.16.9 mypy==2.3.1
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+
+      # rust-toolchain.toml names the nightly, so this file holds no date.
+      - name: install rust
+        run: rustup toolchain install
+
+      # Limine, the MSRV toolchain and the host-tool checks.
+      - name: setup
+        run: ./setup.sh
+
+      # The version ci.yml's check job pins (ROADMAP §10.9); make check runs
+      # `cargo deny check licenses bans sources`.
+      - name: install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.20.2
+
+      - name: make check
+        run: time make check
+
+      # ROADMAP §10.8: the loom models and the Kani proofs on the Apple
+      # Silicon host too (L1453); setup.sh --kani installs the pinned
+      # kani-verifier.
+      - name: ./setup.sh --kani && make models
+        if: "!cancelled()"
+        run: ./setup.sh --kani && make models
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-macos-check
+          path: build/results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  test:
+    name: test
+    runs-on: macos-15
+    timeout-minutes: 240
+    concurrency:
+      group: sched-lane-9
+      queue: max
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: install host tools
+        run: |
+          brew install qemu xorriso dosfstools zstd
+          echo "$(brew --prefix)/sbin" >> "$GITHUB_PATH"
+
+      - name: install rust
+        run: rustup toolchain install
+
+      - name: setup
+        run: ./setup.sh
+
+      # -k: every tier runs and writes its results file after one fails.
+      # test-e2e-uefi is part of `test`; naming it too makes this the step a
+      # `make test-e2e-uefi [macos]` proof reads (scripts/check_ticks.py), and
+      # make still runs it once.
+      - name: make test
+        if: "!cancelled()"
+        run: time make -k test-e2e-uefi test
+
+      # A failed run's guest cores (ROADMAP §10.7, TESTING.md §8.3). This
+      # workflow names no secret (rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-macos-test
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-macos-test
+          path: build/results/
+          if-no-files-found: warn
+          retention-days: 30

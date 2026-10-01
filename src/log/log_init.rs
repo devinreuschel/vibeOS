@@ -1,0 +1,434 @@
+#![allow(dead_code)] // printer thread stays parked
+//! Kernel wiring for the log ring. ROADMAP §5.5.
+//!
+//! Global IRQ-safe ring + serial sink. The printer thread is a parked
+//! stub until DESIGN §2.5's log contract (ROADMAP §19.5) gives each
+//! console one. Each record reaches serial whole, newline included, in
+//! one try-lock write. The ring itself is line-atomic because serial
+//! capture assembles per-CPU until `\n`, and `klog!` pushes a whole record.
+
+use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+
+use vibeos::fmt_util::StackBuf;
+use vibeos::log::{
+    COMPILE_MAX, DEFAULT_RUNTIME_MAX, DUMP_LAST, Level, Logger, MSG_CAP, RING_CAP, Record, allowed,
+};
+
+use crate::arch::current::InterruptGuard;
+use crate::cell::IrqCell;
+use crate::per_cpu_init;
+use crate::serial::PlainSerial;
+use crate::time_init;
+
+struct Stage {
+    buf: [u8; MSG_CAP],
+    len: usize,
+}
+
+impl Stage {
+    const fn empty() -> Self {
+        Self {
+            buf: [0; MSG_CAP],
+            len: 0,
+        }
+    }
+}
+
+static LOG: vibeos::log::KernelLog<crate::arch::current::Arch> = IrqCell::new(Logger::new());
+/// Per-CPU: set while this CPU is inside `emit` so serial capture does
+/// not store a duplicate.
+static EMITTING: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
+static STAGE: [IrqCell<Stage>; 64] = [const { IrqCell::new(Stage::empty()) }; 64];
+/// Extra runtime copy so `allows` can be checked without the ring lock
+/// on the serial capture path. Kept in sync with `Logger.filter`.
+static RUNTIME: AtomicU8 = AtomicU8::new(DEFAULT_RUNTIME_MAX as u8);
+/// Records whose serial copy the try-lock sink dropped because another CPU
+/// held the TX lock (DESIGN §2.5). Kept apart from `REENTRY_DROPS`.
+static SINK_DROPS: AtomicU64 = AtomicU64::new(0);
+/// Records `log_fmt` dropped because its CPU was already inside `log_fmt`.
+static REENTRY_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// The address of the log ring's static, which VMCOREINFO's
+/// `SYMBOL(vibeos_log)` carries (docs/VMCOREINFO.md).
+pub(crate) fn ring_root() -> u64 {
+    core::ptr::from_ref(&LOG).addr() as u64
+}
+
+/// This CPU's `EMITTING` and `STAGE` slot. IF=0 callers only, so the slot
+/// stays this CPU's while the caller uses it (DESIGN §2.9 rule 5).
+fn cpu_index() -> usize {
+    per_cpu_init::try_current()
+        .map(|c| c.cpu_id as usize)
+        .unwrap_or(0)
+        .min(63)
+}
+
+fn runtime() -> Level {
+    Level::from_u8(RUNTIME.load(Ordering::Acquire)).unwrap_or(DEFAULT_RUNTIME_MAX)
+}
+
+/// The clock records are stamped with: uptime in ms once the TSC is
+/// calibrated, the raw TSC before that. `klog_ratelimited!` reads it too.
+pub fn timestamp() -> u64 {
+    // Seqlock tick once time is live; raw TSC before that. Same clock
+    // paths as the rest of the kernel (DESIGN §9.4).
+    if time_init::tsc_per_ms() != 0 {
+        time_init::uptime_ms()
+    } else {
+        time_init::read_tsc()
+    }
+}
+
+/// The record prefix's CPU: a hint, exact while IF=0.
+fn cpu_id() -> u8 {
+    crate::arch::cpu_id_hint() as u8
+}
+
+fn with_logger<R>(f: impl FnOnce(&mut Logger<RING_CAP, MSG_CAP>) -> R) -> R {
+    LOG.with(f)
+}
+
+/// Panic path: drop a held `LOG` owner so the dump can read the ring.
+///
+/// # Safety
+/// Panic path only, after `panic::begin_dump` has stopped the other CPUs:
+/// whichever CPU held `LOG` never touches it again (DESIGN §2.5).
+pub unsafe fn force_unlock() {
+    // SAFETY: the holder never touches `LOG` again, the precondition of
+    // `IrqCell::force_unlock`; established by `log_init::force_unlock`'s
+    // `# Safety` contract.
+    unsafe { LOG.force_unlock() };
+}
+
+/// Read the log ring without taking `LOG`.
+///
+/// # Safety
+/// Nothing writes `LOG` while `f` runs: no `with_logger` on any CPU, and
+/// no holder resumes after [`force_unlock`].
+pub unsafe fn with_logger_unlocked<R>(f: impl FnOnce(&Logger<RING_CAP, MSG_CAP>) -> R) -> R {
+    // SAFETY: no writer runs during `f`, so a shared borrow of the payload
+    // does not alias a `&mut`; established by
+    // `log_init::with_logger_unlocked`'s `# Safety` contract.
+    f(unsafe { &*LOG.as_ptr() })
+}
+
+/// Whether this CPU is inside `log_fmt`. IF=0 callers only.
+pub fn is_emitting() -> bool {
+    EMITTING[cpu_index()].load(Ordering::Relaxed)
+}
+
+pub fn set_max_level(max: Level) {
+    RUNTIME.store(max as u8, Ordering::Release);
+    with_logger(|l| l.filter.set(max));
+}
+
+/// Apply `loglevel=` from the kernel command line (ROADMAP §10.2, BOOT.md
+/// §3.2): Linux's numbering, mapped by `vibeos::log::level_from_loglevel`.
+/// Absent leaves the default; any other value is ignored with a warning.
+pub fn apply_boot_level() {
+    let Some(v) = crate::boot::cmdline().get("loglevel") else {
+        return;
+    };
+    match vibeos::log::level_from_loglevel(v) {
+        Some(l) => set_max_level(l),
+        None => crate::klog!(
+            Level::Warn,
+            "vibeOS: log: loglevel={}: not a number, ignored",
+            vibeos::boot::cmdline::Escaped(v)
+        ),
+    }
+}
+
+pub fn max_level() -> Level {
+    runtime()
+}
+
+pub fn compile_max() -> Level {
+    COMPILE_MAX
+}
+
+fn push_record(level: Level, msg: &[u8]) -> bool {
+    if !allowed(level, runtime(), COMPILE_MAX) {
+        return false;
+    }
+    let rec = Record::from_msg(timestamp(), cpu_id(), level, msg);
+    with_logger(|l| l.emit(rec))
+}
+
+/// `klog!` / formatted emit. Serial is try-lock + drop (DESIGN §5.5).
+/// IRQ-off for the whole emit so `EMITTING` / try-write cannot race a
+/// preempting thread on this CPU.
+pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
+    // A non-owner CPU appending once `HALTING` is set stops here (DESIGN
+    // §2.5 step 1).
+    crate::serial::raw::stop_if_halting();
+    if !allowed(level, runtime(), COMPILE_MAX) {
+        return;
+    }
+    let _irq = InterruptGuard::enter();
+    let i = cpu_index();
+    if EMITTING[i]
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        REENTRY_DROPS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    // `MSG_CAP` bytes of message and one for its newline.
+    let mut buf = [0u8; MSG_CAP + 1];
+    let n = {
+        let mut w = StackBuf::new(&mut buf[..MSG_CAP]);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter record and nothing to act on (DESIGN §2.5)"
+        )]
+        let _ = w.write_fmt(args);
+        let n = w.len();
+        if w.as_bytes().ends_with(b"\n") {
+            n - 1
+        } else {
+            n
+        }
+    };
+    let msg = buf.get(..n).unwrap_or(&[]);
+    // `false` means the runtime filter kept it out of the ring, not a failure.
+    let _ = push_record(level, msg);
+    // `n <= MSG_CAP`, so the newline has its byte.
+    if let Some(b) = buf.get_mut(n) {
+        *b = b'\n';
+    }
+    // The record and its newline in one try-lock write, so another CPU
+    // cannot split it (ROADMAP §10.2, F138).
+    let sent = crate::serial::Serial::try_write_bytes(buf.get(..=n).unwrap_or(&[]));
+    if !sent {
+        SINK_DROPS.fetch_add(1, Ordering::Relaxed);
+    }
+    EMITTING[i].store(false, Ordering::Release);
+}
+
+/// Records whose serial copy the try-lock sink dropped.
+pub fn sink_drops() -> u64 {
+    SINK_DROPS.load(Ordering::Relaxed)
+}
+
+/// Records `log_fmt` dropped on re-entry from its own CPU.
+pub fn reentry_drops() -> u64 {
+    REENTRY_DROPS.load(Ordering::Relaxed)
+}
+
+/// Install the serial capture (`serial::set_capture_hook`). `_start` calls
+/// it right after `Serial::init`, before the first marker, so the ring
+/// holds every boot line (DESIGN §1.2).
+pub fn init() {
+    crate::serial::set_capture_hook(capture_serial);
+}
+
+/// Assemble COM1 bytes into records so boot `marker!` / `writeln!(Serial, ..)` is captured
+/// before a framebuffer exists. Caller holds IRQs off (`Serial::write_line`
+/// / `write_fmt`); `STAGE` is CPU-local and must not outlive that.
+pub fn capture_serial(bytes: &[u8]) {
+    crate::serial::raw::stop_if_halting();
+    let _irq = InterruptGuard::enter();
+    if is_emitting() {
+        return;
+    }
+    if !allowed(Level::Info, runtime(), COMPILE_MAX) {
+        return;
+    }
+    let i = cpu_index();
+    STAGE[i].with(|st| {
+        for &b in bytes {
+            if b == b'\r' {
+                continue;
+            }
+            if b == b'\n' {
+                if st.len > 0 {
+                    let rec =
+                        Record::from_msg(timestamp(), cpu_id(), Level::Info, &st.buf[..st.len]);
+                    st.len = 0;
+                    // `false` means filtered out, not a failure.
+                    let _ = LOG.with(|l| l.emit(rec));
+                }
+                continue;
+            }
+            if st.len < MSG_CAP {
+                st.buf[st.len] = b;
+                st.len += 1;
+            }
+        }
+    });
+}
+
+pub fn contains_msg(needle: &str) -> bool {
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    with_logger(|l| {
+        l.ring
+            .iter()
+            .any(|r| r.msg().windows(n.len()).any(|w| w == n))
+    })
+}
+
+pub fn ring_len() -> usize {
+    with_logger(|l| l.ring.len())
+}
+
+pub fn written() -> u64 {
+    with_logger(|l| l.ring.written())
+}
+
+/// Copy record `i` (oldest-first). Lock is not held after return.
+pub fn record_at(i: usize) -> Option<vibeos::log::Record<MSG_CAP>> {
+    with_logger(|l| l.ring.get(i).copied())
+}
+
+/// Copy each message out, then call `f`. Lock is not held across `f`.
+pub fn for_each_msg(mut f: impl FnMut(&[u8])) {
+    let len = with_logger(|l| l.ring.len());
+    let mut i = 0usize;
+    while i < len {
+        let rec = with_logger(|l| l.ring.get(i).copied());
+        i += 1;
+        let Some(r) = rec else {
+            break;
+        };
+        f(r.msg());
+    }
+}
+
+pub fn dropped() -> u64 {
+    with_logger(|l| l.ring.dropped())
+}
+
+/// `dmesg` dump. `view` None → current runtime max.
+/// Does not hold the ring lock across TX (capture would deadlock).
+pub fn dmesg(view: Option<Level>) {
+    dmesg_write(&mut PlainSerial, view);
+}
+
+pub fn dmesg_write(w: &mut impl Write, view: Option<Level>) {
+    let view = view.unwrap_or_else(max_level);
+    let len = with_logger(|l| l.ring.len());
+    let mut i = 0usize;
+    while i < len {
+        let rec = with_logger(|l| l.ring.get(i).copied());
+        i += 1;
+        let Some(r) = rec else {
+            break;
+        };
+        if !allowed(r.level, view, COMPILE_MAX) {
+            continue;
+        }
+        write_record(w, &r);
+    }
+}
+
+pub fn write_record(w: &mut impl Write, r: &vibeos::log::Record<MSG_CAP>) {
+    let unit = if time_init::tsc_per_ms() != 0 {
+        "ms"
+    } else {
+        "tsc"
+    };
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a diagnostic line to Serial or the console carries no failure anyone could act on (DESIGN §2.5)"
+    )]
+    let _ = writeln!(
+        w,
+        "vibeOS: dmesg: {}{} cpu{} {} {}",
+        r.timestamp,
+        unit,
+        r.cpu_id,
+        r.level.as_str(),
+        r.msg_str()
+    );
+}
+
+/// Last N records for the panic dump, each one line through `out`, the
+/// dump's writer (`panic::out`, over `serial::raw::write_owner`: no lock,
+/// no `InterruptGuard`), which the caller passes so this module does not
+/// name the panic module (DESIGN §1.2).
+///
+/// # Safety
+/// The contracts of [`force_unlock`] and [`with_logger_unlocked`]: panic
+/// path only, after `panic::begin_dump`, with no other writer of `LOG`.
+pub unsafe fn dump_tail(n: usize, out: fn(fmt::Arguments<'_>)) {
+    // SAFETY: the holder never touches `LOG` again (panic path, after
+    // `begin_dump`); established by `log_init::dump_tail`'s `# Safety`
+    // contract.
+    unsafe { force_unlock() };
+    let n = if n == 0 { DUMP_LAST } else { n };
+    // SAFETY: nothing writes `LOG` during the dump; established by
+    // `log_init::dump_tail`'s `# Safety` contract.
+    unsafe {
+        with_logger_unlocked(|l| {
+            out(format_args!(
+                "vibeOS: log: last {} ({} dropped, {} sink, {} reentry)",
+                n.min(l.ring.len()),
+                l.ring.dropped(),
+                sink_drops(),
+                reentry_drops()
+            ));
+            let unit = if time_init::tsc_per_ms() != 0 {
+                "ms"
+            } else {
+                "tsc"
+            };
+            for r in l.ring.last_n(n) {
+                out(format_args!(
+                    "vibeOS: logrec: {}{} cpu{} {} {}",
+                    r.timestamp,
+                    unit,
+                    r.cpu_id,
+                    r.level.as_str(),
+                    r.msg_str()
+                ));
+            }
+        });
+    }
+}
+
+/// Parked. DESIGN §2.5's log contract wants a lockless ring and one
+/// printer thread per console (ROADMAP §19.5). Until then the global
+/// ring + serial try-lock sink print synchronously.
+pub fn start_printer_thread() {}
+
+/// `fmt::Write` that emits one Info record per newline, plus serial.
+pub struct Log;
+
+impl fmt::Write for Log {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        log_fmt(Level::Info, format_args!("{s}"));
+        Ok(())
+    }
+}
+
+#[macro_export]
+macro_rules! klog {
+    ($lvl:expr, $($arg:tt)*) => {{
+        $crate::log_init::log_fmt($lvl, format_args!($($arg)*));
+    }};
+}
+
+/// `klog!` at most once per `interval_ms` per call site (C-RATELIMIT), the
+/// one form of DESIGN §2.5's "a counter plus a log line at most once a
+/// second". A per-site `static` `vibeos::log::RateLimit` counts the calls
+/// in between, on `log_init::timestamp`'s clock; the next line carries
+/// that count as `[N suppressed]` when it is not 0.
+#[macro_export]
+macro_rules! klog_ratelimited {
+    ($interval_ms:expr, $lvl:expr, $($arg:tt)*) => {{
+        static LIMIT: vibeos::log::RateLimit = vibeos::log::RateLimit::new();
+        match LIMIT.check($crate::log_init::timestamp(), $interval_ms) {
+            Some(0) => $crate::log_init::log_fmt($lvl, format_args!($($arg)*)),
+            Some(n) => $crate::log_init::log_fmt(
+                $lvl,
+                format_args!("{} [{} suppressed]", format_args!($($arg)*), n),
+            ),
+            None => {}
+        }
+    }};
+}

@@ -1,0 +1,260 @@
+# Expected skips (DESIGN §8.2, ROADMAP §10.2, C-SKIPS). `skips.py` reads it.
+#
+# Format: one `[[skip]]` row per test and condition. `name` is the test,
+# `reason` the exact text of its `skip <name>: <reason>` line. The optional
+# fields `arch`, `accel`, `cpu`, `smp`, `mem`, `machine` and `host` say
+# where the row holds, each as one value or an array meaning any of them
+# (`smp` is an integer, the rest strings); an unknown key is an error.
+#
+# Matching: `skips.launch_config` gives the configuration a boot launched:
+# `arch` from `qemu-system-<arch>`, `accel` the effective accelerator
+# (`tcg`, `kvm`, `hvf`), `cpu`, `smp` and `mem` as passed (`cpu` compared
+# as the exact string, so `max` and `max,+invtsc` differ), `machine` the
+# `-machine` value (`pc` when there is none, `pc,hpet=off` with HPET off),
+# and `host` the harness host (`platform.system().lower()`). A row matches
+# when every field it sets holds the configuration's value; a field left
+# out matches every value. A boot fails when a test with a `run` line
+# skips and no matching row names it with that reason, when a test of a
+# matching row runs instead of skipping, and when a test that
+# `VIBEOS_KTEST` names without a glob skips. A test without a `run` line
+# in the boot needs nothing.
+#
+# The file shrinks only by an edit: each row added or removed takes a
+# `Gate-change: tests/harness/skips.toml <name> <condition class>: <reason>`
+# trailer (C-GATECHANGE), and a box that adds a test which skips somewhere
+# adds its rows in the same commit.
+
+# Fewer than the four CPUs the tail-reclaim tests pin threads to: the
+# `-smp 2` tiers (`make test-kernel`, `make test-lapic-fallback`, and the
+# nightly KVM leg's `make test-kernel`) under TCG and KVM alike.
+[[skip]]
+name = "lifetime_stack_reclaim"
+reason = "needs 4 cpus"
+smp = [1, 2, 3]
+
+[[skip]]
+name = "lifetime_dead_slot_on_cpu"
+reason = "needs 4 cpus"
+smp = [1, 2, 3]
+
+# qemu64 has no SMEP, SMAP or UMIP, under TCG and KVM alike:
+# `make test-lapic-fallback` and its nightly KVM run, which adds `+invtsc`
+# (`LAPIC_FALLBACK_CPU`, DESIGN §8.4).
+[[skip]]
+name = "cpu_hardening"
+reason = "no smep/smap/umip"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
+
+[[skip]]
+name = "ac_clear_on_exception"
+reason = "no SMAP"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
+
+[[skip]]
+name = "ac_clear_user_popf"
+reason = "no SMAP"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
+
+[[skip]]
+name = "uaccess_smap_stray_fault"
+reason = "cpu: CR4.SMAP clear"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
+
+[[skip]]
+name = "uaccess_smep_user_jump"
+reason = "cpu: CR4.SMEP clear"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
+
+# No invariant TSC, so the PIT-against-HPET band means nothing
+# (`tsc_calib_source`): TCG on every per-push tier and the weekly
+# smp-stress job, and the nightly KVM leg's `make test-lapic-fallback`,
+# whose model has no invariant TSC bit.
+[[skip]]
+name = "tsc_calib_source"
+reason = "no invariant tsc"
+accel = "tcg"
+
+[[skip]]
+name = "tsc_calib_source"
+reason = "no invariant tsc"
+accel = "kvm"
+cpu = "qemu64,-tsc-deadline"
+
+# One CPU: `make test-irqoff` boots TCG with `-icount shift=0` and `-smp 1`
+# (ROADMAP §10.3, TESTING.md §8.2), where each test that needs a second
+# CPU skips with its own reason.
+
+[[skip]]
+name = "alloc_stress_smp"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "call_function_ipi"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "catch_ignores_other_cpu"
+reason = "one CPU"
+smp = 1
+
+[[skip]]
+name = "console_write_newlines"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "cross_cpu_spawn"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "current_migrate_if1"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "dead_list_batched_rounds"
+reason = "needs 2 cpus"
+smp = 1
+
+[[skip]]
+name = "exit_burst"
+reason = "needs 2 cpus"
+smp = 1
+
+[[skip]]
+name = "force_kernel_irq_window"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "fp_migrate_counter"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "intx_fallback"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "intx_free_masks"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "late_wake_after_exit"
+reason = "needs 2 cpus"
+smp = 1
+
+[[skip]]
+name = "lifetime_console_write_acks_shootdown"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "lifetime_shootdown_ack_late"
+reason = "one CPU"
+smp = 1
+
+[[skip]]
+name = "msix_cpu"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "msix_cpu_publish_last"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "per_cpu_identity"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "preempt_gpr_canaries"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "preempt_two_threads"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "requeue_moves_each_dequeue"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "reschedule_ipi_wake_ap"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "rng_pool_no_dup"
+reason = "one CPU"
+smp = 1
+
+[[skip]]
+name = "serial_lines_whole"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "shootdown_ack_while_busy"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "stop_cont_no_lost_wakeup"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "syscall_body_if_on"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "tlb_shootdown_remote"
+reason = "no AP"
+smp = 1
+
+[[skip]]
+name = "trace_tracepoints_fire"
+reason = "needs a second cpu"
+smp = 1
+
+[[skip]]
+name = "user_device_irq"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "user_entry_irq"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "user_ipi"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "user_tf_repin"
+reason = "needs 2 CPUs"
+smp = 1
+
+[[skip]]
+name = "vfs_io_off_lock"
+reason = "needs a second cpu"
+smp = 1
+
+[[skip]]
+name = "wake_inbox_and_kva_pool"
+reason = "no AP"
+smp = 1

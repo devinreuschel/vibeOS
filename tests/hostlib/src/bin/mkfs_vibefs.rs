@@ -1,5 +1,11 @@
 //! Host mkfs.vibefs. Same format module as the kernel.
 
+#![allow(
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "host tool: `alloc`'s growing calls may panic, and a failed allocation ends this host process, not the kernel (DESIGN §4.4)"
+)]
+
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};

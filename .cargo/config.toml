@@ -5,12 +5,22 @@ rustflags = ["-D", "warnings"]
 # Kernel-only flags. Keep them off [build] rustflags so host `cargo test
 # --target $HOST` does not inherit linker/code-gen overrides. Host recipes
 # pass `--target $(HOST_TRIPLE)` (A2); do not pin a GNU triple.
+# Cargo reads one rustflags source: this table replaces [build]'s for the
+# kernel target, so it repeats -D warnings (ROADMAP §10.1, F147). A job that
+# sets RUSTFLAGS drops both tables.
 [target.x86_64-unknown-none]
 rustflags = [
+    "-D", "warnings",
     "-C", "force-frame-pointers=yes",
     "-C", "relocation-model=static",
     # Builtin spec defaults to PIE + full RELRO; we want a static ET_EXEC.
     "-C", "link-arg=-no-pie",
     "-C", "link-arg=-zmax-page-size=0x1000",
     "-C", "link-arg=-znorelro",
+    # A 20-byte GNU build id, which VMCOREINFO's BUILD-ID carries
+    # (docs/VMCOREINFO.md); bare --build-id is lld's 8-byte fast hash.
+    "-C", "link-arg=--build-id=sha1",
+    # Per-function frame sizes in `.stack_sizes`, which linker.ld keeps
+    # non-alloc and scripts/check_stack_sizes.py screens (ROADMAP §10.2).
+    "-Z", "emit-stack-sizes",
 ]

@@ -1,11 +1,60 @@
 #!/usr/bin/env python3
-"""Kernel review traceability: every finding in docs/reviews/KERNEL_REVIEW.md
-is cited by id (F001..F999) in docs/ROADMAP.md, and every cited id exists.
+"""Kernel review traceability and the box dependency rows (ROADMAP §10.9).
+
+Every finding in docs/reviews/KERNEL_REVIEW.md is cited by id (F001..F999) in
+docs/ROADMAP.md, and every cited id exists.
+
+Every tests/gates/phase-<N>-needs.toml loads: a row holds `key`, `needs`,
+`closes`, and `why` only; every key, `needs`, `closes`, and `[wave1].roots`
+entry is a substring of exactly one roadmap line, and that line is a box; no
+row of phase N's file needs a box in a later phase or in none; and every box
+in Phases 0 to 10 whose text has a lands-after, lands-with, or lands-before
+clause is a row's key or appears in a row's `needs` or `closes`.
 
 `--closed` also fails while a CRITICAL or HIGH finding without a LATENT tag
 is cited by an open box in Phases 0 to 10 (the lines before `## Phase 11:`).
 Later phases may cite such a finding as a cross-reference. The Phase 10 gate
 map runs that mode.
+
+`--wave 1` also fails while a wave-1 box is open: the boxes `--closed`
+inspects and phase 10's `[wave1].roots`, with every box they need through the
+rows of every needs file. `--print-wave 1` prints them, one per line.
+
+Placement, as the tracking rule in KERNEL_REVIEW.md and Phase 10's preamble place
+a finding's boxes. A placement citation is a finding id on a box line with a phase
+(`gatelib.roadmap_boxes`; exit-gate and Stretch lines count as boxes of their
+phase, and the `- [ ]` lines after `# Beyond` are proposals, not boxes). A box line
+that names `check_review_refs.py` states this script's rules, so its ids are
+examples, not citations. Every finding has a placement citation; a CRITICAL or HIGH
+finding without a LATENT tag has one in Phase 10 or earlier; and a LATENT finding
+whose tag names a phase has one in that phase or an earlier one, except the ids
+DEPARTURES lists. The tag is the text of `LATENT (...)` up to its matching
+parenthesis, since tags nest parentheses. Its phases are the N of each `Phase N`,
+`§N`, and `§N.M` in the tag, and the smallest is its milestone ("Phase 12.5 ..."
+is 12, "Phase 18/22" is 18, "ROADMAP §20.1" is 20). A tag that names no phase gets
+the first rule only. A DEPARTURES entry fails when its key names no box or several,
+when that box does not cite the id, or when the finding passes without it. The
+bare mode (no option) runs these rules.
+
+Errata, in every mode. A finding's `####` heading and `**Severity:**` line are never
+edited: a correction is a line under `## Errata`, the review's last `## ` heading, of the
+form `- <YYYY-MM-DD> · <Fnnn> · <what changed> -- <why>`, dates in order. When `<what
+changed>` is a `**Severity:** ...` line, `apply_errata` puts it in place of that finding's
+own severity line (the latest erratum wins) before any rule reads the review; other text
+(a location) changes nothing. An unknown id, a malformed line, and `## Errata` not being
+last fail.
+
+Design reviews, in every mode. An id that follows the words `design review` (any
+case, the two words split by any whitespace, a line break included) in `docs/`,
+`AGENTS.md`, or `README.md` needs a row in docs/reviews/DESIGN_REVIEWS.md: a table
+line whose first cell is that id. Each row's Sections cell, the column its table's
+header names, splits on `;`; a group that begins with DESIGN, ROADMAP, SYSCALL, or
+VIBEFS splits on `,` into items that must name a heading of that document. DESIGN
+is docs/DESIGN.md and its topic files (`doc_refs.LAYOUT`). `§N[.M...]` names a
+numbered heading, and in ROADMAP a bare `§N` also names `## Phase N:`; `Phase N`
+names `## Phase N:`; `header` and a group with no items name the document; any
+other item equals a heading title (with or without its number) or a bold paragraph
+lead (`**Standing gates**`), ignoring case.
 """
 
 from __future__ import annotations
@@ -14,24 +63,302 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-REVIEW = ROOT / "docs" / "reviews" / "KERNEL_REVIEW.md"
-ROADMAP = ROOT / "docs" / "ROADMAP.md"
+sys.path.insert(0, str(ROOT))
 
-HEADING = re.compile(r"^#### (F\d{3}) · ")
-SEVERITY = re.compile(r"^\*\*Severity:\*\* (CRITICAL|HIGH|MEDIUM|LOW)\b(.*)$")
-FID = re.compile(r"\bF\d{3}\b")
-BOX = re.compile(r"^\s*- \[( |x)\] ")
-CLOSED_SCOPE_END = re.compile(r"^## Phase 11:")
+from scripts import doc_refs, gatelib  # noqa: E402
+from scripts.gatelib import (  # noqa: E402
+    BOX,
+    CLOSED_SCOPE_END,
+    FID,
+    GATES,
+    HEADING,
+    REVIEW,
+    ROADMAP,
+    SEVERITY,
+    Box,
+    GateError,
+    NeedsFile,
+    load_all_needs,
+    match_key,
+    parse_boxes,
+    wave1_lines,
+)
+
+__all__ = [
+    "DEPARTURES", "Citation", "DocHeading", "Finding", "apply_errata", "check",
+    "check_design_reviews", "check_needs", "check_placement", "design_review_ids",
+    "doc_headings", "parse_review", "parse_roadmap", "tag_phase", "wave",
+]
+
+# A lands clause in box text: "lands after", "land before", "lands with or after".
+LANDS = re.compile(r"\blands? (after|with|before)\b", re.IGNORECASE)
+
+# A phase a LATENT tag names: `Phase N`, `§N`, or `§N.M`.
+TAG_PHASE = re.compile(r"(?:\bPhase\s+|§)(\d+)")
+OWN_RULES = "check_review_refs.py"
+
+# Findings whose box sits after the phase their LATENT tag names: id -> (a key naming
+# the box, the reason that box gives).
+DEPARTURES: dict[str, tuple[str, str]] = {
+    "F122": (
+        "the virtio drivers meet the virtio 1.2 driver requirements",
+        "§26.4: Firecracker's and cloud-hypervisor's devices are the first non-QEMU virtio "
+        "devices the drivers meet",
+    ),
+}
+
+DESIGN_REVIEWS = ROOT / "docs" / "reviews" / "DESIGN_REVIEWS.md"
+REVIEW_ID = re.compile(r"(?i:design)\s+(?i:review)\s+([A-Z]\d{3})\b")
+DOCS: dict[str, tuple[str, ...]] = {
+    "DESIGN": tuple(path for path, _ in doc_refs.LAYOUT),
+    "ROADMAP": ("docs/ROADMAP.md",),
+    "SYSCALL": ("docs/SYSCALL.md",),
+    "VIBEFS": ("docs/VIBEFS.md",),
+}
+DOC_GROUP = re.compile(rf"^({'|'.join(DOCS)})\b\s*(.*)$")
+SECTION_ITEM = re.compile(r"^§(\d+(?:\.\d+)*)$")
+PHASE_ITEM = re.compile(r"^Phase (\d+)$")
+PHASE_TITLE = re.compile(r"^Phase (\d+):")
+BOLD_LEAD = re.compile(r"^\*\*([^*]+?)\.?\*\*")
 
 
 @dataclass(frozen=True)
-class Finding:
-    fid: str
-    severity: str
-    latent: bool
+class DocHeading:
+    file: str
+    line: int
+    level: int
+    number: str | None  # "2.10" for `### 2.10 Trust boundaries`
+    title: str  # the heading's text, its number included
+
+
+def read_docs(paths: tuple[str, ...]) -> dict[str, str]:
+    """path -> text for each of `paths` that exists under ROOT."""
+    out: dict[str, str] = {}
+    for p in paths:
+        f = ROOT / p
+        if f.is_file():
+            out[p] = f.read_text(encoding="utf-8")
+    return out
+
+
+def doc_headings(doc: str, files: dict[str, str] | None = None) -> list[DocHeading]:
+    """The ATX headings outside fences of `doc` (DESIGN, ROADMAP, SYSCALL, VIBEFS), over
+    its files in order. `files` maps a path to its text; by default they are read."""
+    paths = DOCS[doc]
+    texts = read_docs(paths) if files is None else files
+    out: list[DocHeading] = []
+    for path in paths:
+        text = texts.get(path)
+        if text is None:
+            continue
+        fenced = False
+        for n, raw in enumerate(text.splitlines(), start=1):
+            if raw.startswith(doc_refs.FENCE):
+                fenced = not fenced
+                continue
+            m = None if fenced else doc_refs.HEADING.match(raw)
+            if m is None:
+                continue
+            title = m.group(2)
+            num = doc_refs.NUMBER.match(title)
+            out.append(DocHeading(path, n, len(m.group(1)), num.group(1) if num else None,
+                                  title))
+    return out
+
+
+def design_review_ids(text: str) -> list[tuple[int, str]]:
+    """(line, id) of each id that follows the words `design review` in `text`."""
+    return [(text.count("\n", 0, m.start()) + 1, m.group(1)) for m in REVIEW_ID.finditer(text)]
+
+
+def _names(doc: str, files: dict[str, str]) -> tuple[set[str], set[int], set[str]]:
+    """A document's heading numbers, `## Phase N:` numbers, and names (heading titles,
+    with and without their number, and bold paragraph leads), casefolded."""
+    numbers: set[str] = set()
+    phases: set[int] = set()
+    names: set[str] = set()
+    for h in doc_headings(doc, files):
+        names.add(h.title.casefold())
+        if h.number is not None:
+            numbers.add(h.number)
+            names.add(h.title[len(h.number):].lstrip(". ").casefold())
+        p = PHASE_TITLE.match(h.title)
+        if p is not None and h.level == 2:
+            phases.add(int(p.group(1)))
+    for path in DOCS[doc]:
+        for raw in files.get(path, "").splitlines():
+            b = BOLD_LEAD.match(raw)
+            if b is not None:
+                names.add(b.group(1).strip().casefold())
+    return numbers, phases, names
+
+
+def check_design_reviews(cites: dict[str, str], reviews: str, files: dict[str, str]) -> list[str]:
+    """`cites` maps a path in scope to its text, `reviews` is DESIGN_REVIEWS.md, and
+    `files` maps each DOCS path to its text."""
+    errors: list[str] = []
+    rows: dict[str, tuple[int, str | None]] = {}
+    col: int | None = None
+    for n, raw in enumerate(reviews.splitlines(), start=1):
+        if not raw.startswith("|"):
+            col = None
+            continue
+        cells = [c.strip() for c in raw.strip().strip("|").split("|")]
+        if col is None and "Sections" in cells:
+            col = cells.index("Sections")
+            continue
+        if cells and re.fullmatch(r"[A-Z]\d{3}", cells[0]):
+            sections = cells[col] if col is not None and col < len(cells) else None
+            rows.setdefault(cells[0], (n, sections))
+    for path in sorted(cites):
+        for line, rid in design_review_ids(cites[path]):
+            if rid not in rows:
+                errors.append(f"{path}:{line}: design review {rid} has no row in "
+                              f"DESIGN_REVIEWS.md")
+    index = {doc: _names(doc, files) for doc in DOCS}
+    for rid, (n, sections) in rows.items():
+        for group in (sections or "").split(";"):
+            g = DOC_GROUP.match(group.strip())
+            if g is None:
+                continue
+            doc = g.group(1)
+            numbers, phases, names = index[doc]
+            for item in (x.strip() for x in g.group(2).split(",")):
+                if not item or item == "header":
+                    continue
+                sec = SECTION_ITEM.match(item)
+                ph = PHASE_ITEM.match(item)
+                if sec is not None:
+                    ok = sec.group(1) in numbers or (
+                        doc == "ROADMAP" and "." not in sec.group(1)
+                        and int(sec.group(1)) in phases)
+                elif ph is not None:
+                    ok = int(ph.group(1)) in phases
+                else:
+                    ok = item.casefold() in names
+                if not ok:
+                    errors.append(f"DESIGN_REVIEWS.md:{n}: {rid}: {doc} {item} names no heading")
+    return errors
+
+
+def design_review_inputs() -> tuple[dict[str, str], str, dict[str, str]]:
+    """The tree's inputs to `check_design_reviews`."""
+    cites = read_docs(tuple(
+        str(p.relative_to(ROOT)) for p in sorted((ROOT / "docs").rglob("*.md"))
+    ) + ("AGENTS.md", "README.md"))
+    files = read_docs(tuple(p for paths in DOCS.values() for p in paths))
+    return cites, DESIGN_REVIEWS.read_text(encoding="utf-8"), files
+
+
+@dataclass(frozen=True)
+class Finding(gatelib.Finding):
+    tag: str | None = None  # the text of `LATENT (...)`, None without one
+
+
+def latent_tag(rest: str) -> str | None:
+    """The text inside `LATENT (...)` in a severity line's tail, up to the matching
+    parenthesis."""
+    at = rest.find("LATENT (")
+    if at < 0:
+        return None
+    start = at + len("LATENT (")
+    depth = 1
+    for i in range(start, len(rest)):
+        if rest[i] == "(":
+            depth += 1
+        elif rest[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return rest[start:i]
+    return rest[start:]
+
+
+# KERNEL_REVIEW.md's corrections (ROADMAP §10.9, the gate-inputs box): the last
+# `## ` heading, and under it one erratum per non-blank line.
+ERRATA_HEADING = re.compile(r"^## Errata\s*$")
+ERRATUM = re.compile(r"^- (\d{4}-\d{2}-\d{2}) · (F\d{3}) · (\S.*?) -- (\S.*)$")
+
+
+def apply_errata(text: str) -> tuple[str, list[str]]:
+    """The review with each erratum's `**Severity:**` text in place of its finding's
+    own severity line (the latest erratum wins), and the errata's errors. Other
+    errata (a location) change nothing. No `## Errata` heading means no errata."""
+    lines = text.splitlines()
+    tops = [n for n, raw in enumerate(lines) if raw.startswith("## ")]
+    at = [n for n in tops if ERRATA_HEADING.match(lines[n])]
+    if not at:
+        return text, []
+    errors: list[str] = []
+    start = at[0]
+    if len(at) > 1 or tops[-1] != start:
+        errors.append(f"KERNEL_REVIEW.md:{start + 1}: `## Errata` is not the last `## ` heading")
+    severity_at: dict[str, int] = {}
+    current: str | None = None
+    for n, raw in enumerate(lines[:start]):
+        m = HEADING.match(raw)
+        if m:
+            current = m.group(1)
+            continue
+        if current is not None and SEVERITY.match(raw):
+            severity_at[current] = n
+            current = None
+    last: date | None = None
+    for n in range(start + 1, len(lines)):
+        raw = lines[n]
+        if not raw.strip():
+            continue
+        where = f"KERNEL_REVIEW.md:{n + 1}"
+        e = ERRATUM.match(raw)
+        if e is None:
+            errors.append(f"{where}: not `- <YYYY-MM-DD> · <Fnnn> · <what changed> -- <why>`")
+            continue
+        try:
+            day = date.fromisoformat(e.group(1))
+        except ValueError:
+            errors.append(f"{where}: {e.group(1)} is not a date")
+            continue
+        if last is not None and day < last:
+            errors.append(f"{where}: {e.group(1)} is before the erratum above it")
+        last = day
+        fid, change = e.group(2), e.group(3)
+        if fid not in severity_at:
+            errors.append(f"{where}: {fid} is not a finding with a severity line")
+            continue
+        if SEVERITY.match(change):
+            lines[severity_at[fid]] = change
+    out = "\n".join(lines)
+    return (out + "\n" if text.endswith("\n") else out), errors
+
+
+def parse_review(text: str) -> dict[str, Finding]:
+    """`gatelib.parse_review`'s findings, each with its LATENT tag."""
+    tags: dict[str, str | None] = {}
+    current: str | None = None
+    for raw in text.splitlines():
+        m = HEADING.match(raw)
+        if m:
+            current = m.group(1)
+            continue
+        s = SEVERITY.match(raw) if current is not None else None
+        if current is not None and s:
+            tags[current] = latent_tag(s.group(2))
+            current = None
+    return {
+        fid: Finding(f.fid, f.severity, f.latent, tags.get(fid))
+        for fid, f in gatelib.parse_review(text).items()
+    }
+
+
+def tag_phase(tag: str | None) -> int | None:
+    """The smallest phase a LATENT tag names, or None."""
+    if tag is None:
+        return None
+    phases = [int(n) for n in TAG_PHASE.findall(tag)]
+    return min(phases) if phases else None
 
 
 @dataclass(frozen=True)
@@ -40,24 +367,6 @@ class Citation:
     fid: str
     box: str | None  # "open", "closed", or None when the line is not a box
     phase10: bool  # the line is before "## Phase 11:"
-
-
-def parse_review(text: str) -> dict[str, Finding]:
-    """Findings keyed by id. The severity line follows its heading."""
-    found: dict[str, Finding] = {}
-    current: str | None = None
-    for raw in text.splitlines():
-        m = HEADING.match(raw)
-        if m:
-            current = m.group(1)
-            continue
-        if current is None:
-            continue
-        s = SEVERITY.match(raw)
-        if s:
-            found[current] = Finding(current, s.group(1), "LATENT" in s.group(2))
-            current = None
-    return found
 
 
 def parse_roadmap(text: str) -> list[Citation]:
@@ -96,21 +405,140 @@ def check(
     return errors
 
 
+def check_needs(roadmap_text: str, needs: list[NeedsFile]) -> list[str]:
+    """The needs-file rules: keys, later-phase needs, and lands clauses."""
+    errors: list[str] = []
+    lines = roadmap_text.splitlines()
+    boxes = parse_boxes(roadmap_text)
+    rowed: set[int] = set()
+
+    def resolve(where: str, key: str) -> Box | None:
+        try:
+            return match_key(key, boxes, lines)
+        except GateError as e:
+            errors.append(f"{where}: {e}")
+            return None
+
+    for phase, rows, roots in needs:
+        name = f"phase-{phase}-needs.toml"
+        for key in roots:
+            resolve(f"{name} [wave1]", key)
+        for r in rows:
+            where = f"{name} row {r.key!r}"
+            b = resolve(name, r.key)
+            if b is not None:
+                rowed.add(b.line)
+            for n in r.needs:
+                nb = resolve(f"{where} needs", n)
+                if nb is None:
+                    continue
+                rowed.add(nb.line)
+                if nb.phase is None or nb.phase > phase:
+                    at = "no phase" if nb.phase is None else f"Phase {nb.phase}"
+                    errors.append(f"{where}: needs L{nb.line}, a box in {at}, "
+                                  f"after Phase {phase}")
+            for c in r.closes:
+                cb = resolve(f"{where} closes", c)
+                if cb is not None:
+                    rowed.add(cb.line)
+    for b in boxes:
+        if b.phase is None or b.phase > 10 or not LANDS.search(b.text):
+            continue
+        if b.line not in rowed:
+            words = " ".join(b.text.split()[:8])
+            errors.append(f"ROADMAP.md:{b.line}: a lands clause and no needs row: {words}")
+    return errors
+
+
+def check_placement(findings: dict[str, Finding], boxes: list[Box]) -> list[str]:
+    """The placement rules and DEPARTURES (the module docstring states them)."""
+    errors: list[str] = []
+    first: dict[str, Box] = {}
+    for b in boxes:
+        if b.phase is None or OWN_RULES in b.text:
+            continue
+        for fid in FID.findall(b.text):
+            old = first.get(fid)
+            if old is None or b.phase < (old.phase or 0):
+                first[fid] = b
+
+    def passes_latent(f: Finding) -> bool:
+        milestone = tag_phase(f.tag) if f.latent else None
+        b = first.get(f.fid)
+        return milestone is None or (b is not None and (b.phase or 0) <= milestone)
+
+    for fid in sorted(findings):
+        f = findings[fid]
+        at = first.get(fid)
+        if at is None:
+            errors.append(f"{fid}: cited by no box line, only by prose")
+            continue
+        if not f.latent and f.severity in ("CRITICAL", "HIGH") and (at.phase or 0) > 10:
+            errors.append(f"{fid} ({f.severity}): no box before `## Phase 11:` cites it "
+                          f"(first ROADMAP.md:{at.line}, Phase {at.phase})")
+        if fid not in DEPARTURES and not passes_latent(f):
+            errors.append(f"{fid}: LATENT tag names Phase {tag_phase(f.tag)}, first box "
+                          f"ROADMAP.md:{at.line} is in Phase {at.phase}")
+    for fid, (key, _reason) in sorted(DEPARTURES.items()):
+        try:
+            box = match_key(key, boxes)
+        except GateError as e:
+            errors.append(f"DEPARTURES {fid}: {e}")
+            continue
+        if fid not in FID.findall(box.text):
+            errors.append(f"DEPARTURES {fid}: ROADMAP.md:{box.line} does not cite {fid}")
+        found = findings.get(fid)
+        if found is None or passes_latent(found):
+            errors.append(f"DEPARTURES {fid}: stale, the finding passes without the entry")
+    return errors
+
+
+def wave(
+    number: int, roadmap_text: str, review_text: str, needs: list[NeedsFile]
+) -> list[Box]:
+    """The boxes of wave `number`, by line. Only wave 1 is defined."""
+    if number != 1:
+        raise ValueError(f"wave {number}: only wave 1 is defined")
+    lines = wave1_lines(roadmap_text=roadmap_text, review_text=review_text, needs=needs)
+    return [b for b in parse_boxes(roadmap_text) if b.line in lines]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--closed", action="store_true", help="fail on open boxes in Phases "
                     "0 to 10 citing CRITICAL or HIGH findings without a LATENT tag")
+    ap.add_argument("--wave", type=int, choices=[1], help="fail while a box of this wave is open")
+    ap.add_argument("--print-wave", type=int, choices=[1], help="print this wave's boxes")
     args = ap.parse_args(argv)
-    findings = parse_review(REVIEW.read_text(encoding="utf-8"))
+    review_text, errata_errors = apply_errata(REVIEW.read_text(encoding="utf-8"))
+    findings = parse_review(review_text)
     if not findings:
         print(f"check_review_refs: no findings parsed from {REVIEW}", file=sys.stderr)
         return 1
-    cites = parse_roadmap(ROADMAP.read_text(encoding="utf-8"))
-    errors = check(findings, cites, args.closed)
+    roadmap_text = ROADMAP.read_text(encoding="utf-8")
+    cites = parse_roadmap(roadmap_text)
+    errors = errata_errors + check(findings, cites, args.closed)
+    load_errors: list[str] = []
+    needs = load_all_needs(GATES, load_errors)
+    errors += load_errors + check_needs(roadmap_text, needs)
+    bare = not args.closed and args.wave is None and args.print_wave is None
+    errors += check_placement(findings, parse_boxes(roadmap_text)) if bare else []
+    errors += check_design_reviews(*design_review_inputs())
+    if args.print_wave is not None:
+        for b in wave(args.print_wave, roadmap_text, review_text, needs):
+            mark = "[x]" if b.ticked else "[ ]"
+            print(f"L{b.line} {mark} {' '.join(b.text.split()[:8])}")
+    if args.wave is not None:
+        for b in wave(args.wave, roadmap_text, review_text, needs):
+            if not b.ticked:
+                words = " ".join(b.text.split()[:8])
+                errors.append(f"ROADMAP.md:{b.line}: wave {args.wave} box open: {words}")
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print(f"check_review_refs: ok ({len(findings)} findings)")
+    if args.print_wave is None:
+        print(f"check_review_refs: ok ({len(findings)} findings, "
+              f"{sum(len(r) for _, r, _ in needs)} needs rows)")
     return 0
 
 

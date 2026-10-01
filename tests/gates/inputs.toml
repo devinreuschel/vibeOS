@@ -1,0 +1,125 @@
+# Gate inputs (ROADMAP §10.9, the gate-inputs box; docs/TESTING.md §8.6).
+#
+# Every file a gate reads to reach its verdict, and the vibeos-core line-coverage
+# floor. scripts/check_gate_inputs.py reads this file: `make check` runs it against
+# origin/main and the `check` job against each pull request's merge base.
+#
+# Schema. `[coverage]` holds `crate` and `floor`, the `--fail-under-lines` value
+# the `check` job's llvm-cov step reads through `check_gate_inputs.py --floor`.
+# Each `[[input]]` holds exactly one of `path` (must exist) or `glob` (whose `*`
+# does not cross `/`, and which may match nothing, for a file that lands later),
+# a `why`, and at most one of
+#   pair = "tests/harness/test_{stem}.py"   (glob only) each match's test, `{stem}`
+#                                           its name without `check_` and `.py`
+#   recipe = "<target>"                     (path = "Makefile") one rule's recipe
+#   table = "<dotted.table>"                one table of a TOML file
+#   list = {kind, table, entry, classes}    a skip or expected-failure list: its
+#                                           `[[<table>]]` rows, named by `entry`
+#   review = true                           KERNEL_REVIEW.md
+#
+# Rules, from the pull request's merge base to its head:
+# - the floor never falls, and no trailer allows it;
+# - a list entry added or changed needs
+#     Gate-change: <list> <entry> <class>: <reason>
+#   with a class from `classes`, one the entry sets when it sets any; a removed
+#   entry needs nothing;
+# - a `#### Fnnn` heading or `**Severity:**` line of the review is never edited: a
+#   correction is a dated erratum under its last heading, `## Errata`;
+# - any other listed input modified or removed (a recipe or table: its text), and
+#   this file when it drops an entry or changes anything but a raised floor,
+#   needs
+#     Gate-change: <path>: <rule or gate line it serves> -- <why>
+# - adding an input, raising the floor, and removing a list entry need none.
+# A trailer counts from any non-merge commit of the pull request.
+
+[coverage]
+crate = "vibeos-core"
+floor = 87
+
+[[input]]
+glob = "scripts/check_*.py"
+pair = "tests/harness/test_{stem}.py"
+why = "each check script's verdict, and the harness test that holds it to its rule"
+
+[[input]]
+path = "scripts/gatelib.py"
+why = "the readers check_review_refs.py, check_ticks.py, gate.py and this check share"
+
+[[input]]
+path = "tests/harness/test_gatelib.py"
+why = "the tests of those readers"
+
+[[input]]
+path = "scripts/ci_history.py"
+why = "the CI-history records gate.py and check_ticks.py read proving runs from"
+
+[[input]]
+path = "scripts/gate.py"
+why = "`make gate`: runs the gate map's entries and the box rules"
+
+[[input]]
+path = "scripts/release_check.py"
+why = "release.yml's verdict on the tag, its commit, and the ci run proving it"
+
+[[input]]
+path = "scripts/doc_refs.py"
+why = "`make check` runs it; the documents' section references"
+
+[[input]]
+glob = "tests/gates/*.toml"
+why = "the gate maps, the needs files, and this file"
+
+[[input]]
+path = "tests/harness/skips.toml"
+why = "the expected skips (C-SKIPS)"
+list = {kind = "skip", table = "skip", entry = "name", classes = ["arch", "accel", "cpu", "smp", "mem", "machine", "host"]}
+
+[[input]]
+glob = "tests/contract/markers.toml"
+why = "the registered marker lines check_markers.py and the harness match"
+
+[[input]]
+path = "tests/harness/declared.py"
+why = "the registered failure lines an in-guest test declares, which a ktest run then expects instead of failing on (ROADMAP §10.7)"
+
+[[input]]
+glob = "deny.toml"
+why = "cargo deny's license, ban and source rules in `make check`"
+
+[[input]]
+glob = ".github/workflows/*"
+why = "the jobs that run the gates, and their triggers and permissions"
+
+[[input]]
+path = "Makefile"
+recipe = "check"
+why = "`make check`, the `check` job's gate"
+
+[[input]]
+path = "Makefile"
+recipe = "gate"
+why = "`make gate`, the phase exit gate"
+
+[[input]]
+path = "docs/reviews/KERNEL_REVIEW.md"
+review = true
+why = "the findings and severities check_review_refs.py places and closes"
+
+[[input]]
+path = "clippy.toml"
+why = "the clippy settings `make check` lints with"
+
+[[input]]
+path = "Cargo.toml"
+table = "workspace.lints"
+why = "the workspace lints `make check` denies"
+
+[[input]]
+path = "pyproject.toml"
+table = "tool.ruff"
+why = "ruff's settings in `make check`"
+
+[[input]]
+path = "pyproject.toml"
+table = "tool.mypy"
+why = "mypy's settings in `make check`"

@@ -11,7 +11,8 @@ If you learn something about hardware or Rust from reading this, good, but that'
 
 ## Stack
 
-- Dated Rust nightly, pinned in `rust-toolchain.toml`, with built-in `x86_64-unknown-none`
+- Dated Rust nightly, pinned in `rust-toolchain.toml`, with built-in `x86_64-unknown-none` for the kernel and
+  `x86_64-unknown-linux-musl` for user programs
 - Limine to boot, `linker.ld` for layout, `Makefile` to build the ISO, QEMU to run and test
 
 ## Status
@@ -22,15 +23,20 @@ The 2026-09-23 [kernel review](docs/reviews/KERNEL_REVIEW.md) lists 152 findings
 docs, and CI, 3 of them critical and 17 high. Among them are seven ways a user process can halt the kernel
 (F004 to F010), which Phase 10 fixes. ROADMAP boxes the review showed false are open again or reworded
 to match the code, and the ROADMAP line that fixes each finding cites its id.
-Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port) and Phase 12 (demand
-paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
-Do not run code you do not trust on vibeOS, and keep no secrets on it: until Phase 10 closes a process
-can crash the kernel, and until Phase 18 nothing stops one from reading other processes' memory
-([DESIGN §2.10](docs/DESIGN.md#210-trust-boundaries)).
-Do not attach a virtio-blk disk you want to keep: every boot writes a GPT over the first one (`vda`) when
-it is 512 KiB or more and its partition table is missing, empty, or unreadable (F003), and
-`vibeos-ktest.iso` writes fixed sectors of any attached one (F145).
-Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). From Phase 8 on, the commit that closes a phase
+Phase 10 (consolidation) has its code and its per-push tests in, and every tier `make test` runs
+passes under TCG with no harness retry. Its exit gate closes once the scheduled
+runs on `main` (the nightly KVM leg, the models and Miri, the weekly stress and fuzz jobs, macOS) pass
+and the maintainer has run the release steps. TCG proves the per-push tiers; the timing a real CPU
+gives, the TSC-deadline timer and SIMD exceptions are proved only by the KVM leg, so the gate lines
+that name it wait for it. Phase 11 (portability: the aarch64 port) and Phase 12 (demand paging / COW)
+are not started. See [The arc](docs/ROADMAP.md#the-arc).
+Do not run code you do not trust on vibeOS, and keep no secrets on it: until the KVM leg proves Phase
+10's ring-3 lines a process may still find a way to crash the kernel, and until Phase 18 nothing stops
+one from reading other processes' memory ([DESIGN §2.10](docs/INVARIANTS.md#210-trust-boundaries)).
+Do not attach a disk you want to keep to `vibeos-ktest.iso`, which stamps a GPT on an all-zero `vda` and writes fixed sectors of any attached one (F145).
+Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). The maintainer pushes the tags and dispatches `release.yml` from `main`
+([docs/RELEASING.md](docs/RELEASING.md)); a release publishes `vibeos.iso` alone, built with the release profile,
+only after `ci` passed on the tagged commit. From Phase 8 on, the commit that closes a phase
 gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
 later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).
 No release exists yet: Phases 8 and 9 are tagged when Phase 10 closes the gate lines of Phases 0 to 9 that the kernel review and a later design review reopened.
@@ -38,10 +44,10 @@ No release exists yet: Phases 8 and 9 are tagged when Phase 10 closes the gate l
 Quickstart:
 
     ./setup.sh          # fetches Limine binaries, verifies host tools
-    make check          # fast local gate (fmt, host clippy, host units, harness, ruff/mypy, check scripts)
-    make                # kernel + vibeos.iso (hybrid BIOS/UEFI)
+    make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts, cargo deny)
+    make                # kernel + build/vibeos.iso (hybrid BIOS/UEFI)
     make run            # QEMU window = PS/2; the terminal is COM1 (`-serial stdio`)
-    make test           # host + harness units, e2e (BIOS, UEFI, panic, #GP, PIT, 9 GiB), in-guest, vibefs crash
+    make test           # host + harness units, e2e (BIOS, UEFI, panic, #GP, #MC, PIT, 9 GiB), in-guest, vibefs crash
 
 macOS setup, including the firmware image `make test` needs there:
 [AGENTS.md, How to run](AGENTS.md#how-to-run).
@@ -56,20 +62,35 @@ Agents: start at [AGENTS.md](AGENTS.md).
 Docs live in [`docs/`](docs/). The other docs in the root are the changelog, [AGENTS.md](AGENTS.md) (with its
 `CLAUDE.md` pointer), [CONTRIBUTING.md](CONTRIBUTING.md), and [LICENSE](LICENSE).
 
-- [DESIGN.md](docs/DESIGN.md): invariants, boot order, address map, interrupts, time, SMP, testing, and
-  a list of bugs already paid for once. Decisions, not narration.
+- [DESIGN.md](docs/DESIGN.md): the design's index: the overview, the documentation rules, and a
+  Contents table naming each section's file. Decisions, not narration. Each topic file keeps DESIGN's
+  section numbers:
+  - [INVARIANTS.md](docs/INVARIANTS.md) (§2): lock order, handler rules, panic policy, markers, the
+    invariant register, trust boundaries, object lifetimes.
+  - [BOOT.md](docs/BOOT.md) (§3), [MEMORY.md](docs/MEMORY.md) (§4),
+    [INTERRUPTS.md](docs/INTERRUPTS.md) (§5), [TIME.md](docs/TIME.md) (§6), [SMP.md](docs/SMP.md) (§7)
+    and [TESTING.md](docs/TESTING.md) (§8).
+  - [PITFALLS.md](docs/PITFALLS.md) (§9): bugs already paid for once.
+  - [BLOCK.md](docs/BLOCK.md) (§10), [PORTABILITY.md](docs/PORTABILITY.md) (§11) and
+    [DEVICES.md](docs/DEVICES.md) (§12).
+  - [ARCH.md](docs/ARCH.md): the architecture seam map and the x86 audit, beside §11.
 - [ROADMAP.md](docs/ROADMAP.md): 40 phases in eight eras, from boot through self-hosting to a stable 1.0,
   all on free infrastructure, each with a goal, an exit gate, and per-part task lists; what money would
   add is a separate list of funded goals.
 - [VIBEFS.md](docs/VIBEFS.md): vibefs on-disk format (version field in that file). Not DESIGN.
+- [VMCOREINFO.md](docs/VMCOREINFO.md): the kernel's VMCOREINFO note, a format one build writes and
+  another build's core tool reads. Not DESIGN.
 - [SYSCALL.md](docs/SYSCALL.md): syscall ABI. Not DESIGN.
 - [LINUX.md](docs/LINUX.md): which Linux release "Linux's" means, deliberate differences from it, and
   native interfaces. Not DESIGN.
+- [RELEASING.md](docs/RELEASING.md): the maintainer's release steps.
 - [reviews/](docs/reviews/): the architecture, roadmap, and kernel reviews Phase 10 comes from,
   per-item plans in `reviews/issues/`, and the design reviews' decisions in `DESIGN_REVIEWS.md`.
 
-Read [section 9](docs/DESIGN.md#9-pitfalls) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
+Read [INVARIANTS.md](docs/INVARIANTS.md) and [PITFALLS.md](docs/PITFALLS.md) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Every ISO carries `/LICENSES/LICENSE` and
+`/LICENSES/THIRD-PARTY-NOTICES.txt`, the notices its third-party code requires;
+`python3 scripts/gen_notices.py --out <file>` regenerates the latter.

@@ -1,0 +1,174 @@
+//! Serial marker strings, DESIGN §2.6.
+//!
+//! Every boot line is `vibeOS: <subsystem>: <state>` (lowercase, no trailing
+//! punctuation). Each constant is the text of a row of
+//! `tests/contract/markers.toml`, the marker registry (ROADMAP §10.2), or its
+//! `_PREFIX` or `_SUFFIX` fragment; `scripts/check_markers.py` fails on one
+//! that differs. A new registered line adds its row in the same commit.
+
+pub const SERIAL_ONLINE: &str = "vibeOS: serial online";
+pub const LIMINE_OK: &str = "vibeOS: limine: rev 3 ok";
+
+/// Substring the harness matches for the phase-1 PMM marker. The full
+/// line is emitted with a runtime frame count via `writeln!`, so tests
+/// assert on the shape rather than the full string. See DESIGN §8.3.
+pub const PMM_PREFIX: &str = "vibeOS: pmm: ";
+pub const PMM_FREE_SUFFIX: &str = " free 4KiB frames";
+
+/// Phase 1 §1.2 exit-gate marker. Emitted the instant CR3 is loaded with
+/// our own PML4 so the harness can pin the moment we own the address
+/// space, not merely built its tables.
+pub const PAGING_CR3_OK: &str = "vibeOS: paging: cr3 ok";
+
+/// DESIGN §3.3 step 8. Emitted only after `patch_physmap_uc` actually
+/// touches a discovered LAPIC / I/O APIC / HPET leaf — never as a hollow
+/// claim.
+pub const PAGING_MMIO_UC: &str = "vibeOS: paging: mmio uc";
+
+/// Phase 1 §1.4 / §1.5 exit-gate markers. DESIGN §3.3 steps 9 and 10.
+pub const HEAP_OK: &str = "vibeOS: heap ok";
+pub const KVA_READY: &str = "vibeOS: kva: ready";
+
+/// Phase 2 slice A. Live order is after KVA (IST stacks come from it);
+/// relative order matches DESIGN §3.3 steps 3–5.
+pub const GDT_OK: &str = "vibeOS: gdt ok";
+/// PIC boot step finished: ICW remap+mask ran, or FADT skip. Not a claim
+/// that ports were programmed (unlike `paging: mmio uc`).
+pub const PIC_REMAPPED: &str = "vibeOS: pic: remapped";
+pub const IDT_OK: &str = "vibeOS: idt ok";
+
+/// DESIGN §3.3 step 11. After IDT (GDT already loaded). Before ACPI marker.
+pub const PER_CPU_BSP: &str = "vibeOS: per_cpu: bsp ready";
+
+/// Phase 2 §2.4. Runtime table count via `writeln!`; harness pins the
+/// shape with `and_contains`. Live order is after IDT (step 12 after 3–5).
+pub const ACPI_XSDT_PREFIX: &str = "vibeOS: acpi: xsdt ";
+pub const ACPI_XSDT_SUFFIX: &str = " tables";
+
+/// Phase 2 §2.6. Runtime frequency via `writeln!`. DESIGN §3.3 step 13.
+pub const TIME_TSC_PREFIX: &str = "vibeOS: time: tsc ";
+pub const TIME_TSC_SUFFIX: &str = "/ms";
+
+/// Phase 4 §4.3. Runtime mode via `writeln!`. ROADMAP / #26 spelling.
+pub const TIME_LAPIC_PREFIX: &str = "vibeOS: time: lapic_timer ok (";
+pub const TIME_LAPIC_SUFFIX: &str = ")";
+
+/// Phase 3 slice B. DESIGN §3.3 steps 14 and 16. `irq: enabled` is after
+/// `sched: cpu0 ready`. Slice C emits `sched: cpu<i> ready` on each AP
+/// before `smp: ap online`.
+pub const SCHED_CPU0: &str = "vibeOS: sched: cpu0 ready";
+pub const SCHED_CPU_PREFIX: &str = "vibeOS: sched: cpu";
+pub const SCHED_CPU_SUFFIX: &str = " ready";
+pub const IRQ_ENABLED: &str = "vibeOS: irq: enabled";
+
+/// Phase 4 slice B. After `irq: enabled`, before `console ok`.
+/// Exactly `N-1` `ap online` lines at `-smp N`, then `smp: done`.
+pub const SMP_AP_ONLINE: &str = "vibeOS: smp: ap online";
+pub const SMP_DONE: &str = "vibeOS: smp: done";
+
+/// Phase 5 slice B. After `smp: done`. FB text, PS/2, and the mux are live;
+/// IRQ1 was unmasked after the handler.
+pub const CONSOLE_OK: &str = "vibeOS: console ok";
+
+/// Phase 6 slice A. Runtime count via `writeln!`. After `console ok`,
+/// before `shell ready`. DESIGN §3.3 / §8.3.
+pub const PCI_PREFIX: &str = "vibeOS: pci: ";
+pub const PCI_DEVICES_SUFFIX: &str = " devices";
+
+/// Phase 7 slice A. Runtime name + sector count. After `pci: N devices`,
+/// before `shell ready`. ROADMAP §7.1 / DESIGN §8.3. Slice C adds
+/// `block: <parent>p<N> <n> sectors` for each partition child after the
+/// parent line.
+pub const BLOCK_PREFIX: &str = "vibeOS: block: ";
+pub const BLOCK_SECTORS_SUFFIX: &str = " sectors";
+
+/// Phase 5 slice C. Last boot marker. Shell thread is running, builtins
+/// registered, prompt live. Always after `smp: done` and `console ok`.
+pub const SHELL_READY: &str = "vibeOS: shell ready";
+
+/// The `hang_test` build's line once its CPU holds the hang's lock
+/// (ROADMAP §10.7): every CPU hangs from here, and the forensics tier gives
+/// up 5 s later and takes a core.
+pub const HANG_TEST_ARMED: &str = "vibeOS: hang_test: armed";
+
+/// Panic banner. Kept short so the panic path allocates nothing.
+pub const PANIC_BANNER: &str = "vibeOS: panic:";
+
+/// End of a panic/exception dump. Harness waits for this after a signature.
+pub const PANIC_HALTED: &str = "vibeOS: panic: halted";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markers_are_lowercase_prefixed() {
+        for m in [
+            SERIAL_ONLINE,
+            LIMINE_OK,
+            PMM_PREFIX,
+            PAGING_CR3_OK,
+            PAGING_MMIO_UC,
+            HEAP_OK,
+            KVA_READY,
+            GDT_OK,
+            PIC_REMAPPED,
+            IDT_OK,
+            PER_CPU_BSP,
+            ACPI_XSDT_PREFIX,
+            TIME_TSC_PREFIX,
+            TIME_LAPIC_PREFIX,
+            SCHED_CPU0,
+            IRQ_ENABLED,
+            SMP_AP_ONLINE,
+            SMP_DONE,
+            CONSOLE_OK,
+            PCI_PREFIX,
+            BLOCK_PREFIX,
+            SHELL_READY,
+        ] {
+            assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
+            assert!(!m.ends_with(['.', '!']), "marker has trailing punct: {m}");
+        }
+        // The PMM line is assembled at runtime: prefix, decimal count,
+        // suffix. Confirm the fragments agree with the phase-1 exit-gate
+        // string in the roadmap.
+        assert_eq!(PMM_PREFIX, "vibeOS: pmm: ");
+        assert_eq!(PMM_FREE_SUFFIX, " free 4KiB frames");
+        // Paging §1.2 exit marker is a fixed string; must match the
+        // harness contract byte-for-byte.
+        assert_eq!(PAGING_CR3_OK, "vibeOS: paging: cr3 ok");
+        assert_eq!(PAGING_MMIO_UC, "vibeOS: paging: mmio uc");
+        assert_eq!(HEAP_OK, "vibeOS: heap ok");
+        assert_eq!(KVA_READY, "vibeOS: kva: ready");
+        assert_eq!(GDT_OK, "vibeOS: gdt ok");
+        assert_eq!(PIC_REMAPPED, "vibeOS: pic: remapped");
+        assert_eq!(IDT_OK, "vibeOS: idt ok");
+        assert_eq!(PER_CPU_BSP, "vibeOS: per_cpu: bsp ready");
+        assert_eq!(ACPI_XSDT_PREFIX, "vibeOS: acpi: xsdt ");
+        assert_eq!(ACPI_XSDT_SUFFIX, " tables");
+        assert_eq!(TIME_TSC_PREFIX, "vibeOS: time: tsc ");
+        assert_eq!(TIME_TSC_SUFFIX, "/ms");
+        assert_eq!(TIME_LAPIC_PREFIX, "vibeOS: time: lapic_timer ok (");
+        assert_eq!(TIME_LAPIC_SUFFIX, ")");
+        assert_eq!(SCHED_CPU0, "vibeOS: sched: cpu0 ready");
+        assert_eq!(SCHED_CPU_PREFIX, "vibeOS: sched: cpu");
+        assert_eq!(SCHED_CPU_SUFFIX, " ready");
+        assert_eq!(IRQ_ENABLED, "vibeOS: irq: enabled");
+        assert_eq!(SMP_AP_ONLINE, "vibeOS: smp: ap online");
+        assert_eq!(SMP_DONE, "vibeOS: smp: done");
+        assert_eq!(CONSOLE_OK, "vibeOS: console ok");
+        assert_eq!(PCI_PREFIX, "vibeOS: pci: ");
+        assert_eq!(PCI_DEVICES_SUFFIX, " devices");
+        assert_eq!(BLOCK_PREFIX, "vibeOS: block: ");
+        assert_eq!(BLOCK_SECTORS_SUFFIX, " sectors");
+        assert_eq!(SHELL_READY, "vibeOS: shell ready");
+    }
+
+    #[test]
+    fn panic_banner_short_enough_for_uart() {
+        // The panic path prints this before allocating anything. Keep it
+        // small enough that the DESIGN §9.6 tx-poll cap never bites.
+        assert!(PANIC_BANNER.len() < 64);
+    }
+}

@@ -1,40 +1,95 @@
 name: ci
 
+# ROADMAP §10.1: pushes to `main`, every pull request, and dispatch; never a
+# push to another branch (scripts/check_workflows.py, rule_ci_triggers).
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # Least privilege: the jobs read the tree and write only artifacts and caches,
 # which use the runner's own token. ROADMAP §10.1.
 permissions:
   contents: read
 
-# Push + PR share one slot per branch; older SHAs get cancelled.
+# A pull request's runs share `ci-pr-<number>` and cancel superseded ones;
+# every other run has a group of its own, keyed by its run id, so no run on
+# `main` is cancelled or dropped as pending (DESIGN §8.6).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
     name: check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
+    runs-on: ubuntu-26.04
+    env:
       # vibeos-core FAT tests spawn fsck.fat. No QEMU / Limine / setup.sh (T3).
-      - name: install host tools
+      APT_PACKAGES: dosfstools
+    steps:
+      # Full history: check_gate_inputs.py needs the pull request's merge base.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # A pull request does not quietly change the gates that judge it
+      # (ROADMAP §10.9): gate inputs against its merge base.
+      - name: gate inputs
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check_gate_inputs.py --base "$BASE_SHA" --head "$HEAD_SHA"
+
+      # Host packages from a cache keyed by the runner image and the package
+      # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
+      # with no `apt-get update` and no download; a miss installs as before
+      # and saves what apt downloaded.
+      - name: apt cache key
+        id: apt-key
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dosfstools
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: nightly-2026-09-22
           components: rust-src, llvm-tools, rustfmt, clippy
+          # `make check` lints the kernel and vibeos-core's no_std build.
+          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
 
-      # Distinct from the ladder's cargo cache so a host-only `target/`
+      # vibeos-core's MSRV, which `make check` builds it with (ROADMAP §10.1),
+      # read from its manifest.
+      - name: install rust MSRV
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' crates/core/Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal --target x86_64-unknown-none --no-self-update
+
+      # Distinct from the build job's cargo cache so a host-only `target/`
       # cannot evict kernel artifacts (DESIGN §8.6).
       - name: cache cargo (check)
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -48,13 +103,37 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-check-
 
+      # Pinned (ROADMAP §10.1, DX1); .cursor/environment.json installs the
+      # same two versions.
       - name: install python linters
         run: |
-          python3 -m pip install --user --break-system-packages ruff mypy
+          python3 -m pip install --user --break-system-packages ruff==0.16.9 mypy==2.3.1
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Pinned (ROADMAP §10.9): the release's prebuilt musl archive, checked
+      # against its SHA-256. setup.sh and the Makefile read the version here.
+      - name: install cargo-deny
+        env:
+          CARGO_DENY_VERSION: 0.20.2
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          name="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "$HOME/.local/bin"
+          install -m 755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.local/bin/cargo-deny"
+          "$HOME/.local/bin/cargo-deny" --version
 
       - name: make check
         run: time make check
+
+      # The shared-page ELFs the in-guest elf_shared_page tests load, run on
+      # the hosted x86_64 Linux runner itself: Linux must exit 0 and SIGSEGV
+      # as vibeOS does, or the loader's rule is wrong (ROADMAP §10.6, F031).
+      - name: "native Linux: shared-page ELFs (ROADMAP §10.6, F031)"
+        run: python3 scripts/mkelf_shared.py --run-native tests/fixtures/elf
 
       - name: install cargo-llvm-cov
         run: |
@@ -62,12 +141,15 @@ jobs:
             cargo install cargo-llvm-cov --locked --version 0.9.1
           fi
 
-      # Floor 87% (DESIGN §8.6, which records the measured figure). Ratchet only upward.
+      # The floor is `[coverage] floor` in tests/gates/inputs.toml, which
+      # check_gate_inputs.py keeps from falling (DESIGN §8.6 records the
+      # measured figure). Ratchet only upward.
       - name: vibeos-core llvm-cov floor
         run: |
           HOST=$(rustc -vV | sed -n 's/^host: //p')
+          FLOOR=$(python3 scripts/check_gate_inputs.py --floor)
           time cargo llvm-cov -p vibeos-core --lib --features std --target "$HOST" \
-            --html --output-dir coverage --fail-under-lines 87
+            --html --output-dir coverage --fail-under-lines "$FLOOR"
 
       - name: upload vibeos-core coverage HTML
         if: always()
@@ -78,24 +160,61 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  phase0:
-    name: phase 0 ladder
-    needs: check
-    runs-on: ubuntu-latest
+  # Builds every ISO variant and the host tools the tiers run once, and hands
+  # them to the tier jobs as `prebuilt-<arch>` (DESIGN §8.6).
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ubuntu-26.04
+    strategy:
+      matrix:
+        arch: [x86_64]
+    # The harness fails every boot when QEMU is not this version (ROADMAP
+    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
+    # and DESIGN §8.6 together. setup.sh needs qemu-system-x86_64.
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+      APT_PACKAGES: qemu-system-x86 xorriso
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: install host tools
+      # Host packages from a cache keyed by the runner image and the package
+      # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
+      # with no `apt-get update` and no download; a miss installs as before
+      # and saves what apt downloaded.
+      - name: apt cache key
+        id: apt-key
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 xorriso nasm ovmf dosfstools
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: nightly-2026-09-22
           components: rust-src, llvm-tools, rustfmt, clippy
-          targets: x86_64-unknown-none
+          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
 
       - name: cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -117,56 +236,262 @@ jobs:
       - name: setup
         run: ./setup.sh
 
-      # Kernel clippy stays here so `target/` stays warm for `make iso`.
-      # Host fmt/clippy/units/harness live in the `check` job (`make check`).
-      # Do not set RUSTFLAGS here: it replaces target rustflags (frame pointers,
-      # static relocation, linker flags).
+      # One kernel clippy run per feature set an ISO is built with, and one
+      # with kernel_shell (ROADMAP §10.1). The default set runs in the `check`
+      # job's `make check`. Do not set RUSTFLAGS here: it replaces target
+      # rustflags (-D warnings, frame pointers, static relocation, linker flags).
       - name: cargo clippy -D warnings (kernel)
         run: |
-          cargo clippy -p vibeos-core -- -D warnings
-          cargo clippy --bin vibeos --all-features -- -D warnings
           cargo clippy --bin vibeos --features kernel_tests -- -D warnings
           cargo clippy --bin vibeos --features vibefs_crash -- -D warnings
-      - name: build kernel + hybrid ISO
-        run: make iso
+          cargo clippy --bin vibeos --features panic_test -- -D warnings
+          cargo clippy --bin vibeos --features gp_test -- -D warnings
+          cargo clippy --bin vibeos --features panic_nest_test -- -D warnings
+          cargo clippy --bin vibeos --features panic_stop_test -- -D warnings
+          cargo clippy --bin vibeos --features kernel_shell -- -D warnings
+          cargo clippy --bin vibeos --features hang_test -- -D warnings
 
-      - name: e2e (BIOS)
-        run: make test-e2e
+      # The Rust user programs (ROADMAP §10.5): links through rust-lld with no
+      # C compiler, and checks each ELF with scripts/check_user_elf.py.
+      - name: build the user programs (make user)
+        run: make user
 
-      - name: e2e (UEFI / OVMF)
-        run: make test-e2e-uefi
-        env:
-          OVMF: /usr/share/ovmf/OVMF.fd
+      - name: build every ISO and host tool (make prebuilt)
+        run: make prebuilt
 
-      - name: e2e (panic path)
-        run: make test-e2e-panic
+      # The "after" figure of DESIGN §8.6 cites the CPU it ran on.
+      - name: runner CPU
+        run: |
+          cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)
+          echo "runner CPU: $cpu, $(nproc) CPUs" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: e2e (#GP dump+halt)
-        run: make test-e2e-gp
-
-      - name: e2e (PIT calibration fallback)
-        run: make test-e2e-pit
-
-      - name: e2e (9 GiB, past the physmap cap)
-        run: make test-e2e-highmem
-
-      - name: in-guest kernel tests
-        run: make test-kernel
-
-      - name: in-guest kernel tests (-smp 4)
-        run: make test-kernel-smp4
-
-      - name: in-guest LAPIC periodic fallback
-        run: make test-lapic-fallback
-
-      - name: vibefs QEMU-kill crash consistency
-        run: make test-vibefs-crash
+      - name: upload prebuilt files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: prebuilt-${{ matrix.arch }}
+          path: build/prebuilt.tar
+          if-no-files-found: error
+          retention-days: 1
 
       - name: upload production ISO
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: vibeos.iso
-          path: vibeos.iso
+          path: build/vibeos.iso
           if-no-files-found: error
           retention-days: 7
+
+  # One job per tier, each its own check name, running the Makefile's own
+  # `make test-*` targets on the prebuilt files (DESIGN §8.6's tier table,
+  # which scripts/check_workflows.py compares with this matrix). `jobs` is
+  # the QEMU runs in parallel inside a tier (ROADMAP §10.1): 2, on the
+  # runner's 4 CPUs; a tier of one target runs one QEMU whatever it says.
+  tier:
+    name: tier (${{ matrix.arch }}, ${{ matrix.tier }})
+    needs: [check, build]
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            tier: e2e-1
+            targets: test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-qmp
+            jobs: 2
+          - arch: x86_64
+            tier: e2e-2
+            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power
+            jobs: 2
+          - arch: x86_64
+            tier: in-guest-1
+            targets: test-kernel
+            jobs: 2
+          - arch: x86_64
+            tier: in-guest-2
+            targets: test-kernel-smp4
+            jobs: 2
+          - arch: x86_64
+            tier: in-guest-3
+            targets: test-lapic-fallback
+            jobs: 2
+          - arch: x86_64
+            tier: vibefs-crash
+            targets: test-vibefs-crash
+            jobs: 2
+          - arch: x86_64
+            tier: vibefs-crash-plants
+            targets: test-vibefs-crash-plants
+            jobs: 2
+          - arch: x86_64
+            tier: forensics
+            targets: test-forensics
+            jobs: 2
+    # The harness fails every boot when QEMU is not this version (ROADMAP
+    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
+    # and DESIGN §8.6 together.
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+      # resolute's `ovmf` metapackage also pulls ovmf-amdsev, ovmf-inteltdx
+      # and ubuntu-virt; ovmf-generic ships /usr/share/ovmf/OVMF.fd.
+      APT_PACKAGES: qemu-system-x86 ovmf-generic
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Host packages from a cache keyed by the runner image and the package
+      # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
+      # with no `apt-get update` and no download; a miss installs as before
+      # and saves what apt downloaded.
+      - name: apt cache key
+        id: apt-key
+        run: |
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
+
+      # test-vibefs-crash's and test-vibefs-crash-plants' recipes run
+      # `cargo test -p vibeos-hostlib-tests` before their boots, so those
+      # tiers alone need the toolchain (the condition matches both).
+      - name: install rust nightly
+        if: contains(matrix.targets, 'test-vibefs-crash')
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+
+      - name: cache cargo registry
+        if: contains(matrix.targets, 'test-vibefs-crash')
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-tier-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tier-
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: prebuilt-${{ matrix.arch }}
+          path: build
+
+      - name: unpack prebuilt files
+        run: tar -xf build/prebuilt.tar
+
+      # The "after" figure of DESIGN §8.6 cites the CPU it ran on.
+      - name: runner CPU
+        run: |
+          cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)
+          echo "runner CPU: $cpu, $(nproc) CPUs" >> "$GITHUB_STEP_SUMMARY"
+
+      # TARGETS is split into words on purpose: one make goal per target.
+      - name: make ${{ matrix.targets }}
+        env:
+          TARGETS: ${{ matrix.targets }}
+          JOBS: ${{ matrix.jobs }}
+          VIBEOS_QEMU_ACCEL: tcg
+        run: make -k -j "$JOBS" --output-sync=target VIBEOS_PREBUILT=1 $TARGETS
+
+      # Per-tier table and every harness retry, even after a failed step
+      # (ROADMAP §10.2); check_ticks.py reads the uploaded files (§10.9).
+      - name: harness results summary
+        if: always()
+        run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-${{ matrix.arch }}-${{ matrix.tier }}
+          path: build/results/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # A failed tier's guest cores (ROADMAP §10.7, TESTING.md §8.3): each
+      # failed run's build/cores/<arch>-<tier>/<seq>-<label>/ holds core.zst,
+      # kernel.elf and qemu-argv.txt. The artifact is public (DESIGN §1.5), so
+      # no workflow that names a secret or an environment uploads one
+      # (scripts/check_workflows.py, rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-${{ matrix.arch }}-${{ matrix.tier }}
+          path: build/cores/
+          if-no-files-found: ignore
+
+  # Every ROADMAP box a pull request ticks names its proof, and the proof
+  # passed in the results files the tier jobs upload (ROADMAP §10.9).
+  ticks:
+    name: ticks
+    if: ${{ github.event_name == 'pull_request' && !cancelled() }}
+    needs: [tier]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read # check_ticks.py reads scheduled runs and ci-history through gh (ROADMAP §10.9)
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # C-RESULTS: each tier job uploads `results-<arch>-<job>`.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: results-*
+          path: build/ci-results
+
+      - name: check_ticks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/check_ticks.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          --run-commit "$RUN_SHA" --results build/ci-results --summary "$GITHUB_STEP_SUMMARY"
+
+  # The one check the rulesets require besides `check` (ROADMAP §10.9): it
+  # needs every other job and fails unless each succeeded, so regrouping the
+  # tiers never changes a ruleset. `if: always()`, since GitHub counts a
+  # skipped required check as passing; `ticks` runs only on a pull request,
+  # so it may skip. A job added here goes in `needs:`, and in SKIPPABLE when
+  # its `if:` tests the event (scripts/check_gate_inputs.py).
+  ci-pass:
+    name: ci-pass
+    if: always()
+    needs: [check, build, tier, ticks]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          SKIPPABLE: ticks
+        run: python3 scripts/check_gate_inputs.py --ci-pass

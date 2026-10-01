@@ -1,7 +1,6 @@
 # --- Rust / Cargo ---
 /target/
 **/target/
-/target-kernel-tests/
 **/*.rs.bk
 **/*.rlib
 **/*.prof*
@@ -34,18 +33,6 @@ dist/
 out/
 obj/
 isodir/
-/iso_root/
-/iso_root_ktest/
-/iso_root_panic/
-/iso_root_gp/
-/iso_root_vibefs_crash/
-/target-panic/
-/target-gp/
-/target-vibefs-crash/
-/user/hello
-/user/init
-/user/sh
-/user/tests
 /tests/hostlib/target/
 /limine
 sysroot/

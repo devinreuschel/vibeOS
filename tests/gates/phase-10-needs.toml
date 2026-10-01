@@ -29,7 +29,7 @@ needs = ["every IDT vector enters through a stub that `arch/idt.rs` generates"]
 why = "claim: reopened (F004); the generated stubs make the swapgs decision"
 
 [[box]]
-key = "the scheduler is SMP-safe; today another CPU can unmap"
+key = "the scheduler is SMP-safe"
 needs = [
   "a dead thread's kernel stack is reused or freed only by the CPU that ran it",
   "`PerCpu` split into owner-only state and a remote view",
@@ -43,13 +43,20 @@ why = "claim: reopened (F002)"
 
 [[box]]
 key = "vibefs survives injected power loss during a write"
-needs = ["the vibefs crash test can fail"]
-why = "claim: reopened (F014, F080); the crash test must be able to fail"
+needs = [
+  "the vibefs crash test can fail",
+  "vibefs `commit` calls `mark_meta` on",  # L1493
+]
+why = "claim: reopened (F014, F080); the crash test must be able to fail; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "crash consistency testing by killing QEMU at randomized points"
-needs = ["the vibefs crash test can fail"]
-why = "claim: reopened (F014, F080)"
+needs = [
+  "the vibefs crash test can fail",
+  "a volatile-cache device, the backend",  # L1250
+  "the block layer keeps only",  # L1485
+]
+why = "claim: reopened (F014, F080); claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "flush ordering that does not leave a directory entry pointing at unallocated clusters"
@@ -68,7 +75,30 @@ needs = [
 ]
 why = "claim: reopened (F014, F049)"
 
+# L1037
+[[box]]
+key = "a bound (`"
+needs = [
+  "one ring-3 entry model: `/hello`",  # L1402
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1038
+[[box]]
+key = "an orphan goes to pid"
+needs = [
+  "a host-tested `vibeos-core` helper picks",  # L1364
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Phase 10 boxes.
+
+[[box]]
+key = "vibefs `commit` calls `mark_meta` on"
+needs = [
+  "vibefs `commit` writes an alloc-map",  # L1494
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "the `-smp 4` `ipi: ack timeout` panic root-caused and fixed"
@@ -92,8 +122,11 @@ why = "claim: its test's orphan is freed by §10.5's reaper rule"
 
 [[box]]
 key = "the in-guest registry split per subsystem"
-needs = ["the in-guest registry runs in production's interrupt context"]
-why = "text of the registry box: T1's per-test deadline needs IF=1"
+needs = [
+  "the in-guest registry runs in production's interrupt context",
+  "one directory per subsystem, portable",  # L1280
+]
+why = "text of the registry box: T1's per-test deadline needs IF=1; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "every call that may sleep checks that it may"
@@ -105,8 +138,10 @@ key = "the vibefs crash test can fail"
 needs = [
   "vibefs `commit` calls `mark_meta` on every",
   "vibefs `commit` writes an alloc-map block",
+  "a volatile-cache device, the backend",  # L1250
+  "the block layer keeps only",  # L1485
 ]
-why = "text: lands with §10.11's commit-leak fixes"
+why = "text: lands with §10.11's commit-leak fixes; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "`BootCell<T>` is `Sync` only when"
@@ -115,13 +150,27 @@ why = "claim: the PerCpu impl's SAFETY line names the rule the F039 split establ
 
 [[box]]
 key = "allocated at init from a `limits` module; a cap is a constant"
-needs = ["one `limits` module in `vibeos-core` names every"]
-why = "claim: the tables take their sizes from the limits constants"
+needs = [
+  "one `limits` module in `vibeos-core` names every",
+  "the cross-CPU wake inbox holds",  # L1317
+  "a full thread table is",  # L1318
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+  "`spawn_inner` returns `Result` instead of",  # L1475
+]
+why = "claim: the tables take their sizes from the limits constants; claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
 [[box]]
 key = "exec returns `ENOMEM` for an image whose page-rounded"
 needs = ["one `limits` module in `vibeos-core` names every"]
 why = "claim: its cap lives in the limits module"
+
+# L1315
+[[box]]
+key = "one `limits` module in `vibeos-core`"
+needs = [
+  "exec returns `ENOMEM` for an",  # L1380
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "`disallowed-types` denies `alloc`'s"
@@ -142,6 +191,7 @@ needs = [
   "`/dev/random` and `/dev/urandom` return only hardware bytes",
   "the dentry cache never resolves through a reused slot",
   "tmpfs keeps written data when a file's extent moves",
+  "FAT and vibefs behind `InodeOps`;",  # L1324
 ]
 why = "text: lands after the /dev/random, dentry-cache (F065) and tmpfs (F066) boxes"
 
@@ -155,8 +205,11 @@ key = "`/bin/tests` provokes every errno SYSCALL.md lists"
 needs = [
   "user-VA accessors replace the physmap copy for syscalls",
   "the top user page is never mappable",
+  "syscall dispatch indexes the generated",  # L1353
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+  "`getdents64`, `fstat`, and `nanosleep`, which",  # L1357
 ]
-why = "text: lands after the USER_MAP_END and accessor boxes"
+why = "text: lands after the USER_MAP_END and accessor boxes; claim: missing edges found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "every IDT vector enters through a stub that `arch/idt.rs` generates"
@@ -170,16 +223,20 @@ why = "claim: the one stub holds the AC clear, the IST GS decision and the user-
 [[box]]
 key = "syscall bodies run with IF=1"
 needs = [
-  "`addr_space_init::teardown` asserts that no CPU's CR3",
+  "the root's free (`addr_space_init::SpaceCore`'s drop",
   "the open-file table never writes `refs` or `used` back from a snapshot",
   "stop and continue cannot lose a wakeup",
+  "the syscall exit path runs",  # L1387
 ]
-why = "text: lands after the teardown (F106), open-file table (F055) and stop-wait (F033) boxes"
+why = "text: lands after the teardown (F106), open-file table (F055) and stop-wait (F033) boxes; the exit `cli` of the syscall-exit box closes the window"
 
 [[box]]
 key = "every exit to ring 3, the syscall exit included, checks the current process's pending set"
-needs = ["stop and continue cannot lose a wakeup"]
-why = "text: lands after the stop-wait box"
+needs = [
+  "stop and continue cannot lose a wakeup",
+  "the syscall exit path runs",  # L1387
+]
+why = "text: lands after the stop-wait box; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "console `write` holds IF=0 only for bounded work"
@@ -209,8 +266,11 @@ why = "claim: the §10.6 entry stub passes the interrupted rbp"
 
 [[box]]
 key = "after `begin_dump`, every panic-path write to COM1"
-needs = ["every two-way dependency between kernel modules that `scripts/check_cycles.py` reports"]
-why = "claim: it writes through A4's raw serial layer"
+needs = [
+  "every two-way dependency between kernel modules that `scripts/check_cycles.py` reports",
+  "the expect-panic e2e matches markers",  # L1257
+]
+why = "claim: it writes through A4's raw serial layer; P10-S81's issue: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "`now_ns` is computed from one free-running counter"
@@ -232,12 +292,30 @@ needs = ["a kernel command line: `cmdline:`"]
 why = "claim: vibeos.strace=1 is a command-line option"
 
 [[box]]
+key = "syscall tracing behind a flag"
+needs = [
+  "syscall tracing can be switched",  # L1425
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
 key = "no fault or trap that ring-3 code raises reaches `exception_halt`"
 needs = [
   "the `#BP` gate is DPL 3",
   "one per-CPU control-register routine",
+  "an IST vector taken at",
+  "every IDT vector enters through",
+  "one user frame (DESIGN §5.10):",
 ]
-why = "claim: `user_exceptions`' `int3`, x87 `#MF` and SIMD `#XM` cases are the next two boxes'"
+why = "claim: `user_exceptions`' `int3`, x87 `#MF` and SIMD `#XM` cases are the next two boxes'; claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1062
+[[box]]
+key = "`SIGFPE` from a user x87"
+needs = [
+  "one per-CPU control-register routine, run",  # L1398
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "`spawn_inner` returns `Result` instead of calling"
@@ -251,6 +329,80 @@ needs = [
   "`vibeos-core` gains `kalloc`",
 ]
 why = "text: needs §10.10's fallible spawn_inner; claim: its Tcb allocation is fallible"
+
+[[box]]
+key = "`vibeos-core` gains `kalloc` (`TryBox`, `TryVec`,"
+needs = [
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+  "`spawn_inner` returns `Result` instead of",  # L1475
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+[[box]]
+key = "`scripts/check_ticks.py`, which a `ticks` CI"
+needs = [
+  "until those retries are gone,",
+  "`scripts/check_review_refs.py` reads `tests/gates/phase-10-needs.toml`: each row",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1447
+[[box]]
+key = "`make gate PHASE=N` checks every"
+needs = [
+  "`release.yml` runs only from `main`,",  # L1207
+  "a gate map from Phase",  # L1446
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1449
+[[box]]
+key = "dev-host records, for a gate"
+needs = [
+  "`make gate PHASE=N` checks every",  # L1447
+  "CI history: when a `ci`",  # L1448
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "a `make check` script reads"
+needs = [
+  "a disk-backed FAT mount fits",  # L1341
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1365
+[[box]]
+key = "the Rust `/sbin/init` checks every"
+needs = [
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+  "pid 1's exit panics the",  # L1363
+  "`/sbin/init` passes a status pointer to `wait4`",  # L1249
+  "e2e asserts `/bin/tests`' result",  # L1248
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1368
+[[box]]
+key = "`/bin/sh` runs programs from `PATH` with"
+needs = [
+  "`execve` copies the caller's `envp` strings",  # L1354
+  "`reboot` (power off and restart),",  # L1358
+  "an allocator over `brk`, so",  # L1359
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1369
+[[box]]
+key = "`ls`, `cat`, `echo`, `grep`, `wc`,"
+needs = [
+  "`getdents64`, `fstat`, and `nanosleep`, which",  # L1357
+  "an allocator over `brk`, so",  # L1359
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+  "the initrd is sized by",  # L1370
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 # Lands-after, lands-with and lands-before clauses in box text.
 
@@ -266,8 +418,14 @@ why = "text: lands after the T1 box"
 
 [[box]]
 key = "for the Phase 10 exit gate's §10.10 line, the KVM leg also runs"
-needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
-why = "text: lands after §10.2's `vibeos.ktest=` box"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching in-guest tests",
+  "a nightly x86_64 KVM leg",  # L1194
+  "`IoWaiter::finish` makes its `done` store",  # L1470
+  "a dead thread's kernel stack is reused",  # L1472
+  "`wait_acks` never panics: after 1",  # L1476
+]
+why = "text: lands after §10.2's `vibeos.ktest=` box; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "the crash test's planted defects"
@@ -293,14 +451,31 @@ needs = ["`PerCpu` split into owner-only state and a remote view"]
 why = "text: lands after the F039 box above"
 
 [[box]]
+key = "`DmaBuffer` and `GuardedStack` are move-only"
+needs = [
+  "`make test-unit` runs doc tests,",  # L1293
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
 key = "the buddy hands out an owner token"
-needs = ["`DmaBuffer` and `GuardedStack` are move-only handles"]
-why = "text: lands with or after the box above"
+needs = [
+  "`DmaBuffer` and `GuardedStack` are move-only handles",
+  "`make test-unit` runs doc tests,",  # L1293
+  "`kva_init::vmap` returns a move-only handle",  # L1299
+]
+why = "text: lands with or after the box above; claim: missing edge found by the Phase 10 planning survey and review (extra, survey); claim: the vmap handle holds its Frames (box 1299)"
 
 [[box]]
 key = "an IF-off tracer in an `irqoff` build variant"
-needs = ["the in-guest registry runs in production's interrupt context"]
-why = "text: lands after §10.2's box that moves the in-guest registry to IF=1"
+needs = [
+  "the in-guest registry runs in production's interrupt context",
+  "an `arch` module boundary built",  # L1277
+  "the seam proven by a",  # L1279
+  "`now_ns` is computed from one",  # L1310
+  "every IDT vector enters through",  # L1392
+]
+why = "text: lands after §10.2's box that moves the in-guest registry to IF=1; claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
 [[box]]
 key = "the vector table's registration rules hold"
@@ -325,8 +500,11 @@ why = "text: lands with A3's lock-kind step, after the FAT stack-frame box below
 
 [[box]]
 key = "a process's working directory is a counted reference to a directory"
-needs = ["the dentry cache never resolves through a reused slot"]
-why = "text: lands after the dentry-cache box"
+needs = [
+  "the dentry cache never resolves through a reused slot",
+  "every path syscall resolves through",  # L1326
+]
+why = "text: lands after the dentry-cache box; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "a disk-backed FAT mount fits a 16 KiB kernel stack"
@@ -357,21 +535,32 @@ needs = [
   "every IDT vector enters through a stub that `arch/idt.rs` generates",
   "the syscall exit path runs with IF=0 from the dispatcher's return",
   "syscall bodies run with IF=1",
+  "an `arch` module boundary built",
 ]
-why = "text: lands after the generated-stub box above and the syscall-exit and IF=1 boxes"
+why = "text: lands after the generated-stub box above and the syscall-exit and IF=1 boxes; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "one FP binding on x86_64"
 needs = [
   "the syscall exit path runs with IF=0 from the dispatcher's return",
-  "`enter_user` and `enter_user_full` execute `cli`",
+  "`syscall_init::first_return` executes `cli` before it loads",
 ]
-why = "text: lands after the syscall-exit box (F001) and the `enter_user` box (F006)"
+why = "text: lands after the syscall-exit box (F001) and the `syscall_init::first_return` box (F006)"
 
 [[box]]
 key = "x86_64 user FP state follows the psABI across `fork` and `execve`"
-needs = ["one FP binding on x86_64"]
-why = "text of the FP binding box: the F069 box below lands after it"
+needs = [
+  "one FP binding on x86_64",
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+]
+why = "text of the FP binding box: the F069 box below lands after it; claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "one named fill API for"
+needs = [
+  "user-VA accessors replace the physmap",  # L1377
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "an address space is a two-count object"
@@ -397,13 +586,123 @@ needs = [
 ]
 why = "text: lands after the ksyms, release-boot and assert! boxes and the release.yml box"
 
+[[box]]
+key = "gate inputs: `tests/gates/inputs.toml` lists every file a gate reads"
+needs = [
+  "`release.yml` runs only from `main`,",  # L1207
+  "expected skips are data: `tests/harness/skips.toml`",  # L1230
+  "a gate map from Phase",  # L1457
+]
+why = """its lands-with clauses ("a fix lands with the list entry it retires", \
+"a new check land with the code they check") are about a fix and a check, not a box; \
+claim: missing edge found by the Phase 10 planning survey and review (extra)"""
+
+# P10-S90 (repository rulesets): edges #93 §9.2 D-06 found missing.
+
+[[box]]
+key = "repository rulesets, which the owner"
+needs = [
+  "the CI budget, written into",  # L1199
+  "`release.yml` runs only from `main`,",  # L1207
+  "gate inputs: `tests/gates/inputs.toml` lists every",  # L1473
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# P10-S40 (harness matcher): edges #93 §9.2 D-06 found missing.
+
+[[box]]
+key = "the expect-panic e2e matches markers"
+needs = [
+  "the marker-order unit tests drive",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "the harness's SMP check counts"
+needs = [
+  "the marker-order unit tests drive",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "the console-input e2e boot keeps"
+needs = [
+  "the marker-order unit tests drive",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "when QEMU exits before the"
+needs = [
+  "the marker-order unit tests drive",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "serial shows `vibeOS: serial online`"
+needs = [
+  "`run_e2e.py` fails when a kernel",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "a shell-less `meminfo` dump on"
+needs = [
+  "e2e checks the boot log's",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the panic e2e requires the"
+needs = [
+  "the second ksyms link leaves",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "a deterministic kernel, initrd, and"
+needs = [
+  "one `target/` for every feature",
+  "no build time or builder",
+  "no random identifier in the",
+  "no host path in any",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"
+needs = [
+  "the `/bin/tests` stall after `user:",  # L1240
+  "removed: the loader maps segments from the file",  # L1320
+  "a `no_std` Rust crate under",  # L1350
+  "built for `<arch>-unknown-linux-musl`, §24.3's user",  # L1351
+  "syscall stubs generated from one",  # L1352
+  "the initrd is sized by",  # L1370
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "init's own exit panics the"
+needs = [
+  "pid 1's exit panics the",  # L1363
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "a signal whose default action"
+needs = [
+  "a signal cannot kill or",  # L1362
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Closes rows (How to read this): the box named by `key` lands all the work
 # of each box in `closes`, and the commit that ticks it ticks them.
 
 [[box]]
 key = "`run_e2e.py` fails when a kernel line comes before `vibeOS: serial online`"
+needs = ["the marker-order unit tests drive"]
 closes = ["serial shows `vibeOS: serial online` as the kernel's first serial line"]
-why = "reopened by design review J136"
+why = "reopened by design review J136; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "e2e checks the boot log's `vibeOS: meminfo:` lines"
@@ -427,24 +726,1037 @@ closes = [
   "`make test-kernel` at `-smp 2` and `-smp 4` both pass with no harness retry",
   "the `-smp 4` in-guest tier re-run weekly by `smp-stress.yml`",
 ]
-why = "reopened by design review J136"
+needs = [
+  "the `/bin/tests` stall after `user:",  # L1240
+  "the `-smp 4` `ipi: ack",  # L1241
+  "the `-smp 4` `msix_cpu: ap",  # L1242
+  "the `-smp 2` `per_cpu_bsp:",  # L1243
+]
+why = "reopened by design review J136 (closes); needs: claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "`make test-kernel` at `-smp 2`"
+needs = [
+  "the `/bin/tests` stall after `user:",  # L1240
+  "the `-smp 4` `ipi: ack",  # L1241
+  "the `-smp 4` `msix_cpu: ap",  # L1242
+  "the `-smp 2` `per_cpu_bsp:",  # L1243
+  "the harness retries nothing: after",  # L1244
+  "`reap_many_via_idle` compares frame counts against",  # L1247
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the `-smp 4` in-guest tier"
+needs = [
+  "the harness retries nothing: after",  # L1244
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "an in-guest test finds every CPU's `PerCpu.ticks` advancing"
 closes = ["detect TSC-deadline via `CPUID.01H:ECX[24]`"]
-why = "reopened by design review J136"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "`run_ktest.py` checks the `lapic_timer` marker's",  # L1197
+]
+why = "reopened by design review J136; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "pid 1's exit panics the kernel"
 closes = ["init's own exit panics the kernel"]
 why = "the §9.5 deferral box"
 
+# L1354
 [[box]]
 key = "`execve` copies the caller's `envp` strings"
+needs = [
+  "a kernel command line: `cmdline:`",  # L1227
+  "one `limits` module in `vibeos-core`",  # L1315
+  "`vibeos-core` gains `kalloc` (`TryBox`, `TryVec`,",  # L1321
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+]
 closes = ["`execve` copies the caller's `envp` onto the new image's initial stack"]
-why = "the §9.4 deferral box"
+why = "the §9.4 deferral box; claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1023
+[[box]]
+key = "`execve` copies the caller's `envp` onto"
+needs = [
+  "`execve` copies the caller's `envp` strings",  # L1354
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "`elf::parse` host tests also cover checked-in static binaries"
 closes = ["host tests that parse checked-in static binaries"]
 why = "the §9.4 deferral box"
+
+# L1286
+[[box]]
+key = "`scripts/check_cells.py` reads each `unsafe impl`"
+needs = [
+  "`BootCell<T>` is `Sync` only when",  # L1284
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1473
+[[box]]
+key = "every switch tail empties the"
+needs = [
+  "a dead thread's kernel stack is reused",  # L1472
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1247
+[[box]]
+key = "`reap_many_via_idle` compares frame counts against"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1294
+[[box]]
+key = "`addr_space_init::load_cr3_u64` and `syscall_init::switch_cr3_for` become `unsafe"
+needs = [
+  "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1285
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1324
+[[box]]
+key = "FAT and vibefs behind `InodeOps`;"
+needs = [
+  "one refcounted in-core FAT inode",  # L1330
+  "the dentry cache never resolves",  # L1331
+  "`scripts/check_gone.py`, which `make check` runs,",  # L1460
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1390
+[[box]]
+key = "`syscall_init::first_return` executes `cli` before it loads"
+needs = [
+  "ring 3 runs with Linux's",  # L1391
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L989
+[[box]]
+key = "a non-canonical saved RIP gets"
+needs = [
+  "the top user page is",  # L1383
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1224
+[[box]]
+key = "the `catch` module and every"
+needs = [
+  "`kernel_tests` hooks isolated in per-subsystem",  # L1223
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1201
+[[box]]
+key = "CI wall time cut inside"
+needs = [
+  "the CI budget, written into",  # L1199
+  "the harness retries nothing: after",  # L1244
+  "`tsc_calib_source` measures PIT channel 2",  # L1256
+  "`pit_tick_rate` counts timer interrupts, not",  # L1265
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1305
+[[box]]
+key = "the rank checker enforces DESIGN"
+needs = [
+  "every `IrqCell` static that more",  # L1304
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1448
+[[box]]
+key = "CI history: when a `ci`"
+needs = [
+  "no workflow expands a `${{",  # L1204
+  "`ci.yml` runs on a push",  # L1205
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1223
+[[box]]
+key = "`kernel_tests` hooks isolated in per-subsystem"
+needs = [
+  "one directory per subsystem, portable",  # L1280
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1281
+[[box]]
+key = "`fs/mod.rs`, `vibefs.rs`, `fat.rs`, `fs/kernfs.rs`, and"
+needs = [
+  "`kernel_tests` hooks isolated in per-subsystem",  # L1223
+  "one directory per subsystem, portable",  # L1280
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1189
+[[box]]
+key = "DESIGN §2.5's rule that nothing"
+needs = [
+  "one `KError` with `From` for",  # L1343
+  "the portable block cache's readahead",  # L1490
+  "a vibefs write that cannot",  # L1495
+  "vibefs never rewrites corrupt data",  # L1496
+  "`pci_init::map_mmio` refuses a range that",  # L1510
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1278
+[[box]]
+key = "every x86 assumption outside `arch/`"
+needs = [
+  "an `arch` module boundary built",  # L1277
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1279
+[[box]]
+key = "the seam proven by a"
+needs = [
+  "an `arch` module boundary built",  # L1277
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1237
+[[box]]
+key = "UEFI e2e boots the firmware"
+needs = [
+  "OVMF and the aarch64 edk2 firmware",  # L1236
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1238
+[[box]]
+key = "`test-e2e-uefi` checks for the firmware"
+needs = [
+  "OVMF and the aarch64 edk2 firmware",  # L1236
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1235
+[[box]]
+key = "a scheduled macOS CI job running"
+needs = [
+  "OVMF and the aarch64 edk2 firmware",  # L1236
+  "UEFI e2e boots the firmware",  # L1237
+  "`test-e2e-uefi` checks for the firmware",  # L1238
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1202
+[[box]]
+key = "`make debug`: QEMU `-s -S`,"
+needs = [
+  "the Makefile holds no QEMU",  # L1231
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1317
+[[box]]
+key = "the cross-CPU wake inbox holds"
+needs = [
+  "one `limits` module in `vibeos-core`",  # L1315
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1301
+[[box]]
+key = "enabling and disabling interrupts and"
+needs = [
+  "the seam proven by a",  # L1279
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1000
+[[box]]
+key = "user copies dereference the user"
+needs = [
+  "user-VA accessors replace the physmap",  # L1377
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1275
+[[box]]
+key = "`switch_context` and the DMA fences"
+needs = [
+  "an `arch` module boundary built",  # L1277
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1266
+[[box]]
+key = "the host test `switch_context_roundtrip` runs"
+needs = [
+  "`switch_context` and the DMA fences",  # L1275
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1276
+[[box]]
+key = "`dma::dma_mb`, a full barrier (`mfence`"
+needs = [
+  "queue setup, kick, and completion",  # L838
+  "an `arch` module boundary built",  # L1277
+  "the seam proven by a",  # L1279
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L838
+[[box]]
+key = "queue setup, kick, and completion"
+needs = [
+  "`dma::dma_mb`, a full barrier (`mfence`",  # L1276
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "removed: the loader maps segments from the file"
+needs = [
+  "the initrd is sized by `mkinitrd` from its contents",  # L1370
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra); its proof writes into the initrd's write-test space"
+
+[[box]]
+key = "host tests that parse checked-in"
+needs = [
+  "`elf::parse` host tests also cover",  # L1355
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "BPB parsing and validation"
+needs = [
+  "a crafted FAT BPB fails",  # L1234
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "extent-based allocation rather than block"
+needs = [
+  "a vibefs write that cannot",  # L1495
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "checksums on metadata and optionally"
+needs = [
+  "vibefs never rewrites corrupt data",  # L1496
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "syscall stubs generated from one"
+needs = [
+  "a `no_std` Rust crate under",  # L1350
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "syscall dispatch indexes the generated"
+needs = [
+  "syscall stubs generated from one",  # L1352
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "a dispatch table indexed by"
+needs = [
+  "syscall dispatch indexes the generated",  # L1353
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L883
+[[box]]
+key = "partitions exposed as offset-limited block"
+needs = [
+  "one registry of counted block-device",  # L1342
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1513
+[[box]]
+key = "`part_init` registers a child for"
+needs = [
+  "one registry of counted block-device",  # L1342
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L859
+[[box]]
+key = "GPT and MBR partition tables"
+needs = [
+  "one registry of counted block-device",  # L1342
+  "`parse_mbr` copies the four primary",  # L1512
+  "`part_init` registers a child for",  # L1513
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L881
+[[box]]
+key = "MBR parsing including extended and"
+needs = [
+  "`parse_mbr` copies the four primary",  # L1512
+  "`part_init` registers a child for",  # L1513
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "`deny.toml`, and `cargo deny check"
+needs = [
+  "`ruff` and `mypy` pinned by",  # L1190
+  "a nightly x86_64 KVM leg",  # L1194
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+[[box]]
+key = "third-party notices on every published"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "`release.yml` runs only from `main`,",  # L1207
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1404
+[[box]]
+key = "boot runs on a guarded"
+needs = [
+  "one ring-3 entry model: `/hello`",  # L1402
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1416
+[[box]]
+key = "tracepoints at the boundaries that"
+needs = [
+  "a flight recorder (moved from",  # L1415
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1417
+[[box]]
+key = "timestamps from the §10.3 cycle"
+needs = [
+  "a hostlib core tool reads",  # L1412
+  "a flight recorder (moved from",  # L1415
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1230
+[[box]]
+key = "expected skips are data: `tests/harness/skips.toml`"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1340
+[[box]]
+key = "driver and volume state as"
+needs = [
+  "`vibeos-core` gains `kalloc` (`TryBox`, `TryVec`,",  # L1321
+  "counted objects follow DESIGN §2.11",  # L1323
+  "every path syscall resolves through `Vfs`",  # L1326
+  "one registry of counted block-device",  # L1342
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra); no driver module keeps a list of them holds once 1326 deletes the route tables"
+
+# L476
+[[box]]
+key = "the PIT tick runs at"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+  "`pit_tick_rate` counts timer interrupts, not",  # L1265
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L478
+[[box]]
+key = "`now_us` monotonic across 10k reads"
+needs = [
+  "the in-guest clock tests can",  # L1255
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1434
+[[box]]
+key = "the §10.4 wake inbox's push"
+needs = [
+  "an `arch` module boundary built",  # L1277
+  "the seam proven by a",  # L1279
+  "the cross-CPU wake inbox holds",  # L1317
+  "portable code reaches atomics, fences,",  # L1433
+  "`IoWaiter::finish` makes its `done` store",  # L1470
+  "`spawn_inner` reuses a `Dead` TCB",  # L1474
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1200
+[[box]]
+key = "scheduled lanes and a ledger."
+needs = [
+  "CI history: when a `ci`",  # L1448
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1194
+[[box]]
+key = "a nightly x86_64 KVM leg"
+needs = [
+  "`tsc_calib_source` measures PIT channel 2",  # L1256
+  "`pit_tick_rate` counts timer interrupts, not",  # L1265
+  "`now_ns` is computed from one",  # L1310
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1195
+[[box]]
+key = "the KVM leg also runs `make test-e2e`,"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L648
+[[box]]
+key = "detect TSC-deadline via `CPUID.01H:ECX[24]`; LVT"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "`run_ktest.py` checks the `lapic_timer` marker's",  # L1197
+  "an in-guest test finds every",  # L1198
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "one VMCOREINFO note, in Linux's"
+needs = [
+  "a kernel command line: `cmdline:`",  # L1227
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the log ring, TCB, and"
+needs = [
+  "portable code reaches atomics, fences,",  # L1433
+  "the §10.4 wake inbox's push",  # L1434
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L942
+[[box]]
+key = "`tmpfs` on a private four-page"
+needs = [
+  "tmpfs keeps written data when",  # L1333
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1357
+[[box]]
+key = "`getdents64`, `fstat`, and `nanosleep`, which"
+needs = [
+  "every path syscall resolves through",  # L1326
+  "no padding reaches user memory",  # L1378
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1359
+[[box]]
+key = "an allocator over `brk`, so"
+needs = [
+  "a `no_std` Rust crate under",  # L1350
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1008
+[[box]]
+key = "`brk`, anonymous `mmap`/`munmap`, `getdents64`, `fstat`,"
+needs = [
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+  "`getdents64`, `fstat`, and `nanosleep`, which",  # L1357
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1344
+[[box]]
+key = "the E2 table gives each"
+needs = [
+  "one `KError` with `From` for",  # L1343
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1345
+[[box]]
+key = "an operation that a filesystem"
+needs = [
+  "FAT and vibefs behind `InodeOps`;",  # L1324
+  "one `KError` with `From` for",  # L1343
+  "the E2 table gives each",  # L1344
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1347
+[[box]]
+key = "`fat::FatError` and `vibefs::Error`, two copies"
+needs = [
+  "one `KError` with `From` for",  # L1343
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1012
+[[box]]
+key = "each error condition returns the"
+needs = [
+  "the E2 table gives each",  # L1344
+  "`fat::FatError` and `vibefs::Error`, two copies",  # L1347
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1487
+[[box]]
+key = "virtio-blk negotiates `F_RO`: a write"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1488
+[[box]]
+key = "a virtio-blk request that exhausts"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1509
+[[box]]
+key = "a device's resources are claimed"
+needs = [
+  "driver and volume state as",  # L1340
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L805
+[[box]]
+key = "resource tracking so two drivers"
+needs = [
+  "a device's resources are claimed",  # L1509
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the panic dump owns COM1"
+needs = [
+  "the expect-panic e2e matches markers",  # L1258
+  "every two-way dependency between kernel",  # L1282
+  "an IST vector taken at",  # L1384
+  "every IDT vector enters through",  # L1392
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "the panic backtrace follows `rbp`"
+needs = [
+  "one ring-3 entry model: `/hello`",  # L1402
+  "boot runs on a guarded",  # L1404
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "a panic on any CPU"
+needs = [
+  "the second ksyms link leaves",  # L1253
+  "the panic e2e requires the",  # L1254
+  "the panic dump owns COM1",  # L1419
+  "an exception dump's backtrace starts",  # L1420
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "broadcast the halt IPI first"
+needs = [
+  "the panic dump owns COM1",  # L1419
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "symbolized backtrace: keep a symbol"
+needs = [
+  "the second ksyms link leaves",  # L1253
+  "the panic e2e requires the",  # L1254
+  "an exception dump's backtrace starts",  # L1420
+  "the panic backtrace follows `rbp`",  # L1422
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L556
+[[box]]
+key = "`sleep_ms(50)` returns within 50 to"
+needs = [
+  "`now_ns` is computed from one",  # L1310
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1303
+[[box]]
+key = "the kernel writes the TSS"
+needs = [
+  "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1298
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1308
+[[box]]
+key = "the other safe functions that"
+needs = [
+  "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1298
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "on a timeout, or on"
+needs = [
+  "no workflow expands a `${{",  # L1204
+  "a kernel command line: `cmdline:`",  # L1227
+  "the expect-panic e2e matches markers",  # L1258
+  "the harness reads QEMU's QMP",  # L1411
+  "a hostlib core tool reads",  # L1412
+  "one VMCOREINFO note, in Linux's",  # L1414
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+[[box]]
+key = "the harness reads QEMU's QMP"
+needs = [
+  "the expect-panic e2e matches markers",  # L1258
+  "on a timeout, or on",  # L1410
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1412
+[[box]]
+key = "a hostlib core tool reads"
+needs = [
+  "the log ring, TCB, and",  # L1413
+  "one VMCOREINFO note, in Linux's",  # L1414
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1418
+[[box]]
+key = "a `hang_test` feature build in"
+needs = [
+  "on a timeout, or on",  # L1410
+  "the harness reads QEMU's QMP",  # L1411
+  "a hostlib core tool reads",  # L1412
+  "timestamps from the §10.3 cycle",  # L1417
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1435
+[[box]]
+key = "loom models: the seqlock against"
+needs = [
+  "portable code reaches atomics, fences,",  # L1433
+  "the §10.4 wake inbox's push",  # L1434
+  "`TickClock::write` bumps `seq` to odd",  # L1436
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1045
+[[box]]
+key = "`fork` copies the parent's x87"
+needs = [
+  "x86_64 user FP state follows",  # L1400
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1048
+[[box]]
+key = "`execve` starts the new image with the"
+needs = [
+  "x86_64 user FP state follows",  # L1400
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1059
+[[box]]
+key = "a pending signal whose default action terminates or stops the process takes effect on every return to ring 3,"
+needs = [
+  "a pending signal whose default action terminates or stops the process takes effect on every return to ring 3:",  # L1395
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the blocked-thread sweep finds lost"
+needs = [
+  "threads, processes, descriptors, inodes, dentries,",  # L1330
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "dead scheduler and bring-up state"
+needs = [
+  "the `-smp 2` `per_cpu_bsp:",  # L1243
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "a periodic sweep that logs"
+needs = [
+  "the blocked-thread sweep finds lost",  # L1437
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "a syscall count per process,"
+needs = [
+  "a syscall count per process:",  # L1440
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1328
+[[box]]
+key = "only the `Vfs` walker resolves"
+needs = [
+  "FAT and vibefs behind `InodeOps`;",  # L1324
+  "every path syscall resolves through",  # L1326
+  "a process's working directory is",  # L1327
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1332
+[[box]]
+key = "`umount` keeps volume state consistent:"
+needs = [
+  "FAT and vibefs behind `InodeOps`;",  # L1324
+  "a process's working directory is",  # L1327
+  "the dentry cache never resolves",  # L1331
+  "driver and volume state as",  # L1340
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1334
+[[box]]
+key = "`open` reserves the descriptor and"
+needs = [
+  "the E2 table gives each",  # L1344
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L920
+[[box]]
+key = "`File` with an offset and"
+needs = [
+  "threads, processes, descriptors, inodes, dentries,",  # L1316
+  "every path syscall resolves through",  # L1326
+  "a process's working directory is",  # L1327
+  "`open` reserves the descriptor and",  # L1334
+  "the E2 table gives each",  # L1344
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L922
+[[box]]
+key = "inode and dentry caches with"
+needs = [
+  "the dentry cache never resolves",  # L1331
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1032
+[[box]]
+key = "a relative path in a"
+needs = [
+  "every path syscall resolves through",  # L1326
+  "a process's working directory is",  # L1327
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1336
+[[box]]
+key = "`ls` in the `kernel_shell` build"
+needs = [
+  "FAT and vibefs behind `InodeOps`;",  # L1324
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L906
+[[box]]
+key = "mount a FAT32 image and"
+needs = [
+  "`rm -r` in the `kernel_shell`",  # L1335
+  "`ls` in the `kernel_shell` build",  # L1336
+  "`mount` in the `kernel_shell` build",  # L1337
+  "`unlink_path` drops the name from",  # L1338
+  "a disk-backed FAT mount fits",  # L1341
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L929
+[[box]]
+key = "`readdir`, `stat`, timestamp conversion"
+needs = [
+  "FAT timestamps: `fat_datetime` counts years",  # L1339
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L961
+[[box]]
+key = "shell commands: `ls -l`, `cat`,"
+needs = [
+  "`rm -r` in the `kernel_shell`",  # L1335
+  "`ls` in the `kernel_shell` build",  # L1336
+  "`mount` in the `kernel_shell` build",  # L1337
+  "`unlink_path` drops the name from",  # L1338
+  "FAT and vibefs `rename` lose",  # L1501
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L962
+[[box]]
+key = "kernel shell commands `mount` and"
+needs = [
+  "a `make check` script reads",  # L1222
+  "the VFS lock guards the",  # L1325
+  "`umount` keeps volume state consistent:",  # L1332
+  "`mount` in the `kernel_shell` build",  # L1337
+  "a disk-backed FAT mount fits",  # L1341
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# §10.8 models and proofs
+# L1437
+[[box]]
+key = "Kani proofs, each harness stating"
+needs = [
+  "the buddy hands out an",  # L1292
+  "user-VA accessors replace the physmap",  # L1377
+  "the top user page is",  # L1383
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1439
+[[box]]
+key = "Miri runs the portable crate's"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1440
+[[box]]
+key = "`make models` runs the loom"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "a scheduled macOS CI job running",  # L1235
+  "loom models: the seqlock against",  # L1435
+  "Kani proofs, each harness stating",  # L1437
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1441
+[[box]]
+key = "DESIGN §8 gains a models-and-proofs"
+needs = [
+  "`make models` runs the loom",  # L1440
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# P10-S76's boxes.
+
+# L1360
+[[box]]
+key = "`utest_ok` / `utest_fail` / `utest_skip`"
+needs = [
+  "the in-guest registry split per",  # L1219
+  "the ktest verdict counts runs",  # L1229
+  "expected skips are data: `tests/harness/skips.toml`",  # L1230
+  "kernel lines are framed (DESIGN",  # L1272
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1367
+[[box]]
+key = "`/bin/tests` covers the process lifecycle:"
+needs = [
+  "one `limits` module in `vibeos-core`",  # L1315
+  "`utest_ok` / `utest_fail` / `utest_skip`",  # L1360
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+  "a host-tested `vibeos-core` helper picks",  # L1364
+  "stop and continue cannot lose",  # L1388
+  "every switch tail empties the",  # L1473
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L980
+[[box]]
+key = "every pointer argument is validated:"
+needs = [
+  "`/bin/tests` provokes every errno SYSCALL.md",  # L1366
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1052
+[[box]]
+key = "`/bin/tests` fork limit: a fork"
+needs = [
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1053
+[[box]]
+key = "`/bin/tests` exec chain: a child"
+needs = [
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1054
+[[box]]
+key = "`/bin/tests` wait ordering: `wait4` on"
+needs = [
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1055
+[[box]]
+key = "`/bin/tests` orphan reparenting: a grandchild"
+needs = [
+  "a host-tested `vibeos-core` helper picks",  # L1364
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1060
+[[box]]
+key = "`/bin/tests` signals: `SIGKILL` ends a"
+needs = [
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1071
+[[box]]
+key = "`/bin/tests` calls every §9.3 syscall"
+needs = [
+  "`/bin/tests` provokes every errno SYSCALL.md",  # L1366
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

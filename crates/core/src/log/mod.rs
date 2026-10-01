@@ -1,0 +1,738 @@
+//! Kernel log: levels, filter, fixed ring. ROADMAP §5.5, DESIGN §1.3.
+//!
+//! Portable half. Overflow **drops oldest** (overwrite on wrap). The
+//! kernel wraps this in an IRQ-off TAS so the fast path never allocates
+//! and never takes SCHED. Runtime filter is an `AtomicU8` checked on
+//! emit and again on `dmesg`.
+
+// `Filter` and `RateLimit` live in kernel `static`s (the log ring's cell and
+// one `RateLimit` per call site), so they take `core`'s atomics from the
+// seam's statics re-export, which has `const fn new` (C-ATOMICS).
+use crate::atomic::Ordering;
+use crate::atomic::statics::{AtomicU8, AtomicU64};
+
+pub mod backtrace;
+pub mod line;
+pub mod pvpanic;
+pub mod trace;
+pub mod vmcore;
+pub mod vmcoreinfo;
+
+/// Compile-time ceiling. Records above this are not formatted or stored.
+#[cfg(debug_assertions)]
+pub const COMPILE_MAX: Level = Level::Trace;
+#[cfg(not(debug_assertions))]
+pub const COMPILE_MAX: Level = Level::Debug;
+
+/// Default runtime max. Boot markers are `Info`, so they land in the ring.
+pub const DEFAULT_RUNTIME_MAX: Level = Level::Info;
+
+/// Kernel ring size. Host tests use smaller consts.
+pub const RING_CAP: usize = 256;
+/// Bytes of message text kept per record. Longer lines truncate.
+pub const MSG_CAP: usize = 96;
+/// Panic dump prints this many newest records. Sized so `smp: done`
+/// still appears after PCI + ram0 + partition children.
+pub const DUMP_LAST: usize = 24;
+
+/// Severity. Smaller is more severe. Emit if `level <= max`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    Error = 0,
+    Warn = 1,
+    Info = 2,
+    Debug = 3,
+    Trace = 4,
+}
+
+impl Level {
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Error),
+            1 => Some(Self::Warn),
+            2 => Some(Self::Info),
+            3 => Some(Self::Debug),
+            4 => Some(Self::Trace),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "error" | "0" => Some(Self::Error),
+            "warn" | "1" => Some(Self::Warn),
+            "info" | "2" => Some(Self::Info),
+            "debug" | "3" => Some(Self::Debug),
+            "trace" | "4" => Some(Self::Trace),
+            _ => None,
+        }
+    }
+}
+
+/// The runtime level for Linux's `loglevel=N` (ROADMAP §10.2, BOOT.md
+/// §3.2). Linux prints a message when its level is below N, and its
+/// levels are 0 to 3 for errors, 4 for warnings, 5 and 6 for notices and
+/// information, and 7 for debugging. So 0 to 4 give [`Level::Error`], 5 and
+/// 6 [`Level::Warn`], 7 [`Level::Info`], and 8 and up [`Level::Debug`].
+/// `None` for anything but a decimal that fits a `u32`. Not
+/// [`Level::from_name`], whose numbers run the other way.
+pub fn level_from_loglevel(v: &[u8]) -> Option<Level> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut n: u32 = 0;
+    for &b in v {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        n = n.checked_mul(10)?.checked_add(u32::from(b - b'0'))?;
+    }
+    Some(match n {
+        0..=4 => Level::Error,
+        5 | 6 => Level::Warn,
+        7 => Level::Info,
+        _ => Level::Debug,
+    })
+}
+
+/// True when `level` should be stored / shown given compile and runtime caps.
+pub const fn allowed(level: Level, runtime_max: Level, compile_max: Level) -> bool {
+    (level as u8) <= (compile_max as u8) && (level as u8) <= (runtime_max as u8)
+}
+
+/// Runtime max level. Store is `Release`; emit/dmesg load `Acquire`.
+#[repr(C)]
+pub struct Filter {
+    max: AtomicU8,
+}
+
+impl Filter {
+    pub const fn new(max: Level) -> Self {
+        Self {
+            max: AtomicU8::new(max as u8),
+        }
+    }
+
+    pub fn set(&self, max: Level) {
+        self.max.store(max as u8, Ordering::Release);
+    }
+
+    pub fn get(&self) -> Level {
+        Level::from_u8(self.max.load(Ordering::Acquire)).unwrap_or(DEFAULT_RUNTIME_MAX)
+    }
+
+    pub fn allows(&self, level: Level) -> bool {
+        allowed(level, self.get(), COMPILE_MAX)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Record<const M: usize> {
+    /// Monotonic milliseconds from the seqlock clock, or raw TSC before
+    /// time init (still ordered by ring position).
+    pub timestamp: u64,
+    pub cpu_id: u8,
+    pub level: Level,
+    pub len: u8,
+    pub msg: [u8; M],
+}
+
+impl<const M: usize> Record<M> {
+    pub const fn empty() -> Self {
+        Self {
+            timestamp: 0,
+            cpu_id: 0,
+            level: Level::Info,
+            len: 0,
+            msg: [0; M],
+        }
+    }
+
+    pub fn from_msg(timestamp: u64, cpu_id: u8, level: Level, msg: &[u8]) -> Self {
+        let mut rec = Self::empty();
+        rec.timestamp = timestamp;
+        rec.cpu_id = cpu_id;
+        rec.level = level;
+        let n = msg.len().min(M).min(255);
+        rec.len = n as u8;
+        rec.msg[..n].copy_from_slice(&msg[..n]);
+        rec
+    }
+
+    pub fn msg(&self) -> &[u8] {
+        &self.msg[..self.len as usize]
+    }
+
+    pub fn msg_str(&self) -> &str {
+        core::str::from_utf8(self.msg()).unwrap_or("<bin>")
+    }
+}
+
+/// Fixed ring. Wrap overwrites the oldest record.
+#[repr(C)]
+pub struct Ring<const N: usize, const M: usize> {
+    recs: [Record<M>; N],
+    /// Next write index.
+    head: usize,
+    /// Occupied slots, `0..=N`.
+    len: usize,
+    /// Records overwritten by wrap.
+    dropped: u64,
+    /// Total successful pushes (including those later overwritten).
+    written: u64,
+}
+
+impl<const N: usize, const M: usize> Ring<N, M> {
+    pub const fn new() -> Self {
+        Self {
+            recs: [Record::empty(); N],
+            head: 0,
+            len: 0,
+            dropped: 0,
+            written: 0,
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        N
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
+    /// Push. If full, the oldest record is dropped.
+    pub fn push(&mut self, rec: Record<M>) {
+        if N == 0 {
+            return;
+        }
+        if self.len == N {
+            self.dropped = self.dropped.saturating_add(1);
+        } else {
+            self.len += 1;
+        }
+        self.recs[self.head] = rec;
+        self.head = (self.head + 1) % N;
+        self.written = self.written.saturating_add(1);
+    }
+
+    /// Oldest-first walk.
+    pub fn get(&self, i: usize) -> Option<&Record<M>> {
+        if i >= self.len {
+            return None;
+        }
+        let idx = if self.len < N { i } else { (self.head + i) % N };
+        Some(&self.recs[idx])
+    }
+
+    pub fn iter(&self) -> Iter<'_, N, M> {
+        Iter { ring: self, i: 0 }
+    }
+
+    /// Newest-first, at most `n` records.
+    pub fn last_n(&self, n: usize) -> LastN<'_, N, M> {
+        let take = n.min(self.len);
+        LastN {
+            ring: self,
+            remaining: take,
+            // first index in oldest-first order of the newest `take`
+            next: self.len - take,
+        }
+    }
+}
+
+impl<const N: usize, const M: usize> Default for Ring<N, M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct Iter<'a, const N: usize, const M: usize> {
+    ring: &'a Ring<N, M>,
+    i: usize,
+}
+
+impl<'a, const N: usize, const M: usize> Iterator for Iter<'a, N, M> {
+    type Item = &'a Record<M>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let r = self.ring.get(self.i)?;
+        self.i += 1;
+        Some(r)
+    }
+}
+
+pub struct LastN<'a, const N: usize, const M: usize> {
+    ring: &'a Ring<N, M>,
+    remaining: usize,
+    next: usize,
+}
+
+impl<'a, const N: usize, const M: usize> Iterator for LastN<'a, N, M> {
+    type Item = &'a Record<M>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let r = self.ring.get(self.next)?;
+        self.next += 1;
+        self.remaining -= 1;
+        Some(r)
+    }
+}
+
+/// Ring + filter used by host tests and (by value) the kernel cell.
+#[repr(C)]
+pub struct Logger<const N: usize, const M: usize> {
+    pub ring: Ring<N, M>,
+    pub filter: Filter,
+}
+
+impl<const N: usize, const M: usize> Logger<N, M> {
+    pub const fn new() -> Self {
+        Self {
+            ring: Ring::new(),
+            filter: Filter::new(DEFAULT_RUNTIME_MAX),
+        }
+    }
+
+    /// Store if compile-time and runtime filters allow. Returns whether stored.
+    pub fn emit(&mut self, rec: Record<M>) -> bool {
+        if !self.filter.allows(rec.level) {
+            return false;
+        }
+        self.ring.push(rec);
+        true
+    }
+
+    /// `dmesg` view: records that pass `view` (and compile max).
+    pub fn visible<'a>(&'a self, view: Level) -> impl Iterator<Item = &'a Record<M>> + 'a {
+        self.ring
+            .iter()
+            .filter(move |r| allowed(r.level, view, COMPILE_MAX))
+    }
+}
+
+impl<const N: usize, const M: usize> Default for Logger<N, M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The kernel's log instantiation, which the core tool reads through
+/// `SYMBOL(vibeos_log)` (docs/VMCOREINFO.md).
+pub type KernelLogger = Logger<RING_CAP, MSG_CAP>;
+/// The type of the kernel's log static over its port `A`. `A` is only
+/// named (`PhantomData<fn() -> A>`), so every port gives one layout.
+pub type KernelLog<A> = crate::cell::IrqCell<KernelLogger, A>;
+
+// The layout the core tool reads (docs/VMCOREINFO.md, "Types the core tool
+// reads"), in the kernel and in every hostlib build (ROADMAP §10.7). A
+// `Record` is 112 bytes: `timestamp`, three bytes, `MSG_CAP` text bytes,
+// padded to 8. Outside `cfg(loom)`, whose atomics differ in size.
+#[cfg(not(loom))]
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    type Rec = Record<MSG_CAP>;
+    type KRing = Ring<RING_CAP, MSG_CAP>;
+    assert!(MSG_CAP == 96);
+    assert!(size_of::<Rec>() == 112);
+    assert!(align_of::<Rec>() == 8);
+    assert!(offset_of!(Rec, timestamp) == 0);
+    assert!(offset_of!(Rec, cpu_id) == 8);
+    assert!(offset_of!(Rec, level) == 9);
+    assert!(offset_of!(Rec, len) == 10);
+    assert!(offset_of!(Rec, msg) == 11);
+    assert!(size_of::<Level>() == 1);
+    assert!(size_of::<KRing>() == RING_CAP * 112 + 32);
+    assert!(align_of::<KRing>() == 8);
+    assert!(offset_of!(KRing, recs) == 0);
+    assert!(offset_of!(KRing, head) == RING_CAP * 112);
+    assert!(offset_of!(KRing, len) == RING_CAP * 112 + 8);
+    assert!(offset_of!(KRing, dropped) == RING_CAP * 112 + 16);
+    assert!(offset_of!(KRing, written) == RING_CAP * 112 + 24);
+    assert!(size_of::<Filter>() == 1);
+    assert!(align_of::<Filter>() == 1);
+    assert!(offset_of!(Filter, max) == 0);
+    assert!(size_of::<KernelLogger>() == RING_CAP * 112 + 40);
+    assert!(align_of::<KernelLogger>() == 8);
+    assert!(offset_of!(KernelLogger, ring) == 0);
+    assert!(offset_of!(KernelLogger, filter) == RING_CAP * 112 + 32);
+    // With `cell.rs`'s block (`data` at 0, `owner` right after it), this
+    // puts the cell's `owner` at `RING_CAP * 112 + 40`.
+    assert!(size_of::<KernelLog<()>>() == RING_CAP * 112 + 48);
+    assert!(align_of::<KernelLog<()>>() == 8);
+};
+
+/// A per-site rate limit (C-RATELIMIT): DESIGN §2.5's "a counter plus a
+/// log line at most once a second". `klog_ratelimited!` keeps one in a
+/// `static` per call site.
+pub struct RateLimit {
+    /// Calls suppressed since the last line.
+    suppressed: AtomicU64,
+    /// The last line's time plus one; 0 before the first line.
+    last: AtomicU64,
+}
+
+impl RateLimit {
+    pub const fn new() -> Self {
+        Self {
+            suppressed: AtomicU64::new(0),
+            last: AtomicU64::new(0),
+        }
+    }
+
+    /// Whether a line is due at `now_ms`: the first call, or the first
+    /// call `interval_ms` or more after the last line. When one is,
+    /// returns the number of calls suppressed since the last line and
+    /// resets it; otherwise counts this call and returns `None`. Of two
+    /// callers racing for the same line, one gets it and the other counts.
+    pub fn check(&self, now_ms: u64, interval_ms: u64) -> Option<u64> {
+        let last = self.last.load(Ordering::Acquire);
+        let due = last == 0 || now_ms.saturating_sub(last - 1) >= interval_ms;
+        // AcqRel: the winner's swap of `suppressed` follows its claim, and
+        // a loser reads the claim before it counts.
+        if !due
+            || self
+                .last
+                .compare_exchange(
+                    last,
+                    now_ms.saturating_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+        {
+            self.suppressed.fetch_add(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(self.suppressed.swap(0, Ordering::AcqRel))
+    }
+}
+
+impl Default for RateLimit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loglevel_linux_numbering() {
+        for (v, want) in [
+            ("0", Level::Error),
+            ("3", Level::Error),
+            ("4", Level::Error),
+            ("5", Level::Warn),
+            ("6", Level::Warn),
+            ("7", Level::Info),
+            ("8", Level::Debug),
+            ("15", Level::Debug),
+            ("007", Level::Info),
+            ("4294967295", Level::Debug),
+        ] {
+            assert_eq!(level_from_loglevel(v.as_bytes()), Some(want), "{v}");
+        }
+    }
+
+    #[test]
+    fn loglevel_rejects_other_values() {
+        for v in [
+            "",
+            "x",
+            "-1",
+            "7x",
+            " 7",
+            "info",
+            "4294967296",
+            "99999999999999999999",
+        ] {
+            assert_eq!(level_from_loglevel(v.as_bytes()), None, "{v:?}");
+        }
+    }
+
+    fn rec(ts: u64, lvl: Level, msg: &str) -> Record<8> {
+        Record::from_msg(ts, 0, lvl, msg.as_bytes())
+    }
+
+    #[test]
+    fn levels_are_ordered_by_severity() {
+        assert!(Level::Error < Level::Warn);
+        assert!(Level::Warn < Level::Info);
+        assert!(Level::Info < Level::Debug);
+        assert!(Level::Debug < Level::Trace);
+        assert_eq!(Level::from_u8(2), Some(Level::Info));
+        assert_eq!(Level::from_u8(9), None);
+        assert_eq!(Level::Error.as_str(), "error");
+        assert_eq!(Level::Trace.as_str(), "trace");
+        assert_eq!(Level::from_name("debug"), Some(Level::Debug));
+        assert_eq!(Level::from_name("3"), Some(Level::Debug));
+        assert_eq!(Level::from_name("nope"), None);
+    }
+
+    #[test]
+    fn filter_hides_above_runtime_max() {
+        let f = Filter::new(Level::Info);
+        assert!(f.allows(Level::Error));
+        assert!(f.allows(Level::Info));
+        assert!(!f.allows(Level::Debug));
+        f.set(Level::Trace);
+        assert!(f.allows(Level::Debug));
+        f.set(Level::Error);
+        assert!(f.allows(Level::Error));
+        assert!(!f.allows(Level::Warn));
+    }
+
+    #[test]
+    fn wrap_drops_oldest() {
+        let mut r: Ring<4, 8> = Ring::new();
+        r.push(rec(1, Level::Info, "a"));
+        r.push(rec(2, Level::Info, "b"));
+        r.push(rec(3, Level::Info, "c"));
+        r.push(rec(4, Level::Info, "d"));
+        assert_eq!(r.len(), 4);
+        assert_eq!(r.dropped(), 0);
+        r.push(rec(5, Level::Info, "e"));
+        assert_eq!(r.len(), 4);
+        assert_eq!(r.dropped(), 1);
+        let msgs: Vec<&str> = r.iter().map(|x| x.msg_str()).collect();
+        assert_eq!(msgs, ["b", "c", "d", "e"]);
+        r.push(rec(6, Level::Info, "f"));
+        let msgs: Vec<&str> = r.iter().map(|x| x.msg_str()).collect();
+        assert_eq!(msgs, ["c", "d", "e", "f"]);
+        assert_eq!(r.dropped(), 2);
+        assert_eq!(r.written(), 6);
+    }
+
+    #[test]
+    fn last_n_is_newest() {
+        let mut r: Ring<4, 8> = Ring::new();
+        for (i, m) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            r.push(rec(i as u64, Level::Info, m));
+        }
+        let msgs: Vec<&str> = r.last_n(3).map(|x| x.msg_str()).collect();
+        assert_eq!(msgs, ["c", "d", "e"]);
+        let all: Vec<&str> = r.last_n(99).map(|x| x.msg_str()).collect();
+        assert_eq!(all, ["b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn emit_and_dmesg_honor_runtime_filter() {
+        let mut log: Logger<8, 8> = Logger::new();
+        assert!(log.emit(rec(1, Level::Info, "boot")));
+        assert!(!log.emit(rec(2, Level::Debug, "dbg")));
+        assert_eq!(log.ring.len(), 1);
+        log.filter.set(Level::Debug);
+        assert!(log.emit(rec(3, Level::Debug, "dbg")));
+        assert_eq!(log.ring.len(), 2);
+        // dmesg at Info hides the debug record still in the ring
+        let info: Vec<&str> = log.visible(Level::Info).map(|r| r.msg_str()).collect();
+        assert_eq!(info, ["boot"]);
+        let dbg: Vec<&str> = log.visible(Level::Debug).map(|r| r.msg_str()).collect();
+        assert_eq!(dbg, ["boot", "dbg"]);
+        log.filter.set(Level::Error);
+        assert!(!log.emit(rec(4, Level::Warn, "w")));
+        assert_eq!(log.ring.len(), 2);
+    }
+
+    #[test]
+    fn truncates_long_messages() {
+        let r = Record::<4>::from_msg(0, 1, Level::Warn, b"hello");
+        assert_eq!(r.msg(), b"hell");
+        assert_eq!(r.cpu_id, 1);
+        assert_eq!(r.level, Level::Warn);
+    }
+
+    #[test]
+    fn empty_ring_iterates_nothing() {
+        let r: Ring<4, 8> = Ring::new();
+        assert_eq!(r.iter().count(), 0);
+        assert_eq!(r.last_n(4).count(), 0);
+        assert!(r.get(0).is_none());
+    }
+
+    #[test]
+    fn compile_max_is_at_least_info() {
+        assert!(COMPILE_MAX >= Level::Info);
+        assert!(allowed(Level::Info, Level::Info, COMPILE_MAX));
+    }
+
+    #[test]
+    fn ratelimit_first_call_prints() {
+        let r = RateLimit::new();
+        assert_eq!(r.check(0, 1000), Some(0));
+    }
+
+    #[test]
+    fn ratelimit_counts_inside_the_interval() {
+        let r = RateLimit::new();
+        assert_eq!(r.check(5, 1000), Some(0));
+        assert_eq!(r.check(5, 1000), None);
+        assert_eq!(r.check(500, 1000), None);
+        assert_eq!(r.check(1004, 1000), None);
+        assert_eq!(r.check(1005, 1000), Some(3));
+    }
+
+    #[test]
+    fn ratelimit_resets_after_a_line() {
+        let r = RateLimit::new();
+        assert_eq!(r.check(0, 10), Some(0));
+        assert_eq!(r.check(1, 10), None);
+        assert_eq!(r.check(10, 10), Some(1));
+        assert_eq!(r.check(19, 10), None);
+        assert_eq!(r.check(20, 10), Some(1));
+        assert_eq!(r.check(40, 10), Some(0));
+    }
+
+    #[test]
+    fn ratelimit_clock_near_max_does_not_overflow() {
+        let r = RateLimit::new();
+        assert_eq!(r.check(u64::MAX, 1000), Some(0));
+        assert_eq!(r.check(u64::MAX, 1000), None);
+        assert_eq!(r.check(0, 1000), None);
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_models {
+    extern crate std;
+
+    use super::*;
+    use crate::arch::stub::Arch;
+    use crate::cell::IrqCell;
+    use crate::sync::variant::{Bound, Site, check};
+    use loom::cell::UnsafeCell;
+    use loom::sync::Arc;
+    use loom::thread;
+    use std::vec::Vec;
+
+    /// The log ring's lock, as `log_init`'s cell holds it, with a witness
+    /// every critical section writes: the ring itself is plain memory loom
+    /// cannot see, so the witness is what shows an unordered hand-off.
+    type LogCell = IrqCell<(Logger<2, 4>, UnsafeCell<u32>), Arch>;
+
+    /// Run `f` on the ring under the lock, writing the witness first.
+    fn locked<R>(cell: &LogCell, f: impl FnOnce(&mut Logger<2, 4>) -> R) -> R {
+        cell.with(|(log, witness)| {
+            // SAFETY: the cell's owner word makes this the one holder, so no
+            // other thread touches the witness until the unlock; loom
+            // reports it if the unlock fails to order the next holder after
+            // this write. Established by `cell::IrqCell::with`.
+            witness.with_mut(|p| unsafe { *p += 1 });
+            f(log)
+        })
+    }
+
+    /// Writer `w`'s `k`th record: every field derives from `(w, k)`.
+    fn rec(w: u8, k: u8) -> Record<4> {
+        Record::from_msg(
+            u64::from(w) * 10 + u64::from(k),
+            w,
+            Level::Info,
+            &[w, k, w, k],
+        )
+    }
+
+    /// A record's `(writer, k)`; a record that mixes two fails.
+    fn whole(r: &Record<4>) -> (u8, u8) {
+        let (w, k) = (r.cpu_id, (r.timestamp % 10) as u8);
+        if r.timestamp != u64::from(w) * 10 + u64::from(k) || r.msg() != [w, k, w, k] {
+            panic!("log ring: torn record");
+        }
+        (w, k)
+    }
+
+    /// Two writers emit two records each into a ring of two, which wraps,
+    /// while main reads it as `log_init::dmesg_write` does: one `with` for
+    /// the length, then one per index. A concurrent wrap may skip records
+    /// (the ring drops its oldest), so the reader checks each record
+    /// whole, each writer's in order, and none twice. After the joins,
+    /// 4 were written and 2 dropped. Bound: 3 threads (2 writers of 2
+    /// emits each, main up to 4 critical sections), 1 preemption. At 2,
+    /// loom switches between the two spinning writers without charging a
+    /// preemption while the holder waits preempted, and no schedule ends
+    /// within its branch limit.
+    fn log_ring_model(v: Option<Site>) {
+        let bound = Bound {
+            threads: 3,
+            preemptions: 1,
+        };
+        check(v, bound, || {
+            let cell: Arc<LogCell> = Arc::new(IrqCell::new((Logger::new(), UnsafeCell::new(0))));
+            let writers: Vec<_> = [1u8, 2]
+                .into_iter()
+                .map(|w| {
+                    let cell = cell.clone();
+                    thread::spawn(move || {
+                        for k in 1..=2 {
+                            assert!(locked(&cell, |log| log.emit(rec(w, k))));
+                        }
+                    })
+                })
+                .collect();
+            let len = locked(&cell, |log| log.ring.len());
+            let mut seen: Vec<(u8, u8)> = Vec::new();
+            for i in 0..len {
+                let Some(r) = locked(&cell, |log| log.ring.get(i).copied()) else {
+                    continue;
+                };
+                let (w, k) = whole(&r);
+                if seen.contains(&(w, k)) {
+                    panic!("log ring: record twice");
+                }
+                if seen.iter().any(|&(sw, sk)| sw == w && sk > k) {
+                    panic!("log ring: out of order");
+                }
+                seen.push((w, k));
+            }
+            for t in writers {
+                t.join().unwrap();
+            }
+            let (written, dropped) = locked(&cell, |log| (log.ring.written(), log.ring.dropped()));
+            assert_eq!((written, dropped), (4, 2));
+        });
+    }
+
+    #[test]
+    fn loom_log_ring_writers_dmesg() {
+        log_ring_model(None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Causality violation")]
+    fn loom_log_ring_relaxed_unlock_races_fails() {
+        log_ring_model(Some(Site::IrqCellUnlockRelaxed));
+    }
+}
