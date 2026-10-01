@@ -15,7 +15,10 @@ script checks, over every tracked file outside the dated records (EXCLUDE):
   `ROADMAP`, another document's name, or an EXTERNAL specification), outside code spans and
   fences: it names a heading of its own file (the whole LAYOUT set for a LAYOUT file), of a file a
   `DESIGN §` or `ROADMAP §` citation earlier in its sentence names, or of the file its table
-  column's header names.
+  column's header names;
+- the invariant register in INVARIANTS.md: every row has a Relied on and an Enforced by cell,
+  each backticked Enforced by name exists in the tree (resolve_enforcer), and no row whose Status
+  starts with *enforced* has `none` there.
 
 `--where x.y` prints the file and anchor that hold DESIGN §x.y.
 """
@@ -27,8 +30,9 @@ import posixpath
 import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -426,6 +430,181 @@ def check_bare(
     return errors
 
 
+# ---- The invariant register's Relied on and Enforced by columns (ROADMAP §10.3, DOC2) ----
+
+REGISTER = "docs/INVARIANTS.md"
+REGISTER_HEADER = ("#", "Invariant", "Established at", "Relied on", "Enforced by", "Status")
+ROW_ID = re.compile(r"^I(\d+)$")
+TICKED_NAME = re.compile(r"`([^`]+)`")
+TEST_ROOTS = ("src/", "crates/", "tests/hostlib/", "user/")
+TYPE_ROOTS = ("src/", "crates/", "user/")
+TEST_ATTR = re.compile(r"#\[(?:test|kani::proof)\]")
+FN_NAME = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)")
+KTEST_NAME = re.compile(r"\btest\(\s*\"([^\"]+)\"")
+QUOTED = re.compile(r"\"((?:[^\"\\]|\\[\s\S])*)\"")
+PY_DEF = re.compile(r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\(", re.M)
+TYPE_DEF = re.compile(r"\b(?:struct|enum|union|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
+LINT_ATTR = re.compile(r"\b(?:deny|forbid)\(([^()]*)\)")
+MAKE_RULE = re.compile(r"^([^\s:#=][^:#=]*?)\s*::?(?!=)", re.M)
+
+
+@dataclass(frozen=True)
+class RegisterRow:
+    line: int
+    rid: str
+    cells: Mapping[str, str]
+
+
+def register_rows(text: str) -> tuple[list[RegisterRow], list[str]]:
+    """The invariant register's rows, found by its header, with a problem per malformed row."""
+    rows: list[RegisterRow] = []
+    problems: list[str] = []
+    header: list[str] | None = None
+    for n, line in enumerate(text.splitlines(), start=1):
+        if not _is_table_row(line):
+            if header is not None and rows:
+                break
+            header = None
+            continue
+        cells = [c.strip() for _, c in _split_cells(line)]
+        if header is None:
+            if tuple(cells[: len(REGISTER_HEADER)]) == REGISTER_HEADER:
+                header = cells
+            continue
+        if _is_delimiter_row(line):
+            continue
+        m = ROW_ID.match(cells[0]) if cells else None
+        if m is None or len(cells) != len(header):
+            problems.append(
+                f"{REGISTER}:{n}: register row has {len(cells)} cells, header {len(header)}"
+            )
+            continue
+        rows.append(RegisterRow(n, cells[0], dict(zip(header, cells, strict=True))))
+    if header is None and not rows:
+        head = " | ".join(REGISTER_HEADER)
+        problems.append(f"{REGISTER}: no invariant register (a table headed {head})")
+    return rows, problems
+
+
+@dataclass
+class TreeNames:
+    """What an Enforced by name can resolve to, indexed once over the tracked files."""
+
+    paths: set[str] = field(default_factory=set)
+    dirs: set[str] = field(default_factory=set)
+    make_targets: set[str] = field(default_factory=set)
+    lints: set[str] = field(default_factory=set)
+    tests: set[str] = field(default_factory=set)
+    types: set[str] = field(default_factory=set)
+
+
+def tree_names(files: Mapping[str, str]) -> TreeNames:
+    t = TreeNames()
+    for path, text in files.items():
+        t.paths.add(path)
+        parts = path.split("/")
+        for i in range(1, len(parts)):
+            t.dirs.add("/".join(parts[:i]))
+        if path == "Makefile":
+            for m in MAKE_RULE.finditer(text):
+                t.make_targets.update(m.group(1).split())
+        if posixpath.basename(path) == "Cargo.toml":
+            t.lints.update(_cargo_lints(text))
+        if path.endswith(".rs"):
+            for m in LINT_ATTR.finditer(text):
+                for lint in m.group(1).split(","):
+                    lint = lint.strip()
+                    if lint:
+                        t.lints.add(lint if "::" in lint else f"rust::{lint}")
+            if path.startswith(TEST_ROOTS):
+                lines = text.splitlines()
+                for i, line in enumerate(lines):
+                    fm = FN_NAME.search(line)
+                    if fm and _test_attr_above(lines[max(0, i - 3) : i]):
+                        t.tests.add(fm.group(1))
+            if path.startswith("src/") and "ktest" in path:
+                t.tests.update(KTEST_NAME.findall(text))
+            if path.startswith("user/src/tests/"):
+                t.tests.update(QUOTED.findall(text))
+            if path.startswith(TYPE_ROOTS):
+                t.types.update(TYPE_DEF.findall(text))
+        if path.startswith("tests/harness/test_") and path.endswith(".py"):
+            t.tests.update(PY_DEF.findall(text))
+    return t
+
+
+def _test_attr_above(above: Sequence[str]) -> bool:
+    """A `#[test]` or `#[kani::proof]` among the lines above a fn, after the previous item's end."""
+    for line in reversed(above):
+        if TEST_ATTR.search(line):
+            return True
+        if FN_NAME.search(line) or line.rstrip().endswith(("}", ";")):
+            return False
+    return False
+
+
+def _cargo_lints(text: str) -> set[str]:
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return set()
+    tables: list[tuple[str, object]] = []
+    ws = data.get("workspace")
+    for root in (data.get("lints"), ws.get("lints") if isinstance(ws, dict) else None):
+        if isinstance(root, dict):
+            tables.extend(root.items())
+    out: set[str] = set()
+    for tool, lints in tables:
+        if not isinstance(lints, dict):
+            continue
+        for name, setting in lints.items():
+            level = setting.get("level") if isinstance(setting, dict) else setting
+            if level in ("deny", "forbid"):
+                out.add(f"{tool}::{name}")
+    return out
+
+
+def resolve_enforcer(name: str, tree: TreeNames) -> bool:
+    """Whether an Enforced by name exists in the tree (path, make target, lint, test, or type)."""
+    if "/" in name:
+        first = name.split()[0]
+        return first in tree.paths or first.rstrip("/") in tree.dirs
+    if name.startswith("make "):
+        return name.split()[1] in tree.make_targets
+    if name.startswith(("clippy::", "rust::")):
+        return name in tree.lints
+    last = name.split("::")[-1]
+    return last in tree.tests or last in tree.types
+
+
+def check_register(text: str, tree: TreeNames) -> list[str]:
+    """Report register rows with an empty Relied on or Enforced by cell, an Enforced by name not in
+    the tree, or an enforced Status whose Enforced by is `none`."""
+    rows, errors = register_rows(text)
+    for row in rows:
+        where = f"{REGISTER}:{row.line}: {row.rid}"
+        relied = row.cells.get("Relied on", "")
+        cell = row.cells.get("Enforced by", "")
+        if not relied:
+            errors.append(f"{where}: Relied on is empty")
+        if not cell:
+            errors.append(f"{where}: Enforced by is empty")
+            continue
+        names = TICKED_NAME.findall(cell)
+        if not names:
+            if cell.split()[0].strip(".,;") != "none":
+                errors.append(f"{where}: Enforced by is neither `none` nor backticked names")
+                continue
+            status = row.cells.get("Status", "").split()
+            if status and status[0].strip(".,;:") == "enforced":
+                errors.append(f"{where}: Status is enforced and Enforced by is none")
+            continue
+        for name in names:
+            if not resolve_enforcer(name, tree):
+                errors.append(f"{where}: Enforced by names {name}, not in the tree")
+    return errors
+
+
 def in_scope(path: str) -> bool:
     return not path.startswith(EXCLUDE)
 
@@ -442,6 +621,8 @@ def check_tree(files: Mapping[str, str]) -> list[str]:
         if path.endswith(".md"):
             errors.extend(check_links(path, text, anchors))
     errors.extend(check_bare(files, design, roadmap))
+    if REGISTER in files:
+        errors.extend(check_register(files[REGISTER], tree_names(files)))
     return sorted(errors)
 
 

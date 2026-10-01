@@ -7,16 +7,21 @@ import unittest
 from scripts.doc_refs import (
     EXTERNAL,
     LAYOUT,
+    REGISTER,
     ROADMAP,
     check_bare,
     check_citations,
     check_links,
+    check_register,
     check_tree,
     design_index,
     headings,
     in_scope,
+    register_rows,
+    resolve_enforcer,
     roadmap_index,
     slug,
+    tree_names,
     where,
 )
 
@@ -65,6 +70,10 @@ def design_set() -> dict[str, str]:
     )
     head = "# Design\n\n## Contents\n\n" + contents + "\n"
     files["docs/DESIGN.md"] = head + files["docs/DESIGN.md"]
+    files["docs/INVARIANTS.md"] += (
+        "\n| # | Invariant | Established at | Relied on | Enforced by | Status | Holds today |\n"
+        "|---|---|---|---|---|---|---|\n| I1 | Rule | `x` | §2.5 | none | documented | Yes |\n"
+    )
     files[ROADMAP] = "# Roadmap\n\n## Phase 10: Hardening\n\n### 10.3 Documentation\n\n- [ ] box\n"
     return files
 
@@ -277,6 +286,92 @@ class TestBareRule(unittest.TestCase):
         files = design_set()
         files["docs/TIME.md"] += f"\nSee {sec('19.5')}.\n"
         self.assertEqual(len([e for e in check_tree(files) if "bare" in e]), 1)
+
+
+REG_HEAD = (
+    "| # | Invariant | Established at | Relied on | Enforced by | Status | Holds today |\n"
+    "|---|---|---|---|---|---|---|\n"
+)
+
+TREE = {
+    "Makefile": "check: build\n\tcargo test\ntest-e2e test-kernel: iso\n\trun\nX := y\n",
+    "Cargo.toml": "[workspace.lints.clippy]\nlet_underscore_must_use = \"deny\"\n"
+    "needless_return = \"warn\"\n[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = "
+    "{ level = \"forbid\", priority = 1 }\n",
+    "src/main.rs": "#![deny(\n    clippy::unwrap_used,\n    clippy::panic\n)]\nstruct Kernel;\n",
+    "crates/core/src/mm.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn buddy_merges() {}\n"
+    "    fn helper() {}\n}\n#[kani::proof]\nfn proof_range() {}\npub enum MapError {}\n",
+    "src/mm/ktest.rs": "pub(crate) const TESTS: &[Test] = &[\n    test(\n"
+    "        \"kernel_va0_faults\", f),\n];\n",
+    "user/src/tests/console.rs": "const X: &[u8] = b\"a\\\nb\";\n"
+    "t.case(\"console_forged_lines\", f);\n",
+    "tests/harness/test_frame.py": "class T:\n    def test_framed(self) -> None:\n        pass\n",
+    "scripts/check_entry.py": "",
+}
+
+
+def register(*rows: str) -> str:
+    body = "".join(r + "\n" for r in rows)
+    return "## 2.7 Invariant register\n\n" + REG_HEAD + body + "\n## 2.8\n"
+
+
+def row(rid: str, enforced: str, status: str = "documented", relied: str = "§2.1") -> str:
+    return f"| {rid} | Rule | `x` | {relied} | {enforced} | {status} | Yes |"
+
+
+class TestRegister(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tree = tree_names(TREE)
+
+    def check(self, *rows: str) -> list[str]:
+        return check_register(register(*rows), self.tree)
+
+    def test_rows_found_by_header(self) -> None:
+        rows, problems = register_rows(register(row("I1", "none"), row("I2", "`buddy_merges`")))
+        self.assertEqual(problems, [])
+        self.assertEqual([(r.line, r.rid) for r in rows], [(5, "I1"), (6, "I2")])
+        self.assertEqual(rows[1].cells["Enforced by"], "`buddy_merges`")
+
+    def test_each_name_kind_found(self) -> None:
+        for name in ("scripts/check_entry.py", "tests/harness/test_frame.py", "src/mm",
+                     "make check", "make test-kernel", "clippy::let_underscore_must_use",
+                     "clippy::unwrap_used", "rust::unsafe_op_in_unsafe_fn", "buddy_merges",
+                     "vibeos::mm::tests::buddy_merges", "proof_range", "kernel_va0_faults",
+                     "console_forged_lines", "test_framed", "Kernel", "MapError"):
+            self.assertTrue(resolve_enforcer(name, self.tree), name)
+
+    def test_each_name_kind_missing(self) -> None:
+        for name in ("scripts/check_gone.py", "make X", "make iso", "clippy::needless_return",
+                     "clippy::todo", "rust::dead_code", "helper", "kernel_va1_faults",
+                     "console_other", "test_unframed", "Nothing"):
+            self.assertFalse(resolve_enforcer(name, self.tree), name)
+
+    def test_missing_name_message(self) -> None:
+        self.assertEqual(
+            self.check(row("I7", "`buddy_merges` and `no_such_test` (commentary)")),
+            [f"{REGISTER}:5: I7: Enforced by names no_such_test, not in the tree"],
+        )
+
+    def test_none_under_each_status(self) -> None:
+        want = [f"{REGISTER}:5: I3: Status is enforced and Enforced by is none"]
+        self.assertEqual(self.check(row("I3", "none", "enforced")), want)
+        self.assertEqual(self.check(row("I3", "none", "enforced in part (the bound)")), want)
+        self.assertEqual(self.check(row("I3", "none", "documented")), [])
+        self.assertEqual(self.check(row("I3", "`buddy_merges`", "enforced")), [])
+
+    def test_empty_cells(self) -> None:
+        self.assertEqual(self.check(row("I4", "")),
+                         [f"{REGISTER}:5: I4: Enforced by is empty"])
+        self.assertEqual(self.check(row("I4", "none", relied="")),
+                         [f"{REGISTER}:5: I4: Relied on is empty"])
+        self.assertEqual(self.check(row("I4", "the lints")),
+                         [f"{REGISTER}:5: I4: Enforced by is neither `none` nor backticked names"])
+
+    def test_check_tree_runs_it(self) -> None:
+        files = design_set()
+        files.update(TREE)
+        files[REGISTER] = "# 2. Invariants\n\n" + register(row("I9", "`gone`"))
+        self.assertEqual(len([e for e in check_tree(files) if "I9" in e]), 1)
 
 
 class LinkTest(unittest.TestCase):
