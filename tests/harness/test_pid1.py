@@ -1,4 +1,5 @@
-"""Tests for run_pid1.run_case (ROADMAP §10.5, `make test-e2e-init-fault`)."""
+"""Tests for run_pid1.run_case and the `init_no_sh` check (ROADMAP §10.5,
+`make test-e2e-init-fault`)."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from tests.harness.frame import FRAME
 from tests.harness.harness import HarnessError, boot_contract_markers, env_config
 from tests.harness.linesource import FakeLineSource
 from tests.harness.qmp import FakeQmp
-from tests.harness.run_pid1 import CASES, run_case
+from tests.harness.run_pid1 import CASES, check_no_sh_lines, run_case
 
 NAME = "init_fault"
 
@@ -93,6 +94,35 @@ class RunCase(unittest.TestCase):
     def test_no_halt_after_line_fails(self) -> None:
         with self.assertRaises(HarnessError):
             run([*contract_lines(), FAULT, PID1, k("vibeOS: panic:")])
+
+
+# The nosh boot: `/bin/false` as `/bin/tests`, three failed `/bin/sh` starts,
+# then init's exit and its panic (L1365, F128).
+NOSH_TESTS = "init: /bin/tests exited 256"
+NOSH_START = "init: /bin/sh start failed: execve errno 2"
+NOSH_PID1 = k("vibeOS: init: pid 1 exited 1")
+NOSH_DUMP = [k("vibeOS: panic:"), k("vibeOS: panic: msg: pid 1 exited"), k("vibeOS: panic: halted")]
+
+
+class TestInitNoSh(unittest.TestCase):
+    def test_three_diagnostics_and_panic_pass(self) -> None:
+        check_no_sh_lines(
+            [*contract_lines(), "hello from ring3", NOSH_TESTS, *[NOSH_START] * 3, NOSH_PID1,
+             *NOSH_DUMP]
+        )
+
+    def test_two_diagnostics_fail(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "2 .* lines, want 3"):
+            check_no_sh_lines(
+                [*contract_lines(), NOSH_TESTS, *[NOSH_START] * 2, NOSH_PID1, *NOSH_DUMP]
+            )
+
+    def test_shell_ready_fails(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "working init"):
+            check_no_sh_lines(
+                [*contract_lines(), NOSH_TESTS, "vibeOS: shell ready", *[NOSH_START] * 3,
+                 NOSH_PID1, *NOSH_DUMP]
+            )
 
 
 if __name__ == "__main__":
