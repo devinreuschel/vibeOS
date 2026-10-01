@@ -249,7 +249,17 @@ fails with `ktest hung in <name>` for the last run line, or names the stretch ou
 `DeadlineReader` returns buffered bytes without a newline as a `partial` event before it reports the
 timeout. Adding tests changes no timeout, and a test that needs longer carries a registry override,
 reviewed as code; `make test-smp-stress` sets no longer timeout. Every driver's QEMU monitor
-directory (`vibeos-mon-*`) is removed when the driver exits. The `utest_*` lines of ROADMAP §10.5 follow the same protocol.
+directory (`vibeos-mon-*`) is removed when the driver exits.
+
+`/bin/tests` (ROADMAP §10.5) prints the same protocol from ring 3 with the prefix `vibeOS: utest: `,
+through `utest::Runner` in `user/src/utest.rs`: `begin <n>`, `run <name> <deadline_ms>` before each
+case, one `ok <name>`, `FAIL <name>: <why>` or `skip <name>: <reason>` per run, and `end`, each line
+one unframed `write(2)`. Its suites are the modules of `user/src/tests/`, run in `SUITES`' order
+(`errno_matrix`, `efault_matrix` and the lifecycle cases last). `tests/harness/utest.py`'s
+`UtestVerdict` reads them with the same `RunCounter` and `KtestDeadlines` (a `Protocol` of the user
+source and the utest prefix), compares the skips with `skips.toml`, and records each result in the
+results file under `utest`. Nothing in the guest enforces a user test's deadline: the harness's
+progress deadline is the only one it has, and a timeout fails with `utest hung in <name>`.
 
 Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
 names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,
@@ -428,7 +438,12 @@ run on an unframed `user: tests fail`, so a failing `/bin/tests` fails the boot 
 F073). `init` passes a status pointer to `wait4` and, when the status word is nonzero (an exit code
 other than 0, or a signal), prints `init: /bin/tests exited <status>` on fd 2 before it starts
 `/bin/sh`: a registered failure line, so a `/bin/tests` that dies before its last line fails the
-boot too.
+boot too. Both boots of `make test-e2e`, `make test-e2e-uefi`, `make test-e2e-pit` and `make
+test-e2e-highmem` (the marker boot and the console-input boot, where init runs `/bin/tests` again)
+also assert the utest verdict (§8.2): a `begin <n>` line, then exactly `n` runs each with one result,
+then `end`, all before the boot's last marker (`shell ready`); any `FAIL` line, a run with no result,
+a skip that no matching `skips.toml` row lists, and a listed test that runs each fail the boot, and
+`run_e2e.py` prints `utest <n> run, <k> skipped` for each.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`

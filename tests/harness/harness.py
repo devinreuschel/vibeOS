@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     # `qmp` imports this module; the runners import it when they run.
     from tests.harness.qmp import QmpLike
     from tests.harness.qmp import Session as QmpSession
+    from tests.harness.utest import UtestVerdict
 
 # The rows of the marker registry, `tests/contract/markers.toml` (ROADMAP
 # §10.2): the contract lists and the failure lists below are built from them.
@@ -1389,6 +1390,22 @@ def _panic_sigs(
     return base + more
 
 
+def feed_utest(
+    utest: UtestVerdict,
+    src: LineSource,
+    line: str,
+    fail: Callable[[str], NoReturn],
+) -> None:
+    """Feed one serial line to the utest verdict: a protocol line moves the
+    boot's deadline to the verdict's; a failure goes to `fail`."""
+    try:
+        d = utest.feed(line)
+    except HarnessError as e:
+        fail(str(e))
+    if d is not None:
+        src.set_deadline(d)
+
+
 def run_qemu_and_check(
     cfg: QemuConfig,
     markers: list[Marker],
@@ -1398,6 +1415,7 @@ def run_qemu_and_check(
     dump_needles: tuple[str | tuple[str, ...], ...] = (),
     line_source: LineSource | None = None,
     qmp: QmpLike | None = None,
+    utest: UtestVerdict | None = None,
 ) -> RunResult:
     """Boot the ISO, stream serial, and assert the boot contract.
 
@@ -1424,6 +1442,11 @@ def run_qemu_and_check(
     (framed, DESIGN §2.6); each marker matches its own source's lines.
     Limine's panic line before the first framed line, and a
     `frame.USER_FAILURES` line before the dump, fail the run.
+
+    `utest` (`utest.UtestVerdict`) reads every line: from `/bin/tests`'
+    `begin` to its `end` its progress deadline replaces the boot's, it
+    fails the run on a failing user test, and it must `finish` at the last
+    marker.
     """
     from tests.harness import qmp as qmpmod
 
@@ -1517,6 +1540,11 @@ def run_qemu_and_check(
             result.matched.append(markers[marker_idx].name)
             marker_idx += 1
             if marker_idx == len(markers) and not expect_panic:
+                if utest is not None:
+                    try:
+                        utest.finish(markers[-1].name)
+                    except HarnessError as e:
+                        fail(str(e))
                 # Done. Ask QEMU to exit; kill hard if it drags its feet.
                 src.quit()
                 return True
@@ -1538,12 +1566,13 @@ def run_qemu_and_check(
             if kind == "timeout":
                 result.stderr = src.stderr_text()
                 missing = markers[marker_idx].name if marker_idx < len(markers) else "none"
+                hung = f"{utest.hung_message()}; " if utest is not None and utest.running() else ""
                 session.timeout(
                     src,
                     result,
                     argv,
-                    f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers; "
-                    f"missing {missing!r}{_qemu_report(result, exited=False)}",
+                    f"{hung}timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} "
+                    f"markers; missing {missing!r}{_qemu_report(result, exited=False)}",
                 )
             if kind == "eof":
                 # QEMU closed its stdout (usually because it exited).
@@ -1553,6 +1582,8 @@ def run_qemu_and_check(
 
             result.lines.append(line)
             text, ktext, sig = classify(line)
+            if utest is not None and dump_at is None:
+                feed_utest(utest, src, line, fail)
             d = session.line(
                 line,
                 panic=sig is not None and dump_at is None,
@@ -1953,6 +1984,7 @@ def run_qemu_console_input(
     *,
     line_source: LineSource | None = None,
     qmp: QmpLike | None = None,
+    utest: UtestVerdict | None = None,
 ) -> RunResult:
     """Boot, then type into `/bin/sh` via COM1 and via PS/2 (`sendkey`).
 
@@ -1973,7 +2005,9 @@ def run_qemu_console_input(
     `shell ready` and the replies are `/bin/sh`'s, so they match only
     unframed lines, and only whole ones, since the shell echoes each typed
     command after its prompt; panic signatures match only kernel lines
-    (DESIGN §2.6).
+    (DESIGN §2.6). `utest` reads every line as in `run_qemu_and_check` and
+    must `finish` at `shell ready`, since init runs `/bin/tests` before
+    the shell in this boot too.
     """
     from tests.harness import qmp as qmpmod
 
@@ -1997,6 +2031,9 @@ def run_qemu_console_input(
     saw_status = False
     saw_ps = False
     saw_ps2 = False
+
+    def ufail(msg: str) -> NoReturn:
+        session.fail(src, result, argv, msg)
 
     def missing(report: str) -> str:
         """The first step the run has not seen."""
@@ -2023,16 +2060,26 @@ def run_qemu_console_input(
             if kind == "timeout":
                 result.timed_out = True
                 result.stderr = src.stderr_text()
-                session.timeout(src, result, argv, missing(_qemu_report(result, exited=False)))
+                why = missing(_qemu_report(result, exited=False))
+                if utest is not None and utest.running():
+                    why = f"{utest.hung_message()}; {why}"
+                session.timeout(src, result, argv, why)
             if kind == "eof":
                 break
             _console_line(session, src, result, argv, line, panic_signatures, stream)
+            if utest is not None:
+                feed_utest(utest, src, line, ufail)
             utext = frame.user_text(line)
             if utext is None:
                 continue
             reply = utext.strip()
             if not saw_ready and SHELL_READY_NEEDLE in utext:
                 saw_ready = True
+                if utest is not None:
+                    try:
+                        utest.finish("shell_ready")
+                    except HarnessError as e:
+                        ufail(str(e))
                 result.matched.append("shell_ready")
                 # Prompt is written without a newline; give the shell
                 # thread a beat before stuffing COM1.

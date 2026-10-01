@@ -1391,6 +1391,15 @@ arch = "both"
 source = "user"
 section = "§10.5"
 
+# A case's detail, never a result (the ktest protocol's info line):
+# `errno_matrix` names each failing pair in one.
+[[marker]]
+text = "vibeOS: utest: info <name>: <text>"
+kind = "test"
+arch = "both"
+source = "user"
+section = "§10.5"
+
 [[marker]]
 text = "vibeOS: utest: end"
 kind = "test"
