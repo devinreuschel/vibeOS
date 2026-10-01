@@ -7,6 +7,7 @@ use core::sync::atomic::AtomicUsize;
 use vibeos_user::utest;
 
 mod console;
+mod errno;
 mod exec_args;
 mod pid1;
 mod process;
@@ -28,4 +29,5 @@ pub const SUITES: &[fn(&mut utest::Runner)] = &[
     console::run,   // forged kernel lines
     pid1::run,      // init cannot be killed or stopped
     utils::run,     // the /bin utilities and /bin/sh
+    errno::run,     // every call's success and every listed errno
 ];
