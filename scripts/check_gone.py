@@ -255,6 +255,12 @@ GONE: list[tuple[str, str]] = [
     ("scripts/mkuserelf.py", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
     ("user/hello.asm", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
     ("user/sh.asm", "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"),
+    ("FPU_TEMPLATE", "x86_64 user FP state follows"),
+    ("fpu_template", "x86_64 user FP state follows"),
+    ("init_fpu", "x86_64 user FP state follows"),
+    ("seed_current_fpu", "x86_64 user FP state follows"),
+    ("FPU_READY", "x86_64 user FP state follows"),
+    ("fp_init_template", "x86_64 user FP state follows"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

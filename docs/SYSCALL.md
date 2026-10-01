@@ -65,13 +65,15 @@ registers (it is soft-float, and `make` rejects a kernel ELF with an FP or
 SIMD instruction outside its save and load routines), so neither the entry
 nor the exit saves them: the FP binding of DESIGN §7.5 saves a thread's
 state only when a switch takes the CPU away from it, and the exit, with
-IF=0, loads it only when the registers hold another thread's. Two calls differ from Linux
-(F069; ROADMAP §10.6): a `fork` child starts from the boot FXSAVE
-template instead of the parent's x87, XMM, and MXCSR state, and `execve`
-hands the new image the old image's x87 and XMM registers, MXCSR, and FCW.
-The rule the fix implements: `fork` copies the caller's FP state, and
-`execve` loads FCW `0x037F` and MXCSR `0x1F80` with the x87 and XMM
-registers zeroed.
+IF=0, loads it only when the registers hold another thread's. `fork` and
+`execve` follow the psABI, as on Linux: `fork` saves the caller's live
+registers under the binding and copies its x87, XMM, and MXCSR state into
+the child before the child can run (`syscall_init::fork_fp`), and `execve`,
+after its point of no return, starts the new image from
+`vibeos::thread::Fxsave::INITIAL`, FCW `0x037F` and MXCSR `0x1F80` with
+the x87 and XMM registers zeroed (`syscall_init::exec_fp`). Every thread,
+`/sbin/init` included, starts from that image too, whatever the firmware
+left in the registers.
 
 `FMASK` (DESIGN §7.2) clears `TF`, `IF`, `DF`, `IOPL`, `NT`, and `AC` on
 entry. The entry saves the user frame, the 21 words of Linux's
@@ -592,7 +594,7 @@ old one only after a successful load.
 `FS_BASE` is written at a process's first ring-3 entry and at `execve`, and
 `fork` copies the live MSR into the child. No context switch saves or
 restores it, so a process that uses TLS can resume with the base another
-process left, or with 0 (F022). The FP-state differences are in §1 (F069).
+process left, or with 0 (F022). FP state follows the psABI (§1).
 
 ---
 

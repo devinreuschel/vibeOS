@@ -45,8 +45,7 @@ Target notes:
   would need a save around each use, and none exists. Nothing traps a kernel FP use, since `CR0.TS`
   stays clear, so `make` runs `scripts/check_kernel_fp.py` on each linked kernel ELF: with the
   toolchain's `llvm-objdump` (the `llvm-tools` component) it fails the build, and deletes the ELF,
-  on any x87, MMX, SSE, or AVX instruction outside `syscall_init::fp_save`, `fp_load`, and
-  `fp_init_template`. User code gets SSE: `arch::cpu::init_control_regs` clears `CR0.EM` and
+  on any x87, MMX, SSE, or AVX instruction outside `syscall_init::fp_save` and `fp_load`. User code gets SSE: `arch::cpu::init_control_regs` clears `CR0.EM` and
   `CR0.TS` and sets `CR0.MP`, `CR0.NE`, `CR4.OSFXSR` and `CR4.OSXMMEXCPT` on every CPU, so x87 and
   SSE floating-point errors reach `#MF` and `#XF` (§5.2), and each thread's 512-byte FXSAVE image
   (`Tcb.fpu`) follows the FP binding (§7.5).

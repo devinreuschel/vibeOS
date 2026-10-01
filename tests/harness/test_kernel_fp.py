@@ -37,8 +37,11 @@ class TestScan(unittest.TestCase):
                                       "fxsave64\t[rdi]", "ret")), [])
         self.assertEqual(scan(listing(f"vibeos::proc::syscall_init::fp_load{H}",
                                       "fxrstor64\t[rdi]", "ret")), [])
-        self.assertEqual(scan(listing(f"vibeos::proc::syscall_init::fp_init_template{H}",
-                                      "fninit", "fxsave64\t[rdi]", "ret")), [])
+        # Only the save and load routines pass: another routine in the
+        # same module that runs `fninit` and `fxsave64` fails on both.
+        errs = scan(listing(f"vibeos::proc::syscall_init::fp_capture{H}",
+                            "fninit", "fxsave64\t[rdi]", "ret"))
+        self.assertEqual(len(errs), 2, errs)
 
     def test_allow_list_is_per_mnemonic(self) -> None:
         errs = scan(listing(f"vibeos::proc::syscall_init::fp_save{H}", "fxrstor64\t[rdi]"))

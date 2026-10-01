@@ -109,8 +109,10 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
             p.tid = h.id();
         }
     });
-    // The child starts with the parent's DS, ES, FS and GS (DESIGN §5.1).
+    // The child starts with the parent's DS, ES, FS and GS (DESIGN §5.1)
+    // and its x87 and SSE state (DESIGN §7.5), both before it can run.
     thread_init::set_user_segs(h.id(), crate::arch::gdt::read_user_segs());
+    syscall_init::fork_fp(h.id());
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
     Ok(pid as usize)
@@ -195,6 +197,8 @@ pub(super) fn sys_execve(
         orig_rax: frame.orig_rax,
         ..UserFrame::new_user(entry, rsp)
     };
+    // The psABI's initial FP state for the new image (DESIGN §7.5).
+    syscall_init::exec_fp();
     thread_init::reset_user_segs();
     // SAFETY: `fs` is the new image's thread pointer, a canonical user
     // address the loader chose (`user_init::load_image`), as

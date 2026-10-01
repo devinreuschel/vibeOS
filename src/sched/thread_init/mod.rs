@@ -58,20 +58,12 @@ pub use user::{reset_user_segs, set_user_segs};
 /// The hardware side of a context switch (FPU, RSP0, CR3):
 /// `syscall_init::on_switch`. Unset, a switch changes none of them.
 static SWITCH_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-/// A new thread's FP image: `syscall_init::fpu_template`. Unset, a thread
-/// starts with `Fxsave::empty()`.
-static FPU_TEMPLATE_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Install the context-switch and FP-template hooks. `on_switch` has
-/// `syscall_init::on_switch`'s `# Safety` contract.
-pub fn set_switch_hooks(
-    on_switch: unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb),
-    fpu_template: fn() -> Fxsave,
-) {
-    // Release: pairs with the Acquire loads in `on_switch` and
-    // `fpu_template`.
+/// Install the context-switch hook, which has `syscall_init::on_switch`'s
+/// `# Safety` contract.
+pub fn set_switch_hooks(on_switch: unsafe fn(&mut PerCpu, *mut Tcb, *mut Tcb)) {
+    // Release: pairs with the Acquire load in `on_switch`.
     SWITCH_HOOK.store(on_switch as *mut (), Ordering::Release);
-    FPU_TEMPLATE_HOOK.store(fpu_template as *mut (), Ordering::Release);
 }
 
 /// Run the switch hook.
@@ -94,19 +86,6 @@ unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     // SAFETY: the hook's contract is this fn's `# Safety`, which
     // `thread_init::switch_now` establishes.
     unsafe { f(cpu, old, new) };
-}
-
-fn fpu_template() -> Fxsave {
-    // Acquire: pairs with the Release store in `set_switch_hooks`.
-    let p = FPU_TEMPLATE_HOOK.load(Ordering::Acquire);
-    if p.is_null() {
-        return Fxsave::empty();
-    }
-    // SAFETY: invariant: a non-null `FPU_TEMPLATE_HOOK` holds a
-    // `fn() -> Fxsave`; established by `thread_init::set_switch_hooks`,
-    // its only store.
-    let f = unsafe { core::mem::transmute::<*mut (), fn() -> Fxsave>(p) };
-    f()
 }
 
 /// Wake this CPU's workqueue worker to free its dead stacks:
@@ -1204,7 +1183,7 @@ fn spawn_inner(
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3,
-        fpu: fpu_template(),
+        fpu: Fxsave::INITIAL,
         fp_cpu: None,
         user_segs: UserSegs::NULL,
         syscall_count: 0,
@@ -1290,7 +1269,7 @@ fn fill_tcb(
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
-    tcb.fpu = fpu_template();
+    tcb.fpu = Fxsave::INITIAL;
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.user_segs = UserSegs::NULL;
