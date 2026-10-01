@@ -321,6 +321,15 @@ also services incoming shootdown requests.
 
 ## 9.5 SMP bring-up
 
+**A CPU stops acking IPIs after the PCI scan.**
+The scan sized BARs while the APs ran. Each sizing write moves a live BAR, and QEMU's TCG rebuilds its
+memory map and flushes the other vCPUs' TLBs only later, so an AP's LAPIC EOI went through a stale
+entry to the wrong region. The timer vector stayed in service (ISR and PPR 0xF0), which masks every
+vector of class F: the AP halted in idle with the next shootdown's 0xFC pending in its IRR, and the
+BSP's `wait_acks` logged it late every second for good; other boots QEMU aborted in
+`iotlb_to_section` instead. Rule: size BARs before the first AP starts (`pci_init::scan`,
+[BOOT.md §3.3](BOOT.md#33-_start-order) step 15b); ktest `pci_scan_bsp_only`.
+
 **An AP reads garbage parameters and dies.**
 The trampoline parameter block was written with a non-volatile copy, and the compiler was free to
 reorder it past the MMIO write that sent the SIPI. Rule: `write_volatile` per field, and start the AP

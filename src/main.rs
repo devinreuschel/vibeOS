@@ -374,6 +374,12 @@ extern "C" fn boot_rest() -> ! {
         thread_init::sleep_ms,
     );
 
+    // BOOT.md §3.3 step 15b: size every BAR while the BSP runs alone.
+    // SAFETY: boot order (BOOT.md §3.3): once, on the BSP, before
+    // `smp_init::init` starts an AP, as `pci_init::scan` requires;
+    // established here.
+    unsafe { crate::pci_init::scan() };
+
     // DESIGN §3.3 step 17. After the scheduler: APs enter as idle.
     // IPI vectors are in the shared IDT; install the shootdown hook
     // before the first AP is live.
