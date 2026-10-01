@@ -94,9 +94,7 @@ const fn pair(sys: Sys, errno: Errno, how: How) -> Pair {
 }
 
 /// The cases other suites run, which `errno_matrix` delegates to.
-/// `(fork, EAGAIN)` is `process`' `fork_bomb` until `lifecycle`'s
-/// `fork_bomb_eagain_at_limit` lands.
-const DELEGATES: [&str; 2] = ["fork_bomb", "exec_arg_131072_e2big"];
+const DELEGATES: [&str; 2] = ["fork_bomb_eagain_at_limit", "exec_arg_131072_e2big"];
 
 use How::{Delegate, Ktest, Run};
 
@@ -205,7 +203,11 @@ const PAIRS: &[Pair] = &[
         Errno::EINVAL,
         Run(|| Ok(sleep_ts(0, 1_000_000_000))),
     ),
-    pair(Sys::Fork, Errno::EAGAIN, Delegate("fork_bomb")),
+    pair(
+        Sys::Fork,
+        Errno::EAGAIN,
+        Delegate("fork_bomb_eagain_at_limit"),
+    ),
     pair(Sys::Fork, Errno::ENOMEM, Ktest),
     pair(
         Sys::Execve,
@@ -523,6 +525,15 @@ fn dents_into(fd: u32, count: u32) -> Result<usize, Errno> {
 fn sleep_ts(sec: i64, nsec: i64) -> Result<usize, Errno> {
     let ts = [sec, nsec];
     sys::nanosleep(ts.as_ptr().cast(), core::ptr::null_mut())
+}
+
+/// Sleep about `ms` milliseconds.
+pub(super) fn sleep_ms(ms: i64) {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a sleep cut short only makes the caller poll sooner"
+    )]
+    let _ = sleep_ts(ms / 1000, (ms % 1000) * 1_000_000);
 }
 
 /// A raw `mmap` with no fd.
