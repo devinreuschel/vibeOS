@@ -44,6 +44,7 @@ ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
 ISO_IRQOFF       := build/vibeos-irqoff.iso
 ISO_KTEST_IRQOFF := build/vibeos-ktest-irqoff.iso
 ISO_INIT_FAULT   := build/vibeos-init-fault.iso
+ISO_NOSH         := build/vibeos-nosh.iso
 ISO_HANG         := build/vibeos-hang.iso
 
 LIMINE_DIR := ./limine
@@ -62,6 +63,9 @@ INITRD := $(CURDIR)/build/initrd.fat
 # The production initrd with `/sbin/init` from `user/src/bin/init_fault.rs`,
 # for `make test-e2e-init-fault` only (AGENTS.md rule 9).
 INITRD_INIT_FAULT := $(CURDIR)/build/initrd-init_fault.fat
+# The production initrd without `/bin/sh` and with `/bin/false` as
+# `/bin/tests`, for `make test-e2e-init-fault`'s `init_no_sh` case only.
+INITRD_NOSH := $(CURDIR)/build/initrd-nosh.fat
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
 	scripts/gen_ksyms.py scripts/mkiso.sh \
 	.cargo/config.toml Cargo.lock
@@ -158,6 +162,10 @@ ifneq ($(VIBEOS_PREBUILT),1)
 # panic ends the run through pvpanic, as every production panic does.
 $(ISO_INIT_FAULT): $(KERNEL_ELF) $(INITRD_INIT_FAULT) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
 	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ build/iso_root_init-fault
+# The production ELF with the initrd that has no `/bin/sh` (ROADMAP §10.5):
+# init's three failed shell starts end in its exit and the pid 1 panic.
+$(ISO_NOSH): $(KERNEL_ELF) $(INITRD_NOSH) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
+	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_NOSH) $@ build/iso_root_nosh
 endif
 
 # The Rust user programs (ROADMAP §10.5, C-USERBINS): each user/src/bin/<name>.rs
@@ -243,7 +251,7 @@ help:
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
 	  '  test-e2e-highmem      boot contract with 9 GiB, past the physmap cap' \
-	  '  test-e2e-init-fault   /sbin/init faults: pid 1 line, then the kernel panics' \
+	  '  test-e2e-init-fault   /sbin/init faults, or finds no /bin/sh: pid 1 line, then the panic' \
 	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
 	  '  test-qmp              QMP event streams re-recorded and compared; one guest core checked' \
@@ -392,6 +400,11 @@ $(INITRD_INIT_FAULT): $(HOSTLIB_DEPS) $(USER_STAMP)
 	    --add $(USER_OUT)/sh:/bin/sh \
 	    --add $(USER_OUT)/tests:/bin/tests
 
+$(INITRD_NOSH): $(HOSTLIB_DEPS) $(USER_STAMP)
+	mkdir -p $(dir $@)
+	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
+	    $(foreach f,$(filter-out %:/bin/sh %:/bin/tests,$(INITRD_FILES)) $(USER_OUT)/false:/bin/tests,--add $(f))
+
 iso: $(ISO)
 
 isos: $(ISOS)
@@ -495,7 +508,7 @@ vmcore: $(VMCORE)
 # variables' paths. The tar keeps the executable bit, which upload-artifact
 # drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
 # run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
-PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) \
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) $(ISO_NOSH) \
 	$(ISO_HANG) $(KERNEL_ELFS) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
 
 prebuilt: $(PREBUILT_FILES)
@@ -570,9 +583,11 @@ test-e2e-power: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_power.py
 
 # Pid 1's end panics the kernel with its registered line (ROADMAP §10.5,
-# F068): the init-fault ISO's `/sbin/init` stores to 0x1000.
-test-e2e-init-fault: $(ISO_INIT_FAULT)
+# F068): the init-fault ISO's `/sbin/init` stores to 0x1000, and the nosh
+# ISO's init exits after three failed `/bin/sh` starts (F128).
+test-e2e-init-fault: $(ISO_INIT_FAULT) $(ISO_NOSH)
 	VIBEOS_TIER=test-e2e-init-fault VIBEOS_ISO=$(ISO_INIT_FAULT) python3 tests/harness/run_pid1.py init_fault
+	VIBEOS_TIER=test-e2e-init-fault VIBEOS_RESULTS_APPEND=1 VIBEOS_ISO=$(ISO_NOSH) python3 tests/harness/run_pid1.py init_no_sh
 
 # The QMP event streams tests/harness/test_qmp.py replays, re-recorded on
 # this QEMU and compared with tests/harness/fixtures/qmp/, then a guest core
@@ -641,7 +656,7 @@ gate:
 # Keeps build/results/.
 clean:
 	rm -rf build/kernels build/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
-	    $(INITRD) $(USER_OUT) $(ISO_INIT_FAULT) $(INITRD_INIT_FAULT)
+	    $(INITRD) $(USER_OUT) $(ISO_INIT_FAULT) $(INITRD_INIT_FAULT) $(ISO_NOSH) $(INITRD_NOSH)
 	$(CARGO) clean
 
 distclean: clean
