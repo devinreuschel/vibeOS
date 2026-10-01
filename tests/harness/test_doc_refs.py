@@ -9,11 +9,14 @@ from scripts.doc_refs import (
     LAYOUT,
     REGISTER,
     ROADMAP,
+    _marker_key,
     check_bare,
+    check_boot_order,
     check_citations,
     check_links,
     check_register,
     check_tree,
+    contract_markers,
     design_index,
     headings,
     in_scope,
@@ -372,6 +375,135 @@ class TestRegister(unittest.TestCase):
         files.update(TREE)
         files[REGISTER] = "# 2. Invariants\n\n" + register(row("I9", "`gone`"))
         self.assertEqual(len([e for e in check_tree(files) if "I9" in e]), 1)
+
+
+MARKERS_TOML = """
+[[marker]]
+text = "vibeOS: serial online"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§0.2"
+order = 10
+
+[[marker]]
+text = "vibeOS: limine: rev 3 ok"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§0.2"
+order = 20
+
+[[marker]]
+text = "vibeOS: pmm: <n> free 4KiB frames"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§1.1"
+order = 40
+
+[[marker]]
+text = "vibeOS: smp: tsc skew <n> cycles"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§4.2"
+
+[[marker]]
+text = "vibeOS: el2: <n> ok"
+kind = "contract"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+order = 15
+
+[[marker]]
+text = "vibeOS: ktest: ok <name>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§8.2"
+order = 5
+"""
+
+BOOT_HEAD = "# 3. Boot\n\n## 3.3 `_start` order\n\nIntro.\n\n"
+BOOT_TABLE = (
+    "| # | Step | Marker | Why here |\n"
+    "|---|------|--------|----------|\n"
+    "| 1 | Serial | `serial online` | First. |\n"
+    "| 2 | Limine | `limine: rev 3 ok` | Then. |\n"
+    "| 6 | PMM | `pmm: N free 4KiB frames` | Frames. |\n"
+    "| 15b | Scan | (none) | Alone. |\n"
+    "| 16 | SMP | `smp: tsc skew <n> cycles` | No order. |\n"
+)
+BOOT_TAIL = (
+    "\nOrdering rules:\n\n- one\n  wrapped\n- two\n\nPlanned (ROADMAP §25.4): later.\n"
+    "\n## 3.4 Linker script\n\nProse.\n\n| a | b |\n|---|---|\n"
+)
+
+
+def boot(table: str = BOOT_TABLE, tail: str = BOOT_TAIL) -> str:
+    return BOOT_HEAD + table + tail
+
+
+class TestBootOrder(unittest.TestCase):
+    def run_on(self, text: str) -> list[str]:
+        return check_boot_order(text, MARKERS_TOML)
+
+    def test_clean(self) -> None:
+        self.assertEqual(self.run_on(boot()), [])
+
+    def test_contract_markers(self) -> None:
+        known = contract_markers(MARKERS_TOML)
+        self.assertEqual(known[_marker_key("vibeOS: pmm: <n> free 4KiB frames")], 40)
+        self.assertEqual(_marker_key("pmm: N free 4KiB frames"),
+                         _marker_key("vibeOS: pmm: <n> free 4KiB frames"))
+        self.assertNotIn(_marker_key("el2: <n> ok"), known)
+        self.assertNotIn(_marker_key("ktest: ok <name>"), known)
+
+    def test_second_table(self) -> None:
+        errors = self.run_on(boot(tail="\nMore:\n\n| x | y |\n|---|---|\n" + BOOT_TAIL))
+        self.assertEqual(len(errors), 1)
+        self.assertRegex(errors[0], r"^docs/BOOT\.md:\d+: §3\.3 holds 2 tables, not one$")
+
+    def test_prose_after_table(self) -> None:
+        errors = self.run_on(boot(tail="\nLive order differs here.\n" + BOOT_TAIL))
+        line = boot(tail="\nLive order differs here.\n" + BOOT_TAIL).splitlines().index(
+            "Live order differs here.") + 1
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith(f"docs/BOOT.md:{line}: prose after §3.3's table"),
+                        errors)
+
+    def test_lead_in_needs_its_list(self) -> None:
+        errors = self.run_on(boot(tail="\nOrdering rules:\n\nPlanned: x.\n"))
+        self.assertEqual(len(errors), 1, errors)
+
+    def test_unknown_marker(self) -> None:
+        table = BOOT_TABLE.replace("`limine: rev 3 ok`", "`limine: rev N okay`")
+        errors = self.run_on(boot(table))
+        self.assertEqual(len(errors), 1)
+        self.assertRegex(errors[0], r"^docs/BOOT\.md:10: marker limine: rev N okay is no "
+                                    r"contract row of tests/contract/markers\.toml$")
+
+    def test_aarch64_only_marker_is_unknown(self) -> None:
+        table = BOOT_TABLE.replace("`limine: rev 3 ok`", "`el2: <n> ok`")
+        self.assertEqual(len(self.run_on(boot(table))), 1)
+
+    def test_markers_out_of_order(self) -> None:
+        table = (BOOT_TABLE.replace("| 2 | Limine | `limine: rev 3 ok` | Then. |\n", "")
+                 + "| 2 | Limine | `limine: rev 3 ok` | Then. |\n")
+        errors = self.run_on(boot(table))
+        self.assertEqual(len(errors), 1)
+        self.assertRegex(errors[0], r"marker limine: rev 3 ok \(order 20\) after "
+                                    r"pmm: N free 4KiB frames \(order 40\)")
+
+    def test_none_and_unordered_rows_skipped(self) -> None:
+        table = BOOT_TABLE + "| 17 | Console | (none) | x |\n"
+        self.assertEqual(self.run_on(boot(table)), [])
+
+    def test_plain_marker_cell(self) -> None:
+        table = BOOT_TABLE + "| 17 | Console | console ok | x |\n"
+        self.assertEqual(len(self.run_on(boot(table))), 1)
 
 
 class LinkTest(unittest.TestCase):

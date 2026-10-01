@@ -18,7 +18,10 @@ script checks, over every tracked file outside the dated records (EXCLUDE):
   column's header names;
 - the invariant register in INVARIANTS.md: every row has a Relied on and an Enforced by cell,
   each backticked Enforced by name exists in the tree (resolve_enforcer), and no row whose Status
-  starts with *enforced* has `none` there.
+  starts with *enforced* has `none` there;
+- the boot order as one table: BOOT.md §3.3 holds one table, followed only by the ordering
+  list, its one-line lead-in and `Planned` paragraphs, and each backticked Marker cell names an
+  x86_64 contract row of tests/contract/markers.toml, with `order` never decreasing down the table.
 
 `--where x.y` prints the file and anchor that hold DESIGN §x.y.
 """
@@ -605,6 +608,143 @@ def check_register(text: str, tree: TreeNames) -> list[str]:
     return errors
 
 
+# ---- The boot order as one table (BOOT.md §3.3, DOC2) ----
+
+BOOT = "docs/BOOT.md"
+BOOT_SECTION = "3.3"
+MARKERS = "tests/contract/markers.toml"
+PLACEHOLDER = re.compile(r"<[^<>]*>|\bN\b")
+
+
+def _marker_key(text: str) -> str:
+    return PLACEHOLDER.sub("\0", text.removeprefix("vibeOS: ")).strip()
+
+
+def contract_markers(markers_toml: str) -> dict[str, int | None]:
+    """Each x86_64 contract marker's normalized text and its `order`."""
+    data = tomllib.loads(markers_toml)
+    out: dict[str, int | None] = {}
+    for row in data.get("marker", []):
+        if row.get("kind") != "contract" or row.get("arch") not in ("both", "x86_64"):
+            continue
+        order = row.get("order")
+        out[_marker_key(str(row.get("text", "")))] = order if isinstance(order, int) else None
+    return out
+
+
+def _section_lines(text: str, number: str) -> list[tuple[int, str]]:
+    lines = text.splitlines()
+    out: list[tuple[int, str]] = []
+    inside = False
+    level = 0
+    fenced = False
+    for n, line in enumerate(lines, start=1):
+        if line.startswith(FENCE):
+            fenced = not fenced
+        m = None if fenced else HEADING.match(line)
+        if m is not None:
+            num = NUMBER.match(m.group(2))
+            if inside and len(m.group(1)) <= level:
+                break
+            if num and num.group(1) == number:
+                inside, level = True, len(m.group(1))
+                continue
+        if inside:
+            out.append((n, line))
+    return out
+
+
+def check_boot_order(boot: str, markers_toml: str) -> list[str]:
+    """BOOT.md §3.3 holds one table, then only an `:`-ended lead-in, its list, and `Planned`
+    paragraphs; each Marker cell names a contract marker, in non-decreasing `order`."""
+    errors: list[str] = []
+    body = _section_lines(boot, BOOT_SECTION)
+    if not body:
+        return [f"{BOOT}: no §{BOOT_SECTION}"]
+    tables: list[list[tuple[int, str]]] = []
+    after: list[tuple[int, str]] = []
+    prev_table = False
+    for n, line in body:
+        if _is_table_row(line):
+            if not prev_table:
+                tables.append([])
+            tables[-1].append((n, line))
+            prev_table = True
+            continue
+        prev_table = False
+        if tables:
+            after.append((n, line))
+    if len(tables) != 1:
+        where = tables[1][0][0] if len(tables) > 1 else body[0][0]
+        return [f"{BOOT}:{where}: §{BOOT_SECTION} holds {len(tables)} tables, not one"]
+    errors.extend(_check_after_table(after))
+    known = contract_markers(markers_toml)
+    rows = tables[0]
+    header = [c.strip() for _, c in _split_cells(rows[0][1])]
+    if "Marker" not in header:
+        return errors + [f"{BOOT}:{rows[0][0]}: §{BOOT_SECTION}'s table has no Marker column"]
+    col = header.index("Marker")
+    last: tuple[int, str] | None = None
+    for n, line in rows[1:]:
+        if _is_delimiter_row(line):
+            continue
+        cells = [c.strip() for _, c in _split_cells(line)]
+        cell = cells[col] if col < len(cells) else ""
+        if cell == "(none)":
+            continue
+        names = TICKED_NAME.findall(cell)
+        if not names:
+            errors.append(f"{BOOT}:{n}: Marker cell is neither `(none)` nor backticked markers")
+        for name in names:
+            key = _marker_key(name)
+            if key not in known:
+                errors.append(f"{BOOT}:{n}: marker {name} is no contract row of {MARKERS}")
+                continue
+            order = known[key]
+            if order is None:
+                continue
+            if last is not None and order < last[0]:
+                errors.append(
+                    f"{BOOT}:{n}: marker {name} (order {order}) after {last[1]} (order {last[0]})"
+                )
+            last = (order, name)
+    return errors
+
+
+def _check_after_table(after: list[tuple[int, str]]) -> list[str]:
+    """After the table: blank lines, `Planned` paragraphs, and one list with its `:` lead-in."""
+    errors: list[str] = []
+    paras: list[list[tuple[int, str]]] = []
+    cur: list[tuple[int, str]] = []
+    for n, line in after:
+        if not line.strip():
+            if cur:
+                paras.append(cur)
+                cur = []
+            continue
+        cur.append((n, line))
+    if cur:
+        paras.append(cur)
+    lists = 0
+    for i, para in enumerate(paras):
+        first = para[0][1]
+        if LIST_ITEM.match(first):
+            lists += 1
+            continue
+        if first.startswith("Planned"):
+            continue
+        nxt = paras[i + 1][0][1] if i + 1 < len(paras) else ""
+        if len(para) == 1 and first.rstrip().endswith(":") and LIST_ITEM.match(nxt):
+            continue
+        errors.append(
+            f"{BOOT}:{para[0][0]}: prose after §{BOOT_SECTION}'s table; only the ordering list, "
+            "its lead-in and `Planned` paragraphs may follow it"
+        )
+    if lists > 1:
+        errors.append(f"{BOOT}: §{BOOT_SECTION} has {lists} lists after its table, not one")
+    return errors
+
+
 def in_scope(path: str) -> bool:
     return not path.startswith(EXCLUDE)
 
@@ -623,6 +763,8 @@ def check_tree(files: Mapping[str, str]) -> list[str]:
     errors.extend(check_bare(files, design, roadmap))
     if REGISTER in files:
         errors.extend(check_register(files[REGISTER], tree_names(files)))
+    if BOOT in files and MARKERS in files:
+        errors.extend(check_boot_order(files[BOOT], files[MARKERS]))
     return sorted(errors)
 
 
