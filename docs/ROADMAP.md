@@ -925,7 +925,7 @@ limitations.
 - [x] FAT chain walking with a cluster cache
 - [x] directory entry parsing, including ASCII long file names and their checksum validation (F054)
 - [x] file read across cluster boundaries
-- [ ] `readdir`, `stat`, timestamp conversion. Reopened by the kernel review (F123); lands in §10.4.
+- [x] `readdir`, `stat`, timestamp conversion (F123).
 - [x] the on-disk structure parsing in the library half, host-tested against a generated image
 
 ### 8.3 FAT32 write
@@ -1349,7 +1349,7 @@ the work its claim rests on has landed is the failure KERNEL_REVIEW.md §5 found
 - [ ] `ls` in the `kernel_shell` build lists a FAT or vibefs subdirectory: `file_init::readdir` treats `NotSupp` as not kernfs; an in-guest test runs `ls /etc` (F126)
 - [ ] `mount` in the `kernel_shell` build reuses the pinned dentry of an already-mounted path in `FileApi::mount_fs`; an in-guest test runs 64 `mount`s of one path from a thread started with `spawn`'s 16 KiB stack (F126)
 - [x] `unlink_path` drops the name from the resolved parent, not `/` (F126)
-- [ ] FAT timestamps: `fat_datetime` counts years from 1980 with the Gregorian leap rule, `fat_to_unix` is its inverse, and a host test round-trips every day from 1980 through 2107; `FatVol::now` and `Vfs::now` follow `time_init::unix_time_s()` instead of staying 0 (F123)
+- [x] FAT timestamps: `fat_datetime` counts years from 1980 with the Gregorian leap rule, `fat_to_unix` is its inverse, and a host test round-trips every day from 1980 through 2107; `FatVol::now` and `Vfs::now` follow `time_init::unix_time_s()` instead of staying 0 (F123)
 - [ ] driver and volume state as instances owned by their device's registry entry (DESIGN §12.1), so a second disk is a second instance and no driver module keeps a list of them (D2)
 - [x] a disk-backed FAT mount fits a 16 KiB kernel stack: `fat_init::mount_dev` builds `FatVol` in its volume instance instead of moving it by value, and per-call cluster buffers move into per-volume storage under the volume lock; an in-guest test mounts a FAT image on `vda` from a thread started with `spawn`'s 16 KiB stack; the same thread then writes 64 KiB across cluster boundaries to a file on that volume through the File API and reads it back, while a `kernel_tests` hook sends this CPU a self-IPI on the virtio-blk vector whenever the write path enters the block cache with IF=1, so a top half runs on top of the path, and §10.2's stack measurement finds every stack within DESIGN §4.5's budget; it lands after §10.2's stack-measurement box (F058)
 - [ ] one registry of counted block-device handles (`BlockRef`, DESIGN §12.1), keyed by name and by a 64-bit id never reused within a boot, partitions included as children of their disk: the block cache, `part_init`, FAT, vibefs, and devfs block nodes hold a `BlockRef` instead of matching `DEV_RAM0` and `DEV_VDA`, the cache keys its pages by that id, a device's name is an owned array of up to 32 bytes (Linux's `DISK_NAME_LEN`) instead of a `&'static str`, and vibefs no longer treats an unknown device id as `vda`; a host test unregisters a partition while a `BlockRef` to it is held, and I/O through the handle returns `Gone` (DESIGN §2.11 rule 3's gate), a lookup by name no longer finds it, and a new registration gets a new id; an in-guest test mounts a FAT32 partition of `vda` by its partition name and reads `/dev/vdap1` through `Vfs`, from a thread started with `spawn`'s 16 KiB stack, never the registry's; it lands with or after the FAT stack-frame box above; it lands after the counted-object box above (D2, F081)

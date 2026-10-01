@@ -172,7 +172,7 @@ impl FatVol {
             d.flush()?;
         }
         let cs = lfn_checksum(&short);
-        let (date, time) = fat_datetime(self.now)?;
+        let (date, time) = fat_datetime(self.now);
         for (slot, ord) in (1..=n_lfn).rev().enumerate() {
             let last = slot == 0;
             let mut ent = [0u8; ENT];

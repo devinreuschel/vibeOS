@@ -1533,7 +1533,7 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (ext
 
 # L929
 [[box]]
-key = "`readdir`, `stat`, timestamp conversion. Reopened"
+key = "`readdir`, `stat`, timestamp conversion"
 needs = [
   "FAT timestamps: `fat_datetime` counts years",  # L1339
 ]
