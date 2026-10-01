@@ -6,7 +6,7 @@
 
 use core::mem::{offset_of, size_of};
 
-use crate::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
 use crate::sync::variant::{self, Site};
@@ -67,8 +67,12 @@ pub enum ThreadState {
         deadline: Instant,
     },
     /// Blocked on a wait queue. `wq` is the `WaitQueue` address, or 0.
+    /// `deadline` is the one its timeout entry holds, `FAR_DEADLINE` when
+    /// the wait has none, which the blocked-thread sweep checks
+    /// (`sched::find_overdue`).
     Blocked {
         wq: usize,
+        deadline: Instant,
     },
     Dead,
 }
@@ -257,7 +261,7 @@ impl Default for OnCpu {
     }
 }
 
-/// Global TCB. `next`/`prev` are the run-queue links Slice B fills.
+/// Global TCB.
 #[repr(C, align(16))]
 pub struct Tcb {
     pub id: ThreadId,
@@ -276,9 +280,6 @@ pub struct Tcb {
     pub stack: Option<GuardedStack>,
     pub context: CpuContext,
     pub entry: fn(),
-    /// Intrusive ready-list link. Slice B; phase 4 is per-CPU.
-    pub next: Option<ThreadId>,
-    pub prev: Option<ThreadId>,
     pub affinity: CpuAffinity,
     pub cpu: u32,
     /// `InterruptGuard` depth frozen while this thread is off-CPU.
@@ -297,8 +298,11 @@ pub struct Tcb {
     /// until its first return to user mode and after any write to `fpu`
     /// (DESIGN §7.5, the FP binding; `vibeos::fpu`).
     pub fp_cpu: Option<u32>,
-    /// Syscall counter. Aggregated per-process in Slice C.
-    pub syscall_count: u64,
+    /// Syscalls this thread has entered. Its own entry bumps it
+    /// (`syscall_init::bump_counter`); other threads read it for the
+    /// per-process sum (`thread_init::sum_syscalls`), so it is atomic. A
+    /// statistic: its Relaxed accesses order nothing.
+    pub syscall_count: AtomicU64,
     /// 0 = kernel thread. Process pid otherwise.
     pub pid: u32,
     /// Nonzero while this thread is a no-reclaim thread, which releases no
@@ -394,17 +398,22 @@ const _: () = {
             deadline: Instant { ns: 0 }
         }) == 2
     );
-    assert!(tag(&ThreadState::Blocked { wq: 0 }) == 3);
+    assert!(
+        tag(&ThreadState::Blocked {
+            wq: 0,
+            deadline: Instant { ns: 0 }
+        }) == 3
+    );
     assert!(tag(&ThreadState::Dead) == 4);
-    assert!(size_of::<ThreadState>() == 16);
+    assert!(size_of::<ThreadState>() == 24);
     assert!(align_of::<ThreadState>() == 8);
-    assert!(size_of::<Tcb>() == if DEBUG { 1280 } else { 1024 });
+    assert!(size_of::<Tcb>() == if DEBUG { 1264 } else { 1008 });
     assert!(align_of::<Tcb>() == 16);
     assert!(offset_of!(Tcb, id) == 0);
     assert!(offset_of!(Tcb, state) == 24);
-    assert!(offset_of!(Tcb, context) == if DEBUG { 584 } else { 328 });
-    assert!(offset_of!(Tcb, cpu) == if DEBUG { 688 } else { 432 });
-    assert!(offset_of!(Tcb, pid) == if DEBUG { 1264 } else { 1008 });
+    assert!(offset_of!(Tcb, context) == if DEBUG { 592 } else { 336 });
+    assert!(offset_of!(Tcb, cpu) == if DEBUG { 680 } else { 424 });
+    assert!(offset_of!(Tcb, pid) == if DEBUG { 1248 } else { 992 });
     assert!(size_of::<CpuContext>() == 72);
     assert!(size_of::<TcbSlot>() == size_of::<usize>());
 };
@@ -518,7 +527,14 @@ mod tests {
             .name(),
             "sleeping"
         );
-        assert_eq!(ThreadState::Blocked { wq: 0 }.name(), "blocked");
+        assert_eq!(
+            ThreadState::Blocked {
+                wq: 0,
+                deadline: Instant { ns: 1 }
+            }
+            .name(),
+            "blocked"
+        );
         assert_eq!(ThreadState::Dead.name(), "dead");
         assert_eq!(WaitOutcome::Woken.name(), "woken");
         assert_eq!(WaitOutcome::Timeout.name(), "timeout");

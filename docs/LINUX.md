@@ -69,4 +69,4 @@ class (ROADMAP §39.1), recorded when the row lands.
 
 | Id | Interface | Format | Reason | Until | Class |
 |----|-----------|--------|--------|-------|-------|
-| `psinfo` | syscall 500 | one `<pid> <ppid> <state> <name>` line per process, whole lines only, at most 512 bytes (SYSCALL.md §3.1) | the `/bin/sh` `ps` built-in, before `procfs` exists | ROADMAP §13.9, which deletes it | `internal` |
+| `psinfo` | syscall 500 | one `<pid> <ppid> <state> <name> <syscalls>` line per process, in pid order, whole lines only, at most 512 bytes (SYSCALL.md §3.1) | the `/bin/sh` `ps` built-in, before `procfs` exists | ROADMAP §13.9, which deletes it | `internal` |
