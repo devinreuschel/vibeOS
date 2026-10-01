@@ -517,9 +517,20 @@ Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
 `make user` to `build/user/<name>` (below). Initrd:
 
 - `/hello` (`user/src/bin/hello.rs`) — write + exit 42 (Slice B proof)
-- `/sbin/init` (`user/src/bin/init.rs`) — post-init kernel job: `fork`/`exec`
-  `/bin/tests`, printing `init: /bin/tests exited <status>` on fd 2 when its
-  wait status is nonzero, then `/bin/sh`, then reap. Its exit, by `exit` or by
+- `/sbin/init` (`user/src/bin/init.rs`) — post-init kernel job, which
+  checks every `fork`, `execve` and `wait4` result and writes each failure
+  to fd 2 in one line: `fork`/`exec` `/bin/tests`, printing
+  `init: /bin/tests exited <status>` when its wait status is nonzero (or
+  `init: /bin/tests start failed: <why>`), then `/bin/sh`, both with init's
+  environment, and reap orphans until the shell ends
+  (`init: /bin/sh ended: <status>`) or `wait4` fails
+  (`init: wait4: errno <n>`, `ECHILD` included); then yield and start the
+  shell again. A failed start is a `fork` error
+  (`init: /bin/sh start failed: fork errno <n>`) or a shell child that exits
+  127, the status its child exits with after
+  `init: /bin/sh start failed: execve errno <n>`; a shell on the console
+  never exits 127, since a console read never returns end of file. After
+  three failed starts in a row init exits 1. Its exit, by `exit` or by
   a signal, panics the kernel after the line
   `vibeOS: init: pid 1 <how>` (`exited <n>`, `killed SIG<name>`, or
   `killed SIG<name> addr=0x<hex>` for a fault; INVARIANTS.md §2.5)
