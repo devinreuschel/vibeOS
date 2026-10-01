@@ -1,4 +1,6 @@
-//! `/sbin/init` (ROADMAP §9.8, §10.5): pid 1. It checks every `fork`,
+//! `/sbin/init` (ROADMAP §9.8, §10.5): pid 1. It first checks that it
+//! started with the psABI's initial FP state (ROADMAP §10.6, F129), printing
+//! `init: fp initial ok` or `init: fp initial wrong <state>`. It checks every `fork`,
 //! `execve` and `wait4` result, and reports each failure on fd 2 in one
 //! `write` (BOOT.md §3.3).
 //!
@@ -15,6 +17,7 @@
 #![no_std]
 #![no_main]
 
+use vibeos_user::arch;
 use vibeos_user::cmd::{self, Out, Status};
 use vibeos_user::env::Env;
 use vibeos_user::sys::{self, Errno};
@@ -30,6 +33,7 @@ const EXITED: &[u8] = b"init: /bin/tests exited ";
 const SH_STARTS: u32 = 3;
 
 fn main(env: &Env) -> i32 {
+    check_initial_fp();
     // A NULL `envp` is an empty environment, if the copy cannot be made.
     let vars = cmd::envp(env).unwrap_or_default();
     let envp = if vars.is_empty() {
@@ -147,4 +151,59 @@ fn report(status: u32) {
         reason = "DESIGN §2.5: init has nowhere else to report a failed write"
     )]
     let _ = sys::write(2, buf.as_ptr(), len);
+}
+
+/// `init: fp initial ok` when `_start` found FCW `0x037F`, MXCSR `0x1F80`
+/// and the first vector register zero, else `init: fp initial wrong fcw
+/// <hex> mxcsr <hex> xmm0 <hex>`, in one write to fd 2.
+fn check_initial_fp() {
+    let fp = arch::initial_fp();
+    let mut buf = [0u8; 96];
+    let mut w = Line {
+        buf: &mut buf,
+        len: 0,
+    };
+    if fp.is_initial() {
+        w.push(b"init: fp initial ok\n");
+    } else {
+        w.push(b"init: fp initial wrong fcw ");
+        w.hex(u64::from(fp.fcw), 4);
+        w.push(b" mxcsr ");
+        w.hex(u64::from(fp.mxcsr), 8);
+        w.push(b" xmm0 ");
+        for &b in fp.xmm0.iter().rev() {
+            w.hex(u64::from(b), 2);
+        }
+        w.push(b"\n");
+    }
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "DESIGN §2.5: init has nowhere else to report a failed write"
+    )]
+    let _ = sys::write(2, w.buf.as_ptr(), w.len);
+}
+
+/// A line built in a fixed buffer; bytes past its end are dropped.
+struct Line<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl Line<'_> {
+    fn push(&mut self, s: &[u8]) {
+        for &b in s {
+            if let Some(slot) = self.buf.get_mut(self.len) {
+                *slot = b;
+                self.len += 1;
+            }
+        }
+    }
+
+    /// `v` as `digits` lowercase hex digits.
+    fn hex(&mut self, v: u64, digits: u32) {
+        for i in (0..digits).rev() {
+            let d = ((v >> (i * 4)) & 0xF) as u8;
+            self.push(&[if d < 10 { b'0' + d } else { b'a' + d - 10 }]);
+        }
+    }
 }

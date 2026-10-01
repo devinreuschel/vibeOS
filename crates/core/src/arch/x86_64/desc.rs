@@ -1,9 +1,11 @@
 //! GDT / TSS / IDT descriptor encoding. No `lgdt`/`lidt` here.
 //!
-//! Selectors are laid out for `syscall`/`sysret` (DESIGN §5.1, ROADMAP §2.1):
-//! `STAR.SYSCALL_CS = KERNEL_CS` so kernel SS is CS+8, and
-//! `STAR.SYSRET_CS = KERNEL_DS` so user SS is +8 and user CS is +16.
-//! That is why user *data* sits at `0x18` and user *code* at `0x20`.
+//! Selectors are Linux's x86_64 layout (DESIGN §5.1): `STAR.SYSCALL_CS =
+//! KERNEL_CS` so kernel SS is CS+8, and `STAR.SYSRET_CS =` [`STAR_SYSRET`]
+//! (`0x23`, Linux's 32-bit user code slot) so `sysretq` loads SS `0x2b`
+//! (+8) and CS `0x33` (+16). User *data* sits at `0x28` and 64-bit user
+//! *code* at `0x30`; slots `0x18` and `0x20` stay null, and the TSS takes
+//! `0x38`-`0x47`.
 
 #[cfg(test)]
 use core::mem::offset_of;
@@ -59,18 +61,55 @@ impl IstSlot {
 
 pub const KERNEL_CS: u16 = 0x08;
 pub const KERNEL_DS: u16 = 0x10;
-pub const USER_DS: u16 = 0x18;
-pub const USER_CS: u16 = 0x20;
-pub const TSS_SEL: u16 = 0x28;
+pub const USER_DS: u16 = 0x28;
+pub const USER_CS: u16 = 0x30;
+pub const TSS_SEL: u16 = 0x38;
 
-/// RPL=3 forms, used once ring 3 exists.
+/// RPL=3 forms: SS `0x2b` and CS `0x33` in ring 3, as on Linux.
 pub const USER_DS_RPL: u16 = USER_DS | 3;
 pub const USER_CS_RPL: u16 = USER_CS | 3;
 
-/// `IA32_STAR[63:48]` that makes SYSRET land on [`USER_DS`] / [`USER_CS`].
-pub const STAR_SYSRET: u16 = KERNEL_DS;
+/// `IA32_STAR[63:48]` that makes SYSRET land on [`USER_DS`] / [`USER_CS`]:
+/// SS is this +8 and CS this +16, each with RPL 3. Linux's value, its
+/// 32-bit user code selector; that slot is null here.
+pub const STAR_SYSRET: u16 = 0x23;
 
-pub const GDT_ENTRIES: usize = 7;
+/// The `IA32_STAR` value: [`STAR_SYSRET`] in bits 63:48 and [`KERNEL_CS`]
+/// (SYSCALL's CS, SS +8) in bits 47:32. LSTAR holds the entry, so 31:0
+/// are zero.
+pub const fn star_value() -> u64 {
+    ((STAR_SYSRET as u64) << 48) | ((KERNEL_CS as u64) << 32)
+}
+
+/// What SYSRET to 64-bit mode loads from `star`: (CS, SS), RPL forced 3
+/// (Intel SDM Vol. 2B, SYSRET).
+pub const fn sysret_selectors(star: u64) -> (u16, u16) {
+    let base = (star >> 48) as u16;
+    ((base.wrapping_add(16)) | 3, (base.wrapping_add(8)) | 3)
+}
+
+/// A thread's ring-3 data selectors (DESIGN §7.5): DS, ES, FS and GS as
+/// ring 3 last left them, saved and loaded by the context switch. A new
+/// image starts with [`UserSegs::NULL`]; `fork` copies the parent's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UserSegs {
+    pub ds: u16,
+    pub es: u16,
+    pub fs: u16,
+    pub gs: u16,
+}
+
+impl UserSegs {
+    /// The null selector in all four, as Linux's `execve` leaves them.
+    pub const NULL: Self = Self {
+        ds: 0,
+        es: 0,
+        fs: 0,
+        gs: 0,
+    };
+}
+
+pub const GDT_ENTRIES: usize = 9;
 pub const GDT_LIMIT: u16 = (GDT_ENTRIES * 8 - 1) as u16;
 
 #[repr(C, align(8))]
@@ -90,11 +129,12 @@ impl Gdt {
         let mut g = Self::empty();
         g.entries[1] = code64(0);
         g.entries[2] = data(0);
-        g.entries[3] = data(3);
-        g.entries[4] = code64(3);
+        g.entries[usize::from(USER_DS >> 3)] = data(3);
+        g.entries[usize::from(USER_CS >> 3)] = code64(3);
         let tss = tss_desc(tss_base, tss_limit as u64);
-        g.entries[5] = tss[0];
-        g.entries[6] = tss[1];
+        let t = usize::from(TSS_SEL >> 3);
+        g.entries[t] = tss[0];
+        g.entries[t + 1] = tss[1];
         g
     }
 }
@@ -229,13 +269,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sysret_selector_order() {
+    fn linux_user_selectors() {
         assert_eq!(KERNEL_DS, KERNEL_CS + 8);
-        assert_eq!(USER_DS, STAR_SYSRET + 8);
-        assert_eq!(USER_CS, STAR_SYSRET + 16);
-        assert_eq!(TSS_SEL, 0x28);
-        assert_eq!(USER_CS_RPL, 0x23);
-        assert_eq!(USER_DS_RPL, 0x1B);
+        assert_eq!(USER_CS_RPL, 0x33);
+        assert_eq!(USER_DS_RPL, 0x2b);
+        assert_eq!(TSS_SEL, 0x38);
+        assert_eq!(STAR_SYSRET, 0x23);
+        assert_eq!(star_value(), 0x0023_0008_0000_0000);
+        // SYSRET: SS = base + 8, CS = base + 16, RPL 3.
+        assert_eq!((STAR_SYSRET + 8) | 3, USER_DS_RPL);
+        assert_eq!((STAR_SYSRET + 16) | 3, USER_CS_RPL);
+        assert_eq!(sysret_selectors(star_value()), (0x33, 0x2b));
+        // SYSCALL: CS = STAR[47:32], SS = that + 8.
+        assert_eq!(((star_value() >> 32) & 0xFFFF) as u16, KERNEL_CS);
+        assert_eq!(
+            UserSegs::NULL,
+            UserSegs {
+                ds: 0,
+                es: 0,
+                fs: 0,
+                gs: 0
+            }
+        );
+    }
+
+    #[test]
+    fn gdt_linux_layout() {
+        let g = Gdt::with_tss(0x1000, 103);
+        assert_eq!(GDT_ENTRIES, 9);
+        assert_eq!(GDT_LIMIT, 71);
+        assert_eq!(g.entries[0], 0);
+        assert_eq!(g.entries[1], code64(0));
+        assert_eq!(g.entries[2], data(0));
+        assert_eq!(g.entries[3], 0, "slot 0x18 null");
+        assert_eq!(g.entries[4], 0, "slot 0x20 null");
+        assert_eq!(g.entries[5], data(3), "user data at 0x28");
+        assert_eq!(g.entries[6], code64(3), "user code at 0x30");
+        assert_eq!(usize::from(USER_DS >> 3), 5);
+        assert_eq!(usize::from(USER_CS >> 3), 6);
+        assert_eq!(usize::from(TSS_SEL >> 3), 7);
     }
 
     #[test]
@@ -301,8 +373,8 @@ mod tests {
         assert_eq!(hi, 0xFFFF_8000);
         let g = Gdt::with_tss(0x1000, 103);
         assert_eq!(g.entries[0], 0);
-        assert_eq!(g.entries[5], tss_desc(0x1000, 103)[0]);
-        assert_eq!(g.entries[6], tss_desc(0x1000, 103)[1]);
+        assert_eq!(g.entries[7], tss_desc(0x1000, 103)[0]);
+        assert_eq!(g.entries[8], tss_desc(0x1000, 103)[1]);
     }
 
     #[test]

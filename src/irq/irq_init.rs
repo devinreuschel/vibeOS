@@ -5,9 +5,9 @@
 //! flag, not `InterruptGuard`).
 
 use core::any::Any;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use vibeos::apic::{Polarity, Trigger};
+use vibeos::apic::{EoiDomain, Polarity, Trigger};
 use vibeos::dev::{Device, Instance};
 use vibeos::irq::{
     self, IrqError, MsixEntry, VectorPool, in_pool, msi_message_addr, msi_message_data, pool_index,
@@ -114,9 +114,11 @@ fn device_irq(frame: &mut arch::idt::TrapFrame) {
 
 pub fn dispatch(vec: u8) {
     hardirq::set(true);
+    let mut owned = false;
     if let Some(i) = handler_slot(vec) {
         let (top, work, ctx) = with_irq(|s| (s.th.top[i], s.th.work[i], s.th.ctx[i].clone()));
         if work.is_some() || top.is_some() {
+            owned = true;
             if let Some(h) = top {
                 h(ctx.as_deref());
             }
@@ -134,6 +136,7 @@ pub fn dispatch(vec: u8) {
         } else {
             let p = HANDLERS[i].load(Ordering::Acquire);
             if p != 0 {
+                owned = true;
                 // SAFETY: invariant: a nonzero `HANDLERS` slot holds a
                 // `fn()`; established by `irq::irq_init::set_handler`, its
                 // only nonzero store.
@@ -142,8 +145,98 @@ pub fn dispatch(vec: u8) {
             }
         }
     }
-    apic_init::eoi_for(vec);
+    if owned {
+        apic_init::eoi_for(vec);
+    } else {
+        // No handler: counted, EOIed where it came from, logged.
+        unowned(vec);
+    }
     hardirq::set(false);
+}
+
+/// Interrupts no handler owned, per CPU (`acpi::MAX_CPUS`, the cap
+/// `hardirq::IN_ISR` shares) and per vector. Static: the count runs in
+/// hard IRQ, where nothing allocates.
+static UNOWNED: [[AtomicU64; 256]; vibeos::acpi::MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; 256] }; vibeos::acpi::MAX_CPUS];
+/// Per vector: the `now_ms` of its last `irq: no handler` line, plus one
+/// (0: never logged).
+static UNOWNED_LOGGED: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+/// `irq: no handler` lines printed per vector (kernel_tests only).
+#[cfg(feature = "kernel_tests")]
+static UNOWNED_LINES: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+/// An interrupt on `vec` that no handler owns (DESIGN §5.2, §2.10): count
+/// it for this CPU, EOI the controller that delivered it (the LAPIC when
+/// its in-service bit for `vec` is set, else the 8259 for `0x20`-`0x2F`,
+/// which masks a line no driver claims), log
+/// `irq: no handler for vector 0x<v> cpu <n> count <n>` at most once a
+/// second per vector unless it was a spurious IRQ7 or IRQ15, and return.
+/// The vector table's default body for `0x20`-`0xFF`, [`dispatch`]'s
+/// unowned case, and every 8259 line's body call it, with IF=0.
+pub fn unowned(vec: u8) {
+    let cpu = crate::arch::cpu_id_hint();
+    let count = UNOWNED
+        .get(cpu as usize)
+        .and_then(|row| row.get(usize::from(vec)))
+        .map_or(0, |c| c.fetch_add(1, Ordering::Relaxed).wrapping_add(1));
+    let spurious = match vibeos::apic::unowned_eoi(vec, apic_init::in_service(vec)) {
+        EoiDomain::Lapic => {
+            apic_init::eoi();
+            false
+        }
+        EoiDomain::Pic => arch::pic::line_of(vec).is_some_and(arch::pic::unclaimed),
+        EoiDomain::None => false,
+    };
+    if spurious {
+        return;
+    }
+    let now = crate::time_init::now_ns() / 1_000_000;
+    let slot = &UNOWNED_LOGGED[usize::from(vec)];
+    let last = slot.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last - 1) < 1_000 {
+        return;
+    }
+    if slot
+        .compare_exchange(
+            last,
+            now.saturating_add(1),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+    #[cfg(feature = "kernel_tests")]
+    UNOWNED_LINES[usize::from(vec)].fetch_add(1, Ordering::Relaxed);
+    crate::marker!(
+        "vibeOS: irq: no handler for vector 0x{:02x} cpu {} count {}",
+        vec,
+        cpu,
+        count
+    );
+}
+
+/// How many interrupts on `vec` no handler owned on `cpu`.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §25.7's soak samples it; the in-guest storm test reads it today"
+    )
+)]
+pub fn unowned_count(vec: u8, cpu: u32) -> u64 {
+    UNOWNED
+        .get(cpu as usize)
+        .and_then(|row| row.get(usize::from(vec)))
+        .map_or(0, |c| c.load(Ordering::Relaxed))
+}
+
+/// `irq: no handler` lines printed for `vec` so far.
+#[cfg(feature = "kernel_tests")]
+pub fn unowned_lines(vec: u8) -> u64 {
+    UNOWNED_LINES[usize::from(vec)].load(Ordering::Relaxed)
 }
 
 pub fn allocate_vector(cpu: u32) -> Result<u8, IrqError> {

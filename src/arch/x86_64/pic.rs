@@ -4,14 +4,12 @@
 //! 8259 is absent. Missing FADT still remaps+masks. `pic: remapped` is
 //! emitted after this step either way (programmed or skipped).
 
-use vibeos::fmt_util;
 use vibeos::pic::{
-    self, Eoi, IRQ7, IRQ15, PIC_EOI, PIC1_CMD, PIC1_DATA, PIC2_CMD, PIC2_DATA, REMAP_WRITES,
-    irq_port_bit, irq7_eoi, irq15_eoi, should_program,
+    self, Eoi, LineAction, PIC_EOI, PIC1_CMD, PIC1_DATA, PIC2_CMD, PIC2_DATA, REMAP_WRITES,
+    irq_port_bit, should_program, unclaimed_line,
 };
 use vibeos::vectors;
 
-use crate::serial;
 use crate::x86;
 
 /// Remap master `0x20` / slave `0x28`, then mask every line.
@@ -47,10 +45,6 @@ pub unsafe fn program() {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "DESIGN §5.5: ROADMAP §10.6 masks an 8259 line no driver claims"
-)]
 pub fn mask(irq: u8) {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return;
@@ -84,21 +78,47 @@ pub fn disable_all() {
     }
 }
 
-/// IRQ vector `0x20 + irq`. Spurious 7/15 never send a bogus EOI.
+/// The body of IRQ vector `0x20 + irq` for every 8259 line no driver
+/// claims: `irq_init::unowned` counts it, EOIs it (the LAPIC's when it
+/// delivered the vector, else [`unclaimed`]) and logs it (DESIGN §5.5).
 pub fn handle(vec: u8) {
-    let irq = vec.wrapping_sub(vectors::IRQ_BASE);
-    match irq {
-        IRQ7 => {
-            let isr = read_isr(PIC1_CMD);
-            eoi(irq7_eoi(isr));
+    crate::irq_init::unowned(vec);
+}
+
+/// An 8259 interrupt on line `irq` (0-15) that no driver claims: read the
+/// owning PIC's ISR, and for a spurious IRQ7 or IRQ15 send only the EOI it
+/// needs; for any other, mask the line and EOI it (DESIGN §5.5). True when
+/// it was spurious.
+pub fn unclaimed(irq: u8) -> bool {
+    let isr = read_isr(if irq < 8 { PIC1_CMD } else { PIC2_CMD });
+    match unclaimed_line(irq, isr) {
+        LineAction::Spurious(kind) => {
+            eoi(kind);
+            true
         }
-        IRQ15 => {
-            let isr = read_isr(PIC2_CMD);
-            eoi(irq15_eoi(isr));
+        LineAction::Unclaimed(kind) => {
+            mask(irq);
+            eoi(kind);
+            false
         }
-        0..=15 => unexpected(irq),
-        _ => unexpected(irq),
     }
+}
+
+/// Whether line `irq` is masked at its PIC.
+#[cfg(feature = "kernel_tests")]
+pub fn is_masked(irq: u8) -> bool {
+    let Some((port, bit)) = irq_port_bit(irq) else {
+        return false;
+    };
+    // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+    // the 8259 ports are this module's, and `port` is a data port `irq_port_bit` chose.
+    unsafe { x86::inb(port) & (1 << bit) != 0 }
+}
+
+/// The IRQ line of 8259 vector `vec`, or `None` outside `0x20`-`0x2F`.
+pub fn line_of(vec: u8) -> Option<u8> {
+    let irq = vec.wrapping_sub(vectors::IRQ_BASE);
+    (irq < 16).then_some(irq)
 }
 
 fn read_isr(cmd: u16) -> u8 {
@@ -123,18 +143,4 @@ fn eoi(kind: Eoi) {
             x86::outb(PIC1_CMD, PIC_EOI);
         },
     }
-}
-
-fn unexpected(irq: u8) -> ! {
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "a write to Serial cannot fail (DESIGN §2.5)"
-    )]
-    let _ = serial::write_line_with(|w| {
-        w.push_bytes(b"vibeOS: irq: unexpected ");
-        let mut buf = [0u8; 4];
-        w.push_bytes(fmt_util::write_dec(irq as u64, &mut buf));
-        Ok(())
-    });
-    x86::halt();
 }

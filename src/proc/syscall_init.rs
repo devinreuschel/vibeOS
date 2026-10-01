@@ -8,25 +8,21 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
-use vibeos::desc::{KERNEL_CS, STAR_SYSRET, USER_CS_RPL, USER_DS_RPL};
+use vibeos::desc::{USER_CS_RPL, USER_DS_RPL, UserSegs, star_value};
 use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
-use vibeos::thread::{Fxsave, Tcb};
+use vibeos::thread::{Fxsave, Tcb, ThreadId};
 use vibeos::vectors;
 
 use crate::arch::current::{AddressSpace, Arch};
 use crate::arch::gdt::{self, CpuTables};
 use crate::arch::idt::TrapFrame;
-use crate::cell::BootCell;
 use crate::per_cpu_init;
 use crate::x86::{
     self, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK, IA32_FS_BASE, IA32_GS_BASE,
     IA32_KERNEL_GS_BASE, IA32_LSTAR, IA32_STAR,
 };
-
-static FPU_READY: AtomicBool = AtomicBool::new(false);
-static FPU_TEMPLATE: BootCell<Fxsave> = BootCell::new();
 
 const SCRATCH: usize = offset_of!(PerCpu, syscall_scratch);
 const KSP: usize = offset_of!(PerCpu, kernel_rsp0);
@@ -111,6 +107,11 @@ global_asm!(
     // GS. `first_return` enters here too.
     .global vibeos_syscall_return
     vibeos_syscall_return:
+        // Exit work (DESIGN §5.10 rule 11): the last check for a pending
+        // kill or stop, with IF=0; it turns IF on only to do found work.
+        mov edi, {exit_syscall}
+        lea rsi, [rsp + {pad}]
+        call vibeos_exit_work
         // A non-canonical return RIP reaches neither sysretq nor iretq:
         // the process gets SIGSEGV (AGENTS.md rule 1).
         mov rcx, [rsp + {f_rip}]
@@ -228,7 +229,80 @@ global_asm!(
     site_exit = const crate::sched::irqoff::Site::SYSCALL_EXIT.bits(),
     user_cs = const USER_CS_RPL as u64,
     user_ss = const USER_DS_RPL as u64,
+    exit_syscall = const EXIT_SYSCALL,
 );
+
+/// [`exit_work`]'s `kind` for the syscall exit (and a new thread's first
+/// return); a vector exit passes its vector, below this.
+pub const EXIT_SYSCALL: u64 = 0x100;
+
+/// The process layer's exit-work hooks (DESIGN §1.2): whether the current
+/// process has a kill or stop to act on, read with IF=0, and the work
+/// itself, run with IF=1. `proc_init::init` sets both before the first
+/// ring-3 entry; unset, no exit has work.
+static EXIT_PENDING: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static EXIT_WORK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the exit-work hooks.
+pub fn set_exit_work_hooks(pending: fn() -> bool, work: fn(&mut UserFrame)) {
+    // Release: pairs with the Acquire loads in `exit_work`.
+    EXIT_WORK.store(work as *mut (), Ordering::Release);
+    EXIT_PENDING.store(pending as *mut (), Ordering::Release);
+}
+
+/// The syscall exit's call into [`exit_work`].
+///
+/// # Safety
+/// `frame` is the user frame the exit is returning over.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn vibeos_exit_work(kind: u64, frame: *mut UserFrame) {
+    // SAFETY: invariant I25: `frame` is this thread's user frame at the top
+    // of its kernel stack, which nothing else refers to at the exit;
+    // established by `syscall_init::vibeos_syscall_entry` or
+    // `thread_init::spawn_user`.
+    exit_work(kind, unsafe { &mut *frame });
+}
+
+/// Exit work on a return to ring 3 (DESIGN §5.10 rule 11): entered with
+/// IF=0 after the exit's `cli`; while the current process has a kill or a
+/// stop pending, turn IF on, act on it (a kill does not return), turn IF
+/// off, and check again. Returns with IF=0 once a check finds none. `kind`
+/// is [`EXIT_SYSCALL`] or the vector whose exit this is.
+pub fn exit_work(kind: u64, frame: &mut UserFrame) {
+    #[cfg(feature = "kernel_tests")]
+    crate::proc::ktest::exit_seen(frame);
+    // Acquire: pairs with the Release stores in `set_exit_work_hooks`.
+    let pending = EXIT_PENDING.load(Ordering::Acquire);
+    let work = EXIT_WORK.load(Ordering::Acquire);
+    if !pending.is_null() && !work.is_null() {
+        // SAFETY: invariant: non-null hooks hold a `fn() -> bool` and a
+        // `fn(&mut UserFrame)`; established by
+        // `syscall_init::set_exit_work_hooks`, their only stores.
+        let (pending, work) = unsafe {
+            (
+                core::mem::transmute::<*mut (), fn() -> bool>(pending),
+                core::mem::transmute::<*mut (), fn(&mut UserFrame)>(work),
+            )
+        };
+        loop {
+            debug_assert!(!x86::interrupts_enabled(), "exit work check with IF on");
+            if !pending() {
+                break;
+            }
+            #[cfg(feature = "kernel_tests")]
+            crate::proc::ktest::exit_work_found(kind);
+            x86::sti();
+            work(frame);
+            x86::cli();
+        }
+    }
+    #[cfg(feature = "kernel_tests")]
+    if kind == EXIT_SYSCALL {
+        crate::proc::ktest::exit_check_hook(frame);
+    }
+    #[cfg(not(feature = "kernel_tests"))]
+    let _ = kind;
+}
 
 /// The syscall exit's non-canonical-RIP path: kernel stack and GS, IF=0,
 /// the return value already stored. Kills the process with `SIGSEGV`
@@ -282,7 +356,7 @@ unsafe extern "C" {
 pub unsafe fn init_cpu() {
     crate::arch::cpu::init_control_regs();
     let entry = vibeos_syscall_entry as *const () as u64;
-    let star = ((STAR_SYSRET as u64) << 48) | ((KERNEL_CS as u64) << 32);
+    let star = star_value();
     // SAFETY: STAR, LSTAR, FMASK and EFER are architectural MSRs that
     // every x86_64 CPU has; STAR names the GDT's selectors and LSTAR the
     // entry stub, and EFER keeps its other bits. The GDT is loaded (this
@@ -294,7 +368,6 @@ pub unsafe fn init_cpu() {
         let efer = x86::rdmsr(IA32_EFER);
         x86::wrmsr(IA32_EFER, efer | EFER_SCE);
     }
-    init_fpu();
 }
 
 /// BSP: attach the GDT TSS and the dedicated RSP0 stack.
@@ -305,8 +378,8 @@ pub unsafe fn init_bsp() {
     // SAFETY: the GDT is loaded and `GS_BASE` is the BSP's `PerCpu` (this
     // fn's contract, `syscall_init::init_bsp`).
     unsafe { init_cpu() };
-    crate::arch::idt::set_user_return_hook(fp_user_return);
-    crate::thread_init::set_switch_hooks(on_switch, fpu_template);
+    crate::arch::idt::set_user_return_hook(user_return);
+    crate::thread_init::set_switch_hooks(on_switch);
     per_cpu_init::with_current(|cpu| {
         cpu.tables = gdt::bsp_tables().cast();
         let top = gdt::bsp_rsp0_top();
@@ -316,7 +389,6 @@ pub unsafe fn init_bsp() {
             .as_cr3
             .store(crate::paging_init::kernel_cr3(), Ordering::Release);
     });
-    seed_current_fpu();
     // `vibeos.strace=1` on the kernel command line (BOOT.md §3.2).
     if crate::boot::cmdline().flag("vibeos.strace") {
         set_trace(true);
@@ -341,51 +413,10 @@ pub unsafe fn init_ap(tables: *const CpuTables, rsp0: u64) {
             .as_cr3
             .store(crate::paging_init::kernel_cr3(), Ordering::Release);
     });
-    seed_current_fpu();
-}
-
-/// Reset the x87 unit and, on the first CPU, keep the captured image as
-/// the template (`fp_init_template`). `init_control_regs` has already
-/// cleared `CR0.EM` and set `CR4.OSFXSR`, which that routine needs.
-fn init_fpu() {
-    let mut tmpl = Fxsave::empty();
-    fp_init_template(&mut tmpl);
-    if FPU_TEMPLATE.try_get().is_none() {
-        // SAFETY: only the BSP reaches this first, from `init_bsp` before
-        // `smp: done`, so the one write races no reader; established by
-        // `syscall_init::init_bsp`.
-        unsafe { FPU_TEMPLATE.set(tmpl) };
-        FPU_READY.store(true, Ordering::Release);
-    }
-}
-
-fn seed_current_fpu() {
-    let p = per_cpu_init::current_thread();
-    if !p.is_null() {
-        // SAFETY: invariant: a non-null current thread is this CPU's live TCB,
-        // touched only by this CPU while it runs, and at boot nothing else
-        // runs here; established by `per_cpu_init::set_current_thread`.
-        unsafe {
-            (*p).fpu = fpu_template();
-            crate::thread_init::fp_invalidate(&mut *p);
-        }
-    }
 }
 
 // The kernel's only FP and SIMD instructions (`scripts/check_kernel_fp.py`
-// allows these three routines and no other).
-
-/// `fninit`, then capture the FP state into `img`.
-#[inline(never)]
-fn fp_init_template(img: &mut Fxsave) {
-    // SAFETY: invariant: CR0.EM is clear and CR4.OSFXSR set, so `fninit`
-    // and `fxsave64` execute, and `img` is a 16-byte aligned 512-byte
-    // `Fxsave`; established by `arch::cpu::init_control_regs` and
-    // `vibeos::thread::Fxsave`.
-    unsafe {
-        core::arch::asm!("fninit", "fxsave64 [{p}]", p = in(reg) img, options(nostack));
-    }
-}
+// allows these two routines and no other).
 
 /// Save this CPU's FP registers into `tcb.fpu`. Only when the binding says
 /// they hold `tcb`'s state, with IF=0 (`switch_fpu`, and a read of the
@@ -410,9 +441,9 @@ fn fp_load(tcb: &Tcb) {
         "fp_load with CR0.TS set"
     );
     // SAFETY: invariant: CR4.OSFXSR is set, CR0.TS clear, and `tcb.fpu` is
-    // a 16-byte aligned FXSAVE image with MXCSR's reserved bits clear (the
-    // boot template or a save of this hardware); established by
-    // `arch::cpu::init_control_regs`, `syscall_init::fp_init_template` and
+    // a 16-byte aligned FXSAVE image with MXCSR's reserved bits clear
+    // (`Fxsave::INITIAL` or a save of this hardware); established by
+    // `arch::cpu::init_control_regs`, `vibeos::thread::Fxsave::INITIAL` and
     // `syscall_init::fp_save`.
     unsafe {
         core::arch::asm!("fxrstor64 [{p}]", p = in(reg) &tcb.fpu, options(nostack));
@@ -426,9 +457,6 @@ fn fp_load(tcb: &Tcb) {
 #[unsafe(no_mangle)]
 pub extern "C" fn vibeos_fp_user_return() {
     debug_assert!(!x86::interrupts_enabled(), "FP binding check with IF on");
-    if !FPU_READY.load(Ordering::Acquire) {
-        return;
-    }
     per_cpu_init::with_current(|cpu| {
         let t = crate::arch::current_tcb();
         if t.is_null() {
@@ -446,34 +474,31 @@ pub extern "C" fn vibeos_fp_user_return() {
     });
 }
 
-/// `vibeos_fp_user_return` as `arch::idt`'s user-return hook.
-fn fp_user_return() {
+/// `arch::idt`'s user-return hook, run by `idt::exit_to_user` after its
+/// `cli`: the exit work, except on an NMI's exit, which keeps IF=0 (DESIGN
+/// §5.10 rule 3), then the FP binding check.
+fn user_return(frame: &mut TrapFrame) {
+    if frame.vector != u64::from(vectors::NMI) {
+        exit_work(frame.vector, frame.user_mut());
+    }
     vibeos_fp_user_return();
 }
 
 /// The running thread's x87 status word, x87 control word, and MXCSR,
 /// read under the FP binding's read rule (DESIGN §7.5, C-FPBIND): inside
 /// an `InterruptGuard`, this CPU's registers are saved into `Tcb.fpu`
-/// first when they hold its state. `None` before the FPU is set up or
-/// with no current thread.
+/// first when they hold its state. `None` with no current thread.
 pub fn current_fp_words() -> Option<(u32, u32, u32)> {
-    if !FPU_READY.load(Ordering::Acquire) {
-        return None;
-    }
     per_cpu_init::with_current(|cpu| {
-        let t = crate::arch::current_tcb();
+        let t = save_current_fp(cpu);
         if t.is_null() {
             return None;
         }
-        // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live
-        // and touched only by this CPU while it runs, and `with_current`'s
-        // IF=0 keeps it current; established by `thread_init::switch_now`.
-        let tcb = unsafe { &mut *t };
-        if fpu::switch_away(cpu.fp_owner, cpu.cpu_id, t as usize, tcb.fp_cpu)
-            == fpu::SwitchAway::Save
-        {
-            fp_save(tcb);
-        }
+        // SAFETY: invariant: a non-null `current_tcb` is the TCB this CPU
+        // runs, live and touched only by this CPU while it runs, and
+        // `with_current`'s IF=0 keeps it current; established by
+        // `thread_init::switch_now`.
+        let tcb = unsafe { &*t };
         // FXSAVE layout (Intel SDM Vol. 1, 10.5.1): FCW at 0, FSW at 2,
         // MXCSR at 24.
         let b = &tcb.fpu.bytes;
@@ -484,11 +509,67 @@ pub fn current_fp_words() -> Option<(u32, u32, u32)> {
     })
 }
 
-pub fn fpu_template() -> Fxsave {
-    FPU_TEMPLATE
-        .try_get()
-        .copied()
-        .unwrap_or_else(Fxsave::empty)
+/// The running thread's TCB, with its FP state saved into `Tcb.fpu` first
+/// when this CPU's registers hold it (the binding's read rule, DESIGN §7.5).
+/// `cpu` is this CPU's `PerCpu`, held with IF=0. Null with no current
+/// thread.
+fn save_current_fp(cpu: &PerCpu) -> *mut Tcb {
+    let t = crate::arch::current_tcb();
+    if t.is_null() {
+        return t;
+    }
+    // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live and
+    // touched only by this CPU while it runs, and the caller's IF=0 keeps it
+    // current; established by `thread_init::switch_now`.
+    let tcb = unsafe { &mut *t };
+    if fpu::switch_away(cpu.fp_owner, cpu.cpu_id, t as usize, tcb.fp_cpu) == fpu::SwitchAway::Save {
+        fp_save(tcb);
+    }
+    t
+}
+
+/// `fork`'s FP state (DESIGN §7.5, F069): in one IF=0 stretch, save the
+/// caller's live registers under the binding, copy its `Tcb.fpu` into
+/// `child`, a thread not yet made ready, and empty the child's `fp_cpu`,
+/// so its first return to ring 3 loads the copy.
+pub fn fork_fp(child: ThreadId) {
+    let c = crate::thread_init::tcb_ptr(child);
+    if c.is_null() {
+        return;
+    }
+    per_cpu_init::with_current(|cpu| {
+        let p = save_current_fp(cpu);
+        if p.is_null() {
+            return;
+        }
+        // SAFETY: invariant I9: `p` is the TCB this CPU runs and `c` a
+        // live TCB that stays allocated, two distinct threads; the child
+        // is not yet runnable, so only its creator, here, touches it, and
+        // `with_current`'s IF=0 keeps `p` current; established by
+        // `thread_init::spawn_user` and `thread_init::switch_now`.
+        unsafe {
+            (*c).fpu = (*p).fpu;
+            crate::thread_init::fp_invalidate(&mut *c);
+        }
+    });
+}
+
+/// `execve`'s FP state (DESIGN §7.5, F069, F129): in one IF=0 stretch,
+/// write [`Fxsave::INITIAL`] into the running thread's `Tcb.fpu` and empty
+/// its `fp_cpu`, so a switch before the return to ring 3 saves nothing over
+/// it and that return loads it.
+pub fn exec_fp() {
+    let _irq = x86::InterruptGuard::enter();
+    let t = crate::arch::current_tcb();
+    if t.is_null() {
+        return;
+    }
+    // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live and
+    // touched only by this CPU while it runs, and the guard's IF=0 keeps it
+    // current; established by `thread_init::switch_now`.
+    let tcb = unsafe { &mut *t };
+    tcb.fpu = Fxsave::INITIAL;
+    crate::thread_init::fp_invalidate(tcb);
 }
 
 /// Update TSS.RSP0 + `kernel_rsp0` for `tcb`. Every context switch.
@@ -547,7 +628,7 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
 /// CPU writes until the switch tail clears its `on_cpu`; the caller,
 /// `thread_init::switch_now` through [`on_switch`], establishes both.
 pub unsafe fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
-    if !FPU_READY.load(Ordering::Acquire) || old.is_null() {
+    if old.is_null() {
         return;
     }
     // SAFETY: invariant I9: `old` is the TCB this CPU is switching off, live
@@ -594,8 +675,9 @@ pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
 /// A spawned or forked thread's first return to ring 3: the ordinary
 /// syscall exit over the user frame its creator wrote at the top of its
 /// kernel stack (`thread_init::spawn_user`). Runs `cli`, checks IF in
-/// debug builds, loads the user data selectors, sets `KERNEL_GS_BASE` =
-/// `PerCpu` before the selector loads (which zero the GS base), then
+/// debug builds, loads the thread's `Tcb.user_segs` into DS, ES, FS and GS
+/// (DESIGN §5.1), sets `KERNEL_GS_BASE` = `PerCpu` before those loads
+/// (which zero the GS base), then
 /// `GS_BASE` = `PerCpu`, `KERNEL_GS_BASE` = 0 (the user GS base) and
 /// `FS_BASE` = `fs_base`, and jumps to `vibeos_syscall_return`.
 ///
@@ -609,6 +691,19 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
     // The asm's own `cli` finds IF already off; this one tells the irqoff
     // tracer where the return's stretch began.
     crate::arch::current::irq_disable();
+    let t = crate::arch::current_tcb();
+    let segs = if t.is_null() {
+        UserSegs::NULL
+    } else {
+        // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live
+        // and written only by this thread or under its parent's fork before
+        // `make_ready`; established by `thread_init::switch_now`.
+        unsafe { (*t).user_segs }
+    };
+    let segs = u64::from(segs.ds)
+        | u64::from(segs.es) << 16
+        | u64::from(segs.fs) << 32
+        | u64::from(segs.gs) << 48;
     // The kernel_tests fork-wait stall spins inside the asm below with
     // IF=0 and may read no `gs:` there, so its stretch is marked here.
     #[cfg(feature = "kernel_tests")]
@@ -638,10 +733,15 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
             "mov rdx, rdi",
             "shr rdx, 32",
             "wrmsr",
-            "mov eax, {user_ss}",
+            // The thread's DS, ES, FS and GS, 16 bits each from R9's low end
+            // (`Tcb.user_segs`: null, or the parent's after `fork`).
+            "mov rax, r9",
             "mov ds, ax",
+            "shr rax, 16",
             "mov es, ax",
+            "shr rax, 16",
             "mov fs, ax",
+            "shr rax, 16",
             "mov gs, ax",
             // kernel_tests: hold the window after the GS load open (ROADMAP
             // §10.2, F021); the call keeps the live RDI, RSI and R8, and
@@ -669,11 +769,11 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
             kernel_gs_base = const IA32_KERNEL_GS_BASE,
             gs_base = const IA32_GS_BASE,
             fs_base = const IA32_FS_BASE,
-            user_ss = const USER_DS_RPL as u32,
             frame_pad = const size_of::<UserFrame>() + PAD,
             #[cfg(feature = "kernel_tests")]
             stall = sym testing::fork_wait_stall_point,
             in("rsi") fs_base,
+            in("r9") segs,
             options(noreturn),
         );
     }

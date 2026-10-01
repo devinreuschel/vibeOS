@@ -278,6 +278,12 @@ GONE: list[tuple[str, str]] = [
     ("cwd_copy", "a process's working directory is"),
     ("set_cwd", "a process's working directory is"),
     ("Cwd", "a process's working directory is"),
+    ("FPU_TEMPLATE", "x86_64 user FP state follows"),
+    ("fpu_template", "x86_64 user FP state follows"),
+    ("init_fpu", "x86_64 user FP state follows"),
+    ("seed_current_fpu", "x86_64 user FP state follows"),
+    ("FPU_READY", "x86_64 user FP state follows"),
+    ("fp_init_template", "x86_64 user FP state follows"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

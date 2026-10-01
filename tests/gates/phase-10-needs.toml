@@ -229,8 +229,11 @@ why = "text: lands after the teardown (F106), open-file table (F055) and stop-wa
 
 [[box]]
 key = "every exit to ring 3, the syscall exit included, checks the current process's pending set"
-needs = ["stop and continue cannot lose a wakeup"]
-why = "text: lands after the stop-wait box"
+needs = [
+  "stop and continue cannot lose a wakeup",
+  "the syscall exit path runs",  # L1387
+]
+why = "text: lands after the stop-wait box; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "console `write` holds IF=0 only for bounded work"
@@ -540,8 +543,11 @@ why = "text: lands after the syscall-exit box (F001) and the `syscall_init::firs
 
 [[box]]
 key = "x86_64 user FP state follows the psABI across `fork` and `execve`"
-needs = ["one FP binding on x86_64"]
-why = "text of the FP binding box: the F069 box below lands after it"
+needs = [
+  "one FP binding on x86_64",
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+]
+why = "text of the FP binding box: the F069 box below lands after it; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "an address space is a two-count object"
@@ -1457,6 +1463,30 @@ needs = [
   "`TickClock::write` bumps `seq` to odd",  # L1436
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1045
+[[box]]
+key = "`fork` copies the parent's x87"
+needs = [
+  "x86_64 user FP state follows",  # L1400
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1048
+[[box]]
+key = "`execve` starts the new image with the"
+needs = [
+  "x86_64 user FP state follows",  # L1400
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1059
+[[box]]
+key = "a pending signal whose default action terminates or stops the process takes effect on every return to ring 3,"
+needs = [
+  "a pending signal whose default action terminates or stops the process takes effect on every return to ring 3:",  # L1395
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "the blocked-thread sweep finds lost"

@@ -71,20 +71,30 @@ pub enum Eoi {
     SlaveThenMaster,
 }
 
-pub const fn irq7_eoi(master_isr: u8) -> Eoi {
-    if is_spurious_irq7(master_isr) {
-        Eoi::None
-    } else {
-        Eoi::Master
-    }
+/// What the 8259 handler does with line `line` (0-15), which no driver
+/// claims, given the in-service register of the PIC that owns it (`isr`:
+/// the master's for 0-7, the slave's for 8-15), DESIGN §5.5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineAction {
+    /// A spurious IRQ7 or IRQ15: the ISR bit is clear. Count it and send
+    /// this EOI (none for IRQ7; the master's cascade for IRQ15).
+    Spurious(Eoi),
+    /// A real interrupt on an unclaimed line: mask the line, send this EOI,
+    /// count it, and log it.
+    Unclaimed(Eoi),
 }
 
-pub const fn irq15_eoi(slave_isr: u8) -> Eoi {
-    if is_spurious_irq15(slave_isr) {
-        // Slave did not actually service; still ACK the master's cascade.
-        Eoi::Master
+/// [`LineAction`] for `line` with in-service register `isr`.
+pub const fn unclaimed_line(line: u8, isr: u8) -> LineAction {
+    if line == IRQ7 && is_spurious_irq7(isr) {
+        LineAction::Spurious(Eoi::None)
+    } else if line == IRQ15 && is_spurious_irq15(isr) {
+        // The slave did not service it; still ACK the master's cascade.
+        LineAction::Spurious(Eoi::Master)
+    } else if line < 8 {
+        LineAction::Unclaimed(Eoi::Master)
     } else {
-        Eoi::SlaveThenMaster
+        LineAction::Unclaimed(Eoi::SlaveThenMaster)
     }
 }
 
@@ -145,17 +155,28 @@ mod tests {
     }
 
     #[test]
-    fn spurious_irq7_skips_eoi() {
-        assert_eq!(irq7_eoi(0x00), Eoi::None);
-        assert_eq!(irq7_eoi(0x7F), Eoi::None);
-        assert_eq!(irq7_eoi(0x80), Eoi::Master);
-        assert_eq!(irq7_eoi(0xFF), Eoi::Master);
-    }
-
-    #[test]
-    fn spurious_irq15_eoi_master_only() {
-        assert_eq!(irq15_eoi(0x00), Eoi::Master);
-        assert_eq!(irq15_eoi(0x80), Eoi::SlaveThenMaster);
+    fn unclaimed_line_decision() {
+        for line in 0..16u8 {
+            let real = if line < 8 {
+                Eoi::Master
+            } else {
+                Eoi::SlaveThenMaster
+            };
+            // In service: every line is a real, unclaimed interrupt.
+            assert_eq!(
+                unclaimed_line(line, 0x80 | (1 << (line % 8))),
+                LineAction::Unclaimed(real)
+            );
+            assert_eq!(unclaimed_line(line, 0xFF), LineAction::Unclaimed(real));
+            // ISR clear: only IRQ7 and IRQ15 are spurious.
+            let want = match line {
+                7 => LineAction::Spurious(Eoi::None),
+                15 => LineAction::Spurious(Eoi::Master),
+                _ => LineAction::Unclaimed(real),
+            };
+            assert_eq!(unclaimed_line(line, 0x00), want, "line {line}");
+            assert_eq!(unclaimed_line(line, 0x7F), want, "line {line}");
+        }
     }
 
     #[test]

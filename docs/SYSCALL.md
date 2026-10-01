@@ -39,11 +39,11 @@ convention, tagged pointers, and `FS_BASE`), §12.3 (copy-on-write `fork`),
 | return | `rax` | see §2 |
 | clobber | `rcx`, `r11` | RIP and RFLAGS |
 
-Segment selectors are ABI (DESIGN §5.1). The rule ROADMAP §10.6
-implements: a process runs with CS `0x33`, SS `0x2b`, and DS, ES, FS, and GS
-0, as on Linux; `execve` loads them, and `fork` copies the parent's DS, ES,
-FS, and GS. Today ring 3 runs with CS `0x23` and SS, DS, ES, FS, and GS
-`0x1B`.
+Segment selectors are ABI (DESIGN §5.1). A process runs with CS `0x33` and
+SS `0x2b`, as on Linux: `IA32_STAR`'s SYSRET base is `0x23`, and `sysretq`
+loads SS from +8 and CS from +16. DS, ES, FS, and GS hold 0: `execve` and a
+new process's first entry load the null selector into all four, `fork`
+copies the parent's, and the context switch keeps each thread's.
 
 Numbers and arguments are read as Linux's entry code reads them (ROADMAP
 §10.5): the number is `eax` sign-extended, so the high half of `rax` is
@@ -65,13 +65,15 @@ registers (it is soft-float, and `make` rejects a kernel ELF with an FP or
 SIMD instruction outside its save and load routines), so neither the entry
 nor the exit saves them: the FP binding of DESIGN §7.5 saves a thread's
 state only when a switch takes the CPU away from it, and the exit, with
-IF=0, loads it only when the registers hold another thread's. Two calls differ from Linux
-(F069; ROADMAP §10.6): a `fork` child starts from the boot FXSAVE
-template instead of the parent's x87, XMM, and MXCSR state, and `execve`
-hands the new image the old image's x87 and XMM registers, MXCSR, and FCW.
-The rule the fix implements: `fork` copies the caller's FP state, and
-`execve` loads FCW `0x037F` and MXCSR `0x1F80` with the x87 and XMM
-registers zeroed.
+IF=0, loads it only when the registers hold another thread's. `fork` and
+`execve` follow the psABI, as on Linux: `fork` saves the caller's live
+registers under the binding and copies its x87, XMM, and MXCSR state into
+the child before the child can run (`syscall_init::fork_fp`), and `execve`,
+after its point of no return, starts the new image from
+`vibeos::thread::Fxsave::INITIAL`, FCW `0x037F` and MXCSR `0x1F80` with
+the x87 and XMM registers zeroed (`syscall_init::exec_fp`). Every thread,
+`/sbin/init` included, starts from that image too, whatever the firmware
+left in the registers.
 
 `FMASK` (DESIGN §7.2) clears `TF`, `IF`, `DF`, `IOPL`, `NT`, and `AC` on
 entry. The entry saves the user frame, the 21 words of Linux's
@@ -108,6 +110,20 @@ returned with, and in debug builds each exit path checks IF before its
 `swapgs` (on the `sysretq` path before it loads the user RSP) and faults at
 `vibeos_exit_if_set`, a `ud2`, if IF is set. `console_init::wait_key`, which
 a console `read` blocks in, returns with the IF it was entered with.
+
+Every return to ring 3 acts on a pending kill or stop (DESIGN §5.10 rule
+11): after the `cli` and the return-value store, the syscall exit (and a new
+thread's first entry, which enters it) calls `syscall_init::exit_work`, and
+every vector's exit to CPL 3 calls it from `idt::exit_to_user` after that
+exit's `cli`, except an NMI's. With IF=0 it checks the current process
+(`proc_init::exit_work_pending`: `Stopped`, or `SIGKILL`, `SIGSTOP`, or a
+signal whose default action is Term or Stop pending); when it finds work it
+turns IF on, acts (`proc_init::do_exit_work`: a kill ends the process, a
+stop waits on `stop_wq`), turns IF off, and checks again, so a process that
+makes no syscall is killed or stopped at its next interrupt. Debug builds
+assert IF=0 at the check. `kill` of a Term or Stop signal sends the
+target's CPU the reschedule IPI after it publishes the signal, when the
+target is running on another CPU. Handler delivery is ROADMAP §13.8's.
 
 The top user page is never mapped: user mappings end at `USER_MAP_END`
 (`0x0000_7FFF_FFFF_F000`), and `execve` of an image with a segment above it
@@ -633,7 +649,7 @@ old one only after a successful load.
 `FS_BASE` is written at a process's first ring-3 entry and at `execve`, and
 `fork` copies the live MSR into the child. No context switch saves or
 restores it, so a process that uses TLS can resume with the base another
-process left, or with 0 (F022). The FP-state differences are in §1 (F069).
+process left, or with 0 (F022). FP state follows the psABI (§1).
 
 ---
 

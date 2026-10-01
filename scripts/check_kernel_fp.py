@@ -29,7 +29,6 @@ from pathlib import Path
 ALLOW: dict[str, frozenset[str]] = {
     "vibeos::proc::syscall_init::fp_save": frozenset({"fxsave64"}),
     "vibeos::proc::syscall_init::fp_load": frozenset({"fxrstor64"}),
-    "vibeos::proc::syscall_init::fp_init_template": frozenset({"fninit", "fxsave64"}),
 }
 
 # Sections that hold no 64-bit kernel code (the AP trampoline is 16- and
