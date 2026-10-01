@@ -8,6 +8,7 @@ mod floor;
 mod hooks;
 mod lifecycle;
 mod limits;
+mod open;
 mod runtime;
 mod sysdecl;
 mod uaccess;
@@ -19,6 +20,7 @@ pub(crate) use floor::*;
 pub(crate) use hooks::*;
 pub(crate) use lifecycle::*;
 pub(crate) use limits::*;
+pub(crate) use open::*;
 pub(crate) use runtime::*;
 pub(crate) use sysdecl::*;
 pub(crate) use uaccess::*;
@@ -80,5 +82,6 @@ pub(crate) const TESTS: &[Test] = &[
     test("reboot_power_off", reboot_power_off).opt_in(),
     test("reboot_restart", reboot_restart).opt_in(),
     test("user_heap_over_brk", user_heap_over_brk).deadline(60_000),
+    test("open_trunc_enfile", open_trunc_enfile).deadline(60_000),
     test("proc_syscall_count", proc_syscall_count),
 ];

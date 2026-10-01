@@ -428,7 +428,7 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         Ok(())
     }
 
-    fn kill_sb(&self, cx: &mut OpCx<'_>) {
+    fn release(&self, cx: &mut OpCx<'_>) {
         self.op(cx, |k, x| {
             kern_drop_sb(k, x.inst, x.ty == FsType::Tmp);
             for s in k.skins.iter_mut() {

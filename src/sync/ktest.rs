@@ -360,11 +360,11 @@ const CELL_CASES: &[CellCase] = &[
         count: 1,
     },
     CellCase {
-        name: "file_init::CWD",
+        name: "shell::cmds::fs::CWD_REF",
         take: || {
-            let _ = crate::file_init::cwd_copy();
+            let _ = crate::shell::cmds::fs::shell_cwd();
         },
-        file: "src/fs/file_init.rs",
+        file: "src/shell/cmds/fs.rs",
         rank: RANK_DEVICE,
         count: 1,
     },

@@ -458,7 +458,8 @@ sits between `console ok` and `shell ready` so `lspci` is registered before the 
 set). The same blind spot follows the last marker: writeback, deferred reclaim, and vibefs commits
 keep running after `shell ready`, and a panic there is invisible to a harness that stops reading at
 it. So the console-input boot keeps reading serial for 3 s after its last reply (`CONSOLE_TAIL_S`)
-and fails on a panic signature in that window, or on QEMU's exit, before it quits QEMU.
+and fails on a panic signature in that window, or on QEMU's exit, before it types the shell's
+`poweroff` or `reboot`, after which QEMU must exit 0.
 
 With `-smp N`, additionally:
 

@@ -8,7 +8,7 @@ use vibeos::elf::{
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, ArgError, Auxv, Builder, EHDR_SIZE, ElfError, ExecArgs,
     Image, LoadSeg, LoadTarget, PHDR_SIZE, PageRun,
 };
-use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom};
+use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom, WalkBase};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kerror::KError;
 use vibeos::limits::RLIMIT_STACK_DEFAULT;
@@ -398,19 +398,28 @@ pub fn exec_args(argv: &[&[u8]], envp: &[&[u8]]) -> Result<ExecArgs, LoadError> 
     Ok(args)
 }
 
-/// Build a new address space from the file at `path`, with `args` on its
-/// initial stack. Caller installs it only after this returns.
-pub fn load_path(path: &[u8], args: &ExecArgs) -> Result<Loaded, LoadError> {
+/// Build a new address space from the file at `path`, resolved from
+/// `base`, with `args` on its initial stack. Caller installs it only after this returns.
+pub fn load_path(
+    base: Option<WalkBase>,
+    path: &[u8],
+    args: &ExecArgs,
+) -> Result<Loaded, LoadError> {
     #[cfg(feature = "kernel_tests")]
     let before = crate::proc::ktest::free_now();
-    let r = load_path_inner(path, args);
+    let r = load_path_inner(base, path, args);
     #[cfg(feature = "kernel_tests")]
     crate::proc::ktest::record(before, r.is_ok());
     r
 }
 
-fn load_path_inner(path: &[u8], args: &ExecArgs) -> Result<Loaded, LoadError> {
-    let file = file_init::open(path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
+fn load_path_inner(
+    base: Option<WalkBase>,
+    path: &[u8],
+    args: &ExecArgs,
+) -> Result<Loaded, LoadError> {
+    let file =
+        file_init::open_at(base, path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
     let mut src = FileImage {
         file,
         len: 0,

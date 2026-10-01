@@ -252,11 +252,11 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   on a fatal signal; ROADMAP §12.5); a console read returns after a newline
   or `rdx` bytes
 - `open`: `mode` is ignored, and a vibefs file is created 0644 (F149;
-  ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. `O_CREAT` and
-  `O_TRUNC` take effect before the open-file slot and the fd are allocated, so with
-  a full open-file or fd table `open(O_TRUNC)` truncates the file and then
-  fails with `ENFILE` for a full open-file table or `EMFILE` for a full fd
-  table (F057; ROADMAP §10.4)
+  ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. `open`
+  reserves the descriptor (`EMFILE`) and the open-file slot (`ENFILE`)
+  before it creates or truncates, so a failed `open` changes no file; a
+  trailing `/` after a missing name fails with `ENOTDIR` unless the call is
+  `mkdir` (F057; ROADMAP §10.4)
 - `lseek`: `SEEK_END` reads the size from the file's inode (FAT's
   counted in-core inode or the vibefs inode), so it sees writes through
   any descriptor. On a vibefs file a resulting offset above 2^44 − 4096
@@ -417,18 +417,24 @@ ROADMAP §10.4).
 - `dup` / `dup2` copy the slot and clear `FD_CLOEXEC` on the new fd
 - `open` `O_CLOEXEC` becomes per-fd `FD_CLOEXEC`; `execve` drops those
 - open-file slots are refcounted so `dup`/`fork` share them
-- a relative path resolves against one kernel-global cwd,
-  `file_init::CWD`, which only the debug shell's `cd` changes;
-  `Proc::cwd` is copied on `fork` and never read, and there is no `chdir`
-  (F057, F086; ROADMAP §10.4, with `chdir` in §13.9)
+- a relative path resolves against the calling process's working
+  directory, a counted reference to a directory that `fork` copies and
+  exit drops (DESIGN §2.11); a process the kernel starts has `/` as its
+  root and working directory, and there is no `chdir` until ROADMAP
+  §13.9 (F057, F086)
 - `open` and `execve` resolve a path through the VFS walker, one component
   at a time, crossing mounts, so a process reaches every mounted
   filesystem: `open("/dev/null")` opens devfs's `null`, and `/proc`,
   `/tmp`, `/sys`, and `/vibe` are procfs, tmpfs, sysfs, and vibefs.
-  `.` and `..` resolve in the VFS, never in a backend. Still wrong: FAT
-  matches names without regard to case but the dentry cache does not, so
-  `/VIBE/f` reaches the FAT `vibe` directory under the vibefs mount rather
-  than the mount (F056; ROADMAP §10.4)
+  The walker follows path_resolution(7), with no string pass before it:
+  repeated slashes count as one, `.` is the directory reached so far, and
+  `..` is the physical parent of that directory, after any symlink before
+  it has been followed, stays put at the process's root, and at a mount's
+  root steps to the parent of the mountpoint. A component followed by `/`
+  must be a directory (a symlink there is followed), else the call fails
+  with `ENOTDIR`; only `mkdir` accepts a `/` after a name it creates. FAT
+  names compare without regard to case in the dentry cache too, so
+  `/VIBE/f` is `/vibe/f`, under the vibefs mount (F056; ROADMAP §10.4)
 - `read`, `write`, and `lseek` copy the slot out, drop the table lock for
   the I/O, and write back only the offset. `refs` and `used` change only
   in `addref` and `close`, under the table lock, and the `close` that
@@ -522,9 +528,20 @@ Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
 `make user` to `build/user/<name>` (below). Initrd:
 
 - `/hello` (`user/src/bin/hello.rs`) — write + exit 42 (Slice B proof)
-- `/sbin/init` (`user/src/bin/init.rs`) — post-init kernel job: `fork`/`exec`
-  `/bin/tests`, printing `init: /bin/tests exited <status>` on fd 2 when its
-  wait status is nonzero, then `/bin/sh`, then reap. Its exit, by `exit` or by
+- `/sbin/init` (`user/src/bin/init.rs`) — post-init kernel job, which
+  checks every `fork`, `execve` and `wait4` result and writes each failure
+  to fd 2 in one line: `fork`/`exec` `/bin/tests`, printing
+  `init: /bin/tests exited <status>` when its wait status is nonzero (or
+  `init: /bin/tests start failed: <why>`), then `/bin/sh`, both with init's
+  environment, and reap orphans until the shell ends
+  (`init: /bin/sh ended: <status>`) or `wait4` fails
+  (`init: wait4: errno <n>`, `ECHILD` included); then yield and start the
+  shell again. A failed start is a `fork` error
+  (`init: /bin/sh start failed: fork errno <n>`) or a shell child that exits
+  127, the status its child exits with after
+  `init: /bin/sh start failed: execve errno <n>`; a shell on the console
+  never exits 127, since a console read never returns end of file. After
+  three failed starts in a row init exits 1. Its exit, by `exit` or by
   a signal, panics the kernel after the line
   `vibeOS: init: pid 1 <how>` (`exited <n>`, `killed SIG<name>`, or
   `killed SIG<name> addr=0x<hex>` for a fault; INVARIANTS.md §2.5)
@@ -536,7 +553,21 @@ Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
   `user: tests begin` comes first, and `user: tests ok` (status 0) or
   `user: tests fail` (status 1) last
 - `/bin/sh` (`user/src/bin/sh.rs`) — interactive shell; prints
-  `vibeOS: shell ready` then `vibeos>`
+  `vibeOS: shell ready` then `vibeos>`, and reads fd 0 a byte at a time,
+  echoing it, into a 4096-byte line of at most 64 words split on spaces and
+  tabs, with no quoting, pipes or redirection until ROADMAP §13.7. Its
+  built-ins are `poweroff` and `reboot` (the `reboot` call) and `ps` (what
+  `psinfo` returns); a failing one prints `sh: <name>: errno <n>`, status
+  1. Any other first word is a program it runs with `fork`, `execve` and
+  `wait4`: a name with a `/` as given, any other from each `PATH`
+  directory in turn (`/bin:/sbin` when `PATH` is unset), past `ENOENT` and
+  `ENOTDIR`, passing the shell's environment. The child prints
+  `sh: <name>: not found` and exits 127 when nothing is found, or
+  `sh: <name>: cannot run: errno <n>` and exits 126; on fd 2 the shell
+  prints `sh: <name>: exit <n>` for a non-zero exit and
+  `sh: <name>: signal <n>` for a signal, and its last status is the code
+  or 128 plus the signal. A read error exits 1; end of input (a file on
+  fd 0; a console read never ends it) exits with the last status
 - `/bin/envcheck` (`user/src/bin/envcheck.rs`) — exits 0 when its
   environment holds `K=v`, else 1 (`/bin/tests`' `exec_env_*` cases)
 - `/bin/argcheck` (`user/src/bin/argcheck.rs`) — checks its `argv` against
@@ -544,6 +575,25 @@ Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
   empty `argv[0]`) or `<n>:<m>` (`argc` `n`, every later argument `m`
   bytes); exits 0 when it holds, 2 for a bad mode, 3 for `argc`, 4 for
   `argv[0]`, 5 for a length (`/bin/tests`' `exec_*` argument cases)
+- `/bin/ls`, `/bin/cat`, `/bin/echo`, `/bin/grep`, `/bin/wc`, `/bin/true`,
+  `/bin/false`, `/bin/sleep`, `/bin/yes` and `/bin/cmp`
+  (`user/src/bin/<name>.rs`, sharing `vibeos_user::cmd`) — the utilities
+  ROADMAP §13's `ls | grep foo | wc -l` gate joins. `true` and `false` exit 0
+  and 1; `echo [-n] [arg...]` joins its arguments with single spaces;
+  `cat [file...]` copies each file, or fd 0 for none or `-`; `grep pattern
+  [file...]` prints the lines that hold a fixed string, prefixed `<file>:`
+  for several files (status 0 on a match, 1 on none, 2 on an error);
+  `wc [-l] [-w] [-c] [file...]` prints the selected counts single-spaced and
+  unpadded, then the name (none for fd 0), and a `total` line for several
+  files; `ls [-a] [path...]` prints a directory's `getdents64` names sorted
+  bytewise, dot-names only under `-a`, a non-directory operand itself, and
+  `<path>:` headers for several operands (status 2 if one fails); `sleep
+  <seconds>` sleeps whole seconds through `nanosleep`; `yes [arg...]` writes
+  `y`, or its arguments, one `write` a line until killed; `cmp file1 file2`
+  prints `<f1> <f2> differ: char <n>, line <l>`, or `cmp: EOF on <f>` on fd 2
+  for a prefix (status 0 equal, 1 different, 2 on an error). Each reads until
+  `read` returns 0 and reports an error on fd 2 as `<prog>: <what>: errno
+  <n>`
 
 Stack: `argc`, `argv`, `envp` (the caller's, copied by `execve`;
 `/sbin/init`'s from the kernel command line, BOOT.md §3.2, at most 8

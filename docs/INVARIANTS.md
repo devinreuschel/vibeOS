@@ -1013,10 +1013,12 @@ covers the last store of a hand-off; these rules cover the rest.
    process's working directory and root are counted references to a directory (a mount and a
    dentry), never path strings: a relative walk starts from the working directory and an absolute
    one from the root, `fork` copies both references, rename moves the dentry a reference holds, and
-   `chroot` (ROADMAP §14.9) and `pivot_root` (ROADMAP §18.6) replace them. The count is `kalloc`'s
-   `TryArc` (increment `Relaxed`, decrement `Release`, and an `Acquire` fence before the release, as
-   `alloc::sync::Arc` does), a table slot's own count (rule 2), or a frame's count in
-   ROADMAP §12.1's frame array. A count with other rules, such as a get-unless-zero count whose last
+   `chroot` (ROADMAP §14.9) and `pivot_root` (ROADMAP §18.6) replace them. Only a process's own
+   thread replaces or drops its root and working-directory references (until ROADMAP §13.1's
+   `CLONE_FS`), so a syscall reads them from the process table without taking a count. The
+   count is `kalloc`'s `TryArc` (increment `Relaxed`, decrement `Release`, and an `Acquire` fence
+   before the release, as `alloc::sync::Arc` does), a table slot's own count (rule 2), or a
+   frame's count in ROADMAP §12.1's frame array. A count with other rules, such as a get-unless-zero count whose last
    put runs a teardown before the memory goes, rule 3's operation gate, or a per-CPU count, is
    written once as a shared type, beside `TryArc` in `kalloc` or beside `BlockingMutex` in `sync`,
    with host tests and a loom model (ROADMAP §10.8), and then reused; no subsystem writes its own
@@ -1120,9 +1122,7 @@ Today the code breaks rules 1, 2, and 5: TCBs are never freed and their slots ar
 place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
 from table-owned boxes (ROADMAP §10.6, F019), and block completions point into stack frames
 (ROADMAP §12.5, F042). `kalloc::TryArc` implements rule 6's deferred release, and `sync::OpGate`
-rule 3's operation gate (ROADMAP §10.4). A process's working
-directory is a path string: one kernel-global `file_init::CWD` serves every process, and `Proc::cwd`
-is a buffer nothing reads (ROADMAP §10.4, F057).
+rule 3's operation gate (ROADMAP §10.4).
 
 ## 2.12 RCU
 

@@ -239,6 +239,51 @@ fn walk_4level_1g_2m_4k() {
 }
 
 #[test]
+fn page_run_agrees_with_page_probes() {
+    // Two segments with a gap, the second's file bytes cut short: every
+    // run answers as the one-page probe of each page in it would.
+    struct Probe<'a>(&'a SliceCore<'a>);
+    impl PhysMem for Probe<'_> {
+        fn read(&self, addr: u64, buf: &mut [u8]) -> bool {
+            self.0.read(addr, buf)
+        }
+    }
+    let s = Synth::new(&[(0, 0x3000), (0x5800, 0x4000)]);
+    let mut bytes = s.build();
+    bytes.truncate(bytes.len() - 0x2000);
+    let core = SliceCore::new(&bytes).unwrap();
+    let probe = Probe(&core);
+    let end = 0xC000u64;
+    let mut held = Vec::new();
+    let mut pa = 0;
+    while pa < end {
+        let (h, len) = core.page_run(pa, end - pa);
+        assert!(len > 0 && len % PAGE == 0, "{pa:#x}: {len:#x}");
+        for q in (pa..pa + len).step_by(PAGE as usize) {
+            assert_eq!(probe.page_run(q, PAGE), (h, PAGE), "{q:#x}");
+        }
+        if h {
+            held.push((pa, len));
+        }
+        pa += len;
+    }
+    // The file keeps 0x5800..0x7800 of the second segment: the page at
+    // 0x5000 starts below it and the one at 0x8000 past it.
+    assert_eq!(held, [(0, 0x3000), (0x6000, 0x2000)]);
+    // A run stops at `max`.
+    assert_eq!(core.page_run(0, 0x1000), (true, 0x1000));
+    assert_eq!(
+        page_run([(0, 0x1800)].into_iter(), 0x1000, 0x8000),
+        (true, 0x1000)
+    );
+    assert_eq!(
+        page_run([(0x4000, 1)].into_iter(), 0, 0x8000),
+        (false, 0x4000)
+    );
+    assert_eq!(page_run(core::iter::empty(), 0, 0x8000), (false, 0x8000));
+}
+
+#[test]
 fn walk_rejects_absent_and_out_of_core() {
     let mut s = Synth::new(&[(0, RAM)]);
     s.map(KBASE, 0x20_0000, 0x20_0000, 0);
@@ -711,22 +756,26 @@ fn log_tail_matches_ring_last_n() {
     assert_eq!(k.log_header(va), Err(VmError::BadLayout));
 }
 
-fn entry() {}
-
 #[test]
 fn vmcore_reads_kernel_layouts() {
     use crate::per_cpu::{PerCpu, PerCpuRemote};
-    use crate::thread::{CpuAffinity, ThreadId};
+    use crate::thread::ThreadId;
     use core::ptr::addr_of_mut;
 
-    // Two TCBs, built field by field in zeroed memory at real offsets.
+    // Two TCBs, built in zeroed memory at real offsets. Only fields of
+    // plain integers go through typed stores: an enum's or a pointer's
+    // store would leave padding or provenance in the bytes read back. The
+    // state's tag (a `u32` at 0) and payload word (at 8) are written as
+    // integers, as docs/VMCOREINFO.md lays them out.
     let t1: Raw<Tcb> = Raw::new();
     let t2: Raw<Tcb> = Raw::new();
     // SAFETY: each place is a field of the zeroed allocation `Raw::new`
-    // made for a `Tcb`; no `Tcb` value is formed; established here.
+    // made for a `Tcb`, and the state words lie inside `state` (24 bytes,
+    // 8-aligned); no `Tcb` value is formed; established here.
     unsafe {
         addr_of_mut!((*t1.p).id).write(ThreadId(7));
-        addr_of_mut!((*t1.p).state).write(ThreadState::Running);
+        let st = addr_of_mut!((*t1.p).state).cast::<u32>();
+        st.write(1);
         addr_of_mut!((*t1.p).context).write(CpuContext {
             rbx: 1,
             rbp: 2,
@@ -740,50 +789,48 @@ fn vmcore_reads_kernel_layouts() {
         });
         addr_of_mut!((*t1.p).cpu).write(1);
         addr_of_mut!((*t1.p).pid).write(42);
-        addr_of_mut!((*t1.p).affinity).write(CpuAffinity::Any);
-        addr_of_mut!((*t1.p).entry).write(entry);
         addr_of_mut!((*t2.p).id).write(ThreadId(9));
-        addr_of_mut!((*t2.p).state).write(ThreadState::Blocked {
-            wq: 0xABCD,
-            deadline: crate::sched::FAR_DEADLINE,
-        });
+        let st = addr_of_mut!((*t2.p).state).cast::<u32>();
+        st.write(3);
+        st.cast::<u8>().add(8).cast::<u64>().write(0xABCD);
         addr_of_mut!((*t2.p).context).write(CpuContext::empty());
     }
+    // The state words match the enum's own layout.
+    const _: () = assert!(core::mem::align_of::<ThreadState>() == 8);
     let slots: [u64; 4] = [t1.addr(), 0, t2.addr(), 0];
-    // One CPU: current t1, idle t2, run queue [9, 7].
-    static REMOTE: PerCpuRemote = PerCpuRemote::new();
+    // One CPU: current t1, idle t2, run queue [9, 7]. The queue is a real
+    // ReadyQueue; its ring goes into the core at a chosen VA, in storage
+    // order (after one push and pop the front is slot 1), and the PerCpu's
+    // queue words name it, at ReadyQueue::CORE_OFFSETS.
     let mut q = ReadyQueue::try_new(4).unwrap();
     q.push_back(ThreadId(3));
     assert_eq!(q.pop_front(), Some(ThreadId(3)));
     q.push_back(ThreadId(9));
     q.push_back(ThreadId(7));
-    let ids = q.iter().collect::<Vec<_>>();
-    assert_eq!(ids, [ThreadId(9), ThreadId(7)]);
-    let [o_ids, ..] = ReadyQueue::CORE_OFFSETS;
-    let cpu: Raw<PerCpu> = Raw::new();
-    // SAFETY: each place is a field of `cpu`'s zeroed allocation for a
-    // `PerCpu`; no `PerCpu` value is formed; established here.
-    unsafe {
-        addr_of_mut!((*cpu.p).cpu_id).write(1);
-        addr_of_mut!((*cpu.p).runq).write(q);
-        addr_of_mut!((*cpu.p).remote).write(&REMOTE);
+    let (head, cap) = (1usize, q.capacity());
+    let mut ring = std::vec![0xFFu8; cap * 4];
+    ring[..4].copy_from_slice(&3u32.to_le_bytes());
+    for (k, id) in q.iter().enumerate() {
+        let slot = (head + k) % cap;
+        ring[slot * 4..][..4].copy_from_slice(&id.raw().to_le_bytes());
     }
+    let ring_va = KBASE + 0x70_0000;
+    let remote_va = KBASE + 0x71_0000;
+    let cpu: Raw<PerCpu> = Raw::new();
+    // SAFETY: `cpu_id` is a field of `cpu`'s zeroed allocation for a
+    // `PerCpu`; no `PerCpu` value is formed; established here.
+    unsafe { addr_of_mut!((*cpu.p).cpu_id).write(1) };
     let mut cpu_bytes = cpu.bytes();
-    cpu_bytes[PerCpu::CORE_CURRENT..][..8].copy_from_slice(&t1.addr().to_le_bytes());
-    cpu_bytes[PerCpu::CORE_IDLE..][..8].copy_from_slice(&t2.addr().to_le_bytes());
-    // SAFETY: `runq` holds the queue written above, read back once so
-    // its ring drops; established here.
-    let q = unsafe { core::ptr::read(addr_of_mut!((*cpu.p).runq)) };
-    let ring_va = u64::from_le_bytes(
-        cpu_bytes[offset_of!(PerCpu, runq) + o_ids..][..8]
-            .try_into()
-            .unwrap(),
-    );
-    // SAFETY: `ring_va` is the queue's live ring of `capacity` `ThreadId`s
-    // (`u32`, no padding), which `q` owns until it drops below;
-    // established by `sched::ReadyQueue::try_new`.
-    let ring =
-        unsafe { core::slice::from_raw_parts(ring_va as *const u8, q.capacity() * 4) }.to_vec();
+    let mut put = |off: usize, v: u64| cpu_bytes[off..][..8].copy_from_slice(&v.to_le_bytes());
+    put(PerCpu::CORE_CURRENT, t1.addr());
+    put(PerCpu::CORE_IDLE, t2.addr());
+    put(offset_of!(PerCpu, remote), remote_va);
+    let [o_ids, o_cap, o_head, o_len] = ReadyQueue::CORE_OFFSETS;
+    let rq = offset_of!(PerCpu, runq);
+    put(rq + o_ids, ring_va);
+    put(rq + o_cap, cap as u64);
+    put(rq + o_head, head as u64);
+    put(rq + o_len, q.len() as u64);
     // The remote view's words the tool reads, at their offsets.
     let mut remote = std::vec![0u8; size_of::<PerCpuRemote>()];
     remote[offset_of!(PerCpuRemote, apic_id)..][..4].copy_from_slice(&5u32.to_le_bytes());
@@ -808,11 +855,9 @@ fn vmcore_reads_kernel_layouts() {
             .collect::<Vec<u8>>(),
     );
     let cpus_va = KBASE + 0x60_0000;
-    cpu_bytes.truncate(size_of::<PerCpu>());
     s.place(cpus_va, &cpu_bytes);
-    s.place(&REMOTE as *const PerCpuRemote as u64, &remote);
+    s.place(remote_va, &remote);
     s.place(ring_va, &ring);
-    drop(q);
     let root = s.root;
     let bytes = s.build();
     let core = SliceCore::new(&bytes).unwrap();
@@ -860,6 +905,8 @@ fn vmcore_reads_kernel_layouts() {
     let rq: Vec<u32> = (0..c.runq.len)
         .map(|i| k.runq_id(&c.runq, i).unwrap())
         .collect();
+    let want: Vec<u32> = q.iter().map(ThreadId::raw).collect();
+    assert_eq!(rq, want);
     assert_eq!(rq, [9, 7]);
     assert_eq!(k.runq_id(&c.runq, 2), Err(VmError::BadLayout));
     assert_eq!(c.stop_how(), Some(StopHow::Nmi));

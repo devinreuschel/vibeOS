@@ -22,11 +22,11 @@ mod mkfs;
 mod rw;
 mod vol;
 
-pub use dirent::lfn_checksum;
+pub use dirent::{eq_ci, lfn_checksum};
 pub use mkfs::{Geometry, INITRD_FREE_BYTES, MIN_SECTORS, geometry, image_sectors, mkfs, mkinitrd};
 
 use chain::{fat_loc, is_eoc};
-use dirent::{decode_short, eq_ci, fat_datetime, fat_to_unix, fill_lfn, utf16_len};
+use dirent::{decode_short, fat_datetime, fat_to_unix, fill_lfn, utf16_len};
 
 pub const SEC: usize = 512;
 pub const MAX_CLUS_BYTES: usize = 4096;
