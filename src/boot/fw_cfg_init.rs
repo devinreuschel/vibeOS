@@ -3,7 +3,7 @@
 //! 0x518, as QEMU's `docs/specs/fw_cfg.rst` defines them. Encodings are in
 //! `vibeos::boot`.
 //!
-//! Invariant I244: nothing here touches a port before CPUID.1:ECX[31]
+//! Invariant I57: nothing here touches a port before CPUID.1:ECX[31]
 //! reports a hypervisor, so bare metal never sees a write to 0x510, and one
 //! CPU at a time drives the device (boot before `smp: done`, then boot-time
 //! callers and the in-guest registry). The selector is device-global with
@@ -99,7 +99,7 @@ pub fn hypervisor() -> bool {
 
 fn select(key: u16) {
     debug_assert!(hypervisor(), "fw_cfg: port access without a hypervisor");
-    // SAFETY: invariant I244, established at `boot::fw_cfg_init::probe`:
+    // SAFETY: invariant I57, established at `boot::fw_cfg_init::probe`:
     // CPUID reported a hypervisor, so port 0x510 is fw_cfg's 16-bit
     // selector or unclaimed, and one CPU at a time drives it.
     unsafe { x86::outw(PORT_SELECTOR, key) }
@@ -107,7 +107,7 @@ fn select(key: u16) {
 
 fn read_bytes(out: &mut [u8]) {
     for b in out {
-        // SAFETY: invariant I244, established at `boot::fw_cfg_init::probe`:
+        // SAFETY: invariant I57, established at `boot::fw_cfg_init::probe`:
         // port 0x511 is fw_cfg's data byte after `select`.
         *b = unsafe { x86::inb(PORT_DATA) };
     }
@@ -234,7 +234,7 @@ pub(super) fn transfer(
     // device reaches them before the port write below.
     unsafe { core::ptr::copy_nonoverlapping(desc.as_ptr(), base, desc.len()) };
     dma::dma_wmb::<Arch>();
-    // SAFETY: invariant I244, established at `boot::fw_cfg_init::probe`:
+    // SAFETY: invariant I57, established at `boot::fw_cfg_init::probe`:
     // `has_dma` found the signature and the DMA feature, so 0x514 and
     // 0x518 are the DMA address register, big-endian in two halves; the
     // low write starts the transfer.

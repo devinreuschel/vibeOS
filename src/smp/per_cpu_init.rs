@@ -39,7 +39,7 @@ static REMOTE: BootCell<Box<[PerCpuRemote]>> = BootCell::new();
 
 // `cpu(id)` shares `&PerCpuRemote` across CPUs, so the view must be `Sync`
 // from its atomic fields alone; `scripts/check_cells.py` rejects an
-// `unsafe impl` of `Send` or `Sync` for it (invariant I120).
+// `unsafe impl` of `Send` or `Sync` for it (invariant I43).
 crate::cell::assert_impl!(PerCpuRemote: Sync);
 /// Bit `cpu_id`. MADTs with >64 CPUs need a wider mask later.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
@@ -250,7 +250,7 @@ pub unsafe fn with_cpu<R>(id: u32, f: impl FnOnce(&mut PerCpu) -> R) -> Option<R
     let cpu = cpus.get(id as usize)?;
     // SAFETY: `with_ptr`'s contract; `self_ptr` is slot `id` of `CPUS`, and
     // CPU `id` is not running by this fn's `# Safety` contract (invariants
-    // I120 and I21, established here).
+    // I43 and I21, established here).
     Some(unsafe { with_ptr(cpu.self_ptr, f) })
 }
 

@@ -76,7 +76,7 @@ fn buddy_16_frames_five_allocs() {
     // SAFETY: `insert_region`'s contract; the arena's 16 frames reach
     // their nodes in `nodes`, writable memory this harness owns, on no
     // list yet, which only the buddy writes until the harness ends
-    // (invariant I224, established here).
+    // (invariant I46, established here).
     unsafe { b.insert_region(ARENA_BASE, ARENA_END) };
     assert_eq!(b.stats(), ONE_BLOCK);
     let mut live = Live::<ALLOCS>::new();
@@ -126,7 +126,7 @@ fn buddy_16_frames_alloc_then_free() {
     // SAFETY: `insert_region`'s contract; the arena's 16 frames reach
     // their nodes in `nodes`, writable memory this harness owns, on no
     // list yet, which only the buddy writes until the harness ends
-    // (invariant I224, established here).
+    // (invariant I46, established here).
     unsafe { b.insert_region(ARENA_BASE, ARENA_END) };
     assert_eq!(b.stats(), ONE_BLOCK);
     let order: u8 = kani::any();
@@ -240,7 +240,7 @@ fn check<const N: usize>(b: &Buddy, live: &Live<N>) {
             on_list[((cur - ARENA_BASE) / PAGE_SIZE) as usize] = true;
             // SAFETY: `cur` is a node on the order-`k` free list, in a
             // free frame of the arena only the buddy writes (invariant
-            // I224, established at `mm::pmm::Buddy::insert_region`).
+            // I46, established at `mm::pmm::Buddy::insert_region`).
             cur = unsafe { (*b.node_ptr(cur)).next };
         }
         let step = 1usize << k;

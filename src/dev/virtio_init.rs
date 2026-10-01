@@ -68,21 +68,21 @@ pub(crate) const RNG_PAYLOAD: usize = 32;
 const RNG_PAYLOAD_OFF: usize = 16;
 
 fn r8(va: u64, off: u16) -> u8 {
-    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
     // mapped uncached for this bound device, and `off` a register offset
     // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
 }
 
 fn w8(va: u64, off: u16, v: u8) {
-    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
     // mapped uncached for this bound device, and `off` a register offset
     // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
 }
 
 fn r16(va: u64, off: u16) -> u16 {
-    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
     // mapped uncached for this bound device, and `off` a register offset
     // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
@@ -93,7 +93,7 @@ fn r16(va: u64, off: u16) -> u16 {
 }
 
 fn w16(va: u64, off: u16, v: u16) {
-    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
     // mapped uncached for this bound device, and `off` a register offset
     // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
@@ -102,7 +102,7 @@ fn w16(va: u64, off: u16, v: u16) {
 }
 
 fn r32(va: u64, off: u16) -> u32 {
-    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
     // mapped uncached for this bound device, and `off` a register offset
     // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
@@ -113,7 +113,7 @@ fn r32(va: u64, off: u16) -> u32 {
 }
 
 fn w32(va: u64, off: u16, v: u32) {
-    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
     // mapped uncached for this bound device, and `off` a register offset
     // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
@@ -351,7 +351,7 @@ fn rng_work(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
 
 fn kick(doorbell: u64) {
     dma::dma_wmb::<Arch>();
-    // SAFETY: invariant I234: `doorbell` is queue 0's notify register inside
+    // SAFETY: invariant I54: `doorbell` is queue 0's notify register inside
     // the notify capability's BAR, which `map_mmio` mapped uncached, checked
     // against the capability length by `virtio::notify_addr`; established by
     // `pci_init::map_mmio`.
@@ -453,7 +453,7 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
         core::ptr::write_bytes(qdma.virt() as *mut u8, 0, qdma.len() as usize);
         core::ptr::write_bytes(data.virt() as *mut u8, 0, data.len() as usize);
     }
-    // SAFETY: invariant I233: `qdma` is a page-aligned DMA buffer of at
+    // SAFETY: invariant I53: `qdma` is a page-aligned DMA buffer of at
     // least `layout.total` bytes, which stays allocated beside the queue
     // until the device is reset and it is freed; established by
     // `dma_init::alloc`.

@@ -111,7 +111,7 @@ nonzero chance of stomping something ACPI still points at.
 Kernel command line (ROADMAP §10.2). `boot::capture` keeps it in `BootInfo`: the `limine.conf`
 entry's `cmdline:` (`vibeos.strace=0` in the shipped entry), then, on x86_64 when CPUID.1:ECX[31]
 reports a hypervisor and QEMU's fw_cfg lists `opt/vibeos/cmdline`, one space and that file's text,
-trailing NULs and whitespace stripped (`boot::fw_cfg_init`, invariant I244), so the harness sets
+trailing NULs and whitespace stripped (`boot::fw_cfg_init`, invariant I57), so the harness sets
 options on the unmodified ISO (`VIBEOS_CMDLINE`, [§8.4](TESTING.md#84-qemu-flags)). At most 2048 bytes
 are kept, Linux's x86 `COMMAND_LINE_SIZE`; the rest is dropped with one log line. The kernel prints
 it once as `vibeOS: boot: cmdline: <text>`, a byte outside 0x20 to 0x7E as `?`. The portable

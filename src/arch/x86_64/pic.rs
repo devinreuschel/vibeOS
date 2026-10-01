@@ -38,7 +38,7 @@ pub unsafe fn remap_and_mask() {
 /// IRQs off. IDT already loaded so 0x20 is `pit_irq`, not #DF.
 pub unsafe fn program() {
     for &(port, val) in REMAP_WRITES {
-        // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+        // SAFETY: invariant I50, established at `arch::x86_64::pic::program`:
         // the 8259 ports are this module's, and `REMAP_WRITES` is the ICW sequence
         // plus the delay port's writes.
         unsafe { x86::outb(port, val) };
@@ -49,7 +49,7 @@ pub fn mask(irq: u8) {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return;
     };
-    // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+    // SAFETY: invariant I50, established at `arch::x86_64::pic::program`:
     // the 8259 ports are this module's, and `port` is a data port `irq_port_bit` chose.
     unsafe {
         let cur = x86::inb(port);
@@ -61,7 +61,7 @@ pub fn unmask(irq: u8) {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return;
     };
-    // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+    // SAFETY: invariant I50, established at `arch::x86_64::pic::program`:
     // the 8259 ports are this module's, and `port` is a data port `irq_port_bit` chose.
     unsafe {
         let cur = x86::inb(port);
@@ -70,7 +70,7 @@ pub fn unmask(irq: u8) {
 }
 
 pub fn disable_all() {
-    // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+    // SAFETY: invariant I50, established at `arch::x86_64::pic::program`:
     // the 8259 ports are this module's.
     unsafe {
         x86::outb(PIC1_DATA, 0xFF);
@@ -110,7 +110,7 @@ pub fn is_masked(irq: u8) -> bool {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return false;
     };
-    // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+    // SAFETY: invariant I50, established at `arch::x86_64::pic::program`:
     // the 8259 ports are this module's, and `port` is a data port `irq_port_bit` chose.
     unsafe { x86::inb(port) & (1 << bit) != 0 }
 }
@@ -122,7 +122,7 @@ pub fn line_of(vec: u8) -> Option<u8> {
 }
 
 fn read_isr(cmd: u16) -> u8 {
-    // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+    // SAFETY: invariant I50, established at `arch::x86_64::pic::program`:
     // the 8259 ports are this module's, and `cmd` is a command port.
     unsafe {
         x86::outb(cmd, pic::OCW3_ISR);
@@ -133,10 +133,10 @@ fn read_isr(cmd: u16) -> u8 {
 fn eoi(kind: Eoi) {
     match kind {
         Eoi::None => {}
-        // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+        // SAFETY: invariant I50, established at `arch::x86_64::pic::program`:
         // the 8259 ports are this module's.
         Eoi::Master => unsafe { x86::outb(PIC1_CMD, PIC_EOI) },
-        // SAFETY: invariant I229, as for the master's EOI; established at
+        // SAFETY: invariant I50, as for the master's EOI; established at
         // `arch::x86_64::pic::program`.
         Eoi::SlaveThenMaster => unsafe {
             x86::outb(PIC2_CMD, PIC_EOI);

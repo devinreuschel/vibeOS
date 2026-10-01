@@ -406,7 +406,7 @@ fn parked() {
 }
 
 /// The free of a root that a parked TCB's `as_cr3` still names hits the
-/// assertion at the root's free (invariant I128), `SpaceCore`'s drop, which
+/// assertion at the root's free (invariant I44), `SpaceCore`'s drop, which
 /// the space's last reference reaches, instead of freeing the root.
 pub(crate) fn teardown_live_root_asserts() -> Outcome {
     let space = match addr_space_init::create() {

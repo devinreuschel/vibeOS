@@ -268,7 +268,7 @@ impl Buddy {
     /// Caller vouches that the entire range is real, writable memory
     /// reachable through `hhdm_offset`, that no piece of it is currently
     /// in the free lists, and that nothing else holds a pointer into it:
-    /// from here on only the buddy writes it (invariant I224).
+    /// from here on only the buddy writes it (invariant I46).
     pub unsafe fn insert_region(&mut self, start: PhysAddr, end: PhysAddr) {
         let start = start.max(PAGE_SIZE);
         let mut a = align_up(start, PAGE_SIZE);
@@ -287,7 +287,7 @@ impl Buddy {
             self.total_frames += 1 << k;
             // SAFETY: `push_free`'s contract; `[a, a + 2^k frames)` lies in
             // the range this fn's `# Safety` contract hands over, unused and
-            // not yet on a list (invariant I224, established here).
+            // not yet on a list (invariant I46, established here).
             unsafe { self.push_free(a, k as u8) };
             a += PAGE_SIZE << k;
         }
@@ -330,7 +330,7 @@ impl Buddy {
                 }
                 // SAFETY: `cur` is a node on the order-`k` free list, which
                 // lives in a free page only the buddy writes (invariant
-                // I224, established at `mm::pmm::Buddy::insert_region`).
+                // I46, established at `mm::pmm::Buddy::insert_region`).
                 cur = unsafe { (*self.node_ptr(cur)).next };
             }
             if found == NULL {
@@ -347,7 +347,7 @@ impl Buddy {
         while k > target {
             k -= 1;
             // SAFETY: `push_free`'s contract; the high half of the block
-            // unlinked above is unused and the buddy's (invariant I224,
+            // unlinked above is unused and the buddy's (invariant I46,
             // established here).
             unsafe { self.push_free(found + (PAGE_SIZE << k), k as u8) };
         }
@@ -400,7 +400,7 @@ impl Buddy {
             k -= 1;
             let buddy = addr + (PAGE_SIZE << k);
             // SAFETY: `push_free`'s contract; the right half of the block
-            // popped above is unused and the buddy's (invariant I224,
+            // popped above is unused and the buddy's (invariant I46,
             // established here).
             unsafe { self.push_free(buddy, k as u8) };
         }
@@ -432,7 +432,7 @@ impl Buddy {
         assert!(
             // SAFETY: `covered_by_free_block`'s contract; only the buddy
             // writes its free lists, so their nodes are intact (invariant
-            // I224, established at `mm::pmm::Buddy::insert_region`).
+            // I46, established at `mm::pmm::Buddy::insert_region`).
             !unsafe { self.covered_by_free_block(phys, order) },
             "pmm: double free at {phys:#x} order {order}"
         );
@@ -440,7 +440,7 @@ impl Buddy {
         while (order as usize) < MAX_ORDER {
             let buddy = phys ^ (PAGE_SIZE << order);
             // SAFETY: `in_free_list`'s contract; the free lists are intact
-            // (invariant I224, established at
+            // (invariant I46, established at
             // `mm::pmm::Buddy::insert_region`).
             if !unsafe { self.in_free_list(buddy, order) } {
                 break;
@@ -453,7 +453,7 @@ impl Buddy {
         }
         // SAFETY: `push_free`'s contract; `phys` is the block this fn's
         // `# Safety` contract hands back, merged with free buddies the loop
-        // unlinked, so it is unused and the buddy's (invariant I224,
+        // unlinked, so it is unused and the buddy's (invariant I46,
         // established here).
         unsafe { self.push_free(phys, order) };
     }
@@ -497,7 +497,7 @@ impl Buddy {
 
     /// # Safety
     /// `phys` is an unused block of `order` that this buddy owns, not on
-    /// any free list, and writable at `phys + hhdm_offset` (invariant I224).
+    /// any free list, and writable at `phys + hhdm_offset` (invariant I46).
     unsafe fn push_free(&mut self, phys: u64, order: u8) {
         let k = order as usize;
         let head = self.heads[k];
@@ -505,7 +505,7 @@ impl Buddy {
         // SAFETY: `node` is the first bytes of the unused block `phys` this
         // fn's `# Safety` contract hands over, and `head`, when not NULL, is
         // a node on the order-`k` list; only the buddy writes either
-        // (invariant I224, established here).
+        // (invariant I46, established here).
         unsafe {
             node.write(FreeNode {
                 next: head,
@@ -528,13 +528,13 @@ impl Buddy {
         assert!(head != NULL, "pmm: pop_head on empty order {k}");
         let n = self.node_ptr(head);
         // SAFETY: the assert above makes `head` a node on the order-`k`
-        // list, in a free page only the buddy writes (invariant I224,
+        // list, in a free page only the buddy writes (invariant I46,
         // established at `mm::pmm::Buddy::insert_region`).
         let next = unsafe { (*n).next };
         self.heads[k] = next;
         if next != NULL {
             // SAFETY: `next` is the following node on the same list
-            // (invariant I224, established at
+            // (invariant I46, established at
             // `mm::pmm::Buddy::insert_region`).
             unsafe {
                 (*self.node_ptr(next)).prev = NULL;
@@ -552,13 +552,13 @@ impl Buddy {
         let node = self.node_ptr(phys);
         // SAFETY: `phys` is a node on the order-`k` list by this fn's
         // `# Safety` contract, established here, and lives in a free page
-        // only the buddy writes (invariant I224).
+        // only the buddy writes (invariant I46).
         let (prev, next) = unsafe { ((*node).prev, (*node).next) };
         if prev == NULL {
             self.heads[k] = next;
         } else {
             // SAFETY: `prev` is `phys`'s neighbour on the same list
-            // (invariant I224, established at
+            // (invariant I46, established at
             // `mm::pmm::Buddy::insert_region`).
             unsafe {
                 (*self.node_ptr(prev)).next = next;
@@ -566,7 +566,7 @@ impl Buddy {
         }
         if next != NULL {
             // SAFETY: `next` is `phys`'s neighbour on the same list
-            // (invariant I224, established at
+            // (invariant I46, established at
             // `mm::pmm::Buddy::insert_region`).
             unsafe {
                 (*self.node_ptr(next)).prev = prev;
@@ -585,7 +585,7 @@ impl Buddy {
                 return true;
             }
             // SAFETY: `cur` is a node on the order-`order` list, intact by
-            // this fn's `# Safety` contract (invariant I224, established
+            // this fn's `# Safety` contract (invariant I46, established
             // here).
             cur = unsafe { (*self.node_ptr(cur)).next };
         }
@@ -602,7 +602,7 @@ impl Buddy {
         for k in (at_least_order as usize)..=MAX_ORDER {
             let block_start = phys & !((PAGE_SIZE << k) - 1);
             // SAFETY: `in_free_list`'s contract; the lists are intact by
-            // this fn's `# Safety` contract (invariant I224, established
+            // this fn's `# Safety` contract (invariant I46, established
             // here).
             if unsafe { self.in_free_list(block_start, k as u8) } {
                 return true;
@@ -736,7 +736,7 @@ pub(crate) mod testing {
             let mut buddy = Buddy::new(hhdm);
             // SAFETY: `insert_region`'s contract; `mem` is `frames` pages
             // of host memory this pool owns, reached at `hhdm`, and on no
-            // list yet (invariant I224, established here).
+            // list yet (invariant I46, established here).
             unsafe { buddy.insert_region(TEST_PHYS_BASE, phys_end) };
             Self {
                 _mem: mem,
@@ -988,7 +988,7 @@ mod tests {
         let s = p.buddy.stats();
         assert_eq!(s.free_frames, s.total_frames - 1);
         // SAFETY: `covered_by_free_block`'s contract; only the buddy wrote
-        // the pool's lists (invariant I224, established here).
+        // the pool's lists (invariant I46, established here).
         assert!(!unsafe { p.buddy.covered_by_free_block(base, 0) });
     }
 
@@ -1078,7 +1078,7 @@ mod tests {
         let ptr = mem.as_ptr() as u64;
         let mut buddy = Buddy::new(ptr);
         // SAFETY: `insert_region`'s contract; `mem` is 32 pages of host
-        // memory this test owns, reached at `ptr` (invariant I224,
+        // memory this test owns, reached at `ptr` (invariant I46,
         // established here).
         unsafe { buddy.insert_region(0, 32 * PAGE_SIZE) };
         assert_eq!(buddy.stats().total_frames, 31);
@@ -1095,7 +1095,7 @@ mod tests {
         let mut buddy = Buddy::new(ptr.wrapping_sub(TEST_PHYS_BASE));
         // SAFETY: `insert_region`'s contract; `mem` is 10 pages of host
         // memory this test owns, and the range lies inside it (invariant
-        // I224, established here).
+        // I46, established here).
         unsafe {
             buddy.insert_region(TEST_PHYS_BASE + 100, TEST_PHYS_BASE + 9 * PAGE_SIZE + 200);
         }

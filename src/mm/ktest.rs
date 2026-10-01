@@ -378,7 +378,7 @@ pub(crate) fn test_mmio_uc_flags() -> Outcome {
         // SAFETY: `Mapper::map_page`'s contract; the leaf goes back to the
         // physical range and flags `translate` read above, which the
         // physmap mapped before this test, so no other mapping reaches it
-        // anew; the guard holds the page-table lock (invariant I226,
+        // anew; the guard holds the page-table lock (invariant I48,
         // established at `mm::paging_init::current_mapper`).
         unsafe {
             m.map_page(

@@ -793,7 +793,7 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
 }
 
 pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
-    // SAFETY: invariant I484: every caller passes a device's BAR 0 VA,
+    // SAFETY: invariant I58: every caller passes a device's BAR 0 VA,
     // which the `bar-test` driver claimed and mapped uncached, and a
     // register offset inside that BAR; established by `ktest::bar0_va`.
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32) }

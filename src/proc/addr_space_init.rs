@@ -6,7 +6,7 @@
 //! last put runs [`SpaceCore`]'s teardown (every user leaf and user page
 //! table back to the buddy); [`CoreRef`] is one core reference, held by
 //! each region and each `users` holder, whose last put frees the root,
-//! after asserting that no CPU and no TCB still holds it (invariant I128).
+//! after asserting that no CPU and no TCB still holds it (invariant I44).
 //! Code reaches a running space only through a scoped guard
 //! (`proc_init::with_current_space`), never a `&'static`.
 
@@ -110,7 +110,7 @@ impl Teardown for SpaceCore {
         let mut mm = self.mm.lock();
         paging_init::with_pt(|_pt| {
             let mut pool = BuddyPool;
-            // SAFETY: invariant I128: the last `users` reference is gone, so
+            // SAFETY: invariant I44: the last `users` reference is gone, so
             // no thread runs this space and no pin walks it; its process's
             // CR3 was switched away before that put (`proc_init::finish_exit`,
             // `proc_init::sys_execve`), so no CPU walks these tables once they
@@ -122,7 +122,7 @@ impl Teardown for SpaceCore {
 
 impl Drop for SpaceCore {
     /// The core's free: assert that no CPU has the root loaded and no TCB
-    /// names it (invariant I128), then free it to the buddy.
+    /// names it (invariant I44), then free it to the buddy.
     fn drop(&mut self) {
         let Some(root) = self.root.take() else {
             return;
@@ -131,7 +131,7 @@ impl Drop for SpaceCore {
         if let Some(h) = root_holder(pa) {
             #[allow(
                 clippy::panic,
-                reason = "invariant I128: a root is freed only after every CPU and TCB has let it go; a holder is a kernel bug"
+                reason = "invariant I44: a root is freed only after every CPU and TCB has let it go; a holder is a kernel bug"
             )]
             {
                 // The root is not freed: a CPU may still walk it.
@@ -612,13 +612,13 @@ fn root_holder(root: u64) -> Option<RootHolder> {
 /// the kernel root, the caller has recorded it in the current thread's
 /// `Tcb.as_cr3` before the call (`execve` does, through
 /// `thread_init::set_pid_cr3`), so the core's free sees it (invariant
-/// I128).
+/// I44).
 pub unsafe fn load_cr3_u64(want: u64) {
     per_cpu_init::with_current(|cpu| {
         if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
             return;
         }
-        // SAFETY: invariant I128: `want` is a PML4 that shares the kernel
+        // SAFETY: invariant I44: `want` is a PML4 that shares the kernel
         // half this code and stack run in and stays allocated while loaded
         // (this fn's contract, `addr_space_init::load_cr3_u64`).
         unsafe { Arch::set_root(PhysAddr(want)) };

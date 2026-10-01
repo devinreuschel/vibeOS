@@ -34,7 +34,7 @@ pub(super) fn copy_to_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
     let mut i = 0u8;
     while i < req.nseg {
         let s = req.segs[i as usize];
-        // SAFETY: invariant I235: the segment's `len` bytes stay valid and
+        // SAFETY: invariant I55: the segment's `len` bytes stay valid and
         // untouched until the request completes, and `issue` checked that
         // the segments total at most `BOUNCE`, the bounce area's size;
         // established by `virtio_blk_init::VirtioBlk::build`.
@@ -53,7 +53,7 @@ pub(super) fn copy_from_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
     let mut i = 0u8;
     while i < req.nseg {
         let s = req.segs[i as usize];
-        // SAFETY: invariant I235, as in `copy_to_bounce`; established by
+        // SAFETY: invariant I55, as in `copy_to_bounce`; established by
         // `virtio_blk_init::VirtioBlk::build`.
         unsafe {
             core::ptr::copy_nonoverlapping(src, s.ptr as *mut u8, s.len);

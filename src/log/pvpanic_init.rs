@@ -5,7 +5,7 @@
 //! names once for the events the device supports. `vibeos::log::pvpanic`
 //! chooses the event a panic step writes; [`signal`] writes it.
 //!
-//! fw_cfg is probed only when CPUID reports a hypervisor (invariant I244),
+//! fw_cfg is probed only when CPUID reports a hypervisor (invariant I57),
 //! so bare metal sees no port access here, and the port written is only
 //! the one fw_cfg named, never a guessed one.
 
@@ -43,7 +43,7 @@ pub fn probe() {
     // SAFETY: `port` is the one QEMU's fw_cfg names in `etc/pvpanic-port`,
     // the ISA pvpanic device's byte register, where a read returns the
     // supported events (QEMU `docs/specs/pvpanic.rst`); fw_cfg answered only
-    // after CPUID reported a hypervisor (invariant I244); established here.
+    // after CPUID reported a hypervisor (invariant I57); established here.
     let mask = unsafe { x86::inb(port) };
     // Release: pairs with the Acquire loads in `signal` and `found`, so a
     // CPU that sees the state also sees the probe's port read as done.

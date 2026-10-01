@@ -242,7 +242,7 @@ fn execute(req: &Request) -> Result<(), BlockError> {
         }
     }
     let mut data = DATA.lock();
-    // SAFETY: invariant I235: a queued request's segments stay valid and
+    // SAFETY: invariant I55: a queued request's segments stay valid and
     // untouched until its completion runs, and none aliases the ramdisk's
     // own `DATA`; established by `block_init::build`.
     unsafe { ram().apply(&mut data[..], req) }

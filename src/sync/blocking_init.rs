@@ -49,7 +49,7 @@ pub struct BlockingMutex<T> {
     data: UnsafeCell<T>,
 }
 
-// SAFETY: invariant I232: one guard at a time reaches `data`, so sharing
+// SAFETY: invariant I52: one guard at a time reaches `data`, so sharing
 // the mutex hands one holder at a time `&mut T` (AGENTS.md rule 6), and
 // `state` is touched only under SCHED; established by
 // `sync::blocking_init::BlockingMutex::lock_until`.
@@ -164,7 +164,7 @@ impl<T> Drop for BlockingMutexGuard<'_, T> {
 impl<T> Deref for BlockingMutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        // SAFETY: invariant I232: this guard owns the mutex, so no other
+        // SAFETY: invariant I52: this guard owns the mutex, so no other
         // reference to `data` exists; established by
         // `sync::blocking_init::BlockingMutex::lock_until`.
         unsafe { &*self.mutex.data.get() }
@@ -173,7 +173,7 @@ impl<T> Deref for BlockingMutexGuard<'_, T> {
 
 impl<T> DerefMut for BlockingMutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: invariant I232: this guard owns the mutex and `&mut self`
+        // SAFETY: invariant I52: this guard owns the mutex and `&mut self`
         // borrows it uniquely; established by
         // `sync::blocking_init::BlockingMutex::lock_until`.
         unsafe { &mut *self.mutex.data.get() }
@@ -187,7 +187,7 @@ pub struct RwLock<T> {
     data: UnsafeCell<T>,
 }
 
-// SAFETY: invariant I232: readers share `&T` and a writer gets `&mut T`
+// SAFETY: invariant I52: readers share `&T` and a writer gets `&mut T`
 // alone, which `T: Send + Sync` covers (AGENTS.md rule 6), and `state` is
 // touched only under SCHED; established by `sync::blocking_init::RwLock::write_until`.
 unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
@@ -339,7 +339,7 @@ impl<T> Drop for RwLockWriteGuard<'_, T> {
 impl<T> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        // SAFETY: invariant I232: a read guard exists only while no writer
+        // SAFETY: invariant I52: a read guard exists only while no writer
         // holds the lock, so every reference to `data` is shared;
         // established by `sync::blocking_init::RwLock::read_until`.
         unsafe { &*self.lock.data.get() }
@@ -349,7 +349,7 @@ impl<T> Deref for RwLockReadGuard<'_, T> {
 impl<T> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        // SAFETY: invariant I232: the write guard excludes every other
+        // SAFETY: invariant I52: the write guard excludes every other
         // guard; established by `sync::blocking_init::RwLock::write_until`.
         unsafe { &*self.lock.data.get() }
     }
@@ -357,7 +357,7 @@ impl<T> Deref for RwLockWriteGuard<'_, T> {
 
 impl<T> DerefMut for RwLockWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: invariant I232: the write guard excludes every other
+        // SAFETY: invariant I52: the write guard excludes every other
         // guard and `&mut self` borrows it uniquely; established by
         // `sync::blocking_init::RwLock::write_until`.
         unsafe { &mut *self.lock.data.get() }

@@ -205,7 +205,7 @@ pub(super) fn sys_execve(
     };
     close_where(pid, "execve close-on-exec", Fd::cloexec);
     thread_init::set_pid_cr3(tid, pid, root);
-    // SAFETY: invariant I128, established at `addr_space_init::SpaceCore`'s
+    // SAFETY: invariant I44, established at `addr_space_init::SpaceCore`'s
     // drop: `root` is the root of the space `create` built and `p.space`
     // now holds, and `set_pid_cr3` recorded it in this thread's TCB on the
     // line above, here.

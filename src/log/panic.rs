@@ -134,7 +134,7 @@ pub(crate) fn walk_known(rip: u64, rbp: u64, out: impl FnMut(u64)) -> (usize, Wa
         // SAFETY: `backtrace::walk` reads only a word of a frame record it
         // found inside one of `known`, each a mapped stack: the current
         // thread's (live while it runs), the boot stack Limine mapped, and
-        // this CPU's IST and RSP0 stacks, which invariant I230 keeps mapped
+        // this CPU's IST and RSP0 stacks, which invariant I51 keeps mapped
         // while it is online; established by `panic::known_stacks` and
         // `vibeos::log::backtrace::on_known_stack`.
         unsafe { core::ptr::read_volatile(a as *const u64) }

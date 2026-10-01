@@ -824,7 +824,7 @@ impl Ramdisk {
     /// Run one queued request against `data`.
     ///
     /// # Safety
-    /// Invariant I235: for `Read` and `Write`, each of `req`'s segments is
+    /// Invariant I55: for `Read` and `Write`, each of `req`'s segments is
     /// valid for its length (for writes, `Read`) and aliases neither `data`
     /// nor anything else in use until this returns.
     pub unsafe fn apply(self, data: &mut [u8], req: &Request) -> Result<(), BlockError> {
@@ -844,13 +844,13 @@ impl Ramdisk {
                         return Err(BlockError::Inval);
                     }
                     if req.bio.op == Op::Read {
-                        // SAFETY: invariant I235; established by
+                        // SAFETY: invariant I55; established by
                         // `block::Ramdisk::apply`'s `# Safety` contract.
                         let buf =
                             unsafe { core::slice::from_raw_parts_mut(s.ptr as *mut u8, s.len) };
                         self.read(data, lba, buf)?;
                     } else {
-                        // SAFETY: invariant I235; established by
+                        // SAFETY: invariant I55; established by
                         // `block::Ramdisk::apply`'s `# Safety` contract.
                         let buf = unsafe { core::slice::from_raw_parts(s.ptr as *const u8, s.len) };
                         self.write(data, lba, buf)?;

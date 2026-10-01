@@ -117,7 +117,7 @@ fn publish_ns(n: u64) -> u64 {
 
 #[cfg(target_arch = "x86_64")]
 fn io_wait() {
-    // SAFETY: invariant I229, established at `time::time_init::init`: port
+    // SAFETY: invariant I50, established at `time::time_init::init`: port
     // 0x80 is the delay port, a write to it has no effect any module
     // relies on.
     unsafe { x86::outb(IO_WAIT_PORT, 0) };
@@ -131,7 +131,7 @@ pub fn read_tsc() -> u64 {
 
 /// # Safety
 /// `va` is the physmap address of the HPET register block, mapped UC
-/// (invariant I228), and `off` an 8-byte-aligned register offset in it.
+/// (invariant I49), and `off` an 8-byte-aligned register offset in it.
 unsafe fn hpet_read(va: u64, off: u64) -> u64 {
     // SAFETY: this fn's `# Safety` (here): `va + off` is a mapped, aligned
     // HPET register.
@@ -167,7 +167,7 @@ pub(crate) fn hpet_ready() -> Option<(u64, u32)> {
         return None;
     }
     let va = hpet_va(&hpet);
-    // SAFETY: invariant I228, established at `acpi::acpi_init::init`: it
+    // SAFETY: invariant I49, established at `acpi::acpi_init::init`: it
     // stores a nonzero `period_fs` only after UC-patching the HPET page,
     // and `hpet_period_ok` rejected zero just above.
     unsafe { hpet_enable(va) };
@@ -185,7 +185,7 @@ pub(crate) fn hpet_ready() -> Option<(u64, u32)> {
 /// `va` is the address [`hpet_ready`] returned.
 pub(crate) unsafe fn hpet_read_main(va: u64) -> u64 {
     // SAFETY: this fn's `# Safety` (here): `hpet_ready` returns only a UC
-    // HPET block (invariant I228), and the main counter's low half is the
+    // HPET block (invariant I49), and the main counter's low half is the
     // 4-byte register at `HPET_MAIN`.
     u64::from(unsafe { ((va.wrapping_add(HPET_MAIN)) as *const u32).read_volatile() })
 }
@@ -209,7 +209,7 @@ fn read_raw(st: &TimeState, id: ClocksourceId) -> u64 {
     match id {
         ClocksourceId::Tsc => read_tsc(),
         ClocksourceId::Hpet => st.hpet.map_or(0, |(c, va)| {
-            // SAFETY: invariant I228, established at `acpi::acpi_init::init`:
+            // SAFETY: invariant I49, established at `acpi::acpi_init::init`:
             // `va` came from `hpet_ready` in `hpet_counter`.
             unsafe { hpet_read_main(va) & c.mask() }
         }),
@@ -225,7 +225,7 @@ fn hpet_counter() -> Option<(Counter, u64)> {
     let (va, period_fs) = hpet_ready()?;
     let c = Counter::new(ClocksourceId::Hpet, hpet_hz(period_fs)?, HPET_READ_WIDTH)?;
     let main = || {
-        // SAFETY: invariant I228, established at `acpi::acpi_init::init`:
+        // SAFETY: invariant I49, established at `acpi::acpi_init::init`:
         // `va` is the UC block `hpet_ready` returned.
         unsafe { hpet_read_main(va) & c.mask() }
     };
@@ -257,11 +257,11 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
         return None;
     }
     let va = hpet_va(hpet);
-    // Every HPET access below relies on invariant I228, established at
+    // Every HPET access below relies on invariant I49, established at
     // `acpi::acpi_init::init`: it stores a nonzero `period_fs` only after
     // UC-patching the HPET page, and `hpet_period_ok` rejected zero above.
     let main = || {
-        // SAFETY: invariant I228, established at `acpi::acpi_init::init`,
+        // SAFETY: invariant I49, established at `acpi::acpi_init::init`,
         // as stated above `main`.
         unsafe { hpet_read_main(va) }
     };
@@ -270,7 +270,7 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     if want == 0 {
         return None;
     }
-    // SAFETY: invariant I228, established at `acpi::acpi_init::init`, as
+    // SAFETY: invariant I49, established at `acpi::acpi_init::init`, as
     // stated above `main`.
     unsafe { hpet_enable(va) };
     let probe = main();
@@ -359,7 +359,7 @@ pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
 /// it low. None if OUT never rises.
 #[cfg(target_arch = "x86_64")]
 fn pit_window(use_rdtscp: bool) -> Option<PitWindow> {
-    // SAFETY: invariant I229, established at `time::time_init::init`: the
+    // SAFETY: invariant I50, established at `time::time_init::init`: the
     // PIT and port 0x61 are this module's, and channel 2 feeds only this
     // calibration.
     unsafe {
@@ -370,11 +370,11 @@ fn pit_window(use_rdtscp: bool) -> Option<PitWindow> {
         io_wait();
         x86::outb(PIT_CH2, (PIT_CALIB_COUNT >> 8) as u8);
     }
-    // SAFETY: invariant I229, established at `time::time_init::init`: the
+    // SAFETY: invariant I50, established at `time::time_init::init`: the
     // PIT and port 0x61 are this module's.
     let n61 = unsafe { x86::inb(PIT_GATE) };
     let start_lo = rdtsc_ser(use_rdtscp);
-    // SAFETY: invariant I229, established at `time::time_init::init`: the
+    // SAFETY: invariant I50, established at `time::time_init::init`: the
     // PIT and port 0x61 are this module's; the gate starts the one-shot.
     unsafe { x86::outb(PIT_GATE, (n61 & !0x02) | 0x01) };
     let start_hi = rdtsc_ser(use_rdtscp);
@@ -382,7 +382,7 @@ fn pit_window(use_rdtscp: bool) -> Option<PitWindow> {
     let mut spins = 0u64;
     loop {
         let before = rdtsc_ser(use_rdtscp);
-        // SAFETY: invariant I229, established at `time::time_init::init`:
+        // SAFETY: invariant I50, established at `time::time_init::init`:
         // port 0x61 is this module's.
         let out = unsafe { x86::inb(PIT_GATE) } & (1 << 5) != 0;
         let after = rdtsc_ser(use_rdtscp);
@@ -406,7 +406,7 @@ fn pit_window(use_rdtscp: bool) -> Option<PitWindow> {
 #[cfg(target_arch = "x86_64")]
 fn program_pit_ch0() {
     for &(port, val) in PIT_CH0_WRITES {
-        // SAFETY: invariant I229, established at `time::time_init::init`:
+        // SAFETY: invariant I50, established at `time::time_init::init`:
         // the PIT (and the delay port) are this module's.
         unsafe { x86::outb(port, val) };
     }
@@ -414,7 +414,7 @@ fn program_pit_ch0() {
 
 #[cfg(target_arch = "x86_64")]
 fn rtc_reg(reg: u8) -> u8 {
-    // SAFETY: invariant I229, established at `time::time_init::init`: CMOS
+    // SAFETY: invariant I50, established at `time::time_init::init`: CMOS
     // is this module's, so no one else moves the index between the writes.
     unsafe {
         x86::outb(RTC_INDEX, reg | RTC_NMI_OFF);
@@ -681,7 +681,7 @@ pub fn busy_wait_ms(ms: u64) {
 /// Master PIC EOI. Used by the PIT gate after `on_pit_tick`.
 #[cfg(target_arch = "x86_64")]
 pub fn eoi_pit() {
-    // SAFETY: invariant I229, established at `arch::x86_64::pic::program`:
+    // SAFETY: invariant I50, established at `arch::x86_64::pic::program`:
     // the master 8259's EOI, which the IRQ0 path writes directly, is the
     // row's named exception to the PIC's ownership.
     unsafe { x86::outb(PIC1_CMD, PIC_EOI) };
@@ -754,7 +754,7 @@ pub unsafe fn init() {
     }
     // Re-enable NMI after CMOS index bit 7.
     #[cfg(target_arch = "x86_64")]
-    // SAFETY: invariant I229, established here: CMOS is this module's.
+    // SAFETY: invariant I50, established here: CMOS is this module's.
     unsafe {
         x86::outb(RTC_INDEX, 0x0D);
     }

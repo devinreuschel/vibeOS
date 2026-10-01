@@ -44,7 +44,7 @@ pub(super) fn pick_vq(blk: &Blk, need: u16) -> Option<usize> {
 
 pub(super) fn kick(doorbell: u64) {
     dma::dma_wmb::<Arch>();
-    // SAFETY: invariant I234: `doorbell` is a queue's notify register inside
+    // SAFETY: invariant I54: `doorbell` is a queue's notify register inside
     // the notify capability's BAR, which `map_mmio` mapped uncached, checked
     // against the capability length by `vibeos::dev::virtio::notify_addr`;
     // established by `crate::dev::pci_init::map_mmio`.

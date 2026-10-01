@@ -165,7 +165,7 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
         // `[phys, phys + len)` is device MMIO no cacheable alias touches
         // (this fn's `# Safety` contract, established here, invariant I17),
         // and `reserve` handed out VA no other mapping uses; `pt` holds the
-        // page-table lock (invariant I226, established at
+        // page-table lock (invariant I48, established at
         // `mm::paging_init::current_mapper`).
         unsafe {
             pt.map_range(
@@ -199,7 +199,7 @@ pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapErr
     // SAFETY: `Mapper::patch_physmap_uc`'s contract; `install` has run, so
     // the kernel root `current_mapper` walks is the one the CPU uses (this
     // fn's `# Safety` contract, established here), and the guard holds the
-    // page-table lock (invariant I226, established at
+    // page-table lock (invariant I48, established at
     // `mm::paging_init::current_mapper`).
     let n = unsafe { current_mapper().patch_physmap_uc(VirtAddr(HHDM_BASE), phys, len) }?;
     let mut off: u64 = 0;
@@ -246,7 +246,7 @@ pub unsafe fn map_4k_locked(
     let mut alloc = BuddyFrames;
     // SAFETY: `Mapper::map_page`'s contract, which this fn's `# Safety`
     // passes on, established here; `pt` holds the page-table lock
-    // (invariant I226, established at `mm::paging_init::current_mapper`).
+    // (invariant I48, established at `mm::paging_init::current_mapper`).
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
     }
@@ -279,7 +279,7 @@ pub unsafe fn map_2m_locked(
     let mut alloc = BuddyFrames;
     // SAFETY: `Mapper::map_page`'s contract, which this fn's `# Safety`
     // passes on, established here; `pt` holds the page-table lock
-    // (invariant I226, established at `mm::paging_init::current_mapper`).
+    // (invariant I48, established at `mm::paging_init::current_mapper`).
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size2M, MapMode::Fresh, &mut alloc)?;
     }
@@ -473,7 +473,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // owned by the kernel for good, and `HHDM_BASE` reaches every buddy
     // frame (invariant I14, established at `mm::pmm_init::init`). Boot is
     // single-CPU with IRQs off (this fn's `# Safety` contract), the one
-    // case invariant I226 excepts; established here.
+    // case invariant I48 excepts; established here.
     let mut mapper = unsafe { Mapper::new(root, HHDM_BASE) };
 
     // ---- 1. Kernel image, per section ----
@@ -849,7 +849,7 @@ unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
         idx,
     );
     // SAFETY: as above, `dst` is the new PML4, and boot is single-CPU, the
-    // case invariant I226 excepts; the assert kept the slot empty,
+    // case invariant I48 excepts; the assert kept the slot empty,
     // established here.
     unsafe { dst.add(idx).write_volatile(entry) };
 }
