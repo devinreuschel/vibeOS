@@ -10,11 +10,11 @@ use vibeos::acpi::HpetInfo;
 use vibeos::arch::CycleCounter;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::time::{
-    CalibSource, Candidates, ClockWriter, ClocksourceId, Counter, FS_PER_MS, IO_WAIT_PORT,
-    PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE,
-    PM_TIMER_HZ, Snapshot, TickClock, WallOrigin, bcd_to_bin, hpet_counter_width, hpet_hz,
-    hpet_period_ok, monotonic_max, rank, tsc_per_ms_from_hpet, tsc_per_ms_from_pit,
-    unix_from_civil, wall_unix_s,
+    Bracketed, CalibSource, Candidates, ClockWriter, ClocksourceId, Counter, FS_PER_MS,
+    HPET_CALIB_READS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CALIB_WINDOWS,
+    PIT_CH0_WRITES, PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE, PM_TIMER_HZ, PitWindow,
+    Snapshot, TickClock, WallOrigin, bcd_to_bin, hpet_hz, hpet_period_ok, monotonic_max, rank,
+    tsc_per_ms_from_hpet_brackets, tsc_per_ms_from_pit_windows, unix_from_civil, wall_unix_s,
 };
 
 use crate::acpi_init;
@@ -26,7 +26,6 @@ use crate::paging_init;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
 
-const HPET_GCAP_ID: u64 = 0x00;
 const HPET_GEN_CFG: u64 = 0x10;
 const HPET_MAIN: u64 = 0xF0;
 const HPET_ENABLE: u64 = 1;
@@ -175,15 +174,24 @@ pub(crate) fn hpet_ready() -> Option<(u64, u32)> {
     Some((va, hpet.period_fs))
 }
 
-/// The HPET main counter.
+/// The HPET main counter's low 32 bits, in one 4-byte read. An 8-byte
+/// read can tear: QEMU serves it as two 4-byte halves, and one that
+/// straddles the low word's wrap (every 42.9 s at 100 MHz) pairs the new
+/// high word with the old low word, 2^32 ticks in the future, which
+/// `LAST_NS` then held for 42.9 s. Every user treats the counter as 32 bits
+/// wide and masks its deltas, as Linux's HPET clocksource does.
 ///
 /// # Safety
 /// `va` is the address [`hpet_ready`] returned.
 pub(crate) unsafe fn hpet_read_main(va: u64) -> u64 {
     // SAFETY: this fn's `# Safety` (here): `hpet_ready` returns only a UC
-    // HPET block (invariant I228).
-    unsafe { hpet_read(va, HPET_MAIN) }
+    // HPET block (invariant I228), and the main counter's low half is the
+    // 4-byte register at `HPET_MAIN`.
+    u64::from(unsafe { ((va.wrapping_add(HPET_MAIN)) as *const u32).read_volatile() })
 }
+
+/// The width the kernel reads the HPET main counter at ([`hpet_read_main`]).
+pub(crate) const HPET_READ_WIDTH: u32 = 32;
 
 /// The ACPI PM timer's `TMR_VAL`.
 #[cfg(target_arch = "x86_64")]
@@ -209,18 +217,13 @@ fn read_raw(st: &TimeState, id: ClocksourceId) -> u64 {
     }
 }
 
-/// The HPET main counter as a clocksource: a sane period, the width
-/// `GCAP_ID` reports, and a counter that moves within 100,000 spins.
+/// The HPET main counter as a clocksource: a sane period, 32 bits wide
+/// whatever `GCAP_ID` reports ([`hpet_read_main`]), and a counter that
+/// moves within 100,000 spins. CPU 0's tick reads it every millisecond,
+/// far inside its 21.5 s half wrap at 100 MHz.
 fn hpet_counter() -> Option<(Counter, u64)> {
     let (va, period_fs) = hpet_ready()?;
-    // SAFETY: invariant I228, established at `acpi::acpi_init::init`:
-    // `hpet_ready` returned a UC HPET block, and GCAP_ID is register 0.
-    let gcap = unsafe { hpet_read(va, HPET_GCAP_ID) };
-    let c = Counter::new(
-        ClocksourceId::Hpet,
-        hpet_hz(period_fs)?,
-        hpet_counter_width(gcap),
-    )?;
+    let c = Counter::new(ClocksourceId::Hpet, hpet_hz(period_fs)?, HPET_READ_WIDTH)?;
     let main = || {
         // SAFETY: invariant I228, established at `acpi::acpi_init::init`:
         // `va` is the UC block `hpet_ready` returned.
@@ -260,7 +263,7 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     let main = || {
         // SAFETY: invariant I228, established at `acpi::acpi_init::init`,
         // as stated above `main`.
-        unsafe { hpet_read(va, HPET_MAIN) }
+        unsafe { hpet_read_main(va) }
     };
     let want = (PIT_CALIB_MS as u128 * FS_PER_MS) / hpet.period_fs as u128;
     let want = u64::try_from(want).ok()?;
@@ -282,12 +285,32 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     if !saw {
         return None;
     }
-    let start = main();
-    let t0 = rdtsc_ser(use_rdtscp);
+    // Each end is the HPET read the TSC brackets most tightly of
+    // `HPET_CALIB_READS`, placed by its bracket's middle
+    // (`vibeos::time::tsc_per_ms_from_hpet_brackets`): under TCG a stall
+    // between an HPET read and its TSC read moved the rate.
+    let bracketed = || {
+        let read = || {
+            let tsc_lo = rdtsc_ser(use_rdtscp);
+            let counter = main();
+            let tsc_hi = rdtsc_ser(use_rdtscp);
+            Bracketed {
+                tsc_lo,
+                counter,
+                tsc_hi,
+            }
+        };
+        let mut best = read();
+        for _ in 1..HPET_CALIB_READS {
+            best = best.narrower(read());
+        }
+        best
+    };
+    let start = bracketed();
     let mut spins = 0u64;
     loop {
         let now = main();
-        if now.wrapping_sub(start) >= want {
+        if now.wrapping_sub(start.counter) & u64::from(u32::MAX) >= want {
             break;
         }
         spins += 1;
@@ -296,14 +319,46 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
         }
         core::hint::spin_loop();
     }
-    let t1 = rdtsc_ser(use_rdtscp);
-    let elapsed = main().wrapping_sub(start);
-    tsc_per_ms_from_hpet(t1.wrapping_sub(t0), elapsed, hpet.period_fs)
+    tsc_per_ms_from_hpet_brackets(start, bracketed(), hpet.period_fs)
 }
 
-/// Channel 2 one-shot, gated through 0x61. Does not touch channel 0.
+/// `tsc_per_ms` from PIT channel 2 one-shots, gated through 0x61; channel 0
+/// is not touched. It measures windows until [`PIT_CALIB_WINDOWS`] are
+/// tight or twice that many ran, and takes their median
+/// (`vibeos::time::tsc_per_ms_from_pit_windows`): under TCG a vCPU stall at
+/// either end of one 10 ms window moved the rate by up to 4%.
 #[cfg(target_arch = "x86_64")]
 pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
+    let mut windows = [PitWindow {
+        start_lo: 0,
+        start_hi: 0,
+        end_lo: 0,
+        end_hi: 0,
+    }; PIT_CALIB_WINDOWS * 2];
+    let mut n = 0usize;
+    let mut tight = 0usize;
+    for slot in windows.iter_mut() {
+        let Some(w) = pit_window(use_rdtscp) else {
+            continue;
+        };
+        *slot = w;
+        n = n.saturating_add(1);
+        if w.tight_len().is_some() {
+            tight = tight.saturating_add(1);
+            if tight >= PIT_CALIB_WINDOWS {
+                break;
+            }
+        }
+    }
+    tsc_per_ms_from_pit_windows(windows.get(..n)?, PIT_CALIB_COUNT)
+}
+
+/// One PIT channel 2 one-shot of [`PIT_CALIB_COUNT`] ticks, bracketed by
+/// the TSC: reads on both sides of the gate write, and on both sides of the
+/// poll that finds OUT high with the read before the last poll that found
+/// it low. None if OUT never rises.
+#[cfg(target_arch = "x86_64")]
+fn pit_window(use_rdtscp: bool) -> Option<PitWindow> {
     // SAFETY: invariant I229, established at `time::time_init::init`: the
     // PIT and port 0x61 are this module's, and channel 2 feeds only this
     // calibration.
@@ -314,25 +369,38 @@ pub(super) fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
         x86::outb(PIT_CH2, (PIT_CALIB_COUNT & 0xFF) as u8);
         io_wait();
         x86::outb(PIT_CH2, (PIT_CALIB_COUNT >> 8) as u8);
-        let n61 = x86::inb(PIT_GATE);
-        x86::outb(PIT_GATE, (n61 & !0x02) | 0x01);
     }
-    let t0 = rdtsc_ser(use_rdtscp);
+    // SAFETY: invariant I229, established at `time::time_init::init`: the
+    // PIT and port 0x61 are this module's.
+    let n61 = unsafe { x86::inb(PIT_GATE) };
+    let start_lo = rdtsc_ser(use_rdtscp);
+    // SAFETY: invariant I229, established at `time::time_init::init`: the
+    // PIT and port 0x61 are this module's; the gate starts the one-shot.
+    unsafe { x86::outb(PIT_GATE, (n61 & !0x02) | 0x01) };
+    let start_hi = rdtsc_ser(use_rdtscp);
+    let mut before_low = start_hi;
     let mut spins = 0u64;
     loop {
-        // SAFETY: invariant I229, established at `time::time_init::init`, as
-        // for the writes above.
-        if unsafe { x86::inb(PIT_GATE) } & (1 << 5) != 0 {
-            break;
+        let before = rdtsc_ser(use_rdtscp);
+        // SAFETY: invariant I229, established at `time::time_init::init`:
+        // port 0x61 is this module's.
+        let out = unsafe { x86::inb(PIT_GATE) } & (1 << 5) != 0;
+        let after = rdtsc_ser(use_rdtscp);
+        if out {
+            return Some(PitWindow {
+                start_lo,
+                start_hi,
+                end_lo: before_low,
+                end_hi: after,
+            });
         }
+        before_low = before;
         spins += 1;
         if spins > CALIB_SPIN_CAP {
             return None;
         }
         core::hint::spin_loop();
     }
-    let t1 = rdtsc_ser(use_rdtscp);
-    tsc_per_ms_from_pit(t1.wrapping_sub(t0), PIT_CALIB_COUNT)
 }
 
 #[cfg(target_arch = "x86_64")]
