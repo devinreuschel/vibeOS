@@ -644,12 +644,13 @@ carries `#[expect(clippy::let_underscore_must_use, reason = "...")]` naming the 
 exemption whose drop goes away fails the build. Test code is exempt at its root: `vibeos-core`
 allows both lints under `cfg(test)` in `lib.rs`, and each `kernel_tests`-only `ktest` module's `mod`
 line carries a permanent allow. An `if let Ok` with no `else`, and `let _ = f().ok()`, are review
-items, since no lint sees them. Built: root `Cargo.toml`'s `[workspace.lints.clippy]` denies both
-lints in every member. Not yet enforced: a module not yet audited carries
-`#[allow(<lint>, reason = "audit pending, ROADMAP §10.1")]` on its top-level `mod` line (on the item,
-in a crate root file), never as a crate-level attribute, until ROADMAP §10.1's sweep of that module
-removes it; `let _ =` drops a `Result` in more than 40 files, and the kernel review found dropped
-errors that ROADMAP §10.2 (F080) and §13.9 (F124) fix.
+items, since no lint sees them. Built (ROADMAP §10.1): root `Cargo.toml`'s
+`[workspace.lints.clippy]` denies both lints, and every member (`vibeos`, `vibeos-core`, the hostlib
+tests and the user crate) sets `[lints] workspace = true`; every module has had its sweep, so no
+module carries an audit-pending allow, and every kept drop names its case. `KError` and every module
+error enum are `#[must_use]`. The dropped errors the kernel review found are fixed (F080, F051, F063,
+the readahead eviction, F115) but one: F124's `read_dirent` mapping (ROADMAP §13.9), a `match` arm
+that turns a read error into end-of-directory, which no lint sees.
 
 Hardware events are also lost in three cases. An exception before `idt::init` (PMM, the CR3 switch,
 ACPI discovery, heap, KVA, GDT, PIC) goes to whatever IDT Limine left and resets or hangs with no
@@ -745,7 +746,7 @@ that review cites means the review's text.
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
 | I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `arch::x86_64::percpu` (`current_tcb`, `cpu_id_hint`), `per_cpu_init::current` | enforced (debug builds assert IF=0 in `current()` and `try_current()` from `irq: enabled` on; `scripts/check_current.py`) | Yes: `current_thread`, `current_id` and `current_pid` wrap `arch::current_tcb()`, and `current_at_if1` and `current_migrate_if1` read `current` with IF=1 (ROADMAP §10.3, F039) |
-| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; clippy's `let_underscore_must_use` and `unused_result_ok`, denied workspace-wide | enforced in part (the lints, outside modules whose `mod` line carries an audit-pending allow) | No: modules not yet audited carry an audit-pending allow, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §13.9, F124) |
+| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; clippy's `let_underscore_must_use` and `unused_result_ok`, denied workspace-wide in root `Cargo.toml`; test code exempt at its root (`cfg(test)` in `lib.rs`, each `kernel_tests` `ktest` `mod` line) | enforced (the lints, in every member; a kept drop's `#[expect]` names its case) | Partly: F124's `read_dirent` mapping turns a read error into end-of-directory, a drop no lint sees (ROADMAP §13.9) |
 | I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 holds: `syscall_init::exit_work` runs the check with IF=0 on every exit to ring 3 but an NMI's |
 | I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](PORTABILITY.md#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
 | I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | `sync_init::might_sleep`, `Sched::begin_wait` | enforced in debug and `kernel_tests` builds | Partly: only the entry points §2.9 rule 4 names check, a rank-0 lock or an `IrqCell` held across a sleep is not counted, and a build without `debug_assertions` or `kernel_tests` checks only the hard-IRQ flag |

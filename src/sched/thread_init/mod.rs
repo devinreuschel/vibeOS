@@ -115,6 +115,7 @@ fn kick_dead_stacks() {
 }
 
 /// Why a `spawn*` call made no thread.
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpawnError {
     /// Every TCB slot holds a live thread.

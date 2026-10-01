@@ -49,6 +49,7 @@ const PRESENT_DMA: u8 = 3;
 /// probe's port accesses as done.
 static STATE: AtomicU8 = AtomicU8::new(UNPROBED);
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FwCfgError {
     /// No hypervisor bit, or no `QEMU` signature.

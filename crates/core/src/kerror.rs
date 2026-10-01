@@ -64,7 +64,7 @@ errno_table! {
     NoMem = 12, "ENOMEM", "AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table (256 regions, `limits::MAX_REGIONS`, where Linux's `vm.max_map_count` allows 65,530; ROADMAP §10.4), a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4), `execve` argument buffers included";
     Acces = 13, "EACCES", "`open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys`";
     Fault = 14, "EFAULT", "bad user pointer / length";
-    Busy = 16, "EBUSY", "defined; no syscall returns it";
+    Busy = 16, "EBUSY", "`dup2` onto a descriptor an `open` in progress reserved, which no process reaches while each has one thread";
     Exist = 17, "EEXIST", "`O_EXCL`; `mmap` with `MAP_FIXED_NOREPLACE` (or `MAP_FIXED`, §3.1) over a mapping";
     XDev = 18, "EXDEV", "a `rename` or `link` across mounts (no syscall makes one yet)";
     NoDev = 19, "ENODEV", "a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4";

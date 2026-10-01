@@ -669,7 +669,7 @@ test-irqoff: $(ISO_KTEST_IRQOFF) $(ISO_IRQOFF) $(MKFS_VIBEFS)
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_ISO=$(ISO_KTEST_IRQOFF) python3 tests/harness/run_ktest.py
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_RESULTS_APPEND=1 VIBEOS_ISO=$(ISO_IRQOFF) VIBEOS_MKFS=$(MKFS_VIBEFS) python3 tests/harness/run_e2e.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash test-vibefs-crash-plants
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)

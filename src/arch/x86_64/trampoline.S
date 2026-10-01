@@ -63,7 +63,7 @@ vibeos_tramp_patch_pm32:
 .org PM32, 0x90
 .code32
     mov ax, 0x20
-    /* sreg from eax, not ax: a 66 prefix here would miss the nasm blob. */
+    /* sreg from eax, not ax: a 66 prefix here would not match the original assembler's blob. */
     mov ds, eax
     mov es, eax
     mov ss, eax

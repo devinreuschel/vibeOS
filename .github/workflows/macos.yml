@@ -29,11 +29,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # setup.sh requires QEMU, xorriso and nasm; fsck.fat (dosfstools) lands
-      # in Homebrew's sbin, which is not on the runner's PATH.
+      # setup.sh requires QEMU, xorriso and zstd (the harness compresses
+      # guest cores with it); fsck.fat (dosfstools) lands in Homebrew's sbin,
+      # which is not on the runner's PATH.
       - name: install host tools
         run: |
-          brew install qemu xorriso nasm dosfstools
+          brew install qemu xorriso dosfstools zstd
           echo "$(brew --prefix)/sbin" >> "$GITHUB_PATH"
 
       # The versions ci.yml's check job pins (ROADMAP §10.1, DX1).
@@ -50,8 +51,20 @@ jobs:
       - name: setup
         run: ./setup.sh
 
+      # The version ci.yml's check job pins (ROADMAP §10.9); make check runs
+      # `cargo deny check licenses bans sources`.
+      - name: install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.20.2
+
       - name: make check
         run: time make check
+
+      # ROADMAP §10.8: the loom models and the Kani proofs on the Apple
+      # Silicon host too (L1453); setup.sh --kani installs the pinned
+      # kani-verifier.
+      - name: ./setup.sh --kani && make models
+        if: "!cancelled()"
+        run: ./setup.sh --kani && make models
 
       - name: upload harness results
         if: always()
@@ -74,7 +87,7 @@ jobs:
 
       - name: install host tools
         run: |
-          brew install qemu xorriso nasm dosfstools
+          brew install qemu xorriso dosfstools zstd
           echo "$(brew --prefix)/sbin" >> "$GITHUB_PATH"
 
       - name: install rust
@@ -90,6 +103,17 @@ jobs:
       - name: make test
         if: "!cancelled()"
         run: time make -k test-e2e-uefi test
+
+      # A failed run's guest cores (ROADMAP §10.7, TESTING.md §8.3). This
+      # workflow names no secret (rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-macos-test
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: upload harness results
         if: always()

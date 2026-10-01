@@ -911,14 +911,11 @@ per-push tier.
 ## 8.6 CI and coverage
 
 `ci` runs on a push to `main`, on every pull request, and on `workflow_dispatch`, never on a push to
-another branch, with one temporary exception: until ROADMAP §10.1's trigger box is ticked, pushes to
-the Phase 10 integration branch (`phase-10`, and the branch that stands in for it) and to the
-`p10/**` slice branches run too, so a slice's race-proof test commit runs red before its fix
-(`TEMPORARY` in `scripts/check_workflows.py`). A pull request's runs share the concurrency group
+another branch. A pull request's runs share the concurrency group
 `ci-pr-<number>` and cancel superseded ones; every other run has a group of its own, `ci-run-<run
 id>`, so no run on `main` is cancelled or dropped as pending, and a fork's pull request from its own
 `main` shares nothing with `main`'s runs. `scripts/check_workflows.py` fails on `ci.yml` push branches
-other than `main` and the temporary list, on a `tags`, `branches-ignore` or `paths` filter, on a
+other than `main` alone, on a `tags`, `branches-ignore` or `paths` filter, on a
 missing `pull_request` or `workflow_dispatch` trigger, or on a group that is not built that way
 (`rule_ci_triggers`); on any `concurrency` group built from `github.head_ref` or `github.ref_name`
 (`rule_concurrency_group`); and on a workflow a §10.9 gate entry names that has no
@@ -955,8 +952,9 @@ scheduled work runs in the 10 lanes of ROADMAP §10.1's next box (Scheduled capa
 
 Tiers, with each group's summed QEMU step time in the last green integration-branch `ci` run before
 the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash`'s figure
-includes its `cargo test` of the host tools, the one tier that needs the toolchain; `forensics`'s
-is a local TCG run's, until a `ci` run measures it:
+includes its `cargo test` of the host tools, which with `vibefs-crash-plants` are the tiers that need
+the toolchain; `forensics`'s and `vibefs-crash-plants`'s are a local TCG run's (`vibefs-crash-plants`:
+two planted rounds and a control round), until a `ci` run measures them:
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
@@ -966,6 +964,7 @@ is a local TCG run's, until a `ci` run measures it:
 | x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
 | x86_64 | in-guest-3 | `test-lapic-fallback` | 50 |
 | x86_64 | vibefs-crash | `test-vibefs-crash` | 47 |
+| x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
 
 `test-unit` and `test-harness` run inside `make check`, in the `check` job. The in-guest tiers
@@ -974,20 +973,24 @@ each pass 40 s alone and cannot split below a target.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`); on a pull request, `scripts/check_gate_inputs.py` against its merge base; then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines <floor>`, the floor in `tests/gates/inputs.toml`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
-| `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
+| `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 2, so the e2e tiers run two QEMUs at a time on the runner's 4 CPUs; a tier of one target runs one). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
 | `ci-pass` | every per-push run | `needs:` every other job, `if: always()`; fails unless each succeeded, a job gated on the event being allowed to skip (`scripts/check_gate_inputs.py --ci-pass`, which the job runs with `NEEDS: ${{ toJSON(needs) }}` and `SKIPPABLE: ticks`; its static rules fail when the job misses one, lacks `if: always()`, or lists in `SKIPPABLE` a job whose `if:` does not test `github.event_name`) |
-| `smp-stress` `stress` | weekly Monday 06:00 UTC + dispatch, `sched-lane-4` | `make test-smp-stress`: the in-guest tier at `-smp 4`, under the §8.2 per-run deadlines and no whole-run timeout |
+| `smp-stress` `stress` | weekly Monday 06:00 UTC + dispatch, `sched-lane-4` | `make test-smp-stress`: the in-guest tier at `-smp 4`, under the §8.2 per-run deadlines and no whole-run timeout. It and both `repeat-kernel` jobs upload a failed run's `build/cores/` as `cores-x86_64-<job>` |
 | `smp-stress` `repeat-kernel` | same workflow, `sched-lane-4` | `VIBEOS_KTEST_REPEAT=20 make test-kernel`: every in-guest test 20 times in one `-smp 2` boot |
 | `smp-stress` `repeat-kernel-smp4` | same workflow, `sched-lane-5` | `VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4`: the same at `-smp 4` |
 | `nightly-canary` | same workflow, non-blocking, `sched-lane-5` | undated latest nightly, `make iso && make test-unit` |
+| `smp-stress` `fuzz` | same workflow, `sched-lane-5` | cargo-fuzz 0.13.2 (`cargo install cargo-fuzz --locked --version 0.13.2`, the version `make fuzz` requires), then `make fuzz FUZZ_TIME=900`: each of the 12 targets for 15 minutes (about 3 job-hours) on the pinned toolchain; on failure `build/fuzz/artifacts/` is uploaded as `fuzz-artifacts` |
 | `release` | `workflow_dispatch` from `main`, with the release tag | `build` (`contents: read`, `actions: read`) fails on any ref but `refs/heads/main`, then runs `main`'s own `scripts/release_check.py` from a sparse checkout, before any code of the tag's tree: the tag is annotated, its commit is on `main`, a `ci` run that proves that commit (`gatelib.run_proves_commit`, ROADMAP §10.9) concluded `success`, and one annotated `phase-<N>` tag sits on it. It checks that commit out with `persist-credentials: false`, restores no cache, and runs `setup.sh` (a fresh Limine clone and host tool), `make gate PHASE=<N>`, `make release-artifacts OUT=dist` (the release profile), the third-party notices and the ISO's xorriso version, `make CARGO_PROFILE=release` over `test-e2e`, `test-e2e-uefi`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem` and `test-e2e-strace`, and `cmp build/vibeos.iso dist/vibeos.iso`; it uploads the tag's commit as `commit-input` (CI history, below), writes the notes with `scripts/changelog_section.py`, and uploads `dist/` with its `SHA256SUMS` as `release`, and `results-x86_64-build` and `runner-build`. `publish` (`contents: write`, `needs: build`) checks out nothing and runs no repository script: `sha256sum -c SHA256SUMS`, then the pinned release action publishes `vibeos.iso` as the one image, with `vibeos.iso.xorriso-version` and `THIRD-PARTY-NOTICES.txt`, at the verified commit. `scripts/check_workflows.py` keeps that shape (`rule_release_*`): `workflow_dispatch` with a required `tag` as the one trigger, no cache, no workflow-wide write, no checkout, local action, or command outside `PRIVILEGED_COMMANDS` in a job with a write grant or the `release` environment, and `vibeos.iso` as the one published image, after `build`. The owner's steps are [RELEASING.md](RELEASING.md). From ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
 | `ci-history` | `ci`, `release`, `nightly` or `smp-stress` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. Both jobs run in `sched-lane-6`. |
-| `macos` | daily 04:23 UTC + dispatch, `sched-lane-9` | `macos-15` arm64 with Homebrew's `qemu`, `xorriso`, `nasm` and `dosfstools`; jobs `check` (`make check`) and `test` (`make -k test-e2e-uefi test`, with Homebrew's edk2 firmware on pflash); each uploads `build/results/`. |
-| `nightly` `kvm` | daily 03:17 UTC + dispatch, `sched-lane-0` | The x86_64 KVM leg (ROADMAP §10.1): `/dev/kvm` opened by GitHub's documented udev rule, job env `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, then `make test-kernel`, `make test-e2e`, `VIBEOS_SMP=1 make test-e2e`, `make test-lapic-fallback LAPIC_FALLBACK_CPU=qemu64,+invtsc,-tsc-deadline`, and `VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4` (exit-gate line §10.10), each step run even after an earlier one failed. GitHub assigns each job's host CPU at random (AMD EPYC or Intel Xeon, several models), so `scripts/runner_info.py` writes the CPU model beside the guest's invariant-TSC bit to the job summary and to `build/runner.json`, uploaded as `runner-kvm`, which fills the CI-history record's `runner`; a regression threshold compares a number only with history from the same CPU model. `build/results/` is uploaded as `results-x86_64-kvm` (90 days). |
-| `nightly` `release-profile` | daily 03:17 UTC + dispatch, `sched-lane-1` | `make CARGO_PROFILE=release test-e2e test-kernel` under TCG, in its own job, since the release and dev ISOs share their names under `build/` (ROADMAP §10.2, F137; BOOT.md §3.5); the runner record and the uploads as `results-x86_64-release-profile` and `runner-release-profile`. `release.yml` runs the production-image e2e targets on the release-profile image it publishes. |
+| `macos` | daily 04:23 UTC + dispatch, `sched-lane-9` | `macos-15` arm64 with Homebrew's `qemu`, `xorriso`, `dosfstools` and `zstd`; jobs `check` (cargo-deny 0.20.2 from `cargo install`, `make check`, then `./setup.sh --kani && make models`) and `test` (`make -k test-e2e-uefi test`, with Homebrew's edk2 firmware on pflash, `test-vibefs-crash-plants` among `test`'s tiers; a failed run's `build/cores/` as `cores-macos-test`); each uploads `build/results/`. |
+| `nightly` `kvm` | daily 03:17 UTC + dispatch, `sched-lane-0` | The x86_64 KVM leg (ROADMAP §10.1): `/dev/kvm` opened by GitHub's documented udev rule, job env `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, then `make test-kernel`, `make test-e2e`, `VIBEOS_SMP=1 make test-e2e`, `make test-lapic-fallback LAPIC_FALLBACK_CPU=qemu64,+invtsc,-tsc-deadline`, `VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4` (exit-gate line §10.10), and `make test-irqoff` (the IF-off tracer's build variant, ROADMAP §10.2), each step run even after an earlier one failed. GitHub assigns each job's host CPU at random (AMD EPYC or Intel Xeon, several models), so `scripts/runner_info.py` writes the CPU model beside the guest's invariant-TSC bit to the job summary and to `build/runner.json`, uploaded as `runner-kvm`, which fills the CI-history record's `runner`; a regression threshold compares a number only with history from the same CPU model. `build/results/` is uploaded as `results-x86_64-kvm` (90 days), and a failed run's `build/cores/` as `cores-x86_64-kvm`. |
+| `nightly` `release-profile` | daily 03:17 UTC + dispatch, `sched-lane-1` | `make CARGO_PROFILE=release test-e2e test-kernel` under TCG, in its own job, since the release and dev ISOs share their names under `build/` (ROADMAP §10.2, F137; BOOT.md §3.5); the runner record and the uploads as `results-x86_64-release-profile` and `runner-release-profile`, and a failed run's `build/cores/` as `cores-x86_64-release-profile`. `release.yml` runs the production-image e2e targets on the release-profile image it publishes. |
 | `nightly` `repro` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make repro`: every ISO variant built twice from one commit, with a different checkout path, `CARGO_HOME` and `RUSTUP_HOME`, compared byte for byte, and no host path in any output (`scripts/repro_build.py`) |
+| `nightly` `models` | daily 03:17 UTC + dispatch, `sched-lane-2` | `./setup.sh --kani && make models`: every loom model and every Kani proof (ROADMAP §10.8); no QEMU |
+| `nightly` `miri` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make miri`: `vibeos-core`'s host tests under Miri (ROADMAP §10.8); `timeout-minutes` 330, since a serial run took over 2 hours on a 4-CPU host |
+| `nightly` `irqoff` | daily 03:17 UTC + dispatch, `sched-lane-3` | `make test-irqoff` under TCG: the in-guest tier and the e2e boot on the `irqoff` build variant, whose tracer fails a run on an IF=0 stretch over its budget (ROADMAP §10.2); a failed run's `build/cores/` as `cores-x86_64-irqoff` |
 | `nightly` `deny-advisories` | daily 03:17 UTC + dispatch, `sched-lane-3` | cargo-deny's pinned release archive, checked against its SHA-256 as in `check`, then `cargo deny check advisories`, which fetches the RustSec database and so stays out of `make check` |
 | `nightly` `provenance-fetch` | daily 03:17 UTC + dispatch, `sched-lane-3` | `python3 scripts/check_provenance.py --fetch`: each provenance header's upstream file at its pinned revision (DESIGN §1.5) |
 | `nightly` `budget` | daily 03:17 UTC + dispatch, `sched-lane-3` | `make ci-budget` (`ci_history.py --budget` and `--tiers`, Scheduled capacity below) against the `ci-history` branch, which it clones alone |
@@ -1163,10 +1166,10 @@ workflow (`rule_lane_map`). `Reserved for` is `nightly`, `weekly`, `scheduled`, 
 |---|---|---|
 | `sched-lane-0` | nightly | `nightly.yml` `kvm` |
 | `sched-lane-1` | nightly | `nightly.yml` `release-profile` |
-| `sched-lane-2` | nightly | `nightly.yml` `repro`; `models` and `miri` when they land |
-| `sched-lane-3` | nightly | `nightly.yml` `budget`, `deny-advisories`, `provenance-fetch`; `irqoff` when it lands |
+| `sched-lane-2` | nightly | `nightly.yml` `repro`, `models`, `miri` |
+| `sched-lane-3` | nightly | `nightly.yml` `budget`, `deny-advisories`, `provenance-fetch`, `irqoff` |
 | `sched-lane-4` | weekly | `smp-stress.yml` `stress`, `repeat-kernel` |
-| `sched-lane-5` | weekly | `smp-stress.yml` `repeat-kernel-smp4`, `nightly-canary`; `fuzz` when it lands |
+| `sched-lane-5` | weekly | `smp-stress.yml` `repeat-kernel-smp4`, `nightly-canary`, `fuzz` |
 | `sched-lane-6` | history | `ci-history.yml` (every job) |
 | `sched-lane-7` | none | multi-day chains (soaks, campaigns); a §22.1 release window |
 | `sched-lane-8` | none | multi-day chains; a §22.1 release window |
@@ -1176,10 +1179,10 @@ Release windows: none
 
 | Workflow | Cadence | Jobs per run | Job-hours per run | Peak concurrent jobs | Lanes |
 |---|---|---|---|---|---|
-| `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 4 | 4.5 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
-| `nightly.yml` | daily `17 3 * * *` and dispatch | 6 | 4.6 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
+| `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 5 | 7.7 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
+| `nightly.yml` | daily `17 3 * * *` and dispatch | 9 | 9.1 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
 | `ci-history.yml` | each completed `ci`, `release`, `nightly` or `smp-stress` run (`record`); daily `23 4 * * *` and dispatch (`daily`) | 1 | 0.05 per `record`, 0.3 per `daily` (estimated) | 1 | `sched-lane-6` |
-| `macos.yml` | daily `23 4 * * *` and dispatch | 2 | 1.5 (estimated) | 1 | `sched-lane-9` |
+| `macos.yml` | daily `23 4 * * *` and dispatch | 2 | 2.5 (estimated) | 1 | `sched-lane-9` |
 
 `ci_history.py --budget` reads the `ci-history` records of the scheduled workflows `WORKFLOWS`
 lists and takes each job's lane from its workflow file through `check_workflows.py`'s reader. Over
@@ -1207,6 +1210,7 @@ CPU model, and the section also records the `ci-history` branch's packed size (R
 | `tier (x86_64, in-guest-2)` | pending (make ci-budget after merge) | - |
 | `tier (x86_64, in-guest-3)` | pending (make ci-budget after merge) | - |
 | `tier (x86_64, vibefs-crash)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, vibefs-crash-plants)` | pending (make ci-budget after merge) | - |
 
 **Issues and crash records.** Planned (ROADMAP §14.10, §22.5): one `workflow_run` filer is the only
 job with `issues: write`; it checks out nothing, runs no repository code, and opens or comments on
@@ -1230,8 +1234,9 @@ cache (ROADMAP §10.1): `check`, `build` and `tier` each name theirs in `APT_PAC
 cached `.deb` files with `dpkg -i`, with no `apt-get update` and no download, and a miss runs
 `apt-get install` with `APT::Keep-Downloaded-Packages=true` and saves what it downloaded. `build`
 and `tier` write the runner's CPU model to the job summary, so the "after" figure, a `ci` run on
-`main`, can cite it; each tier's `jobs` stays 1 until the timing tests and the §10.2 retried
-failures are fixed. From ROADMAP §10.9's CI
+`main`, can cite it; each tier's `jobs` is 2 (ROADMAP §10.1): `e2e-1` and `e2e-2` passed twice each at `-j 2`
+in a local TCG run on 4 CPUs (56 to 73 s and 73 to 161 s), and the in-guest tiers hold one target
+each. From ROADMAP §10.9's CI
 history on, a measured number recorded in the design docs cites the commit it was measured at and the CPU
 model or machine it ran on (ROADMAP, How to read this).
 

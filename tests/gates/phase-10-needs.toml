@@ -266,8 +266,11 @@ why = "claim: the §10.6 entry stub passes the interrupted rbp"
 
 [[box]]
 key = "after `begin_dump`, every panic-path write to COM1"
-needs = ["every two-way dependency between kernel modules that `scripts/check_cycles.py` reports"]
-why = "claim: it writes through A4's raw serial layer"
+needs = [
+  "every two-way dependency between kernel modules that `scripts/check_cycles.py` reports",
+  "the expect-panic e2e matches markers",  # L1257
+]
+why = "claim: it writes through A4's raw serial layer; P10-S81's issue: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "`now_ns` is computed from one free-running counter"
@@ -727,7 +730,7 @@ needs = [
   "the `/bin/tests` stall after `user:",  # L1240
   "the `-smp 4` `ipi: ack",  # L1241
   "the `-smp 4` `msix_cpu: ap",  # L1242
-  "the `-smp 2` `per_cpu_bsp: ready_head",  # L1243
+  "the `-smp 2` `per_cpu_bsp:",  # L1243
 ]
 why = "reopened by design review J136 (closes); needs: claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
@@ -737,7 +740,7 @@ needs = [
   "the `/bin/tests` stall after `user:",  # L1240
   "the `-smp 4` `ipi: ack",  # L1241
   "the `-smp 4` `msix_cpu: ap",  # L1242
-  "the `-smp 2` `per_cpu_bsp: ready_head",  # L1243
+  "the `-smp 2` `per_cpu_bsp:",  # L1243
   "the harness retries nothing: after",  # L1244
   "`reap_many_via_idle` compares frame counts against",  # L1247
 ]
@@ -1508,7 +1511,7 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (ext
 [[box]]
 key = "dead scheduler and bring-up state"
 needs = [
-  "the `-smp 2` `per_cpu_bsp: ready_head",  # L1243
+  "the `-smp 2` `per_cpu_bsp:",  # L1243
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 

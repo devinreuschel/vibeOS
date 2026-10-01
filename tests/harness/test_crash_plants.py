@@ -8,7 +8,7 @@ from __future__ import annotations
 import unittest
 
 from tests.harness.harness import EnvConfig, HarnessError
-from tests.harness.run_vibefs_crash import CrashCheckError, run_plants, with_plant
+from tests.harness.run_vibefs_crash import CrashCheckError, is_sync_fail, run_plants, with_plant
 
 
 def env(cmdline: str = "") -> EnvConfig:
@@ -90,6 +90,30 @@ class RunPlants(unittest.TestCase):
         self.assertEqual(
             fn.calls, [(f"vibeos.strace=1 loglevel=7 {LEAK}", 0), ("vibeos.strace=1 loglevel=7", 0)]
         )
+
+
+class TestIsSyncFail(unittest.TestCase):
+    """A planted round that ends on `sync fail` is caught, whichever
+    signature spelling matched the line (the registry's has a trailing
+    space); a mount failure is not a sync failure."""
+
+    def test_registry_signature(self) -> None:
+        e = HarnessError(
+            "panic signature 'vibeOS: vibefs: sync fail ' in: 'vibeOS: vibefs: sync fail no space'"
+        )
+        self.assertTrue(is_sync_fail(e))
+
+    def test_bare_signature(self) -> None:
+        e = HarnessError(
+            "panic signature 'vibeOS: vibefs: sync fail' in: 'vibeOS: vibefs: sync fail io'"
+        )
+        self.assertTrue(is_sync_fail(e))
+
+    def test_other_failure(self) -> None:
+        e = HarnessError(
+            "panic signature 'vibeOS: vibefs: mount fail' in: 'vibeOS: vibefs: mount fail corrupt'"
+        )
+        self.assertFalse(is_sync_fail(e))
 
 
 if __name__ == "__main__":

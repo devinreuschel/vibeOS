@@ -29,7 +29,7 @@ class TestCountLines(unittest.TestCase):
 
 class TestIsSource(unittest.TestCase):
     def test_suffixes(self) -> None:
-        for p in ("src/a.rs", "src/arch/x86_64/trampoline.S", "user/init.asm", "user/sys.inc"):
+        for p in ("src/a.rs", "src/arch/x86_64/trampoline.S", "lib/start.asm", "lib/defs.inc"):
             self.assertTrue(is_source(p), p)
         for p in ("docs/ROADMAP.md", "Cargo.toml", "scripts/check_file_size.py"):
             self.assertFalse(is_source(p), p)

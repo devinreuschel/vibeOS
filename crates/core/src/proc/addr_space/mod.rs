@@ -170,6 +170,7 @@ pub struct MmapReq {
 }
 
 /// Why [`mmap_request`] refused a call.
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MmapError {
     /// `EINVAL`.

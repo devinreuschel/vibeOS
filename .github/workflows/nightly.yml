@@ -5,8 +5,10 @@ name: nightly
 # KVM leg: `make test-kernel`, the e2e and LAPIC-fallback runs, and the
 # §10.10 selection at -smp 4, under `-accel kvm -cpu max,+invtsc`.
 # `release-profile` builds and boots `CARGO_PROFILE=release` under TCG.
-# `repro`, `deny-advisories` and `provenance-fetch` run the C-SCHED-TARGETS
-# commands present today; later targets arrive as `CI-step:` lines. `budget`
+# `repro`, `models`, `miri`, `irqoff`, `deny-advisories` and
+# `provenance-fetch` run the C-SCHED-TARGETS commands; `kvm` also runs
+# `make test-irqoff` under KVM. A failed QEMU job uploads its guest cores
+# as `cores-x86_64-<job>`. `budget`
 # runs `make ci-budget` against the ci-history branch. Jobs call
 # only `make` targets and scripts (C-SCHED-TARGETS), and each ends by writing
 # its runner record and uploading it with its results files, which the ticks
@@ -37,7 +39,7 @@ jobs:
     # migratable vCPU even under KVM, so the leg asks for it (ROADMAP §10.1).
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
-      APT_PACKAGES: qemu-system-x86 xorriso nasm dosfstools
+      APT_PACKAGES: qemu-system-x86 xorriso dosfstools
       VIBEOS_QEMU_ACCEL: kvm
       VIBEOS_QEMU_CPU: max,+invtsc
     steps:
@@ -136,6 +138,25 @@ jobs:
         if: ${{ !cancelled() }}
         run: VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4
 
+      # L1321: the IF-off tracer's build variant under KVM, where an IF=0
+      # stretch's length is the host's, not TCG's (ROADMAP §10.1, P10-S50).
+      - name: make test-irqoff (kvm)
+        if: ${{ !cancelled() }}
+        run: VIBEOS_QEMU_ACCEL=kvm VIBEOS_QEMU_CPU=max,+invtsc make test-irqoff
+
+      # A failed run's guest cores (ROADMAP §10.7, TESTING.md §8.3): each
+      # failed boot's build/cores/<arch>-<tier>/<seq>-<label>/ holds core.zst,
+      # kernel.elf and qemu-argv.txt. This workflow names no secret
+      # (scripts/check_workflows.py, rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-x86_64-kvm
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 90
+
       # The host CPU model and the guest's invariant-TSC bit, to the job
       # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
       - name: runner record
@@ -175,7 +196,7 @@ jobs:
     # and DESIGN §8.6 together.
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
-      APT_PACKAGES: qemu-system-x86 xorriso nasm dosfstools
+      APT_PACKAGES: qemu-system-x86 xorriso dosfstools
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -243,6 +264,19 @@ jobs:
       - name: make CARGO_PROFILE=release test-e2e test-kernel
         run: make CARGO_PROFILE=release test-e2e test-kernel
 
+      # A failed run's guest cores (ROADMAP §10.7, TESTING.md §8.3): each
+      # failed boot's build/cores/<arch>-<tier>/<seq>-<label>/ holds core.zst,
+      # kernel.elf and qemu-argv.txt. This workflow names no secret
+      # (scripts/check_workflows.py, rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-x86_64-release-profile
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 90
+
       # The host CPU model and the guest's invariant-TSC bit, to the job
       # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
       - name: runner record
@@ -282,7 +316,7 @@ jobs:
     # and DESIGN §8.6 together. setup.sh needs qemu-system-x86_64.
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
-      APT_PACKAGES: qemu-system-x86 xorriso nasm dosfstools
+      APT_PACKAGES: qemu-system-x86 xorriso dosfstools
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -370,6 +404,126 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: runner-repro
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  models:
+    name: models
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    # Scheduled lane 2 (DESIGN §8.6): one job at a time, the rest queued.
+    concurrency:
+      group: sched-lane-2
+      queue: max
+    # L1172 and L1453, ROADMAP §10.8: every loom model and every Kani proof
+    # (`make models`); setup.sh --kani installs the pinned kani-verifier,
+    # which brings its own nightly, and checks no host tool, so this job
+    # boots no QEMU.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-models-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-models-
+
+      - name: ./setup.sh --kani && make models
+        run: ./setup.sh --kani && make models
+
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-models
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-models
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  miri:
+    name: miri
+    runs-on: ubuntu-26.04
+    # A serial `make miri` took over 2 h on a 4-CPU host (P10-S87); 330 is
+    # the most a reserved lane allows (DESIGN §8.6).
+    timeout-minutes: 330
+    # Scheduled lane 2 (DESIGN §8.6): one job at a time, the rest queued.
+    concurrency:
+      group: sched-lane-2
+      queue: max
+    # L1172, ROADMAP §10.8: vibeos-core's host tests under Miri.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: miri, rust-src
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-miri-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-miri-
+
+      - name: make miri
+        run: make miri
+
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-miri
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-miri
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90
@@ -475,6 +629,125 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: runner-provenance-fetch
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  irqoff:
+    name: irqoff
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    # Scheduled lane 3 (DESIGN §8.6): one job at a time, the rest queued.
+    concurrency:
+      group: sched-lane-3
+      queue: max
+    # L1321 (P10-S50): the IF-off tracer's `irqoff` build variant under
+    # TCG; the kvm job runs it under KVM. The harness fails every boot when
+    # QEMU is not this version (ROADMAP §10.1): resolute's qemu-system-x86
+    # 1:10.2.1+ds-1ubuntu3. Move the pin and DESIGN §8.6 together.
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+      APT_PACKAGES: qemu-system-x86 xorriso dosfstools
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Host packages from a cache keyed by the runner image and the package
+      # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
+      # with no `apt-get update` and no download; a miss installs as before
+      # and saves what apt downloaded.
+      - name: apt cache key
+        id: apt-key
+        run: |
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: rust-src, llvm-tools
+          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-irqoff-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-irqoff-
+
+      - name: cache limine binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: limine
+          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+
+      - name: setup
+        run: ./setup.sh
+
+      - name: make test-irqoff
+        run: make test-irqoff
+
+      # A failed run's guest cores (ROADMAP §10.7, TESTING.md §8.3): each
+      # failed boot's build/cores/<arch>-<tier>/<seq>-<label>/ holds core.zst,
+      # kernel.elf and qemu-argv.txt. This workflow names no secret
+      # (scripts/check_workflows.py, rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-x86_64-irqoff
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-irqoff
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-irqoff
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90

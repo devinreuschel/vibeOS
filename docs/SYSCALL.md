@@ -161,7 +161,7 @@ names, Linux values:
 | `ENOMEM` | 12 | AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table (256 regions, `limits::MAX_REGIONS`, where Linux's `vm.max_map_count` allows 65,530; ROADMAP §10.4), a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4), `execve` argument buffers included |
 | `EACCES` | 13 | `open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys` |
 | `EFAULT` | 14 | bad user pointer / length |
-| `EBUSY` | 16 | defined; no syscall returns it |
+| `EBUSY` | 16 | `dup2` onto a descriptor an `open` in progress reserved, which no process reaches while each has one thread |
 | `EEXIST` | 17 | `O_EXCL`; `mmap` with `MAP_FIXED_NOREPLACE` (or `MAP_FIXED`, §3.1) over a mapping |
 | `EXDEV` | 18 | a `rename` or `link` across mounts (no syscall makes one yet) |
 | `ENODEV` | 19 | a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4 |

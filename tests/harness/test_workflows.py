@@ -10,7 +10,6 @@ from scripts.check_workflows import (
     CI,
     RELEASE,
     ROOT,
-    TEMPORARY,
     Node,
     Problem,
     Tree,
@@ -337,7 +336,7 @@ class TestQemuPin(unittest.TestCase):
         self.assertEqual(rules(rule_qemu_pin(t)), [(2, "qemu_pin")])
 
 
-BRANCHES = ", ".join(f'"{b}"' for b in ("main", *TEMPORARY))
+BRANCHES = "main"
 GROUP = (
     "${{ github.event_name == 'pull_request' && format('ci-pr-{0}', "
     "github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}"
@@ -359,7 +358,8 @@ class TestCiTriggers(unittest.TestCase):
         self.assertEqual(rule_ci_triggers(ci()), [])
 
     def test_other_push_branches_fail(self) -> None:
-        for branches in ('["**"]', "[main]", f"[{BRANCHES}, dev]"):
+        for branches in ('["**"]', "[main, dev]", '[main, phase-10]', '[main, "p10/**"]',
+                         "[phase-10]", "[main, main]"):
             with self.subTest(branches=branches):
                 t = ci(push=f"  push:\n    branches: {branches}\n")
                 self.assertEqual(rules(rule_ci_triggers(t)), [(2, "ci_triggers")])
@@ -873,7 +873,7 @@ jobs:
       - name: install host tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 xorriso nasm ovmf dosfstools
+          sudo apt-get install -y qemu-system-x86 xorriso ovmf dosfstools
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master

@@ -24,6 +24,7 @@ pub const PARAM_ENTRY: usize = 0xE0;
 pub const PATCH_SITES: &[usize] = &[0x2A, 0x3D, 0x6D, 0xCA];
 
 /// Why [`patch_blob`] refused.
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PatchError {
     /// The page is not 4 KiB aligned.

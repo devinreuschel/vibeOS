@@ -71,9 +71,9 @@ class TestCheckUserArch(unittest.TestCase):
                                                  "let x0 = 0;\n"})
         self.assertEqual(errs, [])
 
-    def test_assembly_programs_ignored(self) -> None:
-        errs, n = self.tree({"user/tests.asm": "mov rax, 60\nsyscall\n",
-                             "user/sys.inc": "; x86_64\n"})
+    def test_assembly_files_ignored(self) -> None:
+        errs, n = self.tree({"user/start.asm": "mov rax, 60\nsyscall\n",
+                             "user/defs.inc": "; x86_64\n"})
         self.assertEqual(errs, [])
         self.assertEqual(n, len(CLEAN))
 

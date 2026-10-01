@@ -43,7 +43,7 @@ fn kill_init_ignored() -> Outcome {
         for _ in 0..4 {
             #[expect(
                 clippy::let_underscore_must_use,
-                reason = "a yield has no failure the case can act on"
+                reason = "a yield has no failure the case can act on (DESIGN §2.5)"
             )]
             let _ = sys::sched_yield();
         }

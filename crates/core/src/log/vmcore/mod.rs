@@ -71,6 +71,7 @@ const KERNEL_HALF: u64 = 0xFFFF_8000_0000_0000;
 
 /// Why the tool refuses a core or an ELF, or cannot decode a table. Each
 /// has one message ([`VmError::as_str`]); the binary adds the values.
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmError {
     NotElf,

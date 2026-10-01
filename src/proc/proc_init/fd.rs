@@ -440,22 +440,23 @@ pub(super) fn sys_dup2(old: u32, new: u32) -> SysResult {
         return Err(KError::BadF);
     };
     let r = with_table(|t| {
-        let p = t.get_mut(pid)?;
+        let p = t.get_mut(pid).ok_or(KError::BadF)?;
         if p.fds.get(old) != Some(s) {
-            return None;
+            return Err(KError::BadF);
         }
-        p.fds.dup2(old, new).ok()
+        // `Busy` (a slot an `open` reserved) is EBUSY, as on Linux.
+        p.fds.dup2(old, new).map_err(KError::from)
     });
     match r {
-        Some(disp) => {
+        Ok(disp) => {
             if let Some(d) = disp {
                 close_dropped(d, "dup2 displaced fd");
             }
             Ok(new as usize)
         }
-        None => {
+        Err(e) => {
             drop_held(s);
-            Err(KError::BadF)
+            Err(e)
         }
     }
 }

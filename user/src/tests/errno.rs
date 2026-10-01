@@ -531,7 +531,7 @@ fn sleep_ts(sec: i64, nsec: i64) -> Result<usize, Errno> {
 pub(super) fn sleep_ms(ms: i64) {
     #[expect(
         clippy::let_underscore_must_use,
-        reason = "a sleep cut short only makes the caller poll sooner"
+        reason = "a sleep cut short only makes the caller poll sooner (DESIGN §2.5)"
     )]
     let _ = sleep_ts(ms / 1000, (ms % 1000) * 1_000_000);
 }
@@ -689,7 +689,7 @@ pub(super) fn poll(tries: u32, mut pred: impl FnMut() -> bool) -> bool {
         }
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "a yield has no failure a poll can act on"
+            reason = "a yield has no failure a poll can act on (DESIGN §2.5)"
         )]
         let _ = sys::sched_yield();
     }
@@ -820,11 +820,14 @@ fn with_files_full<T>(f: impl FnOnce() -> T) -> Result<T, &'static str> {
             while open(HELLO, sys::O_RDONLY).is_ok() {}
             #[expect(
                 clippy::let_underscore_must_use,
-                reason = "the parent sees the stop in psinfo, or times out"
+                reason = "the parent sees the stop in psinfo, or times out (DESIGN §2.5)"
             )]
             let _ = sys::kill(sys::getpid().unwrap_or(0) as i32, SIGSTOP);
             loop {
-                #[expect(clippy::let_underscore_must_use, reason = "the parent kills it")]
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the parent kills it (DESIGN §2.5)"
+                )]
                 let _ = sys::sched_yield();
             }
         });
@@ -849,7 +852,7 @@ fn with_files_full<T>(f: impl FnOnce() -> T) -> Result<T, &'static str> {
     for &k in &kids[..made] {
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "a child already gone is reaped below all the same"
+            reason = "a child already gone is reaped below all the same (DESIGN §2.5)"
         )]
         let _ = sys::kill(k as i32, SIGKILL);
         if utest::wait_status(k).is_err() {

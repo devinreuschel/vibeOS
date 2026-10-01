@@ -212,7 +212,7 @@ fn grandchild() -> i32 {
         }
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "the loop yields only to wait"
+            reason = "a yield has no failure the wait loop can act on (DESIGN §2.5)"
         )]
         let _ = sys::sched_yield();
     }
@@ -246,7 +246,7 @@ fn report(line: &[u8]) {
     if let Ok(fd) = open(ORPHAN_FILE, sys::O_WRONLY) {
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "a lost report fails the parent's wait for it"
+            reason = "a lost report fails the parent's wait for it (DESIGN §2.5)"
         )]
         let _ = sys::write(fd, line.as_ptr(), line.len());
         close(fd);
@@ -279,7 +279,7 @@ fn exec_chain_three_steps_status() -> Outcome {
         ];
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "an execve that returns failed; status 126 reports it"
+            reason = "an execve that returns failed; status 126 reports it (DESIGN §2.5)"
         )]
         let _ = sys::execve(prog, argv.as_ptr(), core::ptr::null());
         126
@@ -359,7 +359,10 @@ const SIG_FILE: &CStr = LIFE_FILE;
 fn signals_kill_stop_cont() -> Outcome {
     let Ok(y) = utest::fork_child(|| {
         loop {
-            #[expect(clippy::let_underscore_must_use, reason = "the parent kills it")]
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the parent kills it (DESIGN §2.5)"
+            )]
             let _ = sys::sched_yield();
         }
     }) else {
@@ -380,7 +383,7 @@ fn signals_kill_stop_cont() -> Outcome {
     let r = stop_cont(c);
     #[expect(
         clippy::let_underscore_must_use,
-        reason = "a child already dead is reaped below all the same"
+        reason = "a child already dead is reaped below all the same (DESIGN §2.5)"
     )]
     let _ = sys::kill(c as i32, SIGKILL);
     let dead = utest::wait_status(c).map(utest::signaled);
@@ -406,7 +409,7 @@ fn count_forever() -> i32 {
         }
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "the loop yields only to share"
+            reason = "a yield has no failure the loop can act on (DESIGN §2.5)"
         )]
         let _ = sys::sched_yield();
     }

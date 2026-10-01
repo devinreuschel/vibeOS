@@ -93,6 +93,7 @@ pub struct Note<'a> {
     pub desc: &'a [u8],
 }
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoteError {
     /// The output buffer cannot hold the note.

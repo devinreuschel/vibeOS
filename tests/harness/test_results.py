@@ -98,7 +98,7 @@ class TestResults(unittest.TestCase):
                     "vibeOS: ktest: begin",
                     "vibeOS: ktest: ok alpha",
                     "vibeOS: ktest: skip beta: needs -smp 4",
-                    "vibeOS: ktest: FAIL gamma: ready_head should be empty",
+                    "vibeOS: ktest: FAIL gamma: run queue should be empty",
                     "junk vibeOS: ktest: ok deltavibeOS: panic: at x",
                     "vibeOS: ktest: ok eps.1vibeOS: ktest: ok zeta",
                     "vibeOS: ktest: end",

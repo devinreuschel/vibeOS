@@ -14,8 +14,8 @@ directory. This script reads the crate's portable files (`user/src/**/*.rs`,
   - an x86 register name (`REGISTERS`).
 
 `arm` is not a rule (a match arm), nor are `x0`-style names (common
-identifiers). The assembly programs `user/*.asm` and `user/sys.inc` are not
-the crate.
+identifiers). Only `.rs` files are read: an assembly file under `user/`
+is not the crate.
 
     check_user_arch.py [--root DIR]
 

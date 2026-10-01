@@ -255,7 +255,7 @@ fn spawn(
             }
             #[expect(
                 clippy::let_underscore_must_use,
-                reason = "an execve that returns failed; status 127 reports it"
+                reason = "an execve that returns failed; status 127 reports it (DESIGN §2.5)"
             )]
             let _ = sys::execve(a[0], a.as_ptr(), e.as_ptr());
             rt::exit(127)
