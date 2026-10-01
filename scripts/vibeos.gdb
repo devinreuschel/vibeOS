@@ -12,9 +12,16 @@
 #
 #     hbreak _start
 #     continue
+#
+# `make debug CORE=<core.zst> [ELF=<kernel.elf>]` starts no QEMU: the core
+# tool writes the core's virtually addressed core to build/debug/core.virt,
+# symbols.gdb opens it (`$vibeos_core` 1), and this script attaches to no
+# stub (ROADMAP §10.7). `info threads` lists one thread per CPU.
 
 set confirm off
 set pagination off
 set architecture i386:x86-64
 source build/debug/symbols.gdb
-target remote localhost:1234
+if $vibeos_core == 0
+  target remote localhost:1234
+end

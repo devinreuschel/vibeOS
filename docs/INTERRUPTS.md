@@ -187,6 +187,16 @@ reschedule or shootdown is not starved by a busy NIC.
 | `0xFE` | Panic stop IPI (§2.5 step 1) |
 | `0xFF` | LAPIC spurious vector |
 
+The table has three registration rules. `vectors::NAMED` lists every named vector, `MC` (`0x12`)
+included, and the host tests `named_vectors_are_unique` and `named_includes_mc` check it.
+`idt::set_handler` asserts, as its first statement and before any guard, that its vector is `0x20` or
+above and not one the table gives a fixed owner (`idt::fixed_owner`: the LAPIC timer, error, thermal
+and spurious vectors and the four IPIs); callers pass constants or pool vectors, never input, so the
+assertion guards a kernel invariant (AGENTS.md rule 4), and `idt::init` installs the exception and
+fixed-owner bodies itself. A `const` block beside `idt.rs`'s row table fails the build unless the
+table has exactly one row for each vector 0 to 255. The in-guest `idt_set_handler_refuses_fixed`
+checks the assertion.
+
 Vector numbers live in one module as named constants, with a host unit test asserting that no two are
 equal. That test costs nothing and catches the copy-paste that assigns two subsystems the same vector.
 

@@ -94,7 +94,19 @@ pub fn put_line(content: &[u8]) {
 pub fn put_user(bytes: &[u8]) {
     // Acquire / Release: as in `put_line`, the value is defined on every path.
     let was = USER_OPEN.load(Ordering::Acquire);
-    let open = line::user_bytes(was, bytes, write_byte);
+    // The flag follows each byte, set before any byte but `\n` goes out and
+    // cleared after a `\n`: a panic dump that interrupts this write on this
+    // CPU (an #MC or NMI, after `force_unlock`) then starts its first line
+    // on a fresh one. At worst it writes one empty line.
+    let open = line::user_bytes(was, bytes, |b| {
+        if b != b'\n' {
+            USER_OPEN.store(true, Ordering::Release);
+        }
+        write_byte(b);
+        if b == b'\n' {
+            USER_OPEN.store(false, Ordering::Release);
+        }
+    });
     USER_OPEN.store(open, Ordering::Release);
 }
 

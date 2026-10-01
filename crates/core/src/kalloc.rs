@@ -805,7 +805,7 @@ impl<K: Ord + fmt::Debug, V: fmt::Debug> fmt::Debug for TryBTreeMap<K, V> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     extern crate std;
 
     use super::*;
@@ -888,13 +888,13 @@ mod tests {
         COUNT.with(Cell::get)
     }
 
-    /// Fail the `n`th allocation from now (0 = the next one).
-    fn fail_in(n: u64) {
+    /// Fail the `n`th allocation from now (0 = the next one), in any module.
+    pub(crate) fn fail_in(n: u64) {
         let c = count();
         FAIL_AT.with(|f| f.set(c + n));
     }
 
-    fn disarm() {
+    pub(crate) fn disarm() {
         FAIL_AT.with(|f| f.set(u64::MAX));
     }
 

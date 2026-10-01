@@ -6,6 +6,7 @@
 //! without changing callers. Kernel `schedule` / idle live in the binary crate.
 
 pub mod fpu;
+pub mod irqoff;
 pub mod stack_depth;
 pub mod thread;
 pub mod wait;
@@ -63,6 +64,16 @@ const _: () = {
 };
 
 impl ReadyQueue {
+    /// The offsets of `ids`, `cap`, `head` and `len`, which the core tool
+    /// (`log::vmcore`) reads a dumped queue through: the layout the
+    /// assertions above fix, named here because the fields are private.
+    pub const CORE_OFFSETS: [usize; 4] = [
+        core::mem::offset_of!(Self, ids),
+        core::mem::offset_of!(Self, cap),
+        core::mem::offset_of!(Self, head),
+        core::mem::offset_of!(Self, len),
+    ];
+
     /// A queue with no room, for a `const` initializer.
     pub const fn empty() -> Self {
         Self {

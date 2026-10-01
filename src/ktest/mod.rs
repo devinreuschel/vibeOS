@@ -421,6 +421,8 @@ fn registry_main() {
     // `n` and the loop ask the same two predicates.
     assert_eq!(runs, n, "ktest: runs made != begin count");
     crate::sched::ktest::report();
+    #[cfg(feature = "irqoff")]
+    crate::sched::irqoff::report();
     crate::marker!("vibeOS: ktest: end");
     qemu_exit(if failed { EXIT_FAIL } else { EXIT_PASS });
 }
@@ -542,7 +544,7 @@ pub(crate) fn quiesce_frames() {
     // Under the guard none of these runs, dies, and frees its slot for the
     // next spawn before every empty slot has a Tcb.
     {
-        let _g = InterruptGuard::enter();
+        let _g = crate::sched::irqoff::deliberate("ktest TCB slot warm-up");
         let mut i = 0;
         while i < empty {
             if thread_init::spawn_here("warm", dying_entry).is_err() {

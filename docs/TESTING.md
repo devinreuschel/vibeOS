@@ -15,6 +15,35 @@ The routing rule: if it can be a host test, it must be. Pushing logic into the l
 crate so it becomes host-testable is the highest-leverage thing available, and the old tree's biggest
 weakness was that nearly everything lived behind `main.rs` and was therefore untestable.
 
+**Loom models.** ROADMAP §10.8's loom models run the kernel's own `vibeos-core` primitives under
+`--cfg loom`, where `vibeos::atomic` is loom's, and check every interleaving up to the bound each
+model states. Each is a `#[cfg(all(test, loom))]` unit test named `loom_*` in a `loom_models` module
+beside its primitive. Each model has a variant that weakens one ordering or moves one step at a
+named `vibeos::sync::variant::Site`, whose code outside `cfg(loom)` is always the kernel's; the
+variant is a `should_panic` test, named `_fails`, that passes only when loom finds the failure. The
+bound is set in code through `variant::check`, so the `LOOM_MAX_*` environment cannot shrink it; the
+first two models below take `LOOM_MAX_PREEMPTIONS`, which `make models-quick` sets to 3. Where a
+model cannot run a kernel-half step (`switch_context`'s saves, `wake_all` under `SCHED`,
+`dmesg_write`'s loop), it writes a loom `UnsafeCell` witness in its place.
+
+| Primitive (file under `crates/core/src/`) | Base test | Variant test: the site it switches | Bound |
+|---|---|---|---|
+| `TryArc` count (`kalloc.rs`) | `loom_tryarc_count` | `loom_tryarc_count_relaxed_dec_fails`: `TryArcDecrement`, the put decrements Relaxed | 3 threads, `LOOM_MAX_PREEMPTIONS` |
+| `OpGate` (`sync/mod.rs`) | `loom_opgate` | `loom_opgate_check_first_fails`: `OpGateCountFirst`, `enter` reads the dead mark first | 2 threads, `LOOM_MAX_PREEMPTIONS` |
+| `TickClock` latch (`time/mod.rs`) | `loom_seqlock_latch`: pairs whose words all derive from one number, so a mixed read fails `seqlock: torn read` | `loom_seqlock_acqrel_bump_tears_fails`: `SeqlockBumpAcqRel`, the bump is one AcqRel `fetch_add` with no fences; `loom_seqlock_no_leading_fence_tears_fails`: `SeqlockLeadingFence`, the bump drops its leading `fence(Release)` | 2 threads (1 write, 2 reads), 3 preemptions |
+| `WakeInbox` (`irq/ipi.rs`) | `loom_wake_inbox_three_pushers`: each slot delivered exactly once | `loom_wake_inbox_summary_first_loses_id_fails`: `InboxSummaryFirst`, push sets the summary bit first | 4 threads (3 pushes, 2 drains), 2 preemptions |
+| `IrqCell` over the log ring (`cell.rs`, `log/mod.rs`) | `loom_log_ring_writers_dmesg`: records whole, each writer's in order, none twice | `loom_log_ring_relaxed_unlock_races_fails`: `IrqCellUnlockRelaxed`, the unlock store is Relaxed | 3 threads (2 writers of 2 emits, 1 reader), 1 preemption |
+| `DoneWord` (`block/mod.rs`; model in `block/loom_models.rs`) | `loom_io_done_publish_last` | `loom_io_done_relaxed_races_fails`: `IoDoneRelaxed`, `publish` stores Relaxed | 2 threads, 3 preemptions |
+| `OnCpu` (`sched/thread.rs`) | `loom_on_cpu_handoff` | `loom_on_cpu_relaxed_clear_races_fails`: `OnCpuClearRelaxed`, `clear` stores Relaxed | 2 threads, 3 preemptions |
+
+`make models-quick`, part of `make check`, runs them all. By hand:
+
+```sh
+HOST=$(rustc -vV | sed -n 's/^host: //p')
+RUSTFLAGS="--cfg loom -D warnings" CARGO_TARGET_DIR=target/loom \
+  cargo test -p vibeos-core --lib --features std --target "$HOST" --release -- loom_
+```
+
 ## 8.1 Host unit tests
 
 Anything in `crates/core/src/lib.rs` and its submodules, compiled as `vibeos-core` on the host. No hardware
@@ -62,6 +91,39 @@ the reader can compare against.
 
 A single-threaded test cannot observe a race. Simulate the interrupt-context writer explicitly, or
 accept that the real coverage is in-guest.
+
+**Fuzzing (C-FUZZ, ROADMAP §10.2).** `tests/fuzz` is a cargo-fuzz crate, `vibeos-fuzz`, outside the
+Cargo workspace (the root `Cargo.toml` excludes it), so the kernel build and the MSRV check never
+read `libfuzzer-sys`; `make check` runs `cargo deny` on it as a second workspace, against the same
+`deny.toml`. It has its own `Cargo.lock` and profiles, which keep
+`overflow-checks` and `debug-assertions` on so a fuzzer panics where the kernel would (DESIGN §3.5).
+It holds one target per byte-slice parser in `vibeos-core`, each a `fuzz_targets/<t>.rs` over one
+`pub fn <t>(data: &[u8])` and a row of `vibeos_fuzz::TARGETS`: `acpi_walk`, `acpi_tables`,
+`part_parse`, `fat_mount`, `vibefs_mount`, `pci_enumerate`, `virtio_caps`, `shell_tokenize`,
+`kbd_decode`, `elf_parse`, `cmdline_parse` and `vmcoreinfo_parse`. Most take the input as raw
+bytes; three encodings model hardware: `Sparse`, a disk of 512- or 4096-byte units named by index
+(flag bit 0 recomputes the GPT CRCs, bit 1 selects 4096-byte partition sectors), `FakeCfg`, PCI
+config-space records of bus, devfn and 256 bytes, and `FlatMem`, the input as physical memory at
+`0xE0000` for `acpi::walk`. `corpus/<t>/seed-*` holds only the output of `cargo run --example
+seeds`, built with the parsers' own builders; `regressions/<t>/` holds crash inputs. `make check`
+runs `make fuzz-check`: rustfmt, clippy, a build of every target, and `cargo test`, which replays
+every committed corpus and regression input on its own thread with a 10 s bound, checks that
+`TARGETS`, the `[[bin]]`s, `fuzz_targets/` and `corpus/` agree, that the generator's output is
+committed and accepted, and that every row of `scripts/check_core_stable.py`'s `PARSERS` table is
+named by a target's `covers`; it fuzzes nothing. `make fuzz` runs each target (`FUZZ_TARGETS`,
+default all) for `FUZZ_TIME` seconds (default 60) with `FUZZ_UNIT_TIMEOUT` (10 s) per input and the
+`FUZZ_SANITIZER` (`address`, and `none` on macOS, where AddressSanitizer is unusable), writing new
+inputs to `build/fuzz/corpus/<t>` and crashes to `build/fuzz/artifacts/<t>`; it needs the pinned
+cargo-fuzz (`CARGO_FUZZ_VERSION`) and names the install command when that is missing. The weekly
+`smp-stress.yml` job runs it. A crash: reproduce it with `cargo fuzz run --fuzz-dir tests/fuzz <t>
+<file>`, minimize it with `cargo fuzz tmin --fuzz-dir tests/fuzz <t> <file>`, fix the parser, and
+commit the minimized input under `regressions/<t>/` (no file extension: the root `.gitignore`
+drops `*.bin` and its kin) in the fix's commit. A parser added or changed later gets its target,
+its `TARGETS` row, its seed and its `check_core_stable.py` row in the parser's own commit. The
+harness caps (2^20 units for partitions and FAT, 4096 blocks for vibefs, 64 PCI records, 256 nodes,
+depth 8 and 64 KiB per file in the filesystem walks) bound the harness, not the parser: a real disk
+can be larger. `vibefs_mount` fixes no checksum, because vibefs v1 trusts any checksum-valid block
+(F061, ROADMAP §14.8), so it reaches only what a valid checksum lets through.
 
 ## 8.2 In-guest tests
 
@@ -283,6 +345,30 @@ byte of sector n `(n & 0xFF) ^ 0xA5`, so no GPT is stamped and no partition mark
 the opt-in `vblk_readonly` on a `readonly=on` image (`_vblk_readonly_boot`), and the opt-in
 `vblk_bad_sector` on an image behind QEMU's `blkdebug`, which fails every read of sector 4096
 (`_vblk_bad_sector_boot`). Each boot requires its one `ok` line.
+
+The IF-off tracer build (ROADMAP §10.3, [INVARIANTS.md §2.9](INVARIANTS.md#29-preemption-and-interrupt-state)
+rule 2). The `irqoff` Cargo feature is a measurement build, never a published image: the `irqoff`
+variant is production features plus `irqoff` (`build/vibeos-irqoff.iso`), and `ktest-irqoff` is
+`kernel_tests` plus `irqoff` (`build/vibeos-ktest-irqoff.iso`). `make test-irqoff` runs
+`run_ktest.py` on the second and `run_e2e.py` on the first, both with `VIBEOS_TIER=test-irqoff`;
+it is not part of `make test`, since the nightly job runs it. Under TCG it adds `-icount shift=0`
+and `VIBEOS_SMP=1`, so guest time counts instructions and 100,000 ns is exactly the rule's bound;
+under KVM (`VIBEOS_QEMU_ACCEL=kvm`) it adds neither and the numbers are wall time. The kernel
+prints `vibeOS: irqoff: on bound <n> ns` after `irq: enabled`, and a reporter thread prints each
+changed site's cumulative `site`, `over`, `deliberate` and `unmatched` lines every 100 ms of guest
+time; the ktest runner reports once more before `ktest: end`. The e2e driver quits QEMU at its last
+marker, so stretches after the last report of an e2e boot are not seen. `tests/harness/irqoff.py`
+reads every boot's lines: a `test-irqoff` boot without the `on` line is the wrong ISO and fails; it
+appends a table to `$GITHUB_STEP_SUMMARY` (under TCG the sites over the bound and the totals; under
+KVM every site's max and p99, with no threshold, since its host can deschedule a vCPU mid-stretch)
+and writes the rows to the results file's `irqoff` section, with the e2e driver appending to the
+ktest driver's file (`VIBEOS_RESULTS_APPEND=1`). A test or test hook that holds IF off on purpose
+takes `sched::irqoff::deliberate(reason)` (C-IRQOFF-GUARD, `kernel_tests` only), which marks its
+stretch so it is never over and prints it on a `deliberate` line; `irqoff_logs_long_stretch` and
+`irqoff_deliberate_is_exempt`, registered only in this build, check the tracer and the guard. A
+test longjmped out of by `arch::catch` skips its guards' drops, so its stretch shows as
+`unmatched`. Under `-smp 1` a test that needs a second CPU skips with its "no AP" reason, and each
+such skip has a `smp = 1` row in `tests/harness/skips.toml` (C-SKIPS).
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
@@ -508,6 +594,59 @@ regenerates the streams; the recorder drives QEMU through a qtest socket beside 
 dump or QEMU command line: `scripts/check_workflows.py` (`rule_no_core_upload_with_secrets`) fails
 on one that does.
 
+The core tool, `vmcore` (`tests/hostlib/src/bin/vmcore.rs` over `vibeos::log::vmcore`, ROADMAP
+§10.7), reads such a core with the kernel ELF behind it. `make vmcore` builds it in the kernel's
+profile, since debug assertions move fields of `Tcb` and `PerCpu` ([VMCOREINFO.md](VMCOREINFO.md)).
+`vmcore report --core <file|-> --elf <kernel.elf> [--virt <out>] [--trace <out.json>]` reads the
+core from a file or from `zstd -dc` on stdin into a sparse store of its non-zero 4 KiB pages, and
+refuses by name a core whose VMCOREINFO `BUILD-ID` is not the ELF's GNU build id
+(`vmcore: BUILD-ID mismatch: core <hex> elf <hex>`, exit 3), a core with no VMCOREINFO note (exit 4)
+and an ELF with no build-id note (exit 1); an ELF32 core, which QEMU writes when a timeout comes
+before the kernel reaches long mode, is refused too. It walks the crashed kernel's tables through
+the roots the note names, decoding the portable crate's `#[repr(C)]` types at their `offset_of!`
+offsets. Every run that takes a core prints the report after its serial tail
+(`harness.core_report`, `failure_tail`), in this order:
+
+- `sig: <message> @ <f0> < <f1> < <f2>`, the signature below;
+- `core: <bytes> RAM in <k> segments`, `build-id: <hex>`, and `panic: cpu <n>: <line>` or
+  `panic: none`;
+- for each CPU, `cpu <n> apic <id> current <tid> idle <tid> runq [<tids>] regs slot|prstatus
+  running|stopped (<how>)`, then its symbolized frame-pointer backtrace, one `  #<i> 0x<addr>
+  <function>+0x<off>` line per frame (at most 24, walked as the dump walks, within the kernel half),
+  starting from its crash-register slot when set (a CPU the dump stopped, and the dump's owner,
+  which records where its dump began) and else from its `NT_PRSTATUS` note;
+- `thread <tid> <state> ...` for each thread of the TCB table, with its CPU, pid and saved context;
+- `log: last <k> of <n> (<d> dropped)`, then the last 64 records of the log ring, oldest first, a
+  record caught between `Ring::push`'s stores printed `<torn>`;
+- `trace: order global` or `trace: order per-cpu (<why>)`, the flight recorder's ordering (DESIGN
+  §6.4), and the `--trace` and `--virt` files it wrote.
+
+`--trace` writes every CPU's flight-recorder ring as one Chrome trace-event JSON timeline, which
+Perfetto opens, with the timestamps in nanoseconds from the calibration the core holds. `--virt`
+writes the virtually addressed core: `ET_CORE`, the core's notes, and one `PT_LOAD` per run of
+present kernel-half mappings (`p_vaddr` the VA, `p_paddr` the PA; uncached mappings left out),
+which `gdb` opens with the kernel ELF: `make debug CORE=<core.zst> [ELF=<kernel.elf>]` writes it to
+`build/debug/core.virt`, and `gdb -x scripts/vibeos.gdb` then opens it instead of the stub.
+
+The signature (`vibeos::log::vmcore::sig`, host-tested) is the same line for the same bug in every
+build. Its message is the first line of the panic message, cut at 120 bytes without trailing
+whitespace, which the dump's owner records in its `PanicLine` (an exception dump records its first
+line without `vibeOS: `), with each maximal `0x[0-9A-Fa-f]+` or `[0-9]+` written `N`; with no panic
+line it is `timeout`. Its CPU is the
+one the panic line names, or on a timeout the lowest CPU whose current thread is not its idle
+thread (CPU 0 when every CPU is idle). Its frames are the first three function names of that CPU's
+backtrace, demangled without hash, `?` for an address with no symbol, never an address or offset;
+on a panic, leading frames of the panic machinery are skipped (`PANIC_FRAMES`: `rust_begin_unwind`,
+`core::panicking::`, `core::option::unwrap_failed`, `core::option::expect_failed`,
+`core::result::unwrap_failed`, `core::slice::index::`, `core::str::slice_error_fail` and
+`vibeos::log::panic::`, each a prefix).
+
+The `hang_test` build (a test-only feature, the `hang` variant) hangs every CPU once `smp: done` and
+the clocksource line have printed: one CPU prints `vibeOS: hang_test: armed` and spins holding a
+spinlock with IF=0, and every other CPU spins on that lock with IF=0, so its report reads
+`sig: timeout @ …hang_test::hold < …hang_test::arm < …boot_rest` with CPUs 1 up in
+`hang_test::wait`. `make test-forensics` (§8.5) tests the forensics on its cores.
+
 Every driver classifies each serial line through `tests/harness/frame.py` (DESIGN §2.6): a framed line
 is the kernel's and is matched with its frame stripped, an unframed line is a user program's or the
 loader's, and each driver checks the three failure tuples, the kernel's `PANIC_SIGNATURES` on framed
@@ -676,11 +815,27 @@ unit tests, the `release_assert_` host tests again with debug assertions off, ha
 ruff and mypy; a production-feature link under the `hookcheck`
 profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q2's `nm` check; then every
 `scripts/check_*.py`; then `cargo deny check licenses bans sources` against `deny.toml`, ROADMAP §10.9's
-dependency policy). Right after the `vibeos-core` clippy lines it builds `vibeos-core` with its MSRV
+dependency policy; and the `tests/fuzz` build and replay (§8.1)). Right after the `vibeos-core` clippy lines it builds `vibeos-core` with its MSRV
 (`make check-msrv`: `cargo +<MSRV> check` for the host with `std` and for `x86_64-unknown-none`, under
 `RUSTFLAGS=--cap-lints=warn`, so it proves only that the crate builds). A missing `ruff`, `mypy`, `cargo-deny`,
 `fsck.fat` or MSRV toolchain fails it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`, which skips that check and
 prints it. CI runs it as the `check` job before QEMU (DESIGN §8.6).
+`make test-forensics` (`tests/harness/run_forensics.py`, in `make test`) tests the core tool on
+real cores. It boots the `hang` ISO at `-smp 4` and 128 MiB, declared `expect=none`: its contract
+through `smp: done`, then `vibeOS: hang_test: armed`; any panic signature or QMP event fails it at
+once. Five seconds after the armed marker (`GIVE_UP_S`), never at the harness timeout, it stops the
+guest, takes a core through the pipe into `build/forensics/hang/` and quits, then runs
+`vmcore report --virt --trace` and checks the report (the `sig:` line, a `cpu` block with a
+symbolized frame for each of the four CPUs, CPUs 1 to 3 in `hang_test::wait`, a thread line with
+its state for each current thread, and min(64, ring length) log records ending with the armed
+marker), the export (JSON whose `traceEvents` all carry `name`, `ph`, `ts`, `pid` and `tid`, all
+four CPUs among them, and the report's ordering) and the virtual core (every `PT_LOAD` of the ELF
+covered, and the ELF's `.text` bytes at `.text`'s address). It then checks the refusal (the hang
+core with the `gp` ELF exits 3), boots the `gp` ISO declared `expect=panic` and takes its core at
+`GUEST_PANICKED` (its `sig:` line is the serial `#GP` line as `PanicLine` keeps it, with
+`gp_test_fault < gp_test_trip < boot_rest`), and boots the `hang` ISO at `-m 9G`, whose core goes
+through the pipe and the tool streaming from `zstd -dc`: the same `sig:` line, and at least 9 GiB
+in its `core:` line. Each check is a `forensics_<case>` row of its results file.
 `make test-e2e` is enough when only boot output or QEMU wiring changed. `make test` is the gate before
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.
@@ -751,16 +906,18 @@ scheduled work runs in the 10 lanes of ROADMAP §10.1's next box (Scheduled capa
 
 Tiers, with each group's summed QEMU step time in the last green integration-branch `ci` run before
 the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash`'s figure
-includes its `cargo test` of the host tools, the one tier that needs the toolchain:
+includes its `cargo test` of the host tools, the one tier that needs the toolchain; `forensics`'s
+is a local TCG run's, until a `ci` run measures it:
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
 | x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest`, `test-qmp` | 40 |
-| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-strace`, `test-e2e-panic-stop`, `test-e2e-power` | 40 |
+| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-init-fault`, `test-e2e-strace`, `test-e2e-panic-stop`, `test-e2e-power` | 40 |
 | x86_64 | in-guest-1 | `test-kernel` | 64 |
 | x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
 | x86_64 | in-guest-3 | `test-lapic-fallback` | 50 |
 | x86_64 | vibefs-crash | `test-vibefs-crash` | 47 |
+| x86_64 | forensics | `test-forensics` | 60 |
 
 `test-unit` and `test-harness` run inside `make check`, in the `check` job. The in-guest tiers
 each pass 40 s alone and cannot split below a target.
@@ -768,7 +925,7 @@ each pass 40 s alone and cannot split below a target.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`); on a pull request, `scripts/check_gate_inputs.py` against its merge base; then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines <floor>`, the floor in `tests/gates/inputs.toml`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test` and `panic_stop_test`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
 | `ci-pass` | every per-push run | `needs:` every other job, `if: always()`; fails unless each succeeded, a job gated on the event being allowed to skip (`scripts/check_gate_inputs.py --ci-pass`, which the job runs with `NEEDS: ${{ toJSON(needs) }}` and `SKIPPABLE: ticks`; its static rules fail when the job misses one, lacks `if: always()`, or lists in `SKIPPABLE` a job whose `if:` does not test `github.event_name`) |

@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/core", "tests/hostlib", "user", "user/mem"]
+exclude = ["tests/fuzz"]
 resolver = "3"
 
 # C-LINTS (ROADMAP §10.1): every member has `[lints] workspace = true`. A module
@@ -53,10 +54,19 @@ panic_nest_test = []
 # (ROADMAP §10.7, F135).
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 panic_stop_test = []
+# After `smp: done`, hang every CPU: one holds a spinlock with interrupts off
+# and the others spin on it, so the forensics tier takes a core of a real hang
+# (ROADMAP §10.7, `make test-forensics`).
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+hang_test = []
 # Write-loop kernel for QEMU-kill crash consistency (docs/VIBEFS.md §12).
 # Its own named ELF and ISO; never the production image.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 vibefs_crash = ["vibeos/crash_plant"]
+# IF-off tracer (ROADMAP §10.3, INVARIANTS.md §2.9 rule 2). Measurement build
+# only; never a published image.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+irqoff = []
 
 [lints]
 workspace = true

@@ -368,6 +368,11 @@ extern "C" fn boot_rest() -> ! {
     );
     crate::marker!(marker::SCHED_CPU0);
     crate::marker!(marker::IRQ_ENABLED);
+    #[cfg(feature = "irqoff")]
+    crate::sched::irqoff::start(
+        |name, entry| thread_init::spawn(name, entry).is_ok(),
+        thread_init::sleep_ms,
+    );
 
     // DESIGN §3.3 step 17. After the scheduler: APs enter as idle.
     // IPI vectors are in the shared IDT; install the shootdown hook
@@ -379,6 +384,8 @@ extern "C" fn boot_rest() -> ! {
     unsafe { smp_init::init() };
     time_init::confirm_clocksource();
     diag::cpus();
+    #[cfg(feature = "hang_test")]
+    crate::smp::hang_test::arm();
 
     // DESIGN §3.3 live: after smp: done. Handler, 8042, then unmask IRQ1.
     crate::console_init::init();
@@ -402,7 +409,7 @@ extern "C" fn boot_rest() -> ! {
     {
         use crate::serial::Serial;
         use core::fmt::Write;
-        match crate::proc_init::spawn_elf(b"/hello", &[], &[], 0, 0) {
+        match crate::proc_init::spawn_elf(b"/hello", &[&b"/hello"[..]], &[], 0, 0) {
             Ok(pid) => {
                 let st = crate::proc_init::wait_kernel(pid);
                 let code = if vibeos::proc::wifsignaled(st) {

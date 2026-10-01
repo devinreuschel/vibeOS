@@ -214,7 +214,7 @@ pub(crate) fn test_ring3_syscall_enosys() -> Outcome {
 
 pub(crate) fn test_ring3_hello_exit() -> Outcome {
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf(b"/hello", &[], &[], 0, 0) {
+    let pid = match proc_init::spawn_elf(b"/hello", &[&b"/hello"[..]], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
     };
@@ -341,9 +341,44 @@ pub(crate) fn test_syscall_ptr_validate() -> Outcome {
     }
 }
 
+/// Grow the kernel heap to what `/bin/tests`' `exec_args` cases take, so
+/// the count below sees no growth: argument blocks filled to Linux's
+/// 2 MiB limit in `copy_cvec`'s 256-byte chunks (ROADMAP §10.5), two at
+/// once, the headroom first-fit placement needs when the heap's free
+/// space is split. The heap keeps the pages it maps, so without this the
+/// first such `execve` in the window reads as frames lost.
+fn warm_exec_args() {
+    use vibeos::elf::{ExecArgs, arg_space_limit};
+    use vibeos::limits::{MAX_ARG_STRLEN, RLIMIT_STACK_DEFAULT};
+    let fill = |args: &mut ExecArgs| {
+        let chunk = [b'x'; 256];
+        loop {
+            if args.begin(false).is_err() {
+                return;
+            }
+            let mut len = 0usize;
+            while len + chunk.len() < MAX_ARG_STRLEN {
+                if args.extend(&chunk).is_err() {
+                    return;
+                }
+                len += chunk.len();
+            }
+            if args.end().is_err() {
+                return;
+            }
+        }
+    };
+    let limit = arg_space_limit(RLIMIT_STACK_DEFAULT);
+    let mut a = ExecArgs::new(limit);
+    let mut b = ExecArgs::new(limit);
+    fill(&mut a);
+    fill(&mut b);
+}
+
 pub(crate) fn test_user_syscalls() -> Outcome {
+    warm_exec_args();
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf(b"/bin/tests", &[], &[], 0, 0) {
+    let pid = match proc_init::spawn_elf(b"/bin/tests", &[&b"/bin/tests"[..]], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
     };
@@ -959,7 +994,7 @@ pub(crate) fn test_user_tf_repin() -> Outcome {
     Outcome::Ok
 }
 
-// `user/tests.asm` from its `dup(1)` on (ROADMAP §10.2, F021), for
+// The assembly `/bin/tests`' sequence from its `dup(1)` on (ROADMAP §10.2, F021), for
 // FORK_WAIT_ROUNDS rounds: (1) dup(1), a zero-length write, close; (2) fork,
 // the child exits 7, wait4(pid) wants 0x0700; (3) fork, the child execs
 // /hello, wait4(pid) wants 0x2A00; (4) fork, the child loads from address
@@ -1216,7 +1251,7 @@ fn wait_run(cpu: u32) -> Outcome {
     }
 }
 
-/// `user/tests.asm`'s fork, wait4, execve, fault and fork-bomb sequence
+/// The assembly `/bin/tests`' fork, wait4, execve, fault and fork-bomb sequence
 /// after `user: dup ok` finishes on every spawning CPU, the registry's and
 /// a second one, while `syscall_init::testing::fork_wait_stall_point`
 /// holds each run's first ring-3 entries in the window after GS is

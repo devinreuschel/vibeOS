@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 publish = false
 
-# Host mkfs/fsck, the crash test's nbd-cache and vibefs-cat. Portable tests live in `vibeos-core` (`make test-unit`).
+# Host mkfs/fsck, the crash test's nbd-cache and vibefs-cat, and the core tool. Portable tests live in `vibeos-core` (`make test-unit`).
 # Host tests of a port's assembly live here too, since `vibeos-core` carries none.
 # Parent `.cargo/config.toml` defaults to the kernel triple, so Makefile
 # host recipes pass `--target $(HOST_TRIPLE)`.
@@ -31,12 +31,18 @@ path = "src/bin/vibefs_cat.rs"
 name = "mkinitrd"
 path = "src/bin/mkinitrd.rs"
 
+[[bin]]
+name = "vmcore"
+path = "src/bin/vmcore.rs"
+
 [[test]]
 name = "switch_context"
 path = "tests/switch_context.rs"
 
 [dependencies]
 vibeos = { path = "../../crates/core", package = "vibeos-core", features = ["std"] }
+# The core tool demangles the kernel's v0 and legacy symbol names (host only).
+rustc-demangle = "0.1"
 
 [lints]
 workspace = true

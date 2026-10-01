@@ -429,7 +429,8 @@ pub fn fork() -> Result<usize, Errno> {
 }
 
 /// `execve(const char *pathname, const char *const *argv, const char *const *envp)`: `argv` and
-/// `envp` at most 15 strings of at most 255 bytes each; `envp` copied and dropped.
+/// `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits
+/// (§3.1).
 pub fn execve(
     pathname: *const u8,
     argv: *const *const u8,

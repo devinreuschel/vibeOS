@@ -729,14 +729,26 @@ mod tests {
 
     #[test]
     fn cmdline_init_vectors_on_initial_stack() {
-        use crate::elf::build_initial_stack;
+        use crate::elf::{ExecArgs, build_initial_stack, initial_stack_len};
         let c = parse(b"vibeos.strace=1 single TERM=\"vt 100\" -- x.y");
         let mut buf = [0u8; CMDLINE_MAX];
         let v = c.init_vectors(b"/sbin/init", &mut buf);
+        let mut args = ExecArgs::new(128 << 10);
+        for a in v.argv() {
+            args.push_arg(a).unwrap();
+        }
+        args.finish_argv().unwrap();
+        for e in v.envp() {
+            args.push_env(e).unwrap();
+        }
         let top = 0x7fff_0000u64;
-        let mut mem = [0u8; 4096];
-        let rsp = build_initial_stack(top, &mut mem, v.argv(), v.envp(), &[], &[7; 16]).unwrap();
-        let base = top - mem.len() as u64;
+        let len = initial_stack_len(&args, 0).unwrap();
+        let mut mem = vec![0u8; len - 8 - args.strings().len()];
+        let st = build_initial_stack(top, &args, &[], &[7; 16], &mut mem).unwrap();
+        mem.extend_from_slice(args.strings());
+        mem.extend_from_slice(&[0; 8]);
+        let rsp = st.rsp;
+        let base = rsp;
         let word = |va: u64| {
             let o = (va - base) as usize;
             u64::from_le_bytes(mem[o..o + 8].try_into().unwrap())

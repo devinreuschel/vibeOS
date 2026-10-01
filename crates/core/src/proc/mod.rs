@@ -411,6 +411,14 @@ pub const fn forced(sig: u32) -> bool {
     sig == SIGKILL || sig == SIGSTOP
 }
 
+/// Whether `kill` delivers `sig` to `target` (ROADMAP §10.5, F068). Pid 1
+/// gets only a signal it has a handler for, as on Linux, and never
+/// `SIGKILL` or `SIGSTOP`: no process can kill or stop init. Any other
+/// process gets every signal.
+pub const fn kill_delivers(target: u32, sig: u32, has_handler: bool) -> bool {
+    target != INIT_PID || (has_handler && !forced(sig))
+}
+
 pub fn sig_name(sig: u32) -> &'static str {
     match sig {
         SIGHUP => "HUP",
@@ -433,6 +441,48 @@ pub fn sig_name(sig: u32) -> &'static str {
         SIGSTOP => "STOP",
         SIGTSTP => "TSTP",
         _ => "?",
+    }
+}
+
+/// How pid 1 ended, for the line the kernel prints before it panics
+/// (ROADMAP §10.5, F068): `exited <n>`, `killed SIG<name>`, or, for a
+/// fault, `killed SIG<name> addr=0x<hex>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitExit {
+    /// `exit` with this status.
+    Exited(u32),
+    /// A signal that was not a fault.
+    Killed(u32),
+    /// A fault's signal, and the faulting address: CR2 for a page fault,
+    /// the faulting RIP for any other.
+    Faulted { sig: u32, addr: u64 },
+}
+
+impl InitExit {
+    /// From init's wait status and, when a fault ended it, the address.
+    pub const fn from_wait(status: u32, fault: Option<u64>) -> Self {
+        if wifexited(status) {
+            return Self::Exited(wexitstatus(status));
+        }
+        match fault {
+            Some(addr) => Self::Faulted {
+                sig: wtermsig(status),
+                addr,
+            },
+            None => Self::Killed(wtermsig(status)),
+        }
+    }
+}
+
+impl core::fmt::Display for InitExit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Exited(n) => write!(f, "exited {n}"),
+            Self::Killed(sig) => write!(f, "killed SIG{}", sig_name(sig)),
+            Self::Faulted { sig, addr } => {
+                write!(f, "killed SIG{} addr=0x{addr:x}", sig_name(sig))
+            }
+        }
     }
 }
 
@@ -535,6 +585,42 @@ mod tests {
         let _ = O_CLOEXEC;
         assert_eq!(fd_flags_from_open(O_CLOEXEC), FD_CLOEXEC);
         assert_eq!(fd_flags_from_open(0), 0);
+    }
+
+    /// Pid 1 drops every signal it has no handler for, and `SIGKILL` and
+    /// `SIGSTOP` even with one; pid 2 gets them all (F068).
+    #[test]
+    fn init_signal_filter() {
+        for sig in 1..=31 {
+            assert!(!kill_delivers(INIT_PID, sig, false), "sig {sig} to pid 1");
+            assert!(kill_delivers(2, sig, false), "sig {sig} to pid 2");
+            assert!(kill_delivers(2, sig, true), "sig {sig} to pid 2, handled");
+        }
+        assert!(!kill_delivers(INIT_PID, SIGKILL, true));
+        assert!(!kill_delivers(INIT_PID, SIGSTOP, true));
+        assert!(kill_delivers(INIT_PID, SIGTERM, true));
+    }
+
+    /// The three forms of pid 1's exit line (F068).
+    #[test]
+    fn init_exit_line_format() {
+        extern crate std;
+        use std::string::ToString;
+        let line = |st, fault| InitExit::from_wait(st, fault).to_string();
+        assert_eq!(line(wait_exited(0), None), "exited 0");
+        assert_eq!(line(wait_exited(3), None), "exited 3");
+        assert_eq!(line(wait_signaled(SIGKILL), None), "killed SIGKILL");
+        assert_eq!(
+            line(wait_signaled(SIGSEGV), Some(0x1000)),
+            "killed SIGSEGV addr=0x1000"
+        );
+        assert_eq!(
+            InitExit::from_wait(wait_signaled(SIGSEGV), Some(0x1000)),
+            InitExit::Faulted {
+                sig: SIGSEGV,
+                addr: 0x1000
+            }
+        );
     }
 
     #[test]

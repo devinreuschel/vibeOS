@@ -15,6 +15,11 @@ the row's own result, a `ktest: end` (the call came back), the other row's
 line, a nonzero exit (an odd one is `isa-debug-exit`'s, from the registry
 ending the boot), or no progress by the ktest progress deadline
 (`KtestDeadlines`). The harness retries nothing (ROADMAP §10.2).
+
+Each boot runs under a `qmp.Session` declared `expect=none` (C-QMP), as
+every harness boot does: QEMU starts halted with a QMP socket, a timeout
+or a panic takes a guest core under `build/cores/` before QEMU stops
+(ROADMAP §10.7), and the error carries the core tool's report.
 """
 
 from __future__ import annotations
@@ -28,12 +33,15 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from tests.harness import frame, results
+from tests.harness import frame, qmp, results
 from tests.harness.harness import (
     BOOT_ALLOWANCE_S,
+    IDLE_S,
+    PANIC_DONE,
     HarnessError,
     KtestDeadlines,
     QemuProcess,
+    RunResult,
     contains_panic,
     default_iso,
     env_config,
@@ -69,29 +77,74 @@ def watch_power_boot(
     line: str,
     progress: KtestDeadlines,
     clock: Callable[[], float] = time.monotonic,
+    session: qmp.Session | None = None,
 ) -> PowerBoot:
-    """Read one boot of `row` from `src` until QEMU exits, and judge it."""
+    """Read one boot of `row` from `src` until QEMU exits, and judge it.
+
+    With `session` (a started `qmp.Session`), a timeout or a panic takes a
+    guest core before QEMU stops, as the event rule says (ROADMAP §10.7),
+    and QMP is polled while serial is idle."""
     boot = PowerBoot()
     saw_run = False
     saw_line = False
+    argv = list(getattr(src, "argv", []) or [])
+
+    def ended(err: HarnessError) -> PowerBoot:
+        boot.error = str(err)
+        boot.exit_code = src.wait(5.0)
+        return boot
 
     def fail(why: str) -> PowerBoot:
+        msg = f"{row}: {why}{serial_tail(boot.lines)}"
+        if session is not None:
+            try:
+                session.fail(src, RunResult(lines=boot.lines), argv, msg)
+            except HarnessError as e:
+                return ended(e)
         src.kill()
         boot.exit_code = src.wait(5.0)
-        boot.error = f"{row}: {why}{serial_tail(boot.lines)}"
+        boot.error = msg
         return boot
 
     src.set_deadline(progress.start(clock()))
     while True:
         kind, raw = src.next_event()
+        if kind == "idle":
+            if session is not None:
+                d = session.idle()
+                if d:
+                    try:
+                        session.settle(src, RunResult(lines=boot.lines), d, argv)
+                    except HarnessError as e:
+                        return ended(e)
+            continue
         if kind == "partial":
             boot.lines.append(raw)
             continue
         if kind == "timeout":
-            return fail(f"no progress: {progress.hung_message()}")
+            why = f"{row}: no progress: {progress.hung_message()}{serial_tail(boot.lines)}"
+            if session is not None:
+                try:
+                    session.timeout(src, RunResult(lines=boot.lines), argv, why)
+                except HarnessError as e:
+                    return ended(e)
+            src.kill()
+            boot.exit_code = src.wait(5.0)
+            boot.error = why
+            return boot
         if kind == "eof":
             break
         boot.lines.append(raw)
+        if session is not None:
+            halted = PANIC_DONE in (frame.kernel_text(raw) or "")
+            d = session.line(raw, panic=contains_panic(raw), halted=halted)
+            if d:
+                try:
+                    session.settle(
+                        src, RunResult(lines=boot.lines), d, argv, why=f"{row}: panic line: {raw!r}"
+                    )
+                except HarnessError as e:
+                    return ended(e)
         if contains_panic(raw):
             return fail(f"panic line: {raw!r}")
         user_fail = frame.user_failure(raw)
@@ -145,9 +198,18 @@ def main() -> int:
         try:
             base = env.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
             cfg = dataclasses.replace(base, ktest=row)
-            argv = qemu_argv(cfg, None)
-            src = QemuProcess(argv, math.inf)
-            boot = watch_power_boot(src, row, line, KtestDeadlines(env.timeout, env.timeout_scale))
+            session = qmp.Session(cfg, row)
+            argv = qemu_argv(cfg, None, qmp_sock=session.sock)
+            src = QemuProcess(argv, math.inf, idle_s=IDLE_S)
+            try:
+                session.start()
+                deadlines = KtestDeadlines(env.timeout, env.timeout_scale)
+                boot = watch_power_boot(src, row, line, deadlines, session=session)
+            finally:
+                session.close()
+                if src.wait(0.0) is None:
+                    src.kill()
+                    src.wait(5.0)
         except HarnessError as e:
             res.record("ktest", row, "failed")
             print(f"[power] FAIL: {row}: {e}", file=sys.stderr)

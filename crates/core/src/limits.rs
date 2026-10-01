@@ -107,6 +107,19 @@ pub const MAX_TOKENS: usize = 16;
 pub const MAX_BOOT_MODULES: usize = 4;
 /// `PT_LOAD` segments in one image (`elf::Image`).
 pub const MAX_ELF_LOADS: usize = 8;
+/// Bytes in one `execve` argument or environment string, its NUL
+/// included: Linux's `MAX_ARG_STRLEN`, as execve(2) states it
+/// (`elf::ExecArgs`). A longer string is `E2BIG`.
+pub const MAX_ARG_STRLEN: usize = 131_072;
+/// The least room `execve`'s strings and pointers get together, whatever
+/// `RLIMIT_STACK` is (execve(2); `elf::arg_space_limit`).
+pub const ARG_SPACE_MIN: usize = 128 << 10;
+/// The most room `execve`'s strings and pointers get together, whatever
+/// `RLIMIT_STACK` is (execve(2); `elf::arg_space_limit`).
+pub const ARG_SPACE_MAX: usize = 6 << 20;
+/// `RLIMIT_STACK`, fixed at Linux's 8 MiB default (getrlimit(2)) until
+/// ROADMAP §13.9's `setrlimit`: `execve`'s arguments get a quarter of it.
+pub const RLIMIT_STACK_DEFAULT: u64 = 8 << 20;
 
 /// A table of `len` entries, each from `fill`, in one allocation of
 /// exactly that capacity: the one constructor of every heap table these
@@ -127,6 +140,7 @@ pub fn table<T>(len: usize, mut fill: impl FnMut() -> T) -> Result<TryVec<T>, Al
 
 const _: () = assert!(EXEC_IMAGE_MAX > 192 * 1024 * 1024);
 const _: () = assert!(PID_WRAP < PID_MAX);
+const _: () = assert!(ARG_SPACE_MIN <= ARG_SPACE_MAX);
 const _: () = assert!(MAX_KVA_RANGES <= u16::MAX as usize);
 
 #[cfg(test)]

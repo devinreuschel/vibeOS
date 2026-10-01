@@ -24,6 +24,8 @@ use vibeos::irq::stop::{CrashRegs, StopHow};
 use vibeos::log::DUMP_LAST;
 use vibeos::log::backtrace::{self, StackRange, WalkEnd};
 use vibeos::log::line::LINE_CAP;
+use vibeos::log::vmcore::PANIC_LINE_CAP;
+use vibeos::log::vmcore::sig::PanicLine;
 use vibeos::marker;
 use vibeos::symtab;
 
@@ -48,6 +50,21 @@ fn kend() -> u64 {
     // SAFETY: as in `panic::kstart`: only the linker symbol's address is
     // taken, never its byte.
     unsafe { &__kernel_vma_end as *const u8 as u64 }
+}
+
+/// The first line of the dump owner's panic message, which the core tool's
+/// `sig:` line reads from a guest core (ROADMAP §10.7): serial capture
+/// stops while halting, so the log ring holds no panic text.
+static PANIC_LINE: PanicLine = PanicLine::new();
+
+/// The dump owner's record for the core tool: `line` (the panic message,
+/// or an exception line without `vibeOS: `) in [`PANIC_LINE`], and `regs`,
+/// where the dump began, in its own crash-register slot. No lock, no
+/// allocation; after `begin_dump` only.
+fn record_panic(line: &[u8], regs: CrashRegs) {
+    let cpu = raw::owner_cpu().unwrap_or_else(crate::arch::cpu_id_hint);
+    PANIC_LINE.record(cpu, line);
+    crate::ipi_init::save_crash_regs(regs);
 }
 
 /// The boot stack Limine handed `_start`, `[lo, hi)`, recorded by
@@ -327,12 +344,23 @@ fn panic(info: &PanicInfo) -> ! {
         x86::read_rsp(),
         x86::rflags(),
     );
-    begin_dump(CrashRegs {
+    let regs = CrashRegs {
         rip,
         rsp,
         rbp,
         rflags,
-    });
+    };
+    begin_dump(regs);
+    {
+        let mut msg = [0u8; PANIC_LINE_CAP];
+        let mut w = StackBuf::new(&mut msg);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter line and nothing to act on (DESIGN §2.5)"
+        )]
+        let _ = write!(w, "{}", info.message());
+        record_panic(w.as_bytes(), regs);
+    }
 
     raw::write_owner(marker::PANIC_BANNER.as_bytes());
     write_where(info);
@@ -385,6 +413,32 @@ pub(crate) fn frame_fields(
     }
 }
 
+/// The interrupted context's registers, where an exception dump begins.
+#[cfg(target_arch = "x86_64")]
+fn exception_regs(frame: &InterruptFrame, rbp: u64) -> CrashRegs {
+    CrashRegs {
+        rip: frame.rip,
+        rsp: frame.rsp,
+        rbp,
+        rflags: frame.rflags,
+    }
+}
+
+/// An exception dump's first line, `vibeOS: ` and what `f` builds, formatted
+/// once: written as [`line`] writes, and recorded without the prefix for the
+/// core tool (`record_panic`) with the interrupted `regs`.
+#[cfg(target_arch = "x86_64")]
+fn first_line(regs: CrashRegs, f: impl FnOnce(&mut StackBuf<'_>)) {
+    const PREFIX: &[u8] = b"vibeOS: ";
+    let mut buf = [0u8; LINE_CAP];
+    let mut w = StackBuf::new(&mut buf);
+    w.push_bytes(PREFIX);
+    f(&mut w);
+    w.mark_cut();
+    raw::write_owner(w.as_bytes());
+    record_panic(w.as_bytes().get(PREFIX.len()..).unwrap_or(&[]), regs);
+}
+
 /// An exception's dump: `frame` is the interrupted context's hardware
 /// frame and `rbp` its `rbp` as the entry stub saved it (the trap frame's
 /// user words), where the `vibeOS: regs:` line and the backtrace start
@@ -397,14 +451,9 @@ pub fn exception_halt(
     err: Option<u64>,
     cr2: Option<u64>,
 ) -> ! {
-    begin_dump(CrashRegs {
-        rip: frame.rip,
-        rsp: frame.rsp,
-        rbp,
-        rflags: frame.rflags,
-    });
-    line(|w| {
-        w.push_bytes(b"vibeOS: ");
+    let regs = exception_regs(frame, rbp);
+    begin_dump(regs);
+    first_line(regs, |w| {
         w.push_bytes(kind);
         frame_fields(w, frame, err, cr2);
     });
@@ -421,14 +470,10 @@ pub fn exception_vec(
     err: Option<u64>,
     cr2: Option<u64>,
 ) -> ! {
-    begin_dump(CrashRegs {
-        rip: frame.rip,
-        rsp: frame.rsp,
-        rbp,
-        rflags: frame.rflags,
-    });
-    line(|w| {
-        w.push_bytes(b"vibeOS: exception: vector ");
+    let regs = exception_regs(frame, rbp);
+    begin_dump(regs);
+    first_line(regs, |w| {
+        w.push_bytes(b"exception: vector ");
         let mut b = [0u8; 4];
         w.push_bytes(fmt_util::write_dec(n as u64, &mut b));
         frame_fields(w, frame, err, cr2);

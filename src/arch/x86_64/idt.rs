@@ -183,6 +183,9 @@ pub type TrapBody = fn(&mut TrapFrame);
 /// One row per vector: the stub and gate that [`init`] builds for it.
 #[derive(Clone, Copy)]
 struct Row {
+    /// The vector this row describes; the `const` block after [`ROWS`]
+    /// checks that each of 0 to 255 has exactly one row.
+    vector: u8,
     /// The CPU pushes an error code, so the stub pushes no zero.
     err: bool,
     /// Hardware IST field, 0 for none.
@@ -194,6 +197,7 @@ struct Row {
 
 const fn build_rows() -> [Row; 256] {
     let mut rows = [Row {
+        vector: 0,
         err: false,
         ist: 0,
         dpl: 0,
@@ -203,6 +207,7 @@ const fn build_rows() -> [Row; 256] {
     while v < 256 {
         let ist = ist_for(v as u8);
         rows[v] = Row {
+            vector: v as u8,
             err: vectors::pushes_error_code(v as u8),
             ist,
             // `int3` from ring 3 reaches its body; any other `int n` from
@@ -216,6 +221,25 @@ const fn build_rows() -> [Row; 256] {
 }
 
 const ROWS: [Row; 256] = build_rows();
+
+// The vector table has exactly one row for each vector 0 to 255: the build
+// fails on a missing or doubled row (ROADMAP §10.3, INTERRUPTS.md §5.3).
+const _: () = {
+    assert!(ROWS.len() == 256);
+    let mut want = 0;
+    while want < 256 {
+        let mut n = 0;
+        let mut i = 0;
+        while i < ROWS.len() {
+            if ROWS[i].vector as usize == want {
+                n += 1;
+            }
+            i += 1;
+        }
+        assert!(n == 1, "idt: the vector table needs one row per vector");
+        want += 1;
+    }
+};
 
 /// Bit `v` set when `ROWS[v].err`.
 const ERR_MASK: u32 = {
@@ -515,6 +539,12 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     if matches!(v, vectors::NP | vectors::SS | vectors::GP) {
         user_return_fault(frame);
     }
+    // The irqoff tracer: an entry that interrupted IF=1 code opens a
+    // stretch at this vector. After `user_return_fault`, which runs on the
+    // user GS; its frame (an exit `iretq`) has IF=0 anyway.
+    if frame.iret.rflags & RFLAGS_IF != 0 {
+        crate::sched::irqoff::off(crate::sched::irqoff::Site::vector(v));
+    }
     #[cfg(feature = "kernel_tests")]
     if frame.user_mode() {
         testing::on_cpl3_entry(frame);
@@ -541,7 +571,14 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     if frame.user_mode() {
         exit_to_user(frame);
     }
+    // The stub's `iretq` returns to IF=1.
+    if frame.iret.rflags & RFLAGS_IF != 0 {
+        crate::sched::irqoff::on();
+    }
 }
+
+/// RFLAGS.IF.
+const RFLAGS_IF: u64 = 1 << 9;
 
 /// Vectors 0 to 31 that do not enter through an IST stack, and `#DB`,
 /// whose CPL-3 frame the stub has moved off its IST stack. NMI and `#MC`
@@ -711,9 +748,41 @@ pub fn exit_to_user(_frame: &mut TrapFrame) {
     f();
 }
 
+/// Whether the vector table gives `v` a fixed owner: the LAPIC LVT
+/// vectors, the IPIs and the spurious vector, whose bodies `init` installs.
+pub const fn fixed_owner(v: u8) -> bool {
+    matches!(
+        v,
+        vectors::LAPIC_TIMER
+            | vectors::LAPIC_ERROR
+            | vectors::LAPIC_THERMAL
+            | vectors::IPI_CALL
+            | vectors::IPI_SHOOTDOWN
+            | vectors::IPI_RESCHEDULE
+            | vectors::IPI_HALT
+            | vectors::LAPIC_SPURIOUS
+    )
+}
+
+/// Whether [`set_handler`] accepts `v`: not an exception (0 to 31) and not
+/// a vector with a fixed owner.
+pub const fn registrable(v: u8) -> bool {
+    v >= 32 && !fixed_owner(v)
+}
+
 /// Run `body` for `vector`. Writes no gate: every gate already points at
-/// its stub.
+/// its stub. Exception and fixed-owner vectors are refused: their bodies
+/// are the table's own, which `init` installs.
 pub fn set_handler(vector: u8, body: TrapBody) {
+    // First, before any guard, so a caught panic leaves nothing held. A
+    // kernel invariant no input reaches (AGENTS.md rule 4, DESIGN §9.4):
+    // callers pass vector constants or `irq_init`'s pool vectors.
+    assert!(registrable(vector), "idt: set_handler on a reserved vector");
+    install(vector, body);
+}
+
+/// Store `body` for `vector`, any vector. `init`'s table rows only.
+fn install(vector: u8, body: TrapBody) {
     BODIES[vector as usize].store(body as usize, Ordering::Release);
 }
 
@@ -1001,31 +1070,31 @@ fn check_stub(stub: *const u8, v: usize, row: &Row) {
 }
 
 fn register_named() {
-    set_handler(vectors::DB, debug_ex);
-    set_handler(vectors::NMI, nmi);
-    set_handler(vectors::BP, breakpoint);
-    set_handler(vectors::UD, invalid_opcode);
-    set_handler(vectors::DF, double_fault);
-    set_handler(vectors::NP, segment_not_present);
-    set_handler(vectors::SS, stack_fault);
-    set_handler(vectors::GP, general_protection);
-    set_handler(vectors::PF, page_fault);
-    set_handler(vectors::MC, machine_check);
+    install(vectors::DB, debug_ex);
+    install(vectors::NMI, nmi);
+    install(vectors::BP, breakpoint);
+    install(vectors::UD, invalid_opcode);
+    install(vectors::DF, double_fault);
+    install(vectors::NP, segment_not_present);
+    install(vectors::SS, stack_fault);
+    install(vectors::GP, general_protection);
+    install(vectors::PF, page_fault);
+    install(vectors::MC, machine_check);
 
-    set_handler(vectors::IRQ_PIT, pit_irq);
+    install(vectors::IRQ_PIT, pit_irq);
     for v in vectors::IRQ_BASE + 1..=vectors::IRQ_SPURIOUS_SLAVE {
-        set_handler(v, pic_irq);
+        install(v, pic_irq);
     }
 
-    set_handler(vectors::LAPIC_TIMER, lapic_timer_irq);
-    set_handler(vectors::LAPIC_ERROR, lapic_error_irq);
-    set_handler(vectors::LAPIC_THERMAL, lapic_thermal_irq);
-    set_handler(vectors::LAPIC_SPURIOUS, lapic_spurious_irq);
+    install(vectors::LAPIC_TIMER, lapic_timer_irq);
+    install(vectors::LAPIC_ERROR, lapic_error_irq);
+    install(vectors::LAPIC_THERMAL, lapic_thermal_irq);
+    install(vectors::LAPIC_SPURIOUS, lapic_spurious_irq);
 
-    set_handler(vectors::IPI_CALL, ipi_call);
-    set_handler(vectors::IPI_SHOOTDOWN, ipi_shootdown);
-    set_handler(vectors::IPI_RESCHEDULE, ipi_reschedule);
-    set_handler(vectors::IPI_HALT, ipi_halt);
+    install(vectors::IPI_CALL, ipi_call);
+    install(vectors::IPI_SHOOTDOWN, ipi_shootdown);
+    install(vectors::IPI_RESCHEDULE, ipi_reschedule);
+    install(vectors::IPI_HALT, ipi_halt);
 }
 
 const fn ist_for(vec: u8) -> u8 {

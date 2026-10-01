@@ -14,6 +14,11 @@ nothing, so it writes no results file.
                                 as `run`, halted with a gdb stub (`-s -S`);
                                 writes build/debug/symbols.gdb, which
                                 scripts/vibeos.gdb sources
+    run_interactive.py debug --kernel-elf ELF --core CORE
+                                no QEMU: the core tool writes the guest
+                                core's virtually addressed core to
+                                build/debug/core.virt, and symbols.gdb
+                                opens it instead of the stub (ROADMAP §10.7)
     run_interactive.py firmware ARCH
                                 the probed UEFI firmware pair (C-FIRMWARE):
                                 exit 0 found, 1 none installed, 2 probe error
@@ -43,6 +48,7 @@ from tests.harness.harness import (
     firmware_dirs,
     probe_firmware,
     qemu_argv,
+    run_vmcore,
 )
 
 
@@ -62,6 +68,8 @@ MODES: dict[str, Mode] = {
 # What scripts/vibeos.gdb sources: the ELFs of the session `make debug` started.
 GDB_SYMBOLS = "build/debug/symbols.gdb"
 GDB_PORT = 1234
+# `make debug CORE=`: the virtually addressed core the core tool writes.
+GDB_CORE = "build/debug/core.virt"
 
 
 def interactive_config(mode: str) -> tuple[QemuConfig, float | None]:
@@ -77,14 +85,42 @@ def interactive_argv(mode: str) -> list[str]:
     return qemu_argv(interactive_config(mode)[0], None)
 
 
-def write_gdb_symbols(path: str, kernel_elf: str, user_elfs: Sequence[str]) -> None:
+def write_gdb_symbols(
+    path: str, kernel_elf: str, user_elfs: Sequence[str], core: str | None = None
+) -> None:
     """The gdb commands that load the kernel ELF and each user ELF, by
-    absolute path. The user ELFs load at their own link addresses (`-o 0`)."""
+    absolute path. The user ELFs load at their own link addresses (`-o 0`).
+    `$vibeos_core` tells scripts/vibeos.gdb whether to attach to the stub
+    (0) or, with `core`, to open that virtually addressed core (1)."""
     lines = [f"file {os.path.abspath(kernel_elf)}"]
     lines += [f"add-symbol-file {os.path.abspath(u)} -o 0" for u in user_elfs]
+    if core is None:
+        lines.append("set $vibeos_core = 0")
+    else:
+        lines += [f"core-file {os.path.abspath(core)}", "set $vibeos_core = 1"]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+
+
+def debug_core(core: str, kernel_elf: str) -> int:
+    """`make debug CORE=`: the core tool writes `core`'s virtually addressed
+    core to `GDB_CORE` and prints its report; symbols.gdb then loads
+    `kernel_elf` and opens that core, and scripts/vibeos.gdb skips the stub
+    (ROADMAP §10.7)."""
+    os.makedirs(os.path.dirname(GDB_CORE), exist_ok=True)
+    rc, out, err = run_vmcore(core, kernel_elf, ("--virt", GDB_CORE))
+    sys.stdout.write(out)
+    if rc != 0:
+        raise HarnessError(f"vmcore exited {rc}: {err.strip()}")
+    write_gdb_symbols(GDB_SYMBOLS, kernel_elf, [], core=GDB_CORE)
+    print(
+        f"debug: {GDB_CORE} holds {core}'s kernel half; from the repository root run\n"
+        "    gdb -x scripts/vibeos.gdb        (x86_64-elf-gdb on macOS)\n"
+        "then `info threads` and `bt` (one thread per CPU)",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def launch(argv: Sequence[str], timeout: float | None) -> int:
@@ -140,12 +176,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     dbg = sub.add_parser("debug", help="as run, halted with a gdb stub on :1234")
     dbg.add_argument("--kernel-elf", required=True)
     dbg.add_argument("--user-elf", action="append", default=[])
+    dbg.add_argument("--core", help="a guest core (core.zst): open it instead of starting QEMU")
     fw = sub.add_parser("firmware", help="print the probed UEFI firmware pair")
     fw.add_argument("arch", choices=sorted(FIRMWARE_TABLE))
     args = ap.parse_args(argv)
     if args.cmd == "firmware":
         return firmware_main(args.arch)
     try:
+        if args.cmd == "debug" and args.core:
+            return debug_core(args.core, args.kernel_elf)
         cfg, timeout = interactive_config(args.cmd)
         if args.cmd == "debug":
             write_gdb_symbols(GDB_SYMBOLS, args.kernel_elf, args.user_elf)

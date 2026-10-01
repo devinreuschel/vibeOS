@@ -426,8 +426,14 @@ why = "text: lands with or after the box above; claim: missing edge found by the
 
 [[box]]
 key = "an IF-off tracer in an `irqoff` build variant"
-needs = ["the in-guest registry runs in production's interrupt context"]
-why = "text: lands after §10.2's box that moves the in-guest registry to IF=1"
+needs = [
+  "the in-guest registry runs in production's interrupt context",
+  "an `arch` module boundary built",  # L1277
+  "the seam proven by a",  # L1279
+  "`now_ns` is computed from one",  # L1310
+  "every IDT vector enters through",  # L1392
+]
+why = "text: lands after §10.2's box that moves the in-guest registry to IF=1; claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
 [[box]]
 key = "the vector table's registration rules hold"
@@ -608,6 +614,32 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
+[[box]]
+key = "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`"
+needs = [
+  "the `/bin/tests` stall after `user:",  # L1240
+  "removed: the loader maps segments from the file",  # L1320
+  "a `no_std` Rust crate under",  # L1350
+  "built for `<arch>-unknown-linux-musl`, §24.3's user",  # L1351
+  "syscall stubs generated from one",  # L1352
+  "the initrd is sized by",  # L1370
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "init's own exit panics the"
+needs = [
+  "pid 1's exit panics the",  # L1363
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "a signal whose default action"
+needs = [
+  "a signal cannot kill or",  # L1362
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Closes rows (How to read this): the box named by `key` lands all the work
 # of each box in `closes`, and the commit that ticks it ticks them.
 
@@ -680,10 +712,25 @@ key = "pid 1's exit panics the kernel"
 closes = ["init's own exit panics the kernel"]
 why = "the §9.5 deferral box"
 
+# L1354
 [[box]]
 key = "`execve` copies the caller's `envp` strings"
+needs = [
+  "a kernel command line: `cmdline:`",  # L1227
+  "one `limits` module in `vibeos-core`",  # L1315
+  "`vibeos-core` gains `kalloc` (`TryBox`, `TryVec`,",  # L1321
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+]
 closes = ["`execve` copies the caller's `envp` onto the new image's initial stack"]
-why = "the §9.4 deferral box"
+why = "the §9.4 deferral box; claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1023
+[[box]]
+key = "`execve` copies the caller's `envp` onto"
+needs = [
+  "`execve` copies the caller's `envp` strings",  # L1354
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "`elf::parse` host tests also cover checked-in static binaries"
@@ -1344,3 +1391,33 @@ needs = [
   "on a timeout, or on",  # L1410
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1412
+[[box]]
+key = "a hostlib core tool reads"
+needs = [
+  "the log ring, TCB, and",  # L1413
+  "one VMCOREINFO note, in Linux's",  # L1414
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1418
+[[box]]
+key = "a `hang_test` feature build in"
+needs = [
+  "on a timeout, or on",  # L1410
+  "the harness reads QEMU's QMP",  # L1411
+  "a hostlib core tool reads",  # L1412
+  "timestamps from the §10.3 cycle",  # L1417
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1435
+[[box]]
+key = "loom models: the seqlock against"
+needs = [
+  "portable code reaches atomics, fences,",  # L1433
+  "the §10.4 wake inbox's push",  # L1434
+  "`TickClock::write` bumps `seq` to odd",  # L1436
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
