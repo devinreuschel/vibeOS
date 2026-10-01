@@ -531,7 +531,21 @@ Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
   `user: tests begin` comes first, and `user: tests ok` (status 0) or
   `user: tests fail` (status 1) last
 - `/bin/sh` (`user/src/bin/sh.rs`) — interactive shell; prints
-  `vibeOS: shell ready` then `vibeos>`
+  `vibeOS: shell ready` then `vibeos>`, and reads fd 0 a byte at a time,
+  echoing it, into a 4096-byte line of at most 64 words split on spaces and
+  tabs, with no quoting, pipes or redirection until ROADMAP §13.7. Its
+  built-ins are `poweroff` and `reboot` (the `reboot` call) and `ps` (what
+  `psinfo` returns); a failing one prints `sh: <name>: errno <n>`, status
+  1. Any other first word is a program it runs with `fork`, `execve` and
+  `wait4`: a name with a `/` as given, any other from each `PATH`
+  directory in turn (`/bin:/sbin` when `PATH` is unset), past `ENOENT` and
+  `ENOTDIR`, passing the shell's environment. The child prints
+  `sh: <name>: not found` and exits 127 when nothing is found, or
+  `sh: <name>: cannot run: errno <n>` and exits 126; on fd 2 the shell
+  prints `sh: <name>: exit <n>` for a non-zero exit and
+  `sh: <name>: signal <n>` for a signal, and its last status is the code
+  or 128 plus the signal. A read error exits 1; end of input (a file on
+  fd 0; a console read never ends it) exits with the last status
 - `/bin/envcheck` (`user/src/bin/envcheck.rs`) — exits 0 when its
   environment holds `K=v`, else 1 (`/bin/tests`' `exec_env_*` cases)
 - `/bin/argcheck` (`user/src/bin/argcheck.rs`) — checks its `argv` against

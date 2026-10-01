@@ -4,7 +4,8 @@
 //! the row's input, if any, on fd 0 and fd 1 on a scratch file, then checks
 //! the exit status and what the file holds; a failure names its row.
 //! `sleep` and `yes` run on their own, since they are judged while they
-//! run. Scratch files are `/tmp/u75-*`. Every fork goes through `utest::fork` (F069).
+//! run. `sh_script_status` runs `/bin/sh` on a script, fd 1 and fd 2 on
+//! the scratch file. Scratch files are `/tmp/u75-*`. Every fork goes through `utest::fork` (F069).
 
 use core::ffi::{CStr, c_void};
 
@@ -201,6 +202,7 @@ const ROWS: &[Row] = &[
 
 pub fn run(t: &mut Runner) {
     t.case("utilities_table", utilities_table);
+    t.case("sh_script_status", sh_script_status);
 }
 
 /// At most 8 C strings as the NULL-terminated vector `execve` takes.
@@ -406,4 +408,42 @@ fn yes_row() -> Result<(), &'static str> {
     } else {
         Err("yes abc: a line is not abc")
     }
+}
+
+/// Whether `out` has a line equal to `line`.
+fn has_line(out: &[u8], line: &[u8]) -> bool {
+    out.split(|&b| b == b'\n').any(|l| l == line)
+}
+
+/// `/bin/sh` on a script: the lines it must print and its status.
+fn sh_case(envp: &[&CStr], script: &[u8], lines: &[&[u8]], code: u8) -> Result<(), ()> {
+    put_file(IN, script).map_err(drop)?;
+    let pid = spawn(&[c"/bin/sh"], envp, Some(IN), OUT, true).map_err(drop)?;
+    let (_, status) = cmd::wait(pid, 0).map_err(drop)?;
+    let mut buf = [0u8; 2048];
+    let out = get_file(OUT, &mut buf).map_err(drop)?;
+    let ok = Status::of(status) == Status::Exited(code) && lines.iter().all(|l| has_line(out, l));
+    if ok { Ok(()) } else { Err(()) }
+}
+
+fn sh_script_status() -> Outcome {
+    let script: &[u8] = b"echo a b\nfalse\nnosuch\ntrue\n";
+    let lines: &[&[u8]] = &[b"a b", b"sh: false: exit 1", b"sh: nosuch: not found"];
+    if sh_case(&[c"PATH=/bin"], script, lines, 0).is_err() {
+        return Outcome::Fail("PATH=/bin: echo, false, nosuch, true");
+    }
+    if sh_case(
+        &[c"PATH=/nowhere"],
+        b"true\n",
+        &[b"sh: true: not found"],
+        127,
+    )
+    .is_err()
+    {
+        return Outcome::Fail("PATH=/nowhere: true");
+    }
+    if sh_case(&[], b"true\n", &[], 0).is_err() {
+        return Outcome::Fail("no PATH: true");
+    }
+    Outcome::Ok
 }
