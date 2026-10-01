@@ -5,7 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::fs::{FsError, MAX_PATH};
+use vibeos::fs::{FileRef, FsError, MAX_PATH, O_CREAT, O_RDWR, OpenFlags, SeekFrom};
 use vibeos::kalloc::TryVec;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::stack_depth;
@@ -167,7 +167,7 @@ fn initrd_free() -> Step<u64> {
 
 /// Create `path` holding `data`.
 fn put_file(path: &[u8], data: &[u8]) -> Result<(), FsError> {
-    use vibeos::fs::{O_CREAT, O_TRUNC, O_WRONLY, OpenFlags};
+    use vibeos::fs::{O_TRUNC, O_WRONLY};
     let f = file_init::open(
         path,
         OpenFlags::from_bits(O_WRONLY | O_CREAT | O_TRUNC),
@@ -479,11 +479,7 @@ fn mount_64(k: &mut usize) -> Step<()> {
     }
     let null = step(
         "open /dev/null",
-        file_init::open(
-            b"/dev/null",
-            vibeos::fs::OpenFlags::from_bits(vibeos::fs::O_RDONLY),
-            0,
-        ),
+        file_init::open(b"/dev/null", OpenFlags::from_bits(vibeos::fs::O_RDONLY), 0),
     )?;
     step("close /dev/null", file_init::close(null))?;
     while *k > 0 {
@@ -495,6 +491,124 @@ fn mount_64(k: &mut usize) -> Step<()> {
         return Err(crate::fail_fmt!(
             "{h2} dentries held after the unmounts, {h0} before"
         ));
+    }
+    Ok(())
+}
+
+// ---- shell_mount_umount ----
+
+/// The partition the FAT32 tests format: P10-S60's `umount_consistent`'s,
+/// which keeps the GPT and the persist sector intact.
+const FAT_DEV: &str = "vdap2";
+const U_RAM: &str = "/kt61u/r";
+const U_FAT: &str = "/kt61u/f";
+const U_TOP: &str = "/kt61u";
+
+/// Format [`FAT_DEV`] with a FAT32 image, after checking nothing mounts
+/// it.
+fn fresh_fat_dev() -> Step<()> {
+    let dev =
+        crate::block::blockdev_init::lookup(FAT_DEV.as_bytes()).ok_or(Outcome::Fail("no vdap2"))?;
+    if fs_init::with(|v| v.super_of_dev(dev.id())).is_some() {
+        return Err(Outcome::Fail(
+            "vdap2 is already mounted: another test left it",
+        ));
+    }
+    super::stack16k::fat_image_to(FAT_DEV.as_bytes()).map_err(Outcome::Fail)
+}
+
+/// `mount` and `umount` from a thread on `spawn`'s 16 KiB stack: a ramfs
+/// mount's file is gone after its `umount`; a FAT32 mount on `vdap2` with
+/// a file open is `Busy` to `umount` and stays readable, unmounts once
+/// the file is closed, and mounts and unmounts again.
+pub(crate) fn test_shell_mount_umount() -> Outcome {
+    run_on_spawn_stack("kt61umnt", mount_umount)
+}
+
+fn mount_umount() -> Outcome {
+    let r = mount_umount_steps();
+    for _ in 0..2 {
+        let _ = file_init::umount(U_RAM.as_bytes());
+        let _ = file_init::umount(U_FAT.as_bytes());
+    }
+    if let Ok(mut o) = BufOut::new() {
+        let _ = sh::rm(&["rm", "-r", U_TOP], &mut o);
+    }
+    match r {
+        Ok(()) => Outcome::Ok,
+        Err(o) => o,
+    }
+}
+
+fn mount_umount_steps() -> Step<()> {
+    let mut out = BufOut::new()?;
+    out.run(
+        "mount ramfs /kt61u/r",
+        sh::mount,
+        &["mount", "ramfs", U_RAM],
+    )?;
+    step("create /kt61u/r/x", put_file(b"/kt61u/r/x", b"ram"))?;
+    out.run("umount /kt61u/r", sh::umount, &["umount", U_RAM])?;
+    if !gone(b"/kt61u/r/x") {
+        return Err(Outcome::Fail("/kt61u/r/x is still there after umount"));
+    }
+    fresh_fat_dev()?;
+    out.run(
+        "mount fat32 vdap2",
+        sh::mount,
+        &["mount", "fat32", FAT_DEV, U_FAT],
+    )?;
+    let held = step(
+        "open /kt61u/f/h",
+        file_init::open(b"/kt61u/f/h", OpenFlags::from_bits(O_RDWR | O_CREAT), 0o644),
+    )?;
+    let r = busy_umount(&held, &mut out);
+    let c = file_init::close(held);
+    r?;
+    step("close /kt61u/f/h", c)?;
+    out.run("umount /kt61u/f", sh::umount, &["umount", U_FAT])?;
+    out.run(
+        "mount fat32 vdap2 again",
+        sh::mount,
+        &["mount", "fat32", FAT_DEV, U_FAT],
+    )?;
+    if !out_has_file(b"/kt61u/f/h") {
+        return Err(Outcome::Fail("/kt61u/f/h is gone after the remount"));
+    }
+    out.run("umount /kt61u/f again", sh::umount, &["umount", U_FAT])
+}
+
+/// Whether `path` is there.
+fn out_has_file(path: &[u8]) -> bool {
+    file_init::stat_path(path).is_ok()
+}
+
+/// With `held` open on the FAT mount: `umount` is `Busy`, and the mount
+/// still writes, reads and lists.
+fn busy_umount(held: &FileRef, out: &mut BufOut) -> Step<()> {
+    match file_init::write(held, b"kt61") {
+        Ok(4) => {}
+        _ => return Err(Outcome::Fail("write /kt61u/f/h")),
+    }
+    match sh::umount(&["umount", U_FAT], out) {
+        Err(FsError::Busy) => {}
+        Ok(()) => return Err(Outcome::Fail("umount with a file open succeeded")),
+        Err(e) => {
+            return Err(crate::fail_fmt!(
+                "umount with a file open: {}, not Busy",
+                e.as_str()
+            ));
+        }
+    }
+    step("seek /kt61u/f/h", file_init::seek(held, SeekFrom::Start(0)))?;
+    let mut buf = [0u8; 8];
+    match file_init::read(held, &mut buf) {
+        Ok(4) if buf.get(..4) == Some(b"kt61") => {}
+        _ => return Err(Outcome::Fail("read back /kt61u/f/h on the busy mount")),
+    }
+    out.run("ls /kt61u/f", sh::ls, &["ls", U_FAT])?;
+    if !out.has_line(b"h") {
+        return Err(Outcome::Fail("ls of the busy mount does not list h"));
     }
     Ok(())
 }
