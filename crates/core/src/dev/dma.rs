@@ -21,6 +21,7 @@ impl DeviceAddr {
     }
 }
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DmaError {
     Size,

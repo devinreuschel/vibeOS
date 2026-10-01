@@ -29,6 +29,7 @@ const DEPTH_SHIFT: u32 = 32;
 const DEPTH_MAX: u64 = 0xFF;
 
 /// Why the rank checker refused a lock. DESIGN §2.1 to §2.3.
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RankError {
     /// This CPU already holds a lock of `rank`; `lock_nested` names a pair.

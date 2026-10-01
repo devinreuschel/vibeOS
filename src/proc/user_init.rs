@@ -27,12 +27,12 @@ use crate::thread_init::SpawnError;
 const STACK_HEADROOM_PAGES: u64 = 32;
 const STACK_TOP: u64 = 0x0000_0000_8000_0000;
 
-#[must_use]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     feature = "vibefs_crash",
     allow(dead_code, reason = "the vibefs_crash build spawns no process")
 )]
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadError {
     Fs(FsError),
     Elf(ElfError),
