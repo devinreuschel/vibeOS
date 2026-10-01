@@ -239,6 +239,51 @@ fn walk_4level_1g_2m_4k() {
 }
 
 #[test]
+fn page_run_agrees_with_page_probes() {
+    // Two segments with a gap, the second's file bytes cut short: every
+    // run answers as the one-page probe of each page in it would.
+    struct Probe<'a>(&'a SliceCore<'a>);
+    impl PhysMem for Probe<'_> {
+        fn read(&self, addr: u64, buf: &mut [u8]) -> bool {
+            self.0.read(addr, buf)
+        }
+    }
+    let s = Synth::new(&[(0, 0x3000), (0x5800, 0x4000)]);
+    let mut bytes = s.build();
+    bytes.truncate(bytes.len() - 0x2000);
+    let core = SliceCore::new(&bytes).unwrap();
+    let probe = Probe(&core);
+    let end = 0xC000u64;
+    let mut held = Vec::new();
+    let mut pa = 0;
+    while pa < end {
+        let (h, len) = core.page_run(pa, end - pa);
+        assert!(len > 0 && len % PAGE == 0, "{pa:#x}: {len:#x}");
+        for q in (pa..pa + len).step_by(PAGE as usize) {
+            assert_eq!(probe.page_run(q, PAGE), (h, PAGE), "{q:#x}");
+        }
+        if h {
+            held.push((pa, len));
+        }
+        pa += len;
+    }
+    // The file keeps 0x5800..0x7800 of the second segment: the page at
+    // 0x5000 starts below it and the one at 0x8000 past it.
+    assert_eq!(held, [(0, 0x3000), (0x6000, 0x2000)]);
+    // A run stops at `max`.
+    assert_eq!(core.page_run(0, 0x1000), (true, 0x1000));
+    assert_eq!(
+        page_run([(0, 0x1800)].into_iter(), 0x1000, 0x8000),
+        (true, 0x1000)
+    );
+    assert_eq!(
+        page_run([(0x4000, 1)].into_iter(), 0, 0x8000),
+        (false, 0x4000)
+    );
+    assert_eq!(page_run(core::iter::empty(), 0, 0x8000), (false, 0x8000));
+}
+
+#[test]
 fn walk_rejects_absent_and_out_of_core() {
     let mut s = Synth::new(&[(0, RAM)]);
     s.map(KBASE, 0x20_0000, 0x20_0000, 0);

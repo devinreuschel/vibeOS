@@ -145,12 +145,6 @@ impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
         Ok(u32::from_le_bytes(b))
     }
 
-    /// Whether the 4 KiB page at `pa` is in the core.
-    fn backed(&self, pa: u64) -> bool {
-        let mut b = [0u8; 1];
-        self.mem.read(pa, &mut b)
-    }
-
     /// Every present kernel-half mapping (root slots `KERNEL_ROOT_FIRST`
     /// up), coalesced where both the VA and the PA run on, 4 KiB pages
     /// that the core does not hold and uncached (MMIO) leaves left out.
@@ -209,16 +203,22 @@ impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
             if flags.0 & (PageFlags::PCD | PageFlags::PWT) != 0 {
                 return Ok(());
             }
+            // Runs of 4 KiB pages the core does or does not hold, each
+            // page counted against the budget.
             let mut off = 0u64;
             while off < size {
                 let (Some(v), Some(p)) = (va.checked_add(off), pa.checked_add(off)) else {
                     break;
                 };
-                *left = left.checked_sub(1).ok_or(VmError::WalkBudget)?;
-                if self.backed(p) {
-                    emit(v, p, PAGE);
+                let (held, len) = self.mem.page_run(p, size.saturating_sub(off));
+                let len = (len & !(PAGE - 1)).max(PAGE);
+                *left = left
+                    .checked_sub(len.div_ceil(PAGE))
+                    .ok_or(VmError::WalkBudget)?;
+                if held {
+                    emit(v, p, len);
                 }
-                off = off.saturating_add(PAGE);
+                off = off.saturating_add(len);
             }
             return Ok(());
         }
