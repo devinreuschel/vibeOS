@@ -19,8 +19,8 @@
 use vibeos::block::MAX_BLOCKDEVS;
 use vibeos::block::blockdev::BlockRef;
 use vibeos::fs::{
-    DirEntry, DirRef, FileId, FileRef, FileSystem, FsError, InodeKind, MAX_PATH, O_DIRECTORY,
-    O_RDONLY, OpenFlags, PathRef, SeekFrom, Stat, WalkBase,
+    DirEntry, DirRef, FileId, FileRef, FileSystem, FsError, InodeKind, MAX_PATH, OpenFlags,
+    PathRef, SeekFrom, Stat, WalkBase,
 };
 use vibeos::log::Level;
 
@@ -485,12 +485,15 @@ fn populate_sysfs() {
 }
 
 /// Report each entry of directory `path`, from `base`, but `.` and `..`
-/// to `cb`, with the VFS lock dropped.
+/// to `cb`, with the VFS lock dropped. Tab completion's (`shell::complete`).
+#[cfg(all(feature = "kernel_shell", not(feature = "kernel_tests")))]
 pub(crate) fn list_dir(
     base: Option<WalkBase>,
     path: &[u8],
     cb: &mut dyn FnMut(&DirEntry),
 ) -> Result<(), FsError> {
+    use vibeos::fs::{O_DIRECTORY, O_RDONLY};
+
     let f = open_at(base, path, OpenFlags::from_bits(O_RDONLY | O_DIRECTORY), 0)?;
     let r = readdir(&f, &mut |d| {
         let n = d.name.as_bytes();

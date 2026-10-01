@@ -30,6 +30,40 @@ impl BufOut {
         let buf = TryVec::try_with_capacity(BUF_CAP).map_err(|_| Outcome::Fail("out buffer"))?;
         Ok(Self { buf, over: false })
     }
+
+    /// Whether some line of the output is exactly `line`.
+    fn has_line(&self, line: &[u8]) -> bool {
+        self.buf.split(|&b| b == b'\n').any(|l| l == line)
+    }
+
+    /// How many lines of the output are exactly `line`.
+    fn count_line(&self, line: &[u8]) -> usize {
+        self.buf
+            .split(|&b| b == b'\n')
+            .filter(|&l| l == line)
+            .count()
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.over = false;
+    }
+
+    /// Run command `f` with `args` into a cleared buffer; its result, with
+    /// output past the buffer a failure.
+    fn run(
+        &mut self,
+        what: &'static str,
+        f: fn(&[&str], &mut dyn Out) -> Result<(), FsError>,
+        args: &[&str],
+    ) -> Step<()> {
+        self.clear();
+        step(what, f(args, self))?;
+        if self.over {
+            return Err(crate::fail_fmt!("{what}: output past {BUF_CAP} bytes"));
+        }
+        Ok(())
+    }
 }
 
 impl Out for BufOut {
@@ -288,4 +322,87 @@ fn deepest_there() -> Step<()> {
     }
     p.push(b"/f");
     step("stat the deepest file", file_init::stat_path(p.bytes())).map(|_| ())
+}
+
+// ---- shell_ls_subdir ----
+
+const LS_FAT: &str = "/etc/kt61ls";
+const LS_VIBE: &str = "/vibe/kt61ls";
+/// Files `/vibe/kt61ls` holds besides `f`: with `f`, more than one
+/// `readdir_from` batch.
+const LS_MORE: u8 = 11;
+
+/// `ls` lists a FAT subdirectory (`/etc`) and a vibefs one through the
+/// File API's `readdir`, in batches that resume where the last stopped;
+/// `ls -l` gives each entry's kind and size; `ls /dev` (kernfs) still
+/// lists `null`.
+pub(crate) fn test_shell_ls_subdir() -> Outcome {
+    if !fat_init::live() {
+        return Outcome::Skip("no FAT initrd");
+    }
+    if !crate::vibefs_init::live() {
+        return Outcome::Fail("vibefs is not mounted on /vibe");
+    }
+    let r = ls_subdir();
+    let _ = file_init::unlink(LS_FAT.as_bytes());
+    if let Ok(mut o) = BufOut::new() {
+        let _ = sh::rm(&["rm", "-r", LS_VIBE], &mut o);
+    }
+    match r {
+        Ok(()) => Outcome::Ok,
+        Err(o) => o,
+    }
+}
+
+fn ls_subdir() -> Step<()> {
+    step("create /etc/kt61ls", put_file(LS_FAT.as_bytes(), b""))?;
+    step(
+        "mkdir /vibe/kt61ls",
+        file_init::mkdir(LS_VIBE.as_bytes(), 0o755),
+    )?;
+    step(
+        "create /vibe/kt61ls/f",
+        put_file(b"/vibe/kt61ls/f", b"kt61-ls\n"),
+    )?;
+    for i in 0..LS_MORE {
+        let name = [b'/', b'g', b'0' + i / 10, b'0' + i % 10];
+        let p = PathBuf::of(&[LS_VIBE.as_bytes(), &name]);
+        step("create /vibe/kt61ls/gnn", put_file(p.bytes(), b""))?;
+    }
+    let mut out = BufOut::new()?;
+    out.run("ls /etc", sh::ls, &["ls", "/etc"])?;
+    if !out.has_line(b"kt61ls") {
+        return Err(Outcome::Fail("ls /etc does not list kt61ls"));
+    }
+    out.run("ls /vibe/kt61ls", sh::ls, &["ls", LS_VIBE])?;
+    if out.count_line(b"f") != 1 {
+        return Err(Outcome::Fail("ls /vibe/kt61ls does not list f once"));
+    }
+    for i in 0..LS_MORE {
+        if out.count_line(&[b'g', b'0' + i / 10, b'0' + i % 10]) != 1 {
+            return Err(crate::fail_fmt!(
+                "ls /vibe/kt61ls does not list g{:02} once",
+                i
+            ));
+        }
+    }
+    let lines = out
+        .buf
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .count();
+    if lines != usize::from(LS_MORE) + 1 {
+        return Err(crate::fail_fmt!("ls /vibe/kt61ls printed {lines} entries"));
+    }
+    out.run("ls -l /vibe/kt61ls", sh::ls, &["ls", "-l", LS_VIBE])?;
+    if !out.has_line(b"reg        8 f") {
+        return Err(Outcome::Fail(
+            "ls -l /vibe/kt61ls does not show `reg        8 f`",
+        ));
+    }
+    out.run("ls /dev", sh::ls, &["ls", "/dev"])?;
+    if !out.has_line(b"null") {
+        return Err(Outcome::Fail("ls /dev does not list null"));
+    }
+    Ok(())
 }

@@ -19,16 +19,17 @@
 use core::fmt::{self, Write};
 
 use vibeos::fs::{
-    DirRef, FsError, InodeKind, MAX_NAME, MAX_PATH, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC,
-    O_WRONLY, OpenFlags, PathRef, WalkBase,
+    DirRef, FileRef, FsError, InodeKind, MAX_NAME, MAX_PATH, O_CREAT, O_DIRECTORY, O_RDONLY,
+    O_TRUNC, O_WRONLY, OpenFlags, PathRef, WalkBase,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::shell::Command;
 
 use crate::fat_init::{self, FatVolume};
 use crate::file_init::{
-    child_path, close, dir_get_at, dir_path, dir_put, list_dir, mkdir_at, mkdir_p_at, mount_at,
-    open_at, read, readdir, rename_at, rmdir_at, stat_at, sync_fs, umount_at, unlink_at, write,
+    child_path, close, dir_get_at, dir_path, dir_put, mkdir_at, mkdir_p_at, mount_at, open_at,
+    read, readdir, readdir_from, rename_at, rmdir_at, stat_at, sync_fs, umount_at, unlink_at,
+    write,
 };
 use crate::fs_init;
 use crate::sync_init::SpinMutex;
@@ -254,7 +255,11 @@ fn cmd_sync(args: &[&str]) {
 }
 
 /// `ls [-l] [path]`: a directory's entries but `.` and `..`, with `-l`
-/// each one's kind and size; anything else, its own name.
+/// each one's kind and size; anything else, its own name. Entries come
+/// from the File API's `readdir_from` in batches of [`LS_BATCH`], each
+/// call resuming at the cookie the last one stopped at; the callback only
+/// copies, and the batch is printed (and, with `-l`, stated) after it
+/// returns.
 pub(crate) fn ls(args: &[&str], out: &mut dyn Out) -> Result<(), FsError> {
     let mut long = false;
     let mut path = ".";
@@ -264,7 +269,8 @@ pub(crate) fn ls(args: &[&str], out: &mut dyn Out) -> Result<(), FsError> {
             s => path = s,
         }
     }
-    let st = stat_at(shell_base(), path.as_bytes())?;
+    let base = shell_base();
+    let st = stat_at(base, path.as_bytes())?;
     if st.kind != InodeKind::Dir {
         if long {
             putf(
@@ -276,18 +282,109 @@ pub(crate) fn ls(args: &[&str], out: &mut dyn Out) -> Result<(), FsError> {
         }
         return Ok(());
     }
-    list_dir(shell_base(), path.as_bytes(), &mut |d| {
-        let name = d.name.as_bytes();
-        if long {
-            let mut child = [0u8; MAX_PATH];
-            let size = child_path(path.as_bytes(), name, &mut child)
-                .and_then(|n| stat_at(shell_base(), &child[..n]))
-                .map_or(0, |s| s.size);
-            putf(out, format_args!("{} {:>8} ", d.kind.as_str(), size));
+    let f = open_at(
+        base,
+        path.as_bytes(),
+        OpenFlags::from_bits(O_RDONLY | O_DIRECTORY),
+        0,
+    )?;
+    let r = ls_dir(base, &f, path.as_bytes(), long, out);
+    let c = close(f);
+    r.and(c)
+}
+
+/// Entries `ls` copies from one `readdir_from` call before it prints them.
+const LS_BATCH: usize = 8;
+
+/// Up to [`LS_BATCH`] directory entries' names and kinds.
+struct Batch {
+    names: [[u8; MAX_NAME]; LS_BATCH],
+    lens: [u8; LS_BATCH],
+    kinds: [InodeKind; LS_BATCH],
+    n: usize,
+}
+
+impl Batch {
+    /// Copy entry `name` of `kind` in; false when the batch is full.
+    fn add(&mut self, name: &[u8], kind: InodeKind) -> bool {
+        let (Some(dst), Some(len), Some(k)) = (
+            self.names.get_mut(self.n),
+            self.lens.get_mut(self.n),
+            self.kinds.get_mut(self.n),
+        ) else {
+            return false;
+        };
+        let (Some(to), Ok(l)) = (dst.get_mut(..name.len()), u8::try_from(name.len())) else {
+            return false;
+        };
+        to.copy_from_slice(name);
+        *len = l;
+        *k = kind;
+        self.n = self.n.saturating_add(1);
+        true
+    }
+
+    fn get(&self, i: usize) -> Option<(&[u8], InodeKind)> {
+        let name = self.names.get(i)?.get(..usize::from(*self.lens.get(i)?))?;
+        Some((name, *self.kinds.get(i)?))
+    }
+}
+
+/// List open directory `f`, whose path from `base` is `path`.
+fn ls_dir(
+    base: Option<WalkBase>,
+    f: &FileRef,
+    path: &[u8],
+    long: bool,
+    out: &mut dyn Out,
+) -> Result<(), FsError> {
+    let mut cookie = 0u64;
+    loop {
+        let mut b = Batch {
+            names: [[0; MAX_NAME]; LS_BATCH],
+            lens: [0; LS_BATCH],
+            kinds: [InodeKind::Reg; LS_BATCH],
+            n: 0,
+        };
+        let mut full = false;
+        cookie = readdir_from(f, cookie, &mut |d, _| {
+            let name = d.name.as_bytes();
+            if name == b"." || name == b".." {
+                return true;
+            }
+            full = !b.add(name, d.kind);
+            !full
+        })?;
+        for i in 0..b.n {
+            let Some((name, kind)) = b.get(i) else {
+                break;
+            };
+            if long {
+                ls_long(base, path, name, kind, out);
+            }
+            out.put(name);
+            out.put(b"\n");
         }
-        out.put(name);
-        out.put(b"\n");
-    })
+        if !full {
+            return Ok(());
+        }
+    }
+}
+
+/// `-l`'s `<kind> <size> ` before entry `name` of directory `path`, from
+/// a `stat` of its length-checked child path; a failed one prints its
+/// error line and a `?` size.
+fn ls_long(base: Option<WalkBase>, path: &[u8], name: &[u8], kind: InodeKind, out: &mut dyn Out) {
+    let mut child = [0u8; MAX_PATH];
+    match child_path(path, name, &mut child)
+        .and_then(|n| stat_at(base, child.get(..n).unwrap_or(&[])))
+    {
+        Ok(s) => putf(out, format_args!("{} {:>8} ", kind.as_str(), s.size)),
+        Err(e) => {
+            err_line(out, "ls", e);
+            putf(out, format_args!("{} {:>8} ", kind.as_str(), "?"));
+        }
+    }
 }
 
 /// `cat path...`: each file's bytes.
@@ -339,7 +436,7 @@ pub(crate) fn cp(args: &[&str], _out: &mut dyn Out) -> Result<(), FsError> {
     r.and(c)
 }
 
-fn copy(src: &vibeos::fs::FileRef, dst: &vibeos::fs::FileRef) -> Result<(), FsError> {
+fn copy(src: &FileRef, dst: &FileRef) -> Result<(), FsError> {
     let mut buf = [0u8; 512];
     loop {
         let n = read(src, &mut buf)?;
