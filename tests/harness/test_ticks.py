@@ -931,5 +931,65 @@ class TestRealTree(unittest.TestCase):
         self.assertEqual((p.proof, p.bracket, p.existing), ("lifetime_x", "nightly", "y (z)"))
 
 
+class TestErrata(RepoCase):
+    """tests/gates/proves-errata.toml corrects a pushed `Proves:` line."""
+
+    WAS = f"suite_row (existing: in every boot) -- {PREFIX}"
+
+    def errata(self, sha: str, was: str, proves: str) -> dict[str, str | None]:
+        row = (f'[[erratum]]\ncommit = "{sha}"\nwas = "{was}"\nproves = "{proves}"\n'
+               'why = "the proof skips on every per-push tier"\n')
+        return {check_ticks.ERRATA_PATH: row}
+
+    def test_erratum_line_is_read_in_place_of_the_pushed_one(self) -> None:
+        sha = self.commit(f"t\n\nProves: {self.WAS}", "delta box")
+        self.assertErrors(self.run_check([results_file(sha)]), "passed in no results file")
+        fixed = f"host_one (existing: a host test) -- {PREFIX}"
+        self.commit("errata", None, self.errata(sha, self.WAS, fixed))
+        r = self.run_check([results_file(self.head())])
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any("erratum: Proves: host_one" in n for n in r.notes), r.notes)
+        self.assertTrue(any("host_one (existing: a host test)" in e for e in r.existing))
+
+    def test_erratum_with_no_such_line_fails(self) -> None:
+        sha = self.commit(f"t\n\nProves: {self.WAS}", "delta box")
+        self.commit("errata", None, self.errata(sha, f"suite_row -- {PREFIX}", self.WAS))
+        self.assertErrors(self.run_check(), "erratum names no `Proves:` line")
+
+    def test_erratum_for_a_commit_outside_the_pull_request_is_ignored(self) -> None:
+        self.commit("errata", None, self.errata(self.base, self.WAS, self.WAS))
+        self.assertEqual(self.run_check().errors, [])
+
+    def test_malformed_rows(self) -> None:
+        full = "0123456789abcdef0123456789abcdef01234567"
+        cases = {
+            "[[erratum]]\ncommit = \"abc\"\n": "needs commit, was, proves, why",
+            ('[[erratum]]\ncommit = "e202ed1"\nwas = "a -- b"\nproves = "c -- b"\n'
+             'why = "w"\n'): "not a full sha",
+            (f'[[erratum]]\ncommit = "{full}"\nwas = "a -- b"\nproves = "c -- b"\nwhy = "w"\n'
+             * 2): "repeats a line",
+            "[[erratum\n": "proves-errata.toml",
+        }
+        for text, needle in cases.items():
+            with self.subTest(needle=needle):
+                rows, errors = check_ticks.load_errata(text)
+                # A repeated row keeps its first.
+                self.assertEqual(len(rows), 1 if needle == "repeats a line" else 0)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(needle, errors[0])
+        rows, errors = check_ticks.load_errata(
+            f'[[erratum]]\ncommit = "{full}"\nwas = " a -- b "\nproves = "c -- b"\nwhy = "w"\n')
+        self.assertEqual((rows, errors), ({(full, "a -- b"): ("c -- b", "w")}, []))
+
+    def test_the_tree_errata_file_parses(self) -> None:
+        text = (gatelib.ROOT / check_ticks.ERRATA_PATH).read_text()
+        rows, errors = check_ticks.load_errata(text)
+        self.assertEqual(errors, [])
+        for (sha, was), (proves, _) in rows.items():
+            for line in (was, proves):
+                self.assertIsInstance(check_ticks.parse_proves(line), check_ticks.ProvesLine,
+                                      (sha, line))
+
+
 if __name__ == "__main__":
     unittest.main()

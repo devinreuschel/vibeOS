@@ -362,6 +362,39 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
+# L1365
+[[box]]
+key = "the Rust `/sbin/init` checks every"
+needs = [
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+  "pid 1's exit panics the",  # L1363
+  "`/sbin/init` passes a status pointer to `wait4`",  # L1249
+  "e2e asserts `/bin/tests`' result",  # L1248
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1368
+[[box]]
+key = "`/bin/sh` runs programs from `PATH` with"
+needs = [
+  "`execve` copies the caller's `envp` strings",  # L1354
+  "`reboot` (power off and restart),",  # L1358
+  "an allocator over `brk`, so",  # L1359
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1369
+[[box]]
+key = "`ls`, `cat`, `echo`, `grep`, `wc`,"
+needs = [
+  "`getdents64`, `fstat`, and `nanosleep`, which",  # L1357
+  "an allocator over `brk`, so",  # L1359
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+  "the initrd is sized by",  # L1370
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
 # Lands-after, lands-with and lands-before clauses in box text.
 
 [[box]]

@@ -322,8 +322,21 @@ CONSOLE = [
     "vibeOS: shell ready",
     "$ echo serial-ok",
     "serial-ok",
+    "$ false",
+    "sh: false: exit 1",
+    "$ ps",
+    "1 0 run init",
     "$ echo ps2-ok",
     "ps2-ok",
+]
+CONSOLE_MATCHED = [
+    "shell_ready",
+    "serial_echo",
+    "sh_status",
+    "sh_ps",
+    "ps2_echo",
+    "sh_poweroff",
+    "console_input_sh",
 ]
 
 
@@ -335,7 +348,7 @@ class ConsoleReplyTests(unittest.TestCase):
         return run_qemu_console_input(FAKE_CFG, line_source=src)
 
     def test_unframed_passes(self) -> None:
-        self.assertEqual(self.console(CONSOLE).matched, ["shell_ready", "serial_echo", "ps2_echo"])
+        self.assertEqual(self.console(CONSOLE).matched, CONSOLE_MATCHED)
 
     def test_framed_shell_ready_fails(self) -> None:
         with self.assertRaisesRegex(HarnessError, "no shell ready"):
@@ -347,7 +360,7 @@ class ConsoleReplyTests(unittest.TestCase):
 
     def test_framed_ps2_ok_fails(self) -> None:
         with self.assertRaisesRegex(HarnessError, "PS/2 sendkey echo missing"):
-            self.console([*CONSOLE[:4], K("ps2-ok")])
+            self.console([*CONSOLE[:8], K("ps2-ok")])
 
     def test_kernel_panic_fails(self) -> None:
         with self.assertRaisesRegex(HarnessError, "panic signature"):
