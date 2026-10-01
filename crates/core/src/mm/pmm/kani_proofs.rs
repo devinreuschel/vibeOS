@@ -32,20 +32,31 @@ const ARENA_FRAMES: usize = 16;
 /// order-4 block, and not frame 0, which never enters the buddy.
 const ARENA_BASE: u64 = 0x10_0000;
 const ARENA_END: u64 = ARENA_BASE + ARENA_FRAMES as u64 * PAGE_SIZE;
-/// Highest order the harness allocates.
+/// Highest order the harnesses allocate.
 const TOP: u8 = 4;
-/// Allocate or free calls, and so at most this many live blocks.
-const STEPS: usize = 6;
+/// Allocations in `buddy_16_frames_five_allocs`, and so its live blocks.
+const ALLOCS: usize = 5;
 
-/// The real `Buddy` on a 16-frame arena: every sequence of up to six
-/// `alloc` and `free` calls keeps live blocks inside the arena, aligned
-/// to their size and pairwise disjoint, the free count exact, and no
-/// free block at orders 0 to 3 beside its buddy on the same list
-/// (freed buddies merged). The checks run after setup and after every
-/// call, so every shorter sequence is covered too.
+/// The arena after `insert_region`: one order-4 block.
+const ONE_BLOCK: PmmStats = PmmStats {
+    total_frames: ARENA_FRAMES,
+    free_frames: ARENA_FRAMES,
+    largest_free_order: Some(TOP),
+};
+
+/// The real `Buddy` on a 16-frame arena: every sequence of up to five
+/// `alloc` calls, each of any order 0 to 4, keeps the live blocks inside
+/// the arena, aligned to their size and pairwise disjoint, the free count
+/// exact, and no free block at orders 0 to 3 beside its buddy on the same
+/// list; an allocation is refused only when no free block is large
+/// enough. The checks run after setup and after every call, so every
+/// shorter sequence is covered too. Freeing is
+/// `buddy_16_frames_alloc_then_free`'s: a symbolic free walks up to 21
+/// free lists, and sequences that mix frees ran CBMC out of memory.
 ///
-/// Bound: 16 frames, orders 0 to 4, at most 6 calls; loops unwound 18
-/// times (no free list holds more than 16 nodes, and the order loops
+/// Bound: 16 frames, orders 0 to 4, at most 5 allocations (5 verify in
+/// 15 minutes; 6 did not finish in 50); loops unwound
+/// 18 times (no free list holds more than 16 nodes, and the order loops
 /// run `MAX_ORDER + 1 = 11` times).
 ///
 /// Kani's view of memory: [`node_ptr_in_frame`] stands in for
@@ -55,7 +66,7 @@ const STEPS: usize = 6;
 #[kani::proof]
 #[kani::unwind(18)]
 #[kani::stub(Buddy::node_ptr, node_ptr_in_frame)]
-fn buddy_16_frames_six_calls() {
+fn buddy_16_frames_five_allocs() {
     let mut nodes = [const { FreeNode { next: 0, prev: 0 } }; ARENA_FRAMES];
     // `node_ptr_in_frame` reads it only while `nodes` lives. One thread,
     // so Relaxed.
@@ -67,63 +78,70 @@ fn buddy_16_frames_six_calls() {
     // list yet, which only the buddy writes until the harness ends
     // (invariant I224, established here).
     unsafe { b.insert_region(ARENA_BASE, ARENA_END) };
-    let initial = b.stats();
-    assert_eq!(
-        initial,
-        PmmStats {
-            total_frames: ARENA_FRAMES,
-            free_frames: ARENA_FRAMES,
-            largest_free_order: Some(TOP),
-        }
-    );
-    let mut live: [Option<Frames>; STEPS] = [const { None }; STEPS];
+    assert_eq!(b.stats(), ONE_BLOCK);
+    let mut live = Live::<ALLOCS>::new();
     check(&b, &live);
-    let mut step = 0;
-    while step < STEPS {
-        step += 1;
-        if kani::any() {
-            let order: u8 = kani::any();
-            kani::assume(order <= TOP);
-            match b.alloc(order) {
-                Some(f) => {
-                    kani::cover!(order == 0, "alloc order 0");
-                    kani::cover!(order == 1, "alloc order 1");
-                    kani::cover!(order == 2, "alloc order 2");
-                    kani::cover!(order == 3, "alloc order 3");
-                    kani::cover!(order == 4, "alloc order 4");
-                    // At most one block per call, so a slot is free.
-                    let mut i = 0;
-                    while live[i].is_some() {
-                        i += 1;
-                    }
-                    live[i] = Some(f);
-                }
-                None => {
-                    kani::cover!(b.stats().free_frames == 0, "alloc refused, arena full");
-                }
+    let mut n = 0;
+    while n < ALLOCS {
+        let order: u8 = kani::any();
+        kani::assume(order <= TOP);
+        match b.alloc(order) {
+            Some(f) => {
+                kani::cover!(order == 0, "alloc order 0");
+                kani::cover!(order == 1, "alloc order 1");
+                kani::cover!(order == 2, "alloc order 2");
+                kani::cover!(order == 3, "alloc order 3");
+                kani::cover!(order == 4, "alloc order 4");
+                live.keep(n, f);
             }
-        } else {
-            let i: usize = kani::any();
-            kani::assume(i < STEPS);
-            if let Some(f) = live[i].take() {
-                let order = f.order();
-                b.free(f);
-                // Bound first: a `cover!` over `&&` becomes one check
-                // per branch.
-                let merged = order < TOP && b.stats().largest_free_order == Some(TOP);
-                kani::cover!(merged, "free merges back to order 4");
+            None => {
+                let st = b.stats();
+                assert!(st.largest_free_order.is_none_or(|l| l < order));
+                kani::cover!(st.free_frames == 0, "alloc refused, arena full");
             }
         }
         check(&b, &live);
+        n += 1;
     }
-    let mut i = 0;
-    while i < STEPS {
-        if let Some(f) = live[i].take() {
-            b.free(f);
-        }
-        i += 1;
+    // The blocks stay allocated: freeing is the other proof's.
+}
+
+/// The real `Buddy` on a 16-frame arena: an allocation of any order 0 to
+/// 4 succeeds on the empty arena, and freeing it merges every split back,
+/// leaving one order-4 block and `stats()` as before; the checks run
+/// after each call.
+///
+/// Bound: 16 frames, orders 0 to 4, one allocation and its free; loops
+/// unwound 18 times, as `buddy_16_frames_five_allocs`.
+#[kani::proof]
+#[kani::unwind(18)]
+#[kani::stub(Buddy::node_ptr, node_ptr_in_frame)]
+fn buddy_16_frames_alloc_then_free() {
+    let mut nodes = [const { FreeNode { next: 0, prev: 0 } }; ARENA_FRAMES];
+    // `node_ptr_in_frame` reads it only while `nodes` lives. One thread,
+    // so Relaxed.
+    NODES.store(&raw mut nodes, Ordering::Relaxed);
+    // The stub ignores the offset; 0 names no real mapping.
+    let mut b = Buddy::new(0);
+    // SAFETY: `insert_region`'s contract; the arena's 16 frames reach
+    // their nodes in `nodes`, writable memory this harness owns, on no
+    // list yet, which only the buddy writes until the harness ends
+    // (invariant I224, established here).
+    unsafe { b.insert_region(ARENA_BASE, ARENA_END) };
+    assert_eq!(b.stats(), ONE_BLOCK);
+    let order: u8 = kani::any();
+    kani::assume(order <= TOP);
+    let mut live = Live::<1>::new();
+    let f = b.alloc(order);
+    assert!(f.is_some());
+    if let Some(f) = f {
+        live.keep(0, f);
     }
-    assert_eq!(b.stats(), initial);
+    check(&b, &live);
+    b.free(live.take(0));
+    check(&b, &live);
+    assert_eq!(b.stats(), ONE_BLOCK);
+    kani::cover!(order < TOP, "free merges back to order 4");
 }
 
 /// The free-list node of each arena frame, in frame order.
@@ -143,32 +161,67 @@ fn node_ptr_in_frame(_b: &Buddy, phys: u64) -> *mut FreeNode {
     let nodes = NODES.load(Ordering::Relaxed);
     // SAFETY: `nodes` points at the harness's `nodes`, live until the
     // harness returns, and the assert above makes `i < 16`; established
-    // here and at `mm::pmm::kani_proofs::buddy_16_frames_six_calls`.
+    // here and at `mm::pmm::kani_proofs::buddy_16_frames_five_allocs`.
     unsafe { &raw mut (*nodes)[i] }
 }
 
-/// The invariants `buddy_16_frames_six_calls` asserts after each call.
+/// Live blocks as plain words: an `[Option<Frames>; N]` reached Kani
+/// 0.68 uninitialized (a `None` element read as a block at 2^49). A
+/// block's token moves in by `Frames::into_entry` and back out by
+/// `Frames::from_entry`, so no token is dropped (C-FRAMES).
+struct Live<const N: usize> {
+    used: [bool; N],
+    base: [u64; N],
+    order: [u8; N],
+}
+
+impl<const N: usize> Live<N> {
+    fn new() -> Self {
+        Self {
+            used: [false; N],
+            base: [0; N],
+            order: [0; N],
+        }
+    }
+
+    fn keep(&mut self, i: usize, f: Frames) {
+        self.order[i] = f.order();
+        self.base[i] = f.into_entry();
+        self.used[i] = true;
+    }
+
+    fn take(&mut self, i: usize) -> Frames {
+        assert!(self.used[i]);
+        self.used[i] = false;
+        // SAFETY: `Frames::from_entry`'s contract; slot `i` held the
+        // `into_entry` of a token of this order, and clearing it above
+        // leaves nothing else naming the block; established here.
+        unsafe { Frames::from_entry(self.base[i], self.order[i]) }
+    }
+}
+
+/// The invariants the buddy proofs assert after each call.
 /// Plain index loops: CBMC unwinds iterator adapters slowly.
-fn check(b: &Buddy, live: &[Option<Frames>; STEPS]) {
+fn check<const N: usize>(b: &Buddy, live: &Live<N>) {
     let mut used = 0usize;
     let mut i = 0;
-    while i < STEPS {
-        if let Some(f) = &live[i] {
-            let (base, size) = (f.base(), PAGE_SIZE << f.order());
-            assert!(f.order() <= TOP);
+    while i < N {
+        if live.used[i] {
+            let (base, size) = (live.base[i], PAGE_SIZE << live.order[i]);
+            assert!(live.order[i] <= TOP);
             assert!(base >= ARENA_BASE && base + size <= ARENA_END);
             // A mask, not `%`: `size` is a power of two, and a divider
             // on a symbolic operand swamps CBMC.
             assert!(base & (size - 1) == 0);
             let mut j = i + 1;
-            while j < STEPS {
-                if let Some(g) = &live[j] {
-                    let (gb, gs) = (g.base(), PAGE_SIZE << g.order());
+            while j < N {
+                if live.used[j] {
+                    let (gb, gs) = (live.base[j], PAGE_SIZE << live.order[j]);
                     assert!(base + size <= gb || gb + gs <= base);
                 }
                 j += 1;
             }
-            used += f.count();
+            used += 1 << live.order[i];
         }
         i += 1;
     }
