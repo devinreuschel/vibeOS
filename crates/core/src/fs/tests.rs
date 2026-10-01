@@ -1286,7 +1286,7 @@ fn inode_ops_unsupported_errno() {
     assert_eq!(ops.sync(&mut cx), Ok(()));
     assert_eq!(ops.evict(&mut cx, &a), Ok(()));
     assert_eq!(ops.check_seek(&mut cx, &a), Ok(()));
-    ops.kill_sb(&mut cx);
+    ops.release(&mut cx);
 
     // FAT's `symlink` and `link`, through the core adapter: `EPERM`, as on
     // Linux's vfat.

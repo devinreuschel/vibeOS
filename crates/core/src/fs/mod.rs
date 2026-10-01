@@ -259,6 +259,10 @@ pub struct VfsStats {
     pub i_evicts: u32,
     /// Files [`Vfs::open`] opened on a resolved dentry.
     pub opens: u32,
+    /// Superblock `sync`s that failed at their last unmount; the unmount
+    /// went on (DESIGN §2.5: a counter, and the caller's rate-limited
+    /// line).
+    pub sync_errs: u32,
 }
 
 /// A backend's identity for one of its inodes, unique within its
@@ -434,8 +438,12 @@ pub trait InodeOps: Sync {
     fn evict(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> Result<(), FsError> {
         Ok(())
     }
-    /// Drop the backend state of an unmounted superblock.
-    fn kill_sb(&self, _cx: &mut OpCx<'_>) {}
+    /// Release the backend state of a superblock whose last mount is
+    /// gone, after its `sync`: the volume it shows is retired here, and the
+    /// superblock's own count on the volume instance goes when its slot is
+    /// freed. Runs with the VFS lock dropped, never before the unmount
+    /// succeeded.
+    fn release(&self, _cx: &mut OpCx<'_>) {}
     /// Whether the dentry cache's name `cached` is the name `asked` a
     /// lookup gives: byte equality, or the backend's own rule, as FAT's
     /// case-insensitive one, so a lookup by another spelling finds the
@@ -472,7 +480,7 @@ pub trait FileSystem: Sync {
     /// mount of a shared one.
     fn on_mount(&self, _cx: &mut OpCx<'_>, _at: &[u8]) {}
     /// After the mount on `at` is gone; `last` when it was the
-    /// superblock's last mount, before `kill_sb`.
+    /// superblock's last mount, before its `sync` and `release`.
     fn on_umount(&self, _cx: &mut OpCx<'_>, _at: &[u8], _last: bool) {}
 }
 
@@ -1021,6 +1029,7 @@ impl Vfs {
                 d_evicts: 0,
                 i_evicts: 0,
                 opens: 0,
+                sync_errs: 0,
             },
         })
     }
@@ -1080,7 +1089,7 @@ impl Call {
 
 /// A superblock hook prepared under the VFS lock and run with it dropped:
 /// `fill_super`, `on_mount`, `sync`, and the last unmount's `on_umount`
-/// and `kill_sb`. The superblock's `busy` count keeps its slot meanwhile.
+/// and `release`. The superblock's `busy` count keeps its slot meanwhile.
 pub struct SbCall {
     fs: Option<&'static dyn FileSystem>,
     ops: Option<&'static dyn InodeOps>,

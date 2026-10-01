@@ -239,9 +239,22 @@ pub fn mount_at(
     }
 }
 
-/// [`umount`] of `target` from `base`.
+/// [`umount`] of `target` from `base`, dispatched through the mount's
+/// own filesystem operations. A superblock `sync` that failed at its last
+/// unmount is counted (`VfsStats::sync_errs`) and logged here; the unmount
+/// still succeeds (DESIGN §2.5).
 pub fn umount_at(base: Option<WalkBase>, target: &[u8]) -> Result<(), FsError> {
-    fs_init::api().umount(base, target)
+    let before = fs_init::with(|v| v.stats.sync_errs);
+    fs_init::api().umount(base, target)?;
+    if fs_init::with(|v| v.stats.sync_errs) != before {
+        crate::klog_ratelimited!(
+            1000,
+            Level::Warn,
+            "vibeOS: fs: sync at umount of {} failed",
+            core::str::from_utf8(target).unwrap_or("?")
+        );
+    }
+    Ok(())
 }
 
 // ---- directory references ----

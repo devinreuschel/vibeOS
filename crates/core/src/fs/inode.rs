@@ -142,14 +142,20 @@ impl Vfs {
     }
 
     /// A superblock hook returned. After the last one of a superblock
-    /// whose last mount is gone (`release`), its slot is free.
-    pub(super) fn sb_idle(&mut self, sb: u8, release: bool) {
+    /// whose last mount is gone (`release`), its slot is free, and its
+    /// count on its volume instance comes back for the caller to drop
+    /// with the lock released (DESIGN §2.11 rule 6).
+    #[must_use = "the volume instance is dropped after the VFS lock"]
+    pub(super) fn sb_idle(&mut self, sb: u8, release: bool) -> Option<Instance> {
         let s = &mut self.supers[sb as usize];
         s.busy = s.busy.saturating_sub(1);
         if release && s.busy == 0 {
             debug_assert!(s.refs == 0, "superblock released while held");
+            let vol = s.vol.take();
             *s = Super::EMPTY;
+            return vol;
         }
+        None
     }
 
     /// The next unhashed inode whose release is queued, as a call to its

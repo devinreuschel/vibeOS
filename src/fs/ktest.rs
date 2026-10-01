@@ -19,6 +19,7 @@ mod ops;
 mod routing;
 mod slots;
 mod stack16k;
+mod umount;
 mod walk;
 
 pub(crate) use cwd::test_cwd_per_process;
@@ -31,6 +32,7 @@ pub(crate) use routing::{
 };
 pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
+pub(crate) use umount::test_umount_consistent;
 pub(crate) use walk::test_walk_path_resolution;
 
 use crate::fat_init;
@@ -1447,4 +1449,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("fat_vol_wait_no_eio", test_fat_vol_wait_no_eio).deadline(60_000),
     test("cwd_per_process", test_cwd_per_process),
     test("walk_path_resolution", test_walk_path_resolution),
+    test("umount_consistent", test_umount_consistent).deadline(60_000),
 ];

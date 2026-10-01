@@ -400,6 +400,21 @@ impl InodeOps for VibeOps {
     fn sync(&self, cx: &mut OpCx<'_>) -> Result<(), FsError> {
         sync(vol_of(cx)?)
     }
+
+    /// After the superblock's last mount, which is the last to show the
+    /// volume (one superblock per volume), and its sync: retire the volume
+    /// and take a device's from its entry. The superblock's own reference
+    /// goes when its slot is freed, and with it a memory volume.
+    fn release(&self, cx: &mut OpCx<'_>) {
+        let Ok(vol) = vol_of(cx) else {
+            return;
+        };
+        vol.sb.store(NO_SB, Ordering::Release);
+        drop_slot(vol);
+        if let Media::Dev(r) = &vol.media {
+            drop(blockdev_init::take_holder(r));
+        }
+    }
 }
 
 /// Write `buf` at `off`, or at the file's size when there is none; the
@@ -477,34 +492,11 @@ impl FileSystem for VibeFs {
         }
     }
 
-    /// Drop `at`'s mount-table entry. After the superblock's last mount, which is the
-    /// last to show the volume (one superblock per volume), sync the
-    /// volume, retire it, and take a device's from its entry; the
-    /// superblock's own reference goes when its slot is freed, and with it
-    /// a memory volume.
-    fn on_umount(&self, cx: &mut OpCx<'_>, at: &[u8], last: bool) {
+    /// Drop `at`'s mount-table entry. The superblock's last unmount then
+    /// syncs it and releases its volume through [`VibeOps`] (`Vfs`'s
+    /// unmount runs `sync`, then `release`).
+    fn on_umount(&self, _cx: &mut OpCx<'_>, at: &[u8], _last: bool) {
         drop(unregister_mnt(at));
-        if !last {
-            return;
-        }
-        let Ok(vol) = vol_of(cx) else {
-            return;
-        };
-        let mnt = core::str::from_utf8(at).unwrap_or("?");
-        if let Err(e) = sync(vol) {
-            crate::klog_ratelimited!(
-                1000,
-                vibeos::log::Level::Warn,
-                "vibeOS: vibefs: sync of {} at umount failed: {}",
-                mnt,
-                e.as_str()
-            );
-        }
-        vol.sb.store(NO_SB, Ordering::Release);
-        drop_slot(vol);
-        if let Media::Dev(r) = &vol.media {
-            drop(blockdev_init::take_holder(r));
-        }
     }
 }
 
