@@ -874,10 +874,12 @@ pub struct Mounted {
 /// to its mount, and pins its dentry when it was opened by path. `gen`
 /// changes when the slot is freed, so a [`FileId`] to an earlier file is
 /// refused with `Badf` (C-FDGEN). The size lives in the inode, never
-/// here.
+/// here. A slot is free, `reserved` by an `open` that has not created or
+/// truncated anything yet, or `used`.
 #[derive(Clone, Copy)]
 struct File {
     used: bool,
+    reserved: bool,
     refs: u16,
     r#gen: u16,
     islot: u16,
@@ -890,6 +892,7 @@ struct File {
 impl File {
     const EMPTY: Self = Self {
         used: false,
+        reserved: false,
         refs: 0,
         r#gen: 0,
         islot: 0,

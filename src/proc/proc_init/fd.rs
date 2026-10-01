@@ -299,12 +299,19 @@ pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
     let mut buf = [0u8; vibeos::fs::MAX_PATH];
     let n = copy_user_str(path, &mut buf)?;
     let mode = u32::from(mode) & 0o7777;
-    match file_init::open_at(
-        current_base(),
-        &buf[..n],
-        OpenFlags::from_bits(flags as u32),
-        mode,
-    ) {
+    // The lowest free descriptor (`EMFILE`), then in `Vfs::open` an
+    // open-file slot (`ENFILE`), both before anything is created or
+    // truncated; an error gives back both reservations.
+    let pid = current_pid();
+    let (fd, base) = with_table(|t| match t.get_mut(pid) {
+        Some(p) => p
+            .fds
+            .reserve()
+            .map(|fd| (fd, p.base()))
+            .map_err(KError::from),
+        None => Err(KError::MFile),
+    })?;
+    match file_init::open_at(base, &buf[..n], OpenFlags::from_bits(flags as u32), mode) {
         Ok(f) => {
             let id = f.into_raw();
             let slot = Fd {
@@ -314,13 +321,12 @@ pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
                 },
                 flags: fd_flags_from_open(flags as u32),
             };
-            let pid = current_pid();
             let r = with_table(|t| match t.get_mut(pid) {
-                Some(p) => p.fds.alloc(slot).map_err(KError::from),
-                None => Err(KError::MFile),
+                Some(p) => p.fds.install_reserved(fd, slot).map_err(KError::from),
+                None => Err(KError::BadF),
             });
             match r {
-                Ok(fd) => Ok(fd as usize),
+                Ok(()) => Ok(fd as usize),
                 Err(e) => {
                     #[expect(
                         clippy::let_underscore_must_use,
@@ -331,7 +337,14 @@ pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
                 }
             }
         }
-        Err(e) => Err(KError::from(e)),
+        Err(e) => {
+            with_table(|t| {
+                if let Some(p) = t.get_mut(pid) {
+                    p.fds.unreserve(fd);
+                }
+            });
+            Err(KError::from(e))
+        }
     }
 }
 

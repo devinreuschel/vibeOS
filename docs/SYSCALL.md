@@ -252,11 +252,11 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   on a fatal signal; ROADMAP §12.5); a console read returns after a newline
   or `rdx` bytes
 - `open`: `mode` is ignored, and a vibefs file is created 0644 (F149;
-  ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. `O_CREAT` and
-  `O_TRUNC` take effect before the open-file slot and the fd are allocated, so with
-  a full open-file or fd table `open(O_TRUNC)` truncates the file and then
-  fails with `ENFILE` for a full open-file table or `EMFILE` for a full fd
-  table (F057; ROADMAP §10.4)
+  ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. `open`
+  reserves the descriptor (`EMFILE`) and the open-file slot (`ENFILE`)
+  before it creates or truncates, so a failed `open` changes no file; a
+  trailing `/` after a missing name fails with `ENOTDIR` unless the call is
+  `mkdir` (F057; ROADMAP §10.4)
 - `lseek`: `SEEK_END` reads the size from the file's inode (FAT's
   counted in-core inode or the vibefs inode), so it sees writes through
   any descriptor. On a vibefs file a resulting offset above 2^44 − 4096

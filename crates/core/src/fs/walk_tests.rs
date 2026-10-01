@@ -395,3 +395,51 @@ fn walk_case_fold_finds_mount_dentry() {
     v.umount(None, "/VIBE").unwrap();
     assert_dcache_sound(&v);
 }
+
+#[test]
+fn open_reserves_file_slot_first() {
+    let mut v = ram();
+    put_file(&mut v, None, "/t", b"0123456789");
+    // Fill the open-file table.
+    let mut held = Vec::new();
+    loop {
+        match v.open_path(None, "/t", O_RDONLY, 0) {
+            Ok(f) => held.push(f),
+            Err(e) => {
+                assert_eq!(e, FsError::NFile);
+                break;
+            }
+        }
+    }
+    assert_eq!(held.len(), v.files.len());
+    // Neither a truncate nor a create happens without a slot.
+    assert_eq!(
+        v.open_path(None, "/t", O_WRONLY | O_TRUNC, 0).unwrap_err(),
+        FsError::NFile
+    );
+    assert_eq!(
+        v.open_path(None, "/n", O_WRONLY | O_CREAT, 0o644)
+            .unwrap_err(),
+        FsError::NFile
+    );
+    assert_eq!(v.stat(None, "/t").unwrap().size, 10);
+    assert_eq!(v.stat(None, "/n").unwrap_err(), FsError::NotFound);
+    // A failed open gives its reservation back.
+    let f = held.pop().unwrap();
+    v.close(f).unwrap();
+    assert_eq!(
+        v.open_path(None, "/missing", O_RDONLY, 0).unwrap_err(),
+        FsError::NotFound
+    );
+    assert_eq!(
+        v.open_path(None, "/t/", O_RDONLY, 0).unwrap_err(),
+        FsError::NotDir
+    );
+    let f = v.open_path(None, "/t", O_WRONLY | O_TRUNC, 0).unwrap();
+    assert_eq!(v.stat(None, "/t").unwrap().size, 0);
+    held.push(f);
+    for f in held {
+        v.close(f).unwrap();
+    }
+    assert!(v.files.iter().all(|f| !f.used && !f.reserved));
+}

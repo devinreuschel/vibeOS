@@ -146,7 +146,25 @@ impl Fd {
     pub const fn cloexec(self) -> bool {
         self.flags & FD_CLOEXEC != 0
     }
+
+    /// A closed slot an `open` reserved ([`FdTable::reserve`]).
+    const RESERVED: Self = Self {
+        kind: FdKind::None,
+        flags: FD_RESERVED,
+    };
+
+    /// Neither open nor reserved: a slot `alloc` and `reserve` may take.
+    const fn is_free(self) -> bool {
+        !self.is_open() && self.flags & FD_RESERVED == 0
+    }
+
+    const fn is_reserved(self) -> bool {
+        !self.is_open() && self.flags & FD_RESERVED != 0
+    }
 }
+
+/// The flag bit of a reserved closed slot: never a user-visible fd flag.
+const FD_RESERVED: u32 = 1 << 31;
 
 /// Why an fd-table call failed.
 #[must_use]
@@ -156,6 +174,9 @@ pub enum FdError {
     Badf,
     /// Every slot is in use.
     Full,
+    /// The slot is reserved by an `open` in progress (Linux's `dup2` onto
+    /// such a slot is `EBUSY`).
+    Busy,
 }
 
 /// A bad descriptor is `EBADF`; a full table, `EMFILE`, as Linux's.
@@ -164,6 +185,7 @@ impl From<FdError> for crate::kerror::KError {
         match e {
             FdError::Badf => Self::BadF,
             FdError::Full => Self::MFile,
+            FdError::Busy => Self::Busy,
         }
     }
 }
@@ -208,7 +230,12 @@ impl FdTable {
     pub fn copy_from(&mut self, src: &FdTable) {
         let mut i = 0usize;
         while i < self.slots.len() {
-            self.slots[i] = src.slots.get(i).copied().unwrap_or(Fd::EMPTY);
+            self.slots[i] = src
+                .slots
+                .get(i)
+                .copied()
+                .filter(|s| s.is_open())
+                .unwrap_or(Fd::EMPTY);
             i += 1;
         }
     }
@@ -241,13 +268,43 @@ impl FdTable {
     }
 
     pub fn alloc(&mut self, slot: Fd) -> Result<u32, FdError> {
+        let i = self.reserve()?;
+        self.slots[i as usize] = slot;
+        Ok(i)
+    }
+
+    /// Reserve the lowest free descriptor for an `open` that has not
+    /// opened its file yet: `alloc` and `dup` pass over it, and `get`
+    /// does not see it (`EBADF`). `Full` (`EMFILE`) when none is free.
+    pub fn reserve(&mut self) -> Result<u32, FdError> {
         let i = self
             .slots
             .iter()
-            .position(|s| !s.is_open())
+            .position(|s| s.is_free())
             .ok_or(FdError::Full)?;
-        self.slots[i] = slot;
+        self.slots[i] = Fd::RESERVED;
         Ok(i as u32)
+    }
+
+    /// Fill the descriptor [`Self::reserve`] reserved; `Badf` for one
+    /// it did not.
+    pub fn install_reserved(&mut self, fd: u32, slot: Fd) -> Result<(), FdError> {
+        let s = self.slots.get_mut(fd as usize).ok_or(FdError::Badf)?;
+        if !s.is_reserved() {
+            return Err(FdError::Badf);
+        }
+        *s = slot;
+        Ok(())
+    }
+
+    /// Give back a descriptor [`Self::reserve`] reserved that no file
+    /// filled.
+    pub fn unreserve(&mut self, fd: u32) {
+        if let Some(s) = self.slots.get_mut(fd as usize)
+            && s.is_reserved()
+        {
+            *s = Fd::EMPTY;
+        }
     }
 
     /// Close and return the old slot. `None` if not open.
@@ -276,8 +333,10 @@ impl FdTable {
             return Ok(None);
         }
         let s = self.get(old).ok_or(FdError::Badf)?;
-        if new as usize >= self.slots.len() {
-            return Err(FdError::Badf);
+        match self.slots.get(new as usize) {
+            None => return Err(FdError::Badf),
+            Some(n) if n.is_reserved() => return Err(FdError::Busy),
+            Some(_) => {}
         }
         let displaced = self.close(new);
         self.slots[new as usize] = Fd {
@@ -604,6 +663,44 @@ mod tests {
         assert_eq!(a.iter().count(), 0);
         assert_eq!(FdTable::empty().capacity(), 0);
         assert!(FdTable::empty().alloc(Fd::EMPTY).is_err());
+    }
+
+    #[test]
+    fn fd_reserve_install() {
+        let mut t = FdTable::stdio(5).unwrap();
+        let file = |fid| Fd {
+            kind: FdKind::File { fid, r#gen: 0 },
+            flags: 0,
+        };
+        // The lowest free descriptor, invisible until it is filled.
+        assert_eq!(t.reserve(), Ok(3));
+        assert_eq!(t.get(3), None);
+        assert_eq!(t.close(3), None);
+        assert_eq!(t.iter().count(), 3);
+        // `alloc` and `dup` pass over it; `dup2` onto it is `Busy`.
+        assert_eq!(t.alloc(file(1)), Ok(4));
+        assert_eq!(t.dup(0), Err(FdError::Full));
+        assert_eq!(t.dup2(0, 3), Err(FdError::Busy));
+        assert_eq!(t.reserve(), Err(FdError::Full));
+        // A fork's copy leaves it out.
+        let mut c = FdTable::try_new(5).unwrap();
+        c.copy_from(&t);
+        assert_eq!(c.reserve(), Ok(3));
+        // Filling it: only a reserved slot.
+        assert_eq!(t.install_reserved(4, file(2)), Err(FdError::Badf));
+        assert_eq!(t.install_reserved(7, file(2)), Err(FdError::Badf));
+        assert_eq!(t.install_reserved(3, file(2)), Ok(()));
+        assert_eq!(t.get(3), Some(file(2)));
+        assert_eq!(t.install_reserved(3, file(3)), Err(FdError::Badf));
+        // Giving one back frees it; an open slot is not given back.
+        t.close(4);
+        assert_eq!(t.reserve(), Ok(4));
+        t.unreserve(4);
+        t.unreserve(3);
+        assert_eq!(t.get(3), Some(file(2)));
+        assert_eq!(t.alloc(file(5)), Ok(4));
+        t.reset();
+        assert_eq!(t.reserve(), Ok(0));
     }
 
     #[test]
