@@ -495,9 +495,37 @@ pub const fn fd_flags_from_open(oflags: u32) -> u32 {
     }
 }
 
+/// Add each thread's syscall count to its process's sum: `threads` gives
+/// `(pid, count)` per thread, and `sums` one `(pid, sum)` per process,
+/// sorted by pid. A kernel thread (pid 0) and a pid `sums` does not hold are
+/// skipped, and a sum saturates. `thread_init::sum_syscalls` feeds it the
+/// thread table in one pass (ROADMAP §10.7).
+pub fn sum_syscalls(sums: &mut [(u32, u64)], threads: impl Iterator<Item = (u32, u64)>) {
+    for (pid, n) in threads {
+        if pid == 0 {
+            continue;
+        }
+        if let Ok(i) = sums.binary_search_by_key(&pid, |&(p, _)| p)
+            && let Some(e) = sums.get_mut(i)
+        {
+            e.1 = e.1.saturating_add(n);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sum_syscalls_per_process() {
+        let mut sums = [(1u32, 0u64), (4, 0), (9, u64::MAX - 1)];
+        let threads = [(4u32, 3u64), (0, 100), (1, 2), (4, 5), (7, 11), (9, 5)];
+        sum_syscalls(&mut sums, threads.iter().copied());
+        assert_eq!(sums, [(1, 2), (4, 8), (9, u64::MAX)]);
+        let mut none: [(u32, u64); 0] = [];
+        sum_syscalls(&mut none, threads.iter().copied());
+    }
 
     /// `dup` on a full table is `EMFILE`, and on a closed fd `EBADF`, as
     /// Linux's (ROADMAP §10.4, E2).

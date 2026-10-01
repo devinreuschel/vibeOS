@@ -243,9 +243,7 @@ on the predicate. Timeout is the same path.
 `begin_wait` marked Blocked, SCHED dropped, then `drop(guard)` released the mutex. A timer in that
 window switched the waiter off-CPU still owning it; the notifier blocked on the mutex forever. Rule:
 enqueue on the CV and unlock the mutex under the same SCHED, keep IF off from that section through the
-delivery of the wakes it recorded, then schedule. `with_sched` breaks the second half: it runs
-`place_ready` for the recorded wakes after dropping SCHED, with IF back on, so a preemption there
-switches the waiter out before the woken mutex waiter is on any queue (ROADMAP §10.10, F034).
+delivery of the wakes it recorded, then schedule (ROADMAP §10.10, F034).
 
 **First-run thread `#PF`s in `schedule_inner` at `rsp = stack_top-8`.**
 `popfq` restored IF before `jmp` to the trampoline. A tick landed in that window, `schedule_preempt`

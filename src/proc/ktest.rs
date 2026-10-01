@@ -1,6 +1,7 @@
 //! In-guest tests for proc (kernel_tests only). Rows: [`TESTS`].
 use crate::ktest::{Test, test};
 
+mod counts;
 mod entry;
 mod exec;
 mod floor;
@@ -11,6 +12,7 @@ mod runtime;
 mod sysdecl;
 mod uaccess;
 
+pub(crate) use counts::*;
 pub(crate) use entry::*;
 pub(crate) use exec::*;
 pub(crate) use floor::*;
@@ -78,4 +80,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("reboot_power_off", reboot_power_off).opt_in(),
     test("reboot_restart", reboot_restart).opt_in(),
     test("user_heap_over_brk", user_heap_over_brk).deadline(60_000),
+    test("proc_syscall_count", proc_syscall_count),
 ];

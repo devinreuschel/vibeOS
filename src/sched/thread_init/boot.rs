@@ -42,8 +42,6 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         stack: Some(stack),
         context: CpuContext::empty(),
         entry: bootstrap_entry,
-        next: None,
-        prev: None,
         affinity: CpuAffinity::Pinned(0),
         cpu: 0,
         irq_nest: 0,
@@ -53,7 +51,7 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         as_cr3: 0,
         fpu: fpu_template(),
         fp_cpu: None,
-        syscall_count: 0,
+        syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid: 0,
         no_reclaim: AtomicU32::new(0),
     });
@@ -76,7 +74,6 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         per_cpu_init::set_current_thread(cpu, ptr);
         cpu.idle = ptr;
         cpu.idle_id = ThreadId::BOOTSTRAP;
-        cpu.ready_head = core::ptr::null_mut();
     });
     // The one context-switch primitive (AGENTS rule 10): `from` takes the
     // Limine-stack context, which nothing resumes; the bootstrap TCB's own

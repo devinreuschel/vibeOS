@@ -347,8 +347,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   has parent 0: `/sbin/init`, and the boot `/hello` and the in-guest test
   programs, which `proc_init::wait_kernel` reaps. Linux reparents to a subreaper or
   init and panics when init exits (ROADMAP §10.5, F068)
-- `psinfo`: writes one `<pid> <ppid> <state> <name>` line per process
-  (state `run`, `stop`, or `zombie`). It formats the whole lines that fit in
+- `psinfo`: writes one `<pid> <ppid> <state> <name> <syscalls>` line per
+  process, in pid order (state `run`, `stop`, or `zombie`; `<syscalls>` is
+  the sum of `Tcb.syscall_count` over the process's live threads, every
+  entry counted, `ENOSYS` included). It formats the whole lines that fit in
   512 bytes and copies at most `rsi` of those bytes. Number 500 is in the
   range Linux allocates next (F149); ROADMAP §13.9 deletes the call when
   `ps` moves to `procfs`
@@ -504,10 +506,13 @@ does not meet this yet:
 serial after each call that returns (`?` names an unknown number); the line
 is not a `vibeOS:` marker. `exit`, which never returns, prints no line.
 
-`vibeos_syscall_stub` increments the calling TCB's `syscall_count` and the
-global `SYSCALLS` on every entry, `ENOSYS` included. Nothing reads either:
-`syscall_init::syscall_count` has no caller, and there is no per-process
-sum (F150; ROADMAP §10.7).
+`vibeos_syscall_stub` increments the calling TCB's `syscall_count`, an
+atomic statistic (Relaxed), on every entry, `ENOSYS` included
+(`syscall_init::bump_counter`). `psinfo` reports each process's sum over its
+live threads, which `thread_init::sum_syscalls` takes in one pass over the
+thread table (`vibeos::proc::sum_syscalls`), and the `/bin/sh` `ps` built-in
+prints it; ROADMAP §13.9 moves it to `/proc/<pid>/vibeos/syscalls`, since
+Linux's `/proc/<pid>/syscall` already means something else (F150).
 
 ---
 

@@ -1421,3 +1421,31 @@ needs = [
   "`TickClock::write` bumps `seq` to odd",  # L1436
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "the blocked-thread sweep finds lost"
+needs = [
+  "threads, processes, descriptors, inodes, dentries,",  # L1330
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "dead scheduler and bring-up state"
+needs = [
+  "the `-smp 2` `per_cpu_bsp: ready_head",  # L1243
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "a periodic sweep that logs"
+needs = [
+  "the blocked-thread sweep finds lost",  # L1437
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "a syscall count per process,"
+needs = [
+  "a syscall count per process:",  # L1440
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
