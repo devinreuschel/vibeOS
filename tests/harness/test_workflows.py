@@ -873,7 +873,7 @@ jobs:
       - name: install host tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 xorriso nasm ovmf dosfstools
+          sudo apt-get install -y qemu-system-x86 xorriso ovmf dosfstools
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
