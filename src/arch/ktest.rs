@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::UserPerms;
 use vibeos::apic::TimerMode;
-use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
+use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL, star_value, sysret_selectors};
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGTRAP, wait_signaled};
@@ -119,15 +119,18 @@ pub(crate) fn test_gdt_selectors() -> Outcome {
     if read_cs() != KERNEL_CS {
         return Outcome::Fail("cs not kernel code");
     }
-    if read_tr() != TSS_SEL {
-        return Outcome::Fail("tr not tss");
+    if TSS_SEL != 0x38 || read_tr() != TSS_SEL {
+        return crate::fail_fmt!("tr {:#x}, TSS_SEL {TSS_SEL:#x}, want 0x38", read_tr());
     }
     Outcome::Ok
 }
 
 pub(crate) fn test_star_sysret_layout() -> Outcome {
+    if star_value() != 0x0023_0008_0000_0000 || sysret_selectors(star_value()) != (0x33, 0x2b) {
+        return crate::fail_fmt!("star_value {:#x}: bad SYSRET", star_value());
+    }
     if !crate::proc::ktest::star_configured() {
-        return Outcome::Fail("STAR.SYSCALL_CS/SYSRET_CS or EFER.SCE");
+        return Outcome::Fail("IA32_STAR != star_value() or EFER.SCE clear");
     }
     Outcome::Ok
 }

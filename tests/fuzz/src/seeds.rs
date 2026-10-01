@@ -104,7 +104,9 @@ pub fn corpus() -> Vec<Seed> {
 }
 
 /// The committed regressions the generator owns: box 1234's F064 BPBs,
-/// which panicked the FAT mount before `parse_bpb` checked `data_lba`.
+/// which panicked the FAT mount before `parse_bpb` checked `data_lba`,
+/// and F123's dirent with every date and time field out of range, which
+/// `fat_to_unix` clamps.
 pub fn regressions() -> Vec<Seed> {
     let img = fat_image();
     let count = u32::try_from(img.len() / fat::SEC).unwrap_or(u32::MAX);
@@ -125,7 +127,29 @@ pub fn regressions() -> Vec<Seed> {
             name: "f064-fatsz32-ffffffff-one-fat".to_owned(),
             data: bpb(0xFFFF_FFFF, 1),
         },
+        Seed {
+            target: "fat_mount",
+            name: "f123-dirent-times-out-of-range".to_owned(),
+            data: Sparse::encode_image(0, &bad_times(img), fat::SEC),
+        },
     ]
+}
+
+/// `img` with `BIG.BIN`'s dirent times out of range: month 15, day 0,
+/// hour 31, minute 63 and a seconds field of 31 in its write, creation and
+/// access stamps.
+fn bad_times(mut img: Vec<u8>) -> Vec<u8> {
+    let at = img
+        .chunks(32)
+        .position(|e| e.starts_with(b"BIG     BIN"))
+        .expect("BIG.BIN dirent")
+        * 32;
+    let date: u16 = (127 << 9) | (15 << 5);
+    let time: u16 = (31 << 11) | (63 << 5) | 31;
+    for (off, v) in [(14, time), (16, date), (18, date), (22, time), (24, date)] {
+        img[at + off..at + off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    img
 }
 
 // ------------------ ACPI ------------------

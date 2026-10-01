@@ -721,31 +721,32 @@ fn user_return_fault(frame: &TrapFrame) {
     );
 }
 
-/// The FP binding check every return to ring 3 runs with IF=0
-/// (`syscall_init::vibeos_fp_user_return`, DESIGN §7.5), which
+/// What every vector's return to ring 3 runs with IF=0: the exit work
+/// (DESIGN §5.10 rule 11) and the FP binding check (DESIGN §7.5), which
 /// `syscall_init::init_bsp` sets before the first ring-3 entry (DESIGN
-/// §1.2). Unset, nothing is checked.
+/// §1.2) as `syscall_init::user_return`. Unset, nothing is checked.
 static USER_RETURN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 /// Install the user-return hook.
-pub fn set_user_return_hook(f: fn()) {
+pub fn set_user_return_hook(f: fn(&mut TrapFrame)) {
     // Release: pairs with the Acquire load in `exit_to_user`.
     USER_RETURN.store(f as *mut (), Ordering::Release);
 }
 
 /// The last step before the stub's exit for a frame whose saved CS.RPL is
 /// 3. Only the dispatcher calls it.
-pub fn exit_to_user(_frame: &mut TrapFrame) {
+pub fn exit_to_user(frame: &mut TrapFrame) {
     x86::cli();
     // Acquire: pairs with the Release store in `set_user_return_hook`.
     let p = USER_RETURN.load(Ordering::Acquire);
     if p.is_null() {
         return;
     }
-    // SAFETY: invariant: a non-null `USER_RETURN` holds a `fn()`;
-    // established by `arch::idt::set_user_return_hook`, its only store.
-    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
-    f();
+    // SAFETY: invariant: a non-null `USER_RETURN` holds a
+    // `fn(&mut TrapFrame)`; established by `arch::idt::set_user_return_hook`,
+    // its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn(&mut TrapFrame)>(p) };
+    f(frame);
 }
 
 /// Whether the vector table gives `v` a fixed owner: the LAPIC LVT
@@ -788,6 +789,12 @@ fn install(vector: u8, body: TrapBody) {
 
 fn default_body(frame: &mut TrapFrame) {
     let n = frame.vector as u8;
+    // `0x20`-`0xFF`: an interrupt no handler owns is counted, EOIed and
+    // logged, never a halt (DESIGN §5.2).
+    if n >= vectors::IRQ_BASE {
+        crate::irq_init::unowned(n);
+        return;
+    }
     let err = frame.error_code;
     let cr2 = (n == vectors::PF).then_some(frame.cr2);
     if frame.user_mode() {

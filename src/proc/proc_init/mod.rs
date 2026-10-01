@@ -59,7 +59,7 @@ use fd::{
     addref_fds, close_all_fds, close_where, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
     sys_lseek, sys_open, sys_read, sys_write,
 };
-use floor::{sys_fstat, sys_getdents64, sys_nanosleep, sys_reboot};
+use floor::{signal_acts, sys_fstat, sys_getdents64, sys_nanosleep, sys_reboot};
 
 struct Proc {
     state: ProcState,
@@ -607,6 +607,23 @@ pub(crate) fn wait_kernel(pid: u32) -> u32 {
 pub fn init() {
     crate::arch::idt::set_user_fault_hook(try_user_fault);
     syscall_init::set_syscall_handler(syscall);
+    syscall_init::set_exit_work_hooks(exit_work_pending, do_exit_work);
+}
+
+/// Whether the current process has a kill or a stop for the exit work to
+/// act on (DESIGN §5.10 rule 11): it is `Stopped`, or `SIGKILL`, `SIGSTOP`,
+/// or a signal whose default action is Term or Stop is pending. Reads the
+/// table under its lock with IF as the caller has it, off at the exit.
+pub fn exit_work_pending() -> bool {
+    let pid = current_pid();
+    pid != 0 && with_table(|t| t.get(pid).is_some_and(signal_acts))
+}
+
+/// The exit work itself, with IF=1: [`apply_pending`]. A kill runs
+/// `finish_exit` on this kernel stack and does not return; a stop waits on
+/// `stop_wq` without losing its wakeup.
+pub fn do_exit_work(frame: &mut UserFrame) {
+    apply_pending(Some(frame));
 }
 
 /// A syscall from ring 3, over the user frame its entry saved.
@@ -935,6 +952,32 @@ pub(crate) mod testing {
     use crate::per_cpu_init;
     use crate::thread_init;
     use crate::time_init;
+
+    /// Set `sig`'s pending bit on `pid` and nothing else: no wake, no IPI,
+    /// and no exit for the caller, as the exit-work hook needs.
+    pub(crate) fn post_pending(pid: u32, sig: u32) {
+        super::with_table(|t| {
+            if let Some(p) = t.get_mut(pid) {
+                p.pending |= super::bit(sig);
+            }
+        });
+    }
+
+    /// Whether `pid` is a zombie, waiting to be reaped.
+    pub(crate) fn is_zombie(pid: u32) -> bool {
+        super::with_table(|t| {
+            t.get(pid)
+                .is_some_and(|p| p.state == super::ProcState::Zombie)
+        })
+    }
+
+    /// Whether `pid` is `Stopped`.
+    pub(crate) fn is_stopped(pid: u32) -> bool {
+        super::with_table(|t| {
+            t.get(pid)
+                .is_some_and(|p| p.state == super::ProcState::Stopped)
+        })
+    }
 
     /// The fault address of the `#PF` whose kill line yields once; 0 for
     /// none.

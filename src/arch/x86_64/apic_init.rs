@@ -383,6 +383,21 @@ pub fn eoi() {
     }
 }
 
+/// Whether this CPU's LAPIC has `vec` in service (its ISR bit set): the
+/// LAPIC delivered the interrupt being handled and is owed its EOI. False
+/// while the LAPIC is unmapped.
+pub fn in_service(vec: u8) -> bool {
+    let va = LAPIC_VA.load(Ordering::Relaxed);
+    if va == 0 {
+        return false;
+    }
+    let (off, mask) = apic::isr_reg(vec);
+    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+    // a nonzero `LAPIC_VA` is its return, published by `publish_isr`, and
+    // `isr_reg` gives an ISR register offset in that page.
+    unsafe { lapic_read(va, off) & mask != 0 }
+}
+
 pub fn eoi_for(vec: u8) {
     match apic::eoi_domain(vec) {
         EoiDomain::None => {}

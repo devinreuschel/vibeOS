@@ -45,8 +45,7 @@ Target notes:
   would need a save around each use, and none exists. Nothing traps a kernel FP use, since `CR0.TS`
   stays clear, so `make` runs `scripts/check_kernel_fp.py` on each linked kernel ELF: with the
   toolchain's `llvm-objdump` (the `llvm-tools` component) it fails the build, and deletes the ELF,
-  on any x87, MMX, SSE, or AVX instruction outside `syscall_init::fp_save`, `fp_load`, and
-  `fp_init_template`. User code gets SSE: `arch::cpu::init_control_regs` clears `CR0.EM` and
+  on any x87, MMX, SSE, or AVX instruction outside `syscall_init::fp_save` and `fp_load`. User code gets SSE: `arch::cpu::init_control_regs` clears `CR0.EM` and
   `CR0.TS` and sets `CR0.MP`, `CR0.NE`, `CR4.OSFXSR` and `CR4.OSXMMEXCPT` on every CPU, so x87 and
   SSE floating-point errors reach `#MF` and `#XF` (§5.2), and each thread's 512-byte FXSAVE image
   (`Tcb.fpu`) follows the FP binding (§7.5).
@@ -190,9 +189,8 @@ Ordering rules worth stating separately because they were learned the hard way:
 
 - The bootstrap tick is the LAPIC timer after step 13b, or PIC IRQ0 only on the
   PIT fallback (LINT0 ExtINT). Other PIC lines stay masked; step 15 is
-  `irq: enabled` (IF on, preemption live), not the first unmask. An unexpected
-  line before its driver halts, with no useful backtrace; ROADMAP §10.6 masks,
-  counts, and logs it instead (§5.5).
+  `irq: enabled` (IF on, preemption live), not the first unmask. A line that
+  fires before its driver is masked, counted, and logged (§5.5), not a halt.
 - `smp: done` precedes `console ok`, `pci: N devices`, and `shell ready`. The e2e harness enforces
   it. If SMP moves after the shell, AP failures become invisible in CI.
 - The PCI scan that sizes BARs (step 15b) runs before the first AP starts, though its
@@ -224,7 +222,7 @@ Step 17 is the framebuffer console, PS/2, and mux (`console ok`) after SMP.
 IRQ1 stays masked until the keyboard handler is installed, then the 8042 is
 initialized, then the keyboard GSI is unmasked. After LAPIC owns the tick the
 8259 is masked: IRQ1 is IOAPIC-only. Do not unmask PIC IRQ1 as a fallback. The
-default PIC handler still halts on an unexpected line (§5.5 gives ROADMAP §10.6's change). The timer path re-runs the
+default PIC handler masks, EOIs, counts, and logs a line no driver claims (§5.5). The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
 Step 15b enumerates PCI (ECAM where the first MCFG allocation covers the bus, else CF8 on bus 0 only)

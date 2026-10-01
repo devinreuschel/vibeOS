@@ -386,6 +386,7 @@ $(LIMINE_BIN):
 INITRD_UTILS := ls cat echo grep wc true false sleep yes cmp
 INITRD_FILES := $(USER_OUT)/hello:/hello $(USER_OUT)/init:/sbin/init $(USER_OUT)/sh:/bin/sh \
 	$(USER_OUT)/tests:/bin/tests $(USER_OUT)/envcheck:/bin/envcheck $(USER_OUT)/argcheck:/bin/argcheck \
+	$(USER_OUT)/fpcheck:/bin/fpcheck \
 	$(foreach u,$(INITRD_UTILS),$(USER_OUT)/$(u):/bin/$(u))
 $(INITRD): $(HOSTLIB_DEPS) $(USER_STAMP)
 	mkdir -p $(dir $@)

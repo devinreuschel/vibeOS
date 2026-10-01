@@ -7,6 +7,7 @@
 use core::mem::{offset_of, size_of};
 
 use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use crate::desc::UserSegs;
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
 use crate::sync::variant::{self, Site};
@@ -173,7 +174,7 @@ impl GuardedStack {
     }
 }
 
-/// FXSAVE area. 16-byte aligned. Initialized from a template at FPU bring-up.
+/// FXSAVE area. 16-byte aligned. Every thread starts from [`Fxsave::INITIAL`].
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 pub struct Fxsave {
@@ -181,9 +182,25 @@ pub struct Fxsave {
 }
 
 impl Fxsave {
-    pub const fn empty() -> Self {
-        Self { bytes: [0; 512] }
-    }
+    /// The x86_64 psABI's initial FP state as an FXSAVE image (Intel SDM
+    /// Vol. 1, 10.5.1): FCW `0x037F` (all x87 exceptions masked, 64-bit
+    /// precision, round to nearest) at bytes 0-1, MXCSR `0x1F80` (all SSE
+    /// exceptions masked, round to nearest) at bytes 24-27, every other
+    /// byte zero: empty x87 tags, zeroed ST and XMM registers. `execve`,
+    /// `spawn_user`, kernel-thread creation and `init_bootstrap` start a
+    /// thread from it (DESIGN §7.5).
+    pub const INITIAL: Self = {
+        let mut bytes = [0u8; 512];
+        let fcw = 0x037Fu16.to_le_bytes();
+        bytes[0] = fcw[0];
+        bytes[1] = fcw[1];
+        let mxcsr = 0x1F80u32.to_le_bytes();
+        bytes[24] = mxcsr[0];
+        bytes[25] = mxcsr[1];
+        bytes[26] = mxcsr[2];
+        bytes[27] = mxcsr[3];
+        Self { bytes }
+    };
 }
 
 /// A TCB's on-CPU flag (DESIGN §2.8 rule 2): set while a CPU runs the
@@ -298,6 +315,10 @@ pub struct Tcb {
     /// until its first return to user mode and after any write to `fpu`
     /// (DESIGN §7.5, the FP binding; `vibeos::fpu`).
     pub fp_cpu: Option<u32>,
+    /// A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5): saved by the
+    /// switch away from it and loaded by the switch to it, by its first
+    /// entry, and by `execve`. Unused for a kernel thread (`pid` 0).
+    pub user_segs: UserSegs,
     /// Syscalls this thread has entered. Its own entry bumps it
     /// (`syscall_init::bump_counter`); other threads read it for the
     /// per-process sum (`thread_init::sum_syscalls`), so it is atomic. A
@@ -413,7 +434,7 @@ const _: () = {
     assert!(offset_of!(Tcb, state) == 24);
     assert!(offset_of!(Tcb, context) == if DEBUG { 592 } else { 336 });
     assert!(offset_of!(Tcb, cpu) == if DEBUG { 680 } else { 424 });
-    assert!(offset_of!(Tcb, pid) == if DEBUG { 1248 } else { 992 });
+    assert!(offset_of!(Tcb, pid) == if DEBUG { 1256 } else { 1000 });
     assert!(size_of::<CpuContext>() == 72);
     assert!(size_of::<TcbSlot>() == size_of::<usize>());
 };
@@ -453,6 +474,24 @@ pub fn apply_if_on_resume(rflags: &mut u64, irq_nest: u32) {
 mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn fxsave_initial_is_psabi() {
+        let b = &Fxsave::INITIAL.bytes;
+        assert_eq!(u16::from_le_bytes([b[0], b[1]]), 0x037F, "FCW");
+        assert_eq!(
+            u32::from_le_bytes([b[24], b[25], b[26], b[27]]),
+            0x1F80,
+            "MXCSR"
+        );
+        for (i, &x) in b.iter().enumerate() {
+            if !matches!(i, 0 | 1 | 24..=27) {
+                assert_eq!(x, 0, "byte {i}");
+            }
+        }
+        assert_eq!(b[..2], [0x7F, 0x03]);
+        assert_eq!(b[24..28], [0x80, 0x1F, 0, 0]);
+    }
 
     #[test]
     fn on_cpu_clear_is_seen() {

@@ -2,9 +2,12 @@
 //! loads and SYSCALL MSR reads that no production path needs.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use vibeos::desc::{KERNEL_CS, STAR_SYSRET};
+use vibeos::proc::SIGKILL;
+use vibeos::syscall::UserFrame;
+
+use vibeos::desc::star_value;
 
 use crate::addr_space_init;
 use crate::arch::current::AddressSpace;
@@ -31,14 +34,13 @@ pub(crate) fn cr3_was_skipped(space: &AddressSpace) -> bool {
         == space.root().as_u64()
 }
 
-/// STAR holds the kernel and SYSRET selectors, and EFER.SCE is set.
+/// STAR holds `desc::star_value()` (the kernel and Linux's SYSRET
+/// selectors), and EFER.SCE is set.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn star_configured() -> bool {
     let star = x86::rdmsr(IA32_STAR);
     let efer = x86::rdmsr(IA32_EFER);
-    let syscall_cs = ((star >> 32) & 0xFFFF) as u16;
-    let sysret_cs = ((star >> 48) & 0xFFFF) as u16;
-    syscall_cs == KERNEL_CS && sysret_cs == STAR_SYSRET && (efer & EFER_SCE) != 0
+    star == star_value() && (efer & EFER_SCE) != 0
 }
 
 // Frame counts around `user_init::load_path`, recorded by its inline hook
@@ -90,4 +92,89 @@ pub(crate) fn exec_frames() -> Vec<ExecFrames> {
             ok: OK[i % SLOTS].load(Ordering::Relaxed) != 0,
         })
         .collect()
+}
+
+// The exit-work hooks (ROADMAP §10.6, F033): `syscall_init::exit_work`
+// calls them in kernel_tests builds.
+
+/// Syscall number plus one whose next exit, right after its last exit-work
+/// check, posts `SIGKILL` to the returning process and sends this CPU a
+/// reschedule IPI; 0 for none.
+static KILL_AFTER_NR: AtomicU64 = AtomicU64::new(0);
+/// Set by the hook once it has posted the kill; taken by the next exit
+/// that finds work.
+static KILL_POSTED: AtomicBool = AtomicBool::new(false);
+/// The `kind` of the exit that acted on the posted kill
+/// (`syscall_init::EXIT_SYSCALL` or a vector); `u64::MAX` for none yet.
+static KILL_ACTED_KIND: AtomicU64 = AtomicU64::new(u64::MAX);
+/// The pid whose user `r12` every exit to ring 3 records; 0 for none.
+static WATCH_PID: AtomicU32 = AtomicU32::new(0);
+static WATCH_R12: AtomicU64 = AtomicU64::new(0);
+
+/// Arm the exit hook for syscall `nr` and clear the record.
+pub(crate) fn arm_exit_kill(nr: u64) {
+    KILL_POSTED.store(false, Ordering::Release);
+    KILL_ACTED_KIND.store(u64::MAX, Ordering::Release);
+    KILL_AFTER_NR.store(nr.wrapping_add(1), Ordering::Release);
+}
+
+/// Disarm [`arm_exit_kill`].
+pub(crate) fn disarm_exit_kill() {
+    KILL_AFTER_NR.store(0, Ordering::Release);
+    KILL_POSTED.store(false, Ordering::Release);
+}
+
+/// The exit kind that acted on the hook's kill, once one has.
+pub(crate) fn exit_kill_kind() -> Option<u64> {
+    let k = KILL_ACTED_KIND.load(Ordering::Acquire);
+    (k != u64::MAX).then_some(k)
+}
+
+/// Record `pid`'s user `r12` at each of its exits to ring 3; 0 stops.
+pub(crate) fn watch_r12(pid: u32) {
+    WATCH_R12.store(0, Ordering::Release);
+    WATCH_PID.store(pid, Ordering::Release);
+}
+
+/// The watched pid's `r12` at its last exit to ring 3.
+pub(crate) fn watched_r12() -> u64 {
+    WATCH_R12.load(Ordering::Acquire)
+}
+
+/// `syscall_init::exit_work`, at its start: records the watched process's
+/// `r12`.
+pub(crate) fn exit_seen(frame: &UserFrame) {
+    let w = WATCH_PID.load(Ordering::Acquire);
+    if w != 0 && crate::thread_init::current_pid() == w {
+        WATCH_R12.store(frame.r12, Ordering::Release);
+    }
+}
+
+/// `syscall_init::exit_work`, each time a check finds work: the first one
+/// after the hook posted its kill records its `kind`.
+pub(crate) fn exit_work_found(kind: u64) {
+    if KILL_POSTED.swap(false, Ordering::AcqRel) {
+        KILL_ACTED_KIND.store(kind, Ordering::Release);
+    }
+}
+
+/// `syscall_init::exit_work` on a syscall exit, after its last check: the
+/// armed syscall's exit posts `SIGKILL` to the returning process and sends
+/// this CPU a reschedule IPI, which IF=0 holds pending until ring 3.
+pub(crate) fn exit_check_hook(frame: &UserFrame) {
+    let pid = crate::thread_init::current_pid();
+    let armed = frame.orig_rax.wrapping_add(1);
+    // 0 is "unarmed", and also what an `orig_rax` of -1 (no syscall)
+    // gives.
+    if pid == 0
+        || armed == 0
+        || KILL_AFTER_NR
+            .compare_exchange(armed, 0, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+    {
+        return;
+    }
+    crate::proc_init::testing::post_pending(pid, SIGKILL);
+    KILL_POSTED.store(true, Ordering::Release);
+    crate::ipi_init::kick(crate::thread_init::current_cpu());
 }
