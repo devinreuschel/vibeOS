@@ -266,8 +266,11 @@ why = "claim: the §10.6 entry stub passes the interrupted rbp"
 
 [[box]]
 key = "after `begin_dump`, every panic-path write to COM1"
-needs = ["every two-way dependency between kernel modules that `scripts/check_cycles.py` reports"]
-why = "claim: it writes through A4's raw serial layer"
+needs = [
+  "every two-way dependency between kernel modules that `scripts/check_cycles.py` reports",
+  "the expect-panic e2e matches markers",  # L1257
+]
+why = "claim: it writes through A4's raw serial layer; P10-S81's issue: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "`now_ns` is computed from one free-running counter"
