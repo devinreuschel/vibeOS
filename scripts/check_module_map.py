@@ -14,8 +14,7 @@ one path component, and `—` is an empty cell. Rules:
 - R4: every `.rs`, `.S` and `.asm` file under the two roots is listed, except
   a kernel `<s>/ktest.rs`, or a `<s>/ktest/<topic>.rs` child of it, for a row
   `<s>` (C-KTEST-LAYOUT).
-- R5: outside `crate`, row `<s>`'s paths start with `<s>/`, except the kernel
-  paths in `FLAT_OK`.
+- R5: outside `crate`, row `<s>`'s paths start with `<s>/`.
 - R6: a kernel module `<n>_init` sits in a directory its portable `<n>`
   allows: `<e>/<n>.rs` allows `<e>`, `<e>/<n>/mod.rs` allows `<e>/<n>` and
   `<e>`, and a file in the `crate` row allows any. With no portable `<n>`,
@@ -42,7 +41,6 @@ EMPTY = "—"
 EXTS = (".rs", ".S", ".asm")
 # Kernel paths that may sit outside their row's directory: the ktest runner
 # until ROADMAP §10.2's Q2 box moves it to `ktest/mod.rs`.
-FLAT_OK: frozenset[str] = frozenset({"ktest.rs"})
 KTEST_BODY = "ktest.rs"
 
 _TOKEN = re.compile(r"`([^`]*)`")
@@ -226,8 +224,7 @@ def check(rows: list[Row], core: set[str], kernel: set[str]) -> list[str]:
             if path in seen:
                 errors.append(f"R3: {side} `{path}` listed twice (rows {seen[path]}, {sub})")
             seen.setdefault(path, sub)
-            if sub != CRATE and not path.startswith(sub + "/") and not (
-                    side == "kernel" and path in FLAT_OK):
+            if sub != CRATE and not path.startswith(sub + "/"):
                 errors.append(f"R5: {side} `{path}` lies outside row {sub}'s directory")
         for path in sorted(files - set(seen)):
             if side == "kernel" and _ktest_body(path, subs):

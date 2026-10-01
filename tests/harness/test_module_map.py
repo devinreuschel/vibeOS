@@ -28,7 +28,7 @@ Prose names `prose.rs` outside the table.
 | fs | `fs/{mod,fat}.rs` | `fs/{mod,fat_init}.rs` |
 | sched | `sched/mod.rs` | `sched/{mod,sched_init}.rs` |
 | boot | — | `boot/mod.rs` |
-| ktest | — | `ktest.rs`, `ktest/*.rs` |
+| ktest | — | `ktest/mod.rs`, `ktest/u*.rs` |
 
 ## 1.4 Next
 
@@ -40,7 +40,7 @@ Prose names `prose.rs` outside the table.
 CORE = {"lib.rs", "kalloc.rs", "mm/mod.rs", "mm/pmm.rs", "fs/mod.rs", "fs/fat.rs",
         "sched/mod.rs"}
 KERNEL = {"main.rs", "mm/mod.rs", "mm/pmm_init.rs", "fs/mod.rs", "fs/fat_init.rs",
-          "sched/mod.rs", "sched/sched_init.rs", "boot/mod.rs", "ktest.rs", "ktest/user.rs"}
+          "sched/mod.rs", "sched/sched_init.rs", "boot/mod.rs", "ktest/mod.rs", "ktest/user.rs"}
 
 
 def rows() -> list[Row]:
@@ -86,9 +86,11 @@ class TestPasses(unittest.TestCase):
         self.assertEqual(run(kernel=KERNEL | {"nope/ktest/heap.rs"}),
                          ["R4: kernel `nope/ktest/heap.rs` is in no row"])
 
-    def test_flat_ktest_runner(self) -> None:
-        self.assertIn("ktest.rs", check_module_map.FLAT_OK)
-        self.assertEqual(run(), [])
+    def test_flat_ktest_runner_lies_outside_its_row(self) -> None:
+        table = replace(rows(), Row("ktest", (), ("ktest.rs", "ktest/u*.rs")))
+        kernel = (KERNEL - {"ktest/mod.rs"}) | {"ktest.rs"}
+        self.assertEqual(run(kernel=kernel, table=table),
+                         ["R5: kernel `ktest.rs` lies outside row ktest's directory"])
 
     def test_r6_against_a_file_and_a_mod_dir(self) -> None:
         self.assertEqual(run(), [])
@@ -129,7 +131,7 @@ class TestFails(unittest.TestCase):
 
     def test_star_matching_nothing(self) -> None:
         self.assertEqual(run(kernel=KERNEL - {"ktest/user.rs"}),
-                         ["R2: kernel `ktest/*.rs` (row ktest) matches no file"])
+                         ["R2: kernel `ktest/u*.rs` (row ktest) matches no file"])
 
     def test_listed_twice(self) -> None:
         table = rows() + [Row("fs2", (), ("fs/mod.rs",))]
