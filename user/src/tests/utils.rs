@@ -19,6 +19,9 @@ use vibeos_user::utest::{self, Outcome, Runner};
 const WNOHANG: i32 = 1;
 const SIGKILL: i32 = 9;
 
+/// The 20 ms windows `yes_row` waits, at most, for `yes`'s first line.
+const YES_WINDOWS: u32 = 100;
+
 const IN: &[u8] = b"/tmp/u75-in";
 const OUT: &[u8] = b"/tmp/u75-out";
 const GREP: &[u8] = b"/tmp/u75-grep";
@@ -373,11 +376,21 @@ fn sleep_row() -> Result<(), &'static str> {
     }
 }
 
-/// `yes abc` for 20 ms, then `SIGKILL`: signal 9, and every whole line of
-/// its output, one or more, is `abc`.
+/// `yes abc` for 20 ms, or until its first whole line, then `SIGKILL`:
+/// signal 9, and every whole line of its output, one or more, is `abc`.
 fn yes_row() -> Result<(), &'static str> {
     let pid = spawn(&[c"/bin/yes", c"abc"], &[], None, OUT, false).map_err(|_| "yes abc")?;
-    let slept = sleep_ms(20);
+    // The child runs while the parent sleeps (F128: both are pinned to the
+    // BSP). A fork copies the whole address space under TCG, so the first
+    // line can take longer than one 20 ms window; sleep again, at most
+    // `YES_WINDOWS` times, until the file holds a whole line.
+    let mut slept = sleep_ms(20);
+    for _ in 1..YES_WINDOWS {
+        if slept.is_err() || file_len(OUT).is_ok_and(|n| n >= 4) {
+            break;
+        }
+        slept = sleep_ms(20);
+    }
     let killed = sys::kill(pid, SIGKILL);
     let status = cmd::wait(pid, 0);
     slept.map_err(|_| "yes abc: nanosleep")?;
@@ -408,6 +421,16 @@ fn yes_row() -> Result<(), &'static str> {
     } else {
         Err("yes abc: a line is not abc")
     }
+}
+
+/// `path`'s size, from `lseek(SEEK_END)`.
+fn file_len(path: &[u8]) -> Result<usize, Errno> {
+    // From Linux `include/uapi/linux/fs.h`.
+    const SEEK_END: u32 = 2;
+    let fd = cmd::open_flags(path, sys::O_RDONLY)?;
+    let n = sys::lseek(fd, 0, SEEK_END);
+    sys::close(fd)?;
+    n
 }
 
 /// Whether `out` has a line equal to `line`.
