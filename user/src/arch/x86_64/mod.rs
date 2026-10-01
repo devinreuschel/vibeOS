@@ -4,13 +4,18 @@
 //! stack). A system call takes its number in RAX and its arguments in RDI,
 //! RSI, RDX, R10, R8 and R9, returns in RAX, and clobbers RCX and R11.
 
+pub mod fp;
 pub mod stat;
 pub mod sys;
 
+pub use fp::{FpState, fp_syscall, initial_fp, is_initial};
+
 use core::arch::{asm, naked_asm};
 
-/// The entry point: clear the frame pointer, hand the initial stack pointer
-/// to the portable start, and align the stack for its call.
+/// The entry point: capture the FP state the program starts with
+/// ([`fp::initial_fp`]) before any other instruction touches it, clear the
+/// frame pointer, hand the initial stack pointer to the portable start, and
+/// align the stack for its call.
 ///
 /// # Safety
 ///
@@ -19,11 +24,16 @@ use core::arch::{asm, naked_asm};
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     naked_asm!(
+        "lea rax, [rip + {fp}]",
+        "fnstcw word ptr [rax]",
+        "stmxcsr dword ptr [rax + 4]",
+        "movdqa xmmword ptr [rax + 16], xmm0",
         "xor ebp, ebp",
         "mov rdi, rsp",
         "and rsp, -16",
         "call {start}",
         "ud2",
+        fp = sym fp::ENTRY_FP,
         start = sym crate::rt::start,
     )
 }

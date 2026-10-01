@@ -1,4 +1,6 @@
-//! `/sbin/init` (ROADMAP §9.8, §10.5): pid 1. It runs `/bin/tests` and
+//! `/sbin/init` (ROADMAP §9.8, §10.5): pid 1. It first checks that it
+//! started with the psABI's initial FP state (ROADMAP §10.6, F129), printing
+//! `init: fp initial ok` or `init: fp initial wrong <state>`. It runs `/bin/tests` and
 //! waits for it, printing `init: /bin/tests exited <status>` on fd 2 when
 //! the status word is nonzero; then it starts `/bin/sh` and reaps orphans
 //! forever. Its exit would panic the kernel (INVARIANTS.md §2.5).
@@ -6,6 +8,7 @@
 #![no_std]
 #![no_main]
 
+use vibeos_user::arch;
 use vibeos_user::env::Env;
 use vibeos_user::rt;
 use vibeos_user::sys::{self, Errno};
@@ -41,6 +44,7 @@ fn spawn(path: &[u8]) -> Option<usize> {
 }
 
 fn main(_env: &Env) -> i32 {
+    check_initial_fp();
     if let Some(pid) = spawn(TESTS) {
         let mut status = 0i32;
         // SAFETY: `wait4` writes 4 bytes through `&raw mut status`, a local
@@ -61,6 +65,61 @@ fn main(_env: &Env) -> i32 {
                 reason = "a yield has no failure init can act on"
             )]
             let _ = sys::sched_yield();
+        }
+    }
+}
+
+/// `init: fp initial ok` when `_start` found FCW `0x037F`, MXCSR `0x1F80`
+/// and the first vector register zero, else `init: fp initial wrong fcw
+/// <hex> mxcsr <hex> xmm0 <hex>`, in one write to fd 2.
+fn check_initial_fp() {
+    let fp = arch::initial_fp();
+    let mut buf = [0u8; 96];
+    let mut w = Line {
+        buf: &mut buf,
+        len: 0,
+    };
+    if fp.is_initial() {
+        w.push(b"init: fp initial ok\n");
+    } else {
+        w.push(b"init: fp initial wrong fcw ");
+        w.hex(u64::from(fp.fcw), 4);
+        w.push(b" mxcsr ");
+        w.hex(u64::from(fp.mxcsr), 8);
+        w.push(b" xmm0 ");
+        for &b in fp.xmm0.iter().rev() {
+            w.hex(u64::from(b), 2);
+        }
+        w.push(b"\n");
+    }
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "DESIGN §2.5: init has nowhere else to report a failed write"
+    )]
+    let _ = sys::write(2, w.buf.as_ptr(), w.len);
+}
+
+/// A line built in a fixed buffer; bytes past its end are dropped.
+struct Line<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl Line<'_> {
+    fn push(&mut self, s: &[u8]) {
+        for &b in s {
+            if let Some(slot) = self.buf.get_mut(self.len) {
+                *slot = b;
+                self.len += 1;
+            }
+        }
+    }
+
+    /// `v` as `digits` lowercase hex digits.
+    fn hex(&mut self, v: u64, digits: u32) {
+        for i in (0..digits).rev() {
+            let d = ((v >> (i * 4)) & 0xF) as u8;
+            self.push(&[if d < 10 { b'0' + d } else { b'a' + d - 10 }]);
         }
     }
 }

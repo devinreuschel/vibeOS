@@ -382,7 +382,8 @@ $(INITRD): $(HOSTLIB_DEPS) $(USER_STAMP)
 	    --add $(USER_OUT)/sh:/bin/sh \
 	    --add $(USER_OUT)/tests:/bin/tests \
 	    --add $(USER_OUT)/envcheck:/bin/envcheck \
-	    --add $(USER_OUT)/argcheck:/bin/argcheck
+	    --add $(USER_OUT)/argcheck:/bin/argcheck \
+	    --add $(USER_OUT)/fpcheck:/bin/fpcheck
 
 $(INITRD_INIT_FAULT): $(HOSTLIB_DEPS) $(USER_STAMP)
 	mkdir -p $(dir $@)

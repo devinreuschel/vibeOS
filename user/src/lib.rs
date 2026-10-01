@@ -7,7 +7,7 @@
 //! exits with status 101 ([`rt`]). The heap is [`alloc`]'s `#[global_allocator]`
 //! over `brk`: a program that names the `alloc` crate (`extern crate alloc;`)
 //! gets `Box`, `Vec` and `String`. Everything that names an architecture lives
-//! in the private `arch` module (`scripts/check_user_arch.py`).
+//! in the `arch` module (`scripts/check_user_arch.py`).
 
 #![no_std]
 #![allow(
@@ -19,7 +19,7 @@
 extern crate vibeos_user_mem;
 
 pub mod alloc;
-mod arch;
+pub mod arch;
 pub mod env;
 mod errno;
 pub mod io;
