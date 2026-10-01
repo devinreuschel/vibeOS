@@ -259,8 +259,7 @@ cmd = "VIBEOS_KTEST=cpu_hardening make test-kernel-smp4"
 [[line]]
 key = """
 the kernel VFS's `/dev/random` fed by virtio-rng, then `RDRAND`, and nothing else until the
-§13.10 CSPRNG (F134); no syscall reaches `/dev/random` until §10.4's A3 routes file syscalls
-through `Vfs` (F086)"""
+§13.10 CSPRNG (F134, F086)"""
 [[line.entry]]
 cmd = "VIBEOS_KTEST=dev_random_source make test-kernel"
 
@@ -324,7 +323,8 @@ cmd = "make test-forensics"
 key = """
 `make models` and Miri are green on the nightly job: every loom model passes and fails its
 weakened variant, Kani proves the buddy allocator and the §10.6 user-range check to their stated
-bounds, and Miri passes over the portable crate's host tests (§10.8)"""
+bounds, and Miri passes over the portable crate's host tests, and `make models` in a §10.9
+dev-host record (§10.8)"""
 [[line.entry]]
 job = { workflow = "nightly.yml", job = "models" }
 [[line.entry]]

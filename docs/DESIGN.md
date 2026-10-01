@@ -50,7 +50,7 @@ through.
 
 Each section lives in the file its row names and keeps its number, so `DESIGN §x.y` names §x.y wherever it is. `python3 scripts/doc_refs.py --where x.y` prints the file, and `make check` runs `scripts/doc_refs.py`, which fails on a `DESIGN §` or `ROADMAP §` citation that names no heading.
 
-On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch). Syscall ABI: [SYSCALL.md](SYSCALL.md). The Linux baseline, deliberate differences from it, and native interfaces: [LINUX.md](LINUX.md).
+On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch) and [VMCOREINFO.md](VMCOREINFO.md) (the kernel's VMCOREINFO note), each a format one build writes and another reads. Syscall ABI: [SYSCALL.md](SYSCALL.md). The Linux baseline, deliberate differences from it, and native interfaces: [LINUX.md](LINUX.md).
 
 ---
 
@@ -151,6 +151,10 @@ that sets it:
 - `ipi_init::set_slot_tid_hook` (the wake-inbox drain's slot-to-tid lookup,
   `thread_init::tid_of_slot`), set by `thread_init::init_bootstrap` before a second thread exists;
   unset, a drain leaves the inbox as it is.
+- `kalloc::set_release_context` and `kalloc::set_deferral` (a last put's release-context test,
+  `sync_init::may_release_here`, and the deferral sink, `work_init::defer_release`), and
+  `sync::set_gate_wait` (`OpGate::kill`'s sleep and wake, `sync::blocking_init::gate_sleep` and
+  `gate_wake`), set by `main.rs`'s `boot_rest` right after `sched_init::init`.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),
   the writeback threads (their wake and bounded wait), and the process layer (the OOM killer).
 

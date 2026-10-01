@@ -233,6 +233,11 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
 - `runq`, this CPU's ready FIFO (owner only, IRQs off)
 - `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `timer_mode`
+- `tail_prev`, the thread `switch_now` switched away from, for the switch tail
+  (`thread_init::finish_switch`) that runs next on this CPU; `dead_stack`, the stack of the thread
+  that exited here, parked until that tail runs; `stack_cache`, dead default-size stacks kept mapped
+  for this CPU's next spawns; and `dead_list`, the dead stacks awaiting unmap, which this CPU's
+  workqueue worker frees with IF=1 ([§4.5](MEMORY.md#45-kernel-virtual-address-allocator))
 - `kernel_rsp0`, which the context switch updates; `tables`, this CPU's `gdt::CpuTables` (opaque in `vibeos-core`), through whose `set_rsp0` it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
 - `syscall_scratch`: one word, the user RSP between `syscall` and the entry's stack switch, which
   copies it into the user frame. It is per CPU, not per thread, so it is valid only while IF=0; the
@@ -240,9 +245,11 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
   `iretq` frame in the thread's user frame ([section 5.10](INTERRUPTS.md#510-privilege-transitions)). It sits
   at the end of the owner-only part.
 - `remote`, this CPU's `PerCpuRemote` in a separate per-CPU array: `ticks`, `switches`, `runq_len`,
-  `ready`, `wake_inbox`, `apic_id`, and `as_cr3`, the root this CPU last loaded: an `AtomicU64` its
-  owner stores after each CR3 write and the root's free (`addr_space_init::SpaceCore`) reads. All are atomics; it is the
-  only per-CPU state another CPU reads.
+  `ready`, `wake_inbox`, `apic_id`, `as_cr3`, the root this CPU last loaded: an `AtomicU64` its
+  owner stores after each CR3 write and the root's free (`addr_space_init::SpaceCore`) reads, and
+  `stop_req`, `stopped` and `crash`, the stop primitive's request word, state and crash-register slot
+  ([DESIGN §2.5](INVARIANTS.md#25-panic-policy) step 1). All are atomics, 256 bytes in all, which
+  `vibeos::smp::per_cpu` const-asserts; it is the only per-CPU state another CPU reads.
   `wake_inbox`, a slot bitmap with a summary word (§7.6): a remote CPU sets a thread's bit and sends
   IPI `0xFD`. `ready` is the flag an AP sets last in bring-up
   ([section 7.4](#74-ap-bring-up-sequence)).
@@ -305,7 +312,7 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | Arch | State | Saved in | Switched by | Status |
 |---|---|---|---|---|
 | x86_64 | `rbx`, `rbp`, `r12`–`r15`, RSP, RIP | `Tcb.context` (`CpuContext`) | `switch_context` | switched |
-| x86_64 | RFLAGS | `CpuContext.rflags`; IF comes from `irq_nest` (`apply_if_on_resume`) | `switch_context` | switched |
+| x86_64 | RFLAGS | `CpuContext.rflags`; IF comes from `irq_nest` (`apply_if_on_resume`); a first-run thread starts at `irq_nest` + 1, so the trampoline runs `finish_switch` with IF=0 | `switch_context` | switched |
 | both | `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
 | x86_64 | user GPRs, RIP, RSP, RFLAGS, CS, SS, and the original syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](INTERRUPTS.md#510-privilege-transitions)), saved by every entry from ring 3 | the RSP0 switch, which gives each thread its own entry stack | switched: the syscall entry and every generated stub for a CS.RPL 3 frame save all 21 words of `UserFrame` at the top of the thread's kernel stack, and every return to ring 3 restores from it; `thread_init::spawn_user` writes a new thread's |
 | x86_64 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched, by the binding as built: `PerCpu.fp_owner` and `Tcb.fp_cpu`, whose transitions are `vibeos::fpu`. `syscall_init::switch_fpu` in `on_switch` saves a live state with `fp_save` and loads nothing; `vibeos_fp_user_return` runs with IF=0 after the syscall exit's `cli`, in `idt::exit_to_user` after a `cli`, and in a new thread's first return, which enters the syscall exit after its `cli`, and loads with `fp_load` when the registers hold another thread's state. The syscall entry and exit neither save nor restore it. A new TCB, and one `fill_tcb` reuses, starts with `fp_cpu` empty, and `thread_init::fp_invalidate` empties it for a write to `Tcb.fpu`. Every thread starts from `Fxsave::INITIAL`, the psABI image (FCW `0x037F`, MXCSR `0x1F80`, every register zero); `fork` copies the parent's saved state into the child (`syscall_init::fork_fp`), and `execve` writes `Fxsave::INITIAL` and empties `fp_cpu` (`syscall_init::exec_fp`), each in one IF=0 stretch. FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |

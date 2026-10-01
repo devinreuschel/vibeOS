@@ -68,13 +68,17 @@ Docs live in [`docs/`](docs/). The other docs in the root are the changelog, [AG
   - [PITFALLS.md](docs/PITFALLS.md) (§9): bugs already paid for once.
   - [BLOCK.md](docs/BLOCK.md) (§10), [PORTABILITY.md](docs/PORTABILITY.md) (§11) and
     [DEVICES.md](docs/DEVICES.md) (§12).
+  - [ARCH.md](docs/ARCH.md): the architecture seam map and the x86 audit, beside §11.
 - [ROADMAP.md](docs/ROADMAP.md): 40 phases in eight eras, from boot through self-hosting to a stable 1.0,
   all on free infrastructure, each with a goal, an exit gate, and per-part task lists; what money would
   add is a separate list of funded goals.
 - [VIBEFS.md](docs/VIBEFS.md): vibefs on-disk format (version field in that file). Not DESIGN.
+- [VMCOREINFO.md](docs/VMCOREINFO.md): the kernel's VMCOREINFO note, a format one build writes and
+  another build's core tool reads. Not DESIGN.
 - [SYSCALL.md](docs/SYSCALL.md): syscall ABI. Not DESIGN.
 - [LINUX.md](docs/LINUX.md): which Linux release "Linux's" means, deliberate differences from it, and
   native interfaces. Not DESIGN.
+- [RELEASING.md](docs/RELEASING.md): the maintainer's release steps.
 - [reviews/](docs/reviews/): the architecture, roadmap, and kernel reviews Phase 10 comes from,
   per-item plans in `reviews/issues/`, and the design reviews' decisions in `DESIGN_REVIEWS.md`.
 

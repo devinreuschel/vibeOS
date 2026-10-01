@@ -157,7 +157,7 @@ names, Linux values:
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
-| `EAGAIN` | 11 | `fork` with every process-table slot in use, zombies included (`limits::MAX_PROCS` is 256), or no pid free (pids and tids share one allocator, up to 32,767, then from 300), or the thread table has no free slot (ROADMAP §10.4, F037) |
+| `EAGAIN` | 11 | `fork` with every process-table slot in use, zombies included (`limits::MAX_PROCS` is 256), or no pid free (pids and tids share one allocator, up to 32,767, then from 300), or the thread table has no free slot (ROADMAP §10.4, F037); `read` of `/dev/random` or `/dev/urandom` when virtio-rng and `RDRAND` supply no byte (ROADMAP §10.12; until §13.10) |
 | `ENOMEM` | 12 | AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table (256 regions, `limits::MAX_REGIONS`, where Linux's `vm.max_map_count` allows 65,530; ROADMAP §10.4), a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4), `execve` argument buffers included |
 | `EACCES` | 13 | `open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys` |
 | `EFAULT` | 14 | bad user pointer / length |
@@ -167,7 +167,7 @@ names, Linux values:
 | `ENODEV` | 19 | a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4 |
 | `ENOTDIR` | 20 | |
 | `EISDIR` | 21 | |
-| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written |
+| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written; `open` or `execve` of the empty path (Linux: `ENOENT`); `open` with `O_TRUNC` of a `/proc` file |
 | `ENFILE` | 23 | `open` or `execve` with the system-wide open-file table full: 1024 open files, `limits::MAX_OPEN_FILES` |
 | `EMFILE` | 24 | per-process fd table full: 256 descriptors, `limits::MAX_FDS` (`open`, `dup`) |
 | `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit |
@@ -177,7 +177,7 @@ names, Linux values:
 | `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes. ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
 | `ENOTEMPTY` | 39 | defined; no syscall returns it |
-| `ELOOP` | 40 | `open` or `execve` through too many symbolic links |
+| `ELOOP` | 40 | `open` or `execve` through too many symbolic links, or a walk of more than 80 steps (`limits::MAX_WALK`) |
 | `EOPNOTSUPP` | 95 | defined; no syscall returns it. It is left for the cases Linux gives it, such as an extended-attribute namespace a mount refuses (ROADMAP §14.8) |
 
 <!-- gen_syscalls: end errno-table -->
@@ -189,17 +189,16 @@ Unknown numbers return `-ENOSYS`.
 The mapping is `vibeos::kerror`: each module error converts to one `KError`
 through its `From` impl, and the `KError` table generates §2 (ROADMAP §10.4).
 
-- `fork` near memory exhaustion: a kernel stack that cannot be allocated
-  returns `ENOMEM` and frees the clone, but the child's TCB box and the
-  boxed address space panic when the heap cannot grow, until ROADMAP
-  §10.4's fallible allocation (F010; ROADMAP §10.4)
+- `fork` near memory exhaustion returns `ENOMEM`: a kernel stack, TCB or
+  address-space slot that cannot be allocated frees what was taken
+  (F010; ROADMAP §10.4)
 
 ---
 
 ## 3. Syscalls
 
-`proc_init::dispatch_frame` looks the number up in the generated
-`syscall::x86_64::TABLE` and calls the row's handler, a method of
+`proc_init::dispatch_frame` looks the number up in the port's table
+(`SyscallAbi::table`, x86_64's generated into `crates/core/src/arch/x86_64/syscall.rs`) and calls the row's handler, a method of
 `syscall::Handlers` that takes each argument in its C type and returns
 `Result<usize, KError>`; dispatch encodes an error as `-errno`. One table,
 `crates/core/src/proc/syscalls.toml`, holds each call's number per
@@ -438,7 +437,8 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
 
 Each process (`proc_init::Proc`) has a 256-slot fd table (`limits::MAX_FDS`), a row allocated
 with the process table before `irq: enabled` (MEMORY.md §4.4). Fds 0, 1, and 2 are the console
-mux (serial and framebuffer).
+mux (serial and framebuffer). A 0x1E byte written to them prints as `?` on the serial console
+(docs/LINUX.md `console-rs-escape`).
 
 A file fd names a slot in one system-wide open-file table, the VFS's
 (`fs::Vfs`, 1024 entries, `limits::MAX_OPEN_FILES`), shared by every process with no
@@ -534,10 +534,6 @@ does not meet this yet:
 - a device or keyboard interrupt taken in ring 3 runs with the user GS
   base and halts (F004; ROADMAP §10.6)
 - the exit-path faults in §1 (F001, F007; ROADMAP §10.6)
-- a forked or spawned process's first ring-3 entry,
-  `syscall_init::first_return`, runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
-  reads `gs:[0]` at VA 0 at CPL 0 and halts (F006; ROADMAP §10.6)
-- a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)
 
 ---
 

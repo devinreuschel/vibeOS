@@ -31,7 +31,7 @@ per-architecture uapi (ROADMAP §13.10).
 | Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](INTERRUPTS.md#510-privilege-transitions) rule 1) | one 16-entry vector table ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) | §10.6, §11.3 |
 | Trap decode | pure half: a trap to a `TrapKind` (§5.2) | vector and error code | vector slot and `ESR_EL1` (§11.5) | §10.6, §11.3 |
 | Kernel stack-overflow report | port module | `#DF` on IST 1 (§5.1) | a stack test at every vector entry and a per-CPU overflow stack (§4.5, §11.5) | §11.3 |
-| Interrupt mask | trait (`InterruptMask`) | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
+| Interrupt mask | trait (`InterruptMask`); masking and unmasking are compiler barriers on every port (`asm!` without `nomem`) | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 (`ICC_PMR_EL1` writes, also barriers) | §10.3 |
 | Interrupt controller and IRQ identity | port module: finding the root controller, with the vector entry and the IPI send in their own rows; each controller is an `IrqChip` object (§5.4), not a seam trait | 8259, I/O APIC, and LAPIC MSI chips; a hwirq is an IDT vector (§5.3) | GICv2 or GICv3 distributor and redistributor chips, ITS or GICv2m; a hwirq is an INTID | §11.3 |
 | IPI send and its ordering | trait (`IpiSend`) | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
 | Timer and cycle counter | trait (`CycleCounter`) | TSC, or the HPET or ACPI PM timer as the clocksource (§6.4); LAPIC timer | `CNTVCT_EL0`; generic timer | §10.3, §11.3 |
