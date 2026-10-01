@@ -69,6 +69,19 @@ jobs:
         if: always()
         run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
 
+      # A failed run's guest cores (ROADMAP §10.7, TESTING.md §8.3): each
+      # failed boot's build/cores/<arch>-<tier>/<seq>-<label>/ holds core.zst,
+      # kernel.elf and qemu-argv.txt. This workflow names no secret
+      # (scripts/check_workflows.py, rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-x86_64-stress
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 90
+
       # The host CPU model and the guest's invariant-TSC bit, to the job
       # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
       - name: runner record
@@ -152,6 +165,19 @@ jobs:
         if: always()
         run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
 
+      # A failed run's guest cores (ROADMAP §10.7, TESTING.md §8.3): each
+      # failed boot's build/cores/<arch>-<tier>/<seq>-<label>/ holds core.zst,
+      # kernel.elf and qemu-argv.txt. This workflow names no secret
+      # (scripts/check_workflows.py, rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-x86_64-repeat-kernel
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 90
+
       # The host CPU model and the guest's invariant-TSC bit, to the job
       # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
       - name: runner record
@@ -234,6 +260,19 @@ jobs:
       - name: harness results summary
         if: always()
         run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
+
+      # A failed run's guest cores (ROADMAP §10.7, TESTING.md §8.3): each
+      # failed boot's build/cores/<arch>-<tier>/<seq>-<label>/ holds core.zst,
+      # kernel.elf and qemu-argv.txt. This workflow names no secret
+      # (scripts/check_workflows.py, rule_no_core_upload_with_secrets).
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-x86_64-repeat-kernel-smp4
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 90
 
       # The host CPU model and the guest's invariant-TSC bit, to the job
       # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
@@ -333,6 +372,84 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: runner-nightly-canary
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-26.04
+    # 12 targets of 900 s each, about 3 hours, and the build; 330 is the
+    # most a reserved lane allows (DESIGN §8.6).
+    timeout-minutes: 300
+    # Scheduled lane 5 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out.
+    concurrency:
+      group: sched-lane-5
+      queue: max
+    # L1232's fuzz campaign (ROADMAP §10.2, P10-S97): every byte-slice
+    # parser's cargo-fuzz target on the pinned toolchain; `make fuzz`
+    # refuses any cargo-fuzz but the version it pins.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: rust-src
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-fuzz
+            target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock', 'tests/fuzz/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-fuzz-
+
+      - name: install cargo-fuzz
+        run: |
+          if [ "$(cargo fuzz --version 2>/dev/null)" != "cargo-fuzz 0.13.2" ]; then
+            cargo install cargo-fuzz --locked --version 0.13.2
+          fi
+
+      - name: make fuzz FUZZ_TIME=900
+        run: make fuzz FUZZ_TIME=900
+
+      # A crashing input, for the fix's regression corpus (TESTING.md §8.1).
+      - name: upload fuzz artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: build/fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      # The host CPU model, to the job summary and build/runner.json
+      # (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-fuzz
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-fuzz
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90
