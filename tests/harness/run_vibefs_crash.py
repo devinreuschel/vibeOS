@@ -81,6 +81,14 @@ class CrashCheckError(HarnessError):
     line. What a planted defect trips; any other `HarnessError` is not."""
 
 
+def is_sync_fail(e: HarnessError) -> bool:
+    """`e` stopped the run on the guest's `sync fail` line. Read from the
+    failing line, which the error quotes after `in:`, not from the signature
+    that matched it: the registry row `vibeOS: vibefs: sync fail <err>` is
+    reported as its prefix, with a trailing space."""
+    return f"in: {SYNC_FAIL!r}"[:-1] in str(e)
+
+
 @dataclass
 class Tools:
     mkfs: str
@@ -154,7 +162,7 @@ def _one_round(env: EnvConfig, tools: Tools, rng: random.Random, round: int) -> 
                 )
             except HarnessError as e:
                 results.current().add_boot(qemu_argv(cfg, None), cfg, None)
-                if f"panic signature {SYNC_FAIL!r}" in str(e):
+                if is_sync_fail(e):
                     raise CrashCheckError(str(e)) from e
                 raise
             results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
