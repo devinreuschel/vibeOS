@@ -90,6 +90,16 @@ impl Vfs {
             .map_or(0, |d| u32::from(d.refs))
     }
 
+    /// How many dentries the cache cannot evict: those in use with a
+    /// holder (a child, a mount on it, the superblock for a root, or a held
+    /// path or reference).
+    pub fn dentries_held(&self) -> usize {
+        self.dentries
+            .iter()
+            .filter(|d| d.used && d.refs != 0)
+            .count()
+    }
+
     /// The path from `base`'s root (the namespace root when none) to the
     /// directory `at`, into `out`, crossing mountpoints; its length.
     /// `NotFound` when a dentry on the way lost its name, `NameTooLong`

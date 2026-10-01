@@ -902,7 +902,7 @@ limitations.
 **Unlocks.** Loading binaries. A userspace that persists. Configuration.
 
 **Exit gate**
-- [ ] mount a FAT32 image and `ls`, `cat`, `mkdir`, `rm`, `cp` behave correctly. Reopened by the kernel review (F058, F126); lands in §10.4, and its proof mounts from a thread started with `spawn`'s 16 KiB stack.
+- [x] mount a FAT32 image and `ls`, `cat`, `mkdir`, `rm`, `cp` behave correctly; the proof mounts from a thread started with `spawn`'s 16 KiB stack (F058, F126)
 - [x] host tests write an image through the `vibeos-core` FAT code and require host `fsck.fat -n` to report it clean, and fail when `fsck.fat` is not installed unless `VIBEOS_ALLOW_MISSING_TOOLS=1` is set, which skips that check and prints it (F143)
 - [x] `/dev`, `/proc`, and `/tmp` populated by their respective filesystems in the `Vfs` mount table, which in-guest tests and the kernel shell's `ls` reach (F056, F086)
 - [ ] vibefs survives injected power loss during a write, verified by a crash-consistency test. Reopened by the kernel review (F014, F080); lands in §10.2 and §10.11.
@@ -925,7 +925,7 @@ limitations.
 - [x] FAT chain walking with a cluster cache
 - [x] directory entry parsing, including ASCII long file names and their checksum validation (F054)
 - [x] file read across cluster boundaries
-- [ ] `readdir`, `stat`, timestamp conversion. Reopened by the kernel review (F123); lands in §10.4.
+- [x] `readdir`, `stat`, timestamp conversion (F123).
 - [x] the on-disk structure parsing in the library half, host-tested against a generated image
 
 ### 8.3 FAT32 write
@@ -957,7 +957,7 @@ limitations.
 
 ### 8.6 File API and shell
 - [x] kernel-side open, read, write, seek, close, stat, readdir, mkdir, unlink, rename, symlink, link, truncate
-- [ ] shell commands: `ls -l`, `cat`, `cp`, `mv`, `rm -r`, `mkdir -p`, `touch`, `stat`, `df`, `sync`. Reopened by the kernel review (F059, F126); lands in §10.4 and §10.11.
+- [x] shell commands: `ls -l`, `cat`, `cp`, `mv`, `rm -r`, `mkdir -p`, `touch`, `stat`, `df`, `sync` (F059, F126).
 - [ ] kernel shell commands `mount` and `umount`. Reopened by the kernel review (F058, F060, F126); lands in §10.2 and §10.4.
 - [x] tab completion over the current directory, which is disproportionately useful when debugging by hand
 - [x] an initial ramdisk image built by the Makefile and mounted at boot, so there is a root filesystem before block drivers are trustworthy
@@ -1345,11 +1345,11 @@ the work its claim rests on has landed is the failure KERNEL_REVIEW.md §5 found
 - [ ] `umount` keeps volume state consistent: `Vfs::umount` dispatches through the mount's filesystem operations, never by trying each backend in turn; after the busy checks the box above orders first, it returns `EBUSY` while an open file, a working directory, or a root is reached through the mount or one of its submounts, and never for users of the same superblock through another mount; when the last mount of a superblock goes, the superblock is synced, and it releases the volume instance D2 registers at its last reference (DESIGN §2.11), never before the unmount succeeds. In-guest, on a thread started with `spawn`'s 16 KiB stack: a failed unmount leaves the mount usable, and a remount after a clean unmount succeeds (F060)
 - [x] tmpfs keeps written data when a file's extent moves: `tmp_ensure` writes the old run's dirty `tmp_cache` pages back to `tmp_back` before it copies the run, and `Cache::invalidate`, which drops pages without writeback, runs only for runs that unlink or shrink frees, as its contract comment then says; a host test writes file A, creates B beside it, grows A by write and by truncate, and reads A's first bytes back (F066)
 - [x] `open` reserves the descriptor and the open-file slot before it creates or truncates anything; an in-guest test calls `open(O_TRUNC)` with the open-file table full and gets `ENFILE`, and the file's size is unchanged (F057)
-- [ ] `rm -r` in the `kernel_shell` build walks with a bounded explicit stack, builds child paths with a length check that returns `NameTooLong`, and removes every entry, not the first 16; an in-guest test runs it on a 20-entry, 8-deep tree (F126)
-- [ ] `ls` in the `kernel_shell` build lists a FAT or vibefs subdirectory: `file_init::readdir` treats `NotSupp` as not kernfs; an in-guest test runs `ls /etc` (F126)
-- [ ] `mount` in the `kernel_shell` build reuses the pinned dentry of an already-mounted path in `FileApi::mount_fs`; an in-guest test runs 64 `mount`s of one path from a thread started with `spawn`'s 16 KiB stack (F126)
+- [x] `rm -r` in the `kernel_shell` build walks with a bounded explicit stack, builds child paths with a length check that returns `NameTooLong`, and removes every entry, not the first 16; an in-guest test runs it on a 20-entry, 8-deep tree (F126)
+- [x] `ls` in the `kernel_shell` build lists a FAT or vibefs subdirectory through the File API's `readdir`, which replaced `vfs_ls_snap`; an in-guest test runs `ls /etc` (F126)
+- [x] `mount` in the `kernel_shell` build reuses the pinned dentry of an already-mounted path in `FileApi::mount_fs`; an in-guest test runs 64 `mount`s of one path from a thread started with `spawn`'s 16 KiB stack (F126)
 - [x] `unlink_path` drops the name from the resolved parent, not `/` (F126)
-- [ ] FAT timestamps: `fat_datetime` counts years from 1980 with the Gregorian leap rule, `fat_to_unix` is its inverse, and a host test round-trips every day from 1980 through 2107; `FatVol::now` and `Vfs::now` follow `time_init::unix_time_s()` instead of staying 0 (F123)
+- [x] FAT timestamps: `fat_datetime` counts years from 1980 with the Gregorian leap rule, `fat_to_unix` is its inverse, and a host test round-trips every day from 1980 through 2107; `FatVol::now` and `Vfs::now` follow `time_init::unix_time_s()` instead of staying 0 (F123)
 - [ ] driver and volume state as instances owned by their device's registry entry (DESIGN §12.1), so a second disk is a second instance and no driver module keeps a list of them (D2)
 - [x] a disk-backed FAT mount fits a 16 KiB kernel stack: `fat_init::mount_dev` builds `FatVol` in its volume instance instead of moving it by value, and per-call cluster buffers move into per-volume storage under the volume lock; an in-guest test mounts a FAT image on `vda` from a thread started with `spawn`'s 16 KiB stack; the same thread then writes 64 KiB across cluster boundaries to a file on that volume through the File API and reads it back, while a `kernel_tests` hook sends this CPU a self-IPI on the virtio-blk vector whenever the write path enters the block cache with IF=1, so a top half runs on top of the path, and §10.2's stack measurement finds every stack within DESIGN §4.5's budget; it lands after §10.2's stack-measurement box (F058)
 - [ ] one registry of counted block-device handles (`BlockRef`, DESIGN §12.1), keyed by name and by a 64-bit id never reused within a boot, partitions included as children of their disk: the block cache, `part_init`, FAT, vibefs, and devfs block nodes hold a `BlockRef` instead of matching `DEV_RAM0` and `DEV_VDA`, the cache keys its pages by that id, a device's name is an owned array of up to 32 bytes (Linux's `DISK_NAME_LEN`) instead of a `&'static str`, and vibefs no longer treats an unknown device id as `vda`; a host test unregisters a partition while a `BlockRef` to it is held, and I/O through the handle returns `Gone` (DESIGN §2.11 rule 3's gate), a lookup by name no longer finds it, and a new registration gets a new id; an in-guest test mounts a FAT32 partition of `vda` by its partition name and reads `/dev/vdap1` through `Vfs`, from a thread started with `spawn`'s 16 KiB stack, never the registry's; it lands with or after the FAT stack-frame box above; it lands after the counted-object box above (D2, F081)

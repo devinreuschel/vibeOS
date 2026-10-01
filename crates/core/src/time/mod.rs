@@ -567,6 +567,47 @@ fn days_from_civil(mut y: i32, m: i32, d: i32) -> i64 {
     era as i64 * 146097 + doe - 719468
 }
 
+/// A civil (proleptic Gregorian, UTC) date and time of day.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Civil {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub min: u8,
+    pub sec: u8,
+}
+
+/// The civil date and time of `secs` unix seconds: the inverse of
+/// [`unix_from_civil`]. Howard Hinnant's `civil_from_days`.
+pub fn civil_from_unix(secs: u64) -> Civil {
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (year, month, day) = civil_from_days(days);
+    Civil {
+        year,
+        month,
+        day,
+        hour: (rem / 3600) as u8,
+        min: (rem / 60 % 60) as u8,
+        sec: (rem % 60) as u8,
+    }
+}
+
+/// `(year, month, day)` of day `z` since 1970-01-01, for `0 <= z`.
+fn civil_from_days(z: i64) -> (i32, u8, u8) {
+    let z = z + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y as i32, m, d)
+}
+
 pub const fn bcd_to_bin(v: u8) -> u8 {
     (v & 0x0F) + ((v >> 4) & 0x0F) * 10
 }
@@ -646,6 +687,44 @@ mod tests {
         assert_eq!(unix_from_civil(1970, 13, 1, 0, 0, 0), None);
         assert_eq!(bcd_to_bin(0x59), 59);
         assert_eq!(bcd_to_bin(0x00), 0);
+    }
+
+    /// Every day from 1970 through 2200, at a varying time of day, maps
+    /// back to the seconds it came from.
+    #[test]
+    fn civil_from_unix_inverts_unix_from_civil() {
+        let last = unix_from_civil(2200, 12, 31, 0, 0, 0).unwrap() / 86400;
+        let mut prev: Option<Civil> = None;
+        for day in 0..=last {
+            let t = day * 86400 + (day * 7919) % 86400;
+            let c = civil_from_unix(t);
+            assert_eq!(
+                unix_from_civil(c.year, c.month, c.day, c.hour, c.min, c.sec),
+                Some(t),
+                "{c:?}"
+            );
+            if let Some(p) = prev {
+                assert!(
+                    (p.year, p.month, p.day) < (c.year, c.month, c.day),
+                    "{p:?} {c:?}"
+                );
+            }
+            prev = Some(c);
+        }
+        assert_eq!(
+            civil_from_unix(0),
+            Civil {
+                year: 1970,
+                month: 1,
+                day: 1,
+                hour: 0,
+                min: 0,
+                sec: 0
+            }
+        );
+        let end = civil_from_unix(last * 86400 + 86399);
+        assert_eq!((end.year, end.month, end.day), (2200, 12, 31));
+        assert_eq!((end.hour, end.min, end.sec), (23, 59, 59));
     }
 
     #[test]

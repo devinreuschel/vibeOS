@@ -81,12 +81,22 @@ pub fn init(root_is_fat: bool) {
     }
 }
 
-/// Sleeps: thread context only (DESIGN §2.1).
-impl<T: Send> Guarded<T> for BlockingMutex<T> {
-    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+/// The VFS lock, as the File API takes it: the clock is read before the
+/// lock and stamps `Vfs::now`. Sleeps: thread context only (DESIGN §2.1).
+impl Guarded<Vfs> for BlockingMutex<Vfs> {
+    fn with<R>(&self, f: impl FnOnce(&mut Vfs) -> R) -> R {
+        let t = now();
         let mut g = self.lock();
+        g.now = t;
         f(&mut g)
     }
+}
+
+/// The wall clock in unix seconds, which the filesystems stamp times
+/// with; 0 without an RTC (`time_init::unix_time_s`), which FAT records as
+/// 1980-01-01.
+pub(crate) fn now() -> u64 {
+    crate::time_init::unix_time_s().unwrap_or(0)
 }
 
 pub fn live() -> bool {
@@ -141,8 +151,7 @@ fn hooks() -> Hooks {
 /// never calls a backend: every `Vfs` method that reaches one runs
 /// through [`api`].
 pub fn with<R>(f: impl FnOnce(&mut Vfs) -> R) -> R {
-    let mut g = VFS.get().lock();
-    f(&mut g)
+    VFS.get().with(f)
 }
 
 /// A reference to the volume instance of the filesystem mounted at `path`
