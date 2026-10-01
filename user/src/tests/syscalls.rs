@@ -14,7 +14,6 @@ pub fn run(t: &mut Runner) {
     t.case("write_count", write_count);
     t.case("getpid_nonzero", getpid_nonzero);
     t.case("write_ebadf", write_ebadf);
-    t.case("write_efault", write_efault);
     t.case("dup_write", dup_write);
 }
 
@@ -42,23 +41,6 @@ fn write_ebadf() -> Outcome {
     } else {
         Outcome::Fail("write to fd 3 not EBADF")
     }
-}
-
-/// NULL, a kernel address and an unmapped user page, 8 bytes each, then a
-/// length of `1 << 63`: each `EFAULT`.
-fn write_efault() -> Outcome {
-    let bad: [(u64, usize, &'static str); 4] = [
-        (0, 8, "NULL not EFAULT"),
-        (0xFFFF_8000_0000_1000, 8, "kernel pointer not EFAULT"),
-        (0x7000_0000, 8, "unmapped page not EFAULT"),
-        (BANNER.as_ptr() as u64, 1 << 63, "huge length not EFAULT"),
-    ];
-    for (addr, len, why) in bad {
-        if sys::write(1, addr as *const u8, len) != Err(Errno::EFAULT) {
-            return Outcome::Fail(why);
-        }
-    }
-    Outcome::Ok
 }
 
 /// `dup(1)` is fd 3, a write through it lands, and it closes.

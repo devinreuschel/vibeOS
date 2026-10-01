@@ -11,10 +11,19 @@ architecture, its arguments' C types in order, and its pointer declarations
 - `crates/core/src/arch/x86_64/syscall.rs`: the same for x86_64, in its
   port's pure half, which `SyscallAbi::dispatch` reaches (PORTABILITY
   §11.1);
-- `user/src/arch/x86_64/sys.rs`: the numbers, `Sys::from_name`, and one
-  stub per row with an x86_64 number;
+- `user/src/arch/x86_64/sys.rs`: the numbers, `Sys::from_name`, one stub
+  per row with an x86_64 number, and `CALLS`, each row's errors, in-guest
+  attributions and pointer declarations for `/bin/tests`' `errno_matrix`
+  and `efault_matrix`, with `MAX_PROCS` from `crates/core/src/limits.rs`
+  and `USER_END` and `USER_MAP_END` from `crates/core/src/mm/paging.rs`;
 - the block between `<!-- gen_syscalls: begin syscall-table -->` and
-  `<!-- gen_syscalls: end syscall-table -->` in docs/SYSCALL.md §3.
+  `<!-- gen_syscalls: end syscall-table -->` in docs/SYSCALL.md §3, whose
+  `errors` column lists each row's `errors`.
+
+Each row's `errors` must name `KError` rows, and each `ktest` attribution
+an errno of its row's `errors` and an in-guest test registered under
+`src/` (`test("<name>", …)`); a row with a pointer it reads or writes
+lists `EFAULT`.
 
 From the `errno_table! { … }` block of `crates/core/src/kerror.rs` (ROADMAP
 §10.4, C-KERROR), one row per line, `Variant = N, "ENAME", "Used text";`:
@@ -51,6 +60,11 @@ X86_OUT = Path("crates/core/src/arch/x86_64/syscall.rs")
 USER_OUT = Path("user/src/arch/x86_64/sys.rs")
 SYSCALL_MD = Path("docs/SYSCALL.md")
 KERROR = Path("crates/core/src/kerror.rs")
+LIMITS = Path("crates/core/src/limits.rs")
+PAGING = Path("crates/core/src/mm/paging.rs")
+KTEST_SRC = Path("src")
+# An in-guest test's registration (C-SUITES): `test("<name>", <fn>)`.
+KTEST_REG = re.compile(r'\btest\(\s*"([A-Za-z0-9_.-]+)"')
 USER_ERRNO_OUT = Path("user/src/errno.rs")
 
 MAX_ARGS = 6
@@ -80,7 +94,9 @@ RUST_KEYWORDS = frozenset(
     "unsized virtual yield".split()
 )
 NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
-ROW_KEYS = frozenset(("name", "x86_64", "aarch64", "args", "aarch64_order", "unsafe", "note"))
+ROW_KEYS = frozenset(
+    ("name", "x86_64", "aarch64", "args", "aarch64_order", "unsafe", "note", "errors", "ktest")
+)
 ARG_KEYS = frozenset(("name", "type", "ptr", "len", "size", "dir", "null", "when", "unread"))
 
 # The table's types, emitted as they are into the kernel table, so the
@@ -273,6 +289,10 @@ class Row:
     aarch64_order: tuple[int, ...]  # register i holds args[aarch64_order[i]]
     unsafe: str
     note: str
+    # Every errno the handler returns (SYSCALL.md §3), and the ones only a
+    # kernel fault produces, each with the in-guest test that provokes it.
+    errors: tuple[str, ...] = ()
+    ktest: tuple[tuple[str, str], ...] = ()
 
     @property
     def variant(self) -> str:
@@ -296,6 +316,10 @@ class ErrnoRow:
 class Table:
     rows: list[Row] = field(default_factory=list)
     errno: list[ErrnoRow] = field(default_factory=list)
+    # The in-guest tests registered under `src/` (`check_refs`).
+    ktests: frozenset[str] = frozenset()
+    # `limits::MAX_PROCS`, and paging's `USER_END` and `USER_MAP_END`.
+    consts: dict[str, int] = field(default_factory=dict)
 
 
 def parse_ctype(text: str, where: str) -> CType:
@@ -459,10 +483,90 @@ def parse(text: str) -> Table:
         note = raw.get("note", "")
         if not isinstance(unsafe, str) or not isinstance(note, str):
             raise TableError(f"{name}: unsafe and note are strings")
+        errors, ktest = parse_errors(raw, name, args)
         table.rows.append(
-            Row(name, args, nrs["x86_64"], nrs["aarch64"], order, unsafe, note.strip())
+            Row(
+                name,
+                args,
+                nrs["x86_64"],
+                nrs["aarch64"],
+                order,
+                unsafe,
+                note.strip(),
+                errors,
+                ktest,
+            )
         )
     return table
+
+
+def parse_errors(
+    raw: dict[str, Any], name: str, args: tuple[Arg, ...]
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """A row's `errors` list and its `ktest` attributions."""
+    errors = raw.get("errors")
+    if not isinstance(errors, list) or not all(
+        isinstance(e, str) and re.fullmatch(r"E[A-Z0-9]+", e) for e in errors
+    ):
+        raise TableError(f"{name}: errors is a list of errno names, such as \"EBADF\"")
+    if len(set(errors)) != len(errors):
+        raise TableError(f"{name}: errors repeats an errno")
+    reads = any(a.kind in PTR_KINDS for a in args)
+    if reads and "EFAULT" not in errors:
+        raise TableError(f"{name}: a row with a pointer it copies through lists EFAULT")
+    ktest = raw.get("ktest", {})
+    if not isinstance(ktest, dict) or not all(
+        isinstance(v, str) and v for v in ktest.values()
+    ):
+        raise TableError(f"{name}: ktest maps an errno to the in-guest test that provokes it")
+    for e in ktest:
+        if e not in errors:
+            raise TableError(f"{name}: ktest attributes {e}, which errors does not list")
+    return tuple(errors), tuple(sorted(ktest.items()))
+
+
+def ktest_names(root: Path) -> frozenset[str]:
+    """Every in-guest test registered in a `.rs` file under `root/src`."""
+    names: set[str] = set()
+    for path in sorted((root / KTEST_SRC).rglob("*.rs")):
+        names.update(KTEST_REG.findall(path.read_text(encoding="utf-8")))
+    return frozenset(names)
+
+
+def read_const(root: Path, path: Path, name: str, pattern: str) -> int:
+    """The integer `pattern`'s one group matches in `root/path`."""
+    m = re.search(pattern, (root / path).read_text(encoding="utf-8"), re.M)
+    if m is None:
+        raise TableError(f"{path}: no {name}")
+    return int(m.group(1).replace("_", ""), 0)
+
+
+def load_consts(root: Path) -> dict[str, int]:
+    """The constants `CALLS`' readers need, from the kernel's sources."""
+    return {
+        "MAX_PROCS": read_const(
+            root, LIMITS, "MAX_PROCS", r"^pub const MAX_PROCS: usize = ([0-9_]+);"
+        ),
+        "USER_END": read_const(
+            root, PAGING, "USER_END", r"^pub const USER_END: u64 = (0x[0-9A-Fa-f_]+);"
+        ),
+        "USER_MAP_END": read_const(
+            root, PAGING, "USER_MAP_END", r"assert!\(USER_MAP_END == (0x[0-9A-Fa-f_]+)\)"
+        ),
+    }
+
+
+def check_refs(table: Table) -> None:
+    """Each row's errnos are `KError` rows, and each attribution names a
+    registered in-guest test."""
+    known = {r.name for r in table.errno}
+    for r in table.rows:
+        for e in r.errors:
+            if e not in known:
+                raise TableError(f"{r.name}: errors names {e}, which KError lacks")
+        for e, test in r.ktest:
+            if test not in table.ktests:
+                raise TableError(f"{r.name}: ktest {e} names {test!r}, no registered in-guest test")
 
 
 # ----------------------------------------------------------- errno table
@@ -1045,8 +1149,102 @@ def render_user(table: Table) -> str:
             out += rust_list("        ", f"syscall{len(r.args)}(", sc_args, ")", "")
             out.append("    })")
         out.append("}")
+    out += render_calls(table, rows)
     out.append("")
     return "\n".join(out)
+
+
+def rust_hex(v: int) -> str:
+    """`v` as a Rust hex literal in groups of four digits."""
+    h = f"{v:016X}"
+    return "0x" + "_".join(h[i : i + 4] for i in range(0, 16, 4))
+
+
+def render_calls(table: Table, rows: list[Row]) -> list[str]:
+    """`CALLS` and its types, for `/bin/tests`' matrices (ROADMAP §10.5)."""
+    c = table.consts
+    out = [
+        "",
+        "/// `limits::MAX_PROCS`: the process table's slots, zombies included.",
+        f"pub const MAX_PROCS: usize = {c['MAX_PROCS']};",
+        "/// The user canonical half's exclusive end (DESIGN §4.1).",
+        f"pub const USER_END: u64 = {rust_hex(c['USER_END'])};",
+        "/// The exclusive end of what a user mapping may cover (C-USERMAPEND).",
+        f"pub const USER_MAP_END: u64 = {rust_hex(c['USER_MAP_END'])};",
+        "",
+        "/// How the kernel copies through a pointer argument (SYSCALL.md §3).",
+        "#[derive(Clone, Copy, Debug, PartialEq, Eq)]",
+        "pub enum PtrKind {",
+        "    /// A buffer whose length another argument holds.",
+        "    Buf,",
+        "    /// A fixed number of bytes.",
+        "    Fixed,",
+        "    /// A NUL-terminated string the kernel reads.",
+        "    Cstr,",
+        "    /// A NULL-terminated array of C strings the kernel reads.",
+        "    Strvec,",
+        "}",
+        "",
+        "/// One declared pointer argument.",
+        "#[derive(Clone, Copy, Debug, PartialEq, Eq)]",
+        "pub struct Ptr {",
+        "    /// Its register index.",
+        "    pub arg: usize,",
+        "    /// Its name.",
+        "    pub name: &'static str,",
+        "    /// How the kernel copies through it.",
+        "    pub kind: PtrKind,",
+        "    /// Whether the kernel writes through it (`dir = \"out\"`).",
+        "    pub out: bool,",
+        "    /// Whether NULL is valid and copies nothing.",
+        "    pub nullable: bool,",
+        "    /// The register index of a `Buf`'s length.",
+        "    pub len_from: Option<usize>,",
+        "    /// A `Fixed` pointer's size in bytes.",
+        "    pub size: usize,",
+        "}",
+        "",
+        "/// One call's row: its errors and its declared pointers.",
+        "#[derive(Clone, Copy, Debug, PartialEq, Eq)]",
+        "pub struct Call {",
+        "    /// The call.",
+        "    pub sys: Sys,",
+        "    /// Every errno its handler returns (SYSCALL.md §3).",
+        "    pub errors: &'static [Errno],",
+        "    /// The errnos only a kernel fault produces, each with the in-guest",
+        "    /// test that provokes it.",
+        "    pub ktest: &'static [(Errno, &'static str)],",
+        "    /// Its pointer arguments, but those the kernel does not read yet.",
+        "    pub ptrs: &'static [Ptr],",
+        "}",
+        "",
+        "/// Every row with an x86_64 number, in table order.",
+        "#[rustfmt::skip]",
+        "pub const CALLS: &[Call] = &[",
+    ]
+    for r in rows:
+        errs = ", ".join(f"Errno::{e}" for e in r.errors)
+        kt = ", ".join(f'(Errno::{e}, "{t}")' for e, t in r.ktest)
+        out += [
+            "    Call {",
+            f"        sys: Sys::{r.variant},",
+            f"        errors: &[{errs}],",
+            f"        ktest: &[{kt}],",
+            "        ptrs: &[",
+        ]
+        for i, a in enumerate(r.args):
+            if a.kind not in PTR_KINDS:
+                continue
+            kind = a.kind[:1].upper() + a.kind[1:]
+            len_from = f"Some({a.len_from})" if a.len_from >= 0 else "None"
+            out.append(
+                f'            Ptr {{ arg: {i}, name: "{a.name}", kind: PtrKind::{kind}, '
+                f"out: {str(a.dir == 'out').lower()}, nullable: {str(a.nullable).lower()}, "
+                f"len_from: {len_from}, size: {a.size} }},"
+            )
+        out += ["        ],", "    },"]
+    out.append("];")
+    return out
 
 
 # ------------------------------------------------------------------ docs
@@ -1065,6 +1263,14 @@ def md_ptr(r: Row, a: Arg) -> str:
     return f"`{a.name}`: {what}{null}, {a.when}"
 
 
+def md_errors(r: Row) -> str:
+    """The errors cell: each errno, those only a kernel fault produces
+    followed by the in-guest test that provokes them."""
+    by = dict(r.ktest)
+    cells = [f"`{e}`" + (f" (`{by[e]}`)" if e in by else "") for e in r.errors]
+    return ", ".join(cells) or "—"
+
+
 def c_decl(a: Arg) -> str:
     """`a` as its C declaration: `char *buf`, `size_t count`."""
     sep = "" if a.ty.is_ptr else " "
@@ -1073,8 +1279,8 @@ def c_decl(a: Arg) -> str:
 
 def render_md(table: Table) -> str:
     out = [
-        "| x86_64 | aarch64 | name | arity | arguments | pointer arguments | notes |",
-        "|---:|---:|------|------:|-----------|-------------------|-------|",
+        "| x86_64 | aarch64 | name | arity | arguments | pointer arguments | errors | notes |",
+        "|---:|---:|------|------:|-----------|-------------------|--------|-------|",
     ]
     for r in table.rows:
         args = ", ".join(f"`{c_decl(a)}`" for a in r.args) or "—"
@@ -1086,6 +1292,7 @@ def render_md(table: Table) -> str:
             str(len(r.args)),
             args,
             ptrs,
+            md_errors(r),
             r.note or "—",
         ]
         out.append("| " + " | ".join(cells) + " |")
@@ -1130,6 +1337,9 @@ def generate(text: str, root: Path = ROOT) -> dict[Path, str]:
     """Every output's text, by path relative to `root`, from table `text`."""
     table = parse(text)
     table.errno = load_errno_table(root / KERROR)
+    table.ktests = ktest_names(root)
+    check_refs(table)
+    table.consts = load_consts(root)
     outputs: dict[Path, str] = {}
     for em in EMITTERS:
         body = em.render(table)

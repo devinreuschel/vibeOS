@@ -1142,6 +1142,54 @@ class TestKtestProtocol(unittest.TestCase):
             check_ktest_output(lines, ISA_DEBUG_FAIL)
         self.assertIn("isa-debug-exit", str(cm.exception))
 
+    def test_counter_other_prefix(self) -> None:
+        """`RunCounter` and `KtestDeadlines` count any protocol of the ktest
+        form: here unframed `vibeOS: xtest:` lines, which the ktest parse
+        ignores."""
+        from tests.harness.harness import (
+            KTEST_MESSAGES,
+            HarnessError,
+            KtestDeadlines,
+            Protocol,
+            RunCounter,
+            parse_ktest_line,
+        )
+
+        proto = Protocol("xtest", "vibeOS: xtest: ", frame.USER)
+        lines = [
+            "vibeOS: xtest: begin 2",
+            "vibeOS: xtest: run a 2000",
+            "vibeOS: xtest: ok a",
+            "vibeOS: xtest: run b 10000",
+            "vibeOS: xtest: skip b: why",
+            "vibeOS: xtest: end",
+        ]
+        self.assertIsNone(parse_ktest_line(lines[0]))
+        self.assertIsNone(parse_ktest_line(K(lines[0]), proto))
+        count = RunCounter()
+        d = KtestDeadlines(60.0, 1.0, proto)
+        d.start(0.0)
+        deadlines = []
+        for i, ln in enumerate(lines):
+            k = parse_ktest_line(ln, proto)
+            assert k is not None
+            count.feed(k)
+            deadlines.append(d.on_line(ln, float(i)))
+        count.check_count()
+        self.assertEqual(count.runs, ["a", "b"])
+        self.assertEqual(count.skips, {"b": "why"})
+        self.assertEqual(deadlines[1], 1.0 + 2.0 + 5.0)
+        short = RunCounter({**KTEST_MESSAGES, "count": "xtest count {results} != {n}"})
+        k = parse_ktest_line("vibeOS: xtest: begin 3", proto)
+        assert k is not None
+        short.feed(k)
+        with self.assertRaisesRegex(HarnessError, "^xtest count 0 != 3$"):
+            short.check_count()
+        hung = KtestDeadlines(60.0, 1.0, proto)
+        hung.on_line(lines[0], 0.0)
+        hung.on_line(lines[1], 1.0)
+        self.assertTrue(hung.hung_message().startswith("xtest hung in a: no result"))
+
 
 class TestKtestLineParse(unittest.TestCase):
     """`parse_ktest_line`: one kind per protocol line, kernel lines only."""

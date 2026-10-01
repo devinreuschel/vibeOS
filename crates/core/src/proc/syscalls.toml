@@ -22,6 +22,13 @@
 #   unsafe    why the user stub is `unsafe` beyond the pointers the kernel
 #             writes through
 #   note      the notes cell of SYSCALL.md §3
+#   errors    every errno the handler returns, audited against it and its
+#             callees: SYSCALL.md §3's errors column, and the pairs
+#             `/bin/tests`' `errno_matrix` provokes (ROADMAP §10.5); a row
+#             with a pointer it copies through lists `EFAULT`
+#   ktest     `{ ENAME = "<test>" }`: an errno of `errors` that only a kernel
+#             fault produces (a device error, a failed kernel allocation),
+#             with the registered in-guest test that provokes it instead
 #
 # An argument: `name`, and `type`, one of `int`, `unsigned int`, `long`,
 # `unsigned long`, `size_t`, `off_t`, `pid_t`, `umode_t`, or a pointer
@@ -46,6 +53,8 @@ args = [
   { name = "buf", type = "char *", ptr = "buf", len = "count", dir = "out", when = "after the `fd` lookup" },
   { name = "count", type = "size_t" },
 ]
+errors = ["EBADF", "EFAULT", "EISDIR", "EIO"]
+ktest = { EIO = "vblk_bad_sector" }
 note = ""
 
 [[syscall]]
@@ -57,6 +66,8 @@ args = [
   { name = "buf", type = "const char *", ptr = "buf", len = "count", dir = "in", when = "after the `fd` lookup" },
   { name = "count", type = "size_t" },
 ]
+errors = ["EBADF", "EFAULT", "EINVAL", "EFBIG", "ENOSPC", "EIO"]
+ktest = { EIO = "vblk_bad_sector" }
 note = ""
 
 [[syscall]]
@@ -67,6 +78,11 @@ args = [
   { name = "flags", type = "int" },
   { name = "mode", type = "umode_t" },
 ]
+errors = [
+  "EFAULT", "ENAMETOOLONG", "EINVAL", "ENOENT", "ENOTDIR", "EISDIR", "EEXIST", "EACCES", "ELOOP",
+  "EMFILE", "ENFILE", "ENOSPC", "ENOMEM", "EIO",
+]
+ktest = { ENOMEM = "kalloc_nomem", EIO = "vblk_bad_sector" }
 note = "`pathname` at most 255 bytes"
 
 [[syscall]]
@@ -76,6 +92,7 @@ aarch64 = 57
 args = [
   { name = "fd", type = "unsigned int" },
 ]
+errors = ["EBADF"]
 note = ""
 
 [[syscall]]
@@ -86,6 +103,7 @@ args = [
   { name = "fd", type = "unsigned int" },
   { name = "statbuf", type = "struct stat *", ptr = "fixed", size = 144, dir = "out", when = "after the `fd` lookup" },
 ]
+errors = ["EBADF", "EFAULT"]
 note = "x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1"
 
 [[syscall]]
@@ -97,6 +115,7 @@ args = [
   { name = "offset", type = "off_t" },
   { name = "whence", type = "unsigned int" },
 ]
+errors = ["EBADF", "ESPIPE", "EINVAL"]
 note = ""
 
 [[syscall]]
@@ -112,6 +131,7 @@ args = [
   { name = "offset", type = "unsigned long" },
 ]
 unsafe = "a mapping can replace memory the program uses"
+errors = ["EINVAL", "EBADF", "ENODEV", "ENOMEM", "EPERM", "EEXIST"]
 note = "anonymous and private only; returns the address"
 
 [[syscall]]
@@ -123,6 +143,7 @@ args = [
   { name = "length", type = "size_t" },
 ]
 unsafe = "the range can hold memory the program still uses"
+errors = ["EINVAL", "ENOMEM"]
 note = ""
 
 [[syscall]]
@@ -133,6 +154,7 @@ args = [
   { name = "addr", type = "unsigned long" },
 ]
 unsafe = "shrinking the break unmaps memory the program may still use"
+errors = []
 note = "returns the break; `0` if the caller is not a process"
 
 [[syscall]]
@@ -140,6 +162,7 @@ name = "sched_yield"
 x86_64 = 24
 aarch64 = 124
 args = []
+errors = []
 note = ""
 
 [[syscall]]
@@ -149,6 +172,7 @@ aarch64 = 23
 args = [
   { name = "oldfd", type = "unsigned int" },
 ]
+errors = ["EBADF", "EMFILE"]
 note = "CLOEXEC cleared on the new fd"
 
 [[syscall]]
@@ -158,6 +182,7 @@ args = [
   { name = "oldfd", type = "unsigned int" },
   { name = "newfd", type = "unsigned int" },
 ]
+errors = ["EBADF"]
 note = ""
 
 [[syscall]]
@@ -168,6 +193,7 @@ args = [
   { name = "rqtp", type = "const struct __kernel_timespec *", ptr = "fixed", size = 16, dir = "in", when = "before anything else" },
   { name = "rmtp", type = "struct __kernel_timespec *", unread = "ROADMAP §13.8" },
 ]
+errors = ["EFAULT", "EINVAL"]
 note = "`CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1"
 
 [[syscall]]
@@ -175,12 +201,15 @@ name = "getpid"
 x86_64 = 39
 aarch64 = 172
 args = []
+errors = []
 note = "`0` if the caller is not a process"
 
 [[syscall]]
 name = "fork"
 x86_64 = 57
 args = []
+errors = ["EAGAIN", "ENOMEM"]
+ktest = { ENOMEM = "fork_oom" }
 note = "full address-space copy; the child returns 0"
 
 [[syscall]]
@@ -192,6 +221,10 @@ args = [
   { name = "argv", type = "const char *const *", ptr = "strvec", null = true, when = "after `pathname`" },
   { name = "envp", type = "const char *const *", ptr = "strvec", null = true, when = "after `argv`" },
 ]
+errors = [
+  "EFAULT", "ENAMETOOLONG", "EINVAL", "ENOENT", "ENOTDIR", "ELOOP", "ENFILE", "E2BIG", "ENOEXEC",
+  "ENOMEM",
+]
 note = "`argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1)"
 
 [[syscall]]
@@ -201,6 +234,7 @@ aarch64 = 93
 args = [
   { name = "status", type = "int" },
 ]
+errors = []
 note = "the low 8 bits of `status`"
 
 [[syscall]]
@@ -213,6 +247,7 @@ args = [
   { name = "options", type = "int" },
   { name = "rusage", type = "struct rusage *", unread = "ROADMAP §13.7" },
 ]
+errors = ["ECHILD", "EFAULT"]
 note = ""
 
 [[syscall]]
@@ -223,6 +258,7 @@ args = [
   { name = "pid", type = "pid_t" },
   { name = "sig", type = "int" },
 ]
+errors = ["EINVAL", "ESRCH"]
 note = "default actions only"
 
 [[syscall]]
@@ -234,6 +270,7 @@ args = [
   { name = "cmd", type = "unsigned int" },
   { name = "arg", type = "unsigned long" },
 ]
+errors = ["EBADF", "EINVAL"]
 note = "`F_GETFD` and `F_SETFD` (`FD_CLOEXEC`) only"
 
 [[syscall]]
@@ -241,6 +278,7 @@ name = "getppid"
 x86_64 = 110
 aarch64 = 173
 args = []
+errors = []
 note = ""
 
 [[syscall]]
@@ -253,6 +291,7 @@ args = [
   { name = "cmd", type = "unsigned int" },
   { name = "arg", type = "void *", ptr = "cstr", when = "for `RESTART2` only, after the uid, magic and command checks" },
 ]
+errors = ["EINVAL", "EFAULT"]
 note = "power off and restart; see SYSCALL.md §3.1"
 
 [[syscall]]
@@ -264,6 +303,7 @@ args = [
   { name = "dirent", type = "struct linux_dirent64 *", ptr = "buf", len = "count", dir = "out", when = "after the `fd` lookup and the first record's fit" },
   { name = "count", type = "unsigned int" },
 ]
+errors = ["EBADF", "ENOTDIR", "ESPIPE", "EINVAL", "EFAULT"]
 note = "at most 512 bytes a call; see SYSCALL.md §3.1"
 
 [[syscall]]
@@ -273,4 +313,5 @@ args = [
   { name = "buf", type = "char *", ptr = "buf", len = "len", dir = "out", when = "before anything else" },
   { name = "len", type = "size_t" },
 ]
+errors = ["EFAULT"]
 note = "vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`)"

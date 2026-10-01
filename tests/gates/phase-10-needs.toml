@@ -205,8 +205,11 @@ key = "`/bin/tests` provokes every errno SYSCALL.md lists"
 needs = [
   "user-VA accessors replace the physmap copy for syscalls",
   "the top user page is never mappable",
+  "syscall dispatch indexes the generated",  # L1353
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+  "`getdents64`, `fstat`, and `nanosleep`, which",  # L1357
 ]
-why = "text: lands after the USER_MAP_END and accessor boxes"
+why = "text: lands after the USER_MAP_END and accessor boxes; claim: missing edges found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "every IDT vector enters through a stub that `arch/idt.rs` generates"
@@ -1663,3 +1666,87 @@ needs = [
   "`make models` runs the loom",  # L1440
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# P10-S76's boxes.
+
+# L1360
+[[box]]
+key = "`utest_ok` / `utest_fail` / `utest_skip`"
+needs = [
+  "the in-guest registry split per",  # L1219
+  "the ktest verdict counts runs",  # L1229
+  "expected skips are data: `tests/harness/skips.toml`",  # L1230
+  "kernel lines are framed (DESIGN",  # L1272
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1367
+[[box]]
+key = "`/bin/tests` covers the process lifecycle:"
+needs = [
+  "one `limits` module in `vibeos-core`",  # L1315
+  "`utest_ok` / `utest_fail` / `utest_skip`",  # L1360
+  "`/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello`",  # L1361
+  "a host-tested `vibeos-core` helper picks",  # L1364
+  "stop and continue cannot lose",  # L1388
+  "every switch tail empties the",  # L1473
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L980
+[[box]]
+key = "every pointer argument is validated:"
+needs = [
+  "`/bin/tests` provokes every errno SYSCALL.md",  # L1366
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1052
+[[box]]
+key = "`/bin/tests` fork limit: a fork"
+needs = [
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1053
+[[box]]
+key = "`/bin/tests` exec chain: a child"
+needs = [
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1054
+[[box]]
+key = "`/bin/tests` wait ordering: `wait4` on"
+needs = [
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1055
+[[box]]
+key = "`/bin/tests` orphan reparenting: a grandchild"
+needs = [
+  "a host-tested `vibeos-core` helper picks",  # L1364
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1060
+[[box]]
+key = "`/bin/tests` signals: `SIGKILL` ends a"
+needs = [
+  "`/bin/tests` covers the process lifecycle:",  # L1367
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1071
+[[box]]
+key = "`/bin/tests` calls every §9.3 syscall"
+needs = [
+  "`/bin/tests` provokes every errno SYSCALL.md",  # L1366
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

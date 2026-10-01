@@ -80,14 +80,24 @@ fn main(env: &Env) -> i32 {
     }
 }
 
-/// Run `/bin/tests` and wait for it.
+/// Run `/bin/tests` and wait for it, reaping every orphan it leaves to
+/// init meanwhile (ROADMAP §9.6: `/bin/tests` checks that init reaps one).
 fn tests(envp: *const *const u8) {
     match start(TESTS, envp, b"init: /bin/tests start failed: execve errno ") {
         Err(e) => diag(b"init: /bin/tests start failed: fork errno ", e),
-        Ok(pid) => match cmd::wait(pid as i32, 0) {
-            Ok((_, 0)) => {}
-            Ok((_, status)) => report(status),
-            Err(e) => diag(b"init: wait4: errno ", e),
+        Ok(pid) => loop {
+            match cmd::wait(-1, 0) {
+                Ok((p, _)) if p != pid => {}
+                Ok((_, 0)) => break,
+                Ok((_, status)) => {
+                    report(status);
+                    break;
+                }
+                Err(e) => {
+                    diag(b"init: wait4: errno ", e);
+                    break;
+                }
+            }
         },
     }
 }

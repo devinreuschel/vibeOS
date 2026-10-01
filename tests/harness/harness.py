@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     # `qmp` imports this module; the runners import it when they run.
     from tests.harness.qmp import QmpLike
     from tests.harness.qmp import Session as QmpSession
+    from tests.harness.utest import UtestVerdict
 
 # The rows of the marker registry, `tests/contract/markers.toml` (ROADMAP
 # §10.2): the contract lists and the failure lists below are built from them.
@@ -1389,6 +1390,22 @@ def _panic_sigs(
     return base + more
 
 
+def feed_utest(
+    utest: UtestVerdict,
+    src: LineSource,
+    line: str,
+    fail: Callable[[str], NoReturn],
+) -> None:
+    """Feed one serial line to the utest verdict: a protocol line moves the
+    boot's deadline to the verdict's; a failure goes to `fail`."""
+    try:
+        d = utest.feed(line)
+    except HarnessError as e:
+        fail(str(e))
+    if d is not None:
+        src.set_deadline(d)
+
+
 def run_qemu_and_check(
     cfg: QemuConfig,
     markers: list[Marker],
@@ -1398,6 +1415,7 @@ def run_qemu_and_check(
     dump_needles: tuple[str | tuple[str, ...], ...] = (),
     line_source: LineSource | None = None,
     qmp: QmpLike | None = None,
+    utest: UtestVerdict | None = None,
 ) -> RunResult:
     """Boot the ISO, stream serial, and assert the boot contract.
 
@@ -1424,6 +1442,11 @@ def run_qemu_and_check(
     (framed, DESIGN §2.6); each marker matches its own source's lines.
     Limine's panic line before the first framed line, and a
     `frame.USER_FAILURES` line before the dump, fail the run.
+
+    `utest` (`utest.UtestVerdict`) reads every line: from `/bin/tests`'
+    `begin` to its `end` its progress deadline replaces the boot's, it
+    fails the run on a failing user test, and it must `finish` at the last
+    marker.
     """
     from tests.harness import qmp as qmpmod
 
@@ -1517,6 +1540,11 @@ def run_qemu_and_check(
             result.matched.append(markers[marker_idx].name)
             marker_idx += 1
             if marker_idx == len(markers) and not expect_panic:
+                if utest is not None:
+                    try:
+                        utest.finish(markers[-1].name)
+                    except HarnessError as e:
+                        fail(str(e))
                 # Done. Ask QEMU to exit; kill hard if it drags its feet.
                 src.quit()
                 return True
@@ -1538,12 +1566,13 @@ def run_qemu_and_check(
             if kind == "timeout":
                 result.stderr = src.stderr_text()
                 missing = markers[marker_idx].name if marker_idx < len(markers) else "none"
+                hung = f"{utest.hung_message()}; " if utest is not None and utest.running() else ""
                 session.timeout(
                     src,
                     result,
                     argv,
-                    f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers; "
-                    f"missing {missing!r}{_qemu_report(result, exited=False)}",
+                    f"{hung}timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} "
+                    f"markers; missing {missing!r}{_qemu_report(result, exited=False)}",
                 )
             if kind == "eof":
                 # QEMU closed its stdout (usually because it exited).
@@ -1553,6 +1582,8 @@ def run_qemu_and_check(
 
             result.lines.append(line)
             text, ktext, sig = classify(line)
+            if utest is not None and dump_at is None:
+                feed_utest(utest, src, line, fail)
             d = session.line(
                 line,
                 panic=sig is not None and dump_at is None,
@@ -1953,6 +1984,7 @@ def run_qemu_console_input(
     *,
     line_source: LineSource | None = None,
     qmp: QmpLike | None = None,
+    utest: UtestVerdict | None = None,
 ) -> RunResult:
     """Boot, then type into `/bin/sh` via COM1 and via PS/2 (`sendkey`).
 
@@ -1973,7 +2005,9 @@ def run_qemu_console_input(
     `shell ready` and the replies are `/bin/sh`'s, so they match only
     unframed lines, and only whole ones, since the shell echoes each typed
     command after its prompt; panic signatures match only kernel lines
-    (DESIGN §2.6).
+    (DESIGN §2.6). `utest` reads every line as in `run_qemu_and_check` and
+    must `finish` at `shell ready`, since init runs `/bin/tests` before
+    the shell in this boot too.
     """
     from tests.harness import qmp as qmpmod
 
@@ -1997,6 +2031,9 @@ def run_qemu_console_input(
     saw_status = False
     saw_ps = False
     saw_ps2 = False
+
+    def ufail(msg: str) -> NoReturn:
+        session.fail(src, result, argv, msg)
 
     def missing(report: str) -> str:
         """The first step the run has not seen."""
@@ -2023,16 +2060,26 @@ def run_qemu_console_input(
             if kind == "timeout":
                 result.timed_out = True
                 result.stderr = src.stderr_text()
-                session.timeout(src, result, argv, missing(_qemu_report(result, exited=False)))
+                why = missing(_qemu_report(result, exited=False))
+                if utest is not None and utest.running():
+                    why = f"{utest.hung_message()}; {why}"
+                session.timeout(src, result, argv, why)
             if kind == "eof":
                 break
             _console_line(session, src, result, argv, line, panic_signatures, stream)
+            if utest is not None:
+                feed_utest(utest, src, line, ufail)
             utext = frame.user_text(line)
             if utext is None:
                 continue
             reply = utext.strip()
             if not saw_ready and SHELL_READY_NEEDLE in utext:
                 saw_ready = True
+                if utest is not None:
+                    try:
+                        utest.finish("shell_ready")
+                    except HarnessError as e:
+                        ufail(str(e))
                 result.matched.append("shell_ready")
                 # Prompt is written without a newline; give the shell
                 # thread a beat before stuffing COM1.
@@ -2085,6 +2132,20 @@ ISA_DEBUG_FAIL = 35  # write 0x11
 
 # ktest protocol (DESIGN §8.2, C-KTEST-PROTO): one kernel line per event.
 KTEST_PREFIX = "vibeOS: ktest: "
+
+
+class Protocol(NamedTuple):
+    """A test protocol of the ktest form (DESIGN §8.2): the in-guest
+    registry's, framed kernel lines, or `/bin/tests`' (`utest.UTEST`),
+    unframed user lines. `label` starts its messages."""
+
+    label: str
+    prefix: str
+    # The `frame` source its lines come from: `frame.KERNEL` or `frame.USER`.
+    source: str
+
+
+KTEST = Protocol("ktest", KTEST_PREFIX, frame.KERNEL)
 KTEST_KINDS = ("begin", "run", "ok", "fail", "skip", "info", "end", "bad_option")
 _KTEST_NAME = r"[A-Za-z0-9_.-]+"
 _KTEST_RUN_RE = re.compile(rf"run ({_KTEST_NAME}) (\d+)")
@@ -2111,17 +2172,18 @@ class KtestLine(NamedTuple):
     text: str = ""
 
 
-def parse_ktest_line(raw: str) -> KtestLine | None:
+def parse_ktest_line(raw: str, proto: Protocol = KTEST) -> KtestLine | None:
     """The protocol line `raw` holds, or None.
 
-    Only a framed line (C-FRAME) whose text starts with `vibeOS: ktest: `
-    and then a protocol word parses, so a `dmesg:` or `logrec:` replay, a
-    user program's line, and a `vibeOS: ktest:   <detail>` line never do.
+    Only a line from `proto`'s source (C-FRAME: framed for ktest) whose
+    text starts with `proto.prefix` (`vibeOS: ktest: `) and then a protocol
+    word parses, so a `dmesg:` or `logrec:` replay, a user program's line,
+    and a `vibeOS: ktest:   <detail>` line never do.
     """
-    text = frame.kernel_text(raw)
-    if text is None or not text.startswith(KTEST_PREFIX):
+    text = frame.text_for(proto.source, raw)
+    if text is None or not text.startswith(proto.prefix):
         return None
-    rest = text[len(KTEST_PREFIX) :].rstrip()
+    rest = text[len(proto.prefix) :].rstrip()
     if rest == "end":
         return KtestLine("end")
     if rest == "begin" or rest.startswith("begin "):
@@ -2205,6 +2267,90 @@ def ktest_summary(lines: Iterable[str]) -> KtestSummary:
             s.infos.append(k)
     return s
 
+# The messages `RunCounter` raises, by code, for the ktest protocol.
+KTEST_MESSAGES: Mapping[str, str] = {
+    "begin_after_end": "ktest begin after end",
+    "second_begin": "ktest: a second begin",
+    "begin_no_count": "ktest begin without a run count",
+    "begin_zero": "ktest: no test selected",
+    "run_outside": "ktest: run {name} outside begin and end",
+    "run_open": "ktest: run {open} has no result (next: run {name})",
+    "result_no_run": "ktest: result for {name} with no open run: {kind}",
+    "result_other": "ktest: run {open} got a result for {name}",
+    "end_no_begin": "ktest end without begin",
+    "end_open": "ktest: run {open} has no result before end",
+    "count": "ktest: begin {n}, but {runs} runs and {results} results",
+}
+
+
+class RunCounter:
+    """The run count of one boot's protocol lines (DESIGN §8.2): `begin
+    <n>`, then exactly `n` runs, each closed by its one result, then `end`.
+    The ktest verdict (`check_ktest_output`) and the utest verdict
+    (`utest.UtestVerdict`) share it; `messages` words its failures.
+
+    Runs pair by order, since a repeated test reuses its name: each `run
+    <name>` opens a run that the next result line (`ok`, `FAIL` or `skip`)
+    must close, for the same name. Info lines are never results.
+    """
+
+    def __init__(self, messages: Mapping[str, str] = KTEST_MESSAGES) -> None:
+        self.messages = messages
+        self.n: int | None = None
+        self.saw_end = False
+        self.open_run: str | None = None
+        self.runs: list[str] = []
+        self.results_seen = 0
+        self.fails: list[KtestLine] = []
+        self.skips: dict[str, str] = {}
+
+    def _fail(self, code: str, **kw: object) -> NoReturn:
+        raise HarnessError(self.messages[code].format(**kw))
+
+    def feed(self, k: KtestLine) -> None:
+        """Count protocol line `k`; raise `HarnessError` on a line out of
+        order."""
+        if k.kind == "begin":
+            if self.saw_end:
+                self._fail("begin_after_end")
+            if self.n is not None:
+                self._fail("second_begin")
+            if k.n is None:
+                self._fail("begin_no_count")
+            if k.n == 0:
+                self._fail("begin_zero")
+            self.n = k.n
+        elif k.kind == "run":
+            if self.n is None or self.saw_end:
+                self._fail("run_outside", name=k.name)
+            if self.open_run is not None:
+                self._fail("run_open", open=self.open_run, name=k.name)
+            self.open_run = k.name
+            self.runs.append(k.name)
+        elif k.kind in ("ok", "fail", "skip"):
+            if self.open_run is None:
+                self._fail("result_no_run", name=k.name, kind=k.kind)
+            if k.name != self.open_run:
+                self._fail("result_other", open=self.open_run, name=k.name)
+            self.open_run = None
+            self.results_seen += 1
+            if k.kind == "fail":
+                self.fails.append(k)
+            elif k.kind == "skip":
+                self.skips[k.name] = k.text
+        elif k.kind == "end":
+            if self.n is None:
+                self._fail("end_no_begin")
+            if self.open_run is not None:
+                self._fail("end_open", open=self.open_run)
+            self.saw_end = True
+
+    def check_count(self) -> None:
+        """Raise unless `begin`'s `n` runs and `n` results were seen."""
+        if len(self.runs) != self.n or self.results_seen != self.n:
+            self._fail("count", n=self.n, runs=len(self.runs), results=self.results_seen)
+
+
 def check_ktest_output(
     lines: Iterable[str],
     exit_code: int | None,
@@ -2236,17 +2382,14 @@ def check_ktest_output(
     result = RunResult()
     result.exit_code = exit_code
     stream = frame.Stream()
-    n: int | None = None
-    saw_end = False
-    open_run: str | None = None
-    results_seen = 0
+    count = RunCounter()
     fails: list[str] = []
     # The declared failure lines seen in the open run's window.
     seen: list[str] = []
     for raw in lines:
         result.lines.append(raw)
         why = run_failure(raw, stream)
-        if why is not None and declared.is_declared(open_run, why[1]):
+        if why is not None and declared.is_declared(count.open_run, why[1]):
             seen.append(why[1])
             continue
         if why is not None:
@@ -2257,55 +2400,25 @@ def check_ktest_output(
             continue
         if k.kind == "bad_option":
             raise HarnessError(f"ktest: bad option {k.text}")
-        if k.kind == "begin":
-            if saw_end:
-                raise HarnessError("ktest begin after end")
-            if n is not None:
-                raise HarnessError("ktest: a second begin")
-            if k.n is None:
-                raise HarnessError("ktest begin without a run count")
-            if k.n == 0:
-                raise HarnessError("ktest: no test selected")
-            n = k.n
-        elif k.kind == "run":
-            if n is None or saw_end:
-                raise HarnessError(f"ktest: run {k.name} outside begin and end")
-            if open_run is not None:
-                raise HarnessError(f"ktest: run {open_run} has no result (next: run {k.name})")
-            open_run = k.name
+        count.feed(k)
+        if k.kind == "run":
             seen = []
-            result.ktest_runs.append(k.name)
         elif k.kind in ("ok", "fail", "skip"):
-            if open_run is None:
-                raise HarnessError(f"ktest: result for {k.name} with no open run: {k.kind}")
-            if k.name != open_run:
-                raise HarnessError(f"ktest: run {open_run} got a result for {k.name}")
-            open_run = None
-            results_seen += 1
             gone = declared.missing(k.name, seen) if k.kind == "ok" else []
             if gone:
                 raise HarnessError(f"ktest: {k.name} passed without its declared line {gone[0]!r}")
             if k.kind == "fail":
                 fails.append(frame.kernel_text(raw) or raw)
-            elif k.kind == "skip":
-                result.ktest_skips[k.name] = k.text
-        elif k.kind == "end":
-            if n is None:
-                raise HarnessError("ktest end without begin")
-            if open_run is not None:
-                raise HarnessError(f"ktest: run {open_run} has no result before end")
-            saw_end = True
-    if n is None:
+    result.ktest_runs = count.runs
+    result.ktest_skips = count.skips
+    if count.n is None:
         raise HarnessError("missing marker 'ktest_begin'")
-    if not saw_end:
-        where = f"; run {open_run} has no result" if open_run is not None else ""
+    if not count.saw_end:
+        where = f"; run {count.open_run} has no result" if count.open_run is not None else ""
         raise HarnessError(f"missing marker 'ktest_end'{where}")
     if fails:
         raise HarnessError(f"ktest FAIL: {fails[0]}")
-    if len(result.ktest_runs) != n or results_seen != n:
-        raise HarnessError(
-            f"ktest: begin {n}, but {len(result.ktest_runs)} runs and {results_seen} results"
-        )
+    count.check_count()
     if exit_code != pass_status:
         raise HarnessError(
             f"isa-debug-exit status {exit_code}, expected {pass_status}"
@@ -2326,14 +2439,18 @@ class KtestDeadlines:
     | `begin` or a result to the next `run` or `end` | `KTEST_GAP_S * scale` |
     | `end` to QEMU's exit | `allowance` |
 
-    Only those protocol lines (`parse_ktest_line`) move it; other lines,
-    info lines included, extend nothing. It backstops the in-guest deadline,
-    which a CPU wedged with IF=0 never checks.
+    Only those protocol lines (`parse_ktest_line` over `proto`) move it;
+    other lines, info lines included, extend nothing. For ktest it backstops
+    the in-guest deadline, which a CPU wedged with IF=0 never checks; for
+    utest (`utest.UtestVerdict`) it is the only deadline a user test has.
     """
 
-    def __init__(self, allowance: float, scale: float = TIMEOUT_SCALE) -> None:
+    def __init__(
+        self, allowance: float, scale: float = TIMEOUT_SCALE, proto: Protocol = KTEST
+    ) -> None:
         self.allowance = allowance
         self.scale = scale
+        self.proto = proto
         # "boot" before `begin`, "tests" from `begin` to `end`, "after" then.
         self.stretch = "boot"
         self.last_run: str | None = None
@@ -2349,7 +2466,7 @@ class KtestDeadlines:
 
     def on_line(self, line: str, now: float) -> float:
         """Read raw serial `line`, seen at `now`: the current deadline."""
-        k = parse_ktest_line(line)
+        k = parse_ktest_line(line, self.proto)
         if k is None:
             return self.deadline
         if self.stretch == "boot" and k.kind == "begin":
@@ -2373,16 +2490,17 @@ class KtestDeadlines:
     def hung_message(self) -> str:
         """What timed out: the last run's name from `begin` to `end`, else
         the stretch."""
+        label = self.proto.label
         if self.stretch == "boot":
-            return f"ktest: no begin within {self.window:g} s of QEMU's start"
+            return f"{label}: no begin within {self.window:g} s of QEMU's start"
         if self.stretch == "after":
-            return f"ktest: QEMU did not exit within {self.window:g} s of end"
+            return f"{label}: QEMU did not exit within {self.window:g} s of end"
         if self.last_run is None:
-            return f"ktest: no run within {self.window:g} s of begin"
+            return f"{label}: no run within {self.window:g} s of begin"
         if self.run_open:
-            return f"ktest hung in {self.last_run}: no result within {self.window:g} s"
+            return f"{label} hung in {self.last_run}: no result within {self.window:g} s"
         return (
-            f"ktest hung in {self.last_run}: no run or end within {self.window:g} s "
+            f"{label} hung in {self.last_run}: no run or end within {self.window:g} s "
             "of its result"
         )
 

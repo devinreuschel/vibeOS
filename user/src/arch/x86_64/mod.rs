@@ -38,6 +38,10 @@ pub unsafe extern "C" fn _start() -> ! {
     )
 }
 
+/// The `e_machine` of this architecture's ELF images (`EM_X86_64`, from
+/// the System V gABI's machine list).
+pub const ELF_MACHINE: u16 = 62;
+
 /// The address of [`_start`], the entry point.
 pub fn entry_address() -> usize {
     _start as *const () as usize

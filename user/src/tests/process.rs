@@ -1,8 +1,9 @@
-//! `fork`, `execve`, `wait4`, a fault's signal, and the process table's
-//! limit (ROADMAP §9.8). Every fork goes through `utest::fork` (F069).
+//! `fork`, `execve`, `wait4` and a fault's signal (ROADMAP §9.8); the
+//! process table's limit is `lifecycle`'s. Every fork goes through
+//! `utest::fork` (F069).
 
 use vibeos_user::rt;
-use vibeos_user::sys::{self, Errno};
+use vibeos_user::sys;
 use vibeos_user::utest::{self, Outcome, Runner};
 
 // From signal(7).
@@ -14,7 +15,6 @@ pub fn run(t: &mut Runner) {
     t.case("fork_exit_status", fork_exit_status);
     t.case("exec_hello", exec_hello);
     t.case("fork_segv", fork_segv);
-    t.case("fork_bomb", fork_bomb);
 }
 
 /// Wait for `pid` and return its status word.
@@ -84,42 +84,5 @@ fn fork_segv() -> Outcome {
         Ok(st) if st & 0x7f == SIGSEGV => Outcome::Ok,
         Ok(_) => Outcome::Fail("status not SIGSEGV"),
         Err(why) => Outcome::Fail(why),
-    }
-}
-
-/// A bounded fork bomb: up to 32 children that exit at once, two yields
-/// after each fork so the child can exit before the next. It passes when a
-/// fork fails with `EAGAIN`, or after one or more forks; then it reaps
-/// until `ECHILD`.
-fn fork_bomb() -> Outcome {
-    let mut forks = 0u32;
-    let mut last: Result<usize, Errno> = Ok(0);
-    while forks < 32 {
-        last = utest::fork();
-        match last {
-            Ok(0) => rt::exit(0),
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "a yield has no failure the bomb can act on"
-        )]
-        let _ = (sys::sched_yield(), sys::sched_yield());
-        forks += 1;
-    }
-    let pass = last == Err(Errno::EAGAIN) || forks != 0;
-    loop {
-        // SAFETY: a null status and rusage, so the kernel writes nothing;
-        // established here.
-        let r = unsafe { sys::wait4(-1, core::ptr::null_mut(), 0, core::ptr::null_mut()) };
-        if r == Err(Errno::ECHILD) {
-            break;
-        }
-    }
-    if pass {
-        Outcome::Ok
-    } else {
-        Outcome::Fail("no fork succeeded")
     }
 }

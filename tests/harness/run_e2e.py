@@ -17,6 +17,7 @@ from tests.harness.harness import (
     SERIAL_ONLINE,
     EnvConfig,
     HarnessError,
+    QemuConfig,
     boot_contract_markers,
     default_iso,
     env_config,
@@ -34,6 +35,7 @@ from tests.harness.harness import (
     serial_tail,
     virtio_blk_args,
 )
+from tests.harness.utest import UtestVerdict
 
 # Default QEMU `pc` (i440fx) set used by vibeOS e2e. No UHCI unless `-usb`.
 PCI_GOLDEN = (
@@ -391,6 +393,12 @@ PANIC_VARIANTS = {
 }
 
 
+def _utest_verdict(env: EnvConfig, cfg: QemuConfig) -> UtestVerdict:
+    """A boot's utest verdict: `cfg`'s `skips.toml` rows, the boot
+    allowance, and the tier's timeout scale."""
+    return UtestVerdict(cfg, allowance=env.timeout, scale=env.timeout_scale)
+
+
 # The frames the `#GP` backtrace lists, in this order (ROADMAP §10.7, F070).
 GP_FRAMES = ("gp_test_trip", "boot_rest")
 
@@ -451,13 +459,16 @@ def main() -> int:
         markers = boot_contract_markers(
             cpu=env.cpu, hpet=not expect_pit, smp=env.smp
         )
-
+    # The normal boot runs `/bin/tests` (DESIGN §8.2): its utest verdict.
+    normal = expect == "none"
     try:
+        utest = _utest_verdict(env, cfg) if normal else None
         result = run_qemu_and_check(
             cfg,
             markers,
             timeout_s=env.timeout,
             dump_needles=dump_needles,
+            utest=utest,
         )
     except HarnessError as e:
         _record_missing(str(e))
@@ -471,6 +482,8 @@ def main() -> int:
     print(f"[e2e] ok: {len(result.matched)} markers matched", file=sys.stderr)
     for name in result.matched:
         print(f"[e2e]   . {name}", file=sys.stderr)
+    if utest is not None:
+        print(f"[e2e]   . utest {utest.summary()}", file=sys.stderr)
     if expect_panic and result.panic_line:
         print(f"[e2e]   . panic seen: {result.panic_line!r}", file=sys.stderr)
         print(f"[e2e]   . ended on QMP {result.end}", file=sys.stderr)
@@ -523,7 +536,8 @@ def main() -> int:
             return 1
         print("[e2e]   . meminfo ok", file=sys.stderr)
         try:
-            inp = run_qemu_console_input(cfg, timeout_s=env.timeout)
+            utest = _utest_verdict(env, cfg)
+            inp = run_qemu_console_input(cfg, timeout_s=env.timeout, utest=utest)
         except HarnessError as e:
             _record_missing(str(e))
             res.add_boot(qemu_argv(cfg, None), cfg, None)
@@ -538,6 +552,7 @@ def main() -> int:
             print(f"[e2e] FAIL: console boot: {e}", file=sys.stderr)
             return 1
         print("[e2e]   . console input serial+ps2 ok", file=sys.stderr)
+        print(f"[e2e]   . utest {utest.summary()}", file=sys.stderr)
         for name in inp.matched:
             print(f"[e2e]     . {name}", file=sys.stderr)
         if env.tier == "test-e2e":

@@ -225,34 +225,48 @@ kernel-half pointer in each declared pointer argument, with every other
 argument valid, and needs `EFAULT` from each, so a declaration cannot drift
 from its handler (F150).
 
+Each row also lists, in its `errors` key and the table's "errors" column,
+every errno its handler returns, audited against the handler and its
+callees. An errno that only a kernel fault produces (a device error, a
+failed kernel allocation) names in parentheses the in-guest test that
+provokes it. `/bin/tests`' `errno_matrix` (ROADMAP §10.5) reads the
+generated `vibeos_user::sys::CALLS`: it calls every row once with valid
+arguments and checks the result, except `exit`, which its child cases
+call, and `reboot`, whose valid call powers off; it provokes every other
+listed pair and fails on a pair it has no case for. Its `efault_matrix`
+gives every declared pointer a kernel-half address, an unmapped page, a
+range crossing `USER_MAP_END` and one crossing `USER_END`, a read-only
+page for an `out` pointer, a length of 2^63 for a buffer, and NULL where
+the row does not allow it, and needs `EFAULT` from each.
+
 <!-- gen_syscalls: begin syscall-table -->
 
-| x86_64 | aarch64 | name | arity | arguments | pointer arguments | notes |
-|---:|---:|------|------:|-----------|-------------------|-------|
-| 0 | 63 | `read` | 3 | `unsigned int fd`, `char *buf`, `size_t count` | `buf`: out, `count` bytes, after the `fd` lookup | — |
-| 1 | 64 | `write` | 3 | `unsigned int fd`, `const char *buf`, `size_t count` | `buf`: in, `count` bytes, after the `fd` lookup | — |
-| 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `pathname` at most 255 bytes |
-| 3 | 57 | `close` | 1 | `unsigned int fd` | — | — |
-| 5 | 80 | `fstat` | 2 | `unsigned int fd`, `struct stat *statbuf` | `statbuf`: out, 144 bytes, after the `fd` lookup | x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1 |
-| 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | — |
-| 9 | 222 | `mmap` | 6 | `unsigned long addr`, `unsigned long length`, `unsigned long prot`, `unsigned long flags`, `unsigned long fd`, `unsigned long offset` | — | anonymous and private only; returns the address |
-| 11 | 215 | `munmap` | 2 | `unsigned long addr`, `size_t length` | — | — |
-| 12 | 214 | `brk` | 1 | `unsigned long addr` | — | returns the break; `0` if the caller is not a process |
-| 24 | 124 | `sched_yield` | 0 | — | — | — |
-| 32 | 23 | `dup` | 1 | `unsigned int oldfd` | — | CLOEXEC cleared on the new fd |
-| 33 | — | `dup2` | 2 | `unsigned int oldfd`, `unsigned int newfd` | — | — |
-| 35 | 101 | `nanosleep` | 2 | `const struct __kernel_timespec *rqtp`, `struct __kernel_timespec *rmtp` | `rqtp`: in, 16 bytes, before anything else; `rmtp`: not read (ROADMAP §13.8) | `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1 |
-| 39 | 172 | `getpid` | 0 | — | — | `0` if the caller is not a process |
-| 57 | — | `fork` | 0 | — | — | full address-space copy; the child returns 0 |
-| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
-| 60 | 93 | `exit` | 1 | `int status` | — | the low 8 bits of `status` |
-| 61 | 260 | `wait4` | 4 | `pid_t pid`, `int *wstatus`, `int options`, `struct rusage *rusage` | `wstatus`: out, 4 bytes, may be NULL, after a child is reaped; `rusage`: not read (ROADMAP §13.7) | — |
-| 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | default actions only |
-| 72 | 25 | `fcntl` | 3 | `unsigned int fd`, `unsigned int cmd`, `unsigned long arg` | — | `F_GETFD` and `F_SETFD` (`FD_CLOEXEC`) only |
-| 110 | 173 | `getppid` | 0 | — | — | — |
-| 169 | 142 | `reboot` | 4 | `int magic1`, `int magic2`, `unsigned int cmd`, `void *arg` | `arg`: C string, for `RESTART2` only, after the uid, magic and command checks | power off and restart; see SYSCALL.md §3.1 |
-| 217 | 61 | `getdents64` | 3 | `unsigned int fd`, `struct linux_dirent64 *dirent`, `unsigned int count` | `dirent`: out, `count` bytes, after the `fd` lookup and the first record's fit | at most 512 bytes a call; see SYSCALL.md §3.1 |
-| 500 | — | `psinfo` | 2 | `char *buf`, `size_t len` | `buf`: out, `len` bytes, before anything else | vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`) |
+| x86_64 | aarch64 | name | arity | arguments | pointer arguments | errors | notes |
+|---:|---:|------|------:|-----------|-------------------|--------|-------|
+| 0 | 63 | `read` | 3 | `unsigned int fd`, `char *buf`, `size_t count` | `buf`: out, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EISDIR`, `EIO` (`vblk_bad_sector`) | — |
+| 1 | 64 | `write` | 3 | `unsigned int fd`, `const char *buf`, `size_t count` | `buf`: in, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EINVAL`, `EFBIG`, `ENOSPC`, `EIO` (`vblk_bad_sector`) | — |
+| 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `EACCES`, `ELOOP`, `EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM` (`kalloc_nomem`), `EIO` (`vblk_bad_sector`) | `pathname` at most 255 bytes |
+| 3 | 57 | `close` | 1 | `unsigned int fd` | — | `EBADF` | — |
+| 5 | 80 | `fstat` | 2 | `unsigned int fd`, `struct stat *statbuf` | `statbuf`: out, 144 bytes, after the `fd` lookup | `EBADF`, `EFAULT` | x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1 |
+| 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | `EBADF`, `ESPIPE`, `EINVAL` | — |
+| 9 | 222 | `mmap` | 6 | `unsigned long addr`, `unsigned long length`, `unsigned long prot`, `unsigned long flags`, `unsigned long fd`, `unsigned long offset` | — | `EINVAL`, `EBADF`, `ENODEV`, `ENOMEM`, `EPERM`, `EEXIST` | anonymous and private only; returns the address |
+| 11 | 215 | `munmap` | 2 | `unsigned long addr`, `size_t length` | — | `EINVAL`, `ENOMEM` | — |
+| 12 | 214 | `brk` | 1 | `unsigned long addr` | — | — | returns the break; `0` if the caller is not a process |
+| 24 | 124 | `sched_yield` | 0 | — | — | — | — |
+| 32 | 23 | `dup` | 1 | `unsigned int oldfd` | — | `EBADF`, `EMFILE` | CLOEXEC cleared on the new fd |
+| 33 | — | `dup2` | 2 | `unsigned int oldfd`, `unsigned int newfd` | — | `EBADF` | — |
+| 35 | 101 | `nanosleep` | 2 | `const struct __kernel_timespec *rqtp`, `struct __kernel_timespec *rmtp` | `rqtp`: in, 16 bytes, before anything else; `rmtp`: not read (ROADMAP §13.8) | `EFAULT`, `EINVAL` | `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1 |
+| 39 | 172 | `getpid` | 0 | — | — | — | `0` if the caller is not a process |
+| 57 | — | `fork` | 0 | — | — | `EAGAIN`, `ENOMEM` (`fork_oom`) | full address-space copy; the child returns 0 |
+| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `ELOOP`, `ENFILE`, `E2BIG`, `ENOEXEC`, `ENOMEM` | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
+| 60 | 93 | `exit` | 1 | `int status` | — | — | the low 8 bits of `status` |
+| 61 | 260 | `wait4` | 4 | `pid_t pid`, `int *wstatus`, `int options`, `struct rusage *rusage` | `wstatus`: out, 4 bytes, may be NULL, after a child is reaped; `rusage`: not read (ROADMAP §13.7) | `ECHILD`, `EFAULT` | — |
+| 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | `EINVAL`, `ESRCH` | default actions only |
+| 72 | 25 | `fcntl` | 3 | `unsigned int fd`, `unsigned int cmd`, `unsigned long arg` | — | `EBADF`, `EINVAL` | `F_GETFD` and `F_SETFD` (`FD_CLOEXEC`) only |
+| 110 | 173 | `getppid` | 0 | — | — | — | — |
+| 169 | 142 | `reboot` | 4 | `int magic1`, `int magic2`, `unsigned int cmd`, `void *arg` | `arg`: C string, for `RESTART2` only, after the uid, magic and command checks | `EINVAL`, `EFAULT` | power off and restart; see SYSCALL.md §3.1 |
+| 217 | 61 | `getdents64` | 3 | `unsigned int fd`, `struct linux_dirent64 *dirent`, `unsigned int count` | `dirent`: out, `count` bytes, after the `fd` lookup and the first record's fit | `EBADF`, `ENOTDIR`, `ESPIPE`, `EINVAL`, `EFAULT` | at most 512 bytes a call; see SYSCALL.md §3.1 |
+| 500 | — | `psinfo` | 2 | `char *buf`, `size_t len` | `buf`: out, `len` bytes, before anything else | `EFAULT` | vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`) |
 
 <!-- gen_syscalls: end syscall-table -->
 
@@ -300,7 +314,7 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   Linux replaces the mapping (ROADMAP §12.4). Without a fixed flag a free
   hint is used, rounded down to a page; otherwise the highest free range
   below `0x7FFF_F7FF_F000` (DESIGN §4.1), or `ENOMEM`. Each call is its own
-  region, never merged with a neighbour, so a full region table (32,
+  region, never merged with a neighbour, so a full region table (256,
   `limits::MAX_REGIONS`) is `ENOMEM` (ROADMAP §10.4 sizes it)
 - `munmap`: `addr` must be page-aligned, `len` non-zero, and the range at or
   below `USER_MAP_END` (`EINVAL`); `len` rounds up to a page. It trims,
@@ -343,7 +357,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   (ROADMAP §10.5)
 - `wait4`: `pid > 0` waits for that child, any `pid < 0` for any child, and
   `pid == 0` returns `ECHILD`; Linux reads 0 and `pid < -1` as process
-  groups. Only `WNOHANG` is read; other option bits are accepted and ignored, and `r10`
+  groups. A NULL `wstatus` is accepted and nothing is written, as on Linux;
+  otherwise the child is reaped before its status is copied out, so a bad
+  `wstatus` returns `EFAULT` with the child gone, and the next `wait4` for
+  it is `ECHILD`. A stopped child is never reported. Only `WNOHANG` is read; other option bits are accepted and ignored, and `r10`
   (`rusage`) is not read (F149; ROADMAP §13.7)
 - `kill`: signal 0 returns `EINVAL`, where Linux checks existence and
   permission (F149; ROADMAP §13.7). Signals 32 to 64 return `EINVAL` until
@@ -379,7 +396,9 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   position is read and stored in two steps, so an overlapping call on an
   open file shared through `fork` or `dup` can lose an update until
   ROADMAP §13.1 (F055); entries added or removed between calls may repeat
-  or be skipped, which POSIX leaves unspecified. The console is `ENOTDIR`
+  or be skipped, which POSIX leaves unspecified. The console descriptors a
+  process starts with are `ENOTDIR`; `/dev/console` or `/dev/tty` opened by
+  path is `ESPIPE`, as its `lseek` is
 - `fstat`: x86_64's 144-byte `struct stat` for any descriptor, the console
   a character device (`S_IFCHR | 0620`). `st_dev` and `st_rdev` are 0 until
   ROADMAP §23.3, and `st_uid` and `st_gid` 0 until ROADMAP §13.9; the times
@@ -391,7 +410,8 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   past 2^64 ns sleeps as long as the clock runs. `rmtp` is never written,
   since nothing can interrupt the sleep with `EINTR` before ROADMAP §13.8
   gives signals handlers; a stop and continue resumes the sleep, as Linux
-  restarts it
+  restarts it. So `rmtp` is never read either, and a bad `rmtp` is not
+  `EFAULT`: Linux writes it only on `EINTR`, and `efault_matrix` exempts it
 - `reboot`: checks, in this order, that the caller's effective uid is 0
   (`EPERM` otherwise: root holds `CAP_SYS_BOOT` until ROADMAP §18.6), that
   `magic1` is `0xfee1dead` and `magic2` one of reboot(2)'s four values
@@ -408,8 +428,9 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   ports `0x604` and `0xB004`; a restart writes the FADT's reset register,
   then pulses the 8042, then writes `0xCF9` (`arch::x86_64::power`; ROADMAP
   §20.2 reads `_S5` and the PM1 control block, F097)
-- `read`, the `wait4` status, and `psinfo` write user memory without
-  checking the page's W bit (§5; F023, ROADMAP §10.6)
+- `read`, `fstat`, `getdents64`, the `wait4` status, and `psinfo` write
+  user memory through the accessors, which honour the page's W bit, so a
+  read-only destination is `EFAULT` (§5; F023, ROADMAP §10.6)
 
 ---
 
