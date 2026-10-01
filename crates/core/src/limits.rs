@@ -87,8 +87,6 @@ pub const MAX_VIRTIO_DISKS: u8 = 26;
 pub const MAX_RANK: u8 = 8;
 /// Pages one deferred unmap batch holds (`kva_init`).
 pub const MAX_UNMAP_PAGES: usize = 32;
-/// In-core inode slots per FAT volume (`fat::FatVol`).
-pub const MAX_FAT_INODES: usize = 96;
 /// Partitions per disk (`part::Table`, `part_init`).
 pub const MAX_PARTS: usize = 16;
 /// Registered block devices, partitions included (`block`): boot's two
