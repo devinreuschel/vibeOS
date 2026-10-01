@@ -1,4 +1,5 @@
 use super::*;
+use crate::time::{civil_from_unix, unix_from_civil};
 
 impl FatVol {
     pub(super) fn read_dirent<D: Disk>(
@@ -305,7 +306,7 @@ impl FatVol {
         if !self.read_dir_raw(d, dir, off, &mut ent)? {
             return Err(FatError::Corrupt);
         }
-        let (date, time) = fat_datetime(self.now)?;
+        let (date, time) = fat_datetime(self.now);
         put_le16(&mut ent, 20, (first >> 16) as u16)?;
         put_le16(&mut ent, 22, time)?;
         put_le16(&mut ent, 24, date)?;
@@ -320,7 +321,9 @@ pub fn lfn_checksum(name: &[u8; 11]) -> u8 {
         .fold(0u8, |sum, &c| sum.rotate_right(1).wrapping_add(c))
 }
 
-pub(super) fn eq_ci(a: &[u8], b: &[u8]) -> bool {
+/// Whether two names are one FAT name: ASCII letters compare without
+/// regard to case.
+pub fn eq_ci(a: &[u8], b: &[u8]) -> bool {
     a.eq_ignore_ascii_case(b)
 }
 
@@ -585,11 +588,11 @@ fn apply_tilde(out: &mut [u8; 11], n: u32) {
     }
 }
 
-fn fill_dot(ent: &mut [u8], name11: &[u8], clu: u32, now: u32) -> Result<(), FatError> {
+fn fill_dot(ent: &mut [u8], name11: &[u8], clu: u32, now: u64) -> Result<(), FatError> {
     ent.fill(0);
     put_at(ent, 0, name11)?;
     put_at(ent, 11, &[ATTR_DIR])?;
-    let (date, time) = fat_datetime(now)?;
+    let (date, time) = fat_datetime(now);
     put_le16(ent, 14, time)?;
     put_le16(ent, 16, date)?;
     put_le16(ent, 18, date)?;
@@ -600,75 +603,42 @@ fn fill_dot(ent: &mut [u8], name11: &[u8], clu: u32, now: u32) -> Result<(), Fat
     Ok(())
 }
 
-/// FAT `(date, time)` of `secs` since 1980, the year clamped to 127.
-pub(super) fn fat_datetime(secs: u32) -> Result<(u16, u16), FatError> {
-    let s = (secs % 60) / 2;
-    let mi = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let mut days = secs / 86400;
-    let mut y = 0u16;
-    for yr in 0..=127u16 {
-        y = yr;
-        let ly = if yr.is_multiple_of(4) { 366 } else { 365 };
-        match days.checked_sub(ly) {
-            None => break,
-            Some(_) if yr == 127 => {
-                days = 0;
-                break;
-            }
-            Some(rest) => days = rest,
-        }
-    }
-    let leap = y.is_multiple_of(4);
-    let md = [
-        31u32,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut m = 12u16;
-    for (i, &len) in (0u16..).zip(md.iter()) {
-        match days.checked_sub(len) {
-            Some(rest) => days = rest,
-            None => {
-                m = i;
-                break;
-            }
-        }
-    }
-    let mon = m.checked_add(1).ok_or(FatError::Inval)?;
-    let day = u16::try_from(days)
-        .ok()
-        .and_then(|d| d.checked_add(1))
-        .ok_or(FatError::Inval)?;
-    let date = (y << 9) | (mon << 5) | day;
-    let time = ((h as u16) << 11) | ((mi as u16) << 5) | (s as u16);
-    Ok((date, time))
+/// Unix time of 1980-01-01 00:00:00 UTC, the first instant a FAT date
+/// holds.
+pub const FAT_EPOCH_UNIX: u64 = 315_532_800;
+/// Unix time of 2107-12-31 23:59:58 UTC, the last instant a FAT date and
+/// time hold.
+pub const FAT_LAST_UNIX: u64 = 4_354_819_198;
+
+/// FAT `(date, time)` of `secs` unix seconds, clamped to
+/// [`FAT_EPOCH_UNIX`]..=[`FAT_LAST_UNIX`]: years from 1980 with the
+/// Gregorian leap rule (`vibeos::time`'s calendar), seconds in 2 s units.
+pub(super) fn fat_datetime(secs: u64) -> (u16, u16) {
+    let c = civil_from_unix(secs.clamp(FAT_EPOCH_UNIX, FAT_LAST_UNIX));
+    let y = c
+        .year
+        .checked_sub(1980)
+        .and_then(|y| u16::try_from(y).ok())
+        .unwrap_or(0)
+        & 0x7F;
+    let date = (y << 9) | (u16::from(c.month) << 5) | u16::from(c.day);
+    let time = (u16::from(c.hour) << 11) | (u16::from(c.min) << 5) | u16::from(c.sec / 2);
+    (date, time)
 }
 
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "every field is masked to at most 7 bits, so the sum stays below 2^33"
-)]
+/// Unix seconds of FAT `(date, time)`, the inverse of [`fat_datetime`].
+/// The fields are disk bytes (AGENTS rule 4): each out of range is
+/// clamped (month to 1..=12, day to 1..=31, hour to 23, minute to 59, the
+/// 2-second count to 29), never a panic.
 pub(super) fn fat_to_unix(date: u16, time: u16) -> u64 {
-    let y = ((date >> 9) & 0x7F) as u64;
-    let m = ((date >> 5) & 0xF) as u64;
-    let d = (date & 0x1F) as u64;
-    let h = ((time >> 11) & 0x1F) as u64;
-    let mi = ((time >> 5) & 0x3F) as u64;
-    let s = (time & 0x1F) as u64 * 2;
-    y * 365 * 86400
-        + m.saturating_sub(1) * 30 * 86400
-        + d.saturating_sub(1) * 86400
-        + h * 3600
-        + mi * 60
-        + s
+    let y = i32::from((date >> 9) & 0x7F);
+    let m = ((date >> 5) & 0xF).clamp(1, 12) as u8;
+    let d = (date & 0x1F).clamp(1, 31) as u8;
+    let h = ((time >> 11) & 0x1F).min(23) as u8;
+    let mi = ((time >> 5) & 0x3F).min(59) as u8;
+    let s = (time & 0x1F).min(29) as u8;
+    y.checked_add(1980)
+        .zip(s.checked_mul(2))
+        .and_then(|(year, sec)| unix_from_civil(year, m, d, h, mi, sec))
+        .unwrap_or(FAT_EPOCH_UNIX)
 }

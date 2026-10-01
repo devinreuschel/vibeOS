@@ -243,9 +243,7 @@ on the predicate. Timeout is the same path.
 `begin_wait` marked Blocked, SCHED dropped, then `drop(guard)` released the mutex. A timer in that
 window switched the waiter off-CPU still owning it; the notifier blocked on the mutex forever. Rule:
 enqueue on the CV and unlock the mutex under the same SCHED, keep IF off from that section through the
-delivery of the wakes it recorded, then schedule. `with_sched` breaks the second half: it runs
-`place_ready` for the recorded wakes after dropping SCHED, with IF back on, so a preemption there
-switches the waiter out before the woken mutex waiter is on any queue (ROADMAP §10.10, F034).
+delivery of the wakes it recorded, then schedule (ROADMAP §10.10, F034).
 
 **First-run thread `#PF`s in `schedule_inner` at `rsp = stack_top-8`.**
 `popfq` restored IF before `jmp` to the trampoline. A tick landed in that window, `schedule_preempt`
@@ -330,6 +328,15 @@ Both waited with interrupts disabled for acknowledgement the other could not sen
 also services incoming shootdown requests.
 
 ## 9.5 SMP bring-up
+
+**A CPU stops acking IPIs after the PCI scan.**
+The scan sized BARs while the APs ran. Each sizing write moves a live BAR, and QEMU's TCG rebuilds its
+memory map and flushes the other vCPUs' TLBs only later, so an AP's LAPIC EOI went through a stale
+entry to the wrong region. The timer vector stayed in service (ISR and PPR 0xF0), which masks every
+vector of class F: the AP halted in idle with the next shootdown's 0xFC pending in its IRR, and the
+BSP's `wait_acks` logged it late every second for good; other boots QEMU aborted in
+`iotlb_to_section` instead. Rule: size BARs before the first AP starts (`pci_init::scan`,
+[BOOT.md §3.3](BOOT.md#33-_start-order) step 15b); ktest `pci_scan_bsp_only`.
 
 **An AP reads garbage parameters and dies.**
 The trampoline parameter block was written with a non-volatile copy, and the compiler was free to

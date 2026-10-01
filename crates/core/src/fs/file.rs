@@ -78,11 +78,45 @@ impl Vfs {
     /// Open a file on the resolved dentry `p` (C-FILEAPI's `open`
     /// locked step): the file counts the inode, the mount and the dentry.
     pub fn open(&mut self, p: PathRef, flags: OpenFlags) -> Result<FileId, FsError> {
+        self.open_in(None, p, flags)
+    }
+
+    /// [`Self::open`] into `slot`, which [`Self::file_reserve`] reserved
+    /// (`None`: a free slot). On an error a reserved slot stays reserved.
+    fn open_in(
+        &mut self,
+        slot: Option<u16>,
+        p: PathRef,
+        flags: OpenFlags,
+    ) -> Result<FileId, FsError> {
         let islot = self.d_islot(p.dslot)?;
         open_check(self.inodes[islot as usize].kind, flags)?;
-        let id = self.file_alloc(islot, p.mount, Some(p.dslot), flags)?;
+        let id = self.file_alloc(slot, islot, p.mount, Some(p.dslot), flags)?;
         self.stats.opens = self.stats.opens.saturating_add(1);
         Ok(id)
+    }
+
+    /// Reserve a free open-file slot for an `open` that has yet to walk,
+    /// create or truncate: `NFile` while the table is full (ENFILE).
+    pub fn file_reserve(&mut self) -> Result<u16, FsError> {
+        let i = self
+            .files
+            .iter()
+            .position(|f| !f.used && !f.reserved)
+            .ok_or(FsError::NFile)?;
+        self.files[i].reserved = true;
+        Ok(i as u16)
+    }
+
+    /// Give back a slot [`Self::file_reserve`] reserved that no file
+    /// filled.
+    pub fn file_unreserve(&mut self, slot: u16) {
+        if let Some(f) = self.files.get_mut(slot as usize)
+            && f.reserved
+            && !f.used
+        {
+            f.reserved = false;
+        }
     }
 
     /// Open a file on the inode `r` names, which a walk outside the
@@ -92,7 +126,7 @@ impl Vfs {
         let sb = self.inodes[i].sb;
         let res = match open_check(self.inodes[i].kind, flags) {
             Ok(()) => match self.mounts.iter().position(|m| m.used && m.sb == sb) {
-                Some(m) => self.file_alloc(i as u16, m as u8, None, flags),
+                Some(m) => self.file_alloc(None, i as u16, m as u8, None, flags),
                 None => Err(FsError::Io),
             },
             Err(e) => Err(e),
@@ -139,19 +173,27 @@ impl Vfs {
     }
 
     /// An open file on inode `islot` through `mount`, pinning dentry
-    /// `dslot` when it has one: it counts one reference to each.
+    /// `dslot` when it has one: it counts one reference to each. It fills
+    /// the reserved slot `slot`, or with none a free one.
     fn file_alloc(
         &mut self,
+        slot: Option<u16>,
         islot: u16,
         mount: u8,
         dslot: Option<u16>,
         flags: OpenFlags,
     ) -> Result<FileId, FsError> {
-        let i = self
-            .files
-            .iter()
-            .position(|f| !f.used)
-            .ok_or(FsError::NFile)?;
+        let i = match slot {
+            Some(s) => match self.files.get(s as usize) {
+                Some(f) if f.reserved && !f.used => s as usize,
+                _ => return Err(FsError::Badf),
+            },
+            None => self
+                .files
+                .iter()
+                .position(|f| !f.used && !f.reserved)
+                .ok_or(FsError::NFile)?,
+        };
         let mrefs = self.mounts[mount as usize]
             .refs
             .checked_add(1)
@@ -169,6 +211,7 @@ impl Vfs {
         let g = self.files[i].r#gen;
         self.files[i] = File {
             used: true,
+            reserved: false,
             refs: 1,
             r#gen: g,
             islot,
@@ -333,7 +376,7 @@ impl Vfs {
                 let up = match f.dslot {
                     Some(d) => {
                         let (mut m, mut ds) = (f.mount, d);
-                        self.dotdot(&mut m, &mut ds);
+                        self.dotdot(None, &mut m, &mut ds);
                         self.inodes[self.d_islot(ds)? as usize].ino
                     }
                     None => ino.ino,
@@ -381,17 +424,39 @@ impl Vfs {
 
 impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// Open `path` (C-FILEAPI `open`): `O_CREAT` creates a regular file
-    /// that is not there, `O_TRUNC` empties a regular file.
+    /// that is not there, `O_TRUNC` empties a regular file. The open-file
+    /// slot is reserved before anything is created or truncated, so with
+    /// the table full (`NFile`) a failed `open` changes no file.
     pub fn open(
         &self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
+        path: &[u8],
+        flags: OpenFlags,
+        mode: u32,
+    ) -> Result<FileRef, FsError> {
+        let slot = self.with(|v| v.file_reserve())?;
+        match self.open_slot(slot, base, path, flags, mode) {
+            Ok(f) => self.opened(f, flags),
+            Err(e) => {
+                self.with(|v| v.file_unreserve(slot));
+                Err(e)
+            }
+        }
+    }
+
+    /// [`Self::open`]'s walk and create, filling the reserved `slot`;
+    /// the truncate follows in [`Self::opened`].
+    fn open_slot(
+        &self,
+        slot: u16,
+        base: Option<WalkBase>,
         path: &[u8],
         flags: OpenFlags,
         mode: u32,
     ) -> Result<FileRef, FsError> {
         let follow = !flags.has(O_NOFOLLOW);
         if flags.has(O_CREAT) {
-            match self.walk(cwd, path, follow) {
+            match self.walk(base, path, follow) {
                 Ok(p) => {
                     self.put_path(p);
                     if flags.has(O_EXCL) {
@@ -401,9 +466,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                 Err(FsError::NotFound) => {
                     let mode = file_mode(mode) | S_IFREG;
                     if (self.hooks.open_race)() {
-                        self.create(cwd, path, InodeKind::Reg, mode, None)?;
+                        self.create(base, path, InodeKind::Reg, mode, None)?;
                     }
-                    match self.create(cwd, path, InodeKind::Reg, mode, None) {
+                    match self.create(base, path, InodeKind::Reg, mode, None) {
                         Ok(()) => {}
                         // Created since the walk: without O_EXCL, open it.
                         Err(FsError::Exists) if !flags.has(O_EXCL) => {}
@@ -413,13 +478,13 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                 Err(e) => return Err(e),
             }
         }
-        let p = self.walk(cwd, path, follow)?;
+        let p = self.walk(base, path, follow)?;
         let id = self.step(|v| {
-            let r = v.open(p, flags);
+            let r = v.open_in(Some(slot), p, flags);
             v.path_put(p);
             r
         })?;
-        self.opened(FileRef::from_raw(id), flags)
+        Ok(FileRef::from_raw(id))
     }
 
     /// Finish an open: truncate a regular file for `O_TRUNC`.
@@ -573,8 +638,8 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     /// Set the size of the regular file `path` names.
-    pub fn truncate(&self, cwd: Option<PathRef>, path: &[u8], size: u64) -> Result<(), FsError> {
-        let p = self.walk(cwd, path, true)?;
+    pub fn truncate(&self, base: Option<WalkBase>, path: &[u8], size: u64) -> Result<(), FsError> {
+        let p = self.walk(base, path, true)?;
         let r = self
             .with(|v| v.islot(p).and_then(|i| v.truncate_begin(i)))
             .and_then(|mut c| {

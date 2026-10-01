@@ -1324,3 +1324,130 @@ fn vfs_fat_dotdot_deep() {
         assert_eq!(got.ino, want, "{q} reached the wrong directory");
     }
 }
+
+/// Days in `month` of `year`, from the Gregorian rule: the test's own
+/// calendar oracle.
+fn month_days(year: u16, month: u16) -> u16 {
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn ymd(date: u16) -> (u16, u16, u16) {
+    (1980 + (date >> 9), (date >> 5) & 0xF, date & 0x1F)
+}
+
+/// Every day from 1980-01-01 through 2107-12-31, at 00:00:00, 23:59:58
+/// and an even time that varies by day, packs and unpacks to itself, and
+/// each day's date is the calendar successor of the day before.
+#[test]
+fn datetime_round_trips_every_day_1980_2107() {
+    let days = (FAT_LAST_UNIX - FAT_EPOCH_UNIX) / 86400 + 1;
+    assert_eq!(days, 46_751);
+    let mut prev: Option<(u16, u16, u16)> = None;
+    for day in 0..days {
+        let base = FAT_EPOCH_UNIX + day * 86400;
+        let vary = (day * 7919 * 2) % 86400;
+        for t in [base, base + 86398, base + vary] {
+            let (date, time) = fat_datetime(t);
+            assert_eq!(fat_to_unix(date, time), t, "day {day} t {t}");
+        }
+        let cur = ymd(fat_datetime(base).0);
+        if let Some((y, m, d)) = prev {
+            let want = if d < month_days(y, m) {
+                (y, m, d + 1)
+            } else if m < 12 {
+                (y, m + 1, 1)
+            } else {
+                (y + 1, 1, 1)
+            };
+            assert_eq!(cur, want, "day {day}");
+        } else {
+            assert_eq!(cur, (1980, 1, 1));
+        }
+        prev = Some(cur);
+    }
+    assert_eq!(prev, Some((2107, 12, 31)));
+    assert_eq!(fat_datetime(FAT_EPOCH_UNIX), (0x0021, 0));
+    assert_eq!(fat_datetime(FAT_LAST_UNIX), (0xFF9F, 0xBF7D));
+}
+
+#[test]
+fn datetime_anchor_dates() {
+    // 2000 is a leap year (divisible by 400).
+    let feb29 = fat_datetime(951_782_400);
+    assert_eq!(ymd(feb29.0), (2000, 2, 29));
+    // 2100 is not (divisible by 100, not by 400).
+    assert_eq!(ymd(fat_datetime(4_107_542_400 - 86_400).0), (2100, 2, 28));
+    assert_eq!(ymd(fat_datetime(4_107_542_400).0), (2100, 3, 1));
+    assert_eq!(fat_datetime(1_262_304_000), (0x3C21, 0));
+    // u32::MAX is 2106-02-07 06:28:15; FAT keeps the even second.
+    let (date, time) = fat_datetime(u64::from(u32::MAX));
+    assert_eq!(ymd(date), (2106, 2, 7));
+    assert_eq!(
+        (time >> 11, (time >> 5) & 0x3F, (time & 0x1F) * 2),
+        (6, 28, 14)
+    );
+    assert_eq!(fat_to_unix(date, time), u64::from(u32::MAX) - 1);
+}
+
+#[test]
+fn datetime_clamps_outside_fat_range() {
+    assert_eq!(fat_datetime(0), fat_datetime(FAT_EPOCH_UNIX));
+    assert_eq!(fat_datetime(0), (0x0021, 0));
+    assert_eq!(fat_datetime(u64::MAX), fat_datetime(FAT_LAST_UNIX));
+    assert_eq!(fat_datetime(u64::MAX), (0xFF9F, 0xBF7D));
+}
+
+#[test]
+fn to_unix_clamps_invalid_fields() {
+    let day = |y: u16, m: u16, d: u16| ((y - 1980) << 9) | (m << 5) | d;
+    let t = |h: u16, mi: u16, s2: u16| (h << 11) | (mi << 5) | s2;
+    // Month 0 and 15 clamp to January and December.
+    assert_eq!(
+        fat_to_unix(day(2010, 0, 1), 0),
+        fat_to_unix(day(2010, 1, 1), 0)
+    );
+    assert_eq!(
+        fat_to_unix(day(2010, 15, 1), 0),
+        fat_to_unix(day(2010, 12, 1), 0)
+    );
+    // Day 0 clamps to the 1st.
+    assert_eq!(
+        fat_to_unix(day(2010, 3, 0), 0),
+        fat_to_unix(day(2010, 3, 1), 0)
+    );
+    // Hour 31, minute 63 and seconds field 31 clamp to 23:59:58.
+    let end = fat_to_unix(day(2010, 3, 1), t(23, 59, 29));
+    assert_eq!(fat_to_unix(day(2010, 3, 1), t(31, 63, 31)), end);
+    assert_eq!(
+        fat_to_unix(day(2010, 3, 1), t(31, 0, 0)),
+        fat_to_unix(day(2010, 3, 1), t(23, 0, 0))
+    );
+    assert_eq!(
+        fat_to_unix(day(2010, 3, 1), t(0, 63, 0)),
+        fat_to_unix(day(2010, 3, 1), t(0, 59, 0))
+    );
+    assert_eq!(
+        fat_to_unix(day(2010, 3, 1), t(0, 0, 31)),
+        fat_to_unix(day(2010, 3, 1), t(0, 0, 29))
+    );
+    // Every field at its widest decodes without a panic.
+    assert!(fat_to_unix(u16::MAX, u16::MAX) <= FAT_LAST_UNIX + 86400 * 3);
+}
+
+/// `mkinitrd` stamps its files at 2010-01-01, and the dirent reads back
+/// as written.
+#[test]
+fn initrd_mtime_reads_back() {
+    let mut b = vec![0u8; IMG];
+    mkinitrd(&mut b).unwrap();
+    with_vol(&mut b, |v, d| {
+        let h = v.lookup(d, v.info.root_clus, b"hello.txt").unwrap();
+        assert_eq!(h.mtime, 1_262_304_000);
+    });
+}

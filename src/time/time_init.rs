@@ -647,13 +647,6 @@ pub fn tsc_max_skew() -> u64 {
 }
 
 /// Wall-clock seconds, RTC at boot plus uptime.
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "ROADMAP §10.4 FAT timestamps: `FatVol::now` follows `time_init::unix_time_s()`"
-    )
-)]
 pub fn unix_time_s() -> Option<u64> {
     let st = STATE.try_get()?;
     st.rtc.map(|o| wall_unix_s(o, now_ns()))

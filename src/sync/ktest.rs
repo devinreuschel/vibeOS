@@ -360,11 +360,11 @@ const CELL_CASES: &[CellCase] = &[
         count: 1,
     },
     CellCase {
-        name: "file_init::CWD",
+        name: "shell::cmds::fs::CWD_REF",
         take: || {
-            let _ = crate::file_init::cwd_copy();
+            let _ = crate::shell::cmds::fs::shell_cwd();
         },
-        file: "src/fs/file_init.rs",
+        file: "src/shell/cmds/fs.rs",
         rank: RANK_DEVICE,
         count: 1,
     },
@@ -971,6 +971,111 @@ pub(crate) fn test_op_gate_kill_sleeps() -> Outcome {
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
+/// `condvar_notifier_queued`'s mutex, condvar and state.
+static CNQ_M: BlockingMutex<u32> = BlockingMutex::new(0);
+static CNQ_CV: Condvar = Condvar::new();
+/// The notifier's tid, `u32::MAX` until it starts.
+static CNQ_NOTIFIER: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Set by the notifier once it holds the mutex, before it notifies.
+static CNQ_NOTIFIED: AtomicBool = AtomicBool::new(false);
+/// Set by each thread as it finishes.
+static CNQ_WAITER_DONE: AtomicBool = AtomicBool::new(false);
+static CNQ_NOTIFIER_DONE: AtomicBool = AtomicBool::new(false);
+/// Set by the waiter once it holds the mutex.
+static CNQ_LOCKED: AtomicBool = AtomicBool::new(false);
+/// Set by the waiter when the notifier never blocked on the mutex.
+static CNQ_NO_QUEUE: AtomicBool = AtomicBool::new(false);
+
+/// Holds the mutex until the notifier is queued on it, then waits on the
+/// condvar with the preempt hook armed for itself: `wait`'s one SCHED
+/// section blocks it and records the notifier's wake.
+fn cnq_waiter() {
+    let mut g = CNQ_M.lock();
+    CNQ_LOCKED.store(true, Ordering::Release);
+    let queued = sleep_until(
+        || {
+            let n = CNQ_NOTIFIER.load(Ordering::Acquire);
+            n != u32::MAX
+                && matches!(
+                    thread_init::try_state(vibeos::thread::ThreadId(n)),
+                    Some(vibeos::thread::ThreadState::Blocked { .. })
+                )
+        },
+        2_000,
+    );
+    if !queued {
+        CNQ_NO_QUEUE.store(true, Ordering::Release);
+        drop(g);
+        CNQ_WAITER_DONE.store(true, Ordering::Release);
+        return;
+    }
+    thread_init::ktest_preempt_before_places(thread_init::current_id());
+    while !CNQ_NOTIFIED.load(Ordering::Acquire) {
+        g = CNQ_CV.wait(g);
+    }
+    *g += 1;
+    drop(g);
+    CNQ_WAITER_DONE.store(true, Ordering::Release);
+}
+
+/// Queues on the mutex the waiter holds; once it has it, notifies.
+fn cnq_notifier() {
+    CNQ_NOTIFIER.store(thread_init::current_id().raw(), Ordering::Release);
+    let mut g = CNQ_M.lock();
+    *g += 1;
+    CNQ_NOTIFIED.store(true, Ordering::Release);
+    CNQ_CV.notify_one();
+    drop(g);
+    CNQ_NOTIFIER_DONE.store(true, Ordering::Release);
+}
+
+/// F034: the notifier is queued on the mutex when the waiter calls
+/// `Condvar::wait`, whose SCHED section blocks the waiter and records the
+/// notifier's wake; a reschedule IPI then lands before `with_sched` places
+/// that wake. Both threads must finish.
+pub(crate) fn test_condvar_notifier_queued() -> Outcome {
+    CNQ_NOTIFIER.store(u32::MAX, Ordering::Relaxed);
+    CNQ_NOTIFIED.store(false, Ordering::Relaxed);
+    CNQ_WAITER_DONE.store(false, Ordering::Relaxed);
+    CNQ_NOTIFIER_DONE.store(false, Ordering::Relaxed);
+    CNQ_NO_QUEUE.store(false, Ordering::Relaxed);
+    CNQ_LOCKED.store(false, Ordering::Relaxed);
+    *CNQ_M.lock() = 0;
+    let cpu = Some(thread_init::current_cpu());
+    let opts = thread_init::SpawnOpts {
+        stack_pages: vibeos::kva::DEFAULT_STACK_PAGES,
+        cpu,
+    };
+    if thread_init::spawn_opts("cnq-wait", cnq_waiter, opts).is_err() {
+        return Outcome::Fail("spawn waiter");
+    }
+    // The waiter holds the mutex before the notifier asks for it.
+    if !sleep_until(|| CNQ_LOCKED.load(Ordering::Acquire), 2_000) {
+        return Outcome::Fail("waiter never locked");
+    }
+    if thread_init::spawn_opts("cnq-notify", cnq_notifier, opts).is_err() {
+        return Outcome::Fail("spawn notifier");
+    }
+    let done = sleep_until(
+        || CNQ_WAITER_DONE.load(Ordering::Acquire) && CNQ_NOTIFIER_DONE.load(Ordering::Acquire),
+        2_000,
+    );
+    if CNQ_NO_QUEUE.load(Ordering::Acquire) {
+        return Outcome::Fail("notifier never queued on the mutex");
+    }
+    if !done {
+        return crate::fail_fmt!(
+            "notifier stranded: waiter done {}, notifier done {}",
+            CNQ_WAITER_DONE.load(Ordering::Acquire),
+            CNQ_NOTIFIER_DONE.load(Ordering::Acquire)
+        );
+    }
+    if *CNQ_M.lock() != 2 {
+        return Outcome::Fail("count");
+    }
+    Outcome::Ok
+}
+
 pub(crate) const TESTS: &[Test] = &[
     test("irqcell_reentry_panics", test_irqcell_reentry_panics),
     test("bootcell_set_once", test_bootcell_set_once).once(),
@@ -1001,4 +1106,5 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("cross_cpu_cells_ranked", test_cross_cpu_cells_ranked),
     test("op_gate_kill_sleeps", test_op_gate_kill_sleeps).once(),
+    test("condvar_notifier_queued", test_condvar_notifier_queued),
 ];

@@ -13,12 +13,29 @@ pub(super) fn finish_exit(wait_status: u32, fault: Option<u64>) -> ! {
     if pid == 0 {
         thread_init::exit_current();
     }
+    // An exit from a fault the syscall return path found
+    // (`syscall_init::vibeos_syscall_bad_rip`) arrives with IF=0, its GS
+    // already the kernel's (`try_user_fault`). It runs as a CPL-3 fault's
+    // body does, with IF=1 (DESIGN §2.9 rule 3): the puts below sleep for
+    // the VFS lock.
+    if !crate::arch::current::interrupts_enabled() {
+        crate::arch::current::irq_enable();
+    }
     if pid == INIT_PID {
         init_exited(wait_status, fault);
     }
     // The files first, in batches off the table lock, while the slot is
     // still this process's: once it is a zombie its parent may free it.
+    // Then its root and working directory, taken out under the table lock
+    // and put after it, since a put sleeps for the VFS lock.
     close_all_fds(pid, "exit");
+    let (root, cwd) = with_table(|t| match t.get_mut(pid) {
+        Some(p) => (p.root.take(), p.cwd.take()),
+        None => (None, None),
+    });
+    for r in [root, cwd].into_iter().flatten() {
+        file_init::dir_put(r);
+    }
     let (old, ppid, tid) = thread_init::with_sched(|s| {
         table_locked(|t| {
             if reparent_children(s, t, pid)
@@ -260,7 +277,7 @@ pub(super) fn sys_psinfo(buf: u64, len: usize) -> SysResult {
     if !user_range_ok(buf, len) {
         return Err(KError::Fault);
     }
-    let mut tmp = [0u8; 512];
+    let mut tmp = [0u8; PS_BUF];
     let n = format_ps(&mut tmp);
     let take = usize::try_from(len).map_or(n, |l| n.min(l));
     if take == 0 {
@@ -272,77 +289,111 @@ pub(super) fn sys_psinfo(buf: u64, len: usize) -> SysResult {
     }
 }
 
-/// Processes `format_ps` copies out of the table per lock hold.
+/// Processes `format_ps` reads from the table per lock hold.
 const PS_CHUNK: usize = 16;
+/// The buffer `format_ps` fills for psinfo and `write_ps`.
+const PS_BUF: usize = 512;
+/// Most lines that fit in `PS_BUF`: the shortest, `1 0 run  0\n`, is 11
+/// bytes, so `format_ps` needs the `PS_LINES` lowest pids at most.
+const PS_LINES: usize = PS_BUF / 11;
 
 fn format_ps(out: &mut [u8]) -> usize {
-    // One `<pid> <ppid> <state> <name>\n` line per process, whole lines
-    // only, written with `fmt_util` into `out` (no allocation, DESIGN §4.4).
-    // The table is read a chunk at a time, each under its own lock hold.
-    let mut w = 0usize;
+    // One `<pid> <ppid> <state> <name> <syscalls>\n` line per process, in
+    // pid order, whole lines only, written with `fmt_util` into `out` (no
+    // allocation, DESIGN §4.4). The table is read a chunk at a time, each
+    // under its own lock hold, keeping the `PS_LINES` lowest pids; their
+    // syscall counts are then summed in one pass over the thread table
+    // (`thread_init::sum_syscalls`).
+    let mut sums = [(0u32, 0u64); PS_LINES];
+    let mut rest = [(0u32, ProcState::Unused, ""); PS_LINES];
+    let mut n = 0usize;
     let mut start = 0usize;
     loop {
-        let (snap, n, next) = with_table(|t| {
-            let mut s = [(0u32, 0u32, ProcState::Unused, ""); PS_CHUNK];
-            let mut n = 0usize;
+        let next = with_table(|t| {
             let mut i = start;
-            while n < s.len() {
-                let Some(p) = t.procs.get(i) else {
-                    break;
-                };
-                if p.state != ProcState::Unused
-                    && let Some(e) = s.get_mut(n)
-                {
-                    *e = (p.pid, p.ppid, p.state, p.name);
-                    n += 1;
-                }
+            while i < start.saturating_add(PS_CHUNK) {
+                let p = t.procs.get(i)?;
                 i += 1;
+                if p.state == ProcState::Unused {
+                    continue;
+                }
+                let pos = sums
+                    .iter()
+                    .take(n)
+                    .position(|&(q, _)| q > p.pid)
+                    .unwrap_or(n);
+                if n < PS_LINES {
+                    n += 1;
+                } else if pos == n {
+                    continue;
+                }
+                // Make room at `pos`, dropping the highest pid when full.
+                if let (Some(a), Some(b)) = (sums.get_mut(pos..n), rest.get_mut(pos..n)) {
+                    a.rotate_right(1);
+                    b.rotate_right(1);
+                }
+                if let (Some(a), Some(b)) = (sums.get_mut(pos), rest.get_mut(pos)) {
+                    *a = (p.pid, 0);
+                    *b = (p.ppid, p.state, p.name);
+                }
             }
-            (s, n, i)
+            Some(i)
         });
-        let done = write_ps_lines(out, &mut w, snap.get(..n).unwrap_or(&[]));
-        if n < snap.len() || !done {
-            return w;
+        match next {
+            Some(i) => start = i,
+            None => break,
         }
-        start = next;
     }
+    let sums = sums.get_mut(..n).unwrap_or(&mut []);
+    thread_init::sum_syscalls(sums);
+    let mut w = 0usize;
+    for (&(pid, count), &(ppid, st, name)) in sums.iter().zip(rest.iter()) {
+        if !write_ps_line(out, &mut w, pid, ppid, st, name, count) {
+            break;
+        }
+    }
+    w
 }
 
-/// Append one line per entry of `snap` to `out` at `*w`, whole lines only.
-/// True when every line fit.
-fn write_ps_lines(
+/// Append one process's line to `out` at `*w`, whole or not at all. True
+/// when it fit.
+fn write_ps_line(
     out: &mut [u8],
     w: &mut usize,
-    snap: &[(u32, u32, ProcState, &'static str)],
+    pid: u32,
+    ppid: u32,
+    st: ProcState,
+    name: &str,
+    count: u64,
 ) -> bool {
-    for &(pid, ppid, st, name) in snap {
-        let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
-        let parts: [&[u8]; 8] = [
-            fmt_util::write_dec(u64::from(pid), &mut a),
-            b" ",
-            fmt_util::write_dec(u64::from(ppid), &mut b),
-            b" ",
-            st.name().as_bytes(),
-            b" ",
-            name.as_bytes(),
-            b"\n",
-        ];
-        let len = parts.iter().map(|p| p.len()).sum::<usize>();
-        let Some(mut dst) = out.get_mut(*w..).and_then(|r| r.get_mut(..len)) else {
-            return false;
-        };
-        for p in parts {
-            let (head, rest) = dst.split_at_mut(p.len());
-            head.copy_from_slice(p);
-            dst = rest;
-        }
-        *w += len;
+    let (mut a, mut b, mut c) = ([0u8; 20], [0u8; 20], [0u8; 20]);
+    let parts: [&[u8]; 10] = [
+        fmt_util::write_dec(u64::from(pid), &mut a),
+        b" ",
+        fmt_util::write_dec(u64::from(ppid), &mut b),
+        b" ",
+        st.name().as_bytes(),
+        b" ",
+        name.as_bytes(),
+        b" ",
+        fmt_util::write_dec(count, &mut c),
+        b"\n",
+    ];
+    let len = parts.iter().map(|p| p.len()).sum::<usize>();
+    let Some(mut dst) = out.get_mut(*w..).and_then(|r| r.get_mut(..len)) else {
+        return false;
+    };
+    for p in parts {
+        let (head, rest) = dst.split_at_mut(p.len());
+        head.copy_from_slice(p);
+        dst = rest;
     }
+    *w += len;
     true
 }
 
 pub fn write_ps(w: &mut impl Write) {
-    let mut tmp = [0u8; 512];
+    let mut tmp = [0u8; PS_BUF];
     let n = format_ps(&mut tmp);
     let s = core::str::from_utf8(&tmp[..n]).unwrap_or("");
     for line in s.lines() {

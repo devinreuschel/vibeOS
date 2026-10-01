@@ -11,6 +11,7 @@ mod exec_args;
 mod pid1;
 mod process;
 mod syscalls;
+mod utils;
 
 /// `/bin/tests`' first line.
 pub const BANNER: &[u8] = b"user: tests begin\n";
@@ -26,4 +27,5 @@ pub const SUITES: &[fn(&mut utest::Runner)] = &[
     exec_args::run, // execve's argv and envp, and their limits
     console::run,   // forged kernel lines
     pid1::run,      // init cannot be killed or stopped
+    utils::run,     // the /bin utilities and /bin/sh
 ];

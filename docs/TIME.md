@@ -57,8 +57,7 @@ Serialize around `rdtsc`. Out-of-order execution can move the read across the in
 
 The BSP calibrates `tsc_per_ms` once (`time_init::init`), and every CPU uses that value through
 `time_init::tsc_per_ms()`: delays, the TSC-deadline arm, and `now_ns` when the TSC is the clocksource
-(§6.4). Each CPU's `PerCpu.tsc_per_ms`
-holds a copy that only an in-guest test reads (ROADMAP §10.7 deletes it, F111). The LAPIC periodic
+(§6.4). The LAPIC periodic
 count is also measured once, on the BSP, and `apic_init::arm_ap` reuses it on every AP. Both assume
 one TSC rate and one LAPIC timer rate on every CPU. `time_init::init` checks the invariant TSC CPUID
 bit and prints `vibeOS: time: invariant tsc absent` when it is clear, because everything downstream
@@ -266,15 +265,26 @@ Sleeps and timeouts need a data structure, not a linear scan of every thread on 
   uninterruptible wait with no deadline, such as one for a sleeping lock ([§2.1](INVARIANTS.md#21-lock-order)), is
   where a lost wake hangs a thread for good.
 - The blocked-thread sweep: every `SWEEP_TICKS` ticks CPU 0 reports each `Blocked` or `Sleeping`
-  thread whose recorded deadline is at least `OVERDUE_NS` (5 s) past. The timeout path would have
-  woken it, so its timeout entry was lost (ROADMAP §10.7). ROADMAP §25.5 extends the sweep to
+  thread whose recorded deadline is at least `OVERDUE_NS` (5 s) past, as
+  `vibeOS: sched: overdue tid <id>`, a registered failure line. The timeout path would have woken
+  it, so its timeout entry was lost or never queued (ROADMAP §10.7). A thread records its deadline
+  in its state: `Sleeping { deadline }`, and `Blocked { wq, deadline }`, which `Sched::begin_wait`
+  sets to the deadline it queues (`FAR_DEADLINE`, never overdue, for a wait with none). The check
+  is portable, `vibeos::sched::find_overdue`, which scans in tid order from a cursor so that
+  successive calls reach every overdue thread whatever their number. It runs on `sched-sweep`, a
+  kernel thread pinned to CPU 0 (`thread_init::sweep`), that sleeps `SWEEP_TICKS` ticks, scans the
+  thread table 64 TCBs per SCHED hold with IF off, yields between holds, and prints from thread
+  context. The scan first ran in CPU 0's `schedule_inner`, but over 1,024 TCBs in one hold it
+  measured above ROADMAP §10.7's 20 µs under TCG: `sched_sweep_cost` printed max 815 µs, median
+  108 µs at commit d4580d1 on an Intel(R) Xeon(R) Processor @ 2.80GHz (4 CPUs). Per 64-TCB hold it
+  measured max 191 µs, median 19 µs, and on a second run max 105 µs, median 31 µs, at commit
+  71fd409 on the same host, where an empty SCHED hold alone reached 362 µs, so the maxima are
+  TCG and host noise. ROADMAP §25.5 extends the sweep to
   uninterruptible waits with no deadline, each reported once it has lasted 120 s, Linux's
   `hung_task_timeout_secs` default, or the largest stall bound S among registered block devices
   where that is larger ([§10.3](BLOCK.md#103-failure)). An interruptible wait is never reported, however
   long: an idle server's `epoll_wait` is one. A stall of the timer itself is for ROADMAP §25.5's
-  lockup detectors. Not yet built: `ThreadState::Blocked` records no deadline, and today's sweep
-  scans the timeout queue after `pop_expired_into` has drained every expired entry, so it never
-  reports (F111).
+  lockup detectors (F111).
 
 ## 6.6 Tickless and wall clock
 

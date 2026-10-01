@@ -1,13 +1,13 @@
 use super::testfs::*;
 use super::*;
 
-fn ram() -> Vfs {
+pub(super) fn ram() -> Vfs {
     let mut v = crate::fs::host_vfs();
     v.mount_root_fs(ramfs()).unwrap();
     v
 }
 
-fn st_ino_of(v: &Vfs, p: PathRef) -> u32 {
+pub(super) fn st_ino_of(v: &Vfs, p: PathRef) -> u32 {
     let s = v.islot(p).unwrap();
     v.inodes[s as usize].ino
 }
@@ -140,9 +140,11 @@ fn mount_crossing_dotdot() {
     v.creat(None, "/mnt/x", 0o644).unwrap();
     let x = v.stat(None, "/mnt/x").unwrap();
     assert_eq!(x.kind, InodeKind::Reg);
-    let up = v.stat(None, "/mnt/x/..").unwrap();
+    // A file is no directory to step out of (path_resolution(7)).
+    assert_eq!(v.stat(None, "/mnt/x/..").unwrap_err(), FsError::NotDir);
+    let up = v.stat(None, "/mnt/.").unwrap();
     assert_eq!(up.ino, mnt_after.ino);
-    let root = v.stat(None, "/mnt/x/../..").unwrap();
+    let root = v.stat(None, "/mnt/./..").unwrap();
     assert_eq!(root.ino, v.stat(None, "/").unwrap().ino);
     let root2 = v.stat(None, "/mnt/..").unwrap();
     assert_eq!(root2.ino, root.ino);
@@ -294,9 +296,13 @@ fn cwd_relative_walk() {
     v.mkdir(None, "/a", 0o755).unwrap();
     v.creat(None, "/a/f", 0o644).unwrap();
     let a = v.resolve(None, "/a", true).unwrap();
-    let f = v.resolve(Some(a), "f", true).unwrap();
-    assert_eq!(v.stat(Some(a), "f").unwrap().ino, st_ino_of(&v, f));
-    let root = v.resolve(Some(a), "..", true).unwrap();
+    let base = Some(WalkBase {
+        root: v.root().unwrap(),
+        cwd: a,
+    });
+    let f = v.resolve(base, "f", true).unwrap();
+    assert_eq!(v.stat(base, "f").unwrap().ino, st_ino_of(&v, f));
+    let root = v.resolve(base, "..", true).unwrap();
     assert_eq!(st_ino_of(&v, root), st_ino_of(&v, v.root().unwrap()));
 }
 
@@ -340,7 +346,7 @@ fn fixed_tables_match_limits() {
 
 /// Negative lookups of fresh names under `dir` until the dentry cache
 /// has evicted `n` more dentries.
-fn press(v: &mut Vfs, dir: &str, n: u32, seq: &mut u32) {
+pub(super) fn press(v: &mut Vfs, dir: &str, n: u32, seq: &mut u32) {
     let goal = v.stats.d_evicts.saturating_add(n);
     while v.stats.d_evicts < goal {
         let p = format!("{dir}/n{}", *seq);
@@ -398,7 +404,7 @@ fn dcache_f065_reused_slot_never_aliases() {
 /// Every used dentry is held exactly by its children, the mounts on
 /// it and, for a root, its superblock; a non-root dentry's parent is
 /// used, positive and in the same superblock.
-fn assert_dcache_sound(v: &Vfs) {
+pub(super) fn assert_dcache_sound(v: &Vfs) {
     let mut i = 0usize;
     while i < v.dentries.len() {
         let d = &v.dentries[i];
@@ -414,7 +420,7 @@ fn assert_dcache_sound(v: &Vfs) {
 }
 
 /// Mount `fs` on `at` from block device `dev`.
-fn mount_dev(
+pub(super) fn mount_dev(
     v: &mut Vfs,
     at: &str,
     fs: &'static dyn FileSystem,
@@ -705,7 +711,7 @@ fn second_mount_of_device_shares_super() {
         v.stat(None, "/a/f").unwrap().ino
     );
     assert_eq!(
-        v.stat(None, "/b/f/..").unwrap().ino,
+        v.stat(None, "/b/.").unwrap().ino,
         v.stat(None, "/a").unwrap().ino
     );
     let mut again = ram();
@@ -795,7 +801,7 @@ fn two_mounts_one_dentry_per_name() {
     v.umount(None, "/a").unwrap();
     assert_eq!(v.resolve(None, "/b/d/x", true).unwrap().dslot, bx.dslot);
     assert_eq!(
-        v.stat(None, "/b/d/x/../../..").unwrap().ino,
+        v.stat(None, "/b/d/../..").unwrap().ino,
         v.stat(None, "/").unwrap().ino
     );
     assert_dcache_sound(&v);
@@ -1280,7 +1286,7 @@ fn inode_ops_unsupported_errno() {
     assert_eq!(ops.sync(&mut cx), Ok(()));
     assert_eq!(ops.evict(&mut cx, &a), Ok(()));
     assert_eq!(ops.check_seek(&mut cx, &a), Ok(()));
-    ops.kill_sb(&mut cx);
+    ops.release(&mut cx);
 
     // FAT's `symlink` and `link`, through the core adapter: `EPERM`, as on
     // Linux's vfat.

@@ -25,7 +25,7 @@ use vibeos::dev::Instance;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, Node, SEC};
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
-    Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
+    Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE, WalkBase,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -230,7 +230,8 @@ impl Disk for Io<'_> {
 }
 
 /// Run `f` on volume `v` under its lock, waiting for the holder; `Io`
-/// once the volume is retired. Never under the VFS lock.
+/// once the volume is retired. `FatVol::now` is the wall clock
+/// (`fs_init::now`) for what `f` stamps. Never under the VFS lock.
 fn with_vol<R>(
     v: &FatVolume,
     f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
@@ -239,6 +240,7 @@ fn with_vol<R>(
     if !v.used.load(Ordering::Acquire) {
         return Err(FsError::Io);
     }
+    g.now = fs_init::now();
     let mut io = Io { back: &v.media };
     f(&mut g, &mut io)
 }
@@ -291,6 +293,12 @@ fn vol_of<'a>(cx: &OpCx<'a>) -> Result<&'a FatVolume, FsError> {
 }
 
 impl InodeOps for FatOps {
+    /// FAT compares names without regard to case, so the dentry cache
+    /// does too: `/VIBE` finds the `vibe` dentry a mount is on.
+    fn name_eq(&self, cached: &[u8], asked: &[u8]) -> bool {
+        vibeos::fs::fat::eq_ci(cached, asked)
+    }
+
     fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
             let (w, _) = words(dir)?;
@@ -429,6 +437,20 @@ impl InodeOps for FatOps {
         sync(vol_of(cx)?)
     }
 
+    /// After the superblock's last mount, which is the last to show the
+    /// volume (one superblock per volume), and its sync: retire the volume
+    /// and take it from its device's entry. The superblock's own reference
+    /// goes when its slot is freed.
+    fn release(&self, cx: &mut OpCx<'_>) {
+        let Ok(vol) = vol_of(cx) else {
+            return;
+        };
+        drop_slot(vol);
+        if let Media::Dev(r) = &vol.media {
+            drop(blockdev_init::take_holder(r));
+        }
+    }
+
     fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
         with_vol(vol_of(cx)?, |v, d| {
             let (w, linked) = words(ino)?;
@@ -559,32 +581,11 @@ impl FileSystem for FatFs {
         }
     }
 
-    /// Drop `at`'s mount-table entry. After the superblock's last mount, which is the
-    /// last to show the volume (one superblock per volume), sync the
-    /// volume, retire it, and take it from its device's entry; the
-    /// superblock's own reference goes when its slot is freed.
-    fn on_umount(&self, cx: &mut OpCx<'_>, at: &[u8], last: bool) {
+    /// Drop `at`'s mount-table entry. The superblock's last unmount then
+    /// syncs it and releases its volume through [`FatOps`] (`Vfs`'s
+    /// unmount runs `sync`, then `release`).
+    fn on_umount(&self, _cx: &mut OpCx<'_>, at: &[u8], _last: bool) {
         drop(unregister_mnt(at));
-        if !last {
-            return;
-        }
-        let Ok(vol) = vol_of(cx) else {
-            return;
-        };
-        let mnt = core::str::from_utf8(at).unwrap_or("?");
-        if let Err(e) = sync(vol) {
-            crate::klog_ratelimited!(
-                1000,
-                vibeos::log::Level::Warn,
-                "vibeOS: fat: sync of {} at umount failed: {}",
-                mnt,
-                e.as_str()
-            );
-        }
-        drop_slot(vol);
-        if let Media::Dev(r) = &vol.media {
-            drop(blockdev_init::take_holder(r));
-        }
     }
 }
 
@@ -743,14 +744,20 @@ pub(super) fn drop_slot(vol: &FatVolume) {
 /// (`Busy` when `ro` differs); one holding another filesystem's volume is
 /// `Busy`. Otherwise the volume is built, becomes the entry's holder, and
 /// is taken back if the mount fails.
+#[cfg(feature = "kernel_tests")]
 pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<(), FsError> {
+    mount_dev_at(None, name, at, ro)
+}
+
+/// [`mount_dev`] on `at` from walk base `base`.
+pub fn mount_dev_at(base: Option<WalkBase>, name: &str, at: &str, ro: bool) -> Result<(), FsError> {
     let r = blockdev_init::lookup(name.as_bytes()).ok_or(FsError::NotFound)?;
     let dev = Some(r.id());
     let api = fs_init::api();
     if let Some(h) = blockdev_init::holder(&r) {
         as_fat(&h).map_err(|_| FsError::Busy)?;
         return api
-            .mount_fs(None, at.as_bytes(), &FAT_FS, dev, ro, Some(h))
+            .mount_fs(base, at.as_bytes(), &FAT_FS, dev, ro, Some(h))
             .map(|_| ());
     }
     let vol = new_volume(Media::Dev(r.clone()))?;
@@ -758,7 +765,7 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<(), FsError> {
         BlockError::Exists => FsError::Busy,
         _ => FsError::Io,
     })?;
-    match api.mount_fs(None, at.as_bytes(), &FAT_FS, dev, ro, Some(vol.clone())) {
+    match api.mount_fs(base, at.as_bytes(), &FAT_FS, dev, ro, Some(vol.clone())) {
         Ok(_) => Ok(()),
         Err(e) => {
             if !fs_init::with(|v| v.shows_volume(&vol)) {

@@ -317,7 +317,6 @@ extern "C" fn boot_rest() -> ! {
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the IDT is loaded, the PIC remapped and its lines masked, as `time_init::init` requires; established here.
     unsafe { time_init::init() };
-    per_cpu_init::set_tsc_per_ms(time_init::tsc_per_ms());
 
     // FADT bit 0 may have skipped the boot remap (QEMU clears it). IRQ0
     // still needs the 8259 at 0x20, not 0x08, if we fall back to the PIT.
@@ -373,6 +372,12 @@ extern "C" fn boot_rest() -> ! {
         |name, entry| thread_init::spawn(name, entry).is_ok(),
         thread_init::sleep_ms,
     );
+
+    // BOOT.md §3.3 step 15b: size every BAR while the BSP runs alone.
+    // SAFETY: boot order (BOOT.md §3.3): once, on the BSP, before
+    // `smp_init::init` starts an AP, as `pci_init::scan` requires;
+    // established here.
+    unsafe { crate::pci_init::scan() };
 
     // DESIGN §3.3 step 17. After the scheduler: APs enter as idle.
     // IPI vectors are in the shared IDT; install the shootdown hook

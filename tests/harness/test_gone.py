@@ -73,6 +73,12 @@ class TestFind(unittest.TestCase):
         self.assertEqual(len(run_find([macro], {"src/a.rs": "macro_rules! with_timer {\n"})), 1)
         py = "tests/harness/h.py: def old"
         self.assertEqual(len(run_find([py], {"tests/harness/h.py": "    def old(self):\n"})), 1)
+        field = "src/t.rs: pub next"
+        files = {"src/t.rs": "    pub next: Option<u32>,\n    let next = 1;\n"}
+        self.assertEqual(run_find([field], files), [
+            f"src/t.rs:1: defines pub next: {field!r} is gone (a box removed it)",
+        ])
+        self.assertEqual(run_find([field], {"src/t.rs": "    next: Option<u32>,\n"}), [])
 
     def test_makefile_and_workflow_mentions_fail(self) -> None:
         errs = run_find(["test-old"], {"Makefile": "test-old:\n",

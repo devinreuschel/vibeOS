@@ -142,14 +142,20 @@ impl Vfs {
     }
 
     /// A superblock hook returned. After the last one of a superblock
-    /// whose last mount is gone (`release`), its slot is free.
-    pub(super) fn sb_idle(&mut self, sb: u8, release: bool) {
+    /// whose last mount is gone (`release`), its slot is free, and its
+    /// count on its volume instance comes back for the caller to drop
+    /// with the lock released (DESIGN §2.11 rule 6).
+    #[must_use = "the volume instance is dropped after the VFS lock"]
+    pub(super) fn sb_idle(&mut self, sb: u8, release: bool) -> Option<Instance> {
         let s = &mut self.supers[sb as usize];
         s.busy = s.busy.saturating_sub(1);
         if release && s.busy == 0 {
             debug_assert!(s.refs == 0, "superblock released while held");
+            let vol = s.vol.take();
             *s = Super::EMPTY;
+            return vol;
         }
+        None
     }
 
     /// The next unhashed inode whose release is queued, as a call to its
@@ -359,12 +365,23 @@ impl Vfs {
     }
 
     /// Drop the dentries naming inode `i` that nothing but their own
-    /// descendants holds, releasing their counts on it without a put.
+    /// descendants holds, releasing their counts on it without a put;
+    /// the held ones lose their names.
     pub(super) fn drop_dentries_of(&mut self, i: u16) {
+        self.drop_dentries_except(i, None);
+    }
+
+    /// [`Self::drop_dentries_of`], but for dentry `keep`.
+    pub(super) fn drop_dentries_except(&mut self, i: u16, keep: Option<u16>) {
         let mut d = 0usize;
         while d < self.dentries.len() {
             let e = self.dentries[d];
-            if e.used && !e.negative && e.islot == i && !e.is_root(d as u16) {
+            if e.used
+                && !e.negative
+                && e.islot == i
+                && !e.is_root(d as u16)
+                && keep != Some(d as u16)
+            {
                 if e.refs != 0 && e.refs == self.child_count(d as u16) {
                     self.dentry_prune(d as u16);
                 }
@@ -458,7 +475,7 @@ impl Vfs {
     }
 
     /// Whether dentry `slot` lies strictly below `top`.
-    fn below(&self, slot: u16, top: u16) -> bool {
+    pub(super) fn below(&self, slot: u16, top: u16) -> bool {
         let mut cur = slot;
         let mut n = 0usize;
         while n < self.dentries.len() {
@@ -527,7 +544,10 @@ impl Vfs {
         n
     }
 
+    /// The hashed dentry `name` names in `parent`, its names compared
+    /// through the superblock's [`InodeOps::name_eq`].
     pub(super) fn dcache_peek(&self, sb: u8, parent: u16, name: &[u8]) -> Option<u16> {
+        let ops = self.sb_ops(sb);
         let mut i = 0usize;
         while i < self.dentries.len() {
             let d = &self.dentries[i];
@@ -536,13 +556,21 @@ impl Vfs {
                 && d.sb == sb
                 && d.parent == parent
                 && !d.is_root(i as u16)
-                && d.name.eq_bytes(name)
+                && ops.name_eq(d.name.as_bytes(), name)
             {
                 return Some(i as u16);
             }
             i += 1;
         }
         None
+    }
+
+    /// The ops of superblock `sb`: [`NoOps`] when it has none.
+    pub(super) fn sb_ops(&self, sb: u8) -> &'static dyn InodeOps {
+        self.supers
+            .get(sb as usize)
+            .and_then(|s| s.ops)
+            .unwrap_or(&NoOps)
     }
 
     pub(super) fn dcache_find(&mut self, sb: u8, parent: u16, name: &[u8]) -> Option<u16> {
@@ -599,6 +627,20 @@ impl Vfs {
         if self.dentries[ds as usize].used {
             self.dentries[ds as usize].dead = true;
         }
+    }
+
+    /// Forget `name` in `parent` when nothing but its descendants holds
+    /// it, as a namespace change does before its backend call: a held
+    /// dentry keeps its name until the change succeeds.
+    pub(super) fn dcache_evict_name(&mut self, sb: u8, parent: u16, name: &[u8]) {
+        let Some(ds) = self.dcache_peek(sb, parent, name) else {
+            return;
+        };
+        let d = &self.dentries[ds as usize];
+        if d.refs != 0 && d.refs == self.child_count(ds) {
+            self.dentry_prune(ds);
+        }
+        self.dentry_evict(ds);
     }
 
     pub(super) fn dcache_drop_neg_in_dir(&mut self, sb: u8, parent: u16) {
