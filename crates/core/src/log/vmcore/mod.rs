@@ -734,7 +734,45 @@ impl<'a> SliceCore<'a> {
     }
 }
 
+/// [`PhysMem::page_run`] for a memory that holds the bytes of its
+/// `(start, len)` extents: a page is held when its first byte lies in one.
+pub fn page_run(extents: impl Iterator<Item = (u64, u64)>, addr: u64, max: u64) -> (bool, u64) {
+    // The furthest end of an extent holding `addr`, and the lowest start
+    // of one above it.
+    let mut held_to: Option<u64> = None;
+    let mut next = u64::MAX;
+    for (start, len) in extents {
+        let end = start.saturating_add(len);
+        if addr >= start && addr < end {
+            held_to = Some(held_to.map_or(end, |h| h.max(end)));
+        } else if start > addr {
+            next = next.min(start);
+        }
+    }
+    let to = held_to.unwrap_or(next);
+    // The pages from `addr` whose first byte lies below `to`.
+    let pages = to.saturating_sub(addr).div_ceil(PAGE);
+    (held_to.is_some(), pages.saturating_mul(PAGE).min(max))
+}
+
 impl PhysMem for SliceCore<'_> {
+    fn page_run(&self, addr: u64, max: u64) -> (bool, u64) {
+        // `read` holds a segment's bytes the file has and the zeros past
+        // `filesz`; a truncated file drops the bytes it lacks.
+        let have = |p: &Phdr| {
+            let avail = offset(self.bytes.len()).saturating_sub(p.offset);
+            p.filesz.min(avail).min(p.memsz)
+        };
+        let extents = self.phdrs().filter(|p| p.kind == PT_LOAD).flat_map(|p| {
+            let tail = p.filesz.min(p.memsz);
+            [
+                (p.paddr, have(&p)),
+                (p.paddr.saturating_add(tail), p.memsz.saturating_sub(tail)),
+            ]
+        });
+        page_run(extents, addr, max)
+    }
+
     fn read(&self, addr: u64, buf: &mut [u8]) -> bool {
         let mut pa = addr;
         let mut done = 0usize;
@@ -753,17 +791,16 @@ impl PhysMem for SliceCore<'_> {
             let Some(dst) = done.checked_add(n).and_then(|end| buf.get_mut(done..end)) else {
                 return false;
             };
-            for (i, d) in dst.iter_mut().enumerate() {
-                let at = into.saturating_add(offset(i));
-                *d = if at < p.filesz {
-                    match add(p.offset, at).and_then(|o| bytes_at(self.bytes, o, 1)) {
-                        Ok(&[v]) => v,
-                        _ => return false,
-                    }
-                } else {
-                    0
-                };
+            // The file holds the segment's first `filesz` bytes; the rest
+            // of `memsz` reads as zero.
+            let in_file = p.filesz.saturating_sub(into);
+            let k = usize::try_from(in_file).map_or(n, |f| f.min(n));
+            let (file, zero) = dst.split_at_mut(k);
+            match add(p.offset, into).and_then(|o| bytes_at(self.bytes, o, k)) {
+                Ok(src) => file.copy_from_slice(src),
+                Err(_) => return false,
             }
+            zero.fill(0);
             done = done.saturating_add(n);
             pa = pa.saturating_add(offset(n));
         }

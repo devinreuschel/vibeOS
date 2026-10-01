@@ -41,6 +41,15 @@ pub const MAX_ISOS: usize = 32;
 /// back it with a bag of synthetic tables.
 pub trait PhysMem {
     fn read(&self, addr: u64, buf: &mut [u8]) -> bool;
+
+    /// From the 4 KiB page at `addr`: whether `read` holds the page's
+    /// first byte, and how many bytes from `addr` (whole pages but at most
+    /// `max`) give the same answer. The default probes the one page; a
+    /// memory that knows its extents answers for the whole run.
+    fn page_run(&self, addr: u64, max: u64) -> (bool, u64) {
+        let mut b = [0u8; 1];
+        (self.read(addr, &mut b), max.min(0x1000))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -103,19 +103,23 @@ impl Synth {
     }
 
     pub fn write_phys(&mut self, pa: u64, data: &[u8]) {
-        for (i, b) in data.iter().enumerate() {
-            let (seg, off) = self.seg_mut(pa + i as u64);
-            seg[off] = *b;
+        let mut done = 0;
+        while done < data.len() {
+            let (seg, off) = self.seg_mut(pa + done as u64);
+            let n = (seg.len() - off).min(data.len() - done);
+            seg[off..off + n].copy_from_slice(&data[done..done + n]);
+            done += n;
         }
     }
 
     pub fn read_phys(&mut self, pa: u64, len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|i| {
-                let (seg, off) = self.seg_mut(pa + i as u64);
-                seg[off]
-            })
-            .collect()
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            let (seg, off) = self.seg_mut(pa + out.len() as u64);
+            let n = (seg.len() - off).min(len - out.len());
+            out.extend_from_slice(&seg[off..off + n]);
+        }
+        out
     }
 
     fn pte(&mut self, table: u64, idx: usize) -> u64 {
