@@ -11,6 +11,7 @@ use vibeos::kalloc::TryVec;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::wait_exited;
 
+mod cwd;
 mod hooks;
 mod initrd;
 mod lock;
@@ -19,6 +20,7 @@ mod routing;
 mod slots;
 mod stack16k;
 
+pub(crate) use cwd::test_cwd_per_process;
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use lock::{test_fat_vol_wait_no_eio, test_vfs_io_off_lock};
@@ -1436,4 +1438,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("fat_initrd_dev_no_null", test_fat_initrd_dev_no_null),
     test("vfs_io_off_lock", test_vfs_io_off_lock),
     test("fat_vol_wait_no_eio", test_fat_vol_wait_no_eio).deadline(60_000),
+    test("cwd_per_process", test_cwd_per_process),
 ];

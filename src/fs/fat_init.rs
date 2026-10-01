@@ -25,7 +25,7 @@ use vibeos::dev::Instance;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, Node, SEC};
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
-    Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
+    Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE, WalkBase,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -743,14 +743,20 @@ pub(super) fn drop_slot(vol: &FatVolume) {
 /// (`Busy` when `ro` differs); one holding another filesystem's volume is
 /// `Busy`. Otherwise the volume is built, becomes the entry's holder, and
 /// is taken back if the mount fails.
+#[cfg(feature = "kernel_tests")]
 pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<(), FsError> {
+    mount_dev_at(None, name, at, ro)
+}
+
+/// [`mount_dev`] on `at` from walk base `base`.
+pub fn mount_dev_at(base: Option<WalkBase>, name: &str, at: &str, ro: bool) -> Result<(), FsError> {
     let r = blockdev_init::lookup(name.as_bytes()).ok_or(FsError::NotFound)?;
     let dev = Some(r.id());
     let api = fs_init::api();
     if let Some(h) = blockdev_init::holder(&r) {
         as_fat(&h).map_err(|_| FsError::Busy)?;
         return api
-            .mount_fs(None, at.as_bytes(), &FAT_FS, dev, ro, Some(h))
+            .mount_fs(base, at.as_bytes(), &FAT_FS, dev, ro, Some(h))
             .map(|_| ());
     }
     let vol = new_volume(Media::Dev(r.clone()))?;
@@ -758,7 +764,7 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<(), FsError> {
         BlockError::Exists => FsError::Busy,
         _ => FsError::Io,
     })?;
-    match api.mount_fs(None, at.as_bytes(), &FAT_FS, dev, ro, Some(vol.clone())) {
+    match api.mount_fs(base, at.as_bytes(), &FAT_FS, dev, ro, Some(vol.clone())) {
         Ok(_) => Ok(()),
         Err(e) => {
             if !fs_init::with(|v| v.shows_volume(&vol)) {

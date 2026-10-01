@@ -3,8 +3,12 @@
 //!
 //! A thin File API over `Vfs` (C-FILEAPI): every function runs
 //! [`fs_init::api`], which calls a backend only with the VFS lock dropped,
-//! so a backend may wait for its volume and its disk. Relative paths are
-//! joined with the shell's working directory. `sync` issues a block Flush
+//! so a backend may wait for its volume and its disk. Each path function
+//! has an `_at` form that takes the caller's walk base (`WalkBase`, the
+//! root and working directory a process's or the shell's `DirRef`s hold):
+//! an absolute path starts at its root, a relative one at its working
+//! directory. The C-FILEAPI forms pass none, so a kernel thread's root and
+//! working directory are `/`. `sync` issues a block Flush
 //! (DESIGN §10.2). FAT rejects symlink/link with `Perm`; vibefs stores
 //! POSIX mode and symlinks (docs/VIBEFS.md).
 //!
@@ -15,97 +19,30 @@
 use vibeos::block::MAX_BLOCKDEVS;
 use vibeos::block::blockdev::BlockRef;
 use vibeos::fs::{
-    DirEntry, FileId, FileRef, FileSystem, FsError, InodeKind, MAX_PATH, O_DIRECTORY, O_RDONLY,
-    OpenFlags, SeekFrom, Stat,
+    DirEntry, DirRef, FileId, FileRef, FileSystem, FsError, InodeKind, MAX_PATH, O_DIRECTORY,
+    O_RDONLY, OpenFlags, PathRef, SeekFrom, Stat, WalkBase,
 };
-use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
 
 use crate::block::blockdev_init;
 use crate::dev_init;
 use crate::fat_init;
 use crate::fs_init;
-use crate::sync_init::SpinMutex;
 use crate::vibefs_init;
-
-struct CwdBuf {
-    buf: [u8; MAX_PATH],
-    len: usize,
-}
-
-const fn cwd_root() -> CwdBuf {
-    let mut buf = [0u8; MAX_PATH];
-    buf[0] = b'/';
-    CwdBuf { buf, len: 1 }
-}
-
-static CWD: SpinMutex<CwdBuf> = SpinMutex::with_rank(cwd_root(), RANK_DEVICE);
-
-/// Run `f` on the working directory.
-fn with_cwd<R>(f: impl FnOnce(&mut CwdBuf) -> R) -> R {
-    let mut g = CWD.lock();
-    f(&mut g)
-}
-
-pub(crate) fn cwd_copy() -> ([u8; MAX_PATH], usize) {
-    with_cwd(|c| {
-        let mut buf = [0u8; MAX_PATH];
-        buf[..c.len].copy_from_slice(&c.buf[..c.len]);
-        (buf, c.len)
-    })
-}
-
-pub(crate) fn set_cwd(p: &[u8]) {
-    with_cwd(|c| {
-        let n = p.len().min(MAX_PATH);
-        c.buf[..n].copy_from_slice(&p[..n]);
-        c.len = n;
-    });
-}
-
-/// `path`, made absolute against the working directory, and its length.
-pub(crate) fn join_cwd(p: &[u8]) -> Result<([u8; MAX_PATH], usize), FsError> {
-    let mut out = [0u8; MAX_PATH];
-    if p.first() == Some(&b'/') {
-        if p.len() > MAX_PATH {
-            return Err(FsError::NameTooLong);
-        }
-        out[..p.len()].copy_from_slice(p);
-        return Ok((out, p.len()));
-    }
-    let cwd = cwd_copy();
-    let mut n = cwd.1;
-    if n > MAX_PATH {
-        return Err(FsError::NameTooLong);
-    }
-    out[..n].copy_from_slice(&cwd.0[..n]);
-    if n == 0 || out[n - 1] != b'/' {
-        if n >= MAX_PATH {
-            return Err(FsError::NameTooLong);
-        }
-        out[n] = b'/';
-        n += 1;
-    }
-    let end = n.checked_add(p.len()).ok_or(FsError::NameTooLong)?;
-    if end > MAX_PATH {
-        return Err(FsError::NameTooLong);
-    }
-    out[n..end].copy_from_slice(p);
-    Ok((out, end))
-}
-
-/// Run `f` on `path` made absolute.
-fn with_abs<R>(path: &[u8], f: impl FnOnce(&[u8]) -> Result<R, FsError>) -> Result<R, FsError> {
-    let (buf, n) = join_cwd(path)?;
-    f(&buf[..n])
-}
 
 // ---- C-FILEAPI ----
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
+    )
+)]
 /// Open `path`; `O_CREAT` creates a regular file with `mode`, `O_TRUNC`
 /// empties one.
 pub fn open(path: &[u8], flags: OpenFlags, mode: u32) -> Result<FileRef, FsError> {
-    with_abs(path, |p| fs_init::api().open(None, p, flags, mode))
+    open_at(None, path, flags, mode)
 }
 
 pub fn read(f: &FileRef, buf: &mut [u8]) -> Result<usize, FsError> {
@@ -150,56 +87,210 @@ pub fn readdir_from(
 
 /// Make directory `path`; one already there is kept.
 pub fn mkdir(path: &[u8], mode: u32) -> Result<(), FsError> {
-    match with_abs(path, |p| fs_init::api().mkdir(None, p, mode)) {
+    mkdir_at(None, path, mode)
+}
+
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
+    )
+)]
+pub fn unlink(path: &[u8]) -> Result<(), FsError> {
+    unlink_at(None, path)
+}
+
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
+    )
+)]
+pub fn rmdir(path: &[u8]) -> Result<(), FsError> {
+    rmdir_at(None, path)
+}
+
+#[allow(
+    dead_code,
+    reason = "C-FILEAPI's `rename` on paths; the shell and the in-guest tests call `rename_at`"
+)]
+pub fn rename(old: &[u8], new: &[u8]) -> Result<(), FsError> {
+    rename_at(None, old, new)
+}
+
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
+    )
+)]
+/// Mount `fstype` from `source` on `target`: `fat32` and `vibefs` from a
+/// block device (`ram0`, `vda`), `ramfs` from nothing.
+pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], ro: bool) -> Result<(), FsError> {
+    mount_at(None, source, target, fstype, ro)
+}
+
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
+    )
+)]
+/// Unmount the mount whose root `target` names; its superblock's last
+/// mount releases the volume.
+pub fn umount(target: &[u8]) -> Result<(), FsError> {
+    umount_at(None, target)
+}
+
+// ---- with a walk base ----
+
+/// [`open`] from `base`.
+pub fn open_at(
+    base: Option<WalkBase>,
+    path: &[u8],
+    flags: OpenFlags,
+    mode: u32,
+) -> Result<FileRef, FsError> {
+    fs_init::api().open(base, path, flags, mode)
+}
+
+/// `stat` of `path` from `base`, following a last symlink.
+pub fn stat_at(base: Option<WalkBase>, path: &[u8]) -> Result<Stat, FsError> {
+    fs_init::api().stat_path(base, path, true)
+}
+
+/// [`mkdir`] from `base`; one already there is kept.
+pub fn mkdir_at(base: Option<WalkBase>, path: &[u8], mode: u32) -> Result<(), FsError> {
+    match fs_init::api().mkdir(base, path, mode) {
         Ok(()) | Err(FsError::Exists) => Ok(()),
         Err(e) => Err(e),
     }
 }
 
-pub fn unlink(path: &[u8]) -> Result<(), FsError> {
-    unlink_path(path, false)
+pub fn unlink_at(base: Option<WalkBase>, path: &[u8]) -> Result<(), FsError> {
+    fs_init::api().unlink(base, path)
 }
 
-pub fn rmdir(path: &[u8]) -> Result<(), FsError> {
-    unlink_path(path, true)
+pub fn rmdir_at(base: Option<WalkBase>, path: &[u8]) -> Result<(), FsError> {
+    fs_init::api().rmdir(base, path)
 }
 
-fn unlink_path(path: &[u8], dir: bool) -> Result<(), FsError> {
-    with_abs(path, |p| {
-        let api = fs_init::api();
-        if dir {
-            api.rmdir(None, p)
-        } else {
-            api.unlink(None, p)
-        }
-    })
+pub fn rename_at(base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
+    fs_init::api().rename(base, old, new)
 }
 
-pub fn rename(old: &[u8], new: &[u8]) -> Result<(), FsError> {
-    let (ob, on) = join_cwd(old)?;
-    with_abs(new, |n| fs_init::api().rename(None, &ob[..on], n))
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
+    )
+)]
+/// Make `path` a symlink to `target`, from `base`.
+pub fn symlink_at(base: Option<WalkBase>, path: &[u8], target: &[u8]) -> Result<(), FsError> {
+    fs_init::api().symlink(base, path, target)
 }
 
-/// Mount `fstype` from `source` on `target`: `fat32` and `vibefs` from a
-/// block device (`ram0`, `vda`), `ramfs` from nothing.
-pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], ro: bool) -> Result<(), FsError> {
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
+    )
+)]
+/// Hard link `new` to the regular file `old`, both from `base`.
+pub fn link_at(base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
+    fs_init::api().link(base, old, new)
+}
+
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
+    )
+)]
+/// Set the size of the regular file `path` names from `base`.
+pub fn truncate_at(base: Option<WalkBase>, path: &[u8], size: u64) -> Result<(), FsError> {
+    fs_init::api().truncate(base, path, size)
+}
+
+/// [`mount`] on `target` from `base`.
+pub fn mount_at(
+    base: Option<WalkBase>,
+    source: &[u8],
+    target: &[u8],
+    fstype: &[u8],
+    ro: bool,
+) -> Result<(), FsError> {
     let src = core::str::from_utf8(source).map_err(|_| FsError::Inval)?;
-    let (buf, n) = join_cwd(target)?;
-    let at = core::str::from_utf8(&buf[..n]).map_err(|_| FsError::Inval)?;
+    let at = core::str::from_utf8(target).map_err(|_| FsError::Inval)?;
     match fstype {
-        b"fat32" => fat_init::mount_dev(src, at, ro),
-        b"vibefs" => vibefs_init::mount_dev(src, at, ro),
+        b"fat32" => fat_init::mount_dev_at(base, src, at, ro),
+        b"vibefs" => vibefs_init::mount_dev_at(base, src, at, ro),
         b"ramfs" => fs_init::api()
-            .mount_fs(None, at.as_bytes(), &fs_init::RAMFS, None, ro, None)
+            .mount_fs(base, target, &fs_init::RAMFS, None, ro, None)
             .map(|_| ()),
         _ => Err(FsError::Inval),
     }
 }
 
-/// Unmount the mount whose root `target` names; its superblock's last
-/// mount releases the volume.
-pub fn umount(target: &[u8]) -> Result<(), FsError> {
-    with_abs(target, |p| fs_init::api().umount(None, p))
+/// [`umount`] of `target` from `base`.
+pub fn umount_at(base: Option<WalkBase>, target: &[u8]) -> Result<(), FsError> {
+    fs_init::api().umount(base, target)
+}
+
+// ---- directory references ----
+
+#[cfg_attr(
+    feature = "vibefs_crash",
+    allow(dead_code, reason = "the vibefs_crash kernel starts no process")
+)]
+/// A process's first root and working directory: two references to the
+/// namespace root, or none while the VFS has no root.
+pub fn ns_refs() -> Option<(DirRef, DirRef)> {
+    let api = fs_init::api();
+    let root = api.dir_root().ok()?;
+    match api.dir_dup(root.at()) {
+        Ok(cwd) => Some((root, cwd)),
+        Err(_) => {
+            api.dir_put(root);
+            None
+        }
+    }
+}
+
+/// A reference to the directory `path` names from `base`; `NotDir` when
+/// it names something else.
+pub fn dir_get_at(base: Option<WalkBase>, path: &[u8]) -> Result<DirRef, FsError> {
+    fs_init::api().dir_get(base, path)
+}
+
+/// Another reference to directory `at`, which a reference holds.
+pub fn dir_dup(at: PathRef) -> Result<DirRef, FsError> {
+    fs_init::api().dir_dup(at)
+}
+
+/// Drop a directory reference. Sleeps for the VFS lock: never under a
+/// spinlock or the scheduler's lock.
+pub fn dir_put(r: DirRef) {
+    fs_init::api().dir_put(r);
+}
+
+/// The path of directory `at` from `base`'s root, into `out`; its length.
+pub fn dir_path(base: Option<WalkBase>, at: PathRef, out: &mut [u8]) -> Result<usize, FsError> {
+    fs_init::api().dir_path(base, at, out)
+}
+
+/// How many holders directory `at`'s dentry has (test-only:
+/// `cwd_per_process`).
+#[cfg(feature = "kernel_tests")]
+pub fn dentry_refs(at: PathRef) -> u32 {
+    fs_init::api().dentry_refs(at)
 }
 
 // ---- added ----
@@ -214,8 +305,15 @@ pub fn addref(id: FileId) -> Result<(), FsError> {
     fs_init::api().addref(id)
 }
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    allow(
+        dead_code,
+        reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
+    )
+)]
 pub fn stat_path(path: &[u8]) -> Result<Stat, FsError> {
-    with_abs(path, |p| fs_init::api().stat_path(None, p, true))
+    stat_at(None, path)
 }
 
 /// Write every mounted filesystem's dirty state to its device.
@@ -223,10 +321,9 @@ pub fn sync_fs() -> Result<(), FsError> {
     fs_init::api().sync()
 }
 
-/// Make `path` and every missing parent.
-pub fn mkdir_p(path: &[u8]) -> Result<(), FsError> {
-    let (buf, len) = join_cwd(path)?;
-    let pb = &buf[..len];
+/// Make `path` and every missing parent, from `base`.
+pub fn mkdir_p_at(base: Option<WalkBase>, path: &[u8]) -> Result<(), FsError> {
+    let pb = path;
     let mut i = 0usize;
     while i < pb.len() && pb[i] == b'/' {
         i += 1;
@@ -237,11 +334,11 @@ pub fn mkdir_p(path: &[u8]) -> Result<(), FsError> {
             j += 1;
         }
         let slice = &pb[..j];
-        if slice.len() > 1 {
-            match stat_path(slice) {
+        if slice != b"/" {
+            match stat_at(base, slice) {
                 Ok(s) if s.kind == InodeKind::Dir => {}
                 Ok(_) => return Err(FsError::NotDir),
-                Err(FsError::NotFound) => mkdir(slice, 0o755)?,
+                Err(FsError::NotFound) => mkdir_at(base, slice, 0o755)?,
                 Err(e) => return Err(e),
             }
         }
@@ -269,7 +366,7 @@ pub fn creat(path: &[u8]) -> Result<(), FsError> {
 
 /// The filesystem bring-up: the FAT and vibefs backends, the root
 /// (`fs_init::init`), then while it is live the pseudo filesystems, devfs
-/// and sysfs, and vibefs on `/vibe`, and last the working directory.
+/// and sysfs, and vibefs on `/vibe`.
 pub fn init() {
     fat_init::init();
     fs_init::init(fat_init::live());
@@ -285,7 +382,6 @@ pub fn init() {
         populate_sysfs();
         attach_vibefs();
     }
-    set_cwd(b"/");
 }
 
 fn attach_vibefs() {
@@ -375,10 +471,14 @@ fn populate_sysfs() {
     }
 }
 
-/// Report each entry of directory `path` but `.` and `..` to `cb`, with
-/// the VFS lock dropped.
-pub(crate) fn list_dir(path: &[u8], cb: &mut dyn FnMut(&DirEntry)) -> Result<(), FsError> {
-    let f = open(path, OpenFlags::from_bits(O_RDONLY | O_DIRECTORY), 0)?;
+/// Report each entry of directory `path`, from `base`, but `.` and `..`
+/// to `cb`, with the VFS lock dropped.
+pub(crate) fn list_dir(
+    base: Option<WalkBase>,
+    path: &[u8],
+    cb: &mut dyn FnMut(&DirEntry),
+) -> Result<(), FsError> {
+    let f = open_at(base, path, OpenFlags::from_bits(O_RDONLY | O_DIRECTORY), 0)?;
     let r = readdir(&f, &mut |d| {
         let n = d.name.as_bytes();
         if n != b"." && n != b".." {
@@ -396,8 +496,10 @@ pub(crate) fn child_path(
     name: &[u8],
     out: &mut [u8; MAX_PATH],
 ) -> Result<usize, FsError> {
-    let (buf, mut n) = join_cwd(path)?;
-    out[..n].copy_from_slice(&buf[..n]);
+    let mut n = path.len();
+    out.get_mut(..n)
+        .ok_or(FsError::NameTooLong)?
+        .copy_from_slice(path);
     if n == 0 || out[n - 1] != b'/' {
         if n >= MAX_PATH {
             return Err(FsError::NameTooLong);

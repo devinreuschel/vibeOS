@@ -21,7 +21,7 @@ use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
-    Name, OpCx, S_IFDIR_MODE, S_IFMT,
+    Name, OpCx, S_IFDIR_MODE, S_IFMT, WalkBase,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -662,14 +662,20 @@ fn probe_dev(r: &BlockRef) -> bool {
 /// (`Busy` when `ro` differs); one holding another filesystem's volume is
 /// `Busy`. Otherwise the volume is built, becomes the entry's holder, and
 /// is taken back if the mount fails.
+#[cfg(any(feature = "kernel_tests", feature = "vibefs_crash"))]
 pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<(), FsError> {
+    mount_dev_at(None, name, at, ro)
+}
+
+/// [`mount_dev`] on `at` from walk base `base`.
+pub fn mount_dev_at(base: Option<WalkBase>, name: &str, at: &str, ro: bool) -> Result<(), FsError> {
     let r = blockdev_init::lookup(name.as_bytes()).ok_or(FsError::NotFound)?;
     let dev = Some(r.id());
     let api = fs_init::api();
     if let Some(h) = blockdev_init::holder(&r) {
         as_vibe(&h).map_err(|_| FsError::Busy)?;
         return api
-            .mount_fs(None, at.as_bytes(), &VIBE_FS, dev, ro, Some(h))
+            .mount_fs(base, at.as_bytes(), &VIBE_FS, dev, ro, Some(h))
             .map(|_| ());
     }
     if !probe_dev(&r) {
@@ -680,7 +686,7 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<(), FsError> {
         BlockError::Exists => FsError::Busy,
         _ => FsError::Io,
     })?;
-    match api.mount_fs(None, at.as_bytes(), &VIBE_FS, dev, ro, Some(vol.clone())) {
+    match api.mount_fs(base, at.as_bytes(), &VIBE_FS, dev, ro, Some(vol.clone())) {
         Ok(_) => Ok(()),
         Err(e) => {
             if !fs_init::with(|v| v.shows_volume(&vol)) {

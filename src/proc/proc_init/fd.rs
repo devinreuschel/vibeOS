@@ -299,7 +299,12 @@ pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
     let mut buf = [0u8; vibeos::fs::MAX_PATH];
     let n = copy_user_str(path, &mut buf)?;
     let mode = u32::from(mode) & 0o7777;
-    match file_init::open(&buf[..n], OpenFlags::from_bits(flags as u32), mode) {
+    match file_init::open_at(
+        current_base(),
+        &buf[..n],
+        OpenFlags::from_bits(flags as u32),
+        mode,
+    ) {
         Ok(f) => {
             let id = f.into_raw();
             let slot = Fd {

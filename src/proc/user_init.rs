@@ -7,7 +7,7 @@ use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, Builder, EHDR_SIZE, ElfError, Image, PHDR_SIZE,
 };
-use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom};
+use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom, WalkBase};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kerror::KError;
 use vibeos::paging::PAGE_SIZE_4K;
@@ -379,24 +379,27 @@ fn fill_stack(
 /// `[path]` when empty) and `envp` on its initial stack. Caller installs
 /// it only after this returns.
 pub fn load_path<A: AsRef<[u8]>>(
+    base: Option<WalkBase>,
     path: &[u8],
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
     #[cfg(feature = "kernel_tests")]
     let before = crate::proc::ktest::free_now();
-    let r = load_path_inner(path, argv, envp);
+    let r = load_path_inner(base, path, argv, envp);
     #[cfg(feature = "kernel_tests")]
     crate::proc::ktest::record(before, r.is_ok());
     r
 }
 
 fn load_path_inner<A: AsRef<[u8]>>(
+    base: Option<WalkBase>,
     path: &[u8],
     argv: &[A],
     envp: &[&[u8]],
 ) -> Result<Loaded, LoadError> {
-    let file = file_init::open(path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
+    let file =
+        file_init::open_at(base, path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
     let mut src = FileImage {
         file,
         len: 0,

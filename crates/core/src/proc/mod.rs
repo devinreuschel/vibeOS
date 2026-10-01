@@ -11,7 +11,7 @@ pub mod syscall_table;
 pub mod uabi;
 pub mod uaccess;
 
-use crate::fs::{MAX_PATH, O_CLOEXEC};
+use crate::fs::O_CLOEXEC;
 use crate::kalloc::{AllocError, TryVec};
 use crate::limits;
 
@@ -336,24 +336,6 @@ impl FdTable {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cwd {
-    pub buf: [u8; MAX_PATH],
-    pub len: u8,
-}
-
-impl Cwd {
-    pub const fn root() -> Self {
-        let mut buf = [0u8; MAX_PATH];
-        buf[0] = b'/';
-        Self { buf, len: 1 }
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.buf[..self.len as usize]
-    }
-}
-
 /// Linux wait(2) encoding.
 pub const fn wait_exited(code: u32) -> u32 {
     (code & 0xff) << 8
@@ -551,8 +533,6 @@ mod tests {
         assert_eq!(ProcState::Zombie.name(), "zombie");
         assert_eq!(Creds::ROOT.uid, 0);
         assert_eq!(INIT_PID, 1);
-        let c = Cwd::root();
-        assert_eq!(c.as_bytes(), b"/");
         assert_eq!(default_action(SIGCONT), SigAct::Cont);
     }
 

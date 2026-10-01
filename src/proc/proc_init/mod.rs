@@ -10,7 +10,7 @@ use core::mem::MaybeUninit;
 use vibeos::addr_space::{AsError, MmapError, mmap_request};
 #[cfg(target_arch = "x86_64")]
 use vibeos::arch::x86_64::trap as x86_trap;
-use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
+use vibeos::fs::{DirRef, FileId, FileRef, FsError, OpenFlags, SeekFrom, WalkBase};
 use vibeos::kalloc::{AllocError, TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::kerror::KError;
@@ -19,9 +19,9 @@ use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::pid::IdIndex;
 use vibeos::proc::uaccess::user_range_ok;
 use vibeos::proc::{
-    Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
-    ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action,
-    fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled,
+    Creds, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS, ProcState,
+    SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action, fd_flags_from_open,
+    reaper_for, sig_name, wait_exited, wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult, UserFrame};
@@ -68,7 +68,13 @@ struct Proc {
     tid: ThreadId,
     name: &'static str,
     creds: Creds,
-    cwd: Cwd,
+    /// The process's root and working directory: counted references to
+    /// directories (DESIGN §2.11), `None` while the VFS has no root. Only
+    /// the process's own thread replaces or drops them, so a syscall reads
+    /// them here without taking a count; they are put outside the table
+    /// lock, since a put sleeps for the VFS lock.
+    root: Option<DirRef>,
+    cwd: Option<DirRef>,
     fds: FdTable,
     wait_status: u32,
     pending: u32,
@@ -90,7 +96,8 @@ impl Proc {
             tid: ThreadId::NONE,
             name: "",
             creds: Creds::ROOT,
-            cwd: Cwd::root(),
+            root: None,
+            cwd: None,
             fds: FdTable::empty(),
             wait_status: 0,
             pending: 0,
@@ -108,6 +115,10 @@ impl Proc {
     /// taken before a slot is released, and no thread waits on its queues.
     fn reset(&mut self) {
         debug_assert!(self.space.is_none(), "proc: slot reset with a space");
+        debug_assert!(
+            self.root.is_none() && self.cwd.is_none(),
+            "proc: slot reset with directory references"
+        );
         debug_assert!(self.wait_wq.is_empty() && self.stop_wq.is_empty());
         self.state = ProcState::Unused;
         self.pid = 0;
@@ -115,7 +126,8 @@ impl Proc {
         self.tid = ThreadId::NONE;
         self.name = "";
         self.creds = Creds::ROOT;
-        self.cwd = Cwd::root();
+        self.root = None;
+        self.cwd = None;
         self.fds.reset();
         self.wait_status = 0;
         self.pending = 0;
@@ -125,6 +137,49 @@ impl Proc {
         self.wait_wq = WaitQueue::new();
         self.stop_wq = WaitQueue::new();
     }
+
+    /// Where this process's path syscalls start: its root and working
+    /// directory, or `None` (the namespace root) when it has none.
+    fn base(&self) -> Option<WalkBase> {
+        match (&self.root, &self.cwd) {
+            (Some(r), Some(c)) => Some(WalkBase {
+                root: r.at(),
+                cwd: c.at(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// A root and a working-directory reference, for a new process.
+type DirRefs = Option<(DirRef, DirRef)>;
+
+/// Put the references a process no longer holds. Sleeps for the VFS
+/// lock: never under the table lock or SCHED.
+fn put_dir_refs(refs: DirRefs) {
+    if let Some((root, cwd)) = refs {
+        file_init::dir_put(root);
+        file_init::dir_put(cwd);
+    }
+}
+
+/// The calling process's walk base, read from the table: only its own
+/// thread replaces its references, so they outlive the call.
+fn current_base() -> Option<WalkBase> {
+    let pid = current_pid();
+    with_table(|t| t.get(pid).and_then(Proc::base))
+}
+
+/// Give `pid`'s slot the references `refs`, under the table lock; the
+/// ones no slot took come back, for the caller to put after the lock.
+fn install_dir_refs(t: &mut Table, pid: u32, refs: DirRefs) -> DirRefs {
+    let Some(p) = t.get_mut(pid) else {
+        return refs;
+    };
+    let (root, cwd) = refs?;
+    p.root = Some(root);
+    p.cwd = Some(cwd);
+    None
 }
 
 /// Entries in the pid-to-slot index: twice the process table, so probe
@@ -426,7 +481,7 @@ pub(crate) fn spawn_elf(
     ppid: u32,
 ) -> Result<u32, LoadError> {
     start_loaded(
-        user_init::load_path(path, argv, envp)?,
+        user_init::load_path(None, path, argv, envp)?,
         prefer,
         ppid,
         intern_name(path),
@@ -456,10 +511,14 @@ fn start_loaded(
     ppid: u32,
     name: &'static str,
 ) -> Result<u32, LoadError> {
+    // A process the kernel starts has the namespace root as its root and
+    // working directory; the references are taken before the table lock.
+    let refs = file_init::ns_refs();
     let pid = match alloc_pid(prefer) {
         Some(p) => p,
         None => {
             addr_space_init::teardown(loaded.space.into_inner());
+            put_dir_refs(refs);
             return Err(LoadError::NoProc);
         }
     };
@@ -472,17 +531,20 @@ fn start_loaded(
         Err(e) => {
             with_sched_table(|s, t| release_pid(s, t, pid));
             addr_space_init::teardown(boxed.into_inner());
+            put_dir_refs(refs);
             return Err(LoadError::Spawn(e));
         }
     };
-    with_table(|t| {
+    let left = with_table(|t| {
         init_slot(t, pid, ppid, name);
         if let Some(p) = t.get_mut(pid) {
             p.space = Some(boxed);
             p.fs_base = fs;
             p.tid = h.id();
         }
+        install_dir_refs(t, pid, refs)
     });
+    put_dir_refs(left);
     thread_init::make_ready(h.id());
     Ok(pid)
 }

@@ -5,7 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::fs::{FsError, MAX_PATH};
+use vibeos::fs::FsError;
 use vibeos::kalloc::TryVec;
 use vibeos::limits::MAX_OPEN_FILES;
 
@@ -91,25 +91,16 @@ pub(super) fn table() -> Option<TryVec<(bool, u16, u16)>> {
     Some(t)
 }
 
-/// `path` made absolute against the working directory.
-fn abs(path: &[u8]) -> Result<([u8; MAX_PATH], usize), FsError> {
-    file_init::join_cwd(path)
-}
-
 pub(super) fn symlink_path(path: &[u8], target: &[u8]) -> Result<(), FsError> {
-    let (b, n) = abs(path)?;
-    fs_init::api().symlink(None, &b[..n], target)
+    file_init::symlink_at(None, path, target)
 }
 
 pub(super) fn link_path(old: &[u8], new: &[u8]) -> Result<(), FsError> {
-    let (ob, on) = abs(old)?;
-    let (nb, nn) = abs(new)?;
-    fs_init::api().link(None, &ob[..on], &nb[..nn])
+    file_init::link_at(None, old, new)
 }
 
 pub(super) fn truncate_path(path: &[u8], size: u64) -> Result<(), FsError> {
-    let (b, n) = abs(path)?;
-    fs_init::api().truncate(None, &b[..n], size)
+    file_init::truncate_at(None, path, size)
 }
 
 /// Point `fs_init`'s File API hooks at `write_window` and

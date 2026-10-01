@@ -1,10 +1,12 @@
 //! Tab completion for the kernel shell: a command name at the start of
-//! the line, otherwise a path in the working directory (ROADMAP §5.4).
+//! the line, otherwise a path in the working directory (ROADMAP §5.4):
+//! a relative word completes from the shell's base (`shell_base`).
 
 use vibeos::fs::MAX_NAME;
 use vibeos::shell::LineEditor;
 
 use crate::file_init::list_dir;
+use crate::shell::cmds::fs::shell_base;
 
 fn names_in(
     dirp: &[u8],
@@ -18,7 +20,7 @@ fn names_in(
         clippy::let_underscore_must_use,
         reason = "completion in a directory that cannot be listed offers no names, as a shell's does: no failure anyone could act on (DESIGN §2.5)"
     )]
-    let _ = list_dir(path, &mut |d| {
+    let _ = list_dir(shell_base(), path, &mut |d| {
         let nm = d.name.as_bytes();
         if nm.len() >= prefix.len() && nm[..prefix.len()].eq_ignore_ascii_case(prefix) && n < 16 {
             let l = nm.len().min(MAX_NAME);

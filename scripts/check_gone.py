@@ -251,6 +251,13 @@ GONE: list[tuple[str, str]] = [
     ("tests/harness/run_e2e.py: ISA_DEBUG_EXIT", "on a timeout, or on"),
     ("drain_panic_tail", "on a timeout, or on"),
     ("abandon_ap_idle", "a full thread table is an error, not a panic"),
+    ("join_cwd", "a process's working directory is"),
+    ("CWD", "a process's working directory is"),
+    ("CwdBuf", "a process's working directory is"),
+    ("cwd_root", "a process's working directory is"),
+    ("cwd_copy", "a process's working directory is"),
+    ("set_cwd", "a process's working directory is"),
+    ("Cwd", "a process's working directory is"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

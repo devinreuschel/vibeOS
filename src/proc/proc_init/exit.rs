@@ -12,7 +12,16 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
     }
     // The files first, in batches off the table lock, while the slot is
     // still this process's: once it is a zombie its parent may free it.
+    // Then its root and working directory, taken out under the table lock
+    // and put after it, since a put sleeps for the VFS lock.
     close_all_fds(pid, "exit");
+    let (root, cwd) = with_table(|t| match t.get_mut(pid) {
+        Some(p) => (p.root.take(), p.cwd.take()),
+        None => (None, None),
+    });
+    for r in [root, cwd].into_iter().flatten() {
+        file_init::dir_put(r);
+    }
     let (old, ppid, tid) = thread_init::with_sched(|s| {
         table_locked(|t| {
             if reparent_children(s, t, pid)

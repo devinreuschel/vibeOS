@@ -409,10 +409,11 @@ ROADMAP §10.4).
 - `dup` / `dup2` copy the slot and clear `FD_CLOEXEC` on the new fd
 - `open` `O_CLOEXEC` becomes per-fd `FD_CLOEXEC`; `execve` drops those
 - open-file slots are refcounted so `dup`/`fork` share them
-- a relative path resolves against one kernel-global cwd,
-  `file_init::CWD`, which only the debug shell's `cd` changes;
-  `Proc::cwd` is copied on `fork` and never read, and there is no `chdir`
-  (F057, F086; ROADMAP §10.4, with `chdir` in §13.9)
+- a relative path resolves against the calling process's working
+  directory, a counted reference to a directory that `fork` copies and
+  exit drops (DESIGN §2.11); a process the kernel starts has `/` as its
+  root and working directory, and there is no `chdir` until ROADMAP
+  §13.9 (F057, F086)
 - `open` and `execve` resolve a path through the VFS walker, one component
   at a time, crossing mounts, so a process reaches every mounted
   filesystem: `open("/dev/null")` opens devfs's `null`, and `/proc`,
