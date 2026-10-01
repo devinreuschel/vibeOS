@@ -19,8 +19,8 @@
 use core::fmt::{self, Write};
 
 use vibeos::fs::{
-    DirRef, FsError, InodeKind, MAX_NAME, MAX_PATH, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
-    OpenFlags, PathRef, WalkBase,
+    DirRef, FsError, InodeKind, MAX_NAME, MAX_PATH, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC,
+    O_WRONLY, OpenFlags, PathRef, WalkBase,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::shell::Command;
@@ -28,7 +28,7 @@ use vibeos::shell::Command;
 use crate::fat_init::{self, FatVolume};
 use crate::file_init::{
     child_path, close, dir_get_at, dir_path, dir_put, list_dir, mkdir_at, mkdir_p_at, mount_at,
-    open_at, read, rename_at, rmdir_at, stat_at, sync_fs, umount_at, unlink_at, write,
+    open_at, read, readdir, rename_at, rmdir_at, stat_at, sync_fs, umount_at, unlink_at, write,
 };
 use crate::fs_init;
 use crate::sync_init::SpinMutex;
@@ -520,28 +520,103 @@ fn cmd_pwd(_args: &[&str]) {
     }
 }
 
+/// Most directory levels `rm -r` descends below its argument: each level
+/// adds at least two bytes (`/` and a name) to a path of at most
+/// `MAX_PATH`.
+const RM_MAX_DEPTH: usize = MAX_PATH / 2;
+const _: () = assert!(MAX_PATH <= u16::MAX as usize && RM_MAX_DEPTH * 2 <= MAX_PATH);
+
+/// One directory entry `rm -r` acts on: its name and kind.
+struct Entry {
+    name: [u8; MAX_NAME],
+    len: usize,
+    kind: InodeKind,
+}
+
+/// `path` and everything below it, without recursion: one path buffer
+/// and an explicit stack of the end offsets of the directories above the
+/// current one. Each step takes the current directory's first entry
+/// other than `.` and `..`: a directory is pushed, anything else (a
+/// symlink included, never followed) unlinked; an empty directory is
+/// removed and popped. Each step removes an entry or goes one level
+/// deeper, and the depth is bounded, so the walk ends. A child path past
+/// `MAX_PATH`, or a stack full, is `NameTooLong`.
 fn rm_r(base: Option<WalkBase>, path: &[u8]) -> Result<(), FsError> {
-    let st = stat_at(base, path)?;
+    let st = fs_init::api().stat_path(base, path, false)?;
     if st.kind != InodeKind::Dir {
         return unlink_at(base, path);
     }
-    let mut kids: [[u8; MAX_NAME]; 16] = [[0; MAX_NAME]; 16];
-    let mut klens = [0u8; 16];
-    let mut nk = 0usize;
-    list_dir(base, path, &mut |d| {
-        let n = d.name.as_bytes();
-        if nk < 16 {
-            kids[nk][..n.len()].copy_from_slice(n);
-            klens[nk] = n.len() as u8;
-            nk += 1;
+    let mut buf = [0u8; MAX_PATH];
+    buf.get_mut(..path.len())
+        .ok_or(FsError::NameTooLong)?
+        .copy_from_slice(path);
+    let mut len = path.len();
+    let mut ends = [0u16; RM_MAX_DEPTH];
+    let mut depth = 0usize;
+    loop {
+        let cur = buf.get(..len).ok_or(FsError::NameTooLong)?;
+        let Some(e) = first_entry(base, cur)? else {
+            rmdir_at(base, cur)?;
+            let Some(up) = depth.checked_sub(1) else {
+                return Ok(());
+            };
+            depth = up;
+            len = usize::from(*ends.get(up).ok_or(FsError::NameTooLong)?);
+            continue;
+        };
+        let child = append(&mut buf, len, e.name.get(..e.len).unwrap_or(&[]))?;
+        if e.kind == InodeKind::Dir {
+            let slot = ends.get_mut(depth).ok_or(FsError::NameTooLong)?;
+            *slot = u16::try_from(len).map_err(|_| FsError::NameTooLong)?;
+            depth = depth.checked_add(1).ok_or(FsError::NameTooLong)?;
+            len = child;
+        } else {
+            unlink_at(base, buf.get(..child).ok_or(FsError::NameTooLong)?)?;
         }
-    })?;
-    let mut i = 0usize;
-    while i < nk {
-        let mut child = [0u8; MAX_PATH];
-        let n = child_path(path, &kids[i][..klens[i] as usize], &mut child)?;
-        rm_r(base, &child[..n])?;
-        i += 1;
     }
-    rmdir_at(base, path)
+}
+
+/// The first entry of directory `dir` other than `.` and `..`; `None`
+/// when it is empty. The `readdir` callback only copies: nothing calls
+/// the File API from inside it.
+fn first_entry(base: Option<WalkBase>, dir: &[u8]) -> Result<Option<Entry>, FsError> {
+    let f = open_at(base, dir, OpenFlags::from_bits(O_RDONLY | O_DIRECTORY), 0)?;
+    let mut found: Option<Entry> = None;
+    let r = readdir(&f, &mut |d| {
+        let n = d.name.as_bytes();
+        if n == b"." || n == b".." {
+            return true;
+        }
+        let mut e = Entry {
+            name: [0; MAX_NAME],
+            len: n.len(),
+            kind: d.kind,
+        };
+        match e.name.get_mut(..n.len()) {
+            Some(dst) => {
+                dst.copy_from_slice(n);
+                found = Some(e);
+                false
+            }
+            None => true,
+        }
+    });
+    let c = close(f);
+    r.and(c)?;
+    Ok(found)
+}
+
+/// Append `/name` to the path `buf[..len]` (no `/` after one already
+/// there); the new length, or `NameTooLong` past `MAX_PATH`.
+fn append(buf: &mut [u8; MAX_PATH], len: usize, name: &[u8]) -> Result<usize, FsError> {
+    let mut n = len;
+    if buf.get(..len).and_then(|b| b.last()) != Some(&b'/') {
+        *buf.get_mut(n).ok_or(FsError::NameTooLong)? = b'/';
+        n = n.checked_add(1).ok_or(FsError::NameTooLong)?;
+    }
+    let end = n.checked_add(name.len()).ok_or(FsError::NameTooLong)?;
+    buf.get_mut(n..end)
+        .ok_or(FsError::NameTooLong)?
+        .copy_from_slice(name);
+    Ok(end)
 }

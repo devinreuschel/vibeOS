@@ -17,6 +17,7 @@ mod initrd;
 mod lock;
 mod ops;
 mod routing;
+mod shell;
 mod slots;
 mod stack16k;
 mod times;
@@ -31,6 +32,7 @@ pub(crate) use ops::{test_vfs_backends_via_ops, test_vfs_fat_one_inode};
 pub(crate) use routing::{
     test_fat_initrd_dev_no_null, test_vfs_unlink_drops_parent_dentry, test_vfs_user_dev_nodes,
 };
+pub(crate) use shell::test_shell_rm_r_tree;
 pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
 pub(crate) use times::test_fat_times_wall_clock;
@@ -1453,4 +1455,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("walk_path_resolution", test_walk_path_resolution),
     test("umount_consistent", test_umount_consistent).deadline(60_000),
     test("fat_times_wall_clock", test_fat_times_wall_clock),
+    test("shell_rm_r_tree", test_shell_rm_r_tree),
 ];
