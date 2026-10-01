@@ -13,6 +13,7 @@
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
+use vibeos::desc::UserSegs;
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kalloc::{AllocError, TryBox, TryVec};
 use vibeos::kva::DEFAULT_STACK_PAGES;
@@ -39,6 +40,7 @@ use crate::time_init;
 mod ap;
 mod boot;
 mod table;
+mod user;
 pub use ap::{abandon_unstarted, adopt_ap_idle};
 #[cfg(feature = "kernel_tests")]
 pub(crate) use boot::BOOT_STACK_PAGES;
@@ -49,6 +51,7 @@ use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
 #[cfg(feature = "kernel_tests")]
 pub(crate) use table::{table_usage, timeouts_capacity};
+pub use user::{reset_user_segs, set_user_segs};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.
@@ -695,6 +698,14 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             (*new_ptr).on_cpu.set();
+            // A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5), before
+            // `on_switch`; a kernel thread has none and keeps what is live.
+            if (*old_ptr).pid != 0 {
+                (*old_ptr).user_segs = crate::arch::gdt::read_user_segs();
+            }
+            if (*new_ptr).pid != 0 {
+                crate::arch::gdt::load_user_segs((*new_ptr).user_segs);
+            }
             on_switch(cpu, old_ptr, new_ptr);
         }
     });
@@ -1195,6 +1206,7 @@ fn spawn_inner(
         as_cr3,
         fpu: fpu_template(),
         fp_cpu: None,
+        user_segs: UserSegs::NULL,
         syscall_count: 0,
         pid,
         no_reclaim: AtomicU32::new(0),
@@ -1281,6 +1293,7 @@ fn fill_tcb(
     tcb.fpu = fpu_template();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
+    tcb.user_segs = UserSegs::NULL;
     tcb.syscall_count = 0;
     tcb.pid = pid;
     prepare_thread(&mut tcb.context, top, tramp);

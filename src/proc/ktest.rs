@@ -8,6 +8,7 @@ mod hooks;
 mod lifecycle;
 mod limits;
 mod runtime;
+mod segs;
 mod sysdecl;
 mod uaccess;
 
@@ -18,6 +19,7 @@ pub(crate) use hooks::*;
 pub(crate) use lifecycle::*;
 pub(crate) use limits::*;
 pub(crate) use runtime::*;
+pub(crate) use segs::*;
 pub(crate) use sysdecl::*;
 pub(crate) use uaccess::*;
 
@@ -46,6 +48,9 @@ pub(crate) const TESTS: &[Test] = &[
     test("teardown_live_root_asserts", teardown_live_root_asserts),
     test("console_read_exit", test_console_read_exit).deadline(30_000),
     test("user_entry_irq", test_user_entry_irq).deadline(120_000),
+    test("user_selectors", test_user_selectors),
+    test("user_ds_fork", test_user_ds_fork),
+    test("user_ds_switch", test_user_ds_switch).deadline(30_000),
     test("exec_top_page_enoexec", test_exec_top_page_enoexec).deadline(30_000),
     test("noncanonical_rip_sigsegv", test_noncanonical_rip_sigsegv).deadline(30_000),
     test("exec_huge_memsz", test_exec_huge_memsz).deadline(60_000),

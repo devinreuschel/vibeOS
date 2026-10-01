@@ -12,7 +12,7 @@ use core::cell::UnsafeCell;
 use core::mem::{offset_of, size_of};
 use core::ptr::NonNull;
 
-use vibeos::desc::{GDT_LIMIT, Gdt, IstSlot, KERNEL_CS, KERNEL_DS, TSS_SEL, Tss};
+use vibeos::desc::{GDT_LIMIT, Gdt, IstSlot, KERNEL_CS, KERNEL_DS, TSS_SEL, Tss, UserSegs};
 use vibeos::kalloc::TryBox;
 use vibeos::smp::per_cpu::PerCpu;
 
@@ -358,5 +358,78 @@ unsafe fn asm_reload_cs(sel: u64) {
             tmp = lateout(reg) _,
             options(preserves_flags),
         );
+    }
+}
+
+/// The live DS, ES, FS and GS. While a user thread runs in ring 0 they
+/// still hold what ring 3 left: no kernel entry loads them.
+pub fn read_user_segs() -> UserSegs {
+    let (ds, es, fs, gs): (u16, u16, u16, u16);
+    // SAFETY: `mov r, sreg` only copies the four selectors into registers;
+    // established here.
+    unsafe {
+        core::arch::asm!(
+            "mov {0:x}, ds",
+            "mov {1:x}, es",
+            "mov {2:x}, fs",
+            "mov {3:x}, gs",
+            out(reg) ds,
+            out(reg) es,
+            out(reg) fs,
+            out(reg) gs,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    UserSegs { ds, es, fs, gs }
+}
+
+/// Load `want` into DS, ES, FS and GS, each only where it differs from the
+/// live one: an FS load can zero `FS_BASE` (ROADMAP §11.6 restores it per
+/// thread). GS goes in as `swapgs; mov gs; swapgs`, so the load lands on
+/// the inactive (user) base and `GS_BASE` keeps `PerCpu`; an NMI between
+/// the two finds a user `GS_BASE` and swaps (DESIGN §7.5's `swapgs` sites).
+/// `KERNEL_GS_BASE`, the user GS base, is then written 0, as ring 3 runs
+/// with it.
+///
+/// # Safety
+/// IF=0, at CPL 0 with `GS_BASE` = this CPU's `PerCpu` and
+/// `KERNEL_GS_BASE` the user base, and each selector in `want` is null or
+/// one ring 3 loaded (it came from [`read_user_segs`] on a user thread, or
+/// is [`UserSegs::NULL`]), so the load cannot fault.
+pub unsafe fn load_user_segs(want: UserSegs) {
+    let live = read_user_segs();
+    // SAFETY: this fn's `# Safety`: each selector is null or one ring 3
+    // loaded, which a CPL-0 load accepts too; DS, ES and FS are unused at
+    // CPL 0. Established by the callers, `thread_init::switch_now` and
+    // `thread_init::reset_user_segs`.
+    unsafe {
+        if live.ds != want.ds {
+            core::arch::asm!("mov ds, {0:x}", in(reg) want.ds, options(nostack, preserves_flags));
+        }
+        if live.es != want.es {
+            core::arch::asm!("mov es, {0:x}", in(reg) want.es, options(nostack, preserves_flags));
+        }
+        if live.fs != want.fs {
+            core::arch::asm!("mov fs, {0:x}", in(reg) want.fs, options(nostack, preserves_flags));
+        }
+    }
+    if live.gs == want.gs {
+        return;
+    }
+    // SAFETY: invariant I4: IF=0 (this fn's `# Safety`), so only an NMI,
+    // `#MC` or `#DB` lands between the two `swapgs`, and each decides from
+    // the sign of `GS_BASE`, which holds the user base there; the second
+    // `swapgs` puts `PerCpu` back in `GS_BASE` before any `gs:` read;
+    // established here, under the IF=0 that `thread_init::switch_now` and
+    // `thread_init::reset_user_segs` hold.
+    unsafe {
+        core::arch::asm!(
+            "swapgs",
+            "mov gs, {0:x}",
+            "swapgs",
+            in(reg) want.gs,
+            options(nostack, preserves_flags),
+        );
+        x86::wrmsr(x86::IA32_KERNEL_GS_BASE, 0);
     }
 }

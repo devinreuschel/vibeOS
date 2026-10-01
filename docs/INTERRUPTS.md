@@ -38,9 +38,10 @@ and `clone` copy the parent's, and the context switch keeps each thread's
 because it is Linux's compat code segment, and a far transfer or `rt_sigreturn` to `0x23` gets
 `SIGSEGV` (`docs/LINUX.md`, `no-compat-cs`). The kernel selectors are invisible to user code and keep
 their places. `vibeos::desc` holds the layout, `desc::star_value()` the STAR value both
-`syscall_init::init_cpu` and the in-guest `star_sysret_layout` use. The null DS, ES, FS, and GS are a
-rule not yet enforced: ROADMAP §10.6. Today `syscall_init::first_return` loads `0x2b` into DS, ES,
-FS, and GS.
+`syscall_init::init_cpu` and the in-guest `star_sysret_layout` use, and `Tcb.user_segs`
+(`desc::UserSegs`) a thread's four data selectors, which `syscall_init::first_return` loads and
+`thread_init::switch_now` saves and loads (in-guest `user_selectors`, `user_ds_fork`,
+`user_ds_switch`).
 
 Syscalls reach user memory through `vibeos::proc::uaccess` and its kernel half
 `proc::uaccess_init` (ROADMAP §10.6): `copy_from_user`, `copy_to_user`, their `_partial` forms,

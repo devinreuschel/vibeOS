@@ -62,6 +62,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         as_cr3: 0,
         fpu: fpu_template(),
         fp_cpu: None,
+        user_segs: UserSegs::NULL,
         syscall_count: 0,
         pid: 0,
         no_reclaim: AtomicU32::new(0),
@@ -113,6 +114,7 @@ fn fill_ap_idle(tcb: &mut Tcb, cpu_id: u32) {
     tcb.fpu = fpu_template();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
+    tcb.user_segs = UserSegs::NULL;
     tcb.syscall_count = 0;
     tcb.pid = 0;
     tcb.no_reclaim.store(0, Ordering::Relaxed);

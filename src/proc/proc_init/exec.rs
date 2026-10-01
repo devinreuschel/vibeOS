@@ -109,6 +109,8 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
             p.tid = h.id();
         }
     });
+    // The child starts with the parent's DS, ES, FS and GS (DESIGN §5.1).
+    thread_init::set_user_segs(h.id(), crate::arch::gdt::read_user_segs());
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
     Ok(pid as usize)
@@ -193,6 +195,7 @@ pub(super) fn sys_execve(
         orig_rax: frame.orig_rax,
         ..UserFrame::new_user(entry, rsp)
     };
+    thread_init::reset_user_segs();
     // SAFETY: `fs` is the new image's thread pointer, a canonical user
     // address the loader chose (`user_init::load_image`), as
     // `set_user_tls` requires, so the next ring-3 TLS access reaches its

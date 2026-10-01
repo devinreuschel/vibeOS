@@ -5,6 +5,7 @@ use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
 use vibeos::arch::ContextSwitch;
+use vibeos::desc::UserSegs;
 use vibeos::kalloc::TryBox;
 use vibeos::proc::INIT_PID;
 use vibeos::thread::{CpuAffinity, CpuContext, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome};
@@ -53,6 +54,7 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         as_cr3: 0,
         fpu: fpu_template(),
         fp_cpu: None,
+        user_segs: UserSegs::NULL,
         syscall_count: 0,
         pid: 0,
         no_reclaim: AtomicU32::new(0),

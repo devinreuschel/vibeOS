@@ -1,7 +1,7 @@
 //! Single `swapgs` policy. DESIGN §7.5.
 //!
 //! After ring 3 exists, `GS_BASE` is the user base at CPL=3 and
-//! `KERNEL_GS_BASE` holds `PerCpu`. The `swapgs` instructions live in two
+//! `KERNEL_GS_BASE` holds `PerCpu`. The `swapgs` instructions live in three
 //! places that implement one policy:
 //!
 //! 1. `syscall_init`: `vibeos_syscall_entry`'s first instruction (it
@@ -9,6 +9,8 @@
 //!    `sysretq` and before `iretq`.
 //! 2. `arch::idt`'s generated entry paths: the entry `swapgs` when the
 //!    interrupted CS.RPL is 3, and the exit's matching one.
+//! 3. `arch::gdt::load_user_segs`: `swapgs; mov gs; swapgs` with IF=0, so
+//!    a user GS selector load lands on the user base.
 //!
 //! Do not add another. [`force_kernel`] writes GS MSRs; it is not a
 //! `swapgs` site.

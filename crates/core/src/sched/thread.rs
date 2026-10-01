@@ -7,6 +7,7 @@
 use core::mem::{offset_of, size_of};
 
 use crate::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::desc::UserSegs;
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
 use crate::sync::variant::{self, Site};
@@ -297,6 +298,10 @@ pub struct Tcb {
     /// until its first return to user mode and after any write to `fpu`
     /// (DESIGN §7.5, the FP binding; `vibeos::fpu`).
     pub fp_cpu: Option<u32>,
+    /// A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5): saved by the
+    /// switch away from it and loaded by the switch to it, by its first
+    /// entry, and by `execve`. Unused for a kernel thread (`pid` 0).
+    pub user_segs: UserSegs,
     /// Syscall counter. Aggregated per-process in Slice C.
     pub syscall_count: u64,
     /// 0 = kernel thread. Process pid otherwise.
@@ -404,7 +409,7 @@ const _: () = {
     assert!(offset_of!(Tcb, state) == 24);
     assert!(offset_of!(Tcb, context) == if DEBUG { 584 } else { 328 });
     assert!(offset_of!(Tcb, cpu) == if DEBUG { 688 } else { 432 });
-    assert!(offset_of!(Tcb, pid) == if DEBUG { 1264 } else { 1008 });
+    assert!(offset_of!(Tcb, pid) == if DEBUG { 1272 } else { 1016 });
     assert!(size_of::<CpuContext>() == 72);
     assert!(size_of::<TcbSlot>() == size_of::<usize>());
 };

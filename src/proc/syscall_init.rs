@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
-use vibeos::desc::{USER_CS_RPL, USER_DS_RPL, star_value};
+use vibeos::desc::{USER_CS_RPL, USER_DS_RPL, UserSegs, star_value};
 use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
@@ -594,8 +594,9 @@ pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
 /// A spawned or forked thread's first return to ring 3: the ordinary
 /// syscall exit over the user frame its creator wrote at the top of its
 /// kernel stack (`thread_init::spawn_user`). Runs `cli`, checks IF in
-/// debug builds, loads the user data selectors, sets `KERNEL_GS_BASE` =
-/// `PerCpu` before the selector loads (which zero the GS base), then
+/// debug builds, loads the thread's `Tcb.user_segs` into DS, ES, FS and GS
+/// (DESIGN §5.1), sets `KERNEL_GS_BASE` = `PerCpu` before those loads
+/// (which zero the GS base), then
 /// `GS_BASE` = `PerCpu`, `KERNEL_GS_BASE` = 0 (the user GS base) and
 /// `FS_BASE` = `fs_base`, and jumps to `vibeos_syscall_return`.
 ///
@@ -609,6 +610,19 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
     // The asm's own `cli` finds IF already off; this one tells the irqoff
     // tracer where the return's stretch began.
     crate::arch::current::irq_disable();
+    let t = crate::arch::current_tcb();
+    let segs = if t.is_null() {
+        UserSegs::NULL
+    } else {
+        // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live
+        // and written only by this thread or under its parent's fork before
+        // `make_ready`; established by `thread_init::switch_now`.
+        unsafe { (*t).user_segs }
+    };
+    let segs = u64::from(segs.ds)
+        | u64::from(segs.es) << 16
+        | u64::from(segs.fs) << 32
+        | u64::from(segs.gs) << 48;
     // The kernel_tests fork-wait stall spins inside the asm below with
     // IF=0 and may read no `gs:` there, so its stretch is marked here.
     #[cfg(feature = "kernel_tests")]
@@ -638,10 +652,15 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
             "mov rdx, rdi",
             "shr rdx, 32",
             "wrmsr",
-            "mov eax, {user_ss}",
+            // The thread's DS, ES, FS and GS, 16 bits each from R9's low end
+            // (`Tcb.user_segs`: null, or the parent's after `fork`).
+            "mov rax, r9",
             "mov ds, ax",
+            "shr rax, 16",
             "mov es, ax",
+            "shr rax, 16",
             "mov fs, ax",
+            "shr rax, 16",
             "mov gs, ax",
             // kernel_tests: hold the window after the GS load open (ROADMAP
             // §10.2, F021); the call keeps the live RDI, RSI and R8, and
@@ -669,11 +688,11 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
             kernel_gs_base = const IA32_KERNEL_GS_BASE,
             gs_base = const IA32_GS_BASE,
             fs_base = const IA32_FS_BASE,
-            user_ss = const USER_DS_RPL as u32,
             frame_pad = const size_of::<UserFrame>() + PAD,
             #[cfg(feature = "kernel_tests")]
             stall = sym testing::fork_wait_stall_point,
             in("rsi") fs_base,
+            in("r9") segs,
             options(noreturn),
         );
     }

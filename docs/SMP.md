@@ -266,9 +266,12 @@ bring-up that times out retires the parked workers the same way; `thread_init::a
 an unplaced `Tcb` box only after `SCHED` is released (ROADMAP §10.4, F037).
 
 `per_cpu_init::current()` is valid only after the entry path has put the kernel base in `GS_BASE`. The
-`swapgs` instructions are the three in `vibeos_syscall_entry` (entry, `sysretq` exit, `iretq` exit)
-and the entry and exit ones in the `arch/x86_64/idt.rs` entry paths that every generated stub jumps to
-([section 5.10](INTERRUPTS.md#510-privilege-transitions) rule 1).
+`swapgs` instructions are the three in `vibeos_syscall_entry` (entry, `sysretq` exit, `iretq` exit),
+the entry and exit ones in the `arch/x86_64/idt.rs` entry paths that every generated stub jumps to
+([section 5.10](INTERRUPTS.md#510-privilege-transitions) rule 1), and the pair in
+`gdt::load_user_segs`, which the context switch and `execve` run with IF=0 to load a user thread's GS
+selector: `swapgs; mov gs; swapgs`, so the load lands on the user base and `GS_BASE` holds the user
+base between the two, where an NMI, `#MC`, or `#DB` decides from its sign and swaps.
 
 The CS.RPL rule is also wrong wherever CS is the kernel's while `GS_BASE` holds the user base: NMI,
 `#MC`, and `#DB` in the one-instruction windows between `syscall` and the entry `swapgs` or between
@@ -314,7 +317,7 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | x86_64 | user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3); from then on it is per thread, and while the thread is in the kernel it is in `KERNEL_GS_BASE` whichever vector it entered by, IST vectors included ([section 5.10](INTERRUPTS.md#510-privilege-transitions) rule 3), where the switch away reads it |
 | x86_64 | DR0-DR3, DR7 | the thread's decoded debug slots, and the tracer's masked DR7 for `PEEKUSER` | the switch, by the Debug state paragraph below | not built: nothing arms them before ROADMAP §17.4 |
 | x86_64 | DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
-| x86_64 | DS, ES, FS, and GS selectors | the thread's own four, saved at the switch away | `on_switch`, which loads the incoming thread's four before it writes `FS_BASE` and `GS_BASE`, since a selector load can clear the matching base | Rule; not yet enforced: ROADMAP §10.6 ([section 5.1](INTERRUPTS.md#51-gdt-and-tss)). `syscall_init::first_return` loads `0x1B` into all four and nothing saves them, so a selector ring 3 loads with `mov` is lost at the next switch |
+| x86_64 | DS, ES, FS, and GS selectors | `Tcb.user_segs` (`desc::UserSegs`), a user thread's own four, saved with `gdt::read_user_segs` at the switch away | `switch_now`, before `on_switch`: `gdt::load_user_segs` loads the incoming user thread's four, each only where it differs from the live one, since a selector load can clear the matching base; GS as `swapgs; mov gs; swapgs`, then `KERNEL_GS_BASE` = 0 | switched for user threads (`pid` not 0); a kernel thread has none and keeps what is live ([section 5.1](INTERRUPTS.md#51-gdt-and-tss)). `execve` and a new thread start with the null selector in all four, `fork` copies the parent's live four, and `syscall_init::first_return` loads the thread's four before it writes `GS_BASE` and `FS_BASE`. An FS change at the switch can zero `FS_BASE`, which ROADMAP §11.6 restores per thread (F022) |
 | x86_64 | `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above); one word, the user RSP from `syscall` to the entry's stack switch; the exit keeps its state in the user frame |
 | aarch64 | `x19`-`x29`, SP, LR | `Tcb.context` | `switch_context` (ROADMAP §11.4) | not built |
 | aarch64 | DAIF.I and F | come from `irq_nest`, as on x86_64 | `switch_context` | not built |
