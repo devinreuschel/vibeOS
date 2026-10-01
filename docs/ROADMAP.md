@@ -957,7 +957,7 @@ limitations.
 
 ### 8.6 File API and shell
 - [x] kernel-side open, read, write, seek, close, stat, readdir, mkdir, unlink, rename, symlink, link, truncate
-- [ ] shell commands: `ls -l`, `cat`, `cp`, `mv`, `rm -r`, `mkdir -p`, `touch`, `stat`, `df`, `sync`. Reopened by the kernel review (F059, F126); lands in §10.4 and §10.11.
+- [x] shell commands: `ls -l`, `cat`, `cp`, `mv`, `rm -r`, `mkdir -p`, `touch`, `stat`, `df`, `sync` (F059, F126).
 - [ ] kernel shell commands `mount` and `umount`. Reopened by the kernel review (F058, F060, F126); lands in §10.2 and §10.4.
 - [x] tab completion over the current directory, which is disproportionately useful when debugging by hand
 - [x] an initial ramdisk image built by the Makefile and mounted at boot, so there is a root filesystem before block drivers are trustworthy
