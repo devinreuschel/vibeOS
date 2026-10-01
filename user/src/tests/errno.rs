@@ -548,6 +548,15 @@ pub(super) fn map(len: u64, prot: u64) -> Result<u64, &'static str> {
         .map_err(|_| "mmap")
 }
 
+/// A private anonymous mapping of `len` bytes at exactly `addr`.
+pub(super) fn map_at(addr: u64, len: u64, prot: u64) -> Result<u64, &'static str> {
+    // SAFETY: `MAP_FIXED` never replaces a mapping here (SYSCALL.md §3.1:
+    // it fails with `EEXIST` over one), so it maps only free memory;
+    // established here.
+    let r = unsafe { sys::mmap(addr, len, prot, ANON | MAP_FIXED, u64::MAX, 0) };
+    r.map(|a| a as u64).map_err(|_| "mmap MAP_FIXED")
+}
+
 /// Unmap `[addr, addr + len)`, which the caller mapped and no longer uses.
 pub(super) fn unmap(addr: u64, len: u64) {
     // SAFETY: the callers pass only a range they mapped themselves and no
@@ -558,6 +567,26 @@ pub(super) fn unmap(addr: u64, len: u64) {
         reason = "DESIGN §2.5: a range left mapped is freed at exit"
     )]
     let _ = r;
+}
+
+/// A page that was mapped and is not any more.
+pub(super) fn unmapped_page() -> Result<u64, &'static str> {
+    let a = map(PAGE, PROT_READ | PROT_WRITE)?;
+    unmap(a, PAGE);
+    Ok(a)
+}
+
+/// The raw call `nr` with `args` in its registers.
+///
+/// # Safety
+///
+/// The kernel writes through any pointer argument the call writes through:
+/// no live Rust reference may cover that memory.
+pub(super) unsafe fn raw(nr: usize, args: [u64; 6]) -> Result<usize, Errno> {
+    let [a, b, c, d, e, f] = args.map(|v| v as usize);
+    // SAFETY: the kernel's `syscall` convention, and this fn's `# Safety`
+    // contract for what the call writes, established here by its caller.
+    sys::result(unsafe { sys::syscall6(nr, a, b, c, d, e, f) })
 }
 
 /// Fork a child that runs `f` and exits `100 + errno` when it fails, `0`

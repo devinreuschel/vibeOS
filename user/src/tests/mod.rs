@@ -7,6 +7,7 @@ use core::sync::atomic::AtomicUsize;
 use vibeos_user::utest;
 
 mod console;
+mod efault;
 mod errno;
 mod exec_args;
 mod pid1;
@@ -30,4 +31,5 @@ pub const SUITES: &[fn(&mut utest::Runner)] = &[
     pid1::run,      // init cannot be killed or stopped
     utils::run,     // the /bin utilities and /bin/sh
     errno::run,     // every call's success and every listed errno
+    efault::run,    // every declared pointer, every bad form
 ];
