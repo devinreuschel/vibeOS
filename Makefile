@@ -373,16 +373,16 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-# The production initrd: the Rust programs `make user` built (C-USERBINS).
+# The production initrd: the Rust programs `make user` built (C-USERBINS), each
+# `<build file>:<initrd path>`, with the ten §10.5 utilities in /bin.
+INITRD_UTILS := ls cat echo grep wc true false sleep yes cmp
+INITRD_FILES := $(USER_OUT)/hello:/hello $(USER_OUT)/init:/sbin/init $(USER_OUT)/sh:/bin/sh \
+	$(USER_OUT)/tests:/bin/tests $(USER_OUT)/envcheck:/bin/envcheck $(USER_OUT)/argcheck:/bin/argcheck \
+	$(foreach u,$(INITRD_UTILS),$(USER_OUT)/$(u):/bin/$(u))
 $(INITRD): $(HOSTLIB_DEPS) $(USER_STAMP)
 	mkdir -p $(dir $@)
 	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
-	    --add $(USER_OUT)/hello:/hello \
-	    --add $(USER_OUT)/init:/sbin/init \
-	    --add $(USER_OUT)/sh:/bin/sh \
-	    --add $(USER_OUT)/tests:/bin/tests \
-	    --add $(USER_OUT)/envcheck:/bin/envcheck \
-	    --add $(USER_OUT)/argcheck:/bin/argcheck
+	    $(foreach f,$(INITRD_FILES),--add $(f))
 
 $(INITRD_INIT_FAULT): $(HOSTLIB_DEPS) $(USER_STAMP)
 	mkdir -p $(dir $@)

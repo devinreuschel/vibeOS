@@ -539,6 +539,25 @@ Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
   empty `argv[0]`) or `<n>:<m>` (`argc` `n`, every later argument `m`
   bytes); exits 0 when it holds, 2 for a bad mode, 3 for `argc`, 4 for
   `argv[0]`, 5 for a length (`/bin/tests`' `exec_*` argument cases)
+- `/bin/ls`, `/bin/cat`, `/bin/echo`, `/bin/grep`, `/bin/wc`, `/bin/true`,
+  `/bin/false`, `/bin/sleep`, `/bin/yes` and `/bin/cmp`
+  (`user/src/bin/<name>.rs`, sharing `vibeos_user::cmd`) — the utilities
+  ROADMAP §13's `ls | grep foo | wc -l` gate joins. `true` and `false` exit 0
+  and 1; `echo [-n] [arg...]` joins its arguments with single spaces;
+  `cat [file...]` copies each file, or fd 0 for none or `-`; `grep pattern
+  [file...]` prints the lines that hold a fixed string, prefixed `<file>:`
+  for several files (status 0 on a match, 1 on none, 2 on an error);
+  `wc [-l] [-w] [-c] [file...]` prints the selected counts single-spaced and
+  unpadded, then the name (none for fd 0), and a `total` line for several
+  files; `ls [-a] [path...]` prints a directory's `getdents64` names sorted
+  bytewise, dot-names only under `-a`, a non-directory operand itself, and
+  `<path>:` headers for several operands (status 2 if one fails); `sleep
+  <seconds>` sleeps whole seconds through `nanosleep`; `yes [arg...]` writes
+  `y`, or its arguments, one `write` a line until killed; `cmp file1 file2`
+  prints `<f1> <f2> differ: char <n>, line <l>`, or `cmp: EOF on <f>` on fd 2
+  for a prefix (status 0 equal, 1 different, 2 on an error). Each reads until
+  `read` returns 0 and reports an error on fd 2 as `<prog>: <what>: errno
+  <n>`
 
 Stack: `argc`, `argv`, `envp` (the caller's, copied by `execve`;
 `/sbin/init`'s from the kernel command line, BOOT.md §3.2, at most 8
