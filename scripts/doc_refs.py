@@ -10,7 +10,12 @@ script checks, over every tracked file outside the dated records (EXCLUDE):
   number is defined twice, and DESIGN.md's Contents links each topic file;
 - every `DESIGN §n`, `DESIGN.md §n`, `<TOPIC>.md §n`, `ROADMAP §n` and `ROADMAP.md §n`
   citation, including one wrapped across lines, names a heading that exists;
-- every Markdown link into a LAYOUT file whose fragment names a heading of that file.
+- every Markdown link into a LAYOUT file whose fragment names a heading of that file;
+- every bare `§x.y` in ROADMAP.md and the LAYOUT files (one not directly after `DESIGN`,
+  `ROADMAP`, another document's name, or an EXTERNAL specification), outside code spans and
+  fences: it names a heading of its own file (the whole LAYOUT set for a LAYOUT file), of a file a
+  `DESIGN §` or `ROADMAP §` citation earlier in its sentence names, or of the file its table
+  column's header names.
 
 `--where x.y` prints the file and anchor that hold DESIGN §x.y.
 """
@@ -219,6 +224,208 @@ def check_links(path: str, text: str, anchors: Mapping[str, Sequence[str]]) -> l
     return errors
 
 
+# ---- The bare-§ rule (ROADMAP §10.3, DOC2) ----
+
+# Outside specifications a `§` may follow directly (`virtio 1.2 §2.7`). Only an outside document
+# goes here; a flagged citation of a vibeOS file is qualified instead (`ROADMAP §18.1`).
+EXTERNAL: tuple[str, ...] = ("virtio 1.2", "PCI Firmware Spec 3.2", "PCI Local Bus Spec 3.0")
+
+SECTION = re.compile(r"§(\d+(?:\.\d+)*)")
+# What may stand directly before a qualified `§`: S24's `DESIGN`/`ROADMAP` (with `.md`), another
+# document's name (`X.md`, a link to a `.md` file), or an all-caps name (`KERNEL_REVIEW`).
+QUALIFIER = re.compile(
+    r"(?:\b[A-Za-z0-9_.-]+\.md`?|\]\([^)\s]*\.md(?:#[^)\s]*)?\)|\b[A-Z][A-Z0-9_]*[A-Z0-9]`?)"
+    r"[ \t]*$"
+)
+# A `DESIGN §` or `ROADMAP §` citation ending the text before a `§`.
+CITE_BEFORE = re.compile(r"\b(DESIGN|ROADMAP)(?:\.md)?[ \t]*$")
+SENTENCE_END = re.compile(r"[.?!][ \t]+(?=[A-Z`(\[])")
+BLOCKQUOTE = re.compile(r"^[ \t]*(?:>[ \t]?)+")
+LIST_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+")
+CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1", re.S)
+
+
+@dataclass(frozen=True)
+class Unit:
+    """A paragraph, list item, heading or table cell, its wrapped lines joined by single spaces.
+
+    `lines[i]` is the source line of `text[i]`; `header` is the cell's column header, if any."""
+
+    text: str
+    lines: tuple[int, ...]
+    header: str = ""
+
+
+def _split_cells(row: str) -> list[tuple[int, str]]:
+    """A table row's cells, each with its start column, split on `|` outside code spans."""
+    cells: list[tuple[int, str]] = []
+    start = 0
+    i = 0
+    tick = 0
+    body = row
+    while i < len(body):
+        c = body[i]
+        if c == "`":
+            n = 1
+            while i + n < len(body) and body[i + n] == "`":
+                n += 1
+            if tick == 0:
+                tick = n
+            elif tick == n:
+                tick = 0
+            i += n
+            continue
+        if c == "\\":
+            i += 2
+            continue
+        if c == "|" and tick == 0:
+            cells.append((start, body[start:i]))
+            start = i + 1
+        i += 1
+    cells.append((start, body[start:]))
+    if cells and not cells[0][1].strip():
+        cells = cells[1:]
+    if cells and not cells[-1][1].strip():
+        cells = cells[:-1]
+    return cells
+
+
+def _is_table_row(line: str) -> bool:
+    return line.lstrip().startswith("|")
+
+
+def _is_delimiter_row(line: str) -> bool:
+    return re.fullmatch(r"\s*\|?(\s*:?-+:?\s*\|)+\s*:?-*:?\s*", line) is not None
+
+
+def units(text: str) -> list[Unit]:
+    """The bare rule's units of a Markdown file: paragraphs and list items with wrapped lines joined
+    and blockquote markers stripped, headings, and table cells; fenced blocks are skipped."""
+    out: list[Unit] = []
+    buf: list[tuple[int, str]] = []
+    header: list[str] = []
+    in_table = False
+    fenced = False
+
+    def flush() -> None:
+        if not buf:
+            return
+        parts: list[str] = []
+        lines: list[int] = []
+        for n, s in buf:
+            if parts:
+                parts.append(" ")
+                lines.append(n)
+            parts.append(s)
+            lines.extend([n] * len(s))
+        out.append(Unit("".join(parts), tuple(lines)))
+        buf.clear()
+
+    for n, raw in enumerate(text.splitlines(), start=1):
+        stripped = raw.lstrip()
+        if stripped.startswith(FENCE):
+            flush()
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        m = BLOCKQUOTE.match(raw)
+        line = raw[m.end():] if m else raw
+        if not line.strip():
+            flush()
+            in_table = False
+            continue
+        if _is_table_row(line):
+            flush()
+            if not in_table:
+                in_table = True
+                header = [c.strip() for _, c in _split_cells(line)]
+                cells_hdr = True
+            else:
+                cells_hdr = False
+            if _is_delimiter_row(line):
+                continue
+            for k, (_col, cell) in enumerate(_split_cells(line)):
+                head = "" if cells_hdr or k >= len(header) else header[k]
+                out.append(Unit(cell, tuple([n] * len(cell)), head))
+            continue
+        in_table = False
+        if HEADING.match(line):
+            flush()
+            out.append(Unit(line, tuple([n] * len(line))))
+            continue
+        if LIST_ITEM.match(line):
+            flush()
+        buf.append((n, line.strip()))
+    flush()
+    return out
+
+
+def _spans(text: str) -> list[tuple[int, int]]:
+    return [(m.start(), m.end()) for m in CODE_SPAN.finditer(text)]
+
+
+def _sentences(text: str) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    start = 0
+    for m in SENTENCE_END.finditer(text):
+        out.append((start, m.end()))
+        start = m.end()
+    out.append((start, len(text)))
+    return out
+
+
+def _qualified(before: str) -> bool:
+    if QUALIFIER.search(before):
+        return True
+    tail = before.rstrip()
+    return any(tail.endswith(name) for name in EXTERNAL)
+
+
+def bare_citations(text: str) -> list[tuple[int, str, frozenset[str]]]:
+    """(line, number, docs) for each bare `§` of a Markdown text: `docs` holds `DESIGN` and
+    `ROADMAP` as a citation earlier in its sentence, or its column header, names them."""
+    out: list[tuple[int, str, frozenset[str]]] = []
+    for u in units(text):
+        spans = _spans(u.text)
+        head = {d for d in ("DESIGN", "ROADMAP") if d in u.header}
+        for s0, s1 in _sentences(u.text):
+            named: set[str] = set(head)
+            for m in SECTION.finditer(u.text, s0, s1):
+                if any(a <= m.start() < b for a, b in spans):
+                    continue
+                before = u.text[s0 : m.start()]
+                cite = CITE_BEFORE.search(before)
+                if cite is not None:
+                    named.add(cite.group(1))
+                    continue
+                if _qualified(before):
+                    continue
+                out.append((u.lines[m.start()], m.group(1), frozenset(named)))
+    return out
+
+
+
+def check_bare(
+    files: Mapping[str, str],
+    design: Mapping[str, tuple[str, str]],
+    roadmap: Mapping[str, str],
+) -> list[str]:
+    """Report each bare `§x.y` in ROADMAP.md and the DESIGN files that resolves in no file."""
+    errors: list[str] = []
+    for path in (ROADMAP, *(p for p, _ in LAYOUT)):
+        text = files.get(path)
+        if text is None:
+            continue
+        own = "ROADMAP" if path == ROADMAP else "DESIGN"
+        for line, num, named in bare_citations(text):
+            docs = named | {own}
+            if ("DESIGN" in docs and num in design) or ("ROADMAP" in docs and num in roadmap):
+                continue
+            errors.append(f"{path}:{line}: bare §{num} resolves in no file")
+    return errors
+
+
 def in_scope(path: str) -> bool:
     return not path.startswith(EXCLUDE)
 
@@ -234,6 +441,7 @@ def check_tree(files: Mapping[str, str]) -> list[str]:
         errors.extend(check_citations(path, text, design, roadmap))
         if path.endswith(".md"):
             errors.extend(check_links(path, text, anchors))
+    errors.extend(check_bare(files, design, roadmap))
     return sorted(errors)
 
 

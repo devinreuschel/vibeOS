@@ -925,7 +925,7 @@ id>`, so no run on `main` is cancelled or dropped as pending, and a fork's pull 
 other than `main` alone, on a `tags`, `branches-ignore` or `paths` filter, on a
 missing `pull_request` or `workflow_dispatch` trigger, or on a group that is not built that way
 (`rule_ci_triggers`); on any `concurrency` group built from `github.head_ref` or `github.ref_name`
-(`rule_concurrency_group`); and on a workflow a §10.9 gate entry names that has no
+(`rule_concurrency_group`); and on a workflow a ROADMAP §10.9 gate entry names that has no
 `workflow_dispatch` trigger (`rule_gate_dispatch`). The other rows below are scheduled,
 dispatched, or run on a tag. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9).
 
@@ -948,7 +948,7 @@ macOS job, the KVM leg, the fuzzers, stress, and any job with a performance thre
 name two scheduled workflows, both on the pinned toolchain: the nightly job, which carries the KVM
 leg, and the weekly job (`smp-stress` today); the non-blocking `nightly-canary`, the one job on an
 undated nightly, is neither, and a line that needs its own workflow or another cadence names it
-(§20.8's `hardware-models`, §22.5's `fuzz.yml`, §24.2's rebuilds). A later line that says "in CI"
+(ROADMAP §20.8's `hardware-models`, §22.5's `fuzz.yml`, §24.2's rebuilds). A later line that says "in CI"
 for a functional test means a ladder tier; for a benchmark or a threshold it means the KVM leg. A
 red scheduled job blocks the next phase tag. The earlier no-matrix rule (runner queues) is lifted:
 the repository is public, so standard runners are free and unlimited, and the limits that matter
@@ -1125,7 +1125,7 @@ receives only artifacts and their SHA-256 list (ROADMAP §10.1, §14.6). `releas
 
 **Runners.** Every Linux job runs on GitHub's free `ubuntu-26.04` image (`ubuntu-26.04-arm` for
 arm64 jobs), whose apt QEMU 10.2.1 (`1:10.2.1+ds-1ubuntu3`) meets every QEMU minimum ROADMAP names
-(9.0 for Phase 11's EL2 boot and §20.1's boot with more than 255 vCPUs, 10.2 for §18.1's amd-iommu
+(9.0 for Phase 11's EL2 boot and ROADMAP §20.1's boot with more than 255 vCPUs, 10.2 for §18.1's amd-iommu
 `dma-remap` and Phase 25's GHES injection). A line that needs QEMU 11.1 or later builds that release
 from its tarball, checked by SHA-256 and cached by version; none does yet. Every job that installs
 `qemu-system-*` sets `VIBEOS_QEMU_VERSION` to the version it pins, and when `CI` is set on Linux,
@@ -1181,8 +1181,8 @@ workflow (`rule_lane_map`). `Reserved for` is `nightly`, `weekly`, `scheduled`, 
 | `sched-lane-4` | weekly | `smp-stress.yml` `stress`, `repeat-kernel` |
 | `sched-lane-5` | weekly | `smp-stress.yml` `repeat-kernel-smp4`, `nightly-canary`, `fuzz` |
 | `sched-lane-6` | history | `ci-history.yml` (every job) |
-| `sched-lane-7` | none | multi-day chains (soaks, campaigns); a §22.1 release window |
-| `sched-lane-8` | none | multi-day chains; a §22.1 release window |
+| `sched-lane-7` | none | multi-day chains (soaks, campaigns); a ROADMAP §22.1 release window |
+| `sched-lane-8` | none | multi-day chains; a ROADMAP §22.1 release window |
 | `sched-lane-9` | scheduled | `macos.yml` (P10-S47) |
 
 Release windows: none

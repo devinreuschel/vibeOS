@@ -5,8 +5,10 @@ from __future__ import annotations
 import unittest
 
 from scripts.doc_refs import (
+    EXTERNAL,
     LAYOUT,
     ROADMAP,
+    check_bare,
     check_citations,
     check_links,
     check_tree,
@@ -197,6 +199,84 @@ class CitationTest(unittest.TestCase):
 
     def test_placeholder_is_not_a_citation(self) -> None:
         self.assertEqual(self.run_on(cite("DESIGN", "x.y") + " " + cite("ROADMAP", "x.y")), [])
+
+
+def sec(num: str) -> str:
+    """A bare section sign built at run time, as `cite` does for a citation."""
+    return f"§{num}"
+
+
+class TestBareRule(unittest.TestCase):
+    def run_on(self, path: str, text: str) -> list[str]:
+        files = design_set()
+        files[path] = files.get(path, "") + "\n\n" + text + "\n"
+        design = index(files)
+        roadmap = roadmap_index(files[ROADMAP])
+        return [e for e in check_bare(files, design, roadmap) if e.startswith(path + ":")]
+
+    def assert_flags(self, path: str, text: str, nums: list[str]) -> None:
+        errors = self.run_on(path, text)
+        self.assertEqual([e.split(": bare ")[1] for e in errors],
+                         [f"{sec(n)} resolves in no file" for n in nums], errors)
+
+    def test_own_file_roadmap(self) -> None:
+        self.assert_flags(ROADMAP, f"- [ ] as {sec('10.3')} says", [])
+        self.assert_flags(ROADMAP, f"- [ ] as {sec('5.4')} says", ["5.4"])
+
+    def test_own_file_across_design_topic_files(self) -> None:
+        self.assert_flags("docs/BOOT.md", f"The IRQ path ({sec('5.4')}) and {sec('4.4')}.", [])
+        self.assert_flags("docs/DESIGN.md", f"See {sec('8.2')}.", [])
+        self.assert_flags("docs/BOOT.md", f"See {sec('10.3')}.", ["10.3"])
+
+    def test_earlier_design_citation(self) -> None:
+        self.assert_flags(ROADMAP, f"- [ ] {cite('DESIGN', '5.4')} and {sec('4.4')} hold", [])
+
+    def test_earlier_roadmap_citation(self) -> None:
+        self.assert_flags("docs/MEMORY.md", f"{cite('ROADMAP', '10')}, {sec('10.3')} land it.", [])
+
+    def test_citation_in_previous_sentence_does_not_count(self) -> None:
+        self.assert_flags("docs/MEMORY.md", f"See {cite('ROADMAP', '10')}. Then {sec('10.3')}.",
+                          ["10.3"])
+        self.assert_flags(ROADMAP, f"Per {cite('DESIGN', '5.4')}. `x` and {sec('4.4')}.", ["4.4"])
+
+    def test_wrapped_lines_join(self) -> None:
+        text = f"as {cite('ROADMAP', '10')} and\n{sec('10.3')} say"
+        self.assert_flags("docs/MEMORY.md", text, [])
+        errors = self.run_on("docs/MEMORY.md", f"one\ntwo {sec('10.3')}")
+        self.assertEqual(len(errors), 1)
+        whole = design_set()["docs/MEMORY.md"] + f"\n\none\ntwo {sec('10.3')}\n"
+        line = whole.splitlines().index(f"two {sec('10.3')}") + 1
+        want = f"docs/MEMORY.md:{line}: bare {sec('10.3')} resolves in no file"
+        self.assertEqual(errors[0], want)
+
+    def test_column_header(self) -> None:
+        table = f"| Box | ROADMAP |\n|---|---|\n| a | {sec('10.3')} |\n"
+        self.assert_flags("docs/PORTABILITY.md", table, [])
+        table = f"| Box | Phase |\n|---|---|\n| a | {sec('10.3')} |\n"
+        self.assert_flags("docs/PORTABILITY.md", table, ["10.3"])
+
+    def test_external_specifications(self) -> None:
+        self.assertIn("virtio 1.2", EXTERNAL)
+        text = " ".join(f"{name} {sec('2.7.13')}" for name in EXTERNAL)
+        self.assert_flags("docs/BLOCK.md", text, [])
+
+    def test_other_documents(self) -> None:
+        text = (f"VIBEFS.md {sec('15')}, [the format](VIBEFS.md) {sec('16')}, "
+                f"`docs/SYSCALL.md` {sec('2')}, and KERNEL_REVIEW {sec('8.3')}.")
+        self.assert_flags("docs/BLOCK.md", text, [])
+
+    def test_code_span_and_fence(self) -> None:
+        self.assert_flags("docs/BLOCK.md", f"`{sec('99.9')}` and\n\n```\n{sec('99.8')}\n```\n", [])
+
+    def test_blockquote_wrap(self) -> None:
+        text = f"> as the box says (ROADMAP\n> {sec('10.3')}), here"
+        self.assert_flags("docs/PITFALLS.md", text, [])
+        self.assert_flags("docs/PITFALLS.md", f"> as the box says\n> {sec('10.3')}", ["10.3"])
+
+    def test_check_tree_reports_bare(self) -> None:
+        files = design_set()
+        files["docs/TIME.md"] += f"\nSee {sec('19.5')}.\n"
+        self.assertEqual(len([e for e in check_tree(files) if "bare" in e]), 1)
 
 
 class LinkTest(unittest.TestCase):

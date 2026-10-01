@@ -348,7 +348,7 @@ Planned (ROADMAP §11.3, §11.6).
 | `0x0D` | branch target (BTI) | dump, halt | `SIGILL`, `ILL_ILLOPC`; BTI is off until ROADMAP §18.9 |
 | `0x0E` | illegal execution state | dump, halt | `SIGILL`, `ILL_ILLOPC` |
 | `0x15` | `svc` | not taken: the kernel makes no `svc` | the syscall path |
-| `0x18` | trapped `mrs`, `msr`, or system instruction | dump, halt | `SIGILL`, `ILL_ILLOPC`, unless a ROADMAP line emulates the register (§23.1) |
+| `0x18` | trapped `mrs`, `msr`, or system instruction | dump, halt | `SIGILL`, `ILL_ILLOPC`, unless a ROADMAP line emulates the register (ROADMAP §23.1) |
 | `0x19`, `0x1D` | SVE, SME access | dump, halt | `SIGILL`, `ILL_ILLOPC` (ROADMAP §11.6), until §23.1 gives their state a first-use setup |
 | `0x1C` | pointer-authentication failure | dump, halt | `SIGILL`, `ILL_ILLOPN`; pointer authentication is off until ROADMAP §18.9 |
 | `0x20`, `0x21` | instruction abort (`0x20` from EL0, `0x21` at the kernel's level) | dump with `FAR_EL1`, halt | the fault path (ROADMAP §12.2): an unresolved translation, access-flag, or permission fault gets `SIGSEGV`, `SEGV_MAPERR` or `SEGV_ACCERR`; an alignment fault `SIGBUS`, `BUS_ADRALN`; a synchronous external abort `SIGBUS`, `BUS_OBJERR`, until ROADMAP §25 classifies it |
