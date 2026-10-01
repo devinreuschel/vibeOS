@@ -2,7 +2,7 @@
 //!
 //! A test builds its program with [`user_code!`] or hands in an ELF image,
 //! and [`spawn`] starts it as a process whose parent is the kernel (ppid
-//! 0); [`wait`] reaps it. No initrd file and no `user/*.asm` is involved.
+//! 0); [`wait`] reaps it. No initrd file is involved.
 
 use alloc::vec;
 use alloc::vec::Vec;

@@ -404,6 +404,18 @@ const _: () = {
     assert!(size_of::<KernelTrace>() == 48 + MAX_CPUS * size_of::<Ring<RECORDS_PER_CPU>>());
 };
 
+/// Offsets in a [`KernelTrace`] and in one of its rings, which the core
+/// tool (`log::vmcore`) decodes from a dump: the layout the assertions
+/// above fix, named here because the fields are private.
+pub const TRACE_MAGIC_OFF: usize = offset_of!(KernelTrace, magic);
+pub const TRACE_FREQ_OFF: usize = offset_of!(KernelTrace, freq_hz);
+pub const TRACE_SKEW_OFF: usize = offset_of!(KernelTrace, max_skew);
+pub const TRACE_FLAGS_OFF: usize = offset_of!(KernelTrace, flags);
+pub const TRACE_RINGS_OFF: usize = offset_of!(KernelTrace, rings);
+pub const RING_HEAD_OFF: usize = offset_of!(Ring<RECORDS_PER_CPU>, head);
+pub const RING_RECORDS_OFF: usize = offset_of!(Ring<RECORDS_PER_CPU>, records);
+pub const RING_SIZE: usize = size_of::<Ring<RECORDS_PER_CPU>>();
+
 impl<const CPUS: usize, const N: usize> Trace<CPUS, N> {
     /// An all-zero trace, so the kernel's static lies in `.bss`. It reads
     /// as not live (no magic) until [`Trace::init`].

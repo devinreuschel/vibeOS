@@ -25,6 +25,7 @@ mod errno;
 pub mod io;
 pub mod rt;
 pub mod sys;
+pub mod utest;
 
 /// `vibeos_user::main!(f)` makes `f: fn(&env::Env) -> i32` the program's
 /// entry; its return value is the exit status.

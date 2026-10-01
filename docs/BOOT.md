@@ -17,7 +17,7 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
 | User build | `make user` (a prerequisite of `make all` and of the ktest kernel): clippy `-D warnings`, then `cargo build -p vibeos-user --target x86_64-unknown-linux-musl` with, through `--config` only, `-D warnings`, `-C linker=rust-lld`, `-C relocation-model=static`, `-C link-self-contained=no`, `-C link-arg=-zseparate-loadable-segments`, `-C link-arg=--image-base=0x40000000`, `-C panic=abort`, and opt-level `"z"`; `scripts/check_user_elf.py` on each unstripped ELF; then each program stripped to `build/user/<name>` |
 | Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
-| Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins), `cargo-deny` (`make check`'s `cargo deny check licenses bans sources`, at the version the `check` job pins; `cargo install cargo-deny --locked --version <pin>`) |
+| Extra host tools | `xorriso`, `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins), `cargo-deny` (`make check`'s `cargo deny check licenses bans sources`, at the version the `check` job pins; `cargo install cargo-deny --locked --version <pin>`) |
 
 `make` is the usual entry. It builds `build/initrd.fat` with hostlib `mkinitrd` and stages it on the
 ISO as `/boot/initrd.fat`, which `limine.conf`'s `module_path:` loads as a Limine module; the kernel
@@ -177,13 +177,14 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 13b | BSP LAPIC, I/O APIC, LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calib. Prove a tick (TSC-deadline → periodic → PIT), then mask PIC + PIT GSI if LAPIC owns it. |
 | 14 | Scheduler, idle thread on BSP | `sched: cpu0 ready` | Preemption target must exist before the timer starts firing into it. |
 | 15 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver (step 17). |
+| 15b | PCI scan: enumerate, size every BAR (`pci_init::scan`) | (none) | Before step 16, while the BSP runs alone. Sizing writes all-ones to a live BAR and puts it back, which moves the BAR in the physical map; QEMU's TCG rebuilds its memory map for each move and flushes the other vCPUs' TLBs only later, so their MMIO meanwhile can reach the wrong region, and a LAPIC EOI lost that way leaves the timer vector in service: that CPU takes no IPI again and the next shootdown waits on it for good (ROADMAP §10.2). Sets up ECAM from MCFG. Step 17b publishes what it found. |
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 16b | Confirm the clocksource (`time_init::confirm_clocksource`) | `time: clocksource <name>` | After `smp: done`: the TSC ranks first only if the AP warp tests in step 16 saw no backward step, so step 13's choice is provisional until here ([DESIGN §6.4](TIME.md#64-timekeeping-api)). Switches with no step in `now_ns` if the rank changed; no candidate halts with `time: no clocksource`. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
-| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Scan records each function's parent bridge and maps no BAR: a driver maps a memory BAR it has claimed, in its `probe`, through `pci_init::map_bar` (DEVICES.md §12.3); a BAR above 32 MiB is claimed but not mapped (§9.2). |
+| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). It publishes the list step 15b's scan built. Workqueue + threaded IRQ start, then drivers bind by id. Scan records each function's parent bridge and maps no BAR: a driver maps a memory BAR it has claimed, in its `probe`, through `pci_init::map_bar` (DEVICES.md §12.3); a BAR above 32 MiB is claimed but not mapped (§9.2). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. each virtio-blk function (`vda`, `vdb`, …) emits during its probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
 | 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. The FAT32 initrd Limine loaded as a module (§3.2), mounted read-write in place through the physmap, at `/` when live; with no module, or one past `map_end`, a ramfs root. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. a heap-backed vibefs instance at `/vibe` (Phase 8D). No serial marker: a root without `/sbin/init` shows as `user: init failed` and no `shell ready`. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
-| 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. The bootstrap thread spawns `/hello` and waits for it (`proc_init::spawn_elf`, `proc_init::wait_kernel`), `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests`, waits for it, and prints `init: /bin/tests exited <status>` on fd 2 when the wait status is nonzero, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/sh.asm`); the marker is not kernel-emitted; the harness requires `user: tests ok` before it (ROADMAP §10.2). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
+| 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. The bootstrap thread spawns `/hello` and waits for it (`proc_init::spawn_elf`, `proc_init::wait_kernel`), `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests`, waits for it, and prints `init: /bin/tests exited <status>` on fd 2 when the wait status is nonzero, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/src/bin/sh.rs`); the marker is not kernel-emitted; the harness requires `user: tests ok` before it (ROADMAP §10.2). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
@@ -194,6 +195,9 @@ Ordering rules worth stating separately because they were learned the hard way:
   counts, and logs it instead (§5.5).
 - `smp: done` precedes `console ok`, `pci: N devices`, and `shell ready`. The e2e harness enforces
   it. If SMP moves after the shell, AP failures become invisible in CI.
+- The PCI scan that sizes BARs (step 15b) runs before the first AP starts, though its
+  `pci: N devices` stays at step 17b. A BAR sized while another CPU runs moves under that CPU's
+  MMIO: on QEMU's TCG a LAPIC EOI went astray that way and the CPU never acked an IPI again.
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
   heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
@@ -223,8 +227,8 @@ initialized, then the keyboard GSI is unmasked. After LAPIC owns the tick the
 default PIC handler still halts on an unexpected line (§5.5 gives ROADMAP §10.6's change). The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
-Step 17b enumerates PCI (ECAM where the first MCFG allocation covers the bus, else CF8 on bus 0 only),
-fills the device registry, and emits
+Step 15b enumerates PCI (ECAM where the first MCFG allocation covers the bus, else CF8 on bus 0 only)
+and sizes each BAR before any AP starts. Step 17b fills the device registry from that scan and emits
 `pci: N devices`. Workqueue workers and the threaded-IRQ bottom half start
 next. Drivers register, then bind after the scan, not inline. Virtio-rng
 matches by id when a modern virtio device is present (ktest adds two, and
@@ -360,6 +364,13 @@ of the image with those bytes zeroed. That is safe because `limine.conf` names i
 never by disk signature. The xorriso version lands in the volume descriptor, so `mkiso.sh` records it
 beside each ISO as `<iso>.xorriso-version`, which a release publishes. An incremental build keeps the
 epoch of the commit it last rebuilt a file at; compare clean builds.
+
+The ISO's `/boot/vibeos` is the kernel ELF less its DWARF sections (`objcopy --strip-debug` in
+`mkiso.sh`): Limine reads the whole executable into one buffer before it loads it, and a 128 MiB
+UEFI guest under current OVMF has no room for 13 MB of debug info. The kernel's symbol table is its
+loaded `.ksyms` section, which stays; `build/kernels/*.elf` keep the debug info for gdb and guest
+cores, and `make release-artifacts` compares the image's kernel with the release link's output
+stripped the same way.
 
 `make repro` does (`scripts/repro_build.py`, run by a scheduled job): it clones the commit twice, at
 checkout paths of different lengths, each with its own `CARGO_HOME` and `RUSTUP_HOME`, a copy of

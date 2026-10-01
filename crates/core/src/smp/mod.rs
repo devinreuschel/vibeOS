@@ -14,8 +14,6 @@ pub const PARAM_OFF: usize = 0xD0;
 pub const PARAM_CR3: usize = 0xD0;
 pub const PARAM_STACK: usize = 0xD8;
 pub const PARAM_ENTRY: usize = 0xE0;
-pub const PARAM_IDT: usize = 0xE8;
-pub const PARAM_IDT_LEN: usize = 10;
 
 /// Offset in the blob of each 32-bit absolute operand that `trampoline.S`
 /// assembles as if the blob sat at 0 and [`patch_blob`] rebases onto the
@@ -105,20 +103,6 @@ pub const fn blob_fits(len: usize) -> bool {
     len <= PARAM_OFF
 }
 
-/// 10-byte IDTR image at [`PARAM_IDT`].
-pub fn pack_idtr(limit: u16, base: u64) -> [u8; PARAM_IDT_LEN] {
-    let mut b = [0u8; PARAM_IDT_LEN];
-    b[0] = limit as u8;
-    b[1] = (limit >> 8) as u8;
-    let base_bytes = base.to_le_bytes();
-    let mut i = 0;
-    while i < 8 {
-        b[2 + i] = base_bytes[i];
-        i += 1;
-    }
-    b
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,21 +175,10 @@ mod tests {
         assert_eq!(PARAM_CR3, 0xD0);
         assert_eq!(PARAM_STACK, 0xD8);
         assert_eq!(PARAM_ENTRY, 0xE0);
-        assert_eq!(PARAM_IDT, 0xE8);
-        assert_eq!(PARAM_IDT_LEN, 10);
         assert!(blob_fits(PARAM_OFF));
         assert!(!blob_fits(PARAM_OFF + 1));
         assert!(blob_fits(0));
         assert!(blob_fits(0xD0));
-    }
-
-    #[test]
-    fn idtr_pack_limit_then_base() {
-        let b = pack_idtr(0x0FFF, 0xFFFF_8000_1234_5678);
-        assert_eq!(u16::from_le_bytes([b[0], b[1]]), 0x0FFF);
-        let mut base = [0u8; 8];
-        base.copy_from_slice(&b[2..10]);
-        assert_eq!(u64::from_le_bytes(base), 0xFFFF_8000_1234_5678);
     }
 
     #[test]

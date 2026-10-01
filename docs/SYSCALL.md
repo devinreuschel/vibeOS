@@ -137,12 +137,12 @@ names, Linux values:
 | `ENOENT` | 2 | `open`/`execve` missing path |
 | `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
 | `EIO` | 5 | device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs |
-| `E2BIG` | 7 | `execve` argv or envp with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
+| `E2BIG` | 7 | `execve`: a string over 131,072 bytes with its NUL, or strings and pointers together over max(128 KiB, min(`RLIMIT_STACK`/4, 6 MiB)), 2 MiB at the fixed 8 MiB `RLIMIT_STACK` (§3.1) |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
 | `EAGAIN` | 11 | `fork` with every process-table slot in use, zombies included (`limits::MAX_PROCS` is 256), or no pid free (pids and tids share one allocator, up to 32,767, then from 300), or the thread table has no free slot (ROADMAP §10.4, F037) |
-| `ENOMEM` | 12 | AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table (256 regions, `limits::MAX_REGIONS`, where Linux's `vm.max_map_count` allows 65,530; ROADMAP §10.4), a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4) |
+| `ENOMEM` | 12 | AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table (256 regions, `limits::MAX_REGIONS`, where Linux's `vm.max_map_count` allows 65,530; ROADMAP §10.4), a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4), `execve` argument buffers included |
 | `EACCES` | 13 | `open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys` |
 | `EFAULT` | 14 | bad user pointer / length |
 | `EBUSY` | 16 | defined; no syscall returns it |
@@ -158,7 +158,7 @@ names, Linux values:
 | `ENOSPC` | 28 | `write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent |
 | `ESPIPE` | 29 | `lseek` on the console, `/dev/console`, or `/dev/tty` |
 | `EROFS` | 30 | defined; no syscall returns it: a write to a read-only virtio-blk device fails with it in the block layer |
-| `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv or envp string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
+| `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes. ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
 | `ENOTEMPTY` | 39 | defined; no syscall returns it |
 | `ELOOP` | 40 | `open` or `execve` through too many symbolic links |
@@ -228,7 +228,7 @@ from its handler (F150).
 | 35 | 101 | `nanosleep` | 2 | `const struct __kernel_timespec *rqtp`, `struct __kernel_timespec *rmtp` | `rqtp`: in, 16 bytes, before anything else; `rmtp`: not read (ROADMAP §13.8) | `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1 |
 | 39 | 172 | `getpid` | 0 | — | — | `0` if the caller is not a process |
 | 57 | — | `fork` | 0 | — | — | full address-space copy; the child returns 0 |
-| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `argv` and `envp` at most 15 strings of at most 255 bytes each; `envp` copied and dropped |
+| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
 | 60 | 93 | `exit` | 1 | `int status` | — | the low 8 bits of `status` |
 | 61 | 260 | `wait4` | 4 | `pid_t pid`, `int *wstatus`, `int options`, `struct rusage *rusage` | `wstatus`: out, 4 bytes, may be NULL, after a child is reaped; `rusage`: not read (ROADMAP §13.7) | — |
 | 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | default actions only |
@@ -312,12 +312,19 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   ROADMAP §10.6). Under the cap, every page is allocated and zeroed at the
   call, in chunks of at most 512 pages (one leaf table), with the page-table
   lock dropped between chunks; a frame shortage unmaps and frees what the
-  load mapped and returns `ENOMEM` to the old image. An empty
-  argv becomes `[path]`; Linux starts the image with `argc` 1 and an empty
-  `argv[0]` (ROADMAP §10.5). `envp` is copied as `argv` is, so its
-  pointers are checked and it holds at most 15 strings of at most 255
-  bytes, and then dropped: the new stack gets an empty environment (§7;
-  ROADMAP §10.5)
+  load mapped and returns `ENOMEM` to the old image. `argv` and `envp`
+  take Linux's limits, as execve(2) states them: a string of 131,072 bytes
+  or more before its NUL (`MAX_ARG_STRLEN`) returns `E2BIG`, and so do
+  strings, NULs and 8-byte pointers together over max(128 KiB,
+  min(`RLIMIT_STACK`/4, 6 MiB)), 2 MiB at the fixed 8 MiB `RLIMIT_STACK`
+  (`limits::RLIMIT_STACK_DEFAULT` until ROADMAP §13.9's `setrlimit`); there
+  is no count cap. Both are copied, `argv` then `envp`, into one per-call
+  kernel buffer before the load starts, so `E2BIG`, and `ENOMEM` for a
+  buffer that cannot grow, return to the old image. A NULL or empty `argv`
+  starts the image with `argc` 1 and an empty `argv[0]`, as Linux does; a
+  NULL `envp` is an empty environment. The new stack holds the strings,
+  their pointers and the auxiliary vector, page-rounded, plus 128 KiB
+  (ROADMAP §10.5)
 - `wait4`: `pid > 0` waits for that child, any `pid < 0` for any child, and
   `pid == 0` returns `ECHILD`; Linux reads 0 and `pid < -1` as process
   groups. Only `WNOHANG` is read; other option bits are accepted and ignored, and `r10`
@@ -329,11 +336,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   signals, for 0, the caller's process group, for -1, every process the
   caller may signal except pid 1 and the caller, and for any other negative
   `pid`, process group `-pid` (F149; ROADMAP §13.7). A `pid` that names a
-  zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A
-  default-terminate or default-stop signal to pid 1 kills or stops init,
-  after which an orphan has no reaper and is freed when it exits (`exit`
-  below); Linux delivers to init only the signals it handles (F068; ROADMAP
-  §10.5)
+  zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A signal sent
+  to pid 1 is dropped, and `kill` returns 0, unless init has a handler for
+  it, as Linux does; none can exist before ROADMAP §13.8, and never for
+  `SIGKILL` or `SIGSTOP` (F068)
 - `exit`: the caller's children go to the reaper `proc::reaper_for` picks:
   pid 1 while init is live or stopped; otherwise none, so a child reads
   `getppid()` 0 and is freed when it exits (a zombie child at once), as in
@@ -341,8 +347,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   has parent 0: `/sbin/init`, and the boot `/hello` and the in-guest test
   programs, which `proc_init::wait_kernel` reaps. Linux reparents to a subreaper or
   init and panics when init exits (ROADMAP §10.5, F068)
-- `psinfo`: writes one `<pid> <ppid> <state> <name>` line per process
-  (state `run`, `stop`, or `zombie`). It formats the whole lines that fit in
+- `psinfo`: writes one `<pid> <ppid> <state> <name> <syscalls>` line per
+  process, in pid order (state `run`, `stop`, or `zombie`; `<syscalls>` is
+  the sum of `Tcb.syscall_count` over the process's live threads, every
+  entry counted, `ENOSYS` included). It formats the whole lines that fit in
   512 bytes and copies at most `rsi` of those bytes. Number 500 is in the
   range Linux allocates next (F149); ROADMAP §13.9 deletes the call when
   `ps` moves to `procfs`
@@ -474,8 +482,9 @@ next `wait4` returns `-ECHILD`.
 **Strings and vectors.** `open` and `execve` copy a C string with
 `strncpy_from_user`, in chunks that stop at each page boundary and at
 `USER_MAP_END`, so a string that ends before an unmapped page copies; a
-string that fills the kernel buffer is `-ENAMETOOLONG`, and a fault before
-its NUL `-EFAULT`. Each 8-byte argv or envp pointer is one all-or-nothing
+path that fills the kernel buffer is `-ENAMETOOLONG`, an `execve` argument
+or environment string over Linux's limits `-E2BIG` (§3.1), and a fault
+before its NUL `-EFAULT`. Each 8-byte argv or envp pointer is one all-or-nothing
 copy.
 
 A user `#PF`, `#GP`, or `#UD` from the program itself is a process kill
@@ -503,46 +512,69 @@ does not meet this yet:
 serial after each call that returns (`?` names an unknown number); the line
 is not a `vibeOS:` marker. `exit`, which never returns, prints no line.
 
-`vibeos_syscall_stub` increments the calling TCB's `syscall_count` and the
-global `SYSCALLS` on every entry, `ENOSYS` included. Nothing reads either:
-`syscall_init::syscall_count` has no caller, and there is no per-process
-sum (F150; ROADMAP §10.7).
+`vibeos_syscall_stub` increments the calling TCB's `syscall_count`, an
+atomic statistic (Relaxed), on every entry, `ENOSYS` included
+(`syscall_init::bump_counter`). `psinfo` reports each process's sum over its
+live threads, which `thread_init::sum_syscalls` takes in one pass over the
+thread table (`vibeos::proc::sum_syscalls`), and the `/bin/sh` `ps` built-in
+prints it; ROADMAP §13.9 moves it to `/proc/<pid>/vibeos/syscalls`, since
+Linux's `/proc/<pid>/syscall` already means something else (F150).
 
 ---
 
 ## 7. First userspace
 
-Static ELF64, no libc, hand-written `syscall` stubs. Initrd:
+Static ELF64, no libc: Rust programs of the `vibeos-user` crate, built by
+`make user` to `build/user/<name>` (below). Initrd:
 
-- `/hello` — write + exit 42 (Slice B proof)
-- `/sbin/init` — post-init kernel job: `fork`/`exec` tests then `/bin/sh`, then reap
-- `/bin/tests` — syscall / `EFAULT` / `fork`+`exec`+`wait` / fault-kill runner
-- `/bin/sh` — interactive shell; prints `vibeOS: shell ready` then `vibeos>`
+- `/hello` (`user/src/bin/hello.rs`) — write + exit 42 (Slice B proof)
+- `/sbin/init` (`user/src/bin/init.rs`) — post-init kernel job: `fork`/`exec`
+  `/bin/tests`, printing `init: /bin/tests exited <status>` on fd 2 when its
+  wait status is nonzero, then `/bin/sh`, then reap. Its exit, by `exit` or by
+  a signal, panics the kernel after the line
+  `vibeOS: init: pid 1 <how>` (`exited <n>`, `killed SIG<name>`, or
+  `killed SIG<name> addr=0x<hex>` for a fault; INVARIANTS.md §2.5)
+- `/bin/tests` (`user/src/bin/tests.rs`) — syscall / `EFAULT` /
+  `fork`+`exec`+`wait` / fault-kill runner. Its cases, in `user/src/tests/`,
+  run through `vibeos_user::utest::Runner`, which prints the ktest protocol
+  with `utest:` (`vibeOS: utest: begin <n>`, `run <name> <deadline_ms>`,
+  `ok <name>`, `FAIL <name>: <why>`, `skip <name>: <reason>`, `end`);
+  `user: tests begin` comes first, and `user: tests ok` (status 0) or
+  `user: tests fail` (status 1) last
+- `/bin/sh` (`user/src/bin/sh.rs`) — interactive shell; prints
+  `vibeOS: shell ready` then `vibeos>`
+- `/bin/envcheck` (`user/src/bin/envcheck.rs`) — exits 0 when its
+  environment holds `K=v`, else 1 (`/bin/tests`' `exec_env_*` cases)
+- `/bin/argcheck` (`user/src/bin/argcheck.rs`) — checks its `argv` against
+  the mode its environment's `ARGCHECK` names: `empty` (`argc` 1 and an
+  empty `argv[0]`) or `<n>:<m>` (`argc` `n`, every later argument `m`
+  bytes); exits 0 when it holds, 2 for a bad mode, 3 for `argc`, 4 for
+  `argv[0]`, 5 for a length (`/bin/tests`' `exec_*` argument cases)
 
-Stack: `argc`, `argv`, `envp`, and `auxv`. Init's `argv` and `envp` come
-from the kernel command line (BOOT.md §3.2), at most 8 of each; `execve`
-still passes an empty `envp` (it copies its `envp` argument and drops it). The
+Stack: `argc`, `argv`, `envp` (the caller's, copied by `execve`;
+`/sbin/init`'s from the kernel command line, BOOT.md §3.2, at most 8
+arguments and 8 environment strings), and `auxv`. The
 `auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
 `AT_PHDR` (0 when no header table is mapped), `AT_BASE` 0, `AT_FLAGS` 0,
 `AT_UID`, `AT_EUID`, `AT_GID`, and `AT_EGID` (all 0), `AT_CLKTCK` 100,
 `AT_SECURE` 0, `AT_RANDOM`, `AT_NULL`. `AT_RANDOM` is one TSC read and a
 multiply, not random (F140; ROADMAP §13.10 fills it from the kernel CSPRNG).
 Only `ET_EXEC` loads: `ET_DYN` and `PT_INTERP` return `ENOEXEC`. Two
-`PT_LOAD`s that share a page break the load today: the second is not
-mapped and the first's bytes in that page are zeroed (F031; ROADMAP §10.6
-gives the page the later segment's permissions, as Linux does). `PT_PHDR`
+`PT_LOAD`s that share a page load as Linux loads them: the page gets the
+later segment's permissions and holds both segments' bytes (F031). `PT_PHDR`
 VAs are `check_user_va`'d. Exit status is the kernel-reported low 8 bits
 (`user: exit N` diagnostic for the bootstrap hello).
 
 The Rust user runtime (`vibeos-user`, ROADMAP §10.5) is built, and
 `kernel_tests` kernels embed its programs for the in-guest tests
-(`Image::UserBin`; `user_runtime` runs `ktest_rt` in ring 3); the initrd
-programs stay assembly until §10.5 ports them. `_start`, in `user/src/arch/<arch>/`,
+(`Image::UserBin`; `user_runtime` runs `ktest_rt` in ring 3). `_start`, in `user/src/arch/<arch>/`,
 passes the initial stack pointer to `rt::start`, which reads `argc`,
 `argv`, `envp` and `auxv` into an `env::Env`, calls the program's
 `main!` function, and exits with its return value as the status. A panic
 writes `panicked at <file>:<line>:<col>:` and the message, one line
-each, to fd 2 in one `write` (cut at 512 bytes) and exits with status 101. Each program
+each, to fd 2 in one `write` (cut at 512 bytes) and exits with status 101. The runtime's `#[global_allocator]`
+(`user/src/alloc.rs`) grows the heap with `brk`, so `alloc`'s `Box`, `Vec`
+and `String` work in user programs. Each program
 links as a static non-PIE `ET_EXEC` at `0x4000_0000` for
 `x86_64-unknown-linux-musl`, with no libc and no crt objects (BOOT.md
 §3.1).

@@ -1,5 +1,6 @@
 # The dependency policy (ROADMAP §10.9, DESIGN §1.5). `make check` runs
-# `cargo deny check licenses bans sources`; the nightly job runs
+# `cargo deny check licenses bans sources` for the root workspace and for
+# tests/fuzz's (its own workspace, C-FUZZ); the nightly job runs
 # `cargo deny check advisories`, which fetches the RustSec database.
 #
 # A crate joins the graph only when it is named, with its user, in
@@ -34,6 +35,13 @@ allow = [
 ]
 # The list is the policy, not the graph's current licenses.
 unused-allowed-license = "allow"
+# The same for an exception: one workspace uses it, the other does not.
+unused-license-exception = "allow"
+# libfuzzer-sys bundles LLVM's libFuzzer, whose NCSA license (notice-only)
+# holds for that crate alone (DESIGN §1.5). tests/fuzz only: never in an image.
+exceptions = [
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
 # Every crate of the graph is checked, the ones only dev- and build-edges reach
 # (loom's tree, zerocopy-derive's) included.
 include-dev = true
@@ -48,6 +56,8 @@ allow = [
     { crate = "vibeos-hostlib-tests", reason = "workspace member: host tools and host tests" },
     { crate = "vibeos-user", reason = "workspace member: the user runtime and user programs, ROADMAP §10.5" },
     { crate = "vibeos-user-mem", reason = "workspace member: vibeos-user's mem functions" },
+    # The core tool (ROADMAP §10.7).
+    { crate = "rustc-demangle", reason = "vibeos-hostlib-tests dependency: the vmcore tool demangles kernel symbol names" },
     # The kernel.
     { crate = "limine", reason = "vibeos dependency: the Limine boot protocol" },
     # zerocopy (ROADMAP §10.6).
@@ -59,7 +69,7 @@ allow = [
     { crate = "unicode-ident", reason = "proc-macro2 and syn dependency, under zerocopy-derive" },
     # loom (ROADMAP §10.8).
     { crate = "loom", reason = "vibeos-core dev-dependency under cfg(loom): loom models, ROADMAP §10.8" },
-    { crate = "cfg-if", reason = "loom, generator and thread_local dependency, under cfg(loom)" },
+    { crate = "cfg-if", reason = "loom, generator and thread_local dependency, under cfg(loom); getrandom dependency, in tests/fuzz" },
     { crate = "generator", reason = "loom dependency, under cfg(loom)" },
     { crate = "scoped-tls", reason = "loom dependency, under cfg(loom)" },
     { crate = "tracing", reason = "loom dependency, under cfg(loom)" },
@@ -80,14 +90,22 @@ allow = [
     { crate = "lazy_static", reason = "sharded-slab dependency, under loom" },
     { crate = "smallvec", reason = "tracing-subscriber dependency, under loom" },
     { crate = "thread_local", reason = "tracing-subscriber dependency, under loom" },
-    { crate = "libc", reason = "generator dependency under cfg(unix), under loom" },
-    { crate = "cc", reason = "generator build-dependency, under loom" },
-    { crate = "find-msvc-tools", reason = "cc dependency, under loom" },
-    { crate = "shlex", reason = "cc dependency, under loom" },
+    { crate = "libc", reason = "generator dependency under cfg(unix), under loom; getrandom and jobserver dependency, in tests/fuzz" },
+    { crate = "cc", reason = "generator build-dependency, under loom; libfuzzer-sys build-dependency, in tests/fuzz" },
+    { crate = "find-msvc-tools", reason = "cc dependency, under loom and in tests/fuzz" },
+    { crate = "shlex", reason = "cc dependency, under loom and in tests/fuzz" },
     { crate = "rustversion", reason = "generator build-dependency, under loom" },
     { crate = "windows-link", reason = "generator, windows-result and windows-sys dependency under cfg(windows), under loom" },
     { crate = "windows-result", reason = "generator dependency under cfg(windows), under loom" },
     { crate = "windows-sys", reason = "nu-ansi-term dependency under cfg(windows), under loom" },
+    # tests/fuzz, its own workspace (C-FUZZ, TESTING.md §8.1), which `make check`
+    # checks against this file too. Never linked into an image.
+    { crate = "vibeos-fuzz", reason = "tests/fuzz's workspace root: the cargo-fuzz targets" },
+    { crate = "libfuzzer-sys", reason = "tests/fuzz dependency: cargo-fuzz's harness, never linked into an image" },
+    { crate = "arbitrary", reason = "libfuzzer-sys dependency, in tests/fuzz" },
+    { crate = "jobserver", reason = "cc dependency under libfuzzer-sys's build, in tests/fuzz" },
+    { crate = "getrandom", reason = "jobserver dependency, in tests/fuzz" },
+    { crate = "r-efi", reason = "getrandom dependency under cfg(target_os = \"uefi\"), in tests/fuzz" },
 ]
 
 [sources]

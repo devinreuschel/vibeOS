@@ -16,7 +16,18 @@ from pathlib import Path
 from tests.harness.harness import default_iso
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-VARIANTS = ("default", "panic", "gp", "panic-nest", "panic-stop", "ktest", "vibefs-crash")
+VARIANTS = (
+    "default",
+    "panic",
+    "gp",
+    "panic-nest",
+    "panic-stop",
+    "ktest",
+    "vibefs-crash",
+    "hang",
+    "irqoff",
+    "ktest-irqoff",
+)
 
 
 @dataclass(frozen=True)

@@ -323,6 +323,8 @@ ADDED: tuple[str, ...] = (
     "vibeOS: vibefs: sync fail ",
     # §10.3: the clocksource halt reason.
     "vibeOS: time: no clocksource",
+    # §10.5: pid 1's end, before the kernel panics (F068).
+    "vibeOS: init: pid 1 ",
     # §10.7: the blocked-thread sweep.
     "vibeOS: sched: overdue tid ",
     # §10.7: the panic-stop owner's line, printed only inside its dump.

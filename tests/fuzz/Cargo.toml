@@ -1,0 +1,126 @@
+[package]
+name = "vibeos-fuzz"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# cargo-fuzz targets for vibeos-core's byte parsers (C-FUZZ, TESTING.md §8.1).
+# Its own workspace, excluded from the root one, so the kernel build, the MSRV
+# check and `cargo deny` never read libfuzzer-sys. The root `.cargo/config.toml`
+# defaults to the kernel triple, so plain cargo commands pass
+# `--target $(HOST_TRIPLE)`; cargo-fuzz passes the host triple itself.
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[lib]
+name = "vibeos_fuzz"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vibeos = { path = "../../crates/core", package = "vibeos-core", features = ["std"] }
+
+[[bin]]
+name = "acpi_tables"
+path = "fuzz_targets/acpi_tables.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "acpi_walk"
+path = "fuzz_targets/acpi_walk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cmdline_parse"
+path = "fuzz_targets/cmdline_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "elf_parse"
+path = "fuzz_targets/elf_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fat_mount"
+path = "fuzz_targets/fat_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kbd_decode"
+path = "fuzz_targets/kbd_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "part_parse"
+path = "fuzz_targets/part_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pci_enumerate"
+path = "fuzz_targets/pci_enumerate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shell_tokenize"
+path = "fuzz_targets/shell_tokenize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vibefs_mount"
+path = "fuzz_targets/vibefs_mount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "virtio_caps"
+path = "fuzz_targets/virtio_caps.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vmcore"
+path = "fuzz_targets/vmcore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vmcoreinfo_parse"
+path = "fuzz_targets/vmcoreinfo_parse.rs"
+test = false
+doc = false
+bench = false
+
+# The root profiles do not reach this workspace: panic where the kernel would
+# (DESIGN §3.5), on an overflow as on a failed debug assertion.
+[profile.dev]
+overflow-checks = true
+debug-assertions = true
+
+[profile.release]
+overflow-checks = true
+debug-assertions = true
+debug = 1

@@ -5,10 +5,13 @@ mod dead_slot;
 mod depth;
 mod fill;
 mod hooks;
+#[cfg(feature = "irqoff")]
+mod irqoff;
 mod reclaim;
 mod registry;
 mod requeue;
 mod sleep;
+mod sweep;
 pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use dead_slot::lifetime_dead_slot_on_cpu;
 pub(crate) use depth::{
@@ -16,6 +19,8 @@ pub(crate) use depth::{
 };
 pub(crate) use fill::fill_threads;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
+#[cfg(feature = "irqoff")]
+pub(crate) use irqoff::{irqoff_deliberate_is_exempt, irqoff_logs_long_stretch};
 pub(crate) use reclaim::dead_list_batched_rounds;
 pub(crate) use registry::{test_ktest_fail_fmt, test_ktest_helpers, test_ktest_rows};
 pub(crate) use requeue::test_requeue_moves_each_dequeue;
@@ -23,6 +28,7 @@ pub(crate) use sleep::{
     block_in_hard_irq_asserts, in_hard_irq_top_bottom, lock_across_switch_asserts,
     sleep_under_spinlock_asserts,
 };
+pub(crate) use sweep::{sched_overdue_lost_timeout, sched_sweep_cost};
 
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -373,6 +379,7 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
         if crate::arch::current::interrupts_enabled() {
             return (Outcome::Fail("SCHED left IF on"), held);
         }
+        let _hold = crate::sched::irqoff::deliberate("20 ms SCHED hold");
         time_init::busy_wait_ms(20);
         if crate::arch::current::interrupts_enabled() {
             return (Outcome::Fail("IF on during hold"), held);
@@ -411,7 +418,7 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
 const SPAWN_EXIT_N: usize = 2000;
 
 fn spawn_until_dead(name: &'static str) -> Outcome {
-    let _g = crate::arch::current::InterruptGuard::enter();
+    let _g = crate::sched::irqoff::deliberate("spawn with IF off until the thread is dead");
     let Ok(h) = thread_init::spawn_here(name, dying_entry) else {
         return Outcome::Fail("spawn");
     };
@@ -673,7 +680,7 @@ pub(crate) fn spawn_stack_oom() -> Outcome {
     let base = quiescent_free_frames();
     // IF off on this CPU keeps the drained window short.
     let (drained, r) = {
-        let _g = crate::arch::current::InterruptGuard::enter();
+        let _g = crate::sched::irqoff::deliberate("OOM test's drained-buddy window");
         let drained = drain_buddy(&mut held);
         let r = if drained {
             Some(thread_init::spawn("oom", dying_entry_s08))
@@ -1305,4 +1312,14 @@ pub(crate) const TESTS: &[Test] = &[
     test("stack_depth_planted", stack_depth_planted)
         .opt_in()
         .once(),
+    test("sched_sweep_cost", sched_sweep_cost)
+        .deadline(60_000)
+        .once(),
+    test("sched_overdue_lost_timeout", sched_overdue_lost_timeout)
+        .deadline(15_000)
+        .once(),
+    #[cfg(feature = "irqoff")]
+    test("irqoff_logs_long_stretch", irqoff_logs_long_stretch),
+    #[cfg(feature = "irqoff")]
+    test("irqoff_deliberate_is_exempt", irqoff_deliberate_is_exempt),
 ];

@@ -9,7 +9,7 @@ use vibeos::elf::ElfError;
 use vibeos::fs::{FsError, O_CREAT, O_TRUNC, O_WRONLY};
 use vibeos::kbd::DecodedKey;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
-use vibeos::proc::{SIGSEGV, wait_exited, wait_signaled, wexitstatus, wifexited};
+use vibeos::proc::{SIGILL, SIGSEGV, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::syscall::SYS_GETPID;
 use vibeos::vectors;
 
@@ -115,8 +115,10 @@ pub(crate) fn test_user_code_layout() -> Outcome {
     Outcome::Ok
 }
 
-// fork(); the parent exits at once with the child's pid (100 if fork
-// failed). The orphaned child spins on getppid() + sched_yield() (at most
+// fork(); the parent exits at once with the child's pid, whose low 8 bits
+// are all its exit status keeps, or runs `ud2` (SIGILL) if fork failed: no
+// exit status can stand for that, since any low byte is some pid's once the
+// pid allocator passes 255. The orphaned child spins on getppid() + sched_yield() (at most
 // 100,000 times) until it reads 0, then exits 0 (1 on timeout).
 user_code!(
     ORPHAN_FORK,
@@ -146,9 +148,6 @@ user_code!(
     syscall
     ud2
 3:
-    mov edi, 100
-    mov eax, 60
-    syscall
     ud2
 4:
     xor edi, edi
@@ -180,13 +179,13 @@ impl PsBuf {
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("<invalid utf-8>")
     }
 
-    /// The `ps` line for `pid`, if listed.
-    fn line_of(&self, pid: u32) -> Option<&str> {
+    /// The `ps` line of a pid whose low 8 bits are `low`, if one is listed.
+    fn line_of_low8(&self, low: u32) -> Option<&str> {
         self.as_str().lines().find(|l| {
             l.strip_prefix("vibeOS: ps: ")
                 .and_then(|r| r.split(' ').next())
                 .and_then(|p| p.parse::<u32>().ok())
-                == Some(pid)
+                .is_some_and(|p| p & 0xff == low)
         })
     }
 }
@@ -206,17 +205,18 @@ pub(crate) fn test_orphan_freed_no_init() -> Outcome {
         Ok(st) => st,
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     };
+    if st == wait_signaled(SIGILL) {
+        return Outcome::Fail("fork failed");
+    }
     if !wifexited(st) {
         return crate::fail_fmt!("parent status {st:#x}, want exited");
     }
+    // The child's pid, modulo 256.
     let child = wexitstatus(st);
-    if child == 100 {
-        return Outcome::Fail("fork failed");
-    }
     let deadline = time_init::now_ns().saturating_add(5_000_000_000);
     loop {
         let snap = ps();
-        let Some(line) = snap.line_of(child) else {
+        let Some(line) = snap.line_of_low8(child) else {
             break;
         };
         if time_init::now_ns() >= deadline {
@@ -1362,4 +1362,43 @@ pub(crate) fn test_brk_mmap_munmap_user() -> Outcome {
         return crate::fail_fmt!("unlink {S18_FILE}: {}", e.as_str());
     }
     out
+}
+
+/// `scripts/mkelf_shared.py`'s images: an RX and an RW `PT_LOAD` that
+/// share the page at `0x4000_1000` (ROADMAP §10.6, F031).
+const SHARED_PAGE: &[u8] = include_bytes!("../../../tests/fixtures/elf/shared_page.elf");
+const SHARED_PAGE_JUMP: &[u8] = include_bytes!("../../../tests/fixtures/elf/shared_page_jump.elf");
+
+/// ROADMAP §10.6 (F031): a program whose RX segment's tail and RW segment
+/// share a page reads the RX constant and the RW value from that page and
+/// exits 0; a wrong byte in it is exit 1.
+pub(crate) fn test_elf_shared_page() -> Outcome {
+    let st = match user::run(&Image::Elf(SHARED_PAGE), &["shared_page"]) {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    if st == wait_exited(1) {
+        return Outcome::Fail("a segment's bytes are missing from the shared page");
+    }
+    if st != wait_exited(0) {
+        return crate::fail_fmt!("status {st:#x}, want exited 0");
+    }
+    Outcome::Ok
+}
+
+/// ROADMAP §10.6 (F031): the shared page takes the later RW segment's
+/// permissions, so a jump into it ends in `SIGSEGV`, as on Linux; exit 0
+/// means the code there ran.
+pub(crate) fn test_elf_shared_page_jump() -> Outcome {
+    let st = match user::run(&Image::Elf(SHARED_PAGE_JUMP), &["shared_page_jump"]) {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    if st == wait_exited(0) {
+        return Outcome::Fail("code in the shared RW page ran");
+    }
+    if st != wait_signaled(SIGSEGV) {
+        return crate::fail_fmt!("status {st:#x}, want SIGSEGV");
+    }
+    Outcome::Ok
 }

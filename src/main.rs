@@ -317,7 +317,6 @@ extern "C" fn boot_rest() -> ! {
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the IDT is loaded, the PIC remapped and its lines masked, as `time_init::init` requires; established here.
     unsafe { time_init::init() };
-    per_cpu_init::set_tsc_per_ms(time_init::tsc_per_ms());
 
     // FADT bit 0 may have skipped the boot remap (QEMU clears it). IRQ0
     // still needs the 8259 at 0x20, not 0x08, if we fall back to the PIT.
@@ -368,6 +367,17 @@ extern "C" fn boot_rest() -> ! {
     );
     crate::marker!(marker::SCHED_CPU0);
     crate::marker!(marker::IRQ_ENABLED);
+    #[cfg(feature = "irqoff")]
+    crate::sched::irqoff::start(
+        |name, entry| thread_init::spawn(name, entry).is_ok(),
+        thread_init::sleep_ms,
+    );
+
+    // BOOT.md §3.3 step 15b: size every BAR while the BSP runs alone.
+    // SAFETY: boot order (BOOT.md §3.3): once, on the BSP, before
+    // `smp_init::init` starts an AP, as `pci_init::scan` requires;
+    // established here.
+    unsafe { crate::pci_init::scan() };
 
     // DESIGN §3.3 step 17. After the scheduler: APs enter as idle.
     // IPI vectors are in the shared IDT; install the shootdown hook
@@ -379,6 +389,8 @@ extern "C" fn boot_rest() -> ! {
     unsafe { smp_init::init() };
     time_init::confirm_clocksource();
     diag::cpus();
+    #[cfg(feature = "hang_test")]
+    crate::smp::hang_test::arm();
 
     // DESIGN §3.3 live: after smp: done. Handler, 8042, then unmask IRQ1.
     crate::console_init::init();
@@ -402,7 +414,7 @@ extern "C" fn boot_rest() -> ! {
     {
         use crate::serial::Serial;
         use core::fmt::Write;
-        match crate::proc_init::spawn_elf(b"/hello", &[], &[], 0, 0) {
+        match crate::proc_init::spawn_elf(b"/hello", &[&b"/hello"[..]], &[], 0, 0) {
             Ok(pid) => {
                 let st = crate::proc_init::wait_kernel(pid);
                 let code = if vibeos::proc::wifsignaled(st) {

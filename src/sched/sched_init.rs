@@ -30,6 +30,7 @@ pub unsafe fn init() {
         cpu.slice_tsc = crate::time_init::read_tsc();
     });
     crate::ipi_init::set_reschedule_hook(thread_init::schedule_preempt);
+    thread_init::start_sweep();
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     per_cpu_init::arm_if_checks();
     LIVE.store(true, Ordering::Release);

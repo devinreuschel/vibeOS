@@ -5,11 +5,13 @@ use vibeos::addr_space::{AsError, UserMemError, UserPerms};
 use vibeos::arch::CycleCounter;
 use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
-    AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, Builder, EHDR_SIZE, ElfError, Image, PHDR_SIZE,
+    AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, ArgError, Auxv, Builder, EHDR_SIZE, ElfError, ExecArgs,
+    Image, LoadSeg, LoadTarget, PHDR_SIZE, PageRun,
 };
 use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom, WalkBase};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kerror::KError;
+use vibeos::limits::RLIMIT_STACK_DEFAULT;
 use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
@@ -17,7 +19,9 @@ use crate::arch::current::{AddressSpace, Arch};
 use crate::file_init;
 use crate::thread_init::SpawnError;
 
-const STACK_PAGES: u64 = 32;
+/// Pages mapped below the initial stack's arguments and table, for the
+/// program's own frames: 128 KiB.
+const STACK_HEADROOM_PAGES: u64 = 32;
 const STACK_TOP: u64 = 0x0000_0000_8000_0000;
 
 #[must_use]
@@ -37,6 +41,8 @@ pub enum LoadError {
     Spawn(SpawnError),
     /// A kernel heap allocation failed (DESIGN §4.4).
     NoMem,
+    /// The arguments were over a limit, or their buffer could not grow.
+    Args(ArgError),
 }
 
 /// A load's errno: the loader's, the filesystem's, or the address space's
@@ -53,6 +59,7 @@ impl From<LoadError> for KError {
             LoadError::NoProc => KError::Again,
             LoadError::Spawn(s) => KError::from(s),
             LoadError::NoMem => KError::NoMem,
+            LoadError::Args(a) => KError::from(a),
         }
     }
 }
@@ -72,6 +79,8 @@ impl LoadError {
             Self::NoProc => "eagain",
             Self::Spawn(e) => e.as_str(),
             Self::NoMem => "enomem",
+            Self::Args(ArgError::TooBig) => "e2big",
+            Self::Args(ArgError::NoMem) => "enomem",
         }
     }
 }
@@ -211,43 +220,60 @@ fn copy_file_bytes<S: ImageSource>(
     Ok(())
 }
 
+/// The loader's [`LoadTarget`]: a new address space, filled from `src`.
+struct SpaceTarget<'a, S> {
+    space: &'a mut AddressSpace,
+    src: &'a mut S,
+}
+
+impl<S: ImageSource> LoadTarget for SpaceTarget<'_, S> {
+    type Error = LoadError;
+
+    fn map_zeroed(&mut self, run: PageRun) -> Result<(), LoadError> {
+        let perms = UserPerms::from_elf(run.write, run.exec);
+        // SAFETY: `addr_space_init::map_anon` checks the range is in the
+        // user half and clear of every region before it maps anything, and
+        // maps zeroed frames from the buddy; established by
+        // `addr_space_init::map_anon`.
+        unsafe { addr_space_init::map_anon(self.space, run.start, run.len, perms) }
+            .map_err(LoadError::As)
+    }
+
+    fn copy(&mut self, seg: LoadSeg) -> Result<(), LoadError> {
+        copy_file_bytes(self.space, self.src, seg.offset, seg.vaddr, seg.filesz)
+    }
+}
+
+/// Map `img`'s `PT_LOAD`s as Linux does: `elf::load_plan`'s runs, each
+/// mapped zeroed once with the permissions of the last segment covering
+/// it, then every segment's file bytes, so a page two segments share holds
+/// both (ROADMAP §10.6, F031). A run over any mapping is an error.
 #[inline(never)]
 fn map_loads<S: ImageSource>(
     space: &mut AddressSpace,
     img: &Image,
     src: &mut S,
 ) -> Result<(), LoadError> {
-    let mut top = 0u64;
-    for seg in img.loads() {
-        top = top.max(seg.vaddr.saturating_add(seg.memsz));
-        if seg.memsz == 0 {
-            continue;
-        }
-        let start = elf::page_down(seg.vaddr);
-        let end = elf::page_up(seg.vaddr.saturating_add(seg.memsz));
-        let len = end - start;
-        let perms = UserPerms::from_elf(seg.write, seg.exec);
-        // SAFETY: `addr_space_init::map_anon` checks the range is in the
-        // user half and clear of every region before it maps anything, and
-        // maps from the buddy; established by `addr_space_init::map_anon`.
-        match unsafe { addr_space_init::map_anon(space, start, len, perms) } {
-            Ok(()) | Err(AsError::Overlap) => {}
-            Err(e) => return Err(LoadError::As(e)),
-        }
-        if seg.filesz != 0 {
-            copy_file_bytes(space, src, seg.offset, seg.vaddr, seg.filesz)?;
-        }
-    }
+    elf::load_segments(img, &mut SpaceTarget { space, src })?;
+    let top = img
+        .loads()
+        .iter()
+        .map(|seg| seg.vaddr.saturating_add(seg.memsz))
+        .max()
+        .unwrap_or(0);
     // The heap starts on the page after the image, as on Linux with
     // randomization off.
     space.set_brk_start(elf::page_up(top));
     Ok(())
 }
 
+/// Map `len` bytes of stack below `STACK_TOP`, zeroed. Returns its base
+/// and top.
 #[inline(never)]
-fn map_stack(space: &mut AddressSpace, exec: bool) -> Result<(u64, u64), LoadError> {
-    let len = STACK_PAGES * PAGE_SIZE_4K;
-    let base = STACK_TOP - len;
+fn map_stack(space: &mut AddressSpace, exec: bool, len: u64) -> Result<(u64, u64), LoadError> {
+    let base = STACK_TOP
+        .checked_sub(len)
+        .ok_or(LoadError::Elf(ElfError::Stack))?;
     let perms = if exec { UserPerms::RWX } else { UserPerms::RW };
     // SAFETY: `addr_space_init::map_anon` checks the range is in the user
     // half and clear of every region before it maps anything; established
@@ -296,107 +322,101 @@ fn at_random() -> [u8; 16] {
     b
 }
 
-#[inline(never)]
-fn fill_stack(
-    space: &AddressSpace,
-    img: &Image,
-    argv: &[&[u8]],
-    envp: &[&[u8]],
-) -> Result<u64, LoadError> {
-    let len = (STACK_PAGES * PAGE_SIZE_4K) as usize;
-    let mut mem = TryVec::try_with_capacity(len).map_err(|_| LoadError::NoMem)?;
-    let zero = [0u8; 256];
-    while mem.len() < len {
-        let n = (len - mem.len()).min(zero.len());
-        mem.try_extend_from_slice(&zero[..n])
-            .map_err(|_| LoadError::NoMem)?;
-    }
-    let mut aux = [
-        Auxv {
-            tag: AT_PAGESZ,
-            val: PAGE_SIZE_4K,
-        },
-        Auxv {
-            tag: AT_ENTRY,
-            val: img.entry,
-        },
-        Auxv {
-            tag: AT_PHENT,
-            val: img.phentsize as u64,
-        },
-        Auxv {
-            tag: AT_PHNUM,
-            val: img.phnum as u64,
-        },
-        Auxv {
-            tag: AT_PHDR,
-            val: img.phdr_va.unwrap_or(0),
-        },
-        Auxv {
-            tag: AT_BASE,
-            val: 0,
-        },
-        Auxv {
-            tag: AT_FLAGS,
-            val: 0,
-        },
-        Auxv {
-            tag: AT_UID,
-            val: 0,
-        },
-        Auxv {
-            tag: AT_EUID,
-            val: 0,
-        },
-        Auxv {
-            tag: AT_GID,
-            val: 0,
-        },
-        Auxv {
-            tag: AT_EGID,
-            val: 0,
-        },
-        Auxv {
-            tag: AT_CLKTCK,
-            val: 100,
-        },
-        Auxv {
-            tag: AT_SECURE,
-            val: 0,
-        },
-    ];
-    if img.phdr_va.is_none() {
-        aux[4].val = 0;
-    }
-    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem[..], argv, envp, &aux, &at_random())
-        .map_err(LoadError::Elf)?;
-    let base = STACK_TOP - len as u64;
-    space.write_bytes(base, &mem).map_err(LoadError::Mem)?;
-    Ok(rsp)
+/// The auxiliary vector's entries before `AT_RANDOM` and `AT_NULL`.
+const NAUX: usize = 13;
+
+fn auxv(img: &Image) -> [Auxv; NAUX] {
+    let a = |tag, val| Auxv { tag, val };
+    [
+        a(AT_PAGESZ, PAGE_SIZE_4K),
+        a(AT_ENTRY, img.entry),
+        a(AT_PHENT, img.phentsize as u64),
+        a(AT_PHNUM, img.phnum as u64),
+        a(AT_PHDR, img.phdr_va.unwrap_or(0)),
+        a(AT_BASE, 0),
+        a(AT_FLAGS, 0),
+        a(AT_UID, 0),
+        a(AT_EUID, 0),
+        a(AT_GID, 0),
+        a(AT_EGID, 0),
+        a(AT_CLKTCK, 100),
+        a(AT_SECURE, 0),
+    ]
 }
 
-/// Build a new address space from the file at `path`, with `argv` (or
-/// `[path]` when empty) and `envp` on its initial stack. Caller installs
-/// it only after this returns.
-pub fn load_path<A: AsRef<[u8]>>(
+/// Bytes the stack maps for `args`: the arguments, their pointers and the
+/// auxiliary vector, page-rounded, plus [`STACK_HEADROOM_PAGES`].
+fn stack_len(args: &ExecArgs) -> Result<u64, LoadError> {
+    elf::initial_stack_len(args, NAUX)
+        .and_then(|n| u64::try_from(n).ok())
+        .and_then(|n| elf::page_up(n).checked_add(STACK_HEADROOM_PAGES * PAGE_SIZE_4K))
+        .ok_or(LoadError::Elf(ElfError::Stack))
+}
+
+/// Write the initial stack for `args` below `STACK_TOP`: the table built
+/// in a per-call buffer at RSP, then the strings straight from `args`, so
+/// no second copy of them is made. Returns RSP.
+#[inline(never)]
+fn fill_stack(space: &AddressSpace, img: &Image, args: &ExecArgs) -> Result<u64, LoadError> {
+    let aux = auxv(img);
+    let table_len = elf::initial_stack_len(args, NAUX)
+        .and_then(|n| n.checked_sub(8)?.checked_sub(args.strings().len()))
+        .ok_or(LoadError::Elf(ElfError::Stack))?;
+    let mut table = TryVec::try_with_capacity(table_len).map_err(|_| LoadError::NoMem)?;
+    let zero = [0u8; 256];
+    while table.len() < table_len {
+        let n = (table_len - table.len()).min(zero.len());
+        table
+            .try_extend_from_slice(&zero[..n])
+            .map_err(|_| LoadError::NoMem)?;
+    }
+    let st = elf::build_initial_stack(STACK_TOP, args, &aux, &at_random(), &mut table)
+        .map_err(LoadError::Elf)?;
+    space.write_bytes(st.rsp, &table).map_err(LoadError::Mem)?;
+    space
+        .write_bytes(st.strings_va, args.strings())
+        .map_err(LoadError::Mem)?;
+    Ok(st.rsp)
+}
+
+/// An argument block holding `argv` and `envp` as given, at the default
+/// limit (SYSCALL.md §3.1): the kernel's own spawns' (`spawn_elf`, and
+/// C-RING3's `load_image`).
+#[cfg_attr(
+    feature = "vibefs_crash",
+    allow(dead_code, reason = "the vibefs_crash build spawns no process")
+)]
+pub fn exec_args(argv: &[&[u8]], envp: &[&[u8]]) -> Result<ExecArgs, LoadError> {
+    let mut args = ExecArgs::new(elf::arg_space_limit(RLIMIT_STACK_DEFAULT));
+    for a in argv {
+        args.push_arg(a).map_err(LoadError::Args)?;
+    }
+    args.finish_argv().map_err(LoadError::Args)?;
+    for e in envp {
+        args.push_env(e).map_err(LoadError::Args)?;
+    }
+    Ok(args)
+}
+
+/// Build a new address space from the file at `path`, resolved from
+/// `base`, with `args` on its initial stack. Caller installs it only after this returns.
+pub fn load_path(
     base: Option<WalkBase>,
     path: &[u8],
-    argv: &[A],
-    envp: &[&[u8]],
+    args: &ExecArgs,
 ) -> Result<Loaded, LoadError> {
     #[cfg(feature = "kernel_tests")]
     let before = crate::proc::ktest::free_now();
-    let r = load_path_inner(base, path, argv, envp);
+    let r = load_path_inner(base, path, args);
     #[cfg(feature = "kernel_tests")]
     crate::proc::ktest::record(before, r.is_ok());
     r
 }
 
-fn load_path_inner<A: AsRef<[u8]>>(
+fn load_path_inner(
     base: Option<WalkBase>,
     path: &[u8],
-    argv: &[A],
-    envp: &[&[u8]],
+    args: &ExecArgs,
 ) -> Result<Loaded, LoadError> {
     let file =
         file_init::open_at(base, path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
@@ -405,7 +425,7 @@ fn load_path_inner<A: AsRef<[u8]>>(
         len: 0,
         pos: 0,
     };
-    let r = load_file(&mut src, path, argv, envp);
+    let r = load_file(&mut src, args);
     match file_init::close(src.file) {
         Ok(()) => r,
         Err(e) => {
@@ -417,55 +437,41 @@ fn load_path_inner<A: AsRef<[u8]>>(
     }
 }
 
-/// Load the open file `src` of `path`, mapping each segment from it.
+/// Load the open file `src`, mapping each segment from it.
 #[inline(never)]
-fn load_file<A: AsRef<[u8]>>(
-    src: &mut FileImage,
-    path: &[u8],
-    argv: &[A],
-    envp: &[&[u8]],
-) -> Result<Loaded, LoadError> {
+fn load_file(src: &mut FileImage, args: &ExecArgs) -> Result<Loaded, LoadError> {
     let st = file_init::stat(&src.file).map_err(LoadError::Fs)?;
     if st.size == 0 {
         return Err(LoadError::Empty);
     }
     src.len = st.size;
-    let mut argv_b =
-        TryVec::<&[u8]>::try_with_capacity(argv.len().max(1)).map_err(|_| LoadError::NoMem)?;
-    if argv.is_empty() {
-        argv_b.try_push(path).map_err(|_| LoadError::NoMem)?;
-    }
-    for a in argv {
-        argv_b.try_push(a.as_ref()).map_err(|_| LoadError::NoMem)?;
-    }
-    load_from(src, &argv_b, envp)
+    load_from(src, args)
 }
 
 /// Build a new address space from the ELF image `elf`, with `argv` on its
-/// initial stack as given. Caller installs it only after this returns.
-/// The in-guest tests' loader (C-RING3), over the same `load_from`.
+/// initial stack as given and an empty environment. Caller installs it
+/// only after this returns. The in-guest tests' loader (C-RING3), over
+/// the same `load_from`.
 #[cfg(feature = "kernel_tests")]
 pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
-    load_from(&mut MemImage(elf), argv, &[])
+    let args = exec_args(argv, &[])?;
+    load_from(&mut MemImage(elf), &args)
 }
 
-/// Build a new address space from the ELF file `src`, with `argv` and
-/// `envp` on its initial stack, reading its headers and each segment's file
-/// bytes from it as it maps them.
-fn load_from<S: ImageSource>(
-    src: &mut S,
-    argv: &[&[u8]],
-    envp: &[&[u8]],
-) -> Result<Loaded, LoadError> {
+/// Build a new address space from the ELF file `src`, with `args` on its
+/// initial stack, reading its headers and each segment's file bytes from
+/// it as it maps them.
+fn load_from<S: ImageSource>(src: &mut S, args: &ExecArgs) -> Result<Loaded, LoadError> {
     let img = read_image(src)?;
+    let stack = stack_len(args)?;
     // The new space stays on the heap while the image loads, off the
     // stack under which each file read runs its filesystem's frames.
     let mut space = new_space()?;
     let mapped = (|| {
         map_loads(&mut space, &img, src)?;
-        let (stack_base, _) = map_stack(&mut space, img.stack_exec)?;
+        let (stack_base, _) = map_stack(&mut space, img.stack_exec, stack)?;
         let fs = setup_tls(&mut space, &img, stack_base, src)?;
-        let rsp = fill_stack(&space, &img, argv, envp)?;
+        let rsp = fill_stack(&space, &img, args)?;
         Ok((img.entry, rsp, fs))
     })();
     match mapped {

@@ -132,6 +132,12 @@ jobs:
       - name: make check
         run: time make check
 
+      # The shared-page ELFs the in-guest elf_shared_page tests load, run on
+      # the hosted x86_64 Linux runner itself: Linux must exit 0 and SIGSEGV
+      # as vibeOS does, or the loader's rule is wrong (ROADMAP §10.6, F031).
+      - name: "native Linux: shared-page ELFs (ROADMAP §10.6, F031)"
+        run: python3 scripts/mkelf_shared.py --run-native tests/fixtures/elf
+
       - name: install cargo-llvm-cov
         run: |
           if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
@@ -246,6 +252,7 @@ jobs:
           cargo clippy --bin vibeos --features panic_nest_test -- -D warnings
           cargo clippy --bin vibeos --features panic_stop_test -- -D warnings
           cargo clippy --bin vibeos --features kernel_shell -- -D warnings
+          cargo clippy --bin vibeos --features hang_test -- -D warnings
 
       # The Rust user programs (ROADMAP §10.5): links through rust-lld with no
       # C compiler, and checks each ELF with scripts/check_user_elf.py.
@@ -297,7 +304,7 @@ jobs:
             jobs: 1
           - arch: x86_64
             tier: e2e-2
-            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-e2e-panic-stop test-e2e-power
+            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power
             jobs: 1
           - arch: x86_64
             tier: in-guest-1
@@ -314,6 +321,10 @@ jobs:
           - arch: x86_64
             tier: vibefs-crash
             targets: test-vibefs-crash
+            jobs: 1
+          - arch: x86_64
+            tier: forensics
+            targets: test-forensics
             jobs: 1
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin

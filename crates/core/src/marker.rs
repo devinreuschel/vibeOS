@@ -86,6 +86,11 @@ pub const BLOCK_SECTORS_SUFFIX: &str = " sectors";
 /// registered, prompt live. Always after `smp: done` and `console ok`.
 pub const SHELL_READY: &str = "vibeOS: shell ready";
 
+/// The `hang_test` build's line once its CPU holds the hang's lock
+/// (ROADMAP §10.7): every CPU hangs from here, and the forensics tier gives
+/// up 5 s later and takes a core.
+pub const HANG_TEST_ARMED: &str = "vibeOS: hang_test: armed";
+
 /// Panic banner. Kept short so the panic path allocates nothing.
 pub const PANIC_BANNER: &str = "vibeOS: panic:";
 

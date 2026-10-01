@@ -6,9 +6,10 @@
 
 use core::mem::{offset_of, size_of};
 
-use crate::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
+use crate::sync::variant::{self, Site};
 use crate::time::Instant;
 
 /// Global TCB table size. UP today; phase 4 still addresses by id.
@@ -66,8 +67,12 @@ pub enum ThreadState {
         deadline: Instant,
     },
     /// Blocked on a wait queue. `wq` is the `WaitQueue` address, or 0.
+    /// `deadline` is the one its timeout entry holds, `FAR_DEADLINE` when
+    /// the wait has none, which the blocked-thread sweep checks
+    /// (`sched::find_overdue`).
     Blocked {
         wq: usize,
+        deadline: Instant,
     },
     Dead,
 }
@@ -229,7 +234,15 @@ impl OnCpu {
     pub fn clear(&self) {
         // Release: pairs with the Acquire load in `is_clear`, so a CPU that
         // sees the flag clear sees every save into the TCB before it.
-        self.0.store(false, Ordering::Release);
+        // Relaxed only in the loom model's variant (ROADMAP §10.8).
+        self.0.store(
+            false,
+            variant::pick(
+                Site::OnCpuClearRelaxed,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ),
+        );
     }
 
     /// True once no CPU runs or is switching off the thread: `spawn_inner`'s
@@ -248,7 +261,7 @@ impl Default for OnCpu {
     }
 }
 
-/// Global TCB. `next`/`prev` are the run-queue links Slice B fills.
+/// Global TCB.
 #[repr(C, align(16))]
 pub struct Tcb {
     pub id: ThreadId,
@@ -267,9 +280,6 @@ pub struct Tcb {
     pub stack: Option<GuardedStack>,
     pub context: CpuContext,
     pub entry: fn(),
-    /// Intrusive ready-list link. Slice B; phase 4 is per-CPU.
-    pub next: Option<ThreadId>,
-    pub prev: Option<ThreadId>,
     pub affinity: CpuAffinity,
     pub cpu: u32,
     /// `InterruptGuard` depth frozen while this thread is off-CPU.
@@ -288,8 +298,11 @@ pub struct Tcb {
     /// until its first return to user mode and after any write to `fpu`
     /// (DESIGN §7.5, the FP binding; `vibeos::fpu`).
     pub fp_cpu: Option<u32>,
-    /// Syscall counter. Aggregated per-process in Slice C.
-    pub syscall_count: u64,
+    /// Syscalls this thread has entered. Its own entry bumps it
+    /// (`syscall_init::bump_counter`); other threads read it for the
+    /// per-process sum (`thread_init::sum_syscalls`), so it is atomic. A
+    /// statistic: its Relaxed accesses order nothing.
+    pub syscall_count: AtomicU64,
     /// 0 = kernel thread. Process pid otherwise.
     pub pid: u32,
     /// Nonzero while this thread is a no-reclaim thread, which releases no
@@ -385,17 +398,22 @@ const _: () = {
             deadline: Instant { ns: 0 }
         }) == 2
     );
-    assert!(tag(&ThreadState::Blocked { wq: 0 }) == 3);
+    assert!(
+        tag(&ThreadState::Blocked {
+            wq: 0,
+            deadline: Instant { ns: 0 }
+        }) == 3
+    );
     assert!(tag(&ThreadState::Dead) == 4);
-    assert!(size_of::<ThreadState>() == 16);
+    assert!(size_of::<ThreadState>() == 24);
     assert!(align_of::<ThreadState>() == 8);
-    assert!(size_of::<Tcb>() == if DEBUG { 1280 } else { 1024 });
+    assert!(size_of::<Tcb>() == if DEBUG { 1264 } else { 1008 });
     assert!(align_of::<Tcb>() == 16);
     assert!(offset_of!(Tcb, id) == 0);
     assert!(offset_of!(Tcb, state) == 24);
-    assert!(offset_of!(Tcb, context) == if DEBUG { 584 } else { 328 });
-    assert!(offset_of!(Tcb, cpu) == if DEBUG { 688 } else { 432 });
-    assert!(offset_of!(Tcb, pid) == if DEBUG { 1264 } else { 1008 });
+    assert!(offset_of!(Tcb, context) == if DEBUG { 592 } else { 336 });
+    assert!(offset_of!(Tcb, cpu) == if DEBUG { 680 } else { 424 });
+    assert!(offset_of!(Tcb, pid) == if DEBUG { 1248 } else { 992 });
     assert!(size_of::<CpuContext>() == 72);
     assert!(size_of::<TcbSlot>() == size_of::<usize>());
 };
@@ -509,7 +527,14 @@ mod tests {
             .name(),
             "sleeping"
         );
-        assert_eq!(ThreadState::Blocked { wq: 0 }.name(), "blocked");
+        assert_eq!(
+            ThreadState::Blocked {
+                wq: 0,
+                deadline: Instant { ns: 1 }
+            }
+            .name(),
+            "blocked"
+        );
         assert_eq!(ThreadState::Dead.name(), "dead");
         assert_eq!(WaitOutcome::Woken.name(), "woken");
         assert_eq!(WaitOutcome::Timeout.name(), "timeout");
@@ -518,5 +543,77 @@ mod tests {
         assert_eq!(ThreadId::BOOTSTRAP.raw(), 0);
         assert!(ThreadId::NONE.is_none());
         assert_eq!(size_of::<ThreadId>(), 4);
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_models {
+    extern crate std;
+
+    use super::*;
+    use crate::sync::variant::{Bound, check};
+    use loom::cell::UnsafeCell;
+    use loom::sync::Arc;
+    use loom::thread;
+
+    /// A thread-table slot as the model sees it: the flag and, for the
+    /// TCB, a witness both sides write.
+    struct Slot {
+        on_cpu: OnCpu,
+        tcb: UnsafeCell<u32>,
+    }
+
+    // SAFETY: `tcb` is written by the exiting CPU before it clears
+    // `on_cpu`, and by the spawning CPU only after it finds the flag
+    // clear; the models check, through loom, that the flag orders the two.
+    // Established here.
+    unsafe impl Sync for Slot {}
+
+    /// The exiting CPU writes the TCB, standing for the saves
+    /// `switch_context` makes into it (DESIGN §7.5), then clears the flag
+    /// as `thread_init::finish_switch`'s tail does once `switch_context`
+    /// has returned. Main, as `thread_init::spawn_inner` reusing the Dead
+    /// slot, checks the flag, yielding while it is set, and rewrites the
+    /// TCB once it is clear. Bound: 2 threads (the exiting CPU 1 save and
+    /// 1 clear, main checks until clear and 1 rewrite), 3 preemptions.
+    fn on_cpu_model(v: Option<Site>) {
+        let bound = Bound {
+            threads: 2,
+            preemptions: 3,
+        };
+        check(v, bound, || {
+            let s = Arc::new(Slot {
+                on_cpu: OnCpu::new_set(),
+                tcb: UnsafeCell::new(0),
+            });
+            let exiting = {
+                let s = s.clone();
+                thread::spawn(move || {
+                    // SAFETY: the flag is set, so no other CPU writes the TCB
+                    // until the clear below; established by
+                    // `thread::OnCpu::clear`.
+                    s.tcb.with_mut(|p| unsafe { *p = 1 });
+                    s.on_cpu.clear();
+                })
+            };
+            while !s.on_cpu.is_clear() {
+                thread::yield_now();
+            }
+            // SAFETY: the flag is clear, so the exiting CPU has made its last
+            // access to the TCB; established by `thread::OnCpu::is_clear`.
+            s.tcb.with_mut(|p| unsafe { *p = 2 });
+            exiting.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn loom_on_cpu_handoff() {
+        on_cpu_model(None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Causality violation")]
+    fn loom_on_cpu_relaxed_clear_races_fails() {
+        on_cpu_model(Some(Site::OnCpuClearRelaxed));
     }
 }

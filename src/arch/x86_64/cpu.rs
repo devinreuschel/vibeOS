@@ -384,6 +384,9 @@ pub struct InterruptGuard {
 }
 
 impl InterruptGuard {
+    /// `#[track_caller]`: the irqoff tracer names the caller as the site
+    /// that turned IF off.
+    #[track_caller]
     pub fn enter() -> Self {
         let rflags: u64;
         // SAFETY: `pushfq; pop; cli` reads RFLAGS through one stack slot it
@@ -397,8 +400,14 @@ impl InterruptGuard {
             );
         }
         run_hook(&NEST_ENTER);
+        let restore = rflags & (1 << 9) != 0;
+        if restore {
+            crate::sched::irqoff::off(crate::sched::irqoff::Site::caller(
+                core::panic::Location::caller(),
+            ));
+        }
         Self {
-            restore: rflags & (1 << 9) != 0,
+            restore,
             _not_send: PhantomData,
         }
     }
@@ -408,6 +417,7 @@ impl Drop for InterruptGuard {
     fn drop(&mut self) {
         run_hook(&NEST_LEAVE);
         if self.restore {
+            crate::sched::irqoff::on();
             // SAFETY: IF was 1 when this guard entered (here), so turning it
             // back on restores the state its holder found.
             unsafe { asm!("sti", options(nostack)) };
@@ -592,15 +602,22 @@ pub fn rdtscp() -> u64 {
 
 #[inline]
 pub fn sti() {
+    crate::sched::irqoff::on();
     // SAFETY: `sti` only sets IF; every interrupt then enters through the IDT's
     // stubs, which preserve the interrupted state; established here.
     unsafe { asm!("sti", options(nostack, preserves_flags)) };
 }
 
 #[inline]
+#[track_caller]
 pub fn cli() {
+    // Only an `irqoff` build reads IF first; the tracer stamps a 1 to 0.
+    let was_on = cfg!(feature = "irqoff") && interrupts_enabled();
     // SAFETY: `cli` only clears IF; established here.
     unsafe { asm!("cli", options(nostack, preserves_flags)) };
+    if was_on {
+        crate::sched::irqoff::off_here();
+    }
 }
 
 /// One `hlt`. Returns when the next interrupt (or NMI) arrives.

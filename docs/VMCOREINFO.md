@@ -119,7 +119,7 @@ layout of the profile the kernel was built with.
 | `Filter` | `crates/core/src/log/mod.rs` | `max` | `log/mod.rs` |
 | `TcbSlot` | `crates/core/src/sched/thread.rs` | pointer-sized: null, or a `Tcb` pointer | `sched/thread.rs` |
 | `Tcb` | `crates/core/src/sched/thread.rs` | `id`, `state`, `context`, `cpu`, `pid` | `sched/thread.rs` |
-| `ThreadState` | `crates/core/src/sched/thread.rs` | the tag; `Sleeping`'s deadline and `Blocked`'s queue at offset 8 | `sched/thread.rs` |
+| `ThreadState` | `crates/core/src/sched/thread.rs` | the tag; `Sleeping`'s deadline and `Blocked`'s queue at offset 8, and `Blocked`'s deadline at 16 | `sched/thread.rs` |
 | `CpuContext` | `crates/core/src/sched/thread.rs` | every register slot | `sched/thread.rs` |
 | `PerCpu` | `crates/core/src/smp/per_cpu.rs` | `cpu_id`, `current`, `idle`, `runq`, `remote` | `smp/per_cpu.rs` (the pin block for `cpu_id`, `current` and `idle`) |
 | `PerCpuRemote` | `crates/core/src/smp/per_cpu.rs` | `apic_id` | `smp/per_cpu.rs` |

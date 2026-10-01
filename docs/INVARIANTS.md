@@ -620,9 +620,15 @@ the signal §5.2 gives the vector (§11.5 the exception class, on aarch64), and 
 running. The signal's action then applies, as on Linux: from ROADMAP §13.8 a handler may catch it,
 from §17.4 a tracer sees it first, and a fault signal the process blocks or ignores still takes its
 default action. The default action, the only one today, ends the process and prints
-`user: pid N killed SIG<name>`. Pid 1 is the exception. When init exits, by `exit` or by a signal,
+`user: pid N killed SIG<name>`. Pid 1 is the exception. No process can kill or stop init:
+`kill` drops a signal sent to pid 1 unless init has a handler for it, never `SIGKILL` or
+`SIGSTOP`, and none before ROADMAP §13.8 (`proc::kill_delivers`). When init exits, by `exit` or by a signal,
 the kernel panics with a line naming the exit status, or the signal and, for a fault, the faulting
-address, as Linux panics when init dies. Planned: ROADMAP §10.5 (F068). Not yet enforced: the
+address, as Linux panics when init dies: `finish_exit` prints `vibeOS: init: pid 1 exited <n>`,
+`killed SIG<name>` or `killed SIG<name> addr=0x<hex>` (CR2 for `#PF`, else the faulting RIP) before
+any teardown, then panics (F068). The line is the `failure` row `vibeOS: init: pid 1 <text>` of
+`tests/contract/markers.toml`, and `make test-e2e-init-fault` boots an initrd whose `/sbin/init`
+stores to `0x1000` and requires it. Not yet enforced: the
 entry-path windows of §5.10 (ROADMAP §10.6, F006, F007). Every ring-3 trap takes its signal from
 §5.2's table through `proc_init::sig_for_vec`, a ring-3 `#DB` included. An NMI dumps and halts on its IST stack; from
 ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
@@ -712,7 +718,7 @@ that review cites means the review's text.
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed; slot reuse enforced by the in-guest `lifetime_dead_slot_on_cpu` | Yes: `spawn_inner` reuses a Dead slot only after an Acquire load finds its `Tcb.on_cpu` clear, which its CPU's `thread_init::finish_switch` clears with Release once `switch_context` has returned, and `thread_exit` stores `Dead` under SCHED (ROADMAP §10.10, F012) |
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `thread_init::finish_switch` | enforced by the in-guest `lifetime_stack_reclaim` | Yes: `thread_exit` parks the stack in its CPU's `PerCpu.dead_stack`, and only that CPU's switch tail, after `switch_context` has returned, moves it into the CPU's stack cache or onto its dead list, which that CPU's worker frees (ROADMAP §10.10, F012) |
-| I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter::finish` | enforced by the in-guest `lifetime_iowaiter_publish_last` | Yes: `finish` runs `wake_all` under SCHED, then stores `done` with Release as its last access (ROADMAP §10.10, F002); ROADMAP §10.8 adds its loom model |
+| I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter::finish` | enforced by the in-guest `lifetime_iowaiter_publish_last` | Yes: `finish` runs `wake_all` under SCHED, then stores `done` with Release as its last access (ROADMAP §10.10, F002); ROADMAP §10.8's loom model `loom_io_done_publish_last` checks that the store orders the completer's accesses before the waiter's return |
 | I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §12.1, F101) |
 | I13 | The low identity window is removed after `smp: done` (§4.1) | `paging_init::teardown_identity`, from `smp_init::init` | enforced by the in-guest `kernel_va0_faults` | Yes: all but the trampoline page is unmapped and the TLB flushed on every CPU, global entries included, so a kernel read of VA 0 faults (ROADMAP §10.6, F085) |
 | I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §11.2, F020) |
@@ -732,7 +738,7 @@ that review cites means the review's text.
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::raw`, `console_init::write`, `tests/harness/frame.py` | enforced (the `/bin/tests` forged-line case, `test_frame.py`) | Yes |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch::arm` (`ARMED`, the arming CPU's token) | enforced by the in-guest `catch_ignores_other_cpu` and `catch_ignores_user_frame` | Yes: `arch::catch` and the dispatcher's intercept compile only with `kernel_tests`, so production has no catch hook; `intercept`, `on_panic` and `on_alloc_error` act only on the CPU whose token `ARMED` holds, `intercept` only on a CPL-0 frame, and each CPU records its catch in its own `LAST` slot. A window must not span a CPU migration, which nothing does while no preempted thread changes CPU (I36) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | `arch/x86_64/idt.rs` stubs | enforced by construction: every stub's first instruction is `clac` where the CPU has SMAP | Yes |
-| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); a shootdown survives a violation: `wait_acks` keeps waiting and logs the CPUs that have not acknowledged once a second (§7.9, F011) |
+| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9 rule 2; measured by the `irqoff` build's tracer (`sched::irqoff`, ROADMAP §10.3), which `make test-irqoff` runs | documented | No. `make test-irqoff` at 38fd409 (TCG, `-icount shift=0`, `-smp 1`, on an Intel Xeon @ 2.10GHz cloud container) logs these sites over 100,000 ns, with the ROADMAP line that chunks each: `mm/paging_init.rs:222` (`PT` held in `current_mapper` while exec maps and fills an image; up to 6.6 ms, 1,678 over per registry boot): ROADMAP §10.6's fill-API box (line 1393); `mm/pmm_init.rs:29` (`BUDDY` in `with_buddy`; up to 642 µs, about 2,600 over): ROADMAP §12.1's O(`MAX_ORDER`) `Buddy::deallocate` box (line 1715, F029); `log/log_init.rs:89` (the log ring's `IrqCell` while the shell tests read it; up to 841 µs): ROADMAP §19.5's log-store box (line 2980); `sched/thread_init/mod.rs:528` (`schedule_inner`; 82 ms at boot and after the tests that fill the thread table, and as `vec0xf0` when the tick preempts), `console/fb_init.rs:90` (the framebuffer clear at console init; 41 ms), `sched/thread_init/mod.rs:470` (`thread_exit`; up to 143 µs), and `syscall:exit` with `proc/syscall_init.rs:611` (`first_return`; 292 µs once each): no line yet (ROADMAP §12.6's tracer box waits on a box in that section for each). Not logged in that run but known: the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); a shootdown survives a violation: `wait_acks` keeps waiting and logs the CPUs that have not acknowledged once a second (§7.9, F011) |
 | I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: an IST vector taken at CPL 3 moves its frame to the thread's kernel stack before its body (`arch::idt::vibeos_trap_entry_ist`); on a CPL-0 frame every IST handler halts, so none blocks or switches, and the NMI handler decides through the stop primitive before any write (§2.5 step 1): it returns at once on the panic dump's owner and otherwise stops, halts or dumps, with no lock; except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack (ROADMAP §10.6, F007) |
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/x86_64/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes: the generated stubs save CR2 and DR6 before any body turns IF on |
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
@@ -817,7 +823,10 @@ and a bound.
    preempted or moved to another CPU: a per-CPU access (rule 5), a change to this CPU's registers
    that must match the running thread (FP state, `FS_BASE`), the [§7.9](SMP.md#79-tlb-shootdown)
    shootdown wait, the [§7.6](SMP.md#76-ipis) call-function wait, or the
-   [§7.11](SMP.md#711-cpu-offline-and-online) offline rendezvous; the scheduler's switch path; the
+   [§7.11](SMP.md#711-cpu-offline-and-online) offline rendezvous; the scheduler's switch path;
+   `thread_init::with_sched`'s delivery of the wakes its closure recorded, bounded by the fixed
+   `places` array, so a caller its closure blocked is not switched off before those wakes are
+   placed; the
    return-to-user sequences of [§5.10](INTERRUPTS.md#510-privilege-transitions) rule 4, which begin at rule 11's
    last exit-work check; the panic and halt paths
    (§2.5); and a CPU's bring-up before its first `sti` (the BSP before §3.3's step 13b, an AP
@@ -832,10 +841,26 @@ and a bound.
    architectures it is called only where §7.9's calling contract allows. A long job holds its lock for one bounded chunk at a time and turns
    IF back on between chunks; a walk over a user address space's page tables holds the space's
    page-table lock for at most one leaf table (512 entries) at a time. ROADMAP §10.3's IF-off tracer
-   measures every stretch, and the bound is checked under TCG with `-icount shift=0` on one CPU,
-   where guest time advances 1 ns per instruction retired, so 100 µs of guest time is exactly the
-   bound whatever the host's load. Rule; not yet enforced: ROADMAP §12.6 turns the check on, and I31
-   lists the violations.
+   measures every stretch in the `irqoff` build (the `irqoff` Cargo feature; without it every hook
+   compiles to nothing). `sched::irqoff::off` reads the cycle counter where IF goes from 1 to 0:
+   `InterruptGuard::enter` (so every `SpinMutex` and `IrqCell` acquire), `cpu::cli`, the raw `cli`
+   of the idle loop and `wait_key`, each IDT entry stub whose interrupted RFLAGS had IF=1, and the
+   syscall entry and exit stubs. `on` reads it where IF returns to 1: `InterruptGuard`'s restoring
+   drop, `cpu::sti`, the idle and `wait_key` `sti; hlt` pairs, the switch into a thread whose
+   `irq_nest` is 0, the IDT exit to a frame with IF=1, and the syscall exit before `sysretq` or
+   `iretq`. The stretch between is logged against the site that turned IF off (its `file:line`
+   through `#[track_caller]`, `vec0xNN` for a stub, `syscall:entry` or `syscall:exit`) when it is
+   longer than 100,000 ns of cycle-counter time. The exemptions are subtracted or skipped: the hooks
+   do nothing once the panic dump's `HALTING` is set; a CPU arms at its first `sti`; time in
+   `wait_acks`, in `call_mask`'s slot wait and in `SpinMutex::lock`'s spin is subtracted; and an
+   in-guest test or test hook that holds IF off on purpose takes `sched::irqoff::deliberate`
+   (`kernel_tests` builds only), which marks its stretch so it is never over. The instructions from
+   `syscall` to the entry's first stamp and from the exit's last stamp to `sysretq` or `iretq`, and
+   an interrupt stub's few instructions before its dispatcher and after it, are not measured. The
+   bound is checked under TCG with `-icount shift=0` on one CPU (`make test-irqoff`), where guest
+   time advances 1 ns per instruction retired, so 100 µs of guest time is exactly the bound whatever
+   the host's load. Rule; not yet enforced: ROADMAP §12.6 turns the check on, and I31 lists the
+   violations.
 3. A syscall body runs with IF=1. After `swapgs`, the entry stub copies the user RSP from
    `PerCpu.syscall_scratch` into its frame on the thread's kernel stack, then runs `sti`; from there
    on the scratch belongs to whichever thread next enters on this CPU. The exit stub runs `cli`

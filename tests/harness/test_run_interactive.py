@@ -240,23 +240,55 @@ class TestDebugTarget(unittest.TestCase):
                 f"file {os.path.abspath('k.elf')}",
                 f"add-symbol-file {os.path.abspath('user/a')} -o 0",
                 f"add-symbol-file {os.path.abspath('user/b')} -o 0",
+                "set $vibeos_core = 0",
             ],
         )
+
+    def test_write_gdb_symbols_for_a_core(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "symbols.gdb")
+            run_interactive.write_gdb_symbols(path, "k.elf", [], core="build/debug/core.virt")
+            text = Path(path).read_text(encoding="utf-8")
+        self.assertEqual(
+            text.splitlines(),
+            [
+                f"file {os.path.abspath('k.elf')}",
+                f"core-file {os.path.abspath('build/debug/core.virt')}",
+                "set $vibeos_core = 1",
+            ],
+        )
+
+    def test_make_n_debug_core(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+        out = subprocess.run(
+            ["make", "-n", "debug", "CORE=build/cores/x/001-boot/core.zst",
+             "ELF=build/cores/x/001-boot/kernel.elf"],
+            cwd=ROOT, env=env, capture_output=True, text=True, check=True,
+        ).stdout.replace("\\\n", " ")
+        line = next(ln for ln in out.splitlines() if "run_interactive.py debug" in ln)
+        args = line.split()
+        self.assertEqual(args[args.index("--core") + 1], "build/cores/x/001-boot/core.zst")
+        self.assertEqual(args[args.index("--kernel-elf") + 1], "build/cores/x/001-boot/kernel.elf")
+        self.assertNotIn("--user-elf", args)
+        self.assertTrue(any(a.startswith("VIBEOS_VMCORE=") for a in args), line)
+        self.assertNotIn("build/vibeos.iso", out)
 
     def test_make_n_debug(self) -> None:
         env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
         out = subprocess.run(
             ["make", "-n", "-o", "build/vibeos.iso",
              "-o", "build/kernels/vibeos-default.elf",
-             "-o", "user/hello", "-o", "user/init", "-o", "user/sh", "-o", "user/tests",
-             "debug"],
+             "-o", str(ROOT / "build/user/.stamp"), "debug"],
             cwd=ROOT, env=env, capture_output=True, text=True, check=True,
         ).stdout.replace("\\\n", " ")
         line = next(ln for ln in out.splitlines() if "run_interactive.py debug" in ln)
         args = line.split()
         self.assertEqual(args[args.index("--kernel-elf") + 1], "build/kernels/vibeos-default.elf")
         users = [args[i + 1] for i, a in enumerate(args) if a == "--user-elf"]
-        self.assertEqual(users, ["user/hello", "user/init", "user/sh", "user/tests"])
+        # The initrd's programs before the strip (C-USERBINS).
+        self.assertEqual([os.path.basename(u) for u in users], ["hello", "init", "sh", "tests"])
+        for u in users:
+            self.assertIn("/x86_64-unknown-linux-musl/", u)
 
     def test_gdb_script(self) -> None:
         lines = [
@@ -265,8 +297,12 @@ class TestDebugTarget(unittest.TestCase):
             if ln.strip() and not ln.lstrip().startswith("#")
         ]
         self.assertIn(f"source {run_interactive.GDB_SYMBOLS}", lines)
-        self.assertEqual(lines[-1], f"target remote localhost:{run_interactive.GDB_PORT}")
-        self.assertLess(lines.index(f"source {run_interactive.GDB_SYMBOLS}"), len(lines) - 1)
+        # The stub only when symbols.gdb opened no core (`make debug CORE=`).
+        self.assertEqual(
+            lines[-3:],
+            ["if $vibeos_core == 0", f"target remote localhost:{run_interactive.GDB_PORT}", "end"],
+        )
+        self.assertLess(lines.index(f"source {run_interactive.GDB_SYMBOLS}"), len(lines) - 3)
         self.assertIn("set architecture i386:x86-64", lines)
 
 

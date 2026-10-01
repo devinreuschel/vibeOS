@@ -1008,7 +1008,7 @@ pub(crate) fn test_kalloc_nomem() -> Outcome {
     munmap_16m()
 }
 
-/// `/sbin/init`'s line for a `/bin/tests` that did not pass (`user/init.asm`).
+/// `/sbin/init`'s line for a `/bin/tests` that did not pass (`user/src/bin/init.rs`).
 const INIT_EXITED: &[u8] = b"init: /bin/tests exited ";
 
 /// The copy's line, with `exited` changed so that the ktest boot does not

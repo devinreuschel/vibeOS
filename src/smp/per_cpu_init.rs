@@ -343,12 +343,6 @@ pub fn current_thread() -> *mut Tcb {
     crate::arch::current_tcb()
 }
 
-pub fn set_tsc_per_ms(v: u64) {
-    if try_current().is_some() {
-        with_current(|c| c.tsc_per_ms = v);
-    }
-}
-
 pub fn set_timer_mode(mode: vibeos::apic::TimerMode) {
     if try_current().is_some() {
         with_current(|c| c.timer_mode = mode);

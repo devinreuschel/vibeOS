@@ -5,10 +5,13 @@ from __future__ import annotations
 import itertools
 import unittest
 
+from tests.harness import qmp
 from tests.harness.frame import FRAME
-from tests.harness.harness import KtestDeadlines
+from tests.harness.harness import KtestDeadlines, QemuConfig
 from tests.harness.linesource import FakeLineSource, LineEvent
+from tests.harness.qmp import FakeQmp
 from tests.harness.run_power import ROWS, PowerBoot, watch_power_boot
+from tests.harness.test_qmp import cores_in_tmp, elf_core
 
 ROW, LINE = ROWS[0]
 OTHER_ROW, OTHER_LINE = ROWS[1]
@@ -92,6 +95,46 @@ class WatchPowerBoot(unittest.TestCase):
         # A user program cannot forge the kernel's line (DESIGN §2.6).
         boot = watch(lines([*boot_lines()[:3], LINE]))
         self.assertIn("missing", boot.error or "")
+
+
+class PowerBootQmp(unittest.TestCase):
+    """Power boots run under a `qmp.Session` (C-QMP): a timeout takes a
+    guest core before QEMU stops (ROADMAP §10.7)."""
+
+    def session(self, fake: FakeQmp) -> qmp.Session:
+        s = qmp.Session(QemuConfig(iso="build/vibeos-ktest.iso"), ROW, fake)
+        s.start()
+        return s
+
+    def test_timeout_takes_a_core(self) -> None:
+        with cores_in_tmp("test-e2e-power") as d:
+            fake = FakeQmp([], dump=elf_core(2))
+            src = FakeLineSource(lines(boot_lines()[:3], end="timeout"), exit_code=None)
+            clock = itertools.count(0.0, 0.01)
+            boot = watch_power_boot(
+                src, ROW, LINE, KtestDeadlines(60.0), clock=lambda: next(clock),
+                session=self.session(fake),
+            )
+            cores = list(d.rglob("core.zst"))
+        self.assertIn("no progress", boot.error or "")
+        self.assertIn("guest core:", boot.error or "")
+        self.assertEqual(len(cores), 1)
+        self.assertIn("dump-guest-memory", fake.names())
+        self.assertIn("quit", fake.names())
+
+    def test_pass_takes_no_core(self) -> None:
+        with cores_in_tmp("test-e2e-power") as d:
+            fake = FakeQmp([], dump=elf_core(2))
+            src = FakeLineSource([("idle", ""), *lines(boot_lines())])
+            clock = itertools.count(0.0, 0.01)
+            boot = watch_power_boot(
+                src, ROW, LINE, KtestDeadlines(60.0), clock=lambda: next(clock),
+                session=self.session(fake),
+            )
+            cores = list(d.rglob("core.zst"))
+        self.assertIsNone(boot.error)
+        self.assertEqual(cores, [])
+        self.assertNotIn("dump-guest-memory", fake.names())
 
 
 if __name__ == "__main__":

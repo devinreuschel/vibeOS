@@ -118,11 +118,19 @@ impl<T> SpinMutex<T> {
         let irq = InterruptGuard::enter();
         let owner = owner_token();
         let rank = lock_enter(self.rank, nested);
-        while !self.lock.try_acquire(owner) {
-            #[cfg(feature = "kernel_tests")]
-            record_spin(self.rank);
-            spin_poll();
-            core::hint::spin_loop();
+        if !self.lock.try_acquire(owner) {
+            // Spinning is rule 2's exemption (INVARIANTS.md §2.9): the
+            // tracer subtracts it from this stretch, and only it.
+            let _spin = crate::sched::irqoff::exempt();
+            loop {
+                #[cfg(feature = "kernel_tests")]
+                record_spin(self.rank);
+                spin_poll();
+                core::hint::spin_loop();
+                if self.lock.try_acquire(owner) {
+                    break;
+                }
+            }
         }
         SpinMutexGuard {
             mutex: self,

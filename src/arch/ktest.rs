@@ -31,9 +31,11 @@ use crate::x86::{
     CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
 };
 
+mod idt;
 mod seam;
 mod uaccess;
 
+pub(crate) use idt::test_idt_set_handler_refuses_fixed;
 pub(crate) use seam::test_arch_seam_core;
 pub(crate) use uaccess::*;
 
@@ -1469,6 +1471,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("int3_roundtrip", test_int3_roundtrip),
     test("scoped_pf", test_scoped_pf),
     test("gp_catch", test_gp_catch),
+    test(
+        "idt_set_handler_refuses_fixed",
+        test_idt_set_handler_refuses_fixed,
+    ),
     test("df_on_ist", test_df_on_ist),
     test("lapic_timer_mode", test_lapic_timer_mode),
     test("lapic_timer_rearm", test_lapic_timer_rearm),

@@ -6,6 +6,7 @@
 //! without changing callers. Kernel `schedule` / idle live in the binary crate.
 
 pub mod fpu;
+pub mod irqoff;
 pub mod stack_depth;
 pub mod thread;
 pub mod wait;
@@ -25,8 +26,12 @@ pub const FAR_DEADLINE: Instant = Instant { ns: u64::MAX };
 /// Log if still blocked this far past the deadline. 5 s.
 pub const OVERDUE_NS: u64 = 5_000_000_000;
 
-/// How often `schedule` scans for overdue waiters, in ticks.
+/// How often CPU 0's `schedule` scans for overdue waiters, in ticks.
 pub const SWEEP_TICKS: u64 = 1_000;
+
+/// Most overdue threads one sweep reports; [`find_overdue`]'s cursor
+/// reaches the rest on later sweeps.
+pub const OVERDUE_REPORT: usize = 16;
 
 pub fn effective_deadline(deadline: Option<Instant>) -> Instant {
     deadline.unwrap_or(FAR_DEADLINE)
@@ -63,6 +68,16 @@ const _: () = {
 };
 
 impl ReadyQueue {
+    /// The offsets of `ids`, `cap`, `head` and `len`, which the core tool
+    /// (`log::vmcore`) reads a dumped queue through: the layout the
+    /// assertions above fix, named here because the fields are private.
+    pub const CORE_OFFSETS: [usize; 4] = [
+        core::mem::offset_of!(Self, ids),
+        core::mem::offset_of!(Self, cap),
+        core::mem::offset_of!(Self, head),
+        core::mem::offset_of!(Self, len),
+    ];
+
     /// A queue with no room, for a `const` initializer.
     pub const fn empty() -> Self {
         Self {
@@ -299,23 +314,85 @@ impl TimeoutQueue {
         }
         n
     }
+}
 
-    /// Ids whose deadline is at least `OVERDUE_NS` behind `now`. Borrows
-    /// the queue: `schedule_inner` runs on top of any preempted syscall
-    /// body's stack, where a copy of the whole queue does not fit.
-    pub fn overdue(&self, now: Instant) -> impl Iterator<Item = Timeout> + '_ {
-        let mut i = 0usize;
-        core::iter::from_fn(move || {
-            while i < self.len {
-                let t = self.items[i];
-                i += 1;
-                if now.ns.saturating_sub(t.deadline.ns) >= OVERDUE_NS {
-                    return Some(t);
-                }
-            }
-            None
-        })
+/// Whether a thread in `state` is overdue at `now`: `Blocked` or
+/// `Sleeping` with a recorded deadline at least `OVERDUE_NS` behind `now`.
+/// The timeout path wakes such a thread at its deadline, so it is overdue
+/// only when its timeout entry was lost or never queued. A wait with no
+/// deadline (`FAR_DEADLINE`) never is.
+pub fn is_overdue(state: ThreadState, now: Instant) -> bool {
+    let deadline = match state {
+        ThreadState::Sleeping { deadline } | ThreadState::Blocked { deadline, .. } => deadline,
+        ThreadState::Ready | ThreadState::Running | ThreadState::Dead => return false,
+    };
+    deadline != FAR_DEADLINE && now.ns.saturating_sub(deadline.ns) >= OVERDUE_NS
+}
+
+/// The blocked-thread sweep's check (DESIGN §6.5, ROADMAP §10.7): the
+/// overdue threads ([`is_overdue`]) among `threads`, in tid order starting
+/// at tid `from` and wrapping, written to `out` until it is full. Returns
+/// how many it wrote and the cursor for the next sweep, one past the last
+/// tid written (`from` when none), so successive sweeps reach every
+/// overdue thread however many there are. Allocates nothing: `threads` is
+/// walked twice, and each pass keeps the smallest tids in `out`.
+pub fn find_overdue<I>(
+    threads: I,
+    now: Instant,
+    from: ThreadId,
+    out: &mut [ThreadId],
+) -> (usize, ThreadId)
+where
+    I: Iterator<Item = (ThreadId, ThreadState)> + Clone,
+{
+    let f = from.raw();
+    let n = smallest_overdue(threads.clone(), now, |id| id >= f, out);
+    let n = match out.get_mut(n..) {
+        Some(rest) if !rest.is_empty() => n + smallest_overdue(threads, now, |id| id < f, rest),
+        _ => n,
+    };
+    let next = match n.checked_sub(1).and_then(|i| out.get(i)) {
+        Some(last) => ThreadId(last.raw().wrapping_add(1)),
+        None => from,
+    };
+    (n, next)
+}
+
+/// The smallest overdue tids among `threads` that `keep` accepts, sorted,
+/// into `out`; how many.
+fn smallest_overdue<I>(
+    threads: I,
+    now: Instant,
+    keep: impl Fn(u32) -> bool,
+    out: &mut [ThreadId],
+) -> usize
+where
+    I: Iterator<Item = (ThreadId, ThreadState)>,
+{
+    let mut n = 0usize;
+    for (id, state) in threads {
+        if !keep(id.raw()) || !is_overdue(state, now) {
+            continue;
+        }
+        let pos = out
+            .iter()
+            .take(n)
+            .position(|o| o.raw() > id.raw())
+            .unwrap_or(n);
+        if n < out.len() {
+            n += 1;
+        } else if pos == n {
+            continue;
+        }
+        // Shift `out[pos..n - 1]` up one, dropping the largest when full.
+        let mut i = n - 1;
+        while i > pos {
+            out[i] = out[i - 1];
+            i -= 1;
+        }
+        out[pos] = id;
     }
+    n
 }
 
 /// Enqueue current if it still wants the CPU. Idle is never on the FIFO.
@@ -444,16 +521,6 @@ mod tests {
         assert_eq!(t.pop_expired(at(1_000_000)), Some(tid(2)));
         assert_eq!(t.pop_expired(at(1_000_000)), None);
         assert_eq!(t.next_deadline(), Some(FAR_DEADLINE));
-    }
-
-    #[test]
-    fn overdue_scan() {
-        let mut t = TimeoutQueue::try_new(8).unwrap();
-        t.insert(tid(1), at(10));
-        t.insert(tid(2), at(10 + OVERDUE_NS));
-        let v: Vec<_> = t.overdue(at(10 + OVERDUE_NS)).collect();
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0].id, tid(1));
     }
 
     #[test]
@@ -590,5 +657,83 @@ mod tests {
         let mut t = TimeoutQueue::try_new(1).unwrap();
         t.insert(tid(1), at(1));
         t.insert(tid(2), at(2));
+    }
+
+    fn blocked(deadline: Instant) -> ThreadState {
+        ThreadState::Blocked { wq: 0, deadline }
+    }
+
+    fn sleeping(deadline: Instant) -> ThreadState {
+        ThreadState::Sleeping { deadline }
+    }
+
+    #[test]
+    fn find_overdue_reports_blocked_and_sleeping() {
+        let now = at(10 + OVERDUE_NS);
+        let t = [
+            (tid(1), blocked(at(10))),
+            (tid(2), ThreadState::Ready),
+            (tid(3), sleeping(at(5))),
+            (tid(4), ThreadState::Running),
+            (tid(5), ThreadState::Dead),
+        ];
+        assert!(is_overdue(blocked(at(10)), now));
+        assert!(is_overdue(sleeping(at(10)), now));
+        let mut out = [ThreadId::NONE; OVERDUE_REPORT];
+        let (n, next) = find_overdue(t.iter().copied(), now, tid(0), &mut out);
+        assert_eq!(&out[..n], &[tid(1), tid(3)]);
+        assert_eq!(next, tid(4));
+    }
+
+    #[test]
+    fn find_overdue_skips_far_and_recent() {
+        let now = at(10 + OVERDUE_NS);
+        let t = [
+            (tid(1), blocked(FAR_DEADLINE)),
+            (tid(2), sleeping(FAR_DEADLINE)),
+            (tid(3), blocked(at(11))),
+            (tid(4), sleeping(now)),
+            (tid(5), blocked(at(u64::MAX - 1))),
+        ];
+        assert!(!is_overdue(blocked(FAR_DEADLINE), at(u64::MAX)));
+        assert!(!is_overdue(ThreadState::Ready, now));
+        let mut out = [ThreadId::NONE; OVERDUE_REPORT];
+        let (n, next) = find_overdue(t.iter().copied(), now, tid(3), &mut out);
+        assert_eq!(n, 0);
+        assert_eq!(next, tid(3));
+        let (n, _) = find_overdue(t.iter().copied(), now, tid(0), &mut []);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn find_overdue_wraps_from_cursor() {
+        let now = at(OVERDUE_NS + 100);
+        // Table order is not tid order.
+        let t = [
+            (tid(9), blocked(at(1))),
+            (tid(2), sleeping(at(1))),
+            (tid(7), blocked(at(1))),
+            (tid(4), blocked(at(1))),
+            (tid(3), ThreadState::Ready),
+        ];
+        let mut out = [ThreadId::NONE; 2];
+        let (n, next) = find_overdue(t.iter().copied(), now, tid(5), &mut out);
+        assert_eq!(&out[..n], &[tid(7), tid(9)]);
+        assert_eq!(next, tid(10));
+        let (n, next) = find_overdue(t.iter().copied(), now, next, &mut out);
+        assert_eq!(&out[..n], &[tid(2), tid(4)]);
+        assert_eq!(next, tid(5));
+        // Past the end of the ids wraps to the smallest.
+        let mut one = [ThreadId::NONE; 1];
+        let (n, next) = find_overdue(t.iter().copied(), now, tid(8), &mut one);
+        assert_eq!(&one[..n], &[tid(9)]);
+        let (n, next) = find_overdue(t.iter().copied(), now, next, &mut one);
+        assert_eq!(&one[..n], &[tid(2)]);
+        assert_eq!(next, tid(3));
+        // Every overdue thread fits: all reported, from the cursor on.
+        let mut all = [ThreadId::NONE; OVERDUE_REPORT];
+        let (n, next) = find_overdue(t.iter().copied(), now, tid(5), &mut all);
+        assert_eq!(&all[..n], &[tid(7), tid(9), tid(2), tid(4)]);
+        assert_eq!(next, tid(5));
     }
 }

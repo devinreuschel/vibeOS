@@ -50,6 +50,7 @@ them each run has its printed deadline plus 5 s, and each gap 5 s
 from __future__ import annotations
 
 import atexit
+import glob
 import math
 import os
 import random
@@ -63,10 +64,10 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import IO, TYPE_CHECKING, NamedTuple, NoReturn
 
-from tests.harness import frame, registry
+from tests.harness import declared, frame, registry
 from tests.harness.frame import kernel_text as kernel_text
 from tests.harness.linesource import LineSource
 
@@ -166,6 +167,9 @@ class RunResult:
     # The QMP event that ended the run under its declaration
     # (`GUEST_PANICKED` for an expected panic); empty otherwise.
     end: str = ""
+    # The core tool's report on the run's guest core (`core_report`), or
+    # the line that says why there is none; empty when no core was taken.
+    report: str = ""
 
 
 def serial_tail(lines: list[str], n: int = 40) -> str:
@@ -175,6 +179,99 @@ def serial_tail(lines: list[str], n: int = 40) -> str:
     tail = lines[-n:]
     body = "\n".join(tail)
     return f"\n--- serial tail {len(tail)}/{len(lines)} ---\n{body}"
+
+
+def failure_tail(result: RunResult) -> str:
+    """A failed run's tail: the serial tail, then the core tool's report."""
+    return serial_tail(result.lines) + result.report
+
+
+# The core tool (ROADMAP §10.7, TESTING.md §8.3): `make vmcore` builds it for
+# the host in the kernel's profile; `VIBEOS_VMCORE` names the build to use
+# (the Makefile's forensics tier passes its own).
+VMCORE_TIMEOUT_S = 300.0
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def vmcore_tool() -> str | None:
+    """The `vmcore` binary: `VIBEOS_VMCORE` when set, else the host build
+    under `target/<triple>/debug/` (then `release/`); None when there is
+    none."""
+    named = os.environ.get("VIBEOS_VMCORE", "")
+    if named:
+        return named if os.path.isfile(named) and os.access(named, os.X_OK) else None
+    for profile in ("debug", "release"):
+        hits = sorted(glob.glob(os.path.join(_REPO_ROOT, "target", "*", profile, "vmcore")))
+        for h in hits:
+            if os.access(h, os.X_OK):
+                return h
+    return None
+
+
+def run_vmcore(
+    core: str | os.PathLike[str],
+    elf: str | os.PathLike[str],
+    extra: Sequence[str] = (),
+    *,
+    timeout_s: float = VMCORE_TIMEOUT_S,
+) -> tuple[int, str, str]:
+    """`vmcore report` on `core` with `elf` and `extra` arguments: its exit
+    status, stdout and stderr. A `.zst` core streams through `zstd -dc`, so
+    no uncompressed core touches the disk."""
+    tool = vmcore_tool()
+    if tool is None:
+        raise HarnessError("no vmcore tool (run `make vmcore`, or set VIBEOS_VMCORE)")
+    argv = [tool, "report", "--elf", os.fspath(elf), *extra]
+    path = os.fspath(core)
+    try:
+        if not path.endswith(".zst"):
+            proc = subprocess.run(
+                [*argv, "--core", path], capture_output=True, timeout=timeout_s, check=False
+            )
+        else:
+            unzip = subprocess.Popen(
+                ["zstd", "-dc", "--", path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            assert unzip.stdout is not None
+            try:
+                proc = subprocess.run(
+                    [*argv, "--core", "-"],
+                    stdin=unzip.stdout,
+                    capture_output=True,
+                    timeout=timeout_s,
+                    check=False,
+                )
+            finally:
+                unzip.stdout.close()
+                if unzip.poll() is None:
+                    unzip.kill()
+                unzip.wait()
+    except OSError as e:
+        raise HarnessError(f"vmcore: cannot run: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise HarnessError(f"vmcore: no report within {timeout_s:g} s") from e
+    return (
+        proc.returncode,
+        proc.stdout.decode("utf-8", errors="replace"),
+        proc.stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def core_report(core: str | os.PathLike[str], elf: str | os.PathLike[str]) -> str:
+    """The core tool's report on a guest core, as a block to print after a
+    failed run's serial tail (`failure_tail`), or one line naming why there
+    is none."""
+    if vmcore_tool() is None:
+        return "\n--- no core report: no vmcore tool (run `make vmcore`, or set VIBEOS_VMCORE) ---"
+    if not os.path.isfile(elf):
+        return f"\n--- no core report: no kernel ELF at {os.fspath(elf)} ---"
+    try:
+        rc, out, err = run_vmcore(core, elf)
+    except HarnessError as e:
+        return f"\n--- no core report: {e} ---"
+    if rc != 0:
+        return f"\n--- no core report: vmcore exited {rc}: {err.strip()} ---"
+    return "\n--- core report ---\n" + out.rstrip("\n")
 
 
 def panic_signature(raw: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> str | None:
@@ -1485,6 +1582,7 @@ def run_qemu_and_check(
         if marker_idx < len(markers):
             missing = markers[marker_idx].name
             fail(f"missing marker {missing!r} after {len(result.lines)} lines{report()}")
+        _irqoff_observe(cfg, result.lines)
         if expect_panic:
             if dump_at is None:
                 fail(f"expected a panic signature; none seen{report()}")
@@ -1614,7 +1712,6 @@ def check_mce_dump(
 def run_qemu_inject_mce(
     cfg: QemuConfig,
     markers: list[Marker],
-    *,
     cmd: str,
     timeout_s: float,
     dump_needles: tuple[str | tuple[str, ...], ...] = MCE_DUMP_NEEDLES,
@@ -1625,75 +1722,76 @@ def run_qemu_inject_mce(
     After it the lines are collected until a kernel line holds `PANIC_DONE`,
     EOF, or `MCE_DUMP_WAIT_S`, and `check_mce_dump` judges them. Never
     retries.
+
+    The boot runs under a `qmp.Session` declared `expect=panic`, since the
+    `#MC` dump is the run's expected end (C-QMP): QEMU starts halted with a
+    QMP socket, `cmd` goes through QMP's `human-monitor-command`, and a
+    timeout, a failing line or a failed dump check takes a guest core before
+    QEMU stops (ROADMAP §10.7).
     """
-    if not shutil.which("qemu-system-x86_64"):
-        raise HarnessError("qemu-system-x86_64 not on PATH")
-    if not os.path.exists(cfg.iso):
-        raise HarnessError(f"ISO missing: {cfg.iso}")
+    from tests.harness import qmp as qmpmod
 
-    monitor_sock = _pick_monitor_path()
-    argv = qemu_argv(cfg, monitor_sock)
+    cfg = replace(cfg, expect="panic")
     panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
-
-    err = tempfile.TemporaryFile()
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=err,
-        stdin=subprocess.DEVNULL,
-        bufsize=1,
-        text=True,
-    )
-    assert proc.stdout is not None
+    session = qmpmod.Session(cfg, "mce")
+    src = _start_qemu(cfg, time.monotonic() + timeout_s, qmp_sock=session.sock)
+    argv = _argv_of(src)
 
     result = RunResult()
     stream = frame.Stream()
     marker_idx = 0
-    reader = DeadlineReader(proc.stdout.fileno(), time.monotonic() + timeout_s)
     after: list[str] = []
     reply = ""
-    exited: int | None = None
     try:
+        session.start()
         while marker_idx < len(markers):
-            kind, line = reader.next_event()
+            kind, line = src.next_event()
+            if kind == "idle":
+                continue
             if kind == "timeout":
-                result.timed_out = True
                 missing = markers[marker_idx].name
-                raise HarnessError(
+                session.timeout(
+                    src,
+                    result,
+                    argv,
                     f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} "
-                    f"markers; missing {missing!r}{serial_tail(result.lines)}"
+                    f"markers; missing {missing!r}{serial_tail(result.lines)}",
                 )
             if kind == "eof":
-                try:
-                    result.exit_code = proc.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    result.exit_code = None
-                result.stderr = _file_text(err)
-                raise HarnessError(
+                result.exit_code = _reap(src)
+                result.stderr = src.stderr_text()
+                session.fail(
+                    src,
+                    result,
+                    argv,
                     f"missing marker {markers[marker_idx].name!r} after "
-                    f"{len(result.lines)} lines{_qemu_report(result, exited=True)}"
+                    f"{len(result.lines)} lines{_qemu_report(result, exited=True)}",
                 )
             result.lines.append(line)
             why = run_failure(line, stream, panic_signatures)
             if why is not None:
                 result.panic_line = line
-                raise HarnessError(f"{why[0]} in: {why[1]!r}")
+                msg = f"{why[0]} in: {why[1]!r}{serial_tail(result.lines)}"
+                session.fail(src, result, argv, msg)
             if markers[marker_idx].matches(line):
                 result.matched.append(markers[marker_idx].name)
                 marker_idx += 1
 
-        with _connect_monitor(monitor_sock) as mon:
-            mon.sendall((cmd + "\n").encode())
-            reply = _monitor_reply(mon, 2.0)
+        assert session.qmp is not None
+        try:
+            out = session.qmp.execute("human-monitor-command", {"command-line": cmd})
+            reply = out if isinstance(out, str) else repr(out)
+        except qmpmod.QmpError as e:
+            reply = str(e)
 
-        reader.set_deadline(time.monotonic() + MCE_DUMP_WAIT_S)
+        src.set_deadline(time.monotonic() + MCE_DUMP_WAIT_S)
+        exited: int | None = None
         while True:
-            kind, line = reader.next_event()
+            kind, line = src.next_event()
+            if kind == "idle":
+                continue
             if kind == "eof":
-                try:
-                    exited = proc.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    exited = None
+                exited = _reap(src)
                 break
             if kind == "timeout":
                 break
@@ -1701,20 +1799,20 @@ def run_qemu_inject_mce(
             after.append(line)
             if PANIC_DONE in (kernel_text(line) or ""):
                 break
-    finally:
-        if proc.poll() is None:
-            proc.kill()
         try:
-            result.exit_code = proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            result.exit_code = proc.wait()
-
-    check_mce_dump(after, exit_code=exited, reply=reply, needles=dump_needles)
-    result.panic_line = next(
-        (ln for ln in after if "vibeOS: panic:" in (kernel_text(ln) or "")), None
-    )
-    return result
+            check_mce_dump(after, exit_code=exited, reply=reply, needles=dump_needles)
+        except HarnessError as e:
+            session.fail(src, result, argv, str(e))
+        session.ended = "pass"
+        result.panic_line = next(
+            (ln for ln in after if "vibeOS: panic:" in (kernel_text(ln) or "")), None
+        )
+        return result
+    finally:
+        session.close()
+        if result.exit_code is None:
+            result.exit_code = _reap(src)
+            result.stderr = src.stderr_text()
 
 
 SERIAL_ECHO_TOKEN = "serial-ok"
@@ -2041,6 +2139,10 @@ def check_ktest_output(
     count of runs or results other than `begin`'s each fail, naming the
     test. Info lines are never results. The result carries the run names
     (`ktest_runs`) and the skips (`ktest_skips`, name to reason).
+
+    A failure line inside a run's window that `declared.DECLARED` lists for
+    that run's test is the test's expected output, not a failure; a run of
+    such a test that ends `ok` without each line it declares fails.
     """
     result = RunResult()
     result.exit_code = exit_code
@@ -2050,9 +2152,14 @@ def check_ktest_output(
     open_run: str | None = None
     results_seen = 0
     fails: list[str] = []
+    # The declared failure lines seen in the open run's window.
+    seen: list[str] = []
     for raw in lines:
         result.lines.append(raw)
         why = run_failure(raw, stream)
+        if why is not None and declared.is_declared(open_run, why[1]):
+            seen.append(why[1])
+            continue
         if why is not None:
             result.panic_line = raw
             raise HarnessError(f"{why[0]} in: {why[1]!r}")
@@ -2077,6 +2184,7 @@ def check_ktest_output(
             if open_run is not None:
                 raise HarnessError(f"ktest: run {open_run} has no result (next: run {k.name})")
             open_run = k.name
+            seen = []
             result.ktest_runs.append(k.name)
         elif k.kind in ("ok", "fail", "skip"):
             if open_run is None:
@@ -2085,6 +2193,9 @@ def check_ktest_output(
                 raise HarnessError(f"ktest: run {open_run} got a result for {k.name}")
             open_run = None
             results_seen += 1
+            gone = declared.missing(k.name, seen) if k.kind == "ok" else []
+            if gone:
+                raise HarnessError(f"ktest: {k.name} passed without its declared line {gone[0]!r}")
             if k.kind == "fail":
                 fails.append(frame.kernel_text(raw) or raw)
             elif k.kind == "skip":
@@ -2187,6 +2298,14 @@ class KtestDeadlines:
         )
 
 
+def declared_in_run(progress: KtestDeadlines | None, text: str) -> bool:
+    """Whether kernel text `text`, read while `progress` tracks a ktest
+    boot, is a failure line the open run's test declares (`declared`)."""
+    if progress is None or not progress.run_open:
+        return False
+    return declared.is_declared(progress.last_run, text)
+
+
 class _ProcSource:
     """`run_qemu_until_exit`'s QEMU child as the source `qmp.Session` reads."""
 
@@ -2275,12 +2394,16 @@ def run_qemu_until_exit(
     def take(line: str) -> None:
         result.lines.append(line)
         why = run_failure(line, stream, panic_signatures)
+        # A line the running test declares; `check_ktest_output` judges it.
+        mine = why is not None and declared_in_run(progress, why[1])
+        if mine:
+            why = None
         if why is not None and expect_fail:
             if result.panic_line is None:
                 result.panic_line = line
         elif why is not None:
             result.panic_line = line
-        sig = panic_signature(line, panic_signatures) is not None
+        sig = not mine and panic_signature(line, panic_signatures) is not None
         # A run that declares a panic's end expects its signatures; the
         # event rule judges it (DESIGN §8.3).
         expected = expect_fail or (sig and cfg.expect != "none")
@@ -2355,7 +2478,16 @@ def run_qemu_until_exit(
         except subprocess.TimeoutExpired:
             proc.kill()
             result.exit_code = proc.wait()
+    _irqoff_observe(cfg, result.lines)
     return result
+
+
+def _irqoff_observe(cfg: QemuConfig, lines: list[str]) -> None:
+    """Hand a boot's lines to `irqoff.observe` (ROADMAP §10.3), imported here
+    because it imports this module."""
+    from tests.harness import irqoff
+
+    irqoff.observe(cfg, lines)
 
 
 # The boot contract: the `contract` rows of the registry, in order

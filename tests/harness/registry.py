@@ -28,7 +28,16 @@ REGISTRY_PATH = Path(__file__).resolve().parent.parent / "contract" / "markers.t
 KINDS = ("contract", "diagnostic", "failure", "test")
 ARCHES = ("both", "x86_64", "aarch64")
 SOURCES = ("kernel", "user", "limine")
-WHEN_TERMS = ("hpet", "pit", "smp>1", "gp_test", "panic_test", "panic_nest_test", "panic_stop_test")
+WHEN_TERMS = (
+    "hpet",
+    "pit",
+    "smp>1",
+    "gp_test",
+    "panic_test",
+    "panic_nest_test",
+    "panic_stop_test",
+    "hang_test",
+)
 REPEATS = ("per_ap",)
 KEYS = frozenset(
     ("text", "kind", "arch", "source", "section", "order", "name", "when", "repeat")
@@ -226,6 +235,7 @@ class BootConfig:
     panic_test: bool = False
     panic_nest_test: bool = False
     panic_stop_test: bool = False
+    hang_test: bool = False
     arch: str = "x86_64"
 
 
@@ -238,6 +248,7 @@ def _term(term: str, cfg: BootConfig) -> bool:
         "panic_test": cfg.panic_test,
         "panic_nest_test": cfg.panic_nest_test,
         "panic_stop_test": cfg.panic_stop_test,
+        "hang_test": cfg.hang_test,
     }[term.removeprefix("!")]
     return not value if term.startswith("!") else value
 

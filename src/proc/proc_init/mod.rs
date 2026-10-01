@@ -19,9 +19,9 @@ use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::pid::IdIndex;
 use vibeos::proc::uaccess::user_range_ok;
 use vibeos::proc::{
-    Creds, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS, ProcState,
-    SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action, fd_flags_from_open,
-    reaper_for, sig_name, wait_exited, wait_signaled,
+    Creds, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitExit, InitState, MAX_FDS, MAX_PROCS,
+    ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action,
+    fd_flags_from_open, kill_delivers, reaper_for, sig_name, wait_exited, wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult, UserFrame};
@@ -469,9 +469,10 @@ pub fn start_init() {
     }
 }
 
-/// Start the ELF at `path` with `argv` (`[path]` when empty) and `envp`
-/// as a new process with parent `ppid` (0: the kernel, which reaps it with
-/// [`wait_kernel`]).
+/// Start the ELF at `path` with `argv` and `envp` as a new process with
+/// parent `ppid` (0: the kernel, which reaps it with [`wait_kernel`]). An
+/// empty `argv` starts it with `argc` 1 and an empty `argv[0]`, as
+/// `execve` does.
 #[cfg(not(feature = "vibefs_crash"))]
 pub(crate) fn spawn_elf(
     path: &[u8],
@@ -480,8 +481,9 @@ pub(crate) fn spawn_elf(
     prefer: u32,
     ppid: u32,
 ) -> Result<u32, LoadError> {
+    let args = user_init::exec_args(argv, envp)?;
     start_loaded(
-        user_init::load_path(None, path, argv, envp)?,
+        user_init::load_path(None, path, &args)?,
         prefer,
         ppid,
         intern_name(path),
@@ -811,7 +813,7 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
             Pending::None => return,
             Pending::Die(sig) => {
                 let _ = frame;
-                finish_exit(wait_signaled(sig), true);
+                finish_exit(wait_signaled(sig), None);
             }
             Pending::Stop => {
                 #[cfg(feature = "kernel_tests")]
@@ -909,8 +911,17 @@ pub fn try_user_fault(f: &TrapFrame) {
         testing::kill_line_yield(f);
         testing::kill_line_done();
     }
+    // The faulting address, for pid 1's line: CR2 for `#PF`, else the RIP.
+    #[cfg(target_arch = "x86_64")]
+    let addr = if f.vector == u64::from(vectors::PF) {
+        f.cr2
+    } else {
+        rip
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let addr = rip;
     crate::arch::gs::force_kernel();
-    finish_exit(wait_signaled(sig), true);
+    finish_exit(wait_signaled(sig), Some(addr));
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
@@ -1051,6 +1062,10 @@ pub(crate) mod testing {
             return;
         }
         STALL_IN.store(true, Ordering::Release);
+        // With IF=0 the stall is a deliberate IF-off stretch; with IF=1 it
+        // holds none and takes no guard.
+        let _hold = (!crate::arch::current::interrupts_enabled())
+            .then(|| crate::sched::irqoff::deliberate("stop stall"));
         let t0 = time_init::now_ns();
         while !STALL_RELEASE.load(Ordering::Acquire)
             && time_init::now_ns().saturating_sub(t0) < 1_000_000_000

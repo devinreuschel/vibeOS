@@ -4,7 +4,7 @@
 use core::arch::global_asm;
 use core::mem::{offset_of, size_of};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
@@ -81,6 +81,13 @@ global_asm!(
         push r14
         push r15
         sub rsp, 8
+        // The irqoff tracer (INVARIANTS.md §2.9 rule 2): the entry's IF=0
+        // stretch, from here to the `sti`. Everything live is in the frame.
+        .if {irqoff}
+        mov edi, {site_entry}
+        call {irqoff_off}
+        call {irqoff_on}
+        .endif
         // The body runs with IF=1 (DESIGN §2.9 rule 3). Not before the
         // pushes above: another thread's `syscall` on this CPU overwrites
         // gs:[user_rsp].
@@ -95,6 +102,10 @@ global_asm!(
         // IF is off from here to sysretq or iretq (AGENTS.md rule 2).
         cli
         mov [rsp + {f_rax}], rax
+        .if {irqoff}
+        mov edi, {site_exit}
+        call {irqoff_off}
+        .endif
 
     // The return to ring 3 over the user frame at RSP + 8: IF=0, kernel
     // GS. `first_return` enters here too.
@@ -112,6 +123,11 @@ global_asm!(
         // The FP binding check (DESIGN §7.5). Both calls clobber only
         // registers the exit reloads from the frame.
         call vibeos_fp_user_return
+        // The tracer's stretch ends after the last exit work; the few
+        // instructions from here to `sysretq` or `iretq` are unmeasured.
+        .if {irqoff}
+        call {irqoff_on}
+        .endif
         lea rdi, [rsp + {pad}]
         call vibeos_sysret_ok
         test al, al
@@ -205,6 +221,11 @@ global_asm!(
     enosys = const ENOSYS_RET,
     if_check = const cfg!(debug_assertions) as u8,
     bad_rip = sym vibeos_syscall_bad_rip,
+    irqoff = const cfg!(feature = "irqoff") as u8,
+    irqoff_off = sym crate::sched::irqoff::vibeos_irqoff_off_site,
+    irqoff_on = sym crate::sched::irqoff::vibeos_irqoff_on,
+    site_entry = const crate::sched::irqoff::Site::SYSCALL_ENTRY.bits(),
+    site_exit = const crate::sched::irqoff::Site::SYSCALL_EXIT.bits(),
     user_cs = const USER_CS_RPL as u64,
     user_ss = const USER_DS_RPL as u64,
 );
@@ -585,6 +606,15 @@ pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
 pub unsafe fn first_return(fs_base: u64) -> ! {
     #[cfg(feature = "kernel_tests")]
     testing::on_first_return();
+    // The asm's own `cli` finds IF already off; this one tells the irqoff
+    // tracer where the return's stretch began.
+    crate::arch::current::irq_disable();
+    // The kernel_tests fork-wait stall spins inside the asm below with
+    // IF=0 and may read no `gs:` there, so its stretch is marked here.
+    #[cfg(feature = "kernel_tests")]
+    if testing::fork_wait_stall_armed() {
+        crate::sched::irqoff::deliberate_open("fork-wait stall");
+    }
     // SAFETY: invariant I25: `kernel_rsp0` is the top of this thread's
     // kernel stack, whose top 168 bytes are its user frame, and the pad
     // word below it is where `vibeos_syscall_return` expects RSP; IF=0
@@ -653,7 +683,6 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
 
 static TRACE: AtomicBool = AtomicBool::new(false);
 static CURRENT_AS: AtomicPtr<AddressSpace> = AtomicPtr::new(ptr::null_mut());
-static SYSCALLS: AtomicU64 = AtomicU64::new(0);
 
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Release);
@@ -661,25 +690,6 @@ pub fn set_trace(on: bool) {
 
 pub fn trace_enabled() -> bool {
     TRACE.load(Ordering::Acquire)
-}
-
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    allow(
-        dead_code,
-        reason = "P10-S86 adds its procfs caller; mm::ktest reads it today"
-    )
-)]
-pub fn syscall_count() -> u64 {
-    let t = per_cpu_init::current_thread();
-    if !t.is_null() {
-        // SAFETY: invariant: a non-null current thread is this CPU's live
-        // TCB, and only this CPU writes its `syscall_count` (`bump_counter`);
-        // established by `per_cpu_init::set_current_thread`.
-        unsafe { (*t).syscall_count }
-    } else {
-        SYSCALLS.load(Ordering::Relaxed)
-    }
 }
 
 fn current_as() -> Option<&'static AddressSpace> {
@@ -714,13 +724,14 @@ pub fn clear_user_as() {
 }
 
 fn bump_counter() {
-    SYSCALLS.fetch_add(1, Ordering::Relaxed);
     let t = per_cpu_init::current_thread();
     if !t.is_null() {
-        // SAFETY: invariant: a non-null current thread is this CPU's live
-        // TCB, and only the thread itself, on this CPU, writes its
-        // `syscall_count`; established by `per_cpu_init::set_current_thread`.
-        unsafe { (*t).syscall_count = (*t).syscall_count.wrapping_add(1) };
+        // SAFETY: invariant I9: a non-null current thread is this CPU's
+        // live TCB, which stays in `SCHED`; established by
+        // `per_cpu_init::set_current_thread`.
+        let n = unsafe { &(*t).syscall_count };
+        // Relaxed: the count is a statistic and pairs with nothing.
+        n.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -846,6 +857,11 @@ pub(crate) mod testing {
 
     /// First ring-3 entries [`fork_wait_stall_point`] still holds.
     static FORK_WAIT_STALLS: AtomicU32 = AtomicU32::new(0);
+
+    /// Whether [`fork_wait_stall_point`] still holds an entry.
+    pub(super) fn fork_wait_stall_armed() -> bool {
+        FORK_WAIT_STALLS.load(Ordering::Acquire) != 0
+    }
 
     /// How long [`fork_wait_stall_point`] holds one entry: two ticks of
     /// the 1 kHz timer.
