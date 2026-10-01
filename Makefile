@@ -241,6 +241,8 @@ help:
 	  '  vmcore                the core tool: vmcore report --core <file|-> --elf <kernel.elf>' \
 	  '  test-unit             vibeos-core host tests (any host triple)' \
 	  '  models-quick          loom models (loom_*) at 3 preemptions, ROADMAP §10.8' \
+	  '  models                loom models and Kani proofs (needs ./setup.sh --kani)' \
+	  '  miri                  vibeos-core host tests under Miri' \
 	  '  test-harness          python unit tests for the harness' \
 	  '  test-e2e              boot contract on the production ISO' \
 	  '  test-e2e-uefi         same, UEFI firmware from the probe on pflash; none installed: skip (fail under CI)' \
@@ -477,6 +479,31 @@ test-unit:
 .PHONY: models-quick
 models-quick:
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)/loom RUSTFLAGS="--cfg loom -D warnings" LOOM_MAX_PREEMPTIONS=3 cargo test -p vibeos-core --lib --features std --release --target $(HOST_TRIPLE) -- loom_ --test-threads=1
+
+# ROADMAP §10.8: every loom model, models-quick's command without its
+# preemption cap, then every Kani harness (`#[cfg(kani)] mod kani_proofs`)
+# at setup.sh's KANI_VERSION. Not in `make check`: the nightly and macOS jobs
+# run it. Kani builds with debug assertions off, because a debug `Frames`
+# records its `#[track_caller]` site and Kani has no `caller_location`;
+# `-Z stubbing` lets the buddy proof replace `node_ptr` (mm/pmm.rs).
+KANI_VERSION := $(shell sed -n 's/^KANI_VERSION=//p' setup.sh)
+
+.PHONY: models
+models:
+	@test -n "$(KANI_VERSION)" || { echo "models: KANI_VERSION reads empty in setup.sh" >&2; exit 1; }
+	@found=$$(cargo kani --version 2>/dev/null | sed -n 's/^Kani Rust Verifier \([^ ]*\).*/\1/p'); \
+	  [ "$$found" = "$(KANI_VERSION)" ] || { echo "models: need kani-verifier $(KANI_VERSION) (KANI_VERSION in setup.sh), found '$${found:-none}'; run ./setup.sh --kani" >&2; exit 1; }
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)/loom RUSTFLAGS="--cfg loom -D warnings" cargo test -p vibeos-core --lib --features std --release --target $(HOST_TRIPLE) -- loom_ --test-threads=1
+	CARGO_BUILD_TARGET=$(HOST_TRIPLE) CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false cargo kani -p vibeos-core --features std -Z stubbing
+
+# ROADMAP §10.8: vibeos-core's host tests under Miri, the --lib and --doc
+# sets test-unit runs. Tests leak their 'static backends on purpose
+# (fs::testfs::ramfs), so a leak is not an error here; undefined behaviour
+# is. A test Miri cannot run carries `cfg_attr(miri, ignore = "<reason>")`.
+.PHONY: miri
+miri:
+	MIRIFLAGS=-Zmiri-ignore-leaks cargo miri test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
+	MIRIFLAGS=-Zmiri-ignore-leaks cargo miri test -p vibeos-core --doc --features std --target $(HOST_TRIPLE)
 
 test-harness:
 	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v

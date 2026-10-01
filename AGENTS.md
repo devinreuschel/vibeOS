@@ -84,6 +84,9 @@ Do not re-introduce an undated nightly except the weekly canary job in
 `smp-stress.yml`. Not a drive-by.
 A bump of the nightly, Kani, or Verus re-derives the MSRV (BOOT.md §3.1); the same PR sets
 `rust-version` in `crates/core/Cargo.toml`, which `setup.sh`, the `check` job, and `make check` read.
+`rust-toolchain.toml` lists `miri`, so a new date must ship it; Kani, which brings its own
+compiler, is pinned apart as `KANI_VERSION` in `setup.sh`: bump it
+in its own PR, with `make models` green on Linux and on the Apple Silicon dev host.
 
 ## Do not
 

@@ -2,7 +2,7 @@
 
 Index: [DESIGN.md](DESIGN.md). This file holds DESIGN §8, and its headings keep DESIGN's numbers.
 
-Three tiers. Each catches a class of bug the others cannot, and each is progressively slower, so the
+Each tier below catches a class of bug the others cannot, and each is progressively slower, so the
 decision of where a test goes matters.
 
 | Tier | Runs | Speed | Catches |
@@ -10,10 +10,19 @@ decision of where a test goes matters.
 | Host unit | `make test-unit` (`vibeos-core`, any host triple) | milliseconds | Algorithms: allocators, parsers, state machines, encodings, arithmetic |
 | In-guest (ktest) | QEMU, kernel built with the `kernel_tests` feature | seconds | Anything needing real hardware state: page tables, MMIO, interrupts, threads, SMP |
 | End to end | QEMU boot of the normal ISO, serial captured | ~10 s | Boot regressions, marker ordering, panics, subsystem interaction |
+| Models and proofs | `make models` (loom models and Kani proofs) and `make miri` (host tests under Miri), outside every per-push tier | minutes | Orderings and interleavings a stress test only samples (loom); every input up to a stated bound (Kani); undefined behaviour in host tests (Miri) |
 
 The routing rule: if it can be a host test, it must be. Pushing logic into the library half of the
 crate so it becomes host-testable is the highest-leverage thing available, and the old tree's biggest
 weakness was that nearly everything lived behind `main.rs` and was therefore untestable.
+
+A protocol whose correctness depends on an interleaving (a publish and its read, a lock-free
+hand-off, a seqlock) gets a loom model beside its code, with a variant that weakens one ordering or
+moves one step and passes only when loom finds the failure. A stress test alone is not enough.
+
+**Kani and Miri.** A Kani harness lives in a `#[cfg(kani)] mod kani_proofs` of the module it
+proves, and its doc comment states its bound; `make models` runs every one (§8.5). A host test Miri
+cannot run carries `#[cfg_attr(miri, ignore = "<reason>")]` (§8.1).
 
 **Loom models.** ROADMAP §10.8's loom models run the kernel's own `vibeos-core` primitives under
 `--cfg loom`, where `vibeos::atomic` is loom's, and check every interleaving up to the bound each
@@ -91,6 +100,16 @@ the reader can compare against.
 
 A single-threaded test cannot observe a race. Simulate the interrupt-context writer explicitly, or
 accept that the real coverage is in-guest.
+
+**Miri (ROADMAP §10.8).** `make miri` runs the host tests under Miri (`cargo miri test`, `miri`
+being a `rust-toolchain.toml` component), which reports undefined behaviour the tests' own asserts
+cannot see: a read of freed or uninitialized memory, a write through a shared reference, a data race.
+It passes `-Zmiri-ignore-leaks`, because tests leak their `'static` backends on purpose
+(`fs::testfs::ramfs`). A test Miri cannot run (it spawns a process, runs assembly or calls FFI, or
+cannot finish even with its input scaled down) carries `#[cfg_attr(miri, ignore = "<reason>")]`; one
+that only runs long scales its input with `cfg!(miri)` instead, which keeps its claim. Each Miri
+finding is fixed with a regression test: a fixed test is its own, and a library fix gets a host test
+named `miri_<what>` that fails under `make miri` before the fix.
 
 **Fuzzing (C-FUZZ, ROADMAP §10.2).** `tests/fuzz` is a cargo-fuzz crate, `vibeos-fuzz`, outside the
 Cargo workspace (the root `Cargo.toml` excludes it), so the kernel build and the MSRV check never
@@ -860,6 +879,14 @@ in its `core:` line. Each check is a `forensics_<case>` row of its results file.
 `make test-e2e` is enough when only boot output or QEMU wiring changed. `make test` is the gate before
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.
+
+`make models` runs ROADMAP §10.8's models and proofs: every loom model (`make models-quick`'s
+command without its `LOOM_MAX_PREEMPTIONS=3`), then every Kani harness in `vibeos-core` (`cargo
+kani -p vibeos-core --features std`, built for the host). It needs `kani-verifier` at the
+`KANI_VERSION` that `setup.sh` pins, since Kani brings its own compiler; `./setup.sh --kani`
+installs exactly that release, and `make models` fails, naming both, when `cargo kani` reports
+another version or none. `make miri` runs `vibeos-core`'s host tests, the `--lib` and `--doc` sets
+`make test-unit` runs, under Miri (§8.1). Neither is part of `make check`.
 
 `make gate PHASE=N` (`scripts/gate.py`) is the phase exit gate the maintainer runs before tagging
 (ROADMAP §10.9). It prints one row per exit-gate line, `PASS`, `FAIL` or `TAG  L<line>  <text>`, each

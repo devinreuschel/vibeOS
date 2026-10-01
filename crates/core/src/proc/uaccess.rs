@@ -535,3 +535,50 @@ mod tests {
         );
     }
 }
+
+// ------------------ Kani proofs (ROADMAP §10.8) ------------------
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// The §10.6 range check accepts exactly: an empty range at any
+    /// address below `USER_MAP_END`, the null page included (Linux's
+    /// `read(fd, NULL, 0)`), and a non-empty range that does not overflow
+    /// and lies wholly between the null guard and `USER_MAP_END`.
+    ///
+    /// Bound: every pair of 64-bit `(addr, len)`; the function has no loop.
+    #[kani::proof]
+    fn user_range_exact() {
+        let addr: u64 = kani::any();
+        let len: u64 = kani::any();
+        let want = if len == 0 {
+            addr < USER_MAP_END
+        } else {
+            addr >= NULL_GUARD_LEN && addr.checked_add(len).is_some_and(|end| end <= USER_MAP_END)
+        };
+        let got = user_range_ok(addr, len);
+        assert_eq!(got, want);
+        // Each class bound first: a `cover!` over `&&` becomes one check per
+        // branch.
+        let empty = len == 0;
+        let end = addr.checked_add(len);
+        let null_ok = empty && addr == 0 && got;
+        let empty_ok = empty && addr != 0 && got;
+        let empty_high = empty && addr >= USER_MAP_END && !got;
+        let null_guard = !empty && addr < NULL_GUARD_LEN && !got;
+        let overflow = !empty && end.is_none() && !got;
+        let past_end =
+            !empty && addr >= NULL_GUARD_LEN && end.is_some_and(|e| e > USER_MAP_END) && !got;
+        let last_byte = !empty && end == Some(USER_MAP_END) && got;
+        let inside = !empty && got;
+        kani::cover!(null_ok, "empty at null accepted");
+        kani::cover!(empty_ok, "empty accepted");
+        kani::cover!(empty_high, "empty at or above USER_MAP_END refused");
+        kani::cover!(null_guard, "null guard refused");
+        kani::cover!(overflow, "overflow refused");
+        kani::cover!(past_end, "past USER_MAP_END refused");
+        kani::cover!(last_byte, "last byte accepted");
+        kani::cover!(inside, "non-empty accepted");
+    }
+}

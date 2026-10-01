@@ -1629,6 +1629,44 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
+# §10.8 models and proofs
+# L1437
+[[box]]
+key = "Kani proofs, each harness stating"
+needs = [
+  "the buddy hands out an",  # L1292
+  "user-VA accessors replace the physmap",  # L1377
+  "the top user page is",  # L1383
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1439
+[[box]]
+key = "Miri runs the portable crate's"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1440
+[[box]]
+key = "`make models` runs the loom"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "a scheduled macOS CI job running",  # L1235
+  "loom models: the seqlock against",  # L1435
+  "Kani proofs, each harness stating",  # L1437
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1441
+[[box]]
+key = "DESIGN §8 gains a models-and-proofs"
+needs = [
+  "`make models` runs the loom",  # L1440
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
 # P10-S76's boxes.
 
 # L1360

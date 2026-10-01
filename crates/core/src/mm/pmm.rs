@@ -458,9 +458,12 @@ impl Buddy {
         unsafe { self.push_free(phys, order) };
     }
 
-    /// Order whose block covers `bytes` and is aligned to `align`.
+    /// Order whose block covers `bytes` and is aligned to `align`. `None`
+    /// for an empty size, a size above the largest block (refused before
+    /// rounding, so `next_power_of_two` cannot overflow; F103), an
+    /// alignment that is not a power of two, or a block above `MAX_ORDER`.
     pub fn order_for(bytes: u64, align: u64) -> Option<u8> {
-        if bytes == 0 {
+        if bytes == 0 || bytes > PAGE_SIZE << MAX_ORDER {
             return None;
         }
         let align = if align == 0 { PAGE_SIZE } else { align };
@@ -1285,4 +1288,30 @@ mod tests {
         // No exclusions at all.
         assert_eq!(clipped(3 * P..4 * P, &[]), vec![(3 * P, 4 * P)]);
     }
+
+    /// F103: above 2^63 `next_power_of_two` overflowed; the size is now
+    /// refused before it rounds.
+    #[test]
+    fn order_for_u64_max_is_none() {
+        assert_eq!(Buddy::order_for(u64::MAX, 0), None);
+        assert_eq!(Buddy::order_for(u64::MAX, PAGE_SIZE), None);
+    }
+
+    #[test]
+    fn order_for_above_2_pow_63_is_none() {
+        assert_eq!(Buddy::order_for((1 << 63) + 1, 0), None);
+        assert_eq!(Buddy::order_for((1 << 63) + 1, PAGE_SIZE), None);
+    }
+
+    #[test]
+    fn order_for_largest_block_edge() {
+        let largest = PAGE_SIZE << MAX_ORDER;
+        assert_eq!(Buddy::order_for(largest, 0), Some(MAX_ORDER as u8));
+        assert_eq!(Buddy::order_for(largest + 1, 0), None);
+    }
 }
+
+// ------------------ Kani proofs (ROADMAP §10.8) ------------------
+
+#[cfg(kani)]
+mod kani_proofs;
