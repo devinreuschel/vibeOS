@@ -50,7 +50,7 @@ fn exec_hello() -> Outcome {
             let argv = [HELLO.as_ptr(), core::ptr::null()];
             #[expect(
                 clippy::let_underscore_must_use,
-                reason = "an execve that returns failed; status 127 reports it"
+                reason = "an execve that returns failed; status 127 reports it (DESIGN §2.5)"
             )]
             let _ = sys::execve(HELLO.as_ptr(), argv.as_ptr(), core::ptr::null());
             rt::exit(127)

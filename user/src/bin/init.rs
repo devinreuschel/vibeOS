@@ -74,7 +74,7 @@ fn main(env: &Env) -> i32 {
         }
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "a yield has no failure init can act on"
+            reason = "a yield has no failure init can act on (DESIGN §2.5)"
         )]
         let _ = sys::sched_yield();
     }

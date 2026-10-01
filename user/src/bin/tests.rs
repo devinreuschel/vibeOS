@@ -52,7 +52,7 @@ fn exec_step(env: &Env) -> i32 {
     let argv = [path.as_ptr(), core::ptr::null()];
     #[expect(
         clippy::let_underscore_must_use,
-        reason = "an execve that returns failed; status 126 reports it"
+        reason = "an execve that returns failed; status 126 reports it (DESIGN §2.5)"
     )]
     let _ = sys::execve(path.as_ptr(), argv.as_ptr(), core::ptr::null());
     126

@@ -3,9 +3,9 @@ members = ["crates/core", "tests/hostlib", "user", "user/mem"]
 exclude = ["tests/fuzz"]
 resolver = "3"
 
-# C-LINTS (ROADMAP §10.1): every member has `[lints] workspace = true`. A module
-# not yet swept carries `#[allow(<lint>, reason = "audit pending, ROADMAP §10.1")]`
-# on its `mod` line until its sweep removes it.
+# C-LINTS (ROADMAP §10.1): every member has `[lints] workspace = true`, and every
+# module has had its sweep. A kept discard carries an `#[expect]` naming its
+# DESIGN §2.5 case.
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
 missing_safety_doc = "deny"
