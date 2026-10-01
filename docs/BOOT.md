@@ -188,9 +188,8 @@ Ordering rules worth stating separately because they were learned the hard way:
 
 - The bootstrap tick is the LAPIC timer after step 13b, or PIC IRQ0 only on the
   PIT fallback (LINT0 ExtINT). Other PIC lines stay masked; step 15 is
-  `irq: enabled` (IF on, preemption live), not the first unmask. An unexpected
-  line before its driver halts, with no useful backtrace; ROADMAP §10.6 masks,
-  counts, and logs it instead (§5.5).
+  `irq: enabled` (IF on, preemption live), not the first unmask. A line that
+  fires before its driver is masked, counted, and logged (§5.5), not a halt.
 - `smp: done` precedes `console ok`, `pci: N devices`, and `shell ready`. The e2e harness enforces
   it. If SMP moves after the shell, AP failures become invisible in CI.
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
@@ -219,7 +218,7 @@ Step 17 is the framebuffer console, PS/2, and mux (`console ok`) after SMP.
 IRQ1 stays masked until the keyboard handler is installed, then the 8042 is
 initialized, then the keyboard GSI is unmasked. After LAPIC owns the tick the
 8259 is masked: IRQ1 is IOAPIC-only. Do not unmask PIC IRQ1 as a fallback. The
-default PIC handler still halts on an unexpected line (§5.5 gives ROADMAP §10.6's change). The timer path re-runs the
+default PIC handler masks, EOIs, counts, and logs a line no driver claims (§5.5). The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
 Step 17b enumerates PCI (ECAM where the first MCFG allocation covers the bus, else CF8 on bus 0 only),

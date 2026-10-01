@@ -1393,6 +1393,14 @@ arch = "x86_64"
 source = "kernel"
 section = "§10.6"
 
+# An interrupt no handler owns (DESIGN §5.2): at most once a second per vector.
+[[marker]]
+text = "vibeOS: irq: no handler for vector 0x<v> cpu <n> count <count>"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§10.6"
+
 # `/sbin/init`'s first line, on fd 2: it started with the psABI's initial FP
 # state (FCW 0x037F, MXCSR 0x1F80, XMM0 zero), whatever the firmware left
 # in the registers (F069, F129).

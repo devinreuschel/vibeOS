@@ -655,7 +655,8 @@ Hardware events are also lost in three cases. An exception before `idt::init` (P
 ACPI discovery, heap, KVA, GDT, PIC) goes to whatever IDT Limine left and resets or hangs with no
 output (ROADMAP §11.1, F136). LINT1 is masked on every CPU and MADT NMI entries (types 3 and 4) are
 not parsed, so a chipset or external NMI never reaches the NMI handler (ROADMAP §20.1, F096). An
-interrupt on a pool vector no handler owns is EOIed and ignored with no count (ROADMAP §10.6).
+interrupt no handler owns is counted, EOIed, and logged at most once a second per vector, not
+lost and not a halt (§5.2).
 
 ## 2.6 Serial markers
 
@@ -923,7 +924,7 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 |---|---|---|---|
 | Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Halt the kernel (F004 to F010); every process is root, so it can read any file and signal any process | ROADMAP §10.4, §10.6, §10.10, and §10.11 (halts), §13.9 (uids), §18.6 (capabilities, `seccomp`) |
 | Disk images and partition tables | Nothing: a parse returns `Corrupt` | Panic the kernel with a crafted image or table that root mounts or attaches (F061, F117) | ROADMAP §13.9 (partition tables), §14.8 (vibefs v2 validates every block it reads; v1 is retired); §18.7 (a LUKS2 header is parsed by the initrd's unlock tool, never by the kernel) |
-| Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA; forge an MSI, and so halt the kernel with an interrupt on a vector no handler owns (ROADMAP §10.6) | ROADMAP §10.6 (stray interrupts), §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
+| Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA; forge an MSI on a vector no handler owns, which is counted, EOIed, and logged at most once a second per vector (§5.2), so a storm costs CPU time but never halts | §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
 | Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §11.1 (early exceptions report themselves), §20.1 (table bounds) |
 | The network | Nothing, from the first packet | Not reachable yet | ROADMAP §15.10 fuzzes every parser from the start; §15.4, §15.6, and §15.8 defend against off-path guessing (keyed sequence numbers, ports, and IP IDs, RFC 5961, SYN cookies, checked PMTU messages, randomized DNS ids), which §15.10's simulated attacker checks |
 | Speculation and timing side channels | Out of scope: no KPTI and no Spectre or MDS mitigations; the kernel half is mapped in every user address space (F024, F025, F131, F132) | Read kernel and other processes' memory on an affected CPU | ROADMAP §18.3 |

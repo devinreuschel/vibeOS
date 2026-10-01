@@ -1053,6 +1053,74 @@ pub(crate) fn wake_inbox_and_kva_pool() -> Outcome {
     Outcome::Ok
 }
 
+// unowned_vector_storm (ROADMAP §10.6, DESIGN §5.2)
+
+/// Self-IPIs sent to each vector.
+const STORM_IPIS: u64 = 10_000;
+/// How long one IPI may take to show in the count.
+const STORM_WAIT_NS: u64 = 100_000_000;
+
+/// `vec`'s unowned count summed over every CPU: the test thread may move.
+fn unowned_total(vec: u8) -> u64 {
+    (0..MAX_IPI_CPUS as u32).fold(0, |n, cpu| {
+        n.wrapping_add(irq_init::unowned_count(vec, cpu))
+    })
+}
+
+/// Send `STORM_IPIS` self-IPIs to `vec`, each awaited (the LAPIC merges
+/// pending IPIs on one vector); the count's rise, or the IPI it stopped at.
+fn storm(vec: u8) -> Result<u64, u64> {
+    let before = unowned_total(vec);
+    for i in 0..STORM_IPIS {
+        let want = before.wrapping_add(i).wrapping_add(1);
+        if apic_init::send_ipi_cpu(thread_init::current_cpu(), vec).is_err() {
+            return Err(i);
+        }
+        let t0 = time_init::now_ns();
+        while unowned_total(vec) < want {
+            if time_init::now_ns().saturating_sub(t0) > STORM_WAIT_NS {
+                return Err(i);
+            }
+            spin_loop();
+        }
+    }
+    Ok(unowned_total(vec).wrapping_sub(before))
+}
+
+/// 10,000 self-IPIs each to an allocated-then-freed pool vector, to `0x85`
+/// (no owner), and to `0x25` (8259 line 5, masked) leave the kernel up and
+/// each vector's unowned count up by exactly 10,000 (a lower one is a
+/// missed EOI or a lost delivery), with at most one `irq: no handler` line
+/// per vector per second.
+pub(crate) fn unowned_vector_storm() -> Outcome {
+    if !crate::arch::pic::is_masked(5) {
+        return Outcome::Fail("8259 line 5 not masked");
+    }
+    let pool = match irq_init::allocate_vector(thread_init::current_cpu()) {
+        Ok(v) => v,
+        Err(e) => return crate::fail_fmt!("allocate_vector: {e:?}"),
+    };
+    if let Err(e) = irq_init::free_vector(pool) {
+        return crate::fail_fmt!("free_vector({pool:#x}): {e:?}");
+    }
+    for vec in [pool, 0x85, 0x25] {
+        let lines0 = irq_init::unowned_lines(vec);
+        let t0 = time_init::now_ns();
+        let got = storm(vec);
+        let secs = time_init::now_ns().saturating_sub(t0) / 1_000_000_000;
+        match got {
+            Ok(STORM_IPIS) => {}
+            Ok(n) => return crate::fail_fmt!("vector {vec:#x}: count +{n}, want +{STORM_IPIS}"),
+            Err(i) => return crate::fail_fmt!("vector {vec:#x}: IPI {i} never counted"),
+        }
+        let lines = irq_init::unowned_lines(vec).wrapping_sub(lines0);
+        if lines > secs + 1 {
+            return crate::fail_fmt!("vector {vec:#x}: {lines} log lines in {secs} s");
+        }
+    }
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -1068,4 +1136,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("lifetime_shootdown_ack_late", lifetime_shootdown_ack_late).deadline(15_000),
     test("shootdown_ack_while_busy", shootdown_ack_while_busy).deadline(13_000),
     test("wake_inbox_and_kva_pool", wake_inbox_and_kva_pool),
+    test("unowned_vector_storm", unowned_vector_storm).deadline(60_000),
 ];

@@ -156,7 +156,7 @@ fault, downstream of it.
 | `0x12` | `#MC` | dump on IST, halt. Planned (ROADMAP §25.1, §25.3): only a fatal machine check, or an action-required error in kernel memory, halts; a lower severity is recorded and the CPU continues | not a ring-3 fault: the Ring 0 column applies. Planned (ROADMAP §25.3): an action-required error that ring-3 code consumed is recorded by the handler and recovered in exit work (§5.10 rule 11), which sends `SIGBUS` with `BUS_MCEERR_AR` | as the rule |
 | `0x13` | `#XF` | dump, halt | `SIGFPE` | as the rule |
 | `0x09`, `0x0F`, `0x14`–`0x1F` | reserved, `#VE`, `#CP`, `#HV`, `#VC`, `#SX` | dump, halt | `SIGSEGV` | as the rule |
-| `0x20`–`0xFF` | IRQs and IPIs | handle, return. An interrupt no handler owns is counted per vector and per CPU, EOIed at the controller that delivered it (the LAPIC when its in-service bit for the vector is set, else the 8259), logged at most once a second per vector, and ignored; §5.5 gives the 8259 lines. Rule; not yet enforced: a pool vector (`0x31`–`0x7F`) with no handler is EOIed and ignored with no count, a vector in `0x80`–`0xEF` or `0xF3`–`0xFA` dumps and halts, and an 8259 line with no handler other than IRQ7 and IRQ15 prints `irq: unexpected` and halts the CPU that took it (ROADMAP §10.6) | handle, return to ring 3 | as the rule |
+| `0x20`–`0xFF` | IRQs and IPIs | handle, return. An interrupt no handler owns is counted per vector and per CPU, EOIed at the controller that delivered it (the LAPIC when its in-service bit for the vector is set, else the 8259), logged at most once a second per vector, and ignored; §5.5 gives the 8259 lines. As built: `irq_init::unowned` counts in a static per-CPU, per-vector table (`irq_init::unowned_count`), chooses the EOI with `apic::unowned_eoi` from the LAPIC's in-service bit (`apic_init::in_service`), and logs `irq: no handler for vector 0x<v> cpu <n> count <n>` through a per-vector last-log time claimed by `compare_exchange`; the vector table's default body for `0x20`–`0xFF`, `irq_init::dispatch` for a pool vector with no handler, and every 8259 line's body call it (in-guest `unowned_vector_storm`) | handle, return to ring 3 | as the rule |
 
 A halting handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code where the
 vector pushes one, and, for `#PF`, the CR2 the stub saved (§5.10 rule 9), then the common dump
@@ -343,7 +343,8 @@ aarch64 form of §12.4's interrupt-remapping rule. This is the ITS chip's free o
 
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
 vector arrived via PIC or LAPIC and signals the right controller. A vector with no handler still
-gets its EOI; ROADMAP §10.6 also counts and logs it (§5.2's `0x20`–`0xFF` row).
+gets its EOI, and is counted and logged: `dispatch`'s unowned case calls `irq_init::unowned` in place
+of its own `eoi_for`, so the vector is EOIed once (§5.2's `0x20`–`0xFF` row).
 
 A threaded handler's top half runs in `dispatch` (ack / mask / wake only). Today one
 kernel thread, pinned to the last online CPU, runs every threaded vector's bottom half.
@@ -390,12 +391,13 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
   PIC IRQ0. `on_timer_tick` does nothing until the idle thread exists. The `irq: enabled` marker
   (step 15) follows `sched: cpu0 ready`. The keyboard (step 17) takes vector `0x30` through the
   I/O APIC whenever `kbd_init` can route ISA IRQ1; PIC IRQ1 is unmasked only when there is no route
-  and the PIT owns the tick. The default PIC handler reads the ISR for IRQ7 and IRQ15: a clear bit
-  means a spurious IRQ, which gets no EOI on that PIC (a spurious IRQ15 still EOIs the master's
-  cascade line), and a real IRQ7 or IRQ15 with no driver is EOIed and ignored. Any other line with
-  no handler prints `irq: unexpected N` and halts the CPU that took it. Planned (ROADMAP §10.6): a
-  spurious IRQ is counted, and any other line no driver claims is masked at the PIC, EOIed,
-  counted, and logged at most once a second, and the kernel goes on.
+  and the PIT owns the tick. Every 8259 line no driver claims runs `pic::handle`, which is
+  `irq_init::unowned`: a vector the LAPIC has in service (a self-IPI or a mis-route to `0x20`–`0x2F`)
+  gets the LAPIC's EOI; otherwise `pic::unclaimed` reads the owning PIC's ISR and decides with
+  `pic::unclaimed_line`. A clear bit on IRQ7 or IRQ15 means a spurious IRQ, which is counted and
+  gets no EOI on that PIC (a spurious IRQ15 still EOIs the master's cascade line) and no log line;
+  any other line is masked at the PIC, EOIed, counted, and logged at most once a second, and the
+  kernel goes on.
 - Once the I/O APIC routes devices and the LAPIC timer is verified ticking, mask the PIC completely.
   Leaving it live means every interrupt is delivered twice.
 - Keep the PIT driver code. It is still the calibration fallback and still provides the delays that AP

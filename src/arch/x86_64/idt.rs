@@ -789,6 +789,12 @@ fn install(vector: u8, body: TrapBody) {
 
 fn default_body(frame: &mut TrapFrame) {
     let n = frame.vector as u8;
+    // `0x20`-`0xFF`: an interrupt no handler owns is counted, EOIed and
+    // logged, never a halt (DESIGN §5.2).
+    if n >= vectors::IRQ_BASE {
+        crate::irq_init::unowned(n);
+        return;
+    }
     let err = frame.error_code;
     let cr2 = (n == vectors::PF).then_some(frame.cr2);
     if frame.user_mode() {

@@ -161,6 +161,28 @@ pub enum EoiDomain {
     Lapic,
 }
 
+/// The LAPIC in-service register (ISR) word that holds `vec`'s bit, as
+/// (register offset, bit mask): eight 32-bit registers at `0x100` to
+/// `0x170`, 16 bytes apart, vector `v` in bit `v % 32` of register `v / 32`
+/// (Intel SDM Vol. 3A, 11.8.4).
+pub const fn isr_reg(vec: u8) -> (u32, u32) {
+    (0x100 + 0x10 * (vec as u32 / 32), 1 << (vec as u32 % 32))
+}
+
+/// Where an interrupt no handler owns gets its EOI (DESIGN §5.2): the LAPIC
+/// when its in-service bit for `vec` is set (`in_service`), whatever the
+/// vector, since a self-IPI or an I/O APIC route can deliver any vector
+/// there; else the 8259 for its range `0x20`-`0x2F`; else none.
+pub const fn unowned_eoi(vec: u8, in_service: bool) -> EoiDomain {
+    if in_service {
+        EoiDomain::Lapic
+    } else if vec >= vectors::IRQ_BASE && vec <= vectors::IRQ_SPURIOUS_SLAVE {
+        EoiDomain::Pic
+    } else {
+        EoiDomain::None
+    }
+}
+
 /// PIC vs APIC EOI. Spurious `0xFF` never EOIs. DESIGN §5.7.
 pub const fn eoi_domain(vec: u8) -> EoiDomain {
     if vec == vectors::LAPIC_SPURIOUS {
@@ -380,6 +402,31 @@ pub fn tsc_deadline_arm_plan(vec: u8, now: u64, tsc_per_ms: u64) -> [TscDeadline
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isr_reg_offsets() {
+        assert_eq!(isr_reg(0), (0x100, 1));
+        assert_eq!(isr_reg(0x25), (0x110, 1 << 5));
+        assert_eq!(isr_reg(0x85), (0x140, 1 << 5));
+        assert_eq!(isr_reg(0xFF), (0x170, 1 << 31));
+    }
+
+    #[test]
+    fn unowned_eoi_choice() {
+        for v in 0..=255u8 {
+            assert_eq!(
+                unowned_eoi(v, true),
+                EoiDomain::Lapic,
+                "vector {v:#x} in service"
+            );
+            let want = if (0x20..=0x2F).contains(&v) {
+                EoiDomain::Pic
+            } else {
+                EoiDomain::None
+            };
+            assert_eq!(unowned_eoi(v, false), want, "vector {v:#x}");
+        }
+    }
     use std::vec::Vec;
 
     #[test]
