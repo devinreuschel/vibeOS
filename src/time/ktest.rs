@@ -698,13 +698,38 @@ const IF_OFF_WAIT_MS: u64 = 1_000;
 /// 0 while the body runs; then 1, with [`IF_OFF_VALS`] set, or `2 + i` for
 /// failure `i` of [`IF_OFF_ERRS`].
 static IF_OFF_STATE: AtomicU32 = AtomicU32::new(0);
-static IF_OFF_ERRS: [&str; 5] = [
+static IF_OFF_ERRS: [&str; 6] = [
     "no clocksource",
     "no reference counter",
     "no clock read",
     "not on cpu0",
     "no tick within 20 ms of the window",
+    "no clock read bracketed within 20 us",
 ];
+/// A clock read counts when the reference reads on either side of it are
+/// this close: 0.04% of the window, so a vCPU stall between a read and its
+/// reference cannot move the comparison by the 1% it checks.
+const BRACKET_NS: u64 = 20_000;
+/// How many (reference, clock, reference) triples [`bracketed`] tries.
+const BRACKET_TRIES: u32 = 1_000;
+
+/// A clock read and the reference reads on either side of it, taken again
+/// until those are within [`BRACKET_NS`]: (reference before, clock,
+/// reference after). Err: an index into [`IF_OFF_ERRS`].
+fn bracketed(
+    read: &impl Fn() -> Result<u64, usize>,
+    since: &impl Fn(u64, u64) -> u64,
+) -> Result<(u64, u64, u64), usize> {
+    for _ in 0..BRACKET_TRIES {
+        let lo = read()?;
+        let now = now_raw().ok_or(2usize)?;
+        let hi = read()?;
+        if since(lo, hi) <= BRACKET_NS {
+            return Ok((lo, now, hi));
+        }
+    }
+    Err(5)
+}
 /// Δ`now_ns` and Δreference across the IF-off window, then across the
 /// window and the two ticks after it; the reference's id.
 static IF_OFF_VALS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
@@ -733,41 +758,49 @@ fn if_off_measure() -> Result<([u64; 4], ClocksourceId), usize> {
     let rc = reference(cs).ok_or(1usize)?;
     let read = || time_init::read_counter(rc.id).ok_or(2usize);
     let since = |from: u64, to: u64| rc.scale.to_ns(rc.delta(to, from));
-    let (r0, n0, n1, r1) = {
+    // The reference time between two bracketed reads: from the middle of
+    // the first bracket to the middle of the second.
+    let between = |a: (u64, u64, u64), b: (u64, u64, u64)| {
+        since(a.0, b.2)
+            .saturating_sub(since(a.0, a.2) / 2)
+            .saturating_sub(since(b.0, b.2) / 2)
+    };
+    let (start, end) = {
         let _off = crate::sched::irqoff::deliberate("clocksource 50 ms IF-off window");
         if thread_init::current_cpu() != 0 {
             return Err(3);
         }
-        // Reference, clock, spin, clock, reference: the clock's interval
-        // sits inside the reference's.
-        let r0 = read()?;
-        let n0 = now_raw().ok_or(2usize)?;
+        let start = bracketed(&read, &since)?;
         loop {
-            if since(r0, read()?) >= IF_OFF_NS {
+            if since(start.2, read()?) >= IF_OFF_NS {
                 break;
             }
             core::hint::spin_loop();
         }
-        let n1 = now_raw().ok_or(2usize)?;
-        let r1 = read()?;
-        (r0, n0, n1, r1)
+        (start, bracketed(&read, &since)?)
     };
     // IF is back on: the tick resumes. A clock that counted ticks lost the
     // window's here.
     let t0 = time_init::ticks();
-    while time_init::ticks() < t0.saturating_add(2) {
-        if since(r1, read()?) > TICK_WAIT_NS {
+    loop {
+        // Time first, then the tick count: a tick that preempts this
+        // thread between the two shows in the count, so a stretch off the
+        // CPU cannot read as a missing tick.
+        let late = since(end.2, read()?) > TICK_WAIT_NS;
+        if time_init::ticks() >= t0.saturating_add(2) {
+            break;
+        }
+        if late {
             return Err(4);
         }
         core::hint::spin_loop();
     }
-    let n2 = now_raw().ok_or(2usize)?;
-    let r2 = read()?;
+    let after = bracketed(&read, &since)?;
     let vals = [
-        n1.saturating_sub(n0),
-        since(r0, r1),
-        n2.saturating_sub(n0),
-        since(r0, r2),
+        end.1.saturating_sub(start.1),
+        between(start, end),
+        after.1.saturating_sub(start.1),
+        between(start, after),
     ];
     Ok((vals, rc.id))
 }

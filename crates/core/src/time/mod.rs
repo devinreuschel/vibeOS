@@ -110,6 +110,123 @@ pub fn tsc_per_ms_from_pit(tsc_delta: u64, count: u16) -> Option<u64> {
     tsc_per_ms_sane(v).then_some(v)
 }
 
+/// Reads of a reference counter each calibration end takes, keeping the
+/// one the TSC brackets most tightly (`time_init::calibrate_hpet`).
+pub const HPET_CALIB_READS: usize = 16;
+
+/// A reference counter read between two TSC reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bracketed {
+    pub tsc_lo: u64,
+    pub counter: u64,
+    pub tsc_hi: u64,
+}
+
+impl Bracketed {
+    /// TSC cycles between the reads around the counter read; `u64::MAX`
+    /// for reversed reads, so the narrowest pick never keeps one.
+    pub fn width(self) -> u64 {
+        self.tsc_hi.checked_sub(self.tsc_lo).unwrap_or(u64::MAX)
+    }
+
+    /// The TSC at the counter read, as the middle of its bracket.
+    pub fn tsc_mid(self) -> u64 {
+        self.tsc_lo.saturating_add(self.width() / 2)
+    }
+
+    /// The narrower of two reads, `self` on a tie.
+    pub fn narrower(self, other: Bracketed) -> Bracketed {
+        if other.width() < self.width() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// `tsc_per_ms` from HPET reads `a` and `b` of `period_fs`, 32 bits wide as
+/// the kernel reads the counter (`time_init::hpet_read_main`), each placed on
+/// the TSC by its bracket's middle, so a TSC read and its HPET read no
+/// longer need to be adjacent: a vCPU stall between them widens a bracket
+/// the narrowest pick drops, instead of moving the rate. None when the
+/// brackets are reversed or the rate is poison.
+pub fn tsc_per_ms_from_hpet_brackets(a: Bracketed, b: Bracketed, period_fs: u32) -> Option<u64> {
+    if a.width() == u64::MAX || b.width() == u64::MAX {
+        return None;
+    }
+    let tsc = b.tsc_mid().checked_sub(a.tsc_mid())?;
+    let ticks = b.counter.wrapping_sub(a.counter) & u64::from(u32::MAX);
+    tsc_per_ms_from_hpet(tsc, ticks, period_fs)
+}
+
+/// PIT channel 2 windows a calibration measures (`time_init::calibrate_pit`).
+pub const PIT_CALIB_WINDOWS: usize = 5;
+/// A window counts only when the TSC brackets its start and its end within
+/// `1 / PIT_CALIB_SLACK` of its length: 0.05% of 10 ms is 5 us.
+pub const PIT_CALIB_SLACK: u64 = 2_000;
+
+/// One PIT channel 2 window as the TSC saw it: the one-shot began between
+/// `start_lo` and `start_hi` (the reads around the gate write) and ended
+/// between `end_lo` and `end_hi` (the reads around the poll that found OUT
+/// high, `end_lo` being the one before the poll that still found it low).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PitWindow {
+    pub start_lo: u64,
+    pub start_hi: u64,
+    pub end_lo: u64,
+    pub end_hi: u64,
+}
+
+impl PitWindow {
+    /// The window's length in TSC cycles, its bracket midpoints' distance,
+    /// when the bracket is within `1 / PIT_CALIB_SLACK` of it. A vCPU or
+    /// SMI stall at either end widens that end's bracket, so a window it
+    /// would skew is dropped rather than averaged in.
+    pub fn tight_len(self) -> Option<u64> {
+        let short = self.end_lo.checked_sub(self.start_hi)?;
+        let long = self.end_hi.checked_sub(self.start_lo)?;
+        let slack = long.checked_sub(short)?;
+        if short == 0 || slack.saturating_mul(PIT_CALIB_SLACK) > short {
+            return None;
+        }
+        Some(short.saturating_add(slack / 2))
+    }
+}
+
+/// `tsc_per_ms` from PIT channel 2 windows of `count` ticks each: the median
+/// of the first [`PIT_CALIB_WINDOWS`] windows [`PitWindow::tight_len`]
+/// keeps (the lower middle one of an even number). One window's error is
+/// its brackets' slack, so that median is off by well under 0.1% however
+/// long any one window stalled. With no tight window, as on a host too busy
+/// to give one, it falls back to the median of every window's midpoint
+/// rather than to no rate. None when no window is ordered or the rate is
+/// not sane.
+pub fn tsc_per_ms_from_pit_windows(windows: &[PitWindow], count: u16) -> Option<u64> {
+    let tight = median_len(windows.iter().filter_map(|w| w.tight_len()));
+    let any = || {
+        median_len(windows.iter().filter_map(|w| {
+            let short = w.end_lo.checked_sub(w.start_hi)?;
+            let long = w.end_hi.checked_sub(w.start_lo)?;
+            Some(short.saturating_add(long.checked_sub(short)? / 2))
+        }))
+    };
+    tsc_per_ms_from_pit(tight.or_else(any)?, count)
+}
+
+/// The median of the first [`PIT_CALIB_WINDOWS`] of `lens`, the lower
+/// middle one of an even number; None for none.
+fn median_len(lens: impl Iterator<Item = u64>) -> Option<u64> {
+    let mut buf = [0u64; PIT_CALIB_WINDOWS];
+    let mut n = 0usize;
+    for (slot, len) in buf.iter_mut().zip(lens) {
+        *slot = len;
+        n = n.saturating_add(1);
+    }
+    let kept = buf.get_mut(..n)?;
+    kept.sort_unstable();
+    kept.get(n.checked_sub(1)? / 2).copied()
+}
+
 /// Invariant TSC: PIT vs HPET must land in 75–125%.
 pub const CALIB_BAND_INVARIANT: (u64, u64) = (75, 125);
 
@@ -661,6 +778,121 @@ mod tests {
         assert!(tsc_per_ms_sane(1_000_000));
     }
 
+    /// A window of `len` cycles from 1_000 whose ends are bracketed by
+    /// `lo` and `hi` cycles.
+    fn window(len: u64, lo: u64, hi: u64) -> PitWindow {
+        PitWindow {
+            start_lo: 1_000,
+            start_hi: 1_000 + lo,
+            end_lo: 1_000 + len,
+            end_hi: 1_000 + len + hi,
+        }
+    }
+
+    #[test]
+    fn pit_window_tight_len() {
+        // 10 ms at 2.5 GHz, 1 us brackets at each end: the midpoint.
+        let w = window(25_000_000, 2_500, 2_500);
+        assert_eq!(w.tight_len(), Some(25_000_000));
+        // A 0.4 ms stall at the start: dropped, not a 4% error.
+        assert_eq!(window(25_000_000, 1_000_000, 2_500).tight_len(), None);
+        assert_eq!(window(25_000_000, 2_500, 1_000_000).tight_len(), None);
+        // Just inside and just outside 1 / PIT_CALIB_SLACK.
+        let len = 20_000_000;
+        // Slack 9_980 against 19_995_010 cycles, then 10_000 against it.
+        assert!(window(len, 4_990, 4_990).tight_len().is_some());
+        assert!(window(len, 4_990, 5_010).tight_len().is_none());
+        // Reversed or empty brackets are no window.
+        let bad = PitWindow {
+            start_lo: 10,
+            start_hi: 20,
+            end_lo: 15,
+            end_hi: 30,
+        };
+        assert_eq!(bad.tight_len(), None);
+        assert_eq!(window(0, 0, 0).tight_len(), None);
+    }
+
+    #[test]
+    fn pit_windows_median_of_tight_ones() {
+        let k = 2_500_000u64;
+        let len = |per_ms: u64| per_ms * PIT_CALIB_COUNT as u64 * 1000 / PIT_HZ;
+        let good = |per_ms| window(len(per_ms), 1_000, 1_000);
+        let rate = |ws: &[PitWindow]| tsc_per_ms_from_pit_windows(ws, PIT_CALIB_COUNT);
+        let near = |v: Option<u64>, want: u64| v.is_some_and(|v| v.abs_diff(want) <= want / 10_000);
+        // Two stalled windows that would read 4% off are dropped.
+        let stalled = window(len(k * 104 / 100), 1_000, 1_000_000);
+        let ws = [good(k), stalled, good(k + 100), stalled, good(k - 100)];
+        assert!(near(rate(&ws), k), "{:?}", rate(&ws));
+        // The median ignores one tight outlier.
+        let ws = [
+            good(k),
+            good(k * 96 / 100),
+            good(k + 50),
+            good(k - 50),
+            good(k),
+        ];
+        assert!(near(rate(&ws), k), "{:?}", rate(&ws));
+        // Only one tight window: that one.
+        assert!(near(rate(&[stalled, good(k), stalled]), k));
+        // None tight: the median of every window's midpoint, not no rate.
+        let loose = |per_ms| window(len(per_ms), 1_000, 1_000_000);
+        let ws = [loose(k), loose(k * 2), loose(k)];
+        let mid = window(len(k), 1_000, 1_000_000);
+        let want = tsc_per_ms_from_pit(mid.end_lo - mid.start_hi + 500_500, PIT_CALIB_COUNT);
+        assert_eq!(rate(&ws), want);
+        // No window at all, or none ordered: no rate.
+        assert_eq!(rate(&[]), None);
+        let bad = PitWindow {
+            start_lo: 10,
+            start_hi: 20,
+            end_lo: 15,
+            end_hi: 30,
+        };
+        assert_eq!(rate(&[bad]), None);
+        // More windows than the median holds: the first PIT_CALIB_WINDOWS tight.
+        let many = [good(k); PIT_CALIB_WINDOWS + 3];
+        assert!(near(rate(&many), k));
+    }
+
+    #[test]
+    fn hpet_brackets_place_reads_by_their_middle() {
+        let br = |tsc_lo, counter, tsc_hi| Bracketed {
+            tsc_lo,
+            counter,
+            tsc_hi,
+        };
+        // 10 ms of a 100 MHz HPET against a 2.5 GHz TSC, brackets of 2 us.
+        let a = br(1_000, 500, 6_000);
+        let b = br(25_001_000, 1_000_500, 25_006_000);
+        assert_eq!(
+            tsc_per_ms_from_hpet_brackets(a, b, 10_000_000),
+            Some(2_500_000)
+        );
+        // The old reading (TSC after the first HPET read, before the last)
+        // is short by both brackets; the middles are not.
+        let short = tsc_per_ms_from_hpet(b.tsc_lo - a.tsc_hi, 1_000_000, 10_000_000);
+        assert!(short.is_some_and(|v| v < 2_500_000));
+        // The narrowest of several reads wins; a stalled one loses.
+        let stalled = br(1_000, 500, 1_000_000);
+        assert_eq!(stalled.narrower(a), a);
+        assert_eq!(a.narrower(stalled), a);
+        assert_eq!(a.tsc_mid(), 3_500);
+        // The window straddles the 32-bit counter's wrap: still 10 ms.
+        let wa = br(1_000, 0xFFFF_0000, 6_000);
+        let wb = br(25_001_000, 1_000_000 - 0x1_0000, 25_006_000);
+        assert_eq!(
+            tsc_per_ms_from_hpet_brackets(wa, wb, 10_000_000),
+            Some(2_500_000)
+        );
+        // A reversed bracket is no read.
+        let rev = br(10, 5, 5);
+        assert_eq!(rev.width(), u64::MAX);
+        assert_eq!(a.narrower(rev), a);
+        assert_eq!(tsc_per_ms_from_hpet_brackets(rev, b, 10_000_000), None);
+        assert_eq!(tsc_per_ms_from_hpet_brackets(b, a, 10_000_000), None);
+    }
+
     #[test]
     fn calib_band_invariant() {
         let (lo, hi) = CALIB_BAND_INVARIANT;
@@ -859,12 +1091,14 @@ mod tests {
                 }
             })
         };
-        thread::sleep(Duration::from_millis(50));
+        // Miri's virtual clock gives the reader about 26 reads in 50 ms.
+        let (run_ms, min_reads) = if cfg!(miri) { (500, 100) } else { (50, 1_000) };
+        thread::sleep(Duration::from_millis(run_ms));
         stop.store(true, Ordering::Relaxed);
         let _ = w.join();
         let _ = r.join();
         assert_eq!(bad.load(Ordering::Relaxed), 0);
-        assert!(reads.load(Ordering::Relaxed) > 1_000);
+        assert!(reads.load(Ordering::Relaxed) > min_reads);
     }
 
     /// An independent evaluation of the clocksource formula.

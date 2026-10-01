@@ -13,9 +13,9 @@ let_underscore_must_use = "deny"
 unused_result_ok = "deny"
 
 # Cargo takes no lints table beside `[lints] workspace = true` in a member,
-# so loom's cfg (ROADMAP §10.8) is declared here.
+# so loom's and Kani's cfgs (ROADMAP §10.8) are declared here.
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(kani)"] }
 
 [package]
 name = "vibeos"
