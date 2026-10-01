@@ -1818,6 +1818,12 @@ def run_qemu_inject_mce(
 SERIAL_ECHO_TOKEN = "serial-ok"
 PS2_ECHO_TOKEN = "ps2-ok"
 SHELL_READY_NEEDLE = "vibeOS: shell ready"
+# `/bin/sh`'s fd-2 line for `false` (ROADMAP §10.5): `/bin/false` found
+# through `PATH`, and its exit status reported.
+SH_STATUS_LINE = "sh: false: exit 1"
+# QEMU must exit, status 0, this long after the shell's power command
+# (`-no-reboot` turns a reset into an exit).
+SH_POWER_EXIT_S = 10.0
 # Writeback, deferred reclaim and vibefs commits run on after `shell ready`
 # (DESIGN §8.3), so the console boot keeps reading this long past its last reply.
 CONSOLE_TAIL_S = 3.0
@@ -1888,6 +1894,59 @@ def _console_tail(
         _console_line(session, src, result, argv, line, sigs, stream, tail_s=window_s)
 
 
+def sh_power_command(cfg: QemuConfig) -> str:
+    """The shell built-in that ends the console boot: `reboot` on a UEFI
+    boot (`cfg.firmware` set), `poweroff` on a BIOS one, so `make test-e2e`
+    and `make test-e2e-uefi` together run both."""
+    return "reboot" if cfg.firmware is not None else "poweroff"
+
+
+def is_pid1_ps_line(text: str) -> bool:
+    """`psinfo`'s line for init: its first two fields are `1` and `0`
+    (`<pid> <ppid> ...`; P10-S86 adds fields after them)."""
+    return text.split()[:2] == ["1", "0"]
+
+
+def _console_power(
+    session: QmpSession,
+    src: LineSource,
+    result: RunResult,
+    argv: list[str],
+    sigs: tuple[str, ...],
+    stream: frame.Stream,
+    cmd: str,
+) -> None:
+    """Type `cmd` and require QEMU to exit with status 0 within
+    `SH_POWER_EXIT_S`; a failing line fails the run as before."""
+    src.send_input(f"{cmd}\n".encode())
+    src.set_deadline(time.monotonic() + SH_POWER_EXIT_S)
+    while True:
+        kind, line = src.next_event()
+        if kind == "idle":
+            d = session.idle()
+            if d:
+                session.settle(src, result, d, argv)
+            continue
+        if kind == "timeout":
+            src.kill()
+            result.exit_code = src.wait(5.0)
+            result.stderr = src.stderr_text()
+            raise HarnessError(
+                f"console input: QEMU still ran {SH_POWER_EXIT_S} s after {cmd!r}"
+                f"{_qemu_report(result, exited=False)}"
+            )
+        if kind == "eof":
+            break
+        _console_line(session, src, result, argv, line, sigs, stream)
+    result.exit_code = _reap(src)
+    result.stderr = src.stderr_text()
+    if result.exit_code != 0:
+        raise HarnessError(
+            f"console input: QEMU exited {result.exit_code} after {cmd!r}, want 0"
+            f"{_qemu_report(result, exited=True)}"
+        )
+
+
 def run_qemu_console_input(
     cfg: QemuConfig,
     timeout_s: float = 45.0,
@@ -1895,7 +1954,16 @@ def run_qemu_console_input(
     line_source: LineSource | None = None,
     qmp: QmpLike | None = None,
 ) -> RunResult:
-    """Boot, then type via COM1 and via PS/2 (`sendkey`). Both must echo.
+    """Boot, then type into `/bin/sh` via COM1 and via PS/2 (`sendkey`).
+
+    In order: `echo serial-ok` on COM1 must print `serial-ok` (`/bin/echo`,
+    found through `PATH`); `false` must print `SH_STATUS_LINE`; `ps` must
+    print pid 1's line; `echo ps2-ok` typed through PS/2 must print
+    `ps2-ok`. Then serial is read for `CONSOLE_TAIL_S`, and the shell's
+    `sh_power_command` must make QEMU exit with status 0 within
+    `SH_POWER_EXIT_S`. `result.matched` gains `shell_ready`, `serial_echo`,
+    `sh_status`, `sh_ps`, `ps2_echo`, `sh_poweroff` or `sh_reboot`, and
+    `console_input_sh` last.
 
     `-display none` still has an i8042; QEMU `sendkey` injects set-1
     scancodes on IRQ1, the same path as a focused QEMU window.
@@ -1903,7 +1971,9 @@ def run_qemu_console_input(
     QMP drives the run the same way (`qmp.Session`).
 
     `shell ready` and the replies are `/bin/sh`'s, so they match only
-    unframed lines; panic signatures match only kernel lines (DESIGN §2.6).
+    unframed lines, and only whole ones, since the shell echoes each typed
+    command after its prompt; panic signatures match only kernel lines
+    (DESIGN §2.6).
     """
     from tests.harness import qmp as qmpmod
 
@@ -1918,11 +1988,14 @@ def run_qemu_console_input(
         else _start_qemu(cfg, deadline, stdin=True, qmp_sock=session.sock)
     )
     argv = _argv_of(src)
+    power = sh_power_command(cfg)
 
     result = RunResult()
     stream = frame.Stream()
     saw_ready = False
     saw_serial = False
+    saw_status = False
+    saw_ps = False
     saw_ps2 = False
 
     def missing(report: str) -> str:
@@ -1932,6 +2005,10 @@ def run_qemu_console_input(
             return f"console input: no shell ready {when}; matched={result.matched}{report}"
         if not saw_serial:
             return f"console input: serial echo missing{report}"
+        if not saw_status:
+            return f"console input: missing {SH_STATUS_LINE!r} after `false`{report}"
+        if not saw_ps:
+            return f"console input: missing pid 1's `ps` line '1 0 ...'{report}"
         return f"console input: PS/2 sendkey echo missing (i8042){report}"
 
     try:
@@ -1953,6 +2030,7 @@ def run_qemu_console_input(
             utext = frame.user_text(line)
             if utext is None:
                 continue
+            reply = utext.strip()
             if not saw_ready and SHELL_READY_NEEDLE in utext:
                 saw_ready = True
                 result.matched.append("shell_ready")
@@ -1961,22 +2039,33 @@ def run_qemu_console_input(
                 time.sleep(0.2)
                 src.send_input(f"echo {SERIAL_ECHO_TOKEN}\n".encode())
                 continue
-            if saw_ready and not saw_serial and SERIAL_ECHO_TOKEN in utext:
-                # Line editor reprints the command; wait for the echo
-                # payload, not only the typed line.
-                if utext.strip() == SERIAL_ECHO_TOKEN:
-                    saw_serial = True
-                    result.matched.append("serial_echo")
-                    src.monitor("sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n"))
-                    continue
-            if saw_serial and not saw_ps2 and utext.strip() == PS2_ECHO_TOKEN:
+            # Each reply is a whole line: the shell echoes the typed command
+            # after its prompt (`vibeos> echo serial-ok`).
+            if saw_ready and not saw_serial and reply == SERIAL_ECHO_TOKEN:
+                saw_serial = True
+                result.matched.append("serial_echo")
+                src.send_input(b"false\n")
+                continue
+            if saw_serial and not saw_status and reply == SH_STATUS_LINE:
+                saw_status = True
+                result.matched.append("sh_status")
+                src.send_input(b"ps\n")
+                continue
+            if saw_status and not saw_ps and is_pid1_ps_line(reply):
+                saw_ps = True
+                result.matched.append("sh_ps")
+                src.monitor("sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n"))
+                continue
+            if saw_ps and not saw_ps2 and reply == PS2_ECHO_TOKEN:
                 saw_ps2 = True
                 result.matched.append("ps2_echo")
                 # A later reply step goes before the tail.
                 _console_tail(
                     session, src, result, argv, panic_signatures, CONSOLE_TAIL_S, stream
                 )
-                src.quit()
+                _console_power(session, src, result, argv, panic_signatures, stream, power)
+                result.matched.append(f"sh_{power}")
+                result.matched.append("console_input_sh")
                 break
     finally:
         session.close()

@@ -1108,6 +1108,42 @@ arch = "both"
 source = "user"
 section = "§9.8"
 
+# `/sbin/init`'s other fd-2 lines (ROADMAP §10.5): a child that did not
+# start, the shell's end, and a failed `wait4`. Three failed `/bin/sh`
+# starts in a row end init, which `pid1_exit`'s line reports. The comment
+# above each row is its name in #169; `name` is only for contract rows.
+# init_sh_start_failed
+[[marker]]
+text = "init: /bin/sh start failed: <why>"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+# init_tests_start_failed
+[[marker]]
+text = "init: /bin/tests start failed: <why>"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+# init_sh_ended
+[[marker]]
+text = "init: /bin/sh ended: <status>"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.5"
+
+# init_wait4_error
+[[marker]]
+text = "init: wait4: errno <n>"
+kind = "diagnostic"
+arch = "both"
+source = "user"
+section = "§10.5"
+
 [[marker]]
 text = "user: dup ok"
 kind = "diagnostic"

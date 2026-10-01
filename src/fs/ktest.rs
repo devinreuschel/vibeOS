@@ -11,6 +11,7 @@ use vibeos::kalloc::TryVec;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::wait_exited;
 
+mod cwd;
 mod hooks;
 mod initrd;
 mod lock;
@@ -18,7 +19,10 @@ mod ops;
 mod routing;
 mod slots;
 mod stack16k;
+mod umount;
+mod walk;
 
+pub(crate) use cwd::test_cwd_per_process;
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use lock::{test_fat_vol_wait_no_eio, test_vfs_io_off_lock};
@@ -28,6 +32,8 @@ pub(crate) use routing::{
 };
 pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
+pub(crate) use umount::test_umount_consistent;
+pub(crate) use walk::test_walk_path_resolution;
 
 use crate::fat_init;
 use crate::file_init;
@@ -53,7 +59,12 @@ pub(crate) fn test_vfs_walk() -> Outcome {
         Ok(s) if s.kind == InodeKind::Reg => {}
         _ => return Outcome::Fail("dot walk"),
     }
+    // `..` after a file is no step out of a directory (path_resolution(7)).
     match fid::stat_path("/a/f/../f") {
+        Err(FsError::NotDir) => {}
+        _ => return Outcome::Fail("dotdot after a file"),
+    }
+    match fid::stat_path("/a/../a/f") {
         Ok(s) if s.kind == InodeKind::Reg => {}
         _ => return Outcome::Fail("dotdot"),
     }
@@ -1436,4 +1447,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("fat_initrd_dev_no_null", test_fat_initrd_dev_no_null),
     test("vfs_io_off_lock", test_vfs_io_off_lock),
     test("fat_vol_wait_no_eio", test_fat_vol_wait_no_eio).deadline(60_000),
+    test("cwd_per_process", test_cwd_per_process),
+    test("walk_path_resolution", test_walk_path_resolution),
+    test("umount_consistent", test_umount_consistent).deadline(60_000),
 ];

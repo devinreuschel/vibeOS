@@ -293,7 +293,7 @@ impl<S: Guarded<RamState> + Sync + 'static> InodeOps for RamFs<S> {
         Ok(())
     }
 
-    fn kill_sb(&self, cx: &mut OpCx<'_>) {
+    fn release(&self, cx: &mut OpCx<'_>) {
         let inst = inst_of(cx);
         self.store.with(|st| {
             for n in st.nodes.iter_mut() {

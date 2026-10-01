@@ -320,7 +320,9 @@ pub fn lfn_checksum(name: &[u8; 11]) -> u8 {
         .fold(0u8, |sum, &c| sum.rotate_right(1).wrapping_add(c))
 }
 
-pub(super) fn eq_ci(a: &[u8], b: &[u8]) -> bool {
+/// Whether two names are one FAT name: ASCII letters compare without
+/// regard to case.
+pub fn eq_ci(a: &[u8], b: &[u8]) -> bool {
     a.eq_ignore_ascii_case(b)
 }
 

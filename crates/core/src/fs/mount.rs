@@ -88,7 +88,7 @@ impl Vfs {
             let m = self.alloc_mount()?;
             let call = self.sb_call(sb)?;
             if let Err(e) = self.attach_mount(m, Some(at), sb) {
-                self.sb_idle(sb, false);
+                drop(self.sb_idle(sb, false));
                 return Err(e);
             }
             let done = Mounted {
@@ -148,7 +148,7 @@ impl Vfs {
 
     /// A mount's commit after `fill_super` returned `res`, having set the
     /// superblock's words to `private`. On an error after a successful
-    /// fill, the superblock's `kill_sb` is the caller's to run.
+    /// fill, the superblock's `release` is the caller's to run.
     fn mount_commit(
         &mut self,
         at: Option<PathRef>,
@@ -442,7 +442,13 @@ impl Vfs {
         }
     }
 
-    pub(super) fn dotdot(&self, mount: &mut u8, dslot: &mut u16) {
+    /// Step from `(mount, dslot)` to its parent: nowhere at `root` (the
+    /// walk's base root, with its mounts followed) or at the namespace
+    /// root, and from a mount's root to the parent of its mountpoint.
+    pub(super) fn dotdot(&self, root: Option<PathRef>, mount: &mut u8, dslot: &mut u16) {
+        if root.is_some_and(|r| r.mount == *mount && r.dslot == *dslot) {
+            return;
+        }
         let m = *mount;
         if self.mounts[m as usize].root_dslot == *dslot {
             match self.mounts[m as usize].parent {
@@ -477,14 +483,14 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// one keeps its own.
     pub fn mount_fs(
         &self,
-        cwd: Option<PathRef>,
+        base: Option<WalkBase>,
         at: &[u8],
         fs: &'static dyn FileSystem,
         dev: Option<u64>,
         ro: bool,
         vol: Option<Instance>,
     ) -> Result<Mounted, FsError> {
-        let p = self.walk(cwd, at, true)?;
+        let p = self.walk(base, at, true)?;
         let r = self.mount_at(Some(p), at, fs, dev, ro, vol);
         self.put_path(p);
         r
@@ -521,10 +527,10 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                         if let Some(mut k) = kill {
                             k.run(|_, ops, cx| {
                                 if let Some(o) = ops {
-                                    o.kill_sb(cx);
+                                    o.release(cx);
                                 }
                             });
-                            self.with(|v| v.sb_idle(k.sb, true));
+                            drop(self.with(|v| v.sb_idle(k.sb, true)));
                         }
                         return Err(e);
                     }
@@ -536,16 +542,22 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                 fs.on_mount(cx, path);
             }
         });
-        self.with(|v| v.sb_idle(call.sb, false));
+        drop(self.with(|v| v.sb_idle(call.sb, false)));
         Ok(m)
     }
 
-    /// Unmount the mount whose root `at` names; the superblock's last
-    /// mount releases it, its hooks run with the lock dropped.
-    pub fn umount(&self, cwd: Option<PathRef>, at: &[u8]) -> Result<(), FsError> {
+    /// Unmount the mount whose root `at` names, through its superblock's
+    /// own operations. Every busy check runs first ([`Vfs::umount_step`]):
+    /// an open file, a held path or a directory reference reached through
+    /// this mount or a submount is `Busy`, and users of the superblock
+    /// through another mount are not. After the superblock's last mount,
+    /// with the lock dropped, its `sync` runs, then its `release`, and its
+    /// count on its volume instance is dropped after the lock; a failed
+    /// `sync` counts in `stats.sync_errs` and the unmount goes on.
+    pub fn umount(&self, base: Option<WalkBase>, at: &[u8]) -> Result<(), FsError> {
         let mut tries = 0usize;
         loop {
-            let p = self.walk(cwd, at, true)?;
+            let p = self.walk(base, at, true)?;
             match self.step(|v| v.umount_step(p))? {
                 UmountStep::Release(mut c) => {
                     let ok = c.run(|o, cx, n| o.evict(cx, n)).is_ok();
@@ -557,15 +569,26 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                 }
                 UmountStep::Done(mut u) => {
                     let last = u.last;
-                    u.call.run(|fs, ops, cx| {
+                    let synced = u.call.run(|fs, ops, cx| {
                         if let Some(fs) = fs {
                             fs.on_umount(cx, at, last);
                         }
-                        if last && let Some(o) = ops {
-                            o.kill_sb(cx);
+                        match ops {
+                            Some(o) if last => {
+                                let r = o.sync(cx);
+                                o.release(cx);
+                                r
+                            }
+                            _ => Ok(()),
                         }
                     });
-                    self.with(|v| v.sb_idle(u.sb, last));
+                    let vol = self.with(|v| {
+                        if synced.is_err() {
+                            v.stats.sync_errs = v.stats.sync_errs.saturating_add(1);
+                        }
+                        v.sb_idle(u.sb, last)
+                    });
+                    drop(vol);
                     return Ok(());
                 }
             }
@@ -579,7 +602,7 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         let mut next = 0u8;
         while let Some(mut c) = self.with(|v| v.sync_begin(next)) {
             let r = c.run(|_, ops, cx| ops.map_or(Ok(()), |o| o.sync(cx)));
-            self.with(|v| v.sb_idle(c.sb, false));
+            drop(self.with(|v| v.sb_idle(c.sb, false)));
             if out.is_ok() {
                 out = r;
             }

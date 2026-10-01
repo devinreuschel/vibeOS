@@ -57,31 +57,40 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     let Some(src) = current_space() else {
         return Err(KError::Fault);
     };
-    let meta = with_table(|t| t.get(ppid).map(|p| (p.cwd, p.creds)));
-    let Some((cwd, creds)) = meta else {
+    let meta = with_table(|t| t.get(ppid).map(|p| (p.base(), p.creds)));
+    let Some((base, creds)) = meta else {
         return Err(KError::Srch);
     };
+    // The child's root and working directory: new references to the
+    // parent's, taken with the table lock dropped. Only this thread
+    // replaces the parent's, so they hold meanwhile.
+    let refs = dup_dir_refs(base)?;
     let Some(pid) = alloc_pid(0) else {
+        put_dir_refs(refs);
         return Err(KError::Again);
     };
     // The parent's descriptors, copied row to row in the table, then a
     // reference taken on each open file: no row leaves the table.
     if !with_table(|t| t.copy_fds(ppid, pid)) {
         with_sched_table(|s, t| release_pid(s, t, pid));
+        put_dir_refs(refs);
         return Err(KError::Srch);
     }
     if !addref_fds(pid) {
         with_sched_table(|s, t| release_pid(s, t, pid));
+        put_dir_refs(refs);
         return Err(KError::MFile);
     }
     let Some(slot) = space_slot() else {
         close_all_fds(pid, "fork");
         with_sched_table(|s, t| release_pid(s, t, pid));
+        put_dir_refs(refs);
         return Err(KError::NoMem);
     };
     let Some(boxed) = clone_into(slot, src) else {
         close_all_fds(pid, "fork");
         with_sched_table(|s, t| release_pid(s, t, pid));
+        put_dir_refs(refs);
         return Err(KError::NoMem);
     };
     let root = boxed.root().as_u64();
@@ -95,20 +104,22 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
             addr_space_init::teardown(boxed.into_inner());
             close_all_fds(pid, "fork");
             with_sched_table(|s, t| release_pid(s, t, pid));
+            put_dir_refs(refs);
             return Err(KError::from(e));
         }
     };
-    with_table(|t| {
+    let left = with_table(|t| {
         if let Some(p) = t.get_mut(pid) {
             p.ppid = ppid;
             p.name = "user";
-            p.cwd = cwd;
             p.creds = creds;
             p.space = Some(boxed);
             p.fs_base = fs;
             p.tid = h.id();
         }
+        install_dir_refs(t, pid, refs)
     });
+    put_dir_refs(left);
     // The child starts with the parent's DS, ES, FS and GS (DESIGN §5.1)
     // and its x87 and SSE state (DESIGN §7.5), both before it can run.
     thread_init::set_user_segs(h.id(), crate::arch::gdt::read_user_segs());
@@ -116,6 +127,22 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
     Ok(pid as usize)
+}
+
+/// New references to the directories `base` names, a parent's root and
+/// working directory, for its child; none for none.
+fn dup_dir_refs(base: Option<WalkBase>) -> Result<DirRefs, KError> {
+    let Some(b) = base else {
+        return Ok(None);
+    };
+    let root = file_init::dir_dup(b.root).map_err(KError::from)?;
+    match file_init::dir_dup(b.cwd) {
+        Ok(cwd) => Ok(Some((root, cwd))),
+        Err(e) => {
+            file_init::dir_put(root);
+            Err(KError::from(e))
+        }
+    }
 }
 
 /// A full copy of `src` for fork, moved into `slot`. Out of line, so the
@@ -156,7 +183,7 @@ pub(super) fn sys_execve(
     copy_cvec(argv, &mut args, false)?;
     args.finish_argv()?;
     copy_cvec(envp, &mut args, true)?;
-    let loaded = match user_init::load_path(path_b, &args) {
+    let loaded = match user_init::load_path(current_base(), path_b, &args) {
         Ok(l) => l,
         Err(e) => return Err(KError::from(e)),
     };

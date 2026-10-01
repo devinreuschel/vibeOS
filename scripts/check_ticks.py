@@ -25,6 +25,11 @@ resolves in that directory's files. Its definition changes
 in `git diff base...head`, or its name appears in the ticked line; otherwise
 the line carries `(existing: <reason>)`, which the report lists.
 
+A pushed commit's message cannot change, so a wrong `Proves:` line is
+corrected by a row of `tests/gates/proves-errata.toml`, a gate input: the
+rules read the row's line in place of the pushed one, the report lists it,
+and a row whose commit is in the pull request but has no such line fails.
+
 Modes:
 - bare (`make check`): pairing and the diff rule on `origin/main..HEAD`, or
   `check_ticks: skipped (no origin/main)` when that ref is missing;
@@ -49,6 +54,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,6 +66,8 @@ from scripts import gatelib  # noqa: E402
 from tests.harness import registry  # noqa: E402
 
 ROADMAP_PATH = "docs/ROADMAP.md"
+# Corrections to pushed `Proves:` lines, which no later commit can edit.
+ERRATA_PATH = "tests/gates/proves-errata.toml"
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 TICKED = re.compile(r"^\s*- \[x\] (.*)$")
 EXISTING = re.compile(r"^(.*?)\s+\(existing:\s*(.*)\)$")
@@ -729,6 +737,7 @@ class Checker:
         self.tree = Tree(self.head, repo)
         self.report = Report()
         self.commits = self._read_commits()
+        self.errata = self._read_errata()
         self._changed: dict[str, list[tuple[int, int]]] | None = None
         self._moved: dict[str, list[tuple[str, str]]] = {}
         self.gh = gh if gh is not None else Gh(repo)
@@ -743,6 +752,16 @@ class Checker:
                             if r.get("commit") in commits and r.get("dirty") is False]
             if not self.results:
                 self.report.notes.append(f"no results file at the head in {results_dir}")
+
+    def _read_errata(self) -> dict[tuple[str, str], tuple[str, str]]:
+        """ERRATA_PATH's rows at the head, keyed by (commit, the pushed line)."""
+        text = self.tree.read(ERRATA_PATH)
+        if text is None:
+            return {}
+        rows, errors = load_errata(text)
+        for e in errors:
+            self.report.error("errata", None, e)
+        return rows
 
     def _read_commits(self) -> list[Commit]:
         commits = {sha: Commit(sha) for sha in self.pr}
@@ -780,6 +799,9 @@ class Checker:
         """Pair each `<tag>:` line of `c` with the one tick its prefix begins."""
         out: list[tuple[ProvesLine, Tick]] = []
         for raw in gatelib.parse_message_lines(c.message, tag):
+            if tag == "Proves" and (c.sha, raw) in self.errata:
+                raw, why = self.errata[(c.sha, raw)]
+                self.report.notes.append(f"{c.sha[:7]}: erratum: Proves: {raw} ({why})")
             p = parse_proves(raw) if tag == "Proves" else parse_fails_before(raw)
             if isinstance(p, str):
                 self.report.error(c.sha, None, p)
@@ -1081,6 +1103,7 @@ class Checker:
         for c in self.commits:
             self.report.ticks += len(c.ticks)
             self.check_commit(c)
+        self.check_errata()
         if self.full:
             self.check_needs()
             if not any(r.get("event") == "pull_request" for r in self.history.records()):
@@ -1090,6 +1113,43 @@ class Checker:
                     self.report.notes.append(note)
         self.check_retries()
         return self.report
+
+
+    def check_errata(self) -> None:
+        """A row whose commit is in the pull request replaces one of its lines."""
+        by_sha = {c.sha: c for c in self.commits}
+        for sha, was in self.errata:
+            c = by_sha.get(sha)
+            if c is not None and was not in gatelib.parse_message_lines(c.message, "Proves"):
+                self.report.error(sha, None, f"erratum names no `Proves:` line of the "
+                                  f"commit: {was!r}")
+
+
+def load_errata(text: str) -> tuple[dict[tuple[str, str], tuple[str, str]], list[str]]:
+    """ERRATA_PATH's `[[erratum]]` rows: `commit` (40 hex digits), `was` (the
+    pushed line after `Proves: `), `proves` (the line read in its place) and
+    `why`, keyed by (commit, was); and the reasons malformed rows were refused."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        return {}, [f"{ERRATA_PATH}: {e}"]
+    rows: dict[tuple[str, str], tuple[str, str]] = {}
+    errors: list[str] = []
+    for i, row in enumerate(data.get("erratum") or []):
+        keys = ("commit", "was", "proves", "why")
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k].strip()
+                                                for k in keys):
+            errors.append(f"{ERRATA_PATH}: erratum {i + 1} needs {', '.join(keys)}")
+            continue
+        if not re.fullmatch(r"[0-9a-f]{40}", row["commit"]):
+            errors.append(f"{ERRATA_PATH}: erratum {i + 1}: commit is not a full sha")
+            continue
+        key = (row["commit"], row["was"].strip())
+        if key in rows:
+            errors.append(f"{ERRATA_PATH}: erratum {i + 1} repeats a line")
+            continue
+        rows[key] = (row["proves"].strip(), row["why"].strip())
+    return rows, errors
 
 
 def _workflow_is(run: Run, workflow_file: str, tree: Tree) -> bool:
@@ -1128,6 +1188,7 @@ def check_message(message: str, repo: Path = gatelib.ROOT) -> Report:
     message = "\n".join(ln for ln in message.splitlines() if not ln.startswith("#"))
     ck = Checker.__new__(Checker)
     ck.repo, ck.full, ck.results, ck.report = repo, False, None, Report()
+    ck.errata = {}
     ck.tree = Tree(gatelib.git(repo, "write-tree").strip(), repo)
     main = gatelib.git(repo, "rev-parse", "--verify", "-q", "origin/main", check=False).strip()
     base = gatelib.git(repo, "merge-base", main, "HEAD", check=False).strip() if main else ""

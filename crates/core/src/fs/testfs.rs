@@ -404,7 +404,7 @@ impl InodeOps for LockedFs {
         self.unlocked();
         KeyOps.evict(cx, ino)
     }
-    fn kill_sb(&self, _cx: &mut OpCx<'_>) {
+    fn release(&self, _cx: &mut OpCx<'_>) {
         self.unlocked();
     }
 }
