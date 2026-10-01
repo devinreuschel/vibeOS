@@ -2,6 +2,10 @@ use super::*;
 use crate::arch::stub::Arch;
 use crate::paging::{UserFreeStats, physmap_flags};
 use crate::pmm::testing::Pool;
+use crate::proc::fill;
+
+extern crate std;
+use std::sync::Arc;
 
 /// Frames the pool has handed out and not had back.
 fn used(pool: &Pool) -> usize {
@@ -20,30 +24,100 @@ fn kernel_mapper(pool: &mut Pool) -> Mapper<Arch> {
     mapper
 }
 
+/// A new space over a root frame from `pool`, as the kernel's
+/// `addr_space_init::create` builds one over a root its core owns.
+fn new_space(kernel: &Mapper<Arch>, pool: &mut Pool) -> AddressSpace<Arch> {
+    let root = PhysAddr(pool.alloc_frame().unwrap().into_entry());
+    // SAFETY: `kernel` is this test's kernel mapper, and `root` is an owned frame fresh from
+    // `pool`, writable through its HHDM, which only this space uses; established here.
+    unsafe { AddressSpace::new(kernel, root, &mut region_table().ok()) }.unwrap()
+}
+
+/// Tear `a` down and free its root, as the kernel's last `users` put and
+/// core free do; the stats count the root as a page-table frame.
+///
+/// # Safety
+/// A host test loads no CR3, `a` is not used again, and every frame it
+/// holds, its root included, came from `pool`.
+unsafe fn free_space(a: &mut AddressSpace<Arch>, pool: &mut Pool) -> TeardownStats {
+    // SAFETY: no CPU walks `a` and it is not used again, as
+    // `addr_space::AddressSpace::teardown_pool` requires; established by the caller
+    // (`free_space`'s contract).
+    let mut st = unsafe { a.teardown_pool(pool) };
+    // SAFETY: `new_space` took the root's order-0 token with `into_entry`, and the mapper's
+    // reference is the last one, the contract `pmm::Frames::from_entry` states; established by
+    // `tests::new_space`.
+    pool.free_frame(unsafe { Frames::from_entry(a.root().as_u64(), 0) });
+    st.pt_frames += 1;
+    st
+}
+
+/// A page-table hold with nothing to lock: a host test's spaces are its own.
+struct NoHold;
+
+impl fill::PtHold for NoHold {
+    fn hold<R>(&mut self, _batch: fill::Batch, f: impl FnOnce() -> R) -> R {
+        f()
+    }
+}
+
+/// Write `bytes` at `va` of `a` through the fill API.
+fn poke(a: &AddressSpace<Arch>, va: u64, bytes: &[u8]) {
+    fill::write(a, &mut NoHold, va, bytes).unwrap();
+}
+
+/// Read `buf.len()` bytes at `va` of `a`, for the checks.
+fn peek(a: &AddressSpace<Arch>, va: u64, buf: &mut [u8]) {
+    for (k, byte) in buf.iter_mut().enumerate() {
+        let at = va + k as u64;
+        let (pa, _, _) = a.mapper().translate(VirtAddr(at)).unwrap();
+        let p = a.mapper().hhdm_offset().wrapping_add(pa.as_u64()) as *const u8;
+        // SAFETY: `translate` found `at` mapped to `pa`, a pool frame reachable through the
+        // pool's HHDM; established here.
+        *byte = unsafe { p.read() };
+    }
+}
+
+/// A fork copy of `a`, as the kernel's `fill_init::clone_full` makes one.
+fn clone_space(
+    a: &AddressSpace<Arch>,
+    kernel: &Mapper<Arch>,
+    pool: &mut Pool,
+) -> AddressSpace<Arch> {
+    let mut c = new_space(kernel, pool);
+    fill::clone_layout(a, &mut c, &(), |to, va, len, perms, core| {
+        // SAFETY: `clone_layout` maps each of `a`'s regions once into the new `c`, where no
+        // region overlaps another, and `pool` hands out owned frames; established here.
+        unsafe { to.map_anon(va, len, perms, core, pool) }
+    })
+    .unwrap();
+    for r in a.regions().filter(|r| r.backing == Backing::Anonymous) {
+        fill::copy(a, &c, &mut NoHold, r.start, r.len).unwrap();
+    }
+    c
+}
+
 #[test]
 fn top_page_is_not_mappable() {
     let mut pool = Pool::new(64);
     let kernel = kernel_mapper(&mut pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut aspace =
-        unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut aspace = new_space(&kernel, &mut pool);
     assert_eq!(
         // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
         // anything, and `pool` hands out owned frames; established here.
-        unsafe { aspace.map_anon(USER_MAP_END, PAGE_SIZE_4K, UserPerms::RW, &mut pool) },
+        unsafe { aspace.map_anon(USER_MAP_END, PAGE_SIZE_4K, UserPerms::RW, (), &mut pool) },
         Err(AsError::KernelRange)
     );
     let below = USER_MAP_END - PAGE_SIZE_4K;
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
     // anything, and `pool` hands out owned frames; established here.
-    assert!(unsafe { aspace.map_anon(below, PAGE_SIZE_4K, UserPerms::RW, &mut pool) }.is_ok());
+    assert!(unsafe { aspace.map_anon(below, PAGE_SIZE_4K, UserPerms::RW, (), &mut pool) }.is_ok());
     assert!(aspace.check_user_range(below, PAGE_SIZE_4K).is_ok());
     assert!(aspace.check_user_range(USER_MAP_END, 1).is_err());
     assert!(aspace.check_user_range(below, PAGE_SIZE_4K + 1).is_err());
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { aspace.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut aspace, &mut pool) };
 }
 
 #[test]
@@ -51,14 +125,11 @@ fn null_guard_and_kernel_rejected() {
     let mut pool = Pool::new(64);
     let kernel = kernel_mapper(&mut pool);
     let before = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut aspace =
-        unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut aspace = new_space(&kernel, &mut pool);
     assert_eq!(
         // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
         // anything, and `pool` hands out owned frames; established here.
-        unsafe { aspace.map_anon(0, PAGE_SIZE_4K, UserPerms::RW, &mut pool) },
+        unsafe { aspace.map_anon(0, PAGE_SIZE_4K, UserPerms::RW, (), &mut pool) },
         Err(AsError::NullGuard)
     );
     assert_eq!(
@@ -69,6 +140,7 @@ fn null_guard_and_kernel_rejected() {
                 crate::paging::USER_END,
                 PAGE_SIZE_4K,
                 UserPerms::RW,
+                (),
                 &mut pool,
             )
         },
@@ -82,6 +154,7 @@ fn null_guard_and_kernel_rejected() {
                 0xFFFF_8000_0000_0000,
                 PAGE_SIZE_4K,
                 UserPerms::RW,
+                (),
                 &mut pool,
             )
         },
@@ -89,7 +162,7 @@ fn null_guard_and_kernel_rejected() {
     );
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { aspace.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut aspace, &mut pool) };
     assert_eq!(used(&pool), before);
 }
 
@@ -113,10 +186,7 @@ fn map_unmap_teardown_balances_frames() {
             .unwrap();
     }
     let before = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut aspace =
-        unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut aspace = new_space(&kernel, &mut pool);
     assert_eq!(
         aspace.mapper().pml4_entry(Arch::KERNEL_ROOT_FIRST),
         kernel.pml4_entry(Arch::KERNEL_ROOT_FIRST)
@@ -126,7 +196,7 @@ fn map_unmap_teardown_balances_frames() {
     // anything, and `pool` hands out owned frames; established here.
     unsafe {
         aspace
-            .map_anon(user_va, PAGE_SIZE_4K * 2, UserPerms::RW, &mut pool)
+            .map_anon(user_va, PAGE_SIZE_4K * 2, UserPerms::RW, (), &mut pool)
             .unwrap();
     }
     assert_eq!(aspace.user_frames(), 2);
@@ -146,7 +216,7 @@ fn map_unmap_teardown_balances_frames() {
     );
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    let st = unsafe { aspace.teardown_pool(&mut pool) };
+    let st = unsafe { free_space(&mut aspace, &mut pool) };
     assert_eq!(st.user_frames, 0);
     assert!(st.pt_frames >= 1);
     assert_eq!(used(&pool), before);
@@ -158,16 +228,13 @@ fn user_ptr_helpers() {
     let mut pool = Pool::new(64);
     let kernel = kernel_mapper(&mut pool);
     let before = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut aspace =
-        unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut aspace = new_space(&kernel, &mut pool);
     let va = 0x0000_0000_0040_0000u64;
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
     // anything, and `pool` hands out owned frames; established here.
     unsafe {
         aspace
-            .map_anon(va, PAGE_SIZE_4K, UserPerms::RW, &mut pool)
+            .map_anon(va, PAGE_SIZE_4K, UserPerms::RW, (), &mut pool)
             .unwrap();
     }
     assert_eq!(aspace.check_user_range(0, 8), Err(UserMemError::NullGuard));
@@ -189,59 +256,14 @@ fn user_ptr_helpers() {
     );
     assert!(aspace.check_user_range(va, 8).is_ok());
     assert!(aspace.check_user_range(va, 0).is_ok());
-    aspace.write_bytes(va, b"abcd").unwrap();
-    let mut got = [0u8; 4];
-    aspace.read_bytes(va, &mut got).unwrap();
-    assert_eq!(&got, b"abcd");
-    aspace.zero_bytes(va, 2).unwrap();
-    aspace.read_bytes(va, &mut got).unwrap();
-    assert_eq!(&got, b"\0\0cd");
-    assert_eq!(aspace.write_bytes(0, b"x"), Err(UserMemError::NullGuard));
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { aspace.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut aspace, &mut pool) };
     assert_eq!(used(&pool), before);
     let _ = UserFreeStats {
         leaves: 0,
         tables: 0,
     };
-}
-
-#[test]
-fn clone_anon_copies_bytes_not_frames() {
-    let mut pool = Pool::new(128);
-    let kernel = kernel_mapper(&mut pool);
-    let before = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut src =
-        unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
-    let va = 0x0000_0000_0040_0000u64;
-    // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
-    // anything, and `pool` hands out owned frames; established here.
-    unsafe {
-        src.map_anon(va, PAGE_SIZE_4K, UserPerms::RW, &mut pool)
-            .unwrap();
-    }
-    src.write_bytes(va, b"fork-me").unwrap();
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let dst = unsafe { src.clone_anon(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
-    let mut got = [0u8; 7];
-    dst.read_bytes(va, &mut got).unwrap();
-    assert_eq!(&got, b"fork-me");
-    src.write_bytes(va, b"parent!").unwrap();
-    dst.read_bytes(va, &mut got).unwrap();
-    assert_eq!(&got, b"fork-me");
-    // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
-    // from `pool`; established here.
-    unsafe {
-        let mut src = src;
-        src.teardown_pool(&mut pool);
-        let mut dst = dst;
-        dst.teardown_pool(&mut pool);
-    }
-    assert_eq!(used(&pool), before);
 }
 
 #[test]
@@ -263,17 +285,14 @@ fn kernel_half_not_owned() {
             .unwrap();
     }
     let before = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut aspace =
-        unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut aspace = new_space(&kernel, &mut pool);
     assert_eq!(
         Arch::entry_phys(aspace.mapper().pml4_entry(256)),
         Arch::entry_phys(kernel.pml4_entry(256))
     );
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { aspace.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut aspace, &mut pool) };
     // The shared kernel-half tables stay allocated; only the root went.
     assert_eq!(used(&pool), before);
     assert!(kernel.translate(VirtAddr(0xFFFF_8000_0020_0000)).is_some());
@@ -303,16 +322,13 @@ fn map_anon_rolls_back_on_leaf_oom() {
     let mut pool = Pool::new(16);
     let kernel = kernel_mapper(&mut pool);
     let baseline = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut aspace =
-        unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut aspace = new_space(&kernel, &mut pool);
     let after_new = used(&pool);
     let va = 0x0000_0000_0040_0000u64;
     assert_eq!(
         // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
         // anything, and `pool` hands out owned frames; established here.
-        unsafe { aspace.map_anon(va, 64 * PAGE_SIZE_4K, UserPerms::RW, &mut pool) },
+        unsafe { aspace.map_anon(va, 64 * PAGE_SIZE_4K, UserPerms::RW, (), &mut pool) },
         Err(AsError::OutOfFrames)
     );
     assert_eq!(aspace.user_frames(), 0);
@@ -330,7 +346,7 @@ fn map_anon_rolls_back_on_leaf_oom() {
     // anything, and `pool` hands out owned frames; established here.
     unsafe {
         aspace
-            .map_anon(va, 2 * PAGE_SIZE_4K, UserPerms::RW, &mut pool)
+            .map_anon(va, 2 * PAGE_SIZE_4K, UserPerms::RW, (), &mut pool)
             .unwrap();
     }
     assert_eq!(aspace.user_frames(), 2);
@@ -338,7 +354,7 @@ fn map_anon_rolls_back_on_leaf_oom() {
     assert_eq!(used(&pool), after_new + aspace.pt_frames() - 1 + 2);
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { aspace.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut aspace, &mut pool) };
     assert_eq!(used(&pool), baseline);
 }
 
@@ -352,38 +368,37 @@ fn addr_space_munmap_splits_region() {
     let mut pool = Pool::new(128);
     let kernel = kernel_mapper(&mut pool);
     let before = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut a = unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut a = new_space(&kernel, &mut pool);
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
     // anything, and `pool` hands out owned frames; established here.
-    unsafe { a.map_anon(BASE, 3 * P, UserPerms::RW, &mut pool).unwrap() };
-    a.write_bytes(BASE, b"one").unwrap();
-    a.write_bytes(BASE + 2 * P, b"three").unwrap();
+    unsafe {
+        a.map_anon(BASE, 3 * P, UserPerms::RW, (), &mut pool)
+            .unwrap()
+    };
+    poke(&a, BASE, b"one");
+    poke(&a, BASE + 2 * P, b"three");
     // SAFETY: every leaf in the range came from `pool`, and a host test has no TLB to flush;
     // established here.
     unsafe { a.unmap_free(BASE + P, P, &mut pool, &mut nop).unwrap() };
-    let mut rs: Vec<Region> = a.regions().collect();
+    let mut rs: Vec<Region> = a.regions().cloned().collect();
     rs.sort_by_key(|r| r.start);
     assert_eq!(rs.len(), 2);
     assert_eq!((rs[0].start, rs[0].len), (BASE, P));
     assert_eq!((rs[1].start, rs[1].len), (BASE + 2 * P, P));
     assert_eq!(a.user_frames(), 2);
     assert_eq!(a.check_user_range(BASE + P, 1), Err(UserMemError::Unmapped));
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut c = unsafe { a.clone_anon(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut c = clone_space(&a, &kernel, &mut pool);
     let mut got = [0u8; 5];
-    c.read_bytes(BASE, &mut got[..3]).unwrap();
+    peek(&c, BASE, &mut got[..3]);
     assert_eq!(&got[..3], b"one");
-    c.read_bytes(BASE + 2 * P, &mut got).unwrap();
+    peek(&c, BASE + 2 * P, &mut got);
     assert_eq!(&got, b"three");
     assert_eq!(c.user_frames(), 2);
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
     unsafe {
-        c.teardown_pool(&mut pool);
-        a.teardown_pool(&mut pool);
+        free_space(&mut c, &mut pool);
+        free_space(&mut a, &mut pool);
     }
     assert_eq!(used(&pool), before);
 }
@@ -393,15 +408,14 @@ fn munmap_trims_spans_and_holes() {
     let mut pool = Pool::new(128);
     let kernel = kernel_mapper(&mut pool);
     let before = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut a = unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut a = new_space(&kernel, &mut pool);
     let r2 = BASE + 8 * P;
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
     // anything, and `pool` hands out owned frames; established here.
     unsafe {
-        a.map_anon(BASE, 4 * P, UserPerms::RW, &mut pool).unwrap();
-        a.map_anon(r2, 4 * P, UserPerms::RW, &mut pool).unwrap();
+        a.map_anon(BASE, 4 * P, UserPerms::RW, (), &mut pool)
+            .unwrap();
+        a.map_anon(r2, 4 * P, UserPerms::RW, (), &mut pool).unwrap();
     }
     let base_used = used(&pool) - a.user_frames();
     // Head of the first region.
@@ -449,7 +463,7 @@ fn munmap_trims_spans_and_holes() {
     );
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { a.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut a, &mut pool) };
     assert_eq!(used(&pool), before);
 }
 
@@ -457,17 +471,18 @@ fn munmap_trims_spans_and_holes() {
 fn munmap_split_needs_slot() {
     let mut pool = Pool::new(MAX_REGIONS + 128);
     let kernel = kernel_mapper(&mut pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut a = unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut a = new_space(&kernel, &mut pool);
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
     // anything, and `pool` hands out owned frames; established here.
-    unsafe { a.map_anon(BASE, 3 * P, UserPerms::RW, &mut pool).unwrap() };
+    unsafe {
+        a.map_anon(BASE, 3 * P, UserPerms::RW, (), &mut pool)
+            .unwrap()
+    };
     let mut va = BASE + 4 * P;
     while a.regions().count() < MAX_REGIONS {
         // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
         // anything, and `pool` hands out owned frames; established here.
-        unsafe { a.map_anon(va, P, UserPerms::RW, &mut pool).unwrap() };
+        unsafe { a.map_anon(va, P, UserPerms::RW, (), &mut pool).unwrap() };
         va += 2 * P;
     }
     let frames = a.user_frames();
@@ -488,7 +503,7 @@ fn munmap_split_needs_slot() {
     assert_eq!(a.user_frames(), frames - 1);
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { a.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut a, &mut pool) };
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -517,12 +532,13 @@ unsafe impl FrameFree for Logging<'_> {
 fn munmap_flush_before_free() {
     let mut pool = Pool::new(128);
     let kernel = kernel_mapper(&mut pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut a = unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut a = new_space(&kernel, &mut pool);
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
     // anything, and `pool` hands out owned frames; established here.
-    unsafe { a.map_anon(BASE, 4 * P, UserPerms::RW, &mut pool).unwrap() };
+    unsafe {
+        a.map_anon(BASE, 4 * P, UserPerms::RW, (), &mut pool)
+            .unwrap()
+    };
     let pas: Vec<u64> = (0..4)
         .map(|i| {
             a.mapper()
@@ -558,7 +574,7 @@ fn munmap_flush_before_free() {
     }
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { a.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut a, &mut pool) };
 }
 
 #[test]
@@ -566,9 +582,7 @@ fn addr_space_brk_grow_shrink() {
     let mut pool = Pool::new(128);
     let kernel = kernel_mapper(&mut pool);
     let before = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut a = unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut a = new_space(&kernel, &mut pool);
     assert_eq!(a.brk_plan(BASE + P), BrkPlan::Current);
     a.set_brk_start(BASE + 0x10);
     let b = BASE + P;
@@ -584,7 +598,7 @@ fn addr_space_brk_grow_shrink() {
             // SAFETY: the heap range `brk_plan` returned lies clear of every mapped page, and
             // `pool` hands out owned frames; established here.
             unsafe { a.map_pages(va, len, UserPerms::RW, pool).unwrap() };
-            a.heap_grow_commit(va, len, want).unwrap();
+            a.heap_grow_commit(va, len, want, ()).unwrap();
         }
         BrkPlan::SamePage => a.set_brk(want),
         other => panic!("brk({want:#x}): {other:?}"),
@@ -595,7 +609,7 @@ fn addr_space_brk_grow_shrink() {
     grow(&mut a, &mut pool, b + 2 * P + 8);
     grow(&mut a, &mut pool, b + 3 * P);
     assert_eq!(a.brk(), b + 3 * P);
-    let rs: Vec<Region> = a.regions().collect();
+    let rs: Vec<Region> = a.regions().cloned().collect();
     assert_eq!(rs.len(), 1);
     assert_eq!((rs[0].start, rs[0].len), (b, 3 * P));
     assert_eq!(a.user_frames(), 3);
@@ -616,7 +630,10 @@ fn addr_space_brk_grow_shrink() {
     // Growth into another region leaves the break.
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
     // anything, and `pool` hands out owned frames; established here.
-    unsafe { a.map_anon(b + 2 * P, P, UserPerms::RW, &mut pool).unwrap() };
+    unsafe {
+        a.map_anon(b + 2 * P, P, UserPerms::RW, (), &mut pool)
+            .unwrap()
+    };
     assert_eq!(a.brk_plan(b + 3 * P), BrkPlan::Current);
     assert_eq!(a.heap_grow_check(b + P, 2 * P), Err(AsError::Overlap));
     // Shrinking to the start removes the heap region; growth adds it back.
@@ -641,15 +658,13 @@ fn addr_space_brk_grow_shrink() {
     rs.sort();
     assert_eq!(rs, [(b, P), (b + 2 * P, P)]);
     assert_eq!(a.user_frames(), 2);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut c = unsafe { a.clone_anon(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut c = clone_space(&a, &kernel, &mut pool);
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { c.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut c, &mut pool) };
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { a.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut a, &mut pool) };
     assert_eq!(used(&pool), before);
 }
 
@@ -666,22 +681,23 @@ fn req(addr: u64, len: u64, fixed: Fixed) -> MmapReq {
 fn addr_space_mmap_anon_placement() {
     let mut pool = Pool::new(128);
     let kernel = kernel_mapper(&mut pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut a = unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut a = new_space(&kernel, &mut pool);
     assert_eq!(MMAP_TOP, 0x7FFF_F7FF_F000);
     let top = a.mmap_place(&req(0, 4 * P, Fixed::No)).unwrap();
     assert_eq!(top, MMAP_TOP - 4 * P);
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
     // anything, and `pool` hands out owned frames; established here.
-    unsafe { a.map_anon(top, 4 * P, UserPerms::RW, &mut pool).unwrap() };
+    unsafe {
+        a.map_anon(top, 4 * P, UserPerms::RW, (), &mut pool)
+            .unwrap()
+    };
     assert_eq!(a.mmap_place(&req(0, 2 * P, Fixed::No)), Ok(top - 2 * P));
     // A region at the top leaves a gap too small for 2 pages, which
     // placement skips.
     // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
     // anything, and `pool` hands out owned frames; established here.
     unsafe {
-        a.map_anon(top - 3 * P, 2 * P, UserPerms::RW, &mut pool)
+        a.map_anon(top - 3 * P, 2 * P, UserPerms::RW, (), &mut pool)
             .unwrap()
     };
     assert_eq!(a.mmap_place(&req(0, 2 * P, Fixed::No)), Ok(top - 5 * P));
@@ -714,7 +730,7 @@ fn addr_space_mmap_anon_placement() {
     );
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { a.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut a, &mut pool) };
 }
 
 #[test]
@@ -797,6 +813,7 @@ fn reserve(a: &mut AddressSpace<Arch>, va: u64, len: u64) -> Result<(), AsError>
         len,
         perms: UserPerms::READ,
         backing: Backing::Reserved,
+        core: (),
     })
 }
 
@@ -804,9 +821,7 @@ fn reserve(a: &mut AddressSpace<Arch>, va: u64, len: u64) -> Result<(), AsError>
 fn prot_none_reserves_no_frames() {
     let mut pool = Pool::new(64);
     let kernel = kernel_mapper(&mut pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut a = unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut a = new_space(&kernel, &mut pool);
     let after_new = used(&pool);
     reserve(&mut a, BASE, 16 * P).unwrap();
     assert_eq!(used(&pool), after_new);
@@ -815,7 +830,7 @@ fn prot_none_reserves_no_frames() {
     assert_eq!(
         // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
         // anything, and `pool` hands out owned frames; established here.
-        unsafe { a.map_anon(BASE + P, P, UserPerms::RW, &mut pool) },
+        unsafe { a.map_anon(BASE + P, P, UserPerms::RW, (), &mut pool) },
         Err(AsError::Overlap)
     );
     assert_eq!(
@@ -835,7 +850,7 @@ fn prot_none_reserves_no_frames() {
     assert_eq!(used(&pool), after_new);
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { a.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut a, &mut pool) };
 }
 
 #[test]
@@ -843,9 +858,7 @@ fn clone_keeps_brk_and_reservations() {
     let mut pool = Pool::new(128);
     let kernel = kernel_mapper(&mut pool);
     let before = used(&pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut a = unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut a = new_space(&kernel, &mut pool);
     a.set_brk_start(BASE);
     let BrkPlan::Grow { va, len } = a.brk_plan(BASE + 0x1800) else {
         panic!("no grow");
@@ -853,16 +866,14 @@ fn clone_keeps_brk_and_reservations() {
     // SAFETY: the heap range `brk_plan` returned lies clear of every mapped page, and `pool` hands
     // out owned frames; established here.
     unsafe { a.map_pages(va, len, UserPerms::RW, &mut pool).unwrap() };
-    a.heap_grow_commit(va, len, BASE + 0x1800).unwrap();
-    a.write_bytes(BASE + 0x1000, b"heap").unwrap();
+    a.heap_grow_commit(va, len, BASE + 0x1800, ()).unwrap();
+    poke(&a, BASE + 0x1000, b"heap");
     reserve(&mut a, BASE + 16 * P, 4 * P).unwrap();
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut c = unsafe { a.clone_anon(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut c = clone_space(&a, &kernel, &mut pool);
     assert_eq!((c.brk_start(), c.brk()), (BASE, BASE + 0x1800));
     assert_eq!(c.user_frames(), 2);
     let mut got = [0u8; 4];
-    c.read_bytes(BASE + 0x1000, &mut got).unwrap();
+    peek(&c, BASE + 0x1000, &mut got);
     assert_eq!(&got, b"heap");
     let mut rs: Vec<(u64, u64, Backing)> =
         c.regions().map(|r| (r.start, r.len, r.backing)).collect();
@@ -881,8 +892,8 @@ fn clone_keeps_brk_and_reservations() {
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
     unsafe {
-        c.teardown_pool(&mut pool);
-        a.teardown_pool(&mut pool);
+        free_space(&mut c, &mut pool);
+        free_space(&mut a, &mut pool);
     }
     assert_eq!(used(&pool), before);
 }
@@ -894,15 +905,13 @@ fn clone_keeps_brk_and_reservations() {
 fn region_table_full_is_no_region_slot() {
     let mut pool = Pool::new(MAX_REGIONS + 128);
     let kernel = kernel_mapper(&mut pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let mut a = unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let mut a = new_space(&kernel, &mut pool);
     let mut va = BASE;
     let mut n = 0usize;
     while n < MAX_REGIONS {
         // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
         // anything, and `pool` hands out owned frames; established here.
-        unsafe { a.map_anon(va, P, UserPerms::RW, &mut pool).unwrap() };
+        unsafe { a.map_anon(va, P, UserPerms::RW, (), &mut pool).unwrap() };
         va += 2 * P;
         n += 1;
     }
@@ -911,23 +920,106 @@ fn region_table_full_is_no_region_slot() {
     let used_before = used(&pool);
     assert_eq!(
         // SAFETY: as above; established here.
-        unsafe { a.map_anon(va, P, UserPerms::RW, &mut pool) },
+        unsafe { a.map_anon(va, P, UserPerms::RW, (), &mut pool) },
         Err(AsError::NoRegionSlot)
     );
     assert_eq!(a.user_frames(), frames);
     assert_eq!(used(&pool), used_before);
     // SAFETY: a host test loads no CR3, the space is not used again, and every frame it holds came
     // from `pool`; established here.
-    unsafe { a.teardown_pool(&mut pool) };
+    unsafe { free_space(&mut a, &mut pool) };
 }
 
 #[test]
 fn fixed_tables_match_limits() {
     let mut pool = Pool::new(64);
     let kernel = kernel_mapper(&mut pool);
-    // SAFETY: `kernel` is this test's kernel mapper and `pool` hands out owned frames writable
-    // through its HHDM; established here.
-    let aspace =
-        unsafe { AddressSpace::new(&kernel, &mut pool, &mut region_table().ok()) }.unwrap();
+    let aspace = new_space(&kernel, &mut pool);
     assert_eq!(aspace.regions.len(), crate::limits::MAX_REGIONS);
+}
+
+/// A space over `C` core references, for the tests that count them.
+fn new_counted(kernel: &Mapper<Arch>, pool: &mut Pool) -> AddressSpace<Arch, Arc<()>> {
+    let root = PhysAddr(pool.alloc_frame().unwrap().into_entry());
+    // SAFETY: as in `new_space`: an owned pool frame only this space uses; established here.
+    unsafe { AddressSpace::new(kernel, root, &mut region_table().ok()) }.unwrap()
+}
+
+/// The root's token back to `pool`, after a teardown.
+fn free_root<C>(a: &AddressSpace<Arch, C>, pool: &mut Pool) {
+    // SAFETY: the root's order-0 token was taken with `into_entry` and the space is torn down
+    // and not used again, the contract `pmm::Frames::from_entry` states; established here.
+    pool.free_frame(unsafe { Frames::from_entry(a.root().as_u64(), 0) });
+}
+
+#[test]
+fn teardown_keeps_root() {
+    let mut pool = Pool::new(64);
+    let kernel = kernel_mapper(&mut pool);
+    let before = used(&pool);
+    let mut a = new_space(&kernel, &mut pool);
+    // SAFETY: `map_anon` refuses a range outside the user half or over a region before it maps
+    // anything, and `pool` hands out owned frames; established here.
+    unsafe { a.map_anon(0x40_0000, 2 * PAGE_SIZE_4K, UserPerms::RW, (), &mut pool) }.unwrap();
+    let mapped = used(&pool) - before;
+    // SAFETY: a host test loads no CR3, and every frame the space maps came from `pool`;
+    // established here.
+    let st = unsafe { a.teardown_pool(&mut pool) };
+    assert_eq!(st.user_frames, 2);
+    assert_eq!(
+        st.user_frames + st.pt_frames + 1,
+        mapped,
+        "all but the root freed"
+    );
+    assert_eq!(used(&pool) - before, 1, "the root stays with its owner");
+    assert_eq!(a.regions().count(), 0);
+    free_root(&a, &mut pool);
+    assert_eq!(used(&pool), before);
+}
+
+#[test]
+fn teardown_drops_region_core_refs() {
+    let mut pool = Pool::new(64);
+    let kernel = kernel_mapper(&mut pool);
+    let core = Arc::new(());
+    let mut a = new_counted(&kernel, &mut pool);
+    for i in 0..3u64 {
+        let va = 0x40_0000 + i * 2 * PAGE_SIZE_4K;
+        // SAFETY: as in `teardown_keeps_root`; established here.
+        unsafe { a.map_anon(va, PAGE_SIZE_4K, UserPerms::RW, core.clone(), &mut pool) }.unwrap();
+    }
+    assert_eq!(Arc::strong_count(&core), 4);
+    // SAFETY: as in `teardown_keeps_root`; established here.
+    unsafe { a.teardown_pool(&mut pool) };
+    assert_eq!(
+        Arc::strong_count(&core),
+        1,
+        "every region's reference dropped"
+    );
+    free_root(&a, &mut pool);
+}
+
+#[test]
+fn split_region_clones_core_ref() {
+    const P: u64 = PAGE_SIZE_4K;
+    let mut pool = Pool::new(64);
+    let kernel = kernel_mapper(&mut pool);
+    let core = Arc::new(());
+    let mut a = new_counted(&kernel, &mut pool);
+    // SAFETY: as in `teardown_keeps_root`; established here.
+    unsafe { a.map_anon(0x40_0000, 3 * P, UserPerms::RW, core.clone(), &mut pool) }.unwrap();
+    assert_eq!(Arc::strong_count(&core), 2);
+    // SAFETY: the middle page's leaf came from `pool`, and no TLB holds a host test's page;
+    // established here.
+    unsafe { a.unmap_free(0x40_0000 + P, P, &mut pool, &mut |_| {}) }.unwrap();
+    assert_eq!(a.regions().count(), 2);
+    assert_eq!(
+        Arc::strong_count(&core),
+        3,
+        "a split region holds two references"
+    );
+    // SAFETY: as in `teardown_keeps_root`; established here.
+    unsafe { a.teardown_pool(&mut pool) };
+    assert_eq!(Arc::strong_count(&core), 1);
+    free_root(&a, &mut pool);
 }

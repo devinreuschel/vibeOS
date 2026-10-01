@@ -12,6 +12,7 @@ mod limits;
 mod open;
 mod runtime;
 mod segs;
+mod space;
 mod sysdecl;
 mod uaccess;
 
@@ -26,6 +27,7 @@ pub(crate) use limits::*;
 pub(crate) use open::*;
 pub(crate) use runtime::*;
 pub(crate) use segs::*;
+pub(crate) use space::*;
 pub(crate) use sysdecl::*;
 pub(crate) use uaccess::*;
 
@@ -52,6 +54,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("fork_full_thread_table", fork_full_thread_table).deadline(60_000),
     test("limits_heap_backed", limits_heap_backed).deadline(60_000),
     test("teardown_live_root_asserts", teardown_live_root_asserts),
+    test("as_pin_across_exit", as_pin_across_exit).deadline(30_000),
+    test("fill_pt_hold_bounded", fill_pt_hold_bounded).deadline(60_000),
     test("console_read_exit", test_console_read_exit).deadline(30_000),
     test("user_entry_irq", test_user_entry_irq).deadline(120_000),
     test("user_selectors", test_user_selectors),

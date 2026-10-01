@@ -473,7 +473,7 @@ pub(crate) fn test_cpu_hardening() -> Outcome {
         return Outcome::Skip("no smep/smap/umip");
     }
     x86::clac();
-    x86::stac();
+    crate::arch::x86_64::uaccess::with_window(|| ());
     x86::clac();
 
     let mask = per_cpu_init::online_mask();
@@ -623,15 +623,12 @@ pub(crate) fn test_ac_clear_on_exception() -> Outcome {
         return Outcome::Skip("no SMAP");
     }
     let before = settled_frames();
-    let Some(mut space) = addr_space_init::create() else {
+    let Ok(space) = addr_space_init::create() else {
         return Outcome::Fail("create");
     };
     // SAFETY: invariant: `space` is a fresh address space that no CPU has
     // loaded, and the range is page-aligned user space; established here.
-    if unsafe { addr_space_init::map_anon(&mut space, USER_VA, PAGE_SIZE_4K, UserPerms::RW) }
-        .is_err()
-    {
-        addr_space_init::teardown(space);
+    if unsafe { addr_space_init::map_anon(&space, USER_VA, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
         return Outcome::Fail("map_anon");
     }
     BP_PROBE.reset();
@@ -640,17 +637,18 @@ pub(crate) fn test_ac_clear_on_exception() -> Outcome {
         crate::proc::ktest::load_cr3(&space);
         x86::invlpg(USER_VA);
         testing::set_hook(vectors::BP, Some(bp_hook));
-        x86::stac();
-        // SAFETY: invariant: `int3` at CPL 0 reaches `breakpoint`, which
-        // logs and returns; established by `arch::idt::init`.
-        unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
-        let ac = x86::rflags() & RFLAGS_AC != 0;
-        x86::clac();
+        let ac = crate::arch::x86_64::uaccess::with_window(|| {
+            // SAFETY: invariant: `int3` at CPL 0 reaches `breakpoint`, which
+            // logs and returns; established by `arch::idt::init`.
+            unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
+            x86::rflags() & RFLAGS_AC != 0
+        });
         testing::set_hook(vectors::BP, None);
         addr_space_init::load_kernel_cr3();
         ac
     };
-    addr_space_init::teardown(space);
+    // The last `users` put, with the kernel CR3 back.
+    drop(space);
     if let Some(fail) = BP_PROBE.verdict() {
         return fail;
     }

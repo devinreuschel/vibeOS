@@ -10,7 +10,7 @@ use vibeos::syscall::UserFrame;
 use vibeos::desc::star_value;
 
 use crate::addr_space_init;
-use crate::arch::current::AddressSpace;
+use crate::addr_space_init::Space;
 use crate::pmm_init;
 #[cfg(target_arch = "x86_64")]
 use crate::x86::{self, EFER_SCE, IA32_EFER, IA32_STAR};
@@ -18,18 +18,18 @@ use crate::x86::{self, EFER_SCE, IA32_EFER, IA32_STAR};
 /// Load `space`'s root into CR3 unless this CPU already has it, and record
 /// it in this CPU's `PerCpuRemote.as_cr3`. No TCB names it, so the next
 /// switch back to the calling thread loads that thread's own root again.
-pub(crate) fn load_cr3(space: &AddressSpace) {
+pub(crate) fn load_cr3(space: &Space) {
     // SAFETY: invariant I128: the root is a PML4 `addr_space_init::create`
     // or `addr_space_init::clone_full` built, whose kernel half is the
-    // kernel's, and only `addr_space_init::teardown` frees it, which refuses
-    // a root this CPU has loaded or recorded; established by
-    // `addr_space_init::teardown`.
+    // kernel's, and only the core's free frees it, which refuses a root this
+    // CPU has loaded or recorded, and `space` holds a reference meanwhile;
+    // established by `addr_space_init::SpaceCore`'s drop.
     unsafe { addr_space_init::load_cr3_u64(space.root().as_u64()) };
 }
 
 /// This CPU's recorded root is `space`'s: a [`load_cr3`] of it skipped the
 /// write.
-pub(crate) fn cr3_was_skipped(space: &AddressSpace) -> bool {
+pub(crate) fn cr3_was_skipped(space: &Space) -> bool {
     crate::per_cpu_init::with_current(|c| c.remote.as_cr3.load(Ordering::Relaxed))
         == space.root().as_u64()
 }

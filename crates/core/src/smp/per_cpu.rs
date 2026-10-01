@@ -99,7 +99,7 @@ pub struct PerCpuRemote {
     /// Local APIC id. Written before the CPU is started, then read-only.
     pub apic_id: AtomicU32,
     /// Root this CPU last loaded. Owner stores after each CR3 write
-    /// (Release); `addr_space_init::teardown` reads it. 0 until paging
+    /// (Release); the root's free (`addr_space_init::SpaceCore`) reads it. 0 until paging
     /// publishes the kernel root.
     pub as_cr3: AtomicU64,
     /// The stop primitive's request word (`irq::stop::STOP`): the dump's

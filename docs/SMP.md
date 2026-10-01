@@ -241,7 +241,7 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
   at the end of the owner-only part.
 - `remote`, this CPU's `PerCpuRemote` in a separate per-CPU array: `ticks`, `switches`, `runq_len`,
   `ready`, `wake_inbox`, `apic_id`, and `as_cr3`, the root this CPU last loaded: an `AtomicU64` its
-  owner stores after each CR3 write and `addr_space_init::teardown` reads. All are atomics; it is the
+  owner stores after each CR3 write and the root's free (`addr_space_init::SpaceCore`) reads. All are atomics; it is the
   only per-CPU state another CPU reads.
   `wake_inbox`, a slot bitmap with a summary word (§7.6): a remote CPU sets a thread's bit and sends
   IPI `0xFD`. `ready` is the flag an AP sets last in bring-up

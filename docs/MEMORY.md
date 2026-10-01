@@ -40,8 +40,8 @@ in page multiples of at least 64 KiB and reuses what it frees without shrinking 
 `0x7FFF_F7FF_F000`, Linux's base without randomization), one region per call, never merged. Every
 page of the image, the heap, and an `mmap` is allocated and zeroed at the call until ROADMAP §12.4
 makes them lazy; a `PROT_NONE` mapping is a region with no frames. `munmap` trims, splits, or
-removes the regions in its range, so `fork`'s copy (`clone_anon`) sees exactly the pages that are
-mapped.
+removes the regions in its range, so `fork`'s copy (`fill_init::clone_full`) sees exactly the pages
+that are mapped.
 
 The KASAN build passes each architecture's shadow offset to LLVM explicitly
 (`-Cllvm-args=-asan-mapping-offset=`), never LLVM's default: LLVM picks its Linux kernel offset only

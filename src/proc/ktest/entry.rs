@@ -14,7 +14,7 @@ use vibeos::syscall::SYS_KILL;
 use vibeos::thread::ThreadState;
 use vibeos::vectors;
 
-use crate::addr_space_init;
+use crate::addr_space_init::{self, Space};
 use crate::apic_init;
 use crate::arch;
 use crate::arch::current::Arch;
@@ -33,7 +33,7 @@ use crate::x86;
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
     let before = quiescent_free_frames();
-    let Some(mut space) = addr_space_init::create() else {
+    let Ok(space) = addr_space_init::create() else {
         return Outcome::Fail("create");
     };
     // Above the 512 MiB GLOBAL low-identity window (DESIGN §4.1).
@@ -41,11 +41,10 @@ pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
     // SAFETY: `addr_space_init::map_anon` checks the range is in the user
     // half and clear of every region of this fresh space before it maps;
     // established by `addr_space_init::map_anon`.
-    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K * 2, UserPerms::RW) }
-        .is_err()
-    {
+    if unsafe { addr_space_init::map_anon(&space, va, PAGE_SIZE_4K * 2, UserPerms::RW) }.is_err() {
         return Outcome::Fail("map_anon");
     }
+    let pt_frames = space.mm().pt_frames();
     // IF stays off while this thread runs on `space`'s CR3: the registry
     // thread has IF=1 and `as_cr3 == 0`, so a switch away and back in this
     // window would reload the kernel CR3 under the user VA below.
@@ -53,37 +52,37 @@ pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
     super::load_cr3(&space);
     x86::invlpg(va);
     // User PTE: SMAP would #PF a kernel store/load via this VA.
-    x86::stac();
-    // SAFETY: `va` is a mapped, writable, 8-byte aligned page of `space`,
-    // which CR3 holds with IF=0 and SMAP lifted, so the store and load reach
-    // that page's frame and nothing else; established here.
-    unsafe {
-        (va as *mut u64).write_volatile(0x1111_2222_3333_4444);
-    }
-    // SAFETY: as for the store above; established here.
-    let got = unsafe { (va as *const u64).read_volatile() };
-    x86::clac();
+    let got = crate::arch::x86_64::uaccess::with_window(|| {
+        // SAFETY: `va` is a mapped, writable, 8-byte aligned page of
+        // `space`, which CR3 holds with IF=0 and SMAP lifted, so the store
+        // and load reach that page's frame and nothing else; established
+        // here.
+        unsafe {
+            (va as *mut u64).write_volatile(0x1111_2222_3333_4444);
+        }
+        // SAFETY: as for the store above; established here.
+        unsafe { (va as *const u64).read_volatile() }
+    });
+    // The kernel root and IF on again before the unmap, which sleeps for
+    // the space's `mm` lock.
+    addr_space_init::load_kernel_cr3();
+    drop(irqs_off);
     if got != 0x1111_2222_3333_4444 {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(space);
         return Outcome::Fail("readback");
     }
     // SAFETY: the range's leaves came from the buddy through `map_anon`
-    // above, and `addr_space_init::unmap` flushes this CPU, the only one
-    // with `space` loaded; established here.
-    if unsafe { addr_space_init::unmap(&mut space, va, PAGE_SIZE_4K * 2) }.is_err() {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(space);
+    // above, and no CPU has `space` loaded any more, so no TLB holds them
+    // past this CPU's kernel-root load; established here.
+    if unsafe { addr_space_init::unmap(&space, va, PAGE_SIZE_4K * 2) }.is_err() {
         return Outcome::Fail("unmap");
     }
-    addr_space_init::load_kernel_cr3();
-    drop(irqs_off);
-    let st = addr_space_init::teardown(space);
-    if st.pt_frames == 0 {
+    // Root, PDPT, PD and PT: the tables outlive the unmap.
+    if pt_frames < 4 {
         return Outcome::Fail("teardown pt");
     }
+    // The last `users` put tears the space down, and the core's free
+    // frees the root.
+    drop(space);
     if quiescent_free_frames() != before {
         return Outcome::Fail("frame leak");
     }
@@ -91,88 +90,78 @@ pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
 }
 
 pub(crate) fn test_user_ptr_helpers() -> Outcome {
-    let Some(mut space) = addr_space_init::create() else {
+    let Ok(space) = addr_space_init::create() else {
         return Outcome::Fail("create");
     };
     let va = 0x0000_0000_4000_0000u64;
     // SAFETY: `addr_space_init::map_anon` checks the range is in the user
     // half and clear of every region of this fresh space before it maps;
     // established by `addr_space_init::map_anon`.
-    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
-        addr_space_init::teardown(space);
+    if unsafe { addr_space_init::map_anon(&space, va, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
         return Outcome::Fail("map");
     }
-    if space.check_user_range(va, 8).is_err() {
-        addr_space_init::teardown(space);
+    let mm = space.mm();
+    if mm.check_user_range(va, 8).is_err() {
         return Outcome::Fail("mapped range");
     }
-    if space.check_user_range(0, 8) != Err(UserMemError::NullGuard) {
-        addr_space_init::teardown(space);
+    if mm.check_user_range(0, 8) != Err(UserMemError::NullGuard) {
         return Outcome::Fail("null guard");
     }
-    if space.check_user_range(0xFFFF_8000_0000_1000, 8) != Err(UserMemError::Kernel) {
-        addr_space_init::teardown(space);
+    if mm.check_user_range(0xFFFF_8000_0000_1000, 8) != Err(UserMemError::Kernel) {
         return Outcome::Fail("kernel ptr");
     }
-    if space.check_user_range(u64::MAX, 2) != Err(UserMemError::Overflow) {
-        addr_space_init::teardown(space);
+    if mm.check_user_range(u64::MAX, 2) != Err(UserMemError::Overflow) {
         return Outcome::Fail("overflow");
     }
-    if space.check_user_range(va + PAGE_SIZE_4K, 8) != Err(UserMemError::Unmapped) {
-        addr_space_init::teardown(space);
+    if mm.check_user_range(va + PAGE_SIZE_4K, 8) != Err(UserMemError::Unmapped) {
         return Outcome::Fail("unmapped");
     }
-    if space.check_user_range(USER_END, 8) != Err(UserMemError::NonCanonical) {
-        addr_space_init::teardown(space);
+    if mm.check_user_range(USER_END, 8) != Err(UserMemError::NonCanonical) {
         return Outcome::Fail("user end");
     }
-    addr_space_init::teardown(space);
     Outcome::Ok
 }
 
 pub(crate) fn test_cr3_switch_skip() -> Outcome {
-    let Some(a) = addr_space_init::create() else {
+    let Ok(a) = addr_space_init::create() else {
         return Outcome::Fail("create a");
     };
-    let Some(b) = addr_space_init::create() else {
-        addr_space_init::teardown(a);
+    let Ok(b) = addr_space_init::create() else {
         return Outcome::Fail("create b");
     };
     // IF stays off while this thread runs on a user CR3 (see
     // test_addrspace_map_unmap_teardown): a switch away and back would reload
     // the kernel CR3 between the load and the read.
     let irqs_off = crate::arch::current::InterruptGuard::enter();
-    super::load_cr3(&a);
-    let cr3_a = <Arch as PageTable>::root().as_u64();
-    if !super::cr3_was_skipped(&a) {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(a);
-        addr_space_init::teardown(b);
-        return Outcome::Fail("a not recorded");
-    }
-    super::load_cr3(&a);
-    if (<Arch as PageTable>::root().as_u64()) != cr3_a {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(a);
-        addr_space_init::teardown(b);
-        return Outcome::Fail("skip mutated cr3");
-    }
-    super::load_cr3(&b);
-    let cr3_b = <Arch as PageTable>::root().as_u64();
-    if cr3_b == cr3_a {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(a);
-        addr_space_init::teardown(b);
-        return Outcome::Fail("b shares a cr3");
-    }
+    let r = cr3_switch_steps(&a, &b);
+    // The kernel root before the spaces go: their core's free asserts no
+    // CPU has them loaded.
     addr_space_init::load_kernel_cr3();
     drop(irqs_off);
-    addr_space_init::teardown(a);
-    addr_space_init::teardown(b);
-    Outcome::Ok
+    match r {
+        Ok(()) => Outcome::Ok,
+        Err(m) => Outcome::Fail(m),
+    }
+}
+
+/// [`test_cr3_switch_skip`]'s loads, with IF off; the caller reloads the
+/// kernel root after.
+fn cr3_switch_steps(a: &Space, b: &Space) -> Result<(), &'static str> {
+    super::load_cr3(a);
+    let cr3_a = <Arch as PageTable>::root().as_u64();
+    if !super::cr3_was_skipped(a) {
+        return Err("a not recorded");
+    }
+    super::load_cr3(a);
+    if (<Arch as PageTable>::root().as_u64()) != cr3_a {
+        return Err("skip mutated cr3");
+    }
+    super::load_cr3(b);
+    let cr3_b = <Arch as PageTable>::root().as_u64();
+    if cr3_b == cr3_a {
+        return Err("b shares a cr3");
+    }
+    Ok(())
 }
 
 // syscall 0xC0FFEE, then `ud2` if rax is -ENOSYS, else exit(1).
@@ -416,11 +405,13 @@ fn parked() {
     PARK.acquire();
 }
 
-/// `teardown` of a root that a parked TCB's `as_cr3` still names hits its
-/// assertion (invariant I128) instead of freeing the tables.
+/// The free of a root that a parked TCB's `as_cr3` still names hits the
+/// assertion at the root's free (invariant I128), `SpaceCore`'s drop, which
+/// the space's last reference reaches, instead of freeing the root.
 pub(crate) fn teardown_live_root_asserts() -> Outcome {
-    let Some(space) = addr_space_init::create() else {
-        return Outcome::Fail("create");
+    let space = match addr_space_init::create() {
+        Ok(s) => s.publish(),
+        Err(_) => return Outcome::Fail("create"),
     };
     let root = space.root().as_u64();
     let th = spawn_thread("s07-park", parked);
@@ -435,7 +426,6 @@ pub(crate) fn teardown_live_root_asserts() -> Outcome {
         1_000,
     ) {
         PARK.release();
-        addr_space_init::teardown(space);
         return Outcome::Fail("parked thread did not block");
     }
     thread_init::set_pid_cr3(id, 0, root);
@@ -443,12 +433,13 @@ pub(crate) fn teardown_live_root_asserts() -> Outcome {
     let nest0 = per_cpu_init::irq_nest();
     let if0 = crate::arch::current::interrupts_enabled();
     let hit = arch::catch::catch_panic(|| {
-        // SAFETY: the assertion is `teardown`'s first act, so on a hit this
-        // copy dies unused in the frame the longjmp abandons; on a miss
-        // `keep` is never used again. Exactly one copy frees; established
-        // here.
-        let dup = unsafe { ptr::read(&*keep) };
-        addr_space_init::teardown(dup);
+        // SAFETY: `keep` is never used again, so this copy is the space's
+        // only `users` and core reference; its drop is the last put of
+        // both. The assertion fires inside the core's free, before the root
+        // is freed, so the longjmp leaves the root frame and the cell
+        // leaked, never freed twice; established here.
+        let last = unsafe { ptr::read(&*keep) };
+        drop(last);
     });
     crate::ktest::restore_irq_nest(nest0);
     thread_init::set_pid_cr3(id, 0, 0);
@@ -458,9 +449,8 @@ pub(crate) fn teardown_live_root_asserts() -> Outcome {
         2_000,
     );
     if !hit {
-        return Outcome::Fail("teardown freed a root a parked TCB names");
+        return Outcome::Fail("the core's free freed a root a parked TCB names");
     }
-    addr_space_init::teardown(ManuallyDrop::into_inner(keep));
     if crate::arch::current::interrupts_enabled() != if0 {
         return Outcome::Fail("IF changed across the caught assertion");
     }

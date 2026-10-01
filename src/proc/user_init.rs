@@ -1,7 +1,7 @@
 //! Load a static ELF, from the filesystem or from memory, into a new
 //! address space. ROADMAP §9.4 / §9.8.
 
-use vibeos::addr_space::{AsError, UserMemError, UserPerms};
+use vibeos::addr_space::{AsError, UserPerms};
 use vibeos::arch::CycleCounter;
 use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
@@ -9,14 +9,17 @@ use vibeos::elf::{
     Image, LoadSeg, LoadTarget, PHDR_SIZE, PageRun,
 };
 use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom, WalkBase};
-use vibeos::kalloc::{TryBox, TryVec};
+use vibeos::kalloc::TryVec;
 use vibeos::kerror::KError;
 use vibeos::limits::RLIMIT_STACK_DEFAULT;
 use vibeos::paging::PAGE_SIZE_4K;
+use vibeos::proc::fill::FillError;
 
 use crate::addr_space_init;
-use crate::arch::current::{AddressSpace, Arch};
+use crate::addr_space_init::{NewSpace, Space};
+use crate::arch::current::Arch;
 use crate::file_init;
+use crate::fill_init;
 use crate::thread_init::SpawnError;
 
 /// Pages mapped below the initial stack's arguments and table, for the
@@ -34,7 +37,8 @@ pub enum LoadError {
     Fs(FsError),
     Elf(ElfError),
     As(AsError),
-    Mem(UserMemError),
+    /// A fill into the new space failed (`fill_init`).
+    Fill(FillError),
     Empty,
     NoProc,
     /// The process's thread could not be made.
@@ -54,7 +58,7 @@ impl From<LoadError> for KError {
             LoadError::Elf(ElfError::ImageTooBig) => KError::NoMem,
             LoadError::Elf(e) => KError::from(e),
             LoadError::As(_) => KError::NoMem,
-            LoadError::Mem(m) => KError::from(m),
+            LoadError::Fill(f) => KError::from(f),
             LoadError::Empty => KError::NoExec,
             LoadError::NoProc => KError::Again,
             LoadError::Spawn(s) => KError::from(s),
@@ -74,7 +78,8 @@ impl LoadError {
             Self::Fs(_) => "fs",
             Self::Elf(e) => e.as_str(),
             Self::As(_) => "as",
-            Self::Mem(_) => "efault",
+            Self::Fill(FillError::NoMem) => "enomem",
+            Self::Fill(_) => "efault",
             Self::Empty => "empty",
             Self::NoProc => "eagain",
             Self::Spawn(e) => e.as_str(),
@@ -85,11 +90,11 @@ impl LoadError {
     }
 }
 
-/// A loaded image. The space stays in the box the loader built it in, so
-/// the callers, whose frames stay on the stack under the new thread's
-/// spawn, never hold or copy it (DESIGN §4.5).
+/// A loaded image, its space published for the caller to install. The
+/// space is one counted reference, so the callers, whose frames stay on
+/// the stack under the new thread's spawn, hold a pointer (DESIGN §4.5).
 pub struct Loaded {
-    pub space: TryBox<AddressSpace>,
+    pub space: Space,
     pub entry: u64,
     pub rsp: u64,
     pub fs: u64,
@@ -202,7 +207,7 @@ fn read_image<S: ImageSource>(src: &mut S) -> Result<Image, LoadError> {
 /// `space`, through a 512-byte stack buffer.
 #[inline(never)]
 fn copy_file_bytes<S: ImageSource>(
-    space: &mut AddressSpace,
+    space: &mut NewSpace,
     src: &mut S,
     off: u64,
     va: u64,
@@ -214,7 +219,7 @@ fn copy_file_bytes<S: ImageSource>(
         let n = (len - done).min(chunk.len() as u64) as usize;
         let buf = &mut chunk[..n];
         src.read_exact_at(off + done, buf)?;
-        space.write_bytes(va + done, buf).map_err(LoadError::Mem)?;
+        fill_init::write(space, va + done, buf).map_err(LoadError::Fill)?;
         done += n as u64;
     }
     Ok(())
@@ -222,7 +227,7 @@ fn copy_file_bytes<S: ImageSource>(
 
 /// The loader's [`LoadTarget`]: a new address space, filled from `src`.
 struct SpaceTarget<'a, S> {
-    space: &'a mut AddressSpace,
+    space: &'a mut NewSpace,
     src: &'a mut S,
 }
 
@@ -231,12 +236,7 @@ impl<S: ImageSource> LoadTarget for SpaceTarget<'_, S> {
 
     fn map_zeroed(&mut self, run: PageRun) -> Result<(), LoadError> {
         let perms = UserPerms::from_elf(run.write, run.exec);
-        // SAFETY: `addr_space_init::map_anon` checks the range is in the
-        // user half and clear of every region before it maps anything, and
-        // maps zeroed frames from the buddy; established by
-        // `addr_space_init::map_anon`.
-        unsafe { addr_space_init::map_anon(self.space, run.start, run.len, perms) }
-            .map_err(LoadError::As)
+        fill_init::map(self.space, run.start, run.len, perms).map_err(LoadError::As)
     }
 
     fn copy(&mut self, seg: LoadSeg) -> Result<(), LoadError> {
@@ -250,7 +250,7 @@ impl<S: ImageSource> LoadTarget for SpaceTarget<'_, S> {
 /// both (ROADMAP §10.6, F031). A run over any mapping is an error.
 #[inline(never)]
 fn map_loads<S: ImageSource>(
-    space: &mut AddressSpace,
+    space: &mut NewSpace,
     img: &Image,
     src: &mut S,
 ) -> Result<(), LoadError> {
@@ -263,29 +263,26 @@ fn map_loads<S: ImageSource>(
         .unwrap_or(0);
     // The heap starts on the page after the image, as on Linux with
     // randomization off.
-    space.set_brk_start(elf::page_up(top));
+    space.mm().set_brk_start(elf::page_up(top));
     Ok(())
 }
 
 /// Map `len` bytes of stack below `STACK_TOP`, zeroed. Returns its base
 /// and top.
 #[inline(never)]
-fn map_stack(space: &mut AddressSpace, exec: bool, len: u64) -> Result<(u64, u64), LoadError> {
+fn map_stack(space: &mut NewSpace, exec: bool, len: u64) -> Result<(u64, u64), LoadError> {
     let base = STACK_TOP
         .checked_sub(len)
         .ok_or(LoadError::Elf(ElfError::Stack))?;
     let perms = if exec { UserPerms::RWX } else { UserPerms::RW };
-    // SAFETY: `addr_space_init::map_anon` checks the range is in the user
-    // half and clear of every region before it maps anything; established
-    // by `addr_space_init::map_anon`.
-    unsafe { addr_space_init::map_anon(space, base, len, perms) }.map_err(LoadError::As)?;
-    space.zero_bytes(base, len).map_err(LoadError::Mem)?;
+    fill_init::map(space, base, len, perms).map_err(LoadError::As)?;
+    fill_init::zero(space, base, len).map_err(LoadError::Fill)?;
     Ok((base, STACK_TOP))
 }
 
 #[inline(never)]
 fn setup_tls<S: ImageSource>(
-    space: &mut AddressSpace,
+    space: &mut NewSpace,
     img: &Image,
     stack_base: u64,
     src: &mut S,
@@ -296,20 +293,14 @@ fn setup_tls<S: ImageSource>(
     let aligned = align_up(tls.memsz, tls.align.max(1));
     let map_len = tls.map_len().ok_or(LoadError::Elf(ElfError::ImageTooBig))?;
     let tls_map = stack_base.saturating_sub(map_len);
-    // SAFETY: `addr_space_init::map_anon` checks the range is in the user
-    // half and clear of every region before it maps anything; established
-    // by `addr_space_init::map_anon`.
-    unsafe { addr_space_init::map_anon(space, tls_map, map_len, UserPerms::RW) }
-        .map_err(LoadError::As)?;
-    space.zero_bytes(tls_map, map_len).map_err(LoadError::Mem)?;
+    fill_init::map(space, tls_map, map_len, UserPerms::RW).map_err(LoadError::As)?;
+    fill_init::zero(space, tls_map, map_len).map_err(LoadError::Fill)?;
     let fs = tls_map + map_len - 8;
     let tls_start = fs - aligned;
     if tls.filesz != 0 {
         copy_file_bytes(space, src, tls.offset, tls_start, tls.filesz)?;
     }
-    space
-        .write_bytes(fs, &fs.to_le_bytes())
-        .map_err(LoadError::Mem)?;
+    fill_init::write(space, fs, &fs.to_le_bytes()).map_err(LoadError::Fill)?;
     Ok(fs)
 }
 
@@ -357,7 +348,7 @@ fn stack_len(args: &ExecArgs) -> Result<u64, LoadError> {
 /// in a per-call buffer at RSP, then the strings straight from `args`, so
 /// no second copy of them is made. Returns RSP.
 #[inline(never)]
-fn fill_stack(space: &AddressSpace, img: &Image, args: &ExecArgs) -> Result<u64, LoadError> {
+fn fill_stack(space: &mut NewSpace, img: &Image, args: &ExecArgs) -> Result<u64, LoadError> {
     let aux = auxv(img);
     let table_len = elf::initial_stack_len(args, NAUX)
         .and_then(|n| n.checked_sub(8)?.checked_sub(args.strings().len()))
@@ -372,10 +363,8 @@ fn fill_stack(space: &AddressSpace, img: &Image, args: &ExecArgs) -> Result<u64,
     }
     let st = elf::build_initial_stack(STACK_TOP, args, &aux, &at_random(), &mut table)
         .map_err(LoadError::Elf)?;
-    space.write_bytes(st.rsp, &table).map_err(LoadError::Mem)?;
-    space
-        .write_bytes(st.strings_va, args.strings())
-        .map_err(LoadError::Mem)?;
+    fill_init::write(space, st.rsp, &table).map_err(LoadError::Fill)?;
+    fill_init::write(space, st.strings_va, args.strings()).map_err(LoadError::Fill)?;
     Ok(st.rsp)
 }
 
@@ -429,9 +418,8 @@ fn load_path_inner(
     match file_init::close(src.file) {
         Ok(()) => r,
         Err(e) => {
-            if let Ok(loaded) = r {
-                drop_space(loaded.space);
-            }
+            // A loaded space's last `users` put tears it down.
+            drop(r);
             Err(LoadError::Fs(e))
         }
     }
@@ -464,41 +452,23 @@ pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
 fn load_from<S: ImageSource>(src: &mut S, args: &ExecArgs) -> Result<Loaded, LoadError> {
     let img = read_image(src)?;
     let stack = stack_len(args)?;
-    // The new space stays on the heap while the image loads, off the
-    // stack under which each file read runs its filesystem's frames.
-    let mut space = new_space()?;
+    // The new space is one heap object; this frame holds a pointer to it,
+    // off the stack under which each file read runs its filesystem's frames.
+    let mut space = addr_space_init::create().map_err(LoadError::As)?;
     let mapped = (|| {
         map_loads(&mut space, &img, src)?;
         let (stack_base, _) = map_stack(&mut space, img.stack_exec, stack)?;
         let fs = setup_tls(&mut space, &img, stack_base, src)?;
-        let rsp = fill_stack(&space, &img, args)?;
+        let rsp = fill_stack(&mut space, &img, args)?;
         Ok((img.entry, rsp, fs))
     })();
-    match mapped {
-        Ok((entry, rsp, fs)) => Ok(Loaded {
-            space,
-            entry,
-            rsp,
-            fs,
-        }),
-        Err(e) => {
-            drop_space(space);
-            Err(e)
-        }
-    }
-}
-
-/// A new user address space, on the heap.
-#[inline(never)]
-fn new_space() -> Result<TryBox<AddressSpace>, LoadError> {
-    // The box first, so a refused allocation leaves nothing to tear down.
-    let slot = TryBox::<AddressSpace>::try_new_uninit().map_err(|_| LoadError::NoMem)?;
-    let space = addr_space_init::create().ok_or(LoadError::As(AsError::OutOfFrames))?;
-    Ok(slot.write(space))
-}
-
-/// Unmap and free what a failed load mapped.
-#[inline(never)]
-fn drop_space(space: TryBox<AddressSpace>) {
-    addr_space_init::teardown(space.into_inner());
+    // A failure drops `space` here: its last `users` put unmaps and frees
+    // what the load mapped.
+    let (entry, rsp, fs) = mapped?;
+    Ok(Loaded {
+        space: space.publish(),
+        entry,
+        rsp,
+        fs,
+    })
 }

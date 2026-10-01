@@ -44,6 +44,12 @@ pub mod variant {
         IoDoneRelaxed = 7,
         /// `thread::OnCpu::clear` stores with `Relaxed`.
         OnCpuClearRelaxed = 8,
+        /// `kalloc::UsersArc`'s put decrements `users` with `Relaxed`, not
+        /// `Release`.
+        UsersDecrement = 9,
+        /// `kalloc::CoreArc::pin` raises `users` with a blind `fetch_add`,
+        /// not get-unless-zero.
+        UsersBlindPin = 10,
     }
 
     /// `kernel` at `site`, or `weak` while a loom model has weakened it.

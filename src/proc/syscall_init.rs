@@ -15,7 +15,7 @@ use vibeos::syscall::UserFrame;
 use vibeos::thread::{Fxsave, Tcb, ThreadId};
 use vibeos::vectors;
 
-use crate::arch::current::{AddressSpace, Arch};
+use crate::arch::current::Arch;
 use crate::arch::gdt::{self, CpuTables};
 use crate::arch::idt::TrapFrame;
 use crate::per_cpu_init;
@@ -599,7 +599,7 @@ pub unsafe fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
 /// # Safety
 /// `cpu` is this CPU's own `PerCpu`, held with IF=0 as `on_switch` holds
 /// it. `tcb.as_cr3` is 0 or a root that invariant I128 keeps alive while a
-/// TCB names it (`addr_space_init::teardown`).
+/// TCB names it (the core's free, `addr_space_init::SpaceCore`).
 pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     let want = if tcb.as_cr3 == 0 {
         crate::paging_init::kernel_cr3()
@@ -612,7 +612,7 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     // SAFETY: invariant I128: `want` is the kernel root or a TCB's root,
     // which stays allocated while that TCB names it, and every root shares
     // the kernel half this code and stack run in; established by
-    // `addr_space_init::teardown`.
+    // `addr_space_init::SpaceCore`'s drop.
     unsafe { x86::write_cr3(want) };
     cpu.remote.as_cr3.store(want, Ordering::Release);
     false
@@ -782,7 +782,6 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
 // --- Slice B: dispatch, early fd1 ---
 
 static TRACE: AtomicBool = AtomicBool::new(false);
-static CURRENT_AS: AtomicPtr<AddressSpace> = AtomicPtr::new(ptr::null_mut());
 
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Release);
@@ -790,37 +789,6 @@ pub fn set_trace(on: bool) {
 
 pub fn trace_enabled() -> bool {
     TRACE.load(Ordering::Acquire)
-}
-
-fn current_as() -> Option<&'static AddressSpace> {
-    let p = CURRENT_AS.load(Ordering::Acquire);
-    if p.is_null() {
-        None
-    } else {
-        // SAFETY: invariant: only a process's own thread stores its space
-        // here, and that thread replaces it (execve) or clears it (exit)
-        // before the space is torn down, so a non-null `CURRENT_AS` is live;
-        // established by `syscall_init::set_user_as` and
-        // `syscall_init::clear_user_as`, called from `proc_init`.
-        Some(unsafe { &*p })
-    }
-}
-
-pub fn peek_user_as() -> Option<&'static AddressSpace> {
-    current_as()
-}
-
-pub fn set_user_as(space: &AddressSpace) {
-    CURRENT_AS.store(
-        // `current_as` turns it back into a shared `&AddressSpace` only.
-        // PROVENANCE: nothing writes through the pointer.
-        space as *const AddressSpace as *mut AddressSpace,
-        Ordering::Release,
-    );
-}
-
-pub fn clear_user_as() {
-    CURRENT_AS.store(ptr::null_mut(), Ordering::Release);
 }
 
 fn bump_counter() {

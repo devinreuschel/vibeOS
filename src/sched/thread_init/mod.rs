@@ -1405,7 +1405,7 @@ pub fn sum_syscalls(sums: &mut [(u32, u64)]) {
 }
 
 /// The first TCB, Dead ones included, whose saved root is `root`. Reads
-/// only; `addr_space_init::teardown` asks it before it frees a root.
+/// only; the root's free (`addr_space_init::SpaceCore`) asks it first.
 pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
     with_sched(|s| {
         s.slots

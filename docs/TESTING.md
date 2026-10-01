@@ -37,7 +37,8 @@ model cannot run a kernel-half step (`switch_context`'s saves, `wake_all` under 
 
 | Primitive (file under `crates/core/src/`) | Base test | Variant test: the site it switches | Bound |
 |---|---|---|---|
-| `TryArc` count (`kalloc.rs`) | `loom_tryarc_count` | `loom_tryarc_count_relaxed_dec_fails`: `TryArcDecrement`, the put decrements Relaxed | 3 threads, `LOOM_MAX_PREEMPTIONS` |
+| `TryArc` count (`kalloc.rs`; model in `kalloc/loom_models.rs`) | `loom_tryarc_count` | `loom_tryarc_count_relaxed_dec_fails`: `TryArcDecrement`, the put decrements Relaxed | 3 threads, `LOOM_MAX_PREEMPTIONS` |
+| `UsersArc` users count (`kalloc.rs`; model in `kalloc/loom_models.rs`) | `loom_users_arc`: two holders put racing a pin; one teardown, which sees both holders' writes | `loom_users_arc_relaxed_dec_fails`: `UsersDecrement`, the put decrements Relaxed; `loom_users_arc_blind_pin_fails`: `UsersBlindPin`, `pin` is a blind `fetch_add` | 3 threads, 3 preemptions |
 | `OpGate` (`sync/mod.rs`) | `loom_opgate` | `loom_opgate_check_first_fails`: `OpGateCountFirst`, `enter` reads the dead mark first | 2 threads, `LOOM_MAX_PREEMPTIONS` |
 | `TickClock` latch (`time/mod.rs`) | `loom_seqlock_latch`: pairs whose words all derive from one number, so a mixed read fails `seqlock: torn read` | `loom_seqlock_acqrel_bump_tears_fails`: `SeqlockBumpAcqRel`, the bump is one AcqRel `fetch_add` with no fences; `loom_seqlock_no_leading_fence_tears_fails`: `SeqlockLeadingFence`, the bump drops its leading `fence(Release)` | 2 threads (1 write, 2 reads), 3 preemptions |
 | `WakeInbox` (`irq/ipi.rs`) | `loom_wake_inbox_three_pushers`: each slot delivered exactly once | `loom_wake_inbox_summary_first_loses_id_fails`: `InboxSummaryFirst`, push sets the summary bit first | 4 threads (3 pushes, 2 drains), 2 preemptions |

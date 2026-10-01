@@ -5,13 +5,12 @@
 //! Phase 13.
 
 use core::fmt::Write;
-use core::mem::MaybeUninit;
 
 use vibeos::addr_space::{AsError, MmapError, mmap_request};
 #[cfg(target_arch = "x86_64")]
 use vibeos::arch::x86_64::trap as x86_trap;
 use vibeos::fs::{DirRef, FileId, FileRef, FsError, OpenFlags, SeekFrom, WalkBase};
-use vibeos::kalloc::{AllocError, TryBox, TryVec};
+use vibeos::kalloc::{AllocError, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::kerror::KError;
 use vibeos::lock::RANK_SCHED;
@@ -31,10 +30,12 @@ use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
 use crate::addr_space_init;
-use crate::arch::current::{AddressSpace, Arch};
+use crate::addr_space_init::Space;
+use crate::arch::current::Arch;
 use crate::arch::idt::TrapFrame;
 use crate::console_init;
 use crate::file_init;
+use crate::fill_init;
 use crate::proc::uaccess_init;
 use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
@@ -80,7 +81,10 @@ struct Proc {
     pending: u32,
     /// No reaper: freed at exit, ROADMAP §10.5.
     autoreap: bool,
-    space: Option<TryBox<AddressSpace>>,
+    /// The process's thread's `users` reference to its address space
+    /// (DESIGN §2.11). Taken out under the table lock and dropped after
+    /// it, since the last put sleeps for the space's `mm` lock.
+    space: Option<Space>,
     /// `FS_BASE` for the first return to ring 3 (`user_thread_entry`).
     fs_base: u64,
     wait_wq: WaitQueue,
@@ -334,36 +338,22 @@ fn current_pid() -> u32 {
     thread_init::current_pid()
 }
 
-/// Address space for the current syscall: the process's own, or the
-/// global `CURRENT_AS` when the caller has no pid.
-pub fn current_space() -> Option<&'static AddressSpace> {
+/// Run `f` on the calling process's address space, pinned: the pin is
+/// taken under the table lock (get-unless-zero), `f` runs with the lock
+/// released, and the pin drops after it. `None` for a thread with no
+/// process or a process with no space. Never call it under the table lock
+/// or SCHED: it takes them, and `f` may sleep on the space's `mm` lock.
+pub fn with_current_space<R>(f: impl FnOnce(&Space) -> R) -> Option<R> {
     let pid = current_pid();
-    if pid != 0
-        && let Some(s) = space_of(pid)
-    {
-        return Some(s);
+    if pid == 0 {
+        return None;
     }
-    syscall_init::peek_user_as()
-}
-
-fn space_of(pid: u32) -> Option<&'static AddressSpace> {
-    with_table(|t| {
-        let p = t.get(pid)?;
-        p.space.as_ref().map(|s| &**s as *const AddressSpace)
-    })
-    // SAFETY: a process's space is replaced or taken only by its own thread
-    // (`proc_init::sys_execve`, `proc_init::finish_exit`), and every caller
-    // reads its own process's space or one whose thread is stopped, so the
-    // box outlives the borrow; established by `proc_init::current_space`.
-    .map(|p| unsafe { &*p })
-}
-
-fn set_as(space: &AddressSpace) {
-    syscall_init::set_user_as(space);
-}
-
-fn clear_as() {
-    syscall_init::clear_user_as();
+    let pin = with_table(|t| t.get(pid)?.space.as_ref()?.core().pin())?;
+    let r = f(&pin);
+    // The process's own reference outlives this call: only its thread,
+    // the caller, drops it. So this put is never the last.
+    drop(pin);
+    Some(r)
 }
 
 /// Take a process-table slot and a pid for a new process, `Live`. The pid
@@ -421,14 +411,7 @@ fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str) {
 
 fn user_thread_entry() {
     let pid = current_pid();
-    let fs = with_table(|t| {
-        t.get(pid).map(|p| {
-            if let Some(ref s) = p.space {
-                set_as(s);
-            }
-            p.fs_base
-        })
-    });
+    let fs = with_table(|t| t.get(pid).map(|p| p.fs_base));
     let Some(fs) = fs else {
         thread_init::exit_current();
     };
@@ -499,13 +482,6 @@ pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, 
     start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
 }
 
-/// The heap slot a new address space moves into, taken before the space
-/// is built: `AddressSpace` has no `Drop`, so a space that a failed
-/// `TryBox::try_new` dropped would leak its frames.
-fn space_slot() -> Option<TryBox<MaybeUninit<AddressSpace>>> {
-    TryBox::<AddressSpace>::try_new_uninit().ok()
-}
-
 #[cfg(not(feature = "vibefs_crash"))]
 fn start_loaded(
     loaded: Loaded,
@@ -519,7 +495,8 @@ fn start_loaded(
     let pid = match alloc_pid(prefer) {
         Some(p) => p,
         None => {
-            addr_space_init::teardown(loaded.space.into_inner());
+            // The space's last `users` put: no thread was made for it.
+            drop(loaded.space);
             put_dir_refs(refs);
             return Err(LoadError::NoProc);
         }
@@ -527,26 +504,32 @@ fn start_loaded(
     let root = loaded.space.root().as_u64();
     let frame = UserFrame::new_user(loaded.entry, loaded.rsp);
     let fs = loaded.fs;
-    let boxed = loaded.space;
+    let space = loaded.space;
     let h = match thread_init::spawn_user(name, user_thread_entry, pid, root, &frame) {
         Ok(h) => h,
         Err(e) => {
             with_sched_table(|s, t| release_pid(s, t, pid));
-            addr_space_init::teardown(boxed.into_inner());
+            drop(space);
             put_dir_refs(refs);
             return Err(LoadError::Spawn(e));
         }
     };
+    let mut space = Some(space);
     let left = with_table(|t| {
         init_slot(t, pid, ppid, name);
         if let Some(p) = t.get_mut(pid) {
-            p.space = Some(boxed);
+            p.space = space.take();
             p.fs_base = fs;
             p.tid = h.id();
         }
         install_dir_refs(t, pid, refs)
     });
     put_dir_refs(left);
+    // `alloc_pid` took the slot for this call, and only this thread frees
+    // it, so it took the space; a space left here would be named by the
+    // new thread's TCB, so it is leaked rather than torn down.
+    debug_assert!(space.is_none(), "proc: spawned slot vanished");
+    core::mem::forget(space);
     thread_init::make_ready(h.id());
     Ok(pid)
 }
@@ -961,6 +944,26 @@ pub(crate) mod testing {
                 p.pending |= super::bit(sig);
             }
         });
+    }
+
+    /// Run `f` on `pid`'s address space, pinned: the pin is taken under the
+    /// table lock (get-unless-zero), and dropped after `f`, with no lock
+    /// held, where its put may be the last. `None` when `pid` has no space,
+    /// or its last `users` put has run.
+    pub(crate) fn with_space_of<R>(
+        pid: u32,
+        f: impl FnOnce(&crate::addr_space_init::Space) -> R,
+    ) -> Option<R> {
+        let pin = super::with_table(|t| t.get(pid)?.space.as_ref()?.core().pin())?;
+        let r = f(&pin);
+        drop(pin);
+        Some(r)
+    }
+
+    /// A memory-only reference to `pid`'s address space: it keeps the
+    /// root, not the space's use.
+    pub(crate) fn space_core(pid: u32) -> Option<crate::addr_space_init::CoreRef> {
+        super::with_table(|t| t.get(pid)?.space.as_ref().map(|s| s.core()))
     }
 
     /// Whether `pid` is a zombie, waiting to be reaped.

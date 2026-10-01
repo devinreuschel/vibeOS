@@ -54,9 +54,6 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     if ppid == 0 {
         return Err(KError::Inval);
     }
-    let Some(src) = current_space() else {
-        return Err(KError::Fault);
-    };
     let meta = with_table(|t| t.get(ppid).map(|p| (p.base(), p.creds)));
     let Some((base, creds)) = meta else {
         return Err(KError::Srch);
@@ -81,45 +78,56 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
         put_dir_refs(refs);
         return Err(KError::MFile);
     }
-    let Some(slot) = space_slot() else {
-        close_all_fds(pid, "fork");
-        with_sched_table(|s, t| release_pid(s, t, pid));
-        put_dir_refs(refs);
-        return Err(KError::NoMem);
+    // The parent's space, pinned for the copy; a parent with none is
+    // `EFAULT`, a copy that runs out of memory `ENOMEM`.
+    let child_space = match with_current_space(fill_init::clone_full) {
+        Some(Ok(c)) => Ok(c.publish()),
+        Some(Err(_)) => Err(KError::NoMem),
+        None => Err(KError::Fault),
     };
-    let Some(boxed) = clone_into(slot, src) else {
-        close_all_fds(pid, "fork");
-        with_sched_table(|s, t| release_pid(s, t, pid));
-        put_dir_refs(refs);
-        return Err(KError::NoMem);
+    let space = match child_space {
+        Ok(s) => s,
+        Err(e) => {
+            close_all_fds(pid, "fork");
+            with_sched_table(|s, t| release_pid(s, t, pid));
+            put_dir_refs(refs);
+            return Err(e);
+        }
     };
-    let root = boxed.root().as_u64();
+    let root = space.root().as_u64();
     let mut child = *frame;
     child.rax = 0;
     let fs = crate::arch::current::user_tls();
     let h = match thread_init::spawn_user("user", user_thread_entry, pid, root, &child) {
         Ok(h) => h,
         Err(e) => {
-            // Nothing names the clone's root yet: no thread was made.
-            addr_space_init::teardown(boxed.into_inner());
+            // Nothing names the clone's root yet: no thread was made, so
+            // this last `users` put tears it down.
+            drop(space);
             close_all_fds(pid, "fork");
             with_sched_table(|s, t| release_pid(s, t, pid));
             put_dir_refs(refs);
             return Err(KError::from(e));
         }
     };
+    let mut space = Some(space);
     let left = with_table(|t| {
         if let Some(p) = t.get_mut(pid) {
             p.ppid = ppid;
             p.name = "user";
             p.creds = creds;
-            p.space = Some(boxed);
+            p.space = space.take();
             p.fs_base = fs;
             p.tid = h.id();
         }
         install_dir_refs(t, pid, refs)
     });
     put_dir_refs(left);
+    // `alloc_pid` took the slot for this call and only this thread frees
+    // it, so it took the space; one left here is named by the child's TCB,
+    // so it is leaked rather than torn down.
+    debug_assert!(space.is_none(), "fork: child slot vanished");
+    core::mem::forget(space);
     // The child starts with the parent's DS, ES, FS and GS (DESIGN §5.1)
     // and its x87 and SSE state (DESIGN §7.5), both before it can run.
     thread_init::set_user_segs(h.id(), crate::arch::gdt::read_user_segs());
@@ -143,17 +151,6 @@ fn dup_dir_refs(base: Option<WalkBase>) -> Result<DirRefs, KError> {
             Err(KError::from(e))
         }
     }
-}
-
-/// A full copy of `src` for fork, moved into `slot`. Out of line, so the
-/// clone's by-value moves are off `sys_fork`'s frame, which stays on the
-/// stack under the child's spawn (DESIGN §4.5).
-#[inline(never)]
-fn clone_into(
-    slot: TryBox<MaybeUninit<AddressSpace>>,
-    src: &AddressSpace,
-) -> Option<TryBox<AddressSpace>> {
-    addr_space_init::clone_full(src).map(|c| slot.write(c))
 }
 
 // Out of line: `dispatch_frame` keeps only the running syscall's frame,
@@ -191,35 +188,31 @@ pub(super) fn sys_execve(
     let entry = loaded.entry;
     let rsp = loaded.rsp;
     let fs = loaded.fs;
-    let mut boxed = Some(loaded.space);
-    let root = boxed.as_ref().map(|s| s.root().as_u64()).unwrap_or(0);
+    let root = loaded.space.root().as_u64();
+    let mut new = Some(loaded.space);
     let old = with_table(|t| {
         let p = t.get_mut(pid)?;
         p.name = name;
         p.fs_base = fs;
         let old = p.space.take();
-        p.space = boxed.take();
-        Some((old, p.tid, root))
+        p.space = new.take();
+        Some((old, p.tid))
     });
-    let Some((old, tid, root)) = old else {
-        if let Some(b) = boxed {
-            addr_space_init::teardown(b.into_inner());
-        }
+    let Some((old, tid)) = old else {
+        // Never run: this last `users` put tears it down.
+        drop(new);
         return Err(KError::Srch);
     };
     close_where(pid, "execve close-on-exec", Fd::cloexec);
-    if let Some(s) = p_space_ref(pid) {
-        set_as(s);
-    }
     thread_init::set_pid_cr3(tid, pid, root);
-    // SAFETY: invariant I128, established at `addr_space_init::teardown`:
-    // `cr3` is the root of the space `create` built and `p.space` now owns,
-    // and `set_pid_cr3` recorded it in this thread's TCB on the line above,
-    // here.
+    // SAFETY: invariant I128, established at `addr_space_init::SpaceCore`'s
+    // drop: `root` is the root of the space `create` built and `p.space`
+    // now holds, and `set_pid_cr3` recorded it in this thread's TCB on the
+    // line above, here.
     unsafe { addr_space_init::load_cr3_u64(root) };
-    if let Some(old) = old {
-        addr_space_init::teardown(old.into_inner());
-    }
+    // The old space's last `users` put, with no lock held and its root no
+    // longer loaded or named: the teardown sleeps for its `mm` lock.
+    drop(old);
     *frame = UserFrame {
         orig_rax: frame.orig_rax,
         ..UserFrame::new_user(entry, rsp)
@@ -233,24 +226,6 @@ pub(super) fn sys_execve(
     // block; established by `user_init::setup_tls`.
     unsafe { crate::arch::current::set_user_tls(fs) };
     Ok(0)
-}
-
-/// Run `f` on the calling process's own address space, after the table
-/// lock is released. `None` for pid 0 or a process with no space.
-fn with_own_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
-    let pid = current_pid();
-    if pid == 0 {
-        return None;
-    }
-    let ptr = with_table(|t| {
-        let p = t.get_mut(pid)?;
-        p.space.as_mut().map(|b| &mut **b as *mut AddressSpace)
-    })?;
-    // SAFETY: a process's space is replaced or taken only by its own thread
-    // (`proc_init::sys_execve`, `proc_init::finish_exit`), and that thread
-    // is the caller, here, so the box outlives `f`; processes are
-    // single-threaded, so nothing else reaches the space while `f` runs.
-    Some(f(unsafe { &mut *ptr }))
 }
 
 /// Anonymous private `mmap` (SYSCALL.md §3.1).
@@ -268,7 +243,7 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             return Err(e);
         }
     };
-    match with_own_space(|s| addr_space_init::mmap(s, &req)) {
+    match with_current_space(|s| addr_space_init::mmap(s, &req)) {
         None => Err(KError::Inval),
         Some(Ok(va)) => Ok(va as usize),
         Some(Err(AsError::Overlap)) => Err(KError::Exist),
@@ -294,7 +269,7 @@ pub(super) fn sys_munmap(addr: u64, len: usize) -> SysResult {
     // SAFETY: every leaf of the caller's space was mapped from the buddy by
     // `addr_space_init::map_anon` or `addr_space_init::brk`, and `unmap`
     // supplies the flush, here.
-    match with_own_space(|s| unsafe { addr_space_init::unmap(s, addr, len) }) {
+    match with_current_space(|s| unsafe { addr_space_init::unmap(s, addr, len) }) {
         None => Err(KError::Inval),
         Some(Ok(())) => Ok(0),
         Some(Err(AsError::NoRegionSlot)) => Err(KError::NoMem),
@@ -304,9 +279,5 @@ pub(super) fn sys_munmap(addr: u64, len: usize) -> SysResult {
 
 /// `brk`: the new break, or the current one on failure; 0 for pid 0.
 pub(super) fn sys_brk(want: u64) -> SysResult {
-    Ok(with_own_space(|s| addr_space_init::brk(s, want)).unwrap_or(0) as usize)
-}
-
-fn p_space_ref(pid: u32) -> Option<&'static AddressSpace> {
-    space_of(pid)
+    Ok(with_current_space(|s| addr_space_init::brk(s, want)).unwrap_or(0) as usize)
 }
