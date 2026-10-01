@@ -945,6 +945,26 @@ pub(crate) mod testing {
         });
     }
 
+    /// Run `f` on `pid`'s address space, pinned: the pin is taken under the
+    /// table lock (get-unless-zero), and dropped after `f`, with no lock
+    /// held, where its put may be the last. `None` when `pid` has no space,
+    /// or its last `users` put has run.
+    pub(crate) fn with_space_of<R>(
+        pid: u32,
+        f: impl FnOnce(&crate::addr_space_init::Space) -> R,
+    ) -> Option<R> {
+        let pin = super::with_table(|t| t.get(pid)?.space.as_ref()?.core().pin())?;
+        let r = f(&pin);
+        drop(pin);
+        Some(r)
+    }
+
+    /// A memory-only reference to `pid`'s address space: it keeps the
+    /// root, not the space's use.
+    pub(crate) fn space_core(pid: u32) -> Option<crate::addr_space_init::CoreRef> {
+        super::with_table(|t| t.get(pid)?.space.as_ref().map(|s| s.core()))
+    }
+
     /// Whether `pid` is a zombie, waiting to be reaped.
     pub(crate) fn is_zombie(pid: u32) -> bool {
         super::with_table(|t| {
