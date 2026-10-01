@@ -113,7 +113,7 @@ fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
 /// overlaps a RAM-typed range of the boot memory map, checked before
 /// anything is patched or mapped (DESIGN §12.3 rule 8), and when the UC
 /// patch fails. Reached only from [`map_bar`], through a live claim
-/// (invariant I484), from `ecam_va`, and from the in-guest tests.
+/// (invariant I58), from `ecam_va`, and from the in-guest tests.
 pub(super) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     if phys == 0 || len == 0 {
         return None;
@@ -145,7 +145,7 @@ pub(super) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
         unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) }.ok()?;
         Some(paging_init::HHDM_BASE.wrapping_add(phys))
     } else {
-        // SAFETY: invariant I484: the range is a BAR its caller holds a
+        // SAFETY: invariant I58: the range is a BAR its caller holds a
         // claim on, which overlaps no other claim and no RAM, or an ECAM
         // page, above the physmap, which only this mapping reaches;
         // established by `dev::Registry::claim` and `pci_init::ecam_va`.
@@ -284,9 +284,9 @@ fn ecam_va(phys: u64) -> Option<u64> {
 }
 
 /// # Safety
-/// Invariant I234: `va` is a dword of an ECAM page `ecam_va` mapped.
+/// Invariant I54: `va` is a dword of an ECAM page `ecam_va` mapped.
 unsafe fn ecam_read_at(va: u64) -> u32 {
-    // SAFETY: invariant I234; established by `pci_init::ecam_read_at`'s
+    // SAFETY: invariant I54; established by `pci_init::ecam_read_at`'s
     // `# Safety` contract.
     unsafe { (va as *const u32).read_volatile() }
 }
@@ -294,7 +294,7 @@ unsafe fn ecam_read_at(va: u64) -> u32 {
 /// # Safety
 /// As [`ecam_read_at`].
 unsafe fn ecam_write_at(va: u64, val: u32) {
-    // SAFETY: invariant I234; established by `pci_init::ecam_write_at`'s
+    // SAFETY: invariant I54; established by `pci_init::ecam_write_at`'s
     // `# Safety` contract.
     unsafe { (va as *mut u32).write_volatile(val) }
 }
@@ -311,7 +311,7 @@ impl CfgIo for HwCfg {
             let Some(va) = ecam_va(phys) else {
                 return 0xFFFF_FFFF;
             };
-            // SAFETY: invariant I234: `va` is the config dword's byte in
+            // SAFETY: invariant I54: `va` is the config dword's byte in
             // the ECAM page `ecam_va` just mapped, and config offsets are
             // dword-aligned below 4 KiB; established by `pci_init::map_mmio`.
             return with_cfg(|| unsafe { ecam_read_at(va) });
@@ -330,7 +330,7 @@ impl CfgIo for HwCfg {
             let Some(va) = ecam_va(phys) else {
                 return;
             };
-            // SAFETY: invariant I234, as in `read32`; established by
+            // SAFETY: invariant I54, as in `read32`; established by
             // `pci_init::map_mmio`.
             with_cfg(|| unsafe { ecam_write_at(va, value) });
             return;

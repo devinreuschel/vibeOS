@@ -432,7 +432,7 @@ pub const MAX_CHAIN: usize = 8;
 /// The ring memory a [`SplitQueue`] reaches, at its 16-byte aligned base.
 struct RingPtr(*mut u8);
 
-// SAFETY: invariant I233: the memory at the pointer is owned alongside the
+// SAFETY: invariant I53: the memory at the pointer is owned alongside the
 // queue that holds it (the kernel keeps its `DmaBuffer` with it) and reached
 // only through that queue, so moving the queue to another thread moves that
 // access with it; established by `virtio::SplitQueue::new`.
@@ -456,7 +456,7 @@ impl<A: Barriers> SplitQueue<A> {
     /// A queue over the ring memory at `base`.
     ///
     /// # Safety
-    /// Invariant I233: `base` is 16-byte aligned and valid for volatile
+    /// Invariant I53: `base` is 16-byte aligned and valid for volatile
     /// reads and writes of `layout.total` bytes for the queue's whole life,
     /// and nothing else reaches that memory but the device the queue serves.
     pub unsafe fn new(layout: SplitLayout, base: *mut u8, event_idx: bool) -> Self {
@@ -508,7 +508,7 @@ impl<A: Barriers> SplitQueue<A> {
 
     fn rd16(&self, off: usize) -> u16 {
         let p = self.field(off, 2);
-        // SAFETY: invariant I233: `p` lies inside the queue's ring (checked
+        // SAFETY: invariant I53: `p` lies inside the queue's ring (checked
         // by `field`), which `base` keeps valid and aligned; established by
         // `virtio::SplitQueue::new`.
         unsafe { load_u16(p, 0) }
@@ -516,35 +516,35 @@ impl<A: Barriers> SplitQueue<A> {
 
     fn wr16(&self, off: usize, v: u16) {
         let p = self.field(off, 2);
-        // SAFETY: invariant I233, as in `rd16`; established by
+        // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
         unsafe { store_u16(p, 0, v) }
     }
 
     fn rd32(&self, off: usize) -> u32 {
         let p = self.field(off, 4);
-        // SAFETY: invariant I233, as in `rd16`; established by
+        // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
         unsafe { load_u32(p, 0) }
     }
 
     fn wr32(&self, off: usize, v: u32) {
         let p = self.field(off, 4);
-        // SAFETY: invariant I233, as in `rd16`; established by
+        // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
         unsafe { store_u32(p, 0, v) }
     }
 
     fn rd64(&self, off: usize) -> u64 {
         let p = self.field(off, 8);
-        // SAFETY: invariant I233, as in `rd16`; established by
+        // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
         unsafe { load_u64(p, 0) }
     }
 
     fn wr64(&self, off: usize, v: u64) {
         let p = self.field(off, 8);
-        // SAFETY: invariant I233, as in `rd16`; established by
+        // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
         unsafe { store_u64(p, 0, v) }
     }
@@ -916,7 +916,7 @@ mod tests {
 
     /// A queue over a [`pool`] buffer.
     fn queue(layout: SplitLayout, base: *mut u8, event_idx: bool) -> SplitQueue<Stub> {
-        // SAFETY: invariant I233: every test passes a 16-byte-aligned `pool`
+        // SAFETY: invariant I53: every test passes a 16-byte-aligned `pool`
         // buffer of at least `layout.total` bytes, which it keeps alive
         // while it uses the queue; established here, by each caller.
         unsafe { SplitQueue::new(layout, base, event_idx) }

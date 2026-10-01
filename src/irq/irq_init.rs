@@ -518,7 +518,7 @@ fn msix_table_va(dev: &Device, cap: &pci::MsixCap, index: u16) -> Option<u64> {
 /// # Safety
 /// `table_va` is an MSI-X table that [`msix_table_va`] returned for an
 /// index of at least `index`, so entry `index` lies in a mapped UC BAR
-/// (invariant I228).
+/// (invariant I49).
 unsafe fn write_msix_entry(table_va: u64, index: u16, e: MsixEntry) {
     let base = table_va.wrapping_add((index as u64) * 16);
     let w = e.to_dwords();
@@ -558,7 +558,7 @@ pub fn enable_msix(
     let Some(table) = msix_table_va(dev, &cap, table_index) else {
         return Err(IrqError::NoRoute);
     };
-    // SAFETY: invariant I228, established by `irq::irq_init::msix_table_va`:
+    // SAFETY: invariant I49, established by `irq::irq_init::msix_table_va`:
     // it returned `table` for `table_index`, so the entry lies inside the
     // mapped BAR.
     unsafe {

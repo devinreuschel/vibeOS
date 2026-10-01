@@ -366,7 +366,7 @@ impl<A: PageTable> Mapper<A> {
                     PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER);
                 // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract);
                 // `&mut self` makes this the root's one writer, and for the
-                // kernel root the page-table lock is held (invariant I226,
+                // kernel root the page-table lock is held (invariant I48,
                 // established at `mm::paging_init::current_mapper`).
                 unsafe { entry_ptr.write_volatile(A::make_entry(new, interior)) };
                 table_phys = new;
@@ -411,7 +411,7 @@ impl<A: PageTable> Mapper<A> {
         // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract); the
         // caller vouches for `pa` (this fn's `# Safety` contract,
         // established here), and the page-table lock covers a kernel-root
-        // write (invariant I226, established at
+        // write (invariant I48, established at
         // `mm::paging_init::current_mapper`).
         unsafe { entry_ptr.write_volatile(A::make_entry(pa, leaf_flags)) };
         Ok(())
@@ -491,7 +491,7 @@ impl<A: PageTable> Mapper<A> {
                 let phys = A::entry_phys(entry);
                 // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract),
                 // and the page-table lock covers a kernel-root write
-                // (invariant I226, established at
+                // (invariant I48, established at
                 // `mm::paging_init::current_mapper`).
                 unsafe { entry_ptr.write_volatile(0) };
                 return Some((phys, size));
@@ -585,7 +585,7 @@ impl<A: PageTable> Mapper<A> {
             // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract); the
             // caller walks the tables the CPU uses (this fn's `# Safety`
             // contract, established here) under the page-table lock
-            // (invariant I226, established at
+            // (invariant I48, established at
             // `mm::paging_init::current_mapper`).
             unsafe { entry_ptr.write_volatile(patched) };
             touched += 1;

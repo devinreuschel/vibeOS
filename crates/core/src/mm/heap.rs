@@ -79,7 +79,7 @@ impl Heap {
     /// # Safety
     /// `[base, base+mapped)` must be mapped writable, unused, and not
     /// overlap any live allocation, and from here on only this heap writes
-    /// its free blocks (invariant I225). `base` 16-aligned.
+    /// its free blocks (invariant I47). `base` 16-aligned.
     pub unsafe fn init(&mut self, base: usize, mapped: usize, cap: usize) {
         assert!(base.is_multiple_of(core::mem::align_of::<FreeBlock>()));
         assert!(mapped >= MIN_SPLIT);
@@ -91,7 +91,7 @@ impl Heap {
         self.free_bytes = 0;
         // SAFETY: `insert_free`'s contract; `[base, base + mapped)` is
         // mapped, writable and unused by this fn's `# Safety` contract
-        // (invariant I225, established here).
+        // (invariant I47, established here).
         unsafe { self.insert_free(base as *mut u8, mapped) };
     }
 
@@ -130,7 +130,7 @@ impl Heap {
     /// (and coalesced if the previous tail was free).
     ///
     /// # Safety
-    /// The new span must be mapped writable and unused (invariant I225).
+    /// The new span must be mapped writable and unused (invariant I47).
     pub unsafe fn extend(&mut self, new_mapped: usize) {
         assert!(new_mapped > self.mapped);
         assert!(new_mapped <= self.cap);
@@ -139,7 +139,7 @@ impl Heap {
         self.mapped = new_mapped;
         // SAFETY: `insert_free`'s contract; the new span is mapped,
         // writable and unused by this fn's `# Safety` contract (invariant
-        // I225, established here).
+        // I47, established here).
         unsafe { self.insert_free(start as *mut u8, add) };
     }
 
@@ -155,22 +155,22 @@ impl Heap {
         while let Some(node) = cur {
             let block = node.as_ptr();
             // SAFETY: `block` is a node on the free list, in mapped memory
-            // only the heap writes (invariant I225, established at `mm::heap::Heap::init`).
+            // only the heap writes (invariant I47, established at `mm::heap::Heap::init`).
             let size = unsafe { (*block).size };
             if size >= need {
-                // SAFETY: as above, `block` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
+                // SAFETY: as above, `block` is a free-list node (invariant I47, established at `mm::heap::Heap::init`).
                 let next = unsafe { (*block).next };
                 // SAFETY: `unlink`'s contract; `prev` is `block`'s
                 // predecessor on the free list, or `None` at the head
-                // (invariant I225, established at `mm::heap::Heap::init`).
+                // (invariant I47, established at `mm::heap::Heap::init`).
                 unsafe { unlink(&mut self.free_head, prev, next) };
                 self.free_bytes -= size;
                 // SAFETY: `carve`'s contract; `block` was just unlinked and
-                // is `size` bytes the heap owns (invariant I225, established at `mm::heap::Heap::init`).
+                // is `size` bytes the heap owns (invariant I47, established at `mm::heap::Heap::init`).
                 return unsafe { self.carve(block as *mut u8, size, layout) };
             }
             prev = cur;
-            // SAFETY: as above, `block` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
+            // SAFETY: as above, `block` is a free-list node (invariant I47, established at `mm::heap::Heap::init`).
             cur = unsafe { (*block).next };
         }
         ptr::null_mut()
@@ -187,7 +187,7 @@ impl Heap {
         let (start, size) = unsafe { recover(ptr) };
         // SAFETY: `insert_free`'s contract; the caller gives the block back
         // and never uses it again (this fn's `# Safety` contract,
-        // established here), so it is unused heap memory (invariant I225).
+        // established here), so it is unused heap memory (invariant I47).
         unsafe { self.insert_free(start, size) };
     }
 
@@ -232,7 +232,7 @@ impl Heap {
             if old_block - used >= MIN_SPLIT {
                 // SAFETY: `start` is the live block `recover` found, and
                 // its tail past `used` holds no payload byte, so it is
-                // unused heap memory (invariant I225, established at
+                // unused heap memory (invariant I47, established at
                 // `mm::heap::Heap::init`).
                 unsafe {
                     self.resize_block(start, used);
@@ -281,21 +281,21 @@ impl Heap {
             "heap: carve backpointer in its header"
         );
         // SAFETY: the asserts above put `back` inside `block`, which this
-        // fn's `# Safety` contract hands over (invariant I225, established
+        // fn's `# Safety` contract hands over (invariant I47, established
         // here).
         unsafe { (back as *mut usize).write(user - block as usize) };
 
         let used = align_up(user + layout.size() - block as usize, HEADER_ALIGN);
         if size - used >= MIN_SPLIT {
-            // SAFETY: `block`'s header is the heap's (invariant I225,
+            // SAFETY: `block`'s header is the heap's (invariant I47,
             // established here).
             unsafe { (block as *mut usize).write(used) };
             // SAFETY: `insert_free`'s contract; the tail past `used` is
-            // unused memory of the block this fn owns (invariant I225,
+            // unused memory of the block this fn owns (invariant I47,
             // established here).
             unsafe { self.insert_free((block as usize + used) as *mut u8, size - used) };
         } else {
-            // SAFETY: `block`'s header is the heap's (invariant I225,
+            // SAFETY: `block`'s header is the heap's (invariant I47,
             // established here).
             unsafe { (block as *mut usize).write(size) };
         }
@@ -317,7 +317,7 @@ impl Heap {
         let mut cur = self.free_head;
         while let Some(node) = cur {
             let nstart = node.as_ptr() as usize;
-            // SAFETY: `node` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
+            // SAFETY: `node` is a free-list node (invariant I47, established at `mm::heap::Heap::init`).
             let nsize = unsafe { (*node.as_ptr()).size };
             let nend = nstart + nsize;
             assert!(
@@ -328,7 +328,7 @@ impl Heap {
                 break;
             }
             prev = cur;
-            // SAFETY: `node` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
+            // SAFETY: `node` is a free-list node (invariant I47, established at `mm::heap::Heap::init`).
             cur = unsafe { (*node.as_ptr()).next };
         }
 
@@ -337,7 +337,7 @@ impl Heap {
         let mut reuse_prev = false;
         if let Some(p) = prev {
             let pstart = p.as_ptr() as usize;
-            // SAFETY: `p` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
+            // SAFETY: `p` is a free-list node (invariant I47, established at `mm::heap::Heap::init`).
             let psize = unsafe { (*p.as_ptr()).size };
             if pstart + psize == start {
                 block_start = pstart;
@@ -349,21 +349,21 @@ impl Heap {
         if let Some(n) = cur {
             let nstart = n.as_ptr() as usize;
             if block_start + block_size == nstart {
-                // SAFETY: `n` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
+                // SAFETY: `n` is a free-list node (invariant I47, established at `mm::heap::Heap::init`).
                 let nsize = unsafe { (*n.as_ptr()).size };
                 block_size += nsize;
                 self.free_bytes -= nsize;
-                // SAFETY: `n` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
+                // SAFETY: `n` is a free-list node (invariant I47, established at `mm::heap::Heap::init`).
                 let nnext = unsafe { (*n.as_ptr()).next };
                 // SAFETY: `unlink`'s contract; `prev` is `n`'s predecessor
-                // on the free list, or `None` at the head (invariant I225, established at `mm::heap::Heap::init`).
+                // on the free list, or `None` at the head (invariant I47, established at `mm::heap::Heap::init`).
                 unsafe { unlink(&mut self.free_head, prev, nnext) };
                 cur = nnext;
             }
         }
 
         if reuse_prev && let Some(p) = prev {
-            // SAFETY: `p` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
+            // SAFETY: `p` is a free-list node (invariant I47, established at `mm::heap::Heap::init`).
             unsafe {
                 (*p.as_ptr()).size = block_size;
                 (*p.as_ptr()).next = cur;
@@ -375,7 +375,7 @@ impl Heap {
         let node = block_start as *mut FreeBlock;
         // SAFETY: `[block_start, block_start + block_size)` is unused heap
         // memory this fn's `# Safety` contract hands over, merged with the
-        // free neighbour the loop unlinked (invariant I225, established
+        // free neighbour the loop unlinked (invariant I47, established
         // here).
         unsafe {
             (*node).size = block_size;
@@ -385,7 +385,7 @@ impl Heap {
         // never null, established here.
         let nn = unsafe { NonNull::new_unchecked(node) };
         if let Some(p) = prev {
-            // SAFETY: `p` is a free-list node (invariant I225, established at `mm::heap::Heap::init`).
+            // SAFETY: `p` is a free-list node (invariant I47, established at `mm::heap::Heap::init`).
             unsafe { (*p.as_ptr()).next = Some(nn) };
         } else {
             self.free_head = Some(nn);
@@ -420,7 +420,7 @@ unsafe fn recover(user: *mut u8) -> (*mut u8, usize) {
 ///
 /// # Safety
 /// `prev`, when `Some`, is a node on the free list `head` starts, in heap
-/// memory only this heap writes (invariant I225).
+/// memory only this heap writes (invariant I47).
 unsafe fn unlink(
     head: &mut Option<NonNull<FreeBlock>>,
     prev: Option<NonNull<FreeBlock>>,
@@ -428,7 +428,7 @@ unsafe fn unlink(
 ) {
     if let Some(p) = prev {
         // SAFETY: `p` is a free-list node by this fn's `# Safety` contract
-        // (invariant I225, established here).
+        // (invariant I47, established here).
         unsafe { (*p.as_ptr()).next = next };
     } else {
         *head = next;
@@ -457,7 +457,7 @@ mod tests {
             let base = align_up(mem.as_ptr() as usize, HEADER_ALIGN);
             let mut heap = Heap::empty();
             // SAFETY: `init`'s contract; `mem` is `cap` bytes past `base`,
-            // 16-aligned host memory this pool owns (invariant I225,
+            // 16-aligned host memory this pool owns (invariant I47,
             // established here).
             unsafe { heap.init(base, mapped, cap) };
             Self { _mem: mem, heap }
@@ -619,7 +619,7 @@ mod tests {
         // frees it, established here.
         assert!(unsafe { p.heap.alloc(big) }.is_null());
         // SAFETY: `Heap::extend`'s contract; `Pool::new` backs all of `cap` with host memory
-        // the heap owns (invariant I225, established here).
+        // the heap owns (invariant I47, established here).
         unsafe { p.heap.extend(3 * 4096) };
         // SAFETY: `Heap::alloc`'s contract; the test treats the block as its layout until it
         // frees it, established here.

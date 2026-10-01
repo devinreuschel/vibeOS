@@ -507,7 +507,7 @@ extern "C" fn ap_entry() -> ! {
     let tables = unsafe { &*tables_ptr };
     // SAFETY: `cpu` is this AP's `PerCpu` slot (`per_cpu_init::slot_ptr`);
     // the BSP's `with_cpu` scope on it ended before INIT, and from here this
-    // AP is its one owner (invariants I120 and I21, established at
+    // AP is its one owner (invariants I43 and I21, established at
     // `smp::smp_init::start_one`).
     let cpu = unsafe { &mut *cpu };
     // `mov gs` zeros the hidden base. GS_BASE before any lidt so NMI

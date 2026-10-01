@@ -49,7 +49,7 @@ pub(crate) fn gsi_masked(gsi: u32) -> Option<bool> {
     apic_init::with_state(|st| {
         let (io, pin) = apic_init::find_ioapic(st, gsi)?;
         let (lo, _) = vibeos::apic::ioapic_redir_regs(pin);
-        // SAFETY: invariant I228, established at
+        // SAFETY: invariant I49, established at
         // `arch::x86_64::apic_init::enum_ioapics`: `io.va` is set only
         // there, and `with_state` holds `STATE`.
         Some(vibeos::apic::redir_is_masked(unsafe {

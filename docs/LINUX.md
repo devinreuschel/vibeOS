@@ -57,6 +57,8 @@ and each case that reaches the difference is on an expected-failure list citing 
 | `no-compat-cs` | the x86_64 compat code selector `0x23` (`__USER32_CS`): a far transfer, `iretq`, or `rt_sigreturn` to it | runs 32-bit code; the descriptor is in every CPU's GDT whatever the kernel's configuration | `SIGSEGV`: GDT slot `0x20` is null | 32-bit user code is a non-goal | ROADMAP Non-goals; DESIGN §5.1 | — |
 | `no-modify-ldt` | `modify_ldt` | installs local descriptors, such as 16- and 32-bit code segments | returns `ENOSYS` | its users run 16- and 32-bit code, a non-goal, and an LDT is per-process descriptor state every switch would carry | ROADMAP Non-goals | `CONFIG_MODIFY_LDT_SYSCALL=n` |
 | `console-rs-escape` | bytes a process writes to the console (fds 0-2) that reach the console UART | written unchanged | each 0x1E (ASCII RS) byte prints as `?`; every other byte is unchanged | 0x1E starts every kernel line on the console UART, so no program can forge a kernel marker or panic line | DESIGN §2.6 | — |
+| `reboot-no-halt` | `reboot` with `LINUX_REBOOT_CMD_HALT` | stops the CPUs and leaves the machine on | returns `EINVAL` (`vibeos::proc::uabi::reboot_decode`) | vibeOS has no halt outside the panic stop (DESIGN §2.5); `POWER_OFF` and `RESTART` end the machine | ROADMAP §10.5 | — |
+| `init-word-cap` | init's arguments and environment from the kernel command line | panics past 32 arguments or 32 environment strings | keeps the first 8 of each (`boot::cmdline::INIT_ARGV_MAX`, `INIT_ENVP_MAX`) and drops the rest with a log line | a boot never halts on a long command line, and init's vectors fit one fixed buffer | ROADMAP §10.2 | — |
 
 ## Native interfaces
 

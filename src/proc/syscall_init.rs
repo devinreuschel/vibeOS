@@ -598,7 +598,7 @@ pub unsafe fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
 ///
 /// # Safety
 /// `cpu` is this CPU's own `PerCpu`, held with IF=0 as `on_switch` holds
-/// it. `tcb.as_cr3` is 0 or a root that invariant I128 keeps alive while a
+/// it. `tcb.as_cr3` is 0 or a root that invariant I44 keeps alive while a
 /// TCB names it (the core's free, `addr_space_init::SpaceCore`).
 pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     let want = if tcb.as_cr3 == 0 {
@@ -609,7 +609,7 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
         return true;
     }
-    // SAFETY: invariant I128: `want` is the kernel root or a TCB's root,
+    // SAFETY: invariant I44: `want` is the kernel root or a TCB's root,
     // which stays allocated while that TCB names it, and every root shares
     // the kernel half this code and stack run in; established by
     // `addr_space_init::SpaceCore`'s drop.

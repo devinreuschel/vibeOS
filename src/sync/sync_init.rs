@@ -58,7 +58,7 @@ pub struct SpinMutex<T> {
     rank: u8,
 }
 
-// SAFETY: invariant I232: `data` is reached only through a guard, and one
+// SAFETY: invariant I52: `data` is reached only through a guard, and one
 // guard exists at a time, so sharing the mutex hands one holder at a time
 // `&mut T`, which `T: Send` covers (AGENTS.md rule 6); established by
 // `sync_init::SpinMutex::lock`.
@@ -184,7 +184,7 @@ impl<T> Drop for SpinMutexGuard<'_, T> {
 impl<T> Deref for SpinMutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        // SAFETY: invariant I232: this guard holds the lock, so no other
+        // SAFETY: invariant I52: this guard holds the lock, so no other
         // reference to `data` exists; established by
         // `sync_init::SpinMutex::lock`.
         unsafe { &*self.mutex.data.get() }
@@ -193,7 +193,7 @@ impl<T> Deref for SpinMutexGuard<'_, T> {
 
 impl<T> DerefMut for SpinMutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: invariant I232: this guard holds the lock and `&mut self`
+        // SAFETY: invariant I52: this guard holds the lock and `&mut self`
         // borrows it uniquely, so this is the only reference to `data`;
         // established by `sync_init::SpinMutex::lock`.
         unsafe { &mut *self.mutex.data.get() }

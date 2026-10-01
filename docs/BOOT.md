@@ -111,7 +111,7 @@ nonzero chance of stomping something ACPI still points at.
 Kernel command line (ROADMAP §10.2). `boot::capture` keeps it in `BootInfo`: the `limine.conf`
 entry's `cmdline:` (`vibeos.strace=0` in the shipped entry), then, on x86_64 when CPUID.1:ECX[31]
 reports a hypervisor and QEMU's fw_cfg lists `opt/vibeos/cmdline`, one space and that file's text,
-trailing NULs and whitespace stripped (`boot::fw_cfg_init`, invariant I244), so the harness sets
+trailing NULs and whitespace stripped (`boot::fw_cfg_init`, invariant I57), so the harness sets
 options on the unmodified ISO (`VIBEOS_CMDLINE`, [§8.4](TESTING.md#84-qemu-flags)). At most 2048 bytes
 are kept, Linux's x86 `COMMAND_LINE_SIZE`; the rest is dropped with one log line. The kernel prints
 it once as `vibeOS: boot: cmdline: <text>`, a byte outside 0x20 to 0x7E as `?`. The portable
@@ -152,38 +152,41 @@ and measured boot records the appended text in PCR 12.
 
 ## 3.3 `_start` order
 
-Ordering here is not a suggestion. Each step depends on state the previous one established. This table
-says what each step needs and why. Its numbers are the design order, and the live order differs
-where the paragraphs below the table say so. The executable contract for the markers is
-`boot_contract_markers()` in `tests/harness/harness.py` ([section 8.3](TESTING.md#83-end-to-end)). DOC2 (ROADMAP
-§10.3) rewrites this table in live order and deletes those paragraphs.
+Ordering here is not a suggestion. Each step depends on state the steps above it established. The
+table lists the steps in the order `_start` runs them (`src/main.rs`: `_start`, `normal_boot_tail`,
+then `boot_rest` on the bootstrap stack), with what each needs and why. A step keeps its label from
+the design order, which other text cites ("step 13b"), so the labels are not sorted: steps 6-10 run
+before steps 3-5. Each marker is spelled as `tests/contract/markers.toml` spells it, without its
+`vibeOS: ` prefix; that registry is the executable contract, and the harness asserts the live order
+from it ([section 8.3](TESTING.md#83-end-to-end)). `scripts/doc_refs.py` checks that each marker below is a contract
+row and that their `order` never decreases down the table.
 
 | # | Step | Marker | Why here |
 |---|------|--------|----------|
-| 1 | Serial (COM1) | `serial online` | Nothing before this is debuggable. The panic handler uses the same port. |
-| 2 | Base revision check | `limine: rev N ok` | Everything downstream reads Limine responses. |
-| 3 | GDT + TSS + IST | `gdt ok` | Need a known code selector and a double-fault stack before the IDT is worth installing. |
-| 4 | PIC remap and mask, skipped when the FADT has `IAPC_BOOT_ARCH` bit 0 clear | `pic: remapped` | Firmware may leave the 8259 live with vectors overlapping CPU exceptions. Bit 0 is `LEGACY_DEVICES`, not 8259 presence. QEMU clears it, so on QEMU this step writes nothing. The remap and mask that always runs is `arch::pic::program`, after TSC calibration and before step 13b's `sti` (§5.5; ROADMAP §20.1, F094). |
-| 5 | IDT | `idt ok` | Exceptions become diagnosable. Hardware IRQs are still masked. |
-| 6 | Buddy PMM from memory map | `pmm: N free 4KiB frames` | Page tables and heap both need frames. |
+| 1 | Serial (COM1) and the log ring | `serial online` | Nothing before this is debuggable. The panic handler uses the same port. |
+| 2 | Base revision check | `limine: rev 3 ok` | Everything downstream reads Limine responses. A `panic_test` build stops after this step with `boot: panic-test armed`. |
+| 6 | `boot::capture`, then the buddy PMM from the memory map | `pmm: <n> free 4KiB frames` | Page tables and heap both need frames. `BootInfo` is captured once; nothing outside `boot` reads a Limine response. A second line, `pmm: <n> total, largest order <n>`, is a diagnostic. |
 | 7 | Page tables, install CR3 | `paging: cr3 ok` | Own the address space before mapping anything device-specific. |
-| 8 | MMIO PTE attribute patch | `paging: mmio uc` | LAPIC/IOAPIC/HPET pages must be uncacheable before first touch. |
-| 9 | Kernel heap | `heap ok` | `alloc` becomes legal. Until `irq: enabled` (step 15) boot may use its infallible API; from then on every allocation is fallible ([§4.4](MEMORY.md#44-kernel-heap)). |
-| 10 | Kernel VA allocator | `kva: ready` | Guarded stacks need it, so threads need it. |
-| 11 | Per-CPU area for the BSP, bootstrap TCB, syscall MSRs | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. Then `thread_init::init_bootstrap` makes the bootstrap thread, with a guarded 64 KiB KVA stack in its `Tcb.stack` (§4.5), and switches boot onto that stack; `main.rs`'s `boot_rest` continues there, and `syscall_init::init_bsp` programs STAR, LSTAR, FMASK (§7.2), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0. `syscall_init::init_bsp` first runs `arch::cpu::init_control_regs`, which writes CR0 and CR4 whole (§11.4). |
-| 12 | ACPI tables | `acpi: xsdt N tables` | MADT drives APIC and SMP, HPET drives calibration. |
-| 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
-| 13b | BSP LAPIC, I/O APIC, LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calib. Prove a tick (TSC-deadline → periodic → PIT), then mask PIC + PIT GSI if LAPIC owns it. |
-| 14 | Scheduler, idle thread on BSP | `sched: cpu0 ready` | Preemption target must exist before the timer starts firing into it. |
-| 15 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver (step 17). |
-| 15b | PCI scan: enumerate, size every BAR (`pci_init::scan`) | (none) | Before step 16, while the BSP runs alone. Sizing writes all-ones to a live BAR and puts it back, which moves the BAR in the physical map; QEMU's TCG rebuilds its memory map for each move and flushes the other vCPUs' TLBs only later, so their MMIO meanwhile can reach the wrong region, and a LAPIC EOI lost that way leaves the timer vector in service: that CPU takes no IPI again and the next shootdown waits on it for good (ROADMAP §10.2). Sets up ECAM from MCFG. Step 17b publishes what it found. |
-| 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
-| 16b | Confirm the clocksource (`time_init::confirm_clocksource`) | `time: clocksource <name>` | After `smp: done`: the TSC ranks first only if the AP warp tests in step 16 saw no backward step, so step 13's choice is provisional until here ([DESIGN §6.4](TIME.md#64-timekeeping-api)). Switches with no step in `now_ns` if the rank changed; no candidate halts with `time: no clocksource`. |
-| 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
-| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). It publishes the list step 15b's scan built. Workqueue + threaded IRQ start, then drivers bind by id. Scan records each function's parent bridge and maps no BAR: a driver maps a memory BAR it has claimed, in its `probe`, through `pci_init::map_bar` (DEVICES.md §12.3); a BAR above 32 MiB is claimed but not mapped (§9.2). |
-| 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. each virtio-blk function (`vda`, `vdb`, …) emits during its probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
-| 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. The FAT32 initrd Limine loaded as a module (§3.2), mounted read-write in place through the physmap, at `/` when live; with no module, or one past `map_end`, a ramfs root. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. a heap-backed vibefs instance at `/vibe` (Phase 8D). No serial marker: a root without `/sbin/init` shows as `user: init failed` and no `shell ready`. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
-| 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. The bootstrap thread spawns `/hello` and waits for it (`proc_init::spawn_elf`, `proc_init::wait_kernel`), `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` checks every `fork`, `execve` and `wait4` result. It forks `/bin/tests`, waits for it, and prints `init: /bin/tests exited <status>` on fd 2 when the wait status is nonzero (a failed start prints `init: /bin/tests start failed: <why>`), then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/src/bin/sh.rs`); the marker is not kernel-emitted; the harness requires `user: tests ok` before it (ROADMAP §10.2). Both children get init's environment. Init then reaps orphans until the shell ends, which prints `init: /bin/sh ended: <status>`, or `wait4` fails (`init: wait4: errno <n>`, `ECHILD` included), and yields and starts `/bin/sh` again. A failed start, a `fork` error (`init: /bin/sh start failed: fork errno <n>`) or a shell child that exits 127 after `init: /bin/sh start failed: execve errno <n>`, counts toward three in a row, after which init exits 1, which panics the kernel (§2.5); a shell on the console never exits 127, since a console read never ends its input. `echo` is `/bin/echo`, which the shell finds through `PATH`. A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
+| 8 | ACPI table walk and the MMIO PTE attribute patch (`acpi_init::init`) | `paging: mmio uc` | LAPIC, I/O APIC and HPET pages must be uncacheable before first touch, so the walk runs right after CR3 and before the heap: moving it after the heap would make that first touch cacheable. Its `acpi: xsdt <n> tables` marker waits for step 12. |
+| 9 | Kernel heap, and a probe allocation read back | `heap ok` | `alloc` becomes legal. Until `irq: enabled` (step 15) boot may use its infallible API; from then on every allocation is fallible ([§4.4](MEMORY.md#44-kernel-heap)). |
+| 10 | Kernel VA allocator, and a guarded-stack probe | `kva: ready` | Guarded stacks need it, so threads and the IST stacks of step 3 need it. This is why steps 6-10 run before steps 3-5. |
+| 3 | GDT + TSS + IST (`gdt::init_bsp`) | `gdt ok` | A known code selector and a double-fault stack before the IDT is worth installing. The IST stacks are guarded KVA stacks (step 10). |
+| 4 | PIC remap and mask (`pic::remap_and_mask`), skipped when the FADT has `IAPC_BOOT_ARCH` bit 0 clear | `pic: remapped` | Firmware may leave the 8259 live with vectors overlapping CPU exceptions. Bit 0 is `LEGACY_DEVICES`, not 8259 presence. QEMU clears it, so on QEMU this step writes nothing. The remap and mask that always runs is `arch::pic::program`, after TSC calibration in step 13 and before step 13b's `sti` (§5.5; ROADMAP §20.1, F094): QEMU still has a PIC on vector 0x08. |
+| 5 | IDT (and, in a `kernel_tests` build, `arch::catch::init`) | `idt ok` | Exceptions become diagnosable. Hardware IRQs are still masked. The order GDT, PIC remap, IDT is fixed. |
+| 11 | Per-CPU area for the BSP, the flight recorder, the thread tables, the bootstrap thread, then `boot_rest`: syscall MSRs and the process layer's hooks | `per_cpu: bsp ready` | After the IDT: `mov gs` during the GDT load zeroes the hidden base, so `GS_BASE` is written after it, and before the first timer IRQ so an ISR can read `gs:[0]`. `thread_init::init_bootstrap` makes the bootstrap thread, with a guarded 64 KiB KVA stack in its `Tcb.stack` (§4.5), and switches boot onto that stack; `main.rs`'s `boot_rest` continues there. `syscall_init::init_bsp` first runs `arch::cpu::init_control_regs`, which writes CR0 and CR4 whole (§11.4), then programs STAR, LSTAR, FMASK (§7.2), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0; `proc_init::init` installs the syscall handler. The marker follows, then the VMCOREINFO note is published. |
+| 12 | ACPI report | `acpi: xsdt <n> tables` | The tables step 8 parsed: the MADT drives APIC and SMP, the HPET drives calibration. |
+| 13 | Time: HPET or PIT, TSC calibration (`time_init::init`), then `pic::program` | `time: calibrated hpet <n>/ms`, `time: calibrated pit <n>/ms`, `time: tsc <n>/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. One of the two calibration lines prints, as the HPET or the PIT calibrates. |
+| 13b | BSP LAPIC, I/O APIC (masked), IRQ chips, `sti`, prove the LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calibration. Enable the LAPIC, program the I/O APIC masked, enable IF, and prove a per-CPU tick (TSC-deadline, then periodic, then the PIT), then mask the PIC and the PIT GSI when the LAPIC owns the tick. The PIT fallback keeps IRQ0 unmasked through LINT0 ExtINT. The timer handler updates the clock, EOIs, rearms (TSC-deadline), then calls `on_timer_tick`, a no-op until the idle thread exists. Then the uptime and meminfo diagnostics, and the process and VFS tables, the last allocations a failure may halt on (§4.4). |
+| 14 | Scheduler, idle thread on the BSP, and the release and gate-wait hooks (§1.2) | `sched: cpu0 ready` | The preemption target must exist before the timer can preempt into it. |
+| 15 | Arm the scheduler; emit `irq: enabled` | `irq: enabled` | The scheduler is live. The timer already ticks from steps 13 and 13b, so this marker is the post-scheduler arming (IF on, preemption live), not the first `sti`. IRQ1 stays masked until the keyboard driver (step 17). |
+| 15b | PCI scan: enumerate, size every BAR (`pci_init::scan`) | (none) | Before step 16, while the BSP runs alone. Sizing writes all-ones to a live BAR and puts it back, which moves the BAR in the physical map; QEMU's TCG rebuilds its memory map for each move and flushes the other vCPUs' TLBs only later, so their MMIO meanwhile can reach the wrong region, and a LAPIC EOI lost that way leaves the timer vector in service: that CPU takes no IPI again and the next shootdown waits on it for good (ROADMAP §10.2). ECAM where the first MCFG allocation covers the bus, else `0xCF8`/`0xCFC` on bus 0 only. Step 17b publishes what it found. |
+| 16 | IPI vectors, then APIC + SMP bring-up (`smp_init::init`) | `smp: trampoline page <addr>`, `sched: cpu<n> ready`, `smp: ap online`, `smp: tsc skew <n> cycles`, `smp: done` | Needs time (delays), the heap (per-CPU allocation), and the scheduler (APs enter as idle). APs come up one at a time: each AP prints `sched: cpu<n> ready`, then the BSP prints `smp: ap online`; with more than one CPU the TSC warp test reports the skew, then `smp: done`. SMP before the console: AP failures stay visible in CI. |
+| 16b | Confirm the clocksource (`time_init::confirm_clocksource`) | `time: clocksource <clocksource>` | After `smp: done`: the TSC ranks first only if the AP warp tests in step 16 saw no backward step, so step 13's choice is provisional until here ([DESIGN §6.4](TIME.md#64-timekeeping-api)). Switches with no step in `now_ns` if the rank changed; no candidate halts with `time: no clocksource`. A `hang_test` build arms its hang here. |
+| 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, initialize the 8042, then unmask the keyboard GSI. After the LAPIC owns the tick the 8259 is masked, so IRQ1 is IOAPIC-only: do not unmask PIC IRQ1 as a fallback. The default PIC handler masks, EOIs, counts, and logs a line no driver claims (§5.5). Replay the pre-FB log ring onto the framebuffer. |
+| 17b | PCI registry, workqueue, threaded IRQs, driver bind | `pci: <n> devices` | After `console ok`. It publishes the list step 15b's scan built: ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Workqueue workers and the threaded-IRQ bottom half start next; drivers (virtio, virtio-blk) register, then bind by id after the scan, not inline. Virtio-rng matches by id when a modern virtio device is present (ktest adds two, and the driver refuses the second; e2e adds none), then the entropy pool. The scan records each function's parent bridge and maps no BAR: a driver maps a memory BAR it has claimed, in its `probe`, through `pci_init::map_bar` (DEVICES.md §12.3); a BAR above 32 MiB is claimed but not mapped (§9.2). |
+| 17c | Block layer, ramdisk, block cache, partitions | `block: ram0 <n> sectors`, `block: ram0p1 <n> sectors`, `block: ram0p2 <n> sectors` | After bind. One line per device: each virtio-blk function (`vda`, `vdb`, …) emits during its probe; the ramdisk (`ram0`) follows in `block_init`; the writeback cache thread starts before the partition scan, which stamps an MBR on `ram0` and emits `block: <parent>p<N> <n> sectors` per child. Only a `kernel_tests` build stamps a GPT, and only on a `vda` whose table fails to parse or has no entries and whose LBA 0-33 and last 33 sectors all read back as zeros; the production kernel never writes `vda` here ([section 10.5](BLOCK.md#105-partitions); ROADMAP §10.11, F003). |
+| 17d | VFS: FAT initrd root, pseudo mounts, vibefs (`file_init::init`) | (none) | After block. The FAT32 initrd Limine loaded as a module (§3.2), mounted read-write in place through the physmap, at `/` when live; with no module, or one past `map_end`, a ramfs root. Then devfs, procfs, tmpfs and sysfs on `/dev`, `/proc`, `/tmp` and `/sys`, and a heap-backed vibefs instance at `/vibe` (Phase 8D). No serial marker: a root without `/sbin/init` shows as `user: init failed` and no `shell ready`. |
+| 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `init: fp initial ok`, `user: tests ok`, `shell ready` | Last. The bootstrap thread spawns `/hello` and waits for it (`proc_init::spawn_elf`, `proc_init::wait_kernel`); a `gp_test`, `panic_nest_test` or `panic_stop_test` build trips here. `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` checks its FP state (`init: fp initial ok`) and every `fork`, `execve` and `wait4` result. It forks `/bin/tests`, waits for it, and prints `init: /bin/tests exited <status>` on fd 2 when the wait status is nonzero (a failed start prints `init: /bin/tests start failed: <why>`), then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/src/bin/sh.rs`); the marker is not kernel-emitted, and the harness requires `user: tests ok` before it (ROADMAP §10.2). Both children get init's environment. Init then reaps orphans until the shell ends, which prints `init: /bin/sh ended: <status>`, or `wait4` fails (`init: wait4: errno <n>`, `ECHILD` included), and yields and starts `/bin/sh` again. A failed start, a `fork` error (`init: /bin/sh start failed: fork errno <n>`) or a shell child that exits 127 after `init: /bin/sh start failed: execve errno <n>`, counts toward three in a row, after which init exits 1, which panics the kernel (§2.5); a shell on the console never exits 127, since a console read never ends its input. `echo` is `/bin/echo`, which the shell finds through `PATH`. A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry, and a `vibefs_crash` build its crash loop. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
@@ -196,51 +199,11 @@ Ordering rules worth stating separately because they were learned the hard way:
 - The PCI scan that sizes BARs (step 15b) runs before the first AP starts, though its
   `pci: N devices` stays at step 17b. A BAR sized while another CPU runs moves under that CPU's
   MMIO: on QEMU's TCG a LAPIC EOI went astray that way and the CPU never acked an IPI again.
-- ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
+- ACPI discovery for the step-8 UC patch runs immediately after CR3 (alongside `paging: mmio uc`).
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
   heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
 - In the ROADMAP §12.1 KASAN build, `_start` maps the early shadow (§4.1) before step 1, since every
   instrumented function reads the shadow, the buddy at step 6 included.
-
-Live boot through Phase 3 slice B runs steps 6–10 (PMM, paging, heap, KVA) before
-steps 3–5 (GDT/TSS/IST, PIC remap, IDT). IST stacks are allocated from the KVA
-allocator, which does not exist until step 10. Relative order among those three
-is unchanged: GDT, then PIC remap, then IDT. Step 11 (`per_cpu: bsp ready`) runs
-after IDT: `mov gs` during GDT load zeros the hidden base, so `GS_BASE` is
-written after that, and before the first timer IRQ so an ISR can `gs:[0]`. ACPI table walk +
-`paging: mmio uc` still run after CR3 (step 8); the `acpi: xsdt N tables` marker
-stays after per_cpu (step 12), then `time: tsc N/ms` (step 13). Step 13b enables
-the LAPIC, programs the I/O APIC (masked), enables IF, proves the per-CPU timer, and
-emits `time: lapic_timer ok (<mode>)` before masking the PIC and the PIT GSI
-when LAPIC owns the tick. PIT fallback keeps IRQ0 unmasked with LINT0 ExtINT.
-The handler updates the clock, EOIs, rearms (TSC-deadline), then
-`on_timer_tick`, a no-op until the idle thread exists. Step 14
-(`sched: cpu0 ready`) then step 15 (`irq: enabled`) follow meminfo: IF on,
-preemption live. Step 16 brings APs up one at a time; each AP prints
-`sched: cpu<i> ready` then the BSP prints `smp: ap online`, then `smp: done`.
-Step 17 is the framebuffer console, PS/2, and mux (`console ok`) after SMP.
-IRQ1 stays masked until the keyboard handler is installed, then the 8042 is
-initialized, then the keyboard GSI is unmasked. After LAPIC owns the tick the
-8259 is masked: IRQ1 is IOAPIC-only. Do not unmask PIC IRQ1 as a fallback. The
-default PIC handler masks, EOIs, counts, and logs a line no driver claims (§5.5). The timer path re-runs the
-8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
-that bit but still has a PIC on 0x08).
-Step 15b enumerates PCI (ECAM where the first MCFG allocation covers the bus, else CF8 on bus 0 only)
-and sizes each BAR before any AP starts. Step 17b fills the device registry from that scan and emits
-`pci: N devices`. Workqueue workers and the threaded-IRQ bottom half start
-next. Drivers register, then bind after the scan, not inline. Virtio-rng
-matches by id when a modern virtio device is present (ktest adds two, and
-the driver refuses the second; e2e does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
-Partition scan stamps an MBR on `ram0`. Only a `kernel_tests` build stamps a GPT, and only on a `vda`
-whose table fails to parse or has no entries and whose LBA 0–33 and last 33 sectors all read back as
-zeros; the production kernel never writes `vda` here ([section 10.5](BLOCK.md#105-partitions); ROADMAP
-§10.11, F003). It emits
-`block: <parent>p<N> <n> sectors` per child. A writeback cache thread starts
-before the scan. `file_init::init` then makes the FAT initrd `/` (a ramfs root only when the initrd is not
-live) and mounts devfs / procfs / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys` and vibefs at
-`/vibe`, with no serial marker. Step 18 runs `/hello`, then starts `/sbin/init`; the trailing
-contract line is `shell ready`, from `/bin/sh` (row 18).
-The harness's `boot_contract_markers()` asserts the live order ([section 8.3](TESTING.md#83-end-to-end)).
 
 Planned (ROADMAP §25.4, §26.4): a boot without Limine starts in the image's direct entry
 ([§4.1](MEMORY.md#41-virtual-address-map)), which runs before step 1 and enters the kernel in the state Limine

@@ -129,7 +129,7 @@ pub unsafe fn init(rsdp_phys: u64) {
     // First MMIO touch: HPET GEN_CAP period, only after that page is UC.
     if hpet_uc && let Some(hpet) = info.hpet.as_mut() {
         let va = (paging_init::HHDM_BASE.wrapping_add(hpet.base)) as *const u64;
-        // SAFETY: invariant I228, established here: `uc_mmio` returned true,
+        // SAFETY: invariant I49, established here: `uc_mmio` returned true,
         // so the HPET register page is mapped UC in the physmap, and
         // GEN_CAP is its aligned first register.
         let cap = unsafe { va.read_volatile() };

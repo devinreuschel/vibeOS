@@ -229,7 +229,7 @@ pub fn claim_mem_bars(dev: &DevRef) -> Result<(), ProbeError> {
         }
         if let Err(back) = hold(claimed, va) {
             if let Some(va) = va {
-                // SAFETY: invariant I484: `va` is where `map_bar` just
+                // SAFETY: invariant I58: `va` is where `map_bar` just
                 // mapped `back`, and nothing has used it; established
                 // here.
                 unsafe { pci_init::unmap_bar(&back, va) };
@@ -254,7 +254,7 @@ pub fn release_bars(dev: &DevRef) {
             continue;
         };
         if let Some(va) = va {
-            // SAFETY: invariant I484: `va` is where `map_bar` mapped
+            // SAFETY: invariant I58: `va` is where `map_bar` mapped
             // `claim` for `dev`'s driver, which has quiesced the device and
             // dropped its VAs (its `remove`, or a probe that failed after
             // its own stop), so nothing touches it; established by

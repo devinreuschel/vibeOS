@@ -58,7 +58,8 @@ RUSTFLAGS="--cfg loom -D warnings" CARGO_TARGET_DIR=target/loom \
 
 Anything in `crates/core/src/lib.rs` and its submodules, compiled as `vibeos-core` on the host. No hardware
 access, no `unsafe` port I/O, no MMIO. The kernel half calls into it. Each port's pure half
-([§11.1](PORTABILITY.md#111-the-seam)) is part of it and runs on every host. Rule; not yet enforced: ROADMAP §10.3.
+([§11.1](PORTABILITY.md#111-the-seam)) is part of it and runs on every host. vibeos-core's host tests reach the architecture seam through `arch::stub::Arch`
+([PORTABILITY.md §11.1](PORTABILITY.md#111-the-seam)).
 The core carries no assembly and no `cfg(target_arch)`, which `scripts/check_core_stable.py` enforces,
 so every host runs all of its tests. A host test of a port's assembly lives in `tests/hostlib`:
 `switch_context_roundtrip`, in `tests/hostlib/tests/switch_context.rs`, includes
@@ -283,7 +284,7 @@ progress deadline is the only one it has, and a timeout fails with `utest hung i
 
 Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
 names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,
-`no smep/smap/umip`, `pit owns tick`, `pic fallback`, `rtc unread`, and `no invariant tsc` (the `Outcome::Skip` reasons
+`no smep/smap/umip`, `pit owns tick`, `pic fallback`, `rtc unread`, `no hypervisor bit`, `no fw_cfg`, `no fw_cfg dma`, and `no invariant tsc` (the `Outcome::Skip` reasons
 in the in-guest test bodies, DESIGN §1.3). Destructive exception tests run inside `arch::catch` scopes, which longjmp out or
 step RIP past the faulting instruction, instead of skipping.
 
@@ -441,7 +442,10 @@ followed by `smp: ap online`, then `smp: done`, then `console ok`, then
 `boot: phase1 done` was a Phase 1–4 stand-in and is no longer in the contract; the
 trailing marker is `shell ready`. After that, the same ISO is booted again and the
 harness types `echo serial-ok` on COM1 and `echo ps2-ok` via QEMU `sendkey` (i8042 /
-IRQ1, the window-keyboard path). Both replies are required. `make test-ps2` is that
+IRQ1, the window-keyboard path). Both replies are required. `echo` is `/bin/echo`, found through
+`PATH`. The harness then types `false` and requires `sh: false: exit 1`, types `ps` and requires
+pid 1's line, and after the 3 s tail types `poweroff` (BIOS) or `reboot` (UEFI) and requires QEMU
+to exit 0. `make test-ps2` is that
 second boot alone. SMP stays before console; the old
 table that listed console as step 15 before SMP was drift and is gone.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
@@ -750,11 +754,12 @@ number of images checked, and the trace's write and flush counts.
 
 | Context | Flags |
 |---------|-------|
-| e2e | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -no-reboot -display none -serial stdio -monitor unix:...,server=on,wait=off -qmp unix:...,server=on,wait=off -S -accel tcg -device pvpanic -device vmcoreinfo -action panic=pause` (`harness.qemu_argv`; the two forensics devices, `FORENSICS_DEVICES`, are on every x86_64 boot: `vmcoreinfo` takes the kernel's note, [VMCOREINFO.md](VMCOREINFO.md); every harness boot starts halted, `-S`, until `cont` on its QMP socket, and `-action panic=pause`, `PANIC_ACTION`, keeps a panicked guest up for its core, §8.3) |
+| e2e | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -no-reboot -display none -serial stdio -monitor unix:...,server=on,wait=off -qmp unix:...,server=on,wait=off -S -accel tcg -device pvpanic -device vmcoreinfo -action panic=pause` (`harness.qemu_argv`; the two forensics devices, `FORENSICS_DEVICES`, are on every x86_64 boot: `vmcoreinfo` takes the kernel's note, [VMCOREINFO.md](VMCOREINFO.md); every harness boot starts halted, `-S`, until `cont` on its QMP socket, and `-action panic=pause`, `PANIC_ACTION`, keeps a panicked guest up for its core, §8.3), and `-fw_cfg name=opt/vibeos/cmdline,string=<words>` when the boot has command-line words (`VIBEOS_CMDLINE`, then `vibeos.ktest=`; a comma doubled) |
 | UEFI (`VIBEOS_BIOS=uefi`, `make test-e2e-uefi`) | as e2e plus `-drive if=pflash,format=raw,unit=0,readonly=on,file=<code>` and `-drive if=pflash,format=raw,unit=1,file=<copy>`, where `<copy>` is a fresh copy of the pair's variable-store template made for each QEMU start (`harness.new_vars_copy`, in one per-process temporary directory that exit removes), and `-boot order=d,menu=off` with `-fw_cfg` entries turning off OVMF's PXE and setup (`harness.OVMF_BOOT_ARGS`). A comma in a path is doubled. Never `-bios` |
 | `make run`, `make run-panic`, `make debug` | e2e's argv, so with `-device pvpanic` and `-device vmcoreinfo`, from `tests/harness/run_interactive.py` (`run`, `panic`, `debug`), which builds it with `env_config` and `harness.qemu_argv` and adds no `-monitor`, `-qmp` or `-S`: `make run` opens a display window instead of `-display none`, `make run-panic` boots `build/vibeos-panic.iso` with `-display none`, and `make debug` is `make run` plus `-s -S`. COM1 is the terminal (`-serial stdio`), and the launcher ignores `SIGINT` while QEMU runs |
 | ktest | as e2e (so with `-device pvpanic` and `-device vmcoreinfo`) plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, a second virtio-rng at `00:1d.0` (`-device virtio-rng-pci,disable-legacy=on,addr=0x1d`, which the driver refuses since one is bound: `rng_second_probe_refused`), a virtio-blk at `00:1e.0` on a 1 MiB `null-co` node (`-blockdev driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on` + `-device virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e`), whose probe a `kernel_tests` hook fails after `QENABLE` at every boot (`virtio_probe_fail_quiesces`), two virtio-blk disks (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`, then the same for a blank 1 MiB `vibehd1`, which binds as `vdb`; the proof boots take only the first, `harness.ktest_devices(..., extra_disks=...)`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`); neither forensics device is PCI. After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
+| ktest, PIT tick (`make test-kernel`'s hpet=off boot) | as ktest plus `-machine pc,hpet=off` and `-cpu <VIBEOS_QEMU_CPU>,-tsc-deadline`, with `vibeos.ktest=` set to `run_ktest.HPET_OFF_KTEST` (`pit_tick_rate` among them) |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` (`LAPIC_FALLBACK_CPU` in the Makefile) |
 | KVM leg (nightly `kvm` job, §8.6) | `-accel kvm -cpu max,+invtsc` through `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, since QEMU leaves invariant TSC out of its default migratable vCPU even under KVM; `/dev/kvm` is opened to the runner user by GitHub's documented udev rule; the LAPIC fallback runs on `qemu64,+invtsc,-tsc-deadline` (`make test-lapic-fallback LAPIC_FALLBACK_CPU=…`), so the invariant-TSC check still applies and the mode is `periodic` |
 | SMP stress | `-smp 4` |
@@ -797,8 +802,10 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
 | `VIBEOS_MCE_TEST` | off | `run_e2e` |
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
+| `VIBEOS_CMDLINE` | empty; kernel command-line words passed through fw_cfg `opt/vibeos/cmdline` (BOOT.md §3.2), ahead of `vibeos.ktest=` | all drivers; `run_interactive` |
 | `VIBEOS_KTEST` | unset; `vibeos.ktest=<value>` (BOOT.md §3.2), a comma-separated glob list that selects the in-guest tests; when set, `run_ktest` boots that selection alone | `run_ktest` (every driver's fw_cfg string) |
 | `VIBEOS_KTEST_REPEAT` | 1; `vibeos.ktest_repeat=<n>`, 1 to 1000, which the kernel checks | `run_ktest` (every driver's fw_cfg string) |
+| `VIBEOS_PANIC_VARIANT` | unset; `stop` or `nest`: the panic-stop or nested-panic ISO's armed line and dump (§8.3) | `run_e2e` |
 | `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
 | `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
 | `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash`, `run_e2e` (the `test-e2e` tier's vda images) |
@@ -918,7 +925,7 @@ id>`, so no run on `main` is cancelled or dropped as pending, and a fork's pull 
 other than `main` alone, on a `tags`, `branches-ignore` or `paths` filter, on a
 missing `pull_request` or `workflow_dispatch` trigger, or on a group that is not built that way
 (`rule_ci_triggers`); on any `concurrency` group built from `github.head_ref` or `github.ref_name`
-(`rule_concurrency_group`); and on a workflow a §10.9 gate entry names that has no
+(`rule_concurrency_group`); and on a workflow a ROADMAP §10.9 gate entry names that has no
 `workflow_dispatch` trigger (`rule_gate_dispatch`). The other rows below are scheduled,
 dispatched, or run on a tag. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9).
 
@@ -941,7 +948,7 @@ macOS job, the KVM leg, the fuzzers, stress, and any job with a performance thre
 name two scheduled workflows, both on the pinned toolchain: the nightly job, which carries the KVM
 leg, and the weekly job (`smp-stress` today); the non-blocking `nightly-canary`, the one job on an
 undated nightly, is neither, and a line that needs its own workflow or another cadence names it
-(§20.8's `hardware-models`, §22.5's `fuzz.yml`, §24.2's rebuilds). A later line that says "in CI"
+(ROADMAP §20.8's `hardware-models`, §22.5's `fuzz.yml`, §24.2's rebuilds). A later line that says "in CI"
 for a functional test means a ladder tier; for a benchmark or a threshold it means the KVM leg. A
 red scheduled job blocks the next phase tag. The earlier no-matrix rule (runner queues) is lifted:
 the repository is public, so standard runners are free and unlimited, and the limits that matter
@@ -966,6 +973,9 @@ two planted rounds and a control round), until a `ci` run measures them:
 | x86_64 | vibefs-crash | `test-vibefs-crash` | 47 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
+
+`test-e2e-init-fault` boots twice (`init_fault`, then `init_no_sh`, about 10 s more under TCG), so
+e2e-2's figure, measured before the second boot, is low by that much.
 
 `test-unit` and `test-harness` run inside `make check`, in the `check` job. The in-guest tiers
 each pass 40 s alone and cannot split below a target.
@@ -1115,7 +1125,7 @@ receives only artifacts and their SHA-256 list (ROADMAP §10.1, §14.6). `releas
 
 **Runners.** Every Linux job runs on GitHub's free `ubuntu-26.04` image (`ubuntu-26.04-arm` for
 arm64 jobs), whose apt QEMU 10.2.1 (`1:10.2.1+ds-1ubuntu3`) meets every QEMU minimum ROADMAP names
-(9.0 for Phase 11's EL2 boot and §20.1's boot with more than 255 vCPUs, 10.2 for §18.1's amd-iommu
+(9.0 for Phase 11's EL2 boot and ROADMAP §20.1's boot with more than 255 vCPUs, 10.2 for §18.1's amd-iommu
 `dma-remap` and Phase 25's GHES injection). A line that needs QEMU 11.1 or later builds that release
 from its tarball, checked by SHA-256 and cached by version; none does yet. Every job that installs
 `qemu-system-*` sets `VIBEOS_QEMU_VERSION` to the version it pins, and when `CI` is set on Linux,
@@ -1171,8 +1181,8 @@ workflow (`rule_lane_map`). `Reserved for` is `nightly`, `weekly`, `scheduled`, 
 | `sched-lane-4` | weekly | `smp-stress.yml` `stress`, `repeat-kernel` |
 | `sched-lane-5` | weekly | `smp-stress.yml` `repeat-kernel-smp4`, `nightly-canary`, `fuzz` |
 | `sched-lane-6` | history | `ci-history.yml` (every job) |
-| `sched-lane-7` | none | multi-day chains (soaks, campaigns); a §22.1 release window |
-| `sched-lane-8` | none | multi-day chains; a §22.1 release window |
+| `sched-lane-7` | none | multi-day chains (soaks, campaigns); a ROADMAP §22.1 release window |
+| `sched-lane-8` | none | multi-day chains; a ROADMAP §22.1 release window |
 | `sched-lane-9` | scheduled | `macos.yml` (P10-S47) |
 
 Release windows: none

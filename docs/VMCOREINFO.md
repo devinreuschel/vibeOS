@@ -125,6 +125,11 @@ layout of the profile the kernel was built with.
 | `PerCpuRemote` | `crates/core/src/smp/per_cpu.rs` | `apic_id` | `smp/per_cpu.rs` |
 | `ReadyQueue` | `crates/core/src/sched/mod.rs` | `ids` (the address of its heap ring of `ThreadId`s), `cap` (the ring's length, `limits::MAX_THREADS`), `head`, `len` | `sched/mod.rs` |
 
+The tool reads two more types by symbol rather than through a key: `PanicLine`
+(`vibeos::log::vmcore::sig`), found through the ELF's `.symtab` as `log::panic::PANIC_LINE`, and the
+flight recorder's `KernelTrace` (`vibeos::log::trace`), the ELF's unmangled `VIBEOS_TRACE`.
+`make vmcore` builds the tool in the kernel's profile, so it reads a core with the matching layouts.
+
 The APIC id is `PerCpuRemote.apic_id`, which the tool reaches through `PerCpu.remote`; `PerCpu`
 has no `apic_id` field of its own. `KernelLog`'s port parameter is only named, so its layout is the
 same for every port.

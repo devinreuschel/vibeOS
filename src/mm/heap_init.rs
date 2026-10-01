@@ -27,7 +27,7 @@ pub(crate) use super::ktest::fail_after;
 struct LockedHeap(Heap);
 // SAFETY: `Heap` holds only pointers into the kernel heap window, which the
 // kernel half maps the same on every CPU and only `Heap` writes (invariant
-// I225, established at `mm::heap_init::grow_for`); `HEAP`'s lock gives one
+// I47, established at `mm::heap_init::grow_for`); `HEAP`'s lock gives one
 // CPU at a time the `&mut`, so moving it between CPUs is sound.
 unsafe impl Send for LockedHeap {}
 
@@ -50,7 +50,7 @@ pub unsafe fn init() {
     // SAFETY: `Heap::init`'s contract; the loop above mapped
     // `[HEAP_START, HEAP_START + HEAP_INITIAL)` writable from fresh buddy
     // frames, `assert_unmapped` proved nothing else maps the window, and
-    // `HEAP_START` is page aligned (invariant I225, established here).
+    // `HEAP_START` is page aligned (invariant I47, established here).
     unsafe {
         HEAP.lock().0.init(
             HEAP_START as usize,
@@ -73,8 +73,8 @@ fn map_one(va: u64) -> Result<(), ()> {
         let pa = pmm_init::with_buddy(|b| b.alloc(0)).ok_or(())?.into_entry();
         // SAFETY: `map_4k_locked`'s contract (`Mapper::map_page`'s): `pa` is a
         // fresh buddy frame nothing else maps, and the heap window below
-        // `va` is the heap's alone (invariant I225, established here); `pt`
-        // is the page-table lock (invariant I226, established at
+        // `va` is the heap's alone (invariant I47, established here); `pt`
+        // is the page-table lock (invariant I48, established at
         // `mm::paging_init::current_mapper`).
         unsafe {
             paging_init::map_4k_locked(pt, va, PhysAddr(pa), heap_flags()).map_err(|_| {
@@ -152,7 +152,7 @@ fn grow_for(layout: Layout) -> bool {
             // SAFETY: `Heap::extend`'s contract; `page_present` found every
             // page of `[now, n)` mapped, and only this heap maps heap-window
             // pages (`map_one`), so the span is writable and unused
-            // (invariant I225, established here).
+            // (invariant I47, established here).
             unsafe { h.0.extend(n) };
         }
     }
@@ -167,7 +167,7 @@ const GROW_ROUNDS: u32 = 4096;
 
 // SAFETY: `GlobalAlloc`'s contract; every block comes from `Heap`, which
 // hands out disjoint blocks of at least the layout's size and alignment
-// inside memory mapped before `Heap::extend` takes it (invariant I225,
+// inside memory mapped before `Heap::extend` takes it (invariant I47,
 // established at `mm::heap_init::grow_for`), and a failure returns null.
 unsafe impl GlobalAlloc for KernelAlloc {
     /// # Safety

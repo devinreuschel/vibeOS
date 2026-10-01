@@ -90,7 +90,7 @@ fn phys_va(phys: u64) -> u64 {
 
 /// # Safety
 /// `va` is the physmap address of a LAPIC register page mapped UC
-/// (invariant I228), and `off` a register offset in it.
+/// (invariant I49), and `off` a register offset in it.
 unsafe fn lapic_read(va: u64, off: u32) -> u32 {
     // SAFETY: this fn's `# Safety` (here): an aligned, mapped register.
     unsafe { (va.wrapping_add(off as u64) as *const u32).read_volatile() }
@@ -105,7 +105,7 @@ unsafe fn lapic_write(va: u64, off: u32, val: u32) {
 
 /// # Safety
 /// `va` is the physmap address of an I/O APIC register page mapped UC
-/// (invariant I228), and the caller holds `STATE`, so no other CPU moves
+/// (invariant I49), and the caller holds `STATE`, so no other CPU moves
 /// `IOREGSEL` between the two accesses.
 unsafe fn io_write(va: u64, reg: u8, val: u32) {
     // SAFETY: this fn's `# Safety` (here): `IOREGSEL` and `IOWIN` are
@@ -161,7 +161,7 @@ unsafe fn enable_lapic(madt: &MadtInfo) -> Option<u64> {
         return None;
     }
     let va = phys_va(phys);
-    // SAFETY: invariant I228, established at `acpi::acpi_init::init`: the
+    // SAFETY: invariant I49, established at `acpi::acpi_init::init`: the
     // MADT's LAPIC page is UC in the physmap (this fn's `# Safety`), and
     // `va` is its physmap address.
     unsafe {
@@ -203,7 +203,7 @@ fn enum_ioapics(madt: &MadtInfo, st: &mut ApicState) {
             continue;
         }
         let va = phys_va(phys);
-        // SAFETY: invariant I228, established at `acpi::acpi_init::init`:
+        // SAFETY: invariant I49, established at `acpi::acpi_init::init`:
         // every MADT I/O APIC page is UC in the physmap, and `va` is its
         // physmap address; the caller holds `STATE`.
         let ver = unsafe { io_read(va, IOAPIC_VER) };
@@ -221,7 +221,7 @@ fn enum_ioapics(madt: &MadtInfo, st: &mut ApicState) {
 }
 
 fn mask_all_pins(st: &ApicState) {
-    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // `st.lapic_va` is set only from its return.
     let dest = unsafe { local_apic_id(st.lapic_va) };
     let mut i = 0;
@@ -237,7 +237,7 @@ fn mask_all_pins(st: &ApicState) {
                 Polarity::High,
                 true,
             );
-            // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enum_ioapics`:
+            // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enum_ioapics`:
             // `io.va` is set only there, and the caller holds `STATE`.
             write_redir(
                 |reg, val| unsafe { io_write(io.va, reg, val) },
@@ -252,7 +252,7 @@ fn mask_all_pins(st: &ApicState) {
 }
 
 fn apply_isos(st: &ApicState, madt: &MadtInfo) {
-    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // `st.lapic_va` is set only from its return.
     let dest = unsafe { local_apic_id(st.lapic_va) };
     let mut unrouted = 0usize;
@@ -316,7 +316,7 @@ fn route_gsi_inner(
     };
     let high = redir_high(cpu);
     let low = redir_low(vector, trigger, polarity, masked);
-    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enum_ioapics`:
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enum_ioapics`:
     // `io.va` is set only there, and the caller holds `STATE`.
     write_redir(
         |reg, val| unsafe { io_write(io.va, reg, val) },
@@ -360,7 +360,7 @@ fn set_gsi_mask_inner(st: &ApicState, gsi: u32, masked: bool) {
         return;
     };
     let (lo, hi) = apic::ioapic_redir_regs(pin);
-    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enum_ioapics`:
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enum_ioapics`:
     // `io.va` is set only there, and the caller holds `STATE`.
     let (high, low) = unsafe { (io_read(io.va, hi), io_read(io.va, lo)) };
     let low = redir_set_mask(low, masked);
@@ -377,7 +377,7 @@ fn set_gsi_mask_inner(st: &ApicState, gsi: u32, masked: bool) {
 pub fn eoi() {
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va != 0 {
-        // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+        // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
         // a nonzero `LAPIC_VA` is its return, published by `publish_isr`.
         unsafe { lapic_write(va, LAPIC_EOI, 0) };
     }
@@ -392,7 +392,7 @@ pub fn in_service(vec: u8) -> bool {
         return false;
     }
     let (off, mask) = apic::isr_reg(vec);
-    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // a nonzero `LAPIC_VA` is its return, published by `publish_isr`, and
     // `isr_reg` gives an ISR register offset in that page.
     unsafe { lapic_read(va, off) & mask != 0 }
@@ -413,7 +413,7 @@ pub fn send_ipi(dest: u8, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
     if va == 0 {
         return Err(IpiError::NotReady);
     }
-    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // a nonzero `LAPIC_VA` is its return, published by `publish_isr`.
     let icr = || unsafe { lapic_read(va, LAPIC_ICR_LOW) };
     if !poll_delivery_pending(icr, ICR_POLL_CAP) {
@@ -454,7 +454,7 @@ pub fn send_ipi_all_ex_self(vector: u8) -> Result<(), IpiError> {
     if crate::per_cpu_init::online_mask().count_ones() <= 1 {
         return Ok(());
     }
-    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // a nonzero `LAPIC_VA` is its return, published by `publish_isr`.
     let icr = || unsafe { lapic_read(va, LAPIC_ICR_LOW) };
     if !poll_delivery_pending(icr, ICR_POLL_CAP) {
@@ -631,7 +631,7 @@ pub fn on_spurious_irq() {
 pub fn on_error_irq() {
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va != 0 {
-        // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+        // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
         // a nonzero `LAPIC_VA` is its return, published by `publish_isr`.
         let esr = unsafe {
             lapic_write(va, LAPIC_ESR, 0);
@@ -652,7 +652,7 @@ pub fn on_thermal_irq() {
 
 fn mask_pic_and_pit(st: &ApicState, madt: &MadtInfo) {
     arch::pic::disable_all();
-    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // `st.lapic_va` is set only from its return.
     unsafe { lapic_write(st.lapic_va, LAPIC_LVT_LINT0, LVT_MASKED) };
     let gsi = apic::gsi_for_isa_irq(0, &madt.isos[..madt.iso_count]);
@@ -668,7 +668,7 @@ fn unmask_pit_fallback() {
     if va != 0 {
         // PIC virtual-wire: ExtINT on LINT0. Masked LINT0 (enable path)
         // swallows IRQ0 even after unmasking the 8259.
-        // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+        // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
         // a nonzero `LAPIC_VA` is its return, published by `publish_isr`.
         unsafe { lapic_write(va, LAPIC_LVT_LINT0, LVT_DELIVERY_EXTINT) };
     }
@@ -727,7 +727,7 @@ pub fn prove() {
             st.mode = TimerMode::TscDeadline;
             publish_isr(st);
         });
-        // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+        // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
         // `va` is `st.lapic_va`, set only from its return, and `want_td`
         // is the CPUID TSC-deadline bit.
         unsafe { arm_tsc_deadline(va, tsc_per_ms) };
@@ -741,7 +741,7 @@ pub fn prove() {
         crate::marker!("vibeOS: time: tsc-deadline no ticks");
     }
 
-    // SAFETY: invariant I228, established at `arch::x86_64::apic_init::enable_lapic`:
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // `va` is `st.lapic_va`, set only from its return.
     match unsafe { calib_periodic(va) } {
         Some(per_ms) => {
@@ -823,7 +823,7 @@ pub fn arm_ap() {
             return;
         }
         match st.mode {
-            // SAFETY: invariant I228, established at
+            // SAFETY: invariant I49, established at
             // `arch::x86_64::apic_init::enable_lapic`: `st.lapic_va` is set
             // only from its return, every CPU maps the LAPIC at that one VA,
             // and `st.mode` is TSC-deadline only when the BSP's CPUID

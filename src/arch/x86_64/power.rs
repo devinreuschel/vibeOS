@@ -24,7 +24,7 @@ use crate::paging_init;
 pub fn power_off() -> ! {
     try_acpi_sleep_s5();
     // SAFETY: 0x604 and 0xB004 are QEMU's and Bochs's ACPI power-off ports,
-    // which no module but this one writes (invariant I229 gives them no
+    // which no module but this one writes (invariant I50 gives them no
     // owner), and a power-off is this function's purpose; established here.
     unsafe {
         x86::outw(0x604, 0x2000);
@@ -39,7 +39,7 @@ pub fn restart() -> ! {
     try_acpi_reset();
     pulse_8042();
     // SAFETY: 0xCF9 is the chipset's reset control, which no module but
-    // this one writes (invariant I229 gives it no owner), and a reset is
+    // this one writes (invariant I50 gives it no owner), and a reset is
     // this function's purpose; established here.
     unsafe { x86::outb(0xCF9, 0x06) };
     x86::halt();
@@ -77,7 +77,7 @@ fn write_gas(gas: Gas, val: u8) {
         GAS_SYSTEM_IO => {
             let port = gas.address as u16;
             // SAFETY: the port is the reset or sleep register the FADT names,
-            // which no module but this one writes (invariant I229), and the
+            // which no module but this one writes (invariant I50), and the
             // write is the one ACPI defines for it, which ends the machine;
             // the firmware's address is trusted as the ACPI tables are (DESIGN
             // §2.10); established here.
@@ -107,11 +107,11 @@ fn write_gas(gas: Gas, val: u8) {
 fn pulse_8042() {
     let mut n = 100_000u32;
     while n > 0 {
-        // SAFETY: the 8042's owner is `console::kbd_init` (invariant I229);
+        // SAFETY: the 8042's owner is `console::kbd_init` (invariant I50);
         // this reads its status to pulse its reset line, which ends the
         // machine, so the owner's state no longer matters; established here.
         if unsafe { x86::inb(vibeos::kbd::STATUS) } & vibeos::kbd::STAT_IBF == 0 {
-            // SAFETY: as for the status read above (invariant I229); the
+            // SAFETY: as for the status read above (invariant I50); the
             // 0xFE command pulses the CPU reset line; established here.
             unsafe { x86::outb(vibeos::kbd::CMD, 0xFE) };
             return;

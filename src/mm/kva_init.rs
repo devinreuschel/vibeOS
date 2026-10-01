@@ -91,7 +91,7 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
             // SAFETY: `map_4k_locked`'s contract; `pa` is the fresh frame
             // above and `va` a page of the range `alloc_guarded` just
             // reserved, which nothing else maps; `pt` holds the page-table
-            // lock (invariant I226, established at
+            // lock (invariant I48, established at
             // `mm::paging_init::current_mapper`).
             if unsafe { paging_init::map_4k_locked(pt, va, pa, stack_flags()) }.is_err() {
                 return Err(KvaError::Map);
@@ -347,7 +347,7 @@ pub fn vmap(frames: Frames) -> Result<Vmap, KvaError> {
             // SAFETY: `map_4k_locked`'s contract; frame `mapped` of the
             // `frames` block this fn owns goes to a page of the range
             // `k.alloc` just reserved, which nothing else maps; `pt` holds
-            // the page-table lock (invariant I226, established at
+            // the page-table lock (invariant I48, established at
             // `mm::paging_init::current_mapper`).
             let one =
                 unsafe { paging_init::map_4k_locked(pt, page, PhysAddr(pa0 + off), heap_flags()) };

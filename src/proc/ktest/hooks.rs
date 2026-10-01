@@ -19,7 +19,7 @@ use crate::x86::{self, EFER_SCE, IA32_EFER, IA32_STAR};
 /// it in this CPU's `PerCpuRemote.as_cr3`. No TCB names it, so the next
 /// switch back to the calling thread loads that thread's own root again.
 pub(crate) fn load_cr3(space: &Space) {
-    // SAFETY: invariant I128: the root is a PML4 `addr_space_init::create`
+    // SAFETY: invariant I44: the root is a PML4 `addr_space_init::create`
     // or `addr_space_init::clone_full` built, whose kernel half is the
     // kernel's, and only the core's free frees it, which refuses a root this
     // CPU has loaded or recorded, and `space` holds a reference meanwhile;

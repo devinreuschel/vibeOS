@@ -60,7 +60,7 @@ errno_table! {
     NoExec = 8, "ENOEXEC", "malformed ELF, `ET_DYN`, or `PT_INTERP`";
     BadF = 9, "EBADF", "closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd";
     Child = 10, "ECHILD", "`wait4` with no matching child";
-    Again = 11, "EAGAIN", "`fork` with every process-table slot in use, zombies included (`limits::MAX_PROCS` is 256), or no pid free (pids and tids share one allocator, up to 32,767, then from 300), or the thread table has no free slot (ROADMAP §10.4, F037)";
+    Again = 11, "EAGAIN", "`fork` with every process-table slot in use, zombies included (`limits::MAX_PROCS` is 256), or no pid free (pids and tids share one allocator, up to 32,767, then from 300), or the thread table has no free slot (ROADMAP §10.4, F037); `read` of `/dev/random` or `/dev/urandom` when virtio-rng and `RDRAND` supply no byte (ROADMAP §10.12; until §13.10)";
     NoMem = 12, "ENOMEM", "AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table (256 regions, `limits::MAX_REGIONS`, where Linux's `vm.max_map_count` allows 65,530; ROADMAP §10.4), a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4), `execve` argument buffers included";
     Acces = 13, "EACCES", "`open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys`";
     Fault = 14, "EFAULT", "bad user pointer / length";
@@ -70,7 +70,7 @@ errno_table! {
     NoDev = 19, "ENODEV", "a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4";
     NotDir = 20, "ENOTDIR", "";
     IsDir = 21, "EISDIR", "";
-    Inval = 22, "EINVAL", "`lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written";
+    Inval = 22, "EINVAL", "`lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written; `open` or `execve` of the empty path (Linux: `ENOENT`); `open` with `O_TRUNC` of a `/proc` file";
     NFile = 23, "ENFILE", "`open` or `execve` with the system-wide open-file table full: 1024 open files, `limits::MAX_OPEN_FILES`";
     MFile = 24, "EMFILE", "per-process fd table full: 256 descriptors, `limits::MAX_FDS` (`open`, `dup`)";
     FBig = 27, "EFBIG", "a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit";
@@ -80,7 +80,7 @@ errno_table! {
     NameTooLong = 36, "ENAMETOOLONG", "path of 256 bytes or more; name above 64 bytes. ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255";
     NoSys = 38, "ENOSYS", "unknown number";
     NotEmpty = 39, "ENOTEMPTY", "defined; no syscall returns it";
-    Loop = 40, "ELOOP", "`open` or `execve` through too many symbolic links";
+    Loop = 40, "ELOOP", "`open` or `execve` through too many symbolic links, or a walk of more than 80 steps (`limits::MAX_WALK`)";
     OpNotSupp = 95, "EOPNOTSUPP", "defined; no syscall returns it. It is left for the cases Linux gives it, such as an extended-attribute namespace a mount refuses (ROADMAP §14.8)";
 }
 

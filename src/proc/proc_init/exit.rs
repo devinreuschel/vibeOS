@@ -72,13 +72,13 @@ pub(super) fn finish_exit(wait_status: u32, fault: Option<u64>) -> ! {
     let _ = ppid;
     if let Some(space) = old {
         // The TCB stops naming the root before the kernel root is loaded,
-        // so a switch back in between cannot reload it (invariant I128).
+        // so a switch back in between cannot reload it (invariant I44).
         thread_init::set_pid_cr3(tid, 0, 0);
         crate::arch::gs::force_kernel();
         addr_space_init::load_kernel_cr3();
         // The thread's `users` put, after every lock: the last one tears
         // the space down, and the core's free asserts the root is loaded
-        // and named nowhere (invariant I128).
+        // and named nowhere (invariant I44).
         drop(space);
     }
     crate::arch::gs::force_kernel();

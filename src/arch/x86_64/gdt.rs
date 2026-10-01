@@ -75,7 +75,7 @@ impl CpuTables {
             limit: GDT_LIMIT,
             base: core::ptr::addr_of!(self.gdt) as u64,
         };
-        // SAFETY: invariant I230, established at `arch::x86_64::gdt::init_bsp`
+        // SAFETY: invariant I51, established at `arch::x86_64::gdt::init_bsp`
         // and `smp::smp_init::start_one`: `self` is this CPU's live tables
         // (this fn's `# Safety`) and never moves or is freed while the CPU is
         // online, so the GDT and the TSS its descriptor names stay valid.
@@ -135,7 +135,7 @@ pub(crate) struct Bsp {
         not(feature = "kernel_tests"),
         expect(
             dead_code,
-            reason = "invariant I230 (DESIGN §2.7): holds the IST stacks the TSS names for the BSP's life"
+            reason = "invariant I51 (DESIGN §2.7): holds the IST stacks the TSS names for the BSP's life"
         )
     )]
     pub(crate) ist: [GuardedStack; 4],
@@ -284,7 +284,7 @@ pub unsafe fn init_bsp() {
     // SAFETY: invariant I22, established at `cell::BootCell::set`: the one
     // write, on the BSP before SMP (this fn's `# Safety`).
     unsafe { BSP.set(bsp) };
-    // SAFETY: invariant I230, established here: the tables live in the
+    // SAFETY: invariant I51, established here: the tables live in the
     // `BSP` static, at the address `init` filled them for, so they never
     // move or are freed; IRQs are off (this fn's `# Safety`).
     unsafe { BSP.get().tables.load() };
@@ -306,7 +306,7 @@ pub fn this_cpu_stacks(cpu: &PerCpu) -> [(u64, usize); 5] {
     let mut out = [(0u64, 0usize); 5];
     let tables = cpu.tables.cast::<CpuTables>();
     if !tables.is_null() {
-        // SAFETY: invariant I230, established at `arch::x86_64::gdt::init_bsp`
+        // SAFETY: invariant I51, established at `arch::x86_64::gdt::init_bsp`
         // and `smp::smp_init::start_one`: a non-null `PerCpu.tables` is the
         // `CpuTables` this CPU loaded (`syscall_init::init_bsp`,
         // `syscall_init::init_ap`), which never moves or is freed while

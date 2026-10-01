@@ -23,11 +23,16 @@ The 2026-09-23 [kernel review](docs/reviews/KERNEL_REVIEW.md) lists 152 findings
 docs, and CI, 3 of them critical and 17 high. Among them are seven ways a user process can halt the kernel
 (F004 to F010), which Phase 10 fixes. ROADMAP boxes the review showed false are open again or reworded
 to match the code, and the ROADMAP line that fixes each finding cites its id.
-Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port) and Phase 12 (demand
-paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
-Do not run code you do not trust on vibeOS, and keep no secrets on it: until Phase 10 closes a process
-can crash the kernel, and until Phase 18 nothing stops one from reading other processes' memory
-([DESIGN §2.10](docs/INVARIANTS.md#210-trust-boundaries)).
+Phase 10 (consolidation) has its code and its per-push tests in, and every tier `make test` runs
+passes under TCG with no harness retry. Its exit gate closes once the scheduled
+runs on `main` (the nightly KVM leg, the models and Miri, the weekly stress and fuzz jobs, macOS) pass
+and the maintainer has run the release steps. TCG proves the per-push tiers; the timing a real CPU
+gives, the TSC-deadline timer and SIMD exceptions are proved only by the KVM leg, so the gate lines
+that name it wait for it. Phase 11 (portability: the aarch64 port) and Phase 12 (demand paging / COW)
+are not started. See [The arc](docs/ROADMAP.md#the-arc).
+Do not run code you do not trust on vibeOS, and keep no secrets on it: until the KVM leg proves Phase
+10's ring-3 lines a process may still find a way to crash the kernel, and until Phase 18 nothing stops
+one from reading other processes' memory ([DESIGN §2.10](docs/INVARIANTS.md#210-trust-boundaries)).
 Do not attach a disk you want to keep to `vibeos-ktest.iso`, which stamps a GPT on an all-zero `vda` and writes fixed sectors of any attached one (F145).
 Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). The maintainer pushes the tags and dispatches `release.yml` from `main`
 ([docs/RELEASING.md](docs/RELEASING.md)); a release publishes `vibeos.iso` alone, built with the release profile,
@@ -68,13 +73,17 @@ Docs live in [`docs/`](docs/). The other docs in the root are the changelog, [AG
   - [PITFALLS.md](docs/PITFALLS.md) (§9): bugs already paid for once.
   - [BLOCK.md](docs/BLOCK.md) (§10), [PORTABILITY.md](docs/PORTABILITY.md) (§11) and
     [DEVICES.md](docs/DEVICES.md) (§12).
+  - [ARCH.md](docs/ARCH.md): the architecture seam map and the x86 audit, beside §11.
 - [ROADMAP.md](docs/ROADMAP.md): 40 phases in eight eras, from boot through self-hosting to a stable 1.0,
   all on free infrastructure, each with a goal, an exit gate, and per-part task lists; what money would
   add is a separate list of funded goals.
 - [VIBEFS.md](docs/VIBEFS.md): vibefs on-disk format (version field in that file). Not DESIGN.
+- [VMCOREINFO.md](docs/VMCOREINFO.md): the kernel's VMCOREINFO note, a format one build writes and
+  another build's core tool reads. Not DESIGN.
 - [SYSCALL.md](docs/SYSCALL.md): syscall ABI. Not DESIGN.
 - [LINUX.md](docs/LINUX.md): which Linux release "Linux's" means, deliberate differences from it, and
   native interfaces. Not DESIGN.
+- [RELEASING.md](docs/RELEASING.md): the maintainer's release steps.
 - [reviews/](docs/reviews/): the architecture, roadmap, and kernel reviews Phase 10 comes from,
   per-item plans in `reviews/issues/`, and the design reviews' decisions in `DESIGN_REVIEWS.md`.
 

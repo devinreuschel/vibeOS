@@ -57,7 +57,7 @@ fn kbd_ioapic(_frame: &mut arch::idt::TrapFrame) {
 
 fn kbd_pic(_frame: &mut arch::idt::TrapFrame) {
     on_irq();
-    // SAFETY: invariant I229 names IRQ1's master 8259 EOI as an exception to
+    // SAFETY: invariant I50 names IRQ1's master 8259 EOI as an exception to
     // `arch::x86_64::pic`'s ownership of port 0x20, and an EOI touches no
     // memory; established by `arch::x86_64::pic::program`.
     unsafe { x86::outb(PIC1_CMD, PIC_EOI) };
@@ -65,7 +65,7 @@ fn kbd_pic(_frame: &mut arch::idt::TrapFrame) {
 
 /// ISR: read 0x60, push, return. No alloc, no log.
 pub fn on_irq() {
-    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+    // SAFETY: invariant I50: ports 0x60 and 0x64 belong to the 8042's owner,
     // this module, and a port read or write touches no memory; established by
     // `kbd_init::init`.
     let status = unsafe { x86::inb(STATUS) };
@@ -150,7 +150,7 @@ fn iso_irq1(isos: &[Iso], gsi: u32) -> (Trigger, Polarity) {
 fn wait_ibf_clear() -> bool {
     let mut n = POLL_CAP;
     while n > 0 {
-        // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+        // SAFETY: invariant I50: ports 0x60 and 0x64 belong to the 8042's owner,
         // this module, and a port read or write touches no memory; established by
         // `kbd_init::init`.
         if unsafe { x86::inb(STATUS) } & STAT_IBF == 0 {
@@ -164,7 +164,7 @@ fn wait_ibf_clear() -> bool {
 fn wait_obf() -> bool {
     let mut n = POLL_CAP;
     while n > 0 {
-        // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+        // SAFETY: invariant I50: ports 0x60 and 0x64 belong to the 8042's owner,
         // this module, and a port read or write touches no memory; established by
         // `kbd_init::init`.
         if unsafe { x86::inb(STATUS) } & STAT_OBF != 0 {
@@ -179,7 +179,7 @@ pub(super) fn write_cmd(cmd: u8) -> bool {
     if !wait_ibf_clear() {
         return false;
     }
-    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+    // SAFETY: invariant I50: ports 0x60 and 0x64 belong to the 8042's owner,
     // this module, and a port read or write touches no memory; established by
     // `kbd_init::init`.
     unsafe { x86::outb(kbd::CMD, cmd) };
@@ -190,7 +190,7 @@ pub(super) fn write_data(data: u8) -> bool {
     if !wait_ibf_clear() {
         return false;
     }
-    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+    // SAFETY: invariant I50: ports 0x60 and 0x64 belong to the 8042's owner,
     // this module, and a port read or write touches no memory; established by
     // `kbd_init::init`.
     unsafe { x86::outb(DATA, data) };
@@ -201,7 +201,7 @@ pub(super) fn read_data() -> Option<u8> {
     if !wait_obf() {
         return None;
     }
-    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+    // SAFETY: invariant I50: ports 0x60 and 0x64 belong to the 8042's owner,
     // this module, and a port read or write touches no memory; established by
     // `kbd_init::init`.
     Some(unsafe { x86::inb(DATA) })
@@ -209,7 +209,7 @@ pub(super) fn read_data() -> Option<u8> {
 
 pub(super) fn flush_obf() {
     let mut n = 16u32;
-    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to this module, and
+    // SAFETY: invariant I50: ports 0x60 and 0x64 belong to this module, and
     // a port read touches no memory; established by `kbd_init::init`. The
     // drained byte is dropped by design.
     while n > 0 && unsafe { x86::inb(STATUS) } & STAT_OBF != 0 {

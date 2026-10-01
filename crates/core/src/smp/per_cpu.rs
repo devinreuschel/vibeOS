@@ -215,7 +215,7 @@ pub struct PerCpu {
     pub remote: &'static PerCpuRemote,
 }
 
-// SAFETY: invariant I120 and invariant I21, established by the view split
+// SAFETY: invariant I43 and invariant I21, established by the view split
 // at `smp::per_cpu::PerCpuRemote` and, in the kernel, by
 // `per_cpu_init::cpu`, `per_cpu_init::with_current` and
 // `per_cpu_init::with_cpu`: the kernel's `CPUS` hands a `PerCpu` to its
@@ -224,7 +224,7 @@ pub struct PerCpu {
 // CPUs read only the atomic `PerCpuRemote` that `remote` points to. The raw
 // pointers it holds are owner-only and never dereferenced by another CPU.
 unsafe impl Send for PerCpu {}
-// SAFETY: as for `Send` above: invariant I120 and invariant I21,
+// SAFETY: as for `Send` above: invariant I43 and invariant I21,
 // established at `smp::per_cpu::PerCpuRemote` and the kernel's
 // `per_cpu_init::with_current` and `per_cpu_init::with_cpu`.
 unsafe impl Sync for PerCpu {}
