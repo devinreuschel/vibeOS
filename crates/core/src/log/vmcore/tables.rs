@@ -24,9 +24,11 @@ use crate::thread::{CpuContext, Tcb, ThreadState};
 
 // The payload of a `ThreadState` variant sits after its `u32` tag at 8
 // (`#[repr(u32)]`: the tag, then each variant's fields as a `repr(C)`
-// struct), as docs/VMCOREINFO.md states; `sched/thread.rs` pins the size.
+// struct), as docs/VMCOREINFO.md states: `Sleeping`'s deadline and
+// `Blocked`'s queue at 8, `Blocked`'s deadline at 16. `sched/thread.rs`
+// pins the size.
 const STATE_ARG: usize = 8;
-const _: () = assert!(size_of::<ThreadState>() == 16);
+const _: () = assert!(size_of::<ThreadState>() == 24);
 
 /// A TCB as the core holds it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -506,9 +506,14 @@ English words, and a substring match on prose produces false failures that erode
 A registered failure line can also report a failure the kernel survived, so a run that shows one
 would otherwise pass. The blocked-thread sweep's `vibeOS: sched: overdue tid <id>` (ROADMAP §10.7),
 and `vibeOS: block: <dev> timeout` and `vibeOS: block: <dev> reset` (ROADMAP §12.5), are such rows;
-planned (ROADMAP §25.5), the soft lockup, hard lockup, and hung-thread reports follow. A test that
-provokes one on purpose declares it; in any other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
-lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a 30 s pause.
+planned (ROADMAP §25.5), the soft lockup, hard lockup, and hung-thread reports follow. The overdue
+line is built. A test that provokes one on purpose declares it in `tests/harness/declared.py`,
+whose `DECLARED` maps the test's name to the row texts it provokes (`sched_overdue_lost_timeout`
+declares the overdue line). In a ktest boot a declared line inside that test's `run`..`ok`/`FAIL`
+window is its expected output, and the test fails if it reaches `ok` without it. In any other run,
+or outside that window, the line fails the run, since a recovery no test expected is a bug a
+timeout hides, such as a lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a
+30 s pause.
 
 The in-guest runner's failure lines fail a `make test-kernel` run, matched on framed lines only
 (§8.2): `check_ktest_output` rejects every `vibeOS: ktest: FAIL <name>: <reason>` (a `test` row),

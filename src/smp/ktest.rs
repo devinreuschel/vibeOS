@@ -141,7 +141,6 @@ fn identity_on_ap(_: *mut ()) {
         && per_cpu_init::slot_ptr(id) == Some(c.self_ptr)
         && !c.idle.is_null()
         && !arch::current_tcb().is_null()
-        && c.tsc_per_ms != 0
         && per_cpu_init::cpu(id).is_some_and(|r| core::ptr::eq(r, c.remote));
     if !ok {
         IDENTITY_BAD.fetch_or(1u64 << id, Ordering::Release);

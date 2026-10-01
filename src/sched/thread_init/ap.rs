@@ -51,8 +51,6 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         stack: None,
         context: CpuContext::empty(),
         entry: ap_idle_entry,
-        next: None,
-        prev: None,
         affinity: CpuAffinity::Pinned(cpu_id),
         cpu: cpu_id,
         irq_nest: 0,
@@ -62,7 +60,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         as_cr3: 0,
         fpu: fpu_template(),
         fp_cpu: None,
-        syscall_count: 0,
+        syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid: 0,
         no_reclaim: AtomicU32::new(0),
     });
@@ -101,8 +99,6 @@ fn fill_ap_idle(tcb: &mut Tcb, cpu_id: u32) {
     tcb.on_cpu.set();
     tcb.context = CpuContext::empty();
     tcb.entry = ap_idle_entry;
-    tcb.next = None;
-    tcb.prev = None;
     tcb.affinity = CpuAffinity::Pinned(cpu_id);
     tcb.cpu = cpu_id;
     tcb.irq_nest = 0;
@@ -113,7 +109,8 @@ fn fill_ap_idle(tcb: &mut Tcb, cpu_id: u32) {
     tcb.fpu = fpu_template();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
-    tcb.syscall_count = 0;
+    // Relaxed: a statistic, reset before the thread first runs.
+    tcb.syscall_count.store(0, Ordering::Relaxed);
     tcb.pid = 0;
     tcb.no_reclaim.store(0, Ordering::Relaxed);
 }

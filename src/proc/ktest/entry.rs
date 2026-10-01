@@ -214,7 +214,7 @@ pub(crate) fn test_ring3_syscall_enosys() -> Outcome {
 
 pub(crate) fn test_ring3_hello_exit() -> Outcome {
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf(b"/hello", &[], &[], 0, 0) {
+    let pid = match proc_init::spawn_elf(b"/hello", &[&b"/hello"[..]], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
     };
@@ -341,9 +341,44 @@ pub(crate) fn test_syscall_ptr_validate() -> Outcome {
     }
 }
 
+/// Grow the kernel heap to what `/bin/tests`' `exec_args` cases take, so
+/// the count below sees no growth: argument blocks filled to Linux's
+/// 2 MiB limit in `copy_cvec`'s 256-byte chunks (ROADMAP §10.5), two at
+/// once, the headroom first-fit placement needs when the heap's free
+/// space is split. The heap keeps the pages it maps, so without this the
+/// first such `execve` in the window reads as frames lost.
+fn warm_exec_args() {
+    use vibeos::elf::{ExecArgs, arg_space_limit};
+    use vibeos::limits::{MAX_ARG_STRLEN, RLIMIT_STACK_DEFAULT};
+    let fill = |args: &mut ExecArgs| {
+        let chunk = [b'x'; 256];
+        loop {
+            if args.begin(false).is_err() {
+                return;
+            }
+            let mut len = 0usize;
+            while len + chunk.len() < MAX_ARG_STRLEN {
+                if args.extend(&chunk).is_err() {
+                    return;
+                }
+                len += chunk.len();
+            }
+            if args.end().is_err() {
+                return;
+            }
+        }
+    };
+    let limit = arg_space_limit(RLIMIT_STACK_DEFAULT);
+    let mut a = ExecArgs::new(limit);
+    let mut b = ExecArgs::new(limit);
+    fill(&mut a);
+    fill(&mut b);
+}
+
 pub(crate) fn test_user_syscalls() -> Outcome {
+    warm_exec_args();
     let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf(b"/bin/tests", &[], &[], 0, 0) {
+    let pid = match proc_init::spawn_elf(b"/bin/tests", &[&b"/bin/tests"[..]], &[], 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
     };

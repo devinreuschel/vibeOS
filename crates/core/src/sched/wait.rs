@@ -906,7 +906,10 @@ mod tests {
             &mut ReadyQueue::empty(),
             tid(1),
             tid(0),
-            ThreadState::Blocked { wq: 0 },
+            ThreadState::Blocked {
+                wq: 0,
+                deadline: FAR_DEADLINE,
+            },
         );
     }
 }

@@ -192,7 +192,7 @@ args = [
   { name = "argv", type = "const char *const *", ptr = "strvec", null = true, when = "after `pathname`" },
   { name = "envp", type = "const char *const *", ptr = "strvec", null = true, when = "after `argv`" },
 ]
-note = "`argv` and `envp` at most 15 strings of at most 255 bytes each; `envp` copied and dropped"
+note = "`argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1)"
 
 [[syscall]]
 name = "exit"

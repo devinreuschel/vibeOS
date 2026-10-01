@@ -132,6 +132,12 @@ jobs:
       - name: make check
         run: time make check
 
+      # The shared-page ELFs the in-guest elf_shared_page tests load, run on
+      # the hosted x86_64 Linux runner itself: Linux must exit 0 and SIGSEGV
+      # as vibeOS does, or the loader's rule is wrong (ROADMAP §10.6, F031).
+      - name: "native Linux: shared-page ELFs (ROADMAP §10.6, F031)"
+        run: python3 scripts/mkelf_shared.py --run-native tests/fixtures/elf
+
       - name: install cargo-llvm-cov
         run: |
           if ! command -v cargo-llvm-cov >/dev/null 2>&1; then

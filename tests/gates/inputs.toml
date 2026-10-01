@@ -79,6 +79,10 @@ glob = "tests/contract/markers.toml"
 why = "the registered marker lines check_markers.py and the harness match"
 
 [[input]]
+path = "tests/harness/declared.py"
+why = "the registered failure lines an in-guest test declares, which a ktest run then expects instead of failing on (ROADMAP §10.7)"
+
+[[input]]
 glob = "deny.toml"
 why = "cargo deny's license, ban and source rules in `make check`"
 

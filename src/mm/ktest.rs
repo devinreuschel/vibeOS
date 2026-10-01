@@ -822,7 +822,7 @@ pub(crate) mod fail_after {
     use vibeos::thread::ThreadId;
 
     use crate::arch::current::InterruptGuard;
-    use crate::{per_cpu_init, syscall_init, thread_init};
+    use crate::{per_cpu_init, thread_init};
 
     /// Which allocations the hook counts.
     #[derive(Clone, Copy)]
@@ -893,7 +893,13 @@ pub(crate) mod fail_after {
         let arg = ARG.load(Ordering::Relaxed);
         let in_scope = match KIND.load(Ordering::Relaxed) {
             KIND_PROCESSES => {
-                thread_init::current_pid() != 0 && syscall_init::syscall_count() >= arg
+                let t = per_cpu_init::current_thread();
+                // SAFETY: invariant I9: the non-null current thread (checked
+                // above) is this CPU's live TCB, which stays in `SCHED`;
+                // established by `per_cpu_init::set_current_thread`.
+                let count = unsafe { &(*t).syscall_count };
+                // Relaxed: the count is a statistic (C-FAILAFTER).
+                thread_init::current_pid() != 0 && count.load(Ordering::Relaxed) >= arg
             }
             _ => u64::from(thread_init::current_id().0) == arg,
         };
