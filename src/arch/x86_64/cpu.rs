@@ -165,32 +165,14 @@ pub fn set_smap_live(on: bool) {
     SMAP_LIVE.store(on, Ordering::Release);
 }
 
-/// Set `RFLAGS.AC`. No-op when SMAP is unsupported.
+/// Clear `RFLAGS.AC`. No-op when SMAP is unsupported. Setting it is the
+/// accessor module's alone (`arch::x86_64::uaccess`, ROADMAP §10.6).
 #[inline]
 #[cfg_attr(
     not(feature = "kernel_tests"),
     expect(
         dead_code,
-        reason = "ROADMAP §9.1 `stac`/`clac` helpers; §10.6's user accessors call them"
-    )
-)]
-pub fn stac() {
-    if !smap_live() {
-        return;
-    }
-    // SAFETY: `stac` only changes RFLAGS.AC, and `smap_live` is set only
-    // once CR4.SMAP is on, so the instruction is defined; established
-    // at `arch::x86_64::cpu::init_control_regs`.
-    unsafe { asm!("stac", options(nostack)) };
-}
-
-/// Clear `RFLAGS.AC`. No-op when SMAP is unsupported.
-#[inline]
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "ROADMAP §9.1 `stac`/`clac` helpers; §10.6's user accessors call them"
+        reason = "ROADMAP §9.1's AC-clear helper; the accessor module's test window calls it"
     )
 )]
 pub fn clac() {

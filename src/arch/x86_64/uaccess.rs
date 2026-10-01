@@ -16,6 +16,33 @@ use vibeos::proc::uaccess::{ExEntry, ExKind, search, user_range_ok};
 use super::Arch;
 use super::cpu as x86;
 
+/// Set `RFLAGS.AC`, lifting SMAP. No-op when SMAP is unsupported. Only
+/// this module lifts SMAP (ROADMAP §10.6, `scripts/check_user_access.py`):
+/// the accessors inside their `movsb`, and the tests through
+/// [`with_window`].
+#[cfg(feature = "kernel_tests")]
+#[inline]
+fn stac() {
+    if !x86::smap_live() {
+        return;
+    }
+    // SAFETY: `stac` only changes RFLAGS.AC, and `smap_live` is set only
+    // once CR4.SMAP is on, so the instruction is defined; established
+    // at `arch::x86_64::cpu::init_control_regs`.
+    unsafe { asm!("stac", options(nostack)) };
+}
+
+/// Run `f` with SMAP lifted, then clear `RFLAGS.AC` again: the window an
+/// in-guest test needs to touch a user page from ring 0 (`kernel_tests`
+/// only, AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn with_window<R>(f: impl FnOnce() -> R) -> R {
+    stac();
+    let r = f();
+    x86::clac();
+    r
+}
+
 /// The range check the accessors repeat: the pure user-range rule.
 fn accept(addr: u64, len: usize) -> bool {
     user_range_ok(addr, len as u64)

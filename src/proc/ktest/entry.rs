@@ -52,16 +52,17 @@ pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
     super::load_cr3(&space);
     x86::invlpg(va);
     // User PTE: SMAP would #PF a kernel store/load via this VA.
-    x86::stac();
-    // SAFETY: `va` is a mapped, writable, 8-byte aligned page of `space`,
-    // which CR3 holds with IF=0 and SMAP lifted, so the store and load reach
-    // that page's frame and nothing else; established here.
-    unsafe {
-        (va as *mut u64).write_volatile(0x1111_2222_3333_4444);
-    }
-    // SAFETY: as for the store above; established here.
-    let got = unsafe { (va as *const u64).read_volatile() };
-    x86::clac();
+    let got = crate::arch::x86_64::uaccess::with_window(|| {
+        // SAFETY: `va` is a mapped, writable, 8-byte aligned page of
+        // `space`, which CR3 holds with IF=0 and SMAP lifted, so the store
+        // and load reach that page's frame and nothing else; established
+        // here.
+        unsafe {
+            (va as *mut u64).write_volatile(0x1111_2222_3333_4444);
+        }
+        // SAFETY: as for the store above; established here.
+        unsafe { (va as *const u64).read_volatile() }
+    });
     // The kernel root and IF on again before the unmap, which sleeps for
     // the space's `mm` lock.
     addr_space_init::load_kernel_cr3();

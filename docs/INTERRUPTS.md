@@ -61,7 +61,10 @@ Until ROADMAP §10.6's identity-teardown box removes the GLOBAL identity map of 
 x86_64 methods also refuse a range that starts below 512 MiB. A space no thread runs, the ELF
 loader's and `fork`'s copy's, is written only through the fill API (`proc::fill_init` over
 `vibeos::proc::fill`, ROADMAP §10.6), which writes its frames through the HHDM physmap after a
-range check and a present user leaf on every page, and ignores the PTE's `WRITABLE` bit.
+range check and a present user leaf on every page, and ignores the PTE's `WRITABLE` bit;
+`scripts/check_user_access.py` keeps its physmap primitives inside it, and `stac` inside this
+section's accessor module (`arch::x86_64::uaccess`, whose `with_window` gives the in-guest tests
+their window).
 `arch::cpu::init_control_regs` sets `CR0.WP`, and `CR4.SMEP`, `SMAP` and `UMIP` where CPUID reports
 them, on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
 
