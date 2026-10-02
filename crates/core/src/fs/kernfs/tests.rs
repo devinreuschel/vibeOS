@@ -618,3 +618,33 @@ fn sysfs_bad_driver_name_frees_its_node() {
     assert_eq!(node_counts(&k).1, len);
     assert_eq!(k.fs.with(|s| s.free_len), free - 1);
 }
+
+/// An add that fails part way leaves sysfs as it found it. A driver name
+/// that does not fit fails once the device's directory and three
+/// attributes are made, and a device name too long for its bus link once
+/// all four are; neither leaves a node, a name, or a link count behind,
+/// and the device can be added after.
+#[test]
+fn sysfs_failed_add_takes_back_its_nodes() {
+    let (mut v, k) = boot();
+    let used = node_counts(&k).0;
+    let links = v.stat(None, "/sys/devices").unwrap().nlink;
+    let long_drv = [b'x'; MAX_NAME + 1];
+    assert_eq!(
+        k.fs.sysfs_add_device(b"00:0b.0", 1, 2, 3, Some(&long_drv)),
+        Err(FsError::Inval)
+    );
+    let long_name = [b'0'; MAX_NAME];
+    assert_eq!(
+        k.fs.sysfs_add_device(&long_name, 1, 2, 3, Some(b"virtio-blk")),
+        Err(FsError::NameTooLong)
+    );
+    assert_eq!(node_counts(&k).0, used);
+    assert_eq!(v.stat(None, "/sys/devices").unwrap().nlink, links);
+    assert!(!has_name(&mut v, "/sys/devices", b"00:0b.0"));
+    assert!(!has_name(&mut v, "/sys/bus/pci/drivers", b"virtio-blk"));
+    k.fs.sysfs_add_device(b"00:0b.0", 1, 2, 3, Some(b"virtio-blk"))
+        .unwrap();
+    assert!(has_name(&mut v, "/sys/devices", b"00:0b.0"));
+    assert!(has_name(&mut v, "/sys/bus/pci/drivers", b"virtio-blk"));
+}

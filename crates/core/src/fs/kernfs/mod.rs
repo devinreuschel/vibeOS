@@ -41,7 +41,7 @@ use node::{
     kern_alloc, kern_create, kern_drop_sb, kern_find_child, kern_get, kern_get_mut, kern_idx,
     kern_info, kern_link, kern_lookup, kern_lookup_ino, kern_mk_dir, kern_mk_lnk, kern_mk_root,
     kern_mk_special, kern_read, kern_readdir, kern_readlink, kern_release, kern_truncate,
-    kern_try_free, kern_unlink, kern_write, set_target, target_bytes,
+    kern_try_free, kern_unlink, kern_unlink_child, kern_write, set_target, target_bytes,
 };
 use procfs::{PROC_CMDLINE, PROC_MAPS, PROC_STATUS};
 use sysfs::sys_attr_read;

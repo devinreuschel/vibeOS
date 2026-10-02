@@ -157,7 +157,7 @@ pub(super) fn kern_link(k: &mut KernState, parent: u32, child: u32) {
     k.nodes[pi].child = child;
 }
 
-fn kern_unlink_child(k: &mut KernState, parent: u32, child: u32) {
+pub(super) fn kern_unlink_child(k: &mut KernState, parent: u32, child: u32) {
     let Some(pi) = kern_idx(k, parent) else {
         return;
     };
