@@ -65,6 +65,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("noncanonical_rip_sigsegv", test_noncanonical_rip_sigsegv).deadline(30_000),
     test("exec_huge_memsz", test_exec_huge_memsz).deadline(60_000),
     test("exec_large_elf_from_file", test_exec_large_elf_from_file).deadline(60_000),
+    test("exec_from_tmp", test_exec_from_tmp).deadline(30_000),
     test("elf_shared_page", test_elf_shared_page),
     test("elf_shared_page_jump", test_elf_shared_page_jump),
     test("brk_mmap_munmap_user", test_brk_mmap_munmap_user).deadline(30_000),

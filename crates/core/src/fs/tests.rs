@@ -1335,3 +1335,26 @@ fn inode_ops_unsupported_errno() {
     assert_eq!(v.seek(&f, 0, SEEK_CUR), Ok(0));
     v.close(f).unwrap();
 }
+
+/// More names than inode slots, each cached by a positive dentry that
+/// nothing holds: a lookup that needs an inode evicts dentries until one
+/// releases its inode, rather than failing `NoSpace`.
+#[test]
+fn stat_more_names_than_inode_slots() {
+    let mut v = ram();
+    v.mkdir(None, "/p", 0o755).unwrap();
+    v.mkdir(None, "/q", 0o755).unwrap();
+    // ramfs holds MAX_DIR_ENTS names a directory, so split them.
+    let n = SMALL.inodes + 12;
+    let name = |i: usize| format!("/{}/f{i}", if i.is_multiple_of(2) { "p" } else { "q" });
+    for i in 0..n {
+        v.creat(None, &name(i), 0o644).unwrap();
+    }
+    for _ in 0..2 {
+        for i in 0..n {
+            let s = v.stat(None, &name(i)).unwrap();
+            assert_eq!(s.kind, InodeKind::Reg, "{}", name(i));
+        }
+    }
+    assert!(v.stats.i_evicts >= (n - SMALL.inodes) as u32);
+}

@@ -152,6 +152,12 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- `/dev`, `/proc`, `/sys` and `/tmp` are no longer capped at 128 nodes between them: kernfs's
+  node table grows on the heap, and `ENOMEM` when it cannot.
+- `execve` of a program on `/tmp` stays within its thread's kernel stack budget; tmpfs's cache
+  no longer puts two pages on the stack.
+- `/tmp` has its own `nr_inodes` (half of RAM's pages, as Linux's tmpfs): a full `/tmp` is
+  `ENOSPC` to the writer and no longer crowds out `/dev`, `/proc`, or `/sys` (#195).
 - Boot with more than 8 GiB of RAM no longer triple-faults after `heap ok`. RAM above the
   8 GiB physmap cap is left unused; `make test-e2e-highmem` boots with 9 GiB.
 - UEFI e2e no longer hangs on OVMF PXE after a green marker boot; a timed-out boot prints
@@ -275,6 +281,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   corrupt block returns an error instead of hiding it.
 - A PCI BAR is mapped only by the driver that claims it, and a BAR that overlaps RAM or another
   device's BAR is refused.
+- A lookup no longer fails with `ENOSPC` once cached names hold every VFS inode slot; the dentry
+  cache is shrunk to free one.
 
 ### Removed
 

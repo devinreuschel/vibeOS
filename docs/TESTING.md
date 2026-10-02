@@ -86,7 +86,11 @@ Things that belong here and are easy to get wrong, so should have tests from the
 - `align_up` and friends at 0, at exactly aligned, and near overflow.
 - VFS path walk: `.` / `..`, bounded symlink depth, symlink loop → error, negative dentry
   invalidate-on-create, mount-point crossing.
-- kernfs: one directory implementation shared by devfs/tmpfs/procfs/sysfs; tmpfs
+- kernfs: one directory implementation shared by devfs/tmpfs/procfs/sysfs; its
+  node table grows past its first capacity, reuses freed nodes without growing,
+  and a failed grow is `ENOMEM` with the tree unchanged; a full `/tmp`, of
+  names at its `nr_inodes` or of data, is `ENOSPC` and leaves `/dev`,
+  `/proc` and `/sys` working; tmpfs
   writes evict through the Phase 7 block cache rather than pinning a grow-only
   buffer; `/dev/null` `/dev/zero` `/dev/random` (virtio-rng, then RDRAND, and nothing
   else: a short count when they supply less, `EAGAIN` when they supply none,

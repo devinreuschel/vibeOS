@@ -1,9 +1,13 @@
 //! Every table size and resource cap the kernel enforces, by name (ROADMAP
-//! §10.4, D1). The growable tables are heap tables of these lengths, each
-//! built once by [`table`] and never grown, and the old names
-//! (`proc::MAX_FDS`, `fs::MAX_INODES`, ...) re-export them. A host test in
-//! each portable module that owns a table checks its length against its
-//! name here (`fixed_tables_match_limits`).
+//! §10.4, D1). The heap tables these lengths size are each built once by
+//! [`table`] and never grown, and the old names (`proc::MAX_FDS`,
+//! `fs::MAX_INODES`, ...) re-export them. A host test in each portable
+//! module that owns a table checks its length against its name here
+//! (`fixed_tables_match_limits`). A table that grows as it fills, with
+//! only memory as its cap, has no length here: kernfs's node table
+//! (`fs::kernfs::KernState`), which returns `ENOMEM` when the heap cannot
+//! grow it; what bounds a tmpfs instance's share of it is
+//! [`TMPFS_NODE_HEAP_BYTES`].
 //!
 //! What belongs here: a bound on how many kernel objects or bytes a workload
 //! can hold. What stays where it is, because hardware, a device queue, or an
@@ -52,11 +56,14 @@ pub const PID_MAX: u32 = 32_768;
 pub const PID_WRAP: u32 = 300;
 /// RAM-backed node slots (`fs::Vfs` ramfs).
 pub const MAX_RAM_NODES: usize = 64;
-/// Kernel pseudo-filesystem node slots (`fs::kernfs`).
-pub const MAX_KERN_NODES: usize = 128;
 /// Mounted instances one kernfs store holds, over its four skins
 /// (`fs::kernfs::KernState`).
 pub const MAX_KERN_MOUNTS: usize = 8;
+/// Heap bytes a tmpfs instance's nodes may take at most by default, an
+/// eighth of the heap: its `nr_inodes` is half of RAM's pages, as Linux's,
+/// but no more nodes than this holds (`fs::kernfs::tmp_nr_inodes_default`),
+/// so a full `/tmp` leaves the heap to the kernel.
+pub const TMPFS_NODE_HEAP_BYTES: usize = (crate::heap::HEAP_SIZE / 8) as usize;
 /// Bytes one ramfs file holds (`fs::RamNode` data).
 pub const MAX_TMPFS_FILE_BYTES: usize = 256;
 /// Entries one ramfs directory holds (`fs::RamNode` dents).

@@ -157,7 +157,7 @@ fn tmp_pages_for(size: u64) -> usize {
 }
 
 fn tmp_ensure(k: &mut KernState, inst: u32, ino: u32, new_size: u64) -> Result<(), FsError> {
-    let Some(idx) = kern_idx(ino) else {
+    let Some(idx) = kern_idx(k, ino) else {
         return Err(FsError::NotFound);
     };
     if !k.nodes[idx].used || k.nodes[idx].inst != inst {
@@ -248,14 +248,15 @@ fn tmp_rw_cache(
     src: &[u8],
 ) -> Result<(), FsError> {
     let cache = &mut k.tmp_cache;
+    let scratch = &mut k.tmp_page;
     let back = SliceBack {
         data: RefCell::new(&mut k.tmp_back[..]),
         bits: k.tmp_bits,
     };
     let r = if write {
-        cache::cached_write(cache, &back, TMPFS_DEV, byte_off, src)
+        cache::cached_write(cache, &back, TMPFS_DEV, byte_off, src, scratch)
     } else {
-        cache::cached_read(cache, &back, TMPFS_DEV, byte_off, buf)
+        cache::cached_read(cache, &back, TMPFS_DEV, byte_off, buf, scratch)
     };
     r.map_err(|_| FsError::Io)
 }
@@ -315,7 +316,7 @@ pub(super) fn tmp_truncate(
     ino: u32,
     size: u64,
 ) -> Result<(), FsError> {
-    let Some(idx) = kern_idx(ino) else {
+    let Some(idx) = kern_idx(k, ino) else {
         return Err(FsError::NotFound);
     };
     if !k.nodes[idx].used || k.nodes[idx].inst != inst {

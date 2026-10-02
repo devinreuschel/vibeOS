@@ -966,6 +966,12 @@ pub(crate) mod testing {
         super::with_table(|t| t.get(pid)?.space.as_ref().map(|s| s.core()))
     }
 
+    /// The tid of `pid`'s thread, while its slot lives (until it is
+    /// reaped).
+    pub(crate) fn tid_of(pid: u32) -> Option<u32> {
+        super::with_table(|t| t.get(pid).map(|p| p.tid.0))
+    }
+
     /// Whether `pid` is a zombie, waiting to be reaped.
     pub(crate) fn is_zombie(pid: u32) -> bool {
         super::with_table(|t| {

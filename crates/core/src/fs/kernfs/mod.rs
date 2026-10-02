@@ -1,7 +1,17 @@
 //! Shared kernfs directory tree. ROADMAP §8.4.
 //!
 //! One node table and sibling-linked dirs, in one store ([`KernFs`])
-//! outside `Vfs` behind a [`Guarded`] lock of its own. Four skins
+//! outside `Vfs` behind a [`Guarded`] lock of its own. The table grows on
+//! the heap as nodes are made, with only memory as its cap, and never
+//! shrinks: a freed node goes on a free list for the next one. It grows
+//! with the store unlocked ([`KernFs::with_room`]), since the heap ranks
+//! before the store's lock (DESIGN §2.1).
+//!
+//! Each mounted instance counts its own nodes. A tmpfs instance, which
+//! any process writes, stops at its `nr_inodes` with `NoSpace`
+//! (`ENOSPC`), as Linux's tmpfs does, and its file data fits the fixed
+//! backing below; devfs, procfs and sysfs, the kernel's, have no count
+//! cap, so a full `/tmp` never stops them making nodes (issue #195). Four skins
 //! ([`KernSkin`]: devfs, tmpfs, procfs, sysfs) fill different nodes; they
 //! do not each keep a dentry tree. tmpfs file data goes through the
 //! Phase 7 [`Cache`] plus a fixed ramdisk so eviction works — not a
@@ -12,12 +22,12 @@ use core::cell::RefCell;
 use crate::block::blockdev::BlockRef;
 use crate::block::{BlockError, MAX_BLOCKDEVS};
 use crate::cache::{self, Backend, Cache, CacheKey, CacheStats, PAGE};
-use crate::limits::MAX_KERN_MOUNTS;
+use crate::kalloc::{AllocError, TryVec};
+use crate::limits::{MAX_KERN_MOUNTS, TMPFS_NODE_HEAP_BYTES};
 
 use super::{
-    Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps,
-    MAX_KERN_NODES, MAX_NAME, Name, OpCx, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT,
-    S_IFREG_MODE,
+    Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps, MAX_NAME,
+    Name, OpCx, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT, S_IFREG_MODE,
 };
 
 mod devfs;
@@ -30,8 +40,8 @@ use devfs::{blk_read, blk_write};
 use node::{
     kern_alloc, kern_create, kern_drop_sb, kern_find_child, kern_get, kern_get_mut, kern_idx,
     kern_info, kern_link, kern_lookup, kern_lookup_ino, kern_mk_dir, kern_mk_lnk, kern_mk_root,
-    kern_mk_special, kern_read, kern_readdir, kern_readlink, kern_truncate, kern_try_free,
-    kern_unlink, kern_write, set_target, target_bytes,
+    kern_mk_special, kern_read, kern_readdir, kern_readlink, kern_release, kern_truncate,
+    kern_try_free, kern_unlink, kern_write, set_target, target_bytes,
 };
 use procfs::{PROC_CMDLINE, PROC_MAPS, PROC_STATUS};
 use sysfs::sys_attr_read;
@@ -40,6 +50,16 @@ use tmpfs::{
 };
 
 const TMPFS_DEV: u64 = 0;
+
+/// The node table's first capacity: the boot's `/dev`, `/proc` and `/sys`
+/// nodes, with room left for `/tmp`.
+const NODES_FIRST: usize = 64;
+/// Most nodes one [`fill_skin`] makes, its root included (devfs's and
+/// procfs's seven).
+const SKIN_NODES: usize = 7;
+/// Most nodes one `sysfs_add_device` makes: the device's directory, its
+/// four attributes and its bus link, and its driver's directory and link.
+const SYSFS_DEVICE_NODES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KernKind {
@@ -133,13 +153,19 @@ impl KernNode {
     };
 }
 
-/// A mounted skin of the store: its instance id, type and root node.
+/// A mounted skin of the store: its instance id, type and root node,
+/// and the nodes it has and may have.
 #[derive(Clone, Copy)]
 struct Skin {
     used: bool,
     inst: u32,
     ty: FsType,
     root: u32,
+    /// Nodes of this instance, its root included.
+    nodes: usize,
+    /// The most it may have: a tmpfs instance's `nr_inodes`, and
+    /// `usize::MAX` for the kernel's skins.
+    max_nodes: usize,
 }
 
 impl Skin {
@@ -148,7 +174,20 @@ impl Skin {
         inst: 0,
         ty: FsType::Dev,
         root: 0,
+        nodes: 0,
+        max_nodes: 0,
     };
+}
+
+/// The `nr_inodes` a tmpfs instance gets on a machine of `ram_pages`
+/// pages: Linux's default, half of RAM's pages (tmpfs(5)), but no more
+/// nodes than [`TMPFS_NODE_HEAP_BYTES`] holds, as Linux bounds it by
+/// lowmem: the nodes live on the kernel heap, which a full `/tmp` must
+/// not take from the kernel.
+pub fn tmp_nr_inodes_default(ram_pages: u64) -> usize {
+    let half = usize::try_from(ram_pages / 2).unwrap_or(usize::MAX);
+    half.min(TMPFS_NODE_HEAP_BYTES / core::mem::size_of::<KernNode>())
+        .max(1)
 }
 
 /// The one kernfs store: every node of every skin, tmpfs's page cache
@@ -156,9 +195,23 @@ impl Skin {
 /// instance id `fill_super` took from [`KernState::next_inst`], which
 /// the superblock keeps in its private word 0.
 pub struct KernState {
-    nodes: [KernNode; MAX_KERN_NODES],
+    /// Every node; ino `i + 1` is `nodes[i]`. Its capacity grows only in
+    /// [`KernFs::grow`], with the store unlocked, and its length only up
+    /// to that capacity, so no op under the lock allocates.
+    nodes: TryVec<KernNode>,
+    /// The first unused node, linked through `next`, or 0 for none.
+    free: u32,
+    /// Unused nodes on the `free` list.
+    free_len: usize,
+    /// The `nr_inodes` a tmpfs instance mounted from here gets
+    /// ([`KernFs::set_tmp_nr_inodes`]); `usize::MAX` until it is set.
+    tmp_nr_inodes: usize,
     tmp_cache: Cache<TMPFS_CACHE_PAGES>,
     tmp_back: [u8; TMPFS_BACK_BYTES],
+    /// The page `tmp_cache`'s reads and writes carry a victim or a fill
+    /// through, here under the store's lock rather than on a syscall's
+    /// kernel stack (`cache::cached_read`).
+    tmp_page: [u8; PAGE],
     tmp_bits: u64,
     /// The clock the last op brought in.
     now: u64,
@@ -175,9 +228,13 @@ pub struct KernState {
 impl KernState {
     pub const fn new() -> Self {
         Self {
-            nodes: [KernNode::EMPTY; MAX_KERN_NODES],
+            nodes: TryVec::new(),
+            free: 0,
+            free_len: 0,
+            tmp_nr_inodes: usize::MAX,
             tmp_cache: Cache::new(),
             tmp_back: [0u8; TMPFS_BACK_BYTES],
+            tmp_page: [0u8; PAGE],
             tmp_bits: 0,
             now: 0,
             next_inst: 0,
@@ -194,6 +251,35 @@ impl KernState {
             .iter()
             .find(|s| s.used && s.ty == ty)
             .map(|s| (s.inst, s.root))
+    }
+
+    /// The skin of mounted instance `inst`.
+    fn skin_of(&mut self, inst: u32) -> Option<&mut Skin> {
+        self.skins.iter_mut().find(|s| s.used && s.inst == inst)
+    }
+
+    /// Whether instance `inst` has all the nodes it may.
+    fn at_cap(&self, inst: u32) -> bool {
+        self.skins
+            .iter()
+            .any(|s| s.used && s.inst == inst && s.nodes >= s.max_nodes)
+    }
+
+    /// The capacity the node table needs to grow to so that `need` more
+    /// nodes fit, or `None` when its free list and spare capacity hold
+    /// them: at least double the old, as `Vec`'s own growth.
+    fn grow_to(&self, need: usize) -> Option<usize> {
+        let cap = self.nodes.capacity();
+        let spare = cap.saturating_sub(self.nodes.len());
+        let short = need.checked_sub(self.free_len.saturating_add(spare))?;
+        if short == 0 {
+            return None;
+        }
+        Some(
+            cap.saturating_add(short)
+                .max(cap.saturating_mul(2))
+                .max(NODES_FIRST),
+        )
     }
 }
 
@@ -217,6 +303,83 @@ impl<S: Guarded<KernState>> KernFs<S> {
     /// Run `f` on the store.
     pub fn with<R>(&self, f: impl FnOnce(&mut KernState) -> R) -> R {
         self.store.with(f)
+    }
+
+    /// Nodes in use, and the node table's length: what kernfs holds and
+    /// the most it has held at once.
+    pub fn node_counts(&self) -> (usize, usize) {
+        self.with(|k| (k.nodes.len().saturating_sub(k.free_len), k.nodes.len()))
+    }
+
+    /// Give each tmpfs instance mounted from here, and each mounted
+    /// later, `n` as its `nr_inodes`. An instance already past `n` keeps
+    /// its nodes and makes no more until it is under it.
+    pub fn set_tmp_nr_inodes(&self, n: usize) {
+        self.with(|k| {
+            k.tmp_nr_inodes = n;
+            for s in k.skins.iter_mut() {
+                if s.used && s.ty == FsType::Tmp {
+                    s.max_nodes = n;
+                }
+            }
+        });
+    }
+
+    /// The first mounted tmpfs instance's nodes and `nr_inodes`.
+    pub fn tmp_nodes(&self) -> Option<(usize, usize)> {
+        self.with(|k| {
+            k.skins
+                .iter()
+                .find(|s| s.used && s.ty == FsType::Tmp)
+                .map(|s| (s.nodes, s.max_nodes))
+        })
+    }
+
+    /// Run `f` on the store with room in the node table for `need` more
+    /// nodes, growing it first when it is short: `NoMem` when the heap
+    /// cannot. `f` runs once, under the same lock hold that saw the room,
+    /// so another CPU cannot take it in between.
+    fn with_room<R>(
+        &self,
+        need: usize,
+        f: impl FnOnce(&mut KernState) -> Result<R, FsError>,
+    ) -> Result<R, FsError> {
+        let mut f = Some(f);
+        loop {
+            let ran = self.with(|k| match k.grow_to(need) {
+                Some(cap) => Err(cap),
+                None => Ok(f.take().map(|f| f(k))),
+            });
+            match ran {
+                Ok(Some(r)) => return r,
+                // `f` is taken only by the arm that returns just above.
+                Ok(None) => return Err(FsError::Io),
+                Err(cap) => self.grow(cap)?,
+            }
+        }
+    }
+
+    /// Grow the node table's capacity to `cap`. The new table is allocated,
+    /// and the old one freed, with the store unlocked: the heap ranks
+    /// before the store's lock (DESIGN §2.1). Under the lock the nodes are
+    /// copied across; an ino is an index, so every link stays valid.
+    fn grow(&self, cap: usize) -> Result<(), FsError> {
+        let mut fresh = TryVec::try_with_capacity(cap).map_err(|_| FsError::NoMem)?;
+        let moved = self.with(|k| -> Result<(), AllocError> {
+            if k.nodes.capacity() >= cap {
+                // Another op grew it first.
+                return Ok(());
+            }
+            // `fresh` holds `cap` nodes, more than `k.nodes` has, so this
+            // copy never allocates.
+            fresh.try_extend_from_slice(&k.nodes)?;
+            core::mem::swap(&mut k.nodes, &mut fresh);
+            Ok(())
+        });
+        // `fresh` is now the old table, or the new one unused: freed here,
+        // with the store unlocked.
+        drop(fresh);
+        moved.map_err(|_| FsError::NoMem)
     }
 }
 
@@ -242,13 +405,18 @@ struct Kx {
 }
 
 impl<S: Guarded<KernState> + Sync + 'static> KernSkin<S> {
-    /// Run `f` on the store with the op's [`Kx`], and the clock brought in.
-    fn op<R>(&self, cx: &OpCx<'_>, f: impl FnOnce(&mut KernState, Kx) -> R) -> R {
-        let x = Kx {
+    /// The op's [`Kx`].
+    fn kx(&self, cx: &OpCx<'_>) -> Kx {
+        Kx {
             inst: cx.private[0] as u32,
             ty: self.ty,
             now: cx.now,
-        };
+        }
+    }
+
+    /// Run `f` on the store with the op's [`Kx`], and the clock brought in.
+    fn op<R>(&self, cx: &OpCx<'_>, f: impl FnOnce(&mut KernState, Kx) -> R) -> R {
+        let x = self.kx(cx);
         self.fs.with(|k| {
             k.now = x.now;
             f(k, x)
@@ -271,7 +439,7 @@ impl<S: Guarded<KernState> + Sync + 'static> FileSystem for KernSkin<S> {
 
     fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
         let (now, ty) = (cx.now, self.ty);
-        let (inst, info) = self.fs.with(|k| {
+        let (inst, info) = self.fs.with_room(SKIN_NODES, |k| {
             k.now = now;
             let slot = k
                 .skins
@@ -279,19 +447,33 @@ impl<S: Guarded<KernState> + Sync + 'static> FileSystem for KernSkin<S> {
                 .position(|s| !s.used)
                 .ok_or(FsError::NoSpace)?;
             let inst = k.next_inst.wrapping_add(1).max(1);
-            let root = kern_mk_root(k, now, inst)?;
-            let filled = fill_skin(k, now, inst, root, ty);
-            if let Err(e) = filled {
-                kern_drop_sb(k, inst, false);
-                return Err(e);
-            }
-            k.next_inst = inst;
+            // The skin counts its nodes from its root on.
             k.skins[slot] = Skin {
                 used: true,
                 inst,
                 ty,
-                root,
+                root: 0,
+                nodes: 0,
+                max_nodes: if ty == FsType::Tmp {
+                    k.tmp_nr_inodes
+                } else {
+                    usize::MAX
+                },
             };
+            let filled = kern_mk_root(k, now, inst).and_then(|root| {
+                fill_skin(k, now, inst, root, ty)?;
+                Ok(root)
+            });
+            let root = match filled {
+                Ok(root) => root,
+                Err(e) => {
+                    kern_drop_sb(k, inst, false);
+                    k.skins[slot] = Skin::EMPTY;
+                    return Err(e);
+                }
+            };
+            k.next_inst = inst;
+            k.skins[slot].root = root;
             Ok((inst, kern_info(k, inst, root)?))
         })?;
         *cx.private = [u64::from(inst), 0];
@@ -347,7 +529,14 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         mode: u16,
         target: Option<&[u8]>,
     ) -> Result<InodeInfo, FsError> {
-        self.op(cx, |k, x| kern_create(k, x, dir, name, kind, mode, target))
+        let x = self.kx(cx);
+        // An instance at its cap makes nothing, so the table need not grow
+        // for it; `kern_alloc` fails it with `NoSpace`.
+        let need = usize::from(!self.fs.with(|k| k.at_cap(x.inst)));
+        self.fs.with_room(need, |k| {
+            k.now = x.now;
+            kern_create(k, x, dir, name, kind, mode, target)
+        })
     }
 
     fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {

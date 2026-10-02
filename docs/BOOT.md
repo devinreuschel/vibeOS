@@ -273,11 +273,13 @@ commit that added the screen, the reachable frames over 4096 outside the FAT sta
 `block_init::fail_rest` and `virtio_blk_init::fail_rest` (7048 each), `vibefs::Vol::sync` (5768),
 `vibefs::commit::mount` (4856), `vibefs_init::mount_dev` (4472) and `virtio_blk_init::blk_work`
 (4296), and 7168 is the smallest multiple of 1024 above them. It stays below the 12760-byte frame
-`fat_init::mount_dev` had while it built `FatVol` by value, which the screen names. Two frames
-are over even that and are listed in the script's `KNOWN_OVER`, each with the frame it may not grow
-past, and an entry fails once its function is back under the bound: the tmpfs instance of the
-block cache's `cached_read` and `cached_write` (8424 and 8360 bytes, on the read and write
-syscalls through kernfs). The ROADMAP box closes when that list is empty. The frames are those of
+`fat_init::mount_dev` had while it built `FatVol` by value, which the screen names. A frame over
+even that would be listed in the script's `KNOWN_OVER` with the frame it may not grow past, and an
+entry fails once its function is back under the bound. The list is empty: its two entries, the
+tmpfs instance of the block cache's `cached_read` and `cached_write` (8424 and 8360 bytes, on the
+read and write syscalls through kernfs), left it when the two moved their page buffers into a
+scratch page the kernfs store holds (216 bytes each). The ROADMAP box closed when that list
+became empty. The frames are those of
 the ELF `CARGO_SHIP` builds, whole and not incremental as CI builds it: an incremental build splits
 the crate into other codegen units, which inlines differently and gave the virtio-blk probe
 (`BlkDriver::probe`) a 16824-byte frame where the whole build gives it 3224. The screen is for one

@@ -384,8 +384,107 @@ fn console_write_captured() {
 #[test]
 fn fixed_tables_match_limits() {
     let k = std::boxed::Box::new(KernState::new());
-    assert_eq!(k.nodes.len(), crate::limits::MAX_KERN_NODES);
     assert_eq!(k.skins.len(), crate::limits::MAX_KERN_MOUNTS);
+}
+
+/// Whether `path` names a regular file.
+fn is_reg(v: &mut Vfs, path: &str) -> bool {
+    v.stat(None, path).is_ok_and(|s| s.kind == InodeKind::Reg)
+}
+
+/// Nodes in use and the table's length and capacity.
+fn node_counts(k: &Kfs) -> (usize, usize, usize) {
+    k.fs.with(|s| {
+        let used = s.nodes.iter().filter(|n| n.used).count();
+        assert_eq!(used + s.free_len, s.nodes.len());
+        (used, s.nodes.len(), s.nodes.capacity())
+    })
+}
+
+#[test]
+fn node_table_starts_empty_and_grows_past_the_old_pool() {
+    let k = std::boxed::Box::new(KernState::new());
+    assert_eq!(k.nodes.capacity(), 0);
+    let (mut v, k) = boot();
+    let (boot_used, _, _) = node_counts(&k);
+    // Under Miri, past the first capacity only; else well past the 128
+    // nodes the table held as a fixed pool.
+    let n = if cfg!(miri) { NODES_FIRST } else { 3 * 128 };
+    for i in 0..n {
+        v.creat(None, &format!("/tmp/f{i}"), 0o644).unwrap();
+    }
+    let (used, len, cap) = node_counts(&k);
+    assert_eq!(used, boot_used + n);
+    assert!(len > NODES_FIRST && cap >= len);
+    assert!(cfg!(miri) || len > 128);
+    // Every name is still linked after the moves, and the other skins'
+    // nodes made before them still work.
+    for i in 0..n {
+        assert!(is_reg(&mut v, &format!("/tmp/f{i}")));
+    }
+    let fid = v.open_path(None, "/dev/zero", O_RDWR, 0).unwrap();
+    let mut b = [1u8; 4];
+    assert_eq!(v.read(&fid, &mut b).unwrap(), 4);
+    assert_eq!(b, [0; 4]);
+    v.close(fid).unwrap();
+    assert!(has_name(&mut v, "/proc/1", b"cmdline"));
+    assert_eq!(v.stat(None, "/sys/bus/pci").unwrap().kind, InodeKind::Dir);
+}
+
+#[test]
+fn node_table_reuses_freed_nodes() {
+    let (mut v, k) = boot();
+    let (made, again, rounds) = if cfg!(miri) {
+        (80, 60, 2)
+    } else {
+        (200, 150, 20)
+    };
+    for i in 0..made {
+        v.creat(None, &format!("/tmp/f{i}"), 0o644).unwrap();
+    }
+    for i in 0..made {
+        v.unlink(None, &format!("/tmp/f{i}")).unwrap();
+    }
+    let (used, len, cap) = node_counts(&k);
+    for round in 0..rounds {
+        for i in 0..again {
+            v.creat(None, &format!("/tmp/r{round}_{i}"), 0o644).unwrap();
+        }
+        for i in 0..again {
+            v.unlink(None, &format!("/tmp/r{round}_{i}")).unwrap();
+        }
+        assert_eq!(node_counts(&k), (used, len, cap));
+    }
+}
+
+#[test]
+fn node_table_grow_failure_is_nomem_and_changes_nothing() {
+    let (mut v, k) = boot();
+    v.creat(None, "/tmp/keep", 0o644).unwrap();
+    // Fill the table to its capacity, so the next node needs a grow.
+    let mut i = 0usize;
+    while k
+        .fs
+        .with(|s| s.free_len + (s.nodes.capacity() - s.nodes.len()))
+        > 0
+    {
+        v.creat(None, &format!("/tmp/f{i}"), 0o644).unwrap();
+        i += 1;
+    }
+    let before = node_counts(&k);
+    crate::kalloc::tests::fail_in(0);
+    let r = k.fs.with_room(1, |s| kern_alloc(s, 1));
+    crate::kalloc::tests::disarm();
+    assert_eq!(r, Err(FsError::NoMem));
+    assert_eq!(node_counts(&k), before);
+    // The tree is whole, and the next create grows the table.
+    assert!(is_reg(&mut v, "/tmp/keep"));
+    for j in 0..i {
+        assert!(is_reg(&mut v, &format!("/tmp/f{j}")));
+    }
+    v.creat(None, "/tmp/after", 0o644).unwrap();
+    assert!(is_reg(&mut v, "/tmp/after"));
+    assert!(node_counts(&k).2 > before.2);
 }
 
 /// Read `n` bytes of `path` at `off`.
@@ -429,4 +528,93 @@ fn tmpfs_extent_move_keeps_data() {
     assert_eq!(read_at(&mut v, "/tmp/a", 3 * pg, 1), [0u8]);
     assert_eq!(read_at(&mut v, "/tmp/b", 0, 1), b"B");
     assert_eq!(read_at(&mut v, "/tmp/c", 0, 1), b"C");
+}
+
+#[test]
+fn tmp_nr_inodes_default_is_half_of_ram_within_its_heap_share() {
+    // A 128 MiB guest: half of its 32768 pages.
+    assert_eq!(tmp_nr_inodes_default(32_768), 16_384);
+    let heap_cap = crate::limits::TMPFS_NODE_HEAP_BYTES / core::mem::size_of::<KernNode>();
+    assert!(heap_cap > 16_384);
+    // A 64 GiB machine: the heap share, not half of RAM.
+    assert_eq!(tmp_nr_inodes_default(16 << 20), heap_cap);
+    assert_eq!(tmp_nr_inodes_default(0), 1);
+}
+
+/// `/tmp` at its `nr_inodes` refuses a create with `NoSpace` (`ENOSPC`),
+/// and `/dev`, `/proc` and `/sys` still make and open nodes; an unlink
+/// makes room again.
+#[test]
+fn tmp_at_nr_inodes_is_enospc_and_spares_system_nodes() {
+    let (mut v, k) = boot();
+    let (have, max) = k.fs.tmp_nodes().unwrap();
+    assert_eq!(max, usize::MAX);
+    k.fs.set_tmp_nr_inodes(have + 5);
+    for i in 0..5 {
+        v.creat(None, &format!("/tmp/f{i}"), 0o644).unwrap();
+    }
+    assert_eq!(v.creat(None, "/tmp/over", 0o644), Err(FsError::NoSpace));
+    assert_eq!(v.mkdir(None, "/tmp/overdir", 0o755), Err(FsError::NoSpace));
+    assert_eq!(k.fs.tmp_nodes(), Some((have + 5, have + 5)));
+    // The kernel's skins are not charged to /tmp's count.
+    k.fs.sysfs_add_device(b"00:09.0", 0x1af4, 0x1001, 1, Some(b"virtio-blk"))
+        .unwrap();
+    assert_eq!(
+        v.stat(None, "/sys/devices/00:09.0/vendor").unwrap().kind,
+        InodeKind::Reg
+    );
+    let fid = v.open_path(None, "/dev/zero", O_RDWR, 0).unwrap();
+    let mut b = [1u8; 4];
+    assert_eq!(v.read(&fid, &mut b).unwrap(), 4);
+    assert_eq!(b, [0; 4]);
+    v.close(fid).unwrap();
+    assert!(has_name(&mut v, "/proc/1", b"cmdline"));
+    v.unlink(None, "/tmp/f0").unwrap();
+    v.creat(None, "/tmp/again", 0o644).unwrap();
+    assert_eq!(k.fs.tmp_nodes(), Some((have + 5, have + 5)));
+}
+
+/// `/tmp`'s file data fills its backing to `NoSpace`, and `/dev` still
+/// works.
+#[test]
+fn tmp_data_full_is_enospc_and_spares_dev() {
+    let (mut v, _k) = boot();
+    let f = v
+        .open_path(None, "/tmp/big", O_RDWR | O_CREAT, 0o644)
+        .unwrap();
+    let page = [0x5Au8; PAGE];
+    let mut wrote = 0usize;
+    let err = loop {
+        match v.write(&f, &page) {
+            Ok(n) => wrote += n,
+            Err(e) => break e,
+        }
+        assert!(wrote <= tmpfs::TMPFS_BACK_BYTES);
+    };
+    v.close(f).unwrap();
+    assert_eq!(err, FsError::NoSpace);
+    assert_eq!(wrote, tmpfs::TMPFS_BACK_BYTES);
+    let fid = v.open_path(None, "/dev/null", O_RDWR, 0).unwrap();
+    assert_eq!(v.write(&fid, b"x").unwrap(), 1);
+    v.close(fid).unwrap();
+}
+
+/// A sysfs driver attribute whose name does not fit fails with `Inval`
+/// and gives its node back: the table's count of used and free nodes
+/// stays whole, and the next node reuses it.
+#[test]
+fn sysfs_bad_driver_name_frees_its_node() {
+    let (mut v, k) = boot();
+    let long = [b'x'; MAX_NAME + 1];
+    assert_eq!(
+        k.fs.sysfs_add_device(b"00:0a.0", 1, 2, 3, Some(&long)),
+        Err(FsError::Inval)
+    );
+    let (used, len, _) = node_counts(&k);
+    let free = k.fs.with(|s| s.free_len);
+    assert!(free >= 1);
+    v.creat(None, "/tmp/reuse", 0o644).unwrap();
+    assert_eq!(node_counts(&k).0, used + 1);
+    assert_eq!(node_counts(&k).1, len);
+    assert_eq!(k.fs.with(|s| s.free_len), free - 1);
 }

@@ -464,14 +464,14 @@ pub(super) fn close(fd: u32) {
     let _ = sys::close(fd);
 }
 
-/// The one file `/bin/tests`' matrices and lifecycle cases write, on the
+/// The file `/bin/tests`' matrices and lifecycle cases write, on the
 /// root FAT volume, and truncated after each use ([`discard`]). Nothing
-/// has `unlink` yet, so every name made stays for the boot: `/tmp` takes
-/// none, since its nodes come from kernfs' 128, which the `kernel_tests`
-/// boot's in-guest tests need nearly all of, and an `execve` from `/tmp`
-/// runs deeper than a user thread's stack budget (ROADMAP §10.2's
-/// stack-depth check).
+/// has `unlink` yet, so every name made stays for the boot.
 pub(super) const SCRATCH: &CStr = c"/utest_scratch";
+
+/// The image the `execve` probes write and run, on `/tmp` (kernfs's
+/// tmpfs), and truncated after each use as [`SCRATCH`] is.
+const EXEC_SCRATCH: &CStr = c"/tmp/utest_exec";
 
 /// Truncate `path` to 0 bytes, which frees its clusters.
 pub(super) fn discard(path: &CStr) {
@@ -1030,18 +1030,18 @@ fn nanosleep_efault() -> Result<Result<usize, Errno>, &'static str> {
 
 /// A script: no ELF magic.
 fn execve_enoexec() -> Result<Result<usize, Errno>, &'static str> {
-    put_file(SCRATCH, b"#!/bin/sh\nexit 0\n")?;
-    let r = exec_errno(SCRATCH.as_ptr().cast());
-    discard(SCRATCH);
+    put_file(EXEC_SCRATCH, b"#!/bin/sh\nexit 0\n")?;
+    let r = exec_errno(EXEC_SCRATCH.as_ptr().cast());
+    discard(EXEC_SCRATCH);
     r
 }
 
 /// An ELF whose one `PT_LOAD` asks for 1 GiB and a page, over
 /// `limits::EXEC_IMAGE_MAX`.
 fn execve_enomem() -> Result<Result<usize, Errno>, &'static str> {
-    put_file(SCRATCH, &big_elf())?;
-    let r = exec_errno(SCRATCH.as_ptr().cast());
-    discard(SCRATCH);
+    put_file(EXEC_SCRATCH, &big_elf())?;
+    let r = exec_errno(EXEC_SCRATCH.as_ptr().cast());
+    discard(EXEC_SCRATCH);
     r
 }
 
