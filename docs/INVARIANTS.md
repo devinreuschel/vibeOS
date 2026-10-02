@@ -150,13 +150,15 @@ on every call, whether or not the heap grows. Growth takes PT and then BUDDY aft
 (`heap_init::grow_for`), so the frame allocation it makes can enter direct reclaim with nothing held
 ([§4.4](MEMORY.md#44-kernel-heap) rule 1).
 
-Filesystem spinlocks take `RANK_DEVICE`: the ramfs and kernfs store locks (tmpfs's data ops run
-under kernfs's), each backend's mount and slot-allocation locks, the working
-directory (`file_init::CWD`), and the initrd and vibefs images (`fat_init::INITRD`,
-`vibefs_init::IMAGE`). The rank order therefore forbids heap allocation under them and
-allows logging. kernfs's node table, which grows as nodes are made, grows with its store unlocked
-(`KernFs::with_room`): the new table is allocated and the old one freed outside the lock, and only
-the copy from one to the other runs under it.
+Filesystem spinlocks take `RANK_DEVICE`: each backend's mount and slot-allocation locks, the
+working directory (`file_init::CWD`), and the initrd and vibefs images (`fat_init::INITRD`,
+`vibefs_init::IMAGE`). The rank order therefore forbids heap allocation under them and allows
+logging. The ramfs and kernfs stores (tmpfs's data ops run under kernfs's) are single volume locks
+at level 4, `BlockingMutex`es as the FAT and vibefs volumes below are (`fs::StoreLock`): a store op
+walks a directory's children, which a user can make number in the thousands, and an IF-off
+stretch of that length breaks §2.9 rule 2's bound. kernfs's node table, which grows as nodes are
+made, grows with its store unlocked (`KernFs::with_room`): the new table is allocated and the old
+one freed outside the lock, and only the copy from one to the other runs under it.
 
 The former cross-CPU `IrqCell`s are ranked `SpinMutex`es: the process table (`proc_init::TABLE`) and
 the work queues (`work_init::ST`) at SCHED, each taken through `lock_nested` under the scheduler lock,

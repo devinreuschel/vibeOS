@@ -641,8 +641,7 @@ pub fn rng_bound() -> bool {
 /// the pool is empty or no device is bound. The claim and the copy run
 /// under `Q`, so a refill cannot replace the pool between them.
 pub fn rng_take(buf: &mut [u8]) -> usize {
-    // pair order: VFS (fs_init::KERNFS's store lock) before virtio-rng `Q`
-    let mut g = Q.lock_nested(1);
+    let mut g = Q.lock();
     let Some(q) = g.as_mut() else {
         return 0;
     };
@@ -664,10 +663,9 @@ pub fn rng_take(buf: &mut [u8]) -> usize {
 
 /// Submit one entropy buffer. Completion is harvested by the IRQ thread.
 /// A `/dev/random` read calls it through `entropy_init::hw_fill` with the
-/// kernfs store lock held, both `RANK_DEVICE`.
+/// kernfs store's sleeping lock held (`fs::StoreLock`) and no spinlock.
 pub fn rng_request() -> Result<(), VirtioError> {
-    // pair order: fs_init::KERNFS's store lock, then Q
-    let mut g = Q.lock_nested(1);
+    let mut g = Q.lock();
     let q = g.as_mut().ok_or(VirtioError::Failed)?;
     if IN_FLIGHT.load(Ordering::Acquire) {
         return Ok(());

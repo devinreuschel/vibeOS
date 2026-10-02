@@ -3,8 +3,9 @@
 //! The VFS lock is a `BlockingMutex` over the namespace tables (DESIGN
 //! §2.1's sleeping tier, level 1): it is taken only from thread context
 //! with IF=1 and no spinlock held, and never under a volume lock. The
-//! ramfs and kernfs store locks ([`RAMFS`], [`KERNFS`]) are RANK_DEVICE
-//! spinlocks, never nested; tmpfs's data ops run under kernfs's. The
+//! ramfs and kernfs store locks ([`RAMFS`], [`KERNFS`]) are sleeping
+//! volume locks (`fs::StoreLock`), never nested; tmpfs's data ops run
+//! under kernfs's. The
 //! inode words data I/O changes live in [`INODE_WORDS`], outside the
 //! lock. [`init`] makes the root: the FAT
 //! initrd when it is live, otherwise ramfs. The File API module's `init`
@@ -25,7 +26,6 @@ use vibeos::fs::{
     words_table,
 };
 use vibeos::kalloc::AllocError;
-use vibeos::lock::RANK_DEVICE;
 
 use crate::cell::BootCell;
 use crate::fs::StoreLock;
@@ -40,11 +40,9 @@ static INODE_WORDS: BootCell<WordsTable> = BootCell::new();
 static VFS: BootCell<BlockingMutex<Vfs>> = BootCell::new();
 /// Every ramfs instance's nodes: the root when FAT is not live, and each
 /// `mount ramfs`.
-pub static RAMFS: RamFs<StoreLock<RamState>> =
-    RamFs::new(StoreLock::with_rank(RamState::new(), RANK_DEVICE));
+pub static RAMFS: RamFs<StoreLock<RamState>> = RamFs::new(StoreLock::new(RamState::new()));
 /// The kernfs store the four pseudo filesystems share.
-pub static KERNFS: KernFs<StoreLock<KernState>> =
-    KernFs::new(StoreLock::with_rank(KernState::new(), RANK_DEVICE));
+pub static KERNFS: KernFs<StoreLock<KernState>> = KernFs::new(StoreLock::new(KernState::new()));
 pub static DEVFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Dev);
 pub static PROCFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Proc);
 pub static TMPFS: KernSkin<StoreLock<KernState>> = KernSkin::new(&KERNFS, FsType::Tmp);

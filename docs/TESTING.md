@@ -418,8 +418,9 @@ and writes the rows to the results file's `irqoff` section, with the e2e driver 
 ktest driver's file (`VIBEOS_RESULTS_APPEND=1`). A test or test hook that holds IF off on purpose
 takes `sched::irqoff::deliberate(reason)` (C-IRQOFF-GUARD, `kernel_tests` only), which marks its
 stretch so it is never over and prints it on a `deliberate` line; `irqoff_logs_long_stretch` and
-`irqoff_deliberate_is_exempt`, registered only in this build, check the tracer and the guard. A
-test longjmped out of by `arch::catch` skips its guards' drops, so its stretch shows as
+`irqoff_deliberate_is_exempt`, registered only in this build, check the tracer and the guard, and
+`irqoff_big_tmp_dir` checks that a tmpfs directory of 3,000 files holds IF off for no stretch over
+the bound on a create or a lookup (DESIGN §2.1's sleeping store lock). A test longjmped out of by `arch::catch` skips its guards' drops, so its stretch shows as
 `unmatched`. Under `-smp 1` a test that needs a second CPU skips with its "no AP" reason, and each
 such skip has a `smp = 1` row in `tests/harness/skips.toml` (C-SKIPS).
 

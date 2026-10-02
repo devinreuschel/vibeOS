@@ -14,6 +14,8 @@ mod churn;
 mod cwd;
 mod hooks;
 mod initrd;
+#[cfg(feature = "irqoff")]
+mod irqoff;
 mod kernfs;
 mod lock;
 mod ops;
@@ -1281,4 +1283,6 @@ pub(crate) const TESTS: &[Test] = &[
     test("shell_mount_umount", test_shell_mount_umount),
     test("shell_fs_commands", test_shell_fs_commands),
     test("shell_fat32_image", test_shell_fat32_image),
+    #[cfg(feature = "irqoff")]
+    test("irqoff_big_tmp_dir", irqoff::irqoff_big_tmp_dir).deadline(30_000),
 ];
