@@ -654,3 +654,26 @@ fn link_racing_unlink_is_not_found() {
     assert_eq!(api.walk(None, b"/g", true).unwrap_err(), FsError::NotFound);
     assert_eq!(used_inodes(vfs), before);
 }
+
+/// `..` from the root of mounts stacked on one directory leads to that
+/// directory's parent, not into a mount below, from the top of the stack
+/// and from the lower mount once the top one goes.
+#[test]
+fn dotdot_climbs_stacked_mounts() {
+    let mut v = ram();
+    v.mkdir(None, "/m", 0o755).unwrap();
+    v.mkdir(None, "/x", 0o755).unwrap();
+    v.mount(None, "/m", ramfs()).unwrap();
+    v.mkdir(None, "/m/low", 0o755).unwrap();
+    v.mount(None, "/m", ramfs()).unwrap();
+    v.mkdir(None, "/m/in", 0o755).unwrap();
+    let x = v.stat(None, "/x").unwrap().ino;
+    for p in ["/m/../x", "/m/in/../../x"] {
+        assert_eq!(v.stat(None, p).unwrap().ino, x, "{p}");
+    }
+    assert_eq!(v.stat(None, "/m/low").unwrap_err(), FsError::NotFound);
+    v.umount(None, "/m").unwrap();
+    assert_eq!(v.stat(None, "/m/low/../../x").unwrap().ino, x);
+    v.umount(None, "/m").unwrap();
+    assert_dcache_sound(&v);
+}

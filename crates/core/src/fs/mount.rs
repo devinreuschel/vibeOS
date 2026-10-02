@@ -444,24 +444,27 @@ impl Vfs {
 
     /// Step from `(mount, dslot)` to its parent: nowhere at `root` (the
     /// walk's base root, with its mounts followed) or at the namespace
-    /// root, and from a mount's root to the parent of its mountpoint.
+    /// root, and from a mount's root up to its mountpoint, again while
+    /// that is a mount's root too (mounts stacked on one directory), and
+    /// then to its parent, as Linux's `..` climbs.
     pub(super) fn dotdot(&self, root: Option<PathRef>, mount: &mut u8, dslot: &mut u16) {
-        if root.is_some_and(|r| r.mount == *mount && r.dslot == *dslot) {
-            return;
-        }
-        let m = *mount;
-        if self.mounts[m as usize].root_dslot == *dslot {
-            match self.mounts[m as usize].parent {
-                None => {}
-                Some(p) => {
-                    let mp = self.mounts[m as usize].mp_dslot;
-                    *mount = p;
-                    *dslot = self.dentries[mp as usize].parent;
-                }
+        // Each climb moves to a parent mount, so a sound table needs no
+        // more than one per mount.
+        for _ in 0..=self.mounts.len() {
+            if root.is_some_and(|r| r.mount == *mount && r.dslot == *dslot) {
+                return;
             }
-            return;
+            let m = &self.mounts[*mount as usize];
+            if m.root_dslot != *dslot {
+                *dslot = self.dentries[*dslot as usize].parent;
+                return;
+            }
+            let Some(p) = m.parent else {
+                return;
+            };
+            *dslot = m.mp_dslot;
+            *mount = p;
         }
-        *dslot = self.dentries[*dslot as usize].parent;
     }
 
     /// Mounts whose mountpoint is dentry `slot`.
