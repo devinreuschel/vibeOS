@@ -243,8 +243,10 @@ fn push_part(t: &mut Table, p: Part) -> bool {
     true
 }
 
-fn next_index(t: &Table) -> u8 {
-    (t.n as u8).saturating_add(1)
+/// The number Linux gives the `k`th logical partition (from 0): 5 on,
+/// after the four primary slots.
+fn logical_index(k: usize) -> Option<u8> {
+    u8::try_from(k).ok()?.checked_add(5)
 }
 
 /// Byte offset of MBR entry `i` (0 to 3).
@@ -462,12 +464,18 @@ fn load_entries<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
 
 fn parse_gpt_entries(t: &mut Table, entries: &[u8], nent: u32, nsectors: u64) {
     let nent = nent as usize;
-    for e in entries
+    // An entry's number is its place in the array plus one, used or not,
+    // as Linux names a GPT partition.
+    for (i, e) in entries
         .as_chunks::<{ GPT_ENTRY_SIZE as usize }>()
         .0
         .iter()
         .take(nent)
+        .enumerate()
     {
+        let Some(index) = i.checked_add(1).and_then(|n| u8::try_from(n).ok()) else {
+            break;
+        };
         let (Some(guid), Some(first), Some(last)) = (field::<16>(e, 0), r64(e, 32), r64(e, 40))
         else {
             break;
@@ -481,7 +489,7 @@ fn parse_gpt_entries(t: &mut Table, entries: &[u8], nent: u32, nsectors: u64) {
             continue;
         }
         let p = Part {
-            index: next_index(t),
+            index,
             start_lba: first,
             nsectors: n,
             kind: PartKind::Gpt { type_guid: guid },
@@ -540,6 +548,7 @@ fn parse_logical<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
 ) {
     let ext_end = ext_start.saturating_add(ext_count);
     let mut ebr = ext_start;
+    let mut logical = 0usize;
     for _ in 0..MAX_EBR_DEPTH {
         if ebr >= nsectors || ebr >= ext_end {
             return;
@@ -560,8 +569,12 @@ fn parse_logical<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
             if start >= nsectors || end > nsectors || start < ext_start || end > ext_end {
                 return;
             }
+            let Some(index) = logical_index(logical) else {
+                return;
+            };
+            logical = logical.saturating_add(1);
             let p = Part {
-                index: next_index(t),
+                index,
                 start_lba: start,
                 nsectors: count,
                 kind: PartKind::Mbr { sys },
@@ -598,7 +611,9 @@ fn parse_mbr<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     for (i, e) in prim.iter_mut().enumerate() {
         *e = mbr_entry(sector_buf, i).ok_or(PartError::Truncated)?;
     }
-    for (sys, start, count) in prim {
+    // A primary partition is numbered by its slot, 1 to 4, and the
+    // logical ones from 5, as Linux numbers them.
+    for (slot, (sys, start, count)) in (1u8..).zip(prim) {
         if sys == 0 || count == 0 || sys == MBR_PROTECTIVE {
             continue;
         }
@@ -613,7 +628,7 @@ fn parse_mbr<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
             continue;
         }
         let p = Part {
-            index: next_index(&t),
+            index: slot,
             start_lba: start,
             nsectors: count,
             kind: PartKind::Mbr { sys },
@@ -826,7 +841,9 @@ mod tests {
         assert_eq!(t.parts[1].start_lba, 41);
         assert_eq!(t.parts[1].nsectors, 16);
         assert_eq!(t.parts[2].start_lba, 73);
-        assert_eq!(t.parts[2].index, 3);
+        // The primary keeps its slot's number, and the logicals are 5 on.
+        let idx: Vec<u8> = t.parts[..t.n].iter().map(|p| p.index).collect();
+        assert_eq!(idx, [1, 5, 6]);
     }
 
     #[test]
@@ -1171,6 +1188,25 @@ mod tests {
         assert_eq!((t.n, t.parts[0].start_lba), (1, 300));
         put(&mut d, 0, &[0u8; 512]);
         assert_eq!(parse_image(&d, 512).unwrap_err(), PartError::Empty);
+    }
+
+    /// A partition keeps the number its place on disk gives it, as Linux
+    /// names it: a GPT entry's place in the array plus one, used or not,
+    /// and a primary MBR entry's slot, so a gap shifts no later name.
+    #[test]
+    fn partitions_keep_their_on_disk_numbers() {
+        let d = gpt_disk(1024, &[(GUID_UNUSED, 0, 0, ""), (GUID_LINUX, 34, 200, "L")]);
+        let t = parse_image(&d, 512).unwrap();
+        assert_eq!((t.n, t.parts[0].index), (1, 2));
+        let mut d = disk(64 * 512);
+        let mut mbr = [0u8; 512];
+        pack_mbr(
+            &mut mbr,
+            &[(0, 0, 0), (0, 0, 0), (MBR_LINUX, 8, 16), (0, 0, 0)],
+        );
+        put(&mut d, 0, &mbr);
+        let t = parse_image(&d, 512).unwrap();
+        assert_eq!((t.n, t.parts[0].index), (1, 3));
     }
 
     #[test]
