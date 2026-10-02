@@ -244,6 +244,7 @@ fn with_vol<R>(
     if !v.used.load(Ordering::Acquire) {
         return Err(FsError::Io);
     }
+    g.now = fs_init::now();
     let mut io = Io { back: &v.media };
     f(&mut g, &mut io)
 }

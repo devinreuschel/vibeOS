@@ -109,6 +109,9 @@ impl Vol {
         rec.kind = kind_to(kind);
         rec.mode = mode;
         rec.nlink = 1;
+        rec.atime = self.now;
+        rec.mtime = self.now;
+        rec.ctime = self.now;
         rec.flags = if kind != InodeKind::Dir { F_INLINE } else { 0 };
         if let Some(t) = link_target {
             rec.inline_len = t.len() as u8;
@@ -168,6 +171,8 @@ impl Vol {
         self.inodes[is].nlink = nlink;
         if nlink == 0 {
             self.inodes[is] = Inode::EMPTY;
+        } else {
+            self.bump_ctime(ino);
         }
         self.bump_mtime(dir);
         Ok(())
@@ -235,6 +240,7 @@ impl Vol {
         self.dents[e].name = nm;
         self.bump_mtime(src_dir);
         self.bump_mtime(dst_dir);
+        self.bump_ctime(src_ino);
         Ok(())
     }
 

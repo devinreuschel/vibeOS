@@ -436,6 +436,29 @@ fn unlink_refused_for_drop_room_keeps_the_name() {
     assert_eq!(r.errors, 0, "{r:?}");
 }
 
+/// A change stamps the inodes it touches with `Vol::now`, in the Unix
+/// seconds the record keeps, and the stamps survive a remount: a new
+/// file's three times, its mtime on a write, its directory's on a create.
+#[test]
+fn changes_stamp_the_wall_clock() {
+    const T0: u64 = 1_700_000_000;
+    let mut b = fresh(64 * BLOCK);
+    let ino = with_vol(&mut b, |v, d| {
+        v.now = T0;
+        let ino = new_file(v, d, b"f");
+        v.now = T0 + 5;
+        v.write(d, ino, 0, b"data").unwrap();
+        v.sync(d).unwrap();
+        ino
+    });
+    with_vol(&mut b, |v, _| {
+        let f = v.inodes[v.inode_slot(ino).unwrap()];
+        assert_eq!((f.atime, f.mtime, f.ctime), (T0, T0 + 5, T0 + 5));
+        let r = v.inodes[v.inode_slot(ROOT_INO).unwrap()];
+        assert_eq!((r.mtime, r.ctime), (T0, T0));
+    });
+}
+
 fn n_ext(v: &Vol, ino: u32) -> u8 {
     v.inodes[v.inode_slot(ino).unwrap()].n_ext
 }
