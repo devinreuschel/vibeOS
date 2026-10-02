@@ -287,12 +287,17 @@ impl Vfs {
         if self.kind_of(dir)? != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
+        let vi = self.d_islot(victim.dslot)?;
+        // unlink(2) of a directory is EISDIR, and rmdir(2) of anything
+        // else ENOTDIR, ahead of a mount point's EBUSY, as Linux's
+        // `may_delete` runs before its mount point check.
+        match (rmdir, self.inodes[vi as usize].kind == InodeKind::Dir) {
+            (false, true) => return Err(FsError::IsDir),
+            (true, false) => return Err(FsError::NotDir),
+            _ => {}
+        }
         if self.is_mountpoint(dir, name) || victim.mount != dir.mount {
             return Err(FsError::Busy);
-        }
-        let vi = self.d_islot(victim.dslot)?;
-        if rmdir && self.inodes[vi as usize].kind != InodeKind::Dir {
-            return Err(FsError::NotDir);
         }
         Ok(vi)
     }
@@ -410,13 +415,6 @@ impl Vfs {
         }
         self.hashed_dir(od)?;
         self.hashed_dir(nd)?;
-        if self.is_mountpoint(od, oname)
-            || self.is_mountpoint(nd, nname)
-            || src.mount != od.mount
-            || tgt.is_some_and(|t| t.mount != nd.mount)
-        {
-            return Err(FsError::Busy);
-        }
         let si = self.d_islot(src.dslot)?;
         // A directory never moves below itself: its dentry would become
         // its own ancestor.
@@ -441,6 +439,15 @@ impl Vfs {
                 (true, false) => return Err(FsError::NotDir),
                 _ => {}
             }
+        }
+        // A mount point neither moves nor goes, checked after the kinds as
+        // Linux's `vfs_rename` checks it.
+        if self.is_mountpoint(od, oname)
+            || self.is_mountpoint(nd, nname)
+            || src.mount != od.mount
+            || tgt.is_some_and(|t| t.mount != nd.mount)
+        {
+            return Err(FsError::Busy);
         }
         Ok((si, ti))
     }

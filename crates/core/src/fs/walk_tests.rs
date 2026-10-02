@@ -261,11 +261,29 @@ fn rename_mountpoint_busy() {
     v.mount(None, "/m", ramfs()).unwrap();
     assert_eq!(v.rename(None, "/m", "/o").unwrap_err(), FsError::Busy);
     assert_eq!(v.rename(None, "/n", "/m").unwrap_err(), FsError::Busy);
-    assert_eq!(v.rename(None, "/f", "/m").unwrap_err(), FsError::Busy);
     assert_eq!(v.rmdir(None, "/m").unwrap_err(), FsError::Busy);
-    assert_eq!(v.unlink(None, "/m").unwrap_err(), FsError::Busy);
+    // A directory's kind answers before its mount: a file never replaces
+    // it, and unlink never takes it.
+    assert_eq!(v.rename(None, "/f", "/m").unwrap_err(), FsError::IsDir);
+    assert_eq!(v.unlink(None, "/m").unwrap_err(), FsError::IsDir);
     v.umount(None, "/m").unwrap();
     v.rename(None, "/m", "/o").unwrap();
+    assert_dcache_sound(&v);
+}
+
+/// unlink(2) of a directory is EISDIR, with a trailing slash or without,
+/// and leaves it; rmdir(2) of a file is ENOTDIR.
+#[test]
+fn unlink_of_a_directory_is_eisdir() {
+    let mut v = ram();
+    v.mkdir(None, "/d", 0o755).unwrap();
+    v.creat(None, "/f", 0o644).unwrap();
+    assert_eq!(v.unlink(None, "/d").unwrap_err(), FsError::IsDir);
+    assert_eq!(v.unlink(None, "/d/").unwrap_err(), FsError::IsDir);
+    assert_eq!(v.rmdir(None, "/f").unwrap_err(), FsError::NotDir);
+    assert_eq!(v.stat(None, "/d").unwrap().kind, InodeKind::Dir);
+    v.rmdir(None, "/d").unwrap();
+    v.unlink(None, "/f").unwrap();
     assert_dcache_sound(&v);
 }
 
