@@ -226,7 +226,11 @@ boot checks only those lines, not the other CPUs' state. A test that waits for a
 wake, or an interrupt waits on that event through `ktest::wait_for`, which yields until its
 predicate holds and gives up only 500 ms before the run's deadline, so the test's own failure line
 can name what it waited on; a fixed bound of the test's own, which a loaded host outlasts, is the
-flake class ROADMAP §10.2's flake lines record.
+flake class ROADMAP §10.2's flake lines record. `ktest::sleep_for` waits the same way but sleeps 1 ms
+between checks, for a waiter whose CPU also runs the work it waits on. `ktest::settle_threads`, the
+quiescent point every frame-accounting test reads its counts at, waits through it inside a run: the
+dead threads' stacks come back at the host's rate. Only the registry's warm-up before `begin`, which
+no run's deadline covers, keeps its 2 s bound.
 
 Selection (BOOT.md §3.2). `vibeos.ktest=` (`VIBEOS_KTEST`) takes a comma-separated list of globs,
 `*` matching any run of characters and `?` one; with no item every row not marked opt-in runs. A row

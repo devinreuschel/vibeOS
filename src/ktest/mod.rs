@@ -599,19 +599,27 @@ fn warm_kva() -> (usize, usize) {
 
 /// With the timer on, sleep until no thread but this one and the idle
 /// threads is Ready or Running and no dead thread's stack is still on its
-/// way to a stack cache or back to the buddy. False if that takes longer
-/// than [`SETTLE_MS`].
+/// way to a stack cache or back to the buddy. In a run, the run's deadline
+/// bounds the wait ([`sleep_for`]): the stacks come back at the host's
+/// rate, which no fixed bound fits (ROADMAP §10.2). Outside one, in the
+/// registry's warm-up, [`SETTLE_MS`] does. False if the bound came first.
 pub(crate) fn settle_threads() -> bool {
     let me = thread_init::current_id();
-    let t0 = time_init::uptime_ms();
-    loop {
+    let settled = || {
         let mut busy = thread_init::stacks_in_flight() != 0;
         thread_init::each_thread(|t| {
             busy |= t.id != me
                 && t.name != "idle"
                 && matches!(t.state, ThreadState::Ready | ThreadState::Running);
         });
-        if !busy {
+        !busy
+    };
+    if deadline_near().is_some() {
+        return sleep_for(settled);
+    }
+    let t0 = time_init::uptime_ms();
+    loop {
+        if settled() {
             break true;
         }
         if time_init::uptime_ms().saturating_sub(t0) > SETTLE_MS {
@@ -1033,18 +1041,42 @@ const WAIT_MARGIN_MS: u32 = 500;
 /// naming what it waited on. With no deadline armed it waits on, and the
 /// harness's run deadline is the backstop.
 pub(crate) fn wait_for(pred: impl Fn() -> bool) -> bool {
-    let margin = Arch::freq_hz().map_or(0, |f| vibeos::ktest::deadline_cycles(WAIT_MARGIN_MS, f));
     loop {
         if pred() {
             return true;
         }
-        // Acquire: pairs with `arm`'s Release store, as in `on_tick`.
-        let d = DEADLINE.load(Ordering::Acquire);
-        if d != 0 && Arch::now().saturating_add(margin) >= d {
+        if deadline_near() == Some(true) {
             return pred();
         }
         thread_init::yield_now();
     }
+}
+
+/// [`wait_for`], sleeping 1 ms between checks rather than yielding: for a
+/// waiter whose CPU also runs the work it waits on, which a yield would
+/// take turns with.
+pub(crate) fn sleep_for(pred: impl Fn() -> bool) -> bool {
+    loop {
+        if pred() {
+            return true;
+        }
+        if deadline_near() == Some(true) {
+            return pred();
+        }
+        thread_init::sleep_ms(1);
+    }
+}
+
+/// Whether the running row's deadline is [`WAIT_MARGIN_MS`] away or closer;
+/// `None` when no deadline is armed.
+fn deadline_near() -> Option<bool> {
+    // Acquire: pairs with `arm`'s Release store, as in `on_tick`.
+    let d = DEADLINE.load(Ordering::Acquire);
+    if d == 0 {
+        return None;
+    }
+    let margin = Arch::freq_hz().map_or(0, |f| vibeos::ktest::deadline_cycles(WAIT_MARGIN_MS, f));
+    Some(Arch::now().saturating_add(margin) >= d)
 }
 
 /// Spin on TSC time until `pred` holds, for at most `ns`.
