@@ -278,8 +278,8 @@ even that would be listed in the script's `KNOWN_OVER` with the frame it may not
 entry fails once its function is back under the bound. The list is empty: its two entries, the
 tmpfs instance of the block cache's `cached_read` and `cached_write` (8424 and 8360 bytes, on the
 read and write syscalls through kernfs), left it when the two moved their page buffers into a
-scratch page the kernfs store holds (216 bytes each). The ROADMAP box closes when that list is
-empty. The frames are those of
+scratch page the kernfs store holds (216 bytes each). The ROADMAP box closed when that list
+became empty. The frames are those of
 the ELF `CARGO_SHIP` builds, whole and not incremental as CI builds it: an incremental build splits
 the crate into other codegen units, which inlines differently and gave the virtio-blk probe
 (`BlkDriver::probe`) a 16824-byte frame where the whole build gives it 3224. The screen is for one
