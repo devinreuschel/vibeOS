@@ -187,6 +187,11 @@ pub trait BlockDevice: Send + Sync {
     fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError>;
     fn flush(&self) -> Result<(), BlockError>;
     fn discard(&self, lba: u64, nsectors: u64) -> Result<(), BlockError>;
+    /// Whether the device refuses every write and discard with
+    /// `ReadOnly`, as a virtio-blk disk that negotiated `F_RO` does.
+    fn read_only(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

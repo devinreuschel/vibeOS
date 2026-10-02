@@ -28,7 +28,7 @@ use vibeos::virtio::{
 };
 use vibeos::virtio_blk::{
     CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
-    F_FLUSH, F_MQ, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
+    F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
     exhausted_fails_device, logical_capacity, map_status, nq_from_config, pack_discard,
     pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only, sector_for_lba,
 };
@@ -986,6 +986,10 @@ impl BlockDevice for VblkDev {
     }
     fn discard(&self, lba: u64, nsectors: u64) -> Result<(), BlockError> {
         self.blk()?.discard(lba, nsectors)
+    }
+    fn read_only(&self) -> bool {
+        self.blk()
+            .is_ok_and(|b| b.features.load(Ordering::Acquire) & F_RO != 0)
     }
 }
 
