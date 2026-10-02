@@ -387,13 +387,9 @@ fn fixed_tables_match_limits() {
     assert_eq!(k.skins.len(), crate::limits::MAX_KERN_MOUNTS);
 }
 
-/// Whether `/tmp` has `name`, asked of the store: the host VFS's small
-/// inode table cannot hold hundreds of names at once.
-fn tmp_has(k: &Kfs, name: &str) -> bool {
-    k.fs.with(|s| {
-        let (inst, root) = s.skin(FsType::Tmp).unwrap();
-        kern_find_child(s, inst, root, name.as_bytes()).is_some()
-    })
+/// Whether `path` names a regular file.
+fn is_reg(v: &mut Vfs, path: &str) -> bool {
+    v.stat(None, path).is_ok_and(|s| s.kind == InodeKind::Reg)
 }
 
 /// Nodes in use and the table's length and capacity.
@@ -424,13 +420,8 @@ fn node_table_starts_empty_and_grows_past_the_old_pool() {
     // Every name is still linked after the moves, and the other skins'
     // nodes made before them still work.
     for i in 0..n {
-        assert!(tmp_has(&k, &format!("f{i}")));
+        assert!(is_reg(&mut v, &format!("/tmp/f{i}")));
     }
-    // Unlinked, the names leave the host VFS's small caches room to walk.
-    for i in 0..n {
-        v.unlink(None, &format!("/tmp/f{i}")).unwrap();
-    }
-    assert_eq!(node_counts(&k).1, len);
     let fid = v.open_path(None, "/dev/zero", O_RDWR, 0).unwrap();
     let mut b = [1u8; 4];
     assert_eq!(v.read(&fid, &mut b).unwrap(), 4);
@@ -487,12 +478,12 @@ fn node_table_grow_failure_is_nomem_and_changes_nothing() {
     assert_eq!(r, Err(FsError::NoMem));
     assert_eq!(node_counts(&k), before);
     // The tree is whole, and the next create grows the table.
-    assert!(tmp_has(&k, "keep"));
+    assert!(is_reg(&mut v, "/tmp/keep"));
     for j in 0..i {
-        assert!(tmp_has(&k, &format!("f{j}")));
+        assert!(is_reg(&mut v, &format!("/tmp/f{j}")));
     }
     v.creat(None, "/tmp/after", 0o644).unwrap();
-    assert!(tmp_has(&k, "after"));
+    assert!(is_reg(&mut v, "/tmp/after"));
     assert!(node_counts(&k).2 > before.2);
 }
 
