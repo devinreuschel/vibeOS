@@ -261,19 +261,12 @@ impl FatVol {
         if src.kind == InodeKind::Dir && self.in_subtree(d, src.clu, dst_dir)? {
             return Err(FatError::Inval);
         }
-        let mut replaced = None;
         match self.lookup(d, dst_dir, dst_name) {
             // The source's own dirent, as a case-only rename finds it: the
             // new name is written before the old one goes, so nothing is
             // unlinked.
             Ok(dst) if (dst.dir_clu, dst.dir_off) == from => {}
-            // The destination goes as rename(2) has it: a directory only
-            // for a directory and only when empty (an rmdir's checks),
-            // anything else only for a non-directory (an unlink's).
-            Ok(_) => {
-                let dir = src.kind == InodeKind::Dir;
-                replaced = Some(self.unlink(d, dst_dir, dst_name, dir)?);
-            }
+            Ok(dst) => return self.rename_over(d, (src_dir, &src), &dst),
             Err(FatError::NotFound) => {}
             Err(e) => return Err(e),
         }
@@ -312,7 +305,49 @@ impl FatVol {
         Ok(RenameMoved {
             from,
             to: (dst_dir, short_off),
-            replaced,
+            replaced: None,
+        })
+    }
+
+    /// [`Self::rename`] onto the existing `dst`, as rename(2) has it: a
+    /// directory replaces only an empty directory and anything else only a
+    /// non-directory. The source's entry is written over `dst`'s short
+    /// entry under `dst`'s name, as Linux's vfat reuses the target's slot,
+    /// so the name never goes missing and nothing is allocated; then the
+    /// source's entry goes. `dst`'s clusters are the caller's to free.
+    fn rename_over<D: Disk>(
+        &mut self,
+        d: &mut D,
+        (src_dir, src): (u32, &Node),
+        dst: &Node,
+    ) -> Result<RenameMoved, FatError> {
+        match (src.kind == InodeKind::Dir, dst.kind == InodeKind::Dir) {
+            (false, true) => return Err(FatError::IsDir),
+            (true, false) => return Err(FatError::NotDir),
+            (true, true) if !self.dir_empty(d, dst.clu)? => return Err(FatError::NotEmpty),
+            _ => {}
+        }
+        let mut name = [0u8; ENT];
+        self.read_dir_raw(d, dst.dir_clu, dst.dir_off, &mut name)?;
+        let mut ent = [0u8; ENT];
+        self.read_dir_raw(d, src_dir, src.dir_off, &mut ent)?;
+        ent[..11].copy_from_slice(&name[..11]);
+        self.write_dir_raw(d, dst.dir_clu, dst.dir_off, &ent)?;
+        if src.kind == InodeKind::Dir && src_dir != dst.dir_clu {
+            let parent = if dst.dir_clu == self.info.root_clus {
+                0
+            } else {
+                dst.dir_clu
+            };
+            self.set_dotdot(d, src.clu, parent)?;
+        }
+        d.flush()?;
+        self.mark_deleted(d, src_dir, src.dir_off)?;
+        d.flush()?;
+        Ok(RenameMoved {
+            from: (src.dir_clu, src.dir_off),
+            to: (dst.dir_clu, dst.dir_off),
+            replaced: Some(FatInode::of_node(dst)),
         })
     }
 

@@ -27,7 +27,7 @@ fn allow_missing_tools() -> bool {
 /// A skipped check prints its line once per process.
 /// Miri cannot spawn a process, so under `make miri` the check is skipped
 /// and the test's own image checks still run.
-fn fsck(buf: &[u8]) {
+pub(super) fn fsck(buf: &[u8]) {
     if cfg!(miri) {
         return;
     }
