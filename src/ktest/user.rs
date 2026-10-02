@@ -14,8 +14,6 @@ use vibeos::elf::{
 use vibeos::fs::FsError;
 
 use crate::proc_init;
-use crate::thread_init;
-use crate::time_init;
 use crate::user_init::LoadError;
 
 /// Where a [`user_code!`] program is loaded.
@@ -136,19 +134,12 @@ pub(crate) fn run(img: &Image, argv: &[&str]) -> Result<u32, LoadError> {
     Ok(wait(spawn(img, argv)?))
 }
 
-/// Yield until the free-frame count is back to `before`, for at most 1 s.
-/// TSC time, since ticks stop while the registry holds IF off.
+/// Yield until the free-frame count is back to `before`, with the running
+/// row's deadline as the bound ([`super::wait_for`]): a reaped process's
+/// frames come back when its CPU runs the reclaim, which a loaded host can
+/// put off past any fixed time.
 pub(crate) fn frames_settle(before: usize) -> bool {
-    let deadline = time_init::now_ns().saturating_add(1_000_000_000);
-    loop {
-        if super::free_frames() == before {
-            return true;
-        }
-        if time_init::now_ns() >= deadline {
-            return false;
-        }
-        thread_init::yield_now();
-    }
+    super::wait_for(|| super::free_frames() == before)
 }
 
 /// `user_code!(NAME, "<intel asm>")` assembles position-independent code
@@ -185,3 +176,38 @@ macro_rules! user_code {
     };
 }
 pub(crate) use user_code;
+
+// fork; the child exits 0; the parent waits for any child, then exits 0.
+user_code!(
+    WARM_FORK,
+    "
+    mov eax, 57
+    syscall
+    test rax, rax
+    jnz 2f
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+2:
+    mov rdi, -1
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 61
+    syscall
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+/// Run a process that forks one child and reaps it, for the registry's
+/// warm-up ([`super::quiesce_frames`]): the kernel heap, which never
+/// shrinks, then holds what two live processes' objects take, so a test
+/// that runs its first process alone does not count that growth as a
+/// leak. `false` when it could not be spawned or did not exit 0.
+pub(crate) fn warm_processes() -> bool {
+    matches!(run(&Image::Code(WARM_FORK, DEFAULT), &["warm"]), Ok(0))
+}

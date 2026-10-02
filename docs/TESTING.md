@@ -230,7 +230,11 @@ flake class ROADMAP §10.2's flake lines record. `ktest::sleep_for` waits the sa
 between checks, for a waiter whose CPU also runs the work it waits on. `ktest::settle_threads`, the
 quiescent point every frame-accounting test reads its counts at, waits through it inside a run: the
 dead threads' stacks come back at the host's rate. Only the registry's warm-up before `begin`, which
-no run's deadline covers, keeps its 2 s bound.
+no run's deadline covers, keeps its 2 s bound. `ktest::user::frames_settle`, which waits for a
+reaped process's frames, waits on the run's deadline too. The warm-up also runs a user process that
+forks and reaps a child (`ktest::user::warm_processes`), so a test that `vibeos.ktest=` selects
+alone does not count the kernel heap's growth for its first processes as a leak; the heap never
+shrinks, and a full run's earlier tests grew it first.
 
 Selection (BOOT.md §3.2). `vibeos.ktest=` (`VIBEOS_KTEST`) takes a comma-separated list of globs,
 `*` matching any run of characters and `?` one; with no item every row not marked opt-in runs. A row

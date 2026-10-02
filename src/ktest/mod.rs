@@ -513,18 +513,21 @@ static WARMED: AtomicBool = AtomicBool::new(false);
 /// allocates and frees, so the tests compare against a quiescent baseline
 /// and a leak in their window still shows.
 ///
-/// Three things move the count outside a test's window. A thread spawned
+/// Four things move the count outside a test's window. A thread spawned
 /// before the registry (the boot `/hello`, whose `wait_kernel` returns at
 /// the reap, before the thread parks its stack) can still be running or
 /// have its stack on its CPU's dead list. A spawn into an empty
 /// thread slot boxes a new `Tcb`, which can grow the heap. A stack or vmap
 /// carved from KVA that no mapping has reached before takes a page-table
-/// page that `unmap` never frees. So: let every pending thread finish and
+/// page that `unmap` never frees. A test's first user processes allocate
+/// their address spaces and tables from the heap, which grows to hold
+/// them and never shrinks. So: let every pending thread finish and
 /// its stack come back; fill the empty thread slots, all but
 /// [`EMPTY_SLOT_RESERVE`], with threads that exit at once, so later spawns
 /// reuse Dead boxes; walk KVA through two coalesces with the timer on, so
-/// the free list starts again at VA the walk mapped; and allocate and free
-/// [`WARM_DEFAULT_STACKS`] default-size stacks. It runs once per boot, from
+/// the free list starts again at VA the walk mapped; allocate and free
+/// [`WARM_DEFAULT_STACKS`] default-size stacks; and run a process that
+/// forks and reaps a child ([`user::warm_processes`]). It runs once per boot, from
 /// the registry or from the first `quiescent_free_frames` caller,
 /// which then waits for the threads and stacks to settle before it reads
 /// the count.
@@ -573,6 +576,9 @@ pub(crate) fn quiesce_frames() {
         };
         kva_init::free_stack(stack);
         i += 1;
+    }
+    if !user::warm_processes() {
+        crate::marker!("vibeOS: ktest:   warm-up: user process failed");
     }
 }
 
