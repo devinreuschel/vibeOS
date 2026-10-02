@@ -28,7 +28,7 @@ mod walk;
 pub(crate) use cwd::test_cwd_per_process;
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
-pub(crate) use kernfs::test_kernfs_nodes_grow;
+pub(crate) use kernfs::{test_kernfs_nodes_grow, test_tmp_full_spares_system_nodes};
 pub(crate) use lock::{test_fat_vol_wait_no_eio, test_vfs_io_off_lock};
 pub(crate) use ops::{test_vfs_backends_via_ops, test_vfs_fat_one_inode};
 pub(crate) use routing::{
@@ -1410,6 +1410,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("vfs_walk", test_vfs_walk),
     test("pseudo_fs", test_pseudo_fs),
     test("kernfs_nodes_grow", test_kernfs_nodes_grow),
+    test(
+        "tmp_full_spares_system_nodes",
+        test_tmp_full_spares_system_nodes,
+    ),
     test("fat_initrd", test_fat_initrd),
     test("initrd_module_sized", test_initrd_module_sized),
     test("vibefs", test_vibefs).once(),

@@ -80,9 +80,13 @@ pub(super) fn kern_info(k: &KernState, inst: u32, ino: u32) -> Result<InodeInfo,
 
 /// Take a node for instance `inst`: the free list's first, else a new one
 /// in the table's spare capacity, which [`KernFs::with_room`] reserved.
-/// Never allocates. `NoSpace` when neither has one, or when the ino would
-/// not fit the `u32` an inode key holds.
+/// Never allocates. `NoSpace` when the instance has all the nodes it may,
+/// when neither has one, or when the ino would not fit the `u32` an inode
+/// key holds.
 pub(super) fn kern_alloc(k: &mut KernState, inst: u32) -> Result<u32, FsError> {
+    if k.at_cap(inst) {
+        return Err(FsError::NoSpace);
+    }
     let (ino, i) = match kern_idx(k, k.free) {
         Some(i) => {
             let ino = k.free;
@@ -110,6 +114,9 @@ pub(super) fn kern_alloc(k: &mut KernState, inst: u32) -> Result<u32, FsError> {
     k.nodes[i] = KernNode::EMPTY;
     k.nodes[i].used = true;
     k.nodes[i].inst = inst;
+    if let Some(s) = k.skin_of(inst) {
+        s.nodes = s.nodes.saturating_add(1);
+    }
     Ok(ino)
 }
 
@@ -125,8 +132,12 @@ pub(super) fn kern_release(k: &mut KernState, i: usize) {
     if !n.used {
         return;
     }
+    let inst = n.inst;
     if n.kind == KernKind::File {
         tmp_free_extent(k, i);
+    }
+    if let Some(s) = k.skin_of(inst) {
+        s.nodes = s.nodes.saturating_sub(1);
     }
     k.nodes[i] = KernNode::EMPTY;
     k.nodes[i].next = k.free;

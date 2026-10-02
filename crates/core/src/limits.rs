@@ -4,9 +4,10 @@
 //! `fs::MAX_INODES`, ...) re-export them. A host test in each portable
 //! module that owns a table checks its length against its name here
 //! (`fixed_tables_match_limits`). A table that grows as it fills, with
-//! only memory as its cap, has no name here: kernfs's node table
+//! only memory as its cap, has no length here: kernfs's node table
 //! (`fs::kernfs::KernState`), which returns `ENOMEM` when the heap cannot
-//! grow it.
+//! grow it; what bounds a tmpfs instance's share of it is
+//! [`TMPFS_NODE_HEAP_BYTES`].
 //!
 //! What belongs here: a bound on how many kernel objects or bytes a workload
 //! can hold. What stays where it is, because hardware, a device queue, or an
@@ -58,6 +59,11 @@ pub const MAX_RAM_NODES: usize = 64;
 /// Mounted instances one kernfs store holds, over its four skins
 /// (`fs::kernfs::KernState`).
 pub const MAX_KERN_MOUNTS: usize = 8;
+/// Heap bytes a tmpfs instance's nodes may take at most by default, an
+/// eighth of the heap: its `nr_inodes` is half of RAM's pages, as Linux's,
+/// but no more nodes than this holds (`fs::kernfs::tmp_nr_inodes_default`),
+/// so a full `/tmp` leaves the heap to the kernel.
+pub const TMPFS_NODE_HEAP_BYTES: usize = (crate::heap::HEAP_SIZE / 8) as usize;
 /// Bytes one ramfs file holds (`fs::RamNode` data).
 pub const MAX_TMPFS_FILE_BYTES: usize = 256;
 /// Entries one ramfs directory holds (`fs::RamNode` dents).

@@ -530,6 +530,75 @@ fn tmpfs_extent_move_keeps_data() {
     assert_eq!(read_at(&mut v, "/tmp/c", 0, 1), b"C");
 }
 
+#[test]
+fn tmp_nr_inodes_default_is_half_of_ram_within_its_heap_share() {
+    // A 128 MiB guest: half of its 32768 pages.
+    assert_eq!(tmp_nr_inodes_default(32_768), 16_384);
+    let heap_cap = crate::limits::TMPFS_NODE_HEAP_BYTES / core::mem::size_of::<KernNode>();
+    assert!(heap_cap > 16_384);
+    // A 64 GiB machine: the heap share, not half of RAM.
+    assert_eq!(tmp_nr_inodes_default(16 << 20), heap_cap);
+    assert_eq!(tmp_nr_inodes_default(0), 1);
+}
+
+/// `/tmp` at its `nr_inodes` refuses a create with `NoSpace` (`ENOSPC`),
+/// and `/dev`, `/proc` and `/sys` still make and open nodes; an unlink
+/// makes room again.
+#[test]
+fn tmp_at_nr_inodes_is_enospc_and_spares_system_nodes() {
+    let (mut v, k) = boot();
+    let (have, max) = k.fs.tmp_nodes().unwrap();
+    assert_eq!(max, usize::MAX);
+    k.fs.set_tmp_nr_inodes(have + 5);
+    for i in 0..5 {
+        v.creat(None, &format!("/tmp/f{i}"), 0o644).unwrap();
+    }
+    assert_eq!(v.creat(None, "/tmp/over", 0o644), Err(FsError::NoSpace));
+    assert_eq!(v.mkdir(None, "/tmp/overdir", 0o755), Err(FsError::NoSpace));
+    assert_eq!(k.fs.tmp_nodes(), Some((have + 5, have + 5)));
+    // The kernel's skins are not charged to /tmp's count.
+    k.fs.sysfs_add_device(b"00:09.0", 0x1af4, 0x1001, 1, Some(b"virtio-blk"))
+        .unwrap();
+    assert_eq!(
+        v.stat(None, "/sys/devices/00:09.0/vendor").unwrap().kind,
+        InodeKind::Reg
+    );
+    let fid = v.open_path(None, "/dev/zero", O_RDWR, 0).unwrap();
+    let mut b = [1u8; 4];
+    assert_eq!(v.read(&fid, &mut b).unwrap(), 4);
+    assert_eq!(b, [0; 4]);
+    v.close(fid).unwrap();
+    assert!(has_name(&mut v, "/proc/1", b"cmdline"));
+    v.unlink(None, "/tmp/f0").unwrap();
+    v.creat(None, "/tmp/again", 0o644).unwrap();
+    assert_eq!(k.fs.tmp_nodes(), Some((have + 5, have + 5)));
+}
+
+/// `/tmp`'s file data fills its backing to `NoSpace`, and `/dev` still
+/// works.
+#[test]
+fn tmp_data_full_is_enospc_and_spares_dev() {
+    let (mut v, _k) = boot();
+    let f = v
+        .open_path(None, "/tmp/big", O_RDWR | O_CREAT, 0o644)
+        .unwrap();
+    let page = [0x5Au8; PAGE];
+    let mut wrote = 0usize;
+    let err = loop {
+        match v.write(&f, &page) {
+            Ok(n) => wrote += n,
+            Err(e) => break e,
+        }
+        assert!(wrote <= tmpfs::TMPFS_BACK_BYTES);
+    };
+    v.close(f).unwrap();
+    assert_eq!(err, FsError::NoSpace);
+    assert_eq!(wrote, tmpfs::TMPFS_BACK_BYTES);
+    let fid = v.open_path(None, "/dev/null", O_RDWR, 0).unwrap();
+    assert_eq!(v.write(&fid, b"x").unwrap(), 1);
+    v.close(fid).unwrap();
+}
+
 /// A sysfs driver attribute whose name does not fit fails with `Inval`
 /// and gives its node back: the table's count of used and free nodes
 /// stays whole, and the next node reuses it.

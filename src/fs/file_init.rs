@@ -405,8 +405,11 @@ fn attach_vibefs() {
 
 /// Mount the four pseudo filesystems on `/dev`, `/proc`, `/tmp` and
 /// `/sys`, each mountpoint made with `mkdir` through the root's ops (an
-/// existing directory is kept).
+/// existing directory is kept). `/tmp` gets its node cap first.
 fn mount_pseudo() -> Result<(), FsError> {
+    // `/tmp`'s `nr_inodes`, from Linux's default: half of RAM's pages.
+    let ram_pages = crate::pmm_init::with_buddy(|b| b.stats().total_frames) as u64;
+    fs_init::KERNFS.set_tmp_nr_inodes(vibeos::fs::kernfs::tmp_nr_inodes_default(ram_pages));
     let skins: [(&[u8], &'static dyn FileSystem); 4] = [
         (b"/dev", &fs_init::DEVFS),
         (b"/proc", &fs_init::PROCFS),

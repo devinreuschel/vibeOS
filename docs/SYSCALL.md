@@ -463,6 +463,13 @@ ROADMAP §10.4).
   at a time, crossing mounts, so a process reaches every mounted
   filesystem: `open("/dev/null")` opens devfs's `null`, and `/proc`,
   `/tmp`, `/sys`, and `/vibe` are procfs, tmpfs, sysfs, and vibefs.
+  `/tmp` counts its own nodes against an `nr_inodes` of half of RAM's
+  pages, Linux's tmpfs default, capped at what an eighth of the kernel
+  heap holds (`limits::TMPFS_NODE_HEAP_BYTES`), and its file data fills
+  a fixed 64 KiB backing: past either, a create or `write` there is
+  `ENOSPC`, and `/dev`, `/proc`, and `/sys`, which are not charged to
+  it, keep working (issue #195). The `size` and `nr_inodes` mount
+  options are ROADMAP §23.5's.
   The walker follows path_resolution(7), with no string pass before it:
   repeated slashes count as one, `.` is the directory reached so far, and
   `..` is the physical parent of that directory, after any symlink before

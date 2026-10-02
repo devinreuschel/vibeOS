@@ -5,7 +5,13 @@
 //! the heap as nodes are made, with only memory as its cap, and never
 //! shrinks: a freed node goes on a free list for the next one. It grows
 //! with the store unlocked ([`KernFs::with_room`]), since the heap ranks
-//! before the store's lock (DESIGN §2.1). Four skins
+//! before the store's lock (DESIGN §2.1).
+//!
+//! Each mounted instance counts its own nodes. A tmpfs instance, which
+//! any process writes, stops at its `nr_inodes` with `NoSpace`
+//! (`ENOSPC`), as Linux's tmpfs does, and its file data fits the fixed
+//! backing below; devfs, procfs and sysfs, the kernel's, have no count
+//! cap, so a full `/tmp` never stops them making nodes (issue #195). Four skins
 //! ([`KernSkin`]: devfs, tmpfs, procfs, sysfs) fill different nodes; they
 //! do not each keep a dentry tree. tmpfs file data goes through the
 //! Phase 7 [`Cache`] plus a fixed ramdisk so eviction works — not a
@@ -17,7 +23,7 @@ use crate::block::blockdev::BlockRef;
 use crate::block::{BlockError, MAX_BLOCKDEVS};
 use crate::cache::{self, Backend, Cache, CacheKey, CacheStats, PAGE};
 use crate::kalloc::{AllocError, TryVec};
-use crate::limits::MAX_KERN_MOUNTS;
+use crate::limits::{MAX_KERN_MOUNTS, TMPFS_NODE_HEAP_BYTES};
 
 use super::{
     Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps, MAX_NAME,
@@ -147,13 +153,19 @@ impl KernNode {
     };
 }
 
-/// A mounted skin of the store: its instance id, type and root node.
+/// A mounted skin of the store: its instance id, type and root node,
+/// and the nodes it has and may have.
 #[derive(Clone, Copy)]
 struct Skin {
     used: bool,
     inst: u32,
     ty: FsType,
     root: u32,
+    /// Nodes of this instance, its root included.
+    nodes: usize,
+    /// The most it may have: a tmpfs instance's `nr_inodes`, and
+    /// `usize::MAX` for the kernel's skins.
+    max_nodes: usize,
 }
 
 impl Skin {
@@ -162,7 +174,20 @@ impl Skin {
         inst: 0,
         ty: FsType::Dev,
         root: 0,
+        nodes: 0,
+        max_nodes: 0,
     };
+}
+
+/// The `nr_inodes` a tmpfs instance gets on a machine of `ram_pages`
+/// pages: Linux's default, half of RAM's pages (tmpfs(5)), but no more
+/// nodes than [`TMPFS_NODE_HEAP_BYTES`] holds, as Linux bounds it by
+/// lowmem: the nodes live on the kernel heap, which a full `/tmp` must
+/// not take from the kernel.
+pub fn tmp_nr_inodes_default(ram_pages: u64) -> usize {
+    let half = usize::try_from(ram_pages / 2).unwrap_or(usize::MAX);
+    half.min(TMPFS_NODE_HEAP_BYTES / core::mem::size_of::<KernNode>())
+        .max(1)
 }
 
 /// The one kernfs store: every node of every skin, tmpfs's page cache
@@ -178,6 +203,9 @@ pub struct KernState {
     free: u32,
     /// Unused nodes on the `free` list.
     free_len: usize,
+    /// The `nr_inodes` a tmpfs instance mounted from here gets
+    /// ([`KernFs::set_tmp_nr_inodes`]); `usize::MAX` until it is set.
+    tmp_nr_inodes: usize,
     tmp_cache: Cache<TMPFS_CACHE_PAGES>,
     tmp_back: [u8; TMPFS_BACK_BYTES],
     /// The page `tmp_cache`'s reads and writes carry a victim or a fill
@@ -203,6 +231,7 @@ impl KernState {
             nodes: TryVec::new(),
             free: 0,
             free_len: 0,
+            tmp_nr_inodes: usize::MAX,
             tmp_cache: Cache::new(),
             tmp_back: [0u8; TMPFS_BACK_BYTES],
             tmp_page: [0u8; PAGE],
@@ -222,6 +251,18 @@ impl KernState {
             .iter()
             .find(|s| s.used && s.ty == ty)
             .map(|s| (s.inst, s.root))
+    }
+
+    /// The skin of mounted instance `inst`.
+    fn skin_of(&mut self, inst: u32) -> Option<&mut Skin> {
+        self.skins.iter_mut().find(|s| s.used && s.inst == inst)
+    }
+
+    /// Whether instance `inst` has all the nodes it may.
+    fn at_cap(&self, inst: u32) -> bool {
+        self.skins
+            .iter()
+            .any(|s| s.used && s.inst == inst && s.nodes >= s.max_nodes)
     }
 
     /// The capacity the node table needs to grow to so that `need` more
@@ -268,6 +309,30 @@ impl<S: Guarded<KernState>> KernFs<S> {
     /// the most it has held at once.
     pub fn node_counts(&self) -> (usize, usize) {
         self.with(|k| (k.nodes.len().saturating_sub(k.free_len), k.nodes.len()))
+    }
+
+    /// Give each tmpfs instance mounted from here, and each mounted
+    /// later, `n` as its `nr_inodes`. An instance already past `n` keeps
+    /// its nodes and makes no more until it is under it.
+    pub fn set_tmp_nr_inodes(&self, n: usize) {
+        self.with(|k| {
+            k.tmp_nr_inodes = n;
+            for s in k.skins.iter_mut() {
+                if s.used && s.ty == FsType::Tmp {
+                    s.max_nodes = n;
+                }
+            }
+        });
+    }
+
+    /// The first mounted tmpfs instance's nodes and `nr_inodes`.
+    pub fn tmp_nodes(&self) -> Option<(usize, usize)> {
+        self.with(|k| {
+            k.skins
+                .iter()
+                .find(|s| s.used && s.ty == FsType::Tmp)
+                .map(|s| (s.nodes, s.max_nodes))
+        })
     }
 
     /// Run `f` on the store with room in the node table for `need` more
@@ -382,19 +447,33 @@ impl<S: Guarded<KernState> + Sync + 'static> FileSystem for KernSkin<S> {
                 .position(|s| !s.used)
                 .ok_or(FsError::NoSpace)?;
             let inst = k.next_inst.wrapping_add(1).max(1);
-            let root = kern_mk_root(k, now, inst)?;
-            let filled = fill_skin(k, now, inst, root, ty);
-            if let Err(e) = filled {
-                kern_drop_sb(k, inst, false);
-                return Err(e);
-            }
-            k.next_inst = inst;
+            // The skin counts its nodes from its root on.
             k.skins[slot] = Skin {
                 used: true,
                 inst,
                 ty,
-                root,
+                root: 0,
+                nodes: 0,
+                max_nodes: if ty == FsType::Tmp {
+                    k.tmp_nr_inodes
+                } else {
+                    usize::MAX
+                },
             };
+            let filled = kern_mk_root(k, now, inst).and_then(|root| {
+                fill_skin(k, now, inst, root, ty)?;
+                Ok(root)
+            });
+            let root = match filled {
+                Ok(root) => root,
+                Err(e) => {
+                    kern_drop_sb(k, inst, false);
+                    k.skins[slot] = Skin::EMPTY;
+                    return Err(e);
+                }
+            };
+            k.next_inst = inst;
+            k.skins[slot].root = root;
             Ok((inst, kern_info(k, inst, root)?))
         })?;
         *cx.private = [u64::from(inst), 0];
@@ -451,7 +530,10 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         target: Option<&[u8]>,
     ) -> Result<InodeInfo, FsError> {
         let x = self.kx(cx);
-        self.fs.with_room(1, |k| {
+        // An instance at its cap makes nothing, so the table need not grow
+        // for it; `kern_alloc` fails it with `NoSpace`.
+        let need = usize::from(!self.fs.with(|k| k.at_cap(x.inst)));
+        self.fs.with_room(need, |k| {
             k.now = x.now;
             kern_create(k, x, dir, name, kind, mode, target)
         })
