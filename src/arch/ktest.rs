@@ -364,33 +364,30 @@ pub(crate) fn test_lapic_timer_mode() -> Outcome {
     }
 }
 
+/// Timer interrupts [`test_lapic_timer_rearm`] waits for on CPU 0.
+const REARM_FIRES: u64 = 20;
+
+fn lapic_fires() -> u64 {
+    apic_init::TIMER_FIRES.load(Ordering::Relaxed)
+}
+
+/// The timer keeps firing across many ticks: CPU 0 takes [`REARM_FIRES`]
+/// more timer interrupts, each of which comes only if the tick before it
+/// left the timer armed (`rearm_deadline` in TSC-deadline mode, the
+/// periodic reload otherwise, the PIT's in `hpet=off`). The wait is bounded
+/// by the run's deadline, not by TSC time, which under TCG on a loaded host
+/// runs ahead of the interrupts the guest is delivered (ROADMAP §10.2).
 pub(crate) fn test_lapic_timer_rearm() -> Outcome {
-    match apic_init::timer_mode() {
-        TimerMode::Pit => {
-            let t0 = crate::time::ktest::pit_irqs();
-            time_init::busy_wait_ms(50);
-            let dt = crate::time::ktest::pit_irqs().saturating_sub(t0);
-            if (20..=100).contains(&dt) {
-                Outcome::Ok
-            } else {
-                crate::marker!("vibeOS: ktest:   pit dt={dt}");
-                Outcome::Fail("pit ticks stalled")
-            }
-        }
-        TimerMode::TscDeadline | TimerMode::Periodic => {
-            let t0 = apic_init::TIMER_FIRES.load(Ordering::Relaxed);
-            time_init::busy_wait_ms(50);
-            let n = apic_init::TIMER_FIRES
-                .load(Ordering::Relaxed)
-                .saturating_sub(t0);
-            if n >= 20 {
-                Outcome::Ok
-            } else {
-                crate::marker!("vibeOS: ktest:   lapic fires {n}");
-                Outcome::Fail("rearm stalled")
-            }
-        }
+    let (count, what): (fn() -> u64, &str) = match apic_init::timer_mode() {
+        TimerMode::Pit => (crate::time::ktest::pit_irqs, "pit"),
+        TimerMode::TscDeadline | TimerMode::Periodic => (lapic_fires, "lapic"),
+    };
+    let t0 = count();
+    if crate::ktest::wait_for(|| count().wrapping_sub(t0) >= REARM_FIRES) {
+        return Outcome::Ok;
     }
+    let n = count().wrapping_sub(t0);
+    crate::fail_fmt!("rearm stalled: {n} of {REARM_FIRES} {what} fires")
 }
 
 pub(crate) fn test_ioapic_pit_gsi_masked() -> Outcome {
