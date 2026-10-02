@@ -294,6 +294,27 @@ fn tmpfs_uses_cache_and_evicts() {
     assert_eq!(v.stat(None, "/tmp/big").unwrap().size, 5 * PAGE as u64 + 1);
 }
 
+/// A truncate that keeps part of a page leaves zeros past the new size,
+/// so a write past it reads zeros in the gap, not the bytes it cut.
+#[test]
+fn tmpfs_truncate_zeroes_the_cut_tail() {
+    let (mut v, _k) = boot();
+    let fid = v
+        .open_path(None, "/tmp/t", O_RDWR | O_CREAT, 0o644)
+        .unwrap();
+    assert_eq!(v.write(&fid, &[b'A'; 100]).unwrap(), 100);
+    v.truncate(None, "/tmp/t", 10).unwrap();
+    v.seek(&fid, 50, SEEK_SET).unwrap();
+    assert_eq!(v.write(&fid, b"X").unwrap(), 1);
+    v.seek(&fid, 0, SEEK_SET).unwrap();
+    let mut out = [0xFFu8; 51];
+    assert_eq!(v.read(&fid, &mut out).unwrap(), 51);
+    assert_eq!(&out[..10], &[b'A'; 10]);
+    assert!(out[10..50].iter().all(|&b| b == 0), "{:?}", &out[10..50]);
+    assert_eq!(out[50], b'X');
+    v.close(fid).unwrap();
+}
+
 #[test]
 fn tmpfs_mkdir_and_unlink() {
     let (mut v, _k) = boot();
