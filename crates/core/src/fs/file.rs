@@ -526,6 +526,25 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         self.step(|v| v.put_ref(r));
     }
 
+    /// What a `read` (`write` false) or `write` of open file `id` checks
+    /// before the caller's buffer, in Linux's order (read(2), write(2)):
+    /// `Badf` unless `id` is open for that access. The inode's kind, for
+    /// the checks that follow the buffer's.
+    pub fn access(&self, id: FileId, write: bool) -> Result<InodeKind, FsError> {
+        self.with(|v| {
+            let f = v.files[v.file_slot(id)?];
+            let open = if write {
+                f.flags.writes()
+            } else {
+                f.flags.reads()
+            };
+            if !open {
+                return Err(FsError::Badf);
+            }
+            Ok(v.inodes[f.islot as usize].kind)
+        })
+    }
+
     /// A new counted reference to open file `id`, for one syscall.
     pub fn fget(&self, id: FileId) -> Result<FileRef, FsError> {
         self.with(|v| v.file_addref(id))?;

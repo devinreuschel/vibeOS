@@ -313,6 +313,12 @@ pub fn fget(id: FileId) -> Result<FileRef, FsError> {
     fs_init::api().fget(id)
 }
 
+/// Whether open file `id` is open for a `read` (`write` false) or a
+/// `write`: `Badf` if not, else its inode's kind.
+pub fn access(id: FileId, write: bool) -> Result<InodeKind, FsError> {
+    fs_init::api().access(id, write)
+}
+
 /// Extra process fd pointing at the same kernel file.
 pub fn addref(id: FileId) -> Result<(), FsError> {
     fs_init::api().addref(id)

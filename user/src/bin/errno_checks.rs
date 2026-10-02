@@ -20,6 +20,14 @@
 //!    `EISDIR`; `O_CREAT | O_DIRECTORY` returns `EINVAL` and creates
 //!    nothing; the empty path returns `ENOENT`.
 //! 8. `execve` of a directory and of a device returns `EACCES`.
+//! 9. `read` and `write` check the descriptor's access mode before the
+//!    buffer and the count: a 0-byte `read` of an `O_WRONLY` descriptor,
+//!    and a `write` of an `O_RDONLY` one with a kernel-half buffer or a
+//!    count of 0, return `EBADF`.
+//! 10. `read` of a directory returns `EISDIR` for a count of 0, and
+//!     `EFAULT` for a kernel-half buffer: the buffer, then the directory.
+//! 11. `lseek` on the console with an unknown `whence` returns `EINVAL`:
+//!     `whence` before the descriptor's kind.
 
 #![no_std]
 #![no_main]
@@ -44,9 +52,13 @@ const SEEK_CUR: u32 = 1;
 const LINK: &core::ffi::CStr = c"/proc/self";
 /// A name case 7 must not create.
 const DIR_NEW: &core::ffi::CStr = c"/tmp/errno_dir";
+/// A kernel-half address: never a user buffer (cases 9 and 10).
+const KERNEL_PTR: usize = 0xFFFF_8000_0000_1000;
+/// A `whence` past Linux's last, `SEEK_HOLE` (case 11).
+const WHENCE_BAD: u32 = 99;
 
 fn main(_env: &Env) -> i32 {
-    let cases: [fn() -> bool; 8] = [
+    let cases: [fn() -> bool; 11] = [
         read_wronly_ebadf,
         write_rdonly_ebadf,
         dup_full_emfile,
@@ -55,6 +67,9 @@ fn main(_env: &Env) -> i32 {
         lseek_console_espipe,
         open_links_and_dirs,
         execve_not_regular_eacces,
+        access_before_buffer_and_count,
+        read_dir_eisdir_after_buffer,
+        lseek_whence_before_espipe,
     ];
     for (i, case) in cases.iter().enumerate() {
         if !case() {
@@ -195,6 +210,49 @@ fn execve_not_regular_eacces() -> bool {
         let argv: [*const u8; 2] = [p.as_ptr().cast(), core::ptr::null()];
         sys::execve(p.as_ptr().cast(), argv.as_ptr(), core::ptr::null()) == Err(Errno::EACCES)
     })
+}
+
+/// Case 9.
+fn access_before_buffer_and_count() -> bool {
+    let mut b = [0u8; 1];
+    let Ok(w) = sys::open(PLAIN.as_ptr().cast(), sys::O_CREAT | sys::O_WRONLY, 0o644) else {
+        return false;
+    };
+    // SAFETY: a 0-byte `read` writes nothing into `b`, a local no other
+    // reference covers; established here.
+    let r = unsafe { sys::read(w as u32, b.as_mut_ptr(), 0) };
+    if !close(w) || r != Err(Errno::EBADF) {
+        return false;
+    }
+    let Ok(fd) = sys::open(PLAIN.as_ptr().cast(), sys::O_RDONLY, 0) else {
+        return false;
+    };
+    let ok = sys::write(fd as u32, KERNEL_PTR as *const u8, 1) == Err(Errno::EBADF)
+        && sys::write(fd as u32, b"x".as_ptr(), 0) == Err(Errno::EBADF);
+    close(fd) && ok
+}
+
+/// Case 10.
+fn read_dir_eisdir_after_buffer() -> bool {
+    let Ok(fd) = sys::open(c"/tmp".as_ptr().cast(), sys::O_RDONLY | sys::O_DIRECTORY, 0) else {
+        return false;
+    };
+    let mut b = [0u8; 8];
+    // SAFETY: the kernel writes nothing for a 0-byte `read`, nor through a
+    // kernel-half pointer, which its range check refuses with `EFAULT`
+    // before any write (SYSCALL.md §5); established here.
+    let (zero, kernel) = unsafe {
+        (
+            sys::read(fd as u32, b.as_mut_ptr(), 0),
+            sys::read(fd as u32, KERNEL_PTR as *mut u8, 8),
+        )
+    };
+    close(fd) && zero == Err(Errno::EISDIR) && kernel == Err(Errno::EFAULT)
+}
+
+/// Case 11: fd 1 is the console.
+fn lseek_whence_before_espipe() -> bool {
+    sys::lseek(1, 0, WHENCE_BAD) == Err(Errno::EINVAL)
 }
 
 /// Close `fd`; whether it closed.

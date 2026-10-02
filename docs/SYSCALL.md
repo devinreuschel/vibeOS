@@ -293,7 +293,9 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   maximum file size; a `write` that starts at or past the limit returns
   `EFBIG`, and one that would cross it is cut short at the limit, as
   Linux's is. On a FAT file any offset from 0 to `i64::MAX` is accepted
-  (F008; ROADMAP §10.11)
+  (F008; ROADMAP §10.11). A `whence` past `SEEK_HOLE` is `EINVAL` before
+  the descriptor's kind is looked at, so the console gives it too, as on
+  Linux; `SEEK_DATA` and `SEEK_HOLE` are `EINVAL` on a file that can seek
 - `mmap`: anonymous private mappings only: `MAP_PRIVATE|MAP_ANONYMOUS`,
   plus any of `MAP_FIXED`, `MAP_FIXED_NOREPLACE`, `MAP_NORESERVE`,
   `MAP_POPULATE`, and `MAP_STACK`. `prot` is any mix of `PROT_READ`,
@@ -515,8 +517,9 @@ and `-EFAULT` when it is 0, as Linux's do. `read` from a file reads at most
 256 bytes, copies them out, and seeks back by the bytes it could not copy,
 so the next `read` returns them; a file that cannot seek keeps them, as a
 Linux device does. `write` copies each 256-byte chunk in, writes the bytes
-it copied, and stops at a short chunk. `len == 0` returns 0 once the range
-check passes.
+it copied, and stops at a short chunk. The descriptor's access mode comes
+first (`-EBADF`), then the range check, then, for `read`, a directory's
+`-EISDIR`; only then does `len == 0` return 0, as on Linux.
 
 **State before the copy.** A call that changes state before its copy-out
 keeps the change and returns `-EFAULT`: `wait4` reaps the child, then copies
