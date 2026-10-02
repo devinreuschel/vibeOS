@@ -222,7 +222,7 @@ args = [
   { name = "envp", type = "const char *const *", ptr = "strvec", null = true, when = "after `argv`" },
 ]
 errors = [
-  "EFAULT", "ENAMETOOLONG", "EINVAL", "ENOENT", "ENOTDIR", "ELOOP", "ENFILE", "E2BIG", "ENOEXEC",
+  "EFAULT", "ENAMETOOLONG", "ENOENT", "ENOTDIR", "EACCES", "ELOOP", "ENFILE", "E2BIG", "ENOEXEC",
   "ENOMEM",
 ]
 note = "`argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1)"

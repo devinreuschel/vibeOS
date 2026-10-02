@@ -716,7 +716,7 @@ pub const CALLS: &[Call] = &[
     },
     Call {
         sys: Sys::Execve,
-        errors: &[Errno::EFAULT, Errno::ENAMETOOLONG, Errno::EINVAL, Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::ENFILE, Errno::E2BIG, Errno::ENOEXEC, Errno::ENOMEM],
+        errors: &[Errno::EFAULT, Errno::ENAMETOOLONG, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::ELOOP, Errno::ENFILE, Errno::E2BIG, Errno::ENOEXEC, Errno::ENOMEM],
         ktest: &[],
         ptrs: &[
             Ptr { arg: 0, name: "pathname", kind: PtrKind::Cstr, out: false, nullable: false, len_from: None, size: 0 },

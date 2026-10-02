@@ -25,9 +25,6 @@ use vibeos_user::sys::{self, Errno};
 
 vibeos_user::main!(main);
 
-/// `O_DIRECTORY`, from Linux `include/uapi/asm-generic/fcntl.h`.
-const O_DIRECTORY: i32 = 0o200000;
-
 fn main(_env: &Env) -> i32 {
     match run() {
         Ok(()) => 0,
@@ -76,7 +73,7 @@ fn run() -> Result<(), i32> {
             return Err(i as i32 + 1);
         }
     }
-    let fd = open(b"/vibe/l/\0", sys::O_RDONLY | O_DIRECTORY).map_err(|_| 6)?;
+    let fd = open(b"/vibe/l/\0", sys::O_RDONLY | sys::O_DIRECTORY).map_err(|_| 6)?;
     let mut buf = [0u8; 8];
     let r = read8(fd, &mut buf);
     close(fd);

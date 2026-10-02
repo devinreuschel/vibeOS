@@ -127,7 +127,7 @@ const PAIRS: &[Pair] = &[
     pair(
         Sys::Open,
         Errno::EINVAL,
-        Run(|| Ok(open_raw(c"", sys::O_RDONLY))),
+        Run(|| Ok(open_raw(c"/utest_none", sys::O_CREAT | sys::O_DIRECTORY))),
     ),
     pair(
         Sys::Open,
@@ -217,11 +217,6 @@ const PAIRS: &[Pair] = &[
     pair(Sys::Execve, Errno::ENAMETOOLONG, Run(execve_enametoolong)),
     pair(
         Sys::Execve,
-        Errno::EINVAL,
-        Run(|| exec_errno(c"".as_ptr().cast())),
-    ),
-    pair(
-        Sys::Execve,
         Errno::ENOENT,
         Run(|| exec_errno(c"/utest_none".as_ptr().cast())),
     ),
@@ -229,6 +224,11 @@ const PAIRS: &[Pair] = &[
         Sys::Execve,
         Errno::ENOTDIR,
         Run(|| exec_errno(c"/hello/x".as_ptr().cast())),
+    ),
+    pair(
+        Sys::Execve,
+        Errno::EACCES,
+        Run(|| exec_errno(c"/".as_ptr().cast())),
     ),
     pair(
         Sys::Execve,

@@ -15,6 +15,11 @@
 //!    `/hello` (which exits 42) with one, and exits 100 + errno if
 //!    `execve` returns.
 //! 6. `lseek` on the console returns `ESPIPE`.
+//! 7. `open` of a symbolic link with `O_NOFOLLOW` returns `ELOOP`, and
+//!    `ENOTDIR` with `O_DIRECTORY` too; `O_CREAT` of a directory returns
+//!    `EISDIR`; `O_CREAT | O_DIRECTORY` returns `EINVAL` and creates
+//!    nothing; the empty path returns `ENOENT`.
+//! 8. `execve` of a directory and of a device returns `EACCES`.
 
 #![no_std]
 #![no_main]
@@ -35,15 +40,21 @@ const HELLO: &core::ffi::CStr = c"/hello";
 const HELLO_EXIT: u8 = 42;
 /// Linux `SEEK_CUR`, from `include/uapi/linux/fs.h`.
 const SEEK_CUR: u32 = 1;
+/// A symbolic link (case 7).
+const LINK: &core::ffi::CStr = c"/proc/self";
+/// A name case 7 must not create.
+const DIR_NEW: &core::ffi::CStr = c"/tmp/errno_dir";
 
 fn main(_env: &Env) -> i32 {
-    let cases: [fn() -> bool; 6] = [
+    let cases: [fn() -> bool; 8] = [
         read_wronly_ebadf,
         write_rdonly_ebadf,
         dup_full_emfile,
         open_raw_bytes,
         execve_raw_arg,
         lseek_console_espipe,
+        open_links_and_dirs,
+        execve_not_regular_eacces,
     ];
     for (i, case) in cases.iter().enumerate() {
         if !case() {
@@ -153,6 +164,37 @@ fn execve_raw_arg() -> bool {
 /// Case 6: fd 1 is the console.
 fn lseek_console_espipe() -> bool {
     sys::lseek(1, 0, SEEK_CUR) == Err(Errno::ESPIPE)
+}
+
+/// `open(path, flags)`'s error; `None` when it opened (and is closed).
+fn open_err(path: &core::ffi::CStr, flags: i32) -> Option<Errno> {
+    match sys::open(path.as_ptr().cast(), flags, 0o644) {
+        Ok(fd) => {
+            close(fd);
+            None
+        }
+        Err(e) => Some(e),
+    }
+}
+
+/// Case 7.
+fn open_links_and_dirs() -> bool {
+    open_err(LINK, sys::O_RDONLY | sys::O_NOFOLLOW) == Some(Errno::ELOOP)
+        && open_err(LINK, sys::O_RDONLY | sys::O_NOFOLLOW | sys::O_DIRECTORY)
+            == Some(Errno::ENOTDIR)
+        && open_err(LINK, sys::O_RDONLY | sys::O_DIRECTORY).is_none()
+        && open_err(c"/tmp", sys::O_RDONLY | sys::O_CREAT) == Some(Errno::EISDIR)
+        && open_err(DIR_NEW, sys::O_RDONLY | sys::O_CREAT | sys::O_DIRECTORY) == Some(Errno::EINVAL)
+        && open_err(DIR_NEW, sys::O_RDONLY) == Some(Errno::ENOENT)
+        && open_err(c"", sys::O_RDONLY) == Some(Errno::ENOENT)
+}
+
+/// Case 8: each `execve` returns, since neither file can run.
+fn execve_not_regular_eacces() -> bool {
+    [c"/tmp", c"/dev/null"].iter().all(|p| {
+        let argv: [*const u8; 2] = [p.as_ptr().cast(), core::ptr::null()];
+        sys::execve(p.as_ptr().cast(), argv.as_ptr(), core::ptr::null()) == Err(Errno::EACCES)
+    })
 }
 
 /// Close `fd`; whether it closed.

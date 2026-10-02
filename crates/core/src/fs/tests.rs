@@ -980,6 +980,39 @@ fn stale_window() {
     *STALE_B.lock().unwrap() = Some(b.into_raw());
 }
 
+/// `open` on Linux's terms (open(2), POSIX `open`): `O_NOFOLLOW` on a
+/// symlink is `ELOOP`, or `ENOTDIR` with `O_DIRECTORY`; `O_CREAT` on a
+/// directory is `EISDIR`; `O_CREAT | O_DIRECTORY` is `EINVAL` and creates
+/// nothing.
+#[test]
+fn open_links_and_dirs_as_linux() {
+    let vfs = locked_vfs();
+    let api = FileApi::new(vfs);
+    let open = |p: &[u8], fl: u32| {
+        api.open(None, p, OpenFlags::from_bits(fl), 0o644)
+            .map(|f| api.close(f).unwrap())
+    };
+    assert_eq!(open(b"/f", O_RDWR | O_CREAT), Ok(()));
+    api.symlink(None, b"/l", b"/f").unwrap();
+    assert_eq!(open(b"/l", O_RDONLY | O_NOFOLLOW), Err(FsError::Loop));
+    assert_eq!(open(b"/l", O_RDWR | O_NOFOLLOW), Err(FsError::Loop));
+    assert_eq!(
+        open(b"/l", O_RDONLY | O_NOFOLLOW | O_DIRECTORY),
+        Err(FsError::NotDir)
+    );
+    assert_eq!(open(b"/l", O_RDONLY), Ok(()));
+    assert_eq!(open(b"/blk", O_RDONLY | O_CREAT), Err(FsError::IsDir));
+    assert_eq!(open(b"/blk", O_RDONLY | O_DIRECTORY), Ok(()));
+    assert_eq!(
+        open(b"/new", O_RDONLY | O_CREAT | O_DIRECTORY),
+        Err(FsError::Inval)
+    );
+    assert_eq!(
+        api.stat_path(None, b"/new", false).unwrap_err(),
+        FsError::NotFound
+    );
+}
+
 #[test]
 fn file_ref_generation_rejects_stale_id() {
     let vfs = locked_vfs();

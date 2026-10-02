@@ -8,7 +8,7 @@ use vibeos::elf::{
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, ArgError, Auxv, Builder, EHDR_SIZE, ElfError, ExecArgs,
     Image, LoadSeg, LoadTarget, PHDR_SIZE, PageRun,
 };
-use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom, WalkBase};
+use vibeos::fs::{FileRef, FsError, InodeKind, O_RDONLY, OpenFlags, SeekFrom, WalkBase};
 use vibeos::kalloc::TryVec;
 use vibeos::kerror::KError;
 use vibeos::limits::RLIMIT_STACK_DEFAULT;
@@ -40,6 +40,8 @@ pub enum LoadError {
     /// A fill into the new space failed (`fill_init`).
     Fill(FillError),
     Empty,
+    /// The path names a file that is not regular: a directory or a device.
+    NotRegular,
     NoProc,
     /// The process's thread could not be made.
     Spawn(SpawnError),
@@ -60,6 +62,7 @@ impl From<LoadError> for KError {
             LoadError::As(_) => KError::NoMem,
             LoadError::Fill(f) => KError::from(f),
             LoadError::Empty => KError::NoExec,
+            LoadError::NotRegular => KError::Acces,
             LoadError::NoProc => KError::Again,
             LoadError::Spawn(s) => KError::from(s),
             LoadError::NoMem => KError::NoMem,
@@ -81,6 +84,7 @@ impl LoadError {
             Self::Fill(FillError::NoMem) => "enomem",
             Self::Fill(_) => "efault",
             Self::Empty => "empty",
+            Self::NotRegular => "eacces",
             Self::NoProc => "eagain",
             Self::Spawn(e) => e.as_str(),
             Self::NoMem => "enomem",
@@ -425,10 +429,15 @@ fn load_path_inner(
     }
 }
 
-/// Load the open file `src`, mapping each segment from it.
+/// Load the open file `src`, mapping each segment from it. A file that is
+/// not regular is `EACCES`, as execve(2) gives it, and an empty one
+/// `ENOEXEC`.
 #[inline(never)]
 fn load_file(src: &mut FileImage, args: &ExecArgs) -> Result<Loaded, LoadError> {
     let st = file_init::stat(&src.file).map_err(LoadError::Fs)?;
+    if st.kind != InodeKind::Reg {
+        return Err(LoadError::NotRegular);
+    }
     if st.size == 0 {
         return Err(LoadError::Empty);
     }

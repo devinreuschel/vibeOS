@@ -613,10 +613,11 @@ impl Walker {
     /// A walk of `path` from `base` (the namespace root for both its root
     /// and its working directory when none): an absolute path from its
     /// root, a relative one from its working directory; `follow_last`
-    /// follows a symlink in the last component.
+    /// follows a symlink in the last component. The empty path is
+    /// `NotFound`, as path_resolution(7) gives it.
     pub fn new(base: Option<WalkBase>, path: &[u8], follow_last: bool) -> Result<Self, FsError> {
         if path.is_empty() {
-            return Err(FsError::Inval);
+            return Err(FsError::NotFound);
         }
         if path.len() > MAX_PATH {
             return Err(FsError::NameTooLong);
@@ -1137,10 +1138,11 @@ fn join_path(target: &[u8], rest: &[u8], out: &mut [u8; MAX_PATH]) -> Result<usi
 }
 
 /// `path`'s parent, its last component, and whether a `/` follows that
-/// component (it names a directory).
+/// component (it names a directory). The empty path is `NotFound`, as
+/// path_resolution(7) gives it.
 pub fn split_basename(path: &[u8]) -> Result<(&[u8], &[u8], bool), FsError> {
     if path.is_empty() {
-        return Err(FsError::Inval);
+        return Err(FsError::NotFound);
     }
     let mut end = path.len();
     while end > 0 && path[end - 1] == b'/' {

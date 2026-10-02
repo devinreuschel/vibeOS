@@ -136,11 +136,18 @@ impl Vfs {
     }
 }
 
-/// Whether a file of `kind` may be opened with `flags`.
+/// Whether a file of `kind` may be opened with `flags`. A directory is
+/// `EISDIR` for a write, `O_TRUNC`, or `O_CREAT` without `O_DIRECTORY`
+/// (POSIX `open`); a symlink, which the walk left unfollowed for
+/// `O_NOFOLLOW`, is `ELOOP`, or `ENOTDIR` with `O_DIRECTORY`, since only
+/// Linux's `O_PATH`, which this kernel lacks, opens the link itself.
 fn open_check(kind: InodeKind, flags: OpenFlags) -> Result<(), FsError> {
     match kind {
         InodeKind::Dir => {
-            if flags.writes() || flags.has(O_TRUNC) {
+            if flags.writes()
+                || flags.has(O_TRUNC)
+                || (flags.has(O_CREAT) && !flags.has(O_DIRECTORY))
+            {
                 return Err(FsError::IsDir);
             }
         }
@@ -150,12 +157,10 @@ fn open_check(kind: InodeKind, flags: OpenFlags) -> Result<(), FsError> {
             }
         }
         InodeKind::Lnk => {
-            if !flags.has(O_NOFOLLOW) {
-                return Err(FsError::Loop);
-            }
             if flags.has(O_DIRECTORY) {
                 return Err(FsError::NotDir);
             }
+            return Err(FsError::Loop);
         }
     }
     Ok(())
@@ -427,6 +432,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// that is not there, `O_TRUNC` empties a regular file. The open-file
     /// slot is reserved before anything is created or truncated, so with
     /// the table full (`NFile`) a failed `open` changes no file.
+    /// `O_CREAT` with `O_DIRECTORY` is `EINVAL` before anything else, as
+    /// on Linux since 6.4, which would otherwise create a regular file and
+    /// then fail the open on it.
     pub fn open(
         &self,
         base: Option<WalkBase>,
@@ -434,6 +442,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         flags: OpenFlags,
         mode: u32,
     ) -> Result<FileRef, FsError> {
+        if flags.has(O_CREAT) && flags.has(O_DIRECTORY) {
+            return Err(FsError::Inval);
+        }
         let slot = self.with(|v| v.file_reserve())?;
         match self.open_slot(slot, base, path, flags, mode) {
             Ok(f) => self.opened(f, flags),
