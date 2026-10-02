@@ -168,7 +168,14 @@ pmm::leaked_frames() -> usize                  // dropped tokens; `meminfo` prin
 ```
 
 Initialization walks the Limine memory map and ingests every `USABLE` region as power-of-two aligned
-blocks, excluding:
+blocks. The whole `MAX_ORDER` blocks of a region are one run, a `[start, end)` pair in the `Buddy`
+(at most `pmm::TOP_RUNS`, 16, beyond which they are linked as before), with no node written into
+them: a block leaves its run when an allocation takes it, highest first as the list it replaces
+handed them out, or the lowest that fits for `alloc_constrained`, and a freed block is linked as
+any other. A link in every free 4 MiB block was a first write into every 4 MiB of RAM at boot,
+each a fault the host takes for QEMU's guest memory, which on a host whose transparent huge pages
+compact on fault made a 9 GiB TCG boot spend most of its time before the `pmm:` marker (ROADMAP
+§10.2). Ingestion excludes:
 
 - physical frame 0
 - the AP trampoline page `boot::capture` chose from the memory map (`BootInfo.trampoline_page`,
