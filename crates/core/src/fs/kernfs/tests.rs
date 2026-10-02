@@ -529,3 +529,23 @@ fn tmpfs_extent_move_keeps_data() {
     assert_eq!(read_at(&mut v, "/tmp/b", 0, 1), b"B");
     assert_eq!(read_at(&mut v, "/tmp/c", 0, 1), b"C");
 }
+
+/// A sysfs driver attribute whose name does not fit fails with `Inval`
+/// and gives its node back: the table's count of used and free nodes
+/// stays whole, and the next node reuses it.
+#[test]
+fn sysfs_bad_driver_name_frees_its_node() {
+    let (mut v, k) = boot();
+    let long = [b'x'; MAX_NAME + 1];
+    assert_eq!(
+        k.fs.sysfs_add_device(b"00:0a.0", 1, 2, 3, Some(&long)),
+        Err(FsError::Inval)
+    );
+    let (used, len, _) = node_counts(&k);
+    let free = k.fs.with(|s| s.free_len);
+    assert!(free >= 1);
+    v.creat(None, "/tmp/reuse", 0o644).unwrap();
+    assert_eq!(node_counts(&k).0, used + 1);
+    assert_eq!(node_counts(&k).1, len);
+    assert_eq!(k.fs.with(|s| s.free_len), free - 1);
+}

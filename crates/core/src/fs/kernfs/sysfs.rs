@@ -118,6 +118,7 @@ fn kern_mk_sys_attr(
         }
         _ => 0,
     };
+    let mut bad = Ok(());
     if let Some(n) = kern_get_mut(k, inst, ino) {
         n.kind = KernKind::SysAttr;
         n.mode = S_IFREG_MODE;
@@ -127,14 +128,17 @@ fn kern_mk_sys_attr(
         n.mtime = t;
         n.ctime = t;
         n.name = nm;
-        if let Some(d) = driver
-            && let Err(e) = set_target(&mut n.target, &mut n.target_len, d)
-        {
-            n.used = false;
-            return Err(e);
+        if let Some(d) = driver {
+            bad = set_target(&mut n.target, &mut n.target_len, d);
         }
         n.tag = packed;
         n.tag2 = ((class as u64) << 8) | (which as u64);
+    }
+    if let Err(e) = bad {
+        if let Some(i) = kern_idx(k, ino) {
+            kern_release(k, i);
+        }
+        return Err(e);
     }
     kern_link(k, parent, ino);
     touch_dir(k, inst, parent, t);
