@@ -152,6 +152,10 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- `/dev`, `/proc`, `/sys` and `/tmp` are no longer capped at 128 nodes between them: kernfs's
+  node table grows on the heap, and `ENOMEM` when it cannot.
+- `execve` of a program on `/tmp` stays within its thread's kernel stack budget; tmpfs's cache
+  no longer puts two pages on the stack.
 - Boot with more than 8 GiB of RAM no longer triple-faults after `heap ok`. RAM above the
   8 GiB physmap cap is left unused; `make test-e2e-highmem` boots with 9 GiB.
 - UEFI e2e no longer hangs on OVMF PXE after a green marker boot; a timed-out boot prints
