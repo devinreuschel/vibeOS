@@ -346,6 +346,20 @@ mod tracer {
     /// `dropped` as the last report printed it.
     static REPORTED_DROPPED: AtomicU32 = AtomicU32::new(0);
 
+    /// One report line, written to serial outside the log ring, as `dmesg`
+    /// writes: a report every 100 ms prints a line for each site that moved,
+    /// which in a 256-record ring would push out the boot lines and the
+    /// records `dmesg` and the panic tail show. The harness reads the
+    /// report from serial (`tests/harness/irqoff.py`).
+    fn line(args: core::fmt::Arguments<'_>) {
+        use core::fmt::Write;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to PlainSerial cannot fail (DESIGN §2.5)"
+        )]
+        let _ = crate::serial::PlainSerial.write_fmt(args);
+    }
+
     // Relaxed: counters; a report is a snapshot, and a racing record
     // shows in the next one.
     pub(super) fn report() {
@@ -357,34 +371,40 @@ mod tracer {
             let unmatched = st.unmatched.load(Ordering::Relaxed);
             let max = st.max_ns.load(Ordering::Relaxed);
             if st.reported_over.swap(over, Ordering::Relaxed) != over {
-                crate::marker!("vibeOS: irqoff: over {} n {} max {} ns", site, over, max);
+                line(format_args!(
+                    "vibeOS: irqoff: over {} n {} max {} ns",
+                    site, over, max
+                ));
             }
             if st.reported_count.swap(n, Ordering::Relaxed) != n {
-                crate::marker!(
+                line(format_args!(
                     "vibeOS: irqoff: site {} n {} over {} max {} ns p99 {} ns",
                     site,
                     n,
                     over,
                     max,
                     st.hist.percentile(990)
-                );
+                ));
             }
             if st.reported_deliberate.swap(delib, Ordering::Relaxed) != delib {
-                crate::marker!(
+                line(format_args!(
                     "vibeOS: irqoff: deliberate {} n {} max {} ns {}",
                     site,
                     delib,
                     st.deliberate_max_ns.load(Ordering::Relaxed),
                     st.reason()
-                );
+                ));
             }
             if st.reported_unmatched.swap(unmatched, Ordering::Relaxed) != unmatched {
-                crate::marker!("vibeOS: irqoff: unmatched {} n {}", site, unmatched);
+                line(format_args!(
+                    "vibeOS: irqoff: unmatched {} n {}",
+                    site, unmatched
+                ));
             }
         }
         let dropped = SITES.dropped();
         if REPORTED_DROPPED.swap(dropped, Ordering::Relaxed) != dropped {
-            crate::marker!("vibeOS: irqoff: dropped {}", dropped);
+            line(format_args!("vibeOS: irqoff: dropped {}", dropped));
         }
     }
 

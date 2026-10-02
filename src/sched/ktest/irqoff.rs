@@ -56,6 +56,23 @@ pub(crate) fn irqoff_logs_long_stretch() -> Outcome {
     }
 }
 
+/// A report writes its lines to serial outside the log ring, so the
+/// reports the reporter thread prints every 100 ms cannot push the boot
+/// lines out of it (`log_boot_captured`): a report that has a moved site
+/// to print leaves no `site` line in the ring.
+pub(crate) fn irqoff_report_skips_ring() -> Outcome {
+    if !Arch::enabled() {
+        return Outcome::Fail("registry runs with IF off");
+    }
+    // A stretch at this line's site, so the report below has a line.
+    drop(InterruptGuard::enter());
+    irqoff::report();
+    if crate::log_init::contains_msg("irqoff: site ") {
+        return Outcome::Fail("an irqoff report line is in the log ring");
+    }
+    Outcome::Ok
+}
+
 /// The same hold under `irqoff::deliberate` is marked deliberate, so never
 /// over the bound (C-IRQOFF-GUARD).
 pub(crate) fn irqoff_deliberate_is_exempt() -> Outcome {

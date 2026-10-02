@@ -678,7 +678,8 @@ The markers are a contract with the harness, not an interface for software outsi
 §39.1 classes them `internal`, so a release may change one, with its row in the same commit.
 
 `marker!` for registered lines of every kind (ROADMAP, How to read this); `klog!` for everything
-else; `PlainSerial` only for `dmesg`; the panic dump writes through `serial::raw::write_owner` (§2.5 step 1). `marker!` writes serial before it returns; from
+else; `PlainSerial` only for `dmesg` and the IF-off tracer's report (ROADMAP §10.3), whose lines would
+wrap the log ring; the panic dump writes through `serial::raw::write_owner` (§2.5 step 1). `marker!` writes serial before it returns; from
 ROADMAP §19.5 a `klog!` line reaches serial when a printer thread gets to it
 ([§2.5](#25-panic-policy)).
 

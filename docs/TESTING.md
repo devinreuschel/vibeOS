@@ -409,7 +409,9 @@ and `VIBEOS_SMP=1`, so guest time counts instructions and 100,000 ns is exactly 
 under KVM (`VIBEOS_QEMU_ACCEL=kvm`) it adds neither and the numbers are wall time. The kernel
 prints `vibeOS: irqoff: on bound <n> ns` after `irq: enabled`, and a reporter thread prints each
 changed site's cumulative `site`, `over`, `deliberate` and `unmatched` lines every 100 ms of guest
-time; the ktest runner reports once more before `ktest: end`. The e2e driver quits QEMU at its last
+time; the ktest runner reports once more before `ktest: end`. A report writes serial outside the log
+ring, as `dmesg` does, since in the 256-record ring its lines would push out the boot lines that
+`log_boot_captured` reads. The e2e driver quits QEMU at its last
 marker, so stretches after the last report of an e2e boot are not seen. `tests/harness/irqoff.py`
 reads every boot's lines: a `test-irqoff` boot without the `on` line is the wrong ISO and fails; it
 appends a table to `$GITHUB_STEP_SUMMARY` (under TCG the sites over the bound and the totals; under
@@ -418,10 +420,11 @@ and writes the rows to the results file's `irqoff` section, with the e2e driver 
 ktest driver's file (`VIBEOS_RESULTS_APPEND=1`). A test or test hook that holds IF off on purpose
 takes `sched::irqoff::deliberate(reason)` (C-IRQOFF-GUARD, `kernel_tests` only), which marks its
 stretch so it is never over and prints it on a `deliberate` line; `irqoff_logs_long_stretch` and
-`irqoff_deliberate_is_exempt`, registered only in this build, check the tracer and the guard, and
-`irqoff_big_tmp_dir` checks that a tmpfs directory of 3,000 files holds IF off for no stretch over
-the bound on a create or a lookup (DESIGN §2.1's sleeping store lock). A test longjmped out of by `arch::catch` skips its guards' drops, so its stretch shows as
-`unmatched`. Under `-smp 1` a test that needs a second CPU skips with its "no AP" reason, and each
+`irqoff_deliberate_is_exempt`, registered only in this build, check the tracer and the guard,
+`irqoff_report_skips_ring` that a report leaves the ring alone, and `irqoff_big_tmp_dir` that a
+tmpfs directory of 3,000 files holds IF off for no stretch over the bound on a create or a lookup
+(DESIGN §2.1's sleeping store lock). A test longjmped out of by `arch::catch` skips its guards'
+drops, so its stretch shows as `unmatched`. Under `-smp 1` a test that needs a second CPU skips with its "no AP" reason, and each
 such skip has a `smp = 1` row in `tests/harness/skips.toml` (C-SKIPS).
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its

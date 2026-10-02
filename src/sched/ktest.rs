@@ -21,7 +21,9 @@ pub(crate) use depth::{
 pub(crate) use fill::fill_threads;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 #[cfg(feature = "irqoff")]
-pub(crate) use irqoff::{irqoff_deliberate_is_exempt, irqoff_logs_long_stretch};
+pub(crate) use irqoff::{
+    irqoff_deliberate_is_exempt, irqoff_logs_long_stretch, irqoff_report_skips_ring,
+};
 use parked::test_parked_waits_for_make_ready;
 pub(crate) use reclaim::dead_list_batched_rounds;
 pub(crate) use registry::{test_ktest_fail_fmt, test_ktest_helpers, test_ktest_rows};
@@ -1328,4 +1330,6 @@ pub(crate) const TESTS: &[Test] = &[
     test("irqoff_logs_long_stretch", irqoff_logs_long_stretch),
     #[cfg(feature = "irqoff")]
     test("irqoff_deliberate_is_exempt", irqoff_deliberate_is_exempt),
+    #[cfg(feature = "irqoff")]
+    test("irqoff_report_skips_ring", irqoff_report_skips_ring),
 ];

@@ -85,6 +85,17 @@ PRINTERS: list[tuple[str, str, str, str]] = [
      "the exception line is one raw write, as the dump's are"),
     ("src/proc/proc_init/mod.rs", '"user: syscall {name} nr={nr} = {ret}"',
      "user: syscall {} nr={} = {}", "a strace line is written whole on the syscall exit path"),
+    ("src/sched/irqoff.rs", '"vibeOS: irqoff: over {} n {} max {} ns"',
+     "vibeOS: irqoff: over {} n {} max {} ns",
+     "the IF-off tracer's report writes outside the log ring (AGENTS.md, Emit)"),
+    ("src/sched/irqoff.rs", '"vibeOS: irqoff: site {} n {} over {} max {} ns p99 {} ns"',
+     "vibeOS: irqoff: site {} n {} over {} max {} ns p99 {} ns", "as above"),
+    ("src/sched/irqoff.rs", '"vibeOS: irqoff: deliberate {} n {} max {} ns {}"',
+     "vibeOS: irqoff: deliberate {} n {} max {} ns {}", "as above"),
+    ("src/sched/irqoff.rs", '"vibeOS: irqoff: unmatched {} n {}"',
+     "vibeOS: irqoff: unmatched {} n {}", "as above"),
+    ("src/sched/irqoff.rs", '"vibeOS: irqoff: dropped {}"', "vibeOS: irqoff: dropped {}",
+     "as above"),
 ]
 
 MARKER_CALL = re.compile(r"(?<![A-Za-z0-9_])(?:(?:\$?crate|vibeos)::)?marker!")
