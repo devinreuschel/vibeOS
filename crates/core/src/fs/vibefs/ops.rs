@@ -158,11 +158,15 @@ impl Vol {
         } else if k == KIND_DIR {
             return Err(Error::IsDir);
         }
-        self.dents[e] = Dent::EMPTY;
+        // The one step that can fail goes first, so a refused unlink
+        // leaves the name and the link count as they were.
         let nlink = self.inodes[is].nlink.saturating_sub(1);
-        self.inodes[is].nlink = nlink;
         if nlink == 0 {
             self.free_inode_data(d, ino)?;
+        }
+        self.dents[e] = Dent::EMPTY;
+        self.inodes[is].nlink = nlink;
+        if nlink == 0 {
             self.inodes[is] = Inode::EMPTY;
         }
         self.bump_mtime(dir);

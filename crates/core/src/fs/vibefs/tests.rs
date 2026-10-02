@@ -410,6 +410,32 @@ fn new_file(v: &mut Vol, d: &mut MemDisk, name: &[u8]) -> u32 {
     v.lookup(d, ROOT_INO, name).unwrap().ino
 }
 
+/// An unlink whose blocks the drop list has no room for fails with
+/// `NoSpace` and changes nothing: the name still finds the file, and an
+/// unlink once there is room removes it.
+#[test]
+fn unlink_refused_for_drop_room_keeps_the_name() {
+    let mut b = fresh(64 * BLOCK);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        v.write(d, ino, 0, &[5u8; BLOCK * 2]).unwrap();
+        v.sync(d).unwrap();
+        let held = v.ndrop;
+        v.ndrop = MAX_DROP as u8;
+        assert_eq!(
+            v.unlink(d, ROOT_INO, b"f", false).unwrap_err(),
+            Error::NoSpace
+        );
+        v.ndrop = held;
+        assert_eq!(v.lookup(d, ROOT_INO, b"f").unwrap().ino, ino);
+        v.unlink(d, ROOT_INO, b"f", false).unwrap();
+        assert_eq!(v.lookup(d, ROOT_INO, b"f").unwrap_err(), Error::NotFound);
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!(r.errors, 0, "{r:?}");
+}
+
 fn n_ext(v: &Vol, ino: u32) -> u8 {
     v.inodes[v.inode_slot(ino).unwrap()].n_ext
 }
