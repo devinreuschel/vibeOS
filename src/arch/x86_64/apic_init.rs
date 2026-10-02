@@ -407,7 +407,26 @@ pub fn eoi_for(vec: u8) {
     }
 }
 
-/// ICR high then low; bounded delivery-pending poll. ROADMAP §4.1.
+/// Write this CPU's ICR, high then low, with IF off between the two
+/// writes: a handler that sends an IPI between them would rewrite ICR high,
+/// and the low write would then send this IPI to the handler's
+/// destination. A caller that has IF off already, as the panic dump has
+/// (DESIGN §2.5 step 1), takes no guard.
+///
+/// # Safety
+/// As for [`lapic_read`].
+unsafe fn write_icr(va: u64, hi: u32, lo: u32) {
+    let _irq = x86::interrupts_enabled().then(|| x86::InterruptGuard::enter());
+    // SAFETY: this fn's `# Safety` (here).
+    unsafe { lapic_write(va, LAPIC_ICR_HIGH, hi) };
+    #[cfg(feature = "kernel_tests")]
+    testing::between_icr_writes();
+    // SAFETY: this fn's `# Safety` (here).
+    unsafe { lapic_write(va, LAPIC_ICR_LOW, lo) };
+}
+
+/// ICR high then low ([`write_icr`]); bounded delivery-pending poll.
+/// ROADMAP §4.1.
 pub fn send_ipi(dest: u8, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
     let va = LAPIC_VA.load(Ordering::Acquire);
     if va == 0 {
@@ -422,10 +441,7 @@ pub fn send_ipi(dest: u8, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
     let (hi, lo) = apic::send_ipi_plan(dest, vector, mode);
     // SAFETY: as for `icr`; established at
     // `arch::x86_64::apic_init::enable_lapic`.
-    unsafe {
-        lapic_write(va, LAPIC_ICR_HIGH, hi);
-        lapic_write(va, LAPIC_ICR_LOW, lo);
-    }
+    unsafe { write_icr(va, hi, lo) };
     if !poll_delivery_pending(icr, ICR_POLL_CAP) {
         return Err(IpiError::DeliveryPendingTimeout);
     }
@@ -463,10 +479,7 @@ pub fn send_ipi_all_ex_self(vector: u8) -> Result<(), IpiError> {
     let (hi, lo) = apic::send_ipi_all_ex_self_plan(vector, IpiMode::Fixed);
     // SAFETY: as for `icr`; established at
     // `arch::x86_64::apic_init::enable_lapic`.
-    unsafe {
-        lapic_write(va, LAPIC_ICR_HIGH, hi);
-        lapic_write(va, LAPIC_ICR_LOW, lo);
-    }
+    unsafe { write_icr(va, hi, lo) };
     if !poll_delivery_pending(icr, ICR_POLL_CAP) {
         return Err(IpiError::DeliveryPendingTimeout);
     }
@@ -841,4 +854,24 @@ pub fn arm_ap() {
             TimerMode::Pit => {}
         }
     });
+}
+
+/// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// [`super::write_icr`] calls that found IF on between the two writes.
+    static ICR_IF_ON: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn icr_writes_if_on() -> u64 {
+        ICR_IF_ON.load(Ordering::Acquire)
+    }
+
+    /// No lock and no guard: the panic dump sends its NMIs through here.
+    pub(super) fn between_icr_writes() {
+        if super::x86::interrupts_enabled() {
+            ICR_IF_ON.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 }

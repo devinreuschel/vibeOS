@@ -32,10 +32,12 @@ use crate::x86::{
 };
 
 mod idt;
+mod ipi;
 mod seam;
 mod uaccess;
 
 pub(crate) use idt::test_idt_set_handler_refuses_fixed;
+pub(crate) use ipi::test_ipi_icr_writes_if_off;
 pub(crate) use seam::test_arch_seam_core;
 pub(crate) use uaccess::*;
 
@@ -1485,6 +1487,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_exceptions", test_user_exceptions).deadline(30_000),
     test("user_device_irq", test_user_device_irq).deadline(30_000),
     test("user_ipi", test_user_ipi).deadline(30_000),
+    test("ipi_icr_writes_if_off", test_ipi_icr_writes_if_off),
     test("cpu_control_regs", cpu_control_regs),
     test("catch_ignores_other_cpu", test_catch_ignores_other_cpu),
     test("catch_ignores_user_frame", test_catch_ignores_user_frame).deadline(30_000),
