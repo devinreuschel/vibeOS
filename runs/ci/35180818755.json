@@ -1,0 +1,100 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "conclusion": "success",
+ "created": "2026-09-17T04:09:03Z",
+ "event": "push",
+ "finished": "2026-09-17T04:10:37Z",
+ "head_sha": "64264bda73bc5f3a29303b3b48654cf7a96349dc",
+ "jobs": [
+  {
+   "completed": "2026-09-17T04:10:37Z",
+   "conclusion": "success",
+   "created": "2026-09-17T04:09:03Z",
+   "name": "phase 0 ladder",
+   "results": [],
+   "runner": null,
+   "seconds": 92,
+   "started": "2026-09-17T04:09:05Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 22
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 11
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "setup",
+     "seconds": 0
+    },
+    {
+     "name": "build kernel + hybrid ISO",
+     "seconds": 14
+    },
+    {
+     "name": "harness unit tests",
+     "seconds": 0
+    },
+    {
+     "name": "host unit tests",
+     "seconds": 1
+    },
+    {
+     "name": "e2e (BIOS)",
+     "seconds": 3
+    },
+    {
+     "name": "e2e (UEFI / OVMF)",
+     "seconds": 4
+    },
+    {
+     "name": "e2e (panic path)",
+     "seconds": 14
+    },
+    {
+     "name": "in-guest kernel tests",
+     "seconds": 14
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "Post Run actions/checkout@v4",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 35180818755,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-09-17T04:09:03Z",
+ "workflow": "ci"
+}

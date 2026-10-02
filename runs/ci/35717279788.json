@@ -1,0 +1,120 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "conclusion": "failure",
+ "created": "2026-09-22T10:40:30Z",
+ "event": "push",
+ "finished": "2026-09-22T10:42:59Z",
+ "head_sha": "767c19f336eaad8817dac8e292e1cfc026374567",
+ "jobs": [
+  {
+   "completed": "2026-09-22T10:42:59Z",
+   "conclusion": "failure",
+   "created": "2026-09-22T10:40:31Z",
+   "name": "phase 0 ladder",
+   "results": [],
+   "runner": null,
+   "seconds": 146,
+   "started": "2026-09-22T10:40:33Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 22
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 12
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 2
+    },
+    {
+     "name": "setup",
+     "seconds": 0
+    },
+    {
+     "name": "build kernel + hybrid ISO",
+     "seconds": 27
+    },
+    {
+     "name": "harness unit tests",
+     "seconds": 0
+    },
+    {
+     "name": "host unit tests",
+     "seconds": 3
+    },
+    {
+     "name": "e2e (BIOS)",
+     "seconds": 7
+    },
+    {
+     "name": "e2e (UEFI / OVMF)",
+     "seconds": 66
+    },
+    {
+     "name": "e2e (panic path)",
+     "seconds": null
+    },
+    {
+     "name": "e2e (#GP dump+halt)",
+     "seconds": null
+    },
+    {
+     "name": "e2e (PIT calibration fallback)",
+     "seconds": null
+    },
+    {
+     "name": "in-guest kernel tests",
+     "seconds": null
+    },
+    {
+     "name": "in-guest kernel tests (-smp 4)",
+     "seconds": null
+    },
+    {
+     "name": "in-guest LAPIC periodic fallback",
+     "seconds": null
+    },
+    {
+     "name": "vibefs QEMU-kill crash consistency",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@v4",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 35717279788,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-09-22T10:40:30Z",
+ "workflow": "ci"
+}

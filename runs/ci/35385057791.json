@@ -1,0 +1,116 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "conclusion": "success",
+ "created": "2026-09-18T19:16:59Z",
+ "event": "push",
+ "finished": "2026-09-18T19:20:18Z",
+ "head_sha": "2df4358f8ff1826644560f6deacb217edd1c6f0d",
+ "jobs": [
+  {
+   "completed": "2026-09-18T19:20:18Z",
+   "conclusion": "success",
+   "created": "2026-09-18T19:16:59Z",
+   "name": "phase 0 ladder",
+   "results": [],
+   "runner": null,
+   "seconds": 196,
+   "started": "2026-09-18T19:17:02Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 62
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 12
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "setup",
+     "seconds": 0
+    },
+    {
+     "name": "build kernel + hybrid ISO",
+     "seconds": 20
+    },
+    {
+     "name": "harness unit tests",
+     "seconds": 0
+    },
+    {
+     "name": "host unit tests",
+     "seconds": 2
+    },
+    {
+     "name": "e2e (BIOS)",
+     "seconds": 4
+    },
+    {
+     "name": "e2e (UEFI / OVMF)",
+     "seconds": 4
+    },
+    {
+     "name": "e2e (panic path)",
+     "seconds": 18
+    },
+    {
+     "name": "e2e (#GP dump+halt)",
+     "seconds": 21
+    },
+    {
+     "name": "e2e (PIT calibration fallback)",
+     "seconds": 3
+    },
+    {
+     "name": "in-guest kernel tests",
+     "seconds": 27
+    },
+    {
+     "name": "in-guest kernel tests (-smp 4)",
+     "seconds": 7
+    },
+    {
+     "name": "in-guest LAPIC periodic fallback",
+     "seconds": 7
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@v4",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 35385057791,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-09-18T19:16:59Z",
+ "workflow": "ci"
+}

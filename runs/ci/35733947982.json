@@ -1,0 +1,136 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "conclusion": "success",
+ "created": "2026-09-22T13:30:48Z",
+ "event": "push",
+ "finished": "2026-09-22T13:35:19Z",
+ "head_sha": "b40c69f09eb15293267c50237da711410f6e20cd",
+ "jobs": [
+  {
+   "completed": "2026-09-22T13:35:19Z",
+   "conclusion": "success",
+   "created": "2026-09-22T13:30:55Z",
+   "name": "phase 0 ladder",
+   "results": [],
+   "runner": null,
+   "seconds": 260,
+   "started": "2026-09-22T13:30:59Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 16
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 12
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 0
+    },
+    {
+     "name": "cargo fmt --check",
+     "seconds": 1
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": 22
+    },
+    {
+     "name": "cargo clippy -D warnings (hostlib)",
+     "seconds": 2
+    },
+    {
+     "name": "build kernel + hybrid ISO",
+     "seconds": 12
+    },
+    {
+     "name": "harness unit tests",
+     "seconds": 1
+    },
+    {
+     "name": "host unit tests",
+     "seconds": 3
+    },
+    {
+     "name": "e2e (BIOS)",
+     "seconds": 7
+    },
+    {
+     "name": "e2e (UEFI / OVMF)",
+     "seconds": 9
+    },
+    {
+     "name": "e2e (panic path)",
+     "seconds": 25
+    },
+    {
+     "name": "e2e (#GP dump+halt)",
+     "seconds": 29
+    },
+    {
+     "name": "e2e (PIT calibration fallback)",
+     "seconds": 7
+    },
+    {
+     "name": "in-guest kernel tests",
+     "seconds": 38
+    },
+    {
+     "name": "in-guest kernel tests (-smp 4)",
+     "seconds": 10
+    },
+    {
+     "name": "in-guest LAPIC periodic fallback",
+     "seconds": 10
+    },
+    {
+     "name": "vibefs QEMU-kill crash consistency",
+     "seconds": 43
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 3
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 35733947982,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-09-22T13:30:48Z",
+ "workflow": "ci"
+}

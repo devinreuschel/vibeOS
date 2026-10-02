@@ -1,0 +1,120 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "conclusion": "failure",
+ "created": "2026-09-22T11:10:44Z",
+ "event": "push",
+ "finished": "2026-09-22T11:13:36Z",
+ "head_sha": "12b9a8f52d8f384609504ce316509bfa230e49b5",
+ "jobs": [
+  {
+   "completed": "2026-09-22T11:13:36Z",
+   "conclusion": "failure",
+   "created": "2026-09-22T11:10:45Z",
+   "name": "phase 0 ladder",
+   "results": [],
+   "runner": null,
+   "seconds": 169,
+   "started": "2026-09-22T11:10:47Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 29
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 11
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 3
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "setup",
+     "seconds": 2
+    },
+    {
+     "name": "build kernel + hybrid ISO",
+     "seconds": 21
+    },
+    {
+     "name": "harness unit tests",
+     "seconds": 1
+    },
+    {
+     "name": "host unit tests",
+     "seconds": 2
+    },
+    {
+     "name": "e2e (BIOS)",
+     "seconds": 6
+    },
+    {
+     "name": "e2e (UEFI / OVMF)",
+     "seconds": 8
+    },
+    {
+     "name": "e2e (panic path)",
+     "seconds": 19
+    },
+    {
+     "name": "e2e (#GP dump+halt)",
+     "seconds": 22
+    },
+    {
+     "name": "e2e (PIT calibration fallback)",
+     "seconds": 6
+    },
+    {
+     "name": "in-guest kernel tests",
+     "seconds": 29
+    },
+    {
+     "name": "in-guest kernel tests (-smp 4)",
+     "seconds": 4
+    },
+    {
+     "name": "in-guest LAPIC periodic fallback",
+     "seconds": null
+    },
+    {
+     "name": "vibefs QEMU-kill crash consistency",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 35720000587,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-09-22T11:10:44Z",
+ "workflow": "ci"
+}

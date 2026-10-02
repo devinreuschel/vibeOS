@@ -1,0 +1,112 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "conclusion": "success",
+ "created": "2026-09-17T12:18:07Z",
+ "event": "push",
+ "finished": "2026-09-17T12:20:23Z",
+ "head_sha": "19ff0991c4316224acbff57e05ccb1ecc733753d",
+ "jobs": [
+  {
+   "completed": "2026-09-17T12:20:23Z",
+   "conclusion": "success",
+   "created": "2026-09-17T12:18:07Z",
+   "name": "phase 0 ladder",
+   "results": [],
+   "runner": null,
+   "seconds": 134,
+   "started": "2026-09-17T12:18:09Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 23
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 12
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 2
+    },
+    {
+     "name": "setup",
+     "seconds": 0
+    },
+    {
+     "name": "build kernel + hybrid ISO",
+     "seconds": 17
+    },
+    {
+     "name": "harness unit tests",
+     "seconds": 1
+    },
+    {
+     "name": "host unit tests",
+     "seconds": 1
+    },
+    {
+     "name": "e2e (BIOS)",
+     "seconds": 3
+    },
+    {
+     "name": "e2e (UEFI / OVMF)",
+     "seconds": 5
+    },
+    {
+     "name": "e2e (panic path)",
+     "seconds": 18
+    },
+    {
+     "name": "e2e (#GP dump+halt)",
+     "seconds": 18
+    },
+    {
+     "name": "e2e (PIT calibration fallback)",
+     "seconds": 4
+    },
+    {
+     "name": "in-guest kernel tests",
+     "seconds": 19
+    },
+    {
+     "name": "in-guest LAPIC periodic fallback",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@v4",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 35220336099,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-09-17T12:18:07Z",
+ "workflow": "ci"
+}

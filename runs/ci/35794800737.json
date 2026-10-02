@@ -1,0 +1,184 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "conclusion": "success",
+ "created": "2026-09-22T22:54:21Z",
+ "event": "push",
+ "finished": "2026-09-22T22:58:44Z",
+ "head_sha": "1c7d4f080393e2c8a07904d2e4ae9e49805fbb5f",
+ "jobs": [
+  {
+   "completed": "2026-09-22T22:55:25Z",
+   "conclusion": "success",
+   "created": "2026-09-22T22:54:22Z",
+   "name": "check",
+   "results": [],
+   "runner": null,
+   "seconds": 60,
+   "started": "2026-09-22T22:54:25Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 11
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 13
+    },
+    {
+     "name": "cache cargo (check)",
+     "seconds": 2
+    },
+    {
+     "name": "install python linters",
+     "seconds": 6
+    },
+    {
+     "name": "make check",
+     "seconds": 13
+    },
+    {
+     "name": "install cargo-llvm-cov",
+     "seconds": 0
+    },
+    {
+     "name": "vibeos-core llvm-cov floor",
+     "seconds": 7
+    },
+    {
+     "name": "upload hostlib coverage HTML",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache cargo (check)",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-09-22T22:58:44Z",
+   "conclusion": "success",
+   "created": "2026-09-22T22:55:25Z",
+   "name": "phase 0 ladder",
+   "results": [],
+   "runner": null,
+   "seconds": 197,
+   "started": "2026-09-22T22:55:27Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 0
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 22
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 12
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 1
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": 4
+    },
+    {
+     "name": "build kernel + hybrid ISO",
+     "seconds": 10
+    },
+    {
+     "name": "e2e (BIOS)",
+     "seconds": 5
+    },
+    {
+     "name": "e2e (UEFI / OVMF)",
+     "seconds": 7
+    },
+    {
+     "name": "e2e (panic path)",
+     "seconds": 6
+    },
+    {
+     "name": "e2e (#GP dump+halt)",
+     "seconds": 9
+    },
+    {
+     "name": "e2e (PIT calibration fallback)",
+     "seconds": 65
+    },
+    {
+     "name": "in-guest kernel tests",
+     "seconds": 16
+    },
+    {
+     "name": "in-guest kernel tests (-smp 4)",
+     "seconds": 8
+    },
+    {
+     "name": "in-guest LAPIC periodic fallback",
+     "seconds": 7
+    },
+    {
+     "name": "vibefs QEMU-kill crash consistency",
+     "seconds": 18
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 35794800737,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-09-22T22:54:21Z",
+ "workflow": "ci"
+}
