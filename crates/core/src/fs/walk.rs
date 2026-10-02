@@ -1,5 +1,10 @@
 use super::*;
 
+/// How many times an unlink, rmdir or rename walks its names: once, and
+/// again when a racing change took a name's dentry before the begin step
+/// (DESIGN §2.5's bounded retry).
+const WALKS: usize = 2;
+
 /// Where a walk starts: an absolute path at `root`, a relative one at
 /// `cwd`, and `..` stays put at `root` (path_resolution(7)). A process's
 /// base names the directories its root and working-directory
@@ -234,23 +239,37 @@ impl Vfs {
     }
 
     /// An unlink's or rmdir's call on directory `dir`, holding `victim`,
-    /// the held dentry `name` resolved to, which this step puts.
+    /// the held dentry `name` resolved to, which this step puts. `None`
+    /// when that dentry lost its name to a racing unlink or rename after
+    /// the walk: `name` may now be another file, so the caller walks again.
     fn remove_begin(
         &mut self,
         dir: PathRef,
         name: &[u8],
         victim: PathRef,
         rmdir: bool,
-    ) -> Result<(Call, u16), FsError> {
+    ) -> Result<Option<(Call, u16)>, FsError> {
+        if self.dentries[victim.dslot as usize].dead {
+            self.path_put(victim);
+            return Ok(None);
+        }
         let r = self.remove_check(dir, name, victim, rmdir);
+        // The victim's hold comes before the path's put, which can be its
+        // last reference and queue its release.
+        let held = r.and_then(|vi| self.ihold(vi).map(|()| vi));
         self.path_put(victim);
-        let vi = r?;
-        let di = self.d_islot(dir.dslot)?;
-        self.ihold(vi)?;
+        let vi = held?;
+        let di = match self.d_islot(dir.dslot) {
+            Ok(di) => di,
+            Err(e) => {
+                self.iput(vi);
+                return Err(e);
+            }
+        };
         let sb = self.sb_of(dir.mount);
         self.dcache_evict_name(sb, dir.dslot, name);
         match self.call(di) {
-            Ok(c) => Ok((c, vi)),
+            Ok(c) => Ok(Some((c, vi))),
             Err(e) => {
                 self.iput(vi);
                 Err(e)
@@ -320,20 +339,36 @@ impl Vfs {
         (nd, nname): (PathRef, &[u8]),
         src: PathRef,
         tgt: Option<PathRef>,
-    ) -> Result<RenameCall, FsError> {
-        let r = self.rename_check((od, oname), (nd, nname), src, tgt);
+    ) -> Result<Option<RenameCall>, FsError> {
+        let dead = |v: &Self, p: PathRef| v.dentries[p.dslot as usize].dead;
+        if dead(self, src) || tgt.is_some_and(|t| dead(self, t)) {
+            // A name lost its dentry to a racing change after the walk,
+            // as in `remove_begin`: the caller walks both again.
+            self.path_put(src);
+            if let Some(t) = tgt {
+                self.path_put(t);
+            }
+            return Ok(None);
+        }
+        // The inodes' holds come before the paths' puts, which can be
+        // their last references, as in `remove_begin`.
+        let held = self
+            .rename_check((od, oname), (nd, nname), src, tgt)
+            .and_then(|(si, ti)| {
+                self.ihold(si)?;
+                if let Some(t) = ti
+                    && let Err(e) = self.ihold(t)
+                {
+                    self.iput(si);
+                    return Err(e);
+                }
+                Ok((si, ti))
+            });
         self.path_put(src);
         if let Some(t) = tgt {
             self.path_put(t);
         }
-        let (si, ti) = r?;
-        self.ihold(si)?;
-        if let Some(t) = ti
-            && let Err(e) = self.ihold(t)
-        {
-            self.iput(si);
-            return Err(e);
-        }
+        let (si, ti) = held?;
         let sb = self.sb_of(od.mount);
         self.dcache_evict_name(sb, nd.dslot, nname);
         let calls = self.d_islot(od.dslot).and_then(|o| {
@@ -347,12 +382,12 @@ impl Vfs {
             }
         });
         match calls {
-            Ok((a, b)) => Ok(RenameCall {
+            Ok((a, b)) => Ok(Some(RenameCall {
                 a,
                 b,
                 src: si,
                 tgt: ti,
-            }),
+            })),
             Err(e) => {
                 self.iput(si);
                 if let Some(t) = ti {
@@ -513,6 +548,11 @@ impl Vfs {
         let si = self.d_islot(src.dslot)?;
         if self.inodes[si as usize].kind != InodeKind::Reg {
             return Err(FsError::Perm);
+        }
+        // A file whose last name a racing unlink took after the walk gets
+        // no new one, as Linux's `link` refuses it.
+        if self.inodes[si as usize].nlink == 0 {
+            return Err(FsError::NotFound);
         }
         if self.sb_of(src.mount) != self.sb_of(nd.mount) {
             return Err(FsError::XDev);
@@ -1020,12 +1060,32 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
 
     fn remove(&self, base: Option<WalkBase>, path: &[u8], rmdir: bool) -> Result<(), FsError> {
         let (dir, name, dir_only) = self.walk_parent(base, path)?;
-        let r = self.walk_in(dir, name, false).and_then(|victim| {
+        let r = self.remove_in(dir, name, dir_only, rmdir);
+        self.put_path(dir);
+        r
+    }
+
+    /// Remove `name` from `dir`. The walk and the begin step are two
+    /// holds of the VFS lock, so a racing change can take `name`'s dentry
+    /// between them; `name` is then walked again, up to [`WALKS`] times
+    /// in all (DESIGN §2.5's bounded retry), and is `NotFound` after.
+    fn remove_in(
+        &self,
+        dir: PathRef,
+        name: &[u8],
+        dir_only: bool,
+        rmdir: bool,
+    ) -> Result<(), FsError> {
+        for _ in 0..WALKS {
+            let victim = self.walk_in(dir, name, false)?;
             if dir_only && self.with(|v| v.kind_of(victim)) != Ok(InodeKind::Dir) {
                 self.put_path(victim);
                 return Err(FsError::NotDir);
             }
-            let (mut c, vi) = self.step(|v| v.remove_begin(dir, name, victim, rmdir))?;
+            (self.hooks.change_window)();
+            let Some((mut c, vi)) = self.step(|v| v.remove_begin(dir, name, victim, rmdir))? else {
+                continue;
+            };
             let res = c.run(|o, cx, d| {
                 if rmdir {
                     o.rmdir(cx, d, name)
@@ -1033,10 +1093,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                     o.unlink(cx, d, name)
                 }
             });
-            self.step(|v| v.remove_commit(dir, name, c, vi, res))
-        });
-        self.put_path(dir);
-        r
+            return self.step(|v| v.remove_commit(dir, name, c, vi, res));
+        }
+        Err(FsError::NotFound)
     }
 
     pub fn rename(&self, base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
@@ -1050,30 +1109,39 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         r
     }
 
+    /// Move `o`'s name to `n`'s, walking both again when a racing change
+    /// took either's dentry before the begin step, as [`Self::remove_in`]
+    /// does.
     fn rename_in(
         &self,
         o: (PathRef, &[u8]),
         n: (PathRef, &[u8]),
         dir_only: bool,
     ) -> Result<(), FsError> {
-        let src = self.walk_in(o.0, o.1, false)?;
-        // A `/` after either name moves a directory only.
-        if dir_only && self.with(|v| v.kind_of(src)) != Ok(InodeKind::Dir) {
-            self.put_path(src);
-            return Err(FsError::NotDir);
-        }
-        let tgt = match self.walk_in(n.0, n.1, false) {
-            Ok(t) => Some(t),
-            Err(FsError::NotFound) => None,
-            Err(e) => {
+        for _ in 0..WALKS {
+            let src = self.walk_in(o.0, o.1, false)?;
+            // A `/` after either name moves a directory only.
+            if dir_only && self.with(|v| v.kind_of(src)) != Ok(InodeKind::Dir) {
                 self.put_path(src);
-                return Err(e);
+                return Err(FsError::NotDir);
             }
-        };
-        let mut rc = self.step(|v| v.rename_begin(o, n, src, tgt))?;
-        let res =
-            rc.a.run2(&mut rc.b, |ops, cx, x, y| ops.rename(cx, x, o.1, y, n.1));
-        self.step(|v| v.rename_commit(o, n, rc, res))
+            let tgt = match self.walk_in(n.0, n.1, false) {
+                Ok(t) => Some(t),
+                Err(FsError::NotFound) => None,
+                Err(e) => {
+                    self.put_path(src);
+                    return Err(e);
+                }
+            };
+            (self.hooks.change_window)();
+            let Some(mut rc) = self.step(|v| v.rename_begin(o, n, src, tgt))? else {
+                continue;
+            };
+            let res =
+                rc.a.run2(&mut rc.b, |ops, cx, x, y| ops.rename(cx, x, o.1, y, n.1));
+            return self.step(|v| v.rename_commit(o, n, rc, res));
+        }
+        Err(FsError::NotFound)
     }
 
     /// Hard link `new` to the regular file `old` names.
@@ -1087,6 +1155,7 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                         self.put_path(nd);
                         return Err(FsError::NotDir);
                     }
+                    (self.hooks.change_window)();
                     let r = self
                         .with(|v| v.link_begin(src, nd))
                         .and_then(|(mut d, mut t)| {

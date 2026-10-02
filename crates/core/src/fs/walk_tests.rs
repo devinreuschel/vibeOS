@@ -3,7 +3,7 @@
 //! (ROADMAP §10.4).
 
 use super::testfs::*;
-use super::tests::{assert_dcache_sound, mount_dev, press, ram, st_ino_of};
+use super::tests::{assert_dcache_sound, locked_vfs, mount_dev, press, ram, st_ino_of};
 use super::*;
 
 /// A base whose root is the namespace root and whose working directory
@@ -482,4 +482,157 @@ fn rename_replaces_as_linux() {
     v.rmdir(None, "/e").unwrap();
     assert_eq!(used(&v), before);
     assert_dcache_sound(&v);
+}
+
+/// What a `change_window` hook runs once, between a namespace change's
+/// walks and its begin step: on VFS `.0`, unlink `.1`, or rename it to
+/// `.2`.
+type Race = (
+    &'static std::sync::Mutex<Vfs>,
+    &'static [u8],
+    Option<&'static [u8]>,
+);
+
+/// Each test's race, so tests running in parallel keep their own.
+static UNLINK_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+static OVER_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+static SRC_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+static LINK_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+
+fn run_race(race: &std::sync::Mutex<Option<Race>>) {
+    let Some((vfs, a, b)) = race.lock().unwrap().take() else {
+        return;
+    };
+    let api = FileApi::new(vfs);
+    match b {
+        None => api.unlink(None, a).unwrap(),
+        Some(b) => api.rename(None, a, b).unwrap(),
+    }
+}
+
+fn unlink_window() {
+    run_race(&UNLINK_RACE);
+}
+
+fn over_window() {
+    run_race(&OVER_RACE);
+}
+
+fn src_window() {
+    run_race(&SRC_RACE);
+}
+
+fn link_window() {
+    run_race(&LINK_RACE);
+}
+
+/// A File API on `vfs` whose namespace changes run `window` between their
+/// walks and their begin steps.
+fn racing(
+    vfs: &'static std::sync::Mutex<Vfs>,
+    window: fn(),
+) -> FileApi<'static, std::sync::Mutex<Vfs>> {
+    FileApi::with_hooks(
+        vfs,
+        Hooks {
+            change_window: window,
+            ..Hooks::NONE
+        },
+    )
+}
+
+/// `vfs` with `LockedFs` over a fresh `KeyFs` store at `/blk`, and that
+/// store's id. `KeyOps::evict` fails a test that evicts a held inode.
+fn keyfs_at_blk(vfs: &'static std::sync::Mutex<Vfs>) -> u64 {
+    let fs: &'static LockedFs = std::boxed::Box::leak(std::boxed::Box::new(LockedFs {
+        key: keyfs_new(),
+        vfs,
+        calls: std::sync::atomic::AtomicU32::new(0),
+    }));
+    let vol = crate::dev::instance(7u32).unwrap();
+    FileApi::new(vfs)
+        .mount_fs(None, b"/blk", fs, Some(3), false, Some(vol))
+        .unwrap();
+    fs.key.id
+}
+
+fn make(vfs: &'static std::sync::Mutex<Vfs>, path: &[u8]) {
+    let api = FileApi::new(vfs);
+    let f = api
+        .open(None, path, OpenFlags::from_bits(O_RDWR | O_CREAT), 0o644)
+        .unwrap();
+    api.close(f).unwrap();
+}
+
+fn used_inodes(vfs: &std::sync::Mutex<Vfs>) -> usize {
+    vfs.lock().unwrap().inodes.iter().filter(|n| n.used).count()
+}
+
+/// An unlink whose name a racing unlink takes between its walk and its
+/// begin step finds the name gone, and holds no inode whose release the
+/// racer's last put queued: `evict` runs once, on an inode nothing holds.
+#[test]
+fn unlink_racing_unlink_is_not_found() {
+    let vfs = locked_vfs();
+    let id = keyfs_at_blk(vfs);
+    make(vfs, b"/blk/f");
+    *UNLINK_RACE.lock().unwrap() = Some((vfs, b"/blk/f", None));
+    let api = racing(vfs, unlink_window);
+    assert_eq!(api.unlink(None, b"/blk/f").unwrap_err(), FsError::NotFound);
+    assert_eq!(with_store(id, |s| s.evicts), 1);
+}
+
+/// An unlink whose name a racing rename replaces between its walk and its
+/// begin step unlinks the file the name holds now, as an unlink after the
+/// rename would: both names are gone and both inodes are released.
+#[test]
+fn unlink_racing_rename_over_takes_the_new_file() {
+    let vfs = locked_vfs();
+    let before = used_inodes(vfs);
+    make(vfs, b"/a");
+    make(vfs, b"/b");
+    *OVER_RACE.lock().unwrap() = Some((vfs, b"/a", Some(b"/b")));
+    racing(vfs, over_window).unlink(None, b"/b").unwrap();
+    let api = FileApi::new(vfs);
+    for p in [b"/a" as &[u8], b"/b"] {
+        assert_eq!(api.walk(None, p, true).unwrap_err(), FsError::NotFound);
+    }
+    assert_eq!(used_inodes(vfs), before);
+}
+
+/// A rename whose source a racing unlink takes between its walks and its
+/// begin step finds the source gone, and evicts no inode it holds.
+#[test]
+fn rename_racing_unlink_is_not_found() {
+    let vfs = locked_vfs();
+    let id = keyfs_at_blk(vfs);
+    make(vfs, b"/blk/a");
+    *SRC_RACE.lock().unwrap() = Some((vfs, b"/blk/a", None));
+    let api = racing(vfs, src_window);
+    assert_eq!(
+        api.rename(None, b"/blk/a", b"/blk/c").unwrap_err(),
+        FsError::NotFound
+    );
+    assert_eq!(with_store(id, |s| s.evicts), 1);
+    let api = FileApi::new(vfs);
+    assert_eq!(
+        api.walk(None, b"/blk/c", true).unwrap_err(),
+        FsError::NotFound
+    );
+}
+
+/// A link whose source a racing unlink takes between its walks and its
+/// begin step gives the unlinked file no new name, as Linux's `link`
+/// refuses a file with no links (ENOENT), and the file is released.
+#[test]
+fn link_racing_unlink_is_not_found() {
+    let vfs = locked_vfs();
+    let before = used_inodes(vfs);
+    make(vfs, b"/f");
+    *LINK_RACE.lock().unwrap() = Some((vfs, b"/f", None));
+    let api = racing(vfs, link_window);
+    assert_eq!(api.link(None, b"/f", b"/g").unwrap_err(), FsError::NotFound);
+    let api = FileApi::new(vfs);
+    assert_eq!(api.walk(None, b"/g", true).unwrap_err(), FsError::NotFound);
+    assert_eq!(used_inodes(vfs), before);
 }

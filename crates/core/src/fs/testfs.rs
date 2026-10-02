@@ -218,6 +218,7 @@ impl InodeOps for KeyOps {
         })
     }
     fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+        assert_eq!(ino.refs, 0, "evict of an inode the VFS holds");
         with_store(cx.private[0], |s| {
             if let Some(n) = s.nodes.get_mut(ino.key[0] as usize) {
                 n.alive = false;

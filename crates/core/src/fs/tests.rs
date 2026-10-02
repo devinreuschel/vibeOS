@@ -808,8 +808,8 @@ fn two_mounts_one_dentry_per_name() {
 }
 
 /// A `Vfs` behind a `std::sync::Mutex`, as the kernel's is behind its
-/// spinlock, with a ramfs root and `/blk`.
-fn locked_vfs() -> &'static std::sync::Mutex<Vfs> {
+/// sleeping lock, with a ramfs root and `/blk`.
+pub(super) fn locked_vfs() -> &'static std::sync::Mutex<Vfs> {
     let vfs: &'static std::sync::Mutex<Vfs> = std::boxed::Box::leak(std::boxed::Box::new(
         std::sync::Mutex::new(crate::fs::host_vfs()),
     ));
@@ -1053,7 +1053,7 @@ fn append_lands_after_an_overlapping_append() {
         vfs,
         Hooks {
             write_window: append_window,
-            open_race: Hooks::NONE.open_race,
+            ..Hooks::NONE
         },
     );
     for path in [b"/app" as &'static [u8], b"/tmp/app"] {
@@ -1110,7 +1110,7 @@ fn file_ref_generation_rejects_stale_id() {
         vfs,
         Hooks {
             write_window: stale_window,
-            open_race: Hooks::NONE.open_race,
+            ..Hooks::NONE
         },
     );
     assert_eq!(hooked.write(&a, b"x").unwrap_err(), FsError::Badf);

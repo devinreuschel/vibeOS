@@ -1191,6 +1191,10 @@ pub struct Hooks {
     /// Whether an `O_CREAT` open creates the file itself between its walk
     /// and its create, as another opener would.
     pub open_race: fn() -> bool,
+    /// Between a namespace change's walks and its begin step (an unlink,
+    /// rmdir, rename or link), where a racing change can take a name it
+    /// walked.
+    pub change_window: fn(),
 }
 
 fn no_window() {}
@@ -1203,6 +1207,7 @@ impl Hooks {
     pub const NONE: Hooks = Hooks {
         write_window: no_window,
         open_race: no_race,
+        change_window: no_window,
     };
 }
 
