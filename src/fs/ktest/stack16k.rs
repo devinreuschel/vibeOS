@@ -166,6 +166,9 @@ static PROBE_IF_OFF: AtomicBool = AtomicBool::new(false);
 /// Milliseconds [`top_half_room`] keeps the probe interrupted, sending a
 /// virtio-blk top half and a call-function IPI each.
 const PROBE_MS: u32 = 200;
+/// Milliseconds [`top_half_room`] sleeps with one CPU, while the ticks that
+/// switch the two spinners land on the probe.
+const PROBE_ALONE_MS: u64 = 20;
 
 /// Bytes [`probe_spin`] puts on its stack before it spins, so the spin
 /// sits deeper than anything the probe thread's start does.
@@ -183,22 +186,31 @@ fn probe_entry() {
     }
 }
 
-/// [`PROBE_PAD`] bytes down, read the TSC until 1 ms has passed (`if_off`)
-/// or until [`PROBE_STOP`]: the same calls either way, so the two depths
+/// [`PROBE_PAD`] bytes down, spin until 1 ms has passed (`if_off`) or
+/// until [`PROBE_STOP`]: the same calls either way, so the two depths
 /// differ only by the interrupts that landed on the spin.
 #[inline(never)]
 fn probe_spin(if_off: bool) {
     let mut pad = [0u8; PROBE_PAD];
     core::hint::black_box(&mut pad);
     let end = crate::time_init::read_tsc().saturating_add(crate::time_init::tsc_per_ms());
-    loop {
-        let now = core::hint::black_box(crate::time_init::read_tsc());
-        if if_off && now >= end || !if_off && PROBE_STOP.load(Ordering::Acquire) {
-            break;
-        }
+    while !probe_done(if_off, end) {
         core::hint::spin_loop();
     }
     core::hint::black_box(&mut pad);
+}
+
+/// Whether [`probe_spin`] is over: the TSC past `end` for the IF-off spin,
+/// [`PROBE_STOP`] for the other, which reads no TSC, since a TSC read on
+/// each pass makes that spin, which lasts the whole probe, crawl under
+/// `-icount` (the `test-irqoff` tier). One leaf call either way.
+#[inline(never)]
+fn probe_done(if_off: bool, end: u64) -> bool {
+    if if_off {
+        crate::time_init::read_tsc() >= end
+    } else {
+        PROBE_STOP.load(Ordering::Acquire)
+    }
 }
 
 fn probe_call(_: *mut ()) {}
@@ -217,7 +229,8 @@ fn probe_depth(name: &'static str, cpu: u32) -> Result<usize, &'static str> {
 /// makes the ticks switch between them, which puts the scheduler's and the
 /// switch tail's frames under a tick's, and each millisecond the registry
 /// sends that CPU the virtio-blk vector `vec`, the disk's top half, and a
-/// call-function IPI.
+/// call-function IPI. With one CPU those would land on the registry, so it
+/// only sleeps while the ticks land on the spinners.
 fn top_half_room(vec: u8) -> Result<usize, &'static str> {
     let cpu = crate::ktest::second_cpu().unwrap_or_else(thread_init::current_cpu);
     PROBE_IF_OFF.store(true, Ordering::Release);
@@ -226,8 +239,13 @@ fn top_half_room(vec: u8) -> Result<usize, &'static str> {
     PROBE_STOP.store(false, Ordering::Release);
     let probe = thread_init::spawn_on("probe-irq", probe_entry, cpu).map_err(|_| "probe spawn")?;
     let spinner = thread_init::spawn_on("probe-spin", probe_entry, cpu);
+    let alone = cpu == thread_init::current_cpu();
     let mut sent = 0u32;
-    if spinner.is_ok() {
+    if spinner.is_ok() && alone {
+        // With one CPU an IPI this thread sends lands on this thread, not
+        // the probe, and each 1 ms round waits on the spinners' ticks.
+        thread_init::sleep_ms(PROBE_ALONE_MS);
+    } else if spinner.is_ok() {
         while sent < PROBE_MS {
             if apic_init::send_ipi_cpu(cpu, vec).is_err() {
                 break;
@@ -242,7 +260,7 @@ fn top_half_room(vec: u8) -> Result<usize, &'static str> {
     if spinner.is_err() {
         return Err("probe spinner spawn");
     }
-    if sent < PROBE_MS {
+    if !alone && sent < PROBE_MS {
         return Err("probe self-IPI failed");
     }
     Ok(deep.ok_or("no probe depth recorded")?.saturating_sub(own))
