@@ -158,6 +158,10 @@ pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
             if len == 0 {
                 return Ok(0);
             }
+            #[cfg(feature = "kernel_tests")]
+            if matches!(slot.kind, FdKind::Console) {
+                testing::console_write_started();
+            }
             let mut scratch = [0u8; 256];
             let mut done = 0u64;
             while done < len {

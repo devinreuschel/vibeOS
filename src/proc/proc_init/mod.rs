@@ -1204,6 +1204,76 @@ pub(crate) mod testing {
         if WRITE_ARMED.swap(false, Ordering::AcqRel) {
             WRITE_DONE_NS.store(time_init::now_ns().max(1), Ordering::Release);
         }
+        let me = thread_init::current_id().raw();
+        if TICKS_TID
+            .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            let (cpu, ticks) = cpu_ticks();
+            TICKS_END_CPU.store(cpu, Ordering::Relaxed);
+            TICKS_END.store(ticks, Ordering::Relaxed);
+            // Release: publishes the record; pairs with `console_write_ticks`.
+            TICKS_DONE.store(true, Ordering::Release);
+        }
+    }
+
+    /// Set until a console `write` claims the tick record.
+    static TICKS_ARMED: AtomicBool = AtomicBool::new(false);
+    /// The thread whose console `write` holds the claim, or `u32::MAX`.
+    static TICKS_TID: AtomicU32 = AtomicU32::new(u32::MAX);
+    static TICKS_START_CPU: AtomicU32 = AtomicU32::new(0);
+    static TICKS_START: AtomicU64 = AtomicU64::new(0);
+    static TICKS_END_CPU: AtomicU32 = AtomicU32::new(0);
+    static TICKS_END: AtomicU64 = AtomicU64::new(0);
+    static TICKS_DONE: AtomicBool = AtomicBool::new(false);
+
+    /// Record the next console `write` that copies all it was given: the
+    /// CPU it runs on and that CPU's timer ticks at its first copy and at
+    /// its return (ROADMAP §10.2: what happened during the write, not what
+    /// a watcher saw later).
+    pub(crate) fn arm_console_write_ticks() {
+        TICKS_DONE.store(false, Ordering::Release);
+        TICKS_TID.store(u32::MAX, Ordering::Release);
+        TICKS_ARMED.store(true, Ordering::Release);
+    }
+
+    /// The recorded write's `(cpu, ticks)` at its first copy and at its
+    /// return, once it has returned.
+    pub(crate) fn console_write_ticks() -> Option<((u32, u64), (u32, u64))> {
+        // Acquire: pairs with the Release store in `console_write_returned`.
+        TICKS_DONE.load(Ordering::Acquire).then(|| {
+            (
+                (
+                    TICKS_START_CPU.load(Ordering::Relaxed),
+                    TICKS_START.load(Ordering::Relaxed),
+                ),
+                (
+                    TICKS_END_CPU.load(Ordering::Relaxed),
+                    TICKS_END.load(Ordering::Relaxed),
+                ),
+            )
+        })
+    }
+
+    /// Called by `sys_write` before a console write's first copy.
+    pub(super) fn console_write_started() {
+        if !TICKS_ARMED.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let (cpu, ticks) = cpu_ticks();
+        TICKS_START_CPU.store(cpu, Ordering::Relaxed);
+        TICKS_START.store(ticks, Ordering::Relaxed);
+        // Release: the start's fields before the claim that ends them.
+        TICKS_TID.store(thread_init::current_id().raw(), Ordering::Release);
+    }
+
+    /// This CPU's id and timer ticks, read with IF off so both are this
+    /// CPU's.
+    fn cpu_ticks() -> (u32, u64) {
+        let _g = crate::arch::current::InterruptGuard::enter();
+        let me = per_cpu_init::current().cpu_id;
+        let ticks = per_cpu_init::cpu(me).map_or(0, |c| c.ticks.load(Ordering::Relaxed));
+        (me, ticks)
     }
 
     /// The `rdi` of a `getpid` that the entry hooks below act on: a test

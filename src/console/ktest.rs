@@ -4,16 +4,14 @@ mod hooks;
 
 pub(crate) use hooks::*;
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use vibeos::console::BackendId;
 use vibeos::fb::PIECE_BYTES;
 
 use crate::fb_init::{self, testing as fb_testing};
 use crate::ktest::user::{self, Image, Layout, user_code};
-use crate::ktest::{
-    Outcome, Test, cpu_remote, free_frames_owned, sleep_until_s19, spin_until, test,
-};
+use crate::ktest::{Outcome, Test, free_frames_owned, sleep_until_s19, spin_until, test};
 use crate::kva_init;
 use crate::proc_init::testing as proc_testing;
 
@@ -243,90 +241,37 @@ fn fb_console_on() -> bool {
     fb_init::ready() && enabled(BackendId::Framebuffer)
 }
 
-static NL_PIDS: AtomicU64 = AtomicU64::new(0);
-
-static NL_SPAWNED: AtomicBool = AtomicBool::new(false);
-
-/// 0 while watching, 1 when CPU 0 ticked during the write, 2 when the
-/// write was done first, 3 when no grid hold came.
-static NL_TICK: AtomicU32 = AtomicU32::new(0);
-
-fn nl_spawner() {
-    let pid = match user::spawn(&Image::Code(S19_NEWLINES, NEWLINES_LAYOUT), &["newlines"]) {
-        Ok(pid) => u64::from(pid),
-        Err(_) => u64::MAX,
-    };
-    NL_PIDS.store(pid, Ordering::Relaxed);
-    NL_SPAWNED.store(true, Ordering::Release);
-}
-
-/// On the second CPU: CPU 0's tick count after the write's first grid
-/// hold, then whether it advances before the program's `getpid` after
-/// the write.
-fn nl_watcher() {
-    let ticks = || cpu_remote(0).map_or(0, |c| c.ticks.load(Ordering::Relaxed));
-    let started = spin_until(
-        || fb_testing::grid_holds() >= 1 && NL_SPAWNED.load(Ordering::Acquire),
-        10_000_000_000,
-    );
-    let t0 = ticks();
-    let Ok(pid) = u32::try_from(NL_PIDS.load(Ordering::Relaxed)) else {
-        NL_TICK.store(3, Ordering::Release);
-        return;
-    };
-    if !started {
-        NL_TICK.store(3, Ordering::Release);
-        return;
-    }
-    // The program calls getpid only after its write returns.
-    let base = proc_testing::getpid_count(pid);
-    let done = || proc_testing::getpid_count(pid) > base;
-    let ticked = spin_until(|| ticks() > t0 || done(), 30_000_000_000);
-    let r = if ticked && ticks() > t0 && !done() {
-        1
-    } else {
-        2
-    };
-    NL_TICK.store(r, Ordering::Release);
-}
-
 /// A 4096-newline console `write` from ring 3 on CPU 0 holds IF=0 only
 /// per chunk and per redraw piece: CPU 0 ticks during it, each hold draws
 /// at most 16 KiB, and each chunk scrolls at most once (ROADMAP §10.6,
-/// F044). A write with IF off leaves its redraw to the next write.
+/// F044). A write with IF off leaves its redraw to the next write. The
+/// tick counts come from inside the write (`proc_testing::console_write_ticks`),
+/// so what the test decides is what happened while the write ran.
 pub(crate) fn test_console_write_newlines() -> Outcome {
-    let Some(other) = crate::ktest::second_cpu() else {
-        return Outcome::Skip("needs 2 CPUs");
-    };
     if !fb_console_on() {
         return Outcome::Fail("no framebuffer console");
     }
-    NL_PIDS.store(u64::MAX, Ordering::Relaxed);
-    NL_SPAWNED.store(false, Ordering::Release);
-    NL_TICK.store(0, Ordering::Release);
     let st = {
         let _serial = SerialOff::new();
         fb_testing::reset();
-        crate::ktest::spawn_thread_on("s19_nl_watch", nl_watcher, other);
-        crate::ktest::spawn_thread_on("s19_nl_spawn", nl_spawner, 0);
-        if !sleep_until_s19(|| NL_SPAWNED.load(Ordering::Acquire), 5_000) {
-            return Outcome::Fail("spawner did not run");
-        }
-        let Ok(pid) = u32::try_from(NL_PIDS.load(Ordering::Relaxed)) else {
-            return Outcome::Fail("spawn");
-        };
-        user::wait(pid)
+        proc_testing::arm_console_write_ticks();
+        // A process's thread stays on the CPU that spawns it: the
+        // registry's, CPU 0.
+        user::run(&Image::Code(S19_NEWLINES, NEWLINES_LAYOUT), &["newlines"])
     };
-    if !sleep_until_s19(|| NL_TICK.load(Ordering::Acquire) != 0, 35_000) {
-        return Outcome::Fail("watcher did not finish");
+    match st {
+        Ok(0) => {}
+        Ok(st) => return crate::fail_fmt!("newline program status {st:#x}, want 0"),
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     }
-    if st != 0 {
-        return crate::fail_fmt!("newline program status {st:#x}, want 0");
+    let Some(((c0, t0), (c1, t1))) = proc_testing::console_write_ticks() else {
+        return Outcome::Fail("the write's ticks were not recorded");
+    };
+    if c0 != c1 {
+        return crate::fail_fmt!("the write moved from cpu{c0} to cpu{c1}");
     }
-    match NL_TICK.load(Ordering::Acquire) {
-        1 => {}
-        3 => return Outcome::Fail("the write took no grid hold"),
-        _ => return Outcome::Fail("no tick during the write"),
+    if t1 <= t0 {
+        return crate::fail_fmt!("no tick during the write: cpu{c0} ticks {t0} -> {t1}");
     }
     let holds = fb_testing::grid_holds();
     if holds < 16 {
