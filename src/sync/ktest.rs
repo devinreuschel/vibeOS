@@ -5,13 +5,16 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::lock::{RANK_BUDDY, RANK_DEVICE, RANK_HEAP, RANK_PT, RANK_SCHED, RANK_SERIAL};
 use vibeos::sync::OpGate;
+use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::Instant;
 
 use crate::arch;
 use crate::ktest::{Outcome, Test, sleep_until, spawn_thread, test};
 use crate::kva_init;
 use crate::per_cpu_init;
-use crate::sync::blocking_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore};
+use crate::sync::blocking_init::{
+    BlockingMutex, Channel, Condvar, RwLock, RwLockReadGuard, Semaphore,
+};
 use crate::sync_init::{self, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
@@ -622,9 +625,10 @@ static RW_WR_OUT: AtomicU32 = AtomicU32::new(0);
 
 static RW_RD_GOT: AtomicU32 = AtomicU32::new(0);
 
+/// Queue for write with no deadline of its own: the test gives it one once
+/// the reader has queued behind it (`testing::set_wait_deadline`).
 fn rw_timeout_writer() {
-    let ns = time_init::now_ns().saturating_add(15_000_000);
-    match RW_TO.write_until(Some(Instant { ns })) {
+    match RW_TO.write_until(None) {
         None => RW_WR_OUT.store(1, Ordering::SeqCst),
         Some(_g) => RW_WR_OUT.store(2, Ordering::SeqCst),
     }
@@ -635,37 +639,82 @@ fn rw_pref_reader() {
     RW_RD_GOT.store(1, Ordering::SeqCst);
 }
 
+/// Wait for thread `id` to block; false when it ran to its end instead or
+/// the run's deadline drew near (`ktest::wait_for`).
+fn blocks(id: ThreadId) -> bool {
+    crate::ktest::wait_for(|| {
+        !matches!(
+            thread_init::try_state(id),
+            Some(ThreadState::Ready | ThreadState::Running | ThreadState::Sleeping { .. })
+        )
+    }) && matches!(
+        thread_init::try_state(id),
+        Some(ThreadState::Blocked { .. })
+    )
+}
+
+/// A queued writer that times out wakes the readers queued behind it
+/// (writer preference would leave them parked). Under a read hold, the
+/// writer queues with no deadline, a reader queues behind it, and only
+/// then does the writer's deadline arrive, so no host delay reorders the
+/// three steps. The writer's timeout path wakes the readers before it
+/// returns, so once the writer is Dead the reader must not be `Blocked`.
 pub(crate) fn test_rwlock_writer_timeout() -> Outcome {
     RW_WR_OUT.store(0, Ordering::SeqCst);
     RW_RD_GOT.store(0, Ordering::SeqCst);
     *RW_TO.write() = 0;
     let r = RW_TO.read();
-    let Ok(_w) = thread_init::spawn("rw-to-w", rw_timeout_writer) else {
-        return Outcome::Fail("spawn");
+    let out = writer_timeout_under(&r);
+    drop(r);
+    out
+}
+
+fn writer_timeout_under(_read: &RwLockReadGuard<'_, u64>) -> Outcome {
+    let w = match thread_init::spawn("rw-to-w", rw_timeout_writer) {
+        Ok(h) => h.id(),
+        Err(_) => return Outcome::Fail("spawn"),
     };
-    thread_init::yield_now();
-    thread_init::sleep_ms(5);
-    let Ok(_rd) = thread_init::spawn("rw-to-r", rw_pref_reader) else {
-        return Outcome::Fail("spawn");
+    if !blocks(w) {
+        return crate::fail_fmt!(
+            "writer did not queue under a read hold (out {})",
+            RW_WR_OUT.load(Ordering::SeqCst)
+        );
+    }
+    let rd = match thread_init::spawn("rw-to-r", rw_pref_reader) {
+        Ok(h) => h.id(),
+        Err(_) => return Outcome::Fail("spawn"),
     };
-    thread_init::yield_now();
-    thread_init::sleep_ms(40);
+    if !blocks(rd) {
+        return crate::fail_fmt!(
+            "reader did not queue behind the writer (got {})",
+            RW_RD_GOT.load(Ordering::SeqCst)
+        );
+    }
+    let now = Instant {
+        ns: time_init::now_ns(),
+    };
+    if !thread_init::testing::set_wait_deadline(w, now) {
+        return Outcome::Fail("writer left its wait before its deadline");
+    }
+    if !crate::ktest::wait_for(|| thread_init::exited(w)) {
+        return Outcome::Fail("writer did not time out");
+    }
     if RW_WR_OUT.load(Ordering::SeqCst) != 1 {
-        drop(r);
-        return Outcome::Fail("writer did not timeout");
+        return Outcome::Fail("writer got the lock under a read hold");
     }
-    let t0 = time_init::uptime_ms();
-    loop {
-        if RW_RD_GOT.load(Ordering::SeqCst) == 1 {
-            drop(r);
-            return Outcome::Ok;
-        }
-        if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
-            drop(r);
-            return Outcome::Fail("reader stranded after writer timeout");
-        }
-        thread_init::yield_now();
+    if matches!(
+        thread_init::try_state(rd),
+        Some(ThreadState::Blocked { .. })
+    ) {
+        return Outcome::Fail("reader stranded after writer timeout");
     }
+    if !crate::ktest::wait_for(|| thread_init::exited(rd)) {
+        return Outcome::Fail("woken reader did not finish");
+    }
+    if RW_RD_GOT.load(Ordering::SeqCst) != 1 {
+        return Outcome::Fail("reader exited without the read lock");
+    }
+    Outcome::Ok
 }
 
 static SEM: Semaphore = Semaphore::new(0);

@@ -222,7 +222,11 @@ interrupt and panics, so the dump shows where the test stood. The opt-in `ktest_
 `make test-kernel`'s expect-fail boot `ktest_deadline_trip` selects it and requires, in order, its
 `run` line, the deadline `FAIL` line, a panic signature and `vibeOS: panic: halted`, and no `ok`
 line (`check_deadline_trip`). A CPU spinning with IF=0 never takes the panic's stop IPI, so that
-boot checks only those lines, not the other CPUs' state.
+boot checks only those lines, not the other CPUs' state. A test that waits for another thread, a
+wake, or an interrupt waits on that event through `ktest::wait_for`, which yields until its
+predicate holds and gives up only 500 ms before the run's deadline, so the test's own failure line
+can name what it waited on; a fixed bound of the test's own, which a loaded host outlasts, is the
+flake class ROADMAP §10.2's flake lines record.
 
 Selection (BOOT.md §3.2). `vibeos.ktest=` (`VIBEOS_KTEST`) takes a comma-separated list of globs,
 `*` matching any run of characters and `?` one; with no item every row not marked opt-in runs. A row

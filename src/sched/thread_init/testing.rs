@@ -391,6 +391,25 @@ pub fn ktest_sweeps() -> u64 {
     SWEEPS.load(Ordering::Acquire)
 }
 
+/// Give `Blocked` thread `id`'s wait the deadline `deadline`, in its state
+/// and its timeout entry, as if its wait had been given it; it times out
+/// there as any wait does. False when `id` is not `Blocked`. A test sets a
+/// waiter's deadline this way once the waiters it orders are all queued,
+/// so a slow host cannot let the deadline pass before they are.
+pub fn set_wait_deadline(id: ThreadId, deadline: vibeos::time::Instant) -> bool {
+    with_sched(|s| {
+        let Some(t) = s.get_mut(id) else {
+            return false;
+        };
+        let ThreadState::Blocked { wq, .. } = t.state else {
+            return false;
+        };
+        t.state = ThreadState::Blocked { wq, deadline };
+        s.timeouts.insert(id, deadline);
+        true
+    })
+}
+
 /// Remove `id`'s timeout entry while it is `Blocked`, as a lost entry
 /// would be, so only the sweep can notice it. False when `id` is not
 /// Blocked or its entry is gone already (its timeout fired).
@@ -445,6 +464,12 @@ pub fn state(id: ThreadId) -> ThreadState {
 
 pub fn try_state(id: ThreadId) -> Option<ThreadState> {
     super::SCHED.lock().get(id).map(|t| t.state)
+}
+
+/// `id`'s state and CPU, read under one SCHED hold; `None` once a spawn has
+/// reused its Dead slot.
+pub fn try_state_cpu(id: ThreadId) -> Option<(ThreadState, u32)> {
+    super::SCHED.lock().get(id).map(|t| (t.state, t.cpu))
 }
 
 /// Whether `id`'s thread has exited: its TCB is Dead, or a spawn has

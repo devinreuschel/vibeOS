@@ -1021,6 +1021,32 @@ pub(crate) fn sleep_until_s19(pred: impl Fn() -> bool, ms: u64) -> bool {
     true
 }
 
+/// How long before the running row's deadline [`wait_for`] gives up, so the
+/// caller's failure line, which names what it waited on, comes before the
+/// tick that fails the run on its deadline ([`on_tick`]).
+const WAIT_MARGIN_MS: u32 = 500;
+
+/// Yield until `pred` holds, with no time bound of the caller's own: the
+/// running row's deadline bounds the wait, however slowly the host runs the
+/// guest (ROADMAP §10.2). True once `pred` holds; false when that deadline
+/// is [`WAIT_MARGIN_MS`] away and `pred` still fails, so the caller can fail
+/// naming what it waited on. With no deadline armed it waits on, and the
+/// harness's run deadline is the backstop.
+pub(crate) fn wait_for(pred: impl Fn() -> bool) -> bool {
+    let margin = Arch::freq_hz().map_or(0, |f| vibeos::ktest::deadline_cycles(WAIT_MARGIN_MS, f));
+    loop {
+        if pred() {
+            return true;
+        }
+        // Acquire: pairs with `arm`'s Release store, as in `on_tick`.
+        let d = DEADLINE.load(Ordering::Acquire);
+        if d != 0 && Arch::now().saturating_add(margin) >= d {
+            return pred();
+        }
+        thread_init::yield_now();
+    }
+}
+
 /// Spin on TSC time until `pred` holds, for at most `ns`.
 pub(crate) fn spin_until(pred: impl Fn() -> bool, ns: u64) -> bool {
     let t0 = time_init::now_ns();
