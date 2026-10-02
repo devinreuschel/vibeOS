@@ -435,3 +435,11 @@ fn name_is_dotdot(n: &[u8]) -> bool {
 )]
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "host tests: a panic fails the test, not the kernel"
+)]
+#[cfg(test)]
+mod image_tests;

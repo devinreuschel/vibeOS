@@ -2,15 +2,15 @@ use super::*;
 use crate::fs::FsError;
 
 /// The image size most tests format: 64 KiB.
-const IMG: usize = 64 * 1024;
+pub(super) const IMG: usize = 64 * 1024;
 
-fn fresh(n: usize) -> Vec<u8> {
+pub(super) fn fresh(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
     mkfs(&mut b, b"TEST").unwrap();
     b
 }
 
-fn with_vol<R>(buf: &mut [u8], f: impl FnOnce(&mut FatVol, &mut MemDisk) -> R) -> R {
+pub(super) fn with_vol<R>(buf: &mut [u8], f: impl FnOnce(&mut FatVol, &mut MemDisk) -> R) -> R {
     let mut disk = MemDisk::new(buf, SEC as u32).unwrap();
     let mut vol = FatVol::mount(&mut disk).unwrap();
     f(&mut vol, &mut disk)
@@ -439,7 +439,7 @@ fn unlink_free(
 }
 
 /// Create `name` in `dir`; the caller-owned words of the new file.
-fn create_words(v: &mut FatVol, d: &mut MemDisk, dir: u32, name: &[u8]) -> FatInode {
+pub(super) fn create_words(v: &mut FatVol, d: &mut MemDisk, dir: u32, name: &[u8]) -> FatInode {
     let n = v.create(d, dir, name, false).unwrap();
     FatInode::of_node(&n)
 }

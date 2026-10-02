@@ -102,6 +102,13 @@ impl FatVol {
             }
             return d.flush();
         }
+        // A chain the image corrupted (a loop, or a link to a free, bad or
+        // reserved cluster) fails here, before the dirent or the FAT
+        // changes: the walks below would free clusters the dirent still
+        // names.
+        if *first >= 2 {
+            self.chain_len(d, *first)?;
+        }
         // Size first while clusters stay allocated. Then drop the cluster
         // pointer (still allocated) so the dirent never names a free cluster.
         if let Some((dir_clu, dir_off)) = dirent {
