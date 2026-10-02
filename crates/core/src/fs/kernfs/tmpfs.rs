@@ -248,14 +248,15 @@ fn tmp_rw_cache(
     src: &[u8],
 ) -> Result<(), FsError> {
     let cache = &mut k.tmp_cache;
+    let scratch = &mut k.tmp_page;
     let back = SliceBack {
         data: RefCell::new(&mut k.tmp_back[..]),
         bits: k.tmp_bits,
     };
     let r = if write {
-        cache::cached_write(cache, &back, TMPFS_DEV, byte_off, src)
+        cache::cached_write(cache, &back, TMPFS_DEV, byte_off, src, scratch)
     } else {
-        cache::cached_read(cache, &back, TMPFS_DEV, byte_off, buf)
+        cache::cached_read(cache, &back, TMPFS_DEV, byte_off, buf, scratch)
     };
     r.map_err(|_| FsError::Io)
 }

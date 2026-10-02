@@ -180,6 +180,10 @@ pub struct KernState {
     free_len: usize,
     tmp_cache: Cache<TMPFS_CACHE_PAGES>,
     tmp_back: [u8; TMPFS_BACK_BYTES],
+    /// The page `tmp_cache`'s reads and writes carry a victim or a fill
+    /// through, here under the store's lock rather than on a syscall's
+    /// kernel stack (`cache::cached_read`).
+    tmp_page: [u8; PAGE],
     tmp_bits: u64,
     /// The clock the last op brought in.
     now: u64,
@@ -201,6 +205,7 @@ impl KernState {
             free_len: 0,
             tmp_cache: Cache::new(),
             tmp_back: [0u8; TMPFS_BACK_BYTES],
+            tmp_page: [0u8; PAGE],
             tmp_bits: 0,
             now: 0,
             next_inst: 0,

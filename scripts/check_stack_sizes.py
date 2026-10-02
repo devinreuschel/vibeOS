@@ -63,12 +63,7 @@ BOUND_BYTES = 7168
 # is over the bound: an entry whose function is gone or back under the
 # bound fails, so the list only shrinks. ROADMAP §10.2's frame-screen box
 # ticks when it is empty (BOOT.md §3.5).
-KNOWN_OVER: dict[str, tuple[int, str]] = {
-    "vibeos::block::cache::cached_read::<vibeos::fs::kernfs::tmpfs::SliceBack, 4>": (
-        8424, "the tmpfs block-cache instance's page buffers on the read path"),
-    "vibeos::block::cache::cached_write::<vibeos::fs::kernfs::tmpfs::SliceBack, 4>": (
-        8360, "the tmpfs block-cache instance's page buffers on the write path"),
-}
+KNOWN_OVER: dict[str, tuple[int, str]] = {}
 
 # Entry points no data or code operand names: the `syscall` instruction's
 # target, set through an MSR.

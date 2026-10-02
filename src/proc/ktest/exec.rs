@@ -701,6 +701,68 @@ user_code!(
     "
 );
 
+// execve("/tmp/xtmp", {"/tmp/xtmp", NULL}, NULL); on return exit(100 - rax).
+user_code!(
+    EXEC_XTMP,
+    "
+    lea rdi, [rip + 2f]
+    push 0
+    push rdi
+    mov rsi, rsp
+    xor edx, edx
+    mov eax, 59
+    syscall
+    neg rax
+    lea rdi, [rax + 100]
+    mov eax, 60
+    syscall
+    ud2
+2:
+    .asciz \"/tmp/xtmp\"
+    "
+);
+
+/// The image [`test_exec_from_tmp`] runs, on kernfs's tmpfs.
+const XTMP: &str = "/tmp/xtmp";
+
+/// An `execve` of an ELF on `/tmp`, whose reads go through tmpfs's block
+/// cache under the kernfs store's lock, stays within a user thread's
+/// 16 KiB stack budget (DESIGN §4.5), and the image runs (exit 99).
+pub(crate) fn test_exec_from_tmp() -> Outcome {
+    if let Err(e) = write_file_4k(XTMP, &user::elf_bytes(&Image::Code(EXIT99, DEFAULT))) {
+        return crate::fail_fmt!("write {XTMP}: {}", e.as_str());
+    }
+    let spawned = user::spawn(&Image::Code(EXEC_XTMP, DEFAULT), &["exec_tmp"]);
+    let tid = spawned
+        .as_ref()
+        .ok()
+        .and_then(|&pid| proc_init::testing::tid_of(pid));
+    let st = spawned.map(user::wait);
+    let unlinked = unlink_quiet(XTMP);
+    let st = match st {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    if st != wait_exited(99) {
+        return crate::fail_fmt!("status {st:#x}, want exited 99");
+    }
+    if let Err(e) = unlinked {
+        return crate::fail_fmt!("unlink {XTMP}: {}", e.as_str());
+    }
+    let Some(tid) = tid else {
+        return Outcome::Fail("no tid");
+    };
+    let Some(used) = crate::sched::ktest::wait_exit_depth(tid) else {
+        return Outcome::Fail("no exit depth within 2 s");
+    };
+    crate::ktest_info!("exec_from_tmp: 16 KiB stack depth {used}");
+    let budget = vibeos::sched::stack_depth::budget(16 * 1024);
+    if used > budget {
+        return crate::fail_fmt!("used {used} bytes of its 16 KiB stack, over the {budget} budget");
+    }
+    Outcome::Ok
+}
+
 /// Bytes of `exec_large_elf_from_file`'s data segment.
 const BIG_DATA: usize = 100_000;
 
