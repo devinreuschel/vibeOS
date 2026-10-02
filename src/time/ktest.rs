@@ -728,11 +728,6 @@ pub(crate) fn test_rtc_offset() -> Outcome {
 
 /// How long CPU 0 holds IF off, in ns of the reference counter.
 const IF_OFF_NS: u64 = 50_000_000;
-/// How long after the window the body waits for two ticks, in ns of the
-/// reference counter.
-const TICK_WAIT_NS: u64 = 20_000_000;
-/// How long the test waits for its body, in ms.
-const IF_OFF_WAIT_MS: u64 = 1_000;
 
 /// 0 while the body runs; then 1, with [`IF_OFF_VALS`] set, or `2 + i` for
 /// failure `i` of [`IF_OFF_ERRS`].
@@ -742,7 +737,7 @@ static IF_OFF_ERRS: [&str; 6] = [
     "no reference counter",
     "no clock read",
     "not on cpu0",
-    "no tick within 20 ms of the window",
+    "two ticks did not follow the window",
     "no clock read bracketed within 20 us",
 ];
 /// A clock read counts when the reference reads on either side of it are
@@ -819,20 +814,11 @@ fn if_off_measure() -> Result<([u64; 4], ClocksourceId), usize> {
         (start, bracketed(&read, &since)?)
     };
     // IF is back on: the tick resumes. A clock that counted ticks lost the
-    // window's here.
+    // window's here. The run's deadline bounds the wait: a loaded host can
+    // hold a tick back for tens of milliseconds (ROADMAP §10.2).
     let t0 = time_init::ticks();
-    loop {
-        // Time first, then the tick count: a tick that preempts this
-        // thread between the two shows in the count, so a stretch off the
-        // CPU cannot read as a missing tick.
-        let late = since(end.2, read()?) > TICK_WAIT_NS;
-        if time_init::ticks() >= t0.saturating_add(2) {
-            break;
-        }
-        if late {
-            return Err(4);
-        }
-        core::hint::spin_loop();
+    if !crate::ktest::wait_for(|| time_init::ticks() >= t0.saturating_add(2)) {
+        return Err(4);
     }
     let after = bracketed(&read, &since)?;
     let vals = [
@@ -878,18 +864,12 @@ pub(crate) fn test_clocksource_if_off_50ms() -> Outcome {
     if thread_init::spawn_opts("clock-ifoff", if_off_body, opts).is_err() {
         return Outcome::Fail("spawn");
     }
-    let start = time_init::now_ns();
-    // Acquire: pairs with the Release store in `if_off_body`.
-    let state = loop {
-        let st = IF_OFF_STATE.load(Ordering::Acquire);
-        if st != 0 {
-            break st;
-        }
-        if time_init::now_ns().saturating_sub(start) > IF_OFF_WAIT_MS.saturating_mul(1_000_000) {
-            return Outcome::Fail("body did not finish within 1 s");
-        }
-        thread_init::sleep_ms(1);
-    };
+    // Acquire: pairs with the Release store in `if_off_body`. The registry
+    // thread sleeps between checks, since the body runs on CPU 0 beside it.
+    if !crate::ktest::sleep_for(|| IF_OFF_STATE.load(Ordering::Acquire) != 0) {
+        return Outcome::Fail("body did not finish");
+    }
+    let state = IF_OFF_STATE.load(Ordering::Acquire);
     if state != 1 {
         let i = state.saturating_sub(2) as usize;
         return Outcome::Fail(IF_OFF_ERRS.get(i).copied().unwrap_or("bad state"));

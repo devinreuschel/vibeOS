@@ -144,14 +144,17 @@ pub(crate) fn test_stop_cont_no_lost_wakeup() -> Outcome {
     STOP_DONE.store(false, Ordering::Release);
     STOP_ERR.store(StopErr::None as u32, Ordering::Release);
     crate::ktest::spawn_thread_on("s19_stop_spawner", stop_spawner, 0);
-    if !sleep_until_s19(|| STOP_SPAWNED.load(Ordering::Acquire), 5_000) {
+    if !crate::ktest::sleep_for(|| STOP_SPAWNED.load(Ordering::Acquire)) {
         return Outcome::Fail("spawner did not run");
     }
     let Ok(pid) = u32::try_from(STOP_PID.load(Ordering::Relaxed)) else {
         return Outcome::Fail("spawn");
     };
     crate::ktest::spawn_thread_on("s19_stop_sender", stop_sender, sender_cpu);
-    let done = sleep_until_s19(|| STOP_DONE.load(Ordering::Acquire), 25_000);
+    // The registry thread sleeps between checks, since the process runs on
+    // CPU 0 beside it, and the run's deadline bounds the wait: on a loaded
+    // host the 10,000 pairs ran past a fixed 25 s (ROADMAP §10.2).
+    let done = crate::ktest::sleep_for(|| STOP_DONE.load(Ordering::Acquire));
     proc_testing::disarm_stop_stall();
     let killed = kill(pid, SIGKILL);
     let st = user::wait(pid);
