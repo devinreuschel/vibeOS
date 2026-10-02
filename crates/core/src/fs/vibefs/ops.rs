@@ -218,8 +218,11 @@ impl Vol {
         if self.inodes[ss].kind == KIND_DIR && self.in_subtree(src_ino, dst_dir)? {
             return Err(Error::Inval);
         }
+        // The destination goes as rename(2) has it: a directory only for
+        // a directory and only when empty (an rmdir's checks), anything
+        // else only for a non-directory (an unlink's).
         if self.find_dent(dst_dir, dst_name).is_ok() {
-            self.unlink(d, dst_dir, dst_name, false)?;
+            self.unlink(d, dst_dir, dst_name, self.inodes[ss].kind == KIND_DIR)?;
         }
         let mut nm = [0u8; MAX_NAME];
         nm[..dst_name.len()].copy_from_slice(dst_name);

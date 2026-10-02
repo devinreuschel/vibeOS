@@ -394,6 +394,19 @@ impl Vfs {
             Some(t) => Some(self.d_islot(t.dslot)?),
             None => None,
         };
+        // rename(2): a directory replaces only a directory, and anything
+        // else only a non-directory; the backend refuses a directory
+        // target that is not empty.
+        if let Some(t) = ti
+            && t != si
+        {
+            let dir = |i: u16| self.inodes[i as usize].kind == InodeKind::Dir;
+            match (dir(si), dir(t)) {
+                (false, true) => return Err(FsError::IsDir),
+                (true, false) => return Err(FsError::NotDir),
+                _ => {}
+            }
+        }
         Ok((si, ti))
     }
 

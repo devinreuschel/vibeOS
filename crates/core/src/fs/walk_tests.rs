@@ -443,3 +443,43 @@ fn open_reserves_file_slot_first() {
     }
     assert!(v.files.iter().all(|f| !f.used && !f.reserved));
 }
+
+/// A rename onto an existing name replaces it, as rename(2) does: a file
+/// replaces a file, whose inode goes once nothing holds it, and a
+/// directory an empty directory; a directory never replaces a file
+/// (`ENOTDIR`), nor a file a directory (`EISDIR`), and a directory with
+/// entries stays (`ENOTEMPTY`); two names of one file stay as they are.
+#[test]
+fn rename_replaces_as_linux() {
+    let mut v = ram();
+    let used = |v: &Vfs| v.inodes.iter().filter(|n| n.used).count();
+    let before = used(&v);
+    put_file(&mut v, None, "/a", b"new");
+    put_file(&mut v, None, "/b", b"old");
+    v.rename(None, "/a", "/b").unwrap();
+    assert_eq!(v.stat(None, "/a").unwrap_err(), FsError::NotFound);
+    assert_eq!(get_file(&mut v, None, "/b"), b"new");
+    assert_eq!(v.stat(None, "/b").unwrap().nlink, 1);
+    v.mkdir(None, "/d", 0o755).unwrap();
+    v.mkdir(None, "/e", 0o755).unwrap();
+    assert_eq!(v.rename(None, "/b", "/d").unwrap_err(), FsError::IsDir);
+    assert_eq!(v.rename(None, "/d", "/b").unwrap_err(), FsError::NotDir);
+    put_file(&mut v, None, "/e/f", b"x");
+    assert_eq!(v.rename(None, "/d", "/e").unwrap_err(), FsError::NotEmpty);
+    v.unlink(None, "/e/f").unwrap();
+    let links = v.stat(None, "/").unwrap().nlink;
+    v.rename(None, "/d", "/e").unwrap();
+    assert_eq!(v.stat(None, "/d").unwrap_err(), FsError::NotFound);
+    assert_eq!(v.stat(None, "/e").unwrap().kind, InodeKind::Dir);
+    // The root lost the replaced directory's `..`.
+    assert_eq!(v.stat(None, "/").unwrap().nlink, links - 1);
+    v.link(None, "/b", "/c").unwrap();
+    v.rename(None, "/b", "/c").unwrap();
+    assert_eq!(v.stat(None, "/b").unwrap().nlink, 2);
+    assert_eq!(v.stat(None, "/c").unwrap().nlink, 2);
+    v.unlink(None, "/b").unwrap();
+    v.unlink(None, "/c").unwrap();
+    v.rmdir(None, "/e").unwrap();
+    assert_eq!(used(&v), before);
+    assert_dcache_sound(&v);
+}

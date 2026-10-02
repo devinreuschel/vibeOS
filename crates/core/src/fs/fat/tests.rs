@@ -727,6 +727,41 @@ fn rename_into_own_subtree_einval() {
     fsck(&b);
 }
 
+/// A directory replaces an empty directory and not one with entries, nor
+/// a file, and a file never replaces a directory (rename(2)).
+#[test]
+fn rename_dir_over_empty_dir() {
+    let mut b = fresh(IMG);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let p = v.create(d, root, b"p", true).unwrap();
+        v.create(d, root, b"q", true).unwrap();
+        let r = v.create(d, root, b"r", true).unwrap();
+        v.create(d, r.clu, b"in", false).unwrap();
+        v.create(d, root, b"f", false).unwrap();
+        for (s, t, e) in [
+            (b"p", b"r", FatError::NotEmpty),
+            (b"p", b"f", FatError::NotDir),
+        ] {
+            assert_eq!(v.rename(d, root, s, root, t).unwrap_err(), e);
+        }
+        assert_eq!(
+            v.rename(d, root, b"f", root, b"q").unwrap_err(),
+            FatError::IsDir
+        );
+        let gone = v
+            .rename(d, root, b"p", root, b"q")
+            .unwrap()
+            .replaced
+            .unwrap();
+        v.free_chain(d, gone.first_clu).unwrap();
+        assert_eq!(v.lookup(d, root, b"q").unwrap().clu, p.clu);
+        assert_eq!(v.lookup(d, root, b"p").unwrap_err(), FatError::NotFound);
+        v.sync(d).unwrap();
+    });
+    fsck(&b);
+}
+
 #[test]
 fn rename_dir_dotdot_names_new_parent() {
     let mut b = fresh(IMG);

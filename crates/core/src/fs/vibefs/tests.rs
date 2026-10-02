@@ -823,6 +823,47 @@ fn rename_dir_into_own_subtree_einval() {
     assert_eq!(r.count(Defect::Unreachable), 0);
 }
 
+/// A rename onto an existing name replaces it as rename(2) does: a
+/// directory replaces an empty directory and not one with entries, nor a
+/// file, and a file never replaces a directory; fsck finds the volume
+/// whole after.
+#[test]
+fn rename_replaces_as_linux() {
+    let mut b = fresh(64 * BLOCK);
+    with_vol(&mut b, |v, d| {
+        for n in [b"p" as &[u8], b"q", b"r"] {
+            v.create(d, ROOT_INO, n, InodeKind::Dir, 0o755, None)
+                .unwrap();
+        }
+        let p = v.lookup(d, ROOT_INO, b"p").unwrap().ino;
+        let r = v.lookup(d, ROOT_INO, b"r").unwrap().ino;
+        new_file(v, d, b"f");
+        new_file(v, d, b"g");
+        v.create(d, r, b"in", InodeKind::Reg, 0o644, None).unwrap();
+        assert_eq!(
+            v.rename(d, ROOT_INO, b"p", ROOT_INO, b"f").unwrap_err(),
+            Error::NotDir
+        );
+        assert_eq!(
+            v.rename(d, ROOT_INO, b"f", ROOT_INO, b"p").unwrap_err(),
+            Error::IsDir
+        );
+        assert_eq!(
+            v.rename(d, ROOT_INO, b"p", ROOT_INO, b"r").unwrap_err(),
+            Error::NotEmpty
+        );
+        v.rename(d, ROOT_INO, b"p", ROOT_INO, b"q").unwrap();
+        assert_eq!(v.lookup(d, ROOT_INO, b"q").unwrap().ino, p);
+        assert_eq!(v.lookup(d, ROOT_INO, b"p").unwrap_err(), Error::NotFound);
+        v.rename(d, ROOT_INO, b"f", ROOT_INO, b"g").unwrap();
+        assert_eq!(v.lookup(d, ROOT_INO, b"f").unwrap_err(), Error::NotFound);
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!(r.errors, 0, "{r:?}");
+    assert_eq!(r.count(Defect::Unreachable), 0);
+}
+
 /// Block `i` of the crafted test data: every byte `i + 1`, the first
 /// eight the block's number.
 fn craft_block(i: u32) -> [u8; BLOCK] {

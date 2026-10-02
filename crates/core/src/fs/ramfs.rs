@@ -656,7 +656,10 @@ fn ram_link(
     Ok(())
 }
 
-/// Move `oname` in directory node `odir` to `nname` in `ndir`.
+/// Move `oname` in directory node `odir` to `nname` in `ndir`. A name
+/// already at `nname` is replaced, as rename(2) replaces it: a directory
+/// only by a directory and only when empty, anything else only by a
+/// non-directory, and a second name of the same file is left as it is.
 fn ram_rename(
     st: &mut RamState,
     inst: u32,
@@ -667,36 +670,55 @@ fn ram_rename(
     nname: &[u8],
 ) -> Result<(), FsError> {
     let nm = Name::from_bytes(nname)?;
-    let (idx, node) = {
-        let r = ram_get(st, inst, odir).ok_or(FsError::NotFound)?;
-        let i = r.dents[..r.ndent as usize]
-            .iter()
-            .position(|d| d.name.eq_bytes(oname))
-            .ok_or(FsError::NotFound)?;
-        (i, r.dents[i].ino)
-    };
+    let node = ram_dent(st, inst, odir, oname)?.ok_or(FsError::NotFound)?;
     let kind = ram_get(st, inst, node).ok_or(FsError::NotFound)?.kind;
     if odir == ndir && oname == nname {
         return Ok(());
     }
-    {
+    let tgt = {
         let r = ram_get(st, inst, ndir).ok_or(FsError::NotFound)?;
         if r.kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
-        if r.dents[..r.ndent as usize]
-            .iter()
-            .any(|d| d.name.eq_bytes(nname))
-        {
-            return Err(FsError::Exists);
+        ram_dent(st, inst, ndir, nname)?
+    };
+    match tgt {
+        Some(t) if t == node => return Ok(()),
+        Some(t) => {
+            let tn = ram_get(st, inst, t).ok_or(FsError::NotFound)?;
+            match (kind == InodeKind::Dir, tn.kind == InodeKind::Dir) {
+                (false, true) => return Err(FsError::IsDir),
+                (true, false) => return Err(FsError::NotDir),
+                (true, true) if tn.ndent != 0 => return Err(FsError::NotEmpty),
+                _ => {}
+            }
         }
-        if odir != ndir && r.ndent as usize >= MAX_DIR_ENTS {
-            return Err(FsError::NoSpace);
+        None => {
+            let r = ram_get(st, inst, ndir).ok_or(FsError::NotFound)?;
+            if odir != ndir && r.ndent as usize >= MAX_DIR_ENTS {
+                return Err(FsError::NoSpace);
+            }
+        }
+    }
+    if let Some(t) = tgt {
+        if let Some(tn) = ram_get_mut(st, inst, t) {
+            tn.nlink = if kind == InodeKind::Dir {
+                0
+            } else {
+                tn.nlink.saturating_sub(1)
+            };
+            tn.ctime = now;
+        }
+        let r = ram_get_mut(st, inst, ndir).ok_or(FsError::NotFound)?;
+        remove_name(r, nname);
+        // A replaced directory's `..` linked `ndir`.
+        if kind == InodeKind::Dir {
+            r.nlink = r.nlink.saturating_sub(1);
         }
     }
     {
         let r = ram_get_mut(st, inst, odir).ok_or(FsError::NotFound)?;
-        remove_dent(r, idx);
+        remove_name(r, oname);
         r.mtime = now;
         if kind == InodeKind::Dir {
             r.nlink = r.nlink.saturating_sub(1);
@@ -714,6 +736,25 @@ fn ram_rename(
         r.nlink = r.nlink.saturating_add(1);
     }
     Ok(())
+}
+
+/// The node `name` names in directory node `dir`, if any.
+fn ram_dent(st: &RamState, inst: u32, dir: u32, name: &[u8]) -> Result<Option<u32>, FsError> {
+    let r = ram_get(st, inst, dir).ok_or(FsError::NotFound)?;
+    Ok(r.dents[..r.ndent as usize]
+        .iter()
+        .find(|d| d.name.eq_bytes(name))
+        .map(|d| d.ino))
+}
+
+/// Drop the entry `name` names in directory `r`, if any.
+fn remove_name(r: &mut RamNode, name: &[u8]) {
+    if let Some(i) = r.dents[..r.ndent as usize]
+        .iter()
+        .position(|d| d.name.eq_bytes(name))
+    {
+        remove_dent(r, i);
+    }
 }
 
 fn ram_readlink(st: &RamState, inst: u32, node: u32, buf: &mut [u8]) -> Result<usize, FsError> {

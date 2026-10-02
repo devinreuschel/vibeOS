@@ -234,8 +234,9 @@ impl FatVol {
     }
 
     /// Move `src_name` in `src_dir` to `dst_name` in `dst_dir`, replacing
-    /// a file there. The caller moves an open file's words to `to` and
-    /// frees `replaced` once nothing holds it.
+    /// a file there, or an empty directory when the source is one. The
+    /// caller moves an open file's words to `to` and frees `replaced` once
+    /// nothing holds it.
     pub fn rename<D: Disk>(
         &mut self,
         d: &mut D,
@@ -263,11 +264,12 @@ impl FatVol {
             // new name is written before the old one goes, so nothing is
             // unlinked.
             Ok(dst) if (dst.dir_clu, dst.dir_off) == from => {}
-            Ok(dst) => {
-                if dst.kind == InodeKind::Dir {
-                    return Err(FatError::IsDir);
-                }
-                replaced = Some(self.unlink(d, dst_dir, dst_name, false)?);
+            // The destination goes as rename(2) has it: a directory only
+            // for a directory and only when empty (an rmdir's checks),
+            // anything else only for a non-directory (an unlink's).
+            Ok(_) => {
+                let dir = src.kind == InodeKind::Dir;
+                replaced = Some(self.unlink(d, dst_dir, dst_name, dir)?);
             }
             Err(FatError::NotFound) => {}
             Err(e) => return Err(e),
