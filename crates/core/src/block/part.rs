@@ -645,45 +645,40 @@ pub fn parse<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     let protective = mbr_sig
         && (0..4)
             .any(|i| mbr_entry(sector_buf, i).is_some_and(|(sys, _, _)| sys == MBR_PROTECTIVE));
-    if nsectors >= 2 {
-        let primary = try_gpt(
-            nsectors,
-            sector_size,
-            &mut read,
-            sector_buf,
-            scratch,
-            1,
-            false,
-        );
-        match primary {
-            Ok(t) => return Ok(t),
-            Err(PartError::Truncated) if !protective => {}
-            Err(_) => {
-                let backup = try_gpt(
-                    nsectors,
-                    sector_size,
-                    &mut read,
-                    sector_buf,
-                    scratch,
-                    nsectors.saturating_sub(1),
-                    true,
-                );
-                if let Ok(t) = backup {
-                    return Ok(t);
-                }
-                if protective {
-                    return Err(PartError::BadCrc);
-                }
-            }
+    // A GPT counts only behind a protective MBR, as Linux reads one
+    // without `gpt` on its command line: GPT headers left on a disk that
+    // was later given a plain MBR name partitions that no longer exist.
+    if !protective {
+        if !mbr_sig {
+            return Err(PartError::Empty);
         }
-    } else if protective {
+        return parse_mbr(nsectors, &mut read, sector_buf);
+    }
+    if nsectors < 2 {
         return Err(PartError::Truncated);
     }
-    read(0, sector_buf).map_err(|_| PartError::Truncated)?;
-    if !mbr_sig {
-        return Err(PartError::Empty);
+    let primary = try_gpt(
+        nsectors,
+        sector_size,
+        &mut read,
+        sector_buf,
+        scratch,
+        1,
+        false,
+    );
+    if let Ok(t) = primary {
+        return Ok(t);
     }
-    parse_mbr(nsectors, &mut read, sector_buf)
+    try_gpt(
+        nsectors,
+        sector_size,
+        &mut read,
+        sector_buf,
+        scratch,
+        nsectors.saturating_sub(1),
+        true,
+    )
+    .map_err(|_| PartError::BadCrc)
 }
 
 /// Host helper: parse a whole-disk image.
@@ -1156,6 +1151,26 @@ mod tests {
             i += 1;
         }
         assert!(!saw_ee);
+    }
+
+    /// GPT headers left on a disk that was later given a plain MBR, with
+    /// no protective entry, name partitions that no longer exist: the MBR
+    /// is the table, as Linux reads it; with no MBR signature at all there
+    /// is none.
+    #[test]
+    fn gpt_without_protective_mbr_is_ignored() {
+        let mut d = gpt_disk(1024, &[(GUID_LINUX, 34, 200, "L")]);
+        let mut mbr = [0u8; 512];
+        pack_mbr(
+            &mut mbr,
+            &[(MBR_LINUX, 300, 100), (0, 0, 0), (0, 0, 0), (0, 0, 0)],
+        );
+        put(&mut d, 0, &mbr);
+        let t = parse_image(&d, 512).unwrap();
+        assert_eq!(t.origin, TableOrigin::Mbr);
+        assert_eq!((t.n, t.parts[0].start_lba), (1, 300));
+        put(&mut d, 0, &[0u8; 512]);
+        assert_eq!(parse_image(&d, 512).unwrap_err(), PartError::Empty);
     }
 
     #[test]
