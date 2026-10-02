@@ -41,10 +41,22 @@ pub const SIGUSR2: u32 = 12;
 pub const SIGPIPE: u32 = 13;
 pub const SIGALRM: u32 = 14;
 pub const SIGTERM: u32 = 15;
+pub const SIGSTKFLT: u32 = 16;
 pub const SIGCHLD: u32 = 17;
 pub const SIGCONT: u32 = 18;
 pub const SIGSTOP: u32 = 19;
 pub const SIGTSTP: u32 = 20;
+pub const SIGTTIN: u32 = 21;
+pub const SIGTTOU: u32 = 22;
+pub const SIGURG: u32 = 23;
+pub const SIGXCPU: u32 = 24;
+pub const SIGXFSZ: u32 = 25;
+pub const SIGVTALRM: u32 = 26;
+pub const SIGPROF: u32 = 27;
+pub const SIGWINCH: u32 = 28;
+pub const SIGIO: u32 = 29;
+pub const SIGPWR: u32 = 30;
+pub const SIGSYS: u32 = 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcState {
@@ -438,12 +450,13 @@ pub enum SigAct {
     Cont,
 }
 
+/// A standard signal's default action, as signal(7) lists it for x86_64;
+/// Core is Term, since no core is written before ROADMAP §13.8.
 pub const fn default_action(sig: u32) -> SigAct {
     match sig {
-        SIGCHLD => SigAct::Ign,
+        SIGCHLD | SIGURG | SIGWINCH => SigAct::Ign,
         SIGCONT => SigAct::Cont,
-        SIGSTOP | SIGTSTP => SigAct::Stop,
-        SIGKILL => SigAct::Term,
+        SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => SigAct::Stop,
         _ => SigAct::Term,
     }
 }
@@ -478,10 +491,22 @@ pub fn sig_name(sig: u32) -> &'static str {
         SIGPIPE => "PIPE",
         SIGALRM => "ALRM",
         SIGTERM => "TERM",
+        SIGSTKFLT => "STKFLT",
         SIGCHLD => "CHLD",
         SIGCONT => "CONT",
         SIGSTOP => "STOP",
         SIGTSTP => "TSTP",
+        SIGTTIN => "TTIN",
+        SIGTTOU => "TTOU",
+        SIGURG => "URG",
+        SIGXCPU => "XCPU",
+        SIGXFSZ => "XFSZ",
+        SIGVTALRM => "VTALRM",
+        SIGPROF => "PROF",
+        SIGWINCH => "WINCH",
+        SIGIO => "IO",
+        SIGPWR => "PWR",
+        SIGSYS => "SYS",
         _ => "?",
     }
 }
@@ -708,6 +733,27 @@ mod tests {
         assert_eq!(Creds::ROOT.uid, 0);
         assert_eq!(INIT_PID, 1);
         assert_eq!(default_action(SIGCONT), SigAct::Cont);
+    }
+
+    /// Every standard signal's default action, as signal(7) lists it for
+    /// x86_64 (Core counted as Term), and a name for each.
+    #[test]
+    fn signal_defaults_match_linux() {
+        let ign = [SIGCHLD, SIGURG, SIGWINCH];
+        let stop = [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU];
+        for sig in 1..=31 {
+            let want = if ign.contains(&sig) {
+                SigAct::Ign
+            } else if stop.contains(&sig) {
+                SigAct::Stop
+            } else if sig == SIGCONT {
+                SigAct::Cont
+            } else {
+                SigAct::Term
+            };
+            assert_eq!(default_action(sig), want, "signal {sig}");
+            assert_ne!(sig_name(sig), "?", "signal {sig}");
+        }
     }
 
     #[test]
