@@ -11,7 +11,9 @@ impl<S: Guarded<KernState>> KernFs<S> {
         class: u8,
         driver: Option<&[u8]>,
     ) -> Result<(), FsError> {
-        self.with(|k| sysfs_add(k, name, vendor, device, class, driver))
+        self.with_room(SYSFS_DEVICE_NODES, |k| {
+            sysfs_add(k, name, vendor, device, class, driver)
+        })
     }
 }
 

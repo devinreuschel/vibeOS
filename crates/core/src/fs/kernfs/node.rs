@@ -23,16 +23,14 @@ pub(super) fn target_bytes(n: &KernNode) -> &[u8] {
     &n.target[..n.target_len as usize]
 }
 
-pub(super) fn kern_idx(ino: u32) -> Option<usize> {
-    if ino == 0 {
-        return None;
-    }
-    let i = (ino - 1) as usize;
-    if i >= MAX_KERN_NODES { None } else { Some(i) }
+/// Node `ino`'s index in the table, or `None` for 0 or past its end.
+pub(super) fn kern_idx(k: &KernState, ino: u32) -> Option<usize> {
+    let i = usize::try_from(ino.checked_sub(1)?).ok()?;
+    if i >= k.nodes.len() { None } else { Some(i) }
 }
 
 pub(super) fn kern_get(k: &KernState, inst: u32, ino: u32) -> Option<&KernNode> {
-    let i = kern_idx(ino)?;
+    let i = kern_idx(k, ino)?;
     let n = &k.nodes[i];
     if n.used && n.inst == inst {
         Some(n)
@@ -42,7 +40,7 @@ pub(super) fn kern_get(k: &KernState, inst: u32, ino: u32) -> Option<&KernNode> 
 }
 
 pub(super) fn kern_get_mut(k: &mut KernState, inst: u32, ino: u32) -> Option<&mut KernNode> {
-    let i = kern_idx(ino)?;
+    let i = kern_idx(k, ino)?;
     let n = &mut k.nodes[i];
     if n.used && n.inst == inst {
         Some(n)
@@ -80,25 +78,67 @@ pub(super) fn kern_info(k: &KernState, inst: u32, ino: u32) -> Result<InodeInfo,
     })
 }
 
+/// Take a node for instance `inst`: the free list's first, else a new one
+/// in the table's spare capacity, which [`KernFs::with_room`] reserved.
+/// Never allocates. `NoSpace` when neither has one, or when the ino would
+/// not fit the `u32` an inode key holds.
 pub(super) fn kern_alloc(k: &mut KernState, inst: u32) -> Result<u32, FsError> {
-    let mut i = 0usize;
-    while i < MAX_KERN_NODES {
-        if !k.nodes[i].used {
-            k.nodes[i] = KernNode::EMPTY;
-            k.nodes[i].used = true;
-            k.nodes[i].inst = inst;
-            return Ok((i as u32) + 1);
+    let (ino, i) = match kern_idx(k, k.free) {
+        Some(i) => {
+            let ino = k.free;
+            k.free = k.nodes[i].next;
+            k.free_len = k.free_len.saturating_sub(1);
+            (ino, i)
         }
-        i += 1;
+        None => {
+            let i = k.nodes.len();
+            if i >= k.nodes.capacity() {
+                return Err(FsError::NoSpace);
+            }
+            let ino = i
+                .checked_add(1)
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or(FsError::NoSpace)?;
+            // Within capacity, checked just above, so this push never
+            // allocates.
+            k.nodes
+                .try_push(KernNode::EMPTY)
+                .map_err(|_| FsError::NoSpace)?;
+            (ino, i)
+        }
+    };
+    k.nodes[i] = KernNode::EMPTY;
+    k.nodes[i].used = true;
+    k.nodes[i].inst = inst;
+    Ok(ino)
+}
+
+/// Return node `i` to the free list, its tmpfs extent freed first. The
+/// table keeps its length: a later [`kern_alloc`] reuses the node.
+pub(super) fn kern_release(k: &mut KernState, i: usize) {
+    let Some(ino) = i.checked_add(1).and_then(|n| u32::try_from(n).ok()) else {
+        return;
+    };
+    let Some(n) = k.nodes.get(i) else {
+        return;
+    };
+    if !n.used {
+        return;
     }
-    Err(FsError::NoSpace)
+    if n.kind == KernKind::File {
+        tmp_free_extent(k, i);
+    }
+    k.nodes[i] = KernNode::EMPTY;
+    k.nodes[i].next = k.free;
+    k.free = ino;
+    k.free_len = k.free_len.saturating_add(1);
 }
 
 pub(super) fn kern_link(k: &mut KernState, parent: u32, child: u32) {
-    let Some(pi) = kern_idx(parent) else {
+    let Some(pi) = kern_idx(k, parent) else {
         return;
     };
-    let Some(ci) = kern_idx(child) else {
+    let Some(ci) = kern_idx(k, child) else {
         return;
     };
     k.nodes[ci].parent = parent;
@@ -107,13 +147,13 @@ pub(super) fn kern_link(k: &mut KernState, parent: u32, child: u32) {
 }
 
 fn kern_unlink_child(k: &mut KernState, parent: u32, child: u32) {
-    let Some(pi) = kern_idx(parent) else {
+    let Some(pi) = kern_idx(k, parent) else {
         return;
     };
     let mut prev: Option<usize> = None;
     let mut cur = k.nodes[pi].child;
     while cur != 0 {
-        let Some(ci) = kern_idx(cur) else {
+        let Some(ci) = kern_idx(k, cur) else {
             break;
         };
         let next = k.nodes[ci].next;
@@ -215,6 +255,7 @@ pub(super) fn kern_mk_lnk(
     let nm = Name::from_bytes(name)?;
     let ino = kern_alloc(k, inst)?;
     let t = now;
+    let mut bad = false;
     if let Some(n) = kern_get_mut(k, inst, ino) {
         n.kind = KernKind::Lnk;
         n.mode = S_IFLNK_MODE;
@@ -224,10 +265,13 @@ pub(super) fn kern_mk_lnk(
         n.mtime = t;
         n.ctime = t;
         n.name = nm;
-        if set_target(&mut n.target, &mut n.target_len, target).is_err() {
-            n.used = false;
-            return Err(FsError::Inval);
+        bad = set_target(&mut n.target, &mut n.target_len, target).is_err();
+    }
+    if bad {
+        if let Some(i) = kern_idx(k, ino) {
+            kern_release(k, i);
         }
+        return Err(FsError::Inval);
     }
     kern_link(k, parent, ino);
     touch_dir(k, inst, parent, t);
@@ -290,12 +334,9 @@ pub(super) fn kern_mk_special(
 
 pub(super) fn kern_drop_sb(k: &mut KernState, inst: u32, is_tmp: bool) {
     let mut i = 0usize;
-    while i < MAX_KERN_NODES {
+    while i < k.nodes.len() {
         if k.nodes[i].used && k.nodes[i].inst == inst {
-            if k.nodes[i].kind == KernKind::File {
-                tmp_free_extent(k, i);
-            }
-            k.nodes[i] = KernNode::EMPTY;
+            kern_release(k, i);
         }
         i += 1;
     }
@@ -308,16 +349,13 @@ pub(super) fn kern_drop_sb(k: &mut KernState, inst: u32, is_tmp: bool) {
 
 /// kernfs `evict`: free a node with no links.
 pub(super) fn kern_try_free(k: &mut KernState, inst: u32, ino: u32) {
-    let Some(i) = kern_idx(ino) else {
+    let Some(i) = kern_idx(k, ino) else {
         return;
     };
     if !k.nodes[i].used || k.nodes[i].inst != inst || k.nodes[i].nlink != 0 {
         return;
     }
-    if k.nodes[i].kind == KernKind::File {
-        tmp_free_extent(k, i);
-    }
-    k.nodes[i] = KernNode::EMPTY;
+    kern_release(k, i);
 }
 
 pub(super) fn kern_lookup(

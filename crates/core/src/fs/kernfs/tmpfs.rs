@@ -157,7 +157,7 @@ fn tmp_pages_for(size: u64) -> usize {
 }
 
 fn tmp_ensure(k: &mut KernState, inst: u32, ino: u32, new_size: u64) -> Result<(), FsError> {
-    let Some(idx) = kern_idx(ino) else {
+    let Some(idx) = kern_idx(k, ino) else {
         return Err(FsError::NotFound);
     };
     if !k.nodes[idx].used || k.nodes[idx].inst != inst {
@@ -315,7 +315,7 @@ pub(super) fn tmp_truncate(
     ino: u32,
     size: u64,
 ) -> Result<(), FsError> {
-    let Some(idx) = kern_idx(ino) else {
+    let Some(idx) = kern_idx(k, ino) else {
         return Err(FsError::NotFound);
     };
     if !k.nodes[idx].used || k.nodes[idx].inst != inst {

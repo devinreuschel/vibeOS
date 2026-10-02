@@ -384,8 +384,116 @@ fn console_write_captured() {
 #[test]
 fn fixed_tables_match_limits() {
     let k = std::boxed::Box::new(KernState::new());
-    assert_eq!(k.nodes.len(), crate::limits::MAX_KERN_NODES);
     assert_eq!(k.skins.len(), crate::limits::MAX_KERN_MOUNTS);
+}
+
+/// Whether `/tmp` has `name`, asked of the store: the host VFS's small
+/// inode table cannot hold hundreds of names at once.
+fn tmp_has(k: &Kfs, name: &str) -> bool {
+    k.fs.with(|s| {
+        let (inst, root) = s.skin(FsType::Tmp).unwrap();
+        kern_find_child(s, inst, root, name.as_bytes()).is_some()
+    })
+}
+
+/// Nodes in use and the table's length and capacity.
+fn node_counts(k: &Kfs) -> (usize, usize, usize) {
+    k.fs.with(|s| {
+        let used = s.nodes.iter().filter(|n| n.used).count();
+        assert_eq!(used + s.free_len, s.nodes.len());
+        (used, s.nodes.len(), s.nodes.capacity())
+    })
+}
+
+#[test]
+fn node_table_starts_empty_and_grows_past_the_old_pool() {
+    let k = std::boxed::Box::new(KernState::new());
+    assert_eq!(k.nodes.capacity(), 0);
+    let (mut v, k) = boot();
+    let (boot_used, _, _) = node_counts(&k);
+    // Under Miri, past the first capacity only; else well past the 128
+    // nodes the table held as a fixed pool.
+    let n = if cfg!(miri) { NODES_FIRST } else { 3 * 128 };
+    for i in 0..n {
+        v.creat(None, &format!("/tmp/f{i}"), 0o644).unwrap();
+    }
+    let (used, len, cap) = node_counts(&k);
+    assert_eq!(used, boot_used + n);
+    assert!(len > NODES_FIRST && cap >= len);
+    assert!(cfg!(miri) || len > 128);
+    // Every name is still linked after the moves, and the other skins'
+    // nodes made before them still work.
+    for i in 0..n {
+        assert!(tmp_has(&k, &format!("f{i}")));
+    }
+    // Unlinked, the names leave the host VFS's small caches room to walk.
+    for i in 0..n {
+        v.unlink(None, &format!("/tmp/f{i}")).unwrap();
+    }
+    assert_eq!(node_counts(&k).1, len);
+    let fid = v.open_path(None, "/dev/zero", O_RDWR, 0).unwrap();
+    let mut b = [1u8; 4];
+    assert_eq!(v.read(&fid, &mut b).unwrap(), 4);
+    assert_eq!(b, [0; 4]);
+    v.close(fid).unwrap();
+    assert!(has_name(&mut v, "/proc/1", b"cmdline"));
+    assert_eq!(v.stat(None, "/sys/bus/pci").unwrap().kind, InodeKind::Dir);
+}
+
+#[test]
+fn node_table_reuses_freed_nodes() {
+    let (mut v, k) = boot();
+    let (made, again, rounds) = if cfg!(miri) {
+        (80, 60, 2)
+    } else {
+        (200, 150, 20)
+    };
+    for i in 0..made {
+        v.creat(None, &format!("/tmp/f{i}"), 0o644).unwrap();
+    }
+    for i in 0..made {
+        v.unlink(None, &format!("/tmp/f{i}")).unwrap();
+    }
+    let (used, len, cap) = node_counts(&k);
+    for round in 0..rounds {
+        for i in 0..again {
+            v.creat(None, &format!("/tmp/r{round}_{i}"), 0o644).unwrap();
+        }
+        for i in 0..again {
+            v.unlink(None, &format!("/tmp/r{round}_{i}")).unwrap();
+        }
+        assert_eq!(node_counts(&k), (used, len, cap));
+    }
+}
+
+#[test]
+fn node_table_grow_failure_is_nomem_and_changes_nothing() {
+    let (mut v, k) = boot();
+    v.creat(None, "/tmp/keep", 0o644).unwrap();
+    // Fill the table to its capacity, so the next node needs a grow.
+    let mut i = 0usize;
+    while k
+        .fs
+        .with(|s| s.free_len + (s.nodes.capacity() - s.nodes.len()))
+        > 0
+    {
+        v.creat(None, &format!("/tmp/f{i}"), 0o644).unwrap();
+        i += 1;
+    }
+    let before = node_counts(&k);
+    crate::kalloc::tests::fail_in(0);
+    let r = k.fs.with_room(1, |s| kern_alloc(s, 1));
+    crate::kalloc::tests::disarm();
+    assert_eq!(r, Err(FsError::NoMem));
+    assert_eq!(node_counts(&k), before);
+    // The tree is whole, and the next create grows the table.
+    assert!(tmp_has(&k, "keep"));
+    for j in 0..i {
+        assert!(tmp_has(&k, &format!("f{j}")));
+    }
+    v.creat(None, "/tmp/after", 0o644).unwrap();
+    assert!(tmp_has(&k, "after"));
+    assert!(node_counts(&k).2 > before.2);
 }
 
 /// Read `n` bytes of `path` at `off`.

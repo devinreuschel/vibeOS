@@ -18,7 +18,7 @@ impl<S: Guarded<KernState>> KernFs<S> {
     pub fn devfs_add_block(&self, dev: &BlockRef) -> Result<u32, FsError> {
         let size = blk_size(dev)?;
         let name = dev.name();
-        self.with(|k| {
+        self.with_room(1, |k| {
             let (inst, root) = k.skin(FsType::Dev).ok_or(FsError::Io)?;
             if let Some(ino) = kern_find_child(k, inst, root, name.as_bytes()) {
                 return Ok(ino);

@@ -59,7 +59,6 @@ use crate::limits;
 pub use crate::limits::MAX_DENTRIES;
 pub use crate::limits::MAX_FDS;
 pub use crate::limits::MAX_INODES;
-pub use crate::limits::MAX_KERN_NODES;
 pub use crate::limits::MAX_MOUNTS;
 pub use crate::limits::MAX_NAME;
 pub use crate::limits::MAX_OPEN_FILES as MAX_FILES;
