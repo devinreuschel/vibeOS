@@ -988,6 +988,17 @@ pub(crate) mod testing {
         })
     }
 
+    /// Processes that can hold an open file: `Live` or `Stopped`, since a
+    /// zombie closed its descriptors before it became one.
+    pub(crate) fn holding_count() -> usize {
+        super::with_table(|t| {
+            t.procs
+                .iter()
+                .filter(|p| matches!(p.state, super::ProcState::Live | super::ProcState::Stopped))
+                .count()
+        })
+    }
+
     /// The fault address of the `#PF` whose kill line yields once; 0 for
     /// none.
     static KILL_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
