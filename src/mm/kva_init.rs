@@ -184,16 +184,36 @@ const _: () = assert!(core::mem::align_of::<Parked>() <= PAGE_SIZE as usize);
 /// itself: the node is written into its lowest mapped page. No thread runs
 /// on `stack` any more, and nothing but the list holds it until
 /// [`free_parked`] takes it back.
+#[cfg(feature = "kernel_tests")]
 pub(crate) fn park_on_list(head: &mut u64, stack: GuardedStack) {
-    let node = stack.base().as_u64();
+    park_slot_on_list(head, &mut Some(stack));
+}
+
+/// [`park_on_list`] for the stack in `slot`, which it leaves empty; nothing
+/// when `slot` is empty. The handle moves from the slot into the node with
+/// one copy, so none of its 520 bytes passes through a frame: the switch
+/// tail parks from `PerCpu.dead_stack` this way (ROADMAP §10.2).
+pub(crate) fn park_slot_on_list(head: &mut u64, slot: &mut Option<GuardedStack>) {
+    let Some(stack) = slot.as_ref() else {
+        return;
+    };
+    let src: *const GuardedStack = stack;
+    let node = stack.base().as_u64() as *mut Parked;
     // SAFETY: invariant I10, established at `thread_init::finish_switch`
-    // (and for the test hook `thread_init::testing::park_on_local_list`, a
-    // stack no thread was given): no CPU runs on `stack`, its lowest page is
-    // mapped writable (`kva_init::alloc_guarded_stack`), page-aligned and
-    // one page holds a node (the const assertions above), and this handle
-    // alone names the range, so nothing else reads or writes the node.
-    unsafe { core::ptr::write(node as *mut Parked, Parked { next: *head, stack }) };
-    *head = node;
+    // (and for the test hooks in `thread_init::testing`, a stack no thread
+    // was given): no CPU runs on the slot's stack, its lowest page is mapped
+    // writable (`kva_init::alloc_guarded_stack`), page-aligned and one page
+    // holds a node (the const assertions above), and the slot's handle alone
+    // names the range, so nothing else reads or writes the node. The copy
+    // moves the handle into the node bit for bit, and the write of `None`
+    // over the slot forgets the slot's copy without dropping it, so one
+    // handle names the range again; established here.
+    unsafe {
+        core::ptr::addr_of_mut!((*node).next).write(*head);
+        core::ptr::copy_nonoverlapping(src, core::ptr::addr_of_mut!((*node).stack), 1);
+        core::ptr::write(slot, None);
+    }
+    *head = node as u64;
 }
 
 /// Free every stack on the dead list `head`, which the caller took whole

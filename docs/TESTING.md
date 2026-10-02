@@ -375,9 +375,15 @@ cache. Its worker, started with `spawn_on`'s 16 KiB stack on a CPU that has a vi
 vector (`virtio_blk_init::queue_vector`), mounts `vda` through the File API, writes 64 KiB at offset
 100 and reads it back, and unmounts; while it writes, `fs::ktest::on_cache_write`, which `fat_init`'s
 `Io::write` calls before each block-cache write, sends that CPU a self-IPI on the vector whenever IF
-is on, so the virtio-blk top half lands on the write path. The test requires at least 64 self-IPIs
-and no send error, at least as many new top-half runs, and the worker's exit depth within budget;
-the boot requires its `ok` line and the stack check as every boot does.
+is on, so the virtio-blk top half lands on the write path. Before the worker runs, the test
+measures the deepest top half (`top_half_room`): a probe thread on a CPU other than the registry's
+spins 4 KiB down its stack with IF on while a sibling spinner makes each tick switch and the
+registry sends that CPU the virtio-blk vector and a call-function IPI each millisecond, and its
+depth less the same probe's depth with IF off is the room an interrupt takes. The test requires at
+least 64 self-IPIs and no send error, at least as many new top-half runs, and the worker's exit
+depth plus that room within budget, so an interrupt that lands at the worker's deepest point fits
+however rarely a run catches one there (ROADMAP §10.2); the boot requires its `ok` line and the
+stack check as every boot does.
 Then the two virtio-blk failure boots (ROADMAP §10.11, F046), each through `_single_test_boot`
 with its own device tuple, whose `vda` is a 4 MiB pattern image (`harness.make_pattern_disk`, every
 byte of sector n `(n & 0xFF) ^ 0xA5`, so no GPT is stamped and no partition marker is required):

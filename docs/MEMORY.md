@@ -706,8 +706,12 @@ is the second.
   stack goes into the CPU's stack cache of at most two (`per_cpu::StackCache`, Linux's
   `NR_CACHED_STACKS`), which the next spawn on that CPU reuses zeroed and still mapped; any other
   stack goes on the CPU's dead list, linked through the dead stacks themselves
-  (`kva_init::park_on_list`), and that CPU's workqueue worker unmaps and frees it with IF=1
-  (`kva_init::free_parked`). The worker frees the list in batches of up to 16 stacks and 64 pages:
+  (`kva_init::park_slot_on_list`), and that CPU's workqueue worker unmaps and frees it with IF=1
+  (`kva_init::free_parked`). The tail moves the 520-byte handle from the slot into the cache or
+  the list in place (`StackCache::put_from`), out of line (`thread_init::retire_dead_stack`), so
+  no copy of it sits in the tail's own frame, which is under every blocked thread's deepest frames
+  and every preempting tick's (ROADMAP §10.2). The worker frees the list in batches of up to 16
+  stacks and 64 pages:
   it unmaps each stack of a batch, sends one shootdown round for all of them (§7.9), then frees their
   frames and VA. A round waits for every other CPU's ack while an exit sends none, so with a round per
   page a burst of exits outran the worker, and the dead stacks, their frames, and the fresh KVA and

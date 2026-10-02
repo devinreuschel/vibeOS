@@ -706,26 +706,7 @@ pub(crate) fn finish_switch() {
     testing::scan_dead_slot();
     let (prev, kick) = per_cpu_init::with_current(|cpu| {
         let prev = core::mem::replace(&mut cpu.tail_prev, core::ptr::null_mut());
-        let Some(stack) = cpu.dead_stack.take() else {
-            return (prev, false);
-        };
-        let pages = stack.pages();
-        let refused = if pages == DEFAULT_STACK_PAGES {
-            cpu.stack_cache.put(stack).err()
-        } else {
-            Some(stack)
-        };
-        match refused {
-            None => {
-                CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
-                STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-                (prev, false)
-            }
-            Some(stack) => {
-                kva_init::park_on_list(&mut cpu.dead_list, stack);
-                (prev, true)
-            }
-        }
+        (prev, cpu.dead_stack.is_some() && retire_dead_stack(cpu))
     });
     if kick {
         kick_dead_stacks();
@@ -767,6 +748,27 @@ fn reclaim_dead_stacks_here() -> bool {
 /// The worker has freed `n` stacks it took with [`take_dead_stacks`].
 pub(crate) fn stacks_reclaimed(n: usize) {
     STACKS_IN_FLIGHT.fetch_sub(n, Ordering::AcqRel);
+}
+
+/// The switch tail's work on `cpu`'s dead-stack slot, which holds a stack:
+/// move it into `cpu`'s stack cache, or onto its dead list when the cache
+/// refuses it; true for the dead list, whose worker the caller wakes. Out
+/// of line, and moved slot to slot: a `GuardedStack` is 520 bytes, and the
+/// copies of one that `finish_switch` once held in its own frame sat at the
+/// bottom of every thread that blocks, under its deepest frames, and under
+/// every preempting interrupt (ROADMAP §10.2).
+#[inline(never)]
+fn retire_dead_stack(cpu: &mut PerCpu) -> bool {
+    let Some(pages) = cpu.dead_stack.as_ref().map(GuardedStack::pages) else {
+        return false;
+    };
+    if pages == DEFAULT_STACK_PAGES && cpu.stack_cache.put_from(&mut cpu.dead_stack) {
+        CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
+        STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        return false;
+    }
+    kva_init::park_slot_on_list(&mut cpu.dead_list, &mut cpu.dead_stack);
+    true
 }
 
 /// Frames the stack caches of every CPU hold.

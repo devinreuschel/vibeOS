@@ -51,6 +51,24 @@ impl StackCache {
         }
     }
 
+    /// Move the stack in `src` into a free slot and leave `src` empty:
+    /// true, or false with `src` untouched when the cache is full or `src`
+    /// is empty. The handle moves slot to slot (`mem::swap`), so no copy of
+    /// its 520 bytes passes through the caller's frame, which on the switch
+    /// tail sits under every blocked thread's stack (ROADMAP §10.2).
+    pub fn put_from(&mut self, src: &mut Option<GuardedStack>) -> bool {
+        if src.is_none() {
+            return false;
+        }
+        match self.slots.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => {
+                core::mem::swap(slot, src);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The stack put last, if any.
     pub fn take(&mut self) -> Option<GuardedStack> {
         self.slots.iter_mut().rev().find_map(Option::take)
@@ -382,6 +400,30 @@ mod tests {
         assert!(c.put(fake_stack(0x4000)).is_ok());
         assert_eq!(c.len(), 1);
         assert_eq!(StackCache::default().len(), 0);
+    }
+
+    #[test]
+    fn stack_cache_put_from_moves_the_slot() {
+        let mut c = StackCache::new();
+        let mut none: Option<GuardedStack> = None;
+        assert!(!c.put_from(&mut none));
+        assert!(c.is_empty());
+        let mut a = Some(fake_stack(0x1000));
+        assert!(c.put_from(&mut a));
+        assert!(a.is_none());
+        let mut b = Some(fake_stack(0x2000));
+        assert!(c.put_from(&mut b));
+        assert!(b.is_none());
+        assert!(c.is_full());
+        let mut full = Some(fake_stack(0x3000));
+        assert!(!c.put_from(&mut full));
+        assert_eq!(full.as_ref().map(|s| s.guard().as_u64()), Some(0x3000));
+        assert_eq!(c.take().map(|s| s.guard().as_u64()), Some(0x2000));
+        assert!(c.put_from(&mut full));
+        assert!(full.is_none());
+        assert_eq!(c.take().map(|s| s.guard().as_u64()), Some(0x3000));
+        assert_eq!(c.take().map(|s| s.guard().as_u64()), Some(0x1000));
+        assert!(c.is_empty());
     }
 
     #[test]
