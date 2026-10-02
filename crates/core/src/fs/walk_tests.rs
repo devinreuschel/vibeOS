@@ -677,3 +677,44 @@ fn dotdot_climbs_stacked_mounts() {
     v.umount(None, "/m").unwrap();
     assert_dcache_sound(&v);
 }
+
+/// A scan that unlinks each entry `readdir` gives it meets every entry
+/// once, on ramfs and on tmpfs: a removed entry moves no other entry
+/// behind the scan's cookie.
+#[test]
+fn readdir_unlinking_each_entry_meets_all() {
+    use crate::fs::kernfs::{KernFs, KernSkin, KernState};
+    let vfs = locked_vfs();
+    let api = FileApi::new(vfs);
+    let kfs: &'static KernFs<std::sync::Mutex<KernState>> = std::boxed::Box::leak(
+        std::boxed::Box::new(KernFs::new(std::sync::Mutex::new(KernState::new()))),
+    );
+    let tmp: &'static KernSkin<std::sync::Mutex<KernState>> =
+        std::boxed::Box::leak(std::boxed::Box::new(KernSkin::new(kfs, FsType::Tmp)));
+    api.mkdir(None, b"/tmp", 0o755).unwrap();
+    api.mount_fs(None, b"/tmp", tmp, None, false, None).unwrap();
+    for dir in ["/d", "/tmp/d"] {
+        api.mkdir(None, dir.as_bytes(), 0o755).unwrap();
+        for i in 0..10 {
+            make(vfs, format!("{dir}/f{i}").as_bytes());
+        }
+        let flags = OpenFlags::from_bits(O_RDONLY | O_DIRECTORY);
+        let f = api.open(None, dir.as_bytes(), flags, 0).unwrap();
+        let mut seen = Vec::new();
+        api.readdir(&f, &mut |d| {
+            let n = d.name.as_bytes().to_vec();
+            if n != b"." && n != b".." {
+                let p = format!("{dir}/{}", core::str::from_utf8(&n).unwrap());
+                api.unlink(None, p.as_bytes()).unwrap();
+                seen.push(n);
+            }
+            true
+        })
+        .unwrap();
+        api.close(f).unwrap();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 10, "{dir}: {seen:?}");
+        api.rmdir(None, dir.as_bytes()).unwrap();
+    }
+}

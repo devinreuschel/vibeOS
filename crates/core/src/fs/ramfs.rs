@@ -55,6 +55,29 @@ impl RamNode {
         ndent: 0,
     };
 
+    /// Entries in use. A removed entry leaves its slot empty (`ino` 0)
+    /// rather than moving another into it, so every entry keeps its slot,
+    /// which is its `readdir` cookie: a scan that unlinks what it reads
+    /// still meets each other entry once, as POSIX asks.
+    fn live(&self) -> usize {
+        self.dents[..self.ndent as usize]
+            .iter()
+            .filter(|d| d.ino != 0)
+            .count()
+    }
+
+    /// Put `d` in the first empty slot, or after the last; `NoSpace` when
+    /// every slot is in use.
+    fn insert(&mut self, d: RamDent) -> Result<(), FsError> {
+        let n = self.ndent as usize;
+        let i = self.dents[..n].iter().position(|e| e.ino == 0).unwrap_or(n);
+        *self.dents.get_mut(i).ok_or(FsError::NoSpace)? = d;
+        if i == n {
+            self.ndent += 1;
+        }
+        Ok(())
+    }
+
     /// Copy this node's metadata into the call's copy `ino`, but its size
     /// into the inode slot's words, in the store's section: the VFS merges
     /// each copy after its call, in either order when two calls overlap,
@@ -395,7 +418,7 @@ fn ram_dir_room(st: &RamState, inst: u32, dir: u32, name: &[u8]) -> Result<(), F
     {
         return Err(FsError::Exists);
     }
-    if r.ndent as usize >= MAX_DIR_ENTS {
+    if r.live() >= MAX_DIR_ENTS {
         return Err(FsError::NoSpace);
     }
     Ok(())
@@ -445,12 +468,10 @@ fn ram_create(
         r.info(node)
     };
     let r = ram_get_mut(st, inst, dir_node).ok_or(FsError::NotFound)?;
-    let n = r.ndent as usize;
-    r.dents[n] = RamDent {
+    r.insert(RamDent {
         name: nm,
         ino: node,
-    };
-    r.ndent += 1;
+    })?;
     r.mtime = now;
     r.ctime = now;
     if kind == InodeKind::Dir {
@@ -505,14 +526,15 @@ fn ram_unlink(
     Ok(())
 }
 
-/// Drop entry `idx` of directory `r`, moving its last entry into the gap.
+/// Drop entry `idx` of directory `r`, leaving its slot empty
+/// ([`RamNode::live`]); empty slots at the end go.
 fn remove_dent(r: &mut RamNode, idx: usize) {
-    let Some(last) = (r.ndent as usize).checked_sub(1) else {
-        return;
-    };
-    r.dents[idx] = r.dents[last];
-    r.dents[last] = RamDent::EMPTY;
-    r.ndent -= 1;
+    if let Some(d) = r.dents.get_mut(idx) {
+        *d = RamDent::EMPTY;
+    }
+    while r.ndent > 0 && r.dents[r.ndent as usize - 1].ino == 0 {
+        r.ndent -= 1;
+    }
 }
 
 fn ram_read(
@@ -611,9 +633,13 @@ fn ram_readdir(
     if r.kind != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
-    let Some(d) = usize::try_from(cookie)
-        .ok()
-        .and_then(|i| r.dents[..r.ndent as usize].get(i))
+    // The cookie is the next slot to look at; empty slots are skipped.
+    let from = usize::try_from(cookie).unwrap_or(usize::MAX);
+    let Some((i, d)) = r.dents[..r.ndent as usize]
+        .iter()
+        .enumerate()
+        .skip(from)
+        .find(|(_, d)| d.ino != 0)
     else {
         return Ok(None);
     };
@@ -622,7 +648,7 @@ fn ram_readdir(
         .map(|c| c.kind)
         .unwrap_or(InodeKind::Reg);
     out.name = d.name;
-    Ok(Some(cookie + 1))
+    Ok(Some(i as u64 + 1))
 }
 
 /// Link `name` in directory node `dir` to node `target`.
@@ -641,12 +667,10 @@ fn ram_link(
     }
     ram_dir_room(st, inst, dir, name)?;
     let r = ram_get_mut(st, inst, dir).ok_or(FsError::NotFound)?;
-    let n = r.ndent as usize;
-    r.dents[n] = RamDent {
+    r.insert(RamDent {
         name: nm,
         ino: target,
-    };
-    r.ndent += 1;
+    })?;
     r.mtime = now;
     r.ctime = now;
     if let Some(t) = ram_get_mut(st, inst, target) {
@@ -695,7 +719,7 @@ fn ram_rename(
         }
         None => {
             let r = ram_get(st, inst, ndir).ok_or(FsError::NotFound)?;
-            if odir != ndir && r.ndent as usize >= MAX_DIR_ENTS {
+            if odir != ndir && r.live() >= MAX_DIR_ENTS {
                 return Err(FsError::NoSpace);
             }
         }
@@ -725,12 +749,10 @@ fn ram_rename(
         }
     }
     let r = ram_get_mut(st, inst, ndir).ok_or(FsError::NotFound)?;
-    let n = r.ndent as usize;
-    r.dents[n] = RamDent {
+    r.insert(RamDent {
         name: nm,
         ino: node,
-    };
-    r.ndent += 1;
+    })?;
     r.mtime = now;
     if kind == InodeKind::Dir {
         r.nlink = r.nlink.saturating_add(1);

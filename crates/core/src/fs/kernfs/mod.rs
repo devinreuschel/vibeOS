@@ -113,6 +113,12 @@ struct KernNode {
     parent: u32,
     next: u32,
     child: u32,
+    /// This node's place in its parent's listing, its `readdir` cookie,
+    /// fixed while it stays there.
+    off: u32,
+    /// The place a directory gives its next child; places only grow, so a
+    /// removal moves no other child across a scan's cookie.
+    next_off: u32,
     kind: KernKind,
     mode: u16,
     nlink: u32,
@@ -136,6 +142,8 @@ impl KernNode {
         parent: 0,
         next: 0,
         child: 0,
+        off: 0,
+        next_off: 0,
         kind: KernKind::Dir,
         mode: 0,
         nlink: 0,

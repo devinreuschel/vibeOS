@@ -161,6 +161,8 @@ pub(super) fn kern_link(k: &mut KernState, parent: u32, child: u32) {
         return;
     };
     k.nodes[ci].parent = parent;
+    k.nodes[ci].off = k.nodes[pi].next_off;
+    k.nodes[pi].next_off = k.nodes[pi].next_off.saturating_add(1);
     k.nodes[ci].next = k.nodes[pi].child;
     k.nodes[pi].child = child;
 }
@@ -611,21 +613,27 @@ pub(super) fn kern_readdir(
     if n.kind.inode_kind() != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
+    // The child with the lowest place at or after the cookie: places are
+    // fixed and only grow (`KernNode::off`), so a child added or removed
+    // during a scan moves no other one across it, as Linux's tmpfs
+    // offsets keep a scan.
+    let mut best: Option<(u32, u32)> = None;
     let mut cur = n.child;
-    let mut i = 0u64;
     while cur != 0 {
-        if i == cookie {
-            let c = kern_get(k, inst, cur).ok_or(FsError::NotFound)?;
-            out.ino = cur;
-            out.kind = c.kind.inode_kind();
-            out.name = c.name;
-            return Ok(Some(cookie + 1));
+        let c = kern_get(k, inst, cur).ok_or(FsError::NotFound)?;
+        if u64::from(c.off) >= cookie && best.is_none_or(|(o, _)| c.off < o) {
+            best = Some((c.off, cur));
         }
-        let next = kern_get(k, inst, cur).ok_or(FsError::NotFound)?.next;
-        cur = next;
-        i += 1;
+        cur = c.next;
     }
-    Ok(None)
+    let Some((off, ino)) = best else {
+        return Ok(None);
+    };
+    let c = kern_get(k, inst, ino).ok_or(FsError::NotFound)?;
+    out.ino = ino;
+    out.kind = c.kind.inode_kind();
+    out.name = c.name;
+    Ok(Some(u64::from(off) + 1))
 }
 
 pub(super) fn kern_readlink(
