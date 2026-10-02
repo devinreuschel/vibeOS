@@ -1070,12 +1070,19 @@ pub(crate) fn sleep_for(pred: impl Fn() -> bool) -> bool {
 /// Whether the running row's deadline is [`WAIT_MARGIN_MS`] away or closer;
 /// `None` when no deadline is armed.
 fn deadline_near() -> Option<bool> {
+    deadline_within(WAIT_MARGIN_MS)
+}
+
+/// Whether the running row's deadline is `ms` away or closer; `None` when
+/// no deadline is armed. A loop of repeated work stops starting rounds by
+/// it, so the run's deadline, not a count, bounds it on a slow host.
+pub(crate) fn deadline_within(ms: u32) -> Option<bool> {
     // Acquire: pairs with `arm`'s Release store, as in `on_tick`.
     let d = DEADLINE.load(Ordering::Acquire);
     if d == 0 {
         return None;
     }
-    let margin = Arch::freq_hz().map_or(0, |f| vibeos::ktest::deadline_cycles(WAIT_MARGIN_MS, f));
+    let margin = Arch::freq_hz().map_or(0, |f| vibeos::ktest::deadline_cycles(ms, f));
     Some(Arch::now().saturating_add(margin) >= d)
 }
 

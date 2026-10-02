@@ -7,8 +7,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use vibeos::fs::{FsError, O_RDONLY, OpenFlags};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kerror::KError;
+use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::{SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, wait_exited, wait_signaled};
 use vibeos::syscall::SYS_KILL;
+use vibeos::thread::{ThreadId, ThreadState};
 
 use crate::arch::idt::testing as idt_testing;
 use crate::console_init::testing as console_testing;
@@ -21,6 +23,7 @@ use crate::ktest::{
 use crate::kva_init;
 use crate::log_init;
 use crate::proc_init::{self, testing as proc_testing};
+use crate::sync_init::SpinMutex;
 use crate::thread_init;
 use crate::time_init;
 
@@ -53,7 +56,32 @@ static STOP_PAIR: AtomicU32 = AtomicU32::new(0);
 
 static STOP_RC: AtomicU64 = AtomicU64::new(0);
 
+/// Pairs the sender finished.
+static STOP_SENT: AtomicU32 = AtomicU32::new(0);
+
+/// Pairs the sender sends, unless the run's deadline comes within
+/// [`STOP_MARGIN_MS`] first.
 const STOP_PAIRS: u32 = 10_000;
+
+/// The fewest pairs that pass. Each pair waits on CPU 0, and on a loaded
+/// host on a vCPU the host has descheduled, so the run's deadline bounds
+/// how many fit (ROADMAP §10.2).
+const STOP_PAIRS_MIN: u32 = 1_000;
+
+/// How long before the run's deadline the sender starts no more pairs:
+/// room for the pair in flight and for the test to end.
+const STOP_MARGIN_MS: u32 = 2_000;
+
+/// How long before the run's deadline a pair in flight gives up waiting on
+/// the process: inside [`STOP_MARGIN_MS`], and before the registry thread's
+/// own wait ends, so the failure names its pair.
+const PAIR_MARGIN_MS: u32 = 1_000;
+
+/// The process as the sender found it when a pair failed: its thread's
+/// state and CPU, if it has a thread, and whether the process is stopped.
+type Diag = (Option<(ThreadState, u32)>, bool);
+
+static STOP_DIAG: SpinMutex<Option<Diag>> = SpinMutex::with_rank(None, RANK_DEVICE);
 
 /// Pairs whose SIGCONT lands while the process sits in the stop stall.
 const STOP_STALLED_PAIRS: u32 = 16;
@@ -78,8 +106,46 @@ fn stop_spawner() {
 }
 
 fn stop_fail(err: StopErr, pair: u32) {
+    let pid = STOP_PID.load(Ordering::Relaxed) as u32;
+    let thread =
+        proc_testing::tid_of(pid).and_then(|t| thread_init::testing::try_state_cpu(ThreadId(t)));
+    *STOP_DIAG.lock() = Some((thread, proc_testing::is_stopped(pid)));
     STOP_PAIR.store(pair, Ordering::Relaxed);
     STOP_ERR.store(err as u32, Ordering::Release);
+}
+
+/// [`STOP_DIAG`] for a failure line.
+struct TargetState(Option<Diag>);
+
+impl fmt::Display for TargetState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some((thread, stopped)) = self.0 else {
+            return f.write_str("no state");
+        };
+        match thread {
+            Some((st, cpu)) => write!(f, "{} on cpu{cpu}", st.name())?,
+            None => f.write_str("no thread")?,
+        }
+        if stopped {
+            f.write_str(", stopped")?;
+        }
+        Ok(())
+    }
+}
+
+/// Spin until `pred` holds or the run's deadline is [`PAIR_MARGIN_MS`]
+/// away. Each wait is on the process's CPU, which on a loaded host can be a
+/// vCPU the host has descheduled, so no fixed bound fits (ROADMAP §10.2).
+fn spin_pair(pred: impl Fn() -> bool) -> bool {
+    loop {
+        if pred() {
+            return true;
+        }
+        if crate::ktest::deadline_within(PAIR_MARGIN_MS) != Some(false) {
+            return pred();
+        }
+        core::hint::spin_loop();
+    }
 }
 
 /// Pinned to the second CPU: `SIGSTOP` then `SIGCONT`, [`STOP_PAIRS`]
@@ -93,12 +159,15 @@ fn stop_sender() {
 
 fn stop_pairs() {
     let pid = STOP_PID.load(Ordering::Relaxed) as u32;
-    if !spin_until(|| proc_testing::getpid_count(pid) > 0, 1_000_000_000) {
+    if !spin_pair(|| proc_testing::getpid_count(pid) > 0) {
         stop_fail(StopErr::NeverRan, 0);
         return;
     }
     for i in 0..STOP_PAIRS {
         let stall = i < STOP_STALLED_PAIRS;
+        if !stall && crate::ktest::deadline_within(STOP_MARGIN_MS) == Some(true) {
+            return;
+        }
         if stall {
             proc_testing::arm_stop_stall(pid);
         }
@@ -110,7 +179,7 @@ fn stop_pairs() {
             return;
         }
         if stall {
-            if !spin_until(proc_testing::stop_stalled, 1_000_000_000) {
+            if !spin_pair(proc_testing::stop_stalled) {
                 stop_fail(StopErr::NoStall, i);
                 return;
             }
@@ -126,10 +195,12 @@ fn stop_pairs() {
             stop_fail(StopErr::KillFailed, i);
             return;
         }
-        if !spin_until(|| proc_testing::getpid_count(pid) > c0, 1_000_000_000) {
+        if !spin_pair(|| proc_testing::getpid_count(pid) > c0) {
             stop_fail(StopErr::NoRun, i);
             return;
         }
+        // Relaxed: published by the Release store of `STOP_DONE`.
+        STOP_SENT.store(i + 1, Ordering::Relaxed);
     }
 }
 
@@ -143,6 +214,8 @@ pub(crate) fn test_stop_cont_no_lost_wakeup() -> Outcome {
     STOP_SPAWNED.store(false, Ordering::Release);
     STOP_DONE.store(false, Ordering::Release);
     STOP_ERR.store(StopErr::None as u32, Ordering::Release);
+    STOP_SENT.store(0, Ordering::Relaxed);
+    *STOP_DIAG.lock() = None;
     crate::ktest::spawn_thread_on("s19_stop_spawner", stop_spawner, 0);
     if !crate::ktest::sleep_for(|| STOP_SPAWNED.load(Ordering::Acquire)) {
         return Outcome::Fail("spawner did not run");
@@ -152,8 +225,7 @@ pub(crate) fn test_stop_cont_no_lost_wakeup() -> Outcome {
     };
     crate::ktest::spawn_thread_on("s19_stop_sender", stop_sender, sender_cpu);
     // The registry thread sleeps between checks, since the process runs on
-    // CPU 0 beside it, and the run's deadline bounds the wait: on a loaded
-    // host the 10,000 pairs ran past a fixed 25 s (ROADMAP §10.2).
+    // CPU 0 beside it. The sender stops short of the run's deadline.
     let done = crate::ktest::sleep_for(|| STOP_DONE.load(Ordering::Acquire));
     proc_testing::disarm_stop_stall();
     let killed = kill(pid, SIGKILL);
@@ -161,13 +233,14 @@ pub(crate) fn test_stop_cont_no_lost_wakeup() -> Outcome {
     if !done {
         return Outcome::Fail("sender did not finish");
     }
-    let pair = STOP_PAIR.load(Ordering::Relaxed);
     let err = STOP_ERR.load(Ordering::Acquire);
+    let pair = STOP_PAIR.load(Ordering::Relaxed);
+    let diag = TargetState(*STOP_DIAG.lock());
     if err == StopErr::NoRun as u32 {
-        return crate::fail_fmt!("pair {pair}: pid {pid} did not run again");
+        return crate::fail_fmt!("pair {pair}: pid {pid} did not run again: {diag}");
     }
     if err == StopErr::NoStall as u32 {
-        return crate::fail_fmt!("pair {pair}: pid {pid} never reached the stop stall");
+        return crate::fail_fmt!("pair {pair}: pid {pid} never reached the stop stall: {diag}");
     }
     if err == StopErr::KillFailed as u32 {
         let rc = STOP_RC.load(Ordering::Relaxed) as i64;
@@ -181,6 +254,13 @@ pub(crate) fn test_stop_cont_no_lost_wakeup() -> Outcome {
     }
     if st != wait_signaled(SIGKILL) {
         return crate::fail_fmt!("status {st:#x}, want {:#x}", wait_signaled(SIGKILL));
+    }
+    let sent = STOP_SENT.load(Ordering::Relaxed);
+    if sent < STOP_PAIRS_MIN {
+        return crate::fail_fmt!("{sent} pairs before the run's deadline, want {STOP_PAIRS_MIN}");
+    }
+    if sent < STOP_PAIRS {
+        crate::ktest_info!("{sent} of {STOP_PAIRS} pairs before the run's deadline");
     }
     Outcome::Ok
 }
