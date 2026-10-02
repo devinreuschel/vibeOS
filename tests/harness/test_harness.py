@@ -1093,6 +1093,26 @@ class TestKtestProtocol(unittest.TestCase):
         with self.assertRaises(HarnessError):
             check_ktest_output([K("vibeOS: ktest: begin 1")], ISA_DEBUG_PASS)
 
+    def test_missing_marker_names_exit_and_tail(self) -> None:
+        """A boot that ends before `begin` or `end` shows how it ended:
+        QEMU's exit status and the serial tail (ROADMAP §10.2)."""
+        from tests.harness.harness import HarnessError, check_ktest_output
+        from tests.harness.results import missing_marker
+
+        cases = (
+            ([K("vibeOS: limine: rev 3 ok"), "qemu: fatal: lost the disk"], "ktest_begin"),
+            ([K("vibeOS: ktest: begin 1"), K("vibeOS: ktest: run a 10000")], "ktest_end"),
+        )
+        for lines, name in cases:
+            with self.subTest(name=name):
+                with self.assertRaises(HarnessError) as cm:
+                    check_ktest_output(lines, 1)
+                msg = str(cm.exception)
+                self.assertEqual(missing_marker(msg), name)
+                self.assertIn("after 2 lines; QEMU exited with status 1", msg)
+                self.assertIn("--- serial tail 2/2 ---", msg)
+                self.assertIn(lines[-1], msg)
+
     def test_begin_without_count(self) -> None:
         from tests.harness.harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
 

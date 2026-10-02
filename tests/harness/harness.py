@@ -2351,6 +2351,16 @@ class RunCounter:
             self._fail("count", n=self.n, runs=len(self.runs), results=self.results_seen)
 
 
+def _exit_report(result: RunResult) -> str:
+    """How a ktest boot that lacks a protocol marker ended: its line count,
+    QEMU's exit status, and the serial tail, which holds QEMU's own stderr
+    (`run_qemu_until_exit` merges it) (ROADMAP §10.2)."""
+    return (
+        f" after {len(result.lines)} lines; QEMU exited with status {result.exit_code}"
+        f"{serial_tail(result.lines)}"
+    )
+
+
 def check_ktest_output(
     lines: Iterable[str],
     exit_code: int | None,
@@ -2412,10 +2422,10 @@ def check_ktest_output(
     result.ktest_runs = count.runs
     result.ktest_skips = count.skips
     if count.n is None:
-        raise HarnessError("missing marker 'ktest_begin'")
+        raise HarnessError(f"missing marker 'ktest_begin'{_exit_report(result)}")
     if not count.saw_end:
         where = f"; run {count.open_run} has no result" if count.open_run is not None else ""
-        raise HarnessError(f"missing marker 'ktest_end'{where}")
+        raise HarnessError(f"missing marker 'ktest_end'{where}{_exit_report(result)}")
     if fails:
         raise HarnessError(f"ktest FAIL: {fails[0]}")
     count.check_count()
