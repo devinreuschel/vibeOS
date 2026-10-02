@@ -749,9 +749,10 @@ fn write_at(off: i64) -> Result<Result<usize, Errno>, &'static str> {
     r
 }
 
-/// A FAT write at 4 GiB, FAT's file-size limit.
+/// A FAT write at FAT's file-size limit, 4 GiB less a byte: the seek
+/// may reach the limit, as Linux's `s_maxbytes` lets it, but not pass it.
 fn write_efbig() -> Result<Result<usize, Errno>, &'static str> {
-    write_at(1 << 32)
+    write_at(0xFFFF_FFFF)
 }
 
 /// A FAT write at 4 GiB less 64 KiB: more clusters than the volume has
