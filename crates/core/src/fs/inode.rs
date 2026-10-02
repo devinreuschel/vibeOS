@@ -329,7 +329,74 @@ impl Vfs {
             }
             s += 1;
         }
+        self.dentry_shrink()
+    }
+
+    /// Every inode is held, most by unheld dentries: shrink the dentry
+    /// cache with its clock hand, as Linux's shrinker does under inode
+    /// pressure, until a dentry it evicts releases a free inode, and
+    /// return that inode's slot.
+    fn dentry_shrink(&mut self) -> Result<u16, FsError> {
+        let len = self.dentries.len();
+        let mut n = 0usize;
+        while n < len * 2 {
+            let s = self.dhand as usize % len;
+            self.dhand = self.dhand.wrapping_add(1);
+            n += 1;
+            let d = &mut self.dentries[s];
+            if !d.used || d.refs != 0 {
+                continue;
+            }
+            if d.clock {
+                d.clock = false;
+                continue;
+            }
+            if let Some(i) = self.dentry_kill(s as u16) {
+                return Ok(i);
+            }
+        }
+        let mut s = 0usize;
+        while s < len {
+            if let Some(i) = self.dentry_kill(s as u16) {
+                return Ok(i);
+            }
+            s += 1;
+        }
+        // A dead dentry that a put evicted may have released one.
+        let mut s = 0usize;
+        while s < self.inodes.len() {
+            if self.inode_evict(s as u16) {
+                return Ok(s as u16);
+            }
+            s += 1;
+        }
         Err(FsError::NoSpace)
+    }
+
+    /// Evict unheld dentry `slot`, then each ancestor that leaves
+    /// unheld, as Linux's shrinker kills a parent whose last child it
+    /// freed, until one of them releases its inode: that inode is
+    /// emptied and its slot returned. An unlinked inode waits for its
+    /// release instead.
+    fn dentry_kill(&mut self, slot: u16) -> Option<u16> {
+        let mut cur = slot;
+        let mut n = 0usize;
+        while n < self.dentries.len() {
+            let d = self.dentries[cur as usize];
+            if !d.used || d.refs != 0 {
+                return None;
+            }
+            self.dentry_evict(cur);
+            if !d.negative && self.inode_evict(d.islot) {
+                return Some(d.islot);
+            }
+            if d.is_root(cur) {
+                return None;
+            }
+            cur = d.parent;
+            n += 1;
+        }
+        None
     }
 
     /// Empty unreferenced, linked inode `slot`. An unlinked one waits for

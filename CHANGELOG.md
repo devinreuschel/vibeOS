@@ -279,6 +279,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   corrupt block returns an error instead of hiding it.
 - A PCI BAR is mapped only by the driver that claims it, and a BAR that overlaps RAM or another
   device's BAR is refused.
+- A lookup no longer fails with `ENOSPC` once cached names hold every VFS inode slot; the dentry
+  cache is shrunk to free one.
 
 ### Removed
 
