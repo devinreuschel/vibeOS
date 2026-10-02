@@ -104,14 +104,6 @@ pub struct Loaded {
     pub fs: u64,
 }
 
-fn align_up(x: u64, a: u64) -> u64 {
-    if a <= 1 {
-        x
-    } else {
-        x.saturating_add(a - 1) & !(a - 1)
-    }
-}
-
 /// Where the loader reads an ELF file from: the open file, or an image in
 /// memory (C-RING3's `load_image`). One loader serves both (AGENTS.md
 /// rule 10).
@@ -294,13 +286,13 @@ fn setup_tls<S: ImageSource>(
     let Some(tls) = img.tls else {
         return Ok(0);
     };
-    let aligned = align_up(tls.memsz, tls.align.max(1));
-    let map_len = tls.map_len().ok_or(LoadError::Elf(ElfError::ImageTooBig))?;
-    let tls_map = stack_base.saturating_sub(map_len);
+    let too_big = LoadError::Elf(ElfError::ImageTooBig);
+    let map_len = tls.map_len().ok_or(too_big)?;
+    let tls_map = stack_base.saturating_sub(map_len) & !(tls.map_align() - 1);
+    // The thread pointer is aligned as the block is (TLS variant II).
+    let (fs, tls_start) = tls.thread_pointer(tls_map).ok_or(too_big)?;
     fill_init::map(space, tls_map, map_len, UserPerms::RW).map_err(LoadError::As)?;
     fill_init::zero(space, tls_map, map_len).map_err(LoadError::Fill)?;
-    let fs = tls_map + map_len - 8;
-    let tls_start = fs - aligned;
     if tls.filesz != 0 {
         copy_file_bytes(space, src, tls.offset, tls_start, tls.filesz)?;
     }

@@ -136,18 +136,45 @@ pub struct TlsSeg {
 }
 
 impl TlsSeg {
+    /// `memsz` rounded up to `align`: the TLS block's size. `None` when
+    /// that overflows.
+    fn block_len(&self) -> Option<u64> {
+        if self.align <= 1 {
+            return Some(self.memsz);
+        }
+        let mask = self.align.checked_sub(1)?;
+        Some(self.memsz.checked_add(mask)? & !mask)
+    }
+
     /// Bytes the loader maps for the TLS block: `memsz` rounded up to
     /// `align`, plus the 8-byte thread pointer slot, page-rounded and at
     /// least one page. `None` when that overflows.
     pub fn map_len(&self) -> Option<u64> {
-        let aligned = if self.align <= 1 {
-            self.memsz
-        } else {
-            let mask = self.align.checked_sub(1)?;
-            self.memsz.checked_add(mask)? & !mask
-        };
-        let need = aligned.checked_add(8)?.max(PAGE_SIZE_4K);
+        let need = self.block_len()?.checked_add(8)?.max(PAGE_SIZE_4K);
         Some(need.checked_add(PAGE_SIZE_4K - 1)? & !(PAGE_SIZE_4K - 1))
+    }
+
+    /// The alignment the mapping's base needs: a page, or the block's own
+    /// alignment when that is larger, so [`thread_pointer`](Self::thread_pointer)
+    /// finds an aligned pointer inside it.
+    pub fn map_align(&self) -> u64 {
+        self.align.max(PAGE_SIZE_4K)
+    }
+
+    /// The thread pointer for the block mapped at `map`, the base of
+    /// [`map_len`](Self::map_len) bytes, and the block's first byte: the
+    /// x86-64 psABI's TLS variant II, which aligns the pointer to the
+    /// block's alignment (at least 8, for the self pointer stored at it)
+    /// and ends the block at it. `None` when `map` is not aligned to
+    /// [`map_align`](Self::map_align) or the sizes overflow.
+    pub fn thread_pointer(&self, map: u64) -> Option<(u64, u64)> {
+        if map & self.map_align().checked_sub(1)? != 0 {
+            return None;
+        }
+        let a = self.align.max(8);
+        let tp = map.checked_add(self.map_len()?)?.checked_sub(8)? & !a.checked_sub(1)?;
+        let start = tp.checked_sub(self.block_len()?)?;
+        (start >= map).then_some((tp, start))
     }
 }
 
@@ -971,6 +998,32 @@ mod tests {
         assert_eq!(seg(8, 1 << 20).map_len(), Some((1 << 20) + PAGE_SIZE_4K));
         assert_eq!(seg(u64::MAX, 1).map_len(), None);
         assert_eq!(seg(u64::MAX - 4, 1).map_len(), None);
+    }
+
+    /// The thread pointer is aligned to the block's alignment, at least 8,
+    /// and the block ends at it inside the mapping (TLS variant II), so a
+    /// 16- or 64-byte-aligned thread-local is aligned in ring 3.
+    #[test]
+    fn tls_thread_pointer_is_aligned() {
+        let seg = |memsz, align| TlsSeg {
+            vaddr: 0,
+            offset: 0,
+            filesz: 0,
+            memsz,
+            align,
+        };
+        for align in [1u64, 8, 16, 64, 4096, 1 << 20] {
+            for memsz in [0u64, 8, 100, 4088, 5000] {
+                let s = seg(memsz, align);
+                let map = 0x7FFF_0000_0000 & !(s.map_align() - 1);
+                let (tp, start) = s.thread_pointer(map).unwrap();
+                assert_eq!(tp % align.max(8), 0, "{memsz} {align}");
+                assert!(start >= map, "{memsz} {align}");
+                assert!(tp + 8 <= map + s.map_len().unwrap(), "{memsz} {align}");
+                assert_eq!(tp - start, s.block_len().unwrap(), "{memsz} {align}");
+            }
+        }
+        assert_eq!(seg(8, 1 << 20).thread_pointer(0x7FFF_0000_1000), None);
     }
 
     #[test]
