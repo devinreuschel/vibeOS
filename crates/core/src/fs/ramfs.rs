@@ -55,11 +55,19 @@ impl RamNode {
         ndent: 0,
     };
 
+    /// Copy this node's metadata into the call's copy `ino`, but its size
+    /// into the inode slot's words, in the store's section: the VFS merges
+    /// each copy after its call, in either order when two calls overlap,
+    /// so a size left in a copy could undo the later call's, as
+    /// `vibefs_init::store_size` keeps vibefs's.
     fn meta_into(&self, ino: &mut Inode) {
         ino.kind = self.kind;
         ino.mode = self.mode;
         ino.nlink = self.nlink;
-        ino.size = self.size;
+        match ino.words() {
+            Ok(w) => w.set_size(self.size),
+            Err(_) => ino.size = self.size,
+        }
         ino.atime = self.atime;
         ino.mtime = self.mtime;
         ino.ctime = self.ctime;
@@ -213,6 +221,21 @@ impl<S: Guarded<RamState> + Sync + 'static> InodeOps for RamFs<S> {
         let (inst, now) = (inst_of(cx), cx.now);
         self.store
             .with(|st| ram_write(st, inst, now, ino, off, buf))
+    }
+
+    /// `O_APPEND`: the size is read in the store section that writes, so
+    /// two appenders never write at the same end.
+    fn write_append(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        buf: &[u8],
+    ) -> Result<(usize, u64), FsError> {
+        let (inst, now) = (inst_of(cx), cx.now);
+        self.store.with(|st| {
+            let off = ram_get(st, inst, ino.key[0]).ok_or(FsError::NotFound)?.size;
+            ram_write(st, inst, now, ino, off, buf).map(|n| (n, off))
+        })
     }
 
     fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {

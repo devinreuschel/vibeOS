@@ -50,11 +50,19 @@ pub(super) fn kern_get_mut(k: &mut KernState, inst: u32, ino: u32) -> Option<&mu
 }
 
 impl KernNode {
+    /// Copy this node's metadata into the call's copy `ino`, but its size
+    /// into the inode slot's words, in the store's section: the VFS merges
+    /// each copy after its call, in either order when two calls overlap,
+    /// so a size left in a copy could undo the later call's, as
+    /// `vibefs_init::store_size` keeps vibefs's.
     pub(super) fn meta_into(&self, ino: &mut Inode) {
         ino.kind = self.kind.inode_kind();
         ino.mode = self.mode;
         ino.nlink = self.nlink;
-        ino.size = self.size;
+        match ino.words() {
+            Ok(w) => w.set_size(self.size),
+            Err(_) => ino.size = self.size,
+        }
         ino.atime = self.atime;
         ino.mtime = self.mtime;
         ino.ctime = self.ctime;

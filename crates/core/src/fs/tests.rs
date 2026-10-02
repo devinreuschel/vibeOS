@@ -1013,6 +1013,67 @@ fn open_links_and_dirs_as_linux() {
     );
 }
 
+static APPEND_VFS: std::sync::Mutex<Option<&'static std::sync::Mutex<Vfs>>> =
+    std::sync::Mutex::new(None);
+static APPEND_PATH: std::sync::Mutex<Option<&'static [u8]>> = std::sync::Mutex::new(None);
+
+/// Between the first appender's backend write and its commit: a second
+/// `O_APPEND` writer appends `BBBB`, as another thread would.
+fn append_window() {
+    let Some(path) = APPEND_PATH.lock().unwrap().take() else {
+        return;
+    };
+    let api = FileApi::new(APPEND_VFS.lock().unwrap().unwrap());
+    let f = api
+        .open(None, path, OpenFlags::from_bits(O_WRONLY | O_APPEND), 0)
+        .unwrap();
+    assert_eq!(api.write(&f, b"BBBB").unwrap(), 4);
+    api.close(f).unwrap();
+}
+
+/// `O_APPEND` on ramfs and tmpfs: a second appender that writes in the
+/// first's window, after its backend write and before its commit, lands
+/// after it, and the file's size is both writes', whichever commit
+/// merges last (open(2): the seek to the end and the write are one
+/// atomic step).
+#[test]
+fn append_lands_after_an_overlapping_append() {
+    use crate::fs::kernfs::{KernFs, KernSkin, KernState};
+    let vfs = locked_vfs();
+    let api = FileApi::new(vfs);
+    let kfs: &'static KernFs<std::sync::Mutex<KernState>> = std::boxed::Box::leak(
+        std::boxed::Box::new(KernFs::new(std::sync::Mutex::new(KernState::new()))),
+    );
+    let tmp: &'static KernSkin<std::sync::Mutex<KernState>> =
+        std::boxed::Box::leak(std::boxed::Box::new(KernSkin::new(kfs, FsType::Tmp)));
+    api.mkdir(None, b"/tmp", 0o755).unwrap();
+    api.mount_fs(None, b"/tmp", tmp, None, false, None).unwrap();
+    *APPEND_VFS.lock().unwrap() = Some(vfs);
+    let hooked = FileApi::with_hooks(
+        vfs,
+        Hooks {
+            write_window: append_window,
+            open_race: Hooks::NONE.open_race,
+        },
+    );
+    for path in [b"/app" as &'static [u8], b"/tmp/app"] {
+        let flags = OpenFlags::from_bits(O_WRONLY | O_CREAT | O_APPEND);
+        let f = api.open(None, path, flags, 0o644).unwrap();
+        *APPEND_PATH.lock().unwrap() = Some(path);
+        assert_eq!(hooked.write(&f, b"AAAA").unwrap(), 4);
+        api.close(f).unwrap();
+        let r = api
+            .open(None, path, OpenFlags::from_bits(O_RDONLY), 0)
+            .unwrap();
+        let mut buf = [0u8; 16];
+        let n = api.read(&r, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"AAAABBBB", "{:?}", path);
+        assert_eq!(api.stat(&r).unwrap().size, 8, "{:?}", path);
+        assert_eq!(api.seek(&r, SeekFrom::End(0)).unwrap(), 8, "{:?}", path);
+        api.close(r).unwrap();
+    }
+}
+
 #[test]
 fn file_ref_generation_rejects_stale_id() {
     let vfs = locked_vfs();

@@ -575,6 +575,26 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         self.op(cx, |k, x| kern_write(k, x, ino, off, buf))
     }
 
+    /// `O_APPEND`: a tmpfs file's size is read in the store section that
+    /// writes, so two appenders never write at the same end.
+    fn write_append(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        buf: &[u8],
+    ) -> Result<(usize, u64), FsError> {
+        if let Some(dev) = self.op(cx, |k, x| kern_block_of(k, x.inst, ino.key[0])) {
+            let off = ino.size;
+            return blk_write(&dev, off, buf).map(|n| (n, off));
+        }
+        self.op(cx, |k, x| {
+            let off = kern_get(k, x.inst, ino.key[0])
+                .ok_or(FsError::NotFound)?
+                .size;
+            kern_write(k, x, ino, off, buf).map(|n| (n, off))
+        })
+    }
+
     fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
         self.op(cx, |k, x| kern_truncate(k, x, ino, size))
     }
