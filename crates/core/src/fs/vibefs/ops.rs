@@ -324,6 +324,10 @@ impl Vol {
             return Ok(());
         }
         let size = self.inodes[is].size as usize;
+        // As in `read`: a size past the inline bytes is corruption.
+        if size > INLINE {
+            return Err(Error::Corrupt);
+        }
         let mut tmp = [0u8; INLINE];
         tmp.copy_from_slice(&self.inodes[is].inline_data);
         if size == 0 {
@@ -424,13 +428,20 @@ impl Vol {
             return Err(Error::IsDir);
         }
         let size = self.inodes[is].size;
-        if off >= size {
+        if off >= size || buf.is_empty() {
             return Ok(0);
         }
         let want = core::cmp::min(buf.len() as u64, size - off) as usize;
         if self.inodes[is].flags & F_INLINE != 0 {
+            // An inline file's bytes are `inline_data`'s: a size past them
+            // is the image's corruption (fsck's `inline`).
             let s = off as usize;
-            buf[..want].copy_from_slice(&self.inodes[is].inline_data[s..s + want]);
+            let end = s.checked_add(want).ok_or(Error::Corrupt)?;
+            let src = self.inodes[is]
+                .inline_data
+                .get(s..end)
+                .ok_or(Error::Corrupt)?;
+            buf[..want].copy_from_slice(src);
             return Ok(want);
         }
         // Every extent the range touches verifies before anything is

@@ -281,13 +281,16 @@ fn parse_super(buf: &[u8; BLOCK], slot: u8) -> Result<SuperInfo, Error> {
     })
 }
 
+/// The newer valid superblock of the two slots. A slot that does not
+/// parse is a torn or never-written one and is passed over; a slot that
+/// cannot be read fails the pick, since it may hold the newer generation,
+/// and mounting the older one would roll the volume back.
 pub(super) fn pick_super<D: Disk>(d: &mut D, buf: &mut [u8; BLOCK]) -> Result<SuperInfo, Error> {
     let mut best: Option<SuperInfo> = None;
     let mut slot = 0u8;
     while slot < 2 {
-        if let Ok(()) = d.read_block(slot as u32, buf)
-            && let Ok(s) = parse_super(buf, slot)
-        {
+        d.read_block(slot as u32, buf)?;
+        if let Ok(s) = parse_super(buf, slot) {
             let take = match &best {
                 None => true,
                 Some(b) => {

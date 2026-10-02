@@ -125,6 +125,9 @@ impl Vol {
     }
 
     fn commit<D: Disk>(&mut self, d: &mut D) -> Result<(), Error> {
+        // The image's generation: one at its last value cannot advance, and
+        // fails the commit before any block is allocated.
+        let next_gen = self.generation.checked_add(1).ok_or(Error::Corrupt)?;
         let nino = count_used_inodes(self);
         let (ileaves, iints) = inode_need(nino.max(1));
         let mut dblocks = 0usize;
@@ -221,7 +224,7 @@ impl Vol {
                         META_DIR_LEAF,
                         0,
                         (end - start) as u16,
-                        self.generation + 1,
+                        next_gen,
                         ino,
                     );
                     let mut e = 0usize;
@@ -244,7 +247,7 @@ impl Vol {
                         META_DIR_INT,
                         1,
                         leaves as u16,
-                        self.generation + 1,
+                        next_gen,
                         ino,
                     );
                     k = 0;
@@ -284,7 +287,7 @@ impl Vol {
                 META_INODE_LEAF,
                 0,
                 count as u16,
-                self.generation + 1,
+                next_gen,
                 0,
             );
             let mut e = 0usize;
@@ -303,7 +306,7 @@ impl Vol {
                 META_INODE_INT,
                 1,
                 ileaves as u16,
-                self.generation + 1,
+                next_gen,
                 0,
             );
             li = 0;
@@ -322,7 +325,7 @@ impl Vol {
             d.write_block(iroot, &self.iobuf)?;
         }
 
-        self.generation = self.generation.saturating_add(1);
+        self.generation = next_gen;
         self.inode_root = iroot;
         self.alloc_root = alloc_bno;
         self.alloc_into_iobuf(&old_meta[..old_meta_n as usize]);

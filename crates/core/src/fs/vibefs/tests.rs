@@ -1201,3 +1201,106 @@ fn plant_early_super_breaks_rebuilt_image() {
     let early = early_super_images(Plant::EarlySuper);
     assert!(early.iter().any(|&ok| !ok), "{early:?}");
 }
+
+/// A zero-length read inside a file returns 0: the last byte it would
+/// read is not computed (`off + len - 1` underflows at `len` 0).
+#[test]
+fn read_into_empty_buffer_is_zero() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        v.create(d, ROOT_INO, b"big.bin", InodeKind::Reg, 0o644, None)
+            .unwrap();
+        let n = v.lookup(d, ROOT_INO, b"big.bin").unwrap();
+        v.write(d, n.ino, 0, &[9u8; 400]).unwrap();
+        assert_eq!(v.read(d, n.ino, 10, &mut []).unwrap(), 0);
+    });
+}
+
+/// An inline file whose size an image set past the 128 inline bytes, as
+/// fsck's `inline` defect plants it: a read of it, and a write that would
+/// move its bytes to a block, are `Corrupt` rather than an index past
+/// `inline_data`.
+#[test]
+fn inline_size_past_inline_bytes_is_corrupt() {
+    let mut b = base_tree();
+    with_vol(&mut b, |v, d| {
+        let (_, s) = slot_of(v, d, ROOT_INO, b"g");
+        assert!(v.inodes[s].flags & F_INLINE != 0);
+        v.inodes[s].size = 200;
+        v.dirty = true;
+        v.sync(d).unwrap();
+    });
+    with_vol(&mut b, |v, d| {
+        let g = v.lookup(d, ROOT_INO, b"g").unwrap().ino;
+        let mut out = [0u8; 256];
+        assert_eq!(v.read(d, g, 0, &mut out).unwrap_err(), Error::Corrupt);
+        assert_eq!(v.write(d, g, 300, b"x").unwrap_err(), Error::Corrupt);
+    });
+}
+
+/// A volume whose generation is at its last value fails its next commit
+/// with `Corrupt`, where the increment would overflow.
+#[test]
+fn commit_at_last_generation_is_corrupt() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        v.generation = u64::MAX;
+        v.create(d, ROOT_INO, b"a", InodeKind::Reg, 0o644, None)
+            .unwrap();
+        assert_eq!(v.sync(d).unwrap_err(), Error::Corrupt);
+    });
+}
+
+/// A [`MemDisk`] whose block `bad` cannot be read.
+struct BadRead<'a> {
+    d: MemDisk<'a>,
+    bad: u32,
+}
+
+impl Disk for BadRead<'_> {
+    fn nblocks(&self) -> u32 {
+        self.d.nblocks()
+    }
+    fn read_block(&mut self, bno: u32, buf: &mut [u8; BLOCK]) -> Result<(), Error> {
+        if bno == self.bad {
+            return Err(Error::Io);
+        }
+        self.d.read_block(bno, buf)
+    }
+    fn write_block(&mut self, bno: u32, buf: &[u8; BLOCK]) -> Result<(), Error> {
+        self.d.write_block(bno, buf)
+    }
+    fn flush(&mut self) -> Result<(), Error> {
+        self.d.flush()
+    }
+}
+
+/// A superblock slot that cannot be read fails the mount with `Io`, for
+/// either slot: it may hold the newer generation, and mounting the other
+/// would roll the volume back.
+#[test]
+fn unreadable_super_slot_fails_mount() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        for name in [b"a" as &[u8], b"b"] {
+            v.create(d, ROOT_INO, name, InodeKind::Reg, 0o644, None)
+                .unwrap();
+            v.sync(d).unwrap();
+        }
+    });
+    for bad in 0..2 {
+        let mut disk = BadRead {
+            d: MemDisk::new(&mut b).unwrap(),
+            bad,
+        };
+        let mut v = Vol::new();
+        assert_eq!(
+            mount(&mut disk, &mut v).unwrap_err(),
+            Error::Io,
+            "slot {bad}"
+        );
+    }
+    with_vol(&mut b, |v, d| {
+        assert!(v.lookup(d, ROOT_INO, b"b").is_ok());
+    });
+}
