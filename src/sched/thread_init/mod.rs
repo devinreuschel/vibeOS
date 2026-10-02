@@ -198,9 +198,12 @@ fn publish_slot(slot: usize, id: ThreadId) {
     }
 }
 
-/// The tid in thread-table slot `slot`, for `ipi_init::drain_inbox`. A slot
-/// with a bit in some inbox holds a Ready thread, which cannot die before
-/// it runs, so the slot is not reused while the bit is set.
+/// The tid in thread-table slot `slot`, for `ipi_init::drain_inbox`. A
+/// slot's inbox bit can outlive the wake that set it: the push lands after
+/// the waker drops SCHED, by which time the thread may have run, exited,
+/// and had its slot reused. The drain then queues the slot's new thread,
+/// which `schedule_inner` runs only while it is `Ready` and placed on that
+/// CPU; a thread spawned parked is not `Ready` until [`make_ready`].
 pub(crate) fn tid_of_slot(slot: usize) -> Option<ThreadId> {
     // Acquire: pairs with the Release store in `publish_slot`.
     let raw = SLOT_TID.try_get()?.get(slot)?.load(Ordering::Acquire);
@@ -1009,14 +1012,29 @@ pub fn spawn_user(
 
 const USER_FRAME_BYTES: usize = core::mem::size_of::<UserFrame>();
 
+/// A thread spawned parked ([`spawn_parked_on`], [`spawn_user`]) until
+/// [`make_ready`]: blocked on no queue, with no deadline, so no wake and no
+/// timeout readies it, and no stale run-queue or inbox entry for its slot
+/// runs it ([`tid_of_slot`]).
+const PARKED: ThreadState = ThreadState::Blocked {
+    wq: 0,
+    deadline: vibeos::sched::FAR_DEADLINE,
+};
+
+/// Make thread `id`, spawned parked, runnable on its home CPU. A parked
+/// thread retired before it started (`abandon_unstarted`) stays Dead.
 pub fn make_ready(id: ThreadId) {
     with_sched(|s| {
-        if let Some(t) = s.get_mut(id) {
-            if t.state == ThreadState::Dead {
-                return;
-            }
-            t.state = ThreadState::Ready;
+        let Some(t) = s.get_mut(id) else {
+            return;
+        };
+        if t.state == ThreadState::Dead {
+            return;
         }
+        // Invariant: each parked spawn's owner makes it ready once, and
+        // nothing else changes a parked thread's state (`thread_init::PARKED`).
+        assert!(t.state == PARKED, "make_ready: thread {} not parked", id.0);
+        t.state = ThreadState::Ready;
         s.place_home(id);
     });
 }
@@ -1029,7 +1047,7 @@ fn choose_cpu(affinity: CpuAffinity) -> u32 {
     cpu
 }
 
-/// Build a Ready (or, `enqueue` false, parked) thread. The stack comes
+/// Build a Ready (or, `enqueue` false, [`PARKED`]) thread. The stack comes
 /// first, then a TCB slot: a `Dead` one is rewritten under SCHED, else a new
 /// `Tcb` box goes into an empty one. Neither the box nor the stack is
 /// allocated or freed under SCHED, which ranks above HEAP, PT and BUDDY.
@@ -1100,6 +1118,9 @@ fn spawn_inner(
         fill_tcb(
             tcb, name, entry, affinity, cpu, ks, top, tramp, first_nest, pid, as_cr3,
         );
+        if !enqueue {
+            tcb.state = PARKED;
+        }
         s.bind(id, slot);
         if enqueue {
             s.place(cpu, id);
@@ -1122,7 +1143,7 @@ fn spawn_inner(
     let tcb = TryBox::try_new(Tcb {
         id: ThreadId(0),
         name,
-        state: ThreadState::Ready,
+        state: if enqueue { ThreadState::Ready } else { PARKED },
         on_cpu: OnCpu::new(),
         stack: None,
         context: CpuContext::empty(),

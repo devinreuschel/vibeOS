@@ -7,6 +7,7 @@ mod fill;
 mod hooks;
 #[cfg(feature = "irqoff")]
 mod irqoff;
+mod parked;
 mod reclaim;
 mod registry;
 mod requeue;
@@ -21,6 +22,7 @@ pub(crate) use fill::fill_threads;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 #[cfg(feature = "irqoff")]
 pub(crate) use irqoff::{irqoff_deliberate_is_exempt, irqoff_logs_long_stretch};
+use parked::test_parked_waits_for_make_ready;
 pub(crate) use reclaim::dead_list_batched_rounds;
 pub(crate) use registry::{test_ktest_fail_fmt, test_ktest_helpers, test_ktest_rows};
 pub(crate) use requeue::test_requeue_moves_each_dequeue;
@@ -1301,6 +1303,10 @@ pub(crate) const TESTS: &[Test] = &[
     test(
         "requeue_moves_each_dequeue",
         test_requeue_moves_each_dequeue,
+    ),
+    test(
+        "parked_waits_for_make_ready",
+        test_parked_waits_for_make_ready,
     ),
     test("fp_migrate_counter", test_fp_migrate_counter).deadline(30_000),
     test("lock_across_switch_asserts", lock_across_switch_asserts),
