@@ -1238,10 +1238,10 @@ fn fs_error_conditions_errno() {
             assert!(off <= 64 * 1024, "the volume never filled");
         };
         assert_eq!(errno(e), 28, "{e:?}");
-        // A 2-byte write at `u32::MAX - 1` crosses FAT's 4 GiB file limit:
-        // EFBIG.
+        // A write that starts at FAT's 4 GiB file limit: EFBIG (one that
+        // crosses it is cut there, `fat::limit_tests`).
         let e = v
-            .write_ino(&mut d, &mut n, true, u64::from(u32::MAX - 1), false, b"xy")
+            .write_ino(&mut d, &mut n, true, fat::MAX_FILE_SIZE, false, b"xy")
             .unwrap_err();
         assert_eq!(errno(e), 27, "{e:?}");
     }

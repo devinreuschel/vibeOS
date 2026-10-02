@@ -550,6 +550,10 @@ impl FileSystem for FatFs {
         Some(&FatOps)
     }
 
+    fn max_bytes(&self) -> u64 {
+        fat::MAX_FILE_SIZE
+    }
+
     fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
         let root_clu = vol_of(cx)?.root_clu.load(Ordering::Acquire);
         *cx.private = [0, 0];

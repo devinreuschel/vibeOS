@@ -115,6 +115,8 @@ ALLOW: list[Allow] = [
           "the largest cluster read or written whole, 4096 bytes (" + FAT + ")"),
     Allow("crates/core/src/fs/fat/mod.rs", "MAX_DIR_BYTES", "on-disk",
           "a directory holds at most 65,536 entries of 32 bytes (" + FAT + ")"),
+    Allow("crates/core/src/fs/fat/mod.rs", "MAX_FILE_SIZE", "on-disk",
+          "a dirent's 32-bit file size, 0xFFFFFFFF bytes (" + FAT + ")"),
     Allow("crates/core/src/fs/fat/vol.rs", "MAX_NCLUS", "on-disk",
           "the highest FAT32 cluster count, 0x0FFFFFF5 (" + FAT + ")"),
     Allow("crates/core/src/fs/vibefs/mod.rs", "MAX_BLOCKS", "on-disk", VIBEFS),

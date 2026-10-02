@@ -47,14 +47,17 @@ impl FatVol {
         if buf.is_empty() {
             return Ok(0);
         }
-        // A FAT file ends below 4 GiB: its size is 32 bits.
-        let end = off
-            .checked_add(buf.len() as u64)
-            .ok_or(FatError::FileTooBig)?;
-        if end > u32::MAX as u64 {
+        // A FAT file ends below 4 GiB, its size being 32 bits: a write that
+        // starts at the limit or past it is EFBIG, and one that crosses it
+        // stops short there, as Linux's `s_maxbytes` check cuts it.
+        let room = MAX_FILE_SIZE.checked_sub(off).filter(|&r| r > 0);
+        let Some(room) = room else {
             return Err(FatError::FileTooBig);
-        }
-        let need = end as u32;
+        };
+        let keep = usize::try_from(room).map_or(buf.len(), |r| r.min(buf.len()));
+        let buf = buf.get(..keep).unwrap_or(buf);
+        let end = off.saturating_add(buf.len() as u64);
+        let need = u32::try_from(end).map_err(|_| FatError::FileTooBig)?;
         let old_first = *first;
         self.ensure_size(d, first, *size, need)?;
         self.write_at(d, *first, off, buf)?;
@@ -403,7 +406,8 @@ impl FatVol {
         linked: bool,
         new: u64,
     ) -> Result<(), FatError> {
-        let new = u32::try_from(new).map_err(|_| FatError::Inval)?;
+        // Past the 32-bit size is EFBIG, as Linux's `inode_newsize_ok`.
+        let new = u32::try_from(new).map_err(|_| FatError::FileTooBig)?;
         if n.kind == InodeKind::Dir {
             return Err(FatError::IsDir);
         }

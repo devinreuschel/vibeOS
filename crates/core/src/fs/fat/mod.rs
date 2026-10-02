@@ -443,3 +443,15 @@ pub(crate) mod tests;
 )]
 #[cfg(test)]
 mod image_tests;
+
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "host tests: a panic fails the test, not the kernel"
+)]
+#[cfg(test)]
+mod limit_tests;
+
+/// The largest size a FAT file can have: its dirent holds a 32-bit size.
+/// Linux's vfat sets `s_maxbytes` to it.
+pub const MAX_FILE_SIZE: u64 = 0xFFFF_FFFF;
