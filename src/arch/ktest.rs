@@ -33,6 +33,7 @@ use crate::x86::{
 
 mod idt;
 mod ipi;
+mod msr;
 mod seam;
 mod uaccess;
 
@@ -1468,6 +1469,7 @@ pub(crate) fn test_force_kernel_irq_window() -> Outcome {
 pub(crate) const TESTS: &[Test] = &[
     test("gdt_selectors", test_gdt_selectors),
     test("star_sysret_layout", test_star_sysret_layout),
+    test("sysenter_msrs_zero", msr::sysenter_msrs_zero),
     test("int3_roundtrip", test_int3_roundtrip),
     test("scoped_pf", test_scoped_pf),
     test("gp_catch", test_gp_catch),
