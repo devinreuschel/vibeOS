@@ -8,7 +8,9 @@ use vibeos::fs::{FsError, O_RDONLY, OpenFlags};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kerror::KError;
 use vibeos::lock::RANK_DEVICE;
-use vibeos::proc::{SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, wait_exited, wait_signaled};
+use vibeos::proc::{
+    SIGCONT, SIGKILL, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, wait_exited, wait_signaled,
+};
 use vibeos::syscall::SYS_KILL;
 use vibeos::thread::{ThreadId, ThreadState};
 
@@ -1207,4 +1209,64 @@ pub(crate) fn test_init_reports_failed_tests() -> Outcome {
         return crate::fail_fmt!("status {st:#x}, want {:#x}", wait_signaled(SIGKILL));
     }
     Outcome::Ok
+}
+
+/// Stop `pid` and wait until it has decided to stop, `n` decisions in.
+fn stopped(pid: u32, n: u32) -> bool {
+    kill(pid, SIGSTOP) == 0 && crate::ktest::sleep_for(|| proc_testing::stops() >= n)
+}
+
+/// A stopped process dies of a fatal signal that writes no core with no
+/// `SIGCONT`, as Linux makes one a group `SIGKILL` when it is sent; one
+/// that writes a core (`SIGQUIT`) leaves it stopped, and it dies of that
+/// signal once `SIGCONT` lets it run.
+pub(crate) fn stopped_process_dies_of_term() -> Outcome {
+    let mut out = Outcome::Ok;
+    for (sig, waits_for_cont) in [(SIGTERM, false), (SIGQUIT, true)] {
+        let pid = match user::spawn(&Image::Code(S19_GETPID_LOOP, DEFAULT), &["stop_term"]) {
+            Ok(pid) => pid,
+            Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+        };
+        proc_testing::watch_stops(pid);
+        let r = if !stopped(pid, 1) {
+            Some(crate::fail_fmt!("pid {pid} did not stop"))
+        } else if kill(pid, sig) != 0 {
+            Some(crate::fail_fmt!("kill {sig} failed"))
+        } else if waits_for_cont {
+            // Woken by the signal, it decides to stop again.
+            let again = crate::ktest::sleep_for(|| proc_testing::stops() >= 2);
+            if !again || proc_testing::is_zombie(pid) {
+                Some(crate::fail_fmt!("signal {sig} ended a stopped process"))
+            } else if kill(pid, SIGCONT) != 0
+                || !crate::ktest::sleep_for(|| proc_testing::is_zombie(pid))
+            {
+                Some(crate::fail_fmt!(
+                    "signal {sig} did not end it after SIGCONT"
+                ))
+            } else {
+                None
+            }
+        } else if !crate::ktest::sleep_for(|| proc_testing::is_zombie(pid)) {
+            Some(crate::fail_fmt!(
+                "signal {sig} did not end a stopped process"
+            ))
+        } else {
+            None
+        };
+        proc_testing::watch_stops(0);
+        if !proc_testing::is_zombie(pid) {
+            kill(pid, SIGKILL);
+        }
+        let st = user::wait(pid);
+        if let Some(o) = r {
+            return o;
+        }
+        if st != wait_signaled(sig) && matches!(out, Outcome::Ok) {
+            out = crate::fail_fmt!(
+                "signal {sig}: status {st:#x}, want {:#x}",
+                wait_signaled(sig)
+            );
+        }
+    }
+    out
 }

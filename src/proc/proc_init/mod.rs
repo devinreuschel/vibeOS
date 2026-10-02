@@ -19,7 +19,7 @@ use vibeos::proc::pid::IdIndex;
 use vibeos::proc::uaccess::user_range_ok;
 use vibeos::proc::{
     Creds, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitExit, InitState, MAX_FDS, MAX_PROCS,
-    ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action,
+    ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action, dumps_core,
     fd_flags_from_open, kill_delivers, reaper_for, sig_name, wait_exited, wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
@@ -762,6 +762,12 @@ impl Handlers for Ctx<'_> {
 /// the section that decides it, so a `SIGCONT` that `sys_kill` sends in
 /// between finds the thread on the queue (ROADMAP §10.6, F033). The loop
 /// re-checks after every `schedule()`, which can return early.
+///
+/// A pending fatal signal that writes no core ends the process first,
+/// stopped or not: Linux makes one a group `SIGKILL` when it is sent,
+/// which wakes a stopped process. Then a stop, then the rest, lowest
+/// number first, as Linux dequeues them; a Core signal therefore waits
+/// for `SIGCONT` in a stopped process.
 fn apply_pending(frame: Option<&mut UserFrame>) {
     let pid = current_pid();
     if pid == 0 {
@@ -775,6 +781,16 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
                 };
                 if p.pending & bit(SIGKILL) != 0 {
                     return Pending::Die(SIGKILL);
+                }
+                let mut sig = 1u32;
+                while sig <= 31 {
+                    if p.pending & bit(sig) != 0
+                        && default_action(sig) == SigAct::Term
+                        && !dumps_core(sig)
+                    {
+                        return Pending::Die(sig);
+                    }
+                    sig += 1;
                 }
                 let mut stop = false;
                 if p.state == ProcState::Stopped || p.pending & bit(SIGSTOP) != 0 {
@@ -1152,6 +1168,25 @@ pub(crate) mod testing {
         if STALL_PID.load(Ordering::Acquire) == pid {
             STALL_IN.store(true, Ordering::Release);
         }
+        if STOPS_PID.load(Ordering::Acquire) == pid {
+            STOPS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The pid whose stop decisions [`stops`] counts; 0 for none.
+    static STOPS_PID: AtomicU32 = AtomicU32::new(0);
+    static STOPS: AtomicU32 = AtomicU32::new(0);
+
+    /// Count `pid`'s stop decisions from 0; 0 counts none.
+    pub(crate) fn watch_stops(pid: u32) {
+        STOPS.store(0, Ordering::Release);
+        STOPS_PID.store(pid, Ordering::Release);
+    }
+
+    /// How many times the watched process has decided to stop and armed
+    /// its `stop_wq` wait.
+    pub(crate) fn stops() -> u32 {
+        STOPS.load(Ordering::Acquire)
     }
 
     /// Spins on TSC time; never services IPIs.

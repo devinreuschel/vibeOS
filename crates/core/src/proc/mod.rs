@@ -461,6 +461,26 @@ pub const fn default_action(sig: u32) -> SigAct {
     }
 }
 
+/// Whether `sig`'s default action is signal(7)'s Core, a Term that also
+/// writes a core. Linux makes any other fatal signal a group `SIGKILL`
+/// when it is sent, so it ends a stopped process at once; a Core signal
+/// waits until the process runs again.
+pub const fn dumps_core(sig: u32) -> bool {
+    matches!(
+        sig,
+        SIGQUIT
+            | SIGILL
+            | SIGTRAP
+            | SIGABRT
+            | SIGBUS
+            | SIGFPE
+            | SIGSEGV
+            | SIGXCPU
+            | SIGXFSZ
+            | SIGSYS
+    )
+}
+
 /// Uncatchable even when Phase 13 grows handlers.
 pub const fn forced(sig: u32) -> bool {
     sig == SIGKILL || sig == SIGSTOP
@@ -753,6 +773,14 @@ mod tests {
             };
             assert_eq!(default_action(sig), want, "signal {sig}");
             assert_ne!(sig_name(sig), "?", "signal {sig}");
+        }
+        // signal(7)'s Core list: each is a Term here.
+        let core = [
+            SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV, SIGXCPU, SIGXFSZ, SIGSYS,
+        ];
+        for sig in 1..=31 {
+            assert_eq!(dumps_core(sig), core.contains(&sig), "signal {sig}");
+            assert!(!dumps_core(sig) || default_action(sig) == SigAct::Term);
         }
     }
 
