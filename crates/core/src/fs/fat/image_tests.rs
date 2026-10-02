@@ -81,3 +81,21 @@ fn truncate_looped_chain_changes_nothing() {
         assert_eq!(chain.map(|c| v.fat_get(d, c).unwrap()), links);
     });
 }
+
+/// FSInfo's free count is a hint, which a mount does not take: one of 0
+/// on a volume with free clusters refuses no write, and the volume's count
+/// is the FAT's own.
+#[test]
+fn fsinfo_free_count_is_not_trusted() {
+    let mut b = fresh(IMG);
+    let at = usize::from(u16::from_le_bytes([b[48], b[49]])) * SEC + 488;
+    b[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+    with_vol(&mut b, |v, d| {
+        let counted = v.count_free(d).unwrap();
+        assert_eq!(v.free, counted);
+        let root = v.info.root_clus;
+        let mut f = create_words(v, d, root, b"f.txt");
+        v.write_ino(d, &mut f, true, 0, false, b"data").unwrap();
+        v.sync(d).unwrap();
+    });
+}

@@ -88,12 +88,11 @@ impl FatVol {
         if info.fsinfo != 0 && info.fsinfo < info.rsvd {
             d.read(info.fsinfo, &mut fs)?;
         }
+        // Of FSInfo's two counts only the next-free hint is read: the
+        // free count is one Windows does not keep right, and Linux's vfat
+        // reads it only under `usefree`, so the count below is the FAT's.
         if info.fsinfo != 0 && info.fsinfo < info.rsvd && fsinfo_valid(&fs)? {
-            let free = le32(&fs, 488)?;
             let hint = le32(&fs, 492)?;
-            if free != 0xFFFFFFFF {
-                vol.free = free;
-            }
             if hint >= 2 && !info.past_end(hint) {
                 vol.hint = hint;
             }
@@ -109,9 +108,7 @@ impl FatVol {
                 vol.info.backup = 0;
             }
         }
-        if vol.free == 0xFFFFFFFF {
-            vol.free = vol.count_free(d)?;
-        }
+        vol.free = vol.count_free(d)?;
         Ok(())
     }
 
