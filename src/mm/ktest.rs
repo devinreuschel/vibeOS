@@ -303,7 +303,9 @@ pub(crate) fn test_kva_deferred() -> Outcome {
         kva_init::free_stack(stack);
         return Outcome::Fail("stack did not take 4 frames");
     }
-    thread_init::testing::park_on_local_list(stack);
+    // SAFETY: invariant I10: the stack was allocated just above and no
+    // thread was given it; established here.
+    unsafe { thread_init::testing::park_on_local_list(stack) };
     let after = quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   before={before} after={after}");

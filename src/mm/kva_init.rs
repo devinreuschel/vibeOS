@@ -181,19 +181,31 @@ const _: () = assert!(core::mem::size_of::<Parked>() <= PAGE_SIZE as usize);
 const _: () = assert!(core::mem::align_of::<Parked>() <= PAGE_SIZE as usize);
 
 /// Push `stack` onto the dead list at `head`, linked through the stack
-/// itself: the node is written into its lowest mapped page. No thread runs
-/// on `stack` any more, and nothing but the list holds it until
-/// [`free_parked`] takes it back.
+/// itself: the node is written into its lowest mapped page. Nothing but
+/// the list holds it until [`free_parked`] takes it back.
+///
+/// # Safety
+///
+/// As [`park_slot_on_list`]'s, for `stack`.
 #[cfg(feature = "kernel_tests")]
-pub(crate) fn park_on_list(head: &mut u64, stack: GuardedStack) {
-    park_slot_on_list(head, &mut Some(stack));
+pub(crate) unsafe fn park_on_list(head: &mut u64, stack: GuardedStack) {
+    // SAFETY: invariant I10, established at `thread_init::finish_switch`
+    // for every stack it parks, and by this fn's contract for `stack`;
+    // `head` is a dead list, as the contract asks.
+    unsafe { park_slot_on_list(head, &mut Some(stack)) };
 }
 
 /// [`park_on_list`] for the stack in `slot`, which it leaves empty; nothing
 /// when `slot` is empty. The handle moves from the slot into the node with
 /// one copy, so none of its 520 bytes passes through a frame: the switch
 /// tail parks from `PerCpu.dead_stack` this way (ROADMAP §10.2).
-pub(crate) fn park_slot_on_list(head: &mut u64, slot: &mut Option<GuardedStack>) {
+///
+/// # Safety
+///
+/// No CPU runs on the slot's stack, now or later (invariant I10): the
+/// node overwrites its lowest page. `head` is 0 or a dead list these fns
+/// built, whose stacks no CPU runs on.
+pub(crate) unsafe fn park_slot_on_list(head: &mut u64, slot: &mut Option<GuardedStack>) {
     let Some(stack) = slot.as_ref() else {
         return;
     };
@@ -223,10 +235,19 @@ pub(crate) fn park_slot_on_list(head: &mut u64, slot: &mut Option<GuardedStack>)
 /// [`SHOOT_RANGES`] stacks, not one per page, so a worker frees stacks
 /// faster than a burst of exits, which sends no IPI, parks them (DESIGN
 /// §4.5).
-pub(crate) fn free_parked(mut head: u64) -> usize {
+///
+/// # Safety
+///
+/// `head` is 0 or a dead list [`park_slot_on_list`] built, taken whole off
+/// its owner so nothing else reads or writes it, whose stacks no CPU runs
+/// on (invariant I10).
+pub(crate) unsafe fn free_parked(mut head: u64) -> usize {
     let mut n = 0usize;
     while head != 0 {
-        let (rest, k) = free_batch(head);
+        // SAFETY: invariant I10, established at `thread_init::finish_switch`
+        // for every stack on a dead list: `head` is the rest of the list
+        // this fn's contract names.
+        let (rest, k) = unsafe { free_batch(head) };
         head = rest;
         n += k;
     }
@@ -237,7 +258,11 @@ pub(crate) fn free_parked(mut head: u64) -> usize {
 /// them and [`BATCH_PAGES`] pages, and at least one: unmap each, then one
 /// shootdown round for all of them, then their frames and their VA.
 /// Returns the rest of the list and how many it freed.
-fn free_batch(mut head: u64) -> (u64, usize) {
+///
+/// # Safety
+///
+/// As [`free_parked`]'s; `head` is not 0.
+unsafe fn free_batch(mut head: u64) -> (u64, usize) {
     let mut frames: [Option<Frames>; BATCH_PAGES] = [const { None }; BATCH_PAGES];
     let mut nf = 0usize;
     let mut ranges = [ShootRange::page(0); SHOOT_RANGES];

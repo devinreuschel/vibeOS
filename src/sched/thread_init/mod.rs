@@ -743,7 +743,10 @@ fn reclaim_dead_stacks_here() -> bool {
     if head == 0 {
         return false;
     }
-    let n = kva_init::free_parked(head);
+    // SAFETY: invariant I10, established at `thread_init::finish_switch`:
+    // `head` is this CPU's whole dead list, which only its switch tail
+    // fills with stacks no CPU runs on.
+    let n = unsafe { kva_init::free_parked(head) };
     stacks_reclaimed(n);
     n > 0
 }
@@ -770,7 +773,10 @@ fn retire_dead_stack(cpu: &mut PerCpu) -> bool {
         STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
         return false;
     }
-    kva_init::park_slot_on_list(&mut cpu.dead_list, &mut cpu.dead_stack);
+    // SAFETY: invariant I10, established at `thread_init::finish_switch`:
+    // its switch tail calls this after `switch_context` has left the slot's
+    // stack, and `dead_list` is this CPU's dead list.
+    unsafe { kva_init::park_slot_on_list(&mut cpu.dead_list, &mut cpu.dead_stack) };
     true
 }
 

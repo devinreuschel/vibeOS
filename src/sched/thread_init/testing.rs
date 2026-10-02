@@ -71,7 +71,10 @@ pub fn drain_local_stack_cache() {
         while let Some(stack) = cpu.stack_cache.take() {
             super::CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
             super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
-            crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
+            // SAFETY: invariant I10, established at
+            // `thread_init::finish_switch`, which caches only stacks no CPU
+            // runs on; `dead_list` is this CPU's dead list.
+            unsafe { crate::kva_init::park_on_list(&mut cpu.dead_list, stack) };
             any = true;
         }
         any
@@ -81,12 +84,19 @@ pub fn drain_local_stack_cache() {
     }
 }
 
-/// Put `stack`, which nothing runs on, on this CPU's dead list and wake
-/// its worker, as the switch tail does with a stack the cache refuses.
-pub fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
+/// Put `stack` on this CPU's dead list and wake its worker, as the switch
+/// tail does with a stack the cache refuses.
+///
+/// # Safety
+///
+/// No CPU runs on `stack`, now or later (invariant I10).
+pub unsafe fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
     super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     crate::per_cpu_init::with_current(|cpu| {
-        crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
+        // SAFETY: invariant I10, established at `thread_init::finish_switch`
+        // for the stacks it parks, and by this fn's contract for `stack`;
+        // `dead_list` is this CPU's dead list.
+        unsafe { crate::kva_init::park_on_list(&mut cpu.dead_list, stack) };
     });
     crate::work_init::kick_dead_stacks();
 }

@@ -194,7 +194,10 @@ fn worker() {
         });
         match next {
             Next::DeadStacks(head) => {
-                let n = kva_init::free_parked(head);
+                // SAFETY: invariant I10, established at
+                // `thread_init::finish_switch`: `head` is this CPU's whole
+                // dead list, from `thread_init::take_dead_stacks`.
+                let n = unsafe { kva_init::free_parked(head) };
                 thread_init::stacks_reclaimed(n);
             }
             Next::Item(w, WorkClass::Soft) => {
