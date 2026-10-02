@@ -135,6 +135,12 @@ fn reparent_children(s: &mut Sched, t: &mut Table, dead: u32) -> bool {
     adopted
 }
 
+/// `wait4(pid, status, options)`: reap a zombie child `pid` names, or
+/// sleep on `wait_wq` until one exits. The sleep is armed in the section
+/// that finds no zombie and no kill or stop to act on, as `sys_nanosleep`
+/// arms its own: `sys_kill` wakes `wait_wq`, and a kill that lands before
+/// the wait is armed finds the caller on no queue, so the section checks
+/// for it rather than sleeping until a child exits.
 pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
     let self_pid = current_pid();
     if self_pid == 0 {
@@ -142,6 +148,8 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
     }
     let want = i64::from(pid);
     let nohang = options as u64 & WNOHANG != 0;
+    #[cfg(feature = "kernel_tests")]
+    super::testing::wait4_entered(self_pid, want);
     loop {
         let r = thread_init::with_sched(|s| {
             table_locked(|t| {
@@ -159,6 +167,9 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
                 let Some(me) = t.get_mut(self_pid) else {
                     return WaitAct::Err(KError::Child);
                 };
+                if signal_acts(me) {
+                    return WaitAct::Signal;
+                }
                 s.begin_wait(&mut me.wait_wq, FAR_DEADLINE);
                 WaitAct::Sleep
             })
@@ -175,6 +186,7 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
                 return Ok(cpid as usize);
             }
             WaitAct::Err(e) => return Err(e),
+            WaitAct::Signal => apply_pending(None),
             WaitAct::Sleep => {
                 thread_init::schedule();
                 apply_pending(None);
@@ -186,6 +198,8 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
 enum WaitAct {
     Done(u32, u32),
     Err(KError),
+    /// A kill or stop is pending: act on it, then look again.
+    Signal,
     Sleep,
 }
 

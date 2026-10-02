@@ -1076,6 +1076,44 @@ pub(crate) mod testing {
         c.fetch_add(1, Ordering::AcqRel);
     }
 
+    static WAIT4_KILL_ARMED: AtomicBool = AtomicBool::new(false);
+    /// The caller and `pid` argument of the `wait4` that took the kill; 0
+    /// before.
+    static WAIT4_KILL_CALLER: AtomicU32 = AtomicU32::new(0);
+    static WAIT4_KILL_WANT: AtomicU64 = AtomicU64::new(0);
+
+    /// The next `wait4` from a process posts that process a `SIGKILL`
+    /// once it has entered, as [`post_pending`] does: no wake and no IPI,
+    /// as a kill that lands before the wait is armed finds the caller on
+    /// no queue.
+    pub(crate) fn arm_wait4_kill() {
+        WAIT4_KILL_CALLER.store(0, Ordering::Release);
+        WAIT4_KILL_WANT.store(0, Ordering::Release);
+        WAIT4_KILL_ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_wait4_kill() {
+        WAIT4_KILL_ARMED.store(false, Ordering::Release);
+    }
+
+    /// The caller of the `wait4` that took the kill, and its `pid`
+    /// argument; `(0, 0)` before one did.
+    pub(crate) fn wait4_kill_taken() -> (u32, i64) {
+        (
+            WAIT4_KILL_CALLER.load(Ordering::Acquire),
+            WAIT4_KILL_WANT.load(Ordering::Acquire) as i64,
+        )
+    }
+
+    pub(super) fn wait4_entered(pid: u32, want: i64) {
+        if !WAIT4_KILL_ARMED.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        post_pending(pid, vibeos::proc::SIGKILL);
+        WAIT4_KILL_WANT.store(want as u64, Ordering::Release);
+        WAIT4_KILL_CALLER.store(pid, Ordering::Release);
+    }
+
     /// The pid the next stop stall holds; 0 for none.
     static STALL_PID: AtomicU32 = AtomicU32::new(0);
     static STALL_IN: AtomicBool = AtomicBool::new(false);

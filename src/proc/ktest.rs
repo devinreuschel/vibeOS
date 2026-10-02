@@ -15,6 +15,7 @@ mod segs;
 mod space;
 mod sysdecl;
 mod uaccess;
+mod waits;
 
 pub(crate) use counts::*;
 pub(crate) use entry::*;
@@ -30,6 +31,7 @@ pub(crate) use segs::*;
 pub(crate) use space::*;
 pub(crate) use sysdecl::*;
 pub(crate) use uaccess::*;
+pub(crate) use waits::*;
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
@@ -70,6 +72,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("elf_shared_page_jump", test_elf_shared_page_jump),
     test("brk_mmap_munmap_user", test_brk_mmap_munmap_user).deadline(30_000),
     test("stop_cont_no_lost_wakeup", test_stop_cont_no_lost_wakeup).deadline(30_000),
+    test("wait4_ends_on_pending_kill", wait4_ends_on_pending_kill).deadline(30_000),
     test("signal_on_return", test_signal_on_return).deadline(30_000),
     test("exit_work_ipi", test_exit_work_ipi).deadline(30_000),
     test("syscall_body_if_on", test_syscall_body_if_on).deadline(30_000),
