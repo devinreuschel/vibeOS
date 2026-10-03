@@ -224,6 +224,7 @@ impl Vfs {
             mount,
             flags,
             offset: 0,
+            rw: (true, true),
         };
         Ok(FileId {
             fid: i as u16,
@@ -498,12 +499,16 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         Ok(FileRef::from_raw(id))
     }
 
-    /// Finish an open: truncate a regular file for `O_TRUNC`.
+    /// Finish an open: note what the backend can do to the inode, then
+    /// truncate a regular file for `O_TRUNC`.
     fn opened(&self, f: FileRef, flags: OpenFlags) -> Result<FileRef, FsError> {
-        if flags.has(O_TRUNC)
-            && self.with(|v| v.file_kind(f.id)) == Ok(InodeKind::Reg)
-            && let Err(e) = self.ftruncate(&f, 0)
-        {
+        if let Err(e) = self.note_rw(&f).and_then(|()| {
+            if flags.has(O_TRUNC) && self.with(|v| v.file_kind(f.id)) == Ok(InodeKind::Reg) {
+                self.ftruncate(&f, 0)
+            } else {
+                Ok(())
+            }
+        }) {
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "cleanup after an error already returned (DESIGN §2.5)"
@@ -512,6 +517,19 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
             return Err(e);
         }
         Ok(f)
+    }
+
+    /// Record in open file `f`'s slot what its backend can do to the
+    /// inode ([`InodeOps::can_rw`]), for [`Self::access`].
+    fn note_rw(&self, f: &FileRef) -> Result<(), FsError> {
+        let mut c = self.with(|v| v.file_islot(f.id).and_then(|i| v.call(i)))?;
+        let rw = c.run(|o, cx, n| o.can_rw(cx, n));
+        self.step(|v| {
+            v.finish(c, false);
+            let i = v.file_slot(f.id)?;
+            v.files[i].rw = rw;
+            Ok(())
+        })
     }
 
     /// Open the inode `r` names, found by a walk outside the dentry
@@ -527,19 +545,23 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     /// What a `read` (`write` false) or `write` of open file `id` checks
-    /// before the caller's buffer, in Linux's order (read(2), write(2)):
-    /// `Badf` unless `id` is open for that access. The inode's kind, for
-    /// the checks that follow the buffer's.
+    /// before the caller's buffer, in Linux's `vfs_read` and `vfs_write`
+    /// order: `Badf` unless `id` is open for that access, then `Inval`
+    /// when the backend has no such operation for the inode. The inode's
+    /// kind, for the checks that follow the buffer's.
     pub fn access(&self, id: FileId, write: bool) -> Result<InodeKind, FsError> {
         self.with(|v| {
             let f = v.files[v.file_slot(id)?];
-            let open = if write {
-                f.flags.writes()
+            let (open, can) = if write {
+                (f.flags.writes(), f.rw.1)
             } else {
-                f.flags.reads()
+                (f.flags.reads(), f.rw.0)
             };
             if !open {
                 return Err(FsError::Badf);
+            }
+            if !can {
+                return Err(FsError::Inval);
             }
             Ok(v.inodes[f.islot as usize].kind)
         })

@@ -358,7 +358,8 @@ impl RenameSeen {
 /// creation is `Acces`, as `open(O_CREAT)` in Linux's `/proc`; reading,
 /// writing, truncating, or reading a link of an object that cannot is
 /// `Inval`; looking up or listing in a non-directory is `NotDir`; `sync`
-/// with nothing to write, `getattr`, `evict` and `check_seek` succeed.
+/// with nothing to write, `getattr`, `evict` and `check_seek` succeed, and
+/// `can_rw` reports both operations.
 pub trait InodeOps: Sync {
     fn lookup(&self, _cx: &mut OpCx<'_>, _dir: &Inode, _name: &[u8]) -> Result<InodeInfo, FsError> {
         Err(FsError::NotDir)
@@ -493,6 +494,12 @@ pub trait InodeOps: Sync {
     /// console, which `lseek` then refuses.
     fn check_seek(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> Result<(), FsError> {
         Ok(())
+    }
+    /// Whether `ino` has a read and a write operation, `(read, write)`:
+    /// one it lacks makes `read` or `write` `Inval` before the buffer is
+    /// looked at, as Linux's `FMODE_CAN_READ` and `FMODE_CAN_WRITE` do.
+    fn can_rw(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> (bool, bool) {
+        (true, true)
     }
 }
 
@@ -921,7 +928,8 @@ pub struct Mounted {
 /// changes when the slot is freed, so a [`FileId`] to an earlier file is
 /// refused with `Badf` (C-FDGEN). The size lives in the inode, never
 /// here. A slot is free, `reserved` by an `open` that has not created or
-/// truncated anything yet, or `used`.
+/// truncated anything yet, or `used`. `rw` is what the backend can do to
+/// the inode, `(read, write)`, from [`InodeOps::can_rw`] at the open.
 #[derive(Clone, Copy)]
 struct File {
     used: bool,
@@ -933,6 +941,7 @@ struct File {
     mount: u8,
     flags: OpenFlags,
     offset: u64,
+    rw: (bool, bool),
 }
 
 impl File {
@@ -946,6 +955,7 @@ impl File {
         mount: 0,
         flags: OpenFlags(0),
         offset: 0,
+        rw: (true, true),
     };
 }
 

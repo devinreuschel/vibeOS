@@ -36,6 +36,10 @@
 //!     returns 0 for `SIGKILL`, `SIGSTOP`, and `SIGCONT`, as on Linux, not
 //!     `ESRCH`, and delivers nothing: `psinfo` still says `zombie`, and
 //!     `wait4` reaps the child with the exit status it left.
+//! 15. `write` of a file with no write operation, `/proc/self/status`
+//!     opened `O_WRONLY` (as root may), returns `EINVAL` before the buffer
+//!     and the count, as Linux's `FMODE_CAN_WRITE` check: for a kernel-half
+//!     buffer and for a count of 0 too.
 
 #![no_std]
 #![no_main]
@@ -72,9 +76,11 @@ const SIGKILL: i32 = 9;
 const SIGSTOP: i32 = 19;
 /// Yields case 14 waits, at most, for its child to become a zombie.
 const ZOMBIE_TRIES: u32 = 20_000;
+/// A file with no write operation (case 15).
+const PROC_STATUS: &core::ffi::CStr = c"/proc/self/status";
 
 fn main(_env: &Env) -> i32 {
-    let cases: [fn() -> bool; 14] = [
+    let cases: [fn() -> bool; 15] = [
         read_wronly_ebadf,
         write_rdonly_ebadf,
         dup_full_emfile,
@@ -89,6 +95,7 @@ fn main(_env: &Env) -> i32 {
         execve_path_before_argv,
         getdents_device_enotdir,
         kill_zombie_returns_0,
+        write_no_op_einval_first,
     ];
     for (i, case) in cases.iter().enumerate() {
         if !case() {
@@ -323,6 +330,17 @@ fn kill_zombie_returns_0() -> bool {
         && still
         && r == Ok(pid)
         && sys::exit_code(status as u32) == Some(ZOMBIE_EXIT as u8)
+}
+
+/// Case 15.
+fn write_no_op_einval_first() -> bool {
+    let Ok(fd) = sys::open(PROC_STATUS.as_ptr().cast(), sys::O_WRONLY, 0) else {
+        return false;
+    };
+    let ok = sys::write(fd as u32, b"x".as_ptr(), 1) == Err(Errno::EINVAL)
+        && sys::write(fd as u32, KERNEL_PTR as *const u8, 1) == Err(Errno::EINVAL)
+        && sys::write(fd as u32, b"x".as_ptr(), 0) == Err(Errno::EINVAL);
+    close(fd) && ok
 }
 
 /// Close `fd`; whether it closed.

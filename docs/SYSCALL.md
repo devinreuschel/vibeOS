@@ -527,8 +527,11 @@ and `-EFAULT` when it is 0, as Linux's do. `read` from a file reads at most
 so the next `read` returns them; a file that cannot seek keeps them, as a
 Linux device does. `write` copies each 256-byte chunk in, writes the bytes
 it copied, and stops at a short chunk. The descriptor's access mode comes
-first (`-EBADF`), then the range check, then, for `read`, a directory's
-`-EISDIR`; only then does `len == 0` return 0, as on Linux.
+first (`-EBADF`), then `-EINVAL` for a file with no such operation (a
+`/proc` text file or a sysfs attribute opened for writing, whose backend
+reports it at the open, as Linux's `FMODE_CAN_WRITE`), then the range
+check, then, for `read`, a directory's `-EISDIR`; only then does `len == 0`
+return 0, as on Linux.
 
 **State before the copy.** A call that changes state before its copy-out
 keeps the change and returns `-EFAULT`: `wait4` reaps the child, then copies

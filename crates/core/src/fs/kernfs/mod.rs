@@ -659,6 +659,25 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         })
     }
 
+    /// The `/proc` text files and the sysfs attributes have no write, as
+    /// `kern_write` refuses them.
+    fn can_rw(&self, cx: &mut OpCx<'_>, ino: &Inode) -> (bool, bool) {
+        self.op(cx, |k, x| {
+            let kind = kern_get(k, x.inst, ino.key[0]).map(|n| n.kind);
+            let write = !matches!(
+                kind,
+                Some(
+                    KernKind::Lnk
+                        | KernKind::ProcCmdline
+                        | KernKind::ProcStatus
+                        | KernKind::ProcMaps
+                        | KernKind::SysAttr
+                )
+            );
+            (true, write)
+        })
+    }
+
     fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
         self.op(cx, |k, x| kern_try_free(k, x.inst, ino.key[0]));
         Ok(())

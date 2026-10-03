@@ -145,9 +145,10 @@ pub(super) fn lookup_fd(fd: u32) -> Option<Fd> {
     with_table(|t| t.get(pid).and_then(|p| p.fds.get(fd)))
 }
 
-/// `write(fd, buf, len)`. The descriptor and its access mode come before
-/// the buffer and the count, as Linux checks them: a write to an
-/// `O_RDONLY` file is `EBADF` whatever `buf` and `len` are.
+/// `write(fd, buf, len)`. The descriptor and its access mode (`EBADF`),
+/// then a file with no write (`EINVAL`), come before the buffer and the
+/// count, as Linux's `vfs_write` checks them: a write to an `O_RDONLY`
+/// file is `EBADF` whatever `buf` and `len` are.
 pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
     let len = len as u64;
     let Some(slot) = lookup_fd(fd) else {
@@ -256,8 +257,9 @@ fn key_byte(k: DecodedKey) -> Option<u8> {
 }
 
 /// `read(fd, buf, len)`, in Linux's order: the descriptor and its access
-/// mode (`EBADF`), the buffer (`EFAULT`), then a directory's `EISDIR`
-/// whatever the count, and only then a count of 0.
+/// mode (`EBADF`), a file with no read (`EINVAL`), the buffer (`EFAULT`),
+/// then a directory's `EISDIR` whatever the count, and only then a count
+/// of 0.
 pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
     let len = len as u64;
     let Some(slot) = lookup_fd(fd) else {
