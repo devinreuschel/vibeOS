@@ -3,7 +3,7 @@
 //! (ROADMAP §10.4).
 
 use super::testfs::*;
-use super::tests::{assert_dcache_sound, locked_vfs, mount_dev, press, ram, st_ino_of};
+use super::tests::{assert_dcache_sound, keyed, locked_vfs, mount_dev, press, ram, st_ino_of};
 use super::*;
 
 /// A base whose root is the namespace root and whose working directory
@@ -767,6 +767,41 @@ fn unlink_racing_rename_over_takes_the_new_file() {
         assert_eq!(api.walk(None, p, true).unwrap_err(), FsError::NotFound);
     }
     assert_eq!(used_inodes(vfs), before);
+}
+
+/// A release queued at an inode's last put waits while the inode is held
+/// again: a driver step runs no `evict` on a held inode (`KeyOps::evict`
+/// asserts it), and runs the release once, at the next last put.
+#[test]
+fn queued_release_waits_for_a_new_hold() {
+    let (mut v, id) = keyed();
+    let k = v.resolve(None, "/k", true).unwrap();
+    let sb = v.sb_of_mount(k.mount).unwrap();
+    let info = InodeInfo {
+        key: [42, 0, 0],
+        ino: 4242,
+        kind: InodeKind::Reg,
+        mode: S_IFREG_MODE,
+        nlink: 1,
+        size: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        private: [0; 2],
+    };
+    let r = v.iget_key(sb, &info).unwrap();
+    let h = r.handle();
+    v.inodes[h.slot as usize].nlink = 0;
+    v.put_ref(r);
+    v.ihold(h.slot).unwrap();
+    // A driver step drains the release queue.
+    v.stat(None, "/k").unwrap();
+    assert_eq!(with_store(id, |s| s.evicts), 0, "no evict while held");
+    assert!(v.inode(h).is_ok());
+    v.iput(h.slot);
+    v.stat(None, "/k").unwrap();
+    assert_eq!(with_store(id, |s| s.evicts), 1, "evicted at the last put");
+    assert_eq!(v.inode(h).unwrap_err(), FsError::Badf);
 }
 
 /// A rename whose source a racing unlink takes between its walks and its

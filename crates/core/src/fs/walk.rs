@@ -277,8 +277,11 @@ impl Vfs {
             return Ok(None);
         }
         let r = self.remove_check(dir, name, victim, rmdir);
-        // The victim's hold comes before the path's put, which can be its
-        // last reference and queue its release.
+        // The victim's hold comes before the path's put. The check above
+        // leaves only a live dentry, whose put never drops its inode, so
+        // the order is a defence, no test can tell it from the other: a
+        // put that was the inode's last reference would queue a release
+        // that `take_release` skips while the hold lasts.
         let held = r.and_then(|vi| self.ihold(vi).map(|()| vi));
         self.path_put(victim);
         let vi = held?;
@@ -389,8 +392,8 @@ impl Vfs {
             }
             return Ok(None);
         }
-        // The inodes' holds come before the paths' puts, which can be
-        // their last references, as in `remove_begin`.
+        // The inodes' holds come before the paths' puts, a defence, as in
+        // `remove_begin`.
         let held = self
             .rename_check((od, oname), (nd, nname), src, tgt)
             .and_then(|(si, ti)| {

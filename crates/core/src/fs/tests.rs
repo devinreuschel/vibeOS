@@ -529,7 +529,7 @@ fn dcache_f065_umount_checks_before_state() {
 }
 
 /// `ram()` with a fresh `KeyFs` on `/k`; its store id.
-fn keyed() -> (Vfs, u64) {
+pub(super) fn keyed() -> (Vfs, u64) {
     let mut v = ram();
     v.mkdir(None, "/k", 0o755).unwrap();
     let fs = keyfs_new();
