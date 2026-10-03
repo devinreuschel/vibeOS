@@ -168,10 +168,10 @@ names, Linux values:
 | `ENODEV` | 19 | a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4 |
 | `ENOTDIR` | 20 | |
 | `EISDIR` | 21 | |
-| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written; `open` with `O_CREAT` and `O_DIRECTORY` together, as Linux from 6.4; `open` with `O_TRUNC` of a `/proc` file |
+| `EINVAL` | 22 | `lseek` with a bad `whence`, or a resulting offset below 0 or above the filesystem's file-size limit (vibefs 2^44 − 4096, FAT 2^32 − 1), unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written; `open` with `O_CREAT` and `O_DIRECTORY` together, as Linux from 6.4; `open` with `O_TRUNC` of a `/proc` file |
 | `ENFILE` | 23 | `open` or `execve` with the system-wide open-file table full: 1024 open files, `limits::MAX_OPEN_FILES` |
 | `EMFILE` | 24 | per-process fd table full: 256 descriptors, `limits::MAX_FDS` (`open`, `dup`) |
-| `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit |
+| `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` that starts at or past byte 2^32 − 1 (`fat::MAX_FILE_SIZE`), FAT's file-size limit |
 | `ENOSPC` | 28 | `write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent |
 | `ESPIPE` | 29 | `lseek` on the console, `/dev/console`, or `/dev/tty` |
 | `EROFS` | 30 | defined; no syscall returns it: a write to a read-only virtio-blk device fails with it in the block layer |
@@ -243,7 +243,7 @@ the row does not allow it, and needs `EFAULT` from each.
 
 | x86_64 | aarch64 | name | arity | arguments | pointer arguments | errors | notes |
 |---:|---:|------|------:|-----------|-------------------|--------|-------|
-| 0 | 63 | `read` | 3 | `unsigned int fd`, `char *buf`, `size_t count` | `buf`: out, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EISDIR`, `EIO` (`vblk_bad_sector`) | — |
+| 0 | 63 | `read` | 3 | `unsigned int fd`, `char *buf`, `size_t count` | `buf`: out, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EISDIR`, `EAGAIN` (`dev_random_eagain`), `EIO` (`vblk_bad_sector`) | — |
 | 1 | 64 | `write` | 3 | `unsigned int fd`, `const char *buf`, `size_t count` | `buf`: in, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EINVAL`, `EFBIG`, `ENOSPC`, `EIO` (`vblk_bad_sector`) | — |
 | 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `EACCES`, `ELOOP`, `EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM` (`kalloc_nomem`), `EIO` (`vblk_bad_sector`) | `pathname` at most 255 bytes |
 | 3 | 57 | `close` | 1 | `unsigned int fd` | — | `EBADF` | — |
@@ -258,7 +258,7 @@ the row does not allow it, and needs `EFAULT` from each.
 | 35 | 101 | `nanosleep` | 2 | `const struct __kernel_timespec *rqtp`, `struct __kernel_timespec *rmtp` | `rqtp`: in, 16 bytes, before anything else; `rmtp`: not read (ROADMAP §13.8) | `EFAULT`, `EINVAL` | `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1 |
 | 39 | 172 | `getpid` | 0 | — | — | — | `0` if the caller is not a process |
 | 57 | — | `fork` | 0 | — | — | `EAGAIN`, `ENOMEM` (`fork_oom`) | full address-space copy; the child returns 0 |
-| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname` resolves to a regular file, as Linux opens it first; `envp`: C string vector, may be NULL, after `argv` | `EFAULT`, `ENAMETOOLONG`, `ENOENT`, `ENOTDIR`, `EACCES`, `ELOOP`, `ENFILE`, `E2BIG`, `ENOEXEC`, `ENOMEM` | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
+| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname` resolves to a regular file, as Linux opens it first; `envp`: C string vector, may be NULL, after `argv` | `EFAULT`, `ENAMETOOLONG`, `ENOENT`, `ENOTDIR`, `EACCES`, `ELOOP`, `ENFILE`, `E2BIG`, `ENOEXEC`, `ENOMEM`, `EIO` (`vblk_bad_sector`) | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
 | 60 | 93 | `exit` | 1 | `int status` | — | — | the low 8 bits of `status` |
 | 61 | 260 | `wait4` | 4 | `pid_t pid`, `int *wstatus`, `int options`, `struct rusage *rusage` | `wstatus`: out, 4 bytes, may be NULL, after a child is reaped; `rusage`: not read (ROADMAP §13.7) | `ECHILD`, `EFAULT` | — |
 | 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | `EINVAL`, `ESRCH` | default actions only |
@@ -289,12 +289,13 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   `mkdir` (F057; ROADMAP §10.4)
 - `lseek`: `SEEK_END` reads the size from the file's inode (FAT's
   counted in-core inode or the vibefs inode), so it sees writes through
-  any descriptor. On a vibefs file a resulting offset above 2^44 − 4096
-  (VIBEFS.md §3) returns `EINVAL`, as Linux's does past a filesystem's
+  any descriptor. A resulting offset above the filesystem's file-size
+  limit, 2^44 − 4096 on vibefs (VIBEFS.md §3) and 2^32 − 1 on FAT
+  (`fat::MAX_FILE_SIZE`, its dirent's 32-bit size, Linux's vfat
+  `s_maxbytes`), returns `EINVAL`, as Linux's does past a filesystem's
   maximum file size; a `write` that starts at or past the limit returns
   `EFBIG`, and one that would cross it is cut short at the limit, as
-  Linux's is. On a FAT file any offset from 0 to `i64::MAX` is accepted
-  (F008; ROADMAP §10.11). A `whence` past `SEEK_HOLE` is `EINVAL` before
+  Linux's is (F008; ROADMAP §10.11). A `whence` past `SEEK_HOLE` is `EINVAL` before
   the descriptor's kind is looked at, so the console gives it too, as on
   Linux; then a file that cannot seek (the console, `/dev/console`, or
   `/dev/tty`, however it was opened) is `ESPIPE` whatever the offset, and

@@ -53,8 +53,8 @@ args = [
   { name = "buf", type = "char *", ptr = "buf", len = "count", dir = "out", when = "after the `fd` lookup" },
   { name = "count", type = "size_t" },
 ]
-errors = ["EBADF", "EFAULT", "EISDIR", "EIO"]
-ktest = { EIO = "vblk_bad_sector" }
+errors = ["EBADF", "EFAULT", "EISDIR", "EAGAIN", "EIO"]
+ktest = { EAGAIN = "dev_random_eagain", EIO = "vblk_bad_sector" }
 note = ""
 
 [[syscall]]
@@ -223,8 +223,9 @@ args = [
 ]
 errors = [
   "EFAULT", "ENAMETOOLONG", "ENOENT", "ENOTDIR", "EACCES", "ELOOP", "ENFILE", "E2BIG", "ENOEXEC",
-  "ENOMEM",
+  "ENOMEM", "EIO",
 ]
+ktest = { EIO = "vblk_bad_sector" }
 note = "`argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1)"
 
 [[syscall]]

@@ -71,10 +71,10 @@ errno_table! {
     NoDev = 19, "ENODEV", "a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4";
     NotDir = 20, "ENOTDIR", "";
     IsDir = 21, "EISDIR", "";
-    Inval = 22, "EINVAL", "`lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written; `open` with `O_CREAT` and `O_DIRECTORY` together, as Linux from 6.4; `open` with `O_TRUNC` of a `/proc` file";
+    Inval = 22, "EINVAL", "`lseek` with a bad `whence`, or a resulting offset below 0 or above the filesystem's file-size limit (vibefs 2^44 − 4096, FAT 2^32 − 1), unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written; `open` with `O_CREAT` and `O_DIRECTORY` together, as Linux from 6.4; `open` with `O_TRUNC` of a `/proc` file";
     NFile = 23, "ENFILE", "`open` or `execve` with the system-wide open-file table full: 1024 open files, `limits::MAX_OPEN_FILES`";
     MFile = 24, "EMFILE", "per-process fd table full: 256 descriptors, `limits::MAX_FDS` (`open`, `dup`)";
-    FBig = 27, "EFBIG", "a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit";
+    FBig = 27, "EFBIG", "a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` that starts at or past byte 2^32 − 1 (`fat::MAX_FILE_SIZE`), FAT's file-size limit";
     NoSpc = 28, "ENOSPC", "`write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent";
     SPipe = 29, "ESPIPE", "`lseek` on the console, `/dev/console`, or `/dev/tty`";
     RoFs = 30, "EROFS", "defined; no syscall returns it: a write to a read-only virtio-blk device fails with it in the block layer";

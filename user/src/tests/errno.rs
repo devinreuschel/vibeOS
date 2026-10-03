@@ -105,6 +105,7 @@ const PAIRS: &[Pair] = &[
     pair(Sys::Read, Errno::EBADF, Run(|| Ok(read_into(99, 16)))),
     pair(Sys::Read, Errno::EFAULT, Run(read_efault)),
     pair(Sys::Read, Errno::EISDIR, Run(read_eisdir)),
+    pair(Sys::Read, Errno::EAGAIN, Ktest),
     pair(Sys::Read, Errno::EIO, Ktest),
     pair(
         Sys::Write,
@@ -242,6 +243,7 @@ const PAIRS: &[Pair] = &[
     pair(Sys::Execve, Errno::E2BIG, Delegate("exec_arg_131072_e2big")),
     pair(Sys::Execve, Errno::ENOEXEC, Run(execve_enoexec)),
     pair(Sys::Execve, Errno::ENOMEM, Run(execve_enomem)),
+    pair(Sys::Execve, Errno::EIO, Ktest),
     pair(Sys::Wait4, Errno::ECHILD, Run(wait4_echild)),
     pair(Sys::Wait4, Errno::EFAULT, Run(wait4_efault)),
     pair(Sys::Kill, Errno::EINVAL, Run(kill_einval)),
