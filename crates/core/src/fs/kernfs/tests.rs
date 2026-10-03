@@ -669,3 +669,62 @@ fn sysfs_failed_add_takes_back_its_nodes() {
     assert!(has_name(&mut v, "/sys/devices", b"00:0b.0"));
     assert!(has_name(&mut v, "/sys/bus/pci/drivers", b"virtio-blk"));
 }
+
+#[test]
+fn tmpfs_rename_moves_and_replaces_as_linux() {
+    let (mut v, k) = boot();
+    write_at(&mut v, "/tmp/a", 0, b"AAA");
+    write_at(&mut v, "/tmp/b", 0, b"BB");
+    for d in ["/tmp/d", "/tmp/e", "/tmp/f"] {
+        v.mkdir(None, d, 0o755).unwrap();
+    }
+    write_at(&mut v, "/tmp/e/x", 0, b"X");
+    let (used, _, _) = node_counts(&k);
+    let root_links = v.stat(None, "/tmp").unwrap().nlink;
+
+    // A file replaces a file; the replaced node goes at its last put.
+    v.rename(None, "/tmp/a", "/tmp/b").unwrap();
+    assert_eq!(read_at(&mut v, "/tmp/b", 0, 3), b"AAA");
+    assert_eq!(v.stat(None, "/tmp/a").err(), Some(FsError::NotFound));
+    assert_eq!(node_counts(&k).0, used - 1);
+
+    // rename(2)'s kind rules, and a directory replaces only an empty one.
+    assert_eq!(v.rename(None, "/tmp/b", "/tmp/d"), Err(FsError::IsDir));
+    assert_eq!(v.rename(None, "/tmp/d", "/tmp/b"), Err(FsError::NotDir));
+    assert_eq!(v.rename(None, "/tmp/d", "/tmp/e"), Err(FsError::NotEmpty));
+    v.rename(None, "/tmp/d", "/tmp/f").unwrap();
+    assert_eq!(v.stat(None, "/tmp/d").err(), Some(FsError::NotFound));
+    assert_eq!(v.stat(None, "/tmp/f").unwrap().kind, InodeKind::Dir);
+    assert_eq!(v.stat(None, "/tmp").unwrap().nlink, root_links - 1);
+
+    // Across directories: a file, then a directory whose `..` follows it.
+    v.rename(None, "/tmp/b", "/tmp/e/y").unwrap();
+    assert_eq!(read_at(&mut v, "/tmp/e/y", 0, 3), b"AAA");
+    v.rename(None, "/tmp/e", "/tmp/f/g").unwrap();
+    assert_eq!(read_at(&mut v, "/tmp/f/g/x", 0, 1), b"X");
+    let f = v.stat(None, "/tmp/f").unwrap();
+    assert_eq!(v.stat(None, "/tmp/f/g/..").unwrap().ino, f.ino);
+    assert_eq!(f.nlink, 3);
+    assert_eq!(v.stat(None, "/tmp").unwrap().nlink, root_links - 2);
+    assert!(has_name(&mut v, "/tmp/f", b"g"));
+    assert!(!has_name(&mut v, "/tmp", b"e"));
+
+    // A replaced file stays readable through a descriptor held open on it.
+    write_at(&mut v, "/tmp/p", 0, b"PP");
+    write_at(&mut v, "/tmp/q", 0, b"QQ");
+    let held = v.open_path(None, "/tmp/p", O_RDWR, 0).unwrap();
+    let before = node_counts(&k).0;
+    v.rename(None, "/tmp/q", "/tmp/p").unwrap();
+    assert_eq!(node_counts(&k).0, before);
+    let mut b = [0u8; 2];
+    assert_eq!(v.read(&held, &mut b).unwrap(), 2);
+    assert_eq!(&b, b"PP");
+    v.close(held).unwrap();
+    assert_eq!(node_counts(&k).0, before - 1);
+    assert_eq!(read_at(&mut v, "/tmp/p", 0, 2), b"QQ");
+
+    // A name onto itself changes nothing; the kernel's skins move nothing.
+    v.rename(None, "/tmp/p", "/tmp/p").unwrap();
+    assert_eq!(read_at(&mut v, "/tmp/p", 0, 2), b"QQ");
+    assert_eq!(v.rename(None, "/dev/null", "/dev/nul2"), Err(FsError::Perm));
+}

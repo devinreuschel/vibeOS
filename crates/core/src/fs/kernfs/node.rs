@@ -494,6 +494,84 @@ pub(super) fn kern_unlink(
     Ok(())
 }
 
+/// Move `oname` in `odir` to `nname` in `ndir`, replacing what `nname`
+/// names, as rename(2) does. A replaced node keeps its node until [`Vfs`]
+/// evicts it at its last put, as [`kern_unlink`]'s child does. A tmpfs
+/// node has one name, so the move only relinks it; the moved node takes
+/// a new place in `ndir`'s listing, as Linux's tmpfs gives it a new
+/// offset.
+pub(super) fn kern_rename(
+    k: &mut KernState,
+    x: Kx,
+    (odir, oname): (&mut Inode, &[u8]),
+    (ndir, nname): (&mut Inode, &[u8]),
+) -> Result<(), FsError> {
+    if x.ty != FsType::Tmp {
+        return Err(FsError::Perm);
+    }
+    let (k, t, inst) = (&mut *k, x.now, x.inst);
+    let (od, nd) = (odir.key[0], ndir.key[0]);
+    let nm = Name::from_bytes(nname)?;
+    if nm.is_dot() || nm.is_dotdot() {
+        return Err(FsError::Inval);
+    }
+    let node = kern_find_child(k, inst, od, oname).ok_or(FsError::NotFound)?;
+    let is_dir = kern_get(k, inst, node)
+        .ok_or(FsError::NotFound)?
+        .kind
+        .inode_kind()
+        == InodeKind::Dir;
+    if od == nd && oname == nname {
+        return Ok(());
+    }
+    let n = kern_get(k, inst, nd).ok_or(FsError::NotFound)?;
+    if n.kind.inode_kind() != InodeKind::Dir {
+        return Err(FsError::NotDir);
+    }
+    let tgt = kern_find_child(k, inst, nd, nname);
+    if let Some(tg) = tgt {
+        let tn = kern_get(k, inst, tg).ok_or(FsError::NotFound)?;
+        match (is_dir, tn.kind.inode_kind() == InodeKind::Dir) {
+            (false, true) => return Err(FsError::IsDir),
+            (true, false) => return Err(FsError::NotDir),
+            (true, true) if tn.child != 0 => return Err(FsError::NotEmpty),
+            _ => {}
+        }
+        kern_unlink_child(k, nd, tg);
+        if let Some(c) = kern_get_mut(k, inst, tg) {
+            c.nlink = if is_dir { 0 } else { c.nlink.saturating_sub(1) };
+            c.ctime = t;
+        }
+        // A replaced directory's `..` linked `nd`.
+        if is_dir && let Some(p) = kern_get_mut(k, inst, nd) {
+            p.nlink = p.nlink.saturating_sub(1);
+        }
+    }
+    kern_unlink_child(k, od, node);
+    if let Some(c) = kern_get_mut(k, inst, node) {
+        c.name = nm;
+        c.ctime = t;
+    }
+    kern_link(k, nd, node);
+    if is_dir && od != nd {
+        if let Some(p) = kern_get_mut(k, inst, od) {
+            p.nlink = p.nlink.saturating_sub(1);
+        }
+        if let Some(p) = kern_get_mut(k, inst, nd) {
+            p.nlink = p.nlink.saturating_add(1);
+        }
+    }
+    touch_dir(k, inst, od, t);
+    touch_dir(k, inst, nd, t);
+    if let Some(n) = kern_get(k, inst, od) {
+        n.meta_into(odir);
+    }
+    if let Some(n) = kern_get(k, inst, nd) {
+        n.meta_into(ndir);
+    }
+    Ok(())
+}
+
 pub(super) fn kern_read(
     k: &mut KernState,
     x: Kx,

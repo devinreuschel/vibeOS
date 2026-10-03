@@ -26,8 +26,8 @@ use crate::kalloc::{AllocError, TryVec};
 use crate::limits::{MAX_KERN_MOUNTS, TMPFS_NODE_HEAP_BYTES};
 
 use super::{
-    Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps, MAX_NAME,
-    Name, OpCx, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT, S_IFREG_MODE,
+    Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps, Key,
+    MAX_NAME, Name, OpCx, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT, S_IFREG_MODE,
 };
 
 mod devfs;
@@ -40,8 +40,9 @@ use devfs::{blk_read, blk_write};
 use node::{
     kern_alloc, kern_create, kern_drop_sb, kern_find_child, kern_get, kern_get_mut, kern_idx,
     kern_info, kern_link, kern_lookup, kern_lookup_ino, kern_mk_dir, kern_mk_lnk, kern_mk_root,
-    kern_mk_special, kern_read, kern_readdir, kern_readlink, kern_release, kern_truncate,
-    kern_try_free, kern_unlink, kern_unlink_child, kern_write, set_target, target_bytes,
+    kern_mk_special, kern_read, kern_readdir, kern_readlink, kern_release, kern_rename,
+    kern_truncate, kern_try_free, kern_unlink, kern_unlink_child, kern_write, set_target,
+    target_bytes,
 };
 use procfs::{PROC_CMDLINE, PROC_MAPS, PROC_STATUS};
 use sysfs::sys_attr_read;
@@ -553,6 +554,18 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
 
     fn rmdir(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
         self.op(cx, |k, x| kern_unlink(k, x, dir, name))
+    }
+
+    fn rename(
+        &self,
+        cx: &mut OpCx<'_>,
+        odir: &mut Inode,
+        oname: &[u8],
+        ndir: &mut Inode,
+        nname: &[u8],
+    ) -> Result<Option<Key>, FsError> {
+        self.op(cx, |k, x| kern_rename(k, x, (odir, oname), (ndir, nname)))
+            .map(|()| None)
     }
 
     fn read(
