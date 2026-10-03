@@ -74,8 +74,8 @@ fn live_processes() -> Option<usize> {
 
 /// Fork children that each write one byte to [`LIFE_FILE`] through the
 /// descriptor, and so the offset, they share with this process, then
-/// exit; the next fork waits for that byte, so at most two children live
-/// at once, one with only its exit left. The wait is not for a zombie:
+/// exit; the next fork waits for that byte, so few children are live at
+/// once, each past its byte with only its exit left. The wait is not for a zombie:
 /// `psinfo` leaves a child out once the table outgrows its 512 bytes,
 /// and `kill` returns 0 for a zombie as for a live process. Forks 1 to
 /// `MAX_PROCS - live` succeed, and the next one is `-EAGAIN`. Then every

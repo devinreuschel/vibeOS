@@ -20,7 +20,7 @@ const WNOHANG: i32 = 1;
 const SIGKILL: i32 = 9;
 
 /// The 1 ms sleeps `yes_row` takes, at most, while it waits for `yes`'s
-/// first line: 2 s in all.
+/// first line: about 2 s in all, each sleep rounded up to the tick.
 const YES_POLLS: u32 = 2_000;
 
 const IN: &[u8] = b"/tmp/u75-in";
@@ -389,8 +389,8 @@ fn yes_row() -> Result<(), &'static str> {
     let pid = spawn(&[c"/bin/yes", c"abc"], &[], None, OUT, false).map_err(|_| "yes abc")?;
     // The child runs while the parent sleeps (F128: both are pinned to the
     // BSP). A fork copies the whole address space under TCG, so the first
-    // line can take a while there; under KVM, `yes` can fill `/tmp`'s
-    // 64 KiB store within 20 ms, so the wait is in 1 ms steps.
+    // line can take a while there; under KVM, `yes` can fill `/tmp` before
+    // a long sleep ends, so the wait is in 1 ms steps.
     let mut slept = Ok(());
     for _ in 0..YES_POLLS {
         if slept.is_err() || file_len(OUT).is_ok_and(|n| n >= 4) {
