@@ -1,8 +1,8 @@
 use super::*;
 
 /// How many times an unlink, rmdir or rename walks its names: once, and
-/// again when a racing change took a name's dentry before the begin step
-/// (DESIGN §2.5's bounded retry).
+/// again when a racing change left a name naming another file than the
+/// walk found before the begin step (DESIGN §2.5's bounded retry).
 const WALKS: usize = 2;
 
 /// Where a walk starts: an absolute path at `root`, a relative one at
@@ -238,10 +238,33 @@ impl Vfs {
         Ok(())
     }
 
+    /// Whether held path `p`, which a walk of `name` in `dir` resolved,
+    /// still names that file: its dentry is live and still `name` in
+    /// `dir`. A racing unlink kills the dentry, and a racing rename kills
+    /// the one it replaces and moves the one it moves, to another parent
+    /// or name; either way `name` may now be another file, or none. A
+    /// mount's root, where the walk followed a mount on `name`, still
+    /// names it: a mount point is neither unlinked nor renamed.
+    fn still_named(&self, dir: PathRef, name: &[u8], p: PathRef) -> bool {
+        let d = &self.dentries[p.dslot as usize];
+        if !d.used || d.dead || d.negative {
+            return false;
+        }
+        p.mount != dir.mount
+            || (d.parent == dir.dslot
+                && self
+                    .sb_ops(self.sb_of(dir.mount))
+                    .name_eq(d.name.as_bytes(), name))
+    }
+
     /// An unlink's or rmdir's call on directory `dir`, holding `victim`,
     /// the held dentry `name` resolved to, which this step puts. `None`
-    /// when that dentry lost its name to a racing unlink or rename after
-    /// the walk: `name` may now be another file, so the caller walks again.
+    /// when that dentry no longer names `name` in `dir`
+    /// ([`Self::still_named`]), after a racing change between the walk
+    /// and this step: the caller walks again. This step closes only that
+    /// window: the backend call after it runs with the VFS lock dropped,
+    /// and acts on whatever `name` names then, until the directory locks
+    /// ROADMAP §13.9's `renameat` lines build serialize the two.
     fn remove_begin(
         &mut self,
         dir: PathRef,
@@ -249,7 +272,7 @@ impl Vfs {
         victim: PathRef,
         rmdir: bool,
     ) -> Result<Option<(Call, u16)>, FsError> {
-        if self.dentries[victim.dslot as usize].dead {
+        if !self.still_named(dir, name, victim) {
             self.path_put(victim);
             return Ok(None);
         }
@@ -337,7 +360,11 @@ impl Vfs {
 
     /// A rename's calls on its two directories, holding the inode it
     /// moves (`src`) and the one it may replace (`tgt`), held paths this
-    /// step puts.
+    /// step puts. `None` when a racing change after the walks left either
+    /// name naming another file than the walk found, as in
+    /// `remove_begin`: `src` or `tgt` no longer named by `oname` or
+    /// `nname`, or a file now at an `nname` the walk found free. The
+    /// caller walks both again.
     fn rename_begin(
         &mut self,
         (od, oname): (PathRef, &[u8]),
@@ -345,10 +372,17 @@ impl Vfs {
         src: PathRef,
         tgt: Option<PathRef>,
     ) -> Result<Option<RenameCall>, FsError> {
-        let dead = |v: &Self, p: PathRef| v.dentries[p.dslot as usize].dead;
-        if dead(self, src) || tgt.is_some_and(|t| dead(self, t)) {
-            // A name lost its dentry to a racing change after the walk,
-            // as in `remove_begin`: the caller walks both again.
+        let made = || {
+            let sb = self.sb_of(nd.mount);
+            self.dcache_peek(sb, nd.dslot, nname)
+                .is_some_and(|d| !self.dentries[d as usize].negative)
+        };
+        let stale = !self.still_named(od, oname, src)
+            || match tgt {
+                Some(t) => !self.still_named(nd, nname, t),
+                None => made(),
+            };
+        if stale {
             self.path_put(src);
             if let Some(t) = tgt {
                 self.path_put(t);
@@ -1078,9 +1112,10 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     /// Remove `name` from `dir`. The walk and the begin step are two
-    /// holds of the VFS lock, so a racing change can take `name`'s dentry
-    /// between them; `name` is then walked again, up to [`WALKS`] times
-    /// in all (DESIGN §2.5's bounded retry), and is `NotFound` after.
+    /// holds of the VFS lock, so a racing change can leave `name` naming
+    /// another file between them; `name` is then walked again, up to
+    /// [`WALKS`] times in all (DESIGN §2.5's bounded retry), and is
+    /// `NotFound` after.
     fn remove_in(
         &self,
         dir: PathRef,
@@ -1122,8 +1157,8 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     /// Move `o`'s name to `n`'s, walking both again when a racing change
-    /// took either's dentry before the begin step, as [`Self::remove_in`]
-    /// does.
+    /// left either naming another file than the walks found before the
+    /// begin step, as [`Self::remove_in`] does.
     fn rename_in(
         &self,
         o: (PathRef, &[u8]),
