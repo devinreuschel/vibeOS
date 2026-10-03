@@ -33,7 +33,9 @@ use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use kernfs::{test_kernfs_nodes_grow, test_tmp_full_spares_system_nodes};
 pub(crate) use lock::{test_fat_vol_wait_no_eio, test_vfs_io_off_lock};
-pub(crate) use ops::{test_vfs_backends_via_ops, test_vfs_fat_one_inode};
+pub(crate) use ops::{
+    test_fat_rename_racing_writes, test_vfs_backends_via_ops, test_vfs_fat_one_inode,
+};
 pub(crate) use routing::{
     test_fat_initrd_dev_no_null, test_vfs_unlink_drops_parent_dentry, test_vfs_user_dev_nodes,
 };
@@ -1193,6 +1195,20 @@ pub(crate) fn fat_read_hook() {
     FAT_READ_HELD.store(false, Ordering::Release);
 }
 
+/// Armed by `fat_rename_racing_writes`: the next [`fat_rename_hook`]
+/// runs that test's writes.
+pub(crate) static FAT_RENAME_RACE: AtomicBool = AtomicBool::new(false);
+
+/// `FatOps::rename` after its volume section and before `Vfs` commits
+/// the move, with neither lock held: when [`FAT_RENAME_RACE`] is armed,
+/// disarm it and write through both names, as a write racing the rename
+/// would.
+pub(crate) fn fat_rename_hook() {
+    if FAT_RENAME_RACE.swap(false, Ordering::AcqRel) {
+        ops::rename_window_writes();
+    }
+}
+
 /// `fat_init`'s `Io::read` and `Io::write` on a block device, under the
 /// volume lock: sleep [`BLK_DELAY_MS`] first.
 pub(crate) fn blk_request_hook() {
@@ -1257,6 +1273,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("vfs_vibe_ops_mem", test_vfs_vibe_ops_mem).once(),
     test("vfs_backends_via_ops", test_vfs_backends_via_ops),
     test("vfs_fat_one_inode", test_vfs_fat_one_inode),
+    test("fat_rename_racing_writes", test_fat_rename_racing_writes),
     test(
         "fs_drop_slot_waits_for_holder",
         test_fs_drop_slot_waits_for_holder,

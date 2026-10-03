@@ -432,6 +432,8 @@ impl Vfs {
                 seen: RenameSeen {
                     src: self.inodes[si as usize].key,
                     tgt: ti.map(|t| self.inodes[t as usize].key),
+                    src_words: self.inodes[si as usize].words().ok(),
+                    tgt_words: ti.and_then(|t| self.inodes[t as usize].words().ok()),
                 },
             })),
             Err(e) => {

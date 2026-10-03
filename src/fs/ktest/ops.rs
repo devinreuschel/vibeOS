@@ -1,8 +1,11 @@
 //! In-guest tests of the VFS through each backend's ops (kernel_tests
 //! only). Rows: the parent `ktest.rs`'s `TESTS`.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use vibeos::fs::{
-    FileRef, FsError, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, O_TRUNC, OpenFlags, SeekFrom,
+    FileRef, FsError, O_APPEND, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
+    OpenFlags, SeekFrom,
 };
 
 use super::hooks;
@@ -136,6 +139,87 @@ fn backends_via_ops() -> StepS12<()> {
     }
     if !step("readdir /vibe", lists(b"/vibe", b"vo_h"))? {
         return Err(("/vibe lists vo_h", FsError::NotFound));
+    }
+    Ok(())
+}
+
+const RACE_FROM: &[u8] = b"/vo_rnew";
+const RACE_TO: &[u8] = b"/vo_rlog";
+/// The writes [`rename_window_writes`] made, of 2.
+static RACE_WROTE: AtomicU32 = AtomicU32::new(0);
+
+/// Write `data` to a new file `path`, replacing one there.
+fn write_new(path: &[u8], data: &[u8]) -> StepS12<()> {
+    let flags = OpenFlags::from_bits(O_WRONLY | O_CREAT | O_TRUNC);
+    let f = step("open", file_init::open(path, flags, 0o644))?;
+    let w = file_init::write(&f, data);
+    step("close", file_init::close(f))?;
+    match step("write", w)? {
+        n if n == data.len() => Ok(()),
+        _ => Err(("short write", FsError::Io)),
+    }
+}
+
+/// Append `data` to `path`.
+fn append(path: &[u8], data: &[u8]) -> Result<(), FsError> {
+    let f = file_init::open(path, OpenFlags::from_bits(O_WRONLY | O_APPEND), 0)?;
+    let w = file_init::write(&f, data);
+    file_init::close(f).and(w).map(|_| ())
+}
+
+/// The writes `fat_rename_hook` runs between FAT's rename of
+/// [`RACE_FROM`] over [`RACE_TO`] and the VFS's commit: an append through
+/// each name, which walks to the moved file and to the replaced one.
+pub(super) fn rename_window_writes() {
+    let n = [(RACE_FROM, &b"+M"[..]), (RACE_TO, b"+R")]
+        .into_iter()
+        .filter(|(p, d)| append(p, d).is_ok())
+        .count();
+    RACE_WROTE.store(n as u32, Ordering::Release);
+}
+
+/// A rename over a FAT file with a write through each name between the
+/// backend's rename and the VFS's commit, as a logger appending to its
+/// log while it is rotated: the replaced file's write leaves the dirent
+/// its slot now holds for the moved file, and the moved file's write
+/// reaches that dirent, so the name holds the moved file's bytes and its
+/// append on disk.
+pub(crate) fn test_fat_rename_racing_writes() -> Outcome {
+    if !fat_init::live() {
+        return Outcome::Fail("no FAT initrd");
+    }
+    let r = rename_racing_writes();
+    super::FAT_RENAME_RACE.store(false, Ordering::Release);
+    let mut clean = Ok(());
+    for p in [RACE_FROM, RACE_TO] {
+        match file_init::unlink(p) {
+            Ok(()) | Err(FsError::NotFound) => {}
+            Err(e) => clean = Err(("unlink after", e)),
+        }
+    }
+    outcome(r.and(clean))
+}
+
+fn rename_racing_writes() -> StepS12<()> {
+    write_new(RACE_FROM, b"moved")?;
+    write_new(RACE_TO, b"replaced-file")?;
+    RACE_WROTE.store(0, Ordering::Release);
+    super::FAT_RENAME_RACE.store(true, Ordering::Release);
+    step("rename", file_init::rename_at(None, RACE_FROM, RACE_TO))?;
+    if super::FAT_RENAME_RACE.load(Ordering::Acquire) || RACE_WROTE.load(Ordering::Acquire) != 2 {
+        return Err(("the writes in the rename's window did not run", FsError::Io));
+    }
+    let mut got = [0u8; 64];
+    let (size, n) = step(
+        "read the dirent",
+        fat_init::ktest_root_file(&RACE_TO[1..], &mut got),
+    )?;
+    if (size, &got[..n]) != (7, &b"moved+M"[..]) {
+        crate::ktest_info!(
+            "/vo_rlog on disk: size {size}, {:?}",
+            core::str::from_utf8(&got[..n])
+        );
+        return Err(("the dirent names other bytes", FsError::Io));
     }
     Ok(())
 }

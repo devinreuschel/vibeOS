@@ -24,8 +24,8 @@ use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, Node, SEC};
 use vibeos::fs::{
-    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
-    Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFREG_MODE, WalkBase,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, InodeWords, Key,
+    MAX_PATH, Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFREG_MODE, WalkBase,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -289,7 +289,9 @@ pub fn inode_info(
 
 /// FAT's [`InodeOps`], behind a FAT superblock's `ops` pointer. The
 /// superblock's private words are `[vol, 0]`; an inode's are
-/// `[first_clu, (dir_clu << 32) | dir_off]`. Every op runs with the VFS
+/// `[first_clu, (dir_clu << 32) | dir_off]`, its dirent, which a rename
+/// moves and makes [`NO_DIRENT`] for the file it replaces before `Vfs`
+/// re-keys or unlinks either. Every op runs with the VFS
 /// lock dropped and reads the inode's size and words from its slot's
 /// words inside the busy section, never from the copy it is handed.
 pub struct FatOps;
@@ -357,15 +359,31 @@ impl InodeOps for FatOps {
         nname: &[u8],
         seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
-        with_vol(vol_of(cx)?, |v, d| {
+        let moved = with_vol(vol_of(cx)?, |v, d| {
             let (o, _) = words(odir)?;
             let (n, _) = words(ndir)?;
             let src = key_at(v, d, o.first_clu, oname)?;
             let tgt = key_at(v, d, n.first_clu, nname)?;
             seen.check(src, tgt)?;
             let m = v.rename(d, o.first_clu, oname, n.first_clu, nname)?;
+            // `Vfs` re-keys the moved inode and unlinks the replaced one
+            // only after this returns, and a write on either can take the
+            // volume lock first: the moved inode's words name its new
+            // dirent, and the replaced one's none, since its slot now holds
+            // the moved file's entry.
+            if let Some(w) = seen.src_words {
+                set_dirent(w, dirent_word(m.to.0, m.to.1));
+            }
+            if m.replaced.is_some()
+                && let Some(w) = seen.tgt_words
+            {
+                set_dirent(w, NO_DIRENT);
+            }
             Ok((m.from != m.to).then_some([m.to.0, m.to.1, 0]))
-        })
+        })?;
+        #[cfg(feature = "kernel_tests")]
+        crate::fs::ktest::fat_rename_hook();
+        Ok(moved)
     }
 
     fn read(
@@ -525,21 +543,33 @@ fn dirent_word(dir_clu: u32, dir_off: u32) -> u64 {
     (u64::from(dir_clu) << 32) | u64::from(dir_off)
 }
 
+/// The dirent word of an inode whose dirent a rename gave to another
+/// file ([`FatOps::rename`]): no cluster is `u32::MAX`.
+const NO_DIRENT: u64 = u64::MAX;
+
+/// Point inode words `w` at dirent word `at`, keeping its first cluster;
+/// inside the volume section, where every change to FAT's words is made.
+fn set_dirent(w: &InodeWords, at: u64) {
+    w.set_private([w.private()[0], at]);
+}
+
 /// The words of inode `ino` as its slot holds them now
-/// ([`Inode::words`]), and whether it still has its dirent: its key and
-/// kind from the op's copy, its first cluster, size and link count from
-/// the slot's words. Called inside the volume section; no VFS lock.
+/// ([`Inode::words`]), and whether it still has its dirent: its kind from
+/// the op's copy, and its dirent, first cluster, size and link count from
+/// the slot's words, whose dirent a rename moves before `Vfs` re-keys
+/// the copy. Called inside the volume section; no VFS lock.
 fn words(ino: &Inode) -> Result<(FatInode, bool), FsError> {
     let w = ino.words()?;
+    let [first, at] = w.private();
     Ok((
         FatInode {
-            dir_clu: ino.key[0],
-            dir_off: ino.key[1],
-            first_clu: w.private()[0] as u32,
+            dir_clu: (at >> 32) as u32,
+            dir_off: at as u32,
+            first_clu: first as u32,
             size: w.size(),
             kind: ino.kind,
         },
-        w.nlink() != 0,
+        w.nlink() != 0 && at != NO_DIRENT,
     ))
 }
 
@@ -694,6 +724,19 @@ pub fn ktest_dir_has(vol: &Instance, dirs: &[&[u8]], name: &[u8]) -> Result<bool
             Err(FatError::NotFound) => Ok(false),
             Err(e) => Err(e),
         }
+    })
+}
+
+/// The size and bytes of file `name` in the root directory of the root's
+/// FAT volume, read through its dirent on disk rather than an inode
+/// (test-only: `fat_rename_racing_writes`); `buf` takes what fits.
+#[cfg(feature = "kernel_tests")]
+pub fn ktest_root_file(name: &[u8], buf: &mut [u8]) -> Result<(u64, usize), FsError> {
+    let root = root_volume()?;
+    with_vol(as_fat(&root)?, |v, d| {
+        let n = v.lookup(d, v.info.root_clus, name)?;
+        let got = v.read_ino(d, &FatInode::of_node(&n), 0, buf)?;
+        Ok((u64::from(n.size), got))
     })
 }
 

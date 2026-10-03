@@ -317,10 +317,19 @@ impl<T> Guarded<T> for std::sync::Mutex<T> {
 /// and commits the move on them, so the backend moves and replaces no
 /// other: a racing change can get between the walks and the backend
 /// call, which runs with the VFS lock dropped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `src_words` and `tgt_words` are those two inodes' slot words, which
+/// the VFS's holds keep for the call. The VFS commits the move only after
+/// the backend call returns, so a write on either inode can run in
+/// between; a backend that keys an inode by where its name is (FAT)
+/// points the moved inode's words at its new name, and marks the replaced
+/// one's as having none, under its own lock in the call.
+#[derive(Clone, Copy, Debug)]
 pub struct RenameSeen {
     pub src: Key,
     pub tgt: Option<Key>,
+    pub src_words: Option<&'static InodeWords>,
+    pub tgt_words: Option<&'static InodeWords>,
 }
 
 impl RenameSeen {

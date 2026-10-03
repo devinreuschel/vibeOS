@@ -1366,6 +1366,8 @@ fn inode_ops_unsupported_errno() {
     let seen = RenameSeen {
         src: [1, 0, 0],
         tgt: None,
+        src_words: None,
+        tgt_words: None,
     };
     let e = ops
         .rename(&mut cx, &mut a, b"x", &mut b, b"y", seen)
