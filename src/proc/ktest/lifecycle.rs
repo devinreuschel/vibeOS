@@ -61,17 +61,14 @@ static STOP_RC: AtomicU64 = AtomicU64::new(0);
 /// Pairs the sender finished.
 static STOP_SENT: AtomicU32 = AtomicU32::new(0);
 
-/// Pairs the sender sends, unless the run's deadline comes within
-/// [`STOP_MARGIN_MS`] first.
+/// Pairs the sender sends, all of which must run for the test to pass
+/// (ROADMAP §10.6's stop-wait box).
 const STOP_PAIRS: u32 = 10_000;
 
-/// The fewest pairs that pass. Each pair waits on CPU 0, and on a loaded
-/// host on a vCPU the host has descheduled, so the run's deadline bounds
-/// how many fit (ROADMAP §10.2).
-const STOP_PAIRS_MIN: u32 = 1_000;
-
-/// How long before the run's deadline the sender starts no more pairs:
-/// room for the pair in flight and for the test to end.
+/// How long before the run's deadline the sender starts no more pairs, so
+/// a host too slow for [`STOP_PAIRS`] fails naming how many it sent rather
+/// than with no verdict: room for the pair in flight and for the test to
+/// end.
 const STOP_MARGIN_MS: u32 = 2_000;
 
 /// How long before the run's deadline a pair in flight gives up waiting on
@@ -258,11 +255,8 @@ pub(crate) fn test_stop_cont_no_lost_wakeup() -> Outcome {
         return crate::fail_fmt!("status {st:#x}, want {:#x}", wait_signaled(SIGKILL));
     }
     let sent = STOP_SENT.load(Ordering::Relaxed);
-    if sent < STOP_PAIRS_MIN {
-        return crate::fail_fmt!("{sent} pairs before the run's deadline, want {STOP_PAIRS_MIN}");
-    }
     if sent < STOP_PAIRS {
-        crate::ktest_info!("{sent} of {STOP_PAIRS} pairs before the run's deadline");
+        return crate::fail_fmt!("{sent} of {STOP_PAIRS} pairs before the run's deadline");
     }
     Outcome::Ok
 }
