@@ -74,6 +74,9 @@ impl CacheStats {
 struct Meta {
     key: CacheKey,
     flags: u8,
+    /// While [`F_WB`] is set, which writeback this is: the cache's
+    /// [`Cache::wb_seq`] when it began.
+    wb_start: u64,
 }
 
 impl Meta {
@@ -83,6 +86,7 @@ impl Meta {
             offset: 0,
         },
         flags: 0,
+        wb_start: 0,
     };
 }
 
@@ -100,16 +104,23 @@ pub enum FillNeed {
     Writeback,
 }
 
-/// One step of a flush, from [`Cache::flush_step`].
+/// What a flush does next with one slot, from [`Cache::flush_slot`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlushStep {
     /// The page is in `dst` and the slot in writeback: write it, then
-    /// [`Cache::end_writeback`].
+    /// [`Cache::end_writeback`]. The slot is then done.
     Write(usize, CacheKey),
-    /// A write of this slot is in flight: wait for it.
-    Wait(usize, CacheKey),
-    /// No dirty and no writeback slot is left: send the device `Flush`.
-    Flush,
+    /// The slot's writeback `start` is in flight: wait until it ends. When
+    /// `done`, it began after the flush did, so it carries every byte
+    /// dirtied before, and the slot is then done; else ask again.
+    Wait {
+        slot: usize,
+        key: CacheKey,
+        start: u64,
+        done: bool,
+    },
+    /// Nothing the flush must write is left in the slot.
+    Done,
 }
 
 pub struct Fill {
@@ -132,6 +143,9 @@ pub struct Cache<const N: usize> {
     last: CacheKey,
     /// Sequential page reads in a row, for readahead.
     run: u32,
+    /// Writebacks begun so far; each takes the next number
+    /// ([`Meta::wb_start`]).
+    wb_seq: u64,
     pub stats: CacheStats,
 }
 
@@ -146,6 +160,7 @@ impl<const N: usize> Cache<N> {
                 offset: u64::MAX,
             },
             run: 0,
+            wb_seq: 0,
             stats: CacheStats {
                 hits: 0,
                 misses: 0,
@@ -260,7 +275,7 @@ impl<const N: usize> Cache<N> {
         let f = self.meta[slot].flags;
         if f & (F_VALID | F_DIRTY) == F_VALID | F_DIRTY {
             self.copy_page(slot, evict_out)?;
-            self.meta[slot].flags = (f | F_WB) & !F_DIRTY;
+            self.begin_writeback(slot);
             return Ok(Err(Fill {
                 slot,
                 key,
@@ -487,7 +502,7 @@ impl<const N: usize> Cache<N> {
                     continue;
                 }
                 dst[..PAGE].copy_from_slice(&self.data[s]);
-                self.meta[s].flags = (f & !F_DIRTY) | F_WB;
+                self.begin_writeback(s);
                 return Some((s, key));
             }
             s += 1;
@@ -495,7 +510,16 @@ impl<const N: usize> Cache<N> {
         None
     }
 
-    /// The write that [`Cache::take_dirty`], [`Cache::flush_step`], or a
+    /// Clear `slot`'s dirty bit and put it in writeback, numbered as the
+    /// next writeback the cache begins.
+    fn begin_writeback(&mut self, slot: usize) {
+        self.wb_seq = self.wb_seq.wrapping_add(1);
+        let m = &mut self.meta[slot];
+        m.flags = (m.flags | F_WB) & !F_DIRTY;
+        m.wb_start = self.wb_seq;
+    }
+
+    /// The write that [`Cache::take_dirty`], [`Cache::flush_slot`], or a
     /// `Writeback` fill started on `slot` finished with `res`. On `Err` the
     /// page is dirty again if the slot still holds `key`.
     pub fn end_writeback(&mut self, slot: usize, key: CacheKey, res: Result<(), BlockError>) {
@@ -515,22 +539,61 @@ impl<const N: usize> Cache<N> {
         self.meta.get(slot).is_some_and(|m| m.flags & F_WB != 0)
     }
 
+    /// The number of `slot`'s writeback while one is in flight.
+    pub fn writeback_start(&self, slot: usize) -> Option<u64> {
+        self.meta
+            .get(slot)
+            .filter(|m| m.flags & F_WB != 0)
+            .map(|m| m.wb_start)
+    }
+
     /// Whether a read is filling `slot`: until its `install_*` or
     /// [`Cache::abort_fill`].
     pub fn filling(&self, slot: usize) -> bool {
         self.meta.get(slot).is_some_and(|m| m.flags & F_FILL != 0)
     }
 
-    /// Start one dirty page's writeback (into `dst`), else name a slot in
-    /// writeback, else `Flush`. `dev` limits it to one device when `Some`.
-    pub fn flush_step(&mut self, dev: Option<u64>, dst: &mut [u8]) -> FlushStep {
-        if let Some((slot, key)) = self.take_dirty(0, dev, dst) {
-            return FlushStep::Write(slot, key);
+    /// Where a flush begins: writebacks numbered above this began after it.
+    pub fn flush_begin(&self) -> u64 {
+        self.wb_seq
+    }
+
+    /// A flush's next step on `slot`, for a flush that began at `since`
+    /// ([`Cache::flush_begin`]); `dev` limits it to one device when `Some`.
+    /// A flush asks once for each slot until it is done, so a writer that
+    /// keeps dirtying pages cannot hold it off: it writes each slot at
+    /// most once and waits for at most two of its writebacks, one begun
+    /// before it and one after. A page dirty when the flush began is
+    /// written by the flush, or by a writeback that began after it and
+    /// that the flush waits for; a page dirtied again after its copy was
+    /// taken is the next flush's.
+    pub fn flush_slot(
+        &mut self,
+        slot: usize,
+        dev: Option<u64>,
+        since: u64,
+        dst: &mut [u8],
+    ) -> FlushStep {
+        let Some(m) = self.meta.get(slot).copied() else {
+            return FlushStep::Done;
+        };
+        if dev.is_some_and(|d| m.key.dev != d) {
+            return FlushStep::Done;
         }
-        match self.any_writeback(dev) {
-            Some(i) => FlushStep::Wait(i, self.meta[i].key),
-            None => FlushStep::Flush,
+        if m.flags & F_WB != 0 {
+            return FlushStep::Wait {
+                slot,
+                key: m.key,
+                start: m.wb_start,
+                done: m.wb_start > since,
+            };
         }
+        if m.flags & (F_VALID | F_DIRTY | F_FILL) != F_VALID | F_DIRTY || dst.len() < PAGE {
+            return FlushStep::Done;
+        }
+        dst[..PAGE].copy_from_slice(&self.data[slot]);
+        self.begin_writeback(slot);
+        FlushStep::Write(slot, m.key)
     }
 
     /// Forget every page of `dev`. A slot in writeback keeps `F_WB`, so it
@@ -764,33 +827,35 @@ pub fn cached_evict_range<B: Backend, const N: usize>(
     Ok(())
 }
 
-/// Write each dirty page, then send `b` a `Flush` once no dirty and no
-/// writeback slot is left (DESIGN §10.6). The host cannot wait, so a write
-/// already in flight is `Err(QueueFull)` and no `Flush` is sent.
+/// Write each page dirty when the flush began ([`Cache::flush_slot`]),
+/// then send `b` a `Flush` (DESIGN §10.6). The host cannot wait, so a
+/// write already in flight is `Err(QueueFull)` and no `Flush` is sent.
 pub fn cached_flush<B: Backend, const N: usize>(
     c: &mut Cache<N>,
     b: &B,
     dev: Option<u64>,
 ) -> Result<(), BlockError> {
     let mut data = [0u8; PAGE];
-    loop {
-        match c.flush_step(dev, &mut data) {
-            FlushStep::Write(slot, key) => {
+    let since = c.flush_begin();
+    let mut slot = 0usize;
+    while slot < N {
+        match c.flush_slot(slot, dev, since, &mut data) {
+            FlushStep::Write(s, key) => {
                 let res = b.write(key.offset, &data);
                 if res.is_ok() {
                     c.stats.device_writes = c.stats.device_writes.saturating_add(1);
                 }
-                c.end_writeback(slot, key, res);
+                c.end_writeback(s, key, res);
                 res?;
             }
-            FlushStep::Wait(..) => return Err(BlockError::QueueFull),
-            FlushStep::Flush => {
-                b.flush()?;
-                c.stats.device_flushes = c.stats.device_flushes.saturating_add(1);
-                return Ok(());
-            }
+            FlushStep::Wait { .. } => return Err(BlockError::QueueFull),
+            FlushStep::Done => {}
         }
+        slot += 1;
     }
+    b.flush()?;
+    c.stats.device_flushes = c.stats.device_flushes.saturating_add(1);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1033,6 +1098,97 @@ mod tests {
         assert_eq!(*mem.flushes.lock().unwrap(), 1);
         assert_eq!(mem.writes_at(0), 2);
         assert_eq!(mem.get(0, PAGE), vec![2u8; PAGE]);
+    }
+
+    /// A flush asks each slot until it is done and never comes back to
+    /// it, so a page dirtied again after the flush wrote it does not hold
+    /// the flush off: the old flush took every dirty page again on each
+    /// pass and sent its `Flush` only once none was left.
+    #[test]
+    fn flush_slot_writes_each_slot_once() {
+        let mut c = Cache::<4>::new();
+        let mut z = [0u8; PAGE];
+        let mem = Mem::new(PAGE * 8);
+        cached_write(&mut c, &mem, 0, 0, &[1u8; PAGE], &mut z).unwrap();
+        let since = c.flush_begin();
+        let slot = c.find(CacheKey::page(0, 0)).unwrap();
+        let mut dst = [0u8; PAGE];
+        let FlushStep::Write(s, key) = c.flush_slot(slot, Some(0), since, &mut dst) else {
+            panic!("dirty page not written");
+        };
+        // A writer dirties the page again while the flush's write is out.
+        cached_write(&mut c, &mem, 0, 0, &[2u8; PAGE], &mut z).unwrap();
+        c.end_writeback(s, key, Ok(()));
+        // The sweep has moved past the slot; a later flush writes it.
+        let mut others = 0;
+        for i in 0..4 {
+            if i != slot {
+                others += 1;
+                assert_eq!(c.flush_slot(i, Some(0), since, &mut dst), FlushStep::Done);
+            }
+        }
+        assert_eq!(others, 3);
+        assert_eq!(dst, [1u8; PAGE]);
+        // Another device's dirty page is not this flush's.
+        cached_write(&mut c, &mem, 1, PAGE as u64, &[3u8; PAGE], &mut z).unwrap();
+        let other = c.find(CacheKey::page(1, PAGE as u64)).unwrap();
+        assert_eq!(
+            c.flush_slot(other, Some(0), since, &mut dst),
+            FlushStep::Done
+        );
+    }
+
+    /// A writeback in flight when the flush began is waited for and the
+    /// slot asked again, since a write after its copy may predate the
+    /// flush; one begun after the flush carries every earlier byte, so the
+    /// slot is done once it ends.
+    #[test]
+    fn flush_slot_waits_once_for_each_writeback() {
+        let mut c = Cache::<4>::new();
+        let mut z = [0u8; PAGE];
+        let mem = Mem::new(PAGE * 8);
+        let mut held = [0u8; PAGE];
+        let mut dst = [0u8; PAGE];
+        // Begun before the flush, then dirtied again before it too.
+        cached_write(&mut c, &mem, 0, 0, &[1u8; PAGE], &mut z).unwrap();
+        let (slot, key) = c.take_dirty(0, None, &mut held).unwrap();
+        let before = c.writeback_start(slot).unwrap();
+        cached_write(&mut c, &mem, 0, 0, &[2u8; PAGE], &mut z).unwrap();
+        let since = c.flush_begin();
+        assert_eq!(
+            c.flush_slot(slot, Some(0), since, &mut dst),
+            FlushStep::Wait {
+                slot,
+                key,
+                start: before,
+                done: false
+            }
+        );
+        c.end_writeback(slot, key, Ok(()));
+        assert_eq!(
+            c.flush_slot(slot, Some(0), since, &mut dst),
+            FlushStep::Write(slot, key)
+        );
+        assert_eq!(dst, [2u8; PAGE]);
+        c.end_writeback(slot, key, Ok(()));
+        // Begun after the flush (as `blk-wb` would), and dirtied again.
+        cached_write(&mut c, &mem, 0, PAGE as u64, &[4u8; PAGE], &mut z).unwrap();
+        let since = c.flush_begin();
+        let (slot, key) = c.take_dirty(0, None, &mut held).unwrap();
+        cached_write(&mut c, &mem, 0, PAGE as u64, &[5u8; PAGE], &mut z).unwrap();
+        let after = c.writeback_start(slot).unwrap();
+        assert!(after > since);
+        assert_eq!(
+            c.flush_slot(slot, Some(0), since, &mut dst),
+            FlushStep::Wait {
+                slot,
+                key,
+                start: after,
+                done: true
+            }
+        );
+        c.end_writeback(slot, key, Ok(()));
+        assert_eq!(c.writeback_start(slot), None);
     }
 
     #[test]

@@ -869,6 +869,86 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
     }
 }
 
+/// The most pages the flush-starvation test dirties during one flush.
+const REDIRTY_MAX: u64 = 200;
+
+/// Pages [`flush_redirty`] has dirtied, and the next of the [`WB_PAGES`]
+/// from [`WB_FIRST_LBA`] it dirties.
+static REDIRTIED: AtomicU64 = AtomicU64::new(0);
+static REDIRTY_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// `cache_init`'s hook after each page a flush writes: dirty the next
+/// scratch page, as a writer streaming over them beside the flush would,
+/// [`REDIRTY_MAX`] times at most.
+pub(crate) fn flush_redirty() {
+    let n = REDIRTIED.fetch_add(1, Ordering::AcqRel);
+    if n >= REDIRTY_MAX {
+        return;
+    }
+    let sectors = (PAGE / 512) as u64;
+    let lba = WB_FIRST_LBA + (n % WB_PAGES as u64) * sectors;
+    let page = [n as u8 ^ 0x5A; PAGE];
+    if ram0()
+        .ok_or(BlockError::Gone)
+        .and_then(|r| r.write(lba, &page))
+        .is_err()
+    {
+        REDIRTY_FAILED.store(true, Ordering::Release);
+    }
+}
+
+/// A flush returns while pages of its device keep being dirtied: it writes
+/// each page dirty when it began once, where it once took whichever page
+/// was dirty next and returned only when none was, so a writer that kept
+/// ahead of it held it off for as long as it wrote (B3). The hook dirties
+/// another page after each page the flush writes.
+pub(crate) fn cache_flush_not_starved() -> Outcome {
+    if !cache_init::live() || !block_init::live() {
+        return Outcome::Fail("no ram0 cache");
+    }
+    let Some(ram) = ram0() else {
+        return Outcome::Fail("no ram0");
+    };
+    let mut saved = alloc::vec![0u8; WB_PAGES * PAGE];
+    if ram.read(WB_FIRST_LBA, &mut saved).is_err() {
+        return Outcome::Fail("save");
+    }
+    // Every scratch page dirty, so the flush has some to write.
+    let mut page = [0u8; PAGE];
+    let sectors = (PAGE / 512) as u64;
+    for i in 0..WB_PAGES {
+        page.fill(i as u8 ^ 0xC3);
+        if ram.write(WB_FIRST_LBA + i as u64 * sectors, &page).is_err() {
+            return Outcome::Fail("dirty");
+        }
+    }
+    REDIRTIED.store(0, Ordering::Release);
+    REDIRTY_FAILED.store(false, Ordering::Release);
+    let d0 = cache_init::stats().device_writes;
+    testing::REDIRTY.store(true, Ordering::Release);
+    let flushed = ram.flush();
+    testing::REDIRTY.store(false, Ordering::Release);
+    let wrote = cache_init::stats().device_writes.saturating_sub(d0);
+    let dirtied = REDIRTIED.load(Ordering::Acquire);
+    let restored = ram.write(WB_FIRST_LBA, &saved).and_then(|()| ram.flush());
+    if flushed.is_err() {
+        return Outcome::Fail("flush failed");
+    }
+    if REDIRTY_FAILED.load(Ordering::Acquire) {
+        return Outcome::Fail("a write beside the flush failed");
+    }
+    // One sweep writes each slot once.
+    if wrote > vibeos::cache::DEFAULT_PAGES as u64 || dirtied >= REDIRTY_MAX {
+        return crate::fail_fmt!(
+            "flush wrote {wrote} pages while {dirtied} were dirtied beside it"
+        );
+    }
+    if restored.is_err() {
+        return Outcome::Fail("restore");
+    }
+    Outcome::Ok
+}
+
 /// A ram0 page past the stamped partitions whose read the fill test holds.
 const FILL_LBA: u64 = 208;
 
@@ -1327,5 +1407,6 @@ pub(crate) const TESTS: &[Test] = &[
     .deadline(60_000),
     test("cache_flush_waits_writeback", cache_flush_waits_writeback),
     test("cache_read_waits_for_fill", cache_read_waits_for_fill).deadline(60_000),
+    test("cache_flush_not_starved", cache_flush_not_starved),
     test("block_fua_write", block_fua_write),
 ];

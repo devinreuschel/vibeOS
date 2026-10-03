@@ -8,10 +8,10 @@
 //! A slot whose write is in flight is in WRITEBACK (`vibeos::cache`), and
 //! a thread that needs it sleeps on the slot's wait queue. A page whose
 //! device is gone is dropped, never retried (DEVICES.md §12.4 rule 9).
-//! [`PageCache::flush`] writes each dirty page of its device
-//! and waits for it, waits for every write already in flight on the
-//! device (`blk-wb`'s and eviction writes), and only then sends the device
-//! `Flush` (DESIGN §10.6). Phase 12 makes this cache each block device's
+//! [`PageCache::flush`] sweeps the slots once: it writes each page of its
+//! device dirty when it began and waits for it, waits for every write in
+//! flight on the device (`blk-wb`'s and eviction writes), and only then
+//! sends the device `Flush` (DESIGN §10.6). Phase 12 makes this cache each block device's
 //! mapping in one page cache of mappings (DESIGN §10.6).
 
 use core::cell::UnsafeCell;
@@ -127,6 +127,31 @@ fn wait_writeback(slot: usize) {
     loop {
         let park = thread_init::with_sched(|s| {
             if !CACHE.lock().in_writeback(slot) {
+                return false;
+            }
+            // SAFETY: the slot's queue is touched only under
+            // `thread_init::with_sched`, held here (see `SlotWaits`).
+            s.begin_wait(unsafe { &mut *wq.get() }, FAR_DEADLINE);
+            true
+        });
+        if !park {
+            return;
+        }
+        thread_init::schedule();
+    }
+}
+
+/// Sleep until `slot`'s writeback `start` ends ([`Cache::writeback_start`]).
+/// Returns at once if that one is not in flight, so a writeback begun
+/// after it is not waited for. As [`wait_writeback`], the check and the
+/// wait share one SCHED section.
+fn wait_writeback_end(slot: usize, start: u64) {
+    let Some(wq) = SLOT_WQ.0.get(slot) else {
+        return;
+    };
+    loop {
+        let park = thread_init::with_sched(|s| {
+            if CACHE.lock().writeback_start(slot) != Some(start) {
                 return false;
             }
             // SAFETY: the slot's queue is touched only under
@@ -456,30 +481,50 @@ impl BlockCache for PageCache {
         write(dev, lba, buf)
     }
 
-    /// Make every write to `dev` through the cache durable: write each dirty
-    /// page and wait for it, wait for each write already in flight (`blk-wb`'s
-    /// and eviction writes), write pages dirtied meanwhile, and send the
-    /// device `Flush` only when `dev` has no dirty and no writeback slot.
+    /// Make every write to `dev` through the cache that returned before
+    /// the flush began durable: one sweep of the slots writes each page of
+    /// `dev` dirty then and waits for it, and waits for each write of `dev`
+    /// in flight (`blk-wb`'s and eviction writes), before the device
+    /// `Flush` ([`Cache::flush_slot`]). A writer that keeps dirtying pages
+    /// cannot hold it off, since the sweep visits each slot once.
     fn flush(&self, dev: &BlockRef) -> Result<(), BlockError> {
         if !LIVE.load(Ordering::Acquire) {
             return dev.flush_dev();
         }
         let mut data = page_vec()?;
-        loop {
-            let step = { CACHE.lock().flush_step(Some(dev.id()), &mut data) };
+        let since = CACHE.lock().flush_begin();
+        let mut slot = 0usize;
+        while slot < DEFAULT_PAGES {
+            let step = {
+                CACHE
+                    .lock()
+                    .flush_slot(slot, Some(dev.id()), since, &mut data)
+            };
             match step {
-                FlushStep::Write(slot, key) => {
-                    write_page(Some(dev), slot, key, &data)?;
+                FlushStep::Write(s, key) => {
+                    write_page(Some(dev), s, key, &data)?;
+                    #[cfg(feature = "kernel_tests")]
+                    testing::after_flush_write();
+                    slot += 1;
                 }
-                FlushStep::Wait(slot, _) => wait_writeback(slot),
-                FlushStep::Flush => {
-                    dev.flush_dev()?;
-                    let mut c = CACHE.lock();
-                    c.stats.device_flushes = c.stats.device_flushes.saturating_add(1);
-                    return Ok(());
+                FlushStep::Wait {
+                    slot: s,
+                    start,
+                    done,
+                    ..
+                } => {
+                    wait_writeback_end(s, start);
+                    if done {
+                        slot += 1;
+                    }
                 }
+                FlushStep::Done => slot += 1,
             }
         }
+        dev.flush_dev()?;
+        let mut c = CACHE.lock();
+        c.stats.device_flushes = c.stats.device_flushes.saturating_add(1);
+        Ok(())
     }
 }
 
@@ -608,6 +653,19 @@ pub mod testing {
             thread_init::sleep_ms(1);
         }
         FILL_HELD.store(false, Ordering::Release);
+    }
+
+    /// Whether `PageCache::flush` calls `block::ktest::flush_redirty`
+    /// after each page it writes, as a writer racing the flush would
+    /// dirty another page then.
+    pub(in crate::block) static REDIRTY: AtomicBool = AtomicBool::new(false);
+
+    /// `PageCache::flush`'s point after each page it writes, with no lock
+    /// held.
+    pub(super) fn after_flush_write() {
+        if REDIRTY.load(Ordering::Acquire) {
+            crate::block::ktest::flush_redirty();
+        }
     }
 
     /// `writeback_dev`'s hold point, reached with no lock held. It sleeps

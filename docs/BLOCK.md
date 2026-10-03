@@ -358,10 +358,13 @@ changes a copy's filesystem id offline (VIBEFS.md §15).
 Page-granular (4 KiB), 16 pages (`cache::DEFAULT_PAGES`), keyed by
 `(id, page offset)`, where the id is the device's `BlockRef` id. Read-through,
 write-back, clock eviction, sequential readahead, dirty-ratio writeback thread
-(`blk-wb`). `PageCache::flush(dev)` writes each dirty page of `dev` not already in writeback and waits for it,
-waits for every page of `dev` in writeback, writes pages dirtied meanwhile,
-and sends the device `Flush` (§10.2) only when `dev` has no dirty and no
-writeback page.
+(`blk-wb`). `PageCache::flush(dev)` makes durable every write to `dev` that returned before it began, in
+one sweep of the slots (`Cache::flush_slot`): it writes each page of `dev` that is dirty and
+waits for it, and waits for each write of `dev` in flight, once more when that write began
+before the flush, since a write after its copy may predate the flush. Then it sends the device
+`Flush` (§10.2). A writer that keeps dirtying pages cannot hold it off, since the sweep visits
+each slot once (`cache_flush_not_starved`); a page dirtied after the sweep passed it is the next
+flush's.
 
 A slot whose device write is in flight is in WRITEBACK (`F_WB`): it keeps its
 key, stays readable and writable (a write dirties it again), is never picked by
@@ -369,9 +372,10 @@ the clock or re-keyed, and gets no second write until the first completes.
 Every cache write sets it: `blk-wb`'s, `flush`'s, and an eviction's, so a dirty
 victim is written back in place before it is re-keyed, and the clock prefers a
 clean victim. A thread that needs the slot sleeps on the slot's wait queue
-until the write ends (ROADMAP §10.11, F015, F043). A slot has no filling
-state: `find()` matches only valid slots, so a second reader of a page being
-filled does not wait for it (ROADMAP §12.5, F015).
+until the write ends (ROADMAP §10.11, F015, F043). A slot being filled
+(`F_FILL`) is the page's one slot: `find()` matches it, and a second reader or a
+writer of the page sleeps on its queue until the fill ends
+(`cache_read_waits_for_fill`).
 
 Each disk's `BlockRef` carries the cache (`cache_init::PAGE_CACHE`), and a
 partition's I/O goes through its disk's, so a page is keyed by its disk's
