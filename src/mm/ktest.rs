@@ -1012,4 +1012,58 @@ pub(crate) const TESTS: &[Test] = &[
         unmap_shootdown_over_max_asserts,
     ),
     test("kernel_va0_faults", kernel_va0_faults),
+    test("ioremap_failure_returns_va", ioremap_failure_returns_va),
 ];
+
+// ---------------------------------------------------------------------------
+// ioremap_failure_returns_va
+
+/// The ioremap window's cursor: the first VA it has not handed out.
+fn window_next() -> u64 {
+    paging_init::with_pt(|pt| pt.window().next())
+}
+
+/// A failed `ioremap` gives its window VA back and leaves none of its leaves
+/// mapped. A leaf planted at the second page of the next reservation makes
+/// its `map_range` map the first page and then refuse; the planted leaf,
+/// which the call did not map, stays.
+pub(crate) fn ioremap_failure_returns_va() -> Outcome {
+    let Some(frame) = alloc_frame() else {
+        return Outcome::Fail("frame alloc");
+    };
+    let before = window_next();
+    let planted = VirtAddr(before + PAGE_SIZE);
+    // SAFETY: `paging_init::map_4k`'s contract; `frame` is this test's and
+    // `planted` window VA the cursor has not reached, which nothing maps
+    // until the unmap below; established here.
+    if unsafe { paging_init::map_4k(planted, frame, heap_flags()) }.is_err() {
+        free_frame(frame);
+        return Outcome::Fail("plant");
+    }
+    // The LAPIC's page and the next: the map is refused at the second, and
+    // nothing touches the first, so no UC alias of it is ever used.
+    // SAFETY: `paging_init::ioremap`'s contract; `0xFEE0_0000` is the
+    // LAPIC's MMIO, and the test never accesses the VA it would return;
+    // established here.
+    let got = unsafe { paging_init::ioremap(PhysAddr(0xFEE0_0000), 2 * PAGE_SIZE) };
+    let after = window_next();
+    let first = paging_init::translate(VirtAddr(before));
+    let kept = paging_init::translate(planted).map(|(pa, _, _)| pa);
+    // SAFETY: `unmap_4k`'s contract; nothing but this test reached
+    // `planted`, and it does not touch it again; established here.
+    let unplanted = unsafe { unmap_4k(planted) }.map(|(pa, _)| pa);
+    free_frame(frame);
+    if got.is_some() {
+        return Outcome::Fail("ioremap over a mapped leaf succeeded");
+    }
+    if after != before {
+        return Outcome::Fail("window VA not given back");
+    }
+    if first.is_some() {
+        return Outcome::Fail("first page still mapped");
+    }
+    if kept != Some(frame) || unplanted != Some(frame) {
+        return Outcome::Fail("planted leaf not kept");
+    }
+    Outcome::Ok
+}
