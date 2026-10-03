@@ -115,7 +115,7 @@ args = [
   { name = "offset", type = "off_t" },
   { name = "whence", type = "unsigned int" },
 ]
-errors = ["EBADF", "ESPIPE", "EINVAL"]
+errors = ["EBADF", "ESPIPE", "EINVAL", "ENXIO"]
 note = ""
 
 [[syscall]]

@@ -57,6 +57,12 @@ pub fn seek(f: &FileRef, pos: SeekFrom) -> Result<u64, FsError> {
     fs_init::api().seek(f, pos)
 }
 
+/// `lseek(off, whence)`: `SPipe` for a file that cannot seek before
+/// `off` and `whence` are looked at, as Linux's `vfs_llseek`.
+pub fn lseek(f: &FileRef, off: i64, whence: u32) -> Result<u64, FsError> {
+    fs_init::api().lseek(f, off, whence)
+}
+
 /// Drop one reference; the last frees the slot, changes its generation,
 /// and puts the inode, with the VFS lock dropped for any release.
 pub fn close(f: FileRef) -> Result<(), FsError> {

@@ -638,8 +638,7 @@ impl Vfs {
     }
 
     pub(crate) fn seek(&mut self, f: &FileRef, off: i64, whence: u32) -> Result<u64, FsError> {
-        let pos = SeekFrom::from_whence(off, whence)?;
-        self.api(|a| a.seek(f, pos))
+        self.api(|a| a.lseek(f, off, whence))
     }
 
     pub(crate) fn close(&mut self, f: FileRef) -> Result<(), FsError> {

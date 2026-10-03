@@ -40,6 +40,13 @@
 //!     opened `O_WRONLY` (as root may), returns `EINVAL` before the buffer
 //!     and the count, as Linux's `FMODE_CAN_WRITE` check: for a kernel-half
 //!     buffer and for a count of 0 too.
+//! 16. `lseek` of `/dev/console` opened by path returns `ESPIPE` for
+//!     `SEEK_HOLE` and for a negative `SEEK_SET` offset, as fd 1 does: the
+//!     file's seekability before the offset and `whence`.
+//! 17. `lseek` with `SEEK_DATA` and `SEEK_HOLE` on a 5-byte file in `/tmp`
+//!     treats it all as data, as Linux's `generic_file_llseek`: `SEEK_DATA`
+//!     from 2 returns 2, `SEEK_HOLE` from 0 returns 5, and either from 5
+//!     returns `ENXIO`.
 
 #![no_std]
 #![no_main]
@@ -59,8 +66,11 @@ const RAW_MISSING: &core::ffi::CStr = c"/tmp/\xffx";
 /// The program case 5 runs, and its exit status.
 const HELLO: &core::ffi::CStr = c"/hello";
 const HELLO_EXIT: u8 = 42;
-/// Linux `SEEK_CUR`, from `include/uapi/linux/fs.h`.
+// Linux's `whence` values, from `include/uapi/linux/fs.h`.
+const SEEK_SET: u32 = 0;
 const SEEK_CUR: u32 = 1;
+const SEEK_DATA: u32 = 3;
+const SEEK_HOLE: u32 = 4;
 /// A symbolic link (case 7).
 const LINK: &core::ffi::CStr = c"/proc/self";
 /// A name case 7 must not create.
@@ -78,9 +88,11 @@ const SIGSTOP: i32 = 19;
 const ZOMBIE_TRIES: u32 = 20_000;
 /// A file with no write operation (case 15).
 const PROC_STATUS: &core::ffi::CStr = c"/proc/self/status";
+/// The file case 17 seeks in.
+const SEEKS: &core::ffi::CStr = c"/tmp/errno_seek";
 
 fn main(_env: &Env) -> i32 {
-    let cases: [fn() -> bool; 15] = [
+    let cases: [fn() -> bool; 17] = [
         read_wronly_ebadf,
         write_rdonly_ebadf,
         dup_full_emfile,
@@ -96,6 +108,8 @@ fn main(_env: &Env) -> i32 {
         getdents_device_enotdir,
         kill_zombie_returns_0,
         write_no_op_einval_first,
+        lseek_device_espipe_first,
+        lseek_data_hole,
     ];
     for (i, case) in cases.iter().enumerate() {
         if !case() {
@@ -341,6 +355,32 @@ fn write_no_op_einval_first() -> bool {
         && sys::write(fd as u32, KERNEL_PTR as *const u8, 1) == Err(Errno::EINVAL)
         && sys::write(fd as u32, b"x".as_ptr(), 0) == Err(Errno::EINVAL);
     close(fd) && ok
+}
+
+/// Case 16.
+fn lseek_device_espipe_first() -> bool {
+    let Ok(fd) = sys::open(c"/dev/console".as_ptr().cast(), sys::O_RDONLY, 0) else {
+        return false;
+    };
+    let ok = sys::lseek(fd as u32, 0, SEEK_HOLE) == Err(Errno::ESPIPE)
+        && sys::lseek(fd as u32, -1, SEEK_SET) == Err(Errno::ESPIPE)
+        && sys::lseek(1, -1, SEEK_SET) == Err(Errno::ESPIPE);
+    close(fd) && ok
+}
+
+/// Case 17.
+fn lseek_data_hole() -> bool {
+    let flags = sys::O_CREAT | sys::O_TRUNC | sys::O_RDWR;
+    let Ok(fd) = sys::open(SEEKS.as_ptr().cast(), flags, 0o644) else {
+        return false;
+    };
+    let fd = fd as u32;
+    let ok = sys::write(fd, b"hello".as_ptr(), 5) == Ok(5)
+        && sys::lseek(fd, 2, SEEK_DATA) == Ok(2)
+        && sys::lseek(fd, 0, SEEK_HOLE) == Ok(5)
+        && sys::lseek(fd, 5, SEEK_DATA) == Err(Errno::ENXIO)
+        && sys::lseek(fd, 5, SEEK_HOLE) == Err(Errno::ENXIO);
+    close(fd as usize) && ok
 }
 
 /// Close `fd`; whether it closed.

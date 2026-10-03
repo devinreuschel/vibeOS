@@ -44,6 +44,8 @@ pub enum FsError {
     /// `NotFound` once its bounded retries are spent, so a syscall never
     /// sees this; it maps to `ENOENT` as that `NotFound` does.
     Stale,
+    /// `SEEK_DATA` or `SEEK_HOLE` from an offset at or past the end.
+    NxIo,
 }
 
 /// A filesystem error's Linux errno at the syscall boundary (SYSCALL.md §2).
@@ -69,6 +71,7 @@ impl From<FsError> for crate::kerror::KError {
             FsError::SPipe => Self::SPipe,
             FsError::XDev => Self::XDev,
             FsError::Acces => Self::Acces,
+            FsError::NxIo => Self::NxIo,
             FsError::NoMem => Self::NoMem,
             FsError::Again => Self::Again,
         }
@@ -101,6 +104,7 @@ impl FsError {
             FsError::XDev => "cross-device",
             FsError::Acces => "access denied",
             FsError::Stale => "stale name",
+            FsError::NxIo => "past the end",
         }
     }
 }

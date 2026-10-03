@@ -29,6 +29,8 @@ pub(super) const O_EXCL: i32 = 0o200;
 pub(super) const SEEK_SET: u32 = 0;
 /// `lseek` from the end.
 pub(super) const SEEK_END: u32 = 2;
+/// `lseek` to the next data.
+pub(super) const SEEK_DATA: u32 = 3;
 // From Linux `include/uapi/asm-generic/mman-common.h` and `mman.h`.
 /// No access.
 pub(super) const PROT_NONE: u64 = 0;
@@ -174,6 +176,7 @@ const PAIRS: &[Pair] = &[
         Run(|| Ok(sys::lseek(1, 0, SEEK_SET))),
     ),
     pair(Sys::Lseek, Errno::EINVAL, Run(lseek_einval)),
+    pair(Sys::Lseek, Errno::ENXIO, Run(lseek_enxio)),
     pair(
         Sys::Mmap,
         Errno::EINVAL,
@@ -921,6 +924,17 @@ fn lseek_einval() -> Result<Result<usize, Errno>, &'static str> {
     let r = sys::lseek(fd, 0, 9);
     close(fd);
     Ok(r)
+}
+
+/// `SEEK_DATA` from the end of `/hello`.
+fn lseek_enxio() -> Result<Result<usize, Errno>, &'static str> {
+    let fd = open(HELLO, sys::O_RDONLY).map_err(|_| "open /hello")?;
+    let r = match sys::lseek(fd, 0, SEEK_END) {
+        Ok(end) => Ok(sys::lseek(fd, end as i64, SEEK_DATA)),
+        Err(_) => Err("lseek SEEK_END"),
+    };
+    close(fd);
+    r
 }
 
 /// `MAP_FIXED_NOREPLACE` over a mapping.

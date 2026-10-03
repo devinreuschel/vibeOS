@@ -56,6 +56,7 @@ errno_table! {
     NoEnt = 2, "ENOENT", "`open`/`execve` missing path, or the empty path";
     Srch = 3, "ESRCH", "`kill`: no process has `pid` (a zombie has it until it is reaped), `pid` 0, or a negative 32-bit `pid` (§3.1)";
     Io = 5, "EIO", "device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs";
+    NxIo = 6, "ENXIO", "`lseek` with `SEEK_DATA` or `SEEK_HOLE` from an offset at or past the end of the file, or below 0";
     TooBig = 7, "E2BIG", "`execve`: a string over 131,072 bytes with its NUL, or strings and pointers together over max(128 KiB, min(`RLIMIT_STACK`/4, 6 MiB)), 2 MiB at the fixed 8 MiB `RLIMIT_STACK` (§3.1)";
     NoExec = 8, "ENOEXEC", "malformed ELF, `ET_DYN`, or `PT_INTERP`";
     BadF = 9, "EBADF", "closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd";
@@ -97,6 +98,7 @@ mod tests {
             (KError::NoEnt, 2, "ENOENT"),
             (KError::Srch, 3, "ESRCH"),
             (KError::Io, 5, "EIO"),
+            (KError::NxIo, 6, "ENXIO"),
             (KError::TooBig, 7, "E2BIG"),
             (KError::NoExec, 8, "ENOEXEC"),
             (KError::BadF, 9, "EBADF"),

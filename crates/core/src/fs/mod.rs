@@ -95,9 +95,14 @@ pub const O_NOFOLLOW: u32 = 0x20000;
 /// Linux `O_CLOEXEC`. Process fd table turns this into `FD_CLOEXEC`.
 pub const O_CLOEXEC: u32 = 0x80000;
 
+// `lseek`'s `whence`, from Linux `include/uapi/linux/fs.h`.
 pub const SEEK_SET: u32 = 0;
 pub const SEEK_CUR: u32 = 1;
 pub const SEEK_END: u32 = 2;
+/// The next data at or after the offset.
+pub const SEEK_DATA: u32 = 3;
+/// The next hole at or after the offset; Linux's last `whence`.
+pub const SEEK_HOLE: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InodeKind {

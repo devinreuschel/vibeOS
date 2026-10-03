@@ -971,7 +971,7 @@ pub(crate) fn quiesce() -> bool {
 /// [`FileRef`] carries, so their scenarios and assertions stay as they
 /// were.
 pub(crate) mod fid {
-    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom, Stat};
+    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, Stat};
 
     use crate::file_init;
 
@@ -988,8 +988,7 @@ pub(crate) mod fid {
     }
 
     pub(crate) fn seek(id: FileId, off: i64, whence: u32) -> Result<u64, FsError> {
-        let pos = SeekFrom::from_whence(off, whence)?;
-        file_init::seek(&FileRef::from_raw(id), pos)
+        file_init::lseek(&FileRef::from_raw(id), off, whence)
     }
 
     pub(crate) fn close(id: FileId) -> Result<(), FsError> {

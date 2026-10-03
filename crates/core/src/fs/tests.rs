@@ -1200,6 +1200,7 @@ mod fs_error_errno_per_variant {
         xdev: XDev => 18,
         stale: Stale => 2,
         acces: Acces => 13,
+        nxio: NxIo => 6,
     }
 }
 
@@ -1430,9 +1431,12 @@ fn inode_ops_unsupported_errno() {
         assert_eq!(errno(r.unwrap_err()), 22, "{path}");
     }
 
-    // `lseek` of `/dev/tty`: `ESPIPE`; `/dev/null` seeks.
+    // `lseek` of `/dev/tty`: `ESPIPE`, before the offset and `whence` are
+    // looked at, as Linux's `vfs_llseek`; `/dev/null` seeks.
     let f = v.open_path(None, "/dev/tty", O_RDWR, 0).unwrap();
     assert_eq!(errno(v.seek(&f, 0, SEEK_CUR).unwrap_err()), 29);
+    assert_eq!(errno(v.seek(&f, -1, SEEK_SET).unwrap_err()), 29);
+    assert_eq!(errno(v.seek(&f, 0, SEEK_HOLE).unwrap_err()), 29);
     v.close(f).unwrap();
     let f = v.open_path(None, "/dev/null", O_RDWR, 0).unwrap();
     assert_eq!(v.seek(&f, 0, SEEK_CUR), Ok(0));

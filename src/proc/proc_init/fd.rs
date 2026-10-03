@@ -1,5 +1,5 @@
 use super::*;
-use vibeos::fs::InodeKind;
+use vibeos::fs::{InodeKind, SEEK_HOLE};
 
 /// The open-file table handle an fd names, if it names a file.
 fn file_id(fd: Fd) -> Option<FileId> {
@@ -386,25 +386,23 @@ pub(super) fn sys_close(fd: u32) -> SysResult {
     }
 }
 
-/// Linux's last `whence`, `SEEK_HOLE` (`include/uapi/linux/fs.h`).
-const SEEK_MAX: u32 = 4;
-
 /// `lseek(fd, off, whence)`, in Linux's order: the descriptor, then a
-/// `whence` past [`SEEK_MAX`] (`EINVAL`), then what the file allows, so a
-/// console is `ESPIPE` only for a `whence` Linux knows. `SEEK_DATA` and
-/// `SEEK_HOLE` are `EINVAL` on a file that can seek.
+/// `whence` past `SEEK_HOLE`, Linux's `SEEK_MAX` (`EINVAL`), then a file
+/// that cannot seek (`ESPIPE`, whatever `off` is, on the console however
+/// it was opened), and only then the offset and `whence` themselves.
+/// `SEEK_DATA` and `SEEK_HOLE` treat the whole file as data, as Linux's
+/// `generic_file_llseek` does (`vibeos::fs::SeekFrom`).
 pub(super) fn sys_lseek(fd: u32, off: i64, whence: u32) -> SysResult {
     let Some(slot) = lookup_fd(fd) else {
         return Err(KError::BadF);
     };
-    if whence > SEEK_MAX {
+    if whence > SEEK_HOLE {
         return Err(KError::Inval);
     }
     match slot.kind {
         FdKind::File { fid, r#gen } => {
-            let r = SeekFrom::from_whence(off, whence).and_then(|pos| {
-                let f = file_init::fget(FileId { fid, r#gen })?;
-                let r = file_init::seek(&f, pos);
+            let r = file_init::fget(FileId { fid, r#gen }).and_then(|f| {
+                let r = file_init::lseek(&f, off, whence);
                 file_init::close(f).and(r)
             });
             match r {

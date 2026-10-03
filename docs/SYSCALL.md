@@ -153,6 +153,7 @@ names, Linux values:
 | `ENOENT` | 2 | `open`/`execve` missing path, or the empty path |
 | `ESRCH` | 3 | `kill`: no process has `pid` (a zombie has it until it is reaped), `pid` 0, or a negative 32-bit `pid` (§3.1) |
 | `EIO` | 5 | device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs |
+| `ENXIO` | 6 | `lseek` with `SEEK_DATA` or `SEEK_HOLE` from an offset at or past the end of the file, or below 0 |
 | `E2BIG` | 7 | `execve`: a string over 131,072 bytes with its NUL, or strings and pointers together over max(128 KiB, min(`RLIMIT_STACK`/4, 6 MiB)), 2 MiB at the fixed 8 MiB `RLIMIT_STACK` (§3.1) |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
@@ -247,7 +248,7 @@ the row does not allow it, and needs `EFAULT` from each.
 | 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `EACCES`, `ELOOP`, `EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM` (`kalloc_nomem`), `EIO` (`vblk_bad_sector`) | `pathname` at most 255 bytes |
 | 3 | 57 | `close` | 1 | `unsigned int fd` | — | `EBADF` | — |
 | 5 | 80 | `fstat` | 2 | `unsigned int fd`, `struct stat *statbuf` | `statbuf`: out, 144 bytes, after the `fd` lookup | `EBADF`, `EFAULT` | x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1 |
-| 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | `EBADF`, `ESPIPE`, `EINVAL` | — |
+| 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | `EBADF`, `ESPIPE`, `EINVAL`, `ENXIO` | — |
 | 9 | 222 | `mmap` | 6 | `unsigned long addr`, `unsigned long length`, `unsigned long prot`, `unsigned long flags`, `unsigned long fd`, `unsigned long offset` | — | `EINVAL`, `EBADF`, `ENODEV`, `ENOMEM`, `EPERM`, `EEXIST` | anonymous and private only; returns the address |
 | 11 | 215 | `munmap` | 2 | `unsigned long addr`, `size_t length` | — | `EINVAL`, `ENOMEM` | — |
 | 12 | 214 | `brk` | 1 | `unsigned long addr` | — | — | returns the break; `0` if the caller is not a process |
@@ -295,7 +296,14 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   Linux's is. On a FAT file any offset from 0 to `i64::MAX` is accepted
   (F008; ROADMAP §10.11). A `whence` past `SEEK_HOLE` is `EINVAL` before
   the descriptor's kind is looked at, so the console gives it too, as on
-  Linux; `SEEK_DATA` and `SEEK_HOLE` are `EINVAL` on a file that can seek
+  Linux; then a file that cannot seek (the console, `/dev/console`, or
+  `/dev/tty`, however it was opened) is `ESPIPE` whatever the offset, and
+  only then is a negative `SEEK_SET` offset `EINVAL`. `SEEK_DATA` and
+  `SEEK_HOLE` treat the whole file as data, as Linux's
+  `generic_file_llseek` does: from an offset below the size, `SEEK_DATA`
+  returns the offset and `SEEK_HOLE` the size, and from one at or past
+  the end, or below 0, both return `ENXIO`; reporting real holes waits for
+  ROADMAP §23.1
 - `mmap`: anonymous private mappings only: `MAP_PRIVATE|MAP_ANONYMOUS`,
   plus any of `MAP_FIXED`, `MAP_FIXED_NOREPLACE`, `MAP_NORESERVE`,
   `MAP_POPULATE`, and `MAP_STACK`. `prot` is any mix of `PROT_READ`,

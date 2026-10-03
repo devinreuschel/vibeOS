@@ -16,6 +16,8 @@ impl Errno {
     pub const ESRCH: Errno = Errno(3);
     /// Linux `EIO`.
     pub const EIO: Errno = Errno(5);
+    /// Linux `ENXIO`.
+    pub const ENXIO: Errno = Errno(6);
     /// Linux `E2BIG`.
     pub const E2BIG: Errno = Errno(7);
     /// Linux `ENOEXEC`.

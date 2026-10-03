@@ -645,7 +645,7 @@ pub const CALLS: &[Call] = &[
     },
     Call {
         sys: Sys::Lseek,
-        errors: &[Errno::EBADF, Errno::ESPIPE, Errno::EINVAL],
+        errors: &[Errno::EBADF, Errno::ESPIPE, Errno::EINVAL, Errno::ENXIO],
         ktest: &[],
         ptrs: &[
         ],

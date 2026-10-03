@@ -40,6 +40,11 @@ pub enum SeekFrom {
     Start(u64),
     Current(i64),
     End(i64),
+    /// `SEEK_DATA`: the offset itself, since no backend reports holes yet,
+    /// as Linux's `generic_file_llseek` treats a whole file as data.
+    Data(i64),
+    /// `SEEK_HOLE`: the end of the file, the one hole such a file has.
+    Hole(i64),
 }
 
 impl SeekFrom {
@@ -52,6 +57,8 @@ impl SeekFrom {
                 .map_err(|_| FsError::Inval),
             SEEK_CUR => Ok(SeekFrom::Current(off)),
             SEEK_END => Ok(SeekFrom::End(off)),
+            SEEK_DATA => Ok(SeekFrom::Data(off)),
+            SEEK_HOLE => Ok(SeekFrom::Hole(off)),
             _ => Err(FsError::Inval),
         }
     }
@@ -353,6 +360,22 @@ impl Vfs {
             SeekFrom::Start(o) => o,
             SeekFrom::Current(d) => rel(f.offset, d)?,
             SeekFrom::End(d) => rel(ino.cur_size(), d)?,
+            // From an offset inside the file: the offset (data) or the
+            // size (the hole at the end); `NxIo` from one at or past the
+            // end, or below 0.
+            SeekFrom::Data(o) | SeekFrom::Hole(o) => {
+                let size = ino.cur_size();
+                match u64::try_from(o) {
+                    Ok(o) if o < size => {
+                        if matches!(pos, SeekFrom::Data(_)) {
+                            o
+                        } else {
+                            size
+                        }
+                    }
+                    _ => return Err(FsError::NxIo),
+                }
+            }
         };
         if n > self.supers[ino.sb as usize].maxbytes {
             return Err(FsError::Inval);
@@ -609,11 +632,27 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
 
     /// Move open file `f`'s offset, when its inode can seek (`check_seek`).
     pub fn seek(&self, f: &FileRef, pos: SeekFrom) -> Result<u64, FsError> {
+        self.seek_checked(f, || Ok(pos))
+    }
+
+    /// `lseek(off, whence)` on `f` in Linux's `vfs_llseek` order: a file
+    /// that cannot seek is `SPipe` whatever `off` and `whence` are, and
+    /// only then are they decoded ([`SeekFrom::from_whence`]).
+    pub fn lseek(&self, f: &FileRef, off: i64, whence: u32) -> Result<u64, FsError> {
+        self.seek_checked(f, || SeekFrom::from_whence(off, whence))
+    }
+
+    /// Seek `f` to `pos()` once its inode's `check_seek` passed.
+    fn seek_checked(
+        &self,
+        f: &FileRef,
+        pos: impl FnOnce() -> Result<SeekFrom, FsError>,
+    ) -> Result<u64, FsError> {
         let mut c = self.with(|v| v.file_islot(f.id).and_then(|i| v.call(i)))?;
         let r = c.run(|o, cx, n| o.check_seek(cx, n));
         self.step(|v| {
             v.finish(c, false);
-            r.and_then(|()| v.file_seek(f.id, pos))
+            r.and_then(|()| pos()).and_then(|p| v.file_seek(f.id, p))
         })
     }
 
@@ -700,5 +739,40 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
             });
         self.put_path(p);
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::tests::ram;
+
+    /// `SEEK_DATA` and `SEEK_HOLE` treat the whole file as data, as Linux's
+    /// `generic_file_llseek`: data at the offset, the hole at the end, and
+    /// `ENXIO` from the end on or below 0; a negative `SEEK_SET` is `EINVAL`.
+    #[test]
+    fn seek_data_and_hole() {
+        let errno = |e: FsError| crate::kerror::KError::from(e).errno();
+        let mut v = ram();
+        let f = v.open_path(None, "/f", O_RDWR | O_CREAT, 0o644).unwrap();
+        assert_eq!(errno(v.seek(&f, 0, SEEK_DATA).unwrap_err()), 6, "empty");
+        assert_eq!(errno(v.seek(&f, 0, SEEK_HOLE).unwrap_err()), 6, "empty");
+        v.write(&f, b"hello").unwrap();
+        assert_eq!(v.seek(&f, 0, SEEK_DATA), Ok(0));
+        assert_eq!(v.seek(&f, 3, SEEK_DATA), Ok(3));
+        assert_eq!(v.seek(&f, 0, SEEK_CUR), Ok(3), "SEEK_DATA moves the offset");
+        assert_eq!(v.seek(&f, 1, SEEK_HOLE), Ok(5));
+        assert_eq!(v.seek(&f, 0, SEEK_CUR), Ok(5), "SEEK_HOLE moves the offset");
+        for whence in [SEEK_DATA, SEEK_HOLE] {
+            assert_eq!(errno(v.seek(&f, 5, whence).unwrap_err()), 6, "{whence}");
+            assert_eq!(errno(v.seek(&f, -1, whence).unwrap_err()), 6, "{whence}");
+        }
+        assert_eq!(
+            v.seek(&f, 0, SEEK_CUR),
+            Ok(5),
+            "a failed seek moves nothing"
+        );
+        assert_eq!(errno(v.seek(&f, -1, SEEK_SET).unwrap_err()), 22);
+        v.close(f).unwrap();
     }
 }
