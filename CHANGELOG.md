@@ -161,6 +161,9 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- A host that stalls QEMU no longer drops the timer tick to the PIT: the LAPIC timer is proved
+  against the PIT's interrupts, and its calibration divides by the time its window really took.
+- `kill` of a zombie returns 0 as on Linux; the NBD test server treats a macOS client's close as EOF.
 - `fsync`-style flushes can no longer be held off by a writer that keeps dirtying pages, and a
   page being read in has one cache slot, so a later read cannot see a stale second copy.
 - Partition tables on 4 KiB-sector disks are read; a FAT mount there fails with `EINVAL`, not `EIO`.
