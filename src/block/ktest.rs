@@ -1224,19 +1224,19 @@ fn stamp_six_gpt(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
 type Stamp = fn(&BlockRef) -> Result<[(u64, u64); 6], BlockError>;
 
 /// Check one six-entry table on disk `name`, then unregister it.
-fn six_entries(name: &str, stamp: Stamp) -> Outcome {
+fn six_entries(name: &str, stamp: Stamp, nums: [u32; 6]) -> Outcome {
     let disk = match mem_disk(name.as_bytes()) {
         Ok(d) => d,
         Err(e) => return crate::fail_fmt!("{name}: register: {}", e.as_str()),
     };
-    let r = six_entries_on(&disk, name, stamp);
+    let r = six_entries_on(&disk, name, stamp, nums);
     if let Err(e) = blockdev_init::unregister(&disk) {
         return crate::fail_fmt!("{name}: unregister: {}", e.as_str());
     }
     r
 }
 
-fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp) -> Outcome {
+fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp, nums: [u32; 6]) -> Outcome {
     let parts = match stamp(disk) {
         Ok(p) => p,
         Err(e) => return crate::fail_fmt!("{name}: stamp: {}", e.as_str()),
@@ -1256,7 +1256,7 @@ fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp) -> Outcome {
         Err(e) => return crate::fail_fmt!("{name}: scan: {}", e.as_str()),
     }
     let mut seen = [false; 6];
-    for n in 1..=6u32 {
+    for n in nums {
         let Ok(cname) = vibeos::block::blockdev::BlockName::child(disk.name(), n) else {
             return crate::fail_fmt!("{name}: child name {n}");
         };
@@ -1296,13 +1296,17 @@ fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp) -> Outcome {
 
 /// ROADMAP §10.12 (F117): an MBR table with an extended entry, four
 /// logicals and two primaries after it, and a six-entry GPT, each get six
-/// children `<disk>p1` to `<disk>p6`.
+/// children, numbered as Linux numbers them: the MBR's `<disk>p2`, `p3`
+/// and `p5` to `p8`, the GPT's `<disk>p1` to `p6`.
 pub(crate) fn part_six_entries() -> Outcome {
-    let r = six_entries("ktmbr", stamp_six_mbr);
+    // Linux's numbers: the MBR's primaries keep their slots, 2 and 3,
+    // and its four logical partitions are 5 to 8; the GPT's six entries
+    // are 1 to 6.
+    let r = six_entries("ktmbr", stamp_six_mbr, [2, 3, 5, 6, 7, 8]);
     if !matches!(r, Outcome::Ok) {
         return r;
     }
-    six_entries("ktgpt", stamp_six_gpt)
+    six_entries("ktgpt", stamp_six_gpt, [1, 2, 3, 4, 5, 6])
 }
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
