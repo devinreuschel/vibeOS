@@ -270,7 +270,9 @@ device, the driver fails the device and every queued request only when the
 device status has `DEVICE_NEEDS_RESET` (`exhausted_fails_device`). Each bound function is its own instance (`VirtioBlk`), owned by its PCI
 registry entry and named `vda`, `vdb`, … in bind order, with its own queues, bounce slots and
 vectors; the driver keeps no list of them (DEVICES.md §12.1 rule 1). Config reads capacity (512-byte units), `blk_size` (512
-if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
+if `F_BLK_SIZE` is absent), and topology when offered. A `blk_size` that is not a power of two
+from 512 to 4096, the block cache's page, fails the probe, as Linux's `virtblk_probe` fails on an
+invalid block size (`blk_size_default_and_4k`). Each request is a
 descriptor chain: header + data (or discard range) + status. The status
 byte is device-writable DMA, never a stack slot. Completions harvest the
 used ring on the threaded IRQ and wake the same `IoWaiter` cookies as the
@@ -305,7 +307,12 @@ value is the queue index; `kick` writes 0 for every queue (ROADMAP §11.5, F047)
 MBR (primary + extended/logical) and GPT parse in `crates/core/src/block/part.rs`. Protective
 MBR type `0xEE` is not a data device; GPT is. Header and entry CRCs are
 checked; a bad primary falls back to the backup header at the last LBA.
-EBR walk is capped at 128; a corrupt next-LBA stops the chain. `parse_mbr`
+EBR walk is capped at 128; a corrupt next-LBA stops the chain. Tables
+count in the disk's logical blocks, so on a disk of 4 KiB blocks the GPT header is at byte 4096 and
+every LBA is in 4 KiB units, as Linux reads them; a disk whose blocks are larger than 4 KiB gets no
+scan (`tables_on_4k_blocks`, and `part_six_entries` on a 4 KiB-block disk). FAT reads only
+512-byte sectors, and a FAT mount on a disk of larger blocks fails with `EINVAL`
+(`fat_mount_4k_disk_inval`); vibefs reads 4 KiB blocks on either. `parse_mbr`
 copies the four MBR entries before the EBR walk reuses its sector buffer.
 Entries are checked against the disk size only: an
 entry that overlaps another entry or the table itself, a GPT header whose

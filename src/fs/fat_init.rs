@@ -150,8 +150,15 @@ struct Io<'a> {
 }
 
 impl Disk for Io<'_> {
+    /// The device's logical block size, so a FAT mount on a disk of
+    /// 4 KiB blocks is refused with `Inval` (`FatVol::mount_in`), as
+    /// Linux refuses a 512-byte-sector volume there, rather than failing
+    /// its first 512-byte read with `Io`.
     fn sector_size(&self) -> u32 {
-        SEC as u32
+        match self.back {
+            Media::Initrd => SEC as u32,
+            Media::Dev(r) => r.logical_block_size().unwrap_or(0),
+        }
     }
 
     fn nsectors(&self) -> u32 {

@@ -325,7 +325,15 @@ fn setup(
 
     let cap_512 = r64(cfg, CFG_CAPACITY);
     let cfg_bs = r32(cfg, CFG_BLK_SIZE);
-    let blk_size = pick_blk_size(feat, cfg_bs);
+    let Some(blk_size) = pick_blk_size(feat, cfg_bs) else {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "vibeOS: blk: invalid block size {}",
+            cfg_bs
+        );
+        fail_probe(dev, common, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    };
     let Some(capacity) = logical_capacity(cap_512, blk_size) else {
         fail_probe(dev, common, &[], 0, None, &mut vqs, None);
         return Err(VirtioError::Failed);

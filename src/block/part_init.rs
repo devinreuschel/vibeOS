@@ -48,10 +48,12 @@ fn parse_dev(parent: &BlockRef) -> Result<Table, part::PartError> {
     let cap = parent
         .capacity_sectors()
         .map_err(|_| part::PartError::Invalid)?;
-    let mut sec = [0u8; 512];
-    if bs as usize > sec.len() {
+    // One logical block, which reads whole: 512 bytes, or 4 KiB on a
+    // 4 KiB-sector disk, whose tables count in 4 KiB blocks.
+    if !(512..=vibeos::limits::MAX_BLOCK_SIZE).contains(&bs) {
         return Err(part::PartError::Invalid);
     }
+    let mut sec = zeroed(bs as usize).map_err(|_| part::PartError::NoMemory)?;
     let mut scratch = zeroed(128 * 128).map_err(|_| part::PartError::NoMemory)?;
     part::parse(
         cap,

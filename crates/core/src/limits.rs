@@ -94,6 +94,11 @@ pub const MAX_VIRTIO_DISKS: u8 = 26;
 pub const MAX_RANK: u8 = 8;
 /// Pages one deferred unmap batch holds (`kva_init`).
 pub const MAX_UNMAP_PAGES: usize = 32;
+/// The largest logical block a disk may have: the block cache's page
+/// (`cache::PAGE`). virtio-blk refuses a larger `blk_size` at probe, as
+/// Linux took no block above its page size, and a partition table is read
+/// in blocks of at most this (`part::parse_image`, `part_init`).
+pub const MAX_BLOCK_SIZE: u32 = 4096;
 /// Partitions per disk (`part::Table`, `part_init`).
 pub const MAX_PARTS: usize = 16;
 /// Registered block devices, partitions included (`block`): boot's two

@@ -704,10 +704,10 @@ pub fn parse_image(disk: &[u8], sector_size: u32) -> Result<Table, PartError> {
     let nsectors = (disk.len() as u64)
         .checked_div(sector_size as u64)
         .ok_or(PartError::Invalid)?;
-    let mut sec = [0u8; 512];
-    if sector_size as usize > sec.len() {
-        return Err(PartError::Invalid);
-    }
+    let mut buf = [0u8; crate::limits::MAX_BLOCK_SIZE as usize];
+    let sec = buf
+        .get_mut(..sector_size as usize)
+        .ok_or(PartError::Invalid)?;
     let mut scratch = [0u8; 128 * 128];
     parse(
         nsectors,
@@ -729,7 +729,7 @@ pub fn parse_image(disk: &[u8], sector_size: u32) -> Result<Table, PartError> {
                 .copy_from_slice(src);
             Ok(())
         },
-        &mut sec,
+        sec,
         &mut scratch,
     )
 }
@@ -1282,6 +1282,94 @@ mod tests {
         assert_eq!(
             Table::empty(TableOrigin::Mbr).parts.len(),
             crate::limits::MAX_PARTS
+        );
+    }
+
+    /// A 4 KiB-sector disk's tables count in 4 KiB blocks: its GPT header
+    /// is in block 1, at byte 4096, and its entries and partitions are in
+    /// blocks too. A block larger than a page is refused.
+    #[test]
+    fn tables_on_4k_blocks() {
+        const BS: usize = 4096;
+        const N: u64 = 64;
+        let put4k = |d: &mut [u8], lba: u64, b: &[u8]| {
+            let o = lba as usize * BS;
+            d[o..o + b.len()].copy_from_slice(b);
+        };
+        // MBR: a primary in slot 1 and an extended in slot 2 with one logical.
+        let mut d = disk(N as usize * BS);
+        let mut mbr = [0u8; 512];
+        pack_mbr(
+            &mut mbr,
+            &[
+                (MBR_LINUX, 4, 8),
+                (MBR_EXTENDED, 20, 16),
+                (0, 0, 0),
+                (0, 0, 0),
+            ],
+        );
+        put4k(&mut d, 0, &mbr);
+        let mut e = [0u8; 512];
+        pack_ebr(&mut e, MBR_LINUX, 1, 8, 0, 0);
+        put4k(&mut d, 20, &e);
+        let t = parse_image(&d, BS as u32).unwrap();
+        let got: Vec<(u8, u64, u64)> = t.parts[..t.n]
+            .iter()
+            .map(|p| (p.index, p.start_lba, p.nsectors))
+            .collect();
+        assert_eq!(got, [(1, 4, 8), (5, 21, 8)]);
+
+        // GPT: 128 entries fill four blocks from block 2.
+        let mut d = disk(N as usize * BS);
+        let mut entries = vec![0u8; 128 * GPT_ENTRY_SIZE as usize];
+        pack_gpt_entry(&mut entries[..], &GUID_LINUX, &[1; 16], 6, 13, "a");
+        pack_gpt_entry(
+            &mut entries[2 * GPT_ENTRY_SIZE as usize..],
+            &GUID_LINUX,
+            &[3; 16],
+            20,
+            27,
+            "c",
+        );
+        let ecrc = entries_crc(&entries);
+        let last = N - 1;
+        let back = last - 4;
+        let hdr = |my, alt, part_lba| GptHeaderInfo {
+            my_lba: my,
+            alt_lba: alt,
+            first_usable: 6,
+            last_usable: back - 1,
+            disk_guid: [9; 16],
+            part_lba,
+            part_count: 128,
+            part_size: GPT_ENTRY_SIZE,
+            entries_crc: ecrc,
+        };
+        let mut pmbr = [0u8; 512];
+        pack_protective_mbr(&mut pmbr, N);
+        put4k(&mut d, 0, &pmbr);
+        let mut h = [0u8; 512];
+        pack_gpt_header(&mut h, &hdr(1, last, 2));
+        put4k(&mut d, 1, &h);
+        for k in 0..4u64 {
+            let o = k as usize * BS;
+            put4k(&mut d, 2 + k, &entries[o..o + BS]);
+            put4k(&mut d, back + k, &entries[o..o + BS]);
+        }
+        let mut b = [0u8; 512];
+        pack_gpt_header(&mut b, &hdr(last, 1, back));
+        put4k(&mut d, last, &b);
+        let t = parse_image(&d, BS as u32).unwrap();
+        let got: Vec<(u8, u64, u64)> = t.parts[..t.n]
+            .iter()
+            .map(|p| (p.index, p.start_lba, p.nsectors))
+            .collect();
+        assert_eq!(got, [(1, 6, 8), (3, 20, 8)]);
+        // Read as 512-byte sectors, the header is not at LBA 1.
+        assert_ne!(parse_image(&d, 512).map(|t| t.n), Ok(2));
+        assert_eq!(
+            parse_image(&disk(N as usize * 8192), 8192),
+            Err(PartError::Invalid)
         );
     }
 }
