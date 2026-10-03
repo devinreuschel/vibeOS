@@ -447,7 +447,8 @@ impl Vol {
         let want = core::cmp::min(buf.len() as u64, size - off) as usize;
         if self.inodes[is].flags & F_INLINE != 0 {
             // An inline file's bytes are `inline_data`'s: a size past them
-            // is the image's corruption (fsck's `inline`).
+            // is corruption (fsck's `inline`), which a crafted image or an
+            // earlier v1 truncate left (VIBEFS.md §7).
             let s = off as usize;
             let end = s.checked_add(want).ok_or(Error::Corrupt)?;
             let src = self.inodes[is]

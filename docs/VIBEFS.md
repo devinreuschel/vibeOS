@@ -166,13 +166,15 @@ Snapshot entry (40 bytes):
 | 32 | `u32` | `next_ino` |
 | 36 | `u32` | reserved |
 
-Mount: read both slots. Ignore a slot that fails magic, checksum, version,
-slot id, block size, `16 ≤ nblocks ≤ 1024`, or snapshot count ≤ 4. Of the
-valid slots, take the **highest generation**. Equal generation (both slots
-after `mkfs`): prefer slot 0. Zero valid slots: unmountable (`Corrupt`). A
-device smaller than `nblocks` is `Inval`. Live snapshot entries come first
-in `snap[4]`: entry `i` is live when `i` is below the snapshot count and its
-inode root is non-zero.
+Mount: read both slots. A slot that cannot be read (a disk error) fails
+the mount with `Io`, since it may hold the newer generation and mounting
+the other would roll the volume back. Ignore a slot that reads but fails
+magic, checksum, version, slot id, block size, `16 ≤ nblocks ≤ 1024`, or
+snapshot count ≤ 4. Of the valid slots, take the **highest generation**.
+Equal generation (both slots after `mkfs`): prefer slot 0. Zero valid
+slots: unmountable (`Corrupt`). A device smaller than `nblocks` is
+`Inval`. Live snapshot entries come first in `snap[4]`: entry `i` is live
+when `i` is below the snapshot count and its inode root is non-zero.
 
 ---
 
