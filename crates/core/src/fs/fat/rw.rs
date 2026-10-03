@@ -240,6 +240,12 @@ impl FatVol {
     /// a file there, or an empty directory when the source is one. The
     /// caller moves an open file's words to `to` and frees `replaced` once
     /// nothing holds it.
+    ///
+    /// Every check of the image, a moved directory's `..` included, runs
+    /// before the first write. The new name is written and flushed before
+    /// the source's entry goes, so a crash between leaves two names for
+    /// the source's clusters, never none. A write that fails puts back
+    /// what the rename wrote, so an error leaves both names as they were.
     pub fn rename<D: Disk>(
         &mut self,
         d: &mut D,
@@ -279,19 +285,80 @@ impl FatVol {
             0
         };
         let slots = n_lfn.checked_add(1).ok_or(FatError::NameTooLong)?;
+        let undo = self.rename_undo_of(d, src_dir, &src, dst_dir)?;
         let (_c, ent_off) = self.dir_reserve(d, dst_dir, slots)?;
-        let cs = lfn_checksum(&short);
-        for (slot, ord) in (1..=n_lfn).rev().enumerate() {
-            let mut ent = [0u8; ENT];
-            fill_lfn(&mut ent, ord as u8, slot == 0, cs, dst_name)?;
-            self.write_dir_raw(d, dst_dir, ent_at(ent_off, slot)?, &ent)?;
-        }
-        let mut ent = [0u8; ENT];
-        self.read_dir_raw(d, src_dir, src.dir_off, &mut ent)?;
-        ent[..11].copy_from_slice(&short);
         let short_off = ent_at(ent_off, n_lfn)?;
-        self.write_dir_raw(d, dst_dir, short_off, &ent)?;
+        let cs = lfn_checksum(&short);
+        let mut ent = undo.src;
+        ent[..11].copy_from_slice(&short);
+        let r = (|| {
+            for (slot, ord) in (1..=n_lfn).rev().enumerate() {
+                let mut lfn = [0u8; ENT];
+                fill_lfn(&mut lfn, ord as u8, slot == 0, cs, dst_name)?;
+                self.write_dir_raw(d, dst_dir, ent_at(ent_off, slot)?, &lfn)?;
+            }
+            self.write_dir_raw(d, dst_dir, short_off, &ent)?;
+            self.rename_finish(d, src_dir, &src, dst_dir, &undo)
+        })();
+        if let Err(e) = r {
+            // The new name's slots were free; they become deleted entries.
+            let mut gone = [0u8; ENT];
+            gone[0] = ENT_DEL;
+            let mut back = Ok(());
+            for slot in 0..slots {
+                back = back.and(
+                    ent_at(ent_off, slot).and_then(|o| self.write_dir_raw(d, dst_dir, o, &gone)),
+                );
+            }
+            return back
+                .and(self.rename_undo(d, src_dir, &src, &undo))
+                .and(Err(e));
+        }
+        Ok(RenameMoved {
+            from,
+            to: (dst_dir, short_off),
+            replaced: None,
+        })
+    }
+
+    /// What a rename of `src` from `src_dir` to `dst_dir` changes besides
+    /// the new name, read and checked before its first write: the
+    /// source's short entry and, when a directory changes parent, its
+    /// `..` entry, which is `Corrupt` when it is not one.
+    fn rename_undo_of<D: Disk>(
+        &mut self,
+        d: &mut D,
+        src_dir: u32,
+        src: &Node,
+        dst_dir: u32,
+    ) -> Result<RenameUndo, FatError> {
+        let mut ent = [0u8; ENT];
+        if !self.read_dir_raw(d, src_dir, src.dir_off, &mut ent)? {
+            return Err(FatError::Corrupt);
+        }
+        let mut dotdot = None;
         if src.kind == InodeKind::Dir && src_dir != dst_dir {
+            let mut dd = [0u8; ENT];
+            if !self.read_dir_raw(d, src.clu, ENT as u32, &mut dd)? || &dd[..11] != b"..         " {
+                return Err(FatError::Corrupt);
+            }
+            dotdot = Some(dd);
+        }
+        Ok(RenameUndo { src: ent, dotdot })
+    }
+
+    /// The steps of a rename after its new name is written: a moved
+    /// directory's `..` names its new parent, the new name is flushed, and
+    /// the source's entry goes.
+    fn rename_finish<D: Disk>(
+        &mut self,
+        d: &mut D,
+        src_dir: u32,
+        src: &Node,
+        dst_dir: u32,
+        undo: &RenameUndo,
+    ) -> Result<(), FatError> {
+        if undo.dotdot.is_some() {
             let parent = if dst_dir == self.info.root_clus {
                 0
             } else {
@@ -301,12 +368,27 @@ impl FatVol {
         }
         d.flush()?;
         self.mark_deleted(d, src_dir, src.dir_off)?;
-        d.flush()?;
-        Ok(RenameMoved {
-            from,
-            to: (dst_dir, short_off),
-            replaced: None,
-        })
+        d.flush()
+    }
+
+    /// Put back the source's side of a failed rename, after its caller put
+    /// back the new name's slots: the moved directory's `..` and the
+    /// source's short entry, then a flush. Every write is tried; the first
+    /// error is returned. Long-name entries `mark_deleted` removed before
+    /// it failed stay removed, so the source then keeps its short name.
+    fn rename_undo<D: Disk>(
+        &mut self,
+        d: &mut D,
+        src_dir: u32,
+        src: &Node,
+        undo: &RenameUndo,
+    ) -> Result<(), FatError> {
+        let mut r = Ok(());
+        if let Some(dd) = &undo.dotdot {
+            r = r.and(self.write_dir_raw(d, src.clu, ENT as u32, dd));
+        }
+        r.and(self.write_dir_raw(d, src_dir, src.dir_off, &undo.src))
+            .and(d.flush())
     }
 
     /// [`Self::rename`] onto the existing `dst`, as rename(2) has it: a
@@ -314,7 +396,9 @@ impl FatVol {
     /// non-directory. The source's entry is written over `dst`'s short
     /// entry under `dst`'s name, as Linux's vfat reuses the target's slot,
     /// so the name never goes missing and nothing is allocated; then the
-    /// source's entry goes. `dst`'s clusters are the caller's to free.
+    /// source's entry goes. A failed write puts `dst`'s entry back, so
+    /// the target keeps its clusters. `dst`'s clusters are the caller's to
+    /// free.
     fn rename_over<D: Disk>(
         &mut self,
         d: &mut D,
@@ -328,22 +412,21 @@ impl FatVol {
             _ => {}
         }
         let mut name = [0u8; ENT];
-        self.read_dir_raw(d, dst.dir_clu, dst.dir_off, &mut name)?;
-        let mut ent = [0u8; ENT];
-        self.read_dir_raw(d, src_dir, src.dir_off, &mut ent)?;
-        ent[..11].copy_from_slice(&name[..11]);
-        self.write_dir_raw(d, dst.dir_clu, dst.dir_off, &ent)?;
-        if src.kind == InodeKind::Dir && src_dir != dst.dir_clu {
-            let parent = if dst.dir_clu == self.info.root_clus {
-                0
-            } else {
-                dst.dir_clu
-            };
-            self.set_dotdot(d, src.clu, parent)?;
+        if !self.read_dir_raw(d, dst.dir_clu, dst.dir_off, &mut name)? {
+            return Err(FatError::Corrupt);
         }
-        d.flush()?;
-        self.mark_deleted(d, src_dir, src.dir_off)?;
-        d.flush()?;
+        let undo = self.rename_undo_of(d, src_dir, src, dst.dir_clu)?;
+        let mut ent = undo.src;
+        ent[..11].copy_from_slice(&name[..11]);
+        let r = self
+            .write_dir_raw(d, dst.dir_clu, dst.dir_off, &ent)
+            .and_then(|()| self.rename_finish(d, src_dir, src, dst.dir_clu, &undo));
+        if let Err(e) = r {
+            return self
+                .write_dir_raw(d, dst.dir_clu, dst.dir_off, &name)
+                .and(self.rename_undo(d, src_dir, src, &undo))
+                .and(Err(e));
+        }
         Ok(RenameMoved {
             from: (src.dir_clu, src.dir_off),
             to: (dst.dir_clu, dst.dir_off),
@@ -655,6 +738,14 @@ fn ent_at(base: u32, slot: usize) -> Result<u32, FatError> {
         .and_then(|b| u32::try_from(b).ok())
         .ok_or(FatError::NoSpace)?;
     base.checked_add(rel).ok_or(FatError::NoSpace)
+}
+
+/// What a rename puts back when a write fails ([`FatVol::rename`]): the
+/// source's short entry, and the moved directory's `..` entry when the
+/// rename changes its parent.
+struct RenameUndo {
+    src: [u8; ENT],
+    dotdot: Option<[u8; ENT]>,
 }
 
 /// The clusters a failed extend allocated: the first one it linked, and
