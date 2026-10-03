@@ -312,6 +312,31 @@ impl<T> Guarded<T> for std::sync::Mutex<T> {
     }
 }
 
+/// What a rename's walks found: the key of the inode `oname` named, and
+/// of the one `nname` named (`None` for none). The VFS holds those two
+/// and commits the move on them, so the backend moves and replaces no
+/// other: a racing change can get between the walks and the backend
+/// call, which runs with the VFS lock dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenameSeen {
+    pub src: Key,
+    pub tgt: Option<Key>,
+}
+
+impl RenameSeen {
+    /// `Stale` unless `src` and `tgt`, the keys of what `oname` and
+    /// `nname` name in the backend's store now (`None` for nothing), are
+    /// what the walks found. Nothing has changed then, and the VFS walks
+    /// both names again.
+    pub fn check(&self, src: Option<Key>, tgt: Option<Key>) -> Result<(), FsError> {
+        if src == Some(self.src) && tgt == self.tgt {
+            Ok(())
+        } else {
+            Err(FsError::Stale)
+        }
+    }
+}
+
 /// Per-inode ops, reached only through a superblock's `ops` pointer.
 /// Each call gets copies of the inodes it acts on, whose slots the caller
 /// holds a count on for the call, and runs with the VFS lock dropped
@@ -360,10 +385,14 @@ pub trait InodeOps: Sync {
     ) -> Result<(), FsError> {
         Err(FsError::Perm)
     }
-    /// Move `oname` in `odir` to `nname` in `ndir`. The moved inode's new
-    /// key when the move changed it, as FAT's dirent-location key does.
-    /// An inode the move replaced is the one `Vfs` held for `nname`,
-    /// released at its last put.
+    /// Move `oname` in `odir` to `nname` in `ndir`, replacing what
+    /// `nname` names, as rename(2) does. `seen` is what the VFS's walks
+    /// found at the two names, the inodes it holds and accounts for:
+    /// before it changes anything, under its own lock, the backend checks
+    /// that the names still name them ([`RenameSeen::check`]), so an
+    /// inode the move replaces is always the one `Vfs` held for `nname`,
+    /// released at its last put. The moved inode's new key when the move
+    /// changed it, as FAT's dirent-location key does.
     fn rename(
         &self,
         _cx: &mut OpCx<'_>,
@@ -371,6 +400,7 @@ pub trait InodeOps: Sync {
         _oname: &[u8],
         _ndir: &mut Inode,
         _nname: &[u8],
+        _seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         Err(FsError::Perm)
     }
@@ -1150,12 +1180,13 @@ enum Rd {
 }
 
 /// A rename's two directory calls and the inodes it holds: the one it
-/// moves and the one it may replace.
+/// moves and the one it may replace, whose keys `seen` gives the backend.
 struct RenameCall {
     a: Call,
     b: Call,
     src: u16,
     tgt: Option<u16>,
+    seen: RenameSeen,
 }
 
 impl Vfs {
@@ -1195,6 +1226,10 @@ pub struct Hooks {
     /// rmdir, rename or link), where a racing change can take a name it
     /// walked.
     pub change_window: fn(),
+    /// Between a rename's begin step and its backend call, with the VFS
+    /// lock dropped, where a racing change can make, take or move a name
+    /// the rename walked, or remove its new directory.
+    pub rename_window: fn(),
 }
 
 fn no_window() {}
@@ -1208,6 +1243,7 @@ impl Hooks {
         write_window: no_window,
         open_race: no_race,
         change_window: no_window,
+        rename_window: no_window,
     };
 }
 

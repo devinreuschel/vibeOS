@@ -7,7 +7,7 @@
 
 use super::{
     Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps, Key,
-    MAX_DIR_ENTS, MAX_FILE_BYTES, MAX_RAM_NODES, Name, OpCx, S_IFDIR_MODE, S_IFMT,
+    MAX_DIR_ENTS, MAX_FILE_BYTES, MAX_RAM_NODES, Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFMT,
 };
 
 #[derive(Clone, Copy)]
@@ -317,10 +317,12 @@ impl<S: Guarded<RamState> + Sync + 'static> InodeOps for RamFs<S> {
         oname: &[u8],
         ndir: &mut Inode,
         nname: &[u8],
+        seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         let (inst, now) = (inst_of(cx), cx.now);
         self.store.with(|st| {
-            ram_rename(st, inst, now, odir.key[0], oname, ndir.key[0], nname)?;
+            let (o, n) = ((odir.key[0], oname), (ndir.key[0], nname));
+            ram_rename(st, inst, now, o, n, seen)?;
             refresh(st, inst, odir);
             refresh(st, inst, ndir);
             Ok(None)
@@ -684,28 +686,29 @@ fn ram_link(
 /// already at `nname` is replaced, as rename(2) replaces it: a directory
 /// only by a directory and only when empty, anything else only by a
 /// non-directory, and a second name of the same file is left as it is.
+/// The two names must still name what the VFS's walks found (`seen`).
 fn ram_rename(
     st: &mut RamState,
     inst: u32,
     now: u64,
-    odir: u32,
-    oname: &[u8],
-    ndir: u32,
-    nname: &[u8],
+    (odir, oname): (u32, &[u8]),
+    (ndir, nname): (u32, &[u8]),
+    seen: RenameSeen,
 ) -> Result<(), FsError> {
     let nm = Name::from_bytes(nname)?;
-    let node = ram_dent(st, inst, odir, oname)?.ok_or(FsError::NotFound)?;
+    let node = ram_dent(st, inst, odir, oname)?;
+    let tgt = ram_dent(st, inst, ndir, nname)?;
+    let key = |n: u32| [n, 0, 0];
+    seen.check(node.map(key), tgt.map(key))?;
+    let node = node.ok_or(FsError::NotFound)?;
     let kind = ram_get(st, inst, node).ok_or(FsError::NotFound)?.kind;
     if odir == ndir && oname == nname {
         return Ok(());
     }
-    let tgt = {
-        let r = ram_get(st, inst, ndir).ok_or(FsError::NotFound)?;
-        if r.kind != InodeKind::Dir {
-            return Err(FsError::NotDir);
-        }
-        ram_dent(st, inst, ndir, nname)?
-    };
+    let r = ram_get(st, inst, ndir).ok_or(FsError::NotFound)?;
+    if r.kind != InodeKind::Dir {
+        return Err(FsError::NotDir);
+    }
     match tgt {
         Some(t) if t == node => return Ok(()),
         Some(t) => {

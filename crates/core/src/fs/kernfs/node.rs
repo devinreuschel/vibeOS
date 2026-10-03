@@ -495,16 +495,18 @@ pub(super) fn kern_unlink(
 }
 
 /// Move `oname` in `odir` to `nname` in `ndir`, replacing what `nname`
-/// names, as rename(2) does. A replaced node keeps its node until [`Vfs`]
-/// evicts it at its last put, as [`kern_unlink`]'s child does. A tmpfs
-/// node has one name, so the move only relinks it; the moved node takes
-/// a new place in `ndir`'s listing, as Linux's tmpfs gives it a new
+/// names, as rename(2) does, when the two names still name what the
+/// VFS's walks found (`seen`). A replaced node keeps its node until
+/// [`Vfs`] evicts it at its last put, as [`kern_unlink`]'s child does. A
+/// tmpfs node has one name, so the move only relinks it; the moved node
+/// takes a new place in `ndir`'s listing, as Linux's tmpfs gives it a new
 /// offset.
 pub(super) fn kern_rename(
     k: &mut KernState,
     x: Kx,
     (odir, oname): (&mut Inode, &[u8]),
     (ndir, nname): (&mut Inode, &[u8]),
+    seen: RenameSeen,
 ) -> Result<(), FsError> {
     if x.ty != FsType::Tmp {
         return Err(FsError::Perm);
@@ -515,7 +517,11 @@ pub(super) fn kern_rename(
     if nm.is_dot() || nm.is_dotdot() {
         return Err(FsError::Inval);
     }
-    let node = kern_find_child(k, inst, od, oname).ok_or(FsError::NotFound)?;
+    let node = kern_find_child(k, inst, od, oname);
+    let tgt = kern_find_child(k, inst, nd, nname);
+    let key = |n: u32| [n, 0, 0];
+    seen.check(node.map(key), tgt.map(key))?;
+    let node = node.ok_or(FsError::NotFound)?;
     let is_dir = kern_get(k, inst, node)
         .ok_or(FsError::NotFound)?
         .kind
@@ -528,7 +534,6 @@ pub(super) fn kern_rename(
     if n.kind.inode_kind() != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
-    let tgt = kern_find_child(k, inst, nd, nname);
     if let Some(tg) = tgt {
         let tn = kern_get(k, inst, tg).ok_or(FsError::NotFound)?;
         match (is_dir, tn.kind.inode_kind() == InodeKind::Dir) {

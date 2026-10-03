@@ -1198,6 +1198,7 @@ mod fs_error_errno_per_variant {
         perm: Perm => 1,
         spipe: SPipe => 29,
         xdev: XDev => 18,
+        stale: Stale => 2,
         acces: Acces => 13,
     }
 }
@@ -1362,7 +1363,13 @@ fn inode_ops_unsupported_errno() {
         errno(ops.link(&mut cx, &mut a, b"x", &mut b).unwrap_err()),
         1
     );
-    let e = ops.rename(&mut cx, &mut a, b"x", &mut b, b"y").unwrap_err();
+    let seen = RenameSeen {
+        src: [1, 0, 0],
+        tgt: None,
+    };
+    let e = ops
+        .rename(&mut cx, &mut a, b"x", &mut b, b"y", seen)
+        .unwrap_err();
     assert_eq!(errno(e), 1);
     assert_eq!(
         errno(ops.read(&mut cx, &mut a, 0, &mut buf).unwrap_err()),

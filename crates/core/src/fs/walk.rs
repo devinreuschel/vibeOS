@@ -426,6 +426,10 @@ impl Vfs {
                 b,
                 src: si,
                 tgt: ti,
+                seen: RenameSeen {
+                    src: self.inodes[si as usize].key,
+                    tgt: ti.map(|t| self.inodes[t as usize].key),
+                },
             })),
             Err(e) => {
                 self.iput(si);
@@ -499,7 +503,7 @@ impl Vfs {
         rc: RenameCall,
         res: Result<Option<Key>, FsError>,
     ) -> Result<(), FsError> {
-        let RenameCall { a, b, src, tgt } = rc;
+        let RenameCall { a, b, src, tgt, .. } = rc;
         self.finish(a, true);
         self.finish(b, true);
         let r = res.map(|moved| {
@@ -1157,8 +1161,10 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     }
 
     /// Move `o`'s name to `n`'s, walking both again when a racing change
-    /// left either naming another file than the walks found before the
-    /// begin step, as [`Self::remove_in`] does.
+    /// left either naming another file than the walks found, as
+    /// [`Self::remove_in`] does: before the begin step, which sees it in
+    /// the dentry cache, or before the backend call, whose backend sees it
+    /// in its store ([`RenameSeen`]) and returns `Stale`.
     fn rename_in(
         &self,
         o: (PathRef, &[u8]),
@@ -1184,9 +1190,18 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
             let Some(mut rc) = self.step(|v| v.rename_begin(o, n, src, tgt))? else {
                 continue;
             };
-            let res =
-                rc.a.run2(&mut rc.b, |ops, cx, x, y| ops.rename(cx, x, o.1, y, n.1));
-            return self.step(|v| v.rename_commit(o, n, rc, res));
+            (self.hooks.rename_window)();
+            let seen = rc.seen;
+            let res = rc.a.run2(&mut rc.b, |ops, cx, x, y| {
+                ops.rename(cx, x, o.1, y, n.1, seen)
+            });
+            match self.step(|v| v.rename_commit(o, n, rc, res)) {
+                // A racing change after the begin step left a name naming
+                // another file than the walks found, and the backend
+                // changed nothing: walk both again.
+                Err(FsError::Stale) => continue,
+                r => return r,
+            }
         }
         Err(FsError::NotFound)
     }

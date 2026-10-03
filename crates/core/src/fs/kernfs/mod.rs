@@ -27,7 +27,8 @@ use crate::limits::{MAX_KERN_MOUNTS, TMPFS_NODE_HEAP_BYTES};
 
 use super::{
     Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps, Key,
-    MAX_NAME, Name, OpCx, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT, S_IFREG_MODE,
+    MAX_NAME, Name, OpCx, RenameSeen, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT,
+    S_IFREG_MODE,
 };
 
 mod devfs;
@@ -565,9 +566,12 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         oname: &[u8],
         ndir: &mut Inode,
         nname: &[u8],
+        seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
-        self.op(cx, |k, x| kern_rename(k, x, (odir, oname), (ndir, nname)))
-            .map(|()| None)
+        self.op(cx, |k, x| {
+            kern_rename(k, x, (odir, oname), (ndir, nname), seen)
+        })
+        .map(|()| None)
     }
 
     fn read(

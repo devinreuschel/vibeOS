@@ -25,7 +25,7 @@ use vibeos::dev::Instance;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, Node, SEC};
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
-    Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE, WalkBase,
+    Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFREG_MODE, WalkBase,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -355,10 +355,14 @@ impl InodeOps for FatOps {
         oname: &[u8],
         ndir: &mut Inode,
         nname: &[u8],
+        seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
             let (o, _) = words(odir)?;
             let (n, _) = words(ndir)?;
+            let src = key_at(v, d, o.first_clu, oname)?;
+            let tgt = key_at(v, d, n.first_clu, nname)?;
+            seen.check(src, tgt)?;
             let m = v.rename(d, o.first_clu, oname, n.first_clu, nname)?;
             Ok((m.from != m.to).then_some([m.to.0, m.to.1, 0]))
         })
@@ -505,6 +509,16 @@ fn node_info(n: &Node) -> InodeInfo {
         n.kind,
         n.mtime,
     )
+}
+
+/// The key of the file `name` names in the directory at cluster `dir`,
+/// `None` when it names none: what a rename checks its walks against.
+fn key_at(v: &mut FatVol, d: &mut Io, dir: u32, name: &[u8]) -> Result<Option<Key>, FsError> {
+    match v.lookup(d, dir, name) {
+        Ok(n) => Ok(Some(node_info(&n).key)),
+        Err(FsError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 fn dirent_word(dir_clu: u32, dir_off: u32) -> u64 {

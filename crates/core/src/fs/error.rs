@@ -38,13 +38,19 @@ pub enum FsError {
     XDev,
     /// The filesystem does not let a regular file be made here.
     Acces,
+    /// A name a namespace change walked no longer names the inode the
+    /// walk found: a racing change got between the walk and the backend
+    /// call ([`super::RenameSeen`]). The VFS walks again, and returns
+    /// `NotFound` once its bounded retries are spent, so a syscall never
+    /// sees this; it maps to `ENOENT` as that `NotFound` does.
+    Stale,
 }
 
 /// A filesystem error's Linux errno at the syscall boundary (SYSCALL.md §2).
 impl From<FsError> for crate::kerror::KError {
     fn from(e: FsError) -> Self {
         match e {
-            FsError::NotFound => Self::NoEnt,
+            FsError::NotFound | FsError::Stale => Self::NoEnt,
             FsError::Exists => Self::Exist,
             FsError::NotDir => Self::NotDir,
             FsError::IsDir => Self::IsDir,
@@ -94,6 +100,7 @@ impl FsError {
             FsError::SPipe => "cannot seek",
             FsError::XDev => "cross-device",
             FsError::Acces => "access denied",
+            FsError::Stale => "stale name",
         }
     }
 }

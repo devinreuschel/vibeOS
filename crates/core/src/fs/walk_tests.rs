@@ -587,6 +587,27 @@ fn made_window() {
     run_race(&MADE_RACE);
 }
 
+static CALL_MADE_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+static CALL_SWAP_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+static CALL_SRC_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+static TMP_CALL_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+
+fn call_made_window() {
+    run_race(&CALL_MADE_RACE);
+}
+
+fn call_swap_window() {
+    run_race(&CALL_SWAP_RACE);
+}
+
+fn call_src_window() {
+    run_race(&CALL_SRC_RACE);
+}
+
+fn tmp_call_window() {
+    run_race(&TMP_CALL_RACE);
+}
+
 /// A File API on `vfs` whose namespace changes run `window` between their
 /// walks and their begin steps.
 fn racing(
@@ -597,6 +618,21 @@ fn racing(
         vfs,
         Hooks {
             change_window: window,
+            ..Hooks::NONE
+        },
+    )
+}
+
+/// A File API on `vfs` whose renames run `window` between their begin
+/// steps and their backend calls.
+fn racing_call(
+    vfs: &'static std::sync::Mutex<Vfs>,
+    window: fn(),
+) -> FileApi<'static, std::sync::Mutex<Vfs>> {
+    FileApi::with_hooks(
+        vfs,
+        Hooks {
+            rename_window: window,
             ..Hooks::NONE
         },
     )
@@ -800,6 +836,104 @@ fn rename_racing_create_of_its_target_replaces_it() {
     assert_eq!(api.stat_path(None, b"/b", true).unwrap().nlink, 1);
     api.unlink(None, b"/b").unwrap();
     assert_eq!(fs.with(|s| s.used()), base);
+}
+
+/// A rename whose target a racing create makes after its begin step, with
+/// the VFS lock dropped before the backend call, replaces the new file,
+/// whose node is freed: the backend refuses a name the walks did not find
+/// (`RenameSeen`), and the rename walks again.
+#[test]
+fn rename_racing_create_before_its_backend_call_replaces_it() {
+    let (vfs, fs) = ram_vfs();
+    let base = fs.with(|s| s.used());
+    write_new(vfs, b"/a", b"A");
+    *CALL_MADE_RACE.lock().unwrap() = Some((vfs, &[Change::Create(b"/b", b"B")]));
+    racing_call(vfs, call_made_window)
+        .rename(None, b"/a", b"/b")
+        .unwrap();
+    let api = FileApi::new(vfs);
+    assert_eq!(api.walk(None, b"/a", true).unwrap_err(), FsError::NotFound);
+    assert_eq!(read_all(vfs, b"/b"), b"A");
+    assert_eq!(api.stat_path(None, b"/b", true).unwrap().nlink, 1);
+    api.unlink(None, b"/b").unwrap();
+    assert_eq!(fs.with(|s| s.used()), base);
+}
+
+/// A rename whose target a racing unlink and create replace with another
+/// file after its begin step replaces that new file, and both the file
+/// the walk found and the new one are freed.
+#[test]
+fn rename_racing_swap_of_its_target_replaces_the_new_file() {
+    let (vfs, fs) = ram_vfs();
+    let base = fs.with(|s| s.used());
+    write_new(vfs, b"/a", b"A");
+    write_new(vfs, b"/b", b"B");
+    *CALL_SWAP_RACE.lock().unwrap() =
+        Some((vfs, &[Change::Unlink(b"/b"), Change::Create(b"/b", b"C")]));
+    racing_call(vfs, call_swap_window)
+        .rename(None, b"/a", b"/b")
+        .unwrap();
+    assert_eq!(read_all(vfs, b"/b"), b"A");
+    FileApi::new(vfs).unlink(None, b"/b").unwrap();
+    assert_eq!(fs.with(|s| s.used()), base);
+}
+
+/// A rename whose source a racing rename moves away, and whose old name a
+/// racing create reuses, after its begin step moves the new file, and the
+/// old name is gone from the dentry cache too.
+#[test]
+fn rename_racing_swap_of_its_source_moves_the_new_file() {
+    let (vfs, fs) = ram_vfs();
+    let base = fs.with(|s| s.used());
+    write_new(vfs, b"/a", b"A");
+    *CALL_SRC_RACE.lock().unwrap() = Some((
+        vfs,
+        &[Change::Rename(b"/a", b"/c"), Change::Create(b"/a", b"N")],
+    ));
+    racing_call(vfs, call_src_window)
+        .rename(None, b"/a", b"/b")
+        .unwrap();
+    let api = FileApi::new(vfs);
+    assert_eq!(api.walk(None, b"/a", true).unwrap_err(), FsError::NotFound);
+    assert_eq!(read_all(vfs, b"/b"), b"N");
+    assert_eq!(read_all(vfs, b"/c"), b"A");
+    api.unlink(None, b"/b").unwrap();
+    api.unlink(None, b"/c").unwrap();
+    assert_eq!(fs.with(|s| s.used()), base);
+    assert_dcache_sound(&vfs.lock().unwrap());
+}
+
+/// `vfs` with tmpfs at `/tmp`, and the kernfs store it is a skin of.
+fn tmp_at(
+    vfs: &'static std::sync::Mutex<Vfs>,
+) -> &'static crate::fs::kernfs::KernFs<std::sync::Mutex<crate::fs::kernfs::KernState>> {
+    use crate::fs::kernfs::{KernFs, KernSkin, KernState};
+    let kfs: &'static KernFs<std::sync::Mutex<KernState>> = std::boxed::Box::leak(
+        std::boxed::Box::new(KernFs::new(std::sync::Mutex::new(KernState::new()))),
+    );
+    let tmp: &'static KernSkin<std::sync::Mutex<KernState>> =
+        std::boxed::Box::leak(std::boxed::Box::new(KernSkin::new(kfs, FsType::Tmp)));
+    let api = FileApi::new(vfs);
+    api.mkdir(None, b"/tmp", 0o755).unwrap();
+    api.mount_fs(None, b"/tmp", tmp, None, false, None).unwrap();
+    kfs
+}
+
+/// On tmpfs too, a rename whose target a racing create makes after its
+/// begin step replaces the new file, whose node and data are freed.
+#[test]
+fn tmpfs_rename_racing_create_before_its_backend_call_replaces_it() {
+    let (vfs, _) = ram_vfs();
+    let kfs = tmp_at(vfs);
+    let base = kfs.tmp_nodes().unwrap().0;
+    write_new(vfs, b"/tmp/a", b"A");
+    *TMP_CALL_RACE.lock().unwrap() = Some((vfs, &[Change::Create(b"/tmp/b", b"BBBB")]));
+    racing_call(vfs, tmp_call_window)
+        .rename(None, b"/tmp/a", b"/tmp/b")
+        .unwrap();
+    assert_eq!(read_all(vfs, b"/tmp/b"), b"A");
+    FileApi::new(vfs).unlink(None, b"/tmp/b").unwrap();
+    assert_eq!(kfs.tmp_nodes().unwrap().0, base);
 }
 
 /// `..` from the root of mounts stacked on one directory leads to that

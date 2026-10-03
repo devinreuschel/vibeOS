@@ -21,7 +21,7 @@ use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
-    Name, OpCx, S_IFDIR_MODE, S_IFMT, WalkBase,
+    Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFMT, WalkBase,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -312,8 +312,17 @@ impl InodeOps for VibeOps {
         oname: &[u8],
         ndir: &mut Inode,
         nname: &[u8],
+        seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
+            let mut key_at = |dir: u32, name: &[u8]| match v.lookup(d, dir, name) {
+                Ok(n) => Ok(Some(node_info(&n).key)),
+                Err(FsError::NotFound) => Ok(None),
+                Err(e) => Err(e),
+            };
+            let src = key_at(odir.key[0], oname)?;
+            let tgt = key_at(ndir.key[0], nname)?;
+            seen.check(src, tgt)?;
             v.rename(d, odir.key[0], oname, ndir.key[0], nname)?;
             Ok(None)
         })

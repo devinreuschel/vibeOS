@@ -345,9 +345,17 @@ impl InodeOps for LockedFs {
         oname: &[u8],
         ndir: &mut Inode,
         nname: &[u8],
+        seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         self.unlocked();
         with_store(cx.private[0], |s| {
+            let at = |d: &Inode, name: &[u8]| {
+                s.names
+                    .iter()
+                    .find(|e| e.0 == d.key[0] && e.1 == name)
+                    .map(|e| [e.2, 0, 0])
+            };
+            seen.check(at(odir, oname), at(ndir, nname))?;
             if s.names.iter().any(|e| e.0 == ndir.key[0] && e.1 == nname) {
                 return Err(FsError::Exists);
             }
@@ -719,8 +727,16 @@ impl InodeOps for FoldFs {
         oname: &[u8],
         ndir: &mut Inode,
         nname: &[u8],
+        seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         with_store(cx.private[0], |s| {
+            let at = |d: &Inode, name: &[u8]| {
+                s.names
+                    .iter()
+                    .find(|e| e.0 == d.key[0] && fold_eq(&e.1, name))
+                    .map(|e| [e.2, 0, 0])
+            };
+            seen.check(at(odir, oname), at(ndir, nname))?;
             let i = s
                 .names
                 .iter()
