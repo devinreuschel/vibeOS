@@ -504,7 +504,7 @@ impl BlockCache for PageCache {
                 Some(FlushStep::Write(s, key)) => {
                     write_page(Some(dev), s, key, &data)?;
                     #[cfg(feature = "kernel_tests")]
-                    testing::after_flush_write();
+                    testing::after_flush_write(dev.id());
                 }
                 Some(wait @ FlushStep::Wait { slot: s, start, .. }) => {
                     wait_writeback_end(s, start);
@@ -539,6 +539,10 @@ fn writeback_main() {
         if !LIVE.load(Ordering::Acquire) {
             continue;
         }
+        #[cfg(feature = "kernel_tests")]
+        if !testing::wb_pass_begin() {
+            continue;
+        }
         if over_dirty()
             && let Err(e) = writeback_dev(None)
         {
@@ -549,6 +553,8 @@ fn writeback_main() {
                 e.as_str()
             );
         }
+        #[cfg(feature = "kernel_tests")]
+        testing::wb_pass_end();
     }
 }
 
@@ -599,12 +605,7 @@ pub mod testing {
 
     use vibeos::cache::CacheKey;
 
-    use crate::thread_init;
-    use crate::time_init;
-
     const UNARMED: u64 = u64::MAX;
-    /// The hold point lets go by itself after this long.
-    const SELF_RELEASE_NS: u64 = 5_000_000_000;
 
     // The hold's state; `block::ktest`'s setters arm and read it.
     pub(in crate::block) const UNARMED_OFF: u64 = UNARMED;
@@ -626,10 +627,15 @@ pub mod testing {
     pub(in crate::block) static FILL_OFF: AtomicU64 = AtomicU64::new(UNARMED);
     pub(in crate::block) static FILL_HELD: AtomicBool = AtomicBool::new(false);
     pub(in crate::block) static FILL_RELEASE: AtomicBool = AtomicBool::new(false);
+    /// The fill hold ended at the running row's deadline, not at the
+    /// test's release.
+    pub(in crate::block) static FILL_TIMED_OUT: AtomicBool = AtomicBool::new(false);
 
     /// `fill_read`'s hold point, before the device read, with no lock
     /// held: it holds one read's fill of the armed page until
-    /// `block::ktest`'s release, or [`SELF_RELEASE_NS`] at most.
+    /// `block::ktest`'s release. Only the running row's deadline bounds it
+    /// (`ktest::sleep_for`), so a slow host cannot end it before the test
+    /// has seen what it waits for.
     pub(super) fn fill_hold_point(key: CacheKey) {
         if FILL_DEV.load(Ordering::Acquire) != key.dev
             || FILL_OFF
@@ -639,30 +645,69 @@ pub mod testing {
             return;
         }
         FILL_HELD.store(true, Ordering::Release);
-        let t0 = time_init::now_ns();
-        while !FILL_RELEASE.load(Ordering::Acquire)
-            && time_init::now_ns().saturating_sub(t0) < SELF_RELEASE_NS
-        {
-            thread_init::sleep_ms(1);
+        if !crate::ktest::sleep_for(|| FILL_RELEASE.load(Ordering::Acquire)) {
+            FILL_TIMED_OUT.store(true, Ordering::Release);
         }
         FILL_HELD.store(false, Ordering::Release);
     }
 
-    /// Whether `PageCache::flush` calls `block::ktest::flush_redirty`
-    /// after each page it writes, as a writer racing the flush would
-    /// dirty another page then.
-    pub(in crate::block) static REDIRTY: AtomicBool = AtomicBool::new(false);
+    /// The device whose flush calls `block::ktest::flush_redirty` after
+    /// each page it writes, as a writer racing the flush would dirty
+    /// another page then; [`UNARMED`] for none.
+    pub(in crate::block) static REDIRTY_DEV: AtomicU64 = AtomicU64::new(UNARMED);
 
-    /// `PageCache::flush`'s point after each page it writes, with no lock
-    /// held.
-    pub(super) fn after_flush_write() {
-        if REDIRTY.load(Ordering::Acquire) {
+    /// `PageCache::flush`'s point after each page it writes of `dev`, with
+    /// no lock held.
+    pub(super) fn after_flush_write(dev: u64) {
+        if REDIRTY_DEV.load(Ordering::Acquire) == dev {
             crate::block::ktest::flush_redirty();
         }
     }
 
+    /// While set, `blk-wb` starts no pass.
+    static WB_PAUSE: AtomicBool = AtomicBool::new(false);
+    /// `blk-wb` is in a pass, or deciding whether to start one.
+    static WB_IN_PASS: AtomicBool = AtomicBool::new(false);
+
+    /// Holds `blk-wb` between passes until dropped.
+    pub(in crate::block) struct WbPause;
+
+    impl WbPause {
+        /// Stop `blk-wb` starting a pass and wait out one in progress;
+        /// `None` when that pass does not end by the row's deadline.
+        pub(in crate::block) fn new() -> Option<Self> {
+            WB_PAUSE.store(true, Ordering::SeqCst);
+            let pause = Self;
+            crate::ktest::sleep_for(|| !WB_IN_PASS.load(Ordering::SeqCst)).then_some(pause)
+        }
+    }
+
+    impl Drop for WbPause {
+        fn drop(&mut self) {
+            WB_PAUSE.store(false, Ordering::Release);
+        }
+    }
+
+    /// Whether `blk-wb` may start a pass. SeqCst with
+    /// [`WbPause::new`], which stores [`WB_PAUSE`] and then reads
+    /// [`WB_IN_PASS`]: either this load sees the pause, or the pause sees
+    /// this pass and waits for [`wb_pass_end`].
+    pub(super) fn wb_pass_begin() -> bool {
+        WB_IN_PASS.store(true, Ordering::SeqCst);
+        if WB_PAUSE.load(Ordering::SeqCst) {
+            WB_IN_PASS.store(false, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn wb_pass_end() {
+        WB_IN_PASS.store(false, Ordering::Release);
+    }
+
     /// `writeback_dev`'s hold point, reached with no lock held. It sleeps
-    /// until `block::ktest::release`, or [`SELF_RELEASE_NS`] at most.
+    /// until `block::ktest::release`; only the running row's deadline
+    /// bounds it, as [`fill_hold_point`]'s.
     pub(super) fn hold_point(key: CacheKey) {
         if DEV.load(Ordering::Acquire) != key.dev
             || OFF
@@ -672,12 +717,7 @@ pub mod testing {
             return;
         }
         HELD.store(true, Ordering::Release);
-        let t0 = time_init::now_ns();
-        while !RELEASE.load(Ordering::Acquire)
-            && time_init::now_ns().saturating_sub(t0) < SELF_RELEASE_NS
-        {
-            thread_init::sleep_ms(1);
-        }
+        let _released = crate::ktest::sleep_for(|| RELEASE.load(Ordering::Acquire));
         HELD.store(false, Ordering::Release);
     }
 }

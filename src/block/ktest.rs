@@ -872,8 +872,9 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
 /// The most pages the flush-starvation test dirties during one flush.
 const REDIRTY_MAX: u64 = 200;
 
-/// Pages [`flush_redirty`] has dirtied, and the next of the [`WB_PAGES`]
-/// from [`WB_FIRST_LBA`] it dirties.
+/// Pages ram0's flush has written while the hook was armed, each followed
+/// by a [`flush_redirty`] call; and so the next of the [`WB_PAGES`] from
+/// [`WB_FIRST_LBA`] that call dirties.
 static REDIRTIED: AtomicU64 = AtomicU64::new(0);
 static REDIRTY_FAILED: AtomicBool = AtomicBool::new(false);
 
@@ -897,11 +898,31 @@ pub(crate) fn flush_redirty() {
     }
 }
 
+/// Whether scratch page `i` holds, below the cache, a write made before
+/// the flush that returned: the bytes it was dirtied with before the flush
+/// (`i ^ 0xC3`), or those of a [`flush_redirty`] call `n < calls` that
+/// dirtied it (`n ^ 0x5A`).
+fn scratch_on_ram0(i: usize, calls: u64) -> Result<bool, BlockError> {
+    let mut page = [0u8; PAGE];
+    let sectors = (PAGE / 512) as u64;
+    block_init::read(WB_FIRST_LBA + i as u64 * sectors, &mut page)?;
+    let b = page[0];
+    if page.iter().any(|&x| x != b) {
+        return Ok(false);
+    }
+    let i = i as u64;
+    let redirtied =
+        (0..calls.min(REDIRTY_MAX)).any(|n| n % WB_PAGES as u64 == i && n as u8 ^ 0x5A == b);
+    Ok(b == i as u8 ^ 0xC3 || redirtied)
+}
+
 /// A flush returns while pages of its device keep being dirtied: it writes
 /// each page dirty when it began once, where it once took whichever page
 /// was dirty next and returned only when none was, so a writer that kept
 /// ahead of it held it off for as long as it wrote (B3). The hook dirties
-/// another page after each page the flush writes.
+/// another page after each page the flush writes. `blk-wb` is paused, so
+/// the flush itself writes every scratch page, and each one is on ram0,
+/// below the cache, when it returns.
 pub(crate) fn cache_flush_not_starved() -> Outcome {
     if !cache_init::live() || !block_init::live() {
         return Outcome::Fail("no ram0 cache");
@@ -909,6 +930,13 @@ pub(crate) fn cache_flush_not_starved() -> Outcome {
     let Some(ram) = ram0() else {
         return Outcome::Fail("no ram0");
     };
+    let Some(_paused) = testing::WbPause::new() else {
+        return Outcome::Fail("blk-wb's pass never ended");
+    };
+    // No page of ram0 is dirty but those dirtied below.
+    if ram.flush().is_err() {
+        return Outcome::Fail("pre-flush");
+    }
     let mut saved = alloc::vec![0u8; WB_PAGES * PAGE];
     if ram.read(WB_FIRST_LBA, &mut saved).is_err() {
         return Outcome::Fail("save");
@@ -924,12 +952,12 @@ pub(crate) fn cache_flush_not_starved() -> Outcome {
     }
     REDIRTIED.store(0, Ordering::Release);
     REDIRTY_FAILED.store(false, Ordering::Release);
-    let d0 = cache_init::stats().device_writes;
-    testing::REDIRTY.store(true, Ordering::Release);
+    testing::REDIRTY_DEV.store(ram.id(), Ordering::Release);
     let flushed = ram.flush();
-    testing::REDIRTY.store(false, Ordering::Release);
-    let wrote = cache_init::stats().device_writes.saturating_sub(d0);
-    let dirtied = REDIRTIED.load(Ordering::Acquire);
+    testing::REDIRTY_DEV.store(testing::UNARMED_OFF, Ordering::Release);
+    // The flush's own writes: `blk-wb`'s and evictions' do not count.
+    let wrote = REDIRTIED.load(Ordering::Acquire);
+    let lost = (0..WB_PAGES).find(|&i| !matches!(scratch_on_ram0(i, wrote), Ok(true)));
     let restored = ram.write(WB_FIRST_LBA, &saved).and_then(|()| ram.flush());
     if flushed.is_err() {
         return Outcome::Fail("flush failed");
@@ -938,10 +966,14 @@ pub(crate) fn cache_flush_not_starved() -> Outcome {
         return Outcome::Fail("a write beside the flush failed");
     }
     // One sweep writes each slot once.
-    if wrote > vibeos::cache::DEFAULT_PAGES as u64 || dirtied >= REDIRTY_MAX {
-        return crate::fail_fmt!(
-            "flush wrote {wrote} pages while {dirtied} were dirtied beside it"
-        );
+    if wrote > vibeos::cache::DEFAULT_PAGES as u64 || wrote >= REDIRTY_MAX {
+        return crate::fail_fmt!("flush wrote {wrote} pages, one more dirtied beside each");
+    }
+    if wrote < WB_PAGES as u64 {
+        return crate::fail_fmt!("flush wrote {wrote} of the {WB_PAGES} pages dirty when it began");
+    }
+    if let Some(i) = lost {
+        return crate::fail_fmt!("scratch page {i}, dirty before the flush, not on ram0 after it");
     }
     if restored.is_err() {
         return Outcome::Fail("restore");
@@ -984,7 +1016,8 @@ fn fill_reader_b() {
 /// gets its data: the page has one slot, whose queue the second reader
 /// sleeps on however long the device takes, where it once filled a second
 /// copy of the page. The first reader's fill is held until the second is
-/// seen waiting, or has ended.
+/// seen waiting, or has ended: the test's release ends the hold, never a
+/// time limit of its own.
 pub(crate) fn cache_read_waits_for_fill() -> Outcome {
     if !cache_init::live() || !block_init::live() {
         return Outcome::Fail("no ram0 cache");
@@ -1000,6 +1033,7 @@ pub(crate) fn cache_read_waits_for_fill() -> Outcome {
     FILL_A.store(FILL_PENDING, Ordering::Release);
     FILL_B.store(FILL_PENDING, Ordering::Release);
     testing::FILL_RELEASE.store(false, Ordering::Release);
+    testing::FILL_TIMED_OUT.store(false, Ordering::Release);
     testing::FILL_HELD.store(false, Ordering::Release);
     testing::FILL_DEV.store(ram.id(), Ordering::Release);
     testing::FILL_OFF.store(key.offset, Ordering::Release);
@@ -1024,6 +1058,9 @@ pub(crate) fn cache_read_waits_for_fill() -> Outcome {
     );
     if !held {
         return Outcome::Fail("the first read's fill was never held");
+    }
+    if testing::FILL_TIMED_OUT.load(Ordering::Acquire) {
+        return Outcome::Fail("the first read's fill hold reached the row's deadline");
     }
     if !waited || !done {
         return Outcome::Fail("a reader never ended");
