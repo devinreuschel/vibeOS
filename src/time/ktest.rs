@@ -42,9 +42,6 @@ pub(crate) fn deadline_after(now: Instant) -> Instant {
     next_deadline(now)
 }
 
-/// PIT interrupts taken, counted by `time_init::on_pit_tick`.
-static PIT_IRQS: AtomicU64 = AtomicU64::new(0);
-
 /// PIT interrupts whose TSC [`test_pit_tick_rate`] stamps: 40 intervals.
 const PIT_STAMPS: usize = 41;
 /// The TSC at each stamped PIT interrupt, in order.
@@ -53,10 +50,9 @@ static PIT_STAMP: [AtomicU64; PIT_STAMPS] = [const { AtomicU64::new(0) }; PIT_ST
 /// while it has not.
 static PIT_STAMP_N: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-pub(crate) fn count_pit_irq() {
-    // Relaxed: a counter; `pit_tick_rate` reads it on the CPU the PIT
-    // interrupts, and no data hangs off it.
-    PIT_IRQS.fetch_add(1, Ordering::Relaxed);
+/// Stamp this PIT interrupt for [`test_pit_tick_rate`] while it is armed;
+/// `time_init::on_pit_tick` calls it and counts the interrupt itself.
+pub(crate) fn stamp_pit_irq() {
     // One writer: the PIT interrupts one CPU, whose handler runs this with
     // IF off. Relaxed: the stamp is published by the count's store below.
     let i = PIT_STAMP_N.load(Ordering::Relaxed);
@@ -66,11 +62,6 @@ pub(crate) fn count_pit_irq() {
         // covers stamps it can read.
         PIT_STAMP_N.store(i + 1, Ordering::Release);
     }
-}
-
-pub(crate) fn pit_irqs() -> u64 {
-    // Relaxed: as in `count_pit_irq`.
-    PIT_IRQS.load(Ordering::Relaxed)
 }
 
 /// The PIT's tick rate, in a boot where the PIT drives the tick (`make

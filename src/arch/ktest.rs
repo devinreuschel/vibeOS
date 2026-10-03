@@ -382,7 +382,7 @@ fn lapic_fires() -> u64 {
 /// runs ahead of the interrupts the guest is delivered (ROADMAP §10.2).
 pub(crate) fn test_lapic_timer_rearm() -> Outcome {
     let (count, what): (fn() -> u64, &str) = match apic_init::timer_mode() {
-        TimerMode::Pit => (crate::time::ktest::pit_irqs, "pit"),
+        TimerMode::Pit => (time_init::pit_fires, "pit"),
         TimerMode::TscDeadline | TimerMode::Periodic => (lapic_fires, "lapic"),
     };
     let t0 = count();

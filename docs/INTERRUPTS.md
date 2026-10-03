@@ -390,9 +390,11 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
   IRQ before remap looks like a CPU exception.
 - Mask everything (`0xFF` to both data ports) immediately after remap.
 - After TSC calibration ([section 3.3](BOOT.md#33-_start-order) step 13b), `apic_init::prove` arms the LAPIC
-  timer (TSC-deadline, then periodic) with interrupts enabled and checks that it ticks. If it ticks,
-  it is the tick. If not, the PIT drives the tick through LINT0 ExtINT, the only case that unmasks
-  PIC IRQ0. `on_timer_tick` does nothing until the idle thread exists. The `irq: enabled` marker
+  timer (TSC-deadline, then periodic) with interrupts enabled and checks that it ticks against the
+  PIT, whose IRQ0 it unmasks through LINT0 ExtINT while it waits
+  ([DESIGN §6.3](TIME.md#63-the-tick)). If it ticks, it is the tick. If not, the PIT drives the
+  tick through LINT0 ExtINT, the only case that leaves PIC IRQ0 unmasked after `prove`.
+  `on_timer_tick` does nothing until the idle thread exists. The `irq: enabled` marker
   (step 15) follows `sched: cpu0 ready`. The keyboard (step 17) takes vector `0x30` through the
   I/O APIC whenever `kbd_init` can route ISA IRQ1; PIC IRQ1 is unmasked only when there is no route
   and the PIT owns the tick. Every 8259 line no driver claims runs `pic::handle`, which is

@@ -512,10 +512,22 @@ pub fn on_hw_tick() {
     });
 }
 
+/// PIT interrupts taken. The 8259 reaches CPU 0 alone, so one CPU counts
+/// them; `apic_init::prove` counts them as its LAPIC timer's witness.
+static PIT_FIRES: AtomicU64 = AtomicU64::new(0);
+
 pub fn on_pit_tick() {
+    // Relaxed: a count read on the CPU it counts on; nothing hangs off it.
+    PIT_FIRES.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "kernel_tests")]
-    super::ktest::count_pit_irq();
+    super::ktest::stamp_pit_irq();
     on_hw_tick();
+}
+
+/// PIT interrupts taken since boot.
+pub fn pit_fires() -> u64 {
+    // Relaxed: as in `on_pit_tick`.
+    PIT_FIRES.load(Ordering::Relaxed)
 }
 
 /// Write `snap` to the clock. The caller holds `WRITER`.

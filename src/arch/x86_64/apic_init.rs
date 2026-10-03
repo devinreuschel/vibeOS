@@ -7,18 +7,19 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use vibeos::acpi::{IoApic, MAX_IOAPICS, MadtInfo};
 use vibeos::apic::{
-    self, APIC_BASE_ENABLE, DEFAULT_LAPIC_PHYS, EoiDomain, IA32_APIC_BASE, IA32_TSC_DEADLINE,
-    ICR_POLL_CAP, IOAPIC_VER, IOREGSEL, IOWIN, IpiError, IpiMode, LAPIC_EOI, LAPIC_ESR,
-    LAPIC_ICR_HIGH, LAPIC_ICR_LOW, LAPIC_ID, LAPIC_LVT_ERROR, LAPIC_LVT_LINT0, LAPIC_LVT_LINT1,
-    LAPIC_LVT_PERF, LAPIC_LVT_THERMAL, LAPIC_LVT_TIMER, LAPIC_SVR, LAPIC_TIMER_CCR,
-    LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_TPR, LVT_DELIVERY_EXTINT, LVT_MASKED, Polarity,
-    TIMER_DIV_16, TimerMode, Trigger, TscDeadlineStep, has_tsc_deadline, ioapic_max_index,
-    ioapic_pin, lvt_timer_periodic, poll_delivery_pending, redir_high, redir_low, redir_set_mask,
-    svr_value, tsc_deadline_arm_plan, tsc_deadline_value, write_redir,
+    self, APIC_BASE_ENABLE, CountRead, DEFAULT_LAPIC_PHYS, EoiDomain, IA32_APIC_BASE,
+    IA32_TSC_DEADLINE, ICR_POLL_CAP, IOAPIC_VER, IOREGSEL, IOWIN, IpiError, IpiMode, LAPIC_EOI,
+    LAPIC_ESR, LAPIC_ICR_HIGH, LAPIC_ICR_LOW, LAPIC_ID, LAPIC_LVT_ERROR, LAPIC_LVT_LINT0,
+    LAPIC_LVT_LINT1, LAPIC_LVT_PERF, LAPIC_LVT_THERMAL, LAPIC_LVT_TIMER, LAPIC_SVR,
+    LAPIC_TIMER_CCR, LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_TPR, LVT_DELIVERY_EXTINT, LVT_MASKED,
+    Polarity, TIMER_DIV_16, TimerMode, TimerProof, Trigger, TscDeadlineStep, has_tsc_deadline,
+    ioapic_max_index, ioapic_pin, lapic_per_ms, lvt_timer_periodic, poll_delivery_pending,
+    redir_high, redir_low, redir_set_mask, svr_value, timer_proof, tsc_deadline_arm_plan,
+    tsc_deadline_value, write_redir,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::marker;
-use vibeos::time::{FS_PER_MS, PIT_CALIB_MS, hpet_period_ok};
+use vibeos::time::{FS_PER_MS, HPET_CALIB_READS, PIT_CALIB_MS, hpet_period_ok};
 use vibeos::vectors;
 
 use crate::acpi_init;
@@ -28,7 +29,6 @@ use crate::sync_init::SpinMutex;
 use crate::time_init;
 use crate::x86;
 
-const PROVE_MS: u64 = 50;
 const LAPIC_TICKS_PER_MS_MIN: u64 = 100;
 const LAPIC_TICKS_PER_MS_MAX: u64 = 50_000_000;
 const CALIB_SPIN_CAP: u64 = 1_000_000_000;
@@ -486,6 +486,14 @@ pub fn send_ipi_all_ex_self(vector: u8) -> Result<(), IpiError> {
     Ok(())
 }
 
+/// LAPIC timer counts per millisecond at divider 16, measured against the
+/// HPET over [`PIT_CALIB_MS`] of its time. Each end is the count read the
+/// HPET brackets most tightly of `HPET_CALIB_READS`, placed by its
+/// bracket's middle, and the rate divides by the HPET ticks between the
+/// two ends (`vibeos::apic::lapic_per_ms`): under TCG a host that stalls
+/// QEMU past the window's planned end overruns it, and dividing by the plan
+/// would stretch the period by the overrun (DESIGN §6.3).
+///
 /// # Safety
 /// `va` as for [`lapic_read`].
 unsafe fn calib_periodic(va: u64) -> Option<u64> {
@@ -504,7 +512,7 @@ unsafe fn calib_periodic(va: u64) -> Option<u64> {
         return None;
     }
     // SAFETY: this fn's `# Safety` (here): `va` is the LAPIC's UC page.
-    let start_c = unsafe {
+    unsafe {
         lapic_write(va, LAPIC_TIMER_DCR, TIMER_DIV_16);
         lapic_write(
             va,
@@ -512,14 +520,31 @@ unsafe fn calib_periodic(va: u64) -> Option<u64> {
             apic::lvt_timer_oneshot(vectors::LAPIC_TIMER, true),
         );
         lapic_write(va, LAPIC_TIMER_ICR, 0xFFFF_FFFF);
-        lapic_read(va, LAPIC_TIMER_CCR)
+    }
+    let bracketed = || {
+        let read = || {
+            let hpet_lo = hpet_now();
+            // SAFETY: this fn's `# Safety` (here).
+            let count = unsafe { lapic_read(va, LAPIC_TIMER_CCR) };
+            let hpet_hi = hpet_now();
+            CountRead {
+                hpet_lo,
+                count,
+                hpet_hi,
+            }
+        };
+        let mut best = read();
+        for _ in 1..HPET_CALIB_READS {
+            best = best.narrower(read());
+        }
+        best
     };
-    let start_h = hpet_now();
+    let start = bracketed();
     let mut spins = 0u64;
     loop {
         let now = hpet_now();
         // The HPET reads 32 bits wide (`time_init::hpet_read_main`).
-        if now.wrapping_sub(start_h) & u64::from(u32::MAX) >= want {
+        if now.wrapping_sub(start.hpet_mid()) & u64::from(u32::MAX) >= want {
             break;
         }
         spins += 1;
@@ -530,17 +555,10 @@ unsafe fn calib_periodic(va: u64) -> Option<u64> {
         }
         core::hint::spin_loop();
     }
+    let end = bracketed();
     // SAFETY: this fn's `# Safety` (here).
-    let end_c = unsafe {
-        let c = lapic_read(va, LAPIC_TIMER_CCR);
-        lapic_write(va, LAPIC_TIMER_ICR, 0);
-        c
-    };
-    if end_c >= start_c {
-        return None;
-    }
-    let delta = (start_c - end_c) as u64;
-    let per_ms = delta / PIT_CALIB_MS;
+    unsafe { lapic_write(va, LAPIC_TIMER_ICR, 0) };
+    let per_ms = lapic_per_ms(start, end, period_fs)?;
     if !(LAPIC_TICKS_PER_MS_MIN..=LAPIC_TICKS_PER_MS_MAX).contains(&per_ms) {
         return None;
     }
@@ -595,17 +613,31 @@ unsafe fn disarm_timer(va: u64) {
     }
 }
 
-fn wait_fires(prev: u64, ms: u64) -> bool {
-    let k = time_init::tsc_per_ms();
-    let start = time_init::read_tsc();
-    let target = (start as u128).saturating_add(ms as u128 * k as u128);
-    while TIMER_FIRES.load(Ordering::Relaxed) == prev {
-        if (time_init::read_tsc() as u128) >= target {
-            return false;
+/// Whether the LAPIC timer [`prove`] just armed fires, judged by the
+/// interrupts that arrive and not by the time that passes (DESIGN §6.3).
+/// It unmasks the PIT on LINT0 ExtINT, the PIT fallback's path, and halts
+/// until the timer has fired or the PIT has fired
+/// [`vibeos::apic::PROVE_PIT_FIRES`] times without it ([`timer_proof`]);
+/// IRQ0 is masked at the PIC again before it returns. Under TCG the TSC
+/// and the HPET both follow host time, while QEMU's main loop raises the
+/// timer's interrupt: a host that deschedules QEMU for longer than a fixed
+/// window lets the window pass before the guest is given the interrupt,
+/// but it holds back the PIT's interrupts with the timer's.
+fn timer_fires() -> bool {
+    unmask_pit_fallback();
+    let pit0 = time_init::pit_fires();
+    let fired = loop {
+        let pit = time_init::pit_fires().wrapping_sub(pit0);
+        match timer_proof(TIMER_FIRES.load(Ordering::Relaxed), pit) {
+            TimerProof::Fires => break true,
+            TimerProof::Silent => break false,
+            // IF is on (`prove`'s contract): the next LAPIC timer or PIT
+            // interrupt ends the halt.
+            TimerProof::Pending => arch::current::wait_for_interrupt(),
         }
-        core::hint::spin_loop();
-    }
-    true
+    };
+    arch::pic::mask(0);
+    fired
 }
 
 fn rearm_deadline() {
@@ -714,7 +746,8 @@ pub unsafe fn init() {
     });
 }
 
-/// Start the preferred timer, wait for a fire, commit the marker, mask PIC.
+/// Start the preferred timer, prove it fires against the PIT
+/// ([`timer_fires`]), commit the marker, mask PIC.
 ///
 /// `sti` must already have run. TSC-deadline → periodic (HPET ÷16) → PIT.
 pub fn prove() {
@@ -744,7 +777,7 @@ pub fn prove() {
         // `va` is `st.lapic_va`, set only from its return, and `want_td`
         // is the CPUID TSC-deadline bit.
         unsafe { arm_tsc_deadline(va, tsc_per_ms) };
-        if wait_fires(0, PROVE_MS) {
+        if timer_fires() {
             with_state(|st| commit_lapic(st, TimerMode::TscDeadline));
             return;
         }
@@ -767,7 +800,7 @@ pub fn prove() {
             // SAFETY: as for `calib_periodic` above; established at
             // `arch::x86_64::apic_init::enable_lapic`.
             unsafe { arm_periodic(va, per_ms) };
-            if wait_fires(0, PROVE_MS) {
+            if timer_fires() {
                 with_state(|st| commit_lapic(st, TimerMode::Periodic));
                 return;
             }
