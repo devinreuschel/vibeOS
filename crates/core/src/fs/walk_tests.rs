@@ -528,6 +528,7 @@ fn case_only_rename_moves_the_inode_to_its_new_key() {
 #[derive(Clone, Copy)]
 enum Change {
     Unlink(&'static [u8]),
+    Rmdir(&'static [u8]),
     Rename(&'static [u8], &'static [u8]),
     /// Create a file and write these bytes to it.
     Create(&'static [u8], &'static [u8]),
@@ -553,6 +554,7 @@ fn run_race(race: &std::sync::Mutex<Option<Race>>) {
     for c in changes {
         match *c {
             Change::Unlink(a) => api.unlink(None, a).unwrap(),
+            Change::Rmdir(a) => api.rmdir(None, a).unwrap(),
             Change::Rename(a, b) => api.rename(None, a, b).unwrap(),
             Change::Create(a, data) => write_new(vfs, a, data),
         }
@@ -606,6 +608,22 @@ fn call_src_window() {
 
 fn tmp_call_window() {
     run_race(&TMP_CALL_RACE);
+}
+
+static RAM_RMDIR_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+static TMP_RMDIR_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+static TMP_RMDIR_DIR_RACE: std::sync::Mutex<Option<Race>> = std::sync::Mutex::new(None);
+
+fn ram_rmdir_window() {
+    run_race(&RAM_RMDIR_RACE);
+}
+
+fn tmp_rmdir_window() {
+    run_race(&TMP_RMDIR_RACE);
+}
+
+fn tmp_rmdir_dir_window() {
+    run_race(&TMP_RMDIR_DIR_RACE);
 }
 
 /// A File API on `vfs` whose namespace changes run `window` between their
@@ -934,6 +952,80 @@ fn tmpfs_rename_racing_create_before_its_backend_call_replaces_it() {
     assert_eq!(read_all(vfs, b"/tmp/b"), b"A");
     FileApi::new(vfs).unlink(None, b"/tmp/b").unwrap();
     assert_eq!(kfs.tmp_nodes().unwrap().0, base);
+}
+
+/// A rename into a directory a racing rmdir removes after the rename's
+/// begin step fails with `NotFound`, as Linux refuses a dead directory,
+/// and leaves its source where it was, on ramfs and on tmpfs: a node
+/// moved into the removed directory would be unreachable and never freed.
+#[test]
+fn rename_into_a_directory_removed_before_its_backend_call_is_not_found() {
+    let (vfs, fs) = ram_vfs();
+    let kfs = tmp_at(vfs);
+    let api = FileApi::new(vfs);
+    let ram_base = fs.with(|s| s.used());
+    let tmp_base = kfs.tmp_nodes().unwrap().0;
+    // The directory, the source, its new name, whether the source is a
+    // directory, and the race that removes the directory.
+    type Case = (
+        &'static [u8],
+        &'static [u8],
+        &'static [u8],
+        bool,
+        &'static std::sync::Mutex<Option<Race>>,
+        &'static [Change],
+        fn(),
+    );
+    let cases: [Case; 3] = [
+        (
+            b"/d",
+            b"/f",
+            b"/d/f",
+            false,
+            &RAM_RMDIR_RACE,
+            &[Change::Rmdir(b"/d")],
+            ram_rmdir_window,
+        ),
+        (
+            b"/tmp/d",
+            b"/tmp/f",
+            b"/tmp/d/f",
+            false,
+            &TMP_RMDIR_RACE,
+            &[Change::Rmdir(b"/tmp/d")],
+            tmp_rmdir_window,
+        ),
+        (
+            b"/tmp/e",
+            b"/tmp/g",
+            b"/tmp/e/g",
+            true,
+            &TMP_RMDIR_DIR_RACE,
+            &[Change::Rmdir(b"/tmp/e")],
+            tmp_rmdir_dir_window,
+        ),
+    ];
+    for (d, f, to, dir, race, rmdir, window) in cases {
+        api.mkdir(None, d, 0o755).unwrap();
+        if dir {
+            api.mkdir(None, f, 0o755).unwrap();
+        } else {
+            write_new(vfs, f, b"F");
+        }
+        *race.lock().unwrap() = Some((vfs, rmdir));
+        let r = racing_call(vfs, window).rename(None, f, to);
+        assert_eq!(r, Err(FsError::NotFound), "{to:?}");
+        assert_eq!(api.walk(None, d, true).unwrap_err(), FsError::NotFound);
+        if dir {
+            assert_eq!(api.stat_path(None, f, true).unwrap().nlink, 2);
+            api.rmdir(None, f).unwrap();
+        } else {
+            assert_eq!(read_all(vfs, f), b"F");
+            api.unlink(None, f).unwrap();
+        }
+    }
+    assert_eq!(fs.with(|s| s.used()), ram_base);
+    assert_eq!(kfs.tmp_nodes().unwrap().0, tmp_base);
 }
 
 /// `..` from the root of mounts stacked on one directory leads to that

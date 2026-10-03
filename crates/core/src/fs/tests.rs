@@ -1459,3 +1459,23 @@ fn stat_more_names_than_inode_slots() {
     }
     assert!(v.stats.i_evicts >= (n - SMALL.inodes) as u32);
 }
+
+/// A ramfs create or link into a directory a racing rmdir removed, which
+/// the VFS still holds, fails with `NotFound`, as Linux refuses a dead
+/// directory, and makes nothing: a node made there would be unreachable,
+/// and never freed.
+#[test]
+fn ramfs_make_in_a_removed_directory_is_not_found() {
+    let fs = ramfs();
+    let mut v = crate::fs::host_vfs();
+    v.mount_root_fs(fs).unwrap();
+    v.mkdir(None, "/d", 0o755).unwrap();
+    v.creat(None, "/f", 0o644).unwrap();
+    let used = fs.with(|s| s.used());
+    let r = make_in_removed_dir(&mut v, fs, "/d", "/f");
+    assert_eq!(r, [Err(FsError::NotFound); 3]);
+    // The removed directory went at its last put; nothing else changed.
+    v.stat(None, "/").unwrap();
+    assert_eq!(fs.with(|s| s.used()), used - 1);
+    assert_eq!(v.stat(None, "/f").unwrap().nlink, 1);
+}

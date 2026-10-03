@@ -431,6 +431,12 @@ pub(super) fn kern_create(
     if d.kind.inode_kind() != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
+    // A directory an rmdir removed while the VFS held it, which keeps its
+    // node until its last put, takes no new entry, as Linux's
+    // `IS_DEADDIR` refuses it: one made there would be unreachable.
+    if d.nlink == 0 {
+        return Err(FsError::NotFound);
+    }
     if kern_find_child(k, inst, dir_ino, name).is_some() {
         return Err(FsError::Exists);
     }
@@ -533,6 +539,10 @@ pub(super) fn kern_rename(
     let n = kern_get(k, inst, nd).ok_or(FsError::NotFound)?;
     if n.kind.inode_kind() != InodeKind::Dir {
         return Err(FsError::NotDir);
+    }
+    if n.nlink == 0 {
+        // A removed directory, as in `kern_create`.
+        return Err(FsError::NotFound);
     }
     if let Some(tg) = tgt {
         let tn = kern_get(k, inst, tg).ok_or(FsError::NotFound)?;

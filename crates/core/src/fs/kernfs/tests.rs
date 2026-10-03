@@ -729,6 +729,30 @@ fn tmpfs_rename_moves_and_replaces_as_linux() {
     assert_eq!(v.rename(None, "/dev/null", "/dev/nul2"), Err(FsError::Perm));
 }
 
+/// A tmpfs create into a directory a racing rmdir removed, which the VFS
+/// still holds, fails with `NotFound`, as Linux refuses a dead directory,
+/// and makes nothing: a node made there would be unreachable, and never
+/// freed. tmpfs makes no hard links.
+#[test]
+fn tmpfs_make_in_a_removed_directory_is_not_found() {
+    let (mut v, k) = boot();
+    v.mkdir(None, "/tmp/d", 0o755).unwrap();
+    v.creat(None, "/tmp/f", 0o644).unwrap();
+    let (used, _) = k.fs.tmp_nodes().unwrap();
+    let r = crate::fs::testfs::make_in_removed_dir(&mut v, k.skins[2], "/tmp/d", "/tmp/f");
+    assert_eq!(
+        r,
+        [
+            Err(FsError::NotFound),
+            Err(FsError::NotFound),
+            Err(FsError::Perm)
+        ]
+    );
+    // The removed directory went at its last put; nothing else changed.
+    v.stat(None, "/").unwrap();
+    assert_eq!(k.fs.tmp_nodes().unwrap().0, used - 1);
+}
+
 /// A directory that has handed out the places a 32-bit counter holds
 /// still lists every child: a place is 64-bit, so a create or rename loop
 /// never runs the counter to its end, where children would share a place

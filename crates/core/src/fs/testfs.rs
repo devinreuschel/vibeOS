@@ -419,6 +419,45 @@ impl InodeOps for LockedFs {
     }
 }
 
+/// Remove the empty directory `dir` while holding it, then make a file
+/// and a directory in it and link the file `file` into it through `ops`
+/// directly, as backend calls that a racing rmdir got ahead of would:
+/// the three results.
+pub(crate) fn make_in_removed_dir(
+    v: &mut Vfs,
+    ops: &dyn InodeOps,
+    dir: &str,
+    file: &str,
+) -> [Result<(), FsError>; 3] {
+    let p = v.resolve(None, dir, true).unwrap();
+    let dref = v.iref(p).unwrap();
+    let p = v.resolve(None, file, true).unwrap();
+    let fref = v.iref(p).unwrap();
+    v.rmdir(None, dir).unwrap();
+    let mut d = *v.inode(dref.handle()).unwrap();
+    let mut f = *v.inode(fref.handle()).unwrap();
+    let mut private = v.sb_private(d.sb).unwrap();
+    let mut cx = OpCx {
+        sb: d.sb,
+        fstype: v.fstype(d.sb),
+        private: &mut private,
+        now: 0,
+        vol: None,
+    };
+    let mut make = |name: &[u8], kind| {
+        ops.create(&mut cx, &mut d, name, kind, 0o755, None)
+            .map(|_| ())
+    };
+    let r = [
+        make(b"x", InodeKind::Reg),
+        make(b"z", InodeKind::Dir),
+        ops.link(&mut cx, &mut d, b"y", &mut f),
+    ];
+    v.put_ref(fref);
+    v.put_ref(dref);
+    r
+}
+
 /// The VFS with no lock around it, for host tests that drive one `Vfs`
 /// through [`FileApi`] from one thread.
 pub(crate) struct Direct<'a>(core::cell::RefCell<&'a mut Vfs>);

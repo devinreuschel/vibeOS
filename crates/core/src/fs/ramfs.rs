@@ -414,6 +414,12 @@ fn ram_dir_room(st: &RamState, inst: u32, dir: u32, name: &[u8]) -> Result<(), F
     if r.kind != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
+    // A directory an rmdir removed while the VFS held it, which keeps its
+    // node until its last put, takes no new entry, as Linux's
+    // `IS_DEADDIR` refuses it: one made there would be unreachable.
+    if r.nlink == 0 {
+        return Err(FsError::NotFound);
+    }
     if r.dents[..r.ndent as usize]
         .iter()
         .any(|d| d.name.eq_bytes(name))
@@ -708,6 +714,10 @@ fn ram_rename(
     let r = ram_get(st, inst, ndir).ok_or(FsError::NotFound)?;
     if r.kind != InodeKind::Dir {
         return Err(FsError::NotDir);
+    }
+    if r.nlink == 0 {
+        // A removed directory, as in `ram_dir_room`.
+        return Err(FsError::NotFound);
     }
     match tgt {
         Some(t) if t == node => return Ok(()),
