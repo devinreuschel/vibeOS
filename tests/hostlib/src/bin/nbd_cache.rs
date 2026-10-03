@@ -26,6 +26,7 @@ use std::os::unix::fs::FileExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
+use vibeos::kerror::KError;
 
 const NBDMAGIC: u64 = 0x4e42_444d_4147_4943;
 const IHAVEOPT: u64 = 0x4948_4156_454f_5054;
@@ -90,6 +91,24 @@ struct Pending {
     cookie: u64,
 }
 
+/// What the server needs from a connection beyond reading and writing:
+/// `UnixStream`'s calls, behind a trait so the tests can give Darwin's
+/// answers to them on any host.
+trait Conn: Read + Write {
+    fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()>;
+    fn set_nonblocking(&self, on: bool) -> io::Result<()>;
+}
+
+impl Conn for UnixStream {
+    fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+        UnixStream::set_read_timeout(self, d)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        UnixStream::set_nonblocking(self, on)
+    }
+}
+
 fn be16(b: &[u8], o: usize) -> u16 {
     u16::from_be_bytes([b[o], b[o + 1]])
 }
@@ -104,10 +123,15 @@ fn be64(b: &[u8], o: usize) -> u64 {
     u64::from_be_bytes(a)
 }
 
-fn read_n(s: &mut UnixStream, n: usize) -> io::Result<Vec<u8>> {
+fn read_n(s: &mut impl Read, n: usize) -> io::Result<Vec<u8>> {
     let mut v = vec![0u8; n];
     s.read_exact(&mut v)?;
     Ok(v)
+}
+
+/// Whether `e` is the host's `EINVAL`: Linux's errno 22, which Darwin's is too.
+fn einval(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(KError::Inval.errno())
 }
 
 fn closed(e: &io::Error) -> bool {
@@ -153,7 +177,7 @@ impl Server {
         self.image.sync_data()
     }
 
-    fn opt_reply(s: &mut UnixStream, opt: u32, kind: u32, data: &[u8]) -> io::Result<()> {
+    fn opt_reply(s: &mut impl Write, opt: u32, kind: u32, data: &[u8]) -> io::Result<()> {
         let mut m = Vec::with_capacity(20 + data.len());
         m.extend_from_slice(&REPLY_MAGIC.to_be_bytes());
         m.extend_from_slice(&opt.to_be_bytes());
@@ -165,7 +189,7 @@ impl Server {
 
     /// Fixed newstyle negotiation up to transmission, or until the client
     /// aborts or closes.
-    fn negotiate(&mut self, s: &mut UnixStream) -> io::Result<Negotiated> {
+    fn negotiate(&mut self, s: &mut impl Conn) -> io::Result<Negotiated> {
         let mut hello = Vec::with_capacity(18);
         hello.extend_from_slice(&NBDMAGIC.to_be_bytes());
         hello.extend_from_slice(&IHAVEOPT.to_be_bytes());
@@ -235,7 +259,7 @@ impl Server {
     /// in which case no reply is recorded.
     fn reply(
         &mut self,
-        s: &mut UnixStream,
+        s: &mut impl Conn,
         id: u64,
         cookie: u64,
         err: u32,
@@ -266,7 +290,7 @@ impl Server {
     /// Handles one complete request. Returns false when the connection ends.
     fn request(
         &mut self,
-        s: &mut UnixStream,
+        s: &mut impl Conn,
         req: &[u8],
         pending: &mut Vec<Pending>,
     ) -> io::Result<bool> {
@@ -322,11 +346,24 @@ impl Server {
 
     /// Transmission phase: one single-threaded loop over a byte buffer. The
     /// read timeout is the earliest pending flush deadline, so a partial
-    /// request is never lost to a timeout.
-    fn transmit(&mut self, s: &mut UnixStream) -> io::Result<()> {
+    /// request is never lost to a timeout. It is set only when it changes,
+    /// so a connection with no flush pending sets no socket option.
+    ///
+    /// Darwin refuses every socket option with EINVAL once its socket can
+    /// neither send nor receive, as a unix socket is once its peer has
+    /// closed; Linux takes the option and its next read returns EOF. After
+    /// that refusal the reads are non-blocking: a read then returns what the
+    /// peer sent before it closed and then EOF, as on Linux, and a socket
+    /// that can still receive shows as `WouldBlock`, which makes the EINVAL
+    /// an error.
+    fn transmit(&mut self, s: &mut impl Conn) -> io::Result<()> {
         let mut buf: Vec<u8> = Vec::new();
         let mut pending: Vec<Pending> = Vec::new();
         let mut chunk = vec![0u8; 1 << 16];
+        // A socket from accept() or socketpair() has no read timeout.
+        let mut timeout: Option<Duration> = None;
+        // Darwin's EINVAL, kept until a read shows whether the peer has gone.
+        let mut refused: Option<io::Error> = None;
         loop {
             let now = Instant::now();
             pending.sort_by_key(|p| p.due);
@@ -365,15 +402,25 @@ impl Server {
                 .map(|p| p.due.saturating_duration_since(Instant::now()))
                 .min()
                 .map(|d| d.max(Duration::from_millis(1)));
-            s.set_read_timeout(wait)?;
+            if wait != timeout && refused.is_none() {
+                match s.set_read_timeout(wait) {
+                    Ok(()) => timeout = wait,
+                    Err(e) if einval(&e) => {
+                        s.set_nonblocking(true)?;
+                        refused = Some(e);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             match s.read(&mut chunk) {
                 Ok(0) => return Ok(()),
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
-                    ) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    if let Some(e) = refused {
+                        return Err(e);
+                    }
+                }
+                Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
                 Err(e) if closed(&e) => return Ok(()),
                 Err(e) => return Err(e),
             }
@@ -381,7 +428,7 @@ impl Server {
     }
 
     /// Serves one client. True once a transmission connection has closed.
-    fn serve(&mut self, s: &mut UnixStream) -> io::Result<bool> {
+    fn serve(&mut self, s: &mut impl Conn) -> io::Result<bool> {
         match self.negotiate(s) {
             Ok(Negotiated::Transmission) => {}
             Ok(Negotiated::Closed) => return Ok(false),
@@ -466,7 +513,8 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::mpsc;
     use std::thread::{self, JoinHandle};
 
     const OPT_LIST: u32 = 3;
@@ -516,6 +564,16 @@ mod tests {
             (c, h)
         }
 
+        /// Serves `conn` on a thread, which closes it when the server
+        /// returns: the server's result and the calls `conn` refused.
+        fn spawn_darwin(&self, seed: u64, mut conn: Darwin) -> JoinHandle<(io::Result<bool>, u32)> {
+            let mut srv = self.server(seed);
+            thread::spawn(move || {
+                let r = srv.serve(&mut conn);
+                (r, conn.refused.load(Ordering::Relaxed))
+            })
+        }
+
         fn trace(&self) -> Vec<String> {
             std::fs::read_to_string(self.dir.join("trace"))
                 .unwrap()
@@ -528,6 +586,82 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// When the test's client closes, against the server's socket-option calls.
+    #[derive(Clone, Copy)]
+    enum Close {
+        /// Before the server's first call: every call is refused.
+        First,
+        /// Once its flush is replied: the call that clears a read timeout
+        /// the server set is refused, and the calls before it get through.
+        Cleared,
+    }
+
+    /// Darwin's rule for socket options, on any host. Darwin refuses every
+    /// socket option with EINVAL once its socket can neither send nor
+    /// receive, which a unix socket reaches when its peer closes; Linux takes
+    /// the option. Which comes first, a test client's close or the server's
+    /// `set_read_timeout`, is a race; here the close wins every race `close`
+    /// names: such a call waits for `closed`, the client's word that it has
+    /// closed its end (or that word's sender dropping), and is then refused.
+    struct Darwin {
+        s: UnixStream,
+        close: Close,
+        closed: mpsc::Receiver<()>,
+        /// A call that got through set a read timeout.
+        set: AtomicBool,
+        refused: AtomicU32,
+    }
+
+    impl Darwin {
+        fn new(s: UnixStream, close: Close, closed: mpsc::Receiver<()>) -> Self {
+            Self {
+                s,
+                close,
+                closed,
+                set: AtomicBool::new(false),
+                refused: AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl Read for Darwin {
+        fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+            self.s.read(b)
+        }
+    }
+
+    impl Write for Darwin {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.s.write(b)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.s.flush()
+        }
+    }
+
+    impl Conn for Darwin {
+        fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+            let refuse = match self.close {
+                Close::First => true,
+                Close::Cleared => d.is_none() && self.set.load(Ordering::Relaxed),
+            };
+            if !refuse {
+                self.set.store(d.is_some(), Ordering::Relaxed);
+                return self.s.set_read_timeout(d);
+            }
+            match self.closed.recv() {
+                Ok(()) | Err(mpsc::RecvError) => {}
+            }
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            Err(io::Error::from_raw_os_error(KError::Inval.errno()))
+        }
+
+        fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+            self.s.set_nonblocking(on)
         }
     }
 
@@ -736,6 +870,94 @@ mod tests {
         let t = f.trace();
         assert_eq!(t.last().unwrap(), r#"{"t":"flush","id":1}"#);
         assert!(!t.contains(&r#"{"t":"reply","id":1}"#.to_owned()));
+    }
+
+    /// `handshake_export_name` on Darwin, with the client's close beating
+    /// any socket-option call: an idle connection sets no socket option, so
+    /// the close is a plain EOF.
+    #[test]
+    fn idle_close_sets_no_socket_option() {
+        let f = Fixture::new(4096);
+        let (mut c, s) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let h = f.spawn_darwin(1, Darwin::new(s, Close::First, rx));
+        hello(&mut c, 1);
+        opt(&mut c, OPT_EXPORT_NAME, b"");
+        rd(&mut c, 10 + 124);
+        drop(c);
+        drop(tx);
+        let (r, refused) = h.join().unwrap();
+        assert!(r.unwrap());
+        assert_eq!(refused, 0);
+    }
+
+    /// `eof_leaves_pending_flush_unreplied` on Darwin, with the client's
+    /// close beating the flush's read timeout, which Darwin then refuses.
+    /// The refusal is the client's EOF, as on Linux: the flush stays
+    /// unreplied, and the trace is Linux's.
+    #[test]
+    fn refused_timeout_after_close_is_eof() {
+        let f = Fixture::new(4096);
+        let (mut c, s) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let h = f.spawn_darwin(slow_seed(&f), Darwin::new(s, Close::First, rx));
+        go(&mut c);
+        req(&mut c, 0, CMD_FLUSH, 1, 0, 0, &[]);
+        drop(c);
+        tx.send(()).unwrap();
+        let (r, refused) = h.join().unwrap();
+        assert!(r.unwrap());
+        assert_eq!(refused, 1);
+        assert_eq!(f.trace(), [r#"{"t":"flush","id":0}"#]);
+    }
+
+    /// What the client sent before it closed is served after Darwin's
+    /// refusal, as Linux serves it before its EOF: the write lands in the
+    /// trace and the image, and its reply finds the client gone.
+    #[test]
+    fn refused_timeout_drains_requests_sent_before_close() {
+        let f = Fixture::new(4096);
+        let (mut c, s) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        // Slow, so the server sets the flush's read timeout before the flush
+        // is due, and clearing it is the call the close beats.
+        let h = f.spawn_darwin(slow_seed(&f), Darwin::new(s, Close::Cleared, rx));
+        go(&mut c);
+        req(&mut c, 0, CMD_FLUSH, 1, 0, 0, &[]);
+        assert_eq!(rep(&mut c), (0, 1));
+        req(&mut c, 0, CMD_WRITE, 2, 0, 1, b"z");
+        drop(c);
+        tx.send(()).unwrap();
+        let (r, refused) = h.join().unwrap();
+        assert!(r.unwrap());
+        assert_eq!(refused, 1);
+        assert_eq!(
+            f.trace(),
+            [
+                r#"{"t":"flush","id":0}"#,
+                r#"{"t":"reply","id":0}"#,
+                r#"{"t":"write","id":1,"off":0,"len":1}"#,
+            ]
+        );
+        assert_eq!(std::fs::read(f.dir.join("img")).unwrap()[0], b'z');
+    }
+
+    /// An EINVAL from a socket that can still receive is no EOF: the server
+    /// returns it.
+    #[test]
+    fn refused_timeout_on_open_socket_is_an_error() {
+        let f = Fixture::new(4096);
+        let (mut c, s) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        let h = f.spawn_darwin(slow_seed(&f), Darwin::new(s, Close::First, rx));
+        go(&mut c);
+        req(&mut c, 0, CMD_FLUSH, 1, 0, 0, &[]);
+        // The server's thread closes the connection when the server returns.
+        assert_eq!(c.read(&mut [0u8; 16]).unwrap(), 0);
+        let (r, refused) = h.join().unwrap();
+        assert!(einval(&r.unwrap_err()));
+        assert_eq!(refused, 1);
     }
 
     #[test]

@@ -182,6 +182,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   8 GiB physmap cap is left unused; `make test-e2e-highmem` boots with 9 GiB.
 - UEFI e2e no longer hangs on OVMF PXE after a green marker boot; a timed-out boot prints
   its serial tail.
+- On macOS, `nbd-cache` (the crash test's NBD device) takes its client's close as EOF, as on Linux,
+  instead of failing with the `EINVAL` Darwin gives a socket option once the peer has gone.
 - A process orphaned while no init runs is freed when it exits instead of holding a process slot as
   a zombie.
 - The -smp 4 in-guest msix_cpu test no longer fails at random; its interrupt observer publishes its
