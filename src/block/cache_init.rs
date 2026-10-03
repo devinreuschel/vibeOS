@@ -10,8 +10,9 @@
 //! device is gone is dropped, never retried (DEVICES.md §12.4 rule 9).
 //! [`PageCache::flush`] sweeps the slots once: it writes each page of its
 //! device dirty when it began and waits for it, waits for every write in
-//! flight on the device (`blk-wb`'s and eviction writes), and only then
-//! sends the device `Flush` (DESIGN §10.6). Phase 12 makes this cache each block device's
+//! flight on the device (`blk-wb`'s and eviction writes), writes again a
+//! page whose write it waited on failed, and only then sends the device
+//! `Flush` (DESIGN §10.6). Phase 12 makes this cache each block device's
 //! mapping in one page cache of mappings (DESIGN §10.6).
 
 use core::cell::UnsafeCell;
@@ -39,7 +40,8 @@ struct SlotWaits([UnsafeCell<WaitQueue>; DEFAULT_PAGES]);
 
 // SAFETY: each queue is touched only inside `thread_init::with_sched`,
 // which serializes every access to it; established here, by
-// `wait_writeback` and `end_writeback_and_wake`, the only users.
+// `wait_writeback`, `wait_writeback_end`, `wait_fill` and `wake_slot`,
+// the only functions that dereference `SLOT_WQ`'s cells.
 unsafe impl Sync for SlotWaits {}
 
 static SLOT_WQ: SlotWaits = SlotWaits([const { UnsafeCell::new(WaitQueue::new()) }; DEFAULT_PAGES]);
@@ -485,40 +487,31 @@ impl BlockCache for PageCache {
     /// the flush began durable: one sweep of the slots writes each page of
     /// `dev` dirty then and waits for it, and waits for each write of `dev`
     /// in flight (`blk-wb`'s and eviction writes), before the device
-    /// `Flush` ([`Cache::flush_slot`]). A writer that keeps dirtying pages
-    /// cannot hold it off, since the sweep visits each slot once.
+    /// `Flush` ([`Cache::flush_slot`]). A page whose write it waited on
+    /// failed it writes itself, and returns that write's error
+    /// ([`Cache::flush_waited`]). A writer that keeps dirtying pages cannot
+    /// hold it off, since the sweep visits each slot once.
     fn flush(&self, dev: &BlockRef) -> Result<(), BlockError> {
         if !LIVE.load(Ordering::Acquire) {
             return dev.flush_dev();
         }
         let mut data = page_vec()?;
-        let since = CACHE.lock().flush_begin();
-        let mut slot = 0usize;
-        while slot < DEFAULT_PAGES {
-            let step = {
-                CACHE
-                    .lock()
-                    .flush_slot(slot, Some(dev.id()), since, &mut data)
-            };
+        let mut sweep = CACHE.lock().flush_sweep(Some(dev.id()));
+        loop {
+            let step = { CACHE.lock().flush_next(&mut sweep, &mut data) };
             match step {
-                FlushStep::Write(s, key) => {
+                None => break,
+                Some(FlushStep::Write(s, key)) => {
                     write_page(Some(dev), s, key, &data)?;
                     #[cfg(feature = "kernel_tests")]
                     testing::after_flush_write();
-                    slot += 1;
                 }
-                FlushStep::Wait {
-                    slot: s,
-                    start,
-                    done,
-                    ..
-                } => {
+                Some(wait @ FlushStep::Wait { slot: s, start, .. }) => {
                     wait_writeback_end(s, start);
-                    if done {
-                        slot += 1;
-                    }
+                    CACHE.lock().flush_waited(&mut sweep, wait)?;
                 }
-                FlushStep::Done => slot += 1,
+                // `flush_next` never returns it.
+                Some(FlushStep::Done) => {}
             }
         }
         dev.flush_dev()?;

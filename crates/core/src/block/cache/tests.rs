@@ -331,6 +331,106 @@ fn flush_slot_waits_once_for_each_writeback() {
     assert_eq!(c.writeback_start(slot), None);
 }
 
+/// A writeback that began after the flush, which the flush waited on,
+/// failed: the page is dirty again, so the sweep asks the slot once
+/// more and the flush writes it itself. The sweep once moved on, sent
+/// its `Flush` and returned `Ok` with the page only in the cache.
+#[test]
+fn flush_writes_a_page_whose_waited_writeback_failed() {
+    let mut c = Cache::<4>::new();
+    let mut z = [0u8; PAGE];
+    let mem = Mem::new(PAGE * 8);
+    cached_write(&mut c, &mem, 0, 0, &[1u8; PAGE], &mut z).unwrap();
+    let mut sweep = c.flush_sweep(Some(0));
+    // `blk-wb` takes the page before the sweep reaches it.
+    let mut held = [0u8; PAGE];
+    let (slot, key) = c.take_dirty(0, None, &mut held).unwrap();
+    let mut dst = [0u8; PAGE];
+    let wait = c.flush_next(&mut sweep, &mut dst).unwrap();
+    let FlushStep::Wait { done: true, .. } = wait else {
+        panic!("no wait for the writeback begun after the flush: {wait:?}");
+    };
+    c.end_writeback(slot, key, Err(BlockError::Io));
+    assert_eq!(c.flush_waited(&mut sweep, wait), Ok(()));
+    assert_eq!(
+        c.flush_next(&mut sweep, &mut dst),
+        Some(FlushStep::Write(slot, key))
+    );
+    assert_eq!(dst, [1u8; PAGE]);
+    c.end_writeback(slot, key, Ok(()));
+    assert_eq!(c.flush_next(&mut sweep, &mut dst), None);
+    assert_eq!(c.dirty_count(), 0);
+}
+
+/// The writeback the flush waited on failed, and so did the one it
+/// waited on when it asked the slot again: the flush returns the error,
+/// and the page stays dirty for the next flush.
+#[test]
+fn flush_reports_a_second_failed_writeback() {
+    let mut c = Cache::<4>::new();
+    let mut z = [0u8; PAGE];
+    let mem = Mem::new(PAGE * 8);
+    cached_write(&mut c, &mem, 0, 0, &[1u8; PAGE], &mut z).unwrap();
+    let mut sweep = c.flush_sweep(Some(0));
+    let (mut held, mut dst) = ([0u8; PAGE], [0u8; PAGE]);
+    for round in 0..2 {
+        let (slot, key) = c.take_dirty(0, None, &mut held).unwrap();
+        let wait = c.flush_next(&mut sweep, &mut dst).unwrap();
+        assert!(matches!(wait, FlushStep::Wait { done: true, .. }));
+        c.end_writeback(slot, key, Err(BlockError::Io));
+        let r = c.flush_waited(&mut sweep, wait);
+        assert_eq!(
+            r,
+            if round == 0 {
+                Ok(())
+            } else {
+                Err(BlockError::Io)
+            }
+        );
+    }
+    assert_eq!(c.dirty_count(), 1);
+    // A waited writeback that succeeded finishes the slot.
+    let mut sweep = c.flush_sweep(Some(0));
+    let (slot, key) = c.take_dirty(0, None, &mut held).unwrap();
+    let wait = c.flush_next(&mut sweep, &mut dst).unwrap();
+    c.end_writeback(slot, key, Ok(()));
+    assert_eq!(c.flush_waited(&mut sweep, wait), Ok(()));
+    assert_eq!(c.flush_next(&mut sweep, &mut dst), None);
+}
+
+/// A miss while every slot is being filled waits on one of them
+/// (`FillNeed::None`), as one waits on a slot in writeback, and is
+/// planned once that fill ends; it once failed with `Failed` (EIO).
+#[test]
+fn miss_waits_while_every_slot_fills() {
+    let mut c = Cache::<2>::new();
+    let (mut out, mut ev) = ([0u8; 8], [0u8; PAGE]);
+    let p = PAGE as u64;
+    let f0 = c
+        .plan_read(CacheKey::page(0, 0), 0, &mut out, &mut ev)
+        .unwrap()
+        .unwrap();
+    let f1 = c
+        .plan_read(CacheKey::page(0, p), 0, &mut out, &mut ev)
+        .unwrap()
+        .unwrap();
+    assert_eq!((f0.need, f1.need), (FillNeed::Read, FillNeed::Read));
+    let key = CacheKey::page(0, 2 * p);
+    let w = c.plan_read(key, 0, &mut out, &mut ev).unwrap().unwrap();
+    assert_eq!(w.need, FillNeed::None);
+    assert!(c.filling(w.slot));
+    let fill = if w.slot == f0.slot { &f0 } else { &f1 };
+    c.install_read(fill, &[9u8; PAGE], 0, &mut out).unwrap();
+    // The other slot still fills; the one just filled is the victim.
+    let r = c.plan_read(key, 0, &mut out, &mut ev).unwrap().unwrap();
+    assert_eq!((r.need, r.slot), (FillNeed::Read, w.slot));
+    // The host path cannot sleep: a filling slot is `Io` there.
+    let mem = Mem::new(PAGE * 8);
+    let mut buf = [0u8; 8];
+    let busy = cached_read(&mut c, &mem, 0, 3 * p, &mut buf, &mut [0u8; PAGE]);
+    assert_eq!(busy, Err(BlockError::Io));
+}
+
 #[test]
 fn evict_writes_back_in_place() {
     let mem = Mem::new(PAGE * 8);

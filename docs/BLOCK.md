@@ -376,7 +376,9 @@ write-back, clock eviction, sequential readahead, dirty-ratio writeback thread
 (`blk-wb`). `PageCache::flush(dev)` makes durable every write to `dev` that returned before it began, in
 one sweep of the slots (`Cache::flush_slot`): it writes each page of `dev` that is dirty and
 waits for it, and waits for each write of `dev` in flight, once more when that write began
-before the flush, since a write after its copy may predate the flush. Then it sends the device
+before the flush, since a write after its copy may predate the flush. A write it waited on that
+failed leaves the page dirty again, and the flush writes that page itself and returns its error,
+as Linux's `fsync` reports a writeback error (`Cache::flush_waited`). Then it sends the device
 `Flush` (§10.2). A writer that keeps dirtying pages cannot hold it off, since the sweep visits
 each slot once (`cache_flush_not_starved`); a page dirtied after the sweep passed it is the next
 flush's.
@@ -390,7 +392,9 @@ clean victim. A thread that needs the slot sleeps on the slot's wait queue
 until the write ends (ROADMAP §10.11, F015, F043). A slot being filled
 (`F_FILL`) is the page's one slot: `find()` matches it, and a second reader or a
 writer of the page sleeps on its queue until the fill ends
-(`cache_read_waits_for_fill`).
+(`cache_read_waits_for_fill`). A miss that finds every slot busy sleeps on one in writeback, or
+else on one being filled, and is planned again when it ends; it does not fail
+(`miss_waits_while_every_slot_fills`).
 
 Each disk's `BlockRef` carries the cache (`cache_init::PAGE_CACHE`), and a
 partition's I/O goes through its disk's, so a page is keyed by its disk's
