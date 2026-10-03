@@ -644,36 +644,9 @@ pub(super) fn psinfo(buf: &mut [u8; 512]) -> Result<usize, Errno> {
     unsafe { sys::psinfo(buf.as_mut_ptr(), buf.len()) }
 }
 
-/// The state field (`run`, `stop`, `zombie`) of `pid`'s `psinfo` line, if
-/// it has one; `line` gets its `<ppid>` too.
-pub(super) fn ps_state(pid: usize) -> Option<(usize, [u8; 8])> {
-    let mut buf = [0u8; 512];
-    let n = psinfo(&mut buf).ok()?;
-    let text = buf.get(..n)?;
-    for line in text.split(|&b| b == b'\n') {
-        let mut f = line.split(|&b| b == b' ');
-        let (Some(p), Some(pp), Some(st)) = (f.next(), f.next(), f.next()) else {
-            continue;
-        };
-        if parse_dec(p) != Some(pid) {
-            continue;
-        }
-        let mut state = [0u8; 8];
-        let k = st.len().min(state.len());
-        state[..k].copy_from_slice(&st[..k]);
-        return Some((parse_dec(pp)?, state));
-    }
-    None
-}
-
 /// `s` as a decimal number.
 pub(super) fn parse_dec(s: &[u8]) -> Option<usize> {
     vibeos_user::cmd::parse_dec(s).map(|v| v as usize)
-}
-
-/// Whether `state` (from [`ps_state`]) is `word`.
-pub(super) fn state_is(state: &[u8; 8], word: &[u8]) -> bool {
-    state.get(..word.len()) == Some(word) && state.get(word.len()).is_none_or(|&b| b == 0)
 }
 
 /// Yield until `pred` holds, at most `tries` times.
@@ -838,7 +811,7 @@ fn with_files_full<T>(f: impl FnOnce() -> T) -> Result<T, &'static str> {
             }
         }
         if !poll(20_000, || {
-            ps_state(*k).is_some_and(|(_, s)| state_is(&s, b"stop"))
+            utest::ps_state(*k).is_some_and(|(_, s)| utest::state_is(&s, b"stop"))
         }) {
             why = Some("a child holding files did not stop");
             break;
@@ -1274,8 +1247,8 @@ fn getdents64_ok() -> Result<(), &'static str> {
 /// This process's own line is there.
 fn psinfo_ok() -> Result<(), &'static str> {
     let me = sys::getpid().map_err(|_| "getpid")?;
-    match ps_state(me) {
-        Some((_, s)) if state_is(&s, b"run") => Ok(()),
+    match utest::ps_state(me) {
+        Some((_, s)) if utest::state_is(&s, b"run") => Ok(()),
         _ => Err("no run line for this process"),
     }
 }

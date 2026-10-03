@@ -75,6 +75,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - A FAT file stops at 4 GiB as on Linux: a write is cut short there, and a truncate or seek past it fails.
 - `execve` opens its file before it reads `argv`, and `getdents64` of a non-directory is `ENOTDIR`;
   `open`, `unlink`, `rename`, `read`, `write` and `lseek` return Linux's errnos in Linux's order.
+- `kill` of a zombie, a process that exited and is not yet reaped, returns 0 and discards the
+  signal, as on Linux, instead of ESRCH.
 - A virtio-blk disk with a block size that is not a power of two from 512 to 4096 is refused at probe.
 - Roadmap restructured to 40 phases in eight eras, all on free infrastructure: [Phase 10 Consolidation](docs/ROADMAP.md#phase-10-consolidation)
   and [Phase 11 Portability](docs/ROADMAP.md#phase-11-portability) added; old phases 10–20 are now 12–22.

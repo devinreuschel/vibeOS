@@ -151,7 +151,7 @@ names, Linux values:
 |------|------:|------|
 | `EPERM` | 1 | `mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0); making a symlink, a device node, or a directory, a hard link, a rename, or a removal that the filesystem cannot make, as FAT's `symlink` and `link` (no syscall makes one yet) |
 | `ENOENT` | 2 | `open`/`execve` missing path, or the empty path |
-| `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
+| `ESRCH` | 3 | `kill`: no process has `pid` (a zombie has it until it is reaped), `pid` 0, or a negative 32-bit `pid` (§3.1) |
 | `EIO` | 5 | device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs |
 | `E2BIG` | 7 | `execve`: a string over 131,072 bytes with its NUL, or strings and pointers together over max(128 KiB, min(`RLIMIT_STACK`/4, 6 MiB)), 2 MiB at the fixed 8 MiB `RLIMIT_STACK` (§3.1) |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
@@ -370,10 +370,11 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   signals, for 0, the caller's process group, for -1, every process the
   caller may signal except pid 1 and the caller, and for any other negative
   `pid`, process group `-pid` (F149; ROADMAP §13.7). A `pid` that names a
-  zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A signal sent
-  to pid 1 is dropped, and `kill` returns 0, unless init has a handler for
-  it, as Linux does; none can exist before ROADMAP §13.8, and never for
-  `SIGKILL` or `SIGSTOP` (F068)
+  zombie, a process that exited and is not yet reaped, returns 0 and the
+  signal is discarded, as on Linux: the status `wait4` reports is the one
+  its exit left. A signal sent to pid 1 is dropped, and `kill` returns 0,
+  unless init has a handler for it, as Linux does; none can exist before
+  ROADMAP §13.8, and never for `SIGKILL` or `SIGSTOP` (F068)
 - `exit`: the caller's children go to the reaper `proc::reaper_for` picks:
   pid 1 while init is live or stopped; otherwise none, so a child reads
   `getppid()` 0 and is freed when it exits (a zombie child at once), as in

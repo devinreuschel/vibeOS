@@ -234,8 +234,14 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
             let Some(p) = t.get_mut(target) else {
                 return Err(KError::Srch);
             };
-            if p.state == ProcState::Unused || p.state == ProcState::Zombie {
+            if p.state == ProcState::Unused {
                 return Err(KError::Srch);
+            }
+            // A zombie still has its pid until it is reaped: `kill` finds
+            // it, discards the signal, and returns 0, as Linux's does. Its
+            // `wait_status` stays the one its exit wrote.
+            if p.state == ProcState::Zombie {
+                return Ok((false, None));
             }
             // `false`: no process has a handler until ROADMAP §13.8's
             // `rt_sigaction`, so a signal to init is dropped here, with no

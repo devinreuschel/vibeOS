@@ -32,12 +32,17 @@
 //!     `argv`, a missing path returns `ENOENT` and a directory `EACCES`.
 //! 13. `getdents64` of `/dev/console` opened by path returns `ENOTDIR`, as
 //!     any descriptor that is not a directory does.
+//! 14. `kill` of a zombie, a child that exited and is not yet reaped,
+//!     returns 0 for `SIGKILL`, `SIGSTOP`, and `SIGCONT`, as on Linux, not
+//!     `ESRCH`, and delivers nothing: `psinfo` still says `zombie`, and
+//!     `wait4` reaps the child with the exit status it left.
 
 #![no_std]
 #![no_main]
 
 use vibeos_user::env::Env;
 use vibeos_user::sys::{self, Errno};
+use vibeos_user::utest;
 
 vibeos_user::main!(main);
 
@@ -60,9 +65,16 @@ const DIR_NEW: &core::ffi::CStr = c"/tmp/errno_dir";
 const KERNEL_PTR: usize = 0xFFFF_8000_0000_1000;
 /// A `whence` past Linux's last, `SEEK_HOLE` (case 11).
 const WHENCE_BAD: u32 = 99;
+/// The status case 14's child exits with.
+const ZOMBIE_EXIT: i32 = 7;
+// From signal(7) (case 14).
+const SIGKILL: i32 = 9;
+const SIGSTOP: i32 = 19;
+/// Yields case 14 waits, at most, for its child to become a zombie.
+const ZOMBIE_TRIES: u32 = 20_000;
 
 fn main(_env: &Env) -> i32 {
-    let cases: [fn() -> bool; 13] = [
+    let cases: [fn() -> bool; 14] = [
         read_wronly_ebadf,
         write_rdonly_ebadf,
         dup_full_emfile,
@@ -76,6 +88,7 @@ fn main(_env: &Env) -> i32 {
         lseek_whence_before_espipe,
         execve_path_before_argv,
         getdents_device_enotdir,
+        kill_zombie_returns_0,
     ];
     for (i, case) in cases.iter().enumerate() {
         if !case() {
@@ -278,6 +291,38 @@ fn getdents_device_enotdir() -> bool {
     // established here.
     let r = unsafe { sys::getdents64(fd as u32, b.as_mut_ptr().cast(), 512) };
     close(fd) && r == Err(Errno::ENOTDIR)
+}
+
+/// Case 14: the child is reaped whatever the checks found.
+fn kill_zombie_returns_0() -> bool {
+    let pid = match sys::fork() {
+        Ok(0) => vibeos_user::rt::exit(ZOMBIE_EXIT),
+        Ok(pid) => pid,
+        Err(_) => return false,
+    };
+    let mut zombie = false;
+    for _ in 0..ZOMBIE_TRIES {
+        zombie = utest::zombie(pid);
+        if zombie {
+            break;
+        }
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a yield has no failure the case can act on (DESIGN §2.5)"
+        )]
+        let _ = sys::sched_yield();
+    }
+    let killed = [SIGKILL, SIGSTOP, utest::SIGCONT].map(|sig| sys::kill(pid as i32, sig));
+    let still = utest::zombie(pid);
+    let mut status = 0i32;
+    // SAFETY: `wait4` writes 4 bytes through `&raw mut status`, a local no
+    // reference covers, and nothing through the null rusage; established here.
+    let r = unsafe { sys::wait4(pid as i32, &raw mut status, 0, core::ptr::null_mut()) };
+    zombie
+        && killed.iter().all(|k| *k == Ok(0))
+        && still
+        && r == Ok(pid)
+        && sys::exit_code(status as u32) == Some(ZOMBIE_EXIT as u8)
 }
 
 /// Close `fd`; whether it closed.

@@ -19,8 +19,9 @@ use vibeos_user::utest::{self, Outcome, Runner};
 const WNOHANG: i32 = 1;
 const SIGKILL: i32 = 9;
 
-/// The 20 ms windows `yes_row` waits, at most, for `yes`'s first line.
-const YES_WINDOWS: u32 = 100;
+/// The 1 ms sleeps `yes_row` takes, at most, while it waits for `yes`'s
+/// first line: 2 s in all.
+const YES_POLLS: u32 = 2_000;
 
 const IN: &[u8] = b"/tmp/u75-in";
 const OUT: &[u8] = b"/tmp/u75-out";
@@ -376,28 +377,41 @@ fn sleep_row() -> Result<(), &'static str> {
     }
 }
 
-/// `yes abc` for 20 ms, or until its first whole line, then `SIGKILL`:
-/// signal 9, and every whole line of its output, one or more, is `abc`.
+/// `yes abc` until its first whole line, checked every 1 ms for at most
+/// `YES_POLLS` sleeps, then `SIGKILL`: signal 9, or exit status 1 when
+/// `/tmp`'s store filled first, which a one-byte `O_APPEND` write to the
+/// file confirms by failing with `ENOSPC`; and every whole line of its
+/// output, one or more, is `abc`. Only fd 1 is on the file, so `yes`'s
+/// complaint about the failed write is not in it.
 fn yes_row() -> Result<(), &'static str> {
+    // Empty, so its size counts only what `yes` writes.
+    put_file(OUT, b"").map_err(|_| "yes abc: empty the file")?;
     let pid = spawn(&[c"/bin/yes", c"abc"], &[], None, OUT, false).map_err(|_| "yes abc")?;
     // The child runs while the parent sleeps (F128: both are pinned to the
     // BSP). A fork copies the whole address space under TCG, so the first
-    // line can take longer than one 20 ms window; sleep again, at most
-    // `YES_WINDOWS` times, until the file holds a whole line.
-    let mut slept = sleep_ms(20);
-    for _ in 1..YES_WINDOWS {
+    // line can take a while there; under KVM, `yes` can fill `/tmp`'s
+    // 64 KiB store within 20 ms, so the wait is in 1 ms steps.
+    let mut slept = Ok(());
+    for _ in 0..YES_POLLS {
         if slept.is_err() || file_len(OUT).is_ok_and(|n| n >= 4) {
             break;
         }
-        slept = sleep_ms(20);
+        slept = sleep_ms(1);
     }
+    // A `yes` that already exited is a zombie until the wait below, and
+    // `kill` returns 0 for it too.
     let killed = sys::kill(pid, SIGKILL);
     let status = cmd::wait(pid, 0);
     slept.map_err(|_| "yes abc: nanosleep")?;
     killed.map_err(|_| "yes abc: kill")?;
-    match status {
-        Ok((_, st)) if Status::of(st) == Status::Signaled(SIGKILL as u8) => {}
-        _ => return Err("yes abc: not signal 9"),
+    match status.map(|(_, st)| Status::of(st)) {
+        Ok(Status::Signaled(sig)) if sig == SIGKILL as u8 => {}
+        Ok(Status::Exited(1)) => {
+            if append_byte(OUT) != Err(Errno::ENOSPC) {
+                return Err("yes abc: exit 1, but /tmp has room");
+            }
+        }
+        _ => return Err("yes abc: not signal 9, nor exit 1 on a full /tmp"),
     }
     let fd = cmd::open_flags(OUT, sys::O_RDONLY).map_err(|_| "yes abc: open")?;
     let mut r = Reader::new(fd);
@@ -421,6 +435,14 @@ fn yes_row() -> Result<(), &'static str> {
     } else {
         Err("yes abc: a line is not abc")
     }
+}
+
+/// Write one byte to `path` opened with `O_APPEND`: the `write`'s result.
+fn append_byte(path: &[u8]) -> Result<usize, Errno> {
+    let fd = cmd::open_flags(path, sys::O_WRONLY | sys::O_APPEND)?;
+    let r = sys::write(fd, b"\n".as_ptr(), 1);
+    sys::close(fd)?;
+    r
 }
 
 /// `path`'s size, from `lseek(SEEK_END)`.

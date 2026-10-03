@@ -54,7 +54,7 @@ macro_rules! errno_table {
 errno_table! {
     Perm = 1, "EPERM", "`mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0); making a symlink, a device node, or a directory, a hard link, a rename, or a removal that the filesystem cannot make, as FAT's `symlink` and `link` (no syscall makes one yet)";
     NoEnt = 2, "ENOENT", "`open`/`execve` missing path, or the empty path";
-    Srch = 3, "ESRCH", "`kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1)";
+    Srch = 3, "ESRCH", "`kill`: no process has `pid` (a zombie has it until it is reaped), `pid` 0, or a negative 32-bit `pid` (§3.1)";
     Io = 5, "EIO", "device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs";
     TooBig = 7, "E2BIG", "`execve`: a string over 131,072 bytes with its NUL, or strings and pointers together over max(128 KiB, min(`RLIMIT_STACK`/4, 6 MiB)), 2 MiB at the fixed 8 MiB `RLIMIT_STACK` (§3.1)";
     NoExec = 8, "ENOEXEC", "malformed ELF, `ET_DYN`, or `PT_INTERP`";

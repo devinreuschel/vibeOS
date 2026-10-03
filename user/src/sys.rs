@@ -33,6 +33,8 @@ pub const O_RDWR: i32 = 0o2;
 pub const O_CREAT: i32 = 0o100;
 /// Truncate the file to length 0.
 pub const O_TRUNC: i32 = 0o1000;
+/// Write at the end of the file.
+pub const O_APPEND: i32 = 0o2000;
 /// Fail unless the path names a directory.
 pub const O_DIRECTORY: i32 = 0o200000;
 /// Fail on a symbolic link in the last component.

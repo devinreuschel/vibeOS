@@ -83,7 +83,8 @@ pub(crate) fn test_signal_on_return() -> Outcome {
     exit_testing::watch_r12(b);
     let r = check_children(a, b);
     // Whatever failed, neither child outlives the test. `a` is a zombie
-    // already when the checks passed, so its kill returns ESRCH.
+    // already when the checks passed, so its kill returns 0 and leaves its
+    // status as its first `SIGKILL` set it, as Linux's `kill` does.
     let ka = kill(a, SIGKILL);
     let kb = kill(b, SIGKILL);
     let (sa, sb) = (user::wait(a), user::wait(b));
@@ -91,8 +92,8 @@ pub(crate) fn test_signal_on_return() -> Outcome {
     if let Err(e) = r {
         return e;
     }
-    if ka != -3 || kb != 0 {
-        return crate::fail_fmt!("SIGKILL returned {ka}, {kb}, want -3 (ESRCH), 0");
+    if ka != 0 || kb != 0 {
+        return crate::fail_fmt!("SIGKILL returned {ka}, {kb}, want 0, 0");
     }
     let want = wait_signaled(SIGKILL);
     if sa != want || sb != want {

@@ -205,10 +205,43 @@ pub fn signaled(status: u32) -> Option<u8> {
 /// to a running one.
 pub const SIGCONT: i32 = 18;
 
-/// Whether child `pid` is a zombie: `kill(pid, SIGCONT)` returns `ESRCH`
-/// for one, as SYSCALL.md §3.1 documents.
+/// `psinfo`'s line for `pid`, `<pid> <ppid> <state> <name> <syscalls>`:
+/// its `<ppid>`, and its state (`run`, `stop`, or `zombie`) padded with
+/// NULs; `None` when there is no such line. `psinfo` lists only the
+/// lowest pids whose lines fit in its 512 bytes (SYSCALL.md §3.1), so a
+/// table of more than about 20 processes can leave `pid` out.
+pub fn ps_state(pid: usize) -> Option<(usize, [u8; 8])> {
+    let mut buf = [0u8; 512];
+    // SAFETY: the kernel writes at most 512 bytes into `buf`, a local no
+    // other reference covers; established here.
+    let n = unsafe { sys::psinfo(buf.as_mut_ptr(), buf.len()) }.ok()?;
+    let dec = |s: &[u8]| crate::cmd::parse_dec(s).and_then(|v| usize::try_from(v).ok());
+    for line in buf.get(..n)?.split(|&b| b == b'\n') {
+        let mut f = line.split(|&b| b == b' ');
+        let (Some(p), Some(pp), Some(st)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        if dec(p) != Some(pid) {
+            continue;
+        }
+        let mut state = [0u8; 8];
+        let k = st.len().min(state.len());
+        state.get_mut(..k)?.copy_from_slice(st.get(..k)?);
+        return Some((dec(pp)?, state));
+    }
+    None
+}
+
+/// Whether `state` (from [`ps_state`]) is `word`.
+pub fn state_is(state: &[u8; 8], word: &[u8]) -> bool {
+    state.get(..word.len()) == Some(word) && state.get(word.len()).is_none_or(|&b| b == 0)
+}
+
+/// Whether child `pid` is a zombie: `psinfo` says `zombie` for it. `kill`
+/// cannot tell, since it returns 0 for a zombie, as on Linux (SYSCALL.md
+/// §3.1). [`ps_state`] says which pids `psinfo` lists.
 pub fn zombie(pid: usize) -> bool {
-    sys::kill(pid as i32, SIGCONT) == Err(Errno::ESRCH)
+    ps_state(pid).is_some_and(|(_, s)| state_is(&s, b"zombie"))
 }
 
 /// `fork`, out of line: the call's clobbers then cover every vector
