@@ -1,6 +1,6 @@
 //! Host tests of `Vol`'s file and name operations: truncate across the
-//! inline bytes, inode numbers that run out, and rename between two names
-//! of one file.
+//! inline bytes, inode numbers that run out, the times a lookup reports,
+//! and rename between two names of one file.
 
 use super::tests::{base_tree, fresh, fsck_of, new_file, slot_of, with_vol};
 use super::*;
@@ -132,6 +132,31 @@ fn inode_numbers_run_out_without_reuse() {
     });
     let r = fsck_of(&mut b);
     assert_eq!(r.errors, 0, "{r:?}");
+}
+
+/// A lookup reports the record's three times, as `stat` shows them: a
+/// rename stamps the moved file's ctime and leaves its mtime, before and
+/// after a remount, and an unset (0) atime reads as the mtime.
+#[test]
+fn lookup_reports_the_records_times() {
+    const T0: u64 = 1_700_000_000;
+    let mut b = fresh(64 * BLOCK);
+    let check = |v: &mut Vol, d: &mut MemDisk| {
+        let g = v.lookup(d, ROOT_INO, b"g").unwrap();
+        assert_eq!((g.atime, g.mtime, g.ctime), (T0, T0, T0 + 100));
+        assert_eq!(v.attr(g.ino).unwrap().ctime, T0 + 100);
+        let r = v.walk(d, b"/").unwrap();
+        assert_eq!((r.atime, r.mtime, r.ctime), (T0 + 100, T0 + 100, T0 + 100));
+    };
+    with_vol(&mut b, |v, d| {
+        v.now = T0;
+        new_file(v, d, b"f");
+        v.now = T0 + 100;
+        v.rename(d, ROOT_INO, b"f", ROOT_INO, b"g").unwrap();
+        check(v, d);
+        v.sync(d).unwrap();
+    });
+    with_vol(&mut b, check);
 }
 
 /// A rename between two names of one file, as an image with a hard link

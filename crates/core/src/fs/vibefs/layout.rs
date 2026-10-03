@@ -38,6 +38,9 @@ impl Snap {
     };
 }
 
+/// An inode as a lookup reports it, in memory only. Its times are the
+/// record's (VIBEFS.md §7), with a 0 (unset) atime or ctime reported as
+/// the mtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Node {
     pub ino: u32,
@@ -45,7 +48,9 @@ pub struct Node {
     pub size: u64,
     pub mode: u16,
     pub nlink: u32,
+    pub atime: u64,
     pub mtime: u64,
+    pub ctime: u64,
     pub name_len: u8,
     pub name: [u8; MAX_NAME],
 }
@@ -57,7 +62,9 @@ impl Node {
         size: 0,
         mode: 0,
         nlink: 0,
+        atime: 0,
         mtime: 0,
+        ctime: 0,
         name_len: 0,
         name: [0; MAX_NAME],
     };

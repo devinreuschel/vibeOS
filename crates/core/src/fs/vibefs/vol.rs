@@ -235,7 +235,10 @@ impl Vol {
         n.size = r.size;
         n.mode = r.mode;
         n.nlink = r.nlink;
+        let set = |t: u64| if t != 0 { t } else { r.mtime };
+        n.atime = set(r.atime);
         n.mtime = r.mtime;
+        n.ctime = set(r.ctime);
         let l = name.len().min(MAX_NAME);
         n.name[..l].copy_from_slice(&name[..l]);
         n.name_len = l as u8;

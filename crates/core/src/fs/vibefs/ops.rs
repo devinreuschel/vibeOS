@@ -408,6 +408,12 @@ impl Vol {
         }
     }
 
+    /// Inode `ino` as a lookup reports it, without a name: what `stat`
+    /// reads.
+    pub fn attr(&self, ino: u32) -> Result<Node, Error> {
+        self.node_from(ino, &[])
+    }
+
     /// The size of inode `ino`, which `SEEK_END` and `O_APPEND` read.
     pub fn file_size(&self, ino: u32) -> Result<u64, Error> {
         let s = self.inode_slot(ino)?;

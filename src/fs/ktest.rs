@@ -43,7 +43,7 @@ pub(crate) use shell::{
 };
 pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
-pub(crate) use times::test_fat_times_wall_clock;
+pub(crate) use times::{test_fat_times_wall_clock, test_vibefs_rename_ctime};
 pub(crate) use umount::test_umount_consistent;
 pub(crate) use walk::test_walk_path_resolution;
 
@@ -1277,6 +1277,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("walk_path_resolution", test_walk_path_resolution),
     test("umount_consistent", test_umount_consistent).deadline(60_000),
     test("fat_times_wall_clock", test_fat_times_wall_clock),
+    test("vibefs_rename_ctime", test_vibefs_rename_ctime),
     test("shell_rm_r_tree", test_shell_rm_r_tree),
     test("shell_ls_subdir", test_shell_ls_subdir),
     test("shell_mount_same_path_64", test_shell_mount_same_path_64),
