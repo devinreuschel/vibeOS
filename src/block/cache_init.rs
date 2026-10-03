@@ -141,8 +141,46 @@ fn wait_writeback(slot: usize) {
     }
 }
 
+/// Sleep until a read's fill of `slot` ends, which wakes the slot's queue
+/// ([`end_fill`], [`fill_read`]). Returns at once if none is filling it.
+/// As [`wait_writeback`], the check and the wait share one SCHED section.
+fn wait_fill(slot: usize) {
+    let Some(wq) = SLOT_WQ.0.get(slot) else {
+        return;
+    };
+    #[cfg(feature = "kernel_tests")]
+    testing::FILL_WAITS.fetch_add(1, Ordering::AcqRel);
+    loop {
+        let park = thread_init::with_sched(|s| {
+            if !CACHE.lock().filling(slot) {
+                return false;
+            }
+            // SAFETY: the slot's queue is touched only under
+            // `thread_init::with_sched`, held here (see `SlotWaits`).
+            s.begin_wait(unsafe { &mut *wq.get() }, FAR_DEADLINE);
+            true
+        });
+        if !park {
+            return;
+        }
+        thread_init::schedule();
+    }
+}
+
+/// Wake `slot`'s waiters under SCHED, with the cache lock dropped (never
+/// SCHED under the cache lock).
+fn wake_slot(slot: usize) {
+    if let Some(wq) = SLOT_WQ.0.get(slot) {
+        thread_init::with_sched(|s| {
+            // SAFETY: the slot's queue is touched only under
+            // `thread_init::with_sched`, held here (see `SlotWaits`).
+            s.wake_all(unsafe { &mut *wq.get() });
+        });
+    }
+}
+
 /// End `slot`'s writeback under the cache lock, drop it, then wake the
-/// slot's waiters under SCHED (never SCHED under the cache lock).
+/// slot's waiters.
 fn end_writeback_and_wake(slot: usize, key: CacheKey, res: Result<(), BlockError>) {
     {
         let mut c = CACHE.lock();
@@ -151,13 +189,26 @@ fn end_writeback_and_wake(slot: usize, key: CacheKey, res: Result<(), BlockError
         }
         c.end_writeback(slot, key, res);
     }
-    if let Some(wq) = SLOT_WQ.0.get(slot) {
-        thread_init::with_sched(|s| {
-            // SAFETY: the slot's queue is touched only under
-            // `thread_init::with_sched`, held here (see `SlotWaits`).
-            s.wake_all(unsafe { &mut *wq.get() });
-        });
-    }
+    wake_slot(slot);
+}
+
+/// End `fill` with `install`, an `install_*` call, under the cache lock;
+/// abort the fill when it fails, so the slot is never left filling; then
+/// wake the slot's waiters.
+fn end_fill<T>(
+    fill: &cache::Fill,
+    install: impl FnOnce(&mut Cache<DEFAULT_PAGES>) -> Result<T, BlockError>,
+) -> Result<T, BlockError> {
+    let r = {
+        let mut c = CACHE.lock();
+        let r = install(&mut c);
+        if r.is_err() {
+            c.abort_fill(fill);
+        }
+        r
+    };
+    wake_slot(fill.slot);
+    r
 }
 
 /// Write back `key`'s page from `data` through its device, then end the
@@ -188,8 +239,10 @@ fn write_victim(dev: &BlockRef, fill: &cache::Fill, evict: &[u8]) -> Result<(), 
     write_page(Some(dev), fill.slot, fill.evict_key, evict)
 }
 
-/// Read a `Read` fill's page, or abort the fill.
+/// Read a `Read` fill's page, or abort the fill and wake its waiters.
 fn fill_read(dev: &BlockRef, fill: &cache::Fill, page: &mut [u8]) -> Result<(), BlockError> {
+    #[cfg(feature = "kernel_tests")]
+    testing::fill_hold_point(fill.key);
     match backend_read(dev, fill.key.offset, page) {
         Ok(()) => {
             let mut c = CACHE.lock();
@@ -197,25 +250,26 @@ fn fill_read(dev: &BlockRef, fill: &cache::Fill, page: &mut [u8]) -> Result<(), 
             Ok(())
         }
         Err(e) => {
-            CACHE.lock().abort_fill(fill.slot);
+            CACHE.lock().abort_fill(fill);
+            wake_slot(fill.slot);
             Err(e)
         }
     }
 }
 
-/// A `None` fill: sleep out a slot in writeback, or yield to a fill in
-/// progress (the FILLING state is ROADMAP §12.5's).
-fn wait_busy(fill: &cache::Fill, spins: &mut u32) -> Result<(), BlockError> {
-    if CACHE.lock().in_writeback(fill.slot) {
+/// A `None` fill: sleep out the slot's writeback, or the read filling
+/// it. Either ends, by the device request's own deadline at worst (BLOCK.md
+/// §10.3); a slot that is neither by now is planned again.
+fn wait_busy(fill: &cache::Fill) {
+    let (wb, filling) = {
+        let c = CACHE.lock();
+        (c.in_writeback(fill.slot), c.filling(fill.slot))
+    };
+    if wb {
         wait_writeback(fill.slot);
-        return Ok(());
+    } else if filling {
+        wait_fill(fill.slot);
     }
-    *spins = spins.saturating_add(1);
-    if *spins > 1_000_000 {
-        return Err(BlockError::Io);
-    }
-    thread_init::yield_now();
-    Ok(())
 }
 
 fn byte_off(dev: &BlockRef, lba: u64) -> Result<u64, BlockError> {
@@ -256,10 +310,8 @@ fn bump_readahead(dev: &BlockRef, evict: &mut [u8], page: &mut [u8]) {
         FillNeed::Read => {
             if fill_read(dev, &fill, page).is_ok() {
                 let mut one = [0u8; 1];
-                let mut c = CACHE.lock();
-                if c.install_read(&fill, page, 0, &mut one).is_err() {
-                    c.abort_fill(fill.slot);
-                }
+                let _skipped =
+                    end_fill(&fill, |c| c.install_read(&fill, page, 0, &mut one)).is_err();
             }
         }
     }
@@ -281,7 +333,6 @@ fn read(dev: &BlockRef, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     let mut evict = page_vec()?;
     let mut page = page_vec()?;
     let mut done = 0usize;
-    let mut spins = 0u32;
     while done < buf.len() {
         let off = base.saturating_add(done as u64);
         let key = CacheKey::page(dev.id(), off);
@@ -294,7 +345,7 @@ fn read(dev: &BlockRef, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         if let Some(fill) = plan {
             match fill.need {
                 FillNeed::None => {
-                    wait_busy(&fill, &mut spins)?;
+                    wait_busy(&fill);
                     continue;
                 }
                 FillNeed::Writeback => {
@@ -303,14 +354,13 @@ fn read(dev: &BlockRef, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
                 }
                 FillNeed::Read => {
                     fill_read(dev, &fill, &mut page)?;
-                    CACHE
-                        .lock()
-                        .install_read(&fill, &page, pin, &mut buf[done..done + n])?;
+                    end_fill(&fill, |c| {
+                        c.install_read(&fill, &page, pin, &mut buf[done..done + n])
+                    })?;
                 }
             }
         }
         done += n;
-        spins = 0;
     }
     bump_readahead(dev, &mut evict, &mut page);
     Ok(())
@@ -332,7 +382,6 @@ fn write(dev: &BlockRef, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let mut evict = page_vec()?;
     let mut page = page_vec()?;
     let mut done = 0usize;
-    let mut spins = 0u32;
     while done < buf.len() {
         let off = base.saturating_add(done as u64);
         let key = CacheKey::page(dev.id(), off);
@@ -345,7 +394,7 @@ fn write(dev: &BlockRef, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
         if let Some(fill) = plan {
             match fill.need {
                 FillNeed::None => {
-                    wait_busy(&fill, &mut spins)?;
+                    wait_busy(&fill);
                     continue;
                 }
                 FillNeed::Writeback => {
@@ -354,14 +403,17 @@ fn write(dev: &BlockRef, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
                 }
                 FillNeed::Read => {
                     fill_read(dev, &fill, &mut page)?;
-                    CACHE
-                        .lock()
-                        .install_write(&fill, &page, pin, &buf[done..done + n])?;
+                    // A slot taken back during the read installs nothing:
+                    // the write is planned again.
+                    if !end_fill(&fill, |c| {
+                        c.install_write(&fill, &page, pin, &buf[done..done + n])
+                    })? {
+                        continue;
+                    }
                 }
             }
         }
         done += n;
-        spins = 0;
     }
     Ok(())
 }
@@ -522,6 +574,41 @@ pub mod testing {
     pub(in crate::block) static OFF: AtomicU64 = AtomicU64::new(UNARMED);
     pub(in crate::block) static HELD: AtomicBool = AtomicBool::new(false);
     pub(in crate::block) static RELEASE: AtomicBool = AtomicBool::new(false);
+
+    /// Drop the cached page `key` without writing it back: a test that
+    /// flushed it first makes its next read a miss.
+    pub(in crate::block) fn forget(key: CacheKey) {
+        super::CACHE.lock().invalidate(key);
+    }
+
+    /// Times a reader has waited on a slot another read was filling.
+    pub(in crate::block) static FILL_WAITS: AtomicU64 = AtomicU64::new(0);
+    // The fill hold's state, as the writeback hold's above.
+    pub(in crate::block) static FILL_DEV: AtomicU64 = AtomicU64::new(0);
+    pub(in crate::block) static FILL_OFF: AtomicU64 = AtomicU64::new(UNARMED);
+    pub(in crate::block) static FILL_HELD: AtomicBool = AtomicBool::new(false);
+    pub(in crate::block) static FILL_RELEASE: AtomicBool = AtomicBool::new(false);
+
+    /// `fill_read`'s hold point, before the device read, with no lock
+    /// held: it holds one read's fill of the armed page until
+    /// `block::ktest`'s release, or [`SELF_RELEASE_NS`] at most.
+    pub(super) fn fill_hold_point(key: CacheKey) {
+        if FILL_DEV.load(Ordering::Acquire) != key.dev
+            || FILL_OFF
+                .compare_exchange(key.offset, UNARMED, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        FILL_HELD.store(true, Ordering::Release);
+        let t0 = time_init::now_ns();
+        while !FILL_RELEASE.load(Ordering::Acquire)
+            && time_init::now_ns().saturating_sub(t0) < SELF_RELEASE_NS
+        {
+            thread_init::sleep_ms(1);
+        }
+        FILL_HELD.store(false, Ordering::Release);
+    }
 
     /// `writeback_dev`'s hold point, reached with no lock held. It sleeps
     /// until `block::ktest::release`, or [`SELF_RELEASE_NS`] at most.

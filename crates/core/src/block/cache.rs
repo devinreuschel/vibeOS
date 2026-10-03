@@ -180,11 +180,15 @@ impl<const N: usize> Cache<N> {
         (self.dirty_count() as u64) * 100 > (N as u64) * (DIRTY_RATIO_PCT as u64)
     }
 
+    /// The slot that holds `key`, or that a read is filling with it: a
+    /// page has one slot, so a second reader of a page being filled waits
+    /// for that fill rather than filling a second copy, which a later read
+    /// could find stale after a write to the first.
     pub fn find(&self, key: CacheKey) -> Option<usize> {
         let mut i = 0usize;
         while i < N {
             let m = self.meta[i];
-            if m.flags & F_VALID != 0 && m.key == key {
+            if m.flags & (F_VALID | F_FILL) != 0 && m.key == key {
                 return Some(i);
             }
             i += 1;
@@ -383,6 +387,17 @@ impl<const N: usize> Cache<N> {
         }))
     }
 
+    /// Whether `fill`'s slot is still being filled with its key: an
+    /// [`Cache::invalidate`] or [`Cache::drop_dev`] during the device
+    /// read takes the slot back, and another key may have it by now.
+    fn filling_for(&self, fill: &Fill) -> bool {
+        self.meta
+            .get(fill.slot)
+            .is_some_and(|m| m.key == fill.key && m.flags & F_FILL != 0)
+    }
+
+    /// Cache `fill`'s page and copy `out` from it; a fill whose slot was
+    /// taken back only copies `out`.
     pub fn install_read(
         &mut self,
         fill: &Fill,
@@ -396,6 +411,10 @@ impl<const N: usize> Cache<N> {
         {
             return Err(BlockError::Inval);
         }
+        if !self.filling_for(fill) {
+            out.copy_from_slice(&page[off..off + out.len()]);
+            return Ok(());
+        }
         self.data[fill.slot].copy_from_slice(&page[..PAGE]);
         self.meta[fill.slot].key = fill.key;
         self.meta[fill.slot].flags = F_VALID | F_REF;
@@ -403,29 +422,37 @@ impl<const N: usize> Cache<N> {
         Ok(())
     }
 
+    /// Merge `src` into `fill`'s page and cache it dirty: `true`. `false`
+    /// when the slot was taken back during the read: nothing is written,
+    /// and the caller plans the write again.
     pub fn install_write(
         &mut self,
         fill: &Fill,
         page: &[u8],
         off: usize,
         src: &[u8],
-    ) -> Result<(), BlockError> {
+    ) -> Result<bool, BlockError> {
         if fill.slot >= N
             || page.len() < PAGE
             || off.checked_add(src.len()).map(|e| e > PAGE).unwrap_or(true)
         {
             return Err(BlockError::Inval);
         }
+        if !self.filling_for(fill) {
+            return Ok(false);
+        }
         self.data[fill.slot].copy_from_slice(&page[..PAGE]);
         self.data[fill.slot][off..off + src.len()].copy_from_slice(src);
         self.meta[fill.slot].key = fill.key;
         self.meta[fill.slot].flags = F_VALID | F_DIRTY | F_REF;
-        Ok(())
+        Ok(true)
     }
 
-    pub fn abort_fill(&mut self, slot: usize) {
-        if slot < N {
-            self.meta[slot].flags = 0;
+    /// Give `fill`'s slot back after a failed read, unless it was taken
+    /// back already, when it may hold another key's page or fill.
+    pub fn abort_fill(&mut self, fill: &Fill) {
+        if self.filling_for(fill) {
+            self.meta[fill.slot].flags = 0;
         }
     }
 
@@ -486,6 +513,12 @@ impl<const N: usize> Cache<N> {
 
     pub fn in_writeback(&self, slot: usize) -> bool {
         self.meta.get(slot).is_some_and(|m| m.flags & F_WB != 0)
+    }
+
+    /// Whether a read is filling `slot`: until its `install_*` or
+    /// [`Cache::abort_fill`].
+    pub fn filling(&self, slot: usize) -> bool {
+        self.meta.get(slot).is_some_and(|m| m.flags & F_FILL != 0)
     }
 
     /// Start one dirty page's writeback (into `dst`), else name a slot in
@@ -616,7 +649,7 @@ pub fn cached_read<B: Backend, const N: usize>(
                 }
                 FillNeed::Read => {
                     if let Err(e) = b.read(fill.key.offset, scratch) {
-                        c.abort_fill(fill.slot);
+                        c.abort_fill(&fill);
                         return Err(e);
                     }
                     c.stats.device_reads = c.stats.device_reads.saturating_add(1);
@@ -645,10 +678,10 @@ pub fn cached_read<B: Backend, const N: usize>(
                     if b.read(rk.offset, scratch).is_ok() {
                         c.stats.device_reads = c.stats.device_reads.saturating_add(1);
                         if c.install_read(&fill, scratch, 0, &mut one).is_err() {
-                            c.abort_fill(fill.slot);
+                            c.abort_fill(&fill);
                         }
                     } else {
-                        c.abort_fill(fill.slot);
+                        c.abort_fill(&fill);
                     }
                 }
             }
@@ -684,11 +717,13 @@ pub fn cached_write<B: Backend, const N: usize>(
                 }
                 FillNeed::Read => {
                     if let Err(e) = b.read(fill.key.offset, scratch) {
-                        c.abort_fill(fill.slot);
+                        c.abort_fill(&fill);
                         return Err(e);
                     }
                     c.stats.device_reads = c.stats.device_reads.saturating_add(1);
-                    c.install_write(&fill, scratch, pin, &buf[done..done + n])?;
+                    if !c.install_write(&fill, scratch, pin, &buf[done..done + n])? {
+                        continue;
+                    }
                 }
             }
         }
@@ -835,6 +870,32 @@ mod tests {
             *self.flushes.lock().unwrap() += 1;
             Ok(())
         }
+    }
+
+    /// A page has one slot while a read fills it: a second read of it
+    /// waits on that slot (`FillNeed::None`) rather than filling a second
+    /// copy, which could be found stale after a write to the first; and a
+    /// fill whose slot was taken back during its read caches nothing, and
+    /// its abort leaves the slot to whoever has it.
+    #[test]
+    fn a_filling_page_has_one_slot() {
+        let mut c = Cache::<1>::new();
+        let key = CacheKey::page(0, 0);
+        let (mut out, mut ev) = ([0u8; 8], [0u8; PAGE]);
+        let f1 = c.plan_read(key, 0, &mut out, &mut ev).unwrap().unwrap();
+        assert_eq!(f1.need, FillNeed::Read);
+        let f2 = c.plan_read(key, 0, &mut out, &mut ev).unwrap().unwrap();
+        assert_eq!((f2.need, f2.slot), (FillNeed::None, f1.slot));
+        c.invalidate(key);
+        c.install_read(&f1, &[7u8; PAGE], 0, &mut out).unwrap();
+        assert_eq!(out, [7u8; 8]);
+        assert!(c.find(key).is_none());
+        let other = CacheKey::page(0, PAGE as u64);
+        let f3 = c.plan_read(other, 0, &mut out, &mut ev).unwrap().unwrap();
+        assert_eq!(f3.slot, f1.slot, "the freed slot is reused");
+        c.abort_fill(&f1);
+        assert!(c.filling(f3.slot), "a stale abort leaves the new fill");
+        assert!(!c.install_write(&f1, &[0u8; PAGE], 0, &[1u8; 4]).unwrap());
     }
 
     #[test]

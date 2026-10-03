@@ -869,6 +869,99 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
     }
 }
 
+/// A ram0 page past the stamped partitions whose read the fill test holds.
+const FILL_LBA: u64 = 208;
+
+/// What each reader of the fill test read, and how it ended.
+static FILL_A: AtomicU64 = AtomicU64::new(FILL_PENDING);
+static FILL_B: AtomicU64 = AtomicU64::new(FILL_PENDING);
+const FILL_PENDING: u64 = u64::MAX;
+const FILL_ERR: u64 = u64::MAX - 1;
+
+/// Read `FILL_LBA`'s first word into `out`, or [`FILL_ERR`].
+fn read_fill_word(out: &AtomicU64) {
+    let mut buf = [0u8; 512];
+    let r = ram0()
+        .ok_or(())
+        .and_then(|d| d.read(FILL_LBA, &mut buf).map_err(|_| ()));
+    let w = r.map_or(FILL_ERR, |()| {
+        u64::from_le_bytes([
+            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+        ])
+    });
+    out.store(w, Ordering::Release);
+}
+
+fn fill_reader_a() {
+    read_fill_word(&FILL_A);
+}
+
+fn fill_reader_b() {
+    read_fill_word(&FILL_B);
+}
+
+/// A read of a page that another read is filling waits for that fill and
+/// gets its data: the page has one slot, whose queue the second reader
+/// sleeps on however long the device takes, where it once filled a second
+/// copy of the page. The first reader's fill is held until the second is
+/// seen waiting, or has ended.
+pub(crate) fn cache_read_waits_for_fill() -> Outcome {
+    if !cache_init::live() || !block_init::live() {
+        return Outcome::Fail("no ram0 cache");
+    }
+    let Some(ram) = ram0() else {
+        return Outcome::Fail("no ram0");
+    };
+    if ram.flush().is_err() {
+        return Outcome::Fail("pre-flush");
+    }
+    let key = vibeos::cache::CacheKey::page(ram.id(), FILL_LBA * 512);
+    testing::forget(key);
+    FILL_A.store(FILL_PENDING, Ordering::Release);
+    FILL_B.store(FILL_PENDING, Ordering::Release);
+    testing::FILL_RELEASE.store(false, Ordering::Release);
+    testing::FILL_HELD.store(false, Ordering::Release);
+    testing::FILL_DEV.store(ram.id(), Ordering::Release);
+    testing::FILL_OFF.store(key.offset, Ordering::Release);
+    let _a = spawn_thread("ktest-fill-a", fill_reader_a);
+    let held = crate::ktest::wait_for(|| testing::FILL_HELD.load(Ordering::Acquire));
+    let waits0 = testing::FILL_WAITS.load(Ordering::Acquire);
+    let _b = held.then(|| spawn_thread("ktest-fill-b", fill_reader_b));
+    let waited = held
+        && crate::ktest::sleep_for(|| {
+            testing::FILL_WAITS.load(Ordering::Acquire) != waits0
+                || FILL_B.load(Ordering::Acquire) != FILL_PENDING
+        });
+    testing::FILL_OFF.store(UNARMED_FILL, Ordering::Release);
+    testing::FILL_RELEASE.store(true, Ordering::Release);
+    let done = crate::ktest::sleep_for(|| {
+        FILL_A.load(Ordering::Acquire) != FILL_PENDING
+            && (!held || FILL_B.load(Ordering::Acquire) != FILL_PENDING)
+    });
+    let (a, b) = (
+        FILL_A.load(Ordering::Acquire),
+        FILL_B.load(Ordering::Acquire),
+    );
+    if !held {
+        return Outcome::Fail("the first read's fill was never held");
+    }
+    if !waited || !done {
+        return Outcome::Fail("a reader never ended");
+    }
+    if testing::FILL_WAITS.load(Ordering::Acquire) == waits0 {
+        return Outcome::Fail("the second read filled its own copy of a page being filled");
+    }
+    if b == FILL_ERR {
+        return Outcome::Fail("the second read failed while the first filled the page");
+    }
+    if a == FILL_ERR || a != b {
+        return crate::fail_fmt!("readers got {a:#x} and {b:#x}");
+    }
+    Outcome::Ok
+}
+
+const UNARMED_FILL: u64 = testing::UNARMED_OFF;
+
 /// A ram0 sector past the stamped MBR partitions (`part_init`); restored.
 const RAM0_FUA_LBA: u64 = 200;
 
@@ -1229,5 +1322,6 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(60_000),
     test("cache_flush_waits_writeback", cache_flush_waits_writeback),
+    test("cache_read_waits_for_fill", cache_read_waits_for_fill).deadline(60_000),
     test("block_fua_write", block_fua_write),
 ];
