@@ -695,11 +695,11 @@ pub(super) fn kern_readdir(
     // fixed and only grow (`KernNode::off`), so a child added or removed
     // during a scan moves no other one across it, as Linux's tmpfs
     // offsets keep a scan.
-    let mut best: Option<(u32, u32)> = None;
+    let mut best: Option<(u64, u32)> = None;
     let mut cur = n.child;
     while cur != 0 {
         let c = kern_get(k, inst, cur).ok_or(FsError::NotFound)?;
-        if u64::from(c.off) >= cookie && best.is_none_or(|(o, _)| c.off < o) {
+        if c.off >= cookie && best.is_none_or(|(o, _)| c.off < o) {
             best = Some((c.off, cur));
         }
         cur = c.next;
@@ -711,7 +711,7 @@ pub(super) fn kern_readdir(
     out.ino = ino;
     out.kind = c.kind.inode_kind();
     out.name = c.name;
-    Ok(Some(u64::from(off) + 1))
+    Ok(Some(off.checked_add(1).ok_or(FsError::Io)?))
 }
 
 pub(super) fn kern_readlink(

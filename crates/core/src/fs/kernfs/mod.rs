@@ -116,10 +116,12 @@ struct KernNode {
     child: u32,
     /// This node's place in its parent's listing, its `readdir` cookie,
     /// fixed while it stays there.
-    off: u32,
+    off: u64,
     /// The place a directory gives its next child; places only grow, so a
-    /// removal moves no other child across a scan's cookie.
-    next_off: u32,
+    /// removal moves no other child across a scan's cookie. 64 bits, as
+    /// Linux's tmpfs offsets are: at one place per create or rename it
+    /// never reaches its end, where children would share a place.
+    next_off: u64,
     kind: KernKind,
     mode: u16,
     nlink: u32,

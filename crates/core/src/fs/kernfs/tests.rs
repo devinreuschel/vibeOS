@@ -728,3 +728,27 @@ fn tmpfs_rename_moves_and_replaces_as_linux() {
     assert_eq!(read_at(&mut v, "/tmp/p", 0, 2), b"QQ");
     assert_eq!(v.rename(None, "/dev/null", "/dev/nul2"), Err(FsError::Perm));
 }
+
+/// A directory that has handed out the places a 32-bit counter holds
+/// still lists every child: a place is 64-bit, so a create or rename loop
+/// never runs the counter to its end, where children would share a place
+/// and a scan would stop after the first of them.
+#[test]
+fn tmpfs_readdir_lists_children_past_32_bit_places() {
+    let (mut v, k) = boot();
+    v.mkdir(None, "/tmp/d", 0o755).unwrap();
+    let d = v.stat(None, "/tmp/d").unwrap().ino;
+    k.fs.with(|s| {
+        let i = kern_idx(s, d).unwrap();
+        s.nodes[i].next_off = (u32::MAX - 1).into();
+    });
+    for i in 0..4 {
+        v.creat(None, &format!("/tmp/d/f{i}"), 0o644).unwrap();
+    }
+    for i in 0..4 {
+        let name = format!("f{i}");
+        assert!(has_name(&mut v, "/tmp/d", name.as_bytes()), "{name}");
+    }
+    let mut names = [[0u8; 16]; 32];
+    assert_eq!(readdir_names(&mut v, "/tmp/d", &mut names), 6);
+}
