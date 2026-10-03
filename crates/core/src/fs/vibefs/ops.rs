@@ -233,8 +233,12 @@ impl Vol {
         }
         // The destination goes as rename(2) has it: a directory only for
         // a directory and only when empty (an rmdir's checks), anything
-        // else only for a non-directory (an unlink's).
-        if self.find_dent(dst_dir, dst_name).is_ok() {
+        // else only for a non-directory (an unlink's). Two names of one
+        // file both stay, and nothing changes, as rename(2) has it too.
+        if let Ok(t) = self.find_dent(dst_dir, dst_name) {
+            if self.dents[t].ino == src_ino {
+                return Ok(());
+            }
             self.unlink(d, dst_dir, dst_name, self.inodes[ss].kind == KIND_DIR)?;
         }
         let mut nm = [0u8; MAX_NAME];

@@ -1,5 +1,6 @@
 //! Host tests of `Vol`'s file and name operations: truncate across the
-//! inline bytes, and inode numbers that run out.
+//! inline bytes, inode numbers that run out, and rename between two names
+//! of one file.
 
 use super::tests::{base_tree, fresh, fsck_of, new_file, slot_of, with_vol};
 use super::*;
@@ -128,6 +129,40 @@ fn inode_numbers_run_out_without_reuse() {
         );
         let a = v.lookup(d, ROOT_INO, b"a").unwrap().ino;
         assert_eq!(read_all(v, d, a, 4), b"AAAA");
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!(r.errors, 0, "{r:?}");
+}
+
+/// A rename between two names of one file, as an image with a hard link
+/// holds them, changes nothing: both names stay, with the link count 2,
+/// as rename(2) has it.
+#[test]
+fn rename_between_links_of_one_file_keeps_both() {
+    let mut b = fresh(64 * BLOCK);
+    let a = with_vol(&mut b, |v, d| {
+        let a = new_file(v, d, b"a");
+        let (e, s) = slot_of(v, d, ROOT_INO, b"a");
+        let mut link = v.dents[e];
+        link.nlen = 1;
+        link.name = [0; MAX_NAME];
+        link.name[0] = b'b';
+        let de = v.alloc_dent().unwrap();
+        v.dents[de] = link;
+        v.inodes[s].nlink = 2;
+        v.dirty = true;
+        v.sync(d).unwrap();
+        a
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!(r.errors, 0, "the planted link: {r:?}");
+    with_vol(&mut b, |v, d| {
+        v.rename(d, ROOT_INO, b"a", ROOT_INO, b"b").unwrap();
+        for n in [b"a", b"b"] {
+            assert_eq!(v.lookup(d, ROOT_INO, n).unwrap().ino, a);
+        }
+        assert_eq!(v.inodes[v.inode_slot(a).unwrap()].nlink, 2);
+        v.sync(d).unwrap();
     });
     let r = fsck_of(&mut b);
     assert_eq!(r.errors, 0, "{r:?}");
