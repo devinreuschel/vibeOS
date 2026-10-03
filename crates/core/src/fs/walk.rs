@@ -1003,26 +1003,41 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         self.with(|v| v.dentry_refs(at))
     }
 
-    /// Resolve `path`'s parent to a held directory and name its last
-    /// component, which is neither `.` nor `..`, and whether a `/`
+    /// Resolve `path`'s parent to a held directory, and name its last
+    /// component, what kind of component that is, and whether a `/`
     /// follows it: a name that must be a directory.
-    fn walk_parent<'p>(
+    fn walk_parent_last<'p>(
         &self,
         base: Option<WalkBase>,
         path: &'p [u8],
-    ) -> Result<(PathRef, &'p [u8], bool), FsError> {
+    ) -> Result<(PathRef, &'p [u8], bool, Last), FsError> {
         let (parent, name, dir_only) = split_basename(path)?;
-        if name_is_dot(name) || name_is_dotdot(name) {
-            return Err(FsError::Inval);
-        }
         let dir = self.walk(base, parent, true)?;
         match self.with(|v| v.kind_of(dir)) {
-            Ok(InodeKind::Dir) => Ok((dir, name, dir_only)),
+            Ok(InodeKind::Dir) => Ok((dir, name, dir_only, Last::of(name))),
             r => {
                 self.put_path(dir);
                 Err(r.err().unwrap_or(FsError::NotDir))
             }
         }
+    }
+
+    /// [`Self::walk_parent_last`] for a change that makes or removes a
+    /// name: a last component that is none (`.`, `..`, or the root) is
+    /// `odd`'s error for it, after the parent's walk, whose errors come
+    /// first, as Linux checks the type `filename_parentat` returns.
+    fn walk_parent<'p>(
+        &self,
+        base: Option<WalkBase>,
+        path: &'p [u8],
+        odd: impl FnOnce(Last) -> FsError,
+    ) -> Result<(PathRef, &'p [u8], bool), FsError> {
+        let (dir, name, dir_only, last) = self.walk_parent_last(base, path)?;
+        if last != Last::Name {
+            self.put_path(dir);
+            return Err(odd(last));
+        }
+        Ok((dir, name, dir_only))
     }
 
     /// `stat` (`follow`) or `lstat` of `path`.
@@ -1047,7 +1062,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         mode: u16,
         target: Option<&[u8]>,
     ) -> Result<(), FsError> {
-        let (dir, name, dir_only) = self.walk_parent(base, path)?;
+        // `.`, `..` or the root names no new entry: EEXIST, as Linux's
+        // `filename_create` gives it.
+        let (dir, name, dir_only) = self.walk_parent(base, path, |_| FsError::Exists)?;
         // A `/` after the new name is for a directory only.
         if dir_only && kind != InodeKind::Dir {
             self.put_path(dir);
@@ -1108,8 +1125,17 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         self.remove(base, path, true)
     }
 
+    /// Linux's errnos for a last component that is no name: unlink(2)
+    /// is EISDIR for each; rmdir(2) is EINVAL for `.`, ENOTEMPTY for `..`,
+    /// and EBUSY for the root.
     fn remove(&self, base: Option<WalkBase>, path: &[u8], rmdir: bool) -> Result<(), FsError> {
-        let (dir, name, dir_only) = self.walk_parent(base, path)?;
+        let odd = |last| match (rmdir, last) {
+            (false, _) => FsError::IsDir,
+            (true, Last::Dot) => FsError::Inval,
+            (true, Last::DotDot) => FsError::NotEmpty,
+            (true, Last::Name | Last::Root) => FsError::Busy,
+        };
+        let (dir, name, dir_only) = self.walk_parent(base, path, odd)?;
         let r = self.remove_in(dir, name, dir_only, rmdir);
         self.put_path(dir);
         r
@@ -1149,13 +1175,26 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         Err(FsError::NotFound)
     }
 
+    /// rename(2). A last component that is no name, on either side, is
+    /// EBUSY, after both parents' walks and the cross-filesystem EXDEV, as
+    /// Linux's `do_renameat2` orders them.
     pub fn rename(&self, base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
-        let (od, oname, o_dir) = self.walk_parent(base, old)?;
-        let r = self.walk_parent(base, new).and_then(|(nd, nname, n_dir)| {
-            let r = self.rename_in((od, oname), (nd, nname), o_dir || n_dir);
-            self.put_path(nd);
-            r
-        });
+        let (od, oname, o_dir, o_last) = self.walk_parent_last(base, old)?;
+        let r = self
+            .walk_parent_last(base, new)
+            .and_then(|(nd, nname, n_dir, n_last)| {
+                let r = if o_last != Last::Name || n_last != Last::Name {
+                    Err(if self.with(|v| v.sb_of(od.mount) != v.sb_of(nd.mount)) {
+                        FsError::XDev
+                    } else {
+                        FsError::Busy
+                    })
+                } else {
+                    self.rename_in((od, oname), (nd, nname), o_dir || n_dir)
+                };
+                self.put_path(nd);
+                r
+            });
         self.put_path(od);
         r
     }
@@ -1208,25 +1247,29 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
 
     /// Hard link `new` to the regular file `old` names.
     pub fn link(&self, base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
+        // `.`, `..` or the root as the new name: EEXIST, as for a create.
+        let exists = |_| FsError::Exists;
         let src = self.walk(base, old, true)?;
         let r = match self.with(|v| v.kind_of(src)) {
-            Ok(InodeKind::Reg) => self
-                .walk_parent(base, new)
-                .and_then(|(nd, name, dir_only)| {
-                    if dir_only {
+            Ok(InodeKind::Reg) => {
+                self.walk_parent(base, new, exists)
+                    .and_then(|(nd, name, dir_only)| {
+                        if dir_only {
+                            self.put_path(nd);
+                            return Err(FsError::NotDir);
+                        }
+                        (self.hooks.change_window)();
+                        let r = self
+                            .with(|v| v.link_begin(src, nd))
+                            .and_then(|(mut d, mut t)| {
+                                let res =
+                                    d.run2(&mut t, |o, cx, dir, tg| o.link(cx, dir, name, tg));
+                                self.step(|v| v.link_commit(nd, name, (d, t), res))
+                            });
                         self.put_path(nd);
-                        return Err(FsError::NotDir);
-                    }
-                    (self.hooks.change_window)();
-                    let r = self
-                        .with(|v| v.link_begin(src, nd))
-                        .and_then(|(mut d, mut t)| {
-                            let res = d.run2(&mut t, |o, cx, dir, tg| o.link(cx, dir, name, tg));
-                            self.step(|v| v.link_commit(nd, name, (d, t), res))
-                        });
-                    self.put_path(nd);
-                    r
-                }),
+                        r
+                    })
+            }
             Ok(_) => Err(FsError::Perm),
             Err(e) => Err(e),
         };
@@ -1281,9 +1324,36 @@ fn join_path(target: &[u8], rest: &[u8], out: &mut [u8; MAX_PATH]) -> Result<usi
     Ok(n)
 }
 
+/// What a path's last component is, as Linux's `LAST_*` types sort it:
+/// a name, `.`, `..`, or none at all, in a path of slashes (the root).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Last {
+    Name,
+    Dot,
+    DotDot,
+    Root,
+}
+
+impl Last {
+    /// The kind of last component `name` is, as [`split_basename`] gives
+    /// it: empty for the root.
+    fn of(name: &[u8]) -> Self {
+        if name.is_empty() {
+            Last::Root
+        } else if name_is_dot(name) {
+            Last::Dot
+        } else if name_is_dotdot(name) {
+            Last::DotDot
+        } else {
+            Last::Name
+        }
+    }
+}
+
 /// `path`'s parent, its last component, and whether a `/` follows that
-/// component (it names a directory). The empty path is `NotFound`, as
-/// path_resolution(7) gives it.
+/// component (it names a directory). A path of slashes has no last
+/// component: its parent is `/` and its name empty. The empty path is
+/// `NotFound`, as path_resolution(7) gives it.
 pub fn split_basename(path: &[u8]) -> Result<(&[u8], &[u8], bool), FsError> {
     if path.is_empty() {
         return Err(FsError::NotFound);
@@ -1293,7 +1363,7 @@ pub fn split_basename(path: &[u8]) -> Result<(&[u8], &[u8], bool), FsError> {
         end -= 1;
     }
     if end == 0 {
-        return Err(FsError::Inval);
+        return Ok((b"/", b"", false));
     }
     let dir_only = end < path.len();
     let p = &path[..end];

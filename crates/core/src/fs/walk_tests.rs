@@ -287,6 +287,60 @@ fn unlink_of_a_directory_is_eisdir() {
     assert_dcache_sound(&v);
 }
 
+/// A namespace change whose last component is `.`, `..`, or none (a path
+/// of slashes) gets Linux's errno for that change, after its parent's
+/// walk, whose errors come first: unlink(2) EISDIR; rmdir(2) EINVAL for
+/// `.`, ENOTEMPTY for `..` and EBUSY for the root; rename(2) EBUSY on
+/// either side, after EXDEV; mkdir(2), symlink(2) and link(2)'s new name
+/// EEXIST. Nothing changes.
+#[test]
+fn dot_dotdot_and_root_last_components_get_linux_errnos() {
+    use FsError::*;
+    let mut v = ram();
+    v.mkdir(None, "/d", 0o755).unwrap();
+    v.creat(None, "/f", 0o644).unwrap();
+    v.mkdir(None, "/m", 0o755).unwrap();
+    v.mount(None, "/m", ramfs()).unwrap();
+    for p in ["/d/.", "/d/..", "/", "//", ".", "/d/./"] {
+        assert_eq!(v.unlink(None, p), Err(IsDir), "unlink {p}");
+    }
+    for (p, e) in [
+        ("/d/.", Inval),
+        ("/d/..", NotEmpty),
+        ("/", Busy),
+        (".", Inval),
+        ("..", NotEmpty),
+    ] {
+        assert_eq!(v.rmdir(None, p), Err(e), "rmdir {p}");
+    }
+    for (a, b) in [
+        ("/d/.", "/e"),
+        ("/f", "/d/.."),
+        ("/", "/e"),
+        ("/f", "/"),
+        ("/d/..", "/d/."),
+    ] {
+        assert_eq!(v.rename(None, a, b), Err(Busy), "rename {a} {b}");
+    }
+    assert_eq!(v.rename(None, "/m/.", "/e"), Err(XDev));
+    for p in ["/d/.", "/d/..", "/", "/d/./"] {
+        assert_eq!(v.mkdir(None, p, 0o755), Err(Exists), "mkdir {p}");
+        assert_eq!(v.symlink(None, p, "f"), Err(Exists), "symlink {p}");
+        assert_eq!(v.link(None, "/f", p), Err(Exists), "link {p}");
+    }
+    // The parent's walk comes first.
+    assert_eq!(v.unlink(None, "/none/."), Err(NotFound));
+    assert_eq!(v.rmdir(None, "/f/.."), Err(NotDir));
+    assert_eq!(v.mkdir(None, "/none/..", 0o755), Err(NotFound));
+    assert_eq!(v.rename(None, "/none/.", "/e"), Err(NotFound));
+    assert_eq!(v.rename(None, "/d/.", "/none/e"), Err(NotFound));
+    assert_eq!(v.stat(None, "/d").unwrap().kind, InodeKind::Dir);
+    assert_eq!(v.stat(None, "/f").unwrap().kind, InodeKind::Reg);
+    assert_eq!(v.stat(None, "/e").unwrap_err(), NotFound);
+    v.umount(None, "/m").unwrap();
+    assert_dcache_sound(&v);
+}
+
 #[test]
 fn walk_trailing_slash() {
     let mut v = ram();
