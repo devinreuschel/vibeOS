@@ -339,8 +339,15 @@ stripped the same way.
 checkout paths of different lengths, each with its own `CARGO_HOME` and `RUSTUP_HOME`, a copy of
 `limine/` and no `CARGO_TARGET_DIR`, runs `./setup.sh` and `make isos` in each, and fails unless every
 `build/kernels/*.elf`, `build/*.iso` and `build/initrd.fat` matches byte for byte and holds none of the
-checkouts, `$HOME`, or either `CARGO_HOME` or `RUSTUP_HOME`. `REPRO_ARGS=--share-rustup` reuses the
-caller's toolchain for a local run; `REPRO_ARGS=--scan-only` only scans this checkout's `build/`.
+checkouts, `$HOME`, or either `CARGO_HOME` or `RUSTUP_HOME`. One build's toolchain and `target/` are
+on disk at a time: before the second build starts, the first one's `target/`, `CARGO_HOME` and
+`RUSTUP_HOME` are deleted, leaving its outputs. Each `RUSTUP_HOME` gets the pinned toolchain under
+rustup's `minimal` profile, with `rust-toolchain.toml`'s components and targets but no `rust-docs`
+(0.9 GB), and `./setup.sh` runs with `VIBEOS_SKIP_MSRV=1`, so no MSRV toolchain (0.7 GB), which only
+`make check` uses. On a GitHub runner the builds go under `$RUNNER_TEMP`, on its disk, not in its
+quota-limited `/tmp`, where the first scheduled run failed with `Disk quota exceeded`.
+`REPRO_ARGS=--share-rustup` reuses the caller's toolchain for a local run; `REPRO_ARGS=--keep` keeps
+both builds, the first one unpruned; `REPRO_ARGS=--scan-only` only scans this checkout's `build/`.
 
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP
 rather than discovering AP bugs only in CI. Full flag set in [section 8.4](TESTING.md#84-qemu-flags).
