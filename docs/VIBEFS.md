@@ -601,6 +601,12 @@ device's trace carries every write and flush the guest sent.
 ## 13. What v1 will not do
 
 - Data journaling or WAL
+- Keep an unlinked file while a descriptor holds it open: v1 frees the
+  inode and its blocks at the unlink that drops its last name, and that
+  descriptor's reads and writes then fail with `ENOENT`. Inode numbers are
+  never reused (`next_ino`), so it reaches no other file. §15's Orphans row
+  keeps such a file until its last close and frees it after a crash
+  (ROADMAP §14.8's v2 inode-model box)
 - Compression, encryption, RAID
 - Block size other than 4096
 - Inode extents overflow to an extent tree (4 extents is the cap; files

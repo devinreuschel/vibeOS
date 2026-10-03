@@ -69,6 +69,13 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Changed
 
+- Partitions are numbered by their place on disk, as Linux numbers them: an MBR's logical
+  partitions start at `p5` (ram0's are now `ram0p5` and `ram0p6`), and a GPT entry is its index + 1.
+- A GPT is read only behind a protective MBR, as Linux reads it; a plain MBR wins over stale GPT headers.
+- A FAT file stops at 4 GiB as on Linux: a write is cut short there, and a truncate or seek past it fails.
+- `execve` opens its file before it reads `argv`, and `getdents64` of a non-directory is `ENOTDIR`;
+  `open`, `unlink`, `rename`, `read`, `write` and `lseek` return Linux's errnos in Linux's order.
+- A virtio-blk disk with a block size that is not a power of two from 512 to 4096 is refused at probe.
 - Roadmap restructured to 40 phases in eight eras, all on free infrastructure: [Phase 10 Consolidation](docs/ROADMAP.md#phase-10-consolidation)
   and [Phase 11 Portability](docs/ROADMAP.md#phase-11-portability) added; old phases 10–20 are now 12–22.
 - CI: `check` job (`make check` + `vibeos-core` llvm-cov floor 87%) runs before the QEMU ladder.
@@ -152,6 +159,17 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- `fsync`-style flushes can no longer be held off by a writer that keeps dirtying pages, and a
+  page being read in has one cache slot, so a later read cannot see a stale second copy.
+- Partition tables on 4 KiB-sector disks are read; a FAT mount there fails with `EINVAL`, not `EIO`.
+- tmpfs supports `rename`; rename replaces its target as rename(2) does on every filesystem.
+- A fatal signal ends a stopped process, `wait4` no longer sleeps through a pending `SIGKILL`, and
+  signal default actions follow signal(7).
+- A scan that unlinks each entry it reads sees them all on ramfs and tmpfs; `..` climbs out of
+  mounts stacked on one directory; unlink and rename no longer race an inode's eviction.
+- FAT counts free clusters at mount instead of trusting FSInfo; vibefs stamps inodes with the wall
+  clock and a refused unlink keeps the name.
+- Every CPU zeroes the SYSENTER MSRs, and a failed `ioremap` gives its window back.
 - `/dev`, `/proc`, `/sys` and `/tmp` are no longer capped at 128 nodes between them: kernfs's
   node table grows on the heap, and `ENOMEM` when it cannot.
 - `execve` of a program on `/tmp` stays within its thread's kernel stack budget; tmpfs's cache
@@ -176,8 +194,6 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   teardown refuses a root any CPU or thread still names.
 - A thread's kernel stack is freed only by the CPU that ran it, after it has switched away, and an
   exit burst no longer panics the kernel.
-- Two descriptors on one FAT file no longer leak or cross-link clusters, an unlinked FAT file keeps
-  its clusters until its last close, and no close takes another process's reference.
 - Two descriptors on one FAT file no longer leak or cross-link clusters, an unlinked FAT file keeps
   its clusters until its last close, and no close takes another process's reference.
 - A case-only FAT rename no longer frees the file's clusters, and moving a directory into its own
