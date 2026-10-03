@@ -194,10 +194,12 @@ all: user
 
 ifneq ($(VIBEOS_PREBUILT),1)
 # The build is $(CARGO_SHIP)'s, so trim-paths keeps host paths out of the
-# programs as out of the kernel (ROADMAP §10.2).
+# programs as out of the kernel (ROADMAP §10.2). Its --config args go before
+# `build`: cargo replaces the --config list given before the subcommand with
+# one given after it, which would drop CARGO_SHIP's trim-paths.
 $(USER_STAMP): $(USER_SRCS) user/Cargo.toml user/mem/Cargo.toml Cargo.toml Cargo.lock rust-toolchain.toml scripts/check_user_elf.py Makefile
 	$(CARGO) clippy -p vibeos-user -p vibeos-user-mem --target $(USER_TRIPLE) $(CARGO_FLAGS) $(USER_CARGO_CONFIG) -- -D warnings
-	$(CARGO_SHIP) build -p vibeos-user --target $(USER_TRIPLE) $(CARGO_FLAGS) $(USER_CARGO_CONFIG)
+	$(CARGO_SHIP) $(USER_CARGO_CONFIG) build -p vibeos-user --target $(USER_TRIPLE) $(CARGO_FLAGS)
 	python3 scripts/check_user_elf.py $(addprefix $(USER_ELF_DIR)/,$(USER_BIN_NAMES))
 	mkdir -p $(USER_OUT)
 	$(foreach b,$(USER_BIN_NAMES),$(OBJCOPY) --strip-all $(USER_ELF_DIR)/$(b) $(USER_OUT)/$(b) &&) true
