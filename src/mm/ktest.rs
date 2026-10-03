@@ -1023,10 +1023,13 @@ fn window_next() -> u64 {
     paging_init::with_pt(|pt| pt.window().next())
 }
 
-/// A failed `ioremap` gives its window VA back and leaves none of its leaves
-/// mapped. A leaf planted at the second page of the next reservation makes
-/// its `map_range` map the first page and then refuse; the planted leaf,
-/// which the call did not map, stays.
+/// A failed `ioremap` leaves none of its leaves mapped, and the window
+/// hands out no VA that would refuse the next call the same way. A leaf
+/// planted at the second page of the next reservation makes its
+/// `map_range` map the first page and then refuse; the planted leaf, which
+/// the call did not map, stays, and the cursor stays past it, so a second
+/// `ioremap` beside the planted leaf succeeds. When the cursor went back
+/// onto the planted leaf, every later `ioremap` that reached it failed.
 pub(crate) fn ioremap_failure_returns_va() -> Outcome {
     let Some(frame) = alloc_frame() else {
         return Outcome::Fail("frame alloc");
@@ -1048,6 +1051,9 @@ pub(crate) fn ioremap_failure_returns_va() -> Outcome {
     let got = unsafe { paging_init::ioremap(PhysAddr(0xFEE0_0000), 2 * PAGE_SIZE) };
     let after = window_next();
     let first = paging_init::translate(VirtAddr(before));
+    // The same two pages again, with the planted leaf still in place.
+    // SAFETY: as the call above; established here.
+    let again = unsafe { paging_init::ioremap(PhysAddr(0xFEE0_0000), 2 * PAGE_SIZE) };
     let kept = paging_init::translate(planted).map(|(pa, _, _)| pa);
     // SAFETY: `unmap_4k`'s contract; nothing but this test reached
     // `planted`, and it does not touch it again; established here.
@@ -1056,14 +1062,21 @@ pub(crate) fn ioremap_failure_returns_va() -> Outcome {
     if got.is_some() {
         return Outcome::Fail("ioremap over a mapped leaf succeeded");
     }
-    if after != before {
-        return Outcome::Fail("window VA not given back");
-    }
     if first.is_some() {
         return Outcome::Fail("first page still mapped");
     }
     if kept != Some(frame) || unplanted != Some(frame) {
         return Outcome::Fail("planted leaf not kept");
+    }
+    let Some(va) = again else {
+        return Outcome::Fail("the next ioremap failed on the same leaf");
+    };
+    if after <= planted.as_u64() || va.as_u64() < after {
+        return crate::fail_fmt!(
+            "cursor {after:#x} after the failure, next VA {:#x}, planted leaf at {:#x}",
+            va.as_u64(),
+            planted.as_u64()
+        );
     }
     Outcome::Ok
 }

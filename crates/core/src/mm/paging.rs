@@ -833,7 +833,8 @@ impl<A: PageTable> Mapper<A> {
 
 /// Reservation over the ioremap window (DESIGN §4.1: `0xFFFF_E000_0000_0000`,
 /// 256 MiB). Bump allocator: a mapping is never freed, and a failed map
-/// gives its reservation back ([`IoremapWindow::unreserve`]). Devices call `ioremap` for MMIO
+/// that left nothing in its VA gives its reservation back
+/// ([`IoremapWindow::unreserve`]). Devices call `ioremap` for MMIO
 /// that should not be reached through the physmap (typically because it
 /// belongs to a device whose physical address is far above `map_end`).
 pub const IOREMAP_BASE: u64 = 0xFFFF_E000_0000_0000;
