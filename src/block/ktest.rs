@@ -306,11 +306,11 @@ pub(crate) fn test_block_part_mbr() -> Outcome {
     let Some(d) = blockdev_init::lookup(b"ram0p1") else {
         return Outcome::Fail("no ram0p1");
     };
-    let Some(d2) = blockdev_init::lookup(b"ram0p2") else {
-        return Outcome::Fail("no ram0p2");
+    let Some(d2) = blockdev_init::lookup(b"ram0p5") else {
+        return Outcome::Fail("no ram0p5");
     };
-    let Some(d3) = blockdev_init::lookup(b"ram0p3") else {
-        return Outcome::Fail("no ram0p3");
+    let Some(d3) = blockdev_init::lookup(b"ram0p6") else {
+        return Outcome::Fail("no ram0p6");
     };
     for p in [&d, &d2, &d3] {
         if p.parent().map(BlockRef::id) != Some(disk.id()) || p.part().is_none() {

@@ -128,7 +128,7 @@ class TestMarkerShape(unittest.TestCase):
         )
         self.assertTrue(m.matches(K("vibeOS: block: ram0p1 32 sectors")))
         self.assertFalse(m.matches(K("vibeOS: block: ram0 256 sectors")))
-        self.assertFalse(m.matches(K("vibeOS: block: ram0p2 24 sectors")))
+        self.assertFalse(m.matches(K("vibeOS: block: ram0p5 24 sectors")))
 
     def test_block_vda_marker_needs_name_and_sectors(self) -> None:
         m = Marker(
@@ -2162,7 +2162,7 @@ class TestLapicMode(unittest.TestCase):
         self.assertIn("pci_devices", names)
         self.assertIn("block_ramdisk", names)
         self.assertIn("block_ram0p1", names)
-        self.assertIn("block_ram0p2", names)
+        self.assertIn("block_ram0p5", names)
         self.assertIn("shell_ready", names)
         smp_i = names.index("smp_done")
         con_i = names.index("console_ok")

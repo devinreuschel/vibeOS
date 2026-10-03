@@ -1004,13 +1004,13 @@ name = "block_ram0p1"
 when = ["!panic_test", "!hang_test"]
 
 [[marker]]
-text = "vibeOS: block: ram0p2 <n> sectors"
+text = "vibeOS: block: ram0p5 <n> sectors"
 kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.3"
 order = 300
-name = "block_ram0p2"
+name = "block_ram0p5"
 when = ["!panic_test", "!hang_test"]
 
 # §7.4 Cache
