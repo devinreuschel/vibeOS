@@ -35,6 +35,7 @@ mod idt;
 mod ipi;
 mod msr;
 mod seam;
+mod timer;
 mod uaccess;
 
 pub(crate) use idt::test_idt_set_handler_refuses_fixed;
@@ -365,32 +366,6 @@ pub(crate) fn test_lapic_timer_mode() -> Outcome {
         }
         (false, TimerMode::TscDeadline) => Outcome::Fail("tsc-deadline without cpuid"),
     }
-}
-
-/// Timer interrupts [`test_lapic_timer_rearm`] waits for on CPU 0.
-const REARM_FIRES: u64 = 20;
-
-fn lapic_fires() -> u64 {
-    apic_init::TIMER_FIRES.load(Ordering::Relaxed)
-}
-
-/// The timer keeps firing across many ticks: CPU 0 takes [`REARM_FIRES`]
-/// more timer interrupts, each of which comes only if the tick before it
-/// left the timer armed (`rearm_deadline` in TSC-deadline mode, the
-/// periodic reload otherwise, the PIT's in `hpet=off`). The wait is bounded
-/// by the run's deadline, not by TSC time, which under TCG on a loaded host
-/// runs ahead of the interrupts the guest is delivered (ROADMAP §10.2).
-pub(crate) fn test_lapic_timer_rearm() -> Outcome {
-    let (count, what): (fn() -> u64, &str) = match apic_init::timer_mode() {
-        TimerMode::Pit => (time_init::pit_fires, "pit"),
-        TimerMode::TscDeadline | TimerMode::Periodic => (lapic_fires, "lapic"),
-    };
-    let t0 = count();
-    if crate::ktest::wait_for(|| count().wrapping_sub(t0) >= REARM_FIRES) {
-        return Outcome::Ok;
-    }
-    let n = count().wrapping_sub(t0);
-    crate::fail_fmt!("rearm stalled: {n} of {REARM_FIRES} {what} fires")
 }
 
 pub(crate) fn test_ioapic_pit_gsi_masked() -> Outcome {
@@ -1479,7 +1454,7 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("df_on_ist", test_df_on_ist),
     test("lapic_timer_mode", test_lapic_timer_mode),
-    test("lapic_timer_rearm", test_lapic_timer_rearm),
+    test("lapic_timer_rearm", timer::test_lapic_timer_rearm),
     test("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
     test("irq_guard_nest", test_irq_guard_nest),
     test("cpu_hardening", test_cpu_hardening),

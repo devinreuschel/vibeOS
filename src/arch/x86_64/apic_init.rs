@@ -649,11 +649,14 @@ fn rearm_deadline() {
     }
     // LVT already in TSC-deadline mode. SDM fence is LVT → deadline only.
     let k = time_init::tsc_per_ms();
-    let d = tsc_deadline_value(time_init::read_tsc(), k);
+    let now = time_init::read_tsc();
+    let d = tsc_deadline_value(now, k);
     // SAFETY: `TSC_DEADLINE` is set only once `prove` found the CPUID bit
     // and put the LVT in TSC-deadline mode, so the MSR exists and the write
     // only arms the timer; established at `arch::x86_64::apic_init::prove`.
     unsafe { x86::wrmsr(IA32_TSC_DEADLINE, d) };
+    #[cfg(feature = "kernel_tests")]
+    testing::rearmed(d.wrapping_sub(now));
 }
 
 pub fn on_timer_irq() {
@@ -663,6 +666,8 @@ pub fn on_timer_irq() {
     if cpu_id == 0 {
         TIMER_FIRES.fetch_add(1, Ordering::Relaxed);
         time_init::on_hw_tick();
+        #[cfg(feature = "kernel_tests")]
+        testing::stamp_fire();
     }
     eoi();
     rearm_deadline();
@@ -892,7 +897,109 @@ pub fn arm_ap() {
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(feature = "kernel_tests")]
 pub(crate) mod testing {
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    use vibeos::apic::{TIMER_DIV_16, lvt_timer_periodic};
+    use vibeos::vectors;
+
+    use super::{LAPIC_LVT_TIMER, LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_VA, lapic_read};
+    use crate::time_init;
+
+    /// CPU 0 LAPIC timer fires whose TSC `lapic_timer_rearm` stamps: 20
+    /// intervals.
+    pub(crate) const FIRE_STAMPS: usize = 21;
+    static FIRE_STAMP: [AtomicU64; FIRE_STAMPS] = [const { AtomicU64::new(0) }; FIRE_STAMPS];
+    /// Stamps taken since [`arm_fire_stamps`]; `usize::MAX` while unarmed.
+    static FIRE_STAMP_N: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// Stamp the TSC at each of CPU 0's next [`FIRE_STAMPS`] timer fires.
+    pub(crate) fn arm_fire_stamps() {
+        // Release: the handler sees the arming.
+        FIRE_STAMP_N.store(0, Ordering::Release);
+    }
+
+    /// Stamps taken so far.
+    pub(crate) fn fire_stamps() -> usize {
+        FIRE_STAMP_N.load(Ordering::Acquire)
+    }
+
+    /// Disarm and copy the stamps out: how many there were.
+    pub(crate) fn take_fire_stamps(out: &mut [u64; FIRE_STAMPS]) -> usize {
+        let n = FIRE_STAMP_N.swap(usize::MAX, Ordering::AcqRel);
+        for (o, s) in out.iter_mut().zip(FIRE_STAMP.iter()) {
+            *o = s.load(Ordering::Relaxed);
+        }
+        n
+    }
+
+    /// CPU 0's timer handler, with IF off: one writer.
+    pub(super) fn stamp_fire() {
+        let i = FIRE_STAMP_N.load(Ordering::Relaxed);
+        if let Some(slot) = FIRE_STAMP.get(i) {
+            slot.store(time_init::read_tsc(), Ordering::Relaxed);
+            // Release: publishes the stamp with the count.
+            FIRE_STAMP_N.store(i + 1, Ordering::Release);
+        }
+    }
+
+    /// CPU 0's TSC-deadline rearms, and those that did not arm the next
+    /// fire one tick (`tsc_per_ms`) ahead, with the last such distance.
+    static REARMS: AtomicU64 = AtomicU64::new(0);
+    static REARMS_OFF: AtomicU64 = AtomicU64::new(0);
+    static REARM_OFF_LAST: AtomicU64 = AtomicU64::new(0);
+
+    /// `rearm_deadline` armed the next fire `ahead` TSC cycles from now.
+    pub(super) fn rearmed(ahead: u64) {
+        if crate::per_cpu_init::try_current().map(|c| c.cpu_id) != Some(0) {
+            return;
+        }
+        if ahead != time_init::tsc_per_ms() {
+            REARM_OFF_LAST.store(ahead, Ordering::Relaxed);
+            REARMS_OFF.fetch_add(1, Ordering::Relaxed);
+        }
+        REARMS.fetch_add(1, Ordering::Release);
+    }
+
+    /// CPU 0's rearms, the rearms not one tick ahead, and the last such
+    /// distance in TSC cycles.
+    pub(crate) fn rearms() -> (u64, u64, u64) {
+        (
+            REARMS.load(Ordering::Acquire),
+            REARMS_OFF.load(Ordering::Relaxed),
+            REARM_OFF_LAST.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The periodic timer as this CPU's LAPIC holds it, `(LVT, initial
+    /// count, divide)`, against what the kernel programs for one tick:
+    /// `None` when they match. `None` too while the LAPIC is unmapped.
+    pub(crate) fn periodic_mismatch() -> Option<([u32; 3], [u32; 3])> {
+        let va = LAPIC_VA.load(Ordering::Relaxed);
+        if va == 0 {
+            return None;
+        }
+        let per_ms = super::with_state(|st| st.ticks_per_ms);
+        let icr = u32::try_from(per_ms).unwrap_or(u32::MAX).max(1);
+        let want = [
+            lvt_timer_periodic(vectors::LAPIC_TIMER, false),
+            icr,
+            TIMER_DIV_16,
+        ];
+        let _irq = crate::arch::current::InterruptGuard::enter();
+        // SAFETY: invariant I49, established at
+        // `arch::x86_64::apic_init::enable_lapic`: a nonzero `LAPIC_VA` is
+        // its return, published by `publish_isr`.
+        // The LVT's delivery-status bit (12) is the LAPIC's, not the
+        // kernel's.
+        let got = unsafe {
+            [
+                lapic_read(va, LAPIC_LVT_TIMER) & !(1 << 12),
+                lapic_read(va, LAPIC_TIMER_ICR),
+                lapic_read(va, LAPIC_TIMER_DCR),
+            ]
+        };
+        (got != want).then_some((got, want))
+    }
 
     /// [`super::write_icr`] calls that found IF on between the two writes.
     static ICR_IF_ON: AtomicU64 = AtomicU64::new(0);
