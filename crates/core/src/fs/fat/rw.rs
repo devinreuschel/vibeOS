@@ -537,9 +537,9 @@ impl FatVol {
     }
 
     /// Grow the chain at `*first` to hold `new` bytes. `NoSpace` before
-    /// any allocation when the free count is short; a later error frees
-    /// the clusters this call allocated and restores the old end of chain
-    /// and `*first`, since mount trusts FSInfo's count, which can lie.
+    /// any allocation when the free count is short; an error part way
+    /// through, such as a failed read or write, frees the clusters this
+    /// call allocated and restores the old end of chain and `*first`.
     fn ensure_size<D: Disk>(
         &mut self,
         d: &mut D,

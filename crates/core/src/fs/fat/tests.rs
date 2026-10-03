@@ -954,8 +954,8 @@ fn extend_failure_rolls_back_chain() {
         let o_first = o.first_clu;
         let free = v.count_free(d).unwrap();
         assert_eq!(v.free, free);
-        // A lying FSInfo count: the pre-check passes and the allocation
-        // runs out part way.
+        // A free count above the FAT's: the pre-check passes and the
+        // allocation runs out part way, as any error part way would.
         v.free += 20;
         let cb = v.info.clus_bytes() as u64;
         let far = (u64::from(free) + 5) * cb;
