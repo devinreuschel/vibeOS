@@ -257,14 +257,14 @@ the row does not allow it, and needs `EFAULT` from each.
 | 35 | 101 | `nanosleep` | 2 | `const struct __kernel_timespec *rqtp`, `struct __kernel_timespec *rmtp` | `rqtp`: in, 16 bytes, before anything else; `rmtp`: not read (ROADMAP §13.8) | `EFAULT`, `EINVAL` | `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1 |
 | 39 | 172 | `getpid` | 0 | — | — | — | `0` if the caller is not a process |
 | 57 | — | `fork` | 0 | — | — | `EAGAIN`, `ENOMEM` (`fork_oom`) | full address-space copy; the child returns 0 |
-| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `EFAULT`, `ENAMETOOLONG`, `ENOENT`, `ENOTDIR`, `EACCES`, `ELOOP`, `ENFILE`, `E2BIG`, `ENOEXEC`, `ENOMEM` | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
+| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname` resolves to a regular file, as Linux opens it first; `envp`: C string vector, may be NULL, after `argv` | `EFAULT`, `ENAMETOOLONG`, `ENOENT`, `ENOTDIR`, `EACCES`, `ELOOP`, `ENFILE`, `E2BIG`, `ENOEXEC`, `ENOMEM` | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
 | 60 | 93 | `exit` | 1 | `int status` | — | — | the low 8 bits of `status` |
 | 61 | 260 | `wait4` | 4 | `pid_t pid`, `int *wstatus`, `int options`, `struct rusage *rusage` | `wstatus`: out, 4 bytes, may be NULL, after a child is reaped; `rusage`: not read (ROADMAP §13.7) | `ECHILD`, `EFAULT` | — |
 | 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | `EINVAL`, `ESRCH` | default actions only |
 | 72 | 25 | `fcntl` | 3 | `unsigned int fd`, `unsigned int cmd`, `unsigned long arg` | — | `EBADF`, `EINVAL` | `F_GETFD` and `F_SETFD` (`FD_CLOEXEC`) only |
 | 110 | 173 | `getppid` | 0 | — | — | — | — |
 | 169 | 142 | `reboot` | 4 | `int magic1`, `int magic2`, `unsigned int cmd`, `void *arg` | `arg`: C string, for `RESTART2` only, after the uid, magic and command checks | `EINVAL`, `EFAULT` | power off and restart; see SYSCALL.md §3.1 |
-| 217 | 61 | `getdents64` | 3 | `unsigned int fd`, `struct linux_dirent64 *dirent`, `unsigned int count` | `dirent`: out, `count` bytes, after the `fd` lookup and the first record's fit | `EBADF`, `ENOTDIR`, `ESPIPE`, `EINVAL`, `EFAULT` | at most 512 bytes a call; see SYSCALL.md §3.1 |
+| 217 | 61 | `getdents64` | 3 | `unsigned int fd`, `struct linux_dirent64 *dirent`, `unsigned int count` | `dirent`: out, `count` bytes, after the `fd` lookup and the first record's fit | `EBADF`, `ENOTDIR`, `EINVAL`, `EFAULT` | at most 512 bytes a call; see SYSCALL.md §3.1 |
 | 500 | — | `psinfo` | 2 | `char *buf`, `size_t len` | `buf`: out, `len` bytes, before anything else | `EFAULT` | vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`) |
 
 <!-- gen_syscalls: end syscall-table -->
@@ -397,9 +397,9 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   position is read and stored in two steps, so an overlapping call on an
   open file shared through `fork` or `dup` can lose an update until
   ROADMAP §13.1 (F055); entries added or removed between calls may repeat
-  or be skipped, which POSIX leaves unspecified. The console descriptors a
-  process starts with are `ENOTDIR`; `/dev/console` or `/dev/tty` opened by
-  path is `ESPIPE`, as its `lseek` is
+  or be skipped, which POSIX leaves unspecified. Any descriptor that is not
+  a directory is `ENOTDIR`, the console and `/dev/console` included, as
+  Linux refuses a file with no directory operations
 - `fstat`: x86_64's 144-byte `struct stat` for any descriptor, the console
   a character device (`S_IFCHR | 0620`). `st_dev` and `st_rdev` are 0 until
   ROADMAP §23.3, and `st_uid` and `st_gid` 0 until ROADMAP §13.9; the times

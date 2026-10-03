@@ -28,6 +28,10 @@
 //!     `EFAULT` for a kernel-half buffer: the buffer, then the directory.
 //! 11. `lseek` on the console with an unknown `whence` returns `EINVAL`:
 //!     `whence` before the descriptor's kind.
+//! 12. `execve` opens its file before it reads `argv`: with a kernel-half
+//!     `argv`, a missing path returns `ENOENT` and a directory `EACCES`.
+//! 13. `getdents64` of `/dev/console` opened by path returns `ENOTDIR`, as
+//!     any descriptor that is not a directory does.
 
 #![no_std]
 #![no_main]
@@ -58,7 +62,7 @@ const KERNEL_PTR: usize = 0xFFFF_8000_0000_1000;
 const WHENCE_BAD: u32 = 99;
 
 fn main(_env: &Env) -> i32 {
-    let cases: [fn() -> bool; 11] = [
+    let cases: [fn() -> bool; 13] = [
         read_wronly_ebadf,
         write_rdonly_ebadf,
         dup_full_emfile,
@@ -70,6 +74,8 @@ fn main(_env: &Env) -> i32 {
         access_before_buffer_and_count,
         read_dir_eisdir_after_buffer,
         lseek_whence_before_espipe,
+        execve_path_before_argv,
+        getdents_device_enotdir,
     ];
     for (i, case) in cases.iter().enumerate() {
         if !case() {
@@ -253,6 +259,25 @@ fn read_dir_eisdir_after_buffer() -> bool {
 /// Case 11: fd 1 is the console.
 fn lseek_whence_before_espipe() -> bool {
     sys::lseek(1, 0, WHENCE_BAD) == Err(Errno::EINVAL)
+}
+
+/// Case 12.
+fn execve_path_before_argv() -> bool {
+    let argv = KERNEL_PTR as *const *const u8;
+    sys::execve(c"/errno_none".as_ptr().cast(), argv, core::ptr::null()) == Err(Errno::ENOENT)
+        && sys::execve(c"/tmp".as_ptr().cast(), argv, core::ptr::null()) == Err(Errno::EACCES)
+}
+
+/// Case 13.
+fn getdents_device_enotdir() -> bool {
+    let Ok(fd) = sys::open(c"/dev/console".as_ptr().cast(), sys::O_RDONLY, 0) else {
+        return false;
+    };
+    let mut b = [0u8; 512];
+    // SAFETY: `b` is a local 512-byte buffer no other reference covers;
+    // established here.
+    let r = unsafe { sys::getdents64(fd as u32, b.as_mut_ptr().cast(), 512) };
+    close(fd) && r == Err(Errno::ENOTDIR)
 }
 
 /// Close `fd`; whether it closed.

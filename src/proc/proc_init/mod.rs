@@ -466,7 +466,7 @@ pub(crate) fn spawn_elf(
 ) -> Result<u32, LoadError> {
     let args = user_init::exec_args(argv, envp)?;
     start_loaded(
-        user_init::load_path(None, path, &args)?,
+        user_init::load_exec(user_init::open_exec(None, path)?, &args)?,
         prefer,
         ppid,
         intern_name(path),

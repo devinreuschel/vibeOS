@@ -268,12 +268,7 @@ const PAIRS: &[Pair] = &[
         Errno::EBADF,
         Run(|| Ok(dents_into(99, 512))),
     ),
-    pair(
-        Sys::Getdents64,
-        Errno::ENOTDIR,
-        Run(|| Ok(dents_into(1, 512))),
-    ),
-    pair(Sys::Getdents64, Errno::ESPIPE, Run(getdents64_espipe)),
+    pair(Sys::Getdents64, Errno::ENOTDIR, Run(getdents64_enotdir)),
     pair(Sys::Getdents64, Errno::EINVAL, Run(getdents64_einval)),
     pair(Sys::Getdents64, Errno::EFAULT, Run(getdents64_efault)),
     pair(Sys::Psinfo, Errno::EFAULT, Run(psinfo_efault)),
@@ -1119,8 +1114,8 @@ pub(super) const REBOOT_MAGIC2: i32 = 0x2812_1969;
 /// `LINUX_REBOOT_CMD_RESTART2`.
 pub(super) const REBOOT_CMD_RESTART2: u32 = 0xa1b2_c3d4;
 
-/// `/dev/console` opened by path.
-fn getdents64_espipe() -> Result<Result<usize, Errno>, &'static str> {
+/// `/dev/console` opened by path: not a directory, as fd 1 is not.
+fn getdents64_enotdir() -> Result<Result<usize, Errno>, &'static str> {
     let fd = open(c"/dev/console", sys::O_RDONLY).map_err(|_| "open /dev/console")?;
     let r = dents_into(fd, 512);
     close(fd);

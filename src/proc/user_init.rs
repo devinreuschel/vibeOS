@@ -383,58 +383,78 @@ pub fn exec_args(argv: &[&[u8]], envp: &[&[u8]]) -> Result<ExecArgs, LoadError> 
     Ok(args)
 }
 
-/// Build a new address space from the file at `path`, resolved from
-/// `base`, with `args` on its initial stack. Caller installs it only after this returns.
-pub fn load_path(
-    base: Option<WalkBase>,
-    path: &[u8],
-    args: &ExecArgs,
-) -> Result<Loaded, LoadError> {
+/// An executable `execve` opened before it copies its arguments, as
+/// Linux's `do_execveat_common` opens the file first: a regular file,
+/// held open until [`load_exec`] or [`drop_exec`].
+pub struct ExecFile {
+    img: FileImage,
+    /// Buddy free frames when the open began (`proc::ktest::record`).
     #[cfg(feature = "kernel_tests")]
-    let before = crate::proc::ktest::free_now();
-    let r = load_path_inner(base, path, args);
-    #[cfg(feature = "kernel_tests")]
-    crate::proc::ktest::record(before, r.is_ok());
-    r
+    before: usize,
 }
 
-fn load_path_inner(
-    base: Option<WalkBase>,
-    path: &[u8],
-    args: &ExecArgs,
-) -> Result<Loaded, LoadError> {
+/// Open `path` from `base` to execute it: its walk's errors, then
+/// `EACCES` for a file that is not regular (execve(2)).
+pub fn open_exec(base: Option<WalkBase>, path: &[u8]) -> Result<ExecFile, LoadError> {
+    #[cfg(feature = "kernel_tests")]
+    let before = crate::proc::ktest::free_now();
     let file =
         file_init::open_at(base, path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
-    let mut src = FileImage {
-        file,
-        len: 0,
-        pos: 0,
+    let st = match file_init::stat(&file) {
+        Ok(st) if st.kind == InodeKind::Reg => st,
+        r => {
+            let e = r.map_or_else(LoadError::Fs, |_| LoadError::NotRegular);
+            return Err(match file_init::close(file) {
+                Ok(()) => e,
+                Err(c) => LoadError::Fs(c),
+            });
+        }
     };
-    let r = load_file(&mut src, args);
-    match file_init::close(src.file) {
+    Ok(ExecFile {
+        img: FileImage {
+            file,
+            len: st.size,
+            pos: 0,
+        },
+        #[cfg(feature = "kernel_tests")]
+        before,
+    })
+}
+
+/// Close an [`ExecFile`] that will not be loaded, because copying the
+/// arguments failed: that error is the call's, so a failed close is
+/// counted on a rate-limited line (DESIGN §2.5).
+pub fn drop_exec(f: ExecFile) {
+    if let Err(e) = file_init::close(f.img.file) {
+        crate::klog_ratelimited!(
+            1000,
+            vibeos::log::Level::Warn,
+            "vibeOS: exec: close failed: {}",
+            e.as_str()
+        );
+    }
+}
+
+/// Load the opened file `f` with `args`, then close it. An empty file is
+/// `ENOEXEC`.
+pub fn load_exec(f: ExecFile, args: &ExecArgs) -> Result<Loaded, LoadError> {
+    let mut src = f.img;
+    let r = if src.len == 0 {
+        Err(LoadError::Empty)
+    } else {
+        load_from(&mut src, args)
+    };
+    let r = match file_init::close(src.file) {
         Ok(()) => r,
         Err(e) => {
             // A loaded space's last `users` put tears it down.
             drop(r);
             Err(LoadError::Fs(e))
         }
-    }
-}
-
-/// Load the open file `src`, mapping each segment from it. A file that is
-/// not regular is `EACCES`, as execve(2) gives it, and an empty one
-/// `ENOEXEC`.
-#[inline(never)]
-fn load_file(src: &mut FileImage, args: &ExecArgs) -> Result<Loaded, LoadError> {
-    let st = file_init::stat(&src.file).map_err(LoadError::Fs)?;
-    if st.kind != InodeKind::Reg {
-        return Err(LoadError::NotRegular);
-    }
-    if st.size == 0 {
-        return Err(LoadError::Empty);
-    }
-    src.len = st.size;
-    load_from(src, args)
+    };
+    #[cfg(feature = "kernel_tests")]
+    crate::proc::ktest::record(f.before, r.is_ok());
+    r
 }
 
 /// Build a new address space from the ELF image `elf`, with `argv` on its

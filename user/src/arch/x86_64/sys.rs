@@ -770,7 +770,7 @@ pub const CALLS: &[Call] = &[
     },
     Call {
         sys: Sys::Getdents64,
-        errors: &[Errno::EBADF, Errno::ENOTDIR, Errno::ESPIPE, Errno::EINVAL, Errno::EFAULT],
+        errors: &[Errno::EBADF, Errno::ENOTDIR, Errno::EINVAL, Errno::EFAULT],
         ktest: &[],
         ptrs: &[
             Ptr { arg: 1, name: "dirent", kind: PtrKind::Buf, out: true, nullable: false, len_from: Some(2), size: 0 },

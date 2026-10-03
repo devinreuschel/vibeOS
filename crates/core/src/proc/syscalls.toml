@@ -218,7 +218,7 @@ x86_64 = 59
 aarch64 = 221
 args = [
   { name = "pathname", type = "const char *", ptr = "cstr", when = "before anything else" },
-  { name = "argv", type = "const char *const *", ptr = "strvec", null = true, when = "after `pathname`" },
+  { name = "argv", type = "const char *const *", ptr = "strvec", null = true, when = "after `pathname` resolves to a regular file, as Linux opens it first" },
   { name = "envp", type = "const char *const *", ptr = "strvec", null = true, when = "after `argv`" },
 ]
 errors = [
@@ -303,7 +303,7 @@ args = [
   { name = "dirent", type = "struct linux_dirent64 *", ptr = "buf", len = "count", dir = "out", when = "after the `fd` lookup and the first record's fit" },
   { name = "count", type = "unsigned int" },
 ]
-errors = ["EBADF", "ENOTDIR", "ESPIPE", "EINVAL", "EFAULT"]
+errors = ["EBADF", "ENOTDIR", "EINVAL", "EFAULT"]
 note = "at most 512 bytes a call; see SYSCALL.md §3.1"
 
 [[syscall]]
