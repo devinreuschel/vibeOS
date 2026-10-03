@@ -1,7 +1,9 @@
 name: ci-history
 
 # ROADMAP §10.9, DESIGN §8.6 (CI history): one JSON record per completed `ci`,
-# `release`, `nightly` or `smp-stress` run on the orphan `ci-history` branch,
+# `release`, `nightly`, `smp-stress` or `macos` run on the orphan `ci-history`
+# branch, every scheduled workflow but this one, so `ci_history.py --budget`
+# measures each of their lanes (ROADMAP §10.1),
 # and a daily backfill, completeness check and 500 MB rotation. GitHub runs `workflow_run` and
 # `schedule` from this file as it is on the default branch, with GITHUB_SHA
 # at that branch's last commit, so the tool fetched below is `main`'s, never
@@ -10,7 +12,7 @@ name: ci-history
 # the run id from the event file and the rest from the API.
 on:
   workflow_run:
-    workflows: [ci, nightly, release, smp-stress]
+    workflows: [ci, macos, nightly, release, smp-stress]
     types: [completed]
   schedule:
     - cron: "23 4 * * *"

@@ -7,6 +7,8 @@ configuration, no system configuration, and `HOME` in the temp dir.
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -345,11 +347,17 @@ class TestEvent(unittest.TestCase):
             ),
             ("nightly", 555),
         )
+        self.assertEqual(
+            ci_history.load_event(
+                self.event(name="macos", path=".github/workflows/macos.yml"), REPO
+            ),
+            ("macos", 555),
+        )
 
     def test_event_rejects_unlisted_workflow(self) -> None:
         with self.assertRaises(NotRecorded):
             ci_history.load_event(
-                self.event(name="macos", path=".github/workflows/macos.yml"), REPO
+                self.event(name="fuzz", path=".github/workflows/fuzz.yml"), REPO
             )
         with self.assertRaises(NotRecorded):
             ci_history.load_event(self.event(), "someone/else")
@@ -417,6 +425,25 @@ class TestArtifacts(unittest.TestCase):
         rec, _ = self.build([self.art(4, "results-nomatch", other)], {self.url(4): other},
                             jobs=two_jobs()[:1])
         self.assertEqual(len(rec["jobs"][0]["results"]), 1)
+
+    def test_workflow_prefixed_tokens(self) -> None:
+        # macos.yml uploads results-x86_64-macos-<job> from its check and test jobs
+        def record(workflow: str) -> dict[str, Any]:
+            jobs = [ci_history.job_entry({"name": n}) for n in ("check", "test")]
+            return {"workflow": workflow, "jobs": jobs}
+
+        arts = ci_history.Artifacts(results={"x86_64-macos-check": [{"tier": "c"}],
+                                             "x86_64-macos-test": [{"tier": "t"}]})
+        rec = record("macos")
+        ci_history.attach_artifacts(rec, arts)
+        self.assertEqual([j["results"] for j in rec["jobs"]], [[{"tier": "c"}], [{"tier": "t"}]])
+        self.assertEqual(arts.warnings, [])
+        # the prefix is the run's own workflow key, not any key
+        arts = ci_history.Artifacts(results={"x86_64-macos-check": [{"tier": "c"}]})
+        rec = record("nightly")
+        ci_history.attach_artifacts(rec, arts)
+        self.assertEqual([j["results"] for j in rec["jobs"]], [[], []])
+        self.assertEqual(len(arts.warnings), 1)
 
     def test_runner_parsed_per_job(self) -> None:
         good = zip_bytes({"runner.json": runner_file()})
@@ -563,6 +590,58 @@ class TestWriter(GitIsolated):
         parents = self.gitrun("rev-list", "--parents", "-n1", "ci-history",
                               cwd=self.remote).split()
         self.assertEqual(parents[1:], [root])
+
+
+class TestFallbackCredentials(GitIsolated):
+    """The job-token header `open` gives a clone in CI when git has no helper.
+    The token is a fake; no test prints one."""
+
+    TOKEN = "fake-token-not-a-secret"
+
+    def headers(self, workdir: Path) -> list[str]:
+        r = subprocess.run(
+            ["git", "-C", str(workdir), "config", "--local", "--get-all",
+             ci_history.EXTRAHEADER],
+            capture_output=True, text=True, check=False,
+        )
+        return r.stdout.splitlines()
+
+    def open_in_ci(self, name: str) -> list[list[str]]:
+        """Open the history in `name` as a CI job would, returning every
+        subprocess argv the open ran."""
+        argvs: list[list[str]] = []
+        real_run = subprocess.run
+
+        def spy(argv: Any, *a: Any, **kw: Any) -> Any:
+            argvs.append([str(x) for x in argv])
+            return real_run(argv, *a, **kw)
+
+        with (
+            mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GH_TOKEN": self.TOKEN}),
+            mock.patch.object(subprocess, "run", spy),
+        ):
+            self.history(name)
+        return argvs
+
+    def test_reopened_work_tree_holds_one_header(self) -> None:
+        # `make ci-budget` opens one work tree for --budget, then for --tiers:
+        # two headers made GitHub answer `Duplicate header: "Authorization"`.
+        self.history("seed").commit_files({"runs/ci/1.json": b"{}\n"}, "ci run 1")
+        argvs = self.open_in_ci("w") + self.open_in_ci("w")
+        cred = base64.b64encode(f"x-access-token:{self.TOKEN}".encode()).decode()
+        got = self.headers(self.tmp / "w")
+        self.assertEqual(len(got), 1, "one Authorization header after two opens")
+        self.assertTrue(got[0] == f"AUTHORIZATION: basic {cred}", "the job token's header")
+        # never on argv
+        for argv in argvs:
+            self.assertFalse(any(self.TOKEN in x or cred in x for x in argv), argv[:4])
+
+    def test_no_header_outside_ci_or_with_a_helper(self) -> None:
+        self.history("plain")
+        self.assertEqual(self.headers(self.tmp / "plain"), [])
+        self.gitrun("config", "--global", "credential.helper", "store", cwd=self.tmp)
+        self.open_in_ci("helper")
+        self.assertEqual(self.headers(self.tmp / "helper"), [])
 
 
 NOW = datetime(2026, 4, 15, tzinfo=UTC)
@@ -1162,6 +1241,7 @@ class TestWorkflow(unittest.TestCase):
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 W1 = datetime(2026, 9, 21, tzinfo=UTC)  # the latest complete week
 W4 = datetime(2026, 8, 31, tzinfo=UTC)  # the oldest
+WEEK = timedelta(days=7)
 LANES = ci_history.Lanes(
     job_lane={
         ("nightly", "kvm"): "sched-lane-0",
@@ -1251,12 +1331,39 @@ class Budget(unittest.TestCase):
 
     def test_prints_job_hours_and_waits(self) -> None:
         rec = sched_rec("nightly", "kvm", W1 + timedelta(days=1), 2, wait_h=1)
+        older = sched_rec("nightly", "kvm", W4 - timedelta(days=7), 1, run_id=2)
         with mock.patch("builtins.print") as p:
-            ci_history.budget([rec], LANES, [], NOW)
+            ci_history.budget([older, rec], LANES, [], NOW)
         text = "\n".join(str(c.args[0]) for c in p.call_args_list)
         self.assertIn("workflow nightly: 0.0, 0.0, 0.0, 2.0 job-hours per week", text)
         self.assertIn("sched-lane-0 (nightly): busy 0%, 0%, 0%, 1%; wait median 1.0 h, max 1.0 h",
                       text)
+        self.assertNotIn("not measured", text)
+
+    def test_weeks_before_the_history_not_measured(self) -> None:
+        # The history's first scheduled job is in the week of W2: W4 and W3
+        # ended before it, so they are named and not measured.
+        rec = sched_rec("nightly", "kvm", W1 - timedelta(days=6), 2)
+        with mock.patch("builtins.print") as p:
+            self.assertEqual(ci_history.budget([rec], LANES, [], NOW), [])
+        text = "\n".join(str(c.args[0]) for c in p.call_args_list)
+        self.assertIn("budget: weeks from 2026-09-14, 2026-09-21 (Monday", text)
+        self.assertIn("weeks from 2026-08-31, 2026-09-07 end before the history's first "
+                      "scheduled job (2026-09-15), not measured", text)
+        self.assertIn("workflow nightly: 2.0, 0.0 job-hours per week", text)
+        # a busy lane in a measured week still fails
+        self.assertEqual(len(self.run_budget(busy(("nightly", "kvm"), 0.61, W1 - WEEK))), 1)
+
+    def test_history_younger_than_a_complete_week(self) -> None:
+        # Every record is in the current week: no week can be measured yet.
+        rec = sched_rec("nightly", "kvm", W1 + WEEK + timedelta(hours=9), 1)
+        with self.assertRaises(ci_history.NoHistory) as ctx:
+            self.run_budget([rec])
+        self.assertIn("first scheduled job (2026-09-28 09:00 UTC)", str(ctx.exception))
+        self.assertIn("the first ends 2026-10-05 00:00 UTC", str(ctx.exception))
+        # a release window over the one week the history covers is skipped, as before
+        window = (W1, W1 + timedelta(days=1))
+        self.assertEqual(self.run_budget(busy(("nightly", "kvm"), 0.90), [window]), [])
 
     def test_missing_times_raise(self) -> None:
         rec = sched_rec("nightly", "kvm", W1, 1)
@@ -1352,10 +1459,76 @@ class ReleaseWindows(unittest.TestCase):
 
 class BudgetCli(unittest.TestCase):
     def test_tree_lanes(self) -> None:
+        # Every scheduled workflow but ci-history.yml is recorded, so every
+        # lane they run in is measured (lane 9 is macos.yml's).
         lanes, keys = ci_history.scheduled_lanes()
-        self.assertEqual(sorted(keys), ["nightly", "smp-stress"])
+        self.assertEqual(sorted(keys), ["macos", "nightly", "smp-stress"])
         self.assertEqual(lanes.lane_of("nightly", "kvm"), "sched-lane-0")
         self.assertEqual(lanes.reserved["sched-lane-0"], "nightly")
+        self.assertEqual(lanes.lane_of("macos", "check"), "sched-lane-9")
+        self.assertEqual(lanes.lane_of("macos", "test"), "sched-lane-9")
+
+    def test_unrecorded_scheduled_workflow_fails(self) -> None:
+        # A scheduled workflow the recorder does not list never gets a
+        # record, so --budget would never measure its lanes.
+        unlisted = {k: v for k, v in ci_history.WORKFLOWS.items() if k != "macos"}
+        with mock.patch.object(ci_history, "WORKFLOWS", unlisted):
+            with self.assertRaises(HistoryError) as ctx:
+                ci_history.scheduled_lanes()
+        self.assertIn(".github/workflows/macos.yml", str(ctx.exception))
+
+    def budget_cli(self, by_workflow: dict[str, list[dict[str, Any]]]) -> tuple[int, str]:
+        """`--budget` at `NOW` over these records; its exit status and stderr."""
+
+        class FixedNow(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> FixedNow:
+                return cls.fromtimestamp(NOW.timestamp(), tz)
+
+        history = mock.Mock()
+        history.records.side_effect = lambda key=None: by_workflow.get(key, [])
+        err = io.StringIO()
+        with (
+            mock.patch.object(ci_history, "HistoryRepo", return_value=history),
+            mock.patch.object(ci_history, "datetime", FixedNow),
+            mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(err),
+        ):
+            rc = ci_history.main(["--budget", "--remote", "x"])
+        return rc, err.getvalue()
+
+    def first_night(self) -> dict[str, list[dict[str, Any]]]:
+        return {"nightly": [sched_rec("nightly", "kvm", W1 + timedelta(days=1), 1)]}
+
+    def test_each_scheduled_workflow_needs_a_record(self) -> None:
+        # nightly's first run is recorded; smp-stress (weekly) and macos have
+        # not completed one yet.
+        rc, err = self.budget_cli(self.first_night())
+        self.assertEqual(rc, 2)
+        self.assertIn("no recorded run of macos, smp-stress.", err)
+        self.assertIn("passes once each has a recorded run", err)
+        # a tombstone is no recorded run
+        recs = {**self.first_night(),
+                "smp-stress": [sched_rec("smp-stress", "stress", W1, 1)],
+                "macos": [{"workflow": "macos", "tombstone": "gone", "jobs": []}]}
+        rc, err = self.budget_cli(recs)
+        self.assertEqual(rc, 2)
+        self.assertIn("no recorded run of macos.", err)
+
+    def test_passes_once_each_has_a_recorded_run(self) -> None:
+        recs = {**self.first_night(),
+                "smp-stress": [sched_rec("smp-stress", "stress", W1, 1)],
+                "macos": [sched_rec("macos", "check", W1 + timedelta(days=2), 1)]}
+        self.assertEqual(self.budget_cli(recs), (0, ""))
+        # but not while every record is in the current, incomplete week
+        young = {k: [{**r, "jobs": [{**j, "created": iso(W1 + WEEK), "started": iso(W1 + WEEK),
+                                     "completed": iso(W1 + WEEK + timedelta(hours=1))}
+                                    for j in r["jobs"]]} for r in v]
+                 for k, v in recs.items()}
+        rc, err = self.budget_cli(young)
+        self.assertEqual(rc, 2)
+        self.assertIn("no complete week since the history's first scheduled job", err)
 
     def test_missing_times_exit_2(self) -> None:
         rec = sched_rec("nightly", "kvm", W1, 1)
