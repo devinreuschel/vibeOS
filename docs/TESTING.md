@@ -257,6 +257,22 @@ After its first boot, and whatever `VIBEOS_KTEST` holds, `make test-kernel` also
 `-machine pc,hpet=off` and `-cpu <model>,-tsc-deadline`, limited by `vibeos.ktest=` to the opt-in
 tests that need the PIT tick (`pit_tick_rate`), and requires `lapic_timer ok (pit)` and an `ok` line
 for each (`run_ktest.hpet_off_boot`).
+`vibeos.ktest_range=<from>..<to>` limits a boot to one stretch of the registry: the rows from the
+one named `from` up to, not including, the one named `to`, in run order, an empty side meaning the
+first row or past the last, and a row runs when it is in the stretch and the selection selects it.
+A bound that names no row, or a `to` that does not come after `from`, prints `bad option` and
+fails the boot. Stretches that share their bounds (`..a`, `a..b`, `b..`) put every row, one added
+later included, in exactly one (`vibeos::ktest::Range`, host test
+`ranges_sharing_bounds_partition_the_rows`). `make test-kernel`, `make test-kernel-smp4` and
+`make test-lapic-fallback` run the whole registry in one boot and then every proof boot; their
+shards, `make <variant>-<k>`, run the same in pieces, one per-push tier each (§8.6):
+`tests/harness/ktest_shards.py` gives each shard a stretch for its main boot, whose persist reboot
+reruns that stretch, or some of the proof boots (`run_ktest.PROOF_BOOTS`), in the variant's
+configuration (the Makefile's `KTEST_ENV`). `tests/harness/test_ktest_shards.py` fails when a
+variant's stretches do not hand on their bounds from the first row past the last, when a bound is
+no registered row, when a proof boot the variant runs is in no shard or in two, when a shard's
+recipe differs from its variant's but for `--shard`, or when `make test` runs a variant instead of
+its shards.
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -965,7 +981,8 @@ runs `make test-unit` and the hostlib tests natively, §11.4's aarch64 switch ro
 targets with `VIBEOS_PREBUILT=1`, which defines no ISO or host-tool rule, so a tier builds nothing
 and a missing file fails with `No rule to make target`: the Makefile stays the one definition of
 each tier. Tiers are grouped to about 40 s of QEMU each, a group over 60 s split at target
-boundaries, and each is its own check name, `tier (<arch>, <tier>)`, so a red pull request names
+boundaries and a target over 60 s into shards, Makefile targets of their own (the in-guest targets,
+§8.2), and each is its own check name, `tier (<arch>, <tier>)`, so a red pull request names
 the failing tier; the table below holds the grouping, and `scripts/check_workflows.py` fails when it
 and the matrix differ (`rule_budget_doc`), and when the `tier` job lacks `needs: [check, build]`,
 `fail-fast: false` or `VIBEOS_PREBUILT=1`, or a `make test` prerequisite is in no tier or in two, the
@@ -987,15 +1004,31 @@ Tiers, with each group's summed QEMU step time in the last green integration-bra
 the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash`'s figure
 includes its `cargo test` of the host tools, which with `vibefs-crash-plants` are the tiers that need
 the toolchain; `forensics`'s and `vibefs-crash-plants`'s are a local TCG run's (`vibefs-crash-plants`:
-two planted rounds and a control round), until a `ci` run measures them:
+two planted rounds and a control round), until a `ci` run measures them. The in-guest shards'
+figures are each `make` target's wall time in a local TCG run at `63dffb5` with this split (4 CPUs,
+one QEMU at a time), until a `ci` run measures them:
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
 | x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest`, `test-qmp` | 40 |
 | x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-init-fault`, `test-e2e-strace`, `test-e2e-panic-stop`, `test-e2e-power` | 40 |
-| x86_64 | in-guest-1 | `test-kernel` | 64 |
-| x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
-| x86_64 | in-guest-3 | `test-lapic-fallback` | 50 |
+| x86_64 | kernel-1 | `test-kernel-1` | 39 |
+| x86_64 | kernel-2 | `test-kernel-2` | 36 |
+| x86_64 | kernel-3 | `test-kernel-3` | 35 |
+| x86_64 | kernel-4 | `test-kernel-4` | 37 |
+| x86_64 | kernel-5 | `test-kernel-5` | 36 |
+| x86_64 | kernel-6 | `test-kernel-6` | 24 |
+| x86_64 | kernel-smp4-1 | `test-kernel-smp4-1` | 39 |
+| x86_64 | kernel-smp4-2 | `test-kernel-smp4-2` | 40 |
+| x86_64 | kernel-smp4-3 | `test-kernel-smp4-3` | 38 |
+| x86_64 | kernel-smp4-4 | `test-kernel-smp4-4` | 40 |
+| x86_64 | kernel-smp4-5 | `test-kernel-smp4-5` | 41 |
+| x86_64 | lapic-fallback-1 | `test-lapic-fallback-1` | 40 |
+| x86_64 | lapic-fallback-2 | `test-lapic-fallback-2` | 35 |
+| x86_64 | lapic-fallback-3 | `test-lapic-fallback-3` | 34 |
+| x86_64 | lapic-fallback-4 | `test-lapic-fallback-4` | 37 |
+| x86_64 | lapic-fallback-5 | `test-lapic-fallback-5` | 23 |
+| x86_64 | lapic-fallback-6 | `test-lapic-fallback-6` | 23 |
 | x86_64 | vibefs-crash | `test-vibefs-crash` | 47 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
@@ -1003,8 +1036,25 @@ two planted rounds and a control round), until a `ci` run measures them:
 `test-e2e-init-fault` boots twice (`init_fault`, then `init_no_sh`, about 10 s more under TCG), so
 e2e-2's figure, measured before the second boot, is low by that much.
 
-`test-unit` and `test-harness` run inside `make check`, in the `check` job. The in-guest tiers
-each pass 40 s alone and cannot split below a target.
+`test-unit` and `test-harness` run inside `make check`, in the `check` job. The in-guest targets
+passed 60 s alone: in the `ci` push runs on `main` that `ci_history.py --tiers` read before the
+split, `test-kernel` (tier `in-guest-1`) took a median 236.5 s, `test-kernel-smp4` (`in-guest-2`)
+183 s and `test-lapic-fallback` (`in-guest-3`) 202 s. A local TCG run of each at `63dffb5` timed
+its boots: the main boot 66 to 71 s and the persist reboot, which reran the whole registry, 65 to
+68 s; each proof boot 11 to 14 s, nearly all of it the cost every boot pays before its first test
+(QEMU, the boot, and `ktest::quiesce_frames`' warm-up, about 10 s under TCG). So each target splits
+into shards (`tests/harness/ktest_shards.py`, §8.2), one tier each with one QEMU at a time, of
+about 40 s or less: three for its main boot's registry, split at `user_single_step` (`spawn_sentinel`
+at `-smp 4`, whose sched and irq groups run longer) and `block_vblk_rw`, the last stretch, the
+drivers and fs groups that use `vda`, with the persist reboot that reruns it; and two or three for
+its proof boots, two or three boots each. That is 17 in-guest tiers where there were 3, so a push
+runs 25 jobs (`check`, `build`, 22 tiers, `ci-pass`) and a pull request 26 (`ticks`); the tiers
+start together once `check` and `build` pass, and beyond the 10 concurrent jobs a push keeps
+(above) they wait for a runner, at about a minute each. Two more main boots per variant pay the
+per-boot cost again, about 26 s, while the persist reboot reruns only the last stretch, about 55 s
+less, so the 17 shards ran 597 s locally against the three targets' 663 s. Per push the persist
+reboot reruns that stretch, the rows on the disk it rereads; `make test-kernel` and the others,
+which the scheduled jobs and the gate run, still rerun the whole registry there.
 
 | Job | When | What |
 |---|---|---|
@@ -1258,9 +1308,23 @@ CPU model, and the section also records the `ci-history` branch's packed size (R
 |---|---|---|
 | `tier (x86_64, e2e-1)` | pending (make ci-budget after merge) | - |
 | `tier (x86_64, e2e-2)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, in-guest-1)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, in-guest-2)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, in-guest-3)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-1)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-2)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-3)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-4)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-5)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-6)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-1)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-2)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-3)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-4)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-5)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-1)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-2)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-3)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-4)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-5)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-6)` | pending (make ci-budget after merge) | - |
 | `tier (x86_64, vibefs-crash)` | pending (make ci-budget after merge) | - |
 | `tier (x86_64, vibefs-crash-plants)` | pending (make ci-budget after merge) | - |
 

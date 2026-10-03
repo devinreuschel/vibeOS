@@ -278,6 +278,13 @@ impl Buddy {
         }
     }
 
+    /// Free blocks, every order counted: how many `alloc` calls, highest
+    /// order first, take every free frame, since such a drain splits no
+    /// block.
+    pub fn free_blocks(&self) -> usize {
+        self.counts.iter().fold(0usize, |n, &c| n.saturating_add(c))
+    }
+
     /// Contribute a [start, end) physical range to the free lists.
     /// Splits into maximally-aligned, maximally-sized buddy blocks; the
     /// whole `MAX_ORDER` blocks among them become one run, which writes
@@ -957,6 +964,31 @@ mod tests {
         p.buddy.free(a);
         let s2 = p.buddy.stats();
         assert_eq!(s2, s0, "state after alloc+free must equal initial");
+    }
+
+    #[test]
+    fn free_blocks_bounds_a_highest_order_first_drain() {
+        // 1000 frames: blocks of order 9, 8, 7, 6, 5 and 3 (512 + 256 +
+        // 128 + 64 + 32 + 8).
+        let mut p = Pool::new(1000);
+        assert_eq!(p.buddy.free_blocks(), 6);
+        let a = p.buddy.alloc(0).unwrap();
+        // The order-3 block split into order 2, 1 and 0 blocks.
+        assert_eq!(p.buddy.free_blocks(), 8);
+        let mut held = Vec::new();
+        let want = p.buddy.free_blocks();
+        for order in (0..=MAX_ORDER as u8).rev() {
+            while let Some(f) = p.buddy.alloc(order) {
+                held.push(f);
+            }
+        }
+        assert_eq!(held.len(), want);
+        assert_eq!(p.buddy.free_blocks(), 0);
+        held.push(a);
+        for f in held {
+            p.buddy.free(f);
+        }
+        assert_eq!(p.buddy.free_blocks(), 6);
     }
 
     #[test]

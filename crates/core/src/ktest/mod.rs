@@ -8,7 +8,8 @@
 //! not opt-in is selected. An opt-in row runs only when an item without a
 //! wildcard equals its name. `vibeos.ktest_repeat=` runs the selection 1
 //! to [`REPEAT_MAX`] times, pass by pass, and a `once` row runs in the
-//! first pass only.
+//! first pass only. `vibeos.ktest_range=` limits the rows to one stretch of
+//! the registry ([`Range`]).
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
@@ -129,6 +130,85 @@ pub fn parse_repeat(value: Option<&[u8]>) -> Result<u32, BadOption> {
         Ok(n)
     } else {
         Err(BadOption)
+    }
+}
+
+/// `vibeos.ktest_range=<from>..<to>`: the rows from the one named `from` up
+/// to, not including, the one named `to`, in run order. An empty `from`
+/// starts at the first row and an empty `to` runs past the last, so ranges
+/// that share their bounds, `..a`, `a..b`, `b..`, split the registry with
+/// every row in exactly one (DESIGN §8.6's per-push shards). A row runs
+/// when it is in the range and [`Selection`] selects it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Range<'a> {
+    from: &'a [u8],
+    to: &'a [u8],
+}
+
+/// A registry row's name: `[a-z0-9_]+`, which `ktest_names_unique` holds
+/// every row to.
+fn is_row_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name
+            .iter()
+            .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+impl<'a> Range<'a> {
+    /// Every row: the option absent.
+    pub fn all() -> Range<'static> {
+        Range { from: &[], to: &[] }
+    }
+
+    /// The option's value, or `None` when it is absent. `BadOption` unless
+    /// the value is `<from>..<to>`, each side empty or a row name.
+    pub fn parse(value: Option<&'a [u8]>) -> Result<Self, BadOption> {
+        let Some(v) = value else {
+            return Ok(Range::all());
+        };
+        let at = v.windows(2).position(|w| w == b"..").ok_or(BadOption)?;
+        let from = v.get(..at).ok_or(BadOption)?;
+        let to = v
+            .get(at.checked_add(2).ok_or(BadOption)?..)
+            .ok_or(BadOption)?;
+        for side in [from, to] {
+            if !side.is_empty() && !is_row_name(side) {
+                return Err(BadOption);
+            }
+        }
+        Ok(Range { from, to })
+    }
+
+    /// The indexes `[start, end)` of the range's rows among `names`, the
+    /// registry's row names in run order. `BadOption` when a bound names
+    /// no row, or when `to` does not come after `from`, which would select
+    /// nothing.
+    pub fn bounds<'n>(
+        &self,
+        names: impl IntoIterator<Item = &'n str>,
+    ) -> Result<(usize, usize), BadOption> {
+        let mut start = if self.from.is_empty() { Some(0) } else { None };
+        let mut end = None;
+        let mut count = 0usize;
+        for (i, name) in names.into_iter().enumerate() {
+            if start.is_none() && name.as_bytes() == self.from {
+                start = Some(i);
+            }
+            if end.is_none() && !self.to.is_empty() && name.as_bytes() == self.to {
+                end = Some(i);
+            }
+            count = i.checked_add(1).ok_or(BadOption)?;
+        }
+        let start = start.ok_or(BadOption)?;
+        let end = if self.to.is_empty() {
+            count
+        } else {
+            end.ok_or(BadOption)?
+        };
+        if end <= start {
+            return Err(BadOption);
+        }
+        Ok((start, end))
     }
 }
 
@@ -306,6 +386,66 @@ mod tests {
             b"18446744073709551616",
         ] {
             assert_eq!(parse_repeat(Some(v)), Err(BadOption), "{v:?}");
+        }
+    }
+
+    const NAMES: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+
+    fn range(v: &str) -> Result<(usize, usize), BadOption> {
+        Range::parse(Some(v.as_bytes()))?.bounds(NAMES)
+    }
+
+    #[test]
+    fn range_absent_is_every_row() {
+        assert_eq!(Range::parse(None), Ok(Range::all()));
+        assert_eq!(Range::all().bounds(NAMES), Ok((0, 6)));
+        assert_eq!(range(".."), Ok((0, 6)));
+    }
+
+    #[test]
+    fn range_bounds() {
+        assert_eq!(range("..c"), Ok((0, 2)));
+        assert_eq!(range("c.."), Ok((2, 6)));
+        assert_eq!(range("b..e"), Ok((1, 4)));
+        assert_eq!(range("a..b"), Ok((0, 1)));
+        assert_eq!(range("..f"), Ok((0, 5)));
+        assert_eq!(range("f.."), Ok((5, 6)));
+    }
+
+    #[test]
+    fn range_bad() {
+        for v in [
+            "", "c", "c.", ".c", "x..", "..x", "c..c", "d..b", "..a", "C..", "c ..", "c...d",
+            "c..d..e", "c,d..",
+        ] {
+            assert_eq!(range(v), Err(BadOption), "{v:?}");
+        }
+        assert_eq!(Range::all().bounds([]), Err(BadOption));
+    }
+
+    /// Shards that share their bounds (`..b`, `b..e`, `e..`) put every row
+    /// in exactly one, whatever bounds they pick (DESIGN §8.6).
+    #[test]
+    fn ranges_sharing_bounds_partition_the_rows() {
+        // Every ordered choice of up to three inner bounds from NAMES[1..].
+        let inner = &NAMES[1..];
+        for mask in 0u32..(1 << inner.len()) {
+            let cuts: std::vec::Vec<&str> = inner
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, n)| *n)
+                .collect();
+            let mut seen = [0u32; NAMES.len()];
+            let mut lo = "";
+            for hi in cuts.iter().copied().chain([""]) {
+                let (s, e) = range(&std::format!("{lo}..{hi}")).unwrap();
+                for n in &mut seen[s..e] {
+                    *n += 1;
+                }
+                lo = hi;
+            }
+            assert_eq!(seen, [1; NAMES.len()], "cuts {cuts:?}");
         }
     }
 

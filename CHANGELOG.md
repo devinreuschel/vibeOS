@@ -30,6 +30,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - `loglevel=` on the kernel command line sets the boot log level, with Linux's numbering.
 - Each in-guest test prints its name and deadline before it runs and fails when it passes the
   deadline; `vibeos.ktest=` and `vibeos.ktest_repeat=` select and repeat tests.
+- `vibeos.ktest_range=<from>..<to>` runs one stretch of the in-guest registry; CI's in-guest tiers
+  run as shards of under 60 s (`make test-kernel-<k>`, [ROADMAP §10.1](docs/ROADMAP.md#101-gates-and-pinning)).
 - `make debug` starts QEMU halted with a gdb stub, and `scripts/vibeos.gdb` loads the kernel and
   user ELFs; `make run` and `make run-panic` start QEMU through the harness.
 - An `irqoff` kernel build and `make test-irqoff`, which log every interrupts-off stretch longer

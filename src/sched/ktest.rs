@@ -624,10 +624,10 @@ pub(crate) fn ktest_context() -> Outcome {
 
 fn dying_entry_s08() {}
 
-/// Most blocks [`spawn_stack_oom`] holds while the buddy is drained: the
-/// free memory the heap-sized tables leave (ROADMAP §10.4) splits into a
-/// few hundred blocks.
-const OOM_HOLD: usize = 1024;
+/// Slots [`spawn_stack_oom`]'s hold table keeps past the buddy's free
+/// blocks: for the blocks its own allocation splits off and the frees
+/// other CPUs make before the drain.
+const OOM_HOLD_SLACK: usize = 256;
 
 /// One default kernel stack's frames: fewer than this left, a spawn fails.
 const STACK_FRAMES: usize = vibeos::kva::DEFAULT_STACK_PAGES;
@@ -677,8 +677,14 @@ pub(crate) fn spawn_stack_oom() -> Outcome {
     // A cached stack would let the spawn succeed with the buddy empty.
     thread_init::testing::drain_local_stack_cache();
     // The hold table is allocated before the drain, on the heap: it is too
-    // large for a test's stack.
-    let Ok(mut held) = vibeos::limits::table(OOM_HOLD, || None) else {
+    // large for a test's stack. A drain highest order first takes one slot
+    // per free block (`Buddy::free_blocks`), and how many blocks the free
+    // memory splits into depends on what ran before: after the registry's
+    // earlier rows a few hundred, in a boot that starts at this row's
+    // stretch (`vibeos.ktest_range=`) more than 1024.
+    let slots = pmm_init::with_buddy(|b| b.free_blocks()).saturating_add(OOM_HOLD_SLACK);
+    crate::ktest_info!("{slots} hold slots");
+    let Ok(mut held) = vibeos::limits::table(slots, || None) else {
         return Outcome::Fail("no memory for the hold table");
     };
     let base = quiescent_free_frames();

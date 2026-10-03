@@ -388,13 +388,22 @@ fn registry_main() {
     let cmdline = crate::boot::cmdline();
     let sel = vibeos::ktest::Selection::parse(cmdline.get(OPT_KTEST));
     let repeat_arg = cmdline.get(OPT_REPEAT);
-    let repeat = vibeos::ktest::parse_repeat(repeat_arg).unwrap_or_else(|_| bad_repeat(repeat_arg));
+    let repeat = vibeos::ktest::parse_repeat(repeat_arg)
+        .unwrap_or_else(|_| bad_option(OPT_REPEAT, repeat_arg));
+    let range_arg = cmdline.get(OPT_RANGE);
+    let (start, end) = vibeos::ktest::Range::parse(range_arg)
+        .and_then(|r| r.bounds(rows().map(|(_, _, t)| t.name)))
+        .unwrap_or_else(|_| bad_option(OPT_RANGE, range_arg));
+    let in_range = |i: usize| (start..end).contains(&i);
     let Some(n) = vibeos::ktest::run_count(
-        rows().map(|(_, _, t)| (t.name, t.once, t.opt_in)),
+        rows()
+            .enumerate()
+            .filter(|&(i, _)| in_range(i))
+            .map(|(_, (_, _, t))| (t.name, t.once, t.opt_in)),
         &sel,
         repeat,
     ) else {
-        bad_repeat(repeat_arg);
+        bad_option(OPT_REPEAT, repeat_arg);
     };
     if n == 0 {
         crate::marker!("vibeOS: ktest: begin {n}");
@@ -410,8 +419,11 @@ fn registry_main() {
     let mut failed = false;
     let mut runs: u32 = 0;
     for pass in 1..=repeat {
-        for (g, r, t) in rows() {
-            if !sel.selects(t.name, t.opt_in) || !vibeos::ktest::runs_in_pass(t.once, pass) {
+        for (i, (g, r, t)) in rows().enumerate() {
+            if !in_range(i)
+                || !sel.selects(t.name, t.opt_in)
+                || !vibeos::ktest::runs_in_pass(t.once, pass)
+            {
                 continue;
             }
             runs += 1;
@@ -428,15 +440,18 @@ fn registry_main() {
     qemu_exit(if failed { EXIT_FAIL } else { EXIT_PASS });
 }
 
-/// The command-line options that select and repeat rows (BOOT.md §3.2).
+/// The command-line options that select, limit and repeat rows (BOOT.md
+/// §3.2).
 const OPT_KTEST: &str = "vibeos.ktest";
 const OPT_REPEAT: &str = "vibeos.ktest_repeat";
+const OPT_RANGE: &str = "vibeos.ktest_range";
 
-/// A `vibeos.ktest_repeat=` that is not 1 to `REPEAT_MAX`, or that makes
-/// more runs than a `u32` counts: say so before `begin` and fail the boot.
-fn bad_repeat(value: Option<&[u8]>) -> ! {
+/// A `vibeos.ktest_repeat=` that is not 1 to `REPEAT_MAX` or that makes
+/// more runs than a `u32` counts, or a `vibeos.ktest_range=` that names no
+/// row or no stretch of rows: say so before `begin` and fail the boot.
+fn bad_option(opt: &str, value: Option<&[u8]>) -> ! {
     let v = vibeos::boot::cmdline::Escaped(value.unwrap_or(b""));
-    crate::marker!("vibeOS: ktest: bad option {OPT_REPEAT}={v}");
+    crate::marker!("vibeOS: ktest: bad option {opt}={v}");
     qemu_exit(EXIT_FAIL);
 }
 

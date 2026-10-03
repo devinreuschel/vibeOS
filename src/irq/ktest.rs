@@ -933,14 +933,18 @@ fn inbox_throwaway() {}
 /// Free more than 128 non-adjacent guarded stacks, odd ones last first and
 /// then the even ones; KVA `used` and the free frames come back.
 fn kva_pool_frees_out_of_order() -> Outcome {
-    let before = quiescent_free_frames();
-    let tables0 = crate::mm::ktest::table_pages();
-    let used0 = kva_init::stats().used;
+    // The list comes first: the heap pages it may grow by stay the heap's,
+    // and with no earlier row to have grown the heap past its size (the row
+    // alone, or first in its `vibeos.ktest_range=` stretch) they are 40
+    // frames no stack took.
     let Ok(mut stacks) =
         TryVec::<Option<kva_init::GuardedStack>>::try_with_capacity(INBOX_KVA_STACKS)
     else {
         return Outcome::Fail("no memory for the stack list");
     };
+    let before = quiescent_free_frames();
+    let tables0 = crate::mm::ktest::table_pages();
+    let used0 = kva_init::stats().used;
     for i in 0..INBOX_KVA_STACKS {
         let s = match kva_init::alloc_guarded_stack(1) {
             Ok(s) => s,
