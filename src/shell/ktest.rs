@@ -64,7 +64,7 @@ pub(crate) fn test_shell_dmesg_level() -> Outcome {
         return Outcome::Fail("dmesg -n");
     }
     crate::klog!(Level::Debug, "vibeOS: ktest: shell-level-hidden");
-    if crate::log_init::contains_msg("shell-level-hidden") {
+    if crate::ktest::log_contains("shell-level-hidden") {
         crate::log_init::set_max_level(old);
         return Outcome::Fail("debug stored at error");
     }
@@ -73,7 +73,7 @@ pub(crate) fn test_shell_dmesg_level() -> Outcome {
         return Outcome::Fail("dmesg -n trace");
     }
     crate::klog!(Level::Debug, "vibeOS: ktest: shell-level-visible");
-    let ok = crate::log_init::contains_msg("shell-level-visible");
+    let ok = crate::ktest::log_contains("shell-level-visible");
     crate::log_init::set_max_level(old);
     if ok {
         Outcome::Ok

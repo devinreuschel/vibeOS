@@ -1,9 +1,8 @@
-#![allow(dead_code)] // printer thread stays parked
 //! Kernel wiring for the log ring. ROADMAP §5.5.
 //!
-//! Global IRQ-safe ring + serial sink. The printer thread is a parked
-//! stub until DESIGN §2.5's log contract (ROADMAP §19.5) gives each
-//! console one. Each record reaches serial whole, newline included, in
+//! Global IRQ-safe ring + serial sink. There is no printer thread until
+//! DESIGN §2.5's log contract (ROADMAP §19.5) gives each console one: a
+//! record prints synchronously. Each record reaches serial whole, newline included, in
 //! one try-lock write. The ring itself is line-atomic because serial
 //! capture assembles per-CPU until `\n`, and `klog!` pushes a whole record.
 
@@ -18,7 +17,6 @@ use vibeos::log::{
 use crate::arch::current::InterruptGuard;
 use crate::cell::IrqCell;
 use crate::per_cpu_init;
-use crate::serial::PlainSerial;
 use crate::time_init;
 
 struct Stage {
@@ -260,18 +258,6 @@ pub fn capture_serial(bytes: &[u8]) {
     });
 }
 
-pub fn contains_msg(needle: &str) -> bool {
-    let n = needle.as_bytes();
-    if n.is_empty() {
-        return true;
-    }
-    with_logger(|l| {
-        l.ring
-            .iter()
-            .any(|r| r.msg().windows(n.len()).any(|w| w == n))
-    })
-}
-
 pub fn ring_len() -> usize {
     with_logger(|l| l.ring.len())
 }
@@ -299,16 +285,8 @@ pub fn for_each_msg(mut f: impl FnMut(&[u8])) {
     }
 }
 
-pub fn dropped() -> u64 {
-    with_logger(|l| l.ring.dropped())
-}
-
-/// `dmesg` dump. `view` None → current runtime max.
-/// Does not hold the ring lock across TX (capture would deadlock).
-pub fn dmesg(view: Option<Level>) {
-    dmesg_write(&mut PlainSerial, view);
-}
-
+/// `dmesg` dump to `w`. `view` None → current runtime max. Does not hold
+/// the ring lock across the write (capture would deadlock).
 pub fn dmesg_write(w: &mut impl Write, view: Option<Level>) {
     let view = view.unwrap_or_else(max_level);
     let len = with_logger(|l| l.ring.len());
@@ -388,21 +366,6 @@ pub unsafe fn dump_tail(n: usize, out: fn(fmt::Arguments<'_>)) {
                 ));
             }
         });
-    }
-}
-
-/// Parked. DESIGN §2.5's log contract wants a lockless ring and one
-/// printer thread per console (ROADMAP §19.5). Until then the global
-/// ring + serial try-lock sink print synchronously.
-pub fn start_printer_thread() {}
-
-/// `fmt::Write` that emits one Info record per newline, plus serial.
-pub struct Log;
-
-impl fmt::Write for Log {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        log_fmt(Level::Info, format_args!("{s}"));
-        Ok(())
     }
 }
 

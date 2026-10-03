@@ -99,10 +99,13 @@ pub(crate) fn spin_counts() -> [u64; sync_init::SPIN_RANKS] {
     core::array::from_fn(|i| sync_init::SPINS[i].load(Ordering::Relaxed))
 }
 
-pub(crate) fn test_lock_spins() -> Outcome {
+/// Print the spin counters per lock rank at the end of a run, as an info
+/// line: a measurement, never a result, so no test row counts it as a pass
+/// (DESIGN §8.2, F142).
+pub(crate) fn report_spins() {
     let c = spin_counts();
-    crate::marker!(
-        "vibeOS: ktest:   spins heap={} pt={} buddy={} sched={} device={} serial={}",
+    crate::ktest_info!(
+        "spins heap={} pt={} buddy={} sched={} device={} serial={}",
         c[usize::from(RANK_HEAP)],
         c[usize::from(RANK_PT)],
         c[usize::from(RANK_BUDDY)],
@@ -110,7 +113,6 @@ pub(crate) fn test_lock_spins() -> Outcome {
         c[usize::from(RANK_DEVICE)],
         c[usize::from(RANK_SERIAL)]
     );
-    Outcome::Ok
 }
 
 /// One byte allocated and freed under PT must fail the rank check: the heap
@@ -1129,7 +1131,6 @@ pub(crate) const TESTS: &[Test] = &[
     test("irqcell_reentry_panics", test_irqcell_reentry_panics),
     test("bootcell_set_once", test_bootcell_set_once).once(),
     test("spin_mutex", test_spin_mutex),
-    test("lock_spins", test_lock_spins),
     test("blocking_mutex_counter", test_blocking_mutex_counter),
     test("late_wake_after_exit", test_late_wake_after_exit),
     test("rwlock_exclusion", test_rwlock_exclusion),

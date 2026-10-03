@@ -186,11 +186,15 @@ impl fmt::Write for Serial {
     }
 }
 
-/// Serial TX that does not land in the log ring. `dmesg` uses it so a
-/// dump cannot wrap the ring in copies of itself, and the IF-off tracer's
-/// report (`sched::irqoff`) so its lines every 100 ms cannot wrap it.
+/// Serial TX that does not land in the log ring. The in-guest `dmesg`
+/// test's dump uses it so a dump cannot wrap the ring in copies of itself,
+/// and the IF-off tracer's report (`sched::irqoff`) so its lines every
+/// 100 ms cannot wrap it; the shell's `dmesg` writes to its console. Only
+/// those builds have it.
+#[cfg(any(feature = "kernel_tests", feature = "irqoff"))]
 pub struct PlainSerial;
 
+#[cfg(any(feature = "kernel_tests", feature = "irqoff"))]
 impl fmt::Write for PlainSerial {
     /// `s` as one line.
     fn write_str(&mut self, s: &str) -> fmt::Result {

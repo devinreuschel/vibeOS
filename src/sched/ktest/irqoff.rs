@@ -67,7 +67,7 @@ pub(crate) fn irqoff_report_skips_ring() -> Outcome {
     // A stretch at this line's site, so the report below has a line.
     drop(InterruptGuard::enter());
     irqoff::report();
-    if crate::log_init::contains_msg("irqoff: site ") {
+    if crate::ktest::log_contains("irqoff: site ") {
         return Outcome::Fail("an irqoff report line is in the log ring");
     }
     Outcome::Ok

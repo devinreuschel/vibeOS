@@ -421,6 +421,7 @@ fn registry_main() {
     // `n` and the loop ask the same two predicates.
     assert_eq!(runs, n, "ktest: runs made != begin count");
     crate::sched::ktest::report();
+    crate::sync::ktest::report_spins();
     #[cfg(feature = "irqoff")]
     crate::sched::irqoff::report();
     crate::marker!("vibeOS: ktest: end");
@@ -633,6 +634,17 @@ pub(crate) fn settle_threads() -> bool {
         }
         thread_init::sleep_ms(1);
     }
+}
+
+/// Whether a record in the log ring holds `needle`.
+pub(crate) fn log_contains(needle: &str) -> bool {
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    let mut found = false;
+    crate::log_init::for_each_msg(|m| found |= m.windows(n.len()).any(|w| w == n));
+    found
 }
 
 /// Free frames: the buddy's, and those of the stacks the CPUs' stack caches
