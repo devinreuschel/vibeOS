@@ -91,7 +91,8 @@ pub fn scan(parent: &BlockRef) -> Result<Registered, part::PartError> {
 }
 
 /// Register each entry of `t` (at most `MAX_PARTS`) as a child of `parent`
-/// named `<parent>p<N>`, `N` the entry's index. An entry that is not
+/// named `<parent>p<N>`, `N` the entry's number on disk as Linux gives it
+/// ([`part::Part::index`]). An entry that is not
 /// registered, because the name does not fit or `register` refuses it, gets
 /// one warning line naming it, and the rest are still registered (ROADMAP
 /// §10.12, F117).

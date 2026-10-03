@@ -538,6 +538,10 @@ fn try_gpt<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     Ok(t)
 }
 
+/// Walk the EBR chain of the extended partition at `ext_start`. `logical`
+/// counts the disk's logical partitions so far, across every extended
+/// entry of its MBR: Linux numbers them from 5 for the whole disk, so a
+/// second extended entry's logicals go on from the first's.
 fn parse_logical<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     t: &mut Table,
     nsectors: u64,
@@ -545,10 +549,10 @@ fn parse_logical<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     sector_buf: &mut [u8],
     ext_start: u64,
     ext_count: u64,
+    logical: &mut usize,
 ) {
     let ext_end = ext_start.saturating_add(ext_count);
     let mut ebr = ext_start;
-    let mut logical = 0usize;
     for _ in 0..MAX_EBR_DEPTH {
         if ebr >= nsectors || ebr >= ext_end {
             return;
@@ -569,10 +573,10 @@ fn parse_logical<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
             if start >= nsectors || end > nsectors || start < ext_start || end > ext_end {
                 return;
             }
-            let Some(index) = logical_index(logical) else {
+            let Some(index) = logical_index(*logical) else {
                 return;
             };
-            logical = logical.saturating_add(1);
+            *logical = logical.saturating_add(1);
             let p = Part {
                 index,
                 start_lba: start,
@@ -612,13 +616,22 @@ fn parse_mbr<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
         *e = mbr_entry(sector_buf, i).ok_or(PartError::Truncated)?;
     }
     // A primary partition is numbered by its slot, 1 to 4, and the
-    // logical ones from 5, as Linux numbers them.
+    // logical ones from 5, as Linux numbers them: one count for the disk.
+    let mut logical = 0usize;
     for (slot, (sys, start, count)) in (1u8..).zip(prim) {
         if sys == 0 || count == 0 || sys == MBR_PROTECTIVE {
             continue;
         }
         if is_extended(sys) {
-            parse_logical(&mut t, nsectors, read, sector_buf, start, count);
+            parse_logical(
+                &mut t,
+                nsectors,
+                read,
+                sector_buf,
+                start,
+                count,
+                &mut logical,
+            );
             continue;
         }
         let Some(end) = start.checked_add(count) else {
@@ -844,6 +857,35 @@ mod tests {
         // The primary keeps its slot's number, and the logicals are 5 on.
         let idx: Vec<u8> = t.parts[..t.n].iter().map(|p| p.index).collect();
         assert_eq!(idx, [1, 5, 6]);
+    }
+
+    /// Two extended entries: the second's logicals go on from the
+    /// first's, as Linux numbers them for the disk, where each chain once
+    /// began again at 5 and the second `p5` was refused as a duplicate.
+    #[test]
+    fn logicals_of_two_extended_entries_number_on() {
+        let mut d = disk(256 * 512);
+        let mut mbr = [0u8; 512];
+        pack_mbr(
+            &mut mbr,
+            &[
+                (MBR_EXTENDED, 10, 40),
+                (MBR_EXTENDED, 100, 40),
+                (0, 0, 0),
+                (0, 0, 0),
+            ],
+        );
+        put(&mut d, 0, &mbr);
+        let mut e = [0u8; 512];
+        pack_ebr(&mut e, MBR_LINUX, 1, 16, 0, 0);
+        put(&mut d, 10, &e);
+        put(&mut d, 100, &e);
+        let t = parse_image(&d, 512).unwrap();
+        let got: Vec<(u8, u64)> = t.parts[..t.n]
+            .iter()
+            .map(|p| (p.index, p.start_lba))
+            .collect();
+        assert_eq!(got, [(5, 11), (6, 101)]);
     }
 
     #[test]

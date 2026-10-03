@@ -305,7 +305,10 @@ value is the queue index; `kick` writes 0 for every queue (ROADMAP §11.5, F047)
 ## 10.5 Partitions
 
 MBR (primary + extended/logical) and GPT parse in `crates/core/src/block/part.rs`. Protective
-MBR type `0xEE` is not a data device; GPT is. Header and entry CRCs are
+MBR type `0xEE` is not a data device; GPT is. A GPT is read only behind a protective MBR, one
+with the `0x55AA` signature and a type `0xEE` entry, as Linux reads one without `gpt` on its
+command line: a disk with GPT headers and a plain MBR gets its MBR table, and one with no MBR
+signature gets none (`gpt_without_protective_mbr_is_ignored`). Header and entry CRCs are
 checked; a bad primary falls back to the backup header at the last LBA.
 EBR walk is capped at 128; a corrupt next-LBA stops the chain. Tables
 count in the disk's logical blocks, so on a disk of 4 KiB blocks the GPT header is at byte 4096 and
@@ -323,7 +326,12 @@ Children are entries of the block registry ([§12.1](DEVICES.md#121-devices)), e
 `BlockRef` with its disk as parent. Child LBA `l` maps to `start + l` and
 I/O past `nsectors` is `Inval`. `register_table` registers a child
 `<parent>p<N>` (e.g. `ram0p1`, `vdap1`) for every parsed entry, up to
-`MAX_PARTS` per table, `N` the entry's index in the table, and each
+`MAX_PARTS` per table, `N` the entry's number as Linux gives it: a GPT entry's place in the entry
+array plus one, used or not; an MBR primary's slot, 1 to 4; and logical partitions from 5 in EBR
+order, counted across the whole disk, so a second extended entry's logicals go on from the
+first's (e.g. `ram0p5`). An empty entry or slot renumbers nothing after it
+(`partitions_keep_their_on_disk_numbers`, `mbr_extended_logical`,
+`logicals_of_two_extended_entries_number_on`). Each
 registration prints the marker `vibeOS: block: <name> <n> sectors`. An
 entry it does not register, because the name does not fit in 32 bytes or
 the registry refuses it, gets a warning line naming the disk, the entry,
