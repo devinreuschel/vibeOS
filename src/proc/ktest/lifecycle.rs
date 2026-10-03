@@ -1216,57 +1216,114 @@ fn stopped(pid: u32, n: u32) -> bool {
     kill(pid, SIGSTOP) == 0 && crate::ktest::sleep_for(|| proc_testing::stops() >= n)
 }
 
-/// A stopped process dies of a fatal signal that writes no core with no
-/// `SIGCONT`, as Linux makes one a group `SIGKILL` when it is sent; one
-/// that writes a core (`SIGQUIT`) leaves it stopped, and it dies of that
-/// signal once `SIGCONT` lets it run.
-pub(crate) fn stopped_process_dies_of_term() -> Outcome {
-    let mut out = Outcome::Ok;
-    for (sig, waits_for_cont) in [(SIGTERM, false), (SIGQUIT, true)] {
-        let pid = match user::spawn(&Image::Code(S19_GETPID_LOOP, DEFAULT), &["stop_term"]) {
-            Ok(pid) => pid,
-            Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
-        };
-        proc_testing::watch_stops(pid);
-        let r = if !stopped(pid, 1) {
-            Some(crate::fail_fmt!("pid {pid} did not stop"))
-        } else if kill(pid, sig) != 0 {
-            Some(crate::fail_fmt!("kill {sig} failed"))
-        } else if waits_for_cont {
-            // Woken by the signal, it decides to stop again.
-            let again = crate::ktest::sleep_for(|| proc_testing::stops() >= 2);
-            if !again || proc_testing::is_zombie(pid) {
-                Some(crate::fail_fmt!("signal {sig} ended a stopped process"))
-            } else if kill(pid, SIGCONT) != 0
-                || !crate::ktest::sleep_for(|| proc_testing::is_zombie(pid))
-            {
-                Some(crate::fail_fmt!(
-                    "signal {sig} did not end it after SIGCONT"
+/// Wait until `pid` has made `n` stop decisions or exited.
+fn stops_or_exit(pid: u32, n: u32) -> bool {
+    crate::ktest::sleep_for(|| proc_testing::stops() >= n || proc_testing::is_zombie(pid))
+}
+
+/// Kill `pid` unless it already exited, and reap it: its wait status.
+fn end_and_reap(pid: u32) -> u32 {
+    if !proc_testing::is_zombie(pid) {
+        kill(pid, SIGKILL);
+    }
+    user::wait(pid)
+}
+
+/// The cases of [`stop_holds_signals_until_cont`].
+#[derive(Clone, Copy)]
+enum StopCase {
+    /// This fatal signal reaches a stopped process.
+    Held(u32),
+    /// `SIGKILL` reaches a stopped process.
+    Kill,
+    /// `SIGQUIT`, then `SIGSTOP`, both pending when the process acts.
+    QuitThenStop,
+}
+
+/// One case of [`stop_holds_signals_until_cont`] on a fresh `getpid`
+/// loop; `None` when it held.
+fn stop_case(case: StopCase) -> Option<Outcome> {
+    let sig = match case {
+        StopCase::Held(sig) => sig,
+        StopCase::Kill => SIGKILL,
+        StopCase::QuitThenStop => SIGQUIT,
+    };
+    let pid = match user::spawn(&Image::Code(S19_GETPID_LOOP, DEFAULT), &["stop_hold"]) {
+        Ok(pid) => pid,
+        Err(e) => return Some(crate::fail_fmt!("spawn: {}", e.as_str())),
+    };
+    proc_testing::watch_stops(pid);
+    let r = if matches!(case, StopCase::QuitThenStop) {
+        // SIGCONT, SIGQUIT and SIGSTOP all land while the process sits
+        // between a stop decision and its sleep, so it acts on SIGQUIT and
+        // a stop that has not taken effect together: lowest number first.
+        proc_testing::arm_stop_stall(pid);
+        let r = if kill(pid, SIGSTOP) != 0 || !crate::ktest::sleep_for(proc_testing::stop_stalled) {
+            Some(crate::fail_fmt!("pid {pid} did not reach the stop stall"))
+        } else if kill(pid, SIGCONT) != 0 || kill(pid, SIGQUIT) != 0 || kill(pid, SIGSTOP) != 0 {
+            Some(Outcome::Fail("kill failed"))
+        } else {
+            proc_testing::release_stop_stall();
+            if !stops_or_exit(pid, 2) {
+                Some(crate::fail_fmt!("pid {pid} neither stopped nor exited"))
+            } else if !proc_testing::is_zombie(pid) {
+                Some(Outcome::Fail(
+                    "a pending SIGQUIT lost to a SIGSTOP sent after it",
                 ))
             } else {
                 None
             }
-        } else if !crate::ktest::sleep_for(|| proc_testing::is_zombie(pid)) {
-            Some(crate::fail_fmt!(
-                "signal {sig} did not end a stopped process"
-            ))
-        } else {
-            None
         };
-        proc_testing::watch_stops(0);
-        if !proc_testing::is_zombie(pid) {
-            kill(pid, SIGKILL);
+        proc_testing::disarm_stop_stall();
+        r
+    } else if !stopped(pid, 1) {
+        Some(crate::fail_fmt!("pid {pid} did not stop"))
+    } else if kill(pid, sig) != 0 {
+        Some(crate::fail_fmt!("kill {sig} failed"))
+    } else if matches!(case, StopCase::Kill) {
+        if crate::ktest::sleep_for(|| proc_testing::is_zombie(pid)) {
+            None
+        } else {
+            Some(Outcome::Fail("SIGKILL did not end a stopped process"))
         }
-        let st = user::wait(pid);
-        if let Some(o) = r {
+    } else if !stops_or_exit(pid, 2) || proc_testing::is_zombie(pid) {
+        // Woken by the signal, it re-checks and stays stopped.
+        Some(crate::fail_fmt!("signal {sig} ended a stopped process"))
+    } else if kill(pid, SIGSTOP) != 0 || !stops_or_exit(pid, 3) || proc_testing::is_zombie(pid) {
+        Some(crate::fail_fmt!(
+            "a second SIGSTOP let signal {sig} end a stopped process"
+        ))
+    } else if kill(pid, SIGCONT) != 0 || !crate::ktest::sleep_for(|| proc_testing::is_zombie(pid)) {
+        Some(crate::fail_fmt!(
+            "signal {sig} did not end it after SIGCONT"
+        ))
+    } else {
+        None
+    };
+    proc_testing::watch_stops(0);
+    let st = end_and_reap(pid);
+    let want = wait_signaled(sig);
+    if r.is_some() {
+        return r;
+    }
+    (st != want).then(|| crate::fail_fmt!("signal {sig}: status {st:#x}, want {want:#x}"))
+}
+
+/// A process that has stopped stays stopped, as on Linux: only `SIGKILL`
+/// ends it at once, and any other fatal signal, with a core (`SIGQUIT`) or
+/// without (`SIGTERM`), stays pending through a second `SIGSTOP` and ends
+/// it once `SIGCONT` lets it run. A stop sent but not yet acted on is
+/// dequeued in number order: `SIGQUIT` pending beside it ends the process.
+pub(crate) fn stop_holds_signals_until_cont() -> Outcome {
+    for case in [
+        StopCase::Held(SIGTERM),
+        StopCase::Held(SIGQUIT),
+        StopCase::Kill,
+        StopCase::QuitThenStop,
+    ] {
+        if let Some(o) = stop_case(case) {
             return o;
         }
-        if st != wait_signaled(sig) && matches!(out, Outcome::Ok) {
-            out = crate::fail_fmt!(
-                "signal {sig}: status {st:#x}, want {:#x}",
-                wait_signaled(sig)
-            );
-        }
     }
-    out
+    Outcome::Ok
 }

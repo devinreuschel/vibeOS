@@ -374,7 +374,15 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   signal is discarded, as on Linux: the status `wait4` reports is the one
   its exit left. A signal sent to pid 1 is dropped, and `kill` returns 0,
   unless init has a handler for it, as Linux does; none can exist before
-  ROADMAP §13.8, and never for `SIGKILL` or `SIGSTOP` (F068)
+  ROADMAP §13.8, and never for `SIGKILL` or `SIGSTOP` (F068). A stop is
+  pending until the target's exit work acts on it, and is taken with the
+  other pending signals lowest number first, after a fatal signal that
+  writes no core, which Linux makes a group kill when it is sent; once
+  stopped, the target holds every signal but `SIGKILL`, which ends it at
+  once, until `SIGCONT` (`vibeos::proc::next_signal`). A Term signal held
+  over a stop is ordered as a fresh one, so one numbered above `SIGSTOP`
+  ends the process ahead of a stop sent with the `SIGCONT`, where Linux
+  stops first (ROADMAP §13.8)
 - `exit`: the caller's children go to the reaper `proc::reaper_for` picks:
   pid 1 while init is live or stopped; otherwise none, so a child reads
   `getppid()` 0 and is freed when it exits (a zombie child at once), as in

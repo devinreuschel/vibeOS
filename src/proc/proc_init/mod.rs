@@ -16,11 +16,13 @@ use vibeos::kerror::KError;
 use vibeos::lock::RANK_SCHED;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::pid::IdIndex;
+use vibeos::proc::sig_bit as bit;
 use vibeos::proc::uaccess::user_range_ok;
 use vibeos::proc::{
     Creds, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitExit, InitState, MAX_FDS, MAX_PROCS,
-    ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action, dumps_core,
-    fd_flags_from_open, kill_delivers, reaper_for, sig_name, wait_exited, wait_signaled,
+    ProcState, SIGCHLD, SIGCONT, SIGSTOP, SigAct, SigNext, WNOHANG, default_action,
+    fd_flags_from_open, kill_delivers, next_signal, reaper_for, sig_name, wait_exited,
+    wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult, UserFrame};
@@ -328,10 +330,6 @@ fn intern_name(b: &[u8]) -> &'static str {
         b"hello" => "hello",
         _ => "user",
     }
-}
-
-fn bit(sig: u32) -> u32 {
-    if sig == 0 || sig > 31 { 0 } else { 1u32 << sig }
 }
 
 fn current_pid() -> u32 {
@@ -763,11 +761,11 @@ impl Handlers for Ctx<'_> {
 /// between finds the thread on the queue (ROADMAP §10.6, F033). The loop
 /// re-checks after every `schedule()`, which can return early.
 ///
-/// A pending fatal signal that writes no core ends the process first,
-/// stopped or not: Linux makes one a group `SIGKILL` when it is sent,
-/// which wakes a stopped process. Then a stop, then the rest, lowest
-/// number first, as Linux dequeues them; a Core signal therefore waits
-/// for `SIGCONT` in a stopped process.
+/// `vibeos::proc::next_signal` picks the action, in Linux's order: a
+/// process that has acted on its stop (Stopped, with no `SIGSTOP` bit
+/// left) stays stopped until `SIGCONT` and only `SIGKILL` ends it, and a
+/// stop sent but not yet acted on is dequeued in number order with the
+/// other pending signals.
 fn apply_pending(frame: Option<&mut UserFrame>) {
     let pid = current_pid();
     if pid == 0 {
@@ -779,44 +777,13 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
                 let Some(p) = t.get_mut(pid) else {
                     return Pending::None;
                 };
-                if p.pending & bit(SIGKILL) != 0 {
-                    return Pending::Die(SIGKILL);
-                }
-                let mut sig = 1u32;
-                while sig <= 31 {
-                    if p.pending & bit(sig) != 0
-                        && default_action(sig) == SigAct::Term
-                        && !dumps_core(sig)
-                    {
-                        return Pending::Die(sig);
-                    }
-                    sig += 1;
-                }
-                let mut stop = false;
-                if p.state == ProcState::Stopped || p.pending & bit(SIGSTOP) != 0 {
-                    p.pending &= !bit(SIGSTOP);
-                    stop = true;
-                } else {
-                    let pend = p.pending;
-                    let mut sig = 1u32;
-                    while sig <= 31 && !stop {
-                        if pend & bit(sig) != 0 && sig != SIGCHLD && sig != SIGCONT {
-                            match default_action(sig) {
-                                SigAct::Term => return Pending::Die(sig),
-                                SigAct::Stop => {
-                                    p.pending &= !bit(sig);
-                                    stop = true;
-                                }
-                                SigAct::Ign | SigAct::Cont => {
-                                    p.pending &= !bit(sig);
-                                }
-                            }
-                        }
-                        sig += 1;
-                    }
-                }
-                if !stop {
-                    return Pending::None;
+                let stopped = p.state == ProcState::Stopped && p.pending & bit(SIGSTOP) == 0;
+                let (next, left) = next_signal(p.pending, stopped);
+                p.pending = left;
+                match next {
+                    SigNext::None => return Pending::None,
+                    SigNext::Die(sig) => return Pending::Die(sig),
+                    SigNext::Stop => {}
                 }
                 p.state = ProcState::Stopped;
                 s.begin_wait(&mut p.stop_wq, FAR_DEADLINE);

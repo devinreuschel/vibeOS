@@ -462,9 +462,10 @@ pub const fn default_action(sig: u32) -> SigAct {
 }
 
 /// Whether `sig`'s default action is signal(7)'s Core, a Term that also
-/// writes a core. Linux makes any other fatal signal a group `SIGKILL`
-/// when it is sent, so it ends a stopped process at once; a Core signal
-/// waits until the process runs again.
+/// writes a core. Linux's `complete_signal` makes any other fatal signal a
+/// group `SIGKILL` when it is sent to a process that is not stopped; a
+/// Core signal stays queued and is dequeued in number order
+/// ([`next_signal`]).
 pub const fn dumps_core(sig: u32) -> bool {
     matches!(
         sig,
@@ -479,6 +480,64 @@ pub const fn dumps_core(sig: u32) -> bool {
             | SIGXFSZ
             | SIGSYS
     )
+}
+
+/// `sig`'s bit in a pending mask; 0 for a number outside 1 to 31.
+pub const fn sig_bit(sig: u32) -> u32 {
+    if sig == 0 || sig > 31 { 0 } else { 1u32 << sig }
+}
+
+/// What a process's exit work does next with its pending signals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SigNext {
+    /// Nothing to act on: return to ring 3.
+    None,
+    /// End the process with this signal.
+    Die(u32),
+    /// Stop, or stay stopped, until `SIGCONT`.
+    Stop,
+}
+
+/// The next action for a process with `pending` signals (bits from
+/// [`sig_bit`]) and the pending mask left after it, as Linux orders them
+/// for a process with no handlers. `stopped` is a stop the process has
+/// already acted on, so it sleeps until `SIGCONT`: while stopped only
+/// `SIGKILL` acts, and every other signal stays pending until `SIGCONT`
+/// (`wants_signal` refuses a stopped task anything but `SIGKILL`; POSIX
+/// XSH 2.4.1). A stop that is sent but not yet acted on is a pending
+/// `SIGSTOP` bit. Otherwise `SIGKILL`, then a Term signal that writes no
+/// core (which `complete_signal` made a group `SIGKILL` when it was sent),
+/// then the rest lowest number first, as `get_signal` dequeues them: a
+/// Core signal below `SIGSTOP` ends the process before a pending stop
+/// takes effect, and one above waits behind it. `SIGCHLD` and `SIGCONT`
+/// stay pending; another ignored signal is dropped. A Term signal held
+/// over a stop is ordered as a fresh one, so one above `SIGSTOP` with a
+/// new stop pending ends the process where Linux stops it first (ROADMAP
+/// §13.8).
+pub fn next_signal(pending: u32, stopped: bool) -> (SigNext, u32) {
+    if pending & sig_bit(SIGKILL) != 0 {
+        return (SigNext::Die(SIGKILL), pending);
+    }
+    if stopped {
+        return (SigNext::Stop, pending);
+    }
+    for sig in 1..=31 {
+        if pending & sig_bit(sig) != 0 && default_action(sig) == SigAct::Term && !dumps_core(sig) {
+            return (SigNext::Die(sig), pending);
+        }
+    }
+    let mut left = pending;
+    for sig in 1..=31 {
+        if pending & sig_bit(sig) == 0 || sig == SIGCHLD || sig == SIGCONT {
+            continue;
+        }
+        match default_action(sig) {
+            SigAct::Term => return (SigNext::Die(sig), left),
+            SigAct::Stop => return (SigNext::Stop, left & !sig_bit(sig)),
+            SigAct::Ign | SigAct::Cont => left &= !sig_bit(sig),
+        }
+    }
+    (SigNext::None, left)
 }
 
 /// Uncatchable even when Phase 13 grows handlers.
@@ -782,6 +841,62 @@ mod tests {
             assert_eq!(dumps_core(sig), core.contains(&sig), "signal {sig}");
             assert!(!dumps_core(sig) || default_action(sig) == SigAct::Term);
         }
+    }
+
+    #[test]
+    fn next_signal_follows_linux() {
+        let b = sig_bit;
+        // SIGKILL acts on a stopped process; nothing else does.
+        assert_eq!(
+            next_signal(b(SIGKILL) | b(SIGTERM), true).0,
+            SigNext::Die(SIGKILL)
+        );
+        for sig in 1..=31 {
+            if sig != SIGKILL {
+                assert_eq!(
+                    next_signal(b(sig), true),
+                    (SigNext::Stop, b(sig)),
+                    "signal {sig}"
+                );
+            }
+        }
+        // A stop not yet acted on: a Term signal without a core wins at
+        // any number, a Core one only below SIGSTOP.
+        let stop = b(SIGSTOP);
+        assert_eq!(
+            next_signal(stop | b(SIGTERM), false).0,
+            SigNext::Die(SIGTERM)
+        );
+        assert_eq!(
+            next_signal(stop | b(SIGPROF), false).0,
+            SigNext::Die(SIGPROF)
+        );
+        assert_eq!(
+            next_signal(stop | b(SIGQUIT), false).0,
+            SigNext::Die(SIGQUIT)
+        );
+        assert_eq!(
+            next_signal(stop | b(SIGSEGV), false).0,
+            SigNext::Die(SIGSEGV)
+        );
+        assert_eq!(
+            next_signal(stop | b(SIGXCPU), false),
+            (SigNext::Stop, b(SIGXCPU))
+        );
+        // The lowest pending Term signal without a core comes first.
+        assert_eq!(
+            next_signal(b(SIGQUIT) | b(SIGTERM), false).0,
+            SigNext::Die(SIGTERM)
+        );
+        assert_eq!(next_signal(b(SIGQUIT), false).0, SigNext::Die(SIGQUIT));
+        // SIGCHLD and SIGCONT stay pending; other ignored signals go.
+        let ign = b(SIGCHLD) | b(SIGCONT) | b(SIGURG) | b(SIGWINCH);
+        assert_eq!(
+            next_signal(ign, false),
+            (SigNext::None, b(SIGCHLD) | b(SIGCONT))
+        );
+        assert_eq!(next_signal(0, false), (SigNext::None, 0));
+        assert_eq!(next_signal(stop, false), (SigNext::Stop, 0));
     }
 
     #[test]

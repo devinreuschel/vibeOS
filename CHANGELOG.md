@@ -170,8 +170,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   page being read in has one cache slot, so a later read cannot see a stale second copy.
 - Partition tables on 4 KiB-sector disks are read; a FAT mount there fails with `EINVAL`, not `EIO`.
 - tmpfs supports `rename`; rename replaces its target as rename(2) does on every filesystem.
-- A fatal signal ends a stopped process, `wait4` no longer sleeps through a pending `SIGKILL`, and
-  signal default actions follow signal(7).
+- A stopped process holds every signal but `SIGKILL` until `SIGCONT`, as on Linux; `wait4` no
+  longer sleeps through a pending `SIGKILL`, and signal default actions follow signal(7).
 - A scan that unlinks each entry it reads sees them all on ramfs and tmpfs; `..` climbs out of
   mounts stacked on one directory; unlink and rename no longer race an inode's eviction.
 - FAT counts free clusters at mount instead of trusting FSInfo; vibefs stamps inodes with the wall

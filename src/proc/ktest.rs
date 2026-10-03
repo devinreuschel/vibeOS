@@ -73,7 +73,11 @@ pub(crate) const TESTS: &[Test] = &[
     test("brk_mmap_munmap_user", test_brk_mmap_munmap_user).deadline(30_000),
     test("stop_cont_no_lost_wakeup", test_stop_cont_no_lost_wakeup).deadline(30_000),
     test("wait4_ends_on_pending_kill", wait4_ends_on_pending_kill).deadline(30_000),
-    test("stopped_process_dies_of_term", stopped_process_dies_of_term).deadline(30_000),
+    test(
+        "stop_holds_signals_until_cont",
+        stop_holds_signals_until_cont,
+    )
+    .deadline(30_000),
     test("signal_on_return", test_signal_on_return).deadline(30_000),
     test("exit_work_ipi", test_exit_work_ipi).deadline(30_000),
     test("syscall_body_if_on", test_syscall_body_if_on).deadline(30_000),

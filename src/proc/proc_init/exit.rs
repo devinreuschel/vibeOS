@@ -270,12 +270,20 @@ pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
                     }
                 }
                 SigAct::Stop => {
-                    p.pending |= bit(SIGSTOP);
+                    // A stop pending until the target acts on it. One that
+                    // has taken effect stays so: another stop is a no-op,
+                    // and must not make the signals held since look fresh.
+                    if p.state != ProcState::Stopped {
+                        p.pending |= bit(SIGSTOP);
+                    }
                     p.state = ProcState::Stopped;
                     s.wake_all(&mut p.wait_wq);
                     s.wake_all(&mut p.stop_wq);
                 }
                 SigAct::Term => {
+                    // A stopped target re-checks and, but for `SIGKILL`,
+                    // stays stopped with the signal pending until
+                    // `SIGCONT` (`vibeos::proc::next_signal`).
                     p.pending |= bit(sig);
                     s.wake_all(&mut p.wait_wq);
                     s.wake_all(&mut p.stop_wq);
