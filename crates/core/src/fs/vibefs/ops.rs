@@ -96,13 +96,17 @@ impl Vol {
         if kind == InodeKind::Chr || kind == InodeKind::Blk {
             return Err(Error::Perm);
         }
-        let slot = self.alloc_ino_slot()?;
-        let de = self.alloc_dent()?;
+        // Inode numbers are never reused (VIBEFS.md §13): once `next_ino`
+        // has no successor every create is `NoSpace`, where saturating
+        // would hand the last number to every later file.
         let ino = self.next_ino;
+        let next = ino.checked_add(1).ok_or(Error::NoSpace)?;
         if ino == 0 {
             return Err(Error::NoSpace);
         }
-        self.next_ino = self.next_ino.saturating_add(1);
+        let slot = self.alloc_ino_slot()?;
+        let de = self.alloc_dent()?;
+        self.next_ino = next;
         let mut rec = Inode::EMPTY;
         rec.used = true;
         rec.ino = ino;

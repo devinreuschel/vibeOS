@@ -613,6 +613,12 @@ device's trace carries every write and flush the guest sent.
   never reused (`next_ino`), so it reaches no other file. §15's Orphans row
   keeps such a file until its last close and frees it after a crash
   (ROADMAP §14.8's v2 inode-model box)
+- Use an inode number past `u32::MAX − 1` in a volume's life: `next_ino`
+  is a `u32` that starts at 2 and only grows, and `u32::MAX` is never
+  handed out, so once `next_ino` reaches it every `create` fails with
+  `NoSpace` (`ENOSPC`) rather than reuse a number. §15's Inode numbers row
+  makes them 64-bit. The no-reuse rule assumes a super whose `next_ino` is
+  above every inode number, which v1 mount does not check (§5, F061)
 - Compression, encryption, RAID
 - Block size other than 4096
 - Inode extents overflow to an extent tree (4 extents is the cap; files

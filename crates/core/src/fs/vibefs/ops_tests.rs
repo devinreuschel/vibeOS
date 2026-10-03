@@ -1,5 +1,5 @@
 //! Host tests of `Vol`'s file and name operations: truncate across the
-//! inline bytes.
+//! inline bytes, and inode numbers that run out.
 
 use super::tests::{base_tree, fresh, fsck_of, new_file, slot_of, with_vol};
 use super::*;
@@ -96,4 +96,39 @@ fn truncate_of_oversized_inline_is_corrupt() {
     with_vol(&mut b, |v, d| {
         assert!(v.lookup(d, ROOT_INO, b"f").is_ok());
     });
+}
+
+/// Inode numbers run out rather than repeat: the last one goes to one
+/// file, every later create is `NoSpace` and takes nothing, after a
+/// remount too, and two files never share a record.
+#[test]
+fn inode_numbers_run_out_without_reuse() {
+    let mut b = fresh(64 * BLOCK);
+    let last = u32::MAX - 1;
+    with_vol(&mut b, |v, d| {
+        v.next_ino = last;
+        let a = new_file(v, d, b"a");
+        assert_eq!(a, last);
+        let used = v.inodes.iter().filter(|i| i.used).count();
+        assert_eq!(
+            v.create(d, ROOT_INO, b"c", InodeKind::Reg, 0o644, None)
+                .unwrap_err(),
+            Error::NoSpace
+        );
+        assert_eq!(v.inodes.iter().filter(|i| i.used).count(), used);
+        assert_eq!(v.lookup(d, ROOT_INO, b"c").unwrap_err(), Error::NotFound);
+        v.write(d, a, 0, b"AAAA").unwrap();
+        v.sync(d).unwrap();
+    });
+    with_vol(&mut b, |v, d| {
+        assert_eq!(
+            v.create(d, ROOT_INO, b"c", InodeKind::Dir, 0o755, None)
+                .unwrap_err(),
+            Error::NoSpace
+        );
+        let a = v.lookup(d, ROOT_INO, b"a").unwrap().ino;
+        assert_eq!(read_all(v, d, a, 4), b"AAAA");
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!(r.errors, 0, "{r:?}");
 }
