@@ -53,8 +53,8 @@ args = [
   { name = "buf", type = "char *", ptr = "buf", len = "count", dir = "out", when = "after the `fd` lookup" },
   { name = "count", type = "size_t" },
 ]
-errors = ["EBADF", "EFAULT", "EISDIR", "EIO"]
-ktest = { EIO = "vblk_bad_sector" }
+errors = ["EBADF", "EFAULT", "EISDIR", "EAGAIN", "EIO"]
+ktest = { EAGAIN = "dev_random_eagain", EIO = "vblk_bad_sector" }
 note = ""
 
 [[syscall]]
@@ -115,7 +115,7 @@ args = [
   { name = "offset", type = "off_t" },
   { name = "whence", type = "unsigned int" },
 ]
-errors = ["EBADF", "ESPIPE", "EINVAL"]
+errors = ["EBADF", "ESPIPE", "EINVAL", "ENXIO"]
 note = ""
 
 [[syscall]]
@@ -218,13 +218,14 @@ x86_64 = 59
 aarch64 = 221
 args = [
   { name = "pathname", type = "const char *", ptr = "cstr", when = "before anything else" },
-  { name = "argv", type = "const char *const *", ptr = "strvec", null = true, when = "after `pathname`" },
+  { name = "argv", type = "const char *const *", ptr = "strvec", null = true, when = "after `pathname` resolves to a regular file, as Linux opens it first" },
   { name = "envp", type = "const char *const *", ptr = "strvec", null = true, when = "after `argv`" },
 ]
 errors = [
-  "EFAULT", "ENAMETOOLONG", "EINVAL", "ENOENT", "ENOTDIR", "ELOOP", "ENFILE", "E2BIG", "ENOEXEC",
-  "ENOMEM",
+  "EFAULT", "ENAMETOOLONG", "ENOENT", "ENOTDIR", "EACCES", "ELOOP", "ENFILE", "E2BIG", "ENOEXEC",
+  "ENOMEM", "EIO",
 ]
+ktest = { EIO = "vblk_bad_sector" }
 note = "`argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1)"
 
 [[syscall]]
@@ -303,7 +304,7 @@ args = [
   { name = "dirent", type = "struct linux_dirent64 *", ptr = "buf", len = "count", dir = "out", when = "after the `fd` lookup and the first record's fit" },
   { name = "count", type = "unsigned int" },
 ]
-errors = ["EBADF", "ENOTDIR", "ESPIPE", "EINVAL", "EFAULT"]
+errors = ["EBADF", "ENOTDIR", "EINVAL", "EFAULT"]
 note = "at most 512 bytes a call; see SYSCALL.md §3.1"
 
 [[syscall]]

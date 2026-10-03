@@ -30,8 +30,10 @@ Modes (one `if` branch each in `main`):
   4 complete weeks, failing past 60% busy (a `rebuilds` lane aside) or a
   reserved-lane wait past 12 hours; and each per-push tier's median QEMU time
   over the last 20 `ci` push runs on `main`, failing past 60 s. Both exit 2
-  when the history lacks the runs or the times they need. `make ci-budget`
-  runs both.
+  when the history lacks the runs or the times they need: `--budget` until
+  each scheduled workflow has a recorded run and the history holds a complete
+  week, and it measures no week that ended before the history's first
+  scheduled job. `make ci-budget` runs both.
 - `--record PATH`: the dev-host record writer `make gate PHASE=N RECORD=1`
   calls on the Apple Silicon dev host (ROADMAP §10.9, the dev-host box). It
   refuses a record that lacks a required field or holds the machine's
@@ -88,6 +90,8 @@ MAX_MEMBER_BYTES = 4 * 1024 * 1024
 PER_PAGE = 100
 BOT_NAME = "github-actions[bot]"
 BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
+EXTRAHEADER = "http.https://github.com/.extraheader"
+EXTRAHEADER_PLACEHOLDER = "AUTHORIZATION: basic ci-history-token-placeholder"
 
 
 @dataclass(frozen=True)
@@ -98,12 +102,14 @@ class WorkflowSpec:
 
 # The allowlist. A record's directory name is its key, never event text; a
 # later workflow is one row here and one entry in ci-history.yml's
-# `workflow_run.workflows`.
+# `workflow_run.workflows`. Every scheduled workflow but ci-history.yml itself
+# is one, so `--budget` measures each of their lanes (`scheduled_lanes`).
 WORKFLOWS: dict[str, WorkflowSpec] = {
     "ci": WorkflowSpec(".github/workflows/ci.yml", False),
     "release": WorkflowSpec(".github/workflows/release.yml", True),
     "nightly": WorkflowSpec(".github/workflows/nightly.yml", False),
     "smp-stress": WorkflowSpec(".github/workflows/smp-stress.yml", False),
+    "macos": WorkflowSpec(".github/workflows/macos.yml", False),
 }
 
 ARCH_TOKENS = ("x86_64", "aarch64")
@@ -479,12 +485,17 @@ def read_artifacts(api: Api, repo: str, run_id: int) -> Artifacts:
     return arts
 
 
-def _token_keys(token: str) -> set[str]:
-    """`x86_64-e2e-1` names `x86-64-e2e-1` and, past its arch, `e2e-1`."""
+def _token_keys(token: str, workflow: str = "") -> set[str]:
+    """`x86_64-e2e-1` names `x86-64-e2e-1` and, past its arch, `e2e-1`; in a
+    run of `workflow`, past a `<workflow>-` prefix too (`macos.yml` uploads
+    `results-x86_64-macos-check` from its `check` job)."""
     keys = {slug(token)}
     for arch in ARCH_TOKENS:
         if token.startswith(arch + "-"):
             keys.add(slug(token[len(arch) + 1:]))
+    pre = slug(workflow) + "-"
+    if workflow:
+        keys |= {k[len(pre):] for k in keys if k.startswith(pre) and len(k) > len(pre)}
     return keys
 
 
@@ -498,9 +509,11 @@ def _job_keys(name: str) -> set[str]:
     return keys
 
 
-def match_job(jobs: list[dict[str, Any]], token: str) -> dict[str, Any] | None:
+def match_job(
+    jobs: list[dict[str, Any]], token: str, workflow: str = ""
+) -> dict[str, Any] | None:
     """The one job the `<job>` token names, else the run's only job, else None."""
-    want = _token_keys(token)
+    want = _token_keys(token, workflow)
     hits = [j for j in jobs if isinstance(j.get("name"), str) and _job_keys(j["name"]) & want]
     if len(hits) == 1:
         return hits[0]
@@ -513,14 +526,15 @@ def attach_artifacts(rec: dict[str, Any], arts: Artifacts) -> None:
     """Results and runner data onto their jobs; the run-level `runner` only
     when exactly one job has one."""
     jobs: list[dict[str, Any]] = rec["jobs"]
+    workflow = str(rec.get("workflow") or "")
     for token, results in sorted(arts.results.items()):
-        job = match_job(jobs, token)
+        job = match_job(jobs, token, workflow)
         if job is None:
             arts.warnings.append(f"results-{token}: no single job matches, dropped")
             continue
         job["results"].extend(results)
     for token, runner in sorted(arts.runners.items()):
-        job = match_job(jobs, token)
+        job = match_job(jobs, token, workflow)
         if job is None:
             arts.warnings.append(f"runner-{token}: no single job matches, dropped")
             continue
@@ -734,15 +748,27 @@ class HistoryRepo:
     def _fallback_credentials(self) -> None:
         """In CI, when `gh auth setup-git` left git no credential helper, give
         this clone the job token as an extra header, written to its local
-        config file: never on argv, never printed."""
+        config file: never on argv, never printed. The header is set, never
+        added: a job that opens one work tree twice (`make ci-budget` runs
+        `--budget`, then `--tiers`) would otherwise hold two, git sends every
+        value, and GitHub answers a second `Authorization` with HTTP 400.
+        `git config --replace-all` leaves one value, a placeholder, which the
+        credential then replaces in the file."""
         token = os.environ.get("GH_TOKEN")
         if os.environ.get("GITHUB_ACTIONS") != "true" or not token:
             return
         if self._ok("config", "--get-urlmatch", "credential.helper", "https://github.com/"):
             return
+        self.git("config", "--local", "--replace-all", EXTRAHEADER, EXTRAHEADER_PLACEHOLDER)
         cred = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        with open(self.workdir / ".git" / "config", "a", encoding="utf-8") as f:
-            f.write(f'[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic {cred}\n')
+        config = self.workdir / ".git" / "config"
+        text = config.read_text(encoding="utf-8")
+        if text.count(EXTRAHEADER_PLACEHOLDER) != 1:
+            raise HistoryError(f"{config}: no single {EXTRAHEADER} placeholder to fill")
+        config.write_text(
+            text.replace(EXTRAHEADER_PLACEHOLDER, f"AUTHORIZATION: basic {cred}"),
+            encoding="utf-8",
+        )
 
     def head(self) -> str | None:
         out = self.git("rev-parse", "--verify", "-q", "HEAD", check=False).strip()
@@ -1207,6 +1233,11 @@ class MissingTimes(Exception):
     """A record lacks a per-job or per-step time `--budget` or `--tiers` needs."""
 
 
+class NoHistory(Exception):
+    """The history holds too little for `--budget`: a scheduled workflow with
+    no recorded run, or no complete week since its first scheduled job."""
+
+
 @dataclass(frozen=True)
 class Lanes:
     """Each scheduled job's lane, keyed by (workflow key, job display name), and
@@ -1246,6 +1277,18 @@ def _job_times(
     return created, started, completed
 
 
+def history_start(records: Sequence[Mapping[str, Any]]) -> datetime | None:
+    """The earliest job `created` time of `records`, tombstones aside: where
+    the scheduled workflows' history begins."""
+    times = [
+        t
+        for rec in records if "tombstone" not in rec
+        for job in rec.get("jobs") or [] if isinstance(job, dict)
+        for t in (parse_time(job.get("created")),) if t is not None
+    ]
+    return min(times, default=None)
+
+
 def budget(
     records: Sequence[Mapping[str, Any]],
     lanes: Lanes,
@@ -1256,11 +1299,23 @@ def budget(
     waits over the last 4 complete weeks (Monday 00:00 UTC); return the
     failures: a lane but a `rebuilds` one busy past 60% of a week, or a job in
     a reserved lane that waited past 12 hours to start. Weeks that overlap a
-    release window are skipped. Raises `MissingTimes` on a job without its
-    times."""
+    release window are skipped, and so are weeks that ended before the
+    history's first scheduled job, which it cannot measure; the week that
+    holds that job counts from it on. Raises `MissingTimes` on a job without
+    its times, and `NoHistory` when the history is too young to hold a
+    complete week."""
     end = _week_start(now)
     weeks = [(end - WEEK * (i + 1), end - WEEK * i) for i in range(BUDGET_WEEKS)][::-1]
+    start = history_start(records)
+    early = [w for w in weeks if start is not None and w[1] <= start]
+    weeks = [w for w in weeks if w not in early]
     weeks = [w for w in weeks if not any(_overlap(w[0], w[1], a, b) > 0 for a, b in windows)]
+    if start is not None and len(early) == BUDGET_WEEKS:
+        raise NoHistory(
+            "no complete week since the history's first scheduled job "
+            f"({start:%Y-%m-%d %H:%M} UTC); the first ends "
+            f"{_week_start(start) + WEEK:%Y-%m-%d} 00:00 UTC"
+        )
     hours: dict[str, list[float]] = {}
     busy: dict[str, list[float]] = {}
     waits: dict[str, list[float]] = {}
@@ -1294,6 +1349,10 @@ def budget(
                     )
     label = ", ".join(w0.strftime("%Y-%m-%d") for w0, _ in weeks) or "none"
     print(f"budget: weeks from {label} (Monday 00:00 UTC), release windows skipped")
+    if start is not None and early:
+        print("budget: weeks from " + ", ".join(f"{w0:%Y-%m-%d}" for w0, _ in early)
+              + f" end before the history's first scheduled job ({start:%Y-%m-%d}), "
+              "not measured")
     for wf, hs in sorted(hours.items()):
         print(f"workflow {wf}: " + ", ".join(f"{h:.1f}" for h in hs) + " job-hours per week")
     for lane in sorted(set(busy) | set(waits)):
@@ -1381,11 +1440,21 @@ def release_windows(testing_md: str) -> list[tuple[datetime, datetime]]:
 
 def scheduled_lanes(root: Path = ROOT) -> tuple[Lanes, list[str]]:
     """The lane of every scheduled job, read through check_workflows.py's
-    reader, and the `WORKFLOWS` keys of the scheduled workflows."""
+    reader, and the `WORKFLOWS` keys of the scheduled workflows. A scheduled
+    workflow that `WORKFLOWS` lacks, ci-history.yml aside (its record job
+    records the others), is a `HistoryError`: no record of its runs is ever
+    written, so its lanes would go unmeasured."""
     from scripts import check_workflows as cw
 
     tree = cw.load_tree(root)
     by_path = {spec.path: key for key, spec in WORKFLOWS.items()}
+    unrecorded = sorted(path for path, _ in cw.scheduled(tree)
+                        if path not in by_path and path != HISTORY_WORKFLOW)
+    if unrecorded:
+        raise HistoryError(
+            f"scheduled {', '.join(unrecorded)} not in ci_history.WORKFLOWS and ci-history.yml's "
+            "workflow_run.workflows: --budget cannot measure its lanes"
+        )
     job_lane = {
         (by_path[path], name): lane
         for (path, name), lane in cw.job_lanes(tree).items()
@@ -1668,14 +1737,24 @@ def budget_main(history: HistoryRepo, *, tiers_mode: bool) -> int:
         else:
             lanes, keys = scheduled_lanes()
             windows = release_windows((ROOT / "docs/TESTING.md").read_text(encoding="utf-8"))
-            records = [r for k in keys for r in history.records(k)]
-            if not records:
-                print(f"ci_history: {mode}: no history: ci-history holds no run of "
-                      f"{', '.join(keys) or 'a scheduled workflow'}", file=sys.stderr)
-                return 2
+            by_key = {k: history.records(k) for k in keys}
+            missing = [k for k in keys
+                       if not any("tombstone" not in r and r.get("jobs") for r in by_key[k])]
+            if missing or not keys:
+                which = ", ".join(missing) or "a scheduled workflow"
+                raise NoHistory(
+                    f"ci-history holds no recorded run of {which}. ci-history.yml records a run "
+                    "when it completes, so a scheduled workflow has no record before its first "
+                    "run ends (on the first night, this nightly run's own); --budget passes once "
+                    "each has a recorded run"
+                )
+            records = [r for k in keys for r in by_key[k]]
             problems = budget(records, lanes, windows, datetime.now(UTC))
     except MissingTimes as e:
         print(f"ci_history: {mode}: missing times: {e}", file=sys.stderr)
+        return 2
+    except NoHistory as e:
+        print(f"ci_history: {mode}: no history: {e}", file=sys.stderr)
         return 2
     summary([f"ci-history {mode}: {p}" for p in problems] or [f"ci-history {mode}: ok"])
     return 1 if problems else 0

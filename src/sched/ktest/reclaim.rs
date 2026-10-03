@@ -49,7 +49,9 @@ pub(crate) fn dead_list_batched_rounds() -> Outcome {
         // the list, so it takes all of them at once.
         let _g = crate::arch::current::InterruptGuard::enter();
         for s in stacks.iter_mut().filter_map(Option::take) {
-            thread_init::testing::park_on_local_list(s);
+            // SAFETY: invariant I10: this test allocated the stacks and
+            // gave them to no thread; established here.
+            unsafe { thread_init::testing::park_on_local_list(s) };
         }
     }
     let t0 = time_init::now_ns();

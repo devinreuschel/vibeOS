@@ -606,8 +606,8 @@ pub struct Call {
 pub const CALLS: &[Call] = &[
     Call {
         sys: Sys::Read,
-        errors: &[Errno::EBADF, Errno::EFAULT, Errno::EISDIR, Errno::EIO],
-        ktest: &[(Errno::EIO, "vblk_bad_sector")],
+        errors: &[Errno::EBADF, Errno::EFAULT, Errno::EISDIR, Errno::EAGAIN, Errno::EIO],
+        ktest: &[(Errno::EAGAIN, "dev_random_eagain"), (Errno::EIO, "vblk_bad_sector")],
         ptrs: &[
             Ptr { arg: 1, name: "buf", kind: PtrKind::Buf, out: true, nullable: false, len_from: Some(2), size: 0 },
         ],
@@ -645,7 +645,7 @@ pub const CALLS: &[Call] = &[
     },
     Call {
         sys: Sys::Lseek,
-        errors: &[Errno::EBADF, Errno::ESPIPE, Errno::EINVAL],
+        errors: &[Errno::EBADF, Errno::ESPIPE, Errno::EINVAL, Errno::ENXIO],
         ktest: &[],
         ptrs: &[
         ],
@@ -716,8 +716,8 @@ pub const CALLS: &[Call] = &[
     },
     Call {
         sys: Sys::Execve,
-        errors: &[Errno::EFAULT, Errno::ENAMETOOLONG, Errno::EINVAL, Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::ENFILE, Errno::E2BIG, Errno::ENOEXEC, Errno::ENOMEM],
-        ktest: &[],
+        errors: &[Errno::EFAULT, Errno::ENAMETOOLONG, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::ELOOP, Errno::ENFILE, Errno::E2BIG, Errno::ENOEXEC, Errno::ENOMEM, Errno::EIO],
+        ktest: &[(Errno::EIO, "vblk_bad_sector")],
         ptrs: &[
             Ptr { arg: 0, name: "pathname", kind: PtrKind::Cstr, out: false, nullable: false, len_from: None, size: 0 },
             Ptr { arg: 1, name: "argv", kind: PtrKind::Strvec, out: false, nullable: true, len_from: None, size: 0 },
@@ -770,7 +770,7 @@ pub const CALLS: &[Call] = &[
     },
     Call {
         sys: Sys::Getdents64,
-        errors: &[Errno::EBADF, Errno::ENOTDIR, Errno::ESPIPE, Errno::EINVAL, Errno::EFAULT],
+        errors: &[Errno::EBADF, Errno::ENOTDIR, Errno::EINVAL, Errno::EFAULT],
         ktest: &[],
         ptrs: &[
             Ptr { arg: 1, name: "dirent", kind: PtrKind::Buf, out: true, nullable: false, len_from: Some(2), size: 0 },

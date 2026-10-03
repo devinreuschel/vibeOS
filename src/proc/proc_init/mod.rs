@@ -16,11 +16,13 @@ use vibeos::kerror::KError;
 use vibeos::lock::RANK_SCHED;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::pid::IdIndex;
+use vibeos::proc::sig_bit as bit;
 use vibeos::proc::uaccess::user_range_ok;
 use vibeos::proc::{
     Creds, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitExit, InitState, MAX_FDS, MAX_PROCS,
-    ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action,
-    fd_flags_from_open, kill_delivers, reaper_for, sig_name, wait_exited, wait_signaled,
+    ProcState, SIGCHLD, SIGCONT, SIGSTOP, SigAct, SigNext, WNOHANG, default_action,
+    fd_flags_from_open, kill_delivers, next_signal, reaper_for, sig_name, wait_exited,
+    wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult, UserFrame};
@@ -330,10 +332,6 @@ fn intern_name(b: &[u8]) -> &'static str {
     }
 }
 
-fn bit(sig: u32) -> u32 {
-    if sig == 0 || sig > 31 { 0 } else { 1u32 << sig }
-}
-
 fn current_pid() -> u32 {
     thread_init::current_pid()
 }
@@ -466,7 +464,7 @@ pub(crate) fn spawn_elf(
 ) -> Result<u32, LoadError> {
     let args = user_init::exec_args(argv, envp)?;
     start_loaded(
-        user_init::load_path(None, path, &args)?,
+        user_init::load_exec(user_init::open_exec(None, path)?, &args)?,
         prefer,
         ppid,
         intern_name(path),
@@ -762,6 +760,12 @@ impl Handlers for Ctx<'_> {
 /// the section that decides it, so a `SIGCONT` that `sys_kill` sends in
 /// between finds the thread on the queue (ROADMAP §10.6, F033). The loop
 /// re-checks after every `schedule()`, which can return early.
+///
+/// `vibeos::proc::next_signal` picks the action, in Linux's order: a
+/// process that has acted on its stop (Stopped, with no `SIGSTOP` bit
+/// left) stays stopped until `SIGCONT` and only `SIGKILL` ends it, and a
+/// stop sent but not yet acted on is dequeued in number order with the
+/// other pending signals.
 fn apply_pending(frame: Option<&mut UserFrame>) {
     let pid = current_pid();
     if pid == 0 {
@@ -773,34 +777,13 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
                 let Some(p) = t.get_mut(pid) else {
                     return Pending::None;
                 };
-                if p.pending & bit(SIGKILL) != 0 {
-                    return Pending::Die(SIGKILL);
-                }
-                let mut stop = false;
-                if p.state == ProcState::Stopped || p.pending & bit(SIGSTOP) != 0 {
-                    p.pending &= !bit(SIGSTOP);
-                    stop = true;
-                } else {
-                    let pend = p.pending;
-                    let mut sig = 1u32;
-                    while sig <= 31 && !stop {
-                        if pend & bit(sig) != 0 && sig != SIGCHLD && sig != SIGCONT {
-                            match default_action(sig) {
-                                SigAct::Term => return Pending::Die(sig),
-                                SigAct::Stop => {
-                                    p.pending &= !bit(sig);
-                                    stop = true;
-                                }
-                                SigAct::Ign | SigAct::Cont => {
-                                    p.pending &= !bit(sig);
-                                }
-                            }
-                        }
-                        sig += 1;
-                    }
-                }
-                if !stop {
-                    return Pending::None;
+                let stopped = p.state == ProcState::Stopped && p.pending & bit(SIGSTOP) == 0;
+                let (next, left) = next_signal(p.pending, stopped);
+                p.pending = left;
+                match next {
+                    SigNext::None => return Pending::None,
+                    SigNext::Die(sig) => return Pending::Die(sig),
+                    SigNext::Stop => {}
                 }
                 p.state = ProcState::Stopped;
                 s.begin_wait(&mut p.stop_wq, FAR_DEADLINE);
@@ -988,6 +971,17 @@ pub(crate) mod testing {
         })
     }
 
+    /// Processes that can hold an open file: `Live` or `Stopped`, since a
+    /// zombie closed its descriptors before it became one.
+    pub(crate) fn holding_count() -> usize {
+        super::with_table(|t| {
+            t.procs
+                .iter()
+                .filter(|p| matches!(p.state, super::ProcState::Live | super::ProcState::Stopped))
+                .count()
+        })
+    }
+
     /// The fault address of the `#PF` whose kill line yields once; 0 for
     /// none.
     static KILL_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
@@ -1065,6 +1059,44 @@ pub(crate) mod testing {
         c.fetch_add(1, Ordering::AcqRel);
     }
 
+    static WAIT4_KILL_ARMED: AtomicBool = AtomicBool::new(false);
+    /// The caller and `pid` argument of the `wait4` that took the kill; 0
+    /// before.
+    static WAIT4_KILL_CALLER: AtomicU32 = AtomicU32::new(0);
+    static WAIT4_KILL_WANT: AtomicU64 = AtomicU64::new(0);
+
+    /// The next `wait4` from a process posts that process a `SIGKILL`
+    /// once it has entered, as [`post_pending`] does: no wake and no IPI,
+    /// as a kill that lands before the wait is armed finds the caller on
+    /// no queue.
+    pub(crate) fn arm_wait4_kill() {
+        WAIT4_KILL_CALLER.store(0, Ordering::Release);
+        WAIT4_KILL_WANT.store(0, Ordering::Release);
+        WAIT4_KILL_ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_wait4_kill() {
+        WAIT4_KILL_ARMED.store(false, Ordering::Release);
+    }
+
+    /// The caller of the `wait4` that took the kill, and its `pid`
+    /// argument; `(0, 0)` before one did.
+    pub(crate) fn wait4_kill_taken() -> (u32, i64) {
+        (
+            WAIT4_KILL_CALLER.load(Ordering::Acquire),
+            WAIT4_KILL_WANT.load(Ordering::Acquire) as i64,
+        )
+    }
+
+    pub(super) fn wait4_entered(pid: u32, want: i64) {
+        if !WAIT4_KILL_ARMED.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        post_pending(pid, vibeos::proc::SIGKILL);
+        WAIT4_KILL_WANT.store(want as u64, Ordering::Release);
+        WAIT4_KILL_CALLER.store(pid, Ordering::Release);
+    }
+
     /// The pid the next stop stall holds; 0 for none.
     static STALL_PID: AtomicU32 = AtomicU32::new(0);
     static STALL_IN: AtomicBool = AtomicBool::new(false);
@@ -1103,6 +1135,25 @@ pub(crate) mod testing {
         if STALL_PID.load(Ordering::Acquire) == pid {
             STALL_IN.store(true, Ordering::Release);
         }
+        if STOPS_PID.load(Ordering::Acquire) == pid {
+            STOPS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The pid whose stop decisions [`stops`] counts; 0 for none.
+    static STOPS_PID: AtomicU32 = AtomicU32::new(0);
+    static STOPS: AtomicU32 = AtomicU32::new(0);
+
+    /// Count `pid`'s stop decisions from 0; 0 counts none.
+    pub(crate) fn watch_stops(pid: u32) {
+        STOPS.store(0, Ordering::Release);
+        STOPS_PID.store(pid, Ordering::Release);
+    }
+
+    /// How many times the watched process has decided to stop and armed
+    /// its `stop_wq` wait.
+    pub(crate) fn stops() -> u32 {
+        STOPS.load(Ordering::Acquire)
     }
 
     /// Spins on TSC time; never services IPIs.
@@ -1204,6 +1255,76 @@ pub(crate) mod testing {
         if WRITE_ARMED.swap(false, Ordering::AcqRel) {
             WRITE_DONE_NS.store(time_init::now_ns().max(1), Ordering::Release);
         }
+        let me = thread_init::current_id().raw();
+        if TICKS_TID
+            .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            let (cpu, ticks) = cpu_ticks();
+            TICKS_END_CPU.store(cpu, Ordering::Relaxed);
+            TICKS_END.store(ticks, Ordering::Relaxed);
+            // Release: publishes the record; pairs with `console_write_ticks`.
+            TICKS_DONE.store(true, Ordering::Release);
+        }
+    }
+
+    /// Set until a console `write` claims the tick record.
+    static TICKS_ARMED: AtomicBool = AtomicBool::new(false);
+    /// The thread whose console `write` holds the claim, or `u32::MAX`.
+    static TICKS_TID: AtomicU32 = AtomicU32::new(u32::MAX);
+    static TICKS_START_CPU: AtomicU32 = AtomicU32::new(0);
+    static TICKS_START: AtomicU64 = AtomicU64::new(0);
+    static TICKS_END_CPU: AtomicU32 = AtomicU32::new(0);
+    static TICKS_END: AtomicU64 = AtomicU64::new(0);
+    static TICKS_DONE: AtomicBool = AtomicBool::new(false);
+
+    /// Record the next console `write` that copies all it was given: the
+    /// CPU it runs on and that CPU's timer ticks at its first copy and at
+    /// its return (ROADMAP §10.2: what happened during the write, not what
+    /// a watcher saw later).
+    pub(crate) fn arm_console_write_ticks() {
+        TICKS_DONE.store(false, Ordering::Release);
+        TICKS_TID.store(u32::MAX, Ordering::Release);
+        TICKS_ARMED.store(true, Ordering::Release);
+    }
+
+    /// The recorded write's `(cpu, ticks)` at its first copy and at its
+    /// return, once it has returned.
+    pub(crate) fn console_write_ticks() -> Option<((u32, u64), (u32, u64))> {
+        // Acquire: pairs with the Release store in `console_write_returned`.
+        TICKS_DONE.load(Ordering::Acquire).then(|| {
+            (
+                (
+                    TICKS_START_CPU.load(Ordering::Relaxed),
+                    TICKS_START.load(Ordering::Relaxed),
+                ),
+                (
+                    TICKS_END_CPU.load(Ordering::Relaxed),
+                    TICKS_END.load(Ordering::Relaxed),
+                ),
+            )
+        })
+    }
+
+    /// Called by `sys_write` before a console write's first copy.
+    pub(super) fn console_write_started() {
+        if !TICKS_ARMED.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let (cpu, ticks) = cpu_ticks();
+        TICKS_START_CPU.store(cpu, Ordering::Relaxed);
+        TICKS_START.store(ticks, Ordering::Relaxed);
+        // Release: the start's fields before the claim that ends them.
+        TICKS_TID.store(thread_init::current_id().raw(), Ordering::Release);
+    }
+
+    /// This CPU's id and timer ticks, read with IF off so both are this
+    /// CPU's.
+    fn cpu_ticks() -> (u32, u64) {
+        let _g = crate::arch::current::InterruptGuard::enter();
+        let me = per_cpu_init::current().cpu_id;
+        let ticks = per_cpu_init::cpu(me).map_or(0, |c| c.ticks.load(Ordering::Relaxed));
+        (me, ticks)
     }
 
     /// The `rdi` of a `getpid` that the entry hooks below act on: a test

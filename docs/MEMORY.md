@@ -21,7 +21,7 @@ adopting it re-plans this table. Kernel regions are fixed, not discovered, excep
 | Limine's HHDM offset +, inside the slot `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` | 64 TiB slot; today `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table); today the constant `HHDM_BASE`, which `boot::capture` asserts Limine's offset equals. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a claimed BAR that overlaps a framebuffer from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). The physmap never leaves its slot (below the table). |
 | `0xFFFF_C000_0000_0000` – `0xFFFF_C000_0400_0000` | 64 MiB | Kernel heap. Starts at 1 MiB mapped and grows. Planned (ROADMAP §12.6): the region's size is set at boot from installed memory, up to the 16 TiB below the KVA region, so the heap can grow as far as RAM does ([§4.4](#44-kernel-heap)). |
 | `0xFFFF_D000_0000_0000` – `0xFFFF_D010_0000_0000` | 64 GiB | Kernel VA allocator: guarded stacks, `vmap`, large transient mappings. |
-| `0xFFFF_E000_0000_0000` – `0xFFFF_E000_1000_0000` | 256 MiB | `ioremap` window for device MMIO that should not be reached through the physmap. Today a bump allocator that never frees; planned (ROADMAP §20.1): §4.5's range allocator over its slot, with `iounmap`. Its slot ends at `0xFFFF_EA00_0000_0000` (10 TiB); ROADMAP §20.1 sizes the window inside it. |
+| `0xFFFF_E000_0000_0000` – `0xFFFF_E000_1000_0000` | 256 MiB | `ioremap` window for device MMIO that should not be reached through the physmap. Today a bump allocator that never frees a mapping; a failed map unmaps what it mapped and gives its reservation back, unless a leaf it did not map refused it or it added a page table: then the cursor stays past that VA, so no later `ioremap` gets it and fails the same way (`ioremap_failure_returns_va`). Planned (ROADMAP §20.1): §4.5's range allocator over its slot, with `iounmap`. Its slot ends at `0xFFFF_EA00_0000_0000` (10 TiB); ROADMAP §20.1 sizes the window inside it. |
 | `0xFFFF_EA00_0000_0000` – `0xFFFF_EB00_0000_0000` | 1 TiB | Frame metadata (ROADMAP §12.1): one `Frame` per 4 KiB of physical memory up to 64 TiB, indexed by physical frame number, virtually contiguous, and populated one memory section at a time, so a hole costs page tables only. A const assertion holds `size_of::<Frame>()` to 64 bytes. |
 | `0xFFFF_EC00_0000_0000` – `0xFFFF_FC00_0000_0000` | 16 TiB | KASAN shadow, in the ROADMAP §12.1 KASAN build only: one shadow byte per 8 bytes of the kernel half, at LLVM's x86_64 kernel-address offset `0xDFFF_FC00_0000_0000` (aarch64: §11.2). |
 | `0xFFFF_FFFF_8000_0000` – `0xFFFF_FFFF_FFFF_FFFF` | 2 GiB | Kernel image. Matches the `kernel` code model so `.text` relocations fit in 32-bit displacements. |
@@ -168,7 +168,14 @@ pmm::leaked_frames() -> usize                  // dropped tokens; `meminfo` prin
 ```
 
 Initialization walks the Limine memory map and ingests every `USABLE` region as power-of-two aligned
-blocks, excluding:
+blocks. The whole `MAX_ORDER` blocks of a region are one run, a `[start, end)` pair in the `Buddy`
+(at most `pmm::TOP_RUNS`, 16, beyond which they are linked as before), with no node written into
+them: a block leaves its run when an allocation takes it, highest first as the list it replaces
+handed them out, or the lowest that fits for `alloc_constrained`, and a freed block is linked as
+any other. A link in every free 4 MiB block was a first write into every 4 MiB of RAM at boot,
+each a fault the host takes for QEMU's guest memory, which on a host whose transparent huge pages
+compact on fault made a 9 GiB TCG boot spend most of its time before the `pmm:` marker (ROADMAP
+§10.2). Ingestion excludes:
 
 - physical frame 0
 - the AP trampoline page `boot::capture` chose from the memory map (`BootInfo.trampoline_page`,
@@ -706,8 +713,12 @@ is the second.
   stack goes into the CPU's stack cache of at most two (`per_cpu::StackCache`, Linux's
   `NR_CACHED_STACKS`), which the next spawn on that CPU reuses zeroed and still mapped; any other
   stack goes on the CPU's dead list, linked through the dead stacks themselves
-  (`kva_init::park_on_list`), and that CPU's workqueue worker unmaps and frees it with IF=1
-  (`kva_init::free_parked`). The worker frees the list in batches of up to 16 stacks and 64 pages:
+  (`kva_init::park_slot_on_list`), and that CPU's workqueue worker unmaps and frees it with IF=1
+  (`kva_init::free_parked`). The tail moves the 520-byte handle from the slot into the cache or
+  the list in place (`StackCache::put_from`), out of line (`thread_init::retire_dead_stack`), so
+  no copy of it sits in the tail's own frame, which is under every blocked thread's deepest frames
+  and every preempting tick's (ROADMAP §10.2). The worker frees the list in batches of up to 16
+  stacks and 64 pages:
   it unmaps each stack of a batch, sends one shootdown round for all of them (§7.9), then frees their
   frames and VA. A round waits for every other CPU's ack while an exit sends none, so with a round per
   page a burst of exits outran the worker, and the dead stacks, their frames, and the fresh KVA and

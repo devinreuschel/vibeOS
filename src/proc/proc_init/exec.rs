@@ -174,13 +174,20 @@ pub(super) fn sys_execve(
     // The path's and the arguments' bytes go through as they are: only
     // NUL ends one, as on Linux.
     let path_b = &pbuf[..n];
+    // The file first, as Linux opens it before it reads `argv`: a missing
+    // path is `ENOENT` whatever `argv` holds.
+    let file = user_init::open_exec(current_base(), path_b).map_err(KError::from)?;
     // Every argument is copied before the load starts, so a refused one
     // returns to the old image (DESIGN §4.4).
     let mut args = ExecArgs::new(elf::arg_space_limit(RLIMIT_STACK_DEFAULT));
-    copy_cvec(argv, &mut args, false)?;
-    args.finish_argv()?;
-    copy_cvec(envp, &mut args, true)?;
-    let loaded = match user_init::load_path(current_base(), path_b, &args) {
+    let copied = copy_cvec(argv, &mut args, false)
+        .and_then(|()| args.finish_argv().map_err(KError::from))
+        .and_then(|()| copy_cvec(envp, &mut args, true));
+    if let Err(e) = copied {
+        user_init::drop_exec(file);
+        return Err(e);
+    }
+    let loaded = match user_init::load_exec(file, &args) {
         Ok(l) => l,
         Err(e) => return Err(KError::from(e)),
     };

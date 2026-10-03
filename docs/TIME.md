@@ -91,6 +91,28 @@ TCG, QEMU never advertises `CPUID.01H:ECX[24]`, so `make test-kernel` (`-cpu max
 and no CI tier runs them. Planned (ROADMAP §10.1, F078): the nightly KVM leg runs them. Under KVM,
 `-cpu qemu64,-tsc-deadline` forces the periodic path.
 
+`apic_init::calib_periodic` measures the LAPIC count against the HPET as `calibrate_hpet` measures
+the TSC: each end of the 10 ms window is the count read the HPET brackets most tightly of 16,
+placed by its bracket's middle, and the rate divides by the HPET ticks between the two ends
+(`vibeos::apic::lapic_per_ms`), not by the 10 ms planned. Dividing by the plan let a host that
+stalled QEMU past the window's end lengthen the period by the stall: 80 ms stalls armed 8 to 9 ms
+ticks.
+
+`apic_init::prove` decides whether an armed mode works from the interrupts that arrive, not from
+the time that passes. It unmasks the PIT on PIC IRQ0 through LINT0 ExtINT, the path the PIT
+fallback uses, and halts until the LAPIC timer fires, which makes that mode the tick, or until the
+PIT has fired `PROVE_PIT_FIRES` (20) times and the timer has not, which sends `prove` on to the
+next mode (`vibeos::apic::timer_proof`); IRQ0 is masked again after each wait. A fixed window
+cannot decide it under TCG. The TSC, the HPET and the LAPIC's own counter all follow host time
+there, but the timer's interrupt is raised only when QEMU's main loop runs, so a host that
+deschedules QEMU for longer than the window lets the window pass before the guest is given the
+interrupt: with a 50 ms TSC window, the scheduled macOS run of `make test-lapic-fallback` fell back
+to the PIT that way, and a window of HPET time fails the same way. A host that holds back the
+timer's interrupt holds back the PIT's with it, and QEMU delivers a pending LAPIC interrupt before
+the PIC's, so a timer that works, armed for 1 ms, fires within the PIT's first few interrupts.
+Where the PIT never interrupts, nothing shows a mode silent: a mode that never fires there stops
+the boot in `prove` rather than handing on to the next.
+
 When the LAPIC timer owns the tick, mask the PIT's GSI at the I/O APIC. Do not merely ignore its
 interrupts.
 

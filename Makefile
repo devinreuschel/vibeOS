@@ -194,10 +194,12 @@ all: user
 
 ifneq ($(VIBEOS_PREBUILT),1)
 # The build is $(CARGO_SHIP)'s, so trim-paths keeps host paths out of the
-# programs as out of the kernel (ROADMAP §10.2).
+# programs as out of the kernel (ROADMAP §10.2). Its --config args go before
+# `build`: cargo replaces the --config list given before the subcommand with
+# one given after it, which would drop CARGO_SHIP's trim-paths.
 $(USER_STAMP): $(USER_SRCS) user/Cargo.toml user/mem/Cargo.toml Cargo.toml Cargo.lock rust-toolchain.toml scripts/check_user_elf.py Makefile
 	$(CARGO) clippy -p vibeos-user -p vibeos-user-mem --target $(USER_TRIPLE) $(CARGO_FLAGS) $(USER_CARGO_CONFIG) -- -D warnings
-	$(CARGO_SHIP) build -p vibeos-user --target $(USER_TRIPLE) $(CARGO_FLAGS) $(USER_CARGO_CONFIG)
+	$(CARGO_SHIP) $(USER_CARGO_CONFIG) build -p vibeos-user --target $(USER_TRIPLE) $(CARGO_FLAGS)
 	python3 scripts/check_user_elf.py $(addprefix $(USER_ELF_DIR)/,$(USER_BIN_NAMES))
 	mkdir -p $(USER_OUT)
 	$(foreach b,$(USER_BIN_NAMES),$(OBJCOPY) --strip-all $(USER_ELF_DIR)/$(b) $(USER_OUT)/$(b) &&) true
@@ -261,6 +263,8 @@ help:
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
 	  '  test-lapic-fallback   in-guest tests, TSC-deadline off' \
+	  '  test-kernel-<k>       the per-push shards of those three, which test runs:' \
+	  '                        test-kernel-smp4-<k> and test-lapic-fallback-<k> too' \
 	  '  test-irqoff           test-kernel and test-e2e in the IF-off tracer build (nightly)' \
 	  '  test-vibefs-crash     QEMU-kill + host fsck-vibefs' \
 	  '  test-smp-stress       -smp 4 in-guest tier (weekly CI)' \
@@ -630,17 +634,86 @@ test-qmp: $(ISO)
 test-forensics: $(ISO_HANG) $(ISO_GP) $(VMCORE)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_HANG) VIBEOS_VMCORE=$(VMCORE) python3 tests/harness/run_forensics.py
 
-test-kernel: $(ISO_KTEST)
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py --hpet-off
-
-test-kernel-smp4: $(ISO_KTEST)
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/harness/run_ktest.py
+# The in-guest tiers (DESIGN §8.2). Each variant's target runs the whole
+# registry in one boot, then the proof boots: the full run, for local use, the
+# scheduled jobs and the gate. Its shards, `<variant>-<k>`, run the same in
+# pieces under the 60 s a per-push tier may take, each one ci.yml tier, and
+# `make test` runs them: tests/harness/ktest_shards.py splits the registry
+# (`vibeos.ktest_range=`) and the proof boots between them, every row and boot
+# in one shard (TESTING.md §8.6). KTEST_ENV is the variant's configuration,
+# which a variant and its shards share.
+KTEST_ENV =
+KTEST_RUN = VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) $(KTEST_ENV) python3 tests/harness/run_ktest.py
+KERNEL_SHARDS := test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6
+KERNEL_SMP4_SHARDS := test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5
+LAPIC_FALLBACK_SHARDS := test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6
+.PHONY: $(KERNEL_SHARDS) $(KERNEL_SMP4_SHARDS) $(LAPIC_FALLBACK_SHARDS)
 
 # The nightly KVM leg adds +invtsc, so its invariant-TSC check still applies
 # (DESIGN §8.4).
 LAPIC_FALLBACK_CPU ?= qemu64,-tsc-deadline
+test-kernel-smp4 $(KERNEL_SMP4_SHARDS): KTEST_ENV = VIBEOS_SMP=4
+test-lapic-fallback $(LAPIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_QEMU_CPU=$(LAPIC_FALLBACK_CPU)
+
+test-kernel: $(ISO_KTEST)
+	$(KTEST_RUN) --hpet-off
+
+test-kernel-1: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-2: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-3: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-4: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-5: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-6: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4: $(ISO_KTEST)
+	$(KTEST_RUN)
+
+test-kernel-smp4-1: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-2: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-3: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-4: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-5: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
 test-lapic-fallback: $(ISO_KTEST)
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=$(LAPIC_FALLBACK_CPU) python3 tests/harness/run_ktest.py
+	$(KTEST_RUN)
+
+test-lapic-fallback-1: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-lapic-fallback-2: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-lapic-fallback-3: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-lapic-fallback-4: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-lapic-fallback-5: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-lapic-fallback-6: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
 
 # Over the volatile-cache device (DESIGN §8.3): nbd-cache serves the disk,
 # vibefs-cat reads /w from each image rebuilt from its trace.
@@ -669,7 +742,7 @@ test-irqoff: $(ISO_KTEST_IRQOFF) $(ISO_IRQOFF) $(MKFS_VIBEFS)
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_ISO=$(ISO_KTEST_IRQOFF) python3 tests/harness/run_ktest.py
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_RESULTS_APPEND=1 VIBEOS_ISO=$(ISO_IRQOFF) VIBEOS_MKFS=$(MKFS_VIBEFS) python3 tests/harness/run_e2e.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash test-vibefs-crash-plants
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6 test-vibefs-crash test-vibefs-crash-plants
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)

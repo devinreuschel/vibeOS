@@ -198,9 +198,12 @@ fn publish_slot(slot: usize, id: ThreadId) {
     }
 }
 
-/// The tid in thread-table slot `slot`, for `ipi_init::drain_inbox`. A slot
-/// with a bit in some inbox holds a Ready thread, which cannot die before
-/// it runs, so the slot is not reused while the bit is set.
+/// The tid in thread-table slot `slot`, for `ipi_init::drain_inbox`. A
+/// slot's inbox bit can outlive the wake that set it: the push lands after
+/// the waker drops SCHED, by which time the thread may have run, exited,
+/// and had its slot reused. The drain then queues the slot's new thread,
+/// which `schedule_inner` runs only while it is `Ready` and placed on that
+/// CPU; a thread spawned parked is not `Ready` until [`make_ready`].
 pub(crate) fn tid_of_slot(slot: usize) -> Option<ThreadId> {
     // Acquire: pairs with the Release store in `publish_slot`.
     let raw = SLOT_TID.try_get()?.get(slot)?.load(Ordering::Acquire);
@@ -706,26 +709,7 @@ pub(crate) fn finish_switch() {
     testing::scan_dead_slot();
     let (prev, kick) = per_cpu_init::with_current(|cpu| {
         let prev = core::mem::replace(&mut cpu.tail_prev, core::ptr::null_mut());
-        let Some(stack) = cpu.dead_stack.take() else {
-            return (prev, false);
-        };
-        let pages = stack.pages();
-        let refused = if pages == DEFAULT_STACK_PAGES {
-            cpu.stack_cache.put(stack).err()
-        } else {
-            Some(stack)
-        };
-        match refused {
-            None => {
-                CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
-                STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-                (prev, false)
-            }
-            Some(stack) => {
-                kva_init::park_on_list(&mut cpu.dead_list, stack);
-                (prev, true)
-            }
-        }
+        (prev, cpu.dead_stack.is_some() && retire_dead_stack(cpu))
     });
     if kick {
         kick_dead_stacks();
@@ -759,7 +743,10 @@ fn reclaim_dead_stacks_here() -> bool {
     if head == 0 {
         return false;
     }
-    let n = kva_init::free_parked(head);
+    // SAFETY: invariant I10, established at `thread_init::finish_switch`:
+    // `head` is this CPU's whole dead list, which only its switch tail
+    // fills with stacks no CPU runs on.
+    let n = unsafe { kva_init::free_parked(head) };
     stacks_reclaimed(n);
     n > 0
 }
@@ -767,6 +754,30 @@ fn reclaim_dead_stacks_here() -> bool {
 /// The worker has freed `n` stacks it took with [`take_dead_stacks`].
 pub(crate) fn stacks_reclaimed(n: usize) {
     STACKS_IN_FLIGHT.fetch_sub(n, Ordering::AcqRel);
+}
+
+/// The switch tail's work on `cpu`'s dead-stack slot, which holds a stack:
+/// move it into `cpu`'s stack cache, or onto its dead list when the cache
+/// refuses it; true for the dead list, whose worker the caller wakes. Out
+/// of line, and moved slot to slot: a `GuardedStack` is 520 bytes, and the
+/// copies of one that `finish_switch` once held in its own frame sat at the
+/// bottom of every thread that blocks, under its deepest frames, and under
+/// every preempting interrupt (ROADMAP §10.2).
+#[inline(never)]
+fn retire_dead_stack(cpu: &mut PerCpu) -> bool {
+    let Some(pages) = cpu.dead_stack.as_ref().map(GuardedStack::pages) else {
+        return false;
+    };
+    if pages == DEFAULT_STACK_PAGES && cpu.stack_cache.put_from(&mut cpu.dead_stack) {
+        CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
+        STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        return false;
+    }
+    // SAFETY: invariant I10, established at `thread_init::finish_switch`:
+    // its switch tail calls this after `switch_context` has left the slot's
+    // stack, and `dead_list` is this CPU's dead list.
+    unsafe { kva_init::park_slot_on_list(&mut cpu.dead_list, &mut cpu.dead_stack) };
+    true
 }
 
 /// Frames the stack caches of every CPU hold.
@@ -1007,14 +1018,29 @@ pub fn spawn_user(
 
 const USER_FRAME_BYTES: usize = core::mem::size_of::<UserFrame>();
 
+/// A thread spawned parked ([`spawn_parked_on`], [`spawn_user`]) until
+/// [`make_ready`]: blocked on no queue, with no deadline, so no wake and no
+/// timeout readies it, and no stale run-queue or inbox entry for its slot
+/// runs it ([`tid_of_slot`]).
+const PARKED: ThreadState = ThreadState::Blocked {
+    wq: 0,
+    deadline: vibeos::sched::FAR_DEADLINE,
+};
+
+/// Make thread `id`, spawned parked, runnable on its home CPU. A parked
+/// thread retired before it started (`abandon_unstarted`) stays Dead.
 pub fn make_ready(id: ThreadId) {
     with_sched(|s| {
-        if let Some(t) = s.get_mut(id) {
-            if t.state == ThreadState::Dead {
-                return;
-            }
-            t.state = ThreadState::Ready;
+        let Some(t) = s.get_mut(id) else {
+            return;
+        };
+        if t.state == ThreadState::Dead {
+            return;
         }
+        // Invariant: each parked spawn's owner makes it ready once, and
+        // nothing else changes a parked thread's state (`thread_init::PARKED`).
+        assert!(t.state == PARKED, "make_ready: thread {} not parked", id.0);
+        t.state = ThreadState::Ready;
         s.place_home(id);
     });
 }
@@ -1027,7 +1053,7 @@ fn choose_cpu(affinity: CpuAffinity) -> u32 {
     cpu
 }
 
-/// Build a Ready (or, `enqueue` false, parked) thread. The stack comes
+/// Build a Ready (or, `enqueue` false, [`PARKED`]) thread. The stack comes
 /// first, then a TCB slot: a `Dead` one is rewritten under SCHED, else a new
 /// `Tcb` box goes into an empty one. Neither the box nor the stack is
 /// allocated or freed under SCHED, which ranks above HEAP, PT and BUDDY.
@@ -1098,6 +1124,9 @@ fn spawn_inner(
         fill_tcb(
             tcb, name, entry, affinity, cpu, ks, top, tramp, first_nest, pid, as_cr3,
         );
+        if !enqueue {
+            tcb.state = PARKED;
+        }
         s.bind(id, slot);
         if enqueue {
             s.place(cpu, id);
@@ -1120,7 +1149,7 @@ fn spawn_inner(
     let tcb = TryBox::try_new(Tcb {
         id: ThreadId(0),
         name,
-        state: ThreadState::Ready,
+        state: if enqueue { ThreadState::Ready } else { PARKED },
         on_cpu: OnCpu::new(),
         stack: None,
         context: CpuContext::empty(),

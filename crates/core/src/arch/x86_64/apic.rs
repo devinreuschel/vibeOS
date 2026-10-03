@@ -4,6 +4,7 @@
 //! ISO polarity/trigger, timer mode names. MMIO lives in the binary crate.
 
 use crate::acpi::Iso;
+use crate::time::FS_PER_MS;
 use crate::vectors;
 
 /// `IA32_APIC_BASE` (MSR `0x1B`). Bit 11 global enable; bits 12+ base.
@@ -399,6 +400,89 @@ pub fn tsc_deadline_arm_plan(vec: u8, now: u64, tsc_per_ms: u64) -> [TscDeadline
     ]
 }
 
+/// One read of the LAPIC timer's current count, placed on the HPET by the
+/// main-counter reads just before and just after it, each 32 bits wide as
+/// the kernel reads the counter (`time_init::hpet_read_main`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CountRead {
+    pub hpet_lo: u64,
+    pub count: u32,
+    pub hpet_hi: u64,
+}
+
+impl CountRead {
+    /// HPET ticks between the reads around the count read.
+    pub fn width(self) -> u64 {
+        self.hpet_hi.wrapping_sub(self.hpet_lo) & u64::from(u32::MAX)
+    }
+
+    /// The HPET at the count read, as the middle of its bracket.
+    pub fn hpet_mid(self) -> u64 {
+        self.hpet_lo.wrapping_add(self.width() / 2) & u64::from(u32::MAX)
+    }
+
+    /// The narrower of two reads, `self` on a tie.
+    pub fn narrower(self, other: CountRead) -> CountRead {
+        if other.width() < self.width() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// LAPIC timer counts per millisecond from reads `a` and `b` of one
+/// one-shot count, on an HPET of `period_fs`: the counts it ran down over
+/// the HPET ticks between the reads' bracket middles
+/// (`apic_init::calib_periodic`). The window is the one the HPET measured,
+/// so a stall that keeps the CPU away past its planned end lengthens both
+/// sides of the ratio, and a stall inside a bracket widens it, so the
+/// narrowest pick drops it. None when the count did not fall or no HPET
+/// tick lies between the reads.
+pub fn lapic_per_ms(a: CountRead, b: CountRead, period_fs: u32) -> Option<u64> {
+    let counts = a.count.checked_sub(b.count)?;
+    let ticks = b.hpet_mid().wrapping_sub(a.hpet_mid()) & u64::from(u32::MAX);
+    let fs = u128::from(ticks).checked_mul(u128::from(period_fs))?;
+    if counts == 0 || fs == 0 {
+        return None;
+    }
+    let v = u128::from(counts).checked_mul(FS_PER_MS)? / fs;
+    u64::try_from(v).ok()
+}
+
+/// PIT interrupts after which `apic_init::prove` takes a LAPIC timer it
+/// armed, and which has not fired, for one that will not (DESIGN §6.3).
+/// The PIT ticks at about 1 kHz and the timer is armed for 1 ms, so a timer
+/// that works fires within the PIT's first few interrupts; the rest is
+/// margin.
+pub const PROVE_PIT_FIRES: u64 = 20;
+
+/// What `apic_init::prove` knows of the LAPIC timer it armed, from the
+/// interrupts the timer and the PIT, its witness, delivered since.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimerProof {
+    /// Neither has decided it: wait for the next interrupt.
+    Pending,
+    /// The timer fired: it is the tick.
+    Fires,
+    /// The PIT fired [`PROVE_PIT_FIRES`] times and the timer never.
+    Silent,
+}
+
+/// The proof from `lapic_fires` timer and `pit_fires` PIT interrupts since
+/// the arm. A timer fire decides it, however many PIT fires came first:
+/// interrupts, not elapsed time, are the evidence, so a host that holds
+/// both back, as one that deschedules QEMU does, cannot decide it.
+pub const fn timer_proof(lapic_fires: u64, pit_fires: u64) -> TimerProof {
+    if lapic_fires != 0 {
+        TimerProof::Fires
+    } else if pit_fires >= PROVE_PIT_FIRES {
+        TimerProof::Silent
+    } else {
+        TimerProof::Pending
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,6 +710,81 @@ mod tests {
                 TscDeadlineStep::Deadline(15),
             ]
         );
+    }
+
+    /// QEMU's HPET: 100 MHz, a 10 ns period.
+    const HPET_10NS: u32 = 10_000_000;
+
+    fn read(hpet: u64, count: u32, width: u64) -> CountRead {
+        CountRead {
+            hpet_lo: hpet,
+            count,
+            hpet_hi: hpet.wrapping_add(width) & u64::from(u32::MAX),
+        }
+    }
+
+    #[test]
+    fn lapic_per_ms_over_the_measured_window() {
+        // 62,500 counts per ms (QEMU's 1 GHz bus, divide by 16) over the
+        // 10 ms window `calib_periodic` plans.
+        let a = read(1_000, 4_000_000_000, 10);
+        let b = read(1_001_000, 4_000_000_000 - 625_000, 10);
+        assert_eq!(lapic_per_ms(a, b, HPET_10NS), Some(62_500));
+        // The CPU came back 80 ms after the window's planned end: the HPET
+        // saw 90 ms and the count fell 90 ms' worth, so the rate holds.
+        let late = read(9_001_000, 4_000_000_000 - 5_625_000, 10);
+        assert_eq!(lapic_per_ms(a, late, HPET_10NS), Some(62_500));
+    }
+
+    #[test]
+    fn lapic_per_ms_places_each_read_by_its_bracket() {
+        // A stall between the HPET read and the count read: the bracket
+        // spans it, and its middle is where the count read is placed.
+        let a = read(1_000, 4_000_000_000, 10);
+        let stalled = read(1_000_000, 4_000_000_000 - 625_000, 2_000);
+        let tight = read(1_000_995, 4_000_000_000 - 625_000, 10);
+        assert_eq!(stalled.narrower(tight), tight);
+        assert_eq!(tight.narrower(stalled), tight);
+        assert_eq!(tight.narrower(tight), tight);
+        assert_eq!(lapic_per_ms(a, tight, HPET_10NS), Some(62_500));
+    }
+
+    #[test]
+    fn lapic_per_ms_across_the_32_bit_wrap() {
+        let lo = u64::from(u32::MAX) - 500_000;
+        let a = read(lo, 1_000_000, 10);
+        let b = read(
+            (lo + 1_000_000) & u64::from(u32::MAX),
+            1_000_000 - 625_000,
+            10,
+        );
+        assert!(b.hpet_lo < a.hpet_lo);
+        assert_eq!(lapic_per_ms(a, b, HPET_10NS), Some(62_500));
+        let straddle = read(u64::from(u32::MAX) - 4, 7, 10);
+        assert_eq!(straddle.width(), 10);
+        assert_eq!(straddle.hpet_mid(), 0);
+    }
+
+    #[test]
+    fn lapic_per_ms_refuses_a_count_that_did_not_fall() {
+        let a = read(1_000, 500, 10);
+        assert_eq!(lapic_per_ms(a, read(1_001_000, 501, 10), HPET_10NS), None);
+        assert_eq!(lapic_per_ms(a, read(1_001_000, 500, 10), HPET_10NS), None);
+        // No HPET tick between the two middles.
+        assert_eq!(lapic_per_ms(a, read(1_000, 400, 10), HPET_10NS), None);
+        assert_eq!(lapic_per_ms(a, read(1_001_000, 400, 10), 0), None);
+    }
+
+    #[test]
+    fn timer_proof_counts_interrupts() {
+        assert_eq!(timer_proof(0, 0), TimerProof::Pending);
+        assert_eq!(timer_proof(0, PROVE_PIT_FIRES - 1), TimerProof::Pending);
+        assert_eq!(timer_proof(0, PROVE_PIT_FIRES), TimerProof::Silent);
+        assert_eq!(timer_proof(0, u64::MAX), TimerProof::Silent);
+        assert_eq!(timer_proof(1, 0), TimerProof::Fires);
+        // A fire outweighs any PIT count: a late timer is not a silent one.
+        assert_eq!(timer_proof(1, PROVE_PIT_FIRES), TimerProof::Fires);
+        assert_eq!(timer_proof(u64::MAX, u64::MAX), TimerProof::Fires);
     }
 
     #[test]

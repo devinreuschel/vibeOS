@@ -2,15 +2,15 @@ use super::*;
 use crate::fs::FsError;
 
 /// The image size most tests format: 64 KiB.
-const IMG: usize = 64 * 1024;
+pub(super) const IMG: usize = 64 * 1024;
 
-fn fresh(n: usize) -> Vec<u8> {
+pub(super) fn fresh(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
     mkfs(&mut b, b"TEST").unwrap();
     b
 }
 
-fn with_vol<R>(buf: &mut [u8], f: impl FnOnce(&mut FatVol, &mut MemDisk) -> R) -> R {
+pub(super) fn with_vol<R>(buf: &mut [u8], f: impl FnOnce(&mut FatVol, &mut MemDisk) -> R) -> R {
     let mut disk = MemDisk::new(buf, SEC as u32).unwrap();
     let mut vol = FatVol::mount(&mut disk).unwrap();
     f(&mut vol, &mut disk)
@@ -27,7 +27,7 @@ fn allow_missing_tools() -> bool {
 /// A skipped check prints its line once per process.
 /// Miri cannot spawn a process, so under `make miri` the check is skipped
 /// and the test's own image checks still run.
-fn fsck(buf: &[u8]) {
+pub(super) fn fsck(buf: &[u8]) {
     if cfg!(miri) {
         return;
     }
@@ -439,7 +439,7 @@ fn unlink_free(
 }
 
 /// Create `name` in `dir`; the caller-owned words of the new file.
-fn create_words(v: &mut FatVol, d: &mut MemDisk, dir: u32, name: &[u8]) -> FatInode {
+pub(super) fn create_words(v: &mut FatVol, d: &mut MemDisk, dir: u32, name: &[u8]) -> FatInode {
     let n = v.create(d, dir, name, false).unwrap();
     FatInode::of_node(&n)
 }
@@ -727,6 +727,41 @@ fn rename_into_own_subtree_einval() {
     fsck(&b);
 }
 
+/// A directory replaces an empty directory and not one with entries, nor
+/// a file, and a file never replaces a directory (rename(2)).
+#[test]
+fn rename_dir_over_empty_dir() {
+    let mut b = fresh(IMG);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let p = v.create(d, root, b"p", true).unwrap();
+        v.create(d, root, b"q", true).unwrap();
+        let r = v.create(d, root, b"r", true).unwrap();
+        v.create(d, r.clu, b"in", false).unwrap();
+        v.create(d, root, b"f", false).unwrap();
+        for (s, t, e) in [
+            (b"p", b"r", FatError::NotEmpty),
+            (b"p", b"f", FatError::NotDir),
+        ] {
+            assert_eq!(v.rename(d, root, s, root, t).unwrap_err(), e);
+        }
+        assert_eq!(
+            v.rename(d, root, b"f", root, b"q").unwrap_err(),
+            FatError::IsDir
+        );
+        let gone = v
+            .rename(d, root, b"p", root, b"q")
+            .unwrap()
+            .replaced
+            .unwrap();
+        v.free_chain(d, gone.first_clu).unwrap();
+        assert_eq!(v.lookup(d, root, b"q").unwrap().clu, p.clu);
+        assert_eq!(v.lookup(d, root, b"p").unwrap_err(), FatError::NotFound);
+        v.sync(d).unwrap();
+    });
+    fsck(&b);
+}
+
 #[test]
 fn rename_dir_dotdot_names_new_parent() {
     let mut b = fresh(IMG);
@@ -919,8 +954,8 @@ fn extend_failure_rolls_back_chain() {
         let o_first = o.first_clu;
         let free = v.count_free(d).unwrap();
         assert_eq!(v.free, free);
-        // A lying FSInfo count: the pre-check passes and the allocation
-        // runs out part way.
+        // A free count above the FAT's: the pre-check passes and the
+        // allocation runs out part way, as any error part way would.
         v.free += 20;
         let cb = v.info.clus_bytes() as u64;
         let far = (u64::from(free) + 5) * cb;

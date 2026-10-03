@@ -50,11 +50,19 @@ pub(super) fn kern_get_mut(k: &mut KernState, inst: u32, ino: u32) -> Option<&mu
 }
 
 impl KernNode {
+    /// Copy this node's metadata into the call's copy `ino`, but its size
+    /// into the inode slot's words, in the store's section: the VFS merges
+    /// each copy after its call, in either order when two calls overlap,
+    /// so a size left in a copy could undo the later call's, as
+    /// `vibefs_init::store_size` keeps vibefs's.
     pub(super) fn meta_into(&self, ino: &mut Inode) {
         ino.kind = self.kind.inode_kind();
         ino.mode = self.mode;
         ino.nlink = self.nlink;
-        ino.size = self.size;
+        match ino.words() {
+            Ok(w) => w.set_size(self.size),
+            Err(_) => ino.size = self.size,
+        }
         ino.atime = self.atime;
         ino.mtime = self.mtime;
         ino.ctime = self.ctime;
@@ -153,11 +161,13 @@ pub(super) fn kern_link(k: &mut KernState, parent: u32, child: u32) {
         return;
     };
     k.nodes[ci].parent = parent;
+    k.nodes[ci].off = k.nodes[pi].next_off;
+    k.nodes[pi].next_off = k.nodes[pi].next_off.saturating_add(1);
     k.nodes[ci].next = k.nodes[pi].child;
     k.nodes[pi].child = child;
 }
 
-fn kern_unlink_child(k: &mut KernState, parent: u32, child: u32) {
+pub(super) fn kern_unlink_child(k: &mut KernState, parent: u32, child: u32) {
     let Some(pi) = kern_idx(k, parent) else {
         return;
     };
@@ -421,6 +431,12 @@ pub(super) fn kern_create(
     if d.kind.inode_kind() != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
+    // A directory an rmdir removed while the VFS held it, which keeps its
+    // node until its last put, takes no new entry, as Linux's
+    // `IS_DEADDIR` refuses it: one made there would be unreachable.
+    if d.nlink == 0 {
+        return Err(FsError::NotFound);
+    }
     if kern_find_child(k, inst, dir_ino, name).is_some() {
         return Err(FsError::Exists);
     }
@@ -480,6 +496,93 @@ pub(super) fn kern_unlink(
     touch_dir(k, inst, dir_ino, t);
     if let Some(n) = kern_get(k, inst, dir_ino) {
         n.meta_into(dir);
+    }
+    Ok(())
+}
+
+/// Move `oname` in `odir` to `nname` in `ndir`, replacing what `nname`
+/// names, as rename(2) does, when the two names still name what the
+/// VFS's walks found (`seen`). A replaced node keeps its node until
+/// [`Vfs`] evicts it at its last put, as [`kern_unlink`]'s child does. A
+/// tmpfs node has one name, so the move only relinks it; the moved node
+/// takes a new place in `ndir`'s listing, as Linux's tmpfs gives it a new
+/// offset.
+pub(super) fn kern_rename(
+    k: &mut KernState,
+    x: Kx,
+    (odir, oname): (&mut Inode, &[u8]),
+    (ndir, nname): (&mut Inode, &[u8]),
+    seen: RenameSeen,
+) -> Result<(), FsError> {
+    if x.ty != FsType::Tmp {
+        return Err(FsError::Perm);
+    }
+    let (k, t, inst) = (&mut *k, x.now, x.inst);
+    let (od, nd) = (odir.key[0], ndir.key[0]);
+    let nm = Name::from_bytes(nname)?;
+    if nm.is_dot() || nm.is_dotdot() {
+        return Err(FsError::Inval);
+    }
+    let node = kern_find_child(k, inst, od, oname);
+    let tgt = kern_find_child(k, inst, nd, nname);
+    let key = |n: u32| [n, 0, 0];
+    seen.check(node.map(key), tgt.map(key))?;
+    let node = node.ok_or(FsError::NotFound)?;
+    let is_dir = kern_get(k, inst, node)
+        .ok_or(FsError::NotFound)?
+        .kind
+        .inode_kind()
+        == InodeKind::Dir;
+    if od == nd && oname == nname {
+        return Ok(());
+    }
+    let n = kern_get(k, inst, nd).ok_or(FsError::NotFound)?;
+    if n.kind.inode_kind() != InodeKind::Dir {
+        return Err(FsError::NotDir);
+    }
+    if n.nlink == 0 {
+        // A removed directory, as in `kern_create`.
+        return Err(FsError::NotFound);
+    }
+    if let Some(tg) = tgt {
+        let tn = kern_get(k, inst, tg).ok_or(FsError::NotFound)?;
+        match (is_dir, tn.kind.inode_kind() == InodeKind::Dir) {
+            (false, true) => return Err(FsError::IsDir),
+            (true, false) => return Err(FsError::NotDir),
+            (true, true) if tn.child != 0 => return Err(FsError::NotEmpty),
+            _ => {}
+        }
+        kern_unlink_child(k, nd, tg);
+        if let Some(c) = kern_get_mut(k, inst, tg) {
+            c.nlink = if is_dir { 0 } else { c.nlink.saturating_sub(1) };
+            c.ctime = t;
+        }
+        // A replaced directory's `..` linked `nd`.
+        if is_dir && let Some(p) = kern_get_mut(k, inst, nd) {
+            p.nlink = p.nlink.saturating_sub(1);
+        }
+    }
+    kern_unlink_child(k, od, node);
+    if let Some(c) = kern_get_mut(k, inst, node) {
+        c.name = nm;
+        c.ctime = t;
+    }
+    kern_link(k, nd, node);
+    if is_dir && od != nd {
+        if let Some(p) = kern_get_mut(k, inst, od) {
+            p.nlink = p.nlink.saturating_sub(1);
+        }
+        if let Some(p) = kern_get_mut(k, inst, nd) {
+            p.nlink = p.nlink.saturating_add(1);
+        }
+    }
+    touch_dir(k, inst, od, t);
+    touch_dir(k, inst, nd, t);
+    if let Some(n) = kern_get(k, inst, od) {
+        n.meta_into(odir);
+    }
+    if let Some(n) = kern_get(k, inst, nd) {
+        n.meta_into(ndir);
     }
     Ok(())
 }
@@ -603,21 +706,27 @@ pub(super) fn kern_readdir(
     if n.kind.inode_kind() != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
+    // The child with the lowest place at or after the cookie: places are
+    // fixed and only grow (`KernNode::off`), so a child added or removed
+    // during a scan moves no other one across it, as Linux's tmpfs
+    // offsets keep a scan.
+    let mut best: Option<(u64, u32)> = None;
     let mut cur = n.child;
-    let mut i = 0u64;
     while cur != 0 {
-        if i == cookie {
-            let c = kern_get(k, inst, cur).ok_or(FsError::NotFound)?;
-            out.ino = cur;
-            out.kind = c.kind.inode_kind();
-            out.name = c.name;
-            return Ok(Some(cookie + 1));
+        let c = kern_get(k, inst, cur).ok_or(FsError::NotFound)?;
+        if c.off >= cookie && best.is_none_or(|(o, _)| c.off < o) {
+            best = Some((c.off, cur));
         }
-        let next = kern_get(k, inst, cur).ok_or(FsError::NotFound)?.next;
-        cur = next;
-        i += 1;
+        cur = c.next;
     }
-    Ok(None)
+    let Some((off, ino)) = best else {
+        return Ok(None);
+    };
+    let c = kern_get(k, inst, ino).ok_or(FsError::NotFound)?;
+    out.ino = ino;
+    out.kind = c.kind.inode_kind();
+    out.name = c.name;
+    Ok(Some(off.checked_add(1).ok_or(FsError::Io)?))
 }
 
 pub(super) fn kern_readlink(

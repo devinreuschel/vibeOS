@@ -146,14 +146,18 @@ pub fn kernel_cr3() -> u64 {
 
 /// Reserve and map `[phys, phys+len)` into the ioremap window with UC
 /// attributes. Returns the VA (offset within the page preserved so a
-/// device register at `phys+7` is at `va+7`).
+/// device register at `phys+7` is at `va+7`). A failed map unmaps what it
+/// mapped. It gives the reservation back only when it left the window as
+/// it found it: a leaf it did not map, which refused the map, or a page
+/// table the map added stays under VA the cursor has passed, so no later
+/// `ioremap` is handed that VA and refused the same way.
 ///
 /// # Safety
 /// Caller vouches that `[phys, phys+len)` is real device MMIO and that
 /// no aliased mapping through the physmap will be used to touch the
 /// same registers with cacheable attributes.
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
-    let (va_offset, base_va, round_len) = {
+    let (mapped, base_va, round_len) = {
         let mut pt = current_mapper();
         let va_offset = pt.window().reserve(phys, len)?;
         let base_va = VirtAddr(va_offset.as_u64() & !(PAGE_SIZE_4K - 1));
@@ -161,13 +165,16 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
         let head = phys.as_u64() & (PAGE_SIZE_4K - 1);
         let round_len = paging_align_up(head + len, PAGE_SIZE_4K);
         let mut alloc = BuddyFrames;
+        // PT is held, and only the kernel mapper takes table pages, so
+        // a change in this count is this call's.
+        let tables0 = TABLE_PAGES.load(Ordering::Relaxed);
         // SAFETY: `Mapper::map_range`'s contract; the caller vouches that
         // `[phys, phys + len)` is device MMIO no cacheable alias touches
         // (this fn's `# Safety` contract, established here, invariant I17),
         // and `reserve` handed out VA no other mapping uses; `pt` holds the
         // page-table lock (invariant I48, established at
         // `mm::paging_init::current_mapper`).
-        unsafe {
+        let r = unsafe {
             pt.map_range(
                 base_va,
                 base_pa,
@@ -176,16 +183,63 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
                 MapMode::Fresh,
                 &mut alloc,
             )
-            .ok()?;
+        };
+        if let Err(e) = r {
+            // SAFETY: `unmap_window_range`'s contract; `pt` has been held
+            // since `reserve`, so every leaf in the range that maps
+            // `base_pa + off` is one `map_range` just placed, at VA not
+            // handed out, and the shootdown loop below covers the range
+            // after `pt` drops, before this fn returns; established here.
+            unsafe { unmap_window_range(&mut pt, base_va, base_pa, round_len) };
+            let foreign = matches!(e, MapError::AlreadyMapped | MapError::PageSizeMismatch);
+            let tables_left = TABLE_PAGES.load(Ordering::Relaxed) != tables0;
+            if !foreign && !tables_left {
+                // PT has been held since `reserve`, so this is the latest
+                // reservation and the cursor moves back over it.
+                let back = pt.window().unreserve(va_offset, len);
+                debug_assert!(back, "ioremap: reservation not the latest");
+            }
         }
-        Some((va_offset, base_va, round_len))
-    }?;
+        (r.ok().map(|()| va_offset), base_va, round_len)
+    };
+    // On failure the leaves are gone; the other CPUs still drop any entry
+    // they cached before the VA goes out again. A later `ioremap` of it
+    // shoots them down too, after its map and before it returns the VA.
     let mut off = 0u64;
     while off < round_len {
         paging::tlb_shootdown_others(VirtAddr(base_va.as_u64() + off));
         off += PAGE_SIZE_4K;
     }
-    Some(va_offset)
+    mapped
+}
+
+/// Unmap the leaves a failed `ioremap` placed in `[va, va+len)`, those
+/// mapping `pa + off` at `va + off`, with a local `invlpg` each. A leaf
+/// that maps anything else was there before and stays.
+///
+/// # Safety
+/// Every leaf in `[va, va+len)` that maps `pa + off` was placed by the
+/// caller under the PT hold `pt` still is, at VA it has not handed out,
+/// and the caller shoots the other CPUs down for the whole range before
+/// any VA in it is used or reserved again.
+unsafe fn unmap_window_range(pt: &mut MapperGuard, va: VirtAddr, pa: PhysAddr, len: u64) {
+    let mut off = 0u64;
+    while off < len {
+        let at = VirtAddr(va.as_u64() + off);
+        let step = match pt.translate(at) {
+            Some((got, size, _)) if got.as_u64() == pa.as_u64() + off => {
+                // SAFETY: `unmap_4k_locked`'s contract; no one uses `at`
+                // until the caller's shootdown, as this fn's `# Safety`
+                // contract has it; established here.
+                if unsafe { unmap_4k_locked(pt, at) }.is_none() {
+                    return;
+                }
+                size.bytes()
+            }
+            _ => PAGE_SIZE_4K,
+        };
+        off = off.saturating_add(step);
+    }
 }
 
 /// Patch a physmap-covered MMIO region UC in place. Preserves 2 MiB

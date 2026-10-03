@@ -23,16 +23,26 @@ pub(crate) mod vibefs_init;
 use vibeos::fs::Guarded;
 use vibeos::kalloc::{AllocError, TryBox};
 
-use crate::sync_init::SpinMutex;
+use crate::sync::blocking_init::BlockingMutex;
 
-/// The lock a ramfs or kernfs store sits behind: a RANK_DEVICE spinlock
-/// (DESIGN §2.1), never nested, under which tmpfs's data ops run. The VFS
-/// lock is `fs_init`'s sleeping `BlockingMutex`, never this.
-pub(crate) type StoreLock<T> = SpinMutex<T>;
+/// The lock a ramfs or kernfs store sits behind, under which tmpfs's data
+/// ops run: a single volume lock at level 4, as each FAT and vibefs volume
+/// is (DESIGN §2.1), and like them a `BlockingMutex`. A store op can walk
+/// a directory of thousands of nodes, which an IF-off stretch may not run
+/// for (DESIGN §2.9 rule 2), so it runs with IF on. Taken from thread
+/// context with no spinlock held, never under the VFS lock, and never
+/// nested; every caller runs after `irq: enabled`.
+pub(crate) struct StoreLock<T>(BlockingMutex<T>);
 
-impl<T: Send> Guarded<T> for SpinMutex<T> {
+impl<T> StoreLock<T> {
+    pub(crate) const fn new(v: T) -> Self {
+        Self(BlockingMutex::new(v))
+    }
+}
+
+impl<T: Send> Guarded<T> for StoreLock<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        let mut g = self.lock();
+        let mut g = self.0.lock();
         f(&mut g)
     }
 }

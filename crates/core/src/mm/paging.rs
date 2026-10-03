@@ -832,7 +832,9 @@ impl<A: PageTable> Mapper<A> {
 }
 
 /// Reservation over the ioremap window (DESIGN §4.1: `0xFFFF_E000_0000_0000`,
-/// 256 MiB). Bump allocator, never freed. Devices call `ioremap` for MMIO
+/// 256 MiB). Bump allocator: a mapping is never freed, and a failed map
+/// that left nothing in its VA gives its reservation back
+/// ([`IoremapWindow::unreserve`]). Devices call `ioremap` for MMIO
 /// that should not be reached through the physmap (typically because it
 /// belongs to a device whose physical address is far above `map_end`).
 pub const IOREMAP_BASE: u64 = 0xFFFF_E000_0000_0000;
@@ -867,6 +869,29 @@ impl IoremapWindow {
         }
         self.next = end;
         Some(VirtAddr(va + page_off))
+    }
+
+    /// Give back the reservation `reserve` just returned as `va` for
+    /// `[phys, phys+len)`, after its map failed. Only the latest
+    /// reservation goes back, by moving the cursor down to it; `ioremap`
+    /// holds the lock that guards the window from its `reserve` to here,
+    /// so nothing was reserved after it. Returns whether it went back.
+    pub fn unreserve(&mut self, va: VirtAddr, len: u64) -> bool {
+        let page_off = va.0 & (PAGE_SIZE_4K - 1);
+        let start = va.0 - page_off;
+        let Some(end) = page_off
+            .checked_add(len)
+            .and_then(|n| n.checked_add(PAGE_SIZE_4K - 1))
+            .map(|n| n & !(PAGE_SIZE_4K - 1))
+            .and_then(|n| start.checked_add(n))
+        else {
+            return false;
+        };
+        if len == 0 || end != self.next || start < IOREMAP_BASE {
+            return false;
+        }
+        self.next = start;
+        true
     }
 
     pub fn next(&self) -> u64 {
@@ -1348,6 +1373,27 @@ mod tests {
         // Exhaustion returns None.
         let mut w = IoremapWindow::new();
         assert!(w.reserve(PhysAddr(0), IOREMAP_LEN + 4096).is_none());
+    }
+
+    #[test]
+    fn ioremap_unreserve_returns_only_the_latest() {
+        let mut w = IoremapWindow::new();
+        let a = w.reserve(PhysAddr(0xFEB0_0000), 0x2000).unwrap();
+        let after_a = w.next();
+        let b = w.reserve(PhysAddr(0xFEC0_0123), 0x1F00).unwrap();
+        // `a` is not the latest: refused, and the cursor stays.
+        assert!(!w.unreserve(a, 0x2000));
+        assert_eq!(w.next(), after_a + 0x3000);
+        // A wrong length is refused too.
+        assert!(!w.unreserve(b, 0x100));
+        assert!(w.unreserve(b, 0x1F00));
+        assert_eq!(w.next(), after_a);
+        // The VA goes out again, at the same offset into its page.
+        let c = w.reserve(PhysAddr(0xFED0_0123), 0x1F00).unwrap();
+        assert_eq!(c, b);
+        assert!(w.unreserve(c, 0x1F00));
+        assert!(w.unreserve(a, 0x2000));
+        assert_eq!(w.next(), IOREMAP_BASE);
     }
 
     #[test]

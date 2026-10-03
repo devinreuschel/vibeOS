@@ -287,6 +287,9 @@ jobs:
   # which scripts/check_workflows.py compares with this matrix). `jobs` is
   # the QEMU runs in parallel inside a tier (ROADMAP §10.1): 2, on the
   # runner's 4 CPUs; a tier of one target runs one QEMU whatever it says.
+  # The in-guest tiers are the shards of test-kernel, test-kernel-smp4 and
+  # test-lapic-fallback (tests/harness/ktest_shards.py), one target each, so
+  # each stays under the 60 s `ci_history.py --tiers` allows.
   tier:
     name: tier (${{ matrix.arch }}, ${{ matrix.tier }})
     needs: [check, build]
@@ -304,16 +307,72 @@ jobs:
             targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power
             jobs: 2
           - arch: x86_64
-            tier: in-guest-1
-            targets: test-kernel
+            tier: kernel-1
+            targets: test-kernel-1
             jobs: 2
           - arch: x86_64
-            tier: in-guest-2
-            targets: test-kernel-smp4
+            tier: kernel-2
+            targets: test-kernel-2
             jobs: 2
           - arch: x86_64
-            tier: in-guest-3
-            targets: test-lapic-fallback
+            tier: kernel-3
+            targets: test-kernel-3
+            jobs: 2
+          - arch: x86_64
+            tier: kernel-4
+            targets: test-kernel-4
+            jobs: 2
+          - arch: x86_64
+            tier: kernel-5
+            targets: test-kernel-5
+            jobs: 2
+          - arch: x86_64
+            tier: kernel-6
+            targets: test-kernel-6
+            jobs: 2
+          - arch: x86_64
+            tier: kernel-smp4-1
+            targets: test-kernel-smp4-1
+            jobs: 2
+          - arch: x86_64
+            tier: kernel-smp4-2
+            targets: test-kernel-smp4-2
+            jobs: 2
+          - arch: x86_64
+            tier: kernel-smp4-3
+            targets: test-kernel-smp4-3
+            jobs: 2
+          - arch: x86_64
+            tier: kernel-smp4-4
+            targets: test-kernel-smp4-4
+            jobs: 2
+          - arch: x86_64
+            tier: kernel-smp4-5
+            targets: test-kernel-smp4-5
+            jobs: 2
+          - arch: x86_64
+            tier: lapic-fallback-1
+            targets: test-lapic-fallback-1
+            jobs: 2
+          - arch: x86_64
+            tier: lapic-fallback-2
+            targets: test-lapic-fallback-2
+            jobs: 2
+          - arch: x86_64
+            tier: lapic-fallback-3
+            targets: test-lapic-fallback-3
+            jobs: 2
+          - arch: x86_64
+            tier: lapic-fallback-4
+            targets: test-lapic-fallback-4
+            jobs: 2
+          - arch: x86_64
+            tier: lapic-fallback-5
+            targets: test-lapic-fallback-5
+            jobs: 2
+          - arch: x86_64
+            tier: lapic-fallback-6
+            targets: test-lapic-fallback-6
             jobs: 2
           - arch: x86_64
             tier: vibefs-crash

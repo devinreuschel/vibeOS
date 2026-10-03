@@ -1,5 +1,10 @@
 use super::*;
 
+/// How many times an unlink, rmdir or rename walks its names: once, and
+/// again when a racing change left a name naming another file than the
+/// walk found before the begin step (DESIGN §2.5's bounded retry).
+const WALKS: usize = 2;
+
 /// Where a walk starts: an absolute path at `root`, a relative one at
 /// `cwd`, and `..` stays put at `root` (path_resolution(7)). A process's
 /// base names the directories its root and working-directory
@@ -233,24 +238,64 @@ impl Vfs {
         Ok(())
     }
 
+    /// Whether held path `p`, which a walk of `name` in `dir` resolved,
+    /// still names that file: its dentry is live and still `name` in
+    /// `dir`. A racing unlink kills the dentry, and a racing rename kills
+    /// the one it replaces and moves the one it moves, to another parent
+    /// or name; either way `name` may now be another file, or none. A
+    /// mount's root, where the walk followed a mount on `name`, still
+    /// names it: a mount point is neither unlinked nor renamed.
+    fn still_named(&self, dir: PathRef, name: &[u8], p: PathRef) -> bool {
+        let d = &self.dentries[p.dslot as usize];
+        if !d.used || d.dead || d.negative {
+            return false;
+        }
+        p.mount != dir.mount
+            || (d.parent == dir.dslot
+                && self
+                    .sb_ops(self.sb_of(dir.mount))
+                    .name_eq(d.name.as_bytes(), name))
+    }
+
     /// An unlink's or rmdir's call on directory `dir`, holding `victim`,
-    /// the held dentry `name` resolved to, which this step puts.
+    /// the held dentry `name` resolved to, which this step puts. `None`
+    /// when that dentry no longer names `name` in `dir`
+    /// ([`Self::still_named`]), after a racing change between the walk
+    /// and this step: the caller walks again. This step closes only that
+    /// window: the backend call after it runs with the VFS lock dropped,
+    /// and acts on whatever `name` names then, until the directory locks
+    /// ROADMAP §13.9's `renameat` lines build serialize the two.
     fn remove_begin(
         &mut self,
         dir: PathRef,
         name: &[u8],
         victim: PathRef,
         rmdir: bool,
-    ) -> Result<(Call, u16), FsError> {
+    ) -> Result<Option<(Call, u16)>, FsError> {
+        if !self.still_named(dir, name, victim) {
+            self.path_put(victim);
+            return Ok(None);
+        }
         let r = self.remove_check(dir, name, victim, rmdir);
+        // The victim's hold comes before the path's put. The check above
+        // leaves only a live dentry, whose put never drops its inode, so
+        // the order is a defence, no test can tell it from the other: a
+        // put that was the inode's last reference would queue a release
+        // that `take_release` skips while the hold lasts.
+        let held = r.and_then(|vi| self.ihold(vi).map(|()| vi));
         self.path_put(victim);
-        let vi = r?;
-        let di = self.d_islot(dir.dslot)?;
-        self.ihold(vi)?;
+        let vi = held?;
+        let di = match self.d_islot(dir.dslot) {
+            Ok(di) => di,
+            Err(e) => {
+                self.iput(vi);
+                return Err(e);
+            }
+        };
         let sb = self.sb_of(dir.mount);
         self.dcache_evict_name(sb, dir.dslot, name);
         match self.call(di) {
-            Ok(c) => Ok((c, vi)),
+            Ok(c) => Ok(Some((c, vi))),
             Err(e) => {
                 self.iput(vi);
                 Err(e)
@@ -268,12 +313,17 @@ impl Vfs {
         if self.kind_of(dir)? != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
+        let vi = self.d_islot(victim.dslot)?;
+        // unlink(2) of a directory is EISDIR, and rmdir(2) of anything
+        // else ENOTDIR, ahead of a mount point's EBUSY, as Linux's
+        // `may_delete` runs before its mount point check.
+        match (rmdir, self.inodes[vi as usize].kind == InodeKind::Dir) {
+            (false, true) => return Err(FsError::IsDir),
+            (true, false) => return Err(FsError::NotDir),
+            _ => {}
+        }
         if self.is_mountpoint(dir, name) || victim.mount != dir.mount {
             return Err(FsError::Busy);
-        }
-        let vi = self.d_islot(victim.dslot)?;
-        if rmdir && self.inodes[vi as usize].kind != InodeKind::Dir {
-            return Err(FsError::NotDir);
         }
         Ok(vi)
     }
@@ -313,27 +363,54 @@ impl Vfs {
 
     /// A rename's calls on its two directories, holding the inode it
     /// moves (`src`) and the one it may replace (`tgt`), held paths this
-    /// step puts.
+    /// step puts. `None` when a racing change after the walks left either
+    /// name naming another file than the walk found, as in
+    /// `remove_begin`: `src` or `tgt` no longer named by `oname` or
+    /// `nname`, or a file now at an `nname` the walk found free. The
+    /// caller walks both again.
     fn rename_begin(
         &mut self,
         (od, oname): (PathRef, &[u8]),
         (nd, nname): (PathRef, &[u8]),
         src: PathRef,
         tgt: Option<PathRef>,
-    ) -> Result<RenameCall, FsError> {
-        let r = self.rename_check((od, oname), (nd, nname), src, tgt);
+    ) -> Result<Option<RenameCall>, FsError> {
+        let made = || {
+            let sb = self.sb_of(nd.mount);
+            self.dcache_peek(sb, nd.dslot, nname)
+                .is_some_and(|d| !self.dentries[d as usize].negative)
+        };
+        let stale = !self.still_named(od, oname, src)
+            || match tgt {
+                Some(t) => !self.still_named(nd, nname, t),
+                None => made(),
+            };
+        if stale {
+            self.path_put(src);
+            if let Some(t) = tgt {
+                self.path_put(t);
+            }
+            return Ok(None);
+        }
+        // The inodes' holds come before the paths' puts, a defence, as in
+        // `remove_begin`.
+        let held = self
+            .rename_check((od, oname), (nd, nname), src, tgt)
+            .and_then(|(si, ti)| {
+                self.ihold(si)?;
+                if let Some(t) = ti
+                    && let Err(e) = self.ihold(t)
+                {
+                    self.iput(si);
+                    return Err(e);
+                }
+                Ok((si, ti))
+            });
         self.path_put(src);
         if let Some(t) = tgt {
             self.path_put(t);
         }
-        let (si, ti) = r?;
-        self.ihold(si)?;
-        if let Some(t) = ti
-            && let Err(e) = self.ihold(t)
-        {
-            self.iput(si);
-            return Err(e);
-        }
+        let (si, ti) = held?;
         let sb = self.sb_of(od.mount);
         self.dcache_evict_name(sb, nd.dslot, nname);
         let calls = self.d_islot(od.dslot).and_then(|o| {
@@ -347,12 +424,18 @@ impl Vfs {
             }
         });
         match calls {
-            Ok((a, b)) => Ok(RenameCall {
+            Ok((a, b)) => Ok(Some(RenameCall {
                 a,
                 b,
                 src: si,
                 tgt: ti,
-            }),
+                seen: RenameSeen {
+                    src: self.inodes[si as usize].key,
+                    tgt: ti.map(|t| self.inodes[t as usize].key),
+                    src_words: self.inodes[si as usize].words().ok(),
+                    tgt_words: ti.and_then(|t| self.inodes[t as usize].words().ok()),
+                },
+            })),
             Err(e) => {
                 self.iput(si);
                 if let Some(t) = ti {
@@ -375,13 +458,6 @@ impl Vfs {
         }
         self.hashed_dir(od)?;
         self.hashed_dir(nd)?;
-        if self.is_mountpoint(od, oname)
-            || self.is_mountpoint(nd, nname)
-            || src.mount != od.mount
-            || tgt.is_some_and(|t| t.mount != nd.mount)
-        {
-            return Err(FsError::Busy);
-        }
         let si = self.d_islot(src.dslot)?;
         // A directory never moves below itself: its dentry would become
         // its own ancestor.
@@ -394,6 +470,28 @@ impl Vfs {
             Some(t) => Some(self.d_islot(t.dslot)?),
             None => None,
         };
+        // rename(2): a directory replaces only a directory, and anything
+        // else only a non-directory; the backend refuses a directory
+        // target that is not empty.
+        if let Some(t) = ti
+            && t != si
+        {
+            let dir = |i: u16| self.inodes[i as usize].kind == InodeKind::Dir;
+            match (dir(si), dir(t)) {
+                (false, true) => return Err(FsError::IsDir),
+                (true, false) => return Err(FsError::NotDir),
+                _ => {}
+            }
+        }
+        // A mount point neither moves nor goes, checked after the kinds as
+        // Linux's `vfs_rename` checks it.
+        if self.is_mountpoint(od, oname)
+            || self.is_mountpoint(nd, nname)
+            || src.mount != od.mount
+            || tgt.is_some_and(|t| t.mount != nd.mount)
+        {
+            return Err(FsError::Busy);
+        }
         Ok((si, ti))
     }
 
@@ -410,18 +508,23 @@ impl Vfs {
         rc: RenameCall,
         res: Result<Option<Key>, FsError>,
     ) -> Result<(), FsError> {
-        let RenameCall { a, b, src, tgt } = rc;
+        let RenameCall { a, b, src, tgt, .. } = rc;
         self.finish(a, true);
         self.finish(b, true);
         let r = res.map(|moved| {
             let sb = self.sb_of(od.mount);
-            if tgt == Some(src) {
+            let same = tgt == Some(src);
+            if same && moved.is_none() {
                 // Two names of one file: the rename changed nothing.
                 self.dcache_drop_name(sb, od.dslot, oname);
                 self.dcache_drop_name(sb, nd.dslot, nname);
                 return;
             }
-            if let Some(t) = tgt {
+            // The target is another inode, which loses its link; or, when
+            // the target walk found the source itself through a name that
+            // differs only in case and the backend moved the file to a new
+            // key (FAT), it is the move below, with no link lost.
+            if let Some(t) = tgt.filter(|_| !same) {
                 self.unlink_inode(t);
             }
             let sd = self
@@ -500,6 +603,11 @@ impl Vfs {
         let si = self.d_islot(src.dslot)?;
         if self.inodes[si as usize].kind != InodeKind::Reg {
             return Err(FsError::Perm);
+        }
+        // A file whose last name a racing unlink took after the walk gets
+        // no new one, as Linux's `link` refuses it.
+        if self.inodes[si as usize].nlink == 0 {
+            return Err(FsError::NotFound);
         }
         if self.sb_of(src.mount) != self.sb_of(nd.mount) {
             return Err(FsError::XDev);
@@ -613,10 +721,11 @@ impl Walker {
     /// A walk of `path` from `base` (the namespace root for both its root
     /// and its working directory when none): an absolute path from its
     /// root, a relative one from its working directory; `follow_last`
-    /// follows a symlink in the last component.
+    /// follows a symlink in the last component. The empty path is
+    /// `NotFound`, as path_resolution(7) gives it.
     pub fn new(base: Option<WalkBase>, path: &[u8], follow_last: bool) -> Result<Self, FsError> {
         if path.is_empty() {
-            return Err(FsError::Inval);
+            return Err(FsError::NotFound);
         }
         if path.len() > MAX_PATH {
             return Err(FsError::NameTooLong);
@@ -899,26 +1008,41 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         self.with(|v| v.dentry_refs(at))
     }
 
-    /// Resolve `path`'s parent to a held directory and name its last
-    /// component, which is neither `.` nor `..`, and whether a `/`
+    /// Resolve `path`'s parent to a held directory, and name its last
+    /// component, what kind of component that is, and whether a `/`
     /// follows it: a name that must be a directory.
-    fn walk_parent<'p>(
+    fn walk_parent_last<'p>(
         &self,
         base: Option<WalkBase>,
         path: &'p [u8],
-    ) -> Result<(PathRef, &'p [u8], bool), FsError> {
+    ) -> Result<(PathRef, &'p [u8], bool, Last), FsError> {
         let (parent, name, dir_only) = split_basename(path)?;
-        if name_is_dot(name) || name_is_dotdot(name) {
-            return Err(FsError::Inval);
-        }
         let dir = self.walk(base, parent, true)?;
         match self.with(|v| v.kind_of(dir)) {
-            Ok(InodeKind::Dir) => Ok((dir, name, dir_only)),
+            Ok(InodeKind::Dir) => Ok((dir, name, dir_only, Last::of(name))),
             r => {
                 self.put_path(dir);
                 Err(r.err().unwrap_or(FsError::NotDir))
             }
         }
+    }
+
+    /// [`Self::walk_parent_last`] for a change that makes or removes a
+    /// name: a last component that is none (`.`, `..`, or the root) is
+    /// `odd`'s error for it, after the parent's walk, whose errors come
+    /// first, as Linux checks the type `filename_parentat` returns.
+    fn walk_parent<'p>(
+        &self,
+        base: Option<WalkBase>,
+        path: &'p [u8],
+        odd: impl FnOnce(Last) -> FsError,
+    ) -> Result<(PathRef, &'p [u8], bool), FsError> {
+        let (dir, name, dir_only, last) = self.walk_parent_last(base, path)?;
+        if last != Last::Name {
+            self.put_path(dir);
+            return Err(odd(last));
+        }
+        Ok((dir, name, dir_only))
     }
 
     /// `stat` (`follow`) or `lstat` of `path`.
@@ -943,7 +1067,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         mode: u16,
         target: Option<&[u8]>,
     ) -> Result<(), FsError> {
-        let (dir, name, dir_only) = self.walk_parent(base, path)?;
+        // `.`, `..` or the root names no new entry: EEXIST, as Linux's
+        // `filename_create` gives it.
+        let (dir, name, dir_only) = self.walk_parent(base, path, |_| FsError::Exists)?;
         // A `/` after the new name is for a directory only.
         if dir_only && kind != InodeKind::Dir {
             self.put_path(dir);
@@ -1004,14 +1130,44 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         self.remove(base, path, true)
     }
 
+    /// Linux's errnos for a last component that is no name: unlink(2)
+    /// is EISDIR for each; rmdir(2) is EINVAL for `.`, ENOTEMPTY for `..`,
+    /// and EBUSY for the root.
     fn remove(&self, base: Option<WalkBase>, path: &[u8], rmdir: bool) -> Result<(), FsError> {
-        let (dir, name, dir_only) = self.walk_parent(base, path)?;
-        let r = self.walk_in(dir, name, false).and_then(|victim| {
+        let odd = |last| match (rmdir, last) {
+            (false, _) => FsError::IsDir,
+            (true, Last::Dot) => FsError::Inval,
+            (true, Last::DotDot) => FsError::NotEmpty,
+            (true, Last::Name | Last::Root) => FsError::Busy,
+        };
+        let (dir, name, dir_only) = self.walk_parent(base, path, odd)?;
+        let r = self.remove_in(dir, name, dir_only, rmdir);
+        self.put_path(dir);
+        r
+    }
+
+    /// Remove `name` from `dir`. The walk and the begin step are two
+    /// holds of the VFS lock, so a racing change can leave `name` naming
+    /// another file between them; `name` is then walked again, up to
+    /// [`WALKS`] times in all (DESIGN §2.5's bounded retry), and is
+    /// `NotFound` after.
+    fn remove_in(
+        &self,
+        dir: PathRef,
+        name: &[u8],
+        dir_only: bool,
+        rmdir: bool,
+    ) -> Result<(), FsError> {
+        for _ in 0..WALKS {
+            let victim = self.walk_in(dir, name, false)?;
             if dir_only && self.with(|v| v.kind_of(victim)) != Ok(InodeKind::Dir) {
                 self.put_path(victim);
                 return Err(FsError::NotDir);
             }
-            let (mut c, vi) = self.step(|v| v.remove_begin(dir, name, victim, rmdir))?;
+            (self.hooks.change_window)();
+            let Some((mut c, vi)) = self.step(|v| v.remove_begin(dir, name, victim, rmdir))? else {
+                continue;
+            };
             let res = c.run(|o, cx, d| {
                 if rmdir {
                     o.rmdir(cx, d, name)
@@ -1019,69 +1175,106 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
                     o.unlink(cx, d, name)
                 }
             });
-            self.step(|v| v.remove_commit(dir, name, c, vi, res))
-        });
-        self.put_path(dir);
-        r
+            return self.step(|v| v.remove_commit(dir, name, c, vi, res));
+        }
+        Err(FsError::NotFound)
     }
 
+    /// rename(2). A last component that is no name, on either side, is
+    /// EBUSY, after both parents' walks and the cross-filesystem EXDEV, as
+    /// Linux's `do_renameat2` orders them.
     pub fn rename(&self, base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
-        let (od, oname, o_dir) = self.walk_parent(base, old)?;
-        let r = self.walk_parent(base, new).and_then(|(nd, nname, n_dir)| {
-            let r = self.rename_in((od, oname), (nd, nname), o_dir || n_dir);
-            self.put_path(nd);
-            r
-        });
+        let (od, oname, o_dir, o_last) = self.walk_parent_last(base, old)?;
+        let r = self
+            .walk_parent_last(base, new)
+            .and_then(|(nd, nname, n_dir, n_last)| {
+                let r = if o_last != Last::Name || n_last != Last::Name {
+                    Err(if self.with(|v| v.sb_of(od.mount) != v.sb_of(nd.mount)) {
+                        FsError::XDev
+                    } else {
+                        FsError::Busy
+                    })
+                } else {
+                    self.rename_in((od, oname), (nd, nname), o_dir || n_dir)
+                };
+                self.put_path(nd);
+                r
+            });
         self.put_path(od);
         r
     }
 
+    /// Move `o`'s name to `n`'s, walking both again when a racing change
+    /// left either naming another file than the walks found, as
+    /// [`Self::remove_in`] does: before the begin step, which sees it in
+    /// the dentry cache, or before the backend call, whose backend sees it
+    /// in its store ([`RenameSeen`]) and returns `Stale`.
     fn rename_in(
         &self,
         o: (PathRef, &[u8]),
         n: (PathRef, &[u8]),
         dir_only: bool,
     ) -> Result<(), FsError> {
-        let src = self.walk_in(o.0, o.1, false)?;
-        // A `/` after either name moves a directory only.
-        if dir_only && self.with(|v| v.kind_of(src)) != Ok(InodeKind::Dir) {
-            self.put_path(src);
-            return Err(FsError::NotDir);
-        }
-        let tgt = match self.walk_in(n.0, n.1, false) {
-            Ok(t) => Some(t),
-            Err(FsError::NotFound) => None,
-            Err(e) => {
+        for _ in 0..WALKS {
+            let src = self.walk_in(o.0, o.1, false)?;
+            // A `/` after either name moves a directory only.
+            if dir_only && self.with(|v| v.kind_of(src)) != Ok(InodeKind::Dir) {
                 self.put_path(src);
-                return Err(e);
+                return Err(FsError::NotDir);
             }
-        };
-        let mut rc = self.step(|v| v.rename_begin(o, n, src, tgt))?;
-        let res =
-            rc.a.run2(&mut rc.b, |ops, cx, x, y| ops.rename(cx, x, o.1, y, n.1));
-        self.step(|v| v.rename_commit(o, n, rc, res))
+            let tgt = match self.walk_in(n.0, n.1, false) {
+                Ok(t) => Some(t),
+                Err(FsError::NotFound) => None,
+                Err(e) => {
+                    self.put_path(src);
+                    return Err(e);
+                }
+            };
+            (self.hooks.change_window)();
+            let Some(mut rc) = self.step(|v| v.rename_begin(o, n, src, tgt))? else {
+                continue;
+            };
+            (self.hooks.rename_window)();
+            let seen = rc.seen;
+            let res = rc.a.run2(&mut rc.b, |ops, cx, x, y| {
+                ops.rename(cx, x, o.1, y, n.1, seen)
+            });
+            match self.step(|v| v.rename_commit(o, n, rc, res)) {
+                // A racing change after the begin step left a name naming
+                // another file than the walks found, and the backend
+                // changed nothing: walk both again.
+                Err(FsError::Stale) => continue,
+                r => return r,
+            }
+        }
+        Err(FsError::NotFound)
     }
 
     /// Hard link `new` to the regular file `old` names.
     pub fn link(&self, base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
+        // `.`, `..` or the root as the new name: EEXIST, as for a create.
+        let exists = |_| FsError::Exists;
         let src = self.walk(base, old, true)?;
         let r = match self.with(|v| v.kind_of(src)) {
-            Ok(InodeKind::Reg) => self
-                .walk_parent(base, new)
-                .and_then(|(nd, name, dir_only)| {
-                    if dir_only {
+            Ok(InodeKind::Reg) => {
+                self.walk_parent(base, new, exists)
+                    .and_then(|(nd, name, dir_only)| {
+                        if dir_only {
+                            self.put_path(nd);
+                            return Err(FsError::NotDir);
+                        }
+                        (self.hooks.change_window)();
+                        let r = self
+                            .with(|v| v.link_begin(src, nd))
+                            .and_then(|(mut d, mut t)| {
+                                let res =
+                                    d.run2(&mut t, |o, cx, dir, tg| o.link(cx, dir, name, tg));
+                                self.step(|v| v.link_commit(nd, name, (d, t), res))
+                            });
                         self.put_path(nd);
-                        return Err(FsError::NotDir);
-                    }
-                    let r = self
-                        .with(|v| v.link_begin(src, nd))
-                        .and_then(|(mut d, mut t)| {
-                            let res = d.run2(&mut t, |o, cx, dir, tg| o.link(cx, dir, name, tg));
-                            self.step(|v| v.link_commit(nd, name, (d, t), res))
-                        });
-                    self.put_path(nd);
-                    r
-                }),
+                        r
+                    })
+            }
             Ok(_) => Err(FsError::Perm),
             Err(e) => Err(e),
         };
@@ -1136,18 +1329,46 @@ fn join_path(target: &[u8], rest: &[u8], out: &mut [u8; MAX_PATH]) -> Result<usi
     Ok(n)
 }
 
+/// What a path's last component is, as Linux's `LAST_*` types sort it:
+/// a name, `.`, `..`, or none at all, in a path of slashes (the root).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Last {
+    Name,
+    Dot,
+    DotDot,
+    Root,
+}
+
+impl Last {
+    /// The kind of last component `name` is, as [`split_basename`] gives
+    /// it: empty for the root.
+    fn of(name: &[u8]) -> Self {
+        if name.is_empty() {
+            Last::Root
+        } else if name_is_dot(name) {
+            Last::Dot
+        } else if name_is_dotdot(name) {
+            Last::DotDot
+        } else {
+            Last::Name
+        }
+    }
+}
+
 /// `path`'s parent, its last component, and whether a `/` follows that
-/// component (it names a directory).
+/// component (it names a directory). A path of slashes has no last
+/// component: its parent is `/` and its name empty. The empty path is
+/// `NotFound`, as path_resolution(7) gives it.
 pub fn split_basename(path: &[u8]) -> Result<(&[u8], &[u8], bool), FsError> {
     if path.is_empty() {
-        return Err(FsError::Inval);
+        return Err(FsError::NotFound);
     }
     let mut end = path.len();
     while end > 0 && path[end - 1] == b'/' {
         end -= 1;
     }
     if end == 0 {
-        return Err(FsError::Inval);
+        return Ok((b"/", b"", false));
     }
     let dir_only = end < path.len();
     let p = &path[..end];

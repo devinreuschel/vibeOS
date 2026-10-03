@@ -7,7 +7,7 @@
 
 use super::{
     Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps, Key,
-    MAX_DIR_ENTS, MAX_FILE_BYTES, MAX_RAM_NODES, Name, OpCx, S_IFDIR_MODE, S_IFMT,
+    MAX_DIR_ENTS, MAX_FILE_BYTES, MAX_RAM_NODES, Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFMT,
 };
 
 #[derive(Clone, Copy)]
@@ -55,11 +55,42 @@ impl RamNode {
         ndent: 0,
     };
 
+    /// Entries in use. A removed entry leaves its slot empty (`ino` 0)
+    /// rather than moving another into it, so every entry keeps its slot,
+    /// which is its `readdir` cookie: a scan that unlinks what it reads
+    /// still meets each other entry once, as POSIX asks.
+    fn live(&self) -> usize {
+        self.dents[..self.ndent as usize]
+            .iter()
+            .filter(|d| d.ino != 0)
+            .count()
+    }
+
+    /// Put `d` in the first empty slot, or after the last; `NoSpace` when
+    /// every slot is in use.
+    fn insert(&mut self, d: RamDent) -> Result<(), FsError> {
+        let n = self.ndent as usize;
+        let i = self.dents[..n].iter().position(|e| e.ino == 0).unwrap_or(n);
+        *self.dents.get_mut(i).ok_or(FsError::NoSpace)? = d;
+        if i == n {
+            self.ndent += 1;
+        }
+        Ok(())
+    }
+
+    /// Copy this node's metadata into the call's copy `ino`, but its size
+    /// into the inode slot's words, in the store's section: the VFS merges
+    /// each copy after its call, in either order when two calls overlap,
+    /// so a size left in a copy could undo the later call's, as
+    /// `vibefs_init::store_size` keeps vibefs's.
     fn meta_into(&self, ino: &mut Inode) {
         ino.kind = self.kind;
         ino.mode = self.mode;
         ino.nlink = self.nlink;
-        ino.size = self.size;
+        match ino.words() {
+            Ok(w) => w.set_size(self.size),
+            Err(_) => ino.size = self.size,
+        }
         ino.atime = self.atime;
         ino.mtime = self.mtime;
         ino.ctime = self.ctime;
@@ -215,6 +246,21 @@ impl<S: Guarded<RamState> + Sync + 'static> InodeOps for RamFs<S> {
             .with(|st| ram_write(st, inst, now, ino, off, buf))
     }
 
+    /// `O_APPEND`: the size is read in the store section that writes, so
+    /// two appenders never write at the same end.
+    fn write_append(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        buf: &[u8],
+    ) -> Result<(usize, u64), FsError> {
+        let (inst, now) = (inst_of(cx), cx.now);
+        self.store.with(|st| {
+            let off = ram_get(st, inst, ino.key[0]).ok_or(FsError::NotFound)?.size;
+            ram_write(st, inst, now, ino, off, buf).map(|n| (n, off))
+        })
+    }
+
     fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
         let (inst, now) = (inst_of(cx), cx.now);
         self.store.with(|st| ram_truncate(st, inst, now, ino, size))
@@ -271,10 +317,12 @@ impl<S: Guarded<RamState> + Sync + 'static> InodeOps for RamFs<S> {
         oname: &[u8],
         ndir: &mut Inode,
         nname: &[u8],
+        seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         let (inst, now) = (inst_of(cx), cx.now);
         self.store.with(|st| {
-            ram_rename(st, inst, now, odir.key[0], oname, ndir.key[0], nname)?;
+            let (o, n) = ((odir.key[0], oname), (ndir.key[0], nname));
+            ram_rename(st, inst, now, o, n, seen)?;
             refresh(st, inst, odir);
             refresh(st, inst, ndir);
             Ok(None)
@@ -366,13 +414,19 @@ fn ram_dir_room(st: &RamState, inst: u32, dir: u32, name: &[u8]) -> Result<(), F
     if r.kind != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
+    // A directory an rmdir removed while the VFS held it, which keeps its
+    // node until its last put, takes no new entry, as Linux's
+    // `IS_DEADDIR` refuses it: one made there would be unreachable.
+    if r.nlink == 0 {
+        return Err(FsError::NotFound);
+    }
     if r.dents[..r.ndent as usize]
         .iter()
         .any(|d| d.name.eq_bytes(name))
     {
         return Err(FsError::Exists);
     }
-    if r.ndent as usize >= MAX_DIR_ENTS {
+    if r.live() >= MAX_DIR_ENTS {
         return Err(FsError::NoSpace);
     }
     Ok(())
@@ -422,12 +476,10 @@ fn ram_create(
         r.info(node)
     };
     let r = ram_get_mut(st, inst, dir_node).ok_or(FsError::NotFound)?;
-    let n = r.ndent as usize;
-    r.dents[n] = RamDent {
+    r.insert(RamDent {
         name: nm,
         ino: node,
-    };
-    r.ndent += 1;
+    })?;
     r.mtime = now;
     r.ctime = now;
     if kind == InodeKind::Dir {
@@ -482,14 +534,15 @@ fn ram_unlink(
     Ok(())
 }
 
-/// Drop entry `idx` of directory `r`, moving its last entry into the gap.
+/// Drop entry `idx` of directory `r`, leaving its slot empty
+/// ([`RamNode::live`]); empty slots at the end go.
 fn remove_dent(r: &mut RamNode, idx: usize) {
-    let Some(last) = (r.ndent as usize).checked_sub(1) else {
-        return;
-    };
-    r.dents[idx] = r.dents[last];
-    r.dents[last] = RamDent::EMPTY;
-    r.ndent -= 1;
+    if let Some(d) = r.dents.get_mut(idx) {
+        *d = RamDent::EMPTY;
+    }
+    while r.ndent > 0 && r.dents[r.ndent as usize - 1].ino == 0 {
+        r.ndent -= 1;
+    }
 }
 
 fn ram_read(
@@ -588,9 +641,13 @@ fn ram_readdir(
     if r.kind != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
-    let Some(d) = usize::try_from(cookie)
-        .ok()
-        .and_then(|i| r.dents[..r.ndent as usize].get(i))
+    // The cookie is the next slot to look at; empty slots are skipped.
+    let from = usize::try_from(cookie).unwrap_or(usize::MAX);
+    let Some((i, d)) = r.dents[..r.ndent as usize]
+        .iter()
+        .enumerate()
+        .skip(from)
+        .find(|(_, d)| d.ino != 0)
     else {
         return Ok(None);
     };
@@ -599,7 +656,7 @@ fn ram_readdir(
         .map(|c| c.kind)
         .unwrap_or(InodeKind::Reg);
     out.name = d.name;
-    Ok(Some(cookie + 1))
+    Ok(Some(i as u64 + 1))
 }
 
 /// Link `name` in directory node `dir` to node `target`.
@@ -618,12 +675,10 @@ fn ram_link(
     }
     ram_dir_room(st, inst, dir, name)?;
     let r = ram_get_mut(st, inst, dir).ok_or(FsError::NotFound)?;
-    let n = r.ndent as usize;
-    r.dents[n] = RamDent {
+    r.insert(RamDent {
         name: nm,
         ino: target,
-    };
-    r.ndent += 1;
+    })?;
     r.mtime = now;
     r.ctime = now;
     if let Some(t) = ram_get_mut(st, inst, target) {
@@ -633,64 +688,108 @@ fn ram_link(
     Ok(())
 }
 
-/// Move `oname` in directory node `odir` to `nname` in `ndir`.
+/// Move `oname` in directory node `odir` to `nname` in `ndir`. A name
+/// already at `nname` is replaced, as rename(2) replaces it: a directory
+/// only by a directory and only when empty, anything else only by a
+/// non-directory, and a second name of the same file is left as it is.
+/// The two names must still name what the VFS's walks found (`seen`).
 fn ram_rename(
     st: &mut RamState,
     inst: u32,
     now: u64,
-    odir: u32,
-    oname: &[u8],
-    ndir: u32,
-    nname: &[u8],
+    (odir, oname): (u32, &[u8]),
+    (ndir, nname): (u32, &[u8]),
+    seen: RenameSeen,
 ) -> Result<(), FsError> {
     let nm = Name::from_bytes(nname)?;
-    let (idx, node) = {
-        let r = ram_get(st, inst, odir).ok_or(FsError::NotFound)?;
-        let i = r.dents[..r.ndent as usize]
-            .iter()
-            .position(|d| d.name.eq_bytes(oname))
-            .ok_or(FsError::NotFound)?;
-        (i, r.dents[i].ino)
-    };
+    let node = ram_dent(st, inst, odir, oname)?;
+    let tgt = ram_dent(st, inst, ndir, nname)?;
+    let key = |n: u32| [n, 0, 0];
+    seen.check(node.map(key), tgt.map(key))?;
+    let node = node.ok_or(FsError::NotFound)?;
     let kind = ram_get(st, inst, node).ok_or(FsError::NotFound)?.kind;
     if odir == ndir && oname == nname {
         return Ok(());
     }
-    {
-        let r = ram_get(st, inst, ndir).ok_or(FsError::NotFound)?;
-        if r.kind != InodeKind::Dir {
-            return Err(FsError::NotDir);
+    let r = ram_get(st, inst, ndir).ok_or(FsError::NotFound)?;
+    if r.kind != InodeKind::Dir {
+        return Err(FsError::NotDir);
+    }
+    if r.nlink == 0 {
+        // A removed directory, as in `ram_dir_room`.
+        return Err(FsError::NotFound);
+    }
+    match tgt {
+        Some(t) if t == node => return Ok(()),
+        Some(t) => {
+            let tn = ram_get(st, inst, t).ok_or(FsError::NotFound)?;
+            match (kind == InodeKind::Dir, tn.kind == InodeKind::Dir) {
+                (false, true) => return Err(FsError::IsDir),
+                (true, false) => return Err(FsError::NotDir),
+                (true, true) if tn.ndent != 0 => return Err(FsError::NotEmpty),
+                _ => {}
+            }
         }
-        if r.dents[..r.ndent as usize]
-            .iter()
-            .any(|d| d.name.eq_bytes(nname))
-        {
-            return Err(FsError::Exists);
+        None => {
+            let r = ram_get(st, inst, ndir).ok_or(FsError::NotFound)?;
+            if odir != ndir && r.live() >= MAX_DIR_ENTS {
+                return Err(FsError::NoSpace);
+            }
         }
-        if odir != ndir && r.ndent as usize >= MAX_DIR_ENTS {
-            return Err(FsError::NoSpace);
+    }
+    if let Some(t) = tgt {
+        if let Some(tn) = ram_get_mut(st, inst, t) {
+            tn.nlink = if kind == InodeKind::Dir {
+                0
+            } else {
+                tn.nlink.saturating_sub(1)
+            };
+            tn.ctime = now;
+        }
+        let r = ram_get_mut(st, inst, ndir).ok_or(FsError::NotFound)?;
+        remove_name(r, nname);
+        // A replaced directory's `..` linked `ndir`.
+        if kind == InodeKind::Dir {
+            r.nlink = r.nlink.saturating_sub(1);
         }
     }
     {
         let r = ram_get_mut(st, inst, odir).ok_or(FsError::NotFound)?;
-        remove_dent(r, idx);
+        remove_name(r, oname);
         r.mtime = now;
         if kind == InodeKind::Dir {
             r.nlink = r.nlink.saturating_sub(1);
         }
     }
     let r = ram_get_mut(st, inst, ndir).ok_or(FsError::NotFound)?;
-    let n = r.ndent as usize;
-    r.dents[n] = RamDent {
+    r.insert(RamDent {
         name: nm,
         ino: node,
-    };
-    r.ndent += 1;
+    })?;
     r.mtime = now;
     if kind == InodeKind::Dir {
         r.nlink = r.nlink.saturating_add(1);
     }
     Ok(())
+}
+
+/// The node `name` names in directory node `dir`, if any.
+fn ram_dent(st: &RamState, inst: u32, dir: u32, name: &[u8]) -> Result<Option<u32>, FsError> {
+    let r = ram_get(st, inst, dir).ok_or(FsError::NotFound)?;
+    Ok(r.dents[..r.ndent as usize]
+        .iter()
+        .find(|d| d.name.eq_bytes(name))
+        .map(|d| d.ino))
+}
+
+/// Drop the entry `name` names in directory `r`, if any.
+fn remove_name(r: &mut RamNode, name: &[u8]) {
+    if let Some(i) = r.dents[..r.ndent as usize]
+        .iter()
+        .position(|d| d.name.eq_bytes(name))
+    {
+        remove_dent(r, i);
+    }
 }
 
 fn ram_readlink(st: &RamState, inst: u32, node: u32, buf: &mut [u8]) -> Result<usize, FsError> {

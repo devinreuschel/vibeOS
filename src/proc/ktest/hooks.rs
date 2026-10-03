@@ -43,10 +43,11 @@ pub(crate) fn star_configured() -> bool {
     star == star_value() && (efer & EFER_SCE) != 0
 }
 
-// Frame counts around `user_init::load_path`, recorded by its inline hook
-// points.
+// Frame counts around `user_init::open_exec` and `load_exec`, recorded
+// when `load_exec` returns.
 
-/// Free-frame counts around one [`crate::user_init::load_path`] call.
+/// Free-frame counts around one [`crate::user_init::open_exec`] and
+/// [`crate::user_init::load_exec`] pair.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ExecFrames {
     /// Buddy free frames at entry.
@@ -80,7 +81,7 @@ pub(crate) fn clear_exec_frames() {
     NEXT.store(0, Ordering::Release);
 }
 
-/// The last four `load_path` calls since [`clear_exec_frames`], oldest
+/// The last four `load_exec` calls since [`clear_exec_frames`], oldest
 /// first.
 pub(crate) fn exec_frames() -> Vec<ExecFrames> {
     let n = NEXT.load(Ordering::Acquire);

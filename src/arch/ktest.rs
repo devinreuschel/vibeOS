@@ -32,10 +32,14 @@ use crate::x86::{
 };
 
 mod idt;
+mod ipi;
+mod msr;
 mod seam;
+mod timer;
 mod uaccess;
 
 pub(crate) use idt::test_idt_set_handler_refuses_fixed;
+pub(crate) use ipi::test_ipi_icr_writes_if_off;
 pub(crate) use seam::test_arch_seam_core;
 pub(crate) use uaccess::*;
 
@@ -361,35 +365,6 @@ pub(crate) fn test_lapic_timer_mode() -> Outcome {
             }
         }
         (false, TimerMode::TscDeadline) => Outcome::Fail("tsc-deadline without cpuid"),
-    }
-}
-
-pub(crate) fn test_lapic_timer_rearm() -> Outcome {
-    match apic_init::timer_mode() {
-        TimerMode::Pit => {
-            let t0 = crate::time::ktest::pit_irqs();
-            time_init::busy_wait_ms(50);
-            let dt = crate::time::ktest::pit_irqs().saturating_sub(t0);
-            if (20..=100).contains(&dt) {
-                Outcome::Ok
-            } else {
-                crate::marker!("vibeOS: ktest:   pit dt={dt}");
-                Outcome::Fail("pit ticks stalled")
-            }
-        }
-        TimerMode::TscDeadline | TimerMode::Periodic => {
-            let t0 = apic_init::TIMER_FIRES.load(Ordering::Relaxed);
-            time_init::busy_wait_ms(50);
-            let n = apic_init::TIMER_FIRES
-                .load(Ordering::Relaxed)
-                .saturating_sub(t0);
-            if n >= 20 {
-                Outcome::Ok
-            } else {
-                crate::marker!("vibeOS: ktest:   lapic fires {n}");
-                Outcome::Fail("rearm stalled")
-            }
-        }
     }
 }
 
@@ -1469,6 +1444,7 @@ pub(crate) fn test_force_kernel_irq_window() -> Outcome {
 pub(crate) const TESTS: &[Test] = &[
     test("gdt_selectors", test_gdt_selectors),
     test("star_sysret_layout", test_star_sysret_layout),
+    test("sysenter_msrs_zero", msr::sysenter_msrs_zero),
     test("int3_roundtrip", test_int3_roundtrip),
     test("scoped_pf", test_scoped_pf),
     test("gp_catch", test_gp_catch),
@@ -1478,7 +1454,7 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("df_on_ist", test_df_on_ist),
     test("lapic_timer_mode", test_lapic_timer_mode),
-    test("lapic_timer_rearm", test_lapic_timer_rearm),
+    test("lapic_timer_rearm", timer::test_lapic_timer_rearm),
     test("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
     test("irq_guard_nest", test_irq_guard_nest),
     test("cpu_hardening", test_cpu_hardening),
@@ -1488,6 +1464,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_exceptions", test_user_exceptions).deadline(30_000),
     test("user_device_irq", test_user_device_irq).deadline(30_000),
     test("user_ipi", test_user_ipi).deadline(30_000),
+    test("ipi_icr_writes_if_off", test_ipi_icr_writes_if_off),
     test("cpu_control_regs", cpu_control_regs),
     test("catch_ignores_other_cpu", test_catch_ignores_other_cpu),
     test("catch_ignores_user_frame", test_catch_ignores_user_frame).deadline(30_000),

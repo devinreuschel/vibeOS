@@ -10,6 +10,10 @@ use crate::arch::current::hw_rng64;
 use crate::virtio_init;
 
 fn hw_fill(buf: &mut [u8]) -> (usize, Option<Source>) {
+    #[cfg(feature = "kernel_tests")]
+    if testing::dry() {
+        return (0, None);
+    }
     let mut i = 0usize;
     let mut src = None;
     if virtio_init::rng_bound() {
@@ -59,5 +63,23 @@ fn refill() {
             "vibeOS: entropy: virtio-rng request failed: {}",
             e.as_str()
         );
+    }
+}
+
+/// A machine with no hardware entropy, for `dev_random_eagain`.
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static DRY: AtomicBool = AtomicBool::new(false);
+
+    /// While `on`, the hardware fill supplies no byte, as with neither
+    /// virtio-rng nor `RDRAND`.
+    pub(crate) fn set_dry(on: bool) {
+        DRY.store(on, Ordering::Release);
+    }
+
+    pub(super) fn dry() -> bool {
+        DRY.load(Ordering::Acquire)
     }
 }

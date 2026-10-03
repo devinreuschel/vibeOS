@@ -158,14 +158,15 @@ impl Vfs {
         None
     }
 
-    /// The next unhashed inode whose release is queued, as a call to its
-    /// backend's `evict`; one on a superblock with no ops is released
-    /// here.
+    /// The next unhashed inode whose release is queued and that nothing
+    /// holds, as a call to its backend's `evict`; one on a superblock with
+    /// no ops is released here. One held again after its release was
+    /// queued waits for its last put.
     pub(super) fn take_release(&mut self) -> Option<Call> {
         let mut i = 0usize;
         while i < self.inodes.len() {
             let n = &self.inodes[i];
-            if n.used && n.rel == Rel::Queued {
+            if n.used && n.rel == Rel::Queued && n.refs == 0 {
                 match self.supers[n.sb as usize].ops {
                     None => self.inode_clear(i),
                     Some(ops) => {

@@ -80,26 +80,35 @@ impl FatVol {
         }
         self.info = info;
         let vol = self;
+        // FSInfo, and its backup copy, are written back only to a sector
+        // inside the reserved area that holds a valid FSInfo now: a BPB's
+        // sector numbers are the image's, and could name a FAT or data
+        // sector that the write-back would overwrite.
+        let mut fs = [0u8; SEC];
         if info.fsinfo != 0 && info.fsinfo < info.rsvd {
-            let mut fs = [0u8; SEC];
             d.read(info.fsinfo, &mut fs)?;
-            if le32(&fs, 0)? == 0x4161_5252
-                && le32(&fs, 484)? == 0x6141_7272
-                && le32(&fs, 508)? == 0xAA55_0000
-            {
-                let free = le32(&fs, 488)?;
-                let hint = le32(&fs, 492)?;
-                if free != 0xFFFFFFFF {
-                    vol.free = free;
-                }
-                if hint >= 2 && !info.past_end(hint) {
-                    vol.hint = hint;
-                }
+        }
+        // Of FSInfo's two counts only the next-free hint is read: the
+        // free count is one Windows does not keep right, and Linux's vfat
+        // reads it only under `usefree`, so the count below is the FAT's.
+        if info.fsinfo != 0 && info.fsinfo < info.rsvd && fsinfo_valid(&fs)? {
+            let hint = le32(&fs, 492)?;
+            if hint >= 2 && !info.past_end(hint) {
+                vol.hint = hint;
+            }
+        } else {
+            vol.info.fsinfo = 0;
+        }
+        let b = info.backup.saturating_add(1);
+        if vol.info.fsinfo == 0 || info.backup == 0 || b == info.fsinfo || b >= info.rsvd {
+            vol.info.backup = 0;
+        } else {
+            d.read(b, &mut fs)?;
+            if !fsinfo_valid(&fs)? {
+                vol.info.backup = 0;
             }
         }
-        if vol.free == 0xFFFFFFFF {
-            vol.free = vol.count_free(d)?;
-        }
+        vol.free = vol.count_free(d)?;
         Ok(())
     }
 
@@ -250,6 +259,14 @@ const LFN_ILLEGAL: &[u8] = b"/\"*:<>?\\|";
 
 /// The most clusters a FAT32 volume holds: numbers 2 to `0x0FFF_FFF6`.
 const MAX_NCLUS: u32 = 0x0FFF_FFF5;
+
+/// Whether `fs` holds FSInfo's three signatures (Microsoft's FAT
+/// specification, "FAT32 FSInfo Sector Structure").
+fn fsinfo_valid(fs: &[u8; SEC]) -> Result<bool, FatError> {
+    Ok(le32(fs, 0)? == 0x4161_5252
+        && le32(fs, 484)? == 0x6141_7272
+        && le32(fs, 508)? == 0xAA55_0000)
+}
 
 fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
     if boot[510] != 0x55 || boot[511] != 0xAA {

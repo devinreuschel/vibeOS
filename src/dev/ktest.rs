@@ -12,13 +12,16 @@ use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MAST
 
 use vibeos::kalloc::TryBox;
 use vibeos::pci::CfgIo;
+use vibeos::proc::wait_exited;
 use vibeos::virtio::{F_EVENT_IDX, F_INDIRECT_DESC, F_VERSION_1};
 
 use crate::arch::current::Arch;
 use crate::dev_init;
 use crate::dma_init;
+use crate::entropy_init;
 use crate::fs_init;
 use crate::heap_init::{self, fail_after::Scope};
+use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{
     EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, bar0_va, fid, find_edu, mmio_r32, mmio_w32,
     quiescent_free_frames, spin_until_ns, test,
@@ -504,6 +507,55 @@ pub(crate) fn test_virtio_vq() -> Outcome {
         return Outcome::Fail("no softirq");
     }
     Outcome::Ok
+}
+
+// open("/dev/random", O_RDONLY), then read 16 bytes onto the stack;
+// exit with the errno either returned (a positive count exits 0x80 | 16).
+user_code!(
+    DEV_RANDOM_READ,
+    "
+    lea rdi, [rip + 90f]
+    xor esi, esi
+    xor edx, edx
+    mov eax, 2
+    syscall
+    test rax, rax
+    js 80f
+    mov rdi, rax
+    sub rsp, 64
+    mov rsi, rsp
+    mov edx, 16
+    xor eax, eax
+    syscall
+    test rax, rax
+    js 80f
+    or eax, 0x80
+    mov edi, eax
+    jmp 81f
+80:
+    neg rax
+    mov rdi, rax
+81:
+    mov eax, 60
+    syscall
+    ud2
+90:
+    .asciz \"/dev/random\"
+    "
+);
+
+/// A `read` of `/dev/random` from ring 3, with no hardware entropy,
+/// returns `EAGAIN` (11) through the syscall (SYSCALL.md §3, read's row;
+/// ROADMAP §10.12).
+pub(crate) fn test_dev_random_eagain() -> Outcome {
+    entropy_init::testing::set_dry(true);
+    let st = user::run(&Image::Code(DEV_RANDOM_READ, DEFAULT), &["random_eagain"]);
+    entropy_init::testing::set_dry(false);
+    match st {
+        Ok(st) if st == wait_exited(11) => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("status {st:#x}, want exited 11 (EAGAIN)"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
+    }
 }
 
 pub(crate) fn test_dev_random_source() -> Outcome {
@@ -1281,6 +1333,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("virtio_bind", test_virtio_bind),
     test("virtio_vq", test_virtio_vq),
     test("dev_random_source", test_dev_random_source),
+    test("dev_random_eagain", test_dev_random_eagain),
     test("rng_pool_no_dup", rng_pool_no_dup),
     test(
         "rng_refill_after_empty_completion",

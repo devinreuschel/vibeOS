@@ -16,6 +16,12 @@ use crate::ktest::{Outcome, Test, spin_until_ns, test};
 use crate::log::trace_init::VIBEOS_TRACE;
 use crate::{ipi_init, per_cpu_init, thread_init, time_init};
 
+/// The `dmesg` dump to serial, outside the ring, as the shell's `dmesg`
+/// writes it to the console (AGENTS.md, Emit).
+fn dmesg(view: Option<Level>) {
+    crate::log_init::dmesg_write(&mut crate::serial::PlainSerial, view);
+}
+
 /// The runtime level is what `loglevel=` set at boot (BOOT.md §3.2), or
 /// the default without one. It runs first in its group, before the tests
 /// that set the level and restore it.
@@ -39,13 +45,13 @@ pub(crate) fn test_log_boot_level() -> Outcome {
 }
 
 pub(crate) fn test_log_boot_captured() -> Outcome {
-    if !crate::log_init::contains_msg("serial online") {
+    if !crate::ktest::log_contains("serial online") {
         return Outcome::Fail("serial online missing from ring");
     }
-    if !crate::log_init::contains_msg("smp: done") {
+    if !crate::ktest::log_contains("smp: done") {
         return Outcome::Fail("smp: done missing from ring");
     }
-    if !crate::log_init::contains_msg("console ok") {
+    if !crate::ktest::log_contains("console ok") {
         return Outcome::Fail("console ok missing from ring");
     }
     Outcome::Ok
@@ -56,13 +62,13 @@ pub(crate) fn test_log_runtime_filter() -> Outcome {
     let old = crate::log_init::max_level();
     crate::log_init::set_max_level(Level::Error);
     crate::klog!(Level::Debug, "vibeOS: ktest: log-filter-hidden-xyz");
-    if crate::log_init::contains_msg("log-filter-hidden-xyz") {
+    if crate::ktest::log_contains("log-filter-hidden-xyz") {
         crate::log_init::set_max_level(old);
         return Outcome::Fail("debug stored at error max");
     }
     crate::log_init::set_max_level(Level::Trace);
     crate::klog!(Level::Debug, "vibeOS: ktest: log-filter-visible-xyz");
-    let ok = crate::log_init::contains_msg("log-filter-visible-xyz");
+    let ok = crate::ktest::log_contains("log-filter-visible-xyz");
     crate::log_init::set_max_level(old);
     if ok {
         Outcome::Ok
@@ -73,7 +79,7 @@ pub(crate) fn test_log_runtime_filter() -> Outcome {
 
 pub(crate) fn test_log_emit_roundtrip() -> Outcome {
     crate::klog!(vibeos::log::Level::Info, "vibeOS: ktest: log-roundtrip-abc");
-    if crate::log_init::contains_msg("log-roundtrip-abc") {
+    if crate::ktest::log_contains("log-roundtrip-abc") {
         Outcome::Ok
     } else {
         Outcome::Fail("info record missing")
@@ -82,11 +88,11 @@ pub(crate) fn test_log_emit_roundtrip() -> Outcome {
 
 pub(crate) fn test_log_dmesg_no_recapture() -> Outcome {
     let n = crate::log_init::ring_len();
-    crate::log_init::dmesg(Some(vibeos::log::Level::Info));
+    dmesg(Some(vibeos::log::Level::Info));
     if crate::log_init::ring_len() != n {
         return Outcome::Fail("dmesg recaptured into ring");
     }
-    if crate::log_init::contains_msg("vibeOS: dmesg:") {
+    if crate::ktest::log_contains("vibeOS: dmesg:") {
         return Outcome::Fail("dmesg line stored");
     }
     Outcome::Ok
@@ -115,10 +121,10 @@ pub(crate) fn test_log_reentry_drop_counted() -> Outcome {
     if after.wrapping_sub(before) != 1 {
         return crate::fail_fmt!("reentry_drops {before} -> {after}, want +1");
     }
-    if !crate::log_init::contains_msg("log-reentry-outer") {
+    if !crate::ktest::log_contains("log-reentry-outer") {
         return Outcome::Fail("outer record missing from ring");
     }
-    if crate::log_init::contains_msg("log-reentry-inner") {
+    if crate::ktest::log_contains("log-reentry-inner") {
         return Outcome::Fail("inner record stored");
     }
     Outcome::Ok

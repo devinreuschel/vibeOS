@@ -79,14 +79,17 @@ pub fn pick_features(device: u64) -> Result<u64, virtio::VirtioError> {
     virtio::pick_features(device, OFFER)
 }
 
-/// Logical block size. Missing [`F_BLK_SIZE`] → 512. Never trust a
-/// zero or non-multiple-of-512 `blk_size` from config.
-pub fn pick_blk_size(feat: u64, cfg_blk_size: u32) -> u32 {
-    if feat & F_BLK_SIZE != 0 && cfg_blk_size >= SECTOR && cfg_blk_size.is_multiple_of(SECTOR) {
-        cfg_blk_size
-    } else {
-        SECTOR
+/// Logical block size: 512 without [`F_BLK_SIZE`], else config's
+/// `blk_size`, which must be a power of two from 512 to
+/// [`MAX_BLOCK_SIZE`](crate::limits::MAX_BLOCK_SIZE). `None` for any other, and the probe fails, as
+/// Linux's `virtblk_probe` fails on an invalid block size.
+pub fn pick_blk_size(feat: u64, cfg_blk_size: u32) -> Option<u32> {
+    if feat & F_BLK_SIZE == 0 {
+        return Some(SECTOR);
     }
+    (cfg_blk_size.is_power_of_two()
+        && (SECTOR..=crate::limits::MAX_BLOCK_SIZE).contains(&cfg_blk_size))
+    .then_some(cfg_blk_size)
 }
 
 pub fn sector_for_lba(lba: u64, blk_size: u32) -> Option<u64> {
@@ -240,11 +243,16 @@ mod tests {
 
     #[test]
     fn blk_size_default_and_4k() {
-        assert_eq!(pick_blk_size(0, 4096), 512);
-        assert_eq!(pick_blk_size(F_BLK_SIZE, 0), 512);
-        assert_eq!(pick_blk_size(F_BLK_SIZE, 513), 512);
-        assert_eq!(pick_blk_size(F_BLK_SIZE, 4096), 4096);
-        assert_eq!(pick_blk_size(F_BLK_SIZE, 512), 512);
+        assert_eq!(pick_blk_size(0, 4096), Some(512));
+        assert_eq!(pick_blk_size(0, 0), Some(512));
+        assert_eq!(pick_blk_size(F_BLK_SIZE, 4096), Some(4096));
+        assert_eq!(pick_blk_size(F_BLK_SIZE, 1024), Some(1024));
+        assert_eq!(pick_blk_size(F_BLK_SIZE, 512), Some(512));
+        // Refused, so the probe fails: zero, not a power of two, below a
+        // sector, or above a page.
+        for bad in [0, 256, 513, 1536, 8192, 65536] {
+            assert_eq!(pick_blk_size(F_BLK_SIZE, bad), None, "{bad}");
+        }
         assert_eq!(sector_for_lba(3, 4096), Some(24));
         assert_eq!(sector_for_lba(3, 512), Some(3));
         assert_eq!(sector_for_lba(1, 100), None);

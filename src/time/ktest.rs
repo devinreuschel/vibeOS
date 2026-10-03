@@ -1,6 +1,6 @@
 //! In-guest tests for time (kernel_tests only). Rows: [`TESTS`].
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::time::{
@@ -42,23 +42,36 @@ pub(crate) fn deadline_after(now: Instant) -> Instant {
     next_deadline(now)
 }
 
-/// PIT interrupts taken, counted by `time_init::on_pit_tick`.
-static PIT_IRQS: AtomicU64 = AtomicU64::new(0);
+/// PIT interrupts whose TSC [`test_pit_tick_rate`] stamps: 40 intervals.
+const PIT_STAMPS: usize = 41;
+/// The TSC at each stamped PIT interrupt, in order.
+static PIT_STAMP: [AtomicU64; PIT_STAMPS] = [const { AtomicU64::new(0) }; PIT_STAMPS];
+/// Stamps taken since [`test_pit_tick_rate`] armed them; `usize::MAX`
+/// while it has not.
+static PIT_STAMP_N: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-pub(crate) fn count_pit_irq() {
-    // Relaxed: a counter; `pit_tick_rate` reads it on the CPU the PIT
-    // interrupts, and no data hangs off it.
-    PIT_IRQS.fetch_add(1, Ordering::Relaxed);
+/// Stamp this PIT interrupt for [`test_pit_tick_rate`] while it is armed;
+/// `time_init::on_pit_tick` calls it and counts the interrupt itself.
+pub(crate) fn stamp_pit_irq() {
+    // One writer: the PIT interrupts one CPU, whose handler runs this with
+    // IF off. Relaxed: the stamp is published by the count's store below.
+    let i = PIT_STAMP_N.load(Ordering::Relaxed);
+    if let Some(slot) = PIT_STAMP.get(i) {
+        slot.store(time_init::read_tsc(), Ordering::Relaxed);
+        // Release: pairs with the test's Acquire load, so a count it reads
+        // covers stamps it can read.
+        PIT_STAMP_N.store(i + 1, Ordering::Release);
+    }
 }
 
-pub(crate) fn pit_irqs() -> u64 {
-    // Relaxed: as in `count_pit_irq`.
-    PIT_IRQS.load(Ordering::Relaxed)
-}
-
-/// PIT interrupts over an 80 ms TSC spin with IF=1, in a boot where the PIT
-/// drives the tick (`make test-kernel`'s hpet=off boot). It spins rather
-/// than `busy_wait_ms`, which halts when IF=1.
+/// The PIT's tick rate, in a boot where the PIT drives the tick (`make
+/// test-kernel`'s hpet=off boot): CPU 0 stamps the TSC at [`PIT_STAMPS`]
+/// PIT interrupts, and the median of their 40 intervals lies between 0.5
+/// and 2 ms, the band of the 40 to 160 interrupts in 80 ms this test
+/// first counted. Under TCG the host can stall the PIT's delivery for tens
+/// of milliseconds and merge the edges it missed: one long interval, which
+/// a count over a fixed TSC window took as a slow PIT (ROADMAP §10.2) and
+/// the median ignores.
 pub(crate) fn test_pit_tick_rate() -> Outcome {
     if apic_init::timer_mode() != TimerMode::Pit {
         return Outcome::Fail("pit does not drive the tick");
@@ -70,17 +83,34 @@ pub(crate) fn test_pit_tick_rate() -> Outcome {
     if k == 0 {
         return Outcome::Fail("no tsc_per_ms");
     }
-    let span = k.saturating_mul(80);
-    let n0 = pit_irqs();
-    let t0 = time_init::read_tsc();
-    while time_init::read_tsc().wrapping_sub(t0) < span {
-        core::hint::spin_loop();
+    // Release: the stamps' handler sees the arming.
+    PIT_STAMP_N.store(0, Ordering::Release);
+    // Acquire: pairs with the handler's Release store of the count.
+    let full = crate::ktest::wait_for(|| PIT_STAMP_N.load(Ordering::Acquire) >= PIT_STAMPS);
+    let n = PIT_STAMP_N.swap(usize::MAX, Ordering::AcqRel);
+    if !full {
+        return crate::fail_fmt!("{n} of {PIT_STAMPS} pit interrupts by the run's deadline");
     }
-    let n = pit_irqs().wrapping_sub(n0);
-    if (40..=160).contains(&n) {
+    let mut gaps = [0u64; PIT_STAMPS - 1];
+    for (i, g) in gaps.iter_mut().enumerate() {
+        let (a, b) = (&PIT_STAMP[i], &PIT_STAMP[i + 1]);
+        *g = b
+            .load(Ordering::Relaxed)
+            .wrapping_sub(a.load(Ordering::Relaxed));
+    }
+    gaps.sort_unstable();
+    let mid = gaps.len() / 2;
+    let median = gaps[mid - 1] / 2 + gaps[mid] / 2;
+    let us = |c: u64| c.saturating_mul(1000) / k;
+    if (k / 2..=k.saturating_mul(2)).contains(&median) {
         Outcome::Ok
     } else {
-        crate::fail_fmt!("{n} pit interrupts in 80 ms, want 40 to 160")
+        crate::fail_fmt!(
+            "pit interval median {} us (min {}, max {}), want 500 to 2000",
+            us(median),
+            us(gaps[0]),
+            us(gaps[gaps.len() - 1])
+        )
     }
 }
 
@@ -689,11 +719,6 @@ pub(crate) fn test_rtc_offset() -> Outcome {
 
 /// How long CPU 0 holds IF off, in ns of the reference counter.
 const IF_OFF_NS: u64 = 50_000_000;
-/// How long after the window the body waits for two ticks, in ns of the
-/// reference counter.
-const TICK_WAIT_NS: u64 = 20_000_000;
-/// How long the test waits for its body, in ms.
-const IF_OFF_WAIT_MS: u64 = 1_000;
 
 /// 0 while the body runs; then 1, with [`IF_OFF_VALS`] set, or `2 + i` for
 /// failure `i` of [`IF_OFF_ERRS`].
@@ -703,7 +728,7 @@ static IF_OFF_ERRS: [&str; 6] = [
     "no reference counter",
     "no clock read",
     "not on cpu0",
-    "no tick within 20 ms of the window",
+    "two ticks did not follow the window",
     "no clock read bracketed within 20 us",
 ];
 /// A clock read counts when the reference reads on either side of it are
@@ -780,20 +805,11 @@ fn if_off_measure() -> Result<([u64; 4], ClocksourceId), usize> {
         (start, bracketed(&read, &since)?)
     };
     // IF is back on: the tick resumes. A clock that counted ticks lost the
-    // window's here.
+    // window's here. The run's deadline bounds the wait: a loaded host can
+    // hold a tick back for tens of milliseconds (ROADMAP §10.2).
     let t0 = time_init::ticks();
-    loop {
-        // Time first, then the tick count: a tick that preempts this
-        // thread between the two shows in the count, so a stretch off the
-        // CPU cannot read as a missing tick.
-        let late = since(end.2, read()?) > TICK_WAIT_NS;
-        if time_init::ticks() >= t0.saturating_add(2) {
-            break;
-        }
-        if late {
-            return Err(4);
-        }
-        core::hint::spin_loop();
+    if !crate::ktest::wait_for(|| time_init::ticks() >= t0.saturating_add(2)) {
+        return Err(4);
     }
     let after = bracketed(&read, &since)?;
     let vals = [
@@ -839,18 +855,12 @@ pub(crate) fn test_clocksource_if_off_50ms() -> Outcome {
     if thread_init::spawn_opts("clock-ifoff", if_off_body, opts).is_err() {
         return Outcome::Fail("spawn");
     }
-    let start = time_init::now_ns();
-    // Acquire: pairs with the Release store in `if_off_body`.
-    let state = loop {
-        let st = IF_OFF_STATE.load(Ordering::Acquire);
-        if st != 0 {
-            break st;
-        }
-        if time_init::now_ns().saturating_sub(start) > IF_OFF_WAIT_MS.saturating_mul(1_000_000) {
-            return Outcome::Fail("body did not finish within 1 s");
-        }
-        thread_init::sleep_ms(1);
-    };
+    // Acquire: pairs with the Release store in `if_off_body`. The registry
+    // thread sleeps between checks, since the body runs on CPU 0 beside it.
+    if !crate::ktest::sleep_for(|| IF_OFF_STATE.load(Ordering::Acquire) != 0) {
+        return Outcome::Fail("body did not finish");
+    }
+    let state = IF_OFF_STATE.load(Ordering::Acquire);
     if state != 1 {
         let i = state.saturating_sub(2) as usize;
         return Outcome::Fail(IF_OFF_ERRS.get(i).copied().unwrap_or("bad state"));

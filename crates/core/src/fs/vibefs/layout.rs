@@ -38,6 +38,9 @@ impl Snap {
     };
 }
 
+/// An inode as a lookup reports it, in memory only. Its times are the
+/// record's (VIBEFS.md §7), with a 0 (unset) atime or ctime reported as
+/// the mtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Node {
     pub ino: u32,
@@ -45,7 +48,9 @@ pub struct Node {
     pub size: u64,
     pub mode: u16,
     pub nlink: u32,
+    pub atime: u64,
     pub mtime: u64,
+    pub ctime: u64,
     pub name_len: u8,
     pub name: [u8; MAX_NAME],
 }
@@ -57,7 +62,9 @@ impl Node {
         size: 0,
         mode: 0,
         nlink: 0,
+        atime: 0,
         mtime: 0,
+        ctime: 0,
         name_len: 0,
         name: [0; MAX_NAME],
     };
@@ -281,13 +288,16 @@ fn parse_super(buf: &[u8; BLOCK], slot: u8) -> Result<SuperInfo, Error> {
     })
 }
 
+/// The newer valid superblock of the two slots. A slot that does not
+/// parse is a torn or never-written one and is passed over; a slot that
+/// cannot be read fails the pick, since it may hold the newer generation,
+/// and mounting the older one would roll the volume back.
 pub(super) fn pick_super<D: Disk>(d: &mut D, buf: &mut [u8; BLOCK]) -> Result<SuperInfo, Error> {
     let mut best: Option<SuperInfo> = None;
     let mut slot = 0u8;
     while slot < 2 {
-        if let Ok(()) = d.read_block(slot as u32, buf)
-            && let Ok(s) = parse_super(buf, slot)
-        {
+        d.read_block(slot as u32, buf)?;
+        if let Ok(s) = parse_super(buf, slot) {
             let take = match &best {
                 None => true,
                 Some(b) => {

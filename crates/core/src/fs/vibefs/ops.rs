@@ -96,19 +96,26 @@ impl Vol {
         if kind == InodeKind::Chr || kind == InodeKind::Blk {
             return Err(Error::Perm);
         }
-        let slot = self.alloc_ino_slot()?;
-        let de = self.alloc_dent()?;
+        // Inode numbers are never reused (VIBEFS.md §13): once `next_ino`
+        // has no successor every create is `NoSpace`, where saturating
+        // would hand the last number to every later file.
         let ino = self.next_ino;
+        let next = ino.checked_add(1).ok_or(Error::NoSpace)?;
         if ino == 0 {
             return Err(Error::NoSpace);
         }
-        self.next_ino = self.next_ino.saturating_add(1);
+        let slot = self.alloc_ino_slot()?;
+        let de = self.alloc_dent()?;
+        self.next_ino = next;
         let mut rec = Inode::EMPTY;
         rec.used = true;
         rec.ino = ino;
         rec.kind = kind_to(kind);
         rec.mode = mode;
         rec.nlink = 1;
+        rec.atime = self.now;
+        rec.mtime = self.now;
+        rec.ctime = self.now;
         rec.flags = if kind != InodeKind::Dir { F_INLINE } else { 0 };
         if let Some(t) = link_target {
             rec.inline_len = t.len() as u8;
@@ -158,12 +165,18 @@ impl Vol {
         } else if k == KIND_DIR {
             return Err(Error::IsDir);
         }
-        self.dents[e] = Dent::EMPTY;
+        // The one step that can fail goes first, so a refused unlink
+        // leaves the name and the link count as they were.
         let nlink = self.inodes[is].nlink.saturating_sub(1);
-        self.inodes[is].nlink = nlink;
         if nlink == 0 {
             self.free_inode_data(d, ino)?;
+        }
+        self.dents[e] = Dent::EMPTY;
+        self.inodes[is].nlink = nlink;
+        if nlink == 0 {
             self.inodes[is] = Inode::EMPTY;
+        } else {
+            self.bump_ctime(ino);
         }
         self.bump_mtime(dir);
         Ok(())
@@ -218,8 +231,15 @@ impl Vol {
         if self.inodes[ss].kind == KIND_DIR && self.in_subtree(src_ino, dst_dir)? {
             return Err(Error::Inval);
         }
-        if self.find_dent(dst_dir, dst_name).is_ok() {
-            self.unlink(d, dst_dir, dst_name, false)?;
+        // The destination goes as rename(2) has it: a directory only for
+        // a directory and only when empty (an rmdir's checks), anything
+        // else only for a non-directory (an unlink's). Two names of one
+        // file both stay, and nothing changes, as rename(2) has it too.
+        if let Ok(t) = self.find_dent(dst_dir, dst_name) {
+            if self.dents[t].ino == src_ino {
+                return Ok(());
+            }
+            self.unlink(d, dst_dir, dst_name, self.inodes[ss].kind == KIND_DIR)?;
         }
         let mut nm = [0u8; MAX_NAME];
         nm[..dst_name.len()].copy_from_slice(dst_name);
@@ -228,6 +248,7 @@ impl Vol {
         self.dents[e].name = nm;
         self.bump_mtime(src_dir);
         self.bump_mtime(dst_dir);
+        self.bump_ctime(src_ino);
         Ok(())
     }
 
@@ -324,6 +345,10 @@ impl Vol {
             return Ok(());
         }
         let size = self.inodes[is].size as usize;
+        // As in `read`: a size past the inline bytes is corruption.
+        if size > INLINE {
+            return Err(Error::Corrupt);
+        }
         let mut tmp = [0u8; INLINE];
         tmp.copy_from_slice(&self.inodes[is].inline_data);
         if size == 0 {
@@ -383,6 +408,12 @@ impl Vol {
         }
     }
 
+    /// Inode `ino` as a lookup reports it, without a name: what `stat`
+    /// reads.
+    pub fn attr(&self, ino: u32) -> Result<Node, Error> {
+        self.node_from(ino, &[])
+    }
+
     /// The size of inode `ino`, which `SEEK_END` and `O_APPEND` read.
     pub fn file_size(&self, ino: u32) -> Result<u64, Error> {
         let s = self.inode_slot(ino)?;
@@ -424,13 +455,21 @@ impl Vol {
             return Err(Error::IsDir);
         }
         let size = self.inodes[is].size;
-        if off >= size {
+        if off >= size || buf.is_empty() {
             return Ok(0);
         }
         let want = core::cmp::min(buf.len() as u64, size - off) as usize;
         if self.inodes[is].flags & F_INLINE != 0 {
+            // An inline file's bytes are `inline_data`'s: a size past them
+            // is corruption (fsck's `inline`), which a crafted image or an
+            // earlier v1 truncate left (VIBEFS.md §7).
             let s = off as usize;
-            buf[..want].copy_from_slice(&self.inodes[is].inline_data[s..s + want]);
+            let end = s.checked_add(want).ok_or(Error::Corrupt)?;
+            let src = self.inodes[is]
+                .inline_data
+                .get(s..end)
+                .ok_or(Error::Corrupt)?;
+            buf[..want].copy_from_slice(src);
             return Ok(want);
         }
         // Every extent the range touches verifies before anything is
@@ -717,23 +756,37 @@ impl Vol {
             return Err(Error::FileTooBig);
         }
         let old = self.inodes[is].size;
+        let inline = self.inodes[is].flags & F_INLINE != 0;
         if new >= old {
-            if self.inodes[is].flags & F_INLINE != 0 && new <= INLINE as u64 {
+            if inline && new <= INLINE as u64 {
                 self.inodes[is].size = new;
                 self.inodes[is].inline_len = new as u8;
                 self.bump_mtime(ino);
                 return Ok(());
             }
+            // Past the inline bytes the file needs extents (§7): its bytes
+            // move to a block while `size` still says how many there are,
+            // as a write past byte 128 moves them. `Corrupt` for an inline
+            // size an image set past them.
+            if inline {
+                self.spill_inline(d, ino)?;
+            }
+            let is = self.inode_slot(ino)?;
             self.inodes[is].size = new;
             self.bump_mtime(ino);
             return Ok(());
         }
-        if self.inodes[is].flags & F_INLINE != 0 {
+        if inline {
+            // `new < old`, so `new` fits the inline bytes unless an image
+            // set `old` past them; `inline_len` above 128 fails the mount.
+            let keep = usize::try_from(new)
+                .ok()
+                .filter(|&n| old <= INLINE as u64 && n <= INLINE)
+                .ok_or(Error::Corrupt)?;
             self.inodes[is].size = new;
-            self.inodes[is].inline_len = new as u8;
-            if new == 0 {
-                self.inodes[is].inline_data = [0; INLINE];
-            }
+            self.inodes[is].inline_len = keep as u8;
+            // A later grow reads zeros past `new`, not the old bytes.
+            self.inodes[is].inline_data[keep..].fill(0);
             self.bump_mtime(ino);
             return Ok(());
         }

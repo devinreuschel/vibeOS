@@ -1,5 +1,6 @@
 //! Host-test backends for `Vfs`'s tests: a keyed store outside `Vfs`,
-//! one with no ops, and one that checks the VFS lock is dropped.
+//! one with no ops, and one that checks the VFS lock is dropped; and the
+//! `v.mkdir(None, …)` wrappers that drive a `Vfs` through [`FileApi`].
 
 use super::*;
 
@@ -217,6 +218,7 @@ impl InodeOps for KeyOps {
         })
     }
     fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+        assert_eq!(ino.refs, 0, "evict of an inode the VFS holds");
         with_store(cx.private[0], |s| {
             if let Some(n) = s.nodes.get_mut(ino.key[0] as usize) {
                 n.alive = false;
@@ -343,9 +345,17 @@ impl InodeOps for LockedFs {
         oname: &[u8],
         ndir: &mut Inode,
         nname: &[u8],
+        seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         self.unlocked();
         with_store(cx.private[0], |s| {
+            let at = |d: &Inode, name: &[u8]| {
+                s.names
+                    .iter()
+                    .find(|e| e.0 == d.key[0] && e.1 == name)
+                    .map(|e| [e.2, 0, 0])
+            };
+            seen.check(at(odir, oname), at(ndir, nname))?;
             if s.names.iter().any(|e| e.0 == ndir.key[0] && e.1 == nname) {
                 return Err(FsError::Exists);
             }
@@ -406,5 +416,410 @@ impl InodeOps for LockedFs {
     }
     fn release(&self, _cx: &mut OpCx<'_>) {
         self.unlocked();
+    }
+}
+
+/// Remove the empty directory `dir` while holding it, then make a file
+/// and a directory in it and link the file `file` into it through `ops`
+/// directly, as backend calls that a racing rmdir got ahead of would:
+/// the three results.
+pub(crate) fn make_in_removed_dir(
+    v: &mut Vfs,
+    ops: &dyn InodeOps,
+    dir: &str,
+    file: &str,
+) -> [Result<(), FsError>; 3] {
+    let p = v.resolve(None, dir, true).unwrap();
+    let dref = v.iref(p).unwrap();
+    let p = v.resolve(None, file, true).unwrap();
+    let fref = v.iref(p).unwrap();
+    v.rmdir(None, dir).unwrap();
+    let mut d = *v.inode(dref.handle()).unwrap();
+    let mut f = *v.inode(fref.handle()).unwrap();
+    let mut private = v.sb_private(d.sb).unwrap();
+    let mut cx = OpCx {
+        sb: d.sb,
+        fstype: v.fstype(d.sb),
+        private: &mut private,
+        now: 0,
+        vol: None,
+    };
+    let mut make = |name: &[u8], kind| {
+        ops.create(&mut cx, &mut d, name, kind, 0o755, None)
+            .map(|_| ())
+    };
+    let r = [
+        make(b"x", InodeKind::Reg),
+        make(b"z", InodeKind::Dir),
+        ops.link(&mut cx, &mut d, b"y", &mut f),
+    ];
+    v.put_ref(fref);
+    v.put_ref(dref);
+    r
+}
+
+/// The VFS with no lock around it, for host tests that drive one `Vfs`
+/// through [`FileApi`] from one thread.
+pub(crate) struct Direct<'a>(core::cell::RefCell<&'a mut Vfs>);
+
+impl Guarded<Vfs> for Direct<'_> {
+    fn with<R>(&self, f: impl FnOnce(&mut Vfs) -> R) -> R {
+        f(&mut self.0.borrow_mut())
+    }
+}
+
+/// Host-test wrappers over the driver, in the `v.mkdir(None, …)` style
+/// the tests had before the File API: each runs [`FileApi`] calls on this
+/// `Vfs`.
+impl Vfs {
+    pub(crate) fn api<R>(&mut self, f: impl FnOnce(&FileApi<'_, Direct<'_>>) -> R) -> R {
+        let d = Direct(core::cell::RefCell::new(self));
+        f(&FileApi::new(&d))
+    }
+
+    pub(crate) fn mount_root_fs(
+        &mut self,
+        fs: &'static dyn FileSystem,
+    ) -> Result<PathRef, FsError> {
+        self.api(|a| a.mount_root(fs, None, false, None))?;
+        self.root()
+    }
+
+    pub(crate) fn mount(
+        &mut self,
+        base: Option<WalkBase>,
+        at: &str,
+        fs: &'static dyn FileSystem,
+    ) -> Result<u8, FsError> {
+        self.api(|a| a.mount_fs(base, at.as_bytes(), fs, None, false, None))
+            .map(|m| m.mount)
+    }
+
+    pub(crate) fn mount_dev(
+        &mut self,
+        at: &str,
+        fs: &'static dyn FileSystem,
+        dev: u64,
+        ro: bool,
+    ) -> Result<Mounted, FsError> {
+        self.api(|a| a.mount_fs(None, at.as_bytes(), fs, Some(dev), ro, None))
+    }
+
+    pub(crate) fn umount(&mut self, base: Option<WalkBase>, at: &str) -> Result<(), FsError> {
+        self.api(|a| a.umount(base, at.as_bytes()))
+    }
+
+    /// [`FileApi::dir_get`] on this `Vfs`.
+    pub(crate) fn dir_get(
+        &mut self,
+        base: Option<WalkBase>,
+        path: &str,
+    ) -> Result<DirRef, FsError> {
+        self.api(|a| a.dir_get(base, path.as_bytes()))
+    }
+
+    /// The path `path` resolves to, not held.
+    pub(crate) fn resolve(
+        &mut self,
+        base: Option<WalkBase>,
+        path: &str,
+        follow: bool,
+    ) -> Result<PathRef, FsError> {
+        self.api(|a| {
+            let p = a.walk(base, path.as_bytes(), follow)?;
+            a.put_path(p);
+            Ok(p)
+        })
+    }
+
+    /// A counted reference to the inode `p` names.
+    pub(crate) fn iref(&mut self, p: PathRef) -> Result<InodeRef, FsError> {
+        let slot = self.d_islot(p.dslot)?;
+        self.ihold(slot)?;
+        Ok(InodeRef {
+            slot,
+            r#gen: self.inodes[slot as usize].r#gen,
+        })
+    }
+
+    pub(crate) fn stat(&mut self, base: Option<WalkBase>, path: &str) -> Result<Stat, FsError> {
+        self.api(|a| a.stat_path(base, path.as_bytes(), true))
+    }
+
+    pub(crate) fn lstat(&mut self, base: Option<WalkBase>, path: &str) -> Result<Stat, FsError> {
+        self.api(|a| a.stat_path(base, path.as_bytes(), false))
+    }
+
+    pub(crate) fn mkdir(
+        &mut self,
+        base: Option<WalkBase>,
+        path: &str,
+        mode: u16,
+    ) -> Result<(), FsError> {
+        self.api(|a| a.mkdir(base, path.as_bytes(), u32::from(mode)))
+    }
+
+    pub(crate) fn creat(
+        &mut self,
+        base: Option<WalkBase>,
+        path: &str,
+        mode: u16,
+    ) -> Result<(), FsError> {
+        self.api(|a| a.create(base, path.as_bytes(), InodeKind::Reg, mode | S_IFREG, None))
+    }
+
+    pub(crate) fn symlink(
+        &mut self,
+        base: Option<WalkBase>,
+        path: &str,
+        target: &str,
+    ) -> Result<(), FsError> {
+        self.api(|a| a.symlink(base, path.as_bytes(), target.as_bytes()))
+    }
+
+    pub(crate) fn unlink(&mut self, base: Option<WalkBase>, path: &str) -> Result<(), FsError> {
+        self.api(|a| a.unlink(base, path.as_bytes()))
+    }
+
+    pub(crate) fn rmdir(&mut self, base: Option<WalkBase>, path: &str) -> Result<(), FsError> {
+        self.api(|a| a.rmdir(base, path.as_bytes()))
+    }
+
+    pub(crate) fn link(
+        &mut self,
+        base: Option<WalkBase>,
+        old: &str,
+        new: &str,
+    ) -> Result<(), FsError> {
+        self.api(|a| a.link(base, old.as_bytes(), new.as_bytes()))
+    }
+
+    pub(crate) fn rename(
+        &mut self,
+        base: Option<WalkBase>,
+        old: &str,
+        new: &str,
+    ) -> Result<(), FsError> {
+        self.api(|a| a.rename(base, old.as_bytes(), new.as_bytes()))
+    }
+
+    pub(crate) fn truncate(
+        &mut self,
+        base: Option<WalkBase>,
+        path: &str,
+        size: u64,
+    ) -> Result<(), FsError> {
+        self.api(|a| a.truncate(base, path.as_bytes(), size))
+    }
+
+    pub(crate) fn open_path(
+        &mut self,
+        base: Option<WalkBase>,
+        path: &str,
+        flags: u32,
+        mode: u16,
+    ) -> Result<FileRef, FsError> {
+        self.api(|a| {
+            a.open(
+                base,
+                path.as_bytes(),
+                OpenFlags::from_bits(flags),
+                u32::from(mode),
+            )
+        })
+    }
+
+    pub(crate) fn read(&mut self, f: &FileRef, buf: &mut [u8]) -> Result<usize, FsError> {
+        self.api(|a| a.read(f, buf))
+    }
+
+    pub(crate) fn write(&mut self, f: &FileRef, buf: &[u8]) -> Result<usize, FsError> {
+        self.api(|a| a.write(f, buf))
+    }
+
+    pub(crate) fn seek(&mut self, f: &FileRef, off: i64, whence: u32) -> Result<u64, FsError> {
+        self.api(|a| a.lseek(f, off, whence))
+    }
+
+    pub(crate) fn close(&mut self, f: FileRef) -> Result<(), FsError> {
+        self.api(|a| a.close(f))
+    }
+
+    /// Entry `cookie` of directory `dir`, `.` and `..` first, and the
+    /// cookie of the next.
+    pub(crate) fn readdir(
+        &mut self,
+        dir: PathRef,
+        cookie: u64,
+        out: &mut Dirent,
+    ) -> Result<Option<u64>, FsError> {
+        let f = FileRef::from_raw(self.open(dir, OpenFlags::from_bits(O_RDONLY))?);
+        let mut i = 0u64;
+        let mut hit = None;
+        let r = self.api(|a| {
+            a.readdir(&f, &mut |d| {
+                if i == cookie {
+                    hit = Some(*d);
+                    return false;
+                }
+                i += 1;
+                true
+            })
+        });
+        self.close(f)?;
+        r?;
+        Ok(hit.map(|d| {
+            *out = d;
+            cookie + 1
+        }))
+    }
+}
+
+/// A filesystem over `KeyFs`'s store that keys files as FAT does, by
+/// where their entry sits: names match without regard to case, a rename
+/// that changes only a name's case moves the file to a new key and frees
+/// the old one, and a create takes the lowest free key, so the next file
+/// made can take the key a rename left.
+pub(crate) struct FoldFs {
+    pub(crate) key: &'static KeyFs,
+}
+
+pub(crate) fn foldfs_new() -> &'static FoldFs {
+    std::boxed::Box::leak(std::boxed::Box::new(FoldFs { key: keyfs_new() }))
+}
+
+fn fold_eq(a: &[u8], b: &[u8]) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+impl FileSystem for FoldFs {
+    fn name(&self) -> &'static str {
+        "fold"
+    }
+    fn fstype(&self) -> FsType {
+        self.key.fstype()
+    }
+    fn ops(&'static self) -> Option<&'static dyn InodeOps> {
+        Some(self)
+    }
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        self.key.fill_super(cx)
+    }
+}
+
+impl InodeOps for FoldFs {
+    fn name_eq(&self, cached: &[u8], asked: &[u8]) -> bool {
+        fold_eq(cached, asked)
+    }
+    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
+        with_store(cx.private[0], |s| {
+            let n = s
+                .names
+                .iter()
+                .find(|e| e.0 == dir.key[0] && fold_eq(&e.1, name))
+                .ok_or(FsError::NotFound)?
+                .2;
+            Ok(knode_info(s, n))
+        })
+    }
+    fn create(
+        &self,
+        cx: &mut OpCx<'_>,
+        dir: &mut Inode,
+        name: &[u8],
+        kind: InodeKind,
+        _mode: u16,
+        _target: Option<&[u8]>,
+    ) -> Result<InodeInfo, FsError> {
+        with_store(cx.private[0], |s| {
+            if s.names
+                .iter()
+                .any(|e| e.0 == dir.key[0] && fold_eq(&e.1, name))
+            {
+                return Err(FsError::Exists);
+            }
+            let node = KNode {
+                kind,
+                nlink: 1,
+                data: Vec::new(),
+                alive: true,
+            };
+            let n = match s.nodes.iter().position(|k| !k.alive) {
+                Some(i) => {
+                    s.nodes[i] = node;
+                    i
+                }
+                None => {
+                    s.nodes.push(node);
+                    s.nodes.len() - 1
+                }
+            } as u32;
+            s.names.push((dir.key[0], name.to_vec(), n));
+            Ok(knode_info(s, n))
+        })
+    }
+    fn rename(
+        &self,
+        cx: &mut OpCx<'_>,
+        odir: &mut Inode,
+        oname: &[u8],
+        ndir: &mut Inode,
+        nname: &[u8],
+        seen: RenameSeen,
+    ) -> Result<Option<Key>, FsError> {
+        with_store(cx.private[0], |s| {
+            let at = |d: &Inode, name: &[u8]| {
+                s.names
+                    .iter()
+                    .find(|e| e.0 == d.key[0] && fold_eq(&e.1, name))
+                    .map(|e| [e.2, 0, 0])
+            };
+            seen.check(at(odir, oname), at(ndir, nname))?;
+            let i = s
+                .names
+                .iter()
+                .position(|e| e.0 == odir.key[0] && fold_eq(&e.1, oname))
+                .ok_or(FsError::NotFound)?;
+            if odir.key[0] != ndir.key[0] || !fold_eq(oname, nname) {
+                return Err(FsError::Inval);
+            }
+            // A new entry for the new spelling, the old one freed: the file
+            // moves to the next key, and its old key is free to reuse.
+            let old = s.names[i].2 as usize;
+            let moved = s.nodes[old].clone();
+            s.nodes.push(moved);
+            let n = (s.nodes.len() - 1) as u32;
+            s.nodes[old].alive = false;
+            s.nodes[old].data.clear();
+            s.names[i] = (ndir.key[0], nname.to_vec(), n);
+            Ok(Some([n, 0, 0]))
+        })
+    }
+    fn read(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        KeyOps.read(cx, ino, off, buf)
+    }
+    fn write(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &[u8],
+    ) -> Result<usize, FsError> {
+        KeyOps.write(cx, ino, off, buf)
+    }
+    fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
+        KeyOps.truncate(cx, ino, size)
+    }
+    fn getattr(&self, cx: &mut OpCx<'_>, ino: &mut Inode) -> Result<(), FsError> {
+        KeyOps.getattr(cx, ino)
+    }
+    fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+        KeyOps.evict(cx, ino)
     }
 }

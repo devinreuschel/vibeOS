@@ -1,4 +1,5 @@
 use super::*;
+use vibeos::fs::{InodeKind, SEEK_HOLE};
 
 /// The open-file table handle an fd names, if it names a file.
 fn file_id(fd: Fd) -> Option<FileId> {
@@ -144,11 +145,18 @@ pub(super) fn lookup_fd(fd: u32) -> Option<Fd> {
     with_table(|t| t.get(pid).and_then(|p| p.fds.get(fd)))
 }
 
+/// `write(fd, buf, len)`. The descriptor and its access mode (`EBADF`),
+/// then a file with no write (`EINVAL`), come before the buffer and the
+/// count, as Linux's `vfs_write` checks them: a write to an `O_RDONLY`
+/// file is `EBADF` whatever `buf` and `len` are.
 pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
     let len = len as u64;
     let Some(slot) = lookup_fd(fd) else {
         return Err(KError::BadF);
     };
+    if let FdKind::File { fid, r#gen } = slot.kind {
+        file_init::access(FileId { fid, r#gen }, true).map_err(KError::from)?;
+    }
     match slot.kind {
         FdKind::None => Err(KError::BadF),
         FdKind::Console | FdKind::File { .. } => {
@@ -157,6 +165,10 @@ pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
             }
             if len == 0 {
                 return Ok(0);
+            }
+            #[cfg(feature = "kernel_tests")]
+            if matches!(slot.kind, FdKind::Console) {
+                testing::console_write_started();
             }
             let mut scratch = [0u8; 256];
             let mut done = 0u64;
@@ -244,13 +256,27 @@ fn key_byte(k: DecodedKey) -> Option<u8> {
     }
 }
 
+/// `read(fd, buf, len)`, in Linux's order: the descriptor and its access
+/// mode (`EBADF`), a file with no read (`EINVAL`), the buffer (`EFAULT`),
+/// then a directory's `EISDIR` whatever the count, and only then a count
+/// of 0.
 pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
     let len = len as u64;
     let Some(slot) = lookup_fd(fd) else {
         return Err(KError::BadF);
     };
+    let kind = match slot.kind {
+        FdKind::None => return Err(KError::BadF),
+        FdKind::File { fid, r#gen } => {
+            Some(file_init::access(FileId { fid, r#gen }, false).map_err(KError::from)?)
+        }
+        FdKind::Console => None,
+    };
     if !user_range_ok(buf, len) {
         return Err(KError::Fault);
+    }
+    if kind == Some(InodeKind::Dir) {
+        return Err(KError::IsDir);
     }
     if len == 0 {
         return Ok(0);
@@ -360,15 +386,23 @@ pub(super) fn sys_close(fd: u32) -> SysResult {
     }
 }
 
+/// `lseek(fd, off, whence)`, in Linux's order: the descriptor, then a
+/// `whence` past `SEEK_HOLE`, Linux's `SEEK_MAX` (`EINVAL`), then a file
+/// that cannot seek (`ESPIPE`, whatever `off` is, on the console however
+/// it was opened), and only then the offset and `whence` themselves.
+/// `SEEK_DATA` and `SEEK_HOLE` treat the whole file as data, as Linux's
+/// `generic_file_llseek` does (`vibeos::fs::SeekFrom`).
 pub(super) fn sys_lseek(fd: u32, off: i64, whence: u32) -> SysResult {
     let Some(slot) = lookup_fd(fd) else {
         return Err(KError::BadF);
     };
+    if whence > SEEK_HOLE {
+        return Err(KError::Inval);
+    }
     match slot.kind {
         FdKind::File { fid, r#gen } => {
-            let r = SeekFrom::from_whence(off, whence).and_then(|pos| {
-                let f = file_init::fget(FileId { fid, r#gen })?;
-                let r = file_init::seek(&f, pos);
+            let r = file_init::fget(FileId { fid, r#gen }).and_then(|f| {
+                let r = file_init::lseek(&f, off, whence);
                 file_init::close(f).and(r)
             });
             match r {

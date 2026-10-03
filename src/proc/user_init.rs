@@ -8,7 +8,7 @@ use vibeos::elf::{
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, ArgError, Auxv, Builder, EHDR_SIZE, ElfError, ExecArgs,
     Image, LoadSeg, LoadTarget, PHDR_SIZE, PageRun,
 };
-use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags, SeekFrom, WalkBase};
+use vibeos::fs::{FileRef, FsError, InodeKind, O_RDONLY, OpenFlags, SeekFrom, WalkBase};
 use vibeos::kalloc::TryVec;
 use vibeos::kerror::KError;
 use vibeos::limits::RLIMIT_STACK_DEFAULT;
@@ -40,6 +40,8 @@ pub enum LoadError {
     /// A fill into the new space failed (`fill_init`).
     Fill(FillError),
     Empty,
+    /// The path names a file that is not regular: a directory or a device.
+    NotRegular,
     NoProc,
     /// The process's thread could not be made.
     Spawn(SpawnError),
@@ -60,6 +62,7 @@ impl From<LoadError> for KError {
             LoadError::As(_) => KError::NoMem,
             LoadError::Fill(f) => KError::from(f),
             LoadError::Empty => KError::NoExec,
+            LoadError::NotRegular => KError::Acces,
             LoadError::NoProc => KError::Again,
             LoadError::Spawn(s) => KError::from(s),
             LoadError::NoMem => KError::NoMem,
@@ -81,6 +84,7 @@ impl LoadError {
             Self::Fill(FillError::NoMem) => "enomem",
             Self::Fill(_) => "efault",
             Self::Empty => "empty",
+            Self::NotRegular => "eacces",
             Self::NoProc => "eagain",
             Self::Spawn(e) => e.as_str(),
             Self::NoMem => "enomem",
@@ -98,14 +102,6 @@ pub struct Loaded {
     pub entry: u64,
     pub rsp: u64,
     pub fs: u64,
-}
-
-fn align_up(x: u64, a: u64) -> u64 {
-    if a <= 1 {
-        x
-    } else {
-        x.saturating_add(a - 1) & !(a - 1)
-    }
 }
 
 /// Where the loader reads an ELF file from: the open file, or an image in
@@ -290,13 +286,13 @@ fn setup_tls<S: ImageSource>(
     let Some(tls) = img.tls else {
         return Ok(0);
     };
-    let aligned = align_up(tls.memsz, tls.align.max(1));
-    let map_len = tls.map_len().ok_or(LoadError::Elf(ElfError::ImageTooBig))?;
-    let tls_map = stack_base.saturating_sub(map_len);
+    let too_big = LoadError::Elf(ElfError::ImageTooBig);
+    let map_len = tls.map_len().ok_or(too_big)?;
+    let tls_map = stack_base.saturating_sub(map_len) & !(tls.map_align() - 1);
+    // The thread pointer is aligned as the block is (TLS variant II).
+    let (fs, tls_start) = tls.thread_pointer(tls_map).ok_or(too_big)?;
     fill_init::map(space, tls_map, map_len, UserPerms::RW).map_err(LoadError::As)?;
     fill_init::zero(space, tls_map, map_len).map_err(LoadError::Fill)?;
-    let fs = tls_map + map_len - 8;
-    let tls_start = fs - aligned;
     if tls.filesz != 0 {
         copy_file_bytes(space, src, tls.offset, tls_start, tls.filesz)?;
     }
@@ -387,53 +383,78 @@ pub fn exec_args(argv: &[&[u8]], envp: &[&[u8]]) -> Result<ExecArgs, LoadError> 
     Ok(args)
 }
 
-/// Build a new address space from the file at `path`, resolved from
-/// `base`, with `args` on its initial stack. Caller installs it only after this returns.
-pub fn load_path(
-    base: Option<WalkBase>,
-    path: &[u8],
-    args: &ExecArgs,
-) -> Result<Loaded, LoadError> {
+/// An executable `execve` opened before it copies its arguments, as
+/// Linux's `do_execveat_common` opens the file first: a regular file,
+/// held open until [`load_exec`] or [`drop_exec`].
+pub struct ExecFile {
+    img: FileImage,
+    /// Buddy free frames when the open began (`proc::ktest::record`).
     #[cfg(feature = "kernel_tests")]
-    let before = crate::proc::ktest::free_now();
-    let r = load_path_inner(base, path, args);
-    #[cfg(feature = "kernel_tests")]
-    crate::proc::ktest::record(before, r.is_ok());
-    r
+    before: usize,
 }
 
-fn load_path_inner(
-    base: Option<WalkBase>,
-    path: &[u8],
-    args: &ExecArgs,
-) -> Result<Loaded, LoadError> {
+/// Open `path` from `base` to execute it: its walk's errors, then
+/// `EACCES` for a file that is not regular (execve(2)).
+pub fn open_exec(base: Option<WalkBase>, path: &[u8]) -> Result<ExecFile, LoadError> {
+    #[cfg(feature = "kernel_tests")]
+    let before = crate::proc::ktest::free_now();
     let file =
         file_init::open_at(base, path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
-    let mut src = FileImage {
-        file,
-        len: 0,
-        pos: 0,
+    let st = match file_init::stat(&file) {
+        Ok(st) if st.kind == InodeKind::Reg => st,
+        r => {
+            let e = r.map_or_else(LoadError::Fs, |_| LoadError::NotRegular);
+            return Err(match file_init::close(file) {
+                Ok(()) => e,
+                Err(c) => LoadError::Fs(c),
+            });
+        }
     };
-    let r = load_file(&mut src, args);
-    match file_init::close(src.file) {
+    Ok(ExecFile {
+        img: FileImage {
+            file,
+            len: st.size,
+            pos: 0,
+        },
+        #[cfg(feature = "kernel_tests")]
+        before,
+    })
+}
+
+/// Close an [`ExecFile`] that will not be loaded, because copying the
+/// arguments failed: that error is the call's, so a failed close is
+/// counted on a rate-limited line (DESIGN §2.5).
+pub fn drop_exec(f: ExecFile) {
+    if let Err(e) = file_init::close(f.img.file) {
+        crate::klog_ratelimited!(
+            1000,
+            vibeos::log::Level::Warn,
+            "vibeOS: exec: close failed: {}",
+            e.as_str()
+        );
+    }
+}
+
+/// Load the opened file `f` with `args`, then close it. An empty file is
+/// `ENOEXEC`.
+pub fn load_exec(f: ExecFile, args: &ExecArgs) -> Result<Loaded, LoadError> {
+    let mut src = f.img;
+    let r = if src.len == 0 {
+        Err(LoadError::Empty)
+    } else {
+        load_from(&mut src, args)
+    };
+    let r = match file_init::close(src.file) {
         Ok(()) => r,
         Err(e) => {
             // A loaded space's last `users` put tears it down.
             drop(r);
             Err(LoadError::Fs(e))
         }
-    }
-}
-
-/// Load the open file `src`, mapping each segment from it.
-#[inline(never)]
-fn load_file(src: &mut FileImage, args: &ExecArgs) -> Result<Loaded, LoadError> {
-    let st = file_init::stat(&src.file).map_err(LoadError::Fs)?;
-    if st.size == 0 {
-        return Err(LoadError::Empty);
-    }
-    src.len = st.size;
-    load_from(src, args)
+    };
+    #[cfg(feature = "kernel_tests")]
+    crate::proc::ktest::record(f.before, r.is_ok());
+    r
 }
 
 /// Build a new address space from the ELF image `elf`, with `argv` on its

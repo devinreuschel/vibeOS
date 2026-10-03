@@ -342,6 +342,10 @@ fn user_tables_full() -> Result<(), Outcome> {
 /// `fork`, `-EMFILE` from `open` and `-ENOMEM` from `mmap` (ROADMAP §10.4,
 /// D1). A first pass warms what a full table allocates for good (TCB boxes,
 /// heap), and the second leaves frames and table use where it found them.
+/// Warm-up passes [`limits_heap_backed`] makes at most before its counted
+/// one.
+const WARM_PASSES: usize = 4;
+
 pub(crate) fn limits_heap_backed() -> Outcome {
     if let Err(o) = capacities() {
         return o;
@@ -350,11 +354,24 @@ pub(crate) fn limits_heap_backed() -> Outcome {
         threads_full()?;
         user_tables_full()
     };
-    if let Err(o) = pass() {
-        return o;
-    }
-    if !quiesce() {
-        return Outcome::Fail("threads did not settle");
+    // Warm-up passes until one leaves the kernel heap as it found it: the
+    // heap never shrinks, and while first-fit settles the holes a pass
+    // leaves, the next can still grow it (3 pages when this test runs
+    // alone). The counted pass then grows it only for a leak.
+    let heap = || crate::heap_init::stats().capacity;
+    let mut cap = heap();
+    for _ in 0..WARM_PASSES {
+        if let Err(o) = pass() {
+            return o;
+        }
+        if !quiesce() {
+            return Outcome::Fail("threads did not settle");
+        }
+        let now = heap();
+        if now == cap {
+            break;
+        }
+        cap = now;
     }
     let frames = FrameCount::quiescent();
     let threads = thread_init::table_usage();

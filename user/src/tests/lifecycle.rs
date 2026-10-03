@@ -9,8 +9,8 @@ use vibeos_user::sys::{self, Errno, MAX_PROCS};
 use vibeos_user::utest::{self, Outcome, Runner};
 
 use super::errno::{
-    HELLO_EXIT, SCRATCH, SEEK_SET, SIGKILL, SIGSTOP, WNOHANG, close, discard, open, parse_dec,
-    poll, ps_state, psinfo, put_file, sleep_ms, state_is,
+    HELLO_EXIT, SCRATCH, SEEK_END, SEEK_SET, SIGKILL, SIGSTOP, WNOHANG, close, discard, open,
+    parse_dec, poll, psinfo, put_file, sleep_ms,
 };
 
 /// The one file this suite writes (`errno::SCRATCH`), truncated after
@@ -72,10 +72,14 @@ fn live_processes() -> Option<usize> {
     Some(text.iter().filter(|&&b| b == b'\n').count())
 }
 
-/// Fork children that exit at once, each a zombie before the next fork,
-/// so at most one copy of this process lives: forks 1 to `MAX_PROCS -
-/// live` succeed, and the next one is `-EAGAIN`. Then every child is
-/// reaped, and one more fork succeeds.
+/// Fork children that each write one byte to [`LIFE_FILE`] through the
+/// descriptor, and so the offset, they share with this process, then
+/// exit; the next fork waits for that byte, so few children are live at
+/// once, each past its byte with only its exit left. The wait is not for a zombie:
+/// `psinfo` leaves a child out once the table outgrows its 512 bytes,
+/// and `kill` returns 0 for a zombie as for a live process. Forks 1 to
+/// `MAX_PROCS - live` succeed, and the next one is `-EAGAIN`. Then every
+/// child is reaped, and one more fork succeeds.
 fn fork_bomb_eagain_at_limit() -> Outcome {
     let Some(live) = live_processes() else {
         return Outcome::Fail("psinfo looks truncated");
@@ -83,14 +87,18 @@ fn fork_bomb_eagain_at_limit() -> Outcome {
     let Some(want) = MAX_PROCS.checked_sub(live) else {
         return Outcome::Fail("more processes than MAX_PROCS");
     };
+    let Ok(fd) = open(LIFE_FILE, sys::O_CREAT | sys::O_TRUNC | sys::O_RDWR) else {
+        return Outcome::Fail("create the file the children write");
+    };
     let mut made = 0;
     let mut why = None;
     while made < want {
-        match utest::fork_child(|| 0) {
-            Ok(pid) => {
+        match utest::fork_child(|| i32::from(sys::write(fd, b"x".as_ptr(), 1) != Ok(1))) {
+            Ok(_) => {
                 made += 1;
-                if !poll(20_000, || utest::zombie(pid)) {
-                    why = Some(utest::fail(format_args!("child {made} did not exit")));
+                // Its size, the bytes the children wrote.
+                if !poll(20_000, || sys::lseek(fd, 0, SEEK_END) == Ok(made)) {
+                    why = Some(utest::fail(format_args!("child {made} did not write")));
                     break;
                 }
             }
@@ -121,6 +129,7 @@ fn fork_bomb_eagain_at_limit() -> Outcome {
             }
         };
     }
+    close(fd);
     let reaped = reap_all();
     if let Some(why) = why {
         return why;
@@ -186,7 +195,7 @@ fn orphan_grandchild_getppid_1() -> Outcome {
         return Outcome::Fail("the grandchild never saw getppid() == 1");
     };
     for _ in 0..500 {
-        if ps_state(gpid).is_none() {
+        if utest::ps_state(gpid).is_none() {
             utest::info(
                 "orphan_grandchild_getppid_1",
                 format_args!("pid {gpid} saw ppid 1, and init reaped it"),
@@ -436,7 +445,7 @@ fn stop_cont(c: usize) -> Result<(), &'static str> {
     if c1 != c2 {
         return Err("the child counted while stopped");
     }
-    if !ps_state(c).is_some_and(|(_, s)| state_is(&s, b"stop")) {
+    if !utest::ps_state(c).is_some_and(|(_, s)| utest::state_is(&s, b"stop")) {
         return Err("psinfo does not show the child stopped");
     }
     if sys::kill(c as i32, utest::SIGCONT) != Ok(0) {

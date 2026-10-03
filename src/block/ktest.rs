@@ -306,11 +306,11 @@ pub(crate) fn test_block_part_mbr() -> Outcome {
     let Some(d) = blockdev_init::lookup(b"ram0p1") else {
         return Outcome::Fail("no ram0p1");
     };
-    let Some(d2) = blockdev_init::lookup(b"ram0p2") else {
-        return Outcome::Fail("no ram0p2");
+    let Some(d2) = blockdev_init::lookup(b"ram0p5") else {
+        return Outcome::Fail("no ram0p5");
     };
-    let Some(d3) = blockdev_init::lookup(b"ram0p3") else {
-        return Outcome::Fail("no ram0p3");
+    let Some(d3) = blockdev_init::lookup(b"ram0p6") else {
+        return Outcome::Fail("no ram0p6");
     };
     for p in [&d, &d2, &d3] {
         if p.parent().map(BlockRef::id) != Some(disk.id()) || p.part().is_none() {
@@ -740,8 +740,6 @@ const WB_PAGES: usize = 10;
 /// How long a flush must stay blocked on the held write.
 const BLOCKED_MS: u64 = 200;
 
-const WAIT_NS: u64 = 2_000_000_000;
-
 const FLUSH_PENDING: u32 = 0;
 
 const FLUSH_OK: u32 = 1;
@@ -758,18 +756,6 @@ fn flush_ram0() {
     FLUSH_RES.store(res, Ordering::Release);
 }
 
-/// Poll `f` until it holds or `WAIT_NS` passes.
-fn wait_for(f: impl Fn() -> bool) -> bool {
-    let t0 = time_init::now_ns();
-    while !f() {
-        if time_init::now_ns().saturating_sub(t0) > WAIT_NS {
-            return false;
-        }
-        thread_init::sleep_ms(1);
-    }
-    true
-}
-
 /// Releases the hold and puts the saved pages back through the cache on
 /// every path out of [`cache_flush_waits_writeback`].
 struct WbGuard {
@@ -781,7 +767,8 @@ impl WbGuard {
     fn restore(&mut self) -> Result<(), BlockError> {
         release();
         // A failed flush thread may still be waiting: wait out its flush.
-        let _pending = wait_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING);
+        let _pending =
+            crate::ktest::sleep_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING);
         let ram = ram0().ok_or(BlockError::Gone)?;
         ram.write(WB_FIRST_LBA, &self.saved)?;
         ram.flush()?;
@@ -833,7 +820,7 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
     if ram.write(WB_FIRST_LBA, &dirty).is_err() {
         return Outcome::Fail("dirty");
     }
-    if !wait_for(held) {
+    if !crate::ktest::sleep_for(held) {
         return Outcome::Fail("blk-wb never held");
     }
     let flushes0 = flushes();
@@ -847,7 +834,7 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
         return Outcome::Fail("Flush sent while a write was held");
     }
     release();
-    if !wait_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING) {
+    if !crate::ktest::sleep_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING) {
         return Outcome::Fail("flush never returned");
     }
     if FLUSH_RES.load(Ordering::Acquire) != FLUSH_OK {
@@ -868,6 +855,216 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
         Err(_) => Outcome::Fail("restore"),
     }
 }
+
+/// The most pages the flush-starvation test dirties during one flush.
+const REDIRTY_MAX: u64 = 200;
+
+/// Pages ram0's flush has written while the hook was armed, each followed
+/// by a [`flush_redirty`] call; and so the next of the [`WB_PAGES`] from
+/// [`WB_FIRST_LBA`] that call dirties.
+static REDIRTIED: AtomicU64 = AtomicU64::new(0);
+static REDIRTY_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// `cache_init`'s hook after each page a flush writes: dirty the next
+/// scratch page, as a writer streaming over them beside the flush would,
+/// [`REDIRTY_MAX`] times at most.
+pub(crate) fn flush_redirty() {
+    let n = REDIRTIED.fetch_add(1, Ordering::AcqRel);
+    if n >= REDIRTY_MAX {
+        return;
+    }
+    let sectors = (PAGE / 512) as u64;
+    let lba = WB_FIRST_LBA + (n % WB_PAGES as u64) * sectors;
+    let page = [n as u8 ^ 0x5A; PAGE];
+    if ram0()
+        .ok_or(BlockError::Gone)
+        .and_then(|r| r.write(lba, &page))
+        .is_err()
+    {
+        REDIRTY_FAILED.store(true, Ordering::Release);
+    }
+}
+
+/// Whether scratch page `i` holds, below the cache, a write made before
+/// the flush that returned: the bytes it was dirtied with before the flush
+/// (`i ^ 0xC3`), or those of a [`flush_redirty`] call `n < calls` that
+/// dirtied it (`n ^ 0x5A`).
+fn scratch_on_ram0(i: usize, calls: u64) -> Result<bool, BlockError> {
+    let mut page = [0u8; PAGE];
+    let sectors = (PAGE / 512) as u64;
+    block_init::read(WB_FIRST_LBA + i as u64 * sectors, &mut page)?;
+    let b = page[0];
+    if page.iter().any(|&x| x != b) {
+        return Ok(false);
+    }
+    let i = i as u64;
+    let redirtied =
+        (0..calls.min(REDIRTY_MAX)).any(|n| n % WB_PAGES as u64 == i && n as u8 ^ 0x5A == b);
+    Ok(b == i as u8 ^ 0xC3 || redirtied)
+}
+
+/// A flush returns while pages of its device keep being dirtied: it writes
+/// each page dirty when it began once, where it once took whichever page
+/// was dirty next and returned only when none was, so a writer that kept
+/// ahead of it held it off for as long as it wrote (B3). The hook dirties
+/// another page after each page the flush writes. `blk-wb` is paused, so
+/// the flush itself writes every scratch page, and each one is on ram0,
+/// below the cache, when it returns.
+pub(crate) fn cache_flush_not_starved() -> Outcome {
+    if !cache_init::live() || !block_init::live() {
+        return Outcome::Fail("no ram0 cache");
+    }
+    let Some(ram) = ram0() else {
+        return Outcome::Fail("no ram0");
+    };
+    let Some(_paused) = testing::WbPause::new() else {
+        return Outcome::Fail("blk-wb's pass never ended");
+    };
+    // No page of ram0 is dirty but those dirtied below.
+    if ram.flush().is_err() {
+        return Outcome::Fail("pre-flush");
+    }
+    let mut saved = alloc::vec![0u8; WB_PAGES * PAGE];
+    if ram.read(WB_FIRST_LBA, &mut saved).is_err() {
+        return Outcome::Fail("save");
+    }
+    // Every scratch page dirty, so the flush has some to write.
+    let mut page = [0u8; PAGE];
+    let sectors = (PAGE / 512) as u64;
+    for i in 0..WB_PAGES {
+        page.fill(i as u8 ^ 0xC3);
+        if ram.write(WB_FIRST_LBA + i as u64 * sectors, &page).is_err() {
+            return Outcome::Fail("dirty");
+        }
+    }
+    REDIRTIED.store(0, Ordering::Release);
+    REDIRTY_FAILED.store(false, Ordering::Release);
+    testing::REDIRTY_DEV.store(ram.id(), Ordering::Release);
+    let flushed = ram.flush();
+    testing::REDIRTY_DEV.store(testing::UNARMED_OFF, Ordering::Release);
+    // The flush's own writes: `blk-wb`'s and evictions' do not count.
+    let wrote = REDIRTIED.load(Ordering::Acquire);
+    let lost = (0..WB_PAGES).find(|&i| !matches!(scratch_on_ram0(i, wrote), Ok(true)));
+    let restored = ram.write(WB_FIRST_LBA, &saved).and_then(|()| ram.flush());
+    if flushed.is_err() {
+        return Outcome::Fail("flush failed");
+    }
+    if REDIRTY_FAILED.load(Ordering::Acquire) {
+        return Outcome::Fail("a write beside the flush failed");
+    }
+    // One sweep writes each slot once.
+    if wrote > vibeos::cache::DEFAULT_PAGES as u64 || wrote >= REDIRTY_MAX {
+        return crate::fail_fmt!("flush wrote {wrote} pages, one more dirtied beside each");
+    }
+    if wrote < WB_PAGES as u64 {
+        return crate::fail_fmt!("flush wrote {wrote} of the {WB_PAGES} pages dirty when it began");
+    }
+    if let Some(i) = lost {
+        return crate::fail_fmt!("scratch page {i}, dirty before the flush, not on ram0 after it");
+    }
+    if restored.is_err() {
+        return Outcome::Fail("restore");
+    }
+    Outcome::Ok
+}
+
+/// A ram0 page past the stamped partitions whose read the fill test holds.
+const FILL_LBA: u64 = 208;
+
+/// What each reader of the fill test read, and how it ended.
+static FILL_A: AtomicU64 = AtomicU64::new(FILL_PENDING);
+static FILL_B: AtomicU64 = AtomicU64::new(FILL_PENDING);
+const FILL_PENDING: u64 = u64::MAX;
+const FILL_ERR: u64 = u64::MAX - 1;
+
+/// Read `FILL_LBA`'s first word into `out`, or [`FILL_ERR`].
+fn read_fill_word(out: &AtomicU64) {
+    let mut buf = [0u8; 512];
+    let r = ram0()
+        .ok_or(())
+        .and_then(|d| d.read(FILL_LBA, &mut buf).map_err(|_| ()));
+    let w = r.map_or(FILL_ERR, |()| {
+        u64::from_le_bytes([
+            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+        ])
+    });
+    out.store(w, Ordering::Release);
+}
+
+fn fill_reader_a() {
+    read_fill_word(&FILL_A);
+}
+
+fn fill_reader_b() {
+    read_fill_word(&FILL_B);
+}
+
+/// A read of a page that another read is filling waits for that fill and
+/// gets its data: the page has one slot, whose queue the second reader
+/// sleeps on however long the device takes, where it once filled a second
+/// copy of the page. The first reader's fill is held until the second is
+/// seen waiting, or has ended: the test's release ends the hold, never a
+/// time limit of its own.
+pub(crate) fn cache_read_waits_for_fill() -> Outcome {
+    if !cache_init::live() || !block_init::live() {
+        return Outcome::Fail("no ram0 cache");
+    }
+    let Some(ram) = ram0() else {
+        return Outcome::Fail("no ram0");
+    };
+    if ram.flush().is_err() {
+        return Outcome::Fail("pre-flush");
+    }
+    let key = vibeos::cache::CacheKey::page(ram.id(), FILL_LBA * 512);
+    testing::forget(key);
+    FILL_A.store(FILL_PENDING, Ordering::Release);
+    FILL_B.store(FILL_PENDING, Ordering::Release);
+    testing::FILL_RELEASE.store(false, Ordering::Release);
+    testing::FILL_TIMED_OUT.store(false, Ordering::Release);
+    testing::FILL_HELD.store(false, Ordering::Release);
+    testing::FILL_DEV.store(ram.id(), Ordering::Release);
+    testing::FILL_OFF.store(key.offset, Ordering::Release);
+    let _a = spawn_thread("ktest-fill-a", fill_reader_a);
+    let held = crate::ktest::wait_for(|| testing::FILL_HELD.load(Ordering::Acquire));
+    let waits0 = testing::FILL_WAITS.load(Ordering::Acquire);
+    let _b = held.then(|| spawn_thread("ktest-fill-b", fill_reader_b));
+    let waited = held
+        && crate::ktest::sleep_for(|| {
+            testing::FILL_WAITS.load(Ordering::Acquire) != waits0
+                || FILL_B.load(Ordering::Acquire) != FILL_PENDING
+        });
+    testing::FILL_OFF.store(UNARMED_FILL, Ordering::Release);
+    testing::FILL_RELEASE.store(true, Ordering::Release);
+    let done = crate::ktest::sleep_for(|| {
+        FILL_A.load(Ordering::Acquire) != FILL_PENDING
+            && (!held || FILL_B.load(Ordering::Acquire) != FILL_PENDING)
+    });
+    let (a, b) = (
+        FILL_A.load(Ordering::Acquire),
+        FILL_B.load(Ordering::Acquire),
+    );
+    if !held {
+        return Outcome::Fail("the first read's fill was never held");
+    }
+    if testing::FILL_TIMED_OUT.load(Ordering::Acquire) {
+        return Outcome::Fail("the first read's fill hold reached the row's deadline");
+    }
+    if !waited || !done {
+        return Outcome::Fail("a reader never ended");
+    }
+    if testing::FILL_WAITS.load(Ordering::Acquire) == waits0 {
+        return Outcome::Fail("the second read filled its own copy of a page being filled");
+    }
+    if b == FILL_ERR {
+        return Outcome::Fail("the second read failed while the first filled the page");
+    }
+    if a == FILL_ERR || a != b {
+        return crate::fail_fmt!("readers got {a:#x} and {b:#x}");
+    }
+    Outcome::Ok
+}
+
+const UNARMED_FILL: u64 = testing::UNARMED_OFF;
 
 /// A ram0 sector past the stamped MBR partitions (`part_init`); restored.
 const RAM0_FUA_LBA: u64 = 200;
@@ -943,20 +1140,21 @@ pub(crate) fn block_fua_write() -> Outcome {
 
 // ---- part_six_entries: a heap-backed disk with a six-entry table.
 
-/// Sectors in the [`MemDisk`] `part_six_entries` registers.
+/// Logical blocks in the [`MemDisk`] `part_six_entries` registers.
 const MEM_SECT: u64 = 256;
 
-/// A 512-byte-sector disk in a `TryVec`, for tests that register a disk of
-/// their own.
+/// A disk of `bs`-byte logical blocks in a `TryVec`, for tests that
+/// register a disk of their own.
 struct MemDisk {
+    bs: usize,
     data: crate::sync_init::SpinMutex<vibeos::kalloc::TryVec<u8>>,
 }
 
 impl MemDisk {
-    fn new(nsect: u64) -> Result<Self, BlockError> {
+    fn new(nsect: u64, bs: usize) -> Result<Self, BlockError> {
         let n = usize::try_from(nsect)
             .ok()
-            .and_then(|s| s.checked_mul(512))
+            .and_then(|s| s.checked_mul(bs))
             .ok_or(BlockError::Inval)?;
         let mut v = vibeos::kalloc::TryVec::try_with_capacity(n).map_err(|_| BlockError::NoMem)?;
         let zero = [0u8; 512];
@@ -965,6 +1163,7 @@ impl MemDisk {
                 .map_err(|_| BlockError::NoMem)?;
         }
         Ok(Self {
+            bs,
             data: crate::sync_init::SpinMutex::with_rank(v, vibeos::lock::RANK_DEVICE),
         })
     }
@@ -977,10 +1176,10 @@ impl MemDisk {
     ) -> Result<core::ops::Range<usize>, BlockError> {
         let off = usize::try_from(lba)
             .ok()
-            .and_then(|l| l.checked_mul(512))
+            .and_then(|l| l.checked_mul(self.bs))
             .ok_or(BlockError::Inval)?;
         let end = off.checked_add(bytes).ok_or(BlockError::Inval)?;
-        if !bytes.is_multiple_of(512) || end > len {
+        if !bytes.is_multiple_of(self.bs) || end > len {
             return Err(BlockError::Inval);
         }
         Ok(off..end)
@@ -989,10 +1188,10 @@ impl MemDisk {
 
 impl vibeos::block::BlockDevice for MemDisk {
     fn logical_block_size(&self) -> u32 {
-        512
+        self.bs as u32
     }
     fn capacity_sectors(&self) -> u64 {
-        (self.data.lock().len() / 512) as u64
+        (self.data.lock().len() / self.bs) as u64
     }
     fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         let d = self.data.lock();
@@ -1012,32 +1211,39 @@ impl vibeos::block::BlockDevice for MemDisk {
     fn discard(&self, lba: u64, n: u64) -> Result<(), BlockError> {
         let bytes = usize::try_from(n)
             .ok()
-            .and_then(|n| n.checked_mul(512))
+            .and_then(|n| n.checked_mul(self.bs))
             .ok_or(BlockError::Inval)?;
         let d = self.data.lock();
         self.range(d.len(), lba, bytes).map(|_| ())
     }
 }
 
-/// Register a fresh [`MemDisk`] named `name`, with no cache in front.
-fn mem_disk(name: &[u8]) -> Result<BlockRef, BlockError> {
+/// Register a fresh [`MemDisk`] of `bs`-byte blocks named `name`, with no
+/// cache in front.
+fn mem_disk(name: &[u8], bs: usize) -> Result<BlockRef, BlockError> {
     use vibeos::block::blockdev::Backing;
     let ops = vibeos::kalloc::TryBox::<dyn vibeos::block::BlockDevice>::try_new_unsize(
-        MemDisk::new(MEM_SECT)?,
+        MemDisk::new(MEM_SECT, bs)?,
         |b| b,
     )
     .map_err(|_| BlockError::NoMem)?;
     blockdev_init::register(name, Backing::Disk { ops, cache: None })
 }
 
+/// One zeroed logical block of `d`.
+fn block_buf(d: &BlockRef) -> Result<Vec<u8>, BlockError> {
+    Ok(alloc::vec![0u8; d.logical_block_size()? as usize])
+}
+
 /// Write the MBR table: entry 0 extended (8, 120) with EBRs at 8, 40, 72
-/// and 104, each a 16-sector logical at +1; entries 1 and 2 primaries
-/// after it. Returns the six (start, length) pairs.
+/// and 104, each a 16-block logical at +1; entries 1 and 2 primaries
+/// after it. LBAs are `d`'s logical blocks, as on a 4 KiB-sector disk.
+/// Returns the six (start, length) pairs.
 fn stamp_six_mbr(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
     use vibeos::part::{MBR_EXTENDED, MBR_LINUX, pack_ebr, pack_mbr};
-    let mut s = [0u8; 512];
+    let mut s = block_buf(d)?;
     pack_mbr(
-        &mut s,
+        &mut s[..512],
         &[
             (MBR_EXTENDED, 8, 120),
             (MBR_LINUX, 136, 16),
@@ -1049,9 +1255,9 @@ fn stamp_six_mbr(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
     let ebrs = [8u32, 40, 72, 104];
     for (k, &e) in ebrs.iter().enumerate() {
         let next = ebrs.get(k + 1).map_or(0, |n| n - 8);
-        let mut b = [0u8; 512];
+        let mut b = block_buf(d)?;
         pack_ebr(
-            &mut b,
+            &mut b[..512],
             MBR_LINUX,
             1,
             16,
@@ -1063,8 +1269,8 @@ fn stamp_six_mbr(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
     Ok([(9, 16), (41, 16), (73, 16), (105, 16), (136, 16), (160, 16)])
 }
 
-/// Write the GPT table: six 16-sector entries from LBA 34, the backup
-/// header at the last LBA. Returns the six (start, length) pairs.
+/// Write the GPT table: six 16-block entries after the entry array, the
+/// backup header at the last LBA. Returns the six (start, length) pairs.
 fn stamp_six_gpt(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
     use vibeos::part::{
         GPT_ENTRY_SIZE, GUID_LINUX, GptHeaderInfo, entries_crc, pack_gpt_entry, pack_gpt_header,
@@ -1072,18 +1278,14 @@ fn stamp_six_gpt(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
     };
     const NENT: u32 = 128;
     const ESZ: usize = GPT_ENTRY_SIZE as usize;
+    let bs = d.logical_block_size()? as usize;
     let elen = NENT as usize * ESZ;
-    let mut entries =
-        vibeos::kalloc::TryVec::try_with_capacity(elen).map_err(|_| BlockError::NoMem)?;
-    let zero = [0u8; 512];
-    while entries.len() < elen {
-        entries
-            .try_extend_from_slice(&zero)
-            .map_err(|_| BlockError::NoMem)?;
-    }
+    let nsec = (elen / bs) as u64;
+    let first = 2 + nsec;
+    let mut entries = alloc::vec![0u8; elen];
     let mut parts = [(0u64, 0u64); 6];
     for (k, p) in parts.iter_mut().enumerate() {
-        let start = 34 + 16 * k as u64;
+        let start = first + 16 * k as u64;
         *p = (start, 16);
         let mut uniq = [0u8; 16];
         uniq[0] = k as u8 + 1;
@@ -1098,11 +1300,11 @@ fn stamp_six_gpt(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
     }
     let ecrc = entries_crc(&entries[..elen]);
     let last = MEM_SECT - 1;
-    let back = last - 32;
+    let back = last - nsec;
     let hdr = |my: u64, alt: u64, part_lba: u64| GptHeaderInfo {
         my_lba: my,
         alt_lba: alt,
-        first_usable: 34,
+        first_usable: first,
         last_usable: back - 1,
         disk_guid: [0x6B; 16],
         part_lba,
@@ -1110,19 +1312,19 @@ fn stamp_six_gpt(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
         part_size: GPT_ENTRY_SIZE,
         entries_crc: ecrc,
     };
-    let mut s = [0u8; 512];
-    pack_protective_mbr(&mut s, MEM_SECT);
+    let mut s = block_buf(d)?;
+    pack_protective_mbr(&mut s[..512], MEM_SECT);
     d.write_dev(0, &s)?;
-    let mut h = [0u8; 512];
-    pack_gpt_header(&mut h, &hdr(1, last, 2));
+    let mut h = block_buf(d)?;
+    pack_gpt_header(&mut h[..512], &hdr(1, last, 2));
     d.write_dev(1, &h)?;
-    for k in 0..32u64 {
-        let o = k as usize * 512;
-        d.write_dev(2 + k, &entries[o..o + 512])?;
-        d.write_dev(back + k, &entries[o..o + 512])?;
+    for k in 0..nsec {
+        let o = k as usize * bs;
+        d.write_dev(2 + k, &entries[o..o + bs])?;
+        d.write_dev(back + k, &entries[o..o + bs])?;
     }
-    let mut b = [0u8; 512];
-    pack_gpt_header(&mut b, &hdr(last, 1, back));
+    let mut b = block_buf(d)?;
+    pack_gpt_header(&mut b[..512], &hdr(last, 1, back));
     d.write_dev(last, &b)?;
     Ok(parts)
 }
@@ -1131,19 +1333,19 @@ fn stamp_six_gpt(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
 type Stamp = fn(&BlockRef) -> Result<[(u64, u64); 6], BlockError>;
 
 /// Check one six-entry table on disk `name`, then unregister it.
-fn six_entries(name: &str, stamp: Stamp) -> Outcome {
-    let disk = match mem_disk(name.as_bytes()) {
+fn six_entries(name: &str, bs: usize, stamp: Stamp, nums: [u32; 6]) -> Outcome {
+    let disk = match mem_disk(name.as_bytes(), bs) {
         Ok(d) => d,
         Err(e) => return crate::fail_fmt!("{name}: register: {}", e.as_str()),
     };
-    let r = six_entries_on(&disk, name, stamp);
+    let r = six_entries_on(&disk, name, stamp, nums);
     if let Err(e) = blockdev_init::unregister(&disk) {
         return crate::fail_fmt!("{name}: unregister: {}", e.as_str());
     }
     r
 }
 
-fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp) -> Outcome {
+fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp, nums: [u32; 6]) -> Outcome {
     let parts = match stamp(disk) {
         Ok(p) => p,
         Err(e) => return crate::fail_fmt!("{name}: stamp: {}", e.as_str()),
@@ -1151,7 +1353,9 @@ fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp) -> Outcome {
     // A distinct byte at each entry's first LBA.
     let tag = |k: usize| 0xA0u8 + k as u8;
     for (k, &(start, _)) in parts.iter().enumerate() {
-        let mut s = [0u8; 512];
+        let Ok(mut s) = block_buf(disk) else {
+            return crate::fail_fmt!("{name}: block size");
+        };
         s[0] = tag(k);
         if disk.write_dev(start, &s).is_err() {
             return crate::fail_fmt!("{name}: tag {k}");
@@ -1163,7 +1367,7 @@ fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp) -> Outcome {
         Err(e) => return crate::fail_fmt!("{name}: scan: {}", e.as_str()),
     }
     let mut seen = [false; 6];
-    for n in 1..=6u32 {
+    for n in nums {
         let Ok(cname) = vibeos::block::blockdev::BlockName::child(disk.name(), n) else {
             return crate::fail_fmt!("{name}: child name {n}");
         };
@@ -1173,7 +1377,9 @@ fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp) -> Outcome {
         if c.parent().map(BlockRef::id) != Some(disk.id()) {
             return crate::fail_fmt!("{}: parent", cname.as_str());
         }
-        let mut s = [0u8; 512];
+        let Ok(mut s) = block_buf(&c) else {
+            return crate::fail_fmt!("{}: block size", cname.as_str());
+        };
         if c.read(0, &mut s).is_err() {
             return crate::fail_fmt!("{}: read", cname.as_str());
         }
@@ -1203,13 +1409,46 @@ fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp) -> Outcome {
 
 /// ROADMAP §10.12 (F117): an MBR table with an extended entry, four
 /// logicals and two primaries after it, and a six-entry GPT, each get six
-/// children `<disk>p1` to `<disk>p6`.
+/// children, numbered as Linux numbers them: the MBR's `<disk>p2`, `p3`
+/// and `p5` to `p8`, the GPT's `<disk>p1` to `p6`. Each runs on a disk of
+/// 512-byte blocks and on one of 4 KiB blocks, whose tables count in
+/// 4 KiB blocks.
 pub(crate) fn part_six_entries() -> Outcome {
-    let r = six_entries("ktmbr", stamp_six_mbr);
-    if !matches!(r, Outcome::Ok) {
-        return r;
+    // Linux's numbers: the MBR's primaries keep their slots, 2 and 3,
+    // and its four logical partitions are 5 to 8; the GPT's six entries
+    // are 1 to 6.
+    let cases: [(&str, usize, Stamp, [u32; 6]); 4] = [
+        ("ktmbr", 512, stamp_six_mbr, [2, 3, 5, 6, 7, 8]),
+        ("ktgpt", 512, stamp_six_gpt, [1, 2, 3, 4, 5, 6]),
+        ("ktmbr4k", 4096, stamp_six_mbr, [2, 3, 5, 6, 7, 8]),
+        ("ktgpt4k", 4096, stamp_six_gpt, [1, 2, 3, 4, 5, 6]),
+    ];
+    for (name, bs, stamp, nums) in cases {
+        let r = six_entries(name, bs, stamp, nums);
+        if !matches!(r, Outcome::Ok) {
+            return r;
+        }
     }
-    six_entries("ktgpt", stamp_six_gpt)
+    Outcome::Ok
+}
+
+/// A FAT mount on a disk of 4 KiB blocks is refused with `EINVAL`, as
+/// Linux refuses a volume whose sectors are smaller than the device's,
+/// where its first 512-byte read once failed with `EIO`.
+pub(crate) fn fat_mount_4k_disk_inval() -> Outcome {
+    let disk = match mem_disk(b"ktfat4k", 4096) {
+        Ok(d) => d,
+        Err(e) => return crate::fail_fmt!("register: {}", e.as_str()),
+    };
+    let r = crate::fat_init::mount_dev("ktfat4k", "/tmp", true);
+    if let Err(e) = blockdev_init::unregister(&disk) {
+        return crate::fail_fmt!("unregister: {}", e.as_str());
+    }
+    match r {
+        Err(vibeos::fs::FsError::Inval) => Outcome::Ok,
+        Err(e) => crate::fail_fmt!("mount: {:?}, not Inval", e),
+        Ok(()) => Outcome::Fail("mounted"),
+    }
 }
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
@@ -1223,11 +1462,14 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_cache_hit", test_block_cache_hit).once(),
     test("block_cache_evict", test_block_cache_evict),
     test("part_six_entries", part_six_entries),
+    test("fat_mount_4k_disk_inval", fat_mount_4k_disk_inval),
     test(
         "lifetime_iowaiter_publish_last",
         lifetime_iowaiter_publish_last,
     )
     .deadline(60_000),
     test("cache_flush_waits_writeback", cache_flush_waits_writeback),
+    test("cache_read_waits_for_fill", cache_read_waits_for_fill).deadline(60_000),
+    test("cache_flush_not_starved", cache_flush_not_starved),
     test("block_fua_write", block_fua_write),
 ];

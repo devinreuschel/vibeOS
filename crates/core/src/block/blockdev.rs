@@ -318,6 +318,10 @@ impl BlockRef {
         }
     }
 
+    /// Write whole logical blocks at `lba`, as [`read`](Self::read) reads
+    /// them. A read-only disk refuses the write with `ReadOnly` before its
+    /// cache takes it: a cached page it dirtied could never be written
+    /// back, and would hold its slot for good (F046).
     pub fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
         let _g = self.0.gate.enter().map_err(gone)?;
         match &self.0.back {
@@ -325,6 +329,10 @@ impl BlockRef {
                 let plba = self.map(parent, info, lba, buf.len())?;
                 parent.write(plba, buf)
             }
+            Backing::Disk {
+                ops,
+                cache: Some(_),
+            } if ops.read_only() => Err(BlockError::ReadOnly),
             Backing::Disk { cache: Some(c), .. } => c.write(self, lba, buf),
             Backing::Disk { ops, cache: None } => ops.write(lba, buf),
         }
@@ -606,10 +614,12 @@ pub(crate) mod testing {
     use std::sync::Mutex;
     use std::vec::Vec;
 
-    /// A disk over a byte vector.
+    /// A disk over a byte vector; `ro` refuses writes and discards, as
+    /// an `F_RO` virtio-blk disk does.
     pub(crate) struct MemDisk {
         pub(crate) bs: u32,
         pub(crate) data: Mutex<Vec<u8>>,
+        pub(crate) ro: bool,
     }
 
     impl MemDisk {
@@ -618,6 +628,7 @@ pub(crate) mod testing {
             Self {
                 bs,
                 data: Mutex::new((0..len).map(|i| (i % 251) as u8).collect()),
+                ro: false,
             }
         }
 
@@ -648,6 +659,9 @@ pub(crate) mod testing {
             Ok(())
         }
         fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+            if self.ro {
+                return Err(BlockError::ReadOnly);
+            }
             let r = self.range(lba, buf.len())?;
             self.data.lock().unwrap()[r].copy_from_slice(buf);
             Ok(())
@@ -656,8 +670,14 @@ pub(crate) mod testing {
             Ok(())
         }
         fn discard(&self, lba: u64, n: u64) -> Result<(), BlockError> {
+            if self.ro {
+                return Err(BlockError::ReadOnly);
+            }
             let len = usize::try_from(n).map_err(|_| BlockError::Inval)? * self.bs as usize;
             self.range(lba, len).map(|_| ())
+        }
+        fn read_only(&self) -> bool {
+            self.ro
         }
     }
 
@@ -913,6 +933,59 @@ mod tests {
             Err(BlockError::Gone)
         );
         assert_eq!(DROPS.load(Ordering::SeqCst), 3);
+    }
+
+    /// A cache that counts the writes it takes.
+    struct CountingCache(std::sync::atomic::AtomicUsize);
+
+    impl BlockCache for CountingCache {
+        fn read(&self, dev: &BlockRef, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+            dev.read_dev(lba, buf)
+        }
+        fn write(&self, _dev: &BlockRef, _lba: u64, _buf: &[u8]) -> Result<(), BlockError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn flush(&self, dev: &BlockRef) -> Result<(), BlockError> {
+            dev.flush_dev()
+        }
+    }
+
+    /// A read-only disk refuses a write with `ReadOnly` before its cache
+    /// takes it, through the disk and through a partition on it, and
+    /// still reads (F046); a writable disk's write reaches the cache.
+    #[test]
+    fn read_only_disk_refuses_before_cache() {
+        static CACHE: CountingCache = CountingCache(std::sync::atomic::AtomicUsize::new(0));
+        let seq = DiskSeq::new();
+        let mut reg = Registry::new();
+        let mut cached = |name: &[u8], ro: bool| {
+            let mut d = testing::MemDisk::new(512, 64);
+            d.ro = ro;
+            let r = BlockRef::try_new(
+                seq.next().unwrap(),
+                BlockName::new(name).unwrap(),
+                Backing::Disk {
+                    ops: TryBox::<dyn BlockDevice>::try_new_unsize(d, |b| b).unwrap(),
+                    cache: Some(&CACHE),
+                },
+            )
+            .unwrap();
+            reg.insert(r.clone()).unwrap();
+            r
+        };
+        let ro = cached(b"ro", true);
+        let rw = cached(b"rw", false);
+        let p = part(&mut reg, &seq, &ro, b"rop1", 8, 16);
+        let mut buf = [0u8; 512];
+        assert_eq!(ro.write(0, &buf), Err(BlockError::ReadOnly));
+        assert_eq!(p.write(0, &buf), Err(BlockError::ReadOnly));
+        assert_eq!(ro.discard(0, 1), Err(BlockError::ReadOnly));
+        assert_eq!(CACHE.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        ro.read(0, &mut buf).unwrap();
+        p.read(0, &mut buf).unwrap();
+        rw.write(0, &buf).unwrap();
+        assert_eq!(CACHE.0.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]

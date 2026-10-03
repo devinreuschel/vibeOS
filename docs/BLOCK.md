@@ -270,7 +270,9 @@ device, the driver fails the device and every queued request only when the
 device status has `DEVICE_NEEDS_RESET` (`exhausted_fails_device`). Each bound function is its own instance (`VirtioBlk`), owned by its PCI
 registry entry and named `vda`, `vdb`, … in bind order, with its own queues, bounce slots and
 vectors; the driver keeps no list of them (DEVICES.md §12.1 rule 1). Config reads capacity (512-byte units), `blk_size` (512
-if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
+if `F_BLK_SIZE` is absent), and topology when offered. A `blk_size` that is not a power of two
+from 512 to 4096, the block cache's page, fails the probe, as Linux's `virtblk_probe` fails on an
+invalid block size (`blk_size_default_and_4k`). Each request is a
 descriptor chain: header + data (or discard range) + status. The status
 byte is device-writable DMA, never a stack slot. Completions harvest the
 used ring on the threaded IRQ and wake the same `IoWaiter` cookies as the
@@ -303,9 +305,17 @@ value is the queue index; `kick` writes 0 for every queue (ROADMAP §11.5, F047)
 ## 10.5 Partitions
 
 MBR (primary + extended/logical) and GPT parse in `crates/core/src/block/part.rs`. Protective
-MBR type `0xEE` is not a data device; GPT is. Header and entry CRCs are
+MBR type `0xEE` is not a data device; GPT is. A GPT is read only behind a protective MBR, one
+with the `0x55AA` signature and a type `0xEE` entry, as Linux reads one without `gpt` on its
+command line: a disk with GPT headers and a plain MBR gets its MBR table, and one with no MBR
+signature gets none (`gpt_without_protective_mbr_is_ignored`). Header and entry CRCs are
 checked; a bad primary falls back to the backup header at the last LBA.
-EBR walk is capped at 128; a corrupt next-LBA stops the chain. `parse_mbr`
+EBR walk is capped at 128; a corrupt next-LBA stops the chain. Tables
+count in the disk's logical blocks, so on a disk of 4 KiB blocks the GPT header is at byte 4096 and
+every LBA is in 4 KiB units, as Linux reads them; a disk whose blocks are larger than 4 KiB gets no
+scan (`tables_on_4k_blocks`, and `part_six_entries` on a 4 KiB-block disk). FAT reads only
+512-byte sectors, and a FAT mount on a disk of larger blocks fails with `EINVAL`
+(`fat_mount_4k_disk_inval`); vibefs reads 4 KiB blocks on either. `parse_mbr`
 copies the four MBR entries before the EBR walk reuses its sector buffer.
 Entries are checked against the disk size only: an
 entry that overlaps another entry or the table itself, a GPT header whose
@@ -316,7 +326,12 @@ Children are entries of the block registry ([§12.1](DEVICES.md#121-devices)), e
 `BlockRef` with its disk as parent. Child LBA `l` maps to `start + l` and
 I/O past `nsectors` is `Inval`. `register_table` registers a child
 `<parent>p<N>` (e.g. `ram0p1`, `vdap1`) for every parsed entry, up to
-`MAX_PARTS` per table, `N` the entry's index in the table, and each
+`MAX_PARTS` per table, `N` the entry's number as Linux gives it: a GPT entry's place in the entry
+array plus one, used or not; an MBR primary's slot, 1 to 4; and logical partitions from 5 in EBR
+order, counted across the whole disk, so a second extended entry's logicals go on from the
+first's (e.g. `ram0p5`). An empty entry or slot renumbers nothing after it
+(`partitions_keep_their_on_disk_numbers`, `mbr_extended_logical`,
+`logicals_of_two_extended_entries_number_on`). Each
 registration prints the marker `vibeOS: block: <name> <n> sectors`. An
 entry it does not register, because the name does not fit in 32 bytes or
 the registry refuses it, gets a warning line naming the disk, the entry,
@@ -358,10 +373,15 @@ changes a copy's filesystem id offline (VIBEFS.md §15).
 Page-granular (4 KiB), 16 pages (`cache::DEFAULT_PAGES`), keyed by
 `(id, page offset)`, where the id is the device's `BlockRef` id. Read-through,
 write-back, clock eviction, sequential readahead, dirty-ratio writeback thread
-(`blk-wb`). `PageCache::flush(dev)` writes each dirty page of `dev` not already in writeback and waits for it,
-waits for every page of `dev` in writeback, writes pages dirtied meanwhile,
-and sends the device `Flush` (§10.2) only when `dev` has no dirty and no
-writeback page.
+(`blk-wb`). `PageCache::flush(dev)` makes durable every write to `dev` that returned before it began, in
+one sweep of the slots (`Cache::flush_slot`): it writes each page of `dev` that is dirty and
+waits for it, and waits for each write of `dev` in flight, once more when that write began
+before the flush, since a write after its copy may predate the flush. A write it waited on that
+failed leaves the page dirty again, and the flush writes that page itself and returns its error,
+as Linux's `fsync` reports a writeback error (`Cache::flush_waited`). Then it sends the device
+`Flush` (§10.2). A writer that keeps dirtying pages cannot hold it off, since the sweep visits
+each slot once (`cache_flush_not_starved`); a page dirtied after the sweep passed it is the next
+flush's.
 
 A slot whose device write is in flight is in WRITEBACK (`F_WB`): it keeps its
 key, stays readable and writable (a write dirties it again), is never picked by
@@ -369,9 +389,12 @@ the clock or re-keyed, and gets no second write until the first completes.
 Every cache write sets it: `blk-wb`'s, `flush`'s, and an eviction's, so a dirty
 victim is written back in place before it is re-keyed, and the clock prefers a
 clean victim. A thread that needs the slot sleeps on the slot's wait queue
-until the write ends (ROADMAP §10.11, F015, F043). A slot has no filling
-state: `find()` matches only valid slots, so a second reader of a page being
-filled does not wait for it (ROADMAP §12.5, F015).
+until the write ends (ROADMAP §10.11, F015, F043). A slot being filled
+(`F_FILL`) is the page's one slot: `find()` matches it, and a second reader or a
+writer of the page sleeps on its queue until the fill ends
+(`cache_read_waits_for_fill`). A miss that finds every slot busy sleeps on one in writeback, or
+else on one being filled, and is planned again when it ends; it does not fail
+(`miss_waits_while_every_slot_fills`).
 
 Each disk's `BlockRef` carries the cache (`cache_init::PAGE_CACHE`), and a
 partition's I/O goes through its disk's, so a page is keyed by its disk's

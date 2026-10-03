@@ -449,11 +449,14 @@ and sends `0xFD`; a drain swaps the summary to zero with Acquire, then swaps eac
 zero with Acquire and takes its set bits in ascending order. A push allocates nothing and is
 idempotent, so a thread woken from two CPUs at once is queued once. A bit names a slot, not a tid:
 the `0xFD` handler's drain maps each slot to its tid through `thread_init`'s slot table, which spawn
-publishes with Release under `SCHED` whenever a slot takes a TCB. A bit is set only for a Ready
-thread, which cannot die before it runs, so a slot is not reused while its bit is set. Rejected: an
-intrusive MPSC list, which needs a queued flag in each TCB against double insertion and a larger
-model. ROADMAP §10.8's loom model `loom_wake_inbox_three_pushers` runs push from three CPUs against
-the owner's drains ([TESTING.md §8](TESTING.md#8-testing)).
+publishes with Release under `SCHED` whenever a slot takes a TCB. A bit can outlive the wake that
+set it: the push lands after the waker drops `SCHED`, by which time the thread may have run, exited,
+and had its slot reused. The drain then queues whatever thread holds the slot, and `schedule_inner`
+runs it only while `SCHED` shows it `Ready` and placed on that CPU; a thread spawned parked
+(`spawn_parked_on`, `spawn_user`) is `Blocked` on no queue until `make_ready`, so a stale bit never
+starts it. Rejected: an intrusive MPSC list, which needs a queued flag in each TCB against double
+insertion and a larger model. ROADMAP §10.8's loom model `loom_wake_inbox_three_pushers` runs push
+from three CPUs against the owner's drains ([TESTING.md §8](TESTING.md#8-testing)).
 
 ## 7.7 Locking with more than one CPU
 

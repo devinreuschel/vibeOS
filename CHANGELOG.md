@@ -30,6 +30,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - `loglevel=` on the kernel command line sets the boot log level, with Linux's numbering.
 - Each in-guest test prints its name and deadline before it runs and fails when it passes the
   deadline; `vibeos.ktest=` and `vibeos.ktest_repeat=` select and repeat tests.
+- `vibeos.ktest_range=<from>..<to>` runs one stretch of the in-guest registry; CI's in-guest tiers
+  run as shards of under 60 s (`make test-kernel-<k>`, [ROADMAP §10.1](docs/ROADMAP.md#101-gates-and-pinning)).
 - `make debug` starts QEMU halted with a gdb stub, and `scripts/vibeos.gdb` loads the kernel and
   user ELFs; `make run` and `make run-panic` start QEMU through the harness.
 - An `irqoff` kernel build and `make test-irqoff`, which log every interrupts-off stretch longer
@@ -69,6 +71,15 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Changed
 
+- Partitions are numbered by their place on disk, as Linux numbers them: an MBR's logical
+  partitions start at `p5` (ram0's are now `ram0p5` and `ram0p6`), and a GPT entry is its index + 1.
+- A GPT is read only behind a protective MBR, as Linux reads it; a plain MBR wins over stale GPT headers.
+- A FAT file stops at 4 GiB as on Linux: a write is cut short there, and a truncate or seek past it fails.
+- `execve` opens its file before it reads `argv`, and `getdents64` of a non-directory is `ENOTDIR`;
+  `open`, `unlink`, `rename`, `read`, `write` and `lseek` return Linux's errnos in Linux's order.
+- `kill` of a zombie, a process that exited and is not yet reaped, returns 0 and discards the
+  signal, as on Linux, instead of ESRCH.
+- A virtio-blk disk with a block size that is not a power of two from 512 to 4096 is refused at probe.
 - Roadmap restructured to 40 phases in eight eras, all on free infrastructure: [Phase 10 Consolidation](docs/ROADMAP.md#phase-10-consolidation)
   and [Phase 11 Portability](docs/ROADMAP.md#phase-11-portability) added; old phases 10–20 are now 12–22.
 - CI: `check` job (`make check` + `vibeos-core` llvm-cov floor 87%) runs before the QEMU ladder.
@@ -152,6 +163,22 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- A host that stalls QEMU no longer drops the timer tick to the PIT: the LAPIC timer is proved
+  against the PIT's interrupts, and its calibration divides by the time its window really took.
+- `kill` of a zombie returns 0 as on Linux; the NBD test server treats a macOS client's close as EOF.
+- `fsync`-style flushes can no longer be held off by a writer that keeps dirtying pages, and a
+  page being read in has one cache slot, so a later read cannot see a stale second copy.
+- Partition tables on 4 KiB-sector disks are read; a FAT mount there fails with `EINVAL`, not `EIO`.
+- tmpfs supports `rename`; rename replaces its target as rename(2) does on every filesystem.
+- `lseek` takes `SEEK_DATA` and `SEEK_HOLE` (`ENXIO` past the end) and is `ESPIPE` on any console
+  descriptor first; a file with no write is `EINVAL` before `write` checks its buffer.
+- A stopped process holds every signal but `SIGKILL` until `SIGCONT`, as on Linux; `wait4` no
+  longer sleeps through a pending `SIGKILL`, and signal default actions follow signal(7).
+- A scan that unlinks each entry it reads sees them all on ramfs and tmpfs; `..` climbs out of
+  mounts stacked on one directory; unlink and rename no longer race an inode's eviction.
+- FAT counts free clusters at mount instead of trusting FSInfo; vibefs stamps inodes with the wall
+  clock and a refused unlink keeps the name.
+- Every CPU zeroes the SYSENTER MSRs, and a failed `ioremap` gives its window back.
 - `/dev`, `/proc`, `/sys` and `/tmp` are no longer capped at 128 nodes between them: kernfs's
   node table grows on the heap, and `ENOMEM` when it cannot.
 - `execve` of a program on `/tmp` stays within its thread's kernel stack budget; tmpfs's cache
@@ -162,6 +189,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   8 GiB physmap cap is left unused; `make test-e2e-highmem` boots with 9 GiB.
 - UEFI e2e no longer hangs on OVMF PXE after a green marker boot; a timed-out boot prints
   its serial tail.
+- On macOS, `nbd-cache` (the crash test's NBD device) takes its client's close as EOF, as on Linux,
+  instead of failing with the `EINVAL` Darwin gives a socket option once the peer has gone.
 - A process orphaned while no init runs is freed when it exits instead of holding a process slot as
   a zombie.
 - The -smp 4 in-guest msix_cpu test no longer fails at random; its interrupt observer publishes its
@@ -176,8 +205,6 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   teardown refuses a root any CPU or thread still names.
 - A thread's kernel stack is freed only by the CPU that ran it, after it has switched away, and an
   exit burst no longer panics the kernel.
-- Two descriptors on one FAT file no longer leak or cross-link clusters, an unlinked FAT file keeps
-  its clusters until its last close, and no close takes another process's reference.
 - Two descriptors on one FAT file no longer leak or cross-link clusters, an unlinked FAT file keeps
   its clusters until its last close, and no close takes another process's reference.
 - A case-only FAT rename no longer frees the file's clusters, and moving a directory into its own

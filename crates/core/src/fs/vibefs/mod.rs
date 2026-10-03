@@ -256,6 +256,9 @@ pub struct Vol {
     pub label: [u8; 32],
     pub flags: u8,
     pub dirty: bool,
+    /// Unix seconds the next change stamps, which the kernel half sets
+    /// from the wall clock before each operation; 0 when there is none.
+    pub now: u64,
     bitmap: [u8; MAX_BLOCKS.div_ceil(8)],
     refc: [u8; MAX_BLOCKS],
     txn: [u8; MAX_BLOCKS.div_ceil(8)],
@@ -364,3 +367,6 @@ fn drop_ref(bitmap: &mut [u8], refc: &mut [u8], nblocks: u32, b: u32) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod ops_tests;

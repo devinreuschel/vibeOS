@@ -4,6 +4,10 @@
 //! frames. Split on allocation, merge with the buddy on free. Free-list
 //! nodes live inside the free pages themselves (intrusive), so the
 //! allocator needs no auxiliary bitmap and no allocation to bootstrap.
+//! The whole `MAX_ORDER` blocks of each region `insert_region` takes are
+//! kept as a run, a `[start, end)` pair in the `Buddy` itself, rather than
+//! linked, and a block leaves its run only when it is taken: boot writes
+//! no node into memory it has not used (ROADMAP §10.2).
 //!
 //! The one sharp edge is the same one called out in the design doc: a stray
 //! write into a freed page corrupts these lists, and the crash surfaces
@@ -211,6 +215,10 @@ struct FreeNode {
 /// allocator (DESIGN §2.4), so 0 is unambiguous.
 const NULL: u64 = 0;
 
+/// Runs of whole free `MAX_ORDER` blocks a [`Buddy`] keeps unlinked. A
+/// memory map with more top-order runs than this has the rest linked.
+pub const TOP_RUNS: usize = 16;
+
 pub struct Buddy {
     heads: [u64; MAX_ORDER + 1],
     counts: [usize; MAX_ORDER + 1],
@@ -221,6 +229,15 @@ pub struct Buddy {
     /// `free` refuses a block that was never this buddy's.
     span_lo: u64,
     span_hi: u64,
+    /// Runs `[start, end)` of whole free top-order blocks that
+    /// `insert_region` recorded instead of linking, lowest first; the first
+    /// `nruns` are live. Their blocks count in `counts[MAX_ORDER]` and
+    /// `free_frames`, and a block leaves its run only when it is taken, so
+    /// boot writes no free-list link into memory it has not used: one link
+    /// in every free 4 MiB block was one first touch of every 4 MiB of RAM
+    /// (ROADMAP §10.2).
+    runs: [(u64, u64); TOP_RUNS],
+    nruns: usize,
 }
 
 impl Buddy {
@@ -236,6 +253,8 @@ impl Buddy {
             hhdm_offset: hhdm,
             span_lo: u64::MAX,
             span_hi: 0,
+            runs: [(0, 0); TOP_RUNS],
+            nruns: 0,
         }
     }
 
@@ -259,8 +278,17 @@ impl Buddy {
         }
     }
 
+    /// Free blocks, every order counted: how many `alloc` calls, highest
+    /// order first, take every free frame, since such a drain splits no
+    /// block.
+    pub fn free_blocks(&self) -> usize {
+        self.counts.iter().fold(0usize, |n, &c| n.saturating_add(c))
+    }
+
     /// Contribute a [start, end) physical range to the free lists.
-    /// Splits into maximally-aligned, maximally-sized buddy blocks.
+    /// Splits into maximally-aligned, maximally-sized buddy blocks; the
+    /// whole `MAX_ORDER` blocks among them become one run, which writes
+    /// nothing into them, while a run slot is free ([`TOP_RUNS`]).
     /// Any bytes below the first page, or beyond the last page, are
     /// ignored. Frame 0 is skipped unconditionally.
     ///
@@ -284,6 +312,21 @@ impl Buddy {
             let max_by_align = (a.trailing_zeros() - PAGE_BITS) as usize;
             let max_by_len = remaining_pages.ilog2() as usize;
             let k = max_by_align.min(max_by_len).min(MAX_ORDER);
+            if k == MAX_ORDER {
+                // `a` is top-order aligned and a whole top block fits: every
+                // whole top block from here on is one run.
+                let top = PAGE_SIZE << MAX_ORDER;
+                let n = (b - a) / top;
+                let run_end = a + n * top;
+                if self.add_run(a, run_end) {
+                    let frames = (n as usize) << MAX_ORDER;
+                    self.total_frames += frames;
+                    self.counts[MAX_ORDER] += n as usize;
+                    self.free_frames += frames;
+                    a = run_end;
+                    continue;
+                }
+            }
             self.total_frames += 1 << k;
             // SAFETY: `push_free`'s contract; `[a, a + 2^k frames)` lies in
             // the range this fn's `# Safety` contract hands over, unused and
@@ -337,12 +380,16 @@ impl Buddy {
                 k += 1;
             }
         }
-        if found == NULL {
-            return None;
+        if found != NULL {
+            // SAFETY: `unlink`'s contract; the walk above found `found` on
+            // the order-`k` free list, established here.
+            unsafe { self.unlink(found, k as u8) };
+        } else {
+            // A run's lowest block is the one of it likeliest to end at or
+            // below `max_phys`.
+            k = MAX_ORDER;
+            found = self.take_run_block(|start, _| fits(start).then_some(start))?;
         }
-        // SAFETY: `unlink`'s contract; the walk above found `found` on the
-        // order-`k` free list, established here.
-        unsafe { self.unlink(found, k as u8) };
         // Keep the low piece, push the high half at each order below `k`.
         while k > target {
             k -= 1;
@@ -386,15 +433,19 @@ impl Buddy {
             return None;
         }
         let mut k = target;
-        while k <= MAX_ORDER && self.heads[k] == NULL {
+        while k < MAX_ORDER && self.heads[k] == NULL {
             k += 1;
         }
-        if k > MAX_ORDER {
-            return None;
-        }
-        // SAFETY: `pop_head`'s contract; the loop above stopped at an order
-        // `k` whose head is not NULL, established here.
-        let addr = unsafe { self.pop_head(k as u8) };
+        let addr = if self.heads[k] != NULL {
+            // SAFETY: `pop_head`'s contract; the loop above stopped at an
+            // order `k` whose head is not NULL, established here.
+            unsafe { self.pop_head(k as u8) }
+        } else {
+            // Only `MAX_ORDER`'s list is left: its runs, highest block
+            // first, as the list it replaces handed out its last-linked,
+            // highest block first.
+            self.take_run_block(|_, end| Some(end - (PAGE_SIZE << MAX_ORDER)))?
+        };
         // Split down, pushing the right half at each intermediate order.
         while k > target {
             k -= 1;
@@ -592,6 +643,81 @@ impl Buddy {
         false
     }
 
+    /// Record `[start, end)`, whole top-order blocks on no list, as a run:
+    /// it extends the run that ends at `start`, or takes a free slot. False
+    /// when every slot is taken, and the caller links the blocks instead.
+    fn add_run(&mut self, start: u64, end: u64) -> bool {
+        if start >= end {
+            return true;
+        }
+        if let Some(last) = self.nruns.checked_sub(1).and_then(|i| self.runs.get_mut(i))
+            && last.1 == start
+        {
+            last.1 = end;
+            return true;
+        }
+        match self.runs.get_mut(self.nruns) {
+            Some(slot) => {
+                *slot = (start, end);
+                self.nruns += 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Take one top-order block out of a run: from the last run back, the
+    /// first for which `pick(start, end)` names a block, which must be the
+    /// run's first or last block. The run shrinks, or goes when it empties.
+    fn take_run_block(&mut self, pick: impl Fn(u64, u64) -> Option<u64>) -> Option<u64> {
+        let top = PAGE_SIZE << MAX_ORDER;
+        let mut i = self.nruns;
+        while i > 0 {
+            i -= 1;
+            let Some(&(start, end)) = self.runs.get(i) else {
+                continue;
+            };
+            let Some(blk) = pick(start, end) else {
+                continue;
+            };
+            assert!(
+                blk == start || blk == end - top,
+                "pmm: run block {blk:#x} not at an end of its run"
+            );
+            let rest = if blk == start {
+                (start + top, end)
+            } else {
+                (start, end - top)
+            };
+            if rest.0 < rest.1 {
+                self.runs[i] = rest;
+            } else {
+                self.runs.copy_within(i + 1..self.nruns, i);
+                self.nruns -= 1;
+            }
+            self.counts[MAX_ORDER] -= 1;
+            self.free_frames -= 1 << MAX_ORDER;
+            return Some(blk);
+        }
+        None
+    }
+
+    /// Whether `phys` lies in one of the runs. An index loop, which the
+    /// Kani proofs unwind cheaply.
+    fn in_run(&self, phys: u64) -> bool {
+        let mut i = 0usize;
+        while i < self.nruns {
+            if let Some(&(start, end)) = self.runs.get(i)
+                && start <= phys
+                && phys < end
+            {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
     /// True iff `phys` is currently inside some free block at `at_least_order`
     /// or larger. Used to detect double-free even when the freed piece has
     /// already been coalesced into a bigger block.
@@ -599,6 +725,9 @@ impl Buddy {
     /// # Safety
     /// Free-list nodes are intact.
     unsafe fn covered_by_free_block(&self, phys: u64, at_least_order: u8) -> bool {
+        if self.in_run(phys) {
+            return true;
+        }
         for k in (at_least_order as usize)..=MAX_ORDER {
             let block_start = phys & !((PAGE_SIZE << k) - 1);
             // SAFETY: `in_free_list`'s contract; the lists are intact by
@@ -835,6 +964,31 @@ mod tests {
         p.buddy.free(a);
         let s2 = p.buddy.stats();
         assert_eq!(s2, s0, "state after alloc+free must equal initial");
+    }
+
+    #[test]
+    fn free_blocks_bounds_a_highest_order_first_drain() {
+        // 1000 frames: blocks of order 9, 8, 7, 6, 5 and 3 (512 + 256 +
+        // 128 + 64 + 32 + 8).
+        let mut p = Pool::new(1000);
+        assert_eq!(p.buddy.free_blocks(), 6);
+        let a = p.buddy.alloc(0).unwrap();
+        // The order-3 block split into order 2, 1 and 0 blocks.
+        assert_eq!(p.buddy.free_blocks(), 8);
+        let mut held = Vec::new();
+        let want = p.buddy.free_blocks();
+        for order in (0..=MAX_ORDER as u8).rev() {
+            while let Some(f) = p.buddy.alloc(order) {
+                held.push(f);
+            }
+        }
+        assert_eq!(held.len(), want);
+        assert_eq!(p.buddy.free_blocks(), 0);
+        held.push(a);
+        for f in held {
+            p.buddy.free(f);
+        }
+        assert_eq!(p.buddy.free_blocks(), 6);
     }
 
     #[test]
@@ -1315,3 +1469,7 @@ mod tests {
 
 #[cfg(kani)]
 mod kani_proofs;
+
+/// Host tests of the top-order runs (ROADMAP §10.2).
+#[cfg(test)]
+mod run_tests;

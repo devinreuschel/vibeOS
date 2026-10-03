@@ -61,10 +61,7 @@ SOURCE_DIRS = ("src", "crates")
 
 # Files whose module-level `allow(dead_code)` the sweep that owns them has
 # not removed (Q2); skipped until it does.
-PENDING: tuple[str, ...] = (
-    # P10-S33's log sweep: the parked printer thread and dmesg helpers.
-    "src/log/log_init.rs",
-)
+PENDING: tuple[str, ...] = ()
 
 ATTR_OPEN = re.compile(r"#!?\[")
 DEAD_ALLOW = re.compile(r"\ballow\s*\([^()]*\bdead_code\b")

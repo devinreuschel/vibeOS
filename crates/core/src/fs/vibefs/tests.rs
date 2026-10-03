@@ -1,6 +1,6 @@
 use super::*;
 
-fn fresh(n: usize) -> Vec<u8> {
+pub(super) fn fresh(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
     {
         let mut d = MemDisk::new(&mut b).unwrap();
@@ -10,7 +10,7 @@ fn fresh(n: usize) -> Vec<u8> {
     b
 }
 
-fn with_vol<R>(buf: &mut [u8], f: impl FnOnce(&mut Vol, &mut MemDisk) -> R) -> R {
+pub(super) fn with_vol<R>(buf: &mut [u8], f: impl FnOnce(&mut Vol, &mut MemDisk) -> R) -> R {
     let mut disk = MemDisk::new(buf).unwrap();
     let mut vol = Vol::new();
     mount(&mut disk, &mut vol).unwrap();
@@ -404,10 +404,59 @@ fn crash_workload_seeded_points() {
 }
 
 /// A regular file `name` in the root; its inode number.
-fn new_file(v: &mut Vol, d: &mut MemDisk, name: &[u8]) -> u32 {
+pub(super) fn new_file(v: &mut Vol, d: &mut MemDisk, name: &[u8]) -> u32 {
     v.create(d, ROOT_INO, name, InodeKind::Reg, 0o644, None)
         .unwrap();
     v.lookup(d, ROOT_INO, name).unwrap().ino
+}
+
+/// An unlink whose blocks the drop list has no room for fails with
+/// `NoSpace` and changes nothing: the name still finds the file, and an
+/// unlink once there is room removes it.
+#[test]
+fn unlink_refused_for_drop_room_keeps_the_name() {
+    let mut b = fresh(64 * BLOCK);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        v.write(d, ino, 0, &[5u8; BLOCK * 2]).unwrap();
+        v.sync(d).unwrap();
+        let held = v.ndrop;
+        v.ndrop = MAX_DROP as u8;
+        assert_eq!(
+            v.unlink(d, ROOT_INO, b"f", false).unwrap_err(),
+            Error::NoSpace
+        );
+        v.ndrop = held;
+        assert_eq!(v.lookup(d, ROOT_INO, b"f").unwrap().ino, ino);
+        v.unlink(d, ROOT_INO, b"f", false).unwrap();
+        assert_eq!(v.lookup(d, ROOT_INO, b"f").unwrap_err(), Error::NotFound);
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!(r.errors, 0, "{r:?}");
+}
+
+/// A change stamps the inodes it touches with `Vol::now`, in the Unix
+/// seconds the record keeps, and the stamps survive a remount: a new
+/// file's three times, its mtime on a write, its directory's on a create.
+#[test]
+fn changes_stamp_the_wall_clock() {
+    const T0: u64 = 1_700_000_000;
+    let mut b = fresh(64 * BLOCK);
+    let ino = with_vol(&mut b, |v, d| {
+        v.now = T0;
+        let ino = new_file(v, d, b"f");
+        v.now = T0 + 5;
+        v.write(d, ino, 0, b"data").unwrap();
+        v.sync(d).unwrap();
+        ino
+    });
+    with_vol(&mut b, |v, _| {
+        let f = v.inodes[v.inode_slot(ino).unwrap()];
+        assert_eq!((f.atime, f.mtime, f.ctime), (T0, T0 + 5, T0 + 5));
+        let r = v.inodes[v.inode_slot(ROOT_INO).unwrap()];
+        assert_eq!((r.mtime, r.ctime), (T0, T0));
+    });
 }
 
 fn n_ext(v: &Vol, ino: u32) -> u8 {
@@ -503,7 +552,7 @@ fn block_math_near_u32_limit() {
 }
 
 /// `fsck` over the image in `b`.
-fn fsck_of(b: &mut [u8]) -> FsckReport {
+pub(super) fn fsck_of(b: &mut [u8]) -> FsckReport {
     let mut d = MemDisk::new(b).unwrap();
     fsck(&mut d).unwrap()
 }
@@ -619,7 +668,7 @@ fn nested_dirs_63_commit_remount() {
 
 /// `f` (300 bytes, one extent), `g` (5 bytes, inline) and `p/c` on a
 /// 64-block image that fsck finds clean.
-fn base_tree() -> Vec<u8> {
+pub(super) fn base_tree() -> Vec<u8> {
     let mut b = fresh(64 * BLOCK);
     with_vol(&mut b, |v, d| {
         let f = new_file(v, d, b"f");
@@ -673,7 +722,7 @@ fn planted_alloc(plant: impl FnOnce(&mut [u8], &mut [u8], u32)) -> FsckReport {
     fsck_of(&mut b)
 }
 
-fn slot_of(v: &mut Vol, d: &mut MemDisk, dir: u32, name: &[u8]) -> (usize, usize) {
+pub(super) fn slot_of(v: &mut Vol, d: &mut MemDisk, dir: u32, name: &[u8]) -> (usize, usize) {
     let e = v.find_dent(dir, name).unwrap();
     let ino = v.lookup(d, dir, name).unwrap().ino;
     (e, v.inode_slot(ino).unwrap())
@@ -816,6 +865,47 @@ fn rename_dir_into_own_subtree_einval() {
         );
         assert_eq!(v.lookup(d, c, b"x").unwrap().ino, x);
         assert_eq!(v.walk(d, b"/p/c").unwrap().ino, c);
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!(r.errors, 0, "{r:?}");
+    assert_eq!(r.count(Defect::Unreachable), 0);
+}
+
+/// A rename onto an existing name replaces it as rename(2) does: a
+/// directory replaces an empty directory and not one with entries, nor a
+/// file, and a file never replaces a directory; fsck finds the volume
+/// whole after.
+#[test]
+fn rename_replaces_as_linux() {
+    let mut b = fresh(64 * BLOCK);
+    with_vol(&mut b, |v, d| {
+        for n in [b"p" as &[u8], b"q", b"r"] {
+            v.create(d, ROOT_INO, n, InodeKind::Dir, 0o755, None)
+                .unwrap();
+        }
+        let p = v.lookup(d, ROOT_INO, b"p").unwrap().ino;
+        let r = v.lookup(d, ROOT_INO, b"r").unwrap().ino;
+        new_file(v, d, b"f");
+        new_file(v, d, b"g");
+        v.create(d, r, b"in", InodeKind::Reg, 0o644, None).unwrap();
+        assert_eq!(
+            v.rename(d, ROOT_INO, b"p", ROOT_INO, b"f").unwrap_err(),
+            Error::NotDir
+        );
+        assert_eq!(
+            v.rename(d, ROOT_INO, b"f", ROOT_INO, b"p").unwrap_err(),
+            Error::IsDir
+        );
+        assert_eq!(
+            v.rename(d, ROOT_INO, b"p", ROOT_INO, b"r").unwrap_err(),
+            Error::NotEmpty
+        );
+        v.rename(d, ROOT_INO, b"p", ROOT_INO, b"q").unwrap();
+        assert_eq!(v.lookup(d, ROOT_INO, b"q").unwrap().ino, p);
+        assert_eq!(v.lookup(d, ROOT_INO, b"p").unwrap_err(), Error::NotFound);
+        v.rename(d, ROOT_INO, b"f", ROOT_INO, b"g").unwrap();
+        assert_eq!(v.lookup(d, ROOT_INO, b"f").unwrap_err(), Error::NotFound);
         v.sync(d).unwrap();
     });
     let r = fsck_of(&mut b);
@@ -1200,4 +1290,107 @@ fn plant_early_super_breaks_rebuilt_image() {
     assert!(early_super_images(Plant::None).iter().all(|&ok| ok));
     let early = early_super_images(Plant::EarlySuper);
     assert!(early.iter().any(|&ok| !ok), "{early:?}");
+}
+
+/// A zero-length read inside a file returns 0: the last byte it would
+/// read is not computed (`off + len - 1` underflows at `len` 0).
+#[test]
+fn read_into_empty_buffer_is_zero() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        v.create(d, ROOT_INO, b"big.bin", InodeKind::Reg, 0o644, None)
+            .unwrap();
+        let n = v.lookup(d, ROOT_INO, b"big.bin").unwrap();
+        v.write(d, n.ino, 0, &[9u8; 400]).unwrap();
+        assert_eq!(v.read(d, n.ino, 10, &mut []).unwrap(), 0);
+    });
+}
+
+/// An inline file whose size an image set past the 128 inline bytes, as
+/// fsck's `inline` defect plants it: a read of it, and a write that would
+/// move its bytes to a block, are `Corrupt` rather than an index past
+/// `inline_data`.
+#[test]
+fn inline_size_past_inline_bytes_is_corrupt() {
+    let mut b = base_tree();
+    with_vol(&mut b, |v, d| {
+        let (_, s) = slot_of(v, d, ROOT_INO, b"g");
+        assert!(v.inodes[s].flags & F_INLINE != 0);
+        v.inodes[s].size = 200;
+        v.dirty = true;
+        v.sync(d).unwrap();
+    });
+    with_vol(&mut b, |v, d| {
+        let g = v.lookup(d, ROOT_INO, b"g").unwrap().ino;
+        let mut out = [0u8; 256];
+        assert_eq!(v.read(d, g, 0, &mut out).unwrap_err(), Error::Corrupt);
+        assert_eq!(v.write(d, g, 300, b"x").unwrap_err(), Error::Corrupt);
+    });
+}
+
+/// A volume whose generation is at its last value fails its next commit
+/// with `Corrupt`, where the increment would overflow.
+#[test]
+fn commit_at_last_generation_is_corrupt() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        v.generation = u64::MAX;
+        v.create(d, ROOT_INO, b"a", InodeKind::Reg, 0o644, None)
+            .unwrap();
+        assert_eq!(v.sync(d).unwrap_err(), Error::Corrupt);
+    });
+}
+
+/// A [`MemDisk`] whose block `bad` cannot be read.
+struct BadRead<'a> {
+    d: MemDisk<'a>,
+    bad: u32,
+}
+
+impl Disk for BadRead<'_> {
+    fn nblocks(&self) -> u32 {
+        self.d.nblocks()
+    }
+    fn read_block(&mut self, bno: u32, buf: &mut [u8; BLOCK]) -> Result<(), Error> {
+        if bno == self.bad {
+            return Err(Error::Io);
+        }
+        self.d.read_block(bno, buf)
+    }
+    fn write_block(&mut self, bno: u32, buf: &[u8; BLOCK]) -> Result<(), Error> {
+        self.d.write_block(bno, buf)
+    }
+    fn flush(&mut self) -> Result<(), Error> {
+        self.d.flush()
+    }
+}
+
+/// A superblock slot that cannot be read fails the mount with `Io`, for
+/// either slot: it may hold the newer generation, and mounting the other
+/// would roll the volume back.
+#[test]
+fn unreadable_super_slot_fails_mount() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        for name in [b"a" as &[u8], b"b"] {
+            v.create(d, ROOT_INO, name, InodeKind::Reg, 0o644, None)
+                .unwrap();
+            v.sync(d).unwrap();
+        }
+    });
+    for bad in 0..2 {
+        let mut disk = BadRead {
+            d: MemDisk::new(&mut b).unwrap(),
+            bad,
+        };
+        let mut v = Vol::new();
+        assert_eq!(
+            mount(&mut disk, &mut v).unwrap_err(),
+            Error::Io,
+            "slot {bad}"
+        );
+    }
+    with_vol(&mut b, |v, d| {
+        assert!(v.lookup(d, ROOT_INO, b"b").is_ok());
+    });
 }

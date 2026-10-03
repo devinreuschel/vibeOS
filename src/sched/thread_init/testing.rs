@@ -71,7 +71,10 @@ pub fn drain_local_stack_cache() {
         while let Some(stack) = cpu.stack_cache.take() {
             super::CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
             super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
-            crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
+            // SAFETY: invariant I10, established at
+            // `thread_init::finish_switch`, which caches only stacks no CPU
+            // runs on; `dead_list` is this CPU's dead list.
+            unsafe { crate::kva_init::park_on_list(&mut cpu.dead_list, stack) };
             any = true;
         }
         any
@@ -81,12 +84,19 @@ pub fn drain_local_stack_cache() {
     }
 }
 
-/// Put `stack`, which nothing runs on, on this CPU's dead list and wake
-/// its worker, as the switch tail does with a stack the cache refuses.
-pub fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
+/// Put `stack` on this CPU's dead list and wake its worker, as the switch
+/// tail does with a stack the cache refuses.
+///
+/// # Safety
+///
+/// No CPU runs on `stack`, now or later (invariant I10).
+pub unsafe fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
     super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     crate::per_cpu_init::with_current(|cpu| {
-        crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
+        // SAFETY: invariant I10, established at `thread_init::finish_switch`
+        // for the stacks it parks, and by this fn's contract for `stack`;
+        // `dead_list` is this CPU's dead list.
+        unsafe { crate::kva_init::park_on_list(&mut cpu.dead_list, stack) };
     });
     crate::work_init::kick_dead_stacks();
 }
@@ -391,6 +401,25 @@ pub fn ktest_sweeps() -> u64 {
     SWEEPS.load(Ordering::Acquire)
 }
 
+/// Give `Blocked` thread `id`'s wait the deadline `deadline`, in its state
+/// and its timeout entry, as if its wait had been given it; it times out
+/// there as any wait does. False when `id` is not `Blocked`. A test sets a
+/// waiter's deadline this way once the waiters it orders are all queued,
+/// so a slow host cannot let the deadline pass before they are.
+pub fn set_wait_deadline(id: ThreadId, deadline: vibeos::time::Instant) -> bool {
+    with_sched(|s| {
+        let Some(t) = s.get_mut(id) else {
+            return false;
+        };
+        let ThreadState::Blocked { wq, .. } = t.state else {
+            return false;
+        };
+        t.state = ThreadState::Blocked { wq, deadline };
+        s.timeouts.insert(id, deadline);
+        true
+    })
+}
+
 /// Remove `id`'s timeout entry while it is `Blocked`, as a lost entry
 /// would be, so only the sweep can notice it. False when `id` is not
 /// Blocked or its entry is gone already (its timeout fired).
@@ -445,6 +474,12 @@ pub fn state(id: ThreadId) -> ThreadState {
 
 pub fn try_state(id: ThreadId) -> Option<ThreadState> {
     super::SCHED.lock().get(id).map(|t| t.state)
+}
+
+/// `id`'s state and CPU, read under one SCHED hold; `None` once a spawn has
+/// reused its Dead slot.
+pub fn try_state_cpu(id: ThreadId) -> Option<(ThreadState, u32)> {
+    super::SCHED.lock().get(id).map(|t| (t.state, t.cpu))
 }
 
 /// Whether `id`'s thread has exited: its TCB is Dead, or a spawn has

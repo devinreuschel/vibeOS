@@ -186,10 +186,15 @@ impl fmt::Write for Serial {
     }
 }
 
-/// Serial TX that does not land in the log ring. `dmesg` uses it so a
-/// dump cannot wrap the ring in copies of itself.
+/// Serial TX that does not land in the log ring. The in-guest `dmesg`
+/// test's dump uses it so a dump cannot wrap the ring in copies of itself,
+/// and the IF-off tracer's report (`sched::irqoff`) so its lines every
+/// 100 ms cannot wrap it; the shell's `dmesg` writes to its console. Only
+/// those builds have it.
+#[cfg(any(feature = "kernel_tests", feature = "irqoff"))]
 pub struct PlainSerial;
 
+#[cfg(any(feature = "kernel_tests", feature = "irqoff"))]
 impl fmt::Write for PlainSerial {
     /// `s` as one line.
     fn write_str(&mut self, s: &str) -> fmt::Result {
@@ -217,8 +222,8 @@ pub fn line(msg: &str) {
 ///
 /// `marker!(marker::X)` / `marker!("vibeOS: …")` for a full line;
 /// `marker!("vibeOS: … {}", x)` for formatted contract lines.
-/// `klog!` is filtered. `PlainSerial` is only for `dmesg`; the panic dump
-/// writes through `raw::write_owner`.
+/// `klog!` is filtered. `PlainSerial` is only for `dmesg` and the IF-off
+/// tracer's report; the panic dump writes through `raw::write_owner`.
 #[macro_export]
 macro_rules! marker {
     ($fmt:literal $(, $($arg:tt)*)?) => {{

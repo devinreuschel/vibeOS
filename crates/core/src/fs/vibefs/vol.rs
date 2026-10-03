@@ -13,6 +13,7 @@ impl Vol {
             label: [0; 32],
             flags: FLAG_DATA_CRC,
             dirty: false,
+            now: 0,
             bitmap: [0; MAX_BLOCKS.div_ceil(8)],
             refc: [0; MAX_BLOCKS],
             txn: [0; MAX_BLOCKS.div_ceil(8)],
@@ -38,6 +39,7 @@ impl Vol {
         self.alloc_root = 0;
         self.next_ino = 2;
         self.root_ino = ROOT_INO;
+        self.now = 0;
         self.uuid = [0; 16];
         self.label = [0; 32];
         self.flags = FLAG_DATA_CRC;
@@ -233,17 +235,39 @@ impl Vol {
         n.size = r.size;
         n.mode = r.mode;
         n.nlink = r.nlink;
+        let set = |t: u64| if t != 0 { t } else { r.mtime };
+        n.atime = set(r.atime);
         n.mtime = r.mtime;
+        n.ctime = set(r.ctime);
         let l = name.len().min(MAX_NAME);
         n.name[..l].copy_from_slice(&name[..l]);
         n.name_len = l as u8;
         Ok(n)
     }
 
+    /// Stamp `ino`'s mtime and ctime with [`Vol::now`], the Unix seconds
+    /// VIBEFS.md's inode record holds; with no clock, one past its old
+    /// mtime, so a change still moves it.
     pub(super) fn bump_mtime(&mut self, ino: u32) {
+        let now = self.now;
         if let Ok(s) = self.inode_slot(ino) {
-            self.inodes[s].mtime = self.inodes[s].mtime.saturating_add(1);
-            self.inodes[s].ctime = self.inodes[s].mtime;
+            let t = if now != 0 {
+                now
+            } else {
+                self.inodes[s].mtime.saturating_add(1)
+            };
+            self.inodes[s].mtime = t;
+            self.inodes[s].ctime = t;
+        }
+        self.dirty = true;
+    }
+
+    /// Stamp `ino`'s ctime alone: a change to the inode, not its data.
+    pub(super) fn bump_ctime(&mut self, ino: u32) {
+        if self.now != 0
+            && let Ok(s) = self.inode_slot(ino)
+        {
+            self.inodes[s].ctime = self.now;
         }
         self.dirty = true;
     }

@@ -150,16 +150,17 @@ names, Linux values:
 | Name | Value | Used |
 |------|------:|------|
 | `EPERM` | 1 | `mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0); making a symlink, a device node, or a directory, a hard link, a rename, or a removal that the filesystem cannot make, as FAT's `symlink` and `link` (no syscall makes one yet) |
-| `ENOENT` | 2 | `open`/`execve` missing path |
-| `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
+| `ENOENT` | 2 | `open`/`execve` missing path, or the empty path |
+| `ESRCH` | 3 | `kill`: no process has `pid` (a zombie has it until it is reaped), `pid` 0, or a negative 32-bit `pid` (§3.1) |
 | `EIO` | 5 | device I/O error; on-disk corruption, a failed checksum or bad magic on FAT or vibefs |
+| `ENXIO` | 6 | `lseek` with `SEEK_DATA` or `SEEK_HOLE` from an offset at or past the end of the file, or below 0 |
 | `E2BIG` | 7 | `execve`: a string over 131,072 bytes with its NUL, or strings and pointers together over max(128 KiB, min(`RLIMIT_STACK`/4, 6 MiB)), 2 MiB at the fixed 8 MiB `RLIMIT_STACK` (§3.1) |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd; `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` one; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
 | `EAGAIN` | 11 | `fork` with every process-table slot in use, zombies included (`limits::MAX_PROCS` is 256), or no pid free (pids and tids share one allocator, up to 32,767, then from 300), or the thread table has no free slot (ROADMAP §10.4, F037); `read` of `/dev/random` or `/dev/urandom` when virtio-rng and `RDRAND` supply no byte (ROADMAP §10.12; until §13.10) |
 | `ENOMEM` | 12 | AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table (256 regions, `limits::MAX_REGIONS`, where Linux's `vm.max_map_count` allows 65,530; ROADMAP §10.4), a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4), `execve` argument buffers included |
-| `EACCES` | 13 | `open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys` |
+| `EACCES` | 13 | `open` with `O_CREAT` of a new file in `/dev`, `/proc`, or `/sys`; `execve` of a file that is not regular |
 | `EFAULT` | 14 | bad user pointer / length |
 | `EBUSY` | 16 | `dup2` onto a descriptor an `open` in progress reserved, which no process reaches while each has one thread |
 | `EEXIST` | 17 | `O_EXCL`; `mmap` with `MAP_FIXED_NOREPLACE` (or `MAP_FIXED`, §3.1) over a mapping |
@@ -167,17 +168,17 @@ names, Linux values:
 | `ENODEV` | 19 | a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4 |
 | `ENOTDIR` | 20 | |
 | `EISDIR` | 21 | |
-| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written; `open` or `execve` of the empty path (Linux: `ENOENT`); `open` with `O_TRUNC` of a `/proc` file |
+| `EINVAL` | 22 | `lseek` with a bad `whence`, or a resulting offset below 0 or above the filesystem's file-size limit (vibefs 2^44 − 4096, FAT 2^32 − 1), unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; `read` or `write` of an object that cannot be read or written; `open` with `O_CREAT` and `O_DIRECTORY` together, as Linux from 6.4; `open` with `O_TRUNC` of a `/proc` file |
 | `ENFILE` | 23 | `open` or `execve` with the system-wide open-file table full: 1024 open files, `limits::MAX_OPEN_FILES` |
 | `EMFILE` | 24 | per-process fd table full: 256 descriptors, `limits::MAX_FDS` (`open`, `dup`) |
-| `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` past 4 GiB, FAT's file-size limit |
+| `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3); a FAT `write` that starts at or past byte 2^32 − 1 (`fat::MAX_FILE_SIZE`), FAT's file-size limit |
 | `ENOSPC` | 28 | `write` or `open` with `O_CREAT` on a volume out of blocks, inodes, or directory entries, or a vibefs `write` that needs a fifth extent |
 | `ESPIPE` | 29 | `lseek` on the console, `/dev/console`, or `/dev/tty` |
 | `EROFS` | 30 | defined; no syscall returns it: a write to a read-only virtio-blk device fails with it in the block layer |
 | `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes. ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
 | `ENOTEMPTY` | 39 | defined; no syscall returns it |
-| `ELOOP` | 40 | `open` or `execve` through too many symbolic links, or a walk of more than 80 steps (`limits::MAX_WALK`) |
+| `ELOOP` | 40 | `open` or `execve` through too many symbolic links, or a walk of more than 80 steps (`limits::MAX_WALK`); `open` with `O_NOFOLLOW` of a symbolic link |
 | `EOPNOTSUPP` | 95 | defined; no syscall returns it. It is left for the cases Linux gives it, such as an extended-attribute namespace a mount refuses (ROADMAP §14.8) |
 
 <!-- gen_syscalls: end errno-table -->
@@ -242,12 +243,12 @@ the row does not allow it, and needs `EFAULT` from each.
 
 | x86_64 | aarch64 | name | arity | arguments | pointer arguments | errors | notes |
 |---:|---:|------|------:|-----------|-------------------|--------|-------|
-| 0 | 63 | `read` | 3 | `unsigned int fd`, `char *buf`, `size_t count` | `buf`: out, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EISDIR`, `EIO` (`vblk_bad_sector`) | — |
+| 0 | 63 | `read` | 3 | `unsigned int fd`, `char *buf`, `size_t count` | `buf`: out, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EISDIR`, `EAGAIN` (`dev_random_eagain`), `EIO` (`vblk_bad_sector`) | — |
 | 1 | 64 | `write` | 3 | `unsigned int fd`, `const char *buf`, `size_t count` | `buf`: in, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EINVAL`, `EFBIG`, `ENOSPC`, `EIO` (`vblk_bad_sector`) | — |
 | 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `EACCES`, `ELOOP`, `EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM` (`kalloc_nomem`), `EIO` (`vblk_bad_sector`) | `pathname` at most 255 bytes |
 | 3 | 57 | `close` | 1 | `unsigned int fd` | — | `EBADF` | — |
 | 5 | 80 | `fstat` | 2 | `unsigned int fd`, `struct stat *statbuf` | `statbuf`: out, 144 bytes, after the `fd` lookup | `EBADF`, `EFAULT` | x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1 |
-| 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | `EBADF`, `ESPIPE`, `EINVAL` | — |
+| 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | `EBADF`, `ESPIPE`, `EINVAL`, `ENXIO` | — |
 | 9 | 222 | `mmap` | 6 | `unsigned long addr`, `unsigned long length`, `unsigned long prot`, `unsigned long flags`, `unsigned long fd`, `unsigned long offset` | — | `EINVAL`, `EBADF`, `ENODEV`, `ENOMEM`, `EPERM`, `EEXIST` | anonymous and private only; returns the address |
 | 11 | 215 | `munmap` | 2 | `unsigned long addr`, `size_t length` | — | `EINVAL`, `ENOMEM` | — |
 | 12 | 214 | `brk` | 1 | `unsigned long addr` | — | — | returns the break; `0` if the caller is not a process |
@@ -257,14 +258,14 @@ the row does not allow it, and needs `EFAULT` from each.
 | 35 | 101 | `nanosleep` | 2 | `const struct __kernel_timespec *rqtp`, `struct __kernel_timespec *rmtp` | `rqtp`: in, 16 bytes, before anything else; `rmtp`: not read (ROADMAP §13.8) | `EFAULT`, `EINVAL` | `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1 |
 | 39 | 172 | `getpid` | 0 | — | — | — | `0` if the caller is not a process |
 | 57 | — | `fork` | 0 | — | — | `EAGAIN`, `ENOMEM` (`fork_oom`) | full address-space copy; the child returns 0 |
-| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `ELOOP`, `ENFILE`, `E2BIG`, `ENOEXEC`, `ENOMEM` | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
+| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname` resolves to a regular file, as Linux opens it first; `envp`: C string vector, may be NULL, after `argv` | `EFAULT`, `ENAMETOOLONG`, `ENOENT`, `ENOTDIR`, `EACCES`, `ELOOP`, `ENFILE`, `E2BIG`, `ENOEXEC`, `ENOMEM`, `EIO` (`vblk_bad_sector`) | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
 | 60 | 93 | `exit` | 1 | `int status` | — | — | the low 8 bits of `status` |
 | 61 | 260 | `wait4` | 4 | `pid_t pid`, `int *wstatus`, `int options`, `struct rusage *rusage` | `wstatus`: out, 4 bytes, may be NULL, after a child is reaped; `rusage`: not read (ROADMAP §13.7) | `ECHILD`, `EFAULT` | — |
 | 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | `EINVAL`, `ESRCH` | default actions only |
 | 72 | 25 | `fcntl` | 3 | `unsigned int fd`, `unsigned int cmd`, `unsigned long arg` | — | `EBADF`, `EINVAL` | `F_GETFD` and `F_SETFD` (`FD_CLOEXEC`) only |
 | 110 | 173 | `getppid` | 0 | — | — | — | — |
 | 169 | 142 | `reboot` | 4 | `int magic1`, `int magic2`, `unsigned int cmd`, `void *arg` | `arg`: C string, for `RESTART2` only, after the uid, magic and command checks | `EINVAL`, `EFAULT` | power off and restart; see SYSCALL.md §3.1 |
-| 217 | 61 | `getdents64` | 3 | `unsigned int fd`, `struct linux_dirent64 *dirent`, `unsigned int count` | `dirent`: out, `count` bytes, after the `fd` lookup and the first record's fit | `EBADF`, `ENOTDIR`, `ESPIPE`, `EINVAL`, `EFAULT` | at most 512 bytes a call; see SYSCALL.md §3.1 |
+| 217 | 61 | `getdents64` | 3 | `unsigned int fd`, `struct linux_dirent64 *dirent`, `unsigned int count` | `dirent`: out, `count` bytes, after the `fd` lookup and the first record's fit | `EBADF`, `ENOTDIR`, `EINVAL`, `EFAULT` | at most 512 bytes a call; see SYSCALL.md §3.1 |
 | 500 | — | `psinfo` | 2 | `char *buf`, `size_t len` | `buf`: out, `len` bytes, before anything else | `EFAULT` | vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`) |
 
 <!-- gen_syscalls: end syscall-table -->
@@ -288,12 +289,22 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   `mkdir` (F057; ROADMAP §10.4)
 - `lseek`: `SEEK_END` reads the size from the file's inode (FAT's
   counted in-core inode or the vibefs inode), so it sees writes through
-  any descriptor. On a vibefs file a resulting offset above 2^44 − 4096
-  (VIBEFS.md §3) returns `EINVAL`, as Linux's does past a filesystem's
+  any descriptor. A resulting offset above the filesystem's file-size
+  limit, 2^44 − 4096 on vibefs (VIBEFS.md §3) and 2^32 − 1 on FAT
+  (`fat::MAX_FILE_SIZE`, its dirent's 32-bit size, Linux's vfat
+  `s_maxbytes`), returns `EINVAL`, as Linux's does past a filesystem's
   maximum file size; a `write` that starts at or past the limit returns
   `EFBIG`, and one that would cross it is cut short at the limit, as
-  Linux's is. On a FAT file any offset from 0 to `i64::MAX` is accepted
-  (F008; ROADMAP §10.11)
+  Linux's is (F008; ROADMAP §10.11). A `whence` past `SEEK_HOLE` is `EINVAL` before
+  the descriptor's kind is looked at, so the console gives it too, as on
+  Linux; then a file that cannot seek (the console, `/dev/console`, or
+  `/dev/tty`, however it was opened) is `ESPIPE` whatever the offset, and
+  only then is a negative `SEEK_SET` offset `EINVAL`. `SEEK_DATA` and
+  `SEEK_HOLE` treat the whole file as data, as Linux's
+  `generic_file_llseek` does: from an offset below the size, `SEEK_DATA`
+  returns the offset and `SEEK_HOLE` the size, and from one at or past
+  the end, or below 0, both return `ENXIO`; reporting real holes waits for
+  ROADMAP §23.1
 - `mmap`: anonymous private mappings only: `MAP_PRIVATE|MAP_ANONYMOUS`,
   plus any of `MAP_FIXED`, `MAP_FIXED_NOREPLACE`, `MAP_NORESERVE`,
   `MAP_POPULATE`, and `MAP_STACK`. `prot` is any mix of `PROT_READ`,
@@ -368,10 +379,19 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   signals, for 0, the caller's process group, for -1, every process the
   caller may signal except pid 1 and the caller, and for any other negative
   `pid`, process group `-pid` (F149; ROADMAP §13.7). A `pid` that names a
-  zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A signal sent
-  to pid 1 is dropped, and `kill` returns 0, unless init has a handler for
-  it, as Linux does; none can exist before ROADMAP §13.8, and never for
-  `SIGKILL` or `SIGSTOP` (F068)
+  zombie, a process that exited and is not yet reaped, returns 0 and the
+  signal is discarded, as on Linux: the status `wait4` reports is the one
+  its exit left. A signal sent to pid 1 is dropped, and `kill` returns 0,
+  unless init has a handler for it, as Linux does; none can exist before
+  ROADMAP §13.8, and never for `SIGKILL` or `SIGSTOP` (F068). A stop is
+  pending until the target's exit work acts on it, and is taken with the
+  other pending signals lowest number first, after a fatal signal that
+  writes no core, which Linux makes a group kill when it is sent; once
+  stopped, the target holds every signal but `SIGKILL`, which ends it at
+  once, until `SIGCONT` (`vibeos::proc::next_signal`). A Term signal held
+  over a stop is ordered as a fresh one, so one numbered above `SIGSTOP`
+  ends the process ahead of a stop sent with the `SIGCONT`, where Linux
+  stops first (ROADMAP §13.8)
 - `exit`: the caller's children go to the reaper `proc::reaper_for` picks:
   pid 1 while init is live or stopped; otherwise none, so a child reads
   `getppid()` 0 and is freed when it exits (a zombie child at once), as in
@@ -395,9 +415,9 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   position is read and stored in two steps, so an overlapping call on an
   open file shared through `fork` or `dup` can lose an update until
   ROADMAP §13.1 (F055); entries added or removed between calls may repeat
-  or be skipped, which POSIX leaves unspecified. The console descriptors a
-  process starts with are `ENOTDIR`; `/dev/console` or `/dev/tty` opened by
-  path is `ESPIPE`, as its `lseek` is
+  or be skipped, which POSIX leaves unspecified. Any descriptor that is not
+  a directory is `ENOTDIR`, the console and `/dev/console` included, as
+  Linux refuses a file with no directory operations
 - `fstat`: x86_64's 144-byte `struct stat` for any descriptor, the console
   a character device (`S_IFCHR | 0620`). `st_dev` and `st_rdev` are 0 until
   ROADMAP §23.3, and `st_uid` and `st_gid` 0 until ROADMAP §13.9; the times
@@ -515,8 +535,12 @@ and `-EFAULT` when it is 0, as Linux's do. `read` from a file reads at most
 256 bytes, copies them out, and seeks back by the bytes it could not copy,
 so the next `read` returns them; a file that cannot seek keeps them, as a
 Linux device does. `write` copies each 256-byte chunk in, writes the bytes
-it copied, and stops at a short chunk. `len == 0` returns 0 once the range
-check passes.
+it copied, and stops at a short chunk. The descriptor's access mode comes
+first (`-EBADF`), then `-EINVAL` for a file with no such operation (a
+`/proc` text file or a sysfs attribute opened for writing, whose backend
+reports it at the open, as Linux's `FMODE_CAN_WRITE`), then the range
+check, then, for `read`, a directory's `-EISDIR`; only then does `len == 0`
+return 0, as on Linux.
 
 **State before the copy.** A call that changes state before its copy-out
 keeps the change and returns `-EFAULT`: `wait4` reaps the child, then copies

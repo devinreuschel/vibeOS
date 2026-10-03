@@ -26,8 +26,9 @@ use crate::kalloc::{AllocError, TryVec};
 use crate::limits::{MAX_KERN_MOUNTS, TMPFS_NODE_HEAP_BYTES};
 
 use super::{
-    Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps, MAX_NAME,
-    Name, OpCx, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT, S_IFREG_MODE,
+    Dirent, FileSystem, FsError, FsType, Guarded, Inode, InodeInfo, InodeKind, InodeOps, Key,
+    MAX_NAME, Name, OpCx, RenameSeen, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT,
+    S_IFREG_MODE,
 };
 
 mod devfs;
@@ -40,8 +41,9 @@ use devfs::{blk_read, blk_write};
 use node::{
     kern_alloc, kern_create, kern_drop_sb, kern_find_child, kern_get, kern_get_mut, kern_idx,
     kern_info, kern_link, kern_lookup, kern_lookup_ino, kern_mk_dir, kern_mk_lnk, kern_mk_root,
-    kern_mk_special, kern_read, kern_readdir, kern_readlink, kern_release, kern_truncate,
-    kern_try_free, kern_unlink, kern_write, set_target, target_bytes,
+    kern_mk_special, kern_read, kern_readdir, kern_readlink, kern_release, kern_rename,
+    kern_truncate, kern_try_free, kern_unlink, kern_unlink_child, kern_write, set_target,
+    target_bytes,
 };
 use procfs::{PROC_CMDLINE, PROC_MAPS, PROC_STATUS};
 use sysfs::sys_attr_read;
@@ -113,6 +115,14 @@ struct KernNode {
     parent: u32,
     next: u32,
     child: u32,
+    /// This node's place in its parent's listing, its `readdir` cookie,
+    /// fixed while it stays there.
+    off: u64,
+    /// The place a directory gives its next child; places only grow, so a
+    /// removal moves no other child across a scan's cookie. 64 bits, as
+    /// Linux's tmpfs offsets are: at one place per create or rename it
+    /// never reaches its end, where children would share a place.
+    next_off: u64,
     kind: KernKind,
     mode: u16,
     nlink: u32,
@@ -136,6 +146,8 @@ impl KernNode {
         parent: 0,
         next: 0,
         child: 0,
+        off: 0,
+        next_off: 0,
         kind: KernKind::Dir,
         mode: 0,
         nlink: 0,
@@ -547,6 +559,21 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
         self.op(cx, |k, x| kern_unlink(k, x, dir, name))
     }
 
+    fn rename(
+        &self,
+        cx: &mut OpCx<'_>,
+        odir: &mut Inode,
+        oname: &[u8],
+        ndir: &mut Inode,
+        nname: &[u8],
+        seen: RenameSeen,
+    ) -> Result<Option<Key>, FsError> {
+        self.op(cx, |k, x| {
+            kern_rename(k, x, (odir, oname), (ndir, nname), seen)
+        })
+        .map(|()| None)
+    }
+
     fn read(
         &self,
         cx: &mut OpCx<'_>,
@@ -573,6 +600,26 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
             return blk_write(&dev, off, buf);
         }
         self.op(cx, |k, x| kern_write(k, x, ino, off, buf))
+    }
+
+    /// `O_APPEND`: a tmpfs file's size is read in the store section that
+    /// writes, so two appenders never write at the same end.
+    fn write_append(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        buf: &[u8],
+    ) -> Result<(usize, u64), FsError> {
+        if let Some(dev) = self.op(cx, |k, x| kern_block_of(k, x.inst, ino.key[0])) {
+            let off = ino.size;
+            return blk_write(&dev, off, buf).map(|n| (n, off));
+        }
+        self.op(cx, |k, x| {
+            let off = kern_get(k, x.inst, ino.key[0])
+                .ok_or(FsError::NotFound)?
+                .size;
+            kern_write(k, x, ino, off, buf).map(|n| (n, off))
+        })
     }
 
     fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
@@ -609,6 +656,25 @@ impl<S: Guarded<KernState> + Sync + 'static> InodeOps for KernSkin<S> {
                 Some(KernKind::Console | KernKind::Tty) => Err(FsError::SPipe),
                 _ => Ok(()),
             }
+        })
+    }
+
+    /// The `/proc` text files and the sysfs attributes have no write, as
+    /// `kern_write` refuses them.
+    fn can_rw(&self, cx: &mut OpCx<'_>, ino: &Inode) -> (bool, bool) {
+        self.op(cx, |k, x| {
+            let kind = kern_get(k, x.inst, ino.key[0]).map(|n| n.kind);
+            let write = !matches!(
+                kind,
+                Some(
+                    KernKind::Lnk
+                        | KernKind::ProcCmdline
+                        | KernKind::ProcStatus
+                        | KernKind::ProcMaps
+                        | KernKind::SysAttr
+                )
+            );
+            (true, write)
         })
     }
 

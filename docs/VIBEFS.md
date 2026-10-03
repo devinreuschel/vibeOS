@@ -166,13 +166,15 @@ Snapshot entry (40 bytes):
 | 32 | `u32` | `next_ino` |
 | 36 | `u32` | reserved |
 
-Mount: read both slots. Ignore a slot that fails magic, checksum, version,
-slot id, block size, `16 ≤ nblocks ≤ 1024`, or snapshot count ≤ 4. Of the
-valid slots, take the **highest generation**. Equal generation (both slots
-after `mkfs`): prefer slot 0. Zero valid slots: unmountable (`Corrupt`). A
-device smaller than `nblocks` is `Inval`. Live snapshot entries come first
-in `snap[4]`: entry `i` is live when `i` is below the snapshot count and its
-inode root is non-zero.
+Mount: read both slots. A slot that cannot be read (a disk error) fails
+the mount with `Io`, since it may hold the newer generation and mounting
+the other would roll the volume back. Ignore a slot that reads but fails
+magic, checksum, version, slot id, block size, `16 ≤ nblocks ≤ 1024`, or
+snapshot count ≤ 4. Of the valid slots, take the **highest generation**.
+Equal generation (both slots after `mkfs`): prefer slot 0. Zero valid
+slots: unmountable (`Corrupt`). A device smaller than `nblocks` is
+`Inval`. Live snapshot entries come first in `snap[4]`: entry `i` is live
+when `i` is below the snapshot count and its inode root is non-zero.
 
 ---
 
@@ -317,10 +319,14 @@ extents and clears the inline flag. Truncating an extent file to 128 bytes
 or less moves its bytes back inline. Symlink targets use the inline area (an
 empty target, or one longer than 128 bytes, is `Inval`).
 
-v1 `truncate` does not meet the inline rule yet: growing an inline file past
-128 bytes keeps the inline flag with `size` above 128. A read that reaches
-past byte 128 of such a file, or a write that ends past byte 128, panics the
-kernel, and mount and `fsck` accept such an inode (F062; ROADMAP §13.9).
+`truncate` follows the same rule: growing an inline file past 128 bytes
+moves its bytes to an extent first, and shrinking an inline file zeroes the
+inline bytes past the new size, so a later grow reads zeros. An inline flag
+on an inode whose `size` is above 128, which a crafted image or an earlier
+v1 `truncate` leaves, is corruption: v1 mount accepts it, a read that
+reaches past byte 128, a write that ends past it, and any `truncate` of it
+return `Corrupt` (`EIO`) and change nothing, and `fsck` reports it as
+`inline` (F062; ROADMAP §13.9 makes mount reject it).
 
 Empty files may be inline with `inline_len = 0`.
 
@@ -601,6 +607,18 @@ device's trace carries every write and flush the guest sent.
 ## 13. What v1 will not do
 
 - Data journaling or WAL
+- Keep an unlinked file while a descriptor holds it open: v1 frees the
+  inode and its blocks at the unlink that drops its last name, and that
+  descriptor's reads and writes then fail with `ENOENT`. Inode numbers are
+  never reused (`next_ino`), so it reaches no other file. §15's Orphans row
+  keeps such a file until its last close and frees it after a crash
+  (ROADMAP §14.8's v2 inode-model box)
+- Use an inode number past `u32::MAX − 1` in a volume's life: `next_ino`
+  is a `u32` that starts at 2 and only grows, and `u32::MAX` is never
+  handed out, so once `next_ino` reaches it every `create` fails with
+  `NoSpace` (`ENOSPC`) rather than reuse a number. §15's Inode numbers row
+  makes them 64-bit. The no-reuse rule assumes a super whose `next_ino` is
+  above every inode number, which v1 mount does not check (§5, F061)
 - Compression, encryption, RAID
 - Block size other than 4096
 - Inode extents overflow to an extent tree (4 extents is the cap; files

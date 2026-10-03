@@ -508,7 +508,7 @@ pub static ROWS: [Row; 24] = [
                     kind: PtrKind::StrVec,
                     dir: Dir::In,
                     nullable: true,
-                    when: "after `pathname`",
+                    when: "after `pathname` resolves to a regular file, as Linux opens it first",
                 }),
             },
             Arg {

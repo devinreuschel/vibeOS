@@ -726,6 +726,17 @@ fn readonly_steps() -> Result<(), &'static str> {
     if io_reqs() != before {
         return Err("the refused discard reached the device");
     }
+    // Through the page cache too: refused before a page is dirtied that
+    // could never be written back.
+    match d.write(RO_SECTOR, &buf) {
+        Err(BlockError::ReadOnly) => {}
+        Ok(()) => return Err("a cached write to a read-only device succeeded"),
+        Err(_) => return Err("a cached write to a read-only device: wrong error"),
+    }
+    let mut back = [0u8; 512];
+    if d.read(RO_SECTOR, &mut back).is_err() || back == buf {
+        return Err("a read after the refused cached write failed or got its bytes");
+    }
     pattern_read(&d, RO_SECTOR)?;
     if !vda_ready() {
         return Err("vda not Ready after a refused write");
@@ -734,8 +745,8 @@ fn readonly_steps() -> Result<(), &'static str> {
 }
 
 /// virtio-blk `F_RO` (ROADMAP §10.11, F046): a write and a discard fail
-/// at once with `ReadOnly`, and reads go on. Opt-in: its boot's vda is a
-/// `readonly=on` pattern image.
+/// at once with `ReadOnly`, below the page cache and through it, and reads
+/// go on. Opt-in: its boot's vda is a `readonly=on` pattern image.
 pub(crate) fn vblk_readonly() -> Outcome {
     if !vda_live() {
         return Outcome::Fail("no virtio-blk");

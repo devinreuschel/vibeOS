@@ -529,7 +529,7 @@ fn dcache_f065_umount_checks_before_state() {
 }
 
 /// `ram()` with a fresh `KeyFs` on `/k`; its store id.
-fn keyed() -> (Vfs, u64) {
+pub(super) fn keyed() -> (Vfs, u64) {
     let mut v = ram();
     v.mkdir(None, "/k", 0o755).unwrap();
     let fs = keyfs_new();
@@ -808,8 +808,8 @@ fn two_mounts_one_dentry_per_name() {
 }
 
 /// A `Vfs` behind a `std::sync::Mutex`, as the kernel's is behind its
-/// spinlock, with a ramfs root and `/blk`.
-fn locked_vfs() -> &'static std::sync::Mutex<Vfs> {
+/// sleeping lock, with a ramfs root and `/blk`.
+pub(super) fn locked_vfs() -> &'static std::sync::Mutex<Vfs> {
     let vfs: &'static std::sync::Mutex<Vfs> = std::boxed::Box::leak(std::boxed::Box::new(
         std::sync::Mutex::new(crate::fs::host_vfs()),
     ));
@@ -980,6 +980,100 @@ fn stale_window() {
     *STALE_B.lock().unwrap() = Some(b.into_raw());
 }
 
+/// `open` on Linux's terms (open(2), POSIX `open`): `O_NOFOLLOW` on a
+/// symlink is `ELOOP`, or `ENOTDIR` with `O_DIRECTORY`; `O_CREAT` on a
+/// directory is `EISDIR`; `O_CREAT | O_DIRECTORY` is `EINVAL` and creates
+/// nothing.
+#[test]
+fn open_links_and_dirs_as_linux() {
+    let vfs = locked_vfs();
+    let api = FileApi::new(vfs);
+    let open = |p: &[u8], fl: u32| {
+        api.open(None, p, OpenFlags::from_bits(fl), 0o644)
+            .map(|f| api.close(f).unwrap())
+    };
+    assert_eq!(open(b"/f", O_RDWR | O_CREAT), Ok(()));
+    api.symlink(None, b"/l", b"/f").unwrap();
+    assert_eq!(open(b"/l", O_RDONLY | O_NOFOLLOW), Err(FsError::Loop));
+    assert_eq!(open(b"/l", O_RDWR | O_NOFOLLOW), Err(FsError::Loop));
+    assert_eq!(
+        open(b"/l", O_RDONLY | O_NOFOLLOW | O_DIRECTORY),
+        Err(FsError::NotDir)
+    );
+    assert_eq!(open(b"/l", O_RDONLY), Ok(()));
+    assert_eq!(open(b"/blk", O_RDONLY | O_CREAT), Err(FsError::IsDir));
+    assert_eq!(open(b"/blk", O_RDONLY | O_DIRECTORY), Ok(()));
+    assert_eq!(
+        open(b"/new", O_RDONLY | O_CREAT | O_DIRECTORY),
+        Err(FsError::Inval)
+    );
+    assert_eq!(
+        api.stat_path(None, b"/new", false).unwrap_err(),
+        FsError::NotFound
+    );
+}
+
+static APPEND_VFS: std::sync::Mutex<Option<&'static std::sync::Mutex<Vfs>>> =
+    std::sync::Mutex::new(None);
+static APPEND_PATH: std::sync::Mutex<Option<&'static [u8]>> = std::sync::Mutex::new(None);
+
+/// Between the first appender's backend write and its commit: a second
+/// `O_APPEND` writer appends `BBBB`, as another thread would.
+fn append_window() {
+    let Some(path) = APPEND_PATH.lock().unwrap().take() else {
+        return;
+    };
+    let api = FileApi::new(APPEND_VFS.lock().unwrap().unwrap());
+    let f = api
+        .open(None, path, OpenFlags::from_bits(O_WRONLY | O_APPEND), 0)
+        .unwrap();
+    assert_eq!(api.write(&f, b"BBBB").unwrap(), 4);
+    api.close(f).unwrap();
+}
+
+/// `O_APPEND` on ramfs and tmpfs: a second appender that writes in the
+/// first's window, after its backend write and before its commit, lands
+/// after it, and the file's size is both writes', whichever commit
+/// merges last (open(2): the seek to the end and the write are one
+/// atomic step).
+#[test]
+fn append_lands_after_an_overlapping_append() {
+    use crate::fs::kernfs::{KernFs, KernSkin, KernState};
+    let vfs = locked_vfs();
+    let api = FileApi::new(vfs);
+    let kfs: &'static KernFs<std::sync::Mutex<KernState>> = std::boxed::Box::leak(
+        std::boxed::Box::new(KernFs::new(std::sync::Mutex::new(KernState::new()))),
+    );
+    let tmp: &'static KernSkin<std::sync::Mutex<KernState>> =
+        std::boxed::Box::leak(std::boxed::Box::new(KernSkin::new(kfs, FsType::Tmp)));
+    api.mkdir(None, b"/tmp", 0o755).unwrap();
+    api.mount_fs(None, b"/tmp", tmp, None, false, None).unwrap();
+    *APPEND_VFS.lock().unwrap() = Some(vfs);
+    let hooked = FileApi::with_hooks(
+        vfs,
+        Hooks {
+            write_window: append_window,
+            ..Hooks::NONE
+        },
+    );
+    for path in [b"/app" as &'static [u8], b"/tmp/app"] {
+        let flags = OpenFlags::from_bits(O_WRONLY | O_CREAT | O_APPEND);
+        let f = api.open(None, path, flags, 0o644).unwrap();
+        *APPEND_PATH.lock().unwrap() = Some(path);
+        assert_eq!(hooked.write(&f, b"AAAA").unwrap(), 4);
+        api.close(f).unwrap();
+        let r = api
+            .open(None, path, OpenFlags::from_bits(O_RDONLY), 0)
+            .unwrap();
+        let mut buf = [0u8; 16];
+        let n = api.read(&r, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"AAAABBBB", "{:?}", path);
+        assert_eq!(api.stat(&r).unwrap().size, 8, "{:?}", path);
+        assert_eq!(api.seek(&r, SeekFrom::End(0)).unwrap(), 8, "{:?}", path);
+        api.close(r).unwrap();
+    }
+}
+
 #[test]
 fn file_ref_generation_rejects_stale_id() {
     let vfs = locked_vfs();
@@ -1016,7 +1110,7 @@ fn file_ref_generation_rejects_stale_id() {
         vfs,
         Hooks {
             write_window: stale_window,
-            open_race: Hooks::NONE.open_race,
+            ..Hooks::NONE
         },
     );
     assert_eq!(hooked.write(&a, b"x").unwrap_err(), FsError::Badf);
@@ -1104,7 +1198,9 @@ mod fs_error_errno_per_variant {
         perm: Perm => 1,
         spipe: SPipe => 29,
         xdev: XDev => 18,
+        stale: Stale => 2,
         acces: Acces => 13,
+        nxio: NxIo => 6,
     }
 }
 
@@ -1144,10 +1240,10 @@ fn fs_error_conditions_errno() {
             assert!(off <= 64 * 1024, "the volume never filled");
         };
         assert_eq!(errno(e), 28, "{e:?}");
-        // A 2-byte write at `u32::MAX - 1` crosses FAT's 4 GiB file limit:
-        // EFBIG.
+        // A write that starts at FAT's 4 GiB file limit: EFBIG (one that
+        // crosses it is cut there, `fat::limit_tests`).
         let e = v
-            .write_ino(&mut d, &mut n, true, u64::from(u32::MAX - 1), false, b"xy")
+            .write_ino(&mut d, &mut n, true, fat::MAX_FILE_SIZE, false, b"xy")
             .unwrap_err();
         assert_eq!(errno(e), 27, "{e:?}");
     }
@@ -1268,7 +1364,15 @@ fn inode_ops_unsupported_errno() {
         errno(ops.link(&mut cx, &mut a, b"x", &mut b).unwrap_err()),
         1
     );
-    let e = ops.rename(&mut cx, &mut a, b"x", &mut b, b"y").unwrap_err();
+    let seen = RenameSeen {
+        src: [1, 0, 0],
+        tgt: None,
+        src_words: None,
+        tgt_words: None,
+    };
+    let e = ops
+        .rename(&mut cx, &mut a, b"x", &mut b, b"y", seen)
+        .unwrap_err();
     assert_eq!(errno(e), 1);
     assert_eq!(
         errno(ops.read(&mut cx, &mut a, 0, &mut buf).unwrap_err()),
@@ -1327,9 +1431,12 @@ fn inode_ops_unsupported_errno() {
         assert_eq!(errno(r.unwrap_err()), 22, "{path}");
     }
 
-    // `lseek` of `/dev/tty`: `ESPIPE`; `/dev/null` seeks.
+    // `lseek` of `/dev/tty`: `ESPIPE`, before the offset and `whence` are
+    // looked at, as Linux's `vfs_llseek`; `/dev/null` seeks.
     let f = v.open_path(None, "/dev/tty", O_RDWR, 0).unwrap();
     assert_eq!(errno(v.seek(&f, 0, SEEK_CUR).unwrap_err()), 29);
+    assert_eq!(errno(v.seek(&f, -1, SEEK_SET).unwrap_err()), 29);
+    assert_eq!(errno(v.seek(&f, 0, SEEK_HOLE).unwrap_err()), 29);
     v.close(f).unwrap();
     let f = v.open_path(None, "/dev/null", O_RDWR, 0).unwrap();
     assert_eq!(v.seek(&f, 0, SEEK_CUR), Ok(0));
@@ -1357,4 +1464,24 @@ fn stat_more_names_than_inode_slots() {
         }
     }
     assert!(v.stats.i_evicts >= (n - SMALL.inodes) as u32);
+}
+
+/// A ramfs create or link into a directory a racing rmdir removed, which
+/// the VFS still holds, fails with `NotFound`, as Linux refuses a dead
+/// directory, and makes nothing: a node made there would be unreachable,
+/// and never freed.
+#[test]
+fn ramfs_make_in_a_removed_directory_is_not_found() {
+    let fs = ramfs();
+    let mut v = crate::fs::host_vfs();
+    v.mount_root_fs(fs).unwrap();
+    v.mkdir(None, "/d", 0o755).unwrap();
+    v.creat(None, "/f", 0o644).unwrap();
+    let used = fs.with(|s| s.used());
+    let r = make_in_removed_dir(&mut v, fs, "/d", "/f");
+    assert_eq!(r, [Err(FsError::NotFound); 3]);
+    // The removed directory went at its last put; nothing else changed.
+    v.stat(None, "/").unwrap();
+    assert_eq!(fs.with(|s| s.used()), used - 1);
+    assert_eq!(v.stat(None, "/f").unwrap().nlink, 1);
 }

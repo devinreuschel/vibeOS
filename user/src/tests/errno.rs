@@ -29,6 +29,8 @@ pub(super) const O_EXCL: i32 = 0o200;
 pub(super) const SEEK_SET: u32 = 0;
 /// `lseek` from the end.
 pub(super) const SEEK_END: u32 = 2;
+/// `lseek` to the next data.
+pub(super) const SEEK_DATA: u32 = 3;
 // From Linux `include/uapi/asm-generic/mman-common.h` and `mman.h`.
 /// No access.
 pub(super) const PROT_NONE: u64 = 0;
@@ -103,6 +105,7 @@ const PAIRS: &[Pair] = &[
     pair(Sys::Read, Errno::EBADF, Run(|| Ok(read_into(99, 16)))),
     pair(Sys::Read, Errno::EFAULT, Run(read_efault)),
     pair(Sys::Read, Errno::EISDIR, Run(read_eisdir)),
+    pair(Sys::Read, Errno::EAGAIN, Ktest),
     pair(Sys::Read, Errno::EIO, Ktest),
     pair(
         Sys::Write,
@@ -127,7 +130,7 @@ const PAIRS: &[Pair] = &[
     pair(
         Sys::Open,
         Errno::EINVAL,
-        Run(|| Ok(open_raw(c"", sys::O_RDONLY))),
+        Run(|| Ok(open_raw(c"/utest_none", sys::O_CREAT | sys::O_DIRECTORY))),
     ),
     pair(
         Sys::Open,
@@ -174,6 +177,7 @@ const PAIRS: &[Pair] = &[
         Run(|| Ok(sys::lseek(1, 0, SEEK_SET))),
     ),
     pair(Sys::Lseek, Errno::EINVAL, Run(lseek_einval)),
+    pair(Sys::Lseek, Errno::ENXIO, Run(lseek_enxio)),
     pair(
         Sys::Mmap,
         Errno::EINVAL,
@@ -217,11 +221,6 @@ const PAIRS: &[Pair] = &[
     pair(Sys::Execve, Errno::ENAMETOOLONG, Run(execve_enametoolong)),
     pair(
         Sys::Execve,
-        Errno::EINVAL,
-        Run(|| exec_errno(c"".as_ptr().cast())),
-    ),
-    pair(
-        Sys::Execve,
         Errno::ENOENT,
         Run(|| exec_errno(c"/utest_none".as_ptr().cast())),
     ),
@@ -232,6 +231,11 @@ const PAIRS: &[Pair] = &[
     ),
     pair(
         Sys::Execve,
+        Errno::EACCES,
+        Run(|| exec_errno(c"/".as_ptr().cast())),
+    ),
+    pair(
+        Sys::Execve,
         Errno::ELOOP,
         Run(|| exec_errno(LOOP.as_ptr().cast())),
     ),
@@ -239,6 +243,7 @@ const PAIRS: &[Pair] = &[
     pair(Sys::Execve, Errno::E2BIG, Delegate("exec_arg_131072_e2big")),
     pair(Sys::Execve, Errno::ENOEXEC, Run(execve_enoexec)),
     pair(Sys::Execve, Errno::ENOMEM, Run(execve_enomem)),
+    pair(Sys::Execve, Errno::EIO, Ktest),
     pair(Sys::Wait4, Errno::ECHILD, Run(wait4_echild)),
     pair(Sys::Wait4, Errno::EFAULT, Run(wait4_efault)),
     pair(Sys::Kill, Errno::EINVAL, Run(kill_einval)),
@@ -268,12 +273,7 @@ const PAIRS: &[Pair] = &[
         Errno::EBADF,
         Run(|| Ok(dents_into(99, 512))),
     ),
-    pair(
-        Sys::Getdents64,
-        Errno::ENOTDIR,
-        Run(|| Ok(dents_into(1, 512))),
-    ),
-    pair(Sys::Getdents64, Errno::ESPIPE, Run(getdents64_espipe)),
+    pair(Sys::Getdents64, Errno::ENOTDIR, Run(getdents64_enotdir)),
     pair(Sys::Getdents64, Errno::EINVAL, Run(getdents64_einval)),
     pair(Sys::Getdents64, Errno::EFAULT, Run(getdents64_efault)),
     pair(Sys::Psinfo, Errno::EFAULT, Run(psinfo_efault)),
@@ -649,36 +649,9 @@ pub(super) fn psinfo(buf: &mut [u8; 512]) -> Result<usize, Errno> {
     unsafe { sys::psinfo(buf.as_mut_ptr(), buf.len()) }
 }
 
-/// The state field (`run`, `stop`, `zombie`) of `pid`'s `psinfo` line, if
-/// it has one; `line` gets its `<ppid>` too.
-pub(super) fn ps_state(pid: usize) -> Option<(usize, [u8; 8])> {
-    let mut buf = [0u8; 512];
-    let n = psinfo(&mut buf).ok()?;
-    let text = buf.get(..n)?;
-    for line in text.split(|&b| b == b'\n') {
-        let mut f = line.split(|&b| b == b' ');
-        let (Some(p), Some(pp), Some(st)) = (f.next(), f.next(), f.next()) else {
-            continue;
-        };
-        if parse_dec(p) != Some(pid) {
-            continue;
-        }
-        let mut state = [0u8; 8];
-        let k = st.len().min(state.len());
-        state[..k].copy_from_slice(&st[..k]);
-        return Some((parse_dec(pp)?, state));
-    }
-    None
-}
-
 /// `s` as a decimal number.
 pub(super) fn parse_dec(s: &[u8]) -> Option<usize> {
     vibeos_user::cmd::parse_dec(s).map(|v| v as usize)
-}
-
-/// Whether `state` (from [`ps_state`]) is `word`.
-pub(super) fn state_is(state: &[u8; 8], word: &[u8]) -> bool {
-    state.get(..word.len()) == Some(word) && state.get(word.len()).is_none_or(|&b| b == 0)
 }
 
 /// Yield until `pred` holds, at most `tries` times.
@@ -749,9 +722,10 @@ fn write_at(off: i64) -> Result<Result<usize, Errno>, &'static str> {
     r
 }
 
-/// A FAT write at 4 GiB, FAT's file-size limit.
+/// A FAT write at FAT's file-size limit, 4 GiB less a byte: the seek
+/// may reach the limit, as Linux's `s_maxbytes` lets it, but not pass it.
 fn write_efbig() -> Result<Result<usize, Errno>, &'static str> {
-    write_at(1 << 32)
+    write_at(0xFFFF_FFFF)
 }
 
 /// A FAT write at 4 GiB less 64 KiB: more clusters than the volume has
@@ -842,7 +816,7 @@ fn with_files_full<T>(f: impl FnOnce() -> T) -> Result<T, &'static str> {
             }
         }
         if !poll(20_000, || {
-            ps_state(*k).is_some_and(|(_, s)| state_is(&s, b"stop"))
+            utest::ps_state(*k).is_some_and(|(_, s)| utest::state_is(&s, b"stop"))
         }) {
             why = Some("a child holding files did not stop");
             break;
@@ -952,6 +926,17 @@ fn lseek_einval() -> Result<Result<usize, Errno>, &'static str> {
     let r = sys::lseek(fd, 0, 9);
     close(fd);
     Ok(r)
+}
+
+/// `SEEK_DATA` from the end of `/hello`.
+fn lseek_enxio() -> Result<Result<usize, Errno>, &'static str> {
+    let fd = open(HELLO, sys::O_RDONLY).map_err(|_| "open /hello")?;
+    let r = match sys::lseek(fd, 0, SEEK_END) {
+        Ok(end) => Ok(sys::lseek(fd, end as i64, SEEK_DATA)),
+        Err(_) => Err("lseek SEEK_END"),
+    };
+    close(fd);
+    r
 }
 
 /// `MAP_FIXED_NOREPLACE` over a mapping.
@@ -1118,8 +1103,8 @@ pub(super) const REBOOT_MAGIC2: i32 = 0x2812_1969;
 /// `LINUX_REBOOT_CMD_RESTART2`.
 pub(super) const REBOOT_CMD_RESTART2: u32 = 0xa1b2_c3d4;
 
-/// `/dev/console` opened by path.
-fn getdents64_espipe() -> Result<Result<usize, Errno>, &'static str> {
+/// `/dev/console` opened by path: not a directory, as fd 1 is not.
+fn getdents64_enotdir() -> Result<Result<usize, Errno>, &'static str> {
     let fd = open(c"/dev/console", sys::O_RDONLY).map_err(|_| "open /dev/console")?;
     let r = dents_into(fd, 512);
     close(fd);
@@ -1278,8 +1263,8 @@ fn getdents64_ok() -> Result<(), &'static str> {
 /// This process's own line is there.
 fn psinfo_ok() -> Result<(), &'static str> {
     let me = sys::getpid().map_err(|_| "getpid")?;
-    match ps_state(me) {
-        Some((_, s)) if state_is(&s, b"run") => Ok(()),
+    match utest::ps_state(me) {
+        Some((_, s)) if utest::state_is(&s, b"run") => Ok(()),
         _ => Err("no run line for this process"),
     }
 }

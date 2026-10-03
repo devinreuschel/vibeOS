@@ -21,7 +21,8 @@ use crate::arch::idt::TrapFrame;
 use crate::per_cpu_init;
 use crate::x86::{
     self, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK, IA32_FS_BASE, IA32_GS_BASE,
-    IA32_KERNEL_GS_BASE, IA32_LSTAR, IA32_STAR,
+    IA32_KERNEL_GS_BASE, IA32_LSTAR, IA32_STAR, IA32_SYSENTER_CS, IA32_SYSENTER_EIP,
+    IA32_SYSENTER_ESP,
 };
 
 const SCRATCH: usize = offset_of!(PerCpu, syscall_scratch);
@@ -349,7 +350,10 @@ unsafe extern "C" {
 }
 
 /// Write CR0 and CR4 whole (`arch::cpu::init_control_regs`), then program
-/// the SYSCALL MSRs and the FPU. Per CPU.
+/// the SYSCALL MSRs, and zero the SYSENTER ones: Intel runs `sysenter` in
+/// 64-bit mode, and with `IA32_SYSENTER_CS` 0 it raises `#GP` and the
+/// process gets `SIGSEGV` (DESIGN §11.4), where a value firmware left
+/// would enter ring 0 at its address. Per CPU.
 ///
 /// # Safety
 /// GDT loaded, `GS_BASE` is this CPU's `PerCpu`.
@@ -357,14 +361,18 @@ pub unsafe fn init_cpu() {
     crate::arch::cpu::init_control_regs();
     let entry = vibeos_syscall_entry as *const () as u64;
     let star = star_value();
-    // SAFETY: STAR, LSTAR, FMASK and EFER are architectural MSRs that
-    // every x86_64 CPU has; STAR names the GDT's selectors and LSTAR the
-    // entry stub, and EFER keeps its other bits. The GDT is loaded (this
+    // SAFETY: STAR, LSTAR, FMASK, the SYSENTER MSRs and EFER are
+    // architectural MSRs that every x86_64 CPU has; STAR names the GDT's
+    // selectors and LSTAR the entry stub, 0 in the SYSENTER MSRs makes
+    // `sysenter` fault, and EFER keeps its other bits. The GDT is loaded (this
     // fn's contract, `syscall_init::init_cpu`).
     unsafe {
         x86::wrmsr(IA32_STAR, star);
         x86::wrmsr(IA32_LSTAR, entry);
         x86::wrmsr(IA32_FMASK, FMASK_SYSCALL);
+        x86::wrmsr(IA32_SYSENTER_CS, 0);
+        x86::wrmsr(IA32_SYSENTER_ESP, 0);
+        x86::wrmsr(IA32_SYSENTER_EIP, 0);
         let efer = x86::rdmsr(IA32_EFER);
         x86::wrmsr(IA32_EFER, efer | EFER_SCE);
     }

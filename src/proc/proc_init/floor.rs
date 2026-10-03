@@ -3,6 +3,7 @@
 //! up what it needs, encodes through `vibeos::proc::uabi`, and copies
 //! through `uaccess_init` (SYSCALL.md §3.1).
 
+use vibeos::fs::InodeKind;
 use vibeos::proc::uabi::{self, Dirent64Writer, RebootCmd};
 use vibeos::time::Instant;
 
@@ -42,6 +43,12 @@ pub(super) fn sys_getdents64(fd: u32, dirent: u64, count: u32) -> SysResult {
 }
 
 fn getdents_on(f: &FileRef, dirent: u64, count: u32) -> SysResult {
+    // Anything but a directory is `ENOTDIR`, before its position is read,
+    // as Linux's `iterate_dir` refuses a file with no directory ops: a
+    // device that cannot seek is not `ESPIPE`.
+    if file_init::stat(f).map_err(KError::from)?.kind != InodeKind::Dir {
+        return Err(KError::NotDir);
+    }
     let pos = file_init::seek(f, SeekFrom::Current(0)).map_err(KError::from)?;
     let mut buf = [0u8; GETDENTS_MAX];
     let cap = usize::try_from(count).map_or(GETDENTS_MAX, |c| c.min(GETDENTS_MAX));

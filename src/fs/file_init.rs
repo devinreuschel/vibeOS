@@ -57,6 +57,12 @@ pub fn seek(f: &FileRef, pos: SeekFrom) -> Result<u64, FsError> {
     fs_init::api().seek(f, pos)
 }
 
+/// `lseek(off, whence)`: `SPipe` for a file that cannot seek before
+/// `off` and `whence` are looked at, as Linux's `vfs_llseek`.
+pub fn lseek(f: &FileRef, off: i64, whence: u32) -> Result<u64, FsError> {
+    fs_init::api().lseek(f, off, whence)
+}
+
 /// Drop one reference; the last frees the slot, changes its generation,
 /// and puts the inode, with the VFS lock dropped for any release.
 pub fn close(f: FileRef) -> Result<(), FsError> {
@@ -311,6 +317,12 @@ pub fn dentry_refs(at: PathRef) -> u32 {
 /// A new count on open file `id`, for one syscall.
 pub fn fget(id: FileId) -> Result<FileRef, FsError> {
     fs_init::api().fget(id)
+}
+
+/// Whether open file `id` is open for a `read` (`write` false) or a
+/// `write`: `Badf` if not, else its inode's kind.
+pub fn access(id: FileId, write: bool) -> Result<InodeKind, FsError> {
+    fs_init::api().access(id, write)
 }
 
 /// Extra process fd pointing at the same kernel file.

@@ -309,6 +309,9 @@ pub(super) fn tmp_write(
     Ok(buf.len())
 }
 
+/// A page of zeros, for [`tmp_truncate`]'s tail.
+static ZERO_PAGE: [u8; PAGE] = [0; PAGE];
+
 pub(super) fn tmp_truncate(
     k: &mut KernState,
     now: u64,
@@ -335,6 +338,17 @@ pub(super) fn tmp_truncate(
             if need == 0 {
                 k.nodes[idx].extent_page = 0;
             }
+        }
+        // Past the size, a kept page holds zeros, as a fresh one does
+        // (`tmp_alloc_run`), so the file reads zeros there when it grows
+        // again, not the bytes this truncate cut.
+        let kept = (need as u64).saturating_mul(PAGE as u64);
+        let end = old.min(kept);
+        if size < end {
+            let len = (end - size) as usize;
+            let byte_off = tmp_byte_off(k, inst, ino, size)?;
+            let mut dummy = [0u8; 1];
+            tmp_rw_cache(k, byte_off, &mut dummy, true, &ZERO_PAGE[..len])?;
         }
     }
     let t = now;

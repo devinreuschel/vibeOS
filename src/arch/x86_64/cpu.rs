@@ -108,6 +108,10 @@ pub unsafe fn wrmsr(msr: u32, val: u64) {
     }
 }
 
+/// The SYSENTER target: CS (SS is CS + 8), RSP and RIP (SDM Vol. 4).
+pub const IA32_SYSENTER_CS: u32 = 0x174;
+pub const IA32_SYSENTER_ESP: u32 = 0x175;
+pub const IA32_SYSENTER_EIP: u32 = 0x176;
 pub const IA32_EFER: u32 = 0xC000_0080;
 pub const EFER_NXE: u64 = 1 << 11;
 pub const EFER_SCE: u64 = 1 << 0;

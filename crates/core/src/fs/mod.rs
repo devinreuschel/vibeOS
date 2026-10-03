@@ -95,9 +95,14 @@ pub const O_NOFOLLOW: u32 = 0x20000;
 /// Linux `O_CLOEXEC`. Process fd table turns this into `FD_CLOEXEC`.
 pub const O_CLOEXEC: u32 = 0x80000;
 
+// `lseek`'s `whence`, from Linux `include/uapi/linux/fs.h`.
 pub const SEEK_SET: u32 = 0;
 pub const SEEK_CUR: u32 = 1;
 pub const SEEK_END: u32 = 2;
+/// The next data at or after the offset.
+pub const SEEK_DATA: u32 = 3;
+/// The next hole at or after the offset; Linux's last `whence`.
+pub const SEEK_HOLE: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InodeKind {
@@ -312,6 +317,40 @@ impl<T> Guarded<T> for std::sync::Mutex<T> {
     }
 }
 
+/// What a rename's walks found: the key of the inode `oname` named, and
+/// of the one `nname` named (`None` for none). The VFS holds those two
+/// and commits the move on them, so the backend moves and replaces no
+/// other: a racing change can get between the walks and the backend
+/// call, which runs with the VFS lock dropped.
+///
+/// `src_words` and `tgt_words` are those two inodes' slot words, which
+/// the VFS's holds keep for the call. The VFS commits the move only after
+/// the backend call returns, so a write on either inode can run in
+/// between; a backend that keys an inode by where its name is (FAT)
+/// points the moved inode's words at its new name, and marks the replaced
+/// one's as having none, under its own lock in the call.
+#[derive(Clone, Copy, Debug)]
+pub struct RenameSeen {
+    pub src: Key,
+    pub tgt: Option<Key>,
+    pub src_words: Option<&'static InodeWords>,
+    pub tgt_words: Option<&'static InodeWords>,
+}
+
+impl RenameSeen {
+    /// `Stale` unless `src` and `tgt`, the keys of what `oname` and
+    /// `nname` name in the backend's store now (`None` for nothing), are
+    /// what the walks found. Nothing has changed then, and the VFS walks
+    /// both names again.
+    pub fn check(&self, src: Option<Key>, tgt: Option<Key>) -> Result<(), FsError> {
+        if src == Some(self.src) && tgt == self.tgt {
+            Ok(())
+        } else {
+            Err(FsError::Stale)
+        }
+    }
+}
+
 /// Per-inode ops, reached only through a superblock's `ops` pointer.
 /// Each call gets copies of the inodes it acts on, whose slots the caller
 /// holds a count on for the call, and runs with the VFS lock dropped
@@ -324,7 +363,8 @@ impl<T> Guarded<T> for std::sync::Mutex<T> {
 /// creation is `Acces`, as `open(O_CREAT)` in Linux's `/proc`; reading,
 /// writing, truncating, or reading a link of an object that cannot is
 /// `Inval`; looking up or listing in a non-directory is `NotDir`; `sync`
-/// with nothing to write, `getattr`, `evict` and `check_seek` succeed.
+/// with nothing to write, `getattr`, `evict` and `check_seek` succeed, and
+/// `can_rw` reports both operations.
 pub trait InodeOps: Sync {
     fn lookup(&self, _cx: &mut OpCx<'_>, _dir: &Inode, _name: &[u8]) -> Result<InodeInfo, FsError> {
         Err(FsError::NotDir)
@@ -360,10 +400,14 @@ pub trait InodeOps: Sync {
     ) -> Result<(), FsError> {
         Err(FsError::Perm)
     }
-    /// Move `oname` in `odir` to `nname` in `ndir`. The moved inode's new
-    /// key when the move changed it, as FAT's dirent-location key does.
-    /// An inode the move replaced is the one `Vfs` held for `nname`,
-    /// released at its last put.
+    /// Move `oname` in `odir` to `nname` in `ndir`, replacing what
+    /// `nname` names, as rename(2) does. `seen` is what the VFS's walks
+    /// found at the two names, the inodes it holds and accounts for:
+    /// before it changes anything, under its own lock, the backend checks
+    /// that the names still name them ([`RenameSeen::check`]), so an
+    /// inode the move replaces is always the one `Vfs` held for `nname`,
+    /// released at its last put. The moved inode's new key when the move
+    /// changed it, as FAT's dirent-location key does.
     fn rename(
         &self,
         _cx: &mut OpCx<'_>,
@@ -371,6 +415,7 @@ pub trait InodeOps: Sync {
         _oname: &[u8],
         _ndir: &mut Inode,
         _nname: &[u8],
+        _seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         Err(FsError::Perm)
     }
@@ -454,6 +499,12 @@ pub trait InodeOps: Sync {
     /// console, which `lseek` then refuses.
     fn check_seek(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> Result<(), FsError> {
         Ok(())
+    }
+    /// Whether `ino` has a read and a write operation, `(read, write)`:
+    /// one it lacks makes `read` or `write` `Inval` before the buffer is
+    /// looked at, as Linux's `FMODE_CAN_READ` and `FMODE_CAN_WRITE` do.
+    fn can_rw(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> (bool, bool) {
+        (true, true)
     }
 }
 
@@ -882,7 +933,8 @@ pub struct Mounted {
 /// changes when the slot is freed, so a [`FileId`] to an earlier file is
 /// refused with `Badf` (C-FDGEN). The size lives in the inode, never
 /// here. A slot is free, `reserved` by an `open` that has not created or
-/// truncated anything yet, or `used`.
+/// truncated anything yet, or `used`. `rw` is what the backend can do to
+/// the inode, `(read, write)`, from [`InodeOps::can_rw`] at the open.
 #[derive(Clone, Copy)]
 struct File {
     used: bool,
@@ -894,6 +946,7 @@ struct File {
     mount: u8,
     flags: OpenFlags,
     offset: u64,
+    rw: (bool, bool),
 }
 
 impl File {
@@ -907,6 +960,7 @@ impl File {
         mount: 0,
         flags: OpenFlags(0),
         offset: 0,
+        rw: (true, true),
     };
 }
 
@@ -1150,12 +1204,13 @@ enum Rd {
 }
 
 /// A rename's two directory calls and the inodes it holds: the one it
-/// moves and the one it may replace.
+/// moves and the one it may replace, whose keys `seen` gives the backend.
 struct RenameCall {
     a: Call,
     b: Call,
     src: u16,
     tgt: Option<u16>,
+    seen: RenameSeen,
 }
 
 impl Vfs {
@@ -1191,6 +1246,14 @@ pub struct Hooks {
     /// Whether an `O_CREAT` open creates the file itself between its walk
     /// and its create, as another opener would.
     pub open_race: fn() -> bool,
+    /// Between a namespace change's walks and its begin step (an unlink,
+    /// rmdir, rename or link), where a racing change can take a name it
+    /// walked.
+    pub change_window: fn(),
+    /// Between a rename's begin step and its backend call, with the VFS
+    /// lock dropped, where a racing change can make, take or move a name
+    /// the rename walked, or remove its new directory.
+    pub rename_window: fn(),
 }
 
 fn no_window() {}
@@ -1203,6 +1266,8 @@ impl Hooks {
     pub const NONE: Hooks = Hooks {
         write_window: no_window,
         open_race: no_race,
+        change_window: no_window,
+        rename_window: no_window,
     };
 }
 
@@ -1264,227 +1329,6 @@ fn name_is_dot(n: &[u8]) -> bool {
 
 fn name_is_dotdot(n: &[u8]) -> bool {
     n.len() == 2 && n[0] == b'.' && n[1] == b'.'
-}
-
-/// The VFS with no lock around it, for host tests that drive one `Vfs`
-/// through [`FileApi`] from one thread.
-#[cfg(test)]
-pub(crate) struct Direct<'a>(core::cell::RefCell<&'a mut Vfs>);
-
-#[cfg(test)]
-impl Guarded<Vfs> for Direct<'_> {
-    fn with<R>(&self, f: impl FnOnce(&mut Vfs) -> R) -> R {
-        f(&mut self.0.borrow_mut())
-    }
-}
-
-/// Host-test wrappers over the driver, in the `v.mkdir(None, …)` style
-/// the tests had before the File API: each runs [`FileApi`] calls on this
-/// `Vfs`.
-#[cfg(test)]
-impl Vfs {
-    pub(crate) fn api<R>(&mut self, f: impl FnOnce(&FileApi<'_, Direct<'_>>) -> R) -> R {
-        let d = Direct(core::cell::RefCell::new(self));
-        f(&FileApi::new(&d))
-    }
-
-    pub(crate) fn mount_root_fs(
-        &mut self,
-        fs: &'static dyn FileSystem,
-    ) -> Result<PathRef, FsError> {
-        self.api(|a| a.mount_root(fs, None, false, None))?;
-        self.root()
-    }
-
-    pub(crate) fn mount(
-        &mut self,
-        base: Option<WalkBase>,
-        at: &str,
-        fs: &'static dyn FileSystem,
-    ) -> Result<u8, FsError> {
-        self.api(|a| a.mount_fs(base, at.as_bytes(), fs, None, false, None))
-            .map(|m| m.mount)
-    }
-
-    pub(crate) fn mount_dev(
-        &mut self,
-        at: &str,
-        fs: &'static dyn FileSystem,
-        dev: u64,
-        ro: bool,
-    ) -> Result<Mounted, FsError> {
-        self.api(|a| a.mount_fs(None, at.as_bytes(), fs, Some(dev), ro, None))
-    }
-
-    pub(crate) fn umount(&mut self, base: Option<WalkBase>, at: &str) -> Result<(), FsError> {
-        self.api(|a| a.umount(base, at.as_bytes()))
-    }
-
-    /// [`FileApi::dir_get`] on this `Vfs`.
-    pub(crate) fn dir_get(
-        &mut self,
-        base: Option<WalkBase>,
-        path: &str,
-    ) -> Result<DirRef, FsError> {
-        self.api(|a| a.dir_get(base, path.as_bytes()))
-    }
-
-    /// The path `path` resolves to, not held.
-    pub(crate) fn resolve(
-        &mut self,
-        base: Option<WalkBase>,
-        path: &str,
-        follow: bool,
-    ) -> Result<PathRef, FsError> {
-        self.api(|a| {
-            let p = a.walk(base, path.as_bytes(), follow)?;
-            a.put_path(p);
-            Ok(p)
-        })
-    }
-
-    /// A counted reference to the inode `p` names.
-    pub(crate) fn iref(&mut self, p: PathRef) -> Result<InodeRef, FsError> {
-        let slot = self.d_islot(p.dslot)?;
-        self.ihold(slot)?;
-        Ok(InodeRef {
-            slot,
-            r#gen: self.inodes[slot as usize].r#gen,
-        })
-    }
-
-    pub(crate) fn stat(&mut self, base: Option<WalkBase>, path: &str) -> Result<Stat, FsError> {
-        self.api(|a| a.stat_path(base, path.as_bytes(), true))
-    }
-
-    pub(crate) fn lstat(&mut self, base: Option<WalkBase>, path: &str) -> Result<Stat, FsError> {
-        self.api(|a| a.stat_path(base, path.as_bytes(), false))
-    }
-
-    pub(crate) fn mkdir(
-        &mut self,
-        base: Option<WalkBase>,
-        path: &str,
-        mode: u16,
-    ) -> Result<(), FsError> {
-        self.api(|a| a.mkdir(base, path.as_bytes(), u32::from(mode)))
-    }
-
-    pub(crate) fn creat(
-        &mut self,
-        base: Option<WalkBase>,
-        path: &str,
-        mode: u16,
-    ) -> Result<(), FsError> {
-        self.api(|a| a.create(base, path.as_bytes(), InodeKind::Reg, mode | S_IFREG, None))
-    }
-
-    pub(crate) fn symlink(
-        &mut self,
-        base: Option<WalkBase>,
-        path: &str,
-        target: &str,
-    ) -> Result<(), FsError> {
-        self.api(|a| a.symlink(base, path.as_bytes(), target.as_bytes()))
-    }
-
-    pub(crate) fn unlink(&mut self, base: Option<WalkBase>, path: &str) -> Result<(), FsError> {
-        self.api(|a| a.unlink(base, path.as_bytes()))
-    }
-
-    pub(crate) fn rmdir(&mut self, base: Option<WalkBase>, path: &str) -> Result<(), FsError> {
-        self.api(|a| a.rmdir(base, path.as_bytes()))
-    }
-
-    pub(crate) fn link(
-        &mut self,
-        base: Option<WalkBase>,
-        old: &str,
-        new: &str,
-    ) -> Result<(), FsError> {
-        self.api(|a| a.link(base, old.as_bytes(), new.as_bytes()))
-    }
-
-    pub(crate) fn rename(
-        &mut self,
-        base: Option<WalkBase>,
-        old: &str,
-        new: &str,
-    ) -> Result<(), FsError> {
-        self.api(|a| a.rename(base, old.as_bytes(), new.as_bytes()))
-    }
-
-    pub(crate) fn truncate(
-        &mut self,
-        base: Option<WalkBase>,
-        path: &str,
-        size: u64,
-    ) -> Result<(), FsError> {
-        self.api(|a| a.truncate(base, path.as_bytes(), size))
-    }
-
-    pub(crate) fn open_path(
-        &mut self,
-        base: Option<WalkBase>,
-        path: &str,
-        flags: u32,
-        mode: u16,
-    ) -> Result<FileRef, FsError> {
-        self.api(|a| {
-            a.open(
-                base,
-                path.as_bytes(),
-                OpenFlags::from_bits(flags),
-                u32::from(mode),
-            )
-        })
-    }
-
-    pub(crate) fn read(&mut self, f: &FileRef, buf: &mut [u8]) -> Result<usize, FsError> {
-        self.api(|a| a.read(f, buf))
-    }
-
-    pub(crate) fn write(&mut self, f: &FileRef, buf: &[u8]) -> Result<usize, FsError> {
-        self.api(|a| a.write(f, buf))
-    }
-
-    pub(crate) fn seek(&mut self, f: &FileRef, off: i64, whence: u32) -> Result<u64, FsError> {
-        let pos = SeekFrom::from_whence(off, whence)?;
-        self.api(|a| a.seek(f, pos))
-    }
-
-    pub(crate) fn close(&mut self, f: FileRef) -> Result<(), FsError> {
-        self.api(|a| a.close(f))
-    }
-
-    /// Entry `cookie` of directory `dir`, `.` and `..` first, and the
-    /// cookie of the next.
-    pub(crate) fn readdir(
-        &mut self,
-        dir: PathRef,
-        cookie: u64,
-        out: &mut Dirent,
-    ) -> Result<Option<u64>, FsError> {
-        let f = FileRef::from_raw(self.open(dir, OpenFlags::from_bits(O_RDONLY))?);
-        let mut i = 0u64;
-        let mut hit = None;
-        let r = self.api(|a| {
-            a.readdir(&f, &mut |d| {
-                if i == cookie {
-                    hit = Some(*d);
-                    return false;
-                }
-                i += 1;
-                true
-            })
-        });
-        self.close(f)?;
-        r?;
-        Ok(hit.map(|d| {
-            *out = d;
-            cookie + 1
-        }))
-    }
 }
 
 #[cfg(test)]

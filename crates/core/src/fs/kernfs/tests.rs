@@ -294,6 +294,27 @@ fn tmpfs_uses_cache_and_evicts() {
     assert_eq!(v.stat(None, "/tmp/big").unwrap().size, 5 * PAGE as u64 + 1);
 }
 
+/// A truncate that keeps part of a page leaves zeros past the new size,
+/// so a write past it reads zeros in the gap, not the bytes it cut.
+#[test]
+fn tmpfs_truncate_zeroes_the_cut_tail() {
+    let (mut v, _k) = boot();
+    let fid = v
+        .open_path(None, "/tmp/t", O_RDWR | O_CREAT, 0o644)
+        .unwrap();
+    assert_eq!(v.write(&fid, &[b'A'; 100]).unwrap(), 100);
+    v.truncate(None, "/tmp/t", 10).unwrap();
+    v.seek(&fid, 50, SEEK_SET).unwrap();
+    assert_eq!(v.write(&fid, b"X").unwrap(), 1);
+    v.seek(&fid, 0, SEEK_SET).unwrap();
+    let mut out = [0xFFu8; 51];
+    assert_eq!(v.read(&fid, &mut out).unwrap(), 51);
+    assert_eq!(&out[..10], &[b'A'; 10]);
+    assert!(out[10..50].iter().all(|&b| b == 0), "{:?}", &out[10..50]);
+    assert_eq!(out[50], b'X');
+    v.close(fid).unwrap();
+}
+
 #[test]
 fn tmpfs_mkdir_and_unlink() {
     let (mut v, _k) = boot();
@@ -617,4 +638,141 @@ fn sysfs_bad_driver_name_frees_its_node() {
     assert_eq!(node_counts(&k).0, used + 1);
     assert_eq!(node_counts(&k).1, len);
     assert_eq!(k.fs.with(|s| s.free_len), free - 1);
+}
+
+/// An add that fails part way leaves sysfs as it found it. A driver name
+/// that does not fit fails once the device's directory and three
+/// attributes are made, and a device name too long for its bus link once
+/// all four are; neither leaves a node, a name, or a link count behind,
+/// and the device can be added after.
+#[test]
+fn sysfs_failed_add_takes_back_its_nodes() {
+    let (mut v, k) = boot();
+    let used = node_counts(&k).0;
+    let links = v.stat(None, "/sys/devices").unwrap().nlink;
+    let long_drv = [b'x'; MAX_NAME + 1];
+    assert_eq!(
+        k.fs.sysfs_add_device(b"00:0b.0", 1, 2, 3, Some(&long_drv)),
+        Err(FsError::Inval)
+    );
+    let long_name = [b'0'; MAX_NAME];
+    assert_eq!(
+        k.fs.sysfs_add_device(&long_name, 1, 2, 3, Some(b"virtio-blk")),
+        Err(FsError::NameTooLong)
+    );
+    assert_eq!(node_counts(&k).0, used);
+    assert_eq!(v.stat(None, "/sys/devices").unwrap().nlink, links);
+    assert!(!has_name(&mut v, "/sys/devices", b"00:0b.0"));
+    assert!(!has_name(&mut v, "/sys/bus/pci/drivers", b"virtio-blk"));
+    k.fs.sysfs_add_device(b"00:0b.0", 1, 2, 3, Some(b"virtio-blk"))
+        .unwrap();
+    assert!(has_name(&mut v, "/sys/devices", b"00:0b.0"));
+    assert!(has_name(&mut v, "/sys/bus/pci/drivers", b"virtio-blk"));
+}
+
+#[test]
+fn tmpfs_rename_moves_and_replaces_as_linux() {
+    let (mut v, k) = boot();
+    write_at(&mut v, "/tmp/a", 0, b"AAA");
+    write_at(&mut v, "/tmp/b", 0, b"BB");
+    for d in ["/tmp/d", "/tmp/e", "/tmp/f"] {
+        v.mkdir(None, d, 0o755).unwrap();
+    }
+    write_at(&mut v, "/tmp/e/x", 0, b"X");
+    let (used, _, _) = node_counts(&k);
+    let root_links = v.stat(None, "/tmp").unwrap().nlink;
+
+    // A file replaces a file; the replaced node goes at its last put.
+    v.rename(None, "/tmp/a", "/tmp/b").unwrap();
+    assert_eq!(read_at(&mut v, "/tmp/b", 0, 3), b"AAA");
+    assert_eq!(v.stat(None, "/tmp/a").err(), Some(FsError::NotFound));
+    assert_eq!(node_counts(&k).0, used - 1);
+
+    // rename(2)'s kind rules, and a directory replaces only an empty one.
+    assert_eq!(v.rename(None, "/tmp/b", "/tmp/d"), Err(FsError::IsDir));
+    assert_eq!(v.rename(None, "/tmp/d", "/tmp/b"), Err(FsError::NotDir));
+    assert_eq!(v.rename(None, "/tmp/d", "/tmp/e"), Err(FsError::NotEmpty));
+    v.rename(None, "/tmp/d", "/tmp/f").unwrap();
+    assert_eq!(v.stat(None, "/tmp/d").err(), Some(FsError::NotFound));
+    assert_eq!(v.stat(None, "/tmp/f").unwrap().kind, InodeKind::Dir);
+    assert_eq!(v.stat(None, "/tmp").unwrap().nlink, root_links - 1);
+
+    // Across directories: a file, then a directory whose `..` follows it.
+    v.rename(None, "/tmp/b", "/tmp/e/y").unwrap();
+    assert_eq!(read_at(&mut v, "/tmp/e/y", 0, 3), b"AAA");
+    v.rename(None, "/tmp/e", "/tmp/f/g").unwrap();
+    assert_eq!(read_at(&mut v, "/tmp/f/g/x", 0, 1), b"X");
+    let f = v.stat(None, "/tmp/f").unwrap();
+    assert_eq!(v.stat(None, "/tmp/f/g/..").unwrap().ino, f.ino);
+    assert_eq!(f.nlink, 3);
+    assert_eq!(v.stat(None, "/tmp").unwrap().nlink, root_links - 2);
+    assert!(has_name(&mut v, "/tmp/f", b"g"));
+    assert!(!has_name(&mut v, "/tmp", b"e"));
+
+    // A replaced file stays readable through a descriptor held open on it.
+    write_at(&mut v, "/tmp/p", 0, b"PP");
+    write_at(&mut v, "/tmp/q", 0, b"QQ");
+    let held = v.open_path(None, "/tmp/p", O_RDWR, 0).unwrap();
+    let before = node_counts(&k).0;
+    v.rename(None, "/tmp/q", "/tmp/p").unwrap();
+    assert_eq!(node_counts(&k).0, before);
+    let mut b = [0u8; 2];
+    assert_eq!(v.read(&held, &mut b).unwrap(), 2);
+    assert_eq!(&b, b"PP");
+    v.close(held).unwrap();
+    assert_eq!(node_counts(&k).0, before - 1);
+    assert_eq!(read_at(&mut v, "/tmp/p", 0, 2), b"QQ");
+
+    // A name onto itself changes nothing; the kernel's skins move nothing.
+    v.rename(None, "/tmp/p", "/tmp/p").unwrap();
+    assert_eq!(read_at(&mut v, "/tmp/p", 0, 2), b"QQ");
+    assert_eq!(v.rename(None, "/dev/null", "/dev/nul2"), Err(FsError::Perm));
+}
+
+/// A tmpfs create into a directory a racing rmdir removed, which the VFS
+/// still holds, fails with `NotFound`, as Linux refuses a dead directory,
+/// and makes nothing: a node made there would be unreachable, and never
+/// freed. tmpfs makes no hard links.
+#[test]
+fn tmpfs_make_in_a_removed_directory_is_not_found() {
+    let (mut v, k) = boot();
+    v.mkdir(None, "/tmp/d", 0o755).unwrap();
+    v.creat(None, "/tmp/f", 0o644).unwrap();
+    let (used, _) = k.fs.tmp_nodes().unwrap();
+    let r = crate::fs::testfs::make_in_removed_dir(&mut v, k.skins[2], "/tmp/d", "/tmp/f");
+    assert_eq!(
+        r,
+        [
+            Err(FsError::NotFound),
+            Err(FsError::NotFound),
+            Err(FsError::Perm)
+        ]
+    );
+    // The removed directory went at its last put; nothing else changed.
+    v.stat(None, "/").unwrap();
+    assert_eq!(k.fs.tmp_nodes().unwrap().0, used - 1);
+}
+
+/// A directory that has handed out the places a 32-bit counter holds
+/// still lists every child: a place is 64-bit, so a create or rename loop
+/// never runs the counter to its end, where children would share a place
+/// and a scan would stop after the first of them.
+#[test]
+fn tmpfs_readdir_lists_children_past_32_bit_places() {
+    let (mut v, k) = boot();
+    v.mkdir(None, "/tmp/d", 0o755).unwrap();
+    let d = v.stat(None, "/tmp/d").unwrap().ino;
+    k.fs.with(|s| {
+        let i = kern_idx(s, d).unwrap();
+        s.nodes[i].next_off = (u32::MAX - 1).into();
+    });
+    for i in 0..4 {
+        v.creat(None, &format!("/tmp/d/f{i}"), 0o644).unwrap();
+    }
+    for i in 0..4 {
+        let name = format!("f{i}");
+        assert!(has_name(&mut v, "/tmp/d", name.as_bytes()), "{name}");
+    }
+    let mut names = [[0u8; 16]; 32];
+    assert_eq!(readdir_names(&mut v, "/tmp/d", &mut names), 6);
 }

@@ -264,6 +264,7 @@ CPU, and the aarch64 port does not exist.
 | x86_64 | `CR0.NE` | 1 | an unmasked x87 exception raises `#MF` at the next waiting x87 instruction and gets `SIGFPE` (§5.2), as on Linux |
 | x86_64 | `CR4.OSFXSR` | 1 | SSE runs at CPL 3, and `fxsave`/`fxrstor` include the XMM registers |
 | x86_64 | `CR4.OSXMMEXCPT` | 1 | an unmasked SIMD floating-point exception raises `#XM` and gets `SIGFPE` rather than `#UD` and `SIGILL` |
+| x86_64 | `IA32_SYSENTER_CS`, `IA32_SYSENTER_ESP`, `IA32_SYSENTER_EIP` | 0, as Linux writes them without IA32 emulation | `sysenter` at CPL 3 raises `#GP` on Intel and gets `SIGSEGV` (`#UD` and `SIGILL` on AMD, which has no `sysenter` in long mode); a value firmware left would enter ring 0 at its address. The GDT has no 32-bit user code slot, so ring 3 never reaches compatibility mode and `IA32_CSTAR` is never used |
 
 At EL2 with VHE, `CNTKCTL_EL1` names `CNTHCTL_EL2`, whose EL0 fields sit at the same bits. The boot
 CPU computes that register's whole value with the EL0 fields above, which clears the `EL0PCTEN` bit

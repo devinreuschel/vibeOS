@@ -388,13 +388,22 @@ fn registry_main() {
     let cmdline = crate::boot::cmdline();
     let sel = vibeos::ktest::Selection::parse(cmdline.get(OPT_KTEST));
     let repeat_arg = cmdline.get(OPT_REPEAT);
-    let repeat = vibeos::ktest::parse_repeat(repeat_arg).unwrap_or_else(|_| bad_repeat(repeat_arg));
+    let repeat = vibeos::ktest::parse_repeat(repeat_arg)
+        .unwrap_or_else(|_| bad_option(OPT_REPEAT, repeat_arg));
+    let range_arg = cmdline.get(OPT_RANGE);
+    let (start, end) = vibeos::ktest::Range::parse(range_arg)
+        .and_then(|r| r.bounds(rows().map(|(_, _, t)| t.name)))
+        .unwrap_or_else(|_| bad_option(OPT_RANGE, range_arg));
+    let in_range = |i: usize| (start..end).contains(&i);
     let Some(n) = vibeos::ktest::run_count(
-        rows().map(|(_, _, t)| (t.name, t.once, t.opt_in)),
+        rows()
+            .enumerate()
+            .filter(|&(i, _)| in_range(i))
+            .map(|(_, (_, _, t))| (t.name, t.once, t.opt_in)),
         &sel,
         repeat,
     ) else {
-        bad_repeat(repeat_arg);
+        bad_option(OPT_REPEAT, repeat_arg);
     };
     if n == 0 {
         crate::marker!("vibeOS: ktest: begin {n}");
@@ -410,8 +419,11 @@ fn registry_main() {
     let mut failed = false;
     let mut runs: u32 = 0;
     for pass in 1..=repeat {
-        for (g, r, t) in rows() {
-            if !sel.selects(t.name, t.opt_in) || !vibeos::ktest::runs_in_pass(t.once, pass) {
+        for (i, (g, r, t)) in rows().enumerate() {
+            if !in_range(i)
+                || !sel.selects(t.name, t.opt_in)
+                || !vibeos::ktest::runs_in_pass(t.once, pass)
+            {
                 continue;
             }
             runs += 1;
@@ -421,21 +433,25 @@ fn registry_main() {
     // `n` and the loop ask the same two predicates.
     assert_eq!(runs, n, "ktest: runs made != begin count");
     crate::sched::ktest::report();
+    crate::sync::ktest::report_spins();
     #[cfg(feature = "irqoff")]
     crate::sched::irqoff::report();
     crate::marker!("vibeOS: ktest: end");
     qemu_exit(if failed { EXIT_FAIL } else { EXIT_PASS });
 }
 
-/// The command-line options that select and repeat rows (BOOT.md §3.2).
+/// The command-line options that select, limit and repeat rows (BOOT.md
+/// §3.2).
 const OPT_KTEST: &str = "vibeos.ktest";
 const OPT_REPEAT: &str = "vibeos.ktest_repeat";
+const OPT_RANGE: &str = "vibeos.ktest_range";
 
-/// A `vibeos.ktest_repeat=` that is not 1 to `REPEAT_MAX`, or that makes
-/// more runs than a `u32` counts: say so before `begin` and fail the boot.
-fn bad_repeat(value: Option<&[u8]>) -> ! {
+/// A `vibeos.ktest_repeat=` that is not 1 to `REPEAT_MAX` or that makes
+/// more runs than a `u32` counts, or a `vibeos.ktest_range=` that names no
+/// row or no stretch of rows: say so before `begin` and fail the boot.
+fn bad_option(opt: &str, value: Option<&[u8]>) -> ! {
     let v = vibeos::boot::cmdline::Escaped(value.unwrap_or(b""));
-    crate::marker!("vibeOS: ktest: bad option {OPT_REPEAT}={v}");
+    crate::marker!("vibeOS: ktest: bad option {opt}={v}");
     qemu_exit(EXIT_FAIL);
 }
 
@@ -513,18 +529,21 @@ static WARMED: AtomicBool = AtomicBool::new(false);
 /// allocates and frees, so the tests compare against a quiescent baseline
 /// and a leak in their window still shows.
 ///
-/// Three things move the count outside a test's window. A thread spawned
+/// Four things move the count outside a test's window. A thread spawned
 /// before the registry (the boot `/hello`, whose `wait_kernel` returns at
 /// the reap, before the thread parks its stack) can still be running or
 /// have its stack on its CPU's dead list. A spawn into an empty
 /// thread slot boxes a new `Tcb`, which can grow the heap. A stack or vmap
 /// carved from KVA that no mapping has reached before takes a page-table
-/// page that `unmap` never frees. So: let every pending thread finish and
+/// page that `unmap` never frees. A test's first user processes allocate
+/// their address spaces and tables from the heap, which grows to hold
+/// them and never shrinks. So: let every pending thread finish and
 /// its stack come back; fill the empty thread slots, all but
 /// [`EMPTY_SLOT_RESERVE`], with threads that exit at once, so later spawns
 /// reuse Dead boxes; walk KVA through two coalesces with the timer on, so
-/// the free list starts again at VA the walk mapped; and allocate and free
-/// [`WARM_DEFAULT_STACKS`] default-size stacks. It runs once per boot, from
+/// the free list starts again at VA the walk mapped; allocate and free
+/// [`WARM_DEFAULT_STACKS`] default-size stacks; and run a process that
+/// forks and reaps a child ([`user::warm_processes`]). It runs once per boot, from
 /// the registry or from the first `quiescent_free_frames` caller,
 /// which then waits for the threads and stacks to settle before it reads
 /// the count.
@@ -574,6 +593,9 @@ pub(crate) fn quiesce_frames() {
         kva_init::free_stack(stack);
         i += 1;
     }
+    if !user::warm_processes() {
+        crate::marker!("vibeOS: ktest:   warm-up: user process failed");
+    }
 }
 
 /// Allocate and free guarded stacks until `Kva::free` has coalesced twice.
@@ -599,19 +621,27 @@ fn warm_kva() -> (usize, usize) {
 
 /// With the timer on, sleep until no thread but this one and the idle
 /// threads is Ready or Running and no dead thread's stack is still on its
-/// way to a stack cache or back to the buddy. False if that takes longer
-/// than [`SETTLE_MS`].
+/// way to a stack cache or back to the buddy. In a run, the run's deadline
+/// bounds the wait ([`sleep_for`]): the stacks come back at the host's
+/// rate, which no fixed bound fits (ROADMAP §10.2). Outside one, in the
+/// registry's warm-up, [`SETTLE_MS`] does. False if the bound came first.
 pub(crate) fn settle_threads() -> bool {
     let me = thread_init::current_id();
-    let t0 = time_init::uptime_ms();
-    loop {
+    let settled = || {
         let mut busy = thread_init::stacks_in_flight() != 0;
         thread_init::each_thread(|t| {
             busy |= t.id != me
                 && t.name != "idle"
                 && matches!(t.state, ThreadState::Ready | ThreadState::Running);
         });
-        if !busy {
+        !busy
+    };
+    if deadline_near().is_some() {
+        return sleep_for(settled);
+    }
+    let t0 = time_init::uptime_ms();
+    loop {
+        if settled() {
             break true;
         }
         if time_init::uptime_ms().saturating_sub(t0) > SETTLE_MS {
@@ -619,6 +649,17 @@ pub(crate) fn settle_threads() -> bool {
         }
         thread_init::sleep_ms(1);
     }
+}
+
+/// Whether a record in the log ring holds `needle`.
+pub(crate) fn log_contains(needle: &str) -> bool {
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    let mut found = false;
+    crate::log_init::for_each_msg(|m| found |= m.windows(n.len()).any(|w| w == n));
+    found
 }
 
 /// Free frames: the buddy's, and those of the stacks the CPUs' stack caches
@@ -930,7 +971,7 @@ pub(crate) fn quiesce() -> bool {
 /// [`FileRef`] carries, so their scenarios and assertions stay as they
 /// were.
 pub(crate) mod fid {
-    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom, Stat};
+    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, Stat};
 
     use crate::file_init;
 
@@ -947,8 +988,7 @@ pub(crate) mod fid {
     }
 
     pub(crate) fn seek(id: FileId, off: i64, whence: u32) -> Result<u64, FsError> {
-        let pos = SeekFrom::from_whence(off, whence)?;
-        file_init::seek(&FileRef::from_raw(id), pos)
+        file_init::lseek(&FileRef::from_raw(id), off, whence)
     }
 
     pub(crate) fn close(id: FileId) -> Result<(), FsError> {
@@ -1019,6 +1059,63 @@ pub(crate) fn sleep_until_s19(pred: impl Fn() -> bool, ms: u64) -> bool {
         thread_init::sleep_ms(1);
     }
     true
+}
+
+/// How long before the running row's deadline [`wait_for`] gives up, so the
+/// caller's failure line, which names what it waited on, comes before the
+/// tick that fails the run on its deadline ([`on_tick`]).
+const WAIT_MARGIN_MS: u32 = 500;
+
+/// Yield until `pred` holds, with no time bound of the caller's own: the
+/// running row's deadline bounds the wait, however slowly the host runs the
+/// guest (ROADMAP §10.2). True once `pred` holds; false when that deadline
+/// is [`WAIT_MARGIN_MS`] away and `pred` still fails, so the caller can fail
+/// naming what it waited on. With no deadline armed it waits on, and the
+/// harness's run deadline is the backstop.
+pub(crate) fn wait_for(pred: impl Fn() -> bool) -> bool {
+    loop {
+        if pred() {
+            return true;
+        }
+        if deadline_near() == Some(true) {
+            return pred();
+        }
+        thread_init::yield_now();
+    }
+}
+
+/// [`wait_for`], sleeping 1 ms between checks rather than yielding: for a
+/// waiter whose CPU also runs the work it waits on, which a yield would
+/// take turns with.
+pub(crate) fn sleep_for(pred: impl Fn() -> bool) -> bool {
+    loop {
+        if pred() {
+            return true;
+        }
+        if deadline_near() == Some(true) {
+            return pred();
+        }
+        thread_init::sleep_ms(1);
+    }
+}
+
+/// Whether the running row's deadline is [`WAIT_MARGIN_MS`] away or closer;
+/// `None` when no deadline is armed.
+fn deadline_near() -> Option<bool> {
+    deadline_within(WAIT_MARGIN_MS)
+}
+
+/// Whether the running row's deadline is `ms` away or closer; `None` when
+/// no deadline is armed. A loop of repeated work stops starting rounds by
+/// it, so the run's deadline, not a count, bounds it on a slow host.
+pub(crate) fn deadline_within(ms: u32) -> Option<bool> {
+    // Acquire: pairs with `arm`'s Release store, as in `on_tick`.
+    let d = DEADLINE.load(Ordering::Acquire);
+    if d == 0 {
+        return None;
+    }
+    let margin = Arch::freq_hz().map_or(0, |f| vibeos::ktest::deadline_cycles(ms, f));
+    Some(Arch::now().saturating_add(margin) >= d)
 }
 
 /// Spin on TSC time until `pred` holds, for at most `ns`.

@@ -40,6 +40,11 @@ pub enum SeekFrom {
     Start(u64),
     Current(i64),
     End(i64),
+    /// `SEEK_DATA`: the offset itself, since no backend reports holes yet,
+    /// as Linux's `generic_file_llseek` treats a whole file as data.
+    Data(i64),
+    /// `SEEK_HOLE`: the end of the file, the one hole such a file has.
+    Hole(i64),
 }
 
 impl SeekFrom {
@@ -52,6 +57,8 @@ impl SeekFrom {
                 .map_err(|_| FsError::Inval),
             SEEK_CUR => Ok(SeekFrom::Current(off)),
             SEEK_END => Ok(SeekFrom::End(off)),
+            SEEK_DATA => Ok(SeekFrom::Data(off)),
+            SEEK_HOLE => Ok(SeekFrom::Hole(off)),
             _ => Err(FsError::Inval),
         }
     }
@@ -136,11 +143,18 @@ impl Vfs {
     }
 }
 
-/// Whether a file of `kind` may be opened with `flags`.
+/// Whether a file of `kind` may be opened with `flags`. A directory is
+/// `EISDIR` for a write, `O_TRUNC`, or `O_CREAT` without `O_DIRECTORY`
+/// (POSIX `open`); a symlink, which the walk left unfollowed for
+/// `O_NOFOLLOW`, is `ELOOP`, or `ENOTDIR` with `O_DIRECTORY`, since only
+/// Linux's `O_PATH`, which this kernel lacks, opens the link itself.
 fn open_check(kind: InodeKind, flags: OpenFlags) -> Result<(), FsError> {
     match kind {
         InodeKind::Dir => {
-            if flags.writes() || flags.has(O_TRUNC) {
+            if flags.writes()
+                || flags.has(O_TRUNC)
+                || (flags.has(O_CREAT) && !flags.has(O_DIRECTORY))
+            {
                 return Err(FsError::IsDir);
             }
         }
@@ -150,12 +164,10 @@ fn open_check(kind: InodeKind, flags: OpenFlags) -> Result<(), FsError> {
             }
         }
         InodeKind::Lnk => {
-            if !flags.has(O_NOFOLLOW) {
-                return Err(FsError::Loop);
-            }
             if flags.has(O_DIRECTORY) {
                 return Err(FsError::NotDir);
             }
+            return Err(FsError::Loop);
         }
     }
     Ok(())
@@ -219,6 +231,7 @@ impl Vfs {
             mount,
             flags,
             offset: 0,
+            rw: (true, true),
         };
         Ok(FileId {
             fid: i as u16,
@@ -347,6 +360,22 @@ impl Vfs {
             SeekFrom::Start(o) => o,
             SeekFrom::Current(d) => rel(f.offset, d)?,
             SeekFrom::End(d) => rel(ino.cur_size(), d)?,
+            // From an offset inside the file: the offset (data) or the
+            // size (the hole at the end); `NxIo` from one at or past the
+            // end, or below 0.
+            SeekFrom::Data(o) | SeekFrom::Hole(o) => {
+                let size = ino.cur_size();
+                match u64::try_from(o) {
+                    Ok(o) if o < size => {
+                        if matches!(pos, SeekFrom::Data(_)) {
+                            o
+                        } else {
+                            size
+                        }
+                    }
+                    _ => return Err(FsError::NxIo),
+                }
+            }
         };
         if n > self.supers[ino.sb as usize].maxbytes {
             return Err(FsError::Inval);
@@ -427,6 +456,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// that is not there, `O_TRUNC` empties a regular file. The open-file
     /// slot is reserved before anything is created or truncated, so with
     /// the table full (`NFile`) a failed `open` changes no file.
+    /// `O_CREAT` with `O_DIRECTORY` is `EINVAL` before anything else, as
+    /// on Linux since 6.4, which would otherwise create a regular file and
+    /// then fail the open on it.
     pub fn open(
         &self,
         base: Option<WalkBase>,
@@ -434,6 +466,9 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         flags: OpenFlags,
         mode: u32,
     ) -> Result<FileRef, FsError> {
+        if flags.has(O_CREAT) && flags.has(O_DIRECTORY) {
+            return Err(FsError::Inval);
+        }
         let slot = self.with(|v| v.file_reserve())?;
         match self.open_slot(slot, base, path, flags, mode) {
             Ok(f) => self.opened(f, flags),
@@ -487,12 +522,16 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         Ok(FileRef::from_raw(id))
     }
 
-    /// Finish an open: truncate a regular file for `O_TRUNC`.
+    /// Finish an open: note what the backend can do to the inode, then
+    /// truncate a regular file for `O_TRUNC`.
     fn opened(&self, f: FileRef, flags: OpenFlags) -> Result<FileRef, FsError> {
-        if flags.has(O_TRUNC)
-            && self.with(|v| v.file_kind(f.id)) == Ok(InodeKind::Reg)
-            && let Err(e) = self.ftruncate(&f, 0)
-        {
+        if let Err(e) = self.note_rw(&f).and_then(|()| {
+            if flags.has(O_TRUNC) && self.with(|v| v.file_kind(f.id)) == Ok(InodeKind::Reg) {
+                self.ftruncate(&f, 0)
+            } else {
+                Ok(())
+            }
+        }) {
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "cleanup after an error already returned (DESIGN §2.5)"
@@ -501,6 +540,19 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
             return Err(e);
         }
         Ok(f)
+    }
+
+    /// Record in open file `f`'s slot what its backend can do to the
+    /// inode ([`InodeOps::can_rw`]), for [`Self::access`].
+    fn note_rw(&self, f: &FileRef) -> Result<(), FsError> {
+        let mut c = self.with(|v| v.file_islot(f.id).and_then(|i| v.call(i)))?;
+        let rw = c.run(|o, cx, n| o.can_rw(cx, n));
+        self.step(|v| {
+            v.finish(c, false);
+            let i = v.file_slot(f.id)?;
+            v.files[i].rw = rw;
+            Ok(())
+        })
     }
 
     /// Open the inode `r` names, found by a walk outside the dentry
@@ -513,6 +565,29 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
     /// Drop a reference an [`InodeRef`] held.
     pub fn put(&self, r: InodeRef) {
         self.step(|v| v.put_ref(r));
+    }
+
+    /// What a `read` (`write` false) or `write` of open file `id` checks
+    /// before the caller's buffer, in Linux's `vfs_read` and `vfs_write`
+    /// order: `Badf` unless `id` is open for that access, then `Inval`
+    /// when the backend has no such operation for the inode. The inode's
+    /// kind, for the checks that follow the buffer's.
+    pub fn access(&self, id: FileId, write: bool) -> Result<InodeKind, FsError> {
+        self.with(|v| {
+            let f = v.files[v.file_slot(id)?];
+            let (open, can) = if write {
+                (f.flags.writes(), f.rw.1)
+            } else {
+                (f.flags.reads(), f.rw.0)
+            };
+            if !open {
+                return Err(FsError::Badf);
+            }
+            if !can {
+                return Err(FsError::Inval);
+            }
+            Ok(v.inodes[f.islot as usize].kind)
+        })
     }
 
     /// A new counted reference to open file `id`, for one syscall.
@@ -557,11 +632,27 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
 
     /// Move open file `f`'s offset, when its inode can seek (`check_seek`).
     pub fn seek(&self, f: &FileRef, pos: SeekFrom) -> Result<u64, FsError> {
+        self.seek_checked(f, || Ok(pos))
+    }
+
+    /// `lseek(off, whence)` on `f` in Linux's `vfs_llseek` order: a file
+    /// that cannot seek is `SPipe` whatever `off` and `whence` are, and
+    /// only then are they decoded ([`SeekFrom::from_whence`]).
+    pub fn lseek(&self, f: &FileRef, off: i64, whence: u32) -> Result<u64, FsError> {
+        self.seek_checked(f, || SeekFrom::from_whence(off, whence))
+    }
+
+    /// Seek `f` to `pos()` once its inode's `check_seek` passed.
+    fn seek_checked(
+        &self,
+        f: &FileRef,
+        pos: impl FnOnce() -> Result<SeekFrom, FsError>,
+    ) -> Result<u64, FsError> {
         let mut c = self.with(|v| v.file_islot(f.id).and_then(|i| v.call(i)))?;
         let r = c.run(|o, cx, n| o.check_seek(cx, n));
         self.step(|v| {
             v.finish(c, false);
-            r.and_then(|()| v.file_seek(f.id, pos))
+            r.and_then(|()| pos()).and_then(|p| v.file_seek(f.id, p))
         })
     }
 
@@ -648,5 +739,40 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
             });
         self.put_path(p);
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::tests::ram;
+
+    /// `SEEK_DATA` and `SEEK_HOLE` treat the whole file as data, as Linux's
+    /// `generic_file_llseek`: data at the offset, the hole at the end, and
+    /// `ENXIO` from the end on or below 0; a negative `SEEK_SET` is `EINVAL`.
+    #[test]
+    fn seek_data_and_hole() {
+        let errno = |e: FsError| crate::kerror::KError::from(e).errno();
+        let mut v = ram();
+        let f = v.open_path(None, "/f", O_RDWR | O_CREAT, 0o644).unwrap();
+        assert_eq!(errno(v.seek(&f, 0, SEEK_DATA).unwrap_err()), 6, "empty");
+        assert_eq!(errno(v.seek(&f, 0, SEEK_HOLE).unwrap_err()), 6, "empty");
+        v.write(&f, b"hello").unwrap();
+        assert_eq!(v.seek(&f, 0, SEEK_DATA), Ok(0));
+        assert_eq!(v.seek(&f, 3, SEEK_DATA), Ok(3));
+        assert_eq!(v.seek(&f, 0, SEEK_CUR), Ok(3), "SEEK_DATA moves the offset");
+        assert_eq!(v.seek(&f, 1, SEEK_HOLE), Ok(5));
+        assert_eq!(v.seek(&f, 0, SEEK_CUR), Ok(5), "SEEK_HOLE moves the offset");
+        for whence in [SEEK_DATA, SEEK_HOLE] {
+            assert_eq!(errno(v.seek(&f, 5, whence).unwrap_err()), 6, "{whence}");
+            assert_eq!(errno(v.seek(&f, -1, whence).unwrap_err()), 6, "{whence}");
+        }
+        assert_eq!(
+            v.seek(&f, 0, SEEK_CUR),
+            Ok(5),
+            "a failed seek moves nothing"
+        );
+        assert_eq!(errno(v.seek(&f, -1, SEEK_SET).unwrap_err()), 22);
+        v.close(f).unwrap();
     }
 }

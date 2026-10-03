@@ -214,6 +214,28 @@ class TrimPathsTest(unittest.TestCase):
         # The flags go before the subcommand.
         self.assertNotIn(" build", ship)
 
+    def test_no_config_after_a_cargo_ship_subcommand(self) -> None:
+        # Cargo replaces the --config list given before the subcommand with
+        # one given after it, so a --config after `build` drops CARGO_SHIP's
+        # trim-paths: the user programs, and the ktest kernels and initrd that
+        # carry them, held the toolchain's rust-src path.
+        db = make_db()
+
+        def expand(text: str, depth: int = 0) -> str:
+            if depth > 8:
+                return text
+            return re.sub(r"\$\$?\(([A-Za-z_][A-Za-z0-9_]*)\)",
+                          lambda m: expand(db.variables.get(m.group(1), ""), depth + 1), text)
+
+        lines = [line for rule in db.rules.values() for line in rule.recipe
+                 if "CARGO_SHIP)" in line]
+        self.assertTrue(any("vibeos-user" in line for line in lines), lines)
+        for line in lines:
+            words = line.split("CARGO_SHIP)", 1)[1].split()
+            sub = next(i for i, w in enumerate(words) if not w.startswith(("$", "-", "'")))
+            self.assertEqual(words[sub], "build", line)
+            self.assertNotIn("--config", expand(" ".join(words[sub + 1:])), line)
+
     def test_every_kernel_build_uses_cargo_ship(self) -> None:
         db = make_db()
         for v in VARIANTS:

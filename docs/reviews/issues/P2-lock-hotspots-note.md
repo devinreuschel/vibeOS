@@ -2,7 +2,7 @@
 
 **Status:** in the [index](README.md). #83: ROADMAP §19.4/§19.5/§19.8 and DESIGN §7.7 note the hotspots. The plan below
 keeps the pre-restructure numbers: Phase 17 is now Phase 19 (§17.x → §19.x), and §10.6 is now §12.5.
-`kernel_tests` spin counters dump per lock rank from ktest `lock_spins`.
+`kernel_tests` spin counters dump per lock rank on an info line at the end of each in-guest run (`sync::ktest::report_spins`).
 
 | | |
 |---|---|

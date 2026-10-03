@@ -2,7 +2,9 @@
 //! a disk-backed FAT mount and a 64 KiB write on `vda` from a 16 KiB
 //! `spawn` stack, with a self-IPI on the virtio-blk vector each time the
 //! write path enters the block cache, so a top half lands on the path
-//! (ROADMAP §10.4, F058).
+//! (ROADMAP §10.4, F058). The worker's depth must leave room for the
+//! deepest top half a probe thread on its CPU takes ([`top_half_room`]),
+//! wherever an interrupt lands on the path (ROADMAP §10.2).
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
@@ -14,7 +16,7 @@ use vibeos::sched::stack_depth;
 use crate::arch::current::Arch;
 use crate::block::blockdev_init;
 use crate::file_init;
-use crate::ktest::{Outcome, sleep_until};
+use crate::ktest::{Outcome, sleep_for};
 use crate::thread_init;
 use crate::{apic_init, per_cpu_init};
 
@@ -157,11 +159,119 @@ fn fat16k_worker() {
     DONE.store(true, Ordering::Release);
 }
 
+/// Set to end [`probe_entry`]'s spin with IF on.
+static PROBE_STOP: AtomicBool = AtomicBool::new(false);
+/// Set while [`top_half_room`] measures the probe's own depth.
+static PROBE_IF_OFF: AtomicBool = AtomicBool::new(false);
+/// Milliseconds [`top_half_room`] keeps the probe interrupted, sending a
+/// virtio-blk top half and a call-function IPI each.
+const PROBE_MS: u32 = 200;
+/// Milliseconds [`top_half_room`] sleeps with one CPU, while the ticks that
+/// switch the two spinners land on the probe.
+const PROBE_ALONE_MS: u64 = 20;
+
+/// Bytes [`probe_spin`] puts on its stack before it spins, so the spin
+/// sits deeper than anything the probe thread's start does.
+const PROBE_PAD: usize = 4096;
+
+/// A probe thread: with [`PROBE_IF_OFF`], spin 1 ms with IF off, so only
+/// its own frames touch its stack; otherwise spin with IF on until
+/// [`PROBE_STOP`], taking whatever interrupts its CPU gets.
+fn probe_entry() {
+    if PROBE_IF_OFF.load(Ordering::Acquire) {
+        let _irq = crate::arch::current::InterruptGuard::enter();
+        probe_spin(true);
+    } else {
+        probe_spin(false);
+    }
+}
+
+/// [`PROBE_PAD`] bytes down, spin until 1 ms has passed (`if_off`) or
+/// until [`PROBE_STOP`]: the same calls either way, so the two depths
+/// differ only by the interrupts that landed on the spin.
+#[inline(never)]
+fn probe_spin(if_off: bool) {
+    let mut pad = [0u8; PROBE_PAD];
+    core::hint::black_box(&mut pad);
+    let end = crate::time_init::read_tsc().saturating_add(crate::time_init::tsc_per_ms());
+    while !probe_done(if_off, end) {
+        core::hint::spin_loop();
+    }
+    core::hint::black_box(&mut pad);
+}
+
+/// Whether [`probe_spin`] is over: the TSC past `end` for the IF-off spin,
+/// [`PROBE_STOP`] for the other, which reads no TSC, since a TSC read on
+/// each pass makes that spin, which lasts the whole probe, crawl under
+/// `-icount` (the `test-irqoff` tier). One leaf call either way.
+#[inline(never)]
+fn probe_done(if_off: bool, end: u64) -> bool {
+    if if_off {
+        crate::time_init::read_tsc() >= end
+    } else {
+        PROBE_STOP.load(Ordering::Acquire)
+    }
+}
+
+fn probe_call(_: *mut ()) {}
+
+/// Run [`probe_entry`] as thread `name` on `cpu` and return its stack
+/// depth at exit.
+fn probe_depth(name: &'static str, cpu: u32) -> Result<usize, &'static str> {
+    let h = thread_init::spawn_on(name, probe_entry, cpu).map_err(|_| "probe spawn")?;
+    crate::sched::ktest::wait_exit_depth(h.id().0).ok_or("no probe depth recorded")
+}
+
+/// The stack the deepest interrupt takes: the depth of a probe thread whose
+/// spin takes interrupts, less its depth with IF off ([`probe_spin`]). It runs on a CPU other
+/// than the registry's when there is one, since `ipi_init::call_mask` sends
+/// the calling CPU nothing. While it spins, a sibling spinner on its CPU
+/// makes the ticks switch between them, which puts the scheduler's and the
+/// switch tail's frames under a tick's, and each millisecond the registry
+/// sends that CPU the virtio-blk vector `vec`, the disk's top half, and a
+/// call-function IPI. With one CPU those would land on the registry, so it
+/// only sleeps while the ticks land on the spinners.
+fn top_half_room(vec: u8) -> Result<usize, &'static str> {
+    let cpu = crate::ktest::second_cpu().unwrap_or_else(thread_init::current_cpu);
+    PROBE_IF_OFF.store(true, Ordering::Release);
+    let own = probe_depth("probe-own", cpu)?;
+    PROBE_IF_OFF.store(false, Ordering::Release);
+    PROBE_STOP.store(false, Ordering::Release);
+    let probe = thread_init::spawn_on("probe-irq", probe_entry, cpu).map_err(|_| "probe spawn")?;
+    let spinner = thread_init::spawn_on("probe-spin", probe_entry, cpu);
+    let alone = cpu == thread_init::current_cpu();
+    let mut sent = 0u32;
+    if spinner.is_ok() && alone {
+        // With one CPU an IPI this thread sends lands on this thread, not
+        // the probe, and each 1 ms round waits on the spinners' ticks.
+        thread_init::sleep_ms(PROBE_ALONE_MS);
+    } else if spinner.is_ok() {
+        while sent < PROBE_MS {
+            if apic_init::send_ipi_cpu(cpu, vec).is_err() {
+                break;
+            }
+            crate::ipi_init::call_cpu(cpu, probe_call, core::ptr::null_mut(), true);
+            thread_init::sleep_ms(1);
+            sent += 1;
+        }
+    }
+    PROBE_STOP.store(true, Ordering::Release);
+    let deep = crate::sched::ktest::wait_exit_depth(probe.id().0);
+    if spinner.is_err() {
+        return Err("probe spinner spawn");
+    }
+    if !alone && sent < PROBE_MS {
+        return Err("probe self-IPI failed");
+    }
+    Ok(deep.ok_or("no probe depth recorded")?.saturating_sub(own))
+}
+
 /// Opt-in, in its own boot on a fresh disk: see the module doc. Fails
 /// unless the mount, the 64 KiB unaligned write, the read-back and the
 /// unmount succeed, at least 64 self-IPIs were sent with no error, the
 /// virtio-blk top half ran at least that often more, and the worker's
-/// recorded depth is within its 16 KiB stack's 12 KiB budget.
+/// recorded depth plus the deepest top half a probe on its CPU took
+/// ([`top_half_room`]) is within its 16 KiB stack's 12 KiB budget.
 pub(crate) fn fat_vda_16k_stack() -> Outcome {
     let Some((cpu, vec)) = (0..64u32)
         .filter(|&c| per_cpu_init::is_online(c))
@@ -172,6 +282,10 @@ pub(crate) fn fat_vda_16k_stack() -> Outcome {
         })
     else {
         return Outcome::Fail("no virtio-blk queue vector");
+    };
+    let room = match top_half_room(vec) {
+        Ok(r) => r,
+        Err(why) => return Outcome::Fail(why),
     };
     if let Err(why) = write_image() {
         return Outcome::Fail(why);
@@ -190,9 +304,9 @@ pub(crate) fn fat_vda_16k_stack() -> Outcome {
         Ok(h) => h,
         Err(_) => return Outcome::Fail("spawn"),
     };
-    if !sleep_until(|| DONE.load(Ordering::Acquire), 20_000) {
+    if !sleep_for(|| DONE.load(Ordering::Acquire)) {
         ARMED_CPU.store(u32::MAX, Ordering::Release);
-        return Outcome::Fail("worker did not finish in 20 s");
+        return Outcome::Fail("worker did not finish by the run's deadline");
     }
     let r = RESULT.load(Ordering::Relaxed);
     if r != OK {
@@ -203,13 +317,14 @@ pub(crate) fn fat_vda_16k_stack() -> Outcome {
     let tops = crate::drivers::ktest::top_hits().wrapping_sub(top0);
     let depth = crate::sched::ktest::wait_exit_depth(h.id().0);
     crate::ktest_info!(
-        "cpu {} vector {:#x}: {} self-IPIs, {} errors, {} top halves, depth {:?}",
+        "cpu {} vector {:#x}: {} self-IPIs, {} errors, {} top halves, depth {:?}, top half room {}",
         cpu,
         vec,
         ipis,
         errs,
         tops,
-        depth
+        depth,
+        room
     );
     if errs != 0 {
         return crate::fail_fmt!("{} self-IPI errors", errs);
@@ -220,11 +335,12 @@ pub(crate) fn fat_vda_16k_stack() -> Outcome {
     if tops < ipis {
         return crate::fail_fmt!("{} top halves < {} self-IPIs", tops, ipis);
     }
+    let budget = stack_depth::budget(16 * 1024);
     match depth {
         None => Outcome::Fail("no exit depth recorded"),
-        Some(d) if d > stack_depth::budget(16 * 1024) => {
-            crate::fail_fmt!("worker used {} bytes, over budget", d)
-        }
+        Some(d) if d.saturating_add(room) > budget => crate::fail_fmt!(
+            "worker used {d} bytes, and a top half {room} more is over the {budget}-byte budget"
+        ),
         Some(_) => Outcome::Ok,
     }
 }

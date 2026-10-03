@@ -21,7 +21,7 @@ use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
-    Name, OpCx, S_IFDIR_MODE, S_IFMT, WalkBase,
+    Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFMT, WalkBase,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -205,33 +205,22 @@ pub(super) fn with_slot<R>(
     f(&mut g, &mut io)
 }
 
-/// The one conversion from a vibefs inode's fields to its `Vfs` inode:
-/// key `[ino, 0, 0]`, the mode's permission bits from the node and its
-/// type from `kind`.
-pub fn inode_info(
-    ino: u32,
-    kind: InodeKind,
-    mode: u16,
-    nlink: u32,
-    size: u64,
-    mtime: u64,
-) -> InodeInfo {
+/// The one conversion from a vibefs inode to its `Vfs` inode: key
+/// `[ino, 0, 0]`, the mode's permission bits from the node and its type
+/// from `kind`, and the record's three times.
+fn node_info(n: &Node) -> InodeInfo {
     InodeInfo {
-        key: [ino, 0, 0],
-        ino,
-        kind,
-        mode: (mode & !S_IFMT) | kind.ifmt(),
-        nlink,
-        size,
-        atime: mtime,
-        mtime,
-        ctime: mtime,
+        key: [n.ino, 0, 0],
+        ino: n.ino,
+        kind: n.kind,
+        mode: (n.mode & !S_IFMT) | n.kind.ifmt(),
+        nlink: n.nlink,
+        size: n.size,
+        atime: n.atime,
+        mtime: n.mtime,
+        ctime: n.ctime,
         private: [0; 2],
     }
-}
-
-fn node_info(n: &Node) -> InodeInfo {
-    inode_info(n.ino, n.kind, n.mode, n.nlink, n.size, n.mtime)
 }
 
 /// Run `f` on volume `v` under its lock, with the VFS lock dropped; a
@@ -244,6 +233,7 @@ fn with_vol<R>(
     if !v.used.load(Ordering::Acquire) {
         return Err(FsError::Io);
     }
+    g.now = fs_init::now();
     let mut io = Io { back: &v.media };
     f(&mut g, &mut io)
 }
@@ -311,8 +301,17 @@ impl InodeOps for VibeOps {
         oname: &[u8],
         ndir: &mut Inode,
         nname: &[u8],
+        seen: RenameSeen,
     ) -> Result<Option<Key>, FsError> {
         with_vol(vol_of(cx)?, |v, d| {
+            let mut key_at = |dir: u32, name: &[u8]| match v.lookup(d, dir, name) {
+                Ok(n) => Ok(Some(node_info(&n).key)),
+                Err(FsError::NotFound) => Ok(None),
+                Err(e) => Err(e),
+            };
+            let src = key_at(odir.key[0], oname)?;
+            let tgt = key_at(ndir.key[0], nname)?;
+            seen.check(src, tgt)?;
             v.rename(d, odir.key[0], oname, ndir.key[0], nname)?;
             Ok(None)
         })
@@ -387,9 +386,16 @@ impl InodeOps for VibeOps {
         Ok(Some(c))
     }
 
+    /// The size, mtime and ctime are the record's, which a change the
+    /// cached inode did not see stamps too: a rename stamps the moved
+    /// file's ctime, as Linux's does. The atime stays the cached one,
+    /// since v1 records none on a read.
     fn getattr(&self, cx: &mut OpCx<'_>, ino: &mut Inode) -> Result<(), FsError> {
         let key = ino.key[0];
-        ino.size = with_vol(vol_of(cx)?, |v, _| v.file_size(key))?;
+        let n = with_vol(vol_of(cx)?, |v, _| v.attr(key))?;
+        ino.size = n.size;
+        ino.mtime = n.mtime;
+        ino.ctime = n.ctime;
         Ok(())
     }
 

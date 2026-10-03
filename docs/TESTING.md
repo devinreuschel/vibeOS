@@ -222,7 +222,19 @@ interrupt and panics, so the dump shows where the test stood. The opt-in `ktest_
 `make test-kernel`'s expect-fail boot `ktest_deadline_trip` selects it and requires, in order, its
 `run` line, the deadline `FAIL` line, a panic signature and `vibeOS: panic: halted`, and no `ok`
 line (`check_deadline_trip`). A CPU spinning with IF=0 never takes the panic's stop IPI, so that
-boot checks only those lines, not the other CPUs' state.
+boot checks only those lines, not the other CPUs' state. A test that waits for another thread, a
+wake, or an interrupt waits on that event through `ktest::wait_for`, which yields until its
+predicate holds and gives up only 500 ms before the run's deadline, so the test's own failure line
+can name what it waited on; a fixed bound of the test's own, which a loaded host outlasts, is the
+flake class ROADMAP §10.2's flake lines record. `ktest::sleep_for` waits the same way but sleeps 1 ms
+between checks, for a waiter whose CPU also runs the work it waits on. `ktest::settle_threads`, the
+quiescent point every frame-accounting test reads its counts at, waits through it inside a run: the
+dead threads' stacks come back at the host's rate. Only the registry's warm-up before `begin`, which
+no run's deadline covers, keeps its 2 s bound. `ktest::user::frames_settle`, which waits for a
+reaped process's frames, waits on the run's deadline too. The warm-up also runs a user process that
+forks and reaps a child (`ktest::user::warm_processes`), so a test that `vibeos.ktest=` selects
+alone does not count the kernel heap's growth for its first processes as a leak; the heap never
+shrinks, and a full run's earlier tests grew it first.
 
 Selection (BOOT.md §3.2). `vibeos.ktest=` (`VIBEOS_KTEST`) takes a comma-separated list of globs,
 `*` matching any run of characters and `?` one; with no item every row not marked opt-in runs. A row
@@ -245,6 +257,22 @@ After its first boot, and whatever `VIBEOS_KTEST` holds, `make test-kernel` also
 `-machine pc,hpet=off` and `-cpu <model>,-tsc-deadline`, limited by `vibeos.ktest=` to the opt-in
 tests that need the PIT tick (`pit_tick_rate`), and requires `lapic_timer ok (pit)` and an `ok` line
 for each (`run_ktest.hpet_off_boot`).
+`vibeos.ktest_range=<from>..<to>` limits a boot to one stretch of the registry: the rows from the
+one named `from` up to, not including, the one named `to`, in run order, an empty side meaning the
+first row or past the last, and a row runs when it is in the stretch and the selection selects it.
+A bound that names no row, or a `to` that does not come after `from`, prints `bad option` and
+fails the boot. Stretches that share their bounds (`..a`, `a..b`, `b..`) put every row, one added
+later included, in exactly one (`vibeos::ktest::Range`, host test
+`ranges_sharing_bounds_partition_the_rows`). `make test-kernel`, `make test-kernel-smp4` and
+`make test-lapic-fallback` run the whole registry in one boot and then every proof boot; their
+shards, `make <variant>-<k>`, run the same in pieces, one per-push tier each (§8.6):
+`tests/harness/ktest_shards.py` gives each shard a stretch for its main boot, whose persist reboot
+reruns that stretch, or some of the proof boots (`run_ktest.PROOF_BOOTS`), in the variant's
+configuration (the Makefile's `KTEST_ENV`). `tests/harness/test_ktest_shards.py` fails when a
+variant's stretches do not hand on their bounds from the first row past the last, when a bound is
+no registered row, when a proof boot the variant runs is in no shard or in two, when a shard's
+recipe differs from its variant's but for `--shard`, or when `make test` runs a variant instead of
+its shards.
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -371,9 +399,20 @@ cache. Its worker, started with `spawn_on`'s 16 KiB stack on a CPU that has a vi
 vector (`virtio_blk_init::queue_vector`), mounts `vda` through the File API, writes 64 KiB at offset
 100 and reads it back, and unmounts; while it writes, `fs::ktest::on_cache_write`, which `fat_init`'s
 `Io::write` calls before each block-cache write, sends that CPU a self-IPI on the vector whenever IF
-is on, so the virtio-blk top half lands on the write path. The test requires at least 64 self-IPIs
-and no send error, at least as many new top-half runs, and the worker's exit depth within budget;
-the boot requires its `ok` line and the stack check as every boot does.
+is on, so the virtio-blk top half lands on the write path. Before the worker runs, the test
+measures the deepest top half (`top_half_room`): a probe thread on a CPU other than the registry's
+spins 4 KiB down its stack with IF on while a sibling spinner makes each tick switch and the
+registry sends that CPU the virtio-blk vector and a call-function IPI each millisecond, and its
+depth less the same probe's depth with IF off is the room an interrupt takes. With one CPU
+(`make test-irqoff`'s `-smp 1`) the registry's IPIs would land on the registry, so the probe takes
+only the ticks that switch it with the spinner, and its room holds the tick's and the switch's
+frames, not the virtio-blk top half's; that room is measured in the tiers with two or more CPUs.
+The test waits for the probes' exit scans and for the worker through `ktest::sleep_for`, bounded by
+its run's 30 s deadline. The test requires at
+least 64 self-IPIs and no send error, at least as many new top-half runs, and the worker's exit
+depth plus that room within budget, so an interrupt that lands at the worker's deepest point fits
+however rarely a run catches one there (ROADMAP §10.2); the boot requires its `ok` line and the
+stack check as every boot does.
 Then the two virtio-blk failure boots (ROADMAP §10.11, F046), each through `_single_test_boot`
 with its own device tuple, whose `vda` is a 4 MiB pattern image (`harness.make_pattern_disk`, every
 byte of sector n `(n & 0xFF) ^ 0xA5`, so no GPT is stamped and no partition marker is required):
@@ -391,7 +430,9 @@ and `VIBEOS_SMP=1`, so guest time counts instructions and 100,000 ns is exactly 
 under KVM (`VIBEOS_QEMU_ACCEL=kvm`) it adds neither and the numbers are wall time. The kernel
 prints `vibeOS: irqoff: on bound <n> ns` after `irq: enabled`, and a reporter thread prints each
 changed site's cumulative `site`, `over`, `deliberate` and `unmatched` lines every 100 ms of guest
-time; the ktest runner reports once more before `ktest: end`. The e2e driver quits QEMU at its last
+time; the ktest runner reports once more before `ktest: end`. A report writes serial outside the log
+ring, as `dmesg` does, since in the 256-record ring its lines would push out the boot lines that
+`log_boot_captured` reads. The e2e driver quits QEMU at its last
 marker, so stretches after the last report of an e2e boot are not seen. `tests/harness/irqoff.py`
 reads every boot's lines: a `test-irqoff` boot without the `on` line is the wrong ISO and fails; it
 appends a table to `$GITHUB_STEP_SUMMARY` (under TCG the sites over the bound and the totals; under
@@ -400,9 +441,11 @@ and writes the rows to the results file's `irqoff` section, with the e2e driver 
 ktest driver's file (`VIBEOS_RESULTS_APPEND=1`). A test or test hook that holds IF off on purpose
 takes `sched::irqoff::deliberate(reason)` (C-IRQOFF-GUARD, `kernel_tests` only), which marks its
 stretch so it is never over and prints it on a `deliberate` line; `irqoff_logs_long_stretch` and
-`irqoff_deliberate_is_exempt`, registered only in this build, check the tracer and the guard. A
-test longjmped out of by `arch::catch` skips its guards' drops, so its stretch shows as
-`unmatched`. Under `-smp 1` a test that needs a second CPU skips with its "no AP" reason, and each
+`irqoff_deliberate_is_exempt`, registered only in this build, check the tracer and the guard,
+`irqoff_report_skips_ring` that a report leaves the ring alone, and `irqoff_big_tmp_dir` that a
+tmpfs directory of 3,000 files holds IF off for no stretch over the bound on a create or a lookup
+(DESIGN §2.1's sleeping store lock). A test longjmped out of by `arch::catch` skips its guards'
+drops, so its stretch shows as `unmatched`. Under `-smp 1` a test that needs a second CPU skips with its "no AP" reason, and each
 such skip has a `smp = 1` row in `tests/harness/skips.toml` (C-SKIPS).
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
@@ -477,7 +520,7 @@ a skip that no matching `skips.toml` row lists, and a listed test that runs each
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`
 sits between `console ok` and `shell ready` so `lspci` is registered before the prompt. The ramdisk
 `block: <name> <n> sectors` line sits after PCI and still before the shell. Partition children emit
-`block: <parent>p<N> <n> sectors` after the parent (e2e: `ram0p1`, `ram0p2`). virtio-blk adds
+`block: <parent>p<N> <n> sectors` after the parent (e2e: `ram0p1`, `ram0p5`). virtio-blk adds
 `block: vda <n> sectors` and `vdapN`, and `block: vdb <n> sectors`, when the ktest disks are present (not on the production e2e `pc`
 set). The same blind spot follows the last marker: writeback, deferred reclaim, and vibefs commits
 keep running after `shell ready`, and a panic there is invisible to a harness that stops reading at
@@ -943,7 +986,8 @@ runs `make test-unit` and the hostlib tests natively, §11.4's aarch64 switch ro
 targets with `VIBEOS_PREBUILT=1`, which defines no ISO or host-tool rule, so a tier builds nothing
 and a missing file fails with `No rule to make target`: the Makefile stays the one definition of
 each tier. Tiers are grouped to about 40 s of QEMU each, a group over 60 s split at target
-boundaries, and each is its own check name, `tier (<arch>, <tier>)`, so a red pull request names
+boundaries and a target over 60 s into shards, Makefile targets of their own (the in-guest targets,
+§8.2), and each is its own check name, `tier (<arch>, <tier>)`, so a red pull request names
 the failing tier; the table below holds the grouping, and `scripts/check_workflows.py` fails when it
 and the matrix differ (`rule_budget_doc`), and when the `tier` job lacks `needs: [check, build]`,
 `fail-fast: false` or `VIBEOS_PREBUILT=1`, or a `make test` prerequisite is in no tier or in two, the
@@ -965,15 +1009,31 @@ Tiers, with each group's summed QEMU step time in the last green integration-bra
 the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash`'s figure
 includes its `cargo test` of the host tools, which with `vibefs-crash-plants` are the tiers that need
 the toolchain; `forensics`'s and `vibefs-crash-plants`'s are a local TCG run's (`vibefs-crash-plants`:
-two planted rounds and a control round), until a `ci` run measures them:
+two planted rounds and a control round), until a `ci` run measures them. The in-guest shards'
+figures are each `make` target's wall time in a local TCG run at `63dffb5` with this split (4 CPUs,
+one QEMU at a time), until a `ci` run measures them:
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
 | x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest`, `test-qmp` | 40 |
 | x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-init-fault`, `test-e2e-strace`, `test-e2e-panic-stop`, `test-e2e-power` | 40 |
-| x86_64 | in-guest-1 | `test-kernel` | 64 |
-| x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
-| x86_64 | in-guest-3 | `test-lapic-fallback` | 50 |
+| x86_64 | kernel-1 | `test-kernel-1` | 39 |
+| x86_64 | kernel-2 | `test-kernel-2` | 36 |
+| x86_64 | kernel-3 | `test-kernel-3` | 35 |
+| x86_64 | kernel-4 | `test-kernel-4` | 37 |
+| x86_64 | kernel-5 | `test-kernel-5` | 36 |
+| x86_64 | kernel-6 | `test-kernel-6` | 24 |
+| x86_64 | kernel-smp4-1 | `test-kernel-smp4-1` | 39 |
+| x86_64 | kernel-smp4-2 | `test-kernel-smp4-2` | 40 |
+| x86_64 | kernel-smp4-3 | `test-kernel-smp4-3` | 38 |
+| x86_64 | kernel-smp4-4 | `test-kernel-smp4-4` | 40 |
+| x86_64 | kernel-smp4-5 | `test-kernel-smp4-5` | 41 |
+| x86_64 | lapic-fallback-1 | `test-lapic-fallback-1` | 40 |
+| x86_64 | lapic-fallback-2 | `test-lapic-fallback-2` | 35 |
+| x86_64 | lapic-fallback-3 | `test-lapic-fallback-3` | 34 |
+| x86_64 | lapic-fallback-4 | `test-lapic-fallback-4` | 37 |
+| x86_64 | lapic-fallback-5 | `test-lapic-fallback-5` | 23 |
+| x86_64 | lapic-fallback-6 | `test-lapic-fallback-6` | 23 |
 | x86_64 | vibefs-crash | `test-vibefs-crash` | 47 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
@@ -981,8 +1041,25 @@ two planted rounds and a control round), until a `ci` run measures them:
 `test-e2e-init-fault` boots twice (`init_fault`, then `init_no_sh`, about 10 s more under TCG), so
 e2e-2's figure, measured before the second boot, is low by that much.
 
-`test-unit` and `test-harness` run inside `make check`, in the `check` job. The in-guest tiers
-each pass 40 s alone and cannot split below a target.
+`test-unit` and `test-harness` run inside `make check`, in the `check` job. The in-guest targets
+passed 60 s alone: in the `ci` push runs on `main` that `ci_history.py --tiers` read before the
+split, `test-kernel` (tier `in-guest-1`) took a median 236.5 s, `test-kernel-smp4` (`in-guest-2`)
+183 s and `test-lapic-fallback` (`in-guest-3`) 202 s. A local TCG run of each at `63dffb5` timed
+its boots: the main boot 66 to 71 s and the persist reboot, which reran the whole registry, 65 to
+68 s; each proof boot 11 to 14 s, nearly all of it the cost every boot pays before its first test
+(QEMU, the boot, and `ktest::quiesce_frames`' warm-up, about 10 s under TCG). So each target splits
+into shards (`tests/harness/ktest_shards.py`, §8.2), one tier each with one QEMU at a time, of
+about 40 s or less: three for its main boot's registry, split at `user_single_step` (`spawn_sentinel`
+at `-smp 4`, whose sched and irq groups run longer) and `block_vblk_rw`, the last stretch, the
+drivers and fs groups that use `vda`, with the persist reboot that reruns it; and two or three for
+its proof boots, two or three boots each. That is 17 in-guest tiers where there were 3, so a push
+runs 25 jobs (`check`, `build`, 22 tiers, `ci-pass`) and a pull request 26 (`ticks`); the tiers
+start together once `check` and `build` pass, and beyond the 10 concurrent jobs a push keeps
+(above) they wait for a runner, at about a minute each. Two more main boots per variant pay the
+per-boot cost again, about 26 s, while the persist reboot reruns only the last stretch, about 55 s
+less, so the 17 shards ran 597 s locally against the three targets' 663 s. Per push the persist
+reboot reruns that stretch, the rows on the disk it rereads; `make test-kernel` and the others,
+which the scheduled jobs and the gate run, still rerun the whole registry there.
 
 | Job | When | What |
 |---|---|---|
@@ -997,11 +1074,11 @@ each pass 40 s alone and cannot split below a target.
 | `nightly-canary` | same workflow, non-blocking, `sched-lane-5` | undated latest nightly, `make iso && make test-unit` |
 | `smp-stress` `fuzz` | same workflow, `sched-lane-5` | cargo-fuzz 0.13.2 (`cargo install cargo-fuzz --locked --version 0.13.2`, the version `make fuzz` requires), then `make fuzz FUZZ_TIME=900`: each of the 12 targets for 15 minutes (about 3 job-hours) on the pinned toolchain; on failure `build/fuzz/artifacts/` is uploaded as `fuzz-artifacts` |
 | `release` | `workflow_dispatch` from `main`, with the release tag | `build` (`contents: read`, `actions: read`) fails on any ref but `refs/heads/main`, then runs `main`'s own `scripts/release_check.py` from a sparse checkout, before any code of the tag's tree: the tag is annotated, its commit is on `main`, a `ci` run that proves that commit (`gatelib.run_proves_commit`, ROADMAP §10.9) concluded `success`, and one annotated `phase-<N>` tag sits on it. It checks that commit out with `persist-credentials: false`, restores no cache, and runs `setup.sh` (a fresh Limine clone and host tool), `make gate PHASE=<N>`, `make release-artifacts OUT=dist` (the release profile), the third-party notices and the ISO's xorriso version, `make CARGO_PROFILE=release` over `test-e2e`, `test-e2e-uefi`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem` and `test-e2e-strace`, and `cmp build/vibeos.iso dist/vibeos.iso`; it uploads the tag's commit as `commit-input` (CI history, below), writes the notes with `scripts/changelog_section.py`, and uploads `dist/` with its `SHA256SUMS` as `release`, and `results-x86_64-build` and `runner-build`. `publish` (`contents: write`, `needs: build`) checks out nothing and runs no repository script: `sha256sum -c SHA256SUMS`, then the pinned release action publishes `vibeos.iso` as the one image, with `vibeos.iso.xorriso-version` and `THIRD-PARTY-NOTICES.txt`, at the verified commit. `scripts/check_workflows.py` keeps that shape (`rule_release_*`): `workflow_dispatch` with a required `tag` as the one trigger, no cache, no workflow-wide write, no checkout, local action, or command outside `PRIVILEGED_COMMANDS` in a job with a write grant or the `release` environment, and `vibeos.iso` as the one published image, after `build`. The owner's steps are [RELEASING.md](RELEASING.md). From ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
-| `ci-history` | `ci`, `release`, `nightly` or `smp-stress` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. Both jobs run in `sched-lane-6`. |
+| `ci-history` | `ci`, `release`, `nightly`, `smp-stress` or `macos` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. Both jobs run in `sched-lane-6`. |
 | `macos` | daily 04:23 UTC + dispatch, `sched-lane-9` | `macos-15` arm64 with Homebrew's `qemu`, `xorriso`, `dosfstools` and `zstd`; jobs `check` (cargo-deny 0.20.2 from `cargo install`, `make check`, then `./setup.sh --kani && make models`) and `test` (`make -k test-e2e-uefi test`, with Homebrew's edk2 firmware on pflash, `test-vibefs-crash-plants` among `test`'s tiers; a failed run's `build/cores/` as `cores-macos-test`); each uploads `build/results/`. |
 | `nightly` `kvm` | daily 03:17 UTC + dispatch, `sched-lane-0` | The x86_64 KVM leg (ROADMAP §10.1): `/dev/kvm` opened by GitHub's documented udev rule, job env `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, then `make test-kernel`, `make test-e2e`, `VIBEOS_SMP=1 make test-e2e`, `make test-lapic-fallback LAPIC_FALLBACK_CPU=qemu64,+invtsc,-tsc-deadline`, `VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4` (exit-gate line §10.10), and `make test-irqoff` (the IF-off tracer's build variant, ROADMAP §10.2), each step run even after an earlier one failed. GitHub assigns each job's host CPU at random (AMD EPYC or Intel Xeon, several models), so `scripts/runner_info.py` writes the CPU model beside the guest's invariant-TSC bit to the job summary and to `build/runner.json`, uploaded as `runner-kvm`, which fills the CI-history record's `runner`; a regression threshold compares a number only with history from the same CPU model. `build/results/` is uploaded as `results-x86_64-kvm` (90 days), and a failed run's `build/cores/` as `cores-x86_64-kvm`. |
 | `nightly` `release-profile` | daily 03:17 UTC + dispatch, `sched-lane-1` | `make CARGO_PROFILE=release test-e2e test-kernel` under TCG, in its own job, since the release and dev ISOs share their names under `build/` (ROADMAP §10.2, F137; BOOT.md §3.5); the runner record and the uploads as `results-x86_64-release-profile` and `runner-release-profile`, and a failed run's `build/cores/` as `cores-x86_64-release-profile`. `release.yml` runs the production-image e2e targets on the release-profile image it publishes. |
-| `nightly` `repro` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make repro`: every ISO variant built twice from one commit, with a different checkout path, `CARGO_HOME` and `RUSTUP_HOME`, compared byte for byte, and no host path in any output (`scripts/repro_build.py`) |
+| `nightly` `repro` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make repro`: every ISO variant built twice from one commit, with a different checkout path, `CARGO_HOME` and `RUSTUP_HOME`, compared byte for byte, and no host path in any output (`scripts/repro_build.py`); the builds run one after the other under `$RUNNER_TEMP`, the first one's `target/` and homes deleted before the second starts (DESIGN §3.6) |
 | `nightly` `models` | daily 03:17 UTC + dispatch, `sched-lane-2` | `./setup.sh --kani && make models`: every loom model and every Kani proof (ROADMAP §10.8); no QEMU |
 | `nightly` `miri` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make miri`: `vibeos-core`'s host tests under Miri (ROADMAP §10.8); `timeout-minutes` 330, since a serial run took over 2 hours on a 4-CPU host |
 | `nightly` `irqoff` | daily 03:17 UTC + dispatch, `sched-lane-3` | `make test-irqoff` under TCG: the in-guest tier and the e2e boot on the `irqoff` build variant, whose tracer fails a run on an IF=0 stretch over its budget (ROADMAP §10.2); a failed run's `build/cores/` as `cores-x86_64-irqoff` |
@@ -1014,14 +1091,17 @@ the `build/results/` files they upload. A pull request run tests the merge of it
 base, so the results files carry the merge commit, which `--run-commit` names; `check_ticks.py`
 reads commits and their messages from the pull request's head.
 
-**CI history.** ROADMAP §10.9's `ci-history` workflow keeps what `ci`, `release`, `nightly` and
-`smp-stress` ran past
-GitHub's 90-day limit on Actions logs and artifacts. When a run of either completes, its `record`
+**CI history.** ROADMAP §10.9's `ci-history` workflow keeps what `ci`, `release`, `nightly`,
+`smp-stress` and `macos` ran past
+GitHub's 90-day limit on Actions logs and artifacts: every scheduled workflow but `ci-history`
+itself, so `--budget` (Scheduled capacity, below) measures every lane they run in. When a run of
+one completes, its `record`
 job writes one JSON record per run id, `runs/<workflow>/<run_id>.json`, to the orphan `ci-history`
 branch (C-HISTORY): the run id, workflow, `attempt`, event, head SHA, branch, conclusion, start and
 finish; per job its conclusion, `created`, `started`, `completed`, seconds and per-step seconds, the
 results files of its `results-<arch>-<job>` artifact and the runner data of its `runner-<job>`
-artifact, `<job>` naming the job by the slug of its display name; and, for a workflow that takes a
+artifact, `<job>` naming the job by the slug of its display name, past a `<workflow>-` prefix
+(`macos`'s `results-x86_64-macos-check`); and, for a workflow that takes a
 commit as input, that commit (`release`'s `commit-input` artifact). A re-run replaces the run's
 record with its latest attempt, which `attempt` names. No record carries an actor, author or
 e-mail: the branch is public data (DESIGN §1.5). The job holds `contents: write` and
@@ -1029,7 +1109,11 @@ e-mail: the branch is public data (DESIGN §1.5). The job holds `contents: write
 `scripts/ci_history.py` and `scripts/gatelib.py` as fetched from the default branch at
 `GITHUB_SHA`, never the triggering commit's. No field of the run reaches a shell line: the tool
 reads only the run id from the event file, checks the workflow's name, path and repository against
-its allowlist, takes the rest from the API, and reads artifacts as capped bytes in memory. On a
+its allowlist, takes the rest from the API, and reads artifacts as capped bytes in memory. A job
+whose git has no credential helper (the nightly `budget` job runs no `gh auth setup-git`) gets
+`GH_TOKEN` as the clone's one `http.extraheader`, written to its local config and never to argv,
+and set rather than added to, so a work tree opened twice in one job (`--budget`, then `--tiers`)
+sends one `Authorization` header: GitHub refuses two with HTTP 400. On a
 rejected push it re-applies its one file on the new tip, up to 10 times, so concurrent runs lose no
 record. The `daily` job (04:23 UTC, and on dispatch) runs `--rotate`, then `--backfill --limit
 200`, which records each `ci` run on `main` that the API still lists and the branch lacks, or
@@ -1195,15 +1279,24 @@ Release windows: none
 |---|---|---|---|---|---|
 | `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 5 | 7.7 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
 | `nightly.yml` | daily `17 3 * * *` and dispatch | 9 | 9.1 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
-| `ci-history.yml` | each completed `ci`, `release`, `nightly` or `smp-stress` run (`record`); daily `23 4 * * *` and dispatch (`daily`) | 1 | 0.05 per `record`, 0.3 per `daily` (estimated) | 1 | `sched-lane-6` |
+| `ci-history.yml` | each completed `ci`, `release`, `nightly`, `smp-stress` or `macos` run (`record`); daily `23 4 * * *` and dispatch (`daily`) | 1 | 0.05 per `record`, 0.3 per `daily` (estimated) | 1 | `sched-lane-6` |
 | `macos.yml` | daily `23 4 * * *` and dispatch | 2 | 2.5 (estimated) | 1 | `sched-lane-9` |
 
 `ci_history.py --budget` reads the `ci-history` records of the scheduled workflows `WORKFLOWS`
-lists and takes each job's lane from its workflow file through `check_workflows.py`'s reader. Over
+lists and takes each job's lane from its workflow file through `check_workflows.py`'s reader. It
+fails (exit 1) when a scheduled workflow other than `ci-history.yml` is missing from `WORKFLOWS`,
+since no record of its runs is ever written and its lanes would go unmeasured. Over
 the last 4 complete weeks (Monday 00:00 UTC) outside a release window, it prints each workflow's
 weekly job-hours and each lane's weekly busy share with its median and maximum wait (started minus
 created), and fails when a lane but a `rebuilds` one was busy more than 60% of a week, or a job in a
-reserved lane waited more than 12 hours to start. The 40% left absorbs GitHub's delays to
+reserved lane waited more than 12 hours to start. A young history fails closed and then passes on
+its own, with no change to the tree. `ci-history.yml` writes a run's record when the run
+completes, so `--budget` exits 2, naming each, while a scheduled workflow has no recorded run:
+every night until each has finished one, the first nightly included, whose own run is still going
+when its `budget` job runs, and a week at most for the weekly `smp-stress`. It measures no week
+that ended before the history's first scheduled job, printing those weeks as not measured; the
+week that holds that job counts from it on, and while the history holds no complete week since
+then it exits 2, naming the Monday that ends the first one. The 40% left absorbs GitHub's delays to
 scheduled runs and new workflows, and keeps the account from running its share full around the
 clock, which GitHub's Actions terms count against it when the burden is disproportionate to the
 benefits. `ci_history.py --tiers` takes the last 20 `ci` runs with event `push` on `main`, sums
@@ -1220,9 +1313,23 @@ CPU model, and the section also records the `ci-history` branch's packed size (R
 |---|---|---|
 | `tier (x86_64, e2e-1)` | pending (make ci-budget after merge) | - |
 | `tier (x86_64, e2e-2)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, in-guest-1)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, in-guest-2)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, in-guest-3)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-1)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-2)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-3)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-4)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-5)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-6)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-1)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-2)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-3)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-4)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, kernel-smp4-5)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-1)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-2)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-3)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-4)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-5)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, lapic-fallback-6)` | pending (make ci-budget after merge) | - |
 | `tier (x86_64, vibefs-crash)` | pending (make ci-budget after merge) | - |
 | `tier (x86_64, vibefs-crash-plants)` | pending (make ci-budget after merge) | - |
 

@@ -11,7 +11,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Iterable
 
-from tests.harness import frame, results, skips
+from tests.harness import frame, ktest_shards, results, skips
 from tests.harness.harness import (
     BOOT_ALLOWANCE_S,
     PANIC_DONE,
@@ -784,21 +784,56 @@ def hpet_off_boot(env: EnvConfig) -> None:
     print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--hpet-off",
-        action="store_true",
-        help="after the default boot, boot HPET_OFF_KTEST with the PIT driving the tick",
-    )
-    args = parser.parse_args([] if argv is None else argv)
-    env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
-    results.Results(env.tier)
+@dataclasses.dataclass(frozen=True)
+class ProofBoot:
+    """A boot `make test-kernel` runs after its main boot, on its own disk."""
+
+    name: str
+    label: str
+    # The module function that runs it, looked up when it runs.
+    func: str
+    # Whether the boot applies at `smp` CPUs, with `--hpet-off` or not.
+    applies: Callable[[int, bool], bool]
+    # Whether it runs when `VIBEOS_KTEST` selects the main boot's rows.
+    with_selection: bool = False
+
+    def run(self, env: EnvConfig) -> None:
+        getattr(sys.modules[__name__], self.func)(env)
+
+
+def _always(smp: int, hpet_off: bool) -> bool:
+    return True
+
+
+# In run order. A shard (`ktest_shards.SHARDS`) runs the ones it names.
+PROOF_BOOTS: tuple[ProofBoot, ...] = (
+    ProofBoot("hpet-off", "hpet=off boot", "hpet_off_boot", lambda smp, h: h, True),
+    ProofBoot("select", "select boot", "ktest_select_boot", _always),
+    ProofBoot("repeat", "repeat boot", "_repeat_boot", lambda smp, h: smp == 2),
+    ProofBoot("deadline-trip", "deadline trip boot", "ktest_deadline_trip", lambda s, h: s >= 2),
+    ProofBoot("planted", "planted stack boot", "_planted_boot", _always),
+    ProofBoot("fat", "fat 16k stack boot", "_fat_boot", _always),
+    ProofBoot("vblk-readonly", "vblk readonly boot", "_vblk_readonly_boot", _always),
+    ProofBoot("vblk-bad-sector", "vblk bad sector boot", "_vblk_bad_sector_boot", _always),
+)
+
+
+def proof_boot_names(smp: int, hpet_off: bool) -> list[str]:
+    """The proof boots the union target runs at `smp` CPUs, in order."""
+    return [b.name for b in PROOF_BOOTS if b.applies(smp, hpet_off)]
+
+
+def main_boot(env: EnvConfig, range_word: str | None) -> int:
+    """The registry boot, limited to `range_word`'s rows when given, then
+    the persist reboot of its disk when it ran `block_persist`."""
+    menv = env
+    if range_word is not None:
+        menv = dataclasses.replace(env, cmdline=f"{env.cmdline} {range_word}".strip())
     skip_persist = env_flag("VIBEOS_SKIP_PERSIST")
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     disk2 = make_disk(DISK2_BYTES, "vibeos-vblk2-")
     try:
-        cfg = env.qemu(
+        cfg = menv.qemu(
             extra=ktest_devices(disk, env.smp, extra_disks=(disk2,)), boot_order="d"
         )
         try:
@@ -830,33 +865,46 @@ def main(argv: list[str] | None = None) -> int:
                 os.unlink(path)
             except OSError:
                 pass
+    return 0
 
-    if args.hpet_off:
-        try:
-            hpet_off_boot(env)
-        except HarnessError as e:
-            print(f"[ktest] FAIL hpet=off boot: {e}", file=sys.stderr)
-            return 1
 
-    # A boot the user selected with VIBEOS_KTEST is the whole run.
-    if env.ktest:
-        return 0
-    proofs: list[tuple[str, Callable[[EnvConfig], None]]] = [
-        ("select boot", ktest_select_boot)
-    ]
-    if env.smp == 2:
-        proofs.append(("repeat boot", _repeat_boot))
-    if env.smp >= 2:
-        proofs.append(("deadline trip boot", ktest_deadline_trip))
-    proofs.append(("planted stack boot", _planted_boot))
-    proofs.append(("fat 16k stack boot", _fat_boot))
-    proofs.append(("vblk readonly boot", _vblk_readonly_boot))
-    proofs.append(("vblk bad sector boot", _vblk_bad_sector_boot))
-    for label, proof in proofs:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--hpet-off",
+        action="store_true",
+        help="after the default boot, boot HPET_OFF_KTEST with the PIT driving the tick",
+    )
+    parser.add_argument(
+        "--shard",
+        choices=sorted(ktest_shards.SHARDS),
+        help="run one per-push shard of its variant (tests/harness/ktest_shards.py)",
+    )
+    args = parser.parse_args([] if argv is None else argv)
+    env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
+    results.Results(env.tier)
+    if args.shard is None:
+        boots = proof_boot_names(env.smp, args.hpet_off)
+        rc = main_boot(env, None)
+    else:
+        shard = ktest_shards.SHARDS[args.shard]
+        # A shard runs what it names that the union target would run here.
+        union = proof_boot_names(env.smp, ktest_shards.VARIANTS[shard.variant].hpet_off)
+        boots = [b for b in shard.boots if b in union]
+        rc = 0 if shard.rows is None else main_boot(env, shard.range_word())
+    if rc:
+        return rc
+    for boot in PROOF_BOOTS:
+        if boot.name not in boots:
+            continue
+        # A boot the user selected with VIBEOS_KTEST is the whole run, but
+        # for the boots that run whatever it holds.
+        if env.ktest and not boot.with_selection:
+            continue
         try:
-            proof(env)
+            boot.run(env)
         except HarnessError as e:
-            print(f"[ktest] FAIL {label}: {e}", file=sys.stderr)
+            print(f"[ktest] FAIL {boot.label}: {e}", file=sys.stderr)
             return 1
     return 0
 

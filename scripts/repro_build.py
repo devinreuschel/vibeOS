@@ -9,10 +9,21 @@ checkout paths of different lengths, with its own `CARGO_HOME` and
 builds match byte for byte, and none of them holds a host path: either
 checkout, `$HOME`, or either build's `CARGO_HOME` or `RUSTUP_HOME`.
 
+Disk: the run holds one build's toolchain and `target/` at a time. Before
+build B starts, build A's `target/`, `CARGO_HOME` and own `RUSTUP_HOME` are
+deleted, which leaves its outputs (`prune`). A build's own `RUSTUP_HOME`
+gets the pinned toolchain under rustup's `minimal` profile, so no
+`rust-docs` (0.9 GB), with the components and targets `rust-toolchain.toml`
+lists, and no MSRV toolchain (0.7 GB), which only `make check` uses
+(`VIBEOS_SKIP_MSRV=1` to `./setup.sh`). On a GitHub runner the work dir is
+under `$RUNNER_TEMP`, on the runner's disk, not in its quota-limited `/tmp`.
+
   --commit REV     the commit to build (default HEAD)
-  --workdir DIR    where the two builds go (default: a new temporary dir); it
-                   must not hold them already
-  --keep           keep the two builds afterwards
+  --workdir DIR    where the two builds go (default: a new directory under
+                   `$RUNNER_TEMP` when it is set, else under the system's
+                   temporary directory); it must not hold them already
+  --keep           keep the two builds afterwards, build A unpruned: the run
+                   then needs room for both builds at once
   --share-rustup   both builds use the caller's RUSTUP_HOME, so no toolchain
                    is downloaded (local runs; the scheduled job leaves it off)
   --scan-only      build nothing: scan this checkout's build/ for host paths
@@ -48,6 +59,14 @@ def default_cargo_home() -> Path:
 def default_rustup_home() -> Path:
     raw = os.environ.get("RUSTUP_HOME")
     return Path(raw) if raw else Path.home() / ".rustup"
+
+
+def workdir_parent() -> Path | None:
+    """Where a new work dir goes: `$RUNNER_TEMP` when it names a directory (a
+    GitHub runner's disk; the nightly run whose two builds sat in its `/tmp`
+    failed with EDQUOT), else None, the system's temporary directory."""
+    raw = os.environ.get("RUNNER_TEMP")
+    return Path(raw) if raw and Path(raw).is_dir() else None
 
 
 def plan(workdir: Path, share_rustup: bool) -> tuple[BuildSpec, BuildSpec]:
@@ -122,17 +141,24 @@ def scan(root: Path, needles: list[str]) -> list[str]:
 def build_env(spec: BuildSpec) -> dict[str, str]:
     """The build's environment: its own homes, and no CARGO_TARGET_DIR, so
     each build uses its checkout's target/. rustup's proxies stay on PATH
-    from the caller's CARGO_HOME; the build's own holds only its registry."""
+    from the caller's CARGO_HOME; the build's own holds only its registry.
+    `./setup.sh` installs no MSRV toolchain: `make isos` never uses it."""
     env = dict(os.environ)
     env.pop("CARGO_TARGET_DIR", None)
     env["CARGO_HOME"] = str(spec.cargo_home)
     env["RUSTUP_HOME"] = str(spec.rustup_home)
+    env["VIBEOS_SKIP_MSRV"] = "1"
     return env
 
 
 def run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
     print(f"repro: {cwd}: {' '.join(cmd)}", file=sys.stderr, flush=True)
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
+
+
+def own_rustup(spec: BuildSpec) -> bool:
+    """The build has a `RUSTUP_HOME` of its own, not the caller's."""
+    return spec.rustup_home != default_rustup_home()
 
 
 def build(spec: BuildSpec, commit: str) -> None:
@@ -147,17 +173,32 @@ def build(spec: BuildSpec, commit: str) -> None:
         if (registry / sub).is_dir() and not (spec.cargo_home / "registry" / sub).exists():
             shutil.copytree(registry / sub, spec.cargo_home / "registry" / sub, symlinks=True)
     env = build_env(spec)
-    if spec.rustup_home != default_rustup_home():
-        # A fresh RUSTUP_HOME: install rust-toolchain.toml's toolchain.
-        run(["rustup", "toolchain", "install", "--no-self-update"], spec.checkout, env)
+    if own_rustup(spec):
+        # A fresh RUSTUP_HOME: rust-toolchain.toml's toolchain, components and
+        # targets, without the default profile's rust-docs.
+        run(["rustup", "toolchain", "install", "--profile", "minimal", "--no-self-update"],
+            spec.checkout, env)
     run(["./setup.sh"], spec.checkout, env)
     run(["make", "isos"], spec.checkout, env)
+
+
+def prune(spec: BuildSpec) -> list[Path]:
+    """Delete what the built `spec` holds beyond its outputs: its `target/`,
+    its `CARGO_HOME`, and its `RUSTUP_HOME` when its own. Its checkout and
+    `build/` stay for `compare` and `scan`. Returns what it deleted."""
+    gone = [spec.checkout / "target", spec.cargo_home]
+    if own_rustup(spec):
+        gone.append(spec.rustup_home)
+    gone = [p for p in gone if p.exists()]
+    for p in gone:
+        shutil.rmtree(p)
+    return gone
 
 
 def made_paths(spec: BuildSpec) -> list[Path]:
     """What `build` creates for `spec`, to remove afterwards."""
     out = [spec.checkout.parent, spec.cargo_home]
-    if spec.rustup_home != default_rustup_home():
+    if own_rustup(spec):
         out.append(spec.rustup_home)
     return out
 
@@ -197,15 +238,19 @@ def main(argv: list[str] | None = None) -> int:
 
         commit = resolve(args.commit)
         made_workdir = args.workdir is None
-        workdir = (args.workdir or Path(tempfile.mkdtemp(prefix="vibeos-repro-"))).resolve()
+        workdir = (args.workdir or Path(
+            tempfile.mkdtemp(prefix="vibeos-repro-", dir=workdir_parent()))).resolve()
         a, b = plan(workdir, args.share_rustup)
         taken = [p for s in (a, b) for p in made_paths(s) if p.exists()]
         if taken:
             print(f"repro: {taken[0]} already exists", file=sys.stderr)
             return 2
         try:
-            for spec in (a, b):
-                build(spec, commit)
+            build(a, commit)
+            if not args.keep:
+                for p in prune(a):
+                    print(f"repro: pruned {p}", file=sys.stderr, flush=True)
+            build(b, commit)
             errors = compare(a.checkout, b.checkout)
             needles = needles_for([a, b])
             errors += scan(a.checkout, needles)
