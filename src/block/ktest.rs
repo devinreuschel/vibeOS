@@ -740,8 +740,6 @@ const WB_PAGES: usize = 10;
 /// How long a flush must stay blocked on the held write.
 const BLOCKED_MS: u64 = 200;
 
-const WAIT_NS: u64 = 2_000_000_000;
-
 const FLUSH_PENDING: u32 = 0;
 
 const FLUSH_OK: u32 = 1;
@@ -758,18 +756,6 @@ fn flush_ram0() {
     FLUSH_RES.store(res, Ordering::Release);
 }
 
-/// Poll `f` until it holds or `WAIT_NS` passes.
-fn wait_for(f: impl Fn() -> bool) -> bool {
-    let t0 = time_init::now_ns();
-    while !f() {
-        if time_init::now_ns().saturating_sub(t0) > WAIT_NS {
-            return false;
-        }
-        thread_init::sleep_ms(1);
-    }
-    true
-}
-
 /// Releases the hold and puts the saved pages back through the cache on
 /// every path out of [`cache_flush_waits_writeback`].
 struct WbGuard {
@@ -781,7 +767,8 @@ impl WbGuard {
     fn restore(&mut self) -> Result<(), BlockError> {
         release();
         // A failed flush thread may still be waiting: wait out its flush.
-        let _pending = wait_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING);
+        let _pending =
+            crate::ktest::sleep_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING);
         let ram = ram0().ok_or(BlockError::Gone)?;
         ram.write(WB_FIRST_LBA, &self.saved)?;
         ram.flush()?;
@@ -833,7 +820,7 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
     if ram.write(WB_FIRST_LBA, &dirty).is_err() {
         return Outcome::Fail("dirty");
     }
-    if !wait_for(held) {
+    if !crate::ktest::sleep_for(held) {
         return Outcome::Fail("blk-wb never held");
     }
     let flushes0 = flushes();
@@ -847,7 +834,7 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
         return Outcome::Fail("Flush sent while a write was held");
     }
     release();
-    if !wait_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING) {
+    if !crate::ktest::sleep_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING) {
         return Outcome::Fail("flush never returned");
     }
     if FLUSH_RES.load(Ordering::Acquire) != FLUSH_OK {
