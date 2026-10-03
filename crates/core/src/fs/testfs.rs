@@ -628,3 +628,144 @@ impl Vfs {
         }))
     }
 }
+
+/// A filesystem over `KeyFs`'s store that keys files as FAT does, by
+/// where their entry sits: names match without regard to case, a rename
+/// that changes only a name's case moves the file to a new key and frees
+/// the old one, and a create takes the lowest free key, so the next file
+/// made can take the key a rename left.
+pub(crate) struct FoldFs {
+    pub(crate) key: &'static KeyFs,
+}
+
+pub(crate) fn foldfs_new() -> &'static FoldFs {
+    std::boxed::Box::leak(std::boxed::Box::new(FoldFs { key: keyfs_new() }))
+}
+
+fn fold_eq(a: &[u8], b: &[u8]) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+impl FileSystem for FoldFs {
+    fn name(&self) -> &'static str {
+        "fold"
+    }
+    fn fstype(&self) -> FsType {
+        self.key.fstype()
+    }
+    fn ops(&'static self) -> Option<&'static dyn InodeOps> {
+        Some(self)
+    }
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        self.key.fill_super(cx)
+    }
+}
+
+impl InodeOps for FoldFs {
+    fn name_eq(&self, cached: &[u8], asked: &[u8]) -> bool {
+        fold_eq(cached, asked)
+    }
+    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
+        with_store(cx.private[0], |s| {
+            let n = s
+                .names
+                .iter()
+                .find(|e| e.0 == dir.key[0] && fold_eq(&e.1, name))
+                .ok_or(FsError::NotFound)?
+                .2;
+            Ok(knode_info(s, n))
+        })
+    }
+    fn create(
+        &self,
+        cx: &mut OpCx<'_>,
+        dir: &mut Inode,
+        name: &[u8],
+        kind: InodeKind,
+        _mode: u16,
+        _target: Option<&[u8]>,
+    ) -> Result<InodeInfo, FsError> {
+        with_store(cx.private[0], |s| {
+            if s.names
+                .iter()
+                .any(|e| e.0 == dir.key[0] && fold_eq(&e.1, name))
+            {
+                return Err(FsError::Exists);
+            }
+            let node = KNode {
+                kind,
+                nlink: 1,
+                data: Vec::new(),
+                alive: true,
+            };
+            let n = match s.nodes.iter().position(|k| !k.alive) {
+                Some(i) => {
+                    s.nodes[i] = node;
+                    i
+                }
+                None => {
+                    s.nodes.push(node);
+                    s.nodes.len() - 1
+                }
+            } as u32;
+            s.names.push((dir.key[0], name.to_vec(), n));
+            Ok(knode_info(s, n))
+        })
+    }
+    fn rename(
+        &self,
+        cx: &mut OpCx<'_>,
+        odir: &mut Inode,
+        oname: &[u8],
+        ndir: &mut Inode,
+        nname: &[u8],
+    ) -> Result<Option<Key>, FsError> {
+        with_store(cx.private[0], |s| {
+            let i = s
+                .names
+                .iter()
+                .position(|e| e.0 == odir.key[0] && fold_eq(&e.1, oname))
+                .ok_or(FsError::NotFound)?;
+            if odir.key[0] != ndir.key[0] || !fold_eq(oname, nname) {
+                return Err(FsError::Inval);
+            }
+            // A new entry for the new spelling, the old one freed: the file
+            // moves to the next key, and its old key is free to reuse.
+            let old = s.names[i].2 as usize;
+            let moved = s.nodes[old].clone();
+            s.nodes.push(moved);
+            let n = (s.nodes.len() - 1) as u32;
+            s.nodes[old].alive = false;
+            s.nodes[old].data.clear();
+            s.names[i] = (ndir.key[0], nname.to_vec(), n);
+            Ok(Some([n, 0, 0]))
+        })
+    }
+    fn read(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        KeyOps.read(cx, ino, off, buf)
+    }
+    fn write(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &[u8],
+    ) -> Result<usize, FsError> {
+        KeyOps.write(cx, ino, off, buf)
+    }
+    fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
+        KeyOps.truncate(cx, ino, size)
+    }
+    fn getattr(&self, cx: &mut OpCx<'_>, ino: &mut Inode) -> Result<(), FsError> {
+        KeyOps.getattr(cx, ino)
+    }
+    fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+        KeyOps.evict(cx, ino)
+    }
+}

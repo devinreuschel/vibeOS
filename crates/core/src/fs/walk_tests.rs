@@ -502,6 +502,28 @@ fn rename_replaces_as_linux() {
     assert_dcache_sound(&v);
 }
 
+/// A rename that changes only a name's case on a filesystem that keys a
+/// file by where its entry sits (FAT) moves the file to a new key: the
+/// cached inode follows it, so the next file made at the freed key is a
+/// new inode, not the renamed file's under another name.
+#[test]
+fn case_only_rename_moves_the_inode_to_its_new_key() {
+    let mut v = crate::fs::host_vfs();
+    v.mount_root_fs(foldfs_new()).unwrap();
+    put_file(&mut v, None, "/m", b"MDATA");
+    let held = v.open_path(None, "/m", O_RDWR, 0).unwrap();
+    v.rename(None, "/m", "/M").unwrap();
+    put_file(&mut v, None, "/n", b"NN");
+    assert_eq!(get_file(&mut v, None, "/M"), b"MDATA");
+    assert_eq!(get_file(&mut v, None, "/n"), b"NN");
+    // A descriptor held across the rename writes the renamed file.
+    assert_eq!(v.write(&held, b"m").unwrap(), 1);
+    v.close(held).unwrap();
+    assert_eq!(get_file(&mut v, None, "/M"), b"mDATA");
+    assert_eq!(get_file(&mut v, None, "/n"), b"NN");
+    assert_dcache_sound(&v);
+}
+
 /// What a `change_window` hook runs once, between a namespace change's
 /// walks and its begin step: on VFS `.0`, unlink `.1`, or rename it to
 /// `.2`.

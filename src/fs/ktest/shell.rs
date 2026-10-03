@@ -736,6 +736,13 @@ fn fs_commands_fat() -> Step<()> {
         &["mv", "/kt61c/m", "/kt61c/M"],
     )?;
     cat_is(&mut out, "cat /kt61c/M", "/kt61c/M", CAT_DATA)?;
+    // The rename gave `M` a new entry and freed `m`'s: a file made in that
+    // slot is its own, and `M` keeps its data, where the inode left keyed
+    // by the freed entry once took the new file's name onto `M`'s chain.
+    step("write /kt61c/n", put_file(b"/kt61c/n", b"NN"))?;
+    cat_is(&mut out, "cat /kt61c/n", "/kt61c/n", b"NN")?;
+    cat_is(&mut out, "cat /kt61c/M", "/kt61c/M", CAT_DATA)?;
+    step("rm /kt61c/n", file_init::unlink(b"/kt61c/n"))?;
     out.run("stat /kt61c/M", sh::stat, &["stat", "/kt61c/M"])?;
     if !out.buf.windows(7).any(|w| w == b"size 9 ") {
         return Err(Outcome::Fail("stat /kt61c/M does not print `size 9`"));

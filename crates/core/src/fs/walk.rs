@@ -470,13 +470,18 @@ impl Vfs {
         self.finish(b, true);
         let r = res.map(|moved| {
             let sb = self.sb_of(od.mount);
-            if tgt == Some(src) {
+            let same = tgt == Some(src);
+            if same && moved.is_none() {
                 // Two names of one file: the rename changed nothing.
                 self.dcache_drop_name(sb, od.dslot, oname);
                 self.dcache_drop_name(sb, nd.dslot, nname);
                 return;
             }
-            if let Some(t) = tgt {
+            // The target is another inode, which loses its link; or, when
+            // the target walk found the source itself through a name that
+            // differs only in case and the backend moved the file to a new
+            // key (FAT), it is the move below, with no link lost.
+            if let Some(t) = tgt.filter(|_| !same) {
                 self.unlink_inode(t);
             }
             let sd = self
