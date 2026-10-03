@@ -367,3 +367,6 @@ fn drop_ref(bitmap: &mut [u8], refc: &mut [u8], nblocks: u32, b: u32) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod ops_tests;

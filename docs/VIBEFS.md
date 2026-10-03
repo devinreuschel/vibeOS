@@ -317,10 +317,14 @@ extents and clears the inline flag. Truncating an extent file to 128 bytes
 or less moves its bytes back inline. Symlink targets use the inline area (an
 empty target, or one longer than 128 bytes, is `Inval`).
 
-v1 `truncate` does not meet the inline rule yet: growing an inline file past
-128 bytes keeps the inline flag with `size` above 128. A read that reaches
-past byte 128 of such a file, or a write that ends past byte 128, panics the
-kernel, and mount and `fsck` accept such an inode (F062; ROADMAP §13.9).
+`truncate` follows the same rule: growing an inline file past 128 bytes
+moves its bytes to an extent first, and shrinking an inline file zeroes the
+inline bytes past the new size, so a later grow reads zeros. An inline flag
+on an inode whose `size` is above 128, which a crafted image or an earlier
+v1 `truncate` leaves, is corruption: v1 mount accepts it, a read that
+reaches past byte 128, a write that ends past it, and any `truncate` of it
+return `Corrupt` (`EIO`) and change nothing, and `fsck` reports it as
+`inline` (F062; ROADMAP §13.9 makes mount reject it).
 
 Empty files may be inline with `inline_len = 0`.
 

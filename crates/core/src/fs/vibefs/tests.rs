@@ -1,6 +1,6 @@
 use super::*;
 
-fn fresh(n: usize) -> Vec<u8> {
+pub(super) fn fresh(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
     {
         let mut d = MemDisk::new(&mut b).unwrap();
@@ -10,7 +10,7 @@ fn fresh(n: usize) -> Vec<u8> {
     b
 }
 
-fn with_vol<R>(buf: &mut [u8], f: impl FnOnce(&mut Vol, &mut MemDisk) -> R) -> R {
+pub(super) fn with_vol<R>(buf: &mut [u8], f: impl FnOnce(&mut Vol, &mut MemDisk) -> R) -> R {
     let mut disk = MemDisk::new(buf).unwrap();
     let mut vol = Vol::new();
     mount(&mut disk, &mut vol).unwrap();
@@ -404,7 +404,7 @@ fn crash_workload_seeded_points() {
 }
 
 /// A regular file `name` in the root; its inode number.
-fn new_file(v: &mut Vol, d: &mut MemDisk, name: &[u8]) -> u32 {
+pub(super) fn new_file(v: &mut Vol, d: &mut MemDisk, name: &[u8]) -> u32 {
     v.create(d, ROOT_INO, name, InodeKind::Reg, 0o644, None)
         .unwrap();
     v.lookup(d, ROOT_INO, name).unwrap().ino
@@ -552,7 +552,7 @@ fn block_math_near_u32_limit() {
 }
 
 /// `fsck` over the image in `b`.
-fn fsck_of(b: &mut [u8]) -> FsckReport {
+pub(super) fn fsck_of(b: &mut [u8]) -> FsckReport {
     let mut d = MemDisk::new(b).unwrap();
     fsck(&mut d).unwrap()
 }
@@ -668,7 +668,7 @@ fn nested_dirs_63_commit_remount() {
 
 /// `f` (300 bytes, one extent), `g` (5 bytes, inline) and `p/c` on a
 /// 64-block image that fsck finds clean.
-fn base_tree() -> Vec<u8> {
+pub(super) fn base_tree() -> Vec<u8> {
     let mut b = fresh(64 * BLOCK);
     with_vol(&mut b, |v, d| {
         let f = new_file(v, d, b"f");
@@ -722,7 +722,7 @@ fn planted_alloc(plant: impl FnOnce(&mut [u8], &mut [u8], u32)) -> FsckReport {
     fsck_of(&mut b)
 }
 
-fn slot_of(v: &mut Vol, d: &mut MemDisk, dir: u32, name: &[u8]) -> (usize, usize) {
+pub(super) fn slot_of(v: &mut Vol, d: &mut MemDisk, dir: u32, name: &[u8]) -> (usize, usize) {
     let e = v.find_dent(dir, name).unwrap();
     let ino = v.lookup(d, dir, name).unwrap().ino;
     (e, v.inode_slot(ino).unwrap())

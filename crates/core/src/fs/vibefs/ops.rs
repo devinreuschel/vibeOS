@@ -741,23 +741,37 @@ impl Vol {
             return Err(Error::FileTooBig);
         }
         let old = self.inodes[is].size;
+        let inline = self.inodes[is].flags & F_INLINE != 0;
         if new >= old {
-            if self.inodes[is].flags & F_INLINE != 0 && new <= INLINE as u64 {
+            if inline && new <= INLINE as u64 {
                 self.inodes[is].size = new;
                 self.inodes[is].inline_len = new as u8;
                 self.bump_mtime(ino);
                 return Ok(());
             }
+            // Past the inline bytes the file needs extents (§7): its bytes
+            // move to a block while `size` still says how many there are,
+            // as a write past byte 128 moves them. `Corrupt` for an inline
+            // size an image set past them.
+            if inline {
+                self.spill_inline(d, ino)?;
+            }
+            let is = self.inode_slot(ino)?;
             self.inodes[is].size = new;
             self.bump_mtime(ino);
             return Ok(());
         }
-        if self.inodes[is].flags & F_INLINE != 0 {
+        if inline {
+            // `new < old`, so `new` fits the inline bytes unless an image
+            // set `old` past them; `inline_len` above 128 fails the mount.
+            let keep = usize::try_from(new)
+                .ok()
+                .filter(|&n| old <= INLINE as u64 && n <= INLINE)
+                .ok_or(Error::Corrupt)?;
             self.inodes[is].size = new;
-            self.inodes[is].inline_len = new as u8;
-            if new == 0 {
-                self.inodes[is].inline_data = [0; INLINE];
-            }
+            self.inodes[is].inline_len = keep as u8;
+            // A later grow reads zeros past `new`, not the old bytes.
+            self.inodes[is].inline_data[keep..].fill(0);
             self.bump_mtime(ino);
             return Ok(());
         }
