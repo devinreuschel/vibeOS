@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::stack_depth::{self, Deepest, DepthTable, SIZES};
 
-use crate::ktest::{Outcome, sleep_until};
+use crate::ktest::{Outcome, sleep_for};
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
 
@@ -52,9 +52,10 @@ pub(crate) fn report() {
     crate::marker!("vibeOS: stack: report {} sizes {} lost", n, lost);
 }
 
-/// Wait up to 2 s for the exit scan of thread `tid`.
+/// Wait for the exit scan of thread `tid`, until the run's deadline
+/// (`ktest::sleep_for`).
 pub(crate) fn wait_exit_depth(tid: u32) -> Option<usize> {
-    if !sleep_until(|| exit_depth(tid).is_some(), 2_000) {
+    if !sleep_for(|| exit_depth(tid).is_some()) {
         return None;
     }
     exit_depth(tid)

@@ -16,7 +16,7 @@ use vibeos::sched::stack_depth;
 use crate::arch::current::Arch;
 use crate::block::blockdev_init;
 use crate::file_init;
-use crate::ktest::{Outcome, sleep_until};
+use crate::ktest::{Outcome, sleep_for};
 use crate::thread_init;
 use crate::{apic_init, per_cpu_init};
 
@@ -304,9 +304,9 @@ pub(crate) fn fat_vda_16k_stack() -> Outcome {
         Ok(h) => h,
         Err(_) => return Outcome::Fail("spawn"),
     };
-    if !sleep_until(|| DONE.load(Ordering::Acquire), 20_000) {
+    if !sleep_for(|| DONE.load(Ordering::Acquire)) {
         ARMED_CPU.store(u32::MAX, Ordering::Release);
-        return Outcome::Fail("worker did not finish in 20 s");
+        return Outcome::Fail("worker did not finish by the run's deadline");
     }
     let r = RESULT.load(Ordering::Relaxed);
     if r != OK {
