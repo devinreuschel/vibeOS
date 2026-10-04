@@ -25,7 +25,7 @@ hold on both architectures.
 | `1_193_182` | PIT input frequency in Hz |
 | `1_000` | Target tick rate, so PIT divisor is 1193 |
 | `11_932` | PIT channel 2 count for a ~10 ms calibration window |
-| `10` | Local timer ticks per scheduling slice, so ~10 ms |
+| `10` | Scheduling quantum in ms of the running thread's TSC time (`QUANTUM_MS`), checked at each local timer tick; a run-time quantum, not a tick count, so late ticks lengthen it by one tick's lateness at most (§6.3) |
 | `0x40` / `0x42` / `0x43` | PIT channel 0 data / channel 2 data / command |
 | `0x61` | Speaker gate. Bit 0 enables channel 2, bit 5 reads its output. |
 | `CPUID.01H:ECX[24]` | TSC-deadline feature bit; the `IA32_TSC_DEADLINE` MSR is in §7.2 |
@@ -121,7 +121,9 @@ loop that raises the interrupts. On the scheduled macOS runner (an Apple M1 (Vir
 every 5 to 10 ms of TSC time. `pit_tick_rate` and `lapic_timer_rearm`'s periodic mode read the period
 as the median span between reloads of PIT channel 0's latched count, or of the LAPIC's
 current-count register, against the TSC (`vibeos::time::ReloadSpans`), and they count interrupts
-only to show the tick still arrives.
+only to show the tick still arrives. The scheduler's quantum is run time for the same reason
+([§6.1](#61-roles-and-constants), [SMP §7.8](SMP.md#78-per-cpu-scheduling)): counted in ticks, ten
+of them took about 100 ms there.
 
 When the LAPIC timer owns the tick, mask the PIT's GSI at the I/O APIC. Do not merely ignore its
 interrupts.

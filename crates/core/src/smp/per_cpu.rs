@@ -191,6 +191,9 @@ pub struct PerCpu {
     pub idle_tsc: u64,
     /// TSC at the start of the current slice.
     pub slice_tsc: u64,
+    /// TSC when the running thread's quantum began: its switch-in, or a
+    /// `schedule` that kept it running. DESIGN §7.8.
+    pub quantum_tsc: u64,
     pub switch_scratch: CpuContext,
     pub timer_mode: TimerMode,
     /// Local ready FIFO. Owner CPU only, IRQs off. DESIGN §7.8.
@@ -258,6 +261,7 @@ impl PerCpu {
             idle: core::ptr::null_mut(),
             idle_tsc: 0,
             slice_tsc: 0,
+            quantum_tsc: 0,
             switch_scratch: CpuContext::empty(),
             timer_mode: TimerMode::Pit,
             runq: ReadyQueue::empty(),
@@ -309,10 +313,10 @@ const _: () = {
 const _: () = {
     use core::mem::{align_of, size_of};
     const DEBUG: bool = cfg!(debug_assertions);
-    assert!(size_of::<PerCpu>() == if DEBUG { 1864 } else { 1096 });
+    assert!(size_of::<PerCpu>() == if DEBUG { 1872 } else { 1104 });
     assert!(align_of::<PerCpu>() == 8);
-    assert!(offset_of!(PerCpu, runq) == 136);
-    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1856 } else { 1088 });
+    assert!(offset_of!(PerCpu, runq) == 144);
+    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1864 } else { 1096 });
     assert!(size_of::<PerCpuRemote>() == 256);
     assert!(align_of::<PerCpuRemote>() == 64);
     assert!(offset_of!(PerCpuRemote, apic_id) == 168);
