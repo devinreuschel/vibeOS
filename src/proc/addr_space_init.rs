@@ -535,13 +535,17 @@ pub(crate) mod testing {
     static MAX_PAGES: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn note_hold(pages: u64) {
+        // Relaxed: a statistic; pairs with nothing.
         HOLDS.fetch_add(1, Ordering::Relaxed);
+        // Relaxed: a statistic; pairs with nothing.
         MAX_PAGES.fetch_max(pages, Ordering::Relaxed);
     }
 
     /// Zero the chunk counters.
     pub(crate) fn reset_chunks() {
+        // Relaxed: a statistic; pairs with nothing.
         HOLDS.store(0, Ordering::Relaxed);
+        // Relaxed: a statistic; pairs with nothing.
         MAX_PAGES.store(0, Ordering::Relaxed);
     }
 
@@ -549,6 +553,7 @@ pub(crate) mod testing {
     /// unmap paths took `PT` since [`reset_chunks`], and the most pages one
     /// hold covered.
     pub(crate) fn chunk_stats() -> (u64, u64) {
+        // Relaxed: statistics; pairs with nothing.
         (
             HOLDS.load(Ordering::Relaxed),
             MAX_PAGES.load(Ordering::Relaxed),
@@ -592,6 +597,7 @@ fn root_holder(root: u64) -> Option<RootHolder> {
     let mut id = 0u32;
     while (id as usize) < per_cpu_init::cpu_count() {
         if let Some(r) = per_cpu_init::cpu(id) {
+            // Acquire: pairs with each CPU's Release store of its `as_cr3`.
             let loaded = r.as_cr3.load(Ordering::Acquire);
             // A recorded root is a table address, as `load_cr3_u64` stores it.
             if loaded != 0 && loaded == root {
@@ -615,6 +621,7 @@ fn root_holder(root: u64) -> Option<RootHolder> {
 /// I44).
 pub unsafe fn load_cr3_u64(want: u64) {
     per_cpu_init::with_current(|cpu| {
+        // Relaxed: only this CPU stores its `as_cr3`; pairs with nothing.
         if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
             return;
         }
@@ -622,6 +629,7 @@ pub unsafe fn load_cr3_u64(want: u64) {
         // half this code and stack run in and stays allocated while loaded
         // (this fn's contract, `addr_space_init::load_cr3_u64`).
         unsafe { Arch::set_root(PhysAddr(want)) };
+        // Release: pairs with the Acquire load in `root_holder`.
         cpu.remote.as_cr3.store(want, Ordering::Release);
     });
 }
