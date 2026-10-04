@@ -49,9 +49,10 @@ const PIT_FIRES_MIN: u64 = 20;
 /// The reload period, in TSC cycles, of the down-counting timer `count`
 /// reads on this CPU: the median span [`ReloadSpans`] finds between its
 /// reloads. Each read is taken with IF off between two TSC reads, and one
-/// more than a quarter tick after the read before it starts afresh, so any
-/// period above a quarter tick reads true, the half-tick floor the callers
-/// test included. Under TCG the count is QEMU's clock at the read, whenever
+/// more than a quarter tick after the read before it starts afresh, so no
+/// reload goes unseen for a period above a quarter tick and each span is
+/// within a quarter tick of the period, inside the half-tick to two-tick
+/// band the callers test. Under TCG the count is QEMU's clock at the read, whenever
 /// the host delivers the timer's interrupts. `Err` with the spans taken
 /// when the run's deadline comes first.
 pub(crate) fn reload_period(count: impl Fn() -> u64, tsc_per_ms: u64) -> Result<u64, usize> {

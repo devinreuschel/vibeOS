@@ -24,11 +24,11 @@ const REARM_FIRES: u64 = 20;
 ///   between half a tick and two;
 /// - TSC-deadline mode: every fire CPU 0 takes in the window rearmed the
 ///   next one tick, `tsc_per_ms`, ahead, and the median of the 20
-///   intervals between the 21 fires, in TSC cycles, is at least half a
-///   tick. A fire comes no earlier than the deadline its rearm wrote, so
-///   no host delay lowers that median; an upper bound on it would measure
-///   the host, which under TCG raises the interrupt from QEMU's main loop,
-///   and a macOS host wakes that loop every 5 to 10 ms;
+///   intervals between the 21 fires, in TSC cycles, lies between half a
+///   tick and two. Only an accelerator offers TSC-deadline (TCG's CPU
+///   models have none), where the guest's deadline fires the interrupt
+///   itself, so these intervals do not wait on QEMU's main loop as the
+///   periodic mode's do under TCG;
 /// - both: CPU 0 takes 21 fires by the run's deadline.
 ///
 /// When the PIT drives the tick (no HPET, `make test-kernel`'s hpet=off
@@ -104,12 +104,13 @@ pub(crate) fn test_lapic_timer_rearm() -> Outcome {
     }
     gaps.sort_unstable();
     let median = gaps[(gaps.len() - 1) / 2];
-    if median >= k / 2 {
+    if (k / 2..=k.saturating_mul(2)).contains(&median) {
         return Outcome::Ok;
     }
     crate::fail_fmt!(
-        "lapic fire interval median {} us (min {}), want at least 500",
+        "lapic fire interval median {} us (min {}, max {}), want 500 to 2000",
         us(median),
-        us(gaps[0])
+        us(gaps[0]),
+        us(gaps[gaps.len() - 1])
     )
 }
