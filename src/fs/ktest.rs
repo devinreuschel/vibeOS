@@ -25,6 +25,7 @@ mod slots;
 mod stack16k;
 mod times;
 mod umount;
+mod vdap1;
 mod walk;
 
 use churn::test_file_table_fork_churn;
@@ -47,6 +48,7 @@ pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
 pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
 pub(crate) use times::{test_fat_times_wall_clock, test_vibefs_rename_ctime};
 pub(crate) use umount::test_umount_consistent;
+pub(crate) use vdap1::test_vdap1_vfs_read;
 pub(crate) use walk::test_walk_path_resolution;
 
 use crate::fat_init;
@@ -1304,6 +1306,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("fat_initrd_dev_no_null", test_fat_initrd_dev_no_null),
     test("vfs_io_off_lock", test_vfs_io_off_lock),
     test("fat_vol_wait_no_eio", test_fat_vol_wait_no_eio).deadline(60_000),
+    test("vdap1_vfs_read", test_vdap1_vfs_read),
     test("cwd_per_process", test_cwd_per_process),
     test("walk_path_resolution", test_walk_path_resolution),
     test("umount_consistent", test_umount_consistent).deadline(60_000),

@@ -68,14 +68,17 @@ fn write_image() -> Result<(), &'static str> {
     fat_image_to(b"vda")
 }
 
-/// Format a 256 KiB FAT32 image and write it to block device `dev`'s LBA
-/// 0 to 511 through the block cache a mount reads, then flush.
+/// Format a FAT32 image of 256 KiB, or of all of block device `dev` when
+/// it is smaller, and write it to `dev` from LBA 0 through the block cache
+/// a mount reads, then flush.
 pub(super) fn fat_image_to(dev: &[u8]) -> Result<(), &'static str> {
     let r = blockdev_init::lookup(dev).ok_or("no block device")?;
+    let cap = r.capacity_sectors().map_err(|_| "no capacity")?;
+    let sectors = usize::try_from(cap).map_or(IMG_SECTORS, |c| c.min(IMG_SECTORS));
     let mut img: TryVec<u8> =
-        TryVec::try_with_capacity(IMG_SECTORS * SEC).map_err(|_| "image alloc")?;
+        TryVec::try_with_capacity(sectors * SEC).map_err(|_| "image alloc")?;
     let zero = [0u8; SEC];
-    for _ in 0..IMG_SECTORS {
+    for _ in 0..sectors {
         img.try_extend_from_slice(&zero)
             .map_err(|_| "image alloc")?;
     }
