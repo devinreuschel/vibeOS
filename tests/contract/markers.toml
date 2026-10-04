@@ -241,6 +241,13 @@ source = "kernel"
 section = "§11.2"
 
 [[marker]]
+text = "vibeOS: paging: fw_cfg map failed"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
+
+[[marker]]
 text = "vibeOS: paging: map_end <addr> (<n> MiB)"
 kind = "diagnostic"
 arch = "both"

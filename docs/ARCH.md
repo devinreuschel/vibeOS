@@ -85,7 +85,7 @@ needs the concern moves it behind the seam (PORTABILITY.md §11.3).
 | File | Items | §11.1 row | Why fenced, not moved |
 |---|---|---|---|
 | `src/main.rs` | the root `x86` alias and `apic_init` use line; `gp_test_trip` | Exception entry and exit | the alias names the x86_64 port for the modules below; `gp_test_trip` is the `gp_test` build's `#GP` |
-| `src/boot/fw_cfg_init.rs` | the whole module (its `mod` line in `src/boot/mod.rs`) | Machine description | QEMU's fw_cfg is port I/O on x86_64 and MMIO elsewhere; the MMIO driver comes with the port (ROADMAP §11.5) |
+| `src/boot/fw_cfg_init.rs` | the port I/O `select` / `read_bytes` / `transfer` halves | Machine description | QEMU's fw_cfg is port I/O on x86_64 and MMIO on aarch64 (ROADMAP §11.5); both live in this module |
 | `src/console/kbd_init.rs` | the whole module (its `mod` line in `src/console/mod.rs`) | Interrupt controller and IRQ identity | the i8042 PS/2 driver is PC hardware (ROADMAP Phase 11 splits it) |
 | `src/console/console_init.rs` | `wait_key_loop`'s `cli`, `sti` and `sti; hlt` statements | Idle | ROADMAP §10.3's compiler-barrier box names these raw statements; the idle wait moves with the port's `wfi` sequence (§11.3) |
 | `src/sched/thread_init/idle.rs` | `halt_if_idle`'s `cli`, `sti` and `sti; hlt` statements | Idle | as for `wait_key_loop` |
