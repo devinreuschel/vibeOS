@@ -62,20 +62,16 @@ it; everything else stays NX, and after `smp: done` the rest of the window is go
 
 **Building page tables at boot never finishes.**
 `map_end` was computed from raw memory map entries, and firmware described an MMIO BAR as a
-multi-terabyte region. Rule: derive the physmap extent from usable RAM, kernel image end, and
-framebuffer extent, and cap it (8 GiB). PCI BAR size probes that return > 32 MiB are recorded
-and not page-walked into the ioremap window or physmap. Planned (ROADMAP §11.2): the physmap maps
-only RAM-typed ranges, so a huge MMIO descriptor is never walked and the cap goes (§4.1).
+multi-terabyte region. Rule: the physmap maps only RAM-typed ranges of the boot memory map, inside
+its DESIGN §4.1 slot, so a huge MMIO descriptor is never walked (§4.1). PCI BAR size probes that
+return > 32 MiB are recorded and not page-walked into the ioremap window.
 
 **Device reads return stale values on real hardware but work in QEMU.**
 MMIO reached through a write-back physmap mapping. QEMU does not enforce cache attributes; hardware
-does. Rule: LAPIC, I/O APIC, HPET, and every device MMIO page gets PCD + PWT, patched immediately after
-CR3 install and before first access. Patch every physmap leaf the range touches, and split a 2 MiB leaf
-to 4 KiB first when it also holds usable RAM, so no RAM frame gets a UC alias (§2.7, I17). Not yet
-enforced: `Mapper::patch_physmap_uc` marks whole 2 MiB leaves UC and can skip a trailing leaf (ROADMAP
-§11.2, F104). Planned (ROADMAP §11.2): device MMIO leaves the physmap for `ioremap`, so no physmap leaf
-is ever patched (§4.1).
-Do not UC-patch the console framebuffer when it aliases VGA BAR0; leave that physmap WB.
+does. Rule: LAPIC, I/O APIC, HPET, and every device MMIO page is reached only through `ioremap`
+(PCD + PWT on x86_64, Device-nGnRE on aarch64), so no physmap leaf maps device memory and no RAM
+frame gets a UC alias (§2.7, I17, F104). A framebuffer that aliases VGA BAR0 stays write-back
+through `memremap` or its RAM physmap alias; do not make it UC.
 
 **Config space beyond bus 0 is all `0xFFFF` on a machine without MCFG.**
 The kernel sends only bus 0 through `0xCF8`/`0xCFC`: for any other bus ECAM does not cover, `HwCfg::read32`

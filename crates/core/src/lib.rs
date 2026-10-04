@@ -70,7 +70,7 @@ pub use dev::{dma, entropy, pci, virtio};
 pub use drivers::virtio_blk;
 pub use fs::{fat, vibefs};
 pub use irq::ipi;
-pub use mm::{heap, kva, paging, pmm};
+pub use mm::{asid, heap, kva, paging, pmm};
 pub use proc::{addr_space, elf, syscall};
 pub use sched::{fpu, thread, wait, work};
 pub use smp::per_cpu;

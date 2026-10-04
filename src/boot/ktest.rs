@@ -22,9 +22,19 @@ pub(crate) fn test_bootinfo_consistent() -> Outcome {
         Some((pa, _, _)) if k.contains(&pa.as_u64()) => {}
         _ => return Outcome::Fail("text outside kernel span"),
     }
-    let map_end = paging_init::map_end();
-    if info.framebuffers().any(|fb| fb.phys + fb.size > map_end) {
-        return Outcome::Fail("fb outside physmap");
+    for fb in info.framebuffers() {
+        let mut p = fb.phys & !0xFFFu64;
+        let end = fb.phys.saturating_add(fb.size);
+        while p < end {
+            let hhdm = VirtAddr(paging_init::hhdm_offset().wrapping_add(p));
+            let mapped = paging_init::translate(hhdm).is_some()
+                || crate::fb_init::va_for_phys(p)
+                    .is_some_and(|v| paging_init::translate(VirtAddr(v)).is_some());
+            if !mapped {
+                return Outcome::Fail("fb page unmapped");
+            }
+            p = p.saturating_add(0x1000);
+        }
     }
     let slot = {
         #[cfg(target_arch = "x86_64")]

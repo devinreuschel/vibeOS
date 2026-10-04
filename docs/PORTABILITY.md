@@ -174,9 +174,9 @@ those bits from `FAR_EL1` before it uses the address, so neither the lookup nor 
 sees the tag. The opt-in, `PR_SET_TAGGED_ADDR_CTRL`, is ROADMAP §18.4's; until it lands that `prctl`
 returns `EINVAL`, and `docs/LINUX.md` lists the difference.
 
-Planned (ROADMAP §11.2): ASIDs, so a context switch changes TTBR0 without flushing the TLB. The
-allocator is Linux arm64's generation scheme. An address space holds one 64-bit value, a generation
-counter above its ASID bits, and each CPU holds an atomic `active_asid`. A switch into an address
+The ASID allocator is in `vibeos-core` (`mm/asid.rs`), Linux arm64's generation scheme, so a
+context switch changes TTBR0 without flushing the TLB. An address space holds one 64-bit value, a
+generation counter above its ASID bits, and each CPU holds an atomic `active_asid`. A switch into an address
 space whose generation is current publishes that value with a compare-exchange against the CPU's
 `active_asid` and loads TTBR0. Any other switch takes the allocator lock, keeps the space's old ASID
 if it is free or reserved in the current generation, and otherwise takes a free one. When none is

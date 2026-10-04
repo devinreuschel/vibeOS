@@ -1,5 +1,6 @@
 //! Memory management: the portable half (`vibeos-core`) of subsystem `mm` (DESIGN §1.3).
 
+pub mod asid;
 pub mod heap;
 pub mod kva;
 pub mod paging;

@@ -168,7 +168,7 @@ row and that their `order` never decreases down the table.
 | 2 | Base revision check | `limine: rev 6 ok` | Everything downstream reads Limine responses. A `panic_test` build stops after this step with `boot: panic-test armed`. |
 | 6 | `boot::capture`, then the buddy PMM from the memory map | `pmm: <n> free 4KiB frames` | Page tables and heap both need frames. `BootInfo` is captured once; nothing outside `boot` reads a Limine response. A second line, `pmm: <n> total, largest order <n>`, is a diagnostic. |
 | 7 | Page tables, install CR3 | `paging: cr3 ok` | Own the address space before mapping anything device-specific. |
-| 8 | ACPI table walk and the MMIO PTE attribute patch (`acpi_init::init`) | `paging: mmio uc` | LAPIC, I/O APIC and HPET pages must be uncacheable before first touch, so the walk runs right after CR3 and before the heap: moving it after the heap would make that first touch cacheable. Its `acpi: xsdt <n> tables` marker waits for step 12. |
+| 8 | ACPI table walk; ioremap LAPIC, I/O APIC, and HPET (`acpi_init::init`) | (none) | Device pages must be uncacheable through `ioremap` before first touch, so the walk runs right after CR3 and before the heap: moving it after the heap would make that first touch unmapped. Its `acpi: xsdt <n> tables` marker waits for step 12. |
 | 9 | Kernel heap, and a probe allocation read back | `heap ok` | `alloc` becomes legal. Until `irq: enabled` (step 15) boot may use its infallible API; from then on every allocation is fallible ([§4.4](MEMORY.md#44-kernel-heap)). |
 | 10 | Kernel VA allocator, and a guarded-stack probe | `kva: ready` | Guarded stacks need it, so threads and the IST stacks of step 3 need it. This is why steps 6-10 run before steps 3-5. |
 | 3 | GDT + TSS + IST (`gdt::init_bsp`) | `gdt ok` | A known code selector and a double-fault stack before the IDT is worth installing. The IST stacks are guarded KVA stacks (step 10). |
@@ -200,9 +200,9 @@ Ordering rules worth stating separately because they were learned the hard way:
 - The PCI scan that sizes BARs (step 15b) runs before the first AP starts, though its
   `pci: N devices` stays at step 17b. A BAR sized while another CPU runs moves under that CPU's
   MMIO: on QEMU's TCG a LAPIC EOI went astray that way and the CPU never acked an IPI again.
-- ACPI discovery for the step-8 UC patch runs immediately after CR3 (alongside `paging: mmio uc`).
+- ACPI discovery for the step-8 ioremap of LAPIC, I/O APIC, and HPET runs immediately after CR3.
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
-  heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
+  heap: first touch of those pages would then be unmapped.
 - In the ROADMAP §12.1 KASAN build, `_start` maps the early shadow (§4.1) before step 1, since every
   instrumented function reads the shadow, the buddy at step 6 included.
 

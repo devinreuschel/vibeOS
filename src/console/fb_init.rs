@@ -18,7 +18,10 @@ use vibeos::lock::RANK_DEVICE;
 
 use crate::arch::current::interrupts_enabled;
 use crate::boot::FbInfo;
+use crate::kva_init;
+use crate::paging_init;
 use crate::sync_init::SpinMutex;
+use vibeos::paging::{PhysAddr, VirtAddr, physmap_flags};
 
 const BANNER_ROWS: u32 = 1;
 const BG: u32 = pack_bgrx(0x12, 0x12, 0x18);
@@ -59,6 +62,7 @@ pub(super) static CONSOLE: SpinMutex<Console> = SpinMutex::with_rank(
 );
 static FB_PHYS: AtomicU64 = AtomicU64::new(0);
 static FB_LEN: AtomicU64 = AtomicU64::new(0);
+static FB_VIRT: AtomicU64 = AtomicU64::new(0);
 
 /// The framebuffer console is up; the REPL and the in-guest tests ask.
 #[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
@@ -81,6 +85,20 @@ pub fn overlaps_phys(phys: u64, len: u64) -> bool {
     phys < base.saturating_add(span) && base < phys.saturating_add(len)
 }
 
+/// Kernel VA of `phys` inside the console framebuffer mapping, if any.
+pub fn va_for_phys(phys: u64) -> Option<u64> {
+    let span = FB_LEN.load(Ordering::Acquire);
+    if span == 0 {
+        return None;
+    }
+    let base = FB_PHYS.load(Ordering::Acquire);
+    if phys < base || phys >= base.saturating_add(span) {
+        return None;
+    }
+    let virt = FB_VIRT.load(Ordering::Acquire);
+    Some(virt.saturating_add(phys - base))
+}
+
 /// Attach the first framebuffer [`Fb::new`] accepts.
 pub fn init() -> bool {
     let Some((info, fb)) = crate::boot::info()
@@ -89,6 +107,7 @@ pub fn init() -> bool {
     else {
         return false;
     };
+    let base = fb.base;
     {
         let mut c = CONSOLE.lock();
         if !c.grid.configure(fb.width, fb.height, BANNER_ROWS) {
@@ -102,11 +121,34 @@ pub fn init() -> bool {
     }
     // Release: pairs with the Acquire load in `overlaps_phys`.
     FB_PHYS.store(info.phys, Ordering::Release);
+    // Release: pairs with the Acquire load in `va_for_phys`.
+    FB_VIRT.store(base, Ordering::Release);
     // Release: pairs with the Acquire load in `overlaps_phys`; publishes `FB_PHYS` too.
     FB_LEN.store(info.size, Ordering::Release);
     // Release: pairs with the Acquire loads in `ready` and `write`.
     READY.store(true, Ordering::Release);
     true
+}
+
+fn map_fb(i: &FbInfo) -> Option<u64> {
+    let hhdm = paging_init::hhdm_offset();
+    let va = VirtAddr(i.virt);
+    if paging_init::phys_mapped(i.phys) && paging_init::translate(va).is_some() {
+        let end = i.phys.saturating_add(i.size);
+        let mut p = i.phys & !(4096 - 1);
+        while p < end {
+            if paging_init::translate(VirtAddr(hhdm.wrapping_add(p))).is_none() {
+                break;
+            }
+            p = p.saturating_add(4096);
+        }
+        if p >= end {
+            return Some(hhdm.wrapping_add(i.phys));
+        }
+    }
+    // SAFETY: the framebuffer is device or RAM the bootloader already
+    // scanned; `memremap` maps it write-back in KVA (MEMORY.md §4.1).
+    unsafe { kva_init::memremap(PhysAddr(i.phys), i.size, physmap_flags()) }.map(|v| v.as_u64())
 }
 
 impl Fb {
@@ -115,8 +157,12 @@ impl Fb {
         if i.bpp != 32 || i.width < FONT_W || i.height < FONT_H * (BANNER_ROWS + 1) || i.pitch < 4 {
             return None;
         }
+        let Some(base) = map_fb(i) else {
+            crate::marker!("vibeOS: fb: unreachable");
+            return None;
+        };
         Some(Self {
-            base: i.virt,
+            base,
             width: i.width,
             height: i.height,
             pitch: i.pitch,

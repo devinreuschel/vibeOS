@@ -8,9 +8,9 @@
 //!
 //! ## Design notes
 //!
-//! - Two page sizes: 4 KiB leaf at level 1 and 2 MiB leaf at level 2.
-//!   Bigger pages (1 GiB / L3) are not used; DESIGN §4.3 only names the
-//!   two we implement.
+//! - Three page sizes: 4 KiB at level 1, 2 MiB at level 2, 1 GiB at
+//!   level 3. `map_range` still picks 4 KiB and 2 MiB; 1 GiB is only
+//!   through `map_page(Size1G)` (the physmap builder).
 //! - Table frames come from a caller-supplied `FrameAlloc` as `pmm::Frames`
 //!   tokens, so host tests can back the allocator with a `Vec`-backed
 //!   buddy (`pmm::testing::Pool`). In the kernel it pulls from the buddy
@@ -27,7 +27,7 @@
 //!   remapping".
 //!
 //! User half is `0x0`..`USER_END` (DESIGN §4.1). Address spaces live in
-//! [`crate::addr_space`]. 1 GiB pages and demand paging stay phase 12.
+//! [`crate::addr_space`]. Demand paging stays phase 12.
 //!
 //! Real TLB shootdown IPIs: `tlb_shootdown_others` is a hook the
 //! kernel installs (DESIGN §4.3 / §7.9). Host tests leave it unset.
@@ -43,6 +43,7 @@ use crate::pmm::Frames;
 pub const PAGE_SHIFT: u32 = 12;
 pub const PAGE_SIZE_4K: u64 = 1 << PAGE_SHIFT;
 pub const PAGE_SIZE_2M: u64 = 1 << 21;
+pub const PAGE_SIZE_1G: u64 = 1 << 30;
 
 /// User canonical half, exclusive end. DESIGN §4.1.
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -57,13 +58,9 @@ const _: () = assert!(USER_MAP_END == 0x0000_7FFF_FFFF_F000);
 pub const NULL_GUARD_LEN: u64 = PAGE_SIZE_4K;
 
 pub use super::physmap::{
-    PHYSMAP_AARCH64, PHYSMAP_X86_64, PhysmapSlot, TIB, hhdm_in_slot, physmap_ram_fit,
+    PHYSMAP_AARCH64, PHYSMAP_X86_64, PhysmapRun, PhysmapSlot, PhysmapWalk, TIB, clip_range_to_slot,
+    hhdm_in_slot, leftover_mib, phys_in_slot, physmap_ram_fit, walk_physmap,
 };
-
-/// Hard cap on the physmap's extent (MEMORY.md §4.1, PITFALLS.md §9.2).
-/// Firmware sometimes reports multi-terabyte MMIO BARs as memmap entries;
-/// walking that at boot never finishes. The PMM ingests nothing above it.
-pub const PHYSMAP_CAP: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Physical byte address. Newtype so a physical value cannot silently
 /// stand in for a virtual one, and vice versa (DESIGN §1.1).
@@ -105,6 +102,7 @@ impl VirtAddr {
 pub enum PageSize {
     Size4K,
     Size2M,
+    Size1G,
 }
 
 impl PageSize {
@@ -112,7 +110,25 @@ impl PageSize {
         match self {
             PageSize::Size4K => PAGE_SIZE_4K,
             PageSize::Size2M => PAGE_SIZE_2M,
+            PageSize::Size1G => PAGE_SIZE_1G,
         }
+    }
+
+    pub const fn leaf_level(self) -> u8 {
+        match self {
+            PageSize::Size4K => 1,
+            PageSize::Size2M => 2,
+            PageSize::Size1G => 3,
+        }
+    }
+}
+
+#[inline]
+const fn page_size_at(level: u8) -> PageSize {
+    match level {
+        1 => PageSize::Size4K,
+        2 => PageSize::Size2M,
+        _ => PageSize::Size1G,
     }
 }
 
@@ -137,6 +153,8 @@ impl PageFlags {
     /// use PAT anywhere so treating it as PS is fine.
     pub const HUGE: u64 = 1 << 7;
     pub const GLOBAL: u64 = 1 << 8;
+    /// Contiguous hint (aarch64 descriptor bit 52). Software-available on x86.
+    pub const CONTIGUOUS: u64 = 1 << 52;
     pub const NX: u64 = 1 << 63;
 
     pub const fn empty() -> Self {
@@ -173,10 +191,20 @@ pub trait PageTable {
     /// Root slots `KERNEL_ROOT_FIRST..ENTRIES` are the kernel half every
     /// address space shares.
     const KERNEL_ROOT_FIRST: usize;
+    /// First kernel-half VA (TTBR1 / high canonical).
+    const KERNEL_VA_START: u64;
+    /// UXN bit in `PageFlags` for kernel-half leaves. Zero on x86_64.
+    const KERNEL_UXN: u64;
     /// The index `va` selects in a table at `level`, below `ENTRIES`.
     fn index(va: VirtAddr, level: u8) -> usize;
-    /// An entry that maps `pa` with `flags`.
-    fn make_entry(pa: PhysAddr, flags: PageFlags) -> u64;
+    /// A leaf that maps `pa` at `va` with `flags`.
+    fn make_entry(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> u64;
+    /// An interior table descriptor pointing at `pa`. No leaf permissions.
+    fn make_table(pa: PhysAddr) -> u64;
+    /// Whether `va` is canonical for this port.
+    fn va_ok(va: u64) -> bool;
+    /// Whether `va` is in the kernel half.
+    fn is_kernel_va(va: VirtAddr) -> bool;
     /// The physical address `entry` points at.
     fn entry_phys(entry: u64) -> PhysAddr;
     /// The flags of `entry`.
@@ -214,11 +242,13 @@ pub enum MapError {
     /// Address not aligned to the requested page size.
     Misaligned,
     /// A leaf entry already covers this VA and the caller did not ask
-    /// for `Remap`.
+    /// for `Remap` or `Invalidate`.
     AlreadyMapped,
-    /// The VA has no present leaf. Returned by operations that expect
-    /// to walk an existing mapping (e.g. `patch_physmap_uc`).
+    /// The VA has no present leaf.
     NotMapped,
+    /// `Remap` would change a live leaf's type, output address, size,
+    /// Contiguous bit, or make nG global. Invalidate first (ROADMAP §11.2).
+    LiveChange,
     /// Frame allocator returned `None` while walking down.
     OutOfFrames,
     /// A 2 MiB request landed under a 4 KiB leaf, or vice versa.
@@ -237,7 +267,8 @@ impl From<MapError> for crate::kerror::KError {
             MapError::Misaligned
             | MapError::NotMapped
             | MapError::PageSizeMismatch
-            | MapError::NonCanonical => Self::Inval,
+            | MapError::NonCanonical
+            | MapError::LiveChange => Self::Inval,
         }
     }
 }
@@ -248,8 +279,11 @@ pub enum MapMode {
     /// Fail with `MapError::AlreadyMapped` if the target PTE is present.
     /// The default; matches DESIGN §4.3's "assert on overlap" rule.
     Fresh,
-    /// Overwrite. Used by host tests and by the Phase 12 remap paths.
+    /// Permission-only overwrite, or global → nG. A live type, PA, size,
+    /// Contiguous, or nG → global change is `LiveChange`.
     Remap,
+    /// Break-before-make: clear the leaf, flush this CPU, then store.
+    Invalidate,
 }
 
 /// Canonicalization check: bits 48..64 must all equal bit 47.
@@ -314,7 +348,7 @@ impl<A: PageTable> Mapper<A> {
         mode: MapMode,
         alloc: &mut F,
     ) -> Result<(), MapError> {
-        if !is_canonical(va.0) {
+        if !A::va_ok(va.0) {
             return Err(MapError::NonCanonical);
         }
         let step = size.bytes();
@@ -323,16 +357,8 @@ impl<A: PageTable> Mapper<A> {
         }
 
         let mut table_phys = self.root;
-        // Walk down to the level that holds the leaf. 4K leaf sits at L1
-        // (walk L4->L3->L2->L1), 2M leaf sits at L2 (walk L4->L3->L2 and
-        // stop).
-        let leaf_level: u8 = match size {
-            PageSize::Size4K => 1,
-            PageSize::Size2M => 2,
-        };
+        let leaf_level = size.leaf_level();
 
-        // Walk levels 4 down to leaf_level+1: at each, ensure a child
-        // table exists.
         let mut level = A::LEVELS;
         while level > leaf_level {
             let idx = A::index(va, level);
@@ -353,23 +379,14 @@ impl<A: PageTable> Mapper<A> {
                 // frame the token above owned, reached at `hhdm_offset` as
                 // `FrameAlloc`'s contract (`mm::paging::FrameAlloc`) says.
                 unsafe { self.zero_frame(new) };
-                // Interior tables always writable, always non-NX.
-                // Setting USER here is fine — permission is masked by
-                // the leaf's flags for kernel VAs.
-                let interior =
-                    PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER);
                 // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract);
                 // `&mut self` makes this the root's one writer, and for the
                 // kernel root the page-table lock is held (invariant I48,
                 // established at `mm::paging_init::current_mapper`).
-                unsafe { entry_ptr.write_volatile(A::make_entry(new, interior)) };
+                unsafe { entry_ptr.write_volatile(A::make_table(new)) };
                 table_phys = new;
             } else {
                 if A::entry_flags(entry).contains(PageFlags::HUGE) {
-                    // The walk hit an existing huge/large leaf where we
-                    // expected an interior table. That means the caller
-                    // is trying to map a 4 KiB page inside an existing
-                    // 2 MiB region without splitting.
                     return Err(MapError::PageSizeMismatch);
                 }
                 table_phys = A::entry_phys(entry);
@@ -377,38 +394,81 @@ impl<A: PageTable> Mapper<A> {
             level -= 1;
         }
 
-        // Now at the level holding the leaf slot.
         let idx = A::index(va, leaf_level);
         // SAFETY: `table_phys` is a table the walk above reached, and
         // every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < A::ENTRIES` (`arch::PageTable::index`).
         let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
         // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract).
         let existing = unsafe { entry_ptr.read_volatile() };
-        if A::entry_flags(existing).contains(PageFlags::PRESENT) {
+        let present = A::entry_flags(existing).contains(PageFlags::PRESENT);
+        if present {
             match mode {
                 MapMode::Fresh => return Err(MapError::AlreadyMapped),
-                MapMode::Remap => {}
-            }
-            // If existing leaf was a 4K entry but we're placing a 2M leaf
-            // (or the other way round), refuse. Not our job to split.
-            let existing_huge = A::entry_flags(existing).contains(PageFlags::HUGE);
-            let want_huge = matches!(size, PageSize::Size2M);
-            if existing_huge != want_huge {
-                return Err(MapError::PageSizeMismatch);
+                MapMode::Remap => {
+                    let existing_huge = A::entry_flags(existing).contains(PageFlags::HUGE);
+                    let want_huge = !matches!(size, PageSize::Size4K);
+                    if existing_huge != want_huge {
+                        return Err(MapError::PageSizeMismatch);
+                    }
+                }
+                MapMode::Invalidate => {}
             }
         }
 
         let mut leaf_flags = flags.with(PageFlags::PRESENT);
-        if matches!(size, PageSize::Size2M) {
+        if !matches!(size, PageSize::Size4K) {
             leaf_flags = leaf_flags.with(PageFlags::HUGE);
         }
+        if A::is_kernel_va(va) {
+            leaf_flags = leaf_flags.with(A::KERNEL_UXN);
+        }
+
+        if present
+            && mode == MapMode::Remap
+            && live_change(
+                A::entry_phys(existing),
+                A::entry_flags(existing),
+                pa,
+                leaf_flags,
+            )
+        {
+            return Err(MapError::LiveChange);
+        }
+        if present && mode == MapMode::Invalidate {
+            // SAFETY: as the write below; this is the invalid store of
+            // break-before-make (ROADMAP §11.2), established here.
+            unsafe { entry_ptr.write_volatile(0) };
+            A::flush_local(va);
+        }
+
         // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract); the
         // caller vouches for `pa` (this fn's `# Safety` contract,
         // established here), and the page-table lock covers a kernel-root
         // write (invariant I48, established at
         // `mm::paging_init::current_mapper`).
-        unsafe { entry_ptr.write_volatile(A::make_entry(pa, leaf_flags)) };
+        unsafe { entry_ptr.write_volatile(A::make_entry(va, pa, leaf_flags)) };
         Ok(())
+    }
+
+    /// Raw leaf word at `va`, if present.
+    pub fn leaf_raw(&self, va: VirtAddr) -> Option<u64> {
+        let mut table_phys = self.root;
+        let mut level = A::LEVELS;
+        while level >= 1 {
+            let idx = A::index(va, level);
+            // SAFETY: `table_phys` is this root or a table the walk found
+            // under it (`mm::paging::Mapper::new`'s contract); `idx < A::ENTRIES`.
+            let entry = unsafe { self.table_ptr(table_phys).add(idx).read_volatile() };
+            if !A::entry_flags(entry).contains(PageFlags::PRESENT) {
+                return None;
+            }
+            if level == 1 || A::entry_flags(entry).contains(PageFlags::HUGE) {
+                return Some(entry);
+            }
+            table_phys = A::entry_phys(entry);
+            level -= 1;
+        }
+        None
     }
 
     /// Map `[va, va+len)` to `[pa, pa+len)` using the largest natural
@@ -477,11 +537,7 @@ impl<A: PageTable> Mapper<A> {
             }
             let is_leaf = level == 1 || A::entry_flags(entry).contains(PageFlags::HUGE);
             if is_leaf {
-                let size = if level == 1 {
-                    PageSize::Size4K
-                } else {
-                    PageSize::Size2M
-                };
+                let size = page_size_at(level);
                 let phys = A::entry_phys(entry);
                 // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract),
                 // and the page-table lock covers a kernel-root write
@@ -511,11 +567,7 @@ impl<A: PageTable> Mapper<A> {
             }
             let is_leaf = level == 1 || A::entry_flags(entry).contains(PageFlags::HUGE);
             if is_leaf {
-                let size = if level == 1 {
-                    PageSize::Size4K
-                } else {
-                    PageSize::Size2M
-                };
+                let size = page_size_at(level);
                 let page_base = A::entry_phys(entry).0;
                 let offset = va.0 & (size.bytes() - 1);
                 return Some((PhysAddr(page_base + offset), size, A::entry_flags(entry)));
@@ -526,75 +578,13 @@ impl<A: PageTable> Mapper<A> {
         None
     }
 
-    /// Add PCD+PWT to every leaf covering `[phys, phys+len)` in the
-    /// physmap portion of the address space, preserving 2 MiB page
-    /// size — DESIGN §4.3 forbids splitting. Callers pass `hhdm_start`,
-    /// the VA at which their physmap begins.
-    ///
-    /// Returns the number of leaf PTEs touched. Zero means the region
-    /// wasn't in the physmap and the caller should have used `ioremap`.
-    ///
-    /// # Safety
-    /// Only sound after CR3 install; the walked PTEs must be the ones
-    /// the CPU is currently using.
-    pub unsafe fn patch_physmap_uc(
-        &mut self,
-        hhdm_start: VirtAddr,
-        phys: PhysAddr,
-        len: u64,
-    ) -> Result<usize, MapError> {
-        if len == 0 {
-            return Ok(0);
-        }
-        let mut touched = 0usize;
-        let mut off: u64 = 0;
-        while off < len {
-            let va = VirtAddr(hhdm_start.0 + phys.0 + off);
-            let (_, size, _) = self.translate(va).ok_or(MapError::NotMapped)?;
-            // Walk to the leaf slot, add the bits, write back.
-            let leaf_level: u8 = match size {
-                PageSize::Size4K => 1,
-                PageSize::Size2M => 2,
-            };
-            let mut table_phys = self.root;
-            let mut level = A::LEVELS;
-            while level > leaf_level {
-                let idx = A::index(va, level);
-                // SAFETY: `translate` just walked this path to a present
-                // leaf, so each table on it is live, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < A::ENTRIES` (`arch::PageTable::index`).
-                let entry = unsafe { self.table_ptr(table_phys).add(idx).read_volatile() };
-                table_phys = A::entry_phys(entry);
-                level -= 1;
-            }
-            let idx = A::index(va, leaf_level);
-            // SAFETY: as above, `table_phys` holds the present leaf
-            // `translate` found (`mm::paging::Mapper::new`'s contract).
-            let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
-            // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract).
-            let entry = unsafe { entry_ptr.read_volatile() };
-            let patched = A::make_entry(
-                A::entry_phys(entry),
-                A::entry_flags(entry).with(PageFlags::PCD | PageFlags::PWT),
-            );
-            // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract); the
-            // caller walks the tables the CPU uses (this fn's `# Safety`
-            // contract, established here) under the page-table lock
-            // (invariant I48, established at
-            // `mm::paging_init::current_mapper`).
-            unsafe { entry_ptr.write_volatile(patched) };
-            touched += 1;
-            off = off.saturating_add(size.bytes());
-        }
-        Ok(touched)
-    }
-
     /// What covers `va`: a present leaf, or how far we can skip because
     /// a higher table slot is empty. Used by the range walker and by
     /// "assert this region is unmapped" checks (DESIGN §4.1).
     pub fn probe(&self, va: VirtAddr) -> Probe {
-        if !is_canonical(va.0) {
-            if va.0 < 0xFFFF_8000_0000_0000 {
-                return Probe::Skip(0xFFFF_8000_0000_0000 - va.0);
+        if !A::va_ok(va.0) {
+            if va.0 < A::KERNEL_VA_START {
+                return Probe::Skip(A::KERNEL_VA_START - va.0);
             }
             return Probe::Skip(PAGE_SIZE_4K);
         }
@@ -610,11 +600,7 @@ impl<A: PageTable> Mapper<A> {
             }
             let is_leaf = level == 1 || A::entry_flags(entry).contains(PageFlags::HUGE);
             if is_leaf {
-                let size = if level == 1 {
-                    PageSize::Size4K
-                } else {
-                    PageSize::Size2M
-                };
+                let size = page_size_at(level);
                 return Probe::Mapped {
                     pa: A::entry_phys(entry),
                     size,
@@ -914,6 +900,18 @@ pub enum Probe {
         size: PageSize,
         flags: PageFlags,
     },
+}
+
+/// True when `Remap` would change a live leaf in a way that needs BBM.
+fn live_change(old_pa: PhysAddr, old: PageFlags, new_pa: PhysAddr, new: PageFlags) -> bool {
+    if old_pa != new_pa {
+        return true;
+    }
+    let type_bits = PageFlags::PCD | PageFlags::PWT | PageFlags::HUGE | PageFlags::CONTIGUOUS;
+    if (old.0 & type_bits) != (new.0 & type_bits) {
+        return true;
+    }
+    !old.contains(PageFlags::GLOBAL) && new.contains(PageFlags::GLOBAL)
 }
 
 /// Bytes from `va` to the end of the page-table slot at `level`.
@@ -1244,16 +1242,31 @@ mod tests {
             .unwrap_err()
         };
         assert_eq!(err, MapError::AlreadyMapped);
-        // Remap replaces the leaf.
+        // Remap of a different PA is a live change.
         // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
         // the tables are the pool's (`fresh_mapper`), established here.
-        unsafe {
+        let err = unsafe {
             m.map_page(
                 va,
                 PhysAddr(0x0090_0000),
                 physmap_flags(),
                 PageSize::Size4K,
                 MapMode::Remap,
+                &mut pool,
+            )
+            .unwrap_err()
+        };
+        assert_eq!(err, MapError::LiveChange);
+        assert_eq!(m.translate(va).unwrap().0, pa);
+        // Invalidate then Fresh (BBM) installs the new PA.
+        // SAFETY: as above.
+        unsafe {
+            m.map_page(
+                va,
+                PhysAddr(0x0090_0000),
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Invalidate,
                 &mut pool,
             )
             .unwrap();
@@ -1299,61 +1312,140 @@ mod tests {
         assert_eq!(err, MapError::PageSizeMismatch);
     }
 
-    #[test]
-    fn patch_uc_preserves_2m_and_sets_bits() {
-        let mut pool = Pool::new(1024);
-        let mut m = fresh_mapper(&mut pool);
-        // Fake up a physmap at HHDM_START mapping [0, 4 MiB) with 2M pages.
-        let hhdm = VirtAddr(0xFFFF_8000_0000_0000);
-        // SAFETY: `Mapper::map_range`'s contract; the host never touches the leaves' frames,
-        // and the tables are the pool's (`fresh_mapper`), established here.
-        unsafe {
-            m.map_range(
-                hhdm,
-                PhysAddr(0),
-                4 * PAGE_SIZE_2M,
-                physmap_flags(),
-                MapMode::Fresh,
-                &mut pool,
-            )
-            .unwrap();
-        }
-        // Patch 8 KiB starting at phys 0x0020_1000: falls inside the
-        // second 2M page. patch should touch exactly one 2M leaf and
-        // leave it a 2M leaf.
-        // SAFETY: `Mapper::patch_physmap_uc`'s contract; on the host these tables stand in for
-        // the ones the CPU uses, established here.
-        let touched = unsafe {
-            m.patch_physmap_uc(hhdm, PhysAddr(0x0020_1000), 8 * 1024)
-                .unwrap()
-        };
-        assert_eq!(touched, 1);
-        let inside = VirtAddr(hhdm.0 + 0x0020_1000);
-        let (_, size, flags) = m.translate(inside).unwrap();
-        assert_eq!(size, PageSize::Size2M, "must not split");
-        assert!(flags.contains(PageFlags::PCD | PageFlags::PWT));
-        // A page in an adjacent 2M block still lacks the UC bits.
-        let outside = VirtAddr(hhdm.0 + 0x0040_0000);
-        let (_, _, oflags) = m.translate(outside).unwrap();
-        assert!(!oflags.contains(PageFlags::PCD));
+    fn map_ok(
+        m: &mut Mapper<Arch>,
+        pool: &mut Pool,
+        va: VirtAddr,
+        pa: PhysAddr,
+        flags: PageFlags,
+        size: PageSize,
+        mode: MapMode,
+    ) -> Result<(), MapError> {
+        // SAFETY: host tables; the leaf frame is never touched.
+        unsafe { m.map_page(va, pa, flags, size, mode, pool) }
     }
 
     #[test]
-    fn patch_uc_on_unmapped_returns_not_mapped() {
-        // patch_physmap_uc walks the physmap PTEs, so a phys address the
-        // physmap doesn't cover must surface as `NotMapped` — not the
-        // easily-misread `AlreadyMapped`.
-        let mut pool = Pool::new(1024);
+    fn remap_refuses_each_live_change() {
+        let mut pool = Pool::new(64);
         let mut m = fresh_mapper(&mut pool);
-        let hhdm = VirtAddr(0xFFFF_8000_0000_0000);
-        // Deliberately do NOT map anything into hhdm before patching.
-        // SAFETY: `Mapper::patch_physmap_uc`'s contract; on the host these tables stand in for
-        // the ones the CPU uses, established here.
-        let err = unsafe {
-            m.patch_physmap_uc(hhdm, PhysAddr(0), PAGE_SIZE_4K)
-                .unwrap_err()
-        };
-        assert_eq!(err, MapError::NotMapped);
+        let va = VirtAddr(0xFFFF_C000_0000_0000);
+        let pa = PhysAddr(0x0080_0000);
+        map_ok(
+            &mut m,
+            &mut pool,
+            va,
+            pa,
+            physmap_flags(),
+            PageSize::Size4K,
+            MapMode::Fresh,
+        )
+        .unwrap();
+
+        assert_eq!(
+            map_ok(
+                &mut m,
+                &mut pool,
+                va,
+                PhysAddr(0x0090_0000),
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Remap,
+            ),
+            Err(MapError::LiveChange)
+        );
+        assert_eq!(
+            map_ok(
+                &mut m,
+                &mut pool,
+                va,
+                pa,
+                mmio_flags(),
+                PageSize::Size4K,
+                MapMode::Remap,
+            ),
+            Err(MapError::LiveChange)
+        );
+        assert_eq!(
+            map_ok(
+                &mut m,
+                &mut pool,
+                va,
+                pa,
+                physmap_flags().with(PageFlags::CONTIGUOUS),
+                PageSize::Size4K,
+                MapMode::Remap,
+            ),
+            Err(MapError::LiveChange)
+        );
+        let noglob = physmap_flags().without(PageFlags::GLOBAL);
+        map_ok(
+            &mut m,
+            &mut pool,
+            va,
+            pa,
+            noglob,
+            PageSize::Size4K,
+            MapMode::Invalidate,
+        )
+        .unwrap();
+        assert_eq!(
+            map_ok(
+                &mut m,
+                &mut pool,
+                va,
+                pa,
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Remap,
+            ),
+            Err(MapError::LiveChange)
+        );
+        // Permission-only and global → nG are allowed.
+        map_ok(
+            &mut m,
+            &mut pool,
+            va,
+            pa,
+            noglob.without(PageFlags::WRITABLE),
+            PageSize::Size4K,
+            MapMode::Remap,
+        )
+        .unwrap();
+        assert!(!m.translate(va).unwrap().2.contains(PageFlags::WRITABLE));
+        map_ok(
+            &mut m,
+            &mut pool,
+            va,
+            pa,
+            noglob,
+            PageSize::Size4K,
+            MapMode::Remap,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn map_page_1g() {
+        let mut pool = Pool::new(64);
+        let mut m = fresh_mapper(&mut pool);
+        let va = VirtAddr(0xFFFF_8000_0000_0000);
+        let pa = PhysAddr(0);
+        map_ok(
+            &mut m,
+            &mut pool,
+            va,
+            pa,
+            physmap_flags(),
+            PageSize::Size1G,
+            MapMode::Fresh,
+        )
+        .unwrap();
+        let (got, size, _) = m.translate(va).unwrap();
+        assert_eq!(got, pa);
+        assert_eq!(size, PageSize::Size1G);
+        let mid = VirtAddr(va.0 + 0x2000_0000);
+        assert_eq!(m.translate(mid).unwrap().0, PhysAddr(0x2000_0000));
     }
 
     #[test]

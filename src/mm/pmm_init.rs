@@ -10,18 +10,19 @@
 //!   - anything not marked `USABLE`, including bootloader- and
 //!     ACPI-reclaimable
 //!   - `/reserved-memory` and the FDT memreserve block (`MachineDesc`)
-//!   - anything above the 8 GiB physmap cap
+//!   - RAM whose physmap alias would pass the DESIGN §4.1 slot
 //!
 //! `vibeos::pmm::clip_usable` subtracts the first four from every USABLE
 //! range as it reads `BootInfo`, with no fixed-size list (DESIGN §2.4);
 //! `Buddy::insert_region` drops frame 0 again as defence in depth.
 
 use vibeos::lock::RANK_BUDDY;
+use vibeos::paging::{clip_range_to_slot, leftover_mib};
 use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats, clip_usable};
 
 use crate::boot::BootInfo;
+use crate::paging_init;
 use crate::sync_init::SpinMutex;
-use vibeos::paging::PHYSMAP_CAP;
 
 static BUDDY: SpinMutex<Buddy> = SpinMutex::with_rank(Buddy::new(0), RANK_BUDDY);
 
@@ -59,21 +60,34 @@ pub unsafe fn init(info: &BootInfo) -> PmmStats {
             .chain(crate::machine_init::reserved_ranges())
     };
 
+    let slot = paging_init::physmap_slot();
+    let offset = info.hhdm_offset;
+    let mut leftover = 0u64;
+    for r in info.ram_ranges() {
+        let (_, left) = clip_range_to_slot(slot, offset, r.start, r.end);
+        leftover = leftover.saturating_add(left);
+    }
     // Free-list nodes, page tables, and heap pages are all reached through
-    // our physmap once cr3 switches, so RAM above its cap stays out.
+    // the physmap once cr3 switches, so RAM past the slot stays out.
     for r in info.usable() {
-        let end = r.end.min(PHYSMAP_CAP);
+        let (end, _) = clip_range_to_slot(slot, offset, r.start, r.end);
         if r.start < end {
             clip_usable(r.start..end, excl, |part| {
                 // SAFETY: `Buddy::insert_region`'s contract; Limine's HHDM
                 // maps every USABLE range (this fn's `# Safety` contract),
-                // clipped to the physmap cap so the kernel's physmap reaches
+                // clipped to the physmap slot so the kernel's physmap reaches
                 // it too (invariant I14), `clip_usable` hands each part once
                 // and outside frame 0, the trampoline page, the kernel image,
                 // framebuffers and modules (invariant I15); established here.
                 unsafe { buddy.insert_region(part.start, part.end) };
             });
         }
+    }
+    if leftover > 0 {
+        crate::marker!(
+            "vibeOS: pmm: {} MiB past the physmap slot ignored",
+            leftover_mib(leftover)
+        );
     }
 
     buddy.stats()

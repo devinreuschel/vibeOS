@@ -86,8 +86,16 @@ fn publish_isr(st: &ApicState) {
     TSC_DEADLINE.store(st.mode == TimerMode::TscDeadline, Ordering::Release);
 }
 
-fn phys_va(phys: u64) -> u64 {
-    paging_init::hhdm_offset().wrapping_add(phys)
+fn lapic_mmio_va(phys: u64) -> Option<u64> {
+    crate::acpi_init::lapic_va().or_else(|| {
+        // SAFETY: invariant I49: the LAPIC page is device MMIO; ACPI
+        // already ioremapped it when the MADT named it, and this is the
+        // fallback when the MADT base was zero.
+        unsafe {
+            paging_init::ioremap(vibeos::paging::PhysAddr(phys), vibeos::paging::PAGE_SIZE_4K)
+        }
+        .map(|v| v.as_u64())
+    })
 }
 
 /// # Safety
@@ -162,10 +170,13 @@ unsafe fn enable_lapic(lapic_base: u64) -> Option<u64> {
         crate::marker!("vibeOS: lapic: enable bit clear");
         return None;
     }
-    let va = phys_va(phys);
+    let Some(va) = lapic_mmio_va(phys) else {
+        crate::marker!("vibeOS: lapic: ioremap failed");
+        return None;
+    };
     // SAFETY: invariant I49, established at `acpi::acpi_init::init`: the
-    // MADT's LAPIC page is UC in the physmap (this fn's `# Safety`), and
-    // `va` is its physmap address.
+    // MADT's LAPIC page is UC through `ioremap` (this fn's `# Safety`), and
+    // `va` is that mapping.
     unsafe {
         // Probe: a disabled LAPIC reads as zero and looks like missing HW.
         lapic_write(va, LAPIC_TPR, 0);
@@ -201,10 +212,12 @@ fn enum_ioapics(ios: impl Iterator<Item = IoApic>, st: &mut ApicState) {
         if phys == 0 {
             continue;
         }
-        let va = phys_va(phys);
+        let Some(va) = crate::acpi_init::ioapic_va(phys) else {
+            continue;
+        };
         // SAFETY: invariant I49, established at `acpi::acpi_init::init`:
-        // every MADT I/O APIC page is UC in the physmap, and `va` is its
-        // physmap address; the caller holds `STATE`.
+        // every MADT I/O APIC page is UC through `ioremap`, and `va` is
+        // that mapping; the caller holds `STATE`.
         let ver = unsafe { io_read(va, IOAPIC_VER) };
         let max_index = ioapic_max_index(ver);
         if let Some(slot) = st.ioapics.get_mut(st.ioapic_n) {

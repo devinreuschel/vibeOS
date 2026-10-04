@@ -23,7 +23,6 @@ use crate::arch::current::{Arch, interrupts_enabled, wait_for_interrupt};
 use crate::arch::x86_64::{has_rdtscp, invariant_tsc, rdtsc_ser};
 use crate::cell::{BootCell, IrqCell};
 use crate::machine_init;
-use crate::paging_init;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
 
@@ -157,8 +156,8 @@ unsafe fn hpet_enable(va: u64) {
     }
 }
 
-fn hpet_va(hpet: &HpetInfo) -> u64 {
-    paging_init::hhdm_offset().wrapping_add(hpet.base)
+fn hpet_va(_hpet: &HpetInfo) -> Option<u64> {
+    crate::acpi_init::hpet_va()
 }
 
 /// HPET main counter VA + period, after the page is UC. None if unusable.
@@ -167,9 +166,9 @@ pub(crate) fn hpet_ready() -> Option<(u64, u32)> {
     if !hpet_period_ok(hpet.period_fs) {
         return None;
     }
-    let va = hpet_va(&hpet);
+    let va = hpet_va(&hpet)?;
     // SAFETY: invariant I49, established at `acpi::acpi_init::init`: it
-    // stores a nonzero `period_fs` only after UC-patching the HPET page,
+    // stores a nonzero `period_fs` only after ioremapping the HPET page,
     // and `hpet_period_ok` rejected zero just above.
     unsafe { hpet_enable(va) };
     Some((va, hpet.period_fs))
@@ -257,10 +256,10 @@ pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     if !hpet_period_ok(hpet.period_fs) {
         return None;
     }
-    let va = hpet_va(hpet);
+    let va = hpet_va(hpet)?;
     // Every HPET access below relies on invariant I49, established at
-    // `acpi::acpi_init::init`: it stores a nonzero `period_fs` only after
-    // UC-patching the HPET page, and `hpet_period_ok` rejected zero above.
+    // `acpi::acpi_init::init`: it ioremaps the HPET page before first
+    // touch, and `hpet_period_ok` rejected zero above.
     let main = || {
         // SAFETY: invariant I49, established at `acpi::acpi_init::init`,
         // as stated above `main`.

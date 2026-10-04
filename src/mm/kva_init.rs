@@ -14,7 +14,7 @@ use vibeos::kva::{
     DEFAULT_STACK_PAGES, KVA_END, KVA_SIZE, KVA_START, Kva, KvaError, KvaStats, PAGE_SIZE,
 };
 use vibeos::lock::RANK_PT;
-use vibeos::paging::{MapError, PhysAddr, VirtAddr, heap_flags, stack_flags};
+use vibeos::paging::{MapError, MapMode, PageFlags, PhysAddr, VirtAddr, heap_flags, stack_flags};
 use vibeos::pmm::Frames;
 pub use vibeos::thread::GuardedStack;
 use vibeos::thread::MAX_STACK_PAGES;
@@ -482,6 +482,89 @@ fn shoot_span(va: VirtAddr, n: usize) {
         vibeos::paging::tlb_shootdown_others(VirtAddr(va.as_u64() + i as u64 * PAGE_SIZE));
         i += 1;
     }
+}
+
+/// Map `[phys, phys+len)` into KVA with `flags`. `memunmap` frees it.
+///
+/// # Safety
+/// `[phys, phys+len)` is memory the kernel may map at this type, and no
+/// other mapping of it uses a conflicting type (invariant I17).
+pub unsafe fn memremap(phys: PhysAddr, len: u64, flags: PageFlags) -> Option<VirtAddr> {
+    if len == 0 {
+        return None;
+    }
+    let page_off = phys.as_u64() & (PAGE_SIZE - 1);
+    let Some(span) = page_off.checked_add(len) else {
+        return None;
+    };
+    let pages = span.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    let va = paging_init::with_pt(|_pt| with_kva(|k| k.alloc(pages)))?;
+    let base = VirtAddr(va);
+    let base_pa = PhysAddr(phys.as_u64() & !(PAGE_SIZE - 1));
+    // SAFETY: `map_range_locked`'s contract; `va` is a fresh KVA range and
+    // the caller vouches for `phys` (this fn's `# Safety`); established here.
+    let r = paging_init::with_pt(|pt| unsafe {
+        paging_init::map_range_locked(pt, base, base_pa, pages, flags, MapMode::Fresh)
+    });
+    if r.is_err() {
+        paging_init::with_pt(|pt| {
+            let mut off = 0u64;
+            while off < pages {
+                // SAFETY: these leaves, if any, are the ones `map_range`
+                // just placed, unused; established here.
+                let _ = unsafe { paging_init::unmap_4k_locked(pt, VirtAddr(va + off)) };
+                off = off.saturating_add(PAGE_SIZE);
+            }
+        });
+        let mut off = 0u64;
+        while off < pages {
+            vibeos::paging::tlb_shootdown_others(VirtAddr(va + off));
+            off = off.saturating_add(PAGE_SIZE);
+        }
+        release_va(base, pages);
+        return None;
+    }
+    let mut off = 0u64;
+    while off < pages {
+        vibeos::paging::tlb_shootdown_others(VirtAddr(va + off));
+        off = off.saturating_add(PAGE_SIZE);
+    }
+    Some(VirtAddr(va + page_off))
+}
+
+/// Unmap a `memremap` range and return its VA to KVA.
+///
+/// # Safety
+/// `va` and `len` are what `memremap` returned / was given, and nothing
+/// uses the mapping any more.
+#[expect(
+    dead_code,
+    reason = "pair of memremap (ROADMAP §11.2); callers free a firmware mapping after its last use"
+)]
+pub unsafe fn memunmap(va: VirtAddr, len: u64) {
+    if len == 0 {
+        return;
+    }
+    let page_off = va.as_u64() & (PAGE_SIZE - 1);
+    let start = va.as_u64() - page_off;
+    let Some(span) = page_off.checked_add(len) else {
+        return;
+    };
+    let pages = span.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    paging_init::with_pt(|pt| {
+        let mut off = 0u64;
+        while off < pages {
+            // SAFETY: this fn's `# Safety` contract, established here.
+            let _ = unsafe { paging_init::unmap_4k_locked(pt, VirtAddr(start + off)) };
+            off = off.saturating_add(PAGE_SIZE);
+        }
+    });
+    let mut off = 0u64;
+    while off < pages {
+        vibeos::paging::tlb_shootdown_others(VirtAddr(start + off));
+        off = off.saturating_add(PAGE_SIZE);
+    }
+    release_va(VirtAddr(start), pages);
 }
 
 /// Unmap `n` pages from `va` through `pt`. Local `invlpg` only.

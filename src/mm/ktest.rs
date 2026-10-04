@@ -342,8 +342,7 @@ pub(crate) fn test_vmap() -> Outcome {
     Outcome::Ok
 }
 
-/// A `FrameAlloc` that has no frames: remapping a present leaf needs no
-/// table, so `mmio_uc_flags`' restore never asks it for one.
+/// A `FrameAlloc` that has no frames: a refused `Remap` writes no leaf.
 struct NoFrames;
 
 // SAFETY: `FrameAlloc`'s contract is on the frames it hands out, and this
@@ -355,60 +354,45 @@ unsafe impl paging::FrameAlloc for NoFrames {
 }
 
 pub(crate) fn test_mmio_uc_flags() -> Outcome {
-    // LAPIC (0xFEE0_0000) sits above QEMU's 128 MiB map_end, so the
-    // generic patch API is still proven on a leaf we know exists:
-    // 2 MiB, inside the identity rest / physmap. ACPI's real bases
-    // are checked by `acpi_discovery`.
+    // A live physmap leaf must refuse a type change (ROADMAP §11.2 BBM).
     let phys = PhysAddr(0x0020_0000);
     let va = VirtAddr(paging_init::hhdm_offset() + phys.as_u64());
-    // The whole leaf the patch covers, and its flags, to restore after.
     let Some((pa, size, saved)) = paging_init::translate(va) else {
         return Outcome::Fail("translate before");
     };
     let mask = size.bytes() - 1;
     let leaf_va = VirtAddr(va.as_u64() & !mask);
     let leaf_pa = PhysAddr(pa.as_u64() & !mask);
-    // SAFETY: `paging_init::patch_physmap_uc`'s contract; `install` has run and the physmap
-    // covers physical 2 MiB. Making that RAM leaf UC breaks invariant I17 on purpose, for this
-    // test, until the restore below: UC only slows its accesses; established here.
-    if unsafe { paging_init::patch_physmap_uc(phys, 4096) }.is_err() {
-        return Outcome::Fail("patch_physmap_uc");
-    }
-    let patched = paging_init::translate(va).map(|(_, _, f)| f);
-    let restored = {
+    let err = {
         let mut m = paging_init::current_mapper();
-        // SAFETY: `Mapper::map_page`'s contract; the leaf goes back to the
-        // physical range and flags `translate` read above, which the
-        // physmap mapped before this test, so no other mapping reaches it
-        // anew; the guard holds the page-table lock (invariant I48,
-        // established at `mm::paging_init::current_mapper`).
+        // SAFETY: host-style remap of an existing physmap leaf; we expect
+        // LiveChange and no store, so the leaf stays as `saved`.
         unsafe {
             m.map_page(
                 leaf_va,
                 leaf_pa,
-                saved,
+                paging::mmio_flags(),
                 size,
                 paging::MapMode::Remap,
                 &mut NoFrames,
             )
         }
     };
-    <Arch as PageTable>::flush_local(leaf_va);
-    paging::tlb_shootdown_others(leaf_va);
-    if restored.is_err() {
-        return Outcome::Fail("restore map_page");
-    }
-    match patched {
-        None => return Outcome::Fail("translate after patch"),
-        Some(f) if !f.contains(PageFlags::PCD | PageFlags::PWT) => {
-            return Outcome::Fail("PCD/PWT not set on physmap leaf");
-        }
-        Some(_) => {}
+    if err != Err(paging::MapError::LiveChange) {
+        return crate::fail_fmt!("want LiveChange, got {err:?}");
     }
     match paging_init::translate(va) {
-        Some((_, s, f)) if s == size && f.0 == saved.0 => Outcome::Ok,
-        Some((_, _, f)) => crate::fail_fmt!("restored flags {:#x}, want {:#x}", f.0, saved.0),
-        None => Outcome::Fail("translate after restore"),
+        Some((_, s, f)) if s == size && f.0 == saved.0 => {}
+        Some((_, _, f)) => return crate::fail_fmt!("flags changed {:#x}", f.0),
+        None => return Outcome::Fail("translate after refuse"),
+    }
+    let Some(lapic) = crate::acpi_init::lapic_va() else {
+        return Outcome::Fail("lapic not ioremapped");
+    };
+    match paging_init::translate(VirtAddr(lapic)) {
+        Some((_, _, f)) if f.contains(PageFlags::PCD | PageFlags::PWT) => Outcome::Ok,
+        Some((_, _, f)) => crate::fail_fmt!("lapic flags {:#x}", f.0),
+        None => Outcome::Fail("lapic va unmapped"),
     }
 }
 

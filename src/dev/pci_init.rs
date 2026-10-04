@@ -4,8 +4,9 @@
 //! MCFG → ECAM (DESIGN §7.1). Scan fills the device list, with each
 //! function's parent bridge, and maps no BAR. A driver maps a memory BAR
 //! it has claimed, in its `probe`, through [`map_bar`] (DESIGN §12.3 rule
-//! 8): through ioremap or the capped physmap, never a multi-TiB page walk
-//! (DESIGN §4.1).
+//! 8): through ioremap, never a multi-TiB page walk (DESIGN §4.1). The
+//! physmap is RAM-only; a BAR that overlaps the framebuffer reuses that
+//! write-back mapping.
 
 use core::fmt::Write;
 #[cfg(feature = "kernel_tests")]
@@ -110,13 +111,12 @@ fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
     }
 }
 
-/// Map `[phys, phys + len)` for the kernel: uncached through the physmap
-/// below `map_end`, or through ioremap above it; a range that overlaps a
-/// framebuffer stays write-back on the physmap. `None` for a range that
-/// overlaps a RAM-typed range of the boot memory map, checked before
-/// anything is patched or mapped (DESIGN §12.3 rule 8), and when the UC
-/// patch fails. Reached only from [`map_bar`], through a live claim
-/// (invariant I58), from `ecam_va`, and from the in-guest tests.
+/// Map `[phys, phys + len)` uncached through `ioremap`, except a range
+/// that overlaps the framebuffer, which stays write-back on the mapping
+/// `fb_init` already installed. `None` for a range that overlaps a
+/// RAM-typed range of the boot memory map, checked before anything is
+/// mapped (DESIGN §12.3 rule 8). Reached only from [`map_bar`], through a
+/// live claim (invariant I58), from `ecam_va`, and from the in-guest tests.
 pub(super) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     if phys == 0 || len == 0 {
         return None;
@@ -124,36 +124,14 @@ pub(super) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     if dev::overlaps_any(phys, len, boot::info().ram_ranges()) {
         return None;
     }
-    let end = phys.checked_add(len)?;
-    // A BAR that aliases the Limine FB stays WB on the physmap: a UC patch
-    // or an ioremap would alias the console UC (DESIGN §4.1 / §9.2).
-    // Limine's surface (and thus map_end) is often smaller than the BAR
-    // (16 MiB); fill missing physmap leaves as WB so the BAR is mapped.
     if fb_init::overlaps_phys(phys, len) {
-        // SAFETY: `ensure_physmap_wb`'s contract; this range overlaps the
-        // framebuffer, which stays WB on the physmap and is never
-        // UC-patched or ioremapped (invariant I17, established here).
-        if unsafe { paging_init::ensure_physmap_wb(PhysAddr(phys), len) }
-            || phys < paging_init::map_end()
-        {
-            return Some(paging_init::hhdm_offset().wrapping_add(phys));
-        }
-        return None;
+        return fb_init::va_for_phys(phys);
     }
-    if end <= paging_init::map_end() {
-        // A failed patch leaves some of the range write-back: refuse it.
-        // SAFETY: `paging_init::install` ran at boot, long before the PCI
-        // scan, and `end <= map_end()`, so the physmap covers the range;
-        // established by `paging_init::map_end`.
-        unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) }.ok()?;
-        Some(paging_init::hhdm_offset().wrapping_add(phys))
-    } else {
-        // SAFETY: invariant I58: the range is a BAR its caller holds a
-        // claim on, which overlaps no other claim and no RAM, or an ECAM
-        // page, above the physmap, which only this mapping reaches;
-        // established by `dev::Registry::claim` and `pci_init::ecam_va`.
-        unsafe { paging_init::ioremap(PhysAddr(phys), len) }.map(|v| v.as_u64())
-    }
+    // SAFETY: invariant I58: the range is a BAR its caller holds a
+    // claim on, which overlaps no other claim and no RAM, or an ECAM
+    // page, which only this mapping reaches; established by
+    // `dev::Registry::claim` and `pci_init::ecam_va`.
+    unsafe { paging_init::ioremap(PhysAddr(phys), len) }.map(|v| v.as_u64())
 }
 
 /// Map the BAR `claim` holds, for the driver that claimed it; `None` for
@@ -176,9 +154,8 @@ pub fn map_bar(claim: &BarClaim) -> Option<u64> {
 
 /// Unmap the BAR `claim` holds from `va`, where [`map_bar`] mapped it. An
 /// ioremap VA loses its leaves, on every CPU, before this returns; the
-/// window never hands the VA out again (DESIGN §4.1). A physmap VA stays
-/// mapped, uncached or write-back as `map_bar` left it, until ROADMAP
-/// §11.2 makes the physmap RAM-only.
+/// window never hands the VA out again (DESIGN §4.1). A framebuffer
+/// overlap VA stays mapped write-back.
 ///
 /// # Safety
 /// `va` is what `map_bar(claim)` returned, and nothing touches it any
