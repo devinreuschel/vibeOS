@@ -18,7 +18,7 @@
 
 use core::fmt::Write;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use vibeos::lock::RANK_PT;
 use vibeos::marker;
@@ -59,6 +59,11 @@ pub fn hhdm_offset() -> u64 {
 /// page after `smp: done`.
 const LOW_ID_BASE: u64 = 0;
 const LOW_ID_SIZE: u64 = 512 * 1024 * 1024;
+
+/// Release/Acquire: `install` sets true after the window is mapped;
+/// `teardown_identity` sets false before it unmaps. `identity_covers`
+/// reads it.
+static IDENTITY_LIVE: AtomicBool = AtomicBool::new(false);
 
 // Linker-provided section boundaries. Names match `linker.ld`.
 unsafe extern "C" {
@@ -608,6 +613,8 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // the low identity window and the boot stack, so execution continues
     // across the switch; established here.
     unsafe { Arch::set_root(mapper.root()) };
+    // Release: pairs with the Acquire load in `identity_covers`.
+    IDENTITY_LIVE.store(true, Ordering::Release);
     // Relaxed: the BSP writes it before any reader; pairs with nothing.
     MAP_END.store(map_end, Ordering::Relaxed);
 
@@ -626,6 +633,22 @@ pub(crate) fn identity_window() -> core::ops::Range<u64> {
     LOW_ID_BASE..LOW_ID_BASE + LOW_ID_SIZE
 }
 
+/// True while the low identity window still maps `[phys, phys+len)`.
+/// Firmware tables outside RAM-typed ranges are read this way at
+/// `acpi_init::init` (BOOT.md step 8), before KVA/`memremap` exist.
+pub fn identity_covers(phys: u64, len: u64) -> bool {
+    // Acquire: pairs with the Release stores in `install` and
+    // `teardown_identity`.
+    if !IDENTITY_LIVE.load(Ordering::Acquire) {
+        return false;
+    }
+    let window = identity_window();
+    match phys.checked_add(len) {
+        Some(end) => phys >= window.start && end <= window.end,
+        None => false,
+    }
+}
+
 /// Identity leaves unmapped per PT hold in [`teardown_identity`] (DESIGN
 /// §2.9 rule 2).
 const TEARDOWN_BATCH: usize = 64;
@@ -641,6 +664,8 @@ const TEARDOWN_BATCH: usize = 64;
 /// but the trampoline page from here, and this CPU's stack lies outside
 /// the window.
 pub unsafe fn teardown_identity(keep: Option<u64>) {
+    // Release: pairs with the Acquire load in `identity_covers`.
+    IDENTITY_LIVE.store(false, Ordering::Release);
     let window = identity_window();
     let mut va = window.start;
     while va < window.end {

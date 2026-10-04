@@ -2,7 +2,9 @@
 //!
 //! DESIGN §3.3: after CR3, walk tables through the RAM-only physmap.
 //! LAPIC / I/O APIC / HPET are reached only through `ioremap` (ROADMAP
-//! §11.2). Firmware tables live in RAM-typed ranges already mapped.
+//! §11.2). A firmware table outside RAM (the RSDP in reserved BIOS) is
+//! read through the low identity window, which is still live at this
+//! step; `memremap` needs KVA and is used later (framebuffer).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,13 +31,18 @@ impl PhysMem for HhdmPhys {
         let Some(end) = addr.checked_add(buf.len() as u64) else {
             return false;
         };
-        if !physmap_covers(addr, end - addr) {
+        let src = if physmap_covers(addr, end - addr) {
+            paging_init::hhdm_offset().wrapping_add(addr) as *const u8
+        } else if paging_init::identity_covers(addr, end - addr) {
+            addr as *const u8
+        } else {
             return false;
-        }
-        let src = (paging_init::hhdm_offset().wrapping_add(addr)) as *const u8;
+        };
         // SAFETY: `physmap_covers` found a present physmap leaf for every
-        // 4 KiB of `[addr, end)`, RAM-typed and readable, so `src` is valid
-        // for `buf.len()` bytes; `buf` is a distinct `&mut`. Established here.
+        // 4 KiB of `[addr, end)`, or `identity_covers` found the same span
+        // inside the live low identity window (`paging_init::install`);
+        // `src` is valid for `buf.len()` bytes and `buf` is a distinct
+        // `&mut`. Established here.
         unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len()) };
         true
     }
