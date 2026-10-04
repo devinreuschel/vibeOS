@@ -375,8 +375,12 @@ jobs:
             targets: test-lapic-fallback-6
             jobs: 2
           - arch: x86_64
-            tier: vibefs-crash
-            targets: test-vibefs-crash
+            tier: vibefs-crash-1
+            targets: test-vibefs-crash-1
+            jobs: 2
+          - arch: x86_64
+            tier: vibefs-crash-2
+            targets: test-vibefs-crash-2
             jobs: 2
           - arch: x86_64
             tier: vibefs-crash-plants
