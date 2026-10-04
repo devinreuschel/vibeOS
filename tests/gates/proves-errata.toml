@@ -4,9 +4,10 @@
 # reads each row's `proves` in place of the line `was` of commit `commit`, lists
 # the row in its report, and fails a row whose commit is in the pull request but
 # does not match that `was`. `was` and `proves` are the text after `Proves: `,
-# exactly as the message holds it; `was` is empty when the commit has no line.
-# `commit` is the full sha. A row is a gate input (tests/gates/inputs.toml), so
-# adding one needs a `Gate-change:` trailer.
+# exactly as the message holds it; `was` is empty when the commit has no line,
+# and then each non-empty line of `proves` is one supplied trailer. `commit` is
+# the full sha. A row is a gate input (tests/gates/inputs.toml), so adding one
+# needs a `Gate-change:` trailer.
 
 [[erratum]]
 commit = "e202ed1f5744bbe2dec28af640d137f826bc294d"
@@ -37,3 +38,26 @@ commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
 was = "oslsr_clear -- every core releases the debug OS Lock"
 proves = "src/arch/aarch64/cpu.rs::release_debug_os_lock -- every core releases the debug OS Lock"
 why = "GitHub CI is x86-only; oslsr_clear is an aarch64 ktest and never appears in C-RESULTS. release_debug_os_lock is the function this PR added"
+
+[[erratum]]
+commit = "73a604f71cace8e16e55eb930344359971f7871e"
+was = ""
+proves = """
+src/arch/aarch64/ktest.rs -- `-smp 4` under `virt`
+src/arch/aarch64/secondary.rs -- secondary cores start through PSCI
+src/arch/aarch64/secondary.rs -- before each `CPU_ON`
+src/arch/aarch64/ktest.rs::test_sysreg_compare -- when §11.1 recorded EL2 entry
+src/arch/aarch64/secondary.rs -- the stub enables the MMU
+src/arch/aarch64/cpu.rs::print_exception_level -- each core prints the §11.1 exception-level marker
+docs/SMP.md -- DESIGN §7.3 gains an aarch64 paragraph
+src/arch/aarch64/percpu.rs -- the per-CPU base
+src/arch/aarch64/gic.rs -- per-CPU GIC redistributor
+src/arch/aarch64/cpu.rs::release_debug_os_lock -- every core releases the debug OS Lock
+failed_ap_cleanup (existing: x86 pre-SIPI free; aarch64 AFF_OFF free) -- the bring-up failure path
+stalled_ap_leak -- x86_64's bring-up failure path
+crates/core/src/arch/aarch64/psci.rs -- each core reads its own parameter block
+loom_call_function -- the §4.9 call-function slot
+psci_ids_match_the_spec -- PSCI `SYSTEM_OFF` and `SYSTEM_RESET`
+switch_context_roundtrip -- the aarch64 context switch
+"""
+why = "S8 (#226) squash dropped the Proves lines; these are the trailers the squashed S8 commit carried, with the three aarch64-only ktest/marker proofs rewritten as path::fn the way the 7b7c381 errata already did"

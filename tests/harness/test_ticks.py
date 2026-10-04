@@ -937,7 +937,12 @@ class TestErrata(RepoCase):
     WAS = f"suite_row (existing: in every boot) -- {PREFIX}"
 
     def errata(self, sha: str, was: str, proves: str) -> dict[str, str | None]:
-        row = (f'[[erratum]]\ncommit = "{sha}"\nwas = "{was}"\nproves = "{proves}"\n'
+        body = proves.replace("\\", "\\\\").replace('"', '\\"')
+        if "\n" in proves:
+            quoted = '"""\n' + proves + '\n"""'
+        else:
+            quoted = f'"{body}"'
+        row = (f'[[erratum]]\ncommit = "{sha}"\nwas = "{was}"\nproves = {quoted}\n'
                'why = "the proof skips on every per-push tier"\n')
         return {check_ticks.ERRATA_PATH: row}
 
@@ -964,6 +969,21 @@ class TestErrata(RepoCase):
         r = self.run_check()
         self.assertEqual(r.errors, [])
         self.assertTrue(any("erratum: Proves: host_one" in n for n in r.notes), r.notes)
+
+    def test_erratum_supplies_every_missing_proves_line(self) -> None:
+        self.roadmap = tick(self.roadmap, "delta box")
+        sha = self.commit("t", "beta box")
+        self.assertErrors(
+            self.run_check(),
+            "ticked with no `Proves:` line: beta box:",
+            "ticked with no `Proves:` line: delta box names",
+        )
+        fixed = "host_one (existing: a host test) -- delta box\nmake lint -- beta box"
+        self.commit("errata", None, self.errata(sha, "", fixed))
+        r = self.run_check()
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any("erratum: Proves: host_one" in n for n in r.notes), r.notes)
+        self.assertTrue(any("erratum: Proves: make lint" in n for n in r.notes), r.notes)
 
     def test_erratum_supplying_a_line_when_one_exists_fails(self) -> None:
         sha = self.commit(f"t\n\nProves: {self.WAS}", "delta box")
@@ -1003,11 +1023,13 @@ class TestErrata(RepoCase):
         rows, errors = check_ticks.load_errata(text)
         self.assertEqual(errors, [])
         for (sha, was), (proves, _) in rows.items():
-            for line in (was, proves):
-                if not line:
-                    continue
-                self.assertIsInstance(check_ticks.parse_proves(line), check_ticks.ProvesLine,
-                                      (sha, line))
+            for part in (was, proves):
+                for line in part.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    self.assertIsInstance(check_ticks.parse_proves(line),
+                                          check_ticks.ProvesLine, (sha, line))
 
 
 if __name__ == "__main__":
