@@ -768,6 +768,15 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     Outcome::Ok
 }
 
+/// Limine framebuffer over ramfb (ROADMAP §11.5).
+pub(crate) fn test_fb_limine() -> Outcome {
+    if crate::fb_init::ready() {
+        Outcome::Ok
+    } else {
+        Outcome::Fail("no framebuffer")
+    }
+}
+
 pub(crate) const TESTS: &[Test] = &[
     test("kstack_overflow", test_kstack_overflow),
     test("gic_present", test_gic_present),
@@ -784,4 +793,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("failed_ap_cleanup", test_failed_ap_cleanup),
     test("stalled_ap_leak", test_stalled_ap_leak).opt_in(),
     test("rtc_offset", test_rtc_offset),
+    test("fb_limine", test_fb_limine),
 ];
