@@ -158,8 +158,9 @@ Notify used the wrong BAR offset or ignored `notify_off_multiplier`. Rule: doorb
 a failed kick, not a store into some other register. The 2-byte store needs
 `queue_notify_off * multiplier + 2 <= length`: `virtio::notify_addr` accepts an offset of
 `length - 1` and skips the bound when `length` is 0 (ROADMAP §18.1, F048). The value written is the
-virtqueue index (without `VIRTIO_F_NOTIFICATION_DATA`); `virtio_blk_init::kick` writes 0 for every
-queue, which QEMU ignores and a device that shares one doorbell does not (ROADMAP §11.5, F047).
+virtqueue index (without `VIRTIO_F_NOTIFICATION_DATA`); `kick` writes that
+index. QEMU's virtio-pci ignores the value and takes the queue from the
+address; virtio-mmio reads the written index (ROADMAP §11.5, F047).
 
 **Device sees a virtqueue index and stale descriptors.**
 `avail.idx` was published with a compiler fence. Rule: descriptor stores, then `dma_wmb` /
