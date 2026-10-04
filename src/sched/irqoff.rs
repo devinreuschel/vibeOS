@@ -269,6 +269,8 @@ mod tracer {
         };
         let c = close(&s, now, freq);
         #[cfg(feature = "kernel_tests")]
+        testing::watch_note(crate::arch::cpu_id_hint(), c.ns, s.site);
+        #[cfg(feature = "kernel_tests")]
         if testing::take(c.ns, s.site, s.deliberate) {
             return;
         }
@@ -453,6 +455,45 @@ mod tracer {
             true
         }
 
+        static WATCH: AtomicBool = AtomicBool::new(false);
+        static WATCH_NS: AtomicU64 = AtomicU64::new(0);
+        static WATCH_SITE: AtomicU64 = AtomicU64::new(0);
+
+        pub(in crate::sched::irqoff) fn watch_begin() {
+            WATCH_NS.store(0, Ordering::Relaxed);
+            WATCH_SITE.store(0, Ordering::Relaxed);
+            // Release: a hook that sees the watch on sees the reset.
+            WATCH.store(true, Ordering::Release);
+        }
+
+        /// CPU 0's longest stretch closed while the watch was on, and its
+        /// site; the stretch still goes to the site tables.
+        pub(in crate::sched::irqoff) fn watch_end() -> Option<(u64, Site)> {
+            WATCH.store(false, Ordering::Release);
+            let bits = WATCH_SITE.load(Ordering::Relaxed);
+            if bits == 0 {
+                return None;
+            }
+            // SAFETY: invariant: `WATCH_SITE` holds 0 or `Site::bits`
+            // values; established by `sched::irqoff::watch_note`, its only
+            // nonzero store.
+            let site = unsafe { Site::from_bits(bits) };
+            Some((WATCH_NS.load(Ordering::Relaxed), site))
+        }
+
+        /// A stretch closed on `cpu`: keep CPU 0's longest while watching.
+        /// Only CPU 0's own hooks, with IF off, store, so Relaxed suffices.
+        pub(in crate::sched::irqoff) fn watch_note(cpu: u32, ns: u64, site: Site) {
+            // Acquire: pairs with the Release store in `watch_begin`.
+            if cpu != 0 || !WATCH.load(Ordering::Acquire) {
+                return;
+            }
+            if ns > WATCH_NS.load(Ordering::Relaxed) {
+                WATCH_NS.store(ns, Ordering::Relaxed);
+                WATCH_SITE.store(site.bits(), Ordering::Relaxed);
+            }
+        }
+
         pub(in crate::sched::irqoff) fn last() -> Option<(u64, Site, bool)> {
             if !SET.load(Ordering::Relaxed) {
                 return None;
@@ -494,5 +535,17 @@ pub mod testing {
     /// The longest stretch closed since [`capture`]: ns, site, deliberate.
     pub fn last() -> Option<(u64, Site, bool)> {
         super::tracer::testing::last()
+    }
+
+    /// Start keeping CPU 0's longest closed stretch, without taking any
+    /// stretch out of the site tables (unlike [`capture`]).
+    pub fn watch_cpu0() {
+        super::tracer::testing::watch_begin();
+    }
+
+    /// Stop the watch: CPU 0's longest stretch since [`watch_cpu0`], in
+    /// ns, and its site.
+    pub fn watch_cpu0_end() -> Option<(u64, Site)> {
+        super::tracer::testing::watch_end()
     }
 }
