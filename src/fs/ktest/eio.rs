@@ -12,7 +12,7 @@
 //! `vda` below the block cache, so no cached copy hides the bad sector:
 //! the mount's first read of that page goes to the device and fails.
 
-use vibeos::fat::{FatInode, FatVol, MemDisk, mkfs};
+use vibeos::fat::{FatInfo, FatInode, FatVol, MemDisk, mkfs};
 use vibeos::kalloc::TryVec;
 use vibeos::kerror::KError;
 use vibeos::proc::wait_exited;
@@ -175,11 +175,11 @@ fn zeroed(n: usize) -> Result<TryVec<u8>, &'static str> {
     Ok(v)
 }
 
-/// Whether cluster `clu`'s sector is in the bad sector's page.
-fn in_bad_page(data_lba: u32, clu: u32) -> bool {
-    let lba = u64::from(data_lba) + u64::from(clu.saturating_sub(2));
+/// Whether cluster `clu`'s first sector is in the bad sector's page.
+fn in_bad_page(info: FatInfo, clu: u32) -> bool {
     let page = BAD_SECTOR - BAD_SECTOR % PAGE_SECS;
-    (page..page + PAGE_SECS).contains(&lba)
+    info.clus_lba(clu)
+        .is_ok_and(|lba| (page..page + PAGE_SECS).contains(&u64::from(lba)))
 }
 
 /// Create file `name` in the root and write `data` into it.
@@ -209,6 +209,7 @@ fn build_image() -> Result<TryVec<u8>, &'static str> {
     let first = u32::try_from(page)
         .ok()
         .and_then(|p| p.checked_sub(info.data_lba))
+        .and_then(|o| o.checked_div(u32::from(info.spc)))
         .and_then(|c| c.checked_add(2))
         .ok_or("bad sector before the data area")?;
     let mut disk = MemDisk::new(&mut img, SEC as u32).map_err(|_| "image disk")?;
@@ -226,16 +227,16 @@ fn build_image() -> Result<TryVec<u8>, &'static str> {
     elf[..4].copy_from_slice(b"\x7fELF");
     let prog = file_with(&mut vol, &mut disk, b"prog", &elf)?;
     vol.sync(&mut disk).map_err(|_| "sync the image")?;
-    if ![data, dir, prog]
-        .iter()
-        .all(|&c| in_bad_page(info.data_lba, c))
-    {
+    if ![data, dir, prog].iter().all(|&c| in_bad_page(info, c)) {
         return Err("a file's first cluster is outside the bad sector's page");
     }
     Ok(img)
 }
 
-/// Write the volume to `vda` from LBA 0 below the block cache.
+/// Write the volume to `vda` from LBA 0 below the block cache. The
+/// bad-sector boot selects this test after `vblk_bad_sector` alone, and
+/// both read `vda` below the cache too (as `part_init::scan` does), so no
+/// cached page of these LBAs exists for the mount to read stale.
 fn write_image(img: &[u8]) -> Result<(), &'static str> {
     let vda = blockdev_init::lookup(b"vda").ok_or("no vda")?;
     for (i, chunk) in img.chunks(PAGE_SECS as usize * SEC).enumerate() {

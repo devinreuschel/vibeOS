@@ -640,7 +640,9 @@ fn two_fat_volumes() -> Result<(), &'static str> {
     let ub = file_init::umount(FAT_MNT_B.as_bytes()).map_err(|_| "umount /d2fb");
     let b_alone = fat_holder(FAT_DEV_B).is_none() && fat_holder(FAT_DEV_A).is_some();
     let ua = file_init::umount(FAT_MNT_A.as_bytes()).map_err(|_| "umount /d2fa");
-    r.and(ub).and(ua)?;
+    let da = file_init::rmdir(FAT_MNT_A.as_bytes()).map_err(|_| "rmdir /d2fa");
+    let db = file_init::rmdir(FAT_MNT_B.as_bytes()).map_err(|_| "rmdir /d2fb");
+    r.and(ub).and(ua).and(da).and(db)?;
     if !b_alone {
         return Err("umount /d2fb did not drop vdb's instance alone");
     }
