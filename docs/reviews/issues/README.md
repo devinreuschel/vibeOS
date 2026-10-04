@@ -36,7 +36,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [B2](B2-builtin-target-spike.md) | Replace the custom target JSON with built-in `x86_64-unknown-none` | Medium | M | II | C1 | `implemented (#84)` |
 | [B3](B3-tag-and-release.md) | Version, tag phases, and publish the ISO | Low | S | I | — | `implemented (#81)` |
 | [B4](B4-build-rs-inputs.md) | Simplify `build.rs` inputs and the initrd path | Low | S–M | II | B1 | `implemented (#89)` |
-| [I1](I1-macos-job-ovmf.md) | macOS CI job; find OVMF wherever it lives | Low | S | II | A2 | `in progress (#194)` |
+| [I1](I1-macos-job-ovmf.md) | macOS CI job; find OVMF wherever it lives | Low | S | II | A2 | `implemented (#194, #209, #212)` |
 | [DOC1](DOC1-top-of-funnel-docs.md) | README, DESIGN header, module map, MIT LICENSE | High | S | I | — | `implemented (#78)` |
 | [DOC2](DOC2-split-design-doc.md) | Split `DESIGN.md`; as-built in tables, not prose | Medium | M | III | A1 (helpful) | `implemented (#194)` |
 | [DOC3](DOC3-agents-md.md) | Version the agent instructions in the repo (`AGENTS.md`) | High | S | I | — | `implemented (#78)` |

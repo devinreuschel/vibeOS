@@ -1152,7 +1152,9 @@ prerelease `ci-history-<year>`, never marked latest and tagged at the branch's t
 rotation, lists it in `archives.json` with its SHA-256 and run ids, and restarts the branch from an
 orphan commit holding the rest, pushed with a lease on the tip it read. It refuses to archive the
 current year and fails with the size instead. `ci_history.py` reads the branch and the archives
-alike. The packed size is recorded here once the first daily run measures it (ROADMAP §10.9).
+alike. The branch's packed size was 160 KiB (`size-pack` from `git count-objects -v` in a
+`git clone --bare --single-branch --branch ci-history`) at `ci-history` commit `8e748d29` on
+2026-10-04 (ROADMAP §10.9).
 
 **Gate maps.** From Phase 10 on, `tests/gates/phase-<N>.toml` gives each exit-gate line of phase N
 but the tag the entries that prove it (ROADMAP §10.9, C-GATEMAP): one `[[line]]` per line, its `key`
@@ -1327,31 +1329,37 @@ holds no such run or a record lacks a job's `created`, `started` or `completed` 
 step's seconds. `make ci-budget` runs both and fails if either fails; the nightly `budget` job runs
 it, and from ROADMAP Phase 11 an entry of `tests/gates/common.toml` runs it before every phase
 tag. The medians below are filled from a `make ci-budget` run on `main`, citing the commit and the
-CPU model, and the section also records the `ci-history` branch's packed size (ROADMAP §10.9).
+CPU model, and the section also records the `ci-history` branch's packed size (ROADMAP §10.9). The
+first fill is `ci_history.py --tiers` alone, over the push runs on `main` up to `d494350c`, while
+`--budget` waits for its first complete week; GitHub picks each tier job's host CPU model, which the
+job's summary names. `vibefs-crash`'s 61 s passed the 60 s limit; #221 split it into
+`vibefs-crash-1` and `vibefs-crash-2`, whose medians the next fill records, and `--tiers` judges only
+the tiers the newest run has.
 
 | Tier | Median QEMU s (last 20 runs on main) | Measured at |
 |---|---|---|
-| `tier (x86_64, e2e-1)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, e2e-2)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-1)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-2)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-3)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-4)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-5)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-6)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-smp4-1)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-smp4-2)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-smp4-3)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-smp4-4)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, kernel-smp4-5)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, lapic-fallback-1)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, lapic-fallback-2)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, lapic-fallback-3)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, lapic-fallback-4)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, lapic-fallback-5)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, lapic-fallback-6)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, vibefs-crash)` | pending (make ci-budget after merge) | - |
-| `tier (x86_64, vibefs-crash-plants)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, e2e-1)` | 34.5 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, e2e-2)` | 43 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, forensics)` | 30 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-1)` | 34.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-2)` | 35 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-3)` | 32.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-4)` | 36 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-5)` | 36 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-6)` | 24 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-1)` | 32 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-2)` | 46 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-3)` | 38 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-4)` | 39 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-5)` | 40 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-1)` | 35.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-2)` | 32 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-3)` | 35 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-4)` | 32 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-5)` | 22.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-6)` | 24.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, vibefs-crash)` | 61 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, vibefs-crash-plants)` | 48.5 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
 
 **Issues and crash records.** Planned (ROADMAP §14.10, §22.5): one `workflow_run` filer is the only
 job with `issues: write`; it checks out nothing, runs no repository code, and opens or comments on
@@ -1368,7 +1376,10 @@ rustflags source. A job that sets `RUSTFLAGS` drops both (ROADMAP §10.1, F147).
 GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 35796216463): `check`
 53 s, then the ladder 160 s, serialized by `needs: check`. The ladder spends 58 s on setup, toolchain,
 kernel clippy, and ISO build before the first QEMU step, then 98 s across nine QEMU steps (longest:
-vibefs crash, 22 s); about **3m40s** end to end. A fmt or
+vibefs crash, 22 s); about **3m40s** end to end. After (ROADMAP §10.1): **599 s**, about 10 min,
+at `d494350c` (ci run 37174743575, a push to `main` on hosted `ubuntu-26.04` runners), as
+`python3 scripts/ci_history.py --series ci` prints it: `check` took 476 s and gates the 22 tier
+jobs, which ran in parallel, 40 to 87 s each, beside a 222 s `build`. A fmt or
 hostlib lint failure should go red in about a minute without starting QEMU. Host packages come from a
 cache (ROADMAP §10.1): `check`, `build` and `tier` each name theirs in `APT_PACKAGES` and restore
 `~/apt-cache` under the key `apt-<ImageOS>-<ImageVersion>-<sha256 of the list>`; a hit installs the
