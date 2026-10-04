@@ -14,7 +14,7 @@ use vibeos::block::{
 };
 use vibeos::dev::{DevRef, Device, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
-use vibeos::irq::IrqError;
+use vibeos::irq::{IrqError, IrqId};
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::{CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
@@ -91,7 +91,7 @@ pub(crate) struct VirtioBlk {
     flushes: AtomicU64,
     /// The common-config VA, which `needs_reset` reads; 0 before `setup`.
     common: AtomicU64,
-    /// The vectors the probe allocated, one per queue (or one for all),
+    /// The IDT vectors the probe allocated, one per queue (or one for all),
     /// each as `QUEUE_VEC_LIVE | cpu << 8 | vector`; 0 for none.
     queue_vecs: [AtomicU64; MAX_VQ],
     /// Completions whose device status [`harvest`](Self::harvest) replaces
@@ -234,7 +234,7 @@ fn write_features(common: u64, feat: u64) {
 fn fail_probe(
     dev: &Device,
     common: u64,
-    vecs: &[u8],
+    vecs: &[IrqId],
     nvec: usize,
     slots: Option<DmaBuffer>,
     vqs: &mut [Option<Vq>; MAX_VQ],
@@ -367,8 +367,8 @@ fn setup(
 
     let table_size = msix_table_size(dev);
     let per_q_msix = table_size as usize >= nq;
-    let mut vecs = [0u8; MAX_VQ];
-    // The CPU each of `vecs` was allocated on; a vector is valid only there.
+    let mut vecs = [IrqId::NONE; MAX_VQ];
+    // The CPU each of `vecs` was allocated on; an IRQ is valid only there.
     let mut vcpus = [0u32; MAX_VQ];
     let mut nvec = 0usize;
 
@@ -378,27 +378,25 @@ fn setup(
 
     if !per_q_msix {
         let cpu = irq_init::threaded_cpu();
-        let Some(pc) = per_cpu_init::cpu(cpu) else {
-            fail_probe(dev, common, &[], 0, None, &mut vqs, None);
-            return Err(VirtioError::Failed);
-        };
-        let vec = match irq_init::allocate_vector(cpu) {
-            Ok(v) => v,
-            Err(_) => {
+        let irq = match irq_init::alloc_msi(dev, 1).ok().and_then(|s| s.get(0)) {
+            Some(i) => i,
+            None => {
                 fail_probe(dev, common, &[], 0, None, &mut vqs, None);
                 return Err(VirtioError::Failed);
             }
         };
-        vecs[0] = vec;
+        vecs[0] = irq;
         vcpus[0] = cpu;
         nvec = 1;
-        if irq_init::set_threaded(vec, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
+        if irq_init::set_affinity(irq, cpu).is_err() {
             fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
             return Err(VirtioError::Failed);
         }
-        // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
-        if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8)
-        {
+        if irq_init::set_threaded(irq, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
+            fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
+            return Err(VirtioError::Failed);
+        }
+        if let Err(e) = irq_init::enable_msix(dev, 0, irq) {
             fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
             return match e {
                 IrqError::NoRoute => Err(VirtioError::NoCaps),
@@ -428,33 +426,25 @@ fn setup(
             irq_init::threaded_cpu()
         };
         if per_q_msix {
-            let Some(pc) = per_cpu_init::cpu(cpu) else {
-                fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
-                return Err(VirtioError::Failed);
-            };
-            let vec = match irq_init::allocate_vector(cpu) {
-                Ok(v) => v,
-                Err(_) => {
+            let irq = match irq_init::alloc_msi(dev, 1).ok().and_then(|s| s.get(0)) {
+                Some(i) => i,
+                None => {
                     fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
                     return Err(VirtioError::Failed);
                 }
             };
-            vecs[nvec] = vec;
+            vecs[nvec] = irq;
             vcpus[nvec] = cpu;
             nvec += 1;
-            if irq_init::set_threaded(vec, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
+            if irq_init::set_affinity(irq, cpu).is_err() {
                 fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
                 return Err(VirtioError::Failed);
             }
-            // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
-            if irq_init::enable_msix(
-                dev,
-                qi as u16,
-                vec,
-                pc.apic_id.load(Ordering::Relaxed) as u8,
-            )
-            .is_err()
-            {
+            if irq_init::set_threaded(irq, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
+                fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
+                return Err(VirtioError::Failed);
+            }
+            if irq_init::enable_msix(dev, qi as u16, irq).is_err() {
                 fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
                 return Err(VirtioError::Failed);
             }
@@ -580,7 +570,10 @@ fn setup(
     let mut i = 0usize;
     while i < MAX_VQ {
         let v = if i < nvec {
-            QUEUE_VEC_LIVE | (u64::from(vcpus[i]) << 8) | u64::from(vecs[i])
+            match irq_init::vector(vecs[i]) {
+                Some(hw) => QUEUE_VEC_LIVE | (u64::from(vcpus[i]) << 8) | u64::from(hw),
+                None => 0,
+            }
         } else {
             0
         };

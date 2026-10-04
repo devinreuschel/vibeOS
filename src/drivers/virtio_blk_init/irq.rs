@@ -1,10 +1,11 @@
 use core::any::Any;
+use core::sync::atomic::Ordering;
 
 use super::issue::{copy_from_bounce, slot_base};
 use super::*;
 
 impl VirtioBlk {
-    /// This disk's vector allocated on `cpu`, valid only on that CPU.
+    /// This disk's IDT vector allocated on `cpu`, valid only on that CPU.
     #[cfg(feature = "kernel_tests")]
     pub fn queue_vector(&self, cpu: u32) -> Option<u8> {
         self.queue_vecs.iter().find_map(|q| {
