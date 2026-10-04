@@ -129,7 +129,9 @@ that sets it:
   `per_cpu_init::init_bsp` before it marks the per-CPU area live.
 - `serial::set_capture_hook` (the log ring's serial capture), set by `log_init::init` right after
   `Serial::init`, before the first marker.
-- Planned (ROADMAP §10.7): `serial::raw::set_stop_hook`, set by the stop primitive.
+- `serial::raw::set_stop_hook` (the stop primitive's poll stop, `ipi_init::stop_hook`, which a serial
+  write or log append on a CPU other than the dump's owner runs once `HALTING` is set), set by
+  `ipi_init::init` before the first AP starts (§2.5 step 1).
 - `sync_init::set_spin_poll` (`SpinMutex::lock`'s spin runs `service_incoming`), set by
   `ipi_init::init` before the first AP starts (§7.9).
 - `idt::set_intercept_hook` (the exception intercept for vectors 0 to 31), set by `catch::init` right
