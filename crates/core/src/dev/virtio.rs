@@ -16,10 +16,11 @@ use crate::pci::{
 
 pub const VENDOR_ID: u16 = 0x1AF4;
 
-/// Modern PCI device IDs are `0x1040 + virtio device id`.
+/// Modern PCI device IDs are `0x1040 + virtio device id` (virtio 1.2 §4.1.2).
 pub const DEV_RNG_MODERN: u16 = 0x1044;
-/// Transitional rng. Probe still requires [`F_VERSION_1`].
-pub const DEV_RNG_LEGACY: u16 = 0x1004;
+/// Transitional entropy source. Probe still requires [`F_VERSION_1`].
+/// Transitional `0x1004` is SCSI host, not rng.
+pub const DEV_RNG_LEGACY: u16 = 0x1005;
 /// Modern virtio-blk (`0x1040 + 2`).
 pub const DEV_BLK_MODERN: u16 = 0x1042;
 /// Transitional virtio-blk. Probe still requires [`F_VERSION_1`].
@@ -936,6 +937,7 @@ mod tests {
         assert_eq!(VirtioError::NoVersion1.as_str(), "no VERSION_1");
         assert!(is_rng(VENDOR_ID, DEV_RNG_MODERN));
         assert!(is_rng(VENDOR_ID, DEV_RNG_LEGACY));
+        assert!(!is_rng(VENDOR_ID, 0x1004));
         assert!(!is_rng(0x8086, DEV_RNG_MODERN));
         assert!(is_blk(VENDOR_ID, DEV_BLK_MODERN));
         assert!(is_blk(VENDOR_ID, DEV_BLK_LEGACY));

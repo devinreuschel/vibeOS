@@ -70,7 +70,7 @@ pub fn signal(step: pvpanic::Step) {
 
 /// The probe's result: the port and the supported mask, or `None` when no
 /// device was found.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn found() -> Option<(u16, u8)> {
     // Acquire: pairs with `probe`'s Release store.
     let s = STATE.load(Ordering::Acquire);

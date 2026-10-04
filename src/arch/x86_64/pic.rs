@@ -105,7 +105,7 @@ pub fn unclaimed(irq: u8) -> bool {
 }
 
 /// Whether line `irq` is masked at its PIC.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn is_masked(irq: u8) -> bool {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return false;

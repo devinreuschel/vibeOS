@@ -15,9 +15,9 @@ mod sleep;
 mod sweep;
 pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use dead_slot::lifetime_dead_slot_on_cpu;
-pub(crate) use depth::{
-    record, report, stack_depth_exit_scan, stack_depth_planted, wait_exit_depth,
-};
+#[cfg(target_arch = "x86_64")]
+pub(crate) use depth::report;
+pub(crate) use depth::{record, stack_depth_exit_scan, stack_depth_planted, wait_exit_depth};
 pub(crate) use fill::fill_threads;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 #[cfg(feature = "irqoff")]
@@ -37,6 +37,7 @@ pub(crate) use sweep::{sched_overdue_lost_timeout, sched_sweep_cost};
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::apic::TimerMode;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::paging::PAGE_SIZE_4K;
@@ -45,6 +46,7 @@ use vibeos::proc::{SIGKILL, wait_exited, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 use vibeos::thread::{ThreadId, ThreadState};
 
+#[cfg(target_arch = "x86_64")]
 use crate::apic_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{
@@ -64,6 +66,57 @@ use crate::work_init;
 use crate::x86;
 
 static SENTINEL: AtomicU64 = AtomicU64::new(0);
+
+/// Set while `test_idle_wfi` waits in the idle loop: the hook between the
+/// work check and `wfi` wakes `IDLE_TID` and sends this CPU the reschedule
+/// SGI (ROADMAP §11.3).
+#[cfg(target_arch = "aarch64")]
+static IDLE_HOOK: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "aarch64")]
+static IDLE_TID: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Idle-loop hook: IRQs still masked, before `wfi`.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn idle_pre_wait() {
+    if IDLE_HOOK.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    IDLE_HOOK.store(0, Ordering::Release);
+    let tid = ThreadId(IDLE_TID.load(Ordering::Acquire));
+    if tid.0 != u32::MAX {
+        thread_init::make_ready(tid);
+    }
+    crate::arch::aarch64::ipi::send_reschedule_self();
+}
+
+#[cfg(target_arch = "aarch64")]
+fn idle_wfi_entry() {
+    IDLE_WOKE.store(1, Ordering::Release);
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_idle_wfi() -> Outcome {
+    use crate::arch::aarch64::timer;
+    let Ok(h) = thread_init::spawn_parked_on("idle-wfi", idle_wfi_entry, 0) else {
+        return Outcome::Fail("spawn");
+    };
+    IDLE_TID.store(h.id().0, Ordering::Release);
+    IDLE_WOKE.store(0, Ordering::Release);
+    timer::disable();
+    IDLE_HOOK.store(1, Ordering::Release);
+    // Same wait as the idle thread: runq empty, hook, `wfi` still masked.
+    thread_init::halt_if_idle();
+    thread_init::yield_now();
+    timer::enable();
+    IDLE_TID.store(u32::MAX, Ordering::Release);
+    if IDLE_WOKE.load(Ordering::Acquire) == 0 {
+        return Outcome::Fail("idle wfi did not wake");
+    }
+    Outcome::Ok
+}
+
+#[cfg(target_arch = "aarch64")]
+static IDLE_WOKE: AtomicU32 = AtomicU32::new(0);
 
 fn sentinel_entry() {
     SENTINEL.store(0xC0FFEE, Ordering::SeqCst);
@@ -1289,6 +1342,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("sleep_ms_50", test_sleep_ms_50),
     test("preempt_two_threads", test_preempt_two_threads),
     test("idle_runs", test_idle_runs),
+    #[cfg(target_arch = "aarch64")]
+    test("idle_wfi", test_idle_wfi),
     test("reap_returns_frames", test_reap_returns_frames),
     test("reap_many_via_idle", test_reap_many_via_idle),
     #[cfg(target_arch = "x86_64")]

@@ -19,7 +19,12 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let linker = manifest.join("linker.ld");
+    let target = env::var("TARGET").unwrap_or_default();
+    let linker = if target.starts_with("aarch64") {
+        manifest.join("linker-aarch64.ld")
+    } else {
+        manifest.join("linker.ld")
+    };
     println!("cargo:rerun-if-changed={}", linker.display());
     // First link arg so rust-lld sees the script before other flags.
     println!("cargo:rustc-link-arg-bins=-T{}", linker.display());

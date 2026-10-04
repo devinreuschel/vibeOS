@@ -3,9 +3,11 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use vibeos::kva::DEFAULT_STACK_PAGES;
+#[cfg(target_arch = "x86_64")]
+use vibeos::time::{CALIB_BAND_INVARIANT, calib_in_band};
 use vibeos::time::{
-    CALIB_BAND_INVARIANT, CalibSource, ClocksourceId, Counter, Instant, Snapshot, TICK_NS,
-    calib_in_band, next_deadline, ns_at, unix_from_civil,
+    CalibSource, ClocksourceId, Counter, Instant, Snapshot, TICK_NS, next_deadline, ns_at,
+    unix_from_civil,
 };
 
 use vibeos::apic::TimerMode;
@@ -18,6 +20,7 @@ use crate::thread_init;
 use crate::time_init::{self, STATE};
 
 /// A fresh PIT channel 2 calibration (`tsc_per_ms`).
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn measure_pit_ch2() -> Option<u64> {
     let use_rdtscp = STATE.try_get().is_some_and(|s| s.use_rdtscp);
     time_init::calibrate_pit(use_rdtscp)
@@ -25,6 +28,7 @@ pub(crate) fn measure_pit_ch2() -> Option<u64> {
 
 /// Fresh HPET window. ktest compares this to PIT under the same SMP load;
 /// boot `tsc_per_ms` was sampled before APs came up.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn measure_hpet() -> Option<u64> {
     let hpet = machine_init::info()?.hpet_info()?;
     time_init::calibrate_hpet(&hpet, STATE.try_get().is_some_and(|s| s.use_rdtscp))
@@ -655,17 +659,26 @@ pub(crate) fn test_tsc_calib_source() -> Outcome {
                 return Outcome::Skip("no invariant tsc");
             }
             // Boot HPET ran before APs. Remeasure both under this SMP load.
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                Outcome::Skip("x86 calib")
+            }
+            #[cfg(target_arch = "x86_64")]
             let Some(hpet) = measure_hpet() else {
                 return Outcome::Fail("hpet calib failed");
             };
+            #[cfg(target_arch = "x86_64")]
             let Some(pit) = measure_pit_ch2() else {
                 return Outcome::Fail("pit ch2 calib failed");
             };
-            let (lo, hi) = CALIB_BAND_INVARIANT;
-            if calib_in_band(hpet, pit, lo, hi) {
-                Outcome::Ok
-            } else {
-                crate::fail_fmt!("pit ch2 {pit}/ms outside {lo}-{hi}% of hpet {hpet}/ms")
+            #[cfg(target_arch = "x86_64")]
+            {
+                let (lo, hi) = CALIB_BAND_INVARIANT;
+                if calib_in_band(hpet, pit, lo, hi) {
+                    Outcome::Ok
+                } else {
+                    crate::fail_fmt!("pit ch2 {pit}/ms outside {lo}-{hi}% of hpet {hpet}/ms")
+                }
             }
         }
         CalibSource::Pit => {
@@ -766,6 +779,7 @@ fn reference(cs: ClocksourceId) -> Option<Counter> {
     let order: &[ClocksourceId] = match cs {
         ClocksourceId::Tsc => &[ClocksourceId::Hpet, ClocksourceId::AcpiPm],
         ClocksourceId::Hpet | ClocksourceId::AcpiPm => &[ClocksourceId::Tsc],
+        ClocksourceId::Cntvct => &[],
     };
     order.iter().find_map(|&id| time_init::counter(id))
 }

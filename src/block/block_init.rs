@@ -5,7 +5,7 @@
 //! `IoWaiter` path. Kick is inline for ramdisk; virtio-blk replaces it.
 
 use core::cell::UnsafeCell;
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
@@ -41,7 +41,7 @@ static Q: SpinMutex<Queue> = SpinMutex::with_rank(Queue::new(), RANK_DEVICE);
 // BSS, not a heap Vec: init must not take RANK_HEAP under RANK_DEVICE.
 static DATA: SpinMutex<[u8; RAM0_BYTES]> = SpinMutex::with_rank([0u8; RAM0_BYTES], RANK_DEVICE);
 static STATE: AtomicU8 = AtomicU8::new(0);
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 static FAIL_NEXT: AtomicU32 = AtomicU32::new(0);
 static LIVE: AtomicBool = AtomicBool::new(false);
 static IO_REQS: AtomicU64 = AtomicU64::new(0);
@@ -142,7 +142,7 @@ impl IoWaiter {
     /// stays live until this call's `done` store and no longer.
     unsafe fn finish(this: *const IoWaiter, res: Result<(), BlockError>) {
         let st = pack(res);
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::finish_stall();
         thread_init::with_sched(|s| {
             // SAFETY: invariant I11 (DESIGN §2.7), established at
@@ -159,7 +159,7 @@ impl IoWaiter {
 
 /// Test hooks for the completion path (`lifetime_iowaiter_publish_last`,
 /// ROADMAP §10.10). `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub mod testing {
     use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -236,7 +236,7 @@ fn execute(req: &Request) -> Result<(), BlockError> {
     if DeviceState::from_u8(STATE.load(Ordering::Acquire)) == DeviceState::Failed {
         return Err(BlockError::Failed);
     }
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     loop {
         let n = FAIL_NEXT.load(Ordering::SeqCst);
         if n == 0 {
@@ -454,7 +454,7 @@ pub fn flush() -> Result<(), BlockError> {
     blocking(Op::Flush, 0, 0, 0, 0)
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 /// Write `buf` at `lba` with `Fua`: durable when this returns `Ok`.
 pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let bs = RAM0_BLOCK_SIZE as usize;
@@ -475,7 +475,7 @@ pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     blocking(Op::Discard, lba, nsectors as u32, 0, 0)
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn live() -> bool {
     // Acquire: pairs with the Release store in `init`.
     LIVE.load(Ordering::Acquire)
@@ -499,14 +499,14 @@ pub fn io_reqs() -> u64 {
     IO_REQS.load(Ordering::Relaxed)
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn inject_io_fails(n: u32) {
     FAIL_NEXT.store(n, Ordering::SeqCst);
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn reset() {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     FAIL_NEXT.store(0, Ordering::SeqCst);
     // Release: pairs with the Acquire loads in `execute`, `build` and `state`.
     STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);

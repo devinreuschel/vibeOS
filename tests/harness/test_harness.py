@@ -23,6 +23,7 @@ import tests.harness.run_e2e as run_e2e
 import tests.harness.run_ktest as run_ktest
 from tests.harness import frame, results
 from tests.harness.harness import (
+    AARCH64_FORENSICS,
     AP_ONLINE,
     FORENSICS_DEVICES,
     HPET_OFF_MACHINE,
@@ -1736,6 +1737,96 @@ class TestQemuArgv(unittest.TestCase):
         self.assertEqual(argv[argv.index("-boot") + 1], "order=d,menu=off")
         self.assertEqual(argv.count("-boot"), 1)
 
+    def test_aarch64_machine_scsi_and_forensics(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            argv = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, gic_version="3"),
+                "/tmp/mon",
+            )
+        try:
+            self.assertEqual(argv[0], "qemu-system-aarch64")
+            self.assertEqual(argv[argv.index("-machine") + 1], "virt,acpi=off,gic-version=3")
+            self.assertNotIn("-cdrom", argv)
+            blob = " ".join(argv)
+            self.assertIn("virtio-scsi-pci", blob)
+            self.assertIn("scsi-cd,drive=cd0,bootindex=0", blob)
+            self.assertIn("media=cdrom", blob)
+            devices = [argv[i + 1] for i, a in enumerate(argv) if a == "-device"]
+            self.assertIn("ramfb", devices)
+            self.assertIn("virtio-keyboard-pci", devices)
+            self.assertIn("virtio-tablet-pci", devices)
+            self.assertIn("pvpanic-pci", devices)
+            self.assertIn("vmcoreinfo", devices)
+            self.assertNotIn("pvpanic", devices)
+            self.assertNotIn("-boot", argv)
+            self.assertFalse(any(a == "pc,hpet=off" for a in argv))
+            self.assertEqual(
+                AARCH64_FORENSICS,
+                (
+                    "-device", "ramfb",
+                    "-device", "virtio-keyboard-pci",
+                    "-device", "virtio-tablet-pci",
+                    "-device", "pvpanic-pci",
+                    "-device", "vmcoreinfo",
+                ),
+            )
+        finally:
+            remove_vars_copies()
+
+    def test_aarch64_gic_version_2(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            argv = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, gic_version="2"),
+                None,
+            )
+        try:
+            self.assertEqual(argv[argv.index("-machine") + 1], "virt,acpi=off,gic-version=2")
+        finally:
+            remove_vars_copies()
+
+    def test_aarch64_hvf_uses_host_cpu(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            argv = qemu_argv(
+                QemuConfig(
+                    iso="x.iso", arch="aarch64", firmware=fw, accel="hvf", cpu="max"
+                ),
+                None,
+            )
+        try:
+            self.assertEqual(argv[argv.index("-cpu") + 1], "host")
+        finally:
+            remove_vars_copies()
+
+    def test_aarch64_needs_firmware(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "UEFI firmware"):
+            qemu_argv(QemuConfig(iso="x.iso", arch="aarch64"), None)
+
+
+@contextmanager
+def _firmware_aarch64(directory: str | None = None) -> Iterator[Any]:
+    """An aarch64 AAVMF-named pair in a temporary directory."""
+    import tempfile
+
+    from tests.harness.harness import Firmware
+
+    with tempfile.TemporaryDirectory() as d:
+        if directory is not None:
+            d = os.path.join(d, directory)
+            os.makedirs(d)
+        code = os.path.join(d, "AAVMF_CODE.fd")
+        tmpl = os.path.join(d, "AAVMF_VARS.fd")
+        with open(code, "wb") as f:
+            f.write(b"\x00" * 0x1000)
+        with open(tmpl, "wb") as f:
+            f.write(b"\x00" * 0x1000)
+        yield Firmware("aarch64", code, tmpl)
+
 
 @contextmanager
 def _firmware(directory: str | None = None) -> Iterator[Any]:
@@ -2255,7 +2346,15 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("disable-legacy=on", blob)
         self.assertIn("num-queues=4", blob)
         self.assertIn("isa-debug-exit", blob)
-        self.assertIn("edu", args)
+        self.assertIn("edu,dma_mask=0xFFFFFFFF", args)
+
+    def test_ktest_devices_aarch64_omits_isa_debug_exit(self) -> None:
+        from tests.harness.harness import ktest_devices
+
+        args = ktest_devices("/tmp/disk.img", 1, arch="aarch64")
+        blob = " ".join(args)
+        self.assertNotIn("isa-debug-exit", blob)
+        self.assertIn("edu,dma_mask=0xFFFFFFFF", args)
         self.assertIn("e1000e", args)
         self.assertIn("virtio-rng-pci", blob)
         self.assertIn("virtio-blk-pci", blob)
@@ -2496,6 +2595,51 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(cfg.cpu, "max")
             self.assertEqual(cfg.mem, "128M")
             self.assertEqual(cfg.accel, "tcg")
+            self.assertEqual(env.arch, "x86_64")
+            self.assertEqual(cfg.arch, "x86_64")
+
+    def test_env_config_aarch64(self) -> None:
+        from tests.harness.harness import env_config, overlay_env, remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            with overlay_env(
+                {"VIBEOS_ARCH": "aarch64", "VIBEOS_FW_AARCH64": fw.code},
+                clear=True,
+            ):
+                env = env_config(default_iso="vibeos.iso", default_timeout=60.0)
+                self.assertEqual(env.arch, "aarch64")
+                self.assertEqual(env.smp, 1)
+                self.assertEqual(env.gic_version, "3")
+                self.assertEqual(env.firmware, fw)
+                cfg = env.qemu()
+                self.assertEqual(cfg.arch, "aarch64")
+                self.assertEqual(cfg.gic_version, "3")
+                self.assertEqual(cfg.firmware, fw)
+            with overlay_env(
+                {
+                    "VIBEOS_ARCH": "aarch64",
+                    "VIBEOS_GIC": "2",
+                    "VIBEOS_FW_AARCH64": fw.code,
+                },
+                clear=True,
+            ):
+                env = env_config(default_iso="x.iso", default_timeout=1)
+                self.assertEqual(env.gic_version, "2")
+                self.assertEqual(env.qemu().gic_version, "2")
+            with overlay_env({"VIBEOS_ARCH": "riscv64"}, clear=True):
+                with self.assertRaisesRegex(HarnessError, "VIBEOS_ARCH"):
+                    env_config(default_iso="x.iso", default_timeout=1)
+            with overlay_env(
+                {
+                    "VIBEOS_ARCH": "aarch64",
+                    "VIBEOS_GIC": "4",
+                    "VIBEOS_FW_AARCH64": fw.code,
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(HarnessError, "VIBEOS_GIC"):
+                    env_config(default_iso="x.iso", default_timeout=1)
+        remove_vars_copies()
 
     def test_env_config_overrides(self) -> None:
         from tests.harness.harness import env_config, overlay_env
@@ -3177,6 +3321,22 @@ class TestSkips(unittest.TestCase):
             self.assertTrue(set(row.match) <= set(FIELDS))
         names = {r.name for r in rows}
         self.assertIn("cpu_hardening", names)
+
+    def test_msix_cpu_skip_is_x86_only(self) -> None:
+        from tests.harness.skips import check_skips, load_skips
+
+        rows = load_skips()
+        aarch64 = {
+            **self.TCG2,
+            "arch": "aarch64",
+            "smp": 1,
+            "machine": "virt,acpi=off,gic-version=3",
+        }
+        check_skips({}, ["msix_cpu"], aarch64, rows)
+        x86_smp1 = {**self.TCG2, "smp": 1}
+        check_skips({"msix_cpu": "no AP"}, ["msix_cpu"], x86_smp1, rows)
+        with self.assertRaisesRegex(HarnessError, "msix_cpu ran"):
+            check_skips({}, ["msix_cpu"], x86_smp1, rows)
 
 
 class TestHpetOffBoot(unittest.TestCase):

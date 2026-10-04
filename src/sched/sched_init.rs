@@ -45,7 +45,7 @@ pub fn is_live() -> bool {
 /// After EOI. Preempt every `QUANTUM_TICKS`, or every tick while idle
 /// so a sleeper can displace `sti; hlt`. Each CPU owns its runq.
 pub fn on_timer_tick() {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     crate::ktest::on_tick();
     if !is_live() {
         return;
@@ -76,7 +76,7 @@ fn idle_main() {
     idle_loop();
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn idle_tsc() -> u64 {
     per_cpu_init::with_current(|c| c.idle_tsc)
 }

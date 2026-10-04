@@ -16,7 +16,7 @@
 #   source   `kernel` (matched on framed lines, DESIGN §2.6), `user`
 #            (unframed), or `limine` (unframed, before the first framed line).
 #   section  `§N.M`, the ROADMAP `### N.M` section whose work prints the line.
-#   order    contract rows only: a unique int, in steps of 10; the contract
+#   order    contract rows only: a unique int, in steps of 5; the contract
 #            is in this order.
 #   name     contract rows only: the name the harness reports the marker by.
 #   when     contract rows only, optional: terms that must all hold, from
@@ -75,10 +75,13 @@ section = "§11.1"
 
 [[marker]]
 text = "vibeOS: dt: <n> nodes"
-kind = "diagnostic"
+kind = "contract"
 arch = "aarch64"
 source = "kernel"
 section = "§11.5"
+order = 25
+name = "dt_nodes"
+when = ["!panic_test"]
 
 [[marker]]
 text = "vibeOS: limine: memmap missing"
@@ -119,6 +122,16 @@ source = "kernel"
 section = "§0.4"
 order = 10
 name = "serial_online"
+
+[[marker]]
+text = "vibeOS: el: <el>"
+kind = "contract"
+arch = "aarch64"
+source = "kernel"
+section = "§11.1"
+order = 15
+name = "el"
+when = ["!panic_test"]
 
 [[marker]]
 text = "vibeOS: boot: panic-test armed"
@@ -209,6 +222,23 @@ section = "§1.2"
 order = 50
 name = "paging_cr3_ok"
 when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: paging: ttbr ok"
+kind = "contract"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
+order = 60
+name = "paging_ttbr_ok"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: paging: uart map failed"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
 
 [[marker]]
 text = "vibeOS: paging: map_end <addr> (<n> MiB)"
@@ -407,6 +437,114 @@ section = "§2.2"
 order = 110
 name = "idt_ok"
 when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: vectors ok"
+kind = "contract"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+order = 115
+name = "vectors_ok"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: vectors: no overflow stack"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+
+[[marker]]
+text = "vibeOS: vectors: overflow box"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+
+[[marker]]
+text = "vibeOS: cpu: isa floor (lse+pan) missing"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.1"
+
+[[marker]]
+text = "vibeOS: panic: early sp=<addr> elr=<addr> esr=<n> far=<addr>"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.1"
+
+[[marker]]
+text = "vibeOS: panic: stack overflow far=<addr> esr=<n> elr=<addr> sp=<addr> thread=<addr>"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§11.3"
+
+[[marker]]
+text = "vibeOS: panic: #<name> esr=<n> far=<addr> elr=<addr>"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
+text = "vibeOS: panic: sync esr=<n> far=<addr> elr=<addr> slot=<n>"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
+text = "vibeOS: panic: #DABT esr=<n> far=<addr> elr=<addr>"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
+text = "#DABT"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
+text = "#IABT"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
+text = "#UNDEF"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
+text = "#SERROR"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
+text = "#SPALIGN"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
+text = "#PCALIGN"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
 
 [[marker]]
 text = "vibeOS: boot: gp-test armed"
@@ -686,6 +824,78 @@ section = "§4.3"
 order = 170
 name = "lapic_timer_ok"
 when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: time: timer <timer>"
+kind = "contract"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+order = 125
+name = "time_timer"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: time: cntfrq <n>/s"
+kind = "contract"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+order = 135
+name = "time_cntfrq"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: gic: <ver>"
+kind = "contract"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+order = 165
+name = "gic"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: gic: no machine desc"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+
+[[marker]]
+text = "vibeOS: gic: no controller"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+
+[[marker]]
+text = "vibeOS: gic: dist map"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+
+[[marker]]
+text = "vibeOS: gic: cpu/redist map"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+
+[[marker]]
+text = "vibeOS: time: no cntvct"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
+
+[[marker]]
+text = "vibeOS: irq: no gic"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.3"
 
 [[marker]]
 text = "vibeOS: time: tsc-deadline no ticks"
@@ -1281,11 +1491,11 @@ section = "§10.2"
 
 # The clocksource `time_init::confirm_clocksource` chose once the AP warp
 # tests ran (DESIGN §6.4). The harness binds `<clocksource>`: `hpet` under
-# TCG, `acpi_pm` with HPET off, `tsc` under KVM.
+# TCG, `acpi_pm` with HPET off, `tsc` under KVM, `cntvct` on aarch64.
 [[marker]]
 text = "vibeOS: time: clocksource <clocksource>"
 kind = "contract"
-arch = "x86_64"
+arch = "both"
 source = "kernel"
 section = "§10.3"
 order = 250

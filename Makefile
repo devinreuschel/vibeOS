@@ -2,7 +2,17 @@
 #
 # `make help` is the live target inventory (DESIGN §8.5).
 
+# ARCH= selects the kernel target. Default keeps every existing recipe,
+# `make check` included, on x86_64. aarch64 is ROADMAP §11.3 / §11.7.
+ARCH ?= x86_64
+ifeq ($(ARCH),aarch64)
+TARGET := aarch64-unknown-none-softfloat
+else ifeq ($(ARCH),x86_64)
 TARGET := x86_64-unknown-none
+else
+$(error ARCH must be x86_64 or aarch64)
+endif
+export VIBEOS_ARCH := $(ARCH)
 CARGO  := cargo
 export CARGO_TARGET_DIR := $(CURDIR)/target
 # Host triple for vibeos-core tests and mkfs/fsck. Parent cargo config
@@ -66,7 +76,7 @@ INITRD_INIT_FAULT := $(CURDIR)/build/initrd-init_fault.fat
 # The production initrd without `/bin/sh` and with `/bin/false` as
 # `/bin/tests`, for `make test-e2e-init-fault`'s `init_no_sh` case only.
 INITRD_NOSH := $(CURDIR)/build/initrd-nosh.fat
-KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
+KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld linker-aarch64.ld Makefile rust-toolchain.toml \
 	scripts/gen_ksyms.py scripts/mkiso.sh \
 	.cargo/config.toml Cargo.lock
 # What mkiso.sh's /LICENSES/ notices are generated from (ROADMAP §10.9); the
@@ -110,9 +120,9 @@ ISOS += $(3)
 ifneq ($(VIBEOS_PREBUILT),1)
 build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	rm -rf $$@ build/kernels/vibeos-$(1).ksyms.rs build/kernels/.vibeos-$(1)
-	$$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
+	$$(CARGO_SHIP) build --target $$(TARGET) $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
-	VIBEOS_KSYMS=$(CURDIR)/build/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
+	VIBEOS_KSYMS=$(CURDIR)/build/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build --target $$(TARGET) $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@

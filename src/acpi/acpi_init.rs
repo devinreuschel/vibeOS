@@ -105,6 +105,10 @@ fn ioremap_page(phys: u64) -> Option<u64> {
 }
 
 /// The ioremap VA of the MADT LAPIC page, if mapped.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn lapic_va() -> Option<u64> {
     // Acquire: pairs with the Release store in `init`.
     let v = LAPIC_VA.load(Ordering::Acquire);
@@ -112,6 +116,10 @@ pub fn lapic_va() -> Option<u64> {
 }
 
 /// The ioremap VA of the HPET page, if mapped.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn hpet_va() -> Option<u64> {
     // Acquire: pairs with the Release store in `init`.
     let v = HPET_VA.load(Ordering::Acquire);
@@ -119,6 +127,10 @@ pub fn hpet_va() -> Option<u64> {
 }
 
 /// The ioremap VA of the I/O APIC at `phys`, if mapped.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn ioapic_va(phys: u64) -> Option<u64> {
     if phys == 0 {
         return None;
@@ -208,6 +220,10 @@ pub fn report() {
     );
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn info() -> Option<&'static AcpiInfo> {
     INFO.try_get()
 }

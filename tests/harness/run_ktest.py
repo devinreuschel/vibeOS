@@ -33,6 +33,7 @@ from tests.harness.harness import (
     expected_lapic_mode,
     ktest_devices,
     ktest_lines,
+    ktest_pass_status,
     ktest_summary,
     make_disk,
     make_pattern_disk,
@@ -305,6 +306,8 @@ def expected_clocksource(cfg: QemuConfig) -> str:
     §10.3): `tsc` under KVM, whose guests the harness gives an invariant TSC,
     so one without it fails instead of testing the HPET again; else `hpet`,
     or `acpi_pm` with the HPET off. TCG never reports an invariant TSC."""
+    if cfg.arch == "aarch64":
+        return "cntvct"
     if effective_accel_name(cfg) == "kvm":
         return "tsc"
     return "hpet" if _hpet_on(cfg) else "acpi_pm"
@@ -330,7 +333,10 @@ def check_boot_cpu(lines: list[str], cfg: QemuConfig) -> None:
     `lapic_timer` mode `run_e2e.py`'s boot contract expects of the same
     CPU, HPET and accelerator (L1197): `tsc-deadline` under KVM `-cpu max`,
     `periodic` under TCG or `-tsc-deadline`, `pit` with HPET off.
+    aarch64 has no LAPIC; the generic timer marker is the contract.
     """
+    if cfg.arch == "aarch64":
+        return
     if _wants_invtsc(cfg.cpu):
         absent = INVTSC_ABSENT in lines
         results.current().record("marker", INVTSC_MARKER, "failed" if absent else "passed")
@@ -344,6 +350,33 @@ def check_boot_cpu(lines: list[str], cfg: QemuConfig) -> None:
     heads = [ln for ln in lines if ln.startswith(LAPIC_TIMER_PREFIX)]
     got = heads[0][len(LAPIC_TIMER_PREFIX) :].rstrip(")") if heads else "no lapic_timer line"
     raise HarnessError(f"lapic_timer mode: want {want}, got {got}")
+
+
+def check_aarch64_s7(lines: list[str], cfg: QemuConfig) -> None:
+    """Issue #205: `dt` nodes, GIC, chosen timer, vectors, and `cntvct`."""
+    _require_line(
+        lines,
+        lambda ln: ln.startswith("vibeOS: dt: ") and ln.endswith(" nodes"),
+        "missing vibeOS: dt: <n> nodes",
+    )
+    want_gic = f"vibeOS: gic: v{cfg.gic_version}"
+    _require_line(lines, lambda ln: ln == want_gic, f"missing {want_gic}")
+    _require_line(
+        lines,
+        lambda ln: ln.startswith("vibeOS: time: timer "),
+        "missing vibeOS: time: timer",
+    )
+    _require_line(
+        lines,
+        lambda ln: ln.startswith("vibeOS: time: cntfrq ") and ln.endswith("/s"),
+        "missing vibeOS: time: cntfrq",
+    )
+    _require_line(lines, lambda ln: ln == "vibeOS: vectors ok", "missing vibeOS: vectors ok")
+    _require_line(
+        lines,
+        lambda ln: ln == f"{CLOCKSOURCE_PREFIX}cntvct",
+        f"missing {CLOCKSOURCE_PREFIX}cntvct",
+    )
 
 
 def _ktest_boot(
@@ -373,7 +406,9 @@ def _ktest_boot(
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
     klines = frame.kernel_lines(raw.lines)
     results.current().record_ktest_lines(klines)
-    verdict = check_ktest_output(raw.lines, raw.exit_code)
+    verdict = check_ktest_output(
+        raw.lines, raw.exit_code, pass_status=ktest_pass_status(cfg)
+    )
     write_stack_summary(label, check_stack_depth(klines, enforce=False))
     check_stack_depth(klines, enforce=enforce_stack)
     skips.check_skips(
@@ -388,6 +423,10 @@ def _ktest_boot(
     if SERIAL_FRAME_OK in klines:
         _check_serial_frame(raw.lines)
     check_boot_cpu(klines, cfg)
+    # virtio-blk and GPT stamp are x86 / Phase 11 S9; boot-CPU S7 has neither.
+    if cfg.arch == "aarch64":
+        check_aarch64_s7(klines, cfg)
+        return raw
     _require_line(klines, _block_name("vda"), "missing virtio-blk marker")
     if not parts:
         return raw
@@ -472,7 +511,11 @@ def _proof_boot(
     )
     disk = make_disk(DISK_BYTES, "vibeos-vblk-") if devices is None else None
     try:
-        extra = ktest_devices(disk, env.smp) if disk is not None else devices or ()
+        extra = (
+            ktest_devices(disk, env.smp, arch=env.arch)
+            if disk is not None
+            else devices or ()
+        )
         cfg = penv.qemu(extra=extra, boot_order="d")
         raw = _ktest_boot(
             cfg,
@@ -588,7 +631,7 @@ def _vblk_readonly_boot(env: EnvConfig) -> None:
     and a discard fail with `ReadOnly`, and reads go on."""
     disk = make_pattern_disk(DISK_BYTES, "vibeos-vblk-ro-")
     try:
-        devices = ktest_devices(disk, env.smp, readonly=True)
+        devices = ktest_devices(disk, env.smp, readonly=True, arch=env.arch)
         raw = _single_test_boot(env, VBLK_READONLY_TEST, "vblk readonly", devices=devices)
         check_select_run(raw.lines, {VBLK_READONLY_TEST: 1}, ())
     finally:
@@ -609,7 +652,7 @@ def _vblk_bad_sector_boot(env: EnvConfig) -> None:
     conf = None
     try:
         conf = write_blkdebug_config(VBLK_BAD_SECTOR, "vibeos-blkdebug-")
-        devices = ktest_devices(disk, env.smp, blkdebug=conf)
+        devices = ktest_devices(disk, env.smp, blkdebug=conf, arch=env.arch)
         raw = _single_test_boot(env, VBLK_BAD_SECTOR_TEST, "vblk bad sector", devices=devices)
         check_select_run(raw.lines, {VBLK_BAD_SECTOR_TEST: 1}, ())
     finally:
@@ -680,7 +723,11 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     try:
         # The trip panics on purpose: QMP's `GUEST_PANICKED` ends it too.
-        cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d", expect="panic")
+        cfg = penv.qemu(
+            extra=ktest_devices(disk, env.smp, arch=env.arch),
+            boot_order="d",
+            expect="panic",
+        )
         try:
             raw = run_qemu_until_exit(
                 cfg,
@@ -719,7 +766,9 @@ def hpet_off_config(env: EnvConfig, disk: str) -> QemuConfig:
     (the KVM leg's model offers TSC-deadline, which takes the tick without an
     HPET), and `vibeos.ktest=` set to `HPET_OFF_KTEST`, which overrides
     `VIBEOS_KTEST` and keeps `VIBEOS_KTEST_REPEAT`."""
-    cfg = env.qemu(extra=ktest_devices(disk, env.smp), hpet=False, boot_order="d")
+    cfg = env.qemu(
+        extra=ktest_devices(disk, env.smp, arch=env.arch), hpet=False, boot_order="d"
+    )
     parts = [p.strip() for p in cfg.cpu.split(",")]
     cpu = cfg.cpu if NO_TSC_DEADLINE in parts else f"{cfg.cpu},{NO_TSC_DEADLINE}"
     return dataclasses.replace(cfg, cpu=cpu, ktest=",".join(HPET_OFF_KTEST))
@@ -818,8 +867,10 @@ PROOF_BOOTS: tuple[ProofBoot, ...] = (
 )
 
 
-def proof_boot_names(smp: int, hpet_off: bool) -> list[str]:
+def proof_boot_names(smp: int, hpet_off: bool, arch: str = "x86_64") -> list[str]:
     """The proof boots the union target runs at `smp` CPUs, in order."""
+    if arch == "aarch64":
+        return []
     return [b.name for b in PROOF_BOOTS if b.applies(smp, hpet_off)]
 
 
@@ -834,7 +885,8 @@ def main_boot(env: EnvConfig, range_word: str | None) -> int:
     disk2 = make_disk(DISK2_BYTES, "vibeos-vblk2-")
     try:
         cfg = menv.qemu(
-            extra=ktest_devices(disk, env.smp, extra_disks=(disk2,)), boot_order="d"
+            extra=ktest_devices(disk, env.smp, extra_disks=(disk2,), arch=env.arch),
+            boot_order="d",
         )
         try:
             raw = _ktest_boot(
@@ -884,12 +936,14 @@ def main(argv: list[str] | None = None) -> int:
     env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
     results.Results(env.tier)
     if args.shard is None:
-        boots = proof_boot_names(env.smp, args.hpet_off)
+        boots = proof_boot_names(env.smp, args.hpet_off, env.arch)
         rc = main_boot(env, None)
     else:
         shard = ktest_shards.SHARDS[args.shard]
         # A shard runs what it names that the union target would run here.
-        union = proof_boot_names(env.smp, ktest_shards.VARIANTS[shard.variant].hpet_off)
+        union = proof_boot_names(
+            env.smp, ktest_shards.VARIANTS[shard.variant].hpet_off, env.arch
+        )
         boots = [b for b in shard.boots if b in union]
         rc = 0 if shard.rows is None else main_boot(env, shard.range_word())
     if rc:

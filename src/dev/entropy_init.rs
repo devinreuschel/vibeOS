@@ -10,7 +10,7 @@ use crate::arch::current::hw_rng64;
 use crate::virtio_init;
 
 fn hw_fill(buf: &mut [u8]) -> (usize, Option<Source>) {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if testing::dry() {
         return (0, None);
     }
@@ -67,7 +67,7 @@ fn refill() {
 }
 
 /// A machine with no hardware entropy, for `dev_random_eagain`.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, Ordering};
 

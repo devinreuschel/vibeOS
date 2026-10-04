@@ -1,7 +1,7 @@
 //! Scheduler: the kernel half of subsystem `sched` (DESIGN §1.3).
 
 pub mod irqoff;
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

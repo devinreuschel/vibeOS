@@ -176,7 +176,7 @@ fn wait_fill(slot: usize) {
         return;
     };
     // AcqRel: pairs with the Acquire loads in `block::ktest::cache_read_waits_for_fill`.
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::FILL_WAITS.fetch_add(1, Ordering::AcqRel);
     loop {
         let park = thread_init::with_sched(|s| {
@@ -269,7 +269,7 @@ fn write_victim(dev: &BlockRef, fill: &cache::Fill, evict: &[u8]) -> Result<(), 
 
 /// Read a `Read` fill's page, or abort the fill and wake its waiters.
 fn fill_read(dev: &BlockRef, fill: &cache::Fill, page: &mut [u8]) -> Result<(), BlockError> {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::fill_hold_point(fill.key);
     match backend_read(dev, fill.key.offset, page) {
         Ok(()) => {
@@ -462,7 +462,7 @@ fn writeback_dev(dev: Option<u64>) -> Result<(), BlockError> {
         let Some((slot, key)) = next else {
             break;
         };
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::hold_point(key);
         write_page(None, slot, key, &data)?;
         start = slot + 1;
@@ -507,7 +507,7 @@ impl BlockCache for PageCache {
                 None => break,
                 Some(FlushStep::Write(s, key)) => {
                     write_page(Some(dev), s, key, &data)?;
-                    #[cfg(feature = "kernel_tests")]
+                    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
                     testing::after_flush_write(dev.id());
                 }
                 Some(wait @ FlushStep::Wait { slot: s, start, .. }) => {
@@ -545,7 +545,7 @@ fn writeback_main() {
         if !LIVE.load(Ordering::Acquire) {
             continue;
         }
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         if !testing::wb_pass_begin() {
             continue;
         }
@@ -559,7 +559,7 @@ fn writeback_main() {
                 e.as_str()
             );
         }
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::wb_pass_end();
     }
 }
@@ -608,7 +608,7 @@ pub fn init() {
 
 /// A one-shot hold of `blk-wb`'s write of one page, so a test can find
 /// [`PageCache::flush`] waiting for it (ROADMAP §10.11).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

@@ -102,7 +102,7 @@ fn with_image<R>(img: &Image, f: impl FnOnce(&mut [u8; IMAGE_BYTES]) -> R) -> R 
 /// Take the memory image of volume `i` as a volume read does (the
 /// in-guest test `cross_cpu_cells_ranked`); `false` when `i` is no
 /// memory volume.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(super) fn probe_image_of(i: &Instance) -> bool {
     match as_vibe(i).map(|v| &v.media) {
         Ok(Media::Mem(img)) => {
@@ -606,7 +606,7 @@ pub fn mount_mem(at: &str) -> Result<(), FsError> {
         vibefs::mkfs(io, b"vibe", v)?;
         vibefs::mount(io, v)
     })?;
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if at == "/vibe" {
         *crate::fs::ktest::VIBE_MEM.lock() = Some(vol.clone());
     }
@@ -618,7 +618,7 @@ pub fn mount_mem(at: &str) -> Result<(), FsError> {
 
 /// A used memory volume that nothing mounts or reaches, for the
 /// volume-lock test `fs_drop_slot_waits_for_holder` (test-only).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(super) fn spare_volume() -> Result<Instance, FsError> {
     let img = crate::fs::boxed_zeroed::<IMAGE_BYTES>().map_err(|_| FsError::NoMem)?;
     let vol = crate::fs::boxed_copy(&VOL_INIT).map_err(|_| FsError::NoMem)?;
@@ -633,7 +633,7 @@ pub(super) fn spare_volume() -> Result<Instance, FsError> {
 
 /// Run `f` holding volume `v`'s lock, as another holder would
 /// (test-only: `fs_drop_slot_waits_for_holder`).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(super) fn hold<R>(v: &VibeVolume, f: impl FnOnce() -> R) -> R {
     let _g = v.vol.lock();
     f()
@@ -641,7 +641,7 @@ pub(super) fn hold<R>(v: &VibeVolume, f: impl FnOnce() -> R) -> R {
 
 /// Make a fresh vibefs on block device `name`, which nothing may hold
 /// (test-only, AGENTS.md rule 9: `block_two_disk_instances`).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn mkfs_dev(name: &str) -> Result<(), FsError> {
     let r = blockdev_init::lookup(name.as_bytes()).ok_or(FsError::NotFound)?;
     if blockdev_init::holder(&r).is_some() {
@@ -668,6 +668,10 @@ fn probe_dev(r: &BlockRef) -> bool {
 /// `Busy`. Otherwise the volume is built, becomes the entry's holder, and
 /// is taken back if the mount fails.
 #[cfg(any(feature = "kernel_tests", feature = "vibefs_crash"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<(), FsError> {
     mount_dev_at(None, name, at, ro)
 }

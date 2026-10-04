@@ -218,7 +218,7 @@ def _check_vda_untouched(env: EnvConfig) -> None:
             try:
                 result = run_qemu_and_check(
                     cfg,
-                    boot_contract_markers(cpu=env.cpu, smp=env.smp),
+                    boot_contract_markers(cpu=env.cpu, smp=env.smp, arch=env.arch),
                     timeout_s=env.timeout,
                 )
             except HarnessError as e:
@@ -247,7 +247,7 @@ def _mce_main(env: EnvConfig) -> int:
     """Boot, inject an uncorrected machine check on CPU 0, expect dump and halt."""
     results.Results(env.tier)
     cfg = env.qemu()
-    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp)
+    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp, arch=env.arch)
     cmd = mce_monitor_cmd(
         cpu=0, bank=1, status=MCE_UC_STATUS, mcg_status=MCE_MCG_STATUS
     )
@@ -353,7 +353,7 @@ def _strace() -> int:
         print("[e2e] FAIL: VIBEOS_CMDLINE must hold vibeos.strace=1", file=sys.stderr)
         return 1
     cfg = env.qemu()
-    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp)
+    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp, arch=env.arch)
     try:
         result = run_qemu_and_check(cfg, markers, timeout_s=env.timeout)
     except HarnessError as e:
@@ -427,7 +427,7 @@ def main() -> int:
     cfg = env.qemu(hpet=not expect_pit, expect=expect)
     dump_needles: tuple[str | tuple[str, ...], ...] = ()
     if gp_test:
-        markers = boot_contract_markers(cpu=env.cpu, gp=True, smp=env.smp)
+        markers = boot_contract_markers(cpu=env.cpu, gp=True, smp=env.smp, arch=env.arch)
         expect_panic = True
         dump_needles = (
             "#GP",
@@ -440,11 +440,13 @@ def main() -> int:
             "vibeOS: panic: halted",
         )
     elif panic_variant:
-        markers = boot_contract_markers(cpu=env.cpu, smp=env.smp, panic_variant=panic_variant)
+        markers = boot_contract_markers(
+            cpu=env.cpu, smp=env.smp, panic_variant=panic_variant, arch=env.arch
+        )
         expect_panic = True
         dump_needles = ("vibeOS: backtrace:", "vibeOS: panic: halted")
     elif expect_panic:
-        markers = halt_test_markers()
+        markers = halt_test_markers(arch=env.arch)
         dump_needles = (
             "vibeOS: panic: at",
             "intentional panic-test",
@@ -457,7 +459,7 @@ def main() -> int:
         )
     else:
         markers = boot_contract_markers(
-            cpu=env.cpu, hpet=not expect_pit, smp=env.smp
+            cpu=env.cpu, hpet=not expect_pit, smp=env.smp, arch=env.arch
         )
     # The normal boot runs `/bin/tests` (DESIGN §8.2): its utest verdict.
     normal = expect == "none"

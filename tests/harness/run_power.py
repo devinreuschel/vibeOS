@@ -49,6 +49,7 @@ from tests.harness.harness import (
     make_disk,
     parse_ktest_line,
     qemu_argv,
+    qemu_system,
     serial_tail,
 )
 from tests.harness.linesource import LineSource
@@ -186,8 +187,9 @@ def watch_power_boot(
 def main() -> int:
     env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
     res = results.Results(env.tier)
-    if not shutil.which("qemu-system-x86_64"):
-        print("[power] FAIL: qemu-system-x86_64 not on PATH", file=sys.stderr)
+    binary = qemu_system(env.arch)
+    if not shutil.which(binary):
+        print(f"[power] FAIL: {binary} not on PATH", file=sys.stderr)
         return 1
     if not os.path.exists(env.iso):
         print(f"[power] FAIL: ISO missing: {env.iso}", file=sys.stderr)
@@ -196,7 +198,7 @@ def main() -> int:
     for row, line in ROWS:
         disk = make_disk(DISK_BYTES, "vibeos-vblk-")
         try:
-            base = env.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
+            base = env.qemu(extra=ktest_devices(disk, env.smp, arch=env.arch), boot_order="d")
             cfg = dataclasses.replace(base, ktest=row)
             session = qmp.Session(cfg, row)
             argv = qemu_argv(cfg, None, qmp_sock=session.sock)

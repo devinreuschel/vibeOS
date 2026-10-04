@@ -6,7 +6,7 @@ use super::*;
 
 impl VirtioBlk {
     /// This disk's IDT vector allocated on `cpu`, valid only on that CPU.
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     pub fn queue_vector(&self, cpu: u32) -> Option<u8> {
         self.queue_vecs.iter().find_map(|q| {
             // Acquire: pairs with the Release store in `setup`.
@@ -17,7 +17,7 @@ impl VirtioBlk {
     }
 
     /// `st`, or `S_UNSUPP` while an injected failure is left (test-only).
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     fn injected(&self, st: u8) -> u8 {
         // AcqRel, Acquire on failure: pairs with the Release store in `inject_unsupp`.
         let take = self
@@ -60,7 +60,7 @@ impl VirtioBlk {
                         // the CPU above; established by
                         // `virtio_blk_init::issue::slot_base`.
                         let st = unsafe { *slot_base(&blk.slots, si).add(16) };
-                        #[cfg(feature = "kernel_tests")]
+                        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
                         let st = self.injected(st);
                         let res = map_status(st);
                         if let Some(req) = blk.slot_req[si].take() {

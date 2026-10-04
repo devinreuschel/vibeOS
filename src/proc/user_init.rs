@@ -116,10 +116,10 @@ trait ImageSource {
 }
 
 /// An ELF image in memory: the in-guest tests' ring-3 images (C-RING3).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 struct MemImage<'a>(&'a [u8]);
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 impl ImageSource for MemImage<'_> {
     fn len(&self) -> u64 {
         self.0.len() as u64
@@ -371,6 +371,10 @@ fn fill_stack(space: &mut NewSpace, img: &Image, args: &ExecArgs) -> Result<u64,
     feature = "vibefs_crash",
     allow(dead_code, reason = "the vibefs_crash build spawns no process")
 )]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn exec_args(argv: &[&[u8]], envp: &[&[u8]]) -> Result<ExecArgs, LoadError> {
     let mut args = ExecArgs::new(elf::arg_space_limit(RLIMIT_STACK_DEFAULT));
     for a in argv {
@@ -389,14 +393,14 @@ pub fn exec_args(argv: &[&[u8]], envp: &[&[u8]]) -> Result<ExecArgs, LoadError> 
 pub struct ExecFile {
     img: FileImage,
     /// Buddy free frames when the open began (`proc::ktest::record`).
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     before: usize,
 }
 
 /// Open `path` from `base` to execute it: its walk's errors, then
 /// `EACCES` for a file that is not regular (execve(2)).
 pub fn open_exec(base: Option<WalkBase>, path: &[u8]) -> Result<ExecFile, LoadError> {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     let before = crate::proc::ktest::free_now();
     let file =
         file_init::open_at(base, path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
@@ -416,7 +420,7 @@ pub fn open_exec(base: Option<WalkBase>, path: &[u8]) -> Result<ExecFile, LoadEr
             len: st.size,
             pos: 0,
         },
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         before,
     })
 }
@@ -452,7 +456,7 @@ pub fn load_exec(f: ExecFile, args: &ExecArgs) -> Result<Loaded, LoadError> {
             Err(LoadError::Fs(e))
         }
     };
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     crate::proc::ktest::record(f.before, r.is_ok());
     r
 }
@@ -461,7 +465,7 @@ pub fn load_exec(f: ExecFile, args: &ExecArgs) -> Result<Loaded, LoadError> {
 /// initial stack as given and an empty environment. Caller installs it
 /// only after this returns. The in-guest tests' loader (C-RING3), over
 /// the same `load_from`.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
     let args = exec_args(argv, &[])?;
     load_from(&mut MemImage(elf), &args)

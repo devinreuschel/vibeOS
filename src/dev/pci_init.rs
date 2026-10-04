@@ -9,7 +9,7 @@
 //! write-back mapping.
 
 use core::fmt::Write;
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -30,7 +30,15 @@ use crate::sync_init::SpinMutex;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const CFG_ADDR: u16 = 0xCF8;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const CFG_DATA: u16 = 0xCFC;
 
 const ECAM_CACHE: usize = 64;
@@ -69,7 +77,7 @@ static CFG_LOCK: AtomicBool = AtomicBool::new(false);
 pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
 /// The online-CPU mask while the scan sized the BARs; 0 before it runs.
 /// `dev::ktest::test_pci_scan_bsp_only` reads it.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(super) static SCAN_ONLINE: AtomicU64 = AtomicU64::new(0);
 
 fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
@@ -296,6 +304,7 @@ impl CfgIo for HwCfg {
             // dword-aligned below 4 KiB; established by `pci_init::map_mmio`.
             return with_cfg(|| unsafe { ecam_read_at(va) });
         }
+        #[cfg(target_arch = "x86_64")]
         if bdf.bus == 0 {
             return with_cfg(|| cf8_read32(bdf, offset));
         }
@@ -313,10 +322,11 @@ impl CfgIo for HwCfg {
             // SAFETY: invariant I54, as in `read32`; established by
             // `pci_init::map_mmio`.
             with_cfg(|| unsafe { ecam_write_at(va, value) });
-            return;
-        }
-        if bdf.bus == 0 {
-            with_cfg(|| cf8_write32(bdf, offset, value));
+        } else {
+            #[cfg(target_arch = "x86_64")]
+            if bdf.bus == 0 {
+                with_cfg(|| cf8_write32(bdf, offset, value));
+            }
         }
     }
 }
@@ -349,15 +359,25 @@ pub unsafe fn scan() {
             e.end = h.last_bus;
         });
     }
-    let mut found = [FuncInfo::empty(); MAX_SCAN];
-    let n = pci::enumerate(&mut HwCfg, 0, &mut found);
+    // Enumerate in the BootCell. A `[FuncInfo; MAX_SCAN]` local is an
+    // 11 KiB frame; on aarch64 the bootstrap stack is 16 KiB and IRQs
+    // are already on (DESIGN §4.5).
+    let p = SCAN.as_ptr();
+    // SAFETY: invariant I22, established here: this fn runs once, on the
+    // BSP, before any AP starts or any reader runs (this fn's `# Safety`
+    // contract). The payload at `SCAN.as_ptr()` is filled before
+    // `set_in_place`.
+    unsafe {
+        let found = &mut (*p).found;
+        for slot in found.iter_mut() {
+            *slot = FuncInfo::empty();
+        }
+        (*p).n = pci::enumerate(&mut HwCfg, 0, found);
+        SCAN.set_in_place();
+    }
     // Release: pairs with the Acquire load in `dev::ktest::test_pci_scan_bsp_only`.
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     SCAN_ONLINE.store(crate::per_cpu_init::online_mask(), Ordering::Release);
-    // SAFETY: `BootCell::set`'s contract (invariant I22): this fn runs
-    // once, on the BSP, before any AP starts or any reader runs (this fn's
-    // `# Safety` contract); established here.
-    unsafe { SCAN.set(Scan { n, found }) };
 }
 
 /// Publish each function [`scan`] found behind its parent bridge through
@@ -438,6 +458,10 @@ pub fn update_command(bdf: Bdf, set: u16, clear: u16) -> u16 {
         dead_code,
         reason = "only the in-guest tests read a config word outside a driver yet"
     )
+)]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn cfg_read16(bdf: Bdf, offset: u16) -> u16 {
     pci::read16(&mut HwCfg, bdf, offset)

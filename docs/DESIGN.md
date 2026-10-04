@@ -190,14 +190,14 @@ children, need no row.
 |---|---|---|
 | crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `kalloc/{tests,users_tests,loom_models}.rs`, `kerror.rs`, `trap.rs`, `atomic.rs`, `cell.rs` (`BootCell`, `IrqCell`, `CellHooks`) | `main.rs`, `cell.rs` (the kernel's names for the cells and its `CellHooks` impl) |
 | boot | `boot/{mod,cmdline}.rs` | `boot/{mod,fw_cfg_init}.rs` (`BootInfo`, Limine requests, fw_cfg) |
-| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,stat,syscall,trap,uart,vectors}.rs`, `arch/aarch64/{mod,paging,sysreg,tlb}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,boot,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,power,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S` |
+| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,stat,syscall,trap,uart,vectors}.rs`, `arch/aarch64/{mod,paging,sysreg,tlb,trap}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,boot,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,power,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S`, `arch/aarch64/{mod,boot,catch,cpu,gdt,gic,gs,idt,ipi,irqchip,ktest,mmu,percpu,pic,power,switch,timer,uaccess,vectors}.rs` |
 | mm | `mm/{mod,asid,pmm,paging,paging_tests,physmap,heap,kva}.rs`, `mm/pmm/{kani_proofs,run_tests}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
 | time | `time/mod.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
 | machine | `machine/{mod,fdt}.rs` | `machine/{mod,machine_init}.rs` |
-| irq | `irq/{mod,ipi,stop,chip,its}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |
+| irq | `irq/{mod,ipi,stop,chip,its,gic}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init,hang_test}.rs` |
-| sched | `sched/{mod,thread,wait,work,fpu,stack_depth,irqoff}.rs` | `sched/{mod,sched_init,work_init,irqoff}.rs`, `sched/thread_init/{ap,boot,mod,sweep,table,testing,user}.rs` |
+| sched | `sched/{mod,thread,wait,work,fpu,stack_depth,irqoff}.rs` | `sched/{mod,sched_init,work_init,irqoff}.rs`, `sched/thread_init/{ap,boot,idle,mod,sweep,table,testing,user}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
 | log | `log/{mod,backtrace,line,pvpanic,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs`, `log/vmcore/{mod,sig,synth,tables,tests,walk}.rs` | `log/{mod,log_init,panic,panic_test,pvpanic_init,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
@@ -206,7 +206,7 @@ children, need no row.
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/mod.rs`, `drivers/virtio_blk_init/{mod,vq,issue,irq}.rs` |
 | block | `block/{mod,part,cache,blockdev,loom_models}.rs`, `block/cache/tests.rs` | `block/{mod,block_init,blockdev_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,error,inode,mount,walk,file,ramfs,sizes,testfs,tests,walk_tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests,ops_tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests,image_tests,limit_tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
-| proc | `proc/{mod,elf,fill,pid,syscall,syscall_table,uabi,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs`, `proc/elf/stack.rs` | `proc/{mod,addr_space_init,fill_init,user_init,syscall_init,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit,floor}.rs` |
+| proc | `proc/{mod,elf,fill,pid,syscall,syscall_table,uabi,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs`, `proc/elf/stack.rs` | `proc/{mod,addr_space_init,fill_init,user_init,syscall_init,syscall_init_aarch64,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit,floor}.rs` |
 | ktest | `ktest/mod.rs` (selection by `vibeos.ktest=`, run counts, deadlines) | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 
 **In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel

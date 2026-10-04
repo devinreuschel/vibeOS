@@ -13,18 +13,28 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use vibeos::boot::{
     FW_CFG_DIR_ENTRY, FW_CFG_DMA_ERROR, FW_CFG_DMA_SELECT, FW_CFG_DMA_WRITE, FW_CFG_FILE_DIR,
-    FW_CFG_ID, FW_CFG_ID_DMA, FW_CFG_QEMU, FW_CFG_SIGNATURE, fw_cfg_dma_access,
-    parse_fw_cfg_dir_count, parse_fw_cfg_dir_entry,
+    fw_cfg_dma_access, parse_fw_cfg_dir_count, parse_fw_cfg_dir_entry,
 };
+#[cfg(target_arch = "x86_64")]
+use vibeos::boot::{FW_CFG_ID, FW_CFG_ID_DMA, FW_CFG_QEMU, FW_CFG_SIGNATURE};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 
 pub use vibeos::boot::FwCfgFile;
 
 use crate::arch::current::Arch;
 use crate::dma_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const PORT_SELECTOR: u16 = 0x510;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const PORT_DATA: u16 = 0x511;
 const PORT_DMA_HI: u16 = 0x514;
 const PORT_DMA_LO: u16 = 0x518;
@@ -41,6 +51,10 @@ const DMA_POLLS: u32 = 1_000_000;
 
 const UNPROBED: u8 = 0;
 const ABSENT: u8 = 1;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const PRESENT: u8 = 2;
 const PRESENT_DMA: u8 = 3;
 
@@ -92,11 +106,23 @@ impl FwCfgError {
 }
 
 /// CPUID.1:ECX[31], the hypervisor-present bit.
+#[cfg(target_arch = "x86_64")]
 pub fn hypervisor() -> bool {
     let (_, _, ecx, _) = x86::cpuid(1, 0);
     ecx & (1 << 31) != 0
 }
 
+/// QEMU `virt` is always a hypervisor; fw_cfg is MMIO (ROADMAP §11.5).
+#[cfg(target_arch = "aarch64")]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
+pub fn hypervisor() -> bool {
+    true
+}
+
+#[cfg(target_arch = "x86_64")]
 fn select(key: u16) {
     debug_assert!(hypervisor(), "fw_cfg: port access without a hypervisor");
     // SAFETY: invariant I57, established at `boot::fw_cfg_init::probe`:
@@ -105,6 +131,10 @@ fn select(key: u16) {
     unsafe { x86::outw(PORT_SELECTOR, key) }
 }
 
+#[cfg(target_arch = "aarch64")]
+fn select(_key: u16) {}
+
+#[cfg(target_arch = "x86_64")]
 fn read_bytes(out: &mut [u8]) {
     for b in out {
         // SAFETY: invariant I57, established at `boot::fw_cfg_init::probe`:
@@ -113,6 +143,15 @@ fn read_bytes(out: &mut [u8]) {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+fn read_bytes(_out: &mut [u8]) {}
+
+#[cfg(target_arch = "aarch64")]
+fn probe() -> u8 {
+    ABSENT
+}
+
+#[cfg(target_arch = "x86_64")]
 fn probe() -> u8 {
     if !hypervisor() {
         return ABSENT;
@@ -240,9 +279,14 @@ pub(super) fn transfer(
     // `has_dma` found the signature and the DMA feature, so 0x514 and
     // 0x518 are the DMA address register, big-endian in two halves; the
     // low write starts the transfer.
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         x86::outl(PORT_DMA_HI, ((dev >> 32) as u32).to_be());
         x86::outl(PORT_DMA_LO, (dev as u32).to_be());
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = (dev, PORT_DMA_HI, PORT_DMA_LO);
     }
     for _ in 0..DMA_POLLS {
         let mut word = [0u8; 4];

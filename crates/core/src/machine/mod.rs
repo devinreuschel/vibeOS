@@ -66,11 +66,31 @@ impl PhysRange {
 /// An interrupt controller the firmware named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrqController {
-    Lapic { base: u64 },
-    IoApic { id: u8, addr: u32, gsi_base: u32 },
-    GicV2 { dist: PhysRange, cpu_if: PhysRange },
-    GicV3 { dist: PhysRange, redist: PhysRange },
-    GicIts { mmio: PhysRange, phandle: u32 },
+    Lapic {
+        base: u64,
+    },
+    IoApic {
+        id: u8,
+        addr: u32,
+        gsi_base: u32,
+    },
+    GicV2 {
+        dist: PhysRange,
+        cpu_if: PhysRange,
+    },
+    GicV3 {
+        dist: PhysRange,
+        redist: PhysRange,
+    },
+    GicIts {
+        mmio: PhysRange,
+        phandle: u32,
+    },
+    GicV2m {
+        mmio: PhysRange,
+        spi_base: u32,
+        spi_count: u16,
+    },
 }
 
 /// A timer the firmware named.
@@ -265,6 +285,50 @@ impl MachineDesc {
                     minimum_tick: *minimum_tick,
                     period_fs: *period_fs,
                 }),
+                _ => None,
+            })
+    }
+
+    pub fn gic_v3(&self) -> Option<(PhysRange, PhysRange)> {
+        self.irq_controllers
+            .iter()
+            .take(self.irq_controller_count)
+            .find_map(|c| match c {
+                IrqController::GicV3 { dist, redist } => Some((*dist, *redist)),
+                _ => None,
+            })
+    }
+
+    pub fn gic_v2(&self) -> Option<(PhysRange, PhysRange)> {
+        self.irq_controllers
+            .iter()
+            .take(self.irq_controller_count)
+            .find_map(|c| match c {
+                IrqController::GicV2 { dist, cpu_if } => Some((*dist, *cpu_if)),
+                _ => None,
+            })
+    }
+
+    pub fn gic_its(&self) -> Option<(PhysRange, u32)> {
+        self.irq_controllers
+            .iter()
+            .take(self.irq_controller_count)
+            .find_map(|c| match c {
+                IrqController::GicIts { mmio, phandle } => Some((*mmio, *phandle)),
+                _ => None,
+            })
+    }
+
+    pub fn gic_v2m(&self) -> impl Iterator<Item = (PhysRange, u32, u16)> + '_ {
+        self.irq_controllers
+            .iter()
+            .take(self.irq_controller_count)
+            .filter_map(|c| match c {
+                IrqController::GicV2m {
+                    mmio,
+                    spi_base,
+                    spi_count,
+                } => Some((*mmio, *spi_base, *spi_count)),
                 _ => None,
             })
     }

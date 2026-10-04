@@ -46,7 +46,7 @@ the identity on them; a second port maps them to its own encoding (ROADMAP §11.
 | Context switch | trait (`ContextSwitch`) | `crates/core/src/sched/thread.rs`, `src/sched/thread_init/mod.rs` | `src/arch/x86_64/switch.rs`, `src/arch/x86_64/mod.rs` | none yet (ROADMAP §11.4) | `crates/core/src/arch/stub.rs` |
 | Secondary-CPU bring-up | port module | none yet (ROADMAP §11.4) | `src/smp/smp_init.rs`, `src/arch/x86_64/trampoline.rs`, `src/arch/x86_64/trampoline.S` | none yet (ROADMAP §11.4) | none yet (ROADMAP §11.4) |
 | CPU identity, topology, and features | port module | `src/smp/per_cpu_init.rs` | `src/arch/x86_64/cpu.rs`, `src/arch/x86_64/percpu.rs` | none yet (ROADMAP §11.4) | none yet (ROADMAP §11.4) |
-| Idle | port module | `src/sched/thread_init/mod.rs`, `src/console/console_init.rs` | `src/arch/x86_64/cpu.rs` | none yet (ROADMAP §11.3) | none yet (ROADMAP §11.3) |
+| Idle | port module | `src/sched/thread_init/idle.rs`, `src/console/console_init.rs` | `src/arch/x86_64/cpu.rs` | none yet (ROADMAP §11.3) | none yet (ROADMAP §11.3) |
 | Power-off and reset | port module | `src/shell/cmds/sys.rs`, `src/proc/proc_init/floor.rs` | `src/arch/x86_64/power.rs`, `src/arch/x86_64/cpu.rs` | none yet (ROADMAP §11.4) | none yet (ROADMAP §11.4) |
 | Machine description | pure half | `crates/core/src/machine/mod.rs`, `crates/core/src/machine/fdt.rs`, `crates/core/src/acpi/mod.rs` | `src/machine/machine_init.rs`, `src/acpi/acpi_init.rs` | none yet (ROADMAP §11.5) | none yet (ROADMAP §11.5) |
 | PCI configuration access | port module | `crates/core/src/dev/pci.rs`, `src/dev/pci_init.rs` | `src/dev/pci_init.rs` | none yet (ROADMAP §11.5) | none yet (ROADMAP §11.5) |
@@ -81,7 +81,7 @@ needs the concern moves it behind the seam (PORTABILITY.md §11.3).
 | `src/boot/fw_cfg_init.rs` | the whole module (its `mod` line in `src/boot/mod.rs`) | Machine description | QEMU's fw_cfg is port I/O on x86_64 and MMIO elsewhere; the MMIO driver comes with the port (ROADMAP §11.5) |
 | `src/console/kbd_init.rs` | the whole module (its `mod` line in `src/console/mod.rs`) | Interrupt controller and IRQ identity | the i8042 PS/2 driver is PC hardware (ROADMAP Phase 11 splits it) |
 | `src/console/console_init.rs` | `wait_key_loop`'s `cli`, `sti` and `sti; hlt` statements | Idle | ROADMAP §10.3's compiler-barrier box names these raw statements; the idle wait moves with the port's `wfi` sequence (§11.3) |
-| `src/sched/thread_init/mod.rs` | `halt_if_idle`'s `cli`, `sti` and `sti; hlt` statements | Idle | as for `wait_key_loop` |
+| `src/sched/thread_init/idle.rs` | `halt_if_idle`'s `cli`, `sti` and `sti; hlt` statements | Idle | as for `wait_key_loop` |
 | `src/dev/pci_init.rs` | the `x86` use line; `cf8_read32`, `cf8_write32` | PCI configuration access | the `0xCF8`/`0xCFC` mechanism exists only on x86; ECAM is the portable path |
 | `src/log/serial/raw.rs` | the `x86` use line; `init`, `write_byte`, `try_read_byte`, `this_cpu`, `stop_if_halting` | Early console | the 16550's port I/O; `check_cycles.py`'s `raw` rule keeps this module on the kernel root's `x86` alias alone |
 | `src/log/panic.rs` | the `x86` use line; `dump_regs`, the panic handler's register capture, `frame_fields`, `exception_halt`, `exception_vec` | Unwinder | the register dump and the x86 exception frame; ROADMAP §10.7's dump owns the file's rework |

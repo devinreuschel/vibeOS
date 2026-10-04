@@ -831,6 +831,7 @@ fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
     true
 }
 
+#[cfg(target_arch = "x86_64")]
 const _: () = {
     // The program's literals are the hook's canaries.
     assert!(idt_testing::GPR_CANARIES[0] == 0xC0DE_0000_0000_0101);

@@ -468,6 +468,22 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
         );
     }
 
+    if compatible_has(props, b"arm,gic-v2m-frame")
+        && let Some(mmio) = reg
+    {
+        let spi_base = u32_prop(props, b"arm,msi-base-spi").unwrap_or(0);
+        let n = u32_prop(props, b"arm,msi-num-spis").unwrap_or(0);
+        let spi_count = u16::try_from(n).unwrap_or(0);
+        push_irq(
+            d,
+            IrqController::GicV2m {
+                mmio,
+                spi_base,
+                spi_count,
+            },
+        );
+    }
+
     if compatible_has(props, b"arm,armv8-timer") || compatible_has(props, b"arm,armv7-timer") {
         let mut irqs = [0u32; 5];
         let mut nirq = 0u8;

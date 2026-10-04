@@ -194,6 +194,10 @@ impl fmt::Write for Serial {
 /// 100 ms cannot wrap it; the shell's `dmesg` writes to its console. Only
 /// those builds have it.
 #[cfg(any(feature = "kernel_tests", feature = "irqoff"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub struct PlainSerial;
 
 #[cfg(any(feature = "kernel_tests", feature = "irqoff"))]

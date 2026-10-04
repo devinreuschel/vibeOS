@@ -304,35 +304,40 @@ pub(crate) fn test_gp_catch() -> Outcome {
     }
 }
 
-pub(crate) fn test_df_on_ist() -> Outcome {
+pub(crate) fn test_kstack_overflow() -> Outcome {
     let Ok(stack) = kva_init::alloc_guarded_stack(1) else {
         return Outcome::Fail("guarded stack");
     };
     let poison = stack.guard().as_u64() + 0x800;
     let g = x86::InterruptGuard::enter();
-    // SAFETY: `poison` lies in `stack`'s unmapped guard page, so the first
-    // push faults, the fault's own push faults again, and `#DF` runs on its
-    // IST stack, where `catch` longjmps back with IRQs off (`g`);
+    // SAFETY: `poison` lies in `stack`'s unmapped guard page, so `ud2`
+    // delivery faults, the fault's own push faults again, and `#DF` runs
+    // on its IST stack, where `catch` longjmps back with IRQs off (`g`);
     // established here.
     let caught = arch::catch::catch(vectors::DF, || unsafe {
         vibeos_fault_on_bad_stack(poison);
     });
     drop(g);
-    kva_init::free_stack(stack);
     let Some(c) = caught else {
+        kva_init::free_stack(stack);
         return Outcome::Fail("did not reach df handler");
     };
     let (lo, hi) = ist_span(IstSlot::DoubleFault);
-    if c.handler_rsp >= lo && c.handler_rsp < hi {
+    // `ud2` with RSP in the guard delivers `#UD` onto the unmapped page,
+    // so CR2 is the failed frame push, in the guard, not `poison` itself.
+    let in_guard = stack.guard_contains(c.cr2);
+    kva_init::free_stack(stack);
+    if in_guard && c.handler_rsp >= lo && c.handler_rsp < hi {
         Outcome::Ok
     } else {
         crate::marker!(
-            "vibeOS: ktest:   rsp={:#x} lo={:#x} hi={:#x}",
+            "vibeOS: ktest:   cr2={:#x} want-in-guard rsp={:#x} lo={:#x} hi={:#x}",
+            c.cr2,
             c.handler_rsp,
             lo,
             hi
         );
-        Outcome::Fail("handler rsp not on ist1")
+        Outcome::Fail("overflow catch mismatch")
     }
 }
 
@@ -1349,7 +1354,7 @@ pub(crate) const TESTS: &[Test] = &[
         "idt_set_handler_refuses_fixed",
         test_idt_set_handler_refuses_fixed,
     ),
-    test("df_on_ist", test_df_on_ist),
+    test("kstack_overflow", test_kstack_overflow),
     test("lapic_timer_mode", test_lapic_timer_mode),
     test("lapic_timer_rearm", timer::test_lapic_timer_rearm),
     test("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),

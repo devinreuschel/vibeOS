@@ -710,7 +710,8 @@ pub fn friendly_name(vendor: u16, device: u16) -> Option<&'static str> {
         (0x1234, 0x11e8) => Some("edu"),
         (0x1af4, 0x1000) => Some("virtio-net"),
         (0x1af4, 0x1001) => Some("virtio-blk"),
-        (0x1af4, 0x1004) => Some("virtio-rng"),
+        (0x1af4, 0x1004) => Some("virtio-scsi"),
+        (0x1af4, 0x1005) => Some("virtio-rng"),
         (0x1af4, 0x1041) => Some("virtio-net"),
         (0x1af4, 0x1042) => Some("virtio-blk"),
         (0x1af4, 0x1044) => Some("virtio-rng"),
@@ -1205,7 +1206,8 @@ mod tests {
         assert_eq!(friendly_name(0x8086, 0x1237), Some("440FX"));
         assert_eq!(friendly_name(0x1234, 0x1111), Some("bochs"));
         assert_eq!(friendly_name(0x1af4, 0x1044), Some("virtio-rng"));
-        assert_eq!(friendly_name(0x1af4, 0x1004), Some("virtio-rng"));
+        assert_eq!(friendly_name(0x1af4, 0x1005), Some("virtio-rng"));
+        assert_eq!(friendly_name(0x1af4, 0x1004), Some("virtio-scsi"));
         assert_eq!(friendly_name(0x1af4, 0x1042), Some("virtio-blk"));
         assert_eq!(friendly_name(0x1af4, 0x1001), Some("virtio-blk"));
         assert_eq!(friendly_name(0x1b36, 0x11e8), Some("edu"));

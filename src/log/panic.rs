@@ -18,6 +18,7 @@ use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::desc::InterruptFrame;
 use vibeos::fmt_util::{self, StackBuf};
 use vibeos::irq::stop::{CrashRegs, StopHow};
@@ -31,8 +32,6 @@ use vibeos::symtab;
 
 use crate::per_cpu_init;
 use crate::serial::raw;
-#[cfg(target_arch = "x86_64")]
-use crate::x86;
 
 unsafe extern "C" {
     static __kernel_vma_start: u8;
@@ -149,6 +148,10 @@ pub(crate) fn walk_known(rip: u64, rbp: u64, out: impl FnMut(u64)) -> (usize, Wa
     not(feature = "kernel_tests"),
     expect(dead_code, reason = "the in-guest backtrace test is its only caller")
 )]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn symbol_name(addr: u64) -> Option<&'static str> {
     let e = crate::log::ksyms::lookup(addr)?;
     (symtab::offset(&e, addr) < 0x1_0000).then_some(e.name)
@@ -232,7 +235,6 @@ fn hex(w: &mut StackBuf<'_>, n: u64) {
     w.push_bytes(fmt_util::write_hex(n, &mut b));
 }
 
-#[cfg(target_arch = "x86_64")]
 fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
     line(|w| {
         w.push_bytes(b"vibeOS: regs: rbp=0x");
@@ -244,7 +246,7 @@ fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
         w.push_bytes(b" rip=0x");
         hex(w, rip);
         w.push_bytes(b" cr3=0x");
-        hex(w, x86::read_cr3());
+        hex(w, crate::arch::cpu::read_cr3());
     });
 }
 
@@ -333,17 +335,16 @@ fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     crate::arch::catch::on_panic();
     // IF=0 before anything else: a second panicking CPU must reach
     // `begin_dump` without taking an interrupt (DESIGN §2.5 step 1).
     crate::arch::current::irq_disable();
-    #[cfg(target_arch = "x86_64")]
     let (rip, rbp, rsp, rflags) = (
-        x86::read_rip(),
-        x86::read_rbp(),
-        x86::read_rsp(),
-        x86::rflags(),
+        crate::arch::current::instruction_pointer(),
+        crate::arch::current::frame_pointer(),
+        crate::arch::current::stack_pointer(),
+        crate::arch::current::irq_flags(),
     );
     let regs = CrashRegs {
         rip,

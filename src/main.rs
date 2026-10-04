@@ -32,7 +32,6 @@
     clippy::todo,
     clippy::unimplemented
 )]
-
 extern crate alloc;
 
 // The panic-test build compiles out everything after `limine: ok`
@@ -92,10 +91,14 @@ mod time;
 mod ktest;
 
 use acpi::acpi_init;
+#[cfg(target_arch = "aarch64")]
+use arch::aarch64::irqchip as apic_init;
 #[cfg(target_arch = "x86_64")]
 use arch::x86_64::{apic_init, cpu as x86};
 use block::{block_init, cache_init, part_init};
-use console::{console_init, fb_init, kbd_init};
+#[cfg(target_arch = "x86_64")]
+use console::kbd_init;
+use console::{console_init, fb_init};
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
 use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init};
 use drivers::virtio_blk_init;
@@ -138,9 +141,18 @@ pub extern "C" fn _start() -> ! {
     // Limine's stack (DESIGN §2.5 step 4).
     panic::note_boot_stack(crate::arch::current::stack_pointer());
     // Step 1: serial. Nothing before this is debuggable.
+    #[cfg(target_arch = "aarch64")]
+    {
+        arch::aarch64::cpu::use_sp_elx();
+        arch::aarch64::boot::map_early_console();
+        arch::aarch64::vectors::init_early();
+    }
     serial::Serial::init();
+    serial::raw::set_halt_hook(arch::current::halt);
     log_init::init();
     crate::marker!(marker::SERIAL_ONLINE);
+    #[cfg(target_arch = "aarch64")]
+    arch::aarch64::boot::early_init();
 
     // Step 2: base revision. DESIGN §3.3 puts this immediately after serial.
     // Missing / older Limine responds by not clearing the request, and
@@ -150,6 +162,7 @@ pub extern "C" fn _start() -> ! {
         arch::current::halt();
     }
     crate::marker!(marker::LIMINE_OK);
+    #[cfg(target_arch = "x86_64")]
     crate::log::pvpanic_init::probe();
 
     // With `--features panic_test`, prove the panic path end to end.
@@ -268,18 +281,26 @@ fn normal_boot_tail() -> ! {
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: KVA is up (`kva_init::init` above), as `gdt::init_bsp` requires; established here.
     unsafe { arch::gdt::init_bsp() };
+    #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::GDT_OK);
 
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the ACPI walk ran and no IDT is loaded yet, as `pic::remap_and_mask` requires; established here.
     unsafe { arch::pic::remap_and_mask() };
+    #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::PIC_REMAPPED);
 
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the GDT is loaded and the PIC remapped and masked, as `idt::init` requires; established here.
-    unsafe { arch::idt::init() };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        arch::idt::init()
+    };
+    #[cfg(target_arch = "aarch64")]
+    arch::idt::init();
     #[cfg(feature = "kernel_tests")]
     arch::catch::init();
+    #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::IDT_OK);
 
     // DESIGN §3.3 step 11. After GDT: `mov gs` already ran. Before
@@ -306,6 +327,14 @@ fn normal_boot_tail() -> ! {
 /// is left on the stack below it.
 #[cfg(not(feature = "panic_test"))]
 extern "C" fn boot_rest() -> ! {
+    #[cfg(target_arch = "aarch64")]
+    {
+        arch::aarch64::cpu::use_sp_elx();
+        // SAFETY: the bootstrap thread is on a 2S guarded stack (`init_bootstrap`). established here.
+        unsafe {
+            arch::idt::init_full();
+        }
+    }
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the GDT is loaded and `GS_BASE` is the BSP's `PerCpu`, as `syscall_init::init_bsp` requires; established here.
     unsafe { syscall_init::init_bsp() };
@@ -414,7 +443,7 @@ extern "C" fn boot_rest() -> ! {
 
     // ROADMAP §10.6: `/hello` runs as a process the kernel spawns and
     // waits for. Diagnostic only, not a `vibeOS:` marker.
-    #[cfg(not(feature = "vibefs_crash"))]
+    #[cfg(all(not(feature = "vibefs_crash"), target_arch = "x86_64"))]
     {
         use crate::serial::Serial;
         use core::fmt::Write;

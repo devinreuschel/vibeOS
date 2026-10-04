@@ -5,15 +5,21 @@
 //! §7.3); the BSP writes it only through the physmap, with
 //! `write_volatile` + `compiler_fence(SeqCst)` before SIPI.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+#[cfg(target_arch = "x86_64")]
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::Ordering;
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::apic::IpiMode;
+#[cfg(target_arch = "x86_64")]
 use vibeos::arch::CycleCounter;
 use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
+#[cfg(target_arch = "x86_64")]
 use vibeos::log::trace::{ClockInfo, WARP_MAX_ITERS, WARP_MS, WarpLine};
 use vibeos::marker;
 use vibeos::per_cpu::PerCpu;
+#[cfg(target_arch = "x86_64")]
 use vibeos::smp::{
     INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_OFF, PARAM_STACK, PATCH_SITES, READY_TIMEOUT_MS,
     SIPI_WAIT_MS, blob_fits, patch_blob, sipi_vector,
@@ -21,20 +27,26 @@ use vibeos::smp::{
 use vibeos::thread::ThreadId;
 
 use crate::apic_init;
+#[cfg(target_arch = "x86_64")]
 use crate::arch;
+#[cfg(target_arch = "x86_64")]
 use crate::arch::current::Arch;
 use crate::arch::gdt::{self, ApTables, CpuTables};
 use crate::cell::IrqCell;
 use crate::kva_init;
+#[cfg(target_arch = "x86_64")]
 use crate::log::trace_init;
+#[cfg(target_arch = "x86_64")]
 use crate::machine_init;
 use crate::per_cpu_init;
 use crate::thread_init::{self, SpawnError};
+#[cfg(target_arch = "x86_64")]
 use crate::time_init;
 use crate::work_init::{self, CpuWorkers};
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
 
+#[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
     static __trampoline_start: u8;
     static __trampoline_end: u8;
@@ -45,6 +57,33 @@ unsafe extern "C" {
     static vibeos_tramp_patch_gdt: u8;
 }
 
+#[cfg(target_arch = "aarch64")]
+mod tramp_absent {
+    #[unsafe(no_mangle)]
+    pub(super) static __trampoline_start: u8 = 0;
+    #[unsafe(no_mangle)]
+    pub(super) static __trampoline_end: u8 = 0;
+    #[unsafe(no_mangle)]
+    pub(super) static vibeos_tramp_patch_pm32: u8 = 0;
+    #[unsafe(no_mangle)]
+    pub(super) static vibeos_tramp_patch_cr3: u8 = 0;
+    #[unsafe(no_mangle)]
+    pub(super) static vibeos_tramp_patch_lm64: u8 = 0;
+    #[unsafe(no_mangle)]
+    pub(super) static vibeos_tramp_patch_gdt: u8 = 0;
+}
+
+#[cfg(target_arch = "aarch64")]
+#[expect(unused_imports, reason = "x86 trampoline symbols; aarch64 has no SIPI")]
+use tramp_absent::{
+    __trampoline_end, __trampoline_start, vibeos_tramp_patch_cr3, vibeos_tramp_patch_gdt,
+    vibeos_tramp_patch_lm64, vibeos_tramp_patch_pm32,
+};
+
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 struct Starting {
     cpu: *mut PerCpu,
     cpu_tables: *mut CpuTables,
@@ -58,6 +97,10 @@ struct Starting {
 unsafe impl Send for Starting {}
 
 impl Starting {
+    #[cfg_attr(
+        target_arch = "aarch64",
+        expect(dead_code, reason = "x86-only on the boot-CPU slice")
+    )]
     const fn empty() -> Self {
         Self {
             cpu: core::ptr::null_mut(),
@@ -66,13 +109,25 @@ impl Starting {
     }
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 static STARTING: IrqCell<Starting> = IrqCell::new(Starting::empty());
 /// Each online AP's GDT, TSS and IST stacks, for as long as it runs on
 /// them. `start_one` reserves the slot before INIT and moves the tables in
 /// before INIT too, so nothing allocates, fails or drops them once the AP
 /// runs on them (DESIGN §4.4).
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 static LIVE_TABLES: IrqCell<TryVec<ApTables>> = IrqCell::new(TryVec::new());
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub(super) struct ApAlloc {
     cpu_id: u32,
     apic_id: u8,
@@ -87,6 +142,10 @@ pub(super) struct ApAlloc {
 
 /// The trampoline page `page`'s physmap address, through which the BSP
 /// writes it (the AP reaches it at its identity address).
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub(super) fn tramp_va(page: u64) -> *mut u8 {
     crate::paging_init::hhdm_offset().wrapping_add(page) as *mut u8
 }
@@ -97,6 +156,7 @@ pub(super) fn tramp_va(page: u64) -> *mut u8 {
 /// `page` is `BootInfo.trampoline_page`, `off + 8` is at most the page
 /// size, and no AP runs on the trampoline page: `start_one` starts one AP
 /// at a time and writes the page only before that AP's INIT.
+#[cfg(target_arch = "x86_64")]
 unsafe fn write_u64(page: u64, off: usize, val: u64) {
     // SAFETY: the physmap maps the trampoline page writable (invariant I14,
     // established at `mm::paging_init::install`: the page is usable RAM
@@ -109,6 +169,7 @@ unsafe fn write_u64(page: u64, off: usize, val: u64) {
 }
 
 /// Whether `trampoline.S`'s exported patch labels sit at `PATCH_SITES`.
+#[cfg(target_arch = "x86_64")]
 fn patch_labels_match() -> bool {
     let start = core::ptr::addr_of!(__trampoline_start) as usize;
     let labels = [
@@ -127,6 +188,7 @@ fn patch_labels_match() -> bool {
 /// Copy the blob into a local buffer, rebase it onto `page`
 /// (`vibeos::smp::patch_blob`), and write it to the page through the
 /// physmap. False when the blob cannot be rebased there.
+#[cfg(target_arch = "x86_64")]
 fn install_blob(page: u64) -> bool {
     // Kernel invariant: `.org` pins each patched operand in `trampoline.S`
     // at its `PATCH_SITES` offset.
@@ -180,6 +242,10 @@ fn patch_params(page: u64, cr3: u64, stack_top: u64, entry: u64) {
 /// parked. On any failure it releases what it took and returns `Err`, with
 /// the `SpawnError` when a thread found no slot or no memory; the CPU then
 /// stays offline (ROADMAP §10.4, F037).
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub(super) fn alloc_ap_resources(
     cpu_id: u32,
     apic_id: u8,
@@ -248,6 +314,10 @@ pub(super) fn alloc_ap_resources(
 /// may have accepted it and stalled past the ready timeout and may still
 /// run on its slot (ROADMAP §11.4, F032), so its owner-only fields are left
 /// alone; nothing reads an offline slot's owner-only fields.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub(super) fn free_ap_resources(a: ApAlloc, sipi_sent: bool) {
     let ApAlloc {
         cpu_id,
@@ -263,6 +333,10 @@ pub(super) fn free_ap_resources(a: ApAlloc, sipi_sent: bool) {
 
 /// [`free_ap_resources`] but for the tables, for a `start_one` failure
 /// after the tables moved into `LIVE_TABLES`.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 fn free_ap_slot(
     cpu_id: u32,
     idle_id: ThreadId,
@@ -300,6 +374,10 @@ fn free_ap_slot(
 
 /// Take the tables `start_one` moved into `LIVE_TABLES` back out and free
 /// them with the rest of the AP's resources.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 fn free_live_ap(
     cpu_id: u32,
     idle_id: ThreadId,
@@ -316,6 +394,7 @@ fn free_live_ap(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn wait_ready(cpu_id: u32) -> bool {
     let mut ms = 0u64;
     while ms < READY_TIMEOUT_MS {
@@ -331,12 +410,15 @@ fn wait_ready(cpu_id: u32) -> bool {
 
 /// The line the TSC warp test shares between the BSP and the AP it is
 /// starting (DESIGN §7.4).
+#[cfg(target_arch = "x86_64")]
 static WARP: WarpLine = WarpLine::new();
 /// APs whose warp test met the BSP.
+#[cfg(target_arch = "x86_64")]
 static WARP_RUNS: AtomicU32 = AtomicU32::new(0);
 
 /// The warp test's barrier timeout and run span, in TSC cycles, or `None`
 /// before the TSC is calibrated, when neither side runs it.
+#[cfg(target_arch = "x86_64")]
 fn warp_budget() -> Option<(u64, u64)> {
     let per_ms = time_init::tsc_per_ms();
     if per_ms == 0 {
@@ -351,6 +433,7 @@ fn warp_budget() -> Option<(u64, u64)> {
 /// The BSP's side of the warp test against the AP it just sent SIPIs.
 /// Runs with IF=1, never inside an `InterruptGuard`: an interrupt only
 /// delays a read and cannot fake a backward step.
+#[cfg(target_arch = "x86_64")]
 fn tsc_warp_source() {
     let Some((timeout, span)) = warp_budget() else {
         return;
@@ -371,6 +454,7 @@ fn tsc_warp_source() {
 
 /// The AP's side of the warp test, with IF=0 before its first `sti`
 /// (at most `WARP_MAX_ITERS` iterations). Alone past the timeout, it skips.
+#[cfg(target_arch = "x86_64")]
 fn tsc_warp_target() {
     let Some((timeout, span)) = warp_budget() else {
         return;
@@ -383,6 +467,7 @@ fn tsc_warp_target() {
 
 /// The skew marker, once an AP ran the warp test, and the clock the core
 /// tool reads from the trace's header.
+#[cfg(target_arch = "x86_64")]
 fn report_tsc_warp() {
     // Relaxed: a count; pairs with nothing.
     let runs = WARP_RUNS.load(Ordering::Relaxed);
@@ -560,44 +645,52 @@ extern "C" fn ap_entry() -> ! {
 /// Scheduler live, LAPIC ready, trampoline page identity-mapped and
 /// excluded from the PMM.
 pub unsafe fn init() {
-    let keep = match crate::boot::info().trampoline_page {
-        Some(page) if install_blob(page) => {
-            crate::marker!("vibeOS: smp: trampoline page {page:#x}");
-            core::sync::atomic::compiler_fence(Ordering::SeqCst);
-            start_aps(page);
-            Some(page)
-        }
-        _ => {
-            crate::marker!("vibeOS: smp: no trampoline page");
-            None
-        }
-    };
-    report_tsc_warp();
-    crate::marker!(marker::SMP_DONE);
-    // ROADMAP §10.6: the low identity window goes, all but the trampoline
-    // page. Kernel invariant: boot runs on the bootstrap thread's KVA stack
-    // (`thread_init::init_bootstrap`), outside the window.
-    let window = crate::paging_init::identity_window();
-    let rsp = crate::arch::current::stack_pointer();
-    assert!(
-        !window.contains(&rsp),
-        "smp: rsp {rsp:#x} in the identity window"
-    );
-    let stack = thread_init::bootstrap_stack().map(|(r, _, _)| r);
-    assert!(
-        stack
-            .as_ref()
-            .is_some_and(|r| r.end <= window.start || r.start >= window.end),
-        "smp: bootstrap stack {stack:#x?} not outside the identity window"
-    );
-    // SAFETY: every AP is up or abandoned (`start_aps` returned), nothing
-    // uses an identity address but the trampoline page, which `keep`
-    // keeps, and this CPU's stack is outside the window (checked above);
-    // established here.
-    unsafe { crate::paging_init::teardown_identity(keep) };
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::marker!(marker::SMP_DONE);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let keep = match crate::boot::info().trampoline_page {
+            Some(page) if install_blob(page) => {
+                crate::marker!("vibeOS: smp: trampoline page {page:#x}");
+                core::sync::atomic::compiler_fence(Ordering::SeqCst);
+                start_aps(page);
+                Some(page)
+            }
+            _ => {
+                crate::marker!("vibeOS: smp: no trampoline page");
+                None
+            }
+        };
+        report_tsc_warp();
+        crate::marker!(marker::SMP_DONE);
+        // ROADMAP §10.6: the low identity window goes, all but the trampoline
+        // page. Kernel invariant: boot runs on the bootstrap thread's KVA stack
+        // (`thread_init::init_bootstrap`), outside the window.
+        let window = crate::paging_init::identity_window();
+        let rsp = crate::arch::current::stack_pointer();
+        assert!(
+            !window.contains(&rsp),
+            "smp: rsp {rsp:#x} in the identity window"
+        );
+        let stack = thread_init::bootstrap_stack().map(|(r, _, _)| r);
+        assert!(
+            stack
+                .as_ref()
+                .is_some_and(|r| r.end <= window.start || r.start >= window.end),
+            "smp: bootstrap stack {stack:#x?} not outside the identity window"
+        );
+        // SAFETY: every AP is up or abandoned (`start_aps` returned), nothing
+        // uses an identity address but the trampoline page, which `keep`
+        // keeps, and this CPU's stack is outside the window (checked above);
+        // established here.
+        unsafe { crate::paging_init::teardown_identity(keep) };
+    }
 }
 
 /// Start each MADT CPU but the BSP, one at a time, from `page`.
+#[cfg(target_arch = "x86_64")]
 fn start_aps(page: u64) {
     // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     let bsp_apic = per_cpu_init::with_current(|c| c.remote.apic_id.load(Ordering::Relaxed)) as u8;

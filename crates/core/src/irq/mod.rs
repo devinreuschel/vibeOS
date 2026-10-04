@@ -5,6 +5,7 @@
 //! They never pick IDT slots. The x86 chip allocates from [`VectorPool`].
 
 pub mod chip;
+pub mod gic;
 pub mod ipi;
 pub mod its;
 pub mod stop;
@@ -13,7 +14,10 @@ pub use chip::{
     IRQ_SET_MAX, IrqChip, IrqError, IrqId, IrqSet, IrqSpecifier, IrqTable, LapicLvt, MAX_IRQS,
     MsiMessage,
 };
-pub use its::{ITS_CMD_MAPC, ITS_CMD_MAPD, ITS_CMD_MAPTI, ITS_CMD_MOVI, ITS_CMD_SYNC, ItsCommand};
+pub use its::{
+    ITS_CMD_DISCARD, ITS_CMD_MAPC, ITS_CMD_MAPD, ITS_CMD_MAPTI, ITS_CMD_MOVI, ITS_CMD_SYNC,
+    ITS_FREE_WAIT_NS, ItsCommand, encode_free_sequence,
+};
 
 use crate::vectors;
 

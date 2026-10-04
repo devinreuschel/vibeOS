@@ -1,6 +1,6 @@
 //! Time: the kernel half of subsystem `time` (DESIGN §1.3).
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

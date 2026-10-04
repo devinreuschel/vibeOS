@@ -25,10 +25,9 @@ use vibeos::physmap::PHYSMAP_AARCH64;
 #[cfg(target_arch = "x86_64")]
 use vibeos::physmap::PHYSMAP_X86_64;
 
-#[cfg(target_arch = "x86_64")]
 pub mod fw_cfg_init;
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -190,6 +189,10 @@ impl BootInfo {
         not(feature = "kernel_tests"),
         expect(dead_code, reason = "the in-guest `cmdline_captured` reads it")
     )]
+    #[cfg_attr(
+        all(target_arch = "aarch64", feature = "kernel_tests"),
+        expect(dead_code, reason = "boot-CPU S7; unused on this path")
+    )]
     pub fn cmdline_limine_len(&self) -> usize {
         self.cmdline.limine_len()
     }
@@ -298,6 +301,24 @@ fn dtb_bytes() -> Option<&'static [u8]> {
     // SAFETY: as above, established here: `totalsize` is the blob length
     // and Limine maps those bytes. The cap is the dumpdtb buffer QEMU uses.
     Some(unsafe { core::slice::from_raw_parts(ptr, total) })
+}
+
+/// Limine's HHDM offset, before [`capture`]. None if the response is missing.
+#[cfg(target_arch = "aarch64")]
+pub fn early_hhdm_offset() -> Option<u64> {
+    HHDM.response().map(|h| h.offset)
+}
+
+/// Physical base of the loaded image, before [`capture`].
+#[cfg(target_arch = "aarch64")]
+pub fn early_kernel_phys() -> Option<u64> {
+    EXEC_ADDR.response().map(|e| e.physical_base)
+}
+
+/// Kernel VMA start from the linker script.
+#[cfg(target_arch = "aarch64")]
+pub fn kernel_vma_start() -> u64 {
+    &raw const __kernel_vma_start as u64
 }
 
 /// Read every Limine response we need and stash it. First thing in

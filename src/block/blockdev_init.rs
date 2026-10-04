@@ -55,7 +55,7 @@ pub fn snapshot(out: &mut [Option<BlockRef>]) -> usize {
 /// Take `dev` and its children out of the table, then close each one's gate
 /// with the table unlocked (DEVICES.md §12.2 rule 5). Test builds only:
 /// nothing unplugs a disk yet.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn unregister(dev: &BlockRef) -> Result<(), BlockError> {
     use vibeos::block::MAX_BLOCKDEVS;
     let mut out: [Option<BlockRef>; MAX_BLOCKDEVS] = [const { None }; MAX_BLOCKDEVS];

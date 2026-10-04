@@ -222,6 +222,21 @@ most eight IPI kinds on both architectures, and a line that adds one takes a fre
 
 No SGI does TLB shootdown: aarch64 broadcasts its TLB maintenance (ROADMAP §11.2).
 
+INTID map (aarch64, the counterpart of the vector map above). A hwirq is an INTID.
+
+| INTID | Class | Use |
+|-------|-------|-----|
+| 0 | SGI | Reschedule |
+| 1 | SGI | Call function |
+| 2 | SGI | Panic stop ([§2.5](INVARIANTS.md#25-panic-policy)) |
+| 3–7 | SGI | Free |
+| 8–15 | SGI | Left to the Secure world |
+| 16–31 | PPI | Per-CPU. The generic timer's PPI is one `IrqId` on every CPU (`irq::map_percpu`). |
+| 32–1023 | SPI | Wired devices and GICv2m MSI |
+| 8192– | LPI | GICv3 ITS MSI. Allocated once, never moved; `GICR_CTLR.EnableLPIs` stays set. |
+
+Priorities (lower value is higher priority): reserved 0x00 for ROADMAP §25.5's pseudo-NMI, then 0x40 for SGIs and the tick PPI, then 0xA0 for devices.
+
 ## 5.4 IRQ registration
 
 Drivers do not write to the IDT. They name an interrupt by an `IrqId`, a `u32` the IRQ layer

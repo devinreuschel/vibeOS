@@ -290,9 +290,9 @@ impl Drop for Zeroed {
 /// Run `f` with `PT` held, for a chunk of `pages` pages.
 fn with_pt_chunk<R>(pages: u64, f: impl FnOnce() -> R) -> R {
     paging_init::with_pt(|_pt| {
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::note_hold(pages);
-        #[cfg(not(feature = "kernel_tests"))]
+        #[cfg(not(all(feature = "kernel_tests", target_arch = "x86_64")))]
         let _ = pages;
         f()
     })
@@ -527,7 +527,7 @@ pub fn mmap(space: &Space, req: &MmapReq) -> Result<u64, AsError> {
     Ok(va)
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicU64, Ordering};
 

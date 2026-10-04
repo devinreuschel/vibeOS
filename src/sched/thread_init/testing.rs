@@ -679,34 +679,8 @@ pub(super) fn scan_dead_slot() {
 
 /// Scan every live thread's stack, one `SCHED` section per slot, and hand
 /// each measurement to `f` with the lock dropped (TESTING §8.2).
-pub fn scan_live_stacks(mut f: impl FnMut(Deepest)) {
-    let mut i = 0usize;
-    while i < MAX_THREADS {
-        let d = with_sched(|s| {
-            let t = s.slots.get(i)?.as_deref()?;
-            if t.state == ThreadState::Dead {
-                return None;
-            }
-            let st = t.stack.as_ref()?;
-            let words = st.pages() * WORDS_PER_PAGE;
-            // SAFETY: a thread that is not Dead keeps its stack mapped
-            // while SCHED is held: `thread_exit` stores Dead under SCHED
-            // before its switch hands the stack to reclaim (invariant I10,
-            // established at `sched::thread_init::thread_exit`).
-            let used =
-                unsafe { stack_depth::used_volatile(st.base().as_u64() as *const u64, words) };
-            Some(Deepest {
-                size: words * 8,
-                used,
-                tid: t.id.0,
-                name: t.name,
-            })
-        });
-        if let Some(d) = d {
-            f(d);
-        }
-        i += 1;
-    }
+pub fn scan_live_stacks(f: impl FnMut(Deepest)) {
+    super::scan_live_stacks(f);
 }
 
 const WORDS_PER_PAGE: usize = vibeos::paging::PAGE_SIZE_4K as usize / 8;

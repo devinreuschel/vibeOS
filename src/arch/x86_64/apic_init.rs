@@ -432,7 +432,7 @@ unsafe fn write_icr(va: u64, hi: u32, lo: u32) {
     let _irq = x86::interrupts_enabled().then(|| x86::InterruptGuard::enter());
     // SAFETY: this fn's `# Safety` (here).
     unsafe { lapic_write(va, LAPIC_ICR_HIGH, hi) };
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::between_icr_writes();
     // SAFETY: this fn's `# Safety` (here).
     unsafe { lapic_write(va, LAPIC_ICR_LOW, lo) };
@@ -674,7 +674,7 @@ fn rearm_deadline() {
     // and put the LVT in TSC-deadline mode, so the MSR exists and the write
     // only arms the timer; established at `arch::x86_64::apic_init::prove`.
     unsafe { x86::wrmsr(IA32_TSC_DEADLINE, d) };
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::rearmed(d.wrapping_sub(now));
 }
 
@@ -686,7 +686,7 @@ pub fn on_timer_irq() {
         // Relaxed: only CPU 0 counts, and `prove` reads it there; pairs with nothing.
         TIMER_FIRES.fetch_add(1, Ordering::Relaxed);
         time_init::on_hw_tick();
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::stamp_fire();
     }
     eoi();
@@ -913,7 +913,7 @@ pub fn arm_ap() {
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 

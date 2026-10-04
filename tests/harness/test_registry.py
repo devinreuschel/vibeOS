@@ -468,7 +468,7 @@ class TestRegistrySchema(unittest.TestCase):
     def test_contract_keys(self) -> None:
         self.bad(ROW + "order = 10\n", "'order' is only for contract rows")
         self.bad(contract_row("vibeOS: x", 10, "x").replace("order = 10\n", ""), "int 'order'")
-        self.bad(contract_row("vibeOS: x", 15, "x"), "not a multiple of 10")
+        self.bad(contract_row("vibeOS: x", 12, "x"), "not a multiple of 5")
         self.bad(contract_row("vibeOS: x", 10, "x") + contract_row("vibeOS: y", 10, "y"),
                  "order 10 repeats row 1")
         self.bad(contract_row("vibeOS: x", 10, "x") + contract_row("vibeOS: y", 20, "x"),

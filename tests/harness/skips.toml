@@ -157,6 +157,7 @@ smp = 1
 [[skip]]
 name = "msix_cpu"
 reason = "no AP"
+arch = "x86_64"
 smp = 1
 
 [[skip]]

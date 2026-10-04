@@ -110,6 +110,7 @@ class ShardTable(unittest.TestCase):
         self.assertNotIn("repeat", proof_boot_names(4, False))
         self.assertIn("deadline-trip", proof_boot_names(4, False))
         self.assertNotIn("deadline-trip", proof_boot_names(1, False))
+        self.assertEqual(proof_boot_names(1, True, "aarch64"), [])
 
     def test_unknown_shard_is_refused(self) -> None:
         with (

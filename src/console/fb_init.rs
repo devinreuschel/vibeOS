@@ -66,6 +66,10 @@ static FB_VIRT: AtomicU64 = AtomicU64::new(0);
 
 /// The framebuffer console is up; the REPL and the in-guest tests ask.
 #[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn ready() -> bool {
     // Acquire: pairs with the Release store in `init`.
     READY.load(Ordering::Acquire)
@@ -196,7 +200,7 @@ impl Fb {
     }
 
     /// The pixel at `(x, y)`; the in-guest tests' read-back.
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     pub(super) fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
         let p = self.pixel_ptr(x, y)?;
         // SAFETY: invariant: as in `put_pixel`; established by
@@ -275,6 +279,10 @@ fn redraw() {
         let Some(p) = c.grid.next_piece() else {
             return;
         };
+        #[cfg_attr(
+            not(all(feature = "kernel_tests", target_arch = "x86_64")),
+            allow(unused_variables, unused_assignments)
+        )]
         let mut painted = 0usize;
         if let Some(fb) = c.fb.as_ref() {
             let cols = c.grid.cols() as usize;
@@ -294,8 +302,9 @@ fn redraw() {
                 }
                 i += 1;
             }
+            let _ = painted;
         }
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::on_piece(painted * vibeos::fb::CELL_BYTES);
         #[cfg(not(feature = "kernel_tests"))]
         let _ = painted;
@@ -315,7 +324,7 @@ pub fn write(bytes: &[u8]) {
         let (chunk, tail) = rest.split_at(rest.len().min(CHUNK));
         {
             let _st = CONSOLE.lock().grid.write_chunk(chunk);
-            #[cfg(feature = "kernel_tests")]
+            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
             testing::on_chunk(_st);
         }
         if interrupts_enabled() {
@@ -329,7 +338,7 @@ pub fn write(bytes: &[u8]) {
 }
 
 /// In-guest test counters. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicU64, Ordering};
 
