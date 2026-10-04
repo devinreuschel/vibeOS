@@ -228,7 +228,7 @@ endif
 .PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
-        test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff
+        test-smp-stress test-vibefs-crash test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff
 
 help:
 	@printf '%s\n' \
@@ -726,11 +726,18 @@ test-lapic-fallback-6: $(ISO_KTEST)
 	$(KTEST_RUN) --shard $@
 
 # Over the volatile-cache device (DESIGN §8.3): nbd-cache serves the disk,
-# vibefs-cat reads /w from each image rebuilt from its trace.
-test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
+# vibefs-cat reads /w from each image rebuilt from its trace. The 8 rounds
+# run as two CI tiers of 4, each with its own seed (ROADMAP §10.1, --tiers);
+# test-vibefs-crash runs both.
+VIBEFS_CRASH_RUN = VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) \
+	    VIBEOS_FSCK=$(FSCK_VIBEFS) VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) \
+	    python3 tests/harness/run_vibefs_crash.py --rounds 4
+test-vibefs-crash: test-vibefs-crash-1 test-vibefs-crash-2
+test-vibefs-crash-1: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
 	cargo test -p vibeos-hostlib-tests --target $(HOST_TRIPLE)
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) \
-	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py
+	$(VIBEFS_CRASH_RUN)
+test-vibefs-crash-2: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
+	$(VIBEFS_CRASH_RUN)
 
 # The crash test's planted defects (ROADMAP §10.2): each plant must fail a
 # round, then an unplanted control round must pass. Its own tier keeps the
@@ -752,7 +759,7 @@ test-irqoff: $(ISO_KTEST_IRQOFF) $(ISO_IRQOFF) $(MKFS_VIBEFS)
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_ISO=$(ISO_KTEST_IRQOFF) python3 tests/harness/run_ktest.py
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_RESULTS_APPEND=1 VIBEOS_ISO=$(ISO_IRQOFF) VIBEOS_MKFS=$(MKFS_VIBEFS) python3 tests/harness/run_e2e.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6 test-vibefs-crash test-vibefs-crash-plants
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6 test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)

@@ -28,6 +28,7 @@ pub unsafe fn init() {
         cpu.idle = ptr;
         cpu.idle_id = h.id();
         cpu.slice_tsc = crate::time_init::read_tsc();
+        cpu.quantum_tsc = cpu.slice_tsc;
     });
     crate::ipi_init::set_reschedule_hook(thread_init::schedule_preempt);
     thread_init::start_sweep();
@@ -42,8 +43,9 @@ pub fn is_live() -> bool {
     LIVE.load(Ordering::Acquire)
 }
 
-/// After EOI. Preempt every `QUANTUM_TICKS`, or every tick while idle
-/// so a sleeper can displace `sti; hlt`. Each CPU owns its runq.
+/// After EOI. Preempt a thread that has run `QUANTUM_MS` of TSC time, or
+/// at every tick while idle so a sleeper can displace `sti; hlt`. Each CPU
+/// owns its runq.
 pub fn on_timer_tick() {
     #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     crate::ktest::on_tick();
@@ -51,13 +53,15 @@ pub fn on_timer_tick() {
         return;
     }
     crate::work_init::kick_deferred();
+    let quantum = crate::time_init::tsc_per_ms().saturating_mul(vibeos::sched::QUANTUM_MS);
+    let now = crate::time_init::read_tsc();
     let preempt = per_cpu_init::with_current(|cpu| {
         // Relaxed: only this CPU stores its `ticks`; pairs with nothing.
         let ticks = cpu.remote.ticks.load(Ordering::Relaxed).wrapping_add(1);
         // Relaxed: as the load; pairs with nothing.
         cpu.remote.ticks.store(ticks, Ordering::Relaxed);
         let idle = crate::arch::current_tcb() == cpu.idle && !cpu.idle.is_null();
-        vibeos::sched::should_preempt(ticks, idle)
+        vibeos::sched::should_preempt(now.wrapping_sub(cpu.quantum_tsc), quantum, idle)
     });
     if preempt {
         thread_init::schedule_preempt();

@@ -313,16 +313,56 @@ pub(crate) fn test_preempt_two_threads() -> Outcome {
     Outcome::Ok
 }
 
+/// Threads [`test_idle_runs`] snapshots to name CPU 0's longest runner.
+const IDLE_SNAP: usize = 96;
+/// The window `idle_runs` once gave CPU 0's idle thread: a wait past it
+/// names the thread that held CPU 0.
+const IDLE_WINDOW_MS: u64 = 20;
+
+/// CPU 0's idle thread runs once the registry, pinned there, sleeps. The
+/// registry sleeps in 1 ms steps until CPU 0's `idle_tsc` grows, bounded
+/// by the run's deadline. One fixed 20 ms sleep failed the nightly KVM run
+/// of the irqoff build in three of four runs (`idle did not run`), a
+/// window of the test's own that other work on CPU 0 outlasted; a wait
+/// past it prints which thread held CPU 0 longest (`ktest_info`), and a
+/// failure names it too, so the next such run shows the cause.
 pub(crate) fn test_idle_runs() -> Outcome {
+    let mut before = [thread_init::RunTsc::EMPTY; IDLE_SNAP];
+    let nb = thread_init::run_tsc_snapshot(&mut before);
     let t0 = sched_init::idle_tsc();
-    thread_init::sleep_ms(20);
-    let t1 = sched_init::idle_tsc();
-    if t1 > t0 {
-        Outcome::Ok
-    } else {
-        crate::marker!("vibeOS: ktest:   idle_tsc {t0} -> {t1}");
-        Outcome::Fail("idle did not run")
+    let n0 = crate::time_init::now_ns();
+    let ran = crate::ktest::sleep_for(|| sched_init::idle_tsc() > t0);
+    let waited_ms = crate::time_init::now_ns().saturating_sub(n0) / 1_000_000;
+    if ran && waited_ms <= IDLE_WINDOW_MS {
+        return Outcome::Ok;
     }
+    let mut after = [thread_init::RunTsc::EMPTY; IDLE_SNAP];
+    let na = thread_init::run_tsc_snapshot(&mut after);
+    let mut top = ("none", 0u64);
+    for a in after.iter().take(na).filter(|a| a.cpu == 0) {
+        let b = before
+            .iter()
+            .take(nb)
+            .find(|b| b.id == a.id)
+            .map_or(0, |b| b.run_tsc);
+        let d = a.run_tsc.saturating_sub(b);
+        if d > top.1 {
+            top = (a.name, d);
+        }
+    }
+    let k = crate::time_init::tsc_per_ms().max(1);
+    let held_ms = top.1 / k;
+    if ran {
+        crate::ktest_info!(
+            "idle ran after {waited_ms} ms; cpu0 ran {} longest, {held_ms} ms",
+            top.0
+        );
+        return Outcome::Ok;
+    }
+    crate::fail_fmt!(
+        "idle did not run in {waited_ms} ms; cpu0 ran {} longest, {held_ms} ms",
+        top.0
+    )
 }
 
 pub(crate) fn test_reap_returns_frames() -> Outcome {

@@ -57,6 +57,22 @@ impl<S: Guarded<KernState>> KernFs<S> {
     pub fn tmp_cache_stats(&self) -> CacheStats {
         self.with(|k| k.tmp_cache.stats)
     }
+
+    /// Pages of the tmpfs backing in use, of [`TMPFS_BACK_PAGES`].
+    pub fn tmp_pages_used(&self) -> u32 {
+        self.with(|k| k.tmp_bits.count_ones())
+    }
+
+    /// Run `f` on each node that holds tmpfs backing, with its name and
+    /// the pages it holds, under the store's lock: `f` takes no lock and
+    /// does not allocate.
+    pub fn tmp_page_holders(&self, mut f: impl FnMut(&[u8], u16)) {
+        self.with(|k| {
+            for n in k.nodes.iter().filter(|n| n.used && n.extent_pages > 0) {
+                f(n.name.as_bytes(), n.extent_pages);
+            }
+        });
+    }
 }
 
 fn bit_get(bits: u64, i: usize) -> bool {

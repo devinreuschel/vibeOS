@@ -47,10 +47,14 @@
 //!     treats it all as data, as Linux's `generic_file_llseek`: `SEEK_DATA`
 //!     from 2 returns 2, `SEEK_HOLE` from 0 returns 5, and either from 5
 //!     returns `ENXIO`.
+//!
+//! Then it empties the `/tmp` files the cases wrote, whatever their
+//! outcome, and exits 99 if one cannot be emptied after every case passed.
 
 #![no_std]
 #![no_main]
 
+use vibeos_user::cmd;
 use vibeos_user::env::Env;
 use vibeos_user::sys::{self, Errno};
 use vibeos_user::utest;
@@ -90,6 +94,9 @@ const ZOMBIE_TRIES: u32 = 20_000;
 const PROC_STATUS: &core::ffi::CStr = c"/proc/self/status";
 /// The file case 17 seeks in.
 const SEEKS: &core::ffi::CStr = c"/tmp/errno_seek";
+/// The exit status when every case passed but a file they wrote could not
+/// be emptied.
+const RELEASE_FAILED: i32 = 99;
 
 fn main(_env: &Env) -> i32 {
     let cases: [fn() -> bool; 17] = [
@@ -111,12 +118,15 @@ fn main(_env: &Env) -> i32 {
         lseek_device_espipe_first,
         lseek_data_hole,
     ];
-    for (i, case) in cases.iter().enumerate() {
-        if !case() {
-            return i as i32 + 1;
-        }
+    let failed = cases.iter().position(|case| !case());
+    // Whatever the cases did, give back the pages their files hold on
+    // `/tmp`: one store for the whole boot.
+    let released = cmd::discard_all(&[RAW.to_bytes(), SEEKS.to_bytes(), PLAIN.to_bytes()]);
+    match (failed, released) {
+        (Some(i), _) => i as i32 + 1,
+        (None, Err(_)) => RELEASE_FAILED,
+        (None, Ok(())) => 0,
     }
-    0
 }
 
 /// Case 1.

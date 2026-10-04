@@ -1,7 +1,7 @@
 //! Helpers the `/bin` utilities, `/sbin/init` and `/bin/sh` share (ROADMAP
 //! §10.5): buffered output with decimal numbers, decimal parsing, opening an
-//! operand, the `<prog>: <what>: errno <n>` line, buffered byte and line
-//! reads, and the `wait4` status word.
+//! operand, emptying a scratch file, the `<prog>: <what>: errno <n>` line,
+//! buffered byte and line reads, and the `wait4` status word.
 //!
 //! Every read retries `EINTR` and every loop reads until `read` returns 0,
 //! since a file `read` returns at most 256 bytes a call (SYSCALL.md §3.1).
@@ -149,6 +149,30 @@ pub fn open_flags(path: &[u8], flags: i32) -> Result<u32, Errno> {
     dst.copy_from_slice(path);
     let fd = sys::open(buf.as_ptr(), flags, 0o644)?;
     u32::try_from(fd).map_err(|_| Errno::EBADF)
+}
+
+/// Truncate `path` to 0 bytes, which gives back the pages or clusters it
+/// holds: how a program releases a scratch file while nothing has
+/// `unlink`. A missing file holds nothing, so `ENOENT` is `Ok`.
+pub fn discard(path: &[u8]) -> Result<(), Errno> {
+    match open_flags(path, sys::O_WRONLY | sys::O_TRUNC) {
+        Ok(fd) => sys::close(fd).map(drop),
+        Err(Errno::ENOENT) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`discard`] each of `paths`, each one whatever the others did: the
+/// first error, if any.
+pub fn discard_all(paths: &[&[u8]]) -> Result<(), Errno> {
+    let mut first = Ok(());
+    for path in paths {
+        let r = discard(path);
+        if first.is_ok() {
+            first = r;
+        }
+    }
+    first
 }
 
 /// An input operand: `-` is fd 0; anything else is opened for reading.

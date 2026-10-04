@@ -9,8 +9,9 @@
 //!   `AT_PAGESZ` and `AT_ENTRY` are right.
 //! - `mem` (20-29): `memcpy`, `memmove` both ways, `memset`, `memcmp`, `bcmp`.
 //! - `fp` (30-39): `f64` and `f32` arithmetic.
-//! - `panic-capture` (40-49): a forked child points fd 2 at a tmpfs file and
-//!   panics; it must exit 101, and the file must hold the panic line.
+//! - `panic-capture` (40-50): a forked child points fd 2 at a tmpfs file and
+//!   panics; it must exit 101, and the file must hold the panic line. The
+//!   file is emptied after, whatever the checks found (50 when that fails).
 //! - `panic`: panics with fd 2 on the console, so exits 101.
 
 #![no_std]
@@ -19,7 +20,7 @@
 use core::hint::black_box;
 
 use vibeos_user::env::{self, Env};
-use vibeos_user::{rt, sys};
+use vibeos_user::{cmd, rt, sys};
 
 vibeos_user::main!(main);
 
@@ -214,6 +215,19 @@ fn panic_capture() -> i32 {
         Ok(pid) => pid,
         Err(_) => return 40,
     };
+    let code = captured(pid);
+    // The file's `/tmp` page goes back whatever the checks found: `/tmp`
+    // is one store for the whole boot.
+    match cmd::discard(CAPTURE.to_bytes()) {
+        Ok(()) => code,
+        Err(_) if code == 0 => 50,
+        Err(_) => code,
+    }
+}
+
+/// Reap the panic-capture child `pid` and check what it left in
+/// [`CAPTURE`]: 0, or the failed check's code.
+fn captured(pid: usize) -> i32 {
     let mut status = 0i32;
     // SAFETY: `wait4` writes 4 bytes through `&raw mut status`, a local no
     // reference covers, and nothing through the null rusage; established here.

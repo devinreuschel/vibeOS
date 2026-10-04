@@ -634,8 +634,10 @@ address, as Linux panics when init dies: `finish_exit` prints `vibeOS: init: pid
 `killed SIG<name>` or `killed SIG<name> addr=0x<hex>` (CR2 for `#PF`, else the faulting RIP) before
 any teardown, then panics (F068). The line is the `failure` row `vibeOS: init: pid 1 <text>` of
 `tests/contract/markers.toml`, and `make test-e2e-init-fault` boots an initrd whose `/sbin/init`
-stores to `0x1000` and requires it. Not yet enforced: the
-entry-path windows of §5.10 (ROADMAP §10.6, F006, F007). Every ring-3 trap takes its signal from
+stores to `0x1000` and requires it. The entry and exit windows of §5.10 hold: every
+return to ring 3 runs with IF=0 from its `cli` to its `sysretq` or `iretq` (§5.10 rule 4), and a
+non-canonical saved RIP, or a `#GP`, `#NP`, or `#SS` on a return-to-user `iretq`, kills the process
+with `SIGSEGV` on the kernel GS (§5.10 rule 2). Every ring-3 trap takes its signal from
 §5.2's table through `proc_init::sig_for_vec`, a ring-3 `#DB` included. An NMI dumps and halts on its IST stack; from
 ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
 
@@ -943,7 +945,7 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 
 | Principal | Trusted for | Can do today what a hardened kernel stops | Hardens in |
 |---|---|---|---|
-| Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Halt the kernel (F004 to F010); every process is root, so it can read any file and signal any process | ROADMAP §10.4, §10.6, §10.10, and §10.11 (halts), §13.9 (uids), §18.6 (capabilities, `seccomp`) |
+| Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Every process is root, so it can read any file and signal any process. The ring-3 halts the kernel review found (F004 to F010) are fixed by ROADMAP §10.4, §10.6, §10.10, and §10.11 | ROADMAP §13.9 (uids), §18.6 (capabilities, `seccomp`) |
 | Disk images and partition tables | Nothing: a parse returns `Corrupt` | Panic the kernel with a crafted image or table that root mounts or attaches (F061, F117) | ROADMAP §13.9 (partition tables), §14.8 (vibefs v2 validates every block it reads; v1 is retired); §18.7 (a LUKS2 header is parsed by the initrd's unlock tool, never by the kernel) |
 | Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA; forge an MSI on a vector no handler owns, which is counted, EOIed, and logged at most once a second per vector (§5.2), so a storm costs CPU time but never halts | ROADMAP §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
 | Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §11.1 (early exceptions report themselves), §20.1 (table bounds) |

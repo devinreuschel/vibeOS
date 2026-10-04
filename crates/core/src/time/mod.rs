@@ -7,6 +7,9 @@
 use crate::atomic::{AtomicU64, Ordering, fence, statics};
 use crate::sync::variant::{self, Site};
 
+mod reload;
+pub use reload::{RELOAD_SPANS, ReloadSpans};
+
 /// PIT input frequency in Hz. DESIGN §6.1.
 pub const PIT_HZ: u64 = 1_193_182;
 /// Target bootstrap tick rate. Divisor is 1193.
@@ -25,6 +28,9 @@ pub const IO_WAIT_PORT: u16 = 0x80;
 
 /// Channel 0, lobyte/hibyte, mode 2 (rate generator), binary.
 pub const PIT_CMD_CH0_MODE2: u8 = 0x34;
+/// Channel 0, counter latch: the next two reads of port 0x40 return the
+/// count as it stood at this write, low byte then high.
+pub const PIT_CMD_CH0_LATCH: u8 = 0x00;
 /// Channel 2, lobyte/hibyte, mode 0 (one-shot), binary.
 pub const PIT_CMD_CH2_ONESHOT: u8 = 0xB0;
 

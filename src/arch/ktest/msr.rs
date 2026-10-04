@@ -7,14 +7,14 @@ use crate::x86::{IA32_SYSENTER_CS, IA32_SYSENTER_EIP, IA32_SYSENTER_ESP};
 /// `syscall_init::init_cpu` writes the SYSENTER MSRs 0 whatever they held
 /// (DESIGN §11.4): values planted as firmware might leave them are gone
 /// after it runs, so a CPL-3 `sysenter` faults instead of entering ring 0.
+/// The planted values fit in 32 bits: on AMD the ESP and EIP MSRs hold 32
+/// bits, and KVM on an AMD host raises `#GP` on a write of the upper half;
+/// on Intel the values are canonical.
 pub(crate) fn sysenter_msrs_zero() -> Outcome {
     const MSRS: [u32; 3] = [IA32_SYSENTER_CS, IA32_SYSENTER_ESP, IA32_SYSENTER_EIP];
     // IF off, so the plant and the rewrite happen on one CPU.
     let _g = crate::arch::current::InterruptGuard::enter();
-    for (msr, v) in MSRS
-        .into_iter()
-        .zip([0x08, 0xFFFF_8000_0000_1000, 0xFFFF_8000_0000_2000])
-    {
+    for (msr, v) in MSRS.into_iter().zip([0x08, 0x8000_1000, 0x8000_2000]) {
         // SAFETY: the SYSENTER MSRs are architectural; ring 3 reaches them
         // only through `sysenter`, which cannot run on this CPU while IF
         // is off here, and `init_cpu` below rewrites them; established

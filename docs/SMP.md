@@ -247,7 +247,7 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
 - `self_ptr` and logical CPU id
 - `current`, `idle`, and `idle_id`
 - `runq`, this CPU's ready FIFO (owner only, IRQs off)
-- `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
+- `irq_nest`, `slice_tsc`, `quantum_tsc` (when the running thread's quantum began, [§7.8](#78-per-cpu-scheduling)), `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `timer_mode`
 - `tail_prev`, the thread `switch_now` switched away from, for the switch tail
   (`thread_init::finish_switch`) that runs next on this CPU; `dead_stack`, the stack of the thread
@@ -516,6 +516,9 @@ Global TCB table, per-CPU ready queues.
   reason about, then a proper lock-free deque if the numbers justify it.
 - Each CPU has its own idle thread with its own stack. An idle CPU sits in `sti; hlt` and is woken by
   the reschedule IPI.
+- A thread runs for one quantum of TSC time ([§6.1](TIME.md#61-roles-and-constants)), counted from
+  its switch-in or from a `schedule` that found nothing else to run (`PerCpu::quantum_tsc`); the
+  first timer tick after that preempts it, and every tick preempts the idle thread.
 
 Kernel threads get their scheduling class when they are created, from this table. Planned (ROADMAP
 §19.4): the classes exist from §19.4; until then every thread is scheduled round-robin.

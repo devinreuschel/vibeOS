@@ -7,9 +7,10 @@
 //!   - `VIBEOS_KSYMS` staged by the Makefile. An empty fallback so
 //!     `cargo check` works without `make`.
 //!   - `VIBEOS_USER_BINS` and `VIBEOS_USER_DIR`: in `kernel_tests` builds,
-//!     the user programs `make user` built, embedded for `Image::UserBin`
-//!     (C-USERBINS). An empty table otherwise, so bare `cargo clippy
-//!     --features kernel_tests` works without `make`.
+//!     the user programs `make user` built, copied into OUT_DIR and
+//!     embedded by bare name for `Image::UserBin` (C-USERBINS). An empty
+//!     table otherwise, so bare `cargo clippy --features kernel_tests`
+//!     works without `make`.
 
 use std::env;
 use std::io::Write;
@@ -65,8 +66,12 @@ fn main() {
                 );
             }
             println!("cargo:rerun-if-changed={}", path.display());
-            let path = path.to_str().unwrap();
-            writeln!(bins, "    ({name:?}, include_bytes!({path:?})),").unwrap();
+            // A copy beside user_bins.rs, included by its bare name: an
+            // absolute path in `include_bytes!` is the checkout's, and it
+            // reaches the `.llvm.<hash>` suffixes of the symbols LLVM
+            // promotes, so two checkouts built different kernels.
+            std::fs::copy(&path, out.join(name)).unwrap();
+            writeln!(bins, "    ({name:?}, include_bytes!({name:?})),").unwrap();
         }
     }
     writeln!(bins, "];").unwrap();

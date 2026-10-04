@@ -68,7 +68,6 @@ from tests.harness.harness import (
     QemuConfig,
     RunResult,
     core_report,
-    serial_tail,
 )
 
 EXPECTS = ("none", "panic", "reset", "capture")
@@ -681,9 +680,9 @@ class Session:
         elif self.end_event:
             self._drain(source, result)
         if why is None:
-            msg = f"{decision.reason}{serial_tail(result.lines)}"
+            msg = f"{decision.reason}{result.tail()}"
         elif waited:
-            msg = f"{why}{serial_tail(result.lines)}"
+            msg = f"{why}{result.tail()}"
         else:
             msg = why
         self._finish_fail(source, result, argv, msg, core=decision.core)

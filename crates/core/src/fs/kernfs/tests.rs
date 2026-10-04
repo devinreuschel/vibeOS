@@ -327,6 +327,31 @@ fn tmpfs_mkdir_and_unlink() {
     assert_eq!(v.stat(None, "/tmp/a/f").unwrap_err(), FsError::NotFound);
 }
 
+/// The holders of tmpfs backing pages, and their count, follow writes,
+/// truncates and unlinks: what the in-guest runner's `/tmp` check reads.
+#[test]
+fn tmpfs_page_holders_follow_truncate_and_unlink() {
+    let (mut v, k) = boot();
+    let holders = |k: &Kfs| {
+        let mut h = Vec::new();
+        k.fs.tmp_page_holders(|name, pages| h.push((name.to_vec(), pages)));
+        h.sort();
+        h
+    };
+    assert_eq!(k.fs.tmp_pages_used(), 0);
+    v.creat(None, "/tmp/empty", 0o644).unwrap();
+    write_at(&mut v, "/tmp/one", 0, b"1");
+    write_at(&mut v, "/tmp/two", PAGE as u64, b"2");
+    assert_eq!(k.fs.tmp_pages_used(), 3);
+    assert_eq!(holders(&k), [(b"one".to_vec(), 1), (b"two".to_vec(), 2)]);
+    v.truncate(None, "/tmp/two", 0).unwrap();
+    assert_eq!(k.fs.tmp_pages_used(), 1);
+    assert_eq!(holders(&k), [(b"one".to_vec(), 1)]);
+    v.unlink(None, "/tmp/one").unwrap();
+    assert_eq!(k.fs.tmp_pages_used(), 0);
+    assert!(holders(&k).is_empty());
+}
+
 #[test]
 fn procfs_stubs_with_only_kernel_thread() {
     let (mut v, _k) = boot();

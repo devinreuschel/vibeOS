@@ -163,7 +163,13 @@ its spawner's `irq_nest`, starts with IF on too. A test that needs interrupts of
 `InterruptGuard`: the cooperative `switch_to` and `yield_now` tests, and every `arch::catch` window
 that can longjmp out of an interrupt gate, since the skipped `iretq` would leave IF off. After each
 test the registry fails it if IF is off or `irq_nest` is not 0, and restores both. `ktest_context`
-checks the registry's context and a `spawn_here` worker's.
+checks the registry's context and a `spawn_here` worker's. It also fails a test that returns with
+more of `/tmp`'s backing pages in use than it found (`KernFs::tmp_pages_used`), with `left <n> /tmp
+pages in use, <m> before:` and each file that holds pages as `<name>=<pages>`: `/tmp` is one store of
+`TMPFS_BACK_PAGES` (64 KiB) for the whole boot, so pages a test keeps run a later test, or a later
+pass of `vibeos.ktest_repeat=`, out of room. A test, and a user program it runs, unlinks or empties
+each `/tmp` file it writes whatever its outcome; a user program, which has no `unlink` yet, empties
+one with `vibeos_user::cmd::discard` (`O_TRUNC`).
 
 Each subsystem's `src/<subsystem>/ktest.rs` exports its rows as `pub(crate) const TESTS: &[Test]`,
 and `src/ktest/mod.rs` runs the lists in the order of its `GROUPS` (DESIGN §1.3). A list left out
@@ -418,7 +424,12 @@ with its own device tuple, whose `vda` is a 4 MiB pattern image (`harness.make_p
 byte of sector n `(n & 0xFF) ^ 0xA5`, so no GPT is stamped and no partition marker is required):
 the opt-in `vblk_readonly` on a `readonly=on` image (`_vblk_readonly_boot`), and the opt-in
 `vblk_bad_sector` on an image behind QEMU's `blkdebug`, which fails every read of sector 4096
-(`_vblk_bad_sector_boot`). Each boot requires its one `ok` line.
+(`_vblk_bad_sector_boot`). The second boot then runs the opt-in `fat_bad_sector_eio` (ROADMAP
+§10.5's errno box), whose group runs after `vblk_bad_sector`'s: it writes a FAT32 volume over the
+pattern image, below the block cache, with a file, a directory and an executable starting in the
+4 KiB cache page that holds sector 4096, mounts it, and requires ring-3 `read` and `write` of the
+file, an `open` through the directory, and an `execve` of the executable each to return `EIO`.
+Each boot requires an `ok` line for each test it selects.
 
 The IF-off tracer build (ROADMAP §10.3, [INVARIANTS.md §2.9](INVARIANTS.md#29-preemption-and-interrupt-state)
 rule 2). The `irqoff` Cargo feature is a measurement build, never a published image: the `irqoff`
@@ -759,8 +770,11 @@ which `run_vibefs_crash.py` knows:
 | `vibeOS: vibefs: sync fail <err>` | failure line: an open, write, close or `sync_fs` of an iteration failed (`short write` for a short write); the guest halts |
 
 `make test-vibefs-crash` first runs the hostlib tests (`nbd-cache`, `vibefs-cat`), then
-`run_vibefs_crash.py` over the volatile-cache device (F080; ROADMAP §10.2). Each of 8 rounds
-(`VIBEOS_CRASH_ROUNDS`; the run seed is `VIBEOS_CRASH_SEED` and every failure prints it with the
+`run_vibefs_crash.py` over the volatile-cache device (F080; ROADMAP §10.2). It runs as two CI
+tiers, `test-vibefs-crash-1` (the hostlib tests, then 4 rounds) and `test-vibefs-crash-2` (4
+rounds), each with its own seed, so neither passes the 60 s tier median (§8.6); `make
+test-vibefs-crash` runs both. Each round (`--rounds`, 8 when the script runs alone, or
+`VIBEOS_CRASH_ROUNDS`; the run seed is `VIBEOS_CRASH_SEED` and every failure prints it with the
 round) works in a short `mkdtemp` directory, since macOS allows 104 bytes of unix socket path:
 
 1. `mkfs-vibefs` a 256 KiB image, the size `vibefs::tests::crash_workload_seeded_points` proves
@@ -1008,9 +1022,11 @@ split into shards that hand their state on as artifacts, and the line that needs
 scheduled work runs in the 10 lanes of ROADMAP §10.1's next box (Scheduled capacity, below).
 
 Tiers, with each group's summed QEMU step time in the last green integration-branch `ci` run before
-the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash`'s figure
-includes its `cargo test` of the host tools, which with `vibefs-crash-plants` are the tiers that need
-the toolchain; `forensics`'s and `vibefs-crash-plants`'s are a local TCG run's (`vibefs-crash-plants`:
+the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash-1`'s figure
+includes its `cargo test` of the host tools, which with `vibefs-crash-2` and `vibefs-crash-plants` are
+the tiers that need the toolchain; the two `vibefs-crash` shards' figures are each `make` target's
+wall time in a local TCG run at `d494350c` (4 CPUs) with this split, after the 8 rounds' one tier
+reached a 61 s median; `forensics`'s and `vibefs-crash-plants`'s are a local TCG run's (`vibefs-crash-plants`:
 two planted rounds and a control round), until a `ci` run measures them. The in-guest shards'
 figures are each `make` target's wall time in a local TCG run at `63dffb5` with this split (4 CPUs,
 one QEMU at a time), until a `ci` run measures them:
@@ -1036,7 +1052,8 @@ one QEMU at a time), until a `ci` run measures them:
 | x86_64 | lapic-fallback-4 | `test-lapic-fallback-4` | 37 |
 | x86_64 | lapic-fallback-5 | `test-lapic-fallback-5` | 23 |
 | x86_64 | lapic-fallback-6 | `test-lapic-fallback-6` | 23 |
-| x86_64 | vibefs-crash | `test-vibefs-crash` | 47 |
+| x86_64 | vibefs-crash-1 | `test-vibefs-crash-1` | 17 |
+| x86_64 | vibefs-crash-2 | `test-vibefs-crash-2` | 25 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
 

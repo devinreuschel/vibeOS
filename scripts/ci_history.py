@@ -1383,7 +1383,10 @@ def tiers(records: Sequence[Mapping[str, Any]]) -> list[str]:
     """Print each per-push tier's median QEMU time over the last 20 `ci` runs
     with event `push` on `main`, a tier's time being the summed seconds of its
     `tier (<arch>, <tier>)` job's `make test-*` steps; return the tiers whose
-    median passes 60 s. Raises `MissingTimes` on such a job with no step time."""
+    median passes 60 s. Only the tiers of the newest such run are per-push
+    tiers: a tier a later run no longer has was split or renamed, and its old
+    times stay in the history without judging the tiers that replaced it.
+    Raises `MissingTimes` on such a job with no step time."""
     runs = [
         r for r in records
         if "tombstone" not in r and r.get("workflow") == "ci"
@@ -1407,8 +1410,16 @@ def tiers(records: Sequence[Mapping[str, Any]]) -> list[str]:
                     "no seconds for its `make test-*` step"
                 )
             per_tier.setdefault(str(job["name"]), []).append(sum(known))
+    newest = runs[-1] if runs else {}
+    current = {
+        str(job.get("name")) for job in newest.get("jobs") or []
+        if isinstance(job, dict) and TIER_JOB.fullmatch(str(job.get("name")))
+    }
     problems: list[str] = []
     for name, values in sorted(per_tier.items()):
+        if name not in current:
+            print(f"{name}: retired (not in ci run {newest.get('run_id')}), n={len(values)}")
+            continue
         med = statistics.median(values)
         print(f"{name}: median {med:g} s, n={len(values)}")
         if med > TIER_MEDIAN_MAX_S:

@@ -37,6 +37,7 @@ from scripts.check_workflows import (
     rule_release_no_workflow_write,
     rule_release_one_image,
     rule_release_privileged_jobs,
+    rule_release_profile,
     rule_release_triggers,
     rule_row_lane,
     rule_runs_on,
@@ -988,6 +989,66 @@ def job(body: str, head: str = "    permissions:\n      contents: write # publis
 def step_run(script: str) -> str:
     lines = "".join(f"          {ln}\n" for ln in script.splitlines())
     return f"      - run: |\n{lines}"
+
+
+RELEASE_PROFILE_MAKE = (
+    "release-artifacts:\n\t$(MAKE) CARGO_PROFILE=release $(ISO)\n\tcp $(ISO) \"$(OUT)\"\n"
+)
+RELEASE_PROFILE_STEPS = (
+    "      - run: make release-artifacts OUT=dist\n"
+    "      - run: make CARGO_PROFILE=release test-e2e\n"
+    "      - run: cmp build/vibeos.iso dist/vibeos.iso\n"
+)
+
+
+def profile_rules(steps: str, makefile: str = RELEASE_PROFILE_MAKE) -> list[str]:
+    text = (
+        f"name: release\n{REL_ON}permissions:\n  contents: read\njobs:\n"
+        f"  build:\n    runs-on: ubuntu-26.04\n    steps:\n{steps}"
+    )
+    t = Tree(workflows={RELEASE: parse(text, RELEASE)}, makefile=makefile)
+    return [p.rule for p in rule_release_profile(t)]
+
+
+class ReleaseProfileTest(unittest.TestCase):
+    """L1268: the release builds, tests and publishes the release profile."""
+
+    def test_good_passes(self) -> None:
+        self.assertEqual(profile_rules(RELEASE_PROFILE_STEPS), [])
+
+    def test_repository_passes(self) -> None:
+        self.assertEqual([str(p) for p in rule_release_profile(load_tree(ROOT))], [])
+
+    def test_dev_profile_artifacts_fail(self) -> None:
+        dev = RELEASE_PROFILE_MAKE.replace("CARGO_PROFILE=release ", "")
+        self.assertEqual(profile_rules(RELEASE_PROFILE_STEPS, dev), ["release_profile"])
+
+    def test_untested_image_fails(self) -> None:
+        steps = RELEASE_PROFILE_STEPS.replace("CARGO_PROFILE=release test-e2e", "test-e2e")
+        self.assertEqual(profile_rules(steps), ["release_profile"])
+
+    def test_test_before_build_fails(self) -> None:
+        lines = RELEASE_PROFILE_STEPS.splitlines(keepends=True)
+        self.assertEqual(profile_rules(lines[1] + lines[0] + lines[2]), ["release_profile"])
+
+    def test_other_profile_name_fails(self) -> None:
+        other = RELEASE_PROFILE_MAKE.replace("CARGO_PROFILE=release ", "CARGO_PROFILE=release-x ")
+        self.assertEqual(profile_rules(RELEASE_PROFILE_STEPS, other), ["release_profile"])
+
+    def test_commented_profile_fails(self) -> None:
+        commented = RELEASE_PROFILE_MAKE.replace(
+            "\t$(MAKE) CARGO_PROFILE=release $(ISO)\n",
+            "\t# CARGO_PROFILE=release\n\t$(MAKE) $(ISO)\n",
+        )
+        self.assertEqual(profile_rules(RELEASE_PROFILE_STEPS, commented), ["release_profile"])
+
+    def test_cmp_of_another_dir_fails(self) -> None:
+        steps = RELEASE_PROFILE_STEPS.replace("dist/vibeos.iso", "elsewhere/vibeos.iso")
+        self.assertEqual(profile_rules(steps), ["release_profile"])
+
+    def test_no_cmp_fails(self) -> None:
+        lines = RELEASE_PROFILE_STEPS.splitlines(keepends=True)
+        self.assertEqual(profile_rules(lines[0] + lines[1]), ["release_profile"])
 
 
 class ReleaseRulesTest(unittest.TestCase):

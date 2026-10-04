@@ -5,7 +5,9 @@
 //! the exit status and what the file holds; a failure names its row.
 //! `sleep` and `yes` run on their own, since they are judged while they
 //! run. `sh_script_status` runs `/bin/sh` on a script, fd 1 and fd 2 on
-//! the scratch file. Scratch files are `/tmp/u75-*`. Every fork goes through `utest::fork` (F069).
+//! the scratch file. Scratch files are `/tmp/u75-*`, emptied after each
+//! case whatever its outcome ([`released`]), so neither leaves `/tmp`'s
+//! pages held. Every fork goes through `utest::fork` (F069).
 
 use core::ffi::{CStr, c_void};
 
@@ -33,6 +35,10 @@ const CMP: [(&[u8], &[u8]); 4] = [
     (b"/tmp/u75-b", b"abd\n"),
     (b"/tmp/u75-p", b"ab"),
     (b"/tmp/u75-q", b"abc"),
+];
+/// Every file the cases write.
+const SCRATCH: [&[u8]; 9] = [
+    IN, OUT, GREP, WC, CAT, CMP[0].0, CMP[1].0, CMP[2].0, CMP[3].0,
 ];
 
 /// 1000 bytes of lines, so `cat` sees several short reads.
@@ -205,8 +211,17 @@ const ROWS: &[Row] = &[
 ];
 
 pub fn run(t: &mut Runner) {
-    t.case("utilities_table", utilities_table);
-    t.case("sh_script_status", sh_script_status);
+    t.case("utilities_table", || released(utilities_table()));
+    t.case("sh_script_status", || released(sh_script_status()));
+}
+
+/// Empty every [`SCRATCH`] file ([`cmd::discard_all`]), then `r`; a file that
+/// cannot be emptied fails a case that passed.
+fn released(r: Outcome) -> Outcome {
+    match (r, cmd::discard_all(&SCRATCH)) {
+        (Outcome::Ok, Err(_)) => Outcome::Fail("cannot empty a /tmp/u75 file"),
+        (r, _) => r,
+    }
 }
 
 /// At most 8 C strings as the NULL-terminated vector `execve` takes.
