@@ -47,9 +47,9 @@ from tests.harness.harness import (
     env_config,
     ktest_devices,
     make_disk,
-    qemu_system,
     parse_ktest_line,
     qemu_argv,
+    qemu_system,
     serial_tail,
 )
 from tests.harness.linesource import LineSource
