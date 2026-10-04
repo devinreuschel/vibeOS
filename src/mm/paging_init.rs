@@ -554,6 +554,27 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         if uart_map.is_err() {
             boot::halt_with("vibeOS: paging: uart map failed");
         }
+        let fw = crate::machine_init::info()
+            .and_then(|d| d.fw_cfg)
+            .map(|d| d.base)
+            .unwrap_or(0x0902_0000);
+        let va = VirtAddr(hhdm_offset().wrapping_add(fw & !0xFFF));
+        let pa = PhysAddr(fw & !0xFFF);
+        // SAFETY: one Device page for fw_cfg, mapped in the new root
+        // before `set_root`; established here.
+        let fw_map = unsafe {
+            mapper.map_page(
+                va,
+                pa,
+                paging::mmio_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut alloc,
+            )
+        };
+        if fw_map.is_err() {
+            boot::halt_with("vibeOS: paging: fw_cfg map failed");
+        }
     }
 
     // ---- 3. Low identity, 512 MiB ----
@@ -649,6 +670,11 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
             .and_then(|d| d.console_uart())
             .unwrap_or(0x0900_0000);
         crate::serial::raw::set_mmio(hhdm_offset().wrapping_add(uart & !0xFFF));
+        let fw = crate::machine_init::info()
+            .and_then(|d| d.fw_cfg)
+            .map(|d| d.base)
+            .unwrap_or(0x0902_0000);
+        crate::boot::fw_cfg_init::set_mmio_va(hhdm_offset().wrapping_add(fw & !0xFFF));
     }
     // Release: pairs with the Acquire load in `identity_covers`.
     #[cfg(target_arch = "x86_64")]

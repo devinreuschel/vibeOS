@@ -235,10 +235,6 @@ pub(crate) fn start_cpu_workers(w: &CpuWorkers) {
 
 /// Retire workers [`spawn_cpu_workers`] made for a CPU that did not come
 /// up. None of them ever ran, so each slot is free again.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
-)]
 pub(crate) fn abandon_cpu_workers(w: CpuWorkers) {
     if let Some(stack) = thread_init::abandon_unstarted(w.wq, false) {
         thread_init::return_stack(stack);

@@ -875,14 +875,20 @@ PROOF_BOOTS: tuple[ProofBoot, ...] = (
     ProofBoot("fat", "fat 16k stack boot", "_fat_boot", _always),
     ProofBoot("vblk-readonly", "vblk readonly boot", "_vblk_readonly_boot", _always),
     ProofBoot("vblk-bad-sector", "vblk bad sector boot", "_vblk_bad_sector_boot", _always),
+    ProofBoot("stalled-ap", "stalled AP leak boot", "_stalled_ap_boot", lambda s, h: s >= 4),
 )
 
 
 def proof_boot_names(smp: int, hpet_off: bool, arch: str = "x86_64") -> list[str]:
     """The proof boots the union target runs at `smp` CPUs, in order."""
     if arch == "aarch64":
-        return []
+        return ["stalled-ap"] if smp >= 4 else []
     return [b.name for b in PROOF_BOOTS if b.applies(smp, hpet_off)]
+
+
+def _stalled_ap_boot(env: EnvConfig) -> None:
+    """`stalled_ap_leak`: one AP spins before `ready` (ROADMAP §11.4, F032)."""
+    _proof_boot(env, "stalled-ap", ktest="stalled_ap_leak", repeat=None)
 
 
 def main_boot(env: EnvConfig, range_word: str | None) -> int:

@@ -165,6 +165,21 @@ Two correctness requirements:
   blob and its parameters only through the physmap. Reserve the frame in the PMM forever, even after
   all APs are up.
 
+On aarch64 there is no real-mode trampoline. Each secondary enters at a physical address with the
+MMU and D-cache off (`src/arch/aarch64/secondary.rs`), through PSCI `CPU_ON` on the conduit
+`/psci` named. The boot CPU fills one parameter page per core, cleans that page and the stub to the
+Point of Coherency (`dc cvac`, `dsb sy`), and passes the page's physical address as `context_id`.
+The stub, in order: checks the ISA floor (FEAT_LSE and FEAT_PAN) and stores `STATUS_FEATURE` then
+`CPU_OFF` if either is missing; when the block says EL2, writes each EL2 control on the port's one
+list whole from the block (`HCR_EL2`, `CPTR_EL2`, `CNTHCTL_EL2`, `HSTR_EL2`, `MDCR_EL2`,
+`ICC_SRE_EL2`, `HCRX_EL2` and the FGT registers where the ID bits say so, `CNTVOFF_EL2` = 0,
+`SCTLR_EL2`) before any `*_EL1` access; writes `SCTLR`, `MAIR`, `TCR`, `TTBR1`, and the identity
+`TTBR0` from the block, and `CNTKCTL_EL1` only at EL1 (VHE aliases it to `CNTHCTL_EL2`); enables the
+MMU with the boot CPU's whole `SCTLR_EL1`; jumps to the TTBR1 continue address; points `TTBR0` at
+the empty user root and invalidates the local TLB; then stores `STATUS_ARRIVED`, its first shared
+write. Rust `ap_entry_aarch64` then installs the per-CPU base, GIC, and timer, prints the
+exception-level marker, and publishes `ready`.
+
 ## 7.4 AP bring-up sequence
 
 The BSP starts APs one at a time. They share the trampoline page, its parameter block, and nothing
@@ -182,9 +197,12 @@ For each enabled APIC ID that is not the BSP:
 6. On timeout: send INIT to that APIC ID, clear its online bit, log the failure, and continue with the
    remaining CPUs. Leak the AP's stack, GDT/TSS and IST stacks, `PerCpu` slot, and idle TCB: an AP that accepted a
    SIPI and then stalled past 3 s can keep running on them, or read the next AP's parameter block, and
-   the BSP cannot tell it from an AP that never started. `smp_init::start_one` breaks this rule: it
-   frees the stacks and GDT/TSS and marks the idle TCB Dead, with no INIT, and does not clear the
-   online bit (ROADMAP §11.4, F032).
+   the BSP cannot tell it from an AP that never started. `smp_init::start_one` does this: a failure
+   before the first SIPI frees what it allocated; a ready timeout sends INIT, clears the online bit,
+   and leaks the workers (they hold only `ThreadId`s and have no `Drop`), never `free_ap_resources` / `free_live_ap`. On
+   aarch64 the same leak applies unless PSCI `AFFINITY_INFO` reports `OFF`, in which case the
+   allocations are freed; `CPU_ON` returning `ALREADY_ON` is a logged bring-up failure and a free
+   (ROADMAP §11.4, F032).
 
 On the AP side (`smp_init::ap_entry`), in order: `cli`; load the per-CPU GDT and TSS; set `GS_BASE`
 and `KERNEL_GS_BASE` (`per_cpu_init::install_gs`); write CR0 and CR4 whole (`arch::cpu::init_control_regs`), program the
@@ -340,8 +358,8 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | x86_64 | DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
 | x86_64 | DS, ES, FS, and GS selectors | `Tcb.user_segs` (`desc::UserSegs`), a user thread's own four, saved with `gdt::read_user_segs` at the switch away | `switch_now`, before `on_switch`: `gdt::load_user_segs` loads the incoming user thread's four, each only where it differs from the live one, since a selector load can clear the matching base; GS as `swapgs; mov gs; swapgs`, then `KERNEL_GS_BASE` = 0 | switched for user threads (`pid` not 0); a kernel thread has none and keeps what is live ([section 5.1](INTERRUPTS.md#51-gdt-and-tss)). `execve` and a new thread start with the null selector in all four, `fork` copies the parent's live four, and `syscall_init::first_return` loads the thread's four before it writes `GS_BASE` and `FS_BASE`. An FS change at the switch can zero `FS_BASE`, which ROADMAP §11.6 restores per thread (F022) |
 | x86_64 | `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above); one word, the user RSP from `syscall` to the entry's stack switch; the exit keeps its state in the user frame |
-| aarch64 | `x19`-`x29`, SP, LR | `Tcb.context` | `switch_context` (ROADMAP §11.4) | not built |
-| aarch64 | DAIF.I and F | come from `irq_nest`, as on x86_64 | `switch_context` | not built |
+| aarch64 | `x19`-`x29`, SP, LR | `Tcb.context` | `switch_context` (ROADMAP §11.4) | switched |
+| aarch64 | DAIF.I and F | come from `irq_nest`, as on x86_64 | `switch_context` | switched |
 | aarch64 | user `x0`-`x30`, SP, PC, PSTATE, `orig_x0`, and the syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](INTERRUPTS.md#510-privilege-transitions)) | every entry from EL0 saves it, and each return to EL0 leaves `SP_ELx` at the top of the thread's stack for the next entry | not built: ROADMAP §11.6 |
 | aarch64 | `SP_EL0` | at EL0 the user stack pointer, saved in the user frame by every EL0 entry; at EL1 or EL2 the running thread's TCB pointer ([§2.9](INVARIANTS.md#29-preemption-and-interrupt-state) rule 5) | the EL0 entry stub, the return to EL0, and the switch (ROADMAP §11.6) | not built |
 | aarch64 | V0-V31, FPCR, FPSR | `Tcb.fpu` | the FP binding below | not built: ROADMAP §11.6 |

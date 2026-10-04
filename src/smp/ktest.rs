@@ -256,6 +256,46 @@ pub(crate) fn test_failed_ap_cleanup() -> Outcome {
     }
 }
 
+/// Opt-in: `vibeos.ktest=stalled_ap_leak` stalls the first AP before
+/// `ready`, so bring-up INIT-and-leaks it (ROADMAP §11.4, F032).
+pub(crate) fn test_stalled_ap_leak() -> Outcome {
+    if !smp_init::stalled_ap_leaked() {
+        return Outcome::Fail("bring-up did not leak a stalled AP");
+    }
+    let n = per_cpu_init::cpu_count();
+    if n < 3 {
+        return Outcome::Fail("needs 3 CPUs");
+    }
+    if per_cpu_init::is_online(1) {
+        return Outcome::Fail("stalled AP came online");
+    }
+    let last = n as u32 - 1;
+    if !per_cpu_init::is_online(last) {
+        return Outcome::Fail("next AP did not come up");
+    }
+    let mut online = 0u32;
+    let mut i = 0u32;
+    while i < n as u32 {
+        if per_cpu_init::is_online(i) {
+            online += 1;
+        }
+        i += 1;
+    }
+    if online + 1 != n as u32 {
+        return crate::fail_fmt!("online {online} of {n}, want one hole");
+    }
+    let n0 = quiescent_free_frames();
+    if !exercise_fail_cleanup() {
+        return Outcome::Fail("pre-SIPI free alloc failed");
+    }
+    let n1 = quiescent_free_frames();
+    if n0 != n1 {
+        return crate::fail_fmt!("pre-SIPI free leaked {n0} -> {n1}");
+    }
+    crate::ktest_info!("stalled AP leaked; online {online}/{n}");
+    Outcome::Ok
+}
+
 /// AP bring-up on a full thread table (ROADMAP §10.4, F037): with no slot
 /// for the idle thread, and then with one slot, which the idle thread takes
 /// while its worker finds none, the allocation fails, frees what it took
@@ -656,4 +696,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("percpu_ticks_advance", percpu_ticks_advance),
     test("current_at_if1", current_at_if1),
     test("current_migrate_if1", current_migrate_if1),
+    test("stalled_ap_leak", test_stalled_ap_leak).opt_in(),
 ];

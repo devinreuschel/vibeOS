@@ -806,10 +806,6 @@ fn retire_dead_stack(cpu: &mut PerCpu) -> bool {
 
 /// Frames the stack caches of every CPU hold.
 #[cfg(feature = "kernel_tests")]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub fn cached_stack_frames() -> usize {
     // Acquire: pairs with each AcqRel update of `CACHED_STACK_FRAMES`.
     CACHED_STACK_FRAMES.load(Ordering::Acquire)

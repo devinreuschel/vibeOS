@@ -8,6 +8,7 @@ use super::vectors::TrapFrame;
 
 const ST_OFF: u8 = 0;
 const ST_VECTOR: u8 = 1;
+const ST_DABT: u8 = 2;
 
 #[repr(C)]
 struct JmpBuf {
@@ -29,7 +30,6 @@ struct JmpBuf {
 #[derive(Clone, Copy, Debug)]
 pub struct Caught {
     pub far: u64,
-    #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
     pub esr: u64,
     #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
     pub elr: u64,
@@ -99,9 +99,17 @@ unsafe extern "C" {
 
 pub fn init() {}
 
+pub fn catch_dabt<F: FnOnce()>(f: F) -> Option<Caught> {
+    catch_kind(ST_DABT, f)
+}
+
 pub fn catch<F: FnOnce()>(f: F) -> Option<Caught> {
-    // Release: pairs with the Acquire load in `overflow`.
-    KIND.store(ST_VECTOR, Ordering::Release);
+    catch_kind(ST_VECTOR, f)
+}
+
+fn catch_kind<F: FnOnce()>(kind: u8, f: F) -> Option<Caught> {
+    // Release: pairs with the Acquire load in `overflow` / `intercept`.
+    KIND.store(kind, Ordering::Release);
     // Release: pairs with the Acquire load in `overflow`.
     ARMED.store(1, Ordering::Release);
     // SAFETY: `vibeos_jmpbuf` is this CPU's catch buffer; the test holds
@@ -109,30 +117,43 @@ pub fn catch<F: FnOnce()>(f: F) -> Option<Caught> {
     let rc = unsafe { vibeos_setjmp(BUF.0.get()) };
     if rc == 0 {
         f();
-        // Release: pairs with the Acquire load in `overflow`.
+        // Release: pairs with the Acquire load in `overflow` / `intercept`.
         KIND.store(ST_OFF, Ordering::Release);
         // Release: pairs with nothing.
         ARMED.store(0, Ordering::Release);
         return None;
     }
-    // Release: pairs with the Acquire load in `overflow`.
+    // Release: pairs with the Acquire load in `overflow` / `intercept`.
     KIND.store(ST_OFF, Ordering::Release);
     // Release: pairs with nothing.
     ARMED.store(0, Ordering::Release);
     Some(Caught {
-        // Relaxed: pairs with the Relaxed stores in `overflow` on this CPU.
+        // Relaxed: pairs with the Relaxed stores in `overflow` / `intercept` on this CPU.
         far: GOT_FAR.load(Ordering::Relaxed),
-        // Relaxed: pairs with the Relaxed stores in `overflow` on this CPU.
+        // Relaxed: pairs with the Relaxed stores in `overflow` / `intercept` on this CPU.
         esr: GOT_ESR.load(Ordering::Relaxed),
-        // Relaxed: pairs with the Relaxed stores in `overflow` on this CPU.
+        // Relaxed: pairs with the Relaxed stores in `overflow` / `intercept` on this CPU.
         elr: GOT_ELR.load(Ordering::Relaxed),
-        // Relaxed: pairs with the Relaxed stores in `overflow` on this CPU.
+        // Relaxed: pairs with the Relaxed stores in `overflow` / `intercept` on this CPU.
         handler_rsp: GOT_SP.load(Ordering::Relaxed),
     })
 }
 
-pub fn intercept(_frame: &mut TrapFrame) -> bool {
-    false
+pub fn intercept(frame: &mut TrapFrame) -> bool {
+    // Acquire: pairs with the Release store in `catch_dabt`.
+    if KIND.load(Ordering::Acquire) != ST_DABT {
+        return false;
+    }
+    // Relaxed: pairs with the Relaxed loads in `catch_dabt` on this CPU.
+    GOT_FAR.store(frame.far, Ordering::Relaxed);
+    // Relaxed: pairs with the Relaxed loads in `catch_dabt` on this CPU.
+    GOT_ESR.store(frame.esr, Ordering::Relaxed);
+    // Relaxed: pairs with the Relaxed loads in `catch_dabt` on this CPU.
+    GOT_ELR.store(frame.elr, Ordering::Relaxed);
+    // Relaxed: pairs with the Relaxed loads in `catch_dabt` on this CPU.
+    GOT_SP.store(frame.sp, Ordering::Relaxed);
+    // SAFETY: `vibeos_jmpbuf` was filled by `setjmp` on this CPU; established here.
+    unsafe { vibeos_longjmp(BUF.0.get(), 1) };
 }
 
 pub fn overflow(far: u64, esr: u64, elr: u64, sp: u64) -> bool {

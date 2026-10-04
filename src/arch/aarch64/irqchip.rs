@@ -47,6 +47,7 @@ pub fn route_gsi(
 pub fn mask_gsi(_gsi: u32) {}
 pub fn unmask_gsi(_gsi: u32) {}
 
+#[expect(dead_code, reason = "x86 SIPI/NMI facade; aarch64 uses SGI")]
 pub fn send_ipi(_apic: u8, _vec: u8, _mode: IpiMode) -> Result<(), IpiError> {
     Ok(())
 }
@@ -62,12 +63,15 @@ pub fn send_ipi_all_ex_self(_vec: u8) -> Result<(), IpiError> {
 }
 
 /// # Safety
-/// Unused on the boot-CPU-only slice; established here.
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
-pub unsafe fn enable_ap() {}
+/// This CPU's GIC interface is unused; IRQs masked.
+pub unsafe fn enable_ap() {
+    // SAFETY: this fn's `# Safety`; established here.
+    unsafe { gic::enable_ap() };
+}
 
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
-pub fn arm_ap() {}
+pub fn arm_ap() {
+    timer::enable();
+}
 
 pub fn on_timer_irq() {
     // Relaxed: a count; pairs with nothing.

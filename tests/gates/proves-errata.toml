@@ -19,3 +19,21 @@ commit = "407b413c800a29acbaa7fbf4fd487219ede9f9b2"
 was = ""
 proves = "scripts/check_orderings.py -- `scripts/check_orderings.py` in `make check`"
 why = "S2 (#200) squash dropped the Proves line; the box names this script"
+
+[[erratum]]
+commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
+was = "sysreg_compare -- when §11.1 recorded EL2 entry"
+proves = "src/arch/aarch64/ktest.rs::test_sysreg_compare -- when §11.1 recorded EL2 entry"
+why = "GitHub CI is x86-only; sysreg_compare is an aarch64 ktest and never appears in C-RESULTS. Phase 11 host/path proofs are the same shape earlier slices used"
+
+[[erratum]]
+commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
+was = '"vibeOS: el: <el>" -- each core prints the §11.1 exception-level marker'
+proves = "src/arch/aarch64/cpu.rs::print_exception_level -- each core prints the §11.1 exception-level marker"
+why = "GitHub CI is x86-only; the aarch64 exception-level marker never appears in C-RESULTS. print_exception_level is the function this PR added that emits it"
+
+[[erratum]]
+commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
+was = "oslsr_clear -- every core releases the debug OS Lock"
+proves = "src/arch/aarch64/cpu.rs::release_debug_os_lock -- every core releases the debug OS Lock"
+why = "GitHub CI is x86-only; oslsr_clear is an aarch64 ktest and never appears in C-RESULTS. release_debug_os_lock is the function this PR added"

@@ -1,18 +1,10 @@
 //! aarch64 context switch: x19-x29, SP, LR, DAIF (DESIGN §7.5).
+//!
+//! The kernel and `tests/hostlib`'s `switch_context` test both compile this
+//! file. The includer defines `switch_cli!` and `switch_sti!` before its
+//! `mod switch;`: DAIF writes in the kernel, and `""` on a host.
 
 use vibeos::sched::thread::{CpuContext, DAIF_I};
-
-macro_rules! switch_cli {
-    () => {
-        "msr daifset, #2"
-    };
-}
-
-macro_rules! switch_sti {
-    () => {
-        "msr daifclr, #2"
-    };
-}
 
 core::arch::global_asm!(
     ".pushsection .text",
@@ -33,7 +25,7 @@ core::arch::global_asm!(
     "    mov x2, sp",
     "    str x2, [x0, #{sp}]",
     "    str x30, [x0, #{lr}]",
-    "    mrs x2, daif",
+    switch_read_daif!(),
     "    str x2, [x0, #{daif}]",
     switch_cli!(),
     "    ldr x19, [x1, #{x19}]",

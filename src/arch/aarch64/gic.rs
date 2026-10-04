@@ -39,6 +39,9 @@ const GICC_IAR: u64 = 0x000C;
 const GICC_EOIR: u64 = 0x0010;
 
 const GICR_CTLR: u64 = 0x0000;
+const GICR_TYPER: u64 = 0x0008;
+const GICR_TYPER_LAST: u64 = 1 << 4;
+const GICR_STRIDE: u64 = 0x2_0000;
 const GICR_WAKER: u64 = 0x0014;
 const GICR_WAKER_PS: u32 = 1 << 1;
 const GICR_WAKER_CA: u32 = 1 << 2;
@@ -80,6 +83,8 @@ struct Gic {
     kind: Kind,
     dist: u64,
     cpu_or_redist: u64,
+    redist_size: u64,
+    lpi_prop: AtomicU64,
     its: Option<u64>,
     v2m: Option<(u64, u32, u16)>,
     spi_irqs: [AtomicU32; SPI_SLOTS],
@@ -174,10 +179,11 @@ pub unsafe fn init() {
     let cpu_or_redist = match kind {
         Kind::V3 => PhysRange {
             start: cpu_or_redist.start,
-            size: cpu_or_redist.size.max(0x2_0000),
+            size: cpu_or_redist.size.max(GICR_STRIDE),
         },
         Kind::V2 => cpu_or_redist,
     };
+    let redist_size = cpu_or_redist.size;
     let cpu_va = match map_mmio(cpu_or_redist) {
         Some(v) => v,
         None => crate::boot::halt_with("vibeOS: gic: cpu/redist map"),
@@ -192,6 +198,8 @@ pub unsafe fn init() {
         kind,
         dist: dist_va,
         cpu_or_redist: cpu_va,
+        redist_size,
+        lpi_prop: AtomicU64::new(0),
         its,
         v2m,
         spi_irqs: [const { AtomicU32::new(0) }; SPI_SLOTS],
@@ -281,10 +289,49 @@ fn v2m_spi_range(va: u64, base: u32, n: u16) -> (u32, u16) {
     )
 }
 
+fn mpidr_aff32() -> u64 {
+    let v: u64;
+    // SAFETY: MPIDR_EL1; established here.
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, mpidr_el1",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    (v & 0x00FF_FFFF) | (((v >> 32) & 0xFF) << 24)
+}
+
+/// This CPU's redistributor VA, or the mapped base if the walk misses.
+fn this_redist(g: &Gic) -> u64 {
+    find_redist(g, mpidr_aff32()).unwrap_or(g.cpu_or_redist)
+}
+
+fn find_redist(g: &Gic, aff: u64) -> Option<u64> {
+    if g.kind != Kind::V3 {
+        return None;
+    }
+    let mut off = 0u64;
+    while off.saturating_add(GICR_STRIDE) <= g.redist_size {
+        let rd = g.cpu_or_redist.wrapping_add(off);
+        // SAFETY: `rd` is inside the mapped redistributor window. established here.
+        let typer = unsafe { mmio64(rd, GICR_TYPER) };
+        if (typer >> 32) == aff {
+            return Some(rd);
+        }
+        if typer & GICR_TYPER_LAST != 0 {
+            break;
+        }
+        off = off.saturating_add(GICR_STRIDE);
+    }
+    None
+}
+
 fn init_v3(g: &Gic) {
     // SAFETY: mapped GICD/GICR; system registers are the CPU interface. established here.
     unsafe {
-        wake_redist(g.cpu_or_redist);
+        let rd = this_redist(g);
+        wake_redist(rd);
         let typer = mmio32(g.dist, GICD_TYPER);
         let lines = ((typer & 0x1F) + 1) * 32;
         mmio32w(g.dist, GICD_CTLR, 0);
@@ -309,21 +356,8 @@ fn init_v3(g: &Gic) {
             i = i.saturating_add(4);
         }
         mmio32w(g.dist, GICD_CTLR, GICD_CTLR_ENABLE_G1A | GICD_CTLR_ARE_NS);
-        // SGI/PPI on the redistributor: Group 1, matching ICC_IGRPEN1.
-        mmio32w(g.cpu_or_redist, GICR_IGROUPR0, 0xFFFF_FFFF);
-        mmio32w(g.cpu_or_redist, GICR_ICENABLER0, 0);
-        let mut s = 0u32;
-        while s < 32 {
-            let p = gic::priority_for(s);
-            mmio32w(
-                g.cpu_or_redist,
-                GICR_IPRIORITYR + u64::from(s),
-                u32::from(p) | u32::from(p) << 8 | u32::from(p) << 16 | u32::from(p) << 24,
-            );
-            s = s.saturating_add(4);
-        }
-        mmio32w(g.cpu_or_redist, GICR_ISENABLER0, 0xFFFF_FFFF);
-        enable_lpi(g);
+        program_sgi_ppi(rd);
+        enable_lpi(g, rd);
         icc_enable();
         if let Some(its) = g.its {
             init_its(its);
@@ -351,51 +385,92 @@ unsafe fn wake_redist(rd: u64) {
     }
 }
 
-/// Program redistributor LPI tables once; never clear EnableLPIs.
+/// SGI/PPI Group 1, priorities, enable.
 ///
 /// # Safety
-/// `g` is the live GIC; paging and the buddy are up.
-unsafe fn enable_lpi(g: &Gic) {
-    // Property table: 64K bytes (IDbits 16), pending: 64K bits / 8.
-    let Some(prop) = alloc_pages(16) else {
-        crate::klog!(Level::Error, "vibeOS: gic: lpi prop table");
-        return;
+/// `rd` is this CPU's mapped redistributor.
+unsafe fn program_sgi_ppi(rd: u64) {
+    // SAFETY: `rd` is this CPU's redistributor. established here.
+    unsafe {
+        mmio32w(rd, GICR_IGROUPR0, 0xFFFF_FFFF);
+        mmio32w(rd, GICR_ICENABLER0, 0);
+        let mut s = 0u32;
+        while s < 32 {
+            let p = gic::priority_for(s);
+            mmio32w(
+                rd,
+                GICR_IPRIORITYR + u64::from(s),
+                u32::from(p) | u32::from(p) << 8 | u32::from(p) << 16 | u32::from(p) << 24,
+            );
+            s = s.saturating_add(4);
+        }
+        mmio32w(rd, GICR_ISENABLER0, 0xFFFF_FFFF);
+    }
+}
+
+/// Program redistributor LPI tables; never clear EnableLPIs. Shared
+/// property table, per-CPU pending table.
+///
+/// # Safety
+/// `g` is the live GIC; `rd` is this CPU's redistributor.
+unsafe fn enable_lpi(g: &Gic, rd: u64) {
+    // Acquire: pairs with the Release/AcqRel store of `lpi_prop` here.
+    let existing = g.lpi_prop.load(Ordering::Acquire);
+    let prop = if existing != 0 {
+        existing
+    } else {
+        let Some(prop) = alloc_pages(16) else {
+            crate::klog!(Level::Error, "vibeOS: gic: lpi prop table");
+            return;
+        };
+        let va = crate::paging_init::hhdm_offset().wrapping_add(prop);
+        // Enable the LPIs this chip will allocate as Group 1 (DESIGN §5.4).
+        // SAFETY: `va` is the HHDM alias of the property table (I14). established here.
+        unsafe {
+            let mut i = 0u32;
+            while i < LPI_SLOTS as u32 {
+                let Some(off) = gic::lpi_prop_index(LPI_BASE + i) else {
+                    break;
+                };
+                let p = (va as *mut u8).wrapping_add(off);
+                p.write(gic::lpi_config(gic::PRIO_DEVICE));
+                i = i.saturating_add(1);
+            }
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        }
+        // AcqRel: pairs with another CPU's Acquire failure load of `lpi_prop`.
+        // Acquire: pairs with the successful AcqRel store of `lpi_prop`.
+        match g
+            .lpi_prop
+            .compare_exchange(0, prop, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => prop,
+            Err(other) => other,
+        }
     };
     // GICR_PENDBASER is 64 KiB-aligned (IHI 0069); 16 pages gives that.
     let Some(pend) = alloc_pages(16) else {
         crate::klog!(Level::Error, "vibeOS: gic: lpi pend table");
         return;
     };
-    let va = crate::paging_init::hhdm_offset().wrapping_add(prop);
-    // Enable the LPIs this chip will allocate as Group 1 (DESIGN §5.4).
-    // SAFETY: `va` is the HHDM alias of the property table (I14). established here.
+    // SAFETY: `rd` is this CPU's redistributor. established here.
     unsafe {
-        let mut i = 0u32;
-        while i < LPI_SLOTS as u32 {
-            let Some(off) = gic::lpi_prop_index(LPI_BASE + i) else {
-                break;
-            };
-            let p = (va as *mut u8).wrapping_add(off);
-            p.write(gic::lpi_config(gic::PRIO_DEVICE));
-            i = i.saturating_add(1);
-        }
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
         let idbits = 15u64;
         mmio64w(
-            g.cpu_or_redist,
+            rd,
             GICR_PROPBASER,
             prop | idbits | (1 << 10) | (0b11 << 8) | (0b01 << 7),
         );
         mmio64w(
-            g.cpu_or_redist,
+            rd,
             GICR_PENDBASER,
             pend | (1 << 10) | (0b11 << 8) | (1 << 62),
         );
-        let c = mmio32(g.cpu_or_redist, GICR_CTLR) | GICR_CTLR_ENABLE_LPIS;
-        mmio32w(g.cpu_or_redist, GICR_CTLR, c);
-        mmio64w(g.cpu_or_redist, GICR_INVALLR, 0);
+        let c = mmio32(rd, GICR_CTLR) | GICR_CTLR_ENABLE_LPIS;
+        mmio32w(rd, GICR_CTLR, c);
+        mmio64w(rd, GICR_INVALLR, 0);
         let mut n = 100_000u32;
-        while n > 0 && mmio32(g.cpu_or_redist, GICR_SYNCR) & 1 != 0 {
+        while n > 0 && mmio32(rd, GICR_SYNCR) & 1 != 0 {
             n -= 1;
             core::hint::spin_loop();
         }
@@ -701,31 +776,101 @@ fn eoi(g: &Gic, intid: u32) {
     }
 }
 
+fn sgi1r(intid: u32, mpidr: u64) -> u64 {
+    let aff0 = mpidr & 0xFF;
+    let aff1 = (mpidr >> 8) & 0xFF;
+    let aff2 = (mpidr >> 16) & 0xFF;
+    let aff3 = (mpidr >> 32) & 0xFF;
+    (u64::from(intid & 0xF) << 24) | (aff1 << 16) | (aff2 << 32) | (aff3 << 48) | (1u64 << aff0)
+}
+
+fn write_sgi1r(val: u64) {
+    // SAFETY: DESIGN §7.6: dsb ishst; ICC_SGI1R; isb. established here.
+    unsafe {
+        core::arch::asm!(
+            "dsb ishst",
+            "msr ICC_SGI1R_EL1, {0}",
+            "isb",
+            in(reg) val,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
 pub fn send_sgi(intid: u32) {
+    send_sgi_to(0, intid);
+}
+
+/// SGI to logical CPU `cpu` (its `PerCpuRemote.apic_id` is the MPIDR).
+pub fn send_sgi_to(cpu: u32, intid: u32) {
     let Some(g) = gic() else {
         return;
     };
+    let hw = crate::per_cpu_init::cpu(cpu)
+        .map(|r| {
+            // Relaxed: the MPIDR is fixed after bring-up; pairs with nothing.
+            u64::from(r.apic_id.load(Ordering::Relaxed))
+        })
+        .unwrap_or(0);
     match g.kind {
-        Kind::V3 => {
-            let aff = ((u64::from(intid) & 0xF) << 24) | 1;
-            // SAFETY: DESIGN §7.6: dsb ishst; ICC_SGI1R; isb. established here.
-            unsafe {
-                core::arch::asm!(
-                    "dsb ishst",
-                    "msr ICC_SGI1R_EL1, {0}",
-                    "isb",
-                    in(reg) aff,
-                    options(nostack, preserves_flags),
-                );
-            }
-        }
+        Kind::V3 => write_sgi1r(sgi1r(intid, hw)),
         Kind::V2 => {
-            // TargetListFilter 0b10 = this CPU; CPUTargetList bit 0 (IHI 0048).
-            let sgir = (intid & 0xF) | (2 << 24) | (1 << 16);
+            let bit = (hw & 7) as u32;
+            let sgir = (intid & 0xF) | (1 << (16 + bit));
             // SAFETY: ordered mmio_write (DESIGN §4.7). established here.
             unsafe {
                 core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
                 mmio32w(g.dist, GICD_SGIR, sgir);
+            }
+        }
+    }
+}
+
+/// SGI to every other CPU (ICC_SGI1R IRM, or GICD_SGIR filter 01).
+pub fn send_sgi_others(intid: u32) {
+    let Some(g) = gic() else {
+        return;
+    };
+    match g.kind {
+        Kind::V3 => write_sgi1r((u64::from(intid & 0xF) << 24) | (1u64 << 40)),
+        Kind::V2 => {
+            let sgir = (intid & 0xF) | (1 << 24);
+            // SAFETY: ordered mmio_write (DESIGN §4.7). established here.
+            unsafe {
+                core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
+                mmio32w(g.dist, GICD_SGIR, sgir);
+            }
+        }
+    }
+}
+
+/// Per-CPU redistributor / CPU interface on a secondary.
+///
+/// # Safety
+/// This CPU's GIC interface is unused; IRQs masked.
+pub unsafe fn enable_ap() {
+    let Some(g) = gic() else {
+        return;
+    };
+    // SAFETY: this fn's `# Safety`; established here.
+    unsafe {
+        match g.kind {
+            Kind::V3 => {
+                let rd = this_redist(g);
+                wake_redist(rd);
+                program_sgi_ppi(rd);
+                enable_lpi(g, rd);
+                icc_enable();
+            }
+            Kind::V2 => {
+                mmio32w(g.cpu_or_redist, GICC_PMR, 0xFF);
+                mmio32w(g.cpu_or_redist, GICC_BPR, 0);
+                mmio32w(
+                    g.cpu_or_redist,
+                    GICC_CTLR,
+                    GICC_CTLR_ENABLE_G0 | GICC_CTLR_ENABLE_G1 | GICC_CTLR_ACK_CTL,
+                );
+                core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             }
         }
     }
@@ -740,8 +885,8 @@ fn enable_intid(g: &Gic, intid: u32, on: bool) {
     let off = if on { GICD_ISENABLER } else { GICD_ICENABLER };
     if g.kind == Kind::V3 && intid < 32 {
         let o = if on { GICR_ISENABLER0 } else { GICR_ICENABLER0 };
-        // SAFETY: redistributor SGI/PPI enable. established here.
-        unsafe { mmio32w(g.cpu_or_redist, o, bit) };
+        // SAFETY: this CPU's redistributor SGI/PPI enable. established here.
+        unsafe { mmio32w(this_redist(g), o, bit) };
         return;
     }
     // SAFETY: distributor enable bit. established here.
@@ -775,19 +920,25 @@ impl IrqChip for GicChip {
     }
 
     fn set_affinity(&self, hwirq: u32, cpu: u32) -> Result<(), IrqError> {
-        if cpu != 0 {
-            return Err(IrqError::BadCpu);
-        }
         let Some(g) = gic() else {
             return Err(IrqError::NoRoute);
         };
+        let hw = crate::per_cpu_init::cpu(cpu)
+            .map(|r| {
+                // Relaxed: the MPIDR is fixed after bring-up; pairs with nothing.
+                u64::from(r.apic_id.load(Ordering::Relaxed))
+            })
+            .unwrap_or(0);
         if g.kind == Kind::V3 && gic::is_lpi(hwirq) {
-            // Boot CPU: collection 0. MOVI is a no-op to the same collection.
             return Ok(());
         }
         if g.kind == Kind::V3 && gic::is_spi(hwirq) {
+            let route = (hw & 0xFF)
+                | (((hw >> 8) & 0xFF) << 8)
+                | (((hw >> 16) & 0xFF) << 16)
+                | (((hw >> 24) & 0xFF) << 32);
             // SAFETY: GICD_IROUTER for this SPI. established here.
-            unsafe { mmio64w(g.dist, GICD_IROUTER + u64::from(hwirq) * 8, 0) };
+            unsafe { mmio64w(g.dist, GICD_IROUTER + u64::from(hwirq) * 8, route) };
             return Ok(());
         }
         Ok(())

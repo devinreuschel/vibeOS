@@ -236,6 +236,12 @@ class TestEventRuleReplays(unittest.TestCase):
         rule.on_line("\x1evibeOS: panic: halted", panic=False, halted=True)
         self.assertIn("no GUEST_PANICKED within 10 s", rule.on_timeout().reason)
 
+    def test_aarch64_panic_ends_at_halted(self) -> None:
+        rule = EventRule("panic", arch="aarch64")
+        d = rule.on_line("\x1evibeOS: panic: halted", panic=False, halted=True)
+        self.assertEqual((d.end, d.reason), ("pass", "PANIC_DONE"))
+        self.assertEqual(rule.ended, "pass")
+
     def test_bad_declaration(self) -> None:
         with self.assertRaises(HarnessError):
             EventRule("maybe")

@@ -566,6 +566,19 @@ class TestExpectPanic(unittest.TestCase):
             "no GUEST_PANICKED within 10 s of 'vibeOS: panic: halted'", str(cm.exception)
         )
 
+    def test_aarch64_halted_ends_without_event(self) -> None:
+        src = FakeLineSource.from_lines(PANIC_BOOT + PANIC_DUMP, end="eof", exit_code=0)
+        result = run_qemu_and_check(
+            dataclasses.replace(FAKE_CFG, expect="panic", arch="aarch64"),
+            halt_test_markers(),
+            dump_needles=PANIC_NEEDLES,
+            line_source=src,
+            qmp=FakeQmp([]),
+        )
+        self.assertEqual(result.matched, ["serial_online", "limine_ok", "panic_test_armed"])
+        self.assertEqual(result.end, "PANIC_DONE")
+        self.assertFalse(src.killed)
+
     def test_dump_ended_before_halted_fails(self) -> None:
         with self.assertRaises(HarnessError) as cm:
             self.expect(PANIC_BOOT + PANIC_DUMP[:-1], exit_code=1, event=False)
@@ -2557,6 +2570,14 @@ class TestEnvConfig(unittest.TestCase):
             self.assertFalse(env_flag("VIBEOS_GP_TEST"))
         with overlay_env({}, clear=True):
             self.assertFalse(env_flag("VIBEOS_GP_TEST"))
+
+    def test_expected_clocksource_arch(self) -> None:
+        from tests.harness.harness import expected_clocksource
+
+        self.assertEqual(expected_clocksource(arch="aarch64"), "cntvct")
+        self.assertEqual(expected_clocksource(arch="aarch64", hpet=False), "cntvct")
+        self.assertEqual(expected_clocksource(), "hpet")
+        self.assertEqual(expected_clocksource(hpet=False), "acpi_pm")
 
     def test_env_int(self) -> None:
         from tests.harness.harness import env_int, overlay_env

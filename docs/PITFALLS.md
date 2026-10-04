@@ -349,11 +349,12 @@ The trampoline entered long mode without setting `EFER.NXE`, so NX bits in kerne
 reserved-bit violations. Rule: the trampoline sets NXE along with LME.
 
 **An AP that missed its bring-up timeout runs on freed memory.**
-The timeout path frees the AP's kernel, RSP0, and IST stacks and its GDT/TSS and marks its idle TCB Dead, but an AP that accepted a SIPI and then
-stalled past 3 s can keep running on them, or read the next AP's parameter block. Rule: the timeout path
-sends INIT, clears the AP's online bit, and leaks what it gave the AP; a failed AP costs its stack and
-tables, not a second CPU on the same memory ([section 7.4](SMP.md#74-ap-bring-up-sequence)).
-`smp_init::start_one` frees without INIT (ROADMAP §11.4, F032).
+An AP that accepted a SIPI and then stalled past 3 s can keep running on its stack and tables, or
+read the next AP's parameter block. Rule: the timeout path sends INIT, clears the AP's online bit,
+and leaks what it gave the AP; a failed AP costs its stack and tables, not a second CPU on the same
+memory ([section 7.4](SMP.md#74-ap-bring-up-sequence)). `smp_init::start_one` does this; a
+pre-SIPI failure still frees. On aarch64, `AFFINITY_INFO` `OFF` is the only free after `CPU_ON`
+(ROADMAP §11.4, F032).
 
 **A null dereference in an ISR shortly after an AP comes up.**
 `sti` happened before `GS_BASE` was set, and a timer interrupt landed in code that reads per-CPU state.

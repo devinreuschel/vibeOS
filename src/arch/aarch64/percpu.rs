@@ -2,6 +2,7 @@
 
 use core::arch::asm;
 use core::mem::offset_of;
+use core::sync::atomic::AtomicU64;
 
 use vibeos::atomic::statics::{AtomicBool, Ordering};
 use vibeos::smp::per_cpu::PerCpu;
@@ -11,8 +12,19 @@ use super::cpu;
 
 pub const CURRENT_OFFSET: usize = offset_of!(PerCpu, current);
 pub const CPU_ID_OFFSET: usize = offset_of!(PerCpu, cpu_id);
+pub const OVERFLOW_SP_OFFSET: usize = offset_of!(PerCpu, overflow_sp);
+
+/// Non-zero when the overflow stub must read `TPIDR_EL2`.
+#[unsafe(no_mangle)]
+static VIBEOS_TPIDR_EL2: AtomicU64 = AtomicU64::new(0);
 
 static LIVE: AtomicBool = AtomicBool::new(false);
+
+/// Record the EL2 VHE choice for the overflow stub. Before first per-CPU access.
+pub(crate) fn set_tpidr_el2(vhe: bool) {
+    // Release: pairs with the overflow stub's load of this flag.
+    VIBEOS_TPIDR_EL2.store(u64::from(vhe), Ordering::Release);
+}
 
 #[inline(always)]
 pub fn is_live() -> bool {

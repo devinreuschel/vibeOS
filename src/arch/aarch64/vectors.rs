@@ -173,16 +173,31 @@ global_asm!(
     "    add sp, sp, #{frame}",
     "    eret",
     "vibeos_overflow:",
+    "    adrp x1, VIBEOS_TPIDR_EL2",
+    "    add x1, x1, :lo12:VIBEOS_TPIDR_EL2",
+    "    ldr x1, [x1]",
+    "    cbnz x1, 10f",
+    "    mrs x1, tpidr_el1",
+    "    b 11f",
+    "10:",
+    "    mrs x1, tpidr_el2",
+    "11:",
+    "    cbz x1, 12f",
+    "    ldr x1, [x1, #{off}]",
+    "    cbnz x1, 13f",
+    "12:",
     "    adrp x1, VIBEOS_OVERFLOW_SP",
     "    add x1, x1, :lo12:VIBEOS_OVERFLOW_SP",
     "    ldr x1, [x1]",
     "    cbz x1, 2f",
+    "13:",
     "    mov sp, x1",
     "2:",
     "    b vibeos_overflow_rust",
     ".popsection",
     frame = const FRAME_SIZE,
     sbit = const STACK_BIT,
+    off = const crate::arch::aarch64::percpu::OVERFLOW_SP_OFFSET,
 );
 
 /// Point VBAR at the early table. Safe before KVA.
@@ -210,6 +225,9 @@ pub unsafe fn init_full() {
             OVERFLOW.store(p, Ordering::Release);
         }
         Err(_) => crate::boot::halt_with("vibeOS: vectors: overflow box"),
+    }
+    if crate::per_cpu_init::is_live() {
+        crate::per_cpu_init::with_current(|c| c.overflow_sp = top);
     }
     write_vbar(vibeos_vectors as *const () as u64);
     // Release: pairs with the Acquire load in `full_live`.
@@ -392,8 +410,12 @@ pub fn set_intercept_hook(h: fn(&mut TrapFrame) -> bool) {
 #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 pub fn user_fault(_frame: &TrapFrame) {}
 
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
-pub fn load() {}
+/// Point VBAR at the full table. Secondaries call this; the overflow
+/// stack lives in `PerCpu.overflow_sp`.
+pub fn load() {
+    write_vbar(vibeos_vectors as *const () as u64);
+    cpu::clear_pstate_a();
+}
 
 #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 pub fn registrable(_v: u8) -> bool {

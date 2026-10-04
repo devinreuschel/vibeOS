@@ -63,6 +63,13 @@ The x86_64 port's other files: `src/arch/x86_64/catch.rs` (the in-guest tests' f
 module roots; the latter holds the zero-sized `Arch` and its `InterruptMask`, `CycleCounter`,
 `ContextSwitch`, `Barriers`, `PerCpuBase`, `SyscallAbi` and `Port` impls).
 
+ROADMAP §11.4's aarch64 files, named here so `check_arch.py` can see them without a new
+seam-table column: `src/arch/aarch64/secondary.rs` (PSCI stub, identity TTBR0, EL2 list),
+`src/arch/aarch64/switch.rs` (x19–x29, SP, LR, DAIF), `src/arch/aarch64/percpu.rs`
+(`TPIDR_EL1` or `TPIDR_EL2`), `src/arch/aarch64/power.rs` (`SYSTEM_OFF`/`SYSTEM_RESET`,
+`CPU_ON`), `crates/core/src/arch/aarch64/psci.rs` (IDs and `SecondaryParam`). Bring-up
+lives in `src/smp/smp_init.rs` beside the x86 path.
+
 `vibeos-core` names a few of the reference port's pure-half items directly until a second port's
 kernel builds (ROADMAP Phase 11): `crates/core/src/arch/mod.rs` re-exports the x86_64 descriptor,
 vector, 8259, APIC and UART encodings, `UserFrame`, and the `SYS_*` numbers as `syscall_nr`.
@@ -78,7 +85,7 @@ needs the concern moves it behind the seam (PORTABILITY.md §11.3).
 | File | Items | §11.1 row | Why fenced, not moved |
 |---|---|---|---|
 | `src/main.rs` | the root `x86` alias and `apic_init` use line; `gp_test_trip` | Exception entry and exit | the alias names the x86_64 port for the modules below; `gp_test_trip` is the `gp_test` build's `#GP` |
-| `src/boot/fw_cfg_init.rs` | the whole module (its `mod` line in `src/boot/mod.rs`) | Machine description | QEMU's fw_cfg is port I/O on x86_64 and MMIO elsewhere; the MMIO driver comes with the port (ROADMAP §11.5) |
+| `src/boot/fw_cfg_init.rs` | the port I/O `select` / `read_bytes` / `transfer` halves | Machine description | QEMU's fw_cfg is port I/O on x86_64 and MMIO on aarch64 (ROADMAP §11.5); both live in this module |
 | `src/console/kbd_init.rs` | the whole module (its `mod` line in `src/console/mod.rs`) | Interrupt controller and IRQ identity | the i8042 PS/2 driver is PC hardware (ROADMAP Phase 11 splits it) |
 | `src/console/console_init.rs` | `wait_key_loop`'s `cli`, `sti` and `sti; hlt` statements | Idle | ROADMAP §10.3's compiler-barrier box names these raw statements; the idle wait moves with the port's `wfi` sequence (§11.3) |
 | `src/sched/thread_init/idle.rs` | `halt_if_idle`'s `cli`, `sti` and `sti; hlt` statements | Idle | as for `wait_key_loop` |

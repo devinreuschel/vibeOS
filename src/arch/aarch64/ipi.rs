@@ -9,28 +9,40 @@ use super::{Arch, gic};
 impl IpiSend for Arch {
     type Error = IpiError;
 
-    fn send(_cpu: u32, ipi: Ipi) -> Result<(), IpiError> {
+    fn send(cpu: u32, ipi: Ipi) -> Result<(), IpiError> {
         match ipi {
             Ipi::Shootdown => Ok(()),
             Ipi::Reschedule => {
-                gic::send_sgi(SGI_RESCHEDULE);
+                gic::send_sgi_to(cpu, SGI_RESCHEDULE);
                 Ok(())
             }
             Ipi::Call => {
-                gic::send_sgi(SGI_CALL);
+                gic::send_sgi_to(cpu, SGI_CALL);
                 Ok(())
             }
             Ipi::Halt => {
-                gic::send_sgi(SGI_STOP);
+                gic::send_sgi_to(cpu, SGI_STOP);
                 Ok(())
             }
         }
     }
 
     fn send_others(ipi: Ipi) -> Result<(), IpiError> {
-        // Boot CPU only: no other cores.
-        let _ = ipi;
-        Ok(())
+        match ipi {
+            Ipi::Shootdown => Ok(()),
+            Ipi::Reschedule => {
+                gic::send_sgi_others(SGI_RESCHEDULE);
+                Ok(())
+            }
+            Ipi::Call => {
+                gic::send_sgi_others(SGI_CALL);
+                Ok(())
+            }
+            Ipi::Halt => {
+                gic::send_sgi_others(SGI_STOP);
+                Ok(())
+            }
+        }
     }
 }
 

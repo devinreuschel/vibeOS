@@ -144,10 +144,6 @@ pub fn cpu(id: u32) -> Option<&'static PerCpuRemote> {
 
 /// CPU `id`'s `PerCpu` address, set once in [`init_bsp`]. For
 /// `smp_init::start_one`, which hands it to the AP it starts.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
-)]
 pub fn slot_ptr(id: u32) -> Option<*mut PerCpu> {
     CPUS.try_get()?.get(id as usize).map(|c| c.self_ptr)
 }
@@ -255,10 +251,6 @@ pub fn with_current_switch<R>(f: impl FnOnce(&mut PerCpu) -> R) -> R {
 /// accepted one. No other scope on its slot is live (the busy flag panics
 /// on one on this CPU, not on another).
 #[inline(always)]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
-)]
 pub unsafe fn with_cpu<R>(id: u32, f: impl FnOnce(&mut PerCpu) -> R) -> Option<R> {
     let _irq = InterruptGuard::enter();
     let cpus = CPUS.try_get()?;
@@ -308,10 +300,6 @@ unsafe fn with_ptr<R>(p: *mut PerCpu, f: impl FnOnce(&mut PerCpu) -> R) -> R {
 /// # Safety
 /// `cpu` is this CPU's `PerCpu`. Call after `mov gs` (GDT load) and
 /// before `sti` / any ISR that reads `gs:[0]`.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
-)]
 pub unsafe fn install_gs(cpu: &PerCpu) {
     // SAFETY: `cpu` is this CPU's `PerCpu`, which `CPUS` keeps in place,
     // after `mov gs` and before any ISR reads `gs:[0]` (this fn's `# Safety`
@@ -377,16 +365,21 @@ pub fn set_timer_mode(mode: vibeos::apic::TimerMode) {
     }
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
-)]
 pub fn mark_online(cpu_id: u32) {
     if cpu_id >= 64 {
         return;
     }
     // Release: pairs with the Acquire load in `online_mask`.
     ONLINE.fetch_or(1u64 << cpu_id, Ordering::Release);
+}
+
+/// Clear CPU `cpu_id` from the online mask (F032 timeout).
+pub fn mark_offline(cpu_id: u32) {
+    if cpu_id >= 64 {
+        return;
+    }
+    // Release: pairs with the Acquire load in `online_mask`.
+    ONLINE.fetch_and(!(1u64 << cpu_id), Ordering::Release);
 }
 
 pub fn online_mask() -> u64 {

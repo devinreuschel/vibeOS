@@ -38,6 +38,30 @@ pub(crate) mod mmu;
 pub mod percpu;
 pub mod pic;
 pub mod power;
+pub(crate) mod secondary;
+
+/// `switch.rs`'s IRQ mask: the kernel sets DAIF.I across the GPR shuffle.
+macro_rules! switch_cli {
+    () => {
+        "msr daifset, #2"
+    };
+}
+
+/// `switch.rs`'s delayed unmask before return to a thread that resumes
+/// with IRQs on (DESIGN §7.5).
+macro_rules! switch_sti {
+    () => {
+        "msr daifclr, #2"
+    };
+}
+
+/// Read DAIF into `x2` for the outgoing context.
+macro_rules! switch_read_daif {
+    () => {
+        "mrs x2, daif"
+    };
+}
+
 mod switch;
 pub(crate) mod timer;
 pub(crate) mod uaccess;

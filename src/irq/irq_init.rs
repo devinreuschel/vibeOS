@@ -260,6 +260,9 @@ pub fn dispatch_intid(intid: u32) {
         match intid {
             0 => crate::ipi_init::on_reschedule_ipi(),
             1 => crate::ipi_init::on_call_ipi(),
+            2 => {
+                crate::ipi_init::on_stop_ipi(crate::ipi_init::here_regs_for_stop());
+            }
             _ => {}
         }
         return;

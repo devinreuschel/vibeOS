@@ -144,7 +144,9 @@ pub extern "C" fn _start() -> ! {
     #[cfg(target_arch = "aarch64")]
     {
         arch::aarch64::cpu::use_sp_elx();
-        arch::aarch64::boot::map_early_console();
+        if let Some(va) = arch::aarch64::boot::map_early_console() {
+            boot::fw_cfg_init::set_mmio_va(va);
+        }
         arch::aarch64::vectors::init_early();
     }
     serial::Serial::init();

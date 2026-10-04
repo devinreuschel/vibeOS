@@ -10,6 +10,8 @@ sends `cont`, so no event is lost. Each run declares the end it expects,
   with the core after `vibeOS: panic: halted` or `NO_EVENT_CORE_S`.
 - `panic`: `GUEST_PANICKED` drains serial and passes, and the runner checks
   the dump (a core only if a check fails); `GUEST_CRASHLOADED` fails.
+  aarch64 has no ISA pvpanic; `pvpanic-pci` is ROADMAP §11.7, so `halted`
+  is the pass until that write exists.
 - `reset`: `GUEST_PANICKED` gets `cont`; `GUEST_CRASHLOADED` fails.
 - `capture`: `GUEST_PANICKED` fails; `GUEST_CRASHLOADED` waits for the
   capture kernel's `vibeOS: vmcore: written` line and its reset, and a
@@ -416,7 +418,12 @@ class EventRule:
     """
 
     def __init__(
-        self, expect: str, resets: int = 0, *, clock: Callable[[], float] = time.monotonic
+        self,
+        expect: str,
+        resets: int = 0,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        arch: str = "x86_64",
     ) -> None:
         if expect not in EXPECTS:
             raise HarnessError(f"expect={expect!r}: not one of {EXPECTS}")
@@ -424,6 +431,7 @@ class EventRule:
             raise HarnessError(f"resets={resets}: negative")
         self.expect = expect
         self.resets = resets
+        self.arch = arch
         self._clock = clock
         self._core_at: float | None = None  # the no-event core's deadline
         self._halted = False
@@ -453,6 +461,10 @@ class EventRule:
     def on_line(self, line: str, *, panic: bool, halted: bool) -> Decision:
         if halted:
             self._halted = True
+            # aarch64: no ISA pvpanic write, so no GUEST_PANICKED until
+            # §11.7's pvpanic-pci. The dump's halted line is the panic end.
+            if self.expect == "panic" and self.arch == "aarch64":
+                return self._end(Decision(end="pass", reason="PANIC_DONE"))
         if self._core_at is not None:
             if halted:
                 # The dump has ended: the core moment of a no-event failure.
@@ -576,7 +588,7 @@ class Session:
     ) -> None:
         self.cfg = cfg
         self.label = label
-        self.rule = EventRule(cfg.expect, cfg.resets, clock=clock)
+        self.rule = EventRule(cfg.expect, cfg.resets, clock=clock, arch=cfg.arch)
         self.qmp = qmp
         self.sock: str | None = None if qmp is not None else socket_path()
         self.events: list[Event] = []

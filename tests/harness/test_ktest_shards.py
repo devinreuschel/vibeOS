@@ -111,6 +111,9 @@ class ShardTable(unittest.TestCase):
         self.assertIn("deadline-trip", proof_boot_names(4, False))
         self.assertNotIn("deadline-trip", proof_boot_names(1, False))
         self.assertEqual(proof_boot_names(1, True, "aarch64"), [])
+        self.assertEqual(proof_boot_names(4, False, "aarch64"), ["stalled-ap"])
+        self.assertIn("stalled-ap", proof_boot_names(4, False))
+        self.assertNotIn("stalled-ap", proof_boot_names(2, False))
 
     def test_unknown_shard_is_refused(self) -> None:
         with (

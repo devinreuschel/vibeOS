@@ -329,10 +329,7 @@ pub struct Vmap {
 impl Vmap {
     /// First mapped VA.
     #[cfg_attr(
-        any(
-            not(feature = "kernel_tests"),
-            all(target_arch = "aarch64", feature = "kernel_tests")
-        ),
+        not(feature = "kernel_tests"),
         expect(
             dead_code,
             reason = "ROADMAP §10.3: `kva_init::vmap` returns a move-only handle; only in-guest tests call it until a driver does"
@@ -380,10 +377,6 @@ crate::cell::assert_not_impl!(Vmap: Copy);
         dead_code,
         reason = "ROADMAP §10.3: `kva_init::vmap` returns a move-only handle; only in-guest tests call it until a driver does"
     )
-)]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn vmap(frames: Frames) -> Result<Vmap, KvaError> {
     let n = frames.count();
