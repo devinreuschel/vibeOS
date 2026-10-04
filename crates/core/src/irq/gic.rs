@@ -28,6 +28,15 @@ pub const PRIO_NMI: u8 = 0x00;
 pub const PRIO_IPI_TICK: u8 = 0x40;
 pub const PRIO_DEVICE: u8 = 0xa0;
 
+/// LPI Configuration table bits (IHI 0069). Priority occupies [7:2].
+pub const LPI_PROP_ENABLE: u8 = 1;
+pub const LPI_PROP_GROUP1: u8 = 1 << 1;
+
+/// One LPI Configuration table byte: Group 1, enabled, `priority` in [7:2].
+pub const fn lpi_config(priority: u8) -> u8 {
+    (priority & 0xFC) | LPI_PROP_GROUP1 | LPI_PROP_ENABLE
+}
+
 /// GICv2m MSI_TYPER and SETSPI_NS (ARM IHI 0069 / GICv2m).
 pub const V2M_MSI_TYPER: u32 = 0x008;
 pub const V2M_MSI_SETSPI_NS: u32 = 0x040;
@@ -128,6 +137,12 @@ mod tests {
         assert_eq!(priority_for(SGI_CALL), PRIO_IPI_TICK);
         assert_eq!(priority_for(27), PRIO_IPI_TICK);
         assert_eq!(priority_for(64), PRIO_DEVICE);
+        assert_eq!(
+            lpi_config(PRIO_DEVICE),
+            0xA0 | LPI_PROP_GROUP1 | LPI_PROP_ENABLE
+        );
+        assert_eq!(lpi_config(PRIO_DEVICE) & 1, 1);
+        assert_eq!(lpi_config(PRIO_DEVICE) & 2, 2);
         const {
             assert!(PRIO_NMI == 0);
             assert!(PRIO_NMI < PRIO_IPI_TICK);

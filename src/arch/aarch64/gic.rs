@@ -15,6 +15,7 @@ use crate::paging_init;
 
 const GICD_CTLR: u64 = 0x0000;
 const GICD_TYPER: u64 = 0x0004;
+const GICD_IGROUPR: u64 = 0x0080;
 const GICD_ISENABLER: u64 = 0x0100;
 const GICD_ICENABLER: u64 = 0x0180;
 const GICD_IPRIORITYR: u64 = 0x0400;
@@ -40,6 +41,7 @@ const GICR_WAKER_PS: u32 = 1 << 1;
 const GICR_WAKER_CA: u32 = 1 << 2;
 const GICR_CTLR_ENABLE_LPIS: u32 = 1;
 const GICR_SGI_BASE: u64 = 0x1_0000;
+const GICR_IGROUPR0: u64 = GICR_SGI_BASE + 0x0080;
 const GICR_ISENABLER0: u64 = GICR_SGI_BASE + 0x0100;
 const GICR_ICENABLER0: u64 = GICR_SGI_BASE + 0x0180;
 const GICR_IPRIORITYR: u64 = GICR_SGI_BASE + 0x0400;
@@ -214,6 +216,7 @@ fn init_v2(g: &Gic) {
         mmio32w(g.dist, GICD_CTLR, 0);
         let mut i = 0u32;
         while i < lines {
+            mmio32w(g.dist, GICD_IGROUPR + u64::from(i / 32) * 4, 0xFFFF_FFFF);
             if i >= 32 {
                 mmio32w(g.dist, GICD_ICENABLER + u64::from(i / 32) * 4, 0xFFFF_FFFF);
             }
@@ -245,6 +248,7 @@ fn init_v3(g: &Gic) {
         mmio32w(g.dist, GICD_CTLR, 0);
         let mut i = 32u32;
         while i < lines {
+            mmio32w(g.dist, GICD_IGROUPR + u64::from(i / 32) * 4, 0xFFFF_FFFF);
             mmio32w(g.dist, GICD_ICENABLER + u64::from(i / 32) * 4, 0xFFFF_FFFF);
             let p = gic::priority_for(i);
             mmio32w(
@@ -263,7 +267,8 @@ fn init_v3(g: &Gic) {
             i = i.saturating_add(4);
         }
         mmio32w(g.dist, GICD_CTLR, GICD_CTLR_ENABLE_G1A | GICD_CTLR_ARE_NS);
-        // SGI/PPI on the redistributor.
+        // SGI/PPI on the redistributor: Group 1, matching ICC_IGRPEN1.
+        mmio32w(g.cpu_or_redist, GICR_IGROUPR0, 0xFFFF_FFFF);
         mmio32w(g.cpu_or_redist, GICR_ICENABLER0, 0);
         let mut s = 0u32;
         while s < 32 {
@@ -314,19 +319,20 @@ unsafe fn enable_lpi(g: &Gic) {
         crate::klog!(Level::Error, "vibeOS: gic: lpi prop table");
         return;
     };
-    let Some(pend) = alloc_pages(8) else {
+    // GICR_PENDBASER is 64 KiB-aligned (IHI 0069); 16 pages gives that.
+    let Some(pend) = alloc_pages(16) else {
         crate::klog!(Level::Error, "vibeOS: gic: lpi pend table");
         return;
     };
     let va = crate::paging_init::hhdm_offset().wrapping_add(prop);
-    // Enable the LPIs this chip will allocate (DESIGN §5.4).
+    // Enable the LPIs this chip will allocate as Group 1 (DESIGN §5.4).
     // SAFETY: `va` is the HHDM alias of the property table (I14). established here.
     unsafe {
         let mut i = 0u32;
         while i < LPI_SLOTS as u32 {
             let off = (LPI_BASE + i) as usize;
             let p = (va as *mut u8).wrapping_add(off);
-            p.write(1 | (gic::PRIO_DEVICE & 0xFC));
+            p.write(gic::lpi_config(gic::PRIO_DEVICE));
             i = i.saturating_add(1);
         }
         core::arch::asm!("dsb sy", options(nostack, preserves_flags));
