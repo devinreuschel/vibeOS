@@ -107,10 +107,34 @@ pub(crate) fn test_lapic_timer_rearm() -> Outcome {
     if (k / 2..=k.saturating_mul(2)).contains(&median) {
         return Outcome::Ok;
     }
+    // Where the spacing went: each fire's handler time, from its stamp to
+    // the TSC its rearm read, and how long after the deadline that rearm
+    // armed the next fire was stamped (delivery, the guest's IF-off time
+    // included). A missing rearm reads as zero.
+    let mut at = [0u64; FIRE_STAMPS];
+    let mut deadline = [0u64; FIRE_STAMPS];
+    apic_testing::fire_rearms(&mut at, &mut deadline);
+    let mut handler = [0u64; FIRE_STAMPS - 1];
+    let mut late = [0u64; FIRE_STAMPS - 1];
+    for (((h, l), w), (a, d)) in handler
+        .iter_mut()
+        .zip(late.iter_mut())
+        .zip(stamps.windows(2))
+        .zip(at.iter().zip(deadline.iter()))
+    {
+        *h = a.saturating_sub(w[0]);
+        *l = w[1].saturating_sub(*d);
+    }
+    handler.sort_unstable();
+    late.sort_unstable();
     crate::fail_fmt!(
-        "lapic fire interval median {} us (min {}, max {}), want 500 to 2000",
+        "lapic fire interval median {} us (min {}, max {}), want 500 to 2000; handler median {} us (max {}), past deadline median {} us (max {})",
         us(median),
         us(gaps[0]),
-        us(gaps[gaps.len() - 1])
+        us(gaps[gaps.len() - 1]),
+        us(handler[(handler.len() - 1) / 2]),
+        us(handler[handler.len() - 1]),
+        us(late[(late.len() - 1) / 2]),
+        us(late[late.len() - 1])
     )
 }
