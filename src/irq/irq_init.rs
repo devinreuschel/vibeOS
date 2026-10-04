@@ -251,23 +251,24 @@ pub fn dispatch(vec: u8) {
 }
 
 /// Deliver a GIC INTID to its `IrqId` handler, or the timer / SGI path.
+///
+/// Timer and SGI may `schedule_preempt` (DESIGN §5.8). They are not a
+/// device top half, so they must not set `IN_ISR`.
 #[cfg(target_arch = "aarch64")]
 pub fn dispatch_intid(intid: u32) {
-    hardirq::set(true);
     if intid < 16 {
         match intid {
             0 => crate::ipi_init::on_reschedule_ipi(),
             1 => crate::ipi_init::on_call_ipi(),
             _ => {}
         }
-        hardirq::set(false);
         return;
     }
     if intid == crate::arch::aarch64::timer::intid() {
         apic_init::on_timer_irq();
-        hardirq::set(false);
         return;
     }
+    hardirq::set(true);
     let irq_raw = crate::arch::aarch64::gic::lookup(intid);
     let irq = IrqId::from_raw(irq_raw);
     if let Some(i) = irq.slot() {

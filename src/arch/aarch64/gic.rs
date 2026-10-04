@@ -515,6 +515,8 @@ pub fn handle_irq() {
     if intid >= 1020 {
         return;
     }
+    // DESIGN §5.8: EOI before the timer/IPI body, which may preempt.
+    eoi(g, intid);
     // Acquire: pairs with the Release store in `set_dispatch`.
     let p = DISPATCH.load(Ordering::Acquire);
     if !p.is_null() {
@@ -523,7 +525,6 @@ pub fn handle_irq() {
         let f = unsafe { core::mem::transmute::<*mut (), fn(u32)>(p) };
         f(intid);
     }
-    eoi(g, intid);
 }
 
 fn ack(g: &Gic) -> u32 {
