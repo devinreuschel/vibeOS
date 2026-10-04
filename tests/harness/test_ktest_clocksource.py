@@ -23,6 +23,11 @@ class ExpectedClocksource(unittest.TestCase):
         self.assertEqual(expected_clocksource(_cfg("kvm")), "tsc")
         self.assertEqual(expected_clocksource(_cfg("kvm", hpet=False)), "tsc")
 
+    def test_aarch64_wants_cntvct(self) -> None:
+        cfg = QemuConfig(iso="x.iso", arch="aarch64", accel="tcg")
+        self.assertEqual(expected_clocksource(cfg), "cntvct")
+        check_clocksource(_lines("cntvct"), cfg)
+
     def test_tcg_wants_hpet_or_pm_timer(self) -> None:
         self.assertEqual(expected_clocksource(_cfg("tcg")), "hpet")
         self.assertEqual(expected_clocksource(_cfg("tcg", hpet=False)), "acpi_pm")

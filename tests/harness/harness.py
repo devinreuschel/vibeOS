@@ -613,8 +613,7 @@ def _start_qemu(
 ) -> QemuProcess:
     """Check PATH and the ISO, then start QEMU with a monitor socket, and
     with `qmp_sock` a QMP socket, halted until `qmp.Session.start`."""
-    if not shutil.which("qemu-system-x86_64"):
-        raise HarnessError("qemu-system-x86_64 not on PATH")
+    _require_qemu(cfg.arch)
     if not os.path.exists(cfg.iso):
         raise HarnessError(f"ISO missing: {cfg.iso}")
     monitor_sock = _pick_monitor_path()
@@ -736,6 +735,22 @@ class QemuConfig:
     gic_version: str = "3"
 
 
+def qemu_system(arch: str) -> str:
+    """The QEMU binary `qemu_argv` starts for `arch`."""
+    if arch == "aarch64":
+        return "qemu-system-aarch64"
+    if arch == "x86_64":
+        return "qemu-system-x86_64"
+    raise HarnessError(f"arch {arch!r}: not x86_64 or aarch64")
+
+
+def _require_qemu(arch: str) -> str:
+    binary = qemu_system(arch)
+    if not shutil.which(binary):
+        raise HarnessError(f"{binary} not on PATH")
+    return binary
+
+
 @dataclass
 class EnvConfig:
     iso: str
@@ -754,6 +769,8 @@ class EnvConfig:
     # Multiplies every ktest progress deadline (`KtestDeadlines`); no
     # variable sets it until ROADMAP §17.6.
     timeout_scale: float = TIMEOUT_SCALE
+    arch: str = "x86_64"
+    gic_version: str = "3"
 
     def fw_cfg_cmdline(self, driver_words: str = "") -> str:
         """The fw_cfg command-line string: the driver's words, then
@@ -793,6 +810,8 @@ class EnvConfig:
             cmdline=self.fw_cfg_cmdline(cmdline),
             expect=expect,
             resets=resets,
+            arch=self.arch,
+            gic_version=self.gic_version,
         )
 
 
@@ -831,9 +850,17 @@ def default_iso(variant: str = "default") -> str:
     return f"build/vibeos-{variant}.iso"
 
 
-def env_firmware(environ: Mapping[str, str]) -> Firmware | None:
-    """`VIBEOS_BIOS`: unset, empty or `seabios` is SeaBIOS (None); `uefi` is
-    the x86_64 pair `probe_firmware` finds, which `VIBEOS_FW_X86_64` names."""
+def env_firmware(environ: Mapping[str, str], arch: str = "x86_64") -> Firmware | None:
+    """`VIBEOS_BIOS` on x86_64: unset, empty or `seabios` is SeaBIOS (None);
+    `uefi` is the pair `probe_firmware` finds. aarch64 always probes UEFI."""
+    if arch == "aarch64":
+        fw = probe_firmware("aarch64", environ)
+        if fw is None:
+            raise HarnessError(
+                "VIBEOS_ARCH=aarch64: no aarch64 UEFI firmware installed "
+                "(apt: qemu-efi-aarch64; Homebrew: qemu); set VIBEOS_FW_AARCH64 to a code image"
+            )
+        return fw
     bios = environ.get("VIBEOS_BIOS", "")
     if bios in ("", "seabios"):
         return None
@@ -852,7 +879,13 @@ def env_firmware(environ: Mapping[str, str]) -> Firmware | None:
 
 
 def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
-    firmware = env_firmware(os.environ)
+    arch = os.environ.get("VIBEOS_ARCH", "x86_64")
+    if arch not in ("x86_64", "aarch64"):
+        raise HarnessError(f"VIBEOS_ARCH={arch}: not x86_64 or aarch64")
+    gic = os.environ.get("VIBEOS_GIC", "3")
+    if arch == "aarch64" and gic not in ("2", "3"):
+        raise HarnessError(f"VIBEOS_GIC={gic}: not 2 or 3")
+    firmware = env_firmware(os.environ, arch)
     accel_raw = os.environ.get("VIBEOS_QEMU_ACCEL")
     extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
     ktest = os.environ.get("VIBEOS_KTEST", "")
@@ -876,7 +909,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         timeout = float(timeout_raw)
     return EnvConfig(
         iso=os.environ.get("VIBEOS_ISO", default_iso),
-        smp=env_int("VIBEOS_SMP", DEFAULT_SMP),
+        smp=env_int("VIBEOS_SMP", 1 if arch == "aarch64" else DEFAULT_SMP),
         cpu=os.environ.get("VIBEOS_QEMU_CPU", DEFAULT_CPU),
         mem=os.environ.get("VIBEOS_MEM", DEFAULT_MEM),
         firmware=firmware,
@@ -889,6 +922,8 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         ktest_repeat=ktest_repeat,
         cmdline=os.environ.get("VIBEOS_CMDLINE", ""),
         timeout_scale=TIMEOUT_SCALE,
+        arch=arch,
+        gic_version=gic,
     )
 
 
@@ -1022,18 +1057,23 @@ def ktest_devices(
     extra_disks: Sequence[str] = (),
     readonly: bool = False,
     blkdebug: str | None = None,
+    arch: str = "x86_64",
 ) -> tuple[str, ...]:
     """The in-guest registry's devices: `disk` is `vda`, and each of
     `extra_disks` a further virtio-blk disk after it. A second virtio-rng
     sits at `00:1d.0`, and a virtio-blk whose probe fails at `00:1e.0`.
-    `readonly` and `blkdebug` go to `virtio_blk_args` for `vda`."""
-    return (
-        "-device",
-        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    `readonly` and `blkdebug` go to `virtio_blk_args` for `vda`.
+    aarch64 has no `isa-debug-exit`; pass is PSCI `SYSTEM_OFF`."""
+    isa = (
+        ()
+        if arch == "aarch64"
+        else ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
+    )
+    return isa + (
         "-device",
         "e1000e",
         "-device",
-        "edu",
+        "edu,dma_mask=0xFFFFFFFF",
         "-device",
         "virtio-rng-pci,disable-legacy=on",
         # A second virtio-rng in a high slot, after the first in bus order,
@@ -1351,13 +1391,32 @@ def fw_cfg_cmdline_words(cfg: QemuConfig) -> str:
 PANIC_ACTION = ("-action", "panic=pause")
 
 
+def _aarch64_cpu(cfg: QemuConfig) -> str:
+    """`-cpu host` under HVF; `virt` defaults to the 32-bit cortex-a15."""
+    if _accel_name(cfg.accel) == "hvf" and cfg.cpu == DEFAULT_CPU:
+        return "host"
+    return cfg.cpu
+
+
+def _aarch64_iso_args(iso: str) -> list[str]:
+    """virtio-scsi CD-ROM: `virt` has no IDE, and virtio-blk would be `vda`."""
+    return [
+        "-device", "virtio-scsi-pci,id=scsi0",
+        "-drive",
+        f"if=none,id=cd0,format=raw,media=cdrom,readonly=on,file={_drive_file(iso)}",
+        "-device", "scsi-cd,drive=cd0,bootindex=0",
+    ]
+
+
 def qemu_argv(
     cfg: QemuConfig, monitor_sock: str | None, *, qmp_sock: str | None = None
 ) -> list[str]:
     """QEMU's argv for `cfg`. `qmp_sock` adds a QMP server there and `-S`:
     the CPUs wait for the harness's `cont` (`qmp.Session.start`)."""
+    if cfg.arch == "aarch64":
+        return _qemu_argv_aarch64(cfg, monitor_sock, qmp_sock=qmp_sock)
     argv = [
-        "qemu-system-x86_64",
+        qemu_system(cfg.arch),
         "-cdrom", cfg.iso,
         "-m", cfg.mem,
         "-smp", str(cfg.smp),
@@ -1389,6 +1448,47 @@ def qemu_argv(
         argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]
     argv += list(FORENSICS_DEVICES)
     argv += list(PANIC_ACTION)
+    argv += list(cfg.extra)
+    ensure_qemu_pinned(argv[0], cfg.qemu_version)
+    return argv
+
+
+def _qemu_argv_aarch64(
+    cfg: QemuConfig, monitor_sock: str | None, *, qmp_sock: str | None = None
+) -> list[str]:
+    """ROADMAP §11.7 / DESIGN §8.4: `virt,acpi=off` with AAVMF and a SCSI CD."""
+    if cfg.gic_version not in ("2", "3"):
+        raise HarnessError(f"gic_version={cfg.gic_version!r}: not 2 or 3")
+    if cfg.firmware is None:
+        raise HarnessError(
+            "aarch64 boot needs UEFI firmware (probe or VIBEOS_FW_AARCH64)"
+        )
+    argv = [
+        qemu_system("aarch64"),
+        "-machine", f"virt,acpi=off,gic-version={cfg.gic_version}",
+        "-m", cfg.mem,
+        "-smp", str(cfg.smp),
+        "-cpu", _aarch64_cpu(cfg),
+    ]
+    if cfg.expect != "reset":
+        argv += ["-no-reboot"]
+    if not cfg.display:
+        argv += ["-display", "none"]
+    argv += ["-serial", "stdio"]
+    if monitor_sock is not None:
+        argv += ["-monitor", f"unix:{monitor_sock},server=on,wait=off"]
+    if qmp_sock is not None:
+        argv += ["-qmp", f"unix:{qmp_sock},server=on,wait=off", "-S"]
+    argv += _accel_args(cfg)
+    if cfg.gdb:
+        argv += ["-s", "-S"]
+    argv += pflash_args(cfg.firmware, new_vars_copy(cfg.firmware))
+    words = fw_cfg_cmdline_words(cfg)
+    if words:
+        argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]
+    argv += list(AARCH64_FORENSICS)
+    argv += list(PANIC_ACTION)
+    argv += _aarch64_iso_args(cfg.iso)
     argv += list(cfg.extra)
     ensure_qemu_pinned(argv[0], cfg.qemu_version)
     return argv
@@ -2143,6 +2243,13 @@ def run_qemu_console_input(
 # isa-debug-exit at 0xf4: host status = (value << 1) | 1. DESIGN §8.2.
 ISA_DEBUG_PASS = 33  # write 0x10
 ISA_DEBUG_FAIL = 35  # write 0x11
+# PSCI SYSTEM_OFF: QEMU exits 0 (ROADMAP §11.7).
+PSCI_PASS = 0
+
+
+def ktest_pass_status(cfg: QemuConfig) -> int:
+    """The QEMU exit status a passing ktest boot leaves."""
+    return PSCI_PASS if cfg.arch == "aarch64" else ISA_DEBUG_PASS
 
 
 # ktest protocol (DESIGN §8.2, C-KTEST-PROTO): one kernel line per event.
@@ -2572,7 +2679,7 @@ def run_qemu_until_exit(
     progress: KtestDeadlines | None = None,
     qmp: QmpLike | None = None,
 ) -> RunResult:
-    """Boot the ISO and wait for QEMU to exit (isa-debug-exit).
+    """Boot the ISO and wait for QEMU to exit (isa-debug-exit or PSCI).
 
     Without `progress` the whole boot has `timeout_s`. With it, the ktest
     progress deadline replaces that: `progress` sets the deadline of each
@@ -2595,8 +2702,7 @@ def run_qemu_until_exit(
     """
     from tests.harness import qmp as qmpmod
 
-    if not shutil.which("qemu-system-x86_64"):
-        raise HarnessError("qemu-system-x86_64 not on PATH")
+    _require_qemu(cfg.arch)
     if not os.path.exists(cfg.iso):
         raise HarnessError(f"ISO missing: {cfg.iso}")
 
@@ -2757,13 +2863,14 @@ def boot_contract_markers(
     gp: bool = False,
     smp: int | None = None,
     panic_variant: str = "",
+    arch: str = "x86_64",
 ) -> list[Marker]:
     """Live e2e contract. Pins the LAPIC timer mode and SMP AP count.
 
     `panic_variant` (`nest` or `stop`) selects that panic-path build's contract,
     which ends at its armed line (`VIBEOS_PANIC_VARIANT`, run_e2e)."""
     if smp is None:
-        smp = env_int("VIBEOS_SMP", DEFAULT_SMP)
+        smp = env_int("VIBEOS_SMP", 1 if arch == "aarch64" else DEFAULT_SMP)
     cfg = registry.BootConfig(
         hpet=hpet,
         smp=smp,
@@ -2772,6 +2879,7 @@ def boot_contract_markers(
         gp_test=gp,
         panic_nest_test=panic_variant == "nest",
         panic_stop_test=panic_variant == "stop",
+        arch=arch,
     )
     return contract_markers(cfg)
 
@@ -2782,12 +2890,12 @@ PHASE0_MARKERS: list[Marker] = boot_contract_markers()
 PHASE0_PIT_MARKERS: list[Marker] = boot_contract_markers(hpet=False)
 
 
-def halt_test_markers() -> list[Marker]:
+def halt_test_markers(*, arch: str = "x86_64") -> list[Marker]:
     """The markers that come before the deliberate panic in the panic-test
     build, which panics right after the Limine handshake: the contract rows
     that hold under `panic_test`."""
     return contract_markers(
-        registry.BootConfig(hpet=True, smp=1, lapic_mode="", panic_test=True)
+        registry.BootConfig(hpet=True, smp=1, lapic_mode="", panic_test=True, arch=arch)
     )
 
 
