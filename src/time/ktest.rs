@@ -1,11 +1,11 @@
 //! In-guest tests for time (kernel_tests only). Rows: [`TESTS`].
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::time::{
-    CALIB_BAND_INVARIANT, CalibSource, ClocksourceId, Counter, Instant, Snapshot, TICK_NS,
-    calib_in_band, next_deadline, ns_at, unix_from_civil,
+    CALIB_BAND_INVARIANT, CalibSource, ClocksourceId, Counter, Instant, RELOAD_SPANS, ReloadSpans,
+    Snapshot, TICK_NS, calib_in_band, next_deadline, ns_at, unix_from_civil,
 };
 
 use vibeos::apic::TimerMode;
@@ -42,36 +42,43 @@ pub(crate) fn deadline_after(now: Instant) -> Instant {
     next_deadline(now)
 }
 
-/// PIT interrupts whose TSC [`test_pit_tick_rate`] stamps: 40 intervals.
-const PIT_STAMPS: usize = 41;
-/// The TSC at each stamped PIT interrupt, in order.
-static PIT_STAMP: [AtomicU64; PIT_STAMPS] = [const { AtomicU64::new(0) }; PIT_STAMPS];
-/// Stamps taken since [`test_pit_tick_rate`] armed them; `usize::MAX`
-/// while it has not.
-static PIT_STAMP_N: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// PIT interrupts [`test_pit_tick_rate`] waits for after it has read the
+/// period: the tick still arrives.
+const PIT_FIRES_MIN: u64 = 20;
 
-/// Stamp this PIT interrupt for [`test_pit_tick_rate`] while it is armed;
-/// `time_init::on_pit_tick` calls it and counts the interrupt itself.
-pub(crate) fn stamp_pit_irq() {
-    // One writer: the PIT interrupts one CPU, whose handler runs this with
-    // IF off. Relaxed: the stamp is published by the count's store below.
-    let i = PIT_STAMP_N.load(Ordering::Relaxed);
-    if let Some(slot) = PIT_STAMP.get(i) {
-        slot.store(time_init::read_tsc(), Ordering::Relaxed);
-        // Release: pairs with the test's Acquire load, so a count it reads
-        // covers stamps it can read.
-        PIT_STAMP_N.store(i + 1, Ordering::Release);
+/// The reload period, in TSC cycles, of the down-counting timer `count`
+/// reads on this CPU: the median span [`ReloadSpans`] finds between its
+/// reloads. Each read is taken with IF off between two TSC reads, and one
+/// more than a quarter tick after the read before it starts afresh, so any
+/// period above a quarter tick reads true, the half-tick floor the callers
+/// test included. Under TCG the count is QEMU's clock at the read, whenever
+/// the host delivers the timer's interrupts. `Err` with the spans taken
+/// when the run's deadline comes first.
+pub(crate) fn reload_period(count: impl Fn() -> u64, tsc_per_ms: u64) -> Result<u64, usize> {
+    let mut spans = ReloadSpans::new(tsc_per_ms / 4);
+    loop {
+        let (lo, c, hi) = {
+            let _irq = crate::arch::current::InterruptGuard::enter();
+            let lo = time_init::read_tsc();
+            let c = count();
+            (lo, c, time_init::read_tsc())
+        };
+        spans.push(lo, c, hi);
+        if let Some(p) = spans.period() {
+            return Ok(p);
+        }
+        if crate::ktest::deadline_near() == Some(true) {
+            return Err(spans.len());
+        }
     }
 }
 
 /// The PIT's tick rate, in a boot where the PIT drives the tick (`make
-/// test-kernel`'s hpet=off boot): CPU 0 stamps the TSC at [`PIT_STAMPS`]
-/// PIT interrupts, and the median of their 40 intervals lies between 0.5
-/// and 2 ms, the band of the 40 to 160 interrupts in 80 ms this test
-/// first counted. Under TCG the host can stall the PIT's delivery for tens
-/// of milliseconds and merge the edges it missed: one long interval, which
-/// a count over a fixed TSC window took as a slow PIT (ROADMAP §10.2) and
-/// the median ignores.
+/// test-kernel`'s hpet=off boot): channel 0's reload period, read from its
+/// latched count against the TSC ([`reload_period`]), lies between 0.5 and
+/// 2 ms, and the PIT's interrupts keep arriving. The interrupts' own
+/// arrival times are the host's: QEMU's main loop raises them, and a
+/// macOS host wakes it no more often than every 5 to 10 ms (ROADMAP §10.2).
 pub(crate) fn test_pit_tick_rate() -> Outcome {
     if apic_init::timer_mode() != TimerMode::Pit {
         return Outcome::Fail("pit does not drive the tick");
@@ -83,35 +90,27 @@ pub(crate) fn test_pit_tick_rate() -> Outcome {
     if k == 0 {
         return Outcome::Fail("no tsc_per_ms");
     }
-    // Release: the stamps' handler sees the arming.
-    PIT_STAMP_N.store(0, Ordering::Release);
-    // Acquire: pairs with the handler's Release store of the count.
-    let full = crate::ktest::wait_for(|| PIT_STAMP_N.load(Ordering::Acquire) >= PIT_STAMPS);
-    let n = PIT_STAMP_N.swap(usize::MAX, Ordering::AcqRel);
-    if !full {
-        return crate::fail_fmt!("{n} of {PIT_STAMPS} pit interrupts by the run's deadline");
+    let f0 = time_init::pit_fires();
+    let period = match reload_period(|| u64::from(time_init::pit_ch0_count()), k) {
+        Ok(p) => p,
+        Err(n) => {
+            return crate::fail_fmt!(
+                "{n} of {RELOAD_SPANS} pit reload spans by the run's deadline"
+            );
+        }
+    };
+    if !(k / 2..=k.saturating_mul(2)).contains(&period) {
+        let us = period.saturating_mul(1000) / k;
+        return crate::fail_fmt!("pit reload period {us} us, want 500 to 2000");
     }
-    let mut gaps = [0u64; PIT_STAMPS - 1];
-    for (i, g) in gaps.iter_mut().enumerate() {
-        let (a, b) = (&PIT_STAMP[i], &PIT_STAMP[i + 1]);
-        *g = b
-            .load(Ordering::Relaxed)
-            .wrapping_sub(a.load(Ordering::Relaxed));
+    let fired = || time_init::pit_fires().wrapping_sub(f0);
+    if crate::ktest::wait_for(|| fired() >= PIT_FIRES_MIN) {
+        return Outcome::Ok;
     }
-    gaps.sort_unstable();
-    let mid = gaps.len() / 2;
-    let median = gaps[mid - 1] / 2 + gaps[mid] / 2;
-    let us = |c: u64| c.saturating_mul(1000) / k;
-    if (k / 2..=k.saturating_mul(2)).contains(&median) {
-        Outcome::Ok
-    } else {
-        crate::fail_fmt!(
-            "pit interval median {} us (min {}, max {}), want 500 to 2000",
-            us(median),
-            us(gaps[0]),
-            us(gaps[gaps.len() - 1])
-        )
-    }
+    crate::fail_fmt!(
+        "{} of {PIT_FIRES_MIN} pit interrupts by the run's deadline",
+        fired()
+    )
 }
 
 // ---------------------------------------------------------------------------

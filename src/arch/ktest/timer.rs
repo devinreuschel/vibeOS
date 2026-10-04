@@ -5,6 +5,7 @@ use vibeos::apic::TimerMode;
 
 use crate::apic_init;
 use crate::ktest::Outcome;
+use crate::time::ktest::reload_period;
 use crate::time_init;
 
 /// PIT interrupts [`test_lapic_timer_rearm`] waits for when the PIT
@@ -14,23 +15,25 @@ const REARM_FIRES: u64 = 20;
 /// The timer keeps firing across many ticks, at the tick the kernel
 /// programs. Each fire comes only if the tick before it left the timer
 /// armed (`rearm_deadline` in TSC-deadline mode, the periodic reload
-/// otherwise), and the bound comes from what the kernel controls (ROADMAP
-/// §10.2):
+/// otherwise), and the bounds come from what the kernel controls and the
+/// timer's own count, not from when the host delivers its interrupts
+/// (ROADMAP §10.2):
 /// - periodic mode: this CPU's LAPIC holds the LVT, initial count and
-///   divide the kernel programs for one tick;
+///   divide the kernel programs for one tick, and the reload period its
+///   current-count register shows against the TSC ([`reload_period`]) lies
+///   between half a tick and two;
 /// - TSC-deadline mode: every fire CPU 0 takes in the window rearmed the
-///   next one tick, `tsc_per_ms`, ahead;
-/// - both: the median of the 20 intervals between CPU 0's next 21 fires,
-///   in TSC cycles, lies between half a tick and two, as
-///   `pit_tick_rate`'s does. Under TCG a loaded host can hold the
-///   interrupts back and merge the periods it missed into one long
-///   interval, which a count over a fixed TSC window took as a stalled
-///   timer and the median ignores.
+///   next one tick, `tsc_per_ms`, ahead, and the median of the 20
+///   intervals between the 21 fires, in TSC cycles, is at least half a
+///   tick. A fire comes no earlier than the deadline its rearm wrote, so
+///   no host delay lowers that median; an upper bound on it would measure
+///   the host, which under TCG raises the interrupt from QEMU's main loop,
+///   and a macOS host wakes that loop every 5 to 10 ms;
+/// - both: CPU 0 takes 21 fires by the run's deadline.
 ///
-/// The wait is bounded by the run's deadline. When the PIT drives the tick
-/// (no HPET, `make test-kernel`'s hpet=off boot), the test waits for 20
-/// PIT interrupts, and their rate is `pit_tick_rate`'s claim, in that
-/// boot.
+/// When the PIT drives the tick (no HPET, `make test-kernel`'s hpet=off
+/// boot), the test waits for 20 PIT interrupts, and their rate is
+/// `pit_tick_rate`'s claim, in that boot.
 pub(crate) fn test_lapic_timer_rearm() -> Outcome {
     use apic_init::testing::{self as apic_testing, FIRE_STAMPS};
     let mode = apic_init::timer_mode();
@@ -46,18 +49,32 @@ pub(crate) fn test_lapic_timer_rearm() -> Outcome {
     if k == 0 {
         return Outcome::Fail("no tsc_per_ms");
     }
-    if mode == TimerMode::Periodic
-        && let Some((got, want)) = apic_testing::periodic_mismatch()
-    {
-        return crate::fail_fmt!(
-            "periodic timer lvt {:#x} icr {:#x} dcr {:#x}, the kernel programs {:#x} {:#x} {:#x}",
-            got[0],
-            got[1],
-            got[2],
-            want[0],
-            want[1],
-            want[2]
-        );
+    let us = |c: u64| c.saturating_mul(1000) / k;
+    if mode == TimerMode::Periodic {
+        if let Some((got, want)) = apic_testing::periodic_mismatch() {
+            return crate::fail_fmt!(
+                "periodic timer lvt {:#x} icr {:#x} dcr {:#x}, the kernel programs {:#x} {:#x} {:#x}",
+                got[0],
+                got[1],
+                got[2],
+                want[0],
+                want[1],
+                want[2]
+            );
+        }
+        // The registry runs on CPU 0 alone, so every read is one LAPIC's.
+        let period = match reload_period(|| u64::from(apic_testing::timer_count()), k) {
+            Ok(p) => p,
+            Err(n) => {
+                return crate::fail_fmt!(
+                    "{n} of {} lapic reload spans by the run's deadline",
+                    vibeos::time::RELOAD_SPANS
+                );
+            }
+        };
+        if !(k / 2..=k.saturating_mul(2)).contains(&period) {
+            return crate::fail_fmt!("lapic reload period {} us, want 500 to 2000", us(period));
+        }
     }
     let (r0, off0, _) = apic_testing::rearms();
     apic_testing::arm_fire_stamps();
@@ -68,33 +85,31 @@ pub(crate) fn test_lapic_timer_rearm() -> Outcome {
     if !full {
         return crate::fail_fmt!("rearm stalled: {n} of {FIRE_STAMPS} lapic fires");
     }
-    if mode == TimerMode::TscDeadline {
-        let need = (FIRE_STAMPS - 1) as u64;
-        if r1.wrapping_sub(r0) < need {
-            return crate::fail_fmt!("{} rearms over {need} fires", r1.wrapping_sub(r0));
-        }
-        if off1 != off0 {
-            return crate::fail_fmt!(
-                "{} rearms not one tick ahead: the last {last} TSC cycles, want {k}",
-                off1.wrapping_sub(off0)
-            );
-        }
+    if mode != TimerMode::TscDeadline {
+        return Outcome::Ok;
+    }
+    let need = (FIRE_STAMPS - 1) as u64;
+    if r1.wrapping_sub(r0) < need {
+        return crate::fail_fmt!("{} rearms over {need} fires", r1.wrapping_sub(r0));
+    }
+    if off1 != off0 {
+        return crate::fail_fmt!(
+            "{} rearms not one tick ahead: the last {last} TSC cycles, want {k}",
+            off1.wrapping_sub(off0)
+        );
     }
     let mut gaps = [0u64; FIRE_STAMPS - 1];
     for (g, w) in gaps.iter_mut().zip(stamps.windows(2)) {
         *g = w[1].wrapping_sub(w[0]);
     }
     gaps.sort_unstable();
-    let mid = gaps.len() / 2;
-    let median = gaps[mid - 1] / 2 + gaps[mid] / 2;
-    if (k / 2..=k.saturating_mul(2)).contains(&median) {
+    let median = gaps[(gaps.len() - 1) / 2];
+    if median >= k / 2 {
         return Outcome::Ok;
     }
-    let us = |c: u64| c.saturating_mul(1000) / k;
     crate::fail_fmt!(
-        "lapic fire interval median {} us (min {}, max {}), want 500 to 2000",
+        "lapic fire interval median {} us (min {}), want at least 500",
         us(median),
-        us(gaps[0]),
-        us(gaps[gaps.len() - 1])
+        us(gaps[0])
     )
 }

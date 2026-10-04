@@ -113,6 +113,16 @@ the PIC's, so a timer that works, armed for 1 ms, fires within the PIT's first f
 Where the PIT never interrupts, nothing shows a mode silent: a mode that never fires there stops
 the boot in `prove` rather than handing on to the next.
 
+For the same reason the in-guest tests take a tick's rate from the timer's count, not from its
+interrupts' arrival times. QEMU computes the PIT's and the LAPIC timer's count from its clock when
+the guest reads it, so the count shows the programmed period however late the host wakes the main
+loop that raises the interrupts. On the scheduled macOS runner (an Apple M1 (Virtual) host, macOS
+15.7.9, QEMU 11.1.1) a 1 ms sleep takes 5.3 ms at the median, and the 1 ms ticks reached the guest
+every 5 to 10 ms of TSC time. `pit_tick_rate` and `lapic_timer_rearm`'s periodic mode read the period
+as the median span between reloads of PIT channel 0's latched count, or of the LAPIC's
+current-count register, against the TSC (`vibeos::time::ReloadSpans`), and they count interrupts
+only to show the tick still arrives.
+
 When the LAPIC timer owns the tick, mask the PIT's GSI at the I/O APIC. Do not merely ignore its
 interrupts.
 

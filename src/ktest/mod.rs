@@ -1131,7 +1131,7 @@ pub(crate) fn sleep_for(pred: impl Fn() -> bool) -> bool {
 
 /// Whether the running row's deadline is [`WAIT_MARGIN_MS`] away or closer;
 /// `None` when no deadline is armed.
-fn deadline_near() -> Option<bool> {
+pub(crate) fn deadline_near() -> Option<bool> {
     deadline_within(WAIT_MARGIN_MS)
 }
 

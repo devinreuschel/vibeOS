@@ -17,6 +17,10 @@ use vibeos::time::{
     tsc_per_ms_from_hpet_brackets, tsc_per_ms_from_pit_windows, unix_from_civil, wall_unix_s,
 };
 
+#[cfg(target_arch = "x86_64")]
+#[cfg(feature = "kernel_tests")]
+use vibeos::time::{PIT_CH0, PIT_CMD_CH0_LATCH};
+
 use crate::acpi_init;
 use crate::arch::current::{Arch, interrupts_enabled, wait_for_interrupt};
 #[cfg(target_arch = "x86_64")]
@@ -403,6 +407,25 @@ fn pit_window(use_rdtscp: bool) -> Option<PitWindow> {
     }
 }
 
+/// PIT channel 0's count, latched, for `pit_tick_rate` (`kernel_tests`
+/// only, AGENTS.md rule 9).
+#[cfg(target_arch = "x86_64")]
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn pit_ch0_count() -> u16 {
+    // SAFETY: invariant I50, established at `time::time_init::init`: the
+    // PIT is this module's. After `init` programs channel 0, the command
+    // port is written only here and by `calibrate_pit`, and both run on the
+    // in-guest registry's one thread, one row at a time, so no write lands
+    // between the latch and its two reads; the IRQ0 handler touches no PIT
+    // port.
+    unsafe {
+        x86::outb(PIT_CMD, PIT_CMD_CH0_LATCH);
+        let lo = x86::inb(PIT_CH0);
+        let hi = x86::inb(PIT_CH0);
+        u16::from(lo) | (u16::from(hi) << 8)
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 fn program_pit_ch0() {
     for &(port, val) in PIT_CH0_WRITES {
@@ -519,8 +542,6 @@ static PIT_FIRES: AtomicU64 = AtomicU64::new(0);
 pub fn on_pit_tick() {
     // Relaxed: a count read on the CPU it counts on; nothing hangs off it.
     PIT_FIRES.fetch_add(1, Ordering::Relaxed);
-    #[cfg(feature = "kernel_tests")]
-    super::ktest::stamp_pit_irq();
     on_hw_tick();
 }
 
