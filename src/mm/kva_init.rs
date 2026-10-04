@@ -535,10 +535,6 @@ pub unsafe fn memremap(phys: PhysAddr, len: u64, flags: PageFlags) -> Option<Vir
 /// # Safety
 /// `va` and `len` are what `memremap` returned / was given, and nothing
 /// uses the mapping any more.
-#[expect(
-    dead_code,
-    reason = "pair of memremap (ROADMAP §11.2); callers free a firmware mapping after its last use"
-)]
 pub unsafe fn memunmap(va: VirtAddr, len: u64) {
     if len == 0 {
         return;

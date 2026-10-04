@@ -168,9 +168,9 @@ row and that their `order` never decreases down the table.
 | 2 | Base revision check | `limine: rev 6 ok` | Everything downstream reads Limine responses. A `panic_test` build stops after this step with `boot: panic-test armed`. |
 | 6 | `boot::capture`, then the buddy PMM from the memory map | `pmm: <n> free 4KiB frames` | Page tables and heap both need frames. `BootInfo` is captured once; nothing outside `boot` reads a Limine response. A second line, `pmm: <n> total, largest order <n>`, is a diagnostic. |
 | 7 | Page tables, install CR3 | `paging: cr3 ok` | Own the address space before mapping anything device-specific. |
-| 8 | ACPI table walk; ioremap LAPIC, I/O APIC, and HPET (`acpi_init::init`) | (none) | Device pages must be uncacheable through `ioremap` before first touch, so the walk runs right after CR3. Firmware tables outside RAM-typed ranges are read through the low identity window (live until step 16); `memremap` needs KVA (step 10). Its `acpi: xsdt <n> tables` marker waits for step 12. |
 | 9 | Kernel heap, and a probe allocation read back | `heap ok` | `alloc` becomes legal. Until `irq: enabled` (step 15) boot may use its infallible API; from then on every allocation is fallible ([§4.4](MEMORY.md#44-kernel-heap)). |
-| 10 | Kernel VA allocator, and a guarded-stack probe | `kva: ready` | Guarded stacks need it, so threads and the IST stacks of step 3 need it. This is why steps 6-10 run before steps 3-5. |
+| 10 | Kernel VA allocator, and a guarded-stack probe | `kva: ready` | Guarded stacks need it, so threads and the IST stacks of step 3 need it. This is why steps 6, 7, 9, and 10 run before steps 3-5. |
+| 8 | ACPI table walk; ioremap LAPIC, I/O APIC, and HPET (`acpi_init::init`) | (none) | After KVA so a firmware table outside RAM (highmem reserved BIOS above the 512 MiB identity window) can use `memremap` (MEMORY.md §4.1). Device pages are still ioremapped here, before first MMIO touch (step 13b). Its `acpi: xsdt <n> tables` marker waits for step 12. |
 | 3 | GDT + TSS + IST (`gdt::init_bsp`) | `gdt ok` | A known code selector and a double-fault stack before the IDT is worth installing. The IST stacks are guarded KVA stacks (step 10). |
 | 4 | PIC remap and mask (`pic::remap_and_mask`), skipped when the FADT has `IAPC_BOOT_ARCH` bit 0 clear | `pic: remapped` | Firmware may leave the 8259 live with vectors overlapping CPU exceptions. Bit 0 is `LEGACY_DEVICES`, not 8259 presence. QEMU clears it, so on QEMU this step writes nothing. The remap and mask that always runs is `arch::pic::program`, after TSC calibration in step 13 and before step 13b's `sti` (§5.5; ROADMAP §20.1, F094): QEMU still has a PIC on vector 0x08. |
 | 5 | IDT (and, in a `kernel_tests` build, `arch::catch::init`) | `idt ok` | Exceptions become diagnosable. Hardware IRQs are still masked. The order GDT, PIC remap, IDT is fixed. |
@@ -200,9 +200,9 @@ Ordering rules worth stating separately because they were learned the hard way:
 - The PCI scan that sizes BARs (step 15b) runs before the first AP starts, though its
   `pci: N devices` stays at step 17b. A BAR sized while another CPU runs moves under that CPU's
   MMIO: on QEMU's TCG a LAPIC EOI went astray that way and the CPU never acked an IPI again.
-- ACPI discovery for the step-8 ioremap of LAPIC, I/O APIC, and HPET runs immediately after CR3.
-  The `acpi: xsdt N tables` marker stays at step 12. The walk stays before KVA: firmware tables
-  outside RAM use the identity window, not `memremap`.
+- ACPI discovery for the step-8 ioremap of LAPIC, I/O APIC, and HPET runs after KVA (step 10),
+  still before first MMIO touch. The `acpi: xsdt N tables` marker stays at step 12. Firmware
+  tables outside RAM use the identity window when it covers them, else `memremap`.
 - In the ROADMAP §12.1 KASAN build, `_start` maps the early shadow (§4.1) before step 1, since every
   instrumented function reads the shadow, the buddy at step 6 included.
 

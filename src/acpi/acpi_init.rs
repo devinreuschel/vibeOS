@@ -1,10 +1,9 @@
 //! Kernel ACPI bring-up. Library parsers live in `vibeos::acpi`.
 //!
-//! DESIGN §3.3: after CR3, walk tables through the RAM-only physmap.
+//! DESIGN §3.3: after KVA, walk tables through the RAM-only physmap.
 //! LAPIC / I/O APIC / HPET are reached only through `ioremap` (ROADMAP
-//! §11.2). A firmware table outside RAM (the RSDP in reserved BIOS) is
-//! read through the low identity window, which is still live at this
-//! step; `memremap` needs KVA and is used later (framebuffer).
+//! §11.2). A firmware table outside RAM is read through the identity
+//! window when it still covers the span, else `memremap`.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,6 +11,7 @@ use vibeos::acpi::{self, AcpiError, AcpiInfo, MAX_IOAPICS, PhysMem};
 use vibeos::paging::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
 use crate::cell::BootCell;
+use crate::kva_init;
 use crate::machine_init;
 use crate::paging_init;
 
@@ -31,19 +31,37 @@ impl PhysMem for HhdmPhys {
         let Some(end) = addr.checked_add(buf.len() as u64) else {
             return false;
         };
-        let src = if physmap_covers(addr, end - addr) {
-            paging_init::hhdm_offset().wrapping_add(addr) as *const u8
-        } else if paging_init::identity_covers(addr, end - addr) {
-            addr as *const u8
-        } else {
+        let len = end - addr;
+        if physmap_covers(addr, len) {
+            let src = paging_init::hhdm_offset().wrapping_add(addr) as *const u8;
+            // SAFETY: `physmap_covers` found a present physmap leaf for
+            // every 4 KiB of `[addr, end)`; `src` is valid for `buf.len()`
+            // bytes and `buf` is a distinct `&mut`. Established here.
+            unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len()) };
+            return true;
+        }
+        if paging_init::identity_covers(addr, len) {
+            let src = addr as *const u8;
+            // SAFETY: `identity_covers` found `[addr, end)` inside the live
+            // low identity window (`paging_init::install`); established here.
+            unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len()) };
+            return true;
+        }
+        // SAFETY: invariant I17: this is a firmware table the walk named,
+        // not device MMIO, mapped write-back (MEMORY.md §4.1); established
+        // here.
+        let Some(va) =
+            (unsafe { kva_init::memremap(PhysAddr(addr), len, vibeos::paging::physmap_flags()) })
+        else {
             return false;
         };
-        // SAFETY: `physmap_covers` found a present physmap leaf for every
-        // 4 KiB of `[addr, end)`, or `identity_covers` found the same span
-        // inside the live low identity window (`paging_init::install`);
-        // `src` is valid for `buf.len()` bytes and `buf` is a distinct
-        // `&mut`. Established here.
+        let src = va.as_u64() as *const u8;
+        // SAFETY: `memremap` mapped `[addr, end)` at `va` for `len` bytes;
+        // `buf` is a distinct `&mut`. Established here.
         unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len()) };
+        // SAFETY: `va` and `len` are this `memremap`; nothing else uses
+        // the mapping. Established here.
+        unsafe { kva_init::memunmap(va, len) };
         true
     }
 }
@@ -119,7 +137,7 @@ pub fn ioapic_va(phys: u64) -> Option<u64> {
 /// Parse ACPI, ioremap discovered MMIO, stash the result.
 ///
 /// # Safety
-/// After `paging_init::install`, single-CPU, IRQs off.
+/// After `paging_init::install` and `kva_init::init`, single-CPU, IRQs off.
 pub unsafe fn init(rsdp_phys: u64) {
     if rsdp_phys == 0 {
         return;
