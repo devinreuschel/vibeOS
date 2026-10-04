@@ -192,6 +192,15 @@ arch = "both"
 source = "kernel"
 section = "§0.4"
 
+# §11.6 User mode
+
+[[marker]]
+text = "vibeOS: panic: el0 return with DAIF clear"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.6"
+
 # §1.1 Buddy physical allocator
 
 [[marker]]
@@ -274,6 +283,13 @@ kind = "failure"
 arch = "x86_64"
 source = "kernel"
 section = "§1.2"
+
+[[marker]]
+text = "vibeOS: paging: no empty TTBR0"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
 
 [[marker]]
 text = "vibeOS: paging: physmap map failed"

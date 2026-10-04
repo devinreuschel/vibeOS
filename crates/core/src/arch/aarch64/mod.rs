@@ -6,6 +6,7 @@
 
 pub mod paging;
 pub mod psci;
+pub mod stat;
 pub mod sysreg;
 pub mod tlb;
 pub mod trap;

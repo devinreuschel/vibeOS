@@ -278,6 +278,74 @@ const PAIRS: &[Pair] = &[
     pair(Sys::Getdents64, Errno::EINVAL, Run(getdents64_einval)),
     pair(Sys::Getdents64, Errno::EFAULT, Run(getdents64_efault)),
     pair(Sys::Psinfo, Errno::EFAULT, Run(psinfo_efault)),
+    pair(
+        Sys::Openat,
+        Errno::EBADF,
+        Run(|| Ok(sys::openat(99, c"x".as_ptr().cast(), 0, 0))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::EFAULT,
+        Run(|| Ok(sys::openat(-100, KERNEL_PTR as *const u8, 0, 0))),
+    ),
+    pair(Sys::Openat, Errno::ENAMETOOLONG, Run(openat_enametoolong)),
+    pair(
+        Sys::Openat,
+        Errno::EINVAL,
+        Run(|| Ok(openat_raw(c"/utest_none", sys::O_CREAT | sys::O_DIRECTORY))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::ENOENT,
+        Run(|| Ok(openat_raw(c"/utest_none", sys::O_RDONLY))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::ENOTDIR,
+        Run(|| Ok(openat_raw(c"/hello/x", sys::O_RDONLY))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::EISDIR,
+        Run(|| Ok(openat_raw(c"/", sys::O_WRONLY))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::EEXIST,
+        Run(|| Ok(openat_raw(HELLO, sys::O_CREAT | O_EXCL))),
+    ),
+    pair(Sys::Openat, Errno::EACCES, Run(openat_eacces)),
+    pair(
+        Sys::Openat,
+        Errno::ELOOP,
+        Run(|| Ok(openat_raw(LOOP, sys::O_RDONLY))),
+    ),
+    pair(Sys::Openat, Errno::EMFILE, Run(openat_emfile)),
+    pair(Sys::Openat, Errno::ENFILE, Run(openat_enfile)),
+    pair(Sys::Openat, Errno::ENOSPC, Run(openat_enospc)),
+    pair(Sys::Openat, Errno::ENOMEM, Ktest),
+    pair(Sys::Openat, Errno::EIO, Ktest),
+    pair(Sys::Dup3, Errno::EBADF, Run(|| Ok(sys::dup3(99, 50, 0)))),
+    pair(Sys::Dup3, Errno::EINVAL, Run(dup3_einval)),
+    pair(
+        Sys::Clone,
+        Errno::EAGAIN,
+        Delegate("fork_bomb_eagain_at_limit"),
+    ),
+    pair(Sys::Clone, Errno::ENOMEM, Ktest),
+    pair(
+        Sys::Clone,
+        Errno::EINVAL,
+        Run(|| {
+            Ok(sys::clone(
+                0,
+                0,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                0,
+            ))
+        }),
+    ),
 ];
 
 /// A success probe: `Err` says what went wrong.
@@ -309,6 +377,9 @@ const OKS: &[(Sys, OkProbe)] = &[
     }),
     (Sys::Getdents64, getdents64_ok),
     (Sys::Psinfo, psinfo_ok),
+    (Sys::Openat, openat_ok),
+    (Sys::Dup3, dup3_ok),
+    (Sys::Clone, clone_ok),
 ];
 
 /// The calls with no success probe, and why.
@@ -423,6 +494,9 @@ fn matrix(registered: &[bool; 2]) -> Outcome {
         }
     }
     for p in PAIRS {
+        if !CALLS.iter().any(|c| c.sys == p.sys) {
+            continue;
+        }
         let listed = CALLS
             .iter()
             .any(|c| c.sys == p.sys && c.errors.contains(&p.errno));
@@ -449,6 +523,11 @@ const LOOP: &CStr = c"/proc/self/../self/../self/../self/../self/../self/../self
 /// `open(path, flags, 0644)`.
 pub(super) fn open_raw(path: &CStr, flags: i32) -> Result<usize, Errno> {
     sys::open(path.as_ptr().cast(), flags, 0o644)
+}
+
+/// `openat(AT_FDCWD, path, flags, 0644)`.
+fn openat_raw(path: &CStr, flags: i32) -> Result<usize, Errno> {
+    sys::openat(-100, path.as_ptr().cast(), flags, 0o644)
 }
 
 /// `open`, the descriptor as `u32`.
@@ -1165,6 +1244,89 @@ fn open_ok() -> Result<(), &'static str> {
         return Err("a descriptor below 3");
     }
     sys::close(fd).map(|_| ()).map_err(|_| "close")
+}
+
+fn openat_ok() -> Result<(), &'static str> {
+    let fd = openat_raw(HELLO, sys::O_RDONLY).map_err(|_| "openat /hello")?;
+    if fd < 3 {
+        return Err("a descriptor below 3");
+    }
+    sys::close(fd as u32).map(|_| ()).map_err(|_| "close")
+}
+
+fn openat_enametoolong() -> Result<Result<usize, Errno>, &'static str> {
+    let mut p = [b'a'; 301];
+    p[0] = b'/';
+    p[300] = 0;
+    Ok(sys::openat(-100, p.as_ptr(), sys::O_RDONLY, 0))
+}
+
+fn openat_eacces() -> Result<Result<usize, Errno>, &'static str> {
+    Ok(openat_raw(c"/dev/utest_new", sys::O_CREAT | sys::O_WRONLY))
+}
+
+fn openat_emfile() -> Result<Result<usize, Errno>, &'static str> {
+    let mut fds = [0u32; 300];
+    let mut n = 0;
+    let mut last = Ok(0);
+    while n < fds.len() {
+        match openat_raw(HELLO, sys::O_RDONLY) {
+            Ok(fd) => {
+                fds[n] = fd as u32;
+                n += 1;
+            }
+            Err(e) => {
+                last = Err(e);
+                break;
+            }
+        }
+    }
+    for &fd in &fds[..n] {
+        close(fd);
+    }
+    Ok(last)
+}
+
+fn openat_enfile() -> Result<Result<usize, Errno>, &'static str> {
+    with_files_full(|| {
+        let mut last = Ok(0);
+        for _ in 0..250 {
+            match openat_raw(HELLO, sys::O_RDONLY) {
+                Ok(fd) => close(fd as u32),
+                Err(e) => {
+                    last = Err(e);
+                    break;
+                }
+            }
+        }
+        last
+    })
+}
+
+fn openat_enospc() -> Result<Result<usize, Errno>, &'static str> {
+    Ok(openat_raw(c"/utest_nospc", sys::O_CREAT | sys::O_WRONLY))
+}
+
+fn dup3_einval() -> Result<Result<usize, Errno>, &'static str> {
+    Ok(sys::dup3(1, 1, 0))
+}
+
+fn dup3_ok() -> Result<(), &'static str> {
+    if sys::dup3(1, 50, 0) != Ok(50) {
+        return Err("dup3(1, 50, 0)");
+    }
+    sys::close(50).map(|_| ()).map_err(|_| "close")
+}
+
+fn clone_ok() -> Result<(), &'static str> {
+    match sys::clone(17, 0, core::ptr::null_mut(), core::ptr::null_mut(), 0) {
+        Ok(0) => vibeos_user::rt::exit(7),
+        Ok(pid) => match utest::wait_status(pid).map(utest::exited) {
+            Ok(Some(7)) => Ok(()),
+            _ => Err("child status"),
+        },
+        Err(_) => Err("clone"),
+    }
 }
 
 /// The console is a character device.

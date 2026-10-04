@@ -586,10 +586,18 @@ fn root_holder(root: u64) -> Option<RootHolder> {
     // One IF=0 stretch: the id and CR3 name one CPU.
     let (here, live) = {
         let _irq = crate::arch::current::InterruptGuard::enter();
-        (
-            per_cpu_init::try_current().map_or(0, |c| c.cpu_id),
-            Arch::root().as_u64(),
-        )
+        let live = {
+            #[cfg(target_arch = "aarch64")]
+            {
+                crate::arch::aarch64::cpu::read_ttbr0()
+                    & vibeos::arch::aarch64::paging::DESC_ADDR_MASK
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                Arch::root().as_u64()
+            }
+        };
+        (per_cpu_init::try_current().map_or(0, |c| c.cpu_id), live)
     };
     if live == root {
         return Some(RootHolder::Loaded { cpu: here });
@@ -625,18 +633,36 @@ pub unsafe fn load_cr3_u64(want: u64) {
         if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
             return;
         }
-        // SAFETY: invariant I44: `want` is a PML4 that shares the kernel
-        // half this code and stack run in and stays allocated while loaded
-        // (this fn's contract, `addr_space_init::load_cr3_u64`).
-        unsafe { Arch::set_root(PhysAddr(want)) };
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: invariant I44: `want` is a user root (TTBR0) that stays
+        // allocated while loaded (this fn's contract,
+        // `addr_space_init::load_cr3_u64`).
+        unsafe {
+            crate::arch::aarch64::cpu::write_ttbr0(want);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        // SAFETY: invariant I44: `want` is a user PML4 that stays
+        // allocated while loaded (this fn's contract,
+        // `addr_space_init::load_cr3_u64`).
+        unsafe {
+            Arch::set_root(PhysAddr(want));
+        }
         // Release: pairs with the Acquire load in `root_holder`.
         cpu.remote.as_cr3.store(want, Ordering::Release);
     });
 }
 
 pub fn load_kernel_cr3() {
-    // SAFETY: the kernel root comes from `paging_init::kernel_cr3`, which
-    // `paging_init::install` published and nothing frees; it is the kernel
-    // root, so no TCB need name it.
-    unsafe { load_cr3_u64(paging_init::kernel_cr3()) };
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: the empty user root comes from `paging_init::install`,
+    // which published it and nothing frees; no TCB need name it.
+    unsafe {
+        load_cr3_u64(paging_init::empty_user_root());
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    // SAFETY: the kernel root comes from `paging_init::install`, which
+    // published it and nothing frees; no TCB need name it.
+    unsafe {
+        load_cr3_u64(paging_init::kernel_cr3());
+    }
 }

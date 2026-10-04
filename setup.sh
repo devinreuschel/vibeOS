@@ -135,6 +135,10 @@ if [ -f "$TOOLCHAIN_FILE" ]; then
         # The user runtime's triple (ROADMAP §10.5), linked by rust-lld.
         echo "setup: adding target x86_64-unknown-linux-musl"
         rustup target add x86_64-unknown-linux-musl --toolchain "$PINNED"
+        echo "setup: adding target aarch64-unknown-none-softfloat"
+        rustup target add aarch64-unknown-none-softfloat --toolchain "$PINNED"
+        echo "setup: adding target aarch64-unknown-linux-musl"
+        rustup target add aarch64-unknown-linux-musl --toolchain "$PINNED"
         # vibeos-core's MSRV, which `make check` builds it with (ROADMAP §10.1).
         # VIBEOS_SKIP_MSRV=1 leaves it out: `make repro`'s two builds run only
         # `make isos`, each in a RUSTUP_HOME of its own (scripts/repro_build.py).

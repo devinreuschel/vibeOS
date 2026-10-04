@@ -7,18 +7,26 @@
 use core::arch::{asm, global_asm};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::arch::aarch64::trap::{self, SLOT_CURRENT_SPX_IRQ, SLOT_LOWER_A64_IRQ};
+use crate::arch::current::UserFrame;
+use vibeos::arch::aarch64::trap::{
+    self, SLOT_CURRENT_SPX_IRQ, SLOT_LOWER_A64_IRQ, SLOT_LOWER_A64_SYNC,
+};
 use vibeos::kalloc::TryBox;
 use vibeos::kva::DEFAULT_STACK_PAGES;
+use vibeos::proc::uaccess::untag_user_addr;
 use vibeos::trap::{Ring3Action, TrapKind, ring3_action};
 
 use super::cpu;
+use super::percpu::CURRENT_OFFSET;
 use crate::kva_init;
 use crate::kva_init::GuardedStack;
 
-/// Saved frame: x0-x30, SP, ELR, SPSR, ESR, FAR, slot. 304 bytes.
+/// Saved EL1 frame: x0-x30, SP, ELR, SPSR, ESR, FAR, slot. 304 bytes.
 pub const FRAME_SIZE: u64 = 304;
+/// DESIGN §5.10 user frame at the top of the thread's kernel stack.
+pub const USER_FRAME_SIZE: u64 = 288;
 const STACK_BIT: u32 = 14;
+const _: () = assert!(core::mem::size_of::<UserFrame>() == USER_FRAME_SIZE as usize);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -35,7 +43,7 @@ pub struct TrapFrame {
 
 impl TrapFrame {
     #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
-    pub fn for_user(_vec: u8, _err: u64, _f: &vibeos::arch::x86_64::trap::UserFrame) -> Self {
+    pub fn for_user(_vec: u8, _err: u64, _f: &UserFrame) -> Self {
         Self {
             x: [0; 31],
             sp: 0,
@@ -94,39 +102,65 @@ global_asm!(
     ".balign 0x800",
     ".global vibeos_vectors",
     "vibeos_vectors:",
-    ".macro vibeos_slot n",
-    "    msr tpidr_el0, x0",
-    "    mov x0, sp",
+    // Exchange SP and x0 by add/sub (PORTABILITY §11.5). Overflow stashes
+    // x0 in TPIDR_EL0 and SP in TPIDRRO_EL0; the normal path does not.
+    ".macro vibeos_slot_el1 n",
+    "    add x0, x0, sp",
+    "    sub sp, x0, sp",
+    "    sub x0, x0, sp",
     "    sub x0, x0, #{frame}",
     "    tbnz x0, #{sbit}, 1f",
-    "    sub sp, sp, #{frame}",
-    "    mrs x0, tpidr_el0",
+    "    add sp, x0, sp",
+    "    sub x0, sp, x0",
+    "    sub sp, sp, x0",
     "    stp x0, x1, [sp, #0]",
     "    mov x0, \\n",
-    "    b vibeos_save",
+    "    b vibeos_save_el1",
     "1:",
+    "    msr tpidr_el0, sp",
+    "    add x0, x0, #{frame}",
     "    msr tpidrro_el0, x0",
     "    mov x0, \\n",
     "    b vibeos_overflow",
     "    .balign 0x80",
     ".endm",
-    "    vibeos_slot 0",
-    "    vibeos_slot 1",
-    "    vibeos_slot 2",
-    "    vibeos_slot 3",
-    "    vibeos_slot 4",
-    "    vibeos_slot 5",
-    "    vibeos_slot 6",
-    "    vibeos_slot 7",
-    "    vibeos_slot 8",
-    "    vibeos_slot 9",
-    "    vibeos_slot 10",
-    "    vibeos_slot 11",
-    "    vibeos_slot 12",
-    "    vibeos_slot 13",
-    "    vibeos_slot 14",
-    "    vibeos_slot 15",
-    "vibeos_save:",
+    ".macro vibeos_slot_el0 n",
+    "    add x0, x0, sp",
+    "    sub sp, x0, sp",
+    "    sub x0, x0, sp",
+    "    sub x0, x0, #{uframe}",
+    "    tbnz x0, #{sbit}, 1f",
+    "    add sp, x0, sp",
+    "    sub x0, sp, x0",
+    "    sub sp, sp, x0",
+    "    stp x0, x1, [sp, #0]",
+    "    mov x0, \\n",
+    "    b vibeos_save_el0",
+    "1:",
+    "    msr tpidr_el0, sp",
+    "    add x0, x0, #{uframe}",
+    "    msr tpidrro_el0, x0",
+    "    mov x0, \\n",
+    "    b vibeos_overflow",
+    "    .balign 0x80",
+    ".endm",
+    "    vibeos_slot_el1 0",
+    "    vibeos_slot_el1 1",
+    "    vibeos_slot_el1 2",
+    "    vibeos_slot_el1 3",
+    "    vibeos_slot_el1 4",
+    "    vibeos_slot_el1 5",
+    "    vibeos_slot_el1 6",
+    "    vibeos_slot_el1 7",
+    "    vibeos_slot_el0 8",
+    "    vibeos_slot_el0 9",
+    "    vibeos_slot_el0 10",
+    "    vibeos_slot_el0 11",
+    "    vibeos_slot_el1 12",
+    "    vibeos_slot_el1 13",
+    "    vibeos_slot_el1 14",
+    "    vibeos_slot_el1 15",
+    "vibeos_save_el1:",
     "    stp x2, x3, [sp, #16]",
     "    stp x4, x5, [sp, #32]",
     "    stp x6, x7, [sp, #48]",
@@ -172,6 +206,89 @@ global_asm!(
     "    ldp x0, x1, [sp, #0]",
     "    add sp, sp, #{frame}",
     "    eret",
+    "vibeos_save_el0:",
+    "    stp x2, x3, [sp, #16]",
+    "    stp x4, x5, [sp, #32]",
+    "    stp x6, x7, [sp, #48]",
+    "    stp x8, x9, [sp, #64]",
+    "    stp x10, x11, [sp, #80]",
+    "    stp x12, x13, [sp, #96]",
+    "    stp x14, x15, [sp, #112]",
+    "    stp x16, x17, [sp, #128]",
+    "    stp x18, x19, [sp, #144]",
+    "    stp x20, x21, [sp, #160]",
+    "    stp x22, x23, [sp, #176]",
+    "    stp x24, x25, [sp, #192]",
+    "    stp x26, x27, [sp, #208]",
+    "    stp x28, x29, [sp, #224]",
+    "    str x30, [sp, #240]",
+    "    mov x19, x0",
+    "    mrs x1, sp_el0",
+    "    str x1, [sp, #248]",
+    "    mrs x1, elr_el1",
+    "    mrs x2, spsr_el1",
+    "    stp x1, x2, [sp, #256]",
+    "    str xzr, [sp, #272]",
+    "    mov x1, #-1",
+    "    str x1, [sp, #280]",
+    "    adrp x1, VIBEOS_TPIDR_EL2",
+    "    add x1, x1, :lo12:VIBEOS_TPIDR_EL2",
+    "    ldr x1, [x1]",
+    "    cbnz x1, 20f",
+    "    mrs x1, tpidr_el1",
+    "    b 21f",
+    "20:",
+    "    mrs x1, tpidr_el2",
+    "21:",
+    "    cbz x1, 22f",
+    "    ldr x1, [x1, #{cur}]",
+    "22:",
+    "    msr sp_el0, x1",
+    "    mrs x2, esr_el1",
+    "    mrs x3, far_el1",
+    "    mov x0, sp",
+    "    mov x1, x19",
+    "    bl vibeos_el0_rust",
+    "    b vibeos_el0_return",
+    ".global vibeos_el0_return",
+    "vibeos_el0_return:",
+    "    msr daifset, #0xf",
+    ".if {debug}",
+    "    mrs x1, daif",
+    "    and x1, x1, #0x3c0",
+    "    cmp x1, #0x3c0",
+    "    b.ne vibeos_el0_daif_clear",
+    ".endif",
+    "    mov x0, sp",
+    "    bl vibeos_el0_exit",
+    "    ldp x2, x3, [sp, #16]",
+    "    ldp x4, x5, [sp, #32]",
+    "    ldp x6, x7, [sp, #48]",
+    "    ldp x8, x9, [sp, #64]",
+    "    ldp x10, x11, [sp, #80]",
+    "    ldp x12, x13, [sp, #96]",
+    "    ldp x14, x15, [sp, #112]",
+    "    ldp x16, x17, [sp, #128]",
+    "    ldp x18, x19, [sp, #144]",
+    "    ldp x20, x21, [sp, #160]",
+    "    ldp x22, x23, [sp, #176]",
+    "    ldp x24, x25, [sp, #192]",
+    "    ldp x26, x27, [sp, #208]",
+    "    ldp x28, x29, [sp, #224]",
+    "    ldr x30, [sp, #240]",
+    "    ldp x0, x1, [sp, #0]",
+    "    add sp, sp, #{uframe}",
+    ".if {debug}",
+    "    mrs x16, daif",
+    "    and x16, x16, #0x3c0",
+    "    cmp x16, #0x3c0",
+    "    b.ne vibeos_el0_daif_clear",
+    ".endif",
+    ".global vibeos_el0_eret",
+    "vibeos_el0_eret:",
+    "    eret",
+    "vibeos_el0_daif_clear:",
+    "    b vibeos_el0_daif_halt",
     "vibeos_overflow:",
     "    adrp x1, VIBEOS_TPIDR_EL2",
     "    add x1, x1, :lo12:VIBEOS_TPIDR_EL2",
@@ -196,8 +313,11 @@ global_asm!(
     "    b vibeos_overflow_rust",
     ".popsection",
     frame = const FRAME_SIZE,
+    uframe = const USER_FRAME_SIZE,
     sbit = const STACK_BIT,
     off = const crate::arch::aarch64::percpu::OVERFLOW_SP_OFFSET,
+    cur = const CURRENT_OFFSET,
+    debug = const cfg!(debug_assertions) as u32,
 );
 
 /// Point VBAR at the early table. Safe before KVA.
@@ -316,6 +436,7 @@ fn intercept_overflow(_far: u64, _esr: u64, _elr: u64, _sp: u64) -> bool {
 
 #[unsafe(no_mangle)]
 extern "C" fn vibeos_vector_rust(frame: &mut TrapFrame) {
+    cpu::daif_clear_da();
     let slot = frame.slot as u8;
     let kind = trap::decode(slot, frame.esr);
     match kind {
@@ -346,6 +467,16 @@ fn handle_sync(frame: &mut TrapFrame, kind: TrapKind) {
     if super::catch::intercept(frame) {
         return;
     }
+    #[cfg(feature = "kernel_tests")]
+    if matches!(kind, TrapKind::Debug(_)) && crate::syscall_init::testing::eret_breakpoint_armed() {
+        crate::syscall_init::testing::note_eret_bp();
+        crate::syscall_init::testing::disarm_eret_breakpoint();
+        return;
+    }
+    if let Some(fix) = super::uaccess::fixup(frame.elr, untag_user_addr(frame.far)) {
+        frame.elr = fix;
+        return;
+    }
     match ring3_action(kind) {
         Ring3Action::NotRing3 | Ring3Action::Syscall | Ring3Action::StepOver => {
             if matches!(kind, TrapKind::WaitTrap) {
@@ -371,6 +502,89 @@ fn handle_sync(frame: &mut TrapFrame, kind: TrapKind) {
             cpu::halt();
         }
     }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn vibeos_el0_rust(frame: &mut UserFrame, slot: u64, esr: u64, far: u64) {
+    let far = untag_user_addr(far);
+    let kind = trap::decode(slot as u8, esr);
+    match kind {
+        TrapKind::Interrupt(_) => {
+            cpu::daif_clear_da();
+            crate::arch::aarch64::gic::handle_irq();
+            cpu::daif_set_all();
+        }
+        TrapKind::Fiq | TrapKind::SError => {
+            crate::marker!(
+                "vibeOS: panic: #{} esr={:#x} far={:#x} elr={:#x}",
+                if matches!(kind, TrapKind::Fiq) {
+                    "FIQ"
+                } else {
+                    "SERROR"
+                },
+                esr,
+                far,
+                frame.pc
+            );
+            cpu::halt();
+        }
+        TrapKind::Syscall => {
+            cpu::daif_clear_all();
+            crate::syscall_init::enter(frame);
+            cpu::daif_set_all();
+        }
+        TrapKind::WaitTrap => {
+            frame.pc = frame.pc.wrapping_add(4);
+        }
+        TrapKind::Debug(_) if slot as u8 == SLOT_LOWER_A64_SYNC => {
+            #[cfg(feature = "kernel_tests")]
+            if crate::syscall_init::testing::eret_breakpoint_armed() {
+                crate::syscall_init::testing::note_eret_bp();
+                return;
+            }
+            cpu::daif_clear_all();
+            crate::proc_init::try_user_trap(kind, frame.pc, far);
+            cpu::daif_set_all();
+        }
+        other => {
+            cpu::daif_clear_all();
+            crate::proc_init::try_user_trap(other, frame.pc, far);
+            cpu::daif_set_all();
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn vibeos_el0_exit(frame: &mut UserFrame) {
+    crate::syscall_init::exit_work(crate::syscall_init::EXIT_SYSCALL, frame);
+    crate::syscall_init::vibeos_fp_user_return();
+    #[cfg(feature = "kernel_tests")]
+    if crate::syscall_init::testing::take_bad_elr() {
+        frame.pc = 1u64 << 48;
+    }
+    if !crate::syscall_init::elr_ok(frame.pc) {
+        crate::proc_init::kill_bad_elr(frame.pc);
+    }
+    // SAFETY: `frame` is this thread's user frame at the top of its
+    // kernel stack; DAIF is all set; established here by
+    // `crate::arch::aarch64::vectors::vibeos_el0_return`.
+    unsafe {
+        core::arch::asm!(
+            "msr elr_el1, {pc}",
+            "msr spsr_el1, {pstate}",
+            "msr sp_el0, {sp}",
+            pc = in(reg) frame.pc,
+            pstate = in(reg) frame.pstate,
+            sp = in(reg) frame.sp,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn vibeos_el0_daif_halt() -> ! {
+    crate::marker!("vibeOS: panic: el0 return with DAIF clear");
+    cpu::halt();
 }
 
 fn restore(frame: &TrapFrame) {

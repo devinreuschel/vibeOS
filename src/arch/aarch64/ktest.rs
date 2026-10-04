@@ -14,9 +14,11 @@ use vibeos::thread::ThreadId;
 use crate::arch;
 use crate::arch::current::InterruptGuard;
 use crate::irq_init;
+use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{Outcome, Test, test};
 use crate::kva_init;
 use crate::paging_init;
+use crate::syscall_init;
 use crate::thread_init;
 use crate::time_init;
 
@@ -768,6 +770,252 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     Outcome::Ok
 }
 
+user_code!(
+    EL0_GETPID_10K,
+    "
+    mov x19, #10000
+1:
+    mov x8, #172
+    svc #0
+    subs x19, x19, #1
+    b.ne 1b
+    mov x0, #0
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    EL0_SP,
+    "
+    mov x20, sp
+    mov x19, #1000
+1:
+    mov x8, #172
+    svc #0
+    subs x19, x19, #1
+    b.ne 1b
+    mov x0, #0
+    cmp sp, x20
+    b.eq 2f
+    mov x0, #1
+2:
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    EL0_TAGGED,
+    "
+    adr x1, 1f
+1:
+    mov x2, #0x5a
+    lsl x2, x2, #56
+    orr x2, x2, x1
+    ldr w3, [x2]
+    mov x0, #1
+    mov x1, x2
+    mov x2, #1
+    mov x8, #64
+    svc #0
+    cmn x0, #14
+    b.ne 2f
+    mov x0, #0
+    b 3f
+2:
+    mov x0, #1
+3:
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    EL0_BRK,
+    "
+    brk #0
+    "
+);
+
+user_code!(
+    EL0_UDF,
+    "
+    udf #0
+    "
+);
+
+user_code!(
+    EL0_ODD,
+    "
+    adr x0, 1f
+    add x0, x0, #1
+    br x0
+1:
+    ret
+    "
+);
+
+user_code!(
+    EL0_EXIT0,
+    "
+    mov x0, #0
+    mov x8, #93
+    svc #0
+    "
+);
+
+fn run_code(code: &'static [u8], name: &str) -> Result<u32, Outcome> {
+    user::run(&Image::Code(code, DEFAULT), &[name])
+        .map_err(|e| crate::fail_fmt!("spawn {name}: {}", e.as_str()))
+}
+
+fn exited0(st: u32) -> bool {
+    vibeos::proc::wifexited(st) && vibeos::proc::wexitstatus(st) == 0
+}
+
+fn signaled(st: u32, sig: u32) -> bool {
+    vibeos::proc::wifsignaled(st) && vibeos::proc::wtermsig(st) == sig
+}
+
+/// 10,000 `getpid` at EL0; the exit `eret` breakpoint is never taken.
+pub(crate) fn test_el0_svc_eret() -> Outcome {
+    syscall_init::testing::arm_eret_breakpoint();
+    let st = match run_code(EL0_GETPID_10K, "el0_svc") {
+        Ok(s) => s,
+        Err(e) => {
+            syscall_init::testing::disarm_eret_breakpoint();
+            return e;
+        }
+    };
+    let hits = syscall_init::testing::eret_bp_hits();
+    syscall_init::testing::disarm_eret_breakpoint();
+    if !exited0(st) {
+        return crate::fail_fmt!("status {st:#x}");
+    }
+    if hits != 0 {
+        return crate::fail_fmt!("eret breakpoint hits {hits}");
+    }
+    Outcome::Ok
+}
+
+/// User SP is intact across 1,000 syscalls.
+pub(crate) fn test_el0_sp() -> Outcome {
+    match run_code(EL0_SP, "el0_sp") {
+        Ok(st) if exited0(st) => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("status {st:#x}"),
+        Err(e) => e,
+    }
+}
+
+/// A tagged load works; `write` of the same pointer is `EFAULT`.
+pub(crate) fn test_el0_tagged() -> Outcome {
+    match run_code(EL0_TAGGED, "el0_tagged") {
+        Ok(st) if exited0(st) => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("status {st:#x}"),
+        Err(e) => e,
+    }
+}
+
+/// Kernel threads load the empty TTBR0 root; a user space loads its own.
+pub(crate) fn test_el0_ttbr0() -> Outcome {
+    let empty = crate::paging_init::empty_user_root();
+    if empty == 0 {
+        return Outcome::Fail("no empty TTBR0");
+    }
+    let live =
+        crate::arch::aarch64::cpu::read_ttbr0() & vibeos::arch::aarch64::paging::DESC_ADDR_MASK;
+    if live != empty {
+        return crate::fail_fmt!("kernel ttbr0 {live:#x} != empty {empty:#x}");
+    }
+    Outcome::Ok
+}
+
+/// `copy_to_user` / `copy_from_user` round-trip a user page.
+pub(crate) fn test_el0_uaccess() -> Outcome {
+    let Ok(space) = crate::addr_space_init::create() else {
+        return Outcome::Fail("create");
+    };
+    let va = 0x4000_0000u64;
+    // SAFETY: `space` is a fresh address space that no CPU has loaded;
+    // established here.
+    if unsafe {
+        crate::addr_space_init::map_anon(
+            &space,
+            va,
+            vibeos::paging::PAGE_SIZE_4K,
+            vibeos::addr_space::UserPerms::RW,
+        )
+    }
+    .is_err()
+    {
+        return Outcome::Fail("map");
+    }
+    // SAFETY: `space.root` is a user TTBR0 `create` built; established here.
+    unsafe { crate::addr_space_init::load_cr3_u64(space.root().as_u64()) };
+    let src = *b"pan-ok";
+    let mut dst = [0u8; 6];
+    let to = crate::arch::aarch64::uaccess::with_window(|| {
+        crate::proc::uaccess_init::copy_to_user(va, &src)
+    });
+    let from = crate::arch::aarch64::uaccess::with_window(|| {
+        crate::proc::uaccess_init::copy_from_user(&mut dst, va)
+    });
+    crate::addr_space_init::load_kernel_cr3();
+    drop(space);
+    if to.is_err() || from.is_err() || dst != src {
+        return Outcome::Fail("copy");
+    }
+    Outcome::Ok
+}
+
+/// `brk`, `udf`, and an odd branch end as SIGTRAP, SIGILL, SIGBUS.
+pub(crate) fn test_el0_ring3_signals() -> Outcome {
+    let cases = [
+        (EL0_BRK, "el0_brk", vibeos::proc::SIGTRAP),
+        (EL0_UDF, "el0_udf", vibeos::proc::SIGILL),
+        (EL0_ODD, "el0_odd", vibeos::proc::SIGBUS),
+    ];
+    for (code, name, sig) in cases {
+        match run_code(code, name) {
+            Ok(st) if signaled(st, sig) => {}
+            Ok(st) => return crate::fail_fmt!("{name} status {st:#x} want sig {sig}"),
+            Err(e) => return e,
+        }
+    }
+    Outcome::Ok
+}
+
+/// A saved ELR of 2^48 kills the process with SIGSEGV; the kernel runs.
+pub(crate) fn test_el0_bad_elr() -> Outcome {
+    let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_elr"]) {
+        Ok(p) => p,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    syscall_init::testing::arm_bad_elr();
+    let st = user::wait(pid);
+    if signaled(st, vibeos::proc::SIGSEGV) {
+        Outcome::Ok
+    } else {
+        crate::fail_fmt!("status {st:#x}")
+    }
+}
+
+/// `current_tcb` is `mrs SP_EL0`.
+pub(crate) fn test_el0_sp_el0_current() -> Outcome {
+    let t = crate::arch::current_tcb();
+    let via: u64;
+    // SAFETY: SP_EL0 holds current at EL1 (ROADMAP §11.6). established here.
+    unsafe {
+        core::arch::asm!("mrs {0}, sp_el0", out(reg) via, options(nomem, nostack, preserves_flags));
+    }
+    if t as u64 == via && !t.is_null() {
+        Outcome::Ok
+    } else {
+        crate::fail_fmt!("tcb {t:p} sp_el0 {via:#x}")
+    }
+}
+
 /// Limine framebuffer over ramfb (ROADMAP §11.5).
 pub(crate) fn test_fb_limine() -> Outcome {
     if crate::fb_init::ready() {
@@ -794,4 +1042,51 @@ pub(crate) const TESTS: &[Test] = &[
     test("stalled_ap_leak", test_stalled_ap_leak).opt_in(),
     test("rtc_offset", test_rtc_offset),
     test("fb_limine", test_fb_limine),
+    test("el0_svc_eret", test_el0_svc_eret),
+    test("el0_sp", test_el0_sp),
+    test("el0_tagged", test_el0_tagged),
+    test("el0_ttbr0", test_el0_ttbr0),
+    test("el0_uaccess", test_el0_uaccess),
+    test("el0_sp_el0_current", test_el0_sp_el0_current),
+    test("el0_ring3_signals", test_el0_ring3_signals),
+    test("el0_bad_elr", test_el0_bad_elr),
+    test(
+        "el0_tls_survive",
+        crate::arch::aarch64::ktest_el0::test_el0_tls_survive,
+    )
+    .deadline(30_000),
+    test(
+        "el0_tls_yield",
+        crate::arch::aarch64::ktest_el0::test_el0_tls_yield,
+    )
+    .deadline(30_000),
+    test(
+        "el0_tls_tpidr",
+        crate::arch::aarch64::ktest_el0::test_el0_tls_tpidr,
+    )
+    .deadline(30_000),
+    test(
+        "el0_fp_no_leak",
+        crate::arch::aarch64::ktest_el0::test_el0_fp_no_leak,
+    )
+    .deadline(60_000),
+    test(
+        "el0_sve_sigill",
+        crate::arch::aarch64::ktest_el0::test_el0_sve_sigill,
+    ),
+    test("ac_clear_user_popf", skip_ac_clear_user_popf),
+    test("ist_gs_sign", skip_ist_gs_sign),
+    test("noncanonical_rip_sigsegv", skip_noncanonical_rip),
 ];
+
+fn skip_ac_clear_user_popf() -> Outcome {
+    Outcome::Skip("EL0 cannot write PAN")
+}
+
+fn skip_ist_gs_sign() -> Outcome {
+    Outcome::Skip("no swapgs")
+}
+
+fn skip_noncanonical_rip() -> Outcome {
+    Outcome::Skip("no iretq")
+}

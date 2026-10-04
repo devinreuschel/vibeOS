@@ -96,8 +96,17 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     };
     let root = space.root().as_u64();
     let mut child = *frame;
-    child.rax = 0;
-    let fs = crate::arch::current::user_tls();
+    Arch::set_ret(&mut child, 0);
+    let fs = {
+        let t = crate::arch::current_tcb();
+        if t.is_null() {
+            0
+        } else {
+            // SAFETY: invariant I9: `current_tcb` is this CPU's live TCB;
+            // established by `thread_init::switch_now`.
+            unsafe { (*t).tls_base }
+        }
+    };
     let h = match thread_init::spawn_user("user", user_thread_entry, pid, root, &child) {
         Ok(h) => h,
         Err(e) => {
@@ -131,10 +140,26 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     // The child starts with the parent's DS, ES, FS and GS (DESIGN §5.1)
     // and its x87 and SSE state (DESIGN §7.5), both before it can run.
     thread_init::set_user_segs(h.id(), crate::arch::gdt::read_user_segs());
+    thread_init::set_tls_base(h.id(), fs);
     syscall_init::fork_fp(h.id());
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
     Ok(pid as usize)
+}
+
+/// `clone` with fork semantics: `flags` must be `SIGCHLD` and `stack` 0.
+pub(super) fn sys_clone(
+    flags: u64,
+    stack: u64,
+    _parent_tid: u64,
+    _child_tid: u64,
+    _tls: u64,
+    frame: Option<&mut UserFrame>,
+) -> SysResult {
+    if flags != u64::from(vibeos::proc::SIGCHLD) || stack != 0 {
+        return Err(KError::Inval);
+    }
+    sys_fork(frame)
 }
 
 /// New references to the directories `base` names, a parent's root and
@@ -220,13 +245,16 @@ pub(super) fn sys_execve(
     // The old space's last `users` put, with no lock held and its root no
     // longer loaded or named: the teardown sleeps for its `mm` lock.
     drop(old);
-    *frame = UserFrame {
-        orig_rax: frame.orig_rax,
-        ..UserFrame::new_user(entry, rsp)
-    };
+    *frame = UserFrame::new_user(entry, rsp);
     // The psABI's initial FP state for the new image (DESIGN §7.5).
     syscall_init::exec_fp();
     thread_init::reset_user_segs();
+    let t = crate::arch::current_tcb();
+    if !t.is_null() {
+        // SAFETY: invariant I9: `current_tcb` is this CPU's live TCB;
+        // established by `thread_init::switch_now`.
+        unsafe { (*t).tls_base = fs };
+    }
     // SAFETY: `fs` is the new image's thread pointer, a canonical user
     // address the loader chose (`user_init::load_image`), as
     // `set_user_tls` requires, so the next ring-3 TLS access reaches its

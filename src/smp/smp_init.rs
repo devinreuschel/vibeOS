@@ -1062,6 +1062,9 @@ extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     // SAFETY: this CPU's `PerCpu`, IRQs masked. established here.
     unsafe { per_cpu_init::install_gs(cpu) };
     arch::aarch64::vectors::load();
+    // SAFETY: VBAR is live; `crate::syscall_init::init_ap` writes this
+    // CPU's empty TTBR0; established here.
+    unsafe { crate::syscall_init::init_ap(core::ptr::null(), 0) };
     arch::aarch64::cpu::release_debug_os_lock();
     arch::aarch64::cpu::print_exception_level();
     // SAFETY: this CPU's GIC; IRQs masked. established here.

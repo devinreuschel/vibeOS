@@ -73,6 +73,19 @@ class TestScan(unittest.TestCase):
         both = tramp + listing(f"vibeos::x::f{H}", "emms")
         self.assertEqual(len(scan(both)), 1)
 
+    def test_aarch64_save_and_load_pass(self) -> None:
+        self.assertEqual(scan(listing(f"vibeos::proc::syscall_init::fp_save{H}",
+                                      "stp\tq0, q1, [x0]", "mrs\tx1, fpcr",
+                                      "str\tw1, [x0, #512]"), aarch64=True), [])
+        self.assertEqual(scan(listing(f"vibeos::proc::syscall_init::fp_load{H}",
+                                      "ldp\tq0, q1, [x0]", "ldr\tw1, [x0, #512]",
+                                      "msr\tfpcr, x1"), aarch64=True), [])
+
+    def test_aarch64_simd_outside_allow_fails(self) -> None:
+        errs = scan(listing(f"vibeos::x::f{H}", "stp\tq0, q1, [x0]"), aarch64=True)
+        self.assertEqual(len(errs), 1, errs)
+        self.assertIn("stp", errs[0])
+
 
 class TestMain(unittest.TestCase):
     def test_no_elf_exits_zero(self) -> None:

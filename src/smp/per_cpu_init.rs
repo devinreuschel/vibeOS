@@ -347,6 +347,13 @@ pub use crate::arch::current::percpu::gs_self;
 
 pub fn set_current_thread(cpu: &mut PerCpu, tcb: *mut Tcb) {
     cpu.current = tcb;
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: `tcb` is this CPU's incoming thread, or null at early
+    // boot; `SP_EL0` is `current` at EL1 (ROADMAP §11.6). established
+    // by `thread_init::switch_now` and `thread_init::init_bootstrap`.
+    unsafe {
+        crate::arch::aarch64::percpu::write_sp_el0(tcb as u64);
+    }
 }
 
 /// The running thread's TCB: [`crate::arch::current_tcb`], one load that

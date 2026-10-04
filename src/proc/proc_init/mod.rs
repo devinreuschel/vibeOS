@@ -17,7 +17,6 @@ use vibeos::lock::RANK_SCHED;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::pid::IdIndex;
 use vibeos::proc::sig_bit as bit;
-#[cfg(target_arch = "x86_64")]
 use vibeos::proc::sig_name;
 use vibeos::proc::uaccess::user_range_ok;
 use vibeos::proc::{
@@ -26,11 +25,13 @@ use vibeos::proc::{
     fd_flags_from_open, kill_delivers, next_signal, reaper_for, wait_exited, wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
-use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult, UserFrame};
+use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult};
+
+use crate::arch::current::UserFrame;
 use vibeos::thread::ThreadId;
-use vibeos::trap::SyscallAbi;
+use vibeos::trap::{self, Ring3Action, SyscallAbi, TrapKind};
 #[cfg(target_arch = "x86_64")]
-use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, TrapKind};
+use vibeos::trap::{FpCause, FpUnit};
 #[cfg(target_arch = "x86_64")]
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
@@ -57,15 +58,15 @@ mod exit;
 mod fd;
 mod floor;
 
-#[cfg(all(not(feature = "vibefs_crash"), target_arch = "x86_64"))]
+#[cfg(not(feature = "vibefs_crash"))]
 pub(crate) use exit::wait_kernel;
 pub use exit::write_ps;
 
-use exec::{sys_brk, sys_execve, sys_fork, sys_mmap, sys_munmap};
+use exec::{sys_brk, sys_clone, sys_execve, sys_fork, sys_mmap, sys_munmap};
 use exit::{finish_exit, sys_exit, sys_kill, sys_psinfo, sys_wait4};
 use fd::{
-    addref_fds, close_all_fds, close_where, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
-    sys_lseek, sys_open, sys_read, sys_write,
+    addref_fds, close_all_fds, close_where, lookup_fd, sys_close, sys_dup, sys_dup2, sys_dup3,
+    sys_fcntl, sys_lseek, sys_open, sys_openat, sys_read, sys_write,
 };
 use floor::{signal_acts, sys_fstat, sys_getdents64, sys_nanosleep, sys_reboot};
 
@@ -400,10 +401,6 @@ fn release_pid(s: &mut Sched, t: &mut Table, pid: u32) {
 /// Set up `pid`'s slot, which `alloc_pid` took, for a new image: fds 0 to
 /// 2 on the console and the rest closed.
 #[cfg(not(feature = "vibefs_crash"))]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str) {
     let Some(p) = t.get_mut(pid) else {
         return;
@@ -464,10 +461,6 @@ pub fn start_init() {
 /// empty `argv` starts it with `argc` 1 and an empty `argv[0]`, as
 /// `execve` does.
 #[cfg(not(feature = "vibefs_crash"))]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn spawn_elf(
     path: &[u8],
     argv: &[&[u8]],
@@ -484,20 +477,22 @@ pub(crate) fn spawn_elf(
     )
 }
 
+/// The tid of `pid`'s thread, while its slot lives.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn tid_of(pid: u32) -> Option<u32> {
+    with_table(|t| t.get(pid).map(|p| p.tid.0))
+}
+
 /// Start the in-memory ELF image `elf` with `argv` as a new process with
 /// parent `ppid` (0: the kernel, which reaps it with [`wait_kernel`]).
 /// The in-guest tests' ring-3 entry (C-RING3).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, LoadError> {
     let name = argv.first().map_or("user", |a| intern_name(a));
     start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
 }
 
 #[cfg(not(feature = "vibefs_crash"))]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 fn start_loaded(
     loaded: Loaded,
     prefer: u32,
@@ -540,6 +535,7 @@ fn start_loaded(
         install_dir_refs(t, pid, refs)
     });
     put_dir_refs(left);
+    thread_init::set_tls_base(h.id(), fs);
     // `alloc_pid` took the slot for this call, and only this thread frees
     // it, so it took the space; a space left here would be named by the
     // new thread's TCB, so it is leaked rather than torn down.
@@ -596,7 +592,7 @@ pub fn syscall(frame: &mut UserFrame) -> i64 {
 }
 
 /// A syscall from kernel code, with no user frame: the in-guest tests'.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
     syscall::encode(dispatch_frame(nr, args, None))
 }
@@ -721,6 +717,32 @@ impl Handlers for Ctx<'_> {
 
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult {
         sys_psinfo(buf, len)
+    }
+
+    fn openat(&mut self, dfd: i32, filename: u64, flags: i32, mode: u16) -> SysResult {
+        sys_openat(dfd, filename, flags, mode)
+    }
+
+    fn dup3(&mut self, oldfd: u32, newfd: u32, flags: i32) -> SysResult {
+        sys_dup3(oldfd, newfd, flags)
+    }
+
+    fn clone(
+        &mut self,
+        flags: u64,
+        newsp: u64,
+        parent_tid: u64,
+        child_tid: u64,
+        tls: u64,
+    ) -> SysResult {
+        sys_clone(
+            flags,
+            newsp,
+            parent_tid,
+            child_tid,
+            tls,
+            self.frame.as_deref_mut(),
+        )
     }
 }
 
@@ -876,6 +898,9 @@ pub fn try_user_fault(f: &TrapFrame) {
     crate::arch::gs::force_kernel();
     finish_exit(wait_signaled(sig), Some(addr));
 }
+
+#[cfg(target_arch = "aarch64")]
+pub use exit::{kill_bad_elr, try_user_trap};
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]

@@ -70,17 +70,19 @@ seam-table column: `src/arch/aarch64/secondary.rs` (PSCI stub, identity TTBR0, E
 `CPU_ON`), `crates/core/src/arch/aarch64/psci.rs` (IDs and `SecondaryParam`). Bring-up
 lives in `src/smp/smp_init.rs` beside the x86 path.
 
-`vibeos-core` names a few of the reference port's pure-half items directly until a second port's
-kernel builds (ROADMAP Phase 11): `crates/core/src/arch/mod.rs` re-exports the x86_64 descriptor,
-vector, 8259, APIC and UART encodings, `UserFrame`, and the `SYS_*` numbers as `syscall_nr`.
+`vibeos-core` names a few of the reference port's pure-half items directly: `crates/core/src/arch/mod.rs`
+re-exports the x86_64 descriptor, vector, 8259, APIC and UART encodings. Host tests keep the
+x86_64 `UserFrame` and `SYS_*` numbers; the kernel picks the running port's in
+`src/arch/current.rs` (ROADMAP §11.6).
 
 ## Fenced sites
 
 Each file outside `src/arch/` and `crates/core/src/arch/` where the audit grep below still finds
 x86_64 code, all
-of it under `#[cfg(target_arch = "x86_64")]` (an item, a statement, an array element, a `use` or
-`mod` line, or a whole module). A fenced site in a shared module is a seam defect: the port that
-needs the concern moves it behind the seam (PORTABILITY.md §11.3).
+of it under `#[cfg(target_arch = "x86_64")]` or `#[cfg(target_arch = "aarch64")]` (an item, a
+statement, an array element, a `use` or `mod` line, or a whole module). A fenced site in a shared
+module is a seam defect: the port that needs the concern moves it behind the seam
+(PORTABILITY.md §11.3).
 
 | File | Items | §11.1 row | Why fenced, not moved |
 |---|---|---|---|
@@ -94,11 +96,12 @@ needs the concern moves it behind the seam (PORTABILITY.md §11.3).
 | `src/log/panic.rs` | the `x86` use line; `dump_regs`, the panic handler's register capture, `frame_fields`, `exception_halt`, `exception_vec` | Unwinder | the register dump and the x86 exception frame; ROADMAP §10.7's dump owns the file's rework |
 | `src/log/pvpanic_init.rs` | the whole module (its `mod` line in `src/log/mod.rs`) | Machine description | the ISA pvpanic device is port I/O, found through x86_64's port-I/O fw_cfg; aarch64's `pvpanic-pci` comes with that port (ROADMAP §11.7) |
 | `src/proc/syscall_init.rs` | the whole module (its `mod` line in `src/proc/mod.rs`) | Syscall instruction, user frame's layout (§5.10), numbers and argument order | the `syscall`/`sysretq` entry, its MSRs, FPU state and GS/FS bases (ROADMAP Phase 11 splits it) |
+| `src/proc/syscall_init_aarch64.rs` | the whole module (its `mod` line in `src/proc/mod.rs`) | Syscall instruction, user frame's layout (§5.10), numbers and argument order | the `svc`/`eret` entry, TTBR0, `TPIDR_EL0`, and V0–V31 save and load (ROADMAP §11.6) |
 | `src/proc/proc_init/mod.rs` | the trap-decode use line; `sig_for_vec`, `try_user_fault`'s `#PF` kill line, the `kill_line_yield` and APIC-id test hooks | Trap decode | they read the x86 frame's vector, CR2, DR6, FSW and MXCSR; a second port refines its own `TrapKind` (ROADMAP §11.3) |
 | `src/smp/smp_init.rs` | the `x86` use line; `patch_params`, `start_one`, `ap_entry` | Secondary-CPU bring-up | INIT-SIPI and the real-mode trampoline (ROADMAP Phase 11 splits the module) |
 | `src/time/time_init.rs` | the `x86` and TSC use lines; `io_wait`, `calibrate_pit`, `program_pit_ch0`, `rtc_reg`, `eoi_pit`; `init`'s CMOS write and TSC publication | Timer and cycle counter | the PIT, the CMOS RTC and TSC calibration are PC platform timers (ROADMAP Phase 11 splits them) |
 | `src/ktest/mod.rs` | `Fault.cr2` and its `catch_fault` initializer; `on_kvm` | Trap decode | the in-guest tests' `#PF` address and CPUID's hypervisor leaf |
-| `src/ktest/user.rs` | `user_code!`'s `global_asm!` | Syscall instruction, user frame's layout (§5.10), numbers and argument order | the tests' ring-3 code is x86_64 assembly |
+| `src/ktest/user.rs` | `user_code!`'s `global_asm!` | Syscall instruction, user frame's layout (§5.10), numbers and argument order | the tests' ring-3 / EL0 code is assembled per architecture |
 | `src/mm/paging_init.rs` | `physmap_slot`'s x86_64 slot; `have_1g_pages`'s CPUID `pdpe1gb` check | Page-table format and attributes | the slot constant and 1 GiB pages are this port's; the aarch64 hardware half is ROADMAP §11.2 |
 | `src/mm/ktest.rs` | `test_nx_enforcement`, `test_stack_guard` and their `TESTS` rows; `va0_probe` | Page-table format and attributes | they read the `#PF` error code and CR2, and probe VA 0 with an x86 load |
 | `src/proc/ktest/entry.rs` | the `x86` use line; `test_addrspace_map_unmap_teardown` and its `TESTS` row | TLB maintenance and address-space ids | it runs `invlpg` and opens the SMAP window by hand |

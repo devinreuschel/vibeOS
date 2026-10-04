@@ -185,7 +185,11 @@ endif
 # still applies (F147); the list repeats -D warnings anyway. Opt-level comes from
 # the profile override, since member manifests' profiles are ignored.
 # check_user_elf.py reads each ELF before the strip, which drops .symtab.
+ifeq ($(ARCH),aarch64)
+USER_TRIPLE := aarch64-unknown-linux-musl
+else
 USER_TRIPLE := x86_64-unknown-linux-musl
+endif
 USER_BIN_NAMES := $(sort $(basename $(notdir $(wildcard user/src/bin/*.rs))))
 VIBEOS_USER_BINS ?= $(USER_BIN_NAMES)
 USER_OUT := $(CURDIR)/build/user

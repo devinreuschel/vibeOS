@@ -61,6 +61,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         fpu: Fxsave::INITIAL,
         fp_cpu: None,
         user_segs: UserSegs::NULL,
+        tls_base: 0,
         syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid: 0,
         no_reclaim: AtomicU32::new(0),

@@ -73,7 +73,19 @@ pub use super::aarch64::publish_cntfrq;
 #[cfg(target_arch = "x86_64")]
 pub type UserStat = vibeos::arch::x86_64::stat::Stat;
 #[cfg(target_arch = "aarch64")]
-pub type UserStat = vibeos::arch::x86_64::stat::Stat;
+pub type UserStat = vibeos::arch::aarch64::stat::Stat;
+
+/// This build's port's user frame (DESIGN §5.10).
+#[cfg(target_arch = "x86_64")]
+pub type UserFrame = vibeos::arch::x86_64::trap::UserFrame;
+#[cfg(target_arch = "aarch64")]
+pub type UserFrame = vibeos::arch::aarch64::trap::UserFrame;
+
+/// This build's port's `SYS_*` numbers (SYSCALL.md §1).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+pub use vibeos::arch::x86_64::syscall::nr as syscall_nr;
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub use vibeos::proc::syscall_table::aarch64::nr as syscall_nr;
 
 /// The IRQ-off exclusive cell over this build's port (DESIGN §2.3).
 pub type IrqCell<T> = vibeos::cell::IrqCell<T, Arch>;

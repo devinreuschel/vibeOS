@@ -676,6 +676,17 @@ pub unsafe fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
 /// `thread_init::switch_now` establishes each, inside
 /// `with_current_switch`.
 pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
+    if !old.is_null() {
+        // SAFETY: invariant I9: `old` is the TCB this CPU is switching
+        // off; `user_tls` is still the outgoing `FS_BASE` because
+        // `switch_now` has not loaded the incoming selectors yet;
+        // established by `thread_init::switch_now`.
+        unsafe {
+            if (*old).pid != 0 {
+                (*old).tls_base = crate::arch::current::user_tls();
+            }
+        }
+    }
     // SAFETY: `switch_fpu`'s contract, which this fn's `# Safety` covers;
     // established by `thread_init::switch_now`.
     unsafe { switch_fpu(cpu, old) };
@@ -688,6 +699,9 @@ pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
         unsafe {
             set_rsp0_for(cpu, &*new);
             switch_cr3_for(cpu, &*new);
+            if (*new).pid != 0 {
+                crate::arch::current::set_user_tls((*new).tls_base);
+            }
         }
     }
 }
@@ -718,7 +732,10 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
         // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live
         // and written only by this thread or under its parent's fork before
         // `make_ready`; established by `thread_init::switch_now`.
-        unsafe { (*t).user_segs }
+        unsafe {
+            (*t).tls_base = fs_base;
+            (*t).user_segs
+        }
     };
     let segs = u64::from(segs.ds)
         | u64::from(segs.es) << 16

@@ -449,7 +449,7 @@ extern "C" fn boot_rest() -> ! {
 
     // ROADMAP §10.6: `/hello` runs as a process the kernel spawns and
     // waits for. Diagnostic only, not a `vibeOS:` marker.
-    #[cfg(all(not(feature = "vibefs_crash"), target_arch = "x86_64"))]
+    #[cfg(not(feature = "vibefs_crash"))]
     {
         use crate::serial::Serial;
         use core::fmt::Write;

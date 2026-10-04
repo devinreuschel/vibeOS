@@ -303,10 +303,6 @@ pub fn umount_at(base: Option<WalkBase>, target: &[u8]) -> Result<(), FsError> {
 )]
 /// A process's first root and working directory: two references to the
 /// namespace root, or none while the VFS has no root.
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub fn ns_refs() -> Option<(DirRef, DirRef)> {
     let api = fs_init::api();
     let root = api.dir_root().ok()?;
@@ -353,6 +349,11 @@ pub fn dentry_refs(at: PathRef) -> u32 {
 /// A new count on open file `id`, for one syscall.
 pub fn fget(id: FileId) -> Result<FileRef, FsError> {
     fs_init::api().fget(id)
+}
+
+/// The dentry open file `id` was opened through (`openat`'s dirfd).
+pub fn file_path(id: FileId) -> Result<PathRef, FsError> {
+    fs_init::api().file_path(id)
 }
 
 /// Whether open file `id` is open for a `read` (`write` false) or a

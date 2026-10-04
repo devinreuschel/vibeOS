@@ -13,6 +13,15 @@ pub fn set_user_segs(id: ThreadId, segs: UserSegs) {
     });
 }
 
+/// Give `id` its saved user TLS base before [`make_ready`].
+pub fn set_tls_base(id: ThreadId, tls: u64) {
+    with_sched(|s| {
+        if let Some(t) = s.get_mut(id) {
+            t.tls_base = tls;
+        }
+    });
+}
+
 /// `execve`'s selectors: the running thread's `Tcb.user_segs` and the live
 /// DS, ES, FS and GS become null, as Linux's `execve` leaves them (DESIGN
 /// §5.1). Before the new image's `FS_BASE` write, which a null FS load may

@@ -1,8 +1,8 @@
-//! x86_64: the entry point and the `syscall` instruction (ROADMAP §10.5).
+//! aarch64: the entry point and the `svc` instruction (ROADMAP §11.6).
 //!
-//! The kernel enters `_start` with RSP at `argc` (the psABI's initial process
-//! stack). A system call takes its number in RAX and its arguments in RDI,
-//! RSI, RDX, R10, R8 and R9, returns in RAX, and clobbers RCX and R11.
+//! The kernel enters `_start` with SP at `argc` (the psABI's initial process
+//! stack). A system call takes its number in `x8` and its arguments in
+//! `x0`–`x5`, returns in `x0`, and is `svc #0`.
 
 pub mod env;
 pub mod fp;
@@ -26,23 +26,25 @@ use core::arch::{asm, naked_asm};
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     naked_asm!(
-        "lea rax, [rip + {fp}]",
-        "fnstcw word ptr [rax]",
-        "stmxcsr dword ptr [rax + 4]",
-        "movdqa xmmword ptr [rax + 16], xmm0",
-        "xor ebp, ebp",
-        "mov rdi, rsp",
-        "and rsp, -16",
-        "call {start}",
-        "ud2",
+        "adrp x0, {fp}",
+        "add x0, x0, :lo12:{fp}",
+        "mrs x1, fpcr",
+        "str w1, [x0, #4]",
+        "mrs x1, fpsr",
+        "strh w1, [x0]",
+        "str q0, [x0, #16]",
+        "mov x29, xzr",
+        "mov x0, sp",
+        "and sp, x0, #0xfffffffffffffff0",
+        "bl {start}",
+        "brk #0",
         fp = sym fp::ENTRY_FP,
         start = sym crate::rt::start,
     )
 }
 
-/// The `e_machine` of this architecture's ELF images (`EM_X86_64`, from
-/// the System V gABI's machine list).
-pub const ELF_MACHINE: u16 = 62;
+/// The `e_machine` of this architecture's ELF images (`EM_AARCH64`).
+pub const ELF_MACHINE: u16 = 183;
 
 /// The address of [`_start`], the entry point.
 pub fn entry_address() -> usize {
@@ -58,11 +60,10 @@ pub fn entry_address() -> usize {
 #[inline(always)]
 pub unsafe fn syscall0(n: usize) -> isize {
     let ret: isize;
-    // SAFETY: the kernel's `syscall` convention, stated in the module docs
+    // SAFETY: the kernel's `svc` convention, stated in the module docs
     // here; the caller's contract covers the call's own effects.
     unsafe {
-        asm!("syscall", inlateout("rax") n as isize => ret,
-             out("rcx") _, out("r11") _, options(nostack));
+        asm!("svc #0", in("x8") n, lateout("x0") ret, options(nostack));
     }
     ret
 }
@@ -75,11 +76,10 @@ pub unsafe fn syscall0(n: usize) -> isize {
 #[inline(always)]
 pub unsafe fn syscall1(n: usize, a: usize) -> isize {
     let ret: isize;
-    // SAFETY: the kernel's `syscall` convention, stated in the module docs
+    // SAFETY: the kernel's `svc` convention, stated in the module docs
     // here; the caller's contract covers the call's own effects.
     unsafe {
-        asm!("syscall", inlateout("rax") n as isize => ret, in("rdi") a,
-             out("rcx") _, out("r11") _, options(nostack));
+        asm!("svc #0", in("x8") n, inlateout("x0") a as isize => ret, options(nostack));
     }
     ret
 }
@@ -92,11 +92,11 @@ pub unsafe fn syscall1(n: usize, a: usize) -> isize {
 #[inline(always)]
 pub unsafe fn syscall2(n: usize, a: usize, b: usize) -> isize {
     let ret: isize;
-    // SAFETY: the kernel's `syscall` convention, stated in the module docs
+    // SAFETY: the kernel's `svc` convention, stated in the module docs
     // here; the caller's contract covers the call's own effects.
     unsafe {
-        asm!("syscall", inlateout("rax") n as isize => ret, in("rdi") a, in("rsi") b,
-             out("rcx") _, out("r11") _, options(nostack));
+        asm!("svc #0", in("x8") n, inlateout("x0") a as isize => ret, in("x1") b,
+             options(nostack));
     }
     ret
 }
@@ -109,11 +109,11 @@ pub unsafe fn syscall2(n: usize, a: usize, b: usize) -> isize {
 #[inline(always)]
 pub unsafe fn syscall3(n: usize, a: usize, b: usize, c: usize) -> isize {
     let ret: isize;
-    // SAFETY: the kernel's `syscall` convention, stated in the module docs
+    // SAFETY: the kernel's `svc` convention, stated in the module docs
     // here; the caller's contract covers the call's own effects.
     unsafe {
-        asm!("syscall", inlateout("rax") n as isize => ret, in("rdi") a, in("rsi") b,
-             in("rdx") c, out("rcx") _, out("r11") _, options(nostack));
+        asm!("svc #0", in("x8") n, inlateout("x0") a as isize => ret, in("x1") b,
+             in("x2") c, options(nostack));
     }
     ret
 }
@@ -126,11 +126,11 @@ pub unsafe fn syscall3(n: usize, a: usize, b: usize, c: usize) -> isize {
 #[inline(always)]
 pub unsafe fn syscall4(n: usize, a: usize, b: usize, c: usize, d: usize) -> isize {
     let ret: isize;
-    // SAFETY: the kernel's `syscall` convention, stated in the module docs
+    // SAFETY: the kernel's `svc` convention, stated in the module docs
     // here; the caller's contract covers the call's own effects.
     unsafe {
-        asm!("syscall", inlateout("rax") n as isize => ret, in("rdi") a, in("rsi") b,
-             in("rdx") c, in("r10") d, out("rcx") _, out("r11") _, options(nostack));
+        asm!("svc #0", in("x8") n, inlateout("x0") a as isize => ret, in("x1") b,
+             in("x2") c, in("x3") d, options(nostack));
     }
     ret
 }
@@ -143,12 +143,11 @@ pub unsafe fn syscall4(n: usize, a: usize, b: usize, c: usize, d: usize) -> isiz
 #[inline(always)]
 pub unsafe fn syscall5(n: usize, a: usize, b: usize, c: usize, d: usize, e: usize) -> isize {
     let ret: isize;
-    // SAFETY: the kernel's `syscall` convention, stated in the module docs
+    // SAFETY: the kernel's `svc` convention, stated in the module docs
     // here; the caller's contract covers the call's own effects.
     unsafe {
-        asm!("syscall", inlateout("rax") n as isize => ret, in("rdi") a, in("rsi") b,
-             in("rdx") c, in("r10") d, in("r8") e, out("rcx") _, out("r11") _,
-             options(nostack));
+        asm!("svc #0", in("x8") n, inlateout("x0") a as isize => ret, in("x1") b,
+             in("x2") c, in("x3") d, in("x4") e, options(nostack));
     }
     ret
 }
@@ -169,12 +168,11 @@ pub unsafe fn syscall6(
     f: usize,
 ) -> isize {
     let ret: isize;
-    // SAFETY: the kernel's `syscall` convention, stated in the module docs
+    // SAFETY: the kernel's `svc` convention, stated in the module docs
     // here; the caller's contract covers the call's own effects.
     unsafe {
-        asm!("syscall", inlateout("rax") n as isize => ret, in("rdi") a, in("rsi") b,
-             in("rdx") c, in("r10") d, in("r8") e, in("r9") f, out("rcx") _, out("r11") _,
-             options(nostack));
+        asm!("svc #0", in("x8") n, inlateout("x0") a as isize => ret, in("x1") b,
+             in("x2") c, in("x3") d, in("x4") e, in("x5") f, options(nostack));
     }
     ret
 }

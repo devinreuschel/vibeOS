@@ -160,10 +160,6 @@ pub fn tlbi_va(va: u64) {
 ///
 /// # Safety
 /// `ttbr0` is a complete user root, or the empty ASID-0 root.
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest ASID switch (kernel_tests)")
-)]
 pub unsafe fn write_ttbr0(ttbr0: u64) {
     // SAFETY: this fn's `# Safety` (here).
     unsafe {
@@ -172,10 +168,6 @@ pub unsafe fn write_ttbr0(ttbr0: u64) {
     }
 }
 
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest ASID switch (kernel_tests)")
-)]
 pub fn read_ttbr0() -> u64 {
     let v: u64;
     // SAFETY: TTBR0_EL1 is readable at EL1 / VHE EL2; established here.
@@ -242,19 +234,13 @@ pub fn oslsr() -> u64 {
 }
 
 /// Clear PAN for a kernel access to a user VA. Restore with [`set_pan`].
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest ASID user-VA walk (kernel_tests)")
-)]
+#[cfg(feature = "kernel_tests")]
 pub fn clear_pan() {
     // SAFETY: FEAT_PAN is the ISA floor; established here.
     unsafe { asm!("msr pan, #0", options(nostack, preserves_flags)) };
 }
 
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest ASID user-VA walk (kernel_tests)")
-)]
+#[cfg(feature = "kernel_tests")]
 pub fn set_pan() {
     // SAFETY: as `clear_pan`; established here.
     unsafe { asm!("msr pan, #1", options(nostack, preserves_flags)) };
@@ -284,6 +270,27 @@ pub fn irq_enable() {
 pub fn clear_pstate_a() {
     // SAFETY: SError is taken where raised after full VBAR; established here.
     unsafe { asm!("msr daifclr, #4", options(nostack, preserves_flags)) };
+}
+
+/// Set D, A, I, and F (a return to EL0, DESIGN §5.10).
+#[inline]
+pub fn daif_set_all() {
+    // SAFETY: mask debug, SError, IRQ, and FIQ; no `nomem`. established here.
+    unsafe { asm!("msr daifset, #0xf", options(nostack, preserves_flags)) };
+}
+
+/// Clear D, A, I, and F (syscall / fault body, DESIGN §2.9 rule 3).
+#[inline]
+pub fn daif_clear_all() {
+    // SAFETY: unmask after the user frame is saved; established here.
+    unsafe { asm!("msr daifclr, #0xf", options(nostack, preserves_flags)) };
+}
+
+/// Clear D and A only (IRQ top-half from EL0, DESIGN §5.10).
+#[inline]
+pub fn daif_clear_da() {
+    // SAFETY: SError and debug unmasked; I and F stay set. established here.
+    unsafe { asm!("msr daifclr, #0xc", options(nostack, preserves_flags)) };
 }
 
 #[inline]

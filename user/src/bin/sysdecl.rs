@@ -138,6 +138,14 @@ fn setup(sys: Sys, b: &mut Bufs) -> Setup {
             Ok(fd) => Setup::Regs([fd, byte, 64, 0, 0, 0]),
             Err(_) => Setup::Failed,
         },
+        Sys::Openat => Setup::Regs([
+            (-100isize) as usize,
+            HELLO.as_ptr() as usize,
+            sys::O_RDONLY as usize,
+            0,
+            0,
+            0,
+        ]),
         Sys::Close
         | Sys::Lseek
         | Sys::Mmap
@@ -146,8 +154,10 @@ fn setup(sys: Sys, b: &mut Bufs) -> Setup {
         | Sys::SchedYield
         | Sys::Dup
         | Sys::Dup2
+        | Sys::Dup3
         | Sys::Getpid
         | Sys::Fork
+        | Sys::Clone
         | Sys::Exit
         | Sys::Kill
         | Sys::Fcntl

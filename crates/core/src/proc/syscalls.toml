@@ -1,7 +1,8 @@
 # The syscall table (ROADMAP §10.5, C-SYSTABLE). `scripts/gen_syscalls.py`
 # writes the kernel table (`syscall_table.rs`), the user stubs
-# (`user/src/arch/x86_64/sys.rs`) and the table in docs/SYSCALL.md §3 from
-# it, and `make check` fails when an output differs from what it writes.
+# (`user/src/arch/x86_64/sys.rs` and `user/src/arch/aarch64/sys.rs`) and
+# the table in docs/SYSCALL.md §3 from it, and `make check` fails when an
+# output differs from what it writes.
 # Every syscall added from here on is a row.
 #
 # Sources, as facts (DESIGN §1.5), of the baseline release docs/LINUX.md
@@ -101,10 +102,10 @@ x86_64 = 5
 aarch64 = 80
 args = [
   { name = "fd", type = "unsigned int" },
-  { name = "statbuf", type = "struct stat *", ptr = "fixed", size = 144, dir = "out", when = "after the `fd` lookup" },
+  { name = "statbuf", type = "struct stat *", ptr = "fixed", size = 144, size_aarch64 = 128, dir = "out", when = "after the `fd` lookup" },
 ]
 errors = ["EBADF", "EFAULT"]
-note = "x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1"
+note = "x86_64 144-byte `struct stat`; aarch64 128-byte asm-generic; see SYSCALL.md §3.1"
 
 [[syscall]]
 name = "lseek"
@@ -310,9 +311,55 @@ note = "at most 512 bytes a call; see SYSCALL.md §3.1"
 [[syscall]]
 name = "psinfo"
 x86_64 = 500
+aarch64 = 500
 args = [
   { name = "buf", type = "char *", ptr = "buf", len = "len", dir = "out", when = "before anything else" },
   { name = "len", type = "size_t" },
 ]
 errors = ["EFAULT"]
 note = "vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`)"
+
+[[syscall]]
+name = "openat"
+x86_64 = 257
+aarch64 = 56
+args = [
+  { name = "dfd", type = "int" },
+  { name = "filename", type = "const char *", ptr = "cstr", when = "before anything else" },
+  { name = "flags", type = "int" },
+  { name = "mode", type = "umode_t" },
+]
+errors = [
+  "EBADF", "EFAULT", "ENAMETOOLONG", "EINVAL", "ENOENT", "ENOTDIR", "EISDIR", "EEXIST", "EACCES",
+  "ELOOP", "EMFILE", "ENFILE", "ENOSPC", "ENOMEM", "EIO",
+]
+ktest = { ENOMEM = "kalloc_nomem", EIO = "fat_bad_sector_eio" }
+note = "`AT_FDCWD` is -100; `filename` at most 255 bytes"
+
+[[syscall]]
+name = "dup3"
+x86_64 = 292
+aarch64 = 24
+args = [
+  { name = "oldfd", type = "unsigned int" },
+  { name = "newfd", type = "unsigned int" },
+  { name = "flags", type = "int" },
+]
+errors = ["EBADF", "EINVAL"]
+note = "`flags` is 0 or `O_CLOEXEC`; `oldfd == newfd` is `EINVAL`"
+
+[[syscall]]
+name = "clone"
+x86_64 = 56
+aarch64 = 220
+aarch64_order = ["flags", "newsp", "parent_tid", "tls", "child_tid"]
+args = [
+  { name = "flags", type = "unsigned long" },
+  { name = "newsp", type = "unsigned long" },
+  { name = "parent_tid", type = "int *", unread = "ROADMAP §13.8" },
+  { name = "child_tid", type = "int *", unread = "ROADMAP §13.8" },
+  { name = "tls", type = "unsigned long" },
+]
+errors = ["EAGAIN", "ENOMEM", "EINVAL"]
+ktest = { ENOMEM = "fork_oom" }
+note = "fork semantics only: `flags` must be `SIGCHLD` and `newsp` 0; arm64 swaps `tls` and `child_tid`"

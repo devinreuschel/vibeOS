@@ -57,6 +57,7 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         fpu: Fxsave::INITIAL,
         fp_cpu: None,
         user_segs: UserSegs::NULL,
+        tls_base: 0,
         syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid: 0,
         no_reclaim: AtomicU32::new(0),

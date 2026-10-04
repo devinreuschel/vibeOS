@@ -25,10 +25,14 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
-# Demangled symbol -> the FP mnemonics it may use.
-ALLOW: dict[str, frozenset[str]] = {
+# Demangled symbol -> the FP mnemonics it may use, per ELF machine.
+ALLOW_X86: dict[str, frozenset[str]] = {
     "vibeos::proc::syscall_init::fp_save": frozenset({"fxsave64"}),
     "vibeos::proc::syscall_init::fp_load": frozenset({"fxrstor64"}),
+}
+ALLOW_AARCH64: dict[str, frozenset[str]] = {
+    "vibeos::proc::syscall_init::fp_save": frozenset({"stp", "str", "mrs"}),
+    "vibeos::proc::syscall_init::fp_load": frozenset({"ldp", "ldr", "msr"}),
 }
 
 # Sections that hold no 64-bit kernel code (the AP trampoline is 16- and
@@ -48,6 +52,8 @@ FP_MNEMONICS = frozenset({
 })
 
 VECTOR_REG = re.compile(r"\b(?:[xyz]mm\d+|mm[0-7]|st(?:\(\d\))?|k[0-7])\b")
+VECTOR_A64 = re.compile(r"\b(?:[vqdsbhz]\d+|p\d+|fpcr|fpsr)\b")
+EM_AARCH64 = 183
 SECTION = re.compile(r"^Disassembly of section (\S+):$")
 SYMBOL = re.compile(r"^[0-9a-f]+ <(.*)>:$")
 INSN = re.compile(r"^\s*([0-9a-f]+):\s+(\S+)(?:\s+(.*))?$")
@@ -74,19 +80,38 @@ def symbol_name(raw: str) -> str:
     return HASH.sub("", LLVM_SUFFIX.sub("", raw))
 
 
-def is_fp(mnemonic: str, operands: str) -> bool:
-    """Whether the instruction touches x87, MMX, SSE, or AVX state."""
+def is_fp(mnemonic: str, operands: str, *, aarch64: bool = False) -> bool:
+    """Whether the instruction touches FP or vector state."""
+    ops = ANGLE.sub("", operands)
+    if aarch64:
+        return bool(VECTOR_A64.search(ops))
     if mnemonic in FP_MNEMONICS:
         return True
     # Every x87 mnemonic, `fxsave`/`fxrstor` included, starts with `f`,
     # and no other x86 mnemonic does.
     if mnemonic.startswith("f"):
         return True
-    return bool(VECTOR_REG.search(ANGLE.sub("", operands)))
+    return bool(VECTOR_REG.search(ops))
 
 
-def scan(listing: Iterable[str]) -> list[str]:
+def elf_is_aarch64(path: str) -> bool:
+    """Whether `path` is an ELF with `e_machine` `EM_AARCH64`."""
+    try:
+        with open(path, "rb") as f:
+            hdr = f.read(20)
+    except OSError:
+        return False
+    return (
+        len(hdr) >= 20
+        and hdr[:4] == b"\x7fELF"
+        and hdr[18] == (EM_AARCH64 & 0xFF)
+        and hdr[19] == 0
+    )
+
+
+def scan(listing: Iterable[str], *, aarch64: bool = False) -> list[str]:
     """Each FP instruction in an `llvm-objdump -d` listing outside `ALLOW`."""
+    allow = ALLOW_AARCH64 if aarch64 else ALLOW_X86
     errors: list[str] = []
     section = ""
     sym = ""
@@ -112,19 +137,22 @@ def scan(listing: Iterable[str]) -> list[str]:
         if not rest:
             continue
         mnemonic, operands = rest[0], " ".join(rest[1:])
-        if not is_fp(mnemonic, operands):
+        if not is_fp(mnemonic, operands, aarch64=aarch64):
             continue
-        if mnemonic in ALLOW.get(sym, frozenset()):
+        if mnemonic in allow.get(sym, frozenset()):
             continue
         errors.append(f"{sym or '?'}: {addr}: {mnemonic} {operands}".rstrip())
     return errors
 
 
 def disassemble(objdump: str, elf: str) -> list[str]:
-    """The Intel-syntax disassembly of `elf`; raises on an objdump failure."""
-    out = subprocess.run(
-        [objdump, "-d", "--demangle", "--no-show-raw-insn", "-M", "intel", elf],
-        capture_output=True, text=True, check=True)
+    """The disassembly of `elf`; Intel syntax on x86_64."""
+    cmd = [objdump, "-d", "--demangle", "--no-show-raw-insn"]
+    if not elf_is_aarch64(elf):
+        cmd.append("-M")
+        cmd.append("intel")
+    cmd.append(elf)
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return out.stdout.splitlines()
 
 
@@ -144,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, subprocess.CalledProcessError) as e:
             print(f"check_kernel_fp: {elf}: objdump failed: {e}", file=sys.stderr)
             return 2
-        for err in scan(listing):
+        for err in scan(listing, aarch64=elf_is_aarch64(elf)):
             print(f"check_kernel_fp: {elf}: {err}", file=sys.stderr)
             failed = True
     if failed:

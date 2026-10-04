@@ -37,7 +37,6 @@ use crate::x86;
 use crate::{
     acpi, block, boot, console, dev, drivers, fs, irq, log, mm, proc, sched, shell, smp, sync, time,
 };
-#[cfg(target_arch = "x86_64")]
 pub(crate) mod user;
 
 const EXIT_PASS: u32 = 0x10;
@@ -647,7 +646,6 @@ pub(crate) fn quiesce_frames() {
         kva_init::free_stack(stack);
         i += 1;
     }
-    #[cfg(target_arch = "x86_64")]
     if !user::warm_processes() {
         crate::marker!("vibeOS: ktest:   warm-up: user process failed");
     }
@@ -1100,9 +1098,10 @@ pub(crate) fn quiesce() -> bool {
 /// were written against: each call takes back, or hands out, the count a
 /// [`FileRef`] carries, so their scenarios and assertions stay as they
 /// were.
-#[cfg(target_arch = "x86_64")]
 pub(crate) mod fid {
-    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, Stat};
+    #[cfg(target_arch = "x86_64")]
+    use vibeos::fs::Stat;
+    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags};
 
     use crate::file_init;
 
@@ -1110,6 +1109,7 @@ pub(crate) mod fid {
         file_init::open(path.as_bytes(), OpenFlags::from_bits(flags), mode).map(FileRef::into_raw)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn read(id: FileId, buf: &mut [u8]) -> Result<usize, FsError> {
         file_init::read(&FileRef::from_raw(id), buf)
     }
@@ -1118,6 +1118,7 @@ pub(crate) mod fid {
         file_init::write(&FileRef::from_raw(id), buf)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn seek(id: FileId, off: i64, whence: u32) -> Result<u64, FsError> {
         file_init::lseek(&FileRef::from_raw(id), off, whence)
     }
@@ -1126,23 +1127,28 @@ pub(crate) mod fid {
         file_init::close(FileRef::from_raw(id))
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn addref(id: FileId) -> Result<(), FsError> {
         file_init::addref(id)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn stat_path(path: &str) -> Result<Stat, FsError> {
         file_init::stat_path(path.as_bytes())
     }
 
     /// `lstat` of absolute `path`.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn lstat_path(path: &str) -> Result<Stat, FsError> {
         crate::fs_init::api().stat_path(None, path.as_bytes(), false)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn creat(path: &str) -> Result<(), FsError> {
         file_init::creat(path.as_bytes())
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn unlink_path(path: &str, rmdir: bool) -> Result<(), FsError> {
         if rmdir {
             file_init::rmdir(path.as_bytes())
@@ -1155,10 +1161,7 @@ pub(crate) mod fid {
 /// CPUID.01H:ECX[31] (a hypervisor is present) and leaf `0x4000_0000`
 /// naming it `KVMKVMKVM\0\0\0`.
 #[cfg(target_arch = "aarch64")]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
+#[expect(dead_code, reason = "x86 hypervisor leaf; aarch64 has none")]
 pub(crate) fn on_kvm() -> bool {
     false
 }
@@ -1178,10 +1181,6 @@ pub(crate) fn on_kvm() -> bool {
 }
 
 /// Sleep until `pred` holds, for at most `ms`.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
     let deadline = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
     while !pred() {

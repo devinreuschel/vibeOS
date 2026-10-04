@@ -116,10 +116,10 @@ trait ImageSource {
 }
 
 /// An ELF image in memory: the in-guest tests' ring-3 images (C-RING3).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 struct MemImage<'a>(&'a [u8]);
 
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 impl ImageSource for MemImage<'_> {
     fn len(&self) -> u64 {
         self.0.len() as u64
@@ -173,10 +173,25 @@ const PH_BATCH: usize = 8;
 /// Read the ELF header and program headers of `src`, in batches of
 /// [`PH_BATCH`], and check them against its length.
 #[inline(never)]
+fn native_machine() -> u16 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        elf::EM_AARCH64
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        elf::EM_X86_64
+    }
+}
+
 fn read_image<S: ImageSource>(src: &mut S) -> Result<Image, LoadError> {
     let file_len = src.len();
     let mut eh = [0u8; EHDR_SIZE];
     src.read_exact_at(0, &mut eh)?;
+    let machine = u16::from_le_bytes([eh[18], eh[19]]);
+    if machine != native_machine() {
+        return Err(LoadError::Elf(ElfError::BadMachine));
+    }
     let eh = elf::parse_ehdr(&eh, file_len).map_err(LoadError::Elf)?;
     let mut b = Builder::new(eh, file_len);
     let mut batch = [0u8; PH_BATCH * PHDR_SIZE];
@@ -287,17 +302,29 @@ fn setup_tls<S: ImageSource>(
         return Ok(0);
     };
     let too_big = LoadError::Elf(ElfError::ImageTooBig);
-    let map_len = tls.map_len().ok_or(too_big)?;
+    #[cfg(target_arch = "aarch64")]
+    let (map_len, tp, tls_start) = {
+        let map_len = tls.map_len_variant_i().ok_or(too_big)?;
+        let tls_map = stack_base.saturating_sub(map_len) & !(tls.map_align() - 1);
+        let (tp, tls_start) = tls.thread_pointer_variant_i(tls_map).ok_or(too_big)?;
+        (map_len, tp, tls_start)
+    };
+    #[cfg(target_arch = "x86_64")]
+    let (map_len, tp, tls_start) = {
+        let map_len = tls.map_len().ok_or(too_big)?;
+        let tls_map = stack_base.saturating_sub(map_len) & !(tls.map_align() - 1);
+        let (tp, tls_start) = tls.thread_pointer(tls_map).ok_or(too_big)?;
+        (map_len, tp, tls_start)
+    };
     let tls_map = stack_base.saturating_sub(map_len) & !(tls.map_align() - 1);
-    // The thread pointer is aligned as the block is (TLS variant II).
-    let (fs, tls_start) = tls.thread_pointer(tls_map).ok_or(too_big)?;
     fill_init::map(space, tls_map, map_len, UserPerms::RW).map_err(LoadError::As)?;
     fill_init::zero(space, tls_map, map_len).map_err(LoadError::Fill)?;
     if tls.filesz != 0 {
         copy_file_bytes(space, src, tls.offset, tls_start, tls.filesz)?;
     }
-    fill_init::write(space, fs, &fs.to_le_bytes()).map_err(LoadError::Fill)?;
-    Ok(fs)
+    #[cfg(target_arch = "x86_64")]
+    fill_init::write(space, tp, &tp.to_le_bytes()).map_err(LoadError::Fill)?;
+    Ok(tp)
 }
 
 fn at_random() -> [u8; 16] {
@@ -370,10 +397,6 @@ fn fill_stack(space: &mut NewSpace, img: &Image, args: &ExecArgs) -> Result<u64,
 #[cfg_attr(
     feature = "vibefs_crash",
     allow(dead_code, reason = "the vibefs_crash build spawns no process")
-)]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn exec_args(argv: &[&[u8]], envp: &[&[u8]]) -> Result<ExecArgs, LoadError> {
     let mut args = ExecArgs::new(elf::arg_space_limit(RLIMIT_STACK_DEFAULT));
@@ -465,7 +488,7 @@ pub fn load_exec(f: ExecFile, args: &ExecArgs) -> Result<Loaded, LoadError> {
 /// initial stack as given and an empty environment. Caller installs it
 /// only after this returns. The in-guest tests' loader (C-RING3), over
 /// the same `load_from`.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
     let args = exec_args(argv, &[])?;
     load_from(&mut MemImage(elf), &args)
