@@ -491,7 +491,8 @@ fn write_file(path: &str, bytes: &[u8]) -> Result<(), FsError> {
     rc.and(closed)
 }
 
-fn unlink_quiet(path: &str) -> Result<(), FsError> {
+/// Unlink `path`; a missing file is not an error.
+pub(super) fn unlink_quiet(path: &str) -> Result<(), FsError> {
     match fid::unlink_path(path, false) {
         Ok(()) | Err(FsError::NotFound) => Ok(()),
         Err(e) => Err(e),
@@ -730,6 +731,9 @@ const XTMP: &str = "/tmp/xtmp";
 /// 16 KiB stack budget (DESIGN §4.5), and the image runs (exit 99).
 pub(crate) fn test_exec_from_tmp() -> Outcome {
     if let Err(e) = write_file_4k(XTMP, &user::elf_bytes(&Image::Code(EXIT99, DEFAULT))) {
+        if let Err(u) = unlink_quiet(XTMP) {
+            return crate::fail_fmt!("write {XTMP}: {}; unlink: {}", e.as_str(), u.as_str());
+        }
         return crate::fail_fmt!("write {XTMP}: {}", e.as_str());
     }
     let spawned = user::spawn(&Image::Code(EXEC_XTMP, DEFAULT), &["exec_tmp"]);

@@ -131,6 +131,32 @@ fn dir_has(path: &str, want: &[u8]) -> bool {
     r.is_ok() && hit
 }
 
+/// The file [`test_pseudo_fs`] writes on `/tmp`, and unlinks after.
+const TMP_F: &str = "/tmp/f";
+
+/// Make [`TMP_F`], write `ok` to it, and read that back.
+fn tmp_round_trip() -> Result<(), &'static str> {
+    if fid::creat(TMP_F).is_err() {
+        return Err("tmp creat");
+    }
+    let Ok(t) = fid::open(TMP_F, O_RDWR | O_CREAT, 0o644) else {
+        return Err("tmp open");
+    };
+    let mut buf = [0u8; 4];
+    let r = if fid::write(t, b"ok").ok() != Some(2) {
+        Err("tmp write")
+    } else if fid::seek(t, 0, vibeos::fs::SEEK_SET).is_err() {
+        Err("tmp seek")
+    } else if fid::read(t, &mut buf).ok() != Some(2) || &buf[..2] != b"ok" {
+        Err("tmp read")
+    } else {
+        Ok(())
+    };
+    let closed = fid::close(t);
+    r?;
+    closed.map_err(|_| "tmp close")
+}
+
 pub(crate) fn test_pseudo_fs() -> Outcome {
     if !fs_init::live() {
         return Outcome::Fail("not live");
@@ -192,26 +218,14 @@ pub(crate) fn test_pseudo_fs() -> Outcome {
         return Outcome::Fail("read rand");
     }
     let _ = fid::close(r);
-    if fid::creat("/tmp/f").is_err() {
-        return Outcome::Fail("tmp creat");
+    let tmp = tmp_round_trip();
+    let unlinked = unlink_quiet(TMP_F);
+    if let Err(why) = tmp {
+        return Outcome::Fail(why);
     }
-    let Ok(t) = fid::open("/tmp/f", O_RDWR | O_CREAT, 0o644) else {
-        return Outcome::Fail("tmp open");
-    };
-    if fid::write(t, b"ok").ok() != Some(2) {
-        let _ = fid::close(t);
-        return Outcome::Fail("tmp write");
+    if unlinked.is_err() {
+        return Outcome::Fail("tmp unlink");
     }
-    if fid::seek(t, 0, vibeos::fs::SEEK_SET).is_err() {
-        let _ = fid::close(t);
-        return Outcome::Fail("tmp seek");
-    }
-    buf = [0u8; 4];
-    if fid::read(t, &mut buf).ok() != Some(2) || &buf[..2] != b"ok" {
-        let _ = fid::close(t);
-        return Outcome::Fail("tmp read");
-    }
-    let _ = fid::close(t);
     if !dir_has("/proc", b"1") || !dir_has("/proc", b"self") {
         return Outcome::Fail("proc stubs");
     }

@@ -163,7 +163,13 @@ its spawner's `irq_nest`, starts with IF on too. A test that needs interrupts of
 `InterruptGuard`: the cooperative `switch_to` and `yield_now` tests, and every `arch::catch` window
 that can longjmp out of an interrupt gate, since the skipped `iretq` would leave IF off. After each
 test the registry fails it if IF is off or `irq_nest` is not 0, and restores both. `ktest_context`
-checks the registry's context and a `spawn_here` worker's.
+checks the registry's context and a `spawn_here` worker's. It also fails a test that returns with
+more of `/tmp`'s backing pages in use than it found (`KernFs::tmp_pages_used`), with `left <n> /tmp
+pages in use, <m> before:` and each file that holds pages as `<name>=<pages>`: `/tmp` is one store of
+`TMPFS_BACK_PAGES` (64 KiB) for the whole boot, so pages a test keeps run a later test, or a later
+pass of `vibeos.ktest_repeat=`, out of room. A test, and a user program it runs, unlinks or empties
+each `/tmp` file it writes whatever its outcome; a user program, which has no `unlink` yet, empties
+one with `vibeos_user::cmd::discard` (`O_TRUNC`).
 
 Each subsystem's `src/<subsystem>/ktest.rs` exports its rows as `pub(crate) const TESTS: &[Test]`,
 and `src/ktest/mod.rs` runs the lists in the order of its `GROUPS` (DESIGN §1.3). A list left out
