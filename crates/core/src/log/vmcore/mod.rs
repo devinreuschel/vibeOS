@@ -254,11 +254,30 @@ pub fn ehdr(b: &[u8]) -> Result<Ehdr, VmError> {
     Ok(h)
 }
 
+/// `count` entries of `size` bytes at `off` lie inside `b`. A reader that
+/// holds the whole file checks its tables with this: each lookup walks a
+/// table's count, so a count the file does not hold would cost every
+/// lookup up to 65,535 failed parses. [`ehdr`] cannot, since the core
+/// tool reads a streamed core's header alone.
+fn table_fits(b: &[u8], off: u64, count: u16, size: usize) -> Result<(), VmError> {
+    if count == 0 {
+        return Ok(());
+    }
+    let len = u64::from(count)
+        .checked_mul(offset(size))
+        .ok_or(VmError::Truncated)?;
+    let len = usize::try_from(len).map_err(|_| VmError::Truncated)?;
+    bytes_at(b, off, len).map(|_| ())
+}
+
 /// A core's ELF header: [`ehdr`] with `ET_CORE`.
 pub fn core_header(b: &[u8]) -> Result<Ehdr, VmError> {
     let h = ehdr(b)?;
     if h.kind != ET_CORE {
         return Err(VmError::NotCore);
+    }
+    if h.phnum > crate::limits::MAX_CORE_PHDRS {
+        return Err(VmError::TooManySegments);
     }
     Ok(h)
 }
@@ -576,6 +595,8 @@ impl<'a> KernelElf<'a> {
         if hdr.kind == ET_CORE || hdr.shnum == 0 {
             return Err(VmError::NotExec);
         }
+        table_fits(bytes, hdr.phoff, hdr.phnum, PHDR_SIZE)?;
+        table_fits(bytes, hdr.shoff, hdr.shnum, SHDR_SIZE)?;
         Ok(Self { bytes, hdr })
     }
 
@@ -691,10 +712,9 @@ pub struct SliceCore<'a> {
 
 impl<'a> SliceCore<'a> {
     pub fn new(bytes: &'a [u8]) -> Result<Self, VmError> {
-        Ok(Self {
-            bytes,
-            hdr: core_header(bytes)?,
-        })
+        let hdr = core_header(bytes)?;
+        table_fits(bytes, hdr.phoff, hdr.phnum, PHDR_SIZE)?;
+        Ok(Self { bytes, hdr })
     }
 
     pub fn phdrs(&self) -> impl Iterator<Item = Phdr> + '_ {

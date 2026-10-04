@@ -243,9 +243,9 @@ the row does not allow it, and needs `EFAULT` from each.
 
 | x86_64 | aarch64 | name | arity | arguments | pointer arguments | errors | notes |
 |---:|---:|------|------:|-----------|-------------------|--------|-------|
-| 0 | 63 | `read` | 3 | `unsigned int fd`, `char *buf`, `size_t count` | `buf`: out, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EISDIR`, `EAGAIN` (`dev_random_eagain`), `EIO` (`vblk_bad_sector`) | — |
-| 1 | 64 | `write` | 3 | `unsigned int fd`, `const char *buf`, `size_t count` | `buf`: in, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EINVAL`, `EFBIG`, `ENOSPC`, `EIO` (`vblk_bad_sector`) | — |
-| 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `EACCES`, `ELOOP`, `EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM` (`kalloc_nomem`), `EIO` (`vblk_bad_sector`) | `pathname` at most 255 bytes |
+| 0 | 63 | `read` | 3 | `unsigned int fd`, `char *buf`, `size_t count` | `buf`: out, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EISDIR`, `EAGAIN` (`dev_random_eagain`), `EIO` (`fat_bad_sector_eio`) | — |
+| 1 | 64 | `write` | 3 | `unsigned int fd`, `const char *buf`, `size_t count` | `buf`: in, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EINVAL`, `EFBIG`, `ENOSPC`, `EIO` (`fat_bad_sector_eio`) | — |
+| 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `EACCES`, `ELOOP`, `EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM` (`kalloc_nomem`), `EIO` (`fat_bad_sector_eio`) | `pathname` at most 255 bytes |
 | 3 | 57 | `close` | 1 | `unsigned int fd` | — | `EBADF` | — |
 | 5 | 80 | `fstat` | 2 | `unsigned int fd`, `struct stat *statbuf` | `statbuf`: out, 144 bytes, after the `fd` lookup | `EBADF`, `EFAULT` | x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1 |
 | 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | `EBADF`, `ESPIPE`, `EINVAL`, `ENXIO` | — |
@@ -258,7 +258,7 @@ the row does not allow it, and needs `EFAULT` from each.
 | 35 | 101 | `nanosleep` | 2 | `const struct __kernel_timespec *rqtp`, `struct __kernel_timespec *rmtp` | `rqtp`: in, 16 bytes, before anything else; `rmtp`: not read (ROADMAP §13.8) | `EFAULT`, `EINVAL` | `CLOCK_MONOTONIC`, rounded up to the tick; see SYSCALL.md §3.1 |
 | 39 | 172 | `getpid` | 0 | — | — | — | `0` if the caller is not a process |
 | 57 | — | `fork` | 0 | — | — | `EAGAIN`, `ENOMEM` (`fork_oom`) | full address-space copy; the child returns 0 |
-| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname` resolves to a regular file, as Linux opens it first; `envp`: C string vector, may be NULL, after `argv` | `EFAULT`, `ENAMETOOLONG`, `ENOENT`, `ENOTDIR`, `EACCES`, `ELOOP`, `ENFILE`, `E2BIG`, `ENOEXEC`, `ENOMEM`, `EIO` (`vblk_bad_sector`) | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
+| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname` resolves to a regular file, as Linux opens it first; `envp`: C string vector, may be NULL, after `argv` | `EFAULT`, `ENAMETOOLONG`, `ENOENT`, `ENOTDIR`, `EACCES`, `ELOOP`, `ENFILE`, `E2BIG`, `ENOEXEC`, `ENOMEM`, `EIO` (`fat_bad_sector_eio`) | `argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1) |
 | 60 | 93 | `exit` | 1 | `int status` | — | — | the low 8 bits of `status` |
 | 61 | 260 | `wait4` | 4 | `pid_t pid`, `int *wstatus`, `int options`, `struct rusage *rusage` | `wstatus`: out, 4 bytes, may be NULL, after a child is reaped; `rusage`: not read (ROADMAP §13.7) | `ECHILD`, `EFAULT` | — |
 | 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | `EINVAL`, `ESRCH` | default actions only |
@@ -559,12 +559,12 @@ A user `#PF`, `#GP`, or `#UD` from the program itself is a process kill
 (DESIGN §5.2 CPL split), not `EFAULT`.
 
 **Kernel survival:** no user program may panic or halt the kernel (DESIGN
-§2.5 for ring-3 exceptions, AGENTS.md rule 4 for syscall paths). The code
-does not meet this yet:
-
-- a device or keyboard interrupt taken in ring 3 runs with the user GS
-  base and halts (F004; ROADMAP §10.6)
-- the exit-path faults in §1 (F001, F007; ROADMAP §10.6)
+§2.5 for ring-3 exceptions, AGENTS.md rule 4 for syscall paths). An
+interrupt taken in ring 3, a device-pool or keyboard interrupt included,
+enters through a stub that `arch/x86_64/idt.rs` generates, which swaps to
+the kernel GS base by the saved CS.RPL (DESIGN §5.10 rules 1 and 2); and on
+the exit paths of §1 a non-canonical saved RIP, or a `#GP`, `#NP`, or `#SS`
+on a return-to-user `iretq`, kills the process with `SIGSEGV`.
 
 ---
 

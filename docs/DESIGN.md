@@ -129,7 +129,9 @@ that sets it:
   `per_cpu_init::init_bsp` before it marks the per-CPU area live.
 - `serial::set_capture_hook` (the log ring's serial capture), set by `log_init::init` right after
   `Serial::init`, before the first marker.
-- Planned (ROADMAP §10.7): `serial::raw::set_stop_hook`, set by the stop primitive.
+- `serial::raw::set_stop_hook` (the stop primitive's poll stop, `ipi_init::stop_hook`, which a serial
+  write or log append on a CPU other than the dump's owner runs once `HALTING` is set), set by
+  `ipi_init::init` before the first AP starts (§2.5 step 1).
 - `sync_init::set_spin_poll` (`SpinMutex::lock`'s spin runs `service_incoming`), set by
   `ipi_init::init` before the first AP starts (§7.9).
 - `idt::set_intercept_hook` (the exception intercept for vectors 0 to 31), set by `catch::init` right
@@ -192,7 +194,7 @@ children, need no row.
 | boot | `boot/{mod,cmdline}.rs` | `boot/{mod,fw_cfg_init}.rs` (`BootInfo`, Limine requests, fw_cfg) |
 | arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,stat,syscall,trap,uart,vectors}.rs`, `arch/aarch64/{mod,paging,sysreg,tlb,trap}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,boot,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,power,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S`, `arch/aarch64/{mod,boot,catch,cpu,gdt,gic,gs,idt,ipi,irqchip,ktest,mmu,percpu,pic,power,switch,timer,uaccess,vectors}.rs` |
 | mm | `mm/{mod,asid,pmm,paging,paging_tests,physmap,heap,kva}.rs`, `mm/pmm/{kani_proofs,run_tests}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
-| time | `time/mod.rs` | `time/{mod,time_init}.rs` |
+| time | `time/{mod,reload}.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
 | machine | `machine/{mod,fdt}.rs` | `machine/{mod,machine_init}.rs` |
 | irq | `irq/{mod,ipi,stop,chip,its,gic}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |

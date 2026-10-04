@@ -60,7 +60,7 @@ pub(crate) use table::table_root;
 #[cfg(feature = "kernel_tests")]
 pub(crate) use table::table_usage;
 #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
-pub(crate) use table::timeouts_capacity;
+pub(crate) use table::{RunTsc, run_tsc_snapshot, timeouts_capacity};
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
 pub use user::{reset_user_segs, set_user_segs};
@@ -611,6 +611,10 @@ fn schedule_inner(from_irq: bool) {
     };
 
     if old_id == new_id || old_ptr.is_null() || new_ptr.is_null() {
+        // Nothing else to run: a new quantum, so the next tick does not
+        // preempt again at once.
+        let now = time_init::read_tsc();
+        per_cpu_init::with_current(|cpu| cpu.quantum_tsc = now);
         return;
     }
     assert!(!new_ptr.is_null(), "schedule: next vanished");
@@ -648,6 +652,7 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
         cpu.tail_prev = old_ptr;
         let delta = now.wrapping_sub(cpu.slice_tsc);
         cpu.slice_tsc = now;
+        cpu.quantum_tsc = now;
         // Relaxed: only this CPU stores its `switches`; pairs with nothing.
         let switches = cpu.remote.switches.load(Ordering::Relaxed);
         // Relaxed: as the load; pairs with nothing.

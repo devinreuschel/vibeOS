@@ -1039,7 +1039,9 @@ class TestDeadlineReader(unittest.TestCase):
             w = -1
             reader = DeadlineReader(r, time.monotonic() + 1.0)
             kind, payload = reader.next_event()
-            self.assertEqual(kind, "line")
+            # A kill can cut a line short (`vibeOS: vibefs: wr ` with no N),
+            # so the tail is a partial: kept for reports, never a line.
+            self.assertEqual(kind, "partial")
             self.assertEqual(payload, "partial-without-newline")
             kind2, _ = reader.next_event()
             self.assertEqual(kind2, "eof")
@@ -2489,6 +2491,7 @@ class TestDevicePresets(unittest.TestCase):
                     "echo 'vibeOS: vibefs: wr 1'\n"
                     "sleep 0.05\n"
                     "echo 'vibeOS: vibefs: wr 2'\n"
+                    "printf 'vibeOS: vibefs: wr '\n"
                     "exec sleep 30\n"
                 )
             os.chmod(qemu, 0o755)
@@ -2510,6 +2513,9 @@ class TestDevicePresets(unittest.TestCase):
                     qmp=FakeQmp([]),
                 )
         self.assertIn("vibeOS: vibefs: wr 2", r.lines)
+        # The kill cut the third `wr` short: a partial, which no check reads.
+        self.assertEqual(r.partial, ["vibeOS: vibefs: wr "])
+        self.assertNotIn("vibeOS: vibefs: wr ", r.lines)
         self.assertEqual(r.exit_code, -signal.SIGKILL)
 
     def test_run_until_exit_expect_fail_reads_on(self) -> None:

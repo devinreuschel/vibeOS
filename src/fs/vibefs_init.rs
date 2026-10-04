@@ -20,8 +20,8 @@ use vibeos::block::BlockError;
 use vibeos::block::blockdev::BlockRef;
 use vibeos::dev::Instance;
 use vibeos::fs::{
-    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, MAX_PATH,
-    Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFMT, WalkBase,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, Key, Name, OpCx,
+    RenameSeen, S_IFDIR_MODE, S_IFMT, WalkBase,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -40,8 +40,6 @@ fn vibefs_io_err(e: BlockError) -> Error {
         _ => Error::Io,
     }
 }
-const MNT_MAX: usize = 2;
-const MNT_PATH: usize = 64;
 pub const IMAGE_BYTES: usize = 256 * 1024;
 
 const _: () = assert!(IMAGE_BYTES / BLOCK <= vibeos::vibefs::MAX_BLOCKS);
@@ -73,25 +71,6 @@ pub(crate) struct VibeVolume {
 
 /// A fresh volume's state, copied into each new instance in place.
 static VOL_INIT: Vol = Vol::new();
-
-struct Mnt {
-    used: bool,
-    vol: Option<Instance>,
-    len: u8,
-    path: [u8; MNT_PATH],
-}
-
-impl Mnt {
-    const EMPTY: Self = Self {
-        used: false,
-        vol: None,
-        len: 0,
-        path: [0; MNT_PATH],
-    };
-}
-
-static MNTS: SpinMutex<[Mnt; MNT_MAX]> =
-    SpinMutex::with_rank([Mnt::EMPTY, Mnt::EMPTY], RANK_DEVICE);
 
 /// Run `f` on memory image `img`, holding its lock.
 fn with_image<R>(img: &Image, f: impl FnOnce(&mut [u8; IMAGE_BYTES]) -> R) -> R {
@@ -487,26 +466,16 @@ impl FileSystem for VibeFs {
         vibefs::MAX_FILE_SIZE
     }
 
-    /// Record the superblock, and `at` and the volume in the mount table
-    /// (`MNTS`).
-    fn on_mount(&self, cx: &mut OpCx<'_>, at: &[u8]) {
+    /// Record the superblock the volume is mounted as. The superblock and
+    /// the device's block entry own the volume (DESIGN §12.1);
+    /// `vibefs_init` keeps no list of mounts. The superblock's last unmount
+    /// syncs it and releases its volume through [`VibeOps`] (`Vfs`'s
+    /// unmount runs `sync`, then `release`).
+    fn on_mount(&self, cx: &mut OpCx<'_>, _at: &[u8]) {
         if let Ok(v) = vol_of(cx) {
             // Release: pairs with nothing; nothing reads it yet.
             v.sb.store(cx.sb, Ordering::Release);
         }
-        if register_mnt(cx.vol.cloned(), at).is_err() {
-            crate::klog!(
-                vibeos::log::Level::Warn,
-                "vibeOS: vibefs: no mount-table slot for a mount"
-            );
-        }
-    }
-
-    /// Drop `at`'s mount-table entry. The superblock's last unmount then
-    /// syncs it and releases its volume through [`VibeOps`] (`Vfs`'s
-    /// unmount runs `sync`, then `release`).
-    fn on_umount(&self, _cx: &mut OpCx<'_>, at: &[u8], _last: bool) {
-        drop(unregister_mnt(at));
     }
 }
 
@@ -547,46 +516,16 @@ pub fn df(vol: &VibeVolume) -> Result<(FsType, u64, u64, u32), FsError> {
     })
 }
 
-fn register_mnt(vol: Option<Instance>, p: &[u8]) -> Result<(), FsError> {
-    if p.is_empty() || p.len() > MNT_PATH {
-        return Err(FsError::NameTooLong);
-    }
-    let mut g = MNTS.lock();
-    let m = g.iter_mut().find(|m| !m.used).ok_or(FsError::NoSpace)?;
-    m.used = true;
-    m.vol = vol;
-    m.len = p.len() as u8;
-    m.path[..p.len()].copy_from_slice(p);
-    Ok(())
-}
-
-/// Plant commit defect `p` in the volume mounted at `at`, found by its
-/// mount-table entry as `unregister_mnt` finds it at umount (test-only: the
+/// Plant commit defect `p` in the volume mounted at `at`, found through
+/// the superblock that shows it (`fs_init::volume_at`; test-only: the
 /// `vibefs_crash` build, docs/VIBEFS.md §12).
 #[cfg(feature = "vibefs_crash")]
 pub(crate) fn set_plant(at: &[u8], p: vibefs::Plant) -> Result<(), FsError> {
-    let vol = {
-        let g = MNTS.lock();
-        g.iter()
-            .find(|m| m.used && m.path.get(..m.len as usize) == Some(at))
-            .and_then(|m| m.vol.clone())
-    };
-    let vol = vol.ok_or(FsError::NotFound)?;
+    let vol = fs_init::volume_at(at)?;
     with_slot(as_vibe(&vol)?, |v, _| {
         v.set_plant(p);
         Ok(())
     })
-}
-
-/// Take `p`'s mount-table entry out; the caller drops its volume reference unlocked.
-fn unregister_mnt(p: &[u8]) -> Option<Instance> {
-    let mut g = MNTS.lock();
-    let m = g
-        .iter_mut()
-        .find(|m| m.used && m.path.get(..m.len as usize) == Some(p))?;
-    m.used = false;
-    m.len = 0;
-    m.vol.take()
 }
 
 /// Retire volume `vol`: its `used` flag clears under its lock, waiting
@@ -705,7 +644,3 @@ pub fn mount_dev_at(base: Option<WalkBase>, name: &str, at: &str, ro: bool) -> R
         }
     }
 }
-
-const _: () = {
-    assert!(MAX_PATH >= MNT_PATH);
-};

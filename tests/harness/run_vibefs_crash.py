@@ -267,6 +267,12 @@ def main() -> int:
         default="",
         help="comma-separated vibeos.crash_plant= values; each must be caught",
     )
+    ap.add_argument(
+        "--rounds",
+        type=int,
+        default=None,
+        help="rounds when VIBEOS_CRASH_ROUNDS is unset (default 8); each CI shard runs 4",
+    )
     args = ap.parse_args()
     plants = [p for p in args.plants.split(",") if p]
     env = env_config(default_iso=default_iso("vibefs-crash"), default_timeout=BOOT_ALLOWANCE_S)
@@ -277,7 +283,7 @@ def main() -> int:
         nbd=env_str("VIBEOS_NBD_CACHE", "nbd-cache"),
         cat=env_str("VIBEOS_VIBEFS_CAT", "vibefs-cat"),
     )
-    rounds = env_int("VIBEOS_CRASH_ROUNDS", 8)
+    rounds = env_int("VIBEOS_CRASH_ROUNDS", args.rounds if args.rounds is not None else 8)
     seed = env_int("VIBEOS_CRASH_SEED", int(time.time()) & 0xFFFFFFFF)
     rng = random.Random(seed)
     print(f"[vibefs-crash] seed={seed} rounds={rounds}", file=sys.stderr)

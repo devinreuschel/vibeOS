@@ -173,6 +173,13 @@ class RunResult:
     # The core tool's report on the run's guest core (`core_report`), or
     # the line that says why there is none; empty when no core was taken.
     report: str = ""
+    # Serial text a deadline, kill or exit cut short of its newline: for
+    # reports only, so no check reads a truncated line as a whole one.
+    partial: list[str] = field(default_factory=list)
+
+    def tail(self) -> str:
+        """`serial_tail` of the run's lines and any partial one."""
+        return serial_tail(self.lines + self.partial)
 
 
 def serial_tail(lines: list[str], n: int = 40) -> str:
@@ -186,7 +193,7 @@ def serial_tail(lines: list[str], n: int = 40) -> str:
 
 def failure_tail(result: RunResult) -> str:
     """A failed run's tail: the serial tail, then the core tool's report."""
-    return serial_tail(result.lines) + result.report
+    return result.tail() + result.report
 
 
 # The core tool (ROADMAP §10.7, TESTING.md §8.3): `make vmcore` builds it for
@@ -427,7 +434,10 @@ class DeadlineReader:
       ("line", str)    - one line of serial output, without trailing \\n
       ("partial", str) - the deadline arrived with bytes buffered but no
                          newline: the line the guest was writing, which often
-                         shows where it stopped; ("timeout", "") follows
+                         shows where it stopped; ("timeout", "") follows;
+                         or the pipe closed after bytes with no newline
+                         (a kill or exit cut the line short); ("eof", "")
+                         follows
       ("timeout", "")  - the deadline arrived
       ("eof", "")      - the pipe closed
       ("idle", "")     - with `idle_s`: no complete line within `idle_s` of
@@ -485,13 +495,14 @@ class DeadlineReader:
             except BlockingIOError:
                 continue
             if not chunk:
-                # Pipe closed. Flush anything trailing without a newline.
+                # Pipe closed. Flush anything trailing without a newline: a
+                # line a kill or an exit cut short, never a line to act on.
                 if self._buf:
                     tail = bytes(self._buf).rstrip(b"\r").decode(
                         "utf-8", errors="replace"
                     )
                     self._buf.clear()
-                    return ("line", tail)
+                    return ("partial", tail)
                 return ("eof", "")
 
             self._buf.extend(chunk)
@@ -647,7 +658,7 @@ def _qemu_report(result: RunResult, *, exited: bool) -> str:
     err = result.stderr.splitlines()[-20:]
     if exited or err:
         out += "\n--- qemu stderr ---\n" + ("\n".join(err) if err else "(no stderr)")
-    return out + serial_tail(result.lines)
+    return out + result.tail()
 
 
 def _reap(src: LineSource) -> int | None:
@@ -1603,7 +1614,7 @@ def run_qemu_and_check(
             if marker_idx < len(markers):
                 fail(
                     f"missing marker {markers[marker_idx].name!r} before the first "
-                    f"panic signature: {text!r}{serial_tail(result.lines)}"
+                    f"panic signature: {text!r}{result.tail()}"
                 )
         if dump_at is None:
             return False
@@ -1736,7 +1747,7 @@ def run_qemu_and_check(
             if not panic_done:
                 fail(f"dump ended before {PANIC_DONE!r}{report()}")
             if banners != 1:
-                fail(f"expected one dump banner, saw {banners}{serial_tail(result.lines)}")
+                fail(f"expected one dump banner, saw {banners}{result.tail()}")
             if session.ended != "pass":
                 fail(f"panic run ended without QMP GUEST_PANICKED{report()}")
             try:
@@ -1901,7 +1912,7 @@ def run_qemu_inject_mce(
                     result,
                     argv,
                     f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} "
-                    f"markers; missing {missing!r}{serial_tail(result.lines)}",
+                    f"markers; missing {missing!r}{result.tail()}",
                 )
             if kind == "eof":
                 result.exit_code = _reap(src)
@@ -1917,7 +1928,7 @@ def run_qemu_inject_mce(
             why = run_failure(line, stream, panic_signatures)
             if why is not None:
                 result.panic_line = line
-                msg = f"{why[0]} in: {why[1]!r}{serial_tail(result.lines)}"
+                msg = f"{why[0]} in: {why[1]!r}{result.tail()}"
                 session.fail(src, result, argv, msg)
             if markers[marker_idx].matches(line):
                 result.matched.append(markers[marker_idx].name)
@@ -2479,7 +2490,7 @@ def _exit_report(result: RunResult) -> str:
     (`run_qemu_until_exit` merges it) (ROADMAP §10.2)."""
     return (
         f" after {len(result.lines)} lines; QEMU exited with status {result.exit_code}"
-        f"{serial_tail(result.lines)}"
+        f"{result.tail()}"
     )
 
 
@@ -2754,7 +2765,7 @@ def run_qemu_until_exit(
         if d and d.end != "pass":
             session.settle(src, result, d, argv, why=msg)
         if msg is not None:
-            session.fail(src, result, argv, f"{msg}{serial_tail(result.lines)}")
+            session.fail(src, result, argv, f"{msg}{result.tail()}")
         if d.end == "pass":
             session.settle(src, result, d, argv)
 
@@ -2779,7 +2790,7 @@ def run_qemu_until_exit(
                     while True:
                         kind, line = reader.next_event()
                         if kind == "partial":
-                            result.lines.append(line)
+                            result.partial.append(line)
                             continue
                         if kind == "idle":
                             continue
@@ -2791,12 +2802,12 @@ def run_qemu_until_exit(
                     why = f"{progress.hung_message()}; {len(result.lines)} lines"
                 else:
                     why = f"timed out after {timeout_s}s; {len(result.lines)} lines"
-                session.timeout(src, result, argv, f"{why}{serial_tail(result.lines)}")
+                session.timeout(src, result, argv, f"{why}{result.tail()}")
             if kind == "eof":
                 break
             if kind == "partial":
                 # Kept for the report; never a line to act on.
-                result.lines.append(line)
+                result.partial.append(line)
                 continue
             take(line)
             if session.ended == "pass":

@@ -25,7 +25,7 @@ use vibeos::dev::Instance;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, Node, SEC};
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, InodeWords, Key,
-    MAX_PATH, Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFREG_MODE, WalkBase,
+    Name, OpCx, RenameSeen, S_IFDIR_MODE, S_IFREG_MODE, WalkBase,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -43,8 +43,6 @@ fn fat_io_err(e: BlockError) -> FatError {
         _ => FatError::Io,
     }
 }
-const MNT_MAX: usize = 2;
-const MNT_PATH: usize = 64;
 
 enum Media {
     Initrd,
@@ -71,24 +69,6 @@ pub(crate) struct FatVolume {
 /// A fresh volume's state, copied into each new instance in place.
 static FAT_VOL_INIT: FatVol = FatVol::new();
 
-struct Mnt {
-    used: bool,
-    vol: Option<Instance>,
-    len: u8,
-    path: [u8; MNT_PATH],
-}
-
-impl Mnt {
-    const EMPTY: Self = Self {
-        used: false,
-        vol: None,
-        len: 0,
-        path: [0; MNT_PATH],
-    };
-}
-
-static MNTS: SpinMutex<[Mnt; MNT_MAX]> =
-    SpinMutex::with_rank([Mnt::EMPTY, Mnt::EMPTY], RANK_DEVICE);
 /// The initrd module's bytes in the physmap, set once by [`init`]. Whoever
 /// holds this lock is the one accessor of those bytes (`Io`'s
 /// `Media::Initrd` arms); `None` while there is no initrd.
@@ -624,26 +604,16 @@ impl FileSystem for FatFs {
         })
     }
 
-    /// Record the superblock, and `at` and the volume in the mount table
-    /// (`MNTS`).
-    fn on_mount(&self, cx: &mut OpCx<'_>, at: &[u8]) {
+    /// Record the superblock the volume is mounted as. The superblock and
+    /// the device's block entry own the volume (DESIGN §12.1); `fat_init`
+    /// keeps no list of mounts. The superblock's last unmount syncs it and
+    /// releases its volume through [`FatOps`] (`Vfs`'s unmount runs `sync`,
+    /// then `release`).
+    fn on_mount(&self, cx: &mut OpCx<'_>, _at: &[u8]) {
         if let Ok(v) = vol_of(cx) {
             // Release: pairs with nothing; nothing reads it yet.
             v.sb.store(cx.sb, Ordering::Release);
         }
-        if at != b"/" && register_mnt(cx.vol.cloned(), at).is_err() {
-            crate::klog!(
-                vibeos::log::Level::Warn,
-                "vibeOS: fat: no mount-table slot for a mount"
-            );
-        }
-    }
-
-    /// Drop `at`'s mount-table entry. The superblock's last unmount then
-    /// syncs it and releases its volume through [`FatOps`] (`Vfs`'s
-    /// unmount runs `sync`, then `release`).
-    fn on_umount(&self, _cx: &mut OpCx<'_>, at: &[u8], _last: bool) {
-        drop(unregister_mnt(at));
     }
 }
 
@@ -781,30 +751,6 @@ pub fn initrd_geometry() -> Option<(u64, u64)> {
     .flatten()
 }
 
-fn register_mnt(vol: Option<Instance>, p: &[u8]) -> Result<(), FsError> {
-    if p.is_empty() || p.len() > MNT_PATH {
-        return Err(FsError::NameTooLong);
-    }
-    let mut g = MNTS.lock();
-    let m = g.iter_mut().find(|m| !m.used).ok_or(FsError::NoSpace)?;
-    m.used = true;
-    m.vol = vol;
-    m.len = p.len() as u8;
-    m.path[..p.len()].copy_from_slice(p);
-    Ok(())
-}
-
-/// Take `p`'s mount-table entry out; the caller drops its volume reference unlocked.
-fn unregister_mnt(p: &[u8]) -> Option<Instance> {
-    let mut g = MNTS.lock();
-    let m = g
-        .iter_mut()
-        .find(|m| m.used && m.path.get(..m.len as usize) == Some(p))?;
-    m.used = false;
-    m.len = 0;
-    m.vol.take()
-}
-
 /// Retire volume `vol`: clear it and its `used` flag under its lock,
 /// waiting for any holder, so every later op fails.
 pub(super) fn drop_slot(vol: &FatVolume) {
@@ -852,5 +798,3 @@ pub fn mount_dev_at(base: Option<WalkBase>, name: &str, at: &str, ro: bool) -> R
         }
     }
 }
-
-const _: () = assert!(MAX_PATH >= MNT_PATH);

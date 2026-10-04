@@ -487,6 +487,7 @@ fn bad_option(opt: &str, value: Option<&[u8]>) -> ! {
 fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
     let name = t.name;
     crate::marker!("vibeOS: ktest: run {name} {}", t.deadline_ms);
+    let tmp_before = crate::fs_init::KERNFS.tmp_pages_used();
     let armed = arm(g, r, t.deadline_ms);
     let t0 = Arch::now();
     let mut outcome = (t.run)();
@@ -510,6 +511,9 @@ fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
         }
     }
     irq_enable();
+    if !matches!(outcome, Outcome::Fail(_) | Outcome::FailFmt(_)) {
+        outcome = tmp_given_back(tmp_before).unwrap_or(outcome);
+    }
     match outcome {
         Outcome::Ok => {
             crate::marker!("vibeOS: ktest: ok {name} ({us} us)");
@@ -532,6 +536,32 @@ fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
             true
         }
     }
+}
+
+/// A failure when a run left more of `/tmp`'s backing in use than the
+/// `before` pages it found, naming each file that holds pages as
+/// `<name>=<pages>`. `/tmp` is one store of `TMPFS_BACK_PAGES` for the
+/// whole boot, so pages a run keeps run a later run, or a later pass of
+/// `vibeos.ktest_repeat=`, out of room (`ENOSPC`); this fails the run that
+/// kept them, on the first pass.
+fn tmp_given_back(before: u32) -> Option<Outcome> {
+    let after = crate::fs_init::KERNFS.tmp_pages_used();
+    if after <= before {
+        return None;
+    }
+    let mut buf = [0u8; FAIL_MSG_BYTES];
+    let mut held = StackBuf::new(&mut buf);
+    crate::fs_init::KERNFS.tmp_page_holders(|name, pages| {
+        let mut d = [0u8; 20];
+        held.push_bytes(b" ");
+        held.push_bytes(name);
+        held.push_bytes(b"=");
+        held.push_bytes(vibeos::fmt_util::write_dec(u64::from(pages), &mut d));
+    });
+    let held = vibeos::boot::cmdline::Escaped(held.as_bytes());
+    Some(crate::fail_fmt!(
+        "left {after} /tmp pages in use, {before} before:{held}"
+    ))
 }
 
 /// Pages per stack in [`quiesce_frames`]' KVA walk: 17 pages of VA a round,
@@ -1287,7 +1317,7 @@ pub(crate) fn sleep_for(pred: impl Fn() -> bool) -> bool {
 
 /// Whether the running row's deadline is [`WAIT_MARGIN_MS`] away or closer;
 /// `None` when no deadline is armed.
-fn deadline_near() -> Option<bool> {
+pub(crate) fn deadline_near() -> Option<bool> {
     deadline_within(WAIT_MARGIN_MS)
 }
 

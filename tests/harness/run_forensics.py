@@ -59,7 +59,6 @@ from tests.harness.harness import (
     panic_signature,
     run_failure,
     run_vmcore,
-    serial_tail,
 )
 from tests.harness.linesource import LineSource
 
@@ -207,7 +206,7 @@ def boot_and_capture(
                     result,
                     boot.argv,
                     f"{label}: timed out after {timeout_s:g} s; {missing()}"
-                    f"{serial_tail(result.lines)}",
+                    f"{result.tail()}",
                 )
             if kind == "eof":
                 result.exit_code = _reap(src)
@@ -216,7 +215,7 @@ def boot_and_capture(
                     result,
                     boot.argv,
                     f"{label}: QEMU exited ({result.exit_code}); {missing()}"
-                    f"{serial_tail(result.lines)}",
+                    f"{result.tail()}",
                 )
             result.lines.append(line)
             why = run_failure(line, stream)
@@ -239,7 +238,7 @@ def boot_and_capture(
                 session.settle(src, result, d, boot.argv)
                 break
         if idx < len(markers):
-            session.fail(src, result, boot.argv, f"{label}: {missing()}{serial_tail(result.lines)}")
+            session.fail(src, result, boot.argv, f"{label}: {missing()}{result.tail()}")
         assert session.qmp is not None
         if hang:
             session.qmp.execute("stop")

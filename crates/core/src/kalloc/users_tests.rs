@@ -26,6 +26,9 @@ impl Drop for Probe {
 
 fn probe() -> (Probe, StdArc<StdMutex<StdVec<char>>>) {
     let log = StdArc::new(StdMutex::new(StdVec::with_capacity(8)));
+    // On Apple targets std's Mutex allocates its pthread mutex on the first
+    // lock; take it here so a test's `live()` window does not count it.
+    drop(log.lock());
     (Probe(log.clone()), log)
 }
 

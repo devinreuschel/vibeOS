@@ -675,7 +675,7 @@ fn rearm_deadline() {
     // only arms the timer; established at `arch::x86_64::apic_init::prove`.
     unsafe { x86::wrmsr(IA32_TSC_DEADLINE, d) };
     #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
-    testing::rearmed(d.wrapping_sub(now));
+    testing::rearmed(now, d);
 }
 
 pub fn on_timer_irq() {
@@ -920,13 +920,20 @@ pub(crate) mod testing {
     use vibeos::apic::{TIMER_DIV_16, lvt_timer_periodic};
     use vibeos::vectors;
 
-    use super::{LAPIC_LVT_TIMER, LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_VA, lapic_read};
+    use super::{
+        LAPIC_LVT_TIMER, LAPIC_TIMER_CCR, LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_VA, lapic_read,
+    };
     use crate::time_init;
 
     /// CPU 0 LAPIC timer fires whose TSC `lapic_timer_rearm` stamps: 20
     /// intervals.
     pub(crate) const FIRE_STAMPS: usize = 21;
     static FIRE_STAMP: [AtomicU64; FIRE_STAMPS] = [const { AtomicU64::new(0) }; FIRE_STAMPS];
+    /// For each stamped fire, the TSC its handler's `rearm_deadline` read
+    /// and the deadline it armed: the fire's handler time, and how long
+    /// after that deadline the next fire was stamped.
+    static FIRE_REARM_AT: [AtomicU64; FIRE_STAMPS] = [const { AtomicU64::new(0) }; FIRE_STAMPS];
+    static FIRE_DEADLINE: [AtomicU64; FIRE_STAMPS] = [const { AtomicU64::new(0) }; FIRE_STAMPS];
     /// Stamps taken since [`arm_fire_stamps`]; `usize::MAX` while unarmed.
     static FIRE_STAMP_N: AtomicUsize = AtomicUsize::new(usize::MAX);
 
@@ -955,11 +962,30 @@ pub(crate) mod testing {
         n
     }
 
+    /// After [`take_fire_stamps`]: each stamped fire's rearm TSC and the
+    /// deadline it armed (0 where its rearm did not run in the window).
+    pub(crate) fn fire_rearms(at: &mut [u64; FIRE_STAMPS], deadline: &mut [u64; FIRE_STAMPS]) {
+        for (o, s) in at.iter_mut().zip(FIRE_REARM_AT.iter()) {
+            // Relaxed: `take_fire_stamps` acquired the stamps it counts; pairs with nothing.
+            *o = s.load(Ordering::Relaxed);
+        }
+        for (o, s) in deadline.iter_mut().zip(FIRE_DEADLINE.iter()) {
+            // Relaxed: `take_fire_stamps` acquired the stamps it counts; pairs with nothing.
+            *o = s.load(Ordering::Relaxed);
+        }
+    }
+
     /// CPU 0's timer handler, with IF off: one writer.
     pub(super) fn stamp_fire() {
         // Relaxed: the count alone picks the slot; pairs with nothing.
         let i = FIRE_STAMP_N.load(Ordering::Relaxed);
         if let Some(slot) = FIRE_STAMP.get(i) {
+            if let (Some(a), Some(d)) = (FIRE_REARM_AT.get(i), FIRE_DEADLINE.get(i)) {
+                // Relaxed: CPU 0, IF off, one writer; pairs with nothing.
+                a.store(0, Ordering::Relaxed);
+                // Relaxed: as the store above; pairs with nothing.
+                d.store(0, Ordering::Relaxed);
+            }
             // Relaxed: the Release store of the count below publishes it; pairs with nothing.
             slot.store(time_init::read_tsc(), Ordering::Relaxed);
             // Release: pairs with the Acquire load in `fire_stamps` and the swap
@@ -974,11 +1000,28 @@ pub(crate) mod testing {
     static REARMS_OFF: AtomicU64 = AtomicU64::new(0);
     static REARM_OFF_LAST: AtomicU64 = AtomicU64::new(0);
 
-    /// `rearm_deadline` armed the next fire `ahead` TSC cycles from now.
-    pub(super) fn rearmed(ahead: u64) {
+    /// `rearm_deadline` read `now` and armed the next fire at `deadline`.
+    pub(super) fn rearmed(now: u64, deadline: u64) {
         if crate::per_cpu_init::try_current().map(|c| c.cpu_id) != Some(0) {
             return;
         }
+        // The fire this handler stamped: the rearm runs after the stamp, in
+        // the same handler on CPU 0, IF off, so no other writer.
+        // Once all are stamped the count stays put, so only the first
+        // rearm after a stamp fills its slot (`stamp_fire` cleared it).
+        // Relaxed: the count alone picks the slot; pairs with nothing.
+        let n = FIRE_STAMP_N.load(Ordering::Relaxed);
+        // Relaxed: `stamp_fire` cleared the slot; pairs with nothing.
+        if let Some(i) = n.checked_sub(1)
+            && let (Some(a), Some(d)) = (FIRE_REARM_AT.get(i), FIRE_DEADLINE.get(i))
+            && a.load(Ordering::Relaxed) == 0
+        {
+            // Relaxed: CPU 0, IF off, one writer; pairs with nothing.
+            a.store(now, Ordering::Relaxed);
+            // Relaxed: as the store above; pairs with nothing.
+            d.store(deadline, Ordering::Relaxed);
+        }
+        let ahead = deadline.wrapping_sub(now);
         if ahead != time_init::tsc_per_ms() {
             // Relaxed: the Release add of `REARMS` below publishes it; pairs with nothing.
             REARM_OFF_LAST.store(ahead, Ordering::Relaxed);
@@ -1031,6 +1074,20 @@ pub(crate) mod testing {
             ]
         };
         (got != want).then_some((got, want))
+    }
+
+    /// This CPU's LAPIC timer current count, which the LAPIC computes from
+    /// its clock when it is read; 0 while the LAPIC is unmapped.
+    pub(crate) fn timer_count() -> u32 {
+        // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
+        let va = LAPIC_VA.load(Ordering::Relaxed);
+        if va == 0 {
+            return 0;
+        }
+        // SAFETY: invariant I49, established at
+        // `arch::x86_64::apic_init::enable_lapic`: a nonzero `LAPIC_VA` is
+        // its return, published by `publish_isr`.
+        unsafe { lapic_read(va, LAPIC_TIMER_CCR) }
     }
 
     /// [`super::write_icr`] calls that found IF on between the two writes.
