@@ -281,7 +281,18 @@ fn shootdown_round(ranges: &[ShootRange]) {
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     // Release: pairs with the Acquire load of `waiters` in `service_shootdowns`.
     slot.waiters.store(waiters, Ordering::Release);
-    note_send("shootdown", Arch::send_others(Ipi::Shootdown));
+    // Targeted, as `call_mask`: ALL_EX_SELF also hits a wait-for-SIPI AP
+    // (F032 timeout INIT). QEMU TCG may then start it at 0xFC000.
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut c = 0u32;
+        while c < 64 {
+            if waiters & (1u64 << c) != 0 {
+                note_send("shootdown", Arch::send(c, Ipi::Shootdown));
+            }
+            c += 1;
+        }
+    }
     // Broadcast `tlbi *is` already invalidated every CPU; no shootdown SGI.
     #[cfg(target_arch = "x86_64")]
     wait_acks(waiters, &slot.acked);
@@ -650,7 +661,15 @@ pub fn stop_others() {
             // AcqRel swap in `nmi_stop`.
             r.stop_req.fetch_or(stop::STOP, Ordering::Release);
         }
-        if Arch::send(c, Ipi::Halt).is_err() {
+        // `send_raw` / aarch64 `IpiSend` record no trace event: `trace!`
+        // takes an `InterruptGuard`, which the dump path never does
+        // (DESIGN §2.5 step 1). `Arch::send` on x86_64 goes through
+        // `send_ipi_cpu`, which traces.
+        #[cfg(target_arch = "x86_64")]
+        let halt_err = send_raw(c, vectors::IPI_HALT, IpiMode::Fixed).is_err();
+        #[cfg(target_arch = "aarch64")]
+        let halt_err = Arch::send(c, Ipi::Halt).is_err();
+        if halt_err {
             refused |= 1u64 << c;
         }
     }

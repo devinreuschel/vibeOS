@@ -562,6 +562,7 @@ fn start_one(a: ApAlloc, page: u64) {
             reason = "DESIGN §2.5: INIT parks a stalled AP; its frames are leaked (F032)"
         )]
         let _ = apic_init::send_ipi(apic_id, 0, IpiMode::Init);
+        time_init::busy_wait_ms(INIT_WAIT_MS);
         per_cpu_init::mark_offline(cpu_id);
         note_stalled_leak();
         // F032: the AP may still run on these; do not abandon them.
