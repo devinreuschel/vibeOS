@@ -559,6 +559,7 @@ fn lock_leave(rank: u8) {
     };
     // Relaxed: only this CPU writes its slot; pairs with nothing.
     if Held::from_raw(slot.load(Ordering::Relaxed)).count(rank) != 0 {
+        // Relaxed: as the load above; pairs with nothing.
         slot.fetch_sub(Held::count_unit(rank), Ordering::Relaxed);
     }
 }
