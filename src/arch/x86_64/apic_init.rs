@@ -80,7 +80,9 @@ static LAPIC_VA: AtomicU64 = AtomicU64::new(0);
 static TSC_DEADLINE: AtomicBool = AtomicBool::new(false);
 
 fn publish_isr(st: &ApicState) {
+    // Release: pairs with the Acquire loads in `send_ipi` and `send_ipi_all_ex_self`.
     LAPIC_VA.store(st.lapic_va, Ordering::Release);
+    // Release: pairs with nothing; the boot CPU stores it before it starts the APs.
     TSC_DEADLINE.store(st.mode == TimerMode::TscDeadline, Ordering::Release);
 }
 
@@ -375,6 +377,7 @@ fn set_gsi_mask_inner(st: &ApicState, gsi: u32, masked: bool) {
 }
 
 pub fn eoi() {
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va != 0 {
         // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
@@ -387,6 +390,7 @@ pub fn eoi() {
 /// LAPIC delivered the interrupt being handled and is owed its EOI. False
 /// while the LAPIC is unmapped.
 pub fn in_service(vec: u8) -> bool {
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va == 0 {
         return false;
@@ -428,6 +432,7 @@ unsafe fn write_icr(va: u64, hi: u32, lo: u32) {
 /// ICR high then low ([`write_icr`]); bounded delivery-pending poll.
 /// ROADMAP §4.1.
 pub fn send_ipi(dest: u8, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
+    // Acquire: pairs with the Release store in `publish_isr`.
     let va = LAPIC_VA.load(Ordering::Acquire);
     if va == 0 {
         return Err(IpiError::NotReady);
@@ -453,6 +458,7 @@ pub fn send_ipi_cpu(cpu: u32, vector: u8) -> Result<(), IpiError> {
     let Some(c) = crate::per_cpu_init::cpu(cpu) else {
         return Err(IpiError::NotReady);
     };
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     send_ipi(
         c.apic_id.load(Ordering::Relaxed) as u8,
         vector,
@@ -463,6 +469,7 @@ pub fn send_ipi_cpu(cpu: u32, vector: u8) -> Result<(), IpiError> {
 /// All-excluding-self shorthand. No-op with one online CPU.
 pub fn send_ipi_all_ex_self(vector: u8) -> Result<(), IpiError> {
     vibeos::trace!(IpiSend, u64::from(vector), u64::MAX);
+    // Acquire: pairs with the Release store in `publish_isr`.
     let va = LAPIC_VA.load(Ordering::Acquire);
     if va == 0 {
         return Err(IpiError::NotReady);
@@ -628,6 +635,7 @@ fn timer_fires() -> bool {
     let pit0 = time_init::pit_fires();
     let fired = loop {
         let pit = time_init::pit_fires().wrapping_sub(pit0);
+        // Relaxed: bumped by this CPU's own timer interrupt; pairs with nothing.
         match timer_proof(TIMER_FIRES.load(Ordering::Relaxed), pit) {
             TimerProof::Fires => break true,
             TimerProof::Silent => break false,
@@ -641,9 +649,11 @@ fn timer_fires() -> bool {
 }
 
 fn rearm_deadline() {
+    // Relaxed: the boot CPU stores it before it starts the APs; pairs with nothing.
     if !TSC_DEADLINE.load(Ordering::Relaxed) {
         return;
     }
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     if LAPIC_VA.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -664,6 +674,7 @@ pub fn on_timer_irq() {
         .map(|c| c.cpu_id)
         .unwrap_or(0);
     if cpu_id == 0 {
+        // Relaxed: only CPU 0 counts, and `prove` reads it there; pairs with nothing.
         TIMER_FIRES.fetch_add(1, Ordering::Relaxed);
         time_init::on_hw_tick();
         #[cfg(feature = "kernel_tests")]
@@ -679,6 +690,7 @@ pub fn on_spurious_irq() {
 }
 
 pub fn on_error_irq() {
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va != 0 {
         // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
@@ -714,6 +726,7 @@ fn emit_marker(mode: TimerMode) {
 }
 
 fn unmask_pit_fallback() {
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va != 0 {
         // PIC virtual-wire: ExtINT on LINT0. Masked LINT0 (enable path)
@@ -773,6 +786,7 @@ pub fn prove() {
     let tsc_per_ms = time_init::tsc_per_ms();
 
     if want_td && tsc_per_ms != 0 {
+        // Relaxed: only CPU 0 touches it, here and in its timer interrupt; pairs with nothing.
         TIMER_FIRES.store(0, Ordering::Relaxed);
         with_state(|st| {
             st.mode = TimerMode::TscDeadline;
@@ -796,6 +810,7 @@ pub fn prove() {
     // `va` is `st.lapic_va`, set only from its return.
     match unsafe { calib_periodic(va) } {
         Some(per_ms) => {
+            // Relaxed: only CPU 0 touches it, here and in its timer interrupt; pairs with nothing.
             TIMER_FIRES.store(0, Ordering::Relaxed);
             with_state(|st| {
                 st.ticks_per_ms = per_ms;
@@ -914,19 +929,24 @@ pub(crate) mod testing {
 
     /// Stamp the TSC at each of CPU 0's next [`FIRE_STAMPS`] timer fires.
     pub(crate) fn arm_fire_stamps() {
-        // Release: the handler sees the arming.
+        // Release: pairs with the Acquire load in `fire_stamps` and the swap in
+        // `take_fire_stamps`.
         FIRE_STAMP_N.store(0, Ordering::Release);
     }
 
     /// Stamps taken so far.
     pub(crate) fn fire_stamps() -> usize {
+        // Acquire: pairs with the Release stores in `stamp_fire` and `arm_fire_stamps`.
         FIRE_STAMP_N.load(Ordering::Acquire)
     }
 
     /// Disarm and copy the stamps out: how many there were.
     pub(crate) fn take_fire_stamps(out: &mut [u64; FIRE_STAMPS]) -> usize {
+        // AcqRel: pairs with the Release store in `stamp_fire`, which publishes
+        // the stamps read below.
         let n = FIRE_STAMP_N.swap(usize::MAX, Ordering::AcqRel);
         for (o, s) in out.iter_mut().zip(FIRE_STAMP.iter()) {
+            // Relaxed: the swap above acquired the stamps it counts; pairs with nothing.
             *o = s.load(Ordering::Relaxed);
         }
         n
@@ -934,10 +954,13 @@ pub(crate) mod testing {
 
     /// CPU 0's timer handler, with IF off: one writer.
     pub(super) fn stamp_fire() {
+        // Relaxed: the count alone picks the slot; pairs with nothing.
         let i = FIRE_STAMP_N.load(Ordering::Relaxed);
         if let Some(slot) = FIRE_STAMP.get(i) {
+            // Relaxed: the Release store of the count below publishes it; pairs with nothing.
             slot.store(time_init::read_tsc(), Ordering::Relaxed);
-            // Release: publishes the stamp with the count.
+            // Release: pairs with the Acquire load in `fire_stamps` and the swap
+            // in `take_fire_stamps`, publishing the stamp with the count.
             FIRE_STAMP_N.store(i + 1, Ordering::Release);
         }
     }
@@ -954,15 +977,20 @@ pub(crate) mod testing {
             return;
         }
         if ahead != time_init::tsc_per_ms() {
+            // Relaxed: the Release add of `REARMS` below publishes it; pairs with nothing.
             REARM_OFF_LAST.store(ahead, Ordering::Relaxed);
+            // Relaxed: as the store above; pairs with nothing.
             REARMS_OFF.fetch_add(1, Ordering::Relaxed);
         }
+        // Release: pairs with the Acquire load in `rearms`.
         REARMS.fetch_add(1, Ordering::Release);
     }
 
     /// CPU 0's rearms, the rearms not one tick ahead, and the last such
     /// distance in TSC cycles.
     pub(crate) fn rearms() -> (u64, u64, u64) {
+        // Acquire: pairs with the Release add in `rearmed`, which publishes the other two.
+        // Relaxed: the Acquire load orders them; pairs with nothing.
         (
             REARMS.load(Ordering::Acquire),
             REARMS_OFF.load(Ordering::Relaxed),
@@ -974,6 +1002,7 @@ pub(crate) mod testing {
     /// count, divide)`, against what the kernel programs for one tick:
     /// `None` when they match. `None` too while the LAPIC is unmapped.
     pub(crate) fn periodic_mismatch() -> Option<([u32; 3], [u32; 3])> {
+        // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
         let va = LAPIC_VA.load(Ordering::Relaxed);
         if va == 0 {
             return None;
@@ -1005,12 +1034,14 @@ pub(crate) mod testing {
     static ICR_IF_ON: AtomicU64 = AtomicU64::new(0);
 
     pub(crate) fn icr_writes_if_on() -> u64 {
+        // Acquire: pairs with the AcqRel add in `between_icr_writes`.
         ICR_IF_ON.load(Ordering::Acquire)
     }
 
     /// No lock and no guard: the panic dump sends its NMIs through here.
     pub(super) fn between_icr_writes() {
         if super::x86::interrupts_enabled() {
+            // AcqRel: pairs with the Acquire load in `icr_writes_if_on`.
             ICR_IF_ON.fetch_add(1, Ordering::AcqRel);
         }
     }
