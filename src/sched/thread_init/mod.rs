@@ -49,10 +49,10 @@ pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
 pub use sweep::start_sweep;
 pub(crate) use table::table_root;
+#[cfg(feature = "kernel_tests")]
+pub(crate) use table::{RunTsc, run_tsc_snapshot, table_usage, timeouts_capacity};
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
-#[cfg(feature = "kernel_tests")]
-pub(crate) use table::{table_usage, timeouts_capacity};
 pub use user::{reset_user_segs, set_user_segs};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
