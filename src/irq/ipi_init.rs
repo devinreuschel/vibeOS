@@ -86,6 +86,7 @@ fn note_send(what: &str, r: Result<(), IpiError>) {
 #[cold]
 #[inline(never)]
 fn send_failed(what: &str, e: IpiError) {
+    // Relaxed: a count for the rate-limited line; pairs with nothing.
     let n = SEND_FAILS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
     crate::klog_ratelimited!(
         1000,
@@ -128,12 +129,18 @@ fn service_shootdowns() {
     let mut i = 0usize;
     while i < MAX_IPI_CPUS {
         let s = &SHOOT[i];
+        // Acquire: pairs with the Release store of `waiters` in `shootdown_round`.
         let w = s.waiters.load(Ordering::Acquire);
+        // Relaxed: pairs with nothing; the Acquire load of `waiters` orders
+        // it after the round's reset.
         if w & me != 0 && s.acked.load(Ordering::Relaxed) & me == 0 {
             {
                 let _lockless = sync_init::lockless_section();
+                // Relaxed: pairs with nothing; the Acquire load of `waiters`
+                // orders it after the round's stores.
                 let n = s.n.load(Ordering::Relaxed);
                 for r in s.ranges.iter().take(n as usize) {
+                    // Relaxed: as `n`; pairs with nothing.
                     let r = ShootRange::from_raw(r.load(Ordering::Relaxed));
                     let mut p = 0u64;
                     while p < r.pages() {
@@ -142,12 +149,14 @@ fn service_shootdowns() {
                     }
                 }
             }
+            // Relaxed: the Release `fetch_or` of `acked` below publishes it; pairs with nothing.
             SHOOT_COUNT.fetch_add(1, Ordering::Relaxed);
             vibeos::trace!(IpiAck, u64::from(vectors::IPI_SHOOTDOWN), i as u64);
-            // The ack is this handler's last access to the round (AGENTS.md
-            // rule 5): once `wait_acks` sees it, the initiator may start the
-            // next round, and a reader of `SHOOT_COUNT` that saw the ack
-            // (Acquire) sees this round counted.
+            // Release: pairs with the Acquire load in `wait_acks`. The ack is
+            // this handler's last access to the round (AGENTS.md rule 5): once
+            // `wait_acks` sees it, the initiator may start the next round, and
+            // a reader of `SHOOT_COUNT` that saw the ack (Acquire) sees this
+            // round counted.
             s.acked.fetch_or(me, Ordering::Release);
         }
         i += 1;
@@ -159,14 +168,18 @@ fn service_calls() {
     if me == 0 {
         return;
     }
+    // Acquire: pairs with the Release store of `waiters` in `call_mask`.
     let w = CALL.waiters.load(Ordering::Acquire);
     if w & me == 0 {
         return;
     }
+    // Relaxed: the Acquire load of `waiters` orders it after the call's reset; pairs with nothing.
     if CALL.acked.load(Ordering::Relaxed) & me != 0 {
         return;
     }
+    // Relaxed: the Acquire load of `waiters` orders it after the call's stores; pairs with nothing.
     let f = CALL.func.load(Ordering::Relaxed);
+    // Relaxed: as `func`; pairs with nothing.
     let arg = CALL.arg.load(Ordering::Relaxed);
     if !f.is_null() {
         // SAFETY: invariant: a non-null `CALL.func` holds a `fn(*mut ())`;
@@ -177,9 +190,11 @@ fn service_calls() {
         let _lockless = sync_init::lockless_section();
         f(arg);
     }
+    // Relaxed: the Release `fetch_or` of `acked` below publishes it; pairs with nothing.
     CALL_COUNT.fetch_add(1, Ordering::Relaxed);
     vibeos::trace!(IpiAck, u64::from(vectors::IPI_CALL), u64::MAX);
-    // Publish last (AGENTS.md rule 5), as in `service_shootdowns`.
+    // Release: pairs with the Acquire load in `wait_acks`; publish last
+    // (AGENTS.md rule 5), as in `service_shootdowns`.
     CALL.acked.fetch_or(me, Ordering::Release);
 }
 
@@ -203,6 +218,7 @@ fn wait_acks(waiters: u64, acked: &AtomicU64) {
     let mut last = start;
     let mut spins = 0u64;
     loop {
+        // Acquire: pairs with each handler's Release `fetch_or` of its ack.
         let got = acked.load(Ordering::Acquire);
         if all_acked(waiters, got) {
             return;
@@ -223,6 +239,7 @@ fn wait_acks(waiters: u64, acked: &AtomicU64) {
             None
         };
         if let Some((n, unit)) = late {
+            // Relaxed: a statistic; pairs with nothing.
             ACK_LATE.fetch_add(1, Ordering::Relaxed);
             crate::klog!(
                 Level::Warn,
@@ -282,15 +299,20 @@ fn shootdown_round(ranges: &[ShootRange]) {
     let slot = &SHOOT[me as usize];
     let mut n = 0u64;
     for (dst, r) in slot.ranges.iter().zip(ranges) {
+        // Relaxed: the Release store of `waiters` below publishes it; pairs with nothing.
         dst.store(r.raw(), Ordering::Relaxed);
         n += 1;
     }
+    // Relaxed: as the ranges; pairs with nothing.
     slot.n.store(n, Ordering::Relaxed);
+    // Relaxed: as the ranges; pairs with nothing.
     slot.acked.store(0, Ordering::Relaxed);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    // Release: pairs with the Acquire load of `waiters` in `service_shootdowns`.
     slot.waiters.store(waiters, Ordering::Release);
     note_send("shootdown", Arch::send_others(Ipi::Shootdown));
     wait_acks(waiters, &slot.acked);
+    // Release: pairs with the Acquire load of `waiters` in `service_shootdowns`.
     slot.waiters.store(0, Ordering::Release);
 }
 
@@ -382,6 +404,7 @@ pub fn set_reschedule_hook(f: fn()) {
 
 pub fn on_reschedule_ipi() {
     vibeos::trace!(IpiAck, u64::from(vectors::IPI_RESCHEDULE), u64::MAX);
+    // Relaxed: a statistic; pairs with nothing.
     RESCHED_COUNT.fetch_add(1, Ordering::Relaxed);
     drain_inbox();
     // Acquire: pairs with the Release store in `set_reschedule_hook`.
@@ -444,8 +467,9 @@ fn poll_stop() {
 pub fn stop_this_cpu(how: StopHow, regs: CrashRegs) -> ! {
     current::irq_disable();
     if let Some(r) = per_cpu_init::cpu(my_index() as u32) {
-        // Acquire on success: nothing this CPU writes to the slot moves
-        // above the claim.
+        // Acquire on success: pairs with nothing; nothing this CPU writes to
+        // the slot moves above the claim.
+        // Relaxed on failure: the CPU halts at once; pairs with nothing.
         if r.stopped
             .compare_exchange(
                 stop::RUNNING,
@@ -456,8 +480,9 @@ pub fn stop_this_cpu(how: StopHow, regs: CrashRegs) -> ! {
             .is_ok()
         {
             write_slot(r, regs);
-            // Release: the acknowledgement is this CPU's last store; the
-            // owner reads the slot after it with Acquire (AGENTS.md rule 5).
+            // Release: pairs with the Acquire load in `cpu_stop_state`; the
+            // acknowledgement is this CPU's last store, and the owner reads
+            // the slot after it (AGENTS.md rule 5).
             r.stopped.store(how.code(), Ordering::Release);
         }
     }
@@ -467,6 +492,7 @@ pub fn stop_this_cpu(how: StopHow, regs: CrashRegs) -> ! {
 /// Store `regs` in `r`'s crash-register slot (`irq::stop::CRASH_*`).
 fn write_slot(r: &PerCpuRemote, regs: CrashRegs) {
     for (w, v) in r.crash.iter().zip(regs.to_words()) {
+        // Relaxed: `stop_this_cpu`'s Release acknowledgement publishes it; pairs with nothing.
         w.store(v, Ordering::Relaxed);
     }
 }
@@ -503,8 +529,9 @@ pub fn on_stop_ipi(regs: CrashRegs) -> ! {
 /// the interrupted registers from the NMI's trap frame.
 pub fn nmi_stop(regs: CrashRegs) -> NmiAction {
     let (req, state) = match per_cpu_init::cpu(my_index() as u32) {
-        // AcqRel: the swap reads the owner's Release `fetch_or` and clears
-        // the request in one step.
+        // AcqRel: pairs with the owner's Release `fetch_or` in `stop_others`;
+        // the swap reads it and clears the request in one step.
+        // Acquire: pairs with the Release acknowledgement in `stop_this_cpu`.
         Some(r) => (
             r.stop_req.swap(0, Ordering::AcqRel),
             r.stopped.load(Ordering::Acquire),
@@ -516,6 +543,7 @@ pub fn nmi_stop(regs: CrashRegs) -> NmiAction {
         NmiAction::Halt => current::halt(),
         NmiAction::Stop => stop_this_cpu(StopHow::Nmi, regs),
         NmiAction::Return => {
+            // Relaxed: a statistic; pairs with nothing.
             OWNER_NMI_RETURNS.fetch_add(1, Ordering::Relaxed);
         }
         NmiAction::Dump => {}
@@ -532,6 +560,7 @@ pub fn cpu_stop_state(cpu: u32) -> Option<(Option<StopHow>, CrashRegs)> {
     let how = StopHow::from_code(r.stopped.load(Ordering::Acquire));
     let mut words = [0u64; stop::CRASH_WORDS];
     for (w, v) in words.iter_mut().zip(r.crash.iter()) {
+        // Relaxed: the Acquire load of `stopped` above orders it; pairs with nothing.
         *w = v.load(Ordering::Relaxed);
     }
     Some((how, CrashRegs::from_words(words)))
@@ -584,6 +613,7 @@ fn send_raw(cpu: u32, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
     let Some(r) = per_cpu_init::cpu(cpu) else {
         return Err(IpiError::NotReady);
     };
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     apic_init::send_ipi(r.apic_id.load(Ordering::Relaxed) as u8, vector, mode)
 }
 
@@ -608,6 +638,7 @@ fn nmi_each(mask: u64) {
 /// to each CPU still running, and wait 10 ms more. A CPU whose `0xFE` the
 /// LAPIC refused gets its NMI at once. The owner's own IF is off.
 pub fn stop_others() {
+    // Release: pairs with the Acquire loads of `HALTING` in `serial` and `sync_init`.
     raw::HALTING.store(true, Ordering::Release);
     let me = my_index() as u32;
     let others = waiter_mask(per_cpu_init::online_mask(), me);
@@ -651,6 +682,8 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
     {
         // The wait for the call slot is exempt too (rule 2).
         let _x = crate::sched::irqoff::exempt();
+        // Acquire: pairs with the Release store of `false` that ends `call_mask`.
+        // Relaxed on failure: the loop retries; pairs with nothing.
         while CALL_BUSY
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
@@ -659,10 +692,14 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
             core::hint::spin_loop();
         }
     }
+    // Relaxed: the Release store of `waiters` below publishes it; pairs with nothing.
     CALL.func.store(f as *mut (), Ordering::Relaxed);
+    // Relaxed: as `func`; pairs with nothing.
     CALL.arg.store(arg, Ordering::Relaxed);
+    // Relaxed: as `func`; pairs with nothing.
     CALL.acked.store(0, Ordering::Relaxed);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    // Release: pairs with the Acquire load of `waiters` in `service_calls`.
     CALL.waiters.store(waiters, Ordering::Release);
     let mut c = 0u32;
     while c < 64 {
@@ -672,8 +709,11 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
         c += 1;
     }
     wait_acks(waiters, &CALL.acked);
+    // Release: pairs with the Acquire load of `waiters` in `service_calls`.
     CALL.waiters.store(0, Ordering::Release);
+    // Relaxed: the Release store of `CALL_BUSY` below publishes it; pairs with nothing.
     CALL.func.store(core::ptr::null_mut(), Ordering::Relaxed);
+    // Release: pairs with the Acquire compare-exchange in the next `call_mask`.
     CALL_BUSY.store(false, Ordering::Release);
 }
 

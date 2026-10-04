@@ -993,16 +993,20 @@ pub(crate) mod testing {
     /// line is written, for at most 1 s of TSC time: a kill line written
     /// in pieces would take the other line inside it.
     pub(crate) fn arm_kill_line_yield(fault_addr: u64) {
+        // Release: pairs with the Acquire load and compare-exchange in `kill_line_yield`.
         KILL_YIELD_CR2.store(fault_addr, Ordering::Release);
     }
 
     pub(crate) fn disarm_kill_line_yield() {
+        // Release: pairs with the Acquire load and compare-exchange in `kill_line_yield`.
         KILL_YIELD_CR2.store(0, Ordering::Release);
     }
 
     #[cfg(target_arch = "x86_64")]
     pub(super) fn kill_line_yield(f: &TrapFrame) {
+        // Acquire: pairs with the Release stores of the arm and disarm above.
         let armed = KILL_YIELD_CR2.load(Ordering::Acquire);
+        // AcqRel, Acquire on failure: pairs with the Release stores of the arm and disarm.
         if armed == 0
             || f.vector != u64::from(vibeos::vectors::PF)
             || f.cr2 != armed
@@ -1012,8 +1016,10 @@ pub(crate) mod testing {
         {
             return;
         }
+        // Acquire: pairs with the AcqRel add in `kill_line_done`.
         let n0 = KILL_LINES.load(Ordering::Acquire);
         let t0 = time_init::now_ns();
+        // Acquire: pairs with the AcqRel add in `kill_line_done`.
         while KILL_LINES.load(Ordering::Acquire) == n0
             && time_init::now_ns().saturating_sub(t0) < 1_000_000_000
         {
@@ -1022,6 +1028,7 @@ pub(crate) mod testing {
     }
 
     pub(super) fn kill_line_done() {
+        // AcqRel: pairs with the Acquire loads in `kill_line_yield`.
         KILL_LINES.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -1042,6 +1049,7 @@ pub(crate) mod testing {
     pub(crate) fn getpid_count(pid: u32) -> u64 {
         let b = getpid_bucket(pid);
         match (GETPID_TAGS.get(b), GETPIDS.get(b)) {
+            // Acquire: pairs with the Release stores and AcqRel add in `on_getpid`.
             (Some(tag), Some(c)) if tag.load(Ordering::Acquire) == pid => c.load(Ordering::Acquire),
             _ => 0,
         }
@@ -1052,10 +1060,14 @@ pub(crate) mod testing {
         let (Some(tag), Some(c)) = (GETPID_TAGS.get(b), GETPIDS.get(b)) else {
             return;
         };
+        // Acquire: pairs with the Release store of `tag` below.
         if tag.load(Ordering::Acquire) != pid {
+            // Release: pairs with the Acquire load of `c` in `getpid_count`.
             c.store(0, Ordering::Release);
+            // Release: pairs with the Acquire loads of `tag` above and in `getpid_count`.
             tag.store(pid, Ordering::Release);
         }
+        // AcqRel: pairs with the Acquire load of `c` in `getpid_count`.
         c.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -1070,18 +1082,23 @@ pub(crate) mod testing {
     /// as a kill that lands before the wait is armed finds the caller on
     /// no queue.
     pub(crate) fn arm_wait4_kill() {
+        // Release: pairs with the Acquire load in `wait4_kill_taken`.
         WAIT4_KILL_CALLER.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `wait4_kill_taken`.
         WAIT4_KILL_WANT.store(0, Ordering::Release);
+        // Release: pairs with the AcqRel swap in `wait4_entered`.
         WAIT4_KILL_ARMED.store(true, Ordering::Release);
     }
 
     pub(crate) fn disarm_wait4_kill() {
+        // Release: pairs with the AcqRel swap in `wait4_entered`.
         WAIT4_KILL_ARMED.store(false, Ordering::Release);
     }
 
     /// The caller of the `wait4` that took the kill, and its `pid`
     /// argument; `(0, 0)` before one did.
     pub(crate) fn wait4_kill_taken() -> (u32, i64) {
+        // Acquire: pairs with the Release stores in `wait4_entered` and `arm_wait4_kill`.
         (
             WAIT4_KILL_CALLER.load(Ordering::Acquire),
             WAIT4_KILL_WANT.load(Ordering::Acquire) as i64,
@@ -1089,11 +1106,14 @@ pub(crate) mod testing {
     }
 
     pub(super) fn wait4_entered(pid: u32, want: i64) {
+        // AcqRel: pairs with the Release stores in `arm_wait4_kill` and `disarm_wait4_kill`.
         if !WAIT4_KILL_ARMED.swap(false, Ordering::AcqRel) {
             return;
         }
         post_pending(pid, vibeos::proc::SIGKILL);
+        // Release: pairs with the Acquire load in `wait4_kill_taken`.
         WAIT4_KILL_WANT.store(want as u64, Ordering::Release);
+        // Release: pairs with the Acquire load in `wait4_kill_taken`.
         WAIT4_KILL_CALLER.store(pid, Ordering::Release);
     }
 
@@ -1105,23 +1125,30 @@ pub(crate) mod testing {
     /// Hold `pid` once, at its next stop, between the stop decision and
     /// its sleep, until [`release_stop_stall`] or 1 s of TSC time.
     pub(crate) fn arm_stop_stall(pid: u32) {
+        // Release: pairs with the Acquire load in `stop_stalled`.
         STALL_IN.store(false, Ordering::Release);
+        // Release: pairs with the Acquire load in `stop_stall`.
         STALL_RELEASE.store(false, Ordering::Release);
+        // Release: pairs with the Acquire loads in `stop_decided` and `stop_stall`.
         STALL_PID.store(pid, Ordering::Release);
     }
 
     /// The armed process has decided to stop and armed its `stop_wq` wait:
     /// it sits between its stop decision and its sleep.
     pub(crate) fn stop_stalled() -> bool {
+        // Acquire: pairs with the Release stores in `stop_decided` and `stop_stall`.
         STALL_IN.load(Ordering::Acquire)
     }
 
     pub(crate) fn release_stop_stall() {
+        // Release: pairs with the Acquire load in `stop_stall`.
         STALL_RELEASE.store(true, Ordering::Release);
     }
 
     pub(crate) fn disarm_stop_stall() {
+        // Release: pairs with the Acquire loads in `stop_decided` and `stop_stall`.
         STALL_PID.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `stop_stall`.
         STALL_RELEASE.store(true, Ordering::Release);
     }
 
@@ -1132,10 +1159,14 @@ pub(crate) mod testing {
     /// only after the `SIGCONT` that the sender sends once it sees the
     /// stall; so the stall is marked here, before IF can come back on.
     pub(super) fn stop_decided(pid: u32) {
+        // Acquire: pairs with the Release stores in `arm_stop_stall` and `disarm_stop_stall`.
         if STALL_PID.load(Ordering::Acquire) == pid {
+            // Release: pairs with the Acquire load in `stop_stalled`.
             STALL_IN.store(true, Ordering::Release);
         }
+        // Acquire: pairs with the Release store in `watch_stops`.
         if STOPS_PID.load(Ordering::Acquire) == pid {
+            // AcqRel: pairs with the Acquire load in `stops` and the store in `watch_stops`.
             STOPS.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -1146,30 +1177,36 @@ pub(crate) mod testing {
 
     /// Count `pid`'s stop decisions from 0; 0 counts none.
     pub(crate) fn watch_stops(pid: u32) {
+        // Release: pairs with the Acquire load in `stops` and the AcqRel add in `stop_decided`.
         STOPS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `stop_decided`.
         STOPS_PID.store(pid, Ordering::Release);
     }
 
     /// How many times the watched process has decided to stop and armed
     /// its `stop_wq` wait.
     pub(crate) fn stops() -> u32 {
+        // Acquire: pairs with the AcqRel add in `stop_decided`.
         STOPS.load(Ordering::Acquire)
     }
 
     /// Spins on TSC time; never services IPIs.
     pub(super) fn stop_stall(pid: u32) {
+        // AcqRel, Acquire on failure: pairs with the Release stores of the arm and disarm.
         if STALL_PID
             .compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             return;
         }
+        // Release: pairs with the Acquire load in `stop_stalled`.
         STALL_IN.store(true, Ordering::Release);
         // With IF=0 the stall is a deliberate IF-off stretch; with IF=1 it
         // holds none and takes no guard.
         let _hold = (!crate::arch::current::interrupts_enabled())
             .then(|| crate::sched::irqoff::deliberate("stop stall"));
         let t0 = time_init::now_ns();
+        // Acquire: pairs with the Release store in `release_stop_stall` or the disarm.
         while !STALL_RELEASE.load(Ordering::Acquire)
             && time_init::now_ns().saturating_sub(t0) < 1_000_000_000
         {
@@ -1188,27 +1225,34 @@ pub(crate) mod testing {
 
     /// The next `getpid` from a process on CPU 0 spins for [`SPIN_NS`].
     pub(crate) fn arm_getpid_spin() {
+        // Release: pairs with the Acquire load in `spin_start_ns`.
         SPIN_START_NS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `spin_done_ns`.
         SPIN_DONE_NS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load and swap in `getpid_spin`.
         SPIN_ARMED.store(true, Ordering::Release);
     }
 
     pub(crate) fn disarm_getpid_spin() {
+        // Release: pairs with the Acquire load and swap in `getpid_spin`.
         SPIN_ARMED.store(false, Ordering::Release);
     }
 
     /// `now_ns` when the spin started; 0 before.
     pub(crate) fn spin_start_ns() -> u64 {
+        // Acquire: pairs with the Release store in `getpid_spin`.
         SPIN_START_NS.load(Ordering::Acquire)
     }
 
     /// `now_ns` when the spinning `getpid` was done; 0 before.
     pub(crate) fn spin_done_ns() -> u64 {
+        // Acquire: pairs with the Release store in `getpid_spin`.
         SPIN_DONE_NS.load(Ordering::Acquire)
     }
 
     /// CPU 0's context switches at the spin's start and end.
     pub(crate) fn spin_switches() -> (u64, u64) {
+        // Acquire: pairs with the Release stores in `getpid_spin`.
         (
             SPIN_SW_START.load(Ordering::Acquire),
             SPIN_SW_END.load(Ordering::Acquire),
@@ -1216,24 +1260,31 @@ pub(crate) mod testing {
     }
 
     fn cpu0_switches() -> u64 {
+        // Relaxed: only CPU 0 stores its `switches`; pairs with nothing.
         per_cpu_init::cpu(0).map_or(0, |c| c.switches.load(Ordering::Relaxed))
     }
 
     /// Spins on TSC time; never services IPIs.
     pub(super) fn getpid_spin(pid: u32) {
+        // Acquire: pairs with the Release stores of the arm and disarm above.
         if pid == 0 || !SPIN_ARMED.load(Ordering::Acquire) {
             return;
         }
+        // AcqRel: pairs with the Release stores of the arm and disarm above.
         if thread_init::current_cpu() != 0 || !SPIN_ARMED.swap(false, Ordering::AcqRel) {
             return;
         }
+        // Release: pairs with the Acquire load in `spin_switches`.
         SPIN_SW_START.store(cpu0_switches(), Ordering::Release);
         let t0 = time_init::now_ns();
+        // Release: pairs with the Acquire load in `spin_start_ns`.
         SPIN_START_NS.store(t0.max(1), Ordering::Release);
         while time_init::now_ns().saturating_sub(t0) < SPIN_NS {
             core::hint::spin_loop();
         }
+        // Release: pairs with the Acquire load in `spin_switches`.
         SPIN_SW_END.store(cpu0_switches(), Ordering::Release);
+        // Release: pairs with the Acquire load in `spin_done_ns`.
         SPIN_DONE_NS.store(time_init::now_ns(), Ordering::Release);
     }
 
@@ -1242,26 +1293,35 @@ pub(crate) mod testing {
 
     /// Record when the next console `write` returns.
     pub(crate) fn arm_console_write_record() {
+        // Release: pairs with the Acquire load in `console_write_done_ns`.
         WRITE_DONE_NS.store(0, Ordering::Release);
+        // Release: pairs with the AcqRel swap in `console_write_returned`.
         WRITE_ARMED.store(true, Ordering::Release);
     }
 
     /// `now_ns` when the armed console `write` returned; 0 before.
     pub(crate) fn console_write_done_ns() -> u64 {
+        // Acquire: pairs with the Release store in `console_write_returned`.
         WRITE_DONE_NS.load(Ordering::Acquire)
     }
 
     pub(super) fn console_write_returned() {
+        // AcqRel: pairs with the Release store in `arm_console_write_record`.
         if WRITE_ARMED.swap(false, Ordering::AcqRel) {
+            // Release: pairs with the Acquire load in `console_write_done_ns`.
             WRITE_DONE_NS.store(time_init::now_ns().max(1), Ordering::Release);
         }
         let me = thread_init::current_id().raw();
+        // AcqRel: pairs with the Release store in `console_write_started`.
+        // Relaxed on failure: another thread holds the claim; pairs with nothing.
         if TICKS_TID
             .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
             let (cpu, ticks) = cpu_ticks();
+            // Relaxed: the Release store of `TICKS_DONE` below publishes it; pairs with nothing.
             TICKS_END_CPU.store(cpu, Ordering::Relaxed);
+            // Relaxed: as the store above; pairs with nothing.
             TICKS_END.store(ticks, Ordering::Relaxed);
             // Release: publishes the record; pairs with `console_write_ticks`.
             TICKS_DONE.store(true, Ordering::Release);
@@ -1283,8 +1343,11 @@ pub(crate) mod testing {
     /// its return (ROADMAP §10.2: what happened during the write, not what
     /// a watcher saw later).
     pub(crate) fn arm_console_write_ticks() {
+        // Release: pairs with the Acquire load in `console_write_ticks`.
         TICKS_DONE.store(false, Ordering::Release);
+        // Release: pairs with the compare-exchange in `console_write_returned`.
         TICKS_TID.store(u32::MAX, Ordering::Release);
+        // Release: pairs with the AcqRel swap in `console_write_started`.
         TICKS_ARMED.store(true, Ordering::Release);
     }
 
@@ -1293,6 +1356,7 @@ pub(crate) mod testing {
     pub(crate) fn console_write_ticks() -> Option<((u32, u64), (u32, u64))> {
         // Acquire: pairs with the Release store in `console_write_returned`.
         TICKS_DONE.load(Ordering::Acquire).then(|| {
+            // Relaxed: the Acquire load of `TICKS_DONE` above orders them; pairs with nothing.
             (
                 (
                     TICKS_START_CPU.load(Ordering::Relaxed),
@@ -1308,13 +1372,16 @@ pub(crate) mod testing {
 
     /// Called by `sys_write` before a console write's first copy.
     pub(super) fn console_write_started() {
+        // AcqRel: pairs with the Release store in `arm_console_write_ticks`.
         if !TICKS_ARMED.swap(false, Ordering::AcqRel) {
             return;
         }
         let (cpu, ticks) = cpu_ticks();
+        // Relaxed: the Release store of `TICKS_TID` below publishes it; pairs with nothing.
         TICKS_START_CPU.store(cpu, Ordering::Relaxed);
+        // Relaxed: as the store above; pairs with nothing.
         TICKS_START.store(ticks, Ordering::Relaxed);
-        // Release: the start's fields before the claim that ends them.
+        // Release: pairs with the claim in `console_write_returned`; publishes the start.
         TICKS_TID.store(thread_init::current_id().raw(), Ordering::Release);
     }
 
@@ -1323,6 +1390,7 @@ pub(crate) mod testing {
     fn cpu_ticks() -> (u32, u64) {
         let _g = crate::arch::current::InterruptGuard::enter();
         let me = per_cpu_init::current().cpu_id;
+        // Relaxed: only this CPU stores its `ticks`; pairs with nothing.
         let ticks = per_cpu_init::cpu(me).map_or(0, |c| c.ticks.load(Ordering::Relaxed));
         (me, ticks)
     }
@@ -1338,6 +1406,7 @@ pub(crate) mod testing {
     /// The next `getpid` whose `rdi` is [`HOOK_MAGIC`] returns with `rcx`
     /// = `canary` in its user frame.
     pub(crate) fn arm_rcx_canary(canary: u64) {
+        // Release: pairs with the AcqRel swap in `on_entry`.
         RCX_CANARY.store(canary, Ordering::Release);
     }
 
@@ -1348,22 +1417,29 @@ pub(crate) mod testing {
     /// At each `getpid` whose `rdi` is [`HOOK_MAGIC`], compare this CPU's
     /// `PerCpu` LAPIC ID with the one CPUID reports for the CPU running.
     pub(crate) fn arm_getpid_apic() {
+        // Release: pairs with the Acquire load in `apic_checks`.
         APIC_CHECKS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `apic_mismatches`.
         APIC_MISMATCHES.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `on_entry`.
         APIC_ARMED.store(true, Ordering::Release);
     }
 
     pub(crate) fn apic_checks() -> u32 {
+        // Acquire: pairs with the AcqRel add in `on_entry`.
         APIC_CHECKS.load(Ordering::Acquire)
     }
 
     pub(crate) fn apic_mismatches() -> u32 {
+        // Acquire: pairs with the AcqRel add in `on_entry`.
         APIC_MISMATCHES.load(Ordering::Acquire)
     }
 
     /// Undo every `arm_*` hook of this group.
     pub(crate) fn disarm() {
+        // Release: pairs with the AcqRel swap in `on_entry`.
         RCX_CANARY.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `on_entry`.
         APIC_ARMED.store(false, Ordering::Release);
     }
 
@@ -1372,21 +1448,26 @@ pub(crate) mod testing {
         if frame.orig_rax != SYS_GETPID || frame.rdi != HOOK_MAGIC {
             return;
         }
+        // AcqRel: pairs with the Release stores in `arm_rcx_canary` and `disarm`.
         let c = RCX_CANARY.swap(0, Ordering::AcqRel);
         if c != 0 {
             frame.rcx = c;
         }
+        // Acquire: pairs with the Release stores in `arm_getpid_apic` and `disarm`.
         #[cfg(target_arch = "x86_64")]
         if APIC_ARMED.load(Ordering::Acquire) {
             // One IF=0 stretch: the `PerCpu` read and CPUID see one CPU.
             let _g = crate::arch::current::InterruptGuard::enter();
+            // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
             let mine = per_cpu_init::current()
                 .remote
                 .apic_id
                 .load(Ordering::Relaxed);
             let (_, ebx, _, _) = crate::x86::cpuid(1, 0);
+            // AcqRel: pairs with the Acquire load in `apic_checks`.
             APIC_CHECKS.fetch_add(1, Ordering::AcqRel);
             if ebx >> 24 != mine {
+                // AcqRel: pairs with the Acquire load in `apic_mismatches`.
                 APIC_MISMATCHES.fetch_add(1, Ordering::AcqRel);
             }
         }

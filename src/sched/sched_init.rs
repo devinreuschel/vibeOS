@@ -33,10 +33,12 @@ pub unsafe fn init() {
     thread_init::start_sweep();
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     per_cpu_init::arm_if_checks();
+    // Release: pairs with the Acquire load in `is_live`.
     LIVE.store(true, Ordering::Release);
 }
 
 pub fn is_live() -> bool {
+    // Acquire: pairs with the Release store in `init`.
     LIVE.load(Ordering::Acquire)
 }
 
@@ -50,8 +52,9 @@ pub fn on_timer_tick() {
     }
     crate::work_init::kick_deferred();
     let preempt = per_cpu_init::with_current(|cpu| {
-        // Single writer: only this CPU stores its `ticks`.
+        // Relaxed: only this CPU stores its `ticks`; pairs with nothing.
         let ticks = cpu.remote.ticks.load(Ordering::Relaxed).wrapping_add(1);
+        // Relaxed: as the load; pairs with nothing.
         cpu.remote.ticks.store(ticks, Ordering::Relaxed);
         let idle = crate::arch::current_tcb() == cpu.idle && !cpu.idle.is_null();
         vibeos::sched::should_preempt(ticks, idle)

@@ -587,23 +587,28 @@ impl InodeWords {
     }
 
     pub fn size(&self) -> u64 {
+        // Acquire: pairs with the Release store in `set_size`.
         self.size.load(Ordering::Acquire)
     }
 
     pub fn set_size(&self, size: u64) {
+        // Release: pairs with the Acquire load in `size`.
         self.size.store(size, Ordering::Release);
     }
 
     /// The link count, which only `Vfs` changes.
     pub fn nlink(&self) -> u32 {
+        // Acquire: pairs with the Release store in `set_nlink`.
         self.nlink.load(Ordering::Acquire) as u32
     }
 
     fn set_nlink(&self, n: u32) {
+        // Release: pairs with the Acquire load in `nlink`.
         self.nlink.store(u64::from(n), Ordering::Release);
     }
 
     pub fn private(&self) -> [u64; 2] {
+        // Acquire: pairs with the Release stores in `set_private`.
         [
             self.private[0].load(Ordering::Acquire),
             self.private[1].load(Ordering::Acquire),
@@ -611,7 +616,9 @@ impl InodeWords {
     }
 
     pub fn set_private(&self, p: [u64; 2]) {
+        // Release: pairs with the Acquire loads in `private`.
         self.private[0].store(p[0], Ordering::Release);
+        // Release: pairs with the Acquire loads in `private`.
         self.private[1].store(p[1], Ordering::Release);
     }
 }

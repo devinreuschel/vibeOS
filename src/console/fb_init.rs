@@ -63,6 +63,7 @@ static FB_LEN: AtomicU64 = AtomicU64::new(0);
 /// The framebuffer console is up; the REPL and the in-guest tests ask.
 #[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
 pub fn ready() -> bool {
+    // Acquire: pairs with the Release store in `init`.
     READY.load(Ordering::Acquire)
 }
 
@@ -70,10 +71,12 @@ pub fn ready() -> bool {
 /// Atomically readable so PCI BAR mapping can skip a UC patch without
 /// taking RANK_DEVICE (ioremap needs PT, which ranks below DEVICE).
 pub fn overlaps_phys(phys: u64, len: u64) -> bool {
+    // Acquire: pairs with the Release store in `init`.
     let span = FB_LEN.load(Ordering::Acquire);
     if span == 0 || len == 0 {
         return false;
     }
+    // Acquire: pairs with the Release store in `init`.
     let base = FB_PHYS.load(Ordering::Acquire);
     phys < base.saturating_add(span) && base < phys.saturating_add(len)
 }
@@ -97,8 +100,11 @@ pub fn init() -> bool {
         fb.paint_string(0, 0, BANNER, BANNER_FG, BANNER_BG);
         c.fb = Some(fb);
     }
+    // Release: pairs with the Acquire load in `overlaps_phys`.
     FB_PHYS.store(info.phys, Ordering::Release);
+    // Release: pairs with the Acquire load in `overlaps_phys`; publishes `FB_PHYS` too.
     FB_LEN.store(info.size, Ordering::Release);
+    // Release: pairs with the Acquire loads in `ready` and `write`.
     READY.store(true, Ordering::Release);
     true
 }
@@ -250,6 +256,7 @@ fn redraw() {
 /// for the grid; with IF=1 the redraw follows each chunk, and an empty
 /// write only redraws.
 pub fn write(bytes: &[u8]) {
+    // Acquire: pairs with the Release store in `init`.
     if !READY.load(Ordering::Acquire) {
         return;
     }
@@ -285,46 +292,61 @@ pub(crate) mod testing {
     static PIECES: AtomicU64 = AtomicU64::new(0);
 
     pub(crate) fn reset() {
+        // Release: pairs with the Acquire load in `grid_holds`.
         HOLDS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `max_piece_bytes`.
         MAX_PIECE_BYTES.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `max_chunk_scrolls`.
         MAX_CHUNK_SCROLLS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `scrolls`.
         SCROLLS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `pieces`.
         PIECES.store(0, Ordering::Release);
     }
 
     /// Redraw pieces taken, since [`reset`].
     pub(crate) fn pieces() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel add in `on_piece`.
         PIECES.load(Ordering::Acquire)
     }
 
     /// Console-lock holds that updated the grid, since [`reset`].
     pub(crate) fn grid_holds() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel add in `on_chunk`.
         HOLDS.load(Ordering::Acquire)
     }
 
     /// The most framebuffer bytes one redraw piece wrote, since [`reset`].
     pub(crate) fn max_piece_bytes() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel max in `on_piece`.
         MAX_PIECE_BYTES.load(Ordering::Acquire)
     }
 
     /// The most scrolls one chunk made.
     pub(crate) fn max_chunk_scrolls() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel max in `on_chunk`.
         MAX_CHUNK_SCROLLS.load(Ordering::Acquire)
     }
 
     /// Chunks that scrolled.
     pub(crate) fn scrolls() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel add in `on_chunk`.
         SCROLLS.load(Ordering::Acquire)
     }
 
     pub(super) fn on_chunk(st: ChunkStats) {
+        // AcqRel: pairs with the Acquire load in `grid_holds`.
         HOLDS.fetch_add(1, Ordering::AcqRel);
+        // AcqRel: pairs with the Acquire load in `max_chunk_scrolls`.
         MAX_CHUNK_SCROLLS.fetch_max(u64::from(st.scrolls), Ordering::AcqRel);
+        // AcqRel: pairs with the Acquire load in `scrolls`.
         SCROLLS.fetch_add(u64::from(st.scrolls), Ordering::AcqRel);
     }
 
     pub(super) fn on_piece(bytes: usize) {
+        // AcqRel: pairs with the Acquire load in `pieces`.
         PIECES.fetch_add(1, Ordering::AcqRel);
+        // AcqRel: pairs with the Acquire load in `max_piece_bytes`.
         MAX_PIECE_BYTES.fetch_max(bytes as u64, Ordering::AcqRel);
     }
 }

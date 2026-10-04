@@ -209,7 +209,7 @@ mod tracer {
     /// an id the table covers.
     #[inline(always)]
     fn slot() -> Option<&'static CpuTrace> {
-        // Relaxed: a late view only delays the stop by one hook.
+        // Relaxed: a late view only delays the stop by one hook; pairs with nothing.
         if HALTING.load(Ordering::Relaxed) || Arch::enabled() {
             return None;
         }
@@ -229,17 +229,23 @@ mod tracer {
         let Some(cpu) = slot() else {
             return;
         };
+        // Relaxed: this CPU's own trace, with IF=0; pairs with nothing.
         if !cpu.armed.load(Ordering::Relaxed) {
             return;
         }
+        // Relaxed: as `armed`; pairs with nothing.
         cpu.start.store(Arch::now(), Ordering::Relaxed);
+        // Relaxed: as `armed`; pairs with nothing.
         cpu.exempt.store(0, Ordering::Relaxed);
+        // Relaxed: as `armed`; pairs with nothing.
         cpu.deliberate.store(false, Ordering::Relaxed);
+        // Relaxed: as `armed`; pairs with nothing.
         let prev = cpu.site.swap(site.bits(), Ordering::Relaxed);
         if prev != 0 {
             // IF came back on with no `on` stamp (a `catch` longjmp skips
             // guard drops): drop the old stretch's time, count it.
             if let Some(s) = SITES.get_or_insert(site_of(prev)) {
+                // Relaxed: a counter the reporter reads as a total; pairs with nothing.
                 s.unmatched.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -249,10 +255,12 @@ mod tracer {
         let Some(cpu) = slot() else {
             return;
         };
+        // Relaxed: this CPU's own trace, with IF=0; pairs with nothing.
         if !cpu.armed.swap(true, Ordering::Relaxed) {
             // Bring-up: the first `sti` arms this CPU (rule 2's exemption).
             return;
         }
+        // Relaxed: as `armed`; pairs with nothing.
         let bits = cpu.site.swap(0, Ordering::Relaxed);
         if bits == 0 {
             return;
@@ -261,6 +269,7 @@ mod tracer {
         let Some(freq) = Arch::freq_hz() else {
             return;
         };
+        // Relaxed: as `armed`; pairs with nothing.
         let s = Stretch {
             start: cpu.start.load(Ordering::Relaxed),
             site: site_of(bits),
@@ -282,10 +291,12 @@ mod tracer {
         let Some(cpu) = slot() else {
             return;
         };
+        // Relaxed: this CPU's own trace, with IF=0; pairs with nothing.
         let bits = cpu.site.load(Ordering::Relaxed);
         if bits == 0 {
             return;
         }
+        // Relaxed: as `site`; pairs with nothing.
         cpu.deliberate.store(true, Ordering::Relaxed);
         if !testing::capturing()
             && let Some(st) = SITES.get_or_insert(site_of(bits))
@@ -312,9 +323,11 @@ mod tracer {
             let Some(cpu) = slot() else {
                 return none;
             };
+            // Relaxed: this CPU's own trace, with IF=0; pairs with nothing.
             if cpu.site.load(Ordering::Relaxed) == 0 {
                 return none;
             }
+            // Relaxed: as `site`; pairs with nothing.
             Self {
                 cpu: crate::arch::cpu_id_hint(),
                 start: cpu.start.load(Ordering::Relaxed),
@@ -331,6 +344,7 @@ mod tracer {
             let Some(cpu) = slot() else {
                 return;
             };
+            // Relaxed: this CPU's own trace, with IF=0; pairs with nothing.
             if crate::arch::cpu_id_hint() != self.cpu
                 || cpu.site.load(Ordering::Relaxed) == 0
                 || cpu.start.load(Ordering::Relaxed) != self.start
@@ -338,7 +352,9 @@ mod tracer {
                 return;
             }
             let spent = Arch::now().wrapping_sub(self.t0);
+            // Relaxed: this CPU's own trace, with IF=0; pairs with nothing.
             let e = cpu.exempt.load(Ordering::Relaxed);
+            // Relaxed: as the load; pairs with nothing.
             cpu.exempt.store(e.saturating_add(spent), Ordering::Relaxed);
         }
     }
@@ -365,17 +381,24 @@ mod tracer {
     pub(super) fn report() {
         for st in SITES.iter() {
             let site = st.site();
+            // Relaxed: a counter; a racing record shows in the next report; pairs with nothing.
             let n = st.count.load(Ordering::Relaxed);
+            // Relaxed: as `count`; pairs with nothing.
             let over = st.over.load(Ordering::Relaxed);
+            // Relaxed: as `count`; pairs with nothing.
             let delib = st.deliberate.load(Ordering::Relaxed);
+            // Relaxed: as `count`; pairs with nothing.
             let unmatched = st.unmatched.load(Ordering::Relaxed);
+            // Relaxed: as `count`; pairs with nothing.
             let max = st.max_ns.load(Ordering::Relaxed);
+            // Relaxed: the swap alone decides which report prints a change; pairs with nothing.
             if st.reported_over.swap(over, Ordering::Relaxed) != over {
                 line(format_args!(
                     "vibeOS: irqoff: over {} n {} max {} ns",
                     site, over, max
                 ));
             }
+            // Relaxed: as `reported_over`; pairs with nothing.
             if st.reported_count.swap(n, Ordering::Relaxed) != n {
                 line(format_args!(
                     "vibeOS: irqoff: site {} n {} over {} max {} ns p99 {} ns",
@@ -386,7 +409,9 @@ mod tracer {
                     st.hist.percentile(990)
                 ));
             }
+            // Relaxed: as `reported_over`; pairs with nothing.
             if st.reported_deliberate.swap(delib, Ordering::Relaxed) != delib {
+                // Relaxed: as `count`; pairs with nothing.
                 line(format_args!(
                     "vibeOS: irqoff: deliberate {} n {} max {} ns {}",
                     site,
@@ -395,6 +420,7 @@ mod tracer {
                     st.reason()
                 ));
             }
+            // Relaxed: as `reported_over`; pairs with nothing.
             if st.reported_unmatched.swap(unmatched, Ordering::Relaxed) != unmatched {
                 line(format_args!(
                     "vibeOS: irqoff: unmatched {} n {}",
@@ -403,6 +429,7 @@ mod tracer {
             }
         }
         let dropped = SITES.dropped();
+        // Relaxed: as `reported_over`; pairs with nothing.
         if REPORTED_DROPPED.swap(dropped, Ordering::Relaxed) != dropped {
             line(format_args!("vibeOS: irqoff: dropped {}", dropped));
         }
@@ -425,13 +452,17 @@ mod tracer {
         }
 
         pub(in crate::sched::irqoff) fn begin() {
+            // Relaxed: the Release store of `CAPTURE` below publishes it; pairs with nothing.
             SET.store(false, Ordering::Relaxed);
+            // Relaxed: as `SET`; pairs with nothing.
             NS.store(0, Ordering::Relaxed);
-            // Release: a hook that sees the capture on sees the reset.
+            // Release: pairs with the Acquire load in `capturing`, so a hook
+            // that sees the capture on sees the reset.
             CAPTURE.store(true, Ordering::Release);
         }
 
         pub(in crate::sched::irqoff) fn end() {
+            // Release: pairs with the Acquire load in `capturing`.
             CAPTURE.store(false, Ordering::Release);
         }
 
@@ -441,26 +472,33 @@ mod tracer {
             if !capturing() {
                 return false;
             }
-            // Relaxed: the test reads the slot after its own stretch closed
-            // on its own CPU; a racing capture on another CPU is the test's
-            // to reject by site.
+            // Relaxed: pairs with nothing; the test reads the slot after its
+            // own stretch closed on its own CPU, and a racing capture on
+            // another CPU is the test's to reject by site.
             if !SET.load(Ordering::Relaxed) || ns > NS.load(Ordering::Relaxed) {
+                // Relaxed: as above; pairs with nothing.
                 NS.store(ns, Ordering::Relaxed);
+                // Relaxed: as above; pairs with nothing.
                 SITE.store(site.bits(), Ordering::Relaxed);
+                // Relaxed: as above; pairs with nothing.
                 DELIBERATE.store(deliberate, Ordering::Relaxed);
+                // Relaxed: as above; pairs with nothing.
                 SET.store(true, Ordering::Relaxed);
             }
             true
         }
 
         pub(in crate::sched::irqoff) fn last() -> Option<(u64, Site, bool)> {
+            // Relaxed: as in `take`; pairs with nothing.
             if !SET.load(Ordering::Relaxed) {
                 return None;
             }
+            // Relaxed: as in `take`; pairs with nothing.
             // SAFETY: invariant: `SITE` holds `Site::bits` values only;
             // established by `sched::irqoff::take` (the tracer's capture
             // hook), its only store.
             let site = unsafe { Site::from_bits(SITE.load(Ordering::Relaxed)) };
+            // Relaxed: as in `take`; pairs with nothing.
             Some((
                 NS.load(Ordering::Relaxed),
                 site,

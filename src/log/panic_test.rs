@@ -107,6 +107,7 @@ mod stop {
         enter();
         ready(4);
         loop {
+            // Relaxed: a count; pairs with nothing.
             SPIN.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -144,13 +145,14 @@ mod stop {
         // After the spawns, which take the heap and SCHED locks, ranked
         // below `HELD`.
         let _held = HELD.lock();
+        // Release: pairs with the Acquire load in `enter`.
         GATE.store(true, Ordering::Release);
         // Acquire: pairs with each thread's Release store in `ready`.
         let all = || READY.iter().skip(1).all(|r| r.load(Ordering::Acquire));
         if !wait_ms(READY_MS, all) {
             panic!("panic-stop: cpus 1-4 not in place");
         }
-        // Release: CPU 1 panics once it sees it.
+        // Release: pairs with the Acquire load in `cpu1`.
         GO.store(true, Ordering::Release);
         panic!("panic-stop: cpu 0");
     }
@@ -159,15 +161,18 @@ mod stop {
     /// (a physical destination: the self shorthand takes Fixed delivery
     /// only), then the owner line once the NMI body returned.
     pub(crate) fn after_panic_message() {
+        // Relaxed: a count; pairs with nothing.
         let before = ipi_init::OWNER_NMI_RETURNS.load(Ordering::Relaxed);
         let Some(me) = per_cpu_init::cpu(crate::arch::cpu_id_hint()) else {
             return;
         };
+        // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
         let apic = me.apic_id.load(Ordering::Relaxed) as u8;
         // A refused NMI leaves out the owner line, which fails the run.
         if apic_init::send_ipi(apic, 0, IpiMode::Nmi).is_err() {
             return;
         }
+        // Relaxed: a count; pairs with nothing.
         let back = || ipi_init::OWNER_NMI_RETURNS.load(Ordering::Relaxed) != before;
         if wait_ms(SELF_NMI_MS, back) {
             crate::serial::raw::write_owner(b"vibeOS: panic_stop: owner nmi returned");

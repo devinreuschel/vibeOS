@@ -239,9 +239,9 @@ impl OnCpu {
     /// The incoming side of a switch marks the thread on this CPU.
     #[inline(always)]
     pub fn set(&self) {
-        // Relaxed (P10-S08): the scheduler lock, held across the switch's
-        // bookkeeping, orders this store with every reader that could see
-        // the thread Dead; nothing is published through it.
+        // Relaxed (P10-S08): pairs with nothing; the scheduler lock, held
+        // across the switch's bookkeeping, orders this store with every
+        // reader that could see the thread Dead.
         self.0.store(true, Ordering::Relaxed);
     }
 
@@ -250,8 +250,8 @@ impl OnCpu {
     #[inline(always)]
     pub fn clear(&self) {
         // Release: pairs with the Acquire load in `is_clear`, so a CPU that
-        // sees the flag clear sees every save into the TCB before it.
-        // Relaxed only in the loom model's variant (ROADMAP §10.8).
+        // sees the flag clear sees every save into the TCB before it. The
+        // loom model's variant is Relaxed, which pairs with nothing (ROADMAP §10.8).
         self.0.store(
             false,
             variant::pick(

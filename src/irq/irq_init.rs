@@ -134,6 +134,7 @@ pub fn dispatch(vec: u8) {
             // last put in hard IRQ defers (DESIGN §2.11 rule 6).
             drop(ctx);
         } else {
+            // Acquire: pairs with the Release stores in `set_handler` and `free_vector`.
             let p = HANDLERS[i].load(Ordering::Acquire);
             if p != 0 {
                 owned = true;
@@ -176,6 +177,7 @@ static UNOWNED_LINES: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 /// unowned case, and every 8259 line's body call it, with IF=0.
 pub fn unowned(vec: u8) {
     let cpu = crate::arch::cpu_id_hint();
+    // Relaxed: a count for the log line; pairs with nothing.
     let count = UNOWNED
         .get(cpu as usize)
         .and_then(|row| row.get(usize::from(vec)))
@@ -193,10 +195,12 @@ pub fn unowned(vec: u8) {
     }
     let now = crate::time_init::now_ns() / 1_000_000;
     let slot = &UNOWNED_LOGGED[usize::from(vec)];
+    // Relaxed: a rate limit's timestamp, which orders nothing; pairs with nothing.
     let last = slot.load(Ordering::Relaxed);
     if last != 0 && now.saturating_sub(last - 1) < 1_000 {
         return;
     }
+    // Relaxed both ways: the exchange only picks which CPU logs; pairs with nothing.
     if slot
         .compare_exchange(
             last,
@@ -208,6 +212,7 @@ pub fn unowned(vec: u8) {
     {
         return;
     }
+    // Relaxed: a count `unowned_lines` reads; pairs with nothing.
     #[cfg(feature = "kernel_tests")]
     UNOWNED_LINES[usize::from(vec)].fetch_add(1, Ordering::Relaxed);
     crate::marker!(
@@ -227,6 +232,7 @@ pub fn unowned(vec: u8) {
     )
 )]
 pub fn unowned_count(vec: u8, cpu: u32) -> u64 {
+    // Relaxed: a count; pairs with nothing.
     UNOWNED
         .get(cpu as usize)
         .and_then(|row| row.get(usize::from(vec)))
@@ -236,6 +242,7 @@ pub fn unowned_count(vec: u8, cpu: u32) -> u64 {
 /// `irq: no handler` lines printed for `vec` so far.
 #[cfg(feature = "kernel_tests")]
 pub fn unowned_lines(vec: u8) -> u64 {
+    // Relaxed: a count; pairs with nothing.
     UNOWNED_LINES[usize::from(vec)].load(Ordering::Relaxed)
 }
 
@@ -262,6 +269,7 @@ pub fn free_vector(vec: u8) -> Result<(), IrqError> {
     let (res, ctx) = with_irq(|s| {
         let mut ctx = None;
         if let Some(i) = handler_slot(vec) {
+            // Release: pairs with the Acquire load in `dispatch`.
             HANDLERS[i].store(0, Ordering::Release);
             s.routes[i] = Route::None;
             s.th.top[i] = None;
@@ -286,6 +294,7 @@ pub fn set_handler(vec: u8, h: Handler) -> Result<(), IrqError> {
     let Some(i) = handler_slot(vec) else {
         return Err(IrqError::BadVector);
     };
+    // Release: pairs with the Acquire load in `dispatch`.
     HANDLERS[i].store(h as usize, Ordering::Release);
     Ok(())
 }
@@ -318,6 +327,7 @@ pub fn set_threaded(
 }
 
 pub fn threaded_cpu() -> u32 {
+    // Acquire: pairs with the Release store in `start_threaded`.
     THREAD_CPU.load(Ordering::Acquire)
 }
 
@@ -362,6 +372,7 @@ fn irq_thread() {
 /// Bottom-half thread on the last online CPU (AP when SMP).
 pub fn start_threaded() {
     let cpu = last_online_cpu();
+    // Release: pairs with the Acquire load in `threaded_cpu`.
     THREAD_CPU.store(cpu, Ordering::Release);
     if let Err(e) = thread_init::spawn_on("irqth", irq_thread, cpu) {
         crate::klog!(
@@ -429,6 +440,7 @@ pub fn set_affinity(vec: u8, cpu: u32) -> Result<(), IrqError> {
     )
 )]
 fn apic_id(cpu: u32) -> Option<u8> {
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     per_cpu_init::cpu(cpu).map(|c| c.apic_id.load(Ordering::Relaxed) as u8)
 }
 

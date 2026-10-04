@@ -502,7 +502,7 @@ pub fn on_hw_tick() {
     let Some(st) = STATE.try_get() else {
         return;
     };
-    // Relaxed: a count for diagnostics; nothing is published through it.
+    // Relaxed: a count for diagnostics; pairs with nothing.
     st.ticks.fetch_add(1, Ordering::Relaxed);
     WRITER.with(|w| {
         if let Some(w) = w.as_mut() {
@@ -517,7 +517,7 @@ pub fn on_hw_tick() {
 static PIT_FIRES: AtomicU64 = AtomicU64::new(0);
 
 pub fn on_pit_tick() {
-    // Relaxed: a count read on the CPU it counts on; nothing hangs off it.
+    // Relaxed: a count; pairs with nothing.
     PIT_FIRES.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "kernel_tests")]
     super::ktest::stamp_pit_irq();
@@ -526,7 +526,7 @@ pub fn on_pit_tick() {
 
 /// PIT interrupts taken since boot.
 pub fn pit_fires() -> u64 {
-    // Relaxed: as in `on_pit_tick`.
+    // Relaxed: a count; pairs with nothing.
     PIT_FIRES.load(Ordering::Relaxed)
 }
 
@@ -595,6 +595,7 @@ pub(crate) fn read_counter(id: ClocksourceId) -> Option<u64> {
 /// Timer interrupts CPU 0 has taken since `time_init::init`.
 pub fn ticks() -> u64 {
     // Relaxed: as in `on_hw_tick`.
+    // Relaxed: a count; pairs with nothing.
     STATE
         .try_get()
         .map_or(0, |s| s.ticks.load(Ordering::Relaxed))

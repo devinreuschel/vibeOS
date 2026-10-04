@@ -97,7 +97,9 @@ pub unsafe fn init_bsp() {
         boxed[i].cpu_id = i as u32;
         i += 1;
     }
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     remote[0].apic_id.store(apic_id(), Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `wait_ready`.
     remote[0].ready.store(true, Ordering::Release);
     // SAFETY: slot 0 is the BSP's `PerCpu`, and the heap keeps the boxed
     // slice in place for good once `CPUS` holds it; the GDT load already
@@ -109,6 +111,7 @@ pub unsafe fn init_bsp() {
     unsafe { CPUS.set(boxed) };
     set_per_cpu_hooks(irq_nest_enter, irq_nest_leave, cpu_index_hook);
     percpu::mark_live();
+    // Release: pairs with the Acquire load in `online_mask`.
     ONLINE.store(1, Ordering::Release);
 }
 
@@ -268,12 +271,14 @@ unsafe fn with_ptr<R>(p: *mut PerCpu, f: impl FnOnce(&mut PerCpu) -> R) -> R {
     // SAFETY: `p` is a live slot of `CPUS` by this fn's `# Safety`
     // contract, established here; `cpu_id` is written once in `init_bsp`.
     let id = unsafe { (*p).cpu_id as usize }.min(63);
+    // Acquire: pairs with the Release store in `Unlock::drop`.
     if WITH_BUSY[id].swap(true, Ordering::Acquire) {
         panic!("per_cpu: with_current re-entry");
     }
     struct Unlock<'a>(&'a AtomicBool);
     impl Drop for Unlock<'_> {
         fn drop(&mut self) {
+            // Release: pairs with the next holder's Acquire swap above.
             self.0.store(false, Ordering::Release);
         }
     }
@@ -303,12 +308,14 @@ pub unsafe fn install_gs(cpu: &PerCpu) {
 /// CPU's `PerCpu`.
 pub fn irq_nest_enter() {
     if let Some(c) = try_current() {
+        // Relaxed: only this CPU stores its `irq_nest`; pairs with nothing.
         c.irq_nest.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 pub fn irq_nest_leave() {
     if let Some(c) = try_current() {
+        // Relaxed: only this CPU stores its `irq_nest`; pairs with nothing.
         let old = c.irq_nest.fetch_sub(1, Ordering::Relaxed);
         assert!(old > 0, "irq nest underflow");
     }
@@ -326,6 +333,7 @@ pub fn irq_nest() -> u32 {
     if interrupts_enabled() {
         return 0;
     }
+    // Relaxed: only this CPU stores its `irq_nest`; pairs with nothing.
     try_current()
         .map(|c| c.irq_nest.load(Ordering::Relaxed))
         .unwrap_or(0)
@@ -353,10 +361,12 @@ pub fn mark_online(cpu_id: u32) {
     if cpu_id >= 64 {
         return;
     }
+    // Release: pairs with the Acquire load in `online_mask`.
     ONLINE.fetch_or(1u64 << cpu_id, Ordering::Release);
 }
 
 pub fn online_mask() -> u64 {
+    // Acquire: pairs with the Release stores in `init_bsp` and `mark_online`.
     ONLINE.load(Ordering::Acquire)
 }
 

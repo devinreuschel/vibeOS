@@ -198,6 +198,7 @@ pub(super) fn with_slot<R>(
     f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, Error>,
 ) -> Result<R, Error> {
     let mut g = v.vol.lock();
+    // Acquire: pairs with the Release store in `drop_slot`.
     if !v.used.load(Ordering::Acquire) {
         return Err(Error::Io);
     }
@@ -230,6 +231,7 @@ fn with_vol<R>(
     f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, FsError>,
 ) -> Result<R, FsError> {
     let mut g = v.vol.lock();
+    // Acquire: pairs with the Release store in `drop_slot`.
     if !v.used.load(Ordering::Acquire) {
         return Err(FsError::Io);
     }
@@ -415,6 +417,7 @@ impl InodeOps for VibeOps {
         let Ok(vol) = vol_of(cx) else {
             return;
         };
+        // Release: pairs with nothing; nothing reads it yet.
         vol.sb.store(NO_SB, Ordering::Release);
         drop_slot(vol);
         if let Media::Dev(r) = &vol.media {
@@ -488,6 +491,7 @@ impl FileSystem for VibeFs {
     /// (`MNTS`).
     fn on_mount(&self, cx: &mut OpCx<'_>, at: &[u8]) {
         if let Ok(v) = vol_of(cx) {
+            // Release: pairs with nothing; nothing reads it yet.
             v.sb.store(cx.sb, Ordering::Release);
         }
         if register_mnt(cx.vol.cloned(), at).is_err() {
@@ -510,6 +514,7 @@ impl FileSystem for VibeFs {
 const NO_SB: u8 = u8::MAX;
 
 pub fn live() -> bool {
+    // Acquire: pairs with the Release store in `mount_mem`.
     LIVE.load(Ordering::Acquire)
 }
 
@@ -588,6 +593,7 @@ fn unregister_mnt(p: &[u8]) -> Option<Instance> {
 /// for any holder, so every later op fails.
 pub(super) fn drop_slot(vol: &VibeVolume) {
     let _g = vol.vol.lock();
+    // Release: pairs with the Acquire loads in `with_slot` and `with_vol`.
     vol.used.store(false, Ordering::Release);
 }
 
@@ -605,6 +611,7 @@ pub fn mount_mem(at: &str) -> Result<(), FsError> {
         *crate::fs::ktest::VIBE_MEM.lock() = Some(vol.clone());
     }
     fs_init::api().mount_fs(None, at.as_bytes(), &VIBE_FS, None, false, Some(vol))?;
+    // Release: pairs with the Acquire load in `live`.
     LIVE.store(true, Ordering::Release);
     Ok(())
 }

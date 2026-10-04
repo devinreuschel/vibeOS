@@ -38,22 +38,26 @@ static HW: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 static LAST: AtomicU8 = AtomicU8::new(NO_SOURCE);
 
 pub fn set_hw_fill(f: HwFill) {
+    // Release: pairs with the Acquire load in `hw_fill`.
     HW.store(f as *mut (), Ordering::Release);
 }
 
 /// The source of the last hardware fill that returned bytes; `None` before
 /// the first.
 pub fn last_source() -> Option<Source> {
+    // Acquire: pairs with the Release store in `set_last_source`.
     Source::from_u8(LAST.load(Ordering::Acquire))
 }
 
 pub fn set_last_source(src: Source) {
+    // Release: pairs with the Acquire load in `last_source`.
     LAST.store(src as u8, Ordering::Release);
 }
 
 /// Fill from virtio-rng and RDRAND; returns how many bytes it wrote. `0`
 /// means the hook is missing or both sources are dry.
 pub fn hw_fill(buf: &mut [u8]) -> usize {
+    // Acquire: pairs with the Release store in `set_hw_fill`.
     let p = HW.load(Ordering::Acquire);
     if p.is_null() {
         return 0;

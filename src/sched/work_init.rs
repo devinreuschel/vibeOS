@@ -137,6 +137,7 @@ fn queue_release(cpu: usize, list: &DeferList) {
         return;
     }
     list.unclaim();
+    // Relaxed: a count for the rate-limited warning; pairs with nothing.
     let n = RELEASE_RING_FULL.fetch_add(1, Ordering::Relaxed);
     if n.is_multiple_of(1024) {
         crate::klog!(
@@ -253,6 +254,7 @@ pub fn init() {
         ),
     }
     irq_init::start_threaded();
+    // Release: pairs with the Acquire load in `sched::ktest::work_live`.
     LIVE.store(true, Ordering::Release);
     crate::marker!("vibeOS: work: ready");
 }

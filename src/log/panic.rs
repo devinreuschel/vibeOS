@@ -79,9 +79,9 @@ static BOOT_STACK_HI: AtomicU64 = AtomicU64::new(0);
 pub fn note_boot_stack(rsp: u64) {
     let hi = rsp.checked_add(0xFFF).map_or(rsp, |v| v & !0xFFF);
     let lo = hi.saturating_sub(crate::boot::LIMINE_STACK_BYTES);
-    // Relaxed: written once on the BSP before any other CPU runs; the
-    // dump's reads are ordered by the stop that precedes them.
+    // Relaxed: written once on the BSP before any other CPU runs; pairs with nothing.
     BOOT_STACK_LO.store(lo, Ordering::Relaxed);
+    // Relaxed: written once on the BSP before any other CPU runs; pairs with nothing.
     BOOT_STACK_HI.store(hi, Ordering::Relaxed);
 }
 
@@ -111,6 +111,7 @@ pub(crate) fn known_stacks(out: &mut [StackRange; 8]) -> usize {
             push(StackRange::new(st.base().as_u64(), st.top().as_u64()));
         }
     }
+    // Relaxed: the stop before the dump orders the BSP's stores; pairs with nothing.
     push(StackRange::new(
         BOOT_STACK_LO.load(Ordering::Relaxed),
         BOOT_STACK_HI.load(Ordering::Relaxed),

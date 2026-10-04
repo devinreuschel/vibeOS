@@ -134,9 +134,11 @@ fn probe() -> u8 {
 }
 
 fn state() -> u8 {
+    // Acquire: pairs with the Release store below.
     match STATE.load(Ordering::Acquire) {
         UNPROBED => {
             let s = probe();
+            // Release: pairs with the Acquire load above.
             STATE.store(s, Ordering::Release);
             s
         }

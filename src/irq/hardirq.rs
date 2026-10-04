@@ -27,13 +27,14 @@ pub fn in_hard_irq() -> bool {
     if <Arch as InterruptMask>::enabled() {
         return false;
     }
-    // Relaxed: only this CPU writes its slot.
+    // Relaxed: only this CPU writes its slot; pairs with nothing.
     slot().is_some_and(|f| f.load(Ordering::Relaxed))
 }
 
 /// Set or clear this CPU's flag. `irq_init::dispatch` only, with IF off.
 pub(crate) fn set(on: bool) {
     if let Some(f) = slot() {
+        // Relaxed: only this CPU writes its slot; pairs with nothing.
         f.store(on, Ordering::Relaxed);
     }
 }

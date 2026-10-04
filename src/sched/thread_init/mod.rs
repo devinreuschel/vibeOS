@@ -476,6 +476,7 @@ fn thread_exit() -> ! {
             );
             cpu.dead_stack = Some(stack);
         });
+        // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
         STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     }
     // Under SCHED, as every other state store; the slot stays unreusable
@@ -636,8 +637,9 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
         cpu.tail_prev = old_ptr;
         let delta = now.wrapping_sub(cpu.slice_tsc);
         cpu.slice_tsc = now;
-        // Single writer: only this CPU stores its `switches`.
+        // Relaxed: only this CPU stores its `switches`; pairs with nothing.
         let switches = cpu.remote.switches.load(Ordering::Relaxed);
+        // Relaxed: as the load; pairs with nothing.
         cpu.remote
             .switches
             .store(switches.wrapping_add(1), Ordering::Relaxed);
@@ -654,8 +656,11 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             if old_ptr == cpu.idle {
                 cpu.idle_tsc = cpu.idle_tsc.wrapping_add(delta);
             }
+            // Relaxed: only this CPU changes its `irq_nest`; pairs with nothing.
             (*old_ptr).irq_nest = cpu.irq_nest.load(Ordering::Relaxed);
+            // Relaxed: as above; pairs with nothing.
             cpu.irq_nest.store((*new_ptr).irq_nest, Ordering::Relaxed);
+            // Relaxed: as above; pairs with nothing.
             apply_if_on_resume(
                 &mut (*new_ptr).context.rflags,
                 cpu.irq_nest.load(Ordering::Relaxed),
@@ -753,6 +758,7 @@ fn reclaim_dead_stacks_here() -> bool {
 
 /// The worker has freed `n` stacks it took with [`take_dead_stacks`].
 pub(crate) fn stacks_reclaimed(n: usize) {
+    // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
     STACKS_IN_FLIGHT.fetch_sub(n, Ordering::AcqRel);
 }
 
@@ -769,7 +775,9 @@ fn retire_dead_stack(cpu: &mut PerCpu) -> bool {
         return false;
     };
     if pages == DEFAULT_STACK_PAGES && cpu.stack_cache.put_from(&mut cpu.dead_stack) {
+        // AcqRel: pairs with the Acquire load in `cached_stack_frames` and the other updates.
         CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
+        // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
         STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
         return false;
     }
@@ -783,18 +791,21 @@ fn retire_dead_stack(cpu: &mut PerCpu) -> bool {
 /// Frames the stack caches of every CPU hold.
 #[cfg(feature = "kernel_tests")]
 pub fn cached_stack_frames() -> usize {
+    // Acquire: pairs with each AcqRel update of `CACHED_STACK_FRAMES`.
     CACHED_STACK_FRAMES.load(Ordering::Acquire)
 }
 
 /// Dead threads' stacks not yet cached or freed.
 #[cfg(feature = "kernel_tests")]
 pub fn stacks_in_flight() -> usize {
+    // Acquire: pairs with each AcqRel update of `STACKS_IN_FLIGHT`.
     STACKS_IN_FLIGHT.load(Ordering::Acquire)
 }
 
 /// A default-size stack from this CPU's cache, zeroed, or `None`.
 fn cached_stack() -> Option<GuardedStack> {
     let stack = per_cpu_init::with_current(|cpu| cpu.stack_cache.take())?;
+    // AcqRel: pairs with the Acquire load in `cached_stack_frames` and the other updates.
     CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
     let len = stack.pages() * vibeos::paging::PAGE_SIZE_4K as usize;
     // SAFETY: the stack's `pages` pages above `base` are mapped writable
@@ -817,6 +828,7 @@ pub(crate) fn return_stack(stack: GuardedStack) {
     };
     match refused {
         None => {
+            // AcqRel: pairs with the Acquire load in `cached_stack_frames` and the other updates.
             CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
         }
         Some(stack) => kva_init::free_stack(stack),
@@ -1047,8 +1059,10 @@ pub fn make_ready(id: ThreadId) {
 
 fn choose_cpu(affinity: CpuAffinity) -> u32 {
     let mask = per_cpu_init::online_mask();
+    // Relaxed: a round-robin hint; a lost update only repeats a CPU; pairs with nothing.
     let mut rr = SPAWN_RR.load(Ordering::Relaxed);
     let cpu = pick_cpu(affinity, mask, &mut rr);
+    // Relaxed: as the load; pairs with nothing.
     SPAWN_RR.store(rr, Ordering::Relaxed);
     cpu
 }
@@ -1068,6 +1082,7 @@ fn spawn_inner(
     as_cr3: u64,
     stack_pages: usize,
 ) -> Result<ThreadHandle, SpawnError> {
+    // AcqRel: pairs with the Release store in `testing::fail_next_fork_stack`.
     #[cfg(feature = "kernel_tests")]
     if current_pid() != 0 && testing::FAIL_FORK_STACK.swap(false, Ordering::AcqRel) {
         return Err(SpawnError::NoMemory);
@@ -1249,7 +1264,7 @@ fn fill_tcb(
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.user_segs = UserSegs::NULL;
-    // Relaxed: a statistic, reset before the thread first runs.
+    // Relaxed: a statistic, reset before the thread first runs; pairs with nothing.
     tcb.syscall_count.store(0, Ordering::Relaxed);
     tcb.pid = pid;
     prepare_thread(&mut tcb.context, top, tramp);

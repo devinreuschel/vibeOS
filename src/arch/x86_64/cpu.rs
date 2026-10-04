@@ -178,11 +178,13 @@ static SMAP_LIVE: AtomicBool = AtomicBool::new(false);
 /// `stac`/`clac` are #UD when SMAP is not present. `arch::cpu::init_control_regs` sets this.
 #[inline]
 pub fn smap_live() -> bool {
+    // Acquire: pairs with the Release store in `set_smap_live`.
     SMAP_LIVE.load(Ordering::Acquire)
 }
 
 #[inline]
 pub fn set_smap_live(on: bool) {
+    // Release: pairs with the Acquire load in `smap_live`.
     SMAP_LIVE.store(on, Ordering::Release);
 }
 
@@ -339,7 +341,9 @@ pub fn set_per_cpu_hooks(nest_enter: fn(), nest_leave: fn(), cpu_index: fn() -> 
     // Release: pairs with the Acquire loads in `run_hook` and `cpu_index`,
     // so a CPU that sees a hook sees what `init_bsp` wrote before it.
     NEST_ENTER.store(nest_enter as *mut (), Ordering::Release);
+    // Release: pairs with the Acquire load in `run_hook`.
     NEST_LEAVE.store(nest_leave as *mut (), Ordering::Release);
+    // Release: pairs with the Acquire load in `cpu_index`.
     CPU_INDEX.store(cpu_index as *mut (), Ordering::Release);
 }
 
@@ -709,6 +713,7 @@ pub(crate) fn stored_control_regs() -> Option<ControlRegs> {
     }
     Some(ControlRegs {
         cr0,
+        // Relaxed: the Acquire load of CR0 above orders it; pairs with nothing.
         cr4: CONTROL_CR4.load(Ordering::Relaxed),
     })
 }
@@ -753,6 +758,7 @@ pub fn init_control_regs() {
             // One writer: the BSP's `syscall_init::init_bsp` makes the
             // first call before `smp_init::init` starts any AP.
             let r = compute();
+            // Relaxed: the Release store of CR0 below publishes it; pairs with nothing.
             CONTROL_CR4.store(r.cr4, Ordering::Relaxed);
             // Release: pairs with the Acquire load in `stored_control_regs`.
             CONTROL_CR0.store(r.cr0, Ordering::Release);

@@ -54,6 +54,7 @@ fn capture(bytes: &[u8]) {
 }
 
 fn halting() -> bool {
+    // Acquire: pairs with the Release store in `ipi_init::stop_others`.
     raw::HALTING.load(Ordering::Acquire)
 }
 
@@ -66,6 +67,7 @@ impl Serial {
     /// panic may itself be *in* the serial path (DESIGN §2.5).
     pub fn init() {
         raw::init();
+        // Release: pairs with nothing; nothing reads it.
         INITIALIZED.store(true, Ordering::Release);
     }
 

@@ -911,8 +911,8 @@ impl DoneWord {
     pub fn publish(&self, status: u32) {
         debug_assert!(status != Self::PENDING, "DoneWord::publish(PENDING)");
         // Release: pairs with the Acquire load in `poll`, so the waiter sees
-        // everything the completer did before it. Relaxed only in the loom
-        // model's variant (ROADMAP §10.8).
+        // everything the completer did before it. The loom model's variant
+        // is Relaxed, which pairs with nothing (ROADMAP §10.8).
         self.0.store(
             status,
             variant::pick(Site::IoDoneRelaxed, Ordering::Release, Ordering::Relaxed),

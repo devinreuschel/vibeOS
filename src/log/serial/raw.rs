@@ -82,8 +82,7 @@ fn write_byte(b: u8) {
 /// Write `content` as one framed kernel line (`line::kernel_line`). No
 /// lock: the caller holds `serial`'s TX lock, or is the dump's owner.
 pub fn put_line(content: &[u8]) {
-    // AcqRel: the flag is read and cleared in one step, so a write on the
-    // halt path, which takes no lock, sees a defined value.
+    // AcqRel: pairs with the Acquire load and Release stores in `put_user`.
     let open = USER_OPEN.swap(false, Ordering::AcqRel);
     line::kernel_line(open, content, write_byte);
 }
@@ -92,7 +91,7 @@ pub fn put_line(content: &[u8]) {
 /// each frame byte escaped, `\n` as `\r\n`. No lock: the caller holds
 /// `serial`'s TX lock.
 pub fn put_user(bytes: &[u8]) {
-    // Acquire / Release: as in `put_line`, the value is defined on every path.
+    // Acquire: pairs with the AcqRel swap in `put_line` and the Release stores below.
     let was = USER_OPEN.load(Ordering::Acquire);
     // The flag follows each byte, set before any byte but `\n` goes out and
     // cleared after a `\n`: a panic dump that interrupts this write on this
@@ -100,13 +99,16 @@ pub fn put_user(bytes: &[u8]) {
     // on a fresh one. At worst it writes one empty line.
     let open = line::user_bytes(was, bytes, |b| {
         if b != b'\n' {
+            // Release: pairs with the AcqRel swap in `put_line` and the Acquire load above.
             USER_OPEN.store(true, Ordering::Release);
         }
         write_byte(b);
         if b == b'\n' {
+            // Release: pairs with the AcqRel swap in `put_line` and the Acquire load above.
             USER_OPEN.store(false, Ordering::Release);
         }
     });
+    // Release: pairs with the AcqRel swap in `put_line` and the Acquire load above.
     USER_OPEN.store(open, Ordering::Release);
 }
 
@@ -134,8 +136,7 @@ fn this_cpu() -> u32 {
 /// false for every later one, the owner re-entering included, so a
 /// nested panic does not dump again.
 pub fn claim_dump() -> bool {
-    // AcqRel: the winner's later writes follow its claim, and a loser
-    // sees the owner the winner stored.
+    // AcqRel, Acquire on failure: pairs with the Acquire load in `owner_cpu`.
     DUMP_OWNER
         .compare_exchange(NO_OWNER, this_cpu(), Ordering::AcqRel, Ordering::Acquire)
         .is_ok()

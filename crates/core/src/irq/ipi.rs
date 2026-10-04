@@ -62,6 +62,7 @@ impl<const WORDS: usize> WakeInbox<WORDS> {
         // §10.8): a drain between the two finds the word empty.
         let early = variant::pick(Site::InboxSummaryFirst, false, true);
         if early {
+            // Release: pairs with the drain's Acquire swap of the summary.
             self.summary.fetch_or(1u64 << w, Ordering::Release);
         }
         // Release: pairs with the drain's Acquire swap of this word.
@@ -112,6 +113,7 @@ impl<const WORDS: usize> WakeInbox<WORDS> {
     /// drain's swaps as with a push's `fetch_or`s, so a caller that sees it
     /// empty sees what the drain did before it.
     pub fn is_empty(&self) -> bool {
+        // Acquire: pairs with the Release `fetch_or`s in `push`.
         self.summary.load(Ordering::Acquire) == 0
             && self.words.iter().all(|w| w.load(Ordering::Acquire) == 0)
     }
