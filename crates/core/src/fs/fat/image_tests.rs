@@ -305,3 +305,34 @@ fn dir_read_error_is_io() {
     assert_eq!(v.lookup(&mut d, x, b"IN.TXT").unwrap().size, 6);
     assert_eq!(v.lookup(&mut d, root, b"X").unwrap().clu, x);
 }
+
+/// A directory whose cluster chain leaves the volume fails its walk with
+/// `Corrupt` (EIO) past its first cluster, rather than ending it there.
+#[test]
+fn dir_damaged_chain_is_corrupt() {
+    let mut b = fresh(IMG);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let x = v.create(d, root, b"X", true).unwrap().clu;
+        // `.`, `..` and 14 names fill one 512-byte cluster; a 15th grows
+        // the chain to a second.
+        for i in 0..15u8 {
+            let name = [b'F', b'0' + i / 10, b'0' + i % 10];
+            v.create(d, x, &name, false).unwrap();
+        }
+        assert!(v.lookup(d, x, b"F14").is_ok());
+        let past = v.info.nclus.checked_add(10).unwrap();
+        v.fat_set(d, x, past).unwrap();
+        assert_eq!(v.lookup(d, x, b"NOPE").unwrap_err(), FatError::Corrupt);
+        let mut out = Node::EMPTY;
+        let mut off = 0u64;
+        let err = loop {
+            match v.readdir(d, x, off, &mut out) {
+                Ok(Some(next)) => off = next,
+                Ok(None) => panic!("the walk ended at the damaged chain"),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(err, FatError::Corrupt);
+    });
+}
