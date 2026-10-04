@@ -440,7 +440,8 @@ pub(crate) mod testing {
         unsafe {
             core::arch::asm!(
                 "mrs {t}, mdscr_el1",
-                "orr {t}, {t}, #{mde_kde}",
+                "mov {m}, #{mde_kde}",
+                "orr {t}, {t}, {m}",
                 "msr mdscr_el1, {t}",
                 "isb",
                 "msr dbgbvr0_el1, {eret}",
@@ -448,6 +449,7 @@ pub(crate) mod testing {
                 "msr dbgbcr0_el1, {t}",
                 "isb",
                 t = out(reg) _,
+                m = out(reg) _,
                 eret = in(reg) eret,
                 mde_kde = const (1u64 << 15) | (1u64 << 13),
                 // E=1, PMC=EL1+EL0 (0b11 << 1), unlinked address match.
