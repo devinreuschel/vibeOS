@@ -87,14 +87,17 @@ pub fn overlaps_phys(phys: u64, len: u64) -> bool {
 
 /// Kernel VA of `phys` inside the console framebuffer mapping, if any.
 pub fn va_for_phys(phys: u64) -> Option<u64> {
+    // Acquire: pairs with the Release store in `init`.
     let span = FB_LEN.load(Ordering::Acquire);
     if span == 0 {
         return None;
     }
+    // Acquire: pairs with the Release store in `init`.
     let base = FB_PHYS.load(Ordering::Acquire);
     if phys < base || phys >= base.saturating_add(span) {
         return None;
     }
+    // Acquire: pairs with the Release store in `init`.
     let virt = FB_VIRT.load(Ordering::Acquire);
     Some(virt.saturating_add(phys - base))
 }
@@ -147,7 +150,8 @@ fn map_fb(i: &FbInfo) -> Option<u64> {
         }
     }
     // SAFETY: the framebuffer is device or RAM the bootloader already
-    // scanned; `memremap` maps it write-back in KVA (MEMORY.md §4.1).
+    // scanned; `memremap` maps it write-back in KVA (MEMORY.md §4.1);
+    // established here.
     unsafe { kva_init::memremap(PhysAddr(i.phys), i.size, physmap_flags()) }.map(|v| v.as_u64())
 }
 

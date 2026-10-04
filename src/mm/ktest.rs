@@ -366,7 +366,8 @@ pub(crate) fn test_mmio_uc_flags() -> Outcome {
     let err = {
         let mut m = paging_init::current_mapper();
         // SAFETY: host-style remap of an existing physmap leaf; we expect
-        // LiveChange and no store, so the leaf stays as `saved`.
+        // LiveChange and no store, so the leaf stays as `saved`;
+        // established here.
         unsafe {
             m.map_page(
                 leaf_va,

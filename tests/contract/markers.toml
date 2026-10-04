@@ -648,6 +648,13 @@ source = "kernel"
 section = "§4.1"
 
 [[marker]]
+text = "vibeOS: lapic: ioremap failed"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§11.2"
+
+[[marker]]
 text = "vibeOS: lapic: svr enable failed"
 kind = "diagnostic"
 arch = "x86_64"

@@ -603,9 +603,9 @@ and speculative walks can still read a freed table. aarch64 sends no IPI: its br
 ASID until the lazy CPU loads another root. Until then, a switch to a kernel thread loads the kernel
 root, and on aarch64 points TTBR0 at the empty user root.
 
-On aarch64 the §11.1 seam's invalidation is the Inner Shareable broadcast sequence (ROADMAP §11.2):
+On aarch64 the DESIGN §11.1 seam's invalidation is the Inner Shareable broadcast sequence (ROADMAP §11.2):
 `dsb ishst` after the descriptor store, then `tlbi vale1is` for a leaf (`vae1is` when a table page
-is freed, `aside1is` for one ASID), then `dsb ish`, and `isb` on the issuing core. The §4.10
+is freed, `aside1is` for one ASID), then `dsb ish`, and `isb` on the issuing core. The ROADMAP §4.10
 KVA-free deferral is satisfied once the `dsb ish` completes, so the shootdown hook sends no IPI.
 An ASID rollover broadcasts nothing: each flush-pending CPU runs `tlbi vmalle1`, `dsb nsh`, and
 `isb` locally before it loads an ASID of the new generation.

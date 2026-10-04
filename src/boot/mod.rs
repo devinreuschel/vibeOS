@@ -18,12 +18,12 @@ use crate::cell::BootCell;
 use vibeos::boot::cmdline::{self, CMDLINE_MAX, Cmdline, CmdlineBuf, Escaped, SYSCTLS};
 use vibeos::limits::MAX_BOOT_MODULES;
 use vibeos::log::Level;
-use vibeos::paging::{self, PhysmapSlot};
+use vibeos::physmap::{self, PhysmapSlot};
 
 #[cfg(target_arch = "aarch64")]
-use vibeos::paging::PHYSMAP_AARCH64;
+use vibeos::physmap::PHYSMAP_AARCH64;
 #[cfg(target_arch = "x86_64")]
-use vibeos::paging::PHYSMAP_X86_64;
+use vibeos::physmap::PHYSMAP_X86_64;
 
 #[cfg(target_arch = "x86_64")]
 pub mod fw_cfg_init;
@@ -308,7 +308,7 @@ pub fn capture() -> &'static BootInfo {
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: hhdm missing"));
     let hhdm_offset = hhdm.offset;
-    if !paging::hhdm_in_slot(hhdm_offset, physmap_slot()) {
+    if !physmap::hhdm_in_slot(hhdm_offset, physmap_slot()) {
         halt_with("vibeOS: limine: hhdm offset outside physmap slot");
     }
     let memmap = MEMMAP
@@ -400,7 +400,7 @@ pub fn info() -> &'static BootInfo {
     INFO.get()
 }
 
-fn physmap_slot() -> PhysmapSlot {
+pub(crate) fn physmap_slot() -> PhysmapSlot {
     #[cfg(target_arch = "x86_64")]
     {
         PHYSMAP_X86_64

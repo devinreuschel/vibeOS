@@ -127,9 +127,7 @@ pub const fn make_pte(va: VirtAddr, phys: PhysAddr, flags: PageFlags) -> u64 {
     if kernel || nx || flags.contains(PAGE_UXN) {
         d |= DESC_UXN;
     }
-    if nx {
-        d |= DESC_PXN;
-    } else if user {
+    if nx || user {
         d |= DESC_PXN;
     }
     d
@@ -304,7 +302,8 @@ mod tests {
         let root = PhysAddr(pool.alloc_frame().unwrap().into_entry());
         let ptr = root.0.wrapping_add(pool.hhdm()) as *mut u64;
         for i in 0..PTES_PER_TABLE {
-            // SAFETY: `root` is an order-0 pool frame; `i` stays in it.
+            // SAFETY: `root` is an order-0 pool frame; `i` stays in it;
+            // established here.
             unsafe { ptr.add(i).write_volatile(0) };
         }
         // SAFETY: `Mapper::new`'s contract; the zeroed pool frame is the
@@ -322,7 +321,8 @@ mod tests {
             (VirtAddr(0xFFFF_0000_0060_0000), physmap_flags()),
         ];
         for (va, flags) in cases {
-            // SAFETY: host tables; the leaf frame is never touched.
+            // SAFETY: host tables; the leaf frame is never touched;
+            // established here.
             unsafe {
                 m.map_page(
                     va,
@@ -338,7 +338,8 @@ mod tests {
             assert_ne!(raw & DESC_UXN, 0, "kernel VA {:#x} cleared UXN", va.0);
         }
         let user = VirtAddr(0x0000_0000_0080_0000);
-        // SAFETY: as above.
+        // SAFETY: host tables; the leaf frame is never touched;
+        // established here.
         unsafe {
             m.map_page(
                 user,

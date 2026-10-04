@@ -75,18 +75,20 @@ fn ioremap_page(phys: u64) -> Option<u64> {
     }
     // SAFETY: invariant I49: `[phys, phys+4K)` is a device register page
     // (LAPIC, I/O APIC, or HPET) that no cacheable alias reaches;
-    // established by the MADT/HPET table the walk just parsed.
+    // established here from the MADT/HPET table `acpi::walk` just parsed.
     unsafe { paging_init::ioremap(PhysAddr(phys), PAGE_SIZE_4K) }.map(|v| v.as_u64())
 }
 
 /// The ioremap VA of the MADT LAPIC page, if mapped.
 pub fn lapic_va() -> Option<u64> {
+    // Acquire: pairs with the Release store in `init`.
     let v = LAPIC_VA.load(Ordering::Acquire);
     (v != 0).then_some(v)
 }
 
 /// The ioremap VA of the HPET page, if mapped.
 pub fn hpet_va() -> Option<u64> {
+    // Acquire: pairs with the Release store in `init`.
     let v = HPET_VA.load(Ordering::Acquire);
     (v != 0).then_some(v)
 }
@@ -97,7 +99,9 @@ pub fn ioapic_va(phys: u64) -> Option<u64> {
         return None;
     }
     for i in 0..MAX_IOAPICS {
+        // Acquire: pairs with the Release store in `init`.
         if IOAPIC_PHYS[i].load(Ordering::Acquire) == phys {
+            // Acquire: pairs with the Release store in `init`.
             let v = IOAPIC_VA[i].load(Ordering::Acquire);
             return (v != 0).then_some(v);
         }
@@ -120,6 +124,7 @@ pub unsafe fn init(rsdp_phys: u64) {
 
     if let Some(madt) = &info.madt {
         if let Some(va) = ioremap_page(madt.lapic_base) {
+            // Release: pairs with the Acquire load in `lapic_va`.
             LAPIC_VA.store(va, Ordering::Release);
         }
         for (i, io) in madt.ioapics.iter().take(madt.ioapic_count).enumerate() {
@@ -127,21 +132,25 @@ pub unsafe fn init(rsdp_phys: u64) {
                 break;
             };
             if let Some(va) = ioremap_page(io.addr as u64) {
+                // Release: pairs with the Acquire load in `ioapic_va`.
                 slot.store(io.addr as u64, Ordering::Release);
+                // Release: pairs with the Acquire load in `ioapic_va`.
                 IOAPIC_VA[i].store(va, Ordering::Release);
             }
         }
     }
     let mut hpet_mapped = false;
-    if let Some(hpet) = &info.hpet {
-        if let Some(va) = ioremap_page(hpet.base) {
-            HPET_VA.store(va, Ordering::Release);
-            hpet_mapped = true;
-        }
+    if let Some(hpet) = &info.hpet
+        && let Some(va) = ioremap_page(hpet.base)
+    {
+        // Release: pairs with the Acquire load in `hpet_va`.
+        HPET_VA.store(va, Ordering::Release);
+        hpet_mapped = true;
     }
 
     // First MMIO touch: HPET GEN_CAP period, only after that page is UC.
     if hpet_mapped && let Some(hpet) = info.hpet.as_mut() {
+        // Acquire: pairs with the Release store in `init`.
         let va = HPET_VA.load(Ordering::Acquire) as *const u64;
         // SAFETY: invariant I49, established here: `ioremap_page` returned
         // a Device mapping of the HPET register page, and GEN_CAP is its

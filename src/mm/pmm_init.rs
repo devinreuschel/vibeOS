@@ -17,11 +17,10 @@
 //! `Buddy::insert_region` drops frame 0 again as defence in depth.
 
 use vibeos::lock::RANK_BUDDY;
-use vibeos::paging::{clip_range_to_slot, leftover_mib};
+use vibeos::physmap::{clip_range_to_slot, leftover_mib};
 use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats, clip_usable};
 
-use crate::boot::BootInfo;
-use crate::paging_init;
+use crate::boot::{self, BootInfo};
 use crate::sync_init::SpinMutex;
 
 static BUDDY: SpinMutex<Buddy> = SpinMutex::with_rank(Buddy::new(0), RANK_BUDDY);
@@ -60,7 +59,7 @@ pub unsafe fn init(info: &BootInfo) -> PmmStats {
             .chain(crate::machine_init::reserved_ranges())
     };
 
-    let slot = paging_init::physmap_slot();
+    let slot = boot::physmap_slot();
     let offset = info.hhdm_offset;
     let mut leftover = 0u64;
     for r in info.ram_ranges() {

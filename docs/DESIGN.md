@@ -191,7 +191,7 @@ children, need no row.
 | crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `kalloc/{tests,users_tests,loom_models}.rs`, `kerror.rs`, `trap.rs`, `atomic.rs`, `cell.rs` (`BootCell`, `IrqCell`, `CellHooks`) | `main.rs`, `cell.rs` (the kernel's names for the cells and its `CellHooks` impl) |
 | boot | `boot/{mod,cmdline}.rs` | `boot/{mod,fw_cfg_init}.rs` (`BootInfo`, Limine requests, fw_cfg) |
 | arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,stat,syscall,trap,uart,vectors}.rs`, `arch/aarch64/{mod,paging,sysreg,tlb}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,boot,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,power,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S` |
-| mm | `mm/{mod,asid,pmm,paging,physmap,heap,kva}.rs`, `mm/pmm/{kani_proofs,run_tests}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
+| mm | `mm/{mod,asid,pmm,paging,paging_tests,physmap,heap,kva}.rs`, `mm/pmm/{kani_proofs,run_tests}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
 | time | `time/mod.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
 | machine | `machine/{mod,fdt}.rs` | `machine/{mod,machine_init}.rs` |

@@ -39,14 +39,14 @@ pub(crate) fn test_bootinfo_consistent() -> Outcome {
     let slot = {
         #[cfg(target_arch = "x86_64")]
         {
-            vibeos::paging::PHYSMAP_X86_64
+            vibeos::physmap::PHYSMAP_X86_64
         }
         #[cfg(target_arch = "aarch64")]
         {
-            vibeos::paging::PHYSMAP_AARCH64
+            vibeos::physmap::PHYSMAP_AARCH64
         }
     };
-    if !vibeos::paging::hhdm_in_slot(info.hhdm_offset, slot) {
+    if !vibeos::physmap::hhdm_in_slot(info.hhdm_offset, slot) {
         return Outcome::Fail("hhdm offset outside slot");
     }
     if info.hhdm_offset != paging_init::hhdm_offset() {

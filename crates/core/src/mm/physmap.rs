@@ -282,14 +282,12 @@ mod tests {
     fn collect(
         slot: PhysmapSlot,
         offset: u64,
-        ram: &[Range<u64>],
+        ram: impl IntoIterator<Item = Range<u64>>,
         kernel: Range<u64>,
         have_1g: bool,
     ) -> (PhysmapWalk, Vec<PhysmapRun>) {
         let mut runs = Vec::new();
-        let w = walk_physmap(slot, offset, ram.iter().cloned(), kernel, have_1g, |r| {
-            runs.push(r)
-        });
+        let w = walk_physmap(slot, offset, ram, kernel, have_1g, |r| runs.push(r));
         (w, runs)
     }
 
@@ -301,8 +299,13 @@ mod tests {
     #[test]
     fn builder_skips_multi_tib_mmio() {
         let off = PHYSMAP_X86_64.start;
-        let ram = [0u64..0x1000_0000];
-        let (w, runs) = collect(PHYSMAP_X86_64, off, &ram, 0..0, true);
+        let (w, runs) = collect(
+            PHYSMAP_X86_64,
+            off,
+            core::iter::once(0u64..0x1000_0000),
+            0..0,
+            true,
+        );
         assert_eq!(w.leftover, 0);
         assert!(any_pa(&runs, 0));
         assert!(!any_pa(&runs, 0x40_0000_0000));
@@ -319,7 +322,7 @@ mod tests {
             0u64..PAGE_SIZE_2M + PAGE_SIZE_4K,
             2 * PAGE_SIZE_2M..3 * PAGE_SIZE_2M,
         ];
-        let (_, runs) = collect(PHYSMAP_X86_64, off, &ram, 0..0, false);
+        let (_, runs) = collect(PHYSMAP_X86_64, off, ram, 0..0, false);
         assert!(
             runs.iter()
                 .any(|r| r.size == PageSize::Size2M && r.pa.0 == 0)
@@ -333,10 +336,15 @@ mod tests {
     #[test]
     fn builder_skips_framebuffers_outside_ram() {
         let off = PHYSMAP_X86_64.start;
-        let ram = [0u64..0x80_0000];
         let fb = 0x40_0000_0000u64;
         let fb2 = fb - PAGE_SIZE_4K;
-        let (_, runs) = collect(PHYSMAP_X86_64, off, &ram, 0..0, true);
+        let (_, runs) = collect(
+            PHYSMAP_X86_64,
+            off,
+            core::iter::once(0u64..0x80_0000),
+            0..0,
+            true,
+        );
         assert!(!any_pa(&runs, fb));
         assert!(!any_pa(&runs, fb + PAGE_SIZE_2M));
         assert!(!any_pa(&runs, fb2));
@@ -346,8 +354,13 @@ mod tests {
     #[test]
     fn builder_drops_ram_past_slot() {
         let off = PHYSMAP_X86_64.start + 31 * TIB;
-        let ram = [0u64..70 * TIB];
-        let (w, runs) = collect(PHYSMAP_X86_64, off, &ram, 0..0, true);
+        let (w, runs) = collect(
+            PHYSMAP_X86_64,
+            off,
+            core::iter::once(0u64..70 * TIB),
+            0..0,
+            true,
+        );
         let (fit, left) = physmap_ram_fit(PHYSMAP_X86_64, off, 70 * TIB);
         assert_eq!(w.mapped, fit);
         assert_eq!(w.leftover, left);
@@ -360,8 +373,13 @@ mod tests {
     fn builder_maps_kernel_span_at_4k() {
         let off = PHYSMAP_X86_64.start;
         let kernel = 0x10_0000u64..0x30_0000;
-        let ram = [0u64..0x40_0000];
-        let (_, runs) = collect(PHYSMAP_X86_64, off, &ram, kernel.clone(), true);
+        let (_, runs) = collect(
+            PHYSMAP_X86_64,
+            off,
+            core::iter::once(0u64..0x40_0000),
+            kernel.clone(),
+            true,
+        );
         for r in &runs {
             let overlap = r.pa.0 < kernel.end && kernel.start < r.pa.0 + r.len;
             if overlap {
@@ -383,12 +401,18 @@ mod tests {
     #[test]
     fn builder_uses_1g_when_aligned() {
         let off = PHYSMAP_X86_64.start;
-        let ram = [0u64..2 * PAGE_SIZE_1G];
-        let (_, runs) = collect(PHYSMAP_X86_64, off, &ram, 0..0, true);
+        let ram = 0u64..2 * PAGE_SIZE_1G;
+        let (_, runs) = collect(
+            PHYSMAP_X86_64,
+            off,
+            core::iter::once(ram.clone()),
+            0..0,
+            true,
+        );
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].size, PageSize::Size1G);
         assert_eq!(runs[0].len, 2 * PAGE_SIZE_1G);
-        let (_, runs) = collect(PHYSMAP_X86_64, off, &ram, 0..0, false);
+        let (_, runs) = collect(PHYSMAP_X86_64, off, core::iter::once(ram), 0..0, false);
         assert!(runs.iter().all(|r| r.size == PageSize::Size2M));
     }
 }

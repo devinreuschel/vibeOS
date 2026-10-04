@@ -90,7 +90,7 @@ fn lapic_mmio_va(phys: u64) -> Option<u64> {
     crate::acpi_init::lapic_va().or_else(|| {
         // SAFETY: invariant I49: the LAPIC page is device MMIO; ACPI
         // already ioremapped it when the MADT named it, and this is the
-        // fallback when the MADT base was zero.
+        // fallback when the MADT base was zero; established here.
         unsafe {
             paging_init::ioremap(vibeos::paging::PhysAddr(phys), vibeos::paging::PAGE_SIZE_4K)
         }

@@ -54,10 +54,10 @@ impl AsidAlloc {
             ncpus,
             generation: AtomicU64::new(1u64 << bits),
             next: AtomicU32::new(1),
-            used: [const { AtomicU64::new(0) }; BITMAP_WORDS],
-            reserved: [const { AtomicU64::new(0) }; MAX_CPUS],
-            active: [const { AtomicU64::new(0) }; MAX_CPUS],
-            flush_pending: [const { AtomicBool::new(false) }; MAX_CPUS],
+            used: core::array::from_fn(|_| AtomicU64::new(0)),
+            reserved: core::array::from_fn(|_| AtomicU64::new(0)),
+            active: core::array::from_fn(|_| AtomicU64::new(0)),
+            flush_pending: core::array::from_fn(|_| AtomicBool::new(false)),
             lock: AtomicBool::new(false),
         })
     }
@@ -98,11 +98,22 @@ impl AsidAlloc {
             return false;
         }
         let slot = &self.active[cpu as usize];
+        // Acquire: pairs with the Release store in `switch_locked_inner`
+        // and the AcqRel swap in `rollover`.
         let cur = slot.load(Ordering::Acquire);
+        // Rollover exchanges this slot for 0. A CAS from 0 would
+        // republish a word whose generation is already dead.
+        if cur == 0 {
+            return false;
+        }
         if variant::pick(Site::AsidFastStore, false, true) {
+            // Relaxed: the weakened fast path; pairs with nothing.
             slot.store(word, Ordering::Relaxed);
             return self.current(word);
         }
+        // AcqRel: pairs with the Acquire load in `switch_fast` and the
+        // AcqRel swap in `rollover`. Acquire: the CAS failure load; pairs
+        // with the same.
         slot.compare_exchange(cur, word, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
             && self.current(word)
@@ -128,6 +139,7 @@ impl AsidAlloc {
         } else {
             self.alloc_fresh()
         };
+        // Release: pairs with the Acquire load in `switch_fast` and `active`.
         self.active[cpu as usize].store(out, Ordering::Release);
         out
     }
@@ -144,7 +156,9 @@ impl AsidAlloc {
         }
         let mut hit = false;
         for i in 0..self.ncpus as usize {
+            // Relaxed: the allocator lock is held; pairs with nothing.
             if self.reserved[i].load(Ordering::Relaxed) == word {
+                // Relaxed: the allocator lock is held; pairs with nothing.
                 self.reserved[i].store(self.pack(keep), Ordering::Relaxed);
                 hit = true;
             }
@@ -171,29 +185,44 @@ impl AsidAlloc {
     fn rollover(&self) {
         let mask = self.asid_mask();
         let step = mask + 1;
+        // Release: pairs with the Acquire load in `generation`.
         let _ = self.generation.fetch_add(step, Ordering::Release);
         for i in 0..self.ncpus as usize {
+            // AcqRel: pairs with the Acquire load and AcqRel CAS in `switch_fast`.
             let old = self.active[i].swap(0, Ordering::AcqRel);
             if variant::pick(Site::AsidSkipReserve, false, true) {
+                // Relaxed: the allocator lock is held; pairs with nothing.
                 self.reserved[i].store(0, Ordering::Relaxed);
             } else {
+                // Relaxed: the allocator lock is held; pairs with nothing.
                 self.reserved[i].store(old, Ordering::Relaxed);
             }
+            // Release: pairs with the Acquire load in `flush_pending`.
             self.flush_pending[i].store(true, Ordering::Release);
         }
-        for w in 0..self.bitmap_words() {
-            self.used[w].store(0, Ordering::Relaxed);
+        for a in self.used.iter().take(self.bitmap_words()) {
+            // Relaxed: the allocator lock is held; pairs with nothing.
+            a.store(0, Ordering::Relaxed);
         }
         for i in 0..self.ncpus as usize {
+            // Relaxed: the allocator lock is held; pairs with nothing.
             let asid = (self.reserved[i].load(Ordering::Relaxed) & mask) as u32;
             if asid != 0 {
                 self.set_used(asid);
             }
         }
+        // Relaxed: the allocator lock is held; pairs with nothing.
         self.next.store(1, Ordering::Relaxed);
     }
 
+    /// Rollover under the allocator lock. Loom races this with `switch_fast`.
+    #[cfg(all(test, loom))]
+    fn force_rollover(&self) {
+        self.with_lock(|| self.rollover());
+    }
+
     pub fn flush_pending(&self, cpu: u32) -> bool {
+        // Acquire: pairs with the Release store in `rollover`.
         self.flush_pending
             .get(cpu as usize)
             .is_some_and(|a| a.load(Ordering::Acquire))
@@ -202,11 +231,13 @@ impl AsidAlloc {
     /// Clear flush-pending after the local `vmalle1` sequence.
     pub fn clear_flush(&self, cpu: u32) {
         if let Some(a) = self.flush_pending.get(cpu as usize) {
+            // Release: pairs with the Acquire load in `flush_pending`.
             a.store(false, Ordering::Release);
         }
     }
 
     pub fn active(&self, cpu: u32) -> AsidWord {
+        // Acquire: pairs with the Release store in `switch_locked_inner`.
         self.active
             .get(cpu as usize)
             .map(|a| a.load(Ordering::Acquire))
@@ -215,6 +246,7 @@ impl AsidAlloc {
 
     fn find_free(&self) -> Option<u32> {
         let max = 1u32 << self.bits;
+        // Relaxed: the allocator lock is held; pairs with nothing.
         let start = self.next.load(Ordering::Relaxed).max(1);
         let mut a = start;
         for _ in 1..max {
@@ -223,6 +255,7 @@ impl AsidAlloc {
             }
             if !self.is_used(a) {
                 let n = if a + 1 >= max { 1 } else { a + 1 };
+                // Relaxed: the allocator lock is held; pairs with nothing.
                 self.next.store(n, Ordering::Relaxed);
                 return Some(a);
             }
@@ -247,6 +280,7 @@ impl AsidAlloc {
         let i = asid as usize;
         let w = i / 64;
         let b = i % 64;
+        // Relaxed: the allocator lock is held; pairs with nothing.
         map.get(w)
             .is_some_and(|a| a.load(Ordering::Relaxed) & (1u64 << b) != 0)
     }
@@ -256,6 +290,7 @@ impl AsidAlloc {
         let w = i / 64;
         let b = i % 64;
         if let Some(a) = map.get(w) {
+            // Relaxed: the allocator lock is held; pairs with nothing.
             let _ = a.fetch_or(1u64 << b, Ordering::Relaxed);
         }
     }
@@ -263,12 +298,15 @@ impl AsidAlloc {
     fn with_lock<R>(&self, f: impl FnOnce() -> R) -> R {
         while self
             .lock
+            // Acquire: pairs with the Release store in `with_lock`. Relaxed:
+            // the failure load; pairs with nothing.
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             crate::atomic::spin_loop();
         }
         let r = f();
+        // Release: pairs with the Acquire compare-exchange in `with_lock`.
         self.lock.store(false, Ordering::Release);
         r
     }
@@ -293,7 +331,7 @@ mod tests {
         assert!(AsidAlloc::new(2, 3).is_none());
         assert!(AsidAlloc::new(1, 1).is_none());
         assert!(AsidAlloc::new(2, 2).is_some());
-        assert_eq!(DISABLED_REASON.is_empty(), false);
+        assert!(!DISABLED_REASON.is_empty());
     }
 
     #[test]
@@ -370,46 +408,59 @@ mod tests {
 #[cfg(all(test, loom))]
 mod loom_models {
     use super::*;
-    use crate::sync::variant::{self, Site};
+    use crate::sync::variant::{Bound, Site, check};
     use loom::sync::Arc;
     use loom::thread;
 
-    fn model() {
-        loom::model(|| {
+    /// CPU 0 publishes `first` on the fast path while CPU 1 rolls over
+    /// and allocates a new space. A store instead of CAS can leave a
+    /// stale generation in `active[0]`; skipping reserve can give the
+    /// new space CPU 0's running ASID. Bound: 2 threads (CPU 0 one
+    /// fast switch, CPU 1 one rollover and one alloc), 3 preemptions.
+    fn model(v: Option<Site>) {
+        let bound = Bound {
+            threads: 2,
+            preemptions: 3,
+        };
+        check(v, bound, || {
             let alloc = Arc::new(AsidAlloc::new(2, 2).unwrap());
             let mut w = 0u64;
             let first = switch(&alloc, 0, &mut w);
             let a = alloc.clone();
             let t = thread::spawn(move || {
+                a.force_rollover();
                 let mut other = 0u64;
-                let _ = switch(&a, 1, &mut other);
-                let _ = switch(&a, 1, &mut other);
-                let _ = switch(&a, 1, &mut other);
+                let n = switch(&a, 1, &mut other);
+                assert_ne!(
+                    a.asid_of(n),
+                    a.asid_of(first),
+                    "asid aliased across rollover"
+                );
             });
-            let ok = alloc.switch_fast(0, first);
+            let _ = alloc.switch_fast(0, first);
             t.join().unwrap();
-            if ok {
-                assert_eq!(alloc.asid_of(alloc.active(0)), alloc.asid_of(first));
-            }
+            let act = alloc.active(0);
+            assert!(
+                act == 0 || alloc.current(act),
+                "stale generation in active[0]"
+            );
         });
     }
 
     #[test]
     fn loom_asid_switch_vs_rollover() {
-        model();
+        model(None);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "stale generation in active[0]")]
     fn loom_asid_fast_store_fails() {
-        let _w = variant::weaken(Site::AsidFastStore);
-        model();
+        model(Some(Site::AsidFastStore));
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "asid aliased across rollover")]
     fn loom_asid_skip_reserve_fails() {
-        let _w = variant::weaken(Site::AsidSkipReserve);
-        model();
+        model(Some(Site::AsidSkipReserve));
     }
 }

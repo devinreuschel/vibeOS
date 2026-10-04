@@ -76,21 +76,17 @@ pub enum IcacheOp {
 /// `idc` / `dic` from `CTR_EL0`. ELF load is the first caller.
 pub fn icache_sync(idc: bool, dic: bool, buf: &mut [IcacheOp]) -> usize {
     let mut n = 0;
-    if !idc {
-        if n < buf.len() {
-            buf[n] = IcacheOp::DcCvau;
-            n += 1;
-        }
+    if !idc && n < buf.len() {
+        buf[n] = IcacheOp::DcCvau;
+        n += 1;
     }
     if n < buf.len() {
         buf[n] = IcacheOp::DsbIsh;
         n += 1;
     }
-    if !dic {
-        if n < buf.len() {
-            buf[n] = IcacheOp::IcIvau;
-            n += 1;
-        }
+    if !dic && n < buf.len() {
+        buf[n] = IcacheOp::IcIvau;
+        n += 1;
     }
     if n < buf.len() {
         buf[n] = IcacheOp::DsbIsh;
