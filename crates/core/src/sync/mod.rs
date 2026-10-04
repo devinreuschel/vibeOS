@@ -50,6 +50,10 @@ pub mod variant {
         /// `kalloc::CoreArc::pin` raises `users` with a blind `fetch_add`,
         /// not get-unless-zero.
         UsersBlindPin = 10,
+        /// ASID fast path stores `active_asid` instead of compare-exchange.
+        AsidFastStore = 11,
+        /// ASID rollover skips reserving the ASIDs it exchanged out.
+        AsidSkipReserve = 12,
     }
 
     /// `kernel` at `site`, or `weak` while a loom model has weakened it.

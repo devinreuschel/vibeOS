@@ -92,6 +92,7 @@ needs the concern moves it behind the seam (PORTABILITY.md §11.3).
 | `src/time/time_init.rs` | the `x86` and TSC use lines; `io_wait`, `calibrate_pit`, `program_pit_ch0`, `rtc_reg`, `eoi_pit`; `init`'s CMOS write and TSC publication | Timer and cycle counter | the PIT, the CMOS RTC and TSC calibration are PC platform timers (ROADMAP Phase 11 splits them) |
 | `src/ktest/mod.rs` | `Fault.cr2` and its `catch_fault` initializer; `on_kvm` | Trap decode | the in-guest tests' `#PF` address and CPUID's hypervisor leaf |
 | `src/ktest/user.rs` | `user_code!`'s `global_asm!` | Syscall instruction, user frame's layout (§5.10), numbers and argument order | the tests' ring-3 code is x86_64 assembly |
+| `src/mm/paging_init.rs` | `physmap_slot`'s x86_64 slot; `have_1g_pages`'s CPUID `pdpe1gb` check | Page-table format and attributes | the slot constant and 1 GiB pages are this port's; the aarch64 hardware half is ROADMAP §11.2 |
 | `src/mm/ktest.rs` | `test_nx_enforcement`, `test_stack_guard` and their `TESTS` rows; `va0_probe` | Page-table format and attributes | they read the `#PF` error code and CR2, and probe VA 0 with an x86 load |
 | `src/proc/ktest/entry.rs` | the `x86` use line; `test_addrspace_map_unmap_teardown` and its `TESTS` row | TLB maintenance and address-space ids | it runs `invlpg` and opens the SMAP window by hand |
 | `src/proc/ktest/hooks.rs` | the `x86` use line; `star_configured` | Syscall instruction, user frame's layout (§5.10), numbers and argument order | STAR and EFER.SCE are the `syscall` instruction's MSRs |

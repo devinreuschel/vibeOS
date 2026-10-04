@@ -12,6 +12,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Added
 
+- RAM-only physmap: a 9 GiB guest puts RAM above 8 GiB in the buddy; MMIO
+  is `ioremap` ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
 - One portable `MachineDesc` from the device tree and ACPI; reserved FDT
   ranges stay out of the buddy ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
 - `make check` fails a Relaxed, Acquire, Release or AcqRel ordering with no

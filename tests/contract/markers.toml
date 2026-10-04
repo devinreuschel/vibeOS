@@ -259,17 +259,19 @@ arch = "both"
 source = "kernel"
 section = "§1.2"
 
-# §1.3 MMIO attributes
-
 [[marker]]
-text = "vibeOS: paging: mmio uc"
-kind = "contract"
+text = "vibeOS: pmm: <n> MiB past the physmap slot ignored"
+kind = "diagnostic"
 arch = "both"
 source = "kernel"
-section = "§1.3"
-order = 60
-name = "paging_mmio_uc"
-when = ["!panic_test"]
+section = "§11.2"
+
+[[marker]]
+text = "vibeOS: fb: unreachable"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§11.2"
 
 # §1.4 Kernel heap
 
@@ -644,6 +646,13 @@ kind = "diagnostic"
 arch = "x86_64"
 source = "kernel"
 section = "§4.1"
+
+[[marker]]
+text = "vibeOS: lapic: ioremap failed"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§11.2"
 
 [[marker]]
 text = "vibeOS: lapic: svr enable failed"

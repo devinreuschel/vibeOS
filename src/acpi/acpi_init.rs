@@ -1,21 +1,25 @@
 //! Kernel ACPI bring-up. Library parsers live in `vibeos::acpi`.
 //!
-//! DESIGN §3.3: after CR3, walk tables through the physmap, UC-patch
-//! LAPIC / I/O APIC / HPET before first MMIO touch, then later print
-//! `acpi: xsdt N tables` after GDT/PIC/IDT (live steps 3–5 after KVA).
+//! DESIGN §3.3: after KVA, walk tables through the RAM-only physmap.
+//! LAPIC / I/O APIC / HPET are reached only through `ioremap` (ROADMAP
+//! §11.2). A firmware table outside RAM is read through the identity
+//! window when it still covers the span, else `memremap`.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use vibeos::acpi::{self, AcpiError, AcpiInfo, PhysMem};
-use vibeos::marker;
-use vibeos::paging::{self, PAGE_SIZE_4K, PhysAddr, VirtAddr};
+use vibeos::acpi::{self, AcpiError, AcpiInfo, MAX_IOAPICS, PhysMem};
+use vibeos::paging::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
 use crate::cell::BootCell;
+use crate::kva_init;
 use crate::machine_init;
 use crate::paging_init;
 
 static INFO: BootCell<AcpiInfo> = BootCell::new();
-pub(super) static MMIO_UC: AtomicBool = AtomicBool::new(false);
+static LAPIC_VA: AtomicU64 = AtomicU64::new(0);
+static HPET_VA: AtomicU64 = AtomicU64::new(0);
+static IOAPIC_PHYS: [AtomicU64; MAX_IOAPICS] = [const { AtomicU64::new(0) }; MAX_IOAPICS];
+static IOAPIC_VA: [AtomicU64; MAX_IOAPICS] = [const { AtomicU64::new(0) }; MAX_IOAPICS];
 
 struct HhdmPhys;
 
@@ -27,15 +31,37 @@ impl PhysMem for HhdmPhys {
         let Some(end) = addr.checked_add(buf.len() as u64) else {
             return false;
         };
-        if !ensure_ram(addr, end - addr) {
-            return false;
+        let len = end - addr;
+        if physmap_covers(addr, len) {
+            let src = paging_init::hhdm_offset().wrapping_add(addr) as *const u8;
+            // SAFETY: `physmap_covers` found a present physmap leaf for
+            // every 4 KiB of `[addr, end)`; `src` is valid for `buf.len()`
+            // bytes and `buf` is a distinct `&mut`. Established here.
+            unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len()) };
+            return true;
         }
-        let src = (paging_init::hhdm_offset().wrapping_add(addr)) as *const u8;
-        // SAFETY: `ensure_ram` just mapped every 4 KiB leaf of
-        // `[addr, end)` in the physmap, cacheable and readable, so `src`
-        // is valid for `buf.len()` bytes; `buf` is a distinct `&mut`, so
-        // the ranges do not overlap. Established here.
+        if paging_init::identity_covers(addr, len) {
+            let src = addr as *const u8;
+            // SAFETY: `identity_covers` found `[addr, end)` inside the live
+            // low identity window (`paging_init::install`); established here.
+            unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len()) };
+            return true;
+        }
+        // SAFETY: invariant I17: this is a firmware table the walk named,
+        // not device MMIO, mapped write-back (MEMORY.md §4.1); established
+        // here.
+        let Some(va) =
+            (unsafe { kva_init::memremap(PhysAddr(addr), len, vibeos::paging::physmap_flags()) })
+        else {
+            return false;
+        };
+        let src = va.as_u64() as *const u8;
+        // SAFETY: `memremap` mapped `[addr, end)` at `va` for `len` bytes;
+        // `buf` is a distinct `&mut`. Established here.
         unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len()) };
+        // SAFETY: `va` and `len` are this `memremap`; nothing else uses
+        // the mapping. Established here.
+        unsafe { kva_init::memunmap(va, len) };
         true
     }
 }
@@ -47,13 +73,8 @@ fn align_up(x: u64, a: u64) -> u64 {
     (x + a - 1) & !(a - 1)
 }
 
-/// Map any missing physmap 4 KiB leaves covering `[phys, phys+len)` as
-/// ordinary RAM (cacheable). ACPI tables live in reclaimable RAM, not MMIO.
-fn ensure_ram(phys: u64, len: u64) -> bool {
-    map_gap(phys, len, paging::physmap_flags())
-}
-
-fn map_gap(phys: u64, len: u64, flags: paging::PageFlags) -> bool {
+/// True when the RAM-only physmap already covers `[phys, phys+len)`.
+fn physmap_covers(phys: u64, len: u64) -> bool {
     if len == 0 {
         return true;
     }
@@ -63,13 +84,7 @@ fn map_gap(phys: u64, len: u64, flags: paging::PageFlags) -> bool {
     while p < end {
         let va = VirtAddr(paging_init::hhdm_offset().wrapping_add(p));
         if paging_init::translate(va).is_none() {
-            // SAFETY: the physmap maps a frame only at its own HHDM address
-            // and `translate` found no leaf at `va`, so the new leaf aliases
-            // no other mapping of `p`, which is what `Mapper::map_page` asks;
-            // established here.
-            if unsafe { paging_init::map_4k(va, PhysAddr(p), flags) }.is_err() {
-                return false;
-            }
+            return false;
         }
         p = match p.checked_add(PAGE_SIZE_4K) {
             Some(n) => n,
@@ -79,30 +94,50 @@ fn map_gap(phys: u64, len: u64, flags: paging::PageFlags) -> bool {
     true
 }
 
-/// Make `[phys, phys+len)` UC in the physmap. Map missing leaves with
-/// MMIO flags first so `patch_physmap_uc` has something to touch —
-/// LAPIC/IOAPIC/HPET sit above a 128 MiB `map_end`.
-///
-/// Returns true only if `patch_physmap_uc` actually edited a leaf.
-fn uc_mmio(phys: u64, len: u64) -> bool {
-    if phys == 0 || len == 0 {
-        return false;
+fn ioremap_page(phys: u64) -> Option<u64> {
+    if phys == 0 {
+        return None;
     }
-    if !map_gap(phys, len, paging::mmio_flags()) {
-        return false;
-    }
-    matches!(
-        // SAFETY: `map_gap` just made the physmap cover `[phys, phys+len)`,
-        // which is `patch_physmap_uc`'s requirement; established here.
-        unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) },
-        Ok(n) if n > 0
-    )
+    // SAFETY: invariant I49: `[phys, phys+4K)` is a device register page
+    // (LAPIC, I/O APIC, or HPET) that no cacheable alias reaches;
+    // established here from the MADT/HPET table `acpi::walk` just parsed.
+    unsafe { paging_init::ioremap(PhysAddr(phys), PAGE_SIZE_4K) }.map(|v| v.as_u64())
 }
 
-/// Parse ACPI, UC-patch discovered MMIO, stash the result.
+/// The ioremap VA of the MADT LAPIC page, if mapped.
+pub fn lapic_va() -> Option<u64> {
+    // Acquire: pairs with the Release store in `init`.
+    let v = LAPIC_VA.load(Ordering::Acquire);
+    (v != 0).then_some(v)
+}
+
+/// The ioremap VA of the HPET page, if mapped.
+pub fn hpet_va() -> Option<u64> {
+    // Acquire: pairs with the Release store in `init`.
+    let v = HPET_VA.load(Ordering::Acquire);
+    (v != 0).then_some(v)
+}
+
+/// The ioremap VA of the I/O APIC at `phys`, if mapped.
+pub fn ioapic_va(phys: u64) -> Option<u64> {
+    if phys == 0 {
+        return None;
+    }
+    for i in 0..MAX_IOAPICS {
+        // Acquire: pairs with the Release store in `init`.
+        if IOAPIC_PHYS[i].load(Ordering::Acquire) == phys {
+            // Acquire: pairs with the Release store in `init`.
+            let v = IOAPIC_VA[i].load(Ordering::Acquire);
+            return (v != 0).then_some(v);
+        }
+    }
+    None
+}
+
+/// Parse ACPI, ioremap discovered MMIO, stash the result.
 ///
 /// # Safety
-/// After `paging_init::install`, single-CPU, IRQs off.
+/// After `paging_init::install` and `kva_init::init`, single-CPU, IRQs off.
 pub unsafe fn init(rsdp_phys: u64) {
     if rsdp_phys == 0 {
         return;
@@ -112,31 +147,39 @@ pub unsafe fn init(rsdp_phys: u64) {
         Err(e) => halt_acpi(e),
     };
 
-    let mut patched = false;
     if let Some(madt) = &info.madt {
-        patched |= uc_mmio(madt.lapic_base, PAGE_SIZE_4K);
-        for io in madt.ioapics.iter().take(madt.ioapic_count) {
-            patched |= uc_mmio(io.addr as u64, PAGE_SIZE_4K);
+        if let Some(va) = ioremap_page(madt.lapic_base) {
+            // Release: pairs with the Acquire load in `lapic_va`.
+            LAPIC_VA.store(va, Ordering::Release);
+        }
+        for (i, io) in madt.ioapics.iter().take(madt.ioapic_count).enumerate() {
+            let Some(slot) = IOAPIC_PHYS.get(i) else {
+                break;
+            };
+            if let Some(va) = ioremap_page(io.addr as u64) {
+                // Release: pairs with the Acquire load in `ioapic_va`.
+                slot.store(io.addr as u64, Ordering::Release);
+                // Release: pairs with the Acquire load in `ioapic_va`.
+                IOAPIC_VA[i].store(va, Ordering::Release);
+            }
         }
     }
-    let mut hpet_uc = false;
-    if let Some(hpet) = &info.hpet {
-        hpet_uc = uc_mmio(hpet.base, PAGE_SIZE_4K);
-        patched |= hpet_uc;
-    }
-
-    if patched {
-        // Release: pairs with the Acquire load in `acpi::ktest`.
-        MMIO_UC.store(true, Ordering::Release);
-        crate::marker!(marker::PAGING_MMIO_UC);
+    let mut hpet_mapped = false;
+    if let Some(hpet) = &info.hpet
+        && let Some(va) = ioremap_page(hpet.base)
+    {
+        // Release: pairs with the Acquire load in `hpet_va`.
+        HPET_VA.store(va, Ordering::Release);
+        hpet_mapped = true;
     }
 
     // First MMIO touch: HPET GEN_CAP period, only after that page is UC.
-    if hpet_uc && let Some(hpet) = info.hpet.as_mut() {
-        let va = (paging_init::hhdm_offset().wrapping_add(hpet.base)) as *const u64;
-        // SAFETY: invariant I49, established here: `uc_mmio` returned true,
-        // so the HPET register page is mapped UC in the physmap, and
-        // GEN_CAP is its aligned first register.
+    if hpet_mapped && let Some(hpet) = info.hpet.as_mut() {
+        // Acquire: pairs with the Release store in `init`.
+        let va = HPET_VA.load(Ordering::Acquire) as *const u64;
+        // SAFETY: invariant I49, established here: `ioremap_page` returned
+        // a Device mapping of the HPET register page, and GEN_CAP is its
+        // aligned first register.
         let cap = unsafe { va.read_volatile() };
         hpet.period_fs = (cap >> 32) as u32;
     }

@@ -21,10 +21,11 @@ pub const PMM_FREE_SUFFIX: &str = " free 4KiB frames";
 /// space, not merely built its tables.
 pub const PAGING_CR3_OK: &str = "vibeOS: paging: cr3 ok";
 
-/// DESIGN §3.3 step 8. Emitted only after `patch_physmap_uc` actually
-/// touches a discovered LAPIC / I/O APIC / HPET leaf — never as a hollow
-/// claim.
-pub const PAGING_MMIO_UC: &str = "vibeOS: paging: mmio uc";
+/// RAM whose alias would pass the physmap slot (ROADMAP §11.2).
+pub const PMM_SLOT_IGNORED_SUFFIX: &str = " MiB past the physmap slot ignored";
+
+/// Framebuffer the physmap does not cover and `memremap` could not reach (F020).
+pub const FB_UNREACHABLE: &str = "vibeOS: fb: unreachable";
 
 /// Phase 1 §1.4 / §1.5 exit-gate markers. DESIGN §3.3 steps 9 and 10.
 pub const HEAP_OK: &str = "vibeOS: heap ok";
@@ -33,8 +34,7 @@ pub const KVA_READY: &str = "vibeOS: kva: ready";
 /// Phase 2 slice A. Live order is after KVA (IST stacks come from it);
 /// relative order matches DESIGN §3.3 steps 3–5.
 pub const GDT_OK: &str = "vibeOS: gdt ok";
-/// PIC boot step finished: ICW remap+mask ran, or FADT skip. Not a claim
-/// that ports were programmed (unlike `paging: mmio uc`).
+/// PIC boot step finished: ICW remap+mask ran, or FADT skip.
 pub const PIC_REMAPPED: &str = "vibeOS: pic: remapped";
 pub const IDT_OK: &str = "vibeOS: idt ok";
 
@@ -109,7 +109,7 @@ mod tests {
             LIMINE_OK,
             PMM_PREFIX,
             PAGING_CR3_OK,
-            PAGING_MMIO_UC,
+            FB_UNREACHABLE,
             HEAP_OK,
             KVA_READY,
             GDT_OK,
@@ -146,7 +146,11 @@ mod tests {
         // Paging §1.2 exit marker is a fixed string; must match the
         // harness contract byte-for-byte.
         assert_eq!(PAGING_CR3_OK, "vibeOS: paging: cr3 ok");
-        assert_eq!(PAGING_MMIO_UC, "vibeOS: paging: mmio uc");
+        assert_eq!(
+            PMM_SLOT_IGNORED_SUFFIX,
+            " MiB past the physmap slot ignored"
+        );
+        assert_eq!(FB_UNREACHABLE, "vibeOS: fb: unreachable");
         assert_eq!(HEAP_OK, "vibeOS: heap ok");
         assert_eq!(KVA_READY, "vibeOS: kva: ready");
         assert_eq!(GDT_OK, "vibeOS: gdt ok");

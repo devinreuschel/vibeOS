@@ -254,7 +254,7 @@ help:
 	  '  test-e2e-gp           #GP dump+halt contract' \
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
-	  '  test-e2e-highmem      boot contract with 9 GiB, past the physmap cap' \
+	  '  test-e2e-highmem      boot contract with 9 GiB; pmm counts RAM above 8 GiB' \
 	  '  test-e2e-init-fault   /sbin/init faults, or finds no /bin/sh: pid 1 line, then the panic' \
 	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
@@ -599,7 +599,7 @@ test-e2e-mce: $(ISO)
 test-e2e-pit: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_EXPECT_PIT=1 python3 tests/harness/run_e2e.py
 
-# RAM past the 8 GiB physmap cap (DESIGN §4.1) must stay out of the buddy.
+# 9 GiB guest: the buddy includes RAM above 8 GiB (DESIGN §4.1).
 test-e2e-highmem: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_MEM=9G python3 tests/harness/run_e2e.py
 

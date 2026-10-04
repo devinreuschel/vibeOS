@@ -211,15 +211,6 @@ fn normal_boot_tail() -> ! {
     let paging_report = unsafe { paging_init::install(info) };
     paging_init::report(&paging_report);
 
-    // ---- Phase 2 slice B: ACPI discovery + MMIO UC. ----
-    // Parse before heap so LAPIC/IOAPIC/HPET PTEs are uncacheable
-    // before anything touches those bases (DESIGN §3.3 step 8, §4.3).
-    // The `acpi: xsdt N tables` marker waits until after GDT/PIC/IDT
-    // (steps 3–5 live after KVA; step 12 relative to them).
-    // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
-    // below: the kernel's page tables are live (`paging_init::install` above), as `acpi_init::init` requires; established here.
-    unsafe { acpi_init::init(info.rsdp_phys) };
-
     // ---- Phase 1 slice C: heap, KVA, diagnostics. ----
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the kernel's page tables are live, as `heap_init::init` requires; established here.
@@ -258,6 +249,17 @@ fn normal_boot_tail() -> ! {
         kva_init::free_stack(stack);
     }
     crate::marker!(marker::KVA_READY);
+
+    // ---- Phase 2 slice B: ACPI discovery + device ioremap. ----
+    // After KVA so a firmware table outside RAM (highmem RSDP/XSDT in
+    // reserved BIOS) can use `memremap`. Device pages are still
+    // ioremapped here, before first MMIO touch (step 13b).
+    // The `acpi: xsdt N tables` marker waits until after GDT/PIC/IDT
+    // (step 12).
+    // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
+    // below: page tables, heap, and KVA are live, as `acpi_init::init`
+    // requires; established here.
+    unsafe { acpi_init::init(info.rsdp_phys) };
 
     // ---- Phase 2 slice A: GDT/TSS/IST, PIC, IDT. ----
     // After KVA so IST stacks are guarded KVA stacks. PIC remap before

@@ -1,7 +1,5 @@
 //! In-guest tests for acpi (kernel_tests only). Rows: [`TESTS`].
 
-use core::sync::atomic::Ordering;
-
 use vibeos::paging::{PageFlags, VirtAddr};
 
 use crate::acpi_init;
@@ -9,17 +7,11 @@ use crate::ktest::{Outcome, Test, test};
 use crate::machine_init;
 use crate::paging_init;
 
-/// Whether `acpi_init::init` UC-patched at least one MMIO leaf.
-pub(crate) fn mmio_uc_patched() -> bool {
-    acpi_init::MMIO_UC.load(Ordering::Acquire)
-}
-
-fn leaf_is_uc(phys: u64) -> bool {
-    if phys == 0 {
+fn leaf_is_uc(va: u64) -> bool {
+    if va == 0 {
         return false;
     }
-    let va = VirtAddr(paging_init::hhdm_offset().wrapping_add(phys));
-    match paging_init::translate(va) {
+    match paging_init::translate(VirtAddr(va)) {
         Some((_, _, flags)) => flags.contains(PageFlags::PCD | PageFlags::PWT),
         None => false,
     }
@@ -41,24 +33,30 @@ pub(crate) fn test_acpi_discovery() -> Outcome {
     if !info.hpet_present() {
         return Outcome::Fail("no hpet");
     }
-    if !mmio_uc_patched() {
-        return Outcome::Fail("mmio uc not patched");
-    }
     let Some(madt) = info.madt.as_ref() else {
         return Outcome::Fail("no madt");
     };
-    if !leaf_is_uc(madt.lapic_base) {
+    let Some(lapic) = acpi_init::lapic_va() else {
+        return Outcome::Fail("lapic not ioremapped");
+    };
+    if !leaf_is_uc(lapic) {
         return Outcome::Fail("lapic not uc");
     }
     for io in madt.ioapics.iter().take(madt.ioapic_count) {
-        if !leaf_is_uc(io.addr as u64) {
+        let Some(va) = acpi_init::ioapic_va(io.addr as u64) else {
+            return Outcome::Fail("ioapic not ioremapped");
+        };
+        if !leaf_is_uc(va) {
             return Outcome::Fail("ioapic not uc");
         }
     }
     let Some(hpet) = info.hpet else {
         return Outcome::Fail("no hpet");
     };
-    if !leaf_is_uc(hpet.base) {
+    let Some(hpet_va) = acpi_init::hpet_va() else {
+        return Outcome::Fail("hpet not ioremapped");
+    };
+    if !leaf_is_uc(hpet_va) {
         return Outcome::Fail("hpet not uc");
     }
     if hpet.period_fs == 0 {

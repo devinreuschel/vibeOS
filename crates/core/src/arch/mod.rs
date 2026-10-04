@@ -7,6 +7,7 @@
 //! traits on one zero-sized type: the kernel's `arch::x86_64::Arch`, and the
 //! stub port `stub::Arch` that host builds test against.
 
+pub mod aarch64;
 pub mod x86_64;
 
 /// The reference port's pure-half items that portable code and the kernel

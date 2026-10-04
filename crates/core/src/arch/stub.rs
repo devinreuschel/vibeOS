@@ -377,11 +377,25 @@ impl PageTable for Arch {
     const LEVELS: u8 = paging::LEVELS;
     const ENTRIES: usize = paging::PTES_PER_TABLE;
     const KERNEL_ROOT_FIRST: usize = paging::KERNEL_PML4_FIRST;
+    const KERNEL_VA_START: u64 = 0xFFFF_8000_0000_0000;
+    const KERNEL_UXN: u64 = 0;
     fn index(va: VirtAddr, level: u8) -> usize {
         paging::index(va, level)
     }
-    fn make_entry(pa: PhysAddr, flags: PageFlags) -> u64 {
+    fn make_entry(_va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> u64 {
         paging::make_pte(pa, flags)
+    }
+    fn make_table(pa: PhysAddr) -> u64 {
+        paging::make_pte(
+            pa,
+            PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER),
+        )
+    }
+    fn va_ok(va: u64) -> bool {
+        crate::paging::is_canonical(va)
+    }
+    fn is_kernel_va(va: VirtAddr) -> bool {
+        va.as_u64() >= Self::KERNEL_VA_START
     }
     fn entry_phys(entry: u64) -> PhysAddr {
         paging::pte_phys(entry)
