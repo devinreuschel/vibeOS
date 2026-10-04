@@ -74,20 +74,3 @@ pub fn enable_nx() {
         unsafe { cpu::wrmsr(cpu::IA32_EFER, efer | cpu::EFER_NXE) };
     }
 }
-
-/// Drop every TLB entry on this CPU, global ones included: toggle
-/// `CR4.PGE` when it is set, else reload CR3 (Intel SDM Vol. 3A §4.10.4.1).
-pub fn flush_local_global() {
-    let cr4 = cpu::read_cr4();
-    if cr4 & cpu::CR4_PGE != 0 {
-        // SAFETY: clearing and restoring `CR4.PGE` changes nothing but
-        // which TLB entries survive; every other CR4 bit is written back as
-        // read; established here.
-        unsafe {
-            cpu::write_cr4(cr4 & !cpu::CR4_PGE);
-            cpu::write_cr4(cr4);
-        }
-    } else {
-        <Arch as PageTable>::flush_local_all();
-    }
-}

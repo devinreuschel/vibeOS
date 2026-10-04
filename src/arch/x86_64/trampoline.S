@@ -74,9 +74,9 @@ vibeos_tramp_patch_pm32:
 vibeos_tramp_patch_cr3:
     .long CR3_OFF
     mov cr3, eax
-    /* PAE + PGE for long mode; arch::cpu::init_control_regs rewrites CR4 whole once the AP runs Rust. */
-    mov eax, cr4
-    or eax, 0xA0
+    /* PAE + PGE for long mode, stored whole (INIT left CR4 0), never read
+       back; arch::cpu::init_control_regs stores the AP's value once it runs Rust. */
+    mov eax, 0xA0
     mov cr4, eax
     mov ecx, 0xC0000080
     rdmsr
