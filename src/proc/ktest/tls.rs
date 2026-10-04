@@ -119,9 +119,19 @@ fn write_notls() -> Result<(), Outcome> {
     Ok(())
 }
 
+fn unlink_notls() {
+    let _ = fid::unlink_path("/tmp/vibeos_notls", false);
+}
+
 /// A `PT_TLS` process keeps its TLS across another process's exit, kill,
 /// execve of a non-TLS image, and a non-TLS first entry (F022).
 pub(crate) fn test_tls_survive() -> Outcome {
+    let out = tls_survive_body();
+    unlink_notls();
+    out
+}
+
+fn tls_survive_body() -> Outcome {
     if let Err(e) = write_notls() {
         return e;
     }
