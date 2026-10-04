@@ -20,7 +20,7 @@ use crate::arch::gdt::{self, CpuTables};
 use crate::arch::idt::TrapFrame;
 use crate::per_cpu_init;
 use crate::x86::{
-    self, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK, IA32_FS_BASE, IA32_GS_BASE,
+    self, EFER_FFXSR, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK, IA32_FS_BASE, IA32_GS_BASE,
     IA32_KERNEL_GS_BASE, IA32_LSTAR, IA32_STAR, IA32_SYSENTER_CS, IA32_SYSENTER_EIP,
     IA32_SYSENTER_ESP,
 };
@@ -353,7 +353,8 @@ unsafe extern "C" {
 /// the SYSCALL MSRs, and zero the SYSENTER ones: Intel runs `sysenter` in
 /// 64-bit mode, and with `IA32_SYSENTER_CS` 0 it raises `#GP` and the
 /// process gets `SIGSEGV` (DESIGN §11.4), where a value firmware left
-/// would enter ring 0 at its address. Per CPU.
+/// would enter ring 0 at its address. EFER gains SCE and loses FFXSR, so
+/// the FP switch's `fxsave64` saves XMM0-15 (F130). Per CPU.
 ///
 /// # Safety
 /// GDT loaded, `GS_BASE` is this CPU's `PerCpu`.
@@ -364,8 +365,9 @@ pub unsafe fn init_cpu() {
     // SAFETY: STAR, LSTAR, FMASK, the SYSENTER MSRs and EFER are
     // architectural MSRs that every x86_64 CPU has; STAR names the GDT's
     // selectors and LSTAR the entry stub, 0 in the SYSENTER MSRs makes
-    // `sysenter` fault, and EFER keeps its other bits. The GDT is loaded (this
-    // fn's contract, `syscall_init::init_cpu`).
+    // `sysenter` fault, and EFER gains SCE, loses FFXSR, which every CPU
+    // takes clear, and keeps its other bits. The GDT is loaded (this fn's
+    // contract, `syscall_init::init_cpu`).
     unsafe {
         x86::wrmsr(IA32_STAR, star);
         x86::wrmsr(IA32_LSTAR, entry);
@@ -374,8 +376,9 @@ pub unsafe fn init_cpu() {
         x86::wrmsr(IA32_SYSENTER_ESP, 0);
         x86::wrmsr(IA32_SYSENTER_EIP, 0);
         let efer = x86::rdmsr(IA32_EFER);
-        x86::wrmsr(IA32_EFER, efer | EFER_SCE);
+        x86::wrmsr(IA32_EFER, (efer | EFER_SCE) & !EFER_FFXSR);
     }
+    assert!(x86::rdmsr(IA32_EFER) & EFER_FFXSR == 0, "EFER.FFXSR set");
 }
 
 /// BSP: attach the GDT TSS and the dedicated RSP0 stack.

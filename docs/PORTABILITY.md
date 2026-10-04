@@ -229,7 +229,9 @@ value for every thread. A line that makes one per-thread (Linux's `PR_SET_TSC` f
 `ARCH_SET_CPUID`, `perf_user_access` for `PMUSERENR_EL0`) moves it to §7.5's per-thread table under
 AGENTS.md rule 8, and a line that changes a value changes its row in the same commit. Rule; not yet
 enforced: ROADMAP §11.6. On x86_64 `arch::cpu::init_control_regs` writes CR0 and CR4 whole on every
-CPU, and the aarch64 port does not exist.
+CPU, the CPU's last CR4 store, and clears the CPUID faulting bit where `MSR_PLATFORM_INFO` enumerates
+it, which it reads only on an Intel CPU with SSE4.2, since no CPUID bit says that MSR exists. The
+aarch64 port does not exist.
 
 | Architecture | Control | Value | What user code sees |
 |---|---|---|---|

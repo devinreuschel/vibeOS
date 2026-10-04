@@ -115,12 +115,23 @@ pub const IA32_SYSENTER_EIP: u32 = 0x176;
 pub const IA32_EFER: u32 = 0xC000_0080;
 pub const EFER_NXE: u64 = 1 << 11;
 pub const EFER_SCE: u64 = 1 << 0;
+/// AMD fast FXSAVE: `fxsave64` and `fxrstor64` at CPL 0 in long mode skip
+/// XMM0-15 (APM Vol. 2 §3.1.7).
+pub const EFER_FFXSR: u64 = 1 << 14;
 pub const IA32_STAR: u32 = 0xC000_0081;
 pub const IA32_LSTAR: u32 = 0xC000_0082;
 pub const IA32_FMASK: u32 = 0xC000_0084;
 pub const IA32_FS_BASE: u32 = 0xC000_0100;
 pub const IA32_GS_BASE: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+
+/// CPUID faulting (Intel's VT FlexMigration application note):
+/// `MSR_PLATFORM_INFO` bit 31 enumerates it, and bit 0 of
+/// `MSR_MISC_FEATURES_ENABLES` makes `cpuid` at CPL 3 raise `#GP`.
+pub const MSR_PLATFORM_INFO: u32 = 0xCE;
+pub const MSR_MISC_FEATURES_ENABLES: u32 = 0x140;
+pub const PLATFORM_INFO_CPUID_FAULTING: u64 = 1 << 31;
+pub const MISC_FEATURES_CPUID_FAULTING: u64 = 1 << 0;
 
 /// TF|IF|DF|IOPL|NT|AC. Cleared on `syscall`.
 pub const FMASK_SYSCALL: u64 = 0x47700;
@@ -133,16 +144,22 @@ pub const CR0_NE: u64 = 1 << 5;
 pub const CR0_WP: u64 = 1 << 16;
 pub const CR0_AM: u64 = 1 << 18;
 pub const CR0_PG: u64 = 1 << 31;
+pub const CR4_TSD: u64 = 1 << 2;
 pub const CR4_PAE: u64 = 1 << 5;
 pub const CR4_MCE: u64 = 1 << 6;
 pub const CR4_PGE: u64 = 1 << 7;
+pub const CR4_PCE: u64 = 1 << 8;
 pub const CR4_OSFXSR: u64 = 1 << 9;
 pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
 pub const CR4_UMIP: u64 = 1 << 11;
 pub const CR4_LA57: u64 = 1 << 12;
+pub const CR4_OSXSAVE: u64 = 1 << 18;
 pub const CR4_SMEP: u64 = 1 << 20;
 pub const CR4_SMAP: u64 = 1 << 21;
+pub const CR4_PKE: u64 = 1 << 22;
 
+/// CPUID.01H:ECX[20]
+pub const CPUID_ECX_SSE42: u32 = 1 << 20;
 /// CPUID.01H:ECX[30]
 pub const CPUID_ECX_RDRAND: u32 = 1 << 30;
 /// CPUID.01H:EDX[7]
@@ -655,6 +672,21 @@ pub fn cpuid_features() -> Features {
     }
 }
 
+/// CPUID.0 EBX, EDX, ECX: "GenuineIntel".
+const VENDOR_INTEL: [u32; 3] = [0x756E_6547, 0x4965_6E69, 0x6C65_746E];
+
+/// Whether this CPU has CPUID faulting. No CPUID bit says
+/// `MSR_PLATFORM_INFO` exists and a `rdmsr` of a missing MSR raises `#GP`,
+/// which halts the kernel, so only an Intel CPU with SSE4.2 reads it:
+/// Nehalem, the first with SSE4.2, and every Intel core since have it.
+pub fn cpuid_faulting() -> bool {
+    let (_, ebx, ecx, edx) = cpuid(0, 0);
+    let (_, _, ecx1, _) = cpuid(1, 0);
+    [ebx, edx, ecx] == VENDOR_INTEL
+        && ecx1 & CPUID_ECX_SSE42 != 0
+        && rdmsr(MSR_PLATFORM_INFO) & PLATFORM_INFO_CPUID_FAULTING != 0
+}
+
 /// The CR0 and CR4 every CPU runs with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControlRegs {
@@ -683,7 +715,8 @@ pub(crate) fn stored_control_regs() -> Option<ControlRegs> {
 
 /// CR0: PE, MP, ET, NE, WP, AM, PG, so EM, TS, CD and NW are clear. CR4:
 /// PAE, OSFXSR, OSXMMEXCPT, and MCE, PGE, SMEP, SMAP and UMIP where CPUID
-/// reports them.
+/// reports them; every other bit is clear, TSD and PCE (DESIGN §11.4) and
+/// OSXSAVE and PKE (ROADMAP §11.1) included.
 fn compute() -> ControlRegs {
     let f = cpuid_features();
     let cr0 = CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_WP | CR0_AM | CR0_PG;
@@ -702,10 +735,11 @@ fn compute() -> ControlRegs {
     ControlRegs { cr0, cr4 }
 }
 
-/// Write this CPU's CR0 and CR4 whole. Every CPU calls it from
-/// `syscall_init::init_cpu`: the BSP through `init_bsp`, each AP through
-/// `init_ap`. The BSP's call, the first, computes the values before
-/// `smp: done`.
+/// Write this CPU's CR0 and CR4 whole, and turn CPUID faulting off where
+/// the CPU has it. Every CPU calls it from `syscall_init::init_cpu`: the BSP
+/// through `init_bsp`, each AP through `init_ap`. The BSP's call, the first,
+/// computes the values before `smp: done`. This is a CPU's last CR4 store:
+/// the AP trampoline's comes before it, and no TLB flush writes CR4.
 pub fn init_control_regs() {
     // A whole CR4 write that clears LA57 under 5-level paging raises #GP.
     // The kernel asks Limine for no 5-level paging, and the AP trampoline
@@ -732,15 +766,32 @@ pub fn init_control_regs() {
         x86::write_cr0(regs.cr0);
         x86::write_cr4(regs.cr4);
     }
+    // The FP switch saves only the 512-byte FXSAVE image (F130), and ring 3
+    // runs `rdtsc` but not `rdpmc` (DESIGN §11.4).
+    assert!(
+        x86::read_cr4() & (CR4_OSXSAVE | CR4_PKE | CR4_TSD | CR4_PCE) == 0,
+        "CR4.OSXSAVE, PKE, TSD or PCE set"
+    );
     x86::set_smap_live(regs.cr4 & CR4_SMAP != 0);
+    let fault = cpuid_faulting();
+    if fault {
+        let misc = x86::rdmsr(MSR_MISC_FEATURES_ENABLES) & !MISC_FEATURES_CPUID_FAULTING;
+        // SAFETY: the MSR exists where `MSR_PLATFORM_INFO` enumerates CPUID
+        // faulting, and clearing bit 0 only lets ring 3 run `cpuid`; every
+        // other bit is written back as read; established by
+        // `arch::cpu::cpuid_faulting`.
+        unsafe { x86::wrmsr(MSR_MISC_FEATURES_ENABLES, misc) };
+    }
     if first {
         let smep = u8::from(regs.cr4 & CR4_SMEP != 0);
         let smap = u8::from(regs.cr4 & CR4_SMAP != 0);
         let umip = u8::from(regs.cr4 & CR4_UMIP != 0);
         let wp = u8::from(regs.cr0 & CR0_WP != 0);
+        let fault = u8::from(fault);
         crate::klog!(
             Level::Info,
-            "vibeOS: cpu: cr0={:#x} cr4={:#x} smep={smep} smap={smap} umip={umip} wp={wp}",
+            "vibeOS: cpu: cr0={:#x} cr4={:#x} smep={smep} smap={smap} umip={umip} wp={wp} \
+             cpuid_fault={fault}",
             regs.cr0,
             regs.cr4
         );
