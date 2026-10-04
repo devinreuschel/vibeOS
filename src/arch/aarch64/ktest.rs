@@ -200,8 +200,25 @@ pub(crate) fn test_idle_wfi() -> Outcome {
     IDLE_WOKE.store(0, Ordering::Release);
     timer::disable();
     IDLE_HOOK.store(1, Ordering::Release);
-    thread_init::halt_if_idle();
-    thread_init::yield_now();
+    // halt_if_idle returns before wfi if a leftover wake sits on the
+    // runq (a tick during msix_cpu). Drain and retry until the hook
+    // runs or CNTVCT says 100 ms.
+    let t0 = time_init::now_ns();
+    loop {
+        thread_init::halt_if_idle();
+        thread_init::yield_now();
+        if IDLE_WOKE.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        if IDLE_HOOK.load(Ordering::Acquire) == 0 {
+            timer::enable();
+            IDLE_TID.store(u32::MAX, Ordering::Release);
+            return Outcome::Fail("idle wfi did not wake");
+        }
+        if time_init::now_ns().saturating_sub(t0) > 100_000_000 {
+            break;
+        }
+    }
     timer::enable();
     IDLE_TID.store(u32::MAX, Ordering::Release);
     if IDLE_WOKE.load(Ordering::Acquire) == 0 {

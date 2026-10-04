@@ -20,7 +20,6 @@ const GICD_ISENABLER: u64 = 0x0100;
 const GICD_ICENABLER: u64 = 0x0180;
 const GICD_IPRIORITYR: u64 = 0x0400;
 const GICD_ITARGETSR: u64 = 0x0800;
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 const GICD_ICFGR: u64 = 0x0C00;
 const GICD_IROUTER: u64 = 0x6100;
 const GICD_SGIR: u64 = 0x0F00;
@@ -32,6 +31,8 @@ const GICD_CTLR_ENABLE_G1A: u32 = 1 << 1;
 const GICC_CTLR: u64 = 0x0000;
 const GICC_CTLR_ENABLE_G0: u32 = 1;
 const GICC_CTLR_ENABLE_G1: u32 = 1 << 1;
+/// IAR acknowledges Group 1 as well as Group 0 (IHI 0048).
+const GICC_CTLR_ACK_CTL: u32 = 1 << 2;
 const GICC_PMR: u64 = 0x0004;
 const GICC_BPR: u64 = 0x0008;
 const GICC_IAR: u64 = 0x000C;
@@ -237,6 +238,20 @@ fn init_v2(g: &Gic) {
             );
             i = i.saturating_add(4);
         }
+        if let Some((_, base, count)) = g.v2m {
+            let mut n = 0u32;
+            while n < u32::from(count) {
+                let intid = base.saturating_add(n);
+                if gic::is_spi(intid) {
+                    // SETSPI_NS is a pulse; the SPI must be edge (IHI 0048).
+                    let off = GICD_ICFGR + u64::from(intid / 16) * 4;
+                    let shift = (intid % 16) * 2;
+                    let cur = mmio32(g.dist, off);
+                    mmio32w(g.dist, off, (cur & !(3 << shift)) | (2 << shift));
+                }
+                n = n.saturating_add(1);
+            }
+        }
         // SGIs and PPIs: enable 0..31.
         mmio32w(g.dist, GICD_ISENABLER, 0xFFFF_FFFF);
         // GICv2 always has groups on QEMU: IGROUPR is Group 1, so both
@@ -247,7 +262,7 @@ fn init_v2(g: &Gic) {
         mmio32w(
             g.cpu_or_redist,
             GICC_CTLR,
-            GICC_CTLR_ENABLE_G0 | GICC_CTLR_ENABLE_G1,
+            GICC_CTLR_ENABLE_G0 | GICC_CTLR_ENABLE_G1 | GICC_CTLR_ACK_CTL,
         );
         core::arch::asm!("dsb sy", options(nostack, preserves_flags));
     }
@@ -705,8 +720,8 @@ pub fn send_sgi(intid: u32) {
             }
         }
         Kind::V2 => {
-            // TargetListFilter 0b10 = this CPU (IHI 0048).
-            let sgir = (intid & 0xF) | (2 << 24);
+            // TargetListFilter 0b10 = this CPU; CPUTargetList bit 0 (IHI 0048).
+            let sgir = (intid & 0xF) | (2 << 24) | (1 << 16);
             // SAFETY: ordered mmio_write (DESIGN §4.7). established here.
             unsafe {
                 core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
