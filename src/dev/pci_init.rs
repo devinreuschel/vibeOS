@@ -359,15 +359,25 @@ pub unsafe fn scan() {
             e.end = h.last_bus;
         });
     }
-    let mut found = [FuncInfo::empty(); MAX_SCAN];
-    let n = pci::enumerate(&mut HwCfg, 0, &mut found);
+    // Enumerate in the BootCell. A `[FuncInfo; MAX_SCAN]` local is an
+    // 11 KiB frame; on aarch64 the bootstrap stack is 16 KiB and IRQs
+    // are already on (DESIGN §4.5).
+    let p = SCAN.as_ptr();
+    // SAFETY: invariant I22, established here: this fn runs once, on the
+    // BSP, before any AP starts or any reader runs (this fn's `# Safety`
+    // contract). The payload at `SCAN.as_ptr()` is filled before
+    // `set_in_place`.
+    unsafe {
+        let found = &mut (*p).found;
+        for slot in found.iter_mut() {
+            *slot = FuncInfo::empty();
+        }
+        (*p).n = pci::enumerate(&mut HwCfg, 0, found);
+        SCAN.set_in_place();
+    }
     // Release: pairs with the Acquire load in `dev::ktest::test_pci_scan_bsp_only`.
     #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     SCAN_ONLINE.store(crate::per_cpu_init::online_mask(), Ordering::Release);
-    // SAFETY: `BootCell::set`'s contract (invariant I22): this fn runs
-    // once, on the BSP, before any AP starts or any reader runs (this fn's
-    // `# Safety` contract); established here.
-    unsafe { SCAN.set(Scan { n, found }) };
 }
 
 /// Publish each function [`scan`] found behind its parent bridge through
