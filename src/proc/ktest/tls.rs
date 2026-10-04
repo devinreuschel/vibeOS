@@ -61,7 +61,7 @@ user_code!(
 );
 
 user_code!(
-    EXIT0,
+    TLS_EXIT0,
     "
     xor edi, edi
     mov eax, 60
@@ -103,7 +103,7 @@ fn tls_base_of(pid: u32) -> Option<u64> {
 }
 
 fn write_notls() -> Result<(), Outcome> {
-    let elf = elf_bytes(&Image::Code(EXIT0, DEFAULT));
+    let elf = elf_bytes(&Image::Code(TLS_EXIT0, DEFAULT));
     let f = fid::open("/tmp/vibeos_notls", O_WRONLY | O_CREAT | O_TRUNC, 0o755)
         .map_err(|_| Outcome::Fail("creat notls"))?;
     let mut off = 0;
@@ -133,7 +133,7 @@ pub(crate) fn test_tls_survive() -> Outcome {
         let _ = user::wait(a);
         return Outcome::Fail("pt_tls base 0");
     }
-    match user::run(&Image::Code(EXIT0, DEFAULT), &["tls_exit"]) {
+    match user::run(&Image::Code(TLS_EXIT0, DEFAULT), &["tls_exit"]) {
         Ok(st) if exited0(st) => {}
         Ok(st) => {
             let _ = user::wait(a);
@@ -168,7 +168,7 @@ pub(crate) fn test_tls_survive() -> Outcome {
             return crate::fail_fmt!("exec spawn: {}", e.as_str());
         }
     }
-    match user::run(&Image::Code(EXIT0, DEFAULT), &["tls_first"]) {
+    match user::run(&Image::Code(TLS_EXIT0, DEFAULT), &["tls_first"]) {
         Ok(st) if exited0(st) => {}
         Ok(st) => {
             let _ = user::wait(a);

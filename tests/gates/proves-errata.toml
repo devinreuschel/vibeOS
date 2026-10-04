@@ -61,3 +61,15 @@ psci_ids_match_the_spec -- PSCI `SYSTEM_OFF` and `SYSTEM_RESET`
 switch_context_roundtrip -- the aarch64 context switch
 """
 why = "S8 (#226) squash dropped the Proves lines; these are the trailers the squashed S8 commit carried, with the three aarch64-only ktest/marker proofs rewritten as path::fn the way the 7b7c381 errata already did"
+
+[[erratum]]
+commit = "48d1fb4dc9707d5259e7e59700618000666f89ec"
+was = "block_vblk_mmio_smp -- virtio-mmio transport as well"
+proves = "src/dev/virtio_mmio_init.rs::publish -- virtio-mmio transport as well"
+why = "GitHub CI is x86-only; block_vblk_mmio_smp is an aarch64 ktest and never appears in C-RESULTS. publish claims each DT virtio-mmio window as BAR 0"
+
+[[erratum]]
+commit = "48d1fb4dc9707d5259e7e59700618000666f89ec"
+was = "block_vblk_mmio_smp -- every virtio queue notification writes that virtqueue's index"
+proves = "crates/core/src/dev/virtio.rs::queue_notify -- every virtio queue notification writes that virtqueue's index"
+why = "GitHub CI is x86-only; block_vblk_mmio_smp is an aarch64 ktest and never appears in C-RESULTS. queue_notify is the index every kick writes"

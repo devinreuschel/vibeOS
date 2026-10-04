@@ -146,45 +146,46 @@ user_code!(
 user_code!(
     FP_YIELD,
     "
-    movi v0.16b, #0x5a
-    movi v1.16b, #0x5a
-    movi v2.16b, #0x5a
-    movi v3.16b, #0x5a
-    movi v4.16b, #0x5a
-    movi v5.16b, #0x5a
-    movi v6.16b, #0x5a
-    movi v7.16b, #0x5a
-    movi v8.16b, #0x5a
-    movi v9.16b, #0x5a
-    movi v10.16b, #0x5a
-    movi v11.16b, #0x5a
-    movi v12.16b, #0x5a
-    movi v13.16b, #0x5a
-    movi v14.16b, #0x5a
-    movi v15.16b, #0x5a
-    movi v16.16b, #0x5a
-    movi v17.16b, #0x5a
-    movi v18.16b, #0x5a
-    movi v19.16b, #0x5a
-    movi v20.16b, #0x5a
-    movi v21.16b, #0x5a
-    movi v22.16b, #0x5a
-    movi v23.16b, #0x5a
-    movi v24.16b, #0x5a
-    movi v25.16b, #0x5a
-    movi v26.16b, #0x5a
-    movi v27.16b, #0x5a
-    movi v28.16b, #0x5a
-    movi v29.16b, #0x5a
-    movi v30.16b, #0x5a
-    movi v31.16b, #0x5a
+    // movi v0..v31.16b, #0x5a (soft-float kernel cannot write `vN`)
+    .inst 0x4f02e740
+    .inst 0x4f02e741
+    .inst 0x4f02e742
+    .inst 0x4f02e743
+    .inst 0x4f02e744
+    .inst 0x4f02e745
+    .inst 0x4f02e746
+    .inst 0x4f02e747
+    .inst 0x4f02e748
+    .inst 0x4f02e749
+    .inst 0x4f02e74a
+    .inst 0x4f02e74b
+    .inst 0x4f02e74c
+    .inst 0x4f02e74d
+    .inst 0x4f02e74e
+    .inst 0x4f02e74f
+    .inst 0x4f02e750
+    .inst 0x4f02e751
+    .inst 0x4f02e752
+    .inst 0x4f02e753
+    .inst 0x4f02e754
+    .inst 0x4f02e755
+    .inst 0x4f02e756
+    .inst 0x4f02e757
+    .inst 0x4f02e758
+    .inst 0x4f02e759
+    .inst 0x4f02e75a
+    .inst 0x4f02e75b
+    .inst 0x4f02e75c
+    .inst 0x4f02e75d
+    .inst 0x4f02e75e
+    .inst 0x4f02e75f
     mov w19, #20000
 1:
     mov x8, #124
     svc #0
     subs w19, w19, #1
     b.ne 1b
-    umov x0, v0.d[0]
+    .inst 0x4e083c00
     movz x1, #0x5a5a
     movk x1, #0x5a5a, lsl #16
     movk x1, #0x5a5a, lsl #32
@@ -204,14 +205,14 @@ user_code!(
 user_code!(
     FP_PROBE,
     "
-    umov x0, v0.d[0]
+    .inst 0x4e083c00
     movz x1, #0x5a5a
     movk x1, #0x5a5a, lsl #16
     movk x1, #0x5a5a, lsl #32
     movk x1, #0x5a5a, lsl #48
     cmp x0, x1
     b.eq 9f
-    umov x0, v31.d[0]
+    .inst 0x4e083fe0
     cmp x0, x1
     b.eq 9f
     mov x0, xzr

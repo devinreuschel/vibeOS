@@ -80,6 +80,8 @@ class TestScan(unittest.TestCase):
         self.assertEqual(scan(listing(f"vibeos::proc::syscall_init::fp_load{H}",
                                       "ldp\tq0, q1, [x0]", "ldr\tw1, [x0, #512]",
                                       "msr\tfpcr, x1"), aarch64=True), [])
+        self.assertEqual(scan(listing(f"vibeos::proc::syscall_init_aarch64::fp_save{H}",
+                                      "stp\tq0, q1, [x0]"), aarch64=True), [])
 
     def test_aarch64_simd_outside_allow_fails(self) -> None:
         errs = scan(listing(f"vibeos::x::f{H}", "stp\tq0, q1, [x0]"), aarch64=True)

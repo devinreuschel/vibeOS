@@ -33,6 +33,8 @@ ALLOW_X86: dict[str, frozenset[str]] = {
 ALLOW_AARCH64: dict[str, frozenset[str]] = {
     "vibeos::proc::syscall_init::fp_save": frozenset({"stp", "str", "mrs"}),
     "vibeos::proc::syscall_init::fp_load": frozenset({"ldp", "ldr", "msr"}),
+    "vibeos::proc::syscall_init_aarch64::fp_save": frozenset({"stp", "str", "mrs"}),
+    "vibeos::proc::syscall_init_aarch64::fp_load": frozenset({"ldp", "ldr", "msr"}),
 }
 
 # Sections that hold no 64-bit kernel code (the AP trampoline is 16- and
