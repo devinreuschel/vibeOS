@@ -28,8 +28,10 @@ the line carries `(existing: <reason>)`, which the report lists.
 A pushed commit's message cannot change, so a wrong or missing `Proves:`
 line is corrected by a row of `tests/gates/proves-errata.toml`, a gate
 input: the rules read the row's `proves` in place of `was`, or as the
-line when `was` is empty, the report lists it, and a row whose commit is
-in the pull request but does not match that `was` fails.
+line when `was` is empty (each non-empty line of `proves`, so a squash
+that dropped every trailer can supply them all), the report lists it, and
+a row whose commit is in the pull request but does not match that `was`
+fails.
 
 Modes:
 - bare (`make check`): pairing and the diff rule on `origin/main..HEAD`, or
@@ -802,8 +804,9 @@ class Checker:
         lines = list(gatelib.parse_message_lines(c.message, tag))
         if tag == "Proves" and (c.sha, "") in self.errata and not lines:
             raw, why = self.errata[(c.sha, "")]
-            self.report.notes.append(f"{c.sha[:7]}: erratum: Proves: {raw} ({why})")
-            lines = [raw]
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            for item in lines:
+                self.report.notes.append(f"{c.sha[:7]}: erratum: Proves: {item} ({why})")
         for raw in lines:
             if tag == "Proves" and raw and (c.sha, raw) in self.errata:
                 raw, why = self.errata[(c.sha, raw)]
