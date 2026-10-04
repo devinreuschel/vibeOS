@@ -205,9 +205,9 @@ checks the assertion.
 Vector numbers live in one module as named constants, with a host unit test asserting that no two are
 equal. That test costs nothing and catches the copy-paste that assigns two subsystems the same vector.
 
-Planned (ROADMAP §11.3): the device vectors above (the keyboard's and the pool's) are the x86_64
-chip's hardware numbers ([§5.4](#54-irq-registration)), and the device pool is that chip's to
-allocate. On aarch64 the GIC sets priority per interrupt, by class: the top class is reserved for
+The device vectors above (the keyboard's and the pool's) are the x86_64 chip's hardware numbers
+([§5.4](#54-irq-registration)), and the device pool is that chip's to allocate. On aarch64 the GIC
+sets priority per interrupt, by class: the top class is reserved for
 ROADMAP §25.5's pseudo-NMI, then come IPIs and the tick (the generic timer's PPI), then devices, so
 a busy device does not starve a reschedule there either. IPIs are SGIs 0 to 7 only, as Linux uses
 them, since Arm recommends leaving SGIs 8 to 15 to the Secure world. The kernel therefore has at
@@ -224,36 +224,29 @@ No SGI does TLB shootdown: aarch64 broadcasts its TLB maintenance (ROADMAP §11.
 
 ## 5.4 IRQ registration
 
-Drivers do not write to the IDT. They ask for a vector:
+Drivers do not write to the IDT. They name an interrupt by an `IrqId`, a `u32` the IRQ layer
+allocates, never a hardware number. It indexes the handler table, the interrupt's bottom-half
+thread, and `free_vector`'s wait. Each interrupt controller is an `IrqChip` object, and an `IrqId`
+records its chip and its hardware number on that chip (its hwirq):
 
 ```rust
-let vec = irq::allocate_vector(cpu)?;     // from the §5.3 device pool
-irq::set_handler(vec, my_handler);
-// or: irq::set_threaded(vec, Some(top_half), thread_fn, Some(inst));
-```
-
-Both threaded halves get the vector's context, a driver instance (`inst`, a `dev::Instance`) the vector
-holds a reference to until it is set again or freed, so a driver with several devices keeps no table
-of them (DEVICES.md §12.1 rule 1).
-
-The kernel binary exposes this as `irq_init::allocate_vector`. Allocate is refused
-inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `hardirq::IN_ISR` flag around the handler. The
-timer, IPI, and keyboard ISRs do not set it, and `park`, `begin_wait` and a voluntary `schedule` assert that it is clear
-([INVARIANTS.md §2.2](INVARIANTS.md#22-interrupt-handler-rules)). That flag is not the `InterruptGuard` nest: `allocate_vector` takes only spinlocks, so a
-caller with IF off may allocate, and only a device hard-IRQ is refused.
-
-Planned (ROADMAP §11.3, on x86_64 before the GIC): drivers name an interrupt by an `IrqId`, a `u32`
-the IRQ layer allocates, never a hardware number. It indexes the handler table, the interrupt's
-bottom-half thread, and `free_vector`'s wait. Each interrupt controller is an `IrqChip` object, and
-an `IrqId` records its chip and its hardware number on that chip (its hwirq):
-
-```rust
-let irq = irq::map_wired(&spec)?;      // a device-tree `interrupts` specifier or an ACPI GSI
+let irq = irq::map_wired(spec)?;       // a device-tree `interrupts` specifier or an ACPI GSI
 let irqs = irq::alloc_msi(&dev, n)?;   // MSI or MSI-X, through the device's MSI parent
-let tick = irq::map_percpu(&spec)?;    // a LAPIC LVT or a GIC PPI: one IrqId on every CPU
+let tick = irq::map_percpu(spec)?;     // a LAPIC LVT or a GIC PPI: one IrqId on every CPU
 irq::set_threaded(irq, Some(top_half), thread_fn, Some(inst));
 irq::set_affinity(irq, cpu)?;
 ```
+
+Both threaded halves get the IRQ's context, a driver instance (`inst`, a `dev::Instance`) the IRQ
+holds a reference to until it is set again or freed, so a driver with several devices keeps no table
+of them (DEVICES.md §12.1 rule 1).
+
+The kernel binary exposes this as `irq_init::map_wired`, `irq_init::alloc_msi`, and
+`irq_init::allocate` (tests without a device). Allocate is refused
+inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `hardirq::IN_ISR` flag around the handler. The
+timer, IPI, and keyboard ISRs do not set it, and `park`, `begin_wait` and a voluntary `schedule` assert that it is clear
+([INVARIANTS.md §2.2](INVARIANTS.md#22-interrupt-handler-rules)). That flag is not the `InterruptGuard` nest: allocate takes only spinlocks, so a
+caller with IF off may allocate, and only a device hard-IRQ is refused.
 
 A chip translates a firmware specifier (a device-tree `interrupts` specifier, an ACPI GSI with its
 trigger and polarity) to a hwirq; masks, unmasks, and ends an interrupt (EOI); sets its affinity;
@@ -283,11 +276,9 @@ one chip object in a static `BootCell`, reached as `&'static dyn IrqChip`, as a 
 operations object is (§12.1); the indirect call is a branch beside an interrupt entry. A controller
 a driver brings, such as a cascaded one, would be a counted device (§12.1), and the line that adds
 one extends this. The seam's zero-sized port ([§11.1](PORTABILITY.md#111-the-seam)) keeps only the vector entry,
-finding the root controller, and the IPI send. The MSI paragraph below becomes the x86 chip's
-`compose_msi`. Until the ROADMAP §11.3 box lands, the rest of this section describes the x86 vector
-API as built. Each of its rules then holds for an `IrqId`: `set_affinity`, `set_threaded`, and
-`free_vector` keep their names and take an `IrqId`, and a vector in ROADMAP §12.5 and §20.9 means an
-`IrqId`.
+finding the root controller, and the IPI send. The x86 chip's `compose_msi` is the MSI paragraph
+below. `set_affinity`, `set_threaded`, and `free_vector` take an `IrqId`, and a vector in
+ROADMAP §12.5 and §20.9 means an `IrqId`.
 
 Why: a GIC names a wired interrupt by an SPI the firmware fixes, delivers the timer as a per-CPU
 PPI, and moves an ITS interrupt with `MOVI` while the device's message stays the same, so an API of
@@ -304,12 +295,13 @@ zero-sized port (one implementation per port, where each port runs several contr
 closed enum of each port's chips (no controller a driver brings could join); and waiting for ROADMAP §27.1
 (every driver of Phases 12 to 20 written twice).
 
-The allocator records the dest CPU. `set_affinity` updates that binding. I/O APIC
-routes are rewritten immediately; MSI/MSI-X callers reprogram the message from
-`cpu_of`. The ROADMAP §19.5 rebalance uses this table rather than a second map.
+The allocator records the dest CPU. `set_affinity` updates that binding and asks the
+chip. I/O APIC routes are rewritten immediately. MSI/MSI-X messages come from the
+chip's `compose_msi` when the PCI layer writes the entry. The ROADMAP §19.5 rebalance
+uses this table rather than a second map.
 
-MSI message address is `0xFEE0_0000 | (apic_id << 12)` (physical dest, RH=0). Data is
-the vector (fixed, edge). MSI-X table entries live in a BAR (BIR + offset from the
+On x86, `compose_msi` uses address `0xFEE0_0000 | (apic_id << 12)` (physical dest, RH=0)
+and data the vector (fixed, edge). MSI-X table entries live in a BAR (BIR + offset from the
 capability). The dispatcher writes mask, then addr/data, then the caller's mask bit,
 and enables MSI-X; it writes no `COMMAND` bit, since the driver sets INTx disable and
 bus mastering itself ([§12.3](DEVICES.md#123-resources)). Leaving INTx unmasked while
@@ -319,10 +311,10 @@ INTx remains the fallback when a function has neither MSI nor MSI-X: route the G
 through the I/O APIC (PCI is level, active low). Keyboard keeps hardcoded vector
 `0x30`; the pool starts handing out `0x31`. `free_vector` masks that GSI before it
 clears the handler and forgets a `Route::IoApic` record. It also zeros threaded
-`top`/`work`/`pending` so a recycled vector cannot keep the old bottom half. MSI
+`top`/`work`/`pending` so a recycled `IrqId` cannot keep the old bottom half. MSI
 and MSI-X are message-based and do not need an I/O APIC mask on free. Clearing
 first would let a still-asserted level line storm empty `dispatch` calls, and a
-later `allocate_vector` could take IRQs from the old device.
+later `allocate` could take IRQs from the old device.
 
 Rule: `free_vector` masks the vector, sets its quiesce flag ([section 10.3](BLOCK.md#103-failure)), wakes
 its bottom-half thread, and returns only after no CPU is running the vector's top half and that
@@ -335,7 +327,7 @@ state (§2.11 rule 3, §12.4). Not yet enforced: `free_vector` does not wait for
 handler already running on another CPU (ROADMAP §20.9). With interrupt remapping
 (ROADMAP §18.1), `free_vector` also frees the vector's remapping entry and waits
 until the interrupt entry cache invalidation completes, so a device that still
-writes its old message reaches no vector that a later `allocate_vector` hands out.
+writes its old message reaches no vector that a later `allocate` hands out.
 
 On the GICv3 ITS, freeing a device's LPIs, at `free_vector` or at removal, sends `DISCARD` for each
 of its events and `MAPD` with V=0 for its DeviceID, then `SYNC`, and waits up to 1 s, as Linux
@@ -375,7 +367,7 @@ and one bottom-half thread per CPU, in which one device's blocked handler still 
 another device's on that CPU.
 
 `set_threaded` is refused inside a hard-IRQ. The top half is optional:
-`set_threaded(vec, None, work, ctx)` is accepted, and `dispatch` EOIs before the bottom half runs, so on a
+`set_threaded(irq, None, work, ctx)` is accepted, and `dispatch` EOIs before the bottom half runs, so on a
 level-triggered INTx route a device that nothing quiets raises the line again at once (ROADMAP §15.2,
 F099). The softirq stand-in is the high-prio workqueue: IRQ context enqueues a `fn(usize)` and
 wakes workers. Planned (ROADMAP §19.4): its workers, one per CPU, run in the fair class at nice -20,
