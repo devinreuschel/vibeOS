@@ -361,7 +361,7 @@ impl VirtioBlk {
             i = 0;
             while i < MAX_VQ {
                 if want[i] {
-                    kick(kicks[i]);
+                    kick(kicks[i], i as u16);
                 }
                 i += 1;
             }

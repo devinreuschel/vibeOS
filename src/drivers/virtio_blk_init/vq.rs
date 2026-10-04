@@ -42,13 +42,14 @@ pub(super) fn pick_vq(blk: &Blk, need: u16) -> Option<usize> {
     None
 }
 
-pub(super) fn kick(doorbell: u64) {
+pub(super) fn kick(doorbell: u64, qi: u16) {
     dma::dma_wmb::<Arch>();
     // SAFETY: invariant I54: `doorbell` is a queue's notify register inside
     // the notify capability's BAR, which `map_mmio` mapped uncached, checked
     // against the capability length by `vibeos::dev::virtio::notify_addr`;
-    // established by `crate::dev::pci_init::map_mmio`.
+    // established by `crate::dev::pci_init::map_mmio`. The store is that
+    // virtqueue's index (virtio 1.2 §§4.1.5.2, 4.2.2).
     unsafe {
-        core::ptr::write_volatile(doorbell as *mut u16, 0u16);
+        core::ptr::write_volatile(doorbell as *mut u16, virtio::queue_notify(qi));
     }
 }

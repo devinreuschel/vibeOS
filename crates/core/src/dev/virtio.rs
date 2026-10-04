@@ -265,6 +265,13 @@ pub fn used_pending(used_idx: u16, last_used: u16) -> u16 {
     used_idx.wrapping_sub(last_used)
 }
 
+/// Value written to a queue notify register: the virtqueue index
+/// (virtio 1.2 §§4.1.5.2 PCI Queue Notify, 4.2.2 MMIO QueueNotify).
+#[must_use]
+pub const fn queue_notify(qi: u16) -> u16 {
+    qi
+}
+
 /// `notify = bar_va + cap.offset + queue_notify_off * multiplier`.
 /// `None` on wrap or past `cap.length`.
 pub fn notify_addr(
@@ -953,6 +960,8 @@ mod tests {
         assert_eq!(notify_addr(0x1000, 0x200, 0x1000, 1, 0), Some(0x1200));
         assert_eq!(notify_addr(0x1000, 0x10, 8, 3, 4), None);
         assert!(notify_addr(u64::MAX - 8, 16, 4, 1, 1).is_none());
+        assert_eq!(queue_notify(0), 0);
+        assert_eq!(queue_notify(3), 3);
         assert_eq!(
             PciCap::parse(PCI_CAP_NOTIFY, 1, 0x10, 0x100, 4).notify_off_multiplier,
             4
