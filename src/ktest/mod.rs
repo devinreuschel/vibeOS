@@ -1148,7 +1148,6 @@ pub(crate) mod fid {
         file_init::creat(path.as_bytes())
     }
 
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn unlink_path(path: &str, rmdir: bool) -> Result<(), FsError> {
         if rmdir {
             file_init::rmdir(path.as_bytes())
