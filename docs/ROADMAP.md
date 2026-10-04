@@ -1627,9 +1627,9 @@ behaviour; what a user program sees follows Linux on each architecture (How to r
 - [ ] virtio-mmio transport as well, which QEMU's `virt` offers and Firecracker uses by default; each device's register window is its device-tree `reg` range, claimed and mapped as §10.12 claims and maps a BAR (DESIGN §12.3)
 - [x] `test_dma_edu` programs each device address with one 8-byte MMIO store and fails with `dma mask` when an address exceeds the mask the harness set (§11.7), never truncating it; it passes under `ARCH=aarch64` with `gic-version=3` and with `gic-version=2`; today it writes `src.device.as_u64() as u32`, and `edu` clamps an address outside its mask rather than faulting, so on `virt` its DMA would read and write flash; if `-device edu,help` on the pinned QEMU lists no `dma_mask`, this box instead lists `test_dma_edu` as skipped on aarch64 until §18.1, with that reason (F030)
 - [ ] every virtio queue notification writes that virtqueue's index, as virtio 1.2 sections 4.1.5.2 (PCI) and 4.2.2 (MMIO `QueueNotify`) require. Today virtio-blk's `kick()` writes 0 for every queue, and QEMU's virtio-mmio takes the queue from the written value. An in-guest test at `-smp 4` over `virtio-blk-device,num-queues=4` completes I/O submitted from every CPU (F047)
-- [ ] virtio-input for keyboard and pointer, since `virt` has no PS/2 controller; x86 can use it too, and §16.4 builds on it
-- [ ] PL031 for the §2.7 wall clock; `RNDR` where the CPU has it, then virtio-rng, behind `/dev/random`
-- [ ] the framebuffer console over the Limine framebuffer, which on `virt` needs `-device ramfb`: edk2's virtio-gpu-pci driver is Blt-only and leaves no linear framebuffer after `ExitBootServices`; virtio-gpu gets a native driver in §16.2
+- [x] virtio-input for keyboard and pointer, since `virt` has no PS/2 controller; x86 can use it too, and §16.4 builds on it
+- [x] PL031 for the §2.7 wall clock; `RNDR` where the CPU has it, then virtio-rng, behind `/dev/random`
+- [x] the framebuffer console over the Limine framebuffer, which on `virt` needs `-device ramfb`: edk2's virtio-gpu-pci driver is Blt-only and leaves no linear framebuffer after `ExitBootServices`; virtio-gpu gets a native driver in §16.2
 
 Decided: a device tree, not ACPI, on aarch64 until §20.7. edk2 gives the OS either ACPI or a device tree,
 and picks ACPI when QEMU generates tables, so the aarch64 command line passes `-machine virt,acpi=off`. A
