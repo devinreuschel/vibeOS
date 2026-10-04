@@ -1417,6 +1417,18 @@ class Tiers(unittest.TestCase):
         other = [ci_run(80 + i, {self.TIER: 500}, branch="phase-10") for i in range(20)]
         self.assertEqual(self.run_tiers([*pr, *other, *self.runs(59)]), [])
 
+    def test_tier_missing_from_newest_run_is_retired(self) -> None:
+        old = [ci_run(i, {self.TIER: 236}, finished=f"2026-09-10T{i:02d}:00:00Z")
+               for i in range(2)]
+        new = ci_run(40, {"tier (x86_64, kernel-1)": 50}, finished="2026-09-21T00:00:00Z")
+        with mock.patch("builtins.print") as p:
+            self.assertEqual(ci_history.tiers([*old, new]), [])
+        lines = [c.args[0] for c in p.call_args_list]
+        self.assertIn(f"{self.TIER}: retired (not in ci run 40), n=2", lines)
+        self.assertIn("tier (x86_64, kernel-1): median 50 s, n=1", lines)
+        slow = ci_run(41, {"tier (x86_64, kernel-1)": 70}, finished="2026-09-22T00:00:00Z")
+        self.assertEqual(len(self.run_tiers([*old, new, slow, slow | {"run_id": 42}])), 1)
+
     def test_fewer_runs_prints_n(self) -> None:
         with mock.patch("builtins.print") as p:
             self.assertEqual(ci_history.tiers(self.runs(40, n=3)), [])

@@ -43,8 +43,10 @@ pub fn run(t: &mut Runner) {
     for (name, case) in CASES {
         t.case_ms(name, DEADLINE_MS, || {
             let r = case();
-            discard(LIFE_FILE);
-            r
+            match (r, discard(LIFE_FILE)) {
+                (Outcome::Ok, Err(why)) => Outcome::Fail(why),
+                (r, _) => r,
+            }
         });
     }
 }

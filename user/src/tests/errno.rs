@@ -18,6 +18,7 @@
 use core::ffi::CStr;
 use core::fmt;
 
+use vibeos_user::cmd;
 use vibeos_user::sys::{self, CALLS, Errno, Sys};
 use vibeos_user::utest::{self, Got, Outcome, Runner};
 
@@ -473,11 +474,10 @@ pub(super) const SCRATCH: &CStr = c"/utest_scratch";
 /// tmpfs), and truncated after each use as [`SCRATCH`] is.
 const EXEC_SCRATCH: &CStr = c"/tmp/utest_exec";
 
-/// Truncate `path` to 0 bytes, which frees its clusters.
-pub(super) fn discard(path: &CStr) {
-    if let Ok(fd) = open(path, sys::O_TRUNC | sys::O_WRONLY) {
-        close(fd);
-    }
+/// Truncate `path` to 0 bytes ([`cmd::discard`]), which frees its
+/// clusters or pages.
+pub(super) fn discard(path: &CStr) -> Result<(), &'static str> {
+    cmd::discard(path.to_bytes()).map_err(|_| "discard")
 }
 
 /// `open(path, O_CREAT|O_TRUNC|O_RDWR)` and write `data` to it.
@@ -718,8 +718,8 @@ fn write_at(off: i64) -> Result<Result<usize, Errno>, &'static str> {
         Err(_) => Err("lseek"),
     };
     close(fd);
-    discard(SCRATCH);
-    r
+    let d = discard(SCRATCH);
+    r.and_then(|v| d.map(|()| v))
 }
 
 /// A FAT write at FAT's file-size limit, 4 GiB less a byte: the seek
@@ -1015,19 +1015,19 @@ fn nanosleep_efault() -> Result<Result<usize, Errno>, &'static str> {
 
 /// A script: no ELF magic.
 fn execve_enoexec() -> Result<Result<usize, Errno>, &'static str> {
-    put_file(EXEC_SCRATCH, b"#!/bin/sh\nexit 0\n")?;
-    let r = exec_errno(EXEC_SCRATCH.as_ptr().cast());
-    discard(EXEC_SCRATCH);
-    r
+    let r = put_file(EXEC_SCRATCH, b"#!/bin/sh\nexit 0\n")
+        .and_then(|()| exec_errno(EXEC_SCRATCH.as_ptr().cast()));
+    let d = discard(EXEC_SCRATCH);
+    r.and_then(|v| d.map(|()| v))
 }
 
 /// An ELF whose one `PT_LOAD` asks for 1 GiB and a page, over
 /// `limits::EXEC_IMAGE_MAX`.
 fn execve_enomem() -> Result<Result<usize, Errno>, &'static str> {
-    put_file(EXEC_SCRATCH, &big_elf())?;
-    let r = exec_errno(EXEC_SCRATCH.as_ptr().cast());
-    discard(EXEC_SCRATCH);
-    r
+    let r =
+        put_file(EXEC_SCRATCH, &big_elf()).and_then(|()| exec_errno(EXEC_SCRATCH.as_ptr().cast()));
+    let d = discard(EXEC_SCRATCH);
+    r.and_then(|v| d.map(|()| v))
 }
 
 /// A 64-bit little-endian ELF header and one `PT_LOAD` (the System V
@@ -1154,7 +1154,7 @@ fn write_ok() -> Result<(), &'static str> {
     let fd = open(SCRATCH, sys::O_RDONLY).map_err(|_| "reopen")?;
     let r = read_into(fd, 16);
     close(fd);
-    discard(SCRATCH);
+    discard(SCRATCH)?;
     if r == Ok(5) { Ok(()) } else { Err("read back") }
 }
 

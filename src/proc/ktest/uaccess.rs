@@ -2,8 +2,28 @@
 
 use vibeos::proc::{wexitstatus, wifexited};
 
+use super::exec::unlink_quiet;
 use crate::ktest::Outcome;
 use crate::ktest::user::{self, Image, Layout, user_code};
+
+/// The file [`test_uaccess_syscall_copies`]' program writes, as its
+/// `.asciz` names it.
+const COPIES: &str = "/tmp/uaccess_syscall_copies";
+
+/// The file [`test_uaccess_readonly_efault`]'s program writes, as its
+/// `.asciz` names it.
+const READONLY: &str = "/tmp/uaccess_readonly_efault";
+
+/// Run `img`, then unlink the `/tmp` file `path` it wrote, whatever its
+/// status, so the run gives back the file's page: its exit status, or why
+/// it has none.
+fn run_then_unlink(img: &Image, argv: &[&str], path: &str) -> Result<u32, Outcome> {
+    let st = user::run(img, argv);
+    let unlinked = unlink_quiet(path);
+    let st = st.map_err(|e| crate::fail_fmt!("spawn: {}", e.as_str()))?;
+    unlinked.map_err(|e| crate::fail_fmt!("unlink {path}: {}", e.as_str()))?;
+    Ok(st)
+}
 
 // Its page, then a zeroed page, then nothing: writes the first 300 bytes of
 // its page to /tmp/uaccess_syscall_copies, reopens it read-only, and reads
@@ -114,9 +134,10 @@ pub(crate) fn test_uaccess_syscall_copies() -> Outcome {
         memsz: Some(0x2000),
         writable: true,
     };
-    let st = match user::run(&Image::Code(UACCESS_SHORT, layout), &["uaccess_short"]) {
+    let img = Image::Code(UACCESS_SHORT, layout);
+    let st = match run_then_unlink(&img, &["uaccess_short"], COPIES) {
         Ok(st) => st,
-        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+        Err(fail) => return fail,
     };
     if !wifexited(st) {
         return crate::fail_fmt!("status {st:#x}, want exited");
@@ -255,9 +276,9 @@ user_code!(
 
 pub(crate) fn test_uaccess_readonly_efault() -> Outcome {
     let img = Image::Code(UACCESS_RO, user::DEFAULT);
-    let st = match user::run(&img, &["uaccess_ro"]) {
+    let st = match run_then_unlink(&img, &["uaccess_ro"], READONLY) {
         Ok(st) => st,
-        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+        Err(fail) => return fail,
     };
     if !wifexited(st) {
         return crate::fail_fmt!("status {st:#x}, want exited");

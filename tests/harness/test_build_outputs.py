@@ -63,7 +63,9 @@ def parse_db(text: str) -> MakeDb:
         target, deps = m.group(1).strip(), m.group(2).split("|")[0].split()
         recipe: list[str] = []
         while i < len(lines) and (lines[i].startswith("#") or lines[i].startswith("\t")):
-            if lines[i].startswith("\t"):
+            # GNU Make 3.81 (macOS's /usr/bin/make) prints an empty
+            # recipe line after an $(eval)'d rule; make runs no such line.
+            if lines[i].startswith("\t") and lines[i][1:].strip():
                 recipe.append(lines[i][1:])
             i += 1
         rules[target] = Rule(tuple(deps), tuple(recipe))
@@ -100,6 +102,16 @@ class ParseDbTest(unittest.TestCase):
         rule = db.rules["build/vibeos.iso"]
         self.assertEqual(rule.prereqs, ("build/kernels/vibeos-default.elf", "limine.conf"))
         self.assertEqual(rule.recipe, ("scripts/mkiso.sh $< $@ x",))
+
+    def test_make_381_empty_recipe_line_dropped(self) -> None:
+        db = parse_db(
+            "build/vibeos.iso: build/kernels/vibeos-default.elf\n"
+            "#  recipe to execute (from 'Makefile', line 1):\n"
+            "\tscripts/mkiso.sh $< $@ x\n"
+            "\t\n"
+            "\n"
+        )
+        self.assertEqual(db.rules["build/vibeos.iso"].recipe, ("scripts/mkiso.sh $< $@ x",))
 
 
 class NamedOutputsTest(unittest.TestCase):
