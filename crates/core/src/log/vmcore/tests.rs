@@ -1064,3 +1064,54 @@ fn elf_symbols_and_text() {
     assert_eq!(loads.len(), 1);
     assert_eq!(loads[0].vaddr, KBASE);
 }
+
+// ------------------------------------------------------------ table counts
+
+/// 64 KiB of RAM, one 4 KiB kernel page at `KBASE` and a VMCOREINFO note.
+fn small() -> Synth {
+    let mut s = Synth::new(&[(0, 0x1_0000)]);
+    s.map(KBASE, 0x1000, PAGE, 0);
+    let i = info(s.root);
+    s.vmcoreinfo(&i);
+    s
+}
+
+#[test]
+fn header_tables_fit_the_file_and_cores_have_few() {
+    let bytes = small().build();
+    let h = core_header(&bytes).unwrap();
+    assert!(SliceCore::new(&bytes).is_ok());
+    // A streamed core's header alone still parses (the core tool's
+    // `load_core`); the readers that hold the file check its table.
+    assert_eq!(core_header(&bytes[..EHDR_SIZE]), Ok(h));
+    let table_end = (h.phoff + u64::from(h.phnum) * PHDR_SIZE as u64) as usize;
+    assert_eq!(
+        SliceCore::new(&bytes[..table_end - 1]).err(),
+        Some(VmError::Truncated)
+    );
+    let with_phnum = |n: u16| {
+        let mut b = bytes.clone();
+        b[0x38..0x3A].copy_from_slice(&n.to_le_bytes());
+        b
+    };
+    // A count the file does not hold: before the check, each physical
+    // read scanned all 65,535 slots, and the fuzz target's walk took
+    // over 10 s.
+    assert_eq!(
+        SliceCore::new(&with_phnum(u16::MAX)).err(),
+        Some(VmError::TooManySegments)
+    );
+    assert_eq!(
+        SliceCore::new(&with_phnum(crate::limits::MAX_CORE_PHDRS + 1)).err(),
+        Some(VmError::TooManySegments)
+    );
+    let short = with_phnum(crate::limits::MAX_CORE_PHDRS);
+    let fits =
+        h.phoff + u64::from(crate::limits::MAX_CORE_PHDRS) * PHDR_SIZE as u64 <= short.len() as u64;
+    assert_eq!(SliceCore::new(&short).is_ok(), fits);
+    // The kernel ELF's section table must fit too.
+    let mut elf = synth::kernel_elf(&ID, KBASE, &[0xCC; 0x100], &[]);
+    assert!(KernelElf::parse(&elf).is_ok());
+    elf[0x3C..0x3E].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert_eq!(KernelElf::parse(&elf).err(), Some(VmError::Truncated));
+}

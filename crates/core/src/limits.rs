@@ -109,6 +109,13 @@ pub const MAX_BLOCKDEVS: usize = 32;
 pub const MAX_DRIVERS: usize = 16;
 /// Device claims (`dev::Registry`).
 pub const MAX_CLAIMS: usize = 64;
+/// Program headers a core may have (`log::vmcore::core_header`). Each
+/// physical read and page probe the core tool makes scans its segments
+/// (`SliceCore`, and the tool's store), once per step of a walk whose budget
+/// is `log::vmcore::walk::WALK_BUDGET`, so this count bounds the walk's
+/// cost; QEMU's `dump-guest-memory` writes one note segment and one
+/// `PT_LOAD` per RAM block.
+pub const MAX_CORE_PHDRS: u16 = 256;
 /// Kernel shell commands (`shell::Registry`).
 pub const MAX_COMMANDS: usize = 48;
 /// Tokens in one kernel shell line (`shell`).
