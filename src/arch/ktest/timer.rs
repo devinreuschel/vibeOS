@@ -77,10 +77,18 @@ pub(crate) fn test_lapic_timer_rearm() -> Outcome {
         }
     }
     let (r0, off0, _) = apic_testing::rearms();
+    #[cfg(feature = "irqoff")]
+    crate::sched::irqoff::testing::watch_cpu0();
     apic_testing::arm_fire_stamps();
     let full = crate::ktest::wait_for(|| apic_testing::fire_stamps() >= FIRE_STAMPS);
     let mut stamps = [0u64; FIRE_STAMPS];
     let n = apic_testing::take_fire_stamps(&mut stamps);
+    // CPU 0's longest IF-off stretch in the window, in an `irqoff` build:
+    // a deadline that expires inside one is delivered when it ends.
+    #[cfg(feature = "irqoff")]
+    let if_off = crate::sched::irqoff::testing::watch_cpu0_end();
+    #[cfg(not(feature = "irqoff"))]
+    let if_off: Option<(u64, crate::sched::irqoff::Site)> = None;
     let (r1, off1, last) = apic_testing::rearms();
     if !full {
         return crate::fail_fmt!("rearm stalled: {n} of {FIRE_STAMPS} lapic fires");
@@ -127,14 +135,32 @@ pub(crate) fn test_lapic_timer_rearm() -> Outcome {
     }
     handler.sort_unstable();
     late.sort_unstable();
-    crate::fail_fmt!(
-        "lapic fire interval median {} us (min {}, max {}), want 500 to 2000; handler median {} us (max {}), past deadline median {} us (max {})",
-        us(median),
-        us(gaps[0]),
-        us(gaps[gaps.len() - 1]),
-        us(handler[(handler.len() - 1) / 2]),
-        us(handler[handler.len() - 1]),
-        us(late[(late.len() - 1) / 2]),
-        us(late[late.len() - 1])
-    )
+    // FAIL_MSG_BYTES (120) holds the split, gap median first (want 500 to
+    // 2000 us); the IF-off site comes last.
+    let (off_us, off_site) = match if_off {
+        Some((ns, site)) => (ns / 1000, Some(site)),
+        None => (0, None),
+    };
+    match off_site {
+        Some(site) => crate::fail_fmt!(
+            "gap {}us, late {}/{}us, hdl {}/{}us (med/max); cpu0 if-off {}us at {}",
+            us(median),
+            us(late[(late.len() - 1) / 2]),
+            us(late[late.len() - 1]),
+            us(handler[(handler.len() - 1) / 2]),
+            us(handler[handler.len() - 1]),
+            off_us,
+            site
+        ),
+        None => crate::fail_fmt!(
+            "lapic gap med {}us (500..2000) min {} max {}; late med {} max {}; handler med {} max {}",
+            us(median),
+            us(gaps[0]),
+            us(gaps[gaps.len() - 1]),
+            us(late[(late.len() - 1) / 2]),
+            us(late[late.len() - 1]),
+            us(handler[(handler.len() - 1) / 2]),
+            us(handler[handler.len() - 1])
+        ),
+    }
 }

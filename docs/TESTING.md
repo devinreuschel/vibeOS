@@ -441,7 +441,10 @@ and `VIBEOS_SMP=1`, so guest time counts instructions and 100,000 ns is exactly 
 under KVM (`VIBEOS_QEMU_ACCEL=kvm`) it adds neither and the numbers are wall time. The kernel
 prints `vibeOS: irqoff: on bound <n> ns` after `irq: enabled`, and a reporter thread prints each
 changed site's cumulative `site`, `over`, `deliberate` and `unmatched` lines every 100 ms of guest
-time; the ktest runner reports once more before `ktest: end`. A report writes serial outside the log
+time; the ktest runner reports once more before `ktest: end`. The reporter starts once the APs are
+up, pinned to the highest online CPU: each serial line holds IF off for as long as the UART's port
+I/O takes, milliseconds a line under nested KVM, and a burst of them on CPU 0, where the boot and
+the registry run, delayed `lapic_timer_rearm`'s TSC-deadline fires (ROADMAP §10.2). A report writes serial outside the log
 ring, as `dmesg` does, since in the 256-record ring its lines would push out the boot lines that
 `log_boot_captured` reads. The e2e driver quits QEMU at its last
 marker, so stretches after the last report of an e2e boot are not seen. `tests/harness/irqoff.py`
