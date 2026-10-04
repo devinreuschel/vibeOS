@@ -151,6 +151,7 @@ impl VirtioBlk {
                     return Issued::Local(req, Err(BlockError::Inval));
                 }
             };
+            // Acquire: pairs with the Release store in `setup`.
             let maxd = self.max_discard.load(Ordering::Acquire);
             if maxd != 0 && n512 > maxd {
                 blk.slot_used[si] = false;
@@ -312,8 +313,10 @@ impl VirtioBlk {
                     let seq = req.seq;
                     match self.issue(blk, req) {
                         Issued::Device { qi, kick } => {
+                            // Relaxed: a count; pairs with nothing.
                             self.io_reqs.fetch_add(1, Ordering::Relaxed);
                             if req.bio.op == Op::Flush {
+                                // Relaxed: a count; pairs with nothing.
                                 self.flushes.fetch_add(1, Ordering::Relaxed);
                             }
                             if kick && let Some(v) = blk.vqs[qi].as_ref() {
@@ -323,6 +326,7 @@ impl VirtioBlk {
                         }
                         Issued::Local(req, res) => {
                             if req.bio.op == Op::Flush && res.is_ok() {
+                                // Relaxed: a count; pairs with nothing.
                                 self.flushes.fetch_add(1, Ordering::Relaxed);
                             }
                             let report = match res {
@@ -371,6 +375,7 @@ impl VirtioBlk {
     /// §2.1.1). Until ROADMAP §12.5's error handler resets it, that is the
     /// one failure that fails the device.
     pub(super) fn needs_reset(&self) -> bool {
+        // Acquire: pairs with the Release store in `setup`.
         let common = self.common.load(Ordering::Acquire);
         common != 0 && exhausted_fails_device(r8(common, COMMON_OFF_STATUS))
     }
@@ -383,6 +388,7 @@ impl VirtioBlk {
     }
 
     pub(super) fn fail_rest(&self) {
+        // Release: pairs with the Acquire load in `state`.
         self.state
             .store(DeviceState::Failed.as_u8(), Ordering::Release);
         loop {

@@ -343,15 +343,20 @@ fn setup(
         return Err(VirtioError::Failed);
     }
     if feat & F_TOPOLOGY != 0 {
+        // Release: pairs with nothing; only this thread's marker below reads it.
         blk.phys_exp.store(r8(cfg, CFG_TOPOLOGY), Ordering::Release);
+        // Release: pairs with nothing; nothing reads it yet.
         blk.align_off
             .store(r8(cfg, CFG_TOPOLOGY + 1), Ordering::Release);
+        // Release: pairs with nothing; nothing reads it yet.
         blk.min_io
             .store(r16(cfg, CFG_TOPOLOGY + 2), Ordering::Release);
+        // Release: pairs with nothing; only this thread's marker below reads it.
         blk.opt_io
             .store(r32(cfg, CFG_TOPOLOGY + 4), Ordering::Release);
     }
     if feat & F_DISCARD != 0 {
+        // Release: pairs with the Acquire load in `issue`.
         blk.max_discard
             .store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
     }
@@ -391,6 +396,7 @@ fn setup(
             fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
             return Err(VirtioError::Failed);
         }
+        // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
         if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8)
         {
             fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
@@ -440,6 +446,7 @@ fn setup(
                 fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
                 return Err(VirtioError::Failed);
             }
+            // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
             if irq_init::enable_msix(
                 dev,
                 qi as u16,
@@ -542,12 +549,19 @@ fn setup(
     let st = r8(common, COMMON_OFF_STATUS);
     w8(common, COMMON_OFF_STATUS, st | STATUS_DRIVER_OK);
 
+    // Release: pairs with the Acquire load in `irq::blk_top`.
     blk.isr.store(isr, Ordering::Release);
+    // Release: pairs with the Acquire load in `needs_reset`.
     blk.common.store(common, Ordering::Release);
+    // Release: pairs with the Acquire loads in `build`, `features` and `read_only`.
     blk.features.store(feat, Ordering::Release);
+    // Release: pairs with the Acquire load in `logical_block_size`.
     blk.blk_size.store(blk_size, Ordering::Release);
+    // Release: pairs with the Acquire load in `capacity_sectors`.
     blk.cap.store(capacity, Ordering::Release);
+    // Release: pairs with the Acquire load in `num_queues`.
     blk.nq.store(nq as u8, Ordering::Release);
+    // Release: pairs with the Acquire load in `state`.
     blk.state
         .store(DeviceState::Ready.as_u8(), Ordering::Release);
 
@@ -570,9 +584,11 @@ fn setup(
         } else {
             0
         };
+        // Release: pairs with the Acquire load in `irq::queue_vector`.
         blk.queue_vecs[i].store(v, Ordering::Release);
         i += 1;
     }
+    // Release: pairs with the Acquire load in `live`; last, so it publishes the setup above.
     blk.live.store(true, Ordering::Release);
 
     // The registration prints the `block: <name>` marker. A failure leaves
@@ -586,6 +602,7 @@ fn setup(
         );
     }
     let mq = if feat & F_MQ != 0 { "mq" } else { "sq" };
+    // Acquire: pairs with nothing; the topology stores above are this thread's own.
     crate::marker!(
         "vibeOS: virtio: blk {} {} qsz={q0sz} nq={nq} {mq} feat={:#x} bs={blk_size} topo={}/{} discard={}",
         blk.name(),
@@ -691,26 +708,32 @@ impl VirtioBlk {
     }
 
     pub fn live(&self) -> bool {
+        // Acquire: pairs with the Release store at the end of `setup`.
         self.live.load(Ordering::Acquire)
     }
 
     pub fn state(&self) -> DeviceState {
+        // Acquire: pairs with the Release stores in `setup` and `fail_rest`.
         DeviceState::from_u8(self.state.load(Ordering::Acquire))
     }
 
     pub fn logical_block_size(&self) -> u32 {
+        // Acquire: pairs with the Release store in `setup`.
         self.blk_size.load(Ordering::Acquire)
     }
 
     pub fn capacity_sectors(&self) -> u64 {
+        // Acquire: pairs with the Release store in `setup`.
         self.cap.load(Ordering::Acquire)
     }
 
     pub fn num_queues(&self) -> u8 {
+        // Acquire: pairs with the Release store in `setup`.
         self.nq.load(Ordering::Acquire)
     }
 
     pub fn io_reqs(&self) -> u64 {
+        // Relaxed: a count; pairs with nothing.
         self.io_reqs.load(Ordering::Relaxed)
     }
 
@@ -718,6 +741,7 @@ impl VirtioBlk {
     /// `S_UNSUPP` (test-only).
     #[cfg(feature = "kernel_tests")]
     pub fn inject_unsupp(&self, n: u32) {
+        // Release: pairs with the AcqRel update in `injected`.
         self.inject_unsupp.store(n, Ordering::Release);
     }
 
@@ -776,6 +800,7 @@ impl VirtioBlk {
             }
         }
         // After the range checks, so a bad range is still `Inval`.
+        // Acquire: pairs with the Release store in `setup`.
         refuse_read_only(self.features.load(Ordering::Acquire), op)?;
         Ok(req)
     }
@@ -909,6 +934,7 @@ impl VirtioBlk {
     }
 
     pub fn features(&self) -> u64 {
+        // Acquire: pairs with the Release store in `setup`.
         self.features.load(Ordering::Acquire)
     }
 
@@ -926,22 +952,26 @@ impl VirtioBlk {
 
     /// Runs of this disk's top half.
     pub fn top_hits(&self) -> u32 {
+        // Acquire: pairs with the SeqCst add in `irq::blk_top`.
         self.top_hits.load(Ordering::Acquire)
     }
 
     /// Runs of this disk's bottom half.
     pub fn thread_hits(&self) -> u32 {
+        // Acquire: pairs with the SeqCst add in `irq::blk_work`.
         self.thread_hits.load(Ordering::Acquire)
     }
 
     /// Requests this disk's device completed.
     pub fn completions(&self) -> u32 {
+        // Acquire: pairs with the SeqCst add in `harvest`.
         self.completions.load(Ordering::Acquire)
     }
 
     /// `Flush` requests dispatched, emulated-`Fua` ones and those finished
     /// locally without `F_FLUSH` included.
     pub fn flushes(&self) -> u64 {
+        // Relaxed: a count; pairs with nothing.
         self.flushes.load(Ordering::Relaxed)
     }
 
@@ -996,6 +1026,7 @@ impl BlockDevice for VblkDev {
         self.blk()?.discard(lba, nsectors)
     }
     fn read_only(&self) -> bool {
+        // Acquire: pairs with the Release store in `setup`.
         self.blk()
             .is_ok_and(|b| b.features.load(Ordering::Acquire) & F_RO != 0)
     }

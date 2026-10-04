@@ -8,6 +8,7 @@ impl VirtioBlk {
     #[cfg(feature = "kernel_tests")]
     pub fn queue_vector(&self, cpu: u32) -> Option<u8> {
         self.queue_vecs.iter().find_map(|q| {
+            // Acquire: pairs with the Release store in `setup`.
             let v = q.load(Ordering::Acquire);
             (v & QUEUE_VEC_LIVE != 0 && ((v & !QUEUE_VEC_LIVE) >> 8) as u32 == cpu)
                 .then_some(v as u8)
@@ -17,6 +18,7 @@ impl VirtioBlk {
     /// `st`, or `S_UNSUPP` while an injected failure is left (test-only).
     #[cfg(feature = "kernel_tests")]
     fn injected(&self, st: u8) -> u8 {
+        // AcqRel, Acquire on failure: pairs with the Release store in `inject_unsupp`.
         let take = self
             .inject_unsupp
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
@@ -97,6 +99,7 @@ pub(super) fn blk_top(ctx: Option<&(dyn Any + Send + Sync)>) {
         return;
     };
     b.top_hits.fetch_add(1, Ordering::SeqCst);
+    // Acquire: pairs with the Release store in `setup`.
     let isr = b.isr.load(Ordering::Acquire);
     if isr != 0 {
         // Reading the ISR status acknowledges the interrupt; the value
