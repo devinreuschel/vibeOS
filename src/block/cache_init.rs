@@ -175,6 +175,7 @@ fn wait_fill(slot: usize) {
     let Some(wq) = SLOT_WQ.0.get(slot) else {
         return;
     };
+    // AcqRel: pairs with the Acquire loads in `block::ktest::cache_read_waits_for_fill`.
     #[cfg(feature = "kernel_tests")]
     testing::FILL_WAITS.fetch_add(1, Ordering::AcqRel);
     loop {
@@ -345,6 +346,7 @@ fn bump_readahead(dev: &BlockRef, evict: &mut [u8], page: &mut [u8]) {
 }
 
 fn read(dev: &BlockRef, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+    // Acquire: pairs with the Release store in `init`.
     if !LIVE.load(Ordering::Acquire) {
         return dev.read_dev(lba, buf);
     }
@@ -394,6 +396,7 @@ fn read(dev: &BlockRef, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
 }
 
 fn write(dev: &BlockRef, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    // Acquire: pairs with the Release store in `init`.
     if !LIVE.load(Ordering::Acquire) {
         return dev.write_dev(lba, buf);
     }
@@ -492,6 +495,7 @@ impl BlockCache for PageCache {
     /// ([`Cache::flush_waited`]). A writer that keeps dirtying pages cannot
     /// hold it off, since the sweep visits each slot once.
     fn flush(&self, dev: &BlockRef) -> Result<(), BlockError> {
+        // Acquire: pairs with the Release store in `init`.
         if !LIVE.load(Ordering::Acquire) {
             return dev.flush_dev();
         }
@@ -530,12 +534,14 @@ pub fn over_dirty() -> bool {
 }
 
 pub fn live() -> bool {
+    // Acquire: pairs with the Release store in `init`.
     LIVE.load(Ordering::Acquire)
 }
 
 fn writeback_main() {
     loop {
         thread_init::sleep_ms(50);
+        // Acquire: pairs with the Release store in `init`.
         if !LIVE.load(Ordering::Acquire) {
             continue;
         }
@@ -574,6 +580,7 @@ pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {
         },
         s.device_reqs(),
         s.evicts,
+        // Acquire: pairs with the Release store in `init`.
         if WRITEBACK.load(Ordering::Acquire) {
             ""
         } else {
@@ -583,8 +590,10 @@ pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {
 }
 
 pub fn init() {
+    // Release: pairs with every Acquire load of `LIVE` above.
     LIVE.store(true, Ordering::Release);
     match thread_init::spawn("blk-wb", writeback_main) {
+        // Release: pairs with the Acquire load in `shell_line`.
         Ok(_) => WRITEBACK.store(true, Ordering::Release),
         // The cache runs without it: flushes and evictions still write
         // dirty pages, and the shell line says there is no writer thread
@@ -637,6 +646,7 @@ pub mod testing {
     /// (`ktest::sleep_for`), so a slow host cannot end it before the test
     /// has seen what it waits for.
     pub(super) fn fill_hold_point(key: CacheKey) {
+        // Acquire, AcqRel: pairs with the Release stores in `cache_read_waits_for_fill`.
         if FILL_DEV.load(Ordering::Acquire) != key.dev
             || FILL_OFF
                 .compare_exchange(key.offset, UNARMED, Ordering::AcqRel, Ordering::Acquire)
@@ -644,10 +654,14 @@ pub mod testing {
         {
             return;
         }
+        // Release: pairs with the Acquire load in `cache_read_waits_for_fill`.
         FILL_HELD.store(true, Ordering::Release);
+        // Acquire: pairs with the Release stores in `cache_read_waits_for_fill`.
         if !crate::ktest::sleep_for(|| FILL_RELEASE.load(Ordering::Acquire)) {
+            // Release: pairs with the Acquire load in `cache_read_waits_for_fill`.
             FILL_TIMED_OUT.store(true, Ordering::Release);
         }
+        // Release: pairs with the Acquire load in `cache_read_waits_for_fill`.
         FILL_HELD.store(false, Ordering::Release);
     }
 
@@ -659,6 +673,7 @@ pub mod testing {
     /// `PageCache::flush`'s point after each page it writes of `dev`, with
     /// no lock held.
     pub(super) fn after_flush_write(dev: u64) {
+        // Acquire: pairs with the Release stores in `block::ktest::cache_flush_not_starved`.
         if REDIRTY_DEV.load(Ordering::Acquire) == dev {
             crate::block::ktest::flush_redirty();
         }
@@ -684,6 +699,7 @@ pub mod testing {
 
     impl Drop for WbPause {
         fn drop(&mut self) {
+            // Release: pairs with the SeqCst load in `wb_pass_begin`.
             WB_PAUSE.store(false, Ordering::Release);
         }
     }
@@ -695,6 +711,7 @@ pub mod testing {
     pub(super) fn wb_pass_begin() -> bool {
         WB_IN_PASS.store(true, Ordering::SeqCst);
         if WB_PAUSE.load(Ordering::SeqCst) {
+            // Release: pairs with the SeqCst load in `WbPause::new`.
             WB_IN_PASS.store(false, Ordering::Release);
             return false;
         }
@@ -702,6 +719,7 @@ pub mod testing {
     }
 
     pub(super) fn wb_pass_end() {
+        // Release: pairs with the SeqCst load in `WbPause::new`.
         WB_IN_PASS.store(false, Ordering::Release);
     }
 
@@ -709,6 +727,7 @@ pub mod testing {
     /// until `block::ktest::release`; only the running row's deadline
     /// bounds it, as [`fill_hold_point`]'s.
     pub(super) fn hold_point(key: CacheKey) {
+        // Acquire, AcqRel: pairs with the Release stores in `block::ktest::hold_wb` and `release`.
         if DEV.load(Ordering::Acquire) != key.dev
             || OFF
                 .compare_exchange(key.offset, UNARMED, Ordering::AcqRel, Ordering::Acquire)
@@ -716,8 +735,11 @@ pub mod testing {
         {
             return;
         }
+        // Release: pairs with the Acquire load in `block::ktest::held`.
         HELD.store(true, Ordering::Release);
+        // Acquire: pairs with the Release stores in `block::ktest::hold_wb` and `release`.
         let _released = crate::ktest::sleep_for(|| RELEASE.load(Ordering::Acquire));
+        // Release: pairs with the Acquire load in `block::ktest::held`.
         HELD.store(false, Ordering::Release);
     }
 }
