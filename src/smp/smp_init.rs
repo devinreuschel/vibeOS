@@ -222,11 +222,13 @@ pub(super) fn alloc_ap_resources(
         // `start_one`'s `slot_ptr` check turns into the alloc-failed path.
         let _ = unsafe {
             per_cpu_init::with_cpu(cpu_id, |cpu| {
+                // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
                 cpu.remote.apic_id.store(apic_id as u32, Ordering::Relaxed);
                 cpu.idle_id = idle_id;
                 cpu.idle = idle_ptr;
                 per_cpu_init::set_current_thread(cpu, idle_ptr);
                 cpu.timer_mode = apic_init::timer_mode();
+                // Relaxed: the AP is not running yet; pairs with nothing.
                 cpu.remote.ready.store(false, Ordering::Relaxed);
                 core::sync::atomic::compiler_fence(Ordering::SeqCst);
             })
@@ -271,7 +273,9 @@ fn free_ap_slot(
 ) {
     if published {
         if let Some(r) = per_cpu_init::cpu(cpu_id) {
+            // Relaxed: the AP never started; pairs with nothing.
             r.ready.store(false, Ordering::Relaxed);
+            // Relaxed: the AP never started; pairs with nothing.
             r.apic_id.store(0, Ordering::Relaxed);
         }
         if !sipi_sent {
@@ -316,6 +320,7 @@ fn free_live_ap(
 fn wait_ready(cpu_id: u32) -> bool {
     let mut ms = 0u64;
     while ms < READY_TIMEOUT_MS {
+        // Acquire: pairs with the Release store in `ap_main`.
         if per_cpu_init::cpu(cpu_id).is_some_and(|c| c.ready.load(Ordering::Acquire)) {
             return true;
         }
@@ -353,6 +358,7 @@ fn tsc_warp_source() {
     };
     if WARP.arrive(Arch::now, timeout) {
         time_init::note_tsc_warp(WARP.run(Arch::now, span, WARP_MAX_ITERS));
+        // Relaxed: a count; pairs with nothing.
         WARP_RUNS.fetch_add(1, Ordering::Relaxed);
         if !WARP.wait_left(Arch::now, timeout) {
             crate::klog!(
@@ -379,6 +385,7 @@ fn tsc_warp_target() {
 /// The skew marker, once an AP ran the warp test, and the clock the core
 /// tool reads from the trace's header.
 fn report_tsc_warp() {
+    // Relaxed: a count; pairs with nothing.
     let runs = WARP_RUNS.load(Ordering::Relaxed);
     if runs > 0 {
         crate::marker!("vibeOS: smp: tsc skew {} cycles", time_init::tsc_max_skew());
@@ -541,6 +548,7 @@ extern "C" fn ap_entry() -> ! {
         cpu.cpu_id,
         marker::SCHED_CPU_SUFFIX
     );
+    // Release: pairs with the Acquire load in `wait_ready`.
     cpu.remote.ready.store(true, Ordering::Release);
     x86::sti();
     crate::sched_init::idle_loop();
@@ -592,6 +600,7 @@ pub unsafe fn init() {
 
 /// Start each MADT CPU but the BSP, one at a time, from `page`.
 fn start_aps(page: u64) {
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     let bsp_apic = per_cpu_init::with_current(|c| c.remote.apic_id.load(Ordering::Relaxed)) as u8;
     let Some(info) = acpi_init::info() else {
         return;
