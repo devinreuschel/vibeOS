@@ -18,7 +18,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [Q4](Q4-naming-consistency.md) | Naming and feature-flag consistency | Low | S | II | — | `implemented (#83)` |
 | [Q5](Q5-split-monolithic-files.md) | Split monolithic files; add a size guard | Medium | M | III | A1, T1 | `implemented (#194)` |
 | [D1](D1-heap-backed-tables.md) | Heap-allocate the growable fixed-capacity tables (Phase 10) | High | L | III | Q3, A3 | `implemented (#194)` |
-| [D2](D2-driver-instances.md) | Driver and volume instances instead of module singletons | Medium | L | III | A1, Q3 | `in progress (#194)` |
+| [D2](D2-driver-instances.md) | Driver and volume instances instead of module singletons | Medium | L | III | A1, Q3 | `implemented (#194, #197, #212)` |
 | [D3](D3-bootinfo.md) | Capture boot information once (`BootInfo`) | Low | S | I | Q3 | `implemented (#90, #91)` |
 | [E1](E1-parser-robustness-lints.md) | Lock in parser robustness with restriction lints | Low | S | II | Q1 | `implemented (#86, #194)` |
 | [E2](E2-kerror-errno.md) | One `KError` (errno-shaped) ahead of the syscall boundary | Medium | M | III | A3 | `implemented (#194)` |
@@ -28,7 +28,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [T1](T1-split-ktest-registry.md) | Split the in-guest registry; make failures self-diagnosing | Medium | M | II | Q2 | `implemented (#194)` |
 | [T2](T2-single-qemu-launcher.md) | One QEMU launcher for all drivers | Medium | S | I | — | `implemented (#79)` |
 | [T3](T3-fast-check-ci-job.md) | A fast `check` CI job ahead of the QEMU ladder; coverage floor | Medium | S | II | Q1, T2 | `implemented (#82)` |
-| [T4](T4-fuzz-parsers.md) | Fuzz the pure parsers now | Medium | S | II | A2 | `in progress (#194)` |
+| [T4](T4-fuzz-parsers.md) | Fuzz the pure parsers now | Medium | S | II | A2 | `implemented (#194, #197)` |
 | [P1](P1-build-multiplicity.md) | Cut the build multiplicity | Low | M | II | B1, B2 | `implemented (#194)` |
 | [P2](P2-lock-hotspots-note.md) | Record the known single-lock hotspots as Phase 19 items | Low | S | II | — | `implemented (#83)` |
 | [S1](S1-pre-ring3-hardening.md) | Finish the pre-ring-3 hardening checklist | Medium | S | II | — | `implemented (#85)` |
@@ -36,7 +36,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [B2](B2-builtin-target-spike.md) | Replace the custom target JSON with built-in `x86_64-unknown-none` | Medium | M | II | C1 | `implemented (#84)` |
 | [B3](B3-tag-and-release.md) | Version, tag phases, and publish the ISO | Low | S | I | — | `implemented (#81)` |
 | [B4](B4-build-rs-inputs.md) | Simplify `build.rs` inputs and the initrd path | Low | S–M | II | B1 | `implemented (#89)` |
-| [I1](I1-macos-job-ovmf.md) | macOS CI job; find OVMF wherever it lives | Low | S | II | A2 | `in progress (#194)` |
+| [I1](I1-macos-job-ovmf.md) | macOS CI job; find OVMF wherever it lives | Low | S | II | A2 | `implemented (#194, #209, #212)` |
 | [DOC1](DOC1-top-of-funnel-docs.md) | README, DESIGN header, module map, MIT LICENSE | High | S | I | — | `implemented (#78)` |
 | [DOC2](DOC2-split-design-doc.md) | Split `DESIGN.md`; as-built in tables, not prose | Medium | M | III | A1 (helpful) | `implemented (#194)` |
 | [DOC3](DOC3-agents-md.md) | Version the agent instructions in the repo (`AGENTS.md`) | High | S | I | — | `implemented (#78)` |

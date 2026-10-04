@@ -83,13 +83,14 @@ serializing instruction), then `IA32_TSC_DEADLINE`. `lfence;rdtsc` / `rdtscp` do
 not drain the UC LVT store (SDM Vol. 3A). Rearm on the IRQ path only writes the
 MSR; LVT is already in deadline mode.
 
-Each fallback is worse than the one above it, and all three must work. CI runs two of them. Under
-TCG, QEMU never advertises `CPUID.01H:ECX[24]`, so `make test-kernel` (`-cpu max`) and
-`make test-lapic-fallback` (`-cpu qemu64,-tsc-deadline`) both take the periodic path, and
-`make test-e2e-pit` (`-machine pc,hpet=off`) boots on the PIT tick. `arm_tsc_deadline`,
-`rearm_deadline`, and the `TscDeadline` arm of `apic_init::arm_ap` run only under KVM or on hardware,
-and no CI tier runs them. Planned (ROADMAP §10.1, F078): the nightly KVM leg runs them. Under KVM,
-`-cpu qemu64,-tsc-deadline` forces the periodic path.
+Each fallback is worse than the one above it, and all three must work. The per-push tiers run two
+of them, and the nightly KVM leg the third. Under TCG, QEMU never advertises `CPUID.01H:ECX[24]`, so
+`make test-kernel` (`-cpu max`) and `make test-lapic-fallback` (`-cpu qemu64,-tsc-deadline`) both take
+the periodic path, and `make test-e2e-pit` (`-machine pc,hpet=off`) boots on the PIT tick.
+`arm_tsc_deadline`, `rearm_deadline`, and the `TscDeadline` arm of `apic_init::arm_ap` run only under
+KVM or on hardware, so no per-push tier runs them; the nightly KVM leg runs them under
+`-cpu max,+invtsc`, where `percpu_ticks_advance` finds every CPU's ticks advancing (ROADMAP §10.1,
+F078). Under KVM, `-cpu qemu64,-tsc-deadline` forces the periodic path.
 
 `apic_init::calib_periodic` measures the LAPIC count against the HPET as `calibrate_hpet` measures
 the TSC: each end of the 10 ms window is the count read the HPET brackets most tightly of 16,
