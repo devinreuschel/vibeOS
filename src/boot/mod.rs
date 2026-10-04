@@ -14,13 +14,16 @@ use limine::request::{
     HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
 };
 
-use crate::arch::current::Arch;
 use crate::cell::BootCell;
-use vibeos::arch::BootHandover;
 use vibeos::boot::cmdline::{self, CMDLINE_MAX, Cmdline, CmdlineBuf, Escaped, SYSCTLS};
 use vibeos::limits::MAX_BOOT_MODULES;
 use vibeos::log::Level;
-use vibeos::paging::HHDM_BASE;
+use vibeos::paging::{self, PhysmapSlot};
+
+#[cfg(target_arch = "aarch64")]
+use vibeos::paging::PHYSMAP_AARCH64;
+#[cfg(target_arch = "x86_64")]
+use vibeos::paging::PHYSMAP_X86_64;
 
 #[cfg(target_arch = "x86_64")]
 pub mod fw_cfg_init;
@@ -105,6 +108,8 @@ pub struct FbInfo {
 
 /// What the kernel takes from Limine. Write-once.
 pub struct BootInfo {
+    /// Limine's HHDM offset, read once. Every `phys + offset` uses this.
+    pub hhdm_offset: u64,
     /// Physical span of the loaded kernel image.
     pub kernel_phys: Range<u64>,
     /// The AP trampoline page (DESIGN §7.3): the lowest usable 4 KiB page
@@ -158,7 +163,7 @@ impl BootInfo {
         fbs.iter().filter_map(|fb| {
             let virt = fb.address() as u64;
             Some(FbInfo {
-                phys: virt.checked_sub(HHDM_BASE)?,
+                phys: virt.checked_sub(self.hhdm_offset)?,
                 virt,
                 width: fb.width as u32,
                 height: fb.height as u32,
@@ -201,14 +206,14 @@ impl BootInfo {
 /// file's HHDM address and length; one that is not an HHDM address, or
 /// past [`MAX_BOOT_MODULES`], is skipped. Never `File::path()` or
 /// `cmdline()`, which unwrap.
-fn module_ranges() -> ([(u64, u64); MAX_BOOT_MODULES], usize) {
+fn module_ranges(hhdm: u64) -> ([(u64, u64); MAX_BOOT_MODULES], usize) {
     let mut out = [(0u64, 0u64); MAX_BOOT_MODULES];
     let mut n = 0usize;
     let files = MODULES.response().map_or(&[][..], |r| r.modules());
     for f in files {
         let data = f.data();
         let range = (data.as_ptr() as u64)
-            .checked_sub(HHDM_BASE)
+            .checked_sub(hhdm)
             .and_then(|base| Some((base, base.checked_add(data.len() as u64)?)));
         let (Some(range), Some(slot)) = (range, out.get_mut(n)) else {
             continue;
@@ -272,27 +277,23 @@ pub fn capture() -> &'static BootInfo {
     let hhdm = HHDM
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: hhdm missing"));
-    // Everything downstream computes `phys + HHDM_BASE`, buddy free-list
-    // nodes included, and those fault the moment our own PML4 goes in if
-    // Limine's offset drifted. Fail loud here instead.
-    assert!(
-        hhdm.offset == HHDM_BASE,
-        "paging: limine hhdm offset {:#x} != expected {:#x}; buddy nodes would fault after cr3",
-        hhdm.offset,
-        HHDM_BASE,
-    );
+    let hhdm_offset = hhdm.offset;
+    if !paging::hhdm_in_slot(hhdm_offset, physmap_slot()) {
+        halt_with("vibeOS: limine: hhdm offset outside physmap slot");
+    }
     let memmap = MEMMAP
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: memmap missing"));
     let exec = EXEC_ADDR
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: executable_address missing"));
-    let rsdp = RSDP
+    // From base revision 4 the RSDP is an HHDM address.
+    let rsdp_phys = RSDP
         .response()
+        .and_then(|r| (r.address as u64).checked_sub(hhdm_offset))
         .unwrap_or_else(|| halt_with("vibeOS: limine: rsdp missing"));
-    let rsdp_raw = rsdp.address as u64;
     let kernel_len = (&raw const __kernel_vma_end as u64) - (&raw const __kernel_vma_start as u64);
-    let (modules, nmod) = module_ranges();
+    let (modules, nmod) = module_ranges(hhdm_offset);
     let trampoline_page = vibeos::pmm::choose_trampoline_page(
         memmap
             .entries()
@@ -305,9 +306,10 @@ pub fn capture() -> &'static BootInfo {
     // any reader and long before SMP.
     unsafe {
         INFO.set(BootInfo {
+            hhdm_offset,
             kernel_phys: exec.physical_base..exec.physical_base + kernel_len,
             trampoline_page,
-            rsdp_phys: <Arch as BootHandover>::table_phys(rsdp_raw, HHDM_BASE),
+            rsdp_phys,
             memmap: memmap.entries(),
             fb: FRAMEBUFFER.response(),
             modules,
@@ -359,6 +361,17 @@ pub fn cmdline() -> &'static Cmdline<'static> {
 /// Captured snapshot. Panics if [`capture`] has not run.
 pub fn info() -> &'static BootInfo {
     INFO.get()
+}
+
+fn physmap_slot() -> PhysmapSlot {
+    #[cfg(target_arch = "x86_64")]
+    {
+        PHYSMAP_X86_64
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        PHYSMAP_AARCH64
+    }
 }
 
 /// Print `msg` as a marker line and halt: the boot path's stop for a

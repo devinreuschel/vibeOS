@@ -42,7 +42,7 @@
 # §0.3 Limine handshake
 
 [[marker]]
-text = "vibeOS: limine: rev 3 ok"
+text = "vibeOS: limine: rev 6 ok"
 kind = "contract"
 arch = "both"
 source = "kernel"
@@ -63,6 +63,13 @@ kind = "failure"
 arch = "both"
 source = "kernel"
 section = "§0.3"
+
+[[marker]]
+text = "vibeOS: limine: hhdm offset outside physmap slot"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§11.1"
 
 [[marker]]
 text = "vibeOS: limine: memmap missing"

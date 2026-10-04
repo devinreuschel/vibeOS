@@ -17,7 +17,7 @@ fn leaf_is_uc(phys: u64) -> bool {
     if phys == 0 {
         return false;
     }
-    let va = VirtAddr(paging_init::HHDM_BASE.wrapping_add(phys));
+    let va = VirtAddr(paging_init::hhdm_offset().wrapping_add(phys));
     match paging_init::translate(va) {
         Some((_, _, flags)) => flags.contains(PageFlags::PCD | PageFlags::PWT),
         None => false,

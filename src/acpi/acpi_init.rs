@@ -29,7 +29,7 @@ impl PhysMem for HhdmPhys {
         if !ensure_ram(addr, end - addr) {
             return false;
         }
-        let src = (paging_init::HHDM_BASE.wrapping_add(addr)) as *const u8;
+        let src = (paging_init::hhdm_offset().wrapping_add(addr)) as *const u8;
         // SAFETY: `ensure_ram` just mapped every 4 KiB leaf of
         // `[addr, end)` in the physmap, cacheable and readable, so `src`
         // is valid for `buf.len()` bytes; `buf` is a distinct `&mut`, so
@@ -60,7 +60,7 @@ fn map_gap(phys: u64, len: u64, flags: paging::PageFlags) -> bool {
     let end = align_up(phys.saturating_add(len), PAGE_SIZE_4K);
     let mut p = start;
     while p < end {
-        let va = VirtAddr(paging_init::HHDM_BASE.wrapping_add(p));
+        let va = VirtAddr(paging_init::hhdm_offset().wrapping_add(p));
         if paging_init::translate(va).is_none() {
             // SAFETY: the physmap maps a frame only at its own HHDM address
             // and `translate` found no leaf at `va`, so the new leaf aliases
@@ -129,7 +129,7 @@ pub unsafe fn init(rsdp_phys: u64) {
 
     // First MMIO touch: HPET GEN_CAP period, only after that page is UC.
     if hpet_uc && let Some(hpet) = info.hpet.as_mut() {
-        let va = (paging_init::HHDM_BASE.wrapping_add(hpet.base)) as *const u64;
+        let va = (paging_init::hhdm_offset().wrapping_add(hpet.base)) as *const u64;
         // SAFETY: invariant I49, established here: `uc_mmio` returned true,
         // so the HPET register page is mapped UC in the physmap, and
         // GEN_CAP is its aligned first register.

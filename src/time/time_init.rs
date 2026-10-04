@@ -157,7 +157,7 @@ unsafe fn hpet_enable(va: u64) {
 }
 
 fn hpet_va(hpet: &HpetInfo) -> u64 {
-    paging_init::HHDM_BASE.wrapping_add(hpet.base)
+    paging_init::hhdm_offset().wrapping_add(hpet.base)
 }
 
 /// HPET main counter VA + period, after the page is UC. None if unusable.

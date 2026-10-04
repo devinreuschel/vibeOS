@@ -238,10 +238,10 @@ impl Zeroed {
 /// Zero the order-0 frame at `pa` through the physmap. Not a write to any
 /// address space: no mapping names the frame yet.
 fn zero_frame(pa: u64) {
-    let p = paging_init::HHDM_BASE.wrapping_add(pa) as *mut u8;
+    let p = paging_init::hhdm_offset().wrapping_add(pa) as *mut u8;
     // SAFETY: `pa` is a buddy frame this caller just allocated and nothing
     // else names, and the physmap maps every buddy frame writable at
-    // `HHDM_BASE`; established by `paging_init::install`.
+    // `hhdm_offset()`; established by `paging_init::install`.
     unsafe { core::ptr::write_bytes(p, 0, PAGE_SIZE_4K as usize) };
 }
 

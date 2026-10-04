@@ -13,7 +13,6 @@ use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::log::trace::{ClockInfo, WARP_MAX_ITERS, WARP_MS, WarpLine};
 use vibeos::marker;
-use vibeos::paging::HHDM_BASE;
 use vibeos::per_cpu::PerCpu;
 use vibeos::smp::{
     INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_OFF, PARAM_STACK, PATCH_SITES, READY_TIMEOUT_MS,
@@ -89,7 +88,7 @@ pub(super) struct ApAlloc {
 /// The trampoline page `page`'s physmap address, through which the BSP
 /// writes it (the AP reaches it at its identity address).
 pub(super) fn tramp_va(page: u64) -> *mut u8 {
-    HHDM_BASE.wrapping_add(page) as *mut u8
+    crate::paging_init::hhdm_offset().wrapping_add(page) as *mut u8
 }
 
 /// Store `val` at byte `off` of trampoline page `page`.

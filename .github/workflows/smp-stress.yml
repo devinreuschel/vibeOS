@@ -55,7 +55,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989
 
       - name: setup
         run: ./setup.sh
@@ -151,7 +151,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989
 
       - name: setup
         run: ./setup.sh
@@ -247,7 +247,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989
 
       - name: setup
         run: ./setup.sh
@@ -342,7 +342,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989
 
       - name: setup
         run: ./setup.sh

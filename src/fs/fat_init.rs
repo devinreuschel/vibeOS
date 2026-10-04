@@ -114,10 +114,10 @@ pub(super) fn with_initrd<R>(f: impl FnOnce(&mut Option<Span>) -> R) -> R {
 fn initrd_span() -> Option<(u64, usize)> {
     let r = crate::boot::info().initrd()?;
     let len = usize::try_from(r.end.checked_sub(r.start)?).ok()?;
-    let va = r.start.checked_add(crate::paging_init::HHDM_BASE)?;
+    let va = r.start.checked_add(crate::paging_init::hhdm_offset())?;
     let last = r.end.checked_sub(1)?;
     let mapped = |pa: u64| {
-        let va = pa.checked_add(crate::paging_init::HHDM_BASE)?;
+        let va = pa.checked_add(crate::paging_init::hhdm_offset())?;
         let (got, _, _) = crate::paging_init::translate(vibeos::paging::VirtAddr(va))?;
         (got.as_u64() == pa).then_some(())
     };
