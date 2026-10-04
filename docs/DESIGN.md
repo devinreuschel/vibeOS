@@ -315,7 +315,7 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   `third_party/crates/`; Rust's `COPYRIGHT-library.html` notice for the standard library, with the
   license texts it names; and the notice of each file a provenance header marks as adapted. Host
   tests fail when an entry is missing or `third_party/limine/` names a release other than the one
-  `setup.sh` pins. Planned (ROADMAP §10.9): the same file as an asset beside the image in each
+  `setup.sh` pins. `release.yml` uploads the same file as an asset beside the image in each
   release. A copyleft binary also carries its source offer (ROADMAP §14.10).
 
 Why: one function derived from GPL code would put the kernel under the GPL, against the project's
