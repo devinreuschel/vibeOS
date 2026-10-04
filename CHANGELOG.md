@@ -179,6 +179,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - FAT counts free clusters at mount instead of trusting FSInfo; vibefs stamps inodes with the wall
   clock and a refused unlink keeps the name.
 - Every CPU zeroes the SYSENTER MSRs, and a failed `ioremap` gives its window back.
+- Every CPU clears `EFER.FFXSR`, so a context switch on AMD saves the XMM registers, and turns off
+  CPUID faulting that firmware left on, so `cpuid` runs in ring 3.
 - `/dev`, `/proc`, `/sys` and `/tmp` are no longer capped at 128 nodes between them: kernfs's
   node table grows on the heap, and `ENOMEM` when it cannot.
 - `execve` of a program on `/tmp` stays within its thread's kernel stack budget; tmpfs's cache
