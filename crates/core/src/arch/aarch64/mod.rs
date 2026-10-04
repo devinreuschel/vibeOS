@@ -5,6 +5,7 @@
 //! lives in the kernel crate.
 
 pub mod paging;
+pub mod psci;
 pub mod sysreg;
 pub mod tlb;
 pub mod trap;

@@ -47,10 +47,6 @@ pub(crate) enum Outcome {
     Ok,
     Fail(&'static str),
     FailFmt(FailMsg),
-    #[cfg_attr(
-        target_arch = "aarch64",
-        expect(dead_code, reason = "boot-CPU S7; unused on this path")
-    )]
     Skip(&'static str),
 }
 
@@ -726,10 +722,6 @@ pub(crate) fn log_contains(needle: &str) -> bool {
 
 /// Free frames: the buddy's, and those of the stacks the CPUs' stack caches
 /// hold, which a spawn reuses (ROADMAP §10.10).
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn free_frames() -> usize {
     pmm_init::with_buddy(|b| b.stats().free_frames) + thread_init::cached_stack_frames()
 }
@@ -753,20 +745,16 @@ pub(crate) fn free_frame(pa: PhysAddr) {
     unsafe { dealloc_frames(pa, 0) };
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) struct Fault {
     #[cfg(target_arch = "x86_64")]
     pub(crate) cr2: u64,
+    #[cfg_attr(
+        target_arch = "aarch64",
+        expect(dead_code, reason = "x86 PF error_code; aarch64 stores ESR")
+    )]
     pub(crate) error: u64,
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
     // A hit longjmps out of the #PF gate and skips the `iretq` that would
     // restore IF; the guard restores it.
@@ -780,8 +768,7 @@ pub(crate) fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        let _ = f;
-        None
+        arch::catch::catch_dabt(f).map(|c| Fault { error: c.esr })
     }
 }
 
@@ -808,10 +795,6 @@ pub(crate) fn spawn_thread(name: &'static str, entry: fn()) -> ThreadHandle {
     }
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn spawn_thread_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
     match thread_init::spawn_on(name, entry, cpu) {
         Ok(h) => h,
@@ -890,27 +873,15 @@ pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
 /// A naturally aligned block of `1 << order` frames as its owning
 /// `Frames`, for an API that takes the token (`kva_init::vmap`). The
 /// caller gives it back with [`free_frames_owned`].
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn alloc_frames_owned(order: u8) -> Option<Frames> {
     pmm_init::with_buddy(|b| b.alloc(order))
 }
 
 /// Free a block [`alloc_frames_owned`] returned, once nothing maps it.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn free_frames_owned(f: Frames) {
     pmm_init::with_buddy(|b| b.free(f));
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
     per_cpu_init::cpu(id)
 }
@@ -934,10 +905,6 @@ pub(crate) fn restore_irq_nest(n: u32) {
     }
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn second_cpu() -> Option<u32> {
     let mask = per_cpu_init::online_mask();
     let mut i = 1u32;
@@ -953,19 +920,11 @@ pub(crate) fn second_cpu() -> Option<u32> {
 /// `ipi_init::service_incoming` from thread context. With IF on, an IPI
 /// between `service_calls`' acked check and its ack would run the callback
 /// twice, so this holds IF off across the call.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn service_incoming_guarded() {
     let _g = InterruptGuard::enter();
     ipi_init::service_incoming();
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
     let t0 = time_init::now_ns();
     while !pred() {
@@ -1030,10 +989,6 @@ pub(crate) fn find_edu() -> Option<DevRef> {
 /// first), no thread but the caller and the idle threads is runnable, and
 /// no dead thread's stack is still on its way back. Every frame-accounting
 /// test takes its `before` and `after` from here.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn quiescent_free_frames() -> usize {
     settle();
     free_frames()
@@ -1041,10 +996,6 @@ pub(crate) fn quiescent_free_frames() -> usize {
 
 /// Run the shared warm-up, then wait for [`quiesce`], saying so if it
 /// timed out.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 fn settle() {
     quiesce_frames();
     if !quiesce() {
@@ -1152,10 +1103,6 @@ impl FrameCount {
 /// Wait, bounded, until no thread but this one and the idle threads is
 /// Ready or Running and no dead thread's stack sits in a CPU's dead-stack
 /// slot or on its dead list. False if that did not happen in time.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn quiesce() -> bool {
     settle_threads()
 }

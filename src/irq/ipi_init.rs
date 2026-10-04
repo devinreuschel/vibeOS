@@ -8,9 +8,11 @@
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::apic::{IpiError, IpiMode};
+use vibeos::apic::IpiError;
+#[cfg(target_arch = "x86_64")]
+use vibeos::apic::IpiMode;
 use vibeos::arch::{CycleCounter, InterruptMask, Ipi, IpiSend, PageTable};
-use vibeos::ipi::{MAX_IPI_CPUS, SHOOT_RANGES, ShootRange, all_acked, waiter_mask};
+use vibeos::ipi::{CallSlot, MAX_IPI_CPUS, SHOOT_RANGES, ShootRange, all_acked, waiter_mask};
 use vibeos::irq::stop::{self, CrashRegs, NmiAction, StopBudget, StopHow};
 use vibeos::log::Level;
 use vibeos::paging::VirtAddr;
@@ -18,6 +20,7 @@ use vibeos::per_cpu::PerCpuRemote;
 use vibeos::thread::ThreadId;
 use vibeos::vectors;
 
+#[cfg(target_arch = "x86_64")]
 use crate::apic_init;
 use crate::arch::current::{self, Arch};
 use crate::per_cpu_init;
@@ -38,24 +41,6 @@ impl Slot {
         Self {
             n: AtomicU64::new(0),
             ranges: [const { AtomicU64::new(0) }; SHOOT_RANGES],
-            waiters: AtomicU64::new(0),
-            acked: AtomicU64::new(0),
-        }
-    }
-}
-
-struct CallSlot {
-    func: AtomicPtr<()>,
-    arg: AtomicPtr<()>,
-    waiters: AtomicU64,
-    acked: AtomicU64,
-}
-
-impl CallSlot {
-    const fn empty() -> Self {
-        Self {
-            func: AtomicPtr::new(core::ptr::null_mut()),
-            arg: AtomicPtr::new(core::ptr::null_mut()),
             waiters: AtomicU64::new(0),
             acked: AtomicU64::new(0),
         }
@@ -165,22 +150,10 @@ fn service_shootdowns() {
 
 fn service_calls() {
     let me = my_bit();
-    if me == 0 {
+    if me == 0 || !CALL.invited(me) {
         return;
     }
-    // Acquire: pairs with the Release store of `waiters` in `call_mask`.
-    let w = CALL.waiters.load(Ordering::Acquire);
-    if w & me == 0 {
-        return;
-    }
-    // Relaxed: the Acquire load of `waiters` orders it after the call's reset; pairs with nothing.
-    if CALL.acked.load(Ordering::Relaxed) & me != 0 {
-        return;
-    }
-    // Relaxed: the Acquire load of `waiters` orders it after the call's stores; pairs with nothing.
-    let f = CALL.func.load(Ordering::Relaxed);
-    // Relaxed: as `func`; pairs with nothing.
-    let arg = CALL.arg.load(Ordering::Relaxed);
+    let (f, arg) = CALL.payload();
     if !f.is_null() {
         // SAFETY: invariant: a non-null `CALL.func` holds a `fn(*mut ())`;
         // established by `ipi_init::call_mask`, its only non-null store.
@@ -193,9 +166,7 @@ fn service_calls() {
     // Relaxed: the Release `fetch_or` of `acked` below publishes it; pairs with nothing.
     CALL_COUNT.fetch_add(1, Ordering::Relaxed);
     vibeos::trace!(IpiAck, u64::from(vectors::IPI_CALL), u64::MAX);
-    // Release: pairs with the Acquire load in `wait_acks`; publish last
-    // (AGENTS.md rule 5), as in `service_shootdowns`.
-    CALL.acked.fetch_or(me, Ordering::Release);
+    CALL.ack(me);
 }
 
 /// Wait until every CPU in `waiters` has acked. Never panics and never
@@ -311,7 +282,11 @@ fn shootdown_round(ranges: &[ShootRange]) {
     // Release: pairs with the Acquire load of `waiters` in `service_shootdowns`.
     slot.waiters.store(waiters, Ordering::Release);
     note_send("shootdown", Arch::send_others(Ipi::Shootdown));
+    // Broadcast `tlbi *is` already invalidated every CPU; no shootdown SGI.
+    #[cfg(target_arch = "x86_64")]
     wait_acks(waiters, &slot.acked);
+    #[cfg(target_arch = "aarch64")]
+    let _ = waiters;
     // Release: pairs with the Acquire load of `waiters` in `service_shootdowns`.
     slot.waiters.store(0, Ordering::Release);
 }
@@ -441,7 +416,16 @@ pub static OWNER_NMI_RETURNS: AtomicU64 = AtomicU64::new(0);
 /// How long the owner waits for acknowledgements before it sends NMI, and
 /// after it (DESIGN §2.5 step 1).
 const STOP_WAIT_MS: u64 = 100;
+#[cfg(target_arch = "x86_64")]
 const NMI_WAIT_MS: u64 = 10;
+
+/// The registers of the code that calls this: a stop that no trap
+/// delivered saves its own.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub(crate) fn here_regs_for_stop() -> CrashRegs {
+    here_regs()
+}
 
 /// The registers of the code that calls this: a stop that no trap
 /// delivered saves its own.
@@ -525,10 +509,6 @@ fn stop_hook() {
 /// The `0xFE` body: stop, saving the interrupted registers `regs` (the
 /// IDT body reads them from its trap frame, so this module does not name
 /// the IDT's frame type, DESIGN §1.2).
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
-)]
 pub fn on_stop_ipi(regs: CrashRegs) -> ! {
     stop_this_cpu(StopHow::Ipi, regs);
 }
@@ -625,6 +605,7 @@ fn wait_stopped(mask: u64, ms: u64) -> u64 {
 /// Send `vector` with `mode` to CPU `cpu`. Through `apic_init::send_ipi`,
 /// which records no trace event: `trace!` takes an `InterruptGuard`, which
 /// the dump path never does (DESIGN §2.5 step 1).
+#[cfg(target_arch = "x86_64")]
 fn send_raw(cpu: u32, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
     let Some(r) = per_cpu_init::cpu(cpu) else {
         return Err(IpiError::NotReady);
@@ -635,6 +616,7 @@ fn send_raw(cpu: u32, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
 
 /// Send NMI to each CPU of `mask`; a CPU whose NMI the LAPIC refused is
 /// left running, and the dump reports it `not stopped`.
+#[cfg(target_arch = "x86_64")]
 fn nmi_each(mask: u64) {
     let mut m = mask;
     while m != 0 {
@@ -668,18 +650,28 @@ pub fn stop_others() {
             // AcqRel swap in `nmi_stop`.
             r.stop_req.fetch_or(stop::STOP, Ordering::Release);
         }
-        if send_raw(c, vectors::IPI_HALT, IpiMode::Fixed).is_err() {
+        if Arch::send(c, Ipi::Halt).is_err() {
             refused |= 1u64 << c;
         }
     }
+    #[cfg(target_arch = "x86_64")]
     nmi_each(refused);
+    #[cfg(target_arch = "aarch64")]
+    let _ = refused;
     let late = wait_stopped(others, STOP_WAIT_MS);
     if late == 0 {
         return;
     }
-    nmi_each(late);
-    // The CPUs still running are reported `not stopped` by the dump.
-    wait_stopped(late, NMI_WAIT_MS);
+    #[cfg(target_arch = "x86_64")]
+    {
+        nmi_each(late);
+        // The CPUs still running are reported `not stopped` by the dump.
+        wait_stopped(late, NMI_WAIT_MS);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = late;
+    }
 }
 
 /// Run `f(arg)` on every online CPU in `mask` except self. Always waits
@@ -708,15 +700,7 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
             core::hint::spin_loop();
         }
     }
-    // Relaxed: the Release store of `waiters` below publishes it; pairs with nothing.
-    CALL.func.store(f as *mut (), Ordering::Relaxed);
-    // Relaxed: as `func`; pairs with nothing.
-    CALL.arg.store(arg, Ordering::Relaxed);
-    // Relaxed: as `func`; pairs with nothing.
-    CALL.acked.store(0, Ordering::Relaxed);
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
-    // Release: pairs with the Acquire load of `waiters` in `service_calls`.
-    CALL.waiters.store(waiters, Ordering::Release);
+    CALL.publish(f as *mut (), arg, waiters);
     let mut c = 0u32;
     while c < 64 {
         if waiters & (1u64 << c) != 0 {
@@ -724,11 +708,8 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
         }
         c += 1;
     }
-    wait_acks(waiters, &CALL.acked);
-    // Release: pairs with the Acquire load of `waiters` in `service_calls`.
-    CALL.waiters.store(0, Ordering::Release);
-    // Relaxed: the Release store of `CALL_BUSY` below publishes it; pairs with nothing.
-    CALL.func.store(core::ptr::null_mut(), Ordering::Relaxed);
+    wait_acks(waiters, CALL.acked_ref());
+    CALL.clear_waiters();
     // Release: pairs with the Acquire compare-exchange in the next `call_mask`.
     CALL_BUSY.store(false, Ordering::Release);
 }

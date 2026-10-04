@@ -4,7 +4,7 @@
 //! MMIO and IDT live in the binary crate.
 
 use crate::arch::InterruptMask;
-use crate::atomic::{AtomicU64, Ordering};
+use crate::atomic::{AtomicPtr, AtomicU64, Ordering};
 use crate::sync::variant::{self, Site};
 use crate::thread::{CpuAffinity, MAX_THREADS};
 
@@ -146,6 +146,117 @@ pub const fn waiter_mask(online: u64, self_cpu: u32) -> u64 {
 
 pub const fn all_acked(waiters: u64, acked: u64) -> bool {
     waiters & acked == waiters
+}
+
+/// One call-function round (ROADMAP §11.4, F109). The sender stores
+/// `func` and `arg`, then publishes with `acked.store(0, Release)`.
+/// Responders Acquire-load `acked` before the payload and ack with a
+/// Release `fetch_or` after the closure.
+///
+/// Litmus: `tests/litmus/call_function.litmus` (Release publish) and
+/// `tests/litmus/call_function_relaxed.litmus` (barrier-removed twin).
+pub struct CallSlot {
+    func: AtomicPtr<()>,
+    arg: AtomicPtr<()>,
+    waiters: AtomicU64,
+    acked: AtomicU64,
+}
+
+impl CallSlot {
+    /// An empty slot. `const` outside `cfg(loom)`.
+    #[cfg(not(loom))]
+    pub const fn empty() -> Self {
+        Self {
+            func: AtomicPtr::new(core::ptr::null_mut()),
+            arg: AtomicPtr::new(core::ptr::null_mut()),
+            waiters: AtomicU64::new(0),
+            acked: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    /// An empty slot (loom's atomics have no `const fn new`).
+    #[cfg(loom)]
+    pub fn empty() -> Self {
+        Self {
+            func: AtomicPtr::new(core::ptr::null_mut()),
+            arg: AtomicPtr::new(core::ptr::null_mut()),
+            waiters: AtomicU64::new(0),
+            acked: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    /// Store the payload, then publish the waiter mask by resetting
+    /// `acked` (Release). `Site::CallPublishRelaxed` stores Relaxed.
+    pub fn publish(&self, func: *mut (), arg: *mut (), waiters: u64) {
+        // Relaxed: the Release store of `acked` below publishes it; pairs with nothing.
+        self.func.store(func, Ordering::Relaxed);
+        // Relaxed: as `func`; pairs with nothing.
+        self.arg.store(arg, Ordering::Relaxed);
+        // Relaxed: as `func`; pairs with nothing.
+        self.waiters.store(waiters, Ordering::Relaxed);
+        // Release: pairs with the Acquire load of `acked` in `invited`.
+        // Relaxed: the loom variant; pairs with nothing.
+        let ord = variant::pick(
+            Site::CallPublishRelaxed,
+            Ordering::Release,
+            Ordering::Relaxed,
+        );
+        self.acked.store(0, ord);
+    }
+
+    /// True when this CPU is invited and has not acked. The Acquire load
+    /// of `acked` is the responder's first access to the payload.
+    pub fn invited(&self, me: u64) -> bool {
+        if me == 0 {
+            return false;
+        }
+        // Acquire: pairs with the Release store of `acked` in `publish`.
+        let a = self.acked.load(Ordering::Acquire);
+        if a & me != 0 {
+            return false;
+        }
+        // Relaxed: the Acquire load of `acked` orders it; pairs with nothing.
+        self.waiters.load(Ordering::Relaxed) & me != 0
+    }
+
+    /// The payload. Call only after [`invited`] returned true.
+    pub fn payload(&self) -> (*mut (), *mut ()) {
+        // Relaxed: the Acquire load of `acked` in `invited` orders it; pairs with nothing.
+        (
+            self.func.load(Ordering::Relaxed),
+            self.arg.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Ack after the closure. Last access to `arg` (DESIGN §2.8).
+    /// `Site::CallAckRelaxed` uses Relaxed.
+    pub fn ack(&self, me: u64) {
+        // Release: pairs with the Acquire load in the initiator's wait.
+        // Relaxed: the loom variant; pairs with nothing.
+        let ord = variant::pick(Site::CallAckRelaxed, Ordering::Release, Ordering::Relaxed);
+        self.acked.fetch_or(me, ord);
+    }
+
+    /// The initiator's wait: Acquire-load `acked` until every waiter bit.
+    pub fn acked(&self) -> u64 {
+        // Acquire: pairs with each responder's Release `fetch_or`.
+        self.acked.load(Ordering::Acquire)
+    }
+
+    /// The ack word, for the kernel's `wait_acks` poll.
+    pub fn acked_ref(&self) -> &AtomicU64 {
+        &self.acked
+    }
+
+    /// End the round so a late IPI does not re-run the closure.
+    pub fn clear_waiters(&self) {
+        // Release: pairs with the Acquire load of `acked` in `invited`
+        // only after a later `publish`; this store just drops the mask.
+        // Relaxed: pairs with nothing.
+        self.waiters.store(0, Ordering::Relaxed);
+        // Relaxed: as `waiters`; pairs with nothing.
+        self.func.store(core::ptr::null_mut(), Ordering::Relaxed);
+    }
 }
 
 /// Most ranges one TLB shootdown round carries (DESIGN §7.9). A caller
@@ -501,5 +612,90 @@ mod loom_models {
     #[should_panic(expected = "inbox: ThreadId lost")]
     fn loom_wake_inbox_summary_first_loses_id_fails() {
         inbox_model(Some(Site::InboxSummaryFirst));
+    }
+
+    /// Initiator publishes a payload word; one responder yields until
+    /// `invited`, reads it, writes the witness, then acks. Weakened
+    /// publish lets the responder see `acked` reset without the
+    /// payload; weakened ack lets the wait reuse the witness before
+    /// the responder's last write. Bound: 2 threads (responder 1 take
+    /// and 1 ack, main 1 publish and the wait), 3 preemptions.
+    fn call_model(v: Option<Site>) {
+        let bound = Bound {
+            threads: 2,
+            preemptions: 3,
+        };
+        check(v, bound, || {
+            struct Frame {
+                slot: CallSlot,
+                witness: loom::cell::UnsafeCell<u32>,
+            }
+            // SAFETY: the responder writes `witness` before it acks, and
+            // main writes it only after the wait sees the ack; the models
+            // check, through loom, that the ack orders the two. Established
+            // here.
+            unsafe impl Sync for Frame {}
+            let f = Arc::new(Frame {
+                slot: CallSlot::empty(),
+                witness: loom::cell::UnsafeCell::new(0),
+            });
+            let payload = Arc::new(loom::sync::atomic::AtomicU64::new(0));
+            let bit = 1u64;
+            let responder = {
+                let f = f.clone();
+                let payload = payload.clone();
+                thread::spawn(move || {
+                    while !f.slot.invited(bit) {
+                        thread::yield_now();
+                    }
+                    let (fnp, arg) = f.slot.payload();
+                    if fnp as usize != 0xC0FFEE {
+                        panic!("call: stale func");
+                    }
+                    // SAFETY: `arg` is the `payload` atomic this model owns.
+                    // established here.
+                    let seen = unsafe {
+                        (*(arg as *const loom::sync::atomic::AtomicU64)).load(Ordering::Relaxed)
+                    };
+                    if seen != 0xC0FFEE {
+                        panic!("call: stale arg");
+                    }
+                    let _ = payload;
+                    // SAFETY: the wait has not seen the ack. established here.
+                    f.witness.with_mut(|p| unsafe { *p = 1 });
+                    f.slot.ack(bit);
+                })
+            };
+            payload.store(0xC0FFEE, Ordering::Relaxed);
+            f.slot.publish(
+                core::ptr::without_provenance_mut(0xC0FFEE),
+                core::ptr::from_ref(payload.as_ref()) as *mut (),
+                bit,
+            );
+            while !all_acked(bit, f.slot.acked()) {
+                thread::yield_now();
+            }
+            // SAFETY: the ack is visible, so the responder has made its last
+            // access. established here.
+            f.witness.with_mut(|p| unsafe { *p = 2 });
+            responder.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn loom_call_function() {
+        call_model(None);
+    }
+
+    #[test]
+    #[should_panic(expected = "call:")]
+    fn loom_call_publish_relaxed_fails() {
+        call_model(Some(Site::CallPublishRelaxed));
+    }
+
+    #[test]
+    #[should_panic(expected = "Causality violation")]
+    fn loom_call_ack_relaxed_fails() {
+        call_model(Some(Site::CallAckRelaxed));
     }
 }

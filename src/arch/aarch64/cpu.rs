@@ -136,9 +136,10 @@ pub fn write_translation_regs() {
 }
 
 pub fn tlbi_all() {
-    // SAFETY: local TLB invalidate of the EL1 (VHE host) regime; established here.
+    // Inner-shareable broadcast (ROADMAP §11.2 / Arm ARM DDI0487 TLBI).
+    // SAFETY: EL1 (VHE host) regime; established here.
     unsafe {
-        asm!("tlbi vmalle1", options(nostack, preserves_flags));
+        asm!("tlbi vmalle1is", options(nostack, preserves_flags));
         asm!("dsb ish", options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));
     }
@@ -146,12 +147,117 @@ pub fn tlbi_all() {
 
 pub fn tlbi_va(va: u64) {
     let page = va >> 12;
-    // SAFETY: invalidate one VA in the EL1 (VHE host) regime; established here.
+    // Inner-shareable leaf invalidate (Arm ARM `tlbi vale1is`).
+    // SAFETY: EL1 (VHE host) regime; established here.
     unsafe {
-        asm!("tlbi vaae1, {0}", in(reg) page, options(nostack, preserves_flags));
+        asm!("tlbi vale1is, {0}", in(reg) page, options(nostack, preserves_flags));
         asm!("dsb ish", options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));
     }
+}
+
+/// Write `TTBR0_EL1` (ASID in the high bits when `TCR.A1` is clear).
+///
+/// # Safety
+/// `ttbr0` is a complete user root, or the empty ASID-0 root.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest ASID switch (kernel_tests)")
+)]
+pub unsafe fn write_ttbr0(ttbr0: u64) {
+    // SAFETY: this fn's `# Safety` (here).
+    unsafe {
+        asm!("msr ttbr0_el1, {0}", in(reg) ttbr0, options(nostack, preserves_flags));
+        asm!("isb", options(nostack, preserves_flags));
+    }
+}
+
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest ASID switch (kernel_tests)")
+)]
+pub fn read_ttbr0() -> u64 {
+    let v: u64;
+    // SAFETY: TTBR0_EL1 is readable at EL1 / VHE EL2; established here.
+    unsafe {
+        asm!("mrs {0}, ttbr0_el1", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// Write the #202 computed EL0/EL1 environment registers whole.
+pub fn apply_computed_sysregs() {
+    let sctlr = sysreg::sctlr_el1();
+    let pmuserenr = sysreg::pmuserenr_el0();
+    let cpacr = sysreg::cpacr_el1();
+    // SAFETY: whole writes of the computed values; never RMW. established here.
+    unsafe {
+        if el2_vhe() {
+            let cnthctl = sysreg::cnthctl_el2();
+            asm!("msr cnthctl_el2, {0}", in(reg) cnthctl, options(nostack, preserves_flags));
+        } else {
+            let cntkctl = sysreg::cntkctl_el1();
+            asm!("msr cntkctl_el1, {0}", in(reg) cntkctl, options(nostack, preserves_flags));
+        }
+        asm!("msr pmuserenr_el0, {0}", in(reg) pmuserenr, options(nostack, preserves_flags));
+        asm!("msr cpacr_el1, {0}", in(reg) cpacr, options(nostack, preserves_flags));
+        asm!("msr sctlr_el1, {0}", in(reg) sctlr, options(nostack, preserves_flags));
+        asm!("isb", options(nostack, preserves_flags));
+    }
+}
+
+/// Print the §11.1 exception-level marker. Does not write [`EL2_VHE`].
+pub fn print_exception_level() {
+    let el = current_el();
+    if el2_vhe() {
+        crate::marker!("vibeOS: el: 2 vhe");
+    } else {
+        crate::marker!("vibeOS: el: {el}");
+    }
+}
+
+/// Release the debug OS Lock and clear `MDSCR_EL1.{MDE,KDE,SS}`.
+pub fn release_debug_os_lock() {
+    // SAFETY: OSDLR/OSLAR/MDSCR are writable at EL1; established here.
+    unsafe {
+        asm!("msr osdlr_el1, xzr", options(nostack, preserves_flags));
+        asm!("msr oslar_el1, xzr", options(nostack, preserves_flags));
+        asm!("isb", options(nostack, preserves_flags));
+        asm!("msr mdscr_el1, xzr", options(nostack, preserves_flags));
+        asm!("isb", options(nostack, preserves_flags));
+    }
+}
+
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest oslsr_clear (kernel_tests)")
+)]
+pub fn oslsr() -> u64 {
+    let v: u64;
+    // SAFETY: OSLSR_EL1 is readable; established here.
+    unsafe {
+        asm!("mrs {0}, oslsr_el1", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// Clear PAN for a kernel access to a user VA. Restore with [`set_pan`].
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest ASID user-VA walk (kernel_tests)")
+)]
+pub fn clear_pan() {
+    // SAFETY: FEAT_PAN is the ISA floor; established here.
+    unsafe { asm!("msr pan, #0", options(nostack, preserves_flags)) };
+}
+
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest ASID user-VA walk (kernel_tests)")
+)]
+pub fn set_pan() {
+    // SAFETY: as `clear_pan`; established here.
+    unsafe { asm!("msr pan, #1", options(nostack, preserves_flags)) };
 }
 
 #[inline]
@@ -324,6 +430,10 @@ pub fn set_overflow_sp(sp: u64) {
     OVERFLOW_SP.store(sp, Ordering::Release);
 }
 
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest overflow-stack check (kernel_tests)")
+)]
 pub fn overflow_sp() -> u64 {
     // Acquire: pairs with the Release store in `set_overflow_sp`.
     OVERFLOW_SP.load(Ordering::Acquire)

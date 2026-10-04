@@ -77,7 +77,7 @@ SHARDS: dict[str, Shard] = {
     **_rows("test-kernel-smp4", "spawn_sentinel"),
     "test-kernel-smp4-4": Shard("test-kernel-smp4", boots=("select", "deadline-trip", "planted")),
     "test-kernel-smp4-5": Shard(
-        "test-kernel-smp4", boots=("fat", "vblk-readonly", "vblk-bad-sector")
+        "test-kernel-smp4", boots=("fat", "vblk-readonly", "vblk-bad-sector", "stalled-ap")
     ),
     **_rows("test-lapic-fallback", "user_single_step"),
     "test-lapic-fallback-4": Shard(

@@ -962,7 +962,7 @@ section = "§4.5"
 [[marker]]
 text = "vibeOS: smp: apic <n> alloc failed"
 kind = "diagnostic"
-arch = "x86_64"
+arch = "both"
 source = "kernel"
 section = "§4.5"
 
@@ -976,9 +976,23 @@ section = "§4.5"
 [[marker]]
 text = "vibeOS: smp: apic <n> timed out"
 kind = "diagnostic"
-arch = "x86_64"
+arch = "both"
 source = "kernel"
 section = "§4.5"
+
+[[marker]]
+text = "vibeOS: smp: apic <n> already on"
+kind = "diagnostic"
+arch = "aarch64"
+source = "kernel"
+section = "§11.4"
+
+[[marker]]
+text = "vibeOS: smp: apic <n> cpu_on <n>"
+kind = "diagnostic"
+arch = "aarch64"
+source = "kernel"
+section = "§11.4"
 
 # §4.6 Per-CPU data
 

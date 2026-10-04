@@ -1,11 +1,9 @@
-//! PSCI `SYSTEM_OFF` / `SYSTEM_RESET` (ROADMAP §11.4).
+//! PSCI 0.2/1.0 through the device-tree conduit (ROADMAP §11.4).
 
 use core::arch::asm;
 
+use vibeos::arch::aarch64::psci;
 use vibeos::machine::EnableMethod;
-
-const PSCI_SYSTEM_OFF: u32 = 0x8400_0008;
-const PSCI_SYSTEM_RESET: u32 = 0x8400_0009;
 
 fn conduit_hvc() -> bool {
     crate::machine_init::info()
@@ -13,16 +11,44 @@ fn conduit_hvc() -> bool {
         .unwrap_or(true)
 }
 
-fn psci(fid: u32) -> ! {
+/// One PSCI call. `fid` is the function id in `x0`.
+///
+/// # Safety
+/// The firmware implements PSCI on this conduit; a `SYSTEM_*` call may
+/// not return.
+unsafe fn psci_call(fid: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let hvc = conduit_hvc();
-    // SAFETY: PSCI SMC/HVC; the firmware ends the VM or returns, and we
-    // halt if it returns; established here.
+    let mut ret: i64;
+    // SAFETY: this fn's `# Safety`; established here.
     unsafe {
         if hvc {
-            asm!("hvc #0", in("x0") u64::from(fid), options(nostack, preserves_flags));
+            asm!(
+                "hvc #0",
+                inout("x0") fid as i64 => ret,
+                in("x1") a1,
+                in("x2") a2,
+                in("x3") a3,
+                options(nostack, preserves_flags),
+            );
         } else {
-            asm!("smc #0", in("x0") u64::from(fid), options(nostack, preserves_flags));
+            asm!(
+                "smc #0",
+                inout("x0") fid as i64 => ret,
+                in("x1") a1,
+                in("x2") a2,
+                in("x3") a3,
+                options(nostack, preserves_flags),
+            );
         }
+    }
+    ret
+}
+
+fn psci_halt(fid: u32) -> ! {
+    // SAFETY: SYSTEM_OFF / SYSTEM_RESET; halt if firmware returns.
+    // established here.
+    unsafe {
+        let _ = psci_call(u64::from(fid), 0, 0, 0);
         loop {
             asm!("wfi", options(nomem, nostack, preserves_flags));
         }
@@ -30,11 +56,23 @@ fn psci(fid: u32) -> ! {
 }
 
 pub fn power_off() -> ! {
-    psci(PSCI_SYSTEM_OFF);
+    psci_halt(psci::SYSTEM_OFF as u32);
 }
 
 pub fn restart() -> ! {
-    psci(PSCI_SYSTEM_RESET);
+    psci_halt(psci::SYSTEM_RESET as u32);
+}
+
+/// PSCI `CPU_ON` (64-bit). `target` is the MPIDR affinity.
+pub fn cpu_on(target: u64, entry_pa: u64, context: u64) -> i64 {
+    // SAFETY: CPU_ON; firmware returns a status. established here.
+    unsafe { psci_call(psci::CPU_ON, target, entry_pa, context) }
+}
+
+/// PSCI `AFFINITY_INFO` for `target` at level 0.
+pub fn affinity_info(target: u64) -> i64 {
+    // SAFETY: AFFINITY_INFO; firmware returns ON/OFF/ON_PENDING. established here.
+    unsafe { psci_call(psci::AFFINITY_INFO, target, 0, 0) }
 }
 
 /// PSCI `SYSTEM_OFF` for the ktest pass verdict (QEMU exits 0).

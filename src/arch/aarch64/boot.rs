@@ -133,6 +133,7 @@ fn alloc_early_table(kphys: u64, used: &mut usize) -> Option<u64> {
 /// After serial: EL marker, ISA floor, early VBAR.
 pub fn early_init() {
     cpu::note_exception_level();
+    super::percpu::set_tpidr_el2(cpu::el2_vhe());
     cpu::check_isa_floor();
     vectors::init_early();
 }

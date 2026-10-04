@@ -63,6 +63,13 @@ The x86_64 port's other files: `src/arch/x86_64/catch.rs` (the in-guest tests' f
 module roots; the latter holds the zero-sized `Arch` and its `InterruptMask`, `CycleCounter`,
 `ContextSwitch`, `Barriers`, `PerCpuBase`, `SyscallAbi` and `Port` impls).
 
+ROADMAP §11.4's aarch64 files, named here so `check_arch.py` can see them without a new
+seam-table column: `src/arch/aarch64/secondary.rs` (PSCI stub, identity TTBR0, EL2 list),
+`src/arch/aarch64/switch.rs` (x19–x29, SP, LR, DAIF), `src/arch/aarch64/percpu.rs`
+(`TPIDR_EL1` or `TPIDR_EL2`), `src/arch/aarch64/power.rs` (`SYSTEM_OFF`/`SYSTEM_RESET`,
+`CPU_ON`), `crates/core/src/arch/aarch64/psci.rs` (IDs and `SecondaryParam`). Bring-up
+lives in `src/smp/smp_init.rs` beside the x86 path.
+
 `vibeos-core` names a few of the reference port's pure-half items directly until a second port's
 kernel builds (ROADMAP Phase 11): `crates/core/src/arch/mod.rs` re-exports the x86_64 descriptor,
 vector, 8259, APIC and UART encodings, `UserFrame`, and the `SYS_*` numbers as `syscall_nr`.
