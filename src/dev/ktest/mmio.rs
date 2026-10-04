@@ -62,7 +62,30 @@ pub(crate) fn test_block_vblk_mmio_smp() -> Outcome {
     let t0 = crate::time_init::uptime_ms();
     while DONE.load(Ord::SeqCst) < spawned {
         if crate::time_init::uptime_ms().saturating_sub(t0) > 15_000 {
-            return Outcome::Fail("stall");
+            let (top, thr, done, used, isr, ior) = mmio_blk(|b| {
+                (
+                    b.top_hits(),
+                    b.thread_hits(),
+                    b.completions(),
+                    b.used_idx0(),
+                    b.mmio_isr(),
+                    b.io_reqs(),
+                )
+            })
+            .unwrap_or((0, 0, 0, 0, 0, 0));
+            crate::klog!(
+                vibeos::log::Level::Error,
+                "vibeOS: vblk-mmio stall top={top} thr={thr} done={done} used={used} isr={isr} io={ior} nq={nq}"
+            );
+            return if top == 0 {
+                Outcome::Fail("stall no irq")
+            } else if thr == 0 {
+                Outcome::Fail("stall no bh")
+            } else if used != 0 {
+                Outcome::Fail("stall used")
+            } else {
+                Outcome::Fail("stall")
+            };
         }
         thread_init::yield_now();
     }

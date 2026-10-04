@@ -55,6 +55,17 @@ const V2M_TYPER_MASK: u32 = 0x3FF;
 /// ITS translation register, from the ITS frame (IHI 0069G).
 pub const GITS_TRANSLATER: u32 = 0x1_0040;
 
+/// `GICD_IROUTER<n>` base. Offset is `0x6000 + 8*n` with `n` the INTID
+/// (IHI 0069). `n` 0–31 are reserved; the first SPI (INTID 32) sits at
+/// `0x6100`.
+pub const GICD_IROUTER: u64 = 0x6000;
+
+/// Byte offset of `GICD_IROUTER<intid>` from the distributor base.
+#[must_use]
+pub const fn gicd_irouter(intid: u32) -> u64 {
+    GICD_IROUTER.saturating_add((intid as u64).saturating_mul(8))
+}
+
 /// SPI or PPI INTID from a 3-cell GIC specifier (type, number).
 pub const fn gic_intid(ty: u32, num: u32) -> Option<u32> {
     match ty {
@@ -155,6 +166,9 @@ mod tests {
         assert_eq!(lpi_prop_index(LPI_BASE), Some(0));
         assert_eq!(lpi_prop_index(LPI_BASE + 3), Some(3));
         assert_eq!(lpi_prop_index(LPI_BASE - 1), None);
+        assert_eq!(gicd_irouter(32), 0x6100);
+        assert_eq!(gicd_irouter(48), 0x6180);
+        assert_eq!(gicd_irouter(80), 0x6280);
         const {
             assert!(PRIO_NMI == 0);
             assert!(PRIO_NMI < PRIO_IPI_TICK);

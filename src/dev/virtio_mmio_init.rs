@@ -123,8 +123,12 @@ pub(crate) fn config_va(base: u64) -> u64 {
     base.wrapping_add(u64::from(MMIO_OFF_CONFIG))
 }
 
+pub(crate) fn isr_bits(base: u64) -> u32 {
+    r32(base, MMIO_OFF_ISR)
+}
+
 pub(crate) fn ack_isr(base: u64) {
-    let v = r32(base, MMIO_OFF_ISR);
+    let v = isr_bits(base);
     w32(base, MMIO_OFF_ISR_ACK, v);
 }
 

@@ -49,7 +49,7 @@ pub(super) fn kick(doorbell: u64, qi: u16, notify32: bool) {
     // SAFETY: invariant I54: `doorbell` is a queue's notify register inside
     // a mapped virtio window (`map_mmio`); established by
     // `crate::dev::pci_init::map_mmio`. The store is that virtqueue's index
-    // (virtio 1.2 §§4.1.5.2, 4.2.2).
+    // (virtio 1.2 sections 4.1.5.2, 4.2.2).
     unsafe {
         if notify32 {
             core::ptr::write_volatile(doorbell as *mut u32, u32::from(virtio::queue_notify(qi)));

@@ -21,7 +21,7 @@ const GICD_ICENABLER: u64 = 0x0180;
 const GICD_IPRIORITYR: u64 = 0x0400;
 const GICD_ITARGETSR: u64 = 0x0800;
 const GICD_ICFGR: u64 = 0x0C00;
-const GICD_IROUTER: u64 = 0x6100;
+const GICD_ICFGR_EDGE: u32 = 2;
 const GICD_SGIR: u64 = 0x0F00;
 const GICD_CTLR_ENABLE_G0: u32 = 1;
 const GICD_CTLR_ENABLE_G1: u32 = 1 << 1;
@@ -349,7 +349,7 @@ fn init_v3(g: &Gic) {
             while j < 4 {
                 let n = i.saturating_add(j);
                 if n < lines {
-                    mmio64w(g.dist, GICD_IROUTER + u64::from(n) * 8, 0);
+                    mmio64w(g.dist, gic::gicd_irouter(n), 0);
                 }
                 j = j.saturating_add(1);
             }
@@ -725,7 +725,13 @@ pub fn handle_irq() {
         return;
     }
     // DESIGN §5.8: EOI before the timer/IPI body, which may preempt.
-    eoi(g, intid);
+    // A device SPI/LPI EOIs after the top half, so a level line is
+    // dropped (virtio-mmio InterruptACK) before deactivate.
+    let tick = crate::arch::aarch64::timer::intid();
+    let early = gic::is_sgi(intid) || (tick != 0 && intid == tick);
+    if early {
+        eoi(g, intid);
+    }
     // Acquire: pairs with the Release store in `set_dispatch`.
     let p = DISPATCH.load(Ordering::Acquire);
     if !p.is_null() {
@@ -733,6 +739,9 @@ pub fn handle_irq() {
         // `crate::arch::aarch64::gic::set_dispatch`, its only store.
         let f = unsafe { core::mem::transmute::<*mut (), fn(u32)>(p) };
         f(intid);
+    }
+    if !early {
+        eoi(g, intid);
     }
 }
 
@@ -893,6 +902,26 @@ fn enable_intid(g: &Gic, intid: u32, on: bool) {
     unsafe { mmio32w(g.dist, off + u64::from(intid / 32) * 4, bit) };
 }
 
+/// Program `GICD_ICFGR` for an SPI. `edge` is virtio 1.2 / DT cell 2
+/// value 1 (rising); level is 4.
+pub fn set_spi_edge(intid: u32, edge: bool) {
+    let Some(g) = gic() else {
+        return;
+    };
+    if !gic::is_spi(intid) {
+        return;
+    }
+    enable_intid(g, intid, false);
+    let off = GICD_ICFGR + u64::from(intid / 16) * 4;
+    let shift = (intid % 16) * 2;
+    let bits = if edge { GICD_ICFGR_EDGE } else { 0 };
+    // SAFETY: GICD_ICFGR for a disabled SPI. established here.
+    unsafe {
+        let cur = mmio32(g.dist, off);
+        mmio32w(g.dist, off, (cur & !(3 << shift)) | (bits << shift));
+    }
+}
+
 impl IrqChip for GicChip {
     fn translate(&self, spec: IrqSpecifier, _cpu: u32) -> Result<u32, IrqError> {
         match spec {
@@ -938,7 +967,18 @@ impl IrqChip for GicChip {
                 | (((hw >> 16) & 0xFF) << 16)
                 | (((hw >> 24) & 0xFF) << 32);
             // SAFETY: GICD_IROUTER for this SPI. established here.
-            unsafe { mmio64w(g.dist, GICD_IROUTER + u64::from(hwirq) * 8, route) };
+            unsafe { mmio64w(g.dist, gic::gicd_irouter(hwirq), route) };
+            return Ok(());
+        }
+        if g.kind == Kind::V2 && gic::is_spi(hwirq) {
+            let bit = 1u32 << (hw & 7);
+            let off = GICD_ITARGETSR + u64::from(hwirq & !3);
+            let shift = (hwirq % 4) * 8;
+            // SAFETY: GICD_ITARGETSR for this SPI. established here.
+            unsafe {
+                let cur = mmio32(g.dist, off);
+                mmio32w(g.dist, off, (cur & !(0xFF << shift)) | (bit << shift));
+            }
             return Ok(());
         }
         Ok(())

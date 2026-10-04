@@ -713,6 +713,10 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
     let mut vcpus = [0u32; MAX_VQ];
     let spec = crate::virtio_mmio_init::irq_spec(dev).ok_or(VirtioError::Failed)?;
     let cpu = irq_init::threaded_cpu();
+    #[cfg(target_arch = "aarch64")]
+    if let vibeos::irq::IrqSpecifier::Gic { intid } = spec {
+        crate::arch::aarch64::gic::set_spi_edge(intid, true);
+    }
     let irq = match irq_init::map_wired(spec) {
         Ok(i) => i,
         Err(_) => {
@@ -1262,6 +1266,30 @@ impl VirtioBlk {
     pub fn completions(&self) -> u32 {
         // Acquire: pairs with the SeqCst add in `harvest`.
         self.completions.load(Ordering::Acquire)
+    }
+
+    /// Used-ring index the device last published on queue 0.
+    #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+    pub fn used_idx0(&self) -> u16 {
+        let g = self.st.lock();
+        g.as_deref()
+            .and_then(|b| b.vqs.first().and_then(|v| v.as_ref()))
+            .map(|v| v.vq.used_idx())
+            .unwrap_or(0)
+    }
+
+    /// virtio-mmio InterruptStatus, or 0 on PCI.
+    #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+    pub fn mmio_isr(&self) -> u32 {
+        if !self.is_mmio() {
+            return 0;
+        }
+        // Acquire: pairs with the Release store of `common` in `setup_mmio`.
+        let base = self.common.load(Ordering::Acquire);
+        if base == 0 {
+            return 0;
+        }
+        crate::virtio_mmio_init::isr_bits(base)
     }
 
     /// `Flush` requests dispatched, emulated-`Fua` ones and those finished
