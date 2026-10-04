@@ -1493,6 +1493,10 @@ def _qemu_argv_aarch64(
     argv = [
         qemu_system("aarch64"),
         "-machine", f"virt,acpi=off,gic-version={cfg.gic_version}",
+        # QEMU 8.2 `virt` builds virtio-mmio with force-legacy=on
+        # (Version=1). Firecracker and virtio 1.2 §4.2 are Version=2;
+        # ROADMAP §11.5 F047 needs QueueNotify to take the queue index.
+        "-global", "virtio-mmio.force-legacy=off",
         "-m", cfg.mem,
         "-smp", str(cfg.smp),
         "-cpu", _aarch64_cpu(cfg),

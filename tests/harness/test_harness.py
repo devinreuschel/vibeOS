@@ -1763,6 +1763,9 @@ class TestQemuArgv(unittest.TestCase):
         try:
             self.assertEqual(argv[0], "qemu-system-aarch64")
             self.assertEqual(argv[argv.index("-machine") + 1], "virt,acpi=off,gic-version=3")
+            self.assertEqual(
+                argv[argv.index("-global") + 1], "virtio-mmio.force-legacy=off"
+            )
             self.assertNotIn("-cdrom", argv)
             blob = " ".join(argv)
             self.assertIn("virtio-scsi-pci", blob)

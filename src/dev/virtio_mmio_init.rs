@@ -2,7 +2,10 @@
 //!
 //! Each `MachineDesc` virtio-mmio window is published as a device whose
 //! BAR 0 is that `reg` range. Probe reads Magic/Version/DeviceID after
-//! `claim_mem_bars`, the same path a PCI BAR takes.
+//! `claim_mem_bars`, the same path a PCI BAR takes. Only Version=2
+//! (virtio 1.2 §4.2) is a modern transport; QEMU's `virt` builds the
+//! 32 windows with `force-legacy=on`, so the harness sets
+//! `-global virtio-mmio.force-legacy=off`.
 
 use vibeos::dev::{Device, Resource, ResourceKind};
 use vibeos::irq::IrqSpecifier;
