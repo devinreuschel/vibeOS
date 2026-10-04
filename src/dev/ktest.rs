@@ -5,6 +5,7 @@ use vibeos::dev::{
     ClaimError, DevRef, DevState, Driver, IdMatch, Instance, ProbeError, Resource, ResourceKind,
 };
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
+#[cfg(target_arch = "x86_64")]
 use vibeos::fs::O_RDWR;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::{PAGE_SIZE_2M, PageFlags, VirtAddr};
@@ -12,18 +13,25 @@ use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MAST
 
 use vibeos::kalloc::TryBox;
 use vibeos::pci::CfgIo;
+#[cfg(target_arch = "x86_64")]
 use vibeos::proc::wait_exited;
 use vibeos::virtio::{F_EVENT_IDX, F_INDIRECT_DESC, F_VERSION_1};
 
 use crate::arch::current::Arch;
 use crate::dev_init;
 use crate::dma_init;
+#[cfg(target_arch = "x86_64")]
 use crate::entropy_init;
+#[cfg(target_arch = "x86_64")]
 use crate::fs_init;
+#[cfg(target_arch = "x86_64")]
 use crate::heap_init::{self, fail_after::Scope};
+#[cfg(target_arch = "x86_64")]
+use crate::ktest::fid;
+#[cfg(target_arch = "x86_64")]
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{
-    EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, bar0_va, fid, find_edu, mmio_r32, mmio_w32,
+    EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, bar0_va, find_edu, mmio_r32, mmio_w32, mmio_w64,
     quiescent_free_frames, spin_until_ns, test,
 };
 use crate::log_init;
@@ -31,6 +39,7 @@ use crate::paging_init;
 use crate::pci_init;
 use crate::sync::blocking_init::BlockingMutex;
 use crate::sync_init::SpinMutex;
+#[cfg(target_arch = "x86_64")]
 use crate::thread_init;
 use crate::virtio_init;
 
@@ -139,6 +148,7 @@ pub(crate) fn test_pci_qemu_set() -> Outcome {
 /// moves a live BAR, and QEMU's TCG can send another CPU's MMIO through a
 /// stale TLB entry meanwhile: a LAPIC EOI lost that way leaves the timer
 /// vector in service, and that CPU takes no IPI again (ROADMAP §10.2).
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_pci_scan_bsp_only() -> Outcome {
     // Acquire: pairs with the scan's Release store.
     match pci_init::SCAN_ONLINE.load(Ordering::Acquire) {
@@ -388,8 +398,14 @@ pub(crate) fn test_dma_edu() -> Outcome {
     }
     src.sync_for_device::<Arch>();
     dst.sync_for_device::<Arch>();
-    mmio_w32(mmio, EDU_DMA_SRC, src.device().as_u64() as u32);
-    mmio_w32(mmio, EDU_DMA_DST, EDU_DMA_BUF);
+    let src_dev = src.device().as_u64();
+    if !dma::addr_fits_mask(src_dev, dma::EDU_DMA_MASK) {
+        dma_init::free(src);
+        dma_init::free(dst);
+        return Outcome::Fail("dma mask");
+    }
+    mmio_w64(mmio, EDU_DMA_SRC, src_dev);
+    mmio_w64(mmio, EDU_DMA_DST, u64::from(EDU_DMA_BUF));
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb::<Arch>();
     mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN);
@@ -401,8 +417,14 @@ pub(crate) fn test_dma_edu() -> Outcome {
         dma_init::free(dst);
         return Outcome::Fail("dma to edu");
     }
-    mmio_w32(mmio, EDU_DMA_SRC, EDU_DMA_BUF);
-    mmio_w32(mmio, EDU_DMA_DST, dst.device().as_u64() as u32);
+    let dst_dev = dst.device().as_u64();
+    if !dma::addr_fits_mask(dst_dev, dma::EDU_DMA_MASK) {
+        dma_init::free(src);
+        dma_init::free(dst);
+        return Outcome::Fail("dma mask");
+    }
+    mmio_w64(mmio, EDU_DMA_SRC, u64::from(EDU_DMA_BUF));
+    mmio_w64(mmio, EDU_DMA_DST, dst_dev);
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb::<Arch>();
     mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN | EDU_DMA_TO_PCI);
@@ -511,6 +533,7 @@ pub(crate) fn test_virtio_vq() -> Outcome {
 
 // open("/dev/random", O_RDONLY), then read 16 bytes onto the stack;
 // exit with the errno either returned (a positive count exits 0x80 | 16).
+#[cfg(target_arch = "x86_64")]
 user_code!(
     DEV_RANDOM_READ,
     "
@@ -547,6 +570,7 @@ user_code!(
 /// A `read` of `/dev/random` from ring 3, with no hardware entropy,
 /// returns `EAGAIN` (11) through the syscall (SYSCALL.md §3, read's row;
 /// ROADMAP §10.12).
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_dev_random_eagain() -> Outcome {
     entropy_init::testing::set_dry(true);
     let st = user::run(&Image::Code(DEV_RANDOM_READ, DEFAULT), &["random_eagain"]);
@@ -558,6 +582,7 @@ pub(crate) fn test_dev_random_eagain() -> Outcome {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_dev_random_source() -> Outcome {
     if !virtio_init::rng_bound() {
         return Outcome::Skip("no virtio-rng");
@@ -644,6 +669,7 @@ fn logged_since(mark: u64, needles: &[&str]) -> bool {
 
 /// A probe whose allocation fails leaves its device unbound, with a log
 /// line naming the driver and the device, and the kernel up.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_dev_probe_alloc_fail() -> Outcome {
     let registered = dev_init::register_driver(&NOMEM_DRV) || {
         let g = dev_init::REG.lock();
@@ -748,6 +774,7 @@ static RAM_DEV_ID: vibeos::atomic::statics::AtomicU64 = vibeos::atomic::statics:
 
 /// The `kernel_tests` record with BAR0 on a usable RAM page, registered
 /// on first use.
+#[cfg(target_arch = "x86_64")]
 fn ram_bar_device() -> Option<DevRef> {
     let id = RAM_DEV_ID.load(Ordering::Acquire);
     if id != 0 {
@@ -771,6 +798,7 @@ fn ram_bar_device() -> Option<DevRef> {
 /// ROADMAP §10.12 (F115): every memory BAR of every bound device is in the
 /// claims table, a second claim of one is `Already`, a claim over usable
 /// RAM is `Ram`, and an unbound device keeps no claim.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_dev_bar_claims() -> Outcome {
     bind_bar_test_driver();
     let mut i = 0usize;
@@ -855,6 +883,7 @@ pub(crate) fn test_dev_bar_claims() -> Outcome {
 
 /// ROADMAP §10.12 (F115): `map_mmio` refuses a page of usable RAM, and
 /// that page's physmap leaf stays write-back.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_map_mmio_refuses_ram() -> Outcome {
     let Some(page) = usable_page() else {
         return Outcome::Fail("no usable page above 1 MiB");
@@ -1321,6 +1350,7 @@ pub(crate) fn rng_fail_after_qenable_case() -> Outcome {
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
+#[cfg(target_arch = "x86_64")]
 pub(crate) const TESTS: &[Test] = &[
     test("pci_qemu_set", test_pci_qemu_set),
     test("pci_scan_bsp_only", test_pci_scan_bsp_only),
@@ -1343,4 +1373,12 @@ pub(crate) const TESTS: &[Test] = &[
     test("rng_second_probe_refused", rng_second_probe_refused),
     test("dev_bar_claims", test_dev_bar_claims).once(),
     test("map_mmio_refuses_ram", test_map_mmio_refuses_ram),
+];
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) const TESTS: &[Test] = &[
+    test("dma_alloc", test_dma_alloc),
+    test("dma_edu", test_dma_edu),
+    test("virtio_bind", test_virtio_bind),
+    test("virtio_vq", test_virtio_vq),
 ];

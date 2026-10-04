@@ -119,6 +119,15 @@ impl DmaAlloc {
     }
 }
 
+/// Harness `-device edu,dma_mask=` (ROADMAP §11.5 / §11.7).
+pub const EDU_DMA_MASK: u64 = 0xFFFF_FFFF;
+
+/// Whether a device address fits `mask` without truncation.
+#[must_use]
+pub const fn addr_fits_mask(addr: u64, mask: u64) -> bool {
+    addr <= mask
+}
+
 /// Physically contiguous DMA memory: a move-only handle with private
 /// fields. Only [`alloc_from_buddy`] builds one (the kernel reaches it
 /// through `dma_init::alloc`), and [`free_to_buddy`] (`dma_init::free`)
@@ -516,5 +525,14 @@ mod tests {
             DMA32_BOUNDARY
         ));
         assert!(!crosses_boundary(0x1000, 0x1000, 0));
+    }
+
+    #[test]
+    fn edu_addr_fits_harness_mask() {
+        assert!(addr_fits_mask(0, EDU_DMA_MASK));
+        assert!(addr_fits_mask(0x4000_0000, EDU_DMA_MASK));
+        assert!(addr_fits_mask(EDU_DMA_MASK, EDU_DMA_MASK));
+        assert!(!addr_fits_mask(EDU_DMA_MASK.wrapping_add(1), EDU_DMA_MASK));
+        assert!(!addr_fits_mask(0x1_0000_0000, EDU_DMA_MASK));
     }
 }

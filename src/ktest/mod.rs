@@ -8,7 +8,6 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::arch::CycleCounter;
-#[cfg(target_arch = "x86_64")]
 use vibeos::dev::DevRef;
 use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_DEVICE;
@@ -23,6 +22,8 @@ use crate::arch;
 use crate::arch::current::{
     Arch, InterruptGuard, interrupts_enabled, irq_disable, irq_enable, qemu_exit,
 };
+#[cfg(target_arch = "aarch64")]
+use crate::dev;
 use crate::ipi_init;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -254,7 +255,7 @@ pub(crate) const GROUPS: &[Suite] = &[
 ];
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) const GROUPS: &[Suite] = &[TESTS, arch::ktest::TESTS];
+pub(crate) const GROUPS: &[Suite] = &[TESTS, arch::ktest::TESTS, dev::ktest::TESTS];
 
 /// Name of the registry's kernel thread.
 const REGISTRY_NAME: &str = "ktest";
@@ -937,10 +938,6 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
     true
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
     // SAFETY: invariant I58: every caller passes a device's BAR 0 VA,
     // which the `bar-test` driver claimed and mapped uncached, and a
@@ -948,36 +945,28 @@ pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32) }
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn mmio_w32(va: u64, off: u32, val: u32) {
     // SAFETY: invariant: as for `mmio_r32`; established by `ktest::bar0_va`.
     unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, val) }
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
+pub(crate) fn mmio_w64(va: u64, off: u32, val: u64) {
+    // SAFETY: invariant: as for `mmio_r32`; established by `ktest::bar0_va`.
+    // `off` is an 8-byte device register (edu DMA src/dst).
+    unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u64, val) }
+}
+
 pub(crate) const EDU_IDENT: u32 = 0x00;
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) const EDU_IDENT_VAL: u32 = 0x0100_00ED;
 
 /// BAR 0's VA for edu or e1000e, which the `kernel_tests` driver
 /// `bar-test` claims and maps (binding it on first use); `None` when that
 /// driver does not hold the BAR.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn bar0_va(dev: &DevRef) -> Option<u64> {
     crate::dev::ktest::bind_bar_test_driver();
     crate::dev_init::bar_va(dev, 0)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn find_edu() -> Option<DevRef> {
     // QEMU 8.x edu is 1234:11e8 (old QEMU vendor). Later trees use 1b36:11e8.
     crate::dev::ktest::find_id(0x1234, 0x11e8)

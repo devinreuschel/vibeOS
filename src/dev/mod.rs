@@ -3,7 +3,8 @@
 pub(crate) mod dev_init;
 pub(crate) mod dma_init;
 pub(crate) mod entropy_init;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
+#[cfg_attr(target_arch = "aarch64", allow(dead_code, unused_imports))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
