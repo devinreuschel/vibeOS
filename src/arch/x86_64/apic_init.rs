@@ -966,9 +966,11 @@ pub(crate) mod testing {
     /// deadline it armed (0 where its rearm did not run in the window).
     pub(crate) fn fire_rearms(at: &mut [u64; FIRE_STAMPS], deadline: &mut [u64; FIRE_STAMPS]) {
         for (o, s) in at.iter_mut().zip(FIRE_REARM_AT.iter()) {
+            // Relaxed: `take_fire_stamps` acquired the stamps it counts; pairs with nothing.
             *o = s.load(Ordering::Relaxed);
         }
         for (o, s) in deadline.iter_mut().zip(FIRE_DEADLINE.iter()) {
+            // Relaxed: `take_fire_stamps` acquired the stamps it counts; pairs with nothing.
             *o = s.load(Ordering::Relaxed);
         }
     }
@@ -979,7 +981,9 @@ pub(crate) mod testing {
         let i = FIRE_STAMP_N.load(Ordering::Relaxed);
         if let Some(slot) = FIRE_STAMP.get(i) {
             if let (Some(a), Some(d)) = (FIRE_REARM_AT.get(i), FIRE_DEADLINE.get(i)) {
+                // Relaxed: CPU 0, IF off, one writer; pairs with nothing.
                 a.store(0, Ordering::Relaxed);
+                // Relaxed: as the store above; pairs with nothing.
                 d.store(0, Ordering::Relaxed);
             }
             // Relaxed: the Release store of the count below publishes it; pairs with nothing.
@@ -1005,12 +1009,16 @@ pub(crate) mod testing {
         // the same handler on CPU 0, IF off, so no other writer.
         // Once all are stamped the count stays put, so only the first
         // rearm after a stamp fills its slot (`stamp_fire` cleared it).
+        // Relaxed: the count alone picks the slot; pairs with nothing.
         let n = FIRE_STAMP_N.load(Ordering::Relaxed);
+        // Relaxed: `stamp_fire` cleared the slot; pairs with nothing.
         if let Some(i) = n.checked_sub(1)
             && let (Some(a), Some(d)) = (FIRE_REARM_AT.get(i), FIRE_DEADLINE.get(i))
             && a.load(Ordering::Relaxed) == 0
         {
+            // Relaxed: CPU 0, IF off, one writer; pairs with nothing.
             a.store(now, Ordering::Relaxed);
+            // Relaxed: as the store above; pairs with nothing.
             d.store(deadline, Ordering::Relaxed);
         }
         let ahead = deadline.wrapping_sub(now);
@@ -1071,6 +1079,7 @@ pub(crate) mod testing {
     /// This CPU's LAPIC timer current count, which the LAPIC computes from
     /// its clock when it is read; 0 while the LAPIC is unmapped.
     pub(crate) fn timer_count() -> u32 {
+        // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
         let va = LAPIC_VA.load(Ordering::Relaxed);
         if va == 0 {
             return 0;
