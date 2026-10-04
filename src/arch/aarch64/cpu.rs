@@ -265,6 +265,26 @@ impl Drop for InterruptGuard {
     }
 }
 
+/// Select `SP_ELx` and put the live stack on it (DESIGN §11.5).
+///
+/// Exception entry sets `PSTATE.SP` to 1, so an IRQ taken while `SPSel`
+/// is 0 would run on leftover `SP_EL1` instead of the stack `mov sp`
+/// wrote on `SP_EL0`.
+pub fn use_sp_elx() {
+    // SAFETY: one write of the live SP onto `SP_ELx`; DAIF still masks
+    // IRQs as Limine left them, and the `msr`/`mov` pair is one block
+    // so nothing uses leftover `SP_EL1`. established here.
+    unsafe {
+        asm!(
+            "mov {tmp}, sp",
+            "msr spsel, #1",
+            "isb",
+            "mov sp, {tmp}",
+            tmp = out(reg) _,
+        );
+    }
+}
+
 #[inline]
 pub fn stack_pointer() -> u64 {
     let sp: u64;

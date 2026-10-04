@@ -143,6 +143,7 @@ pub extern "C" fn _start() -> ! {
     // Step 1: serial. Nothing before this is debuggable.
     #[cfg(target_arch = "aarch64")]
     {
+        arch::aarch64::cpu::use_sp_elx();
         arch::aarch64::boot::map_early_console();
         arch::aarch64::vectors::init_early();
     }
@@ -327,9 +328,12 @@ fn normal_boot_tail() -> ! {
 #[cfg(not(feature = "panic_test"))]
 extern "C" fn boot_rest() -> ! {
     #[cfg(target_arch = "aarch64")]
-    // SAFETY: the bootstrap thread is on a 2S guarded stack (`init_bootstrap`). established here.
-    unsafe {
-        arch::idt::init_full();
+    {
+        arch::aarch64::cpu::use_sp_elx();
+        // SAFETY: the bootstrap thread is on a 2S guarded stack (`init_bootstrap`). established here.
+        unsafe {
+            arch::idt::init_full();
+        }
     }
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the GDT is loaded and `GS_BASE` is the BSP's `PerCpu`, as `syscall_init::init_bsp` requires; established here.
