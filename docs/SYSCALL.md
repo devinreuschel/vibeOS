@@ -559,12 +559,12 @@ A user `#PF`, `#GP`, or `#UD` from the program itself is a process kill
 (DESIGN §5.2 CPL split), not `EFAULT`.
 
 **Kernel survival:** no user program may panic or halt the kernel (DESIGN
-§2.5 for ring-3 exceptions, AGENTS.md rule 4 for syscall paths). The code
-does not meet this yet:
-
-- a device or keyboard interrupt taken in ring 3 runs with the user GS
-  base and halts (F004; ROADMAP §10.6)
-- the exit-path faults in §1 (F001, F007; ROADMAP §10.6)
+§2.5 for ring-3 exceptions, AGENTS.md rule 4 for syscall paths). An
+interrupt taken in ring 3, a device-pool or keyboard interrupt included,
+enters through a stub that `arch/x86_64/idt.rs` generates, which swaps to
+the kernel GS base by the saved CS.RPL (DESIGN §5.10 rules 1 and 2); and on
+the exit paths of §1 a non-canonical saved RIP, or a `#GP`, `#NP`, or `#SS`
+on a return-to-user `iretq`, kills the process with `SIGSEGV`.
 
 ---
 
