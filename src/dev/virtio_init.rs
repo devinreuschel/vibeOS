@@ -2,11 +2,11 @@
 //!
 //! Transport + virtio-rng. virtio-blk is `virtio_blk_init`. ROADMAP §6.5.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::dev::{DevRef, Device, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
-use vibeos::irq::IrqError;
+use vibeos::irq::{IrqError, IrqId};
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::{Bdf, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
@@ -24,7 +24,6 @@ use crate::dev_init;
 use crate::dma_init;
 use crate::irq_init;
 use crate::pci_init;
-use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
 use crate::work_init;
 
@@ -57,10 +56,10 @@ pub(super) static DATA_DEV: AtomicU64 = AtomicU64::new(0);
 pub(super) static DATA_VIRT: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// The bound device ([`bdf_key`], 0 for none), its common configuration
-/// and its vector (0 for none), which `remove` stops and frees.
+/// and its IRQ (0 for none), which `remove` stops and frees.
 static DEV_KEY: AtomicU64 = AtomicU64::new(0);
 static COMMON_VA: AtomicU64 = AtomicU64::new(0);
-static VEC: AtomicU8 = AtomicU8::new(0);
+static VEC: AtomicU32 = AtomicU32::new(0);
 /// Frames kept because a device's bus mastering would not turn off.
 pub(crate) static KEPT_FRAMES: AtomicU64 = AtomicU64::new(0);
 
@@ -253,7 +252,7 @@ pub(crate) fn report_stuck(bdf: Bdf, stopped: Stopped, kept: usize) {
 /// The one unwind of a probe that fails once bus mastering is on, in
 /// INTERRUPTS.md §5.4's order: stop the device, turn MSI-X off and free
 /// `vec`, then free `bufs`, or keep them when the device is `Stuck`.
-fn fail_probe(dev: &Device, common: u64, vec: Option<u8>, bufs: [Option<DmaBuffer>; 2]) {
+fn fail_probe(dev: &Device, common: u64, vec: Option<IrqId>, bufs: [Option<DmaBuffer>; 2]) {
     let stopped = stop_device(dev.addr, common);
     irq_init::disable_msix(dev);
     if let Some(v) = vec {
@@ -404,25 +403,24 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     }
 
     let cpu = irq_init::threaded_cpu();
-    let Some(pc) = per_cpu_init::cpu(cpu) else {
-        fail_probe(dev, common, None, [None, None]);
-        return Err(VirtioError::Failed);
-    };
-    let vec = match irq_init::allocate_vector(cpu) {
-        Ok(v) => v,
-        Err(_) => {
+    let irq = match irq_init::alloc_msi(dev, 1).ok().and_then(|s| s.get(0)) {
+        Some(i) => i,
+        None => {
             fail_probe(dev, common, None, [None, None]);
             return Err(VirtioError::Failed);
         }
     };
-    if irq_init::set_threaded(vec, Some(rng_top), rng_work, None).is_err() {
-        fail_probe(dev, common, Some(vec), [None, None]);
+    if irq_init::set_affinity(irq, cpu).is_err() {
+        fail_probe(dev, common, Some(irq), [None, None]);
+        return Err(VirtioError::Failed);
+    }
+    if irq_init::set_threaded(irq, Some(rng_top), rng_work, None).is_err() {
+        fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::Failed);
     }
     pci_init::update_command(dev.addr, CMD_INTX_DISABLE, 0);
-    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
-    if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8) {
-        fail_probe(dev, common, Some(vec), [None, None]);
+    if let Err(e) = irq_init::enable_msix(dev, 0, irq) {
+        fail_probe(dev, common, Some(irq), [None, None]);
         return match e {
             IrqError::NoRoute => Err(VirtioError::NoCaps),
             _ => Err(VirtioError::Failed),
@@ -434,20 +432,20 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     let hw_qs = r16(common, COMMON_OFF_QSIZE);
     let qsz = clamp_qsize(hw_qs);
     if qsz == 0 {
-        fail_probe(dev, common, Some(vec), [None, None]);
+        fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::BadQueue);
     }
     w16(common, COMMON_OFF_QSIZE, qsz);
     let Some(layout) = SplitLayout::new(qsz) else {
-        fail_probe(dev, common, Some(vec), [None, None]);
+        fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::BadQueue);
     };
     let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
-        fail_probe(dev, common, Some(vec), [None, None]);
+        fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::Failed);
     };
     let Some(data) = dma_init::alloc(DmaAlloc::dma32(64)) else {
-        fail_probe(dev, common, Some(vec), [Some(qdma), None]);
+        fail_probe(dev, common, Some(irq), [Some(qdma), None]);
         return Err(VirtioError::Failed);
     };
     // SAFETY: both buffers were just allocated, are `len()` bytes long at
@@ -485,7 +483,7 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     w16(common, COMMON_OFF_QENABLE, 1);
     #[cfg(feature = "kernel_tests")]
     if crate::dev::ktest::fail_after_qenable(dev.addr) {
-        fail_probe(dev, common, Some(vec), [Some(qdma), Some(data)]);
+        fail_probe(dev, common, Some(irq), [Some(qdma), Some(data)]);
         return Err(VirtioError::Failed);
     }
     let qoff = r16(common, COMMON_OFF_QNOTIFY);
@@ -496,7 +494,7 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
         qoff,
         notify_cap.notify_off_multiplier,
     ) else {
-        fail_probe(dev, common, Some(vec), [Some(qdma), Some(data)]);
+        fail_probe(dev, common, Some(irq), [Some(qdma), Some(data)]);
         return Err(VirtioError::Notify);
     };
 
@@ -508,7 +506,7 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     // Release: pairs with the AcqRel swap in `remove`.
     COMMON_VA.store(common, Ordering::Release);
     // Release: pairs with the AcqRel swap in `remove`.
-    VEC.store(vec, Ordering::Release);
+    VEC.store(irq.raw(), Ordering::Release);
     // Release: pairs with the Acquire load in `remove`.
     DEV_KEY.store(bdf_key(dev.addr), Ordering::Release);
     // Release: pairs with the Acquire load in `dev::ktest::rng_features`.
@@ -621,13 +619,13 @@ impl Driver for RngDriver {
         };
         irq_init::disable_msix(dev);
         // AcqRel: pairs with the Release store in `setup`.
-        let vec = VEC.swap(0, Ordering::AcqRel);
-        if vec != 0 && irq_init::free_vector(vec).is_err() {
+        let raw = VEC.swap(0, Ordering::AcqRel);
+        if raw != 0 && irq_init::free_vector(IrqId::from_raw(raw)).is_err() {
             crate::klog!(
                 vibeos::log::Level::Warn,
-                "vibeOS: virtio: rng {} vector {:#x} not freed",
+                "vibeOS: virtio: rng {} irq {} not freed",
                 dev.addr,
-                vec
+                raw
             );
         }
         if let Some(Q { qdma, data, .. }) = q {

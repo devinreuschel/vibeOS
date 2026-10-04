@@ -323,7 +323,7 @@ const CELL_CASES: &[CellCase] = &[
     CellCase {
         name: "irq_init::IRQ",
         take: || {
-            let _ = crate::irq_init::cpu_of(0x40);
+            let _ = crate::irq_init::cpu_of(vibeos::irq::IrqId::NONE);
         },
         file: "src/irq/irq_init.rs",
         rank: RANK_DEVICE,

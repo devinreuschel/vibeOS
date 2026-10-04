@@ -1236,18 +1236,22 @@ fn user_irqs(vecs: &[u8]) -> Outcome {
 }
 
 pub(crate) fn test_user_device_irq() -> Outcome {
-    let v = match irq_init::allocate_vector(0) {
+    let irq = match irq_init::allocate(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
-    if irq_init::set_handler(v, pool_hit).is_err() {
-        let _ = irq_init::free_vector(v);
+    if irq_init::set_handler(irq, pool_hit).is_err() {
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("set_handler");
     }
+    let Some(v) = irq_init::vector(irq) else {
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("no hwirq");
+    };
     POOL_HITS.store(0, Ordering::Relaxed);
     POOL_OFF_CPU0.store(0, Ordering::Relaxed);
     let out = user_irqs(&[v, vectors::KBD]);
-    let freed = irq_init::free_vector(v);
+    let freed = irq_init::free_vector(irq);
     if !matches!(out, Outcome::Ok) {
         return out;
     }
