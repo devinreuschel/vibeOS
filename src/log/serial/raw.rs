@@ -101,7 +101,7 @@ pub fn init() {
 
 #[cfg(target_arch = "aarch64")]
 pub fn init() {
-    // Identity PL011 until paging remaps it (`paging_init` calls `set_mmio`).
+    // `map_early_console` already pointed `UART_VA` at `HHDM + PA`.
 }
 
 #[cfg(target_arch = "x86_64")]

@@ -141,6 +141,11 @@ pub extern "C" fn _start() -> ! {
     // Limine's stack (DESIGN §2.5 step 4).
     panic::note_boot_stack(crate::arch::current::stack_pointer());
     // Step 1: serial. Nothing before this is debuggable.
+    #[cfg(target_arch = "aarch64")]
+    {
+        arch::aarch64::boot::map_early_console();
+        arch::aarch64::vectors::init_early();
+    }
     serial::Serial::init();
     serial::raw::set_halt_hook(arch::current::halt);
     log_init::init();

@@ -303,6 +303,24 @@ fn dtb_bytes() -> Option<&'static [u8]> {
     Some(unsafe { core::slice::from_raw_parts(ptr, total) })
 }
 
+/// Limine's HHDM offset, before [`capture`]. None if the response is missing.
+#[cfg(target_arch = "aarch64")]
+pub fn early_hhdm_offset() -> Option<u64> {
+    HHDM.response().map(|h| h.offset)
+}
+
+/// Physical base of the loaded image, before [`capture`].
+#[cfg(target_arch = "aarch64")]
+pub fn early_kernel_phys() -> Option<u64> {
+    EXEC_ADDR.response().map(|e| e.physical_base)
+}
+
+/// Kernel VMA start from the linker script.
+#[cfg(target_arch = "aarch64")]
+pub fn kernel_vma_start() -> u64 {
+    &raw const __kernel_vma_start as u64
+}
+
 /// Read every Limine response we need and stash it. First thing in
 /// `normal_boot_tail`, before PMM / paging / ACPI. A missing required
 /// response halts with a serial line. Framebuffers are optional.
