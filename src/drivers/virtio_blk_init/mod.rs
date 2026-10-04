@@ -785,6 +785,10 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
             qdma.device().as_u64() + layout.used_off as u64,
         );
         crate::virtio_mmio_init::set_queue_ready(base, true);
+        if !crate::virtio_mmio_init::queue_ready(base) {
+            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
+            return Err(VirtioError::BadQueue);
+        }
         vqs[qi] = Some(Vq {
             vq,
             qdma,

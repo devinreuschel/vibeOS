@@ -105,6 +105,10 @@ pub(crate) fn set_queue_ready(base: u64, on: bool) {
     w32(base, MMIO_OFF_QREADY, u32::from(on));
 }
 
+pub(crate) fn queue_ready(base: u64) -> bool {
+    r32(base, MMIO_OFF_QREADY) != 0
+}
+
 pub(crate) fn set_queue_addrs(base: u64, desc: u64, driver: u64, device: u64) {
     w64(base, MMIO_OFF_QDESC, desc);
     w64(base, MMIO_OFF_QDRIVER, driver);

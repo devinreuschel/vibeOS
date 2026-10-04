@@ -59,9 +59,16 @@ pub(crate) fn test_block_vblk_mmio_smp() -> Outcome {
         }
         cpu += 1;
     }
+    crate::klog!(
+        vibeos::log::Level::Info,
+        "vibeOS: vblk-mmio smp cpus={cpus} nq={nq} spawned={spawned}"
+    );
     let t0 = crate::time_init::uptime_ms();
+    let mut last_note = 0u64;
     while DONE.load(Ord::SeqCst) < spawned {
-        if crate::time_init::uptime_ms().saturating_sub(t0) > 15_000 {
+        let dt = crate::time_init::uptime_ms().saturating_sub(t0);
+        if dt.saturating_sub(last_note) >= 1_000 {
+            last_note = dt;
             let (top, thr, done, used, isr, ior) = mmio_blk(|b| {
                 (
                     b.top_hits(),
@@ -74,14 +81,16 @@ pub(crate) fn test_block_vblk_mmio_smp() -> Outcome {
             })
             .unwrap_or((0, 0, 0, 0, 0, 0));
             crate::klog!(
-                vibeos::log::Level::Error,
-                "vibeOS: vblk-mmio stall top={top} thr={thr} done={done} used={used} isr={isr} io={ior} nq={nq}"
+                vibeos::log::Level::Warn,
+                "vibeOS: vblk-mmio wait {dt} top={top} thr={thr} done={done} used={used} isr={isr} io={ior}"
             );
-            return if top == 0 {
+        }
+        if dt > 4_000 {
+            return if mmio_blk(|b| b.top_hits()).unwrap_or(0) == 0 {
                 Outcome::Fail("stall no irq")
-            } else if thr == 0 {
+            } else if mmio_blk(|b| b.thread_hits()).unwrap_or(0) == 0 {
                 Outcome::Fail("stall no bh")
-            } else if used != 0 {
+            } else if mmio_blk(|b| b.used_idx0()).unwrap_or(0) != 0 {
                 Outcome::Fail("stall used")
             } else {
                 Outcome::Fail("stall")

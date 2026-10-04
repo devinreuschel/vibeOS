@@ -72,6 +72,10 @@ pub const COMMON_OFF_QDRIVER: u16 = 40;
 pub const COMMON_OFF_QDEVICE: u16 = 48;
 
 /// virtio 1.2 §4.2.2 MMIO register layout (modern, Version = 2).
+///
+/// `QueueReady` is 0x044 in Linux uapi `virtio_mmio.h` (BSD) and QEMU 8.2's
+/// copy of it. 0x03c is legacy `QueueAlign`; a Version=2 window ignores
+/// writes there and never installs the rings.
 pub const MMIO_MAGIC: u32 = 0x7472_6976;
 pub const MMIO_VERSION: u32 = 2;
 pub const MMIO_OFF_MAGIC: u16 = 0x000;
@@ -85,7 +89,9 @@ pub const MMIO_OFF_DRV_FEATURES_SEL: u16 = 0x024;
 pub const MMIO_OFF_QSEL: u16 = 0x030;
 pub const MMIO_OFF_QNUM_MAX: u16 = 0x034;
 pub const MMIO_OFF_QNUM: u16 = 0x038;
-pub const MMIO_OFF_QREADY: u16 = 0x03c;
+/// Legacy `QueueAlign`. Version=2 does not implement this offset.
+pub const MMIO_OFF_QALIGN_LEGACY: u16 = 0x03c;
+pub const MMIO_OFF_QREADY: u16 = 0x044;
 pub const MMIO_OFF_QNOTIFY: u16 = 0x050;
 pub const MMIO_OFF_ISR: u16 = 0x060;
 pub const MMIO_OFF_ISR_ACK: u16 = 0x064;
@@ -916,6 +922,8 @@ mod tests {
     #[test]
     fn mmio_layout_and_ident() {
         assert_eq!(MMIO_MAGIC, u32::from_le_bytes(*b"virt"));
+        assert_eq!(MMIO_OFF_QALIGN_LEGACY, 0x03c);
+        assert_eq!(MMIO_OFF_QREADY, 0x044);
         assert_eq!(MMIO_OFF_QNOTIFY, 0x50);
         assert_eq!(MMIO_OFF_STATUS, 0x70);
         assert_eq!(MMIO_OFF_CONFIG, 0x100);
