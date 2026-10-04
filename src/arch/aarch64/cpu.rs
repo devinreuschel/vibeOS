@@ -90,38 +90,30 @@ pub fn read_sysreg(name_hint: u64) -> u64 {
     0
 }
 
-/// Write `TTBR1` (and `TTBR0` to the empty user root is the caller's).
+/// Write `TTBR1_EL1`. There is no `TTBR1_EL2`; under VHE the `_EL1`
+/// name reaches the host root (DESIGN §11.2).
 ///
 /// # Safety
 /// `ttbr1` is a complete TTBR1 root that maps this CPU's code, stack, and
 /// everything it touches next.
 pub unsafe fn write_ttbr1(ttbr1: u64) {
-    let vhe = el2_vhe();
     // SAFETY: this fn's `# Safety` (here); `msr` only loads the root.
     unsafe {
-        if vhe {
-            asm!("msr ttbr1_el2, {0}", in(reg) ttbr1, options(nostack, preserves_flags));
-        } else {
-            asm!("msr ttbr1_el1, {0}", in(reg) ttbr1, options(nostack, preserves_flags));
-        }
+        asm!("msr ttbr1_el1, {0}", in(reg) ttbr1, options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));
     }
 }
 
 pub fn read_ttbr1() -> u64 {
     let v: u64;
-    // SAFETY: TTBR1 is readable; established here.
+    // SAFETY: TTBR1_EL1 is readable at EL1 and at EL2 with VHE; established here.
     unsafe {
-        if el2_vhe() {
-            asm!("mrs {0}, ttbr1_el2", out(reg) v, options(nomem, nostack, preserves_flags));
-        } else {
-            asm!("mrs {0}, ttbr1_el1", out(reg) v, options(nomem, nostack, preserves_flags));
-        }
+        asm!("mrs {0}, ttbr1_el1", out(reg) v, options(nomem, nostack, preserves_flags));
     }
     v
 }
 
-/// Write MAIR and TCR from the computed values. Not SCTLR.
+/// Write MAIR and TCR from the computed `*_EL1` values. Not SCTLR.
 pub fn write_translation_regs() {
     let asid16 = {
         let mmfr0: u64;
@@ -134,27 +126,19 @@ pub fn write_translation_regs() {
     let mair = sysreg::mair_el1();
     let tcr = sysreg::tcr_el1(asid16);
     // SAFETY: whole writes of the computed translation policy; SCTLR is
-    // left as Limine/#202 set it; established here.
+    // left as Limine/#202 set it. VHE redirects the `_EL1` names.
+    // established here.
     unsafe {
-        if el2_vhe() {
-            asm!("msr mair_el2, {0}", in(reg) mair, options(nostack, preserves_flags));
-            asm!("msr tcr_el2, {0}", in(reg) tcr, options(nostack, preserves_flags));
-        } else {
-            asm!("msr mair_el1, {0}", in(reg) mair, options(nostack, preserves_flags));
-            asm!("msr tcr_el1, {0}", in(reg) tcr, options(nostack, preserves_flags));
-        }
+        asm!("msr mair_el1, {0}", in(reg) mair, options(nostack, preserves_flags));
+        asm!("msr tcr_el1, {0}", in(reg) tcr, options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));
     }
 }
 
 pub fn tlbi_all() {
-    // SAFETY: local TLB invalidate; established here.
+    // SAFETY: local TLB invalidate of the EL1 (VHE host) regime; established here.
     unsafe {
-        if el2_vhe() {
-            asm!("tlbi alle2", options(nostack, preserves_flags));
-        } else {
-            asm!("tlbi vmalle1", options(nostack, preserves_flags));
-        }
+        asm!("tlbi vmalle1", options(nostack, preserves_flags));
         asm!("dsb ish", options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));
     }
@@ -162,13 +146,9 @@ pub fn tlbi_all() {
 
 pub fn tlbi_va(va: u64) {
     let page = va >> 12;
-    // SAFETY: invalidate one VA; established here.
+    // SAFETY: invalidate one VA in the EL1 (VHE host) regime; established here.
     unsafe {
-        if el2_vhe() {
-            asm!("tlbi vae2, {0}", in(reg) page, options(nostack, preserves_flags));
-        } else {
-            asm!("tlbi vaae1, {0}", in(reg) page, options(nostack, preserves_flags));
-        }
+        asm!("tlbi vaae1, {0}", in(reg) page, options(nostack, preserves_flags));
         asm!("dsb ish", options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));
     }
