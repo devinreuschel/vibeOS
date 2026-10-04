@@ -12,6 +12,7 @@ use vibeos::proc::wait_exited;
 
 mod churn;
 mod cwd;
+mod eio;
 mod hooks;
 mod initrd;
 #[cfg(feature = "irqoff")]
@@ -30,6 +31,7 @@ mod walk;
 
 use churn::test_file_table_fork_churn;
 pub(crate) use cwd::test_cwd_per_process;
+pub(crate) use eio::fat_bad_sector_eio;
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use kernfs::{test_kernfs_nodes_grow, test_tmp_full_spares_system_nodes};
@@ -1298,6 +1300,7 @@ pub(crate) const TESTS: &[Test] = &[
         .deadline(30_000)
         .opt_in()
         .once(),
+    test("fat_bad_sector_eio", fat_bad_sector_eio).opt_in(),
     test(
         "vfs_unlink_drops_parent_dentry",
         test_vfs_unlink_drops_parent_dentry,

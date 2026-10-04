@@ -607,7 +607,7 @@ pub const CALLS: &[Call] = &[
     Call {
         sys: Sys::Read,
         errors: &[Errno::EBADF, Errno::EFAULT, Errno::EISDIR, Errno::EAGAIN, Errno::EIO],
-        ktest: &[(Errno::EAGAIN, "dev_random_eagain"), (Errno::EIO, "vblk_bad_sector")],
+        ktest: &[(Errno::EAGAIN, "dev_random_eagain"), (Errno::EIO, "fat_bad_sector_eio")],
         ptrs: &[
             Ptr { arg: 1, name: "buf", kind: PtrKind::Buf, out: true, nullable: false, len_from: Some(2), size: 0 },
         ],
@@ -615,7 +615,7 @@ pub const CALLS: &[Call] = &[
     Call {
         sys: Sys::Write,
         errors: &[Errno::EBADF, Errno::EFAULT, Errno::EINVAL, Errno::EFBIG, Errno::ENOSPC, Errno::EIO],
-        ktest: &[(Errno::EIO, "vblk_bad_sector")],
+        ktest: &[(Errno::EIO, "fat_bad_sector_eio")],
         ptrs: &[
             Ptr { arg: 1, name: "buf", kind: PtrKind::Buf, out: false, nullable: false, len_from: Some(2), size: 0 },
         ],
@@ -623,7 +623,7 @@ pub const CALLS: &[Call] = &[
     Call {
         sys: Sys::Open,
         errors: &[Errno::EFAULT, Errno::ENAMETOOLONG, Errno::EINVAL, Errno::ENOENT, Errno::ENOTDIR, Errno::EISDIR, Errno::EEXIST, Errno::EACCES, Errno::ELOOP, Errno::EMFILE, Errno::ENFILE, Errno::ENOSPC, Errno::ENOMEM, Errno::EIO],
-        ktest: &[(Errno::EIO, "vblk_bad_sector"), (Errno::ENOMEM, "kalloc_nomem")],
+        ktest: &[(Errno::EIO, "fat_bad_sector_eio"), (Errno::ENOMEM, "kalloc_nomem")],
         ptrs: &[
             Ptr { arg: 0, name: "pathname", kind: PtrKind::Cstr, out: false, nullable: false, len_from: None, size: 0 },
         ],
@@ -717,7 +717,7 @@ pub const CALLS: &[Call] = &[
     Call {
         sys: Sys::Execve,
         errors: &[Errno::EFAULT, Errno::ENAMETOOLONG, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::ELOOP, Errno::ENFILE, Errno::E2BIG, Errno::ENOEXEC, Errno::ENOMEM, Errno::EIO],
-        ktest: &[(Errno::EIO, "vblk_bad_sector")],
+        ktest: &[(Errno::EIO, "fat_bad_sector_eio")],
         ptrs: &[
             Ptr { arg: 0, name: "pathname", kind: PtrKind::Cstr, out: false, nullable: false, len_from: None, size: 0 },
             Ptr { arg: 1, name: "argv", kind: PtrKind::Strvec, out: false, nullable: true, len_from: None, size: 0 },

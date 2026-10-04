@@ -672,9 +672,10 @@ const PATTERN_XOR: u8 = 0xA5;
 /// The sector the read-only test reads and tries to write. The harness
 /// has no twin: any sector of the pattern image serves.
 const RO_SECTOR: u64 = 100;
-/// The sector whose reads QEMU's `blkdebug` fails. Harness twin:
+/// The sector whose reads QEMU's `blkdebug` fails; `fs::ktest`'s
+/// `fat_bad_sector_eio` puts files on it. Harness twin:
 /// `harness.VBLK_BAD_SECTOR`.
-const BAD_SECTOR: u64 = 4096;
+pub(crate) const BAD_SECTOR: u64 = 4096;
 
 /// vda's registry handle; its `_dev` calls reach the driver below the
 /// page cache, as `block_vblk_rw`'s do.
