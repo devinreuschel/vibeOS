@@ -12,6 +12,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Added
 
+- `make check` fails a Relaxed, Acquire, Release or AcqRel ordering with no
+  comment naming what it pairs with ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - SMEP/SMAP/UMIP and `CR0.WP` on every CPU (`arch::cpu::init_control_regs`).
 - [Phase 9](docs/ROADMAP.md#phase-9-user-mode-and-processes): ring 3, syscalls, ELF `/hello`,
   `fork`/`execve`/`wait4`, `/sbin/init`, `/bin/sh`. Gate reopened into Phase 10; COW is Phase 12.
