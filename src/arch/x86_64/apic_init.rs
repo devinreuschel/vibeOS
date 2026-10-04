@@ -5,7 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use vibeos::acpi::{IoApic, MAX_IOAPICS, MadtInfo};
+use vibeos::acpi::{IoApic, Iso, MAX_IOAPICS};
 use vibeos::apic::{
     self, APIC_BASE_ENABLE, CountRead, DEFAULT_LAPIC_PHYS, EoiDomain, IA32_APIC_BASE,
     IA32_TSC_DEADLINE, ICR_POLL_CAP, IOAPIC_VER, IOREGSEL, IOWIN, IpiError, IpiMode, LAPIC_EOI,
@@ -22,8 +22,8 @@ use vibeos::marker;
 use vibeos::time::{FS_PER_MS, HPET_CALIB_READS, PIT_CALIB_MS, hpet_period_ok};
 use vibeos::vectors;
 
-use crate::acpi_init;
 use crate::arch;
+use crate::machine_init;
 use crate::paging_init;
 use crate::sync_init::SpinMutex;
 use crate::time_init;
@@ -145,9 +145,9 @@ unsafe fn local_apic_id(va: u64) -> u8 {
 ///
 /// # Safety
 /// LAPIC page already UC. IRQs off.
-unsafe fn enable_lapic(madt: &MadtInfo) -> Option<u64> {
-    let phys = if madt.lapic_base != 0 {
-        madt.lapic_base
+unsafe fn enable_lapic(lapic_base: u64) -> Option<u64> {
+    let phys = if lapic_base != 0 {
+        lapic_base
     } else {
         DEFAULT_LAPIC_PHYS
     };
@@ -194,14 +194,11 @@ unsafe fn enable_lapic(madt: &MadtInfo) -> Option<u64> {
     Some(va)
 }
 
-fn enum_ioapics(madt: &MadtInfo, st: &mut ApicState) {
+fn enum_ioapics(ios: impl Iterator<Item = IoApic>, st: &mut ApicState) {
     st.ioapic_n = 0;
-    let mut i = 0;
-    while i < madt.ioapic_count {
-        let IoApic { addr, gsi_base, .. } = madt.ioapics[i];
+    for IoApic { addr, gsi_base, .. } in ios {
         let phys = addr as u64;
         if phys == 0 {
-            i += 1;
             continue;
         }
         let va = phys_va(phys);
@@ -218,7 +215,6 @@ fn enum_ioapics(madt: &MadtInfo, st: &mut ApicState) {
             };
             st.ioapic_n += 1;
         }
-        i += 1;
     }
 }
 
@@ -253,14 +249,14 @@ fn mask_all_pins(st: &ApicState) {
     }
 }
 
-fn apply_isos(st: &ApicState, madt: &MadtInfo) {
+fn apply_isos(st: &ApicState, isos: &[Iso]) {
     // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // `st.lapic_va` is set only from its return.
     let dest = unsafe { local_apic_id(st.lapic_va) };
     let mut unrouted = 0usize;
     let mut i = 0;
-    while i < madt.iso_count {
-        let iso = madt.isos[i];
+    while i < isos.len() {
+        let iso = isos[i];
         let trig = apic::iso_trigger(iso.flags);
         let pol = apic::iso_polarity(iso.flags);
         // Shared placeholder vector: every ISO stays masked until a driver
@@ -287,7 +283,7 @@ fn apply_isos(st: &ApicState, madt: &MadtInfo) {
             vibeos::log::Level::Warn,
             "vibeOS: ioapic: {} of {} MADT ISOs name a GSI no I/O APIC serves",
             unrouted,
-            madt.iso_count
+            isos.len()
         );
     }
 }
@@ -712,12 +708,12 @@ pub fn on_thermal_irq() {
     eoi();
 }
 
-fn mask_pic_and_pit(st: &ApicState, madt: &MadtInfo) {
+fn mask_pic_and_pit(st: &ApicState, isos: &[Iso]) {
     arch::pic::disable_all();
     // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // `st.lapic_va` is set only from its return.
     unsafe { lapic_write(st.lapic_va, LAPIC_LVT_LINT0, LVT_MASKED) };
-    let gsi = apic::gsi_for_isa_irq(0, &madt.isos[..madt.iso_count]);
+    let gsi = apic::gsi_for_isa_irq(0, isos);
     set_gsi_mask_inner(st, gsi, true);
 }
 
@@ -743,22 +739,19 @@ fn unmask_pit_fallback() {
 /// # Safety
 /// IDT live, PIC remapped, LAPIC/IOAPIC UC, IRQs still off.
 pub unsafe fn init() {
-    let Some(info) = acpi_init::info() else {
-        return;
-    };
-    let Some(madt) = info.madt.as_ref() else {
+    let Some(desc) = machine_init::info() else {
         return;
     };
     // SAFETY: this fn's `# Safety` (here) is `enable_lapic`'s: the LAPIC
     // page is UC and IRQs are off.
-    let Some(va) = (unsafe { enable_lapic(madt) }) else {
+    let Some(va) = (unsafe { enable_lapic(desc.lapic_base().unwrap_or(0)) }) else {
         return;
     };
     with_state(|st| {
         st.lapic_va = va;
-        enum_ioapics(madt, st);
+        enum_ioapics(desc.ioapics(), st);
         mask_all_pins(st);
-        apply_isos(st, madt);
+        apply_isos(st, desc.irq_overrides());
         st.ready = true;
         publish_isr(st);
     });
@@ -848,8 +841,8 @@ fn commit_lapic(st: &mut ApicState, mode: TimerMode) {
     st.owns_tick = true;
     publish_isr(st);
     crate::per_cpu_init::set_timer_mode(mode);
-    if let Some(madt) = acpi_init::info().and_then(|i| i.madt.as_ref()) {
-        mask_pic_and_pit(st, madt);
+    if let Some(desc) = machine_init::info() {
+        mask_pic_and_pit(st, desc.irq_overrides());
     } else {
         arch::pic::disable_all();
     }
@@ -869,17 +862,14 @@ pub fn owns_tick() -> bool {
 /// # Safety
 /// LAPIC page already UC. IF off.
 pub unsafe fn enable_ap() {
-    let Some(info) = acpi_init::info() else {
-        return;
-    };
-    let Some(madt) = info.madt.as_ref() else {
+    let Some(desc) = machine_init::info() else {
         return;
     };
     // A failure has printed its line; the AP then never reports ready and
     // `smp_init::start_one` times it out.
     // SAFETY: this fn's `# Safety` (here) is `enable_lapic`'s: the LAPIC
     // page is UC and IF is off.
-    let _ = unsafe { enable_lapic(madt) };
+    let _ = unsafe { enable_lapic(desc.lapic_base().unwrap_or(0)) };
 }
 
 /// Arm this CPU's timer in the mode the BSP proved. PIT: no local tick.

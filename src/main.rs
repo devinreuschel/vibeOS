@@ -61,6 +61,8 @@ mod irq;
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
 mod log;
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
+mod machine;
+#[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
 mod mm;
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
 mod proc;
@@ -100,6 +102,7 @@ use drivers::virtio_blk_init;
 use fs::{fat_init, file_init, fs_init, vibefs_init};
 use irq::{ipi_init, irq_init};
 use log::{diag, log_init, panic, serial};
+use machine::machine_init;
 use mm::{heap_init, kva_init, paging_init, pmm_init};
 use proc::{addr_space_init, fill_init, proc_init, syscall_init, user_init};
 use sched::{sched_init, thread_init, work_init};
@@ -181,6 +184,7 @@ fn normal_boot_tail() -> ! {
     // ---- Phase 1 slice A: physical memory manager. ----
     // Capture Limine once. Nothing else reads the request statics.
     let info = boot::capture();
+    machine_init::init_from_dtb(info);
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: Limine's HHDM still maps every usable range, as `pmm_init::init` requires; established here.
     let stats = unsafe { pmm_init::init(info) };

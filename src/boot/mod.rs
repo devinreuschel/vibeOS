@@ -10,8 +10,8 @@ use limine::memmap::{
     MEMMAP_EXECUTABLE_AND_MODULES, MEMMAP_USABLE,
 };
 use limine::request::{
-    ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, FramebufferResponse,
-    HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
+    DtbRequest, ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest,
+    FramebufferResponse, HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
 };
 
 use crate::cell::BootCell;
@@ -53,6 +53,10 @@ static MEMMAP: MemmapRequest = MemmapRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static RSDP: RsdpRequest = RsdpRequest::new();
+
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static DTB: DtbRequest = DtbRequest::new();
 
 // Physical base of the loaded image, so the PMM does not hand our own
 // code and data back out as RAM.
@@ -116,6 +120,8 @@ pub struct BootInfo {
     /// above frame 0 and below 1 MiB, or `None` when the map has none.
     pub trampoline_page: Option<u64>,
     pub rsdp_phys: u64,
+    /// Flattened device tree, HHDM-mapped, when Limine gave one.
+    pub dtb: Option<&'static [u8]>,
     memmap: &'static [&'static Entry],
     fb: Option<&'static FramebufferResponse>,
     /// Physical `(base, end)` of each module, in response order; the first
@@ -270,6 +276,30 @@ fn capture_cmdline() -> CmdlineBuf {
     buf
 }
 
+/// Limine's DTB, sized from the FDT header `totalsize`.
+fn dtb_bytes() -> Option<&'static [u8]> {
+    let resp = DTB.response()?;
+    let ptr = resp.dtb_ptr.cast::<u8>();
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: Limine's protocol, trusted here (DESIGN §2.10): `dtb_ptr`
+    // is an HHDM address of the DTB that stays mapped while the kernel
+    // runs. The header is 40 bytes; `totalsize` then names the rest.
+    // Established here.
+    let hdr = unsafe { core::slice::from_raw_parts(ptr, 40) };
+    let total = {
+        let b = hdr.get(4..8).and_then(|s| <[u8; 4]>::try_from(s).ok())?;
+        u32::from_be_bytes(b) as usize
+    };
+    if !(40..=2_097_152).contains(&total) {
+        return None;
+    }
+    // SAFETY: as above, established here: `totalsize` is the blob length
+    // and Limine maps those bytes. The cap is the dumpdtb buffer QEMU uses.
+    Some(unsafe { core::slice::from_raw_parts(ptr, total) })
+}
+
 /// Read every Limine response we need and stash it. First thing in
 /// `normal_boot_tail`, before PMM / paging / ACPI. A missing required
 /// response halts with a serial line. Framebuffers are optional.
@@ -287,11 +317,17 @@ pub fn capture() -> &'static BootInfo {
     let exec = EXEC_ADDR
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: executable_address missing"));
-    // From base revision 4 the RSDP is an HHDM address.
+    // From base revision 4 the RSDP is an HHDM address. aarch64 virt
+    // has a DTB and no RSDP (ROADMAP §11.5).
     let rsdp_phys = RSDP
         .response()
         .and_then(|r| (r.address as u64).checked_sub(hhdm_offset))
-        .unwrap_or_else(|| halt_with("vibeOS: limine: rsdp missing"));
+        .unwrap_or(0);
+    #[cfg(target_arch = "x86_64")]
+    if rsdp_phys == 0 {
+        halt_with("vibeOS: limine: rsdp missing");
+    }
+    let dtb = dtb_bytes();
     let kernel_len = (&raw const __kernel_vma_end as u64) - (&raw const __kernel_vma_start as u64);
     let (modules, nmod) = module_ranges(hhdm_offset);
     let trampoline_page = vibeos::pmm::choose_trampoline_page(
@@ -310,6 +346,7 @@ pub fn capture() -> &'static BootInfo {
             kernel_phys: exec.physical_base..exec.physical_base + kernel_len,
             trampoline_page,
             rsdp_phys,
+            dtb,
             memmap: memmap.entries(),
             fb: FRAMEBUFFER.response(),
             modules,

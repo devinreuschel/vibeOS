@@ -20,9 +20,9 @@ use vibeos::per_cpu::{PerCpu, PerCpuRemote};
 use vibeos::sched::ReadyQueue;
 use vibeos::thread::{MAX_THREADS, Tcb};
 
-use crate::acpi_init;
 use crate::arch::current::{InterruptGuard, interrupts_enabled, percpu, set_per_cpu_hooks};
 use crate::cell::BootCell;
+use crate::machine_init;
 
 #[allow(
     clippy::disallowed_types,
@@ -49,8 +49,11 @@ fn apic_id() -> u32 {
     percpu::hw_cpu_id()
 }
 
-fn madt_cpu_count() -> usize {
-    acpi_init::info().map(|i| i.cpu_count()).unwrap_or(0).max(1)
+fn firmware_cpu_count() -> usize {
+    machine_init::info()
+        .map(|d| d.cpu_count())
+        .unwrap_or(0)
+        .max(1)
 }
 
 /// Allocate the heap array, install the BSP at slot 0.
@@ -65,7 +68,7 @@ fn madt_cpu_count() -> usize {
     reason = "boot: DESIGN §3.3 step 11 per-CPU areas, before irq: enabled; sized once from the MADT, never grown"
 )]
 pub unsafe fn init_bsp() {
-    let n = madt_cpu_count();
+    let n = firmware_cpu_count();
     let mut r = Vec::with_capacity(n);
     let mut i = 0;
     while i < n {

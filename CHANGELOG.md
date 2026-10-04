@@ -12,6 +12,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Added
 
+- One portable `MachineDesc` from the device tree and ACPI; reserved FDT
+  ranges stay out of the buddy ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
 - `make check` fails a Relaxed, Acquire, Release or AcqRel ordering with no
   comment naming what it pairs with ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - SMEP/SMAP/UMIP and `CR0.WP` on every CPU (`arch::cpu::init_control_regs`).

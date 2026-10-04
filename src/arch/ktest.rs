@@ -12,7 +12,6 @@ use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGTRAP, wait_signa
 use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
-use crate::acpi_init;
 use crate::addr_space_init;
 use crate::apic_init;
 use crate::arch;
@@ -22,6 +21,7 @@ use crate::irq_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{Outcome, Test, spawn_thread_on, spin_until_ns, test};
 use crate::kva_init;
+use crate::machine_init;
 use crate::per_cpu_init;
 use crate::proc_init;
 use crate::thread_init;
@@ -352,7 +352,7 @@ pub(crate) fn test_lapic_timer_mode() -> Outcome {
         }
         (false, TimerMode::Periodic) => Outcome::Ok,
         (false, TimerMode::Pit) => {
-            if acpi_init::info().is_some_and(|i| i.hpet_present()) {
+            if machine_init::info().is_some_and(|d| d.hpet_info().is_some()) {
                 Outcome::Fail("pit despite hpet")
             } else {
                 Outcome::Ok
@@ -366,13 +366,10 @@ pub(crate) fn test_ioapic_pit_gsi_masked() -> Outcome {
     match apic_init::timer_mode() {
         TimerMode::Pit => Outcome::Skip("pit owns tick"),
         TimerMode::TscDeadline | TimerMode::Periodic => {
-            let Some(info) = acpi_init::info() else {
-                return Outcome::Fail("no acpi");
+            let Some(desc) = machine_init::info() else {
+                return Outcome::Fail("no machine desc");
             };
-            let Some(madt) = info.madt.as_ref() else {
-                return Outcome::Fail("no madt");
-            };
-            let gsi = vibeos::apic::gsi_for_isa_irq(0, &madt.isos[..madt.iso_count]);
+            let gsi = vibeos::apic::gsi_for_isa_irq(0, desc.irq_overrides());
             match gsi_masked(gsi) {
                 Some(true) => Outcome::Ok,
                 Some(false) => Outcome::Fail("pit gsi unmasked"),

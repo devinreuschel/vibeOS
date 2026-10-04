@@ -18,9 +18,9 @@ use vibeos::lock::RANK_DEVICE;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::vectors;
 
-use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
+use crate::machine_init;
 use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
 use crate::x86;
@@ -122,9 +122,8 @@ pub fn init() -> bool {
 }
 
 fn route_keyboard() -> Option<u32> {
-    let info = acpi_init::info()?;
-    let madt = info.madt.as_ref()?;
-    let isos = &madt.isos[..madt.iso_count];
+    let desc = machine_init::info()?;
+    let isos = desc.irq_overrides();
     let gsi = apic::gsi_for_isa_irq(1, isos);
     let (trig, pol) = iso_irq1(isos, gsi);
     // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.

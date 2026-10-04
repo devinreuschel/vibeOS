@@ -20,7 +20,6 @@ use vibeos::smp::{
 };
 use vibeos::thread::ThreadId;
 
-use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
 use crate::arch::current::Arch;
@@ -28,6 +27,7 @@ use crate::arch::gdt::{self, ApTables, CpuTables};
 use crate::cell::IrqCell;
 use crate::kva_init;
 use crate::log::trace_init;
+use crate::machine_init;
 use crate::per_cpu_init;
 use crate::thread_init::{self, SpawnError};
 use crate::time_init;
@@ -601,17 +601,17 @@ pub unsafe fn init() {
 fn start_aps(page: u64) {
     // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     let bsp_apic = per_cpu_init::with_current(|c| c.remote.apic_id.load(Ordering::Relaxed)) as u8;
-    let Some(info) = acpi_init::info() else {
-        return;
-    };
-    let Some(madt) = info.madt.as_ref() else {
+    let Some(desc) = machine_init::info() else {
         return;
     };
 
     let mut logical = 1u32;
     let mut i = 0usize;
-    while i < madt.cpu_count {
-        let apic_id = madt.apic_ids[i];
+    while i < desc.cpu_count() {
+        let Some(cpu) = desc.cpus().get(i) else {
+            break;
+        };
+        let apic_id = cpu.hw_id as u8;
         i += 1;
         if apic_id == bsp_apic {
             continue;

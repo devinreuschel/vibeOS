@@ -4,6 +4,7 @@ pub mod acpi;
 pub mod cmdline;
 pub mod elf;
 pub mod fat;
+pub mod fdt;
 pub mod part;
 pub mod pci;
 pub mod shell;

@@ -19,7 +19,7 @@ concurrency: {group: release, cancel-in-progress: false}
 jobs:
   # Read-only. main's scripts/release_check.py runs before any code of the
   # tag's tree; then the tag's commit is built from scratch (no restored
-  # cache, a fresh Limine archive), tested, and uploaded with its SHA-256 list.
+  # cache, a fresh Limine clone), tested, and uploaded with its SHA-256 list.
   build:
     runs-on: ubuntu-26.04
     permissions:
@@ -110,8 +110,8 @@ jobs:
           install -m 755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.local/bin/cargo-deny"
           "$HOME/.local/bin/cargo-deny" --version
 
-      # Fetches Limine's pinned release archive and builds its host tool:
-      # nothing here is restored, so both are fresh (ROADMAP §10.1).
+      # Clones Limine at its pinned commit and builds its host tool: nothing
+      # here is restored, so both are fresh (ROADMAP §10.1).
       - name: setup
         run: ./setup.sh
 

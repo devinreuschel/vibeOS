@@ -25,10 +25,11 @@ resolves in that directory's files. Its definition changes
 in `git diff base...head`, or its name appears in the ticked line; otherwise
 the line carries `(existing: <reason>)`, which the report lists.
 
-A pushed commit's message cannot change, so a wrong `Proves:` line is
-corrected by a row of `tests/gates/proves-errata.toml`, a gate input: the
-rules read the row's line in place of the pushed one, the report lists it,
-and a row whose commit is in the pull request but has no such line fails.
+A pushed commit's message cannot change, so a wrong or missing `Proves:`
+line is corrected by a row of `tests/gates/proves-errata.toml`, a gate
+input: the rules read the row's `proves` in place of `was`, or as the
+line when `was` is empty, the report lists it, and a row whose commit is
+in the pull request but does not match that `was` fails.
 
 Modes:
 - bare (`make check`): pairing and the diff rule on `origin/main..HEAD`, or
@@ -798,8 +799,13 @@ class Checker:
     def pair(self, c: Commit, tag: str) -> list[tuple[ProvesLine, Tick]]:
         """Pair each `<tag>:` line of `c` with the one tick its prefix begins."""
         out: list[tuple[ProvesLine, Tick]] = []
-        for raw in gatelib.parse_message_lines(c.message, tag):
-            if tag == "Proves" and (c.sha, raw) in self.errata:
+        lines = list(gatelib.parse_message_lines(c.message, tag))
+        if tag == "Proves" and (c.sha, "") in self.errata and not lines:
+            raw, why = self.errata[(c.sha, "")]
+            self.report.notes.append(f"{c.sha[:7]}: erratum: Proves: {raw} ({why})")
+            lines = [raw]
+        for raw in lines:
+            if tag == "Proves" and raw and (c.sha, raw) in self.errata:
                 raw, why = self.errata[(c.sha, raw)]
                 self.report.notes.append(f"{c.sha[:7]}: erratum: Proves: {raw} ({why})")
             p = parse_proves(raw) if tag == "Proves" else parse_fails_before(raw)
@@ -1116,19 +1122,28 @@ class Checker:
 
 
     def check_errata(self) -> None:
-        """A row whose commit is in the pull request replaces one of its lines."""
+        """A row whose commit is in the pull request replaces one of its lines,
+        or supplies the line when `was` is empty."""
         by_sha = {c.sha: c for c in self.commits}
         for sha, was in self.errata:
             c = by_sha.get(sha)
-            if c is not None and was not in gatelib.parse_message_lines(c.message, "Proves"):
+            if c is None:
+                continue
+            existing = gatelib.parse_message_lines(c.message, "Proves")
+            if was == "":
+                if existing:
+                    self.report.error(sha, None, "erratum supplies a `Proves:` line but "
+                                      "the commit already has one")
+            elif was not in existing:
                 self.report.error(sha, None, f"erratum names no `Proves:` line of the "
                                   f"commit: {was!r}")
 
 
 def load_errata(text: str) -> tuple[dict[tuple[str, str], tuple[str, str]], list[str]]:
     """ERRATA_PATH's `[[erratum]]` rows: `commit` (40 hex digits), `was` (the
-    pushed line after `Proves: `), `proves` (the line read in its place) and
-    `why`, keyed by (commit, was); and the reasons malformed rows were refused."""
+    pushed line after `Proves: `, empty when the commit has none), `proves`
+    (the line read in its place) and `why`, keyed by (commit, was); and the
+    reasons malformed rows were refused."""
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
@@ -1137,8 +1152,10 @@ def load_errata(text: str) -> tuple[dict[tuple[str, str], tuple[str, str]], list
     errors: list[str] = []
     for i, row in enumerate(data.get("erratum") or []):
         keys = ("commit", "was", "proves", "why")
-        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k].strip()
-                                                for k in keys):
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) for k in keys):
+            errors.append(f"{ERRATA_PATH}: erratum {i + 1} needs {', '.join(keys)}")
+            continue
+        if not row["commit"].strip() or not row["proves"].strip() or not row["why"].strip():
             errors.append(f"{ERRATA_PATH}: erratum {i + 1} needs {', '.join(keys)}")
             continue
         if not re.fullmatch(r"[0-9a-f]{40}", row["commit"]):

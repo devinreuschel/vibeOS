@@ -22,6 +22,7 @@ use crate::arch::current::{Arch, interrupts_enabled, wait_for_interrupt};
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86_64::{has_rdtscp, invariant_tsc, rdtsc_ser};
 use crate::cell::{BootCell, IrqCell};
+use crate::machine_init;
 use crate::paging_init;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
@@ -162,7 +163,7 @@ fn hpet_va(hpet: &HpetInfo) -> u64 {
 
 /// HPET main counter VA + period, after the page is UC. None if unusable.
 pub(crate) fn hpet_ready() -> Option<(u64, u32)> {
-    let hpet = acpi_init::info()?.hpet?;
+    let hpet = machine_init::info()?.hpet_info()?;
     if !hpet_period_ok(hpet.period_fs) {
         return None;
     }
@@ -718,7 +719,7 @@ pub unsafe fn init() {
     let mut source = CalibSource::Pit;
     let mut per_ms = None;
 
-    if let Some(hpet) = acpi_init::info().and_then(|i| i.hpet) {
+    if let Some(hpet) = machine_init::info().and_then(|d| d.hpet_info()) {
         match calibrate_hpet(&hpet, use_rdtscp) {
             Some(v) => {
                 source = CalibSource::Hpet;

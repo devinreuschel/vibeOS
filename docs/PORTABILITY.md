@@ -86,8 +86,8 @@ layer, and the device registry read only it, so a firmware format is one more pr
 consumer path. A device, its resources, and its INTx routing are not in it: a driver binds through
 ROADMAP §6.1's registry to a firmware-node handle, a device-tree node or an ACPI namespace node, matched
 by compatible string or `_HID`, whose resources ROADMAP §20.2's `_CRS` and `_PRT` fill at runtime and
-hot removal can take away. Planned (ROADMAP §11.5); today the ACPI parser's results feed x86_64's
-consumers directly.
+hot removal can take away. The ACPI parser (MADT, HPET, MCFG) and the device-tree parser each fill it;
+x86_64's consumers of those tables read `MachineDesc`.
 
 The mechanism:
 

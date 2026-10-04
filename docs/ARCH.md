@@ -48,7 +48,7 @@ the identity on them; a second port maps them to its own encoding (ROADMAP §11.
 | CPU identity, topology, and features | port module | `src/smp/per_cpu_init.rs` | `src/arch/x86_64/cpu.rs`, `src/arch/x86_64/percpu.rs` | none yet (ROADMAP §11.4) | none yet (ROADMAP §11.4) |
 | Idle | port module | `src/sched/thread_init/mod.rs`, `src/console/console_init.rs` | `src/arch/x86_64/cpu.rs` | none yet (ROADMAP §11.3) | none yet (ROADMAP §11.3) |
 | Power-off and reset | port module | `src/shell/cmds/sys.rs`, `src/proc/proc_init/floor.rs` | `src/arch/x86_64/power.rs`, `src/arch/x86_64/cpu.rs` | none yet (ROADMAP §11.4) | none yet (ROADMAP §11.4) |
-| Machine description | pure half | `crates/core/src/acpi/mod.rs`, `src/acpi/acpi_init.rs` | none yet (ROADMAP §11.5) | none yet (ROADMAP §11.5) | none yet (ROADMAP §11.5) |
+| Machine description | pure half | `crates/core/src/machine/mod.rs`, `crates/core/src/machine/fdt.rs`, `crates/core/src/acpi/mod.rs` | `src/machine/machine_init.rs`, `src/acpi/acpi_init.rs` | none yet (ROADMAP §11.5) | none yet (ROADMAP §11.5) |
 | PCI configuration access | port module | `crates/core/src/dev/pci.rs`, `src/dev/pci_init.rs` | `src/dev/pci_init.rs` | none yet (ROADMAP §11.5) | none yet (ROADMAP §11.5) |
 | Hardware RNG | port module | `src/dev/entropy_init.rs` | `src/arch/x86_64/cpu.rs` | none yet (ROADMAP §11.5) | none yet (ROADMAP §11.5) |
 | Debug and single-step state | port module | none yet (ROADMAP §17.4) | `src/arch/x86_64/idt.rs` | `crates/core/src/arch/x86_64/vectors.rs` | none yet (ROADMAP §17.4) |
