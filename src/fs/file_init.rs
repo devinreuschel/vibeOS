@@ -107,10 +107,6 @@ pub fn mkdir(path: &[u8], mode: u32) -> Result<(), FsError> {
         reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
     )
 )]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub fn unlink(path: &[u8]) -> Result<(), FsError> {
     unlink_at(None, path)
 }
@@ -121,10 +117,6 @@ pub fn unlink(path: &[u8]) -> Result<(), FsError> {
         dead_code,
         reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
     )
-)]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn rmdir(path: &[u8]) -> Result<(), FsError> {
     rmdir_at(None, path)
