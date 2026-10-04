@@ -2365,6 +2365,8 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("num-queues=4", blob)
         self.assertIn("isa-debug-exit", blob)
         self.assertIn("edu,dma_mask=0xFFFFFFFF", args)
+        self.assertIn("virtio-keyboard-pci,disable-legacy=on", args)
+        self.assertIn("virtio-tablet-pci,disable-legacy=on", args)
 
     def test_ktest_devices_aarch64_omits_isa_debug_exit(self) -> None:
         from tests.harness.harness import ktest_devices
@@ -2377,6 +2379,8 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("virtio-rng-pci", blob)
         self.assertIn("virtio-blk-pci", blob)
         self.assertNotIn("virtio-blk-device", blob)
+        self.assertNotIn("virtio-keyboard-pci", blob)
+        self.assertNotIn("virtio-tablet-pci", blob)
         self.assertIn("discard=unmap", blob)
         mmio = ktest_devices("/tmp/disk.img", 4, arch="aarch64", mmio_disk="/tmp/mmio.img")
         mmio_blob = " ".join(mmio)

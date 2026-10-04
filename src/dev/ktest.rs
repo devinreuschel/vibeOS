@@ -6,6 +6,7 @@ use crate::ktest::{Test, test};
 mod claims;
 mod dma;
 mod hooks;
+mod input;
 #[cfg(target_arch = "aarch64")]
 mod mmio;
 mod pci;
@@ -15,6 +16,7 @@ mod rng;
 pub(crate) use claims::*;
 pub(crate) use dma::*;
 pub(crate) use hooks::*;
+pub(crate) use input::*;
 #[cfg(target_arch = "aarch64")]
 pub(crate) use mmio::*;
 pub(crate) use pci::*;
@@ -34,6 +36,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("dma_edu", test_dma_edu),
     test("virtio_bind", test_virtio_bind),
     test("virtio_vq", test_virtio_vq),
+    test("virtio_input", test_virtio_input),
     test("dev_random_source", test_dev_random_source),
     test("dev_random_eagain", test_dev_random_eagain),
     test("rng_pool_no_dup", rng_pool_no_dup),
@@ -53,6 +56,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("dma_edu", test_dma_edu),
     test("virtio_bind", test_virtio_bind),
     test("virtio_vq", test_virtio_vq),
+    test("virtio_input", test_virtio_input),
     test("block_vblk_mmio_smp", test_block_vblk_mmio_smp),
     test("dev_random_source", test_dev_random_source),
 ];

@@ -25,6 +25,8 @@ pub const DEV_RNG_LEGACY: u16 = 0x1005;
 pub const DEV_BLK_MODERN: u16 = 0x1042;
 /// Transitional virtio-blk. Probe still requires [`F_VERSION_1`].
 pub const DEV_BLK_LEGACY: u16 = 0x1001;
+/// Modern virtio-input (`0x1040 + 18`).
+pub const DEV_INPUT_MODERN: u16 = 0x1052;
 
 pub const F_INDIRECT_DESC: u64 = 1 << 28;
 pub const F_EVENT_IDX: u64 = 1 << 29;
@@ -922,6 +924,7 @@ mod tests {
         assert!(!mmio_ident_ok(MMIO_MAGIC, 1));
         assert_eq!(modern_pci_id(ID_BLOCK), Some(DEV_BLK_MODERN));
         assert_eq!(modern_pci_id(ID_ENTROPY), Some(DEV_RNG_MODERN));
+        assert_eq!(modern_pci_id(ID_INPUT), Some(DEV_INPUT_MODERN));
         assert_eq!(modern_pci_id(0), None);
         assert_eq!(queue_notify(3), 3);
     }

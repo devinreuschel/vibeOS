@@ -101,7 +101,7 @@ use console::kbd_init;
 use console::{console_init, fb_init};
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
 use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init, virtio_mmio_init};
-use drivers::virtio_blk_init;
+use drivers::{virtio_blk_init, virtio_input_init};
 use fs::{fat_init, file_init, fs_init, vibefs_init};
 use irq::{ipi_init, irq_init};
 use log::{diag, log_init, panic, serial};
@@ -439,6 +439,7 @@ extern "C" fn boot_rest() -> ! {
     crate::work_init::init();
     crate::virtio_init::init();
     crate::virtio_blk_init::init();
+    crate::virtio_input_init::init();
     crate::dev_init::init();
     crate::entropy_init::init();
     crate::block_init::init();

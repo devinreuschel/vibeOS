@@ -205,7 +205,7 @@ children, need no row.
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
 | shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
 | dev | `dev/{mod,pci,dma,virtio,entropy,tests}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,virtio_mmio_init,entropy_init}.rs` |
-| drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/mod.rs`, `drivers/virtio_blk_init/{mod,vq,issue,irq}.rs` |
+| drivers | `drivers/{mod,virtio_blk,virtio_input}.rs` | `drivers/mod.rs`, `drivers/virtio_blk_init/{mod,vq,issue,irq}.rs`, `drivers/virtio_input_init.rs` |
 | block | `block/{mod,part,cache,blockdev,loom_models}.rs`, `block/cache/tests.rs` | `block/{mod,block_init,blockdev_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,error,inode,mount,walk,file,ramfs,sizes,testfs,tests,walk_tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests,ops_tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests,image_tests,limit_tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
 | proc | `proc/{mod,elf,fill,pid,syscall,syscall_table,uabi,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs`, `proc/elf/stack.rs` | `proc/{mod,addr_space_init,fill_init,user_init,syscall_init,syscall_init_aarch64,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit,floor}.rs` |

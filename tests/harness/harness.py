@@ -1074,10 +1074,12 @@ def ktest_devices(
     """The in-guest registry's devices: `disk` is `vda`, and each of
     `extra_disks` a further virtio-blk disk after it. A second virtio-rng
     sits at `00:1d.0`, and a virtio-blk whose probe fails at `00:1e.0`.
-    `readonly` and `blkdebug` go to `virtio_blk_args` for `vda`.
-    aarch64 has no `isa-debug-exit`; pass is PSCI `SYSTEM_OFF`.
-    `mmio_disk` is the virtio-mmio `virtio-blk-device` image (F047);
-    it must be a different file from `disk` (QEMU write-locks the image)."""
+    x86 also attaches `virtio-keyboard-pci` and `virtio-tablet-pci`
+    (aarch64 already has them on every boot). `readonly` and `blkdebug`
+    go to `virtio_blk_args` for `vda`. aarch64 has no `isa-debug-exit`;
+    pass is PSCI `SYSTEM_OFF`. `mmio_disk` is the virtio-mmio
+    `virtio-blk-device` image (F047); it must be a different file from
+    `disk` (QEMU write-locks the image)."""
     isa = (
         ()
         if arch == "aarch64"
@@ -1103,6 +1105,16 @@ def ktest_devices(
         # which the driver refuses (`dev::ktest::SPARE_RNG_BDF`).
         "-device",
         "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+    ) + (
+        ()
+        if arch == "aarch64"
+        else (
+            # aarch64 already attaches both through AARCH64_FORENSICS.
+            "-device",
+            "virtio-keyboard-pci,disable-legacy=on",
+            "-device",
+            "virtio-tablet-pci,disable-legacy=on",
+        )
     ) + virtio_blk_args(
         disk, smp, extra=extra_disks, readonly=readonly, blkdebug=blkdebug
     ) + mmio_blk + (
