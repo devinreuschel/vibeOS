@@ -8,6 +8,7 @@
 //! Where `2^bits - 1` does not exceed the CPU count, ASIDs are off.
 
 use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use crate::kalloc::TryBox;
 use crate::machine::MAX_CPUS;
 use crate::sync::variant::{self, Site};
 
@@ -60,6 +61,48 @@ impl AsidAlloc {
             flush_pending: core::array::from_fn(|_| AtomicBool::new(false)),
             lock: AtomicBool::new(false),
         })
+    }
+
+    /// Heap form of [`Self::new`]. Writes fields in place so a 16 KiB
+    /// kernel stack does not hold the 16-bit bitmap.
+    pub fn try_boxed(bits: u32, ncpus: u32) -> Option<TryBox<Self>> {
+        if bits == 0 || bits > 16 || ncpus == 0 || ncpus as usize > MAX_CPUS {
+            return None;
+        }
+        let usable = (1u32 << bits).saturating_sub(1);
+        if usable <= ncpus {
+            return None;
+        }
+        let slot = TryBox::<Self>::try_new_uninit().ok()?;
+        let raw = TryBox::into_raw(slot);
+        // SAFETY: `raw` is the exclusive `MaybeUninit<Self>` `try_new_uninit`
+        // allocated. Each field is written once, then the pointer is a
+        // live `Self`. established here.
+        unsafe {
+            let p = raw.cast::<Self>();
+            core::ptr::addr_of_mut!((*p).bits).write(bits);
+            core::ptr::addr_of_mut!((*p).ncpus).write(ncpus);
+            core::ptr::addr_of_mut!((*p).generation).write(AtomicU64::new(1u64 << bits));
+            core::ptr::addr_of_mut!((*p).next).write(AtomicU32::new(1));
+            let used = core::ptr::addr_of_mut!((*p).used).cast::<AtomicU64>();
+            for i in 0..BITMAP_WORDS {
+                used.add(i).write(AtomicU64::new(0));
+            }
+            let reserved = core::ptr::addr_of_mut!((*p).reserved).cast::<AtomicU64>();
+            for i in 0..MAX_CPUS {
+                reserved.add(i).write(AtomicU64::new(0));
+            }
+            let active = core::ptr::addr_of_mut!((*p).active).cast::<AtomicU64>();
+            for i in 0..MAX_CPUS {
+                active.add(i).write(AtomicU64::new(0));
+            }
+            let flush = core::ptr::addr_of_mut!((*p).flush_pending).cast::<AtomicBool>();
+            for i in 0..MAX_CPUS {
+                flush.add(i).write(AtomicBool::new(false));
+            }
+            core::ptr::addr_of_mut!((*p).lock).write(AtomicBool::new(false));
+            Some(TryBox::from_raw(p))
+        }
     }
 
     pub fn bits(&self) -> u32 {
@@ -332,6 +375,14 @@ mod tests {
         assert!(AsidAlloc::new(1, 1).is_none());
         assert!(AsidAlloc::new(2, 2).is_some());
         assert!(!DISABLED_REASON.is_empty());
+    }
+
+    #[test]
+    fn try_boxed_matches_new() {
+        assert!(AsidAlloc::try_boxed(2, 3).is_none());
+        let a = AsidAlloc::try_boxed(4, 2).expect("4-bit boxed");
+        assert_eq!(a.bits(), 4);
+        assert_eq!(a.asid_mask(), 0xF);
     }
 
     #[test]

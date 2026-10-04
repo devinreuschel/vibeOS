@@ -355,7 +355,7 @@ fn alloc_zeroed() -> Option<u64> {
 
 pub(crate) fn test_asid_4bit() -> Outcome {
     let ncpus = crate::per_cpu_init::cpu_count().max(2) as u32;
-    let Some(alloc) = AsidAlloc::new(4, ncpus) else {
+    let Some(alloc) = AsidAlloc::try_boxed(4, ncpus) else {
         return Outcome::Fail("4-bit AsidAlloc");
     };
     let saved = crate::arch::aarch64::cpu::read_ttbr0();
