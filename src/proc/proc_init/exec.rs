@@ -245,7 +245,8 @@ pub(super) fn sys_execve(
     // The old space's last `users` put, with no lock held and its root no
     // longer loaded or named: the teardown sleeps for its `mm` lock.
     drop(old);
-    *frame = UserFrame::new_user(entry, rsp);
+    // Still this execve's syscall exit: `new_user` would write -1.
+    *frame = UserFrame::exec_from(entry, rsp, Arch::nr(frame));
     // The psABI's initial FP state for the new image (DESIGN §7.5).
     syscall_init::exec_fp();
     thread_init::reset_user_segs();

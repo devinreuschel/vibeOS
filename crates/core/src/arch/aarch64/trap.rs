@@ -129,6 +129,14 @@ impl UserFrame {
         f.syscallno = u64::MAX;
         f
     }
+
+    /// A successful `execve`'s frame: [`new_user`] plus the syscall
+    /// number the exit is still returning from. `new_user` writes -1.
+    pub const fn exec_from(pc: u64, sp: u64, nr: u64) -> Self {
+        let mut f = Self::new_user(pc, sp);
+        f.syscallno = nr;
+        f
+    }
 }
 
 /// The aarch64 Linux syscall ABI over [`UserFrame`]: number in the low
@@ -336,6 +344,11 @@ mod tests {
         assert_eq!((f.pc, f.sp, f.pstate), (0x40_0000, 0x7fff_f000, 0));
         assert_eq!(f.syscallno, u64::MAX);
         assert_eq!(f.x[0], 0);
+        let e = UserFrame::exec_from(0x40_0000, 0x7fff_f000, 221);
+        assert_eq!(
+            (e.pc, e.sp, e.pstate, e.syscallno),
+            (0x40_0000, 0x7fff_f000, 0, 221)
+        );
         let mut r = f;
         r.orig_x0 = 7;
         r.pc = 0x40_1004;

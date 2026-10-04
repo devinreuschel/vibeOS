@@ -943,6 +943,12 @@ pub(crate) mod testing {
             return;
         }
         let armed = f.orig_rax.wrapping_add(1);
+        // 0 is "unarmed", and also what an `orig_rax` of -1 (no syscall)
+        // gives. A compare-exchange of 0 with 0 would succeed every time
+        // nothing is armed.
+        if armed == 0 {
+            return;
+        }
         // AcqRel: pairs with the Release stores of the arm and disarm above.
         // Relaxed on failure: the exit is not the armed one; pairs with nothing.
         if ARMED_NR
