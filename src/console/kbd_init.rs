@@ -101,11 +101,13 @@ pub fn init() -> bool {
     match routed {
         Some(gsi) => {
             apic_init::unmask_gsi(gsi);
+            // Release: pairs with the Acquire load in `console::ktest::hooks::gsi`.
             GSI.store(gsi, Ordering::Release);
         }
         None if !apic_init::owns_tick() => {
             // PIT path: 8259 still live via LINT0 ExtINT.
             arch::pic::unmask(1);
+            // Release: pairs with the Acquire load in `console::ktest::hooks::pic_fallback`.
             PIC_FALLBACK.store(true, Ordering::Release);
         }
         None => {
@@ -114,6 +116,7 @@ pub fn init() -> bool {
             crate::marker!("vibeOS: kbd: no ioapic route");
         }
     }
+    // Release: pairs with the Acquire load in `console::ktest::hooks::kbd_live`.
     LIVE.store(true, Ordering::Release);
     true
 }
@@ -124,6 +127,7 @@ fn route_keyboard() -> Option<u32> {
     let isos = &madt.isos[..madt.iso_count];
     let gsi = apic::gsi_for_isa_irq(1, isos);
     let (trig, pol) = iso_irq1(isos, gsi);
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     let dest = per_cpu_init::cpu(0)
         .map(|c| c.apic_id.load(Ordering::Relaxed) as u8)
         .unwrap_or(0);

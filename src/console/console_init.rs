@@ -30,6 +30,7 @@ pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
 pub fn write(bytes: &[u8]) {
     #[cfg(feature = "kernel_tests")]
     testing::record(bytes);
+    // Acquire: pairs with the Release stores in `init` and `set_enabled`.
     let fb = FB_ON.load(Ordering::Acquire);
     if bytes.is_empty() {
         if fb {
@@ -38,6 +39,7 @@ pub fn write(bytes: &[u8]) {
         return;
     }
     for chunk in bytes.chunks(CHUNK) {
+        // Acquire: pairs with the Release stores in `init` and `set_enabled`.
         if SERIAL_ON.load(Ordering::Acquire) {
             Serial::write_user(chunk);
         }
@@ -65,6 +67,7 @@ pub fn read() -> Option<DecodedKey> {
     if let Some(k) = kbd_init::pop() {
         return Some(k);
     }
+    // Acquire: pairs with the Release stores in `init` and `set_enabled`.
     if SERIAL_ON.load(Ordering::Acquire)
         && let Some(b) = Serial::try_read_byte()
     {
@@ -127,6 +130,7 @@ fn wait_key_loop() -> DecodedKey {
             thread_init::yield_now();
             continue;
         }
+        // Relaxed: a count; pairs with nothing.
         #[cfg(feature = "kernel_tests")]
         testing::HALTS.fetch_add(1, Ordering::Relaxed);
         crate::sched::irqoff::on();
@@ -199,10 +203,12 @@ pub(crate) mod testing {
     /// Calls of `wait_key` that reached its `sti; hlt`, since the last
     /// [`reset_halts`].
     pub(crate) fn halts() -> u64 {
+        // Relaxed: a count; pairs with nothing.
         HALTS.load(Ordering::Relaxed)
     }
 
     pub(crate) fn reset_halts() {
+        // Relaxed: a count; pairs with nothing.
         HALTS.store(0, Ordering::Relaxed);
     }
 }
@@ -210,12 +216,15 @@ pub(crate) mod testing {
 /// FB text, replay the pre-FB ring, PS/2, then `console ok`.
 pub fn init() {
     let fb = fb_init::init();
+    // Release: pairs with the Acquire loads in `write` and `read`.
     SERIAL_ON.store(true, Ordering::Release);
+    // Release: pairs with the Acquire load in `write`.
     FB_ON.store(fb, Ordering::Release);
     if fb {
         replay_log();
     }
     let _kbd = kbd_init::init();
+    // Release: pairs with the Acquire load in `console::ktest::hooks::live`.
     LIVE.store(true, Ordering::Release);
     crate::marker!(marker::CONSOLE_OK);
     if fb {
