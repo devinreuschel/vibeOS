@@ -996,6 +996,7 @@ pub struct UserFreeStats {
 static SHOOTDOWN_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 pub fn set_tlb_shootdown_hook(f: fn(&[ShootRange])) {
+    // Release: pairs with the Acquire load in `tlb_shootdown_ranges`.
     SHOOTDOWN_HOOK.store(f as *mut (), Ordering::Release);
 }
 
@@ -1011,6 +1012,7 @@ pub fn tlb_shootdown_others(va: VirtAddr) {
 /// their PTEs and run its local `invlpg`s.
 #[inline]
 pub fn tlb_shootdown_ranges(ranges: &[ShootRange]) {
+    // Acquire: pairs with the Release store in `set_tlb_shootdown_hook`.
     let p = SHOOTDOWN_HOOK.load(Ordering::Acquire);
     if p.is_null() {
         return;

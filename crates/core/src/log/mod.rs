@@ -129,10 +129,12 @@ impl Filter {
     }
 
     pub fn set(&self, max: Level) {
+        // Release: pairs with the Acquire load in `get`.
         self.max.store(max as u8, Ordering::Release);
     }
 
     pub fn get(&self) -> Level {
+        // Acquire: pairs with the Release store in `set`.
         Level::from_u8(self.max.load(Ordering::Acquire)).unwrap_or(DEFAULT_RUNTIME_MAX)
     }
 
@@ -417,10 +419,13 @@ impl RateLimit {
     /// resets it; otherwise counts this call and returns `None`. Of two
     /// callers racing for the same line, one gets it and the other counts.
     pub fn check(&self, now_ms: u64, interval_ms: u64) -> Option<u64> {
+        // Acquire: pairs with the AcqRel compare-exchange below in an earlier `check`.
         let last = self.last.load(Ordering::Acquire);
         let due = last == 0 || now_ms.saturating_sub(last - 1) >= interval_ms;
-        // AcqRel: the winner's swap of `suppressed` follows its claim, and
+        // AcqRel: pairs with another caller's compare-exchange and load of
+        // `last`, so the winner's swap of `suppressed` follows its claim, and
         // a loser reads the claim before it counts.
+        // Acquire on failure: pairs with the winning caller's AcqRel.
         if !due
             || self
                 .last
@@ -432,9 +437,11 @@ impl RateLimit {
                 )
                 .is_err()
         {
+            // AcqRel: pairs with the winner's AcqRel `swap` below.
             self.suppressed.fetch_add(1, Ordering::AcqRel);
             return None;
         }
+        // AcqRel: pairs with the losers' AcqRel `fetch_add` above.
         Some(self.suppressed.swap(0, Ordering::AcqRel))
     }
 }

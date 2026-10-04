@@ -283,6 +283,7 @@ pub fn dma_mb<A: Barriers>() {
 #[inline]
 pub fn publish_index<A: Barriers>(slot: &AtomicU16, idx: u16) {
     dma_wmb::<A>();
+    // Release: pairs with the device's read of the index; `dma_wmb` orders it for DMA.
     slot.store(idx, Ordering::Release);
 }
 

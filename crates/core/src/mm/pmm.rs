@@ -58,6 +58,7 @@ static LEAKED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 /// Frames leaked by dropped [`Frames`] tokens since boot. `meminfo`
 /// prints it.
 pub fn leaked_frames() -> usize {
+    // Relaxed: a statistic; pairs with nothing.
     LEAKED_FRAMES.load(Ordering::Relaxed)
 }
 
@@ -172,6 +173,7 @@ impl Drop for Frames {
         reason = "ROADMAP §10.3: a dropped Frames panics in debug builds, DESIGN §4.2"
     )]
     fn drop(&mut self) {
+        // Relaxed: a statistic; pairs with nothing.
         LEAKED_FRAMES.fetch_add(self.count(), Ordering::Relaxed);
         #[cfg(debug_assertions)]
         {

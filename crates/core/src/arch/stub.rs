@@ -235,7 +235,7 @@ static NEXT_CPU: AtomicU32 = AtomicU32::new(0);
 /// A new thread's state: the defaults, on a CPU id no other thread started
 /// with.
 fn thread_state() -> State {
-    // Relaxed: the counter only hands out distinct ids; it orders nothing.
+    // Relaxed: the counter only hands out distinct ids; pairs with nothing.
     let id = NEXT_CPU.fetch_add(1, Ordering::Relaxed);
     State {
         cpu_id: id,

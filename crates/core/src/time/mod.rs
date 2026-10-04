@@ -240,6 +240,7 @@ pub const fn calib_in_band(reference: u64, sample: u64, lo_pct: u64, hi_pct: u64
 /// `fetch_max` then return the larger of previous and `n`. `last` is a
 /// `static` (`time_init::LAST_NS`), so it takes the seam's `core` flavour.
 pub fn monotonic_max(last: &statics::AtomicU64, n: u64) -> u64 {
+    // Relaxed: the read-modify-write alone keeps it monotonic; pairs with nothing.
     last.fetch_max(n, statics::Ordering::Relaxed).max(n)
 }
 
@@ -490,15 +491,17 @@ impl Payload {
     }
 
     fn store(&self, s: Snapshot) {
-        // Relaxed: ordered by the fences around the sequence bumps.
+        // Relaxed: ordered by the fences around the sequence bumps; pairs with nothing.
         self.id.store(s.id as u64, Ordering::Relaxed);
+        // Relaxed: as `id`; pairs with nothing.
         self.cycles.store(s.cycles, Ordering::Relaxed);
+        // Relaxed: as `id`; pairs with nothing.
         self.ns.store(s.ns, Ordering::Relaxed);
     }
 
     /// The raw words: id, cycles, ns. The id is 0 before the first write.
     fn load(&self) -> (u64, u64, u64) {
-        // Relaxed: ordered by the reader's `fence(Acquire)`.
+        // Relaxed: ordered by the reader's `fence(Acquire)`; pairs with nothing.
         (
             self.id.load(Ordering::Relaxed),
             self.cycles.load(Ordering::Relaxed),
@@ -556,15 +559,17 @@ impl TickClock {
         // The loom models' variants (ROADMAP §10.8): F098's lone AcqRel
         // `fetch_add`, and the bump without its leading fence.
         if variant::pick(Site::SeqlockBumpAcqRel, false, true) {
+            // AcqRel: pairs with the reader's Acquire load of `seq`; F098 shows it is not enough.
             self.seq.fetch_add(1, Ordering::AcqRel);
             return;
         }
         if variant::pick(Site::SeqlockLeadingFence, true, false) {
-            // Release: orders the stores of the copy written before this
-            // bump ahead of it, for a reader whose Acquire load of `seq`
-            // sees the bump and then reads that copy.
+            // Release: pairs with the reader's Acquire load of `seq`; it
+            // orders the stores of the copy written before this bump ahead
+            // of it, for a reader that sees the bump and then reads that copy.
             fence(Ordering::Release);
         }
+        // Relaxed: the one writer's count, which the fences order; pairs with nothing.
         self.seq.fetch_add(1, Ordering::Relaxed);
         // Release: pairs with the reader's `fence(Acquire)` after its
         // payload loads. A reader that loaded any store made after this
@@ -602,10 +607,13 @@ impl TickClock {
     /// when `seq` changed.
     pub fn read(&self) -> Option<Snapshot> {
         loop {
+            // Acquire: pairs with the leading Release fence in `bump`.
             let s1 = self.seq.load(Ordering::Acquire);
             let v = self.copy(s1).load();
-            // Payload loads must not move past the seq re-check.
+            // Acquire: pairs with the trailing Release fence in `bump`;
+            // payload loads must not move past the seq re-check.
             fence(Ordering::Acquire);
+            // Relaxed: ordered by the Acquire fence above; pairs with nothing.
             let s2 = self.seq.load(Ordering::Relaxed);
             if s1 == s2 {
                 return decode(v);
@@ -625,11 +633,14 @@ impl TickClock {
         counter: impl Fn(ClocksourceId) -> Option<Counter>,
     ) -> u64 {
         loop {
+            // Acquire: pairs with the leading Release fence in `bump`.
             let s1 = self.seq.load(Ordering::Acquire);
             let v = self.copy(s1).load();
+            // Acquire: pairs with the trailing Release fence in `bump`.
             fence(Ordering::Acquire);
             let snap = decode(v);
             let raw = snap.map(|s| read_raw(s.id));
+            // Relaxed: ordered by the Acquire fence above; pairs with nothing.
             let s2 = self.seq.load(Ordering::Relaxed);
             if s1 != s2 {
                 continue;

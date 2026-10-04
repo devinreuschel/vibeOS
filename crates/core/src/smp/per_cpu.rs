@@ -284,6 +284,7 @@ impl PerCpu {
     /// end of every `&mut PerCpu` scope; a run-queue change made outside
     /// one leaves the published length stale until the next scope ends.
     pub fn publish_runq_len(&self) {
+        // Relaxed: a published hint; pairs with nothing.
         self.remote
             .runq_len
             .store(self.runq.len(), Ordering::Relaxed);
