@@ -935,6 +935,51 @@ mod tests {
         assert_eq!(DROPS.load(Ordering::SeqCst), 3);
     }
 
+    /// ROADMAP §10.4 (D2): two disks are two entries, each owning its own
+    /// volume instance, and nothing outside the registry lists them.
+    /// Unregistering one disk drops the instance its partition's entry
+    /// owned and leaves the other disk's alone; a disk registered again
+    /// under the old name is a new entry with a new id and no instance.
+    #[test]
+    fn two_disks_own_two_instances() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static A_DROPS: AtomicU32 = AtomicU32::new(0);
+        static B_DROPS: AtomicU32 = AtomicU32::new(0);
+        let seq = DiskSeq::new();
+        let mut reg = Registry::new();
+        let a = disk(&mut reg, &seq, b"vda", 64);
+        let ap = part(&mut reg, &seq, &a, b"vdap1", 8, 16);
+        let b = disk(&mut reg, &seq, b"vdb", 32);
+        assert_ne!(a.id(), b.id());
+        reg.set_holder(&ap, crate::dev::instance(Vol(&A_DROPS)).unwrap())
+            .unwrap();
+        reg.set_holder(&b, crate::dev::instance(Vol(&B_DROPS)).unwrap())
+            .unwrap();
+        // Each entry holds its own instance; the disk under a partition
+        // holds none of its own.
+        let (ha, hb) = (reg.holder(&ap).unwrap(), reg.holder(&b).unwrap());
+        assert!(!crate::dev::same_instance(&ha, &hb));
+        assert!(reg.holder(&a).is_none());
+        drop((ha, hb));
+        // Unregistering `vda` takes its partition's entry, and that
+        // entry's instance goes with it; `vdb`'s stays.
+        remove(&mut reg, &a);
+        assert_eq!(A_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(B_DROPS.load(Ordering::SeqCst), 0);
+        assert!(reg.lookup(b"vdap1").is_none() && reg.holder(&ap).is_none());
+        let mut buf = [0u8; 512];
+        assert_eq!(ap.read(0, &mut buf), Err(BlockError::Gone));
+        assert!(reg.holder(&b).unwrap().downcast_ref::<Vol>().is_some());
+        b.read(0, &mut buf).unwrap();
+        // A new `vda` is a new entry: a new id, and no instance of its own.
+        let a2 = disk(&mut reg, &seq, b"vda", 64);
+        assert!(a2.id() != a.id() && a2.id() != b.id());
+        assert!(reg.holder(&a2).is_none());
+        remove(&mut reg, &b);
+        assert_eq!(B_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(A_DROPS.load(Ordering::SeqCst), 1);
+    }
+
     /// A cache that counts the writes it takes.
     struct CountingCache(std::sync::atomic::AtomicUsize);
 

@@ -533,22 +533,28 @@ const PROBE_DATA: &[u8] = b"vdb is its own volume";
 
 /// Write [`PROBE`], or read it back and compare.
 fn probe_file(write: bool) -> Result<(), &'static str> {
+    file_rw(PROBE, PROBE_DATA, write)
+}
+
+/// Write `data` to `path`, or read `path` back and compare it with `data`
+/// (at most 32 bytes).
+fn file_rw(path: &str, data: &[u8], write: bool) -> Result<(), &'static str> {
     use vibeos::fs::{O_CREAT, O_RDONLY, O_RDWR, O_TRUNC};
     let flags = if write {
         O_RDWR | O_CREAT | O_TRUNC
     } else {
         O_RDONLY
     };
-    let f = fid::open(PROBE, flags, 0o644).map_err(|_| "open probe")?;
+    let f = fid::open(path, flags, 0o644).map_err(|_| "open probe")?;
     let r = if write {
-        match fid::write(f, PROBE_DATA) {
-            Ok(n) if n == PROBE_DATA.len() => Ok(()),
+        match fid::write(f, data) {
+            Ok(n) if n == data.len() => Ok(()),
             _ => Err("write probe"),
         }
     } else {
         let mut buf = [0u8; 32];
         match fid::read(f, &mut buf) {
-            Ok(n) if buf.get(..n) == Some(PROBE_DATA) => Ok(()),
+            Ok(n) if buf.get(..n) == Some(data) => Ok(()),
             _ => Err("read probe back"),
         }
     };
@@ -602,21 +608,82 @@ fn mounted_checks() -> Result<(), &'static str> {
     }
 }
 
+/// Step 5's FAT volumes: one on `vda`'s second partition, one on `vdb`.
+const FAT_DEV_A: &str = "vdap2";
+const FAT_DEV_B: &str = "vdb";
+const FAT_MNT_A: &str = "/d2fa";
+const FAT_MNT_B: &str = "/d2fb";
+
+/// The FAT volume instance block device `name`'s entry holds, if any.
+fn fat_holder(name: &str) -> Option<Instance> {
+    crate::block::blockdev_init::lookup(name.as_bytes())
+        .and_then(|r| crate::block::blockdev_init::holder(&r))
+        .filter(|h| h.downcast_ref::<fat_init::FatVolume>().is_some())
+}
+
+/// Format block device `dev` as FAT and mount it on `at`.
+fn fat_mount(dev: &str, at: &str) -> Result<(), &'static str> {
+    crate::fs::ktest::fat_image_to(dev.as_bytes())?;
+    match file_init::mkdir(at.as_bytes(), 0o755) {
+        Ok(()) | Err(vibeos::fs::FsError::Exists) => {}
+        Err(_) => return Err("mkdir a FAT mountpoint"),
+    }
+    fat_init::mount_dev(dev, at, false).map_err(|_| "mount a FAT volume")
+}
+
+/// 5: one FAT module, two disks, two volume instances mounted at once:
+/// each device's entry holds its own, each file stays on its own volume,
+/// and each unmount drops its own device's instance alone.
+fn two_fat_volumes() -> Result<(), &'static str> {
+    fat_mount(FAT_DEV_A, FAT_MNT_A)?;
+    let r = fat_mount(FAT_DEV_B, FAT_MNT_B).and_then(|()| fat_pair_checks());
+    let ub = file_init::umount(FAT_MNT_B.as_bytes()).map_err(|_| "umount /d2fb");
+    let b_alone = fat_holder(FAT_DEV_B).is_none() && fat_holder(FAT_DEV_A).is_some();
+    let ua = file_init::umount(FAT_MNT_A.as_bytes()).map_err(|_| "umount /d2fa");
+    r.and(ub).and(ua)?;
+    if !b_alone {
+        return Err("umount /d2fb did not drop vdb's instance alone");
+    }
+    if fat_holder(FAT_DEV_A).is_some() {
+        return Err("vdap2 still holds a volume after umount");
+    }
+    Ok(())
+}
+
+fn fat_pair_checks() -> Result<(), &'static str> {
+    let (Some(a), Some(b)) = (fat_holder(FAT_DEV_A), fat_holder(FAT_DEV_B)) else {
+        return Err("a disk's entry does not hold a FAT volume");
+    };
+    if vibeos::dev::same_instance(&a, &b) {
+        return Err("two disks share one FAT volume instance");
+    }
+    file_rw("/d2fa/f", b"fat volume on vdap2", true)?;
+    file_rw("/d2fb/f", b"fat volume on vdb", true)?;
+    file_rw("/d2fa/f", b"fat volume on vdap2", false)?;
+    file_rw("/d2fb/f", b"fat volume on vdb", false)?;
+    file_rw("/d2fb/g", b"only on vdb", true)?;
+    if fid::stat_path("/d2fa/g").err() != Some(vibeos::fs::FsError::NotFound) {
+        return Err("/d2fa shows vdb's file");
+    }
+    Ok(())
+}
+
 /// The volume thread has finished.
 static TWO_DONE: AtomicBool = AtomicBool::new(false);
 /// Why the volume thread failed; `None` when it passed.
 static TWO_WHY: SpinMutex<Option<&'static str>> = SpinMutex::with_rank(None, RANK_DEVICE);
 
 fn two_volume_worker() {
-    *TWO_WHY.lock() = volume_on_vdb().err();
+    *TWO_WHY.lock() = volume_on_vdb().and_then(|()| two_fat_volumes()).err();
     // Release: pairs with the test's Acquire load of `TWO_DONE`.
     TWO_DONE.store(true, Ordering::Release);
 }
 
 /// ROADMAP §10.4 (D2): the two ktest disks are two driver instances, owned
 /// by their PCI entries, each with its own name, I/O, interrupts and
-/// failure, and a vibefs on vdb is a volume instance its block entry
-/// holds, on a thread with `spawn`'s default 16 KiB stack.
+/// failure; a vibefs on vdb is a volume instance its block entry holds,
+/// and so are two FAT volumes on vdap2 and vdb mounted at once, on a
+/// thread with `spawn`'s default 16 KiB stack.
 pub(crate) fn test_block_two_disk_instances() -> Outcome {
     if let Err(why) = two_instances()
         .and_then(|()| io_on_each())

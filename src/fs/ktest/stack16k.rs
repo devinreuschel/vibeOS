@@ -71,7 +71,7 @@ fn write_image() -> Result<(), &'static str> {
 /// Format a FAT32 image of 256 KiB, or of all of block device `dev` when
 /// it is smaller, and write it to `dev` from LBA 0 through the block cache
 /// a mount reads, then flush.
-pub(super) fn fat_image_to(dev: &[u8]) -> Result<(), &'static str> {
+pub(crate) fn fat_image_to(dev: &[u8]) -> Result<(), &'static str> {
     let r = blockdev_init::lookup(dev).ok_or("no block device")?;
     let cap = r.capacity_sectors().map_err(|_| "no capacity")?;
     let sectors = usize::try_from(cap).map_or(IMG_SECTORS, |c| c.min(IMG_SECTORS));

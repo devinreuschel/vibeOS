@@ -47,7 +47,7 @@ pub(crate) use shell::{
     test_shell_mount_same_path_64, test_shell_mount_umount, test_shell_rm_r_tree,
 };
 pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
-pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
+pub(crate) use stack16k::{fat_image_to, fat_vda_16k_stack, on_cache_write};
 pub(crate) use times::{test_fat_times_wall_clock, test_vibefs_rename_ctime};
 pub(crate) use umount::test_umount_consistent;
 pub(crate) use vdap1::test_vdap1_vfs_read;
