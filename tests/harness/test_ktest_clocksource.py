@@ -6,7 +6,7 @@ import unittest
 
 from tests.harness.frame import FRAME
 from tests.harness.harness import HarnessError, QemuConfig
-from tests.harness.run_ktest import check_clocksource, expected_clocksource
+from tests.harness.run_ktest import check_aarch64_s7, check_clocksource, expected_clocksource
 
 
 def _cfg(accel: str, *, hpet: bool = True, extra: tuple[str, ...] = ()) -> QemuConfig:
@@ -66,6 +66,37 @@ class CheckClocksource(unittest.TestCase):
     def test_accel_kvm_in_extra_wants_tsc(self) -> None:
         with self.assertRaisesRegex(HarnessError, "clocksource tsc"):
             check_clocksource(_lines("hpet"), _cfg("tcg", extra=("-accel", "kvm")))
+
+
+class CheckAarch64S7(unittest.TestCase):
+    def test_s7_markers_pass(self) -> None:
+        cfg = QemuConfig(iso="x.iso", arch="aarch64", gic_version="3")
+        check_aarch64_s7(
+            [
+                "vibeOS: dt: 42 nodes",
+                "vibeOS: vectors ok",
+                "vibeOS: time: timer el1 virt",
+                "vibeOS: time: cntfrq 24000000/s",
+                "vibeOS: gic: v3",
+                "vibeOS: time: clocksource cntvct",
+            ],
+            cfg,
+        )
+
+    def test_gic_version_must_match(self) -> None:
+        cfg = QemuConfig(iso="x.iso", arch="aarch64", gic_version="2")
+        with self.assertRaisesRegex(HarnessError, "gic: v2"):
+            check_aarch64_s7(
+                [
+                    "vibeOS: dt: 1 nodes",
+                    "vibeOS: vectors ok",
+                    "vibeOS: time: timer el1 virt",
+                    "vibeOS: time: cntfrq 1/s",
+                    "vibeOS: gic: v3",
+                    "vibeOS: time: clocksource cntvct",
+                ],
+                cfg,
+            )
 
 
 if __name__ == "__main__":

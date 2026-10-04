@@ -2,7 +2,10 @@
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
-use vibeos::irq::{IrqChip, IrqError, IrqSpecifier, ItsCommand, encode_free_sequence, gic};
+use vibeos::irq::{
+    ITS_FREE_WAIT_NS, IrqChip, IrqError, IrqSpecifier, ItsCommand, encode_free_sequence, gic,
+};
+use vibeos::log::Level;
 use vibeos::machine::PhysRange;
 use vibeos::paging::PhysAddr;
 
@@ -161,6 +164,13 @@ pub unsafe fn init() {
         Some(v) => v,
         None => crate::boot::halt_with("vibeOS: gic: dist map"),
     };
+    let cpu_or_redist = match kind {
+        Kind::V3 => PhysRange {
+            start: cpu_or_redist.start,
+            size: cpu_or_redist.size.max(0x2_0000),
+        },
+        Kind::V2 => cpu_or_redist,
+    };
     let cpu_va = match map_mmio(cpu_or_redist) {
         Some(v) => v,
         None => crate::boot::halt_with("vibeOS: gic: cpu/redist map"),
@@ -242,7 +252,14 @@ fn init_v3(g: &Gic) {
                 GICD_IPRIORITYR + u64::from(i),
                 u32::from(p) | u32::from(p) << 8 | u32::from(p) << 16 | u32::from(p) << 24,
             );
-            mmio64w(g.dist, GICD_IROUTER + u64::from(i) * 8, 0);
+            let mut j = 0u32;
+            while j < 4 {
+                let n = i.saturating_add(j);
+                if n < lines {
+                    mmio64w(g.dist, GICD_IROUTER + u64::from(n) * 8, 0);
+                }
+                j = j.saturating_add(1);
+            }
             i = i.saturating_add(4);
         }
         mmio32w(g.dist, GICD_CTLR, GICD_CTLR_ENABLE_G1A | GICD_CTLR_ARE_NS);
@@ -294,9 +311,11 @@ unsafe fn wake_redist(rd: u64) {
 unsafe fn enable_lpi(g: &Gic) {
     // Property table: 64K bytes (IDbits 16), pending: 64K bits / 8.
     let Some(prop) = alloc_pages(16) else {
+        crate::klog!(Level::Error, "vibeOS: gic: lpi prop table");
         return;
     };
     let Some(pend) = alloc_pages(8) else {
+        crate::klog!(Level::Error, "vibeOS: gic: lpi pend table");
         return;
     };
     let va = crate::paging_init::hhdm_offset().wrapping_add(prop);
@@ -355,12 +374,15 @@ static CMDQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(
 /// `its` is the mapped ITS; paging and the buddy are up.
 unsafe fn init_its(its: u64) {
     let Some(cmd) = alloc_pages(1) else {
+        crate::klog!(Level::Error, "vibeOS: gic: its cmdq");
         return;
     };
     if let Some(itt) = alloc_pages(1) {
         // Relaxed: ITT physical address, published once on the BSP.
         // Relaxed: pairs with nothing.
         ITT.store(itt, Ordering::Relaxed);
+    } else {
+        crate::klog!(Level::Error, "vibeOS: gic: its itt");
     }
     // Relaxed: command-queue PA; pairs with nothing.
     CMDQ.store(cmd, Ordering::Relaxed);
@@ -714,6 +736,14 @@ impl IrqChip for GicChip {
                     if c.dw[0] != 0 {
                         // SAFETY: ITS command queue. established here.
                         unsafe { its_cmd(its, c) };
+                    }
+                }
+                let hz = crate::arch::aarch64::timer::hz();
+                if hz != 0 {
+                    let ticks = ITS_FREE_WAIT_NS.saturating_mul(hz) / 1_000_000_000;
+                    let t0 = crate::arch::aarch64::cpu::cntvct();
+                    while crate::arch::aarch64::cpu::cntvct().wrapping_sub(t0) < ticks {
+                        core::hint::spin_loop();
                     }
                 }
             }

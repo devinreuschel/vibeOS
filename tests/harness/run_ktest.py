@@ -352,6 +352,33 @@ def check_boot_cpu(lines: list[str], cfg: QemuConfig) -> None:
     raise HarnessError(f"lapic_timer mode: want {want}, got {got}")
 
 
+def check_aarch64_s7(lines: list[str], cfg: QemuConfig) -> None:
+    """Issue #205: `dt` nodes, GIC, chosen timer, vectors, and `cntvct`."""
+    _require_line(
+        lines,
+        lambda ln: ln.startswith("vibeOS: dt: ") and ln.endswith(" nodes"),
+        "missing vibeOS: dt: <n> nodes",
+    )
+    want_gic = f"vibeOS: gic: v{cfg.gic_version}"
+    _require_line(lines, lambda ln: ln == want_gic, f"missing {want_gic}")
+    _require_line(
+        lines,
+        lambda ln: ln.startswith("vibeOS: time: timer "),
+        "missing vibeOS: time: timer",
+    )
+    _require_line(
+        lines,
+        lambda ln: ln.startswith("vibeOS: time: cntfrq ") and ln.endswith("/s"),
+        "missing vibeOS: time: cntfrq",
+    )
+    _require_line(lines, lambda ln: ln == "vibeOS: vectors ok", "missing vibeOS: vectors ok")
+    _require_line(
+        lines,
+        lambda ln: ln == f"{CLOCKSOURCE_PREFIX}cntvct",
+        f"missing {CLOCKSOURCE_PREFIX}cntvct",
+    )
+
+
 def _ktest_boot(
     cfg: QemuConfig,
     timeout: float,
@@ -398,6 +425,7 @@ def _ktest_boot(
     check_boot_cpu(klines, cfg)
     # virtio-blk and GPT stamp are x86 / Phase 11 S9; boot-CPU S7 has neither.
     if cfg.arch == "aarch64":
+        check_aarch64_s7(klines, cfg)
         return raw
     _require_line(klines, _block_name("vda"), "missing virtio-blk marker")
     if not parts:
