@@ -102,11 +102,12 @@ fn fsinfo_free_count_is_not_trusted() {
 
 /// A disk whose `fail`-th write or flush since the count was reset,
 /// counted from 1, fails with `Io` and changes nothing; every other one
-/// goes through.
+/// goes through. A read of sector `bad_read` fails with `Io`.
 struct FailDisk<'a> {
     inner: MemDisk<'a>,
     ops: u32,
     fail: u32,
+    bad_read: Option<u32>,
 }
 
 impl FailDisk<'_> {
@@ -129,6 +130,9 @@ impl Disk for FailDisk<'_> {
     }
 
     fn read(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), FatError> {
+        if self.bad_read == Some(lba) {
+            return Err(FatError::Io);
+        }
         self.inner.read(lba, buf)
     }
 
@@ -220,6 +224,7 @@ fn rename_failed_write_keeps_both_names() {
                     inner: MemDisk::new(&mut b, SEC as u32).unwrap(),
                     ops: 0,
                     fail: 0,
+                    bad_read: None,
                 };
                 let mut v = FatVol::mount(&mut d).unwrap();
                 let root = v.info.root_clus;
@@ -264,4 +269,39 @@ fn rename_failed_write_keeps_both_names() {
         }
         assert!(fail > 2, "the rename wrote");
     }
+}
+
+/// A directory whose cluster the disk fails to read: a lookup in it, a
+/// listing of it and its rmdir each return `Io`, never `NotFound`, the
+/// listing's end, or an empty directory removed, so `open` gets `EIO`
+/// (ROADMAP §10.5's errno box); once the sector reads, the name is there.
+#[test]
+fn dir_read_error_is_io() {
+    let mut b = fresh(IMG);
+    let (x, lba) = with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let x = v.create(d, root, b"X", true).unwrap();
+        let mut f = create_words(v, d, x.clu, b"IN.TXT");
+        v.write_ino(d, &mut f, true, 0, false, b"inside").unwrap();
+        v.sync(d).unwrap();
+        (x.clu, v.info.clus_lba(x.clu).unwrap())
+    });
+    let mut d = FailDisk {
+        inner: MemDisk::new(&mut b, SEC as u32).unwrap(),
+        ops: 0,
+        fail: 0,
+        bad_read: Some(lba),
+    };
+    let mut v = FatVol::mount(&mut d).unwrap();
+    let root = v.info.root_clus;
+    assert_eq!(v.lookup(&mut d, x, b"IN.TXT").unwrap_err(), FatError::Io);
+    let mut out = Node::EMPTY;
+    assert_eq!(v.readdir(&mut d, x, 0, &mut out).unwrap_err(), FatError::Io);
+    assert_eq!(
+        v.unlink(&mut d, root, b"X", true).unwrap_err(),
+        FatError::Io
+    );
+    d.bad_read = None;
+    assert_eq!(v.lookup(&mut d, x, b"IN.TXT").unwrap().size, 6);
+    assert_eq!(v.lookup(&mut d, root, b"X").unwrap().clu, x);
 }

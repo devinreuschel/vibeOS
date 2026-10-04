@@ -11,8 +11,10 @@ impl FatVol {
         let mut lfn = Lfn::EMPTY;
         loop {
             let mut ent = [0u8; ENT];
+            // A damaged chain ends the walk; a sector the disk fails to
+            // read is the caller's `Io`, never the directory's end.
             match self.read_dir_raw(d, dir, off, &mut ent) {
-                Err(FatError::Corrupt) | Err(FatError::Io) => return Ok(None),
+                Err(FatError::Corrupt) => return Ok(None),
                 Err(e) => return Err(e),
                 Ok(false) => return Ok(None),
                 Ok(true) => {}
