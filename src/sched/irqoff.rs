@@ -110,15 +110,26 @@ pub fn deliberate(reason: &'static str) -> DeliberateGuard {
 /// recorded error state (DESIGN §2.5): the boot goes on, and only the
 /// ktest runner's report prints.
 #[cfg(feature = "irqoff")]
-pub fn start(spawn: fn(&'static str, fn()) -> bool, sleep_ms: fn(u64)) {
+pub fn start(sleep_ms: fn(u64)) {
     crate::marker!("vibeOS: irqoff: on bound {} ns", BOUND_NS);
     // Release: pairs with the Acquire load in `reporter`, which runs only
-    // once the spawn below has read it.
+    // once `start_reporter`'s spawn, after this store, has read it.
     SLEEP_MS.store(
         sleep_ms as *mut (),
         vibeos::atomic::statics::Ordering::Release,
     );
-    if !spawn("irqoff", reporter) {
+}
+
+/// Spawn the reporter on `cpu`, once the APs are up: the highest online
+/// CPU, so the serial lines it writes every 100 ms, each with IF off for
+/// as long as the UART's port I/O takes (milliseconds a line under nested
+/// KVM), do not hold back CPU 0's interrupts, where the boot and the
+/// in-guest registry run. Placed before the APs started, it could only
+/// land on CPU 0, where its bursts delayed `lapic_timer_rearm`'s
+/// TSC-deadline fires by up to a line each (ROADMAP §10.2).
+#[cfg(feature = "irqoff")]
+pub fn start_reporter(spawn_on: fn(&'static str, fn(), u32) -> bool, cpu: u32) {
+    if !spawn_on("irqoff", reporter, cpu) {
         crate::marker!("vibeOS: irqoff: no reporter");
     }
 }
