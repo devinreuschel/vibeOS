@@ -77,6 +77,7 @@ struct BuddyFrames;
 unsafe impl FrameAlloc for BuddyFrames {
     fn alloc_frame(&mut self) -> Option<Frames> {
         let f = pmm_init::with_buddy(|b| b.alloc(0))?;
+        // Relaxed: a count; pairs with nothing.
         TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
         Some(f)
     }
@@ -134,6 +135,7 @@ static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
 
 /// Physmap high water from [`install`]. BARs above this go through ioremap.
 pub fn map_end() -> u64 {
+    // Relaxed: the BSP writes `MAP_END` before any reader; pairs with nothing.
     MAP_END.load(Ordering::Relaxed)
 }
 
@@ -141,6 +143,7 @@ pub fn map_end() -> u64 {
 /// from this root; `current_mapper` always walks it so later kernel maps
 /// do not land on a private user PML4 slot.
 pub fn kernel_cr3() -> u64 {
+    // Acquire: pairs with the Release store in `install`.
     KERNEL_CR3.load(Ordering::Acquire)
 }
 
@@ -167,6 +170,7 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
         let mut alloc = BuddyFrames;
         // PT is held, and only the kernel mapper takes table pages, so
         // a change in this count is this call's.
+        // Relaxed: a count; pairs with nothing.
         let tables0 = TABLE_PAGES.load(Ordering::Relaxed);
         // SAFETY: `Mapper::map_range`'s contract; the caller vouches that
         // `[phys, phys + len)` is device MMIO no cacheable alias touches
@@ -192,6 +196,7 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
             // after `pt` drops, before this fn returns; established here.
             unsafe { unmap_window_range(&mut pt, base_va, base_pa, round_len) };
             let foreign = matches!(e, MapError::AlreadyMapped | MapError::PageSizeMismatch);
+            // Relaxed: a count; pairs with nothing.
             let tables_left = TABLE_PAGES.load(Ordering::Relaxed) != tables0;
             if !foreign && !tables_left {
                 // PT has been held since `reserve`, so this is the latest
@@ -709,12 +714,14 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     enable_nx();
 
     // ---- 6. Install ----
+    // Release: pairs with the Acquire load in `kernel_cr3`.
     KERNEL_CR3.store(mapper.root().as_u64(), Ordering::Release);
     // SAFETY: the new root maps the kernel image, the physmap (so every
     // pointer computed as `phys + HHDM_BASE` stays valid, invariant I14),
     // the low identity window and the boot stack, so execution continues
     // across the switch; established here.
     unsafe { Arch::set_root(mapper.root()) };
+    // Relaxed: the BSP writes it before any reader; pairs with nothing.
     MAP_END.store(map_end, Ordering::Relaxed);
 
     PagingReport {

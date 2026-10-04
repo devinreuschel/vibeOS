@@ -122,6 +122,7 @@ pub unsafe fn init(rsdp_phys: u64) {
     }
 
     if patched {
+        // Release: pairs with the Acquire load in `acpi::ktest`.
         MMIO_UC.store(true, Ordering::Release);
         crate::marker!(marker::PAGING_MMIO_UC);
     }

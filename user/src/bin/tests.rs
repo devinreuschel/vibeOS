@@ -31,6 +31,7 @@ fn main(env: &Env) -> i32 {
         return exec_step(env);
     }
     let n = sys::write(1, tests::BANNER.as_ptr(), tests::BANNER.len()).unwrap_or(usize::MAX);
+    // Relaxed: a count; pairs with nothing.
     tests::BANNER_WRITE.store(n, Ordering::Relaxed);
     let mut t = Runner::new();
     t.run_suites(tests::SUITES);
