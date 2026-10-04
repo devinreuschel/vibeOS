@@ -1311,6 +1311,54 @@ def rule_release_one_image(tree: Tree) -> list[Problem]:
         out.append(Problem(RELEASE, 1, "release_one_image", msg))
     return out
 
+RELEASE_PROFILE_RE = re.compile(r"\bCARGO_PROFILE=release(?![\w-])")
+RELEASE_ARTIFACTS_RE = re.compile(r"\bmake release-artifacts OUT=(\S+)")
+
+
+def _make_recipe(makefile: str, target: str) -> str:
+    """The recipe lines of `target:` in `makefile`, joined; empty when none."""
+    m = re.search(rf"^{re.escape(target)}:(?!=).*\n((?:\t.*\n)*)", makefile, re.M)
+    return m.group(1) if m is not None else ""
+
+
+def rule_release_profile(tree: Tree) -> list[Problem]:
+    """L1268: v* releases ship the release profile. `make release-artifacts`
+    builds with `CARGO_PROFILE=release`, and release.yml's `build` job runs
+    it, then a `make CARGO_PROFILE=release test-e2e` step on that build, then
+    a `cmp` of the tested ISO with the published one."""
+    wf = tree.workflows.get(RELEASE)
+    if wf is None:
+        return []
+    out = []
+    recipe = [ln for ln in _make_recipe(tree.makefile, "release-artifacts").splitlines()
+              if not ln.strip().startswith("#")]
+    if not any(RELEASE_PROFILE_RE.search(ln) for ln in recipe):
+        msg = "`release-artifacts` does not build with CARGO_PROFILE=release"
+        out.append(Problem("Makefile", 1, "release_profile", msg))
+    build = next((j for j in _jobs(wf) if j.key == "build"), None)
+    runs = []
+    for step in _steps(build) if build is not None else []:
+        r = step.get("run")
+        runs.append(r.value or "" if r is not None else "")
+    line = build.line if build is not None else 1
+    art = next(((i, m) for i, r in enumerate(runs)
+                if (m := RELEASE_ARTIFACTS_RE.search(r)) is not None), None)
+    if art is None:
+        msg = "`build` runs no `make release-artifacts OUT=<dir>`"
+        return [*out, Problem(RELEASE, line, "release_profile", msg)]
+    at, m = art
+    tested = next((i for i in range(at + 1, len(runs))
+                   if "make CARGO_PROFILE=release test-e2e" in runs[i]), None)
+    if tested is None:
+        msg = "`build` tests no release-profile image after `make release-artifacts`"
+        return [*out, Problem(RELEASE, line, "release_profile", msg)]
+    cmp = f"cmp build/vibeos.iso {m.group(1).rstrip('/')}/vibeos.iso"
+    if not any(cmp in runs[i] for i in range(tested + 1, len(runs))):
+        msg = f"`build` runs no `{cmp}` after its tests"
+        out.append(Problem(RELEASE, line, "release_profile", msg))
+    return out
+
+
 SECRET_EXPR_RE = re.compile(r"\$\{\{[^}]*\bsecrets\s*[.\[]")
 # An upload path that holds a guest core, a memory dump or a QEMU command line.
 CORE_PATH_RE = re.compile(
@@ -1406,6 +1454,7 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_release_no_workflow_write,
     rule_release_privileged_jobs,
     rule_release_one_image,
+    rule_release_profile,
     rule_no_core_upload_with_secrets,
 ]
 
