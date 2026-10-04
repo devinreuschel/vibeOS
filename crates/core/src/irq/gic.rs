@@ -37,6 +37,15 @@ pub const fn lpi_config(priority: u8) -> u8 {
     (priority & 0xFC) | LPI_PROP_GROUP1 | LPI_PROP_ENABLE
 }
 
+/// Byte offset of `intid` in the LPI Configuration table: INTID minus
+/// [`LPI_BASE`]. The table starts at LPI 8192, not INTID 0 (IHI 0069).
+pub const fn lpi_prop_index(intid: u32) -> Option<usize> {
+    match intid.checked_sub(LPI_BASE) {
+        Some(i) => Some(i as usize),
+        None => None,
+    }
+}
+
 /// GICv2m MSI_TYPER and SETSPI_NS (ARM IHI 0069 / GICv2m).
 pub const V2M_MSI_TYPER: u32 = 0x008;
 pub const V2M_MSI_SETSPI_NS: u32 = 0x040;
@@ -143,6 +152,9 @@ mod tests {
         );
         assert_eq!(lpi_config(PRIO_DEVICE) & 1, 1);
         assert_eq!(lpi_config(PRIO_DEVICE) & 2, 2);
+        assert_eq!(lpi_prop_index(LPI_BASE), Some(0));
+        assert_eq!(lpi_prop_index(LPI_BASE + 3), Some(3));
+        assert_eq!(lpi_prop_index(LPI_BASE - 1), None);
         const {
             assert!(PRIO_NMI == 0);
             assert!(PRIO_NMI < PRIO_IPI_TICK);

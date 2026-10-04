@@ -323,20 +323,35 @@ pub fn init() {
         // Only a blank vda is stamped (F003); any other is left as it is.
         let _stamped = stamp_vda_gpt(&vda).is_ok();
     }
-    let mut all: [Option<BlockRef>; MAX_BLOCKDEVS] = [const { None }; MAX_BLOCKDEVS];
-    let n = blockdev_init::snapshot(&mut all);
-    for d in all.iter().take(n).flatten() {
-        if d.parent().is_none() {
-            // A disk with no table has no children: recorded at debug
-            // level, since most disks have none. Each entry
-            // `register_table` drops is logged there.
-            if let Err(e) = scan(d) {
-                crate::klog!(
-                    vibeos::log::Level::Debug,
-                    "vibeOS: part: {}: no table: {}",
-                    d.name().as_str(),
-                    e.as_str()
-                );
+    // aarch64 boot-CPU S7 (#205): virtio-blk I/O waits on MSI (ITS / GICv2m).
+    // That device path is Phase 11 S9 (#207). Scan only the ramdisk here.
+    #[cfg(target_arch = "aarch64")]
+    if let Some(ram0) = blockdev_init::lookup(b"ram0")
+        && let Err(e) = scan(&ram0)
+    {
+        crate::klog!(
+            vibeos::log::Level::Debug,
+            "vibeOS: part: ram0: no table: {}",
+            e.as_str()
+        );
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut all: [Option<BlockRef>; MAX_BLOCKDEVS] = [const { None }; MAX_BLOCKDEVS];
+        let n = blockdev_init::snapshot(&mut all);
+        for d in all.iter().take(n).flatten() {
+            if d.parent().is_none() {
+                // A disk with no table has no children: recorded at debug
+                // level, since most disks have none. Each entry
+                // `register_table` drops is logged there.
+                if let Err(e) = scan(d) {
+                    crate::klog!(
+                        vibeos::log::Level::Debug,
+                        "vibeOS: part: {}: no table: {}",
+                        d.name().as_str(),
+                        e.as_str()
+                    );
+                }
             }
         }
     }

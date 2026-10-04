@@ -78,12 +78,16 @@ impl ItsCommand {
             return Err(ItsError::BadItt);
         }
         let mut cmd = Self::empty(ITS_CMD_MAPD).with_device(device_id);
-        // DW1[51:8] = ITT_addr[51:8]; DW1[4:0] = Size.
+        // Size in DW1[4:0]. ITT_addr[51:8] and V in DW2: QEMU's ITS and
+        // KVM vgic-its read them from that doubleword.
         if let Some(dw1) = cmd.dw.get_mut(1) {
-            *dw1 = (itt_addr & (((1u64 << 52) - 1) & !0xFF)) | u64::from(size);
+            *dw1 = u64::from(size);
         }
-        if valid && let Some(dw2) = cmd.dw.get_mut(2) {
-            *dw2 |= 1u64 << 63;
+        if let Some(dw2) = cmd.dw.get_mut(2) {
+            *dw2 = itt_addr & (((1u64 << 52) - 1) & !0xFF);
+            if valid {
+                *dw2 |= 1u64 << 63;
+            }
         }
         Ok(cmd)
     }
@@ -181,14 +185,14 @@ mod tests {
         // IHI 0069G field layout, checked as literals.
         let mapd = ItsCommand::mapd(1, 0x1000, 7, true).unwrap();
         assert_eq!(mapd.dw[0], (1u64 << 32) | 0x08);
-        assert_eq!(mapd.dw[1], 0x1000 | 7);
-        assert_eq!(mapd.dw[2], 1u64 << 63);
+        assert_eq!(mapd.dw[1], 7);
+        assert_eq!(mapd.dw[2], 0x1000 | (1u64 << 63));
         assert_eq!(mapd.dw[3], 0);
 
         let mapd_inv = ItsCommand::mapd(0xA, 0x20000, 0, false).unwrap();
         assert_eq!(mapd_inv.dw[0], (0xAu64 << 32) | 0x08);
-        assert_eq!(mapd_inv.dw[1], 0x20000);
-        assert_eq!(mapd_inv.dw[2], 0);
+        assert_eq!(mapd_inv.dw[1], 0);
+        assert_eq!(mapd_inv.dw[2], 0x20000);
 
         assert_eq!(ItsCommand::mapd(0, 0x80, 0, true), Err(ItsError::BadItt));
         assert_eq!(

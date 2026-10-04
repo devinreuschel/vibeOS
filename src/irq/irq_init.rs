@@ -977,6 +977,7 @@ pub fn enable_msix(dev: &Device, table_index: u16, irq: IrqId) -> Result<(), Irq
         );
     }
     pci::set_msix_enable(&mut hw, dev.addr, cap_off, true, false);
+    chip.unmask(hwirq);
     if let Some(i) = irq.slot() {
         with_irq(|s| {
             if let Some(r) = s.routes.get_mut(i) {

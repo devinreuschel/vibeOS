@@ -1,6 +1,6 @@
 //! GICv2 / GICv3 + ITS / GICv2m as `IrqChip`s (DESIGN §5.4, §11.5).
 
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::irq::{
     ITS_FREE_WAIT_NS, IrqChip, IrqError, IrqSpecifier, ItsCommand, encode_free_sequence, gic,
@@ -54,6 +54,8 @@ const GITS_CWRITER: u64 = 0x0088;
 const GITS_CREADR: u64 = 0x0090;
 const GITS_BASER: u64 = 0x0100;
 const GITS_CTLR_ENABLED: u32 = 1;
+/// GITS_CREADR bit 0: the ITS stalled on the command at this offset.
+const GITS_CREADR_STALLED: u64 = 1;
 const GICR_INVALLR: u64 = 0x00B0;
 const GICR_SYNCR: u64 = 0x00C0;
 /// GITS_CBASER / GITS_BASER physical address (IHI 0069G bits [51:12]).
@@ -330,7 +332,9 @@ unsafe fn enable_lpi(g: &Gic) {
     unsafe {
         let mut i = 0u32;
         while i < LPI_SLOTS as u32 {
-            let off = (LPI_BASE + i) as usize;
+            let Some(off) = gic::lpi_prop_index(LPI_BASE + i) else {
+                break;
+            };
             let p = (va as *mut u8).wrapping_add(off);
             p.write(gic::lpi_config(gic::PRIO_DEVICE));
             i = i.saturating_add(1);
@@ -371,8 +375,25 @@ fn alloc_pages(pages: usize) -> Option<u64> {
     Some(pa)
 }
 
-static ITT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static CMDQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+const ITS_DEV_MAX: usize = 16;
+const ITS_DEV_EMPTY: u32 = u32::MAX;
+
+struct ItsDev {
+    id: AtomicU32,
+    itt: AtomicU64,
+    next_event: AtomicU32,
+}
+
+static ITS_DEVS: [ItsDev; ITS_DEV_MAX] = [const {
+    ItsDev {
+        id: AtomicU32::new(ITS_DEV_EMPTY),
+        itt: AtomicU64::new(0),
+        next_event: AtomicU32::new(0),
+    }
+}; ITS_DEV_MAX];
+/// EventID programmed for each LPI slot, for `compose_msi`.
+static LPI_EVENT: [AtomicU32; LPI_SLOTS] = [const { AtomicU32::new(0) }; LPI_SLOTS];
+static CMDQ: AtomicU64 = AtomicU64::new(0);
 
 /// Allocate ITS tables, the command queue, and enable the ITS.
 ///
@@ -383,13 +404,6 @@ unsafe fn init_its(its: u64) {
         crate::klog!(Level::Error, "vibeOS: gic: its cmdq");
         return;
     };
-    if let Some(itt) = alloc_pages(1) {
-        // Relaxed: ITT physical address, published once on the BSP.
-        // Relaxed: pairs with nothing.
-        ITT.store(itt, Ordering::Relaxed);
-    } else {
-        crate::klog!(Level::Error, "vibeOS: gic: its itt");
-    }
     // Relaxed: command-queue PA; pairs with nothing.
     CMDQ.store(cmd, Ordering::Relaxed);
     // SAFETY: ITS tables and command queue, never freed. established here.
@@ -433,6 +447,48 @@ unsafe fn init_its_basers(its: u64) {
     }
 }
 
+/// One ITT page per DeviceID. EventIDs are per-device (ITS MSI data).
+fn claim_its_dev(device_id: u32) -> Option<&'static ItsDev> {
+    let mut i = 0usize;
+    while i < ITS_DEV_MAX {
+        let Some(d) = ITS_DEVS.get(i) else {
+            break;
+        };
+        // Relaxed: pairs with nothing; DeviceID is written once.
+        if d.id.load(Ordering::Relaxed) == device_id {
+            return Some(d);
+        }
+        i = i.saturating_add(1);
+    }
+    let itt = alloc_pages(1)?;
+    i = 0;
+    while i < ITS_DEV_MAX {
+        let Some(d) = ITS_DEVS.get(i) else {
+            break;
+        };
+        // AcqRel: publishes DeviceID; Acquire failure pairs with another claimer's AcqRel.
+        if d.id
+            .compare_exchange(
+                ITS_DEV_EMPTY,
+                device_id,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            // Release: pairs with the Acquire ITT load in `map_its_event`.
+            d.itt.store(itt, Ordering::Release);
+            return Some(d);
+        }
+        // Relaxed: pairs with nothing; another CPU claimed this DeviceID.
+        if d.id.load(Ordering::Relaxed) == device_id {
+            return Some(d);
+        }
+        i = i.saturating_add(1);
+    }
+    None
+}
+
 /// Bind `hwirq` (an LPI) as EventID on `device_id`.
 pub fn map_its_event(device_id: u32, hwirq: u32) {
     let Some(g) = gic() else {
@@ -444,15 +500,28 @@ pub fn map_its_event(device_id: u32, hwirq: u32) {
     if !gic::is_lpi(hwirq) {
         return;
     }
-    // Relaxed: pairs with nothing.
-    let itt = ITT.load(Ordering::Relaxed);
+    let Some(dev) = claim_its_dev(device_id) else {
+        crate::klog!(Level::Error, "vibeOS: gic: its itt");
+        return;
+    };
+    // Acquire: pairs with the Release store of `itt` in `claim_its_dev`.
+    let itt = dev.itt.load(Ordering::Acquire);
     if itt == 0 {
+        crate::klog!(Level::Error, "vibeOS: gic: its itt");
         return;
     }
-    let event = hwirq - LPI_BASE;
+    // Relaxed: per-device EventID bump; pairs with nothing.
+    let event = dev.next_event.fetch_add(1, Ordering::Relaxed);
+    let slot = (hwirq - LPI_BASE) as usize;
+    if let Some(e) = LPI_EVENT.get(slot) {
+        // Release: pairs with the Acquire load in `compose_msi`.
+        e.store(event, Ordering::Release);
+    }
     // SAFETY: ITS command queue the boot CPU owns. established here.
     unsafe {
-        if let Ok(mapd) = ItsCommand::mapd(device_id, itt, 7, true) {
+        if event == 0
+            && let Ok(mapd) = ItsCommand::mapd(device_id, itt, 3, true)
+        {
             its_cmd(its, mapd);
         }
         its_cmd(its, ItsCommand::mapti(device_id, event, hwirq, 0));
@@ -467,7 +536,12 @@ pub fn map_its_event(device_id: u32, hwirq: u32) {
 unsafe fn its_cmd(its: u64, cmd: ItsCommand) {
     // SAFETY: ITS command queue the boot CPU owns. established here.
     unsafe {
-        let wr = mmio64(its, GITS_CWRITER);
+        let rd0 = mmio64(its, GITS_CREADR);
+        if rd0 & GITS_CREADR_STALLED != 0 {
+            crate::klog!(Level::Error, "vibeOS: gic: its stalled rd={rd0:#x}");
+            return;
+        }
+        let wr = mmio64(its, GITS_CWRITER) & !GITS_CREADR_STALLED;
         // Relaxed: pairs with nothing.
         let base = CMDQ.load(Ordering::Relaxed);
         let va = crate::paging_init::hhdm_offset()
@@ -479,11 +553,23 @@ unsafe fn its_cmd(its: u64, cmd: ItsCommand) {
         mmio64w(its, GITS_CWRITER, next);
         let mut n = 100_000u32;
         while n > 0 {
-            if mmio64(its, GITS_CREADR) == next {
+            let rd = mmio64(its, GITS_CREADR);
+            if rd & GITS_CREADR_STALLED != 0 {
+                crate::klog!(Level::Error, "vibeOS: gic: its stalled rd={rd:#x}");
+                return;
+            }
+            if (rd & !GITS_CREADR_STALLED) == next {
                 break;
             }
             n -= 1;
             core::hint::spin_loop();
+        }
+        if n == 0 {
+            crate::klog!(
+                Level::Error,
+                "vibeOS: gic: its creadr timeout wr={next:#x} rd={:#x}",
+                mmio64(its, GITS_CREADR)
+            );
         }
     }
 }
@@ -606,6 +692,10 @@ pub fn send_sgi(intid: u32) {
 }
 
 fn enable_intid(g: &Gic, intid: u32, on: bool) {
+    // LPIs are enabled in the property table, not GICD_ISENABLER (IHI 0069).
+    if gic::is_lpi(intid) {
+        return;
+    }
     let bit = 1u32 << (intid % 32);
     let off = if on { GICD_ISENABLER } else { GICD_ICENABLER };
     if g.kind == Kind::V3 && intid < 32 {
@@ -712,7 +802,12 @@ impl IrqChip for GicChip {
             let Some(its) = g.its else {
                 return Err(IrqError::NoRoute);
             };
-            let event = hwirq - LPI_BASE;
+            let slot = (hwirq - LPI_BASE) as usize;
+            // Acquire: pairs with the Release store in `map_its_event`.
+            let event = LPI_EVENT
+                .get(slot)
+                .map(|e| e.load(Ordering::Acquire))
+                .unwrap_or(0);
             let _ = its;
             let phys = machine_init::info()
                 .and_then(|d| d.gic_its())
