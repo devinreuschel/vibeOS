@@ -71,6 +71,15 @@ arch = "both"
 source = "kernel"
 section = "§11.1"
 
+# §11.5 Devices
+
+[[marker]]
+text = "vibeOS: dt: <n> nodes"
+kind = "diagnostic"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
 [[marker]]
 text = "vibeOS: limine: memmap missing"
 kind = "failure"

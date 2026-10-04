@@ -51,6 +51,7 @@ pub mod kerror;
 pub mod ktest;
 pub mod limits;
 pub mod log;
+pub mod machine;
 pub mod marker;
 pub mod mm;
 pub mod proc;

@@ -33,6 +33,22 @@ Limine hands over the RSDP physical address. From there:
 | FADT | `FACP` | `iapc_boot_arch` at offset 109; bit 0 is `LEGACY_DEVICES` (not 8259 presence, §5.5) |
 | MCFG | `MCFG` | PCIe ECAM base. ECAM reaches extended config space (offsets `0x100` and up); below that offset, `0xCF8`/`0xCFC` reaches every bus ([section 9.2](PITFALLS.md#92-memory)) |
 
+Device-tree nodes that fill the same [`MachineDesc`](PORTABILITY.md#111-the-seam) (ROADMAP §11.5). RAM stays on the Limine memory map. `/chosen` is ignored.
+
+| Node / property | Compatible / path | Contents |
+|-----------------|-------------------|----------|
+| CPU | `device_type = "cpu"` under `/cpus` | MPIDR in `reg`; startable if `status` is okay or absent |
+| `/psci` | `arm,psci-1.0`, `arm,psci-0.2` | `method` (`hvc` or `smc`) is the enable method |
+| GIC | `arm,gic-v3`, `arm,gic-v2` / `arm,gic-400` | Distributor and redistributor or CPU-interface `reg` |
+| ITS | `arm,gic-v3-its` | MMIO `reg` and phandle (DeviceIDs come from `msi-map` / `msi-parent`) |
+| Timer | `arm,armv8-timer` | `interrupts` IDs in tree order (4 or 5) |
+| Console | `arm,pl011` | The one `/aliases` `serial0` names, else the first okay node |
+| RTC | `arm,pl031` | MMIO `reg` |
+| PCI host | `pci-host-ecam-generic` | ECAM `reg` (first-bus config base), `bus-range`, `interrupt-map`, `msi-map` |
+| virtio-mmio | `virtio,mmio` | Each transport's `reg` and `dma-coherent` |
+| fw-cfg | `qemu,fw-cfg-mmio` | MMIO `reg` |
+| Reserved | `/reserved-memory` children and the FDT memreserve block | Physical ranges that never enter the buddy |
+
 MADT entry types in use:
 
 | Type | Meaning |
@@ -45,9 +61,9 @@ MADT entry types in use:
 A processor is startable if flags bit 0 is set. Bit 1 alone means it could come online later, which is
 hotplug territory and out of scope.
 
-Planned (ROADMAP §11.5): what these tables describe fills the portable machine description
-([§11.1](PORTABILITY.md#111-the-seam)), which SMP bring-up, the IRQ layer, and the device registry read, and
-aarch64's device tree fills the same description.
+What these tables describe fills the portable machine description
+([§11.1](PORTABILITY.md#111-the-seam)), which SMP bring-up, the IRQ layer, and the device registry read.
+The device tree fills the same description.
 
 ## 7.2 LAPIC
 

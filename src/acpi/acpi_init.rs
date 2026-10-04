@@ -11,6 +11,7 @@ use vibeos::marker;
 use vibeos::paging::{self, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
 use crate::cell::BootCell;
+use crate::machine_init;
 use crate::paging_init;
 
 static INFO: BootCell<AcpiInfo> = BootCell::new();
@@ -103,6 +104,9 @@ fn uc_mmio(phys: u64, len: u64) -> bool {
 /// # Safety
 /// After `paging_init::install`, single-CPU, IRQs off.
 pub unsafe fn init(rsdp_phys: u64) {
+    if rsdp_phys == 0 {
+        return;
+    }
     let mut info = match acpi::walk(&HhdmPhys, rsdp_phys) {
         Ok(i) => i,
         Err(e) => halt_acpi(e),
@@ -136,6 +140,7 @@ pub unsafe fn init(rsdp_phys: u64) {
         let cap = unsafe { va.read_volatile() };
         hpet.period_fs = (cap >> 32) as u32;
     }
+    machine_init::set_from_acpi(&info);
     // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
     // the one write, on the BSP before SMP (`acpi::acpi_init::init`'s
     // `# Safety`), and no reader runs until it returns.

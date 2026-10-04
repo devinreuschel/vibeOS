@@ -9,6 +9,7 @@
 //!   - each framebuffer and each boot module
 //!   - anything not marked `USABLE`, including bootloader- and
 //!     ACPI-reclaimable
+//!   - `/reserved-memory` and the FDT memreserve block (`MachineDesc`)
 //!   - anything above the 8 GiB physmap cap
 //!
 //! `vibeos::pmm::clip_usable` subtracts the first four from every USABLE
@@ -55,6 +56,7 @@ pub unsafe fn init(info: &BootInfo) -> PmmStats {
                     .map(|fb| fb.phys..fb.phys.saturating_add(fb.size)),
             )
             .chain(info.modules())
+            .chain(crate::machine_init::reserved_ranges())
     };
 
     // Free-list nodes, page tables, and heap pages are all reached through

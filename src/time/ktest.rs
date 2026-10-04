@@ -10,9 +10,9 @@ use vibeos::time::{
 
 use vibeos::apic::TimerMode;
 
-use crate::acpi_init;
 use crate::apic_init;
 use crate::ktest::{Outcome, Test, test};
+use crate::machine_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init::{self, STATE};
@@ -26,7 +26,7 @@ pub(crate) fn measure_pit_ch2() -> Option<u64> {
 /// Fresh HPET window. ktest compares this to PIT under the same SMP load;
 /// boot `tsc_per_ms` was sampled before APs came up.
 pub(crate) fn measure_hpet() -> Option<u64> {
-    let hpet = acpi_init::info()?.hpet?;
+    let hpet = machine_init::info()?.hpet_info()?;
     time_init::calibrate_hpet(&hpet, STATE.try_get().is_some_and(|s| s.use_rdtscp))
 }
 
@@ -641,7 +641,7 @@ pub(crate) fn test_now_us_planted_tear() -> Outcome {
 /// sample. Without an invariant TSC (TCG) the band means nothing, so it
 /// skips; the nightly KVM leg runs it.
 pub(crate) fn test_tsc_calib_source() -> Outcome {
-    let present = acpi_init::info().is_some_and(|i| i.hpet_present());
+    let present = machine_init::info().is_some_and(|d| d.hpet_info().is_some());
     let k = time_init::tsc_per_ms();
     match source() {
         CalibSource::Hpet => {

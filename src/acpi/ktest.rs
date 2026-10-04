@@ -6,6 +6,7 @@ use vibeos::paging::{PageFlags, VirtAddr};
 
 use crate::acpi_init;
 use crate::ktest::{Outcome, Test, test};
+use crate::machine_init;
 use crate::paging_init;
 
 /// Whether `acpi_init::init` UC-patched at least one MMIO leaf.
@@ -62,6 +63,24 @@ pub(crate) fn test_acpi_discovery() -> Outcome {
     }
     if hpet.period_fs == 0 {
         return Outcome::Fail("hpet period unread");
+    }
+    let Some(desc) = machine_init::info() else {
+        return Outcome::Fail("no machine desc");
+    };
+    if desc.cpu_count() != info.cpu_count() {
+        return Outcome::Fail("machine desc cpu count");
+    }
+    if desc.lapic_base() != Some(madt.lapic_base) {
+        return Outcome::Fail("machine desc lapic");
+    }
+    if desc.ioapic_count() != info.ioapic_count() {
+        return Outcome::Fail("machine desc ioapic count");
+    }
+    if desc
+        .hpet_info()
+        .is_none_or(|h| h.base != hpet.base || h.period_fs != hpet.period_fs)
+    {
+        return Outcome::Fail("machine desc hpet");
     }
     Outcome::Ok
 }

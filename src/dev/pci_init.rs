@@ -19,11 +19,11 @@ use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::{IOREMAP_BASE, IOREMAP_LEN, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
-use crate::acpi_init;
 use crate::arch::current::InterruptGuard;
 use crate::boot;
 use crate::cell::BootCell;
 use crate::fb_init;
+use crate::machine_init;
 use crate::paging_init;
 use crate::sync_init::SpinMutex;
 #[cfg(target_arch = "x86_64")]
@@ -365,11 +365,11 @@ static SCAN: BootCell<Scan> = BootCell::new();
 /// Once, on the BSP, before `smp_init::init` starts an AP
 /// (`BootCell::set`'s contract).
 pub unsafe fn scan() {
-    if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
+    if let Some(h) = machine_init::info().and_then(|d| d.pci_hosts().first()) {
         with_ecam(|e| {
-            e.base = m.ecam_base;
-            e.start = m.start_bus;
-            e.end = m.end_bus;
+            e.base = h.ecam_base;
+            e.start = h.first_bus;
+            e.end = h.last_bus;
         });
     }
     let mut found = [FuncInfo::empty(); MAX_SCAN];
@@ -388,12 +388,12 @@ pub unsafe fn scan() {
 /// passes), emit `pci: N devices`. Maps no BAR: each driver maps what it
 /// claims.
 pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
-    if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
+    if let Some(h) = machine_init::info().and_then(|d| d.pci_hosts().first()) {
         crate::marker!(
             "vibeOS: pci: ecam {:#x} buses {}-{}",
-            m.ecam_base,
-            m.start_bus,
-            m.end_bus
+            h.ecam_base,
+            h.first_bus,
+            h.last_bus
         );
     }
 
