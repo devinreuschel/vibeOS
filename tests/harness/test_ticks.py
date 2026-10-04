@@ -956,6 +956,20 @@ class TestErrata(RepoCase):
         self.commit("errata", None, self.errata(sha, f"suite_row -- {PREFIX}", self.WAS))
         self.assertErrors(self.run_check(), "erratum names no `Proves:` line")
 
+    def test_erratum_supplies_a_missing_proves_line(self) -> None:
+        sha = self.commit("t", "delta box")
+        self.assertErrors(self.run_check(), "ticked with no")
+        fixed = f"host_one (existing: a host test) -- {PREFIX}"
+        self.commit("errata", None, self.errata(sha, "", fixed))
+        r = self.run_check()
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any("erratum: Proves: host_one" in n for n in r.notes), r.notes)
+
+    def test_erratum_supplying_a_line_when_one_exists_fails(self) -> None:
+        sha = self.commit(f"t\n\nProves: {self.WAS}", "delta box")
+        self.commit("errata", None, self.errata(sha, "", self.WAS))
+        self.assertErrors(self.run_check(), "already has one")
+
     def test_erratum_for_a_commit_outside_the_pull_request_is_ignored(self) -> None:
         self.commit("errata", None, self.errata(self.base, self.WAS, self.WAS))
         self.assertEqual(self.run_check().errors, [])
@@ -980,6 +994,9 @@ class TestErrata(RepoCase):
         rows, errors = check_ticks.load_errata(
             f'[[erratum]]\ncommit = "{full}"\nwas = " a -- b "\nproves = "c -- b"\nwhy = "w"\n')
         self.assertEqual((rows, errors), ({(full, "a -- b"): ("c -- b", "w")}, []))
+        rows, errors = check_ticks.load_errata(
+            f'[[erratum]]\ncommit = "{full}"\nwas = ""\nproves = "c -- b"\nwhy = "w"\n')
+        self.assertEqual((rows, errors), ({(full, ""): ("c -- b", "w")}, []))
 
     def test_the_tree_errata_file_parses(self) -> None:
         text = (gatelib.ROOT / check_ticks.ERRATA_PATH).read_text()
@@ -987,6 +1004,8 @@ class TestErrata(RepoCase):
         self.assertEqual(errors, [])
         for (sha, was), (proves, _) in rows.items():
             for line in (was, proves):
+                if not line:
+                    continue
                 self.assertIsInstance(check_ticks.parse_proves(line), check_ticks.ProvesLine,
                                       (sha, line))
 

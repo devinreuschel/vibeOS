@@ -3,12 +3,19 @@
 # A commit's message cannot change once it is pushed. scripts/check_ticks.py
 # reads each row's `proves` in place of the line `was` of commit `commit`, lists
 # the row in its report, and fails a row whose commit is in the pull request but
-# carries no such line. `was` and `proves` are the text after `Proves: `, exactly
-# as the message holds it; `commit` is the full sha. A row is a gate input
-# (tests/gates/inputs.toml), so adding one needs a `Gate-change:` trailer.
+# does not match that `was`. `was` and `proves` are the text after `Proves: `,
+# exactly as the message holds it; `was` is empty when the commit has no line.
+# `commit` is the full sha. A row is a gate input (tests/gates/inputs.toml), so
+# adding one needs a `Gate-change:` trailer.
 
 [[erratum]]
 commit = "e202ed1f5744bbe2dec28af640d137f826bc294d"
 was = "tsc_calib_source (existing: checks the one BSP calibration every CPU reads) -- `tsc_per_ms` calibrated once on the BSP"
 proves = "src/time/time_init.rs::tsc_per_ms (existing: every CPU reads the one calibration from time_init's STATE, a BootCell written once on the BSP before SMP) -- `tsc_per_ms` calibrated once on the BSP"
 why = "tsc_calib_source skips on every per-push tier (TCG has no invariant TSC; tests/harness/skips.toml), so no results file shows it passed; the box's text, after P10-S86 dropped the PerCpu copy, is the reader's shape"
+
+[[erratum]]
+commit = "407b413c800a29acbaa7fbf4fd487219ede9f9b2"
+was = ""
+proves = "scripts/check_orderings.py -- `scripts/check_orderings.py` in `make check`"
+why = "S2 (#200) squash dropped the Proves line; the box names this script"
