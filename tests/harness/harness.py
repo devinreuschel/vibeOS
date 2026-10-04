@@ -1069,23 +1069,26 @@ def ktest_devices(
     readonly: bool = False,
     blkdebug: str | None = None,
     arch: str = "x86_64",
+    mmio_disk: str | None = None,
 ) -> tuple[str, ...]:
     """The in-guest registry's devices: `disk` is `vda`, and each of
     `extra_disks` a further virtio-blk disk after it. A second virtio-rng
     sits at `00:1d.0`, and a virtio-blk whose probe fails at `00:1e.0`.
     `readonly` and `blkdebug` go to `virtio_blk_args` for `vda`.
-    aarch64 has no `isa-debug-exit`; pass is PSCI `SYSTEM_OFF`."""
+    aarch64 has no `isa-debug-exit`; pass is PSCI `SYSTEM_OFF`.
+    `mmio_disk` is the virtio-mmio `virtio-blk-device` image (F047);
+    it must be a different file from `disk` (QEMU write-locks the image)."""
     isa = (
         ()
         if arch == "aarch64"
         else ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
     )
     mmio_blk: tuple[str, ...] = ()
-    if arch == "aarch64":
+    if arch == "aarch64" and mmio_disk is not None:
         # virtio-mmio F047: QueueNotify takes the virtqueue index.
         mmio_blk = (
             "-drive",
-            f"file={disk},if=none,id=vibehdmmio,format=raw,cache=writeback",
+            f"file={mmio_disk},if=none,id=vibehdmmio,format=raw,cache=writeback",
             "-device",
             f"virtio-blk-device,drive=vibehdmmio,num-queues={smp}",
         )

@@ -2373,8 +2373,13 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("e1000e", args)
         self.assertIn("virtio-rng-pci", blob)
         self.assertIn("virtio-blk-pci", blob)
-        self.assertIn("virtio-blk-device", blob)
+        self.assertNotIn("virtio-blk-device", blob)
         self.assertIn("discard=unmap", blob)
+        mmio = ktest_devices("/tmp/disk.img", 4, arch="aarch64", mmio_disk="/tmp/mmio.img")
+        mmio_blob = " ".join(mmio)
+        self.assertIn("virtio-blk-device", mmio_blob)
+        self.assertIn("/tmp/mmio.img", mmio_blob)
+        self.assertIn("num-queues=4", mmio_blob)
 
     def test_ktest_devices_probe_functions(self) -> None:
         from tests.harness.harness import ktest_devices
