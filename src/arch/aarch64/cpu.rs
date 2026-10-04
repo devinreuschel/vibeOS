@@ -257,9 +257,11 @@ impl InterruptGuard {
 
 impl Drop for InterruptGuard {
     fn drop(&mut self) {
+        // Nest tracks live guards, including those entered with IRQs
+        // already off (x86's `InterruptGuard::drop`).
+        run_hook(&NEST_LEAVE);
         if self.restore {
             crate::sched::irqoff::on();
-            run_hook(&NEST_LEAVE);
             irq_enable();
         }
     }
