@@ -36,6 +36,7 @@ pub fn set_spin_poll(f: fn()) {
 /// Whether the spin-poll hook is set (`sync::ktest`).
 #[cfg(feature = "kernel_tests")]
 pub(super) fn spin_poll_installed() -> bool {
+    // Acquire: pairs with the Release store in `set_spin_poll`.
     !SPIN_POLL.load(Ordering::Acquire).is_null()
 }
 
@@ -219,6 +220,7 @@ pub(super) static SPINS: [AtomicU64; SPIN_RANKS] = [const { AtomicU64::new(0) };
 fn record_spin(rank: u8) {
     let i = rank as usize;
     if i < SPIN_RANKS {
+        // Relaxed: a statistic `sync::ktest` reads; pairs with nothing.
         SPINS[i].fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -248,7 +250,7 @@ fn held_slot() -> Option<&'static AtomicU64> {
 pub fn held() -> Held {
     let _irq = InterruptGuard::enter();
     match held_slot() {
-        // Relaxed: only this CPU writes its slot.
+        // Relaxed: only this CPU writes its slot; pairs with nothing.
         Some(h) => Held::from_raw(h.load(Ordering::Relaxed)),
         None => Held::EMPTY,
     }
@@ -413,7 +415,7 @@ pub(crate) fn may_take_sched() -> bool {
     let Some(slot) = held_slot() else {
         return false;
     };
-    // Relaxed: only this CPU writes its slot.
+    // Relaxed: only this CPU writes its slot; pairs with nothing.
     let held = Held::from_raw(slot.load(Ordering::Relaxed));
     held.acquire(RANK_SCHED).is_ok()
 }
@@ -436,6 +438,7 @@ pub(crate) fn may_release_here() -> bool {
         return false;
     }
     match current_tcb() {
+        // Relaxed: only this thread changes its own count; pairs with nothing.
         // SAFETY: invariant I9: a `Tcb` is never freed, so the current
         // thread's pointer stays valid, and `no_reclaim` is atomic because
         // `Sched::get_mut` may build `&mut Tcb` for it on another CPU;
@@ -458,11 +461,11 @@ pub(crate) struct NoReclaim {
 pub(crate) fn no_reclaim() -> NoReclaim {
     let tcb = current_tcb();
     if let Some(t) = tcb {
+        // Relaxed: only this thread changes or reads its own count; pairs with nothing.
         // SAFETY: invariant I9: a `Tcb` is never freed, so the current
         // thread's pointer stays valid, and `no_reclaim` is atomic because
         // `Sched::get_mut` may build `&mut Tcb` for it on another CPU;
-        // established by `thread_init::spawn_inner`. Relaxed: only this
-        // thread reads its own count.
+        // established by `thread_init::spawn_inner`.
         unsafe { t.as_ref() }
             .no_reclaim
             .fetch_add(1, Ordering::Relaxed);
@@ -473,6 +476,7 @@ pub(crate) fn no_reclaim() -> NoReclaim {
 impl Drop for NoReclaim {
     fn drop(&mut self) {
         if let Some(t) = self.tcb {
+            // Relaxed: as in `no_reclaim`; pairs with nothing.
             // SAFETY: invariant I9: a `Tcb` is never freed, so the pointer
             // `no_reclaim` took stays valid; established by
             // `thread_init::spawn_inner`. The guard is `!Send`, so this is
@@ -493,6 +497,7 @@ static RANK_FAILURES: AtomicU64 = AtomicU64::new(0);
     reason = "a lock taken out of rank order is a kernel bug, never input: DESIGN §2.3's nesting rule, checked by `vibeos::lock::Held::acquire`"
 )]
 fn rank_refused(e: RankError, held: Held) -> ! {
+    // Relaxed: a statistic `testing::rank_failures` reads; pairs with nothing.
     #[cfg(feature = "kernel_tests")]
     RANK_FAILURES.fetch_add(1, Ordering::Relaxed);
     panic!(
@@ -505,6 +510,7 @@ fn rank_refused(e: RankError, held: Held) -> ! {
 /// Whether the rank checker is off: the panic path, §2.2's stated
 /// exception, has set `HALTING`.
 fn halting() -> bool {
+    // Acquire: pairs with the Release store in `ipi_init::stop_others`.
     crate::serial::raw::HALTING.load(Ordering::Acquire)
 }
 
@@ -521,8 +527,8 @@ fn lock_enter(rank: u8, nested: bool) -> u8 {
     if halting() {
         return 0;
     }
-    // Relaxed: only this CPU writes its slot, with IF off; an NMI that
-    // raises the depth lowers it again before it returns.
+    // Relaxed: only this CPU writes its slot, with IF off; pairs with nothing.
+    // An NMI that raises the depth lowers it again before it returns.
     let held = Held::from_raw(slot.load(Ordering::Relaxed));
     let r = if nested {
         held.acquire_nested(rank)
@@ -535,6 +541,7 @@ fn lock_enter(rank: u8, nested: bool) -> u8 {
     if rank == 0 {
         return 0;
     }
+    // Relaxed: as the load above; pairs with nothing.
     let now = slot.fetch_add(Held::count_unit(rank), Ordering::Relaxed);
     #[cfg(feature = "kernel_tests")]
     trace_record(rank, Held::from_raw(now).count(rank) + 1);
@@ -550,6 +557,7 @@ fn lock_leave(rank: u8) {
     let Some(slot) = held_slot() else {
         return;
     };
+    // Relaxed: only this CPU writes its slot; pairs with nothing.
     if Held::from_raw(slot.load(Ordering::Relaxed)).count(rank) != 0 {
         slot.fetch_sub(Held::count_unit(rank), Ordering::Relaxed);
     }
@@ -566,6 +574,7 @@ pub fn check_cell_context() {
     if halting() {
         return;
     }
+    // Relaxed: only this CPU writes its slot; pairs with nothing.
     let held = Held::from_raw(slot.load(Ordering::Relaxed));
     if let Err(e) = held.check_cell() {
         rank_refused(e, held);
@@ -584,11 +593,13 @@ pub struct LocklessSection {
 /// Nothing before per-CPU data is live.
 pub fn lockless_section() -> LocklessSection {
     let raised = held_slot().is_some_and(|slot| {
-        // Relaxed: only this CPU changes its slot, and an NMI that raises
-        // the depth between this load and the add lowers it again first.
+        // Relaxed: only this CPU changes its slot; pairs with nothing. An NMI
+        // that raises the depth between this load and the add lowers it
+        // again first.
         if Held::from_raw(slot.load(Ordering::Relaxed)).lockless_depth() == u8::MAX {
             return false;
         }
+        // Relaxed: as the load above; pairs with nothing.
         slot.fetch_add(Held::depth_unit(), Ordering::Relaxed);
         true
     });
@@ -604,6 +615,7 @@ impl Drop for LocklessSection {
             return;
         }
         if let Some(slot) = held_slot() {
+            // Relaxed: only this CPU changes its slot; pairs with nothing.
             slot.fetch_sub(Held::depth_unit(), Ordering::Relaxed);
         }
     }
@@ -627,20 +639,25 @@ static TRACE_AT: [AtomicPtr<Location<'static>>; testing::TRACE_CAP] =
 #[cfg(feature = "kernel_tests")]
 #[track_caller]
 fn trace_record(rank: u8, count: u8) {
+    // Relaxed: only the armed CPU matches, and it reads the trace itself; pairs with nothing.
     if TRACE_CPU.load(Ordering::Relaxed) != lock_cpu() {
         return;
     }
+    // Relaxed: only the armed CPU writes the trace; pairs with nothing.
     let i = TRACE_LEN.load(Ordering::Relaxed);
     if i >= testing::TRACE_CAP {
         return;
     }
+    // Relaxed: only the armed CPU writes the trace; pairs with nothing.
     TRACE_RC[i].store(u16::from(rank) << 8 | u16::from(count), Ordering::Relaxed);
+    // Relaxed: only the armed CPU writes the trace; pairs with nothing.
     TRACE_AT[i].store(
         // The trace reads it back as a shared `&Location` only.
         // PROVENANCE: nothing writes through the pointer.
         core::ptr::from_ref(Location::caller()).cast_mut(),
         Ordering::Relaxed,
     );
+    // Relaxed: only the armed CPU writes the trace; pairs with nothing.
     TRACE_LEN.store(i + 1, Ordering::Relaxed);
 }
 
@@ -662,12 +679,14 @@ pub mod testing {
     /// lock those acquisitions counted is released or was never taken.
     pub unsafe fn restore_held(h: Held) {
         if let Some(slot) = held_slot() {
+            // Relaxed: only this CPU writes its slot; pairs with nothing.
             slot.store(h.raw(), Ordering::Relaxed);
         }
     }
 
     /// Rank-checker refusals since boot.
     pub fn rank_failures() -> u64 {
+        // Relaxed: a statistic; pairs with nothing.
         RANK_FAILURES.load(Ordering::Relaxed)
     }
 
@@ -693,11 +712,13 @@ pub mod testing {
 
     /// Record `t` just before its assertion fires.
     pub(super) fn trip(t: SleepTrip) {
+        // Relaxed: read back by the thread that caught the assertion; pairs with nothing.
         TRIP.store(t as u8, Ordering::Relaxed);
     }
 
     /// Take the last recorded [`SleepTrip`] and clear it.
     pub fn take_trip() -> Option<SleepTrip> {
+        // Relaxed: as in `trip`; pairs with nothing.
         match TRIP.swap(0, Ordering::Relaxed) {
             1 => Some(SleepTrip::SwitchHeld),
             2 => Some(SleepTrip::HardIrq),
@@ -723,19 +744,25 @@ pub mod testing {
     /// Trace this CPU's counted acquisitions until [`trace_take`]. Call with
     /// IF off, so the thread stays on this CPU.
     pub fn trace_arm() {
+        // Relaxed: the trace is this CPU's, armed with IF off; pairs with nothing.
         TRACE_LEN.store(0, Ordering::Relaxed);
+        // Relaxed: as `TRACE_LEN`; pairs with nothing.
         TRACE_CPU.store(lock_cpu(), Ordering::Relaxed);
     }
 
     /// Disarm the trace and return what it recorded, in order.
     pub fn trace_take() -> [Option<TraceEntry>; TRACE_CAP] {
+        // Relaxed: the armed CPU disarms and reads its own trace; pairs with nothing.
         TRACE_CPU.store(usize::MAX, Ordering::Relaxed);
+        // Relaxed: as `TRACE_CPU`; pairs with nothing.
         let n = TRACE_LEN.load(Ordering::Relaxed).min(TRACE_CAP);
         core::array::from_fn(|i| {
             if i >= n {
                 return None;
             }
+            // Relaxed: the trace is this CPU's own; pairs with nothing.
             let rc = TRACE_RC[i].load(Ordering::Relaxed);
+            // Relaxed: as `TRACE_RC`; pairs with nothing.
             let at = TRACE_AT[i].load(Ordering::Relaxed);
             // SAFETY: invariant: a non-null `TRACE_AT` slot holds a
             // `&'static Location` cast to a pointer, and nothing writes
