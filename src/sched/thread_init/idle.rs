@@ -39,7 +39,14 @@ pub fn halt_if_idle() {
         #[cfg(target_arch = "aarch64")]
         {
             crate::arch::current::idle_wait();
+            // The wake may already have queued work (test hook or a
+            // remote make_ready). Taking the SGI and looping would
+            // wfi again with the tick off.
+            let work = !per_cpu_init::current().runq.is_empty();
             crate::arch::current::irq_enable();
+            if work {
+                return;
+            }
         }
     }
 }
