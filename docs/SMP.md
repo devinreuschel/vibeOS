@@ -500,6 +500,12 @@ Global TCB table, per-CPU ready queues.
   reason about, then a proper lock-free deque if the numbers justify it.
 - Each CPU has its own idle thread with its own stack. An idle CPU sits in `sti; hlt` and is woken by
   the reschedule IPI.
+- A thread runs for a quantum of `QUANTUM_MS` (10 ms) of TSC time, counted from its switch-in or
+  from a `schedule` that found nothing else to run (`PerCpu::quantum_tsc`); the first timer tick
+  after that preempts it, and every tick preempts the idle thread. The quantum is run time, not a
+  count of ticks, so a host that delivers ticks late lengthens it by one tick's lateness at most:
+  QEMU under TCG on the macOS runner delivers 1 ms ticks 5 to 10 ms apart, where ten ticks took
+  about 100 ms.
 
 Kernel threads get their scheduling class when they are created, from this table. Planned (ROADMAP
 §19.4): the classes exist from §19.4; until then every thread is scheduled round-robin.

@@ -17,8 +17,8 @@ use crate::limits;
 use crate::thread::{ThreadId, ThreadState};
 use crate::time::Instant;
 
-/// Local timer ticks per slice. DESIGN §6.1. PIT is ~1 kHz, so ~10 ms.
-pub const QUANTUM_TICKS: u64 = 10;
+/// Run time a thread gets before a timer tick preempts it. DESIGN §7.8.
+pub const QUANTUM_MS: u64 = 10;
 
 /// No deadline given: still a deadline, so nothing blocks forever.
 pub const FAR_DEADLINE: Instant = Instant { ns: u64::MAX };
@@ -427,8 +427,13 @@ pub fn wake_expired(
     n
 }
 
-pub fn should_preempt(ticks: u64, current_is_idle: bool) -> bool {
-    current_is_idle || ticks.is_multiple_of(QUANTUM_TICKS)
+/// Whether a timer tick preempts the running thread: the idle thread at
+/// every tick, so a sleeper can displace `sti; hlt`, and any other thread
+/// once it has run `quantum` TSC cycles (`ran`) since its quantum began.
+/// Run time, not a tick count, so ticks that a host delivers late lengthen
+/// a quantum by one tick's lateness at most (DESIGN §7.8).
+pub fn should_preempt(ran: u64, quantum: u64, current_is_idle: bool) -> bool {
+    current_is_idle || ran >= quantum
 }
 
 #[cfg(test)]
@@ -588,12 +593,19 @@ mod tests {
     }
 
     #[test]
-    fn preempt_quantum_and_idle() {
-        assert!(!should_preempt(1, false));
-        assert!(should_preempt(10, false));
-        assert!(should_preempt(20, false));
-        assert!(should_preempt(1, true));
-        assert_eq!(QUANTUM_TICKS, 10);
+    fn preempt_quantum_is_run_time() {
+        let q = 10_000;
+        assert!(!should_preempt(0, q, false));
+        assert!(!should_preempt(q - 1, q, false));
+        assert!(should_preempt(q, q, false));
+        // One late tick after a 10x quantum still preempts: no tick count.
+        assert!(should_preempt(10 * q, q, false));
+        assert!(should_preempt(0, q, true));
+        assert_eq!(QUANTUM_MS, 10);
+    }
+
+    #[test]
+    fn effective_deadline_far_when_none() {
         assert_eq!(effective_deadline(None), FAR_DEADLINE);
         assert_eq!(effective_deadline(Some(at(3))).ns, 3);
     }

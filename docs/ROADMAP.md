@@ -575,7 +575,7 @@ synchronization primitives.
 ### 3.3 Scheduler
 - [x] ready queue, sleep queue ordered by deadline, per-wait-queue blocked lists (`WaitQueue`)
 - [x] `schedule()` for the voluntary path
-- [x] `on_timer_tick()` called after EOI, preempting every 10 ticks
+- [x] `on_timer_tick()` called after EOI, preempting a thread once it has run 10 ms of TSC time since its quantum began, and the idle thread at every tick (DESIGN §7.8)
 - [x] `yield_now()`
 - [x] a dead thread's kernel stack is freed only after its own CPU has switched off it, never by another CPU's `reap_zombies` while the exiting CPU still runs on it (F012)
 - [x] every scheduler lock acquisition inside an interrupt guard, no exceptions

@@ -599,6 +599,10 @@ fn schedule_inner(from_irq: bool) {
     };
 
     if old_id == new_id || old_ptr.is_null() || new_ptr.is_null() {
+        // Nothing else to run: a new quantum, so the next tick does not
+        // preempt again at once.
+        let now = time_init::read_tsc();
+        per_cpu_init::with_current(|cpu| cpu.quantum_tsc = now);
         return;
     }
     assert!(!new_ptr.is_null(), "schedule: next vanished");
@@ -636,6 +640,7 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
         cpu.tail_prev = old_ptr;
         let delta = now.wrapping_sub(cpu.slice_tsc);
         cpu.slice_tsc = now;
+        cpu.quantum_tsc = now;
         // Single writer: only this CPU stores its `switches`.
         let switches = cpu.remote.switches.load(Ordering::Relaxed);
         cpu.remote
