@@ -39,14 +39,17 @@ pub fn halt_if_idle() {
         #[cfg(target_arch = "aarch64")]
         {
             crate::arch::current::idle_wait();
-            // The wake may already have queued work (test hook or a
-            // remote make_ready). Taking the SGI and looping would
-            // wfi again with the tick off.
-            let work = !per_cpu_init::current().runq.is_empty();
-            crate::arch::current::irq_enable();
-            if work {
+            crate::ipi_init::drain_inbox();
+            // Work queued before this wfi is still on the runq because
+            // DAIF stayed set. Schedule it masked: unmasking first takes
+            // the self-SGI and can drop the waiter, then a second wfi
+            // sleeps with the tick off.
+            if !per_cpu_init::current().runq.is_empty() {
+                super::yield_now();
+                crate::arch::current::irq_enable();
                 return;
             }
+            crate::arch::current::irq_enable();
         }
     }
 }
