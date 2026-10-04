@@ -139,3 +139,46 @@ pub const SNAPSHOT_CHUNK: usize = 16;
 pub(crate) fn timeouts_capacity() -> usize {
     with_sched(|s| s.timeouts.capacity())
 }
+
+/// The id, name, CPU and `run_tsc` of each thread in the table, up to
+/// `out.len()`, under one SCHED section: a test compares two of these to
+/// name the threads a CPU ran between them. Returns how many it wrote.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn run_tsc_snapshot(out: &mut [RunTsc]) -> usize {
+    with_sched(|s| {
+        let mut n = 0usize;
+        for t in s.slots.iter().flatten() {
+            let Some(o) = out.get_mut(n) else {
+                break;
+            };
+            *o = RunTsc {
+                id: t.id,
+                name: t.name,
+                cpu: t.cpu,
+                run_tsc: t.run_tsc,
+            };
+            n += 1;
+        }
+        n
+    })
+}
+
+/// One thread's row of [`run_tsc_snapshot`].
+#[cfg(feature = "kernel_tests")]
+#[derive(Clone, Copy)]
+pub(crate) struct RunTsc {
+    pub id: ThreadId,
+    pub name: &'static str,
+    pub cpu: u32,
+    pub run_tsc: u64,
+}
+
+#[cfg(feature = "kernel_tests")]
+impl RunTsc {
+    pub const EMPTY: Self = Self {
+        id: ThreadId::NONE,
+        name: "",
+        cpu: 0,
+        run_tsc: 0,
+    };
+}

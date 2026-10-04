@@ -902,7 +902,9 @@ pub(crate) mod testing {
     use vibeos::apic::{TIMER_DIV_16, lvt_timer_periodic};
     use vibeos::vectors;
 
-    use super::{LAPIC_LVT_TIMER, LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_VA, lapic_read};
+    use super::{
+        LAPIC_LVT_TIMER, LAPIC_TIMER_CCR, LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_VA, lapic_read,
+    };
     use crate::time_init;
 
     /// CPU 0 LAPIC timer fires whose TSC `lapic_timer_rearm` stamps: 20
@@ -999,6 +1001,19 @@ pub(crate) mod testing {
             ]
         };
         (got != want).then_some((got, want))
+    }
+
+    /// This CPU's LAPIC timer current count, which the LAPIC computes from
+    /// its clock when it is read; 0 while the LAPIC is unmapped.
+    pub(crate) fn timer_count() -> u32 {
+        let va = LAPIC_VA.load(Ordering::Relaxed);
+        if va == 0 {
+            return 0;
+        }
+        // SAFETY: invariant I49, established at
+        // `arch::x86_64::apic_init::enable_lapic`: a nonzero `LAPIC_VA` is
+        // its return, published by `publish_isr`.
+        unsafe { lapic_read(va, LAPIC_TIMER_CCR) }
     }
 
     /// [`super::write_icr`] calls that found IF on between the two writes.

@@ -867,7 +867,10 @@ static REDIRTY_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// `cache_init`'s hook after each page a flush writes: dirty the next
 /// scratch page, as a writer streaming over them beside the flush would,
-/// [`REDIRTY_MAX`] times at most.
+/// [`REDIRTY_MAX`] times at most. Out of line, so its page buffer never
+/// joins `PageCache::flush`'s frame, which every volume's sync reaches
+/// (DESIGN §4.5: a mount's sync runs on 16 KiB).
+#[inline(never)]
 pub(crate) fn flush_redirty() {
     let n = REDIRTIED.fetch_add(1, Ordering::AcqRel);
     if n >= REDIRTY_MAX {

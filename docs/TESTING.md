@@ -424,7 +424,12 @@ with its own device tuple, whose `vda` is a 4 MiB pattern image (`harness.make_p
 byte of sector n `(n & 0xFF) ^ 0xA5`, so no GPT is stamped and no partition marker is required):
 the opt-in `vblk_readonly` on a `readonly=on` image (`_vblk_readonly_boot`), and the opt-in
 `vblk_bad_sector` on an image behind QEMU's `blkdebug`, which fails every read of sector 4096
-(`_vblk_bad_sector_boot`). Each boot requires its one `ok` line.
+(`_vblk_bad_sector_boot`). The second boot then runs the opt-in `fat_bad_sector_eio` (ROADMAP
+§10.5's errno box), whose group runs after `vblk_bad_sector`'s: it writes a FAT32 volume over the
+pattern image, below the block cache, with a file, a directory and an executable starting in the
+4 KiB cache page that holds sector 4096, mounts it, and requires ring-3 `read` and `write` of the
+file, an `open` through the directory, and an `execve` of the executable each to return `EIO`.
+Each boot requires an `ok` line for each test it selects.
 
 The IF-off tracer build (ROADMAP §10.3, [INVARIANTS.md §2.9](INVARIANTS.md#29-preemption-and-interrupt-state)
 rule 2). The `irqoff` Cargo feature is a measurement build, never a published image: the `irqoff`

@@ -12,6 +12,7 @@ use vibeos::proc::wait_exited;
 
 mod churn;
 mod cwd;
+mod eio;
 mod hooks;
 mod initrd;
 #[cfg(feature = "irqoff")]
@@ -25,10 +26,12 @@ mod slots;
 mod stack16k;
 mod times;
 mod umount;
+mod vdap1;
 mod walk;
 
 use churn::test_file_table_fork_churn;
 pub(crate) use cwd::test_cwd_per_process;
+pub(crate) use eio::fat_bad_sector_eio;
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use kernfs::{test_kernfs_nodes_grow, test_tmp_full_spares_system_nodes};
@@ -44,9 +47,10 @@ pub(crate) use shell::{
     test_shell_mount_same_path_64, test_shell_mount_umount, test_shell_rm_r_tree,
 };
 pub(crate) use slots::test_fs_drop_slot_waits_for_holder;
-pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
+pub(crate) use stack16k::{fat_image_to, fat_vda_16k_stack, on_cache_write};
 pub(crate) use times::{test_fat_times_wall_clock, test_vibefs_rename_ctime};
 pub(crate) use umount::test_umount_consistent;
+pub(crate) use vdap1::test_vdap1_vfs_read;
 pub(crate) use walk::test_walk_path_resolution;
 
 use crate::fat_init;
@@ -1296,6 +1300,7 @@ pub(crate) const TESTS: &[Test] = &[
         .deadline(30_000)
         .opt_in()
         .once(),
+    test("fat_bad_sector_eio", fat_bad_sector_eio).opt_in(),
     test(
         "vfs_unlink_drops_parent_dentry",
         test_vfs_unlink_drops_parent_dentry,
@@ -1304,6 +1309,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("fat_initrd_dev_no_null", test_fat_initrd_dev_no_null),
     test("vfs_io_off_lock", test_vfs_io_off_lock),
     test("fat_vol_wait_no_eio", test_fat_vol_wait_no_eio).deadline(60_000),
+    test("vdap1_vfs_read", test_vdap1_vfs_read),
     test("cwd_per_process", test_cwd_per_process),
     test("walk_path_resolution", test_walk_path_resolution),
     test("umount_consistent", test_umount_consistent).deadline(60_000),

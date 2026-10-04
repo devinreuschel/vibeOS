@@ -54,7 +54,7 @@ args = [
   { name = "count", type = "size_t" },
 ]
 errors = ["EBADF", "EFAULT", "EISDIR", "EAGAIN", "EIO"]
-ktest = { EAGAIN = "dev_random_eagain", EIO = "vblk_bad_sector" }
+ktest = { EAGAIN = "dev_random_eagain", EIO = "fat_bad_sector_eio" }
 note = ""
 
 [[syscall]]
@@ -67,7 +67,7 @@ args = [
   { name = "count", type = "size_t" },
 ]
 errors = ["EBADF", "EFAULT", "EINVAL", "EFBIG", "ENOSPC", "EIO"]
-ktest = { EIO = "vblk_bad_sector" }
+ktest = { EIO = "fat_bad_sector_eio" }
 note = ""
 
 [[syscall]]
@@ -82,7 +82,7 @@ errors = [
   "EFAULT", "ENAMETOOLONG", "EINVAL", "ENOENT", "ENOTDIR", "EISDIR", "EEXIST", "EACCES", "ELOOP",
   "EMFILE", "ENFILE", "ENOSPC", "ENOMEM", "EIO",
 ]
-ktest = { ENOMEM = "kalloc_nomem", EIO = "vblk_bad_sector" }
+ktest = { ENOMEM = "kalloc_nomem", EIO = "fat_bad_sector_eio" }
 note = "`pathname` at most 255 bytes"
 
 [[syscall]]
@@ -225,7 +225,7 @@ errors = [
   "EFAULT", "ENAMETOOLONG", "ENOENT", "ENOTDIR", "EACCES", "ELOOP", "ENFILE", "E2BIG", "ENOEXEC",
   "ENOMEM", "EIO",
 ]
-ktest = { EIO = "vblk_bad_sector" }
+ktest = { EIO = "fat_bad_sector_eio" }
 note = "`argv` and `envp`: NULL-terminated vectors of C strings, copied to the new stack under Linux's limits (§3.1)"
 
 [[syscall]]
