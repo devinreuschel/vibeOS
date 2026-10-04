@@ -916,6 +916,12 @@ mod tests {
             ecam_phys(0xB000_0000, 1, 3, 2, 0, 1, 4),
             Some(0xB000_0000 + ecam_off(1, 0, 1, 4))
         );
+        const R: u64 = 0x4000_0000;
+        assert_eq!(ecam_phys(R, 0x10, 0x1f, 0x10, 0, 0, 0), Some(R));
+        assert_eq!(
+            ecam_phys(R, 0x10, 0x1f, 0x1f, 0, 0, 0),
+            Some(R + (0xf << 20))
+        );
     }
 
     #[test]

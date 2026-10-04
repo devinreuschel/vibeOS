@@ -775,6 +775,7 @@ mod tests {
     const VIRT_CUR: &[u8] = include_bytes!("testdata/virt-current.dtb");
     const RESERVED: &[u8] = include_bytes!("testdata/reserved-both.dtb");
     const TIMER5: &[u8] = include_bytes!("testdata/timer-5irq.dtb");
+    const ECAM_RANGE: &[u8] = include_bytes!("testdata/ecam-bus-range.dtb");
 
     #[test]
     fn virt_dumpdtb_picks_uart_9000000() {
@@ -868,6 +869,35 @@ mod tests {
         assert_eq!(rs[0], 0x8000_0000..0x8000_1000);
         assert_eq!(rs[1], 0x8100_0000..0x8100_2000);
         assert_eq!(d.console_uart(), Some(0x900_0000));
+    }
+
+    #[test]
+    fn ecam_bus_range_reg_is_first_bus() {
+        let d = parse(ECAM_RANGE).unwrap();
+        let pci = d.pci_hosts();
+        assert_eq!(pci.len(), 1);
+        let h = &pci[0];
+        assert_eq!(h.segment, 0);
+        assert_eq!(h.first_bus, 0x10);
+        assert_eq!(h.last_bus, 0x1f);
+        const R: u64 = 0x4000_0000;
+        assert_eq!(h.ecam_base, R);
+        assert_eq!(
+            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x10, 0, 0, 0),
+            Some(R)
+        );
+        assert_eq!(
+            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x1f, 0, 0, 0),
+            Some(R + (0xf << 20))
+        );
+        assert_eq!(
+            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x0f, 0, 0, 0),
+            None
+        );
+        assert_eq!(
+            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x20, 0, 0, 0),
+            None
+        );
     }
 
     #[test]
