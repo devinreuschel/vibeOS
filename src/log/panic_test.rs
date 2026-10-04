@@ -26,18 +26,22 @@ pub(crate) use stop::{after_panic_message, stop_trip};
 mod stop {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+    #[cfg(target_arch = "x86_64")]
     use vibeos::apic::IpiMode;
     use vibeos::lock::RANK_DEVICE;
 
     use crate::arch::current;
     use crate::sync_init::SpinMutex;
-    use crate::{apic_init, ipi_init, per_cpu_init, thread_init, time_init};
+    #[cfg(target_arch = "x86_64")]
+    use crate::{apic_init, ipi_init};
+    use crate::{per_cpu_init, thread_init, time_init};
 
     /// CPUs the scenario needs: the panicking pair and one per other way.
     const CPUS: u32 = 5;
     /// How long CPU 0 waits for the four threads to be in place.
     const READY_MS: u64 = 10_000;
     /// How long the owner waits for its own NMI to come back.
+    #[cfg(target_arch = "x86_64")]
     const SELF_NMI_MS: u64 = 10;
     /// CPU 2's lines before it counts as in place.
     const LINES_BEFORE_READY: u64 = 3;
