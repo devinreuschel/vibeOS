@@ -233,6 +233,7 @@ pub(crate) fn release(stopped: Stopped, buf: DmaBuffer) -> usize {
     }
     let n = buf.frame_count();
     core::mem::forget(buf);
+    // Relaxed: a count; pairs with nothing.
     KEPT_FRAMES.fetch_add(n as u64, Ordering::Relaxed);
     n
 }
@@ -280,6 +281,7 @@ fn on_soft(_arg: usize) {
 /// One device, module state: `_ctx` is `None` (ROADMAP §10.12).
 fn rng_top(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     TOP_HITS.fetch_add(1, Ordering::SeqCst);
+    // Acquire: pairs with the Release stores in `setup` and `remove`.
     let isr = ISR_VA.load(Ordering::Acquire);
     if isr != 0 {
         // Reading the ISR status acknowledges the interrupt; the value
@@ -330,6 +332,7 @@ fn harvest() {
             if n != 0 {
                 q.data.sync_for_cpu::<Arch>();
                 publish_pool(q, last);
+                // Release: pairs with the Acquire load in `rng_request`.
                 IN_FLIGHT.store(false, Ordering::Release);
             }
         }
@@ -417,6 +420,7 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
         return Err(VirtioError::Failed);
     }
     pci_init::update_command(dev.addr, CMD_INTX_DISABLE, 0);
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8) {
         fail_probe(dev, common, Some(vec), [None, None]);
         return match e {
@@ -499,13 +503,21 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     let st = r8(common, COMMON_OFF_STATUS);
     w8(common, COMMON_OFF_STATUS, st | STATUS_DRIVER_OK);
 
+    // Release: pairs with the Acquire load in `rng_top`.
     ISR_VA.store(isr, Ordering::Release);
+    // Release: pairs with the AcqRel swap in `remove`.
     COMMON_VA.store(common, Ordering::Release);
+    // Release: pairs with the AcqRel swap in `remove`.
     VEC.store(vec, Ordering::Release);
+    // Release: pairs with the Acquire load in `remove`.
     DEV_KEY.store(bdf_key(dev.addr), Ordering::Release);
+    // Release: pairs with the Acquire load in `dev::ktest::rng_features`.
     FEATURES.store(feat, Ordering::Release);
+    // Release: pairs with the Acquire load in `dev::ktest::rng_qdma_device`.
     QDMA_DEV.store(qdma.device().as_u64(), Ordering::Release);
+    // Release: pairs with the Acquire load in `dev::ktest::rng_data_device`.
     DATA_DEV.store(data.device().as_u64(), Ordering::Release);
+    // Release: pairs with the Acquire load in `dev::ktest::rng_data_virt`.
     DATA_VIRT.store(data.virt(), Ordering::Release);
 
     let mut g = Q.lock();
@@ -558,6 +570,7 @@ impl Driver for RngDriver {
     /// `dev_init::bind_all` probes one device at a time, and a concurrent
     /// binder would need a claim (a compare-exchange) instead.
     fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+        // Acquire: pairs with the Release stores below and in `remove`.
         if BOUND.load(Ordering::Acquire) {
             crate::marker!("vibeOS: virtio: rng {} already bound", dev.addr);
             return Err(ProbeError::Busy);
@@ -570,6 +583,7 @@ impl Driver for RngDriver {
         dev_init::claim_mem_bars(dev)?;
         let r = match setup(dev, caps) {
             Ok(()) => {
+                // Release: pairs with the Acquire loads above and in `rng_bound`.
                 BOUND.store(true, Ordering::Release);
                 return Ok(None);
             }
@@ -591,11 +605,14 @@ impl Driver for RngDriver {
     /// ISR; then the device stops before its vector and memory go, and
     /// `BOUND` clears last, when nothing of the device is left.
     fn remove(&self, dev: &DevRef) {
+        // Acquire: pairs with the Release stores in `setup` and below.
         if DEV_KEY.load(Ordering::Acquire) != bdf_key(dev.addr) {
             return;
         }
         let q = Q.lock().take();
+        // Release: pairs with the Acquire load in `rng_top`.
         ISR_VA.store(0, Ordering::Release);
+        // AcqRel: pairs with the Release store in `setup`.
         let common = COMMON_VA.swap(0, Ordering::AcqRel);
         let stopped = if common != 0 {
             stop_device(dev.addr, common)
@@ -603,6 +620,7 @@ impl Driver for RngDriver {
             Stopped::Reset
         };
         irq_init::disable_msix(dev);
+        // AcqRel: pairs with the Release store in `setup`.
         let vec = VEC.swap(0, Ordering::AcqRel);
         if vec != 0 && irq_init::free_vector(vec).is_err() {
             crate::klog!(
@@ -616,10 +634,13 @@ impl Driver for RngDriver {
             let kept = release(stopped, qdma).saturating_add(release(stopped, data));
             report_stuck(dev.addr, stopped, kept);
         }
+        // Release: pairs with the Acquire load in `rng_request`.
         IN_FLIGHT.store(false, Ordering::Release);
+        // Release: pairs with the Acquire load above.
         DEV_KEY.store(0, Ordering::Release);
         // The device is stopped and every VA into its BARs dropped.
         dev_init::release_bars(dev);
+        // Release: pairs with the Acquire loads in `probe` and `rng_bound`.
         BOUND.store(false, Ordering::Release);
     }
 }
@@ -634,6 +655,7 @@ pub fn init() {
 }
 
 pub fn rng_bound() -> bool {
+    // Acquire: pairs with the Release stores in `probe` and `remove`.
     BOUND.load(Ordering::Acquire)
 }
 
@@ -667,6 +689,7 @@ pub fn rng_take(buf: &mut [u8]) -> usize {
 pub fn rng_request() -> Result<(), VirtioError> {
     let mut g = Q.lock();
     let q = g.as_mut().ok_or(VirtioError::Failed)?;
+    // Acquire: pairs with the Release stores below and in `harvest` and `remove`.
     if IN_FLIGHT.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -696,6 +719,7 @@ pub fn rng_request() -> Result<(), VirtioError> {
     if q.vq.should_kick(old) {
         kick(q.doorbell);
     }
+    // Release: pairs with the Acquire load above.
     IN_FLIGHT.store(true, Ordering::Release);
     Ok(())
 }

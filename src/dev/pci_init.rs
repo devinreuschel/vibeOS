@@ -73,6 +73,8 @@ pub(super) static SCAN_ONLINE: AtomicU64 = AtomicU64::new(0);
 
 fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
     let _irq = InterruptGuard::enter();
+    // Acquire: pairs with the Release store that unlocks below.
+    // Relaxed on failure: the lock is held; pairs with nothing.
     while CFG_LOCK
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
@@ -80,6 +82,7 @@ fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
         core::hint::spin_loop();
     }
     let r = f();
+    // Release: pairs with the next holder's Acquire compare-exchange above.
     CFG_LOCK.store(false, Ordering::Release);
     r
 }
@@ -371,6 +374,7 @@ pub unsafe fn scan() {
     }
     let mut found = [FuncInfo::empty(); MAX_SCAN];
     let n = pci::enumerate(&mut HwCfg, 0, &mut found);
+    // Release: pairs with the Acquire load in `dev::ktest::test_pci_scan_bsp_only`.
     #[cfg(feature = "kernel_tests")]
     SCAN_ONLINE.store(crate::per_cpu_init::online_mask(), Ordering::Release);
     // SAFETY: `BootCell::set`'s contract (invariant I22): this fn runs
@@ -428,6 +432,7 @@ pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
         i += 1;
     }
     crate::marker!("vibeOS: pci: {} devices", n);
+    // Release: pairs with the Acquire load in `dev::ktest::pci_live`.
     LIVE.store(true, Ordering::Release);
 }
 

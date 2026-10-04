@@ -76,10 +76,12 @@ pub(crate) mod testing {
     /// While `on`, the hardware fill supplies no byte, as with neither
     /// virtio-rng nor `RDRAND`.
     pub(crate) fn set_dry(on: bool) {
+        // Release: pairs with the Acquire load in `dry`.
         DRY.store(on, Ordering::Release);
     }
 
     pub(super) fn dry() -> bool {
+        // Acquire: pairs with the Release store in `set_dry`.
         DRY.load(Ordering::Acquire)
     }
 }
