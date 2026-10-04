@@ -173,6 +173,7 @@ fn register(pa: u64, len: usize) -> Result<(), Refused> {
 /// the device. Once, on the BSP, after `per_cpu_init::init_bsp` and
 /// `thread_init::init_bootstrap` and before `smp: done`. A failure is a
 /// recorded [`DeviceState`] and one log line (DESIGN §2.5).
+#[inline(never)]
 pub(crate) fn publish() {
     let id = build_id();
     let (tcbs, tcbs_len) = thread_init::table_root();
@@ -189,27 +190,35 @@ pub(crate) fn publish() {
         cpus,
         cpus_len,
     };
-    let mut page = NotePage {
-        bytes: [0; NOTE_MAX],
-    };
-    let len = match vmcoreinfo::render(&info, &mut page.bytes) {
-        Ok(n) => n,
-        Err(e) => {
-            // Release: pairs with the Acquire load in `published`.
-            STATE.store(DeviceState::NoNote as u8, Ordering::Release);
-            crate::klog!(Level::Error, "vmcoreinfo: not rendered: {}", e.as_str());
-            return;
-        }
-    };
     if NOTE.try_get().is_some() {
         crate::klog!(Level::Error, "vmcoreinfo: already published");
         return;
     }
+    // The note is a 4 KiB aligned page. Rendering it in the BootCell keeps
+    // it off the aarch64 16 KiB bootstrap stack (ROADMAP §11.3).
+    let len = {
+        // SAFETY: `NOTE` is unset (`try_get` above); this is the one boot
+        // writer before `smp: done`. established here.
+        let page = unsafe {
+            let p = NOTE.as_ptr();
+            core::ptr::write_bytes(p, 0, 1);
+            &mut *p
+        };
+        match vmcoreinfo::render(&info, &mut page.bytes) {
+            Ok(n) => n,
+            Err(e) => {
+                // Release: pairs with the Acquire load in `published`.
+                STATE.store(DeviceState::NoNote as u8, Ordering::Release);
+                crate::klog!(Level::Error, "vmcoreinfo: not rendered: {}", e.as_str());
+                return;
+            }
+        }
+    };
     // SAFETY: boot order (DESIGN §3.3): `publish` runs once on the BSP
-    // before `smp: done`, and `NOTE` was unset just above, so this is its
-    // one write and nothing reads it concurrently; established here, with
-    // the boot order of `boot_rest` in `src/main.rs`, its only caller.
-    unsafe { NOTE.set(page) };
+    // before `smp: done`, and the payload at `NOTE.as_ptr()` was filled
+    // above; established here, with the boot order of `boot_rest` in
+    // `src/main.rs`, its only caller.
+    unsafe { NOTE.set_in_place() };
     let note = NOTE.get();
     let va = VirtAddr(note.bytes.as_ptr().addr() as u64);
     let state = match paging_init::translate(va) {

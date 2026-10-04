@@ -86,6 +86,22 @@ impl<T> BootCell<T> {
         self.state.store(SET, Ordering::Release);
     }
 
+    /// Mark the cell set after the caller initialized the payload at [`as_ptr`].
+    ///
+    /// # Safety
+    /// Single writer, before `smp: done`. The payload at [`as_ptr`] is
+    /// initialized. Must not race `get` / `try_get`.
+    pub unsafe fn set_in_place(&self) {
+        // Acquire: pairs with the Release store below in a first `set`.
+        assert_eq!(
+            self.state.load(Ordering::Acquire),
+            UNSET,
+            "BootCell::set twice"
+        );
+        // Release: pairs with the Acquire load in `try_get`.
+        self.state.store(SET, Ordering::Release);
+    }
+
     #[allow(
         clippy::expect_used,
         reason = "invariant I22: every `BootCell` the kernel reads is set during boot, before its first reader (`cell::BootCell::set`)"
@@ -359,6 +375,18 @@ mod tests {
         unsafe { c.set(9u32) };
         assert_eq!(*c.get(), 9);
         assert_eq!(c.try_get().copied(), Some(9));
+    }
+
+    #[test]
+    fn bootcell_set_in_place() {
+        let c: BootCell<u32> = BootCell::new();
+        // SAFETY: `c` is this test's local; the payload is written before
+        // `set_in_place`; established here.
+        unsafe {
+            c.as_ptr().write(7u32);
+            c.set_in_place();
+        }
+        assert_eq!(*c.get(), 7);
     }
 
     /// Holds in release builds too (DESIGN §9.4): `make check` runs it with
