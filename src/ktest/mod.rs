@@ -8,6 +8,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::arch::CycleCounter;
+#[cfg(target_arch = "x86_64")]
 use vibeos::dev::DevRef;
 use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_DEVICE;
@@ -15,8 +16,10 @@ use vibeos::paging::PhysAddr;
 use vibeos::per_cpu::PerCpuRemote;
 use vibeos::pmm::Frames;
 use vibeos::thread::{ThreadId, ThreadState};
+#[cfg(target_arch = "x86_64")]
 use vibeos::vectors;
 
+use crate::arch;
 use crate::arch::current::{
     Arch, InterruptGuard, interrupts_enabled, irq_disable, irq_enable, qemu_exit,
 };
@@ -29,10 +32,11 @@ use crate::thread_init::{self, ThreadHandle};
 use crate::time_init;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
+#[cfg(target_arch = "x86_64")]
 use crate::{
-    acpi, arch, block, boot, console, dev, drivers, fs, irq, log, mm, proc, sched, shell, smp,
-    sync, time,
+    acpi, block, boot, console, dev, drivers, fs, irq, log, mm, proc, sched, shell, smp, sync, time,
 };
+#[cfg(target_arch = "x86_64")]
 pub(crate) mod user;
 
 const EXIT_PASS: u32 = 0x10;
@@ -43,6 +47,10 @@ pub(crate) enum Outcome {
     Ok,
     Fail(&'static str),
     FailFmt(FailMsg),
+    #[cfg_attr(
+        target_arch = "aarch64",
+        expect(dead_code, reason = "boot-CPU S7; unused on this path")
+    )]
     Skip(&'static str),
 }
 
@@ -227,6 +235,7 @@ fn test_ktest_names_unique() -> Outcome {
 /// place in the old single list, except log, which runs first:
 /// `log_boot_captured` reads boot lines that the other groups' lines push
 /// out of the log ring.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const GROUPS: &[Suite] = &[
     TESTS,
     log::ktest::TESTS,
@@ -248,16 +257,26 @@ pub(crate) const GROUPS: &[Suite] = &[
     fs::ktest::TESTS,
 ];
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) const GROUPS: &[Suite] = &[TESTS, arch::ktest::TESTS];
+
 /// Name of the registry's kernel thread.
 const REGISTRY_NAME: &str = "ktest";
-/// The registry's stack: 64 KiB, the boot stack size Limine guarantees
-/// (ROADMAP §10.2).
+/// The registry's stack: 64 KiB on x86_64 (ROADMAP §10.2); 16 KiB on
+/// aarch64 (ROADMAP §11.3).
+#[cfg(target_arch = "aarch64")]
+const REGISTRY_STACK_PAGES: usize = 4;
+#[cfg(not(target_arch = "aarch64"))]
 const REGISTRY_STACK_PAGES: usize = 16;
 
 /// The registry thread's id, `u32::MAX` until it starts.
 static REGISTRY_TID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// The id of the thread [`registry_main`] runs on.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn registry_tid() -> ThreadId {
     ThreadId(REGISTRY_TID.load(Ordering::Acquire))
 }
@@ -335,6 +354,10 @@ fn disarm() {
 /// The one tick that claims the passed deadline prints
 /// `vibeOS: ktest: FAIL <name>: deadline` and panics, so the dump shows
 /// where the test stood.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn on_tick() {
     // Acquire: pairs with `arm`'s Release store.
     let d = DEADLINE.load(Ordering::Acquire);
@@ -432,7 +455,9 @@ fn registry_main() {
     }
     // `n` and the loop ask the same two predicates.
     assert_eq!(runs, n, "ktest: runs made != begin count");
+    #[cfg(target_arch = "x86_64")]
     crate::sched::ktest::report();
+    #[cfg(target_arch = "x86_64")]
     crate::sync::ktest::report_spins();
     #[cfg(feature = "irqoff")]
     crate::sched::irqoff::report();
@@ -593,6 +618,7 @@ pub(crate) fn quiesce_frames() {
         kva_init::free_stack(stack);
         i += 1;
     }
+    #[cfg(target_arch = "x86_64")]
     if !user::warm_processes() {
         crate::marker!("vibeOS: ktest:   warm-up: user process failed");
     }
@@ -652,6 +678,10 @@ pub(crate) fn settle_threads() -> bool {
 }
 
 /// Whether a record in the log ring holds `needle`.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn log_contains(needle: &str) -> bool {
     let n = needle.as_bytes();
     if n.is_empty() {
@@ -664,14 +694,26 @@ pub(crate) fn log_contains(needle: &str) -> bool {
 
 /// Free frames: the buddy's, and those of the stacks the CPUs' stack caches
 /// hold, which a spawn reuses (ROADMAP §10.10).
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn free_frames() -> usize {
     pmm_init::with_buddy(|b| b.stats().free_frames) + thread_init::cached_stack_frames()
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn alloc_frame() -> Option<PhysAddr> {
     alloc_frames(0)
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn free_frame(pa: PhysAddr) {
     // SAFETY: an unknown base frees nothing, and a held one is freed once
     // (`ktest::take_held` removes it), so the contract of
@@ -679,23 +721,42 @@ pub(crate) fn free_frame(pa: PhysAddr) {
     unsafe { dealloc_frames(pa, 0) };
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) struct Fault {
     #[cfg(target_arch = "x86_64")]
     pub(crate) cr2: u64,
     pub(crate) error: u64,
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
     // A hit longjmps out of the #PF gate and skips the `iretq` that would
     // restore IF; the guard restores it.
     let _g = InterruptGuard::enter();
-    arch::catch::catch(vectors::PF, f).map(|c| Fault {
-        #[cfg(target_arch = "x86_64")]
-        cr2: c.cr2,
-        error: c.error,
-    })
+    #[cfg(target_arch = "x86_64")]
+    {
+        arch::catch::catch(vectors::PF, f).map(|c| Fault {
+            cr2: c.cr2,
+            error: c.error,
+        })
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = f;
+        None
+    }
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
     arch::catch::catch_alloc(f)
 }
@@ -704,6 +765,10 @@ pub(crate) fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
 // reaches those APIs only through these; the slice that changes one
 // updates its helper here (DESIGN §8.2).
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn spawn_thread(name: &'static str, entry: fn()) -> ThreadHandle {
     match thread_init::spawn(name, entry) {
         Ok(h) => h,
@@ -711,6 +776,10 @@ pub(crate) fn spawn_thread(name: &'static str, entry: fn()) -> ThreadHandle {
     }
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn spawn_thread_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
     match thread_init::spawn_on(name, entry, cpu) {
         Ok(h) => h,
@@ -721,10 +790,18 @@ pub(crate) fn spawn_thread_on(name: &'static str, entry: fn(), cpu: u32) -> Thre
 /// Blocks the frame helpers handed out, as the `Frames` that own them.
 /// The helpers trade bare addresses (C-SUITES), so the tokens wait here.
 /// Never held together with BUDDY.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 static HELD: SpinMutex<[Option<Frames>; 16]> =
     SpinMutex::with_rank([const { None }; 16], RANK_DEVICE);
 
 /// Remove and return the held token whose base is `pa`.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 fn take_held(pa: PhysAddr) -> Option<Frames> {
     let mut held = HELD.lock();
     let slot = held
@@ -735,6 +812,10 @@ fn take_held(pa: PhysAddr) -> Option<Frames> {
 
 /// A naturally aligned block of `1 << order` frames. `None` when the
 /// buddy is out, or when 16 blocks are already out through these helpers.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
     let f = pmm_init::with_buddy(|b| b.alloc(order))?;
     let pa = PhysAddr(f.base());
@@ -763,6 +844,10 @@ pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
 /// # Safety
 /// `pa` is a block that [`alloc_frames`] returned for this same `order`, and
 /// nothing still maps or uses it.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
     if let Some(f) = take_held(pa) {
         debug_assert_eq!(f.order(), order, "ktest: dealloc_frames order");
@@ -773,15 +858,27 @@ pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
 /// A naturally aligned block of `1 << order` frames as its owning
 /// `Frames`, for an API that takes the token (`kva_init::vmap`). The
 /// caller gives it back with [`free_frames_owned`].
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn alloc_frames_owned(order: u8) -> Option<Frames> {
     pmm_init::with_buddy(|b| b.alloc(order))
 }
 
 /// Free a block [`alloc_frames_owned`] returned, once nothing maps it.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn free_frames_owned(f: Frames) {
     pmm_init::with_buddy(|b| b.free(f));
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
     per_cpu_init::cpu(id)
 }
@@ -792,6 +889,10 @@ pub(crate) fn dying_entry() {}
 /// the guards that would have dropped it. The store runs with IF=0, so it
 /// lands on the slot of the CPU the caller runs on (DESIGN §2.9 rule 5),
 /// and IF is left as the caller had it.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn restore_irq_nest(n: u32) {
     let if_on = interrupts_enabled();
     irq_disable();
@@ -801,6 +902,10 @@ pub(crate) fn restore_irq_nest(n: u32) {
     }
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn second_cpu() -> Option<u32> {
     let mask = per_cpu_init::online_mask();
     let mut i = 1u32;
@@ -816,11 +921,19 @@ pub(crate) fn second_cpu() -> Option<u32> {
 /// `ipi_init::service_incoming` from thread context. With IF on, an IPI
 /// between `service_calls`' acked check and its ack would run the callback
 /// twice, so this holds IF off across the call.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn service_incoming_guarded() {
     let _g = InterruptGuard::enter();
     ipi_init::service_incoming();
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
     let t0 = time_init::now_ns();
     while !pred() {
@@ -833,6 +946,10 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
     true
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
     // SAFETY: invariant I58: every caller passes a device's BAR 0 VA,
     // which the `bar-test` driver claimed and mapped uncached, and a
@@ -840,22 +957,36 @@ pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32) }
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn mmio_w32(va: u64, off: u32, val: u32) {
     // SAFETY: invariant: as for `mmio_r32`; established by `ktest::bar0_va`.
     unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, val) }
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) const EDU_IDENT: u32 = 0x00;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) const EDU_IDENT_VAL: u32 = 0x0100_00ED;
 
 /// BAR 0's VA for edu or e1000e, which the `kernel_tests` driver
 /// `bar-test` claims and maps (binding it on first use); `None` when that
 /// driver does not hold the BAR.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn bar0_va(dev: &DevRef) -> Option<u64> {
     crate::dev::ktest::bind_bar_test_driver();
     crate::dev_init::bar_va(dev, 0)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn find_edu() -> Option<DevRef> {
     // QEMU 8.x edu is 1234:11e8 (old QEMU vendor). Later trees use 1b36:11e8.
     crate::dev::ktest::find_id(0x1234, 0x11e8)
@@ -867,6 +998,10 @@ pub(crate) fn find_edu() -> Option<DevRef> {
 /// first), no thread but the caller and the idle threads is runnable, and
 /// no dead thread's stack is still on its way back. Every frame-accounting
 /// test takes its `before` and `after` from here.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn quiescent_free_frames() -> usize {
     settle();
     free_frames()
@@ -874,6 +1009,10 @@ pub(crate) fn quiescent_free_frames() -> usize {
 
 /// Run the shared warm-up, then wait for [`quiesce`], saying so if it
 /// timed out.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 fn settle() {
     quiesce_frames();
     if !quiesce() {
@@ -894,6 +1033,10 @@ fn settle() {
 /// time takes a table page, which stays in the kernel tables for good
 /// (`mm::ktest::table_pages`) and is no frame lost. No warm-up can map the
 /// span ahead, since nothing bounds it but the KVA window.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) struct FrameCount {
     /// The buddy's free frames.
     buddy: usize,
@@ -914,12 +1057,19 @@ pub(crate) struct FrameCount {
 }
 
 impl FrameCount {
+    #[cfg_attr(
+        target_arch = "aarch64",
+        expect(dead_code, reason = "boot-CPU S7; unused on this path")
+    )]
     pub(crate) fn quiescent() -> Self {
         settle();
         Self {
             buddy: pmm_init::with_buddy(|b| b.stats().free_frames),
             cached: thread_init::cached_stack_frames(),
+            #[cfg(target_arch = "x86_64")]
             tables: crate::mm::ktest::table_pages(),
+            #[cfg(target_arch = "aarch64")]
+            tables: 0,
             heap: crate::heap_init::stats().capacity / vibeos::paging::PAGE_SIZE_4K as usize,
             in_flight: thread_init::stacks_in_flight(),
             kva_used: kva_init::stats().used,
@@ -928,6 +1078,10 @@ impl FrameCount {
     }
 
     /// The frames free ([`free_frames`]) or in kernel page tables.
+    #[cfg_attr(
+        target_arch = "aarch64",
+        expect(dead_code, reason = "boot-CPU S7; unused on this path")
+    )]
     fn total(&self) -> usize {
         self.buddy + self.cached + self.tables
     }
@@ -936,6 +1090,10 @@ impl FrameCount {
     /// failure line that names every count before and after, and, after,
     /// the stacks in flight, the KVA KiB used, and the dropped
     /// frames, in [`FAIL_MSG_BYTES`].
+    #[cfg_attr(
+        target_arch = "aarch64",
+        expect(dead_code, reason = "boot-CPU S7; unused on this path")
+    )]
     pub(crate) fn unchanged(&self, after: &Self) -> Outcome {
         if after.total() == self.total() {
             return Outcome::Ok;
@@ -962,6 +1120,10 @@ impl FrameCount {
 /// Wait, bounded, until no thread but this one and the idle threads is
 /// Ready or Running and no dead thread's stack sits in a CPU's dead-stack
 /// slot or on its dead list. False if that did not happen in time.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn quiesce() -> bool {
     settle_threads()
 }
@@ -970,6 +1132,7 @@ pub(crate) fn quiesce() -> bool {
 /// were written against: each call takes back, or hands out, the count a
 /// [`FileRef`] carries, so their scenarios and assertions stay as they
 /// were.
+#[cfg(target_arch = "x86_64")]
 pub(crate) mod fid {
     use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, Stat};
 
@@ -1023,6 +1186,15 @@ pub(crate) mod fid {
 
 /// CPUID.01H:ECX[31] (a hypervisor is present) and leaf `0x4000_0000`
 /// naming it `KVMKVMKVM\0\0\0`.
+#[cfg(target_arch = "aarch64")]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
+pub(crate) fn on_kvm() -> bool {
+    false
+}
+
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn on_kvm() -> bool {
     let (_, _, ecx1, _) = x86::cpuid(1, 0);
@@ -1038,6 +1210,10 @@ pub(crate) fn on_kvm() -> bool {
 }
 
 /// Sleep until `pred` holds, for at most `ms`.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
     let deadline = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
     while !pred() {
@@ -1050,6 +1226,10 @@ pub(crate) fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
 }
 
 /// Sleep until `pred` holds, for at most `ms`.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn sleep_until_s19(pred: impl Fn() -> bool, ms: u64) -> bool {
     let deadline = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
     while !pred() {
@@ -1072,6 +1252,10 @@ const WAIT_MARGIN_MS: u32 = 500;
 /// is [`WAIT_MARGIN_MS`] away and `pred` still fails, so the caller can fail
 /// naming what it waited on. With no deadline armed it waits on, and the
 /// harness's run deadline is the backstop.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn wait_for(pred: impl Fn() -> bool) -> bool {
     loop {
         if pred() {
@@ -1119,6 +1303,10 @@ pub(crate) fn deadline_within(ms: u32) -> Option<bool> {
 }
 
 /// Spin on TSC time until `pred` holds, for at most `ns`.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn spin_until(pred: impl Fn() -> bool, ns: u64) -> bool {
     let t0 = time_init::now_ns();
     while !pred() {

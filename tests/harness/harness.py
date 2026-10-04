@@ -15,12 +15,14 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 | Variable | Default | Drivers |
 |---|---|---|
 | `VIBEOS_ISO` | per driver | all, `run_interactive` |
-| `VIBEOS_SMP` | `2` | all, `run_interactive` |
+| `VIBEOS_ARCH` | `x86_64` | all (`qemu_argv`, `env_config`); `aarch64` is ROADMAP §11.3 / §11.7 |
+| `VIBEOS_GIC` | `3` on aarch64 | `qemu_argv` (`gic-version=2` or `3`) |
+| `VIBEOS_SMP` | `2` (`1` on aarch64) | all, `run_interactive` |
 | `VIBEOS_QEMU_CPU` | `max` | all, `run_interactive` |
 | `VIBEOS_MEM` | `128M` | all, `run_interactive` |
 | `VIBEOS_BIOS` | unset, `seabios`: SeaBIOS; `uefi`: probe, pflash | all, `run_interactive` |
 | `VIBEOS_FW_X86_64` | probed (`FIRMWARE_TABLE`) | all, `run_interactive` (`VIBEOS_BIOS=uefi`) |
-| `VIBEOS_FW_AARCH64` | probed (`FIRMWARE_TABLE`) | none yet (ROADMAP §11.7) |
+| `VIBEOS_FW_AARCH64` | probed (`FIRMWARE_TABLE`) | aarch64 boots (always UEFI) |
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all, `run_interactive` |
 | `VIBEOS_TIMEOUT` | `60` (`BOOT_ALLOWANCE_S`), none interactive | all, `run_interactive` |
 | `VIBEOS_QEMU_EXTRA` | empty | all, `run_interactive` |
@@ -665,6 +667,15 @@ HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
 # and `vmcoreinfo` so `dump-guest-memory` copies the kernel's VMCOREINFO
 # note into a core (docs/VMCOREINFO.md). Neither is a PCI device.
 FORENSICS_DEVICES = ("-device", "pvpanic", "-device", "vmcoreinfo")
+# aarch64 `virt` (ROADMAP §11.7): PCI pvpanic, vmcoreinfo, ramfb, and the
+# virtio input devices. The ISO is a virtio-scsi CD-ROM, not IDE.
+AARCH64_FORENSICS = (
+    "-device", "ramfb",
+    "-device", "virtio-keyboard-pci",
+    "-device", "virtio-tablet-pci",
+    "-device", "pvpanic-pci",
+    "-device", "vmcoreinfo",
+)
 # The only defaults of the QEMU settings: the Makefile sets none, and
 # `make run` reads them through `run_interactive.py` (ROADMAP §10.2).
 DEFAULT_SMP = 2
@@ -719,6 +730,10 @@ class QemuConfig:
     expect: str = "none"
     # The QMP `RESET` events an `expect="reset"` run allows.
     resets: int = 0
+    # Guest architecture. `x86_64` keeps the existing pc/SeaBIOS line.
+    arch: str = "x86_64"
+    # GICv2 or GICv3 on `virt`. Ignored on x86_64.
+    gic_version: str = "3"
 
 
 @dataclass

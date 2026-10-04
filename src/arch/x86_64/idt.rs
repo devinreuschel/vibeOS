@@ -475,7 +475,12 @@ global_asm!(
         swapgs
         mov ebx, 1
     2:
-        mov qword ptr [rsp + {cr2}], 0
+        xor eax, eax
+        cmp edi, {df}
+        jne 7f
+        mov rax, cr2
+    7:
+        mov [rsp + {cr2}], rax
         mov qword ptr [rsp + {dr6}], 0
         cmp edi, {db}
         jne 3f
@@ -545,7 +550,7 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     if frame.iret.rflags & RFLAGS_IF != 0 {
         crate::sched::irqoff::off(crate::sched::irqoff::Site::vector(v));
     }
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if frame.user_mode() {
         testing::on_cpl3_entry(frame);
     }
@@ -617,17 +622,17 @@ pub fn user_fault(frame: &TrapFrame) {
 /// The exception intercept for vectors 0 to 31: `catch::intercept`, which
 /// `catch::init` sets right after `idt::init` (DESIGN §1.2). Unset, no
 /// exception is intercepted. `kernel_tests` only (ROADMAP §10.2, F146).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 static INTERCEPT: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 /// Install the exception intercept. `true` from it skips the body.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn set_intercept_hook(f: fn(&mut TrapFrame) -> bool) {
     // Release: pairs with the Acquire load in `intercept`.
     INTERCEPT.store(f as *mut (), Ordering::Release);
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[inline(always)]
 fn intercept(frame: &mut TrapFrame) -> bool {
     // Acquire: pairs with the Release store in `set_intercept_hook`.
@@ -647,7 +652,7 @@ fn intercept(frame: &mut TrapFrame) -> bool {
 /// every body.
 #[inline(always)]
 fn pre_body(frame: &mut TrapFrame, v: u8) -> bool {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     {
         testing::on_entry(frame, v) || (v < 32 && intercept(frame))
     }
@@ -811,7 +816,7 @@ fn breakpoint(frame: &mut TrapFrame) {
     if frame.user_mode() {
         user_fault(frame);
     }
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if !frame.user_mode() {
         testing::note_breakpoint();
     }
@@ -857,7 +862,7 @@ fn nmi(frame: &mut TrapFrame) {
 /// the dispatcher, and can resume instead.
 fn debug_ex(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         if testing::on_user_db(frame) {
             return;
         }
@@ -922,7 +927,7 @@ fn general_protection(frame: &mut TrapFrame) {
 fn page_fault(frame: &mut TrapFrame) {
     let (err, cr2) = (frame.error_code, frame.cr2);
     if frame.user_mode() {
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::on_user_pf(frame);
         user_fault(frame);
     } else if let Some(rip) = super::uaccess::fixup(frame.iret.rip, cr2) {
@@ -934,12 +939,27 @@ fn page_fault(frame: &mut TrapFrame) {
 }
 
 fn double_fault(frame: &mut TrapFrame) {
+    let cr2 = frame.cr2;
+    let t = crate::arch::current_tcb();
+    // SAFETY: `t` is this CPU's TCB or null; we only read `stack`; established here.
+    let in_guard =
+        !t.is_null() && unsafe { (*t).stack.as_ref().is_some_and(|s| s.guard_contains(cr2)) };
+    if in_guard {
+        crate::marker!(
+            "vibeOS: panic: stack overflow far={:#x} esr={:#x} elr={:#x} sp={:#x} thread={:#x}",
+            cr2,
+            frame.error_code,
+            frame.iret.rip,
+            frame.iret.rsp,
+            t as u64
+        );
+    }
     crate::panic::exception_halt(
         b"#DF",
         &frame.iret,
         frame.user().rbp,
         Some(frame.error_code),
-        None,
+        Some(cr2),
     );
 }
 
@@ -1131,7 +1151,7 @@ fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>)
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub mod testing {
     use core::mem::size_of;
     use core::ptr;

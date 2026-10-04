@@ -148,7 +148,7 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
     }
     let want = i64::from(pid);
     let nohang = options as u64 & WNOHANG != 0;
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     super::testing::wait4_entered(self_pid, want);
     loop {
         let r = thread_init::with_sched(|s| {
@@ -439,5 +439,61 @@ pub fn write_ps(w: &mut impl Write) {
             reason = "a diagnostic line to Serial or the console carries no failure anyone could act on (DESIGN §2.5)"
         )]
         let _ = writeln!(w, "vibeOS: ps: {line}");
+    }
+}
+
+#[cfg(not(feature = "vibefs_crash"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
+enum KernelWait {
+    Done(u32),
+    Sleep,
+    NotKernelChild,
+}
+
+/// Block until `pid`, a process whose parent is the kernel (ppid 0),
+/// exits; reap it and return its `wait4` status word.
+#[cfg(not(feature = "vibefs_crash"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
+pub(crate) fn wait_kernel(pid: u32) -> u32 {
+    debug_assert_eq!(current_pid(), 0);
+    loop {
+        let r = thread_init::with_sched(|s| {
+            table_locked(|t| {
+                let Some(p) = t.get(pid) else {
+                    return KernelWait::NotKernelChild;
+                };
+                if p.ppid != 0 {
+                    return KernelWait::NotKernelChild;
+                }
+                match p.state {
+                    ProcState::Zombie => {
+                        let st = p.wait_status;
+                        reap_zombie(s, t, pid);
+                        KernelWait::Done(st)
+                    }
+                    ProcState::Live | ProcState::Stopped => {
+                        s.begin_wait(&mut t.kernel_wq, FAR_DEADLINE);
+                        KernelWait::Sleep
+                    }
+                    ProcState::Unused => KernelWait::NotKernelChild,
+                }
+            })
+        });
+        assert!(
+            !matches!(r, KernelWait::NotKernelChild),
+            "wait_kernel({pid}): not a live kernel-parented process; only kernel code calls \
+             wait_kernel, once per ppid-0 pid that spawn_elf or spawn_image returned, and only \
+             wait_kernel reaps a ppid-0 process"
+        );
+        match r {
+            KernelWait::Done(st) => return st,
+            KernelWait::Sleep | KernelWait::NotKernelChild => thread_init::schedule(),
+        }
     }
 }

@@ -70,7 +70,7 @@ impl DeviceState {
         }
     }
 
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     fn from_u8(v: u8) -> Option<Self> {
         Some(match v {
             1 => DeviceState::Written,
@@ -250,7 +250,7 @@ pub(crate) fn publish() {
 
 /// The published note, its physical address, and what the device got;
 /// `None` before [`publish`] ran or when it rendered nothing.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) fn published() -> Option<(&'static [u8], u64, DeviceState)> {
     // Acquire: pairs with the Release stores in `publish`.
     let state = DeviceState::from_u8(STATE.load(Ordering::Acquire))?;

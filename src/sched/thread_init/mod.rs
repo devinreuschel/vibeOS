@@ -13,6 +13,7 @@
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
+use vibeos::arch::ContextSwitch;
 use vibeos::desc::UserSegs;
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kalloc::{AllocError, TryBox, TryVec};
@@ -25,12 +26,12 @@ use vibeos::sched::{TimeoutQueue, effective_deadline, enqueue_runnable, take_nex
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{
     CpuAffinity, CpuContext, Fxsave, MAX_THREADS, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome,
-    apply_if_on_resume, prepare_thread,
+    prepare_thread,
 };
 use vibeos::time::Instant;
 use vibeos::wait::{WaitLink, WaitLinks, WaitQueue};
 
-use crate::arch::current::InterruptGuard;
+use crate::arch::current::{Arch, InterruptGuard};
 use crate::cell::BootCell;
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
@@ -39,20 +40,25 @@ use crate::time_init;
 
 mod ap;
 mod boot;
+mod idle;
 mod sweep;
 mod table;
 mod user;
 pub use ap::{abandon_unstarted, adopt_ap_idle};
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) use boot::BOOT_STACK_PAGES;
+#[cfg(target_arch = "x86_64")]
 pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
+pub use idle::halt_if_idle;
 pub use sweep::start_sweep;
 pub(crate) use table::table_root;
+#[cfg(feature = "kernel_tests")]
+pub(crate) use table::table_usage;
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+pub(crate) use table::timeouts_capacity;
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
-#[cfg(feature = "kernel_tests")]
-pub(crate) use table::{table_usage, timeouts_capacity};
 pub use user::{reset_user_segs, set_user_segs};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
@@ -487,7 +493,7 @@ fn thread_exit() -> ! {
         // scan in `thread_init::spawn_inner`.
         unsafe { (*p).state = ThreadState::Dead };
     });
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::exit_stall();
     schedule();
     panic!("dead thread resumed");
@@ -514,8 +520,9 @@ pub fn schedule_preempt() {
 const EXPIRE_BATCH: usize = 32;
 const PLACE_BATCH: usize = 32;
 
-/// IF-on-resume is applied to the incoming TCB before `popfq`. See
-/// [`apply_if_on_resume`]. `InterruptGuard` stays on the outgoing stack.
+/// IF-on-resume is applied to the incoming TCB before `popfq` /
+/// `msr daif`. See [`vibeos::arch::ContextSwitch::resume_with_irqs`].
+/// `InterruptGuard` stays on the outgoing stack.
 fn schedule_inner(from_irq: bool) {
     let _irq = InterruptGuard::enter();
     if !from_irq {
@@ -579,9 +586,9 @@ fn schedule_inner(from_irq: bool) {
     // exited; the entry is then stale. SCHED decides: run a thread only
     // while it is `Ready` and placed on this CPU, and drop any other entry.
     let (old_ptr, new_ptr, old_id, new_id) = loop {
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         let cand = testing::requeue_next_cpu(next, cur, idle, me);
-        #[cfg(not(feature = "kernel_tests"))]
+        #[cfg(not(all(feature = "kernel_tests", target_arch = "x86_64")))]
         let cand = next;
         let picked = with_sched(|s| {
             if cand != idle && !s.get(cand).is_some_and(|t| runnable_on(t, me)) {
@@ -622,7 +629,7 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
     // `thread_init::spawn_inner`.
     let (from, to) = unsafe { ((*old_ptr).id.0, (*new_ptr).id.0) };
     vibeos::trace!(Switch, u64::from(from), u64::from(to));
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if sync_init::held_mask() != 0 {
         // SAFETY: invariant I9: `new_ptr` is a live entry of `SCHED` that
         // `schedule_inner` or `switch_to` set Running for this CPU, and `id`
@@ -661,9 +668,9 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             // Relaxed: as above; pairs with nothing.
             cpu.irq_nest.store((*new_ptr).irq_nest, Ordering::Relaxed);
             // Relaxed: as above; pairs with nothing.
-            apply_if_on_resume(
-                &mut (*new_ptr).context.rflags,
-                cpu.irq_nest.load(Ordering::Relaxed),
+            Arch::resume_with_irqs(
+                &mut (*new_ptr).context,
+                cpu.irq_nest.load(Ordering::Relaxed) == 0,
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             (*new_ptr).on_cpu.set();
@@ -708,9 +715,9 @@ pub(crate) fn finish_switch() {
         !crate::arch::current::interrupts_enabled(),
         "finish_switch with IF on"
     );
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     crate::irq::ktest::tail_enter();
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::scan_dead_slot();
     let (prev, kick) = per_cpu_init::with_current(|cpu| {
         let prev = core::mem::replace(&mut cpu.tail_prev, core::ptr::null_mut());
@@ -719,7 +726,7 @@ pub(crate) fn finish_switch() {
     if kick {
         kick_dead_stacks();
     }
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     crate::irq::ktest::tail_leave();
     if !prev.is_null() {
         // SAFETY: `prev` is the TCB this CPU switched off (stored in
@@ -790,6 +797,10 @@ fn retire_dead_stack(cpu: &mut PerCpu) -> bool {
 
 /// Frames the stack caches of every CPU hold.
 #[cfg(feature = "kernel_tests")]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn cached_stack_frames() -> usize {
     // Acquire: pairs with each AcqRel update of `CACHED_STACK_FRAMES`.
     CACHED_STACK_FRAMES.load(Ordering::Acquire)
@@ -812,7 +823,7 @@ fn cached_stack() -> Option<GuardedStack> {
     // and owned by this handle alone: no thread runs on a cached stack
     // (invariant I10, established at `thread_init::finish_switch`).
     unsafe { core::ptr::write_bytes(stack.base().as_u64() as *mut u8, 0, len) };
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::refill_cached(&stack);
     Some(stack)
 }
@@ -835,37 +846,16 @@ pub(crate) fn return_stack(stack: GuardedStack) {
     }
 }
 
-/// `sti; hlt` with a closed lost-wakeup window: cli, drain inbox, recheck
-/// runq, then `sti; hlt` as one pair. ROADMAP §4.8 / DESIGN §7.8.
-pub fn halt_if_idle() {
-    loop {
-        // SAFETY: `cli` touches only IF; the `sti` below or the idle loop's
-        // next pass turns it back on; established here.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("cli", options(nostack, preserves_flags));
-        }
-        crate::sched::irqoff::off_here();
-        crate::ipi_init::drain_inbox();
-        if !per_cpu_init::current().runq.is_empty() {
-            crate::sched::irqoff::on();
-            // SAFETY: `sti` restores the IF=1 this idle loop runs with;
-            // established here.
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                core::arch::asm!("sti", options(nostack, preserves_flags));
-            }
-            return;
-        }
-        crate::sched::irqoff::on();
-        // SAFETY: `sti; hlt` as one pair: the interrupt shadow keeps a
-        // wake-up IPI from landing between them (DESIGN §7.8); established
-        // here.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("sti; hlt", options(nomem, nostack));
-        }
+fn prepare_kernel_context(ctx: &mut CpuContext, top: u64, tramp: u64) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        prepare_thread(ctx, top, tramp);
+        // SAFETY: `prepare_thread` wrote `rsp` 8 bytes below `top` on this
+        // thread's stack; established by `vibeos::thread::prepare_thread`.
+        unsafe { (ctx.stack_ptr() as *mut u64).write_volatile(0) };
     }
+    #[cfg(target_arch = "aarch64")]
+    Arch::prepare(ctx, top, tramp);
 }
 
 pub fn spawn(name: &'static str, entry: fn()) -> Result<ThreadHandle, SpawnError> {
@@ -1023,7 +1013,7 @@ pub fn spawn_user(
         prepare_thread(&mut tcb.context, at - 8, tramp);
         // SAFETY: invariant: `context.rsp` is 8 bytes below the pad word,
         // inside this thread's unused stack; established here.
-        unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
+        unsafe { (tcb.context.stack_ptr() as *mut u64).write_volatile(0) };
     });
     Ok(h)
 }
@@ -1083,7 +1073,7 @@ fn spawn_inner(
     stack_pages: usize,
 ) -> Result<ThreadHandle, SpawnError> {
     // AcqRel: pairs with the Release store in `testing::fail_next_fork_stack`.
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if current_pid() != 0 && testing::FAIL_FORK_STACK.swap(false, Ordering::AcqRel) {
         return Err(SpawnError::NoMemory);
     }
@@ -1193,11 +1183,7 @@ fn spawn_inner(
         }
     };
     tcb.stack = stack;
-    prepare_thread(&mut tcb.context, top, tramp);
-    // SAFETY: `prepare_thread` put `context.rsp` 8 bytes below `top`,
-    // inside the thread's own stack, mapped and not yet run on; established
-    // by `vibeos::thread::prepare_thread`.
-    unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
+    prepare_kernel_context(&mut tcb.context, top, tramp);
 
     let placed = with_sched(|s| {
         let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
@@ -1267,11 +1253,7 @@ fn fill_tcb(
     // Relaxed: a statistic, reset before the thread first runs; pairs with nothing.
     tcb.syscall_count.store(0, Ordering::Relaxed);
     tcb.pid = pid;
-    prepare_thread(&mut tcb.context, top, tramp);
-    // SAFETY: `prepare_thread` put `context.rsp` 8 bytes below `top`,
-    // inside the thread's own stack, mapped and not yet run on; established
-    // by `vibeos::thread::prepare_thread`.
-    unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
+    prepare_kernel_context(&mut tcb.context, top, tramp);
 }
 
 pub fn sleep_ms(ms: u64) {
@@ -1294,7 +1276,7 @@ pub fn park(deadline: Option<Instant>) {
 }
 
 /// Hold SCHED for `f`. IF is off for the whole call (IRQ-aware lock).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
     let _g = SCHED.lock();
     f()
@@ -1310,7 +1292,7 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     let ctx = sync_init::sleep_ctx();
     let _irq = InterruptGuard::enter();
     // Dropped last, once the places are delivered.
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     let _window = testing::window_enter();
     // The wakes `f` recorded, placed after SCHED drops, at most
     // `PLACE_BATCH` per lock hold: the rest wait in `places`, where this
@@ -1323,11 +1305,11 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
         let n = s.take_places(&mut batch);
         (r, n)
     };
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::preempt_before_places(n);
     loop {
         for &(cpu, id, slot) in batch.iter().take(n) {
-            #[cfg(feature = "kernel_tests")]
+            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
             testing::place_stall(id);
             crate::ipi_init::place_ready(cpu, id, slot as usize);
         }
@@ -1353,7 +1335,7 @@ pub fn last_wait_outcome() -> WaitOutcome {
 
 /// Test helper. Local CPU only — the target must already sit on this
 /// runq (spawn_here). Same nest-swap as `schedule`.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[allow(
     clippy::expect_used,
     reason = "invariant I9: a TCB slot once filled is never emptied, so an id `spawn_here` returned always names one (`thread_init::spawn_inner`)"
@@ -1470,7 +1452,7 @@ pub fn current_cpu() -> u32 {
     crate::arch::cpu_id_hint()
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub use testing::{
     cpu_of, exited, ktest_drop_timeout, ktest_last_overdue, ktest_preempt_before_places,
     ktest_sweeps, name, state, try_state,
@@ -1481,5 +1463,5 @@ pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
 }
 
 /// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub mod testing;

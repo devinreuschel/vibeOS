@@ -107,6 +107,10 @@ pub enum IrqSpecifier {
         line: u8,
     },
     LapicLvt(LapicLvt),
+    /// GIC INTID: SGI 0–15, PPI 16–31, SPI 32–1019, LPI ≥ 8192.
+    Gic {
+        intid: u32,
+    },
 }
 
 /// Address and data a chip writes into an MSI/MSI-X entry.
@@ -442,6 +446,7 @@ mod tests {
                 IrqSpecifier::Gsi { gsi, .. } => gsi,
                 IrqSpecifier::Isa { line } => 0x20u32.saturating_add(u32::from(line)),
                 IrqSpecifier::LapicLvt(lvt) => lvt.hwirq(),
+                IrqSpecifier::Gic { intid } => intid,
             };
             self.claim(hwirq, cpu)?;
             Ok(hwirq)
@@ -545,6 +550,12 @@ mod tests {
         assert_eq!(ha, STUB_MSI_BASE);
         assert_eq!(hb, STUB_MSI_BASE + 1);
         assert_eq!(chip.cpu_of(ha), Some(1));
+
+        let gic = table
+            .map_wired(chip, IrqSpecifier::Gic { intid: 27 }, 0)
+            .unwrap();
+        assert_eq!(table.hwirq(gic), Some(27));
+        table.free(gic).unwrap();
 
         let tick = table
             .map_percpu(chip, IrqSpecifier::LapicLvt(LapicLvt::Timer))

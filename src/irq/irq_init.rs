@@ -97,6 +97,7 @@ enum Route {
     )]
     Msi,
     Msix,
+    Gic,
 }
 
 pub(super) struct Threaded {
@@ -135,6 +136,20 @@ fn lapic_msi() -> &'static dyn IrqChip {
     *LAPIC_MSI.get()
 }
 
+fn msi_chip() -> &'static dyn IrqChip {
+    #[cfg(target_arch = "aarch64")]
+    {
+        match crate::arch::aarch64::gic::chip() {
+            Some(c) => c,
+            None => crate::boot::halt_with("vibeOS: irq: no gic"),
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        lapic_msi()
+    }
+}
+
 fn publish_vec(hwirq: u32, irq: IrqId) {
     let Ok(v) = u8::try_from(hwirq) else {
         return;
@@ -165,7 +180,10 @@ pub(super) fn with_pool<R>(f: impl FnOnce(&mut VectorPool) -> R) -> R {
 pub use super::hardirq::in_hard_irq;
 
 fn device_irq(frame: &mut arch::idt::TrapFrame) {
+    #[cfg(target_arch = "x86_64")]
     dispatch(frame.vector as u8);
+    #[cfg(target_arch = "aarch64")]
+    dispatch(frame.slot as u8);
 }
 
 pub fn dispatch(vec: u8) {
@@ -232,6 +250,64 @@ pub fn dispatch(vec: u8) {
     hardirq::set(false);
 }
 
+/// Deliver a GIC INTID to its `IrqId` handler, or the timer / SGI path.
+#[cfg(target_arch = "aarch64")]
+pub fn dispatch_intid(intid: u32) {
+    hardirq::set(true);
+    if intid < 16 {
+        match intid {
+            0 => crate::ipi_init::on_reschedule_ipi(),
+            1 => crate::ipi_init::on_call_ipi(),
+            _ => {}
+        }
+        hardirq::set(false);
+        return;
+    }
+    if intid == crate::arch::aarch64::timer::intid() {
+        apic_init::on_timer_irq();
+        hardirq::set(false);
+        return;
+    }
+    let irq_raw = crate::arch::aarch64::gic::lookup(intid);
+    let irq = IrqId::from_raw(irq_raw);
+    if let Some(i) = irq.slot() {
+        if let Some(slot) = HANDLERS.get(i) {
+            // Acquire: pairs with the Release store in `set_handler`.
+            let p = slot.load(Ordering::Acquire);
+            if p != 0 {
+                // SAFETY: a nonzero `HANDLERS` slot holds a `fn()`;
+                // established by `irq::irq_init::set_handler`.
+                let h: Handler = unsafe { core::mem::transmute(p) };
+                h();
+            }
+        }
+        let (top, work, ctx) = with_irq(|s| {
+            (
+                s.th.top.get(i).copied().flatten(),
+                s.th.work.get(i).copied().flatten(),
+                s.th.ctx.get(i).cloned().flatten(),
+            )
+        });
+        if work.is_some() || top.is_some() {
+            if let Some(h) = top {
+                h(ctx.as_deref());
+            }
+            thread_init::with_sched(|sched| {
+                with_irq(|s| {
+                    if let Some(p) = s.th.pending.get_mut(i) {
+                        *p = true;
+                    }
+                    if s.th.started {
+                        sched.wake_one(&mut s.th.wq);
+                    }
+                });
+            });
+            drop(ctx);
+        }
+    }
+    hardirq::set(false);
+}
+
 /// Interrupts no handler owned, per CPU (`acpi::MAX_CPUS`, the cap
 /// `hardirq::IN_ISR` shares) and per vector. Static: the count runs in
 /// hard IRQ, where nothing allocates.
@@ -241,7 +317,7 @@ static UNOWNED: [[AtomicU64; 256]; vibeos::acpi::MAX_CPUS] =
 /// (0: never logged).
 static UNOWNED_LOGGED: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 /// `irq: no handler` lines printed per vector (kernel_tests only).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 static UNOWNED_LINES: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
 /// An interrupt on `vec` that no handler owns (DESIGN §5.2, §2.10): count
@@ -290,7 +366,7 @@ pub fn unowned(vec: u8) {
         return;
     }
     // Relaxed: a count `unowned_lines` reads; pairs with nothing.
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     UNOWNED_LINES[usize::from(vec)].fetch_add(1, Ordering::Relaxed);
     crate::marker!(
         "vibeOS: irq: no handler for vector 0x{:02x} cpu {} count {}",
@@ -308,6 +384,10 @@ pub fn unowned(vec: u8) {
         reason = "ROADMAP §25.7's soak samples it; the in-guest storm test reads it today"
     )
 )]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn unowned_count(vec: u8, cpu: u32) -> u64 {
     // Relaxed: a count; pairs with nothing.
     UNOWNED
@@ -317,7 +397,7 @@ pub fn unowned_count(vec: u8, cpu: u32) -> u64 {
 }
 
 /// `irq: no handler` lines printed for `vec` so far.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn unowned_lines(vec: u8) -> u64 {
     // Relaxed: a count; pairs with nothing.
     UNOWNED_LINES[usize::from(vec)].load(Ordering::Relaxed)
@@ -331,11 +411,15 @@ pub fn unowned_lines(vec: u8) -> u64 {
         reason = "ROADMAP §6.3 / §11.3: in-guest tests allocate without a device"
     )
 )]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn allocate(cpu: u32) -> Result<IrqId, IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
-    let chip = lapic_msi();
+    let chip = msi_chip();
     let mut hw = [0u32; 1];
     let got = chip.alloc_msi(1, cpu, &mut hw)?;
     let Some(hwirq) = hw.first().copied().filter(|_| got == 1) else {
@@ -344,6 +428,8 @@ pub fn allocate(cpu: u32) -> Result<IrqId, IrqError> {
     match with_irq(|s| {
         let irq = s.table.bind(chip, hwirq, cpu)?;
         publish_vec(hwirq, irq);
+        #[cfg(target_arch = "aarch64")]
+        crate::arch::aarch64::gic::publish(hwirq, irq.raw());
         Ok(irq)
     }) {
         Ok(irq) => Ok(irq),
@@ -371,6 +457,16 @@ pub fn map_wired(spec: IrqSpecifier) -> Result<IrqId, IrqError> {
         IrqSpecifier::Gsi { .. } => ioapic(),
         IrqSpecifier::Isa { .. } => pic(),
         IrqSpecifier::LapicLvt(_) => return Err(IrqError::BadVector),
+        IrqSpecifier::Gic { .. } => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                crate::arch::aarch64::gic::chip().ok_or(IrqError::NoRoute)?
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                return Err(IrqError::NoRoute);
+            }
+        }
     };
     let hwirq = chip.translate(spec, 0)?;
     if let IrqSpecifier::Gsi {
@@ -388,13 +484,18 @@ pub fn map_wired(spec: IrqSpecifier) -> Result<IrqId, IrqError> {
     }
     match with_irq(|s| {
         let irq = s.table.bind(chip, hwirq, 0)?;
-        if let IrqSpecifier::Gsi { gsi, .. } = spec
-            && let Some(i) = irq.slot()
+        if let Some(i) = irq.slot()
             && let Some(r) = s.routes.get_mut(i)
         {
-            *r = Route::IoApic { gsi };
+            match spec {
+                IrqSpecifier::Gsi { gsi, .. } => *r = Route::IoApic { gsi },
+                IrqSpecifier::Gic { .. } => *r = Route::Gic,
+                _ => {}
+            }
         }
         publish_vec(hwirq, irq);
+        #[cfg(target_arch = "aarch64")]
+        crate::arch::aarch64::gic::publish(hwirq, irq.raw());
         Ok(irq)
     }) {
         Ok(irq) => Ok(irq),
@@ -414,7 +515,7 @@ pub fn alloc_msi(dev: &Device, n: u8) -> Result<IrqSet, IrqError> {
     if n == 0 || (n as usize) > irq::IRQ_SET_MAX {
         return Err(IrqError::BadVector);
     }
-    let chip = lapic_msi();
+    let chip = msi_chip();
     let mut hw = [0u32; irq::IRQ_SET_MAX];
     let Some(out) = hw.get_mut(..n as usize) else {
         return Err(IrqError::BadVector);
@@ -434,6 +535,8 @@ pub fn alloc_msi(dev: &Device, n: u8) -> Result<IrqSet, IrqError> {
             match s.table.bind(chip, h, 0) {
                 Ok(irq) => {
                     publish_vec(h, irq);
+                    #[cfg(target_arch = "aarch64")]
+                    crate::arch::aarch64::gic::publish(h, irq.raw());
                     if set.push(irq).is_err() {
                         unpublish_vec(h);
                         unbind_slot(s, irq);
@@ -450,7 +553,20 @@ pub fn alloc_msi(dev: &Device, n: u8) -> Result<IrqSet, IrqError> {
         }
         Ok(set)
     }) {
-        Ok(set) => Ok(set),
+        Ok(set) => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                let id = pci_device_id(dev);
+                let mut i = 0usize;
+                while i < got {
+                    if let Some(h) = hw.get(i) {
+                        crate::arch::aarch64::gic::map_its_event(id, *h);
+                    }
+                    i += 1;
+                }
+            }
+            Ok(set)
+        }
         Err(e) => {
             let mut i = 0usize;
             while i < got {
@@ -462,6 +578,27 @@ pub fn alloc_msi(dev: &Device, n: u8) -> Result<IrqSet, IrqError> {
             Err(e)
         }
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn pci_device_id(dev: &Device) -> u32 {
+    let rid = (u32::from(dev.addr.bus) << 8)
+        | (u32::from(dev.addr.device) << 3)
+        | u32::from(dev.addr.function);
+    let Some(h) = crate::machine_init::info().and_then(|d| d.pci_hosts().first()) else {
+        return rid;
+    };
+    let mut i = 0usize;
+    while i < h.msi_map_len {
+        if let Some(e) = h.msi_map.get(i)
+            && rid >= e.rid_base
+            && rid.wrapping_sub(e.rid_base) < e.length
+        {
+            return e.msi_base.wrapping_add(rid.wrapping_sub(e.rid_base));
+        }
+        i += 1;
+    }
+    rid
 }
 
 fn unbind_slot(s: &mut IrqState, irq: IrqId) {
@@ -485,22 +622,39 @@ fn unwind_bound(s: &mut IrqState, set: &IrqSet) {
     }
 }
 
-/// One [`IrqId`] for a per-CPU source (LAPIC LVT). Does not steal the
-/// vector's IDT body.
-#[expect(
-    dead_code,
-    reason = "ROADMAP §11.3 LAPIC LVT / GIC PPI; no production caller yet"
+/// One [`IrqId`] for a per-CPU source (LAPIC LVT or GIC PPI).
+#[cfg_attr(
+    not(target_arch = "aarch64"),
+    expect(
+        dead_code,
+        reason = "ROADMAP §11.3 LAPIC LVT / GIC PPI; no production caller yet"
+    )
 )]
 pub fn map_percpu(spec: IrqSpecifier) -> Result<IrqId, IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
-    let IrqSpecifier::LapicLvt(_) = spec else {
-        return Err(IrqError::BadVector);
+    let chip = match spec {
+        IrqSpecifier::LapicLvt(_) => lapic_msi(),
+        IrqSpecifier::Gic { .. } => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                crate::arch::aarch64::gic::chip().ok_or(IrqError::NoRoute)?
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                return Err(IrqError::NoRoute);
+            }
+        }
+        _ => return Err(IrqError::BadVector),
     };
-    let chip = lapic_msi();
     let hwirq = chip.translate(spec, 0)?;
-    with_irq(|s| s.table.bind(chip, hwirq, 0))
+    with_irq(|s| {
+        let irq = s.table.bind(chip, hwirq, 0)?;
+        #[cfg(target_arch = "aarch64")]
+        crate::arch::aarch64::gic::publish(hwirq, irq.raw());
+        Ok(irq)
+    })
 }
 
 /// The x86 hwirq (IDT vector) for `irq`.
@@ -569,7 +723,7 @@ pub fn set_handler(irq: IrqId, h: Handler) -> Result<(), IrqError> {
         if s.table.hwirq(irq).is_none() {
             return Err(IrqError::BadVector);
         }
-        let wired = matches!(s.routes.get(i), Some(Route::IoApic { .. }));
+        let wired = matches!(s.routes.get(i), Some(Route::IoApic { .. } | Route::Gic));
         Ok((s.table.chip(irq), s.table.hwirq(irq), wired))
     })?;
     let Some(slot) = HANDLERS.get(i) else {
@@ -614,7 +768,7 @@ pub fn set_threaded(
             if let Some(c) = s.th.ctx.get_mut(i) {
                 *c = ctx;
             }
-            let wired = matches!(s.routes.get(i), Some(Route::IoApic { .. }));
+            let wired = matches!(s.routes.get(i), Some(Route::IoApic { .. } | Route::Gic));
             Ok((s.table.chip(irq), s.table.hwirq(irq), wired, old))
         })
     })?;
@@ -860,6 +1014,21 @@ pub fn init() {
         );
     }
     install_pool_stubs();
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arch::aarch64::gic::set_dispatch(dispatch_intid);
+        let intid = crate::arch::aarch64::timer::intid();
+        if intid != 0 {
+            match map_percpu(IrqSpecifier::Gic { intid }) {
+                Ok(_) => {}
+                Err(e) => crate::klog!(
+                    vibeos::log::Level::Error,
+                    "vibeOS: irq: timer ppi {intid}: {}",
+                    e.as_str()
+                ),
+            }
+        }
+    }
 }
 
 fn install_pool_stubs() {

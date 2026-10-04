@@ -9,10 +9,10 @@ use core::ops::{Deref, DerefMut};
 use core::panic::Location;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 use core::sync::atomic::{AtomicU16, AtomicUsize};
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 use vibeos::atomic::statics::AtomicU8;
 
 use vibeos::lock::{Held, RANK_SCHED, RankError};
@@ -34,7 +34,7 @@ pub fn set_spin_poll(f: fn()) {
 }
 
 /// Whether the spin-poll hook is set (`sync::ktest`).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(super) fn spin_poll_installed() -> bool {
     // Acquire: pairs with the Release store in `set_spin_poll`.
     !SPIN_POLL.load(Ordering::Acquire).is_null()
@@ -124,7 +124,7 @@ impl<T> SpinMutex<T> {
             // tracer subtracts it from this stretch, and only it.
             let _spin = crate::sched::irqoff::exempt();
             loop {
-                #[cfg(feature = "kernel_tests")]
+                #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
                 record_spin(self.rank);
                 spin_poll();
                 core::hint::spin_loop();
@@ -169,7 +169,7 @@ impl<T> SpinMutex<T> {
 
     /// Whether any CPU, this one included, holds the lock right now. A
     /// snapshot, for tests: another CPU may take or drop it at once.
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     pub fn is_locked(&self) -> bool {
         self.lock.is_locked()
     }
@@ -209,14 +209,14 @@ fn owner_token() -> usize {
 }
 
 /// Ranks `SPINS` counts (index by rank; 0 unused).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(super) const SPIN_RANKS: usize = 7;
 
 /// Spin iterations per lock rank, which `sync::ktest::spin_counts` reads.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(super) static SPINS: [AtomicU64; SPIN_RANKS] = [const { AtomicU64::new(0) }; SPIN_RANKS];
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 fn record_spin(rank: u8) {
     let i = rank as usize;
     if i < SPIN_RANKS {
@@ -269,7 +269,7 @@ pub fn held_mask() -> u8 {
 #[track_caller]
 pub fn assert_not_hard_irq() {
     let hard = crate::irq::hardirq::in_hard_irq();
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if hard {
         testing::trip(testing::SleepTrip::HardIrq);
     }
@@ -324,7 +324,7 @@ impl SleepCtx {
     /// set, as the rank checker is.
     #[track_caller]
     pub fn check(self) {
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         if self.hard_irq {
             testing::trip(testing::SleepTrip::HardIrq);
         }
@@ -336,7 +336,7 @@ impl SleepCtx {
         if !SLEEP_CHECKS || halting() {
             return;
         }
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         if self.held != 0 {
             testing::trip(testing::SleepTrip::Held);
         }
@@ -346,7 +346,7 @@ impl SleepCtx {
             self.held,
             Location::caller()
         );
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         if !self.if_on {
             testing::trip(testing::SleepTrip::IfOff);
         }
@@ -390,7 +390,7 @@ pub fn assert_switch_clean() {
         return;
     }
     let mask = held_mask();
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if mask != 0 {
         testing::trip(testing::SleepTrip::SwitchHeld);
     }
@@ -488,7 +488,7 @@ impl Drop for NoReclaim {
     }
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 static RANK_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 #[track_caller]
@@ -498,7 +498,7 @@ static RANK_FAILURES: AtomicU64 = AtomicU64::new(0);
 )]
 fn rank_refused(e: RankError, held: Held) -> ! {
     // Relaxed: a statistic `testing::rank_failures` reads; pairs with nothing.
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     RANK_FAILURES.fetch_add(1, Ordering::Relaxed);
     panic!(
         "lock order: {e} (held {:#x}) at {}",
@@ -543,9 +543,9 @@ fn lock_enter(rank: u8, nested: bool) -> u8 {
     }
     // Relaxed: as the load above; pairs with nothing.
     let now = slot.fetch_add(Held::count_unit(rank), Ordering::Relaxed);
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     trace_record(rank, Held::from_raw(now).count(rank) + 1);
-    #[cfg(not(feature = "kernel_tests"))]
+    #[cfg(not(all(feature = "kernel_tests", target_arch = "x86_64")))]
     let _ = now;
     rank
 }
@@ -623,21 +623,21 @@ impl Drop for LocklessSection {
 }
 
 /// The CPU whose acquisitions are traced; `usize::MAX` when disarmed.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 static TRACE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 static TRACE_LEN: AtomicUsize = AtomicUsize::new(0);
 /// `rank << 8 | count` of each entry.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 static TRACE_RC: [AtomicU16; testing::TRACE_CAP] =
     [const { AtomicU16::new(0) }; testing::TRACE_CAP];
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 static TRACE_AT: [AtomicPtr<Location<'static>>; testing::TRACE_CAP] =
     [const { AtomicPtr::new(ptr::null_mut()) }; testing::TRACE_CAP];
 
 /// Record one acquisition if this CPU is armed. Relaxed throughout:
 /// only the armed CPU writes, and it reads the result itself.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[track_caller]
 fn trace_record(rank: u8, count: u8) {
     // Relaxed: only the armed CPU matches, and it reads the trace itself; pairs with nothing.
@@ -663,7 +663,7 @@ fn trace_record(rank: u8, count: u8) {
 }
 
 /// Test access to the rank checker (kernel_tests only).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub mod testing {
     use super::*;
 

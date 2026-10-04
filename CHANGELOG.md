@@ -12,6 +12,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Added
 
+- aarch64 boot CPU: GICv2/v3, generic timer, full vector table, idle `wfi`
+  ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
 - RAM-only physmap: a 9 GiB guest puts RAM above 8 GiB in the buddy; MMIO
   is `ioremap` ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
 - One portable `MachineDesc` from the device tree and ACPI; reserved FDT

@@ -143,6 +143,10 @@ fn paint(ed: &LineEditor, painted: &mut usize) {
 
 /// Run one command line: the REPL's and the in-guest tests'.
 #[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn dispatch_line(line: &str) -> Result<(), &'static str> {
     let mut toks = [""; MAX_TOKENS];
     let n = match vibeos::shell::tokenize(line, &mut toks) {

@@ -310,10 +310,10 @@ const _: () = {
 const _: () = {
     use core::mem::{align_of, size_of};
     const DEBUG: bool = cfg!(debug_assertions);
-    assert!(size_of::<PerCpu>() == if DEBUG { 1864 } else { 1096 });
+    assert!(size_of::<PerCpu>() == if DEBUG { 1904 } else { 1136 });
+    assert!(offset_of!(PerCpu, runq) == 176);
+    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1896 } else { 1128 });
     assert!(align_of::<PerCpu>() == 8);
-    assert!(offset_of!(PerCpu, runq) == 136);
-    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1856 } else { 1088 });
     assert!(size_of::<PerCpuRemote>() == 256);
     assert!(align_of::<PerCpuRemote>() == 64);
     assert!(offset_of!(PerCpuRemote, apic_id) == 168);

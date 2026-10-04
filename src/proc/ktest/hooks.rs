@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 use vibeos::proc::SIGKILL;
 use vibeos::syscall::UserFrame;
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::desc::star_value;
 
 use crate::addr_space_init;

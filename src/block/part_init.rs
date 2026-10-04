@@ -15,7 +15,7 @@ use vibeos::part::{
     self, MBR_EXTENDED, MBR_LINUX, PartKind, Table, gpt_type_name, mbr_type_name, pack_ebr,
     pack_mbr,
 };
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 use vibeos::part::{
     GPT_ENTRY_SIZE, GUID_EFI, GUID_LINUX, GptHeaderInfo, entries_crc, pack_gpt_entry,
     pack_gpt_header, pack_protective_mbr,
@@ -29,11 +29,11 @@ const RAM0_EXT: u32 = 120;
 const RAM0_EXT_N: u32 = 80;
 const RAM0_EBR2: u32 = 160;
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 const VDA_P1: u64 = 256;
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 const VDA_P1_N: u64 = 128;
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 const VDA_P2: u64 = 512;
 
 /// Set once `init` has scanned; `block::ktest` reads it.
@@ -161,7 +161,7 @@ fn stamp_ram0_mbr(ram0: &BlockRef) -> Result<(), BlockError> {
 /// True when LBA 0 to 33 and the last 33 sectors of `vda` all read back as
 /// zeros: the only disk the `kernel_tests` build stamps (F003, DESIGN §10.5).
 /// A read error is returned, never read as blank.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 fn vda_blank(vda: &BlockRef, cap: u64) -> Result<bool, BlockError> {
     let mut sec = [0u8; 512];
     let tail = cap.checked_sub(33).ok_or(BlockError::Inval)?;
@@ -182,7 +182,7 @@ fn vda_blank(vda: &BlockRef, cap: u64) -> Result<bool, BlockError> {
 
 /// Test builds only: stamps the fixed two-entry GPT the vdap1/vdap2 tests
 /// read, and only on an all-zero `vda` (F003).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 fn stamp_vda_gpt(vda: &BlockRef) -> Result<(), BlockError> {
     let cap = vda.capacity_sectors()?;
     let bs = vda.logical_block_size()?;
@@ -316,7 +316,7 @@ pub fn init() {
             e.as_str()
         );
     }
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if let Some(vda) = blockdev_init::lookup(b"vda")
         && !matches!(parse_dev(&vda), Ok(t) if t.n > 0)
     {

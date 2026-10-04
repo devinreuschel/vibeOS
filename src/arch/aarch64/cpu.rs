@@ -1,0 +1,462 @@
+//! aarch64 CPU primitives: DAIF, halt, `wfi`, system registers.
+//!
+//! DAIF writes omit `nomem` so they are compiler barriers (ROADMAP §10.3,
+//! F091). They never rewrite `SCTLR_EL1`, `CNTKCTL_EL1`, `PMUSERENR_EL0`,
+//! or `CPACR` (#202 wrote those once).
+
+use core::arch::asm;
+use core::marker::PhantomData;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+
+use vibeos::arch::aarch64::sysreg;
+use vibeos::log::Level;
+
+use crate::cell::BootCell;
+
+/// PSTATE.I (IRQs).
+const DAIF_I: u64 = 1 << 7;
+
+static EL2_VHE: BootCell<bool> = BootCell::new();
+static ISA_OK: AtomicBool = AtomicBool::new(false);
+static OVERFLOW_SP: AtomicU64 = AtomicU64::new(0);
+
+/// Whether entry was EL2 with VHE (`HCR_EL2.{E2H,TGE}`).
+pub fn el2_vhe() -> bool {
+    EL2_VHE.try_get().copied().unwrap_or(false)
+}
+
+pub fn current_el() -> u8 {
+    let v: u64;
+    // SAFETY: `CurrentEL` is always readable at EL1/EL2; established here.
+    unsafe { asm!("mrs {0}, CurrentEL", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    ((v >> 2) & 3) as u8
+}
+
+fn hcr_el2() -> u64 {
+    let v: u64;
+    // SAFETY: readable at EL2; callers check `current_el`. established here.
+    unsafe { asm!("mrs {0}, hcr_el2", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// Record the exception level Limine chose. Never changes it.
+pub fn note_exception_level() {
+    let el = current_el();
+    let vhe = el == 2 && {
+        let h = hcr_el2();
+        h & ((1 << 34) | (1 << 27)) == (1 << 34) | (1 << 27)
+    };
+    // SAFETY: I22, one write on the BSP before SMP; established here.
+    unsafe { EL2_VHE.set(vhe) };
+    if vhe {
+        crate::marker!("vibeOS: el: 2 vhe");
+    } else {
+        crate::marker!("vibeOS: el: {el}");
+    }
+}
+
+/// ISA floor: FEAT_LSE (`Atomic >= 2`) and FEAT_PAN (`PAN != 0`).
+pub fn check_isa_floor() {
+    let isar0: u64;
+    let mmfr1: u64;
+    // SAFETY: ID registers are readable at EL1/EL2; established here.
+    unsafe {
+        asm!("mrs {0}, ID_AA64ISAR0_EL1", out(reg) isar0, options(nomem, nostack, preserves_flags));
+        asm!("mrs {0}, ID_AA64MMFR1_EL1", out(reg) mmfr1, options(nomem, nostack, preserves_flags));
+    }
+    let atomic = (isar0 >> 20) & 0xF;
+    let pan = (mmfr1 >> 20) & 0xF;
+    if atomic < 2 || pan == 0 {
+        crate::boot::halt_with("vibeOS: cpu: isa floor (lse+pan) missing");
+    }
+    // Release: pairs with the Acquire load in `isa_ok`.
+    ISA_OK.store(true, Ordering::Release);
+    crate::klog!(
+        Level::Info,
+        "vibeOS: cpu: isar0={isar0:#x} mmfr1={mmfr1:#x} lse=1 pan=1"
+    );
+}
+
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub fn isa_ok() -> bool {
+    // Acquire: pairs with the Release store in `check_isa_floor`.
+    ISA_OK.load(Ordering::Acquire)
+}
+
+#[inline]
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub fn read_sysreg(name_hint: u64) -> u64 {
+    let _ = name_hint;
+    0
+}
+
+/// Write `TTBR1` (and `TTBR0` to the empty user root is the caller's).
+///
+/// # Safety
+/// `ttbr1` is a complete TTBR1 root that maps this CPU's code, stack, and
+/// everything it touches next.
+pub unsafe fn write_ttbr1(ttbr1: u64) {
+    let vhe = el2_vhe();
+    // SAFETY: this fn's `# Safety` (here); `msr` only loads the root.
+    unsafe {
+        if vhe {
+            asm!("msr ttbr1_el2, {0}", in(reg) ttbr1, options(nostack, preserves_flags));
+        } else {
+            asm!("msr ttbr1_el1, {0}", in(reg) ttbr1, options(nostack, preserves_flags));
+        }
+        asm!("isb", options(nostack, preserves_flags));
+    }
+}
+
+pub fn read_ttbr1() -> u64 {
+    let v: u64;
+    // SAFETY: TTBR1 is readable; established here.
+    unsafe {
+        if el2_vhe() {
+            asm!("mrs {0}, ttbr1_el2", out(reg) v, options(nomem, nostack, preserves_flags));
+        } else {
+            asm!("mrs {0}, ttbr1_el1", out(reg) v, options(nomem, nostack, preserves_flags));
+        }
+    }
+    v
+}
+
+/// Write MAIR and TCR from the computed values. Not SCTLR.
+pub fn write_translation_regs() {
+    let asid16 = {
+        let mmfr0: u64;
+        // SAFETY: ID register; established here.
+        unsafe {
+            asm!("mrs {0}, ID_AA64MMFR0_EL1", out(reg) mmfr0, options(nomem, nostack, preserves_flags));
+        }
+        sysreg::asid16_from_mmfr0(mmfr0)
+    };
+    let mair = sysreg::mair_el1();
+    let tcr = sysreg::tcr_el1(asid16);
+    // SAFETY: whole writes of the computed translation policy; SCTLR is
+    // left as Limine/#202 set it; established here.
+    unsafe {
+        if el2_vhe() {
+            asm!("msr mair_el2, {0}", in(reg) mair, options(nostack, preserves_flags));
+            asm!("msr tcr_el2, {0}", in(reg) tcr, options(nostack, preserves_flags));
+        } else {
+            asm!("msr mair_el1, {0}", in(reg) mair, options(nostack, preserves_flags));
+            asm!("msr tcr_el1, {0}", in(reg) tcr, options(nostack, preserves_flags));
+        }
+        asm!("isb", options(nostack, preserves_flags));
+    }
+}
+
+pub fn tlbi_all() {
+    // SAFETY: local TLB invalidate; established here.
+    unsafe {
+        if el2_vhe() {
+            asm!("tlbi alle2", options(nostack, preserves_flags));
+        } else {
+            asm!("tlbi vmalle1", options(nostack, preserves_flags));
+        }
+        asm!("dsb ish", options(nostack, preserves_flags));
+        asm!("isb", options(nostack, preserves_flags));
+    }
+}
+
+pub fn tlbi_va(va: u64) {
+    let page = va >> 12;
+    // SAFETY: invalidate one VA; established here.
+    unsafe {
+        if el2_vhe() {
+            asm!("tlbi vae2, {0}", in(reg) page, options(nostack, preserves_flags));
+        } else {
+            asm!("tlbi vaae1, {0}", in(reg) page, options(nostack, preserves_flags));
+        }
+        asm!("dsb ish", options(nostack, preserves_flags));
+        asm!("isb", options(nostack, preserves_flags));
+    }
+}
+
+#[inline]
+pub fn interrupts_enabled() -> bool {
+    let daif: u64;
+    // SAFETY: DAIF read; established here.
+    unsafe { asm!("mrs {0}, daif", out(reg) daif, options(nomem, nostack, preserves_flags)) };
+    daif & DAIF_I == 0
+}
+
+#[inline]
+pub fn irq_disable() {
+    // SAFETY: mask IRQs on this CPU; no `nomem` (compiler barrier). established here.
+    unsafe { asm!("msr daifset, #2", options(nostack, preserves_flags)) };
+}
+
+#[inline]
+pub fn irq_enable() {
+    // SAFETY: unmask IRQs on this CPU; no `nomem`. established here.
+    unsafe { asm!("msr daifclr, #2", options(nostack, preserves_flags)) };
+}
+
+/// Clear PSTATE.A once the full vector table is live.
+pub fn clear_pstate_a() {
+    // SAFETY: SError is taken where raised after full VBAR; established here.
+    unsafe { asm!("msr daifclr, #4", options(nostack, preserves_flags)) };
+}
+
+#[inline]
+pub fn cli() {
+    irq_disable();
+}
+
+#[inline]
+pub fn sti() {
+    irq_enable();
+}
+
+/// `CNTVCT_EL0` after `isb`.
+#[inline]
+pub fn cntvct() -> u64 {
+    let v: u64;
+    // SAFETY: CNTVCT is the virtual counter; `isb` before the read. established here.
+    unsafe {
+        asm!(
+            "isb",
+            "mrs {0}, cntvct_el0",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    v
+}
+
+/// `wfi` with IRQs still masked. Wakes on a pending interrupt anyway.
+#[inline]
+pub fn idle_wait() {
+    // SAFETY: `wfi` waits; DAIF is unchanged; established here.
+    unsafe { asm!("wfi", options(nomem, nostack, preserves_flags)) };
+}
+
+#[inline]
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub fn wait_for_interrupt() {
+    idle_wait();
+}
+
+pub fn halt() -> ! {
+    irq_disable();
+    loop {
+        idle_wait();
+    }
+}
+
+/// The one-interrupt wait used by calibration loops.
+pub fn hlt_once() {
+    idle_wait();
+}
+
+pub struct InterruptGuard {
+    restore: bool,
+    _not_send: PhantomData<*const ()>,
+}
+
+impl InterruptGuard {
+    #[inline]
+    #[track_caller]
+    pub fn enter() -> Self {
+        let enabled = interrupts_enabled();
+        irq_disable();
+        run_hook(&NEST_ENTER);
+        if enabled {
+            crate::sched::irqoff::off(crate::sched::irqoff::Site::caller(
+                core::panic::Location::caller(),
+            ));
+        }
+        Self {
+            restore: enabled,
+            _not_send: PhantomData,
+        }
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        if self.restore {
+            crate::sched::irqoff::on();
+            run_hook(&NEST_LEAVE);
+            irq_enable();
+        }
+    }
+}
+
+#[inline]
+pub fn stack_pointer() -> u64 {
+    let sp: u64;
+    // SAFETY: reads SP; established here.
+    unsafe { asm!("mov {0}, sp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
+    sp
+}
+
+#[inline]
+pub fn frame_pointer() -> u64 {
+    let fp: u64;
+    // SAFETY: reads x29; established here.
+    unsafe { asm!("mov {0}, x29", out(reg) fp, options(nomem, nostack, preserves_flags)) };
+    fp
+}
+
+#[inline]
+pub fn instruction_pointer() -> u64 {
+    let lr: u64;
+    // SAFETY: approximate PC from LR; established here.
+    unsafe { asm!("mov {0}, x30", out(reg) lr, options(nomem, nostack, preserves_flags)) };
+    lr
+}
+
+#[inline]
+pub fn irq_flags() -> u64 {
+    let daif: u64;
+    // SAFETY: DAIF read; established here.
+    unsafe { asm!("mrs {0}, daif", out(reg) daif, options(nomem, nostack, preserves_flags)) };
+    daif
+}
+
+pub fn set_overflow_sp(sp: u64) {
+    // Release: pairs with the Acquire load in `overflow_sp`.
+    OVERFLOW_SP.store(sp, Ordering::Release);
+}
+
+pub fn overflow_sp() -> u64 {
+    // Acquire: pairs with the Release store in `set_overflow_sp`.
+    OVERFLOW_SP.load(Ordering::Acquire)
+}
+
+#[inline]
+pub fn hw_rng64() -> Option<u64> {
+    None
+}
+
+#[inline]
+pub fn user_tls() -> u64 {
+    let v: u64;
+    // SAFETY: TPIDR_EL0 is the user TLS register; established here.
+    unsafe { asm!("mrs {0}, tpidr_el0", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// # Safety
+/// `v` is the thread's TLS base.
+#[inline]
+pub unsafe fn set_user_tls(v: u64) {
+    // SAFETY: this fn's `# Safety` (here).
+    unsafe { asm!("msr tpidr_el0, {0}", in(reg) v, options(nomem, nostack, preserves_flags)) };
+}
+
+static NEST_ENTER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+static NEST_LEAVE: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+static CPU_INDEX: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the per-CPU hooks: `InterruptGuard`'s nesting count and this
+/// CPU's index. The per-CPU module's `init_bsp` calls it once, on the BSP.
+pub fn set_per_cpu_hooks(nest_enter: fn(), nest_leave: fn(), cpu_index: fn() -> Option<u32>) {
+    // Release: pairs with the Acquire loads in `run_hook` and `cpu_index`.
+    NEST_ENTER.store(nest_enter as *mut (), Ordering::Release);
+    // Release: pairs with the Acquire load in `run_hook`.
+    NEST_LEAVE.store(nest_leave as *mut (), Ordering::Release);
+    // Release: pairs with the Acquire load in `cpu_index`.
+    CPU_INDEX.store(cpu_index as *mut (), Ordering::Release);
+}
+
+#[inline]
+fn run_hook(hook: &AtomicPtr<()>) {
+    // Acquire: pairs with the Release stores in `set_per_cpu_hooks`.
+    let p = hook.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: a non-null hook holds a `fn()`; established by
+    // `set_per_cpu_hooks`, its only store. established here.
+    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
+    f();
+}
+
+pub fn cpu_index() -> Option<u32> {
+    // Acquire: pairs with the Release store in `set_per_cpu_hooks`.
+    let p = CPU_INDEX.load(Ordering::Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: a non-null hook holds `fn() -> Option<u32>`; established by
+    // `set_per_cpu_hooks`. established here.
+    let f = unsafe { core::mem::transmute::<*mut (), fn() -> Option<u32>>(p) };
+    f()
+}
+
+pub fn read_cr3() -> u64 {
+    read_ttbr1()
+}
+
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub fn read_rip() -> u64 {
+    instruction_pointer()
+}
+
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub fn read_rbp() -> u64 {
+    frame_pointer()
+}
+
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub fn read_rsp() -> u64 {
+    stack_pointer()
+}
+
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub fn rflags() -> u64 {
+    irq_flags()
+}
+
+/// Full-system barrier. Shared code names `mfence`.
+#[inline]
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub fn mfence() {
+    // SAFETY: `dsb sy` is a full system barrier; established here.
+    unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+}
+
+/// Unused port I/O names so shared boot code compiles.
+///
+/// # Safety
+/// No port I/O on aarch64; the caller must not rely on the write.
+#[inline]
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub unsafe fn outb(_port: u16, _val: u8) {}
+
+/// # Safety
+/// As `outb`.
+#[inline]
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub unsafe fn outw(_port: u16, _val: u16) {}
+
+/// # Safety
+/// As `outb`.
+#[inline]
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub unsafe fn outl(_port: u16, _val: u32) {}
+
+/// # Safety
+/// As `outb`.
+#[inline]
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub unsafe fn inb(_port: u16) -> u8 {
+    0
+}
+
+/// # Safety
+/// As `outb`.
+#[inline]
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub unsafe fn inl(_port: u16) -> u32 {
+    0
+}
+
+#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+pub fn cpuid(_leaf: u32, _sub: u32) -> (u32, u32, u32, u32) {
+    (0, 0, 0, 0)
+}

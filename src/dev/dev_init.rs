@@ -124,6 +124,10 @@ pub fn find_bdf(bdf: Bdf) -> Option<DevRef> {
         reason = "only the in-guest tests look a device up by id yet"
     )
 )]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn find_id(vendor: u16, device: u16) -> Option<DevRef> {
     let mut i = 0usize;
     while let Some(d) = get(i) {
@@ -143,6 +147,10 @@ pub fn find_id(vendor: u16, device: u16) -> Option<DevRef> {
         reason = "only the in-guest tests read a device's state until ROADMAP §20.9's removal"
     )
 )]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn state(dev: &DevRef) -> Option<DevState> {
     REG.lock().state(dev)
 }
@@ -154,6 +162,10 @@ pub fn state(dev: &DevRef) -> Option<DevState> {
         dead_code,
         reason = "only the in-guest tests read a parent until DESIGN §12.2's parent-first order (ROADMAP §20.x)"
     )
+)]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn parent(dev: &DevRef) -> Option<DevRef> {
     REG.lock().parent(dev)
@@ -273,7 +285,7 @@ pub fn is_claimed(dev: &DevRef, bar: u8) -> bool {
 /// Remove `dev`'s driver under the device's lock: `Bound` → `Removing`,
 /// the driver's `remove`, its BARs unmapped and released, then `Present`.
 /// `false` when `dev` was not bound.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn unbind(dev: &DevRef) -> bool {
     let Some(lock) = dev_lock(dev) else {
         return false;
@@ -291,7 +303,7 @@ pub fn unbind(dev: &DevRef) -> bool {
 
 /// Register `d`, a record no driver matches (vendor `0xFFFE`, class
 /// `0xFF`), for a claim test; its id, or `None` when the table is full.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn push_test_device(mut d: Device) -> Option<u64> {
     d.vendor = 0xFFFE;
     d.class = 0xFF;

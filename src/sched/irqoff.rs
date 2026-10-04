@@ -45,11 +45,19 @@ pub fn on() {
 /// [`off`] for the asm stubs: `site` is a vector site (`0x100 | vector`)
 /// or a syscall site. Defined in every build, so the stubs' `sym`
 /// operands resolve; the stubs call it only in an `irqoff` build.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub extern "C" fn vibeos_irqoff_off_site(site: u64) {
     off(Site::from_stub(site));
 }
 
 /// [`on`] for the asm stubs, as [`vibeos_irqoff_off_site`].
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub extern "C" fn vibeos_irqoff_on() {
     on();
 }
@@ -156,7 +164,7 @@ pub fn report() {
 /// hook that already runs with IF=0 and cannot take one (C-IRQOFF-GUARD's
 /// guard-less form): `syscall_init::first_return`'s fork-wait stall spins
 /// where no `gs:` may be read.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn deliberate_open(reason: &'static str) {
     #[cfg(feature = "irqoff")]
     tracer::mark_deliberate(reason);
@@ -277,7 +285,7 @@ mod tracer {
             deliberate: cpu.deliberate.load(Ordering::Relaxed),
         };
         let c = close(&s, now, freq);
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         if testing::take(c.ns, s.site, s.deliberate) {
             return;
         }
@@ -286,7 +294,7 @@ mod tracer {
         }
     }
 
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     pub(super) fn mark_deliberate(reason: &'static str) {
         let Some(cpu) = slot() else {
             return;
@@ -436,7 +444,7 @@ mod tracer {
     }
 
     /// The in-guest tests' capture (`sched::irqoff::testing`).
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     pub(super) mod testing {
         use super::{AtomicBool, AtomicU64, Ordering, Site};
 

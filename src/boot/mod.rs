@@ -25,10 +25,9 @@ use vibeos::physmap::PHYSMAP_AARCH64;
 #[cfg(target_arch = "x86_64")]
 use vibeos::physmap::PHYSMAP_X86_64;
 
-#[cfg(target_arch = "x86_64")]
 pub mod fw_cfg_init;
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -189,6 +188,10 @@ impl BootInfo {
     #[cfg_attr(
         not(feature = "kernel_tests"),
         expect(dead_code, reason = "the in-guest `cmdline_captured` reads it")
+    )]
+    #[cfg_attr(
+        all(target_arch = "aarch64", feature = "kernel_tests"),
+        expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub fn cmdline_limine_len(&self) -> usize {
         self.cmdline.limine_len()

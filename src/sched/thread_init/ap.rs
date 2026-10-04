@@ -14,6 +14,10 @@ use super::*;
     clippy::result_large_err,
     reason = "the stack comes back by value so the caller frees it once; a Box would allocate on the failure path"
 )]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, GuardedStack> {
     let reused = with_sched(move |s| {
         let Some(slot) = s.slots.iter().position(|x| slot_reusable(x.as_deref())) else {
@@ -94,6 +98,10 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
 
 /// Rewrite a reused Dead TCB as CPU `cpu_id`'s AP idle thread: Running on
 /// the stack the AP starts on, as [`adopt_ap_idle`]'s new box is built.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 fn fill_ap_idle(tcb: &mut Tcb, cpu_id: u32) {
     tcb.name = "idle";
     tcb.state = ThreadState::Running;
@@ -124,6 +132,10 @@ fn fill_ap_idle(tcb: &mut Tcb, cpu_id: u32) {
 /// have started on its idle thread past the ready timeout and may still
 /// run on it, so its slot stays unreusable; otherwise nothing ever ran on
 /// the TCB and the slot is free for a later spawn.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn abandon_unstarted(id: ThreadId, may_have_run: bool) -> Option<GuardedStack> {
     with_sched(|s| {
         s.timeouts.remove(id);
@@ -142,6 +154,10 @@ pub fn abandon_unstarted(id: ThreadId, may_have_run: bool) -> Option<GuardedStac
 #[allow(
     clippy::panic,
     reason = "invariant: an AP idle TCB is adopted Running and never started, so nothing enters its `entry` (`thread_init::adopt_ap_idle`)"
+)]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
 )]
 fn ap_idle_entry() {
     panic!("ap idle entry called");

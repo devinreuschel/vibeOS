@@ -670,8 +670,7 @@ is the second.
   aarch64 kernel runs on (thread, idle, and overflow stacks) to have one size, 16 KiB. x86_64 needs no
   test, since `#DF` switches to its IST stack (§5.1), and its `#DF` handler reports stack overflow
   when CR2 lies in the guard of the stack the interrupted code ran on; it uses the same layout, so
-  stack allocation has one path. Rule; not yet enforced: ROADMAP §11.3. Today a guarded stack of *n*
-  pages reserves *n+1* pages of VA, maps the upper *n*, and has no alignment.
+  stack allocation has one path. `Kva::alloc_guarded` reserves `2S` at that alignment.
 - A `GuardedStack` (`vibeos::thread::GuardedStack`, re-exported as `kva_init::GuardedStack`) is a
   move-only handle with private fields; only `kva_init::alloc_guarded_stack` builds one, and
   `free_stack` takes it by value.

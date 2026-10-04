@@ -45,7 +45,8 @@ KEYS = frozenset(
 
 PLACEHOLDER = re.compile(r"<[a-z_]+>")
 SECTION = re.compile(r"§(\d+)\.(\d+)")
-ORDER_STEP = 10
+# aarch64-only rows sit between the existing x86 tens (ROADMAP §11.7).
+ORDER_STEP = 5
 
 # The regex metacharacters `_escape` escapes: every other character stands
 # for itself, so a built pattern reads as its text does.

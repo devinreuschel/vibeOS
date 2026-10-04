@@ -15,7 +15,7 @@
 //! backend call runs through [`api`], with this lock dropped (C-FILEAPI).
 //! No serial marker.
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -113,16 +113,16 @@ pub fn api() -> FileApi<'static, BlockingMutex<Vfs>> {
 /// The File API's `write_window` stall, a `fn()`, for the in-guest tests
 /// `file_table_fork_churn` and `file_table_stale_writeback_ebadf`; null
 /// until `fs::ktest::hooks::install_hooks` arms it.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(super) static WRITE_WINDOW: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 /// The File API's `open_race` hook, a `fn() -> bool`, for the in-guest
 /// test `open_creat_exists_opens`; null until `fs::ktest::hooks::install_hooks`
 /// arms it.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(super) static OPEN_RACE: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// The hooks the in-guest tests armed; each unarmed one is `Hooks::NONE`'s.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 fn hooks() -> Hooks {
     let mut h = Hooks::NONE;
     // Acquire: pairs with the Release stores in `fs::ktest::hooks::install_hooks`.
@@ -143,7 +143,7 @@ fn hooks() -> Hooks {
     h
 }
 
-#[cfg(not(feature = "kernel_tests"))]
+#[cfg(not(all(feature = "kernel_tests", target_arch = "x86_64")))]
 fn hooks() -> Hooks {
     Hooks::NONE
 }

@@ -21,6 +21,7 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use vibeos::lock::RANK_PT;
+#[cfg(target_arch = "x86_64")]
 use vibeos::marker;
 use vibeos::paging::{
     self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_1G, PAGE_SIZE_2M, PAGE_SIZE_4K,
@@ -335,7 +336,7 @@ pub unsafe fn map_4k_locked(
 ///
 /// # Safety
 /// Same contract as `Mapper::map_page`. Must run after [`install`].
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
     // SAFETY: `map_4k_locked`'s contract, which this fn's `# Safety` passes
     // on, established here.
@@ -530,6 +531,31 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     );
     let _ = walk;
 
+    // ---- 3. Console UART (aarch64) / low identity (x86_64) ----
+    #[cfg(target_arch = "aarch64")]
+    {
+        let uart = crate::machine_init::info()
+            .and_then(|d| d.console_uart())
+            .unwrap_or(0x0900_0000);
+        let va = VirtAddr(hhdm_offset().wrapping_add(uart & !0xFFF));
+        let pa = PhysAddr(uart & !0xFFF);
+        // SAFETY: one Device page for the console UART, mapped in the new
+        // root before `set_root`; established here.
+        let uart_map = unsafe {
+            mapper.map_page(
+                va,
+                pa,
+                paging::mmio_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut alloc,
+            )
+        };
+        if uart_map.is_err() {
+            boot::halt_with("vibeOS: paging: uart map failed");
+        }
+    }
+
     // ---- 3. Low identity, 512 MiB ----
     // First 2 MiB as 4 KiB leaves: the trampoline page (DESIGN §7.3)
     // present, read-only and executable, and not GLOBAL, so the teardown's
@@ -537,7 +563,9 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // Rest: 2 MiB leaves, writable + NX + GLOBAL, so the TLB survives CR3
     // reloads (DESIGN §4.3 TLB section) until `teardown_identity`, whose
     // `flush_identity` invalidates one address per leaf of this layout.
+    #[cfg(target_arch = "x86_64")]
     let tramp = info.trampoline_page;
+    #[cfg(target_arch = "x86_64")]
     let low_4k = |va: u64| {
         if Some(va) == tramp {
             PageFlags(PageFlags::PRESENT)
@@ -549,6 +577,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // identity window maps `[0, 512 MiB)` onto itself once, in the low half
     // no other kernel mapping uses, for the AP trampoline (DESIGN §4.1);
     // established here.
+    #[cfg(target_arch = "x86_64")]
     let low_id = unsafe {
         (0..PAGE_SIZE_2M)
             .step_by(PAGE_SIZE_4K as usize)
@@ -578,6 +607,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
                 )
             })
     };
+    #[cfg(target_arch = "x86_64")]
     if low_id.is_err() {
         boot::halt_with("vibeOS: paging: low identity map failed");
     }
@@ -613,7 +643,15 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // the low identity window and the boot stack, so execution continues
     // across the switch; established here.
     unsafe { Arch::set_root(mapper.root()) };
+    #[cfg(target_arch = "aarch64")]
+    {
+        let uart = crate::machine_init::info()
+            .and_then(|d| d.console_uart())
+            .unwrap_or(0x0900_0000);
+        crate::serial::raw::set_mmio(hhdm_offset().wrapping_add(uart & !0xFFF));
+    }
     // Release: pairs with the Acquire load in `identity_covers`.
+    #[cfg(target_arch = "x86_64")]
     IDENTITY_LIVE.store(true, Ordering::Release);
     // Relaxed: the BSP writes it before any reader; pairs with nothing.
     MAP_END.store(map_end, Ordering::Relaxed);
@@ -651,6 +689,10 @@ pub fn identity_covers(phys: u64, len: u64) -> bool {
 
 /// Identity leaves unmapped per PT hold in [`teardown_identity`] (DESIGN
 /// §2.9 rule 2).
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const TEARDOWN_BATCH: usize = 64;
 
 /// Remove the low identity window after `smp: done`, all but the leaf that
@@ -663,7 +705,15 @@ const TEARDOWN_BATCH: usize = 64;
 /// Once, after every AP is up; nothing on any CPU uses an identity address
 /// but the trampoline page from here, and this CPU's stack lies outside
 /// the window.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub unsafe fn teardown_identity(keep: Option<u64>) {
+    // Acquire: pairs with nothing.
+    if !IDENTITY_LIVE.load(Ordering::Acquire) {
+        return;
+    }
     // Release: pairs with the Acquire load in `identity_covers`.
     IDENTITY_LIVE.store(false, Ordering::Release);
     let window = identity_window();
@@ -697,6 +747,10 @@ pub unsafe fn teardown_identity(keep: Option<u64>) {
 /// writes CR4 after `arch::cpu::init_control_regs` (DESIGN §11.4), so no
 /// `CR4.PGE` toggle flushes them all. It takes no lock and allocates
 /// nothing, so `teardown_identity` runs it through `ipi_init::call_mask`.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 fn flush_identity(_: *mut ()) {
     let window = identity_window();
     let mut va = window.start;
@@ -715,7 +769,10 @@ fn flush_identity(_: *mut ()) {
 /// its own follow-up printing.
 pub fn report(r: &PagingReport) {
     // Exit-gate marker: DESIGN §2.6 shape.
+    #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::PAGING_CR3_OK);
+    #[cfg(target_arch = "aarch64")]
+    crate::marker!("vibeOS: paging: ttbr ok");
 
     crate::marker!(
         "vibeOS: paging: map_end {:#x} ({} MiB)",

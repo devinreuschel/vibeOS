@@ -2,7 +2,7 @@
 
 pub(crate) mod addr_space_init;
 pub(crate) mod fill_init;
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -17,6 +17,9 @@ pub(crate) mod fill_init;
 pub mod ktest;
 pub(crate) mod proc_init;
 #[cfg(target_arch = "x86_64")]
+pub(crate) mod syscall_init;
+#[cfg(target_arch = "aarch64")]
+#[path = "syscall_init_aarch64.rs"]
 pub(crate) mod syscall_init;
 pub(crate) mod uaccess_init;
 pub(crate) mod user_init;

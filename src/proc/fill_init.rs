@@ -22,16 +22,16 @@ struct KernelPt;
 impl PtHold for KernelPt {
     fn hold<R>(&mut self, batch: Batch, f: impl FnOnce() -> R) -> R {
         paging_init::with_pt(|_pt| {
-            #[cfg(feature = "kernel_tests")]
+            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
             testing::note_hold(batch);
-            #[cfg(not(feature = "kernel_tests"))]
+            #[cfg(not(all(feature = "kernel_tests", target_arch = "x86_64")))]
             let _ = batch;
             f()
         })
     }
 
     fn filled(&mut self, _batch: Batch) {
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::note_boundary(crate::arch::current::interrupts_enabled());
     }
 }
@@ -100,7 +100,7 @@ pub fn clone_full(src: &Space) -> Result<NewSpace, FillError> {
 
 /// The fill API's statistics (`kernel_tests` only): how its holds of `PT`
 /// went since [`testing::reset`].
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicU64, Ordering};
 

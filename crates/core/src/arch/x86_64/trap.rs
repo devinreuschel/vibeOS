@@ -457,7 +457,9 @@ mod tests {
                 assert_eq!(sig, SIGSEGV, "error {e:#x}");
                 si_code
             }
-            Ring3Action::NotRing3 => panic!("error {e:#x} is not a ring-3 fault"),
+            Ring3Action::NotRing3 | Ring3Action::Syscall | Ring3Action::StepOver => {
+                panic!("error {e:#x} is not a ring-3 fault")
+            }
         };
         assert_eq!(code(0x0), SEGV_MAPERR);
         assert_eq!(code(0x2), SEGV_MAPERR);

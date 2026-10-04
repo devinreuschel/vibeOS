@@ -263,6 +263,8 @@ pub enum ClocksourceId {
     Tsc = 1,
     Hpet = 2,
     AcpiPm = 3,
+    /// `CNTVCT_EL0` (aarch64).
+    Cntvct = 4,
 }
 
 impl ClocksourceId {
@@ -272,6 +274,7 @@ impl ClocksourceId {
             ClocksourceId::Tsc => "tsc",
             ClocksourceId::Hpet => "hpet",
             ClocksourceId::AcpiPm => "acpi_pm",
+            ClocksourceId::Cntvct => "cntvct",
         }
     }
 
@@ -281,6 +284,7 @@ impl ClocksourceId {
             1 => Some(ClocksourceId::Tsc),
             2 => Some(ClocksourceId::Hpet),
             3 => Some(ClocksourceId::AcpiPm),
+            4 => Some(ClocksourceId::Cntvct),
             _ => None,
         }
     }
@@ -438,12 +442,17 @@ pub struct Candidates {
     pub tsc_warp_ok: bool,
     pub hpet: Option<Counter>,
     pub pm: Option<Counter>,
+    pub cntvct: Option<Counter>,
 }
 
-/// The clocksource (DESIGN §6.4): the TSC when CPUID reports it invariant
-/// and no warp test saw it step backward, then the HPET main counter, then
-/// the ACPI PM timer. None: no candidate.
+/// The clocksource (DESIGN §6.4): `CNTVCT` when the port has it, else the
+/// TSC when CPUID reports it invariant and no warp test saw it step
+/// backward, then the HPET main counter, then the ACPI PM timer. None:
+/// no candidate.
 pub fn rank(c: &Candidates) -> Option<Counter> {
+    if let Some(v) = c.cntvct {
+        return Some(v);
+    }
     let tsc = c.tsc.filter(|_| c.tsc_invariant && c.tsc_warp_ok);
     tsc.or(c.hpet).or(c.pm)
 }
@@ -1249,12 +1258,16 @@ mod tests {
             tsc_warp_ok: true,
             hpet: Some(hpet),
             pm: Some(pm),
+            cntvct: None,
         };
         assert_eq!(rank(&c), Some(tsc));
         c.tsc = None;
         assert_eq!(rank(&c), Some(hpet));
         c.hpet = None;
         assert_eq!(rank(&c), Some(pm));
+        let cntvct = Counter::new(ClocksourceId::Cntvct, 24_000_000, 64).unwrap();
+        c.cntvct = Some(cntvct);
+        assert_eq!(rank(&c), Some(cntvct));
     }
 
     #[test]
@@ -1266,6 +1279,7 @@ mod tests {
             tsc_warp_ok: true,
             hpet: Some(hpet),
             pm: Some(pm),
+            cntvct: None,
         };
         let not_inv = Candidates {
             tsc_invariant: false,
@@ -1294,6 +1308,7 @@ mod tests {
             tsc_warp_ok: true,
             hpet: None,
             pm: None,
+            cntvct: None,
         };
         assert_eq!(rank(&none), None);
         // A TSC that is not invariant is no candidate.
@@ -1322,15 +1337,17 @@ mod tests {
         assert_eq!(ClocksourceId::Tsc.as_str(), "tsc");
         assert_eq!(ClocksourceId::Hpet.as_str(), "hpet");
         assert_eq!(ClocksourceId::AcpiPm.as_str(), "acpi_pm");
+        assert_eq!(ClocksourceId::Cntvct.as_str(), "cntvct");
         for id in [
             ClocksourceId::Tsc,
             ClocksourceId::Hpet,
             ClocksourceId::AcpiPm,
+            ClocksourceId::Cntvct,
         ] {
             assert_eq!(ClocksourceId::from_u64(id as u64), Some(id));
         }
         assert_eq!(ClocksourceId::from_u64(0), None);
-        assert_eq!(ClocksourceId::from_u64(4), None);
+        assert_eq!(ClocksourceId::from_u64(5), None);
     }
 
     #[test]

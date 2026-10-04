@@ -17,23 +17,28 @@ use vibeos::lock::RANK_SCHED;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::pid::IdIndex;
 use vibeos::proc::sig_bit as bit;
+#[cfg(target_arch = "x86_64")]
+use vibeos::proc::sig_name;
 use vibeos::proc::uaccess::user_range_ok;
 use vibeos::proc::{
     Creds, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitExit, InitState, MAX_FDS, MAX_PROCS,
     ProcState, SIGCHLD, SIGCONT, SIGSTOP, SigAct, SigNext, WNOHANG, default_action,
-    fd_flags_from_open, kill_delivers, next_signal, reaper_for, sig_name, wait_exited,
-    wait_signaled,
+    fd_flags_from_open, kill_delivers, next_signal, reaper_for, wait_exited, wait_signaled,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{self, F_GETFD, F_SETFD, Handlers, SysResult, UserFrame};
 use vibeos::thread::ThreadId;
-use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, SyscallAbi, TrapKind};
+use vibeos::trap::SyscallAbi;
+#[cfg(target_arch = "x86_64")]
+use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, TrapKind};
+#[cfg(target_arch = "x86_64")]
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
 use crate::addr_space_init;
 use crate::addr_space_init::Space;
 use crate::arch::current::Arch;
+#[cfg(target_arch = "x86_64")]
 use crate::arch::idt::TrapFrame;
 use crate::console_init;
 use crate::file_init;
@@ -52,11 +57,11 @@ mod exit;
 mod fd;
 mod floor;
 
+#[cfg(all(not(feature = "vibefs_crash"), target_arch = "x86_64"))]
+pub(crate) use exit::wait_kernel;
 pub use exit::write_ps;
 
 use exec::{sys_brk, sys_execve, sys_fork, sys_mmap, sys_munmap};
-#[cfg(not(feature = "vibefs_crash"))]
-use exit::reap_zombie;
 use exit::{finish_exit, sys_exit, sys_kill, sys_psinfo, sys_wait4};
 use fd::{
     addref_fds, close_all_fds, close_where, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
@@ -283,13 +288,13 @@ pub fn init_tables() -> Result<(), AllocError> {
 
 /// The descriptor row's length in each process-table slot (the first's;
 /// `init_tables` gives each the same).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) fn fd_row_capacity() -> usize {
     with_table(|t| t.procs.first().map_or(0, |p| p.fds.capacity()))
 }
 
 /// The process table's use: slots not `Unused`, and its length.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) fn table_usage() -> (usize, usize) {
     with_table(|t| {
         let used = t
@@ -395,6 +400,10 @@ fn release_pid(s: &mut Sched, t: &mut Table, pid: u32) {
 /// Set up `pid`'s slot, which `alloc_pid` took, for a new image: fds 0 to
 /// 2 on the console and the rest closed.
 #[cfg(not(feature = "vibefs_crash"))]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str) {
     let Some(p) = t.get_mut(pid) else {
         return;
@@ -455,6 +464,10 @@ pub fn start_init() {
 /// empty `argv` starts it with `argc` 1 and an empty `argv[0]`, as
 /// `execve` does.
 #[cfg(not(feature = "vibefs_crash"))]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn spawn_elf(
     path: &[u8],
     argv: &[&[u8]],
@@ -474,13 +487,17 @@ pub(crate) fn spawn_elf(
 /// Start the in-memory ELF image `elf` with `argv` as a new process with
 /// parent `ppid` (0: the kernel, which reaps it with [`wait_kernel`]).
 /// The in-guest tests' ring-3 entry (C-RING3).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, LoadError> {
     let name = argv.first().map_or("user", |a| intern_name(a));
     start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
 }
 
 #[cfg(not(feature = "vibefs_crash"))]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 fn start_loaded(
     loaded: Loaded,
     prefer: u32,
@@ -532,60 +549,12 @@ fn start_loaded(
     Ok(pid)
 }
 
-#[cfg(not(feature = "vibefs_crash"))]
-enum KernelWait {
-    Done(u32),
-    Sleep,
-    NotKernelChild,
-}
-
-/// Block until `pid`, a process whose parent is the kernel (ppid 0),
-/// exits; reap it and return its `wait4` status word. Returns once the
-/// zombie is reaped, before its address space and kernel stack are freed.
-#[cfg(not(feature = "vibefs_crash"))]
-pub(crate) fn wait_kernel(pid: u32) -> u32 {
-    debug_assert_eq!(current_pid(), 0);
-    loop {
-        let r = thread_init::with_sched(|s| {
-            table_locked(|t| {
-                let Some(p) = t.get(pid) else {
-                    return KernelWait::NotKernelChild;
-                };
-                if p.ppid != 0 {
-                    return KernelWait::NotKernelChild;
-                }
-                match p.state {
-                    ProcState::Zombie => {
-                        let st = p.wait_status;
-                        reap_zombie(s, t, pid);
-                        KernelWait::Done(st)
-                    }
-                    ProcState::Live | ProcState::Stopped => {
-                        s.begin_wait(&mut t.kernel_wq, FAR_DEADLINE);
-                        KernelWait::Sleep
-                    }
-                    ProcState::Unused => KernelWait::NotKernelChild,
-                }
-            })
-        });
-        assert!(
-            !matches!(r, KernelWait::NotKernelChild),
-            "wait_kernel({pid}): not a live kernel-parented process; only kernel code calls \
-             wait_kernel, once per ppid-0 pid that spawn_elf or spawn_image returned, and only \
-             wait_kernel reaps a ppid-0 process"
-        );
-        match r {
-            KernelWait::Done(st) => return st,
-            KernelWait::Sleep | KernelWait::NotKernelChild => thread_init::schedule(),
-        }
-    }
-}
-
 /// Install the process layer's hooks in the layers below it (DESIGN §1.2):
 /// the ring-3 fault hook in `arch::idt` and the syscall handler in
 /// `syscall_init`. `_start` calls it right after `syscall_init::init_bsp`,
 /// before the first ring-3 entry.
 pub fn init() {
+    #[cfg(target_arch = "x86_64")]
     crate::arch::idt::set_user_fault_hook(try_user_fault);
     syscall_init::set_syscall_handler(syscall);
     syscall_init::set_exit_work_hooks(exit_work_pending, do_exit_work);
@@ -609,7 +578,7 @@ pub fn do_exit_work(frame: &mut UserFrame) {
 
 /// A syscall from ring 3, over the user frame its entry saved.
 pub fn syscall(frame: &mut UserFrame) -> i64 {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::on_entry(frame);
     apply_pending(Some(&mut *frame));
     let nr = Arch::nr(frame);
@@ -627,7 +596,7 @@ pub fn syscall(frame: &mut UserFrame) -> i64 {
 }
 
 /// A syscall from kernel code, with no user frame: the in-guest tests'.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
     syscall::encode(dispatch_frame(nr, args, None))
 }
@@ -787,7 +756,7 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
                 }
                 p.state = ProcState::Stopped;
                 s.begin_wait(&mut p.stop_wq, FAR_DEADLINE);
-                #[cfg(feature = "kernel_tests")]
+                #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
                 testing::stop_decided(pid);
                 Pending::Stop
             })
@@ -799,7 +768,7 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
                 finish_exit(wait_signaled(sig), None);
             }
             Pending::Stop => {
-                #[cfg(feature = "kernel_tests")]
+                #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
                 testing::stop_stall(pid);
                 thread_init::schedule();
             }
@@ -815,7 +784,7 @@ enum Pending {
 
 fn sys_getpid() -> SysResult {
     let pid = current_pid();
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     {
         testing::getpid_spin(pid);
         testing::on_getpid(pid);
@@ -853,13 +822,14 @@ fn sig_for_vec(f: &TrapFrame) -> Option<(u32, i32)> {
     };
     match trap::ring3_action(kind) {
         Ring3Action::Signal { sig, si_code } => Some((sig, si_code)),
-        Ring3Action::NotRing3 => None,
+        Ring3Action::NotRing3 | Ring3Action::Syscall | Ring3Action::StepOver => None,
     }
 }
 
 /// User exception: default action (kill) + diagnostic. Kernel stays up.
 /// No-op if this is not a user process (trampoline / no pid), or the
 /// vector is not a ring-3 fault.
+#[cfg(target_arch = "x86_64")]
 pub fn try_user_fault(f: &TrapFrame) {
     let pid = current_pid();
     if pid == 0 {
@@ -889,7 +859,7 @@ pub fn try_user_fault(f: &TrapFrame) {
             "user: pid {pid} killed SIG{name} rip=0x{rip:x} err=0x{err:x}"
         )
     };
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     {
         testing::kill_line_yield(f);
         testing::kill_line_done();
@@ -908,12 +878,13 @@ pub fn try_user_fault(f: &TrapFrame) {
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     use vibeos::syscall::{SYS_GETPID, UserFrame};
 
+    #[cfg(target_arch = "x86_64")]
     use crate::arch::idt::TrapFrame;
     use crate::per_cpu_init;
     use crate::thread_init;

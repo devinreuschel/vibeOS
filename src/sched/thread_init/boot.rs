@@ -17,9 +17,11 @@ use crate::arch::current::Arch;
 use crate::kva_init;
 use crate::per_cpu_init;
 
-/// The bootstrap thread's stack: 64 KiB, the registry thread's size
-/// (ROADMAP §10.2). Direct calls alone reach about 32 KB from `_start`,
-/// which the 16 KiB default would overflow (MEMORY.md §4.5).
+/// The bootstrap thread's stack. x86_64: 64 KiB (ROADMAP §10.2). aarch64:
+/// 16 KiB, the one size every kernel stack uses (ROADMAP §11.3).
+#[cfg(target_arch = "aarch64")]
+pub(crate) const BOOT_STACK_PAGES: usize = 4;
+#[cfg(not(target_arch = "aarch64"))]
 pub(crate) const BOOT_STACK_PAGES: usize = 16;
 
 /// Make boot thread 0 and move it off Limine's stack: allocate its guarded
@@ -110,13 +112,17 @@ fn bootstrap_entry() {
 /// The bootstrap thread's stack range, its saved RSP, and whether it is on
 /// a CPU now (its saved RSP is stale while it runs). `None` before
 /// [`init_bootstrap`].
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub(crate) fn bootstrap_stack() -> Option<(Range<u64>, u64, bool)> {
     with_sched(|s| {
         let t = s.get(ThreadId::BOOTSTRAP)?;
         let st = t.stack.as_ref()?;
         Some((
             st.base().as_u64()..st.top().as_u64(),
-            t.context.rsp,
+            t.context.stack_ptr(),
             !t.on_cpu.is_clear(),
         ))
     })

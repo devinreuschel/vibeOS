@@ -108,11 +108,12 @@ impl WaitOutcome {
 
 pub use crate::limits::MAX_STACK_PAGES;
 
-/// A guarded kernel stack: `pages` mapped pages above one unmapped guard
-/// page at `guard` (default 4×4 KiB, DESIGN §4.5), and the order-0
-/// [`Frames`] of each mapped page, lowest first. A move-only handle with
-/// private fields: only `kva_init::alloc_guarded_stack` builds one
-/// (through [`GuardedStack::from_raw_parts`]) and only `kva_init::free_stack`
+/// A guarded kernel stack: `pages` mapped pages at a `2S`-aligned
+/// address, with `S` unmapped bytes below (`S = pages × 4 KiB`,
+/// DESIGN §4.5), and the order-0 [`Frames`] of each mapped page, lowest
+/// first. A move-only handle with private fields: only
+/// `kva_init::alloc_guarded_stack` builds one (through
+/// [`GuardedStack::from_raw_parts`]) and only `kva_init::free_stack`
 /// takes it apart, so the stack and its frames are freed once, by their
 /// owner. It lives in this crate so `Tcb` can own it.
 pub struct GuardedStack {
@@ -123,10 +124,11 @@ pub struct GuardedStack {
 
 impl GuardedStack {
     /// # Safety
-    /// `[guard, guard + (pages + 1) * 4 KiB)` came from
-    /// `Kva::alloc_guarded(pages)`, the guard page is not mapped, upper
-    /// page `i` maps `frames[i]` for every `i < pages`, the other slots are
-    /// `None`, and no other `GuardedStack` names the range.
+    /// `[guard, guard + 2S)` came from `Kva::alloc_guarded(pages)`
+    /// (`S = pages × 4 KiB`), the guard `[guard, guard + S)` is not
+    /// mapped, page `i` of the stack maps `frames[i]` for every
+    /// `i < pages`, the other slots are `None`, and no other
+    /// `GuardedStack` names the range.
     pub unsafe fn from_raw_parts(
         guard: VirtAddr,
         pages: usize,
@@ -148,19 +150,26 @@ impl GuardedStack {
         (self.guard, self.pages, self.frames)
     }
 
-    /// The unmapped guard page.
+    /// The unmapped guard (`S` bytes).
     pub fn guard(&self) -> VirtAddr {
         self.guard
     }
 
-    /// The lowest mapped byte.
+    /// The lowest mapped byte: a `2S`-aligned address.
     pub fn base(&self) -> VirtAddr {
-        VirtAddr(self.guard.as_u64() + PAGE_SIZE_4K)
+        VirtAddr(self.guard.as_u64() + self.pages as u64 * PAGE_SIZE_4K)
     }
 
     /// One past the highest mapped byte: the initial RSP.
     pub fn top(&self) -> VirtAddr {
-        VirtAddr(self.guard.as_u64() + (self.pages as u64 + 1) * PAGE_SIZE_4K)
+        VirtAddr(self.guard.as_u64() + self.pages as u64 * 2 * PAGE_SIZE_4K)
+    }
+
+    /// Whether `va` lies in this stack's unmapped guard.
+    pub fn guard_contains(&self, va: u64) -> bool {
+        let g = self.guard.as_u64();
+        let s = self.pages as u64 * PAGE_SIZE_4K;
+        va >= g && va < g + s
     }
 
     /// Mapped pages, the guard page not counted.
@@ -334,7 +343,11 @@ pub struct Tcb {
     pub no_reclaim: AtomicU32,
 }
 
-/// Callee-saved GPRs, rflags, rsp, return address. No XMM: soft-float.
+/// Callee-saved GPRs, rflags/DAIF, stack pointer, return address.
+/// No XMM: soft-float. aarch64 overlays x19-x24 on the first six words
+/// and keeps x25-x29 in `extra` (DESIGN §7.5). The 40-byte tail is
+/// unused on x86_64; both ports share one layout so vibeos-core stays
+/// free of `cfg(target_arch)` (ROADMAP §10.3).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CpuContext {
@@ -347,7 +360,17 @@ pub struct CpuContext {
     pub rflags: u64,
     pub rsp: u64,
     pub rip: u64,
+    pub extra: [u64; 5],
 }
+
+/// PSTATE.I / SPSR.I: IRQs masked when set.
+pub const DAIF_I: u64 = 1 << 7;
+/// PSTATE.F.
+pub const DAIF_F: u64 = 1 << 6;
+/// PSTATE.A.
+pub const DAIF_A: u64 = 1 << 8;
+/// PSTATE.D.
+pub const DAIF_D: u64 = 1 << 9;
 
 impl CpuContext {
     pub const RBX: usize = 0;
@@ -359,6 +382,21 @@ impl CpuContext {
     pub const RFLAGS: usize = 48;
     pub const RSP: usize = 56;
     pub const RIP: usize = 64;
+    pub const EXTRA: usize = 72;
+    pub const X19: usize = Self::RBX;
+    pub const X20: usize = Self::RBP;
+    pub const X21: usize = Self::R12;
+    pub const X22: usize = Self::R13;
+    pub const X23: usize = Self::R14;
+    pub const X24: usize = Self::R15;
+    pub const X25: usize = 72;
+    pub const X26: usize = 80;
+    pub const X27: usize = 88;
+    pub const X28: usize = 96;
+    pub const X29: usize = 104;
+    pub const DAIF: usize = Self::RFLAGS;
+    pub const SP: usize = Self::RSP;
+    pub const LR: usize = Self::RIP;
 
     pub const fn empty() -> Self {
         Self {
@@ -371,7 +409,16 @@ impl CpuContext {
             rflags: RFLAGS_RESERVED1,
             rsp: 0,
             rip: 0,
+            extra: [0; 5],
         }
+    }
+
+    pub fn irq_word_mut(&mut self) -> &mut u64 {
+        &mut self.rflags
+    }
+
+    pub fn stack_ptr(&self) -> u64 {
+        self.rsp
     }
 }
 
@@ -385,7 +432,8 @@ const _: () = {
     assert!(offset_of!(CpuContext, rflags) == CpuContext::RFLAGS);
     assert!(offset_of!(CpuContext, rsp) == CpuContext::RSP);
     assert!(offset_of!(CpuContext, rip) == CpuContext::RIP);
-    assert!(size_of::<CpuContext>() == 72);
+    assert!(offset_of!(CpuContext, extra) == CpuContext::EXTRA);
+    assert!(size_of::<CpuContext>() == 112);
     assert!(size_of::<ThreadId>() == 4);
     assert!(offset_of!(Tcb, fpu) % 16 == 0);
 };
@@ -428,20 +476,22 @@ const _: () = {
     assert!(tag(&ThreadState::Dead) == 4);
     assert!(size_of::<ThreadState>() == 24);
     assert!(align_of::<ThreadState>() == 8);
-    assert!(size_of::<Tcb>() == if DEBUG { 1264 } else { 1008 });
     assert!(align_of::<Tcb>() == 16);
     assert!(offset_of!(Tcb, id) == 0);
     assert!(offset_of!(Tcb, state) == 24);
     assert!(offset_of!(Tcb, context) == if DEBUG { 592 } else { 336 });
-    assert!(offset_of!(Tcb, cpu) == if DEBUG { 680 } else { 424 });
-    assert!(offset_of!(Tcb, pid) == if DEBUG { 1256 } else { 1000 });
-    assert!(size_of::<CpuContext>() == 72);
+    // +40 for `CpuContext.extra`, then +8 so `fpu` stays 16-aligned.
+    assert!(size_of::<Tcb>() == if DEBUG { 1312 } else { 1056 });
+    assert!(offset_of!(Tcb, cpu) == if DEBUG { 720 } else { 464 });
+    assert!(offset_of!(Tcb, pid) == if DEBUG { 1304 } else { 1048 });
+    assert!(size_of::<CpuContext>() == 112);
     assert!(size_of::<TcbSlot>() == size_of::<usize>());
 };
 
 /// SysV: `rsp % 16 == 8` on function entry. `stack_top` must be 16-aligned.
 /// IF is off (`rflags = 0x2`). `schedule` applies [`apply_if_on_resume`]
 /// so a first-run or timer-preempted thread is not stuck tick-deaf.
+/// The aarch64 port builds its first frame through `Arch::prepare`.
 pub fn prepare_thread(ctx: &mut CpuContext, stack_top: u64, entry: u64) {
     assert!(
         stack_top.is_multiple_of(16),
@@ -462,11 +512,14 @@ pub fn prepare_thread(ctx: &mut CpuContext, stack_top: u64, entry: u64) {
 /// therefore enables IF on the incoming thread even if the outgoing
 /// stack still has an open ISR / `InterruptGuard` — expected; the
 /// guard lives on the preempted stack.
-pub fn apply_if_on_resume(rflags: &mut u64, irq_nest: u32) {
+///
+/// On aarch64 the port's `Arch::resume_with_irqs` applies the DAIF
+/// equivalent (I set means IRQs masked).
+pub fn apply_if_on_resume(flags: &mut u64, irq_nest: u32) {
     if irq_nest == 0 {
-        *rflags |= RFLAGS_IF;
+        *flags |= RFLAGS_IF;
     } else {
-        *rflags &= !RFLAGS_IF;
+        *flags &= !RFLAGS_IF;
     }
 }
 
@@ -530,7 +583,8 @@ mod tests {
         assert_eq!(offset_of!(CpuContext, rflags), CpuContext::RFLAGS);
         assert_eq!(offset_of!(CpuContext, rsp), CpuContext::RSP);
         assert_eq!(offset_of!(CpuContext, rip), CpuContext::RIP);
-        assert_eq!(size_of::<CpuContext>(), 72);
+        assert_eq!(offset_of!(CpuContext, extra), CpuContext::EXTRA);
+        assert_eq!(size_of::<CpuContext>(), 112);
     }
 
     #[test]

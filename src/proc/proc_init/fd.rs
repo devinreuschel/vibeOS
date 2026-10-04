@@ -166,7 +166,7 @@ pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
             if len == 0 {
                 return Ok(0);
             }
-            #[cfg(feature = "kernel_tests")]
+            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
             if matches!(slot.kind, FdKind::Console) {
                 testing::console_write_started();
             }
@@ -205,7 +205,7 @@ pub(super) fn sys_write(fd: u32, buf: u64, len: usize) -> SysResult {
                     return byte_count(done);
                 }
             }
-            #[cfg(feature = "kernel_tests")]
+            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
             if matches!(slot.kind, FdKind::Console) {
                 testing::console_write_returned();
             }

@@ -930,6 +930,7 @@ fn va0_probe() -> u64 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn va0_entry() {
     // Pinned by `spawn_thread_on`, so the hint is this thread's CPU.
     let cpu = u64::from(thread_init::current_cpu());
@@ -940,6 +941,7 @@ fn va0_entry() {
 /// ROADMAP §10.6: after `smp: done` the low identity window is gone, so a
 /// kernel read of VA 0 faults on every online CPU. `catch_fault`'s one
 /// jump buffer serves one CPU at a time, so the CPUs probe in turn.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn kernel_va0_faults() -> Outcome {
     // The registry is pinned, so the hint is its CPU.
     let me = thread_init::current_cpu();
@@ -994,6 +996,7 @@ pub(crate) const TESTS: &[Test] = &[
         "unmap_shootdown_over_max_asserts",
         unmap_shootdown_over_max_asserts,
     ),
+    #[cfg(target_arch = "x86_64")]
     test("kernel_va0_faults", kernel_va0_faults),
     test("ioremap_failure_returns_va", ioremap_failure_returns_va),
 ];

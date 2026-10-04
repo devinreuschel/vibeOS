@@ -12,6 +12,7 @@ use vibeos::marker;
 
 use crate::arch::current::{InterruptGuard, interrupts_enabled, irq_disable, irq_enable};
 use crate::fb_init;
+#[cfg(target_arch = "x86_64")]
 use crate::kbd_init;
 use crate::log_init;
 use crate::per_cpu_init;
@@ -28,7 +29,7 @@ pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
 /// caller runs with IF=1 (DESIGN §2.9 rule 2). An empty write only lets
 /// the framebuffer redraw.
 pub fn write(bytes: &[u8]) {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::record(bytes);
     // Acquire: pairs with the Release stores in `init` and `set_enabled`.
     let fb = FB_ON.load(Ordering::Acquire);
@@ -64,6 +65,7 @@ impl fmt::Write for Console {
 /// guard keeps IF off across both so we never poll COM1 with IF=1.
 pub fn read() -> Option<DecodedKey> {
     let _irq = InterruptGuard::enter();
+    #[cfg(target_arch = "x86_64")]
     if let Some(k) = kbd_init::pop() {
         return Some(k);
     }
@@ -131,7 +133,7 @@ fn wait_key_loop() -> DecodedKey {
             continue;
         }
         // Relaxed: a count; pairs with nothing.
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::HALTS.fetch_add(1, Ordering::Relaxed);
         crate::sched::irqoff::on();
         // SAFETY: `sti; hlt` only enables interrupts and halts until one
@@ -145,7 +147,7 @@ fn wait_key_loop() -> DecodedKey {
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
@@ -223,6 +225,7 @@ pub fn init() {
     if fb {
         replay_log();
     }
+    #[cfg(target_arch = "x86_64")]
     let _kbd = kbd_init::init();
     // Release: pairs with the Acquire load in `console::ktest::hooks::live`.
     LIVE.store(true, Ordering::Release);

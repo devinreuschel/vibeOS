@@ -69,17 +69,17 @@ pub(super) fn release_va(va: VirtAddr, len: u64) {
     paging_init::with_pt(|_pt| with_kva(|k| k.free(va.as_u64(), len)));
 }
 
-/// Reserve `pages+1` VA, map the upper `pages` from separate order-0
-/// frames, leave the bottom page unmapped. The one constructor of a
-/// [`GuardedStack`]; [`free_stack`] takes it back.
+/// Reserve `2S` VA for a power-of-two stack of `pages` pages, map the
+/// upper `S`, leave the lower `S` unmapped (DESIGN §4.5). The one
+/// constructor of a [`GuardedStack`]; [`free_stack`] takes it back.
 pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
-    if pages == 0 || pages > MAX_STACK_PAGES {
+    if pages == 0 || pages > MAX_STACK_PAGES || !pages.is_power_of_two() {
         return Err(KvaError::Size);
     }
     let guard = paging_init::with_pt(|_pt| with_kva(|k| k.alloc_guarded(pages)))
         .map(VirtAddr)
         .ok_or(KvaError::NoVa)?;
-    let base = VirtAddr(guard.as_u64() + PAGE_SIZE);
+    let base = VirtAddr(guard.as_u64() + pages as u64 * PAGE_SIZE);
     let mut frames: [Option<Frames>; MAX_STACK_PAGES] = [const { None }; MAX_STACK_PAGES];
     let mut mapped = 0usize;
     let r = paging_init::with_pt(|pt| {
@@ -89,7 +89,7 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
             let pa = PhysAddr(f.base());
             frames[mapped] = Some(f);
             // SAFETY: `map_4k_locked`'s contract; `pa` is the fresh frame
-            // above and `va` a page of the range `alloc_guarded` just
+            // above and `va` a page of the 2S range `alloc_guarded` just
             // reserved, which nothing else maps; `pt` holds the page-table
             // lock (invariant I48, established at
             // `mm::paging_init::current_mapper`).
@@ -105,23 +105,23 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
         // frames and the VA.
         unmap_shootdown(base, mapped);
         free_frames(&mut frames);
-        release_va(guard, (pages as u64 + 1) * PAGE_SIZE);
+        release_va(guard, Kva::guarded_va_len(pages));
         return Err(e);
     }
     shoot_span(base, pages);
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     fill_stack(base, pages);
-    // SAFETY: `[guard, guard + (pages + 1) pages)` came from
-    // `Kva::alloc_guarded(pages)` above, upper page `i` maps `frames[i]`
-    // (the loop above), the other slots are `None`, the guard page was
-    // never mapped, and this is the only handle built for the range (the
-    // contract `GuardedStack::from_raw_parts` states, established here).
+    // SAFETY: `[guard, guard + 2S)` came from `Kva::alloc_guarded(pages)`
+    // above, page `i` of the stack maps `frames[i]` (the loop above), the
+    // other slots are `None`, the guard was never mapped, and this is the
+    // only handle built for the range (the contract
+    // `GuardedStack::from_raw_parts` states, established here).
     Ok(unsafe { GuardedStack::from_raw_parts(guard, pages, frames) })
 }
 
 /// Fill a fresh stack's `pages` mapped pages above `base` with
 /// `stack_depth::PATTERN`, for the depth scan (DESIGN §4.5, TESTING §8.2).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 fn fill_stack(base: VirtAddr, pages: usize) {
     let words = pages * (PAGE_SIZE as usize / 8);
     // SAFETY: `alloc_guarded_stack` mapped `[base, base + pages)` writable
@@ -137,7 +137,7 @@ fn fill_stack(base: VirtAddr, pages: usize) {
 /// # Safety
 /// No thread runs on `stack` and nothing else reads or writes its pages
 /// until the call returns.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub unsafe fn refill_stack(stack: &GuardedStack) {
     let words = stack.pages() * (PAGE_SIZE as usize / 8);
     // SAFETY: the handle's `pages` pages above `base` are mapped writable
@@ -187,7 +187,7 @@ const _: () = assert!(core::mem::align_of::<Parked>() <= PAGE_SIZE as usize);
 /// # Safety
 ///
 /// As [`park_slot_on_list`]'s, for `stack`.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) unsafe fn park_on_list(head: &mut u64, stack: GuardedStack) {
     // SAFETY: invariant I10, established at `thread_init::finish_switch`
     // for every stack it parks, and by this fn's contract for `stack`;
@@ -288,7 +288,7 @@ unsafe fn free_batch(mut head: u64) -> (u64, usize) {
         // and its frames and VA are freed only after that round, established
         // here.
         let (guard, pages, parts) = unsafe { stack.into_raw_parts() };
-        let base = VirtAddr(guard.as_u64() + PAGE_SIZE);
+        let base = VirtAddr(guard.as_u64() + pages as u64 * PAGE_SIZE);
         // SAFETY: `unmap_only_locked`'s contract; no CPU runs on the stack
         // (invariant I10, established at `thread_init::finish_switch`), and
         // the round below completes before its frames and VA are freed.
@@ -312,7 +312,7 @@ unsafe fn free_batch(mut head: u64) -> (u64, usize) {
     vibeos::paging::tlb_shootdown_ranges(&ranges[..nr]);
     free_frames(&mut frames[..nf]);
     for &(guard, pages) in &vas[..k] {
-        release_va(guard, (pages as u64 + 1) * PAGE_SIZE);
+        release_va(guard, Kva::guarded_va_len(pages));
     }
     (head, k)
 }
@@ -329,7 +329,10 @@ pub struct Vmap {
 impl Vmap {
     /// First mapped VA.
     #[cfg_attr(
-        not(feature = "kernel_tests"),
+        any(
+            not(feature = "kernel_tests"),
+            all(target_arch = "aarch64", feature = "kernel_tests")
+        ),
         expect(
             dead_code,
             reason = "ROADMAP §10.3: `kva_init::vmap` returns a move-only handle; only in-guest tests call it until a driver does"
@@ -341,7 +344,10 @@ impl Vmap {
 
     /// Mapped span in bytes: the frame count times the page size.
     #[cfg_attr(
-        not(feature = "kernel_tests"),
+        any(
+            not(feature = "kernel_tests"),
+            all(target_arch = "aarch64", feature = "kernel_tests")
+        ),
         expect(
             dead_code,
             reason = "ROADMAP §10.3: `kva_init::vmap` returns a move-only handle; only in-guest tests call it until a driver does"
@@ -374,6 +380,10 @@ crate::cell::assert_not_impl!(Vmap: Copy);
         dead_code,
         reason = "ROADMAP §10.3: `kva_init::vmap` returns a move-only handle; only in-guest tests call it until a driver does"
     )
+)]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn vmap(frames: Frames) -> Result<Vmap, KvaError> {
     let n = frames.count();
@@ -444,9 +454,9 @@ unsafe fn free_stack_shootdown(stack: GuardedStack) {
     // before the frames and the VA are freed (the contract
     // `GuardedStack::into_raw_parts` states, met here).
     let (guard, pages, mut frames) = unsafe { stack.into_raw_parts() };
-    unmap_shootdown(VirtAddr(guard.as_u64() + PAGE_SIZE), pages);
+    unmap_shootdown(VirtAddr(guard.as_u64() + pages as u64 * PAGE_SIZE), pages);
     free_frames(&mut frames);
-    release_va(guard, (pages as u64 + 1) * PAGE_SIZE);
+    release_va(guard, Kva::guarded_va_len(pages));
 }
 
 /// Unmap `n` pages, drop PT, shootdown. Frees nothing: the caller owns

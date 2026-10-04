@@ -289,7 +289,7 @@ pub fn shootdown_ranges(ranges: &[ShootRange]) {
 /// One round for at most [`SHOOT_RANGES`] ranges.
 fn shootdown_round(ranges: &[ShootRange]) {
     let _irq = crate::arch::current::InterruptGuard::enter();
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     crate::irq::ktest::note_shootdown();
     let me = my_index() as u32;
     let waiters = waiter_mask(per_cpu_init::online_mask(), me);
@@ -418,6 +418,10 @@ pub fn on_reschedule_ipi() {
     f();
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn on_shootdown_ipi() {
     service_shootdowns();
 }
@@ -428,6 +432,10 @@ pub fn on_call_ipi() {
 
 /// NMIs the panic dump's owner returned from (its own, from a self-NMI
 /// test, or any that lands mid-dump): the NMI body's `Return` arm.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub static OWNER_NMI_RETURNS: AtomicU64 = AtomicU64::new(0);
 
 /// How long the owner waits for acknowledgements before it sends NMI, and
@@ -517,6 +525,10 @@ fn stop_hook() {
 /// The `0xFE` body: stop, saving the interrupted registers `regs` (the
 /// IDT body reads them from its trap frame, so this module does not name
 /// the IDT's frame type, DESIGN §1.2).
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn on_stop_ipi(regs: CrashRegs) -> ! {
     stop_this_cpu(StopHow::Ipi, regs);
 }
@@ -527,6 +539,10 @@ pub fn on_stop_ipi(regs: CrashRegs) -> ! {
 /// stopping, stops on STOP, and returns `Return` on the dump's owner and
 /// `Dump` for any other NMI, which the caller dumps as before. `regs` are
 /// the interrupted registers from the NMI's trap frame.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn nmi_stop(regs: CrashRegs) -> NmiAction {
     let (req, state) = match per_cpu_init::cpu(my_index() as u32) {
         // AcqRel: pairs with the owner's Release `fetch_or` in `stop_others`;
@@ -723,6 +739,10 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
         dead_code,
         reason = "ROADMAP §4.9 0xFB call-function; only the in-guest tests send one yet"
     )
+)]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn call_cpu(cpu: u32, f: fn(*mut ()), arg: *mut (), wait: bool) {
     if cpu >= 64 {
