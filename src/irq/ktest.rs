@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
 use vibeos::ipi::MAX_IPI_CPUS;
-use vibeos::irq::{self, IrqError};
+use vibeos::irq::{self, IrqError, IrqId, IrqSpecifier};
 use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::pci::{Bdf, CFG_COMMAND, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
@@ -155,7 +155,7 @@ fn record_irq_cpu() {
 }
 
 fn on_msix() {
-    match irq_init::allocate_vector(0) {
+    match irq_init::allocate(0) {
         Err(IrqError::InIrq) => IRQ_ALLOC.store(1, Ordering::SeqCst),
         Ok(_) => IRQ_ALLOC.store(2, Ordering::SeqCst),
         Err(_) => IRQ_ALLOC.store(3, Ordering::SeqCst),
@@ -186,23 +186,43 @@ fn on_intx_no_ack() {
 
 pub(crate) fn test_irq_pool() -> Outcome {
     let n0 = allocated_count();
-    let v = match irq_init::allocate_vector(0) {
+    let irq = match irq_init::allocate(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
+    let Some(v) = irq_init::vector(irq) else {
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("no hwirq");
+    };
     if !irq::in_pool(v) || v == vectors::KBD {
-        let _ = irq_init::free_vector(v);
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("out of pool");
     }
-    if irq_init::cpu_of(v) != Some(0) {
-        let _ = irq_init::free_vector(v);
+    if irq_init::cpu_of(irq) != Some(0) {
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("cpu_of");
     }
-    if irq_init::set_affinity(v, 0).is_err() {
-        let _ = irq_init::free_vector(v);
+    if irq_init::set_affinity(irq, 0).is_err() {
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("affinity");
     }
-    match irq_init::free_vector(v) {
+    let isa = match irq_init::map_wired(IrqSpecifier::Isa { line: 5 }) {
+        Ok(i) => i,
+        Err(e) => {
+            let _ = irq_init::free_vector(irq);
+            return Outcome::Fail(e.as_str());
+        }
+    };
+    if irq_init::vector(isa) != Some(0x25) {
+        let _ = irq_init::free_vector(isa);
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("isa vector");
+    }
+    if irq_init::free_vector(isa).is_err() {
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("isa free");
+    }
+    match irq_init::free_vector(irq) {
         Ok(()) => {
             if allocated_count() != n0 {
                 Outcome::Fail("count")
@@ -220,7 +240,7 @@ fn irq_nop() {}
 
 pub(crate) fn test_irq_free_threaded() -> Outcome {
     let n0 = allocated_count();
-    let v = match irq_init::allocate_vector(0) {
+    let v = match irq_init::allocate(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
@@ -238,7 +258,7 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
     if has_threaded(v) {
         return Outcome::Fail("threaded after free");
     }
-    let v2 = match irq_init::allocate_vector(0) {
+    let v2 = match irq_init::allocate(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
@@ -280,10 +300,10 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     let Some(mmio) = bar0_va(&dev) else {
         return Outcome::Fail("e1000e bar0");
     };
-    let Some(cpu) = cpu_remote(ap) else {
+    if cpu_remote(ap).is_none() {
         return Outcome::Fail("no apic id");
-    };
-    let vec = match irq_init::allocate_vector(0) {
+    }
+    let vec = match irq_init::allocate(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
@@ -308,7 +328,7 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     let restore = || {
         pci_init::update_command(dev.addr, saved, !saved);
     };
-    if let Err(e) = irq_init::enable_msix(&dev, 0, vec, cpu.apic_id.load(Ordering::Relaxed) as u8) {
+    if let Err(e) = irq_init::enable_msix(&dev, 0, vec) {
         let _ = irq_init::free_vector(vec);
         restore();
         return Outcome::Fail(e.as_str());
@@ -367,7 +387,12 @@ pub(crate) fn test_intx_fallback() -> Outcome {
     if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
         return Outcome::Fail("edu ident");
     }
-    let vec = match irq_init::allocate_vector(0) {
+    let gsi = line as u32;
+    let vec = match irq_init::map_wired(IrqSpecifier::Gsi {
+        gsi,
+        trigger: Trigger::Level,
+        polarity: Polarity::Low,
+    }) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
@@ -375,12 +400,7 @@ pub(crate) fn test_intx_fallback() -> Outcome {
         let _ = irq_init::free_vector(vec);
         return Outcome::Fail("handler");
     }
-    let gsi = line as u32;
     pci_init::update_command(dev.addr, 0, CMD_INTX_DISABLE);
-    if irq_init::route_intx(gsi, vec, 0, Trigger::Level, Polarity::Low).is_err() {
-        let _ = irq_init::free_vector(vec);
-        return Outcome::Fail("route");
-    }
     if irq_init::set_affinity(vec, ap).is_err() {
         apic_init::mask_gsi(gsi);
         let _ = irq_init::free_vector(vec);
@@ -407,7 +427,7 @@ pub(crate) fn test_intx_fallback() -> Outcome {
     Outcome::Ok
 }
 
-fn edu_intx_teardown(bdf: Bdf, gsi: u32, vec: Option<u8>, mmio: u64) {
+fn edu_intx_teardown(bdf: Bdf, gsi: u32, vec: Option<IrqId>, mmio: u64) {
     let st = mmio_r32(mmio, EDU_IRQSTAT);
     if st != 0 {
         mmio_w32(mmio, EDU_ACK, st);
@@ -440,12 +460,16 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
         return Outcome::Fail("edu ident");
     }
-    let vec = match irq_init::allocate_vector(0) {
+    let gsi = line as u32;
+    let vec = match irq_init::map_wired(IrqSpecifier::Gsi {
+        gsi,
+        trigger: Trigger::Level,
+        polarity: Polarity::Low,
+    }) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
-    let gsi = line as u32;
-    let fail = |why, live: Option<u8>| {
+    let fail = |why, live: Option<IrqId>| {
         edu_intx_teardown(dev.addr, gsi, live, mmio);
         Outcome::Fail(why)
     };
@@ -453,9 +477,6 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
         return fail("handler", Some(vec));
     }
     pci_init::update_command(dev.addr, 0, CMD_INTX_DISABLE);
-    if irq_init::route_intx(gsi, vec, 0, Trigger::Level, Polarity::Low).is_err() {
-        return fail("route", Some(vec));
-    }
     if irq_init::set_affinity(vec, ap).is_err() {
         return fail("affinity", Some(vec));
     }
@@ -488,22 +509,26 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     if st != 0 {
         mmio_w32(mmio, EDU_ACK, st);
     }
-    let vec2 = match irq_init::allocate_vector(0) {
+    let vec2 = match irq_init::map_wired(IrqSpecifier::Gsi {
+        gsi,
+        trigger: Trigger::Level,
+        polarity: Polarity::Low,
+    }) {
         Ok(v) => v,
         Err(e) => return fail(e.as_str(), None),
     };
-    if vec2 != vec {
+    if irq_init::vector(vec2) != irq_init::vector(vec) {
         return fail("realloc other vec", Some(vec2));
-    }
-    if irq_init::set_handler(vec2, on_intx).is_err() {
-        return fail("handler2", Some(vec2));
     }
     reset_irq_obs();
     mmio_w32(mmio, EDU_RAISE, 1);
     if spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 50_000_000) {
-        return fail("delivery after free", Some(vec2));
+        return fail("delivery while masked", Some(vec2));
     }
-    if irq_init::route_intx(gsi, vec2, ap, Trigger::Level, Polarity::Low).is_err() {
+    if irq_init::set_handler(vec2, on_intx).is_err() {
+        return fail("handler2", Some(vec2));
+    }
+    if irq_init::set_affinity(vec2, ap).is_err() {
         return fail("reroute", Some(vec2));
     }
     let fired2 = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
@@ -863,12 +888,15 @@ pub(crate) fn allocated_count() -> usize {
     irq_init::with_pool(|p| p.allocated())
 }
 
-/// Whether `vec` has a threaded handler or pending threaded work.
-pub(crate) fn has_threaded(vec: u8) -> bool {
-    match irq_init::handler_slot(vec) {
+/// Whether `irq` has a threaded handler or pending threaded work.
+pub(crate) fn has_threaded(irq: IrqId) -> bool {
+    match irq.slot() {
         Some(i) => irq_init::with_irq(|s| {
             let t = &s.th;
-            t.top[i].is_some() || t.work[i].is_some() || t.ctx[i].is_some() || t.pending[i]
+            t.top.get(i).is_some_and(|x| x.is_some())
+                || t.work.get(i).is_some_and(|x| x.is_some())
+                || t.ctx.get(i).is_some_and(|x| x.is_some())
+                || t.pending.get(i).copied() == Some(true)
         }),
         None => false,
     }
@@ -1100,11 +1128,15 @@ pub(crate) fn unowned_vector_storm() -> Outcome {
     if !crate::arch::pic::is_masked(5) {
         return Outcome::Fail("8259 line 5 not masked");
     }
-    let pool = match irq_init::allocate_vector(thread_init::current_cpu()) {
+    let irq = match irq_init::allocate(thread_init::current_cpu()) {
         Ok(v) => v,
-        Err(e) => return crate::fail_fmt!("allocate_vector: {e:?}"),
+        Err(e) => return crate::fail_fmt!("allocate: {e:?}"),
     };
-    if let Err(e) = irq_init::free_vector(pool) {
+    let Some(pool) = irq_init::vector(irq) else {
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("no hwirq");
+    };
+    if let Err(e) = irq_init::free_vector(irq) {
         return crate::fail_fmt!("free_vector({pool:#x}): {e:?}");
     }
     for vec in [pool, 0x85, 0x25] {
