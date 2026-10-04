@@ -566,6 +566,19 @@ class TestExpectPanic(unittest.TestCase):
             "no GUEST_PANICKED within 10 s of 'vibeOS: panic: halted'", str(cm.exception)
         )
 
+    def test_aarch64_halted_ends_without_event(self) -> None:
+        src = FakeLineSource.from_lines(PANIC_BOOT + PANIC_DUMP, end="eof", exit_code=0)
+        result = run_qemu_and_check(
+            dataclasses.replace(FAKE_CFG, expect="panic", arch="aarch64"),
+            halt_test_markers(),
+            dump_needles=PANIC_NEEDLES,
+            line_source=src,
+            qmp=FakeQmp([]),
+        )
+        self.assertEqual(result.matched, ["serial_online", "limine_ok", "panic_test_armed"])
+        self.assertEqual(result.end, "PANIC_DONE")
+        self.assertFalse(src.killed)
+
     def test_dump_ended_before_halted_fails(self) -> None:
         with self.assertRaises(HarnessError) as cm:
             self.expect(PANIC_BOOT + PANIC_DUMP[:-1], exit_code=1, event=False)
