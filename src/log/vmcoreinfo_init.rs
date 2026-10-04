@@ -195,6 +195,7 @@ pub(crate) fn publish() {
     let len = match vmcoreinfo::render(&info, &mut page.bytes) {
         Ok(n) => n,
         Err(e) => {
+            // Release: pairs with the Acquire load in `published`.
             STATE.store(DeviceState::NoNote as u8, Ordering::Release);
             crate::klog!(Level::Error, "vmcoreinfo: not rendered: {}", e.as_str());
             return;
@@ -214,6 +215,7 @@ pub(crate) fn publish() {
     let state = match paging_init::translate(va) {
         None => Refused(DeviceState::NoPhys, None),
         Some((pa, _, _)) => {
+            // Relaxed: the Release store of `STATE` below publishes it; pairs with nothing.
             PA.store(pa.0, Ordering::Relaxed);
             match register(pa.0, len) {
                 Ok(()) => Refused(DeviceState::Written, None),
@@ -221,8 +223,11 @@ pub(crate) fn publish() {
             }
         }
     };
+    // Relaxed: the Release store of `STATE` below publishes it; pairs with nothing.
     LEN.store(len as u64, Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `published`.
     STATE.store(state.0 as u8, Ordering::Release);
+    // Relaxed: this thread stored it above; pairs with nothing.
     let pa = PA.load(Ordering::Relaxed);
     match state.1 {
         Some(e) => crate::klog!(
@@ -247,8 +252,11 @@ pub(crate) fn publish() {
 /// `None` before [`publish`] ran or when it rendered nothing.
 #[cfg(feature = "kernel_tests")]
 pub(crate) fn published() -> Option<(&'static [u8], u64, DeviceState)> {
+    // Acquire: pairs with the Release stores in `publish`.
     let state = DeviceState::from_u8(STATE.load(Ordering::Acquire))?;
     let note = NOTE.try_get()?;
+    // Relaxed: the Acquire of `STATE` above orders it; pairs with nothing.
     let len = usize::try_from(LEN.load(Ordering::Relaxed)).ok()?;
+    // Relaxed: the Acquire of `STATE` above orders it; pairs with nothing.
     Some((note.bytes.get(..len)?, PA.load(Ordering::Relaxed), state))
 }
