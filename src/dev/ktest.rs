@@ -171,7 +171,7 @@ pub(crate) fn test_pci_bar_map() -> Outcome {
     if dev_init::bar_va(&d, 0).is_some() {
         return Outcome::Fail("vga bar0 mapped");
     }
-    let va = paging_init::HHDM_BASE.wrapping_add(r.addr);
+    let va = paging_init::hhdm_offset().wrapping_add(r.addr);
     if let Some((_, _, flags)) = paging_init::translate(VirtAddr(va))
         && (flags.contains(PageFlags::PCD) || flags.contains(PageFlags::PWT))
     {
@@ -295,7 +295,7 @@ pub(crate) fn test_dma_alloc() -> Outcome {
         dma_init::free(buf);
         return Outcome::Fail("device != phys");
     }
-    if buf.virt() != paging_init::HHDM_BASE.wrapping_add(buf.phys()) {
+    if buf.virt() != paging_init::hhdm_offset().wrapping_add(buf.phys()) {
         dma_init::free(buf);
         return Outcome::Fail("virt not hhdm");
     }
@@ -863,7 +863,7 @@ pub(crate) fn test_map_mmio_refuses_ram() -> Outcome {
         return crate::fail_fmt!("usable page {page:#x} mapped at {va:#x}");
     }
     let Some((_, _, flags)) =
-        paging_init::translate(VirtAddr(paging_init::HHDM_BASE.wrapping_add(page)))
+        paging_init::translate(VirtAddr(paging_init::hhdm_offset().wrapping_add(page)))
     else {
         return crate::fail_fmt!("usable page {page:#x} not on the physmap");
     };

@@ -85,7 +85,7 @@ fn publish_isr(st: &ApicState) {
 }
 
 fn phys_va(phys: u64) -> u64 {
-    paging_init::HHDM_BASE.wrapping_add(phys)
+    paging_init::hhdm_offset().wrapping_add(phys)
 }
 
 /// # Safety

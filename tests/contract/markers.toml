@@ -65,6 +65,13 @@ source = "kernel"
 section = "§0.3"
 
 [[marker]]
+text = "vibeOS: limine: hhdm offset outside physmap slot"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§11.1"
+
+[[marker]]
 text = "vibeOS: limine: memmap missing"
 kind = "failure"
 arch = "both"

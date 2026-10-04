@@ -38,7 +38,12 @@ use vibeos::arch::PageTable;
 
 /// The physmap constants live in `vibeos::paging` (MEMORY.md §4.1); these
 /// paths stay for the callers that name them here.
-pub use vibeos::paging::{HHDM_BASE, PHYSMAP_CAP};
+pub use vibeos::paging::PHYSMAP_CAP;
+
+/// Limine's HHDM offset, from the one `BootInfo` capture.
+pub fn hhdm_offset() -> u64 {
+    crate::boot::info().hhdm_offset
+}
 
 /// Low identity window base and size (DESIGN §4.1). It exists for AP
 /// bring-up; [`teardown_identity`] removes all of it but the trampoline
@@ -72,7 +77,7 @@ fn sym_addr(sym: &u8) -> u64 {
 struct BuddyFrames;
 
 // SAFETY: `FrameAlloc`'s contract; the buddy hands out order-0 frames, and
-// every buddy frame lies inside the physmap at `HHDM_BASE`, mapped writable
+// every buddy frame lies inside the physmap at `hhdm_offset()`, mapped writable
 // (invariant I14, established at `mm::pmm_init::init`).
 unsafe impl FrameAlloc for BuddyFrames {
     fn alloc_frame(&mut self) -> Option<Frames> {
@@ -255,15 +260,15 @@ pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapErr
     // fn's `# Safety` contract, established here), and the guard holds the
     // page-table lock (invariant I48, established at
     // `mm::paging_init::current_mapper`).
-    let n = unsafe { current_mapper().patch_physmap_uc(VirtAddr(HHDM_BASE), phys, len) }?;
+    let n = unsafe { current_mapper().patch_physmap_uc(VirtAddr(hhdm_offset()), phys, len) }?;
     let mut off: u64 = 0;
-    let hhdm_end = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(len);
-    let mut va = HHDM_BASE.wrapping_add(phys.as_u64());
+    let hhdm_end = hhdm_offset().wrapping_add(phys.as_u64()).wrapping_add(len);
+    let mut va = hhdm_offset().wrapping_add(phys.as_u64());
     while va < hhdm_end {
         Arch::flush_local(VirtAddr(va));
         paging::tlb_shootdown_others(VirtAddr(va));
         off += PAGE_SIZE_4K;
-        va = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(off);
+        va = hhdm_offset().wrapping_add(phys.as_u64()).wrapping_add(off);
     }
     Ok(n)
 }
@@ -282,7 +287,7 @@ pub(crate) fn current_mapper() -> MapperGuard {
     // it, the boot tables CR3 holds) is never freed, and PT is held for the
     // guard's life, so this is the only live `Mapper` over it; established
     // here.
-    let mapper = unsafe { Mapper::new(PhysAddr(root), HHDM_BASE) };
+    let mapper = unsafe { Mapper::new(PhysAddr(root), hhdm_offset()) };
     MapperGuard { mapper, pt }
 }
 
@@ -378,7 +383,7 @@ pub unsafe fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
     let flags = paging::physmap_flags();
     let mut p = start;
     while p < end {
-        let va = VirtAddr(HHDM_BASE.wrapping_add(p));
+        let va = VirtAddr(hhdm_offset().wrapping_add(p));
         if let Some((_, sz, _)) = translate(va) {
             let span = sz.bytes();
             let next = (p & !(span - 1)).saturating_add(span);
@@ -420,7 +425,7 @@ pub unsafe fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
             | Err(MapError::NonCanonical) => break,
         }
     }
-    translate(VirtAddr(HHDM_BASE.wrapping_add(phys.as_u64()))).is_some()
+    translate(VirtAddr(hhdm_offset().wrapping_add(phys.as_u64()))).is_some()
 }
 
 /// Unmap one leaf through `pt`. Local `invlpg` only.
@@ -516,19 +521,19 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         boot::halt_with("vibeOS: paging: no frame for the PML4");
     };
     let root = PhysAddr(root.into_entry());
-    let hhdm_ptr = root.as_u64().wrapping_add(HHDM_BASE) as *mut u64;
+    let hhdm_ptr = root.as_u64().wrapping_add(hhdm_offset()) as *mut u64;
     for i in 0..Arch::ENTRIES {
         // SAFETY: `root` is the order-0 buddy frame above, which Limine's
-        // HHDM maps writable at `HHDM_BASE` (invariant I14, established at
+        // HHDM maps writable at `hhdm_offset()` (invariant I14, established at
         // `mm::pmm_init::init`); `i < Arch::ENTRIES` words stay inside it.
         unsafe { hhdm_ptr.add(i).write_volatile(0) };
     }
     // SAFETY: `Mapper::new`'s contract; `root` is the zeroed PML4 above,
-    // owned by the kernel for good, and `HHDM_BASE` reaches every buddy
+    // owned by the kernel for good, and `hhdm_offset()` reaches every buddy
     // frame (invariant I14, established at `mm::pmm_init::init`). Boot is
     // single-CPU with IRQs off (this fn's `# Safety` contract), the one
     // case invariant I48 excepts; established here.
-    let mut mapper = unsafe { Mapper::new(root, HHDM_BASE) };
+    let mut mapper = unsafe { Mapper::new(root, hhdm_offset()) };
 
     // ---- 1. Kernel image, per section ----
     // SAFETY: the linker script (`linker.ld`) defines this and each `&__*`
@@ -586,11 +591,11 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // ---- 2. Physmap [0, map_end) with 2 MiB pages ----
     let map_end = physmap_extent(info);
     // SAFETY: `Mapper::map_range`'s contract; the physmap maps `[0, map_end)`
-    // once, at `HHDM_BASE`, in a root nothing else maps yet (invariant I14,
+    // once, at `hhdm_offset()`, in a root nothing else maps yet (invariant I14,
     // established here).
     let physmap = unsafe {
         mapper.map_range(
-            VirtAddr(HHDM_BASE),
+            VirtAddr(hhdm_offset()),
             PhysAddr(0),
             map_end,
             paging::physmap_flags(),
@@ -611,7 +616,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     for m in info.modules() {
         let start = m.start.max(map_end) & !(PAGE_SIZE_4K - 1);
         let end = paging_align_up(m.end, PAGE_SIZE_4K);
-        if end <= start || end > vibeos::heap::HEAP_START - HHDM_BASE {
+        if end <= start || end > vibeos::heap::HEAP_START - hhdm_offset() {
             continue;
         }
         // SAFETY: `Mapper::map_range`'s contract; `[start, end)` lies above
@@ -620,7 +625,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         // established here).
         let r = unsafe {
             mapper.map_range(
-                VirtAddr(HHDM_BASE + start),
+                VirtAddr(hhdm_offset() + start),
                 PhysAddr(start),
                 end - start,
                 paging::physmap_flags(),
@@ -711,7 +716,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // ---- 6. Install ----
     KERNEL_CR3.store(mapper.root().as_u64(), Ordering::Release);
     // SAFETY: the new root maps the kernel image, the physmap (so every
-    // pointer computed as `phys + HHDM_BASE` stays valid, invariant I14),
+    // pointer computed as `phys + hhdm_offset()` stays valid, invariant I14),
     // the low identity window and the boot stack, so execution continues
     // across the switch; established here.
     unsafe { Arch::set_root(mapper.root()) };
@@ -888,10 +893,10 @@ fn physmap_extent(info: &BootInfo) -> u64 {
     reason = "boot protocol invariant (DESIGN §3.3): Limine's PML4 maps the boot stack"
 )]
 unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
-    let src = Arch::root().as_u64().wrapping_add(HHDM_BASE) as *const u64;
+    let src = Arch::root().as_u64().wrapping_add(hhdm_offset()) as *const u64;
     let idx = Arch::index(va, Arch::LEVELS);
     // SAFETY: CR3 still holds Limine's PML4 (this fn's `# Safety` contract,
-    // established here), which Limine's HHDM maps at `HHDM_BASE`, and
+    // established here), which Limine's HHDM maps at `hhdm_offset()`, and
     // `idx < 512`.
     let entry = unsafe { src.add(idx).read_volatile() };
     if entry & PageFlags::PRESENT == 0 {
@@ -903,9 +908,9 @@ unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
             va.as_u64()
         );
     }
-    let dst = mapper.root().as_u64().wrapping_add(HHDM_BASE) as *mut u64;
+    let dst = mapper.root().as_u64().wrapping_add(hhdm_offset()) as *mut u64;
     // SAFETY: `mapper`'s root is the new PML4, a buddy frame reached at
-    // `HHDM_BASE` (`Mapper::new`'s contract, invariant I14), and `idx < 512`;
+    // `hhdm_offset()` (`Mapper::new`'s contract, invariant I14), and `idx < 512`;
     // established here.
     let existing = unsafe { dst.add(idx).read_volatile() };
     assert!(

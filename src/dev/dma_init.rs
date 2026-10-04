@@ -11,7 +11,7 @@ use crate::pmm_init;
 /// The kernel's one way to get a [`DmaBuffer`]; free it with [`free`].
 pub fn alloc(spec: DmaAlloc) -> Option<DmaBuffer> {
     pmm_init::with_buddy(|b| {
-        dma::alloc_from_buddy::<Arch>(b, spec, |p| paging_init::HHDM_BASE.wrapping_add(p))
+        dma::alloc_from_buddy::<Arch>(b, spec, |p| paging_init::hhdm_offset().wrapping_add(p))
     })
 }
 

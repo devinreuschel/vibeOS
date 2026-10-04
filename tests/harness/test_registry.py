@@ -301,6 +301,7 @@ ADDED: tuple[str, ...] = (
     # §0.3: the halt reasons of the Limine handshake.
     "vibeOS: limine: base revision unsupported",
     "vibeOS: limine: hhdm missing",
+    "vibeOS: limine: hhdm offset outside physmap slot",
     "vibeOS: limine: memmap missing",
     "vibeOS: limine: executable_address missing",
     "vibeOS: limine: rsdp missing",

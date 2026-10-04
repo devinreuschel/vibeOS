@@ -3,4 +3,5 @@
 pub mod heap;
 pub mod kva;
 pub mod paging;
+pub mod physmap;
 pub mod pmm;

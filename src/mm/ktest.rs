@@ -360,7 +360,7 @@ pub(crate) fn test_mmio_uc_flags() -> Outcome {
     // 2 MiB, inside the identity rest / physmap. ACPI's real bases
     // are checked by `acpi_discovery`.
     let phys = PhysAddr(0x0020_0000);
-    let va = VirtAddr(paging_init::HHDM_BASE + phys.as_u64());
+    let va = VirtAddr(paging_init::hhdm_offset() + phys.as_u64());
     // The whole leaf the patch covers, and its flags, to restore after.
     let Some((pa, size, saved)) = paging_init::translate(va) else {
         return Outcome::Fail("translate before");
@@ -745,7 +745,7 @@ pub(crate) fn vmap_32_frames_unmapped() -> Outcome {
         if paging_init::translate(VirtAddr(base + i * PAGE_SIZE)).is_some() {
             still += 1;
         }
-        let hhdm = paging_init::HHDM_BASE + frames.base() + i * PAGE_SIZE;
+        let hhdm = paging_init::hhdm_offset() + frames.base() + i * PAGE_SIZE;
         // SAFETY: frame `i` of the block this test holds, read through the
         // physmap, which covers all RAM (DESIGN §4.1); established here.
         if unsafe { (hhdm as *const u64).read_volatile() } != i {

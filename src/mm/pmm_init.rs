@@ -20,9 +20,9 @@ use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats, clip_usable};
 
 use crate::boot::BootInfo;
 use crate::sync_init::SpinMutex;
-use vibeos::paging::{HHDM_BASE, PHYSMAP_CAP};
+use vibeos::paging::PHYSMAP_CAP;
 
-static BUDDY: SpinMutex<Buddy> = SpinMutex::with_rank(Buddy::new(HHDM_BASE), RANK_BUDDY);
+static BUDDY: SpinMutex<Buddy> = SpinMutex::with_rank(Buddy::new(0), RANK_BUDDY);
 
 /// Post-init access to the global buddy. IRQ-aware, rank buddy.
 pub fn with_buddy<R>(f: impl FnOnce(&mut Buddy) -> R) -> R {
@@ -35,10 +35,11 @@ pub fn with_buddy<R>(f: impl FnOnce(&mut Buddy) -> R) -> R {
 ///
 /// # Safety
 /// - Limine's HHDM must still map every USABLE range, so the buddy can
-///   write free-list nodes into it at `phys + HHDM_BASE`.
+///   write free-list nodes into it at `phys + info.hhdm_offset`.
 /// - Single CPU, before interrupts are enabled.
 pub unsafe fn init(info: &BootInfo) -> PmmStats {
     let mut buddy = BUDDY.lock();
+    buddy.set_hhdm(info.hhdm_offset);
 
     // DESIGN §2.4: frame 0, the trampoline page (kept forever, even after
     // every AP is up), the kernel image, and each framebuffer and module.

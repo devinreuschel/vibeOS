@@ -93,10 +93,10 @@ fn write_gas(gas: Gas, val: u8) {
             if gas.address == 0 {
                 return;
             }
-            let va = paging_init::HHDM_BASE.wrapping_add(gas.address);
+            let va = paging_init::hhdm_offset().wrapping_add(gas.address);
             // SAFETY: the FADT names this register for the reset or sleep
             // write ACPI defines, and the HHDM maps physical memory at
-            // `paging_init::HHDM_BASE`; the firmware's address is trusted
+            // `paging_init::hhdm_offset()`; the firmware's address is trusted
             // here as the ACPI tables are (DESIGN §2.10).
             unsafe { (va as *mut u8).write_volatile(val) };
         }

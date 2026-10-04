@@ -56,15 +56,9 @@ const _: () = assert!(USER_MAP_END == 0x0000_7FFF_FFFF_F000);
 /// First page of the user half stays unmapped (null deref). ROADMAP §9.2.
 pub const NULL_GUARD_LEN: u64 = PAGE_SIZE_4K;
 
-/// HHDM base for the kernel's physmap (MEMORY.md §4.1). The same VA Limine
-/// already gave, so the switch to the kernel's PML4 invalidates no pointer
-/// computed as `hhdm_offset + phys`, the buddy allocator's intrusive
-/// free-list nodes included: they live inside the free pages and are
-/// reached through `phys + hhdm_offset`. If Limine drifted to another
-/// offset, the first allocation after `mov cr3` would walk an unmapped VA
-/// and fault with no useful backtrace, so the kernel's boot capture fails
-/// loud against that drift.
-pub const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
+pub use super::physmap::{
+    PHYSMAP_AARCH64, PHYSMAP_X86_64, PhysmapSlot, TIB, hhdm_in_slot, physmap_ram_fit,
+};
 
 /// Hard cap on the physmap's extent (MEMORY.md §4.1, PITFALLS.md §9.2).
 /// Firmware sometimes reports multi-terabyte MMIO BARs as memmap entries;

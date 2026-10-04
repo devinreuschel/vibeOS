@@ -133,7 +133,7 @@ pub(super) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
         if unsafe { paging_init::ensure_physmap_wb(PhysAddr(phys), len) }
             || phys < paging_init::map_end()
         {
-            return Some(paging_init::HHDM_BASE.wrapping_add(phys));
+            return Some(paging_init::hhdm_offset().wrapping_add(phys));
         }
         return None;
     }
@@ -143,7 +143,7 @@ pub(super) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
         // scan, and `end <= map_end()`, so the physmap covers the range;
         // established by `paging_init::map_end`.
         unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) }.ok()?;
-        Some(paging_init::HHDM_BASE.wrapping_add(phys))
+        Some(paging_init::hhdm_offset().wrapping_add(phys))
     } else {
         // SAFETY: invariant I58: the range is a BAR its caller holds a
         // claim on, which overlaps no other claim and no RAM, or an ECAM
