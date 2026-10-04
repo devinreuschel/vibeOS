@@ -403,10 +403,7 @@ extern "C" fn boot_rest() -> ! {
     crate::marker!(marker::SCHED_CPU0);
     crate::marker!(marker::IRQ_ENABLED);
     #[cfg(feature = "irqoff")]
-    crate::sched::irqoff::start(
-        |name, entry| thread_init::spawn(name, entry).is_ok(),
-        thread_init::sleep_ms,
-    );
+    crate::sched::irqoff::start(thread_init::sleep_ms);
 
     // BOOT.md §3.3 step 15b: size every BAR while the BSP runs alone.
     // SAFETY: boot order (BOOT.md §3.3): once, on the BSP, before
@@ -422,6 +419,11 @@ extern "C" fn boot_rest() -> ! {
     // ready, and the trampoline page identity-mapped and kept from the PMM
     // (`pmm_init::init`), as `smp_init::init` requires; established here.
     unsafe { smp_init::init() };
+    #[cfg(feature = "irqoff")]
+    crate::sched::irqoff::start_reporter(
+        |name, entry, cpu| thread_init::spawn_on(name, entry, cpu).is_ok(),
+        63u32.saturating_sub(per_cpu_init::online_mask().leading_zeros()),
+    );
     time_init::confirm_clocksource();
     diag::cpus();
     #[cfg(feature = "hang_test")]
