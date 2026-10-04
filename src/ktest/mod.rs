@@ -457,6 +457,8 @@ fn registry_main() {
     assert_eq!(runs, n, "ktest: runs made != begin count");
     #[cfg(target_arch = "x86_64")]
     crate::sched::ktest::report();
+    #[cfg(target_arch = "aarch64")]
+    crate::thread_init::report_stack_depth();
     #[cfg(target_arch = "x86_64")]
     crate::sync::ktest::report_spins();
     #[cfg(feature = "irqoff")]

@@ -109,7 +109,7 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
         return Err(e);
     }
     shoot_span(base, pages);
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     fill_stack(base, pages);
     // SAFETY: `[guard, guard + 2S)` came from `Kva::alloc_guarded(pages)`
     // above, page `i` of the stack maps `frames[i]` (the loop above), the
@@ -121,7 +121,7 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
 
 /// Fill a fresh stack's `pages` mapped pages above `base` with
 /// `stack_depth::PATTERN`, for the depth scan (DESIGN §4.5, TESTING §8.2).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 fn fill_stack(base: VirtAddr, pages: usize) {
     let words = pages * (PAGE_SIZE as usize / 8);
     // SAFETY: `alloc_guarded_stack` mapped `[base, base + pages)` writable
@@ -137,7 +137,7 @@ fn fill_stack(base: VirtAddr, pages: usize) {
 /// # Safety
 /// No thread runs on `stack` and nothing else reads or writes its pages
 /// until the call returns.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub unsafe fn refill_stack(stack: &GuardedStack) {
     let words = stack.pages() * (PAGE_SIZE as usize / 8);
     // SAFETY: the handle's `pages` pages above `base` are mapped writable

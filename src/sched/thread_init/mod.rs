@@ -52,6 +52,10 @@ pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
 pub use idle::halt_if_idle;
 pub use sweep::start_sweep;
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub(crate) use table::report_stack_depth;
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+pub(crate) use table::scan_live_stacks;
 pub(crate) use table::table_root;
 #[cfg(feature = "kernel_tests")]
 pub(crate) use table::table_usage;
@@ -825,6 +829,11 @@ fn cached_stack() -> Option<GuardedStack> {
     unsafe { core::ptr::write_bytes(stack.base().as_u64() as *mut u8, 0, len) };
     #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::refill_cached(&stack);
+    #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+    // SAFETY: invariant I10, established at `thread_init::finish_switch`.
+    unsafe {
+        kva_init::refill_stack(&stack);
+    }
     Some(stack)
 }
 
