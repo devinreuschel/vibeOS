@@ -14,10 +14,7 @@ pub(crate) fn sysenter_msrs_zero() -> Outcome {
     const MSRS: [u32; 3] = [IA32_SYSENTER_CS, IA32_SYSENTER_ESP, IA32_SYSENTER_EIP];
     // IF off, so the plant and the rewrite happen on one CPU.
     let _g = crate::arch::current::InterruptGuard::enter();
-    for (msr, v) in MSRS
-        .into_iter()
-        .zip([0x08, 0x8000_1000, 0x8000_2000])
-    {
+    for (msr, v) in MSRS.into_iter().zip([0x08, 0x8000_1000, 0x8000_2000]) {
         // SAFETY: the SYSENTER MSRs are architectural; ring 3 reaches them
         // only through `sysenter`, which cannot run on this CPU while IF
         // is off here, and `init_cpu` below rewrites them; established
