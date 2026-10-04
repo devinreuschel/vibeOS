@@ -111,9 +111,10 @@ fn fill_ap_idle(tcb: &mut Tcb, cpu_id: u32) {
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.user_segs = UserSegs::NULL;
-    // Relaxed: a statistic, reset before the thread first runs.
+    // Relaxed: a statistic, reset before the thread first runs; pairs with nothing.
     tcb.syscall_count.store(0, Ordering::Relaxed);
     tcb.pid = 0;
+    // Relaxed: as `syscall_count`; pairs with nothing.
     tcb.no_reclaim.store(0, Ordering::Relaxed);
 }
 
