@@ -1,0 +1,440 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "conclusion": "cancelled",
+ "created": "2026-10-03T23:22:24Z",
+ "event": "workflow_dispatch",
+ "finished": "2026-10-04T01:08:34Z",
+ "head_sha": "cbbe0f4544953be8f70e8dd2c0bfb24c948e4c7b",
+ "jobs": [
+  {
+   "completed": "2026-10-03T23:27:21Z",
+   "conclusion": "success",
+   "created": "2026-10-03T23:22:26Z",
+   "name": "high-CPU SMP stress",
+   "results": [],
+   "runner": null,
+   "seconds": 293,
+   "started": "2026-10-03T23:22:28Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 18
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 16
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 13
+    },
+    {
+     "name": "SMP stress (-smp 4)",
+     "seconds": 235
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "runner record",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload runner record",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 3
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-03T23:23:50Z",
+   "conclusion": "failure",
+   "created": "2026-10-03T23:22:26Z",
+   "name": "latest nightly canary",
+   "results": [],
+   "runner": null,
+   "seconds": 82,
+   "started": "2026-10-03T23:22:28Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 16
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 14
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 23
+    },
+    {
+     "name": "iso + host units on latest nightly",
+     "seconds": 22
+    },
+    {
+     "name": "runner record",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload runner record",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-03T23:31:01Z",
+   "conclusion": "failure",
+   "created": "2026-10-03T23:22:26Z",
+   "name": "repeat-kernel",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "cbbe0f4544953be8f70e8dd2c0bfb24c948e4c7b",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 218,
+   "started": "2026-10-03T23:27:23Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 29
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 15
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "setup",
+     "seconds": 11
+    },
+    {
+     "name": "make test-kernel (each run 20 times)",
+     "seconds": 153
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 0
+    },
+    {
+     "name": "runner record",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload runner record",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-03T23:28:23Z",
+   "conclusion": "failure",
+   "created": "2026-10-03T23:22:26Z",
+   "name": "repeat-kernel-smp4",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "cbbe0f4544953be8f70e8dd2c0bfb24c948e4c7b",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 271,
+   "started": "2026-10-03T23:23:52Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 30
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 16
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 2
+    },
+    {
+     "name": "setup",
+     "seconds": 11
+    },
+    {
+     "name": "make test-kernel-smp4 (each run 20 times)",
+     "seconds": 203
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 0
+    },
+    {
+     "name": "runner record",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload runner record",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T01:08:34Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-03T23:22:26Z",
+   "name": "fuzz",
+   "results": [],
+   "runner": null,
+   "seconds": 6009,
+   "started": "2026-10-03T23:28:25Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 9
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "install cargo-fuzz",
+     "seconds": 29
+    },
+    {
+     "name": "make fuzz FUZZ_TIME=900",
+     "seconds": 5965
+    },
+    {
+     "name": "upload fuzz artifacts",
+     "seconds": null
+    },
+    {
+     "name": "runner record",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload runner record",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 37161566639,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-10-03T23:22:24Z",
+ "workflow": "smp-stress"
+}
