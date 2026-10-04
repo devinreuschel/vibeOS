@@ -19,17 +19,19 @@ const GICD_IGROUPR: u64 = 0x0080;
 const GICD_ISENABLER: u64 = 0x0100;
 const GICD_ICENABLER: u64 = 0x0180;
 const GICD_IPRIORITYR: u64 = 0x0400;
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 const GICD_ITARGETSR: u64 = 0x0800;
 #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 const GICD_ICFGR: u64 = 0x0C00;
 const GICD_IROUTER: u64 = 0x6100;
 const GICD_SGIR: u64 = 0x0F00;
-const GICD_CTLR_ENABLE_G1: u32 = 1;
+const GICD_CTLR_ENABLE_G0: u32 = 1;
+const GICD_CTLR_ENABLE_G1: u32 = 1 << 1;
 const GICD_CTLR_ARE_NS: u32 = 1 << 4;
 const GICD_CTLR_ENABLE_G1A: u32 = 1 << 1;
 
 const GICC_CTLR: u64 = 0x0000;
+const GICC_CTLR_ENABLE_G0: u32 = 1;
+const GICC_CTLR_ENABLE_G1: u32 = 1 << 1;
 const GICC_PMR: u64 = 0x0004;
 const GICC_BPR: u64 = 0x0008;
 const GICC_IAR: u64 = 0x000C;
@@ -180,10 +182,11 @@ pub unsafe fn init() {
         None => crate::boot::halt_with("vibeOS: gic: cpu/redist map"),
     };
     let its = desc.gic_its().and_then(|(r, _)| map_mmio(r));
-    let v2m = desc
-        .gic_v2m()
-        .next()
-        .and_then(|(r, base, n)| map_mmio(r).map(|va| (va, base, n)));
+    let v2m = desc.gic_v2m().next().and_then(|(r, base, n)| {
+        let va = map_mmio(r)?;
+        let (base, n) = v2m_spi_range(va, base, n);
+        Some((va, base, n))
+    });
     let g = Gic {
         kind,
         dist: dist_va,
@@ -221,6 +224,8 @@ fn init_v2(g: &Gic) {
             mmio32w(g.dist, GICD_IGROUPR + u64::from(i / 32) * 4, 0xFFFF_FFFF);
             if i >= 32 {
                 mmio32w(g.dist, GICD_ICENABLER + u64::from(i / 32) * 4, 0xFFFF_FFFF);
+                // CPU0 in each of the four target bytes (IHI 0048).
+                mmio32w(g.dist, GICD_ITARGETSR + u64::from(i), 0x0101_0101);
             }
             mmio32w(
                 g.dist,
@@ -234,11 +239,31 @@ fn init_v2(g: &Gic) {
         }
         // SGIs and PPIs: enable 0..31.
         mmio32w(g.dist, GICD_ISENABLER, 0xFFFF_FFFF);
-        mmio32w(g.dist, GICD_CTLR, GICD_CTLR_ENABLE_G1);
+        // GICv2 always has groups on QEMU: IGROUPR is Group 1, so both
+        // EnableGrp0 and EnableGrp1 must be set (IHI 0048).
+        mmio32w(g.dist, GICD_CTLR, GICD_CTLR_ENABLE_G0 | GICD_CTLR_ENABLE_G1);
         mmio32w(g.cpu_or_redist, GICC_PMR, 0xFF);
         mmio32w(g.cpu_or_redist, GICC_BPR, 0);
-        mmio32w(g.cpu_or_redist, GICC_CTLR, 1);
+        mmio32w(
+            g.cpu_or_redist,
+            GICC_CTLR,
+            GICC_CTLR_ENABLE_G0 | GICC_CTLR_ENABLE_G1,
+        );
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
     }
+}
+
+/// MSI_TYPER when the device tree omits `arm,msi-base-spi`.
+fn v2m_spi_range(va: u64, base: u32, n: u16) -> (u32, u16) {
+    if n != 0 {
+        return (base, n);
+    }
+    // SAFETY: `va` is the mapped GICv2m frame. established here.
+    let typer = unsafe { mmio32(va, u64::from(gic::V2M_MSI_TYPER)) };
+    (
+        gic::v2m_typer_spi_base(typer),
+        u16::try_from(gic::v2m_typer_spi_count(typer)).unwrap_or(0),
+    )
 }
 
 fn init_v3(g: &Gic) {
