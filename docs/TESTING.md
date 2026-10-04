@@ -770,8 +770,11 @@ which `run_vibefs_crash.py` knows:
 | `vibeOS: vibefs: sync fail <err>` | failure line: an open, write, close or `sync_fs` of an iteration failed (`short write` for a short write); the guest halts |
 
 `make test-vibefs-crash` first runs the hostlib tests (`nbd-cache`, `vibefs-cat`), then
-`run_vibefs_crash.py` over the volatile-cache device (F080; ROADMAP §10.2). Each of 8 rounds
-(`VIBEOS_CRASH_ROUNDS`; the run seed is `VIBEOS_CRASH_SEED` and every failure prints it with the
+`run_vibefs_crash.py` over the volatile-cache device (F080; ROADMAP §10.2). It runs as two CI
+tiers, `test-vibefs-crash-1` (the hostlib tests, then 4 rounds) and `test-vibefs-crash-2` (4
+rounds), each with its own seed, so neither passes the 60 s tier median (§8.6); `make
+test-vibefs-crash` runs both. Each round (`--rounds`, 8 when the script runs alone, or
+`VIBEOS_CRASH_ROUNDS`; the run seed is `VIBEOS_CRASH_SEED` and every failure prints it with the
 round) works in a short `mkdtemp` directory, since macOS allows 104 bytes of unix socket path:
 
 1. `mkfs-vibefs` a 256 KiB image, the size `vibefs::tests::crash_workload_seeded_points` proves
@@ -1017,9 +1020,11 @@ split into shards that hand their state on as artifacts, and the line that needs
 scheduled work runs in the 10 lanes of ROADMAP §10.1's next box (Scheduled capacity, below).
 
 Tiers, with each group's summed QEMU step time in the last green integration-branch `ci` run before
-the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash`'s figure
-includes its `cargo test` of the host tools, which with `vibefs-crash-plants` are the tiers that need
-the toolchain; `forensics`'s and `vibefs-crash-plants`'s are a local TCG run's (`vibefs-crash-plants`:
+the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash-1`'s figure
+includes its `cargo test` of the host tools, which with `vibefs-crash-2` and `vibefs-crash-plants` are
+the tiers that need the toolchain; the two `vibefs-crash` shards' figures are each `make` target's
+wall time in a local TCG run at `d494350c` (4 CPUs) with this split, after the 8 rounds' one tier
+reached a 61 s median; `forensics`'s and `vibefs-crash-plants`'s are a local TCG run's (`vibefs-crash-plants`:
 two planted rounds and a control round), until a `ci` run measures them. The in-guest shards'
 figures are each `make` target's wall time in a local TCG run at `63dffb5` with this split (4 CPUs,
 one QEMU at a time), until a `ci` run measures them:
@@ -1045,7 +1050,8 @@ one QEMU at a time), until a `ci` run measures them:
 | x86_64 | lapic-fallback-4 | `test-lapic-fallback-4` | 37 |
 | x86_64 | lapic-fallback-5 | `test-lapic-fallback-5` | 23 |
 | x86_64 | lapic-fallback-6 | `test-lapic-fallback-6` | 23 |
-| x86_64 | vibefs-crash | `test-vibefs-crash` | 47 |
+| x86_64 | vibefs-crash-1 | `test-vibefs-crash-1` | 17 |
+| x86_64 | vibefs-crash-2 | `test-vibefs-crash-2` | 25 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
 
