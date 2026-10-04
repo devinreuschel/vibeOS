@@ -292,7 +292,7 @@ fn dtb_bytes() -> Option<&'static [u8]> {
         let b = hdr.get(4..8).and_then(|s| <[u8; 4]>::try_from(s).ok())?;
         u32::from_be_bytes(b) as usize
     };
-    if total < 40 || total > 2 * 1024 * 1024 {
+    if !(40..=2_097_152).contains(&total) {
         return None;
     }
     // SAFETY: as above, established here: `totalsize` is the blob length
