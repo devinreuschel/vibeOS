@@ -372,8 +372,9 @@ def _send_monitor_quit(sock_path: str) -> None:
 def sendkey_chars(s: str) -> str:
     """QEMU `sendkey` chord for lowercase letters, digits, space, minus.
 
-    Window keyboard and monitor sendkey both go through the i8042. This
-    is the TCG stand-in for typing in the QEMU window (DESIGN §3.6 / #66).
+    Window keyboard and monitor sendkey go through the i8042 on x86_64
+    and through virtio-keyboard on aarch64 virt (ROADMAP §11.1 / #207).
+    This is the TCG stand-in for typing in the QEMU window (DESIGN §3.6 / #66).
     """
     parts: list[str] = []
     for c in s:
@@ -2006,6 +2007,17 @@ def run_qemu_inject_mce(
 
 SERIAL_ECHO_TOKEN = "serial-ok"
 PS2_ECHO_TOKEN = "ps2-ok"
+KBD_ECHO_TOKEN = "kbd-ok"
+
+
+def kbd_echo_token(arch: str) -> str:
+    """The second echo token: PS/2 on x86_64, virtio-keyboard on aarch64."""
+    return KBD_ECHO_TOKEN if arch == "aarch64" else PS2_ECHO_TOKEN
+
+
+def kbd_echo_name(arch: str) -> str:
+    """`RunResult.matched` name for the sendkey echo."""
+    return "kbd_echo" if arch == "aarch64" else "ps2_echo"
 SHELL_READY_NEEDLE = "vibeOS: shell ready"
 # `/bin/sh`'s fd-2 line for `false` (ROADMAP §10.5): `/bin/false` found
 # through `PATH`, and its exit status reported.
@@ -2146,17 +2158,19 @@ def run_qemu_console_input(
 ) -> RunResult:
     """Boot, then type into `/bin/sh` via COM1 and via PS/2 (`sendkey`).
 
-    In order: `echo serial-ok` on COM1 must print `serial-ok` (`/bin/echo`,
-    found through `PATH`); `false` must print `SH_STATUS_LINE`; `ps` must
-    print pid 1's line; `echo ps2-ok` typed through PS/2 must print
-    `ps2-ok`. Then serial is read for `CONSOLE_TAIL_S`, and the shell's
-    `sh_power_command` must make QEMU exit with status 0 within
-    `SH_POWER_EXIT_S`. `result.matched` gains `shell_ready`, `serial_echo`,
-    `sh_status`, `sh_ps`, `ps2_echo`, `sh_poweroff` or `sh_reboot`, and
-    `console_input_sh` last.
+    In order: `echo serial-ok` on COM1 (PL011 on aarch64) must print
+    `serial-ok` (`/bin/echo`, found through `PATH`); `false` must print
+    `SH_STATUS_LINE`; `ps` must print pid 1's line; `echo ps2-ok` typed
+    through PS/2, or `echo kbd-ok` through virtio-keyboard on aarch64,
+    must print that token. Then serial is read for `CONSOLE_TAIL_S`, and
+    the shell's `sh_power_command` must make QEMU exit with status 0
+    within `SH_POWER_EXIT_S`. `result.matched` gains `shell_ready`,
+    `serial_echo`, `sh_status`, `sh_ps`, `ps2_echo` or `kbd_echo`,
+    `sh_poweroff` or `sh_reboot`, and `console_input_sh` last.
 
-    `-display none` still has an i8042; QEMU `sendkey` injects set-1
-    scancodes on IRQ1, the same path as a focused QEMU window.
+    `-display none` still has an i8042 on x86_64; QEMU `sendkey` injects
+    set-1 scancodes on IRQ1, the same path as a focused QEMU window. On
+    aarch64 virt it injects evdev keys into virtio-keyboard.
     `line_source` and `qmp` replace QEMU as in `run_qemu_and_check`, and
     QMP drives the run the same way (`qmp.Session`).
 
@@ -2204,6 +2218,8 @@ def run_qemu_console_input(
             return f"console input: missing {SH_STATUS_LINE!r} after `false`{report}"
         if not saw_ps:
             return f"console input: missing pid 1's `ps` line '1 0 ...'{report}"
+        if cfg.arch == "aarch64":
+            return f"console input: virtio-keyboard sendkey echo missing{report}"
         return f"console input: PS/2 sendkey echo missing (i8042){report}"
 
     try:
@@ -2259,11 +2275,13 @@ def run_qemu_console_input(
             if saw_status and not saw_ps and is_pid1_ps_line(reply):
                 saw_ps = True
                 result.matched.append("sh_ps")
-                src.monitor("sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n"))
+                src.monitor(
+                    "sendkey " + sendkey_chars(f"echo {kbd_echo_token(cfg.arch)}\n")
+                )
                 continue
-            if saw_ps and not saw_ps2 and reply == PS2_ECHO_TOKEN:
+            if saw_ps and not saw_ps2 and reply == kbd_echo_token(cfg.arch):
                 saw_ps2 = True
-                result.matched.append("ps2_echo")
+                result.matched.append(kbd_echo_name(cfg.arch))
                 # A later reply step goes before the tail.
                 _console_tail(
                     session, src, result, argv, panic_signatures, CONSOLE_TAIL_S, stream

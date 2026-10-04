@@ -865,6 +865,37 @@ class TestConsoleInput(unittest.TestCase):
             run_qemu_console_input(FAKE_CFG, line_source=src)
         self.assertIn("PS/2 sendkey echo missing", str(cm.exception))
 
+    def test_aarch64_serial_then_virtio_keyboard(self) -> None:
+        lines = [
+            *CONSOLE_OK_LINES[:8],
+            "vibeos> echo kbd-ok",
+            "kbd-ok",
+        ]
+        src = FakeLineSource.from_lines(lines, end="timeout")
+        cfg = dataclasses.replace(FAKE_CFG, arch="aarch64")
+        result = run_qemu_console_input(cfg, line_source=src)
+        self.assertEqual(
+            result.matched,
+            [
+                "shell_ready",
+                "serial_echo",
+                "sh_status",
+                "sh_ps",
+                "kbd_echo",
+                "sh_poweroff",
+                "console_input_sh",
+            ],
+        )
+        self.assertEqual(len(src.monitor_cmds), 1)
+        self.assertTrue(src.monitor_cmds[0].startswith("sendkey e-c-h-o-spc-k-b-d"))
+
+    def test_missing_virtio_keyboard_echo_fails(self) -> None:
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES[:9])
+        cfg = dataclasses.replace(FAKE_CFG, arch="aarch64")
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(cfg, line_source=src)
+        self.assertIn("virtio-keyboard sendkey echo missing", str(cm.exception))
+
     def test_panic_fails(self) -> None:
         src = FakeLineSource.from_lines(["vibeOS: shell ready", K("vibeOS: panic: x")])
         with self.assertRaises(HarnessError) as cm:
@@ -2344,6 +2375,10 @@ class TestSendkeyChars(unittest.TestCase):
         self.assertEqual(
             sendkey_chars("echo ps2-ok\n"),
             "e-c-h-o-spc-p-s-2-minus-o-k-ret",
+        )
+        self.assertEqual(
+            sendkey_chars("echo kbd-ok\n"),
+            "e-c-h-o-spc-k-b-d-minus-o-k-ret",
         )
 
     def test_rejects_empty_and_unknown(self) -> None:
