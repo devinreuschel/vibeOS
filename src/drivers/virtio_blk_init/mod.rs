@@ -91,8 +91,8 @@ pub(crate) struct VirtioBlk {
     flushes: AtomicU64,
     /// The common-config VA, which `needs_reset` reads; 0 before `setup`.
     common: AtomicU64,
-    /// The IRQs the probe allocated, one per queue (or one for all),
-    /// each as `QUEUE_VEC_LIVE | cpu << 32 | irq.raw()`; 0 for none.
+    /// The IDT vectors the probe allocated, one per queue (or one for all),
+    /// each as `QUEUE_VEC_LIVE | cpu << 8 | vector`; 0 for none.
     queue_vecs: [AtomicU64; MAX_VQ],
     /// Completions whose device status [`harvest`](Self::harvest) replaces
     /// with `S_UNSUPP` (test-only, AGENTS.md rule 9).
@@ -570,7 +570,10 @@ fn setup(
     let mut i = 0usize;
     while i < MAX_VQ {
         let v = if i < nvec {
-            QUEUE_VEC_LIVE | (u64::from(vcpus[i]) << 32) | u64::from(vecs[i].raw())
+            match irq_init::vector(vecs[i]) {
+                Some(hw) => QUEUE_VEC_LIVE | (u64::from(vcpus[i]) << 8) | u64::from(hw),
+                None => 0,
+            }
         } else {
             0
         };

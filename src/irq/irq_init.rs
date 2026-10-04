@@ -503,11 +503,7 @@ pub fn map_percpu(spec: IrqSpecifier) -> Result<IrqId, IrqError> {
     with_irq(|s| s.table.bind(chip, hwirq, 0))
 }
 
-/// The x86 hwirq (IDT vector) for `irq`, for IPI injection tests.
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest IPI tests read the hwirq")
-)]
+/// The x86 hwirq (IDT vector) for `irq`.
 pub fn vector(irq: IrqId) -> Option<u8> {
     with_irq(|s| s.table.hwirq(irq).and_then(|h| u8::try_from(h).ok()))
 }

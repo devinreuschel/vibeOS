@@ -1,9 +1,6 @@
 use core::any::Any;
 use core::sync::atomic::Ordering;
 
-#[cfg(feature = "kernel_tests")]
-use vibeos::irq::IrqId;
-
 use super::issue::{copy_from_bounce, slot_base};
 use super::*;
 
@@ -14,10 +11,8 @@ impl VirtioBlk {
         self.queue_vecs.iter().find_map(|q| {
             // Acquire: pairs with the Release store in `setup`.
             let v = q.load(Ordering::Acquire);
-            if v & QUEUE_VEC_LIVE == 0 || (v >> 32) as u32 != cpu {
-                return None;
-            }
-            crate::irq_init::vector(IrqId::from_raw(v as u32))
+            (v & QUEUE_VEC_LIVE != 0 && ((v & !QUEUE_VEC_LIVE) >> 8) as u32 == cpu)
+                .then_some(v as u8)
         })
     }
 
