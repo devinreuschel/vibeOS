@@ -18,59 +18,6 @@ permissions:
   contents: read
 
 jobs:
-  # TEMPORARY probe (not for main): host timer granularity and the timer
-  # ktests with and without QEMU at the top QoS tiers.
-  probe:
-    name: probe
-    runs-on: macos-15
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: install host tools
-        run: |
-          brew install qemu xorriso dosfstools zstd
-          echo "$(brew --prefix)/sbin" >> "$GITHUB_PATH"
-      - name: install rust
-        run: rustup toolchain install
-      - name: setup
-        run: ./setup.sh
-      - name: host facts
-        run: |
-          sw_vers; uname -a; sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize || true
-          qemu-system-x86_64 --version
-          taskpolicy 2>&1 | head -20 || true
-          ps -o pid,pri,nice,command -p $$ || true
-      - name: host sleep granularity
-        run: |
-          cat > /tmp/gran.py <<'PY'
-          import select, statistics, time
-          def m(f, n=400):
-              xs = []
-              for _ in range(n):
-                  t = time.perf_counter_ns(); f(); xs.append((time.perf_counter_ns() - t) / 1e3)
-              xs.sort()
-              return f"median {statistics.median(xs):.0f} us p90 {xs[int(n*0.9)]:.0f} us max {xs[-1]:.0f} us"
-          print("sleep(0.001):  ", m(lambda: time.sleep(0.001)))
-          print("select(0.001): ", m(lambda: select.select([], [], [], 0.001)))
-          print("sleep(0.0002): ", m(lambda: time.sleep(0.0002)))
-          PY
-          echo "== plain"; python3 /tmp/gran.py
-          echo "== taskpolicy -l 0 -t 0"; taskpolicy -l 0 -t 0 python3 /tmp/gran.py || true
-          echo "== taskpolicy -c utility"; taskpolicy -c utility python3 /tmp/gran.py || true
-          echo "== sudo nice -n -20"; sudo nice -n -20 python3 /tmp/gran.py || true
-      - name: timer ktests plain
-        run: VIBEOS_KTEST=lapic_timer_rearm,pit_tick_rate make test-kernel || true
-      - name: timer ktests under taskpolicy -l 0 -t 0
-        run: |
-          mkdir -p /tmp/wrap
-          printf '#!/bin/sh\nexec taskpolicy -l 0 -t 0 %s "$@"\n' "$(command -v qemu-system-x86_64)" > /tmp/wrap/qemu-system-x86_64
-          chmod +x /tmp/wrap/qemu-system-x86_64
-          PATH=/tmp/wrap:$PATH VIBEOS_KTEST=lapic_timer_rearm,pit_tick_rate make test-kernel || true
-      - name: timer ktests under -icount shift=auto,sleep=on
-        run: |
-          printf '#!/bin/sh\nexec %s -icount shift=auto,sleep=on "$@"\n' "$(command -v qemu-system-x86_64)" > /tmp/wrap/qemu-system-x86_64
-          PATH=/tmp/wrap:$PATH VIBEOS_KTEST=lapic_timer_rearm,pit_tick_rate make test-kernel || true
-
   check:
     name: check
     runs-on: macos-15
