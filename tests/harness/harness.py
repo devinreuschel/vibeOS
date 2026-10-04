@@ -1143,11 +1143,15 @@ def expected_lapic_mode(
     return "tsc-deadline"
 
 
-def expected_clocksource(*, hpet: bool = True, accel: str | None = None) -> str:
+def expected_clocksource(
+    *, hpet: bool = True, accel: str | None = None, arch: str = "x86_64"
+) -> str:
     """The clocksource the kernel must name in `time: clocksource <name>`
-    (DESIGN §6.4): `tsc` under KVM, whose guests the harness gives an
-    invariant TSC; else `hpet`, or `acpi_pm` with HPET off, since TCG never
-    reports an invariant TSC."""
+    (DESIGN §6.4): `cntvct` on aarch64; `tsc` under KVM, whose guests the
+    harness gives an invariant TSC; else `hpet`, or `acpi_pm` with HPET
+    off, since TCG never reports an invariant TSC."""
+    if arch == "aarch64":
+        return "cntvct"
     if _accel_name(accel) == "kvm":
         return "tsc"
     return "hpet" if hpet else "acpi_pm"
@@ -2886,7 +2890,7 @@ def boot_contract_markers(
         hpet=hpet,
         smp=smp,
         lapic_mode=expected_lapic_mode(cpu=cpu, hpet=hpet, accel=accel),
-        clocksource=expected_clocksource(hpet=hpet, accel=accel),
+        clocksource=expected_clocksource(hpet=hpet, accel=accel, arch=arch),
         gp_test=gp,
         panic_nest_test=panic_variant == "nest",
         panic_stop_test=panic_variant == "stop",

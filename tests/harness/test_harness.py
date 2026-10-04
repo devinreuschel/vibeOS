@@ -2558,6 +2558,14 @@ class TestEnvConfig(unittest.TestCase):
         with overlay_env({}, clear=True):
             self.assertFalse(env_flag("VIBEOS_GP_TEST"))
 
+    def test_expected_clocksource_arch(self) -> None:
+        from tests.harness.harness import expected_clocksource
+
+        self.assertEqual(expected_clocksource(arch="aarch64"), "cntvct")
+        self.assertEqual(expected_clocksource(arch="aarch64", hpet=False), "cntvct")
+        self.assertEqual(expected_clocksource(), "hpet")
+        self.assertEqual(expected_clocksource(hpet=False), "acpi_pm")
+
     def test_env_int(self) -> None:
         from tests.harness.harness import env_int, overlay_env
 
