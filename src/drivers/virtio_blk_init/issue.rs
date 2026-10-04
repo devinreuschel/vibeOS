@@ -288,6 +288,7 @@ impl VirtioBlk {
     pub(super) fn pump(&self) {
         loop {
             let mut kicks = [0u64; MAX_VQ];
+            let mut notify32 = [false; MAX_VQ];
             let mut want = [false; MAX_VQ];
             let mut local: [Option<(Request, Result<(), BlockError>)>; PUMP_BATCH] =
                 [None; PUMP_BATCH];
@@ -321,6 +322,7 @@ impl VirtioBlk {
                             }
                             if kick && let Some(v) = blk.vqs[qi].as_ref() {
                                 kicks[qi] = v.doorbell;
+                                notify32[qi] = v.notify32;
                                 want[qi] = true;
                             }
                         }
@@ -361,7 +363,7 @@ impl VirtioBlk {
             i = 0;
             while i < MAX_VQ {
                 if want[i] {
-                    kick(kicks[i], i as u16);
+                    kick(kicks[i], i as u16, notify32[i]);
                 }
                 i += 1;
             }
@@ -377,7 +379,16 @@ impl VirtioBlk {
     pub(super) fn needs_reset(&self) -> bool {
         // Acquire: pairs with the Release store in `setup`.
         let common = self.common.load(Ordering::Acquire);
-        common != 0 && exhausted_fails_device(r8(common, COMMON_OFF_STATUS))
+        if common == 0 {
+            return false;
+        }
+        // Acquire: pairs with the Release store in `setup_mmio`.
+        let st = if self.mmio.load(Ordering::Acquire) {
+            crate::virtio_mmio_init::status(common)
+        } else {
+            r8(common, COMMON_OFF_STATUS)
+        };
+        exhausted_fails_device(st)
     }
 
     /// [`fail_rest`](Self::fail_rest), only when [`needs_reset`](Self::needs_reset).

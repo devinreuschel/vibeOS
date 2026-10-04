@@ -101,11 +101,20 @@ pub(super) fn blk_top(ctx: Option<&(dyn Any + Send + Sync)>) {
     };
     b.top_hits.fetch_add(1, Ordering::SeqCst);
     // Acquire: pairs with the Release store in `setup`.
-    let isr = b.isr.load(Ordering::Acquire);
-    if isr != 0 {
-        // Reading the ISR status acknowledges the interrupt; the value
-        // itself is not needed (virtio 1.x §4.1.4.5).
-        let _ = r8(isr, 0);
+    if b.mmio.load(Ordering::Acquire) {
+        // Acquire: pairs with the Release store of `common` in `setup_mmio`.
+        let base = b.common.load(Ordering::Acquire);
+        if base != 0 {
+            crate::virtio_mmio_init::ack_isr(base);
+        }
+    } else {
+        // Acquire: pairs with the Release store in `setup`.
+        let isr = b.isr.load(Ordering::Acquire);
+        if isr != 0 {
+            // Reading the ISR status acknowledges the interrupt; the value
+            // itself is not needed (virtio 1.x §4.1.4.5).
+            let _ = r8(isr, 0);
+        }
     }
 }
 

@@ -1080,6 +1080,15 @@ def ktest_devices(
         if arch == "aarch64"
         else ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
     )
+    mmio_blk: tuple[str, ...] = ()
+    if arch == "aarch64":
+        # virtio-mmio F047: QueueNotify takes the virtqueue index.
+        mmio_blk = (
+            "-drive",
+            f"file={disk},if=none,id=vibehdmmio,format=raw,cache=writeback",
+            "-device",
+            f"virtio-blk-device,drive=vibehdmmio,num-queues={smp}",
+        )
     return isa + (
         "-device",
         "e1000e",
@@ -1093,7 +1102,7 @@ def ktest_devices(
         "virtio-rng-pci,disable-legacy=on,addr=0x1d",
     ) + virtio_blk_args(
         disk, smp, extra=extra_disks, readonly=readonly, blkdebug=blkdebug
-    ) + (
+    ) + mmio_blk + (
         # A virtio-blk function in a high slot whose probe the kernel_tests
         # hook fails after QENABLE (`dev::ktest::PROBE_BLK_BDF`).
         "-blockdev",

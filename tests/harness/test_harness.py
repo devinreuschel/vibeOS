@@ -2373,6 +2373,7 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("e1000e", args)
         self.assertIn("virtio-rng-pci", blob)
         self.assertIn("virtio-blk-pci", blob)
+        self.assertIn("virtio-blk-device", blob)
         self.assertIn("discard=unmap", blob)
 
     def test_ktest_devices_probe_functions(self) -> None:

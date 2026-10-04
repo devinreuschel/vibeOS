@@ -69,6 +69,56 @@ pub const COMMON_OFF_QDESC: u16 = 32;
 pub const COMMON_OFF_QDRIVER: u16 = 40;
 pub const COMMON_OFF_QDEVICE: u16 = 48;
 
+/// virtio 1.2 §4.2.2 MMIO register layout (modern, Version = 2).
+pub const MMIO_MAGIC: u32 = 0x7472_6976;
+pub const MMIO_VERSION: u32 = 2;
+pub const MMIO_OFF_MAGIC: u16 = 0x000;
+pub const MMIO_OFF_VERSION: u16 = 0x004;
+pub const MMIO_OFF_DEVICE_ID: u16 = 0x008;
+pub const MMIO_OFF_VENDOR_ID: u16 = 0x00c;
+pub const MMIO_OFF_DEV_FEATURES: u16 = 0x010;
+pub const MMIO_OFF_DEV_FEATURES_SEL: u16 = 0x014;
+pub const MMIO_OFF_DRV_FEATURES: u16 = 0x020;
+pub const MMIO_OFF_DRV_FEATURES_SEL: u16 = 0x024;
+pub const MMIO_OFF_QSEL: u16 = 0x030;
+pub const MMIO_OFF_QNUM_MAX: u16 = 0x034;
+pub const MMIO_OFF_QNUM: u16 = 0x038;
+pub const MMIO_OFF_QREADY: u16 = 0x03c;
+pub const MMIO_OFF_QNOTIFY: u16 = 0x050;
+pub const MMIO_OFF_ISR: u16 = 0x060;
+pub const MMIO_OFF_ISR_ACK: u16 = 0x064;
+pub const MMIO_OFF_STATUS: u16 = 0x070;
+pub const MMIO_OFF_QDESC: u16 = 0x080;
+pub const MMIO_OFF_QDRIVER: u16 = 0x090;
+pub const MMIO_OFF_QDEVICE: u16 = 0x0a0;
+pub const MMIO_OFF_CONFIG: u16 = 0x100;
+
+/// Virtio device id: block (virtio 1.2 §5).
+pub const ID_BLOCK: u32 = 2;
+/// Virtio device id: entropy source.
+pub const ID_ENTROPY: u32 = 4;
+/// Virtio device id: input.
+pub const ID_INPUT: u32 = 18;
+
+/// PCI class used for a virtio-mmio transport published from the DT `reg`.
+pub const CLASS_MMIO: u8 = 0xFF;
+
+/// Modern PCI device id `0x1040 + virtio device id`, or `None` for an
+/// empty transport (device id 0) or a value that would wrap.
+#[must_use]
+pub const fn modern_pci_id(virtio_id: u32) -> Option<u16> {
+    if virtio_id == 0 || virtio_id > 0xFBF {
+        return None;
+    }
+    Some(0x1040u16.saturating_add(virtio_id as u16))
+}
+
+/// Whether a virtio-mmio identity pair is a modern transport.
+#[must_use]
+pub const fn mmio_ident_ok(magic: u32, version: u32) -> bool {
+    magic == MMIO_MAGIC && version == MMIO_VERSION
+}
+
 pub const CAP_HDR: u16 = 16;
 pub const MAX_VENDOR_CAPS: usize = 8;
 
@@ -860,6 +910,21 @@ mod tests {
     use std::vec::Vec;
 
     type Stub = crate::arch::stub::Arch;
+
+    #[test]
+    fn mmio_layout_and_ident() {
+        assert_eq!(MMIO_MAGIC, u32::from_le_bytes(*b"virt"));
+        assert_eq!(MMIO_OFF_QNOTIFY, 0x50);
+        assert_eq!(MMIO_OFF_STATUS, 0x70);
+        assert_eq!(MMIO_OFF_CONFIG, 0x100);
+        assert!(mmio_ident_ok(MMIO_MAGIC, MMIO_VERSION));
+        assert!(!mmio_ident_ok(0, MMIO_VERSION));
+        assert!(!mmio_ident_ok(MMIO_MAGIC, 1));
+        assert_eq!(modern_pci_id(ID_BLOCK), Some(DEV_BLK_MODERN));
+        assert_eq!(modern_pci_id(ID_ENTROPY), Some(DEV_RNG_MODERN));
+        assert_eq!(modern_pci_id(0), None);
+        assert_eq!(queue_notify(3), 3);
+    }
 
     struct Fake {
         data: [u8; 256],
