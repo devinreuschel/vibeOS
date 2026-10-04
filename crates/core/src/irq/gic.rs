@@ -13,6 +13,9 @@ pub const SGI_BASE: u32 = 0;
 pub const SGI_COUNT: u32 = 16;
 pub const PPI_BASE: u32 = 16;
 pub const SPI_BASE: u32 = 32;
+/// First special INTID (IHI 0069). 1020–1023 are special (1023 is spurious);
+/// 1024–8191 are reserved. LPIs start at [`LPI_BASE`].
+pub const SPECIAL_INTID_BASE: u32 = 1020;
 pub const LPI_BASE: u32 = 8192;
 
 /// SGIs the kernel uses (DESIGN §5.3). 8–15 stay with the Secure world.
@@ -67,6 +70,12 @@ pub const fn is_lpi(intid: u32) -> bool {
     intid >= LPI_BASE
 }
 
+/// Special (1020–1023) or reserved (1024–8191) INTID. `ICC_IAR1` /
+/// `GICC_IAR` can return these; they are not EOI'd or dispatched.
+pub const fn is_special(intid: u32) -> bool {
+    intid >= SPECIAL_INTID_BASE && intid < LPI_BASE
+}
+
 /// Priority for an INTID: NMI reserved, then SGI/tick, then devices.
 pub const fn priority_for(intid: u32) -> u8 {
     if is_sgi(intid) || is_ppi(intid) {
@@ -111,6 +120,11 @@ mod tests {
         assert!(is_ppi(27));
         assert!(is_spi(32));
         assert!(is_lpi(8192));
+        assert!(is_special(1020));
+        assert!(is_special(1023));
+        assert!(is_special(8191));
+        assert!(!is_special(1019));
+        assert!(!is_special(8192));
         assert_eq!(priority_for(SGI_CALL), PRIO_IPI_TICK);
         assert_eq!(priority_for(27), PRIO_IPI_TICK);
         assert_eq!(priority_for(64), PRIO_DEVICE);

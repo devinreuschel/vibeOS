@@ -512,7 +512,9 @@ pub fn handle_irq() {
         return;
     };
     let intid = ack(g);
-    if intid >= 1020 {
+    // 1020–1023 are special (1023 is spurious); 1024–8191 are reserved.
+    // LPIs are 8192+ and must be dispatched (IHI 0069).
+    if gic::is_special(intid) {
         return;
     }
     // DESIGN §5.8: EOI before the timer/IPI body, which may preempt.

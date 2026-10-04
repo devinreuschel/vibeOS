@@ -440,7 +440,7 @@ pub(crate) fn test_dma_edu() -> Outcome {
 }
 
 fn find_rng() -> Option<DevRef> {
-    find_id(0x1af4, 0x1044).or_else(|| find_id(0x1af4, 0x1004))
+    find_id(0x1af4, 0x1044).or_else(|| find_id(0x1af4, 0x1005))
 }
 
 pub(crate) fn test_virtio_bind() -> Outcome {
@@ -1097,7 +1097,7 @@ fn rng_functions() -> ([Option<DevRef>; 4], usize) {
     let mut i = 0usize;
     while let Some(d) = dev_init::get(i) {
         i += 1;
-        let rng = d.vendor == 0x1af4 && (d.device_id == 0x1044 || d.device_id == 0x1004);
+        let rng = d.vendor == 0x1af4 && (d.device_id == 0x1044 || d.device_id == 0x1005);
         if !rng {
             continue;
         }
