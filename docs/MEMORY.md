@@ -100,10 +100,10 @@ The low identity window exists for one reason: an AP starting from SIPI runs in 
 32-bit protected mode in the trampoline page below 1 MiB (§7.3), so that page must be identity
 mapped and executable. After `smp: done`, `smp_init::init` asserts that the bootstrap thread's stack
 and its own RSP lie outside the window and calls `paging_init::teardown_identity`, which unmaps every
-identity leaf but the trampoline page's and flushes the whole TLB, global entries included, on every
-CPU (§4.3). From then a NULL-plus-offset access from kernel code faults, as it does from user code,
-and no buddy frame has an identity alias. The trampoline page stays mapped, read-only, executable and
-not global, for as long as the kernel CR3 lives.
+identity leaf but the trampoline page's and drops the window's translations, global ones included, on
+every CPU (§4.3). From then a NULL-plus-offset access from kernel code faults, as it does from user
+code, and no buddy frame has an identity alias. The trampoline page stays mapped, read-only, executable
+and not global, for as long as the kernel CR3 lives.
 
 The physmap is capped at 8 GiB (`PHYSMAP_CAP`) regardless of what the memory map says. Some firmware
 describes MMIO BARs as multi-terabyte regions, and walking that to build page tables at boot does not
@@ -312,9 +312,10 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
 
 - `invlpg` after any single-PTE edit, including MMIO attribute patches.
 - The identity teardown (§4.1) unmaps its leaves under PT, dropping it at least every 64 leaves
-  (§2.9 rule 2), then flushes the whole TLB, global entries included, on this CPU (a `CR4.PGE`
-  toggle, or a CR3 reload when PGE is clear) and on every other online CPU through
-  `ipi_init::call_mask`, before anything relies on VA 0 faulting.
+  (§2.9 rule 2), then drops the window's translations, global ones included, on this CPU and on
+  every other online CPU through `ipi_init::call_mask`, before anything relies on VA 0 faulting:
+  one `invlpg` per leaf `paging_init::install` mapped there, 512 of 4 KiB and 255 of 2 MiB, since
+  no CR4 write follows `arch::cpu::init_control_regs` (§11.4) to toggle `CR4.PGE`.
 - Kernel mappings are `GLOBAL`, and every CPU sets `CR4.PGE` (`arch::cpu::init_control_regs`,
   §11.4), so they survive a CR3 reload. Unmapping one requires a shootdown on every online CPU
   before the VA or the frame behind it can be reused (§2.4). See [section 7.9](SMP.md#79-tlb-shootdown).

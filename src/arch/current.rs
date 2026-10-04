@@ -8,7 +8,7 @@ pub type Arch = super::x86_64::Arch;
 
 /// The page-table port items that are not `PageTable` methods.
 #[cfg(target_arch = "x86_64")]
-pub use super::x86_64::mmu::{enable_nx, flush_local_global};
+pub use super::x86_64::mmu::enable_nx;
 
 /// The port's CPU primitives that shared kernel code calls by these
 /// port-neutral names (`docs/ARCH.md`): the interrupt guard and flag, the

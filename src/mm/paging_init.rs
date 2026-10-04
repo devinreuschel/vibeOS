@@ -28,7 +28,7 @@ use vibeos::paging::{
 };
 use vibeos::pmm::Frames;
 
-use crate::arch::current::{Arch, Mapper, enable_nx, flush_local_global, stack_pointer};
+use crate::arch::current::{Arch, Mapper, enable_nx, stack_pointer};
 use crate::boot::{self, BootInfo};
 use crate::pmm_init;
 use crate::sync_init::{SpinMutex, SpinMutexGuard};
@@ -638,7 +638,8 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // present, read-only and executable, and not GLOBAL, so the teardown's
     // flush need not reach it; every other page writable, NX and GLOBAL.
     // Rest: 2 MiB leaves, writable + NX + GLOBAL, so the TLB survives CR3
-    // reloads (DESIGN §4.3 TLB section) until `teardown_identity`.
+    // reloads (DESIGN §4.3 TLB section) until `teardown_identity`, whose
+    // `flush_identity` invalidates one address per leaf of this layout.
     let tramp = info.trampoline_page;
     let low_4k = |va: u64| {
         if Some(va) == tramp {
@@ -736,10 +737,10 @@ pub(crate) fn identity_window() -> core::ops::Range<u64> {
 const TEARDOWN_BATCH: usize = 64;
 
 /// Remove the low identity window after `smp: done`, all but the leaf that
-/// maps `keep` (the trampoline page), then flush the whole TLB, global
-/// entries included, on this CPU and every other online one, so a kernel
-/// read of VA 0 faults on each (DESIGN §4.1, §4.3). The page tables stay:
-/// a kernel table page is never freed.
+/// maps `keep` (the trampoline page), then drop the window's translations,
+/// global ones included, on this CPU and every other online one, so a
+/// kernel read of VA 0 faults on each (DESIGN §4.1, §4.3). The page tables
+/// stay: a kernel table page is never freed.
 ///
 /// # Safety
 /// Once, after every AP is up; nothing on any CPU uses an identity address
@@ -759,22 +760,34 @@ pub unsafe fn teardown_identity(keep: Option<u64>) {
             if keep != Some(va) {
                 // SAFETY: `Mapper::unmap_page`'s contract; the caller keeps
                 // every CPU off the window (this fn's `# Safety` contract),
-                // and the whole-TLB flush below runs on every CPU before
-                // this returns; established here.
+                // and the flush below runs on every CPU before this
+                // returns; established here.
                 let _unmapped = unsafe { pt.unmap_page(VirtAddr(va)) };
                 n += 1;
             }
             va += size;
         }
     }
-    flush_local_global();
-    crate::ipi_init::call_mask(u64::MAX, flush_tlb_all_ipi, core::ptr::null_mut(), true);
+    flush_identity(core::ptr::null_mut());
+    crate::ipi_init::call_mask(u64::MAX, flush_identity, core::ptr::null_mut(), true);
 }
 
-/// `flush_local_global` on a CPU `teardown_identity` calls through
-/// `ipi_init::call_mask`: it takes no lock and allocates nothing.
-fn flush_tlb_all_ipi(_: *mut ()) {
-    flush_local_global();
+/// Drop this CPU's translations of the identity window, global ones
+/// included, with one `invlpg` per leaf `install` mapped there: nothing
+/// writes CR4 after `arch::cpu::init_control_regs` (DESIGN §11.4), so no
+/// `CR4.PGE` toggle flushes them all. It takes no lock and allocates
+/// nothing, so `teardown_identity` runs it through `ipi_init::call_mask`.
+fn flush_identity(_: *mut ()) {
+    let window = identity_window();
+    let mut va = window.start;
+    while va < window.end {
+        Arch::flush_local(VirtAddr(va));
+        va += if va < window.start + PAGE_SIZE_2M {
+            PAGE_SIZE_4K
+        } else {
+            PAGE_SIZE_2M
+        };
+    }
 }
 
 /// Print the phase-1 §1.2 exit marker and the diagnostic follow-ups.
