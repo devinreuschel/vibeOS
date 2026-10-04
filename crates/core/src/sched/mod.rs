@@ -17,7 +17,7 @@ use crate::limits;
 use crate::thread::{ThreadId, ThreadState};
 use crate::time::Instant;
 
-/// Run time a thread gets before a timer tick preempts it. DESIGN §7.8.
+/// Run time a thread gets before a timer tick preempts it. DESIGN §6.1, §7.8.
 pub const QUANTUM_MS: u64 = 10;
 
 /// No deadline given: still a deadline, so nothing blocks forever.
