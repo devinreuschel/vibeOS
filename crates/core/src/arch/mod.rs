@@ -50,19 +50,14 @@ impl MmioWidth for u16 {}
 impl MmioWidth for u32 {}
 impl MmioWidth for u64 {}
 
-/// The machine state the boot handshake hands over, normalized.
+/// The machine state the boot handshake hands over, normalized. Every port
+/// requests one Limine base revision (`boot::LIMINE_BASE_REVISION`), so the
+/// record differs by platform (a DTB against an RSDP), never by revision.
 pub trait BootHandover {
     type Info: 'static;
-    /// The boot protocol revision the port asks its loader for (Limine's
-    /// base revision).
-    const BASE_REVISION: u64;
     /// The handover record. Valid only after entry has captured it, which
     /// every caller outside the entry path is.
     fn info() -> &'static Self::Info;
-    /// The physical address of a firmware table the loader handed over as
-    /// `raw`: a physical address, or an address in the loader's direct map
-    /// at `hhdm_offset`, as the port's revision gives it.
-    fn table_phys(raw: u64, hhdm_offset: u64) -> u64;
 }
 
 /// This CPU's interrupt mask.

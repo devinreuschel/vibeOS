@@ -7,7 +7,8 @@
 //! that differs. A new registered line adds its row in the same commit.
 
 pub const SERIAL_ONLINE: &str = "vibeOS: serial online";
-pub const LIMINE_OK: &str = "vibeOS: limine: rev 3 ok";
+/// `boot::LIMINE_BASE_REVISION`, accepted.
+pub const LIMINE_OK: &str = "vibeOS: limine: rev 6 ok";
 
 /// Substring the harness matches for the phase-1 PMM marker. The full
 /// line is emitted with a runtime frame count via `writeln!`, so tests
@@ -135,6 +136,13 @@ mod tests {
         // string in the roadmap.
         assert_eq!(PMM_PREFIX, "vibeOS: pmm: ");
         assert_eq!(PMM_FREE_SUFFIX, " free 4KiB frames");
+        assert_eq!(
+            LIMINE_OK,
+            format!(
+                "vibeOS: limine: rev {} ok",
+                crate::boot::LIMINE_BASE_REVISION
+            )
+        );
         // Paging §1.2 exit marker is a fixed string; must match the
         // harness contract byte-for-byte.
         assert_eq!(PAGING_CR3_OK, "vibeOS: paging: cr3 ok");

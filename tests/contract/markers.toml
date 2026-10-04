@@ -42,7 +42,7 @@
 # §0.3 Limine handshake
 
 [[marker]]
-text = "vibeOS: limine: rev 3 ok"
+text = "vibeOS: limine: rev 6 ok"
 kind = "contract"
 arch = "both"
 source = "kernel"

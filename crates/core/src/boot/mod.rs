@@ -5,6 +5,10 @@
 
 pub mod cmdline;
 
+/// The Limine base revision every port requests (BOOT.md §3.2): 6, the
+/// lowest the pinned Limine accepts on aarch64. `marker::LIMINE_OK` names it.
+pub const LIMINE_BASE_REVISION: u64 = 6;
+
 /// Selector key of the `QEMU` signature.
 pub const FW_CFG_SIGNATURE: u16 = 0x0000;
 /// Selector key of the feature word (little-endian `u32`).

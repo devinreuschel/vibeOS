@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # Phase 0 dev environment bootstrap.
 #
-# Clones the Limine binary branch to ./limine, builds the `limine` host tool,
-# and verifies the other host tools that make(1) needs. Never rewrites any
-# project files (ROADMAP §0.5). Installs scripts/hooks/commit-msg into the
-# clone's git hooks unless a hook of another origin is already there.
+# Unpacks the pinned Limine release's binary archive to ./limine, builds the
+# `limine` host tool, and verifies the other host tools that make(1) needs.
+# Never rewrites any project files (ROADMAP §0.5). Installs
+# scripts/hooks/commit-msg into the clone's git hooks unless a hook of another
+# origin is already there.
 
 set -euo pipefail
 
-LIMINE_TAG="${LIMINE_TAG:-v9.6.7-binary}"
-LIMINE_COMMIT="${LIMINE_COMMIT:-ee5d29cd0a8034612dcd1df3f00052480db785c5}"
-LIMINE_REPO="${LIMINE_REPO:-https://github.com/limine-bootloader/limine.git}"
+# Limine 12 publishes its binaries only as a release asset, so the pin is the
+# tag, the commit it must still name, and the archive's SHA-256.
+LIMINE_TAG="${LIMINE_TAG:-v12.9.1}"
+LIMINE_COMMIT="${LIMINE_COMMIT:-c82c3708b3304be806b2492dc2ce34e219c6f989}"
+LIMINE_SHA256="${LIMINE_SHA256:-5cdebc518daa3af30b22c2322ba0dba2e0e2046fa8b087b9e13071b8dbcdcff4}"
+LIMINE_REPO="${LIMINE_REPO:-https://github.com/limine-bootloader/limine}"
+LIMINE_URL="${LIMINE_URL:-$LIMINE_REPO/releases/download/$LIMINE_TAG/limine-binary.tar.gz}"
 LIMINE_DIR="${LIMINE_DIR:-./limine}"
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
@@ -43,6 +48,7 @@ need qemu-system-x86_64
 need xorriso
 need python3
 need cargo
+need curl
 # The harness compresses guest cores with zstd (ROADMAP §10.7).
 need zstd
 
@@ -153,30 +159,59 @@ if [ -f "$TOOLCHAIN_FILE" ]; then
     fi
 fi
 
-if [ ! -d "$LIMINE_DIR/.git" ]; then
-    echo "setup: cloning $LIMINE_REPO@$LIMINE_TAG -> $LIMINE_DIR"
-    git clone --depth 1 --branch "$LIMINE_TAG" "$LIMINE_REPO" "$LIMINE_DIR"
-else
-    echo "setup: $LIMINE_DIR already present, skipping clone"
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1
+}
+limine_stale() {
+    echo "setup: $*" >&2
+    echo "setup: rm -rf $LIMINE_DIR and re-run" >&2
+    exit 1
+}
+
+# $LIMINE_DIR/.pin keeps the pin and the archive the directory came from, so
+# a restored cache is checked against both without the network.
+pin="$LIMINE_TAG $LIMINE_COMMIT $LIMINE_SHA256"
+if [ ! -e "$LIMINE_DIR" ]; then
+    # The tag's peeled line comes last; a tag moved off the pinned commit
+    # is a release nobody checked.
+    tagged=$(git ls-remote "$LIMINE_REPO" "refs/tags/$LIMINE_TAG" "refs/tags/$LIMINE_TAG^{}" | awk 'END { print $1 }')
+    if [ "$tagged" != "$LIMINE_COMMIT" ]; then
+        echo "setup: limine tag $LIMINE_TAG names ${tagged:-no commit}, not the pinned $LIMINE_COMMIT" >&2
+        exit 1
+    fi
+    echo "setup: fetching $LIMINE_URL -> $LIMINE_DIR"
+    rm -rf "$LIMINE_DIR.part"
+    mkdir -p "$LIMINE_DIR.part/.pin"
+    curl -fsSL --retry 3 -o "$LIMINE_DIR.part/.pin/limine-binary.tar.gz" "$LIMINE_URL"
+    got=$(sha256 "$LIMINE_DIR.part/.pin/limine-binary.tar.gz")
+    if [ "$got" != "$LIMINE_SHA256" ]; then
+        echo "setup: $LIMINE_URL has SHA-256 $got, not the pinned $LIMINE_SHA256" >&2
+        exit 1
+    fi
+    tar -xzf "$LIMINE_DIR.part/.pin/limine-binary.tar.gz" -C "$LIMINE_DIR.part" --strip-components=1
+    echo "$pin" > "$LIMINE_DIR.part/.pin/pin"
+    mv "$LIMINE_DIR.part" "$LIMINE_DIR"
 fi
 
-got=$(git -C "$LIMINE_DIR" rev-parse HEAD)
-if [ "$got" != "$LIMINE_COMMIT" ]; then
-    echo "setup: limine HEAD $got != pinned $LIMINE_COMMIT (tag $LIMINE_TAG)" >&2
-    echo "setup: rm -rf $LIMINE_DIR and re-run" >&2
-    exit 1
+[ -f "$LIMINE_DIR/.pin/pin" ] || limine_stale "$LIMINE_DIR is not an unpacked $LIMINE_TAG (an older clone?)"
+[ "$(cat "$LIMINE_DIR/.pin/pin")" = "$pin" ] || limine_stale "$LIMINE_DIR is pinned at $(cat "$LIMINE_DIR/.pin/pin"), not $pin"
+got=$(sha256 "$LIMINE_DIR/.pin/limine-binary.tar.gz")
+[ "$got" = "$LIMINE_SHA256" ] || limine_stale "$LIMINE_DIR/.pin/limine-binary.tar.gz has SHA-256 $got"
+# A file that differs from the archive (a restored cache or a local edit)
+# would ship a Limine binary the pin check passed (ROADMAP §10.1). Files the
+# archive lacks stay: the host tool, and the macOS build's limine.dSYM/.
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+tar -xzf "$LIMINE_DIR/.pin/limine-binary.tar.gz" -C "$scratch" --strip-components=1
+unpacked=$(cd "$LIMINE_DIR" && pwd)
+changed=$(cd "$scratch" && find . -type f | sort | while read -r f; do
+    cmp -s "$f" "$unpacked/$f" || echo "$f"
+done)
+if [ -n "$changed" ]; then
+    limine_stale "limine has files that differ from its archive (a restored cache or a local edit):
+$changed"
 fi
 echo "setup: limine $LIMINE_TAG @ $LIMINE_COMMIT"
-# A tracked file that differs from HEAD (a restored cache or a local edit)
-# would ship a Limine binary the HEAD check passed (ROADMAP §10.1). Untracked
-# files stay: the macOS build leaves limine.dSYM/.
-changed=$(git -C "$LIMINE_DIR" status --porcelain --untracked-files=no)
-if [ -n "$changed" ]; then
-    echo "setup: limine has changed tracked files (a restored cache or a local edit):" >&2
-    echo "$changed" >&2
-    echo "setup: rm -rf $LIMINE_DIR and re-run" >&2
-    exit 1
-fi
 
 if [ ! -x "$LIMINE_DIR/limine" ]; then
     echo "setup: building limine host tool"
@@ -184,6 +219,8 @@ if [ ! -x "$LIMINE_DIR/limine" ]; then
 else
     echo "setup: limine host tool already built"
 fi
+tool=$("$LIMINE_DIR/limine" version --version-only)
+[ "v$tool" = "$LIMINE_TAG" ] || limine_stale "the limine host tool is $tool, not $LIMINE_TAG"
 
 hooks_path=$(git -C "$ROOT" config --get core.hooksPath || true)
 hook_dir=$(git -C "$ROOT" rev-parse --git-path hooks)

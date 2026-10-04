@@ -145,7 +145,7 @@ class TestMarkerShape(unittest.TestCase):
 
 ABC_MARKERS = [
     Marker("vibeOS: serial online", "a"),
-    Marker("vibeOS: limine: rev 3 ok", "b"),
+    Marker("vibeOS: limine: rev 6 ok", "b"),
     Marker("vibeOS: boot: phase1 done", "c"),
 ]
 FAKE_CFG = QemuConfig(iso="fake.iso")
@@ -294,7 +294,7 @@ class TestMarkerOrder(unittest.TestCase):
     def test_all_present_in_order_quits(self) -> None:
         lines = [
             K("vibeOS: serial online"),
-            K("vibeOS: limine: rev 3 ok"),
+            K("vibeOS: limine: rev 6 ok"),
             K("vibeOS: boot: phase1 done"),
         ]
         result, src = check_fake(lines, ABC_MARKERS)
@@ -306,14 +306,14 @@ class TestMarkerOrder(unittest.TestCase):
         lines = [
             K("vibeOS: boot: phase1 done"),  # too early
             K("vibeOS: serial online"),
-            K("vibeOS: limine: rev 3 ok"),
+            K("vibeOS: limine: rev 6 ok"),
         ]
         with self.assertRaises(HarnessError) as cm:
             check_fake(lines, ABC_MARKERS)
         self.assertIn("'c'", str(cm.exception))
 
     def test_missing_final_marker_fails(self) -> None:
-        lines = [K("vibeOS: serial online"), K("vibeOS: limine: rev 3 ok")]
+        lines = [K("vibeOS: serial online"), K("vibeOS: limine: rev 6 ok")]
         with self.assertRaises(HarnessError) as cm:
             check_fake(lines, ABC_MARKERS)
         # The error names the missing marker's `name`, not its substring.
@@ -361,7 +361,7 @@ class TestMarkerOrder(unittest.TestCase):
             "chatter",
             K("vibeOS: serial online"),
             "more chatter",
-            K("vibeOS: limine: rev 3 ok"),
+            K("vibeOS: limine: rev 6 ok"),
             "even more",
             K("vibeOS: boot: phase1 done"),
         ]
@@ -458,7 +458,7 @@ class TestSmpApCount(unittest.TestCase):
 PANIC_BOOT = [
     "limine: Loading executable `boot():/boot/vibeos`...",
     K("vibeOS: serial online"),
-    K("vibeOS: limine: rev 3 ok"),
+    K("vibeOS: limine: rev 6 ok"),
     K("vibeOS: boot: panic-test armed"),
 ]
 PANIC_DUMP = [
@@ -469,7 +469,7 @@ PANIC_DUMP = [
     K("vibeOS: panic: thread cpu=0 tid=0 <early>"),
     K("vibeOS: log: last 3 (0 dropped)"),
     K("vibeOS: logrec: 2980393398tsc cpu0 info vibeOS: serial online"),
-    K("vibeOS: logrec: 2981355280tsc cpu0 info vibeOS: limine: rev 3 ok"),
+    K("vibeOS: logrec: 2981355280tsc cpu0 info vibeOS: limine: rev 6 ok"),
     K("vibeOS: logrec: 2981513364tsc cpu0 info vibeOS: boot: panic-test armed"),
     K("vibeOS: backtrace:"),
     K("  0xffffffff80001a5b __rustc::rust_begin_unwind+0x1b"),
@@ -669,7 +669,7 @@ class TestFirstKernelLine(unittest.TestCase):
 MEMINFO_BOOT = [
     "limine: Loading executable `boot():/boot/vibeos`...",
     K("vibeOS: serial online"),
-    K("vibeOS: limine: rev 3 ok"),
+    K("vibeOS: limine: rev 6 ok"),
     K("vibeOS: pmm: 29503 free 4KiB frames"),
     K("vibeOS: pmm: 29503 total, largest order 10"),
     K("vibeOS: paging: cr3 ok"),
@@ -1100,7 +1100,7 @@ class TestKtestProtocol(unittest.TestCase):
         from tests.harness.results import missing_marker
 
         cases = (
-            ([K("vibeOS: limine: rev 3 ok"), "qemu: fatal: lost the disk"], "ktest_begin"),
+            ([K("vibeOS: limine: rev 6 ok"), "qemu: fatal: lost the disk"], "ktest_begin"),
             ([K("vibeOS: ktest: begin 1"), K("vibeOS: ktest: run a 10000")], "ktest_end"),
         )
         for lines, name in cases:

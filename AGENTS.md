@@ -45,7 +45,7 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
 
 ## How to run
 
-    ./setup.sh          # Limine clone + host-tool check (verifies pinned Limine commit)
+    ./setup.sh          # Limine archive + host-tool check (verifies the pinned Limine tag, commit and SHA-256)
     make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, the default kernel ELF, check scripts, cargo deny)
     make                # kernel + build/vibeos.iso
     make run            # QEMU window = PS/2; the terminal is COM1
@@ -93,7 +93,7 @@ in its own PR, with `make models` green on Linux and on the Apple Silicon dev ho
 ## Do not
 
 - commit build products (anything under `build/` or `target/`, `limine/`, and the assembled `user/` programs)
-- edit `limine/` (cloned by `setup.sh`)
+- edit `limine/` (unpacked by `setup.sh`)
 - add a crate to the dependency graph without naming it, with its reason, in `deny.toml`'s `[bans]` allow list (`make check`'s `cargo deny check licenses bans sources` fails until it is there) and without a note in the PR
 - copy or translate code, comments, or tables from a file licensed only under the GPL or LGPL (most of Linux, glibc, GNU tools), or have its implementation open while writing the code that matches it: match Linux's behaviour from its documentation and from running it, and cite where an interface's constants and layouts are defined; a format that only GPL code defines, with the algorithm that maintains it, is learned from what Linux writes, never from that code (DESIGN §1.5)
 - adapt code into a vibeOS file unless its license is notice-only (MIT, BSD, ISC, zlib, 0BSD, or that option of a dual license), with its notice and a provenance header; Apache-2.0-only code enters only as a crate or a port (DESIGN §1.5)

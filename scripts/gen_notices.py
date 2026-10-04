@@ -6,7 +6,7 @@
 The file holds, in this order, each part under one marker line:
 
 - `== vibeOS ==`: the tree's LICENSE.
-- `== Limine <release> (binary <commit>) ==`: Limine's LICENSE, then one
+- `== Limine <release> (<commit>) ==`: Limine's LICENSE, then one
   `-- Limine third-party: <name> (<license>) --` per project Limine's
   3RDPARTY.md lists, from `third_party/limine/` (MANIFEST.toml).
 - `== Rust crates (<arch>) ==`: one `-- crate: <name> <version> (<license>) --`
@@ -23,9 +23,9 @@ The file holds, in this order, each part under one marker line:
 It fails, and writes nothing, when a crate of the graph has no license text,
 comes from a source other than crates.io, or a workspace member is neither a
 shipped root, reachable from one, nor host-only; when `third_party/limine/`
-names a release or binary commit other than setup.sh's LIMINE_TAG and
-LIMINE_COMMIT, lacks a project 3RDPARTY.md lists, or its LICENSE differs from
-the clone's; when Rust's notice or a license text it names is missing; and
+names a release or commit other than setup.sh's LIMINE_TAG and LIMINE_COMMIT,
+lacks a project 3RDPARTY.md lists, or its LICENSE differs from the unpacked
+archive's; when Rust's notice or a license text it names is missing; and
 when a marker line it expects is absent. The output names no host path.
 """
 
@@ -127,7 +127,7 @@ def parse_3rdparty(text: str) -> list[tuple[str, str]]:
 
 def check_limine(root: Path = ROOT, limine_dir: Path | None = None) -> list[str]:
     """Problems with `third_party/limine/` against setup.sh's pins, its
-    3RDPARTY.md, and the clone's LICENSE when `limine_dir` holds one."""
+    3RDPARTY.md, and the unpacked archive's LICENSE when `limine_dir` holds one."""
     tp = root / LIMINE_TP
     problems = []
     tag, commit = setup_pins(root)
@@ -135,13 +135,11 @@ def check_limine(root: Path = ROOT, limine_dir: Path | None = None) -> list[str]
         man = limine_manifest(tp)
     except (OSError, tomllib.TOMLDecodeError) as e:
         return [f"{LIMINE_TP}/MANIFEST.toml: {e}"]
-    want = tag.removesuffix("-binary")
-    if man.get("release") != want:
+    if man.get("release") != tag:
         problems.append(f"{LIMINE_TP}/MANIFEST.toml: release {man.get('release')!r}, but "
-                        f"setup.sh's LIMINE_TAG {tag} is built from {want}: "
-                        "copy that release's texts")
-    if man.get("binary_commit") != commit:
-        problems.append(f"{LIMINE_TP}/MANIFEST.toml: binary_commit {man.get('binary_commit')!r}, "
+                        f"setup.sh's LIMINE_TAG is {tag}: copy that release's texts")
+    if man.get("commit") != commit:
+        problems.append(f"{LIMINE_TP}/MANIFEST.toml: commit {man.get('commit')!r}, "
                         f"but setup.sh's LIMINE_COMMIT is {commit}")
     projects = {p.get("name"): p for p in man.get("project", [])}
     try:
@@ -166,7 +164,7 @@ def check_limine(root: Path = ROOT, limine_dir: Path | None = None) -> list[str]
         problems.append(f"{LIMINE_TP}/LICENSE: missing")
     elif limine_dir is not None and (limine_dir / "LICENSE").is_file():
         if (limine_dir / "LICENSE").read_bytes() != (tp / "LICENSE").read_bytes():
-            problems.append(f"{LIMINE_TP}/LICENSE differs from the Limine clone's LICENSE: "
+            problems.append(f"{LIMINE_TP}/LICENSE differs from the unpacked Limine's LICENSE: "
                             "copy the pinned release's texts again")
     return problems
 
@@ -397,7 +395,7 @@ def collect(root: Path, arch: str, limine_dir: Path | None,
     sections.append(("== vibeOS ==", [(None, (root / "LICENSE").read_text(encoding="utf-8"))]))
     tp = root / LIMINE_TP
     man = limine_manifest(tp)
-    sections.append((f"== Limine {man['release']} (binary {man['binary_commit']}) ==",
+    sections.append((f"== Limine {man['release']} ({man['commit']}) ==",
                      [(None, (tp / "LICENSE").read_text(encoding="utf-8"))]))
     for p in man["project"]:
         sections.append((f"-- Limine third-party: {p['name']} ({p['license']}) --",
@@ -434,7 +432,7 @@ def expected_markers(root: Path, n: Notices) -> list[str]:
     tp = root / LIMINE_TP
     man = limine_manifest(tp)
     by_name = {p["name"]: p for p in man["project"]}
-    want = ["== vibeOS ==", f"== Limine {man['release']} (binary {man['binary_commit']}) =="]
+    want = ["== vibeOS ==", f"== Limine {man['release']} ({man['commit']}) =="]
     for name, _ in parse_3rdparty((tp / "3RDPARTY.md").read_text(encoding="utf-8")):
         lic = by_name.get(name, {}).get("license", "?")
         want.append(f"-- Limine third-party: {name} ({lic}) --")
@@ -478,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True, type=Path, help="the file to write")
     ap.add_argument("--arch", default="x86_64", choices=sorted(ROOTS))
     ap.add_argument("--limine-dir", type=Path, default=None,
-                    help="the Limine clone, whose LICENSE must equal third_party/limine/LICENSE")
+                    help="the unpacked Limine, whose LICENSE must equal third_party/limine/LICENSE")
     args = ap.parse_args(argv if argv is not None else [])
     try:
         text = generate(ROOT, args.arch, args.limine_dir)

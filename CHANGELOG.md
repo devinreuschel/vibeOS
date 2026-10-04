@@ -71,6 +71,7 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Changed
 
+- Limine 12.9.1; the boot handshake is base revision 6 (`vibeOS: limine: rev 6 ok`).
 - Partitions are numbered by their place on disk, as Linux numbers them: an MBR's logical
   partitions start at `p5` (ram0's are now `ram0p5` and `ram0p6`), and a GPT entry is its index + 1.
 - A GPT is read only behind a protective MBR, as Linux reads it; a plain MBR wins over stale GPT headers.

@@ -94,12 +94,12 @@ first module), and derive the rest themselves.
 
 | Request | What we need from it |
 |---------|---------------------|
-| Base revision | Protocol version handshake: revision 3 today; ROADMAP §11.1 moves both architectures to the one revision the pinned Limine accepts on aarch64. Halt with a serial line if unsupported. |
+| Base revision | Protocol version handshake: revision 6 on both architectures (`vibeos::boot::LIMINE_BASE_REVISION`), the lowest the pinned Limine accepts on aarch64, so `BootInfo` differs by platform, never by revision. Halt with a serial line if unsupported. |
 | Framebuffer | Linear BGRX8888, 32 bits per pixel. Row stride is `pitch` bytes, which may exceed `width * 4`. |
 | Memory map | Physical regions and types. Only `USABLE` feeds the buddy allocator. |
 | HHDM | Higher-half direct map offset. `virt = phys + offset` for any physical access before our own tables exist. |
 | Executable address | Physical and virtual base of the loaded kernel, so we can map ourselves and exclude ourselves from the allocator. |
-| RSDP | Physical pointer to the ACPI RSDP. Gates all of ACPI, APIC, HPET, SMP. |
+| RSDP | HHDM pointer to the ACPI RSDP (base revision 4 and later), which `capture` makes physical. Gates all of ACPI, APIC, HPET, SMP. |
 | Modules | The files `limine.conf`'s `module_path:` keys load, as HHDM addresses and lengths: the x86_64 initrd, `/boot/initrd.fat`. `capture` keeps each one's physical range, never a slice over it, and never calls `path()` or `cmdline()`, which unwrap. Optional: with none the root is a ramfs. |
 | Executable command line | The `limine.conf` entry's `cmdline:`, read as raw bytes up to the NUL (at most 2048), never through the crate's `cmdline()`, which unwraps non-UTF-8. Optional: absent means empty. |
 | Stack size | 256 KiB, for the steps before `thread_init::init_bootstrap` moves boot onto its guarded KVA stack ([§4.5](MEMORY.md#45-kernel-virtual-address-allocator)); without the request Limine guarantees 64 KiB. |
@@ -165,7 +165,7 @@ row and that their `order` never decreases down the table.
 | # | Step | Marker | Why here |
 |---|------|--------|----------|
 | 1 | Serial (COM1) and the log ring | `serial online` | Nothing before this is debuggable. The panic handler uses the same port. |
-| 2 | Base revision check | `limine: rev 3 ok` | Everything downstream reads Limine responses. A `panic_test` build stops after this step with `boot: panic-test armed`. |
+| 2 | Base revision check | `limine: rev 6 ok` | Everything downstream reads Limine responses. A `panic_test` build stops after this step with `boot: panic-test armed`. |
 | 6 | `boot::capture`, then the buddy PMM from the memory map | `pmm: <n> free 4KiB frames` | Page tables and heap both need frames. `BootInfo` is captured once; nothing outside `boot` reads a Limine response. A second line, `pmm: <n> total, largest order <n>`, is a diagnostic. |
 | 7 | Page tables, install CR3 | `paging: cr3 ok` | Own the address space before mapping anything device-specific. |
 | 8 | ACPI table walk and the MMIO PTE attribute patch (`acpi_init::init`) | `paging: mmio uc` | LAPIC, I/O APIC and HPET pages must be uncacheable before first touch, so the walk runs right after CR3 and before the heap: moving it after the heap would make that first touch cacheable. Its `acpi: xsdt <n> tables` marker waits for step 12. |
