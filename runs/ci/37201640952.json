@@ -1,0 +1,7526 @@
+{
+ "attempt": 1,
+ "branch": "claude/determined-shannon-3a53yg",
+ "conclusion": "success",
+ "created": "2026-10-04T12:18:19Z",
+ "event": "pull_request",
+ "finished": "2026-10-04T12:27:11Z",
+ "head_sha": "54d98ef3a7be05c8e7ee66cea1a49a1ec09098f9",
+ "jobs": [
+  {
+   "completed": "2026-10-04T12:24:37Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:18:19Z",
+   "name": "check",
+   "results": [],
+   "runner": null,
+   "seconds": 376,
+   "started": "2026-10-04T12:18:21Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "gate inputs",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "install host tools",
+     "seconds": 0
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 15
+    },
+    {
+     "name": "install rust MSRV",
+     "seconds": 8
+    },
+    {
+     "name": "cache cargo (check)",
+     "seconds": 6
+    },
+    {
+     "name": "install python linters",
+     "seconds": 10
+    },
+    {
+     "name": "install cargo-deny",
+     "seconds": 1
+    },
+    {
+     "name": "make check",
+     "seconds": 241
+    },
+    {
+     "name": "native Linux: shared-page ELFs (ROADMAP \u00a710.6, F031)",
+     "seconds": 0
+    },
+    {
+     "name": "install cargo-llvm-cov",
+     "seconds": 0
+    },
+    {
+     "name": "vibeos-core llvm-cov floor",
+     "seconds": 88
+    },
+    {
+     "name": "upload vibeos-core coverage HTML",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache cargo (check)",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:22:47Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:18:19Z",
+   "name": "build (x86_64)",
+   "results": [],
+   "runner": null,
+   "seconds": 266,
+   "started": "2026-10-04T12:18:21Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 16
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 5
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "setup",
+     "seconds": 11
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": 22
+    },
+    {
+     "name": "build the user programs (make user)",
+     "seconds": 3
+    },
+    {
+     "name": "build every ISO and host tool (make prebuilt)",
+     "seconds": 183
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "upload prebuilt files",
+     "seconds": 7
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:25Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, e2e-1)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "panic_nest_armed",
+       "panic_nest_dump",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-panic-nest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-panic-nest",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_input_sh",
+       "console_ok",
+       "forged_user_lines",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "ps2_echo",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_echo",
+       "serial_online",
+       "sh_ps",
+       "sh_reboot",
+       "sh_status",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-drive",
+        "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "-drive",
+        "if=pflash,format=raw,unit=1,file=/tmp/vibeos-fw-hwes5te4/x86_64-vars-i_567mu1.fd",
+        "-boot",
+        "order=d,menu=off",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv4PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv6PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/FirmwareSetupSupport,string=no",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-drive",
+        "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "-drive",
+        "if=pflash,format=raw,unit=1,file=/tmp/vibeos-fw-hwes5te4/x86_64-vars-dhp706_v.fd",
+        "-boot",
+        "order=d,menu=off",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv4PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv6PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/FirmwareSetupSupport,string=no",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-uefi",
+     "utest": {
+      "failed": [],
+      "passed": [
+       "console_forged_lines",
+       "dup_write",
+       "efault_matrix",
+       "errno_matrix",
+       "exec_10000_one_byte_args",
+       "exec_arg_131071_runs",
+       "exec_arg_131072_e2big",
+       "exec_arg_at_page_end",
+       "exec_args_near_limit_runs",
+       "exec_args_total_e2big",
+       "exec_chain_three_steps_status",
+       "exec_empty_argv",
+       "exec_env_k_v",
+       "exec_env_without_k_v",
+       "exec_hello",
+       "exec_null_argv",
+       "fork_bomb_eagain_at_limit",
+       "fork_exit_status",
+       "fork_segv",
+       "fp_execve_initial",
+       "fp_fork_inherits",
+       "getpid_nonzero",
+       "kill_init_ignored",
+       "orphan_grandchild_getppid_1",
+       "sh_script_status",
+       "signals_kill_stop_cont",
+       "utilities_table",
+       "wait4_specific_pid_blocks_then_zombie_sibling",
+       "write_count",
+       "write_ebadf"
+      ],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "limine_ok",
+       "panic_test_armed",
+       "serial_online"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-panic.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-panic",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_input_sh",
+       "console_ok",
+       "forged_user_lines",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "ps2_echo",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_echo",
+       "serial_online",
+       "sh_poweroff",
+       "sh_ps",
+       "sh_status",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok",
+       "vda_55aa_untouched",
+       "vda_vibefs_untouched"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file=/tmp/vibeos-vda-hxfwuqz4.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file=/tmp/vibeos-vda-h8crkeui.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e",
+     "utest": {
+      "failed": [],
+      "passed": [
+       "console_forged_lines",
+       "dup_write",
+       "efault_matrix",
+       "errno_matrix",
+       "exec_10000_one_byte_args",
+       "exec_arg_131071_runs",
+       "exec_arg_131072_e2big",
+       "exec_arg_at_page_end",
+       "exec_args_near_limit_runs",
+       "exec_args_total_e2big",
+       "exec_chain_three_steps_status",
+       "exec_empty_argv",
+       "exec_env_k_v",
+       "exec_env_without_k_v",
+       "exec_hello",
+       "exec_null_argv",
+       "fork_bomb_eagain_at_limit",
+       "fork_exit_status",
+       "fork_segv",
+       "fp_execve_initial",
+       "fp_fork_inherits",
+       "getpid_nonzero",
+       "kill_init_ignored",
+       "orphan_grandchild_getppid_1",
+       "sh_script_status",
+       "signals_kill_stop_cont",
+       "utilities_table",
+       "wait4_specific_pid_blocks_then_zombie_sibling",
+       "write_count",
+       "write_ebadf"
+      ],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "qmp_core_smoke",
+       "qmp_streams"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "unix:/tmp/vibeos-mon-q3loiu9n/monitor.sock,server=on,wait=off",
+        "-qmp",
+        "unix:/tmp/vibeos-qmp-xfaqj0a4/qmp.sock,server=on,wait=off",
+        "-S",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-qmp",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 46,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-qmp",
+     "seconds": 26
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:20Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-3)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "block_persist",
+       "block_two_disk_instances",
+       "block_vblk_concurrent",
+       "block_vblk_deep",
+       "block_vblk_irq",
+       "block_vblk_mq",
+       "block_vblk_rw",
+       "cwd_per_process",
+       "fat_initrd",
+       "fat_initrd_dev_no_null",
+       "fat_rename_racing_writes",
+       "fat_times_wall_clock",
+       "fat_unlinked_open_frees_at_close",
+       "fat_vol_wait_no_eio",
+       "file_table_fork_churn",
+       "file_table_stale_writeback_ebadf",
+       "fs_drop_slot_waits_for_holder",
+       "initrd_module_sized",
+       "inode_size_shared_across_opens",
+       "kernfs_nodes_grow",
+       "open_creat_exists_opens",
+       "pseudo_fs",
+       "shell_fat32_image",
+       "shell_fs_commands",
+       "shell_ls_subdir",
+       "shell_mount_same_path_64",
+       "shell_mount_umount",
+       "shell_rm_r_tree",
+       "tmp_full_spares_system_nodes",
+       "umount_consistent",
+       "vdap1_vfs_read",
+       "vfs_backends_via_ops",
+       "vfs_fat_file_api_one_inode",
+       "vfs_fat_one_inode",
+       "vfs_fat_ops_initrd",
+       "vfs_fat_unlinked_open_inode",
+       "vfs_io_off_lock",
+       "vfs_unlink_drops_parent_dentry",
+       "vfs_user_dev_nodes",
+       "vfs_vibe_ops_mem",
+       "vfs_walk",
+       "vibefs",
+       "vibefs_efbig",
+       "vibefs_rename_ctime",
+       "vibefs_seek_end_5gib",
+       "virtio_probe_fail_quiesces",
+       "walk_path_resolution"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=block_vblk_rw..",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-p3dy248e.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-vh4_7hc2.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=block_vblk_rw..",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-p3dy248e.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-vh4_7hc2.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-3",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 41,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-3",
+     "seconds": 24
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:30Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-1)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "ac_clear_on_exception",
+       "ac_clear_user_popf",
+       "acpi_discovery",
+       "addrspace_map_unmap_teardown",
+       "alloc_stress_smp",
+       "arch_seam_core",
+       "as_pin_across_exit",
+       "backtrace_syscall_boundary",
+       "brk_mmap_munmap_user",
+       "catch_ignores_other_cpu",
+       "catch_ignores_user_frame",
+       "console_read_exit",
+       "cpu_control_regs",
+       "cpu_hardening",
+       "cr3_switch_skip",
+       "current_mapper_holds_pt",
+       "df_on_ist",
+       "elf_shared_page",
+       "elf_shared_page_jump",
+       "exec_from_tmp",
+       "exec_huge_memsz",
+       "exec_large_elf_from_file",
+       "exec_top_page_enoexec",
+       "exit_work_ipi",
+       "fill_pt_hold_bounded",
+       "force_kernel_irq_window",
+       "fork_child_gprs",
+       "fork_full_thread_table",
+       "frames_none_leaked",
+       "gdt_selectors",
+       "gp_catch",
+       "heap_align",
+       "heap_box",
+       "heap_growth",
+       "heap_oom",
+       "heap_reuse",
+       "idt_set_handler_refuses_fixed",
+       "init_reports_failed_tests",
+       "int3_roundtrip",
+       "ioapic_pit_gsi_masked",
+       "ioremap_failure_returns_va",
+       "ipi_icr_writes_if_off",
+       "irq_guard_nest",
+       "ist_gs_sign",
+       "kalloc_fail_after_hook",
+       "kalloc_nomem",
+       "kernel_va0_faults",
+       "kill_line_whole",
+       "ktest_names_unique",
+       "ktest_once_probe",
+       "kva_deferred",
+       "kva_roundtrip",
+       "lapic_timer_mode",
+       "lapic_timer_rearm",
+       "limits_heap_backed",
+       "log_boot_captured",
+       "log_boot_level",
+       "log_dmesg_no_recapture",
+       "log_emit_roundtrip",
+       "log_reentry_drop_counted",
+       "log_runtime_filter",
+       "map_unmap",
+       "mmio_uc_flags",
+       "noncanonical_rip_sigsegv",
+       "nx_enforcement",
+       "orphan_freed_no_init",
+       "preempt_gpr_canaries",
+       "pvpanic_found",
+       "ring3_hello_exit",
+       "ring3_syscall_enosys",
+       "scoped_pf",
+       "serial_frame",
+       "serial_lines_whole",
+       "signal_on_return",
+       "stack_guard",
+       "star_sysret_layout",
+       "stop_cont_no_lost_wakeup",
+       "stop_holds_signals_until_cont",
+       "syscall_body_if_on",
+       "syscall_dispatch",
+       "syscall_ptr_validate",
+       "syscall_rcx_canary",
+       "sysenter_msrs_zero",
+       "teardown_live_root_asserts",
+       "tlb_shootdown_remote",
+       "trace_ring_own_cpu",
+       "trace_tracepoints_fire",
+       "uaccess_smap_stray_fault",
+       "uaccess_smep_user_jump",
+       "unmap_shootdown_over_max_asserts",
+       "user_code_exit",
+       "user_code_layout",
+       "user_device_irq",
+       "user_ds_fork",
+       "user_ds_switch",
+       "user_entry_irq",
+       "user_exceptions",
+       "user_image_elf",
+       "user_ipi",
+       "user_ptr_helpers",
+       "user_selectors",
+       "user_syscalls",
+       "vmap",
+       "vmap_32_frames_unmapped",
+       "vmcoreinfo_published",
+       "wait4_ends_on_pending_kill"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=..user_single_step",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-7zgvb82q.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-izl4yys8.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-1",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 51,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 10
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-1",
+     "seconds": 28
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:25Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-2)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "ap_bringup_full_thread_table",
+       "block_cache_evict",
+       "block_cache_hit",
+       "block_concurrent",
+       "block_fua_write",
+       "block_in_hard_irq_asserts",
+       "block_part_gpt",
+       "block_part_mbr",
+       "block_ramdisk_rw",
+       "block_retry",
+       "blocking_mutex_counter",
+       "boot_stack_guarded",
+       "bootcell_set_once",
+       "bootinfo_consistent",
+       "cache_flush_not_starved",
+       "cache_flush_waits_writeback",
+       "cache_read_waits_for_fill",
+       "call_function_ipi",
+       "channel_mpsc",
+       "clocksource_if_off_50ms",
+       "cmdline_captured",
+       "condvar_notifier_queued",
+       "condvar_signal",
+       "condvar_wait_releases",
+       "console_mux",
+       "console_write_newlines",
+       "counted_deferred_release",
+       "cross_cpu_cells_ranked",
+       "cross_cpu_spawn",
+       "current_at_if1",
+       "current_migrate_if1",
+       "dead_list_batched_rounds",
+       "dev_bar_claims",
+       "dev_probe_alloc_fail",
+       "dev_random_eagain",
+       "dev_random_source",
+       "dma_alloc",
+       "dma_edu",
+       "exit_burst",
+       "failed_ap_cleanup",
+       "fat_mount_4k_disk_inval",
+       "fb_bgrx_roundtrip",
+       "fb_cr_home",
+       "fb_pitch",
+       "floor_syscalls_from_user",
+       "fork_oom",
+       "fp_migrate_counter",
+       "fp_no_leak",
+       "fw_cfg_dma",
+       "fw_cfg_probe",
+       "idle_runs",
+       "in_hard_irq_top_bottom",
+       "intx_fallback",
+       "intx_free_masks",
+       "irq_free_threaded",
+       "irq_pool",
+       "irqcell_reentry_panics",
+       "kbd_8042_clock",
+       "kbd_gsi_unmasked",
+       "kbd_ps2_irq",
+       "kbd_ring_drain",
+       "ktest_context",
+       "ktest_fail_fmt",
+       "ktest_helpers",
+       "ktest_rows",
+       "late_wake_after_exit",
+       "lifetime_console_write_acks_shootdown",
+       "lifetime_iowaiter_publish_last",
+       "lifetime_shootdown_ack_late",
+       "lock_across_switch_asserts",
+       "lspci_cmd",
+       "map_mmio_refuses_ram",
+       "msix_cpu",
+       "msix_cpu_publish_last",
+       "mutex_deadline",
+       "now_us_monotonic",
+       "now_us_planted_tear",
+       "now_us_under_yields",
+       "op_gate_kill_sleeps",
+       "open_trunc_enfile",
+       "parked_waits_for_make_ready",
+       "part_six_entries",
+       "pci_bar_map",
+       "pci_bind_order",
+       "pci_cfg_rw",
+       "pci_claim_exclusive",
+       "pci_qemu_set",
+       "pci_scan_bsp_only",
+       "per_cpu_bsp",
+       "per_cpu_identity",
+       "percpu_remote_view",
+       "percpu_ticks_advance",
+       "pid_not_reused_after_reap",
+       "preempt_two_threads",
+       "proc_syscall_count",
+       "rank_alloc_under_pt_asserts",
+       "rank_lock_nested_keeps_outer",
+       "rank_same_rank_lock_asserts",
+       "read_ebadf_before_efault",
+       "reap_many_via_idle",
+       "reap_returns_frames",
+       "reboot_bad_args_einval",
+       "requeue_moves_each_dequeue",
+       "reschedule_hook_installed",
+       "reschedule_ipi_wake_ap",
+       "rng_pool_no_dup",
+       "rng_refill_after_empty_completion",
+       "rng_second_probe_refused",
+       "rtc_offset",
+       "rwlock_exclusion",
+       "rwlock_writer_timeout",
+       "sched_lock_timer_irq",
+       "sched_overdue_lost_timeout",
+       "sched_sweep_cost",
+       "semaphore_wake",
+       "shell_dispatch",
+       "shell_dmesg_level",
+       "shell_registry",
+       "shootdown_ack_while_busy",
+       "sleep_ms_50",
+       "sleep_under_spinlock_asserts",
+       "spawn_exit_thousands",
+       "spawn_sentinel",
+       "spawn_stack_oom",
+       "spin_mutex",
+       "spin_poll_hook_installed",
+       "stack_depth_exit_scan",
+       "strace_flag_matches_cmdline",
+       "switch_two_threads",
+       "sync_try_paths",
+       "syscall_errno_checks",
+       "syscall_ptr_decl_efault",
+       "trampoline_page",
+       "uaccess_readonly_efault",
+       "uaccess_syscall_copies",
+       "unowned_vector_storm",
+       "user_fork_wait_stall",
+       "user_heap_over_brk",
+       "user_int1",
+       "user_runtime",
+       "user_single_step",
+       "user_tf_repin",
+       "virtio_bind",
+       "virtio_vq",
+       "wait4_echild_before_efault",
+       "wake_inbox_and_kva_pool",
+       "workqueue",
+       "yield_now_switches"
+      ],
+      "skipped": [
+       "lifetime_dead_slot_on_cpu",
+       "lifetime_stack_reclaim",
+       "tsc_calib_source"
+      ]
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=user_single_step..block_vblk_rw",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-hpc91_il.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-rggo6emf.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-2",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 46,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-2",
+     "seconds": 27
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:16Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-6)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "fat_bad_sector_eio",
+       "vblk_bad_sector",
+       "vblk_readonly"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=vblk_readonly",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-ro-ijpe7eoa.img,if=none,id=vibehd,format=raw,cache=writeback,readonly=on",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=vblk_bad_sector,,fat_bad_sector_eio",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=blkdebug:/tmp/vibeos-blkdebug-85f04qut.conf:/tmp/vibeos-vblk-bad-8i30xfq7.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap,rerror=report,werror=report",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-6",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 36,
+   "started": "2026-10-04T12:24:40Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-6",
+     "seconds": 20
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:48Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, e2e-2)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "gp_backtrace_order",
+       "gp_test_armed",
+       "heap_ok",
+       "idt_ok",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-gp.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-gp",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_input_sh",
+       "console_ok",
+       "forged_user_lines",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "ps2_echo",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_echo",
+       "serial_online",
+       "sh_poweroff",
+       "sh_ps",
+       "sh_status",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "9G",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "9G",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "9G",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "9G",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-highmem",
+     "utest": {
+      "failed": [],
+      "passed": [
+       "console_forged_lines",
+       "dup_write",
+       "efault_matrix",
+       "errno_matrix",
+       "exec_10000_one_byte_args",
+       "exec_arg_131071_runs",
+       "exec_arg_131072_e2big",
+       "exec_arg_at_page_end",
+       "exec_args_near_limit_runs",
+       "exec_args_total_e2big",
+       "exec_chain_three_steps_status",
+       "exec_empty_argv",
+       "exec_env_k_v",
+       "exec_env_without_k_v",
+       "exec_hello",
+       "exec_null_argv",
+       "fork_bomb_eagain_at_limit",
+       "fork_exit_status",
+       "fork_segv",
+       "fp_execve_initial",
+       "fp_fork_inherits",
+       "getpid_nonzero",
+       "kill_init_ignored",
+       "orphan_grandchild_getppid_1",
+       "sh_script_status",
+       "signals_kill_stop_cont",
+       "utilities_table",
+       "wait4_specific_pid_blocks_then_zombie_sibling",
+       "write_count",
+       "write_ebadf"
+      ],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_no_sh",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pid1_exit",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-init-fault.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-nosh.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-init-fault",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "mce_dump",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-mce",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "panic_stop_armed",
+       "panic_stop_dump",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "sched_cpu2",
+       "sched_cpu3",
+       "sched_cpu4",
+       "serial_online",
+       "smp_ap_online_0",
+       "smp_ap_online_1",
+       "smp_ap_online_2",
+       "smp_ap_online_3",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-panic-stop.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "5",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 5
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-panic-stop",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_input_sh",
+       "console_ok",
+       "forged_user_lines",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "ps2_echo",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_echo",
+       "serial_online",
+       "sh_poweroff",
+       "sh_ps",
+       "sh_status",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_pit",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-machine",
+        "pc,hpet=off",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-machine",
+        "pc,hpet=off",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-pit",
+     "utest": {
+      "failed": [],
+      "passed": [
+       "console_forged_lines",
+       "dup_write",
+       "efault_matrix",
+       "errno_matrix",
+       "exec_10000_one_byte_args",
+       "exec_arg_131071_runs",
+       "exec_arg_131072_e2big",
+       "exec_arg_at_page_end",
+       "exec_args_near_limit_runs",
+       "exec_args_total_e2big",
+       "exec_chain_three_steps_status",
+       "exec_empty_argv",
+       "exec_env_k_v",
+       "exec_env_without_k_v",
+       "exec_hello",
+       "exec_null_argv",
+       "fork_bomb_eagain_at_limit",
+       "fork_exit_status",
+       "fork_segv",
+       "fp_execve_initial",
+       "fp_fork_inherits",
+       "getpid_nonzero",
+       "kill_init_ignored",
+       "orphan_grandchild_getppid_1",
+       "sh_script_status",
+       "signals_kill_stop_cont",
+       "utilities_table",
+       "wait4_specific_pid_blocks_then_zombie_sibling",
+       "write_count",
+       "write_ebadf"
+      ],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "reboot_power_off",
+       "reboot_restart"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "vibeOS: reboot: power off",
+       "vibeOS: reboot: restart"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-qmp",
+        "unix:/tmp/vibeos-qmp-47zof3f1/qmp.sock,server=on,wait=off",
+        "-S",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=reboot_power_off",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-rh5oxu3i.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-qmp",
+        "unix:/tmp/vibeos-qmp-1_ru7ded/qmp.sock,server=on,wait=off",
+        "-S",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=reboot_restart",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-zm0stibd.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-power",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "strace",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.strace=1",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-strace",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 69,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power",
+     "seconds": 49
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:34Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-4)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "clocksource_if_off_50ms",
+       "ktest_context",
+       "ktest_fail_fmt",
+       "ktest_helpers",
+       "ktest_names_unique",
+       "ktest_once_probe",
+       "ktest_optin_probe",
+       "ktest_rows",
+       "log_boot_level",
+       "pit_tick_rate",
+       "reap_many_via_idle",
+       "sleep_ms_50"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "ktest_select_boot"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-machine",
+        "pc,hpet=off",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=pit_tick_rate,,clocksource_if_off_50ms,,sleep_ms_50",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-k1grd84z.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=ktest_*,,ktest_optin_probe,,log_boot_level vibeos.ktest_repeat=3 loglevel=8",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-pwq_q4yk.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=reap_many_via_idle vibeos.ktest_repeat=20",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-vmgx5hcj.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 55,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 9
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 8
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-4",
+     "seconds": 28
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:34Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-5)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "fat_vda_16k_stack",
+       "stack_depth_planted"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "ktest_deadline_trip",
+       "stack_depth_planted"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=ktest_deadline_hang",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-_ourn8ul.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=stack_depth_planted",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-gdhxnkg5.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=fat_vda_16k_stack",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-nf9pp8j_.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-5",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 54,
+   "started": "2026-10-04T12:24:40Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 12
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 4
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-5",
+     "seconds": 28
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:23Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, vibefs-crash-2)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "crash_round_1",
+       "crash_round_2",
+       "crash_round_3",
+       "crash_round_4"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-lmf1pvic/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-m3f67qva/s,format=raw,if=none,id=vibehd,cache=none",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-ykoh7cv7/s,format=raw,if=none,id=vibehd,cache=writethrough",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-_g9o751r/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-vibefs-crash-2",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 44,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 8
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-vibefs-crash-2",
+     "seconds": 17
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:38Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, lapic-fallback-3)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "block_persist",
+       "block_two_disk_instances",
+       "block_vblk_concurrent",
+       "block_vblk_deep",
+       "block_vblk_irq",
+       "block_vblk_mq",
+       "block_vblk_rw",
+       "cwd_per_process",
+       "fat_initrd",
+       "fat_initrd_dev_no_null",
+       "fat_rename_racing_writes",
+       "fat_times_wall_clock",
+       "fat_unlinked_open_frees_at_close",
+       "fat_vol_wait_no_eio",
+       "file_table_fork_churn",
+       "file_table_stale_writeback_ebadf",
+       "fs_drop_slot_waits_for_holder",
+       "initrd_module_sized",
+       "inode_size_shared_across_opens",
+       "kernfs_nodes_grow",
+       "open_creat_exists_opens",
+       "pseudo_fs",
+       "shell_fat32_image",
+       "shell_fs_commands",
+       "shell_ls_subdir",
+       "shell_mount_same_path_64",
+       "shell_mount_umount",
+       "shell_rm_r_tree",
+       "tmp_full_spares_system_nodes",
+       "umount_consistent",
+       "vdap1_vfs_read",
+       "vfs_backends_via_ops",
+       "vfs_fat_file_api_one_inode",
+       "vfs_fat_one_inode",
+       "vfs_fat_ops_initrd",
+       "vfs_fat_unlinked_open_inode",
+       "vfs_io_off_lock",
+       "vfs_unlink_drops_parent_dentry",
+       "vfs_user_dev_nodes",
+       "vfs_vibe_ops_mem",
+       "vfs_walk",
+       "vibefs",
+       "vibefs_efbig",
+       "vibefs_rename_ctime",
+       "vibefs_seek_end_5gib",
+       "virtio_probe_fail_quiesces",
+       "walk_path_resolution"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=block_vblk_rw..",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-wuu8z0n2.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-jmj5ye81.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=block_vblk_rw..",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-wuu8z0n2.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-jmj5ye81.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-3",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 58,
+   "started": "2026-10-04T12:24:40Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 1
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 4
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-3",
+     "seconds": 37
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:26:14Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-smp4-4)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "ktest_context",
+       "ktest_fail_fmt",
+       "ktest_helpers",
+       "ktest_names_unique",
+       "ktest_once_probe",
+       "ktest_optin_probe",
+       "ktest_rows",
+       "log_boot_level",
+       "stack_depth_planted"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "ktest_deadline_trip",
+       "ktest_select_boot",
+       "stack_depth_planted"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=ktest_*,,ktest_optin_probe,,log_boot_level vibeos.ktest_repeat=3 loglevel=8",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-ek9bpydb.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 4
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=ktest_deadline_hang",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-ezsmnif2.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 4
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=stack_depth_planted",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-a88rb40c.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 4
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 56,
+   "started": "2026-10-04T12:25:18Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-4",
+     "seconds": 35
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:34Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-smp4-5)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "fat_bad_sector_eio",
+       "fat_vda_16k_stack",
+       "vblk_bad_sector",
+       "vblk_readonly"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=fat_vda_16k_stack",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-jti1f3hg.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 4
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=vblk_readonly",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-ro-f5zudcgi.img,if=none,id=vibehd,format=raw,cache=writeback,readonly=on",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 4
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=vblk_bad_sector,,fat_bad_sector_eio",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=blkdebug:/tmp/vibeos-blkdebug-1z8fq59y.conf:/tmp/vibeos-vblk-bad-hb4hplj3.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap,rerror=report,werror=report",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 4
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-5",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 55,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 6
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-5",
+     "seconds": 40
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:22Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, lapic-fallback-4)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "ktest_context",
+       "ktest_fail_fmt",
+       "ktest_helpers",
+       "ktest_names_unique",
+       "ktest_once_probe",
+       "ktest_optin_probe",
+       "ktest_rows",
+       "log_boot_level",
+       "reap_many_via_idle"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "ktest_deadline_trip",
+       "ktest_select_boot"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=ktest_*,,ktest_optin_probe,,log_boot_level vibeos.ktest_repeat=3 loglevel=8",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-9lnit0or.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=reap_many_via_idle vibeos.ktest_repeat=20",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-t_xfgov7.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=ktest_deadline_hang",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-46m3zur4.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 43,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-4",
+     "seconds": 27
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:46Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-smp4-2)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "block_cache_evict",
+       "block_cache_hit",
+       "block_concurrent",
+       "block_fua_write",
+       "block_in_hard_irq_asserts",
+       "block_part_gpt",
+       "block_part_mbr",
+       "block_ramdisk_rw",
+       "block_retry",
+       "boot_stack_guarded",
+       "cache_flush_not_starved",
+       "cache_flush_waits_writeback",
+       "cache_read_waits_for_fill",
+       "call_function_ipi",
+       "console_mux",
+       "console_write_newlines",
+       "counted_deferred_release",
+       "cross_cpu_spawn",
+       "dead_list_batched_rounds",
+       "dev_bar_claims",
+       "dev_probe_alloc_fail",
+       "dev_random_eagain",
+       "dev_random_source",
+       "dma_alloc",
+       "dma_edu",
+       "exit_burst",
+       "fat_mount_4k_disk_inval",
+       "fb_bgrx_roundtrip",
+       "fb_cr_home",
+       "fb_pitch",
+       "fork_oom",
+       "fp_migrate_counter",
+       "fp_no_leak",
+       "idle_runs",
+       "in_hard_irq_top_bottom",
+       "intx_fallback",
+       "intx_free_masks",
+       "irq_free_threaded",
+       "irq_pool",
+       "kbd_8042_clock",
+       "kbd_gsi_unmasked",
+       "kbd_ps2_irq",
+       "kbd_ring_drain",
+       "ktest_context",
+       "ktest_fail_fmt",
+       "ktest_helpers",
+       "ktest_rows",
+       "lifetime_console_write_acks_shootdown",
+       "lifetime_dead_slot_on_cpu",
+       "lifetime_iowaiter_publish_last",
+       "lifetime_shootdown_ack_late",
+       "lifetime_stack_reclaim",
+       "lock_across_switch_asserts",
+       "lspci_cmd",
+       "map_mmio_refuses_ram",
+       "msix_cpu",
+       "msix_cpu_publish_last",
+       "parked_waits_for_make_ready",
+       "part_six_entries",
+       "pci_bar_map",
+       "pci_bind_order",
+       "pci_cfg_rw",
+       "pci_claim_exclusive",
+       "pci_qemu_set",
+       "pci_scan_bsp_only",
+       "preempt_two_threads",
+       "reap_many_via_idle",
+       "reap_returns_frames",
+       "requeue_moves_each_dequeue",
+       "reschedule_hook_installed",
+       "reschedule_ipi_wake_ap",
+       "rng_pool_no_dup",
+       "rng_refill_after_empty_completion",
+       "rng_second_probe_refused",
+       "sched_lock_timer_irq",
+       "sched_overdue_lost_timeout",
+       "sched_sweep_cost",
+       "shell_dispatch",
+       "shell_dmesg_level",
+       "shell_registry",
+       "shootdown_ack_while_busy",
+       "sleep_ms_50",
+       "sleep_under_spinlock_asserts",
+       "spawn_exit_thousands",
+       "spawn_sentinel",
+       "spawn_stack_oom",
+       "stack_depth_exit_scan",
+       "switch_two_threads",
+       "unowned_vector_storm",
+       "virtio_bind",
+       "virtio_vq",
+       "wake_inbox_and_kva_pool",
+       "workqueue",
+       "yield_now_switches"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=spawn_sentinel..block_vblk_rw",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-8syna188.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-yq0hc2g2.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 4
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-2",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 67,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 10
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-2",
+     "seconds": 47
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:21Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, lapic-fallback-5)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "fat_vda_16k_stack",
+       "stack_depth_planted"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "stack_depth_planted"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=stack_depth_planted",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-xfbgm1i2.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=fat_vda_16k_stack",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-84ztgyiu.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-5",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 42,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-5",
+     "seconds": 24
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:26:14Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, vibefs-crash-1)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "crash_round_1",
+       "crash_round_2",
+       "crash_round_3",
+       "crash_round_4"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-5jlve_p9/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-sovave_i/s,format=raw,if=none,id=vibehd,cache=none",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-xpzarenj/s,format=raw,if=none,id=vibehd,cache=writethrough",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-yj8haq_z/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-vibefs-crash-1",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 58,
+   "started": "2026-10-04T12:25:16Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 7
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-vibefs-crash-1",
+     "seconds": 31
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:26:15Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, lapic-fallback-2)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "ap_bringup_full_thread_table",
+       "block_cache_evict",
+       "block_cache_hit",
+       "block_concurrent",
+       "block_fua_write",
+       "block_in_hard_irq_asserts",
+       "block_part_gpt",
+       "block_part_mbr",
+       "block_ramdisk_rw",
+       "block_retry",
+       "blocking_mutex_counter",
+       "boot_stack_guarded",
+       "bootcell_set_once",
+       "bootinfo_consistent",
+       "cache_flush_not_starved",
+       "cache_flush_waits_writeback",
+       "cache_read_waits_for_fill",
+       "call_function_ipi",
+       "channel_mpsc",
+       "clocksource_if_off_50ms",
+       "cmdline_captured",
+       "condvar_notifier_queued",
+       "condvar_signal",
+       "condvar_wait_releases",
+       "console_mux",
+       "console_write_newlines",
+       "counted_deferred_release",
+       "cross_cpu_cells_ranked",
+       "cross_cpu_spawn",
+       "current_at_if1",
+       "current_migrate_if1",
+       "dead_list_batched_rounds",
+       "dev_bar_claims",
+       "dev_probe_alloc_fail",
+       "dev_random_eagain",
+       "dev_random_source",
+       "dma_alloc",
+       "dma_edu",
+       "exit_burst",
+       "failed_ap_cleanup",
+       "fat_mount_4k_disk_inval",
+       "fb_bgrx_roundtrip",
+       "fb_cr_home",
+       "fb_pitch",
+       "floor_syscalls_from_user",
+       "fork_oom",
+       "fp_migrate_counter",
+       "fp_no_leak",
+       "fw_cfg_dma",
+       "fw_cfg_probe",
+       "idle_runs",
+       "in_hard_irq_top_bottom",
+       "intx_fallback",
+       "intx_free_masks",
+       "irq_free_threaded",
+       "irq_pool",
+       "irqcell_reentry_panics",
+       "kbd_8042_clock",
+       "kbd_gsi_unmasked",
+       "kbd_ps2_irq",
+       "kbd_ring_drain",
+       "ktest_context",
+       "ktest_fail_fmt",
+       "ktest_helpers",
+       "ktest_rows",
+       "late_wake_after_exit",
+       "lifetime_console_write_acks_shootdown",
+       "lifetime_iowaiter_publish_last",
+       "lifetime_shootdown_ack_late",
+       "lock_across_switch_asserts",
+       "lspci_cmd",
+       "map_mmio_refuses_ram",
+       "msix_cpu",
+       "msix_cpu_publish_last",
+       "mutex_deadline",
+       "now_us_monotonic",
+       "now_us_planted_tear",
+       "now_us_under_yields",
+       "op_gate_kill_sleeps",
+       "open_trunc_enfile",
+       "parked_waits_for_make_ready",
+       "part_six_entries",
+       "pci_bar_map",
+       "pci_bind_order",
+       "pci_cfg_rw",
+       "pci_claim_exclusive",
+       "pci_qemu_set",
+       "pci_scan_bsp_only",
+       "per_cpu_bsp",
+       "per_cpu_identity",
+       "percpu_remote_view",
+       "percpu_ticks_advance",
+       "pid_not_reused_after_reap",
+       "preempt_two_threads",
+       "proc_syscall_count",
+       "rank_alloc_under_pt_asserts",
+       "rank_lock_nested_keeps_outer",
+       "rank_same_rank_lock_asserts",
+       "read_ebadf_before_efault",
+       "reap_many_via_idle",
+       "reap_returns_frames",
+       "reboot_bad_args_einval",
+       "requeue_moves_each_dequeue",
+       "reschedule_hook_installed",
+       "reschedule_ipi_wake_ap",
+       "rng_pool_no_dup",
+       "rng_refill_after_empty_completion",
+       "rng_second_probe_refused",
+       "rtc_offset",
+       "rwlock_exclusion",
+       "rwlock_writer_timeout",
+       "sched_lock_timer_irq",
+       "sched_overdue_lost_timeout",
+       "sched_sweep_cost",
+       "semaphore_wake",
+       "shell_dispatch",
+       "shell_dmesg_level",
+       "shell_registry",
+       "shootdown_ack_while_busy",
+       "sleep_ms_50",
+       "sleep_under_spinlock_asserts",
+       "spawn_exit_thousands",
+       "spawn_sentinel",
+       "spawn_stack_oom",
+       "spin_mutex",
+       "spin_poll_hook_installed",
+       "stack_depth_exit_scan",
+       "strace_flag_matches_cmdline",
+       "switch_two_threads",
+       "sync_try_paths",
+       "syscall_errno_checks",
+       "syscall_ptr_decl_efault",
+       "trampoline_page",
+       "uaccess_readonly_efault",
+       "uaccess_syscall_copies",
+       "unowned_vector_storm",
+       "user_fork_wait_stall",
+       "user_heap_over_brk",
+       "user_int1",
+       "user_runtime",
+       "user_single_step",
+       "user_tf_repin",
+       "virtio_bind",
+       "virtio_vq",
+       "wait4_echild_before_efault",
+       "wake_inbox_and_kva_pool",
+       "workqueue",
+       "yield_now_switches"
+      ],
+      "skipped": [
+       "lifetime_dead_slot_on_cpu",
+       "lifetime_stack_reclaim",
+       "tsc_calib_source"
+      ]
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=user_single_step..block_vblk_rw",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-dj7glhos.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-pex7y98g.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-2",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 52,
+   "started": "2026-10-04T12:25:23Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-2",
+     "seconds": 37
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:26:10Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, lapic-fallback-6)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "fat_bad_sector_eio",
+       "vblk_bad_sector",
+       "vblk_readonly"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=vblk_readonly",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-ro-gv0j0bi6.img,if=none,id=vibehd,format=raw,cache=writeback,readonly=on",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=vblk_bad_sector,,fat_bad_sector_eio",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=blkdebug:/tmp/vibeos-blkdebug-eamj_abm.conf:/tmp/vibeos-vblk-bad-7f137kof.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap,rerror=report,werror=report",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-6",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 47,
+   "started": "2026-10-04T12:25:23Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 4
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-6",
+     "seconds": 26
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:42Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, lapic-fallback-1)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "acpi_discovery",
+       "addrspace_map_unmap_teardown",
+       "alloc_stress_smp",
+       "arch_seam_core",
+       "as_pin_across_exit",
+       "backtrace_syscall_boundary",
+       "brk_mmap_munmap_user",
+       "catch_ignores_other_cpu",
+       "catch_ignores_user_frame",
+       "console_read_exit",
+       "cpu_control_regs",
+       "cr3_switch_skip",
+       "current_mapper_holds_pt",
+       "df_on_ist",
+       "elf_shared_page",
+       "elf_shared_page_jump",
+       "exec_from_tmp",
+       "exec_huge_memsz",
+       "exec_large_elf_from_file",
+       "exec_top_page_enoexec",
+       "exit_work_ipi",
+       "fill_pt_hold_bounded",
+       "force_kernel_irq_window",
+       "fork_child_gprs",
+       "fork_full_thread_table",
+       "frames_none_leaked",
+       "gdt_selectors",
+       "gp_catch",
+       "heap_align",
+       "heap_box",
+       "heap_growth",
+       "heap_oom",
+       "heap_reuse",
+       "idt_set_handler_refuses_fixed",
+       "init_reports_failed_tests",
+       "int3_roundtrip",
+       "ioapic_pit_gsi_masked",
+       "ioremap_failure_returns_va",
+       "ipi_icr_writes_if_off",
+       "irq_guard_nest",
+       "ist_gs_sign",
+       "kalloc_fail_after_hook",
+       "kalloc_nomem",
+       "kernel_va0_faults",
+       "kill_line_whole",
+       "ktest_names_unique",
+       "ktest_once_probe",
+       "kva_deferred",
+       "kva_roundtrip",
+       "lapic_timer_mode",
+       "lapic_timer_rearm",
+       "limits_heap_backed",
+       "log_boot_captured",
+       "log_boot_level",
+       "log_dmesg_no_recapture",
+       "log_emit_roundtrip",
+       "log_reentry_drop_counted",
+       "log_runtime_filter",
+       "map_unmap",
+       "mmio_uc_flags",
+       "noncanonical_rip_sigsegv",
+       "nx_enforcement",
+       "orphan_freed_no_init",
+       "preempt_gpr_canaries",
+       "pvpanic_found",
+       "ring3_hello_exit",
+       "ring3_syscall_enosys",
+       "scoped_pf",
+       "serial_frame",
+       "serial_lines_whole",
+       "signal_on_return",
+       "stack_guard",
+       "star_sysret_layout",
+       "stop_cont_no_lost_wakeup",
+       "stop_holds_signals_until_cont",
+       "syscall_body_if_on",
+       "syscall_dispatch",
+       "syscall_ptr_validate",
+       "syscall_rcx_canary",
+       "sysenter_msrs_zero",
+       "teardown_live_root_asserts",
+       "tlb_shootdown_remote",
+       "trace_ring_own_cpu",
+       "trace_tracepoints_fire",
+       "unmap_shootdown_over_max_asserts",
+       "user_code_exit",
+       "user_code_layout",
+       "user_device_irq",
+       "user_ds_fork",
+       "user_ds_switch",
+       "user_entry_irq",
+       "user_exceptions",
+       "user_image_elf",
+       "user_ipi",
+       "user_ptr_helpers",
+       "user_selectors",
+       "user_syscalls",
+       "vmap",
+       "vmap_32_frames_unmapped",
+       "vmcoreinfo_published",
+       "wait4_ends_on_pending_kill"
+      ],
+      "skipped": [
+       "ac_clear_on_exception",
+       "ac_clear_user_popf",
+       "cpu_hardening",
+       "uaccess_smap_stray_fault",
+       "uaccess_smep_user_jump"
+      ]
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "qemu64,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=..user_single_step",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-sslr71nl.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-gch8wama.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "qemu64,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-1",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 63,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 3
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "install host tools",
+     "seconds": 14
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-1",
+     "seconds": 38
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:26:19Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, forensics)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "forensics_build_id",
+       "forensics_gp",
+       "forensics_hang",
+       "forensics_highmem"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-hang.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "unix:/tmp/vibeos-mon-_ntgbnp5/monitor.sock,server=on,wait=off",
+        "-qmp",
+        "unix:/tmp/vibeos-qmp-i4x2mu7l/qmp.sock,server=on,wait=off",
+        "-S",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 4
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-gp.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "unix:/tmp/vibeos-mon-i3t9evoj/monitor.sock,server=on,wait=off",
+        "-qmp",
+        "unix:/tmp/vibeos-qmp-yx8tzn7r/qmp.sock,server=on,wait=off",
+        "-S",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-hang.iso",
+        "-m",
+        "9G",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "unix:/tmp/vibeos-mon-pbp88z66/monitor.sock,server=on,wait=off",
+        "-qmp",
+        "unix:/tmp/vibeos-qmp-0ffehadi/qmp.sock,server=on,wait=off",
+        "-S",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "9G",
+       "smp": 4
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-forensics",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 57,
+   "started": "2026-10-04T12:25:22Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 5
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-forensics",
+     "seconds": 34
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:26:52Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, vibefs-crash-plants)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "crash_plant_control",
+       "crash_plant_early_super",
+       "crash_plant_leak"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.crash_plant=leak",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-ytldr_n7/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": null,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.crash_plant=early_super",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-rmexadmq/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-ydk1ecz_/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-vibefs-crash-plants",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 87,
+   "started": "2026-10-04T12:25:25Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 11
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 9
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 4
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-vibefs-crash-plants",
+     "seconds": 51
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:25:31Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-smp4-1)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "ac_clear_on_exception",
+       "ac_clear_user_popf",
+       "acpi_discovery",
+       "addrspace_map_unmap_teardown",
+       "alloc_stress_smp",
+       "ap_bringup_full_thread_table",
+       "arch_seam_core",
+       "as_pin_across_exit",
+       "backtrace_syscall_boundary",
+       "blocking_mutex_counter",
+       "bootcell_set_once",
+       "bootinfo_consistent",
+       "brk_mmap_munmap_user",
+       "catch_ignores_other_cpu",
+       "catch_ignores_user_frame",
+       "channel_mpsc",
+       "clocksource_if_off_50ms",
+       "cmdline_captured",
+       "condvar_notifier_queued",
+       "condvar_signal",
+       "condvar_wait_releases",
+       "console_read_exit",
+       "cpu_control_regs",
+       "cpu_hardening",
+       "cr3_switch_skip",
+       "cross_cpu_cells_ranked",
+       "current_at_if1",
+       "current_mapper_holds_pt",
+       "current_migrate_if1",
+       "df_on_ist",
+       "elf_shared_page",
+       "elf_shared_page_jump",
+       "exec_from_tmp",
+       "exec_huge_memsz",
+       "exec_large_elf_from_file",
+       "exec_top_page_enoexec",
+       "exit_work_ipi",
+       "failed_ap_cleanup",
+       "fill_pt_hold_bounded",
+       "floor_syscalls_from_user",
+       "force_kernel_irq_window",
+       "fork_child_gprs",
+       "fork_full_thread_table",
+       "frames_none_leaked",
+       "fw_cfg_dma",
+       "fw_cfg_probe",
+       "gdt_selectors",
+       "gp_catch",
+       "heap_align",
+       "heap_box",
+       "heap_growth",
+       "heap_oom",
+       "heap_reuse",
+       "idt_set_handler_refuses_fixed",
+       "init_reports_failed_tests",
+       "int3_roundtrip",
+       "ioapic_pit_gsi_masked",
+       "ioremap_failure_returns_va",
+       "ipi_icr_writes_if_off",
+       "irq_guard_nest",
+       "irqcell_reentry_panics",
+       "ist_gs_sign",
+       "kalloc_fail_after_hook",
+       "kalloc_nomem",
+       "kernel_va0_faults",
+       "kill_line_whole",
+       "ktest_names_unique",
+       "ktest_once_probe",
+       "kva_deferred",
+       "kva_roundtrip",
+       "lapic_timer_mode",
+       "lapic_timer_rearm",
+       "late_wake_after_exit",
+       "limits_heap_backed",
+       "log_boot_captured",
+       "log_boot_level",
+       "log_dmesg_no_recapture",
+       "log_emit_roundtrip",
+       "log_reentry_drop_counted",
+       "log_runtime_filter",
+       "map_unmap",
+       "mmio_uc_flags",
+       "mutex_deadline",
+       "noncanonical_rip_sigsegv",
+       "now_us_monotonic",
+       "now_us_planted_tear",
+       "now_us_under_yields",
+       "nx_enforcement",
+       "op_gate_kill_sleeps",
+       "open_trunc_enfile",
+       "orphan_freed_no_init",
+       "per_cpu_bsp",
+       "per_cpu_identity",
+       "percpu_remote_view",
+       "percpu_ticks_advance",
+       "pid_not_reused_after_reap",
+       "preempt_gpr_canaries",
+       "proc_syscall_count",
+       "pvpanic_found",
+       "rank_alloc_under_pt_asserts",
+       "rank_lock_nested_keeps_outer",
+       "rank_same_rank_lock_asserts",
+       "read_ebadf_before_efault",
+       "reboot_bad_args_einval",
+       "ring3_hello_exit",
+       "ring3_syscall_enosys",
+       "rtc_offset",
+       "rwlock_exclusion",
+       "rwlock_writer_timeout",
+       "scoped_pf",
+       "semaphore_wake",
+       "serial_frame",
+       "serial_lines_whole",
+       "signal_on_return",
+       "spin_mutex",
+       "spin_poll_hook_installed",
+       "stack_guard",
+       "star_sysret_layout",
+       "stop_cont_no_lost_wakeup",
+       "stop_holds_signals_until_cont",
+       "strace_flag_matches_cmdline",
+       "sync_try_paths",
+       "syscall_body_if_on",
+       "syscall_dispatch",
+       "syscall_errno_checks",
+       "syscall_ptr_decl_efault",
+       "syscall_ptr_validate",
+       "syscall_rcx_canary",
+       "sysenter_msrs_zero",
+       "teardown_live_root_asserts",
+       "tlb_shootdown_remote",
+       "trace_ring_own_cpu",
+       "trace_tracepoints_fire",
+       "trampoline_page",
+       "uaccess_readonly_efault",
+       "uaccess_smap_stray_fault",
+       "uaccess_smep_user_jump",
+       "uaccess_syscall_copies",
+       "unmap_shootdown_over_max_asserts",
+       "user_code_exit",
+       "user_code_layout",
+       "user_device_irq",
+       "user_ds_fork",
+       "user_ds_switch",
+       "user_entry_irq",
+       "user_exceptions",
+       "user_fork_wait_stall",
+       "user_heap_over_brk",
+       "user_image_elf",
+       "user_int1",
+       "user_ipi",
+       "user_ptr_helpers",
+       "user_runtime",
+       "user_selectors",
+       "user_single_step",
+       "user_syscalls",
+       "user_tf_repin",
+       "vmap",
+       "vmap_32_frames_unmapped",
+       "vmcoreinfo_published",
+       "wait4_echild_before_efault",
+       "wait4_ends_on_pending_kill"
+      ],
+      "skipped": [
+       "tsc_calib_source"
+      ]
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=..spawn_sentinel",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-7tc88qgy.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-su4z_dkb.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 4
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-1",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 52,
+   "started": "2026-10-04T12:24:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-1",
+     "seconds": 35
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:26:30Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:24:37Z",
+   "name": "tier (x86_64, kernel-smp4-3)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "0f08ca5ff955de649ea7276ad981948e369ff7b5",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "block_persist",
+       "block_two_disk_instances",
+       "block_vblk_concurrent",
+       "block_vblk_deep",
+       "block_vblk_irq",
+       "block_vblk_mq",
+       "block_vblk_rw",
+       "cwd_per_process",
+       "fat_initrd",
+       "fat_initrd_dev_no_null",
+       "fat_rename_racing_writes",
+       "fat_times_wall_clock",
+       "fat_unlinked_open_frees_at_close",
+       "fat_vol_wait_no_eio",
+       "file_table_fork_churn",
+       "file_table_stale_writeback_ebadf",
+       "fs_drop_slot_waits_for_holder",
+       "initrd_module_sized",
+       "inode_size_shared_across_opens",
+       "kernfs_nodes_grow",
+       "open_creat_exists_opens",
+       "pseudo_fs",
+       "shell_fat32_image",
+       "shell_fs_commands",
+       "shell_ls_subdir",
+       "shell_mount_same_path_64",
+       "shell_mount_umount",
+       "shell_rm_r_tree",
+       "tmp_full_spares_system_nodes",
+       "umount_consistent",
+       "vdap1_vfs_read",
+       "vfs_backends_via_ops",
+       "vfs_fat_file_api_one_inode",
+       "vfs_fat_one_inode",
+       "vfs_fat_ops_initrd",
+       "vfs_fat_unlinked_open_inode",
+       "vfs_io_off_lock",
+       "vfs_unlink_drops_parent_dentry",
+       "vfs_user_dev_nodes",
+       "vfs_vibe_ops_mem",
+       "vfs_walk",
+       "vibefs",
+       "vibefs_efbig",
+       "vibefs_rename_ctime",
+       "vibefs_seek_end_5gib",
+       "virtio_probe_fail_quiesces",
+       "walk_path_resolution"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=block_vblk_rw..",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-4na2t7ho.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-b9e3ipd5.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 4
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "4",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest_range=block_vblk_rw..",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-drive",
+        "file=/tmp/vibeos-vblk-4na2t7ho.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=4",
+        "-drive",
+        "file=/tmp/vibeos-vblk2-b9e3ipd5.img,if=none,id=vibehd1,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd1,disable-legacy=on,num-queues=4",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 4
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-3",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 59,
+   "started": "2026-10-04T12:25:31Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-3",
+     "seconds": 40
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:27:04Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:26:52Z",
+   "name": "ticks",
+   "results": [],
+   "runner": null,
+   "seconds": 10,
+   "started": "2026-10-04T12:26:54Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 3
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 1
+    },
+    {
+     "name": "check_ticks",
+     "seconds": 1
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-04T12:27:11Z",
+   "conclusion": "success",
+   "created": "2026-10-04T12:27:04Z",
+   "name": "ci-pass",
+   "results": [],
+   "runner": null,
+   "seconds": 5,
+   "started": "2026-10-04T12:27:06Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "every job succeeded",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 37201640952,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-10-04T12:18:19Z",
+ "workflow": "ci"
+}
