@@ -14,6 +14,7 @@ use crate::atomic::statics::{AtomicPtr, AtomicU8, Ordering};
 pub enum Source {
     VirtioRng = 0,
     RdRand = 1,
+    Rndr = 2,
 }
 
 impl Source {
@@ -21,6 +22,7 @@ impl Source {
         match v {
             0 => Some(Self::VirtioRng),
             1 => Some(Self::RdRand),
+            2 => Some(Self::Rndr),
             _ => None,
         }
     }
@@ -124,8 +126,10 @@ mod tests {
     fn source_roundtrip() {
         assert_eq!(Source::from_u8(0), Some(Source::VirtioRng));
         assert_eq!(Source::from_u8(1), Some(Source::RdRand));
-        assert_eq!(Source::from_u8(2), None);
+        assert_eq!(Source::from_u8(2), Some(Source::Rndr));
+        assert_eq!(Source::from_u8(3), None);
         assert_eq!(Source::from_u8(u8::MAX), None);
         assert_eq!(Source::from_u8(Source::RdRand as u8), Some(Source::RdRand));
+        assert_eq!(Source::from_u8(Source::Rndr as u8), Some(Source::Rndr));
     }
 }

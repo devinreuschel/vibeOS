@@ -439,8 +439,47 @@ pub fn overflow_sp() -> u64 {
     OVERFLOW_SP.load(Ordering::Acquire)
 }
 
+/// `ID_AA64ISAR0_EL1.RNDR` (Arm ARM DDI0487): 0b0001 means `RNDR`/`RNDRRS`.
+fn has_rndr() -> bool {
+    let isar0: u64;
+    // SAFETY: ID registers are readable at EL1/EL2; established here.
+    unsafe {
+        asm!(
+            "mrs {0}, ID_AA64ISAR0_EL1",
+            out(reg) isar0,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    (isar0 >> 60) & 0xF != 0
+}
+
+/// One word from `RNDR`, or `None` when the CPU has none or it failed
+/// ten times. Does not write CPACR (ROADMAP §11.6).
 #[inline]
 pub fn hw_rng64() -> Option<u64> {
+    if !has_rndr() {
+        return None;
+    }
+    let mut tries = 0u8;
+    while tries < 10 {
+        let val: u64;
+        let nzcv: u64;
+        // SAFETY: `RNDR` is an ID/random register; a failed read sets
+        // PSTATE.V and writes an UNKNOWN value. established here.
+        unsafe {
+            asm!(
+                "mrs {val}, S3_3_C2_C4_0",
+                "mrs {nzcv}, nzcv",
+                val = out(reg) val,
+                nzcv = out(reg) nzcv,
+                options(nomem, nostack),
+            );
+        }
+        if nzcv & (1 << 28) == 0 {
+            return Some(val);
+        }
+        tries = tries.saturating_add(1);
+    }
     None
 }
 

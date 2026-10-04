@@ -893,6 +893,22 @@ pub fn eoi_pit() {
     unsafe { x86::outb(PIC1_CMD, PIC_EOI) };
 }
 
+#[cfg(target_arch = "aarch64")]
+fn read_pl031_unix() -> Option<u64> {
+    let rtc = machine_init::info()?.rtc?;
+    if rtc.size < 4 {
+        return None;
+    }
+    // SAFETY: invariant I17: PL031 `reg` is Device MMIO the device tree
+    // named, and the physmap does not cover it; established by here.
+    let va = unsafe { crate::paging_init::ioremap(vibeos::paging::PhysAddr(rtc.base), rtc.size) }?
+        .as_u64();
+    // SAFETY: invariant I54: `va` is the ioremap of the PL031 window;
+    // established by `paging_init::ioremap`.
+    let unix = u32::from_le(unsafe { core::ptr::read_volatile(va as *const u32) });
+    Some(u64::from(unix))
+}
+
 /// Calibrate, program PIT channel 0, emit markers. Does not `sti`.
 ///
 /// # Safety
@@ -912,6 +928,13 @@ pub unsafe fn init() {
     let w = ClockWriter::new(chosen, read_raw(&st, chosen.id), 0);
     publish(&st, w.snapshot());
     WRITER.with(|slot| *slot = Some(w));
+    if let Some(unix) = read_pl031_unix() {
+        st.rtc = Some(WallOrigin {
+            unix_s: unix,
+            mono_ns: 0,
+        });
+        crate::klog!(vibeos::log::Level::Info, "vibeOS: time: pl031 unix={unix}");
+    }
     // SAFETY: I22, one write on the BSP before SMP; established here.
     unsafe { STATE.set(st) };
 }

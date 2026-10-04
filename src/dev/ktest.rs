@@ -22,7 +22,11 @@ use crate::dev_init;
 use crate::dma_init;
 #[cfg(target_arch = "x86_64")]
 use crate::entropy_init;
+#[cfg(target_arch = "aarch64")]
+use crate::file_init;
 #[cfg(target_arch = "x86_64")]
+use crate::fs_init;
+#[cfg(target_arch = "aarch64")]
 use crate::fs_init;
 #[cfg(target_arch = "x86_64")]
 use crate::heap_init::{self, fail_after::Scope};
@@ -1445,10 +1449,54 @@ pub(crate) fn test_block_vblk_mmio_smp() -> Outcome {
 }
 
 #[cfg(target_arch = "aarch64")]
+pub(crate) fn test_dev_random_source() -> Outcome {
+    if !virtio_init::rng_bound() && crate::arch::current::hw_rng64().is_none() {
+        return Outcome::Skip("no entropy");
+    }
+    if !fs_init::live() {
+        return Outcome::Fail("not live");
+    }
+    let Ok(f) = file_init::open(
+        b"/dev/random",
+        vibeos::fs::OpenFlags::from_bits(vibeos::fs::O_RDWR),
+        0,
+    ) else {
+        return Outcome::Fail("open");
+    };
+    let mut buf = [0u8; 16];
+    let t0 = crate::time_init::now_ns();
+    let n = loop {
+        match file_init::read(&f, &mut buf) {
+            Err(vibeos::fs::FsError::Again)
+                if crate::time_init::now_ns().saturating_sub(t0) < 2_000_000_000 =>
+            {
+                spin_until_ns(|| false, 1_000_000);
+            }
+            r => break r,
+        }
+    };
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "close after the read the test already scored: a leaked FileRef is a counter, which nothing can act on (DESIGN §2.5)"
+    )]
+    let _ = file_init::close(f);
+    match n {
+        Ok(1..=16) => {}
+        Ok(_) => return Outcome::Fail("read count"),
+        Err(_) => return Outcome::Fail("read"),
+    }
+    match vibeos::entropy::last_source() {
+        Some(_) => Outcome::Ok,
+        None => Outcome::Fail("no source"),
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
 pub(crate) const TESTS: &[Test] = &[
     test("dma_alloc", test_dma_alloc),
     test("dma_edu", test_dma_edu),
     test("virtio_bind", test_virtio_bind),
     test("virtio_vq", test_virtio_vq),
     test("block_vblk_mmio_smp", test_block_vblk_mmio_smp),
+    test("dev_random_source", test_dev_random_source),
 ];

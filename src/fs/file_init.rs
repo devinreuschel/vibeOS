@@ -42,7 +42,7 @@ use crate::vibefs_init;
 /// Open `path`; `O_CREAT` creates a regular file with `mode`, `O_TRUNC`
 /// empties one.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn open(path: &[u8], flags: OpenFlags, mode: u32) -> Result<FileRef, FsError> {

@@ -745,6 +745,29 @@ pub(crate) fn test_percpu_remote_view() -> Outcome {
     Outcome::Ok
 }
 
+/// PL031 wall clock (ROADMAP §11.5): year in 2024..2099, then it advances.
+pub(crate) fn test_rtc_offset() -> Outcome {
+    let Some(a) = time_init::unix_time_s() else {
+        return Outcome::Skip("rtc unread");
+    };
+    let lo = vibeos::time::unix_from_civil(2024, 1, 1, 0, 0, 0);
+    let hi = vibeos::time::unix_from_civil(2100, 1, 1, 0, 0, 0);
+    let (Some(lo), Some(hi)) = (lo, hi) else {
+        return Outcome::Fail("unix_from_civil");
+    };
+    if !(lo..hi).contains(&a) {
+        return Outcome::Fail("rtc year");
+    }
+    time_init::busy_wait_ms(20);
+    let Some(b) = time_init::unix_time_s() else {
+        return Outcome::Fail("rtc lost");
+    };
+    if b < a {
+        return Outcome::Fail("wall clock went backwards");
+    }
+    Outcome::Ok
+}
+
 pub(crate) const TESTS: &[Test] = &[
     test("kstack_overflow", test_kstack_overflow),
     test("gic_present", test_gic_present),
@@ -760,4 +783,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("percpu_remote_view", test_percpu_remote_view),
     test("failed_ap_cleanup", test_failed_ap_cleanup),
     test("stalled_ap_leak", test_stalled_ap_leak).opt_in(),
+    test("rtc_offset", test_rtc_offset),
 ];
