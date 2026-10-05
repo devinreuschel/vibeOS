@@ -1,0 +1,5023 @@
+{
+ "attempt": 1,
+ "branch": "feature/aarch64-el1-x16-irq-8db4",
+ "conclusion": "cancelled",
+ "created": "2026-10-05T11:57:51Z",
+ "event": "pull_request",
+ "finished": "2026-10-05T12:09:06Z",
+ "head_sha": "9006d6f6b66de84a0959880da23b673e3d14c221",
+ "jobs": [
+  {
+   "completed": "2026-10-05T12:07:07Z",
+   "conclusion": "success",
+   "created": "2026-10-05T11:59:10Z",
+   "name": "check",
+   "results": [],
+   "runner": null,
+   "seconds": 467,
+   "started": "2026-10-05T11:59:20Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 4
+    },
+    {
+     "name": "gate inputs",
+     "seconds": 0
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 0
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 15
+    },
+    {
+     "name": "install rust MSRV",
+     "seconds": 8
+    },
+    {
+     "name": "cache cargo (check)",
+     "seconds": 9
+    },
+    {
+     "name": "install python linters",
+     "seconds": 5
+    },
+    {
+     "name": "install cargo-deny",
+     "seconds": 1
+    },
+    {
+     "name": "make check",
+     "seconds": 250
+    },
+    {
+     "name": "native Linux: shared-page ELFs (ROADMAP \u00a710.6, F031)",
+     "seconds": 0
+    },
+    {
+     "name": "install cargo-llvm-cov",
+     "seconds": 0
+    },
+    {
+     "name": "vibeos-core llvm-cov floor",
+     "seconds": 167
+    },
+    {
+     "name": "upload vibeos-core coverage HTML",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache cargo (check)",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:00:54Z",
+   "conclusion": "success",
+   "created": "2026-10-05T11:59:10Z",
+   "name": "build (aarch64)",
+   "results": [],
+   "runner": null,
+   "seconds": 100,
+   "started": "2026-10-05T11:59:14Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 10
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 11
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "setup",
+     "seconds": 10
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": null
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel, aarch64)",
+     "seconds": 11
+    },
+    {
+     "name": "build the user programs (make user)",
+     "seconds": 3
+    },
+    {
+     "name": "build every ISO and host tool (make prebuilt)",
+     "seconds": 43
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "upload prebuilt files",
+     "seconds": 2
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:03:50Z",
+   "conclusion": "success",
+   "created": "2026-10-05T11:59:10Z",
+   "name": "build (x86_64)",
+   "results": [],
+   "runner": null,
+   "seconds": 251,
+   "started": "2026-10-05T11:59:39Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 16
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "setup",
+     "seconds": 15
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": 20
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel, aarch64)",
+     "seconds": null
+    },
+    {
+     "name": "build the user programs (make user)",
+     "seconds": 3
+    },
+    {
+     "name": "build every ISO and host tool (make prebuilt)",
+     "seconds": 171
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "upload prebuilt files",
+     "seconds": 7
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:03Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 56,
+   "started": "2026-10-05T12:07:07Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-05T12:07:39Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-4)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 29,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 11
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-4",
+     "seconds": 3
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:34Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-smp4-3)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-3",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 25,
+   "started": "2026-10-05T12:07:09Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 6
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-3",
+     "seconds": 2
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 3
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:39Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-5)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [
+       "ktest_deadline_trip"
+      ],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=ktest_deadline_hang",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu,dma_mask=0xFFFFFFFF",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-device",
+        "virtio-keyboard-pci,disable-legacy=on",
+        "-device",
+        "virtio-tablet-pci,disable-legacy=on",
+        "-drive",
+        "file=/tmp/vibeos-vblk-eq2pxp2a.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-5",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 29,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 14
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-5",
+     "seconds": 2
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:43Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-1)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-1",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 32,
+   "started": "2026-10-05T12:07:11Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 9
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 4
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-1",
+     "seconds": 6
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 3
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:43Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, e2e-1)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "limine_ok",
+       "panic_test_armed",
+       "serial_online"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-panic.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-panic",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-drive",
+        "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "-drive",
+        "if=pflash,format=raw,unit=1,file=/tmp/vibeos-fw-2e0z84uu/x86_64-vars-fo7hzpyt.fd",
+        "-boot",
+        "order=d,menu=off",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv4PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv6PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/FirmwareSetupSupport,string=no",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": null,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-uefi",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "panic_nest_armed",
+       "panic_nest_dump",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-panic-nest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-panic-nest",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": null,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [
+       "qmp_core_smoke"
+      ],
+      "passed": [
+       "qmp_streams"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "unix:/tmp/vibeos-mon-6pq0w9_4/monitor.sock,server=on,wait=off",
+        "-qmp",
+        "unix:/tmp/vibeos-qmp-_74z9426/qmp.sock,server=on,wait=off",
+        "-S",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-qmp",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 33,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 3
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-qmp",
+     "seconds": 10
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:34Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, lapic-fallback-5)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [
+       "stack_depth_planted"
+      ],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-5",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 25,
+   "started": "2026-10-05T12:07:09Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "install host tools",
+     "seconds": 11
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-5",
+     "seconds": 2
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 1
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:58Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-6)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-6",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 22,
+   "started": "2026-10-05T12:07:36Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-6",
+     "seconds": 1
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:33Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-3)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-3",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 23,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-3",
+     "seconds": 3
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:47Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, lapic-fallback-1)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-1",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 37,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 3
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 15
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 4
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-1",
+     "seconds": 3
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 3
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:48Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, e2e-2)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "9G",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": null,
+       "mem": "9G",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-highmem",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [
+       "init_no_sh"
+      ],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pid1_exit",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-init-fault.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-nosh.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": null,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-init-fault",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [
+       "mce_dump"
+      ],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": null,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-mce",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "gp_backtrace_order",
+       "gp_test_armed",
+       "heap_ok",
+       "idt_ok",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-gp.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-gp",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [
+       "panic_stop_dump"
+      ],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "panic_stop_armed",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "sched_cpu2",
+       "sched_cpu3",
+       "sched_cpu4",
+       "serial_online",
+       "smp_ap_online_0",
+       "smp_ap_online_1",
+       "smp_ap_online_2",
+       "smp_ap_online_3",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-panic-stop.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "5",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 5
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-panic-stop",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-machine",
+        "pc,hpet=off",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": null,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-pit",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [
+       "reboot_power_off",
+       "reboot_restart"
+      ],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-qmp",
+        "unix:/tmp/vibeos-qmp-_d9yufbr/qmp.sock,server=on,wait=off",
+        "-S",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=reboot_power_off",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu,dma_mask=0xFFFFFFFF",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-device",
+        "virtio-keyboard-pci,disable-legacy=on",
+        "-device",
+        "virtio-tablet-pci,disable-legacy=on",
+        "-drive",
+        "file=/tmp/vibeos-vblk-yl92p6os.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-qmp",
+        "unix:/tmp/vibeos-qmp-1kr7x_zl/qmp.sock,server=on,wait=off",
+        "-S",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=reboot_restart",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu,dma_mask=0xFFFFFFFF",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-device",
+        "virtio-keyboard-pci,disable-legacy=on",
+        "-device",
+        "virtio-tablet-pci,disable-legacy=on",
+        "-drive",
+        "file=/tmp/vibeos-vblk-_4p8ib7o.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-power",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.strace=1",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": null,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-strace",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 38,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power",
+     "seconds": 16
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 4
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:03Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-smp4-4)",
+   "results": [],
+   "runner": null,
+   "seconds": 56,
+   "started": "2026-10-05T12:07:07Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-05T12:07:33Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, lapic-fallback-4)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [
+       "ktest_select_boot"
+      ],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 23,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 10
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-4",
+     "seconds": 2
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 3
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:40Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, lapic-fallback-2)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-2",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 30,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 3
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 5
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 1
+    },
+    {
+     "name": "make test-lapic-fallback-2",
+     "seconds": 3
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 3
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:40Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, lapic-fallback-3)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-3",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 28,
+   "started": "2026-10-05T12:07:12Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 4
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-3",
+     "seconds": 2
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 3
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:05Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-smp4-1)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-1",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 29,
+   "started": "2026-10-05T12:07:36Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 13
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-1",
+     "seconds": 3
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:33Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-smp4-2)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-2",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 24,
+   "started": "2026-10-05T12:07:09Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 3
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 6
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-2",
+     "seconds": 2
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:11Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, vibefs-crash-2)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "crash_round_1",
+       "crash_round_2",
+       "crash_round_3",
+       "crash_round_4"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-hwrgnekz/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-cdhm4ove/s,format=raw,if=none,id=vibehd,cache=none",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-qlo6f0gi/s,format=raw,if=none,id=vibehd,cache=writethrough",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-333g4a88/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-vibefs-crash-2",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 60,
+   "started": "2026-10-05T12:07:11Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 19
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 10
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-vibefs-crash-2",
+     "seconds": 21
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:04Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-6)",
+   "results": [],
+   "runner": null,
+   "seconds": 57,
+   "started": "2026-10-05T12:07:07Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-05T12:08:02Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-2)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-2",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 24,
+   "started": "2026-10-05T12:07:38Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-2",
+     "seconds": 7
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:04Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-5)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-5",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 16,
+   "started": "2026-10-05T12:07:48Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 1
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-5",
+     "seconds": 1
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:28Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-1)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-1",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 26,
+   "started": "2026-10-05T12:08:02Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-1",
+     "seconds": 6
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 1
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:02Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, lapic-fallback-6)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-lapic-fallback-6",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 21,
+   "started": "2026-10-05T12:07:41Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-lapic-fallback-6",
+     "seconds": 3
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:03Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, e2e-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 56,
+   "started": "2026-10-05T12:07:07Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-05T12:07:55Z",
+   "conclusion": "success",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, gic-fallback-5)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-gic-fallback-5",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 18,
+   "started": "2026-10-05T12:07:37Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-gic-fallback-5",
+     "seconds": 0
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:02Z",
+   "conclusion": "success",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-4)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 18,
+   "started": "2026-10-05T12:07:44Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 1
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-4",
+     "seconds": 0
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 1
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:10Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, gic-fallback-1)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-gic-fallback-1",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 26,
+   "started": "2026-10-05T12:07:44Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-gic-fallback-1",
+     "seconds": 6
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 1
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:34Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, kernel-smp4-5)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-5",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 24,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 1
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 10
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-5",
+     "seconds": 2
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:57Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, vibefs-crash-plants)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "crash_plant_control",
+       "crash_plant_early_super",
+       "crash_plant_leak"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.crash_plant=leak",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-m89vh1ry/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": null,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.crash_plant=early_super",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-huu0dozp/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-vibefs-crash.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file.driver=nbd,file.server.type=unix,file.server.path=/tmp/vnbd-yqgrbg35/s,format=raw,if=none,id=vibehd,cache=writeback",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2,write-cache=on"
+       ],
+       "cpu": "max",
+       "exit": -9,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-vibefs-crash-plants",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 82,
+   "started": "2026-10-05T12:07:35Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 7
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 9
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-vibefs-crash-plants",
+     "seconds": 48
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:13Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-smp4-3)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-3",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 25,
+   "started": "2026-10-05T12:07:48Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 6
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-3",
+     "seconds": 7
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:11Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, gic-fallback-4)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-gic-fallback-4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 18,
+   "started": "2026-10-05T12:07:53Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-gic-fallback-4",
+     "seconds": 0
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 2
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:07:52Z",
+   "conclusion": "success",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-smp4-4)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-smp4-4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 15,
+   "started": "2026-10-05T12:07:37Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 6
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 1
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-smp4-4",
+     "seconds": 1
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:04Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, gic-fallback-6)",
+   "results": [],
+   "runner": null,
+   "seconds": 57,
+   "started": "2026-10-05T12:07:07Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-05T12:08:25Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-3)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-3",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 29,
+   "started": "2026-10-05T12:07:56Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 9
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-3",
+     "seconds": 7
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:21Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, gic-fallback-2)",
+   "results": [
+    {
+     "arch": "aarch64",
+     "commit": "5e09fbbc44dc9dcca5af5083eb3e8d31544eb714",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": []
+     },
+     "qemu": [],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-gic-fallback-2",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 30,
+   "started": "2026-10-05T12:07:51Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "install host tools",
+     "seconds": 9
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 2
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-gic-fallback-2",
+     "seconds": 7
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:04Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-smp4-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 57,
+   "started": "2026-10-05T12:07:07Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-05T12:08:40Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, vibefs-crash-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 90,
+   "started": "2026-10-05T12:07:10Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 3
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 17
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 10
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-vibefs-crash-1",
+     "seconds": 50
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:04Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-smp4-5)",
+   "results": [],
+   "runner": null,
+   "seconds": 57,
+   "started": "2026-10-05T12:07:07Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-05T12:08:04Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (aarch64, kernel-smp4-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 57,
+   "started": "2026-10-05T12:07:07Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-05T12:08:23Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:07Z",
+   "name": "tier (x86_64, forensics)",
+   "results": [],
+   "runner": null,
+   "seconds": 41,
+   "started": "2026-10-05T12:07:42Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 8
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 0
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 1
+    },
+    {
+     "name": "make test-forensics",
+     "seconds": 22
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:04Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:07:08Z",
+   "name": "tier (aarch64, gic-fallback-3)",
+   "results": [],
+   "runner": null,
+   "seconds": 56,
+   "started": "2026-10-05T12:07:08Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-05T12:09:06Z",
+   "conclusion": "failure",
+   "created": "2026-10-05T12:08:58Z",
+   "name": "ci-pass",
+   "results": [],
+   "runner": null,
+   "seconds": 6,
+   "started": "2026-10-05T12:09:00Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "every job succeeded",
+     "seconds": 1
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T12:08:58Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-05T12:08:58Z",
+   "name": "ticks",
+   "results": [],
+   "runner": null,
+   "seconds": 0,
+   "started": "2026-10-05T12:08:58Z",
+   "steps": []
+  }
+ ],
+ "run_id": 37306321339,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-10-05T11:57:51Z",
+ "workflow": "ci"
+}
