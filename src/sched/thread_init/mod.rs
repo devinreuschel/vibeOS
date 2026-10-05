@@ -1175,9 +1175,7 @@ fn spawn_inner(
     // Built without the stack, so a failed allocation drops no stack; the
     // stack goes back as a full table's does (DESIGN §4.4). The TCB is
     // written in the box: `TryBox::try_new(Tcb { ... })` would put
-    // `Option<GuardedStack>` and `Fxsave` on this stack, and aarch64's
-    // 16 KiB `/hello` spawn already sat at 12528 with an IRQ on top
-    // (DESIGN §4.5).
+    // `Option<GuardedStack>` and `Fxsave` on this stack (DESIGN §4.5).
     let mut tcb =
         match user::box_new_tcb(name, entry, affinity, enqueue, cpu, first_nest, pid, as_cr3) {
             Ok(t) => t,
