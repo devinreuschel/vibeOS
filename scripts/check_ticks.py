@@ -33,6 +33,11 @@ that dropped every trailer can supply them all), the report lists it, and
 a row whose commit is in the pull request but does not match that `was`
 fails.
 
+A `Fails-before:` line names the tier, the test commit, and the failure
+line. That commit must be an earlier commit of the pull request, or a SHA
+a later squash dropped from ancestry at which ci-history holds a failed
+`pull_request` run of that tier.
+
 Modes:
 - bare (`make check`): pairing and the diff rule on `origin/main..HEAD`, or
   `check_ticks: skipped (no origin/main)` when that ref is missing;
@@ -1090,33 +1095,52 @@ class Checker:
                 self.report.error(c.sha, t.line, f"Fails-before: no Makefile rule {tier!r}")
             full = gatelib.git(self.repo, "rev-parse", "--verify", "-q", f"{short}^{{commit}}",
                                check=False).strip()
-            if full not in pr or full == c.sha:
+            sha = full or short
+            if full == c.sha:
                 self.report.error(c.sha, t.line, f"Fails-before: {short} is not an earlier "
                                   "commit of the pull request")
+                continue
+            if full not in pr:
+                # Squash of a feature PR drops the test-only commit from
+                # base..head. ci-history still holds the failed run.
+                if self.failed_history_run(tier, sha):
+                    self.report.notes.append(
+                        f"{c.sha[:7]}: Fails-before {short} is not an earlier commit "
+                        f"of this pull request; ci-history has a failed {tier} run "
+                        "there")
+                else:
+                    self.report.error(c.sha, t.line, f"Fails-before: {short} is not an "
+                                      "earlier commit of the pull request")
+                    continue
             elif subprocess.run(["git", "-C", str(self.repo), "merge-base", "--is-ancestor",
                                  full, c.sha], check=False).returncode != 0:
                 self.report.error(c.sha, t.line, f"Fails-before: {short} is not an ancestor "
                                   "of the commit")
-            self.check_fails_history(c, t, tier, full or short)
+                continue
+            self.check_fails_history(c, t, tier, sha)
 
-    def check_fails_history(self, c: Commit, t: Tick, tier: str, sha: str) -> None:
-        prs = [r for r in self.history.records() if r.get("event") == "pull_request"]
-        if not prs:
-            note = ("Fails-before history clause inert: ci-history holds no pull_request "
-                    "record (#93 §9.2 D-01)")
-            if note not in self.report.notes:
-                self.report.notes.append(note)
-            return
-        for r in prs:
-            if r.get("head_sha") != sha:
+    def failed_history_run(self, tier: str, sha: str) -> bool:
+        """A pull_request ci-history record at `sha` failed `tier`."""
+        for r in self.history.records():
+            if r.get("event") != "pull_request" or r.get("head_sha") != sha:
                 continue
             for res in record_results(r):
                 if res.get("tier") != tier:
                     continue
                 if any((res.get(k) or {}).get("failed") for k in RESULT_KINDS):
-                    return
-        self.report.error(c.sha, t.line, f"Fails-before: ci-history holds no failed "
-                          f"{tier} run at {sha[:7]}")
+                    return True
+        return False
+
+    def check_fails_history(self, c: Commit, t: Tick, tier: str, sha: str) -> None:
+        if not any(r.get("event") == "pull_request" for r in self.history.records()):
+            note = ("Fails-before history clause inert: ci-history holds no pull_request "
+                    "record (#93 §9.2 D-01)")
+            if note not in self.report.notes:
+                self.report.notes.append(note)
+            return
+        if not self.failed_history_run(tier, sha):
+            self.report.error(c.sha, t.line, f"Fails-before: ci-history holds no failed "
+                              f"{tier} run at {sha[:7]}")
 
     def check_retries(self) -> None:
         if self.results is None or not self.report.ticks:
