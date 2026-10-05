@@ -385,6 +385,30 @@ unsafe fn wake_redist(rd: u64) {
     }
 }
 
+/// Banked SGI/PPI Group 1, priorities, enable (GICv2 distributor view).
+///
+/// # Safety
+/// Called on this CPU with IRQs masked; `dist` is the mapped distributor.
+unsafe fn program_sgi_ppi_v2(dist: u64) {
+    // SAFETY: this fn's `# Safety`; established here.
+    unsafe {
+        mmio32w(dist, GICD_IGROUPR, 0xFFFF_FFFF);
+        let mut s = 0u32;
+        while s < 32 {
+            mmio32w(
+                dist,
+                GICD_IPRIORITYR + u64::from(s),
+                u32::from(gic::priority_for(s))
+                    | u32::from(gic::priority_for(s.saturating_add(1))) << 8
+                    | u32::from(gic::priority_for(s.saturating_add(2))) << 16
+                    | u32::from(gic::priority_for(s.saturating_add(3))) << 24,
+            );
+            s = s.saturating_add(4);
+        }
+        mmio32w(dist, GICD_ISENABLER, 0xFFFF_FFFF);
+    }
+}
+
 /// SGI/PPI Group 1, priorities, enable.
 ///
 /// # Safety
@@ -872,6 +896,9 @@ pub unsafe fn enable_ap() {
                 icc_enable();
             }
             Kind::V2 => {
+                // SGI/PPI 0..31 are banked in the distributor. The BSP
+                // write in `init` only armed that CPU.
+                program_sgi_ppi_v2(g.dist);
                 mmio32w(g.cpu_or_redist, GICC_PMR, 0xFF);
                 mmio32w(g.cpu_or_redist, GICC_BPR, 0);
                 mmio32w(
