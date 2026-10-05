@@ -13,8 +13,6 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 ### Added
 
 - SMEP/SMAP/UMIP and `CR0.WP` on every CPU (`arch::cpu::init_control_regs`).
-- [Phase 9](docs/ROADMAP.md#phase-9-user-mode-and-processes): ring 3, syscalls, ELF `/hello`,
-  `fork`/`execve`/`wait4`, `/sbin/init`, `/bin/sh`. Gate reopened into Phase 10; COW is Phase 12.
 - MIT license (`LICENSE`). Every crate manifest declares `license = "MIT"`.
 - Tracked `AGENTS.md` (DOC3). Cursor rules and `CLAUDE.md` point at it.
 - `make check` as the fast local gate (host clippy, host units, harness, ruff/mypy).
@@ -317,6 +315,17 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   ([ROADMAP §10.2](docs/ROADMAP.md#102-build-and-harness)).
 - The `vibeos-ktest.iso` release asset (F145).
 
+## [0.9.0]
+
+Phase 9 exit: user mode and processes. The 2026-09-23 kernel review reopened Phase 9's gate lines
+into Phase 10, so `v0.9.0` is cut from the tree that closed them, one commit before `v0.10.0`, and
+it carries the changes the 0.10.0 notes list.
+
+### Added
+
+- [Phase 9](docs/ROADMAP.md#phase-9-user-mode-and-processes): ring 3, syscalls, ELF loading,
+  `fork`/`execve`/`wait4`, `/sbin/init`, `/bin/sh`. COW is Phase 12.
+
 ## [0.8.0]
 
 Phase 8 exit: filesystems. Phases 0–8 in one cut. See [the arc](docs/ROADMAP.md#the-arc).
@@ -379,5 +388,6 @@ Phase 10, so `v0.8.0` is cut from the tree that closed them, and it carries the 
 - TSC-deadline arm is LVT timer write, then `MFENCE`, then `IA32_TSC_DEADLINE`.
 - Condvar/RwLock timeouts wake the right waiters; spawn reuses Dead TCBs without growing the heap.
 
-[Unreleased]: https://github.com/devinreuschel/vibeOS/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/devinreuschel/vibeOS/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/devinreuschel/vibeOS/releases/tag/v0.9.0
 [0.8.0]: https://github.com/devinreuschel/vibeOS/releases/tag/v0.8.0
