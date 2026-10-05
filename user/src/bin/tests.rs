@@ -5,6 +5,7 @@
 //!
 //! `/bin/tests --exec-step <path>` instead `execve`s `<path>` at once, and
 //! exits 126 if that fails: the middle step of `lifecycle`'s exec chain.
+//! `/bin/tests --case <name>` runs only that case.
 
 #![no_std]
 #![no_main]
@@ -25,16 +26,27 @@ const FAIL: &[u8] = b"user: tests fail\n";
 
 /// The flag of an exec chain's middle step.
 const EXEC_STEP: &[u8] = b"--exec-step";
+/// Run one named case (ROADMAP §11.6 every-CPU EL0 environment).
+const CASE: &[u8] = b"--case";
 
 fn main(env: &Env) -> i32 {
     if env.arg(1) == Some(EXEC_STEP) {
         return exec_step(env);
     }
+    let mut t = Runner::new();
+    if env.arg(1) == Some(CASE) {
+        let Some(name) = env.arg(2) else {
+            return 1;
+        };
+        t.only_case(name);
+    }
     let n = sys::write(1, tests::BANNER.as_ptr(), tests::BANNER.len()).unwrap_or(usize::MAX);
     // Relaxed: a count; pairs with nothing.
     tests::BANNER_WRITE.store(n, Ordering::Relaxed);
-    let mut t = Runner::new();
     t.run_suites(tests::SUITES);
+    if env.arg(1) == Some(CASE) && t.counted() == 0 {
+        return 1;
+    }
     let (line, code) = if t.failed() == 0 { (OK, 0) } else { (FAIL, 1) };
     #[expect(
         clippy::let_underscore_must_use,

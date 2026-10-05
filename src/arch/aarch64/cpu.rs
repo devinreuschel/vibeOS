@@ -233,6 +233,13 @@ pub fn oslsr() -> u64 {
     v
 }
 
+/// Set PSTATE.PAN. FEAT_PAN is the ISA floor (ROADMAP §11.1); this is
+/// not a write of `SCTLR_EL1`.
+pub fn set_pan() {
+    // SAFETY: FEAT_PAN is the ISA floor; established here.
+    unsafe { asm!("msr pan, #1", options(nostack, preserves_flags)) };
+}
+
 /// Clear PAN for a kernel access to a user VA. Restore with [`set_pan`].
 #[cfg(feature = "kernel_tests")]
 pub fn clear_pan() {
@@ -240,10 +247,16 @@ pub fn clear_pan() {
     unsafe { asm!("msr pan, #0", options(nostack, preserves_flags)) };
 }
 
-#[cfg(feature = "kernel_tests")]
-pub fn set_pan() {
-    // SAFETY: as `clear_pan`; established here.
-    unsafe { asm!("msr pan, #1", options(nostack, preserves_flags)) };
+/// Whether `mrs PAN` is nonzero (PSTATE.PAN set).
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest PAN check (kernel_tests)")
+)]
+pub fn pan_is_set() -> bool {
+    let v: u64;
+    // SAFETY: `PAN` is readable once FEAT_PAN is present; established here.
+    unsafe { asm!("mrs {0}, pan", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v != 0
 }
 
 #[inline]

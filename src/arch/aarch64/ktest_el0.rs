@@ -637,3 +637,82 @@ pub(crate) fn current_migrate_if1() -> Outcome {
     }
     Outcome::Ok
 }
+
+static PAN_OK: AtomicU32 = AtomicU32::new(0);
+static PAN_DONE: AtomicBool = AtomicBool::new(false);
+
+fn pan_on_cpu() {
+    let ok = u32::from(crate::arch::aarch64::cpu::pan_is_set());
+    // Relaxed: pairs with nothing.
+    PAN_OK.store(ok, Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `test_el0_pan_every_cpu`.
+    PAN_DONE.store(true, Ordering::Release);
+}
+
+/// PSTATE.PAN is set on every online CPU (ROADMAP §11.6).
+pub(crate) fn test_el0_pan_every_cpu() -> Outcome {
+    let n = per_cpu_init::cpu_count().min(64);
+    if n == 0 {
+        return Outcome::Fail("no cpus");
+    }
+    let mut i = 0u32;
+    while (i as usize) < n {
+        if !per_cpu_init::is_online(i) {
+            i += 1;
+            continue;
+        }
+        // Release: pairs with the Acquire load below.
+        PAN_DONE.store(false, Ordering::Release);
+        spawn_thread_on("pan_cpu", pan_on_cpu, i);
+        if !sleep_until(|| PAN_DONE.load(Ordering::Acquire), 5_000) {
+            return crate::fail_fmt!("cpu{i} did not report");
+        }
+        // Relaxed: pairs with nothing.
+        if PAN_OK.load(Ordering::Relaxed) == 0 {
+            return crate::fail_fmt!("cpu{i} PAN clear");
+        }
+        i += 1;
+    }
+    Outcome::Ok
+}
+
+static ENV_ST: AtomicU32 = AtomicU32::new(0);
+static ENV_DONE: AtomicBool = AtomicBool::new(false);
+
+fn env_on_cpu() {
+    let st = match user::run(&Image::UserBin("tests"), &["tests", "--case", "user_env"]) {
+        Ok(s) => s,
+        Err(_) => u32::MAX,
+    };
+    // Relaxed: pairs with nothing.
+    ENV_ST.store(st, Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `test_el0_env_every_cpu`.
+    ENV_DONE.store(true, Ordering::Release);
+}
+
+/// The `/bin/tests` `user_env` case on every online CPU (issue #207).
+pub(crate) fn test_el0_env_every_cpu() -> Outcome {
+    let n = per_cpu_init::cpu_count().min(64);
+    if n == 0 {
+        return Outcome::Fail("no cpus");
+    }
+    let mut i = 0u32;
+    while (i as usize) < n {
+        if !per_cpu_init::is_online(i) {
+            i += 1;
+            continue;
+        }
+        ENV_DONE.store(false, Ordering::Release);
+        spawn_thread_on("env_cpu", env_on_cpu, i);
+        if !sleep_until(|| ENV_DONE.load(Ordering::Acquire), 15_000) {
+            return crate::fail_fmt!("cpu{i} did not finish");
+        }
+        // Relaxed: pairs with nothing.
+        let st = ENV_ST.load(Ordering::Relaxed);
+        if !exited0(st) {
+            return crate::fail_fmt!("cpu{i} status {st:#x}");
+        }
+        i += 1;
+    }
+    Outcome::Ok
+}

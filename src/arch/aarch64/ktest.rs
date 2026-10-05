@@ -1051,6 +1051,33 @@ pub(crate) const TESTS: &[Test] = &[
     test("el0_tagged", test_el0_tagged),
     test("el0_ttbr0", test_el0_ttbr0),
     test("el0_uaccess", test_el0_uaccess),
+    test(
+        "uaccess_smap_stray_fault",
+        crate::arch::aarch64::ktest_uaccess::test_uaccess_smap_stray_fault,
+    ),
+    test(
+        "uaccess_smep_user_jump",
+        crate::arch::aarch64::ktest_uaccess::test_uaccess_smep_user_jump,
+    ),
+    test(
+        "uaccess_syscall_copies",
+        crate::arch::aarch64::ktest_uaccess::test_uaccess_syscall_copies,
+    )
+    .deadline(30_000),
+    test(
+        "uaccess_readonly_efault",
+        crate::arch::aarch64::ktest_uaccess::test_uaccess_readonly_efault,
+    )
+    .deadline(30_000),
+    test(
+        "el0_pan_every_cpu",
+        crate::arch::aarch64::ktest_el0::test_el0_pan_every_cpu,
+    ),
+    test(
+        "el0_env_every_cpu",
+        crate::arch::aarch64::ktest_el0::test_el0_env_every_cpu,
+    )
+    .deadline(60_000),
     test("el0_sp_el0_current", test_el0_sp_el0_current),
     test(
         "current_at_if1",
