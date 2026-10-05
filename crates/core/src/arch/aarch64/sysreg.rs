@@ -80,13 +80,11 @@ pub const fn pmuserenr_el0() -> u64 {
     0
 }
 
-/// `CPACR_EL1`: FPEN no-trap; ZEN and SMEN no-trap so a later feature
-/// check, not a trap, decides SVE/SME.
+/// `CPACR_EL1`: FPEN no-trap; ZEN and SMEN clear so SVE and SME trap
+/// at EL0 and EL1 (ROADMAP §11.6, F130).
 pub const fn cpacr_el1() -> u64 {
-    const ZEN: u64 = 0b11 << 16;
     const FPEN: u64 = 0b11 << 20;
-    const SMEN: u64 = 0b11 << 24;
-    ZEN | FPEN | SMEN
+    FPEN
 }
 
 /// `ID_AA64MMFR0_EL1.ASIDBits` field (bits 7:4): 2 means 16-bit ASIDs.
@@ -134,10 +132,19 @@ mod tests {
         assert_eq!(cntkctl_el1(), 1 << 1);
         assert_eq!(cnthctl_el2(), 0b11);
         assert_eq!(pmuserenr_el0(), 0);
-        assert_eq!(cpacr_el1() >> 16 & 0b11, 0b11);
         assert_eq!(cpacr_el1() >> 20 & 0b11, 0b11);
-        assert_eq!(cpacr_el1() >> 24 & 0b11, 0b11);
         assert!(asid16_from_mmfr0(2 << 4));
         assert!(!asid16_from_mmfr0(0));
+    }
+
+    #[test]
+    fn cpacr_traps_sve_and_sme() {
+        // Arm ARM DDI0487 CPACR_EL1: 0b00 traps EL0 and EL1; 0b11 is no-trap.
+        // ROADMAP §11.6 / F130: FP/SIMD stay on; SVE and SME trap.
+        let c = cpacr_el1();
+        assert_eq!(c >> 16 & 0b11, 0, "ZEN");
+        assert_eq!(c >> 20 & 0b11, 0b11, "FPEN");
+        assert_eq!(c >> 24 & 0b11, 0, "SMEN");
+        assert_eq!(c, 0b11 << 20);
     }
 }
