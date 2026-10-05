@@ -879,7 +879,7 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
 | `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
 | `VIBEOS_PREBUILT` | unset | the Makefile: `1` makes `make test-*` use the files `make prebuilt` packed (`build/prebuilt.tar`, unpacked in place) and build nothing, as a CI tier job does (§8.6) |
-| `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when `qemu-system-x86_64 --version` differs, or when the variable is unset (§8.6, Runners) |
+| `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when that arch's `qemu-system-* --version` differs, or when the variable is unset (§8.6, Runners) |
 
 UEFI firmware is found by one probe, `harness.probe_firmware(arch)`, which reads one table of
 (code image, variable-store template) pairs per architecture, `harness.FIRMWARE_TABLE`, in this
@@ -1261,8 +1261,8 @@ arm64 jobs), whose apt QEMU 10.2.1 (`1:10.2.1+ds-1ubuntu3`) meets every QEMU min
 `dma-remap` and Phase 25's GHES injection). A line that needs QEMU 11.1 or later builds that release
 from its tarball, checked by SHA-256 and cached by version; none does yet. Every job that installs
 `qemu-system-*` sets `VIBEOS_QEMU_VERSION` to the version it pins, and when `CI` is set on Linux,
-`harness.qemu_argv` runs `ensure_qemu_pinned`, which compares `qemu-system-x86_64 --version` with
-that pin before the first boot and fails on a mismatch or an unset pin, so an image update that
+`harness.qemu_argv` runs `ensure_qemu_pinned`, which compares that arch's `qemu-system-* --version`
+with that pin before the first boot and fails on a mismatch or an unset pin, so an image update that
 moves QEMU fails every tier loudly instead of changing what they test; move the pin and this
 paragraph together. `make check`, the macOS job, and a dev host's QEMU (Homebrew's included) are
 not checked. `scripts/check_workflows.py` fails on a `runs-on:` label other than these two and
