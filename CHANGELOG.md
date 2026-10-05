@@ -10,6 +10,12 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ## [Unreleased]
 
+## [0.10.0]
+
+Phase 10 exit: consolidation. The 2026-09-23 kernel review's fixes, the user runtime in Rust, the
+forensics tools, and the gates and CI that hold every later phase. See
+[Phase 10](docs/ROADMAP.md#phase-10-consolidation).
+
 ### Added
 
 - SMEP/SMAP/UMIP and `CR0.WP` on every CPU (`arch::cpu::init_control_regs`).
@@ -17,8 +23,6 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - Tracked `AGENTS.md` (DOC3). Cursor rules and `CLAUDE.md` point at it.
 - `make check` as the fast local gate (host clippy, host units, harness, ruff/mypy).
   `make help` lists targets.
-- [Phase 10](docs/ROADMAP.md#phase-10-consolidation): the kernel review's fixes, the user runtime in
-  Rust, the forensics tools and the gates below; its exit gate closes after the scheduled runs.
 - Each `make test-*` tier writes `build/results/<arch>-<tier>.json`
   ([ROADMAP §10.2](docs/ROADMAP.md#102-build-and-harness)).
 - `meminfo` prints how many frames a dropped ownership token leaked.
@@ -388,6 +392,7 @@ Phase 10, so `v0.8.0` is cut from the tree that closed them, and it carries the 
 - TSC-deadline arm is LVT timer write, then `MFENCE`, then `IA32_TSC_DEADLINE`.
 - Condvar/RwLock timeouts wake the right waiters; spawn reuses Dead TCBs without growing the heap.
 
-[Unreleased]: https://github.com/devinreuschel/vibeOS/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/devinreuschel/vibeOS/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/devinreuschel/vibeOS/releases/tag/v0.10.0
 [0.9.0]: https://github.com/devinreuschel/vibeOS/releases/tag/v0.9.0
 [0.8.0]: https://github.com/devinreuschel/vibeOS/releases/tag/v0.8.0
