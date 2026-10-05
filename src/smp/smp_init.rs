@@ -1061,6 +1061,9 @@ extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     let cpu = unsafe { &mut *cpu };
     // SAFETY: this CPU's `PerCpu`, IRQs masked. established here.
     unsafe { per_cpu_init::install_gs(cpu) };
+    // BSP published `cpu.current` before CPU_ON; `SP_EL0` is this CPU's
+    // and still 0 (`mark_live` ran on the BSP).
+    per_cpu_init::set_current_thread(cpu, cpu.current);
     arch::aarch64::vectors::load();
     // SAFETY: VBAR is live; `crate::syscall_init::init_ap` writes this
     // CPU's empty TTBR0; established here.
