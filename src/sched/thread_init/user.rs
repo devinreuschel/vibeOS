@@ -8,6 +8,7 @@ use super::*;
 /// Box a TCB by writing each field through the allocation. `Tcb` holds
 /// `MAX_STACK_PAGES` frame tokens and an `Fxsave`; a by-value constructor
 /// would put that frame under every spawn (DESIGN §4.5).
+#[inline(never)]
 #[allow(clippy::too_many_arguments)] // same fields as the TCB constructor
 pub(super) fn box_new_tcb(
     name: &'static str,

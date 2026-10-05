@@ -746,9 +746,10 @@ stack, proves the check fails. The deepest 16 KiB path measured when the check l
 spawn (`proc_init::spawn_image`, `start_loaded`, `thread_init::spawn_inner` and its `Tcb`,
 `user_init::new_space`) with an interrupt on top, about 11.9 KiB, after the FAT cluster buffers moved
 into the volume and virtio-blk's `pump` shrank to a 4-completion batch. aarch64's 16 KiB bootstrap
-runs that spawn for `/hello`; a GICv2 smp4 boot measured 12528 (over the 12288 budget) when a timer
-IRQ landed on it. `spawn_inner` writes the `Tcb` in its `TryBox`, and virtio-blk `harvest` finishes
-`PUMP_BATCH` completions at a time, same as `pump`.
+hit 12528 (over the 12288 budget) on that path for `/hello` when a timer IRQ landed on it
+(GICv2 smp4). `kernel_tests` builds skip the boot `/hello` there; the e2e ISO still runs it.
+`spawn_inner` writes the `Tcb` in its `TryBox`, and virtio-blk `harvest` finishes `PUMP_BATCH`
+completions at a time, same as `pump`.
 
 ## 4.6 What comes later
 

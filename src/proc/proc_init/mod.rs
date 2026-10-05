@@ -461,6 +461,10 @@ pub fn start_init() {
 /// empty `argv` starts it with `argc` 1 and an empty `argv[0]`, as
 /// `execve` does.
 #[cfg(not(feature = "vibefs_crash"))]
+#[cfg_attr(
+    all(feature = "kernel_tests", target_arch = "aarch64"),
+    expect(dead_code, reason = "aarch64 kernel_tests skips the boot /hello")
+)]
 pub(crate) fn spawn_elf(
     path: &[u8],
     argv: &[&[u8]],

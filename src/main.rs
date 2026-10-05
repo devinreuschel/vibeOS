@@ -450,8 +450,14 @@ extern "C" fn boot_rest() -> ! {
     crate::file_init::init();
 
     // ROADMAP §10.6: `/hello` runs as a process the kernel spawns and
-    // waits for. Diagnostic only, not a `vibeOS:` marker.
-    #[cfg(not(feature = "vibefs_crash"))]
+    // waits for. Diagnostic only, not a `vibeOS:` marker. aarch64
+    // `kernel_tests` skips it: bootstrap is 16 KiB and that spawn plus a
+    // timer IRQ does not fit DESIGN §4.5's budget. The e2e ISO still
+    // runs it.
+    #[cfg(not(any(
+        feature = "vibefs_crash",
+        all(feature = "kernel_tests", target_arch = "aarch64"),
+    )))]
     {
         use crate::serial::Serial;
         use core::fmt::Write;
