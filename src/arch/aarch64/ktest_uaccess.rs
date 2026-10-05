@@ -213,7 +213,8 @@ user_code!(
     tbnz x0, #63, 8f
     mov x21, x0
     mov x0, x21
-    add x1, x20, #0x1f9c
+    mov x1, #0x1f9c
+    add x1, x20, x1
     mov x2, #256
     mov x8, #63
     svc #0
@@ -229,7 +230,8 @@ user_code!(
     cmp x0, #100
     b.ne 8f
     mov x0, x20
-    add x1, x20, #0x1f9c
+    mov x1, #0x1f9c
+    add x1, x20, x1
     mov x2, #100
     mov w19, #6
 10:
