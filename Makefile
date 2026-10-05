@@ -678,6 +678,10 @@ LAPIC_FALLBACK_SHARDS := test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-
 # The nightly KVM leg adds +invtsc, so its invariant-TSC check still applies
 # (DESIGN §8.4).
 LAPIC_FALLBACK_CPU ?= qemu64,-tsc-deadline
+# aarch64 env_config defaults VIBEOS_SMP to 1 (`make run`). The in-guest
+# `-smp 2` tiers must set it: AP tests skip with `no AP` at 1 CPU, and
+# those skips have no aarch64 skips.toml row (ROADMAP §11.7).
+test-kernel $(KERNEL_SHARDS): KTEST_ENV = VIBEOS_SMP=2
 test-kernel-smp4 $(KERNEL_SMP4_SHARDS): KTEST_ENV = VIBEOS_SMP=4
 test-lapic-fallback $(LAPIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_QEMU_CPU=$(LAPIC_FALLBACK_CPU)
 
@@ -746,7 +750,7 @@ test-lapic-fallback-6: $(ISO_KTEST)
 # aarch64 CI tier run the shards.
 GIC_FALLBACK_SHARDS := test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6
 .PHONY: test-gic-fallback $(GIC_FALLBACK_SHARDS)
-test-gic-fallback $(GIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_GIC=2
+test-gic-fallback $(GIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_GIC=2 VIBEOS_SMP=2
 test-gic-fallback: $(ISO_KTEST)
 	$(KTEST_RUN)
 test-gic-fallback-1: $(ISO_KTEST)

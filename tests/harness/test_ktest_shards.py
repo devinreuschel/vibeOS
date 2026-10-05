@@ -145,10 +145,20 @@ class ShardMakefile(unittest.TestCase):
             flag = " --hpet-off" if v.hpet_off else ""
             self.assertTrue(full.endswith(f"run_ktest.py{flag}"), full)
             self.assertEqual(" VIBEOS_SMP=4 " in full, v.smp == 4, full)
+            # aarch64 env_config defaults VIBEOS_SMP to 1; the -smp 2
+            # shards must set it (ROADMAP §11.7).
+            self.assertEqual(" VIBEOS_SMP=2 " in full, variant == "test-kernel", full)
             base = full.removesuffix(flag).replace(f"VIBEOS_TIER={variant} ", "", 1)
             for name, _ in shards_of(variant):
                 want = f"VIBEOS_TIER={name} {base} --shard {name}"
                 self.assertEqual(" ".join(recipes[name].split()), " ".join(want.split()))
+
+    def test_gic_fallback_sets_gic_and_smp(self) -> None:
+        recipes = make_n("test-gic-fallback-1", "test-gic-fallback-2")
+        self.assertEqual(set(recipes), {"test-gic-fallback-1", "test-gic-fallback-2"})
+        for name, line in recipes.items():
+            self.assertIn(" VIBEOS_GIC=2 ", f" {line} ", name)
+            self.assertIn(" VIBEOS_SMP=2 ", f" {line} ", name)
 
     def test_make_test_runs_the_shards(self) -> None:
         text = (ROOT / "Makefile").read_text(encoding="utf-8")
