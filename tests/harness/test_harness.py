@@ -1673,6 +1673,21 @@ class TestNoRetry(unittest.TestCase):
             self.assertEqual(run_e2e.main(), 1)
         self.assertEqual(inp.call_count, 1)
 
+    def test_pci_golden_is_arch_specific(self) -> None:
+        self.assertIn("8086:1237", run_e2e.pci_golden("x86_64"))
+        self.assertNotIn("8086:1237", run_e2e.pci_golden("aarch64"))
+        self.assertIn("1b36:0008", run_e2e.pci_golden("aarch64"))
+
+    def test_pci_check_accepts_virt_ids(self) -> None:
+        lines = [
+            *[
+                K(f"vibeOS: pci: 00:0{i}.0 {id_}")
+                for i, id_ in enumerate(run_e2e.PCI_GOLDEN_AARCH64)
+            ],
+            K("vibeOS: pci: 6 devices"),
+        ]
+        run_e2e._check_pci_qemu_set(lines, "aarch64")
+
 
 class TestQemuArgv(unittest.TestCase):
     def test_extra_accel_is_effective(self) -> None:
