@@ -186,7 +186,7 @@ def watch_power_boot(
 
 def main() -> int:
     env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     binary = qemu_system(env.arch)
     if not shutil.which(binary):
         print(f"[power] FAIL: {binary} not on PATH", file=sys.stderr)

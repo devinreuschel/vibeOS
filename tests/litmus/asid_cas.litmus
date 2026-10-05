@@ -1,0 +1,10 @@
+AArch64 vibeos-asid-cas
+{
+0:X1=asid; 0:X2=slot;
+1:X1=asid; 1:X2=slot;
+}
+ P0              | P1              ;
+ MOV W0,#1       | MOV W0,#2       ;
+ CASAL W4,W0,[X1]| SWPAL W0,W5,[X1];
+ STLR W0,[X2]    | LDR W6,[X2]     ;
+exists (1:X5=1 /\ 1:X6=0)

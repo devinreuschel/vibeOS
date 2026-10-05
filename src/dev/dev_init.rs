@@ -118,7 +118,7 @@ pub fn find_bdf(bdf: Bdf) -> Option<DevRef> {
 
 /// The first device with `vendor:device`.
 #[cfg_attr(
-    not(feature = "kernel_tests"),
+    all(not(feature = "kernel_tests"), target_arch = "x86_64"),
     expect(
         dead_code,
         reason = "only the in-guest tests look a device up by id yet"

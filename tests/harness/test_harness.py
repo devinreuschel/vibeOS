@@ -1824,7 +1824,8 @@ class TestQemuArgv(unittest.TestCase):
             self.assertIn("pvpanic-pci", devices)
             self.assertIn("vmcoreinfo", devices)
             self.assertNotIn("pvpanic", devices)
-            self.assertNotIn("-boot", argv)
+            i = argv.index("-boot")
+            self.assertEqual(argv[i : i + len(OVMF_BOOT_ARGS)], list(OVMF_BOOT_ARGS))
             self.assertFalse(any(a == "pc,hpet=off" for a in argv))
             self.assertEqual(
                 AARCH64_FORENSICS,
@@ -1864,6 +1865,25 @@ class TestQemuArgv(unittest.TestCase):
             )
         try:
             self.assertEqual(argv[argv.index("-cpu") + 1], "host")
+        finally:
+            remove_vars_copies()
+
+    def test_aarch64_tcg_max_is_neoverse_n1(self) -> None:
+        from tests.harness.harness import AARCH64_TCG_CPU, remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            argv = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, cpu="max"),
+                None,
+            )
+            kept = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, cpu="cortex-a72"),
+                None,
+            )
+        try:
+            self.assertEqual(argv[argv.index("-cpu") + 1], AARCH64_TCG_CPU)
+            self.assertEqual(AARCH64_TCG_CPU, "neoverse-n1")
+            self.assertEqual(kept[kept.index("-cpu") + 1], "cortex-a72")
         finally:
             remove_vars_copies()
 
@@ -2017,6 +2037,11 @@ class TestFirmwareProbe(unittest.TestCase):
 
         rows = (
             ("x86_64", "/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
+            (
+                "aarch64",
+                "/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd",
+                "/usr/share/AAVMF/AAVMF_VARS.fd",
+            ),
             ("aarch64", "/usr/share/AAVMF/AAVMF_CODE.fd", "/usr/share/AAVMF/AAVMF_VARS.fd"),
             (
                 "x86_64",
@@ -2042,6 +2067,14 @@ class TestFirmwareProbe(unittest.TestCase):
         self.put("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")
         self.put("/opt/homebrew/share/qemu/edk2-i386-vars.fd")
         self.assertEqual(self.probe("x86_64").code, ubuntu)
+
+    def test_aarch64_no_secboot_first(self) -> None:
+        preferred = self.put("/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd")
+        self.put("/usr/share/AAVMF/AAVMF_VARS.fd")
+        self.put("/usr/share/AAVMF/AAVMF_CODE.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-aarch64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-arm-vars.fd")
+        self.assertEqual(self.probe("aarch64").code, preferred)
 
     def test_homebrew_prefix(self) -> None:
         self.put("/usr/local/share/qemu/edk2-x86_64-code.fd")
@@ -2127,7 +2160,8 @@ class TestFirmwareProbe(unittest.TestCase):
         self.assertEqual(
             FIRMWARE_VARS, {"x86_64": "VIBEOS_FW_X86_64", "aarch64": "VIBEOS_FW_AARCH64"}
         )
-        self.assertEqual([len(rows) for rows in FIRMWARE_TABLE.values()], [2, 2])
+        self.assertEqual([len(rows) for rows in FIRMWARE_TABLE.values()], [2, 3])
+        self.assertEqual(FIRMWARE_TABLE["aarch64"][0].code, "AAVMF_CODE.no-secboot.fd")
 
 
 class TestStraceE2e(unittest.TestCase):

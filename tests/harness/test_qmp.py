@@ -242,6 +242,11 @@ class TestEventRuleReplays(unittest.TestCase):
         self.assertEqual((d.end, d.reason), ("pass", "PANIC_DONE"))
         self.assertEqual(rule.ended, "pass")
 
+    def test_aarch64_panic_also_passes_on_guest_panicked(self) -> None:
+        rule = EventRule("panic", arch="aarch64")
+        d = rule.on_event({"event": "GUEST_PANICKED", "data": {}})
+        self.assertEqual((d.end, d.reason), ("pass", "GUEST_PANICKED"))
+
     def test_bad_declaration(self) -> None:
         with self.assertRaises(HarnessError):
             EventRule("maybe")

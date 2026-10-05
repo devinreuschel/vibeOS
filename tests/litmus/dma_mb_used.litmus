@@ -1,0 +1,10 @@
+AArch64 vibeos-dma_mb_used
+{
+0:X1=x; 0:X2=y;
+1:X1=x; 1:X2=y;
+}
+ P0              | P1              ;
+ MOV W0,#1       | LDAR W3,[X2]    ;
+ STLR W0,[X1]    | LDR W4,[X1]     ;
+ STLR W0,[X2]    |                 ;
+exists (1:X3=1 /\ 1:X4=0)

@@ -316,7 +316,6 @@ fn dump_backtrace(rip: u64, rbp: u64) {
 /// or end the guest on it, then the halt.
 fn finish() -> ! {
     raw::write_owner(b"vibeOS: panic: halted");
-    #[cfg(target_arch = "x86_64")]
     crate::log::pvpanic_init::signal(vibeos::log::pvpanic::Step::Halt);
     crate::arch::current::halt();
 }

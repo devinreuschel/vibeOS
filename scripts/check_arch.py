@@ -14,7 +14,7 @@ x86_64 code behind `#[cfg(target_arch = "x86_64")]`. Rules:
   `crates/core/src/arch/mod.rs` has no `cfg`.
 - `dyn`: no `dyn Port` or `dyn` of a seam trait in `src/` or `crates/`.
 - `paths`: every backticked path in ARCH.md exists, and every file under
-  either `arch/x86_64/` appears in it.
+    either port's `arch/` directory in either crate appears in it.
 - `audit`: the grep of ROADMAP §10.3's audit box (`asm!`, `x86`, and CR and
   MSR names) over `src/` and `crates/core/src/`, outside both `arch/`
   directories, with comments and string contents stripped: every hit is in
@@ -55,7 +55,12 @@ SKIPS = "tests/harness/skips.toml"
 PURE = tuple(
     f"crates/core/src/arch/x86_64/{n}.rs" for n in ("desc", "vectors", "pic", "apic", "paging")
 )
-PORT_DIRS = ("src/arch/x86_64", "crates/core/src/arch/x86_64")
+PORT_DIRS = (
+    "src/arch/x86_64",
+    "crates/core/src/arch/x86_64",
+    "src/arch/aarch64",
+    "crates/core/src/arch/aarch64",
+)
 AUDIT_ROOTS = ("src", "crates/core/src")
 ARCH_DIRS = ("src/arch/", "crates/core/src/arch/")
 DYN_ROOTS = ("src", "crates")

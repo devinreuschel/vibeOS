@@ -164,16 +164,26 @@ jobs:
   # them to the tier jobs as `prebuilt-<arch>` (DESIGN §8.6).
   build:
     name: build (${{ matrix.arch }})
-    runs-on: ubuntu-26.04
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
-        arch: [x86_64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 xorriso
+            rust_targets: x86_64-unknown-none, x86_64-unknown-linux-musl
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64 xorriso
+            rust_targets: aarch64-unknown-none-softfloat, aarch64-unknown-linux-musl
     # The harness fails every boot when QEMU is not this version (ROADMAP
-    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
-    # and DESIGN §8.6 together. setup.sh needs qemu-system-x86_64.
+    # §10.1): resolute's qemu-system-x86 / qemu-system-arm 10.2.1. Move the pin
+    # and DESIGN §8.6 together.
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
-      APT_PACKAGES: qemu-system-x86 xorriso
+      APT_PACKAGES: ${{ matrix.apt }}
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -214,7 +224,7 @@ jobs:
         with:
           toolchain: nightly-2026-09-22
           components: rust-src, llvm-tools, rustfmt, clippy
-          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
+          targets: ${{ matrix.rust_targets }}
 
       - name: cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -223,15 +233,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ matrix.arch }}-cargo-
 
       - name: cache limine binaries
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989-${{ runner.arch }}
 
       - name: setup
         run: ./setup.sh
@@ -241,6 +251,7 @@ jobs:
       # job's `make check`. Do not set RUSTFLAGS here: it replaces target
       # rustflags (-D warnings, frame pointers, static relocation, linker flags).
       - name: cargo clippy -D warnings (kernel)
+        if: matrix.arch == 'x86_64'
         run: |
           cargo clippy --bin vibeos --features kernel_tests -- -D warnings
           cargo clippy --bin vibeos --features vibefs_crash -- -D warnings
@@ -250,6 +261,13 @@ jobs:
           cargo clippy --bin vibeos --features panic_stop_test -- -D warnings
           cargo clippy --bin vibeos --features kernel_shell -- -D warnings
           cargo clippy --bin vibeos --features hang_test -- -D warnings
+
+      - name: cargo clippy -D warnings (kernel, aarch64)
+        if: matrix.arch == 'aarch64'
+        run: |
+          cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat -- -D warnings
+          cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_tests -- -D warnings
+          cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_shell -- -D warnings
 
       # The Rust user programs (ROADMAP §10.5): links through rust-lld with no
       # C compiler, and checks each ELF with scripts/check_user_elf.py.
@@ -293,102 +311,256 @@ jobs:
   tier:
     name: tier (${{ matrix.arch }}, ${{ matrix.tier }})
     needs: [check, build]
-    runs-on: ubuntu-26.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: e2e-1
             targets: test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-qmp
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: e2e-2
             targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-1
             targets: test-kernel-1
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-2
             targets: test-kernel-2
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-3
             targets: test-kernel-3
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-4
             targets: test-kernel-4
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-5
             targets: test-kernel-5
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-6
             targets: test-kernel-6
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-smp4-1
             targets: test-kernel-smp4-1
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-smp4-2
             targets: test-kernel-smp4-2
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-smp4-3
             targets: test-kernel-smp4-3
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-smp4-4
             targets: test-kernel-smp4-4
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: kernel-smp4-5
             targets: test-kernel-smp4-5
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: lapic-fallback-1
             targets: test-lapic-fallback-1
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: lapic-fallback-2
             targets: test-lapic-fallback-2
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: lapic-fallback-3
             targets: test-lapic-fallback-3
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: lapic-fallback-4
             targets: test-lapic-fallback-4
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: lapic-fallback-5
             targets: test-lapic-fallback-5
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: lapic-fallback-6
             targets: test-lapic-fallback-6
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: vibefs-crash-1
             targets: test-vibefs-crash-1
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: vibefs-crash-2
             targets: test-vibefs-crash-2
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: vibefs-crash-plants
             targets: test-vibefs-crash-plants
             jobs: 2
           - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
             tier: forensics
             targets: test-forensics
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: e2e-1
+            targets: test-e2e
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-1
+            targets: test-kernel-1
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-2
+            targets: test-kernel-2
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-3
+            targets: test-kernel-3
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-4
+            targets: test-kernel-4
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-5
+            targets: test-kernel-5
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-6
+            targets: test-kernel-6
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-smp4-1
+            targets: test-kernel-smp4-1
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-smp4-2
+            targets: test-kernel-smp4-2
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-smp4-3
+            targets: test-kernel-smp4-3
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-smp4-4
+            targets: test-kernel-smp4-4
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-smp4-5
+            targets: test-kernel-smp4-5
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: gic-fallback-1
+            targets: test-gic-fallback-1
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: gic-fallback-2
+            targets: test-gic-fallback-2
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: gic-fallback-3
+            targets: test-gic-fallback-3
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: gic-fallback-4
+            targets: test-gic-fallback-4
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: gic-fallback-5
+            targets: test-gic-fallback-5
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: gic-fallback-6
+            targets: test-gic-fallback-6
             jobs: 2
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
@@ -397,7 +569,8 @@ jobs:
       VIBEOS_QEMU_VERSION: "10.2.1"
       # resolute's `ovmf` metapackage also pulls ovmf-amdsev, ovmf-inteltdx
       # and ubuntu-virt; ovmf-generic ships /usr/share/ovmf/OVMF.fd.
-      APT_PACKAGES: qemu-system-x86 ovmf-generic
+      APT_PACKAGES: ${{ matrix.apt }}
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 

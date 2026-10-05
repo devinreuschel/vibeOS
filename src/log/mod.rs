@@ -19,7 +19,6 @@ pub(crate) mod log_init;
 pub(crate) mod panic;
 #[cfg(any(feature = "panic_stop_test", feature = "panic_nest_test"))]
 pub(crate) mod panic_test;
-#[cfg(target_arch = "x86_64")]
 pub(crate) mod pvpanic_init;
 pub(crate) mod serial;
 pub(crate) mod trace_init;

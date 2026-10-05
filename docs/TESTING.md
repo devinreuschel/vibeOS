@@ -827,7 +827,7 @@ number of images checked, and the trace's write and flush counts.
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` (`LAPIC_FALLBACK_CPU` in the Makefile) |
 | KVM leg (nightly `kvm` job, §8.6) | `-accel kvm -cpu max,+invtsc` through `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, since QEMU leaves invariant TSC out of its default migratable vCPU even under KVM; `/dev/kvm` is opened to the runner user by GitHub's documented udev rule; the LAPIC fallback runs on `qemu64,+invtsc,-tsc-deadline` (`make test-lapic-fallback LAPIC_FALLBACK_CPU=…`), so the invariant-TSC check still applies and the mode is `periodic` |
 | SMP stress | `-smp 4` |
-| aarch64 (`ARCH=aarch64`) | `qemu-system-aarch64 -machine virt,acpi=off,gic-version=<VIBEOS_GIC>` (default 3), `-global virtio-mmio.force-legacy=off` (QEMU 8.2 `virt` otherwise builds Version=1 windows), with `-cpu max` under TCG or `-cpu host` under HVF (`virt` defaults to the 32-bit `cortex-a15`); the §10.2 probe's firmware code read-only on pflash unit 0 and a per-run copy of its variable-store template on unit 1; the ISO on a virtio-scsi CD-ROM, `-device virtio-scsi-pci,id=scsi0 -drive if=none,id=cd0,format=raw,media=cdrom,readonly=on,file=<iso> -device scsi-cd,drive=cd0,bootindex=0`, so the ktest disks are the only virtio-blk devices; and `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo`. Pass is PSCI `SYSTEM_OFF` (QEMU exits 0); there is no `isa-debug-exit` |
+| aarch64 (`ARCH=aarch64`) | `qemu-system-aarch64 -machine virt,acpi=off,gic-version=<VIBEOS_GIC>` (default 3), `-global virtio-mmio.force-legacy=off` (QEMU 8.2 `virt` otherwise builds Version=1 windows), with `-cpu neoverse-n1` under TCG (AAVMF 2025.11 hangs after its version banner on `-cpu max`, EDK2 #11962) or `-cpu host` under HVF (`virt` defaults to the 32-bit `cortex-a15`); the §10.2 probe's firmware code read-only on pflash unit 0 and a per-run copy of its variable-store template on unit 1; `harness.OVMF_BOOT_ARGS` (`-boot order=d,menu=off` and the Tianocore PXE/setup-off fw_cfg entries), so AAVMF BDS does not PXE-stall; the ISO on a virtio-scsi CD-ROM, `-device virtio-scsi-pci,id=scsi0 -drive if=none,id=cd0,format=raw,media=cdrom,readonly=on,file=<iso> -device scsi-cd,drive=cd0,bootindex=0`, so the ktest disks are the only virtio-blk devices; and `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo`. Pass is PSCI `SYSTEM_OFF` (QEMU exits 0); there is no `isa-debug-exit` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
 
 TCG is the per-push accelerator: the harness and `make test` default to `-accel tcg`, and KVM runs
@@ -879,7 +879,7 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
 | `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
 | `VIBEOS_PREBUILT` | unset | the Makefile: `1` makes `make test-*` use the files `make prebuilt` packed (`build/prebuilt.tar`, unpacked in place) and build nothing, as a CI tier job does (§8.6) |
-| `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when `qemu-system-x86_64 --version` differs, or when the variable is unset (§8.6, Runners) |
+| `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when that arch's `qemu-system-* --version` differs, or when the variable is unset (§8.6, Runners) |
 
 UEFI firmware is found by one probe, `harness.probe_firmware(arch)`, which reads one table of
 (code image, variable-store template) pairs per architecture, `harness.FIRMWARE_TABLE`, in this
@@ -889,6 +889,7 @@ order (ROADMAP §10.2, I1, F079):
 |--------------|------------|-------------------------|-------------|
 | x86_64 | `OVMF_CODE_4M.fd` | `OVMF_VARS_4M.fd` | `/usr/share/OVMF` (Ubuntu's `ovmf`) |
 | x86_64 | `edk2-x86_64-code.fd` | `edk2-i386-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
+| aarch64 | `AAVMF_CODE.no-secboot.fd` | `AAVMF_VARS.fd` | `/usr/share/AAVMF` (Ubuntu's `qemu-efi-aarch64`) |
 | aarch64 | `AAVMF_CODE.fd` | `AAVMF_VARS.fd` | `/usr/share/AAVMF` (Ubuntu's `qemu-efi-aarch64`) |
 | aarch64 | `edk2-aarch64-code.fd` | `edk2-arm-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
 
@@ -898,7 +899,9 @@ Homebrew ships no vars file named for either 64-bit architecture, so its 32-bit 
 fails and names both paths, and never falls through to a later row. `VIBEOS_FW_X86_64` and
 `VIBEOS_FW_AARCH64` override the probe with a code image, whose template is its row's in the same
 directory; a missing file, or an image no row of that architecture names, fails. Secure-boot builds
-need SMM and `q35`, so the table leaves them out. The code image boots read-only from pflash, so a
+need SMM and `q35` on x86_64, and on aarch64 they refuse unsigned Limine, so the table prefers
+`AAVMF_CODE.no-secboot.fd` (Ubuntu 26.04's `AAVMF_CODE.fd` may be the Secure Boot image) and leaves
+the `.secboot` / `.ms` images out. The code image boots read-only from pflash, so a
 code-only image boots whatever its size (Homebrew's `edk2-x86_64-code.fd` is 0x37C000 bytes, which
 `-bios` refuses because it is no multiple of 64 KiB).
 
@@ -998,7 +1001,8 @@ dispatched, or run on a tag. A `pull_request` run never counts as proof of a com
 **CI budget.** Every push to `main` and every pull-request update runs `check` and, alongside it,
 one `build` job per architecture (x86_64 now; from Phase 11 aarch64 on the arm64 runner, which also
 runs `make test-unit` and the hostlib tests natively, §11.4's aarch64 switch roundtrip among them).
-`build` runs `make prebuilt`, which builds every ISO variant and the host `mkfs`/`fsck`/`nbd-cache`/
+`build` runs `make prebuilt`, which builds the ISO variants that architecture's tiers
+run (x86_64: every ISO; aarch64: default and ktest) and the host `mkfs`/`fsck`/`nbd-cache`/
 `vibefs-cat` tools once and packs them, with the host triple they were built for, into
 `build/prebuilt.tar`, uploaded as `prebuilt-<arch>`. A matrix of `tier` jobs per architecture
 (`needs: [check, build]`, `fail-fast: false`, TCG) downloads it and runs the same `make test-*`
@@ -1059,6 +1063,24 @@ one QEMU at a time), until a `ci` run measures them:
 | x86_64 | vibefs-crash-2 | `test-vibefs-crash-2` | 25 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
+| aarch64 | e2e-1 | `test-e2e` | 40 |
+| aarch64 | kernel-1 | `test-kernel-1` | 40 |
+| aarch64 | kernel-2 | `test-kernel-2` | 40 |
+| aarch64 | kernel-3 | `test-kernel-3` | 40 |
+| aarch64 | kernel-4 | `test-kernel-4` | 24 |
+| aarch64 | kernel-5 | `test-kernel-5` | 24 |
+| aarch64 | kernel-6 | `test-kernel-6` | 24 |
+| aarch64 | kernel-smp4-1 | `test-kernel-smp4-1` | 40 |
+| aarch64 | kernel-smp4-2 | `test-kernel-smp4-2` | 40 |
+| aarch64 | kernel-smp4-3 | `test-kernel-smp4-3` | 40 |
+| aarch64 | kernel-smp4-4 | `test-kernel-smp4-4` | 24 |
+| aarch64 | kernel-smp4-5 | `test-kernel-smp4-5` | 24 |
+| aarch64 | gic-fallback-1 | `test-gic-fallback-1` | 40 |
+| aarch64 | gic-fallback-2 | `test-gic-fallback-2` | 40 |
+| aarch64 | gic-fallback-3 | `test-gic-fallback-3` | 40 |
+| aarch64 | gic-fallback-4 | `test-gic-fallback-4` | 24 |
+| aarch64 | gic-fallback-5 | `test-gic-fallback-5` | 24 |
+| aarch64 | gic-fallback-6 | `test-gic-fallback-6` | 24 |
 
 `test-e2e-init-fault` boots twice (`init_fault`, then `init_no_sh`, about 10 s more under TCG), so
 e2e-2's figure, measured before the second boot, is low by that much.
@@ -1086,11 +1108,12 @@ which the scheduled jobs and the gate run, still rerun the whole registry there.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`); on a pull request, `scripts/check_gate_inputs.py` against its merge base; then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines <floor>`, the floor in `tests/gates/inputs.toml`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (x86_64: `kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`, plus `kernel_shell`; aarch64: default, `kernel_tests`, `kernel_shell`) (the default set also runs in `check` on x86_64); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 2, so the e2e tiers run two QEMUs at a time on the runner's 4 CPUs; a tier of one target runs one). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
 | `ci-pass` | every per-push run | `needs:` every other job, `if: always()`; fails unless each succeeded, a job gated on the event being allowed to skip (`scripts/check_gate_inputs.py --ci-pass`, which the job runs with `NEEDS: ${{ toJSON(needs) }}` and `SKIPPABLE: ticks`; its static rules fail when the job misses one, lacks `if: always()`, or lists in `SKIPPABLE` a job whose `if:` does not test `github.event_name`) |
 | `smp-stress` `stress` | weekly Monday 06:00 UTC + dispatch, `sched-lane-4` | `make test-smp-stress`: the in-guest tier at `-smp 4`, under the §8.2 per-run deadlines and no whole-run timeout. It and both `repeat-kernel` jobs upload a failed run's `build/cores/` as `cores-x86_64-<job>` |
+| `smp-stress` `stress-aarch64` | same workflow, `sched-lane-4` | `ARCH=aarch64 make test-smp-stress` on `ubuntu-26.04-arm`: the in-guest tier at `-smp 4`, then `weak_order_probe` in its own boot (`VIBEOS_KTEST=weak_order_probe`); a failed run's `build/cores/` as `cores-aarch64-stress` |
 | `smp-stress` `repeat-kernel` | same workflow, `sched-lane-4` | `VIBEOS_KTEST_REPEAT=20 make test-kernel`: every in-guest test 20 times in one `-smp 2` boot |
 | `smp-stress` `repeat-kernel-smp4` | same workflow, `sched-lane-5` | `VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4`: the same at `-smp 4` |
 | `nightly-canary` | same workflow, non-blocking, `sched-lane-5` | undated latest nightly, `make iso && make test-unit` |
@@ -1101,12 +1124,13 @@ which the scheduled jobs and the gate run, still rerun the whole registry there.
 | `nightly` `kvm` | daily 03:17 UTC + dispatch, `sched-lane-0` | The x86_64 KVM leg (ROADMAP §10.1): `/dev/kvm` opened by GitHub's documented udev rule, job env `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, then `make test-kernel`, `make test-e2e`, `VIBEOS_SMP=1 make test-e2e`, `make test-lapic-fallback LAPIC_FALLBACK_CPU=qemu64,+invtsc,-tsc-deadline`, `VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4` (exit-gate line §10.10), and `make test-irqoff` (the IF-off tracer's build variant, ROADMAP §10.2), each step run even after an earlier one failed. GitHub assigns each job's host CPU at random (AMD EPYC or Intel Xeon, several models), so `scripts/runner_info.py` writes the CPU model beside the guest's invariant-TSC bit to the job summary and to `build/runner.json`, uploaded as `runner-kvm`, which fills the CI-history record's `runner`; a regression threshold compares a number only with history from the same CPU model. `build/results/` is uploaded as `results-x86_64-kvm` (90 days), and a failed run's `build/cores/` as `cores-x86_64-kvm`. |
 | `nightly` `release-profile` | daily 03:17 UTC + dispatch, `sched-lane-1` | `make CARGO_PROFILE=release test-e2e test-kernel` under TCG, in its own job, since the release and dev ISOs share their names under `build/` (ROADMAP §10.2, F137; BOOT.md §3.5); the runner record and the uploads as `results-x86_64-release-profile` and `runner-release-profile`, and a failed run's `build/cores/` as `cores-x86_64-release-profile`. `release.yml` runs the production-image e2e targets on the release-profile image it publishes. |
 | `nightly` `repro` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make repro`: every ISO variant built twice from one commit, with a different checkout path, `CARGO_HOME` and `RUSTUP_HOME`, compared byte for byte, and no host path in any output (`scripts/repro_build.py`); the builds run one after the other under `$RUNNER_TEMP`, the first one's `target/` and homes deleted before the second starts (DESIGN §3.6) |
-| `nightly` `models` | daily 03:17 UTC + dispatch, `sched-lane-2` | `./setup.sh --kani && make models`: every loom model and every Kani proof (ROADMAP §10.8); no QEMU |
+| `nightly` `models` | daily 03:17 UTC + dispatch, `sched-lane-2` | `./setup.sh --kani && make models`: every loom model and every Kani proof (ROADMAP §10.8); then `make litmus` (herd7 on `tests/litmus/`, ROADMAP §11.7). No guest. |
 | `nightly` `miri` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make miri`: `vibeos-core`'s host tests under Miri (ROADMAP §10.8); `timeout-minutes` 330, since a serial run took over 2 hours on a 4-CPU host |
 | `nightly` `irqoff` | daily 03:17 UTC + dispatch, `sched-lane-3` | `make test-irqoff` under TCG: the in-guest tier and the e2e boot on the `irqoff` build variant, whose tracer fails a run on an IF=0 stretch over its budget (ROADMAP §10.2); a failed run's `build/cores/` as `cores-x86_64-irqoff` |
 | `nightly` `deny-advisories` | daily 03:17 UTC + dispatch, `sched-lane-3` | cargo-deny's pinned release archive, checked against its SHA-256 as in `check`, then `cargo deny check advisories`, which fetches the RustSec database and so stays out of `make check` |
 | `nightly` `provenance-fetch` | daily 03:17 UTC + dispatch, `sched-lane-3` | `python3 scripts/check_provenance.py --fetch`: each provenance header's upstream file at its pinned revision (DESIGN §1.5) |
 | `nightly` `budget` | daily 03:17 UTC + dispatch, `sched-lane-3` | `make ci-budget` (`ci_history.py --budget` and `--tiers`, Scheduled capacity below) against the `ci-history` branch, which it clones alone |
+| `nightly` `el2` | daily 03:17 UTC + dispatch, `sched-lane-1` | On `ubuntu-26.04-arm`, `ARCH=aarch64` `make test-e2e` twice: `-machine virt,acpi=off,gic-version=3,virtualization=on` then `virt-8.2` with the same (ROADMAP §11.7 EL2 boot). A failed run's `build/cores/` as `cores-aarch64-el2` |
 
 The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
@@ -1241,21 +1265,23 @@ arm64 jobs), whose apt QEMU 10.2.1 (`1:10.2.1+ds-1ubuntu3`) meets every QEMU min
 `dma-remap` and Phase 25's GHES injection). A line that needs QEMU 11.1 or later builds that release
 from its tarball, checked by SHA-256 and cached by version; none does yet. Every job that installs
 `qemu-system-*` sets `VIBEOS_QEMU_VERSION` to the version it pins, and when `CI` is set on Linux,
-`harness.qemu_argv` runs `ensure_qemu_pinned`, which compares `qemu-system-x86_64 --version` with
-that pin before the first boot and fails on a mismatch or an unset pin, so an image update that
+`harness.qemu_argv` runs `ensure_qemu_pinned`, which compares that arch's `qemu-system-* --version`
+with that pin before the first boot and fails on a mismatch or an unset pin, so an image update that
 moves QEMU fails every tier loudly instead of changing what they test; move the pin and this
 paragraph together. `make check`, the macOS job, and a dev host's QEMU (Homebrew's included) are
 not checked. `scripts/check_workflows.py` fails on a `runs-on:` label other than these two and
 `macos-*` (`rule_runs_on`, which resolves `${{ matrix.X }}` to the matrix's values), and on a job
 that names `qemu-system` without a `VIBEOS_QEMU_VERSION` of the form `N.N.N` (`rule_qemu_pin`).
-Planned (ROADMAP §11.7): every job that boots an aarch64 guest runs on an arm64 runner
-(`ubuntu-26.04-arm`, or the scheduled macOS job's arm64 image), never on an x86_64 one. TCG adds no
-ordering to an aarch64 guest's loads and stores, so only an arm64 host lets a weak reordering reach
-guest code; an x86_64 host runs them in its TSO order. `scripts/check_workflows.py` will check it. From
-ROADMAP Phase 11 on, `make gate` also needs two dev-host records that loop the -smp 4 in-guest tier
-and smp-stress under HVF for 30 minutes each (`tests/gates/common.toml`), the only gate that runs
-those tests on a weakly ordered CPU directly. The weekly aarch64 smp-stress leg records whether TCG
-there showed any weak outcome (`weak_order_probe`).
+Every job that boots an aarch64 guest runs on an arm64 runner (`ubuntu-26.04-arm`, or the scheduled
+macOS job's arm64 image), never on an x86_64 one. TCG adds no ordering to an aarch64 guest's loads
+and stores, so only an arm64 host lets a weak reordering reach guest code; an x86_64 host runs them
+in its TSO order. `scripts/check_workflows.py` (`rule_aarch64_arm`) fails a `test-*` or `run` target
+for aarch64 unless `runs-on` names an arm64 image. From ROADMAP Phase 11 on, `make gate` also checks
+two dev-host records that loop the -smp 4 in-guest tier and smp-stress under HVF for 30 minutes each
+(`tests/gates/common.toml`), the only gate that runs those tests on a weakly ordered CPU directly.
+The weekly aarch64 smp-stress leg records whether TCG there showed any weak outcome
+(`weak_order_probe`). x86_64 jobs stay on `ubuntu-26.04`; aarch64 build and tier jobs use
+`ubuntu-26.04-arm`.
 
 **Scheduled capacity.** The Free plan's 20 concurrent jobs are the owner's account's, shared with
 its other repositories, and scheduled and dispatched workflows hold 10 of them as lanes (ROADMAP
@@ -1287,10 +1313,10 @@ workflow (`rule_lane_map`). `Reserved for` is `nightly`, `weekly`, `scheduled`, 
 | Lane | Reserved for | Jobs |
 |---|---|---|
 | `sched-lane-0` | nightly | `nightly.yml` `kvm` |
-| `sched-lane-1` | nightly | `nightly.yml` `release-profile` |
+| `sched-lane-1` | nightly | `nightly.yml` `release-profile`, `el2` |
 | `sched-lane-2` | nightly | `nightly.yml` `repro`, `models`, `miri` |
 | `sched-lane-3` | nightly | `nightly.yml` `budget`, `deny-advisories`, `provenance-fetch`, `irqoff` |
-| `sched-lane-4` | weekly | `smp-stress.yml` `stress`, `repeat-kernel` |
+| `sched-lane-4` | weekly | `smp-stress.yml` `stress`, `stress-aarch64`, `repeat-kernel` |
 | `sched-lane-5` | weekly | `smp-stress.yml` `repeat-kernel-smp4`, `nightly-canary`, `fuzz` |
 | `sched-lane-6` | history | `ci-history.yml` (every job) |
 | `sched-lane-7` | none | multi-day chains (soaks, campaigns); a ROADMAP §22.1 release window |
@@ -1301,8 +1327,8 @@ Release windows: none
 
 | Workflow | Cadence | Jobs per run | Job-hours per run | Peak concurrent jobs | Lanes |
 |---|---|---|---|---|---|
-| `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 5 | 7.7 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
-| `nightly.yml` | daily `17 3 * * *` and dispatch | 9 | 9.1 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
+| `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 6 | 9.0 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
+| `nightly.yml` | daily `17 3 * * *` and dispatch | 10 | 10.5 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
 | `ci-history.yml` | each completed `ci`, `release`, `nightly`, `smp-stress` or `macos` run (`record`); daily `23 4 * * *` and dispatch (`daily`) | 1 | 0.05 per `record`, 0.3 per `daily` (estimated) | 1 | `sched-lane-6` |
 | `macos.yml` | daily `23 4 * * *` and dispatch | 2 | 2.5 (estimated) | 1 | `sched-lane-9` |
 

@@ -106,6 +106,90 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
+  stress-aarch64:
+    name: high-CPU SMP stress (aarch64)
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 120
+    concurrency:
+      group: sched-lane-4
+      queue: max
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+      ARCH: aarch64
+      VIBEOS_QEMU_ACCEL: tcg
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 xorriso
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: rust-src, llvm-tools
+          targets: aarch64-unknown-none-softfloat, aarch64-unknown-linux-musl
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-stress-aarch64-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-stress-aarch64-
+
+      - name: cache limine binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: limine
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989-${{ runner.arch }}
+
+      - name: setup
+        run: ./setup.sh
+
+      - name: SMP stress aarch64 (-smp 4, weak_order_probe)
+        run: make test-smp-stress
+
+      - name: harness results summary
+        if: always()
+        run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-aarch64-stress
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-aarch64-stress
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-stress-aarch64
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
   repeat-kernel:
     name: repeat-kernel
     runs-on: ubuntu-26.04

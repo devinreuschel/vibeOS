@@ -1,0 +1,11 @@
+AArch64 vibeos-seqlock-odd
+{
+0:X1=ver; 0:X2=data;
+1:X1=ver; 1:X2=data;
+}
+ P0              | P1              ;
+ MOV W0,#1       | LDAR W3,[X1]    ;
+ LDADD W0,W5,[X1]| LDR W4,[X2]     ;
+ DMB ISH         |                 ;
+ STLR W0,[X2]    |                 ;
+exists (1:X3=1 /\ 1:X4=0)

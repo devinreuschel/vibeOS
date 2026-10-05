@@ -19,7 +19,7 @@ from pathlib import Path
 
 from scripts.gen_syscalls import ktest_names
 from tests.harness import ktest_shards
-from tests.harness.ktest_shards import SHARDS, VARIANTS
+from tests.harness.ktest_shards import AARCH64_ROWS, SHARDS, VARIANTS
 from tests.harness.run_ktest import PROOF_BOOTS, main, proof_boot_names
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -82,6 +82,18 @@ class ShardTable(unittest.TestCase):
             for bound in s.rows or ():
                 if bound:
                     self.assertIn(bound, registered, name)
+        for name, rows in AARCH64_ROWS.items():
+            for bound in rows:
+                if bound:
+                    self.assertIn(bound, registered, name)
+
+    def test_aarch64_ranges_hand_on_their_bounds(self) -> None:
+        for variant in VARIANTS:
+            rows = [AARCH64_ROWS[f"{variant}-{k}"] for k in (1, 2, 3)]
+            self.assertEqual(rows[0][0], "", variant)
+            self.assertEqual(rows[-1][1], "", variant)
+            for (_, hi), (lo, _) in zip(rows[:-1], rows[1:], strict=True):
+                self.assertEqual(hi, lo, variant)
 
     def test_proof_boots_once_each(self) -> None:
         for variant, v in VARIANTS.items():
@@ -133,10 +145,20 @@ class ShardMakefile(unittest.TestCase):
             flag = " --hpet-off" if v.hpet_off else ""
             self.assertTrue(full.endswith(f"run_ktest.py{flag}"), full)
             self.assertEqual(" VIBEOS_SMP=4 " in full, v.smp == 4, full)
+            # aarch64 env_config defaults VIBEOS_SMP to 1; the -smp 2
+            # shards must set it (ROADMAP §11.7).
+            self.assertEqual(" VIBEOS_SMP=2 " in full, variant == "test-kernel", full)
             base = full.removesuffix(flag).replace(f"VIBEOS_TIER={variant} ", "", 1)
             for name, _ in shards_of(variant):
                 want = f"VIBEOS_TIER={name} {base} --shard {name}"
                 self.assertEqual(" ".join(recipes[name].split()), " ".join(want.split()))
+
+    def test_gic_fallback_sets_gic_and_smp(self) -> None:
+        recipes = make_n("test-gic-fallback-1", "test-gic-fallback-2")
+        self.assertEqual(set(recipes), {"test-gic-fallback-1", "test-gic-fallback-2"})
+        for name, line in recipes.items():
+            self.assertIn(" VIBEOS_GIC=2 ", f" {line} ", name)
+            self.assertIn(" VIBEOS_SMP=2 ", f" {line} ", name)
 
     def test_make_test_runs_the_shards(self) -> None:
         text = (ROOT / "Makefile").read_text(encoding="utf-8")

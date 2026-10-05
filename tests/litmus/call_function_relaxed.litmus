@@ -7,5 +7,5 @@ AArch64 vibeos-call-function-relaxed
  MOV W0,#1       | LDR W4,[X3]     ;
  STR W0,[X1]     | LDR W5,[X1]     ;
  STR W0,[X2]     | LDR W6,[X2]     ;
- STR WZR,[X3]    |                 ;
-exists (1:X4=0 /\ 1:X5=0)
+ STR W0,[X3]     |                 ;
+exists (1:X4=1 /\ 1:X5=0)

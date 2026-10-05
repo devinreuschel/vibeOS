@@ -696,10 +696,8 @@ static ENV_ST: AtomicU32 = AtomicU32::new(0);
 static ENV_DONE: AtomicBool = AtomicBool::new(false);
 
 fn env_on_cpu() {
-    let st = match user::run(&Image::UserBin("tests"), &["tests", "--case", "user_env"]) {
-        Ok(s) => s,
-        Err(_) => u32::MAX,
-    };
+    let st =
+        user::run(&Image::UserBin("tests"), &["tests", "--case", "user_env"]).unwrap_or(u32::MAX);
     // Relaxed: pairs with nothing.
     ENV_ST.store(st, Ordering::Relaxed);
     // Release: pairs with the Acquire load in `test_el0_env_every_cpu`.

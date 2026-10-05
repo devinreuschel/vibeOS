@@ -44,7 +44,16 @@ echo "setup: checking host tools"
 need git
 need make
 need cc
-need qemu-system-x86_64
+# ROADMAP §11.7: the qemu-system the job's ARCH boots. Default x86_64.
+arch="${ARCH:-x86_64}"
+case "$arch" in
+    x86_64) need qemu-system-x86_64 ;;
+    aarch64) need qemu-system-aarch64 ;;
+    *)
+        echo "setup: ARCH=$arch: not x86_64 or aarch64" >&2
+        exit 1
+        ;;
+esac
 need xorriso
 need python3
 need cargo
@@ -217,8 +226,11 @@ $changed"
 fi
 echo "setup: limine $LIMINE_TAG @ $LIMINE_COMMIT"
 
-if [ ! -x "$LIMINE_DIR/limine" ]; then
+# The archive has no Unix host tool. A restored cache may have one built
+# for another runner arch (ROADMAP §11.7 arm64 jobs).
+if [ ! -x "$LIMINE_DIR/limine" ] || ! "$LIMINE_DIR/limine" version --version-only >/dev/null 2>&1; then
     echo "setup: building limine host tool"
+    rm -f "$LIMINE_DIR/limine"
     make -C "$LIMINE_DIR"
 else
     echo "setup: limine host tool already built"

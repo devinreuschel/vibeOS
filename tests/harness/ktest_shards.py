@@ -69,6 +69,35 @@ def _rows(variant: str, cut: str) -> dict[str, Shard]:
     return {f"{variant}-{k}": Shard(variant, rows=r) for k, r in enumerate(bounds, start=1)}
 
 
+# aarch64's registry is `ktest` + `arch` + `dev` only (src/ktest/mod.rs).
+# x86 cut names (`user_single_step`, `block_vblk_rw`) are not rows there.
+# `el0_sve_sigill` sits in the second stretch, after `el0_uaccess`.
+def _aarch64_rows(variant: str, cut: str) -> dict[str, tuple[str, str]]:
+    bounds = (("", cut), (cut, "virtio_bind"), ("virtio_bind", ""))
+    return {f"{variant}-{k}": r for k, r in enumerate(bounds, start=1)}
+
+
+AARCH64_ROWS: dict[str, tuple[str, str]] = {
+    **_aarch64_rows("test-kernel", "el0_uaccess"),
+    **_aarch64_rows("test-kernel-smp4", "el0_uaccess"),
+    **_aarch64_rows("test-lapic-fallback", "el0_uaccess"),
+}
+
+
+def rows_for(name: str, arch: str) -> tuple[str, str] | None:
+    """The main-boot range of shard `name` on `arch`."""
+    if arch == "aarch64" and name in AARCH64_ROWS:
+        return AARCH64_ROWS[name]
+    return SHARDS[name].rows
+
+
+def range_word_for(name: str, arch: str) -> str | None:
+    rows = rows_for(name, arch)
+    if rows is None:
+        return None
+    return f"vibeos.ktest_range={rows[0]}..{rows[1]}"
+
+
 SHARDS: dict[str, Shard] = {
     **_rows("test-kernel", "user_single_step"),
     "test-kernel-4": Shard("test-kernel", boots=("hpet-off", "select", "repeat")),

@@ -17,6 +17,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 | `VIBEOS_ISO` | per driver | all, `run_interactive` |
 | `VIBEOS_ARCH` | `x86_64` | all (`qemu_argv`, `env_config`); `aarch64` is ROADMAP §11.3 / §11.7 |
 | `VIBEOS_GIC` | `3` on aarch64 | `qemu_argv` (`gic-version=2` or `3`) |
+| `VIBEOS_MACHINE` | virt+gic | aarch64 `-machine` |
 | `VIBEOS_SMP` | `2` (`1` on aarch64) | all, `run_interactive` |
 | `VIBEOS_QEMU_CPU` | `max` | all, `run_interactive` |
 | `VIBEOS_MEM` | `128M` | all, `run_interactive` |
@@ -745,6 +746,8 @@ class QemuConfig:
     arch: str = "x86_64"
     # GICv2 or GICv3 on `virt`. Ignored on x86_64.
     gic_version: str = "3"
+    # aarch64 `-machine` string. Empty uses DESIGN §8.4's `virt,acpi=off,gic-version=`.
+    machine: str = ""
 
 
 def qemu_system(arch: str) -> str:
@@ -783,6 +786,7 @@ class EnvConfig:
     timeout_scale: float = TIMEOUT_SCALE
     arch: str = "x86_64"
     gic_version: str = "3"
+    machine: str = ""
 
     def fw_cfg_cmdline(self, driver_words: str = "") -> str:
         """The fw_cfg command-line string: the driver's words, then
@@ -824,6 +828,7 @@ class EnvConfig:
             resets=resets,
             arch=self.arch,
             gic_version=self.gic_version,
+            machine=self.machine,
         )
 
 
@@ -897,6 +902,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
     gic = os.environ.get("VIBEOS_GIC", "3")
     if arch == "aarch64" and gic not in ("2", "3"):
         raise HarnessError(f"VIBEOS_GIC={gic}: not 2 or 3")
+    machine = os.environ.get("VIBEOS_MACHINE", "")
     firmware = env_firmware(os.environ, arch)
     accel_raw = os.environ.get("VIBEOS_QEMU_ACCEL")
     extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
@@ -936,7 +942,17 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         timeout_scale=TIMEOUT_SCALE,
         arch=arch,
         gic_version=gic,
+        machine=machine,
     )
+
+
+def apply_arch_cli(arch: str | None) -> None:
+    """`--arch` for the harness drivers: sets `VIBEOS_ARCH` before `env_config`."""
+    if not arch:
+        return
+    if arch not in ("x86_64", "aarch64"):
+        raise HarnessError(f"--arch {arch}: not x86_64 or aarch64")
+    os.environ["VIBEOS_ARCH"] = arch
 
 
 @contextmanager
@@ -1230,6 +1246,9 @@ FIRMWARE_TABLE: dict[str, tuple[FirmwarePair, ...]] = {
         FirmwarePair("edk2-x86_64-code.fd", "edk2-i386-vars.fd", (HOMEBREW_QEMU,)),
     ),
     "aarch64": (
+        # Ubuntu 26.04's AAVMF_CODE.fd may be the Secure Boot image, which
+        # will not start unsigned Limine. Prefer the no-secboot build.
+        FirmwarePair("AAVMF_CODE.no-secboot.fd", "AAVMF_VARS.fd", ("/usr/share/AAVMF",)),
         FirmwarePair("AAVMF_CODE.fd", "AAVMF_VARS.fd", ("/usr/share/AAVMF",)),
         FirmwarePair("edk2-aarch64-code.fd", "edk2-arm-vars.fd", (HOMEBREW_QEMU,)),
     ),
@@ -1356,7 +1375,7 @@ def pflash_args(fw: Firmware, vars_copy: str) -> list[str]:
     ]
 
 
-# OVMF BDS PXEs the default e1000 if the CD isn't first/ready. slirp
+# EDK2 BDS (OVMF and AAVMF) PXEs if the CD isn't first/ready. slirp
 # answers DHCP; TFTP does not. Silent stall matches VIBEOS_TIMEOUT.
 # Hits the UEFI e2e second boot (COM1 is an open pipe; marker boot is not).
 OVMF_BOOT_ARGS: tuple[str, ...] = (
@@ -1431,10 +1450,17 @@ def fw_cfg_cmdline_words(cfg: QemuConfig) -> str:
 PANIC_ACTION = ("-action", "panic=pause")
 
 
+# AAVMF 2025.11 hangs after its version banner on TCG `-cpu max`
+# (EDK2 #11962, LPA2). neoverse-n1 is a 64-bit Armv8.2 model BDS reaches.
+AARCH64_TCG_CPU = "neoverse-n1"
+
+
 def _aarch64_cpu(cfg: QemuConfig) -> str:
-    """`-cpu host` under HVF; `virt` defaults to the 32-bit cortex-a15."""
+    """`-cpu host` under HVF; TCG default `max` is `neoverse-n1`."""
     if _accel_name(cfg.accel) == "hvf" and cfg.cpu == DEFAULT_CPU:
         return "host"
+    if cfg.cpu == DEFAULT_CPU:
+        return AARCH64_TCG_CPU
     return cfg.cpu
 
 
@@ -1493,6 +1519,13 @@ def qemu_argv(
     return argv
 
 
+def _aarch64_machine(cfg: QemuConfig) -> str:
+    """DESIGN §8.4 / ROADMAP §11.7: `virt,acpi=off,gic-version=` unless overridden."""
+    if cfg.machine:
+        return cfg.machine
+    return f"virt,acpi=off,gic-version={cfg.gic_version}"
+
+
 def _qemu_argv_aarch64(
     cfg: QemuConfig, monitor_sock: str | None, *, qmp_sock: str | None = None
 ) -> list[str]:
@@ -1505,7 +1538,7 @@ def _qemu_argv_aarch64(
         )
     argv = [
         qemu_system("aarch64"),
-        "-machine", f"virt,acpi=off,gic-version={cfg.gic_version}",
+        "-machine", _aarch64_machine(cfg),
         # QEMU 8.2 `virt` builds virtio-mmio with force-legacy=on
         # (Version=1). Firecracker and virtio 1.2 §4.2 are Version=2;
         # ROADMAP §11.5 F047 needs QueueNotify to take the queue index.
@@ -1527,6 +1560,7 @@ def _qemu_argv_aarch64(
     if cfg.gdb:
         argv += ["-s", "-S"]
     argv += pflash_args(cfg.firmware, new_vars_copy(cfg.firmware))
+    argv += list(OVMF_BOOT_ARGS)
     words = fw_cfg_cmdline_words(cfg)
     if words:
         argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]
