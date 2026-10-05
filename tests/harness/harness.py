@@ -1246,6 +1246,9 @@ FIRMWARE_TABLE: dict[str, tuple[FirmwarePair, ...]] = {
         FirmwarePair("edk2-x86_64-code.fd", "edk2-i386-vars.fd", (HOMEBREW_QEMU,)),
     ),
     "aarch64": (
+        # Ubuntu 26.04's AAVMF_CODE.fd may be the Secure Boot image, which
+        # will not start unsigned Limine. Prefer the no-secboot build.
+        FirmwarePair("AAVMF_CODE.no-secboot.fd", "AAVMF_VARS.fd", ("/usr/share/AAVMF",)),
         FirmwarePair("AAVMF_CODE.fd", "AAVMF_VARS.fd", ("/usr/share/AAVMF",)),
         FirmwarePair("edk2-aarch64-code.fd", "edk2-arm-vars.fd", (HOMEBREW_QEMU,)),
     ),
@@ -1372,7 +1375,7 @@ def pflash_args(fw: Firmware, vars_copy: str) -> list[str]:
     ]
 
 
-# OVMF BDS PXEs the default e1000 if the CD isn't first/ready. slirp
+# EDK2 BDS (OVMF and AAVMF) PXEs if the CD isn't first/ready. slirp
 # answers DHCP; TFTP does not. Silent stall matches VIBEOS_TIMEOUT.
 # Hits the UEFI e2e second boot (COM1 is an open pipe; marker boot is not).
 OVMF_BOOT_ARGS: tuple[str, ...] = (
@@ -1550,6 +1553,7 @@ def _qemu_argv_aarch64(
     if cfg.gdb:
         argv += ["-s", "-S"]
     argv += pflash_args(cfg.firmware, new_vars_copy(cfg.firmware))
+    argv += list(OVMF_BOOT_ARGS)
     words = fw_cfg_cmdline_words(cfg)
     if words:
         argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]

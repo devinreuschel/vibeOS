@@ -827,7 +827,7 @@ number of images checked, and the trace's write and flush counts.
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` (`LAPIC_FALLBACK_CPU` in the Makefile) |
 | KVM leg (nightly `kvm` job, §8.6) | `-accel kvm -cpu max,+invtsc` through `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, since QEMU leaves invariant TSC out of its default migratable vCPU even under KVM; `/dev/kvm` is opened to the runner user by GitHub's documented udev rule; the LAPIC fallback runs on `qemu64,+invtsc,-tsc-deadline` (`make test-lapic-fallback LAPIC_FALLBACK_CPU=…`), so the invariant-TSC check still applies and the mode is `periodic` |
 | SMP stress | `-smp 4` |
-| aarch64 (`ARCH=aarch64`) | `qemu-system-aarch64 -machine virt,acpi=off,gic-version=<VIBEOS_GIC>` (default 3), `-global virtio-mmio.force-legacy=off` (QEMU 8.2 `virt` otherwise builds Version=1 windows), with `-cpu max` under TCG or `-cpu host` under HVF (`virt` defaults to the 32-bit `cortex-a15`); the §10.2 probe's firmware code read-only on pflash unit 0 and a per-run copy of its variable-store template on unit 1; the ISO on a virtio-scsi CD-ROM, `-device virtio-scsi-pci,id=scsi0 -drive if=none,id=cd0,format=raw,media=cdrom,readonly=on,file=<iso> -device scsi-cd,drive=cd0,bootindex=0`, so the ktest disks are the only virtio-blk devices; and `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo`. Pass is PSCI `SYSTEM_OFF` (QEMU exits 0); there is no `isa-debug-exit` |
+| aarch64 (`ARCH=aarch64`) | `qemu-system-aarch64 -machine virt,acpi=off,gic-version=<VIBEOS_GIC>` (default 3), `-global virtio-mmio.force-legacy=off` (QEMU 8.2 `virt` otherwise builds Version=1 windows), with `-cpu max` under TCG or `-cpu host` under HVF (`virt` defaults to the 32-bit `cortex-a15`); the §10.2 probe's firmware code read-only on pflash unit 0 and a per-run copy of its variable-store template on unit 1; `harness.OVMF_BOOT_ARGS` (`-boot order=d,menu=off` and the Tianocore PXE/setup-off fw_cfg entries), so AAVMF BDS does not PXE-stall; the ISO on a virtio-scsi CD-ROM, `-device virtio-scsi-pci,id=scsi0 -drive if=none,id=cd0,format=raw,media=cdrom,readonly=on,file=<iso> -device scsi-cd,drive=cd0,bootindex=0`, so the ktest disks are the only virtio-blk devices; and `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo`. Pass is PSCI `SYSTEM_OFF` (QEMU exits 0); there is no `isa-debug-exit` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
 
 TCG is the per-push accelerator: the harness and `make test` default to `-accel tcg`, and KVM runs
@@ -889,6 +889,7 @@ order (ROADMAP §10.2, I1, F079):
 |--------------|------------|-------------------------|-------------|
 | x86_64 | `OVMF_CODE_4M.fd` | `OVMF_VARS_4M.fd` | `/usr/share/OVMF` (Ubuntu's `ovmf`) |
 | x86_64 | `edk2-x86_64-code.fd` | `edk2-i386-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
+| aarch64 | `AAVMF_CODE.no-secboot.fd` | `AAVMF_VARS.fd` | `/usr/share/AAVMF` (Ubuntu's `qemu-efi-aarch64`) |
 | aarch64 | `AAVMF_CODE.fd` | `AAVMF_VARS.fd` | `/usr/share/AAVMF` (Ubuntu's `qemu-efi-aarch64`) |
 | aarch64 | `edk2-aarch64-code.fd` | `edk2-arm-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
 
@@ -898,7 +899,9 @@ Homebrew ships no vars file named for either 64-bit architecture, so its 32-bit 
 fails and names both paths, and never falls through to a later row. `VIBEOS_FW_X86_64` and
 `VIBEOS_FW_AARCH64` override the probe with a code image, whose template is its row's in the same
 directory; a missing file, or an image no row of that architecture names, fails. Secure-boot builds
-need SMM and `q35`, so the table leaves them out. The code image boots read-only from pflash, so a
+need SMM and `q35` on x86_64, and on aarch64 they refuse unsigned Limine, so the table prefers
+`AAVMF_CODE.no-secboot.fd` (Ubuntu 26.04's `AAVMF_CODE.fd` may be the Secure Boot image) and leaves
+the `.secboot` / `.ms` images out. The code image boots read-only from pflash, so a
 code-only image boots whatever its size (Homebrew's `edk2-x86_64-code.fd` is 0x37C000 bytes, which
 `-bios` refuses because it is no multiple of 64 KiB).
 
