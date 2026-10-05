@@ -836,13 +836,21 @@ fn open_eacces() -> Result<Result<usize, Errno>, &'static str> {
 /// Open `/hello` until a call fails: that call's error, with every
 /// descriptor it opened closed.
 fn open_until_error(max: usize) -> Result<usize, Errno> {
+    open_until_error_with(max, || open_raw(HELLO, sys::O_RDONLY))
+}
+
+/// Hold each successful open until `max` or the first error, then close.
+fn open_until_error_with(
+    max: usize,
+    mut open_one: impl FnMut() -> Result<usize, Errno>,
+) -> Result<usize, Errno> {
     let mut fds = [0u32; 300];
     let mut n = 0;
     let mut last = Ok(0);
     while n < max.min(fds.len()) {
-        match open(HELLO, sys::O_RDONLY) {
+        match open_one() {
             Ok(fd) => {
-                fds[n] = fd;
+                fds[n] = fd as u32;
                 n += 1;
             }
             Err(e) => {
@@ -947,12 +955,21 @@ fn execve_enfile() -> Result<Result<usize, Errno>, &'static str> {
     })?
 }
 
+fn open_enospc() -> Result<Result<usize, Errno>, &'static str> {
+    volume_enospc(*b"/utest_ns000\0", |p| {
+        sys::open(p, sys::O_CREAT | sys::O_RDWR, 0o644)
+    })
+}
+
 /// Fill the root FAT volume through one file, then create names in its
 /// root directory until one needs a cluster; then free the clusters. Only
 /// under init: a kernel-parented run (`kernel_tests`' `user_syscalls`)
 /// shares the initrd volume with the in-guest tests that run after it,
 /// whose own files need the root directory's room.
-fn open_enospc() -> Result<Result<usize, Errno>, &'static str> {
+fn volume_enospc(
+    mut name: [u8; 13],
+    mut create: impl FnMut(*const u8) -> Result<usize, Errno>,
+) -> Result<Result<usize, Errno>, &'static str> {
     if sys::getppid() != Ok(1) {
         return Err(NOT_HERE);
     }
@@ -973,12 +990,11 @@ fn open_enospc() -> Result<Result<usize, Errno>, &'static str> {
     let mut r = Err("the volume did not fill");
     if full {
         r = Err("200 names fit in the root directory");
-        let mut name = *b"/utest_ns000\0";
         for i in 0..200u32 {
             name[9] = b'0' + (i / 100) as u8;
             name[10] = b'0' + (i / 10 % 10) as u8;
             name[11] = b'0' + (i % 10) as u8;
-            match sys::open(name.as_ptr(), sys::O_CREAT | sys::O_RDWR, 0o644) {
+            match create(name.as_ptr()) {
                 Ok(fd) => close(fd as u32),
                 Err(e) => {
                     r = Ok(Err(e));
@@ -1266,45 +1282,19 @@ fn openat_eacces() -> Result<Result<usize, Errno>, &'static str> {
 }
 
 fn openat_emfile() -> Result<Result<usize, Errno>, &'static str> {
-    let mut fds = [0u32; 300];
-    let mut n = 0;
-    let mut last = Ok(0);
-    while n < fds.len() {
-        match openat_raw(HELLO, sys::O_RDONLY) {
-            Ok(fd) => {
-                fds[n] = fd as u32;
-                n += 1;
-            }
-            Err(e) => {
-                last = Err(e);
-                break;
-            }
-        }
-    }
-    for &fd in &fds[..n] {
-        close(fd);
-    }
-    Ok(last)
+    Ok(open_until_error_with(300, || {
+        openat_raw(HELLO, sys::O_RDONLY)
+    }))
 }
 
 fn openat_enfile() -> Result<Result<usize, Errno>, &'static str> {
-    with_files_full(|| {
-        let mut last = Ok(0);
-        for _ in 0..250 {
-            match openat_raw(HELLO, sys::O_RDONLY) {
-                Ok(fd) => close(fd as u32),
-                Err(e) => {
-                    last = Err(e);
-                    break;
-                }
-            }
-        }
-        last
-    })
+    with_files_full(|| open_until_error_with(250, || openat_raw(HELLO, sys::O_RDONLY)))
 }
 
 fn openat_enospc() -> Result<Result<usize, Errno>, &'static str> {
-    Ok(openat_raw(c"/utest_nospc", sys::O_CREAT | sys::O_WRONLY))
+    volume_enospc(*b"/utest_as000\0", |p| {
+        sys::openat(-100, p, sys::O_CREAT | sys::O_RDWR, 0o644)
+    })
 }
 
 fn dup3_einval() -> Result<Result<usize, Errno>, &'static str> {
