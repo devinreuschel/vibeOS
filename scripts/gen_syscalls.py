@@ -11,8 +11,10 @@ architecture, its arguments' C types in order, and its pointer declarations
 - `crates/core/src/arch/x86_64/syscall.rs`: the same for x86_64, in its
   port's pure half, which `SyscallAbi::dispatch` reaches (PORTABILITY
   §11.1);
-- `user/src/arch/x86_64/sys.rs`: the numbers, `Sys::from_name`, one stub
-  per row with an x86_64 number, and `CALLS`, each row's errors, in-guest
+- `user/src/arch/x86_64/sys.rs` and `user/src/arch/aarch64/sys.rs`: the
+  numbers, `Sys::from_name`, one stub per row with that architecture's
+  number (aarch64 also emits `open`/`dup2`/`fork` wrappers onto
+  `openat`/`dup3`/`clone`), and `CALLS`, each row's errors, in-guest
   attributions and pointer declarations for `/bin/tests`' `errno_matrix`
   and `efault_matrix`, with `MAX_PROCS` from `crates/core/src/limits.rs`
   and `USER_END` and `USER_MAP_END` from `crates/core/src/mm/paging.rs`;
@@ -58,6 +60,7 @@ TABLE = Path("crates/core/src/proc/syscalls.toml")
 KERNEL_OUT = Path("crates/core/src/proc/syscall_table.rs")
 X86_OUT = Path("crates/core/src/arch/x86_64/syscall.rs")
 USER_OUT = Path("user/src/arch/x86_64/sys.rs")
+USER_AARCH64_OUT = Path("user/src/arch/aarch64/sys.rs")
 SYSCALL_MD = Path("docs/SYSCALL.md")
 KERROR = Path("crates/core/src/kerror.rs")
 LIMITS = Path("crates/core/src/limits.rs")
@@ -97,7 +100,9 @@ NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
 ROW_KEYS = frozenset(
     ("name", "x86_64", "aarch64", "args", "aarch64_order", "unsafe", "note", "errors", "ktest")
 )
-ARG_KEYS = frozenset(("name", "type", "ptr", "len", "size", "dir", "null", "when", "unread"))
+ARG_KEYS = frozenset(
+    ("name", "type", "ptr", "len", "size", "size_aarch64", "dir", "null", "when", "unread")
+)
 
 # The table's types, emitted as they are into the kernel table, so the
 # generated module depends on nothing but `KError` (check_cycles.py).
@@ -277,6 +282,7 @@ class Arg:
     nullable: bool = False
     len_from: int = -1
     size: int = 0
+    size_aarch64: int = 0
     when: str = ""
 
 
@@ -413,13 +419,19 @@ def parse_arg(raw: Any, row: str, names: list[str], types: list[CType]) -> Arg:
         len_from = names.index(length)
     elif "len" in raw:
         raise TableError(f"{where}: len on a {kind}")
+    size_a64 = 0
     if kind == "fixed":
         size = raw.get("size", 0)
         if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
             raise TableError(f"{where}: a fixed pointer declares its size in bytes")
-    elif "size" in raw:
+        size_a64 = raw.get("size_aarch64", 0)
+        if "size_aarch64" in raw and (
+            not isinstance(size_a64, int) or isinstance(size_a64, bool) or size_a64 <= 0
+        ):
+            raise TableError(f"{where}: size_aarch64 is a positive byte count")
+    elif "size" in raw or "size_aarch64" in raw:
         raise TableError(f"{where}: size on a {kind}")
-    return Arg(name, ty, kind, direction, null, len_from, size, when)
+    return Arg(name, ty, kind, direction, null, len_from, size, size_a64, when)
 
 
 def parse(text: str) -> Table:
@@ -994,7 +1006,7 @@ def writes_through(a: Arg) -> bool:
     return a.kind in ("buf", "fixed") and a.dir == "out"
 
 
-def user_safety(r: Row) -> list[str]:
+def user_safety(r: Row, arch: str = "x86_64") -> list[str]:
     lines: list[str] = []
     for a in r.args:
         if not writes_through(a):
@@ -1002,7 +1014,8 @@ def user_safety(r: Row) -> list[str]:
         if a.kind == "buf":
             size = f"up to `{r.args[a.len_from].name}` bytes"
         else:
-            size = f"{a.size} bytes"
+            n = a.size_aarch64 if arch == "aarch64" and a.size_aarch64 else a.size
+            size = f"{n} bytes"
         null = ", unless it is null" if a.nullable else ""
         lines.append(
             f"The kernel writes {size} through `{a.name}`{null}: no live Rust reference"
@@ -1029,17 +1042,41 @@ def wrap_doc(text: str, indent: str, width: int = 100) -> list[str]:
     return out
 
 
-def render_user(table: Table) -> str:
-    rows = [r for r in table.rows if r.x86_64 is not None]
+def render_user_x86(table: Table) -> str:
+    return render_user(table, "x86_64")
+
+
+def render_user_aarch64(table: Table) -> str:
+    return render_user(table, "aarch64")
+
+
+def render_user(table: Table, arch: str = "x86_64") -> str:
+    if arch == "aarch64":
+        rows = [r for r in table.rows if r.aarch64 is not None]
+        title = "aarch64"
+        conv = [
+            "//! aarch64 system call stubs (C-USERRT, C-SYSTABLE), generated from the",
+            "//! kernel's syscall table. Each takes its arguments in the C types of",
+            "//! Linux's prototype and returns `Ok` with the result or the `Errno`.",
+            "//! A stub is an `unsafe fn` when the kernel writes through one of its",
+            "//! pointers or the row says why. `open`, `dup2`, and `fork` are",
+            "//! wrappers onto `openat`/`dup3`/`clone` (ROADMAP §11.6).",
+        ]
+    else:
+        rows = [r for r in table.rows if r.x86_64 is not None]
+        title = "x86_64"
+        conv = [
+            "//! x86_64 system call stubs (C-USERRT, C-SYSTABLE), generated from the",
+            "//! kernel's syscall table. Each takes its arguments in the C types of",
+            "//! Linux's prototype and returns `Ok` with the result or the `Errno`.",
+            "//! A stub is an `unsafe fn` when the kernel writes through one of its",
+            "//! pointers or the row says why.",
+        ]
     out = [
         f"// {GENERATED}.",
         "// Do not edit: change the table and run the script (ROADMAP §10.5).",
         "",
-        "//! x86_64 system call stubs (C-USERRT, C-SYSTABLE), generated from the",
-        "//! kernel's syscall table. Each takes its arguments in the C types of",
-        "//! Linux's prototype and returns `Ok` with the result or the `Errno`.",
-        "//! A stub is an `unsafe fn` when the kernel writes through one of its",
-        "//! pointers or the row says why.",
+        *conv,
         "",
     ]
     if any(a.ty.is_ptr and "c_void" in a.ty.pointee for r in rows for a in r.args):
@@ -1049,11 +1086,31 @@ def render_user(table: Table) -> str:
         "pub use super::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall5, syscall6};",
         "use crate::sys::{Errno, result};",
         "",
-        "/// The x86_64 numbers.",
+        f"/// The {title} numbers.",
         "pub mod nr {",
     ]
     for r in rows:
-        out += [f"    /// `{r.name}`.", f"    pub const SYS_{r.name.upper()}: usize = {r.x86_64};"]
+        out += [
+            f"    /// `{r.name}`.",
+            f"    pub const SYS_{r.name.upper()}: usize = {r.nr(arch)};",
+        ]
+    if arch == "aarch64":
+        by_name = {r.name: r for r in table.rows}
+        if "open" in by_name and "openat" in by_name and by_name["openat"].aarch64 is not None:
+            out += [
+                "    /// `open` as `openat(AT_FDCWD, …)`.",
+                "    pub const SYS_OPEN: usize = SYS_OPENAT;",
+            ]
+        if "dup2" in by_name and "dup3" in by_name and by_name["dup3"].aarch64 is not None:
+            out += [
+                "    /// `dup2` as `dup3(…, 0)` except `oldfd == newfd`.",
+                "    pub const SYS_DUP2: usize = SYS_DUP3;",
+            ]
+        if "fork" in by_name and "clone" in by_name and by_name["clone"].aarch64 is not None:
+            out += [
+                "    /// `fork` as `clone(SIGCHLD, 0, …)`.",
+                "    pub const SYS_FORK: usize = SYS_CLONE;",
+            ]
     out += [
         "}",
         "",
@@ -1061,16 +1118,25 @@ def render_user(table: Table) -> str:
         "#[derive(Clone, Copy, Debug, PartialEq, Eq)]",
         "pub enum Sys {",
     ]
-    for r in rows:
+    # Every table row, so portable `/bin/tests` can name `Sys::Psinfo`
+    # on aarch64. Stubs and `CALLS` stay the rows with a number, plus
+    # the `open`/`dup2`/`fork` wrappers.
+    enum_rows = list(table.rows)
+    call_rows = [
+        r
+        for r in enum_rows
+        if r.nr(arch) is not None or (arch == "aarch64" and r.name in ("open", "dup2", "fork"))
+    ]
+    for r in enum_rows:
         out += [f"    /// `{r.name}`.", f"    {r.variant},"]
     out += [
         "}",
         "",
         "impl Sys {",
         "    /// Every call, in table order.",
-        f"    pub const ALL: [Sys; {len(rows)}] = [",
+        f"    pub const ALL: [Sys; {len(enum_rows)}] = [",
     ]
-    out += [f"        Sys::{r.variant}," for r in rows]
+    out += [f"        Sys::{r.variant}," for r in enum_rows]
     out += [
         "    ];",
         "",
@@ -1078,9 +1144,9 @@ def render_user(table: Table) -> str:
         "    pub fn from_name(name: &[u8]) -> Option<Sys> {",
         "        match name {",
     ]
-    out += [f'            b"{r.name}" => Some(Sys::{r.variant}),' for r in rows]
+    out += [f'            b"{r.name}" => Some(Sys::{r.variant}),' for r in enum_rows]
     out += [
-        "            _ => None,",
+            "            _ => None,",
         "        }",
         "    }",
         "",
@@ -1088,7 +1154,7 @@ def render_user(table: Table) -> str:
         "    pub const fn name(self) -> &'static str {",
         "        match self {",
     ]
-    out += [f'            Sys::{r.variant} => "{r.name}",' for r in rows]
+    out += [f'            Sys::{r.variant} => "{r.name}",' for r in enum_rows]
     out += [
         "        }",
         "    }",
@@ -1097,7 +1163,11 @@ def render_user(table: Table) -> str:
         "    pub const fn nr(self) -> usize {",
         "        match self {",
     ]
-    out += [f"            Sys::{r.variant} => nr::SYS_{r.name.upper()}," for r in rows]
+    for r in enum_rows:
+        if r.nr(arch) is not None or (arch == "aarch64" and r.name in ("open", "dup2", "fork")):
+            out.append(f"            Sys::{r.variant} => nr::SYS_{r.name.upper()},")
+        else:
+            out.append(f"            Sys::{r.variant} => 0,")
     out += [
         "        }",
         "    }",
@@ -1106,12 +1176,16 @@ def render_user(table: Table) -> str:
         "    pub const fn args(self) -> &'static [&'static str] {",
         "        match self {",
     ]
-    for r in rows:
-        names = ", ".join(f'"{a.name}"' for a in r.args)
+    for r in enum_rows:
+        if arch == "aarch64" and r.aarch64_order != tuple(range(len(r.args))):
+            ordered = [r.args[i] for i in r.aarch64_order]
+        else:
+            ordered = list(r.args)
+        names = ", ".join(f'"{a.name}"' for a in ordered)
         out.append(f"            Sys::{r.variant} => &[{names}],")
     out += ["        }", "    }", "}"]
     for r in rows:
-        safety = user_safety(r)
+        safety = user_safety(r, arch)
         params = ", ".join(f"{a.name}: {user_type(a)}" for a in r.args)
         proto = f"`{r.name}({', '.join(c_decl(a) for a in r.args)})`"
         out.append("")
@@ -1140,18 +1214,59 @@ def render_user(table: Table) -> str:
                 "    // SAFETY: the kernel's `syscall` convention; the kernel writes through"
             )
             out.append("    // none of its pointers, established here by the table row.")
-        sc_args = [f"nr::SYS_{r.name.upper()}"] + [user_cast(a) for a in r.args]
-        one = rust_list("    result(unsafe { ", f"syscall{len(r.args)}(", sc_args, ")", " })")
+        if arch == "aarch64":
+            casts = [user_cast(r.args[i]) for i in r.aarch64_order]
+        else:
+            casts = [user_cast(a) for a in r.args]
+        sc_args = [f"nr::SYS_{r.name.upper()}"] + casts
+        one = rust_list("    result(unsafe { ", f"syscall{len(casts)}(", sc_args, ")", " })")
         if len(one) == 1:
             out += one
         else:
             out.append("    result(unsafe {")
-            out += rust_list("        ", f"syscall{len(r.args)}(", sc_args, ")", "")
+            out += rust_list("        ", f"syscall{len(casts)}(", sc_args, ")", "")
             out.append("    })")
         out.append("}")
-    out += render_calls(table, rows)
+    if arch == "aarch64":
+        out += render_aarch64_compat(table)
+    out += render_calls(table, call_rows, arch)
     out.append("")
     return "\n".join(out)
+
+
+def render_aarch64_compat(table: Table) -> list[str]:
+    """`open`/`dup2`/`fork` onto `openat`/`dup3`/`clone` (ROADMAP §11.6)."""
+    names = {r.name for r in table.rows}
+    out: list[str] = []
+    if "open" in names and "openat" in names:
+        out += [
+            "",
+            "/// `open` as `openat(AT_FDCWD, pathname, flags, mode)`.",
+            "pub fn open(pathname: *const u8, flags: i32, mode: u16) -> Result<usize, Errno> {",
+            "    openat(-100, pathname, flags, mode)",
+            "}",
+        ]
+    if "dup2" in names and "dup3" in names:
+        out += [
+            "",
+            "/// `dup2`: `dup3(oldfd, newfd, 0)`, or `fcntl(F_GETFD)` when equal.",
+            "pub fn dup2(oldfd: u32, newfd: u32) -> Result<usize, Errno> {",
+            "    if oldfd == newfd {",
+            "        fcntl(oldfd, 1, 0).map(|_| oldfd as usize)",
+            "    } else {",
+            "        dup3(oldfd, newfd, 0)",
+            "    }",
+            "}",
+        ]
+    if "fork" in names and "clone" in names:
+        out += [
+            "",
+            "/// `fork` as `clone(SIGCHLD, 0, …)`.",
+            "pub fn fork() -> Result<usize, Errno> {",
+            "    clone(17, 0, core::ptr::null_mut(), core::ptr::null_mut(), 0)",
+            "}",
+        ]
+    return out
 
 
 def rust_hex(v: int) -> str:
@@ -1160,7 +1275,7 @@ def rust_hex(v: int) -> str:
     return "0x" + "_".join(h[i : i + 4] for i in range(0, 16, 4))
 
 
-def render_calls(table: Table, rows: list[Row]) -> list[str]:
+def render_calls(table: Table, rows: list[Row], arch: str = "x86_64") -> list[str]:
     """`CALLS` and its types, for `/bin/tests`' matrices (ROADMAP §10.5)."""
     c = table.consts
     out = [
@@ -1218,7 +1333,7 @@ def render_calls(table: Table, rows: list[Row]) -> list[str]:
         "    pub ptrs: &'static [Ptr],",
         "}",
         "",
-        "/// Every row with an x86_64 number, in table order.",
+        f"/// Every row with a {arch} number, in table order.",
         "#[rustfmt::skip]",
         "pub const CALLS: &[Call] = &[",
     ]
@@ -1232,15 +1347,20 @@ def render_calls(table: Table, rows: list[Row]) -> list[str]:
             f"        ktest: &[{kt}],",
             "        ptrs: &[",
         ]
+        if arch == "aarch64":
+            reg_of = {arg: reg for reg, arg in enumerate(r.aarch64_order)}
+        else:
+            reg_of = {i: i for i in range(len(r.args))}
         for i, a in enumerate(r.args):
             if a.kind not in PTR_KINDS:
                 continue
             kind = a.kind[:1].upper() + a.kind[1:]
             len_from = f"Some({a.len_from})" if a.len_from >= 0 else "None"
+            size = a.size_aarch64 if arch == "aarch64" and a.size_aarch64 else a.size
             out.append(
-                f'            Ptr {{ arg: {i}, name: "{a.name}", kind: PtrKind::{kind}, '
+                f'            Ptr {{ arg: {reg_of[i]}, name: "{a.name}", kind: PtrKind::{kind}, '
                 f"out: {str(a.dir == 'out').lower()}, nullable: {str(a.nullable).lower()}, "
-                f"len_from: {len_from}, size: {a.size} }},"
+                f"len_from: {len_from}, size: {size} }},"
             )
         out += ["        ],", "    },"]
     out.append("];")
@@ -1314,7 +1434,8 @@ class Emitter:
 EMITTERS: list[Emitter] = [
     Emitter(KERNEL_OUT, render_kernel),
     Emitter(X86_OUT, render_x86),
-    Emitter(USER_OUT, render_user),
+    Emitter(USER_OUT, render_user_x86),
+    Emitter(USER_AARCH64_OUT, render_user_aarch64),
     Emitter(SYSCALL_MD, render_md, "syscall-table"),
     Emitter(SYSCALL_MD, render_errno_md, "errno-table"),
     Emitter(USER_ERRNO_OUT, render_user_errno),

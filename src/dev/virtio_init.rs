@@ -351,14 +351,15 @@ fn rng_work(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     harvest();
 }
 
-fn kick(doorbell: u64) {
+fn kick(doorbell: u64, qi: u16) {
     dma::dma_wmb::<Arch>();
-    // SAFETY: invariant I54: `doorbell` is queue 0's notify register inside
+    // SAFETY: invariant I54: `doorbell` is a queue's notify register inside
     // the notify capability's BAR, which `map_mmio` mapped uncached, checked
     // against the capability length by `virtio::notify_addr`; established by
-    // `pci_init::map_mmio`.
+    // `pci_init::map_mmio`. The store is that virtqueue's index
+    // (virtio 1.2 §§4.1.5.2, 4.2.2).
     unsafe {
-        core::ptr::write_volatile(doorbell as *mut u16, 0u16);
+        core::ptr::write_volatile(doorbell as *mut u16, virtio::queue_notify(qi));
     }
 }
 
@@ -715,7 +716,7 @@ pub fn rng_request() -> Result<(), VirtioError> {
     q.vq.publish();
     q.qdma.sync_for_device::<Arch>();
     if q.vq.should_kick(old) {
-        kick(q.doorbell);
+        kick(q.doorbell, 0);
     }
     // Release: pairs with the Acquire load above.
     IN_FLIGHT.store(true, Ordering::Release);

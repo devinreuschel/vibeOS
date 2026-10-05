@@ -158,6 +158,8 @@ pub struct MmioDev {
     pub size: u64,
     pub dma_coherent: bool,
     pub msi_parent: Option<u32>,
+    /// GIC INTID from the node's `interrupts` specifier; 0 if absent.
+    pub irq: u32,
 }
 
 /// What boot needs from firmware. No AML, no per-device `_CRS`.

@@ -183,11 +183,16 @@ impl GuardedStack {
     }
 }
 
-/// FXSAVE area. 16-byte aligned. Every thread starts from [`Fxsave::INITIAL`].
+/// FXSAVE area. 16-byte aligned. A new TCB starts from [`Fxsave::INITIAL`]
+/// on x86_64 and [`Fxsave::ZERO`] on aarch64.
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 pub struct Fxsave {
     pub bytes: [u8; 512],
+    /// aarch64 `FPCR`; unused on x86_64 (the FXSAVE image holds MXCSR).
+    pub fpcr: u32,
+    /// aarch64 `FPSR`; unused on x86_64.
+    pub fpsr: u32,
 }
 
 impl Fxsave {
@@ -197,7 +202,7 @@ impl Fxsave {
     /// exceptions masked, round to nearest) at bytes 24-27, every other
     /// byte zero: empty x87 tags, zeroed ST and XMM registers. `execve`,
     /// `spawn_user`, kernel-thread creation and `init_bootstrap` start a
-    /// thread from it (DESIGN §7.5).
+    /// thread from it on x86_64 (DESIGN §7.5).
     pub const INITIAL: Self = {
         let mut bytes = [0u8; 512];
         let fcw = 0x037Fu16.to_le_bytes();
@@ -208,7 +213,19 @@ impl Fxsave {
         bytes[25] = mxcsr[1];
         bytes[26] = mxcsr[2];
         bytes[27] = mxcsr[3];
-        Self { bytes }
+        Self {
+            bytes,
+            fpcr: 0,
+            fpsr: 0,
+        }
+    };
+
+    /// aarch64 initial user FP: V0–V31, FPCR, and FPSR all zero (ROADMAP
+    /// §11.6). x86_64 keeps [`INITIAL`].
+    pub const ZERO: Self = Self {
+        bytes: [0u8; 512],
+        fpcr: 0,
+        fpsr: 0,
     };
 }
 
@@ -328,6 +345,11 @@ pub struct Tcb {
     /// switch away from it and loaded by the switch to it, by its first
     /// entry, and by `execve`. Unused for a kernel thread (`pid` 0).
     pub user_segs: UserSegs,
+    /// User TLS base: `FS_BASE` on x86_64, `TPIDR_EL0` on aarch64
+    /// (DESIGN §7.5). `on_switch` saves the live register for an outgoing
+    /// user thread and loads this for an incoming one. A kernel thread
+    /// keeps 0.
+    pub tls_base: u64,
     /// Syscalls this thread has entered. Its own entry bumps it
     /// (`syscall_init::bump_counter`); other threads read it for the
     /// per-process sum (`thread_init::sum_syscalls`), so it is atomic. A
@@ -436,6 +458,7 @@ const _: () = {
     assert!(size_of::<CpuContext>() == 112);
     assert!(size_of::<ThreadId>() == 4);
     assert!(offset_of!(Tcb, fpu) % 16 == 0);
+    assert!(size_of::<Fxsave>() == 528);
 };
 
 /// One slot of the kernel's TCB table (`thread_init`'s `Sched.slots`): null,
@@ -481,9 +504,10 @@ const _: () = {
     assert!(offset_of!(Tcb, state) == 24);
     assert!(offset_of!(Tcb, context) == if DEBUG { 592 } else { 336 });
     // +40 for `CpuContext.extra`, then +8 so `fpu` stays 16-aligned.
-    assert!(size_of::<Tcb>() == if DEBUG { 1312 } else { 1056 });
+    // +8 `tls_base`, +16 `Fxsave` FPCR/FPSR tail, +8 so `align(16)` holds.
+    assert!(size_of::<Tcb>() == if DEBUG { 1344 } else { 1088 });
     assert!(offset_of!(Tcb, cpu) == if DEBUG { 720 } else { 464 });
-    assert!(offset_of!(Tcb, pid) == if DEBUG { 1304 } else { 1048 });
+    assert!(offset_of!(Tcb, pid) == if DEBUG { 1328 } else { 1072 });
     assert!(size_of::<CpuContext>() == 112);
     assert!(size_of::<TcbSlot>() == size_of::<usize>());
 };
@@ -544,6 +568,14 @@ mod tests {
         }
         assert_eq!(b[..2], [0x7F, 0x03]);
         assert_eq!(b[24..28], [0x80, 0x1F, 0, 0]);
+    }
+
+    #[test]
+    fn fxsave_zero_is_zero() {
+        let t = Fxsave::ZERO;
+        assert_eq!(t.bytes, [0u8; 512]);
+        assert_eq!(t.fpcr, 0);
+        assert_eq!(t.fpsr, 0);
     }
 
     #[test]

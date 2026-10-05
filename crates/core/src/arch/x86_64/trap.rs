@@ -88,6 +88,14 @@ impl UserFrame {
         f.orig_rax = u64::MAX;
         f
     }
+
+    /// A successful `execve`'s frame: [`new_user`] plus the syscall
+    /// number the exit is still returning from. `new_user` writes -1.
+    pub const fn exec_from(rip: u64, rsp: u64, nr: u64) -> Self {
+        let mut f = Self::new_user(rip, rsp);
+        f.orig_rax = nr;
+        f
+    }
 }
 
 /// Whether the syscall exit may leave `f` through `sysretq`, as Linux
@@ -321,6 +329,14 @@ mod tests {
         assert_eq!(f.ss, u64::from(USER_DS_RPL));
         assert_eq!(f.orig_rax, u64::MAX);
         assert_eq!((f.rax, f.rdi, f.r15), (0, 0, 0));
+    }
+
+    #[test]
+    fn exec_from_keeps_syscall_nr() {
+        let f = UserFrame::exec_from(0x40_0000, 0x7fff_f000, 59);
+        assert!(sysret_ok(&f));
+        assert_eq!(f.orig_rax, 59);
+        assert_eq!((f.rip, f.rcx, f.rsp), (0x40_0000, 0x40_0000, 0x7fff_f000));
     }
 
     #[test]

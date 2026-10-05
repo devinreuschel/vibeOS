@@ -1,7 +1,9 @@
 //! aarch64 trap decode: vector slot and `ESR_EL1` to a `TrapKind`
-//! (DESIGN §11.5). Compiles on every host.
+//! (DESIGN §11.5), and the user frame every entry from EL0 saves
+//! (DESIGN §5.10, ROADMAP §11.6). Compiles on every host.
 
-use crate::trap::{DebugCause, FpCause, FpUnit, PageFaultCause, TrapKind};
+use crate::proc::syscall_table::{self, Handlers, NrTable, SysResult};
+use crate::trap::{DebugCause, FpCause, FpUnit, PageFaultCause, SyscallAbi, TrapKind};
 
 /// Sixteen VBAR entries, 0x80 bytes apart. Index is `offset / 0x80`.
 pub const SLOT_CURRENT_SP0_SYNC: u8 = 0;
@@ -85,6 +87,109 @@ const fn decode_abort(iss: u32, fetch: bool) -> TrapKind {
         write,
         fetch,
     })
+}
+
+/// An EL0 register frame: Linux's `struct user_pt_regs`
+/// (`arch/arm64/include/uapi/asm/ptrace.h`: `x0`-`x30`, `sp` from SP_EL0,
+/// `pc` from ELR_EL1, `pstate` from SPSR_EL1), then `orig_x0` and the
+/// syscall number, -1 on an entry that is not a syscall (DESIGN §5.10).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserFrame {
+    pub x: [u64; 31],
+    pub sp: u64,
+    pub pc: u64,
+    pub pstate: u64,
+    pub orig_x0: u64,
+    pub syscallno: u64,
+}
+
+/// EL0t, DAIF clear: `SPSR_EL1` M[3:0] = 0.
+const PSTATE_EL0T: u64 = 0;
+
+impl UserFrame {
+    pub const fn zeroed() -> Self {
+        Self {
+            x: [0; 31],
+            sp: 0,
+            pc: 0,
+            pstate: 0,
+            orig_x0: 0,
+            syscallno: 0,
+        }
+    }
+
+    /// A new program's first frame: GPRs zero, EL0t, DAIF clear, and
+    /// `syscallno` = -1 so the first `eret` is not a restart.
+    pub const fn new_user(pc: u64, sp: u64) -> Self {
+        let mut f = Self::zeroed();
+        f.pc = pc;
+        f.sp = sp;
+        f.pstate = PSTATE_EL0T;
+        f.syscallno = u64::MAX;
+        f
+    }
+
+    /// A successful `execve`'s frame: [`new_user`] plus the syscall
+    /// number the exit is still returning from. `new_user` writes -1.
+    pub const fn exec_from(pc: u64, sp: u64, nr: u64) -> Self {
+        let mut f = Self::new_user(pc, sp);
+        f.syscallno = nr;
+        f
+    }
+}
+
+/// The aarch64 Linux syscall ABI over [`UserFrame`]: number in the low
+/// 32 bits of `x8` as Linux's `invoke_syscall` reads it, args `x0`-`x5`,
+/// result in `x0`. `svc #0` is four bytes.
+pub struct Abi;
+
+impl SyscallAbi for Abi {
+    type Frame = UserFrame;
+
+    fn nr(f: &UserFrame) -> u64 {
+        f.syscallno
+    }
+
+    fn arg(f: &UserFrame, i: usize) -> u64 {
+        match i {
+            0..=5 => f.x[i],
+            _ => 0,
+        }
+    }
+
+    fn set_ret(f: &mut UserFrame, v: u64) {
+        f.x[0] = v;
+    }
+
+    fn ip(f: &UserFrame) -> u64 {
+        f.pc
+    }
+
+    fn set_ip(f: &mut UserFrame, v: u64) {
+        f.pc = v;
+    }
+
+    fn sp(f: &UserFrame) -> u64 {
+        f.sp
+    }
+
+    fn set_sp(f: &mut UserFrame, v: u64) {
+        f.sp = v;
+    }
+
+    fn table() -> &'static NrTable {
+        &syscall_table::aarch64::TABLE
+    }
+
+    fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
+        syscall_table::aarch64::dispatch(h, raw_nr, regs)
+    }
+
+    fn restart(f: &mut UserFrame) {
+        f.x[0] = f.orig_x0;
+        f.pc = f.pc.wrapping_sub(4);
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +326,54 @@ mod tests {
         for slot in 0u8..16 {
             let _ = decode(slot, 0);
         }
+    }
+
+    #[test]
+    fn user_pt_regs_layout_is_linux() {
+        use core::mem::{offset_of, size_of};
+        // `arch/arm64/include/uapi/asm/ptrace.h` `user_pt_regs`, then
+        // `orig_x0` and the syscall number (DESIGN §5.10).
+        assert_eq!(size_of::<UserFrame>(), 288);
+        assert_eq!(offset_of!(UserFrame, x), 0);
+        assert_eq!(offset_of!(UserFrame, sp), 248);
+        assert_eq!(offset_of!(UserFrame, pc), 256);
+        assert_eq!(offset_of!(UserFrame, pstate), 264);
+        assert_eq!(offset_of!(UserFrame, orig_x0), 272);
+        assert_eq!(offset_of!(UserFrame, syscallno), 280);
+        let f = UserFrame::new_user(0x40_0000, 0x7fff_f000);
+        assert_eq!((f.pc, f.sp, f.pstate), (0x40_0000, 0x7fff_f000, 0));
+        assert_eq!(f.syscallno, u64::MAX);
+        assert_eq!(f.x[0], 0);
+        let e = UserFrame::exec_from(0x40_0000, 0x7fff_f000, 221);
+        assert_eq!(
+            (e.pc, e.sp, e.pstate, e.syscallno),
+            (0x40_0000, 0x7fff_f000, 0, 221)
+        );
+        let mut r = f;
+        r.orig_x0 = 7;
+        r.pc = 0x40_1004;
+        Abi::restart(&mut r);
+        assert_eq!(r.x[0], 7);
+        assert_eq!(r.pc, 0x40_1000);
+        assert_eq!(Abi::nr(&UserFrame { syscallno: 64, ..f }), 64);
+        assert_eq!(
+            Abi::arg(
+                &UserFrame {
+                    x: {
+                        let mut x = [0; 31];
+                        x[0] = 1;
+                        x[1] = 2;
+                        x[5] = 6;
+                        x
+                    },
+                    ..f
+                },
+                5
+            ),
+            6
+        );
+        let mut ret = f;
+        Abi::set_ret(&mut ret, 9);
+        assert_eq!(ret.x[0], 9);
     }
 }

@@ -125,7 +125,7 @@ fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
 /// RAM-typed range of the boot memory map, checked before anything is
 /// mapped (DESIGN §12.3 rule 8). Reached only from [`map_bar`], through a
 /// live claim (invariant I58), from `ecam_va`, and from the in-guest tests.
-pub(super) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
+pub(crate) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     if phys == 0 || len == 0 {
         return None;
     }
@@ -169,6 +169,17 @@ pub fn map_bar(claim: &BarClaim) -> Option<u64> {
 /// `va` is what `map_bar(claim)` returned, and nothing touches it any
 /// more: the driver has stopped its device and dropped every copy of it.
 pub unsafe fn unmap_bar(claim: &BarClaim, va: u64) {
+    // SAFETY: `va` is what `map_bar(claim)` returned and nothing touches
+    // it; established by here.
+    unsafe { unmap_mmio(va, claim.len()) };
+}
+
+/// Unmap `[va, va+len)` from the ioremap window. Same contract as
+/// [`unmap_bar`].
+///
+/// # Safety
+/// `va` is an ioremap VA for `len` bytes, and nothing touches it.
+pub unsafe fn unmap_mmio(va: u64, len: u64) {
     let window = IOREMAP_BASE..IOREMAP_BASE.saturating_add(IOREMAP_LEN);
     if !window.contains(&va) {
         return;
@@ -176,7 +187,7 @@ pub unsafe fn unmap_bar(claim: &BarClaim, va: u64) {
     let start = va & !(PAGE_SIZE_4K - 1);
     let head = va - start;
     let Some(end) = head
-        .checked_add(claim.len())
+        .checked_add(len)
         .and_then(|l| l.checked_add(PAGE_SIZE_4K - 1))
         .map(|l| start.saturating_add(l & !(PAGE_SIZE_4K - 1)))
     else {
@@ -189,7 +200,7 @@ pub unsafe fn unmap_bar(claim: &BarClaim, va: u64) {
             // SAFETY: `unmap_4k_locked`'s contract: nothing uses the BAR's
             // VA any more (this fn's `# Safety` contract), and the
             // shootdown below runs before this fn returns; established by
-            // `pci_init::unmap_bar`.
+            // `pci_init::unmap_mmio`.
             let step = match unsafe { paging_init::unmap_4k_locked(pt, VirtAddr(v)) } {
                 Some((_, size)) => size.bytes(),
                 None => PAGE_SIZE_4K,

@@ -301,6 +301,33 @@ class TestSeam(ArchTest):
         self.assertIn("src/arch/x86_64/new.rs", errs[0])
 
 
+class TestSkips(ArchTest):
+    def test_aarch64_row_needs_counterpart_or_reason(self) -> None:
+        self.t.write(
+            "tests/harness/skips.toml",
+            '[[skip]]\nname = "ac_clear_user_popf"\nreason = "x"\narch = "aarch64"\n',
+        )
+        errs = [e for e in self.t.errors() if ": skips:" in e]
+        self.assertTrue(errs, self.t.errors())
+        self.assertIn("neither counterpart nor no_counterpart", errs[0])
+
+    def test_aarch64_row_with_counterpart_passes(self) -> None:
+        self.t.write(
+            "tests/harness/skips.toml",
+            '[[skip]]\nname = "ist_gs_sign"\nreason = "no swapgs"\n'
+            'arch = "aarch64"\ncounterpart = "el0_svc_eret"\n',
+        )
+        self.assertEqual([e for e in self.t.errors() if ": skips:" in e], [])
+
+    def test_aarch64_row_with_no_counterpart_passes(self) -> None:
+        self.t.write(
+            "tests/harness/skips.toml",
+            '[[skip]]\nname = "ac_clear_user_popf"\nreason = "EL0 cannot write PAN"\n'
+            'arch = "aarch64"\nno_counterpart = "EL0 cannot write PAN"\n',
+        )
+        self.assertEqual([e for e in self.t.errors() if ": skips:" in e], [])
+
+
 class TestRepo(unittest.TestCase):
     def test_repo_passes(self) -> None:
         self.assertEqual(check(), [])

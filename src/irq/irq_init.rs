@@ -81,13 +81,6 @@ static VEC_TO_IRQ: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
 #[derive(Clone, Copy)]
 enum Route {
     None,
-    #[cfg_attr(
-        not(feature = "kernel_tests"),
-        expect(
-            dead_code,
-            reason = "ROADMAP §6.3 legacy INTx fallback; only the in-guest tests route one yet"
-        )
-    )]
     IoApic {
         gsi: u32,
     },
@@ -308,6 +301,9 @@ pub fn dispatch_intid(intid: u32) {
             });
             drop(ctx);
         }
+    } else if let Some(c) = crate::arch::aarch64::gic::chip() {
+        // No IrqId: a level SPI would re-pend after EOI forever.
+        c.mask(intid);
     }
     hardirq::set(false);
 }
@@ -446,13 +442,6 @@ pub fn allocate(cpu: u32) -> Result<IrqId, IrqError> {
 
 /// Map a firmware specifier. Leaves an I/O APIC route masked until
 /// [`set_handler`] or [`set_threaded`].
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "ROADMAP §6.3 legacy INTx fallback; only the in-guest tests map a GSI yet"
-    )
-)]
 pub fn map_wired(spec: IrqSpecifier) -> Result<IrqId, IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);

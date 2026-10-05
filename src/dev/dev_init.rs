@@ -124,10 +124,6 @@ pub fn find_bdf(bdf: Bdf) -> Option<DevRef> {
         reason = "only the in-guest tests look a device up by id yet"
     )
 )]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub fn find_id(vendor: u16, device: u16) -> Option<DevRef> {
     let mut i = 0usize;
     while let Some(d) = get(i) {
@@ -146,10 +142,6 @@ pub fn find_id(vendor: u16, device: u16) -> Option<DevRef> {
         dead_code,
         reason = "only the in-guest tests read a device's state until ROADMAP §20.9's removal"
     )
-)]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn state(dev: &DevRef) -> Option<DevState> {
     REG.lock().state(dev)

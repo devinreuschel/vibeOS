@@ -372,8 +372,9 @@ def _send_monitor_quit(sock_path: str) -> None:
 def sendkey_chars(s: str) -> str:
     """QEMU `sendkey` chord for lowercase letters, digits, space, minus.
 
-    Window keyboard and monitor sendkey both go through the i8042. This
-    is the TCG stand-in for typing in the QEMU window (DESIGN §3.6 / #66).
+    Window keyboard and monitor sendkey go through the i8042 on x86_64
+    and through virtio-keyboard on aarch64 virt (ROADMAP §11.1 / #207).
+    This is the TCG stand-in for typing in the QEMU window (DESIGN §3.6 / #66).
     """
     parts: list[str] = []
     for c in s:
@@ -1069,17 +1070,31 @@ def ktest_devices(
     readonly: bool = False,
     blkdebug: str | None = None,
     arch: str = "x86_64",
+    mmio_disk: str | None = None,
 ) -> tuple[str, ...]:
     """The in-guest registry's devices: `disk` is `vda`, and each of
     `extra_disks` a further virtio-blk disk after it. A second virtio-rng
     sits at `00:1d.0`, and a virtio-blk whose probe fails at `00:1e.0`.
-    `readonly` and `blkdebug` go to `virtio_blk_args` for `vda`.
-    aarch64 has no `isa-debug-exit`; pass is PSCI `SYSTEM_OFF`."""
+    x86 also attaches `virtio-keyboard-pci` and `virtio-tablet-pci`
+    (aarch64 already has them on every boot). `readonly` and `blkdebug`
+    go to `virtio_blk_args` for `vda`. aarch64 has no `isa-debug-exit`;
+    pass is PSCI `SYSTEM_OFF`. `mmio_disk` is the virtio-mmio
+    `virtio-blk-device` image (F047); it must be a different file from
+    `disk` (QEMU write-locks the image)."""
     isa = (
         ()
         if arch == "aarch64"
         else ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
     )
+    mmio_blk: tuple[str, ...] = ()
+    if arch == "aarch64" and mmio_disk is not None:
+        # virtio-mmio F047: QueueNotify takes the virtqueue index.
+        mmio_blk = (
+            "-drive",
+            f"file={mmio_disk},if=none,id=vibehdmmio,format=raw,cache=writeback",
+            "-device",
+            f"virtio-blk-device,drive=vibehdmmio,num-queues={smp}",
+        )
     return isa + (
         "-device",
         "e1000e",
@@ -1091,9 +1106,19 @@ def ktest_devices(
         # which the driver refuses (`dev::ktest::SPARE_RNG_BDF`).
         "-device",
         "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+    ) + (
+        ()
+        if arch == "aarch64"
+        else (
+            # aarch64 already attaches both through AARCH64_FORENSICS.
+            "-device",
+            "virtio-keyboard-pci,disable-legacy=on",
+            "-device",
+            "virtio-tablet-pci,disable-legacy=on",
+        )
     ) + virtio_blk_args(
         disk, smp, extra=extra_disks, readonly=readonly, blkdebug=blkdebug
-    ) + (
+    ) + mmio_blk + (
         # A virtio-blk function in a high slot whose probe the kernel_tests
         # hook fails after QENABLE (`dev::ktest::PROBE_BLK_BDF`).
         "-blockdev",
@@ -1481,6 +1506,10 @@ def _qemu_argv_aarch64(
     argv = [
         qemu_system("aarch64"),
         "-machine", f"virt,acpi=off,gic-version={cfg.gic_version}",
+        # QEMU 8.2 `virt` builds virtio-mmio with force-legacy=on
+        # (Version=1). Firecracker and virtio 1.2 §4.2 are Version=2;
+        # ROADMAP §11.5 F047 needs QueueNotify to take the queue index.
+        "-global", "virtio-mmio.force-legacy=off",
         "-m", cfg.mem,
         "-smp", str(cfg.smp),
         "-cpu", _aarch64_cpu(cfg),
@@ -1978,6 +2007,17 @@ def run_qemu_inject_mce(
 
 SERIAL_ECHO_TOKEN = "serial-ok"
 PS2_ECHO_TOKEN = "ps2-ok"
+KBD_ECHO_TOKEN = "kbd-ok"
+
+
+def kbd_echo_token(arch: str) -> str:
+    """The second echo token: PS/2 on x86_64, virtio-keyboard on aarch64."""
+    return KBD_ECHO_TOKEN if arch == "aarch64" else PS2_ECHO_TOKEN
+
+
+def kbd_echo_name(arch: str) -> str:
+    """`RunResult.matched` name for the sendkey echo."""
+    return "kbd_echo" if arch == "aarch64" else "ps2_echo"
 SHELL_READY_NEEDLE = "vibeOS: shell ready"
 # `/bin/sh`'s fd-2 line for `false` (ROADMAP §10.5): `/bin/false` found
 # through `PATH`, and its exit status reported.
@@ -2118,17 +2158,19 @@ def run_qemu_console_input(
 ) -> RunResult:
     """Boot, then type into `/bin/sh` via COM1 and via PS/2 (`sendkey`).
 
-    In order: `echo serial-ok` on COM1 must print `serial-ok` (`/bin/echo`,
-    found through `PATH`); `false` must print `SH_STATUS_LINE`; `ps` must
-    print pid 1's line; `echo ps2-ok` typed through PS/2 must print
-    `ps2-ok`. Then serial is read for `CONSOLE_TAIL_S`, and the shell's
-    `sh_power_command` must make QEMU exit with status 0 within
-    `SH_POWER_EXIT_S`. `result.matched` gains `shell_ready`, `serial_echo`,
-    `sh_status`, `sh_ps`, `ps2_echo`, `sh_poweroff` or `sh_reboot`, and
-    `console_input_sh` last.
+    In order: `echo serial-ok` on COM1 (PL011 on aarch64) must print
+    `serial-ok` (`/bin/echo`, found through `PATH`); `false` must print
+    `SH_STATUS_LINE`; `ps` must print pid 1's line; `echo ps2-ok` typed
+    through PS/2, or `echo kbd-ok` through virtio-keyboard on aarch64,
+    must print that token. Then serial is read for `CONSOLE_TAIL_S`, and
+    the shell's `sh_power_command` must make QEMU exit with status 0
+    within `SH_POWER_EXIT_S`. `result.matched` gains `shell_ready`,
+    `serial_echo`, `sh_status`, `sh_ps`, `ps2_echo` or `kbd_echo`,
+    `sh_poweroff` or `sh_reboot`, and `console_input_sh` last.
 
-    `-display none` still has an i8042; QEMU `sendkey` injects set-1
-    scancodes on IRQ1, the same path as a focused QEMU window.
+    `-display none` still has an i8042 on x86_64; QEMU `sendkey` injects
+    set-1 scancodes on IRQ1, the same path as a focused QEMU window. On
+    aarch64 virt it injects evdev keys into virtio-keyboard.
     `line_source` and `qmp` replace QEMU as in `run_qemu_and_check`, and
     QMP drives the run the same way (`qmp.Session`).
 
@@ -2176,6 +2218,8 @@ def run_qemu_console_input(
             return f"console input: missing {SH_STATUS_LINE!r} after `false`{report}"
         if not saw_ps:
             return f"console input: missing pid 1's `ps` line '1 0 ...'{report}"
+        if cfg.arch == "aarch64":
+            return f"console input: virtio-keyboard sendkey echo missing{report}"
         return f"console input: PS/2 sendkey echo missing (i8042){report}"
 
     try:
@@ -2231,11 +2275,13 @@ def run_qemu_console_input(
             if saw_status and not saw_ps and is_pid1_ps_line(reply):
                 saw_ps = True
                 result.matched.append("sh_ps")
-                src.monitor("sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n"))
+                src.monitor(
+                    "sendkey " + sendkey_chars(f"echo {kbd_echo_token(cfg.arch)}\n")
+                )
                 continue
-            if saw_ps and not saw_ps2 and reply == PS2_ECHO_TOKEN:
+            if saw_ps and not saw_ps2 and reply == kbd_echo_token(cfg.arch):
                 saw_ps2 = True
-                result.matched.append("ps2_echo")
+                result.matched.append(kbd_echo_name(cfg.arch))
                 # A later reply step goes before the tail.
                 _console_tail(
                     session, src, result, argv, panic_signatures, CONSOLE_TAIL_S, stream

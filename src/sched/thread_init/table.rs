@@ -14,7 +14,7 @@ pub fn init_tables() -> Result<(), AllocError> {
     let places = limits::table(MAX_THREADS, || (0, ThreadId::NONE, 0))?;
     let timeouts = TimeoutQueue::try_new(MAX_THREADS)?;
     let tids = limits::table(MAX_THREADS, || AtomicU32::new(u32::MAX))?;
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     testing::init_tables()?;
     // SAFETY: `BootCell::set`'s contract: this is its one write, on the BSP
     // before `smp: done` and before any thread is bound (so no reader of

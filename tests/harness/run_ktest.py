@@ -48,6 +48,23 @@ DISK_BYTES = 4 * 1024 * 1024
 # `block_two_disk_instances`.
 DISK2_BYTES = 1 * 1024 * 1024
 
+
+def mmio_disk(arch: str) -> str | None:
+    """A second raw image for aarch64 virtio-mmio (F047), or None."""
+    if arch != "aarch64":
+        return None
+    return make_disk(DISK_BYTES, "vibeos-vblk-mmio-")
+
+
+def unlink_disks(*paths: str | None) -> None:
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
 # `serial_lines_whole` (ROADMAP §10.2, F138): CPU 0 prints SERIAL_WHOLE_N
 # numbered lines while every AP prints noise lines; each ends in SERIAL_PAD.
 SERIAL_WHOLE_OK = "vibeOS: ktest: ok serial_lines_whole"
@@ -510,9 +527,10 @@ def _proof_boot(
         env, ktest=ktest, ktest_repeat=repeat, cmdline=f"{env.cmdline} {cmdline}".strip()
     )
     disk = make_disk(DISK_BYTES, "vibeos-vblk-") if devices is None else None
+    mmio = mmio_disk(env.arch) if devices is None else None
     try:
         extra = (
-            ktest_devices(disk, env.smp, arch=env.arch)
+            ktest_devices(disk, env.smp, arch=env.arch, mmio_disk=mmio)
             if disk is not None
             else devices or ()
         )
@@ -527,11 +545,7 @@ def _proof_boot(
             parts=devices is None,
         )
     finally:
-        if disk is not None:
-            try:
-                os.unlink(disk)
-            except OSError:
-                pass
+        unlink_disks(disk, mmio)
     print(f"[ktest] {label}:", file=sys.stderr)
     print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
     return raw
@@ -630,15 +644,15 @@ def _vblk_readonly_boot(env: EnvConfig) -> None:
     """`vblk_readonly` alone on a `readonly=on` pattern image: a write
     and a discard fail with `ReadOnly`, and reads go on."""
     disk = make_pattern_disk(DISK_BYTES, "vibeos-vblk-ro-")
+    mmio = mmio_disk(env.arch)
     try:
-        devices = ktest_devices(disk, env.smp, readonly=True, arch=env.arch)
+        devices = ktest_devices(
+            disk, env.smp, readonly=True, arch=env.arch, mmio_disk=mmio
+        )
         raw = _single_test_boot(env, VBLK_READONLY_TEST, "vblk readonly", devices=devices)
         check_select_run(raw.lines, {VBLK_READONLY_TEST: 1}, ())
     finally:
-        try:
-            os.unlink(disk)
-        except OSError:
-            pass
+        unlink_disks(disk, mmio)
 
 
 VBLK_BAD_SECTOR_TEST = "vblk_bad_sector"
@@ -656,9 +670,12 @@ def _vblk_bad_sector_boot(env: EnvConfig) -> None:
     return `EIO` to ring 3."""
     disk = make_pattern_disk(DISK_BYTES, "vibeos-vblk-bad-")
     conf = None
+    mmio = mmio_disk(env.arch)
     try:
         conf = write_blkdebug_config(VBLK_BAD_SECTOR, "vibeos-blkdebug-")
-        devices = ktest_devices(disk, env.smp, blkdebug=conf, arch=env.arch)
+        devices = ktest_devices(
+            disk, env.smp, blkdebug=conf, arch=env.arch, mmio_disk=mmio
+        )
         raw = _single_test_boot(
             env,
             f"{VBLK_BAD_SECTOR_TEST},{FAT_BAD_SECTOR_TEST}",
@@ -667,13 +684,7 @@ def _vblk_bad_sector_boot(env: EnvConfig) -> None:
         )
         check_select_run(raw.lines, {VBLK_BAD_SECTOR_TEST: 1, FAT_BAD_SECTOR_TEST: 1}, ())
     finally:
-        for path in (disk, conf):
-            if path is None:
-                continue
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        unlink_disks(disk, conf, mmio)
 
 
 def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
@@ -732,10 +743,11 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
     `check_deadline_trip` checks them."""
     penv = dataclasses.replace(env, ktest=TRIP_TEST, ktest_repeat=None)
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+    mmio = mmio_disk(env.arch)
     try:
         # The trip panics on purpose: QMP's `GUEST_PANICKED` ends it too.
         cfg = penv.qemu(
-            extra=ktest_devices(disk, env.smp, arch=env.arch),
+            extra=ktest_devices(disk, env.smp, arch=env.arch, mmio_disk=mmio),
             boot_order="d",
             expect="panic",
         )
@@ -755,10 +767,7 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
             _record("ktest_deadline_trip", False)
             raise
     finally:
-        try:
-            os.unlink(disk)
-        except OSError:
-            pass
+        unlink_disks(disk, mmio)
     _record("ktest_deadline_trip", True)
     print(f"[ktest] deadline trip: {TRIP_TEST} failed on its deadline", file=sys.stderr)
 
@@ -772,13 +781,17 @@ HPET_OFF_KTEST: tuple[str, ...] = ("pit_tick_rate", "clocksource_if_off_50ms", "
 NO_TSC_DEADLINE = "-tsc-deadline"
 
 
-def hpet_off_config(env: EnvConfig, disk: str) -> QemuConfig:
+def hpet_off_config(
+    env: EnvConfig, disk: str, *, mmio_disk: str | None = None
+) -> QemuConfig:
     """The hpet=off boot: `-machine pc,hpet=off`, `-cpu <model>,-tsc-deadline`
     (the KVM leg's model offers TSC-deadline, which takes the tick without an
     HPET), and `vibeos.ktest=` set to `HPET_OFF_KTEST`, which overrides
     `VIBEOS_KTEST` and keeps `VIBEOS_KTEST_REPEAT`."""
     cfg = env.qemu(
-        extra=ktest_devices(disk, env.smp, arch=env.arch), hpet=False, boot_order="d"
+        extra=ktest_devices(disk, env.smp, arch=env.arch, mmio_disk=mmio_disk),
+        hpet=False,
+        boot_order="d",
     )
     parts = [p.strip() for p in cfg.cpu.split(",")]
     cpu = cfg.cpu if NO_TSC_DEADLINE in parts else f"{cfg.cpu},{NO_TSC_DEADLINE}"
@@ -825,8 +838,9 @@ def hpet_off_boot(env: EnvConfig) -> None:
     `_ktest_boot`'s allowance; recorded in the results file, then checked
     by `check_hpet_off_boot`."""
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+    mmio = mmio_disk(env.arch)
     try:
-        cfg = hpet_off_config(env, disk)
+        cfg = hpet_off_config(env, disk, mmio_disk=mmio)
         raw = run_qemu_until_exit(
             cfg,
             timeout_s=env.timeout,
@@ -836,10 +850,7 @@ def hpet_off_boot(env: EnvConfig) -> None:
         results.current().record_ktest_lines(frame.kernel_lines(raw.lines))
         check_hpet_off_boot(raw.lines, raw.exit_code, cfg)
     finally:
-        try:
-            os.unlink(disk)
-        except OSError:
-            pass
+        unlink_disks(disk, mmio)
     print("[ktest] hpet=off boot:", file=sys.stderr)
     print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
 
@@ -900,9 +911,12 @@ def main_boot(env: EnvConfig, range_word: str | None) -> int:
     skip_persist = env_flag("VIBEOS_SKIP_PERSIST")
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     disk2 = make_disk(DISK2_BYTES, "vibeos-vblk2-")
+    mmio = mmio_disk(env.arch)
     try:
         cfg = menv.qemu(
-            extra=ktest_devices(disk, env.smp, extra_disks=(disk2,), arch=env.arch),
+            extra=ktest_devices(
+                disk, env.smp, extra_disks=(disk2,), arch=env.arch, mmio_disk=mmio
+            ),
             boot_order="d",
         )
         try:
@@ -929,11 +943,7 @@ def main_boot(env: EnvConfig, range_word: str | None) -> int:
                 return 1
             print("[ktest] persist reboot: intact", file=sys.stderr)
     finally:
-        for path in (disk, disk2):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        unlink_disks(disk, disk2, mmio)
     return 0
 
 

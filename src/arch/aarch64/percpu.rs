@@ -33,8 +33,26 @@ pub fn is_live() -> bool {
 }
 
 pub(crate) fn mark_live() {
+    // SAFETY: before `smp: done` this CPU is the only writer; `SP_EL0`
+    // holds `current`, null until `set_current_thread` (ROADMAP §11.6).
+    // established here.
+    unsafe { write_sp_el0(0) };
     // Release: pairs with the Acquire load in `is_live`.
     LIVE.store(true, Ordering::Release);
+}
+
+/// Write `SP_EL0` with the current TCB pointer (or 0).
+///
+/// # Safety
+/// `v` is 0 or this CPU's live TCB. Only `set_current_thread` and
+/// `mark_live` write it; EL0 entry overwrites `SP_EL0` from
+/// `PerCpu.current` after saving the user SP.
+#[inline(always)]
+pub unsafe fn write_sp_el0(v: u64) {
+    // SAFETY: this fn's `# Safety` (here).
+    unsafe {
+        asm!("msr sp_el0, {0}", in(reg) v, options(nomem, nostack, preserves_flags));
+    }
 }
 
 fn tpidr() -> u64 {
@@ -56,13 +74,12 @@ pub fn current_tcb() -> *mut Tcb {
     if !is_live() {
         return core::ptr::null_mut();
     }
-    let base = tpidr();
-    if base == 0 {
-        return core::ptr::null_mut();
-    }
-    // SAFETY: `base` is this CPU's `PerCpu` (I4); `current` is a pointer
-    // field at `CURRENT_OFFSET`. established here.
-    unsafe { ((base as *const u8).add(CURRENT_OFFSET) as *const *mut Tcb).read() }
+    let v: u64;
+    // SAFETY: I4 and ROADMAP §11.6: after `mark_live`, `SP_EL0` holds this
+    // CPU's current TCB (or 0); `set_current_thread` and EL0 entry write
+    // it. established by `smp::per_cpu_init::set_current_thread`.
+    unsafe { asm!("mrs {0}, sp_el0", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v as *mut Tcb
 }
 
 #[inline(always)]

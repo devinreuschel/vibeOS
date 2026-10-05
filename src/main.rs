@@ -100,8 +100,8 @@ use block::{block_init, cache_init, part_init};
 use console::kbd_init;
 use console::{console_init, fb_init};
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
-use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init};
-use drivers::virtio_blk_init;
+use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init, virtio_mmio_init};
+use drivers::{virtio_blk_init, virtio_input_init};
 use fs::{fat_init, file_init, fs_init, vibefs_init};
 use irq::{ipi_init, irq_init};
 use log::{diag, log_init, panic, serial};
@@ -435,9 +435,11 @@ extern "C" fn boot_rest() -> ! {
     // Phase 6 slice A: scan → list → bind. Marker before `shell ready`
     // so lspci is available once the shell thread runs.
     crate::pci_init::init(crate::dev_init::push);
+    crate::virtio_mmio_init::publish();
     crate::work_init::init();
     crate::virtio_init::init();
     crate::virtio_blk_init::init();
+    crate::virtio_input_init::init();
     crate::dev_init::init();
     crate::entropy_init::init();
     crate::block_init::init();
@@ -447,7 +449,7 @@ extern "C" fn boot_rest() -> ! {
 
     // ROADMAP §10.6: `/hello` runs as a process the kernel spawns and
     // waits for. Diagnostic only, not a `vibeOS:` marker.
-    #[cfg(all(not(feature = "vibefs_crash"), target_arch = "x86_64"))]
+    #[cfg(not(feature = "vibefs_crash"))]
     {
         use crate::serial::Serial;
         use core::fmt::Write;

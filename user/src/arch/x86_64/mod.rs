@@ -4,10 +4,12 @@
 //! stack). A system call takes its number in RAX and its arguments in RDI,
 //! RSI, RDX, R10, R8 and R9, returns in RAX, and clobbers RCX and R11.
 
+pub mod env;
 pub mod fp;
 pub mod stat;
 pub mod sys;
 
+pub use env::user_env;
 pub use fp::{FpState, fp_syscall, initial_fp, is_initial};
 
 use core::arch::{asm, naked_asm};

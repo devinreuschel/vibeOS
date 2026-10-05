@@ -777,6 +777,7 @@ fn init_aarch64() {
     #[cfg(feature = "kernel_tests")]
     arm_stall_from_cmdline();
     arch::aarch64::cpu::apply_computed_sysregs();
+    arch::aarch64::cpu::set_pan();
     arch::aarch64::cpu::release_debug_os_lock();
     let Some(entry) = arch::aarch64::secondary::entry_pa() else {
         crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: no secondary entry");
@@ -1056,12 +1057,19 @@ fn finish_aarch64_failure(
 #[cfg(target_arch = "aarch64")]
 extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     arch::aarch64::cpu::cli();
+    arch::aarch64::cpu::set_pan();
     // SAFETY: `cpu` is this AP's slot; the BSP's `with_cpu` ended before
     // CPU_ON (I43, I21, established at `smp_init::start_one_aarch64`).
     let cpu = unsafe { &mut *cpu };
     // SAFETY: this CPU's `PerCpu`, IRQs masked. established here.
     unsafe { per_cpu_init::install_gs(cpu) };
+    // BSP published this CPU's idle TCB before CPU_ON; `SP_EL0` is this
+    // CPU's and still 0 (`mark_live` ran on the BSP).
+    per_cpu_init::set_current_thread(cpu, cpu.idle);
     arch::aarch64::vectors::load();
+    // SAFETY: VBAR is live; `crate::syscall_init::init_ap` writes this
+    // CPU's empty TTBR0; established here.
+    unsafe { crate::syscall_init::init_ap(core::ptr::null(), 0) };
     arch::aarch64::cpu::release_debug_os_lock();
     arch::aarch64::cpu::print_exception_level();
     // SAFETY: this CPU's GIC; IRQs masked. established here.

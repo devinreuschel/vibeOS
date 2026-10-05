@@ -14,6 +14,7 @@ use super::{
     MsiMapEntry, PciHost, PhysRange, TimerDesc, push_console, push_cpu, push_irq, push_pci,
     push_reserved, push_timer, push_virtio,
 };
+use crate::irq::gic::gic_intid;
 
 /// FDT magic (`dt_spec` v0.4 §5.2).
 const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -163,6 +164,17 @@ fn str_at(strings: &[u8], off: u32) -> Option<&[u8]> {
 fn cell(val: &[u8], i: usize) -> Option<u32> {
     let off = i.checked_mul(4)?;
     be_u32(val, off)
+}
+
+/// First GIC INTID from a 3-cell `interrupts` specifier, or 0.
+fn first_gic_intid(props: &[Prop<'_>]) -> u32 {
+    prop_named(props, b"interrupts")
+        .and_then(|v| {
+            let ty = cell(v, 0)?;
+            let num = cell(v, 1)?;
+            gic_intid(ty, num)
+        })
+        .unwrap_or(0)
 }
 
 fn addr_cells(val: &[u8], start: usize, ncells: u32) -> Option<u64> {
@@ -522,6 +534,7 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
             size: r.size,
             dma_coherent: dma,
             msi_parent,
+            irq: first_gic_intid(props),
         });
     }
 
@@ -533,6 +546,7 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
             size: r.size,
             dma_coherent: dma,
             msi_parent,
+            irq: first_gic_intid(props),
         });
     }
 
@@ -547,6 +561,7 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
                 size: r.size,
                 dma_coherent: dma,
                 msi_parent,
+                irq: first_gic_intid(props),
             },
         );
     }
@@ -775,6 +790,7 @@ mod tests {
     const VIRT_CUR: &[u8] = include_bytes!("testdata/virt-current.dtb");
     const RESERVED: &[u8] = include_bytes!("testdata/reserved-both.dtb");
     const TIMER5: &[u8] = include_bytes!("testdata/timer-5irq.dtb");
+    const ECAM_RANGE: &[u8] = include_bytes!("testdata/ecam-bus-range.dtb");
 
     #[test]
     fn virt_dumpdtb_picks_uart_9000000() {
@@ -840,6 +856,9 @@ mod tests {
         assert_eq!(d.virtio_mmio_count, 32);
         assert!(d.virtio_mmio[0].dma_coherent);
         assert_eq!(d.virtio_mmio[0].base, 0xa00_0000);
+        // QEMU virt: SPI 16 → INTID 48 (GIC_SPI + 16).
+        assert_eq!(d.virtio_mmio[0].irq, 48);
+        assert_eq!(d.virtio_mmio[1].irq, 49);
         let fw = d.fw_cfg.unwrap();
         assert_eq!(fw.base, 0x902_0000);
         assert!(fw.dma_coherent);
@@ -868,6 +887,35 @@ mod tests {
         assert_eq!(rs[0], 0x8000_0000..0x8000_1000);
         assert_eq!(rs[1], 0x8100_0000..0x8100_2000);
         assert_eq!(d.console_uart(), Some(0x900_0000));
+    }
+
+    #[test]
+    fn ecam_bus_range_reg_is_first_bus() {
+        let d = parse(ECAM_RANGE).unwrap();
+        let pci = d.pci_hosts();
+        assert_eq!(pci.len(), 1);
+        let h = &pci[0];
+        assert_eq!(h.segment, 0);
+        assert_eq!(h.first_bus, 0x10);
+        assert_eq!(h.last_bus, 0x1f);
+        const R: u64 = 0x4000_0000;
+        assert_eq!(h.ecam_base, R);
+        assert_eq!(
+            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x10, 0, 0, 0),
+            Some(R)
+        );
+        assert_eq!(
+            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x1f, 0, 0, 0),
+            Some(R + (0xf << 20))
+        );
+        assert_eq!(
+            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x0f, 0, 0, 0),
+            None
+        );
+        assert_eq!(
+            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x20, 0, 0, 0),
+            None
+        );
     }
 
     #[test]

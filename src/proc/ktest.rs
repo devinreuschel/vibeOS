@@ -14,6 +14,7 @@ mod runtime;
 mod segs;
 mod space;
 mod sysdecl;
+mod tls;
 mod uaccess;
 mod waits;
 
@@ -30,6 +31,7 @@ pub(crate) use runtime::*;
 pub(crate) use segs::*;
 pub(crate) use space::*;
 pub(crate) use sysdecl::*;
+pub(crate) use tls::*;
 pub(crate) use uaccess::*;
 pub(crate) use waits::*;
 
@@ -63,6 +65,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_selectors", test_user_selectors),
     test("user_ds_fork", test_user_ds_fork),
     test("user_ds_switch", test_user_ds_switch).deadline(30_000),
+    test("tls_survive", test_tls_survive).deadline(30_000),
+    test("tls_yield", test_tls_yield).deadline(30_000),
     test("exec_top_page_enoexec", test_exec_top_page_enoexec).deadline(30_000),
     test("noncanonical_rip_sigsegv", test_noncanonical_rip_sigsegv).deadline(30_000),
     test("exec_huge_memsz", test_exec_huge_memsz).deadline(60_000),

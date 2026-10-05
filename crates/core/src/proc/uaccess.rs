@@ -14,6 +14,16 @@ pub use zerocopy::{Immutable, IntoBytes};
 use crate::arch::UserAccess;
 use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END};
 
+/// Bits 63:56 of a user pointer: Linux arm64's TBI0 tag, which the
+/// range check refuses until the tagged-address ABI (ROADMAP §11.6, §18.4).
+pub const USER_TAG_MASK: u64 = 0xFF00_0000_0000_0000;
+
+/// Drop bits 63:56 of `FAR_EL1` so a lookup and a later `si_addr` see
+/// the untagged address (ROADMAP §11.6).
+pub const fn untag_user_addr(va: u64) -> u64 {
+    va & !USER_TAG_MASK
+}
+
 /// A user copy that the range check refused or that faulted before its end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fault;
@@ -30,6 +40,11 @@ impl From<Fault> for crate::kerror::KError {
 /// included, as Linux's `access_ok`). Canonical and user-half follow from
 /// `USER_MAP_END`. Pure: no page-table walk.
 pub const fn user_range_ok(addr: u64, len: u64) -> bool {
+    // Bits 63:56 are the TBI0 tag; refuse them even though
+    // `USER_MAP_END` already excludes every such address.
+    if addr & USER_TAG_MASK != 0 {
+        return false;
+    }
     if len == 0 {
         return addr < USER_MAP_END;
     }
@@ -353,6 +368,17 @@ mod tests {
         assert!(!user_range_ok(0xFFFF_8000_0000_1000, 0));
         assert!(!user_range_ok(0x0000_8000_0000_0000, 8));
         assert!(!user_range_ok(0x0000_8000_0000_0000, 0));
+        // Tagged user pointers (TBI0 bits 63:56): ROADMAP §11.6.
+        let tagged = 0x5A00_0000_0040_0000;
+        assert_eq!(tagged & USER_TAG_MASK, 0x5A00_0000_0000_0000);
+        assert!(!user_range_ok(tagged, 0));
+        assert!(!user_range_ok(tagged, 8));
+        assert_eq!(untag_user_addr(tagged), 0x0000_0000_0040_0000);
+        assert!(user_range_ok(untag_user_addr(tagged), 8));
+        assert_eq!(
+            untag_user_addr(0x0000_0000_0040_0000),
+            0x0000_0000_0040_0000
+        );
     }
 
     /// Entries whose offsets point `insn_off` and `fixup_off` bytes past
@@ -552,11 +578,13 @@ mod kani_proofs {
     fn user_range_exact() {
         let addr: u64 = kani::any();
         let len: u64 = kani::any();
-        let want = if len == 0 {
-            addr < USER_MAP_END
-        } else {
-            addr >= NULL_GUARD_LEN && addr.checked_add(len).is_some_and(|end| end <= USER_MAP_END)
-        };
+        let want = addr & USER_TAG_MASK == 0
+            && if len == 0 {
+                addr < USER_MAP_END
+            } else {
+                addr >= NULL_GUARD_LEN
+                    && addr.checked_add(len).is_some_and(|end| end <= USER_MAP_END)
+            };
         let got = user_range_ok(addr, len);
         assert_eq!(got, want);
         // Each class bound first: a `cover!` over `&&` becomes one check per

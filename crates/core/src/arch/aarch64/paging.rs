@@ -14,8 +14,10 @@ pub const LEVELS: u8 = 4;
 /// Entries in one table.
 pub const PTES_PER_TABLE: usize = 512;
 
-/// A TTBR1 root is all kernel; user space is a separate TTBR0 root.
-pub const KERNEL_ROOT_FIRST: usize = 0;
+/// A TTBR0 user root has no kernel-half slots (TTBR1 holds the kernel),
+/// so `copy_kernel_half_from` copies nothing and `free_user_half` walks
+/// every slot (ROADMAP §11.6).
+pub const KERNEL_ROOT_FIRST: usize = PTES_PER_TABLE;
 
 /// Output-address mask: bits 12..=47 (48-bit PA).
 pub const DESC_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
@@ -235,6 +237,11 @@ mod tests {
         assert_eq!((wb >> ATTR_SHIFT) & 0b111, ATTR_NORMAL_WB);
         let mmio = make_pte(va, pa, crate::paging::mmio_flags());
         assert_eq!((mmio >> ATTR_SHIFT) & 0b111, ATTR_DEVICE);
+    }
+
+    #[test]
+    fn ttbr0_user_root_has_no_kernel_slots() {
+        assert_eq!(KERNEL_ROOT_FIRST, PTES_PER_TABLE);
     }
 
     #[test]

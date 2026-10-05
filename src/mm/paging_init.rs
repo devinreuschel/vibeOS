@@ -152,6 +152,8 @@ pub fn with_pt<R>(f: impl FnOnce(&mut MapperGuard) -> R) -> R {
 
 static MAP_END: AtomicU64 = AtomicU64::new(0);
 static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "aarch64")]
+static EMPTY_TTBR0: AtomicU64 = AtomicU64::new(0);
 
 /// Physmap high water from [`install`]. BARs above this go through ioremap.
 pub fn map_end() -> u64 {
@@ -165,6 +167,14 @@ pub fn map_end() -> u64 {
 pub fn kernel_cr3() -> u64 {
     // Acquire: pairs with the Release store in `install`.
     KERNEL_CR3.load(Ordering::Acquire)
+}
+
+/// Permanent empty TTBR0 root (ASID 0). Kernel threads load it; a
+/// missing publish is 0.
+#[cfg(target_arch = "aarch64")]
+pub fn empty_user_root() -> u64 {
+    // Acquire: pairs with the Release store in `install`.
+    EMPTY_TTBR0.load(Ordering::Acquire)
 }
 
 /// Reserve and map `[phys, phys+len)` into the ioremap window with UC
@@ -664,6 +674,23 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // the low identity window and the boot stack, so execution continues
     // across the switch; established here.
     unsafe { Arch::set_root(mapper.root()) };
+    #[cfg(target_arch = "aarch64")]
+    {
+        if let Some(f) = pmm_init::with_buddy(|b| b.alloc(0)) {
+            let pa = f.into_entry();
+            let va = hhdm_offset().wrapping_add(pa);
+            // SAFETY: `va` is the physmap alias of a buddy frame we just
+            // took; nothing else names it. established here.
+            unsafe { core::ptr::write_bytes(va as *mut u8, 0, PAGE_SIZE_4K as usize) };
+            // Release: pairs with the Acquire load in `empty_user_root`.
+            EMPTY_TTBR0.store(pa, Ordering::Release);
+            // SAFETY: the zeroed page is the permanent empty TTBR0 root.
+            // established here.
+            unsafe { crate::arch::aarch64::cpu::write_ttbr0(pa) };
+        } else {
+            crate::boot::halt_with("vibeOS: paging: no empty TTBR0");
+        }
+    }
     #[cfg(target_arch = "aarch64")]
     {
         let uart = crate::machine_init::info()

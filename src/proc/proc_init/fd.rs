@@ -321,20 +321,46 @@ pub(super) fn sys_read(fd: u32, buf: u64, len: usize) -> SysResult {
     }
 }
 
+/// Walk base for `openat`: `AT_FDCWD` or an absolute path uses the
+/// process cwd; a directory fd supplies the relative start.
+fn openat_base(dirfd: i32, path: &[u8]) -> Result<Option<WalkBase>, KError> {
+    let abs = path.first() == Some(&b'/');
+    if dirfd == vibeos::proc::AT_FDCWD || abs {
+        return Ok(current_base());
+    }
+    if dirfd < 0 {
+        return Err(KError::BadF);
+    }
+    let slot = lookup_fd(dirfd as u32).ok_or(KError::BadF)?;
+    match slot.kind {
+        FdKind::File { fid, r#gen } => {
+            let id = FileId { fid, r#gen };
+            if file_init::access(id, false).map_err(KError::from)? != InodeKind::Dir {
+                return Err(KError::NotDir);
+            }
+            let cwd = file_init::file_path(id).map_err(KError::from)?;
+            let root = current_base().map_or(cwd, |b| b.root);
+            Ok(Some(WalkBase { root, cwd }))
+        }
+        FdKind::Console | FdKind::None => Err(KError::NotDir),
+    }
+}
+
 pub(super) fn sys_open(path: u64, flags: i32, mode: u16) -> SysResult {
+    sys_openat(vibeos::proc::AT_FDCWD, path, flags, mode)
+}
+
+pub(super) fn sys_openat(dirfd: i32, path: u64, flags: i32, mode: u16) -> SysResult {
     let mut buf = [0u8; vibeos::fs::MAX_PATH];
     let n = copy_user_str(path, &mut buf)?;
+    let base = openat_base(dirfd, &buf[..n])?;
     let mode = u32::from(mode) & 0o7777;
     // The lowest free descriptor (`EMFILE`), then in `Vfs::open` an
     // open-file slot (`ENFILE`), both before anything is created or
     // truncated; an error gives back both reservations.
     let pid = current_pid();
-    let (fd, base) = with_table(|t| match t.get_mut(pid) {
-        Some(p) => p
-            .fds
-            .reserve()
-            .map(|fd| (fd, p.base()))
-            .map_err(KError::from),
+    let fd = with_table(|t| match t.get_mut(pid) {
+        Some(p) => p.fds.reserve().map_err(KError::from),
         None => Err(KError::MFile),
     })?;
     match file_init::open_at(base, &buf[..n], OpenFlags::from_bits(flags as u32), mode) {
@@ -460,6 +486,21 @@ pub(super) fn sys_dup(old: u32) -> SysResult {
             Err(e)
         }
     }
+}
+
+pub(super) fn sys_dup3(old: u32, new: u32, flags: i32) -> SysResult {
+    if old == new {
+        return Err(KError::Inval);
+    }
+    let oflags = flags as u32;
+    if oflags != 0 && oflags != vibeos::fs::O_CLOEXEC {
+        return Err(KError::Inval);
+    }
+    let r = sys_dup2(old, new)?;
+    if oflags == vibeos::fs::O_CLOEXEC {
+        sys_fcntl(new, F_SETFD, u64::from(FD_CLOEXEC))?;
+    }
+    Ok(r)
 }
 
 pub(super) fn sys_dup2(old: u32, new: u32) -> SysResult {

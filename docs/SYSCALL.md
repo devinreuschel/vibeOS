@@ -247,7 +247,7 @@ the row does not allow it, and needs `EFAULT` from each.
 | 1 | 64 | `write` | 3 | `unsigned int fd`, `const char *buf`, `size_t count` | `buf`: in, `count` bytes, after the `fd` lookup | `EBADF`, `EFAULT`, `EINVAL`, `EFBIG`, `ENOSPC`, `EIO` (`fat_bad_sector_eio`) | — |
 | 2 | — | `open` | 3 | `const char *pathname`, `int flags`, `umode_t mode` | `pathname`: C string, before anything else | `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `EACCES`, `ELOOP`, `EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM` (`kalloc_nomem`), `EIO` (`fat_bad_sector_eio`) | `pathname` at most 255 bytes |
 | 3 | 57 | `close` | 1 | `unsigned int fd` | — | `EBADF` | — |
-| 5 | 80 | `fstat` | 2 | `unsigned int fd`, `struct stat *statbuf` | `statbuf`: out, 144 bytes, after the `fd` lookup | `EBADF`, `EFAULT` | x86_64's 144-byte `struct stat`; see SYSCALL.md §3.1 |
+| 5 | 80 | `fstat` | 2 | `unsigned int fd`, `struct stat *statbuf` | `statbuf`: out, 144 bytes, after the `fd` lookup | `EBADF`, `EFAULT` | x86_64 144-byte `struct stat`; aarch64 128-byte asm-generic; see SYSCALL.md §3.1 |
 | 8 | 62 | `lseek` | 3 | `unsigned int fd`, `off_t offset`, `unsigned int whence` | — | `EBADF`, `ESPIPE`, `EINVAL`, `ENXIO` | — |
 | 9 | 222 | `mmap` | 6 | `unsigned long addr`, `unsigned long length`, `unsigned long prot`, `unsigned long flags`, `unsigned long fd`, `unsigned long offset` | — | `EINVAL`, `EBADF`, `ENODEV`, `ENOMEM`, `EPERM`, `EEXIST` | anonymous and private only; returns the address |
 | 11 | 215 | `munmap` | 2 | `unsigned long addr`, `size_t length` | — | `EINVAL`, `ENOMEM` | — |
@@ -266,7 +266,10 @@ the row does not allow it, and needs `EFAULT` from each.
 | 110 | 173 | `getppid` | 0 | — | — | — | — |
 | 169 | 142 | `reboot` | 4 | `int magic1`, `int magic2`, `unsigned int cmd`, `void *arg` | `arg`: C string, for `RESTART2` only, after the uid, magic and command checks | `EINVAL`, `EFAULT` | power off and restart; see SYSCALL.md §3.1 |
 | 217 | 61 | `getdents64` | 3 | `unsigned int fd`, `struct linux_dirent64 *dirent`, `unsigned int count` | `dirent`: out, `count` bytes, after the `fd` lookup and the first record's fit | `EBADF`, `ENOTDIR`, `EINVAL`, `EFAULT` | at most 512 bytes a call; see SYSCALL.md §3.1 |
-| 500 | — | `psinfo` | 2 | `char *buf`, `size_t len` | `buf`: out, `len` bytes, before anything else | `EFAULT` | vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`) |
+| 500 | 500 | `psinfo` | 2 | `char *buf`, `size_t len` | `buf`: out, `len` bytes, before anything else | `EFAULT` | vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`) |
+| 257 | 56 | `openat` | 4 | `int dfd`, `const char *filename`, `int flags`, `umode_t mode` | `filename`: C string, before anything else | `EBADF`, `EFAULT`, `ENAMETOOLONG`, `EINVAL`, `ENOENT`, `ENOTDIR`, `EISDIR`, `EEXIST`, `EACCES`, `ELOOP`, `EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM` (`kalloc_nomem`), `EIO` (`fat_bad_sector_eio`) | `AT_FDCWD` is -100; `filename` at most 255 bytes |
+| 292 | 24 | `dup3` | 3 | `unsigned int oldfd`, `unsigned int newfd`, `int flags` | — | `EBADF`, `EINVAL` | `flags` is 0 or `O_CLOEXEC`; `oldfd == newfd` is `EINVAL` |
+| 56 | 220 | `clone` | 5 | `unsigned long flags`, `unsigned long newsp`, `int *parent_tid`, `int *child_tid`, `unsigned long tls` | `parent_tid`: not read (ROADMAP §13.8); `child_tid`: not read (ROADMAP §13.8) | `EAGAIN`, `ENOMEM` (`fork_oom`), `EINVAL` | fork semantics only: `flags` must be `SIGCHLD` and `newsp` 0; arm64 swaps `tls` and `child_tid` |
 
 <!-- gen_syscalls: end syscall-table -->
 

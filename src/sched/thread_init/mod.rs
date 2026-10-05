@@ -13,6 +13,7 @@
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
+use crate::arch::current::UserFrame;
 use vibeos::arch::ContextSwitch;
 use vibeos::desc::UserSegs;
 use vibeos::ipi::{home_cpu, pick_cpu};
@@ -23,10 +24,10 @@ use vibeos::lock::RANK_SCHED;
 use vibeos::per_cpu::PerCpu;
 use vibeos::proc::pid::{IdIndex, PidAlloc};
 use vibeos::sched::{TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
-use vibeos::syscall::UserFrame;
+#[cfg(target_arch = "x86_64")]
+use vibeos::thread::prepare_thread;
 use vibeos::thread::{
     CpuAffinity, CpuContext, Fxsave, MAX_THREADS, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome,
-    prepare_thread,
 };
 use vibeos::time::Instant;
 use vibeos::wait::{WaitLink, WaitLinks, WaitQueue};
@@ -63,7 +64,8 @@ pub(crate) use table::table_usage;
 pub(crate) use table::{RunTsc, run_tsc_snapshot, timeouts_capacity};
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
-pub use user::{reset_user_segs, set_user_segs};
+pub(crate) use user::initial_fxsave;
+pub use user::{reset_user_segs, set_tls_base, set_user_segs};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.
@@ -590,9 +592,9 @@ fn schedule_inner(from_irq: bool) {
     // exited; the entry is then stale. SCHED decides: run a thread only
     // while it is `Ready` and placed on this CPU, and drop any other entry.
     let (old_ptr, new_ptr, old_id, new_id) = loop {
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         let cand = testing::requeue_next_cpu(next, cur, idle, me);
-        #[cfg(not(all(feature = "kernel_tests", target_arch = "x86_64")))]
+        #[cfg(not(feature = "kernel_tests"))]
         let cand = next;
         let picked = with_sched(|s| {
             if cand != idle && !s.get(cand).is_some_and(|t| runnable_on(t, me)) {
@@ -683,15 +685,21 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             (*new_ptr).on_cpu.set();
-            // A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5), before
-            // `on_switch`; a kernel thread has none and keeps what is live.
+            // A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5). Save
+            // the outgoing TLS base before `on_switch` and before a
+            // selector load, which can zero `FS_BASE`.
             if (*old_ptr).pid != 0 {
                 (*old_ptr).user_segs = crate::arch::gdt::read_user_segs();
-            }
-            if (*new_ptr).pid != 0 {
-                crate::arch::gdt::load_user_segs((*new_ptr).user_segs);
+                (*old_ptr).tls_base = crate::arch::current::user_tls();
             }
             on_switch(cpu, old_ptr, new_ptr);
+            if (*new_ptr).pid != 0 {
+                crate::arch::gdt::load_user_segs((*new_ptr).user_segs);
+                // SAFETY: `tls_base` is 0 or the image's thread pointer,
+                // a user address `setup_tls` chose; established by
+                // `user_init::setup_tls` and `on_switch`.
+                crate::arch::current::set_user_tls((*new_ptr).tls_base);
+            }
         }
     });
     // The switch asm turns IF on for a thread whose `irq_nest` is 0.
@@ -1014,16 +1022,21 @@ pub fn spawn_user(
             panic!("spawn_user: thread {} has no stack", h.id().0);
         };
         let at = top - USER_FRAME_BYTES as u64;
-        // SAFETY: invariant I25: `[top - 168, top)` is the user frame of
-        // this thread's own kernel stack, mapped and unused: the thread is
-        // not runnable before `make_ready`, and nothing else refers to its
-        // stack; established by `thread_init::spawn_inner`.
+        // SAFETY: invariant I25: `[top - USER_FRAME_BYTES, top)` is the
+        // user frame of this thread's own kernel stack, mapped and unused:
+        // the thread is not runnable before `make_ready`, and nothing else
+        // refers to its stack; established by `thread_init::spawn_inner`.
         unsafe { (at as *mut UserFrame).write(*frame) };
-        // The pad word below the frame, as the syscall entry leaves it.
-        prepare_thread(&mut tcb.context, at - 8, tramp);
-        // SAFETY: invariant: `context.rsp` is 8 bytes below the pad word,
-        // inside this thread's unused stack; established here.
-        unsafe { (tcb.context.stack_ptr() as *mut u64).write_volatile(0) };
+        #[cfg(target_arch = "aarch64")]
+        Arch::prepare(&mut tcb.context, at, tramp);
+        #[cfg(target_arch = "x86_64")]
+        {
+            // The pad word below the frame, as the syscall entry leaves it.
+            prepare_thread(&mut tcb.context, at - 8, tramp);
+            // SAFETY: invariant: `context.rsp` is 8 bytes below the pad
+            // word, inside this thread's unused stack; established here.
+            unsafe { (tcb.context.stack_ptr() as *mut u64).write_volatile(0) };
+        }
     });
     Ok(h)
 }
@@ -1176,9 +1189,10 @@ fn spawn_inner(
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3,
-        fpu: Fxsave::INITIAL,
+        fpu: initial_fxsave(),
         fp_cpu: None,
         user_segs: UserSegs::NULL,
+        tls_base: 0,
         syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid,
         no_reclaim: AtomicU32::new(0),
@@ -1256,7 +1270,7 @@ fn fill_tcb(
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
-    tcb.fpu = Fxsave::INITIAL;
+    tcb.fpu = initial_fxsave();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.user_segs = UserSegs::NULL;
@@ -1462,10 +1476,12 @@ pub fn current_cpu() -> u32 {
     crate::arch::cpu_id_hint()
 }
 
+#[cfg(feature = "kernel_tests")]
+pub use testing::exited;
 #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub use testing::{
-    cpu_of, exited, ktest_drop_timeout, ktest_last_overdue, ktest_preempt_before_places,
-    ktest_sweeps, name, state, try_state,
+    cpu_of, ktest_drop_timeout, ktest_last_overdue, ktest_preempt_before_places, ktest_sweeps,
+    name, state, try_state,
 };
 
 pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
@@ -1473,5 +1489,9 @@ pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
 }
 
 /// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
+#[cfg_attr(
+    target_arch = "aarch64",
+    allow(dead_code, reason = "x86 ktest hooks; aarch64 uses the requeue hook")
+)]
 pub mod testing;

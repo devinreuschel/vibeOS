@@ -443,10 +443,6 @@ pub fn write_ps(w: &mut impl Write) {
 }
 
 #[cfg(not(feature = "vibefs_crash"))]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
-)]
 enum KernelWait {
     Done(u32),
     Sleep,
@@ -456,10 +452,6 @@ enum KernelWait {
 /// Block until `pid`, a process whose parent is the kernel (ppid 0),
 /// exits; reap it and return its `wait4` status word.
 #[cfg(not(feature = "vibefs_crash"))]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
-)]
 pub(crate) fn wait_kernel(pid: u32) -> u32 {
     debug_assert_eq!(current_pid(), 0);
     loop {
@@ -496,4 +488,45 @@ pub(crate) fn wait_kernel(pid: u32) -> u32 {
             KernelWait::Sleep | KernelWait::NotKernelChild => thread_init::schedule(),
         }
     }
+}
+
+/// User exception from a portable `TrapKind`: default action (kill).
+/// Kernel stays up. No-op if this is not a user process, or the kind is
+/// not a ring-3 fault.
+#[cfg(target_arch = "aarch64")]
+pub fn try_user_trap(kind: TrapKind, pc: u64, far: u64) {
+    let pid = current_pid();
+    if pid == 0 {
+        return;
+    }
+    let Ring3Action::Signal { sig, si_code: _ } = trap::ring3_action(kind) else {
+        return;
+    };
+    let name = sig_name(sig);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = writeln!(
+        Serial,
+        "user: pid {pid} killed SIG{name} pc=0x{pc:x} far=0x{far:x}"
+    );
+    crate::arch::gs::force_kernel();
+    finish_exit(wait_signaled(sig), Some(far));
+}
+
+/// A return to EL0 whose `ELR_EL1` is not a user PC: `SIGSEGV`.
+#[cfg(target_arch = "aarch64")]
+pub fn kill_bad_elr(pc: u64) -> ! {
+    let pid = current_pid();
+    if pid == 0 {
+        crate::arch::current::halt();
+    }
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = writeln!(Serial, "user: pid {pid} killed SIGSEGV bad elr=0x{pc:x}");
+    crate::arch::gs::force_kernel();
+    finish_exit(wait_signaled(vibeos::proc::SIGSEGV), Some(pc));
 }

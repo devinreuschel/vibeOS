@@ -160,10 +160,6 @@ pub fn tlbi_va(va: u64) {
 ///
 /// # Safety
 /// `ttbr0` is a complete user root, or the empty ASID-0 root.
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest ASID switch (kernel_tests)")
-)]
 pub unsafe fn write_ttbr0(ttbr0: u64) {
     // SAFETY: this fn's `# Safety` (here).
     unsafe {
@@ -172,10 +168,6 @@ pub unsafe fn write_ttbr0(ttbr0: u64) {
     }
 }
 
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest ASID switch (kernel_tests)")
-)]
 pub fn read_ttbr0() -> u64 {
     let v: u64;
     // SAFETY: TTBR0_EL1 is readable at EL1 / VHE EL2; established here.
@@ -241,23 +233,30 @@ pub fn oslsr() -> u64 {
     v
 }
 
+/// Set PSTATE.PAN. FEAT_PAN is the ISA floor (ROADMAP §11.1); this is
+/// not a write of `SCTLR_EL1`.
+pub fn set_pan() {
+    // SAFETY: FEAT_PAN is the ISA floor; established here.
+    unsafe { asm!("msr pan, #1", options(nostack, preserves_flags)) };
+}
+
 /// Clear PAN for a kernel access to a user VA. Restore with [`set_pan`].
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest ASID user-VA walk (kernel_tests)")
-)]
+#[cfg(feature = "kernel_tests")]
 pub fn clear_pan() {
     // SAFETY: FEAT_PAN is the ISA floor; established here.
     unsafe { asm!("msr pan, #0", options(nostack, preserves_flags)) };
 }
 
+/// Whether `mrs PAN` is nonzero (PSTATE.PAN set).
 #[cfg_attr(
     not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest ASID user-VA walk (kernel_tests)")
+    expect(dead_code, reason = "in-guest PAN check (kernel_tests)")
 )]
-pub fn set_pan() {
-    // SAFETY: as `clear_pan`; established here.
-    unsafe { asm!("msr pan, #1", options(nostack, preserves_flags)) };
+pub fn pan_is_set() -> bool {
+    let v: u64;
+    // SAFETY: `PAN` is readable once FEAT_PAN is present; established here.
+    unsafe { asm!("mrs {0}, pan", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v != 0
 }
 
 #[inline]
@@ -284,6 +283,27 @@ pub fn irq_enable() {
 pub fn clear_pstate_a() {
     // SAFETY: SError is taken where raised after full VBAR; established here.
     unsafe { asm!("msr daifclr, #4", options(nostack, preserves_flags)) };
+}
+
+/// Set D, A, I, and F (a return to EL0, DESIGN §5.10).
+#[inline]
+pub fn daif_set_all() {
+    // SAFETY: mask debug, SError, IRQ, and FIQ; no `nomem`. established here.
+    unsafe { asm!("msr daifset, #0xf", options(nostack, preserves_flags)) };
+}
+
+/// Clear D, A, I, and F (syscall / fault body, DESIGN §2.9 rule 3).
+#[inline]
+pub fn daif_clear_all() {
+    // SAFETY: unmask after the user frame is saved; established here.
+    unsafe { asm!("msr daifclr, #0xf", options(nostack, preserves_flags)) };
+}
+
+/// Clear D and A only (IRQ top-half from EL0, DESIGN §5.10).
+#[inline]
+pub fn daif_clear_da() {
+    // SAFETY: SError and debug unmasked; I and F stay set. established here.
+    unsafe { asm!("msr daifclr, #0xc", options(nostack, preserves_flags)) };
 }
 
 #[inline]
@@ -439,8 +459,47 @@ pub fn overflow_sp() -> u64 {
     OVERFLOW_SP.load(Ordering::Acquire)
 }
 
+/// `ID_AA64ISAR0_EL1.RNDR` (Arm ARM DDI0487): 0b0001 means `RNDR`/`RNDRRS`.
+fn has_rndr() -> bool {
+    let isar0: u64;
+    // SAFETY: ID registers are readable at EL1/EL2; established here.
+    unsafe {
+        asm!(
+            "mrs {0}, ID_AA64ISAR0_EL1",
+            out(reg) isar0,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    (isar0 >> 60) & 0xF != 0
+}
+
+/// One word from `RNDR`, or `None` when the CPU has none or it failed
+/// ten times. Does not write CPACR (ROADMAP §11.6).
 #[inline]
 pub fn hw_rng64() -> Option<u64> {
+    if !has_rndr() {
+        return None;
+    }
+    let mut tries = 0u8;
+    while tries < 10 {
+        let val: u64;
+        let nzcv: u64;
+        // SAFETY: `RNDR` is an ID/random register; a failed read sets
+        // PSTATE.V and writes an UNKNOWN value. established here.
+        unsafe {
+            asm!(
+                "mrs {val}, S3_3_C2_C4_0",
+                "mrs {nzcv}, nzcv",
+                val = out(reg) val,
+                nzcv = out(reg) nzcv,
+                options(nomem, nostack),
+            );
+        }
+        if nzcv & (1 << 28) == 0 {
+            return Some(val);
+        }
+        tries = tries.saturating_add(1);
+    }
     None
 }
 

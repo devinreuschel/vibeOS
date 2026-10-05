@@ -60,13 +60,16 @@ impl fmt::Write for Console {
     }
 }
 
-/// PS/2 first, then serial RX. Whole consumer critical section is IRQ-off
+/// PS/2 first, then virtio-input, then serial RX. IRQ-off for the whole
 /// (DESIGN §9.4): `pop` already cli's, and serial RX must too — a nested
 /// guard keeps IF off across both so we never poll COM1 with IF=1.
 pub fn read() -> Option<DecodedKey> {
     let _irq = InterruptGuard::enter();
     #[cfg(target_arch = "x86_64")]
     if let Some(k) = kbd_init::pop() {
+        return Some(k);
+    }
+    if let Some(k) = crate::virtio_input_init::pop() {
         return Some(k);
     }
     // Acquire: pairs with the Release stores in `init` and `set_enabled`.
@@ -110,6 +113,8 @@ fn wait_key_loop() -> DecodedKey {
         unsafe {
             core::arch::asm!("cli", options(nostack, preserves_flags));
         }
+        #[cfg(target_arch = "aarch64")]
+        crate::arch::current::irq_disable();
         crate::sched::irqoff::off_here();
         if let Some(k) = read() {
             crate::sched::irqoff::on();
@@ -129,6 +134,8 @@ fn wait_key_loop() -> DecodedKey {
             unsafe {
                 core::arch::asm!("sti", options(nostack, preserves_flags));
             }
+            #[cfg(target_arch = "aarch64")]
+            crate::arch::current::irq_enable();
             thread_init::yield_now();
             continue;
         }
@@ -142,6 +149,13 @@ fn wait_key_loop() -> DecodedKey {
         #[cfg(target_arch = "x86_64")]
         unsafe {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
+        }
+        // WFI while DAIF stays set: it wakes on a pending IRQ anyway
+        // (DESIGN §11.1 idle). Enabling first would race the only wake.
+        #[cfg(target_arch = "aarch64")]
+        {
+            crate::arch::current::idle_wait();
+            crate::arch::current::irq_enable();
         }
     }
 }

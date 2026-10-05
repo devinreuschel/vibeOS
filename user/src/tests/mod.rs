@@ -8,6 +8,7 @@ use vibeos_user::utest;
 
 mod console;
 mod efault;
+mod env;
 mod errno;
 mod exec_args;
 mod fp;
@@ -30,6 +31,7 @@ pub const SUITES: &[fn(&mut utest::Runner)] = &[
     process::run,   // fork, execve, wait4, a fault
     exec_args::run, // execve's argv and envp, and their limits
     fp::run,        // FP state across fork and execve
+    env::run,       // ring-3 / EL0 environment
     console::run,   // forged kernel lines
     pid1::run,      // init cannot be killed or stopped
     utils::run,     // the /bin utilities and /bin/sh

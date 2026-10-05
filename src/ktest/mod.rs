@@ -8,7 +8,6 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::arch::CycleCounter;
-#[cfg(target_arch = "x86_64")]
 use vibeos::dev::DevRef;
 use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_DEVICE;
@@ -23,6 +22,8 @@ use crate::arch;
 use crate::arch::current::{
     Arch, InterruptGuard, interrupts_enabled, irq_disable, irq_enable, qemu_exit,
 };
+#[cfg(target_arch = "aarch64")]
+use crate::dev;
 use crate::ipi_init;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -36,7 +37,6 @@ use crate::x86;
 use crate::{
     acpi, block, boot, console, dev, drivers, fs, irq, log, mm, proc, sched, shell, smp, sync, time,
 };
-#[cfg(target_arch = "x86_64")]
 pub(crate) mod user;
 
 const EXIT_PASS: u32 = 0x10;
@@ -254,7 +254,7 @@ pub(crate) const GROUPS: &[Suite] = &[
 ];
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) const GROUPS: &[Suite] = &[TESTS, arch::ktest::TESTS];
+pub(crate) const GROUPS: &[Suite] = &[TESTS, arch::ktest::TESTS, dev::ktest::TESTS];
 
 /// Name of the registry's kernel thread.
 const REGISTRY_NAME: &str = "ktest";
@@ -646,7 +646,6 @@ pub(crate) fn quiesce_frames() {
         kva_init::free_stack(stack);
         i += 1;
     }
-    #[cfg(target_arch = "x86_64")]
     if !user::warm_processes() {
         crate::marker!("vibeOS: ktest:   warm-up: user process failed");
     }
@@ -937,10 +936,6 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
     true
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
     // SAFETY: invariant I58: every caller passes a device's BAR 0 VA,
     // which the `bar-test` driver claimed and mapped uncached, and a
@@ -948,36 +943,28 @@ pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32) }
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn mmio_w32(va: u64, off: u32, val: u32) {
     // SAFETY: invariant: as for `mmio_r32`; established by `ktest::bar0_va`.
     unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, val) }
 }
 
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
+pub(crate) fn mmio_w64(va: u64, off: u32, val: u64) {
+    // SAFETY: invariant: as for `mmio_r32`; established by `ktest::bar0_va`.
+    // `off` is an 8-byte device register (edu DMA src/dst).
+    unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u64, val) }
+}
+
 pub(crate) const EDU_IDENT: u32 = 0x00;
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) const EDU_IDENT_VAL: u32 = 0x0100_00ED;
 
 /// BAR 0's VA for edu or e1000e, which the `kernel_tests` driver
 /// `bar-test` claims and maps (binding it on first use); `None` when that
 /// driver does not hold the BAR.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn bar0_va(dev: &DevRef) -> Option<u64> {
     crate::dev::ktest::bind_bar_test_driver();
     crate::dev_init::bar_va(dev, 0)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn find_edu() -> Option<DevRef> {
     // QEMU 8.x edu is 1234:11e8 (old QEMU vendor). Later trees use 1b36:11e8.
     crate::dev::ktest::find_id(0x1234, 0x11e8)
@@ -1111,9 +1098,10 @@ pub(crate) fn quiesce() -> bool {
 /// were written against: each call takes back, or hands out, the count a
 /// [`FileRef`] carries, so their scenarios and assertions stay as they
 /// were.
-#[cfg(target_arch = "x86_64")]
 pub(crate) mod fid {
-    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, Stat};
+    #[cfg(target_arch = "x86_64")]
+    use vibeos::fs::Stat;
+    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags};
 
     use crate::file_init;
 
@@ -1121,6 +1109,7 @@ pub(crate) mod fid {
         file_init::open(path.as_bytes(), OpenFlags::from_bits(flags), mode).map(FileRef::into_raw)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn read(id: FileId, buf: &mut [u8]) -> Result<usize, FsError> {
         file_init::read(&FileRef::from_raw(id), buf)
     }
@@ -1129,6 +1118,7 @@ pub(crate) mod fid {
         file_init::write(&FileRef::from_raw(id), buf)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn seek(id: FileId, off: i64, whence: u32) -> Result<u64, FsError> {
         file_init::lseek(&FileRef::from_raw(id), off, whence)
     }
@@ -1137,19 +1127,23 @@ pub(crate) mod fid {
         file_init::close(FileRef::from_raw(id))
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn addref(id: FileId) -> Result<(), FsError> {
         file_init::addref(id)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn stat_path(path: &str) -> Result<Stat, FsError> {
         file_init::stat_path(path.as_bytes())
     }
 
     /// `lstat` of absolute `path`.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn lstat_path(path: &str) -> Result<Stat, FsError> {
         crate::fs_init::api().stat_path(None, path.as_bytes(), false)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn creat(path: &str) -> Result<(), FsError> {
         file_init::creat(path.as_bytes())
     }
@@ -1166,10 +1160,7 @@ pub(crate) mod fid {
 /// CPUID.01H:ECX[31] (a hypervisor is present) and leaf `0x4000_0000`
 /// naming it `KVMKVMKVM\0\0\0`.
 #[cfg(target_arch = "aarch64")]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
+#[expect(dead_code, reason = "x86 hypervisor leaf; aarch64 has none")]
 pub(crate) fn on_kvm() -> bool {
     false
 }
@@ -1189,10 +1180,6 @@ pub(crate) fn on_kvm() -> bool {
 }
 
 /// Sleep until `pred` holds, for at most `ms`.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
     let deadline = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
     while !pred() {
@@ -1231,10 +1218,6 @@ const WAIT_MARGIN_MS: u32 = 500;
 /// is [`WAIT_MARGIN_MS`] away and `pred` still fails, so the caller can fail
 /// naming what it waited on. With no deadline armed it waits on, and the
 /// harness's run deadline is the backstop.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn wait_for(pred: impl Fn() -> bool) -> bool {
     loop {
         if pred() {

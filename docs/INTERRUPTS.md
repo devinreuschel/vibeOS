@@ -539,7 +539,10 @@ On aarch64 the boundary is between EL0 and the kernel's level, EL1 or EL2 with V
 is the required state; [§11.5](PORTABILITY.md#115-aarch64-exceptions-and-privilege-transitions) gives the mechanism and the
 aarch64 counterparts of rules 1, 4, and 5. Rules 2 and 3 have none, because EL0 cannot reach the
 per-CPU base register, so nothing is swapped at the boundary. Rules 9 onward hold on both
-architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist.
+architectures. Built: `src/arch/aarch64/vectors.rs` saves the user frame on
+every EL0 entry, `vibeos_el0_return` sets all of DAIF before it writes
+`ELR_EL1`, `SPSR_EL1`, or `SP_EL0`, and `syscall_init::enter` runs the
+syscall body after the stub has unmasked IRQs (ROADMAP §11.6).
 
 | Point | Level, stack | DAIF | PAN | `SP_EL0` |
 |-------|--------------|------|-----|----------|

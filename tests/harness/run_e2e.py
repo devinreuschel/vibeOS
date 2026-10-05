@@ -47,12 +47,30 @@ PCI_GOLDEN = (
     "8086:100e",  # e1000 (QEMU default NIC)
 )
 
+# QEMU `virt` + the aarch64 e2e argv (virtio-net, virtio-input ×2, pvpanic,
+# virtio-scsi). IDs from the guest dump, not from QEMU source.
+PCI_GOLDEN_AARCH64 = (
+    "1b36:0008",  # Red Hat PCIe host bridge
+    "1af4:1000",  # virtio-net
+    "1af4:1052",  # virtio-input
+    "1b36:0011",  # pvpanic-pci
+    "1af4:1004",  # virtio-scsi
+)
 
-def _check_pci_qemu_set(raw: list[str]) -> None:
-    """lspci-adjacent boot dump must name the default QEMU `pc` devices."""
+
+def pci_golden(arch: str) -> tuple[str, ...]:
+    """The vendor:device IDs the e2e dump must name for `arch`."""
+    if arch == "aarch64":
+        return PCI_GOLDEN_AARCH64
+    return PCI_GOLDEN
+
+
+def _check_pci_qemu_set(raw: list[str], arch: str = "x86_64") -> None:
+    """lspci-adjacent boot dump must name the default QEMU devices for `arch`."""
+    golden = pci_golden(arch)
     lines = frame.kernel_lines(raw)
     blob = "\n".join(lines)
-    missing = [id_ for id_ in PCI_GOLDEN if id_ not in blob]
+    missing = [id_ for id_ in golden if id_ not in blob]
     if missing:
         raise HarnessError(f"pci dump missing {missing!r}")
     count_line = None
@@ -67,8 +85,8 @@ def _check_pci_qemu_set(raw: list[str]) -> None:
         n = int(n_s)
     except ValueError as e:
         raise HarnessError(f"pci count not an int: {count_line!r}") from e
-    if n < len(PCI_GOLDEN):
-        raise HarnessError(f"pci count {n} < golden {len(PCI_GOLDEN)}")
+    if n < len(golden):
+        raise HarnessError(f"pci count {n} < golden {len(golden)}")
 
 
 def check_first_kernel_line(lines: list[str]) -> None:
@@ -520,7 +538,7 @@ def main() -> int:
         print(f"[e2e]   . panic-{panic_variant} dump ok", file=sys.stderr)
     if not expect_panic and not gp_test:
         try:
-            _check_pci_qemu_set(result.lines)
+            _check_pci_qemu_set(result.lines, env.arch)
         except HarnessError as e:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1

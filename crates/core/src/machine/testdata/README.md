@@ -11,3 +11,4 @@ Each `.dtb` was written by `qemu-system-aarch64 -machine …,dumpdtb=` and compa
 | `timer-5irq.dtb` | `timer-5irq.dts`: five-entry `arm,armv8-timer` (hyp-virt) |
 | `two-uarts.dtb` | disabled PL011 first, no `/aliases` |
 | `two-uarts-alias.dtb` | okay PL011 first, `/aliases/serial0` names `0x9000000` |
+| `ecam-bus-range.dtb` | `ecam-bus-range.dts`: `pci-host-ecam-generic` with `bus-range = <0x10 0x1f>` |

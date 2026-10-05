@@ -13,15 +13,7 @@ use vibeos_user::sys::{self, nr};
 use vibeos_user::utest::{self, Outcome, Runner};
 
 const FPCHECK: &CStr = c"/bin/fpcheck";
-
-/// Not the initial state in any field: MXCSR rounds toward zero (`0x7F80`,
-/// every exception still masked), FCW rounds toward zero, and the first
-/// vector register holds a pattern.
-const DIRTY: FpState = FpState {
-    fcw: 0x0F7F,
-    mxcsr: 0x7F80,
-    xmm0: *b"vibeos fp state!",
-};
+const DIRTY: FpState = FpState::DIRTY;
 
 pub fn run(t: &mut Runner) {
     t.case("fp_fork_inherits", fp_fork_inherits);
@@ -40,11 +32,15 @@ fn reap(pid: usize) -> Result<u8, &'static str> {
     sys::exit_code(status as u32).ok_or("child killed by a signal")
 }
 
+/// `clone` with fork semantics (`SIGCHLD`, `newsp` 0). `SYS_FORK` is the
+/// asm-generic `clone` number (SYSCALL.md).
+const FORK_CLONE_FLAGS: usize = 17;
+
 /// The parent sets [`DIRTY`] and forks in one block; the child exits 0 when
 /// it reads [`DIRTY`] back, else 1, and the parent checks its own copy too.
 fn fp_fork_inherits() -> Outcome {
-    // SAFETY: `fork` writes through no argument; established here.
-    let (ret, seen) = unsafe { fp_syscall(&DIRTY, nr::SYS_FORK, 0, 0, 0) };
+    // SAFETY: `fork`/`clone` writes through no argument; established here.
+    let (ret, seen) = unsafe { fp_syscall(&DIRTY, nr::SYS_FORK, FORK_CLONE_FLAGS, 0, 0) };
     if ret == 0 {
         rt::exit(i32::from(seen != DIRTY));
     }

@@ -5,6 +5,9 @@
 # fields `arch`, `accel`, `cpu`, `smp`, `mem`, `machine` and `host` say
 # where the row holds, each as one value or an array meaning any of them
 # (`smp` is an integer, the rest strings); an unknown key is an error.
+# An aarch64 row also names `counterpart` (the aarch64 test) or
+# `no_counterpart` (why there is none); `check_arch.py` fails a row
+# that names neither (ROADMAP §11.1, §11.6).
 #
 # Matching: `skips.launch_config` gives the configuration a boot launched:
 # `arch` from `qemu-system-<arch>`, `accel` the effective accelerator
@@ -254,3 +257,23 @@ smp = 1
 name = "wake_inbox_and_kva_pool"
 reason = "no AP"
 smp = 1
+
+# x86-only §10.6 / §11.6 cases: EL0 has no `popf` into PAN, no `swapgs`,
+# and no `iretq` (ROADMAP §11.6).
+[[skip]]
+name = "ac_clear_user_popf"
+reason = "EL0 cannot write PAN"
+arch = "aarch64"
+no_counterpart = "EL0 cannot write PAN"
+
+[[skip]]
+name = "ist_gs_sign"
+reason = "no swapgs"
+arch = "aarch64"
+counterpart = "el0_svc_eret"
+
+[[skip]]
+name = "noncanonical_rip_sigsegv"
+reason = "no iretq"
+arch = "aarch64"
+counterpart = "el0_bad_elr"

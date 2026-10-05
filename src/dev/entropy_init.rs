@@ -40,7 +40,14 @@ fn hw_fill(buf: &mut [u8]) -> (usize, Option<Source>) {
             i += n;
         }
         if src.is_none() && i > 0 {
-            src = Some(Source::RdRand);
+            #[cfg(target_arch = "x86_64")]
+            {
+                src = Some(Source::RdRand);
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                src = Some(Source::Rndr);
+            }
         }
     }
     (i, src)

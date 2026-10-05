@@ -335,7 +335,7 @@ fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::arch::catch::on_panic();
     // IF=0 before anything else: a second panicking CPU must reach
     // `begin_dump` without taking an interrupt (DESIGN §2.5 step 1).

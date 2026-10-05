@@ -192,7 +192,7 @@ children, need no row.
 |---|---|---|
 | crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `kalloc/{tests,users_tests,loom_models}.rs`, `kerror.rs`, `trap.rs`, `atomic.rs`, `cell.rs` (`BootCell`, `IrqCell`, `CellHooks`) | `main.rs`, `cell.rs` (the kernel's names for the cells and its `CellHooks` impl) |
 | boot | `boot/{mod,cmdline}.rs` | `boot/{mod,fw_cfg_init}.rs` (`BootInfo`, Limine requests, fw_cfg) |
-| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,stat,syscall,trap,uart,vectors}.rs`, `arch/aarch64/{mod,paging,psci,sysreg,tlb,trap}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,boot,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,power,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S`, `arch/aarch64/{mod,boot,catch,cpu,gdt,gic,gs,idt,ipi,irqchip,ktest,mmu,percpu,pic,power,secondary,switch,timer,uaccess,vectors}.rs` |
+| arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,paging,pic,stat,syscall,trap,uart,vectors}.rs`, `arch/aarch64/{mod,paging,psci,stat,sysreg,tlb,trap}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,boot,catch,cpu,gdt,gs,idt,ipi,mmu,percpu,pic,power,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S`, `arch/aarch64/{mod,boot,catch,cpu,gdt,gic,gs,idt,ipi,irqchip,ktest,ktest_el0,ktest_uaccess,mmu,percpu,pic,power,secondary,switch,timer,uaccess,vectors}.rs` |
 | mm | `mm/{mod,asid,pmm,paging,paging_tests,physmap,heap,kva}.rs`, `mm/pmm/{kani_proofs,run_tests}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |
 | time | `time/{mod,reload}.rs` | `time/{mod,time_init}.rs` |
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
@@ -204,11 +204,11 @@ children, need no row.
 | log | `log/{mod,backtrace,line,pvpanic,vmcoreinfo}.rs`, `log/trace/{mod,tests}.rs`, `log/vmcore/{mod,sig,synth,tables,tests,walk}.rs` | `log/{mod,log_init,panic,panic_test,pvpanic_init,diag,ksyms,trace_init,vmcoreinfo_init}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
 | shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
-| dev | `dev/{mod,pci,dma,virtio,entropy,tests}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
-| drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/mod.rs`, `drivers/virtio_blk_init/{mod,vq,issue,irq}.rs` |
+| dev | `dev/{mod,pci,dma,virtio,entropy,tests}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,virtio_mmio_init,entropy_init}.rs` |
+| drivers | `drivers/{mod,virtio_blk,virtio_input}.rs` | `drivers/mod.rs`, `drivers/virtio_blk_init/{mod,vq,issue,irq}.rs`, `drivers/virtio_input_init.rs` |
 | block | `block/{mod,part,cache,blockdev,loom_models}.rs`, `block/cache/tests.rs` | `block/{mod,block_init,blockdev_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,error,inode,mount,walk,file,ramfs,sizes,testfs,tests,walk_tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests,ops_tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests,image_tests,limit_tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
-| proc | `proc/{mod,elf,fill,pid,syscall,syscall_table,uabi,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs`, `proc/elf/stack.rs` | `proc/{mod,addr_space_init,fill_init,user_init,syscall_init,syscall_init_aarch64,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit,floor}.rs` |
+| proc | `proc/{mod,elf,fill,pid,syscall,syscall_table,uabi,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs`, `proc/elf/{stack,tls}.rs` | `proc/{mod,addr_space_init,fill_init,user_init,syscall_init,syscall_init_aarch64,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit,floor}.rs` |
 | ktest | `ktest/mod.rs` (selection by `vibeos.ktest=`, run counts, deadlines) | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 
 **In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel

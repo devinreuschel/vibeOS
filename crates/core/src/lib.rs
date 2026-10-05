@@ -67,7 +67,7 @@ pub use arch::{apic, desc, pic, uart, vectors};
 pub use block::{cache, part};
 pub use console::{fb, font, kbd};
 pub use dev::{dma, entropy, pci, virtio};
-pub use drivers::virtio_blk;
+pub use drivers::{virtio_blk, virtio_input};
 pub use fs::{fat, vibefs};
 pub use irq::ipi;
 pub use mm::{asid, heap, kva, paging, physmap, pmm};

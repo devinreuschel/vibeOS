@@ -8,9 +8,7 @@ use vibeos::arch::ContextSwitch;
 use vibeos::desc::UserSegs;
 use vibeos::kalloc::TryBox;
 use vibeos::proc::INIT_PID;
-use vibeos::thread::{
-    CpuAffinity, CpuContext, Fxsave, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome,
-};
+use vibeos::thread::{CpuAffinity, CpuContext, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome};
 
 use super::{SCHED, tid_of_slot, with_sched};
 use crate::arch::current::Arch;
@@ -54,9 +52,10 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
-        fpu: Fxsave::INITIAL,
+        fpu: super::initial_fxsave(),
         fp_cpu: None,
         user_segs: UserSegs::NULL,
+        tls_base: 0,
         syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid: 0,
         no_reclaim: AtomicU32::new(0),

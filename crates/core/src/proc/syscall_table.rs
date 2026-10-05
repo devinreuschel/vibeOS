@@ -192,11 +192,17 @@ pub enum Sys {
     Getdents64,
     /// `psinfo`.
     Psinfo,
+    /// `openat`.
+    Openat,
+    /// `dup3`.
+    Dup3,
+    /// `clone`.
+    Clone,
 }
 
 impl Sys {
     /// Every syscall, in table order.
-    pub const ALL: [Sys; 24] = [
+    pub const ALL: [Sys; 27] = [
         Sys::Read,
         Sys::Write,
         Sys::Open,
@@ -221,6 +227,9 @@ impl Sys {
         Sys::Reboot,
         Sys::Getdents64,
         Sys::Psinfo,
+        Sys::Openat,
+        Sys::Dup3,
+        Sys::Clone,
     ];
 
     /// This syscall's row.
@@ -230,7 +239,7 @@ impl Sys {
 }
 
 /// The rows, in [`Sys`] order.
-pub static ROWS: [Row; 24] = [
+pub static ROWS: [Row; 27] = [
     Row {
         sys: Sys::Read,
         name: "read",
@@ -688,6 +697,99 @@ pub static ROWS: [Row; 24] = [
             },
         ],
     },
+    Row {
+        sys: Sys::Openat,
+        name: "openat",
+        args: &[
+            Arg {
+                name: "dfd",
+                ty: CType::Int,
+                ptr: None,
+            },
+            Arg {
+                name: "filename",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::CStr,
+                    dir: Dir::In,
+                    nullable: false,
+                    when: "before anything else",
+                }),
+            },
+            Arg {
+                name: "flags",
+                ty: CType::Int,
+                ptr: None,
+            },
+            Arg {
+                name: "mode",
+                ty: CType::UmodeT,
+                ptr: None,
+            },
+        ],
+    },
+    Row {
+        sys: Sys::Dup3,
+        name: "dup3",
+        args: &[
+            Arg {
+                name: "oldfd",
+                ty: CType::UInt,
+                ptr: None,
+            },
+            Arg {
+                name: "newfd",
+                ty: CType::UInt,
+                ptr: None,
+            },
+            Arg {
+                name: "flags",
+                ty: CType::Int,
+                ptr: None,
+            },
+        ],
+    },
+    Row {
+        sys: Sys::Clone,
+        name: "clone",
+        args: &[
+            Arg {
+                name: "flags",
+                ty: CType::ULong,
+                ptr: None,
+            },
+            Arg {
+                name: "newsp",
+                ty: CType::ULong,
+                ptr: None,
+            },
+            Arg {
+                name: "parent_tid",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Unread,
+                    dir: Dir::In,
+                    nullable: false,
+                    when: "not read (ROADMAP §13.8)",
+                }),
+            },
+            Arg {
+                name: "child_tid",
+                ty: CType::Ptr,
+                ptr: Some(Ptr {
+                    kind: PtrKind::Unread,
+                    dir: Dir::In,
+                    nullable: false,
+                    when: "not read (ROADMAP §13.8)",
+                }),
+            },
+            Arg {
+                name: "tls",
+                ty: CType::ULong,
+                ptr: None,
+            },
+        ],
+    },
 ];
 
 /// The handlers: one method per row, each argument in its C type
@@ -749,6 +851,19 @@ pub trait Handlers {
     fn getdents64(&mut self, fd: u32, dirent: u64, count: u32) -> SysResult;
     /// `psinfo`.
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult;
+    /// `openat`.
+    fn openat(&mut self, dfd: i32, filename: u64, flags: i32, mode: u16) -> SysResult;
+    /// `dup3`.
+    fn dup3(&mut self, oldfd: u32, newfd: u32, flags: i32) -> SysResult;
+    /// `clone`.
+    fn clone(
+        &mut self,
+        flags: u64,
+        newsp: u64,
+        parent_tid: u64,
+        child_tid: u64,
+        tls: u64,
+    ) -> SysResult;
 }
 
 /// aarch64: the number is the low 32 bits of `x8`, unsigned (ROADMAP §11.6).
@@ -798,10 +913,18 @@ pub mod aarch64 {
         pub const SYS_REBOOT: u64 = 142;
         /// `getdents64`.
         pub const SYS_GETDENTS64: u64 = 61;
+        /// `psinfo`.
+        pub const SYS_PSINFO: u64 = 500;
+        /// `openat`.
+        pub const SYS_OPENAT: u64 = 56;
+        /// `dup3`.
+        pub const SYS_DUP3: u64 = 24;
+        /// `clone`.
+        pub const SYS_CLONE: u64 = 220;
     }
 
-    const SLOTS: [Option<Sys>; 261] = {
-        let mut t = [None; 261];
+    const SLOTS: [Option<Sys>; 501] = {
+        let mut t = [None; 501];
         t[nr::SYS_READ as usize] = Some(Sys::Read);
         t[nr::SYS_WRITE as usize] = Some(Sys::Write);
         t[nr::SYS_CLOSE as usize] = Some(Sys::Close);
@@ -822,6 +945,10 @@ pub mod aarch64 {
         t[nr::SYS_GETPPID as usize] = Some(Sys::Getppid);
         t[nr::SYS_REBOOT as usize] = Some(Sys::Reboot);
         t[nr::SYS_GETDENTS64 as usize] = Some(Sys::Getdents64);
+        t[nr::SYS_PSINFO as usize] = Some(Sys::Psinfo);
+        t[nr::SYS_OPENAT as usize] = Some(Sys::Openat);
+        t[nr::SYS_DUP3 as usize] = Some(Sys::Dup3);
+        t[nr::SYS_CLONE as usize] = Some(Sys::Clone);
         t
     };
 
@@ -851,7 +978,11 @@ pub mod aarch64 {
             Sys::Getppid => h.getppid(),
             Sys::Reboot => h.reboot(regs[0] as i32, regs[1] as i32, regs[2] as u32, regs[3]),
             Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
-            Sys::Open | Sys::Dup2 | Sys::Fork | Sys::Psinfo => Err(KError::NoSys),
+            Sys::Psinfo => h.psinfo(regs[0], regs[1] as usize),
+            Sys::Openat => h.openat(regs[0] as i32, regs[1], regs[2] as i32, regs[3] as u16),
+            Sys::Dup3 => h.dup3(regs[0] as u32, regs[1] as u32, regs[2] as i32),
+            Sys::Clone => h.clone(regs[0], regs[1], regs[2], regs[4], regs[3]),
+            Sys::Open | Sys::Dup2 | Sys::Fork => Err(KError::NoSys),
         }
     }
 
@@ -1048,5 +1179,44 @@ impl Handlers for Recorder {
 
     fn psinfo(&mut self, buf: u64, len: usize) -> SysResult {
         self.record(Sys::Psinfo, &[Val::Ptr(buf), Val::Usize(len)])
+    }
+
+    fn openat(&mut self, dfd: i32, filename: u64, flags: i32, mode: u16) -> SysResult {
+        self.record(
+            Sys::Openat,
+            &[
+                Val::I32(dfd),
+                Val::Ptr(filename),
+                Val::I32(flags),
+                Val::U16(mode),
+            ],
+        )
+    }
+
+    fn dup3(&mut self, oldfd: u32, newfd: u32, flags: i32) -> SysResult {
+        self.record(
+            Sys::Dup3,
+            &[Val::U32(oldfd), Val::U32(newfd), Val::I32(flags)],
+        )
+    }
+
+    fn clone(
+        &mut self,
+        flags: u64,
+        newsp: u64,
+        parent_tid: u64,
+        child_tid: u64,
+        tls: u64,
+    ) -> SysResult {
+        self.record(
+            Sys::Clone,
+            &[
+                Val::U64(flags),
+                Val::U64(newsp),
+                Val::Ptr(parent_tid),
+                Val::Ptr(child_tid),
+                Val::U64(tls),
+            ],
+        )
     }
 }

@@ -865,6 +865,37 @@ class TestConsoleInput(unittest.TestCase):
             run_qemu_console_input(FAKE_CFG, line_source=src)
         self.assertIn("PS/2 sendkey echo missing", str(cm.exception))
 
+    def test_aarch64_serial_then_virtio_keyboard(self) -> None:
+        lines = [
+            *CONSOLE_OK_LINES[:8],
+            "vibeos> echo kbd-ok",
+            "kbd-ok",
+        ]
+        src = FakeLineSource.from_lines(lines, end="timeout")
+        cfg = dataclasses.replace(FAKE_CFG, arch="aarch64")
+        result = run_qemu_console_input(cfg, line_source=src)
+        self.assertEqual(
+            result.matched,
+            [
+                "shell_ready",
+                "serial_echo",
+                "sh_status",
+                "sh_ps",
+                "kbd_echo",
+                "sh_poweroff",
+                "console_input_sh",
+            ],
+        )
+        self.assertEqual(len(src.monitor_cmds), 1)
+        self.assertTrue(src.monitor_cmds[0].startswith("sendkey e-c-h-o-spc-k-b-d"))
+
+    def test_missing_virtio_keyboard_echo_fails(self) -> None:
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES[:9])
+        cfg = dataclasses.replace(FAKE_CFG, arch="aarch64")
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(cfg, line_source=src)
+        self.assertIn("virtio-keyboard sendkey echo missing", str(cm.exception))
+
     def test_panic_fails(self) -> None:
         src = FakeLineSource.from_lines(["vibeOS: shell ready", K("vibeOS: panic: x")])
         with self.assertRaises(HarnessError) as cm:
@@ -1642,6 +1673,21 @@ class TestNoRetry(unittest.TestCase):
             self.assertEqual(run_e2e.main(), 1)
         self.assertEqual(inp.call_count, 1)
 
+    def test_pci_golden_is_arch_specific(self) -> None:
+        self.assertIn("8086:1237", run_e2e.pci_golden("x86_64"))
+        self.assertNotIn("8086:1237", run_e2e.pci_golden("aarch64"))
+        self.assertIn("1b36:0008", run_e2e.pci_golden("aarch64"))
+
+    def test_pci_check_accepts_virt_ids(self) -> None:
+        lines = [
+            *[
+                K(f"vibeOS: pci: 00:0{i}.0 {id_}")
+                for i, id_ in enumerate(run_e2e.PCI_GOLDEN_AARCH64)
+            ],
+            K("vibeOS: pci: 6 devices"),
+        ]
+        run_e2e._check_pci_qemu_set(lines, "aarch64")
+
 
 class TestQemuArgv(unittest.TestCase):
     def test_extra_accel_is_effective(self) -> None:
@@ -1763,6 +1809,9 @@ class TestQemuArgv(unittest.TestCase):
         try:
             self.assertEqual(argv[0], "qemu-system-aarch64")
             self.assertEqual(argv[argv.index("-machine") + 1], "virt,acpi=off,gic-version=3")
+            self.assertEqual(
+                argv[argv.index("-global") + 1], "virtio-mmio.force-legacy=off"
+            )
             self.assertNotIn("-cdrom", argv)
             blob = " ".join(argv)
             self.assertIn("virtio-scsi-pci", blob)
@@ -2342,6 +2391,10 @@ class TestSendkeyChars(unittest.TestCase):
             sendkey_chars("echo ps2-ok\n"),
             "e-c-h-o-spc-p-s-2-minus-o-k-ret",
         )
+        self.assertEqual(
+            sendkey_chars("echo kbd-ok\n"),
+            "e-c-h-o-spc-k-b-d-minus-o-k-ret",
+        )
 
     def test_rejects_empty_and_unknown(self) -> None:
         from tests.harness.harness import HarnessError, sendkey_chars
@@ -2362,6 +2415,8 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("num-queues=4", blob)
         self.assertIn("isa-debug-exit", blob)
         self.assertIn("edu,dma_mask=0xFFFFFFFF", args)
+        self.assertIn("virtio-keyboard-pci,disable-legacy=on", args)
+        self.assertIn("virtio-tablet-pci,disable-legacy=on", args)
 
     def test_ktest_devices_aarch64_omits_isa_debug_exit(self) -> None:
         from tests.harness.harness import ktest_devices
@@ -2373,7 +2428,15 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("e1000e", args)
         self.assertIn("virtio-rng-pci", blob)
         self.assertIn("virtio-blk-pci", blob)
+        self.assertNotIn("virtio-blk-device", blob)
+        self.assertNotIn("virtio-keyboard-pci", blob)
+        self.assertNotIn("virtio-tablet-pci", blob)
         self.assertIn("discard=unmap", blob)
+        mmio = ktest_devices("/tmp/disk.img", 4, arch="aarch64", mmio_disk="/tmp/mmio.img")
+        mmio_blob = " ".join(mmio)
+        self.assertIn("virtio-blk-device", mmio_blob)
+        self.assertIn("/tmp/mmio.img", mmio_blob)
+        self.assertIn("num-queues=4", mmio_blob)
 
     def test_ktest_devices_probe_functions(self) -> None:
         from tests.harness.harness import ktest_devices

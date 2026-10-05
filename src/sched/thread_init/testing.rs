@@ -1,5 +1,6 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::sched::stack_depth::{self, Deepest};
 use vibeos::sched::take_next;
 use vibeos::thread::{CpuAffinity, GuardedStack, MAX_THREADS, Tcb, ThreadId, ThreadState};
@@ -7,6 +8,7 @@ use vibeos::thread::{CpuAffinity, GuardedStack, MAX_THREADS, Tcb, ThreadId, Thre
 use vibeos::kalloc::{AllocError, TryVec};
 use vibeos::limits;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) use super::sweep::SWEEP_CHUNK;
 use super::{runnable_on, with_sched};
 use crate::cell::BootCell;
@@ -73,6 +75,7 @@ pub(super) static FAIL_FORK_STACK: AtomicBool = AtomicBool::new(false);
 
 /// Move this CPU's cached stacks onto its dead list and wake its worker,
 /// which unmaps and frees them.
+#[cfg(target_arch = "x86_64")]
 pub fn drain_local_stack_cache() {
     let kick = crate::per_cpu_init::with_current(|cpu| {
         let mut any = false;
@@ -100,6 +103,7 @@ pub fn drain_local_stack_cache() {
 /// # Safety
 ///
 /// No CPU runs on `stack`, now or later (invariant I10).
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
     // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
     super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
@@ -119,8 +123,7 @@ pub fn fail_next_fork_stack() {
     FAIL_FORK_STACK.store(true, Ordering::Release);
 }
 
-/// C-REQUEUE-HOOK's switch, which `sched::ktest::set_requeue_next_cpu`
-/// sets.
+/// C-REQUEUE-HOOK's switch, which [`set_requeue_next_cpu`] sets.
 pub(in crate::sched) static REQUEUE: AtomicBool = AtomicBool::new(false);
 /// Moves the hook has made since boot (`sched::ktest::requeues`).
 pub(in crate::sched) static REQUEUES: AtomicU64 = AtomicU64::new(0);
@@ -184,8 +187,33 @@ pub fn queue_here(id: ThreadId) {
 }
 
 pub(super) fn requeue_on() -> bool {
-    // Acquire: pairs with the Release store in `sched::ktest::set_requeue_next_cpu`.
+    // Acquire: pairs with the Release store in `set_requeue_next_cpu`.
     REQUEUE.load(Ordering::Acquire)
+}
+
+/// C-REQUEUE-HOOK: move each user or `CpuAffinity::Any` thread to the
+/// next online CPU when its CPU dequeues it ([`requeue_next_cpu`]).
+/// Turning it on forgets the arrivals an earlier use left: a thread
+/// moved just before the hook went off keeps its flag, and a later
+/// thread in that slot would run where it is dequeued instead of moving.
+pub fn set_requeue_next_cpu(on: bool) {
+    if on {
+        for a in ARRIVED.try_get().map_or(&[][..], |v| &v[..]) {
+            // Relaxed: a reset before the hook is published; pairs with nothing.
+            a.store(false, Ordering::Relaxed);
+        }
+    }
+    // Release: pairs with the Acquire load in `requeue_on`.
+    REQUEUE.store(on, Ordering::Release);
+}
+
+/// Turns the requeue hook off when dropped.
+pub struct RequeueGuard;
+
+impl Drop for RequeueGuard {
+    fn drop(&mut self) {
+        set_requeue_next_cpu(false);
+    }
 }
 
 /// The first online CPU after `me`, wrapping; `None` with one CPU.
@@ -547,7 +575,7 @@ pub fn cpu_of(id: ThreadId) -> u32 {
     super::SCHED.lock().get(id).expect("unknown thread").cpu
 }
 
-/// C-REQUEUE-HOOK: while `sched::ktest::set_requeue_next_cpu` is on, a user
+/// C-REQUEUE-HOOK: while [`set_requeue_next_cpu`] is on, a user
 /// thread or a `CpuAffinity::Any` kernel thread that this CPU dequeues
 /// while another thread is current moves to the next online CPU instead
 /// of running here, once per slice it runs. A preempted thread that is the
@@ -646,6 +674,7 @@ pub(super) fn refill_cached(stack: &GuardedStack) {
 /// is cached, zeroed or linked onto the dead list: its depth is recorded
 /// for the thread that just switched off it, whose `Tcb` stays intact
 /// until `on_cpu` clears (TESTING §8.2).
+#[cfg(target_arch = "x86_64")]
 pub(super) fn scan_dead_slot() {
     let found = per_cpu_init::with_current(|cpu| {
         let s = cpu.dead_stack.as_ref()?;
@@ -679,6 +708,7 @@ pub(super) fn scan_dead_slot() {
 
 /// Scan every live thread's stack, one `SCHED` section per slot, and hand
 /// each measurement to `f` with the lock dropped (TESTING §8.2).
+#[cfg(target_arch = "x86_64")]
 pub fn scan_live_stacks(f: impl FnMut(Deepest)) {
     super::scan_live_stacks(f);
 }
