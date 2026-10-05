@@ -226,8 +226,11 @@ $changed"
 fi
 echo "setup: limine $LIMINE_TAG @ $LIMINE_COMMIT"
 
-if [ ! -x "$LIMINE_DIR/limine" ]; then
+# The archive has no Unix host tool. A restored cache may have one built
+# for another runner arch (ROADMAP §11.7 arm64 jobs).
+if [ ! -x "$LIMINE_DIR/limine" ] || ! "$LIMINE_DIR/limine" version --version-only >/dev/null 2>&1; then
     echo "setup: building limine host tool"
+    rm -f "$LIMINE_DIR/limine"
     make -C "$LIMINE_DIR"
 else
     echo "setup: limine host tool already built"

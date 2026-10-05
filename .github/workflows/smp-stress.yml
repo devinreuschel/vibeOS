@@ -147,7 +147,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989-${{ runner.arch }}
 
       - name: setup
         run: ./setup.sh
