@@ -520,6 +520,7 @@ const MIG_WRONG_PID: u32 = 3;
 const MIG_NEVER_MOVED: u32 = 4;
 
 fn migrate_body(i: usize) {
+    // Acquire: pairs with the Release store of MIGRATE_START in `current_migrate_if1`.
     while !MIGRATE_START.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
@@ -530,6 +531,8 @@ fn migrate_body(i: usize) {
     ) else {
         return;
     };
+    // Acquire: pairs with the Release stores of MIGRATE_TCB and MIGRATE_PID
+    // in `current_migrate_if1`.
     let (tcb, pid) = (tcb.load(Ordering::Acquire), pid.load(Ordering::Acquire));
     let first = arch::cpu_id_hint();
     let mut moved = false;
@@ -549,8 +552,9 @@ fn migrate_body(i: usize) {
     if verdict == MIG_OK && !moved {
         verdict = MIG_NEVER_MOVED;
     }
-    // Release: publishes the verdict to `current_migrate_if1`.
+    // Release: pairs with the Acquire load of MIGRATE_RESULT in `current_migrate_if1`.
     out.store(verdict, Ordering::Release);
+    // Acquire: pairs with the Release store of MIGRATE_EXIT in `current_migrate_if1`.
     while !MIGRATE_EXIT.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
@@ -581,7 +585,9 @@ pub(crate) fn current_migrate_if1() -> Outcome {
     if second_cpu().is_none() {
         return Outcome::Skip("needs 2 CPUs");
     }
+    // Release: pairs with the Acquire load of MIGRATE_START in `migrate_body`.
     MIGRATE_START.store(false, Ordering::Release);
+    // Release: pairs with the Acquire load of MIGRATE_EXIT in `migrate_body`.
     MIGRATE_EXIT.store(false, Ordering::Release);
     let entries: [fn(); MIGRATE_THREADS] = [migrate_0, migrate_1, migrate_2, migrate_3];
     let mut ids = [ThreadId::NONE; MIGRATE_THREADS];
@@ -589,7 +595,9 @@ pub(crate) fn current_migrate_if1() -> Outcome {
         let h = match thread_init::spawn("current-migrate", entry) {
             Ok(h) => h,
             Err(e) => {
+                // Release: pairs with the Acquire load of MIGRATE_EXIT in `migrate_body`.
                 MIGRATE_EXIT.store(true, Ordering::Release);
+                // Release: pairs with the Acquire load of MIGRATE_START in `migrate_body`.
                 MIGRATE_START.store(true, Ordering::Release);
                 return crate::fail_fmt!("spawn: {}", e.as_str());
             }
@@ -598,16 +606,21 @@ pub(crate) fn current_migrate_if1() -> Outcome {
         ids[i] = id;
         let pid = PID_MAX.saturating_add(1).saturating_add(i as u32);
         thread_init::set_pid_cr3(id, pid, 0);
+        // Release: pairs with the Acquire load of MIGRATE_TCB in `migrate_body`.
         MIGRATE_TCB[i].store(thread_init::tcb_ptr(id), Ordering::Release);
+        // Release: pairs with the Acquire load of MIGRATE_PID in `migrate_body`.
         MIGRATE_PID[i].store(pid, Ordering::Release);
+        // Release: pairs with the Acquire load of MIGRATE_RESULT below.
         MIGRATE_RESULT[i].store(MIG_RUNNING, Ordering::Release);
     }
     let done = {
         let _g = thread_init::testing::RequeueGuard;
         thread_init::testing::set_requeue_next_cpu(true);
+        // Release: pairs with the Acquire load of MIGRATE_START in `migrate_body`.
         MIGRATE_START.store(true, Ordering::Release);
         sleep_until(
             || {
+                // Acquire: pairs with the Release store of MIGRATE_RESULT in `migrate_body`.
                 MIGRATE_RESULT
                     .iter()
                     .all(|r| r.load(Ordering::Acquire) != MIG_RUNNING)
@@ -618,12 +631,14 @@ pub(crate) fn current_migrate_if1() -> Outcome {
     for id in ids {
         thread_init::set_pid_cr3(id, 0, 0);
     }
+    // Release: pairs with the Acquire load of MIGRATE_EXIT in `migrate_body`.
     MIGRATE_EXIT.store(true, Ordering::Release);
     let joined = sleep_until(|| ids.iter().all(|&id| thread_init::exited(id)), 2_000);
     if !done {
         return Outcome::Fail("a thread did not finish its 2 s");
     }
     for (i, r) in MIGRATE_RESULT.iter().enumerate() {
+        // Acquire: pairs with the Release store of MIGRATE_RESULT in `migrate_body`.
         match r.load(Ordering::Acquire) {
             MIG_OK => {}
             MIG_WRONG_TCB => return crate::fail_fmt!("thread {i}: current_tcb not its own"),
@@ -664,6 +679,7 @@ pub(crate) fn test_el0_pan_every_cpu() -> Outcome {
         // Release: pairs with the Acquire load below.
         PAN_DONE.store(false, Ordering::Release);
         spawn_thread_on("pan_cpu", pan_on_cpu, i);
+        // Acquire: pairs with the Release store in `pan_on_cpu`.
         if !sleep_until(|| PAN_DONE.load(Ordering::Acquire), 5_000) {
             return crate::fail_fmt!("cpu{i} did not report");
         }
@@ -702,8 +718,10 @@ pub(crate) fn test_el0_env_every_cpu() -> Outcome {
             i += 1;
             continue;
         }
+        // Release: pairs with the Acquire load below.
         ENV_DONE.store(false, Ordering::Release);
         spawn_thread_on("env_cpu", env_on_cpu, i);
+        // Acquire: pairs with the Release store in `env_on_cpu`.
         if !sleep_until(|| ENV_DONE.load(Ordering::Acquire), 15_000) {
             return crate::fail_fmt!("cpu{i} did not finish");
         }

@@ -1004,7 +1004,7 @@ limitations.
 - [x] first set wired for proof: `write`, `exit`, `getpid`, `sched_yield`
 - [x] remainder: `read`, `open`, `close`, `lseek`, `fork`, `execve`, `wait4`, `getppid`, `dup`, `dup2`, `kill`, `fcntl`
 - [x] `brk`, anonymous `mmap`/`munmap`, `getdents64`, `fstat`, and `nanosleep`
-- [x] `openat`, `dup3`, and fork-shaped `clone`; lands in §11.6
+- [x] `openat`, `dup3`, and fork-shaped `clone`
 - [ ] `stat` and the rest of the POSIX floor; lands in §13.9
 - [x] errno numbers equal Linux's for every name the `KError` table (`vibeos::kerror`) defines (F083)
 - [x] each error condition returns the errno Linux returns for it: a full filesystem, a full global open-file table, and FAT's 4 GiB file limit return `ENOSPC`, `ENFILE`, and `EFBIG`, on-disk corruption returns `EIO`, and `lseek` on the console returns `ESPIPE` (F083)
@@ -1020,7 +1020,7 @@ limitations.
 - [x] initial stack set up with `argv`, `envp`, and the auxiliary vector
 - [x] `execve` copies the caller's `envp` onto the new image's initial stack, as it copies `argv`
 - [x] `PT_TLS` parsed by `elf::parse`, and `setup_tls` places its image below the stack in the x86_64 variant II layout with a self-pointer at the thread pointer; `FS_BASE` is loaded at the first entry to ring 3 and at `execve` (F022)
-- [x] `FS_BASE` saved and restored per thread on every context switch, and `fork` gives the child the parent's saved value, shown by the in-guest test of the box that lands it; today `on_switch` does not switch it, so a TLS process resumes with whatever base its CPU last loaded, 0 after any process on that CPU exits or is killed. Reopened by the kernel review (F022); lands in §11.6.
+- [x] `FS_BASE` saved and restored per thread on every context switch, and `fork` gives the child the parent's saved value, shown by the in-guest test of the box that lands it; today `on_switch` does not switch it, so a TLS process resumes with whatever base its CPU last loaded, 0 after any process on that CPU exits or is killed.
 - [x] header parsing in `vibeos-core` (`crates/core/src/proc/elf.rs`), host-tested against images the test helper `build_elf` synthesizes and against truncated ones
 - [x] host tests that parse checked-in static binaries linked by `ld.lld` and by GNU `ld` (§10.5)
 - [x] refuse a malformed binary with an error rather than mapping garbage

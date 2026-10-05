@@ -111,7 +111,8 @@ pub(crate) fn test_uaccess_smap_stray_fault() -> Outcome {
             core::ptr::read_volatile(STRAY_RW_VA as *const u8);
         });
         // SAFETY: as for the read; a write that got through touches only
-        // this throwaway page; established by `with_stray_page`.
+        // this throwaway page; established by
+        // `arch::aarch64::ktest_uaccess::with_stray_page`.
         let write = arch::catch::catch_dabt(|| unsafe {
             core::ptr::write_volatile(STRAY_RW_VA as *mut u8, 0xA5);
         });

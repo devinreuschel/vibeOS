@@ -199,9 +199,11 @@ pub(super) fn requeue_on() -> bool {
 pub fn set_requeue_next_cpu(on: bool) {
     if on {
         for a in ARRIVED.try_get().map_or(&[][..], |v| &v[..]) {
+            // Relaxed: a reset before the hook is published; pairs with nothing.
             a.store(false, Ordering::Relaxed);
         }
     }
+    // Release: pairs with the Acquire load in `requeue_on`.
     REQUEUE.store(on, Ordering::Release);
 }
 

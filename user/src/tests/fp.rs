@@ -32,8 +32,8 @@ fn reap(pid: usize) -> Result<u8, &'static str> {
     sys::exit_code(status as u32).ok_or("child killed by a signal")
 }
 
-/// `clone` with fork semantics (`SIGCHLD`, `newsp` 0). x86 `fork` ignores
-/// the extra registers; aarch64 `SYS_FORK` is `clone` (SYSCALL.md).
+/// `clone` with fork semantics (`SIGCHLD`, `newsp` 0). `SYS_FORK` is the
+/// asm-generic `clone` number (SYSCALL.md).
 const FORK_CLONE_FLAGS: usize = 17;
 
 /// The parent sets [`DIRTY`] and forks in one block; the child exits 0 when
