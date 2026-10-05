@@ -191,6 +191,14 @@ user load a kernel-half base, saves `GS_BASE` and loads the per-CPU base uncondi
 thread's GS base, and the thread resumes on another CPU with a kernel address as its GS base, or
 with two CPUs sharing one `PerCpu`.
 
+**aarch64 kernel `#DABT` after an IRQ, FAR in the heap/KVA hole.**
+The EL1 stub used `x16` as the stack-bit temporary before saving GPRs, so
+`eret` restored `SP-FRAME` into `x16`. LLVM keeps scan offsets in `x16`; an
+IRQ during `cmdline::Words::next` made the next `ldrb` use `ptr+(SP-FRAME)`
+(CI 37286340200, `esr=0x96000004`). Rule: the stack-bit test exchanges SP
+and `x0` by add/sub and touches no other register (DESIGN §11.5 rule 6);
+`el1_x16_survives_irq` holds `x16` live until a timer IRQ.
+
 **A user program halts every CPU.**
 Ring-3 activity reached `exception_halt` on three paths. `debug_ex` had no ring-3 branch and
 `sig_for_vec` mapped neither `#DB` nor `#AC`, so a user `popf` that set `RFLAGS.TF`, or an `int1`

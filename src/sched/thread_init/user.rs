@@ -1,7 +1,136 @@
 //! A user thread's ring-3 CPU state outside the context switch: what `fork`
 //! and `execve` set in its TCB (DESIGN §5.1, §7.5).
 
+use core::alloc::Layout;
+use core::ptr;
+
 use super::*;
+
+/// Box a TCB by writing each field through the allocation. `Tcb` holds
+/// `MAX_STACK_PAGES` frame tokens and an `Fxsave`; a by-value constructor
+/// would put that frame under every spawn (DESIGN §4.5).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)] // same fields as the TCB constructor
+pub(super) fn box_new_tcb(
+    name: &'static str,
+    entry: fn(),
+    affinity: CpuAffinity,
+    enqueue: bool,
+    cpu: u32,
+    first_nest: u32,
+    pid: u32,
+    as_cr3: u64,
+) -> Result<TryBox<Tcb>, AllocError> {
+    let slot = TryBox::<Tcb>::try_new_uninit()?;
+    let raw = TryBox::into_raw(slot);
+    // SAFETY: `raw` is the exclusive `MaybeUninit<Tcb>` `try_new_uninit`
+    // allocated. Each field is written once, then the pointer is a live
+    // `Tcb`; established here.
+    unsafe {
+        let p = raw.cast::<Tcb>();
+        ptr::addr_of_mut!((*p).id).write(ThreadId(0));
+        ptr::addr_of_mut!((*p).name).write(name);
+        ptr::addr_of_mut!((*p).state).write(if enqueue { ThreadState::Ready } else { PARKED });
+        ptr::addr_of_mut!((*p).on_cpu).write(OnCpu::new());
+        ptr::addr_of_mut!((*p).stack).write(None);
+        ptr::addr_of_mut!((*p).context).write(CpuContext::empty());
+        ptr::addr_of_mut!((*p).entry).write(entry);
+        ptr::addr_of_mut!((*p).affinity).write(affinity);
+        ptr::addr_of_mut!((*p).cpu).write(cpu);
+        ptr::addr_of_mut!((*p).irq_nest).write(first_nest);
+        ptr::addr_of_mut!((*p).switches).write(0);
+        ptr::addr_of_mut!((*p).run_tsc).write(0);
+        ptr::addr_of_mut!((*p).wait_outcome).write(WaitOutcome::Woken);
+        ptr::addr_of_mut!((*p).as_cr3).write(as_cr3);
+        ptr::addr_of_mut!((*p).fpu).write(initial_fxsave());
+        ptr::addr_of_mut!((*p).fp_cpu).write(None);
+        ptr::addr_of_mut!((*p).user_segs).write(UserSegs::NULL);
+        ptr::addr_of_mut!((*p).tls_base).write(0);
+        ptr::addr_of_mut!((*p).syscall_count).write(vibeos::atomic::AtomicU64::new(0));
+        ptr::addr_of_mut!((*p).pid).write(pid);
+        ptr::addr_of_mut!((*p).no_reclaim).write(AtomicU32::new(0));
+        Ok(TryBox::from_raw(p))
+    }
+}
+
+/// A cached default-size stack, or a freshly mapped one, as a heap handle.
+/// `spawn_inner` holds only the pointer: a by-value [`GuardedStack`] plus
+/// `alloc_guarded_stack`'s frame-token array is a 16 KiB stack's user-spawn
+/// peak (DESIGN §4.5).
+#[inline(never)]
+pub(super) fn take_boxed_stack(stack_pages: usize) -> Result<TryBox<GuardedStack>, SpawnError> {
+    if stack_pages == DEFAULT_STACK_PAGES
+        && !per_cpu_init::with_current(|cpu| cpu.stack_cache.is_empty())
+        && let Some(b) = boxed_cached_stack()
+    {
+        return Ok(b);
+    }
+    match kva_init::alloc_boxed_stack(stack_pages) {
+        Ok(b) => Ok(b),
+        // Once: an exit burst can leave this CPU's dead list holding
+        // enough stacks for KVA to refuse (`Kva::alloc`'s live cap).
+        Err(_) if reclaim_dead_stacks_here() => {
+            kva_init::alloc_boxed_stack(stack_pages).map_err(|_| SpawnError::NoMemory)
+        }
+        Err(_) => Err(SpawnError::NoMemory),
+    }
+}
+
+/// Box a stack this CPU's cache already held. The 520-byte handle lives
+/// on this frame, not `take_boxed_stack`'s (DESIGN §4.5).
+#[inline(never)]
+fn boxed_cached_stack() -> Option<TryBox<GuardedStack>> {
+    let s = cached_stack()?;
+    match TryBox::try_new_uninit() {
+        Ok(slot) => Some(slot.write(s)),
+        Err(_) => {
+            return_stack(s);
+            None
+        }
+    }
+}
+
+/// Copy the handle into a TCB slot without freeing the box. `fill_tcb`
+/// runs under SCHED, which ranks above HEAP, so the caller
+/// [`forget_stack_box`]s after that lock drops (DESIGN §4.5).
+#[inline(never)]
+pub(super) fn place_stack(
+    dst: &mut Option<GuardedStack>,
+    src: TryBox<GuardedStack>,
+) -> *mut GuardedStack {
+    let p = TryBox::into_raw(src);
+    // SAFETY: `src` is the exclusive box; `dst` is empty; the copy is the
+    // one handle; the allocation stays allocated until `forget_stack_box`;
+    // established here.
+    unsafe {
+        ptr::write(dst, Some(ptr::read(p)));
+    }
+    p
+}
+
+/// Free the empty box [`place_stack`] left. Not under SCHED.
+pub(super) fn forget_stack_box(p: *mut GuardedStack) {
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: `p` came from `place_stack` (`thread_init::user::place_stack`);
+    // the handle lives in the TCB; established here.
+    unsafe {
+        alloc::alloc::dealloc(p.cast::<u8>(), Layout::new::<GuardedStack>());
+    }
+}
+
+/// Move the handle into a TCB slot. Not under SCHED: the box is freed here.
+#[inline(never)]
+pub(super) fn install_stack(dst: &mut Option<GuardedStack>, src: TryBox<GuardedStack>) {
+    forget_stack_box(place_stack(dst, src));
+}
+
+/// Give an unused boxed stack back to the cache or KVA.
+#[inline(never)]
+pub(super) fn return_boxed_stack(src: TryBox<GuardedStack>) {
+    return_stack(src.into_inner());
+}
 
 /// The image a new TCB starts from (DESIGN §7.5). x86_64 uses the psABI
 /// FXSAVE image; aarch64 uses V0–V31, FPCR, and FPSR zero, because

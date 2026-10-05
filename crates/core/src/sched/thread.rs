@@ -4,7 +4,8 @@
 //! lives in each port's hardware half (`arch::x86_64::switch` on x86_64).
 //! The TCB table, KVA mapping, and `spawn` live in the binary crate.
 
-use core::mem::{offset_of, size_of};
+use core::mem::{MaybeUninit, offset_of, size_of};
+use core::ptr;
 
 use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::desc::UserSegs;
@@ -112,8 +113,9 @@ pub use crate::limits::MAX_STACK_PAGES;
 /// address, with `S` unmapped bytes below (`S = pages × 4 KiB`,
 /// DESIGN §4.5), and the order-0 [`Frames`] of each mapped page, lowest
 /// first. A move-only handle with private fields: only
-/// `kva_init::alloc_guarded_stack` builds one (through
-/// [`GuardedStack::from_raw_parts`]) and only `kva_init::free_stack`
+/// `kva_init::alloc_guarded_stack` and `kva_init::alloc_boxed_stack`
+/// build one (through [`GuardedStack::from_raw_parts`] or
+/// [`GuardedStack::write_empty`]) and only `kva_init::free_stack`
 /// takes it apart, so the stack and its frames are freed once, by their
 /// owner. It lives in this crate so `Tcb` can own it.
 pub struct GuardedStack {
@@ -139,6 +141,51 @@ impl GuardedStack {
             pages,
             frames,
         }
+    }
+
+    /// Write `guard` and `pages` and empty `frames` into an exclusive
+    /// uninitialized allocation. The caller fills mapped pages with
+    /// [`set_frame`].
+    ///
+    /// # Safety
+    /// `slot` is the exclusive `MaybeUninit<GuardedStack>` the caller
+    /// allocated. `[guard, guard + 2S)` came from `Kva::alloc_guarded(pages)`
+    /// (the contract [`from_raw_parts`] states). The caller writes page
+    /// `i`'s frame with [`set_frame`] for every `i < pages` before any
+    /// other accessor reads `frames`, and never maps the guard.
+    pub unsafe fn write_empty(
+        slot: *mut MaybeUninit<Self>,
+        guard: VirtAddr,
+        pages: usize,
+    ) -> *mut Self {
+        let p = slot.cast::<Self>();
+        // SAFETY: `slot` is the exclusive allocation this fn's contract
+        // names; each field is written once, then `p` is a live `Self`;
+        // established here.
+        unsafe {
+            ptr::addr_of_mut!((*p).guard).write(guard);
+            ptr::addr_of_mut!((*p).pages).write(pages);
+            let frames = ptr::addr_of_mut!((*p).frames).cast::<Option<Frames>>();
+            let mut i = 0;
+            while i < MAX_STACK_PAGES {
+                frames.add(i).write(None);
+                i += 1;
+            }
+        }
+        p
+    }
+
+    /// Record that page `i` maps `f`.
+    ///
+    /// # Safety
+    /// `i < self.pages()`, page `i` maps `f`, and no other token names `f`.
+    pub unsafe fn set_frame(&mut self, i: usize, f: Frames) {
+        self.frames[i] = Some(f);
+    }
+
+    /// The frame slots, for an unfinished handle's error path.
+    pub fn frames_mut(&mut self) -> &mut [Option<Frames>] {
+        &mut self.frames
     }
 
     /// Give the range and its frames back to the allocator that built it.

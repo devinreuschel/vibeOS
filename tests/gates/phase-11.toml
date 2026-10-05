@@ -31,7 +31,8 @@ reads the verdict from QEMU's exit status and its QMP `GUEST_PANICKED` event und
 and the harness fails if the skipped set differs from the aarch64 rows of `tests/harness/skips.toml`
 (§10.2), which `docs/ARCH.md` links; each skip row also names the aarch64 test that proves the same
 property, or says that the property has no aarch64 counterpart and why, and
-`scripts/check_arch.py` fails a row that does neither"""
+`scripts/check_arch.py` fails a row that does neither. The in-guest test
+`el1_x16_survives_irq` fails before the fix."""
 [[line.entry]]
 cmd = "python3 scripts/check_arch.py"
 [[line.entry]]

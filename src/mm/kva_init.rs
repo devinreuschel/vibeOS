@@ -9,7 +9,10 @@
 //! The KVA free-list lives under the page-table lock. Unmap, drop PT,
 //! shootdown, then free VA to the tail ([`release_va`]).
 
+use core::mem::MaybeUninit;
+
 use vibeos::ipi::{SHOOT_RANGE_PAGES, SHOOT_RANGES, ShootRange};
+use vibeos::kalloc::TryBox;
 use vibeos::kva::{
     DEFAULT_STACK_PAGES, KVA_END, KVA_SIZE, KVA_START, Kva, KvaError, KvaStats, PAGE_SIZE,
 };
@@ -70,24 +73,40 @@ pub(super) fn release_va(va: VirtAddr, len: u64) {
 }
 
 /// Reserve `2S` VA for a power-of-two stack of `pages` pages, map the
-/// upper `S`, leave the lower `S` unmapped (DESIGN §4.5). The one
-/// constructor of a [`GuardedStack`]; [`free_stack`] takes it back.
-pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
+/// upper `S`, leave the lower `S` unmapped (DESIGN §4.5). Writes the
+/// handle in a [`TryBox`] so the frame-token array is not on the
+/// caller's stack. [`alloc_guarded_stack`] takes the handle out;
+/// [`free_stack`] takes it back.
+#[inline(never)]
+pub fn alloc_boxed_stack(pages: usize) -> Result<TryBox<GuardedStack>, KvaError> {
     if pages == 0 || pages > MAX_STACK_PAGES || !pages.is_power_of_two() {
         return Err(KvaError::Size);
     }
-    let guard = paging_init::with_pt(|_pt| with_kva(|k| k.alloc_guarded(pages)))
-        .map(VirtAddr)
-        .ok_or(KvaError::NoVa)?;
+    let slot = TryBox::<GuardedStack>::try_new_uninit().map_err(|_| KvaError::NoFrames)?;
+    let raw = TryBox::into_raw(slot);
+    let Some(guard) =
+        paging_init::with_pt(|_pt| with_kva(|k| k.alloc_guarded(pages))).map(VirtAddr)
+    else {
+        // SAFETY: `raw` is the exclusive uninit box `try_new_uninit`
+        // allocated; nothing wrote it; established here.
+        drop(unsafe { TryBox::<MaybeUninit<GuardedStack>>::from_raw(raw) });
+        return Err(KvaError::NoVa);
+    };
     let base = VirtAddr(guard.as_u64() + pages as u64 * PAGE_SIZE);
-    let mut frames: [Option<Frames>; MAX_STACK_PAGES] = [const { None }; MAX_STACK_PAGES];
+    // SAFETY: `GuardedStack::write_empty`'s contract; `raw` is the exclusive
+    // uninit allocation and `guard` came from `Kva::alloc_guarded(pages)`
+    // just above; established here.
+    let p = unsafe { GuardedStack::write_empty(raw, guard, pages) };
     let mut mapped = 0usize;
     let r = paging_init::with_pt(|pt| {
         while mapped < pages {
             let va = VirtAddr(base.as_u64() + PAGE_SIZE * mapped as u64);
             let f = pmm_init::with_buddy(|b| b.alloc(0)).ok_or(KvaError::NoFrames)?;
             let pa = PhysAddr(f.base());
-            frames[mapped] = Some(f);
+            // SAFETY: `write_empty`'s follow-up; `mapped < pages`, `f` is
+            // the fresh frame this loop owns, and page `mapped` maps it
+            // next; established here.
+            unsafe { (*p).set_frame(mapped, f) };
             // SAFETY: `map_4k_locked`'s contract; `pa` is the fresh frame
             // above and `va` a page of the 2S range `alloc_guarded` just
             // reserved, which nothing else maps; `pt` holds the page-table
@@ -104,27 +123,38 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
         // Unmap and shoot down what was mapped, and only then free the
         // frames and the VA.
         unmap_shootdown(base, mapped);
-        free_frames(&mut frames);
+        // SAFETY: `p` is the exclusive handle `write_empty` started; no
+        // other accessor; established here.
+        unsafe { free_frames((*p).frames_mut()) };
         release_va(guard, Kva::guarded_va_len(pages));
+        // SAFETY: every frame slot is `None` after `free_frames`; dropping
+        // the box drops an empty handle; established here.
+        drop(unsafe { TryBox::from_raw(p) });
         return Err(e);
     }
     shoot_span(base, pages);
     #[cfg(feature = "kernel_tests")]
     fill_stack(base, pages);
-    // SAFETY: `[guard, guard + 2S)` came from `Kva::alloc_guarded(pages)`
-    // above, page `i` of the stack maps `frames[i]` (the loop above), the
-    // other slots are `None`, the guard was never mapped, and this is the
-    // only handle built for the range (the contract
-    // `GuardedStack::from_raw_parts` states, established here).
-    Ok(unsafe { GuardedStack::from_raw_parts(guard, pages, frames) })
+    // SAFETY: `TryBox::from_raw`'s contract; `p` is the exclusive
+    // initialized `GuardedStack` `write_empty` and the map loop finished;
+    // established here.
+    Ok(unsafe { TryBox::from_raw(p) })
+}
+
+/// [`alloc_boxed_stack`], then take the handle out for callers that own
+/// a [`GuardedStack`] by value (bootstrap, IST, tests).
+#[inline(never)]
+pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
+    Ok(alloc_boxed_stack(pages)?.into_inner())
 }
 
 /// Fill a fresh stack's `pages` mapped pages above `base` with
 /// `stack_depth::PATTERN`, for the depth scan (DESIGN §4.5, TESTING §8.2).
+/// [`alloc_boxed_stack`] calls this after the span is mapped.
 #[cfg(feature = "kernel_tests")]
 fn fill_stack(base: VirtAddr, pages: usize) {
     let words = pages * (PAGE_SIZE as usize / 8);
-    // SAFETY: `alloc_guarded_stack` mapped `[base, base + pages)` writable
+    // SAFETY: `alloc_boxed_stack` mapped `[base, base + pages)` writable
     // from fresh frames and shot the span down, and no handle to it exists
     // yet, so nothing else reads or writes it; established here.
     let s = unsafe { core::slice::from_raw_parts_mut(base.as_u64() as *mut u64, words) };
@@ -161,8 +191,9 @@ fn free_frames(frames: &mut [Option<Frames>]) {
 
 /// Unmap `stack`, shoot it down, then free its frames and its VA.
 pub fn free_stack(stack: GuardedStack) {
-    // SAFETY: `free_stack_shootdown`'s contract; the one constructor of a
-    // `GuardedStack` is `alloc_guarded_stack`, so this KVA allocated it, and
+    // SAFETY: `free_stack_shootdown`'s contract; the constructors of a
+    // `GuardedStack` are `alloc_guarded_stack` and `alloc_boxed_stack`, so
+    // this KVA allocated it, and
     // the handle moves here only once no CPU runs on the stack (invariant
     // I10, established at `sched::thread_init::finish_switch`).
     unsafe { free_stack_shootdown(stack) };

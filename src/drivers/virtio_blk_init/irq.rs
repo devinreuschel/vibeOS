@@ -1,7 +1,7 @@
 use core::any::Any;
 use core::sync::atomic::Ordering;
 
-use super::issue::{copy_from_bounce, slot_base};
+use super::issue::{PUMP_BATCH, copy_from_bounce, slot_base};
 use super::*;
 
 impl VirtioBlk {
@@ -31,60 +31,70 @@ impl VirtioBlk {
     }
 
     pub(super) fn harvest(&self) {
-        let mut done: [Option<(Request, Result<(), BlockError>)>; N_SLOTS] = [None; N_SLOTS];
-        let mut n = 0usize;
-        {
-            let mut g = self.st.lock();
-            let Some(blk) = g.as_deref_mut() else {
-                return;
-            };
-            let mut qi = 0usize;
-            while qi < blk.nq as usize {
-                if let Some(v) = blk.vqs[qi].as_mut() {
-                    while let Some(u) = v.vq.get_used() {
-                        let id = u.id as usize;
-                        let si = if id < MAX_QSIZE {
-                            let s = v.inflight[id];
-                            v.inflight[id] = FREE;
-                            s
-                        } else {
-                            FREE
-                        };
-                        if si == FREE || (si as usize) >= N_SLOTS {
-                            continue;
-                        }
-                        let si = si as usize;
-                        blk.slots.sync_for_cpu::<Arch>();
-                        // SAFETY: slot `si` is in flight on this queue, so the
-                        // device wrote its status byte at offset 16, synced for
-                        // the CPU above; established by
-                        // `virtio_blk_init::issue::slot_base`.
-                        let st = unsafe { *slot_base(&blk.slots, si).add(16) };
-                        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
-                        let st = self.injected(st);
-                        let res = map_status(st);
-                        if let Some(req) = blk.slot_req[si].take() {
-                            if res.is_ok() && req.bio.op == Op::Read {
-                                copy_from_bounce(&blk.slots, si, &req);
+        // [`PUMP_BATCH`] completions at a time, same as [`pump`](Self::pump):
+        // a `[Request; N_SLOTS]` local is ~4 KiB, and this runs on irqth's
+        // 16 KiB stack under a top half (DESIGN §4.5).
+        loop {
+            let mut done: [Option<(Request, Result<(), BlockError>)>; PUMP_BATCH] =
+                [None; PUMP_BATCH];
+            let mut n = 0usize;
+            {
+                let mut g = self.st.lock();
+                let Some(blk) = g.as_deref_mut() else {
+                    return;
+                };
+                let mut qi = 0usize;
+                while qi < blk.nq as usize && n < PUMP_BATCH {
+                    if let Some(v) = blk.vqs[qi].as_mut() {
+                        while n < PUMP_BATCH {
+                            let Some(u) = v.vq.get_used() else {
+                                break;
+                            };
+                            let id = u.id as usize;
+                            let si = if id < MAX_QSIZE {
+                                let s = v.inflight[id];
+                                v.inflight[id] = FREE;
+                                s
+                            } else {
+                                FREE
+                            };
+                            if si == FREE || (si as usize) >= N_SLOTS {
+                                continue;
                             }
-                            if n < N_SLOTS {
+                            let si = si as usize;
+                            blk.slots.sync_for_cpu::<Arch>();
+                            // SAFETY: slot `si` is in flight on this queue, so the
+                            // device wrote its status byte at offset 16, synced for
+                            // the CPU above; established by
+                            // `virtio_blk_init::issue::slot_base`.
+                            let st = unsafe { *slot_base(&blk.slots, si).add(16) };
+                            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+                            let st = self.injected(st);
+                            let res = map_status(st);
+                            if let Some(req) = blk.slot_req[si].take() {
+                                if res.is_ok() && req.bio.op == Op::Read {
+                                    copy_from_bounce(&blk.slots, si, &req);
+                                }
                                 done[n] = Some((req, res));
                                 n += 1;
                             }
+                            blk.slot_used[si] = false;
+                            self.completions.fetch_add(1, Ordering::SeqCst);
                         }
-                        blk.slot_used[si] = false;
-                        self.completions.fetch_add(1, Ordering::SeqCst);
                     }
+                    qi += 1;
                 }
-                qi += 1;
             }
-        }
-        let mut i = 0usize;
-        while i < n {
-            if let Some((req, res)) = done[i].take() {
-                self.finish(req, res);
+            if n == 0 {
+                break;
             }
-            i += 1;
+            let mut i = 0usize;
+            while i < n {
+                if let Some((req, res)) = done[i].take() {
+                    self.finish(req, res);
+                }
+                i += 1;
+            }
         }
         self.pump();
     }

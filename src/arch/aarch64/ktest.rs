@@ -1,6 +1,6 @@
 //! aarch64 in-guest tests for ROADMAP §11.3 and §11.4.
 
-use core::arch::global_asm;
+use core::arch::{asm, global_asm};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use vibeos::irq::IrqSpecifier;
@@ -66,6 +66,59 @@ pub(crate) fn test_kstack_overflow() -> Outcome {
         );
         Outcome::Fail("overflow catch mismatch")
     }
+}
+
+/// EL1 vector entry must restore x16 (DESIGN §11.5 rule 6: no scratch).
+/// Holds x16 live until a timer IRQ, so TCG still takes one at a TB
+/// boundary. Fails when the stub saves SP-FRAME as x16.
+pub(crate) fn test_el1_x16_survives_irq() -> Outcome {
+    if !crate::arch::current::interrupts_enabled() {
+        return Outcome::Fail("registry runs with IF off");
+    }
+    let Some(me) = crate::per_cpu_init::cpu(crate::thread_init::current_cpu()) else {
+        return Outcome::Fail("no percpu");
+    };
+    let hz = crate::arch::aarch64::timer::hz();
+    if hz == 0 {
+        return Outcome::Fail("no cntfrq");
+    }
+    // Relaxed: a count; pairs with nothing.
+    let t0 = me.ticks.load(Ordering::Relaxed);
+    let start = crate::arch::aarch64::cpu::cntvct();
+    let limit = start.wrapping_add(hz);
+    let ticks = me.ticks.as_ptr();
+    const CANARY: u64 = 0x1111_2222_3333_4444;
+    let mut seen = t0;
+    let got: u64;
+    // SAFETY: `ticks` is this CPU's remote tick word; the loop only
+    // loads it. x16 holds a canary the EL1 stub must restore. established here.
+    unsafe {
+        asm!(
+            "1:",
+            "isb",
+            "mrs x5, cntvct_el0",
+            "cmp x5, x4",
+            "b.hs 2f",
+            "ldar x2, [x3]",
+            "cmp x2, x1",
+            "b.eq 1b",
+            "2:",
+            in("x4") limit,
+            in("x3") ticks,
+            in("x1") t0,
+            inout("x2") seen,
+            inout("x16") CANARY => got,
+            out("x5") _,
+            options(nostack),
+        );
+    }
+    if seen == t0 {
+        return Outcome::Fail("no irq while x16 live");
+    }
+    if got != CANARY {
+        return crate::fail_fmt!("x16 {got:#x} want {CANARY:#x}");
+    }
+    Outcome::Ok
 }
 
 #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
@@ -176,15 +229,29 @@ fn fire_msi(msg: vibeos::irq::MsiMessage) -> bool {
 }
 
 static IDLE_HOOK: AtomicU32 = AtomicU32::new(0);
+static IDLE_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 static IDLE_TID: AtomicU32 = AtomicU32::new(u32::MAX);
 static IDLE_WOKE: AtomicU32 = AtomicU32::new(0);
 
 /// Idle-loop hook: IRQs still masked, before `wfi`.
 pub(crate) fn idle_pre_wait() {
+    // Acquire: pairs with the Release store that arms IDLE_HOOK.
     if IDLE_HOOK.load(Ordering::Acquire) == 0 {
         return;
     }
-    IDLE_HOOK.store(0, Ordering::Release);
+    // APs sit in this same wfi. Only the CPU that armed the hook
+    // claims it, so make_ready runs once and the self-SGI wakes this wfi.
+    // Acquire: pairs with the Release store of IDLE_CPU in test_idle_wfi.
+    if crate::thread_init::current_cpu() != IDLE_CPU.load(Ordering::Acquire) {
+        return;
+    }
+    // AcqRel: pairs with the arming Release and with losers' Acquire loads.
+    if IDLE_HOOK
+        .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     let tid = ThreadId(IDLE_TID.load(Ordering::Acquire));
     if tid.0 != u32::MAX {
         thread_init::make_ready(tid);
@@ -202,6 +269,7 @@ pub(crate) fn test_idle_wfi() -> Outcome {
         return Outcome::Fail("spawn");
     };
     IDLE_TID.store(h.id().0, Ordering::Release);
+    IDLE_CPU.store(crate::thread_init::current_cpu(), Ordering::Release);
     IDLE_WOKE.store(0, Ordering::Release);
     timer::disable();
     IDLE_HOOK.store(1, Ordering::Release);
@@ -1167,6 +1235,7 @@ pub(crate) fn test_weak_order_probe() -> Outcome {
 
 pub(crate) const TESTS: &[Test] = &[
     test("kstack_overflow", test_kstack_overflow),
+    test("el1_x16_survives_irq", test_el1_x16_survives_irq),
     test("gic_present", test_gic_present),
     test("now_ns_cntvct", test_now_ns_cntvct),
     test("msix_cpu", test_msix_cpu),
