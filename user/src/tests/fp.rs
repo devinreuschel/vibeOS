@@ -13,15 +13,7 @@ use vibeos_user::sys::{self, nr};
 use vibeos_user::utest::{self, Outcome, Runner};
 
 const FPCHECK: &CStr = c"/bin/fpcheck";
-
-/// Not the initial state in any field: MXCSR rounds toward zero (`0x7F80`,
-/// every exception still masked), FCW rounds toward zero, and the first
-/// vector register holds a pattern.
-const DIRTY: FpState = FpState {
-    fcw: 0x0F7F,
-    mxcsr: 0x7F80,
-    xmm0: *b"vibeos fp state!",
-};
+const DIRTY: FpState = FpState::DIRTY;
 
 pub fn run(t: &mut Runner) {
     t.case("fp_fork_inherits", fp_fork_inherits);

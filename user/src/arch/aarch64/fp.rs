@@ -26,6 +26,14 @@ impl FpState {
         xmm0: [0; 16],
     };
 
+    /// Not the initial state: FPSR.IOC, FPCR RMode toward zero, and a
+    /// pattern in V0. The x86 DIRTY words are not valid FPCR/FPSR bits.
+    pub const DIRTY: Self = Self {
+        fcw: 0x0001,
+        mxcsr: 0x00C0_0000,
+        xmm0: *b"vibeos fp state!",
+    };
+
     /// Whether this is [`FpState::INITIAL`].
     pub fn is_initial(&self) -> bool {
         *self == Self::INITIAL

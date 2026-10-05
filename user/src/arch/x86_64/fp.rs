@@ -24,6 +24,15 @@ impl FpState {
         xmm0: [0; 16],
     };
 
+    /// Not the initial state in any field: MXCSR rounds toward zero
+    /// (`0x7F80`, every exception still masked), FCW rounds toward zero,
+    /// and the first vector register holds a pattern.
+    pub const DIRTY: Self = Self {
+        fcw: 0x0F7F,
+        mxcsr: 0x7F80,
+        xmm0: *b"vibeos fp state!",
+    };
+
     /// Whether this is [`FpState::INITIAL`].
     pub fn is_initial(&self) -> bool {
         *self == Self::INITIAL
