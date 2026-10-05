@@ -1218,10 +1218,6 @@ const WAIT_MARGIN_MS: u32 = 500;
 /// is [`WAIT_MARGIN_MS`] away and `pred` still fails, so the caller can fail
 /// naming what it waited on. With no deadline armed it waits on, and the
 /// harness's run deadline is the backstop.
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn wait_for(pred: impl Fn() -> bool) -> bool {
     loop {
         if pred() {
