@@ -229,15 +229,29 @@ fn fire_msi(msg: vibeos::irq::MsiMessage) -> bool {
 }
 
 static IDLE_HOOK: AtomicU32 = AtomicU32::new(0);
+static IDLE_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 static IDLE_TID: AtomicU32 = AtomicU32::new(u32::MAX);
 static IDLE_WOKE: AtomicU32 = AtomicU32::new(0);
 
 /// Idle-loop hook: IRQs still masked, before `wfi`.
 pub(crate) fn idle_pre_wait() {
+    // Acquire: pairs with the Release store that arms IDLE_HOOK.
     if IDLE_HOOK.load(Ordering::Acquire) == 0 {
         return;
     }
-    IDLE_HOOK.store(0, Ordering::Release);
+    // APs sit in this same wfi. Only the CPU that armed the hook
+    // claims it, so make_ready runs once and the self-SGI wakes this wfi.
+    // Acquire: pairs with the Release store of IDLE_CPU in test_idle_wfi.
+    if crate::thread_init::current_cpu() != IDLE_CPU.load(Ordering::Acquire) {
+        return;
+    }
+    // AcqRel: pairs with the arming Release and with losers' Acquire loads.
+    if IDLE_HOOK
+        .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     let tid = ThreadId(IDLE_TID.load(Ordering::Acquire));
     if tid.0 != u32::MAX {
         thread_init::make_ready(tid);
@@ -255,6 +269,7 @@ pub(crate) fn test_idle_wfi() -> Outcome {
         return Outcome::Fail("spawn");
     };
     IDLE_TID.store(h.id().0, Ordering::Release);
+    IDLE_CPU.store(crate::thread_init::current_cpu(), Ordering::Release);
     IDLE_WOKE.store(0, Ordering::Release);
     timer::disable();
     IDLE_HOOK.store(1, Ordering::Release);
