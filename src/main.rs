@@ -435,6 +435,8 @@ extern "C" fn boot_rest() -> ! {
     // Phase 6 slice A: scan → list → bind. Marker before `shell ready`
     // so lspci is available once the shell thread runs.
     crate::pci_init::init(crate::dev_init::push);
+    #[cfg(target_arch = "aarch64")]
+    crate::log::pvpanic_init::probe_pci();
     crate::virtio_mmio_init::publish();
     crate::work_init::init();
     crate::virtio_init::init();

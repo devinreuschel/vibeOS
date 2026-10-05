@@ -15,7 +15,7 @@ use crate::arch;
 use crate::arch::current::InterruptGuard;
 use crate::irq_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
-use crate::ktest::{Outcome, Test, test};
+use crate::ktest::{Outcome, Test, spawn_thread_on, test};
 use crate::kva_init;
 use crate::paging_init;
 use crate::syscall_init;
@@ -1029,6 +1029,142 @@ pub(crate) fn test_fb_limine() -> Outcome {
     }
 }
 
+/// Message-passing and load-buffering with Relaxed stores and no barrier
+/// (ROADMAP §11.7). Fails only when a shape completes no iteration.
+const WO_ITERS: u64 = 10_000_000;
+const WO_BUDGET_NS: u64 = 5 * 60 * 1_000_000_000;
+const WO_KIND_MP: u64 = 0;
+const WO_KIND_LB: u64 = 1;
+
+static WO_GO: AtomicU64 = AtomicU64::new(0);
+static WO_DONE: AtomicU64 = AtomicU64::new(0);
+static WO_STOP: AtomicU64 = AtomicU64::new(0);
+static WO_KIND: AtomicU64 = AtomicU64::new(0);
+static WO_DATA: AtomicU64 = AtomicU64::new(0);
+static WO_FLAG: AtomicU64 = AtomicU64::new(0);
+static WO_X: AtomicU64 = AtomicU64::new(0);
+static WO_Y: AtomicU64 = AtomicU64::new(0);
+static WO_OBS_A: AtomicU64 = AtomicU64::new(0);
+static WO_OBS_B: AtomicU64 = AtomicU64::new(0);
+
+fn wo_time_up(start: u64) -> bool {
+    time_init::now_ns().saturating_sub(start) >= WO_BUDGET_NS
+        || crate::ktest::deadline_within(5_000) == Some(true)
+}
+
+fn wo_worker() {
+    loop {
+        if WO_STOP.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let g = WO_GO.load(Ordering::Acquire);
+        if g == 0 || g == WO_DONE.load(Ordering::Relaxed) {
+            thread_init::yield_now();
+            continue;
+        }
+        match WO_KIND.load(Ordering::Relaxed) {
+            WO_KIND_MP => {
+                // Relaxed: the shape under test; pairs with nothing.
+                let f = WO_FLAG.load(Ordering::Relaxed);
+                let d = WO_DATA.load(Ordering::Relaxed);
+                WO_OBS_A.store(f, Ordering::Relaxed);
+                WO_OBS_B.store(d, Ordering::Relaxed);
+            }
+            _ => {
+                // Relaxed: the shape under test; pairs with nothing.
+                let x = WO_X.load(Ordering::Relaxed);
+                WO_Y.store(1, Ordering::Relaxed);
+                WO_OBS_A.store(x, Ordering::Relaxed);
+            }
+        }
+        // Release: pairs with the coordinator's Acquire of `WO_DONE`.
+        WO_DONE.store(g, Ordering::Release);
+    }
+}
+
+fn wo_wait(g: u64, start: u64) -> bool {
+    while WO_DONE.load(Ordering::Acquire) != g {
+        if wo_time_up(start) {
+            return false;
+        }
+        thread_init::yield_now();
+    }
+    true
+}
+
+fn wo_mp(start: u64) -> (u64, u64) {
+    // Relaxed: pairs with nothing.
+    WO_KIND.store(WO_KIND_MP, Ordering::Relaxed);
+    let mut n = 0u64;
+    let mut w = 0u64;
+    while n < WO_ITERS && !wo_time_up(start) {
+        // Relaxed: reset before the Release of `WO_GO`; pairs with nothing.
+        WO_DATA.store(0, Ordering::Relaxed);
+        WO_FLAG.store(0, Ordering::Relaxed);
+        let g = n.saturating_add(1);
+        // Release: pairs with the worker's Acquire of `WO_GO`.
+        WO_GO.store(g, Ordering::Release);
+        // Relaxed: the shape under test; pairs with nothing.
+        WO_DATA.store(1, Ordering::Relaxed);
+        WO_FLAG.store(1, Ordering::Relaxed);
+        if !wo_wait(g, start) {
+            break;
+        }
+        if WO_OBS_A.load(Ordering::Relaxed) == 1 && WO_OBS_B.load(Ordering::Relaxed) == 0 {
+            w = w.saturating_add(1);
+        }
+        n = n.saturating_add(1);
+    }
+    (n, w)
+}
+
+fn wo_lb(start: u64) -> (u64, u64) {
+    // Relaxed: pairs with nothing.
+    WO_KIND.store(WO_KIND_LB, Ordering::Relaxed);
+    let mut n = 0u64;
+    let mut w = 0u64;
+    while n < WO_ITERS && !wo_time_up(start) {
+        // Relaxed: reset before the Release of `WO_GO`; pairs with nothing.
+        WO_X.store(0, Ordering::Relaxed);
+        WO_Y.store(0, Ordering::Relaxed);
+        let g = n.saturating_add(1);
+        // Release: pairs with the worker's Acquire of `WO_GO`.
+        WO_GO.store(g, Ordering::Release);
+        // Relaxed: the shape under test; pairs with nothing.
+        let y = WO_Y.load(Ordering::Relaxed);
+        WO_X.store(1, Ordering::Relaxed);
+        if !wo_wait(g, start) {
+            break;
+        }
+        if y == 0 && WO_OBS_A.load(Ordering::Relaxed) == 0 {
+            w = w.saturating_add(1);
+        }
+        n = n.saturating_add(1);
+    }
+    (n, w)
+}
+
+pub(crate) fn test_weak_order_probe() -> Outcome {
+    if crate::per_cpu_init::cpu_count() < 2 {
+        return Outcome::Fail("need 2 cpus");
+    }
+    // Relaxed: this boot's only run; pairs with nothing.
+    WO_GO.store(0, Ordering::Relaxed);
+    WO_DONE.store(0, Ordering::Relaxed);
+    WO_STOP.store(0, Ordering::Relaxed);
+    let _worker = spawn_thread_on("wo_probe", wo_worker, 1);
+    let start = time_init::now_ns();
+    let (mp_n, mp_w) = wo_mp(start);
+    let (lb_n, lb_w) = wo_lb(start);
+    // Release: pairs with the worker's Acquire of `WO_STOP`.
+    WO_STOP.store(1, Ordering::Release);
+    crate::ktest_info!("mp iters={mp_n} weak={mp_w} lb iters={lb_n} weak={lb_w}");
+    if mp_n == 0 || lb_n == 0 {
+        return crate::fail_fmt!("mp {mp_n} lb {lb_n}");
+    }
+    Outcome::Ok
+}
+
 pub(crate) const TESTS: &[Test] = &[
     test("kstack_overflow", test_kstack_overflow),
     test("gic_present", test_gic_present),
@@ -1114,6 +1250,9 @@ pub(crate) const TESTS: &[Test] = &[
         "el0_sve_sigill",
         crate::arch::aarch64::ktest_el0::test_el0_sve_sigill,
     ),
+    test("weak_order_probe", test_weak_order_probe)
+        .deadline(330_000)
+        .opt_in(),
     test("ac_clear_user_popf", skip_ac_clear_user_popf),
     test("ist_gs_sign", skip_ist_gs_sign),
     test("noncanonical_rip_sigsegv", skip_noncanonical_rip),

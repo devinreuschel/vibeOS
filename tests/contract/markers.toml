@@ -1851,9 +1851,16 @@ source = "kernel"
 section = "§10.7"
 
 [[marker]]
+text = "vibeOS: pvpanic: pci events 0x<mask>"
+kind = "diagnostic"
+arch = "aarch64"
+source = "kernel"
+section = "§11.7"
+
+[[marker]]
 text = "vibeOS: pvpanic: absent"
 kind = "diagnostic"
-arch = "x86_64"
+arch = "both"
 source = "kernel"
 section = "§10.7"
 

@@ -181,6 +181,7 @@ impl ContextSwitch for Arch {
 }
 
 impl Barriers for Arch {
+    /// tests/litmus/virtio_avail.litmus
     #[inline]
     fn dma_wmb() {
         // Release: pairs with the Acquire fence in `dma_rmb`.
@@ -193,6 +194,7 @@ impl Barriers for Arch {
         compiler_fence(Ordering::Release);
     }
 
+    /// tests/litmus/log_ring.litmus
     #[inline]
     fn dma_rmb() {
         // Acquire: pairs with the Release fence in `dma_wmb`.
@@ -205,6 +207,7 @@ impl Barriers for Arch {
         compiler_fence(Ordering::Acquire);
     }
 
+    /// tests/litmus/dma_mb.litmus
     #[inline]
     fn dma_mb() {
         // SAFETY: `dmb osh` is a full outer-shareable barrier. established here.
@@ -213,6 +216,8 @@ impl Barriers for Arch {
         }
     }
 
+    /// Arm ARM B2.3.5 / DDI0487: `dmb oshld` after an `mmio_read` orders
+    /// Device against Normal; herd7 does not model Device memory.
     #[inline]
     unsafe fn mmio_read<W: MmioWidth>(reg: *const W) -> W {
         compiler_fence(Ordering::SeqCst);
@@ -224,6 +229,8 @@ impl Barriers for Arch {
         v
     }
 
+    /// Arm ARM B2.3.5 / DDI0487: `dmb oshst` before an `mmio_write` orders
+    /// Normal against Device; herd7 does not model Device memory.
     #[inline]
     unsafe fn mmio_write<W: MmioWidth>(reg: *mut W, v: W) {
         compiler_fence(Ordering::SeqCst);
