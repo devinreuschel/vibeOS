@@ -52,6 +52,56 @@ pub(super) fn box_new_tcb(
     }
 }
 
+/// A cached default-size stack, or a freshly mapped one, as a heap handle.
+/// `spawn_inner` holds only the pointer: a by-value [`GuardedStack`] plus
+/// `alloc_guarded_stack`'s frame-token array is a 16 KiB stack's user-spawn
+/// peak (DESIGN §4.5).
+#[inline(never)]
+pub(super) fn take_boxed_stack(stack_pages: usize) -> Result<TryBox<GuardedStack>, SpawnError> {
+    if stack_pages == DEFAULT_STACK_PAGES
+        && !per_cpu_init::with_current(|cpu| cpu.stack_cache.is_empty())
+        && let Some(b) = boxed_cached_stack()
+    {
+        return Ok(b);
+    }
+    match kva_init::alloc_boxed_stack(stack_pages) {
+        Ok(b) => Ok(b),
+        // Once: an exit burst can leave this CPU's dead list holding
+        // enough stacks for KVA to refuse (`Kva::alloc`'s live cap).
+        Err(_) if reclaim_dead_stacks_here() => {
+            kva_init::alloc_boxed_stack(stack_pages).map_err(|_| SpawnError::NoMemory)
+        }
+        Err(_) => Err(SpawnError::NoMemory),
+    }
+}
+
+/// Box a stack this CPU's cache already held. The 520-byte handle lives
+/// on this frame, not `take_boxed_stack`'s (DESIGN §4.5).
+#[inline(never)]
+fn boxed_cached_stack() -> Option<TryBox<GuardedStack>> {
+    let s = cached_stack()?;
+    match TryBox::try_new_uninit() {
+        Ok(slot) => Some(slot.write(s)),
+        Err(_) => {
+            return_stack(s);
+            None
+        }
+    }
+}
+
+/// Move the handle into a TCB slot. `into_inner` materializes
+/// [`GuardedStack`] on this frame, not the caller's (DESIGN §4.5).
+#[inline(never)]
+pub(super) fn install_stack(dst: &mut Option<GuardedStack>, src: TryBox<GuardedStack>) {
+    *dst = Some(src.into_inner());
+}
+
+/// Give an unused boxed stack back to the cache or KVA.
+#[inline(never)]
+pub(super) fn return_boxed_stack(src: TryBox<GuardedStack>) {
+    return_stack(src.into_inner());
+}
+
 /// The image a new TCB starts from (DESIGN §7.5). x86_64 uses the psABI
 /// FXSAVE image; aarch64 uses V0–V31, FPCR, and FPSR zero, because
 /// `fp_load` stores those registers at the start of `bytes`.

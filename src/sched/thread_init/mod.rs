@@ -1100,23 +1100,7 @@ fn spawn_inner(
     if current_pid() != 0 && testing::FAIL_FORK_STACK.swap(false, Ordering::AcqRel) {
         return Err(SpawnError::NoMemory);
     }
-    let cached = if stack_pages == DEFAULT_STACK_PAGES {
-        cached_stack()
-    } else {
-        None
-    };
-    let stack = match cached {
-        Some(s) => s,
-        None => match kva_init::alloc_guarded_stack(stack_pages) {
-            Ok(s) => s,
-            // Once: an exit burst can leave this CPU's dead list holding
-            // enough stacks for KVA to refuse (`Kva::alloc`'s live cap).
-            Err(_) if reclaim_dead_stacks_here() => {
-                kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?
-            }
-            Err(_) => return Err(SpawnError::NoMemory),
-        },
-    };
+    let stack = user::take_boxed_stack(stack_pages)?;
     let top = stack.top().as_u64();
     assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
     // Taken by whichever path below installs it in a TCB.
@@ -1165,7 +1149,7 @@ fn spawn_inner(
         Some(Ok(id)) => return Ok(ThreadHandle { id }),
         Some(Err(e)) => {
             if let Some(ks) = stack.take() {
-                return_stack(ks);
+                user::return_boxed_stack(ks);
             }
             return Err(e);
         }
@@ -1173,20 +1157,23 @@ fn spawn_inner(
     }
 
     // Built without the stack, so a failed allocation drops no stack; the
-    // stack goes back as a full table's does (DESIGN §4.4). The TCB is
-    // written in the box: `TryBox::try_new(Tcb { ... })` would put
-    // `Option<GuardedStack>` and `Fxsave` on this stack (DESIGN §4.5).
+    // stack goes back as a full table's does (DESIGN §4.4). The TCB and
+    // the stack handle are written in their boxes: a by-value `Tcb` or
+    // `GuardedStack` would put `Option<GuardedStack>` and `Fxsave` on this
+    // stack (DESIGN §4.5).
     let mut tcb =
         match user::box_new_tcb(name, entry, affinity, enqueue, cpu, first_nest, pid, as_cr3) {
             Ok(t) => t,
             Err(_) => {
                 if let Some(ks) = stack.take() {
-                    return_stack(ks);
+                    user::return_boxed_stack(ks);
                 }
                 return Err(SpawnError::NoMemory);
             }
         };
-    tcb.stack = stack;
+    if let Some(ks) = stack.take() {
+        user::install_stack(&mut tcb.stack, ks);
+    }
     prepare_kernel_context(&mut tcb.context, top, tramp);
 
     let placed = with_sched(|s| {
@@ -1225,6 +1212,7 @@ pub fn fp_invalidate(tcb: &mut Tcb) {
     vibeos::fpu::invalidate(&mut tcb.fp_cpu);
 }
 
+#[inline(never)]
 #[allow(clippy::too_many_arguments)] // TCB fields filled at spawn
 fn fill_tcb(
     tcb: &mut Tcb,
@@ -1232,7 +1220,7 @@ fn fill_tcb(
     entry: fn(),
     affinity: CpuAffinity,
     cpu: u32,
-    ks: GuardedStack,
+    ks: TryBox<GuardedStack>,
     top: u64,
     tramp: u64,
     irq_nest: u32,
@@ -1241,7 +1229,7 @@ fn fill_tcb(
 ) {
     tcb.name = name;
     tcb.state = ThreadState::Ready;
-    tcb.stack = Some(ks);
+    user::install_stack(&mut tcb.stack, ks);
     tcb.entry = entry;
     tcb.affinity = affinity;
     tcb.cpu = cpu;
