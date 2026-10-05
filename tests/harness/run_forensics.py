@@ -462,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args([] if argv is None else argv)
     apply_arch_cli(args.arch)
     env = env_config(default_iso=default_iso("hang"), default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     hang_iso = env.iso
     gp_iso = default_iso("gp")
     hang_elf = qmp.kernel_elf_for(hang_iso)

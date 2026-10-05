@@ -265,7 +265,7 @@ def _check_vda_untouched(env: EnvConfig) -> None:
 
 def _mce_main(env: EnvConfig) -> int:
     """Boot, inject an uncorrected machine check on CPU 0, expect dump and halt."""
-    results.Results(env.tier)
+    results.Results(env.tier, env.arch)
     cfg = env.qemu()
     markers = boot_contract_markers(cpu=env.cpu, smp=env.smp, arch=env.arch)
     cmd = mce_monitor_cmd(
@@ -368,7 +368,7 @@ def check_strace_lines(lines: list[str], expected_cmdline: str) -> tuple[str, st
 
 def _strace() -> int:
     env = env_config(default_iso="vibeos.iso", default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     if "vibeos.strace=1" not in env.cmdline.split():
         print("[e2e] FAIL: VIBEOS_CMDLINE must hold vibeos.strace=1", file=sys.stderr)
         return 1
@@ -440,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
     env = env_config(default_iso=iso, default_timeout=BOOT_ALLOWANCE_S)
     if env_flag("VIBEOS_MCE_TEST"):
         return _mce_main(env)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     expect_panic = env_expect_panic()
     gp_test = env_flag("VIBEOS_GP_TEST")
     expect_pit = env_flag("VIBEOS_EXPECT_PIT")

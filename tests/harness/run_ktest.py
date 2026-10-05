@@ -968,7 +968,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args([] if argv is None else argv)
     apply_arch_cli(args.arch)
     env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
-    results.Results(env.tier)
+    results.Results(env.tier, env.arch)
     if args.shard is None:
         boots = proof_boot_names(env.smp, args.hpet_off, env.arch)
         rc = main_boot(env, None)
