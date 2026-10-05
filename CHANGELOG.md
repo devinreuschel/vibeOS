@@ -174,6 +174,9 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- aarch64 EL1 vector entry no longer clobbers `x16` before save, which
+  panicked as `#DABT` in `cmdline::Words::next` on a GICv2 tick
+  ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - aarch64 UEFI boots prefer AAVMF no-secboot and use `-cpu neoverse-n1`
   under TCG so AAVMF 2025.11 reaches BDS ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - A host that stalls QEMU no longer drops the timer tick to the PIT: the LAPIC timer is proved
