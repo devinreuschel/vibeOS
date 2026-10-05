@@ -10,8 +10,8 @@ sends `cont`, so no event is lost. Each run declares the end it expects,
   with the core after `vibeOS: panic: halted` or `NO_EVENT_CORE_S`.
 - `panic`: `GUEST_PANICKED` drains serial and passes, and the runner checks
   the dump (a core only if a check fails); `GUEST_CRASHLOADED` fails.
-  aarch64 has no ISA pvpanic; `pvpanic-pci` is ROADMAP §11.7, so `halted`
-  is the pass until that write exists.
+  aarch64 writes `pvpanic-pci` after the PCI scan (ROADMAP §11.7); an
+  earlier panic, such as `panic_test`, still ends at `halted`.
 - `reset`: `GUEST_PANICKED` gets `cont`; `GUEST_CRASHLOADED` fails.
 - `capture`: `GUEST_PANICKED` fails; `GUEST_CRASHLOADED` waits for the
   capture kernel's `vibeOS: vmcore: written` line and its reset, and a
@@ -461,8 +461,10 @@ class EventRule:
     def on_line(self, line: str, *, panic: bool, halted: bool) -> Decision:
         if halted:
             self._halted = True
-            # aarch64: no ISA pvpanic write, so no GUEST_PANICKED until
-            # §11.7's pvpanic-pci. The dump's halted line is the panic end.
+            # aarch64 `panic_test` trips before PCI, so no `pvpanic-pci`
+            # write and no `GUEST_PANICKED`. The dump's halted line is
+            # the panic end. A later panic that reaches `probe_pci` also
+            # passes on `GUEST_PANICKED` below.
             if self.expect == "panic" and self.arch == "aarch64":
                 return self._end(Decision(end="pass", reason="PANIC_DONE"))
         if self._core_at is not None:

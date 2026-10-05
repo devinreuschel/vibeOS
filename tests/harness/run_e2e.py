@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import os
 import re
@@ -18,6 +19,7 @@ from tests.harness.harness import (
     EnvConfig,
     HarnessError,
     QemuConfig,
+    apply_arch_cli,
     boot_contract_markers,
     default_iso,
     env_config,
@@ -421,7 +423,11 @@ def _utest_verdict(env: EnvConfig, cfg: QemuConfig) -> UtestVerdict:
 GP_FRAMES = ("gp_test_trip", "boot_rest")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--arch", choices=("x86_64", "aarch64"))
+    args = parser.parse_args([] if argv is None else argv)
+    apply_arch_cli(args.arch)
     panic_variant = env_str("VIBEOS_PANIC_VARIANT", "")
     if panic_variant and panic_variant not in PANIC_VARIANTS:
         print(

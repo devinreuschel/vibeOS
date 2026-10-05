@@ -300,6 +300,11 @@ class TestSeam(ArchTest):
         errs = self.assertRule("paths")
         self.assertIn("src/arch/x86_64/new.rs", errs[0])
 
+    def test_unlisted_aarch64_port_file_fails(self) -> None:
+        self.t.write("src/arch/aarch64/new.rs", "\n")
+        errs = self.assertRule("paths")
+        self.assertIn("src/arch/aarch64/new.rs", errs[0])
+
 
 class TestSkips(ArchTest):
     def test_aarch64_row_needs_counterpart_or_reason(self) -> None:

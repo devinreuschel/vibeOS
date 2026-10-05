@@ -762,16 +762,22 @@ def rule_tiers(tree: Tree) -> list[Problem]:
             if v is None or not v.value:
                 out.append(Problem(CI, item.line, "tiers", f"tier entry without `{k}`"))
     covered = _check_submakes(tree.makefile)
-    want = [t for t in _make_prereqs(tree.makefile, "test") if t not in covered]
-    if not want:
-        out.append(Problem("Makefile", 1, "tiers", "no `test:` prerequisites found"))
     entries = _tier_entries(tier)
     for arch in sorted({e.arch for e in entries}):
+        union = (
+            "test-aarch64"
+            if arch == "aarch64" and _is_rule(tree.makefile, "test-aarch64")
+            else "test"
+        )
+        want = [t for t in _make_prereqs(tree.makefile, union) if t not in covered]
+        if not want:
+            out.append(Problem("Makefile", 1, "tiers", f"no `{union}:` prerequisites found"))
         seen: dict[str, str] = {}
         for e in [x for x in entries if x.arch == arch]:
             for t in e.targets:
                 if t not in want:
-                    what = "is not a `make test` tier" if _is_rule(tree.makefile, t) else "unknown"
+                    known = _is_rule(tree.makefile, t)
+                    what = f"is not a `make {union}` tier" if known else "unknown"
                     out.append(Problem(CI, e.line, "tiers", f"tier {e.tier}: target {t} {what}"))
                 elif t in seen:
                     out.append(
@@ -781,7 +787,7 @@ def rule_tiers(tree: Tree) -> list[Problem]:
                     seen[t] = e.tier
         for t in want:
             if t not in seen:
-                msg = f"{arch}: `make test` runs {t}, no tier does"
+                msg = f"{arch}: `make {union}` runs {t}, no tier does"
                 out.append(Problem(CI, tier.line, "tiers", msg))
     return out
 
@@ -1432,8 +1438,119 @@ def rule_no_core_upload_with_secrets(tree: Tree) -> list[Problem]:
     return out
 
 
+ARM64_LABELS = ("ubuntu-26.04-arm",)
+BOOT_CMD = re.compile(
+    r"\bmake\b.*\b(test-\S+|run)\b|\brun_(?:ktest|e2e|forensics|interactive|power)\.py\b"
+)
+
+
+def _job_run_text(job: Node) -> str:
+    steps = job.get("steps")
+    parts: list[str] = []
+    for st in steps.items if steps is not None else []:
+        run = st.get("run")
+        if run is not None and run.value:
+            parts.append(run.value)
+        env = st.get("env")
+        if env is not None:
+            for child in env.children:
+                if child.value:
+                    parts.append(f"{child.key}={child.value}")
+    env = job.get("env")
+    if env is not None:
+        for child in env.children:
+            if child.value:
+                parts.append(f"{child.key}={child.value}")
+    return "\n".join(parts)
+
+
+def _is_arm64_label(label: str) -> bool:
+    return label in ARM64_LABELS or label.startswith("macos-")
+
+
+def _entry_runner(job: Node, entry: Node) -> list[str]:
+    """`runs-on` labels for one matrix include row."""
+    runs_on = job.get("runs-on")
+    if runs_on is None:
+        return []
+    out: list[str] = []
+    for label in runs_on.scalars():
+        m = MATRIX_REF_RE.fullmatch(label.strip())
+        if m is None:
+            out.append(label)
+            continue
+        axis = m.group(1)
+        v = entry.get(axis)
+        if v is not None and v.value:
+            out.append(v.value)
+        else:
+            out += _matrix_values(job, axis)
+    return out
+
+
+def rule_aarch64_arm(tree: Tree) -> list[Problem]:
+    """ROADMAP §11.7: a job that boots an aarch64 guest runs on arm64."""
+    out = []
+    for path, wf in tree.workflows.items():
+        for job in _jobs(wf):
+            strategy = job.get("strategy")
+            matrix = strategy.get("matrix") if strategy is not None else None
+            include = matrix.get("include") if matrix is not None else None
+            run_text = _job_run_text(job)
+            boots = BOOT_CMD.search(run_text) is not None
+            if include is not None and include.items:
+                for entry in include.items:
+                    arch = entry.get("arch")
+                    if arch is None or arch.value != "aarch64":
+                        continue
+                    targets = entry.get("targets")
+                    words = (targets.value or "").split() if targets is not None else []
+                    entry_boots = boots or any(
+                        t.startswith("test-") or t == "run" for t in words
+                    )
+                    if not entry_boots:
+                        continue
+                    labels = _entry_runner(job, entry)
+                    if not labels or not all(_is_arm64_label(lb) for lb in labels):
+                        out.append(
+                            Problem(
+                                path,
+                                entry.line,
+                                "aarch64_arm",
+                                f"job `{job.key}` boots aarch64 but "
+                                f"runs-on is {labels or 'unset'}; use an arm64 image",
+                            )
+                        )
+                continue
+            if "aarch64" not in run_text and "ARCH=aarch64" not in run_text:
+                continue
+            if not boots:
+                continue
+            runs_on = job.get("runs-on")
+            labels = runs_on.scalars() if runs_on is not None else []
+            resolved: list[str] = []
+            for label in labels:
+                m = MATRIX_REF_RE.fullmatch(label.strip())
+                if m is None:
+                    resolved.append(label)
+                else:
+                    resolved += _matrix_values(job, m.group(1))
+            if not resolved or not all(_is_arm64_label(lb) for lb in resolved):
+                out.append(
+                    Problem(
+                        path,
+                        job.line,
+                        "aarch64_arm",
+                        f"job `{job.key}` boots aarch64 but runs-on is {resolved or 'unset'}; "
+                        "use an arm64 image",
+                    )
+                )
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
+    rule_aarch64_arm,
     rule_permissions,
     rule_action_pins,
     rule_runs_on,

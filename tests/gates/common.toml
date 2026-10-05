@@ -1,0 +1,13 @@
+# Phase 11+ shared gate entries (ROADMAP §11.7), keyed by name.
+# `scripts/check_gates.py` checks each cmd names a Makefile target.
+# `make gate PHASE=N` from Phase 11 also requires a passing dev-host record
+# of each entry at the gated commit. RECORD=1 on the Apple Silicon Mac
+# writes those records; GitHub cannot.
+
+[[entry]]
+name = "hvf-aarch64-kernel-smp4"
+cmd = "VIBEOS_QEMU_ACCEL=hvf make test-kernel-smp4 ARCH=aarch64"
+
+[[entry]]
+name = "hvf-aarch64-smp-stress"
+cmd = "VIBEOS_QEMU_ACCEL=hvf make test-smp-stress ARCH=aarch64"

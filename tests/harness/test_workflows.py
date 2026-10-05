@@ -20,6 +20,7 @@ from scripts.check_workflows import (
     ledger,
     load_tree,
     parse,
+    rule_aarch64_arm,
     rule_action_pins,
     rule_budget_doc,
     rule_ci_triggers,
@@ -544,6 +545,18 @@ class TestTiers(unittest.TestCase):
         )
         self.assertEqual(tiers(tier_ci(entries)), ["tier entry without `jobs`"])
 
+    def test_aarch64_uses_test_aarch64_when_present(self) -> None:
+        makefile = MAKEFILE + "test-d: x.iso\n\trun d\n\ntest-aarch64: test-d\n"
+        entries = (
+            "          - {arch: x86_64, tier: one, targets: test-a test-b test-c, jobs: 1}\n"
+            "          - {arch: aarch64, tier: one, targets: test-a, jobs: 1}\n"
+        )
+        self.assertEqual(
+            tiers(tier_ci(entries), makefile),
+            ["tier one: target test-a is not a `make test-aarch64` tier",
+             "aarch64: `make test-aarch64` runs test-d, no tier does"],
+        )
+
 
 TABLE = (
     "## 8.6 CI\n\ntext\n\n| Arch | Tier | Targets | QEMU s |\n|---|---|---|---|\n"
@@ -557,6 +570,41 @@ def budget(rows: str, text: str | None = None) -> list[tuple[int, str]]:
         testing_md=TABLE.format(rows=rows),
     )
     return [(p.line, p.message) for p in rule_budget_doc(t)]
+
+
+class TestAarch64Arm(unittest.TestCase):
+    def test_aarch64_tier_on_x86_runner_fails(self) -> None:
+        text = (
+            "jobs:\n  tier:\n    runs-on: ${{ matrix.runner }}\n"
+            "    strategy:\n      matrix:\n        include:\n"
+            "          - {arch: aarch64, runner: ubuntu-26.04, tier: k, "
+            "targets: test-kernel-1, jobs: 1}\n"
+            "    steps:\n      - run: make $TARGETS\n"
+        )
+        t = Tree(workflows={CI: parse(text, CI)})
+        got = [(p.rule, p.message) for p in rule_aarch64_arm(t)]
+        self.assertTrue(got and got[0][0] == "aarch64_arm", got)
+
+    def test_aarch64_tier_on_arm_runner_passes(self) -> None:
+        text = (
+            "jobs:\n  tier:\n    runs-on: ${{ matrix.runner }}\n"
+            "    strategy:\n      matrix:\n        include:\n"
+            "          - {arch: aarch64, runner: ubuntu-26.04-arm, tier: k, "
+            "targets: test-kernel-1, jobs: 1}\n"
+            "    steps:\n      - run: make $TARGETS\n"
+        )
+        t = Tree(workflows={CI: parse(text, CI)})
+        self.assertEqual(rule_aarch64_arm(t), [])
+
+    def test_aarch64_build_without_boot_passes(self) -> None:
+        text = (
+            "jobs:\n  build:\n    runs-on: ubuntu-26.04\n"
+            "    strategy:\n      matrix:\n        include:\n"
+            "          - {arch: aarch64}\n"
+            "    steps:\n      - run: make prebuilt\n"
+        )
+        t = Tree(workflows={CI: parse(text, CI)})
+        self.assertEqual(rule_aarch64_arm(t), [])
 
 
 class TestBudgetDoc(unittest.TestCase):

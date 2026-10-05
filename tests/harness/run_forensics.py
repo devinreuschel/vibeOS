@@ -32,6 +32,7 @@ Each check is a C-RESULTS `marker` row (`forensics_<case>`), each boot an
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import re
@@ -51,6 +52,7 @@ from tests.harness.harness import (
     RunResult,
     _reap,
     _start_qemu,
+    apply_arch_cli,
     contract_markers,
     default_iso,
     env_config,
@@ -454,7 +456,11 @@ def tool(core: Path, elf: Path, *extra: str) -> tuple[int, str, str]:
     return run_vmcore(core, elf, extra)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--arch", choices=("x86_64", "aarch64"))
+    args = parser.parse_args([] if argv is None else argv)
+    apply_arch_cli(args.arch)
     env = env_config(default_iso=default_iso("hang"), default_timeout=BOOT_ALLOWANCE_S)
     res = results.Results(env.tier)
     hang_iso = env.iso

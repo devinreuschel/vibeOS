@@ -28,8 +28,9 @@ passes under TCG with no harness retry. Its exit gate closes once the scheduled
 runs on `main` (the nightly KVM leg, the models and Miri, the weekly stress and fuzz jobs, macOS) pass
 and the maintainer has run the release steps. TCG proves the per-push tiers; the timing a real CPU
 gives, the TSC-deadline timer and SIMD exceptions are proved only by the KVM leg, so the gate lines
-that name it wait for it. Phase 11 (portability: the aarch64 port) and Phase 12 (demand paging / COW)
-are not started. See [The arc](docs/ROADMAP.md#the-arc).
+that name it wait for it. Phase 11 (portability: the aarch64 port) has S1–S9 in and S10 wiring the
+arm64 CI, litmus, and docs. Phase 12 (demand paging / COW) is not started.
+See [The arc](docs/ROADMAP.md#the-arc).
 Do not run code you do not trust on vibeOS, and keep no secrets on it: until the KVM leg proves Phase
 10's ring-3 lines a process may still find a way to crash the kernel, and until Phase 18 nothing stops
 one from reading other processes' memory ([DESIGN §2.10](docs/INVARIANTS.md#210-trust-boundaries)).
@@ -41,7 +42,7 @@ gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing orde
 later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).
 No release exists yet: Phases 8 and 9 are tagged when Phase 10 closes the gate lines of Phases 0 to 9 that the kernel review and a later design review reopened.
 
-Quickstart:
+## x86_64 quickstart
 
     ./setup.sh          # fetches Limine binaries, verifies host tools
     make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts, cargo deny)
@@ -51,6 +52,15 @@ Quickstart:
 
 macOS setup, including the firmware image `make test` needs there:
 [AGENTS.md, How to run](AGENTS.md#how-to-run).
+
+## aarch64 quickstart
+
+On an Apple Silicon Mac, QEMU's HVF (`-accel hvf`):
+
+    ./setup.sh
+    make ARCH=aarch64
+    VIBEOS_QEMU_ACCEL=hvf make ARCH=aarch64 run   # ramfb window; PL011 on the terminal
+    make ARCH=aarch64 check                       # same host gate; kernel target is aarch64
 
 A previous iteration got to SMP with a preemptive scheduler before being scrapped; what survived is
 written down in `docs/`.

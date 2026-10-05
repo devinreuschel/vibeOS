@@ -23,6 +23,7 @@ from tests.harness.harness import (
     KtestSummary,
     QemuConfig,
     RunResult,
+    apply_arch_cli,
     boot_contract_markers,
     check_ktest_output,
     contains_panic,
@@ -955,11 +956,17 @@ def main(argv: list[str] | None = None) -> int:
         help="after the default boot, boot HPET_OFF_KTEST with the PIT driving the tick",
     )
     parser.add_argument(
+        "--arch",
+        choices=("x86_64", "aarch64"),
+        help="guest architecture (sets VIBEOS_ARCH; Makefile already exports it)",
+    )
+    parser.add_argument(
         "--shard",
         choices=sorted(ktest_shards.SHARDS),
         help="run one per-push shard of its variant (tests/harness/ktest_shards.py)",
     )
     args = parser.parse_args([] if argv is None else argv)
+    apply_arch_cli(args.arch)
     env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
     results.Results(env.tier)
     if args.shard is None:
@@ -972,7 +979,8 @@ def main(argv: list[str] | None = None) -> int:
             env.smp, ktest_shards.VARIANTS[shard.variant].hpet_off, env.arch
         )
         boots = [b for b in shard.boots if b in union]
-        rc = 0 if shard.rows is None else main_boot(env, shard.range_word())
+        word = ktest_shards.range_word_for(args.shard, env.arch)
+        rc = 0 if word is None else main_boot(env, word)
     if rc:
         return rc
     for boot in PROOF_BOOTS:
