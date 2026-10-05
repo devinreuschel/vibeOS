@@ -675,6 +675,22 @@ def record_results(run: Run) -> list[dict[str, Any]]:
     return out
 
 
+def dev_host_ran(rec: Run, d: Definition) -> bool:
+    """A dev-host record (`gate.py --record`) proves a `make` target or a
+    script it ran: its `result` is `pass` and its `command` is `make <target>`
+    or names the script's path. It has no `conclusion`, since no workflow
+    ran it."""
+    cmd = rec.get("command")
+    if rec.get("result") != "pass" or not isinstance(cmd, str):
+        return False
+    words = cmd.split()
+    if d.kind == "make":
+        return words[:2] == ["make", d.name]
+    if d.kind == "path":
+        return d.path in words
+    return False
+
+
 def passed_in(results: list[dict[str, Any]], kind: str, name: str,
               labels: list[re.Pattern[str]] | None = None) -> bool:
     """`name`, or a name one of `labels` fully matches, is in a `passed` list."""
@@ -951,8 +967,10 @@ class Checker:
                 if not self._counts(run, bracket == "dev-host"):
                     continue
                 if self._run_passes(run, is_record, d, bracket):
+                    where = (f"the dev-host record at {gatelib.run_commit(run)[:12]}"
+                             if bracket == "dev-host" else f"run {run.get('id')}")
                     self.report.notes.append(f"{c.sha[:7]} L{t.line}: {p.proof} [{bracket}] "
-                                             f"passed in run {run.get('id')}")
+                                             f"passed in {where}")
                     return
         except gatelib.GateError as e:
             self.report.error(c.sha, t.line, f"[{bracket}] runs unreadable: {e}")
@@ -973,6 +991,8 @@ class Checker:
                 with tempfile.TemporaryDirectory() as tmp:
                     results = self.gh.download_results(run.get("id"), Path(tmp))
             return passed_in(results, d.kind, d.name, self.labels(d))
+        if bracket == "dev-host":
+            return dev_host_ran(run, d)
         wf = BRACKET_WORKFLOW.get(bracket)
         if d.kind not in ("job", "make") or (d.kind == "make" and wf is None):
             return run.get("conclusion") == "success"
