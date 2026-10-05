@@ -107,3 +107,15 @@ user/src/tests/fp.rs -- aarch64 user FP state across
 src/arch/aarch64/ktest.rs::test_el0_ring3_signals -- ring 3 cannot halt the kernel on aarch64
 """
 why = "S9 (#228) squash dropped the Proves lines; these are the trailers the squashed S9 commits carried, with the two aarch64-only mmio proofs rewritten as path::fn the way the 48d1fb4 errata already did"
+
+[[erratum]]
+commit = "d1f68f825e3928612cecd7ff7d33ba7f35462bb0"
+was = "make test-kernel -- `make test-kernel ARCH=aarch64` passes"
+proves = "make test-kernel -- CI runs the aarch64"
+why = "S10 (#234) squash kept this trailer after the same squash reopened the GICv2 kernel box; remap it onto the ticked CI aarch64-jobs box"
+
+[[erratum]]
+commit = "d1f68f825e3928612cecd7ff7d33ba7f35462bb0"
+was = "make test-aarch64 -- `make test-kernel ARCH=aarch64` and the e2e"
+proves = "make test-aarch64 -- CI runs the aarch64"
+why = "S10 (#234) squash kept this trailer after the same squash reopened the §11.7 e2e+kernel+GICv2 box; remap it onto the ticked CI aarch64-jobs box"
