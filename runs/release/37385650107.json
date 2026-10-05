@@ -1,0 +1,1104 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "commit": "4f235d4ba1672db05a688a8d8f1f2ae470bfed19",
+ "conclusion": "success",
+ "created": "2026-10-05T22:57:12Z",
+ "event": "workflow_dispatch",
+ "finished": "2026-10-05T23:01:02Z",
+ "head_sha": "8953c66563ea367fe2b7ea2ec8994e5f774b3da8",
+ "jobs": [
+  {
+   "completed": "2026-10-05T23:00:46Z",
+   "conclusion": "success",
+   "created": "2026-10-05T22:57:13Z",
+   "name": "build",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "4f235d4ba1672db05a688a8d8f1f2ae470bfed19",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_input_sh",
+       "console_ok",
+       "forged_user_lines",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "ps2_echo",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_echo",
+       "serial_online",
+       "sh_poweroff",
+       "sh_ps",
+       "sh_status",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "9G",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "9G",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "9G",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "9G",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-highmem",
+     "utest": {
+      "failed": [],
+      "passed": [
+       "console_forged_lines",
+       "dup_write",
+       "efault_matrix",
+       "errno_matrix",
+       "exec_10000_one_byte_args",
+       "exec_arg_131071_runs",
+       "exec_arg_131072_e2big",
+       "exec_arg_at_page_end",
+       "exec_args_near_limit_runs",
+       "exec_args_total_e2big",
+       "exec_chain_three_steps_status",
+       "exec_empty_argv",
+       "exec_env_k_v",
+       "exec_env_without_k_v",
+       "exec_hello",
+       "exec_null_argv",
+       "fork_bomb_eagain_at_limit",
+       "fork_exit_status",
+       "fork_segv",
+       "fp_execve_initial",
+       "fp_fork_inherits",
+       "getpid_nonzero",
+       "kill_init_ignored",
+       "orphan_grandchild_getppid_1",
+       "sh_script_status",
+       "signals_kill_stop_cont",
+       "utilities_table",
+       "wait4_specific_pid_blocks_then_zombie_sibling",
+       "write_count",
+       "write_ebadf"
+      ],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "4f235d4ba1672db05a688a8d8f1f2ae470bfed19",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "mce_dump",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-mce",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "4f235d4ba1672db05a688a8d8f1f2ae470bfed19",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_input_sh",
+       "console_ok",
+       "forged_user_lines",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "ps2_echo",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_echo",
+       "serial_online",
+       "sh_poweroff",
+       "sh_ps",
+       "sh_status",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_pit",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-machine",
+        "pc,hpet=off",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-machine",
+        "pc,hpet=off",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-pit",
+     "utest": {
+      "failed": [],
+      "passed": [
+       "console_forged_lines",
+       "dup_write",
+       "efault_matrix",
+       "errno_matrix",
+       "exec_10000_one_byte_args",
+       "exec_arg_131071_runs",
+       "exec_arg_131072_e2big",
+       "exec_arg_at_page_end",
+       "exec_args_near_limit_runs",
+       "exec_args_total_e2big",
+       "exec_chain_three_steps_status",
+       "exec_empty_argv",
+       "exec_env_k_v",
+       "exec_env_without_k_v",
+       "exec_hello",
+       "exec_null_argv",
+       "fork_bomb_eagain_at_limit",
+       "fork_exit_status",
+       "fork_segv",
+       "fp_execve_initial",
+       "fp_fork_inherits",
+       "getpid_nonzero",
+       "kill_init_ignored",
+       "orphan_grandchild_getppid_1",
+       "sh_script_status",
+       "signals_kill_stop_cont",
+       "utilities_table",
+       "wait4_specific_pid_blocks_then_zombie_sibling",
+       "write_count",
+       "write_ebadf"
+      ],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "4f235d4ba1672db05a688a8d8f1f2ae470bfed19",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_ok",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_online",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "strace",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.strace=1",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-strace",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "4f235d4ba1672db05a688a8d8f1f2ae470bfed19",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_input_sh",
+       "console_ok",
+       "forged_user_lines",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "ps2_echo",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_echo",
+       "serial_online",
+       "sh_ps",
+       "sh_reboot",
+       "sh_status",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-drive",
+        "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "-drive",
+        "if=pflash,format=raw,unit=1,file=/tmp/vibeos-fw-v35awpuq/x86_64-vars-v_sah1_o.fd",
+        "-boot",
+        "order=d,menu=off",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv4PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv6PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/FirmwareSetupSupport,string=no",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-drive",
+        "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "-drive",
+        "if=pflash,format=raw,unit=1,file=/tmp/vibeos-fw-v35awpuq/x86_64-vars-_flqd3z8.fd",
+        "-boot",
+        "order=d,menu=off",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv4PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/IPv6PXESupport,string=no",
+        "-fw_cfg",
+        "name=opt/org.tianocore/FirmwareSetupSupport,string=no",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e-uefi",
+     "utest": {
+      "failed": [],
+      "passed": [
+       "console_forged_lines",
+       "dup_write",
+       "efault_matrix",
+       "errno_matrix",
+       "exec_10000_one_byte_args",
+       "exec_arg_131071_runs",
+       "exec_arg_131072_e2big",
+       "exec_arg_at_page_end",
+       "exec_args_near_limit_runs",
+       "exec_args_total_e2big",
+       "exec_chain_three_steps_status",
+       "exec_empty_argv",
+       "exec_env_k_v",
+       "exec_env_without_k_v",
+       "exec_hello",
+       "exec_null_argv",
+       "fork_bomb_eagain_at_limit",
+       "fork_exit_status",
+       "fork_segv",
+       "fp_execve_initial",
+       "fp_fork_inherits",
+       "getpid_nonzero",
+       "kill_init_ignored",
+       "orphan_grandchild_getppid_1",
+       "sh_script_status",
+       "signals_kill_stop_cont",
+       "utilities_table",
+       "wait4_specific_pid_blocks_then_zombie_sibling",
+       "write_count",
+       "write_ebadf"
+      ],
+      "skipped": []
+     }
+    },
+    {
+     "arch": "x86_64",
+     "commit": "4f235d4ba1672db05a688a8d8f1f2ae470bfed19",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "acpi_xsdt",
+       "block_ram0p1",
+       "block_ram0p5",
+       "block_ramdisk",
+       "console_input_sh",
+       "console_ok",
+       "forged_user_lines",
+       "gdt_ok",
+       "heap_ok",
+       "idt_ok",
+       "init_fp_initial",
+       "irq_enabled",
+       "kva_ready",
+       "lapic_timer_ok",
+       "limine_ok",
+       "paging_cr3_ok",
+       "paging_mmio_uc",
+       "pci_devices",
+       "per_cpu_bsp",
+       "pic_remapped",
+       "pmm_free_frames",
+       "ps2_echo",
+       "sched_cpu0",
+       "sched_cpu1",
+       "serial_echo",
+       "serial_online",
+       "sh_poweroff",
+       "sh_ps",
+       "sh_status",
+       "shell_ready",
+       "smp_ap_online_0",
+       "smp_done",
+       "smp_trampoline_page",
+       "smp_tsc_skew",
+       "time_calib_hpet",
+       "time_clocksource",
+       "time_tsc",
+       "user_tests_ok",
+       "vda_55aa_untouched",
+       "vda_vibefs_untouched"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file=/tmp/vibeos-vda-t7_usvvv.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-drive",
+        "file=/tmp/vibeos-vda-v7fvj8xo.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2"
+       ],
+       "cpu": "max",
+       "exit": 0,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-e2e",
+     "utest": {
+      "failed": [],
+      "passed": [
+       "console_forged_lines",
+       "dup_write",
+       "efault_matrix",
+       "errno_matrix",
+       "exec_10000_one_byte_args",
+       "exec_arg_131071_runs",
+       "exec_arg_131072_e2big",
+       "exec_arg_at_page_end",
+       "exec_args_near_limit_runs",
+       "exec_args_total_e2big",
+       "exec_chain_three_steps_status",
+       "exec_empty_argv",
+       "exec_env_k_v",
+       "exec_env_without_k_v",
+       "exec_hello",
+       "exec_null_argv",
+       "fork_bomb_eagain_at_limit",
+       "fork_exit_status",
+       "fork_segv",
+       "fp_execve_initial",
+       "fp_fork_inherits",
+       "getpid_nonzero",
+       "kill_init_ignored",
+       "orphan_grandchild_getppid_1",
+       "sh_script_status",
+       "signals_kill_stop_cont",
+       "utilities_table",
+       "wait4_specific_pid_blocks_then_zombie_sibling",
+       "write_count",
+       "write_ebadf"
+      ],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 211,
+   "started": "2026-10-05T22:57:15Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "dispatched from main",
+     "seconds": 0
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "annotated tag, commit on main, ci success",
+     "seconds": 9
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 3
+    },
+    {
+     "name": "gate inputs changed since the last release",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 21
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 17
+    },
+    {
+     "name": "install rust MSRV",
+     "seconds": 10
+    },
+    {
+     "name": "install python linters",
+     "seconds": 7
+    },
+    {
+     "name": "install cargo-deny",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 3
+    },
+    {
+     "name": "make gate",
+     "seconds": 0
+    },
+    {
+     "name": "make release-artifacts",
+     "seconds": 53
+    },
+    {
+     "name": "third-party notices",
+     "seconds": 0
+    },
+    {
+     "name": "xorriso version",
+     "seconds": 1
+    },
+    {
+     "name": "make CARGO_PROFILE=release test-e2e",
+     "seconds": 24
+    },
+    {
+     "name": "make CARGO_PROFILE=release test-e2e-uefi",
+     "seconds": 17
+    },
+    {
+     "name": "make CARGO_PROFILE=release test-e2e-mce",
+     "seconds": 4
+    },
+    {
+     "name": "make CARGO_PROFILE=release test-e2e-pit",
+     "seconds": 13
+    },
+    {
+     "name": "make CARGO_PROFILE=release test-e2e-highmem",
+     "seconds": 13
+    },
+    {
+     "name": "make CARGO_PROFILE=release test-e2e-strace",
+     "seconds": 5
+    },
+    {
+     "name": "tested image is the release image",
+     "seconds": 0
+    },
+    {
+     "name": "commit input",
+     "seconds": 1
+    },
+    {
+     "name": "upload commit input",
+     "seconds": 0
+    },
+    {
+     "name": "release notes",
+     "seconds": 0
+    },
+    {
+     "name": "SHA-256 list",
+     "seconds": 0
+    },
+    {
+     "name": "upload release files",
+     "seconds": 2
+    },
+    {
+     "name": "runner record",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload runner record",
+     "seconds": 1
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-05T23:01:02Z",
+   "conclusion": "success",
+   "created": "2026-10-05T23:00:46Z",
+   "name": "publish",
+   "results": [],
+   "runner": null,
+   "seconds": 13,
+   "started": "2026-10-05T23:00:49Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 1
+    },
+    {
+     "name": "check SHA-256 list",
+     "seconds": 0
+    },
+    {
+     "name": "GitHub Release",
+     "seconds": 8
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 37385650107,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-10-05T22:57:12Z",
+ "workflow": "release"
+}
