@@ -437,7 +437,7 @@ pub(crate) fn test_el0_fp_no_leak() -> Outcome {
     }
 }
 
-/// An SVE instruction at EL0 is `SIGILL` (F130).
+/// An SVE instruction at EL0 is `SIGILL` (F130): `CPACR_EL1.ZEN` is clear.
 pub(crate) fn test_el0_sve_sigill() -> Outcome {
     match user::run(&Image::Code(SVE_PTRUE, DEFAULT), &["sve"]) {
         Ok(st) if vibeos::proc::wifsignaled(st) && vibeos::proc::wtermsig(st) == SIGILL => {
