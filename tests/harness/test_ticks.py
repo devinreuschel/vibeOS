@@ -843,6 +843,34 @@ class TestFailsBefore(RepoCase):
                     "eta box")
         self.assertEqual(self.run_check().errors, [])
 
+    def test_out_of_pr_sha_accepted_when_history_failed(self) -> None:
+        # The base commit is in the repo but not in base..head. After a squash
+        # the test-only SHA is the same shape: history still holds the fail.
+        self.fix(self.good(self.base))
+        failed = {"event": "pull_request", "head_sha": self.base, "jobs": [
+            {"name": "tier", "results": [results_file(self.base, failed=["t"])]}]}
+        r = self.run_check(history=[failed])
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any("not an earlier commit of this pull request" in n
+                            for n in r.notes), r.notes)
+
+    def test_squash_dropped_sha_accepted_when_history_failed(self) -> None:
+        dropped = "ab" * 20
+        self.fix(f'Fails-before: test-kernel {dropped} "vibeOS: ktest: FAIL t" -- {ZETA}')
+        failed = {"event": "pull_request", "head_sha": dropped, "jobs": [
+            {"name": "tier", "results": [results_file(dropped, failed=["t"])]}]}
+        r = self.run_check(history=[failed])
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any(dropped in n for n in r.notes), r.notes)
+
+    def test_squash_dropped_sha_without_history_fails(self) -> None:
+        dropped = "cd" * 20
+        self.fix(f'Fails-before: test-kernel {dropped} "vibeOS: ktest: FAIL t" -- {ZETA}')
+        self.assertErrors(self.run_check(), "is not an earlier commit of the pull request")
+        other = {"event": "pull_request", "head_sha": "f" * 40, "jobs": []}
+        self.assertErrors(self.run_check(history=[other]),
+                          "is not an earlier commit of the pull request")
+
 
 class TestBareMode(unittest.TestCase):
     def setUp(self) -> None:
