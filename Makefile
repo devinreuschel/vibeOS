@@ -148,22 +148,20 @@ ISOS :=
 $(eval $(call KERNEL_VARIANT,default,,$(ISO)))
 # panic: deliberate panic-test dump
 $(eval $(call KERNEL_VARIANT,panic,--features panic_test,$(ISO_PANIC)))
-# gp: deliberate #GP after IDT
-$(eval $(call KERNEL_VARIANT,gp,--features gp_test,$(ISO_GP)))
-# panic-nest: an `irq_nest` underflow after boot, dumped without a guard
-$(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test,$(ISO_PANIC_NEST)))
-# panic-stop: two CPUs panic at -smp 5; the dump stops the other three
-$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_STOP)))
 # ktest: in-guest registry, never packaged as production
 $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
-# vibefs-crash: write-loop kernel for QEMU-kill fsck
+# x86-only ISO variants: #GP, nest/stop dumps, vibefs crash, hang, IF-off
+# tracer. aarch64 `make prebuilt` must not compile them (gp_test_trip is
+# x86-only; ROADMAP §11.7 aarch64 tiers run default + ktest).
+ifeq ($(ARCH),x86_64)
+$(eval $(call KERNEL_VARIANT,gp,--features gp_test,$(ISO_GP)))
+$(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test,$(ISO_PANIC_NEST)))
+$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_STOP)))
 $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
-# hang: every CPU hangs after smp: done, for the forensics tier's cores
 $(eval $(call KERNEL_VARIANT,hang,--features hang_test,$(ISO_HANG)))
-# irqoff: production features plus the IF-off tracer (ROADMAP §10.3); measurement only
 $(eval $(call KERNEL_VARIANT,irqoff,--features irqoff,$(ISO_IRQOFF)))
-# ktest-irqoff: the in-guest registry plus the IF-off tracer; measurement only
 $(eval $(call KERNEL_VARIANT,ktest-irqoff,--features kernel_tests --features irqoff,$(ISO_KTEST_IRQOFF)))
+endif
 
 KERNEL_ELF := build/kernels/vibeos-default.elf
 
@@ -289,7 +287,7 @@ help:
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
 	  '  test-vibefs-crash-plants  each vibeos.crash_plant= defect caught, then a clean round' \
 	  '  gate PHASE=N          phase exit gate: gate-map entries and box rules (RECORD=1: dev-host records)' \
-	  '  prebuilt              every ISO and host tool a tier uses, as build/prebuilt.tar;' \
+	  '  prebuilt              the ISOs and host tools that architecture'\''s tiers use;' \
 	  '                        VIBEOS_PREBUILT=1 make test-* then uses them (CI tier jobs)' \
 	  '  clean / distclean     build products; distclean also drops limine/'
 
@@ -558,8 +556,15 @@ vmcore: $(VMCORE)
 # variables' paths. The tar keeps the executable bit, which upload-artifact
 # drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
 # run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
+ifeq ($(ARCH),aarch64)
+# The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e + ktest shards.
+PREBUILT_FILES = $(ISO) $(ISO_KTEST) \
+	build/kernels/vibeos-default.elf build/kernels/vibeos-ktest.elf \
+	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
+else
 PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) $(ISO_NOSH) \
 	$(ISO_HANG) $(KERNEL_ELFS) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
+endif
 
 prebuilt: $(PREBUILT_FILES)
 	mkdir -p build

@@ -479,7 +479,7 @@ extern "C" fn boot_rest() -> ! {
         }
     }
 
-    #[cfg(feature = "gp_test")]
+    #[cfg(all(feature = "gp_test", target_arch = "x86_64"))]
     gp_test_trip();
     #[cfg(feature = "panic_nest_test")]
     crate::log::panic_test::nest_trip();
