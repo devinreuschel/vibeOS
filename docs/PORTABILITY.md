@@ -227,11 +227,13 @@ MSR only the bits this table names are written. The values are Linux's on each a
 software that runs on Linux sees the same machine (ROADMAP, How to read this). A control here holds one
 value for every thread. A line that makes one per-thread (Linux's `PR_SET_TSC` for `CR4.TSD`,
 `ARCH_SET_CPUID`, `perf_user_access` for `PMUSERENR_EL0`) moves it to §7.5's per-thread table under
-AGENTS.md rule 8, and a line that changes a value changes its row in the same commit. Rule; not yet
-enforced: ROADMAP §11.6. On x86_64 `arch::cpu::init_control_regs` writes CR0 and CR4 whole on every
-CPU, the CPU's last CR4 store, and clears the CPUID faulting bit where `MSR_PLATFORM_INFO` enumerates
-it, which it reads only on an Intel CPU with SSE4.2, since no CPUID bit says that MSR exists. The
-aarch64 port does not exist.
+AGENTS.md rule 8, and a line that changes a value changes its row in the same commit. On x86_64
+`arch::cpu::init_control_regs` writes CR0 and CR4 whole on every CPU, the CPU's last CR4 store, and
+clears the CPUID faulting bit where `MSR_PLATFORM_INFO` enumerates it, which it reads only on an
+Intel CPU with SSE4.2, since no CPUID bit says that MSR exists. The aarch64 port writes `SCTLR_EL1`,
+`CNTKCTL_EL1` (`CNTHCTL_EL2` at EL2 with VHE), `PMUSERENR_EL0`, and `CPACR_EL1` from the computed
+values on every CPU at bring-up (ROADMAP §11.2, §11.4). ROADMAP §11.6's `/bin/tests` `user_env` case
+proves the EL0-visible rows that case covers.
 
 | Architecture | Control | Value | What user code sees |
 |---|---|---|---|
