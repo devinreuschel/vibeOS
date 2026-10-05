@@ -1152,9 +1152,9 @@ prerelease `ci-history-<year>`, never marked latest and tagged at the branch's t
 rotation, lists it in `archives.json` with its SHA-256 and run ids, and restarts the branch from an
 orphan commit holding the rest, pushed with a lease on the tip it read. It refuses to archive the
 current year and fails with the size instead. `ci_history.py` reads the branch and the archives
-alike. The branch's packed size was 160 KiB (`size-pack` from `git count-objects -v` in a
-`git clone --bare --single-branch --branch ci-history`) at `ci-history` commit `8e748d29` on
-2026-10-04 (ROADMAP §10.9).
+alike. The branch's packed size was 646 KiB (`size-pack` from `git count-objects -v` in a
+`git clone --bare --single-branch --branch ci-history`) at `ci-history` commit `cf8c8507` on
+2026-10-05 (ROADMAP §10.9).
 
 **Gate maps.** From Phase 10 on, `tests/gates/phase-<N>.toml` gives each exit-gate line of phase N
 but the tag the entries that prove it (ROADMAP §10.9, C-GATEMAP): one `[[line]]` per line, its `key`
@@ -1329,37 +1329,40 @@ holds no such run or a record lacks a job's `created`, `started` or `completed` 
 step's seconds. `make ci-budget` runs both and fails if either fails; the nightly `budget` job runs
 it, and from ROADMAP Phase 11 an entry of `tests/gates/common.toml` runs it before every phase
 tag. The medians below are filled from a `make ci-budget` run on `main`, citing the commit and the
-CPU model, and the section also records the `ci-history` branch's packed size (ROADMAP §10.9). The
-first fill is `ci_history.py --tiers` alone, over the push runs on `main` up to `d494350c`, while
-`--budget` waits for its first complete week; GitHub picks each tier job's host CPU model, which the
-job's summary names. `vibefs-crash`'s 61 s passed the 60 s limit; #221 split it into
-`vibefs-crash-1` and `vibefs-crash-2`, whose medians the next fill records, and `--tiers` judges only
-the tiers the newest run has.
+CPU model, and the section also records the `ci-history` branch's packed size (ROADMAP §10.9). This
+fill is a `make ci-budget` run on 2026-10-05 over the push runs on `main` up to `19923800` (ci run
+37230075729): `--tiers` passed with every tier under 60 s, and `--budget` passed over the first
+complete week, from 2026-09-28, with the busiest lane, `sched-lane-2`, at 22% and the longest
+wait in a reserved lane 4.1 h (`sched-lane-5`). GitHub picks each tier job's host, whose CPU model
+the job's `runner CPU` summary names. `vibefs-crash`, whose 61 s median at `d494350c` passed the
+limit, is retired: #221 split it into `vibefs-crash-1` and `vibefs-crash-2`, and `--tiers` judges
+only the tiers the newest run has.
 
 | Tier | Median QEMU s (last 20 runs on main) | Measured at |
 |---|---|---|
-| `tier (x86_64, e2e-1)` | 34.5 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, e2e-2)` | 43 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, forensics)` | 30 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-1)` | 34.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-2)` | 35 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-3)` | 32.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-4)` | 36 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-5)` | 36 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-6)` | 24 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-smp4-1)` | 32 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-smp4-2)` | 46 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-smp4-3)` | 38 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-smp4-4)` | 39 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, kernel-smp4-5)` | 40 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, lapic-fallback-1)` | 35.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, lapic-fallback-2)` | 32 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, lapic-fallback-3)` | 35 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, lapic-fallback-4)` | 32 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, lapic-fallback-5)` | 22.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, lapic-fallback-6)` | 24.5 (n=4) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, vibefs-crash)` | 61 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
-| `tier (x86_64, vibefs-crash-plants)` | 48.5 (n=6) | `d494350c`, ci run 37174743575, hosted `ubuntu-26.04` |
+| `tier (x86_64, e2e-1)` | 35 (n=11) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, e2e-2)` | 47 (n=11) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, forensics)` | 29 (n=11) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-1)` | 38 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-2)` | 37 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-3)` | 36 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-4)` | 36 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-5)` | 36 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-6)` | 24 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-1)` | 42 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-2)` | 46 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-3)` | 39 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-4)` | 39 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, kernel-smp4-5)` | 40 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-1)` | 32 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-2)` | 37 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-3)` | 36 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-4)` | 30 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-5)` | 23 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, lapic-fallback-6)` | 25 (n=9) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, vibefs-crash-1)` | 45 (n=4) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, vibefs-crash-2)` | 12.5 (n=4) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
+| `tier (x86_64, vibefs-crash-plants)` | 51 (n=11) | `19923800`, ci run 37230075729, hosted `ubuntu-26.04` |
 
 **Issues and crash records.** Planned (ROADMAP §14.10, §22.5): one `workflow_run` filer is the only
 job with `issues: write`; it checks out nothing, runs no repository code, and opens or comments on
