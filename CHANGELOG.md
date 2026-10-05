@@ -174,8 +174,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
-- aarch64 UEFI boots prefer AAVMF no-secboot and apply the same PXE/setup-off
-  args as OVMF ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- aarch64 UEFI boots prefer AAVMF no-secboot and use `-cpu neoverse-n1`
+  under TCG so AAVMF 2025.11 reaches BDS ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - A host that stalls QEMU no longer drops the timer tick to the PIT: the LAPIC timer is proved
   against the PIT's interrupts, and its calibration divides by the time its window really took.
 - `kill` of a zombie returns 0 as on Linux; the NBD test server treats a macOS client's close as EOF.

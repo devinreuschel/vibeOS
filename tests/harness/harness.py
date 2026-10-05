@@ -1450,10 +1450,17 @@ def fw_cfg_cmdline_words(cfg: QemuConfig) -> str:
 PANIC_ACTION = ("-action", "panic=pause")
 
 
+# AAVMF 2025.11 hangs after its version banner on TCG `-cpu max`
+# (EDK2 #11962, LPA2). neoverse-n1 is a 64-bit Armv8.2 model BDS reaches.
+AARCH64_TCG_CPU = "neoverse-n1"
+
+
 def _aarch64_cpu(cfg: QemuConfig) -> str:
-    """`-cpu host` under HVF; `virt` defaults to the 32-bit cortex-a15."""
+    """`-cpu host` under HVF; TCG default `max` is `neoverse-n1`."""
     if _accel_name(cfg.accel) == "hvf" and cfg.cpu == DEFAULT_CPU:
         return "host"
+    if cfg.cpu == DEFAULT_CPU:
+        return AARCH64_TCG_CPU
     return cfg.cpu
 
 

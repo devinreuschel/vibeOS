@@ -1868,6 +1868,25 @@ class TestQemuArgv(unittest.TestCase):
         finally:
             remove_vars_copies()
 
+    def test_aarch64_tcg_max_is_neoverse_n1(self) -> None:
+        from tests.harness.harness import AARCH64_TCG_CPU, remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            argv = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, cpu="max"),
+                None,
+            )
+            kept = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, cpu="cortex-a72"),
+                None,
+            )
+        try:
+            self.assertEqual(argv[argv.index("-cpu") + 1], AARCH64_TCG_CPU)
+            self.assertEqual(AARCH64_TCG_CPU, "neoverse-n1")
+            self.assertEqual(kept[kept.index("-cpu") + 1], "cortex-a72")
+        finally:
+            remove_vars_copies()
+
     def test_aarch64_needs_firmware(self) -> None:
         with self.assertRaisesRegex(HarnessError, "UEFI firmware"):
             qemu_argv(QemuConfig(iso="x.iso", arch="aarch64"), None)
