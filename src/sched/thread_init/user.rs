@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// The image a new TCB starts from (DESIGN §7.5). x86_64 uses the psABI
+/// FXSAVE image; aarch64 uses V0–V31, FPCR, and FPSR zero, because
+/// `fp_load` stores those registers at the start of `bytes`.
+pub(crate) fn initial_fxsave() -> Fxsave {
+    #[cfg(target_arch = "aarch64")]
+    {
+        Fxsave::ZERO
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        Fxsave::INITIAL
+    }
+}
+
 /// Give `id`, a user thread not yet [`make_ready`], ring-3 selectors `segs`
 /// for its first entry (`fork`: the parent's, DESIGN §5.1).
 pub fn set_user_segs(id: ThreadId, segs: UserSegs) {

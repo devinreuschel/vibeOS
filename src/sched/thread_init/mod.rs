@@ -64,6 +64,7 @@ pub(crate) use table::table_usage;
 pub(crate) use table::{RunTsc, run_tsc_snapshot, timeouts_capacity};
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
+pub(crate) use user::initial_fxsave;
 pub use user::{reset_user_segs, set_tls_base, set_user_segs};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
@@ -1188,7 +1189,7 @@ fn spawn_inner(
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3,
-        fpu: Fxsave::new_thread(),
+        fpu: initial_fxsave(),
         fp_cpu: None,
         user_segs: UserSegs::NULL,
         tls_base: 0,
@@ -1269,7 +1270,7 @@ fn fill_tcb(
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
-    tcb.fpu = Fxsave::new_thread();
+    tcb.fpu = initial_fxsave();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.user_segs = UserSegs::NULL;
