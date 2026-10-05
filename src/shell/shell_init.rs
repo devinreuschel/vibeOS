@@ -144,7 +144,7 @@ fn paint(ed: &LineEditor, painted: &mut usize) {
 /// Run one command line: the REPL's and the in-guest tests'.
 #[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_shell")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn dispatch_line(line: &str) -> Result<(), &'static str> {
