@@ -183,7 +183,7 @@ impl GuardedStack {
     }
 }
 
-/// FXSAVE area. 16-byte aligned. Every thread starts from [`Fxsave::INITIAL`].
+/// FXSAVE area. 16-byte aligned. A new TCB starts from [`Fxsave::new_thread`].
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 pub struct Fxsave {
@@ -226,6 +226,17 @@ impl Fxsave {
         fpcr: 0,
         fpsr: 0,
     };
+
+    /// The image a new TCB starts from (DESIGN §7.5). x86_64 uses the
+    /// psABI FXSAVE image; aarch64 uses V0–V31, FPCR, and FPSR zero,
+    /// because `fp_load` stores those registers at the start of `bytes`.
+    pub const fn new_thread() -> Self {
+        if cfg!(target_arch = "aarch64") {
+            Self::ZERO
+        } else {
+            Self::INITIAL
+        }
+    }
 }
 
 /// A TCB's on-CPU flag (DESIGN §2.8 rule 2): set while a CPU runs the
@@ -567,6 +578,18 @@ mod tests {
         }
         assert_eq!(b[..2], [0x7F, 0x03]);
         assert_eq!(b[24..28], [0x80, 0x1F, 0, 0]);
+    }
+
+    #[test]
+    fn fxsave_new_thread_is_arch_initial() {
+        let t = Fxsave::new_thread();
+        if cfg!(target_arch = "aarch64") {
+            assert_eq!(t.bytes, [0u8; 512]);
+            assert_eq!(t.fpcr, 0);
+            assert_eq!(t.fpsr, 0);
+        } else {
+            assert_eq!(t.bytes, Fxsave::INITIAL.bytes);
+        }
     }
 
     #[test]

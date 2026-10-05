@@ -1188,7 +1188,7 @@ fn spawn_inner(
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3,
-        fpu: Fxsave::INITIAL,
+        fpu: Fxsave::new_thread(),
         fp_cpu: None,
         user_segs: UserSegs::NULL,
         tls_base: 0,
@@ -1269,7 +1269,7 @@ fn fill_tcb(
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
-    tcb.fpu = Fxsave::INITIAL;
+    tcb.fpu = Fxsave::new_thread();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.user_segs = UserSegs::NULL;

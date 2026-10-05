@@ -54,7 +54,7 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
-        fpu: Fxsave::INITIAL,
+        fpu: Fxsave::new_thread(),
         fp_cpu: None,
         user_segs: UserSegs::NULL,
         tls_base: 0,
