@@ -88,10 +88,11 @@ pub(super) enum Issued {
     Full(Request),
 }
 
-/// Requests finished here that one [`pump`](Self::pump) pass holds before it drops
-/// the queue lock to wake their waiters and picks again. Small, so the pass's frame
-/// stays far below a top half's 4 KiB share of a kernel stack: `pump` runs
-/// on a submitter's stack, under the FAT write path (DESIGN §4.5).
+/// Requests one [`pump`](Self::pump) or `harvest` pass holds before it drops
+/// the queue lock to wake waiters. Small, so the pass's frame stays far
+/// below a top half's 4 KiB share of a kernel stack: `pump` runs on a
+/// submitter's stack under the FAT write path, and `harvest` on irqth
+/// (DESIGN §4.5).
 pub(super) const PUMP_BATCH: usize = 2;
 
 impl VirtioBlk {

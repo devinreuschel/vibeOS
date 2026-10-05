@@ -1173,39 +1173,21 @@ fn spawn_inner(
     }
 
     // Built without the stack, so a failed allocation drops no stack; the
-    // stack goes back as a full table's does (DESIGN §4.4).
-    let tcb = TryBox::try_new(Tcb {
-        id: ThreadId(0),
-        name,
-        state: if enqueue { ThreadState::Ready } else { PARKED },
-        on_cpu: OnCpu::new(),
-        stack: None,
-        context: CpuContext::empty(),
-        entry,
-        affinity,
-        cpu,
-        irq_nest: first_nest,
-        switches: 0,
-        run_tsc: 0,
-        wait_outcome: WaitOutcome::Woken,
-        as_cr3,
-        fpu: initial_fxsave(),
-        fp_cpu: None,
-        user_segs: UserSegs::NULL,
-        tls_base: 0,
-        syscall_count: vibeos::atomic::AtomicU64::new(0),
-        pid,
-        no_reclaim: AtomicU32::new(0),
-    });
-    let mut tcb = match tcb {
-        Ok(t) => t,
-        Err(_) => {
-            if let Some(ks) = stack.take() {
-                return_stack(ks);
+    // stack goes back as a full table's does (DESIGN §4.4). The TCB is
+    // written in the box: `TryBox::try_new(Tcb { ... })` would put
+    // `Option<GuardedStack>` and `Fxsave` on this stack, and aarch64's
+    // 16 KiB `/hello` spawn already sat at 12528 with an IRQ on top
+    // (DESIGN §4.5).
+    let mut tcb =
+        match user::box_new_tcb(name, entry, affinity, enqueue, cpu, first_nest, pid, as_cr3) {
+            Ok(t) => t,
+            Err(_) => {
+                if let Some(ks) = stack.take() {
+                    return_stack(ks);
+                }
+                return Err(SpawnError::NoMemory);
             }
-            return Err(SpawnError::NoMemory);
-        }
-    };
+        };
     tcb.stack = stack;
     prepare_kernel_context(&mut tcb.context, top, tramp);
 
