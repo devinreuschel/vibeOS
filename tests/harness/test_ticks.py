@@ -664,6 +664,16 @@ class TestBrackets(RepoCase):
         self.assertErrors(self.run_check([], gh=self.nightly(head)), "[dev-host]: no run")
         self.assertErrors(self.run_check([], history=[{**rec, "event": "push"}]), "no run")
 
+    def test_dev_host_record_of_a_make_target(self) -> None:
+        # The shape gate.py --record writes: a command and a result, no conclusion.
+        head = self.tick_bracket("make test-kernel", "dev-host")
+        rec = {"event": "dev-host", "head_sha": head, "commit": head, "host": "dev-host",
+               "command": "make test-kernel", "result": "pass", "results": []}
+        self.assertEqual(self.run_check([], history=[rec]).errors, [])
+        for bad in ({"result": "fail"}, {"command": "make lint"}, {"command": "make"}):
+            with self.subTest(bad=bad):
+                self.assertErrors(self.run_check([], history=[{**rec, **bad}]), "no run")
+
     def test_marker_on_a_nightly_run(self) -> None:
         head = self.tick_bracket('"vibeOS: ready"', "nightly")
         run = {"id": 5, "head_sha": head, "event": "schedule", "conclusion": "success"}
