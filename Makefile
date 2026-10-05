@@ -148,15 +148,18 @@ ISOS :=
 $(eval $(call KERNEL_VARIANT,default,,$(ISO)))
 # panic: deliberate panic-test dump
 $(eval $(call KERNEL_VARIANT,panic,--features panic_test,$(ISO_PANIC)))
-# ktest: in-guest registry, never packaged as production
-$(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
-# x86-only ISO variants: #GP, nest/stop dumps, vibefs crash, hang, IF-off
-# tracer. aarch64 `make prebuilt` must not compile them (gp_test_trip is
-# x86-only; ROADMAP §11.7 aarch64 tiers run default + ktest).
+# x86-only ISO variants: #GP, nest/stop dumps. aarch64 `make prebuilt`
+# must not compile them (gp_test_trip is x86-only; ROADMAP §11.7 aarch64
+# tiers run default + ktest). Keep this order so x86 KERNEL_ELFS matches
+# tests/harness/test_build_outputs.py VARIANTS.
 ifeq ($(ARCH),x86_64)
 $(eval $(call KERNEL_VARIANT,gp,--features gp_test,$(ISO_GP)))
 $(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test,$(ISO_PANIC_NEST)))
 $(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_STOP)))
+endif
+# ktest: in-guest registry, never packaged as production
+$(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
+ifeq ($(ARCH),x86_64)
 $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
 $(eval $(call KERNEL_VARIANT,hang,--features hang_test,$(ISO_HANG)))
 $(eval $(call KERNEL_VARIANT,irqoff,--features irqoff,$(ISO_IRQOFF)))
