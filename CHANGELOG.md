@@ -22,15 +22,33 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   ranges stay out of the buddy ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
 - `make check` fails a Relaxed, Acquire, Release or AcqRel ordering with no
   comment naming what it pairs with ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+
+### Changed
+
+- Limine 12.9.1; the boot handshake is base revision 6 (`vibeOS: limine: rev 6 ok`).
+
+### Fixed
+
+- aarch64 EL1 vector entry no longer clobbers `x16`, which panicked as
+  `#DABT` in `cmdline::Words::next` ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- aarch64 UEFI boots prefer AAVMF no-secboot and use `-cpu neoverse-n1`
+  under TCG so AAVMF 2025.11 reaches BDS ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- Every CPU clears `EFER.FFXSR`, so a context switch on AMD saves the XMM registers, and turns off
+  CPUID faulting that firmware left on, so `cpuid` runs in ring 3.
+
+## [0.10.0]
+
+Phase 10 exit: consolidation. The 2026-09-23 kernel review's fixes, the user runtime in Rust, the
+forensics tools, and the gates and CI that hold every later phase. See
+[Phase 10](docs/ROADMAP.md#phase-10-consolidation).
+
+### Added
+
 - SMEP/SMAP/UMIP and `CR0.WP` on every CPU (`arch::cpu::init_control_regs`).
-- [Phase 9](docs/ROADMAP.md#phase-9-user-mode-and-processes): ring 3, syscalls, ELF `/hello`,
-  `fork`/`execve`/`wait4`, `/sbin/init`, `/bin/sh`. Gate reopened into Phase 10; COW is Phase 12.
 - MIT license (`LICENSE`). Every crate manifest declares `license = "MIT"`.
 - Tracked `AGENTS.md` (DOC3). Cursor rules and `CLAUDE.md` point at it.
 - `make check` as the fast local gate (host clippy, host units, harness, ruff/mypy).
   `make help` lists targets.
-- [Phase 10](docs/ROADMAP.md#phase-10-consolidation): the kernel review's fixes, the user runtime in
-  Rust, the forensics tools and the gates below; its exit gate closes after the scheduled runs.
 - Each `make test-*` tier writes `build/results/<arch>-<tier>.json`
   ([ROADMAP §10.2](docs/ROADMAP.md#102-build-and-harness)).
 - `meminfo` prints how many frames a dropped ownership token leaked.
@@ -81,7 +99,6 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Changed
 
-- Limine 12.9.1; the boot handshake is base revision 6 (`vibeOS: limine: rev 6 ok`).
 - Partitions are numbered by their place on disk, as Linux numbers them: an MBR's logical
   partitions start at `p5` (ram0's are now `ram0p5` and `ram0p6`), and a GPT entry is its index + 1.
 - A GPT is read only behind a protective MBR, as Linux reads it; a plain MBR wins over stale GPT headers.
@@ -174,10 +191,6 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
-- aarch64 EL1 vector entry no longer clobbers `x16`, which panicked as
-  `#DABT` in `cmdline::Words::next` ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
-- aarch64 UEFI boots prefer AAVMF no-secboot and use `-cpu neoverse-n1`
-  under TCG so AAVMF 2025.11 reaches BDS ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - A host that stalls QEMU no longer drops the timer tick to the PIT: the LAPIC timer is proved
   against the PIT's interrupts, and its calibration divides by the time its window really took.
 - `kill` of a zombie returns 0 as on Linux; the NBD test server treats a macOS client's close as EOF.
@@ -194,8 +207,6 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - FAT counts free clusters at mount instead of trusting FSInfo; vibefs stamps inodes with the wall
   clock and a refused unlink keeps the name.
 - Every CPU zeroes the SYSENTER MSRs, and a failed `ioremap` gives its window back.
-- Every CPU clears `EFER.FFXSR`, so a context switch on AMD saves the XMM registers, and turns off
-  CPUID faulting that firmware left on, so `cpuid` runs in ring 3.
 - `/dev`, `/proc`, `/sys` and `/tmp` are no longer capped at 128 nodes between them: kernfs's
   node table grows on the heap, and `ENOMEM` when it cannot.
 - `execve` of a program on `/tmp` stays within its thread's kernel stack budget; tmpfs's cache
@@ -334,12 +345,23 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   ([ROADMAP §10.2](docs/ROADMAP.md#102-build-and-harness)).
 - The `vibeos-ktest.iso` release asset (F145).
 
+## [0.9.0]
+
+Phase 9 exit: user mode and processes. The 2026-09-23 kernel review reopened Phase 9's gate lines
+into Phase 10, so `v0.9.0` is cut from the tree that closed them, one commit before `v0.10.0`, and
+it carries the changes the 0.10.0 notes list.
+
+### Added
+
+- [Phase 9](docs/ROADMAP.md#phase-9-user-mode-and-processes): ring 3, syscalls, ELF loading,
+  `fork`/`execve`/`wait4`, `/sbin/init`, `/bin/sh`. COW is Phase 12.
+
 ## [0.8.0]
 
 Phase 8 exit: filesystems. Phases 0–8 in one cut. See [the arc](docs/ROADMAP.md#the-arc).
-Not yet tagged: the 2026-09-23 kernel review and a later design review reopened gate lines of Phases 0
-to 8, so `v0.8.0` is cut, with this section as its notes, when every gate line of Phases 0 to 8 is
-checked (ROADMAP, standing gates).
+The 2026-09-23 kernel review and a later design review reopened gate lines of Phases 0 to 8 into
+Phase 10, so `v0.8.0` is cut from the tree that closed them, and it carries the changes the
+0.10.0 notes list.
 
 ### Added
 
@@ -396,5 +418,7 @@ checked (ROADMAP, standing gates).
 - TSC-deadline arm is LVT timer write, then `MFENCE`, then `IA32_TSC_DEADLINE`.
 - Condvar/RwLock timeouts wake the right waiters; spawn reuses Dead TCBs without growing the heap.
 
-[Unreleased]: https://github.com/devinreuschel/vibeOS/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/devinreuschel/vibeOS/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/devinreuschel/vibeOS/releases/tag/v0.10.0
+[0.9.0]: https://github.com/devinreuschel/vibeOS/releases/tag/v0.9.0
 [0.8.0]: https://github.com/devinreuschel/vibeOS/releases/tag/v0.8.0
