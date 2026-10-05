@@ -22,7 +22,9 @@ const ESR_EC_MASK: u64 = 0x3F;
 const ESR_FSC_MASK: u64 = 0x3F;
 const ESR_WNR: u64 = 1 << 6;
 const EC_IABT_CUR: u64 = 0x20;
+const EC_IABT_LOWER: u64 = 0x21;
 const EC_DABT_CUR: u64 = 0x24;
+const EC_DABT_LOWER: u64 = 0x25;
 
 fn esr_ec(esr: u64) -> u64 {
     (esr >> ESR_EC_SHIFT) & ESR_EC_MASK
@@ -70,10 +72,15 @@ fn stray_verdict(
     let Some(c) = c else {
         return Some(crate::fail_fmt!("{what}: no fault"));
     };
-    let want_ec = if fetch { EC_IABT_CUR } else { EC_DABT_CUR };
+    let (ec_a, ec_b) = if fetch {
+        (EC_IABT_CUR, EC_IABT_LOWER)
+    } else {
+        (EC_DABT_CUR, EC_DABT_LOWER)
+    };
     let wnr = c.esr & ESR_WNR != 0;
+    let ec = esr_ec(c.esr);
     let ok = c.far == va
-        && esr_ec(c.esr) == want_ec
+        && (ec == ec_a || ec == ec_b)
         && esr_perm(c.esr)
         && wnr == write
         && (!fetch || !wnr);
@@ -81,7 +88,7 @@ fn stray_verdict(
         None
     } else {
         Some(crate::fail_fmt!(
-            "{what}: far={:#x} esr={:#x}, want {va:#x} ec={want_ec:#x} perm W={}",
+            "{what}: far={:#x} esr={:#x}, want {va:#x} perm W={}",
             c.far,
             c.esr,
             u8::from(write)
