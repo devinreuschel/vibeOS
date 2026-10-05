@@ -12,6 +12,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Added
 
+- aarch64 per-push CI on arm64 TCG, `make litmus`, and dual README quickstarts
+  ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - aarch64 boot CPU: GICv2/v3, generic timer, full vector table, idle `wfi`
   ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
 - RAM-only physmap: a 9 GiB guest puts RAM above 8 GiB in the buddy; MMIO
