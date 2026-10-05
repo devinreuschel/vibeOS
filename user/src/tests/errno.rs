@@ -581,11 +581,11 @@ fn read_into(fd: u32, n: usize) -> Result<usize, Errno> {
 
 /// `fstat(fd, <a stack buffer>)`: the call's result and `st_mode`.
 fn fstat_mode(fd: u32) -> (Result<usize, Errno>, u32) {
-    let mut st = [0u32; 36];
-    // SAFETY: the kernel writes 144 bytes into `st`, a local of 144 bytes
-    // no reference covers during the call; established here.
-    let r = unsafe { sys::fstat(fd, st.as_mut_ptr().cast()) };
-    (r, st[6])
+    let mut st = sys::Stat::default();
+    // SAFETY: the kernel writes this port's `struct stat` through
+    // `&raw mut st`; established here.
+    let r = unsafe { sys::fstat(fd, core::ptr::from_mut(&mut st).cast()) };
+    (r, st.st_mode)
 }
 
 fn fstat_into(fd: u32) -> Result<usize, Errno> {
