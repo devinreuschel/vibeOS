@@ -73,3 +73,37 @@ commit = "48d1fb4dc9707d5259e7e59700618000666f89ec"
 was = "block_vblk_mmio_smp -- every virtio queue notification writes that virtqueue's index"
 proves = "crates/core/src/dev/virtio.rs::queue_notify -- every virtio queue notification writes that virtqueue's index"
 why = "GitHub CI is x86-only; block_vblk_mmio_smp is an aarch64 ktest and never appears in C-RESULTS. queue_notify is the index every kick writes"
+
+[[erratum]]
+commit = "4ea066ae1ef3304ab3153179ae9fdd2fa4f03775"
+was = ""
+proves = """
+user/src/arch/aarch64/sys.rs -- `openat`, `dup3`, and fork-shaped
+src/proc/ktest/tls.rs::test_tls_survive -- `FS_BASE` saved and restored
+user/src/tests/mod.rs -- `/bin/tests` from the Phase 10 user crate
+tests/harness/harness.py::run_qemu_console_input -- the harness types
+src/main.rs -- the initrd, built by the same
+src/console/console_init.rs::read -- PL011 receive
+ecam_bus_range_reg_is_first_bus -- PCIe through the ECAM the device tree names
+src/dev/virtio_mmio_init.rs::publish -- virtio-mmio transport as well
+dma_edu -- `test_dma_edu` programs each device address
+crates/core/src/dev/virtio.rs::queue_notify -- every virtio queue notification writes that virtqueue's index
+virtio_input -- virtio-input for keyboard and pointer
+src/arch/aarch64/ktest.rs::test_rtc_offset -- PL031 for the §2.7 wall clock
+src/arch/aarch64/ktest.rs::test_fb_limine -- the framebuffer console over the Limine framebuffer
+src/arch/aarch64/ktest.rs::test_el0_svc_eret -- `svc` entry and `eret` exit
+src/arch/aarch64/ktest_el0.rs::current_migrate_if1 -- `current` in `SP_EL0`
+src/proc/syscall_init_aarch64.rs::switch_cr3_for -- `TTBR0` switch on context switch
+src/arch/aarch64/ktest_el0.rs::test_el0_pan_every_cpu -- PAN enabled on every CPU
+src/arch/aarch64/ktest.rs::test_el0_tagged -- tagged user pointers
+crates/core/src/proc/elf/tls.rs::thread_pointer_variant_i -- `TPIDR_EL0` for user TLS
+src/proc/ktest/tls.rs::test_tls_survive -- the user TLS base is per-thread
+docs/SYSCALL.md -- the aarch64 syscall convention
+user/src/arch/aarch64/sys.rs -- `openat` (with `AT_FDCWD`)
+crates/core/src/arch/aarch64/stat.rs::stat_aarch64_layout_is_linux -- `struct stat` for `fstat`
+user/src/arch/aarch64/sys.rs -- `/sbin/init`, `/bin/sh`, `/bin/tests` from the user crate
+src/arch/aarch64/ktest_el0.rs::test_el0_fp_no_leak -- user FP and SIMD state
+user/src/tests/fp.rs -- aarch64 user FP state across
+src/arch/aarch64/ktest.rs::test_el0_ring3_signals -- ring 3 cannot halt the kernel on aarch64
+"""
+why = "S9 (#228) squash dropped the Proves lines; these are the trailers the squashed S9 commits carried, with the two aarch64-only mmio proofs rewritten as path::fn the way the 48d1fb4 errata already did"
