@@ -10,18 +10,19 @@ use crate::ktest::{Outcome, fid};
 use crate::proc_init;
 use crate::thread_init;
 
+// ebx, not ecx: `syscall` overwrites rcx with the return RIP.
 user_code!(
     TLS_LOOP,
     "
-    mov ecx, 80
+    mov ebx, 80
 1:
     mov rax, qword ptr fs:[-8]
-    mov rbx, 0x1122334455667788
-    cmp rax, rbx
+    mov r12, 0x1122334455667788
+    cmp rax, r12
     jne 9f
     mov eax, 24
     syscall
-    dec ecx
+    dec ebx
     jnz 1b
     xor edi, edi
     mov eax, 60
@@ -37,11 +38,11 @@ user_code!(
 user_code!(
     YIELD_LOOP,
     "
-    mov ecx, 80
+    mov ebx, 80
 1:
     mov eax, 24
     syscall
-    dec ecx
+    dec ebx
     jnz 1b
     xor edi, edi
     mov eax, 60

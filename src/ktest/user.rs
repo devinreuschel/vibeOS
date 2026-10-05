@@ -149,7 +149,8 @@ fn fill_phdrs(b: &mut [u8], code: &[u8], layout: &Layout, tls: bool) {
         b[t + 8..t + 16].copy_from_slice(&(TLS_OFF as u64).to_le_bytes());
         b[t + 32..t + 40].copy_from_slice(&8u64.to_le_bytes());
         b[t + 40..t + 48].copy_from_slice(&8u64.to_le_bytes());
-        b[t + 48..t + 56].copy_from_slice(&16u64.to_le_bytes());
+        // 8: variant II puts the one-word init image at TP-8 (`fs:[-8]`).
+        b[t + 48..t + 56].copy_from_slice(&8u64.to_le_bytes());
     }
 }
 
