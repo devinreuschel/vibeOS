@@ -1,6 +1,7 @@
 //! A user thread's ring-3 CPU state outside the context switch: what `fork`
 //! and `execve` set in its TCB (DESIGN §5.1, §7.5).
 
+use core::alloc::Layout;
 use core::ptr;
 
 use super::*;
@@ -89,11 +90,40 @@ fn boxed_cached_stack() -> Option<TryBox<GuardedStack>> {
     }
 }
 
-/// Move the handle into a TCB slot. `into_inner` materializes
-/// [`GuardedStack`] on this frame, not the caller's (DESIGN §4.5).
+/// Copy the handle into a TCB slot without freeing the box. `fill_tcb`
+/// runs under SCHED, which ranks above HEAP, so the caller
+/// [`forget_stack_box`]s after that lock drops (DESIGN §4.5).
+#[inline(never)]
+pub(super) fn place_stack(
+    dst: &mut Option<GuardedStack>,
+    src: TryBox<GuardedStack>,
+) -> *mut GuardedStack {
+    let p = TryBox::into_raw(src);
+    // SAFETY: `src` is the exclusive box; `dst` is empty; the copy is the
+    // one handle; the allocation stays allocated until `forget_stack_box`;
+    // established here.
+    unsafe {
+        ptr::write(dst, Some(ptr::read(p)));
+    }
+    p
+}
+
+/// Free the empty box [`place_stack`] left. Not under SCHED.
+pub(super) fn forget_stack_box(p: *mut GuardedStack) {
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: `p` came from `place_stack` (`thread_init::user::place_stack`);
+    // the handle lives in the TCB; established here.
+    unsafe {
+        alloc::alloc::dealloc(p.cast::<u8>(), Layout::new::<GuardedStack>());
+    }
+}
+
+/// Move the handle into a TCB slot. Not under SCHED: the box is freed here.
 #[inline(never)]
 pub(super) fn install_stack(dst: &mut Option<GuardedStack>, src: TryBox<GuardedStack>) {
-    *dst = Some(src.into_inner());
+    forget_stack_box(place_stack(dst, src));
 }
 
 /// Give an unused boxed stack back to the cache or KVA.

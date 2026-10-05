@@ -1117,6 +1117,7 @@ fn spawn_inner(
     // `on_cpu` set; its CPU clears it with Release (`finish_switch`).
     // The Dead TCB's old tid leaves the index and the timeout queue and
     // goes back to the allocator; the new thread takes a new tid.
+    let mut stacked = core::ptr::null_mut();
     let reused = with_sched(|s| {
         let slot = s
             .slots
@@ -1133,7 +1134,7 @@ fn spawn_inner(
         let tcb = s.slots[slot].as_deref_mut()?;
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
         tcb.id = id;
-        fill_tcb(
+        stacked = fill_tcb(
             tcb, name, entry, affinity, cpu, ks, top, tramp, first_nest, pid, as_cr3,
         );
         if !enqueue {
@@ -1145,6 +1146,7 @@ fn spawn_inner(
         }
         Some(Ok(id))
     });
+    user::forget_stack_box(stacked);
     match reused {
         Some(Ok(id)) => return Ok(ThreadHandle { id }),
         Some(Err(e)) => {
@@ -1226,10 +1228,10 @@ fn fill_tcb(
     irq_nest: u32,
     pid: u32,
     as_cr3: u64,
-) {
+) -> *mut GuardedStack {
     tcb.name = name;
     tcb.state = ThreadState::Ready;
-    user::install_stack(&mut tcb.stack, ks);
+    let p = user::place_stack(&mut tcb.stack, ks);
     tcb.entry = entry;
     tcb.affinity = affinity;
     tcb.cpu = cpu;
@@ -1246,6 +1248,7 @@ fn fill_tcb(
     tcb.syscall_count.store(0, Ordering::Relaxed);
     tcb.pid = pid;
     prepare_kernel_context(&mut tcb.context, top, tramp);
+    p
 }
 
 pub fn sleep_ms(ms: u64) {
