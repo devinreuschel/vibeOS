@@ -592,9 +592,9 @@ fn schedule_inner(from_irq: bool) {
     // exited; the entry is then stale. SCHED decides: run a thread only
     // while it is `Ready` and placed on this CPU, and drop any other entry.
     let (old_ptr, new_ptr, old_id, new_id) = loop {
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         let cand = testing::requeue_next_cpu(next, cur, idle, me);
-        #[cfg(not(all(feature = "kernel_tests", target_arch = "x86_64")))]
+        #[cfg(not(feature = "kernel_tests"))]
         let cand = next;
         let picked = with_sched(|s| {
             if cand != idle && !s.get(cand).is_some_and(|t| runnable_on(t, me)) {
@@ -1476,10 +1476,12 @@ pub fn current_cpu() -> u32 {
     crate::arch::cpu_id_hint()
 }
 
+#[cfg(feature = "kernel_tests")]
+pub use testing::exited;
 #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub use testing::{
-    cpu_of, exited, ktest_drop_timeout, ktest_last_overdue, ktest_preempt_before_places,
-    ktest_sweeps, name, state, try_state,
+    cpu_of, ktest_drop_timeout, ktest_last_overdue, ktest_preempt_before_places, ktest_sweeps,
+    name, state, try_state,
 };
 
 pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
@@ -1487,5 +1489,9 @@ pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
 }
 
 /// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
+#[cfg_attr(
+    target_arch = "aarch64",
+    allow(dead_code, reason = "x86 ktest hooks; aarch64 uses the requeue hook")
+)]
 pub mod testing;

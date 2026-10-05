@@ -789,16 +789,20 @@ user_code!(
     EL0_SP,
     "
     mov x20, sp
-    mov x19, #1000
+    stur x20, [sp, #-16]
+    mov x19, #10000
 1:
     mov x8, #172
     svc #0
     subs x19, x19, #1
     b.ne 1b
-    mov x0, #0
-    cmp sp, x20
-    b.eq 2f
+    ldur x21, [sp, #-16]
     mov x0, #1
+    cmp sp, x20
+    b.ne 2f
+    cmp x21, x20
+    b.ne 2f
+    mov x0, #0
 2:
     mov x8, #93
     svc #0
@@ -899,7 +903,7 @@ pub(crate) fn test_el0_svc_eret() -> Outcome {
     Outcome::Ok
 }
 
-/// User SP is intact across 1,000 syscalls.
+/// User SP is intact across 10,000 syscalls and timer preemptions.
 pub(crate) fn test_el0_sp() -> Outcome {
     match run_code(EL0_SP, "el0_sp") {
         Ok(st) if exited0(st) => Outcome::Ok,
@@ -1048,6 +1052,15 @@ pub(crate) const TESTS: &[Test] = &[
     test("el0_ttbr0", test_el0_ttbr0),
     test("el0_uaccess", test_el0_uaccess),
     test("el0_sp_el0_current", test_el0_sp_el0_current),
+    test(
+        "current_at_if1",
+        crate::arch::aarch64::ktest_el0::current_at_if1,
+    ),
+    test(
+        "current_migrate_if1",
+        crate::arch::aarch64::ktest_el0::current_migrate_if1,
+    )
+    .deadline(30_000),
     test("el0_ring3_signals", test_el0_ring3_signals),
     test("el0_bad_elr", test_el0_bad_elr),
     test(

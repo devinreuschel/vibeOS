@@ -1,16 +1,20 @@
 //! EL0 TLS, FP, and SVE proofs (ROADMAP §11.6, F022, F069, F130).
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::fs::{O_CREAT, O_TRUNC, O_WRONLY};
+use vibeos::limits::PID_MAX;
 use vibeos::proc::{SIGILL, SIGKILL, wait_signaled};
-use vibeos::thread::ThreadId;
+use vibeos::thread::{Tcb, ThreadId};
 
+use crate::arch;
 use crate::arch::current::syscall_nr;
 use crate::ktest::user::{self, DEFAULT, Image, TLS_MAGIC, elf_bytes, user_code};
-use crate::ktest::{Outcome, fid, spawn_thread_on};
+use crate::ktest::{Outcome, fid, second_cpu, sleep_until, spawn_thread_on};
+use crate::per_cpu_init;
 use crate::proc_init;
 use crate::thread_init;
+use crate::time_init;
 
 user_code!(
     TLS_LOOP,
@@ -445,3 +449,191 @@ pub(crate) fn test_el0_sve_sigill() -> Outcome {
 }
 
 const _: () = assert!(TLS_MAGIC == 0x1122_3344_5566_7788);
+
+/// ROADMAP §10.3 (F039): `current` is read in one instruction that
+/// preemption cannot split. The registry, with IF=1, reads its id and pid
+/// through `thread_init`, which must not trip the IF=0 assertion of
+/// `per_cpu_init::current`, and finds them equal to its TCB's; in a debug
+/// build `per_cpu_init::current()` itself trips it.
+pub(crate) fn current_at_if1() -> Outcome {
+    if !crate::arch::current::interrupts_enabled() {
+        return Outcome::Fail("registry runs with IF off");
+    }
+    if !per_cpu_init::if_checks_armed() {
+        return Outcome::Fail("IF=0 checks not armed");
+    }
+    let mut got = (ThreadId::NONE, 0u32);
+    let hit = arch::catch::catch_panic(|| {
+        got = (thread_init::current_id(), thread_init::current_pid());
+    });
+    if hit {
+        return Outcome::Fail("two-step current read tripped the IF=0 assertion");
+    }
+    let t = arch::current_tcb();
+    if t.is_null() {
+        return Outcome::Fail("current_tcb null");
+    }
+    // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`,
+    // `id` changes only while its slot is Dead, and `pid` only under SCHED
+    // by `set_pid_cr3`, a word this read cannot tear; established by
+    // `thread_init::spawn_inner`.
+    let want = unsafe { ((*t).id, (*t).pid) };
+    if got != want {
+        return crate::fail_fmt!(
+            "current_id/current_pid ({}, {}), TCB ({}, {})",
+            got.0.0,
+            got.1,
+            want.0.0,
+            want.1
+        );
+    }
+    if cfg!(debug_assertions) {
+        let hit = arch::catch::catch_panic(|| {
+            core::hint::black_box(per_cpu_init::current());
+        });
+        if !hit {
+            return Outcome::Fail("per_cpu_init::current() at IF=1 did not assert");
+        }
+        if !crate::arch::current::interrupts_enabled() || per_cpu_init::irq_nest() != 0 {
+            return Outcome::Fail("the caught assertion left IF or irq_nest changed");
+        }
+    }
+    Outcome::Ok
+}
+
+/// `current_migrate_if1`'s threads.
+const MIGRATE_THREADS: usize = 4;
+/// How long each thread reads with IF=1.
+const MIGRATE_MS: u64 = 2_000;
+static MIGRATE_START: AtomicBool = AtomicBool::new(false);
+static MIGRATE_EXIT: AtomicBool = AtomicBool::new(false);
+static MIGRATE_TCB: [AtomicPtr<Tcb>; MIGRATE_THREADS] =
+    [const { AtomicPtr::new(core::ptr::null_mut()) }; MIGRATE_THREADS];
+static MIGRATE_PID: [AtomicU32; MIGRATE_THREADS] = [const { AtomicU32::new(0) }; MIGRATE_THREADS];
+/// Each thread's verdict: one of the `MIG_*` values.
+static MIGRATE_RESULT: [AtomicU32; MIGRATE_THREADS] =
+    [const { AtomicU32::new(MIG_RUNNING) }; MIGRATE_THREADS];
+const MIG_RUNNING: u32 = 0;
+const MIG_OK: u32 = 1;
+const MIG_WRONG_TCB: u32 = 2;
+const MIG_WRONG_PID: u32 = 3;
+const MIG_NEVER_MOVED: u32 = 4;
+
+fn migrate_body(i: usize) {
+    while !MIGRATE_START.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    let (Some(tcb), Some(pid), Some(out)) = (
+        MIGRATE_TCB.get(i),
+        MIGRATE_PID.get(i),
+        MIGRATE_RESULT.get(i),
+    ) else {
+        return;
+    };
+    let (tcb, pid) = (tcb.load(Ordering::Acquire), pid.load(Ordering::Acquire));
+    let first = arch::cpu_id_hint();
+    let mut moved = false;
+    let end = time_init::uptime_ms().saturating_add(MIGRATE_MS);
+    let mut verdict = MIG_OK;
+    while time_init::uptime_ms() < end {
+        if arch::current_tcb() != tcb {
+            verdict = MIG_WRONG_TCB;
+            break;
+        }
+        if thread_init::current_pid() != pid {
+            verdict = MIG_WRONG_PID;
+            break;
+        }
+        moved |= arch::cpu_id_hint() != first;
+    }
+    if verdict == MIG_OK && !moved {
+        verdict = MIG_NEVER_MOVED;
+    }
+    // Release: publishes the verdict to `current_migrate_if1`.
+    out.store(verdict, Ordering::Release);
+    while !MIGRATE_EXIT.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+}
+
+fn migrate_0() {
+    migrate_body(0);
+}
+
+fn migrate_1() {
+    migrate_body(1);
+}
+
+fn migrate_2() {
+    migrate_body(2);
+}
+
+fn migrate_3() {
+    migrate_body(3);
+}
+
+/// ROADMAP §10.3 (F039): four `CpuAffinity::Any` threads, each with its
+/// own fake pid above `PID_MAX`, read `arch::current_tcb()` and
+/// `current_pid()` with IF=1 for 2 s while C-REQUEUE-HOOK moves each
+/// preempted one to the next online CPU; any value not its own fails, and
+/// so does a thread that never changed CPU.
+pub(crate) fn current_migrate_if1() -> Outcome {
+    if second_cpu().is_none() {
+        return Outcome::Skip("needs 2 CPUs");
+    }
+    MIGRATE_START.store(false, Ordering::Release);
+    MIGRATE_EXIT.store(false, Ordering::Release);
+    let entries: [fn(); MIGRATE_THREADS] = [migrate_0, migrate_1, migrate_2, migrate_3];
+    let mut ids = [ThreadId::NONE; MIGRATE_THREADS];
+    for (i, entry) in entries.into_iter().enumerate() {
+        let h = match thread_init::spawn("current-migrate", entry) {
+            Ok(h) => h,
+            Err(e) => {
+                MIGRATE_EXIT.store(true, Ordering::Release);
+                MIGRATE_START.store(true, Ordering::Release);
+                return crate::fail_fmt!("spawn: {}", e.as_str());
+            }
+        };
+        let id = h.id();
+        ids[i] = id;
+        let pid = PID_MAX.saturating_add(1).saturating_add(i as u32);
+        thread_init::set_pid_cr3(id, pid, 0);
+        MIGRATE_TCB[i].store(thread_init::tcb_ptr(id), Ordering::Release);
+        MIGRATE_PID[i].store(pid, Ordering::Release);
+        MIGRATE_RESULT[i].store(MIG_RUNNING, Ordering::Release);
+    }
+    let done = {
+        let _g = thread_init::testing::RequeueGuard;
+        thread_init::testing::set_requeue_next_cpu(true);
+        MIGRATE_START.store(true, Ordering::Release);
+        sleep_until(
+            || {
+                MIGRATE_RESULT
+                    .iter()
+                    .all(|r| r.load(Ordering::Acquire) != MIG_RUNNING)
+            },
+            MIGRATE_MS.saturating_mul(3),
+        )
+    };
+    for id in ids {
+        thread_init::set_pid_cr3(id, 0, 0);
+    }
+    MIGRATE_EXIT.store(true, Ordering::Release);
+    let joined = sleep_until(|| ids.iter().all(|&id| thread_init::exited(id)), 2_000);
+    if !done {
+        return Outcome::Fail("a thread did not finish its 2 s");
+    }
+    for (i, r) in MIGRATE_RESULT.iter().enumerate() {
+        match r.load(Ordering::Acquire) {
+            MIG_OK => {}
+            MIG_WRONG_TCB => return crate::fail_fmt!("thread {i}: current_tcb not its own"),
+            MIG_WRONG_PID => return crate::fail_fmt!("thread {i}: current_pid not its own"),
+            MIG_NEVER_MOVED => return crate::fail_fmt!("thread {i}: never changed CPU"),
+            v => return crate::fail_fmt!("thread {i}: verdict {v}"),
+        }
+    }
+    if !joined {
+        return Outcome::Fail("a thread did not exit");
+    }
+    Outcome::Ok
+}
