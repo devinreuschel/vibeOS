@@ -1277,7 +1277,7 @@ mod tests {
 
     // ---- AP trampoline page and usable-range clipping (DESIGN §7.3, §2.4) ----
 
-    /// Limine memory map types, as `limine::memmap` numbers them.
+    /// Limine memory map types, as the Limine boot protocol numbers them.
     const USABLE: u64 = 0;
     const RESERVED: u64 = 1;
     const BOOTLOADER_RECLAIMABLE: u64 = 5;

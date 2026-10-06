@@ -322,7 +322,7 @@ forensics tools, and the gates and CI that hold every later phase. See
 ## [0.9.0]
 
 Phase 9 exit: user mode and processes. The 2026-09-23 kernel review reopened Phase 9's gate lines
-into Phase 10, so `v0.9.0` is cut from the tree that closed them, one commit before `v0.10.0`, and
+into Phase 10, so `v0.9.0` is cut from the tree that closed them, just before `v0.10.0`, and
 it carries the changes the 0.10.0 notes list.
 
 ### Added
