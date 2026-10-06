@@ -261,8 +261,8 @@ impl IrqTable {
         self.slot(irq).ok().map(|s| s.cpu)
     }
 
-    /// Record dest CPU only. The kernel calls the chip after dropping the
-    /// IRQ lock so chip code can take it.
+    /// Record dest CPU only. The kernel calls the chip outside the IRQ
+    /// lock, then this on `Ok`.
     pub fn set_cpu(&mut self, irq: IrqId, cpu: u32) -> Result<(), IrqError> {
         self.slot_mut(irq)?.cpu = cpu;
         Ok(())
@@ -368,8 +368,11 @@ impl IrqTable {
             let s = self.slot(irq)?;
             (s.chip.ok_or(IrqError::BadVector)?, s.hwirq)
         };
-        self.set_cpu(irq, cpu)?;
-        chip.set_affinity(hwirq, cpu)
+        // Chip first: a reject must leave `cpu_of` on the old dest.
+        // The kernel wrapper calls the chip outside the IRQ lock, then
+        // `set_cpu` only on `Ok`.
+        chip.set_affinity(hwirq, cpu)?;
+        self.set_cpu(irq, cpu)
     }
 
     pub fn free(&mut self, irq: IrqId) -> Result<(), IrqError> {
@@ -400,6 +403,7 @@ mod tests {
         next: AtomicU32,
         cpu: [AtomicU32; STUB_HW],
         live: [AtomicU8; STUB_HW],
+        fail_aff: AtomicU8,
     }
 
     impl StubChip {
@@ -408,6 +412,7 @@ mod tests {
                 next: AtomicU32::new(STUB_MSI_BASE),
                 cpu: [const { AtomicU32::new(0) }; STUB_HW],
                 live: [const { AtomicU8::new(0) }; STUB_HW],
+                fail_aff: AtomicU8::new(0),
             }
         }
 
@@ -459,6 +464,9 @@ mod tests {
         fn eoi(&self, _hwirq: u32) {}
 
         fn set_affinity(&self, hwirq: u32, cpu: u32) -> Result<(), IrqError> {
+            if self.fail_aff.load(Ordering::Relaxed) != 0 {
+                return Err(IrqError::BadCpu);
+            }
             let live = Self::at(&self.live, hwirq)?;
             if live.load(Ordering::Relaxed) == 0 {
                 return Err(IrqError::BadVector);
@@ -575,5 +583,23 @@ mod tests {
         assert_eq!(table.hwirq(again), Some(5));
         assert_eq!(table.cpu_of(again), Some(2));
         table.free(again).unwrap();
+    }
+
+    #[test]
+    fn set_affinity_keeps_cpu_when_chip_rejects() {
+        let chip: &'static StubChip = Box::leak(Box::new(StubChip::new()));
+        let mut table = IrqTable::new();
+        let spec = IrqSpecifier::Gsi {
+            gsi: 7,
+            trigger: Trigger::Edge,
+            polarity: Polarity::High,
+        };
+        let irq = table.map_wired(chip, spec, 1).unwrap();
+        assert_eq!(table.cpu_of(irq), Some(1));
+        assert_eq!(chip.cpu_of(7), Some(1));
+        chip.fail_aff.store(1, Ordering::Relaxed);
+        assert_eq!(table.set_affinity(irq, 4), Err(IrqError::BadCpu));
+        assert_eq!(table.cpu_of(irq), Some(1));
+        assert_eq!(chip.cpu_of(7), Some(1));
     }
 }

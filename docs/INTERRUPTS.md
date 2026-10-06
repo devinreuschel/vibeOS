@@ -232,7 +232,9 @@ INTID map (aarch64, the counterpart of the vector map above). A hwirq is an INTI
 | 3–7 | SGI | Free |
 | 8–15 | SGI | Left to the Secure world |
 | 16–31 | PPI | Per-CPU. The generic timer's PPI is one `IrqId` on every CPU (`irq::map_percpu`). |
-| 32–1023 | SPI | Wired devices and GICv2m MSI |
+| 32–1019 | SPI | Wired devices and GICv2m MSI |
+| 1020–1023 | Special | IAR only; 1023 is spurious. Not EOI'd, not dispatched, no GICD write. |
+| 1024–8191 | Reserved | Not a programmable INTID. |
 | 8192– | LPI | GICv3 ITS MSI. Allocated once, never moved; `GICR_CTLR.EnableLPIs` stays set. |
 
 Priorities (lower value is higher priority): reserved 0x00 for ROADMAP §25.5's pseudo-NMI, then 0x40 for SGIs and the tick PPI, then 0xA0 for devices.
@@ -310,10 +312,12 @@ zero-sized port (one implementation per port, where each port runs several contr
 closed enum of each port's chips (no controller a driver brings could join); and waiting for ROADMAP §27.1
 (every driver of Phases 12 to 20 written twice).
 
-The allocator records the dest CPU. `set_affinity` updates that binding and asks the
-chip. I/O APIC routes are rewritten immediately. MSI/MSI-X messages come from the
-chip's `compose_msi` when the PCI layer writes the entry. The ROADMAP §19.5 rebalance
-uses this table rather than a second map.
+The allocator records the dest CPU. `set_affinity` asks the chip first, with
+the IRQ lock dropped, and records the new dest only when the chip returns `Ok`.
+A chip error leaves the table on the old CPU. I/O APIC routes are rewritten
+immediately. MSI/MSI-X messages come from the chip's `compose_msi` when the PCI
+layer writes the entry. The ROADMAP §19.5 rebalance uses this table rather than
+a second map.
 
 On x86, `compose_msi` uses address `0xFEE0_0000 | (apic_id << 12)` (physical dest, RH=0)
 and data the vector (fixed, edge). MSI-X table entries live in a BAR (BIR + offset from the

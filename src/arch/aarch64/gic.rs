@@ -743,9 +743,10 @@ pub fn handle_irq() {
         return;
     };
     let intid = ack(g);
-    // 1020–1023 are special (1023 is spurious); 1024–8191 are reserved.
-    // LPIs are 8192+ and must be dispatched (IHI 0069).
-    if gic::is_special(intid) {
+    // Before EOI or any GICD write: 1020–1023 are special (1023 is
+    // spurious) and 1024–8191 are reserved. LPIs are 8192+ and must
+    // be dispatched (IHI 0069).
+    if gic::ack_drops(intid) {
         return;
     }
     // DESIGN §5.8: EOI before the timer/IPI body, which may preempt.
@@ -914,7 +915,8 @@ pub unsafe fn enable_ap() {
 
 fn enable_intid(g: &Gic, intid: u32, on: bool) {
     // LPIs are enabled in the property table, not GICD_ISENABLER (IHI 0069).
-    if gic::is_lpi(intid) {
+    // Special/reserved INTIDs have no enable bit; never write GICD for them.
+    if gic::is_lpi(intid) || gic::is_special(intid) {
         return;
     }
     let bit = 1u32 << (intid % 32);

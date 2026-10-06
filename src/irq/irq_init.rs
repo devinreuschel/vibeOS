@@ -839,19 +839,20 @@ pub fn cpu_of(irq: IrqId) -> Option<u32> {
     with_irq(|s| s.table.cpu_of(irq))
 }
 
-/// Record dest CPU, then ask the chip to move the interrupt.
+/// Ask the chip to move the interrupt, then record dest CPU on success.
+/// The chip call stays outside the IRQ lock so chip code can take it.
 pub fn set_affinity(irq: IrqId, cpu: u32) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
     let (chip, hwirq) = with_irq(|s| {
-        s.table.set_cpu(irq, cpu)?;
         Ok((
             s.table.chip(irq).ok_or(IrqError::BadVector)?,
             s.table.hwirq(irq).ok_or(IrqError::BadVector)?,
         ))
     })?;
-    chip.set_affinity(hwirq, cpu)
+    chip.set_affinity(hwirq, cpu)?;
+    with_irq(|s| s.table.set_cpu(irq, cpu))
 }
 
 fn apic_id(cpu: u32) -> Option<u8> {

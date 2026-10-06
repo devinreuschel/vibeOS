@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- a failed `irq::set_affinity` leaves dest CPU unchanged, and GIC SPIs
+  stop at INTID 1019 ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
 - aarch64 EL1 vector entry no longer clobbers `x16`, which panicked as
   `#DABT` in `cmdline::Words::next` ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - aarch64 UEFI boots prefer AAVMF no-secboot and use `-cpu neoverse-n1`
