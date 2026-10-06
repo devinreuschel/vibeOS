@@ -69,8 +69,14 @@ pub const fn gicd_irouter(intid: u32) -> u64 {
 /// SPI or PPI INTID from a 3-cell GIC specifier (type, number).
 pub const fn gic_intid(ty: u32, num: u32) -> Option<u32> {
     match ty {
-        GIC_SPI => num.checked_add(SPI_BASE),
-        GIC_PPI => num.checked_add(PPI_BASE),
+        GIC_SPI => match num.checked_add(SPI_BASE) {
+            Some(intid) if is_spi(intid) => Some(intid),
+            _ => None,
+        },
+        GIC_PPI => match num.checked_add(PPI_BASE) {
+            Some(intid) if is_ppi(intid) => Some(intid),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -92,7 +98,7 @@ pub const fn is_ppi(intid: u32) -> bool {
 }
 
 pub const fn is_spi(intid: u32) -> bool {
-    intid >= SPI_BASE && intid < LPI_BASE
+    intid >= SPI_BASE && intid < SPECIAL_INTID_BASE
 }
 
 pub const fn is_lpi(intid: u32) -> bool {
@@ -103,6 +109,11 @@ pub const fn is_lpi(intid: u32) -> bool {
 /// `GICC_IAR` can return these; they are not EOI'd or dispatched.
 pub const fn is_special(intid: u32) -> bool {
     intid >= SPECIAL_INTID_BASE && intid < LPI_BASE
+}
+
+/// After IAR: drop with no EOI and no distributor write (IHI 0069).
+pub const fn ack_drops(intid: u32) -> bool {
+    is_special(intid)
 }
 
 /// Priority for an INTID: NMI reserved, then SGI/tick, then devices.
@@ -148,12 +159,36 @@ mod tests {
         assert!(is_sgi(SGI_RESCHEDULE));
         assert!(is_ppi(27));
         assert!(is_spi(32));
+        assert!(is_spi(1019));
+        assert!(!is_spi(31));
+        assert!(!is_spi(1020));
+        assert!(!is_spi(1023));
+        assert!(!is_spi(1024));
+        assert!(!is_spi(8191));
+        assert!(!is_spi(8192));
         assert!(is_lpi(8192));
         assert!(is_special(1020));
         assert!(is_special(1023));
         assert!(is_special(8191));
         assert!(!is_special(1019));
         assert!(!is_special(8192));
+        assert!(ack_drops(1020));
+        assert!(ack_drops(1023));
+        assert!(ack_drops(8191));
+        assert!(!ack_drops(0));
+        assert!(!ack_drops(32));
+        assert!(!ack_drops(1019));
+        assert!(!ack_drops(8192));
+        assert_eq!(gic_intid(GIC_SPI, 987), Some(1019));
+        assert_eq!(gic_intid(GIC_SPI, 988), None);
+        assert_eq!(gic_intid(GIC_PPI, 15), Some(31));
+        assert_eq!(gic_intid(GIC_PPI, 16), None);
+        const {
+            assert!(!is_spi(SPECIAL_INTID_BASE));
+            assert!(is_special(1023));
+            assert!(ack_drops(1023));
+            assert!(!ack_drops(32));
+        }
         assert_eq!(priority_for(SGI_CALL), PRIO_IPI_TICK);
         assert_eq!(priority_for(27), PRIO_IPI_TICK);
         assert_eq!(priority_for(64), PRIO_DEVICE);
