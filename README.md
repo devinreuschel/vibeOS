@@ -38,7 +38,7 @@ Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). T
 only after `ci` passed on the tagged commit. From Phase 8 on, the commit that closes a phase
 gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
 later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).
-Phase 10 closed the gate lines of Phases 0 to 9 that the kernel review and a later design review reopened, so `v0.8.0`, `v0.9.0` and `v0.10.0` are cut from three consecutive commits of `main`, one `phase-<N>` tag each.
+Phase 10 closed the gate lines of Phases 0 to 9 that the kernel review and a later design review reopened, so `v0.8.0`, `v0.9.0` and `v0.10.0` are cut from three commits of `main`, one `phase-<N>` tag each.
 
 Quickstart:
 
