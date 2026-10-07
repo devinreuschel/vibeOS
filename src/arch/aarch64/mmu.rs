@@ -53,6 +53,12 @@ impl PageTable for Arch {
         PhysAddr(cpu::read_ttbr1() & paging::DESC_ADDR_MASK)
     }
 
+    /// TTBR0's table address. A user space is never TTBR1 (`root`).
+    #[inline]
+    fn user_root() -> PhysAddr {
+        PhysAddr(cpu::read_ttbr0() & paging::DESC_ADDR_MASK)
+    }
+
     #[inline]
     unsafe fn set_root(root: PhysAddr) {
         cpu::write_translation_regs();
