@@ -19,6 +19,7 @@ use vibeos::dev::{self, BarClaim, DevRef, Device};
 use vibeos::ipi::{SHOOT_RANGE_PAGES, SHOOT_RANGES, ShootRange};
 use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
+use vibeos::machine::MAX_PCI_HOSTS;
 use vibeos::paging::{IOREMAP_BASE, IOREMAP_LEN, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
@@ -45,10 +46,27 @@ const CFG_DATA: u16 = 0xCFC;
 
 const ECAM_CACHE: usize = 64;
 
-struct Ecam {
+/// One firmware ECAM window, after [`pci::scan_range`] clamps `end`.
+#[derive(Clone, Copy)]
+struct EcamWin {
     base: u64,
     start: u8,
     end: u8,
+}
+
+impl EcamWin {
+    const fn empty() -> Self {
+        Self {
+            base: 0,
+            start: 0,
+            end: 0,
+        }
+    }
+}
+
+struct Ecam {
+    wins: [EcamWin; MAX_PCI_HOSTS],
+    nwin: usize,
     phys: [u64; ECAM_CACHE],
     va: [u64; ECAM_CACHE],
     n: usize,
@@ -57,9 +75,8 @@ struct Ecam {
 impl Ecam {
     const fn empty() -> Self {
         Self {
-            base: 0,
-            start: 0,
-            end: 0,
+            wins: [EcamWin::empty(); MAX_PCI_HOSTS],
+            nwin: 0,
             phys: [0; ECAM_CACHE],
             va: [0; ECAM_CACHE],
             n: 0,
@@ -237,22 +254,80 @@ pub unsafe fn unmap_mmio(va: u64, len: u64) {
     }
 }
 
+fn window_of(e: &Ecam, bus: u8) -> Option<EcamWin> {
+    let mut i = 0usize;
+    while i < e.nwin {
+        if let Some(w) = e.wins.get(i)
+            && w.base != 0
+            && bus >= w.start
+            && bus <= w.end
+        {
+            return Some(*w);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The window `scan` installs for `h`: base non-zero, `last` clamped to
+/// `first + (size >> 20) - 1`.
+fn host_window(h: &vibeos::machine::PciHost) -> Option<EcamWin> {
+    if h.ecam_base == 0 {
+        return None;
+    }
+    let (start, end) = pci::scan_range(h.first_bus, h.last_bus, h.ecam_size)?;
+    Some(EcamWin {
+        base: h.ecam_base,
+        start,
+        end,
+    })
+}
+
 fn ecam_covers(bus: u8) -> bool {
-    with_ecam(|e| e.base != 0 && bus >= e.start && bus <= e.end)
+    with_ecam(|e| window_of(e, bus).is_some())
 }
 
 fn ecam_phys_of(bdf: Bdf, offset: u16) -> Option<u64> {
-    with_ecam(|e| {
-        pci::ecam_phys(
-            e.base,
-            e.start,
-            e.end,
-            bdf.bus,
-            bdf.device,
-            bdf.function,
-            offset,
-        )
-    })
+    let w = with_ecam(|e| window_of(e, bdf.bus))?;
+    pci::ecam_phys(
+        w.base,
+        w.start,
+        w.end,
+        bdf.bus,
+        bdf.device,
+        bdf.function,
+        offset,
+    )
+}
+
+/// Record each host's ECAM window and the bus its scan starts at.
+fn install_ecam() -> ([u8; MAX_PCI_HOSTS], usize) {
+    let mut starts = [0u8; MAX_PCI_HOSTS];
+    let mut nstarts = 0usize;
+    let Some(desc) = machine_init::info() else {
+        return (starts, 0);
+    };
+    for h in desc.pci_hosts() {
+        let Some(w) = host_window(h) else {
+            continue;
+        };
+        let stored = with_ecam(|e| {
+            let Some(slot) = e.wins.get_mut(e.nwin) else {
+                return false;
+            };
+            *slot = w;
+            e.nwin += 1;
+            true
+        });
+        if !stored {
+            break;
+        }
+        if let Some(s) = starts.get_mut(nstarts) {
+            *s = w.start;
+            nstarts += 1;
+        }
+    }
+    (starts, nstarts)
 }
 
 /// Map the 4K function page for `phys` and return the byte VA.
@@ -365,13 +440,7 @@ static SCAN: BootCell<Scan> = BootCell::new();
 /// Once, on the BSP, before `smp_init::init` starts an AP
 /// (`BootCell::set`'s contract).
 pub unsafe fn scan() {
-    if let Some(h) = machine_init::info().and_then(|d| d.pci_hosts().first()) {
-        with_ecam(|e| {
-            e.base = h.ecam_base;
-            e.start = h.first_bus;
-            e.end = h.last_bus;
-        });
-    }
+    let (starts, nstarts) = install_ecam();
     // Enumerate in the BootCell. A `[FuncInfo; MAX_SCAN]` local is an
     // 11 KiB frame; on aarch64 the bootstrap stack is 16 KiB and IRQs
     // are already on (DESIGN §4.5).
@@ -385,7 +454,14 @@ pub unsafe fn scan() {
         for slot in found.iter_mut() {
             *slot = FuncInfo::empty();
         }
-        (*p).n = pci::enumerate(&mut HwCfg, 0, found);
+        // No window: mechanism #1 on bus 0. A host starts at its first
+        // bus, so a `bus-range` of `<0x10 0x1f>` is not read as bus 0.
+        let buses = starts.get(..nstarts).unwrap_or(&[]);
+        (*p).n = if buses.is_empty() {
+            pci::enumerate(&mut HwCfg, 0, found)
+        } else {
+            pci::enumerate_buses(&mut HwCfg, buses, found)
+        };
         #[cfg(target_arch = "aarch64")]
         {
             // AAVMF programs a page-or-larger BAR and leaves a sub-page
@@ -415,13 +491,18 @@ pub unsafe fn scan() {
 /// passes), emit `pci: N devices`. Maps no BAR: each driver maps what it
 /// claims.
 pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
-    if let Some(h) = machine_init::info().and_then(|d| d.pci_hosts().first()) {
-        crate::marker!(
-            "vibeOS: pci: ecam {:#x} buses {}-{}",
-            h.ecam_base,
-            h.first_bus,
-            h.last_bus
-        );
+    if let Some(desc) = machine_init::info() {
+        for h in desc.pci_hosts() {
+            let Some(w) = host_window(h) else {
+                continue;
+            };
+            crate::marker!(
+                "vibeOS: pci: ecam {:#x} buses {}-{}",
+                w.base,
+                w.start,
+                w.end
+            );
+        }
     }
 
     let s = SCAN.get();
