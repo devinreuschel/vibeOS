@@ -372,6 +372,14 @@ memory ([section 7.4](SMP.md#74-ap-bring-up-sequence)). `smp_init::start_one` do
 pre-SIPI failure still frees. On aarch64, `AFFINITY_INFO` `OFF` is the only free after `CPU_ON`
 (ROADMAP §11.4, F032).
 
+**A CPU that arrives after the bring-up timeout marks itself online.**
+The timeout cleared the online bit and leaked the core, and the late core then ran `mark_online`
+itself. On aarch64 it sat in the online mask with no workers, so deferred work queued to it never
+ran. On x86, INIT could land while it still held a lock. Rule: one handshake word. The AP claims
+`ARRIVED` before `mark_online`; the boot CPU claims `ABANDONED` on timeout. The AP that loses parks.
+The boot CPU that loses does not send INIT
+([section 7.4](SMP.md#74-ap-bring-up-sequence)).
+
 **A null dereference in an ISR shortly after an AP comes up.**
 `sti` happened before `GS_BASE` was set, and a timer interrupt landed in code that reads per-CPU state.
 Rule: per-CPU MSRs are set before the IDT is live and before `sti`.

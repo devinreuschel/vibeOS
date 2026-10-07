@@ -5,6 +5,7 @@
 //! §7.3); the BSP writes it only through the physmap, with
 //! `write_volatile` + `compiler_fence(SeqCst)` before SIPI.
 
+use core::sync::atomic::AtomicU8;
 #[cfg(target_arch = "x86_64")]
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::Ordering;
@@ -556,7 +557,14 @@ fn start_one(a: ApAlloc, page: u64) {
 
     tsc_warp_source();
     if !wait_ready(cpu_id) {
+        if !abandon_cpu(cpu_id) {
+            publish_online(cpu_id, &workers);
+            return;
+        }
         crate::marker!("vibeOS: smp: apic {apic_id} timed out");
+        // The AP is still before `mark_online` (it lost the handshake, or
+        // has not reached it). Park it, then INIT.
+        release_held_ap();
         #[expect(
             clippy::let_underscore_must_use,
             reason = "DESIGN §2.5: INIT parks a stalled AP; its frames are leaked (F032)"
@@ -571,8 +579,7 @@ fn start_one(a: ApAlloc, page: u64) {
         return;
     }
 
-    work_init::start_cpu_workers(&workers);
-    crate::marker!(marker::SMP_AP_ONLINE);
+    publish_online(cpu_id, &workers);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -622,6 +629,9 @@ extern "C" fn ap_entry() -> ! {
     apic_init::arm_ap();
     tsc_warp_target();
     maybe_stall_ap();
+    if !claim_online(cpu.cpu_id) {
+        park_lost();
+    }
     per_cpu_init::mark_online(cpu.cpu_id);
     crate::marker!(
         "{}{}{}",
@@ -732,8 +742,19 @@ fn start_aps(page: u64) {
     }
 }
 
+/// One word per logical CPU: [`vibeos::smp::HANDSHAKE_NONE`] until the AP
+/// or the boot CPU wins it (DESIGN §7.4).
+static HANDSHAKE: [AtomicU8; vibeos::acpi::MAX_CPUS] =
+    [const { AtomicU8::new(vibeos::smp::HANDSHAKE_NONE) }; vibeos::acpi::MAX_CPUS];
+
 #[cfg(feature = "kernel_tests")]
 static STALL_ONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "kernel_tests")]
+static STALL_HELD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "kernel_tests")]
+static STALL_GO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "kernel_tests")]
+static STALL_PARKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "kernel_tests")]
 static STALL_LEAKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -741,7 +762,7 @@ static STALL_LEAKED: core::sync::atomic::AtomicBool = core::sync::atomic::Atomic
 fn arm_stall_from_cmdline() {
     let sel = vibeos::ktest::Selection::parse(crate::boot::cmdline().get("vibeos.ktest"));
     if sel.selects("stalled_ap_leak", true) {
-        // Release: pairs with the Acquire swap in `maybe_stall_ap`.
+        // Release: pairs with the AcqRel swap in `maybe_stall_ap`.
         STALL_ONE.store(true, Ordering::Release);
     }
 }
@@ -751,9 +772,103 @@ fn maybe_stall_ap() {
     {
         // AcqRel: pairs with the Release store in `arm_stall_from_cmdline`.
         if STALL_ONE.swap(false, Ordering::AcqRel) {
-            loop {
+            // Release: pairs with the Acquire load in `release_held_ap`.
+            STALL_HELD.store(true, Ordering::Release);
+            // Acquire: pairs with the Release store in `release_held_ap`.
+            while !STALL_GO.load(Ordering::Acquire) {
                 core::hint::spin_loop();
             }
+        }
+    }
+}
+
+/// `true` when the AP won `NONE`→`ARRIVED` and may mark itself online.
+fn claim_online(cpu_id: u32) -> bool {
+    match HANDSHAKE.get(cpu_id as usize) {
+        Some(word) => vibeos::smp::claim_arrived(word),
+        None => false,
+    }
+}
+
+/// The AP lost the handshake. Park; do not mark online or enter idle.
+fn park_lost() -> ! {
+    #[cfg(feature = "kernel_tests")]
+    {
+        // Acquire: pairs with the Release store in `maybe_stall_ap`.
+        if STALL_HELD.load(Ordering::Acquire) {
+            // Release: pairs with the Acquire load in `release_held_ap`.
+            STALL_PARKED.store(true, Ordering::Release);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let rc = crate::arch::aarch64::power::cpu_off();
+        if rc != 0 {
+            crate::klog!(vibeos::log::Level::Warn, "vibeOS: smp: cpu_off {rc}");
+        }
+        loop {
+            arch::aarch64::cpu::idle_wait();
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    loop {
+        x86::hlt_once();
+    }
+}
+
+/// `true` when the boot CPU won `NONE`→`ABANDONED`. A loss means the AP
+/// already claimed arrival; wait until it publishes `ready`.
+fn abandon_cpu(cpu_id: u32) -> bool {
+    let Some(word) = HANDSHAKE.get(cpu_id as usize) else {
+        return true;
+    };
+    if vibeos::smp::claim_abandoned(word) {
+        return true;
+    }
+    let _ = wait_arrival(cpu_id);
+    false
+}
+
+fn wait_arrival(cpu_id: u32) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        wait_ready(cpu_id)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        wait_ready_ms(cpu_id)
+    }
+}
+
+fn publish_online(cpu_id: u32, workers: &CpuWorkers) {
+    if !per_cpu_init::is_online(cpu_id) {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "vibeOS: smp: cpu {cpu_id} claimed arrival and stayed offline"
+        );
+        return;
+    }
+    work_init::start_cpu_workers(cpu_id, workers);
+    crate::marker!(marker::SMP_AP_ONLINE);
+}
+
+/// Let a `kernel_tests` AP that is held before the handshake run the lose
+/// path. No-op when nothing is held.
+fn release_held_ap() {
+    #[cfg(feature = "kernel_tests")]
+    {
+        // Acquire: pairs with the Release store in `maybe_stall_ap`.
+        if !STALL_HELD.load(Ordering::Acquire) {
+            return;
+        }
+        // Release: pairs with the Acquire load in `maybe_stall_ap`.
+        STALL_GO.store(true, Ordering::Release);
+        let t0 = time_init::now_ns();
+        // Acquire: pairs with the Release store in `park_lost`.
+        while !STALL_PARKED.load(Ordering::Acquire)
+            && time_init::now_ns().saturating_sub(t0) < 1_000_000_000
+        {
+            core::hint::spin_loop();
         }
     }
 }
@@ -770,6 +885,12 @@ fn note_stalled_leak() {
 pub fn stalled_ap_leaked() -> bool {
     // Acquire: pairs with the Release store in `note_stalled_leak`.
     STALL_LEAKED.load(Ordering::Acquire)
+}
+
+#[cfg(feature = "kernel_tests")]
+pub fn stalled_ap_parked() -> bool {
+    // Acquire: pairs with the Release store in `park_lost`.
+    STALL_PARKED.load(Ordering::Acquire)
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -973,21 +1094,25 @@ fn start_one_aarch64(
             vibeos::log::Level::Error,
             "vibeOS: smp: cpu {hw_id:#x} isa floor (lse+pan) missing"
         );
-        finish_aarch64_failure(cpu_id, hw_id, idle_id, workers, published);
-        return StartAp::Failed;
+        return aarch64_lost(cpu_id, hw_id, idle_id, workers, published);
     }
     if status != vibeos::arch::aarch64::psci::STATUS_ARRIVED {
         crate::marker!("vibeOS: smp: apic {hw_id} timed out");
-        finish_aarch64_failure(cpu_id, hw_id, idle_id, workers, published);
-        return StartAp::Failed;
+        return aarch64_lost(cpu_id, hw_id, idle_id, workers, published);
     }
     if !wait_ready_ms(cpu_id) {
+        if !abandon_cpu(cpu_id) {
+            publish_online(cpu_id, &workers);
+            return StartAp::Online;
+        }
         crate::marker!("vibeOS: smp: apic {hw_id} timed out");
         finish_aarch64_failure(cpu_id, hw_id, idle_id, workers, published);
+        // Affinity was sampled while the core was still in the stall, so a
+        // late `CPU_OFF` does not turn a leak into a free.
+        release_held_ap();
         return StartAp::Failed;
     }
-    work_init::start_cpu_workers(&workers);
-    crate::marker!(marker::SMP_AP_ONLINE);
+    publish_online(cpu_id, &workers);
     StartAp::Online
 }
 
@@ -1034,6 +1159,25 @@ fn wait_ready_ms(cpu_id: u32) -> bool {
     }
 }
 
+/// The boot CPU won the handshake, or the core never reached it. Leak or
+/// free, then let a held AP park.
+#[cfg(target_arch = "aarch64")]
+fn aarch64_lost(
+    cpu_id: u32,
+    hw_id: u64,
+    idle_id: ThreadId,
+    workers: CpuWorkers,
+    published: bool,
+) -> StartAp {
+    if !abandon_cpu(cpu_id) {
+        publish_online(cpu_id, &workers);
+        return StartAp::Online;
+    }
+    finish_aarch64_failure(cpu_id, hw_id, idle_id, workers, published);
+    release_held_ap();
+    StartAp::Failed
+}
+
 #[cfg(target_arch = "aarch64")]
 fn finish_aarch64_failure(
     cpu_id: u32,
@@ -1076,6 +1220,9 @@ extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     unsafe { apic_init::enable_ap() };
     apic_init::arm_ap();
     maybe_stall_ap();
+    if !claim_online(cpu.cpu_id) {
+        park_lost();
+    }
     per_cpu_init::mark_online(cpu.cpu_id);
     crate::marker!(
         "{}{}{}",
