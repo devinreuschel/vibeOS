@@ -888,13 +888,15 @@ PROOF_BOOTS: tuple[ProofBoot, ...] = (
     ProofBoot("vblk-readonly", "vblk readonly boot", "_vblk_readonly_boot", _always),
     ProofBoot("vblk-bad-sector", "vblk bad sector boot", "_vblk_bad_sector_boot", _always),
     ProofBoot("stalled-ap", "stalled AP leak boot", "_stalled_ap_boot", lambda s, h: s >= 4),
+    # aarch64 only: `applies` is never, and `proof_boot_names` lists it.
+    ProofBoot("aff-off", "aarch64 AFF_OFF free boot", "_aff_off_boot", lambda _s, _h: False),
 )
 
 
 def proof_boot_names(smp: int, hpet_off: bool, arch: str = "x86_64") -> list[str]:
     """The proof boots the union target runs at `smp` CPUs, in order."""
     if arch == "aarch64":
-        return ["stalled-ap"] if smp >= 4 else []
+        return ["stalled-ap", "aff-off"] if smp >= 4 else []
     return [b.name for b in PROOF_BOOTS if b.applies(smp, hpet_off)]
 
 
@@ -904,6 +906,11 @@ def _stalled_ap_boot(env: EnvConfig) -> None:
     It must park (ROADMAP §11.4, F032).
     """
     _proof_boot(env, "stalled-ap", ktest="stalled_ap_leak", repeat=None)
+
+
+def _aff_off_boot(env: EnvConfig) -> None:
+    """`failed_ap_cleanup`: one AP stays OFF, `CPU_ON` not issued (F032)."""
+    _proof_boot(env, "aff-off", ktest="failed_ap_cleanup", repeat=None)
 
 
 def main_boot(env: EnvConfig, range_word: str | None) -> int:
@@ -981,7 +988,10 @@ def main(argv: list[str] | None = None) -> int:
         union = proof_boot_names(
             env.smp, ktest_shards.VARIANTS[shard.variant].hpet_off, env.arch
         )
-        boots = [b for b in shard.boots if b in union]
+        wanted = list(shard.boots)
+        if env.arch == "aarch64":
+            wanted.extend(shard.aarch64_boots)
+        boots = [b for b in wanted if b in union]
         word = ktest_shards.range_word_for(args.shard, env.arch)
         rc = 0 if word is None else main_boot(env, word)
     if rc:

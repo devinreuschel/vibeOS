@@ -127,9 +127,22 @@ class ShardTable(unittest.TestCase):
         self.assertIn("deadline-trip", proof_boot_names(4, False))
         self.assertNotIn("deadline-trip", proof_boot_names(1, False))
         self.assertEqual(proof_boot_names(1, True, "aarch64"), [])
-        self.assertEqual(proof_boot_names(4, False, "aarch64"), ["stalled-ap"])
+        self.assertEqual(proof_boot_names(4, False, "aarch64"), ["stalled-ap", "aff-off"])
+        self.assertNotIn("aff-off", proof_boot_names(4, False))
+        self.assertNotIn("aff-off", proof_boot_names(2, False, "aarch64"))
         self.assertIn("stalled-ap", proof_boot_names(4, False))
         self.assertNotIn("stalled-ap", proof_boot_names(2, False))
+
+    def test_aarch64_proof_boots_once_each(self) -> None:
+        for variant, v in VARIANTS.items():
+            union = proof_boot_names(v.smp, v.hpet_off, "aarch64")
+            listed = Counter(
+                b
+                for _, s in shards_of(variant)
+                for b in (*s.boots, *s.aarch64_boots)
+                if b in union
+            )
+            self.assertEqual(sorted(listed.elements()), sorted(union), variant)
 
     def test_unknown_shard_is_refused(self) -> None:
         with (
