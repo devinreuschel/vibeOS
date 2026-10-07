@@ -226,6 +226,55 @@ fn choose_size(pa: u64, rem: u64, force_4k: bool, have_1g: bool) -> PageSize {
     PageSize::Size4K
 }
 
+/// Limine memory-map types, as `limine::memmap` numbers them.
+pub const MEMMAP_USABLE: u64 = 0;
+pub const MEMMAP_RESERVED: u64 = 1;
+pub const MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
+pub const MEMMAP_ACPI_NVS: u64 = 3;
+pub const MEMMAP_BAD_MEMORY: u64 = 4;
+pub const MEMMAP_BOOTLOADER_RECLAIMABLE: u64 = 5;
+pub const MEMMAP_EXECUTABLE_AND_MODULES: u64 = 6;
+pub const MEMMAP_FRAMEBUFFER: u64 = 7;
+pub const MEMMAP_MAPPED_RESERVED: u64 = 8;
+
+/// One firmware memory-map entry: physical `[base, base + len)` of type `ty`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemmapEntry {
+    pub base: u64,
+    pub len: u64,
+    pub ty: u64,
+}
+
+/// Whether `ty` is a RAM-typed memory-map entry the physmap maps
+/// (MEMORY.md §4.1): usable, bootloader-reclaimable, executable and
+/// modules, ACPI reclaimable, ACPI NVS.
+const fn is_ram_memmap(ty: u64) -> bool {
+    matches!(
+        ty,
+        MEMMAP_USABLE
+            | MEMMAP_BOOTLOADER_RECLAIMABLE
+            | MEMMAP_EXECUTABLE_AND_MODULES
+            | MEMMAP_ACPI_RECLAIMABLE
+            | MEMMAP_ACPI_NVS
+    )
+}
+
+/// Physical ranges of the RAM-typed entries. Anything else, including
+/// [`MEMMAP_RESERVED`] and [`MEMMAP_FRAMEBUFFER`], is dropped. Ends
+/// saturate: the map is firmware input.
+pub fn ram_ranges<I>(entries: I) -> impl Iterator<Item = Range<u64>>
+where
+    I: IntoIterator<Item = MemmapEntry>,
+{
+    entries.into_iter().filter_map(|e| {
+        if is_ram_memmap(e.ty) {
+            Some(e.base..e.base.saturating_add(e.len))
+        } else {
+            None
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,20 +345,67 @@ mod tests {
             .any(|r| pa >= r.pa.0 && pa < r.pa.0.saturating_add(r.len))
     }
 
+    fn ent(base: u64, len: u64, ty: u64) -> MemmapEntry {
+        MemmapEntry { base, len, ty }
+    }
+
+    /// RAM the filter must keep. Lengths are the expected mapped total:
+    /// adding `MEMMAP_RESERVED` (or any other non-RAM type) makes
+    /// `ram_ranges` emit more bytes than this.
+    fn ram_entries() -> [MemmapEntry; 5] {
+        [
+            ent(0, 0x1000_0000, MEMMAP_USABLE),
+            ent(0x1000_0000, PAGE_SIZE_2M, MEMMAP_BOOTLOADER_RECLAIMABLE),
+            ent(0x2000_0000, 0x10_0000, MEMMAP_EXECUTABLE_AND_MODULES),
+            ent(0x3000_0000, PAGE_SIZE_4K, MEMMAP_ACPI_RECLAIMABLE),
+            ent(0x4000_0000, 2 * PAGE_SIZE_4K, MEMMAP_ACPI_NVS),
+        ]
+    }
+
     #[test]
     fn builder_skips_multi_tib_mmio() {
-        let off = PHYSMAP_X86_64.start;
-        let (w, runs) = collect(
-            PHYSMAP_X86_64,
-            off,
-            core::iter::once(0u64..0x1000_0000),
-            0..0,
-            true,
+        // Inside the x86_64 slot, so a filter that accepts RESERVED maps
+        // these bytes instead of leaving them out.
+        let reserved_base = 2 * TIB;
+        let reserved_len = 8 * TIB;
+        let fb = 0x40_0000_0000u64;
+        let fb_base = fb - PAGE_SIZE_4K;
+        let fb_len = PAGE_SIZE_2M + 2 * PAGE_SIZE_4K;
+        let ram = ram_entries();
+        let ram_bytes: u64 = ram.iter().map(|e| e.len).sum();
+        let mut entries = ram.to_vec();
+        entries.extend([
+            ent(reserved_base, reserved_len, MEMMAP_RESERVED),
+            ent(fb_base, fb_len, MEMMAP_FRAMEBUFFER),
+            ent(0x5000_0000, PAGE_SIZE_4K, MEMMAP_BAD_MEMORY),
+            ent(0x6000_0000, PAGE_SIZE_4K, MEMMAP_MAPPED_RESERVED),
+        ]);
+        let ranges: Vec<_> = ram_ranges(entries).collect();
+        let covers = |pa: u64| ranges.iter().any(|r| r.contains(&pa));
+        assert_eq!(
+            ranges.iter().map(|r| r.end - r.start).sum::<u64>(),
+            ram_bytes
         );
+        for e in &ram {
+            assert!(covers(e.base), "RAM type {:#x} dropped", e.ty);
+        }
+        assert!(!covers(reserved_base));
+        assert!(!covers(reserved_base + reserved_len / 2));
+        assert!(!covers(fb_base));
+        assert!(!covers(fb));
+        assert!(!covers(fb + PAGE_SIZE_2M));
+        assert!(!covers(0x5000_0000));
+        assert!(!covers(0x6000_0000));
+
+        let (w, runs) = collect(PHYSMAP_X86_64, PHYSMAP_X86_64.start, ranges, 0..0, true);
+        assert_eq!(w.mapped, ram_bytes);
         assert_eq!(w.leftover, 0);
         assert!(any_pa(&runs, 0));
-        assert!(!any_pa(&runs, 0x40_0000_0000));
-        assert!(!any_pa(&runs, 0x8000_0000_0000));
+        assert!(!any_pa(&runs, reserved_base));
+        assert!(!any_pa(&runs, reserved_base + reserved_len / 2));
+        assert!(!any_pa(&runs, fb));
+        assert!(!any_pa(&runs, fb_base));
+        assert!(!any_pa(&runs, fb + PAGE_SIZE_2M));
     }
 
     #[test]
@@ -335,16 +431,22 @@ mod tests {
 
     #[test]
     fn builder_skips_framebuffers_outside_ram() {
-        let off = PHYSMAP_X86_64.start;
         let fb = 0x40_0000_0000u64;
         let fb2 = fb - PAGE_SIZE_4K;
+        // Covers `fb2`, `fb`, and the page at `fb + 2 MiB`.
+        let fb_len = (fb + PAGE_SIZE_2M + PAGE_SIZE_4K) - fb2;
+        let entries = [
+            ent(0, 0x80_0000, MEMMAP_USABLE),
+            ent(fb2, fb_len, MEMMAP_FRAMEBUFFER),
+        ];
         let (_, runs) = collect(
             PHYSMAP_X86_64,
-            off,
-            core::iter::once(0u64..0x80_0000),
+            PHYSMAP_X86_64.start,
+            ram_ranges(entries),
             0..0,
             true,
         );
+        assert!(any_pa(&runs, 0));
         assert!(!any_pa(&runs, fb));
         assert!(!any_pa(&runs, fb + PAGE_SIZE_2M));
         assert!(!any_pa(&runs, fb2));
