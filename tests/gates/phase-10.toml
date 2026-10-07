@@ -341,6 +341,6 @@ run on `main` since the history landed, and `scripts/check_gate_inputs.py --rule
 [[line.entry]]
 cmd = "cargo deny check"
 [[line.entry]]
-cmd = "python3 scripts/check_gate_inputs.py --rulesets"
+record = { cmd = "python3 scripts/check_gate_inputs.py --rulesets" }
 [[line.entry]]
 cmd = "python3 scripts/ci_history.py"
