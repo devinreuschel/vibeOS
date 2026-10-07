@@ -461,7 +461,7 @@ pub fn overflow_sp() -> u64 {
 }
 
 /// `ID_AA64ISAR0_EL1.RNDR` (Arm ARM DDI0487): 0b0001 means `RNDR`/`RNDRRS`.
-fn has_rndr() -> bool {
+pub(crate) fn has_rndr() -> bool {
     let isar0: u64;
     // SAFETY: ID registers are readable at EL1/EL2; established here.
     unsafe {
@@ -485,8 +485,9 @@ pub fn hw_rng64() -> Option<u64> {
     while tries < 10 {
         let val: u64;
         let nzcv: u64;
-        // SAFETY: `RNDR` is an ID/random register; a failed read sets
-        // PSTATE.V and writes an UNKNOWN value. established here.
+        // SAFETY: `S3_3_C2_C4_0` is `RNDR`, readable at EL1 where
+        // `ID_AA64ISAR0_EL1.RNDR` is set, which `has_rndr` checked, and
+        // `NZCV` is readable at EL1. established here.
         unsafe {
             asm!(
                 "mrs {val}, S3_3_C2_C4_0",
@@ -496,8 +497,8 @@ pub fn hw_rng64() -> Option<u64> {
                 options(nomem, nostack),
             );
         }
-        if nzcv & (1 << 28) == 0 {
-            return Some(val);
+        if let Some(word) = sysreg::rndr_word(nzcv, val) {
+            return Some(word);
         }
         tries = tries.saturating_add(1);
     }
