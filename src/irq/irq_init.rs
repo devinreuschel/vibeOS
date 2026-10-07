@@ -11,7 +11,7 @@ use vibeos::apic::{EoiDomain, Polarity, Trigger};
 use vibeos::dev::{Device, Instance};
 use vibeos::irq::{
     self, IrqChip, IrqError, IrqId, IrqSet, IrqSpecifier, IrqTable, MsiMessage, MsixEntry,
-    VectorPool, in_pool, msi_message_addr, msi_message_data, pool_index,
+    PlannedMsi, PlannedWired, VectorPool, in_pool, msi_message_addr, msi_message_data, pool_index,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::{self, Bdf};
@@ -164,6 +164,26 @@ fn unpublish_vec(hwirq: u32) {
         // Release: pairs with the Acquire load in `dispatch`.
         slot.store(0, Ordering::Release);
     }
+}
+
+fn publish_msi(plan: &PlannedMsi, set: &IrqSet) {
+    let mut i = 0usize;
+    while i < set.len() {
+        if let (Some(irq), Some(h)) = (set.get(i), plan.hwirq_at(i)) {
+            publish_vec(h, irq);
+            #[cfg(target_arch = "aarch64")]
+            crate::arch::aarch64::gic::publish(h, irq.raw());
+        }
+        i += 1;
+    }
+}
+
+fn bind_msi(plan: &PlannedMsi) -> Result<IrqSet, IrqError> {
+    with_irq(|s| {
+        let set = s.table.commit_msi(plan)?;
+        publish_msi(plan, &set);
+        Ok(set)
+    })
 }
 
 pub(super) fn with_pool<R>(f: impl FnOnce(&mut VectorPool) -> R) -> R {
@@ -411,22 +431,11 @@ pub fn allocate(cpu: u32) -> Result<IrqId, IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
-    let chip = msi_chip();
-    let mut hw = [0u32; 1];
-    let got = chip.alloc_msi(1, cpu, &mut hw)?;
-    let Some(hwirq) = hw.first().copied().filter(|_| got == 1) else {
-        return Err(IrqError::Exhausted);
-    };
-    match with_irq(|s| {
-        let irq = s.table.bind(chip, hwirq, cpu)?;
-        publish_vec(hwirq, irq);
-        #[cfg(target_arch = "aarch64")]
-        crate::arch::aarch64::gic::publish(hwirq, irq.raw());
-        Ok(irq)
-    }) {
-        Ok(irq) => Ok(irq),
+    let plan = PlannedMsi::claim(msi_chip(), 1, cpu)?;
+    match bind_msi(&plan) {
+        Ok(set) => set.get(0).ok_or(IrqError::Exhausted),
         Err(e) => {
-            chip.free(hwirq);
+            plan.release();
             Err(e)
         }
     }
@@ -453,22 +462,28 @@ pub fn map_wired(spec: IrqSpecifier) -> Result<IrqId, IrqError> {
             }
         }
     };
-    let hwirq = chip.translate(spec, 0)?;
+    let plan = PlannedWired::claim(chip, spec, 0)?;
     if let IrqSpecifier::Gsi {
         gsi,
         trigger,
         polarity,
     } = spec
     {
-        let dest = apic_id(0).ok_or(IrqError::BadCpu)?;
-        let vec = u8::try_from(hwirq).map_err(|_| IrqError::BadVector)?;
+        let Some(dest) = apic_id(0) else {
+            plan.release();
+            return Err(IrqError::BadCpu);
+        };
+        let Ok(vec) = u8::try_from(plan.hwirq()) else {
+            plan.release();
+            return Err(IrqError::BadVector);
+        };
         if apic_init::route_gsi(gsi, vec, dest, trigger, polarity).is_err() {
-            chip.free(hwirq);
+            plan.release();
             return Err(IrqError::NoRoute);
         }
     }
     match with_irq(|s| {
-        let irq = s.table.bind(chip, hwirq, 0)?;
+        let irq = s.table.commit_wired(&plan)?;
         if let Some(i) = irq.slot()
             && let Some(r) = s.routes.get_mut(i)
         {
@@ -478,14 +493,14 @@ pub fn map_wired(spec: IrqSpecifier) -> Result<IrqId, IrqError> {
                 _ => {}
             }
         }
-        publish_vec(hwirq, irq);
+        publish_vec(plan.hwirq(), irq);
         #[cfg(target_arch = "aarch64")]
-        crate::arch::aarch64::gic::publish(hwirq, irq.raw());
+        crate::arch::aarch64::gic::publish(plan.hwirq(), irq.raw());
         Ok(irq)
     }) {
         Ok(irq) => Ok(irq),
         Err(e) => {
-            chip.free(hwirq);
+            plan.release();
             Err(e)
         }
     }
@@ -497,55 +512,16 @@ pub fn alloc_msi(dev: &Device, n: u8) -> Result<IrqSet, IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
-    if n == 0 || (n as usize) > irq::IRQ_SET_MAX {
-        return Err(IrqError::BadVector);
-    }
-    let chip = msi_chip();
-    let mut hw = [0u32; irq::IRQ_SET_MAX];
-    let Some(out) = hw.get_mut(..n as usize) else {
-        return Err(IrqError::BadVector);
-    };
-    let got = chip.alloc_msi(n, 0, out)?;
-    match with_irq(|s| {
-        if s.table.free_slots() < got {
-            return Err(IrqError::Exhausted);
-        }
-        let mut set = IrqSet::empty();
-        let mut i = 0usize;
-        while i < got {
-            let Some(h) = hw.get(i).copied() else {
-                unwind_bound(s, &set);
-                return Err(IrqError::BadVector);
-            };
-            match s.table.bind(chip, h, 0) {
-                Ok(irq) => {
-                    publish_vec(h, irq);
-                    #[cfg(target_arch = "aarch64")]
-                    crate::arch::aarch64::gic::publish(h, irq.raw());
-                    if set.push(irq).is_err() {
-                        unpublish_vec(h);
-                        unbind_slot(s, irq);
-                        unwind_bound(s, &set);
-                        return Err(IrqError::Exhausted);
-                    }
-                }
-                Err(e) => {
-                    unwind_bound(s, &set);
-                    return Err(e);
-                }
-            }
-            i += 1;
-        }
-        Ok(set)
-    }) {
+    let plan = PlannedMsi::claim(msi_chip(), n, 0)?;
+    match bind_msi(&plan) {
         Ok(set) => {
             #[cfg(target_arch = "aarch64")]
             {
                 let id = pci_device_id(dev);
                 let mut i = 0usize;
-                while i < got {
-                    if let Some(h) = hw.get(i) {
-                        crate::arch::aarch64::gic::map_its_event(id, *h);
+                while i < plan.len() {
+                    if let Some(h) = plan.hwirq_at(i) {
+                        crate::arch::aarch64::gic::map_its_event(id, h);
                     }
                     i += 1;
                 }
@@ -553,13 +529,7 @@ pub fn alloc_msi(dev: &Device, n: u8) -> Result<IrqSet, IrqError> {
             Ok(set)
         }
         Err(e) => {
-            let mut i = 0usize;
-            while i < got {
-                if let Some(h) = hw.get(i) {
-                    chip.free(*h);
-                }
-                i += 1;
-            }
+            plan.release();
             Err(e)
         }
     }
@@ -584,27 +554,6 @@ fn pci_device_id(dev: &Device) -> u32 {
         i += 1;
     }
     rid
-}
-
-fn unbind_slot(s: &mut IrqState, irq: IrqId) {
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "unbind on teardown or unwind: a slot that stays bound is leaked (DESIGN §2.5)"
-    )]
-    let _ = s.table.unbind(irq);
-}
-
-fn unwind_bound(s: &mut IrqState, set: &IrqSet) {
-    let mut i = 0usize;
-    while i < set.len() {
-        if let Some(irq) = set.get(i) {
-            if let Some(h) = s.table.hwirq(irq) {
-                unpublish_vec(h);
-            }
-            unbind_slot(s, irq);
-        }
-        i += 1;
-    }
 }
 
 /// One [`IrqId`] for a per-CPU source (LAPIC LVT or GIC PPI).
@@ -633,13 +582,19 @@ pub fn map_percpu(spec: IrqSpecifier) -> Result<IrqId, IrqError> {
         }
         _ => return Err(IrqError::BadVector),
     };
-    let hwirq = chip.translate(spec, 0)?;
-    with_irq(|s| {
-        let irq = s.table.bind(chip, hwirq, 0)?;
+    let plan = PlannedWired::claim(chip, spec, 0)?;
+    match with_irq(|s| {
+        let irq = s.table.commit_wired(&plan)?;
         #[cfg(target_arch = "aarch64")]
-        crate::arch::aarch64::gic::publish(hwirq, irq.raw());
+        crate::arch::aarch64::gic::publish(plan.hwirq(), irq.raw());
         Ok(irq)
-    })
+    }) {
+        Ok(irq) => Ok(irq),
+        Err(e) => {
+            plan.release();
+            Err(e)
+        }
+    }
 }
 
 /// The x86 hwirq (IDT vector) for `irq`.
@@ -651,19 +606,19 @@ pub fn free_vector(irq: IrqId) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
-    let (chip, hwirq, gsi) = with_irq(|s| {
-        let chip = s.table.chip(irq).ok_or(IrqError::BadVector)?;
-        let hwirq = s.table.hwirq(irq).ok_or(IrqError::BadVector)?;
-        let gsi = irq.slot().and_then(|i| match s.routes.get(i) {
+    let gsi = with_irq(|s| {
+        if s.table.hwirq(irq).is_none() {
+            return Err(IrqError::BadVector);
+        }
+        Ok(irq.slot().and_then(|i| match s.routes.get(i) {
             Some(Route::IoApic { gsi, .. }) => Some(*gsi),
             _ => None,
-        });
-        Ok::<_, IrqError>((chip, hwirq, gsi))
+        }))
     })?;
     if let Some(gsi) = gsi {
         apic_init::mask_gsi(gsi);
     }
-    let ctx = with_irq(|s| {
+    let (ctx, freed) = with_irq(|s| {
         let mut ctx = None;
         if let Some(i) = irq.slot() {
             if let Some(h) = HANDLERS.get(i) {
@@ -686,11 +641,11 @@ pub fn free_vector(irq: IrqId) -> Result<(), IrqError> {
                 *p = false;
             }
         }
-        unpublish_vec(hwirq);
-        unbind_slot(s, irq);
-        ctx
-    });
-    chip.free(hwirq);
+        let freed = s.table.commit_free(irq)?;
+        unpublish_vec(freed.hwirq());
+        Ok((ctx, freed))
+    })?;
+    freed.release();
     drop(ctx);
     Ok(())
 }
@@ -837,14 +792,9 @@ pub fn set_affinity(irq: IrqId, cpu: u32) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
-    let (chip, hwirq) = with_irq(|s| {
-        Ok((
-            s.table.chip(irq).ok_or(IrqError::BadVector)?,
-            s.table.hwirq(irq).ok_or(IrqError::BadVector)?,
-        ))
-    })?;
-    chip.set_affinity(hwirq, cpu)?;
-    with_irq(|s| s.table.set_cpu(irq, cpu))
+    let step = with_irq(|s| s.table.plan_affinity(irq, cpu))?;
+    step.chip().set_affinity(step.hwirq(), step.cpu())?;
+    with_irq(|s| s.table.set_cpu(irq, step.cpu()))
 }
 
 fn apic_id(cpu: u32) -> Option<u8> {

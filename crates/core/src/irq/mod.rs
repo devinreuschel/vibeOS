@@ -11,8 +11,8 @@ pub mod its;
 pub mod stop;
 
 pub use chip::{
-    IRQ_SET_MAX, IrqChip, IrqError, IrqId, IrqSet, IrqSpecifier, IrqTable, LapicLvt, MAX_IRQS,
-    MsiMessage,
+    AffinityPlan, FreedIrq, IRQ_SET_MAX, IrqChip, IrqError, IrqId, IrqSet, IrqSpecifier, IrqTable,
+    LapicLvt, MAX_IRQS, MsiMessage, PlannedMsi, PlannedWired,
 };
 pub use its::{
     ITS_CMD_DISCARD, ITS_CMD_MAPC, ITS_CMD_MAPD, ITS_CMD_MAPTI, ITS_CMD_MOVI, ITS_CMD_SYNC,

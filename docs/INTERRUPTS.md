@@ -312,9 +312,15 @@ zero-sized port (one implementation per port, where each port runs several contr
 closed enum of each port's chips (no controller a driver brings could join); and waiting for ROADMAP §27.1
 (every driver of Phases 12 to 20 written twice).
 
-The allocator records the dest CPU. `set_affinity` asks the chip first, with
-the IRQ lock dropped, and records the new dest only when the chip returns `Ok`.
-A chip error leaves the table on the old CPU. I/O APIC routes are rewritten
+The allocator records the dest CPU. The portable table does not call the
+chip, so a chip can take the IRQ lock. `irq_init` runs `PlannedWired::claim`
+or `PlannedMsi::claim` outside that lock and `IrqTable::commit_wired` or
+`commit_msi` under it, and `release`s the claim outside the lock when the
+commit fails. `set_affinity` reads `IrqTable::plan_affinity` under the lock,
+calls `IrqChip::set_affinity` outside it, and `IrqTable::set_cpu` under it
+only when that returns `Ok`, so a chip error leaves the table on the old CPU.
+`free_vector` drops the slot with `IrqTable::commit_free` under the lock and
+`FreedIrq::release` outside it. I/O APIC routes are rewritten
 immediately. MSI/MSI-X messages come from the chip's `compose_msi` when the PCI
 layer writes the entry. The ROADMAP §19.5 rebalance uses this table rather than
 a second map.
