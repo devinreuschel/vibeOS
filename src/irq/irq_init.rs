@@ -48,6 +48,9 @@ pub(super) struct IrqState {
     table: IrqTable,
     routes: [Route; irq::MAX_IRQS],
     gsi_bind: [Option<IoApicBind>; irq::POOL_LEN],
+    /// MSI-X table entry `enable_msix` programmed for this `IrqId`, so a
+    /// later `set_affinity` can rewrite it. `None` until then.
+    msix: [Option<MsixLive>; irq::MAX_IRQS],
     pub(super) th: Threaded,
 }
 
@@ -57,6 +60,7 @@ static IRQ: SpinMutex<IrqState> = SpinMutex::with_rank(
         table: IrqTable::new(),
         routes: [Route::None; irq::MAX_IRQS],
         gsi_bind: [None; irq::POOL_LEN],
+        msix: [None; irq::MAX_IRQS],
         th: Threaded {
             wq: WaitQueue::new(),
             pending: [false; irq::MAX_IRQS],
@@ -77,6 +81,14 @@ pub(super) fn with_irq<R>(f: impl FnOnce(&mut IrqState) -> R) -> R {
 static HANDLERS: [AtomicUsize; irq::MAX_IRQS] = [const { AtomicUsize::new(0) }; irq::MAX_IRQS];
 /// Vector → [`IrqId`]. 0 is none. Release/Acquire with bind and free.
 static VEC_TO_IRQ: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
+
+/// One programmed MSI-X table entry. `table` is the VA `enable_msix`
+/// wrote, `index` the entry in it.
+#[derive(Clone, Copy)]
+struct MsixLive {
+    table: u64,
+    index: u16,
+}
 
 #[derive(Clone, Copy)]
 enum Route {
@@ -628,6 +640,9 @@ pub fn free_vector(irq: IrqId) -> Result<(), IrqError> {
             if let Some(r) = s.routes.get_mut(i) {
                 *r = Route::None;
             }
+            if let Some(m) = s.msix.get_mut(i) {
+                *m = None;
+            }
             if let Some(t) = s.th.top.get_mut(i) {
                 *t = None;
             }
@@ -915,6 +930,12 @@ pub fn enable_msix(dev: &Device, table_index: u16, irq: IrqId) -> Result<(), Irq
     chip.unmask(hwirq);
     if let Some(i) = irq.slot() {
         with_irq(|s| {
+            if let Some(m) = s.msix.get_mut(i) {
+                *m = Some(MsixLive {
+                    table,
+                    index: table_index,
+                });
+            }
             if let Some(r) = s.routes.get_mut(i) {
                 *r = Route::Msix;
             }
@@ -1133,11 +1154,37 @@ impl IrqChip for LapicMsiChip {
 
     fn set_affinity(&self, hwirq: u32, cpu: u32) -> Result<(), IrqError> {
         let vec = u8::try_from(hwirq).map_err(|_| IrqError::BadVector)?;
-        if in_pool(vec) {
-            with_pool(|p| p.set_affinity(vec, cpu))
-        } else {
-            Ok(())
+        if !in_pool(vec) {
+            return Ok(());
         }
+        // A CPU with no APIC id cannot be the message's destination.
+        // Updating the pool anyway would make `cpu_of` lie.
+        if apic_id(cpu).is_none() {
+            return Err(IrqError::BadCpu);
+        }
+        let msg = self.compose_msi(hwirq, cpu)?;
+        let live = with_irq(|s| {
+            s.pool.set_affinity(vec, cpu)?;
+            // Acquire: pairs with the Release store in `publish_vec`.
+            let raw = VEC_TO_IRQ
+                .get(usize::from(vec))
+                .map(|a| a.load(Ordering::Acquire))
+                .unwrap_or(0);
+            let slot = IrqId::from_raw(raw).slot();
+            Ok(slot.and_then(|i| s.msix.get(i).copied().flatten()))
+        })?;
+        if let Some(live) = live {
+            // SAFETY: invariant I49, established by `irq::irq_init::enable_msix`:
+            // `live.table` is the MSI-X table VA that call wrote for `live.index`.
+            unsafe {
+                write_msix_entry(
+                    live.table,
+                    live.index,
+                    MsixEntry::new(msg.addr, msg.data, false),
+                );
+            }
+        }
+        Ok(())
     }
 
     fn alloc_msi(&self, n: u8, cpu: u32, out: &mut [u32]) -> Result<usize, IrqError> {

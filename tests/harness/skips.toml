@@ -160,7 +160,6 @@ smp = 1
 [[skip]]
 name = "msix_cpu"
 reason = "no AP"
-arch = "x86_64"
 smp = 1
 
 [[skip]]
@@ -591,12 +590,6 @@ name = "trampoline_page"
 reason = "x86 AP trampoline"
 arch = "aarch64"
 no_counterpart = "secondary cores start through PSCI, not a real-mode trampoline"
-
-[[skip]]
-name = "msix_cpu"
-reason = "x86 MSI-X affinity"
-arch = "aarch64"
-no_counterpart = "ITS set_affinity is the open §11.3 MSI box; its_doorbell only writes the doorbell"
 
 [[skip]]
 name = "console_read_exit"
