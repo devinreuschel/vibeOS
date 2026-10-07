@@ -140,6 +140,46 @@ pub(crate) fn watch_r12(pid: u32) {
     WATCH_PID.store(pid, Ordering::Release);
 }
 
+/// The next aarch64 `sys_fork` adds `0x1000` to the saved TLS base while
+/// the live `TPIDR_EL0` stays put, so `el0_tls_fork` can tell which one
+/// the child got. A fork copy is preempted, and that switch would refresh
+/// the saved base.
+#[cfg(target_arch = "aarch64")]
+static FORK_TLS_DIVERGE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn arm_fork_tls_diverge() {
+    // Release: pairs with the AcqRel swap in `fork_tls_diverge`.
+    FORK_TLS_DIVERGE.store(true, Ordering::Release);
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn disarm_fork_tls_diverge() {
+    // Release: pairs with the AcqRel swap in `fork_tls_diverge`.
+    FORK_TLS_DIVERGE.store(false, Ordering::Release);
+}
+
+/// If armed, make this thread's saved TLS base differ from the live
+/// register. The caller holds IF=0 and reads the child's base next.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn fork_tls_diverge() {
+    // AcqRel: pairs with the Release stores in `arm_fork_tls_diverge`
+    // and `disarm_fork_tls_diverge`.
+    if !FORK_TLS_DIVERGE.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let t = crate::arch::current_tcb();
+    if t.is_null() {
+        return;
+    }
+    // SAFETY: invariant I9: `current_tcb` is this CPU's live TCB;
+    // established by `thread_init::switch_now`. The caller's guard holds
+    // IF=0, so this CPU stays on it.
+    unsafe {
+        (*t).tls_base = (*t).tls_base.wrapping_add(0x1000);
+    }
+}
+
 /// The watched pid's `r12` at its last exit to ring 3.
 pub(crate) fn watched_r12() -> u64 {
     WATCH_R12.load(Ordering::Acquire)

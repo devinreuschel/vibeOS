@@ -1442,6 +1442,11 @@ pub(crate) const TESTS: &[Test] = &[
         crate::arch::aarch64::ktest_el0::test_el0_tls_align64,
     ),
     test(
+        "el0_tls_fork",
+        crate::arch::aarch64::ktest_el0::test_el0_tls_fork,
+    )
+    .deadline(30_000),
+    test(
         "el0_fp_no_leak",
         crate::arch::aarch64::ktest_el0::test_el0_fp_no_leak,
     )
