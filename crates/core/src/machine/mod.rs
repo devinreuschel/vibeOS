@@ -137,12 +137,14 @@ pub struct InterruptMapEntry {
 }
 
 /// An ECAM host: first-bus config-space base, as DESIGN §11.5 stores it.
+/// `ecam_size` is the window in bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PciHost {
     pub segment: u16,
     pub first_bus: u8,
     pub last_bus: u8,
     pub ecam_base: u64,
+    pub ecam_size: u64,
     pub dma_coherent: bool,
     pub msi_parent: Option<u32>,
     pub msi_map: [MsiMapEntry; MAX_MSI_MAP],
@@ -429,6 +431,7 @@ fn fill_mcfg(d: &mut MachineDesc, m: McfgInfo) {
             first_bus: m.start_bus,
             last_bus: m.end_bus,
             ecam_base: m.ecam_base,
+            ecam_size: crate::pci::ecam_bytes(m.start_bus, m.end_bus),
             dma_coherent: true,
             ..PciHost::default()
         },
@@ -592,6 +595,7 @@ mod tests {
         let pci = d.pci_hosts();
         assert_eq!(pci.len(), 1);
         assert_eq!(pci[0].ecam_base, 0xE000_0000);
+        assert_eq!(pci[0].ecam_size, 0x1000_0000);
         assert_eq!(pci[0].first_bus, 0);
         assert_eq!(pci[0].last_bus, 0xFF);
         assert_eq!(d.reserved_count, 0);
@@ -620,6 +624,7 @@ mod tests {
         assert_eq!(pci[0].first_bus, 0x10);
         assert_eq!(pci[0].last_bus, 0x1F);
         assert_eq!(pci[0].ecam_base, 0xE000_0000);
+        assert_eq!(pci[0].ecam_size, 0x0100_0000);
     }
 
     #[test]

@@ -29,6 +29,37 @@ pub const fn ecam_off(bus_rel: u8, dev: u8, func: u8, offset: u16) -> u64 {
         | (offset as u64 & 0xFFF)
 }
 
+/// Buses the scan walks: `first` through `min(last, first + (size >> 20) - 1)`.
+/// `None` when that range is empty or `size` holds no full bus.
+pub const fn scan_range(first: u8, last: u8, size: u64) -> Option<(u8, u8)> {
+    if last < first {
+        return None;
+    }
+    let buses = size >> 20;
+    if buses == 0 {
+        return None;
+    }
+    // Buses from `first` through 255. A wider `reg` does not pass bus 255,
+    // and `room` is at most 256 so the casts below do not truncate.
+    let room = 256u64.saturating_sub(first as u64);
+    let buses = if buses > room { room } else { buses };
+    let covered = (first as u16)
+        .saturating_add(buses as u16)
+        .saturating_sub(1);
+    let last_u = last as u16;
+    let end = if last_u < covered { last_u } else { covered };
+    Some((first, end as u8))
+}
+
+/// Bytes of ECAM for buses `first` through `last`. MCFG has no size field.
+pub const fn ecam_bytes(first: u8, last: u8) -> u64 {
+    if last < first {
+        return 0;
+    }
+    let n = (last as u64).saturating_sub(first as u64).saturating_add(1);
+    n.saturating_mul(1 << 20)
+}
+
 /// Physical ECAM address, or `None` if `bus` is outside the window.
 pub const fn ecam_phys(
     base: u64,
@@ -543,9 +574,21 @@ fn bus_bit(seen: &mut [u64; 4], bus: u8) -> bool {
 /// Recursive scan from `start_bus`. Bridges with a non-zero secondary
 /// bus are followed. Does not assign bus numbers.
 pub fn enumerate<C: CfgIo>(cfg: &mut C, start_bus: u8, out: &mut [FuncInfo]) -> usize {
+    enumerate_buses(cfg, &[start_bus], out)
+}
+
+/// As [`enumerate`], from each bus in `starts`. A bus is walked once, so
+/// a bridge into the next host's root is not recorded twice.
+pub fn enumerate_buses<C: CfgIo>(cfg: &mut C, starts: &[u8], out: &mut [FuncInfo]) -> usize {
     let mut n = 0usize;
     let mut seen = [0u64; 4];
-    scan_bus(cfg, start_bus, out, &mut n, &mut seen);
+    let mut i = 0usize;
+    while i < starts.len() {
+        if let Some(&bus) = starts.get(i) {
+            scan_bus(cfg, bus, out, &mut n, &mut seen);
+        }
+        i = i.saturating_add(1);
+    }
     n
 }
 
@@ -1164,6 +1207,52 @@ mod tests {
         assert_eq!(parsed.table_off, 0x1000);
         assert!(parsed.enable);
         assert_eq!(MsiCap::parse(0x50, 0).data_off, 0x58);
+    }
+
+    /// `ecam-bus-range.dtb`: `bus-range = <0x10 0x1f>`, `reg` size 16 MiB.
+    /// The scan starts at the first bus. A wider `bus-range` is clamped
+    /// to the buses the `reg` can hold, and a device on bus 0 is not
+    /// what that start finds.
+    #[test]
+    fn ecam_bus_range_scan_starts_at_first_bus() {
+        let d =
+            crate::machine::fdt::parse(include_bytes!("../machine/testdata/ecam-bus-range.dtb"))
+                .unwrap();
+        let h = &d.pci_hosts()[0];
+        assert_eq!(h.first_bus, 0x10);
+        assert_eq!(h.last_bus, 0x1f);
+        assert_eq!(h.ecam_size, 0x0100_0000);
+        let range = scan_range(h.first_bus, h.last_bus, h.ecam_size);
+        assert_eq!(range, Some((0x10, 0x1f)));
+        // Same window, a bus-range that runs past the reg.
+        assert_eq!(
+            scan_range(h.first_bus, 0xff, h.ecam_size),
+            Some((0x10, 0x1f))
+        );
+        assert_eq!(scan_range(0x10, 0x1f, 1 << 20), Some((0x10, 0x10)));
+        assert_eq!(scan_range(0, 0xff, 0), None);
+        assert_eq!(scan_range(0x20, 0x10, 1 << 20), None);
+        assert_eq!(scan_range(0xf0, 0xff, 32 << 20), Some((0xf0, 0xff)));
+        assert_eq!(ecam_bytes(0, 0xff), 0x1000_0000);
+        assert_eq!(
+            scan_range(0x10, 0x1f, ecam_bytes(0x10, 0x1f)),
+            Some((0x10, 0x1f))
+        );
+
+        let (start, _) = range.unwrap();
+        let mut f = Fake::new();
+        f.device(Bdf::new(0, 0, 0), 0x8086, 0x1237, 0x06, 0x00);
+        f.device(Bdf::new(0x10, 0, 0), 0x1af4, 0x1042, 0x01, 0x00);
+        let mut out = [FuncInfo::empty(); 4];
+        let n = enumerate(&mut f, start, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0].bdf.bus, 0x10);
+        assert_eq!(out[0].device, 0x1042);
+
+        let n = enumerate_buses(&mut f, &[start, 0], &mut out);
+        assert_eq!(n, 2);
+        assert_eq!(out[0].bdf.bus, 0x10);
+        assert_eq!(out[1].bdf.bus, 0);
     }
 
     #[test]

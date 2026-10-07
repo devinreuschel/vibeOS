@@ -579,6 +579,7 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
             first_bus: first,
             last_bus: last,
             ecam_base: r.start,
+            ecam_size: r.size,
             dma_coherent: dma,
             msi_parent,
             ..PciHost::default()
@@ -845,8 +846,13 @@ mod tests {
         let pci = d.pci_hosts();
         assert_eq!(pci.len(), 1);
         assert_eq!(pci[0].ecam_base, 0x40_1000_0000);
+        assert_eq!(pci[0].ecam_size, 0x1000_0000);
         assert_eq!(pci[0].first_bus, 0);
         assert_eq!(pci[0].last_bus, 0xff);
+        assert_eq!(
+            crate::pci::scan_range(pci[0].first_bus, pci[0].last_bus, pci[0].ecam_size),
+            Some((0, 0xff))
+        );
         assert!(pci[0].dma_coherent);
         assert_eq!(pci[0].msi_map_len, 1);
         assert_eq!(pci[0].msi_map[0].length, 0x1_0000);
@@ -900,6 +906,7 @@ mod tests {
         assert_eq!(h.last_bus, 0x1f);
         const R: u64 = 0x4000_0000;
         assert_eq!(h.ecam_base, R);
+        assert_eq!(h.ecam_size, 0x0100_0000);
         assert_eq!(
             crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x10, 0, 0, 0),
             Some(R)
