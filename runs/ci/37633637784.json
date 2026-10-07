@@ -1,0 +1,1076 @@
+{
+ "attempt": 1,
+ "branch": "feature/el0-eret-breakpoint-3ec0",
+ "conclusion": "cancelled",
+ "created": "2026-10-07T14:04:18Z",
+ "event": "pull_request",
+ "finished": "2026-10-07T15:27:11Z",
+ "head_sha": "547d991fd8b619c04b93fb0b9e0ac900521f9cfc",
+ "jobs": [
+  {
+   "completed": "2026-10-07T14:50:44Z",
+   "conclusion": "success",
+   "created": "2026-10-07T14:20:00Z",
+   "name": "build (x86_64)",
+   "results": [],
+   "runner": null,
+   "seconds": 325,
+   "started": "2026-10-07T14:45:19Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 7
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 18
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 17
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": 35
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel, aarch64)",
+     "seconds": null
+    },
+    {
+     "name": "build the user programs (make user)",
+     "seconds": 3
+    },
+    {
+     "name": "build every ISO and host tool (make prebuilt)",
+     "seconds": 226
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "upload prebuilt files",
+     "seconds": 8
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 3
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-07T14:47:31Z",
+   "conclusion": "success",
+   "created": "2026-10-07T14:20:00Z",
+   "name": "build (aarch64)",
+   "results": [],
+   "runner": null,
+   "seconds": 144,
+   "started": "2026-10-07T14:45:07Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "install host tools",
+     "seconds": 22
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 10
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 1
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 13
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": null
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel, aarch64)",
+     "seconds": 18
+    },
+    {
+     "name": "build the user programs (make user)",
+     "seconds": 3
+    },
+    {
+     "name": "build every ISO and host tool (make prebuilt)",
+     "seconds": 61
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "upload prebuilt files",
+     "seconds": 3
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 3
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-07T14:54:30Z",
+   "conclusion": "success",
+   "created": "2026-10-07T14:20:00Z",
+   "name": "check",
+   "results": [],
+   "runner": null,
+   "seconds": 527,
+   "started": "2026-10-07T14:45:43Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 3
+    },
+    {
+     "name": "gate inputs",
+     "seconds": 0
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "install host tools",
+     "seconds": 0
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 18
+    },
+    {
+     "name": "install rust MSRV",
+     "seconds": 10
+    },
+    {
+     "name": "cache cargo (check)",
+     "seconds": 7
+    },
+    {
+     "name": "install python linters",
+     "seconds": 5
+    },
+    {
+     "name": "install cargo-deny",
+     "seconds": 1
+    },
+    {
+     "name": "make check",
+     "seconds": 361
+    },
+    {
+     "name": "native Linux: shared-page ELFs (ROADMAP \u00a710.6, F031)",
+     "seconds": 0
+    },
+    {
+     "name": "install cargo-llvm-cov",
+     "seconds": 0
+    },
+    {
+     "name": "vibeos-core llvm-cov floor",
+     "seconds": 108
+    },
+    {
+     "name": "upload vibeos-core coverage HTML",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache cargo (check)",
+     "seconds": 8
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-07T15:21:41Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-smp4-4)",
+   "results": [],
+   "runner": null,
+   "seconds": 1631,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:22:26Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-4)",
+   "results": [
+    {
+     "arch": "x86_64",
+     "commit": "b0507ff3f8f845b54986ad6b7f8323edcd716d85",
+     "dirty": false,
+     "ktest": {
+      "failed": [],
+      "passed": [
+       "clocksource_if_off_50ms",
+       "ktest_context",
+       "ktest_fail_fmt",
+       "ktest_helpers",
+       "ktest_names_unique",
+       "ktest_once_probe",
+       "ktest_optin_probe",
+       "ktest_rows",
+       "log_boot_level",
+       "pit_tick_rate",
+       "reap_many_via_idle",
+       "sleep_ms_50"
+      ],
+      "skipped": []
+     },
+     "marker": {
+      "failed": [],
+      "passed": [
+       "ktest_select_boot"
+      ]
+     },
+     "qemu": [
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max,-tsc-deadline",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-machine",
+        "pc,hpet=off",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=pit_tick_rate,,clocksource_if_off_50ms,,sleep_ms_50",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu,dma_mask=0xFFFFFFFF",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-device",
+        "virtio-keyboard-pci,disable-legacy=on",
+        "-device",
+        "virtio-tablet-pci,disable-legacy=on",
+        "-drive",
+        "file=/tmp/vibeos-vblk-xyvkjxun.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max,-tsc-deadline",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=ktest_*,,ktest_optin_probe,,log_boot_level vibeos.ktest_repeat=3 loglevel=8",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu,dma_mask=0xFFFFFFFF",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-device",
+        "virtio-keyboard-pci,disable-legacy=on",
+        "-device",
+        "virtio-tablet-pci,disable-legacy=on",
+        "-drive",
+        "file=/tmp/vibeos-vblk-9apd65_9.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      },
+      {
+       "accel": "tcg",
+       "argv": [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "build/vibeos-ktest.iso",
+        "-m",
+        "128M",
+        "-smp",
+        "2",
+        "-cpu",
+        "max",
+        "-no-reboot",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-accel",
+        "tcg",
+        "-boot",
+        "order=d",
+        "-fw_cfg",
+        "name=opt/vibeos/cmdline,string=vibeos.ktest=reap_many_via_idle vibeos.ktest_repeat=20",
+        "-device",
+        "pvpanic",
+        "-device",
+        "vmcoreinfo",
+        "-action",
+        "panic=pause",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu,dma_mask=0xFFFFFFFF",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+        "-device",
+        "virtio-keyboard-pci,disable-legacy=on",
+        "-device",
+        "virtio-tablet-pci,disable-legacy=on",
+        "-drive",
+        "file=/tmp/vibeos-vblk-0eh1qviv.img,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=2",
+        "-blockdev",
+        "driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on",
+        "-device",
+        "virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e"
+       ],
+       "cpu": "max",
+       "exit": 33,
+       "mem": "128M",
+       "smp": 2
+      }
+     ],
+     "retries": [],
+     "schema": 1,
+     "tier": "test-kernel-4",
+     "utest": {
+      "failed": [],
+      "passed": [],
+      "skipped": []
+     }
+    }
+   ],
+   "runner": null,
+   "seconds": 54,
+   "started": "2026-10-07T15:21:32Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 2
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 10
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": null
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 3
+    },
+    {
+     "name": "unpack prebuilt files",
+     "seconds": 1
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "make test-kernel-4",
+     "seconds": 30
+    },
+    {
+     "name": "harness results summary",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 1
+    },
+    {
+     "name": "upload failed-run cores",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-07T15:21:41Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-5)",
+   "results": [],
+   "runner": null,
+   "seconds": 1631,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:41Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, lapic-fallback-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 1631,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, vibefs-crash-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:41Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-smp4-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 1631,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, vibefs-crash-plants)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, lapic-fallback-4)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:40Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, e2e-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 1630,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:40Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 1630,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:40Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 1630,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-6)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, e2e-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-3)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, lapic-fallback-5)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-smp4-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:41Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-smp4-3)",
+   "results": [],
+   "runner": null,
+   "seconds": 1631,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, lapic-fallback-6)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:41Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-6)",
+   "results": [],
+   "runner": null,
+   "seconds": 1631,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:40Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, e2e-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 1630,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, vibefs-crash-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, gic-fallback-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:40Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-3)",
+   "results": [],
+   "runner": null,
+   "seconds": 1630,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:41Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-smp4-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 1631,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, forensics)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, lapic-fallback-3)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-smp4-5)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-smp4-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:44Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, gic-fallback-5)",
+   "results": [],
+   "runner": null,
+   "seconds": 1634,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-smp4-3)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-1)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:44Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, gic-fallback-6)",
+   "results": [],
+   "runner": null,
+   "seconds": 1634,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-5)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:41Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, lapic-fallback-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 1631,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-smp4-4)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:41Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (x86_64, kernel-smp4-5)",
+   "results": [],
+   "runner": null,
+   "seconds": 1631,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, gic-fallback-2)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, gic-fallback-4)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:43Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, gic-fallback-3)",
+   "results": [],
+   "runner": null,
+   "seconds": 1633,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:21:42Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T14:54:30Z",
+   "name": "tier (aarch64, kernel-4)",
+   "results": [],
+   "runner": null,
+   "seconds": 1632,
+   "started": "2026-10-07T14:54:30Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T15:27:11Z",
+   "conclusion": "failure",
+   "created": "2026-10-07T15:22:27Z",
+   "name": "ci-pass",
+   "results": [],
+   "runner": null,
+   "seconds": 4,
+   "started": "2026-10-07T15:27:07Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 0
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "every job succeeded",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 1
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-07T15:22:26Z",
+   "conclusion": "cancelled",
+   "created": "2026-10-07T15:22:27Z",
+   "name": "ticks",
+   "results": [],
+   "runner": null,
+   "seconds": -1,
+   "started": "2026-10-07T15:22:27Z",
+   "steps": []
+  }
+ ],
+ "run_id": 37633637784,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-10-07T14:04:18Z",
+ "workflow": "ci"
+}
