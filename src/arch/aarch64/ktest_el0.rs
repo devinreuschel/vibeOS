@@ -43,6 +43,28 @@ user_code!(
     "
 );
 
+// Offset 64 is variant I for `p_align` 64 (`TLS_PALIGN_64` in `ktest/user.rs`).
+user_code!(
+    TLS_ALIGN64,
+    "
+    mrs x0, tpidr_el0
+    ldr x1, [x0, #64]
+    movz x2, #0x7788
+    movk x2, #0x5566, lsl #16
+    movk x2, #0x3344, lsl #32
+    movk x2, #0x1122, lsl #48
+    cmp x1, x2
+    b.ne 9f
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
 user_code!(
     TLS_ZERO,
     "
@@ -377,6 +399,15 @@ pub(crate) fn test_el0_tls_yield() -> Outcome {
         Outcome::Ok
     } else {
         crate::fail_fmt!("status {sp:#x} {sr:#x}")
+    }
+}
+
+/// An align-64 TLS word is the initial image at `TP + 64` (variant I).
+pub(crate) fn test_el0_tls_align64() -> Outcome {
+    match user::run(&Image::TlsAlign64(TLS_ALIGN64, DEFAULT), &["tls_a64"]) {
+        Ok(st) if exited0(st) => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("status {st:#x}"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
     }
 }
 
