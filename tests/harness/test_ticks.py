@@ -387,6 +387,30 @@ class TestDiffRule(RepoCase):
                 self.commit(f"t\n\nProves: {proof} (existing: x) -- {self.PREFIX}", "delta box")
                 self.assertErrors(self.run_check(), "proof not found at the head")
 
+    def test_rust_path_fn_must_be_a_test_or_a_registry_row(self) -> None:
+        """A `.rs` path::fn is a proof only as a #[test] or a ktest row's
+        function. A production function is refused."""
+        tree = check_ticks.Tree("HEAD", self.repo.path)
+        self.assertEqual(check_ticks.resolve("crates/core/src/a.rs::not_a_test", tree)[0], [])
+        host = check_ticks.resolve("crates/core/src/a.rs::handler", tree)[0]
+        self.assertEqual([(d.kind, d.name) for d in host], [("host", "handler")])
+        rows = check_ticks.resolve("src/ktest.rs::test_suite", tree)[0]
+        self.assertTrue(rows)
+        self.assertTrue(all(d.kind == "ktest" and d.name == "suite_row" for d in rows))
+        self.commit("t\n\nProves: crates/core/src/a.rs::not_a_test (existing: x) -- "
+                    f"{self.PREFIX}", "delta box")
+        self.assertErrors(self.run_check(), "proof not found at the head")
+
+    def test_later_reopen_withdraws_the_tick(self) -> None:
+        """A later commit that removes the `- [x]` line withdraws the tick, so
+        its proof is not checked once the definition is gone."""
+        self.commit(f"t\n\nProves: check_x -- {self.PREFIX}", "delta box",
+                    self.change("scripts/check_x.py", "return 0", "return 1"))
+        self.commit("rm", files={"scripts/check_x.py": None})
+        self.roadmap = self.roadmap.replace("- [x] delta box", "- [ ] delta box")
+        self.commit("reopen")
+        self.assertEqual(self.run_check().errors, [])
+
     def test_bare_make_target(self) -> None:
         """A bare word is a Makefile target only when it names no test or
         script, so an identifier keeps its own definition first."""

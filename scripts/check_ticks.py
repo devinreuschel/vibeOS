@@ -3,9 +3,11 @@
 
 For each non-merge commit of a pull request (`base..head`), the lines of
 docs/ROADMAP.md that the commit changes to `- [x]` are its ticks: an added
-`- [x]` line, unless the same commit removes a `- [x]` line with the same text
-(a move) or that text is already `- [x]` at the merge base. So a ticked box
-whose text changes names its proof again; one reopened or deleted needs none.
+`- [x]` line, unless that text is already `- [x]` at the merge base or the
+pull request removes a `- [x]` line with the same text (this commit, or a
+later one). A `Proves:` line that pairs only with a removed line is not an
+error. So a ticked box whose text changes names its proof again; one reopened
+or deleted needs none.
 
 Each tick pairs with one `Proves: <proof>[ [<bracket>]][ (existing: <reason>)]
 -- <prefix>` line of the commit's message, read anywhere in the message: the
@@ -15,8 +17,10 @@ collapsed). The line splits at its first ` -- `.
 The proof exists at the head: a `make <target>` rule, a path (optionally
 `<path>::<name>`), a `"<marker text>"`, or an identifier (a ktest registry row,
 a user test, a host `#[test]`, a harness or script `def`, a harness or script
-file). A bare word that names none of those but is a Makefile target
-(`test-e2e-mce`) is that `make` rule, since ROADMAP's How to read this names
+file). A Rust `<path>::<fn>` is a host `#[test]` or the function a ktest
+registry row names; any other function is not found. A bare word that names
+none of those but is a Makefile target (`test-e2e-mce`) is that `make`
+rule, since ROADMAP's How to read this names
 "a `make` target" as a proof without the `make` word. A path that git finds
 renamed by a commit between the ticking commit and the head (`git log -M -B`)
 resolves at its head path, and a `<path>::<name>` whose Rust module a later
@@ -93,6 +97,10 @@ PY_DEF = r"^(\s*)(?:async\s+)?(?:def|class)\s+"
 # `("<name>", f),` that starts its own line. A bare `(` would match any call.
 REGISTRY_ROW = (r"\btest\(\s*\"{0}\"\s*,\s*([A-Za-z_][A-Za-z0-9_:]*)"
                 r"|^[ \t]*\(\s*\"{0}\"\s*,\s*([A-Za-z_][A-Za-z0-9_:]*)\s*\)\s*,")
+# `{0}` is the function a row names, so a Rust path::fn can be that row.
+REGISTRY_BY_FN = (
+    r"\btest\(\s*\"([^\"]+)\"\s*,\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*{0}\b"
+    r"|^[ \t]*\(\s*\"([^\"]+)\"\s*,\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*{0}\b")
 IGNORE_ATTR = re.compile(r"^\s*#\[ignore\b")
 MARKER_CALL = re.compile(r"marker!\(\s*\"((?:[^\"\\]|\\.)*)\"", re.S)
 MARKER_CONST = re.compile(r"^\s*pub\s+const\s+([A-Z0-9_]+):\s*&str\s*=\s*\"((?:[^\"\\]|\\.)*)\";",
@@ -129,6 +137,8 @@ class Commit:
     sha: str
     message: str = ""
     ticks: list[Tick] = field(default_factory=list)
+    # Ticks whose `- [x]` text a later commit of the pull request removes.
+    dropped: list[Tick] = field(default_factory=list)
 
 
 @dataclass
@@ -346,6 +356,48 @@ def find_fn(text: str, name: str, rust: bool) -> list[tuple[int, int, list[str]]
     return out
 
 
+def _has_test_attr(attrs: list[str]) -> bool:
+    return any(a.strip().startswith("#[test]") for a in attrs)
+
+
+def _ktest_rows_for_fn(fn: str, tree: Tree) -> list[Definition]:
+    """Registry rows whose function is `fn`, and that function where the row's
+    file defines it, as kind ktest under the row's name."""
+    row = re.compile(REGISTRY_BY_FN.format(re.escape(fn)), re.M)
+    out: list[Definition] = []
+    for path in tree.files():
+        if not path.startswith("src/") or not path.endswith(".rs") or "ktest" not in path:
+            continue
+        src = tree.read(path) or ""
+        for m in row.finditer(src):
+            name = m.group(1) or m.group(2)
+            a = src.count("\n", 0, m.start()) + 1
+            b = src.count("\n", 0, m.end()) + 1
+            out.append(Definition("ktest", path, a, b, name))
+            for s, e, _attrs in find_fn(src, fn, True):
+                out.append(Definition("ktest", path, s, e, name))
+    return out
+
+
+def _rust_path_fn(path: str, name: str, text: str, tree: Tree) -> list[Definition]:
+    """A Rust `path::fn`: its `#[test]`s, or the ktest rows that name it.
+    A production function is not a proof."""
+    fns = find_fn(text, name, True)
+    if not fns:
+        return []
+    tested = [(s, e, attrs) for s, e, attrs in fns if _has_test_attr(attrs)]
+    if tested:
+        return [Definition("host", path, s, e, name, _is_ignored(attrs)) for s, e, attrs in tested]
+    rows = _ktest_rows_for_fn(name, tree)
+    if not rows:
+        return []
+    reg = rows[0].name
+    for s, e, _attrs in fns:
+        if not any(d.path == path and d.start == s for d in rows):
+            rows.append(Definition("ktest", path, s, e, reg))
+    return rows
+
+
 def _make_rule(text: str, target: str) -> tuple[int, int] | None:
     lines = text.splitlines()
     pat = re.compile(r"^([^\s:=#][^:=]*?)\s*::?(?!=)")
@@ -402,9 +454,10 @@ def resolve(proof: str, tree: Tree) -> tuple[list[Definition], str]:
             return [], path
         if not name:
             return [Definition("path", path, 0, 0, path)], path
-        rust = path.endswith(".rs")
-        defs = [Definition("host" if rust else "py", path, s, e, name, _is_ignored(attrs))
-                for s, e, attrs in find_fn(text, name, rust)]
+        if path.endswith(".rs"):
+            defs = _rust_path_fn(path, name, text, tree)
+            return defs, defs[0].name if defs else name
+        defs = [Definition("py", path, s, e, name) for s, e, _attrs in find_fn(text, name, False)]
         return defs, name
     j = JOB.match(proof)
     if j:
@@ -806,12 +859,28 @@ class Checker:
         base_text = gatelib.git(self.repo, "show", f"{self.merge_base}:{ROADMAP_PATH}",
                                 check=False)
         at_base = {b.text for b in gatelib.parse_boxes(base_text) if b.ticked}
-        for sha, (added, removed) in parse_roadmap_diff(diff).items():
+        parsed = parse_roadmap_diff(diff)
+        # Texts a later commit removes. Same-commit removal stays a non-tick
+        # (`gone`), not a dropped tick a Proves line may excuse.
+        removed_after: dict[str, set[str]] = {}
+        later: set[str] = set()
+        for sha in reversed(self.pr):
+            removed_after[sha] = set(later)
+            later.update(parsed.get(sha, ([], []))[1])
+        for sha, (added, removed) in parsed.items():
             c = commits.get(sha)
             if c is None:
                 continue
             gone = set(removed)
-            c.ticks = [Tick(sha, n, t) for n, t in added if t not in gone and t not in at_base]
+            withdrawn = removed_after.get(sha, set())
+            for n, t in added:
+                if t in gone or t in at_base:
+                    continue
+                tick = Tick(sha, n, t)
+                if t in withdrawn:
+                    c.dropped.append(tick)
+                else:
+                    c.ticks.append(tick)
         return [commits[s] for s in self.pr]
 
     def changed(self) -> dict[str, list[tuple[int, int]]]:
@@ -841,6 +910,11 @@ class Checker:
             pre = collapse(p.prefix)
             hits = [t for t in c.ticks if collapse(t.text).startswith(pre)]
             if not hits:
+                dropped = [t for t in c.dropped if collapse(t.text).startswith(pre)]
+                if len(dropped) == 1:
+                    self.report.notes.append(f"{c.sha[:7]}: {tag}: line the pull request "
+                                             f"removes: {p.prefix!r}")
+                    continue
                 self.report.error(c.sha, None, f"{tag}: pairs with no line this commit "
                                   f"ticks: {p.prefix!r}")
             elif len(hits) > 1:

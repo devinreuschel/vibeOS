@@ -24,89 +24,83 @@ why = "S2 (#200) squash dropped the Proves line; the box names this script"
 [[erratum]]
 commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
 was = "sysreg_compare -- when §11.1 recorded EL2 entry"
-proves = "src/arch/aarch64/ktest.rs::test_sysreg_compare -- when §11.1 recorded EL2 entry"
-why = "GitHub CI is x86-only; sysreg_compare is an aarch64 ktest and never appears in C-RESULTS. Phase 11 host/path proofs are the same shape earlier slices used"
+proves = "sysreg_compare -- when §11.1 recorded EL2 entry"
+why = "the proof is the aarch64 ktest; a path::fn of the test function is not the registry row"
 
 [[erratum]]
 commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
 was = '"vibeOS: el: <el>" -- each core prints the §11.1 exception-level marker'
-proves = "src/arch/aarch64/cpu.rs::print_exception_level -- each core prints the §11.1 exception-level marker"
-why = "GitHub CI is x86-only; the aarch64 exception-level marker never appears in C-RESULTS. print_exception_level is the function this PR added that emits it"
+proves = '"vibeOS: el: <el>" -- each core prints the §11.1 exception-level marker'
+why = "the proof is the exception-level marker, not print_exception_level"
 
 [[erratum]]
 commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
 was = "oslsr_clear -- every core releases the debug OS Lock"
-proves = "src/arch/aarch64/cpu.rs::release_debug_os_lock -- every core releases the debug OS Lock"
-why = "GitHub CI is x86-only; oslsr_clear is an aarch64 ktest and never appears in C-RESULTS. release_debug_os_lock is the function this PR added"
+proves = "oslsr_clear -- every core releases the debug OS Lock"
+why = "the proof is the aarch64 ktest, not release_debug_os_lock"
 
 [[erratum]]
 commit = "73a604f71cace8e16e55eb930344359971f7871e"
 was = ""
 proves = """
-src/arch/aarch64/ktest.rs -- `-smp 4` under `virt`
-src/arch/aarch64/secondary.rs -- secondary cores start through PSCI
-src/arch/aarch64/secondary.rs -- before each `CPU_ON`
-src/arch/aarch64/ktest.rs::test_sysreg_compare -- when §11.1 recorded EL2 entry
-src/arch/aarch64/secondary.rs -- the stub enables the MMU
-src/arch/aarch64/cpu.rs::print_exception_level -- each core prints the §11.1 exception-level marker
-docs/SMP.md -- DESIGN §7.3 gains an aarch64 paragraph
-src/arch/aarch64/percpu.rs -- the per-CPU base
-src/arch/aarch64/gic.rs -- per-CPU GIC redistributor
-src/arch/aarch64/cpu.rs::release_debug_os_lock -- every core releases the debug OS Lock
+tlb_shootdown_remote -- `-smp 4` under `virt`
+sysreg_compare -- when §11.1 recorded EL2 entry
+"vibeOS: el: <el>" -- each core prints the §11.1 exception-level marker
+per_cpu_identity -- the per-CPU base
+percpu_ticks_advance -- per-CPU GIC redistributor
+oslsr_clear -- every core releases the debug OS Lock
 failed_ap_cleanup (existing: x86 pre-SIPI free; aarch64 AFF_OFF free) -- the bring-up failure path
 stalled_ap_leak -- x86_64's bring-up failure path
-crates/core/src/arch/aarch64/psci.rs -- each core reads its own parameter block
 loom_call_function -- the §4.9 call-function slot
 psci_ids_match_the_spec -- PSCI `SYSTEM_OFF` and `SYSTEM_RESET`
 switch_context_roundtrip -- the aarch64 context switch
 """
-why = "S8 (#226) squash dropped the Proves lines; these are the trailers the squashed S8 commit carried, with the three aarch64-only ktest/marker proofs rewritten as path::fn the way the 7b7c381 errata already did"
+why = "S8 (#226) squash dropped the Proves lines. Proofs are the registry tests, the exception-level marker, and the host tests; boxes with no test are reopened"
 
 [[erratum]]
 commit = "48d1fb4dc9707d5259e7e59700618000666f89ec"
 was = "block_vblk_mmio_smp -- virtio-mmio transport as well"
-proves = "src/dev/virtio_mmio_init.rs::publish -- virtio-mmio transport as well"
-why = "GitHub CI is x86-only; block_vblk_mmio_smp is an aarch64 ktest and never appears in C-RESULTS. publish claims each DT virtio-mmio window as BAR 0"
+proves = "block_vblk_mmio_smp -- virtio-mmio transport as well"
+why = "the proof is the in-guest virtio-mmio test, not virtio_mmio_init::publish"
 
 [[erratum]]
 commit = "48d1fb4dc9707d5259e7e59700618000666f89ec"
 was = "block_vblk_mmio_smp -- every virtio queue notification writes that virtqueue's index"
-proves = "crates/core/src/dev/virtio.rs::queue_notify -- every virtio queue notification writes that virtqueue's index"
-why = "GitHub CI is x86-only; block_vblk_mmio_smp is an aarch64 ktest and never appears in C-RESULTS. queue_notify is the index every kick writes"
+proves = "block_vblk_mmio_smp -- every virtio queue notification writes that virtqueue's index"
+why = "the proof is the in-guest -smp 4 virtio-mmio test, not queue_notify"
 
 [[erratum]]
 commit = "4ea066ae1ef3304ab3153179ae9fdd2fa4f03775"
 was = ""
 proves = """
-user/src/arch/aarch64/sys.rs -- `openat`, `dup3`, and fork-shaped
-src/proc/ktest/tls.rs::test_tls_survive -- `FS_BASE` saved and restored
-user/src/tests/mod.rs -- `/bin/tests` from the Phase 10 user crate
-tests/harness/harness.py::run_qemu_console_input -- the harness types
-src/main.rs -- the initrd, built by the same
-src/console/console_init.rs::read -- PL011 receive
+openat_ok -- `openat`, `dup3`, and fork-shaped
+tls_survive -- `FS_BASE` saved and restored
+"user: tests ok" (existing: the e2e contract already requires /bin/tests to pass) -- `/bin/tests` from the Phase 10 user crate
+test_aarch64_serial_then_virtio_keyboard -- the harness types
+initrd_module_sized (existing: the §10.5 in-guest initrd test) -- the initrd, built by the same
+"serial-ok" (existing: the console echo the x86 e2e already matches) -- PL011 receive
 ecam_bus_range_reg_is_first_bus -- PCIe through the ECAM the device tree names
-src/dev/virtio_mmio_init.rs::publish -- virtio-mmio transport as well
+block_vblk_mmio_smp -- virtio-mmio transport as well
 dma_edu -- `test_dma_edu` programs each device address
-crates/core/src/dev/virtio.rs::queue_notify -- every virtio queue notification writes that virtqueue's index
+block_vblk_mmio_smp -- every virtio queue notification writes that virtqueue's index
 virtio_input -- virtio-input for keyboard and pointer
-src/arch/aarch64/ktest.rs::test_rtc_offset -- PL031 for the §2.7 wall clock
-src/arch/aarch64/ktest.rs::test_fb_limine -- the framebuffer console over the Limine framebuffer
-src/arch/aarch64/ktest.rs::test_el0_svc_eret -- `svc` entry and `eret` exit
-src/arch/aarch64/ktest_el0.rs::current_migrate_if1 -- `current` in `SP_EL0`
-src/proc/syscall_init_aarch64.rs::switch_cr3_for -- `TTBR0` switch on context switch
-src/arch/aarch64/ktest_el0.rs::test_el0_pan_every_cpu -- PAN enabled on every CPU
-src/arch/aarch64/ktest.rs::test_el0_tagged -- tagged user pointers
-crates/core/src/proc/elf/tls.rs::thread_pointer_variant_i -- `TPIDR_EL0` for user TLS
-src/proc/ktest/tls.rs::test_tls_survive -- the user TLS base is per-thread
-docs/SYSCALL.md -- the aarch64 syscall convention
-user/src/arch/aarch64/sys.rs -- `openat` (with `AT_FDCWD`)
-crates/core/src/arch/aarch64/stat.rs::stat_aarch64_layout_is_linux -- `struct stat` for `fstat`
-user/src/arch/aarch64/sys.rs -- `/sbin/init`, `/bin/sh`, `/bin/tests` from the user crate
-src/arch/aarch64/ktest_el0.rs::test_el0_fp_no_leak -- user FP and SIMD state
-user/src/tests/fp.rs -- aarch64 user FP state across
-src/arch/aarch64/ktest.rs::test_el0_ring3_signals -- ring 3 cannot halt the kernel on aarch64
+rtc_offset -- PL031 for the §2.7 wall clock
+fb_limine -- the framebuffer console over the Limine framebuffer
+el0_svc_eret -- `svc` entry and `eret` exit
+current_migrate_if1 -- `current` in `SP_EL0`
+el0_ttbr0 -- `TTBR0` switch on context switch
+el0_pan_every_cpu -- PAN enabled on every CPU
+el0_tagged -- tagged user pointers
+tls_thread_pointer_variant_i_is_aligned -- `TPIDR_EL0` for user TLS
+el0_tls_survive -- the user TLS base is per-thread
+openat_ok -- `openat` (with `AT_FDCWD`)
+stat_aarch64_layout_is_linux -- `struct stat` for `fstat`
+"user: tests ok" (existing: the e2e contract already requires /bin/tests to pass) -- `/sbin/init`, `/bin/sh`, `/bin/tests` from the user crate
+el0_fp_no_leak -- user FP and SIMD state
+fp_fork_inherits -- aarch64 user FP state across
+el0_ring3_signals -- ring 3 cannot halt the kernel on aarch64
 """
-why = "S9 (#228) squash dropped the Proves lines; these are the trailers the squashed S9 commits carried, with the two aarch64-only mmio proofs rewritten as path::fn the way the 48d1fb4 errata already did"
+why = "S9 (#228) squash dropped the Proves lines. Proofs are the registry tests, utests, markers, and host tests; the syscall-convention box has no test and is reopened"
 
 [[erratum]]
 commit = "d1f68f825e3928612cecd7ff7d33ba7f35462bb0"
