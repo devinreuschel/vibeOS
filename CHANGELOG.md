@@ -63,8 +63,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   stop at INTID 1019 ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
 - aarch64 EL1 vector entry no longer clobbers `x16`, which panicked as
   `#DABT` in `cmdline::Words::next` ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
-- aarch64 UEFI boots prefer AAVMF no-secboot and use `-cpu neoverse-n1`
-  under TCG so AAVMF 2025.11 reaches BDS ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- aarch64 UEFI boots prefer AAVMF no-secboot and use `-cpu neoverse-v1`
+  under TCG, so BDS reaches and `el0_sve_sigill` can fail ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - Every CPU clears `EFER.FFXSR`, so a context switch on AMD saves the XMM registers, and turns off
   CPUID faulting that firmware left on, so `cpuid` runs in ring 3.
 

@@ -65,7 +65,7 @@ job = { workflow = "ci.yml", job = "tier" }
 key = """
 the nightly job, on QEMU 9.0 or later (the first whose `virt` wires the EL2 virtual timer's
 interrupt), boots aarch64 under TCG with `-machine virt,acpi=off,gic-version=3,virtualization=on
--cpu max -smp 4` to `shell ready` with every core online; the exception-level marker reports EL2
+-cpu neoverse-v1 -smp 4` to `shell ready` with every core online; the exception-level marker reports EL2
 with VHE on every core, and the §11.3 timer marker names the EL2 virtual timer. The same boot with
 machine type `virt-8.2`, whose timer node has no `hyp-virt` interrupt, names the EL2 physical
 timer"""

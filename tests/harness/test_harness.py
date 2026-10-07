@@ -1912,12 +1912,33 @@ class TestQemuArgv(unittest.TestCase):
         finally:
             remove_vars_copies()
 
-    def test_aarch64_tcg_max_is_neoverse_n1(self) -> None:
+    def test_aarch64_tcg_cpu(self) -> None:
         from tests.harness.harness import AARCH64_TCG_CPU, remove_vars_copies
 
         with _firmware_aarch64() as fw:
             argv = qemu_argv(
                 QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, cpu="max"),
+                None,
+            )
+            explicit = qemu_argv(
+                QemuConfig(
+                    iso="x.iso",
+                    arch="aarch64",
+                    firmware=fw,
+                    cpu="max",
+                    cpu_explicit=True,
+                ),
+                None,
+            )
+            hvf_explicit = qemu_argv(
+                QemuConfig(
+                    iso="x.iso",
+                    arch="aarch64",
+                    firmware=fw,
+                    accel="hvf",
+                    cpu="max",
+                    cpu_explicit=True,
+                ),
                 None,
             )
             kept = qemu_argv(
@@ -1926,7 +1947,9 @@ class TestQemuArgv(unittest.TestCase):
             )
         try:
             self.assertEqual(argv[argv.index("-cpu") + 1], AARCH64_TCG_CPU)
-            self.assertEqual(AARCH64_TCG_CPU, "neoverse-n1")
+            self.assertEqual(AARCH64_TCG_CPU, "neoverse-v1")
+            self.assertEqual(explicit[explicit.index("-cpu") + 1], "max")
+            self.assertEqual(hvf_explicit[hvf_explicit.index("-cpu") + 1], "max")
             self.assertEqual(kept[kept.index("-cpu") + 1], "cortex-a72")
         finally:
             remove_vars_copies()
@@ -2761,13 +2784,14 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(cfg.iso, "vibeos.iso")
             self.assertEqual(cfg.smp, 2)
             self.assertEqual(cfg.cpu, "max")
+            self.assertFalse(cfg.cpu_explicit)
             self.assertEqual(cfg.mem, "128M")
             self.assertEqual(cfg.accel, "tcg")
             self.assertEqual(env.arch, "x86_64")
             self.assertEqual(cfg.arch, "x86_64")
 
     def test_env_config_aarch64(self) -> None:
-        from tests.harness.harness import env_config, overlay_env, remove_vars_copies
+        from tests.harness.harness import env_config, guest_cpu, overlay_env, remove_vars_copies
 
         with _firmware_aarch64() as fw:
             with overlay_env(
@@ -2783,6 +2807,8 @@ class TestEnvConfig(unittest.TestCase):
                 self.assertEqual(cfg.arch, "aarch64")
                 self.assertEqual(cfg.gic_version, "3")
                 self.assertEqual(cfg.firmware, fw)
+                self.assertFalse(cfg.cpu_explicit)
+                self.assertEqual(guest_cpu(cfg), "neoverse-v1")
             with overlay_env(
                 {
                     "VIBEOS_ARCH": "aarch64",
@@ -2807,6 +2833,17 @@ class TestEnvConfig(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(HarnessError, "VIBEOS_GIC"):
                     env_config(default_iso="x.iso", default_timeout=1)
+            with overlay_env(
+                {
+                    "VIBEOS_ARCH": "aarch64",
+                    "VIBEOS_FW_AARCH64": fw.code,
+                    "VIBEOS_QEMU_CPU": "max",
+                },
+                clear=True,
+            ):
+                cfg = env_config(default_iso="x.iso", default_timeout=1).qemu()
+                self.assertTrue(cfg.cpu_explicit)
+                self.assertEqual(guest_cpu(cfg), "max")
         remove_vars_copies()
 
     def test_env_config_overrides(self) -> None:
@@ -2829,6 +2866,8 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(env.iso, "custom.iso")
             self.assertEqual(env.smp, 4)
             self.assertEqual(env.cpu, "qemu64")
+            self.assertTrue(env.cpu_explicit)
+            self.assertTrue(env.qemu().cpu_explicit)
             self.assertEqual(env.mem, "256M")
             self.assertIsNone(env.firmware)
             self.assertEqual(env.accel, "")
@@ -3473,6 +3512,33 @@ class TestSkips(unittest.TestCase):
         off = launch_config(QemuConfig(iso="x.iso", hpet=False, accel="tcg"))
         self.assertEqual(off["machine"], "pc,hpet=off")
         self.assertEqual(off["accel"], "tcg")
+
+    def test_launch_config_aarch64_cpu(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+        from tests.harness.skips import launch_config
+
+        with _firmware_aarch64() as fw:
+            default = launch_config(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw)
+            )
+            explicit = launch_config(
+                QemuConfig(
+                    iso="x.iso",
+                    arch="aarch64",
+                    firmware=fw,
+                    cpu="max",
+                    cpu_explicit=True,
+                )
+            )
+            host = launch_config(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, accel="hvf")
+            )
+        try:
+            self.assertEqual(default["cpu"], "neoverse-v1")
+            self.assertEqual(explicit["cpu"], "max")
+            self.assertEqual(host["cpu"], "host")
+        finally:
+            remove_vars_copies()
 
     def test_ktest_selection(self) -> None:
         self.assertEqual(run_ktest.ktest_selection(QemuConfig(iso="x", ktest="a,b*")), "a,b*")

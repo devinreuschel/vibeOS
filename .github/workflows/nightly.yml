@@ -774,7 +774,7 @@ jobs:
       APT_PACKAGES: qemu-system-arm qemu-efi-aarch64 xorriso
       ARCH: aarch64
       VIBEOS_SMP: "4"
-      VIBEOS_QEMU_CPU: max
+      VIBEOS_QEMU_CPU: neoverse-v1
       VIBEOS_QEMU_ACCEL: tcg
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

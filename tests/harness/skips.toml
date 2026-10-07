@@ -11,8 +11,9 @@
 #
 # Matching: `skips.launch_config` gives the configuration a boot launched:
 # `arch` from `qemu-system-<arch>`, `accel` the effective accelerator
-# (`tcg`, `kvm`, `hvf`), `cpu`, `smp` and `mem` as passed (`cpu` compared
-# as the exact string, so `max` and `max,+invtsc` differ), `machine` the
+# (`tcg`, `kvm`, `hvf`), `cpu` the `-cpu` argument (exact string, so `max`
+# and `max,+invtsc` differ; aarch64 TCG's unset default is `neoverse-v1`
+# and an explicit `max` stays `max`), `smp` and `mem` as passed, `machine` the
 # `-machine` value (`pc` when there is none, `pc,hpet=off` with HPET off),
 # and `host` the harness host (`platform.system().lower()`). A row matches
 # when every field it sets holds the configuration's value; a field left
@@ -686,3 +687,13 @@ name = "lifetime_shootdown_ack_late"
 reason = "x86 shootdown ack"
 arch = "aarch64"
 no_counterpart = "aarch64 invalidates with a broadcast TLBI and does not wait for an ack"
+
+# `ptrue` is UNDEFINED without SVE, so `el0_sve_sigill` would pass with ZEN
+# either way. Neoverse-N1 has no SVE or SME. HVF `-cpu host` on M1-M3 has
+# neither. Neoverse-V1 has SVE and must run the test.
+[[skip]]
+name = "el0_sve_sigill"
+reason = "no SVE or SME"
+arch = "aarch64"
+cpu = ["neoverse-n1", "host"]
+no_counterpart = "x86 has no SVE or SME"
