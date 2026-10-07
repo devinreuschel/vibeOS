@@ -3456,7 +3456,9 @@ class TestSkips(unittest.TestCase):
             "smp": 1,
             "machine": "virt,acpi=off,gic-version=3",
         }
-        check_skips({}, ["msix_cpu"], aarch64, rows)
+        check_skips({"msix_cpu": "x86 MSI-X affinity"}, ["msix_cpu"], aarch64, rows)
+        with self.assertRaisesRegex(HarnessError, "msix_cpu ran"):
+            check_skips({}, ["msix_cpu"], aarch64, rows)
         x86_smp1 = {**self.TCG2, "smp": 1}
         check_skips({"msix_cpu": "no AP"}, ["msix_cpu"], x86_smp1, rows)
         with self.assertRaisesRegex(HarnessError, "msix_cpu ran"):

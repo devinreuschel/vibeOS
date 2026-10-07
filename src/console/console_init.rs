@@ -29,7 +29,7 @@ pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
 /// caller runs with IF=1 (DESIGN §2.9 rule 2). An empty write only lets
 /// the framebuffer redraw.
 pub fn write(bytes: &[u8]) {
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     testing::record(bytes);
     // Acquire: pairs with the Release stores in `init` and `set_enabled`.
     let fb = FB_ON.load(Ordering::Acquire);
@@ -140,7 +140,7 @@ fn wait_key_loop() -> DecodedKey {
             continue;
         }
         // Relaxed: a count; pairs with nothing.
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         testing::HALTS.fetch_add(1, Ordering::Relaxed);
         crate::sched::irqoff::on();
         // SAFETY: `sti; hlt` only enables interrupts and halts until one
@@ -161,7 +161,7 @@ fn wait_key_loop() -> DecodedKey {
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
@@ -218,11 +218,13 @@ pub(crate) mod testing {
 
     /// Calls of `wait_key` that reached its `sti; hlt`, since the last
     /// [`reset_halts`].
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn halts() -> u64 {
         // Relaxed: a count; pairs with nothing.
         HALTS.load(Ordering::Relaxed)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn reset_halts() {
         // Relaxed: a count; pairs with nothing.
         HALTS.store(0, Ordering::Relaxed);

@@ -260,7 +260,7 @@ pub fn init() {
 }
 
 /// Test access to the deferred-release lists (kernel_tests only).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) mod testing {
     /// Whether `cpu`'s deferred-release list holds no object.
     pub(crate) fn release_idle(cpu: usize) -> bool {

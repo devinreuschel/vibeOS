@@ -121,7 +121,6 @@ pub(crate) fn test_el1_x16_survives_irq() -> Outcome {
     Outcome::Ok
 }
 
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 pub(crate) fn gsi_masked(_gsi: u32) -> Option<bool> {
     None
 }
@@ -171,8 +170,10 @@ fn on_msi() {
     MSI_HITS.fetch_add(1, Ordering::Release);
 }
 
-/// Boot-CPU MSI: compose, map, doorbell write, handler runs.
-pub(crate) fn test_msix_cpu() -> Outcome {
+/// Doorbell write after `compose_msi` and `map_its_event` with DeviceID 0.
+/// Not the Phase 6 MSI-X path (`irq::ktest::test_msix_cpu`): no PCI device,
+/// no `enable_msix`, and no affinity move.
+pub(crate) fn test_its_doorbell() -> Outcome {
     let Some(chip) = crate::arch::aarch64::gic::chip() else {
         return Outcome::Fail("no gic");
     };
@@ -206,7 +207,7 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     let t0 = time_init::now_ns();
     while MSI_HITS.load(Ordering::Acquire) == 0 {
         if time_init::now_ns().saturating_sub(t0) > 500_000_000 {
-            return Outcome::Fail("no msix");
+            return Outcome::Fail("no doorbell");
         }
         core::hint::spin_loop();
     }
@@ -1289,7 +1290,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("el1_x16_survives_irq", test_el1_x16_survives_irq),
     test("gic_present", test_gic_present),
     test("now_ns_cntvct", test_now_ns_cntvct),
-    test("msix_cpu", test_msix_cpu),
+    test("its_doorbell", test_its_doorbell),
     test("idle_wfi", test_idle_wfi),
     test("sysreg_compare", test_sysreg_compare),
     test("oslsr_clear", test_oslsr_clear),

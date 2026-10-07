@@ -140,7 +140,7 @@ pub fn rename(old: &[u8], new: &[u8]) -> Result<(), FsError> {
 /// Mount `fstype` from `source` on `target`: `fat32` and `vibefs` from a
 /// block device (`ram0`, `vda`), `ramfs` from nothing.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], ro: bool) -> Result<(), FsError> {
@@ -157,7 +157,7 @@ pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], ro: bool) -> Result<()
 /// Unmount the mount whose root `target` names; its superblock's last
 /// mount releases the volume.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn umount(target: &[u8]) -> Result<(), FsError> {
@@ -210,7 +210,7 @@ pub fn rename_at(base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), F
 )]
 /// Make `path` a symlink to `target`, from `base`.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn symlink_at(base: Option<WalkBase>, path: &[u8], target: &[u8]) -> Result<(), FsError> {
@@ -226,7 +226,7 @@ pub fn symlink_at(base: Option<WalkBase>, path: &[u8], target: &[u8]) -> Result<
 )]
 /// Hard link `new` to the regular file `old`, both from `base`.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn link_at(base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
@@ -242,7 +242,7 @@ pub fn link_at(base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsE
 )]
 /// Set the size of the regular file `path` names from `base`.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn truncate_at(base: Option<WalkBase>, path: &[u8], size: u64) -> Result<(), FsError> {
@@ -331,7 +331,7 @@ pub fn dir_path(base: Option<WalkBase>, at: PathRef, out: &mut [u8]) -> Result<u
 
 /// How many holders directory `at`'s dentry has (test-only:
 /// `cwd_per_process`).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn dentry_refs(at: PathRef) -> u32 {
     fs_init::api().dentry_refs(at)
 }
@@ -367,7 +367,7 @@ pub fn addref(id: FileId) -> Result<(), FsError> {
     )
 )]
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn stat_path(path: &[u8]) -> Result<Stat, FsError> {
@@ -410,7 +410,7 @@ pub fn mkdir_p_at(base: Option<WalkBase>, path: &[u8]) -> Result<(), FsError> {
 
 /// Create regular file `path`, or empty it. Test-only: `ktest::fid`
 /// and the fs in-guest tests call it.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn creat(path: &[u8]) -> Result<(), FsError> {
     use vibeos::fs::{O_CREAT, O_TRUNC, O_WRONLY};
 

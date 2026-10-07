@@ -17,7 +17,10 @@ pub fn unmask(_line: u8) {}
 pub fn unclaimed(_line: u8) -> bool {
     false
 }
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn is_masked(_line: u8) -> bool {
     true
 }

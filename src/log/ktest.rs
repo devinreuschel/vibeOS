@@ -5,13 +5,14 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::log::Level;
 use vibeos::log::backtrace::WalkEnd;
+#[cfg(target_arch = "x86_64")]
 use vibeos::paging::USER_MAP_END;
 
 use vibeos::log::trace::{self, Event, RecordData};
 use vibeos::vectors;
 
 use crate::block::{block_init, blockdev_init};
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{Outcome, Test, spin_until_ns, test};
 use crate::log::trace_init::VIBEOS_TRACE;
 use crate::{ipi_init, per_cpu_init, thread_init, time_init};
@@ -351,7 +352,7 @@ pub(crate) fn test_trace_ring_own_cpu() -> Outcome {
 }
 
 // getpid, then a store to 0x10, which faults: `SIGSEGV` ends it.
-user_code!(
+x86_user_code!(
     TRACE_GETPID_FAULT,
     "
     mov eax, 39
@@ -581,6 +582,7 @@ pub(crate) fn test_vmcoreinfo_published() -> Outcome {
 /// runs them (DESIGN §8.2).
 /// The user `rbp` `backtrace_syscall_boundary`'s program sets before its
 /// syscall, which the probe keys on.
+#[cfg(target_arch = "x86_64")]
 const WALK_RBP: u64 = 0x4000_0800;
 static WALK_ARMED: AtomicBool = AtomicBool::new(false);
 static WALK_DONE: AtomicBool = AtomicBool::new(false);
@@ -605,6 +607,7 @@ fn walk_end_code(e: WalkEnd) -> u32 {
 /// backtrace does (`panic::walk_known`) and record how it ended, the last
 /// frame, and whether any frame was a user address.
 #[inline(never)]
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn syscall_walk_probe(user_rbp: u64) {
     // Acquire: pairs with the test's Release store.
     if user_rbp != WALK_RBP || !WALK_ARMED.load(Ordering::Acquire) {
@@ -632,7 +635,7 @@ pub(crate) fn syscall_walk_probe(user_rbp: u64) {
 }
 
 // A nonzero user rbp, getpid, then exit(0).
-user_code!(
+x86_user_code!(
     WALK_GETPID,
     "
     mov rbp, 0x40000800
@@ -682,7 +685,17 @@ pub(crate) fn test_backtrace_syscall_boundary() -> Outcome {
 
 /// L1410: the boot probe found QEMU's pvpanic through fw_cfg's
 /// `etc/pvpanic-port` and read a mask with the panicked event (bit 0),
-/// which every harness boot's `-device pvpanic` supports.
+/// which every harness boot's `-device pvpanic` supports. On aarch64 the
+/// same property is `pvpanic-pci`'s BAR (ROADMAP §11.7).
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_pvpanic_found() -> Outcome {
+    if crate::log::pvpanic_init::pci_found() {
+        Outcome::Ok
+    } else {
+        Outcome::Fail("no pvpanic-pci")
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn test_pvpanic_found() -> Outcome {
     use vibeos::log::pvpanic::PANICKED;
@@ -712,6 +725,5 @@ pub(crate) const TESTS: &[Test] = &[
         "backtrace_syscall_boundary",
         test_backtrace_syscall_boundary,
     ),
-    #[cfg(target_arch = "x86_64")]
     test("pvpanic_found", test_pvpanic_found),
 ];

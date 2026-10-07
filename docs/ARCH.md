@@ -9,6 +9,12 @@ that moves a seam row's code or adds a file under `src/arch/x86_64/`,
 `crates/core/src/arch/aarch64/` edits its row here in the
 same commit.
 
+aarch64 in-guest boots run the portable ktest groups and skip each row that needs
+x86_64 code or PC hardware. [`tests/harness/skips.toml`](../tests/harness/skips.toml)
+is the set the harness requires. Each aarch64 row names the aarch64 test that
+proves the same property (`counterpart`) or a `no_counterpart` reason.
+`scripts/check_arch.py` fails a row that does neither.
+
 ## Seam rows
 
 Portable side: the port-independent code that reaches the concern (in `vibeos-core`, or the kernel

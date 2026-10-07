@@ -211,7 +211,7 @@ pub(crate) fn stop_device(bdf: Bdf, common: u64) -> Stopped {
         crate::marker!("vibeOS: virtio: {} reset timeout", bdf);
     }
     let cmd = pci_init::update_command(bdf, 0, CMD_MASTER);
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::dev::ktest::record_quiesce(bdf, reset_ok, r8(common, COMMON_OFF_STATUS), cmd);
     if cmd & CMD_MASTER != 0 {
         Stopped::Stuck
@@ -307,7 +307,7 @@ fn publish_pool(q: &mut Q, len: u32) {
         // `virtio_init::setup`, which allocates it.
         *b = unsafe { p.add(i).read_volatile() };
     }
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     let n = {
         let mut n = n;
         crate::dev::ktest::rng_hooks::on_publish(&mut q.pool, &mut n);
@@ -482,7 +482,7 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     );
     w16(common, COMMON_OFF_QMSIX, 0);
     w16(common, COMMON_OFF_QENABLE, 1);
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     if crate::dev::ktest::fail_after_qenable(dev.addr) {
         fail_probe(dev, common, Some(irq), [Some(qdma), Some(data)]);
         return Err(VirtioError::Failed);
@@ -676,7 +676,7 @@ pub fn rng_take(buf: &mut [u8]) -> usize {
     }
     // `pos + n <= pool_len`, a `u8`.
     q.pool_pos = (pos + n) as u8;
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::dev::ktest::rng_hooks::on_take_claim();
     dst.copy_from_slice(src);
     n

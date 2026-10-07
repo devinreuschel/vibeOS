@@ -253,6 +253,41 @@ macro_rules! user_code {
 }
 pub(crate) use user_code;
 
+/// x86 ring-3 text. On aarch64 the static is a zero page and is not
+/// assembled: a test that needs these bytes skips (`x86 user text`).
+macro_rules! x86_user_code {
+    ($name:ident, $asm:literal) => {
+        #[cfg(target_arch = "x86_64")]
+        ::core::arch::global_asm!(concat!(
+            ".pushsection .rodata.vibeos_user_code, \"a\", @progbits\n.balign 16\n",
+            ".global vibeos_user_code_",
+            stringify!($name),
+            "\n",
+            "vibeos_user_code_",
+            stringify!($name),
+            ":\n",
+            $asm,
+            "\n",
+            ".org vibeos_user_code_",
+            stringify!($name),
+            " + 4096, 0xcc\n.popsection\n"
+        ));
+        #[cfg(target_arch = "x86_64")]
+        static $name: &[u8] = {
+            unsafe extern "C" {
+                #[link_name = concat!("vibeos_user_code_", stringify!($name))]
+                static CODE: [u8; 4096];
+            }
+            // SAFETY: the symbol names 4096 initialized read-only bytes that
+            // nothing writes, established here by the `global_asm!` above.
+            unsafe { &CODE }
+        };
+        #[cfg(target_arch = "aarch64")]
+        static $name: &[u8] = &[0u8; 4096];
+    };
+}
+pub(crate) use x86_user_code;
+
 // fork; the child exits 0; the parent waits for any child, then exits 0.
 #[cfg(target_arch = "x86_64")]
 user_code!(

@@ -5,13 +5,13 @@ use vibeos::fs::{O_CREAT, O_TRUNC, O_WRONLY};
 use vibeos::proc::{SIGKILL, wait_signaled};
 use vibeos::thread::ThreadId;
 
-use crate::ktest::user::{self, DEFAULT, Image, elf_bytes, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, elf_bytes, x86_user_code};
 use crate::ktest::{Outcome, fid};
 use crate::proc_init;
 use crate::thread_init;
 
 // ebx, not ecx: `syscall` overwrites rcx with the return RIP.
-user_code!(
+x86_user_code!(
     TLS_LOOP,
     "
     mov ebx, 80
@@ -35,7 +35,7 @@ user_code!(
     "
 );
 
-user_code!(
+x86_user_code!(
     YIELD_LOOP,
     "
     mov ebx, 80
@@ -51,7 +51,7 @@ user_code!(
     "
 );
 
-user_code!(
+x86_user_code!(
     YIELD_FOREVER,
     "
 1:
@@ -61,7 +61,7 @@ user_code!(
     "
 );
 
-user_code!(
+x86_user_code!(
     TLS_EXIT0,
     "
     xor edi, edi
@@ -71,7 +71,7 @@ user_code!(
     "
 );
 
-user_code!(
+x86_user_code!(
     EXEC_NOTLS,
     "
     lea rdi, [rip + 1f]

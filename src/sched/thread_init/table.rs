@@ -137,7 +137,7 @@ pub const SNAPSHOT_CHUNK: usize = 16;
 /// The scheduler's timeout queue's capacity.
 #[cfg(feature = "kernel_tests")]
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn timeouts_capacity() -> usize {
@@ -206,7 +206,7 @@ pub(crate) fn report_stack_depth() {
 /// name the threads a CPU ran between them. Returns how many it wrote.
 #[cfg(feature = "kernel_tests")]
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "x86 quantum snapshot; unused on this path")
 )]
 pub(crate) fn run_tsc_snapshot(out: &mut [RunTsc]) -> usize {
@@ -231,7 +231,7 @@ pub(crate) fn run_tsc_snapshot(out: &mut [RunTsc]) -> usize {
 /// One thread's row of [`run_tsc_snapshot`].
 #[cfg(feature = "kernel_tests")]
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "x86 quantum snapshot; unused on this path")
 )]
 #[derive(Clone, Copy)]
@@ -244,7 +244,7 @@ pub(crate) struct RunTsc {
 
 #[cfg(feature = "kernel_tests")]
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "x86 quantum snapshot; unused on this path")
 )]
 impl RunTsc {

@@ -317,7 +317,7 @@ static UNOWNED: [[AtomicU64; 256]; vibeos::acpi::MAX_CPUS] =
 /// (0: never logged).
 static UNOWNED_LOGGED: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 /// `irq: no handler` lines printed per vector (kernel_tests only).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 static UNOWNED_LINES: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
 /// An interrupt on `vec` that no handler owns (DESIGN §5.2, §2.10): count
@@ -366,7 +366,7 @@ pub fn unowned(vec: u8) {
         return;
     }
     // Relaxed: a count `unowned_lines` reads; pairs with nothing.
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     UNOWNED_LINES[usize::from(vec)].fetch_add(1, Ordering::Relaxed);
     crate::marker!(
         "vibeOS: irq: no handler for vector 0x{:02x} cpu {} count {}",
@@ -384,10 +384,6 @@ pub fn unowned(vec: u8) {
         reason = "ROADMAP §25.7's soak samples it; the in-guest storm test reads it today"
     )
 )]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub fn unowned_count(vec: u8, cpu: u32) -> u64 {
     // Relaxed: a count; pairs with nothing.
     UNOWNED
@@ -397,7 +393,7 @@ pub fn unowned_count(vec: u8, cpu: u32) -> u64 {
 }
 
 /// `irq: no handler` lines printed for `vec` so far.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn unowned_lines(vec: u8) -> u64 {
     // Relaxed: a count; pairs with nothing.
     UNOWNED_LINES[usize::from(vec)].load(Ordering::Relaxed)
@@ -410,10 +406,6 @@ pub fn unowned_lines(vec: u8) -> u64 {
         dead_code,
         reason = "ROADMAP §6.3 / §11.3: in-guest tests allocate without a device"
     )
-)]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn allocate(cpu: u32) -> Result<IrqId, IrqError> {
     if in_hard_irq() {

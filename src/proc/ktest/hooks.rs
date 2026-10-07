@@ -4,7 +4,9 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::proc::SIGKILL;
+#[cfg(target_arch = "x86_64")]
 use vibeos::syscall::UserFrame;
 
 #[cfg(target_arch = "x86_64")]
@@ -145,6 +147,7 @@ pub(crate) fn watched_r12() -> u64 {
 
 /// `syscall_init::exit_work`, at its start: records the watched process's
 /// `r12`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn exit_seen(frame: &UserFrame) {
     let w = WATCH_PID.load(Ordering::Acquire);
     if w != 0 && crate::thread_init::current_pid() == w {
@@ -154,6 +157,7 @@ pub(crate) fn exit_seen(frame: &UserFrame) {
 
 /// `syscall_init::exit_work`, each time a check finds work: the first one
 /// after the hook posted its kill records its `kind`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn exit_work_found(kind: u64) {
     if KILL_POSTED.swap(false, Ordering::AcqRel) {
         KILL_ACTED_KIND.store(kind, Ordering::Release);
@@ -163,6 +167,7 @@ pub(crate) fn exit_work_found(kind: u64) {
 /// `syscall_init::exit_work` on a syscall exit, after its last check: the
 /// armed syscall's exit posts `SIGKILL` to the returning process and sends
 /// this CPU a reschedule IPI, which IF=0 holds pending until ring 3.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn exit_check_hook(frame: &UserFrame) {
     let pid = crate::thread_init::current_pid();
     let armed = frame.orig_rax.wrapping_add(1);

@@ -106,7 +106,7 @@ fn ioremap_page(phys: u64) -> Option<u64> {
 
 /// The ioremap VA of the MADT LAPIC page, if mapped.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "x86-only on the boot-CPU slice")
 )]
 pub fn lapic_va() -> Option<u64> {

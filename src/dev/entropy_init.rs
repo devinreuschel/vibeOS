@@ -10,7 +10,7 @@ use crate::arch::current::hw_rng64;
 use crate::virtio_init;
 
 fn hw_fill(buf: &mut [u8]) -> (usize, Option<Source>) {
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     if testing::dry() {
         return (0, None);
     }
@@ -74,7 +74,7 @@ fn refill() {
 }
 
 /// A machine with no hardware entropy, for `dev_random_eagain`.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -82,6 +82,7 @@ pub(crate) mod testing {
 
     /// While `on`, the hardware fill supplies no byte, as with neither
     /// virtio-rng nor `RDRAND`.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn set_dry(on: bool) {
         // Release: pairs with the Acquire load in `dry`.
         DRY.store(on, Ordering::Release);

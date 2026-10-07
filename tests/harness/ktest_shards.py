@@ -69,18 +69,34 @@ def _rows(variant: str, cut: str) -> dict[str, Shard]:
     return {f"{variant}-{k}": Shard(variant, rows=r) for k, r in enumerate(bounds, start=1)}
 
 
-# aarch64's registry is `ktest` + `arch` + `dev` only (src/ktest/mod.rs).
-# x86 cut names (`user_single_step`, `block_vblk_rw`) are not rows there.
-# `el0_sve_sigill` sits in the second stretch, after `el0_uaccess`.
-def _aarch64_rows(variant: str, cut: str) -> dict[str, tuple[str, str]]:
-    bounds = (("", cut), (cut, "virtio_bind"), ("virtio_bind", ""))
-    return {f"{variant}-{k}": r for k, r in enumerate(bounds, start=1)}
+# aarch64 runs the portable groups plus its arch group (src/ktest/mod.rs).
+# The cuts are rows of that registry. `block_vblk_rw` starts the drivers
+# group, so the last stretch holds every row on `vda` and the persist reboot.
+# x86's `user_single_step` cut is not used: that row skips, and the portable
+# proc group is large enough to need its own stretches.
+def _aarch64_spans(variant: str, cuts: tuple[str, ...]) -> dict[str, tuple[str, str]]:
+    bounds = ("", *cuts, "")
+    return {f"{variant}-{k}": (bounds[k - 1], bounds[k]) for k in range(1, len(bounds))}
 
+
+_AARCH64_KERNEL = (
+    "el0_uaccess",
+    "tls_survive",
+    "user_runtime",
+    "spawn_sentinel",
+    "block_vblk_rw",
+)
+_AARCH64_SMP4 = (
+    "el0_uaccess",
+    "user_runtime",
+    "spawn_sentinel",
+    "block_vblk_rw",
+)
 
 AARCH64_ROWS: dict[str, tuple[str, str]] = {
-    **_aarch64_rows("test-kernel", "el0_uaccess"),
-    **_aarch64_rows("test-kernel-smp4", "el0_uaccess"),
-    **_aarch64_rows("test-lapic-fallback", "el0_uaccess"),
+    **_aarch64_spans("test-kernel", _AARCH64_KERNEL),
+    **_aarch64_spans("test-kernel-smp4", _AARCH64_SMP4),
+    **_aarch64_spans("test-lapic-fallback", _AARCH64_KERNEL),
 }
 
 

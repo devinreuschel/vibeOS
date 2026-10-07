@@ -23,16 +23,18 @@ job = { workflow = "ci.yml", job = "tier" }
 
 [[line]]
 key = """
-`make test-kernel ARCH=aarch64` passes every in-guest test that is not x86-specific, including the
-Phase 6 MSI-X tests and the §10.6 user-memory tests, on the default `gic-version=3`, where MSI-X
-goes through the ITS, and again with `gic-version=2`, where it goes through GICv2m, and the harness
-reads the verdict from QEMU's exit status and its QMP `GUEST_PANICKED` event under TCG and HVF
-(§11.7); each x86-specific test is `ktest_skip`ped with a reason naming the x86 feature it needs,
-and the harness fails if the skipped set differs from the aarch64 rows of `tests/harness/skips.toml`
-(§10.2), which `docs/ARCH.md` links; each skip row also names the aarch64 test that proves the same
-property, or says that the property has no aarch64 counterpart and why, and
-`scripts/check_arch.py` fails a row that does neither. The in-guest test
-`el1_x16_survives_irq` fails before the fix."""
+`make test-kernel ARCH=aarch64` runs the portable in-guest groups (log, mm, acpi, proc, sync, boot,
+time, smp, sched, irq, dev, block, drivers, and fs) and the aarch64 arch group, on `gic-version=3`
+and `gic-version=2`; the x86_64 arch, console, and shell groups stay off aarch64; each row that
+needs x86 user text, an x86 ELF, x86 syscall-number or entry rules, ACPI tables, an AP trampoline,
+a PS/2 console, MSI-X affinity, an I/O APIC, LAPIC page flags, NX or a stack-guard `#PF`, a PIT, or
+a software timer interrupt is `ktest_skip`ped with a reason naming that x86 feature, and the harness
+fails if the skipped set differs from the aarch64 rows of `tests/harness/skips.toml` (§10.2), which
+`docs/ARCH.md` links; each skip row names an aarch64 counterpart or `no_counterpart`, and
+`scripts/check_arch.py` fails a row that does neither; Phase 6 MSI-X through the ITS and GICv2m
+stays the open §11.3 MSI box, and `its_doorbell` only checks that the ITS doorbell write lands;
+pass is PSCI `SYSTEM_OFF` (QEMU exit 0) and fail is `pvpanic-pci`'s QMP `GUEST_PANICKED`, under TCG
+and HVF. The in-guest test `el1_x16_survives_irq` fails before the fix."""
 [[line.entry]]
 cmd = "python3 scripts/check_arch.py"
 [[line.entry]]

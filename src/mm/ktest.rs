@@ -4,7 +4,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::fmt;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+#[cfg(target_arch = "x86_64")]
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
@@ -15,9 +17,10 @@ use vibeos::pmm::Frames;
 use crate::diag;
 use crate::ktest::{
     Outcome, Test, alloc_frame, alloc_frames_owned, catch_alloc_error, catch_fault, free_frame,
-    free_frames, free_frames_owned, quiescent_free_frames, second_cpu, settle_threads,
-    spawn_thread_on, spin_until_ns, test,
+    free_frames, free_frames_owned, quiescent_free_frames, settle_threads, spin_until_ns, test,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::ktest::{second_cpu, spawn_thread_on};
 use crate::kva_init;
 use crate::paging_init;
 use crate::per_cpu_init;
@@ -401,14 +404,20 @@ pub(crate) fn test_mmio_uc_flags() -> Outcome {
 /// `arch::catch::LAST`. `SHOOT_REQ` counts requests (`SHOOT_QUIT` ends the
 /// thread), `SHOOT_ACK` names the last one served, and `SHOOT_RESULT` holds
 /// its outcome: 1 the read succeeded, 2 it faulted.
+#[cfg(target_arch = "x86_64")]
 static SHOOT_VA: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 static SHOOT_REQ: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 static SHOOT_ACK: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 static SHOOT_RESULT: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 const SHOOT_QUIT: u64 = u64::MAX;
 
 /// Spin on the AP, never blocking, so the TLB entry a read loads stays
 /// live until a shootdown removes it; IF stays on for the shootdown IPI.
+#[cfg(target_arch = "x86_64")]
 fn shoot_prober() {
     let mut seen = 0u64;
     loop {
@@ -436,6 +445,7 @@ fn shoot_prober() {
 }
 
 /// Ask the prober to read `SHOOT_VA` and return its result, 0 on timeout.
+#[cfg(target_arch = "x86_64")]
 fn shoot_touch(req: u64) -> u64 {
     // Release: `SHOOT_VA` and the mapping change happen before the request.
     SHOOT_REQ.store(req, Ordering::Release);
@@ -446,6 +456,7 @@ fn shoot_touch(req: u64) -> u64 {
 }
 
 /// End the prober and wait until it has stopped reading.
+#[cfg(target_arch = "x86_64")]
 fn shoot_quit() {
     SHOOT_REQ.store(SHOOT_QUIT, Ordering::Release);
     let _ = spin_until_ns(
@@ -454,6 +465,7 @@ fn shoot_quit() {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
@@ -903,6 +915,7 @@ pub(crate) mod fail_after {
 /// `kernel_va0_faults`' probe result: 0 none yet, 1 `#PF` at CR2 0 on a
 /// not-present supervisor read, 2 the read did not fault, 3 any other
 /// fault. The CPU that ran it is in the upper 32 bits.
+#[cfg(target_arch = "x86_64")]
 static VA0_RESULT: AtomicU64 = AtomicU64::new(0);
 
 /// Read VA 0 under `catch_fault` with an asm load (a Rust null
@@ -970,23 +983,37 @@ pub(crate) fn kernel_va0_faults() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_nx_enforcement() -> Outcome {
+    Outcome::Skip("x86 NX page")
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_stack_guard() -> Outcome {
+    Outcome::Skip("x86 stack guard")
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn kernel_va0_faults() -> Outcome {
+    Outcome::Skip("x86 #PF at VA 0")
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("map_unmap", test_map_unmap),
-    #[cfg(target_arch = "x86_64")]
     test("nx_enforcement", test_nx_enforcement),
     test("heap_box", test_heap_box),
     test("heap_reuse", test_heap_reuse),
     test("heap_align", test_heap_align),
     test("heap_growth", test_heap_growth),
     test("heap_oom", test_heap_oom),
-    #[cfg(target_arch = "x86_64")]
     test("stack_guard", test_stack_guard),
     test("kva_roundtrip", test_kva_roundtrip),
     test("kva_deferred", test_kva_deferred),
     test("vmap", test_vmap),
     test("mmio_uc_flags", test_mmio_uc_flags),
+    #[cfg(target_arch = "x86_64")]
     test("tlb_shootdown_remote", test_tlb_shootdown_remote),
     test("alloc_stress_smp", test_alloc_stress_smp),
     test("frames_none_leaked", frames_none_leaked),
@@ -996,7 +1023,6 @@ pub(crate) const TESTS: &[Test] = &[
         "unmap_shootdown_over_max_asserts",
         unmap_shootdown_over_max_asserts,
     ),
-    #[cfg(target_arch = "x86_64")]
     test("kernel_va0_faults", kernel_va0_faults),
     test("ioremap_failure_returns_va", ioremap_failure_returns_va),
 ];

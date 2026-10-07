@@ -289,13 +289,13 @@ pub fn init_tables() -> Result<(), AllocError> {
 
 /// The descriptor row's length in each process-table slot (the first's;
 /// `init_tables` gives each the same).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) fn fd_row_capacity() -> usize {
     with_table(|t| t.procs.first().map_or(0, |p| p.fds.capacity()))
 }
 
 /// The process table's use: slots not `Unused`, and its length.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) fn table_usage() -> (usize, usize) {
     with_table(|t| {
         let used = t
@@ -778,7 +778,7 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
                 }
                 p.state = ProcState::Stopped;
                 s.begin_wait(&mut p.stop_wq, FAR_DEADLINE);
-                #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+                #[cfg(feature = "kernel_tests")]
                 testing::stop_decided(pid);
                 Pending::Stop
             })
@@ -790,7 +790,7 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
                 finish_exit(wait_signaled(sig), None);
             }
             Pending::Stop => {
-                #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+                #[cfg(feature = "kernel_tests")]
                 testing::stop_stall(pid);
                 thread_init::schedule();
             }
@@ -806,7 +806,7 @@ enum Pending {
 
 fn sys_getpid() -> SysResult {
     let pid = current_pid();
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     {
         testing::getpid_spin(pid);
         testing::on_getpid(pid);
@@ -881,7 +881,7 @@ pub fn try_user_fault(f: &TrapFrame) {
             "user: pid {pid} killed SIG{name} rip=0x{rip:x} err=0x{err:x}"
         )
     };
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     {
         testing::kill_line_yield(f);
         testing::kill_line_done();
@@ -903,10 +903,11 @@ pub fn try_user_fault(f: &TrapFrame) {
 pub use exit::{kill_bad_elr, try_user_trap};
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+    #[cfg(target_arch = "x86_64")]
     use vibeos::syscall::{SYS_GETPID, UserFrame};
 
     #[cfg(target_arch = "x86_64")]
@@ -982,6 +983,7 @@ pub(crate) mod testing {
     /// none.
     static KILL_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
     /// Kill lines `try_user_fault` has finished writing since boot.
+    #[cfg(target_arch = "x86_64")]
     static KILL_LINES: AtomicU64 = AtomicU64::new(0);
 
     /// The next CPL-3 `#PF` at `fault_addr` that ends in a kill yields in
@@ -1023,6 +1025,7 @@ pub(crate) mod testing {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(super) fn kill_line_done() {
         // AcqRel: pairs with the Acquire loads in `kill_line_yield`.
         KILL_LINES.fetch_add(1, Ordering::AcqRel);
@@ -1288,6 +1291,7 @@ pub(crate) mod testing {
     static WRITE_DONE_NS: AtomicU64 = AtomicU64::new(0);
 
     /// Record when the next console `write` returns.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn arm_console_write_record() {
         // Release: pairs with the Acquire load in `console_write_done_ns`.
         WRITE_DONE_NS.store(0, Ordering::Release);
@@ -1296,6 +1300,7 @@ pub(crate) mod testing {
     }
 
     /// `now_ns` when the armed console `write` returned; 0 before.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn console_write_done_ns() -> u64 {
         // Acquire: pairs with the Release store in `console_write_returned`.
         WRITE_DONE_NS.load(Ordering::Acquire)
@@ -1338,6 +1343,7 @@ pub(crate) mod testing {
     /// CPU it runs on and that CPU's timer ticks at its first copy and at
     /// its return (ROADMAP §10.2: what happened during the write, not what
     /// a watcher saw later).
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn arm_console_write_ticks() {
         // Release: pairs with the Acquire load in `console_write_ticks`.
         TICKS_DONE.store(false, Ordering::Release);
@@ -1349,6 +1355,7 @@ pub(crate) mod testing {
 
     /// The recorded write's `(cpu, ticks)` at its first copy and at its
     /// return, once it has returned.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn console_write_ticks() -> Option<((u32, u64), (u32, u64))> {
         // Acquire: pairs with the Release store in `console_write_returned`.
         TICKS_DONE.load(Ordering::Acquire).then(|| {
@@ -1440,6 +1447,7 @@ pub(crate) mod testing {
     }
 
     /// Top of `proc_init::syscall`, before the dispatch.
+    #[cfg(target_arch = "x86_64")]
     pub(super) fn on_entry(frame: &mut UserFrame) {
         if frame.orig_rax != SYS_GETPID || frame.rdi != HOOK_MAGIC {
             return;

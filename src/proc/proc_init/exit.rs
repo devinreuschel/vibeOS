@@ -148,7 +148,7 @@ pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
     }
     let want = i64::from(pid);
     let nohang = options as u64 & WNOHANG != 0;
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     super::testing::wait4_entered(self_pid, want);
     loop {
         let r = thread_init::with_sched(|s| {

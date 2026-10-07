@@ -4,7 +4,7 @@
 use vibeos::proc::{SIGKILL, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{Outcome, sleep_for};
 use crate::proc_init;
 use crate::proc_init::testing as proc_testing;
@@ -12,7 +12,7 @@ use crate::proc_init::testing as proc_testing;
 // fork; the child sleeps 1000 s at a time, forever; the parent calls
 // wait4(child, NULL, 0, NULL) and exits 1 if it returns. Exits 2 if the
 // fork fails.
-user_code!(
+x86_user_code!(
     WAIT4_ON_SLEEPER,
     "
     mov eax, 57

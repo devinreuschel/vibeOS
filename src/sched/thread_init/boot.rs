@@ -1,6 +1,7 @@
 //! The bootstrap thread: boot's own context made thread 0 and moved off
 //! Limine's stack onto a guarded KVA stack (ROADMAP §10.6, MEMORY.md §4.5).
 
+#[cfg(any(target_arch = "x86_64", feature = "kernel_tests"))]
 use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
@@ -10,7 +11,9 @@ use vibeos::kalloc::TryBox;
 use vibeos::proc::INIT_PID;
 use vibeos::thread::{CpuAffinity, CpuContext, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome};
 
-use super::{SCHED, tid_of_slot, with_sched};
+#[cfg(any(target_arch = "x86_64", feature = "kernel_tests"))]
+use super::with_sched;
+use super::{SCHED, tid_of_slot};
 use crate::arch::current::Arch;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -111,10 +114,7 @@ fn bootstrap_entry() {
 /// The bootstrap thread's stack range, its saved RSP, and whether it is on
 /// a CPU now (its saved RSP is stale while it runs). `None` before
 /// [`init_bootstrap`].
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
-)]
+#[cfg(any(target_arch = "x86_64", feature = "kernel_tests"))]
 pub(crate) fn bootstrap_stack() -> Option<(Range<u64>, u64, bool)> {
     with_sched(|s| {
         let t = s.get(ThreadId::BOOTSTRAP)?;

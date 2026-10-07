@@ -1,6 +1,5 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-#[cfg(target_arch = "x86_64")]
 use vibeos::sched::stack_depth::{self, Deepest};
 use vibeos::sched::take_next;
 use vibeos::thread::{CpuAffinity, GuardedStack, MAX_THREADS, Tcb, ThreadId, ThreadState};
@@ -8,7 +7,6 @@ use vibeos::thread::{CpuAffinity, GuardedStack, MAX_THREADS, Tcb, ThreadId, Thre
 use vibeos::kalloc::{AllocError, TryVec};
 use vibeos::limits;
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) use super::sweep::SWEEP_CHUNK;
 use super::{runnable_on, with_sched};
 use crate::cell::BootCell;
@@ -75,7 +73,6 @@ pub(super) static FAIL_FORK_STACK: AtomicBool = AtomicBool::new(false);
 
 /// Move this CPU's cached stacks onto its dead list and wake its worker,
 /// which unmaps and frees them.
-#[cfg(target_arch = "x86_64")]
 pub fn drain_local_stack_cache() {
     let kick = crate::per_cpu_init::with_current(|cpu| {
         let mut any = false;
@@ -103,7 +100,6 @@ pub fn drain_local_stack_cache() {
 /// # Safety
 ///
 /// No CPU runs on `stack`, now or later (invariant I10).
-#[cfg(target_arch = "x86_64")]
 pub unsafe fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
     // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
     super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
@@ -674,7 +670,6 @@ pub(super) fn refill_cached(stack: &GuardedStack) {
 /// is cached, zeroed or linked onto the dead list: its depth is recorded
 /// for the thread that just switched off it, whose `Tcb` stays intact
 /// until `on_cpu` clears (TESTING §8.2).
-#[cfg(target_arch = "x86_64")]
 pub(super) fn scan_dead_slot() {
     let found = per_cpu_init::with_current(|cpu| {
         let s = cpu.dead_stack.as_ref()?;
@@ -708,7 +703,6 @@ pub(super) fn scan_dead_slot() {
 
 /// Scan every live thread's stack, one `SCHED` section per slot, and hand
 /// each measurement to `f` with the lock dropped (TESTING §8.2).
-#[cfg(target_arch = "x86_64")]
 pub fn scan_live_stacks(f: impl FnMut(Deepest)) {
     super::scan_live_stacks(f);
 }

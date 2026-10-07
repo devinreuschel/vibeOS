@@ -277,3 +277,395 @@ name = "noncanonical_rip_sigsegv"
 reason = "no iretq"
 arch = "aarch64"
 counterpart = "el0_bad_elr"
+
+# Portable groups on aarch64: rows whose body is x86_64 code or PC hardware.
+
+[[skip]]
+name = "ring3_syscall_enosys"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "syscall_ptr_validate"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "user_code_exit"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "user_image_elf"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "user_code_layout"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "orphan_freed_no_init"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "fork_full_thread_table"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "limits_heap_backed"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "as_pin_across_exit"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "fill_pt_hold_bounded"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "user_entry_irq"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "user_selectors"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "user_ds_fork"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "user_ds_switch"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "exec_top_page_enoexec"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "exec_huge_memsz"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "exec_large_elf_from_file"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "exec_from_tmp"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "brk_mmap_munmap_user"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "stop_cont_no_lost_wakeup"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "wait4_ends_on_pending_kill"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "stop_holds_signals_until_cont"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "signal_on_return"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "exit_work_ipi"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "syscall_body_if_on"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "kill_line_whole"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "kalloc_nomem"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "syscall_rcx_canary"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "fork_child_gprs"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "preempt_gpr_canaries"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "pid_not_reused_after_reap"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "proc_syscall_count"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "trace_tracepoints_fire"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "backtrace_syscall_boundary"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "file_table_fork_churn"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "vibefs_efbig"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "vibefs_seek_end_5gib"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "vfs_user_dev_nodes"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "fork_oom"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "exit_burst"
+reason = "x86 user text"
+arch = "aarch64"
+no_counterpart = "the program is x86_64 machine code"
+
+[[skip]]
+name = "user_single_step"
+reason = "x86 TF single-step"
+arch = "aarch64"
+no_counterpart = "aarch64 software step is MDSCR_EL1.SS, not RFLAGS.TF"
+
+[[skip]]
+name = "user_int1"
+reason = "x86 TF single-step"
+arch = "aarch64"
+no_counterpart = "aarch64 software step is MDSCR_EL1.SS, not RFLAGS.TF"
+
+[[skip]]
+name = "user_tf_repin"
+reason = "x86 TF single-step"
+arch = "aarch64"
+no_counterpart = "aarch64 software step is MDSCR_EL1.SS, not RFLAGS.TF"
+
+[[skip]]
+name = "fp_no_leak"
+reason = "x86 XMM user text"
+arch = "aarch64"
+counterpart = "el0_fp_no_leak"
+
+[[skip]]
+name = "fp_migrate_counter"
+reason = "x86 XMM user text"
+arch = "aarch64"
+no_counterpart = "the counter is in xmm0"
+
+[[skip]]
+name = "tls_survive"
+reason = "x86 FS_BASE user text"
+arch = "aarch64"
+counterpart = "el0_tls_survive"
+
+[[skip]]
+name = "tls_yield"
+reason = "x86 FS_BASE user text"
+arch = "aarch64"
+counterpart = "el0_tls_yield"
+
+[[skip]]
+name = "elf_shared_page"
+reason = "x86 ELF"
+arch = "aarch64"
+no_counterpart = "the fixture is an x86_64 ELF"
+
+[[skip]]
+name = "elf_shared_page_jump"
+reason = "x86 ELF"
+arch = "aarch64"
+no_counterpart = "the fixture is an x86_64 ELF"
+
+[[skip]]
+name = "syscall_dispatch"
+reason = "x86 eax syscall numbers"
+arch = "aarch64"
+no_counterpart = "aarch64 takes the syscall number from x8, not sign-extended eax"
+
+[[skip]]
+name = "acpi_discovery"
+reason = "x86 ACPI tables"
+arch = "aarch64"
+no_counterpart = "aarch64 describes the machine with a device tree"
+
+[[skip]]
+name = "trampoline_page"
+reason = "x86 AP trampoline"
+arch = "aarch64"
+no_counterpart = "secondary cores start through PSCI, not a real-mode trampoline"
+
+[[skip]]
+name = "msix_cpu"
+reason = "x86 MSI-X affinity"
+arch = "aarch64"
+no_counterpart = "ITS set_affinity is the open §11.3 MSI box; its_doorbell only writes the doorbell"
+
+[[skip]]
+name = "console_read_exit"
+reason = "x86 PS/2 console"
+arch = "aarch64"
+no_counterpart = "virt has no PS/2 controller"
+
+[[skip]]
+name = "user_fork_wait_stall"
+reason = "x86 syscall entry"
+arch = "aarch64"
+no_counterpart = "the stall is the x86 syscall entry window"
+
+[[skip]]
+name = "mmio_uc_flags"
+reason = "x86 LAPIC page flags"
+arch = "aarch64"
+no_counterpart = "aarch64 has no LAPIC; device memory is Device, not PCD or PWT"
+
+[[skip]]
+name = "intx_fallback"
+reason = "x86 I/O APIC"
+arch = "aarch64"
+no_counterpart = "aarch64 INTx is the open §11.3 interrupt-map path"
+
+[[skip]]
+name = "intx_free_masks"
+reason = "x86 I/O APIC"
+arch = "aarch64"
+no_counterpart = "aarch64 INTx is the open §11.3 interrupt-map path"
+
+[[skip]]
+name = "nx_enforcement"
+reason = "x86 NX page"
+arch = "aarch64"
+no_counterpart = "the check reads the x86 page-fault error code"
+
+[[skip]]
+name = "stack_guard"
+reason = "x86 stack guard"
+arch = "aarch64"
+no_counterpart = "the check reads the x86 page-fault error code"
+
+[[skip]]
+name = "kernel_va0_faults"
+reason = "x86 #PF at VA 0"
+arch = "aarch64"
+no_counterpart = "the probe is an x86 load of VA 0"
+
+[[skip]]
+name = "sched_lock_timer_irq"
+reason = "x86 timer vector"
+arch = "aarch64"
+no_counterpart = "the test raises the x86 timer vector with int"
+
+[[skip]]
+name = "addrspace_map_unmap_teardown"
+reason = "x86 invlpg"
+arch = "aarch64"
+no_counterpart = "the test runs invlpg and opens the SMAP window"
+
+[[skip]]
+name = "pit_tick_rate"
+reason = "x86 PIT"
+arch = "aarch64"
+no_counterpart = "the PIT is PC hardware; aarch64 ticks from the generic timer"
+
+[[skip]]
+name = "tsc_calib_source"
+reason = "no invariant tsc"
+arch = "aarch64"
+no_counterpart = "the band compares PIT channel 2 to HPET; aarch64 takes CNTFRQ"

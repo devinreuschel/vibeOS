@@ -260,7 +260,7 @@ pub fn shootdown_ranges(ranges: &[ShootRange]) {
 /// One round for at most [`SHOOT_RANGES`] ranges.
 fn shootdown_round(ranges: &[ShootRange]) {
     let _irq = crate::arch::current::InterruptGuard::enter();
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::irq::ktest::note_shootdown();
     let me = my_index() as u32;
     let waiters = waiter_mask(per_cpu_init::online_mask(), me);
@@ -739,10 +739,6 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
         dead_code,
         reason = "ROADMAP §4.9 0xFB call-function; only the in-guest tests send one yet"
     )
-)]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn call_cpu(cpu: u32, f: fn(*mut ()), arg: *mut (), wait: bool) {
     if cpu >= 64 {

@@ -140,7 +140,7 @@ pub(super) struct TimeState {
     tsc_per_ms: u64,
     #[cfg_attr(
         target_arch = "aarch64",
-        expect(dead_code, reason = "x86-only on the boot-CPU slice")
+        expect(dead_code, reason = "PIT/HPET calib source is x86")
     )]
     pub(super) source: CalibSource,
     #[cfg_attr(
@@ -717,7 +717,7 @@ pub fn pit_fires() -> u64 {
 
 /// Write `snap` to the clock. The caller holds `WRITER`.
 fn publish(st: &TimeState, snap: Snapshot) {
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     super::ktest::publish_tick(snap);
     st.clock.write(snap);
 }
@@ -759,19 +759,19 @@ pub fn confirm_clocksource() {
 }
 
 /// The seqlock clock, for the in-guest clock tests' unclamped read.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(super) fn tick_clock() -> Option<&'static TickClock> {
     STATE.try_get().map(|s| &s.clock)
 }
 
 /// The counter `id` names, for the in-guest clock tests.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) fn counter(id: ClocksourceId) -> Option<Counter> {
     STATE.try_get()?.counter(id)
 }
 
 /// One raw read of counter `id`, for the in-guest clock tests.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) fn read_counter(id: ClocksourceId) -> Option<u64> {
     let st = STATE.try_get()?;
     st.counter(id).map(|_| read_raw(st, id))
@@ -819,7 +819,7 @@ pub fn tsc_per_ms() -> u64 {
 /// CPUID.8000_0007H:EDX[8]. TCG leaves this clear; KVM and real silicon set it.
 #[cfg_attr(
     target_arch = "aarch64",
-    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+    expect(dead_code, reason = "invariant TSC is an x86 CPUID bit")
 )]
 pub fn tsc_invariant() -> bool {
     STATE.try_get().is_some_and(|s| s.invariant_tsc)

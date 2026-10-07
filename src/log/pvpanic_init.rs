@@ -149,3 +149,10 @@ pub fn found() -> Option<(u16, u8)> {
     let port = (s & 0xFFFF) as u16;
     (port != 0).then_some((port, ((s >> 16) & 0xFF) as u8))
 }
+
+/// `pvpanic-pci` was found and its BAR mapped. `kernel_tests` only.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn pci_found() -> bool {
+    // Acquire: pairs with `probe_pci`'s Release store.
+    PCI_VA.load(Ordering::Acquire) != 0
+}

@@ -3,7 +3,7 @@
 pub mod hardirq;
 pub(crate) mod ipi_init;
 pub(crate) mod irq_init;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

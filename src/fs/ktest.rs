@@ -56,7 +56,7 @@ pub(crate) use walk::test_walk_path_resolution;
 use crate::fat_init;
 use crate::file_init;
 use crate::fs_init;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{Outcome, Test, fid, test};
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
@@ -806,7 +806,7 @@ fn unlinked_open(path: &str, a: FileId, before: u64) -> Outcome {
 // it (exit 2 if not), write 1 byte there returns -EFBIG (3), lseek to
 // 2^44 returns -EINVAL (4), and SEEK_END returns 0 (5). Exit 1 if the
 // open fails, 0 when every step passes.
-user_code!(
+x86_user_code!(
     VIBEFS_EFBIG,
     "
     lea rdi, [rip + 90f]
@@ -883,7 +883,7 @@ pub(crate) fn test_vibefs_efbig() -> Outcome {
 // SEEK_END returns 5 GiB + 1 (exit 3 if not), and the byte read back at
 // 5 GiB is "x" (4). Exit 1 if the open fails, 2 if the lseek or write
 // fails, 0 when every step passes.
-user_code!(
+x86_user_code!(
     VIBEFS_BIG5,
     "
     lea rdi, [rip + 90f]

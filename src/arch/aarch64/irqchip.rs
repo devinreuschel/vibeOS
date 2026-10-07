@@ -52,7 +52,10 @@ pub fn send_ipi(_apic: u8, _vec: u8, _mode: IpiMode) -> Result<(), IpiError> {
     Ok(())
 }
 
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn send_ipi_cpu(_cpu: u32, _vec: u8) -> Result<(), IpiError> {
     Ok(())
 }

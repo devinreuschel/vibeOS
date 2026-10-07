@@ -9,7 +9,7 @@
 //! write-back mapping.
 
 use core::fmt::Write;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -77,7 +77,7 @@ static CFG_LOCK: AtomicBool = AtomicBool::new(false);
 pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
 /// The online-CPU mask while the scan sized the BARs; 0 before it runs.
 /// `dev::ktest::test_pci_scan_bsp_only` reads it.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(super) static SCAN_ONLINE: AtomicU64 = AtomicU64::new(0);
 
 fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
@@ -387,7 +387,7 @@ pub unsafe fn scan() {
         SCAN.set_in_place();
     }
     // Release: pairs with the Acquire load in `dev::ktest::test_pci_scan_bsp_only`.
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     SCAN_ONLINE.store(crate::per_cpu_init::online_mask(), Ordering::Release);
 }
 
@@ -469,10 +469,6 @@ pub fn update_command(bdf: Bdf, set: u16, clear: u16) -> u16 {
         dead_code,
         reason = "only the in-guest tests read a config word outside a driver yet"
     )
-)]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn cfg_read16(bdf: Bdf, offset: u16) -> u16 {
     pci::read16(&mut HwCfg, bdf, offset)
