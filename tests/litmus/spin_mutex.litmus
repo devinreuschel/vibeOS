@@ -1,10 +1,14 @@
-AArch64 vibeos-spin_mutex
+AArch64 vibeos-spin-mutex
+(* Unlock is STLRB of the lock word. Acquire is CASAB. A successful
+   acquire that still sees the old critical-section store is forbidden. *)
 {
-0:X1=x; 0:X2=y;
-1:X1=x; 1:X2=y;
+[locked]=1;
+0:X1=locked; 0:X2=data;
+1:X1=locked; 1:X2=data;
 }
- P0              | P1              ;
- MOV W0,#1       | LDAR W3,[X2]    ;
- STLR W0,[X1]    | LDR W4,[X1]     ;
- STLR W0,[X2]    |                 ;
-exists (1:X3=1 /\ 1:X4=0)
+ P0              | P1               ;
+ MOV W0,#1       | MOV W4,#0        ;
+ STR W0,[X2]     | MOV W0,#1        ;
+ STLRB WZR,[X1]  | CASAB W4,W0,[X1] ;
+                 | LDR W6,[X2]      ;
+exists (1:X4=0 /\ 1:X6=0)

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import check_litmus
 from scripts.check_litmus import check_helpers, litmus_files
@@ -76,6 +78,33 @@ class TestRepo(unittest.TestCase):
 
     def test_usage(self) -> None:
         self.assertEqual(check_litmus.main(["--nope"]), 2)
+
+
+class ObservationTest(unittest.TestCase):
+    def test_both_models_use_the_same_rule(self) -> None:
+        err = check_litmus.observation_error
+        self.assertIsNone(err("tests/litmus/seqlock.litmus", "aarch64.cat", "Never"))
+        self.assertIsNotNone(err("tests/litmus/seqlock.litmus", "aarch64.cat", "Sometimes"))
+        self.assertIsNone(err("tests/litmus/seqlock_x86.litmus", "x86tso.cat", "Never"))
+        self.assertIsNotNone(err("tests/litmus/seqlock_x86.litmus", "x86tso.cat", "Sometimes"))
+        self.assertIsNone(err("tests/litmus/dma_mb_relaxed.litmus", "aarch64.cat", "Sometimes"))
+        self.assertIsNone(err("tests/litmus/dma_mb_x86_relaxed.litmus", "x86tso.cat", "Always"))
+        self.assertIsNotNone(err("tests/litmus/dma_mb_x86_relaxed.litmus", "x86tso.cat", "Never"))
+
+    def test_run_herd7_reads_x86_verdicts(self) -> None:
+        t = Tree()
+        self.addCleanup(t.close)
+        t.write("tests/litmus/mp_x86.litmus", "X86 mp\n")
+
+        def fake_run(_cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(_cmd, 0, "Observation mp Sometimes 1 0\n", "")
+
+        with (
+            patch("scripts.check_litmus.which", return_value="/usr/bin/herd7"),
+            patch("scripts.check_litmus.subprocess.run", side_effect=fake_run),
+        ):
+            errs = check_litmus.run_herd7(t.root)
+        self.assertTrue(any("mp_x86.litmus" in e and "x86tso.cat" in e for e in errs), errs)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
-X86 vibeos-log_ring-x86
+X86 vibeos-log-ring-x86
+(* Same seqlock as the trace ring. TSO forbids a stable new seq with
+   the old field, and a new field whose recheck still sees the old seq. *)
 {
+[seq]=2;
+[field]=1;
 }
- P0              | P1              ;
- MOV [x],$1      | MOV EAX,[y]     ;
- MFENCE          | MFENCE          ;
- MOV [y],$1      | MOV EBX,[x]     ;
-exists (1:EAX=1 /\ 1:EBX=0)
+ P0               | P1                ;
+ MOV [seq],$0     | MOV EAX,[seq]     ;
+ MOV [field],$9   | MOV EBX,[field]   ;
+ MOV [seq],$3     | MOV ECX,[seq]     ;
+exists ((1:EAX=3 /\ 1:ECX=3 /\ 1:EBX=1) \/ (1:EBX=9 /\ 1:ECX=2))

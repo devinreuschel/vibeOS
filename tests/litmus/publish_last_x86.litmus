@@ -1,8 +1,9 @@
-X86 vibeos-publish_last-x86
+X86 vibeos-publish-last-x86
+(* Plain stores and a plain load. TSO forbids seeing the flag while the
+   object's final value is still the publisher's. No MFENCE. *)
 {
 }
- P0              | P1              ;
- MOV [x],$1      | MOV EAX,[y]     ;
- MFENCE          | MFENCE          ;
- MOV [y],$1      | MOV EBX,[x]     ;
-exists (1:EAX=1 /\ 1:EBX=0)
+ P0               | P1               ;
+ MOV [data],$1    | MOV EAX,[flag]   ;
+ MOV [flag],$1    | MOV [data],$2    ;
+exists (1:EAX=1 /\ [data]=1)

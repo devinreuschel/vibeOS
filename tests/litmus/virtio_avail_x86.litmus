@@ -1,8 +1,9 @@
-X86 vibeos-virtio_avail-x86
+X86 vibeos-virtio-avail-x86
+(* TSO orders the descriptor store before the index store. The SFENCE
+   in dma_wmb is not required, and this test has none. *)
 {
 }
- P0              | P1              ;
- MOV [x],$1      | MOV EAX,[y]     ;
- MFENCE          | MFENCE          ;
- MOV [y],$1      | MOV EBX,[x]     ;
+ P0               | P1               ;
+ MOV [desc],$1    | MOV EAX,[idx]    ;
+ MOV [idx],$1     | MOV EBX,[desc]   ;
 exists (1:EAX=1 /\ 1:EBX=0)
