@@ -642,7 +642,7 @@ no_counterpart = "the check reads the x86 page-fault error code"
 
 [[skip]]
 name = "kernel_va0_faults"
-reason = "x86 #PF at VA 0"
+reason = "x86 VA 0 fault"
 arch = "aarch64"
 no_counterpart = "the probe is an x86 load of VA 0"
 

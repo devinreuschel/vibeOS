@@ -995,7 +995,7 @@ pub(crate) fn test_stack_guard() -> Outcome {
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn kernel_va0_faults() -> Outcome {
-    Outcome::Skip("x86 #PF at VA 0")
+    Outcome::Skip("x86 VA 0 fault")
 }
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`

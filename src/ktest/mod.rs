@@ -275,11 +275,7 @@ pub(crate) const GROUPS: &[Suite] = &[
 
 /// Name of the registry's kernel thread.
 const REGISTRY_NAME: &str = "ktest";
-/// The registry's stack: 64 KiB on x86_64 (ROADMAP §10.2); 16 KiB on
-/// aarch64 (ROADMAP §11.3).
-#[cfg(target_arch = "aarch64")]
-const REGISTRY_STACK_PAGES: usize = 4;
-#[cfg(not(target_arch = "aarch64"))]
+/// The registry's stack, 64 KiB (ROADMAP §10.2). `spawn` stays at 16 KiB.
 const REGISTRY_STACK_PAGES: usize = 16;
 
 /// The registry thread's id, `u32::MAX` until it starts.
@@ -554,7 +550,7 @@ fn aarch64_x86_skip(name: &str) -> Option<&'static str> {
         "intx_fallback" | "intx_free_masks" => "x86 I/O APIC",
         "nx_enforcement" => "x86 NX page",
         "stack_guard" => "x86 stack guard",
-        "kernel_va0_faults" => "x86 #PF at VA 0",
+        "kernel_va0_faults" => "x86 VA 0 fault",
         "sched_lock_timer_irq" => "x86 timer vector",
         "addrspace_map_unmap_teardown" => "x86 invlpg",
         "pit_tick_rate" => "x86 PIT",

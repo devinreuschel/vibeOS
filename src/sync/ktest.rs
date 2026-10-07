@@ -307,7 +307,8 @@ const CELL_CASES: &[CellCase] = &[
     CellCase {
         name: "proc_init::TABLE",
         take: || {
-            let _ = crate::proc_init::dispatch(vibeos::syscall::SYS_GETPPID, [0; 6]);
+            let _ =
+                crate::proc_init::dispatch(crate::arch::current::syscall_nr::SYS_GETPPID, [0; 6]);
         },
         file: "src/proc/proc_init/mod.rs",
         rank: RANK_SCHED,
@@ -333,6 +334,7 @@ const CELL_CASES: &[CellCase] = &[
         rank: RANK_DEVICE,
         count: 1,
     },
+    #[cfg(target_arch = "x86_64")]
     CellCase {
         name: "apic_init::STATE",
         take: || {

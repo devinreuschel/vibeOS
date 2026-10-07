@@ -156,16 +156,17 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
 /// kernel root after.
 fn cr3_switch_steps(a: &Space, b: &Space) -> Result<(), &'static str> {
     super::load_cr3(a);
-    let cr3_a = <Arch as PageTable>::root().as_u64();
+    // TTBR0 on aarch64. `root` is TTBR1, which every user space shares.
+    let cr3_a = <Arch as PageTable>::user_root().as_u64();
     if !super::cr3_was_skipped(a) {
         return Err("a not recorded");
     }
     super::load_cr3(a);
-    if (<Arch as PageTable>::root().as_u64()) != cr3_a {
+    if (<Arch as PageTable>::user_root().as_u64()) != cr3_a {
         return Err("skip mutated cr3");
     }
     super::load_cr3(b);
-    let cr3_b = <Arch as PageTable>::root().as_u64();
+    let cr3_b = <Arch as PageTable>::user_root().as_u64();
     if cr3_b == cr3_a {
         return Err("b shares a cr3");
     }

@@ -803,12 +803,13 @@ static IF_OFF_VALS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static IF_OFF_REF: AtomicU64 = AtomicU64::new(0);
 
 /// A counter to measure the clocksource against: the TSC under the HPET or
-/// the PM timer; under the TSC, the HPET, else the PM timer.
+/// the PM timer; under the TSC, the HPET, else the PM timer. CNTVCT is the
+/// only counter on aarch64, so the check is that `now_ns` tracks it.
 fn reference(cs: ClocksourceId) -> Option<Counter> {
     let order: &[ClocksourceId] = match cs {
         ClocksourceId::Tsc => &[ClocksourceId::Hpet, ClocksourceId::AcpiPm],
         ClocksourceId::Hpet | ClocksourceId::AcpiPm => &[ClocksourceId::Tsc],
-        ClocksourceId::Cntvct => &[],
+        ClocksourceId::Cntvct => &[ClocksourceId::Cntvct],
     };
     order.iter().find_map(|&id| time_init::counter(id))
 }

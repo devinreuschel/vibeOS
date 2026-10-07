@@ -11,9 +11,9 @@ use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::{
     SIGCONT, SIGKILL, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, wait_exited, wait_signaled,
 };
-use vibeos::syscall::SYS_KILL;
 use vibeos::thread::{ThreadId, ThreadState};
 
+use crate::arch::current::syscall_nr::SYS_KILL;
 use crate::arch::idt::testing as idt_testing;
 use crate::console_init::testing as console_testing;
 use crate::file_init;
