@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- x86 boot under a hypervisor does not read `MSR_PLATFORM_INFO`, so a missing
+  MSR's `#GP` does not halt the BSP.
 - An unaligned or overlapping ACPI memory-map entry no longer halts boot at
   `physmap map failed` ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
 - x86 reset and power-off map a memory-space ACPI register before writing it, so

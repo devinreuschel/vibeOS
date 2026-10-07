@@ -229,8 +229,11 @@ value for every thread. A line that makes one per-thread (Linux's `PR_SET_TSC` f
 `ARCH_SET_CPUID`, `perf_user_access` for `PMUSERENR_EL0`) moves it to §7.5's per-thread table under
 AGENTS.md rule 8, and a line that changes a value changes its row in the same commit. On x86_64
 `arch::cpu::init_control_regs` writes CR0 and CR4 whole on every CPU, the CPU's last CR4 store, and
-clears the CPUID faulting bit where `MSR_PLATFORM_INFO` enumerates it, which it reads only on an
-Intel CPU with SSE4.2, since no CPUID bit says that MSR exists. The aarch64 port writes `SCTLR_EL1`,
+clears the CPUID faulting bit where `MSR_PLATFORM_INFO` enumerates it. No CPUID bit says that MSR
+exists, and `rdmsr` of a missing one raises `#GP`, so the read runs only on a bare-metal Intel CPU
+with SSE4.2 (Nehalem and every Intel core since have the MSR). CPUID.1:ECX[31] skips it: a
+hypervisor that reports that model may not implement the MSR, and a VM starts with
+`MSR_MISC_FEATURES_ENABLES` at 0, so there is nothing to clear. The aarch64 port writes `SCTLR_EL1`,
 `CNTKCTL_EL1` (`CNTHCTL_EL2` at EL2 with VHE), `PMUSERENR_EL0`, and `CPACR_EL1` from the computed
 values on every CPU at bring-up (ROADMAP §11.2, §11.4). ROADMAP §11.6's `/bin/tests` `user_env` case
 proves the EL0-visible rows that case covers.
@@ -258,7 +261,7 @@ proves the EL0-visible rows that case covers.
 | aarch64 | EL0 `mrs` of an ID register | traps | `SIGILL`, and `AT_HWCAP` carries no `HWCAP_CPUID`, until ROADMAP §23.1 emulates the sanitized fields |
 | x86_64 | `CR4.TSD` | 0 | `rdtsc` and `rdtscp` run at CPL 3, as the ROADMAP §13.10 vDSO clock needs |
 | x86_64 | `CR4.PCE` | 0 | `rdpmc` at CPL 3 raises `#GP` and gets `SIGSEGV` |
-| x86_64 | CPUID faulting (`MSR_MISC_FEATURES_ENABLES` bit 0, where `MSR_PLATFORM_INFO` bit 31 enumerates it) | 0 | `cpuid` runs at CPL 3 |
+| x86_64 | CPUID faulting (`MSR_MISC_FEATURES_ENABLES` bit 0, where `MSR_PLATFORM_INFO` bit 31 enumerates it; that MSR is not read when CPUID.1:ECX[31] is set) | 0 | `cpuid` runs at CPL 3 |
 | x86_64 | `CR4.UMIP` | 1 where CPUID enumerates it (§5.1) | `sgdt`, `sidt`, `sldt`, `smsw`, and `str` at CPL 3 raise `#GP` (§5.2) |
 | x86_64 | `CR4.OSXSAVE`, `CR4.PKE` | 0 (ROADMAP §11.1, F130) | `xgetbv`, `rdpkru`, and `wrpkru` raise `#UD` and get `SIGILL`; ROADMAP §13.8 changes the `OSXSAVE` row if it chooses XSAVE |
 | x86_64 | `CR4.FSGSBASE` | 0 until ROADMAP §18.3 | `rdfsbase`, `wrfsbase`, `rdgsbase`, and `wrgsbase` raise `#UD` |
