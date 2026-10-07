@@ -893,10 +893,124 @@ pub fn stalled_ap_parked() -> bool {
     STALL_PARKED.load(Ordering::Acquire)
 }
 
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+static AFF_OFF_ARM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+static AFF_OFF_FREED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+static AFF_OFF_HW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+static AFF_OFF_CPU: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+static AFF_OFF_SEEN: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(i64::MIN);
+
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+fn arm_aff_off_from_cmdline() {
+    let sel = vibeos::ktest::Selection::parse(crate::boot::cmdline().get("vibeos.ktest"));
+    if sel.selects("failed_ap_cleanup", true) {
+        // Release: pairs with the AcqRel swap in `take_aff_off`.
+        AFF_OFF_ARM.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+fn take_aff_off() -> bool {
+    // AcqRel: pairs with the Release store in `arm_aff_off_from_cmdline`.
+    AFF_OFF_ARM.swap(false, Ordering::AcqRel)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn note_aff_seen(aff: i64) {
+    #[cfg(feature = "kernel_tests")]
+    {
+        // Release: pairs with the Acquire load in `aff_off_seen`.
+        AFF_OFF_SEEN.store(aff, Ordering::Release);
+    }
+    #[cfg(not(feature = "kernel_tests"))]
+    let _ = aff;
+}
+
+#[cfg(target_arch = "aarch64")]
+fn note_aff_off_free() {
+    #[cfg(feature = "kernel_tests")]
+    {
+        // Release: pairs with the Acquire load in `aff_off_freed`.
+        AFF_OFF_FREED.store(true, Ordering::Release);
+    }
+}
+
+/// `vibeos.ktest=` names `failed_ap_cleanup`, so bring-up left one core OFF.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn aff_off_required() -> bool {
+    vibeos::ktest::Selection::parse(crate::boot::cmdline().get("vibeos.ktest"))
+        .selects("failed_ap_cleanup", true)
+}
+
+/// Hardware id of the core [`take_aff_off`] left unstarted.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn aff_off_hw() -> Option<u64> {
+    // Acquire: pairs with the Release store in `start_one_aarch64`.
+    let hw = AFF_OFF_HW.load(Ordering::Acquire);
+    if hw == u64::MAX { None } else { Some(hw) }
+}
+
+/// Logical id of that core.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn aff_off_cpu() -> Option<u32> {
+    // Acquire: pairs with the Release store in `start_one_aarch64`.
+    let id = AFF_OFF_CPU.load(Ordering::Acquire);
+    if id == u32::MAX { None } else { Some(id) }
+}
+
+/// `finish_aarch64_failure` took the `AFF_OFF` free.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn aff_off_freed() -> bool {
+    // Acquire: pairs with the Release store in `note_aff_off_free`.
+    AFF_OFF_FREED.load(Ordering::Acquire)
+}
+
+/// Last `AFFINITY_INFO` `finish_aarch64_failure` saw, or `i64::MIN` if none.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn aff_off_seen() -> i64 {
+    // Acquire: pairs with the Release store in `note_aff_seen`.
+    AFF_OFF_SEEN.load(Ordering::Acquire)
+}
+
+/// Allocate a bring-up, push its tables, and run [`finish_aarch64_failure`]
+/// without `CPU_ON`. `hw_id` is a core that is still OFF. False when the
+/// allocation failed; the caller compares the free-frame count.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn exercise_aff_off_free(hw_id: u64) -> bool {
+    let alloc = match alloc_ap_resources(0xFE, hw_id, false) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    if LIVE_TABLES.with(|live| live.try_reserve(1)).is_err() {
+        free_ap_resources(alloc, false);
+        return false;
+    }
+    let ApAlloc {
+        tables,
+        idle_id,
+        workers,
+        published,
+        ..
+    } = alloc;
+    if LIVE_TABLES.with(|live| live.try_push(tables)).is_err() {
+        free_ap_slot(0xFE, idle_id, workers, published, false);
+        return false;
+    }
+    finish_aarch64_failure(0xFE, hw_id, idle_id, workers, published);
+    true
+}
+
 #[cfg(target_arch = "aarch64")]
 fn init_aarch64() {
     #[cfg(feature = "kernel_tests")]
-    arm_stall_from_cmdline();
+    {
+        arm_stall_from_cmdline();
+        arm_aff_off_from_cmdline();
+    }
     arch::aarch64::cpu::apply_computed_sysregs();
     arch::aarch64::cpu::set_pan();
     arch::aarch64::cpu::release_debug_os_lock();
@@ -1041,6 +1155,18 @@ fn start_one_aarch64(
     if LIVE_TABLES.with(|live| live.try_push(tables)).is_err() {
         crate::marker!("vibeOS: smp: apic {hw_id} alloc failed");
         free_ap_slot(cpu_id, idle_id, workers, published, false);
+        return StartAp::Failed;
+    }
+    // `vibeos.ktest=failed_ap_cleanup`: CPU_ON is not issued. The core
+    // stays OFF, so `finish_aarch64_failure` takes the free.
+    #[cfg(feature = "kernel_tests")]
+    if take_aff_off() {
+        // Release: pairs with the Acquire load in `aff_off_hw`.
+        AFF_OFF_HW.store(hw_id, Ordering::Release);
+        // Release: pairs with the Acquire load in `aff_off_cpu`.
+        AFF_OFF_CPU.store(cpu_id, Ordering::Release);
+        crate::klog!(vibeos::log::Level::Warn, "smp: cpu {:#x} left off", hw_id);
+        finish_aarch64_failure(cpu_id, hw_id, idle_id, workers, published);
         return StartAp::Failed;
     }
     let Some(param_pa) = alloc_param_page() else {
@@ -1188,8 +1314,10 @@ fn finish_aarch64_failure(
 ) {
     per_cpu_init::mark_offline(cpu_id);
     let aff = crate::arch::aarch64::power::affinity_info(hw_id);
+    note_aff_seen(aff);
     if aff == vibeos::arch::aarch64::psci::AFF_OFF {
         free_live_ap(cpu_id, idle_id, workers, published, false);
+        note_aff_off_free();
     } else {
         note_stalled_leak();
         // F032: AFFINITY_INFO is not OFF; a late core may still start.

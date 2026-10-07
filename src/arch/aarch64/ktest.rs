@@ -759,6 +759,9 @@ fn exercise_fail_cleanup() -> bool {
     }
 }
 
+/// Pre-`CPU_ON` free. When `vibeos.ktest=failed_ap_cleanup`, bring-up also
+/// leaves one core OFF (no `CPU_ON`) and this checks `finish_aarch64_failure`
+/// returned those frames.
 pub(crate) fn test_failed_ap_cleanup() -> Outcome {
     if !exercise_fail_cleanup() {
         return Outcome::Fail("warm-up bring-up allocation failed");
@@ -770,10 +773,44 @@ pub(crate) fn test_failed_ap_cleanup() -> Outcome {
     let n1 = crate::ktest::quiescent_free_frames();
     if n0 != n1 {
         crate::marker!("vibeOS: ktest:   frames {n0} -> {n1}");
-        Outcome::Fail("failed AP leaked frames")
-    } else {
-        Outcome::Ok
+        return Outcome::Fail("failed AP leaked frames");
     }
+    if !crate::smp_init::aff_off_required() {
+        return Outcome::Ok;
+    }
+    aff_off_frames()
+}
+
+fn aff_off_frames() -> Outcome {
+    let Some(hw) = crate::smp_init::aff_off_hw() else {
+        return Outcome::Fail("bring-up did not leave a core OFF");
+    };
+    let Some(id) = crate::smp_init::aff_off_cpu() else {
+        return Outcome::Fail("bring-up did not leave a core OFF");
+    };
+    if crate::per_cpu_init::is_online(id) {
+        return Outcome::Fail("OFF core came online");
+    }
+    if !crate::smp_init::aff_off_freed() {
+        let seen = crate::smp_init::aff_off_seen();
+        return crate::fail_fmt!("AFF_OFF free did not run, affinity {seen}");
+    }
+    let aff = crate::arch::aarch64::power::affinity_info(hw);
+    if aff != vibeos::arch::aarch64::psci::AFF_OFF {
+        return crate::fail_fmt!("affinity {aff}, want OFF");
+    }
+    if !crate::smp_init::exercise_aff_off_free(hw) {
+        return Outcome::Fail("warm-up AFF_OFF free failed");
+    }
+    let n0 = crate::ktest::quiescent_free_frames();
+    if !crate::smp_init::exercise_aff_off_free(hw) {
+        return Outcome::Fail("AFF_OFF free alloc failed");
+    }
+    let n1 = crate::ktest::quiescent_free_frames();
+    if n0 != n1 {
+        return crate::fail_fmt!("AFF_OFF free leaked {n0} -> {n1}");
+    }
+    Outcome::Ok
 }
 
 pub(crate) fn test_stalled_ap_leak() -> Outcome {

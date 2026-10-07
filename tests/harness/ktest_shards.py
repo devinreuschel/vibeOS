@@ -43,6 +43,9 @@ class Shard:
     rows: tuple[str, str] | None = None
     # Names from `run_ktest.PROOF_BOOTS`, run after the main boot.
     boots: tuple[str, ...] = ()
+    # Proof boots only the aarch64 union runs. Kept off `boots` so the
+    # x86 union, which shares this table, does not gain them.
+    aarch64_boots: tuple[str, ...] = ()
 
     def range_word(self) -> str | None:
         """The main boot's `vibeos.ktest_range=` word, or None."""
@@ -122,7 +125,9 @@ SHARDS: dict[str, Shard] = {
     **_rows("test-kernel-smp4", "spawn_sentinel"),
     "test-kernel-smp4-4": Shard("test-kernel-smp4", boots=("select", "deadline-trip", "planted")),
     "test-kernel-smp4-5": Shard(
-        "test-kernel-smp4", boots=("fat", "vblk-readonly", "vblk-bad-sector", "stalled-ap")
+        "test-kernel-smp4",
+        boots=("fat", "vblk-readonly", "vblk-bad-sector", "stalled-ap"),
+        aarch64_boots=("aff-off",),
     ),
     **_rows("test-lapic-fallback", "user_single_step"),
     "test-lapic-fallback-4": Shard(
