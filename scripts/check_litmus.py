@@ -8,9 +8,13 @@ herd7 cannot express (TLB, SGI `dsb`, Device vs Normal MMIO, cache
 maintenance).
 
 `make check` runs the comment gate. `make litmus` runs this script with
-`--run`, which also invokes herd7: a non-relaxed test must report Never
-under its cat, and each `*.relaxed.litmus` / `*_relaxed.litmus` twin must
-report Sometimes or Always.
+`--run`, which also invokes herd7. Under both `aarch64.cat` and
+`x86tso.cat`, a non-relaxed test must report Never, and each
+`*.relaxed.litmus` / `*_relaxed.litmus` twin must report Sometimes or
+Always. An x86 message-passing idiom that TSO already forbids has no
+relaxed twin: the unfenced test is Never, which is the record that the
+barrier is elided. The store-then-load twins keep one, because that shape
+needs `MFENCE`.
 """
 
 from __future__ import annotations
@@ -92,6 +96,17 @@ def _want_never(path: Path) -> bool:
     return RELAXED.search(path.name) is None
 
 
+def observation_error(rel: str, model: str, got: str) -> str | None:
+    """None when `got` is the verdict `rel` must have under `model`."""
+    if _want_never(Path(rel)):
+        if got != "Never":
+            return f"{rel}: {model} allowed a forbidden outcome ({got})"
+        return None
+    if got == "Never":
+        return f"{rel}: barrier-removed twin forbids its bad outcome"
+    return None
+
+
 def run_herd7(root: Path) -> list[str]:
     """Run herd7 on every litmus file. herd7 must be on PATH."""
     if which("herd7") is None:
@@ -122,15 +137,9 @@ def run_herd7(root: Path) -> list[str]:
             errs.append(f"{rel}: herd7 printed no Observation line")
             continue
         got = m.group(1)
-        # x86tso.cat records which barriers TSO elides; only aarch64.cat
-        # must show Never vs Sometimes on the twins.
-        if model != "aarch64.cat":
-            continue
-        if _want_never(path):
-            if got != "Never":
-                errs.append(f"{rel}: {model} allowed a forbidden outcome ({got})")
-        elif got == "Never":
-            errs.append(f"{rel}: barrier-removed twin forbids its bad outcome")
+        err = observation_error(rel, model, got)
+        if err is not None:
+            errs.append(err)
     return errs
 
 

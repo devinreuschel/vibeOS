@@ -1,10 +1,14 @@
-AArch64 vibeos-publish_last
+AArch64 vibeos-publish-last
+(* IoWaiter and on_cpu: an earlier store, then the Release store. The
+   other side Acquire-loads the flag and then stores into the object.
+   Seeing the flag while the object's final value is still the
+   publisher's is forbidden. *)
 {
-0:X1=x; 0:X2=y;
-1:X1=x; 1:X2=y;
+0:X1=flag; 0:X2=data;
+1:X1=flag; 1:X2=data;
 }
  P0              | P1              ;
- MOV W0,#1       | LDAR W3,[X2]    ;
- STLR W0,[X1]    | LDR W4,[X1]     ;
- STLR W0,[X2]    |                 ;
-exists (1:X3=1 /\ 1:X4=0)
+ MOV W0,#1       | LDAR W3,[X1]    ;
+ STR W0,[X2]     | MOV W0,#2       ;
+ STLR W0,[X1]    | STR W0,[X2]     ;
+exists (1:X3=1 /\ [data]=1)

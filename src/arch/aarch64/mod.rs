@@ -208,6 +208,7 @@ impl Barriers for Arch {
     }
 
     /// tests/litmus/dma_mb.litmus
+    /// tests/litmus/dma_mb_used.litmus
     #[inline]
     fn dma_mb() {
         // SAFETY: `dmb osh` is a full outer-shareable barrier. established here.

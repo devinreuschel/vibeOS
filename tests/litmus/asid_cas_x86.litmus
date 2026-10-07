@@ -1,8 +1,13 @@
 X86 vibeos-asid-cas-x86
+(* Payload store, then a locked exchange of the asid, against the
+   rollover's XCHG. herd's X86 model does not implement CMPXCHG; XCHG
+   is the locked RMW it does, and it is a full barrier as lock cmpxchg
+   is. Seeing the new asid without the payload is forbidden. No MFENCE. *)
 {
+[asid]=5;
 }
- P0              | P1              ;
- MOV [x],$1      | MOV EAX,[y]     ;
- MFENCE          | MFENCE          ;
- MOV [y],$1      | MOV EBX,[x]     ;
-exists (1:EAX=1 /\ 1:EBX=0)
+ P0                  | P1                  ;
+ MOV [payload],$1    | MOV EAX,$0          ;
+ MOV EAX,$9          | XCHG EAX,[asid]     ;
+ XCHG EAX,[asid]     | MOV EBX,[payload]   ;
+exists (1:EAX=9 /\ 1:EBX=0)

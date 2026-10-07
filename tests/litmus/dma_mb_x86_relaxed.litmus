@@ -1,7 +1,9 @@
-X86 vibeos-dma_mb-x86-relaxed
+X86 vibeos-dma-mb-x86-relaxed
+(* One MFENCE is not enough: the unfenced side can still read the old value. *)
 {
 }
- P0              | P1              ;
- MOV [x],$1      | MOV EAX,[y]     ;
- MOV [y],$1      | MOV EBX,[x]     ;
-exists (1:EAX=1 /\ 1:EBX=0)
+ P0                 | P1                 ;
+ MOV [idx],$1       | MOV [event],$1     ;
+ MOV EAX,[event]    | MFENCE             ;
+                    | MOV EBX,[idx]      ;
+exists (0:EAX=0 /\ 1:EBX=0)

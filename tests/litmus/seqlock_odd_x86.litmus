@@ -1,8 +1,9 @@
 X86 vibeos-seqlock-odd-x86
+(* LOCK INC, then the copy. The reader loads the copy, then the seq.
+   New copy with the old seq is forbidden without an MFENCE. *)
 {
 }
- P0              | P1              ;
- MOV [x],$1      | MOV EAX,[y]     ;
- MFENCE          | MFENCE          ;
- MOV [y],$1      | MOV EBX,[x]     ;
+ P0                 | P1               ;
+ LOCK INC [ver]     | MOV EAX,[data]  ;
+ MOV [data],$1      | MOV EBX,[ver]   ;
 exists (1:EAX=1 /\ 1:EBX=0)

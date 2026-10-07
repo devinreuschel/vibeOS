@@ -1,10 +1,11 @@
 AArch64 vibeos-seqlock-relaxed
 {
-0:X1=x; 0:X2=y;
-1:X1=x; 1:X2=y;
+0:X1=seq; 0:X2=data;
+1:X1=seq; 1:X2=data;
 }
- P0              | P1              ;
- MOV W0,#1       | LDR W3,[X2]     ;
- STR W0,[X1]     | LDR W4,[X1]     ;
- STR W0,[X2]     |                 ;
-exists (1:X3=1 /\ 1:X4=0)
+ P0                 | P1              ;
+ MOV W0,#1          | LDAR W3,[X1]    ;
+ STR W0,[X2]        | LDR W4,[X2]     ;
+ LDADD W0,W5,[X1]   | DMB ISHLD       ;
+                    | LDR W5,[X1]     ;
+exists (1:X3=1 /\ 1:X5=1 /\ 1:X4=0)
