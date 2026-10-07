@@ -255,7 +255,8 @@ time:
    working across the `mov cr3`.
 
 Then set `EFER.NXE` if it is not already on, load CR3, and print `paging: cr3 ok`. Immediately after,
-`acpi_init` ioremaps the LAPIC, I/O APIC, and HPET pages (PCD + PWT). The portable `Mapper` is the
+`acpi_init` ioremaps the LAPIC, I/O APIC, and HPET pages (PCD + PWT), and on x86_64 a
+SystemMemory FADT reset or sleep-control page that the physmap does not cover. The portable `Mapper` is the
 only writer of live entries and refuses a live change of output address, memory type, size, or
 Contiguous bit, and nG→global, unless the leaf was invalidated first (ROADMAP §11.2).
 

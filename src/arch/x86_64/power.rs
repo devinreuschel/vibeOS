@@ -6,9 +6,12 @@
 //! Power-off writes ACPI S5 through the FADT's sleep-control register with
 //! a hard-coded `SLP_TYP` of 5, then QEMU's and Bochs's PM1a ports `0x604`
 //! and `0xB004`. Restart writes the FADT's reset register, then pulses the
-//! 8042's reset line, then writes `0xCF9`. A memory-space register is
-//! written through the physmap without being mapped first, and the ports
-//! are QEMU's; ROADMAP §20.2 (F097) reads `_S5` and the PM1 control block.
+//! 8042's reset line, then writes `0xCF9`. A SystemMemory register outside
+//! the physmap is written through the ioremap `acpi_init` made of its
+//! page; one the physmap already covers is written through that leaf. One
+//! that could not be mapped is skipped and the next method runs. The
+//! ports are QEMU's; ROADMAP §20.2 (F097) reads `_S5` and the PM1 control
+//! block.
 //!
 //! The module prints nothing and takes no lock, so ROADMAP §22.2's panic
 //! reset can call it.
@@ -17,7 +20,6 @@ use vibeos::acpi::{GAS_SYSTEM_IO, GAS_SYSTEM_MEMORY, Gas};
 
 use super::cpu as x86;
 use crate::acpi_init;
-use crate::paging_init;
 
 /// Turn the machine off: ACPI S5, then QEMU's power-off ports. Halts this
 /// CPU if none of them worked.
@@ -55,7 +57,7 @@ fn try_acpi_reset() {
     if fadt.reset.is_empty() {
         return;
     }
-    write_gas(fadt.reset, fadt.reset_value);
+    write_gas(fadt.reset, fadt.reset_value, acpi_init::reset_page_va());
 }
 
 fn try_acpi_sleep_s5() {
@@ -69,10 +71,14 @@ fn try_acpi_sleep_s5() {
         return;
     }
     // SLP_TYPx = 5 in bits 2..4, SLP_EN bit 5.
-    write_gas(fadt.sleep_control, (5 << 2) | (1 << 5));
+    write_gas(
+        fadt.sleep_control,
+        (5 << 2) | (1 << 5),
+        acpi_init::sleep_page_va(),
+    );
 }
 
-fn write_gas(gas: Gas, val: u8) {
+fn write_gas(gas: Gas, val: u8, mapped_page: Option<u64>) {
     match gas.space_id {
         GAS_SYSTEM_IO => {
             let port = gas.address as u16;
@@ -90,14 +96,16 @@ fn write_gas(gas: Gas, val: u8) {
             }
         }
         GAS_SYSTEM_MEMORY => {
-            if gas.address == 0 {
+            // No mapped page: skip this method. `restart` / `power_off`
+            // then run the port fallbacks.
+            let Some(va) = gas.system_memory_va(mapped_page) else {
                 return;
-            }
-            let va = paging_init::hhdm_offset().wrapping_add(gas.address);
-            // SAFETY: the FADT names this register for the reset or sleep
-            // write ACPI defines, and the HHDM maps physical memory at
-            // `paging_init::hhdm_offset()`; the firmware's address is trusted
-            // here as the ACPI tables are (DESIGN §2.10).
+            };
+            // SAFETY: invariant I17: `va` is a byte of the UC ioremap
+            // `acpi::acpi_init::map_fadt_power` made of this register's
+            // page, at the offset `Gas::system_memory_va` added; the write
+            // is the reset or sleep value ACPI defines and ends the
+            // machine. Established at `acpi::acpi_init::map_fadt_power`.
             unsafe { (va as *mut u8).write_volatile(val) };
         }
         _ => {}

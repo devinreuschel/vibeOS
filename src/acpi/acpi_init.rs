@@ -2,8 +2,10 @@
 //!
 //! DESIGN §3.3: after KVA, walk tables through the RAM-only physmap.
 //! LAPIC / I/O APIC / HPET are reached only through `ioremap` (ROADMAP
-//! §11.2). A firmware table outside RAM is read through the identity
-//! window when it still covers the span, else `memremap`.
+//! §11.2). A SystemMemory FADT reset or sleep-control page outside the
+//! physmap is ioremapped the same way. A firmware table outside RAM is
+//! read through the identity window when it still covers the span, else
+//! `memremap`.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,6 +22,14 @@ static LAPIC_VA: AtomicU64 = AtomicU64::new(0);
 static HPET_VA: AtomicU64 = AtomicU64::new(0);
 static IOAPIC_PHYS: [AtomicU64; MAX_IOAPICS] = [const { AtomicU64::new(0) }; MAX_IOAPICS];
 static IOAPIC_VA: [AtomicU64; MAX_IOAPICS] = [const { AtomicU64::new(0) }; MAX_IOAPICS];
+/// Page VA of a SystemMemory FADT reset register: the ioremap, or the
+/// physmap leaf when the page is RAM. 0 if it is not memory or the map failed.
+#[cfg(target_arch = "x86_64")]
+static RESET_PAGE_VA: AtomicU64 = AtomicU64::new(0);
+/// Page VA of a SystemMemory FADT sleep-control register: the ioremap, or
+/// the physmap leaf when the page is RAM. 0 if it is not memory or the map failed.
+#[cfg(target_arch = "x86_64")]
+static SLEEP_PAGE_VA: AtomicU64 = AtomicU64::new(0);
 
 struct HhdmPhys;
 
@@ -102,6 +112,62 @@ fn ioremap_page(phys: u64) -> Option<u64> {
     // (LAPIC, I/O APIC, or HPET) that no cacheable alias reaches;
     // established here from the MADT/HPET table `acpi::walk` just parsed.
     unsafe { paging_init::ioremap(PhysAddr(phys), PAGE_SIZE_4K) }.map(|v| v.as_u64())
+}
+
+/// VA of one FADT SystemMemory register page. `phys` is page-aligned and
+/// nonzero (`Gas::system_memory_page`). A page the physmap already covers
+/// is RAM, so this returns that leaf instead of a UC alias (invariant I17).
+#[cfg(target_arch = "x86_64")]
+fn map_reg_page(phys: u64) -> Option<u64> {
+    if physmap_covers(phys, PAGE_SIZE_4K) {
+        return paging_init::hhdm_offset().checked_add(phys);
+    }
+    // SAFETY: invariant I17: `physmap_covers` found no leaf, so `phys` is
+    // device MMIO. It is the page of a FADT reset or sleep SystemMemory
+    // register (`Gas::system_memory_page` in `map_fadt_power`); established
+    // here from the FADT `acpi::walk` just parsed.
+    unsafe { paging_init::ioremap(PhysAddr(phys), PAGE_SIZE_4K) }.map(|v| v.as_u64())
+}
+
+/// Map the FADT reset and sleep-control pages when they are SystemMemory.
+/// One page shared by both is mapped once. A failed map leaves that
+/// register's VA at 0 so the write is skipped.
+#[cfg(target_arch = "x86_64")]
+fn map_fadt_power(reset: acpi::Gas, sleep: acpi::Gas) {
+    let reset_phys = reset.system_memory_page();
+    let sleep_phys = sleep.system_memory_page();
+    let reset_va = reset_phys.and_then(map_reg_page);
+    let sleep_va = if sleep_phys.is_some() && sleep_phys == reset_phys {
+        reset_va
+    } else {
+        sleep_phys.and_then(map_reg_page)
+    };
+    if let Some(va) = reset_va {
+        // Release: pairs with the Acquire load in `reset_page_va`.
+        RESET_PAGE_VA.store(va, Ordering::Release);
+    }
+    if let Some(va) = sleep_va {
+        // Release: pairs with the Acquire load in `sleep_page_va`.
+        SLEEP_PAGE_VA.store(va, Ordering::Release);
+    }
+}
+
+/// Page VA of a SystemMemory FADT reset register, if it was mapped.
+/// The register byte is this plus the address's offset in the page.
+#[cfg(target_arch = "x86_64")]
+pub fn reset_page_va() -> Option<u64> {
+    // Acquire: pairs with the Release store in `map_fadt_power`.
+    let v = RESET_PAGE_VA.load(Ordering::Acquire);
+    (v != 0).then_some(v)
+}
+
+/// Page VA of a SystemMemory FADT sleep-control register, if it was mapped.
+/// The register byte is this plus the address's offset in the page.
+#[cfg(target_arch = "x86_64")]
+pub fn sleep_page_va() -> Option<u64> {
+    // Acquire: pairs with the Release store in `map_fadt_power`.
+    let v = SLEEP_PAGE_VA.load(Ordering::Acquire);
+    (v != 0).then_some(v)
 }
 
 /// The ioremap VA of the MADT LAPIC page, if mapped.
@@ -194,6 +260,10 @@ pub unsafe fn init(rsdp_phys: u64) {
         // aligned first register.
         let cap = unsafe { va.read_volatile() };
         hpet.period_fs = (cap >> 32) as u32;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if let Some(fadt) = info.fadt {
+        map_fadt_power(fadt.reset, fadt.sleep_control);
     }
     machine_init::set_from_acpi(&info);
     // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
