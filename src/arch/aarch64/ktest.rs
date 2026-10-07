@@ -784,7 +784,11 @@ pub(crate) fn test_stalled_ap_leak() -> Outcome {
     if n0 != n1 {
         return crate::fail_fmt!("pre-SIPI free leaked {n0} -> {n1}");
     }
-    crate::ktest_info!("stalled AP leaked; online {online}/{n}");
+    let agreed = crate::smp::ktest::late_ap_agrees();
+    if !matches!(agreed, Outcome::Ok) {
+        return agreed;
+    }
+    crate::ktest_info!("stalled AP leaked and parked; online {online}/{n}");
     Outcome::Ok
 }
 

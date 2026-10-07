@@ -279,8 +279,23 @@ pub(crate) fn test_failed_ap_cleanup() -> Outcome {
     }
 }
 
-/// Opt-in: `vibeos.ktest=stalled_ap_leak` stalls the first AP before
-/// `ready`, so bring-up INIT-and-leaks it (ROADMAP §11.4, F032).
+/// The stalled AP parked after losing the handshake, and every online CPU
+/// has the workers bring-up started for it.
+pub(crate) fn late_ap_agrees() -> Outcome {
+    if !smp_init::stalled_ap_parked() {
+        return Outcome::Fail("stalled AP did not park");
+    }
+    let online = per_cpu_init::online_mask();
+    let workers = crate::work_init::started_mask();
+    if online != workers {
+        return crate::fail_fmt!("online {online:#x} workers {workers:#x}");
+    }
+    Outcome::Ok
+}
+
+/// Opt-in: `vibeos.ktest=stalled_ap_leak` holds the first AP past the ready
+/// timeout, then releases it. It must park, stay offline, and leave the
+/// online mask equal to the worker set (ROADMAP §11.4, F032).
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn test_stalled_ap_leak() -> Outcome {
     if !smp_init::stalled_ap_leaked() {
@@ -316,7 +331,11 @@ pub(crate) fn test_stalled_ap_leak() -> Outcome {
     if n0 != n1 {
         return crate::fail_fmt!("pre-SIPI free leaked {n0} -> {n1}");
     }
-    crate::ktest_info!("stalled AP leaked; online {online}/{n}");
+    let agreed = late_ap_agrees();
+    if !matches!(agreed, Outcome::Ok) {
+        return agreed;
+    }
+    crate::ktest_info!("stalled AP leaked and parked; online {online}/{n}");
     Outcome::Ok
 }
 

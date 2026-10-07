@@ -899,7 +899,10 @@ def proof_boot_names(smp: int, hpet_off: bool, arch: str = "x86_64") -> list[str
 
 
 def _stalled_ap_boot(env: EnvConfig) -> None:
-    """`stalled_ap_leak`: one AP spins before `ready` (ROADMAP §11.4, F032)."""
+    """`stalled_ap_leak`: hold one AP past the ready timeout, then release it.
+
+    It must park (ROADMAP §11.4, F032).
+    """
     _proof_boot(env, "stalled-ap", ktest="stalled_ap_leak", repeat=None)
 
 

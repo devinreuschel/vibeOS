@@ -815,7 +815,8 @@ tail's last access to the TCB), and its readers, `spawn_inner`'s Dead-slot reuse
 use `OnCpu::is_clear` (an Acquire load).
 
 Rule; not yet enforced. The bring-up timeout no longer frees a live AP's stacks
-without INIT (ROADMAP §11.4, F032).
+without INIT (ROADMAP §11.4, F032). A late AP does not mark itself online after
+the boot CPU has claimed the bring-up handshake (DESIGN §7.4).
 
 ## 2.9 Preemption and interrupt state
 

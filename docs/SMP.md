@@ -178,7 +178,7 @@ list whole from the block (`HCR_EL2`, `CPTR_EL2`, `CNTHCTL_EL2`, `HSTR_EL2`, `MD
 MMU with the boot CPU's whole `SCTLR_EL1`; jumps to the TTBR1 continue address; points `TTBR0` at
 the empty user root and invalidates the local TLB; then stores `STATUS_ARRIVED`, its first shared
 write. Rust `ap_entry_aarch64` then installs the per-CPU base, GIC, and timer, prints the
-exception-level marker, and publishes `ready`.
+exception-level marker, claims the bring-up handshake, and publishes `ready` only when it won.
 
 ## 7.4 AP bring-up sequence
 
@@ -194,13 +194,20 @@ For each enabled APIC ID that is not the BSP:
 3. Send INIT. Wait 10 ms, the Intel-specified minimum.
 4. Send SIPI. Wait ~1 ms. Send SIPI again. Some hardware needs the second one; sending two is harmless.
 5. Wait for the AP to set its ready flag, with a 3 second timeout.
-6. On timeout: send INIT to that APIC ID, clear its online bit, log the failure, and continue with the
-   remaining CPUs. Leak the AP's stack, GDT/TSS and IST stacks, `PerCpu` slot, and idle TCB: an AP that accepted a
+6. On timeout the boot CPU and the AP compare-exchange one word per CPU
+   (`vibeos::smp::HANDSHAKE_NONE`, `ARRIVED`, `ABANDONED`). The AP claims `ARRIVED` before
+   `mark_online`. The boot CPU claims `ABANDONED`. The AP that loses parks: PSCI `CPU_OFF`, then `wfi`
+   if that returns, on aarch64, and `hlt` with IF=0 on x86. It does not mark itself online, store
+   `ready`, or enter the idle loop. The boot CPU that loses does not send INIT; it waits for `ready`
+   and starts that CPU's workers only if the CPU is online. The boot CPU that wins then sends INIT to
+   that APIC ID (x86), clears its online bit, logs the failure, and continues with the remaining CPUs.
+   Leak the AP's stack, GDT/TSS and IST stacks, `PerCpu` slot, and idle TCB: an AP that accepted a
    SIPI and then stalled past 3 s can keep running on them, or read the next AP's parameter block, and
    the BSP cannot tell it from an AP that never started. `smp_init::start_one` does this: a failure
-   before the first SIPI frees what it allocated; a ready timeout sends INIT, clears the online bit,
-   and leaks the workers (they hold only `ThreadId`s and have no `Drop`), never `free_ap_resources` / `free_live_ap`. On
-   aarch64 the same leak applies unless PSCI `AFFINITY_INFO` reports `OFF`, in which case the
+   before the first SIPI frees what it allocated; a ready timeout the boot CPU won sends INIT after
+   the AP has lost, clears the online bit, and leaks the workers (they hold only `ThreadId`s and have
+   no `Drop`), never `free_ap_resources` / `free_live_ap`. On aarch64 the same leak applies unless
+   PSCI `AFFINITY_INFO` reports `OFF`, sampled before a parked core's `CPU_OFF`, in which case the
    allocations are freed; `CPU_ON` returning `ALREADY_ON` is a logged bring-up failure and a free
    (ROADMAP §11.4, F032).
 
@@ -208,7 +215,7 @@ On the AP side (`smp_init::ap_entry`), in order: `cli`; load the per-CPU GDT and
 and `KERNEL_GS_BASE` (`per_cpu_init::install_gs`); write CR0 and CR4 whole (`arch::cpu::init_control_regs`), program the
 syscall MSRs and the FPU, and set RSP0 (`syscall_init::init_ap`); load the shared IDT; enable the LAPIC; copy the BSP's timer mode into `PerCpu`; arm the
 LAPIC timer with the BSP's calibration (`apic_init::arm_ap`); run the TSC warp test against the
-BSP; mark the CPU online and print
+BSP; claim the handshake and park on a loss; mark the CPU online and print
 `vibeOS: sched: cpu<i> ready`; publish the ready flag; `sti`; enter the idle loop.
 
 The TSC warp test (`smp_init::tsc_warp_source` on the BSP, `tsc_warp_target` on the AP) measures
@@ -769,6 +776,8 @@ Online runs the online steps in the reverse order: the control CPU's steps, then
 ([§7.4](#74-ap-bring-up-sequence)) up to its online bit, then the steps that run on the CPU itself.
 A CPU that misses the bring-up timeout takes step 6 of §7.4 (on aarch64, ROADMAP §11.4's
 `AFFINITY_INFO` path) and stays offline, and its `PerCpu`, stacks, and idle thread stay with it.
+A core that reaches `ap_entry` after the boot CPU claimed `ABANDONED` parks and does not set its
+online bit.
 ROADMAP §10.7's TSC skew check runs again, and the active bit is set last.
 
 Rejected: evacuating per subsystem as each lands, which left a dozen per-CPU structures with no

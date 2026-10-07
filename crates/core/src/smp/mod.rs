@@ -7,6 +7,8 @@
 
 pub mod per_cpu;
 
+use crate::atomic::{AtomicU8, Ordering};
+
 pub const TRAMPOLINE_PAGES: u64 = 1;
 
 /// Param block. Blob must fit strictly below this.
@@ -100,6 +102,41 @@ pub const SIPI_WAIT_MS: u64 = 1;
 /// Ready-flag timeout. On expiry free the stack and per-CPU area.
 pub const READY_TIMEOUT_MS: u64 = 3000;
 
+/// Per-CPU bring-up handshake (DESIGN §7.4). The AP and the boot CPU each
+/// compare-exchange this once; the loser does not take the online path.
+pub const HANDSHAKE_NONE: u8 = 0;
+/// The AP won: it may mark itself online.
+pub const HANDSHAKE_ARRIVED: u8 = 1;
+/// The boot CPU won: the AP parks and is not brought online.
+pub const HANDSHAKE_ABANDONED: u8 = 2;
+
+/// `NONE`→`ARRIVED`. `true` when this CPU won and may mark itself online.
+#[must_use]
+pub fn claim_arrived(word: &AtomicU8) -> bool {
+    // AcqRel, Acquire on failure: pairs with the AcqRel compare-exchange in `claim_abandoned`.
+    word.compare_exchange(
+        HANDSHAKE_NONE,
+        HANDSHAKE_ARRIVED,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    )
+    .is_ok()
+}
+
+/// `NONE`→`ABANDONED`. `true` when the boot CPU won and the AP will not
+/// mark itself online.
+#[must_use]
+pub fn claim_abandoned(word: &AtomicU8) -> bool {
+    // AcqRel, Acquire on failure: pairs with the AcqRel compare-exchange in `claim_arrived`.
+    word.compare_exchange(
+        HANDSHAKE_NONE,
+        HANDSHAKE_ABANDONED,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    )
+    .is_ok()
+}
+
 pub const fn blob_fits(len: usize) -> bool {
     len <= PARAM_OFF
 }
@@ -187,5 +224,20 @@ mod tests {
         assert_eq!(INIT_WAIT_MS, 10);
         assert_eq!(SIPI_WAIT_MS, 1);
         assert_eq!(READY_TIMEOUT_MS, 3000);
+    }
+
+    #[test]
+    fn handshake_has_one_winner() {
+        let arrived = AtomicU8::new(HANDSHAKE_NONE);
+        assert!(claim_arrived(&arrived));
+        assert!(!claim_arrived(&arrived));
+        assert!(!claim_abandoned(&arrived));
+        assert_eq!(arrived.load(Ordering::Acquire), HANDSHAKE_ARRIVED);
+
+        let abandoned = AtomicU8::new(HANDSHAKE_NONE);
+        assert!(claim_abandoned(&abandoned));
+        assert!(!claim_arrived(&abandoned));
+        assert!(!claim_abandoned(&abandoned));
+        assert_eq!(abandoned.load(Ordering::Acquire), HANDSHAKE_ABANDONED);
     }
 }

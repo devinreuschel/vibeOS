@@ -228,9 +228,33 @@ pub(crate) fn spawn_cpu_workers(cpu: u32) -> Result<CpuWorkers, SpawnError> {
     Ok(CpuWorkers { wq: wq.id() })
 }
 
-/// Make `w`'s workers runnable, once their CPU is online.
-pub(crate) fn start_cpu_workers(w: &CpuWorkers) {
+/// CPUs whose workers [`start_cpu_workers`] has made runnable. A `kernel_tests`
+/// check that the online mask and this set agree (a late AP must not be
+/// online with no worker).
+#[cfg(feature = "kernel_tests")]
+static WORKERS: AtomicU64 = AtomicU64::new(0);
+
+/// Make `w`'s workers runnable, once CPU `cpu` is online.
+pub(crate) fn start_cpu_workers(cpu: u32, w: &CpuWorkers) {
     thread_init::make_ready(w.wq);
+    note_started(cpu);
+}
+
+fn note_started(cpu: u32) {
+    #[cfg(feature = "kernel_tests")]
+    if cpu < 64 {
+        // Release: pairs with the Acquire load in `started_mask`.
+        WORKERS.fetch_or(1u64 << cpu, Ordering::Release);
+    }
+    #[cfg(not(feature = "kernel_tests"))]
+    let _ = cpu;
+}
+
+/// Bits of CPUs whose workers were started. `kernel_tests` only.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn started_mask() -> u64 {
+    // Acquire: pairs with the Release fetch_or in `note_started`.
+    WORKERS.load(Ordering::Acquire)
 }
 
 /// Retire workers [`spawn_cpu_workers`] made for a CPU that did not come
@@ -246,7 +270,7 @@ pub(crate) fn abandon_cpu_workers(w: CpuWorkers) {
 pub fn init() {
     thread_init::set_kick_hook(kick_dead_stacks);
     match spawn_cpu_workers(0) {
-        Ok(w) => start_cpu_workers(&w),
+        Ok(w) => start_cpu_workers(0, &w),
         Err(e) => crate::klog!(
             vibeos::log::Level::Error,
             "work: cpu0 worker not started: {}",

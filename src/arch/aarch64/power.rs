@@ -75,6 +75,13 @@ pub fn affinity_info(target: u64) -> i64 {
     unsafe { psci_call(psci::AFFINITY_INFO, target, 0, 0) }
 }
 
+/// PSCI `CPU_OFF` for the calling core. Success does not return.
+pub fn cpu_off() -> i64 {
+    // SAFETY: CPU_OFF; success does not return, a failure returns a status.
+    // established here.
+    unsafe { psci_call(psci::CPU_OFF, 0, 0, 0) }
+}
+
 /// ktest pass code (`ktest::EXIT_PASS`). A pass is PSCI `SYSTEM_OFF`
 /// (QEMU exits 0). Any other code is a fail: write pvpanic's panicked
 /// bit and wait. QEMU with `-action panic=pause` reports
