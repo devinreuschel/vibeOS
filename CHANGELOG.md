@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- a reused call-function IPI runs the round that was published, not the
+  previous one ([ROADMAP §11.4](docs/ROADMAP.md#114-smp-and-per-cpu)).
 - aarch64 `munmap` and a `brk` shrink drop the page from the TLB before
   the frame is freed, so a later EL0 access is `SIGSEGV`.
 - aarch64 leaf TLB invalidates drop a kernel address's high bits, so the
