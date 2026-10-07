@@ -185,12 +185,13 @@ pub fn apply_computed_sysregs() {
     let cpacr = sysreg::cpacr_el1();
     // SAFETY: whole writes of the computed values; never RMW. established here.
     unsafe {
+        // E2H=1 renames CNTHCTL_EL2 bits 0 and 1 to EL0PCTEN and EL0VCTEN.
+        // The E2H=0 value (EL1PCTEN|EL1PCEN) would let EL0 read CNTPCT.
+        let cnt = sysreg::cntkctl_el1();
         if el2_vhe() {
-            let cnthctl = sysreg::cnthctl_el2();
-            asm!("msr cnthctl_el2, {0}", in(reg) cnthctl, options(nostack, preserves_flags));
+            asm!("msr cnthctl_el2, {0}", in(reg) cnt, options(nostack, preserves_flags));
         } else {
-            let cntkctl = sysreg::cntkctl_el1();
-            asm!("msr cntkctl_el1, {0}", in(reg) cntkctl, options(nostack, preserves_flags));
+            asm!("msr cntkctl_el1, {0}", in(reg) cnt, options(nostack, preserves_flags));
         }
         asm!("msr pmuserenr_el0, {0}", in(reg) pmuserenr, options(nostack, preserves_flags));
         asm!("msr cpacr_el1, {0}", in(reg) cpacr, options(nostack, preserves_flags));

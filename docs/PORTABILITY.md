@@ -270,10 +270,12 @@ proves the EL0-visible rows that case covers.
 | x86_64 | `CR4.OSXMMEXCPT` | 1 | an unmasked SIMD floating-point exception raises `#XM` and gets `SIGFPE` rather than `#UD` and `SIGILL` |
 | x86_64 | `IA32_SYSENTER_CS`, `IA32_SYSENTER_ESP`, `IA32_SYSENTER_EIP` | 0, as Linux writes them without IA32 emulation | `sysenter` at CPL 3 raises `#GP` on Intel and gets `SIGSEGV` (`#UD` and `SIGILL` on AMD, which has no `sysenter` in long mode); a value firmware left would enter ring 0 at its address. The GDT has no 32-bit user code slot, so ring 3 never reaches compatibility mode and `IA32_CSTAR` is never used |
 
-At EL2 with VHE, `CNTKCTL_EL1` names `CNTHCTL_EL2`, whose EL0 fields sit at the same bits. The boot
-CPU computes that register's whole value with the EL0 fields above, which clears the `EL0PCTEN` bit
-Limine sets at EL2 entry, and ROADMAP §11.4's stub writes the same value on every core, as it writes
-the boot CPU's `SCTLR_EL1`.
+At EL2 with VHE (`HCR_EL2.E2H` is 1), `CNTKCTL_EL1` names `CNTHCTL_EL2`. Bits 0 and 1 are then
+`EL0PCTEN` and `EL0VCTEN`, the same fields as `CNTKCTL_EL1`, not `EL1PCTEN` and `EL1PCEN`, which are
+those bits only when E2H is 0. The boot CPU writes `CNTKCTL_EL1`'s value (`EL0VCTEN` alone) into
+`CNTHCTL_EL2`, which clears the `EL0PCTEN` bit Limine sets at EL2 entry, and ROADMAP §11.4's stub
+writes that value on every core. The nightly EL2 leg runs `/bin/tests` `user_env`
+(`el0_env_every_cpu`).
 
 Why: user code depends on these values (a JIT's cache maintenance, glibc's `memset`, the vDSO's clock),
 and the kernel's own safety depends on others (`UMA`, `EL0VTEN`). Their reset values are UNKNOWN.
