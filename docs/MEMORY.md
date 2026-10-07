@@ -260,7 +260,13 @@ time:
 4. The bootloader stack window, duplicated out of Limine's active tables so `_start`'s own stack keeps
    working across the `mov cr3`.
 
-Then set `EFER.NXE` if it is not already on, load CR3, and print `paging: cr3 ok`. Immediately after,
+Then set `EFER.NXE` if it is not already on, load CR3, and print `paging: cr3 ok`. On aarch64 that
+load is `TTBR1_EL1`, and the marker is `vibeOS: paging: ttbr ok`. Limine's global entries can still
+be cached at a different block size, so the install points TTBR0 at a temporary identity map of the
+switch sequence and drops the local TLB, then from that map writes a reserved empty TTBR1,
+`tlbi vmalle1`, `dsb nsh`, `isb`, then the new root. TTBR0 is pointed at an
+empty root and the local TLB is invalidated again before `install` returns, so the identity map does
+not survive. Immediately after,
 `acpi_init` ioremaps the LAPIC, I/O APIC, and HPET pages (PCD + PWT), and on x86_64 a
 SystemMemory FADT reset or sleep-control page that the physmap does not cover. The portable `Mapper` is the
 only writer of live entries and refuses a live change of output address, memory type, size, or

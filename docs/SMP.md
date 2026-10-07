@@ -170,12 +170,15 @@ MMU and D-cache off (`src/arch/aarch64/secondary.rs`), through PSCI `CPU_ON` on 
 `/psci` named. The boot CPU fills one parameter page per core, cleans that page and the stub to the
 Point of Coherency (`dc cvac`, `dsb sy`), and passes the page's physical address as `context_id`.
 The stub, in order: checks the ISA floor (FEAT_LSE and FEAT_PAN) and stores `STATUS_FEATURE` then
-`CPU_OFF` if either is missing; when the block says EL2, writes each EL2 control on the port's one
-list whole from the block (`HCR_EL2`, `CPTR_EL2`, `CNTHCTL_EL2`, `HSTR_EL2`, `MDCR_EL2`,
-`ICC_SRE_EL2`, `HCRX_EL2` and the FGT registers where the ID bits say so, `CNTVOFF_EL2` = 0,
-`SCTLR_EL2` with `M`, `C`, and `I` clear) before any `*_EL1` access; writes `SCTLR`, `MAIR`, `TCR`, `TTBR1`, and the identity
-`TTBR0` from the block, and `CNTKCTL_EL1` only at EL1 (VHE aliases it to `CNTHCTL_EL2`); enables the
-MMU with the boot CPU's whole `SCTLR_EL1`; jumps to the TTBR1 continue address; points `TTBR0` at
+`CPU_OFF` if either is missing; when the block says EL2, writes `HCR_EL2` whole and an `isb`, then
+`tlbi vmalle1` and `dsb nsh` (an E2H/TGE change leaves the local TLB stale), then the rest of the
+EL2 controls on the port's one list whole from the block (`CPTR_EL2`, `CNTHCTL_EL2`, `HSTR_EL2`,
+`MDCR_EL2`, `ICC_SRE_EL2`, `HCRX_EL2` and the FGT registers where the ID bits say so,
+`CNTVOFF_EL2` = 0, `SCTLR_EL2` with `M`, `C`, and `I` clear) before any `*_EL1` access; writes
+`MAIR`, `TCR`, `TTBR1`, and the identity `TTBR0` from the block, and `CNTKCTL_EL1` only at EL1
+(VHE aliases it to `CNTHCTL_EL2`); runs `tlbi vmalle1` and `dsb nsh` before the `isb` that publishes
+`SCTLR.M`, then enables the MMU with the boot CPU's whole `SCTLR_EL1`; jumps to the TTBR1 continue
+address; points `TTBR0` at
 the empty user root and invalidates the local TLB; then stores `STATUS_ARRIVED`, its first shared
 write. Rust `ap_entry_aarch64` then installs the per-CPU base, GIC, and timer, prints the
 exception-level marker, claims the bring-up handshake, and publishes `ready` only when it won.
@@ -769,7 +772,7 @@ still arrives. It returns to the loop from either without acting on it, clearing
 a machine check, as Linux does for an offline CPU. It comes back through INIT and SIPI on the
 reserved trampoline ([§7.4](#74-ap-bring-up-sequence)), and INIT flushes its TLB. On aarch64 it
 calls PSCI `CPU_OFF` and comes back through `CPU_ON` (ROADMAP §11.4), whose entry runs
-`tlbi vmalle1` before it enables the MMU. Its `PerCpu`, stacks, and idle thread stay allocated for
+`tlbi vmalle1` and `dsb nsh` before it enables the MMU. Its `PerCpu`, stacks, and idle thread stay allocated for
 the next online.
 
 Online runs the online steps in the reverse order: the control CPU's steps, then the CPU's bring-up

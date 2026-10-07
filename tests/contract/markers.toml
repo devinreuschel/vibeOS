@@ -302,6 +302,34 @@ source = "kernel"
 section = "§11.2"
 
 [[marker]]
+text = "vibeOS: paging: no reserved TTBR1"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
+
+[[marker]]
+text = "vibeOS: paging: takeover trampoline"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
+
+[[marker]]
+text = "vibeOS: paging: takeover identity"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
+
+[[marker]]
+text = "vibeOS: paging: ttbr0 tcr"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
+
+[[marker]]
 text = "vibeOS: paging: physmap map failed"
 kind = "failure"
 arch = "both"
