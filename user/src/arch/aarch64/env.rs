@@ -1,5 +1,6 @@
 //! EL0 environment of DESIGN §11.4 (ROADMAP §11.6): readable ID registers,
-//! cache ops, `wfe`/`wfi`, and the trapped system registers.
+//! cache ops, `wfe`/`wfi`, and the trapped system registers, `SCXTNUM_EL0`
+//! included.
 
 use core::arch::asm;
 
@@ -23,6 +24,9 @@ pub fn user_env() -> Outcome {
         ("cntv_ctl", trap_cntv_ctl as fn()),
         ("cntp_ctl", trap_cntp_ctl as fn()),
         ("pmccntr", trap_pmccntr as fn()),
+        // TSCXT traps this where FEAT_CSV2_2 is present. Without that
+        // feature the encoding is unallocated, so it still raises SIGILL.
+        ("scxtnum", trap_scxtnum as fn()),
     ];
     for (name, f) in traps {
         match child_trap(f) {
@@ -110,5 +114,14 @@ fn trap_pmccntr() {
     let mut v: u64;
     // SAFETY: the instruction is meant to trap; established here.
     unsafe { asm!("mrs {0}, pmccntr_el0", out(reg) v, options(nomem, nostack)) };
+    let _ = v;
+}
+
+fn trap_scxtnum() {
+    let mut v: u64;
+    // `S3_3_C13_C0_7` is `SCXTNUM_EL0` (Arm ARM DDI0487). The baseline
+    // assembler accepts that encoding.
+    // SAFETY: the instruction is meant to trap (DESIGN §11.4); established here.
+    unsafe { asm!("mrs {0}, S3_3_C13_C0_7", out(reg) v, options(nomem, nostack)) };
     let _ = v;
 }

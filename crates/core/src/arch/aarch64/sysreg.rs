@@ -43,7 +43,8 @@ pub const fn tcr_el1(asid16: bool) -> u64 {
 }
 
 /// `SCTLR_EL1`: MMU and caches on, alignment check off, SP alignment on,
-/// EL0 cache ops, no WXN. One computed value (ROADMAP §11.2).
+/// EL0 cache ops, no WXN. `TSCXT` set, `nTWI` clear (DESIGN §11.4).
+/// One computed value (ROADMAP §11.2).
 pub const fn sctlr_el1() -> u64 {
     const M: u64 = 1 << 0;
     const C: u64 = 1 << 2;
@@ -54,11 +55,14 @@ pub const fn sctlr_el1() -> u64 {
     const I: u64 = 1 << 12;
     const DZE: u64 = 1 << 14;
     const UCT: u64 = 1 << 15;
-    const NTWI: u64 = 1 << 16;
+    // nTWI (bit 16) stays clear: an EL0 `wfi` traps.
     const NTWE: u64 = 1 << 18;
+    // TSCXT (bit 20): EL0 `SCXTNUM_EL0` traps where FEAT_CSV2_2 is
+    // present, and the bit is RES1 where it is not (Arm ARM DDI0487).
+    const TSCXT: u64 = 1 << 20;
     const EIS: u64 = 1 << 22;
     const UCI: u64 = 1 << 26;
-    M | C | SA | SA0 | NAA | EOS | I | DZE | UCT | NTWI | NTWE | EIS | UCI
+    M | C | SA | SA0 | NAA | EOS | I | DZE | UCT | NTWE | TSCXT | EIS | UCI
 }
 
 /// `CNTKCTL_EL1` at EL1, and `CNTHCTL_EL2` when `HCR_EL2.E2H` is 1.
@@ -144,6 +148,9 @@ mod tests {
         assert_ne!(s & (1 << 2), 0, "C");
         assert_ne!(s & (1 << 12), 0, "I");
         assert_eq!(s & (1 << 19), 0, "WXN");
+        // Arm ARM DDI0487 SCTLR_EL1: bit 20 TSCXT, bit 16 nTWI (DESIGN §11.4).
+        assert_ne!(s & (1 << 20), 0, "TSCXT");
+        assert_eq!(s & (1 << 16), 0, "nTWI");
         assert_eq!(s, sctlr_el1());
     }
 
