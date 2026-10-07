@@ -8,6 +8,7 @@ use core::marker::PhantomData;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
+use vibeos::arch::x86_64::cpuid::probe_platform_info;
 use vibeos::log::Level;
 
 use crate::x86;
@@ -158,8 +159,6 @@ pub const CR4_SMEP: u64 = 1 << 20;
 pub const CR4_SMAP: u64 = 1 << 21;
 pub const CR4_PKE: u64 = 1 << 22;
 
-/// CPUID.01H:ECX[20]
-pub const CPUID_ECX_SSE42: u32 = 1 << 20;
 /// CPUID.01H:ECX[30]
 pub const CPUID_ECX_RDRAND: u32 = 1 << 30;
 /// CPUID.01H:EDX[7]
@@ -676,18 +675,16 @@ pub fn cpuid_features() -> Features {
     }
 }
 
-/// CPUID.0 EBX, EDX, ECX: "GenuineIntel".
-const VENDOR_INTEL: [u32; 3] = [0x756E_6547, 0x4965_6E69, 0x6C65_746E];
-
-/// Whether this CPU has CPUID faulting. No CPUID bit says
-/// `MSR_PLATFORM_INFO` exists and a `rdmsr` of a missing MSR raises `#GP`,
-/// which halts the kernel, so only an Intel CPU with SSE4.2 reads it:
-/// Nehalem, the first with SSE4.2, and every Intel core since have it.
+/// Whether this CPU has CPUID faulting.
+///
+/// [`probe_platform_info`] decides the `rdmsr`. No CPUID bit says
+/// `MSR_PLATFORM_INFO` exists, and a missing MSR raises `#GP`, which
+/// halts the kernel. The `&&` is that guard: the read runs only when
+/// the probe allows it.
 pub fn cpuid_faulting() -> bool {
     let (_, ebx, ecx, edx) = cpuid(0, 0);
     let (_, _, ecx1, _) = cpuid(1, 0);
-    [ebx, edx, ecx] == VENDOR_INTEL
-        && ecx1 & CPUID_ECX_SSE42 != 0
+    probe_platform_info(ebx, edx, ecx, ecx1)
         && rdmsr(MSR_PLATFORM_INFO) & PLATFORM_INFO_CPUID_FAULTING != 0
 }
 

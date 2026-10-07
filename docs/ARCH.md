@@ -66,9 +66,11 @@ the identity on them; a second port maps them to its own encoding (ROADMAP §11.
 | Hypervisor | port module | none yet (ROADMAP §21.1) | none yet (ROADMAP §21.1) | none yet (ROADMAP §21.1) | none yet (ROADMAP §21.1) | none yet (ROADMAP §21.1) | none yet (ROADMAP §21.1) |
 
 The x86_64 port's other files: `src/arch/x86_64/catch.rs` (the in-guest tests' fault catcher,
-`kernel_tests` only), `crates/core/src/arch/x86_64/mod.rs` and `src/arch/x86_64/mod.rs` (the
-module roots; the latter holds the zero-sized `Arch` and its `InterruptMask`, `CycleCounter`,
-`ContextSwitch`, `Barriers`, `PerCpuBase`, `SyscallAbi` and `Port` impls).
+`kernel_tests` only), `crates/core/src/arch/x86_64/cpuid.rs` (whether
+`MSR_PLATFORM_INFO` may be read for CPUID faulting), `crates/core/src/arch/x86_64/mod.rs`
+and `src/arch/x86_64/mod.rs` (the module roots; the latter holds the zero-sized `Arch` and
+its `InterruptMask`, `CycleCounter`, `ContextSwitch`, `Barriers`, `PerCpuBase`, `SyscallAbi`
+and `Port` impls).
 
 The aarch64 port, both halves, every file under `src/arch/aarch64/` and
 `crates/core/src/arch/aarch64/`: `src/arch/aarch64/mod.rs` (the zero-sized `Arch`
