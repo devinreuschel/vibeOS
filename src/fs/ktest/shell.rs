@@ -710,6 +710,24 @@ fn shell_fs_commands() -> Outcome {
 fn fs_commands_fat() -> Step<()> {
     let f0 = initrd_free()?;
     let mut out = BufOut::new()?;
+    // Each step is its own frame. Inlined into one function, opt-level 1
+    // keeps every step's buffers live across `cat`, and that depth crosses
+    // the 16 KiB worker's budget (DESIGN §4.5).
+    fat_dirs(&mut out)?;
+    fat_touch(&mut out)?;
+    fat_cp_write(&mut out)?;
+    fat_cp_copy(&mut out)?;
+    fat_mv(&mut out)?;
+    fat_case_mv(&mut out)?;
+    fat_slot_files(&mut out)?;
+    fat_slot_stat(&mut out)?;
+    fat_list(&mut out)?;
+    fat_finish(&mut out, f0)?;
+    Ok(())
+}
+
+#[inline(never)]
+fn fat_dirs(out: &mut BufOut) -> Step<()> {
     out.run(
         "mkdir -p /kt61c/a/b/c",
         sh::mkdir,
@@ -721,19 +739,37 @@ fn fs_commands_fat() -> Step<()> {
             return Err(Outcome::Fail("mkdir -p made a non-directory"));
         }
     }
+    Ok(())
+}
+
+#[inline(never)]
+fn fat_touch(out: &mut BufOut) -> Step<()> {
     out.run("touch /kt61c/t", sh::touch, &["touch", "/kt61c/t"])?;
     let t = step("stat /kt61c/t", file_init::stat_path(b"/kt61c/t"))?;
     if t.kind != InodeKind::Reg || t.size != 0 {
         return Err(Outcome::Fail("touch did not make an empty file"));
     }
+    Ok(())
+}
+
+#[inline(never)]
+fn fat_cp_write(out: &mut BufOut) -> Step<()> {
     step("write /kt61c/s", put_file(b"/kt61c/s", CAT_DATA))?;
-    cat_is(&mut out, "cat /kt61c/s", "/kt61c/s", CAT_DATA)?;
+    cat_is(out, "cat /kt61c/s", "/kt61c/s", CAT_DATA)
+}
+
+#[inline(never)]
+fn fat_cp_copy(out: &mut BufOut) -> Step<()> {
     out.run(
         "cp /kt61c/s /kt61c/a/s2",
         sh::cp,
         &["cp", "/kt61c/s", "/kt61c/a/s2"],
     )?;
-    cat_is(&mut out, "cat /kt61c/a/s2", "/kt61c/a/s2", CAT_DATA)?;
+    cat_is(out, "cat /kt61c/a/s2", "/kt61c/a/s2", CAT_DATA)
+}
+
+#[inline(never)]
+fn fat_mv(out: &mut BufOut) -> Step<()> {
     out.run(
         "mv /kt61c/a/s2 /kt61c/m",
         sh::mv,
@@ -742,42 +778,66 @@ fn fs_commands_fat() -> Step<()> {
     if !gone(b"/kt61c/a/s2") {
         return Err(Outcome::Fail("mv left /kt61c/a/s2"));
     }
-    cat_is(&mut out, "cat /kt61c/m", "/kt61c/m", CAT_DATA)?;
-    // A case-only FAT rename (F059).
+    cat_is(out, "cat /kt61c/m", "/kt61c/m", CAT_DATA)?;
+    Ok(())
+}
+
+/// A case-only FAT rename (F059).
+#[inline(never)]
+fn fat_case_mv(out: &mut BufOut) -> Step<()> {
     out.run(
         "mv /kt61c/m /kt61c/M",
         sh::mv,
         &["mv", "/kt61c/m", "/kt61c/M"],
     )?;
-    cat_is(&mut out, "cat /kt61c/M", "/kt61c/M", CAT_DATA)?;
-    // The rename gave `M` a new entry and freed `m`'s: a file made in that
-    // slot is its own, and `M` keeps its data, where the inode left keyed
-    // by the freed entry once took the new file's name onto `M`'s chain.
+    cat_is(out, "cat /kt61c/M", "/kt61c/M", CAT_DATA)?;
+    Ok(())
+}
+
+/// The rename gave `M` a new entry and freed `m`'s: a file made in that
+/// slot is its own, and `M` keeps its data, where the inode left keyed
+/// by the freed entry once took the new file's name onto `M`'s chain.
+#[inline(never)]
+fn fat_slot_files(out: &mut BufOut) -> Step<()> {
     step("write /kt61c/n", put_file(b"/kt61c/n", b"NN"))?;
-    cat_is(&mut out, "cat /kt61c/n", "/kt61c/n", b"NN")?;
-    cat_is(&mut out, "cat /kt61c/M", "/kt61c/M", CAT_DATA)?;
-    step("rm /kt61c/n", file_init::unlink(b"/kt61c/n"))?;
+    cat_is(out, "cat /kt61c/n", "/kt61c/n", b"NN")?;
+    cat_is(out, "cat /kt61c/M", "/kt61c/M", CAT_DATA)?;
+    step("rm /kt61c/n", file_init::unlink(b"/kt61c/n"))
+}
+
+#[inline(never)]
+fn fat_slot_stat(out: &mut BufOut) -> Step<()> {
     out.run("stat /kt61c/M", sh::stat, &["stat", "/kt61c/M"])?;
     if !out.buf.windows(7).any(|w| w == b"size 9 ") {
         return Err(Outcome::Fail("stat /kt61c/M does not print `size 9`"));
     }
+    Ok(())
+}
+
+#[inline(never)]
+fn fat_list(out: &mut BufOut) -> Step<()> {
     out.run("ls -l /kt61c", sh::ls, &["ls", "-l", "/kt61c"])?;
-    if !has_long(&out, "dir", None, b"a")
-        || !has_long(&out, "reg", Some(0), b"t")
-        || !has_long(&out, "reg", Some(9), b"s")
-        || !has_long(&out, "reg", Some(9), b"M")
+    if !has_long(out, "dir", None, b"a")
+        || !has_long(out, "reg", Some(0), b"t")
+        || !has_long(out, "reg", Some(9), b"s")
+        || !has_long(out, "reg", Some(9), b"M")
     {
         return Err(Outcome::Fail(
             "ls -l /kt61c does not list a, t, s and M with kinds and sizes",
         ));
     }
-    if has_long(&out, "reg", None, b"m") {
+    if has_long(out, "reg", None, b"m") {
         return Err(Outcome::Fail(
             "ls -l /kt61c still lists m after the case-only mv",
         ));
     }
+    Ok(())
+}
+
+#[inline(never)]
+fn fat_finish(out: &mut BufOut, f0: u64) -> Step<()> {
     out.run("df", sh::df, &["df"])?;
-    match df_fat(&out) {
+    match df_fat(out) {
         Some((total, free)) if free <= total => {}
         Some(_) => return Err(Outcome::Fail("df: fat32 free over total")),
         None => return Err(Outcome::Fail("df prints no fat32 line")),
@@ -798,6 +858,15 @@ fn fs_commands_fat() -> Step<()> {
 
 fn fs_commands_vibe() -> Step<()> {
     let mut out = BufOut::new()?;
+    vibe_setup(&mut out)?;
+    vibe_cp(&mut out)?;
+    vibe_mv(&mut out)?;
+    vibe_rm(&mut out)?;
+    Ok(())
+}
+
+#[inline(never)]
+fn vibe_setup(out: &mut BufOut) -> Step<()> {
     out.run(
         "mkdir -p /vibe/kt61c/a/b",
         sh::mkdir,
@@ -808,17 +877,22 @@ fn fs_commands_vibe() -> Step<()> {
         file_init::stat_path(b"/vibe/kt61c/a/b"),
     )?;
     step("write /vibe/kt61c/s", put_file(b"/vibe/kt61c/s", CAT_DATA))?;
+    Ok(())
+}
+
+#[inline(never)]
+fn vibe_cp(out: &mut BufOut) -> Step<()> {
     out.run(
         "cp on vibefs",
         sh::cp,
         &["cp", "/vibe/kt61c/s", "/vibe/kt61c/a/s2"],
     )?;
-    cat_is(
-        &mut out,
-        "cat /vibe/kt61c/a/s2",
-        "/vibe/kt61c/a/s2",
-        CAT_DATA,
-    )?;
+    cat_is(out, "cat /vibe/kt61c/a/s2", "/vibe/kt61c/a/s2", CAT_DATA)?;
+    Ok(())
+}
+
+#[inline(never)]
+fn vibe_mv(out: &mut BufOut) -> Step<()> {
     out.run(
         "mv on vibefs",
         sh::mv,
@@ -827,12 +901,12 @@ fn fs_commands_vibe() -> Step<()> {
     if !gone(b"/vibe/kt61c/a/s2") {
         return Err(Outcome::Fail("mv left /vibe/kt61c/a/s2"));
     }
-    cat_is(
-        &mut out,
-        "cat /vibe/kt61c/a/b/m",
-        "/vibe/kt61c/a/b/m",
-        CAT_DATA,
-    )?;
+    cat_is(out, "cat /vibe/kt61c/a/b/m", "/vibe/kt61c/a/b/m", CAT_DATA)?;
+    Ok(())
+}
+
+#[inline(never)]
+fn vibe_rm(out: &mut BufOut) -> Step<()> {
     out.run("rm -r /vibe/kt61c", sh::rm, &["rm", "-r", "/vibe/kt61c"])?;
     if !gone(b"/vibe/kt61c") {
         return Err(Outcome::Fail("/vibe/kt61c is still there after rm -r"));

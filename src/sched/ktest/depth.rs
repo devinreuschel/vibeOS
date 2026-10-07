@@ -5,9 +5,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use vibeos::lock::RANK_DEVICE;
-#[cfg(target_arch = "x86_64")]
-use vibeos::sched::stack_depth::SIZES;
-use vibeos::sched::stack_depth::{self, Deepest, DepthTable};
+use vibeos::sched::stack_depth::{self, Deepest, DepthTable, SIZES};
 
 use crate::ktest::{Outcome, sleep_for};
 use crate::sync_init::SpinMutex;
@@ -28,10 +26,11 @@ pub(crate) fn exit_depth(tid: u32) -> Option<usize> {
     DEPTH.lock().recent(tid).map(|d| d.used)
 }
 
-/// Scan every live thread's stack, then print one line per stack size and
-/// the report line, outside the lock (TESTING §8.2). Runs just before
-/// `vibeOS: ktest: end`.
-#[cfg(target_arch = "x86_64")]
+/// Scan every live thread's stack into the table the exit scans already
+/// fill, then print one line per stack size and the report line, outside
+/// the lock (TESTING §8.2). Runs just before `vibeOS: ktest: end`. An
+/// exited thread stays in the table, so its use can be the deepest of its
+/// size.
 pub(crate) fn report() {
     thread_init::testing::scan_live_stacks(record);
     let mut sizes: [Option<Deepest>; SIZES] = [None; SIZES];

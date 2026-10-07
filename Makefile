@@ -671,9 +671,11 @@ test-forensics: $(ISO_HANG) $(ISO_GP) $(VMCORE)
 KTEST_ENV =
 KTEST_RUN = VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) $(KTEST_ENV) python3 tests/harness/run_ktest.py
 KERNEL_SHARDS := test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6
+KERNEL_A64_PROOF := test-kernel-7 test-kernel-8 test-kernel-9
 KERNEL_SMP4_SHARDS := test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5
+KERNEL_SMP4_A64_PROOF := test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8
 LAPIC_FALLBACK_SHARDS := test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6
-.PHONY: $(KERNEL_SHARDS) $(KERNEL_SMP4_SHARDS) $(LAPIC_FALLBACK_SHARDS)
+.PHONY: $(KERNEL_SHARDS) $(KERNEL_A64_PROOF) $(KERNEL_SMP4_SHARDS) $(KERNEL_SMP4_A64_PROOF) $(LAPIC_FALLBACK_SHARDS)
 
 # The nightly KVM leg adds +invtsc, so its invariant-TSC check still applies
 # (DESIGN §8.4).
@@ -681,8 +683,8 @@ LAPIC_FALLBACK_CPU ?= qemu64,-tsc-deadline
 # aarch64 env_config defaults VIBEOS_SMP to 1 (`make run`). The in-guest
 # `-smp 2` tiers must set it: AP tests skip with `no AP` at 1 CPU, and
 # those skips have no aarch64 skips.toml row (ROADMAP §11.7).
-test-kernel $(KERNEL_SHARDS): KTEST_ENV = VIBEOS_SMP=2
-test-kernel-smp4 $(KERNEL_SMP4_SHARDS): KTEST_ENV = VIBEOS_SMP=4
+test-kernel $(KERNEL_SHARDS) $(KERNEL_A64_PROOF): KTEST_ENV = VIBEOS_SMP=2
+test-kernel-smp4 $(KERNEL_SMP4_SHARDS) $(KERNEL_SMP4_A64_PROOF): KTEST_ENV = VIBEOS_SMP=4
 test-lapic-fallback $(LAPIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_QEMU_CPU=$(LAPIC_FALLBACK_CPU)
 
 test-kernel: $(ISO_KTEST)
@@ -706,6 +708,15 @@ test-kernel-5: $(ISO_KTEST)
 test-kernel-6: $(ISO_KTEST)
 	$(KTEST_RUN) --shard $@
 
+test-kernel-7: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-8: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-9: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
 test-kernel-smp4: $(ISO_KTEST)
 	$(KTEST_RUN)
 
@@ -722,6 +733,15 @@ test-kernel-smp4-4: $(ISO_KTEST)
 	$(KTEST_RUN) --shard $@
 
 test-kernel-smp4-5: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-6: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-7: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-8: $(ISO_KTEST)
 	$(KTEST_RUN) --shard $@
 
 test-lapic-fallback: $(ISO_KTEST)
@@ -745,10 +765,10 @@ test-lapic-fallback-5: $(ISO_KTEST)
 test-lapic-fallback-6: $(ISO_KTEST)
 	$(KTEST_RUN) --shard $@
 
-# GICv2 fallback (ROADMAP §11.7): same registry shards as test-kernel, with
-# VIBEOS_GIC=2. Not in `make test` (x86); `make test-aarch64` and the
-# aarch64 CI tier run the shards.
-GIC_FALLBACK_SHARDS := test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6
+# GICv2 fallback (ROADMAP §11.7): the test-kernel shards, registry and
+# proof boots, with VIBEOS_GIC=2. Not in `make test` (x86); `make test-aarch64`
+# and the aarch64 CI tiers run them.
+GIC_FALLBACK_SHARDS := test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
 .PHONY: test-gic-fallback $(GIC_FALLBACK_SHARDS)
 test-gic-fallback $(GIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_GIC=2 VIBEOS_SMP=2
 test-gic-fallback: $(ISO_KTEST)
@@ -765,10 +785,16 @@ test-gic-fallback-5: $(ISO_KTEST)
 	$(KTEST_RUN) --shard test-kernel-5
 test-gic-fallback-6: $(ISO_KTEST)
 	$(KTEST_RUN) --shard test-kernel-6
+test-gic-fallback-7: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-7
+test-gic-fallback-8: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-8
+test-gic-fallback-9: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-9
 
 # aarch64 per-push ladder (ROADMAP §11.7). x86-only e2e (PIT, #GP, #MC,
 # 9 GiB, LAPIC fallback, vibefs-crash) stays on `make test`.
-test-aarch64: test-e2e test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6
+test-aarch64: test-e2e test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
 
 .PHONY: litmus
 litmus:

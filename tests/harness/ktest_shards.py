@@ -107,7 +107,10 @@ def rows_for(name: str, arch: str) -> tuple[str, str] | None:
     """The main-boot range of shard `name` on `arch`."""
     if arch == "aarch64" and name in AARCH64_ROWS:
         return AARCH64_ROWS[name]
-    return SHARDS[name].rows
+    shard = SHARDS.get(name)
+    if shard is None:
+        return None
+    return shard.rows
 
 
 def range_word_for(name: str, arch: str) -> str | None:
@@ -138,3 +141,49 @@ SHARDS: dict[str, Shard] = {
         "test-lapic-fallback", boots=("vblk-readonly", "vblk-bad-sector")
     ),
 }
+
+
+# Proof boots on aarch64. Shards 4 and later of each variant already hold
+# registry ranges, so these are extra shards: stacking a proof boot on a
+# range shard would put the tier over the 60 s budget. `hpet-off` stays on
+# x86. `fat` stays on x86: its self-IPI is not delivered on aarch64.
+# `aff-off` stays on `test-kernel-smp4-5`'s `aarch64_boots`. GICv2
+# reruns the `-smp 2` ones as `test-gic-fallback-<k>`.
+AARCH64_PROOF: dict[str, Shard] = {
+    "test-kernel-7": Shard("test-kernel", boots=("select", "repeat")),
+    "test-kernel-8": Shard("test-kernel", boots=("deadline-trip", "planted")),
+    "test-kernel-9": Shard("test-kernel", boots=("vblk-readonly", "vblk-bad-sector")),
+    "test-kernel-smp4-6": Shard(
+        "test-kernel-smp4", boots=("select", "deadline-trip", "planted")
+    ),
+    "test-kernel-smp4-7": Shard("test-kernel-smp4", boots=("vblk-readonly",)),
+    "test-kernel-smp4-8": Shard("test-kernel-smp4", boots=("vblk-bad-sector", "stalled-ap")),
+}
+
+
+def shard_names() -> tuple[str, ...]:
+    """Every `--shard` name: the x86 table, then the aarch64 proof shards."""
+    return tuple(SHARDS) + tuple(AARCH64_PROOF)
+
+
+def shard_for(name: str) -> Shard:
+    """Shard `name` from `SHARDS` or `AARCH64_PROOF`."""
+    if name in SHARDS:
+        return SHARDS[name]
+    return AARCH64_PROOF[name]
+
+
+def boots_for(name: str, arch: str) -> tuple[str, ...]:
+    """Proof-boot names shard `name` runs on `arch`, before `applies`.
+
+    On aarch64 the x86 boot lists do not run: those shards hold registry
+    ranges, and the portable proof boots live in `AARCH64_PROOF`.
+    `aarch64_boots` still runs (`aff-off` on `test-kernel-smp4-5`).
+    """
+    if name in AARCH64_PROOF:
+        if arch != "aarch64":
+            return ()
+        return AARCH64_PROOF[name].boots
+    if arch == "aarch64":
+        return SHARDS[name].aarch64_boots
+    return SHARDS[name].boots

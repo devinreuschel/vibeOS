@@ -663,12 +663,23 @@ VBLK_BAD_SECTOR_TEST = "vblk_bad_sector"
 FAT_BAD_SECTOR_TEST = "fat_bad_sector_eio"
 
 
+def _bad_sector_tests(arch: str) -> tuple[str, ...]:
+    """`vblk_bad_sector`, and `fat_bad_sector_eio` where its programs exist.
+
+    Those programs are `x86_user_code`, a zero page on aarch64, so the
+    syscall half stays on x86."""
+    if arch == "aarch64":
+        return (VBLK_BAD_SECTOR_TEST,)
+    return (VBLK_BAD_SECTOR_TEST, FAT_BAD_SECTOR_TEST)
+
+
 def _vblk_bad_sector_boot(env: EnvConfig) -> None:
-    """`vblk_bad_sector`, then `fat_bad_sector_eio`, on a pattern image
-    behind `blkdebug`, which fails every read of `VBLK_BAD_SECTOR`: that
-    read fails alone, after its retries, and the disk stays `Ready`; then
-    `read`, `write`, `open` and `execve` of FAT objects on that sector each
-    return `EIO` to ring 3."""
+    """`vblk_bad_sector`, then `fat_bad_sector_eio` on x86, on a pattern
+    image behind `blkdebug`, which fails every read of `VBLK_BAD_SECTOR`:
+    that read fails alone, after its retries, and the disk stays `Ready`;
+    then `read`, `write`, `open` and `execve` of FAT objects on that sector
+    each return `EIO` to ring 3."""
+    names = _bad_sector_tests(env.arch)
     disk = make_pattern_disk(DISK_BYTES, "vibeos-vblk-bad-")
     conf = None
     mmio = mmio_disk(env.arch)
@@ -677,13 +688,8 @@ def _vblk_bad_sector_boot(env: EnvConfig) -> None:
         devices = ktest_devices(
             disk, env.smp, blkdebug=conf, arch=env.arch, mmio_disk=mmio
         )
-        raw = _single_test_boot(
-            env,
-            f"{VBLK_BAD_SECTOR_TEST},{FAT_BAD_SECTOR_TEST}",
-            "vblk bad sector",
-            devices=devices,
-        )
-        check_select_run(raw.lines, {VBLK_BAD_SECTOR_TEST: 1, FAT_BAD_SECTOR_TEST: 1}, ())
+        raw = _single_test_boot(env, ",".join(names), "vblk bad sector", devices=devices)
+        check_select_run(raw.lines, {n: 1 for n in names}, ())
     finally:
         unlink_disks(disk, conf, mmio)
 
@@ -868,6 +874,8 @@ class ProofBoot:
     applies: Callable[[int, bool], bool]
     # Whether it runs when `VIBEOS_KTEST` selects the main boot's rows.
     with_selection: bool = False
+    # `hpet-off` is the PIT boot (`-machine pc,hpet=off`). The rest are portable.
+    arches: tuple[str, ...] = ("x86_64", "aarch64")
 
     def run(self, env: EnvConfig) -> None:
         getattr(sys.modules[__name__], self.func)(env)
@@ -877,27 +885,45 @@ def _always(smp: int, hpet_off: bool) -> bool:
     return True
 
 
-# In run order. A shard (`ktest_shards.SHARDS`) runs the ones it names.
+# In run order. x86 shards name them in `SHARDS`. aarch64 names the portable
+# ones in `AARCH64_PROOF` and `aff-off` on `aarch64_boots`.
 PROOF_BOOTS: tuple[ProofBoot, ...] = (
-    ProofBoot("hpet-off", "hpet=off boot", "hpet_off_boot", lambda smp, h: h, True),
+    ProofBoot("hpet-off", "hpet=off boot", "hpet_off_boot", lambda smp, h: h, True, ("x86_64",)),
     ProofBoot("select", "select boot", "ktest_select_boot", _always),
     ProofBoot("repeat", "repeat boot", "_repeat_boot", lambda smp, h: smp == 2),
     ProofBoot("deadline-trip", "deadline trip boot", "ktest_deadline_trip", lambda s, h: s >= 2),
     ProofBoot("planted", "planted stack boot", "_planted_boot", _always),
-    ProofBoot("fat", "fat 16k stack boot", "_fat_boot", _always),
+    # The FAT boot's self-IPI is `apic_init::send_ipi_cpu` on an x86 vector.
+    # aarch64's `send_ipi_cpu` returns without delivering, so the boot stays
+    # on x86.
+    ProofBoot("fat", "fat 16k stack boot", "_fat_boot", _always, arches=("x86_64",)),
     ProofBoot("vblk-readonly", "vblk readonly boot", "_vblk_readonly_boot", _always),
     ProofBoot("vblk-bad-sector", "vblk bad sector boot", "_vblk_bad_sector_boot", _always),
     ProofBoot("stalled-ap", "stalled AP leak boot", "_stalled_ap_boot", lambda s, h: s >= 4),
-    # aarch64 only: `applies` is never, and `proof_boot_names` lists it.
-    ProofBoot("aff-off", "aarch64 AFF_OFF free boot", "_aff_off_boot", lambda _s, _h: False),
+    # aarch64 only, at `-smp 4`, named on `test-kernel-smp4-5`'s `aarch64_boots`.
+    ProofBoot(
+        "aff-off",
+        "aarch64 AFF_OFF free boot",
+        "_aff_off_boot",
+        lambda s, _h: s >= 4,
+        arches=("aarch64",),
+    ),
 )
 
 
 def proof_boot_names(smp: int, hpet_off: bool, arch: str = "x86_64") -> list[str]:
     """The proof boots the union target runs at `smp` CPUs, in order."""
-    if arch == "aarch64":
-        return ["stalled-ap", "aff-off"] if smp >= 4 else []
-    return [b.name for b in PROOF_BOOTS if b.applies(smp, hpet_off)]
+    return [b.name for b in PROOF_BOOTS if arch in b.arches and b.applies(smp, hpet_off)]
+
+
+def shard_plan(name: str, arch: str, smp: int, hpet_off: bool) -> tuple[str | None, list[str]]:
+    """`(range word, proof boots)` shard `name` runs on `arch`.
+
+    Both empty is a failed plan: `main` exits 1 instead of reporting success."""
+    word = ktest_shards.range_word_for(name, arch)
+    want = set(proof_boot_names(smp, hpet_off, arch))
+    boots = [b for b in ktest_shards.boots_for(name, arch) if b in want]
+    return word, boots
 
 
 def _stalled_ap_boot(env: EnvConfig) -> None:
@@ -972,7 +998,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--shard",
-        choices=sorted(ktest_shards.SHARDS),
+        choices=sorted(ktest_shards.shard_names()),
         help="run one per-push shard of its variant (tests/harness/ktest_shards.py)",
     )
     args = parser.parse_args([] if argv is None else argv)
@@ -983,16 +1009,14 @@ def main(argv: list[str] | None = None) -> int:
         boots = proof_boot_names(env.smp, args.hpet_off, env.arch)
         rc = main_boot(env, None)
     else:
-        shard = ktest_shards.SHARDS[args.shard]
+        shard = ktest_shards.shard_for(args.shard)
         # A shard runs what it names that the union target would run here.
-        union = proof_boot_names(
-            env.smp, ktest_shards.VARIANTS[shard.variant].hpet_off, env.arch
+        word, boots = shard_plan(
+            args.shard, env.arch, env.smp, ktest_shards.VARIANTS[shard.variant].hpet_off
         )
-        wanted = list(shard.boots)
-        if env.arch == "aarch64":
-            wanted.extend(shard.aarch64_boots)
-        boots = [b for b in wanted if b in union]
-        word = ktest_shards.range_word_for(args.shard, env.arch)
+        if word is None and not boots:
+            print(f"[ktest] FAIL: {args.shard} runs no boot on {env.arch}", file=sys.stderr)
+            return 1
         rc = 0 if word is None else main_boot(env, word)
     if rc:
         return rc
