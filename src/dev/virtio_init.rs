@@ -629,6 +629,7 @@ impl Driver for RngDriver {
                 raw
             );
         }
+        irq_init::release_its_device(dev);
         if let Some(Q { qdma, data, .. }) = q {
             let kept = release(stopped, qdma).saturating_add(release(stopped, data));
             report_stuck(dev.addr, stopped, kept);

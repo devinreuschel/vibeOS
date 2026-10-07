@@ -18,9 +18,8 @@ pub const ITS_CMD_MAPC: u8 = 0x09;
 pub const ITS_CMD_MAPTI: u8 = 0x0A;
 pub const ITS_CMD_DISCARD: u8 = 0x0F;
 
-/// After DISCARD / MAPD V=0 / SYNC, wait this long before freeing the ITT
-/// (DESIGN §5.4).
-pub const ITS_FREE_WAIT_NS: u64 = 1_000_000_000;
+/// MAPD Size the kernel programs: EventID bits minus one, so 16 events.
+pub const ITS_MAPD_SIZE: u8 = 3;
 
 /// ITT is 256-byte aligned (IHI 0069G MAPD).
 pub const ITS_ITT_ALIGN: u64 = 256;
@@ -144,8 +143,37 @@ impl ItsCommand {
     }
 }
 
-/// Commands that free a device's LPIs: DISCARD each event, MAPD V=0,
-/// SYNC. The caller then waits [`ITS_FREE_WAIT_NS`] (DESIGN §5.4).
+/// EventIDs a MAPD `size` field admits. `size` is EventID bits minus one
+/// (IHI 0069G). `None` when `size` is out of range or the count does not
+/// fit in a `u32`.
+pub fn its_event_limit(size: u8) -> Option<u32> {
+    if size > ITS_SIZE_MAX {
+        return None;
+    }
+    let bits = u32::from(size).checked_add(1)?;
+    1u32.checked_shl(bits)
+}
+
+/// DISCARD one (DeviceID, EventID), then SYNC. No MAPD: the device stays
+/// mapped (DESIGN §5.4).
+pub fn encode_lpi_free(device_id: u32, event_id: u32, rdbase: u64) -> [ItsCommand; 2] {
+    [
+        ItsCommand::discard(device_id, event_id),
+        ItsCommand::sync(rdbase),
+    ]
+}
+
+/// MAPD with V=0, then SYNC. Only after that device's events were discarded.
+pub fn encode_device_unmap(device_id: u32, rdbase: u64) -> Result<[ItsCommand; 2], ItsError> {
+    Ok([
+        ItsCommand::mapd(device_id, 0, 0, false)?,
+        ItsCommand::sync(rdbase),
+    ])
+}
+
+/// Drop every listed event and the device: DISCARD each, MAPD V=0, SYNC.
+/// Per-LPI free uses [`encode_lpi_free`]; removal after those discards
+/// uses [`encode_device_unmap`] (DESIGN §5.4).
 pub fn encode_free_sequence(
     device_id: u32,
     event_ids: &[u32],
@@ -240,10 +268,32 @@ mod tests {
         assert_eq!(out[1], ItsCommand::discard(1, 6));
         assert_eq!(out[2], ItsCommand::mapd(1, 0, 0, false).unwrap());
         assert_eq!(out[3], ItsCommand::sync(3));
-        assert_eq!(ITS_FREE_WAIT_NS, 1_000_000_000);
         assert_eq!(
             encode_free_sequence(1, &[1], 0, &mut out[..2]),
             Err(ItsError::BadSize)
         );
+    }
+
+    #[test]
+    fn its_lpi_free_is_discard_sync() {
+        let cmds = encode_lpi_free(1, 5, 3);
+        assert_eq!(cmds[0], ItsCommand::discard(1, 5));
+        assert_eq!(cmds[1], ItsCommand::sync(3));
+        assert_ne!(cmds[0].dw[0] & 0xFF, u64::from(ITS_CMD_MAPD));
+        assert_ne!(cmds[1].dw[0] & 0xFF, u64::from(ITS_CMD_MAPD));
+    }
+
+    #[test]
+    fn its_device_unmap_is_mapd_sync() {
+        let cmds = encode_device_unmap(1, 3).unwrap();
+        assert_eq!(cmds[0], ItsCommand::mapd(1, 0, 0, false).unwrap());
+        assert_eq!(cmds[1], ItsCommand::sync(3));
+    }
+
+    #[test]
+    fn its_event_limit_matches_mapd_size() {
+        assert_eq!(its_event_limit(ITS_MAPD_SIZE), Some(16));
+        assert_eq!(its_event_limit(32), None);
+        assert_eq!(its_event_limit(31), None);
     }
 }

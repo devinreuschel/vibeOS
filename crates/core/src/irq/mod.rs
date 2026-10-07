@@ -16,7 +16,8 @@ pub use chip::{
 };
 pub use its::{
     ITS_CMD_DISCARD, ITS_CMD_MAPC, ITS_CMD_MAPD, ITS_CMD_MAPTI, ITS_CMD_MOVI, ITS_CMD_SYNC,
-    ITS_FREE_WAIT_NS, ItsCommand, encode_free_sequence,
+    ITS_MAPD_SIZE, ItsCommand, encode_device_unmap, encode_free_sequence, encode_lpi_free,
+    its_event_limit,
 };
 
 use crate::vectors;

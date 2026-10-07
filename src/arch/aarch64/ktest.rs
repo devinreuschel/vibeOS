@@ -192,7 +192,9 @@ pub(crate) fn test_its_doorbell() -> Outcome {
         return Outcome::Fail("handler");
     }
     chip.unmask(hwirq);
-    crate::arch::aarch64::gic::map_its_event(0, hwirq);
+    if let Err(e) = crate::arch::aarch64::gic::map_its_event(0, hwirq) {
+        return Outcome::Fail(e.as_str());
+    }
     let msg = match chip.compose_msi(hwirq, 0) {
         Ok(m) => m,
         Err(e) => return Outcome::Fail(e.as_str()),

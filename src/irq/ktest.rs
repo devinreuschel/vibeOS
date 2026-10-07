@@ -4,6 +4,8 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
+#[cfg(target_arch = "aarch64")]
+use vibeos::dev::DevRef;
 use vibeos::ipi::MAX_IPI_CPUS;
 use vibeos::irq::{self, IrqError, IrqId, IrqSpecifier};
 use vibeos::kalloc::TryVec;
@@ -1182,6 +1184,158 @@ pub(crate) fn unowned_vector_storm() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "aarch64")]
+static LPI_FIRST: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_arch = "aarch64")]
+static LPI_SECOND: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_arch = "aarch64")]
+fn ack_edu(va: u64) {
+    if va == 0 {
+        return;
+    }
+    let st = mmio_r32(va, EDU_IRQSTAT);
+    if st != 0 {
+        mmio_w32(va, EDU_ACK, st);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn on_lpi_first() {
+    ack_edu(IRQ_MMIO.load(Ordering::SeqCst));
+    LPI_FIRST.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn on_lpi_second() {
+    ack_edu(IRQ_MMIO.load(Ordering::SeqCst));
+    LPI_SECOND.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn lpi_realloc_cleanup(dev: &DevRef, saved: u16, mmio: u64, irqs: &[Option<IrqId>; 2]) {
+    ack_edu(mmio);
+    if let Some(cap) = dev.caps.msi {
+        irq_init::disable_msi(dev.addr, cap);
+    }
+    if dev.caps.msix.is_some() {
+        irq_init::disable_msix(dev);
+    }
+    let mut i = 0usize;
+    while i < irqs.len() {
+        if let Some(irq) = irqs.get(i).copied().flatten() {
+            let _ = irq_init::free_vector(irq);
+        }
+        i += 1;
+    }
+    pci_init::update_command(dev.addr, saved, !saved);
+    crate::arch::aarch64::gic::ktest_watch_intid(0);
+    IRQ_MMIO.store(0, Ordering::SeqCst);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn arm_edu_msi(dev: &DevRef, irq: IrqId) -> Result<(), &'static str> {
+    if let Some(cap) = dev.caps.msi {
+        return irq_init::enable_msi(dev.addr, cap, irq).map_err(|e| e.as_str());
+    }
+    if dev.caps.msix.is_some() {
+        return irq_init::enable_msix(dev, 0, irq).map_err(|e| e.as_str());
+    }
+    Err("no msi")
+}
+
+/// Alloc, free, alloc one LPI on edu. The freed INTID is unpublished and
+/// stays quiet; the second allocation is the one that fires.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn lpi_free_realloc() -> Outcome {
+    if !crate::arch::aarch64::gic::has_its() {
+        return Outcome::Skip("no its");
+    }
+    let Some(dev) = find_edu() else {
+        return Outcome::Fail("no edu");
+    };
+    let Some(mmio) = bar0_va(&dev) else {
+        return Outcome::Fail("edu bar0");
+    };
+    if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
+        return Outcome::Fail("edu ident");
+    }
+    LPI_FIRST.store(0, Ordering::SeqCst);
+    LPI_SECOND.store(0, Ordering::SeqCst);
+    crate::arch::aarch64::gic::ktest_watch_intid(0);
+    let saved = pci_init::cfg_read16(dev.addr, CFG_COMMAND);
+    pci_init::update_command(dev.addr, CMD_MEM | CMD_MASTER | CMD_INTX_DISABLE, 0);
+    let mut irqs = [None, None];
+    let fail = |why: &'static str, irqs: [Option<IrqId>; 2]| {
+        lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+        Outcome::Fail(why)
+    };
+    let first =
+        match irq_init::alloc_msi(&dev, 1).and_then(|s| s.get(0).ok_or(irq::IrqError::Exhausted)) {
+            Ok(irq) => irq,
+            Err(e) => return fail(e.as_str(), irqs),
+        };
+    irqs[0] = Some(first);
+    let Some(old_hwirq) = irq_init::hwirq_of(first) else {
+        return fail("no hwirq", irqs);
+    };
+    if irq_init::set_handler(first, on_lpi_first).is_err() {
+        return fail("handler", irqs);
+    }
+    if let Err(why) = arm_edu_msi(&dev, first) {
+        return fail(why, irqs);
+    }
+    IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    mmio_w32(mmio, EDU_RAISE, 1);
+    if !spin_until_ns(|| LPI_FIRST.load(Ordering::SeqCst) != 0, 500_000_000) {
+        return fail("no first", irqs);
+    }
+    let first_hits = LPI_FIRST.load(Ordering::SeqCst);
+    if irq_init::free_vector(first).is_err() {
+        return fail("free", irqs);
+    }
+    irqs[0] = None;
+    if crate::arch::aarch64::gic::lookup(old_hwirq) != 0 {
+        return fail("stale irq", irqs);
+    }
+    crate::arch::aarch64::gic::ktest_watch_intid(old_hwirq);
+    mmio_w32(mmio, EDU_RAISE, 1);
+    let t0 = time_init::now_ns();
+    while time_init::now_ns().saturating_sub(t0) < 50_000_000 {
+        spin_loop();
+    }
+    if crate::arch::aarch64::gic::ktest_lpi_seen() != 0 {
+        return fail("freed lpi", irqs);
+    }
+    if LPI_FIRST.load(Ordering::SeqCst) != first_hits {
+        return fail("old handler", irqs);
+    }
+    ack_edu(mmio);
+    let second =
+        match irq_init::alloc_msi(&dev, 1).and_then(|s| s.get(0).ok_or(irq::IrqError::Exhausted)) {
+            Ok(irq) => irq,
+            Err(e) => return fail(e.as_str(), irqs),
+        };
+    irqs[1] = Some(second);
+    if irq_init::set_handler(second, on_lpi_second).is_err() {
+        return fail("handler 2", irqs);
+    }
+    if let Err(why) = arm_edu_msi(&dev, second) {
+        return fail(why, irqs);
+    }
+    mmio_w32(mmio, EDU_RAISE, 1);
+    if !spin_until_ns(|| LPI_SECOND.load(Ordering::SeqCst) != 0, 500_000_000) {
+        return fail("no second", irqs);
+    }
+    if LPI_FIRST.load(Ordering::SeqCst) != first_hits {
+        lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+        return Outcome::Fail("old handler");
+    }
+    lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -1193,6 +1347,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("msix_cpu", test_msix_cpu),
     test("intx_fallback", test_intx_fallback),
     test("intx_free_masks", test_intx_free_masks),
+    #[cfg(target_arch = "aarch64")]
+    test("lpi_free_realloc", lpi_free_realloc),
     test("msix_cpu_publish_last", msix_cpu_publish_last),
     test("lifetime_shootdown_ack_late", lifetime_shootdown_ack_late).deadline(15_000),
     test("shootdown_ack_while_busy", shootdown_ack_while_busy).deadline(13_000),
