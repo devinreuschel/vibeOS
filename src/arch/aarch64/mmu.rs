@@ -79,6 +79,16 @@ impl PageTable for Arch {
     fn flush_local_all() {
         cpu::tlbi_all();
     }
+
+    #[inline]
+    fn bbm_break(va: VirtAddr) {
+        cpu::bbm_break(va.as_u64());
+    }
+
+    #[inline]
+    fn bbm_make() {
+        cpu::bbm_make();
+    }
 }
 
 /// NX is a leaf bit on aarch64; Limine already honours UXN/PXN.

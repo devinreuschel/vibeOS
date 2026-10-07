@@ -1,7 +1,7 @@
 //! Host tests for `mm::paging`.
 
 use super::*;
-use crate::arch::stub::Arch;
+use crate::arch::stub::{self, Arch, Event};
 use crate::pmm::testing::Pool;
 
 #[test]
@@ -505,4 +505,37 @@ fn walk_ranges_coalesces_and_skips_holes() {
         VirtAddr(0xFFFF_D000_0010_0000)
     ));
     assert!(!m.range_unmapped(a, VirtAddr(a.0 + PAGE_SIZE_4K)));
+}
+
+#[test]
+fn invalidate_runs_break_then_make() {
+    stub::reset();
+    let mut pool = Pool::new(64);
+    let mut m = fresh_mapper(&mut pool);
+    let va = VirtAddr(0xFFFF_C000_0000_0000);
+    let pa = PhysAddr(0x0080_0000);
+    map_ok(
+        &mut m,
+        &mut pool,
+        va,
+        pa,
+        physmap_flags(),
+        PageSize::Size4K,
+        MapMode::Fresh,
+    )
+    .unwrap();
+    stub::reset();
+    map_ok(
+        &mut m,
+        &mut pool,
+        va,
+        PhysAddr(0x0090_0000),
+        physmap_flags(),
+        PageSize::Size4K,
+        MapMode::Invalidate,
+    )
+    .unwrap();
+    let log = stub::take_events();
+    assert_eq!(log.dropped(), 0);
+    assert_eq!(log.as_slice(), &[Event::BbmBreak(va.0), Event::BbmMake]);
 }

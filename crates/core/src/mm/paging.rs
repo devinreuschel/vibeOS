@@ -220,6 +220,14 @@ pub trait PageTable {
     fn flush_local(va: VirtAddr);
     /// Drop this CPU's non-global translations.
     fn flush_local_all();
+    /// Maintenance after the invalid store of break-before-make, before the
+    /// new store. aarch64 runs `BBM_AFTER_INVALID`. Default is [`flush_local`].
+    fn bbm_break(va: VirtAddr) {
+        Self::flush_local(va);
+    }
+    /// Barriers after the new store of break-before-make. aarch64 runs
+    /// `BBM_AFTER_MAKE` (`dsb ishst`, `isb`).
+    fn bbm_make() {}
 }
 
 /// Frame allocator abstraction. Hands out order-0 [`Frames`], one
@@ -280,7 +288,7 @@ pub enum MapMode {
     /// Permission-only overwrite, or global → nG. A live type, PA, size,
     /// Contiguous, or nG → global change is `LiveChange`.
     Remap,
-    /// Break-before-make: clear the leaf, flush this CPU, then store.
+    /// Break-before-make: invalid store, `bbm_break`, new store, `bbm_make`.
     Invalidate,
 }
 
@@ -432,11 +440,12 @@ impl<A: PageTable> Mapper<A> {
         {
             return Err(MapError::LiveChange);
         }
-        if present && mode == MapMode::Invalidate {
+        let invalidate = present && mode == MapMode::Invalidate;
+        if invalidate {
             // SAFETY: as the write below; this is the invalid store of
             // break-before-make (ROADMAP §11.2), established here.
             unsafe { entry_ptr.write_volatile(0) };
-            A::flush_local(va);
+            A::bbm_break(va);
         }
 
         // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract); the
@@ -445,6 +454,9 @@ impl<A: PageTable> Mapper<A> {
         // write (invariant I48, established at
         // `mm::paging_init::current_mapper`).
         unsafe { entry_ptr.write_volatile(A::make_entry(va, pa, leaf_flags)) };
+        if invalidate {
+            A::bbm_make();
+        }
         Ok(())
     }
 
