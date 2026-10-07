@@ -246,6 +246,7 @@ proves the EL0-visible rows that case covers.
 | aarch64 | `SCTLR_EL1.UMA` | 0 | an EL0 access to `DAIF` (`msr daifset`, `msr daifclr`, `mrs`) traps and gets `SIGILL`, so user code never masks an interrupt (§2.5) |
 | aarch64 | `SCTLR_EL1.nTWE` | 1 | `wfe` runs at EL0 |
 | aarch64 | `SCTLR_EL1.nTWI` | 0 | an EL0 `wfi` traps, and the exception handler steps over it, so it returns at once with no signal, as on Linux arm64 |
+| aarch64 | `SCTLR_EL1.TSCXT` | 1 | an EL0 `mrs` or `msr` of `SCXTNUM_EL0` traps and gets `SIGILL` where FEAT_CSV2_2 is present, so the register does not carry state between processes; the bit is RES1 where that feature is absent (Arm ARM DDI0487 SCTLR_EL1) |
 | aarch64 | `SCTLR_EL1.SA0` | 1 | an EL0 load or store through a misaligned SP raises an SP alignment fault and gets `SIGBUS` |
 | aarch64 | `SCTLR_EL1.A` | 0 (ROADMAP §11.1) | an EL0 load or store to Normal memory may be unaligned, as on Linux arm64; the user crate's `aarch64-unknown-linux-musl` code is not built for strict alignment and relies on it |
 | aarch64 | `SCTLR_EL1.E0E` | 0 | EL0 is little-endian |

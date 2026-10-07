@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- aarch64 EL0 cannot read or write `SCXTNUM_EL0`, and an EL0 `wfi` traps and
+  returns at once ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
 - x86 boot under a hypervisor does not read `MSR_PLATFORM_INFO`, so a missing
   MSR's `#GP` does not halt the BSP.
 - An unaligned or overlapping ACPI memory-map entry no longer halts boot at
