@@ -29,6 +29,12 @@ pub(super) fn with_reg<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
     REG.with(f)
 }
 
+/// `name` is a registered command. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn has_command(name: &str) -> bool {
+    with_reg(|r| r.lookup(name).is_some())
+}
+
 /// Subsystems register here. Not a growing `match` on the name.
 pub fn register(cmd: Command) -> bool {
     with_reg(|r| r.register(cmd))
@@ -143,10 +149,6 @@ fn paint(ed: &LineEditor, painted: &mut usize) {
 
 /// Run one command line: the REPL's and the in-guest tests'.
 #[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
-#[cfg_attr(
-    all(target_arch = "aarch64", not(feature = "kernel_shell")),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub fn dispatch_line(line: &str) -> Result<(), &'static str> {
     let mut toks = [""; MAX_TOKENS];
     let n = match vibeos::shell::tokenize(line, &mut toks) {

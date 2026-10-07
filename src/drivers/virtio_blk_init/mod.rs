@@ -49,7 +49,7 @@ mod issue;
 mod vq;
 
 use irq::{blk_top, blk_work};
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub use issue::submit;
 use issue::{Blk, N_SLOTS, SLOT_STRIDE};
 use vq::{FREE, MAX_QSIZE, MAX_VQ, Vq};
@@ -67,10 +67,6 @@ pub(crate) struct VirtioBlk {
             dead_code,
             reason = "held for its count; only the in-guest tests read it"
         )
-    )]
-    #[cfg_attr(
-        all(target_arch = "aarch64", feature = "kernel_tests"),
-        expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     dev: DevRef,
     name: [u8; 4],
@@ -102,7 +98,7 @@ pub(crate) struct VirtioBlk {
     queue_vecs: [AtomicU64; MAX_VQ],
     /// Completions whose device status [`harvest`](Self::harvest) replaces
     /// with `S_UNSUPP` (test-only, AGENTS.md rule 9).
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     inject_unsupp: AtomicU32,
 }
 
@@ -138,7 +134,7 @@ impl VirtioBlk {
             common: AtomicU64::new(0),
             mmio: AtomicBool::new(false),
             queue_vecs: [const { AtomicU64::new(0) }; MAX_VQ],
-            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+            #[cfg(feature = "kernel_tests")]
             inject_unsupp: AtomicU32::new(0),
         }
     }
@@ -510,7 +506,7 @@ fn setup(
         );
         w16(common, COMMON_OFF_QENABLE, 1);
         // Before anything registers the instance or its disk.
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         if qi == 0 && crate::dev::ktest::fail_after_qenable(dev.addr) {
             fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
             return Err(VirtioError::Failed);
@@ -1000,7 +996,7 @@ impl VirtioBlk {
     }
 
     #[cfg_attr(
-        not(all(feature = "kernel_tests", target_arch = "aarch64")),
+        not(feature = "kernel_tests"),
         expect(dead_code, reason = "in-guest virtio-mmio F047 test")
     )]
     pub fn is_mmio(&self) -> bool {
@@ -1035,7 +1031,7 @@ impl VirtioBlk {
 
     /// Replace the device status of the next `n` completions with
     /// `S_UNSUPP` (test-only).
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     pub fn inject_unsupp(&self, n: u32) {
         // Release: pairs with the AcqRel update in `injected`.
         self.inject_unsupp.store(n, Ordering::Release);
@@ -1193,7 +1189,7 @@ impl VirtioBlk {
 
     /// Write `buf` at `lba` with `Fua`: durable when this returns `Ok`.
     /// virtio-blk has no FUA (DESIGN §10.4), so the queue sends a `Flush`.
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     pub fn write_fua(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
         let bs = self.logical_block_size() as usize;
         if bs == 0 || !buf.len().is_multiple_of(bs) {
@@ -1220,13 +1216,13 @@ impl VirtioBlk {
 
 /// Observers the in-guest tests read.
 #[cfg_attr(
-    any(not(feature = "kernel_tests"), target_arch = "aarch64"),
+    not(feature = "kernel_tests"),
     expect(dead_code, reason = "observers only the in-guest tests read")
 )]
 impl VirtioBlk {
     /// The PCI function this instance drives.
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub fn dev(&self) -> &DevRef {
@@ -1234,7 +1230,7 @@ impl VirtioBlk {
     }
 
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub fn features(&self) -> u64 {
@@ -1415,7 +1411,7 @@ fn find_disk<R>(mut f: impl FnMut(&VirtioBlk) -> Option<R>) -> Option<R> {
 /// Run `f` on the disk named `name`; `None` when no bound instance has
 /// that name.
 #[cfg_attr(
-    any(not(feature = "kernel_tests"), target_arch = "aarch64"),
+    not(feature = "kernel_tests"),
     expect(
         dead_code,
         reason = "only the in-guest tests look a disk up by name yet"

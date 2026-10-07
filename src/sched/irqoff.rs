@@ -175,7 +175,8 @@ pub fn report() {
 /// hook that already runs with IF=0 and cannot take one (C-IRQOFF-GUARD's
 /// guard-less form): `syscall_init::first_return`'s fork-wait stall spins
 /// where no `gs:` may be read.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
+#[cfg(target_arch = "x86_64")]
 pub fn deliberate_open(reason: &'static str) {
     #[cfg(feature = "irqoff")]
     tracer::mark_deliberate(reason);
@@ -296,9 +297,9 @@ mod tracer {
             deliberate: cpu.deliberate.load(Ordering::Relaxed),
         };
         let c = close(&s, now, freq);
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         testing::watch_note(crate::arch::cpu_id_hint(), c.ns, s.site);
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         if testing::take(c.ns, s.site, s.deliberate) {
             return;
         }
@@ -307,7 +308,7 @@ mod tracer {
         }
     }
 
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     pub(super) fn mark_deliberate(reason: &'static str) {
         let Some(cpu) = slot() else {
             return;
@@ -457,7 +458,7 @@ mod tracer {
     }
 
     /// The in-guest tests' capture (`sched::irqoff::testing`).
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     pub(super) mod testing {
         use super::{AtomicBool, AtomicU64, Ordering, Site};
 

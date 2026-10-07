@@ -15,7 +15,7 @@ use vibeos::part::{
     self, MBR_EXTENDED, MBR_LINUX, PartKind, Table, gpt_type_name, mbr_type_name, pack_ebr,
     pack_mbr,
 };
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 use vibeos::part::{
     GPT_ENTRY_SIZE, GUID_EFI, GUID_LINUX, GptHeaderInfo, entries_crc, pack_gpt_entry,
     pack_gpt_header, pack_protective_mbr,
@@ -29,11 +29,11 @@ const RAM0_EXT: u32 = 120;
 const RAM0_EXT_N: u32 = 80;
 const RAM0_EBR2: u32 = 160;
 
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 const VDA_P1: u64 = 256;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 const VDA_P1_N: u64 = 128;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 const VDA_P2: u64 = 512;
 
 /// Set once `init` has scanned; `block::ktest` reads it.
@@ -161,7 +161,7 @@ fn stamp_ram0_mbr(ram0: &BlockRef) -> Result<(), BlockError> {
 /// True when LBA 0 to 33 and the last 33 sectors of `vda` all read back as
 /// zeros: the only disk the `kernel_tests` build stamps (F003, DESIGN §10.5).
 /// A read error is returned, never read as blank.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 fn vda_blank(vda: &BlockRef, cap: u64) -> Result<bool, BlockError> {
     let mut sec = [0u8; 512];
     let tail = cap.checked_sub(33).ok_or(BlockError::Inval)?;
@@ -182,7 +182,7 @@ fn vda_blank(vda: &BlockRef, cap: u64) -> Result<bool, BlockError> {
 
 /// Test builds only: stamps the fixed two-entry GPT the vdap1/vdap2 tests
 /// read, and only on an all-zero `vda` (F003).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 fn stamp_vda_gpt(vda: &BlockRef) -> Result<(), BlockError> {
     let cap = vda.capacity_sectors()?;
     let bs = vda.logical_block_size()?;
@@ -316,42 +316,27 @@ pub fn init() {
             e.as_str()
         );
     }
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     if let Some(vda) = blockdev_init::lookup(b"vda")
         && !matches!(parse_dev(&vda), Ok(t) if t.n > 0)
     {
         // Only a blank vda is stamped (F003); any other is left as it is.
         let _stamped = stamp_vda_gpt(&vda).is_ok();
     }
-    // aarch64 boot-CPU S7 (#205): virtio-blk I/O waits on MSI (ITS / GICv2m).
-    // That device path is Phase 11 S9 (#207). Scan only the ramdisk here.
-    #[cfg(target_arch = "aarch64")]
-    if let Some(ram0) = blockdev_init::lookup(b"ram0")
-        && let Err(e) = scan(&ram0)
-    {
-        crate::klog!(
-            vibeos::log::Level::Debug,
-            "vibeOS: part: ram0: no table: {}",
-            e.as_str()
-        );
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        let mut all: [Option<BlockRef>; MAX_BLOCKDEVS] = [const { None }; MAX_BLOCKDEVS];
-        let n = blockdev_init::snapshot(&mut all);
-        for d in all.iter().take(n).flatten() {
-            if d.parent().is_none() {
-                // A disk with no table has no children: recorded at debug
-                // level, since most disks have none. Each entry
-                // `register_table` drops is logged there.
-                if let Err(e) = scan(d) {
-                    crate::klog!(
-                        vibeos::log::Level::Debug,
-                        "vibeOS: part: {}: no table: {}",
-                        d.name().as_str(),
-                        e.as_str()
-                    );
-                }
+    let mut all: [Option<BlockRef>; MAX_BLOCKDEVS] = [const { None }; MAX_BLOCKDEVS];
+    let n = blockdev_init::snapshot(&mut all);
+    for d in all.iter().take(n).flatten() {
+        if d.parent().is_none() {
+            // A disk with no table has no children: recorded at debug
+            // level, since most disks have none. Each entry
+            // `register_table` drops is logged there.
+            if let Err(e) = scan(d) {
+                crate::klog!(
+                    vibeos::log::Level::Debug,
+                    "vibeOS: part: {}: no table: {}",
+                    d.name().as_str(),
+                    e.as_str()
+                );
             }
         }
     }

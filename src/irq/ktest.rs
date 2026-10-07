@@ -5,18 +5,24 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
 use vibeos::ipi::MAX_IPI_CPUS;
-use vibeos::irq::{self, IrqError, IrqId, IrqSpecifier};
+#[cfg(target_arch = "x86_64")]
+use vibeos::irq::IrqError;
+use vibeos::irq::{self, IrqId, IrqSpecifier};
 use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
-use vibeos::pci::{Bdf, CFG_COMMAND, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
+use vibeos::pci::{Bdf, CMD_INTX_DISABLE};
+#[cfg(target_arch = "x86_64")]
+use vibeos::pci::{CFG_COMMAND, CMD_MASTER, CMD_MEM};
 use vibeos::thread::ThreadState;
 use vibeos::vectors;
 
 use crate::apic_init;
 use crate::ipi_init;
 use crate::irq_init;
+#[cfg(target_arch = "x86_64")]
+use crate::ktest::cpu_remote;
 use crate::ktest::{
-    EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, alloc_frames_owned, bar0_va, cpu_remote, find_edu,
+    EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, alloc_frames_owned, bar0_va, find_edu,
     free_frames_owned, mmio_r32, mmio_w32, quiescent_free_frames, second_cpu, spawn_thread_on,
     spin_until_ns, test,
 };
@@ -77,21 +83,29 @@ pub(crate) fn test_call_function_ipi() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "x86_64")]
 const E1000_ICR: u32 = 0xC0;
 
+#[cfg(target_arch = "x86_64")]
 const E1000_ICS: u32 = 0xC8;
 
+#[cfg(target_arch = "x86_64")]
 const E1000_IMS: u32 = 0xD0;
 
+#[cfg(target_arch = "x86_64")]
 const E1000_IMC: u32 = 0xD8;
 
+#[cfg(target_arch = "x86_64")]
 const E1000_IVAR: u32 = 0xE4;
 
+#[cfg(target_arch = "x86_64")]
 const E1000_ICR_LSC: u32 = 1 << 2;
 
+#[cfg(target_arch = "x86_64")]
 const E1000_ICR_OTHER: u32 = 1 << 24;
 
 /// Other -> MSI-X table entry 0, valid.
+#[cfg(target_arch = "x86_64")]
 const E1000_IVAR_OTHER0: u32 = 0x8 << 16;
 
 const EDU_IRQSTAT: u32 = 0x24;
@@ -154,6 +168,7 @@ fn record_irq_cpu() {
     IRQ_HITS.fetch_add(1, Ordering::SeqCst);
 }
 
+#[cfg(target_arch = "x86_64")]
 fn on_msix() {
     match irq_init::allocate(0) {
         Err(IrqError::InIrq) => IRQ_ALLOC.store(1, Ordering::SeqCst),
@@ -287,6 +302,14 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
     Outcome::Ok
 }
 
+/// GICv3 `set_affinity` does not `MOVI` an LPI yet (ROADMAP §11.3).
+/// `its_doorbell` writes the doorbell; it is not this test.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_msix_cpu() -> Outcome {
+    Outcome::Skip("x86 MSI-X affinity")
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 pub(crate) fn test_msix_cpu() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
@@ -864,6 +887,7 @@ pub(crate) fn reschedule_count() -> u64 {
 }
 
 /// Shootdown requests this kernel has serviced since boot.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn shootdown_count() -> u64 {
     ipi_init::SHOOT_COUNT.load(Ordering::Relaxed)
 }

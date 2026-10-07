@@ -3,7 +3,7 @@
 pub(crate) mod fat_init;
 pub(crate) mod file_init;
 pub(crate) mod fs_init;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

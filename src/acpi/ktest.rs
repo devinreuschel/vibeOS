@@ -1,12 +1,17 @@
 //! In-guest tests for acpi (kernel_tests only). Rows: [`TESTS`].
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::paging::{PageFlags, VirtAddr};
 
+#[cfg(target_arch = "x86_64")]
 use crate::acpi_init;
 use crate::ktest::{Outcome, Test, test};
+#[cfg(target_arch = "x86_64")]
 use crate::machine_init;
+#[cfg(target_arch = "x86_64")]
 use crate::paging_init;
 
+#[cfg(target_arch = "x86_64")]
 fn leaf_is_uc(va: u64) -> bool {
     if va == 0 {
         return false;
@@ -18,6 +23,18 @@ fn leaf_is_uc(va: u64) -> bool {
 }
 
 pub(crate) fn test_acpi_discovery() -> Outcome {
+    #[cfg(target_arch = "aarch64")]
+    {
+        Outcome::Skip("x86 ACPI tables")
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        test_acpi_discovery_x86()
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn test_acpi_discovery_x86() -> Outcome {
     let Some(info) = acpi_init::info() else {
         return Outcome::Fail("no acpi info");
     };

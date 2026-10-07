@@ -48,7 +48,7 @@ use vibeos::thread::{ThreadId, ThreadState};
 
 #[cfg(target_arch = "x86_64")]
 use crate::apic_init;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{
     FrameCount, Outcome, Test, dying_entry, quiescent_free_frames, registry_tid, second_cpu,
     sleep_until, spin_until_ns, test,
@@ -66,57 +66,6 @@ use crate::work_init;
 use crate::x86;
 
 static SENTINEL: AtomicU64 = AtomicU64::new(0);
-
-/// Set while `test_idle_wfi` waits in the idle loop: the hook between the
-/// work check and `wfi` wakes `IDLE_TID` and sends this CPU the reschedule
-/// SGI (ROADMAP §11.3).
-#[cfg(target_arch = "aarch64")]
-static IDLE_HOOK: AtomicU32 = AtomicU32::new(0);
-#[cfg(target_arch = "aarch64")]
-static IDLE_TID: AtomicU32 = AtomicU32::new(u32::MAX);
-
-/// Idle-loop hook: IRQs still masked, before `wfi`.
-#[cfg(target_arch = "aarch64")]
-pub(crate) fn idle_pre_wait() {
-    if IDLE_HOOK.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    IDLE_HOOK.store(0, Ordering::Release);
-    let tid = ThreadId(IDLE_TID.load(Ordering::Acquire));
-    if tid.0 != u32::MAX {
-        thread_init::make_ready(tid);
-    }
-    crate::arch::aarch64::ipi::send_reschedule_self();
-}
-
-#[cfg(target_arch = "aarch64")]
-fn idle_wfi_entry() {
-    IDLE_WOKE.store(1, Ordering::Release);
-}
-
-#[cfg(target_arch = "aarch64")]
-pub(crate) fn test_idle_wfi() -> Outcome {
-    use crate::arch::aarch64::timer;
-    let Ok(h) = thread_init::spawn_parked_on("idle-wfi", idle_wfi_entry, 0) else {
-        return Outcome::Fail("spawn");
-    };
-    IDLE_TID.store(h.id().0, Ordering::Release);
-    IDLE_WOKE.store(0, Ordering::Release);
-    timer::disable();
-    IDLE_HOOK.store(1, Ordering::Release);
-    // Same wait as the idle thread: runq empty, hook, `wfi` still masked.
-    thread_init::halt_if_idle();
-    thread_init::yield_now();
-    timer::enable();
-    IDLE_TID.store(u32::MAX, Ordering::Release);
-    if IDLE_WOKE.load(Ordering::Acquire) == 0 {
-        return Outcome::Fail("idle wfi did not wake");
-    }
-    Outcome::Ok
-}
-
-#[cfg(target_arch = "aarch64")]
-static IDLE_WOKE: AtomicU32 = AtomicU32::new(0);
 
 fn sentinel_entry() {
     SENTINEL.store(0xC0FFEE, Ordering::SeqCst);
@@ -610,8 +559,9 @@ pub(crate) fn test_workqueue() -> Outcome {
     Outcome::Ok
 }
 
-/// The registry's stack size ROADMAP §10.2 names.
-const REGISTRY_STACK_BYTES: u64 = 64 * 1024;
+/// The registry stack `ktest::run` spawns: 64 KiB on x86_64 (ROADMAP §10.2),
+/// 16 KiB on aarch64 (ROADMAP §11.3).
+const REGISTRY_STACK_BYTES: u64 = (crate::ktest::REGISTRY_STACK_PAGES as u64) * PAGE_SIZE_4K;
 
 /// How long [`ktest_context`] yields for its worker.
 const WORKER_WAIT_NS: u64 = 1_000_000_000;
@@ -684,7 +634,11 @@ pub(crate) fn ktest_context() -> Outcome {
         let stack = unsafe { &(*crate::arch::current_tcb()).stack };
         return match stack {
             Some(ks) if (ks.pages() as u64) * PAGE_SIZE_4K != REGISTRY_STACK_BYTES => {
-                Outcome::Fail("registry stack not 64 KiB")
+                crate::fail_fmt!(
+                    "registry stack {} KiB, want {} KiB",
+                    (ks.pages() as u64) * PAGE_SIZE_4K / 1024,
+                    REGISTRY_STACK_BYTES / 1024
+                )
             }
             _ => Outcome::Fail("registry stack not guarded"),
         };
@@ -810,7 +764,7 @@ pub(crate) fn spawn_stack_oom() -> Outcome {
 
 // fork(): exit 0 when it returns -ENOMEM, 1 when it returns a pid; a
 // child exits 2.
-user_code!(
+x86_user_code!(
     FORK_ENOMEM,
     "
     mov eax, 57
@@ -1011,7 +965,7 @@ pub(crate) fn lifetime_stack_reclaim() -> Outcome {
 
 // Spin about 10 million iterations (several 10 ms quanta under TCG), then
 // exit(0).
-user_code!(
+x86_user_code!(
     SPIN_EXIT0,
     "
     mov ecx, 10000000
@@ -1095,7 +1049,7 @@ pub(crate) fn exit_burst() -> Outcome {
 
 // P: fill XMM0-15 with the pattern, sched_yield 20,000 times, then exit 0
 // only if all 16 still hold it.
-user_code!(
+x86_user_code!(
     FP_PATTERN_YIELD,
     "
     mov rax, 0x5A5A5A5A5A5A5A5A
@@ -1182,7 +1136,7 @@ user_code!(
 );
 
 // Q: exit 1 if any XMM register holds P's pattern at entry, else 0.
-user_code!(
+x86_user_code!(
     FP_PATTERN_PROBE,
     "
     mov rbx, 0x5A5A5A5A5A5A5A5A
@@ -1284,7 +1238,7 @@ pub(crate) fn test_fp_no_leak() -> Outcome {
 
 // Keep a counter in xmm0 and in memory, compare them on every iteration,
 // exit 1 on a mismatch; getpid every 4,096 iterations so a kill lands.
-user_code!(
+x86_user_code!(
     FP_COUNTER,
     "
     sub rsp, 16
@@ -1373,6 +1327,11 @@ pub(crate) fn boot_stack_guarded() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
+    Outcome::Skip("x86 timer vector")
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -1382,11 +1341,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("sleep_ms_50", test_sleep_ms_50),
     test("preempt_two_threads", test_preempt_two_threads),
     test("idle_runs", test_idle_runs),
-    #[cfg(target_arch = "aarch64")]
-    test("idle_wfi", test_idle_wfi),
     test("reap_returns_frames", test_reap_returns_frames),
     test("reap_many_via_idle", test_reap_many_via_idle),
-    #[cfg(target_arch = "x86_64")]
     test("sched_lock_timer_irq", test_sched_lock_timer_irq),
     test("spawn_exit_thousands", test_spawn_exit_thousands),
     test("cross_cpu_spawn", test_cross_cpu_spawn),

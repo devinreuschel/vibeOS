@@ -75,9 +75,25 @@ pub fn affinity_info(target: u64) -> i64 {
     unsafe { psci_call(psci::AFFINITY_INFO, target, 0, 0) }
 }
 
-/// PSCI `SYSTEM_OFF` for the ktest pass verdict (QEMU exits 0).
+/// ktest pass code (`ktest::EXIT_PASS`). A pass is PSCI `SYSTEM_OFF`
+/// (QEMU exits 0). Any other code is a fail: write pvpanic's panicked
+/// bit and wait. QEMU with `-action panic=pause` reports
+/// `GUEST_PANICKED`. Semihosting is not used (ROADMAP §11.7).
+#[cfg(feature = "kernel_tests")]
+const EXIT_PASS: u32 = 0x10;
+
+/// End a ktest run. Pass powers off; fail signals `pvpanic-pci` and waits.
 #[cfg(feature = "kernel_tests")]
 pub fn qemu_exit(code: u32) -> ! {
-    let _ = code;
-    power_off();
+    if code == EXIT_PASS {
+        power_off();
+    }
+    crate::log::pvpanic_init::signal(vibeos::log::pvpanic::Step::Halt);
+    // SAFETY: the fail verdict parks this CPU until QEMU pauses on the
+    // pvpanic write; established here.
+    unsafe {
+        loop {
+            asm!("wfi", options(nomem, nostack, preserves_flags));
+        }
+    }
 }

@@ -119,3 +119,9 @@ commit = "d1f68f825e3928612cecd7ff7d33ba7f35462bb0"
 was = "make test-aarch64 -- `make test-kernel ARCH=aarch64` and the e2e"
 proves = "make test-aarch64 -- CI runs the aarch64"
 why = "S10 (#234) squash kept this trailer after the same squash reopened the §11.7 e2e+kernel+GICv2 box; remap it onto the ticked CI aarch64-jobs box"
+
+[[erratum]]
+commit = "e459ebaf1c8d2501a26e026242ca8bb13db0b852"
+was = ""
+proves = "loom_call_function_reuse -- the §4.9 call-function slot is safe to reuse"
+why = "C2 (#300) squash dropped the Proves line; 063778ef carried this trailer for the rewritten call-function box"

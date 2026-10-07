@@ -3,21 +3,29 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::kva::DEFAULT_STACK_PAGES;
+#[cfg(not(target_arch = "aarch64"))]
+use vibeos::time::CalibSource;
 #[cfg(target_arch = "x86_64")]
 use vibeos::time::{CALIB_BAND_INVARIANT, calib_in_band};
-use vibeos::time::{
-    CalibSource, ClocksourceId, Counter, Instant, RELOAD_SPANS, ReloadSpans, Snapshot, TICK_NS,
-    next_deadline, ns_at, unix_from_civil,
-};
+use vibeos::time::{ClocksourceId, Counter, Snapshot, ns_at};
+#[cfg(target_arch = "x86_64")]
+use vibeos::time::{Instant, ReloadSpans, next_deadline};
+#[cfg(target_arch = "x86_64")]
+use vibeos::time::{RELOAD_SPANS, TICK_NS, unix_from_civil};
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::apic::TimerMode;
 
+#[cfg(target_arch = "x86_64")]
 use crate::apic_init;
 use crate::ktest::{Outcome, Test, test};
+#[cfg(not(target_arch = "aarch64"))]
 use crate::machine_init;
 use crate::per_cpu_init;
 use crate::thread_init;
-use crate::time_init::{self, STATE};
+use crate::time_init;
+#[cfg(not(target_arch = "aarch64"))]
+use crate::time_init::STATE;
 
 /// A fresh PIT channel 2 calibration (`tsc_per_ms`).
 #[cfg(target_arch = "x86_64")]
@@ -35,6 +43,7 @@ pub(crate) fn measure_hpet() -> Option<u64> {
 }
 
 /// Which source calibrated the TSC at boot.
+#[cfg(not(target_arch = "aarch64"))]
 pub(crate) fn source() -> CalibSource {
     STATE
         .try_get()
@@ -42,12 +51,14 @@ pub(crate) fn source() -> CalibSource {
         .unwrap_or(CalibSource::Pit)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn deadline_after(now: Instant) -> Instant {
     next_deadline(now)
 }
 
 /// PIT interrupts [`test_pit_tick_rate`] waits for after it has read the
 /// period: the tick still arrives.
+#[cfg(target_arch = "x86_64")]
 const PIT_FIRES_MIN: u64 = 20;
 
 /// The reload period, in TSC cycles, of the down-counting timer `count`
@@ -59,6 +70,7 @@ const PIT_FIRES_MIN: u64 = 20;
 /// band the callers test. Under TCG the count is QEMU's clock at the read, whenever
 /// the host delivers the timer's interrupts. `Err` with the spans taken
 /// when the run's deadline comes first.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn reload_period(count: impl Fn() -> u64, tsc_per_ms: u64) -> Result<u64, usize> {
     let mut spans = ReloadSpans::new(tsc_per_ms / 4);
     loop {
@@ -84,6 +96,7 @@ pub(crate) fn reload_period(count: impl Fn() -> u64, tsc_per_ms: u64) -> Result<
 /// 2 ms, and the PIT's interrupts keep arriving. The interrupts' own
 /// arrival times are the host's: QEMU's main loop raises them, and a
 /// macOS host wakes it no more often than every 5 to 10 ms (ROADMAP §10.2).
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_pit_tick_rate() -> Outcome {
     if apic_init::timer_mode() != TimerMode::Pit {
         return Outcome::Fail("pit does not drive the tick");
@@ -645,6 +658,20 @@ pub(crate) fn test_now_us_planted_tear() -> Outcome {
 /// sample. Without an invariant TSC (TCG) the band means nothing, so it
 /// skips; the nightly KVM leg runs it.
 pub(crate) fn test_tsc_calib_source() -> Outcome {
+    // CNTFRQ is the counter and `invariant_tsc` stays clear. The TCG row
+    // already expects this reason; the aarch64 row covers HVF.
+    #[cfg(target_arch = "aarch64")]
+    {
+        Outcome::Skip("no invariant tsc")
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        test_tsc_calib_source_x86()
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn test_tsc_calib_source_x86() -> Outcome {
     let present = machine_init::info().is_some_and(|d| d.hpet_info().is_some());
     let k = time_init::tsc_per_ms();
     match source() {
@@ -694,8 +721,10 @@ pub(crate) fn test_tsc_calib_source() -> Outcome {
 }
 
 /// Seconds in a mean Gregorian year, to name the year a bad RTC reads.
+#[cfg(target_arch = "x86_64")]
 const MEAN_YEAR_S: u64 = 31_556_952;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_rtc_offset() -> Outcome {
     let Some(a) = time_init::unix_time_s() else {
         return Outcome::Skip("rtc unread");
@@ -774,12 +803,13 @@ static IF_OFF_VALS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static IF_OFF_REF: AtomicU64 = AtomicU64::new(0);
 
 /// A counter to measure the clocksource against: the TSC under the HPET or
-/// the PM timer; under the TSC, the HPET, else the PM timer.
+/// the PM timer; under the TSC, the HPET, else the PM timer. CNTVCT is the
+/// only counter on aarch64, so the check is that `now_ns` tracks it.
 fn reference(cs: ClocksourceId) -> Option<Counter> {
     let order: &[ClocksourceId] = match cs {
         ClocksourceId::Tsc => &[ClocksourceId::Hpet, ClocksourceId::AcpiPm],
         ClocksourceId::Hpet | ClocksourceId::AcpiPm => &[ClocksourceId::Tsc],
-        ClocksourceId::Cntvct => &[],
+        ClocksourceId::Cntvct => &[ClocksourceId::Cntvct],
     };
     order.iter().find_map(|&id| time_init::counter(id))
 }
@@ -893,6 +923,11 @@ pub(crate) fn test_clocksource_if_off_50ms() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_pit_tick_rate() -> Outcome {
+    Outcome::Skip("x86 PIT")
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -901,6 +936,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("now_us_under_yields", test_now_us_under_yields),
     test("now_us_planted_tear", test_now_us_planted_tear),
     test("tsc_calib_source", test_tsc_calib_source),
+    #[cfg(target_arch = "x86_64")]
     test("rtc_offset", test_rtc_offset),
     test("clocksource_if_off_50ms", test_clocksource_if_off_50ms),
 ];

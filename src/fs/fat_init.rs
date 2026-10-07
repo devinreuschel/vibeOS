@@ -172,7 +172,7 @@ impl Disk for Io<'_> {
                 Ok(())
             }),
             Media::Dev(r) => {
-                #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+                #[cfg(feature = "kernel_tests")]
                 crate::fs::ktest::blk_request_hook();
                 r.read(u64::from(lba), buf).map_err(fat_io_err)
             }
@@ -199,9 +199,9 @@ impl Disk for Io<'_> {
                 Ok(())
             }),
             Media::Dev(r) => {
-                #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+                #[cfg(feature = "kernel_tests")]
                 crate::fs::ktest::blk_request_hook();
-                #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+                #[cfg(feature = "kernel_tests")]
                 crate::fs::ktest::on_cache_write();
                 r.write(u64::from(lba), buf).map_err(fat_io_err)
             }
@@ -362,7 +362,7 @@ impl InodeOps for FatOps {
             }
             Ok((m.from != m.to).then_some([m.to.0, m.to.1, 0]))
         })?;
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         crate::fs::ktest::fat_rename_hook();
         Ok(moved)
     }
@@ -376,7 +376,7 @@ impl InodeOps for FatOps {
     ) -> Result<usize, FsError> {
         let vol = vol_of(cx)?;
         with_vol(vol, |v, d| {
-            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+            #[cfg(feature = "kernel_tests")]
             if matches!(vol.media, Media::Dev(_)) {
                 crate::fs::ktest::fat_read_hook();
             }
@@ -640,7 +640,7 @@ fn new_volume(media: Media) -> Result<Instance, FsError> {
 
 /// A used volume that nothing mounts or reaches, for the volume-lock test
 /// `fs_drop_slot_waits_for_holder` (test-only).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(super) fn spare_volume() -> Result<Instance, FsError> {
     let fv = crate::fs::boxed_copy(&FAT_VOL_INIT).map_err(|_| FsError::NoMem)?;
     vibeos::dev::instance(FatVolume {
@@ -655,7 +655,7 @@ pub(super) fn spare_volume() -> Result<Instance, FsError> {
 
 /// Run `f` holding volume `v`'s lock, as another holder would
 /// (test-only: `fs_drop_slot_waits_for_holder`).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(super) fn hold<R>(v: &FatVolume, f: impl FnOnce() -> R) -> R {
     let _g = v.vol.lock();
     f()
@@ -685,7 +685,7 @@ pub fn init() {
 /// holds `name`, compared as FAT compares names (without regard to case):
 /// one `FatVol::lookup` per name under the volume lock (test-only:
 /// `fat_initrd_dev_no_null`).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn ktest_dir_has(vol: &Instance, dirs: &[&[u8]], name: &[u8]) -> Result<bool, FsError> {
     with_vol(as_fat(vol)?, |fv, d| {
         let mut clu = fv.info.root_clus;
@@ -707,7 +707,7 @@ pub fn ktest_dir_has(vol: &Instance, dirs: &[&[u8]], name: &[u8]) -> Result<bool
 /// The size and bytes of file `name` in the root directory of the root's
 /// FAT volume, read through its dirent on disk rather than an inode
 /// (test-only: `fat_rename_racing_writes`); `buf` takes what fits.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn ktest_root_file(name: &[u8], buf: &mut [u8]) -> Result<(u64, usize), FsError> {
     let root = root_volume()?;
     with_vol(as_fat(&root)?, |v, d| {
@@ -733,14 +733,14 @@ pub fn df(vol: &FatVolume) -> Result<(FsType, u64, u64, u32), FsError> {
 }
 
 /// The root superblock's FAT volume: the initrd's (test-only).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn root_volume() -> Result<Instance, FsError> {
     fs_init::with(|v| v.root().and_then(|p| v.volume_of(p)))
 }
 
 /// The mounted initrd's image bytes, from its BPB, and its free bytes;
 /// `None` when it is not mounted (`initrd_module_sized`).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn initrd_geometry() -> Option<(u64, u64)> {
     let root = root_volume().ok()?;
     with_vol(as_fat(&root).ok()?, |v, _| {
@@ -767,7 +767,7 @@ pub(super) fn drop_slot(vol: &FatVolume) {
 /// (`Busy` when `ro` differs); one holding another filesystem's volume is
 /// `Busy`. Otherwise the volume is built, becomes the entry's holder, and
 /// is taken back if the mount fails.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<(), FsError> {
     mount_dev_at(None, name, at, ro)
 }

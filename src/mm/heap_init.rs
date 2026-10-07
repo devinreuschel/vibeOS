@@ -21,7 +21,7 @@ use crate::pmm_init;
 use crate::sync_init::SpinMutex;
 
 /// The heap-failure hook's path (C-FAILAFTER); it lives in `mm::ktest`.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) use super::ktest::fail_after;
 
 struct LockedHeap(Heap);
@@ -173,7 +173,7 @@ unsafe impl GlobalAlloc for KernelAlloc {
     /// # Safety
     /// `layout` is a valid allocation request.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         if fail_after::refuse() {
             return ptr::null_mut();
         }
@@ -207,7 +207,7 @@ unsafe impl GlobalAlloc for KernelAlloc {
     /// # Safety
     /// `ptr` came from `alloc` with `layout`; the returned pointer replaces it.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         if fail_after::refuse() {
             return ptr::null_mut();
         }
@@ -245,7 +245,7 @@ static GLOBAL: KernelAlloc = KernelAlloc;
     reason = "DESIGN §4.4: only an infallible allocation reaches this handler, and those run only before irq: enabled"
 )]
 fn on_alloc_error(layout: Layout) -> ! {
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::arch::catch::on_alloc_error(layout);
     panic!(
         "alloc error: size={} align={}",

@@ -441,10 +441,8 @@ def _ktest_boot(
     if SERIAL_FRAME_OK in klines:
         _check_serial_frame(raw.lines)
     check_boot_cpu(klines, cfg)
-    # virtio-blk and GPT stamp are x86 / Phase 11 S9; boot-CPU S7 has neither.
     if cfg.arch == "aarch64":
         check_aarch64_s7(klines, cfg)
-        return raw
     _require_line(klines, _block_name("vda"), "missing virtio-blk marker")
     if not parts:
         return raw

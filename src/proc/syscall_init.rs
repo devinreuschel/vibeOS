@@ -273,7 +273,7 @@ unsafe extern "C" fn vibeos_exit_work(kind: u64, frame: *mut UserFrame) {
 /// off, and check again. Returns with IF=0 once a check finds none. `kind`
 /// is [`EXIT_SYSCALL`] or the vector whose exit this is.
 pub fn exit_work(kind: u64, frame: &mut UserFrame) {
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::proc::ktest::exit_seen(frame);
     // Acquire: pairs with the Release stores in `set_exit_work_hooks`.
     let pending = EXIT_PENDING.load(Ordering::Acquire);
@@ -294,14 +294,14 @@ pub fn exit_work(kind: u64, frame: &mut UserFrame) {
             if !pending() {
                 break;
             }
-            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+            #[cfg(feature = "kernel_tests")]
             crate::proc::ktest::exit_work_found(kind);
             x86::sti();
             work(frame);
             x86::cli();
         }
     }
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     if kind == EXIT_SYSCALL {
         crate::proc::ktest::exit_check_hook(frame);
     }
@@ -322,7 +322,7 @@ unsafe extern "C" fn vibeos_syscall_bad_rip(frame: *mut UserFrame) -> ! {
     // `thread_init::spawn_user`.
     let f = unsafe { &*frame };
     // Relaxed: a count; pairs with nothing.
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     testing::BAD_RIP_KILLS.fetch_add(1, Ordering::Relaxed);
     crate::arch::idt::user_fault(&TrapFrame::for_user(vectors::GP, 0, f));
     #[allow(
@@ -720,7 +720,7 @@ pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
 /// top, the user frame `thread_init::spawn_user` wrote, with a loaded CR3
 /// that maps its user RIP and RSP.
 pub unsafe fn first_return(fs_base: u64) -> ! {
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     testing::on_first_return();
     // The asm's own `cli` finds IF already off; this one tells the irqoff
     // tracer where the return's stretch began.
@@ -743,7 +743,7 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
         | u64::from(segs.gs) << 48;
     // The kernel_tests fork-wait stall spins inside the asm below with
     // IF=0 and may read no `gs:` there, so its stretch is marked here.
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     if testing::fork_wait_stall_armed() {
         crate::sched::irqoff::deliberate_open("fork-wait stall");
     }
@@ -783,7 +783,7 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
             // kernel_tests: hold the window after the GS load open (ROADMAP
             // §10.2, F021); the call keeps the live RDI, RSI and R8, and
             // RSP 16-byte aligned (four pushes).
-            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+            #[cfg(feature = "kernel_tests")]
             "push rdi; push rsi; push r8; push r8; call {stall}; pop r8; pop r8; pop rsi; pop rdi",
             "mov ecx, {gs_base}",
             "mov eax, edi",
@@ -807,7 +807,7 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
             gs_base = const IA32_GS_BASE,
             fs_base = const IA32_FS_BASE,
             frame_pad = const size_of::<UserFrame>() + PAD,
-            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+            #[cfg(feature = "kernel_tests")]
             stall = sym testing::fork_wait_stall_point,
             in("rsi") fs_base,
             in("r9") segs,
@@ -869,7 +869,7 @@ pub unsafe extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     // kernel stack, which only this thread's syscall path refers to
     // (this fn's `# Safety`).
     let frame = unsafe { &mut *frame };
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::log::ktest::syscall_walk_probe(frame.rbp);
     let nr = <Arch as SyscallAbi>::nr(frame);
     vibeos::trace!(SyscallEnter, nr, <Arch as SyscallAbi>::arg(frame, 0));
@@ -884,14 +884,14 @@ pub unsafe extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
         let f = unsafe { core::mem::transmute::<*mut (), fn(&mut UserFrame) -> i64>(p) };
         f(frame)
     };
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     testing::on_exit(frame);
     vibeos::trace!(SyscallExit, nr, r as u64);
     r
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 

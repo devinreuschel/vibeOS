@@ -218,7 +218,7 @@ const _: () = assert!(core::mem::align_of::<Parked>() <= PAGE_SIZE as usize);
 /// # Safety
 ///
 /// As [`park_slot_on_list`]'s, for `stack`.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) unsafe fn park_on_list(head: &mut u64, stack: GuardedStack) {
     // SAFETY: invariant I10, established at `thread_init::finish_switch`
     // for every stack it parks, and by this fn's contract for `stack`;
@@ -372,10 +372,7 @@ impl Vmap {
 
     /// Mapped span in bytes: the frame count times the page size.
     #[cfg_attr(
-        any(
-            not(feature = "kernel_tests"),
-            all(target_arch = "aarch64", feature = "kernel_tests")
-        ),
+        not(feature = "kernel_tests"),
         expect(
             dead_code,
             reason = "ROADMAP §10.3: `kva_init::vmap` returns a move-only handle; only in-guest tests call it until a driver does"

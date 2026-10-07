@@ -22,8 +22,6 @@ use crate::arch;
 use crate::arch::current::{
     Arch, InterruptGuard, interrupts_enabled, irq_disable, irq_enable, qemu_exit,
 };
-#[cfg(target_arch = "aarch64")]
-use crate::dev;
 use crate::ipi_init;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -37,6 +35,8 @@ use crate::x86;
 use crate::{
     acpi, block, boot, console, dev, drivers, fs, irq, log, mm, proc, sched, shell, smp, sync, time,
 };
+#[cfg(target_arch = "aarch64")]
+use crate::{acpi, block, boot, dev, drivers, fs, irq, log, mm, proc, sched, smp, sync, time};
 pub(crate) mod user;
 
 const EXIT_PASS: u32 = 0x10;
@@ -254,23 +254,41 @@ pub(crate) const GROUPS: &[Suite] = &[
 ];
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) const GROUPS: &[Suite] = &[TESTS, arch::ktest::TESTS, dev::ktest::TESTS];
+pub(crate) const GROUPS: &[Suite] = &[
+    TESTS,
+    log::ktest::TESTS,
+    mm::ktest::TESTS,
+    acpi::ktest::TESTS,
+    arch::ktest::TESTS,
+    proc::ktest::TESTS,
+    sync::ktest::TESTS,
+    boot::ktest::TESTS,
+    time::ktest::TESTS,
+    smp::ktest::TESTS,
+    sched::ktest::TESTS,
+    irq::ktest::TESTS,
+    dev::ktest::TESTS,
+    block::ktest::TESTS,
+    drivers::ktest::TESTS,
+    fs::ktest::TESTS,
+];
 
 /// Name of the registry's kernel thread.
 const REGISTRY_NAME: &str = "ktest";
-/// The registry's stack: 64 KiB on x86_64 (ROADMAP §10.2); 16 KiB on
-/// aarch64 (ROADMAP §11.3).
+/// The registry's stack. x86_64: 64 KiB (ROADMAP §10.2). aarch64: 16 KiB,
+/// the one size the vector entry's stack-bit test accepts (ROADMAP §11.3).
+/// `spawn` stays at 16 KiB on both.
 #[cfg(target_arch = "aarch64")]
-const REGISTRY_STACK_PAGES: usize = 4;
+pub(crate) const REGISTRY_STACK_PAGES: usize = 4;
 #[cfg(not(target_arch = "aarch64"))]
-const REGISTRY_STACK_PAGES: usize = 16;
+pub(crate) const REGISTRY_STACK_PAGES: usize = 16;
 
 /// The registry thread's id, `u32::MAX` until it starts.
 static REGISTRY_TID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// The id of the thread [`registry_main`] runs on.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn registry_tid() -> ThreadId {
@@ -351,7 +369,7 @@ fn disarm() {
 /// `vibeOS: ktest: FAIL <name>: deadline` and panics, so the dump shows
 /// where the test stood.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn on_tick() {
@@ -478,11 +496,86 @@ fn bad_option(opt: &str, value: Option<&[u8]>) -> ! {
     qemu_exit(EXIT_FAIL);
 }
 
+/// Rows whose body is x86_64 machine code or x86 hardware. The reason names
+/// that feature; `tests/harness/skips.toml` lists the same strings.
+#[cfg(target_arch = "aarch64")]
+fn aarch64_x86_skip(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "ring3_syscall_enosys"
+        | "syscall_ptr_validate"
+        | "user_code_exit"
+        | "user_image_elf"
+        | "user_code_layout"
+        | "orphan_freed_no_init"
+        | "fork_full_thread_table"
+        | "limits_heap_backed"
+        | "as_pin_across_exit"
+        | "fill_pt_hold_bounded"
+        | "user_entry_irq"
+        | "user_selectors"
+        | "user_ds_fork"
+        | "user_ds_switch"
+        | "exec_top_page_enoexec"
+        | "exec_huge_memsz"
+        | "exec_large_elf_from_file"
+        | "exec_from_tmp"
+        | "brk_mmap_munmap_user"
+        | "stop_cont_no_lost_wakeup"
+        | "wait4_ends_on_pending_kill"
+        | "stop_holds_signals_until_cont"
+        | "signal_on_return"
+        | "exit_work_ipi"
+        | "syscall_body_if_on"
+        | "kill_line_whole"
+        | "kalloc_nomem"
+        | "syscall_rcx_canary"
+        | "fork_child_gprs"
+        | "preempt_gpr_canaries"
+        | "pid_not_reused_after_reap"
+        | "proc_syscall_count"
+        | "trace_tracepoints_fire"
+        | "backtrace_syscall_boundary"
+        | "file_table_fork_churn"
+        | "vibefs_efbig"
+        | "vibefs_seek_end_5gib"
+        | "vfs_user_dev_nodes"
+        | "fork_oom"
+        | "exit_burst" => "x86 user text",
+        "user_single_step" | "user_int1" | "user_tf_repin" => "x86 TF single-step",
+        "fp_no_leak" | "fp_migrate_counter" => "x86 XMM user text",
+        "tls_survive" | "tls_yield" => "x86 FS_BASE user text",
+        "elf_shared_page" | "elf_shared_page_jump" => "x86 ELF",
+        "syscall_dispatch" => "x86 eax syscall numbers",
+        "acpi_discovery" => "x86 ACPI tables",
+        "trampoline_page" => "x86 AP trampoline",
+        "msix_cpu" => "x86 MSI-X affinity",
+        "console_read_exit" => "x86 PS/2 console",
+        "user_fork_wait_stall" => "x86 syscall entry",
+        "mmio_uc_flags" => "x86 LAPIC page flags",
+        "intx_fallback" | "intx_free_masks" => "x86 I/O APIC",
+        "nx_enforcement" => "x86 NX page",
+        "stack_guard" => "x86 stack guard",
+        "kernel_va0_faults" => "x86 VA 0 fault",
+        "sched_lock_timer_irq" => "x86 timer vector",
+        "addrspace_map_unmap_teardown" => "x86 invlpg",
+        "pit_tick_rate" => "x86 PIT",
+        "irq_pool" | "in_hard_irq_top_bottom" | "unowned_vector_storm" => "x86 IDT vector",
+        "lifetime_shootdown_ack_late" => "x86 shootdown ack",
+        _ => return None,
+    })
+}
+
 /// One run of row `r` of group `g`: its run line, the body, and its result
 /// line. False when it failed.
 fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
     let name = t.name;
     crate::marker!("vibeOS: ktest: run {name} {}", t.deadline_ms);
+    // The body is x86 text or x86 hardware. Skip before arming its deadline.
+    #[cfg(target_arch = "aarch64")]
+    if let Some(reason) = aarch64_x86_skip(name) {
+        crate::marker!("vibeOS: ktest: skip {name}: {reason}");
+        return true;
+    }
     let tmp_before = crate::fs_init::KERNFS.tmp_pages_used();
     let armed = arm(g, r, t.deadline_ms);
     let t0 = Arch::now();
@@ -706,7 +799,7 @@ pub(crate) fn settle_threads() -> bool {
 
 /// Whether a record in the log ring holds `needle`.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn log_contains(needle: &str) -> bool {
@@ -726,7 +819,7 @@ pub(crate) fn free_frames() -> usize {
 }
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn alloc_frame() -> Option<PhysAddr> {
@@ -734,7 +827,7 @@ pub(crate) fn alloc_frame() -> Option<PhysAddr> {
 }
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn free_frame(pa: PhysAddr) {
@@ -772,7 +865,7 @@ pub(crate) fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
 }
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
@@ -784,7 +877,7 @@ pub(crate) fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
 // updates its helper here (DESIGN §8.2).
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn spawn_thread(name: &'static str, entry: fn()) -> ThreadHandle {
@@ -805,7 +898,7 @@ pub(crate) fn spawn_thread_on(name: &'static str, entry: fn(), cpu: u32) -> Thre
 /// The helpers trade bare addresses (C-SUITES), so the tokens wait here.
 /// Never held together with BUDDY.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 static HELD: SpinMutex<[Option<Frames>; 16]> =
@@ -813,7 +906,7 @@ static HELD: SpinMutex<[Option<Frames>; 16]> =
 
 /// Remove and return the held token whose base is `pa`.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 fn take_held(pa: PhysAddr) -> Option<Frames> {
@@ -827,7 +920,7 @@ fn take_held(pa: PhysAddr) -> Option<Frames> {
 /// A naturally aligned block of `1 << order` frames. `None` when the
 /// buddy is out, or when 16 blocks are already out through these helpers.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
@@ -859,7 +952,7 @@ pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
 /// `pa` is a block that [`alloc_frames`] returned for this same `order`, and
 /// nothing still maps or uses it.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
@@ -892,7 +985,7 @@ pub(crate) fn dying_entry() {}
 /// lands on the slot of the CPU the caller runs on (DESIGN §2.9 rule 5),
 /// and IF is left as the caller had it.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn restore_irq_nest(n: u32) {
@@ -1004,7 +1097,7 @@ fn settle() {
 /// (`mm::ktest::table_pages`) and is no frame lost. No warm-up can map the
 /// span ahead, since nothing bounds it but the KVA window.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) struct FrameCount {
@@ -1028,7 +1121,7 @@ pub(crate) struct FrameCount {
 
 impl FrameCount {
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub(crate) fn quiescent() -> Self {
@@ -1049,7 +1142,7 @@ impl FrameCount {
 
     /// The frames free ([`free_frames`]) or in kernel page tables.
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     fn total(&self) -> usize {
@@ -1061,7 +1154,7 @@ impl FrameCount {
     /// the stacks in flight, the KVA KiB used, and the dropped
     /// frames, in [`FAIL_MSG_BYTES`].
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub(crate) fn unchanged(&self, after: &Self) -> Outcome {
@@ -1099,9 +1192,7 @@ pub(crate) fn quiesce() -> bool {
 /// [`FileRef`] carries, so their scenarios and assertions stay as they
 /// were.
 pub(crate) mod fid {
-    #[cfg(target_arch = "x86_64")]
-    use vibeos::fs::Stat;
-    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags};
+    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, Stat};
 
     use crate::file_init;
 
@@ -1109,7 +1200,6 @@ pub(crate) mod fid {
         file_init::open(path.as_bytes(), OpenFlags::from_bits(flags), mode).map(FileRef::into_raw)
     }
 
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn read(id: FileId, buf: &mut [u8]) -> Result<usize, FsError> {
         file_init::read(&FileRef::from_raw(id), buf)
     }
@@ -1118,7 +1208,6 @@ pub(crate) mod fid {
         file_init::write(&FileRef::from_raw(id), buf)
     }
 
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn seek(id: FileId, off: i64, whence: u32) -> Result<u64, FsError> {
         file_init::lseek(&FileRef::from_raw(id), off, whence)
     }
@@ -1127,23 +1216,19 @@ pub(crate) mod fid {
         file_init::close(FileRef::from_raw(id))
     }
 
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn addref(id: FileId) -> Result<(), FsError> {
         file_init::addref(id)
     }
 
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn stat_path(path: &str) -> Result<Stat, FsError> {
         file_init::stat_path(path.as_bytes())
     }
 
     /// `lstat` of absolute `path`.
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn lstat_path(path: &str) -> Result<Stat, FsError> {
         crate::fs_init::api().stat_path(None, path.as_bytes(), false)
     }
 
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn creat(path: &str) -> Result<(), FsError> {
         file_init::creat(path.as_bytes())
     }
@@ -1160,7 +1245,6 @@ pub(crate) mod fid {
 /// CPUID.01H:ECX[31] (a hypervisor is present) and leaf `0x4000_0000`
 /// naming it `KVMKVMKVM\0\0\0`.
 #[cfg(target_arch = "aarch64")]
-#[expect(dead_code, reason = "x86 hypervisor leaf; aarch64 has none")]
 pub(crate) fn on_kvm() -> bool {
     false
 }
@@ -1193,7 +1277,7 @@ pub(crate) fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
 
 /// Sleep until `pred` holds, for at most `ms`.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn sleep_until_s19(pred: impl Fn() -> bool, ms: u64) -> bool {
@@ -1266,7 +1350,7 @@ pub(crate) fn deadline_within(ms: u32) -> Option<bool> {
 
 /// Spin on TSC time until `pred` holds, for at most `ns`.
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub(crate) fn spin_until(pred: impl Fn() -> bool, ns: u64) -> bool {

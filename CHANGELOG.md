@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- aarch64 `pvpanic-pci` with a firmware BAR at 0 is placed in the virt 32-bit MMIO
+  window, so a panic reaches QEMU ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - a reused call-function IPI runs the round that was published, not the
   previous one ([ROADMAP §11.4](docs/ROADMAP.md#114-smp-and-per-cpu)).
 - aarch64 `munmap` and a `brk` shrink drop the page from the TLB before

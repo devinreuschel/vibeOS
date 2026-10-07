@@ -481,7 +481,7 @@ impl VirtioBlk {
     }
 }
 
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 /// Async submit. `buf` lives until `w` completes. Hard IRQ must not call this.
 pub fn submit(
     blk: &VirtioBlk,

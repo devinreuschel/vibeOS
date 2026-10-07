@@ -195,7 +195,7 @@ impl fmt::Write for Serial {
 /// those builds have it.
 #[cfg(any(feature = "kernel_tests", feature = "irqoff"))]
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub struct PlainSerial;

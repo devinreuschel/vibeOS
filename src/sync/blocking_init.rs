@@ -94,7 +94,7 @@ impl<T> BlockingMutex<T> {
     }
 
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub fn try_lock(&self) -> Option<BlockingMutexGuard<'_, T>> {
@@ -187,7 +187,7 @@ impl<T> DerefMut for BlockingMutexGuard<'_, T> {
 // ----- RwLock -----
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub struct RwLock<T> {
@@ -204,7 +204,7 @@ unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 unsafe impl<T: Send> Send for RwLock<T> {}
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub struct RwLockReadGuard<'a, T> {
@@ -212,7 +212,7 @@ pub struct RwLockReadGuard<'a, T> {
 }
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub struct RwLockWriteGuard<'a, T> {
@@ -220,12 +220,12 @@ pub struct RwLockWriteGuard<'a, T> {
 }
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 impl<T> RwLock<T> {
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub const fn new(v: T) -> Self {
@@ -391,7 +391,7 @@ impl<T> DerefMut for RwLockWriteGuard<'_, T> {
 // ----- Semaphore -----
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub struct Semaphore {
@@ -405,12 +405,12 @@ unsafe impl Sync for Semaphore {}
 unsafe impl Send for Semaphore {}
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 impl Semaphore {
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub const fn new(count: usize) -> Self {
@@ -482,7 +482,7 @@ unsafe impl Sync for Condvar {}
 unsafe impl Send for Condvar {}
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 impl Condvar {
@@ -493,7 +493,7 @@ impl Condvar {
     }
 
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub fn wait<'a, T>(&self, guard: BlockingMutexGuard<'a, T>) -> BlockingMutexGuard<'a, T> {
@@ -576,7 +576,7 @@ impl Condvar {
 // ----- Channel -----
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub struct Channel<T, const N: usize> {
@@ -592,12 +592,12 @@ unsafe impl<T: Send, const N: usize> Sync for Channel<T, N> {}
 unsafe impl<T: Send, const N: usize> Send for Channel<T, N> {}
 
 #[cfg_attr(
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
     expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 impl<T, const N: usize> Channel<T, N> {
     #[cfg_attr(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
         expect(dead_code, reason = "boot-CPU S7; unused on this path")
     )]
     pub const fn new() -> Self {

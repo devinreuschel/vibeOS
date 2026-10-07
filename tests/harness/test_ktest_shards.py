@@ -88,12 +88,16 @@ class ShardTable(unittest.TestCase):
                     self.assertIn(bound, registered, name)
 
     def test_aarch64_ranges_hand_on_their_bounds(self) -> None:
+        """Every aarch64 shard of a variant has a range, and the ranges
+        partition the registry the way the x86 main boots do."""
         for variant in VARIANTS:
-            rows = [AARCH64_ROWS[f"{variant}-{k}"] for k in (1, 2, 3)]
+            names = [name for name, _ in shards_of(variant)]
+            rows = [AARCH64_ROWS[name] for name in names]
             self.assertEqual(rows[0][0], "", variant)
             self.assertEqual(rows[-1][1], "", variant)
             for (_, hi), (lo, _) in zip(rows[:-1], rows[1:], strict=True):
                 self.assertEqual(hi, lo, variant)
+                self.assertRegex(hi, ROW_NAME)
 
     def test_proof_boots_once_each(self) -> None:
         for variant, v in VARIANTS.items():

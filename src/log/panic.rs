@@ -148,10 +148,6 @@ pub(crate) fn walk_known(rip: u64, rbp: u64, out: impl FnMut(u64)) -> (usize, Wa
     not(feature = "kernel_tests"),
     expect(dead_code, reason = "the in-guest backtrace test is its only caller")
 )]
-#[cfg_attr(
-    all(target_arch = "aarch64", feature = "kernel_tests"),
-    expect(dead_code, reason = "boot-CPU S7; unused on this path")
-)]
 pub(crate) fn symbol_name(addr: u64) -> Option<&'static str> {
     let e = crate::log::ksyms::lookup(addr)?;
     (symtab::offset(&e, addr) < 0x1_0000).then_some(e.name)

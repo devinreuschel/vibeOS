@@ -277,7 +277,8 @@ pub fn is_claimed(dev: &DevRef, bar: u8) -> bool {
 /// Remove `dev`'s driver under the device's lock: `Bound` → `Removing`,
 /// the driver's `remove`, its BARs unmapped and released, then `Present`.
 /// `false` when `dev` was not bound.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
+#[cfg(target_arch = "x86_64")]
 pub fn unbind(dev: &DevRef) -> bool {
     let Some(lock) = dev_lock(dev) else {
         return false;
@@ -295,7 +296,8 @@ pub fn unbind(dev: &DevRef) -> bool {
 
 /// Register `d`, a record no driver matches (vendor `0xFFFE`, class
 /// `0xFF`), for a claim test; its id, or `None` when the table is full.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
+#[cfg(target_arch = "x86_64")]
 pub fn push_test_device(mut d: Device) -> Option<u64> {
     d.vendor = 0xFFFE;
     d.class = 0xFF;

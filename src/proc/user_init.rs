@@ -416,14 +416,14 @@ pub fn exec_args(argv: &[&[u8]], envp: &[&[u8]]) -> Result<ExecArgs, LoadError> 
 pub struct ExecFile {
     img: FileImage,
     /// Buddy free frames when the open began (`proc::ktest::record`).
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     before: usize,
 }
 
 /// Open `path` from `base` to execute it: its walk's errors, then
 /// `EACCES` for a file that is not regular (execve(2)).
 pub fn open_exec(base: Option<WalkBase>, path: &[u8]) -> Result<ExecFile, LoadError> {
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     let before = crate::proc::ktest::free_now();
     let file =
         file_init::open_at(base, path, OpenFlags::from_bits(O_RDONLY), 0).map_err(LoadError::Fs)?;
@@ -443,7 +443,7 @@ pub fn open_exec(base: Option<WalkBase>, path: &[u8]) -> Result<ExecFile, LoadEr
             len: st.size,
             pos: 0,
         },
-        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        #[cfg(feature = "kernel_tests")]
         before,
     })
 }
@@ -479,7 +479,7 @@ pub fn load_exec(f: ExecFile, args: &ExecArgs) -> Result<Loaded, LoadError> {
             Err(LoadError::Fs(e))
         }
     };
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::proc::ktest::record(f.before, r.is_ok());
     r
 }

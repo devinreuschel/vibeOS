@@ -10,6 +10,7 @@ const ST_OFF: u8 = 0;
 const ST_VECTOR: u8 = 1;
 const ST_DABT: u8 = 2;
 const ST_PANIC: u8 = 3;
+const ST_ALLOC: u8 = 4;
 
 #[repr(C)]
 struct JmpBuf {
@@ -183,9 +184,12 @@ pub fn catch_panic<F: FnOnce()>(f: F) -> bool {
     catch_kind(ST_PANIC, f).is_some()
 }
 
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
-pub fn catch_alloc<F: FnOnce()>(_f: F) -> bool {
-    false
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "kernel_tests alloc-failure window")
+)]
+pub fn catch_alloc<F: FnOnce()>(f: F) -> bool {
+    catch_kind(ST_ALLOC, f).is_some()
 }
 
 /// Longjmp out of an armed `catch_panic`, on the CPU that armed it only.
@@ -209,8 +213,21 @@ pub fn on_panic() {
     unsafe { vibeos_longjmp(BUF.0.get(), 1) };
 }
 
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
-pub fn on_alloc_error(_layout: core::alloc::Layout) {}
+/// Longjmp out of an armed `catch_alloc`, on the CPU that armed it only.
+pub fn on_alloc_error(_layout: core::alloc::Layout) {
+    // Acquire: pairs with the Release store in `catch_kind`.
+    if KIND.load(Ordering::Acquire) != ST_ALLOC {
+        return;
+    }
+    // Release: pairs with the Acquire load in `catch_kind` after the longjmp.
+    KIND.store(ST_OFF, Ordering::Release);
+    // Release: pairs with nothing.
+    ARMED.store(0, Ordering::Release);
+    // SAFETY: an armed `catch_alloc` window lies inside `catch_kind`'s
+    // `vibeos_setjmp` call, so `BUF` holds the context that call saved on
+    // a frame that is still live; established by `arch::aarch64::catch::catch_kind`.
+    unsafe { vibeos_longjmp(BUF.0.get(), 1) };
+}
 
 #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 pub fn force_kernel_window() {}

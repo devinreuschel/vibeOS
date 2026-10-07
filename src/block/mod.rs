@@ -3,7 +3,7 @@
 pub(crate) mod block_init;
 pub(crate) mod blockdev_init;
 pub(crate) mod cache_init;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -346,7 +346,7 @@ pub unsafe fn map_4k_locked(
 ///
 /// # Safety
 /// Same contract as `Mapper::map_page`. Must run after [`install`].
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
     // SAFETY: `map_4k_locked`'s contract, which this fn's `# Safety` passes
     // on, established here.

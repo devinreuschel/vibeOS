@@ -91,6 +91,10 @@ pub fn probe_pci() {
         crate::marker!("vibeOS: pvpanic: absent");
         return;
     }
+    // AAVMF can leave Memory Space clear on a BAR it did not program.
+    // The event byte reads as the supported mask only with decode on
+    // (QEMU `docs/specs/pvpanic.rst`).
+    crate::pci_init::update_command(dev.addr, vibeos::pci::CMD_MEM, 0);
     // SAFETY: `va` is BAR0 of the `pvpanic-pci` this probe just mapped
     // uncached (`pci_init::map_bar`); a read returns the supported events
     // (QEMU `docs/specs/pvpanic.rst`); established here.
@@ -148,4 +152,11 @@ pub fn found() -> Option<(u16, u8)> {
     let s = STATE.load(Ordering::Acquire);
     let port = (s & 0xFFFF) as u16;
     (port != 0).then_some((port, ((s >> 16) & 0xFF) as u8))
+}
+
+/// `pvpanic-pci` was found and its BAR mapped. `kernel_tests` only.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn pci_found() -> bool {
+    // Acquire: pairs with `probe_pci`'s Release store.
+    PCI_VA.load(Ordering::Acquire) != 0
 }

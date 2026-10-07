@@ -46,21 +46,21 @@ mod sweep;
 mod table;
 mod user;
 pub use ap::{abandon_unstarted, adopt_ap_idle};
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) use boot::BOOT_STACK_PAGES;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", feature = "kernel_tests"))]
 pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
 pub use idle::halt_if_idle;
 pub use sweep::start_sweep;
 #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
 pub(crate) use table::report_stack_depth;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) use table::scan_live_stacks;
 pub(crate) use table::table_root;
 #[cfg(feature = "kernel_tests")]
 pub(crate) use table::table_usage;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub(crate) use table::{RunTsc, run_tsc_snapshot, timeouts_capacity};
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
@@ -499,7 +499,7 @@ fn thread_exit() -> ! {
         // scan in `thread_init::spawn_inner`.
         unsafe { (*p).state = ThreadState::Dead };
     });
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     testing::exit_stall();
     schedule();
     panic!("dead thread resumed");
@@ -639,7 +639,7 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
     // `thread_init::spawn_inner`.
     let (from, to) = unsafe { ((*old_ptr).id.0, (*new_ptr).id.0) };
     vibeos::trace!(Switch, u64::from(from), u64::from(to));
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     if sync_init::held_mask() != 0 {
         // SAFETY: invariant I9: `new_ptr` is a live entry of `SCHED` that
         // `schedule_inner` or `switch_to` set Running for this CPU, and `id`
@@ -732,9 +732,9 @@ pub(crate) fn finish_switch() {
         !crate::arch::current::interrupts_enabled(),
         "finish_switch with IF on"
     );
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::irq::ktest::tail_enter();
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     testing::scan_dead_slot();
     let (prev, kick) = per_cpu_init::with_current(|cpu| {
         let prev = core::mem::replace(&mut cpu.tail_prev, core::ptr::null_mut());
@@ -743,7 +743,7 @@ pub(crate) fn finish_switch() {
     if kick {
         kick_dead_stacks();
     }
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::irq::ktest::tail_leave();
     if !prev.is_null() {
         // SAFETY: `prev` is the TCB this CPU switched off (stored in
@@ -836,7 +836,7 @@ fn cached_stack() -> Option<GuardedStack> {
     // and owned by this handle alone: no thread runs on a cached stack
     // (invariant I10, established at `thread_init::finish_switch`).
     unsafe { core::ptr::write_bytes(stack.base().as_u64() as *mut u8, 0, len) };
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     testing::refill_cached(&stack);
     #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
     // SAFETY: invariant I10, established at `thread_init::finish_switch`.
@@ -1096,7 +1096,7 @@ fn spawn_inner(
     stack_pages: usize,
 ) -> Result<ThreadHandle, SpawnError> {
     // AcqRel: pairs with the Release store in `testing::fail_next_fork_stack`.
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     if current_pid() != 0 && testing::FAIL_FORK_STACK.swap(false, Ordering::AcqRel) {
         return Err(SpawnError::NoMemory);
     }
@@ -1271,7 +1271,7 @@ pub fn park(deadline: Option<Instant>) {
 }
 
 /// Hold SCHED for `f`. IF is off for the whole call (IRQ-aware lock).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
     let _g = SCHED.lock();
     f()
@@ -1287,7 +1287,7 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     let ctx = sync_init::sleep_ctx();
     let _irq = InterruptGuard::enter();
     // Dropped last, once the places are delivered.
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     let _window = testing::window_enter();
     // The wakes `f` recorded, placed after SCHED drops, at most
     // `PLACE_BATCH` per lock hold: the rest wait in `places`, where this
@@ -1300,11 +1300,11 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
         let n = s.take_places(&mut batch);
         (r, n)
     };
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     testing::preempt_before_places(n);
     loop {
         for &(cpu, id, slot) in batch.iter().take(n) {
-            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+            #[cfg(feature = "kernel_tests")]
             testing::place_stall(id);
             crate::ipi_init::place_ready(cpu, id, slot as usize);
         }
@@ -1330,7 +1330,7 @@ pub fn last_wait_outcome() -> WaitOutcome {
 
 /// Test helper. Local CPU only — the target must already sit on this
 /// runq (spawn_here). Same nest-swap as `schedule`.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::expect_used,
     reason = "invariant I9: a TCB slot once filled is never emptied, so an id `spawn_here` returned always names one (`thread_init::spawn_inner`)"
@@ -1449,7 +1449,7 @@ pub fn current_cpu() -> u32 {
 
 #[cfg(feature = "kernel_tests")]
 pub use testing::exited;
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub use testing::{
     cpu_of, ktest_drop_timeout, ktest_last_overdue, ktest_preempt_before_places, ktest_sweeps,
     name, state, try_state,

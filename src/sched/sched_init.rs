@@ -47,7 +47,7 @@ pub fn is_live() -> bool {
 /// at every tick while idle so a sleeper can displace `sti; hlt`. Each CPU
 /// owns its runq.
 pub fn on_timer_tick() {
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     crate::ktest::on_tick();
     if !is_live() {
         return;
@@ -80,7 +80,7 @@ fn idle_main() {
     idle_loop();
 }
 
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub fn idle_tsc() -> u64 {
     per_cpu_init::with_current(|c| c.idle_tsc)
 }

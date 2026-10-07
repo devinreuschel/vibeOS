@@ -40,7 +40,7 @@ pub(crate) fn set(on: bool) {
 }
 
 /// Test access to the flag (kernel_tests only).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[cfg(feature = "kernel_tests")]
 pub mod testing {
     /// Set or clear this CPU's `IN_ISR` as `irq_init::dispatch` does. Call
     /// with IF off, and clear it on the same CPU before IF goes back on.
