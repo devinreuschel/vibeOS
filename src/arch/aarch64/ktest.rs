@@ -301,7 +301,9 @@ pub(crate) fn test_idle_wfi() -> Outcome {
     Outcome::Ok
 }
 
-static SYSREG_WANT: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+const SYSREG_N: usize = crate::arch::aarch64::secondary::SNAP_LEN;
+
+static SYSREG_WANT: [AtomicU64; SYSREG_N] = [const { AtomicU64::new(0) }; SYSREG_N];
 static SYSREG_BAD: AtomicU64 = AtomicU64::new(0);
 static SYSREG_SEEN: AtomicU64 = AtomicU64::new(0);
 static OSLR_BAD: AtomicU64 = AtomicU64::new(0);
@@ -338,7 +340,7 @@ fn snap_on_ap(_: *mut ()) {
     }
     let mut bad = false;
     let mut i = 0;
-    while i < 8 {
+    while i < SYSREG_N {
         if v[i] != SYSREG_WANT[i].load(Ordering::Relaxed) {
             bad = true;
         }
@@ -350,16 +352,40 @@ fn snap_on_ap(_: *mut ()) {
     SYSREG_SEEN.fetch_or(1u64 << id, Ordering::Release);
 }
 
+fn described_aps() -> u64 {
+    let n = crate::per_cpu_init::cpu_count().min(64) as u32;
+    let mut m = 0u64;
+    let mut i = 1u32;
+    while i < n {
+        m |= 1u64 << i;
+        i += 1;
+    }
+    m
+}
+
 pub(crate) fn test_sysreg_compare() -> Outcome {
     let want = crate::arch::aarch64::secondary::snapshot_sysregs();
     let mut i = 0;
-    while i < 8 {
+    while i < SYSREG_N {
         SYSREG_WANT[i].store(want[i], Ordering::Relaxed);
         i += 1;
     }
     SYSREG_BAD.store(0, Ordering::SeqCst);
     SYSREG_SEEN.store(0, Ordering::SeqCst);
     let aps = ap_mask();
+    if crate::arch::aarch64::cpu::el2_vhe() {
+        // HCR_EL2.E2H (bit 34) and .TGE (bit 27). A zero slot means the
+        // snapshot did not read the EL2 controls.
+        const E2H_TGE: u64 = (1 << 34) | (1 << 27);
+        let hcr = want[crate::arch::aarch64::secondary::SNAP_HCR_EL2];
+        if hcr & E2H_TGE != E2H_TGE {
+            return Outcome::Fail("el2 hcr");
+        }
+        let described = described_aps();
+        if described != 0 && aps != described {
+            return Outcome::Fail("el2 ap missing");
+        }
+    }
     if aps == 0 {
         return Outcome::Skip("no AP");
     }

@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- aarch64 secondaries entered at EL2 turn translation on only after MAIR, TCR,
+  and the TTBRs are set ([ROADMAP §11.4](docs/ROADMAP.md#114-smp-and-per-cpu)).
 - aarch64 EL0 cannot read or write `SCXTNUM_EL0`, and an EL0 `wfi` traps and
   returns at once ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
 - x86 boot under a hypervisor does not read `MSR_PLATFORM_INFO`, so a missing
