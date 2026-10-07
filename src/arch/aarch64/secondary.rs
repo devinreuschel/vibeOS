@@ -75,8 +75,8 @@ global_asm!(
     "    ldr x1, [x0, #{sctlr_el2}]",
     "    msr sctlr_el2, x1",
     "3:",
-    // #202: CNTKCTL_EL1 at EL1; at EL2 the CNTHCTL_EL2 write above is
-    // the same register under VHE, so skip this msr.
+    // CNTKCTL_EL1 at EL1. At EL2, CNTHCTL_EL2 already holds that value
+    // (E2H=1: EL0VCTEN, EL0PCTEN clear), so skip this msr.
     "    ldr x1, [x0, #{el2}]",
     "    cbnz x1, 31f",
     "    ldr x1, [x0, #{cntkctl}]",
@@ -320,7 +320,9 @@ pub fn fill_computed(p: &mut SecondaryParam) {
     p.cntkctl = sysreg::cntkctl_el1();
     p.pmuserenr = sysreg::pmuserenr_el0();
     p.cpacr = sysreg::cpacr_el1();
-    p.cnthctl_el2 = sysreg::cnthctl_el2();
+    // The stub writes CNTHCTL_EL2 only after setting E2H, when bits 0 and 1
+    // are EL0PCTEN and EL0VCTEN. capture_el2 stores this same value.
+    p.cnthctl_el2 = sysreg::cntkctl_el1();
     let asid16 = {
         let mmfr0: u64;
         // SAFETY: ID register. established here.
@@ -349,7 +351,8 @@ pub fn capture_el2(p: &mut SecondaryParam) {
         asm!("mrs {0}, icc_sre_el2", out(reg) p.icc_sre_el2, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, sctlr_el2", out(reg) p.sctlr_el2, options(nomem, nostack, preserves_flags));
     }
-    p.cnthctl_el2 = sysreg::cnthctl_el2();
+    // E2H is 1, so bits 0 and 1 are EL0PCTEN and EL0VCTEN.
+    p.cnthctl_el2 = sysreg::cntkctl_el1();
     let mmfr0: u64;
     let mmfr1: u64;
     // SAFETY: ID registers. established here.

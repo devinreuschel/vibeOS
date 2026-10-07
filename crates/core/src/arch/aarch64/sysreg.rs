@@ -61,14 +61,23 @@ pub const fn sctlr_el1() -> u64 {
     M | C | SA | SA0 | NAA | EOS | I | DZE | UCT | NTWI | NTWE | EIS | UCI
 }
 
-/// `CNTKCTL_EL1`: EL0 may read the virtual counter.
+/// `CNTKCTL_EL1` at EL1, and `CNTHCTL_EL2` when `HCR_EL2.E2H` is 1.
+///
+/// Bit 1 is `EL0VCTEN`: EL0 reads `CNTVCT_EL0`. Bit 0 is `EL0PCTEN` and
+/// stays clear, so an EL0 read of `CNTPCT_EL0` traps (DESIGN §11.4).
+/// With E2H=1 those are the names of `CNTHCTL_EL2` bits 0 and 1. The
+/// E2H=0 names, `EL1PCTEN` and `EL1PCEN`, are [`cnthctl_el2`]; writing
+/// that `0b11` under VHE sets `EL0PCTEN`.
 pub const fn cntkctl_el1() -> u64 {
     const EL0VCTEN: u64 = 1 << 1;
     EL0VCTEN
 }
 
-/// `CNTHCTL_EL2` when entered at EL2: EL1 accesses the physical counter
-/// and timer (Arm ARM CNTHCTL_EL2).
+/// `CNTHCTL_EL2` when `HCR_EL2.E2H` is 0 (Arm ARM CNTHCTL_EL2).
+///
+/// Bit 0 is `EL1PCTEN` and bit 1 is `EL1PCEN`: EL1 accesses the physical
+/// counter and timer. With E2H=1 those bits are `EL0PCTEN` and `EL0VCTEN`;
+/// that regime writes [`cntkctl_el1`] instead.
 pub const fn cnthctl_el2() -> u64 {
     const EL1PCTEN: u64 = 1 << 0;
     const EL1PCEN: u64 = 1 << 1;
@@ -140,12 +149,25 @@ mod tests {
 
     #[test]
     fn others_are_whole_values() {
-        assert_eq!(cntkctl_el1(), 1 << 1);
-        assert_eq!(cnthctl_el2(), 0b11);
         assert_eq!(pmuserenr_el0(), 0);
         assert_eq!(cpacr_el1() >> 20 & 0b11, 0b11);
         assert!(asid16_from_mmfr0(2 << 4));
         assert!(!asid16_from_mmfr0(0));
+    }
+
+    #[test]
+    fn counter_bits_follow_the_regime() {
+        // CNTKCTL_EL1, and CNTHCTL_EL2 when HCR_EL2.E2H is 1.
+        const EL0PCTEN: u64 = 1 << 0;
+        const EL0VCTEN: u64 = 1 << 1;
+        assert_eq!(cntkctl_el1(), EL0VCTEN);
+        assert_eq!(cntkctl_el1() & EL0PCTEN, 0);
+        // CNTHCTL_EL2 when E2H is 0. The same bits under E2H=1 are
+        // EL0PCTEN and EL0VCTEN, so this value must not be written then.
+        const EL1PCTEN: u64 = 1 << 0;
+        const EL1PCEN: u64 = 1 << 1;
+        assert_eq!(cnthctl_el2(), EL1PCTEN | EL1PCEN);
+        assert_ne!(cnthctl_el2(), cntkctl_el1());
     }
 
     #[test]
