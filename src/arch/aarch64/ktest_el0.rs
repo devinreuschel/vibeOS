@@ -1,5 +1,6 @@
 //! EL0 TLS, FP, and SVE proofs (ROADMAP §11.6, F022, F069, F130).
 
+use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::fs::{O_CREAT, O_TRUNC, O_WRONLY};
@@ -468,8 +469,42 @@ pub(crate) fn test_el0_fp_no_leak() -> Outcome {
     }
 }
 
-/// An SVE instruction at EL0 is `SIGILL` (F130): `CPACR_EL1.ZEN` is clear.
+fn id_aa64pfr0_el1() -> u64 {
+    let v: u64;
+    // SAFETY: ID_AA64PFR0_EL1 is readable at EL1 and at EL2 under VHE; established here.
+    unsafe {
+        asm!(
+            "mrs {0}, ID_AA64PFR0_EL1",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    v
+}
+
+fn id_aa64pfr1_el1() -> u64 {
+    let v: u64;
+    // SAFETY: ID_AA64PFR1_EL1 is readable at EL1 and at EL2 under VHE; established here.
+    unsafe {
+        asm!(
+            "mrs {0}, ID_AA64PFR1_EL1",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    v
+}
+
+/// `ptrue` at EL0 is `SIGILL` (F130). ZEN clear traps it; ZEN left enabled
+/// lets it exit 0, so this fails. No SVE skips: `ptrue` is then UNDEFINED
+/// either way. SME absent does not: `ptrue` is still SVE, and no named
+/// model that has SME boots AAVMF 2025.11.
 pub(crate) fn test_el0_sve_sigill() -> Outcome {
+    let sve = vibeos::arch::aarch64::sysreg::pfr0_sve(id_aa64pfr0_el1());
+    let sme = vibeos::arch::aarch64::sysreg::pfr1_sme(id_aa64pfr1_el1());
+    if sve == 0 {
+        return Outcome::Skip(if sme == 0 { "no SVE or SME" } else { "no SVE" });
+    }
     match user::run(&Image::Code(SVE_PTRUE, DEFAULT), &["sve"]) {
         Ok(st) if vibeos::proc::wifsignaled(st) && vibeos::proc::wtermsig(st) == SIGILL => {
             Outcome::Ok

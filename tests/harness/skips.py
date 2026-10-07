@@ -20,7 +20,13 @@ import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from tests.harness.harness import HarnessError, QemuConfig, effective_accel_name, qemu_argv
+from tests.harness.harness import (
+    HarnessError,
+    QemuConfig,
+    effective_accel_name,
+    guest_cpu,
+    qemu_argv,
+)
 
 SKIPS_TOML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skips.toml")
 
@@ -117,7 +123,7 @@ def launch_config(cfg: QemuConfig) -> dict[str, Value]:
     return {
         "arch": arch,
         "accel": effective_accel_name(cfg),
-        "cpu": cfg.cpu,
+        "cpu": guest_cpu(cfg),
         "smp": cfg.smp,
         "mem": cfg.mem,
         "machine": _machine(argv),

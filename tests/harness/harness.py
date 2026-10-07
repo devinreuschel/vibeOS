@@ -715,6 +715,8 @@ class QemuConfig:
     iso: str
     smp: int = DEFAULT_SMP
     cpu: str = DEFAULT_CPU
+    # True when `VIBEOS_QEMU_CPU` set `cpu`. aarch64 remaps only the unset default.
+    cpu_explicit: bool = False
     mem: str = DEFAULT_MEM
     # UEFI firmware on pflash; None = QEMU's default SeaBIOS.
     firmware: Firmware | None = None
@@ -787,6 +789,8 @@ class EnvConfig:
     arch: str = "x86_64"
     gic_version: str = "3"
     machine: str = ""
+    # True when `VIBEOS_QEMU_CPU` set `cpu`. See `QemuConfig.cpu_explicit`.
+    cpu_explicit: bool = False
 
     def fw_cfg_cmdline(self, driver_words: str = "") -> str:
         """The fw_cfg command-line string: the driver's words, then
@@ -829,6 +833,7 @@ class EnvConfig:
             arch=self.arch,
             gic_version=self.gic_version,
             machine=self.machine,
+            cpu_explicit=self.cpu_explicit,
         )
 
 
@@ -904,6 +909,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         raise HarnessError(f"VIBEOS_GIC={gic}: not 2 or 3")
     machine = os.environ.get("VIBEOS_MACHINE", "")
     firmware = env_firmware(os.environ, arch)
+    cpu_env = os.environ.get("VIBEOS_QEMU_CPU")
     accel_raw = os.environ.get("VIBEOS_QEMU_ACCEL")
     extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
     ktest = os.environ.get("VIBEOS_KTEST", "")
@@ -928,7 +934,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
     return EnvConfig(
         iso=os.environ.get("VIBEOS_ISO", default_iso),
         smp=env_int("VIBEOS_SMP", 1 if arch == "aarch64" else DEFAULT_SMP),
-        cpu=os.environ.get("VIBEOS_QEMU_CPU", DEFAULT_CPU),
+        cpu=DEFAULT_CPU if cpu_env is None else cpu_env,
         mem=os.environ.get("VIBEOS_MEM", DEFAULT_MEM),
         firmware=firmware,
         accel=DEFAULT_ACCEL if accel_raw is None else accel_raw,
@@ -943,6 +949,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         arch=arch,
         gic_version=gic,
         machine=machine,
+        cpu_explicit=cpu_env is not None,
     )
 
 
@@ -1502,17 +1509,31 @@ def fw_cfg_cmdline_words(cfg: QemuConfig) -> str:
 PANIC_ACTION = ("-action", "panic=pause")
 
 
-# AAVMF 2025.11 hangs after its version banner on TCG `-cpu max`
-# (EDK2 #11962, LPA2). neoverse-n1 is a 64-bit Armv8.2 model BDS reaches.
-AARCH64_TCG_CPU = "neoverse-n1"
+# AAVMF 2025.11 takes a synchronous exception at 0x47EFE008 on TCG
+# `-cpu max` and on `max,lpa2=off`. QEMU leaves PARange at 52 bits and
+# has no property to clear it (EDK2 #11962, Debian #1124168).
+# Neoverse-V1 has SVE and a 48-bit PARange, so `ptrue` is real and BDS
+# still comes up. Neoverse-N1 has no SVE, so `ptrue` is UNDEFINED.
+AARCH64_TCG_CPU = "neoverse-v1"
 
 
 def _aarch64_cpu(cfg: QemuConfig) -> str:
-    """`-cpu host` under HVF; TCG default `max` is `neoverse-n1`."""
-    if _accel_name(cfg.accel) == "hvf" and cfg.cpu == DEFAULT_CPU:
+    """HVF's unset default is `host`. TCG's unset `max` is `neoverse-v1`.
+
+    An explicit model, including `max`, is passed through (`cpu_explicit`,
+    or any `cpu` other than the unset default).
+    """
+    if cfg.cpu_explicit or cfg.cpu != DEFAULT_CPU:
+        return cfg.cpu
+    if _accel_name(cfg.accel) == "hvf":
         return "host"
-    if cfg.cpu == DEFAULT_CPU:
-        return AARCH64_TCG_CPU
+    return AARCH64_TCG_CPU
+
+
+def guest_cpu(cfg: QemuConfig) -> str:
+    """The `-cpu` argument `qemu_argv` passes for `cfg`."""
+    if cfg.arch == "aarch64":
+        return _aarch64_cpu(cfg)
     return cfg.cpu
 
 

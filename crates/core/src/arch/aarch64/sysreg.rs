@@ -121,6 +121,16 @@ pub const fn cpacr_el1() -> u64 {
     FPEN
 }
 
+/// `ID_AA64PFR0_EL1.SVE` (Arm ARM DDI0487, bits 35:32). Zero means no SVE.
+pub const fn pfr0_sve(pfr0: u64) -> u64 {
+    (pfr0 >> 32) & 0xF
+}
+
+/// `ID_AA64PFR1_EL1.SME` (Arm ARM DDI0487, bits 27:24). Zero means no SME.
+pub const fn pfr1_sme(pfr1: u64) -> u64 {
+    (pfr1 >> 24) & 0xF
+}
+
 /// `ID_AA64MMFR0_EL1.ASIDBits` field (bits 7:4): 2 means 16-bit ASIDs.
 pub const fn asid16_from_mmfr0(mmfr0: u64) -> bool {
     ((mmfr0 >> 4) & 0xF) == 2
@@ -245,5 +255,17 @@ mod tests {
         assert_eq!(c >> 20 & 0b11, 0b11, "FPEN");
         assert_eq!(c >> 24 & 0b11, 0, "SMEN");
         assert_eq!(c, 0b11 << 20);
+    }
+
+    #[test]
+    fn pfr_sve_and_sme_fields() {
+        assert_eq!(pfr0_sve(0), 0);
+        assert_eq!(pfr0_sve(0x1 << 32), 1);
+        assert_eq!(pfr0_sve(0xF << 32), 0xF);
+        assert_eq!(pfr0_sve((0xF << 28) | (0xF << 36)), 0);
+        assert_eq!(pfr1_sme(0), 0);
+        assert_eq!(pfr1_sme(0x1 << 24), 1);
+        assert_eq!(pfr1_sme(0xF << 24), 0xF);
+        assert_eq!(pfr1_sme((0xF << 20) | (0xF << 28)), 0);
     }
 }
