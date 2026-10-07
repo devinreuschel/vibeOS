@@ -275,8 +275,13 @@ pub(crate) const GROUPS: &[Suite] = &[
 
 /// Name of the registry's kernel thread.
 const REGISTRY_NAME: &str = "ktest";
-/// The registry's stack, 64 KiB (ROADMAP §10.2). `spawn` stays at 16 KiB.
-const REGISTRY_STACK_PAGES: usize = 16;
+/// The registry's stack. x86_64: 64 KiB (ROADMAP §10.2). aarch64: 16 KiB,
+/// the one size the vector entry's stack-bit test accepts (ROADMAP §11.3).
+/// `spawn` stays at 16 KiB on both.
+#[cfg(target_arch = "aarch64")]
+pub(crate) const REGISTRY_STACK_PAGES: usize = 4;
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) const REGISTRY_STACK_PAGES: usize = 16;
 
 /// The registry thread's id, `u32::MAX` until it starts.
 static REGISTRY_TID: AtomicU32 = AtomicU32::new(u32::MAX);

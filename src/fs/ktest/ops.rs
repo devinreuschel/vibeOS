@@ -7,6 +7,7 @@ use vibeos::fs::{
     FileRef, FsError, O_APPEND, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
     OpenFlags, SeekFrom,
 };
+use vibeos::kalloc::TryVec;
 
 use super::hooks;
 use crate::fat_init;
@@ -254,11 +255,27 @@ fn fat_one_inode() -> StepS12<()> {
     step("close b", cb)
 }
 
-fn two_descriptors(a: &FileRef, b: &FileRef) -> StepS12<()> {
-    let mut data = [0u8; 5000];
-    for (i, d) in data.iter_mut().enumerate() {
-        *d = (i % 253) as u8;
+/// `n` bytes on the heap, byte `i` set to `i % 253`. The registry's stack
+/// on aarch64 is 16 KiB (ROADMAP §11.3), and two 5,000-byte buffers plus
+/// the FAT write frames do not fit it.
+fn pattern_buf(n: usize) -> Result<TryVec<u8>, (&'static str, FsError)> {
+    let mut v = TryVec::try_with_capacity(n).map_err(|_| ("buffer", FsError::NoMem))?;
+    let mut chunk = [0u8; 256];
+    let mut filled = 0usize;
+    while filled < n {
+        let take = (n - filled).min(chunk.len());
+        for (i, b) in chunk[..take].iter_mut().enumerate() {
+            *b = ((filled + i) % 253) as u8;
+        }
+        v.try_extend_from_slice(&chunk[..take])
+            .map_err(|_| ("buffer", FsError::NoMem))?;
+        filled += take;
     }
+    Ok(v)
+}
+
+fn two_descriptors(a: &FileRef, b: &FileRef) -> StepS12<()> {
+    let data = pattern_buf(5000)?;
     let mut n = 0usize;
     while n < data.len() {
         match step("write", file_init::write(a, &data[n..]))? {
@@ -275,7 +292,7 @@ fn two_descriptors(a: &FileRef, b: &FileRef) -> StepS12<()> {
         return Err(("size is not 5,000 on both", FsError::Io));
     }
     step("seek b", file_init::seek(b, SeekFrom::Start(0)))?;
-    let mut back = [0u8; 5000];
+    let mut back = pattern_buf(5000)?;
     let mut m = 0usize;
     while m < back.len() {
         match step("read b", file_init::read(b, &mut back[m..]))? {
@@ -283,7 +300,7 @@ fn two_descriptors(a: &FileRef, b: &FileRef) -> StepS12<()> {
             k => m += k,
         }
     }
-    if m != back.len() || back != data {
+    if m != back.len() || *back != *data {
         return Err(("read back through b", FsError::Io));
     }
     let (sbk, key) = step("inode of a", fs_init::with(|v| v.file_inode(a.id())))?;

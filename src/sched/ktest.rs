@@ -559,8 +559,9 @@ pub(crate) fn test_workqueue() -> Outcome {
     Outcome::Ok
 }
 
-/// The registry's stack size ROADMAP §10.2 names.
-const REGISTRY_STACK_BYTES: u64 = 64 * 1024;
+/// The registry stack `ktest::run` spawns: 64 KiB on x86_64 (ROADMAP §10.2),
+/// 16 KiB on aarch64 (ROADMAP §11.3).
+const REGISTRY_STACK_BYTES: u64 = (crate::ktest::REGISTRY_STACK_PAGES as u64) * PAGE_SIZE_4K;
 
 /// How long [`ktest_context`] yields for its worker.
 const WORKER_WAIT_NS: u64 = 1_000_000_000;
@@ -633,7 +634,11 @@ pub(crate) fn ktest_context() -> Outcome {
         let stack = unsafe { &(*crate::arch::current_tcb()).stack };
         return match stack {
             Some(ks) if (ks.pages() as u64) * PAGE_SIZE_4K != REGISTRY_STACK_BYTES => {
-                Outcome::Fail("registry stack not 64 KiB")
+                crate::fail_fmt!(
+                    "registry stack {} KiB, want {} KiB",
+                    (ks.pages() as u64) * PAGE_SIZE_4K / 1024,
+                    REGISTRY_STACK_BYTES / 1024
+                )
             }
             _ => Outcome::Fail("registry stack not guarded"),
         };
