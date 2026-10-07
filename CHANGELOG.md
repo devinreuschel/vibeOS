@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- aarch64 leaf TLB invalidates drop a kernel address's high bits, so the
+  TTL hint cannot skip the invalidate ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
 - a failed `RNDR` is not entropy, so `/dev/random` does not fill zeros
   ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
 - a failed `irq::set_affinity` leaves dest CPU unchanged, and GIC SPIs

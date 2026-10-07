@@ -59,6 +59,15 @@ pub const ROLLOVER_LOCAL: [TlbOp; 3] = [TlbOp::TlbiVmalle1, TlbOp::DsbNsh, TlbOp
 pub const BBM_AFTER_INVALID: [TlbOp; 3] = [TlbOp::DsbIshst, TlbOp::TlbiVale1is, TlbOp::DsbIsh];
 pub const BBM_AFTER_MAKE: [TlbOp; 2] = [TlbOp::DsbIshst, TlbOp::Isb];
 
+/// `TLBI VA*E1` / `VA*E1IS` register operand (Arm ARM DDI0487).
+///
+/// Bits 63:48 are `asid`. Bits 47:44 are the FEAT_TTL hint and stay 0, so
+/// hardware does not treat a mismatched granule or level as "invalidate
+/// nothing". Bits 43:0 are VA[55:12].
+pub const fn tlbi_va_operand(va: u64, asid: u16) -> u64 {
+    ((va >> 12) & ((1u64 << 44) - 1)) | ((asid as u64) << 48)
+}
+
 /// `dmb oshst` / `dmb oshld` / `dmb osh` (Linux arm64 DMA barriers; F098).
 pub const DMA_WMB: &str = "dmb oshst";
 pub const DMA_RMB: &str = "dmb oshld";
@@ -102,6 +111,41 @@ pub fn icache_sync(idc: bool, dic: bool, buf: &mut [IcacheOp]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vale1is_operand_clears_ttl_and_asid() {
+        // 0xFFFF_8000_1234_5000 >> 12 is 0x000F_FFF8_0001_2345: TTL 0b1111
+        // (64 KiB, level 3) and ASID 0x000F. The operand keeps VA[55:12].
+        let kernel = tlbi_va_operand(0xFFFF_8000_1234_5000, 0);
+        assert_eq!(kernel, 0x0000_0FF8_0001_2345);
+        assert_eq!(kernel >> 48, 0, "ASID");
+        assert_eq!((kernel >> 44) & 0xF, 0, "TTL");
+
+        let top = tlbi_va_operand(0xFFFF_FFFF_FFFF_F000, 0);
+        assert_eq!(top, 0x0000_0FFF_FFFF_FFFF);
+        assert_eq!(top >> 44, 0, "TTL and ASID");
+
+        let user = tlbi_va_operand(0x0000_0000_0040_2000, 0);
+        assert_eq!(user, 0x402);
+        assert_eq!(user >> 48, 0, "ASID");
+        assert_eq!((user >> 44) & 0xF, 0, "TTL");
+
+        // TBI0: a tag in bits 63:56 is not an ASID or a TTL hint.
+        let tagged = tlbi_va_operand(0x7F00_0000_0040_2000, 0);
+        assert_eq!(tagged, 0x402);
+        assert_eq!(tagged >> 44, 0, "TTL and ASID");
+    }
+
+    #[test]
+    fn vale1is_operand_ors_asid_above_the_va() {
+        let kernel = tlbi_va_operand(0xFFFF_8000_1234_5000, 0x00AB);
+        assert_eq!(kernel, 0x00AB_0FF8_0001_2345);
+        assert_eq!((kernel >> 44) & 0xF, 0, "TTL");
+
+        let user = tlbi_va_operand(0x0000_0000_0040_2000, 7);
+        assert_eq!(user, 0x0007_0000_0000_0402);
+        assert_eq!((user >> 44) & 0xF, 0, "TTL");
+    }
 
     #[test]
     fn leaf_sequence_is_broadcast() {
