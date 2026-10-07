@@ -1,0 +1,379 @@
+{
+ "attempt": 1,
+ "branch": "feature/acpi-sysmem-gas-map-5984",
+ "conclusion": "failure",
+ "created": "2026-10-07T13:35:09Z",
+ "event": "pull_request",
+ "finished": "2026-10-07T13:43:41Z",
+ "head_sha": "6f2739d1331d02c34c0cdcc1732702c33201ae10",
+ "jobs": [
+  {
+   "completed": "2026-10-07T13:41:49Z",
+   "conclusion": "failure",
+   "created": "2026-10-07T13:35:10Z",
+   "name": "check",
+   "results": [],
+   "runner": null,
+   "seconds": 368,
+   "started": "2026-10-07T13:35:41Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "gate inputs",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "install host tools",
+     "seconds": 0
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 17
+    },
+    {
+     "name": "install rust MSRV",
+     "seconds": 10
+    },
+    {
+     "name": "cache cargo (check)",
+     "seconds": 8
+    },
+    {
+     "name": "install python linters",
+     "seconds": 5
+    },
+    {
+     "name": "install cargo-deny",
+     "seconds": 1
+    },
+    {
+     "name": "make check",
+     "seconds": 318
+    },
+    {
+     "name": "native Linux: shared-page ELFs (ROADMAP \u00a710.6, F031)",
+     "seconds": null
+    },
+    {
+     "name": "install cargo-llvm-cov",
+     "seconds": null
+    },
+    {
+     "name": "vibeos-core llvm-cov floor",
+     "seconds": null
+    },
+    {
+     "name": "upload vibeos-core coverage HTML",
+     "seconds": 0
+    },
+    {
+     "name": "Post cache cargo (check)",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-07T13:40:03Z",
+   "conclusion": "success",
+   "created": "2026-10-07T13:35:10Z",
+   "name": "build (x86_64)",
+   "results": [],
+   "runner": null,
+   "seconds": 291,
+   "started": "2026-10-07T13:35:12Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 3
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 3
+    },
+    {
+     "name": "install host tools",
+     "seconds": 25
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 19
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 26
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": 27
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel, aarch64)",
+     "seconds": null
+    },
+    {
+     "name": "build the user programs (make user)",
+     "seconds": 2
+    },
+    {
+     "name": "build every ISO and host tool (make prebuilt)",
+     "seconds": 168
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "upload prebuilt files",
+     "seconds": 7
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 4
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-07T13:43:23Z",
+   "conclusion": "success",
+   "created": "2026-10-07T13:35:10Z",
+   "name": "build (aarch64)",
+   "results": [],
+   "runner": null,
+   "seconds": 488,
+   "started": "2026-10-07T13:35:15Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 376
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 10
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 12
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": null
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel, aarch64)",
+     "seconds": 17
+    },
+    {
+     "name": "build the user programs (make user)",
+     "seconds": 2
+    },
+    {
+     "name": "build every ISO and host tool (make prebuilt)",
+     "seconds": 57
+    },
+    {
+     "name": "runner CPU",
+     "seconds": 0
+    },
+    {
+     "name": "upload prebuilt files",
+     "seconds": 3
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": 2
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-07T13:43:34Z",
+   "conclusion": "success",
+   "created": "2026-10-07T13:43:24Z",
+   "name": "ticks",
+   "results": [],
+   "runner": null,
+   "seconds": 8,
+   "started": "2026-10-07T13:43:26Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 3
+    },
+    {
+     "name": "Run actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+     "seconds": 0
+    },
+    {
+     "name": "check_ticks",
+     "seconds": 1
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "completed": "2026-10-07T13:43:24Z",
+   "conclusion": "skipped",
+   "created": "2026-10-07T13:43:24Z",
+   "name": "tier (${{ matrix.arch }}, ${{ matrix.tier }})",
+   "results": [],
+   "runner": null,
+   "seconds": 0,
+   "started": "2026-10-07T13:43:24Z",
+   "steps": []
+  },
+  {
+   "completed": "2026-10-07T13:43:41Z",
+   "conclusion": "failure",
+   "created": "2026-10-07T13:43:35Z",
+   "name": "ci-pass",
+   "results": [],
+   "runner": null,
+   "seconds": 5,
+   "started": "2026-10-07T13:43:36Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "every job succeeded",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  }
+ ],
+ "run_id": 37629662068,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-10-07T13:35:09Z",
+ "workflow": "ci"
+}
