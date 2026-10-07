@@ -31,6 +31,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 - aarch64 `munmap` and a `brk` shrink drop the page from the TLB before
   the frame is freed, so a later EL0 access is `SIGSEGV`.
+- aarch64 leaf TLB invalidates drop a kernel address's high bits, so the
+  TTL hint cannot skip the invalidate ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
 - a failed `RNDR` is not entropy, so `/dev/random` does not fill zeros
   ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
 - a failed `irq::set_affinity` leaves dest CPU unchanged, and GIC SPIs

@@ -626,8 +626,10 @@ root, and on aarch64 points TTBR0 at the empty user root.
 
 On aarch64 the DESIGN §11.1 seam's invalidation is the Inner Shareable broadcast sequence (ROADMAP §11.2):
 `dsb ishst` after the descriptor store, then `tlbi vale1is` for a leaf (`vae1is` when a table page
-is freed, `aside1is` for one ASID), then `dsb ish`, and `isb` on the issuing core. The ROADMAP §4.10
-KVA-free deferral is satisfied once the `dsb ish` completes, so the shootdown hook sends no IPI.
+is freed, `aside1is` for one ASID), then `dsb ish`, and `isb` on the issuing core. A VA-form
+operand holds VA[55:12] in bits 43:0, the ASID in bits 63:48, and a zero TTL hint in bits 47:44.
+The ROADMAP §4.10 KVA-free deferral is satisfied once the `dsb ish` completes, so the shootdown
+hook sends no IPI.
 An ASID rollover broadcasts nothing: each flush-pending CPU runs `tlbi vmalle1`, `dsb nsh`, and
 `isb` locally before it loads an ASID of the new generation.
 
