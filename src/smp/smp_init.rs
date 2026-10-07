@@ -1061,6 +1061,16 @@ fn init_aarch64() {
             break;
         };
         i += 1;
+        // ICC_SGI1R cannot name this Aff0. Leave the CPU offline.
+        if let Err(e) = crate::arch::aarch64::gic::cpu_ok(cpu.hw_id) {
+            crate::klog!(
+                vibeos::log::Level::Error,
+                "vibeOS: smp: cpu {:#x} {}",
+                cpu.hw_id,
+                e.as_str()
+            );
+            continue;
+        }
         if cpu.hw_id == bsp {
             continue;
         }
