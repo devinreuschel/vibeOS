@@ -878,12 +878,16 @@ class TestBareMode(unittest.TestCase):
         self.addCleanup(self.repo.cleanup)
         self.repo.commit("base", dict(FILES))
 
-    def run_main(self, argv: list[str]) -> tuple[int, str, str]:
+    def run_main(self, argv: list[str], env: dict[str, str] | None = None
+                 ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
+        base_env = {"BASE_SHA": "", "GITHUB_BASE_REF": ""}
+        if env:
+            base_env.update(env)
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch.object(check_ticks, "ROOT", self.repo.path), \
                 mock.patch.object(gatelib, "ROOT", self.repo.path), \
-                mock.patch.dict(os.environ, {}):
+                mock.patch.dict(os.environ, base_env):
             cwd = os.getcwd()
             os.chdir(self.repo.path)
             try:
@@ -905,6 +909,31 @@ class TestBareMode(unittest.TestCase):
         self.repo.commit("t\n\nProves: make lint -- beta box: `make lint` checks the",
                          {"docs/ROADMAP.md": tick(ROADMAP, "beta box")})
         self.assertEqual(self.run_main([])[0], 0)
+
+    def test_non_main_pull_request_diffs_its_base(self) -> None:
+        """A tick that already landed on phase-11 is not a later pull request's
+        to prove again. A pull request into main still is."""
+        self.repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        phase = self.repo.commit("phase", {"docs/ROADMAP.md": tick(ROADMAP, "beta box")})
+        self.repo.git("update-ref", "refs/remotes/origin/phase-11", phase)
+        self.repo.commit("pr", {"src.rs": "fn x() {}\n"})
+        rc, _, err = self.run_main([])
+        self.assertEqual(rc, 1)
+        self.assertIn("ticked with no `Proves:` line", err)
+        rc, out, err = self.run_main([], {"GITHUB_BASE_REF": "phase-11"})
+        self.assertEqual(rc, 0, err)
+        self.assertIn("origin/phase-11", out)
+        rc, _, err = self.run_main([], {"GITHUB_BASE_REF": "main"})
+        self.assertEqual(rc, 1)
+        self.assertIn("ticked with no `Proves:` line", err)
+        rc, out, err = self.run_main([], {"BASE_SHA": phase})
+        self.assertEqual(rc, 0, err)
+        self.assertIn(phase, out)
+        self.repo.commit("ticks", {"docs/ROADMAP.md": tick(ROADMAP, "alpha box")})
+        rc, _, err = self.run_main([], {"GITHUB_BASE_REF": "phase-11"})
+        self.assertEqual(rc, 1)
+        self.assertIn("ticked with no `Proves:` line", err)
+        self.assertIn("alpha box", err)
 
 
 class TestSummary(RepoCase):

@@ -39,8 +39,10 @@ a later squash dropped from ancestry at which ci-history holds a failed
 `pull_request` run of that tier.
 
 Modes:
-- bare (`make check`): pairing and the diff rule on `origin/main..HEAD`, or
-  `check_ticks: skipped (no origin/main)` when that ref is missing;
+- bare (`make check`): pairing and the diff rule on `gatelib.pr_diff_base`
+  ..HEAD (`BASE_SHA`, or `origin/$GITHUB_BASE_REF` when that is not `main`,
+  or `origin/main`), or `check_ticks: skipped (no origin/main)` when no such
+  ref exists;
 - `--base B [--head H]`: pairing and the diff rule on `B..H`, plus the needs,
   closes and Fails-before rules;
 - `--results DIR [--run-commit SHA]`: adds the results, retry and bracket
@@ -1317,11 +1319,10 @@ def main(argv: list[str] | None = None) -> int:
     base = args.base
     full = base is not None
     if base is None:
-        if gatelib.git(ROOT, "rev-parse", "--verify", "-q", "origin/main",
-                       check=False).strip() == "":
+        base = gatelib.pr_diff_base(ROOT)
+        if base is None:
             print("check_ticks: skipped (no origin/main)")
             return 0
-        base = "origin/main"
     try:
         r = check(base, args.head, results_dir=args.results, run_commit=args.run_commit,
                   repo=ROOT, full=full)

@@ -125,3 +125,9 @@ commit = "e459ebaf1c8d2501a26e026242ca8bb13db0b852"
 was = ""
 proves = "loom_call_function_reuse -- the §4.9 call-function slot is safe to reuse"
 why = "C2 (#300) squash dropped the Proves line; 063778ef carried this trailer for the rewritten call-function box"
+
+[[erratum]]
+commit = "a45037fa88aab00b12dbba61707ceb7407f082ed"
+was = ""
+proves = "el1_x16_survives_irq -- `make test-kernel ARCH=aarch64` runs the portable in-guest groups"
+why = "#299 squash dropped the Proves line; 4e4fc3b5 carried this trailer for the reworded portable-groups box"
