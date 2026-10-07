@@ -92,6 +92,17 @@ pub const fn asid16_from_mmfr0(mmfr0: u64) -> bool {
     ((mmfr0 >> 4) & 0xF) == 2
 }
 
+/// One `RNDR` sample. `nzcv` is what `mrs NZCV` returns: PSTATE.NZCV in
+/// bits 31:28. Arm ARM DDI0487 RNDR writes `0b0000` and a random word, or
+/// `0b0100` (Z, bit 30) and 0. Z set is not entropy.
+pub const fn rndr_word(nzcv: u64, value: u64) -> Option<u64> {
+    if nzcv & (1 << 30) == 0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +146,19 @@ mod tests {
         assert_eq!(cpacr_el1() >> 20 & 0b11, 0b11);
         assert!(asid16_from_mmfr0(2 << 4));
         assert!(!asid16_from_mmfr0(0));
+    }
+
+    #[test]
+    fn rndr_word_nzcv() {
+        // `mrs NZCV` holds the encoding in bits 31:28, so `0b0100` is bit 30.
+        assert_eq!(
+            rndr_word(0b0000 << 28, 0x0123_4567_89ab_cdef),
+            Some(0x0123_4567_89ab_cdef)
+        );
+        assert_eq!(rndr_word(0b0000 << 28, 0), Some(0));
+        assert_eq!(rndr_word(0b0100 << 28, 0), None);
+        // V (bit 28) is not the failure flag. RNDR does not set it.
+        assert_eq!(rndr_word(0b0001 << 28, 1), Some(1));
     }
 
     #[test]

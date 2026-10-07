@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- a failed `RNDR` is not entropy, so `/dev/random` does not fill zeros
+  ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
 - a failed `irq::set_affinity` leaves dest CPU unchanged, and GIC SPIs
   stop at INTID 1019 ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
 - aarch64 EL1 vector entry no longer clobbers `x16`, which panicked as
