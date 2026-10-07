@@ -511,7 +511,11 @@ second boot alone. SMP stays before console; the old
 table that listed console as step 15 before SMP was drift and is gone.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
 advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`
-expects `pit`; KVM `-cpu max` expects `tsc-deadline`. Default QEMU also requires
+expects `pit`; KVM `-cpu max` expects `tsc-deadline`. On aarch64, `virtualization=on`
+in `VIBEOS_MACHINE` pins `<el>` to `2 vhe` and `<timer>` to `el2 hyp-virt`, or to
+`el2 hyp-phys` when the machine type is `virt-8.2`; `check_el2_boot` then requires
+one `el: 2 vhe` line per CPU. Without that property both placeholders stay open.
+Default QEMU also requires
 the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 `calibrated pit` instead. `make test-lapic-fallback`
 (`-cpu qemu64,-tsc-deadline`) runs in-guest tests on the periodic path.
@@ -551,6 +555,8 @@ With `-smp N`, additionally:
 - `vibeOS: sched: cpu<i> ready` for every `i` in `0..N`
 - `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
   (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
+- with `virtualization=on`, `vibeOS: el: 2 vhe` once per CPU, and
+  `vibeOS: time: timer el2 hyp-virt` (`el2 hyp-phys` on `virt-8.2`)
 
 e2e also reads the boot log's memory diagnostics, the registry's `pmm:` and `meminfo:` rows, which
 print before `sched: cpu0 ready`, in every production mode (default, `EXPECT_PIT`, highmem, and UEFI;
@@ -1134,7 +1140,7 @@ which the scheduled jobs and the gate run, still rerun the whole registry there.
 | `nightly` `deny-advisories` | daily 03:17 UTC + dispatch, `sched-lane-3` | cargo-deny's pinned release archive, checked against its SHA-256 as in `check`, then `cargo deny check advisories`, which fetches the RustSec database and so stays out of `make check` |
 | `nightly` `provenance-fetch` | daily 03:17 UTC + dispatch, `sched-lane-3` | `python3 scripts/check_provenance.py --fetch`: each provenance header's upstream file at its pinned revision (DESIGN §1.5) |
 | `nightly` `budget` | daily 03:17 UTC + dispatch, `sched-lane-3` | `make ci-budget` (`ci_history.py --budget` and `--tiers`, Scheduled capacity below) against the `ci-history` branch, which it clones alone |
-| `nightly` `el2` | daily 03:17 UTC + dispatch, `sched-lane-1` | On `ubuntu-26.04-arm`, `ARCH=aarch64` `make test-e2e` twice: `-machine virt,acpi=off,gic-version=3,virtualization=on` then `virt-8.2` with the same (ROADMAP §11.7 EL2 boot). A failed run's `build/cores/` as `cores-aarch64-el2` |
+| `nightly` `el2` | daily 03:17 UTC + dispatch, `sched-lane-1` | On `ubuntu-26.04-arm`, `ARCH=aarch64` `make test-e2e` twice: `-machine virt,acpi=off,gic-version=3,virtualization=on` then `virt-8.2` with the same, then `make test-kernel-smp4` on `virt` with `virtualization=on` (ROADMAP §11.7 EL2 boot). The harness requires `el: 2 vhe` on every CPU and `time: timer el2 hyp-virt` (`el2 hyp-phys` on `virt-8.2`). A failed run's `build/cores/` as `cores-aarch64-el2` |
 
 The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its

@@ -847,6 +847,12 @@ jobs:
           VIBEOS_RESULTS_APPEND: "1"
         run: make test-e2e
 
+      # In-guest registry at EL2. `make test-kernel` forces SMP=2.
+      - name: EL2 test-kernel -smp 4
+        env:
+          VIBEOS_MACHINE: virt,acpi=off,gic-version=3,virtualization=on
+        run: make test-kernel-smp4
+
       - name: harness results summary
         if: always()
         run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"

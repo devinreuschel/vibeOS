@@ -29,6 +29,9 @@
 #            contract row after the group comes after exactly `N - 1` lines
 #            of the group's last row and before any other (F141).
 #   `<mode>` is bound by the harness to the LAPIC timer mode it expects.
+#   `<el>` and `<timer>` stay open unless the aarch64 machine sets
+#   `virtualization=on`, which binds `<el>` to `2 vhe` and `<timer>` to
+#   `el2 hyp-virt` (`el2 hyp-phys` on machine type `virt-8.2`).
 #
 # A failure row whose placeholders all follow its last literal fails a line
 # that holds the text before its first placeholder (its head signature);
