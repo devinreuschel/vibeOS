@@ -58,6 +58,7 @@ impl TrapFrame {
 }
 
 const _: () = assert!(core::mem::size_of::<TrapFrame>() == FRAME_SIZE as usize);
+const _: () = assert!(core::mem::offset_of!(TrapFrame, x) + 30 * 8 == 240);
 
 static FULL: AtomicBool = AtomicBool::new(false);
 static OVERFLOW: AtomicPtr<GuardedStack> = AtomicPtr::new(core::ptr::null_mut());
@@ -255,12 +256,32 @@ global_asm!(
     "    b vibeos_el0_return",
     ".global vibeos_el0_return",
     "vibeos_el0_return:",
+    // `daifset` only sets bits. While the exit breakpoint is armed, clear
+    // D first so a mutant that writes `#2` leaves D clear at the `eret`.
+    // Unarmed returns keep the mask the body already set.
+    ".if {ktest}",
+    "    adrp x1, VIBEOS_ERET_BP_ARMED",
+    "    add x1, x1, :lo12:VIBEOS_ERET_BP_ARMED",
+    "    ldarb w1, [x1]",
+    "    cbz w1, 6f",
+    "    msr daifclr, #8",
+    "6:",
+    ".endif",
     "    msr daifset, #0xf",
     ".if {debug}",
     "    mrs x1, daif",
     "    and x1, x1, #0x3c0",
     "    cmp x1, #0x3c0",
-    "    b.ne vibeos_el0_daif_clear",
+    "    b.eq 7f",
+    // Armed: the hit count is the failure. Halting would hide it.
+    ".if {ktest}",
+    "    adrp x1, VIBEOS_ERET_BP_ARMED",
+    "    add x1, x1, :lo12:VIBEOS_ERET_BP_ARMED",
+    "    ldarb w1, [x1]",
+    "    cbnz w1, 7f",
+    ".endif",
+    "    b vibeos_el0_daif_clear",
+    "7:",
     ".endif",
     "    mov x0, sp",
     "    bl vibeos_el0_exit",
@@ -283,7 +304,15 @@ global_asm!(
     "    mrs x16, daif",
     "    and x16, x16, #0x3c0",
     "    cmp x16, #0x3c0",
-    "    b.ne vibeos_el0_daif_clear",
+    "    b.eq 8f",
+    ".if {ktest}",
+    "    adrp x16, VIBEOS_ERET_BP_ARMED",
+    "    add x16, x16, :lo12:VIBEOS_ERET_BP_ARMED",
+    "    ldarb w16, [x16]",
+    "    cbnz w16, 8f",
+    ".endif",
+    "    b vibeos_el0_daif_clear",
+    "8:",
     ".endif",
     "    ldp x16, x17, [sp, #128]",
     "    add sp, sp, #{uframe}",
@@ -321,6 +350,7 @@ global_asm!(
     off = const crate::arch::aarch64::percpu::OVERFLOW_SP_OFFSET,
     cur = const CURRENT_OFFSET,
     debug = const cfg!(debug_assertions) as u32,
+    ktest = const cfg!(feature = "kernel_tests") as u32,
 );
 
 /// Point VBAR at the early table. Safe before KVA.
@@ -465,6 +495,31 @@ extern "C" fn vibeos_vector_rust(frame: &mut TrapFrame) {
     restore(frame);
 }
 
+#[cfg(feature = "kernel_tests")]
+fn on_eret_breakpoint(frame: &mut TrapFrame) {
+    crate::syscall_init::testing::note_eret_bp();
+    if crate::syscall_init::testing::take_probe() {
+        // x30 is the probe continuation. The exception replaced ELR
+        // with this `eret`, so returning there loops.
+        frame.elr = frame.x[30];
+        crate::syscall_init::testing::disarm_eret_breakpoint();
+        return;
+    }
+    if let Some((pc, pstate)) = crate::syscall_init::testing::take_exit_target() {
+        frame.elr = pc;
+        frame.spsr = pstate;
+        crate::syscall_init::testing::clear_eret_bcr();
+        return;
+    }
+    // ELR is this `eret`. Returning there erets to itself.
+    crate::syscall_init::testing::disarm_eret_breakpoint();
+    crate::klog!(
+        vibeos::log::Level::Error,
+        "vibeOS: ktest: eret breakpoint with no target"
+    );
+    cpu::halt();
+}
+
 fn handle_sync(frame: &mut TrapFrame, kind: TrapKind) {
     #[cfg(feature = "kernel_tests")]
     if super::catch::intercept(frame) {
@@ -472,8 +527,7 @@ fn handle_sync(frame: &mut TrapFrame, kind: TrapKind) {
     }
     #[cfg(feature = "kernel_tests")]
     if matches!(kind, TrapKind::Debug(_)) && crate::syscall_init::testing::eret_breakpoint_armed() {
-        crate::syscall_init::testing::note_eret_bp();
-        crate::syscall_init::testing::disarm_eret_breakpoint();
+        on_eret_breakpoint(frame);
         return;
     }
     if let Some(fix) = super::uaccess::fixup(frame.elr, untag_user_addr(frame.far)) {
@@ -564,6 +618,10 @@ extern "C" fn vibeos_el0_exit(frame: &mut UserFrame) {
     #[cfg(feature = "kernel_tests")]
     if crate::syscall_init::testing::take_bad_elr() {
         frame.pc = 1u64 << 48;
+    }
+    #[cfg(feature = "kernel_tests")]
+    if crate::syscall_init::testing::eret_breakpoint_armed() {
+        crate::syscall_init::testing::note_exit_target(frame.pc, frame.pstate);
     }
     if !crate::syscall_init::elr_ok(frame.pc) {
         crate::proc_init::kill_bad_elr(frame.pc);
