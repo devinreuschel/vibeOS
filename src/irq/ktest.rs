@@ -5,22 +5,16 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
 use vibeos::ipi::MAX_IPI_CPUS;
-#[cfg(target_arch = "x86_64")]
-use vibeos::irq::IrqError;
-use vibeos::irq::{self, IrqId, IrqSpecifier};
+use vibeos::irq::{self, IrqError, IrqId, IrqSpecifier};
 use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
-use vibeos::pci::{Bdf, CMD_INTX_DISABLE};
-#[cfg(target_arch = "x86_64")]
-use vibeos::pci::{CFG_COMMAND, CMD_MASTER, CMD_MEM};
+use vibeos::pci::{Bdf, CFG_COMMAND, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::thread::ThreadState;
 use vibeos::vectors;
 
 use crate::apic_init;
 use crate::ipi_init;
 use crate::irq_init;
-#[cfg(target_arch = "x86_64")]
-use crate::ktest::cpu_remote;
 use crate::ktest::{
     EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, alloc_frames_owned, bar0_va, find_edu,
     free_frames_owned, mmio_r32, mmio_w32, quiescent_free_frames, second_cpu, spawn_thread_on,
@@ -83,29 +77,21 @@ pub(crate) fn test_call_function_ipi() -> Outcome {
     Outcome::Ok
 }
 
-#[cfg(target_arch = "x86_64")]
 const E1000_ICR: u32 = 0xC0;
 
-#[cfg(target_arch = "x86_64")]
 const E1000_ICS: u32 = 0xC8;
 
-#[cfg(target_arch = "x86_64")]
 const E1000_IMS: u32 = 0xD0;
 
-#[cfg(target_arch = "x86_64")]
 const E1000_IMC: u32 = 0xD8;
 
-#[cfg(target_arch = "x86_64")]
 const E1000_IVAR: u32 = 0xE4;
 
-#[cfg(target_arch = "x86_64")]
 const E1000_ICR_LSC: u32 = 1 << 2;
 
-#[cfg(target_arch = "x86_64")]
 const E1000_ICR_OTHER: u32 = 1 << 24;
 
 /// Other -> MSI-X table entry 0, valid.
-#[cfg(target_arch = "x86_64")]
 const E1000_IVAR_OTHER0: u32 = 0x8 << 16;
 
 const EDU_IRQSTAT: u32 = 0x24;
@@ -168,7 +154,6 @@ fn record_irq_cpu() {
     IRQ_HITS.fetch_add(1, Ordering::SeqCst);
 }
 
-#[cfg(target_arch = "x86_64")]
 fn on_msix() {
     match irq_init::allocate(0) {
         Err(IrqError::InIrq) => IRQ_ALLOC.store(1, Ordering::SeqCst),
@@ -302,14 +287,14 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
     Outcome::Ok
 }
 
-/// GICv3 `set_affinity` does not `MOVI` an LPI yet (ROADMAP §11.3).
-/// `its_doorbell` writes the doorbell; it is not this test.
-#[cfg(target_arch = "aarch64")]
-pub(crate) fn test_msix_cpu() -> Outcome {
-    Outcome::Skip("x86 MSI-X affinity")
+fn arm_e1000_msix(mmio: u64) {
+    mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
+    mmio_w32(mmio, E1000_IVAR, E1000_IVAR_OTHER0);
+    mmio_w32(mmio, E1000_IMS, E1000_ICR_LSC | E1000_ICR_OTHER);
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+/// MSI-X goes live on CPU 0, then `set_affinity` moves it. The next
+/// interrupt has to arrive on the new CPU (issue #263).
 pub(crate) fn test_msix_cpu() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
@@ -323,68 +308,84 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     let Some(mmio) = bar0_va(&dev) else {
         return Outcome::Fail("e1000e bar0");
     };
-    if cpu_remote(ap).is_none() {
-        return Outcome::Fail("no apic id");
-    }
-    let vec = match irq_init::allocate(0) {
-        Ok(v) => v,
-        Err(e) => return Outcome::Fail(e.as_str()),
+    // `alloc_msi` maps the ITS event on aarch64. `allocate` does not.
+    let vec = match irq_init::alloc_msi(&dev, 1).ok().and_then(|s| s.get(0)) {
+        Some(v) => v,
+        None => return Outcome::Fail("alloc"),
     };
-    if irq_init::set_handler(vec, on_msix).is_err() {
-        let _ = irq_init::free_vector(vec);
-        return Outcome::Fail("handler");
-    }
-    if irq_init::set_affinity(vec, ap).is_err() {
-        let _ = irq_init::free_vector(vec);
-        return Outcome::Fail("affinity");
-    }
-    if irq_init::cpu_of(vec) != Some(ap) {
-        let _ = irq_init::free_vector(vec);
-        return Outcome::Fail("cpu_of ap");
-    }
-    reset_irq_obs();
-    IRQ_MMIO.store(mmio, Ordering::SeqCst);
-    // Decode on, bus mastering and INTx disable off, so a COMMAND write by
-    // `enable_msix` shows; `saved` goes back at the end.
     let saved = pci_init::cfg_read16(dev.addr, CFG_COMMAND);
-    let before = pci_init::update_command(dev.addr, CMD_MEM, CMD_MASTER | CMD_INTX_DISABLE);
-    let restore = || {
+    let restore_cmd = || {
         pci_init::update_command(dev.addr, saved, !saved);
     };
-    if let Err(e) = irq_init::enable_msix(&dev, 0, vec) {
+    let fail = |why: &'static str| {
+        mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
+        irq_init::disable_msix(&dev);
         let _ = irq_init::free_vector(vec);
-        restore();
+        IRQ_MMIO.store(0, Ordering::SeqCst);
+        restore_cmd();
+        Outcome::Fail(why)
+    };
+    if irq_init::set_handler(vec, on_msix).is_err() {
+        return fail("handler");
+    }
+    // Decode on, bus mastering and INTx disable off, so a COMMAND write by
+    // `enable_msix` shows; `saved` goes back at the end.
+    let before = pci_init::update_command(dev.addr, CMD_MEM, CMD_MASTER | CMD_INTX_DISABLE);
+    // The entry is live, aimed at CPU 0, before the move.
+    if let Err(e) = irq_init::enable_msix(&dev, 0, vec) {
+        restore_cmd();
+        mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
+        let _ = irq_init::free_vector(vec);
         return Outcome::Fail(e.as_str());
     }
     if pci_init::cfg_read16(dev.addr, CFG_COMMAND) != before {
-        irq_init::disable_msix(&dev);
-        let _ = irq_init::free_vector(vec);
-        restore();
-        return Outcome::Fail("msix wrote command");
+        return fail("msix wrote command");
     }
     // The test is the driver: an MSI-X message is a bus-master write
     // (DESIGN §4.7), and INTx goes off while MSI-X is armed.
     pci_init::update_command(dev.addr, CMD_MASTER | CMD_INTX_DISABLE, 0);
-    mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
-    mmio_w32(mmio, E1000_IVAR, E1000_IVAR_OTHER0);
-    mmio_w32(mmio, E1000_IMS, E1000_ICR_LSC | E1000_ICR_OTHER);
+    reset_irq_obs();
+    IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    arm_e1000_msix(mmio);
     mmio_w32(mmio, E1000_ICS, E1000_ICR_LSC);
-    let fired = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
+    let first = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
+    let cpu0 = IRQ_CPU.load(Ordering::SeqCst);
+    if !first {
+        return fail("no msix");
+    }
+    if cpu0 != 0 {
+        return fail("not cpu0");
+    }
+    reset_irq_obs();
+    if irq_init::set_affinity(vec, ap).is_err() {
+        return fail("affinity");
+    }
+    if irq_init::cpu_of(vec) != Some(ap) {
+        return fail("cpu_of ap");
+    }
+    mmio_w32(mmio, E1000_ICS, E1000_ICR_LSC);
+    let second = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
+    let cpu = IRQ_CPU.load(Ordering::SeqCst);
+    let ap_hits = CPU_HITS
+        .get(ap as usize)
+        .map(|c| c.load(Ordering::SeqCst))
+        .unwrap_or(0);
+    let alloc = IRQ_ALLOC.load(Ordering::SeqCst);
     mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
     irq_init::disable_msix(&dev);
     let _ = irq_init::free_vector(vec);
     IRQ_MMIO.store(0, Ordering::SeqCst);
-    restore();
-    if !fired {
-        return Outcome::Fail("no msix");
+    restore_cmd();
+    if !second {
+        return Outcome::Fail("no msix after move");
     }
-    if IRQ_CPU.load(Ordering::SeqCst) != ap {
+    if cpu != ap {
         return Outcome::Fail("wrong cpu");
     }
-    if CPU_HITS[ap as usize].load(Ordering::SeqCst) == 0 {
+    if ap_hits == 0 {
         return Outcome::Fail("ap counter");
     }
-    if IRQ_ALLOC.load(Ordering::SeqCst) != 1 {
+    if alloc != 1 {
         return Outcome::Fail("alloc in irq");
     }
     Outcome::Ok

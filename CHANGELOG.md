@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- MSI-X `set_affinity` retargets a live interrupt: x86 rewrites the table
+  entry, and GICv3 `MOVI`s an LPI after `MAPC` on each CPU.
 - aarch64 secondaries entered at EL2 turn translation on only after MAIR, TCR,
   and the TTBRs are set ([ROADMAP §11.4](docs/ROADMAP.md#114-smp-and-per-cpu)).
 - aarch64 EL0 cannot read or write `SCXTNUM_EL0`, and an EL0 `wfi` traps and

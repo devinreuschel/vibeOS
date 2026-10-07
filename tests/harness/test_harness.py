@@ -3490,19 +3490,19 @@ class TestSkips(unittest.TestCase):
         names = {r.name for r in rows}
         self.assertIn("cpu_hardening", names)
 
-    def test_msix_cpu_skip_is_x86_only(self) -> None:
+    def test_msix_cpu_skip_needs_an_ap(self) -> None:
         from tests.harness.skips import check_skips, load_skips
 
         rows = load_skips()
         aarch64 = {
             **self.TCG2,
             "arch": "aarch64",
-            "smp": 1,
             "machine": "virt,acpi=off,gic-version=3",
         }
-        check_skips({"msix_cpu": "x86 MSI-X affinity"}, ["msix_cpu"], aarch64, rows)
+        check_skips({}, ["msix_cpu"], aarch64, rows)
+        check_skips({"msix_cpu": "no AP"}, ["msix_cpu"], {**aarch64, "smp": 1}, rows)
         with self.assertRaisesRegex(HarnessError, "msix_cpu ran"):
-            check_skips({}, ["msix_cpu"], aarch64, rows)
+            check_skips({}, ["msix_cpu"], {**aarch64, "smp": 1}, rows)
         x86_smp1 = {**self.TCG2, "smp": 1}
         check_skips({"msix_cpu": "no AP"}, ["msix_cpu"], x86_smp1, rows)
         with self.assertRaisesRegex(HarnessError, "msix_cpu ran"):

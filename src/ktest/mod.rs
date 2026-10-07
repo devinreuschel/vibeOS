@@ -548,7 +548,6 @@ fn aarch64_x86_skip(name: &str) -> Option<&'static str> {
         "syscall_dispatch" => "x86 eax syscall numbers",
         "acpi_discovery" => "x86 ACPI tables",
         "trampoline_page" => "x86 AP trampoline",
-        "msix_cpu" => "x86 MSI-X affinity",
         "console_read_exit" => "x86 PS/2 console",
         "user_fork_wait_stall" => "x86 syscall entry",
         "mmio_uc_flags" => "x86 LAPIC page flags",
