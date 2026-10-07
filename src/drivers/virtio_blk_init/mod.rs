@@ -996,7 +996,7 @@ impl VirtioBlk {
     }
 
     #[cfg_attr(
-        not(all(feature = "kernel_tests", target_arch = "aarch64")),
+        not(feature = "kernel_tests"),
         expect(dead_code, reason = "in-guest virtio-mmio F047 test")
     )]
     pub fn is_mmio(&self) -> bool {

@@ -669,3 +669,27 @@ name = "tsc_calib_source"
 reason = "no invariant tsc"
 arch = "aarch64"
 no_counterpart = "the band compares PIT channel 2 to HPET; aarch64 takes CNTFRQ"
+
+[[skip]]
+name = "irq_pool"
+reason = "x86 IDT vector"
+arch = "aarch64"
+no_counterpart = "the pool is an x86 IDT vector, and ISA line 5 is routed to vector 0x25"
+
+[[skip]]
+name = "in_hard_irq_top_bottom"
+reason = "x86 IDT vector"
+arch = "aarch64"
+no_counterpart = "the top half runs from an x86 self-IPI; aarch64 send_ipi_cpu does not raise the LPI"
+
+[[skip]]
+name = "unowned_vector_storm"
+reason = "x86 IDT vector"
+arch = "aarch64"
+no_counterpart = "the storm is x86 self-IPIs to IDT vectors, including masked 8259 line 5"
+
+[[skip]]
+name = "lifetime_shootdown_ack_late"
+reason = "x86 shootdown ack"
+arch = "aarch64"
+no_counterpart = "aarch64 invalidates with a broadcast TLBI and does not wait for an ack"

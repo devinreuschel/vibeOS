@@ -244,6 +244,31 @@ pub const fn bar_map_allowed(size: u64) -> bool {
     size > 0 && size <= MAX_BAR_MAP
 }
 
+/// Next address in a PCI MMIO window. `cursor` is the first free byte,
+/// `align` is a power of two (the reservation: one page, or the BAR size
+/// rounded up), and `limit` is the first byte past the window. Returns
+/// `(addr, next)` with `addr` aligned and `next == addr + align`, or
+/// `None` when that reservation would pass `limit` or `align` is not a
+/// power of two. `next == limit` fits.
+pub const fn next_bar_addr(cursor: u64, align: u64, limit: u64) -> Option<(u64, u64)> {
+    if !align.is_power_of_two() {
+        return None;
+    }
+    let mask = align.wrapping_sub(1);
+    let Some(sum) = cursor.checked_add(mask) else {
+        return None;
+    };
+    let addr = sum & !mask;
+    let Some(next) = addr.checked_add(align) else {
+        return None;
+    };
+    if next > limit {
+        None
+    } else {
+        Some((addr, next))
+    }
+}
+
 fn size_from_mask(mask: u64, flag_bits: u64, wide: bool) -> u64 {
     let m = mask & !flag_bits;
     if m == 0 {
@@ -1283,5 +1308,24 @@ mod tests {
         assert_eq!((c.msi, c.msix), (Some(0x40), Some(0x50)));
         let msi = read_msi_cap(&mut f, l, 0xFF);
         assert_eq!(msi.addr_off, 0xFF + 4);
+    }
+
+    #[test]
+    fn next_bar_addr_aligns_inside_the_window() {
+        assert_eq!(
+            next_bar_addr(0x101c_d000, 0x1000, 0x4000_0000),
+            Some((0x101c_d000, 0x101c_e000))
+        );
+        assert_eq!(
+            next_bar_addr(0x101c_c100, 0x1000, 0x4000_0000),
+            Some((0x101c_d000, 0x101c_e000))
+        );
+        assert_eq!(
+            next_bar_addr(0x3fff_f000, 0x1000, 0x4000_0000),
+            Some((0x3fff_f000, 0x4000_0000))
+        );
+        assert_eq!(next_bar_addr(0x3fff_f001, 0x1000, 0x4000_0000), None);
+        assert_eq!(next_bar_addr(0, 0, 0x1000), None);
+        assert_eq!(next_bar_addr(0, 3, 0x1000), None);
     }
 }

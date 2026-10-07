@@ -559,6 +559,8 @@ fn aarch64_x86_skip(name: &str) -> Option<&'static str> {
         "sched_lock_timer_irq" => "x86 timer vector",
         "addrspace_map_unmap_teardown" => "x86 invlpg",
         "pit_tick_rate" => "x86 PIT",
+        "irq_pool" | "in_hard_irq_top_bottom" | "unowned_vector_storm" => "x86 IDT vector",
+        "lifetime_shootdown_ack_late" => "x86 shootdown ack",
         _ => return None,
     })
 }

@@ -2,11 +2,13 @@
 //!
 //! Legacy `0xCF8`/`0xCFC` for bus 0 when there is no MCFG. Beyond bus 0,
 //! MCFG → ECAM (DESIGN §7.1). Scan fills the device list, with each
-//! function's parent bridge, and maps no BAR. A driver maps a memory BAR
-//! it has claimed, in its `probe`, through [`map_bar`] (DESIGN §12.3 rule
-//! 8): through ioremap, never a multi-TiB page walk (DESIGN §4.1). The
-//! physmap is RAM-only; a BAR that overlaps the framebuffer reuses that
-//! write-back mapping.
+//! function's parent bridge, and maps no BAR. On aarch64, a memory BAR
+//! firmware left at address 0 is assigned one in QEMU virt's 32-bit PCI
+//! window during [`scan`], before any AP starts. A driver maps a memory
+//! BAR it has claimed, in its `probe`, through [`map_bar`] (DESIGN §12.3
+//! rule 8): through ioremap, never a multi-TiB page walk (DESIGN §4.1).
+//! The physmap is RAM-only; a BAR that overlaps the framebuffer reuses
+//! that write-back mapping.
 
 use core::fmt::Write;
 #[cfg(feature = "kernel_tests")]
@@ -384,6 +386,23 @@ pub unsafe fn scan() {
             *slot = FuncInfo::empty();
         }
         (*p).n = pci::enumerate(&mut HwCfg, 0, found);
+        #[cfg(target_arch = "aarch64")]
+        {
+            // AAVMF programs a page-or-larger BAR and leaves a sub-page
+            // one (pvpanic-pci is 16 bytes) at 0. Assign those here, on
+            // the BSP, in the same window as the size probe above
+            // (BOOT.md §3.3 step 15b): a BAR write after an AP is up
+            // rebuilds QEMU's memory map under that AP's MMIO.
+            let n_scan = (*p).n;
+            let mut cursor = mmio32_cursor(found.get(..n_scan).unwrap_or(&[]));
+            let mut i = 0usize;
+            while i < n_scan {
+                if let Some(info) = found.get_mut(i) {
+                    place_unset_bars(info, &mut cursor);
+                }
+                i += 1;
+            }
+        }
         SCAN.set_in_place();
     }
     // Release: pairs with the Acquire load in `dev::ktest::test_pci_scan_bsp_only`.
@@ -452,10 +471,97 @@ fn scan_line(info: &FuncInfo) -> core::fmt::Result {
     })
 }
 
+/// QEMU `virt` 32-bit PCI MMIO window (`VIRT_PCIE_MMIO` in
+/// `hw/arm/virt.c`). RAM starts at the limit.
+#[cfg(target_arch = "aarch64")]
+const PCI_MMIO32_BASE: u64 = 0x1000_0000;
+#[cfg(target_arch = "aarch64")]
+const PCI_MMIO32_LIMIT: u64 = 0x4000_0000;
+
+/// First free byte at or above [`PCI_MMIO32_BASE`], past every memory BAR
+/// already programmed inside the window. A 64-bit BAR above the limit
+/// stays in the high window and does not move the cursor.
+#[cfg(target_arch = "aarch64")]
+fn mmio32_cursor(found: &[FuncInfo]) -> u64 {
+    let mut end = PCI_MMIO32_BASE;
+    for info in found {
+        for bar in &info.bars {
+            if bar.kind.is_mem() && bar.addr != 0 && bar.addr < PCI_MMIO32_LIMIT {
+                let bar_end = bar.addr.saturating_add(bar.size);
+                if bar_end > end {
+                    end = bar_end;
+                }
+            }
+        }
+    }
+    end
+}
+
+/// Write `addr` into memory BAR `index`, keeping the type and prefetch
+/// bits. The high dword of a 64-bit BAR is written too.
+#[cfg(target_arch = "aarch64")]
+fn program_mem_bar(hw: &mut HwCfg, bdf: Bdf, index: u8, bar: pci::Bar, addr: u64) {
+    let off = pci::CFG_BAR0.saturating_add(u16::from(index).saturating_mul(4));
+    let mut low = (addr as u32) & !0xF;
+    if bar.prefetchable {
+        low |= 1 << 3;
+    }
+    if bar.kind == pci::BarKind::Mem64 {
+        low |= 0x4;
+        hw.write32(bdf, off, low);
+        hw.write32(bdf, off.saturating_add(4), (addr >> 32) as u32);
+    } else {
+        hw.write32(bdf, off, low);
+    }
+}
+
+/// Assign each memory BAR `scan` left at address 0, when its size is one
+/// [`map_bar`] would map. The reservation is one page, or the next power
+/// of two of a larger BAR, so two devices do not share an ioremap page.
+/// A BAR that does not fit is left at 0 and the walk continues.
+#[cfg(target_arch = "aarch64")]
+fn place_unset_bars(info: &mut FuncInfo, cursor: &mut u64) {
+    let mut hw = HwCfg;
+    let mut placed = false;
+    let mut i = 0u8;
+    while usize::from(i) < pci::MAX_BARS {
+        let Some(bar) = info.bars.get(usize::from(i)).copied() else {
+            break;
+        };
+        let wide = bar.kind == pci::BarKind::Mem64;
+        let step = if wide { 2u8 } else { 1 };
+        let fits = bar.kind.is_mem()
+            && bar.addr == 0
+            && bar.size > 0
+            && bar_map_allowed(bar.size)
+            && !(wide && i >= 5);
+        if fits {
+            let align = if bar.size <= PAGE_SIZE_4K {
+                PAGE_SIZE_4K
+            } else {
+                bar.size.checked_next_power_of_two().unwrap_or(bar.size)
+            };
+            if let Some((addr, next)) = pci::next_bar_addr(*cursor, align, PCI_MMIO32_LIMIT) {
+                program_mem_bar(&mut hw, info.bdf, i, bar, addr);
+                if let Some(slot) = info.bars.get_mut(usize::from(i)) {
+                    slot.addr = addr;
+                }
+                *cursor = next;
+                placed = true;
+            }
+        }
+        i = i.saturating_add(step);
+    }
+    if placed {
+        update_command(info.bdf, pci::CMD_MEM, 0);
+    }
+}
+
 /// Set `set` and clear `clear` in `bdf`'s COMMAND and return COMMAND as
 /// read back. The write leaves the RW1C STATUS half alone. This is the
 /// kernel's one COMMAND writer: each driver turns on its own device
-/// (DESIGN §12.3), and neither the binder nor MSI setup writes COMMAND.
+/// (DESIGN §12.3), aarch64 `scan` enables memory decode on a BAR it just
+/// assigned, and neither the binder nor MSI setup writes COMMAND.
 pub fn update_command(bdf: Bdf, set: u16, clear: u16) -> u16 {
     let mut hw = HwCfg;
     let cmd = pci::read16(&mut hw, bdf, CFG_COMMAND);

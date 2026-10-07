@@ -418,8 +418,10 @@ fn vdb<R>(f: impl FnOnce(&VirtioBlk) -> R) -> Option<R> {
     virtio_blk_init::with_disk(b"vdb", f)
 }
 
-/// The instances the device registry owns for bound virtio-blk functions,
-/// and how many there are.
+/// The instances the device registry owns for bound virtio-blk PCI
+/// functions, and how many there are. The aarch64 harness also binds a
+/// virtio-mmio disk under the same driver name (F047); this count is the
+/// two PCI functions. A bound PCI function with no instance still counts.
 fn blk_instances() -> ([Option<Instance>; 2], usize) {
     let mut out: [Option<Instance>; 2] = [const { None }; 2];
     let mut n = 0usize;
@@ -429,7 +431,15 @@ fn blk_instances() -> ([Option<Instance>; 2], usize) {
         if crate::dev_init::bound(&d) != Some("virtio-blk") {
             continue;
         }
-        if let (Some(slot), Some(inst)) = (out.get_mut(n), crate::dev_init::instance(&d)) {
+        let inst = crate::dev_init::instance(&d);
+        if inst
+            .as_ref()
+            .and_then(|inst| inst.downcast_ref::<VirtioBlk>())
+            .is_some_and(VirtioBlk::is_mmio)
+        {
+            continue;
+        }
+        if let (Some(slot), Some(inst)) = (out.get_mut(n), inst) {
             *slot = Some(inst);
         }
         n += 1;
