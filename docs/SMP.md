@@ -47,7 +47,7 @@ Device-tree nodes that fill the same [`MachineDesc`](PORTABILITY.md#111-the-seam
 | PCI host | `pci-host-ecam-generic` | ECAM `reg` (first-bus config base), `bus-range`, `interrupt-map`, `msi-map` |
 | virtio-mmio | `virtio,mmio` | Each transport's `reg` and `dma-coherent` |
 | fw-cfg | `qemu,fw-cfg-mmio` | MMIO `reg` |
-| Reserved | `/reserved-memory` children and the FDT memreserve block | Physical ranges that never enter the buddy |
+| Reserved | `/reserved-memory` children and the FDT memreserve block | Physical ranges that never enter the buddy. A `no-map` child is also left out of the cacheable physmap |
 
 MADT entry types in use:
 

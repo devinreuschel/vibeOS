@@ -26,16 +26,23 @@ pub fn info() -> Option<&'static MachineDesc> {
 }
 
 /// Parse Limine's DTB before [`crate::pmm_init::init`].
+///
+/// Halts if a reserved range will not fit or the device walk cannot finish.
+/// `no-map` ranges are published when every reservation was recorded.
 pub fn init_from_dtb(boot: &BootInfo) {
     let Some(dtb) = boot.dtb else {
         return;
     };
-    let d = match vibeos::machine::fdt::parse(dtb) {
-        Ok(d) => d,
-        Err(e) => {
-            crate::klog!(vibeos::log::Level::Warn, "vibeOS: dt: {}", e.as_str());
-            return;
+    let d = match vibeos::machine::fdt::parse_dtb(dtb) {
+        Ok(vibeos::machine::fdt::Parsed::Complete(d)) => {
+            publish_nomap(&d);
+            d
         }
+        Ok(vibeos::machine::fdt::Parsed::Incomplete(desc, e)) => {
+            publish_nomap(&desc);
+            refuse_dt(e);
+        }
+        Err(e) => refuse_dt(e),
     };
     if boot.rsdp_phys == 0 {
         let n = d.node_count;
@@ -58,6 +65,30 @@ pub fn init_from_dtb(boot: &BootInfo) {
             });
         }
     }
+}
+
+fn publish_nomap(d: &MachineDesc) {
+    let mut holes: [Range<u64>; MAX_RESERVED] = core::array::from_fn(|_| 0..0);
+    let mut n = 0usize;
+    for r in d.nomap_ranges() {
+        let Some(slot) = holes.get_mut(n) else {
+            crate::boot::halt_with("vibeOS: dt: refused");
+        };
+        *slot = r;
+        n = n.saturating_add(1);
+    }
+    if n == 0 {
+        return;
+    }
+    let Some(stored) = holes.get(..n) else {
+        crate::boot::halt_with("vibeOS: dt: refused");
+    };
+    crate::boot::set_nomap(stored);
+}
+
+fn refuse_dt(e: vibeos::machine::fdt::FdtError) -> ! {
+    crate::klog!(vibeos::log::Level::Error, "vibeOS: dt: {}", e.as_str());
+    crate::boot::halt_with("vibeOS: dt: refused");
 }
 
 /// MADT / HPET / MCFG. No-op when a DTB already filled the cell.

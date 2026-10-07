@@ -49,7 +49,7 @@ does not own it.
 8. A probe owns its device's resources. It maps only the MMIO and I/O ranges it holds a claim for: a
    PCI BAR, a device-tree `reg` entry, or an ACPI `_CRS` range. A claim is not `Copy`, and it is the
    only way to map a range. The registry refuses a claim that overlaps another claim or a RAM-typed
-   range of the boot memory map. The driver enables its device's memory decode before it touches the
+   range of the boot memory map. A device-tree `no-map` range is not one of those ranges. The driver enables its device's memory decode before it touches the
    device and bus mastering after it resets it; the binder enables neither. A failed probe, and
    `remove`, reset the device and clear bus mastering before they free memory the device was given
    ([§5.4](INTERRUPTS.md#54-irq-registration)).
