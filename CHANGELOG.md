@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- An unaligned or overlapping ACPI memory-map entry no longer halts boot at
+  `physmap map failed` ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
 - x86 reset and power-off map a memory-space ACPI register before writing it, so
   that path does not page-fault ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
 - At EL2 with VHE, an EL0 read of the physical counter traps, as it does at EL1

@@ -159,7 +159,8 @@ impl BootInfo {
     /// The RAM-typed memmap ranges, physical (`physmap::ram_ranges`).
     /// No device range may overlap one (DESIGN §12.3 rule 8), so
     /// `dev::Registry::claim` and `pci_init::map_mmio` check against them.
-    pub fn ram_ranges(&self) -> impl Iterator<Item = Range<u64>> {
+    /// `Clone`, so `walk_physmap` can coalesce the ranges before the heap exists.
+    pub fn ram_ranges(&self) -> impl Iterator<Item = Range<u64>> + Clone {
         physmap::ram_ranges(self.memmap.iter().map(|e| physmap::MemmapEntry {
             base: e.base,
             len: e.length,

@@ -18,7 +18,7 @@ adopting it re-plans this table. Kernel regions are fixed, not discovered, excep
 | `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space, one PML4 per process (`AddressSpace`), below `USER_END`. Page 0 is never mapped (`NULL_GUARD_LEN`). The top 4 KiB page is never mapped either: user mappings end at `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`), which the ELF loader and every address-space range check use, so a `syscall` in the last mappable page returns to a canonical RIP. The syscall exit still sends a non-canonical saved RIP to `SIGSEGV` (§5.10 rule 2). Each user PML4 copies the kernel's PML4[256..512) at creation, so the whole kernel half stays mapped, supervisor-only, while ring 3 runs: no KPTI (ROADMAP §18.3, F024, F133). |
 | `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel PML4 only (user PML4s do not copy slot 0), until `smp: done`: the first 2 MiB as 4 KiB pages, the rest 2 MiB pages, all GLOBAL, writable and NX except the trampoline page. From `smp: done` only the trampoline page stays: 4 KiB, read-only, executable, not global. |
 | *hole* | | Non-canonical. Any pointer here is a bug. |
-| Limine's HHDM offset +, inside the slot `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` | 64 TiB slot | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table) and stored in `BootInfo.hhdm_offset`. Only the RAM-typed ranges of the boot memory map, largest page each range allows (1 GiB where the CPU has it), except the kernel image's physical span at 4 KiB. Device MMIO is `ioremap`; firmware tables and framebuffers outside RAM are `memremap`. The physmap never leaves its slot (below the table). |
+| Limine's HHDM offset +, inside the slot `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` | 64 TiB slot | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table) and stored in `BootInfo.hhdm_offset`. Only the RAM-typed ranges of the boot memory map, sorted and coalesced, each span rounded inward to 4 KiB, largest page that span allows (1 GiB where the CPU has it), except the kernel image's physical span at 4 KiB. Device MMIO is `ioremap`; firmware tables and framebuffers outside RAM are `memremap`. The physmap never leaves its slot (below the table). |
 | `0xFFFF_C000_0000_0000` – `0xFFFF_C000_0400_0000` | 64 MiB | Kernel heap. Starts at 1 MiB mapped and grows. Planned (ROADMAP §12.6): the region's size is set at boot from installed memory, up to the 16 TiB below the KVA region, so the heap can grow as far as RAM does ([§4.4](#44-kernel-heap)). |
 | `0xFFFF_D000_0000_0000` – `0xFFFF_D010_0000_0000` | 64 GiB | Kernel VA allocator: guarded stacks, `vmap`, large transient mappings. |
 | `0xFFFF_E000_0000_0000` – `0xFFFF_E000_1000_0000` | 256 MiB | `ioremap` window for device MMIO that should not be reached through the physmap. Today a bump allocator that never frees a mapping; a failed map unmaps what it mapped and gives its reservation back, unless a leaf it did not map refused it or it added a page table: then the cursor stays past that VA, so no later `ioremap` gets it and fails the same way (`ioremap_failure_returns_va`). Planned (ROADMAP §20.1): §4.5's range allocator over its slot, with `iounmap`. Its slot ends at `0xFFFF_EA00_0000_0000` (10 TiB); ROADMAP §20.1 sizes the window inside it. |
@@ -106,11 +106,15 @@ and not global, for as long as the kernel CR3 lives.
 
 One physmap policy on both architectures (ROADMAP §11.2). The portable builder maps only the
 RAM-typed ranges of the memory map (usable, bootloader-reclaimable, executable and modules, ACPI
-reclaimable, ACPI NVS), inside its slot, and nothing else. It maps the kernel image's physical span
-at 4 KiB on both architectures, since ROADMAP §18.1 gives that span per-section permissions and a
-live aarch64 block is never split; every other range takes the largest page its alignment allows
-(1 GiB where the CPU has `pdpe1gb` or an aarch64 level-1 block, else 2 MiB, else 4 KiB). After boot
-the physmap changes only in ROADMAP §12.1's `debug_mm` build, which maps it at 4 KiB and unmaps or
+reclaimable, ACPI NVS), inside its slot, and nothing else. It sorts those ranges, coalesces overlaps
+and abutments, and rounds each span inward to 4 KiB before choosing a page size. Limine promises
+that alignment and no overlap only for usable and bootloader-reclaimable entries. A partial page
+stays out of the physmap; `physmap_covers` checks each page, and a miss is read through `memremap`.
+It maps the kernel image's physical span at 4 KiB on both architectures, since ROADMAP §18.1 gives
+that span per-section permissions and a live aarch64 block is never split; every other span takes
+the largest page its alignment allows (1 GiB where the CPU has `pdpe1gb` or an aarch64 level-1
+block, else 2 MiB, else 4 KiB). After boot the physmap changes only in ROADMAP §12.1's `debug_mm`
+build, which maps it at 4 KiB and unmaps or
 remaps a frame by one atomic exchange of its existing leaf. Device MMIO is reached only through
 `ioremap` (PCD + PWT on x86_64, Device-nGnRE on aarch64). Memory the kernel does not own that is not
 device MMIO (a firmware table or an AML `SystemMemory` region outside the RAM-typed ranges, a
@@ -245,9 +249,9 @@ The kernel builds its own PML4 from buddy frames rather than editing Limine's. C
 time:
 
 1. Kernel image, mapped per section with correct permissions.
-2. Physmap over the RAM-typed ranges at the HHDM offset: 1 GiB where the CPU and alignment allow,
-   else 2 MiB, else 4 KiB, and the kernel image's physical span at 4 KiB. No MMIO, framebuffer, or
-   firmware hole.
+2. Physmap over the coalesced RAM-typed ranges at the HHDM offset, each rounded inward to 4 KiB:
+   1 GiB where the CPU and alignment allow, else 2 MiB, else 4 KiB, and the kernel image's physical
+   span at 4 KiB. No MMIO, framebuffer, or firmware hole.
 3. Low identity window, 512 MiB: the first 2 MiB as 4 KiB pages, with the trampoline page (§7.3)
    read-only, executable and not global, and the rest 2 MiB pages. `paging_init::teardown_identity`
    removes all of it but the trampoline page after `smp: done` (§4.1).

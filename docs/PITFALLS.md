@@ -66,6 +66,13 @@ multi-terabyte region. Rule: the physmap maps only RAM-typed ranges of the boot 
 its DESIGN §4.1 slot, so a huge MMIO descriptor is never walked (§4.1). PCI BAR size probes that
 return > 32 MiB are recorded and not page-walked into the ioremap window.
 
+**Boot halts with `physmap map failed` when ACPI entries meet mid-page.**
+Limine guarantees 4 KiB alignment and no overlap only for usable and bootloader-reclaimable
+entries. ACPI reclaimable, ACPI NVS, and executable-and-modules entries may start mid-page or
+overlap, and mapping each from its raw base returns `Misaligned` or `AlreadyMapped`. Rule: sort
+and coalesce the RAM-typed ranges, then round each span inward to 4 KiB before mapping (§4.1). A
+partial page is not a physmap leaf; `physmap_covers` misses it and the read uses `memremap`.
+
 **Device reads return stale values on real hardware but work in QEMU.**
 MMIO reached through a write-back physmap mapping. QEMU does not enforce cache attributes; hardware
 does. Rule: LAPIC, I/O APIC, HPET, and every device MMIO page is reached only through `ioremap`
