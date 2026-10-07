@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- aarch64 TLS with `p_align` above 16 is placed at `TP + align`, so an
+  align-64 thread-local reads its initial value ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
 - `make ARCH=aarch64 check` after `./setup.sh` lints the aarch64 kernel and builds
   `vibeos-core` with the MSRV toolchain for that target.
 - a GICv2 SGI end-of-interrupt keeps the source CPU the acknowledge

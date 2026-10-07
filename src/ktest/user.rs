@@ -48,8 +48,11 @@ impl Default for Layout {
 pub(crate) enum Image {
     Code(&'static [u8], Layout),
     /// Like [`Code`], plus a one-word `PT_TLS` whose init image is
-    /// [`TLS_MAGIC`] (ROADMAP §11.6, F022).
+    /// [`TLS_MAGIC`] (ROADMAP §11.6, F022). `p_align` is 8.
     TlsCode(&'static [u8], Layout),
+    /// Like [`TlsCode`] with `p_align` 64. Variant I puts the word at `TP + 64`.
+    #[cfg(target_arch = "aarch64")]
+    TlsAlign64(&'static [u8], Layout),
     #[allow(dead_code, reason = "x86 ktests construct Elf/UserBin")]
     Elf(&'static [u8]),
     #[allow(dead_code, reason = "x86 ktests construct Elf/UserBin")]
@@ -60,6 +63,11 @@ pub(crate) enum Image {
 /// places in its `PT_TLS` block.
 pub(crate) const TLS_MAGIC: u64 = 0x1122_3344_5566_7788;
 const TLS_OFF: usize = 0x0F00;
+/// `p_align` of [`Image::TlsCode`]: variant II's one-word image sits at `TP - 8`.
+const TLS_PALIGN_WORD: u64 = 8;
+/// `p_align` of [`Image::TlsAlign64`]. Variant I's offset is `TP + 64`.
+#[cfg(target_arch = "aarch64")]
+const TLS_PALIGN_64: u64 = 64;
 
 /// The user programs this kernel embeds (`build.rs`, `VIBEOS_USER_BINS`).
 mod bins {
@@ -97,13 +105,13 @@ fn code_elf(code: &[u8], layout: &Layout) -> Vec<u8> {
     b[52..54].copy_from_slice(&(EHDR_SIZE as u16).to_le_bytes());
     b[54..56].copy_from_slice(&(PHDR_SIZE as u16).to_le_bytes());
     b[56..58].copy_from_slice(&1u16.to_le_bytes());
-    fill_phdrs(&mut b, code, layout, false);
+    fill_phdrs(&mut b, code, layout, None);
     b[CODE_OFFSET..].copy_from_slice(code);
     b
 }
 
-/// [`code_elf`] plus a `PT_TLS` of 8 bytes at [`TLS_OFF`].
-fn tls_code_elf(code: &[u8], layout: &Layout) -> Vec<u8> {
+/// [`code_elf`] plus a `PT_TLS` of 8 bytes at [`TLS_OFF`], aligned to `align`.
+fn tls_code_elf(code: &[u8], layout: &Layout, align: u64) -> Vec<u8> {
     let mut b = vec![0u8; CODE_OFFSET + code.len()];
     b[0] = ELFMAG0;
     b[1..4].copy_from_slice(b"ELF");
@@ -121,13 +129,13 @@ fn tls_code_elf(code: &[u8], layout: &Layout) -> Vec<u8> {
     b[52..54].copy_from_slice(&(EHDR_SIZE as u16).to_le_bytes());
     b[54..56].copy_from_slice(&(PHDR_SIZE as u16).to_le_bytes());
     b[56..58].copy_from_slice(&2u16.to_le_bytes());
-    fill_phdrs(&mut b, code, layout, true);
+    fill_phdrs(&mut b, code, layout, Some(align));
     b[TLS_OFF..TLS_OFF + 8].copy_from_slice(&TLS_MAGIC.to_le_bytes());
     b[CODE_OFFSET..].copy_from_slice(code);
     b
 }
 
-fn fill_phdrs(b: &mut [u8], code: &[u8], layout: &Layout, tls: bool) {
+fn fill_phdrs(b: &mut [u8], code: &[u8], layout: &Layout, tls_align: Option<u64>) {
     let mut flags = PF_R | PF_X;
     if layout.writable {
         flags |= PF_W;
@@ -142,15 +150,14 @@ fn fill_phdrs(b: &mut [u8], code: &[u8], layout: &Layout, tls: bool) {
     b[ph + 32..ph + 40].copy_from_slice(&len.to_le_bytes());
     b[ph + 40..ph + 48].copy_from_slice(&len.max(layout.memsz.unwrap_or(0)).to_le_bytes());
     b[ph + 48..ph + 56].copy_from_slice(&0x1000u64.to_le_bytes());
-    if tls {
+    if let Some(align) = tls_align {
         let t = ph + PHDR_SIZE;
         b[t..t + 4].copy_from_slice(&PT_TLS.to_le_bytes());
         b[t + 4..t + 8].copy_from_slice(&PF_R.to_le_bytes());
         b[t + 8..t + 16].copy_from_slice(&(TLS_OFF as u64).to_le_bytes());
         b[t + 32..t + 40].copy_from_slice(&8u64.to_le_bytes());
         b[t + 40..t + 48].copy_from_slice(&8u64.to_le_bytes());
-        // 8: variant II puts the one-word init image at TP-8 (`fs:[-8]`).
-        b[t + 48..t + 56].copy_from_slice(&8u64.to_le_bytes());
+        b[t + 48..t + 56].copy_from_slice(&align.to_le_bytes());
     }
 }
 
@@ -159,7 +166,9 @@ fn fill_phdrs(b: &mut [u8], code: &[u8], layout: &Layout, tls: bool) {
 pub(crate) fn elf_bytes(img: &Image) -> Vec<u8> {
     match img {
         Image::Code(code, layout) => code_elf(code, layout),
-        Image::TlsCode(code, layout) => tls_code_elf(code, layout),
+        Image::TlsCode(code, layout) => tls_code_elf(code, layout, TLS_PALIGN_WORD),
+        #[cfg(target_arch = "aarch64")]
+        Image::TlsAlign64(code, layout) => tls_code_elf(code, layout, TLS_PALIGN_64),
         Image::Elf(elf) => elf.to_vec(),
         Image::UserBin(name) => user_bin(name).map(<[u8]>::to_vec).unwrap_or_default(),
     }
@@ -173,7 +182,11 @@ pub(crate) fn spawn(img: &Image, argv: &[&str]) -> Result<u32, LoadError> {
     match img {
         Image::Code(code, layout) => proc_init::spawn_image(&code_elf(code, layout), &argv_b, 0),
         Image::TlsCode(code, layout) => {
-            proc_init::spawn_image(&tls_code_elf(code, layout), &argv_b, 0)
+            proc_init::spawn_image(&tls_code_elf(code, layout, TLS_PALIGN_WORD), &argv_b, 0)
+        }
+        #[cfg(target_arch = "aarch64")]
+        Image::TlsAlign64(code, layout) => {
+            proc_init::spawn_image(&tls_code_elf(code, layout, TLS_PALIGN_64), &argv_b, 0)
         }
         Image::Elf(elf) => proc_init::spawn_image(elf, &argv_b, 0),
         Image::UserBin(name) => match user_bin(name) {
