@@ -141,7 +141,13 @@ pub(crate) fn test_dev_random_source() -> Outcome {
         Ok(_) => return Outcome::Fail("read count"),
         Err(_) => return Outcome::Fail("read"),
     }
+    // `Source::Rndr` only where `ID_AA64ISAR0_EL1.RNDR` is set. virtio-rng,
+    // when it supplied a byte, is the recorded source either way.
+    let rndr = crate::arch::cpu::has_rndr();
     match vibeos::entropy::last_source() {
+        Some(vibeos::entropy::Source::Rndr) if rndr => Outcome::Ok,
+        Some(vibeos::entropy::Source::Rndr) => Outcome::Fail("rndr without feature"),
+        Some(_) if rndr && !virtio_init::rng_bound() => Outcome::Fail("expected rndr"),
         Some(_) => Outcome::Ok,
         None => Outcome::Fail("no source"),
     }
