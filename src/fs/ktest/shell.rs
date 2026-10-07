@@ -683,6 +683,20 @@ pub(crate) fn test_shell_fs_commands() -> Outcome {
     if !crate::vibefs_init::live() {
         return Outcome::Fail("vibefs is not mounted on /vibe");
     }
+    // aarch64's registry stack is 16 KiB (ROADMAP §11.3). This path plus
+    // `registry_main` crosses DESIGN §4.5's margin; the worker's stack is
+    // the same size without that frame. x86_64's registry is 64 KiB.
+    #[cfg(target_arch = "aarch64")]
+    {
+        run_on_spawn_stack("kt61c", shell_fs_commands)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        shell_fs_commands()
+    }
+}
+
+fn shell_fs_commands() -> Outcome {
     let r = fs_commands_fat().and_then(|()| fs_commands_vibe());
     if let Ok(mut o) = BufOut::new() {
         let _ = sh::rm(&["rm", "-r", "/kt61c", "/vibe/kt61c"], &mut o);
