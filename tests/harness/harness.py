@@ -17,7 +17,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 | `VIBEOS_ISO` | per driver | all, `run_interactive` |
 | `VIBEOS_ARCH` | `x86_64` | all (`qemu_argv`, `env_config`); `aarch64` is ROADMAP §11.3 / §11.7 |
 | `VIBEOS_GIC` | `3` on aarch64 | `qemu_argv` (`gic-version=2` or `3`) |
-| `VIBEOS_MACHINE` | virt+gic | aarch64 `-machine` |
+| `VIBEOS_MACHINE` | virt+gic | aarch64 `-machine`; `virtualization=on` pins EL2 |
 | `VIBEOS_SMP` | `2` (`1` on aarch64) | all, `run_interactive` |
 | `VIBEOS_QEMU_CPU` | `max` | all, `run_interactive` |
 | `VIBEOS_MEM` | `128M` | all, `run_interactive` |
@@ -1196,6 +1196,58 @@ def expected_clocksource(
     if _accel_name(accel) == "kvm":
         return "tsc"
     return "hpet" if hpet else "acpi_pm"
+
+
+# Marker text after `vibeOS: el: ` and `vibeOS: time: timer ` (ROADMAP §11.7).
+EL2_VHE = "2 vhe"
+EL2_TIMER_VIRT = "el2 hyp-virt"
+EL2_TIMER_PHYS = "el2 hyp-phys"
+
+
+def machine_type(machine: str) -> str:
+    """The QEMU machine type, the part of a `-machine` value before the first comma."""
+    return machine.split(",", 1)[0]
+
+
+def virtualization_on(machine: str) -> bool:
+    """True when a `-machine` value sets `virtualization=on`."""
+    return "virtualization=on" in machine.split(",")
+
+
+def expected_el2(machine: str) -> tuple[str, str] | None:
+    """`(el, timer)` to bind when `machine` boots at EL2.
+
+    `virt` wires the EL2 virtual timer. `virt-8.2` has no `hyp-virt`
+    interrupt, so the kernel names the EL2 physical timer (ROADMAP §11.7).
+    Other types with `virtualization=on` follow `virt`. None when the
+    property is off: `<el>` and `<timer>` stay wildcards.
+    """
+    if not virtualization_on(machine):
+        return None
+    timer = EL2_TIMER_PHYS if machine_type(machine) == "virt-8.2" else EL2_TIMER_VIRT
+    return EL2_VHE, timer
+
+
+def check_el2_boot(lines: list[str], machine: str, smp: int) -> None:
+    """Require `el: 2 vhe` on every CPU and the EL2 timer `expected_el2` names.
+
+    `lines` are kernel text, frame already stripped. No-op when `machine`
+    does not set `virtualization=on`. Raises `HarnessError` on an EL1 line,
+    a short count, or the other machine's timer.
+    """
+    want = expected_el2(machine)
+    if want is None:
+        return
+    el, timer = want
+    n = max(smp, 1)
+    want_el = f"vibeOS: el: {el}"
+    got_el = [ln for ln in lines if ln.startswith("vibeOS: el:")]
+    if got_el != [want_el] * n:
+        raise HarnessError(f"el2: want {n} {want_el!r}, got {got_el or 'none'}")
+    want_timer = f"vibeOS: time: timer {timer}"
+    got_timer = [ln for ln in lines if ln.startswith("vibeOS: time: timer ")]
+    if got_timer != [want_timer]:
+        raise HarnessError(f"el2: want {want_timer!r}, got {got_timer or 'none'}")
 
 
 def _accel_args(cfg: QemuConfig) -> list[str]:
@@ -2959,13 +3011,21 @@ def boot_contract_markers(
     smp: int | None = None,
     panic_variant: str = "",
     arch: str = "x86_64",
+    machine: str = "",
 ) -> list[Marker]:
     """Live e2e contract. Pins the LAPIC timer mode and SMP AP count.
 
     `panic_variant` (`nest` or `stop`) selects that panic-path build's contract,
-    which ends at its armed line (`VIBEOS_PANIC_VARIANT`, run_e2e)."""
+    which ends at its armed line (`VIBEOS_PANIC_VARIANT`, run_e2e). On aarch64,
+    `machine` with `virtualization=on` pins `<el>` to `2 vhe` and `<timer>` to
+    the EL2 timer that machine wires (`expected_el2`)."""
     if smp is None:
         smp = env_int("VIBEOS_SMP", 1 if arch == "aarch64" else DEFAULT_SMP)
+    el, arm_timer = "", ""
+    if arch == "aarch64":
+        pinned = expected_el2(machine)
+        if pinned is not None:
+            el, arm_timer = pinned
     cfg = registry.BootConfig(
         hpet=hpet,
         smp=smp,
@@ -2975,6 +3035,8 @@ def boot_contract_markers(
         panic_nest_test=panic_variant == "nest",
         panic_stop_test=panic_variant == "stop",
         arch=arch,
+        el=el,
+        arm_timer=arm_timer,
     )
     return contract_markers(cfg)
 

@@ -25,6 +25,7 @@ from tests.harness.harness import (
     RunResult,
     apply_arch_cli,
     boot_contract_markers,
+    check_el2_boot,
     check_ktest_output,
     contains_panic,
     default_iso,
@@ -395,6 +396,7 @@ def check_aarch64_s7(lines: list[str], cfg: QemuConfig) -> None:
         lambda ln: ln == f"{CLOCKSOURCE_PREFIX}cntvct",
         f"missing {CLOCKSOURCE_PREFIX}cntvct",
     )
+    check_el2_boot(lines, cfg.machine, cfg.smp)
 
 
 def _ktest_boot(

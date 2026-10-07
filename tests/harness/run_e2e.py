@@ -21,6 +21,7 @@ from tests.harness.harness import (
     QemuConfig,
     apply_arch_cli,
     boot_contract_markers,
+    check_el2_boot,
     default_iso,
     env_config,
     env_expect_panic,
@@ -36,6 +37,7 @@ from tests.harness.harness import (
     run_qemu_inject_mce,
     serial_tail,
     virtio_blk_args,
+    virtualization_on,
 )
 from tests.harness.utest import UtestVerdict
 
@@ -238,7 +240,9 @@ def _check_vda_untouched(env: EnvConfig) -> None:
             try:
                 result = run_qemu_and_check(
                     cfg,
-                    boot_contract_markers(cpu=env.cpu, smp=env.smp, arch=env.arch),
+                    boot_contract_markers(
+                        cpu=env.cpu, smp=env.smp, arch=env.arch, machine=env.machine
+                    ),
                     timeout_s=env.timeout,
                 )
             except HarnessError as e:
@@ -267,7 +271,9 @@ def _mce_main(env: EnvConfig) -> int:
     """Boot, inject an uncorrected machine check on CPU 0, expect dump and halt."""
     results.Results(env.tier, env.arch)
     cfg = env.qemu()
-    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp, arch=env.arch)
+    markers = boot_contract_markers(
+        cpu=env.cpu, smp=env.smp, arch=env.arch, machine=env.machine
+    )
     cmd = mce_monitor_cmd(
         cpu=0, bank=1, status=MCE_UC_STATUS, mcg_status=MCE_MCG_STATUS
     )
@@ -373,7 +379,9 @@ def _strace() -> int:
         print("[e2e] FAIL: VIBEOS_CMDLINE must hold vibeos.strace=1", file=sys.stderr)
         return 1
     cfg = env.qemu()
-    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp, arch=env.arch)
+    markers = boot_contract_markers(
+        cpu=env.cpu, smp=env.smp, arch=env.arch, machine=env.machine
+    )
     try:
         result = run_qemu_and_check(cfg, markers, timeout_s=env.timeout)
     except HarnessError as e:
@@ -451,7 +459,9 @@ def main(argv: list[str] | None = None) -> int:
     cfg = env.qemu(hpet=not expect_pit, expect=expect)
     dump_needles: tuple[str | tuple[str, ...], ...] = ()
     if gp_test:
-        markers = boot_contract_markers(cpu=env.cpu, gp=True, smp=env.smp, arch=env.arch)
+        markers = boot_contract_markers(
+            cpu=env.cpu, gp=True, smp=env.smp, arch=env.arch, machine=env.machine
+        )
         expect_panic = True
         dump_needles = (
             "#GP",
@@ -465,7 +475,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif panic_variant:
         markers = boot_contract_markers(
-            cpu=env.cpu, smp=env.smp, panic_variant=panic_variant, arch=env.arch
+            cpu=env.cpu,
+            smp=env.smp,
+            panic_variant=panic_variant,
+            arch=env.arch,
+            machine=env.machine,
         )
         expect_panic = True
         dump_needles = ("vibeOS: backtrace:", "vibeOS: panic: halted")
@@ -483,7 +497,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         markers = boot_contract_markers(
-            cpu=env.cpu, hpet=not expect_pit, smp=env.smp, arch=env.arch
+            cpu=env.cpu,
+            hpet=not expect_pit,
+            smp=env.smp,
+            arch=env.arch,
+            machine=env.machine,
         )
     # The normal boot runs `/bin/tests` (DESIGN §8.2): its utest verdict.
     normal = expect == "none"
@@ -550,6 +568,13 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("[e2e]   . pci qemu set ok", file=sys.stderr)
         try:
+            check_el2_boot(frame.kernel_lines(result.lines), env.machine, env.smp)
+        except HarnessError as e:
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        if virtualization_on(env.machine):
+            print("[e2e]   . el: 2 vhe on every cpu", file=sys.stderr)
+        try:
             forged_user_lines(res, result.lines)
         except HarnessError as e:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
@@ -574,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
         res.add_boot(qemu_argv(cfg, None), cfg, inp.exit_code)
         try:
             check_first_kernel_line(inp.lines)
+            check_el2_boot(frame.kernel_lines(inp.lines), env.machine, env.smp)
         except HarnessError as e:
             print(f"[e2e] FAIL: console boot: {e}", file=sys.stderr)
             return 1
