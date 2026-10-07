@@ -80,7 +80,8 @@ The machine description is one portable struct, `MachineDesc` in `vibeos-core`, 
 needs from firmware and nothing that needs AML: the CPUs with their hardware ids (APIC ID or MPIDR) and
 enable method, the interrupt controllers, the timers, the consoles, the PCI host bridges (segment, bus
 range, and ECAM base), and the memory that must stay out of the buddy (the device tree's
-`/reserved-memory` and its header's reservation block). The ACPI tables ([§7.1](SMP.md#71-acpi), and on
+`/reserved-memory` and its header's reservation block). A `no-map` range is also left out of the
+cacheable physmap. The ACPI tables ([§7.1](SMP.md#71-acpi), and on
 aarch64 from ROADMAP §20.7) and the device tree (ROADMAP §11.5) each fill it, and SMP bring-up, the IRQ
 layer, and the device registry read only it, so a firmware format is one more producer, never another
 consumer path. A device, its resources, and its INTx routing are not in it: a driver binds through

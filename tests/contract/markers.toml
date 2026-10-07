@@ -87,6 +87,13 @@ name = "dt_nodes"
 when = ["!panic_test"]
 
 [[marker]]
+text = "vibeOS: dt: refused"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
 text = "vibeOS: limine: memmap missing"
 kind = "failure"
 arch = "both"

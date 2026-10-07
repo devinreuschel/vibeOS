@@ -15,7 +15,9 @@ use crate::cell::BootCell;
 use vibeos::boot::cmdline::{self, CMDLINE_MAX, Cmdline, CmdlineBuf, Escaped, SYSCTLS};
 use vibeos::limits::MAX_BOOT_MODULES;
 use vibeos::log::Level;
+use vibeos::machine::MAX_RESERVED;
 use vibeos::physmap::{self, PhysmapSlot};
+use vibeos::pmm::clip_usable;
 
 #[cfg(target_arch = "aarch64")]
 use vibeos::physmap::PHYSMAP_AARCH64;
@@ -157,15 +159,19 @@ impl BootInfo {
     }
 
     /// The RAM-typed memmap ranges, physical (`physmap::ram_ranges`).
-    /// No device range may overlap one (DESIGN §12.3 rule 8), so
-    /// `dev::Registry::claim` and `pci_init::map_mmio` check against them.
-    /// `Clone`, so `walk_physmap` can coalesce the ranges before the heap exists.
+    /// A device-tree `no-map` range is cut out (page-rounded), so the
+    /// cacheable physmap does not cover firmware or TEE memory. A claim
+    /// may then overlap that hole (DESIGN §12.3 rule 8 checks this
+    /// iterator). `Clone`, so `walk_physmap` can coalesce the ranges
+    /// before the heap exists.
     pub fn ram_ranges(&self) -> impl Iterator<Item = Range<u64>> + Clone {
-        physmap::ram_ranges(self.memmap.iter().map(|e| physmap::MemmapEntry {
-            base: e.base,
-            len: e.length,
-            ty: e.type_,
-        }))
+        NomapPunch::new(physmap::ram_ranges(self.memmap.iter().map(|e| {
+            physmap::MemmapEntry {
+                base: e.base,
+                len: e.length,
+                ty: e.type_,
+            }
+        })))
     }
 
     /// Every framebuffer Limine mapped through the HHDM, in response order.
@@ -431,6 +437,128 @@ pub(crate) fn physmap_slot() -> PhysmapSlot {
     #[cfg(target_arch = "aarch64")]
     {
         PHYSMAP_AARCH64
+    }
+}
+
+struct NoMapHoles {
+    ranges: [Range<u64>; MAX_RESERVED],
+    count: usize,
+}
+
+static NOMAP: BootCell<NoMapHoles> = BootCell::new();
+
+/// `no-map` holes for [`BootInfo::ram_ranges`]. Empty does nothing. A
+/// second call, or more holes than [`MAX_RESERVED`], halts: the cell is
+/// write-once and the physmap must not boot with a hole dropped.
+pub(crate) fn set_nomap(holes: &[Range<u64>]) {
+    if holes.is_empty() {
+        return;
+    }
+    if NOMAP.try_get().is_some() || holes.len() > MAX_RESERVED {
+        halt_with("vibeOS: dt: refused");
+    }
+    let mut ranges = core::array::from_fn(|_| 0..0);
+    for (i, h) in holes.iter().enumerate() {
+        if let Some(slot) = ranges.get_mut(i) {
+            *slot = h.clone();
+        }
+    }
+    // SAFETY: invariant I22, established at `cell::BootCell::set`: one
+    // write, from `machine::machine_init::init_from_dtb` on the BSP before
+    // `pmm_init` and SMP, and `ram_ranges` does not run until that returns.
+    unsafe {
+        NOMAP.set(NoMapHoles {
+            ranges,
+            count: holes.len(),
+        });
+    }
+}
+
+fn nomap_copy() -> ([Range<u64>; MAX_RESERVED], usize) {
+    match NOMAP.try_get() {
+        Some(n) => (n.ranges.clone(), n.count),
+        None => (core::array::from_fn(|_| 0..0), 0),
+    }
+}
+
+/// `physmap::ram_ranges` with device-tree `no-map` holes removed.
+/// `walk_physmap` clones the iterator and scans it from the start, so
+/// the hole list is copied with the iterator.
+#[derive(Clone)]
+struct NomapPunch<I> {
+    inner: I,
+    holes: [Range<u64>; MAX_RESERVED],
+    nh: usize,
+    parts: [Range<u64>; MAX_RESERVED + 1],
+    npart: usize,
+    part: usize,
+}
+
+impl<I> NomapPunch<I> {
+    fn new(inner: I) -> Self {
+        let (holes, nh) = nomap_copy();
+        Self {
+            inner,
+            holes,
+            nh,
+            parts: core::array::from_fn(|_| 0..0),
+            npart: 0,
+            part: 0,
+        }
+    }
+}
+
+impl<I> NomapPunch<I>
+where
+    I: Iterator<Item = Range<u64>>,
+{
+    fn fill(&mut self, span: Range<u64>) {
+        self.part = 0;
+        self.npart = 0;
+        let holes = self.holes.clone();
+        let nh = self.nh;
+        let mut n = 0usize;
+        let mut overflow = false;
+        clip_usable(
+            span,
+            || holes.iter().take(nh).cloned(),
+            |p| {
+                if let Some(slot) = self.parts.get_mut(n) {
+                    *slot = p;
+                    n = n.saturating_add(1);
+                } else {
+                    overflow = true;
+                }
+            },
+        );
+        if overflow {
+            halt_with("vibeOS: dt: refused");
+        }
+        self.npart = n;
+    }
+}
+
+impl<I> Iterator for NomapPunch<I>
+where
+    I: Iterator<Item = Range<u64>>,
+{
+    type Item = Range<u64>;
+
+    fn next(&mut self) -> Option<Range<u64>> {
+        loop {
+            if self.part < self.npart {
+                let p = self.parts.get(self.part).cloned();
+                self.part = self.part.saturating_add(1);
+                if let Some(p) = p {
+                    return Some(p);
+                }
+            }
+            let span = self.inner.next()?;
+            if self.nh == 0 {
+                return Some(span);
+            }
+            self.fill(span);
+        }
     }
 }
 

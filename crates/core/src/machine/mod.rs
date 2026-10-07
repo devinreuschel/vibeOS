@@ -179,6 +179,10 @@ pub struct MachineDesc {
     pub pci_hosts: [PciHost; MAX_PCI_HOSTS],
     pub pci_host_count: usize,
     pub reserved: [PhysRange; MAX_RESERVED],
+    /// Parallel to [`Self::reserved`]: the `/reserved-memory` child had `no-map`.
+    /// FDT memreserve entries are false. Those ranges stay out of the cacheable
+    /// physmap as well as the buddy.
+    pub reserved_nomap: [bool; MAX_RESERVED],
     pub reserved_count: usize,
     pub isos: [Iso; acpi::MAX_ISOS],
     pub iso_count: usize,
@@ -213,6 +217,7 @@ impl Default for MachineDesc {
             pci_hosts: [PciHost::default(); MAX_PCI_HOSTS],
             pci_host_count: 0,
             reserved: [PhysRange::default(); MAX_RESERVED],
+            reserved_nomap: [false; MAX_RESERVED],
             reserved_count: 0,
             isos: [Iso::default(); acpi::MAX_ISOS],
             iso_count: 0,
@@ -241,6 +246,17 @@ impl MachineDesc {
             .iter()
             .take(self.reserved_count)
             .filter_map(|r| r.range())
+    }
+
+    /// `no-map` reserved ranges. The physmap leaves these out; the buddy
+    /// leaves out every [`Self::reserved_ranges`] entry, `no-map` or not.
+    pub fn nomap_ranges(&self) -> impl Iterator<Item = Range<u64>> + '_ {
+        self.reserved
+            .iter()
+            .zip(self.reserved_nomap.iter())
+            .take(self.reserved_count)
+            .filter(|(_, nomap)| **nomap)
+            .filter_map(|(r, _)| r.range())
     }
 
     pub fn lapic_base(&self) -> Option<u64> {
@@ -473,14 +489,40 @@ pub(crate) fn push_pci(d: &mut MachineDesc, h: PciHost) {
     }
 }
 
-pub(crate) fn push_reserved(d: &mut MachineDesc, r: PhysRange) {
+/// The range cannot be stored: the table is full, or `start` is
+/// [`u64::MAX`] so a half-open range cannot name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CannotReserve;
+
+pub(crate) fn push_reserved(
+    d: &mut MachineDesc,
+    r: PhysRange,
+    no_map: bool,
+) -> Result<(), CannotReserve> {
     if r.size == 0 {
-        return;
+        return Ok(());
     }
-    if let Some(slot) = d.reserved.get_mut(d.reserved_count) {
-        *slot = r;
-        d.reserved_count = d.reserved_count.saturating_add(1);
+    // A half-open range cannot include the last address. Refuse it instead
+    // of dropping it.
+    if r.start == u64::MAX {
+        return Err(CannotReserve);
     }
+    let size = match r.start.checked_add(r.size) {
+        Some(_) => r.size,
+        None => u64::MAX - r.start,
+    };
+    let Some(slot) = d.reserved.get_mut(d.reserved_count) else {
+        return Err(CannotReserve);
+    };
+    *slot = PhysRange {
+        start: r.start,
+        size,
+    };
+    if let Some(flag) = d.reserved_nomap.get_mut(d.reserved_count) {
+        *flag = no_map;
+    }
+    d.reserved_count = d.reserved_count.saturating_add(1);
+    Ok(())
 }
 
 pub(crate) fn push_virtio(d: &mut MachineDesc, m: MmioDev) {
@@ -653,5 +695,50 @@ mod tests {
         );
         assert!(out.iter().any(|p| p.start == 0x8000_1000));
         let _ = PAGE_SIZE;
+    }
+
+    #[test]
+    fn unrepresentable_reserved_range_is_refused() {
+        let mut d = MachineDesc::default();
+        assert!(
+            push_reserved(
+                &mut d,
+                PhysRange {
+                    start: u64::MAX,
+                    size: 1
+                },
+                false
+            )
+            .is_err()
+        );
+        assert_eq!(d.reserved_count, 0);
+        for i in 0..MAX_RESERVED {
+            let start = (i as u64).saturating_mul(0x1000);
+            assert!(
+                push_reserved(
+                    &mut d,
+                    PhysRange {
+                        start,
+                        size: 0x1000
+                    },
+                    false
+                )
+                .is_ok()
+            );
+        }
+        assert_eq!(d.reserved_count, MAX_RESERVED);
+        assert!(
+            push_reserved(
+                &mut d,
+                PhysRange {
+                    start: 0x1000_0000,
+                    size: 0x1000
+                },
+                true
+            )
+            .is_err()
+        );
+        assert_eq!(d.reserved_count, MAX_RESERVED);
+        assert_eq!(d.nomap_ranges().count(), 0);
     }
 }

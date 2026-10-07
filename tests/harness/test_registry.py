@@ -295,6 +295,8 @@ ADDED: tuple[str, ...] = (
     "vibeOS: limine: base revision unsupported",
     "vibeOS: limine: hhdm missing",
     "vibeOS: limine: hhdm offset outside physmap slot",
+    # §11.5: a device tree that cannot record a reserved range or finish its walk.
+    "vibeOS: dt: refused",
     "vibeOS: limine: memmap missing",
     "vibeOS: limine: executable_address missing",
     "vibeOS: limine: rsdp missing",

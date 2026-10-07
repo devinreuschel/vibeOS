@@ -38,6 +38,10 @@ pub enum FdtError {
     Truncated,
     BadMagic,
     BadToken,
+    /// A reserved range would not fit in [`super::MAX_RESERVED`], or its
+    /// start is the last address of the space so it cannot be a half-open
+    /// range.
+    Reserved,
 }
 
 impl FdtError {
@@ -46,6 +50,7 @@ impl FdtError {
             FdtError::Truncated => "truncated",
             FdtError::BadMagic => "bad magic",
             FdtError::BadToken => "bad token",
+            FdtError::Reserved => "reserved",
         }
     }
 }
@@ -195,6 +200,49 @@ fn first_reg(val: &[u8], addr_c: u32, size_c: u32) -> Option<PhysRange> {
     Some(PhysRange { start, size })
 }
 
+/// Every `(addr, size)` pair in a `reg` property. A partial trailing pair
+/// is [`FdtError::Truncated`]. `ncells` above 2 still contributes only its
+/// low 64 bits, and the stride still advances by the full cell count, same
+/// as [`first_reg`].
+fn each_reg(
+    val: &[u8],
+    addr_c: u32,
+    size_c: u32,
+    mut f: impl FnMut(PhysRange) -> Result<(), FdtError>,
+) -> Result<(), FdtError> {
+    let stride = addr_c.checked_add(size_c).ok_or(FdtError::Truncated)?;
+    if stride == 0 {
+        return if val.is_empty() {
+            Ok(())
+        } else {
+            Err(FdtError::Truncated)
+        };
+    }
+    let mut i = 0usize;
+    loop {
+        let off = i.checked_mul(4).ok_or(FdtError::Truncated)?;
+        let rest = val.get(off..).unwrap_or(&[]);
+        if rest.is_empty() {
+            return Ok(());
+        }
+        let pair_bytes = (stride as usize)
+            .checked_mul(4)
+            .ok_or(FdtError::Truncated)?;
+        if rest.len() < pair_bytes {
+            return Err(FdtError::Truncated);
+        }
+        let start = addr_cells(val, i, addr_c).ok_or(FdtError::Truncated)?;
+        let size_i = i.checked_add(addr_c as usize).ok_or(FdtError::Truncated)?;
+        let size = addr_cells(val, size_i, size_c).ok_or(FdtError::Truncated)?;
+        f(PhysRange { start, size })?;
+        i = i.checked_add(stride as usize).ok_or(FdtError::Truncated)?;
+    }
+}
+
+fn is_reserved_memory(name: &[u8]) -> bool {
+    name == b"reserved-memory" || name.starts_with(b"reserved-memory@")
+}
+
 fn prop_named<'a>(props: &[Prop<'a>], name: &[u8]) -> Option<&'a [u8]> {
     props.iter().find(|p| p.name == name).map(|p| p.value)
 }
@@ -307,7 +355,7 @@ fn pick_pl011_full(dtb: &[u8]) -> Option<UartCand> {
         okay: false,
     }; UART_CAP];
     let mut n = 0usize;
-    if walk(dtb, |path, props, inh| {
+    if walk(dtb, false, |path, props, inh| {
         if path_is(path, b"/aliases")
             && let Some(v) = prop_named(props, b"serial0")
         {
@@ -351,39 +399,74 @@ fn pick_pl011_full(dtb: &[u8]) -> Option<UartCand> {
     cands.iter().take(n).find(|c| c.okay).copied()
 }
 
-/// Parse a DTB into [`MachineDesc`]. RAM stays on the Limine memory map.
-pub fn parse(dtb: &[u8]) -> Result<MachineDesc, FdtError> {
+/// A DTB whose reservations were recorded. [`Parsed::Incomplete`] means the
+/// device walk hit a path or depth cap; the memreserve block and
+/// `/reserved-memory` are still in the descriptor.
+#[derive(Clone, Copy, Debug)]
+pub enum Parsed {
+    Complete(MachineDesc),
+    Incomplete(MachineDesc, FdtError),
+}
+
+/// Parse a DTB. [`Err`] means the reservations themselves failed (bad
+/// magic, a truncated blob, or a reserved range that will not fit). A
+/// device-tree walk that cannot finish is [`Parsed::Incomplete`], with the
+/// reservations already stored. RAM stays on the Limine memory map.
+pub fn parse_dtb(dtb: &[u8]) -> Result<Parsed, FdtError> {
     let h = parse_header(dtb)?;
     let mut d = MachineDesc::default();
     fill_mem_rsv(&mut d, dtb, &h)?;
-    d.node_count = walk(dtb, |path, props, inh| {
-        if path_is(path, b"/reserved-memory") {
-            return Ok(());
-        }
-        if path_starts(path, b"/reserved-memory") {
-            if let Some(r) =
-                prop_named(props, b"reg").and_then(|v| first_reg(v, inh.addr_cells, inh.size_cells))
-            {
-                push_reserved(&mut d, r);
-            }
-            return Ok(());
-        }
-        if path_is(path, b"/chosen") {
+    walk(dtb, true, |path, props, inh| {
+        take_reserved(&mut d, path, props, inh)
+    })?;
+    match walk(dtb, false, |path, props, inh| {
+        if path_starts(path, b"/reserved-memory") || path_is(path, b"/chosen") {
             return Ok(());
         }
         fill_node(&mut d, path, props, inh);
         Ok(())
-    })?;
-    if let Some(c) = pick_pl011_full(dtb) {
-        push_console(
-            &mut d,
-            ConsoleDesc {
-                base: c.base,
-                size: c.size,
-            },
-        );
+    }) {
+        Ok(nodes) => {
+            d.node_count = nodes;
+            if let Some(c) = pick_pl011_full(dtb) {
+                push_console(
+                    &mut d,
+                    ConsoleDesc {
+                        base: c.base,
+                        size: c.size,
+                    },
+                );
+            }
+            Ok(Parsed::Complete(d))
+        }
+        Err(e) => Ok(Parsed::Incomplete(d, e)),
     }
-    Ok(d)
+}
+
+/// Parse a DTB into [`MachineDesc`]. A walk that cannot finish is [`Err`],
+/// same as a reservation that will not fit.
+pub fn parse(dtb: &[u8]) -> Result<MachineDesc, FdtError> {
+    match parse_dtb(dtb)? {
+        Parsed::Complete(d) => Ok(d),
+        Parsed::Incomplete(_, e) => Err(e),
+    }
+}
+
+fn take_reserved(
+    d: &mut MachineDesc,
+    path: &[u8],
+    props: &[Prop<'_>],
+    inh: Inherit,
+) -> Result<(), FdtError> {
+    if path_starts(path, b"/reserved-memory") && !path_is(path, b"/reserved-memory") {
+        let no_map = has_empty(props, b"no-map");
+        if let Some(v) = prop_named(props, b"reg") {
+            each_reg(v, inh.addr_cells, inh.size_cells, |r| {
+                push_reserved(d, r, no_map).map_err(|_| FdtError::Reserved)
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn fill_mem_rsv(d: &mut MachineDesc, dtb: &[u8], h: &Header) -> Result<(), FdtError> {
@@ -396,7 +479,8 @@ fn fill_mem_rsv(d: &mut MachineDesc, dtb: &[u8], h: &Header) -> Result<(), FdtEr
             return Ok(());
         }
         if size != 0 {
-            push_reserved(d, PhysRange { start: addr, size });
+            push_reserved(d, PhysRange { start: addr, size }, false)
+                .map_err(|_| FdtError::Reserved)?;
         }
         off = off.checked_add(16).ok_or(FdtError::Truncated)?;
     }
@@ -681,6 +765,7 @@ fn fill_interrupt_map(host: &mut PciHost, props: &[Prop<'_>]) {
 
 fn walk(
     dtb: &[u8],
+    skip_unrelated: bool,
     mut visit: impl FnMut(&[u8], &[Prop<'_>], Inherit) -> Result<(), FdtError>,
 ) -> Result<u32, FdtError> {
     let h = parse_header(dtb)?;
@@ -695,6 +780,7 @@ fn walk(
         dma_coherent: false,
     }; DEPTH];
     let mut depth = 0usize;
+    let mut reserved_depth: Option<usize> = None;
     let mut nodes = 0u32;
     let mut props_buf = [Prop {
         name: &[],
@@ -713,11 +799,22 @@ fn walk(
                 off = align4(off.checked_add(raw).ok_or(FdtError::Truncated)?)
                     .ok_or(FdtError::Truncated)?;
                 let parent = *stack.get(depth).ok_or(FdtError::BadToken)?;
-                if !path_push(&mut path, &mut path_len, name) {
-                    return Err(FdtError::Truncated);
-                }
+                let pushed = path_push(&mut path, &mut path_len, name);
                 let next = depth.checked_add(1).ok_or(FdtError::BadToken)?;
-                if next >= DEPTH {
+                if !pushed || next >= DEPTH {
+                    if pushed {
+                        path_pop(&path, &mut path_len);
+                    }
+                    // A root `/reserved-memory` and anything already inside it
+                    // must be recorded. Anything else past the path or depth
+                    // cap is skipped only on the reservation walk, so a later
+                    // reserved node is still seen.
+                    let inside = reserved_depth.is_some();
+                    let opens = depth == 1 && is_reserved_memory(name);
+                    if skip_unrelated && !inside && !opens {
+                        skip_node(st, &mut off)?;
+                        continue;
+                    }
                     return Err(FdtError::BadToken);
                 }
                 // Collect this node's properties before visiting.
@@ -760,12 +857,18 @@ fn walk(
                 }
                 // This node's `reg` uses the parent's cells.
                 visit(path.get(..path_len).unwrap_or(&[]), props, parent)?;
+                if depth == 1 && is_reserved_memory(name) {
+                    reserved_depth = Some(next);
+                }
                 depth = next;
                 nodes = nodes.saturating_add(1);
             }
             FDT_END_NODE => {
                 if depth == 0 {
                     return Err(FdtError::BadToken);
+                }
+                if reserved_depth == Some(depth) {
+                    reserved_depth = None;
                 }
                 path_pop(&path, &mut path_len);
                 depth = depth.saturating_sub(1);
@@ -774,6 +877,38 @@ fn walk(
             _ => return Err(FdtError::BadToken),
         }
     }
+}
+
+/// Consume the rest of the node whose name is already taken, including its
+/// children. `nest` starts at 1 for that node.
+fn skip_node(st: &[u8], off: &mut usize) -> Result<(), FdtError> {
+    let mut nest = 1u32;
+    while nest > 0 {
+        let tok = be_u32(st, *off).ok_or(FdtError::Truncated)?;
+        *off = (*off).checked_add(4).ok_or(FdtError::Truncated)?;
+        match tok {
+            FDT_NOP => {}
+            FDT_END => return Err(FdtError::Truncated),
+            FDT_BEGIN_NODE => {
+                let name = cstr(st.get(*off..).ok_or(FdtError::Truncated)?);
+                let raw = name.len().checked_add(1).ok_or(FdtError::Truncated)?;
+                *off = align4((*off).checked_add(raw).ok_or(FdtError::Truncated)?)
+                    .ok_or(FdtError::Truncated)?;
+                nest = nest.checked_add(1).ok_or(FdtError::Truncated)?;
+            }
+            FDT_END_NODE => {
+                nest = nest.checked_sub(1).ok_or(FdtError::BadToken)?;
+            }
+            FDT_PROP => {
+                let plen = be_u32(st, *off).ok_or(FdtError::Truncated)? as usize;
+                *off = (*off).checked_add(8).ok_or(FdtError::Truncated)?;
+                let end = (*off).checked_add(plen).ok_or(FdtError::Truncated)?;
+                *off = align4(end).ok_or(FdtError::Truncated)?;
+            }
+            _ => return Err(FdtError::BadToken),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -785,11 +920,17 @@ fn walk(
 mod tests {
     use super::*;
     use crate::machine::IrqController;
+    use crate::pmm::clip_usable;
 
     const VIRT_82: &[u8] = include_bytes!("testdata/virt-8.2.dtb");
     const VIRT_82_SEC: &[u8] = include_bytes!("testdata/virt-8.2-secure.dtb");
     const VIRT_CUR: &[u8] = include_bytes!("testdata/virt-current.dtb");
     const RESERVED: &[u8] = include_bytes!("testdata/reserved-both.dtb");
+    const TWO_REG: &[u8] = include_bytes!("testdata/reserved-two-reg.dtb");
+    const RESERVED_33: &[u8] = include_bytes!("testdata/reserved-33.dtb");
+    const RESERVED_32: &[u8] = include_bytes!("testdata/reserved-32.dtb");
+    const OVERFLOW: &[u8] = include_bytes!("testdata/reserved-overflow.dtb");
+    const DEEP: &[u8] = include_bytes!("testdata/reserved-deep.dtb");
     const TIMER5: &[u8] = include_bytes!("testdata/timer-5irq.dtb");
     const ECAM_RANGE: &[u8] = include_bytes!("testdata/ecam-bus-range.dtb");
 
@@ -893,6 +1034,96 @@ mod tests {
         assert_eq!(rs[0], 0x8000_0000..0x8000_1000);
         assert_eq!(rs[1], 0x8100_0000..0x8100_2000);
         assert_eq!(d.console_uart(), Some(0x900_0000));
+        // The memreserve block has no no-map flag. Only the reserved node does.
+        let nomap: Vec<_> = d.nomap_ranges().collect();
+        assert_eq!(nomap, vec![0x8100_0000..0x8100_2000]);
+    }
+
+    #[test]
+    fn reserved_reg_keeps_every_pair() {
+        let d = parse(TWO_REG).unwrap();
+        let mut rs: Vec<_> = d.reserved_ranges().collect();
+        rs.sort_by_key(|r| r.start);
+        assert_eq!(
+            rs,
+            vec![
+                0x8000_0000..0x8000_1000,
+                0x8100_0000..0x8100_2000,
+                0x8200_0000..0x8200_1000,
+            ]
+        );
+        let mut nomap: Vec<_> = d.nomap_ranges().collect();
+        nomap.sort_by_key(|r| r.start);
+        assert_eq!(
+            nomap,
+            vec![0x8000_0000..0x8000_1000, 0x8100_0000..0x8100_2000]
+        );
+        let mut phys = Vec::new();
+        clip_usable(
+            0x7FF0_0000..0x8300_0000,
+            || d.nomap_ranges(),
+            |p| {
+                phys.push(p);
+            },
+        );
+        assert_eq!(
+            phys,
+            vec![
+                0x7FF0_0000..0x8000_0000,
+                0x8000_1000..0x8100_0000,
+                0x8100_2000..0x8300_0000,
+            ]
+        );
+        let mut buddy = Vec::new();
+        clip_usable(
+            0x7FF0_0000..0x8300_0000,
+            || d.reserved_ranges(),
+            |p| {
+                buddy.push(p);
+            },
+        );
+        assert!(
+            buddy
+                .iter()
+                .all(|p| rs.iter().all(|e| p.end <= e.start || p.start >= e.end))
+        );
+        assert!(buddy.contains(&(0x8200_1000..0x8300_0000)));
+    }
+
+    #[test]
+    fn reserved_past_cap_is_refused() {
+        assert_eq!(parse(RESERVED_33).err(), Some(FdtError::Reserved));
+        assert_eq!(parse_dtb(RESERVED_33).err(), Some(FdtError::Reserved));
+        let d = parse(RESERVED_32).unwrap();
+        assert_eq!(d.reserved_count, 32);
+        assert_eq!(d.reserved_ranges().count(), 32);
+    }
+
+    #[test]
+    fn reserved_overflow_is_saturated() {
+        let d = parse(OVERFLOW).unwrap();
+        let rs: Vec<_> = d.reserved_ranges().collect();
+        assert_eq!(rs, vec![0xFFFF_FFFF_FFF0_0000..u64::MAX]);
+        let mut out = Vec::new();
+        clip_usable(
+            0xFFFF_FFFF_FFE0_0000..u64::MAX,
+            || d.reserved_ranges(),
+            |p| out.push(p),
+        );
+        assert_eq!(out, vec![0xFFFF_FFFF_FFE0_0000..0xFFFF_FFFF_FFF0_0000]);
+    }
+
+    #[test]
+    fn reserved_survives_a_walk_past_the_caps() {
+        let parsed = parse_dtb(DEEP).unwrap();
+        let Parsed::Incomplete(d, e) = parsed else {
+            panic!("device walk should fail");
+        };
+        assert_ne!(e, FdtError::Reserved);
+        assert!(parse(DEEP).is_err());
+        let mut rs: Vec<_> = d.reserved_ranges().collect();
+        rs.sort_by_key(|r| r.start);
+        assert_eq!(rs, vec![0x8000_0000..0x8000_1000, 0x9000_0000..0x9000_1000]);
     }
 
     #[test]
