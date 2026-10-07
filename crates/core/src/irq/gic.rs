@@ -171,6 +171,55 @@ pub fn its_compose(its_base: u64, event_id: u32) -> (u64, u32) {
     )
 }
 
+/// Aff0 ≥ 16 while `ICC_CTLR_EL1.RSS` is clear (ARM ARM).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum SgiError {
+    Aff0,
+}
+
+impl SgiError {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SgiError::Aff0 => "aff0 needs ICC_CTLR_EL1.RSS",
+        }
+    }
+}
+
+impl From<SgiError> for crate::kerror::KError {
+    fn from(e: SgiError) -> Self {
+        match e {
+            SgiError::Aff0 => Self::Inval,
+        }
+    }
+}
+
+/// `ICC_SGI1R_EL1` for one PE (IHI 0069, ARM ARM `ICC_SGI1R_EL1`).
+///
+/// `rss` is `ICC_CTLR_EL1.RSS` (bit 18). With it, RS (bits [47:44]) is
+/// `Aff0 >> 4` and TargetList is bit `Aff0 & 15`. Without it RS is RES0,
+/// and Aff0 ≥ 16 is [`SgiError::Aff0`]: discovery leaves that CPU offline.
+pub fn sgi1r(intid: u32, mpidr: u64, rss: bool) -> Result<u64, SgiError> {
+    let aff0 = mpidr & 0xFF;
+    let aff1 = (mpidr >> 8) & 0xFF;
+    let aff2 = (mpidr >> 16) & 0xFF;
+    let aff3 = (mpidr >> 32) & 0xFF;
+    // `bit` stays in 0..16, so the TargetList shift cannot overflow.
+    let (rs, bit) = if rss {
+        (aff0 >> 4, aff0 & 15)
+    } else if aff0 < 16 {
+        (0, aff0)
+    } else {
+        return Err(SgiError::Aff0);
+    };
+    Ok((u64::from(intid & 0xF) << 24)
+        | (aff1 << 16)
+        | (aff2 << 32)
+        | (aff3 << 48)
+        | (rs << 44)
+        | (1u64 << bit))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +326,30 @@ mod tests {
         let a = v2_ack(0x8000_1401);
         assert_eq!(a.intid, 1);
         assert_eq!(a.eoi, 0x8000_1401);
+    }
+
+    #[test]
+    fn sgi1r_aff0() {
+        // ICC_SGI1R_EL1 with RSS: RS = Aff0[7:4] in bits [47:44],
+        // TargetList bit Aff0[3:0]. Literals, not the encoder's formula.
+        let cases = [
+            (0u64, 0x0000_0000_0000_0001u64),
+            (15, 0x0000_0000_0000_8000),
+            (16, 0x0000_1000_0000_0001),
+            (63, 0x0000_3000_0000_8000),
+            (255, 0x0000_F000_0000_8000),
+        ];
+        for (aff0, enc) in cases {
+            assert_eq!(sgi1r(0, aff0, true), Ok(enc), "aff0 {aff0}");
+        }
+        // Other affinity levels and the INTID stay in their fields.
+        let mpidr = (0xAAu64 << 32) | (0xBB << 16) | (0xCC << 8) | 16;
+        assert_eq!(sgi1r(7, mpidr, true), Ok(0x00AA_10BB_07CC_0001));
+        assert_eq!(sgi1r(0, 0, false), Ok(0x1));
+        assert_eq!(sgi1r(0, 15, false), Ok(0x8000));
+        assert_eq!(sgi1r(0, 16, false), Err(SgiError::Aff0));
+        assert_eq!(sgi1r(0, 63, false), Err(SgiError::Aff0));
+        assert_eq!(sgi1r(0, 255, false), Err(SgiError::Aff0));
     }
 
     #[test]

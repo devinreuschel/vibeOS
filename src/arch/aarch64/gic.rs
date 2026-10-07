@@ -85,6 +85,8 @@ enum Kind {
 
 struct Gic {
     kind: Kind,
+    /// `ICC_CTLR_EL1.RSS`, sampled on the BSP in `init`.
+    rss: bool,
     dist: u64,
     cpu_or_redist: u64,
     /// Physical base of the redistributor window (`cpu_or_redist` is its VA).
@@ -201,8 +203,9 @@ pub unsafe fn init() {
         let (base, n) = v2m_spi_range(va, base, n);
         Some((va, base, n))
     });
-    let g = Gic {
+    let mut g = Gic {
         kind,
+        rss: false,
         dist: dist_va,
         cpu_or_redist: cpu_va,
         redist_pa,
@@ -216,7 +219,10 @@ pub unsafe fn init() {
         next_v2m: AtomicU32::new(0),
     };
     match kind {
-        Kind::V3 => init_v3(&g),
+        Kind::V3 => {
+            init_v3(&g);
+            g.rss = icc_ctlr_rss();
+        }
         Kind::V2 => init_v2(&g),
     }
     // SAFETY: I22, one write on the BSP before SMP; established here.
@@ -1029,12 +1035,34 @@ fn eoi(g: &Gic, eoir: u32) {
     }
 }
 
-fn sgi1r(intid: u32, mpidr: u64) -> u64 {
-    let aff0 = mpidr & 0xFF;
-    let aff1 = (mpidr >> 8) & 0xFF;
-    let aff2 = (mpidr >> 16) & 0xFF;
-    let aff3 = (mpidr >> 32) & 0xFF;
-    (u64::from(intid & 0xF) << 24) | (aff1 << 16) | (aff2 << 32) | (aff3 << 48) | (1u64 << aff0)
+/// `ICC_CTLR_EL1.RSS` (ARM ARM bit 18): range selectors in `ICC_SGI1R_EL1`.
+const ICC_CTLR_RSS: u64 = 1 << 18;
+
+fn icc_ctlr_rss() -> bool {
+    let v: u64;
+    // SAFETY: ICC_CTLR_EL1 is the GICv3 CPU interface control register,
+    // readable after `icc_enable` sets ICC_SRE_EL1.SRE. established here.
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, ICC_CTLR_EL1",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    (v & ICC_CTLR_RSS) != 0
+}
+
+/// Aff0 of `hw_id` can be named in `ICC_SGI1R_EL1`. GICv2 does not use
+/// that register. No chip yet is not a refusal.
+pub fn cpu_ok(hw_id: u64) -> Result<(), gic::SgiError> {
+    let Some(g) = gic() else {
+        return Ok(());
+    };
+    if g.kind != Kind::V3 {
+        return Ok(());
+    }
+    gic::sgi1r(0, hw_id, g.rss)?;
+    Ok(())
 }
 
 fn write_sgi1r(val: u64) {
@@ -1066,7 +1094,15 @@ pub fn send_sgi_to(cpu: u32, intid: u32) {
         })
         .unwrap_or(0);
     match g.kind {
-        Kind::V3 => write_sgi1r(sgi1r(intid, hw)),
+        Kind::V3 => match gic::sgi1r(intid, hw, g.rss) {
+            Ok(v) => write_sgi1r(v),
+            Err(e) => crate::klog_ratelimited!(
+                1000,
+                Level::Error,
+                "vibeOS: gic: sgi {intid}: {}",
+                e.as_str()
+            ),
+        },
         Kind::V2 => {
             let bit = (hw & 7) as u32;
             let sgir = (intid & 0xF) | (1 << (16 + bit));
