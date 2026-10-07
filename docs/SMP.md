@@ -457,7 +457,13 @@ again or exited. A run-queue entry is therefore only a hint: `thread_init::sched
 dequeued thread only while SCHED shows it `Ready` and placed on that CPU, and drops any other entry.
 Shootdown and call-function work take no lock at all, since a CPU in a serviced spin runs them inside
 whatever it holds ([§2.2](INVARIANTS.md#22-interrupt-handler-rules)). Call-function uses one global slot; the
-initiator holds IF off from publish through reclaim, polling inbound work while it waits.
+initiator holds IF off from publish through reclaim, polling inbound work while it waits. The release
+word is a round counter, not the waiter mask: a later round often stores the same mask, and a Release
+store of that same value does not synchronize a responder that can still read the previous store. The
+initiator stores an odd count, a release fence, then the ack reset, function, argument, and mask, then
+the next even count with Release. A responder Acquire-loads the count, reads the payload, and checks
+the count again after an acquire fence. Clearing the mask does the odd half of the next round and stays
+before the initiator releases the slot.
 
 The IPI send is the publication point. `send_ipi`, the seam's IPI send ([§11.1](PORTABILITY.md#111-the-seam)),
 orders every store its CPU made before the call ahead of the interrupt's arrival, so a handler that

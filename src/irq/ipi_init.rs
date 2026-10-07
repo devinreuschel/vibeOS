@@ -49,6 +49,9 @@ impl Slot {
 
 static SHOOT: [Slot; MAX_IPI_CPUS] = [const { Slot::empty() }; MAX_IPI_CPUS];
 static CALL: CallSlot = CallSlot::empty();
+/// Last even call-function round each CPU has taken. 0 means none. The
+/// CPU in `service_calls` is the only reader and writer of its slot.
+static CALL_SEEN: [AtomicU64; MAX_IPI_CPUS] = [const { AtomicU64::new(0) }; MAX_IPI_CPUS];
 static CALL_BUSY: AtomicBool = AtomicBool::new(false);
 pub(super) static RESCHED_COUNT: AtomicU64 = AtomicU64::new(0);
 pub(super) static SHOOT_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -150,10 +153,17 @@ fn service_shootdowns() {
 
 fn service_calls() {
     let me = my_bit();
-    if me == 0 || !CALL.invited(me) {
+    if me == 0 {
         return;
     }
-    let (f, arg) = CALL.payload();
+    let cpu = me.trailing_zeros() as usize;
+    // Relaxed: this CPU is the only accessor; pairs with nothing.
+    let seen = CALL_SEEN[cpu].load(Ordering::Relaxed);
+    let Some((round, f, arg)) = CALL.poll(me, seen) else {
+        return;
+    };
+    // Relaxed: stored before `f` so a nested poll skips this round; pairs with nothing.
+    CALL_SEEN[cpu].store(round, Ordering::Relaxed);
     if !f.is_null() {
         // SAFETY: invariant: a non-null `CALL.func` holds a `fn(*mut ())`;
         // established by `ipi_init::call_mask`, its only non-null store.

@@ -54,10 +54,13 @@ pub mod variant {
         AsidFastStore = 11,
         /// ASID rollover skips reserving the ASIDs it exchanged out.
         AsidSkipReserve = 12,
-        /// Call-function publishes the round with `acked.store(0, Relaxed)`.
+        /// Call-function publishes the even round with a Relaxed store.
         CallPublishRelaxed = 13,
         /// Call-function acks with a Relaxed `fetch_or`.
         CallAckRelaxed = 14,
+        /// Call-function publishes by resetting `acked`, the order a reused
+        /// slot gets wrong.
+        CallPublishOnAcked = 15,
     }
 
     /// `kernel` at `site`, or `weak` while a loom model has weakened it.
