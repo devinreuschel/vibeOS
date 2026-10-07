@@ -204,8 +204,11 @@ pub trait PageTable {
     fn entry_phys(entry: u64) -> PhysAddr;
     /// The flags of `entry`.
     fn entry_flags(entry: u64) -> PageFlags;
-    /// The root this CPU runs on.
+    /// The kernel root this CPU runs on: CR3 on x86_64, TTBR1 on aarch64.
     fn root() -> PhysAddr;
+    /// The user root this CPU has loaded: CR3 on x86_64, the same register
+    /// as [`Self::root`], and TTBR0 on aarch64. Table address only.
+    fn user_root() -> PhysAddr;
     /// Switch this CPU to `root`.
     ///
     /// # Safety

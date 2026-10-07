@@ -937,6 +937,44 @@ user_code!(
     "
 );
 
+// mmap, store, munmap, store. The second store is SIGSEGV. Exit 3 means
+// that store still hit the page.
+user_code!(
+    EL0_MUNMAP_TOUCH,
+    "
+    mov x0, #0
+    mov x1, #0x1000
+    mov x2, #3
+    mov x3, #0x22
+    movn x4, #0
+    mov x5, #0
+    mov x8, #222
+    svc #0
+    mov x19, x0
+    ands xzr, x0, #0xfff
+    b.ne 1f
+    mov x1, #5
+    str x1, [x19]
+    mov x0, x19
+    mov x1, #0x1000
+    mov x8, #215
+    svc #0
+    cbnz x0, 2f
+    mov x1, #7
+    str x1, [x19]
+    mov x0, #3
+    b 9f
+1:
+    mov x0, #1
+    b 9f
+2:
+    mov x0, #2
+9:
+    mov x8, #93
+    svc #0
+    "
+);
+
 fn run_code(code: &'static [u8], name: &str) -> Result<u32, Outcome> {
     user::run(&Image::Code(code, DEFAULT), &[name])
         .map_err(|e| crate::fail_fmt!("spawn {name}: {}", e.as_str()))
@@ -1056,6 +1094,19 @@ pub(crate) fn test_el0_ring3_signals() -> Outcome {
         }
     }
     Outcome::Ok
+}
+
+/// mmap, store, munmap, store again. The second store is SIGSEGV.
+/// Exit 3 means the store still translated (stale user TLB).
+pub(crate) fn test_el0_munmap_touch() -> Outcome {
+    match run_code(EL0_MUNMAP_TOUCH, "el0_munmap_touch") {
+        Ok(st) if signaled(st, vibeos::proc::SIGSEGV) => Outcome::Ok,
+        Ok(st) if vibeos::proc::wifexited(st) => {
+            crate::fail_fmt!("exit {} want SIGSEGV", vibeos::proc::wexitstatus(st))
+        }
+        Ok(st) => crate::fail_fmt!("status {st:#x} want SIGSEGV"),
+        Err(e) => e,
+    }
 }
 
 /// A saved ELR of 2^48 kills the process with SIGSEGV; the kernel runs.
@@ -1295,6 +1346,7 @@ pub(crate) const TESTS: &[Test] = &[
     .deadline(30_000),
     test("el0_ring3_signals", test_el0_ring3_signals),
     test("el0_bad_elr", test_el0_bad_elr),
+    test("el0_munmap_touch", test_el0_munmap_touch),
     test(
         "el0_tls_survive",
         crate::arch::aarch64::ktest_el0::test_el0_tls_survive,

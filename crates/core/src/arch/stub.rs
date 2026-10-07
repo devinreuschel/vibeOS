@@ -406,6 +406,9 @@ impl PageTable for Arch {
     fn root() -> PhysAddr {
         with(|s| PhysAddr::new(s.root))
     }
+    fn user_root() -> PhysAddr {
+        Self::root()
+    }
     unsafe fn set_root(root: PhysAddr) {
         with(|s| {
             s.root = root.as_u64();

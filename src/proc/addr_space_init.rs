@@ -384,7 +384,7 @@ unsafe fn map_chunks(space: &mut Mm, va: u64, len: u64, perms: UserPerms) -> Res
 
 /// Unmap and free every leaf in `[va, va+len)`, chunk by chunk, flushing
 /// each page from this CPU's TLB before its frame is freed when `space` is
-/// the loaded CR3.
+/// the loaded user root.
 ///
 /// # Safety
 /// Same contract as `AddressSpace::unmap_pages`, whose flush this fn
@@ -407,10 +407,10 @@ unsafe fn unmap_chunks(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError>
     Ok(())
 }
 
-/// A flush for `space`'s pages: `invlpg` when it is this CPU's CR3,
-/// nothing otherwise.
+/// A flush for `space`'s pages when it is this CPU's user root
+/// (CR3; TTBR0 on aarch64).
 fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
-    let loaded = Arch::root() == space.root();
+    let loaded = Arch::user_root() == space.root();
     move |va| {
         if loaded {
             Arch::flush_local(VirtAddr(va));
@@ -420,7 +420,7 @@ fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
 
 /// `munmap` of `[va, va+len)` over `AddressSpace::unmap_free`, taking `PT`
 /// once per chunk ([`CHUNK_PAGES`]). Each page leaves this CPU's TLB before
-/// its frame is freed when `space` is the loaded CR3. Only the first chunk
+/// its frame is freed when `space` is the loaded user root. Only the first chunk
 /// can split a region, so a full region table fails it before anything is
 /// unmapped.
 ///
@@ -583,20 +583,10 @@ impl fmt::Debug for RootHolder {
 /// or any TCB's saved root. Returns with no lock held, so the caller's
 /// assertion never fires under PT or SCHED.
 fn root_holder(root: u64) -> Option<RootHolder> {
-    // One IF=0 stretch: the id and CR3 name one CPU.
+    // One IF=0 stretch: the id and the user root name one CPU.
     let (here, live) = {
         let _irq = crate::arch::current::InterruptGuard::enter();
-        let live = {
-            #[cfg(target_arch = "aarch64")]
-            {
-                crate::arch::aarch64::cpu::read_ttbr0()
-                    & vibeos::arch::aarch64::paging::DESC_ADDR_MASK
-            }
-            #[cfg(not(target_arch = "aarch64"))]
-            {
-                Arch::root().as_u64()
-            }
-        };
+        let live = Arch::user_root().as_u64();
         (per_cpu_init::try_current().map_or(0, |c| c.cpu_id), live)
     };
     if live == root {

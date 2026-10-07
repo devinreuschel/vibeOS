@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- aarch64 `munmap` and a `brk` shrink drop the page from the TLB before
+  the frame is freed, so a later EL0 access is `SIGSEGV`.
 - a failed `RNDR` is not entropy, so `/dev/random` does not fill zeros
   ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
 - a failed `irq::set_affinity` leaves dest CPU unchanged, and GIC SPIs

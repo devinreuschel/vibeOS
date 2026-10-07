@@ -300,6 +300,9 @@ mod tests {
         fn root() -> PhysAddr {
             PhysAddr(0)
         }
+        fn user_root() -> PhysAddr {
+            PhysAddr(0)
+        }
         unsafe fn set_root(_root: PhysAddr) {}
         fn flush_local(_va: VirtAddr) {}
         fn flush_local_all() {}

@@ -58,6 +58,12 @@ impl PageTable for Arch {
         PhysAddr(cpu::read_cr3() & paging::PTE_ADDR_MASK)
     }
 
+    /// User and kernel share CR3.
+    #[inline]
+    fn user_root() -> PhysAddr {
+        Self::root()
+    }
+
     #[inline]
     unsafe fn set_root(root: PhysAddr) {
         // SAFETY: `root` is a complete PML4 that maps this CPU's code, stack
