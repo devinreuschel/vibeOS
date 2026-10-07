@@ -933,14 +933,15 @@ ELFs carry no symbols, so gdb warns that they add none.
 `make help` prints the live inventory. Do not hand-maintain a second list here.
 
 `make check` is the fast local gate (rustfmt `--check`; clippy `-D warnings` on `vibeos-core` and hostlib
-for the host, on `vibeos-core` for `x86_64-unknown-none`, and on the kernel with its default features; host
+for the host, on `vibeos-core` for `$(TARGET)`, and on the kernel for `$(TARGET)` with its default features; host
 unit tests, the `release_assert_` host tests again with debug assertions off, harness unit tests,
 ruff and mypy; a production-feature link under the `hookcheck`
 profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q2's `nm` check; then every
 `scripts/check_*.py`; then `cargo deny check licenses bans sources` against `deny.toml`, ROADMAP §10.9's
 dependency policy; and the `tests/fuzz` build and replay (§8.1)). Right after the `vibeos-core` clippy lines it builds `vibeos-core` with its MSRV
-(`make check-msrv`: `cargo +<MSRV> check` for the host with `std` and for `x86_64-unknown-none`, under
-`RUSTFLAGS=--cap-lints=warn`, so it proves only that the crate builds). A missing `ruff`, `mypy`, `cargo-deny`,
+(`make check-msrv`: `cargo +<MSRV> check` for the host with `std` and for `$(TARGET)`, under
+`RUSTFLAGS=--cap-lints=warn`, so it proves only that the crate builds). `./setup.sh` installs
+`x86_64-unknown-none` and `aarch64-unknown-none-softfloat` for that toolchain. A missing `ruff`, `mypy`, `cargo-deny`,
 `fsck.fat` or MSRV toolchain fails it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`, which skips that check and
 prints it. CI runs it as the `check` job before QEMU (DESIGN §8.6).
 `make test-forensics` (`tests/harness/run_forensics.py`, in `make test`) tests the core tool on
@@ -1118,7 +1119,7 @@ which the scheduled jobs and the gate run, still rerun the whole registry there.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`); on a pull request, `scripts/check_gate_inputs.py` against its merge base; then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines <floor>`, the floor in `tests/gates/inputs.toml`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (x86_64: `kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`, plus `kernel_shell`; aarch64: default, `kernel_tests`, `kernel_shell`) (the default set also runs in `check` on x86_64); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos-<arch>.iso` (7 days). |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (x86_64: `kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`, plus `kernel_shell`; aarch64: default, `kernel_tests`, `kernel_shell`, and `make ARCH=aarch64 check-msrv`) (the default set also runs in `check` on x86_64, and that recipe passes `--target $(TARGET)`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos-<arch>.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 2, so the e2e tiers run two QEMUs at a time on the runner's 4 CPUs; a tier of one target runs one). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `gatelib.pr_diff_base` (`BASE_SHA`, or `origin/$GITHUB_BASE_REF` when that is not `main`, or `origin/main`) and skips them when no such ref exists. |
 | `ci-pass` | every per-push run | `needs:` every other job, `if: always()`; fails unless each succeeded, a job gated on the event being allowed to skip (`scripts/check_gate_inputs.py --ci-pass`, which the job runs with `NEEDS: ${{ toJSON(needs) }}` and `SKIPPABLE: ticks`; its static rules fail when the job misses one, lacks `if: always()`, or lists in `SKIPPABLE` a job whose `if:` does not test `github.event_name`) |
@@ -1411,10 +1412,11 @@ issues by kind, branch, and signature. From ROADMAP §22.5, fuzz jobs run in `fu
 key, and publish only the target, the run, and a keyed crash id, so a crash's reproducer stays
 private until its fix is published.
 
-`-D warnings` reaches host builds through `[build] rustflags`, and every kernel build and clippy run
-(`make iso`, every ISO variant, `make check`) through `[target.x86_64-unknown-none] rustflags` in
-`.cargo/config.toml`, which replaces `[build] rustflags` for the kernel target, since Cargo reads one
-rustflags source. A job that sets `RUSTFLAGS` drops both (ROADMAP §10.1, F147).
+`-D warnings` reaches host builds through `[build] rustflags`, and a kernel build or clippy through the
+`[target.<triple>]` rustflags of the triple it passes (`x86_64-unknown-none` by default,
+`aarch64-unknown-none-softfloat` with `ARCH=aarch64`), which replaces `[build] rustflags` for that
+target, since Cargo reads one rustflags source. `make check` passes `--target $(TARGET)` to the kernel
+clippy. A job that sets `RUSTFLAGS` drops both tables (ROADMAP §10.1, F147).
 
 GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 35796216463): `check`
 53 s, then the ladder 160 s, serialized by `needs: check`. The ladder spends 58 s on setup, toolchain,

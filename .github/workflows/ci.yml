@@ -265,7 +265,17 @@ jobs:
       - name: cargo clippy -D warnings (kernel, aarch64)
         if: matrix.arch == 'aarch64'
         run: |
-          cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat -- -D warnings
+          # `make ARCH=aarch64 check`: its MSRV step, then its default-feature
+          # kernel clippy. setup.sh installed the MSRV target. The other
+          # feature sets have no make target.
+          make ARCH=aarch64 check-msrv
+          line=$(make -n ARCH=aarch64 check | grep -E '^cargo clippy --bin vibeos ' || true)
+          case "$line" in
+            *" --target aarch64-unknown-none-softfloat "*) ;;
+            *) echo "check recipe kernel clippy does not target aarch64-unknown-none-softfloat: ${line:-<missing>}" >&2
+               exit 1 ;;
+          esac
+          $line
           cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_tests -- -D warnings
           cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_shell -- -D warnings
 
