@@ -2,7 +2,7 @@
 
 use core::ops::Range;
 
-use crate::paging::{PAGE_SIZE_1G, PAGE_SIZE_2M, PageSize, PhysAddr, VirtAddr};
+use crate::paging::{PAGE_SIZE_1G, PAGE_SIZE_2M, PAGE_SIZE_4K, PageSize, PhysAddr, VirtAddr};
 
 /// One architecture's physmap slot (MEMORY.md §4.1, PORTABILITY.md §11.2).
 /// The HHDM offset Limine reports must lie in it; RAM whose alias would
@@ -114,10 +114,16 @@ pub struct PhysmapWalk {
     pub leftover: u64,
 }
 
-/// Walk RAM-typed `[start, end)` ranges and emit coalesced runs at the
-/// largest page each span's alignment allows (1 GiB when `have_1g`),
-/// except `kernel` which is always 4 KiB. Ranges whose alias would pass
-/// `slot` are leftover. Nothing that is not in `ram` is emitted.
+/// Walk RAM-typed `[start, end)` ranges and emit runs at the largest page
+/// each span's alignment allows (1 GiB when `have_1g`), except `kernel`,
+/// which is always 4 KiB.
+///
+/// Ranges are sorted, overlaps and abutments coalesced, then each span
+/// rounded inward to 4 KiB. A partial page is not emitted. A span whose
+/// alias would pass `slot` is leftover. Nothing outside `ram` is emitted.
+///
+/// The iterator is cloned across passes so this allocates nothing: the
+/// kernel calls it before the heap exists.
 pub fn walk_physmap<I, F>(
     slot: PhysmapSlot,
     offset: u64,
@@ -128,23 +134,88 @@ pub fn walk_physmap<I, F>(
 ) -> PhysmapWalk
 where
     I: IntoIterator<Item = Range<u64>>,
+    I::IntoIter: Clone,
     F: FnMut(PhysmapRun),
 {
+    let ram = ram.into_iter();
     let mut mapped = 0u64;
     let mut leftover = 0u64;
-    for r in ram {
-        if r.start >= r.end {
+    let mut done = 0u64;
+    while let Some((raw_start, raw_end)) = next_span(&ram, done) {
+        if raw_end <= done {
+            break;
+        }
+        done = raw_end;
+        let Some(start) = align_up_page(raw_start) else {
+            continue;
+        };
+        let end = align_down_page(raw_end);
+        if start >= end {
             continue;
         }
-        let (hi, left) = clip_range_to_slot(slot, offset, r.start, r.end);
+        let (hi, left) = clip_range_to_slot(slot, offset, start, end);
         leftover = leftover.saturating_add(left);
-        if r.start >= hi {
+        let hi = align_down_page(hi);
+        if start >= hi {
             continue;
         }
-        mapped = mapped.saturating_add(hi - r.start);
-        emit_clipped(offset, r.start, hi, &kernel, have_1g, &mut emit);
+        mapped = mapped.saturating_add(hi - start);
+        emit_clipped(offset, start, hi, &kernel, have_1g, &mut emit);
     }
     PhysmapWalk { mapped, leftover }
+}
+
+/// Next coalesced span in address order: the range that starts soonest
+/// after `done`, grown to every overlap and abutment. `done` is the
+/// previous span's unrounded end, so a later pass does not see it again.
+fn next_span<I>(ram: &I, done: u64) -> Option<(u64, u64)>
+where
+    I: Iterator<Item = Range<u64>> + Clone,
+{
+    let mut seed: Option<(u64, u64)> = None;
+    for r in ram.clone() {
+        if r.end <= r.start || r.end <= done {
+            continue;
+        }
+        let start = if r.start > done { r.start } else { done };
+        let take = match seed {
+            Some((s, _)) => start < s,
+            None => true,
+        };
+        if take {
+            seed = Some((start, r.end));
+        }
+    }
+    let (start, mut end) = seed?;
+    loop {
+        let mut ext = end;
+        for r in ram.clone() {
+            if r.end <= r.start {
+                continue;
+            }
+            if r.start <= end && r.end > ext {
+                ext = r.end;
+            }
+        }
+        if ext == end {
+            break;
+        }
+        end = ext;
+    }
+    Some((start, end))
+}
+
+fn align_down_page(x: u64) -> u64 {
+    x & !(PAGE_SIZE_4K - 1)
+}
+
+fn align_up_page(x: u64) -> Option<u64> {
+    let down = align_down_page(x);
+    if down == x {
+        Some(x)
+    } else {
+        down.checked_add(PAGE_SIZE_4K)
+    }
 }
 
 fn emit_clipped<F: FnMut(PhysmapRun)>(
@@ -261,10 +332,12 @@ const fn is_ram_memmap(ty: u64) -> bool {
 
 /// Physical ranges of the RAM-typed entries. Anything else, including
 /// [`MEMMAP_RESERVED`] and [`MEMMAP_FRAMEBUFFER`], is dropped. Ends
-/// saturate: the map is firmware input.
-pub fn ram_ranges<I>(entries: I) -> impl Iterator<Item = Range<u64>>
+/// saturate: the map is firmware input. The iterator is [`Clone`] when
+/// `entries` is, so [`walk_physmap`] can coalesce it before the heap exists.
+pub fn ram_ranges<I>(entries: I) -> impl Iterator<Item = Range<u64>> + Clone
 where
     I: IntoIterator<Item = MemmapEntry>,
+    I::IntoIter: Clone,
 {
     entries.into_iter().filter_map(|e| {
         if is_ram_memmap(e.ty) {
@@ -328,13 +401,17 @@ mod tests {
         assert_eq!(leftover_mib((1 << 20) + 1), 2);
     }
 
-    fn collect(
+    fn collect<I>(
         slot: PhysmapSlot,
         offset: u64,
-        ram: impl IntoIterator<Item = Range<u64>>,
+        ram: I,
         kernel: Range<u64>,
         have_1g: bool,
-    ) -> (PhysmapWalk, Vec<PhysmapRun>) {
+    ) -> (PhysmapWalk, Vec<PhysmapRun>)
+    where
+        I: IntoIterator<Item = Range<u64>>,
+        I::IntoIter: Clone,
+    {
         let mut runs = Vec::new();
         let w = walk_physmap(slot, offset, ram, kernel, have_1g, |r| runs.push(r));
         (w, runs)
@@ -380,7 +457,7 @@ mod tests {
             ent(0x5000_0000, PAGE_SIZE_4K, MEMMAP_BAD_MEMORY),
             ent(0x6000_0000, PAGE_SIZE_4K, MEMMAP_MAPPED_RESERVED),
         ]);
-        let ranges: Vec<_> = ram_ranges(entries).collect();
+        let ranges: Vec<_> = ram_ranges(entries.iter().copied()).collect();
         let covers = |pa: u64| ranges.iter().any(|r| r.contains(&pa));
         assert_eq!(
             ranges.iter().map(|r| r.end - r.start).sum::<u64>(),
@@ -397,7 +474,13 @@ mod tests {
         assert!(!covers(0x5000_0000));
         assert!(!covers(0x6000_0000));
 
-        let (w, runs) = collect(PHYSMAP_X86_64, PHYSMAP_X86_64.start, ranges, 0..0, true);
+        let (w, runs) = collect(
+            PHYSMAP_X86_64,
+            PHYSMAP_X86_64.start,
+            ranges.iter().cloned(),
+            0..0,
+            true,
+        );
         assert_eq!(w.mapped, ram_bytes);
         assert_eq!(w.leftover, 0);
         assert!(any_pa(&runs, 0));
@@ -516,5 +599,58 @@ mod tests {
         assert_eq!(runs[0].len, 2 * PAGE_SIZE_1G);
         let (_, runs) = collect(PHYSMAP_X86_64, off, core::iter::once(ram), 0..0, false);
         assert!(runs.iter().all(|r| r.size == PageSize::Size2M));
+    }
+
+    fn covered(runs: &[PhysmapRun], pa: u64) -> usize {
+        runs.iter()
+            .filter(|r| pa >= r.pa.0 && pa < r.pa.0.saturating_add(r.len))
+            .count()
+    }
+
+    /// ACPI NVS and ACPI reclaimable entries are not 4 KiB aligned and may
+    /// overlap. Limine promises that only for usable and bootloader-reclaimable.
+    #[test]
+    fn builder_rounds_unaligned_overlapping_acpi() {
+        let off = PHYSMAP_X86_64.start;
+        // Unaligned NVS [0x100, 0x4100) overlapped by ACPI data [0x1800, 0x3900).
+        // Union [0x100, 0x4100) rounds inward to [0x1000, 0x4000).
+        // NVS [0x5000, 0x5800) meets ACPI data [0x5800, 0x6000) mid-page:
+        // together one page, and rounding each entry first would drop it.
+        let ranges = [
+            0x5800u64..0x6000,
+            0x1800..0x3900,
+            0x5000..0x5800,
+            0x100..0x4100,
+        ];
+        let (_, runs) = collect(PHYSMAP_X86_64, off, ranges, 0..0, false);
+        for r in &runs {
+            assert_eq!(r.pa.0 & (PAGE_SIZE_4K - 1), 0, "pa {:#x}", r.pa.0);
+            assert_eq!(r.len & (PAGE_SIZE_4K - 1), 0, "len {:#x}", r.len);
+            assert_eq!(r.va.0, off + r.pa.0);
+        }
+        let mut page = 0u64;
+        while page < 0x7000 {
+            let n = covered(&runs, page);
+            let want = usize::from(matches!(page, 0x1000 | 0x2000 | 0x3000 | 0x5000));
+            assert_eq!(n, want, "page {page:#x} covered {n} times");
+            page += PAGE_SIZE_4K;
+        }
+    }
+
+    #[test]
+    fn builder_coalesces_adjacent_ram_into_one_large_page() {
+        let off = PHYSMAP_X86_64.start;
+        let half = PAGE_SIZE_2M / 2;
+        let (_, runs) = collect(
+            PHYSMAP_X86_64,
+            off,
+            [0u64..half, half..PAGE_SIZE_2M],
+            0..0,
+            false,
+        );
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].size, PageSize::Size2M);
+        assert_eq!(runs[0].pa.0, 0);
+        assert_eq!(runs[0].len, PAGE_SIZE_2M);
     }
 }
