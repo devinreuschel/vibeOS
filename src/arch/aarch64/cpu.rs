@@ -90,20 +90,6 @@ pub fn read_sysreg(name_hint: u64) -> u64 {
     0
 }
 
-/// Write `TTBR1_EL1`. There is no `TTBR1_EL2`; under VHE the `_EL1`
-/// name reaches the host root (DESIGN §11.2).
-///
-/// # Safety
-/// `ttbr1` is a complete TTBR1 root that maps this CPU's code, stack, and
-/// everything it touches next.
-pub unsafe fn write_ttbr1(ttbr1: u64) {
-    // SAFETY: this fn's `# Safety` (here); `msr` only loads the root.
-    unsafe {
-        asm!("msr ttbr1_el1, {0}", in(reg) ttbr1, options(nostack, preserves_flags));
-        asm!("isb", options(nostack, preserves_flags));
-    }
-}
-
 pub fn read_ttbr1() -> u64 {
     let v: u64;
     // SAFETY: TTBR1_EL1 is readable at EL1 and at EL2 with VHE; established here.
@@ -113,26 +99,26 @@ pub fn read_ttbr1() -> u64 {
     v
 }
 
-/// Write MAIR and TCR from the computed `*_EL1` values. Not SCTLR.
-pub fn write_translation_regs() {
-    let asid16 = {
-        let mmfr0: u64;
-        // SAFETY: ID register; established here.
-        unsafe {
-            asm!("mrs {0}, ID_AA64MMFR0_EL1", out(reg) mmfr0, options(nomem, nostack, preserves_flags));
-        }
-        sysreg::asid16_from_mmfr0(mmfr0)
-    };
-    let mair = sysreg::mair_el1();
-    let tcr = sysreg::tcr_el1(asid16);
-    // SAFETY: whole writes of the computed translation policy; SCTLR is
-    // left as Limine/#202 set it. VHE redirects the `_EL1` names.
-    // established here.
+/// Computed `MAIR_EL1` and `TCR_EL1`. The TTBR1 takeover writes them.
+pub fn mair_tcr() -> (u64, u64) {
+    let mmfr0: u64;
+    // SAFETY: ID register; established here.
     unsafe {
-        asm!("msr mair_el1, {0}", in(reg) mair, options(nostack, preserves_flags));
-        asm!("msr tcr_el1, {0}", in(reg) tcr, options(nostack, preserves_flags));
-        asm!("isb", options(nostack, preserves_flags));
+        asm!("mrs {0}, ID_AA64MMFR0_EL1", out(reg) mmfr0, options(nomem, nostack, preserves_flags));
     }
+    (
+        sysreg::mair_el1(),
+        sysreg::tcr_el1(sysreg::asid16_from_mmfr0(mmfr0)),
+    )
+}
+
+pub fn read_tcr() -> u64 {
+    let v: u64;
+    // SAFETY: TCR_EL1 is readable at EL1 and at EL2 with VHE; established here.
+    unsafe {
+        asm!("mrs {0}, tcr_el1", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
 }
 
 /// Run one op from a `tlb` sequence. The instruction text is `TlbOp::mnemonic`.

@@ -40,6 +40,11 @@ global_asm!(
     "    ldr x1, [x0, #{hcr}]",
     "    msr hcr_el2, x1",
     "    isb",
+    // E2H/TGE changes the regime. TLB contents from reset or retention
+    // are not architecturally clean (#260).
+    "    tlbi vmalle1",
+    "    dsb nsh",
+    "    isb",
     "    ldr x1, [x0, #{cptr}]",
     "    msr cptr_el2, x1",
     "    ldr x1, [x0, #{cnthctl}]",
@@ -97,6 +102,10 @@ global_asm!(
     "    msr ttbr0_el1, x1",
     "    ldr x1, [x0, #{ttbr1}]",
     "    msr ttbr1_el1, x1",
+    // SCTLR_EL2.M is clear above. Drop the old regime before the
+    // SCTLR_EL1 write that sets M.
+    "    tlbi vmalle1",
+    "    dsb nsh",
     "    isb",
     "    ldr x1, [x0, #{sctlr}]",
     "    msr sctlr_el1, x1",
@@ -206,7 +215,7 @@ pub fn va_to_pa(va: u64) -> Option<u64> {
     Some(va)
 }
 
-fn alloc_zeroed_page() -> Option<u64> {
+pub(crate) fn alloc_zeroed_page() -> Option<u64> {
     let f = pmm_init::with_buddy(|b| b.alloc(0))?;
     let pa = f.into_entry();
     let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
@@ -228,7 +237,7 @@ pub fn map_va(
     l0_pa: u64,
     va: u64,
     pa: u64,
-    tables: &mut TryBox<[u64; 8]>,
+    tables: &mut [u64],
     n: &mut usize,
     flags: PageFlags,
 ) -> bool {
@@ -265,7 +274,7 @@ pub fn map_va(
 }
 
 /// Identity-map `pa` as a 4 KiB RW global page in `l0_pa` (TTBR0).
-pub fn map_identity(l0_pa: u64, pa: u64, tables: &mut TryBox<[u64; 8]>, n: &mut usize) -> bool {
+pub fn map_identity(l0_pa: u64, pa: u64, tables: &mut [u64], n: &mut usize) -> bool {
     map_va(
         l0_pa,
         pa,
@@ -279,28 +288,41 @@ pub fn map_identity(l0_pa: u64, pa: u64, tables: &mut TryBox<[u64; 8]>, n: &mut 
     )
 }
 
-/// Build a TTBR0 identity root covering `pas`, plus `empty` TTBR0.
-pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; 8]>)> {
+/// Build a TTBR0 identity root covering `pas` into `tables` (no heap).
+///
+/// Returns `(l0, empty, count)`. `empty` is a zero root. `tables[..count]`
+/// holds `l0` and the tables under it. Paging install calls this before
+/// the heap exists.
+pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u64, u64, usize)> {
+    if tables.is_empty() {
+        return None;
+    }
     let l0 = alloc_zeroed_page()?;
     let empty = alloc_zeroed_page()?;
-    let mut tables = TryBox::try_new([0u64; 8]).ok()?;
     let mut n = 0usize;
     tables[n] = l0;
     n += 1;
     for &pa in pas {
         let page = pa & !0xFFFu64;
-        if !map_identity(l0, page, &mut tables, &mut n) {
+        if !map_identity(l0, page, tables, &mut n) {
             return None;
         }
     }
     let mut i = 0;
     while i < n {
         let pa = tables[i];
-        if pa != 0 && !map_identity(l0, pa, &mut tables, &mut n) {
+        if pa != 0 && !map_identity(l0, pa, tables, &mut n) {
             return None;
         }
         i += 1;
     }
+    Some((l0, empty, n))
+}
+
+/// Build a TTBR0 identity root covering `pas`, plus `empty` TTBR0.
+pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; 8]>)> {
+    let mut tables = TryBox::try_new([0u64; 8]).ok()?;
+    let (l0, empty, _) = build_identity_into(pas, &mut *tables)?;
     Some((l0, empty, tables))
 }
 

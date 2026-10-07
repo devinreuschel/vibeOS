@@ -60,6 +60,14 @@ its low page after enabling paging. Rule: the trampoline page is the identity wi
 executable leaf, a 4 KiB page, read-only, with its GDT's accessed bits preset so the AP never writes
 it; everything else stays NX, and after `smp: done` the rest of the window is gone.
 
+**aarch64 boots in QEMU, then a TLB conflict abort on hardware at MMU-on or the TTBR1 switch.**
+A secondary's TLB is not architecturally clean after reset or after `CPU_OFF`/`CPU_ON`, and the boot
+CPU still has Limine's global entries cached when it installs its own TTBR1. QEMU does not keep
+those entries. Rule: the stub runs `tlbi vmalle1` and `dsb nsh` after the `HCR_EL2` E2H/TGE write
+and again after the TTBR writes, before the `isb` that publishes `SCTLR.M`. The TTBR1 install goes
+through a reserved empty root with that same local invalidate between the two writes, from a TTBR0
+identity map of the sequence (§7.3, §4.3).
+
 **Building page tables at boot never finishes.**
 `map_end` was computed from raw memory map entries, and firmware described an MMIO BAR as a
 multi-terabyte region. Rule: the physmap maps only RAM-typed ranges of the boot memory map, inside

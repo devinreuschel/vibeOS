@@ -1184,7 +1184,7 @@ fn start_one_aarch64(
         free_live_ap(cpu_id, idle_id, workers, published, false);
         return StartAp::Failed;
     };
-    if !arch::aarch64::secondary::map_identity(ttbr0_id, param_pa, id_tables, n_id) {
+    if !arch::aarch64::secondary::map_identity(ttbr0_id, param_pa, &mut id_tables[..], n_id) {
         crate::marker!("vibeOS: smp: apic {hw_id} alloc failed");
         free_live_ap(cpu_id, idle_id, workers, published, false);
         return StartAp::Failed;

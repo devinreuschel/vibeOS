@@ -676,20 +676,15 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     unsafe { Arch::set_root(mapper.root()) };
     #[cfg(target_arch = "aarch64")]
     {
-        if let Some(f) = pmm_init::with_buddy(|b| b.alloc(0)) {
-            let pa = f.into_entry();
-            let va = hhdm_offset().wrapping_add(pa);
-            // SAFETY: `va` is the physmap alias of a buddy frame we just
-            // took; nothing else names it. established here.
-            unsafe { core::ptr::write_bytes(va as *mut u8, 0, PAGE_SIZE_4K as usize) };
-            // Release: pairs with the Acquire load in `empty_user_root`.
-            EMPTY_TTBR0.store(pa, Ordering::Release);
-            // SAFETY: the zeroed page is the permanent empty TTBR0 root.
-            // established here.
-            unsafe { crate::arch::aarch64::cpu::write_ttbr0(pa) };
-        } else {
+        // `set_root` left TTBR0 on the empty root and dropped the
+        // identity map. Table address only: ASID lives above bit 47.
+        let pa =
+            crate::arch::aarch64::cpu::read_ttbr0() & vibeos::arch::aarch64::paging::DESC_ADDR_MASK;
+        if pa == 0 {
             crate::boot::halt_with("vibeOS: paging: no empty TTBR0");
         }
+        // Release: pairs with the Acquire load in `empty_user_root`.
+        EMPTY_TTBR0.store(pa, Ordering::Release);
     }
     #[cfg(target_arch = "aarch64")]
     {
