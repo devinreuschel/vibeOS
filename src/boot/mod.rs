@@ -5,10 +5,7 @@
 
 use core::ops::Range;
 
-use limine::memmap::{
-    Entry, MEMMAP_ACPI_NVS, MEMMAP_ACPI_RECLAIMABLE, MEMMAP_BOOTLOADER_RECLAIMABLE,
-    MEMMAP_EXECUTABLE_AND_MODULES, MEMMAP_USABLE,
-};
+use limine::memmap::Entry;
 use limine::request::{
     DtbRequest, ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest,
     FramebufferResponse, HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
@@ -91,6 +88,24 @@ static STACK_SIZE: StackSizeRequest = StackSizeRequest::new(LIMINE_STACK_BYTES);
 /// The fw_cfg file whose text follows Limine's command line.
 pub const FW_CFG_CMDLINE: &str = "opt/vibeos/cmdline";
 
+// The type numbers `physmap` filters on are Limine's. A drift here would
+// map MMIO or drop RAM, and the host tests would still pass.
+const _: () = {
+    assert!(physmap::MEMMAP_USABLE == limine::memmap::MEMMAP_USABLE);
+    assert!(physmap::MEMMAP_RESERVED == limine::memmap::MEMMAP_RESERVED);
+    assert!(physmap::MEMMAP_ACPI_RECLAIMABLE == limine::memmap::MEMMAP_ACPI_RECLAIMABLE);
+    assert!(physmap::MEMMAP_ACPI_NVS == limine::memmap::MEMMAP_ACPI_NVS);
+    assert!(physmap::MEMMAP_BAD_MEMORY == limine::memmap::MEMMAP_BAD_MEMORY);
+    assert!(
+        physmap::MEMMAP_BOOTLOADER_RECLAIMABLE == limine::memmap::MEMMAP_BOOTLOADER_RECLAIMABLE
+    );
+    assert!(
+        physmap::MEMMAP_EXECUTABLE_AND_MODULES == limine::memmap::MEMMAP_EXECUTABLE_AND_MODULES
+    );
+    assert!(physmap::MEMMAP_FRAMEBUFFER == limine::memmap::MEMMAP_FRAMEBUFFER);
+    assert!(physmap::MEMMAP_MAPPED_RESERVED == limine::memmap::MEMMAP_MAPPED_RESERVED);
+};
+
 // Kernel image bounds from linker.ld (DESIGN §3.4). Virtual.
 unsafe extern "C" {
     static __kernel_vma_start: u8;
@@ -137,29 +152,19 @@ impl BootInfo {
     pub fn usable(&self) -> impl Iterator<Item = Range<u64>> {
         self.memmap
             .iter()
-            .filter(|e| e.type_ == MEMMAP_USABLE)
+            .filter(|e| e.type_ == physmap::MEMMAP_USABLE)
             .map(|e| e.base..e.base + e.length)
     }
 
-    /// The RAM-typed memmap ranges, physical: usable, bootloader
-    /// reclaimable, executable and modules, ACPI reclaimable and ACPI NVS.
+    /// The RAM-typed memmap ranges, physical (`physmap::ram_ranges`).
     /// No device range may overlap one (DESIGN §12.3 rule 8), so
     /// `dev::Registry::claim` and `pci_init::map_mmio` check against them.
-    /// Ends saturate: the map is firmware input (AGENTS.md rule 4).
     pub fn ram_ranges(&self) -> impl Iterator<Item = Range<u64>> {
-        self.memmap
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.type_,
-                    MEMMAP_USABLE
-                        | MEMMAP_BOOTLOADER_RECLAIMABLE
-                        | MEMMAP_EXECUTABLE_AND_MODULES
-                        | MEMMAP_ACPI_RECLAIMABLE
-                        | MEMMAP_ACPI_NVS
-                )
-            })
-            .map(|e| e.base..e.base.saturating_add(e.length))
+        physmap::ram_ranges(self.memmap.iter().map(|e| physmap::MemmapEntry {
+            base: e.base,
+            len: e.length,
+            ty: e.type_,
+        }))
     }
 
     /// Every framebuffer Limine mapped through the HHDM, in response order.
@@ -351,7 +356,7 @@ pub fn capture() -> &'static BootInfo {
         memmap
             .entries()
             .iter()
-            .filter(|e| e.type_ == MEMMAP_USABLE)
+            .filter(|e| e.type_ == physmap::MEMMAP_USABLE)
             .map(|e| e.base..e.base.saturating_add(e.length)),
     );
     // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
