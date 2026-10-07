@@ -32,6 +32,7 @@ from scripts.check_workflows import (
     rule_lane_map,
     rule_ledger_row,
     rule_limine_cache,
+    rule_matrix_artifact_names,
     rule_no_core_upload_with_secrets,
     rule_no_expr_in_run,
     rule_permissions,
@@ -1356,6 +1357,154 @@ class TestNoCoreUploadWithSecrets(unittest.TestCase):
 
     def test_tree_workflows_pass(self) -> None:
         self.assertEqual(rule_no_core_upload_with_secrets(load_tree(ROOT)), [])
+
+
+def _matrix_upload(
+    matrix: str,
+    *,
+    name: str | None = "vibeos.iso",
+    step_if: str = "",
+    job_if: str = "",
+    extra: str = "",
+) -> str:
+    """A one-job workflow whose matrix is `matrix` (already indented) and which
+    uploads `name` (`None`: omit the input, so v4's default applies)."""
+    name_line = f"          name: {name}\n" if name is not None else ""
+    step = f"        if: {step_if}\n" if step_if else ""
+    job = f"    if: {job_if}\n" if job_if else ""
+    return (
+        "jobs:\n"
+        "  build:\n"
+        f"{job}"
+        "    strategy:\n"
+        "      matrix:\n"
+        f"{matrix}"
+        "    steps:\n"
+        f"      - uses: actions/upload-artifact@{SHA} # v4\n"
+        f"{step}"
+        "        with:\n"
+        f"{name_line}"
+        "          path: build/vibeos.iso\n"
+        f"{extra}"
+    )
+
+
+_TWO_ARCH = (
+    "        include:\n"
+    "          - {arch: x86_64}\n"
+    "          - {arch: aarch64}\n"
+)
+
+
+class TestMatrixArtifactNames(unittest.TestCase):
+    """upload-artifact v4: one name per matrix leg (409 on the second)."""
+
+    def problems(self, text: str) -> list[Problem]:
+        return rule_matrix_artifact_names(tree(text))
+
+    def test_fixed_name_on_two_arches_fails(self) -> None:
+        got = self.problems(_matrix_upload(_TWO_ARCH))
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].rule, "matrix_artifact_names")
+        self.assertIn("'vibeos.iso'", got[0].message)
+        self.assertIn("409", got[0].message)
+
+    def test_arch_in_the_name_passes(self) -> None:
+        text = _matrix_upload(_TWO_ARCH, name="vibeos-${{ matrix.arch }}.iso")
+        self.assertEqual(self.problems(text), [])
+
+    def test_event_if_does_not_split_legs(self) -> None:
+        text = _matrix_upload(
+            _TWO_ARCH,
+            step_if="github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        )
+        self.assertEqual(len(self.problems(text)), 1)
+
+    def test_arch_if_leaves_one_leg(self) -> None:
+        text = _matrix_upload(_TWO_ARCH, step_if="matrix.arch == 'x86_64'")
+        self.assertEqual(self.problems(text), [])
+        wrapped = _matrix_upload(_TWO_ARCH, job_if="${{ matrix.arch == 'aarch64' }}")
+        self.assertEqual(self.problems(wrapped), [])
+
+    def test_shared_arch_needs_every_varying_key(self) -> None:
+        matrix = (
+            "        include:\n"
+            "          - {arch: x86_64, tier: e2e-1}\n"
+            "          - {arch: x86_64, tier: e2e-2}\n"
+        )
+        only_arch = _matrix_upload(matrix, name="results-${{ matrix.arch }}")
+        self.assertEqual(len(self.problems(only_arch)), 1)
+        both = _matrix_upload(matrix, name="results-${{ matrix.arch }}-${{ matrix.tier }}")
+        self.assertEqual(self.problems(both), [])
+
+    def test_non_matrix_job_may_use_a_fixed_name(self) -> None:
+        text = (
+            "jobs:\n"
+            "  check:\n"
+            "    steps:\n"
+            f"      - uses: actions/upload-artifact@{SHA} # v4\n"
+            "        with:\n"
+            "          name: core-coverage\n"
+            "          path: coverage\n"
+        )
+        self.assertEqual(self.problems(text), [])
+
+    def test_one_leg_may_use_a_fixed_name(self) -> None:
+        matrix = "        include:\n          - {arch: x86_64}\n"
+        self.assertEqual(self.problems(_matrix_upload(matrix)), [])
+
+    def test_axis_product(self) -> None:
+        matrix = "        arch: [x86_64, aarch64]\n"
+        self.assertEqual(len(self.problems(_matrix_upload(matrix))), 1)
+        named = _matrix_upload(matrix, name="vibeos-${{ matrix.arch }}.iso")
+        self.assertEqual(self.problems(named), [])
+
+    def test_exclude_can_leave_one_leg(self) -> None:
+        matrix = (
+            "        arch: [x86_64, aarch64]\n"
+            "        exclude:\n"
+            "          - {arch: aarch64}\n"
+        )
+        self.assertEqual(self.problems(_matrix_upload(matrix)), [])
+
+    def test_include_adds_a_leg(self) -> None:
+        matrix = (
+            "        arch: [x86_64]\n"
+            "        include:\n"
+            "          - {arch: aarch64}\n"
+        )
+        self.assertEqual(len(self.problems(_matrix_upload(matrix))), 1)
+
+    def test_omitted_name_uses_the_default(self) -> None:
+        got = self.problems(_matrix_upload(_TWO_ARCH, name=None))
+        self.assertEqual(len(got), 1)
+        self.assertIn("'artifact'", got[0].message)
+
+    def test_overwrite_does_not_excuse_a_shared_name(self) -> None:
+        text = _matrix_upload(_TWO_ARCH, extra="          overwrite: true\n")
+        self.assertEqual(len(self.problems(text)), 1)
+
+    def test_expression_matrix_cannot_be_checked(self) -> None:
+        text = (
+            "jobs:\n"
+            "  build:\n"
+            "    strategy:\n"
+            "      matrix: ${{ fromJSON(needs.x.outputs.matrix) }}\n"
+            "    steps:\n"
+            f"      - uses: actions/upload-artifact@{SHA} # v4\n"
+            "        with:\n"
+            "          name: vibeos.iso\n"
+        )
+        got = self.problems(text)
+        self.assertEqual(len(got), 1)
+        self.assertIn("not literal", got[0].message)
+
+    def test_indexed_matrix_ref_varies(self) -> None:
+        text = _matrix_upload(_TWO_ARCH, name="vibeos-${{ matrix['arch'] }}.iso")
+        self.assertEqual(self.problems(text), [])
+
+    def test_tree_workflows_pass(self) -> None:
+        self.assertEqual(rule_matrix_artifact_names(load_tree(ROOT)), [])
 
 
 class TestLimineCache(unittest.TestCase):
