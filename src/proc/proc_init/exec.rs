@@ -98,13 +98,25 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     let mut child = *frame;
     Arch::set_ret(&mut child, 0);
     let fs = {
-        let t = crate::arch::current_tcb();
-        if t.is_null() {
-            0
-        } else {
-            // SAFETY: invariant I9: `current_tcb` is this CPU's live TCB;
-            // established by `thread_init::switch_now`.
-            unsafe { (*t).tls_base }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // EL0 writes TPIDR_EL0 between switches, so the saved base is
+            // stale. The parent is on this CPU (DESIGN §7.5).
+            let _irq = crate::arch::current::InterruptGuard::enter();
+            #[cfg(feature = "kernel_tests")]
+            crate::proc::ktest::fork_tls_diverge();
+            crate::arch::current::user_tls()
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let t = crate::arch::current_tcb();
+            if t.is_null() {
+                0
+            } else {
+                // SAFETY: invariant I9: `current_tcb` is this CPU's live TCB;
+                // established by `thread_init::switch_now`.
+                unsafe { (*t).tls_base }
+            }
         }
     };
     let h = match thread_init::spawn_user("user", user_thread_entry, pid, root, &child) {
@@ -250,6 +262,9 @@ pub(super) fn sys_execve(
     // The psABI's initial FP state for the new image (DESIGN §7.5).
     syscall_init::exec_fp();
     thread_init::reset_user_segs();
+    // A switch between these two stores saves the old live register over
+    // the new tls_base (DESIGN §7.5).
+    let _irq = crate::arch::current::InterruptGuard::enter();
     let t = crate::arch::current_tcb();
     if !t.is_null() {
         // SAFETY: invariant I9: `current_tcb` is this CPU's live TCB;

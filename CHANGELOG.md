@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- aarch64 `fork` and `clone` give the child the live `TPIDR_EL0`, so a thread
+  pointer written with `msr` is the child's too ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
 - aarch64 `open` and `openat` take arm64's `O_DIRECTORY`, `O_NOFOLLOW`,
   `O_DIRECT`, and `O_LARGEFILE` bits ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
 - MSI-X `set_affinity` retargets a live interrupt: x86 rewrites the table

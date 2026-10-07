@@ -136,6 +136,53 @@ user_code!(
 );
 
 user_code!(
+    TLS_FORK,
+    "
+    movz x19, #0xa000
+    msr tpidr_el0, x19
+    mov x0, #17
+    mov x1, xzr
+    mov x2, xzr
+    mov x3, xzr
+    mov x4, xzr
+    mov x8, #220
+    svc #0
+    tbnz x0, #63, 9f
+    cbz x0, 1f
+    mov x20, x0
+    sub sp, sp, #16
+    mov x0, x20
+    mov x1, sp
+    mov x2, xzr
+    mov x3, xzr
+    mov x8, #260
+    svc #0
+    cmp x0, x20
+    b.ne 9f
+    ldr w0, [sp]
+    cbnz w0, 9f
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+1:
+    mrs x0, tpidr_el0
+    cmp x0, x19
+    b.ne 8f
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+8:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #2
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
     YIELD_FOREVER,
     "
 1:
@@ -430,6 +477,20 @@ pub(crate) fn test_el0_tls_tpidr() -> Outcome {
         Outcome::Ok
     } else {
         crate::fail_fmt!("status {sa:#x} {sb:#x}")
+    }
+}
+
+/// `msr tpidr_el0` then `clone` before any yield: the child reads that
+/// value. The saved base is forced off the live register first, because
+/// the fork copy is preempted and that switch would refresh it.
+pub(crate) fn test_el0_tls_fork() -> Outcome {
+    crate::proc::ktest::arm_fork_tls_diverge();
+    let st = user::run(&Image::Code(TLS_FORK, DEFAULT), &["tls_fork"]);
+    crate::proc::ktest::disarm_fork_tls_diverge();
+    match st {
+        Ok(st) if exited0(st) => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("status {st:#x}"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
     }
 }
 
