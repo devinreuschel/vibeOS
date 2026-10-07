@@ -8,7 +8,7 @@ use core::arch::asm;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::arch::aarch64::sysreg;
+use vibeos::arch::aarch64::{sysreg, tlb};
 use vibeos::log::Level;
 
 use crate::cell::BootCell;
@@ -146,11 +146,12 @@ pub fn tlbi_all() {
 }
 
 pub fn tlbi_va(va: u64) {
-    let page = va >> 12;
+    // ASID 0: TTBR0 does not carry one yet (ROADMAP §11.2).
+    let operand = tlb::tlbi_va_operand(va, 0);
     // Inner-shareable leaf invalidate (Arm ARM `tlbi vale1is`).
     // SAFETY: EL1 (VHE host) regime; established here.
     unsafe {
-        asm!("tlbi vale1is, {0}", in(reg) page, options(nostack, preserves_flags));
+        asm!("tlbi vale1is, {0}", in(reg) operand, options(nostack, preserves_flags));
         asm!("dsb ish", options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));
     }
