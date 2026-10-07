@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -30,6 +31,7 @@ from scripts.check_workflows import (
     rule_lane_capacity,
     rule_lane_map,
     rule_ledger_row,
+    rule_limine_cache,
     rule_no_core_upload_with_secrets,
     rule_no_expr_in_run,
     rule_permissions,
@@ -1354,6 +1356,115 @@ class TestNoCoreUploadWithSecrets(unittest.TestCase):
 
     def test_tree_workflows_pass(self) -> None:
         self.assertEqual(rule_no_core_upload_with_secrets(load_tree(ROOT)), [])
+
+
+class TestLimineCache(unittest.TestCase):
+    """A Limine cache key names setup.sh's LIMINE_TAG and LIMINE_COMMIT."""
+
+    TAG = "v1.2.3"
+    COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+    def setUp(self) -> None:
+        self._td = tempfile.TemporaryDirectory()
+        self.root = Path(self._td.name)
+        self.root.joinpath("setup.sh").write_text(
+            f'LIMINE_TAG="${{LIMINE_TAG:-{self.TAG}}}"\n'
+            f'LIMINE_COMMIT="${{LIMINE_COMMIT:-{self.COMMIT}}}"\n',
+            encoding="utf-8",
+        )
+
+    def tearDown(self) -> None:
+        self._td.cleanup()
+
+    def problems(self, text: str) -> list[Problem]:
+        t = Tree(workflows={WF: wf(text)}, root=self.root)
+        return rule_limine_cache(t)
+
+    def test_old_clone_key_fails(self) -> None:
+        text = """\
+        jobs:
+          a:
+            steps:
+              - uses: actions/cache@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
+                with:
+                  path: limine
+                  key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+        """
+        got = self.problems(text)
+        self.assertEqual([(p.line, p.rule) for p in got], [(7, "limine_cache")])
+        self.assertIn(self.TAG, got[0].message)
+        self.assertIn(self.COMMIT, got[0].message)
+
+    def test_tag_or_commit_prefix_does_not_count(self) -> None:
+        longer_tag = f"limine-v1.2.30-{self.COMMIT}"
+        longer_commit = f"limine-{self.TAG}-{self.COMMIT}ff"
+        for key in (longer_tag, longer_commit):
+            with self.subTest(key=key):
+                text = f"""\
+                jobs:
+                  a:
+                    steps:
+                      - with:
+                          path: limine
+                          key: {key}
+                """
+                got = self.problems(text)
+                self.assertEqual([(p.line, p.rule) for p in got], [(6, "limine_cache")])
+
+    def test_key_naming_setup_pin_passes(self) -> None:
+        key = f"limine-{self.TAG}-{self.COMMIT}-${{{{ runner.arch }}}}"
+        text = f"""\
+        jobs:
+          a:
+            steps:
+              - with:
+                  path: limine
+                  key: {key}
+        """
+        self.assertEqual(self.problems(text), [])
+
+    def test_cargo_cache_is_ignored(self) -> None:
+        text = """\
+        jobs:
+          a:
+            steps:
+              - with:
+                  path: |
+                    ~/.cargo/registry
+                    target
+                  key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+        """
+        self.assertEqual(self.problems(text), [])
+
+    def test_limine_path_or_limine_key_prefix_is_checked(self) -> None:
+        bare = """\
+        jobs:
+          a:
+            steps:
+              - with:
+                  path: limine
+                  key: ${{ runner.os }}-boot
+        """
+        prefixed = """\
+        jobs:
+          a:
+            steps:
+              - with:
+                  path: somewhere
+                  key: limine-old
+        """
+        self.assertEqual([(p.line, p.rule) for p in self.problems(bare)], [(6, "limine_cache")])
+        self.assertEqual(
+            [(p.line, p.rule) for p in self.problems(prefixed)], [(6, "limine_cache")]
+        )
+
+    def test_missing_setup_pin_fails(self) -> None:
+        self.root.joinpath("setup.sh").write_text("echo hi\n", encoding="utf-8")
+        got = self.problems("jobs: {}\n")
+        self.assertEqual([(p.path, p.rule) for p in got], [("setup.sh", "limine_cache")])
+
+    def test_real_workflows_match_setup_pin(self) -> None:
+        self.assertEqual(rule_limine_cache(load_tree(ROOT)), [])
 
 
 class TestTree(unittest.TestCase):
