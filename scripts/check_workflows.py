@@ -579,6 +579,79 @@ def rule_qemu_pin(tree: Tree) -> list[Problem]:
     return out
 
 
+_LIMINE_PIN_RE = re.compile(
+    r'^(LIMINE_TAG|LIMINE_COMMIT)="\$\{\1:-([^}]*)\}"\s*$', re.M
+)
+
+
+def _limine_pins(root: Path) -> tuple[str, str] | None:
+    """setup.sh's `LIMINE_TAG` and `LIMINE_COMMIT` defaults, not the environment."""
+    setup = root / "setup.sh"
+    if not setup.is_file():
+        return None
+    pins = dict(_LIMINE_PIN_RE.findall(setup.read_text(encoding="utf-8")))
+    tag, commit = pins.get("LIMINE_TAG"), pins.get("LIMINE_COMMIT")
+    if not tag or not commit:
+        return None
+    return tag, commit
+
+
+def _names_pin(value: str, pin: str) -> bool:
+    """`pin` occurs as its own token, so v12.9.1 does not match v12.9.10."""
+    return re.search(rf"(?<![0-9A-Za-z]){re.escape(pin)}(?![0-9A-Za-z])", value) is not None
+
+
+def _path_is_limine(path: Node | None) -> bool:
+    if path is None:
+        return False
+    for raw in path.scalars():
+        for line in raw.splitlines():
+            for part in line.split(","):
+                name = part.strip().rstrip("/")
+                if name in ("limine", "./limine"):
+                    return True
+    return False
+
+
+def rule_limine_cache(tree: Tree) -> list[Problem]:
+    """A Limine cache key names setup.sh's LIMINE_TAG and LIMINE_COMMIT.
+
+    An older key restores a clone setup.sh rejects.
+    """
+    pins = _limine_pins(tree.root)
+    if pins is None:
+        return [
+            Problem("setup.sh", 1, "limine_cache", "no LIMINE_TAG or LIMINE_COMMIT default")
+        ]
+    tag, commit = pins
+    out: list[Problem] = []
+    for path, wf in tree.workflows.items():
+        for job in _jobs(wf):
+            for step in _steps(job):
+                with_node = step.get("with")
+                if with_node is None or with_node.kind != "map":
+                    continue
+                key = with_node.get("key")
+                value = key.value if key is not None else None
+                path_limine = _path_is_limine(with_node.get("path"))
+                key_limine = value is not None and value.startswith("limine-")
+                if not path_limine and not key_limine:
+                    continue
+                where = key if key is not None else with_node
+                if value is None or not _names_pin(value, tag) or not _names_pin(value, commit):
+                    shown = value if value is not None else ""
+                    out.append(
+                        Problem(
+                            path,
+                            where.line,
+                            "limine_cache",
+                            f"Limine cache key {shown!r} does not name "
+                            f"setup.sh's {tag} and {commit}",
+                        )
+                    )
+    return out
+
+
 FILTERS = ("tags", "tags-ignore", "branches-ignore", "paths", "paths-ignore")
 
 
@@ -1778,6 +1851,7 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_action_pins,
     rule_runs_on,
     rule_qemu_pin,
+    rule_limine_cache,
     rule_ci_triggers,
     rule_concurrency_group,
     rule_gate_dispatch,
