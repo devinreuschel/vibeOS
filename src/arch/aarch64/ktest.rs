@@ -989,8 +989,16 @@ fn signaled(st: u32, sig: u32) -> bool {
     vibeos::proc::wifsignaled(st) && vibeos::proc::wtermsig(st) == sig
 }
 
-/// 10,000 `getpid` at EL0; the exit `eret` breakpoint is never taken.
+/// One hit on the exit `eret` with D clear, then 10,000 `getpid`
+/// whose exits leave that breakpoint untaken.
 pub(crate) fn test_el0_svc_eret() -> Outcome {
+    syscall_init::testing::arm_eret_breakpoint();
+    syscall_init::testing::poke_eret_once();
+    let poke = syscall_init::testing::eret_bp_hits();
+    syscall_init::testing::disarm_eret_breakpoint();
+    if poke != 1 {
+        return crate::fail_fmt!("eret breakpoint positive {poke}");
+    }
     syscall_init::testing::arm_eret_breakpoint();
     let st = match run_code(EL0_GETPID_10K, "el0_svc") {
         Ok(s) => s,
