@@ -116,6 +116,31 @@ pub const fn ack_drops(intid: u32) -> bool {
     is_special(intid)
 }
 
+/// `GICC_IAR` / `GICC_EOIR` INTID field (IHI 0048B §4.4.4 bits [9:0]).
+const V2_IAR_INTID_MASK: u32 = 0x3FF;
+
+/// A GICv2 `GICC_IAR` read, split for dispatch and EOI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct V2Ack {
+    /// INTID, bits [9:0]. Dispatch, `is_sgi`, and [`ack_drops`] use this.
+    pub intid: u32,
+    /// Value for `GICC_EOIR`: the raw IAR, including an SGI's source CPUID.
+    pub eoi: u32,
+}
+
+/// Split a raw GICv2 `GICC_IAR` (IHI 0048B §4.4.4, §4.4.5).
+///
+/// Bits [9:0] are the INTID. `GICC_EOIR` is written with the raw value:
+/// an SGI's source CPUID is bits [12:10], and an EOI that drops them
+/// does not complete.
+#[must_use]
+pub const fn v2_ack(raw_iar: u32) -> V2Ack {
+    V2Ack {
+        intid: raw_iar & V2_IAR_INTID_MASK,
+        eoi: raw_iar,
+    }
+}
+
 /// Priority for an INTID: NMI reserved, then SGI/tick, then devices.
 pub const fn priority_for(intid: u32) -> u8 {
     if is_sgi(intid) || is_ppi(intid) {
@@ -209,6 +234,49 @@ mod tests {
             assert!(PRIO_NMI < PRIO_IPI_TICK);
             assert!(PRIO_IPI_TICK < PRIO_DEVICE);
         }
+    }
+
+    #[test]
+    fn v2_ack_eoi_is_the_raw_iar() {
+        // IHI 0048B §4.4.4: INTID is bits [9:0], an SGI's source CPUID is
+        // bits [12:10]. §4.4.5: GICC_EOIR must carry that CPUID.
+        // SGI 1 (call function) from CPU 5: 1 | (5 << 10).
+        let a = v2_ack(0x1401);
+        assert_eq!(a.intid, 1);
+        assert_eq!(a.eoi, 0x1401);
+        assert!(is_sgi(a.intid));
+        // The raw word sits in the reserved INTID range. Dispatching it
+        // would drop the SGI with no EOI.
+        assert!(ack_drops(0x1401));
+        assert!(!ack_drops(a.intid));
+
+        // SGI 0 from CPU 7, the top of the CPUID field.
+        let a = v2_ack(0x1C00);
+        assert_eq!(a.intid, 0);
+        assert_eq!(a.eoi, 0x1C00);
+        assert!(is_sgi(a.intid));
+        assert!(ack_drops(0x1C00));
+        assert!(!ack_drops(a.intid));
+
+        // CPU 0: the CPUID field is zero, so the raw word is the INTID.
+        let a = v2_ack(2);
+        assert_eq!(a.intid, 2);
+        assert_eq!(a.eoi, 2);
+
+        // SPI and spurious. CPUID is RAZ; EOI is still the raw read.
+        let a = v2_ack(32);
+        assert_eq!(a.intid, 32);
+        assert_eq!(a.eoi, 32);
+        assert!(!ack_drops(a.intid));
+        let a = v2_ack(1023);
+        assert_eq!(a.intid, 1023);
+        assert_eq!(a.eoi, 1023);
+        assert!(ack_drops(a.intid));
+
+        // Reserved IAR bits ride along. EOI writes the register as read.
+        let a = v2_ack(0x8000_1401);
+        assert_eq!(a.intid, 1);
+        assert_eq!(a.eoi, 0x8000_1401);
     }
 
     #[test]

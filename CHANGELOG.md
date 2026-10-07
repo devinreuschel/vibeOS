@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- a GICv2 SGI end-of-interrupt keeps the source CPU the acknowledge
+  returned, so that CPU's running priority drops ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
 - aarch64 `pvpanic-pci` with a firmware BAR at 0 is placed in the virt 32-bit MMIO
   window, so a panic reaches QEMU ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - a reused call-function IPI runs the round that was published, not the

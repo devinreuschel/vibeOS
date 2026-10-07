@@ -742,7 +742,7 @@ pub fn handle_irq() {
     let Some(g) = gic() else {
         return;
     };
-    let intid = ack(g);
+    let (intid, eoi_val) = ack(g);
     // Before EOI or any GICD write: 1020–1023 are special (1023 is
     // spurious) and 1024–8191 are reserved. LPIs are 8192+ and must
     // be dispatched (IHI 0069).
@@ -755,7 +755,7 @@ pub fn handle_irq() {
     let tick = crate::arch::aarch64::timer::intid();
     let early = gic::is_sgi(intid) || (tick != 0 && intid == tick);
     if early {
-        eoi(g, intid);
+        eoi(g, eoi_val);
     }
     // Acquire: pairs with the Release store in `set_dispatch`.
     let p = DISPATCH.load(Ordering::Acquire);
@@ -766,15 +766,19 @@ pub fn handle_irq() {
         f(intid);
     }
     if !early {
-        eoi(g, intid);
+        eoi(g, eoi_val);
     }
 }
 
-fn ack(g: &Gic) -> u32 {
+/// `(intid, eoi)`. GICv2 EOI is the raw `GICC_IAR`, CPUID bits included.
+/// GICv3 `ICC_IAR1_EL1` has no CPUID field, so both are the INTID.
+fn ack(g: &Gic) -> (u32, u32) {
     match g.kind {
         Kind::V2 => {
             // SAFETY: GICC_IAR. established here.
-            unsafe { mmio32(g.cpu_or_redist, GICC_IAR) & 0x3FF }
+            let raw = unsafe { mmio32(g.cpu_or_redist, GICC_IAR) };
+            let split = gic::v2_ack(raw);
+            (split.intid, split.eoi)
         }
         Kind::V3 => {
             let v: u64;
@@ -786,23 +790,25 @@ fn ack(g: &Gic) -> u32 {
                     options(nomem, nostack, preserves_flags)
                 );
             }
-            v as u32
+            let intid = v as u32;
+            (intid, intid)
         }
     }
 }
 
-fn eoi(g: &Gic, intid: u32) {
+/// Write EOI. On GICv2 `eoir` is the raw `GICC_IAR` (`gic::v2_ack`).
+fn eoi(g: &Gic, eoir: u32) {
     match g.kind {
         Kind::V2 => {
             // SAFETY: GICC_EOIR. established here.
-            unsafe { mmio32w(g.cpu_or_redist, GICC_EOIR, intid) };
+            unsafe { mmio32w(g.cpu_or_redist, GICC_EOIR, eoir) };
         }
         Kind::V3 => {
             // SAFETY: ICC_EOIR1_EL1. established here.
             unsafe {
                 core::arch::asm!(
                     "msr ICC_EOIR1_EL1, {0}",
-                    in(reg) u64::from(intid),
+                    in(reg) u64::from(eoir),
                     options(nostack, preserves_flags)
                 );
             }
