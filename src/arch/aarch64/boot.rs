@@ -94,9 +94,7 @@ fn map_device_page(hhdm: u64, kphys: u64, va: u64, pa: u64, used: &mut usize) ->
     let pte = paging::make_pte(VirtAddr(va), PhysAddr(pa), mmio_flags());
     // SAFETY: L3 slot for the early Device page (UART or fw_cfg). established here.
     unsafe { core::ptr::write_volatile(slot, pte) };
-    // SAFETY: order the PTE store before the local TLB invalidate.
-    // established here.
-    unsafe { core::arch::asm!("dsb ishst", options(nostack, preserves_flags)) };
+    // `tlbi_va` starts with `dsb ishst` (`tlb::LEAF_INVAL`).
     cpu::tlbi_va(va);
     true
 }

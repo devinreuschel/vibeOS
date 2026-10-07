@@ -135,26 +135,61 @@ pub fn write_translation_regs() {
     }
 }
 
-pub fn tlbi_all() {
-    // Inner-shareable broadcast (ROADMAP §11.2 / Arm ARM DDI0487 TLBI).
-    // SAFETY: EL1 (VHE host) regime; established here.
+/// Run one op from a `tlb` sequence. The instruction text is `TlbOp::mnemonic`.
+fn exec_tlb(op: tlb::TlbOp, va_operand: u64) {
+    // SAFETY: EL1 (VHE host) barrier and TLBI. The register operand is
+    // `va_operand` (`tlb::tlbi_va_operand` for a VA form). established here.
     unsafe {
-        asm!("tlbi vmalle1is", options(nostack, preserves_flags));
-        asm!("dsb ish", options(nostack, preserves_flags));
-        asm!("isb", options(nostack, preserves_flags));
+        match op {
+            tlb::TlbOp::DsbIshst => asm!("dsb ishst", options(nostack, preserves_flags)),
+            tlb::TlbOp::TlbiVale1is => {
+                asm!("tlbi vale1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
+            }
+            tlb::TlbOp::TlbiVae1is => {
+                asm!("tlbi vae1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
+            }
+            tlb::TlbOp::TlbiAside1is => {
+                asm!("tlbi aside1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
+            }
+            tlb::TlbOp::TlbiAside1 => {
+                asm!("tlbi aside1, {0}", in(reg) va_operand, options(nostack, preserves_flags));
+            }
+            tlb::TlbOp::TlbiVmalle1 => asm!("tlbi vmalle1", options(nostack, preserves_flags)),
+            tlb::TlbOp::TlbiVmalle1is => asm!("tlbi vmalle1is", options(nostack, preserves_flags)),
+            tlb::TlbOp::DsbIsh => asm!("dsb ish", options(nostack, preserves_flags)),
+            tlb::TlbOp::DsbNsh => asm!("dsb nsh", options(nostack, preserves_flags)),
+            tlb::TlbOp::Isb => asm!("isb", options(nostack, preserves_flags)),
+        }
     }
 }
 
-pub fn tlbi_va(va: u64) {
-    // ASID 0: TTBR0 does not carry one yet (ROADMAP §11.2).
-    let operand = tlb::tlbi_va_operand(va, 0);
-    // Inner-shareable leaf invalidate (Arm ARM `tlbi vale1is`).
-    // SAFETY: EL1 (VHE host) regime; established here.
-    unsafe {
-        asm!("tlbi vale1is, {0}", in(reg) operand, options(nostack, preserves_flags));
-        asm!("dsb ish", options(nostack, preserves_flags));
-        asm!("isb", options(nostack, preserves_flags));
+fn run_tlb(ops: &[tlb::TlbOp], va_operand: u64) {
+    for &op in ops {
+        exec_tlb(op, va_operand);
     }
+}
+
+/// Broadcast TLB invalidate. Runs `tlb::ALL_INVAL`.
+pub fn tlbi_all() {
+    run_tlb(&tlb::ALL_INVAL, 0);
+}
+
+/// Leaf TLB invalidate. Runs `tlb::LEAF_INVAL`. ASID 0: TTBR0 does not
+/// carry one yet (ROADMAP §11.2).
+pub fn tlbi_va(va: u64) {
+    run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, 0));
+}
+
+/// Break-before-make maintenance after the invalid store. Runs
+/// `tlb::BBM_AFTER_INVALID`.
+pub(crate) fn bbm_break(va: u64) {
+    run_tlb(&tlb::BBM_AFTER_INVALID, tlb::tlbi_va_operand(va, 0));
+}
+
+/// Barriers after the new store of break-before-make. Runs
+/// `tlb::BBM_AFTER_MAKE`.
+pub(crate) fn bbm_make() {
+    run_tlb(&tlb::BBM_AFTER_MAKE, 0);
 }
 
 /// Write `TTBR0_EL1` (ASID in the high bits when `TCR.A1` is clear).

@@ -47,6 +47,10 @@ pub enum Event {
     SetRoot(u64),
     FlushPage(u64),
     FlushAll,
+    /// Break-before-make maintenance after the invalid store, for this VA.
+    BbmBreak(u64),
+    /// Barriers after the new store of break-before-make.
+    BbmMake,
     Wmb,
     Rmb,
     Mb,
@@ -420,6 +424,12 @@ impl PageTable for Arch {
     }
     fn flush_local_all() {
         record(Event::FlushAll);
+    }
+    fn bbm_break(va: VirtAddr) {
+        record(Event::BbmBreak(va.as_u64()));
+    }
+    fn bbm_make() {
+        record(Event::BbmMake);
     }
 }
 

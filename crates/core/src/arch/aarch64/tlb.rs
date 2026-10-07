@@ -1,7 +1,8 @@
 //! aarch64 TLB, I-cache, and DMA-barrier encodings (ROADMAP §11.2).
 //!
-//! The hardware ops live in the kernel. This module names the sequences
-//! so host tests can check them without executing `tlbi` / `dmb`.
+//! The hardware ops live in the kernel, which runs these arrays in order
+//! (`tlbi_va`, `tlbi_all`, `bbm_break`, `bbm_make`). Host tests check that
+//! order without executing `tlbi` / `dmb`.
 
 /// Inner-shareable broadcast TLB maintenance after a PTE write
 /// (ROADMAP §11.2, DESIGN §7.9).
@@ -19,6 +20,8 @@ pub enum TlbOp {
     TlbiAside1,
     /// Local generation flush: `tlbi vmalle1`.
     TlbiVmalle1,
+    /// Broadcast all stage-1 EL1 entries: `tlbi vmalle1is`.
+    TlbiVmalle1is,
     /// `dsb ish` after the broadcast TLBI (KVA-free deferral waits here).
     DsbIsh,
     /// `dsb nsh` after a local `vmalle1` (ASID rollover, no broadcast).
@@ -27,11 +30,38 @@ pub enum TlbOp {
     Isb,
 }
 
-/// Leaf change: store, then this sequence. Permission-only and
-/// global→nG use the same maintenance.
+impl TlbOp {
+    /// Instruction this op emits (Arm ARM DDI0487). The kernel's `exec_tlb`
+    /// uses the same text.
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::DsbIshst => "dsb ishst",
+            Self::TlbiVale1is => "tlbi vale1is",
+            Self::TlbiVae1is => "tlbi vae1is",
+            Self::TlbiAside1is => "tlbi aside1is",
+            Self::TlbiAside1 => "tlbi aside1",
+            Self::TlbiVmalle1 => "tlbi vmalle1",
+            Self::TlbiVmalle1is => "tlbi vmalle1is",
+            Self::DsbIsh => "dsb ish",
+            Self::DsbNsh => "dsb nsh",
+            Self::Isb => "isb",
+        }
+    }
+}
+
+/// Leaf change: the kernel's `tlbi_va` runs this after the descriptor
+/// store. Permission-only and global→nG use the same maintenance.
 pub const LEAF_INVAL: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiVale1is,
+    TlbOp::DsbIsh,
+    TlbOp::Isb,
+];
+
+/// Full EL1 invalidation: the kernel's `tlbi_all` runs this.
+pub const ALL_INVAL: [TlbOp; 4] = [
+    TlbOp::DsbIshst,
+    TlbOp::TlbiVmalle1is,
     TlbOp::DsbIsh,
     TlbOp::Isb,
 ];
@@ -55,8 +85,10 @@ pub const ASID_INVAL: [TlbOp; 4] = [
 /// Flush-pending CPU before it loads an ASID of the new generation.
 pub const ROLLOVER_LOCAL: [TlbOp; 3] = [TlbOp::TlbiVmalle1, TlbOp::DsbNsh, TlbOp::Isb];
 
-/// Break-before-make: invalidate, maintain, write, maintain.
+/// Break-before-make, after the invalid store and before the new one.
+/// The kernel's `bbm_break` runs this.
 pub const BBM_AFTER_INVALID: [TlbOp; 3] = [TlbOp::DsbIshst, TlbOp::TlbiVale1is, TlbOp::DsbIsh];
+/// Break-before-make, after the new store. The kernel's `bbm_make` runs this.
 pub const BBM_AFTER_MAKE: [TlbOp; 2] = [TlbOp::DsbIshst, TlbOp::Isb];
 
 /// `TLBI VA*E1` / `VA*E1IS` register operand (Arm ARM DDI0487).
@@ -157,6 +189,26 @@ mod tests {
         assert_eq!(ASID_INVAL[1], TlbOp::TlbiAside1is);
         assert_eq!(ROLLOVER_LOCAL[0], TlbOp::TlbiVmalle1);
         assert_ne!(ROLLOVER_LOCAL.as_slice(), LEAF_INVAL.as_slice());
+    }
+
+    #[test]
+    fn emitted_sequences_match_arm_arm() {
+        // DDI0487 leaf maintenance, and DESIGN §7.9: DSB ISHST, TLBI, DSB ISH, ISB.
+        assert_eq!(
+            LEAF_INVAL.map(TlbOp::mnemonic),
+            ["dsb ishst", "tlbi vale1is", "dsb ish", "isb"]
+        );
+        assert_eq!(
+            ALL_INVAL.map(TlbOp::mnemonic),
+            ["dsb ishst", "tlbi vmalle1is", "dsb ish", "isb"]
+        );
+        // Break-before-make (DDI0487, ROADMAP §11.2): invalid store, the
+        // first half, new store, the second half.
+        assert_eq!(
+            BBM_AFTER_INVALID.map(TlbOp::mnemonic),
+            ["dsb ishst", "tlbi vale1is", "dsb ish"]
+        );
+        assert_eq!(BBM_AFTER_MAKE.map(TlbOp::mnemonic), ["dsb ishst", "isb"]);
     }
 
     #[test]
