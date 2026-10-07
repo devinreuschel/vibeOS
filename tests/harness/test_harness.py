@@ -750,6 +750,50 @@ class TestMeminfoCheck(unittest.TestCase):
         run_e2e.check_meminfo(doctor(MEMINFO_TOTAL_LINE, line))
 
 
+def _meminfo_log(frames: int) -> list[str]:
+    """A boot log whose `pmm:` and `meminfo:` totals are `frames`."""
+    free = 1
+    used = frames - free
+    return [
+        K("vibeOS: serial online"),
+        K(f"vibeOS: pmm: {free} free 4KiB frames"),
+        K(f"vibeOS: pmm: {frames} total, largest order 10"),
+        K(f"vibeOS: meminfo: total {frames} frames, free {free}, used {used}, largest order 10"),
+        K("vibeOS: meminfo: leaked 0 frames"),
+        K("vibeOS: meminfo: heap used 1 B / capacity 2 B"),
+        K("vibeOS: meminfo: kva used 1 B"),
+    ]
+
+
+# 8 GiB in 4 KiB frames. The old physmap cap cannot count past this.
+_EIGHT_GIB_FRAMES = (8 << 30) // 4096
+
+
+class TestHighmemPmm(unittest.TestCase):
+    """`VIBEOS_MEM=9G` requires the buddy total above the old 8 GiB cap."""
+
+    def test_one_frame_over_the_cap_passes(self) -> None:
+        run_e2e.check_highmem_pmm(_EIGHT_GIB_FRAMES + 1, "9G")
+        run_e2e.check_meminfo(_meminfo_log(_EIGHT_GIB_FRAMES + 1), "9G")
+
+    def test_exactly_8gib_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            run_e2e.check_highmem_pmm(_EIGHT_GIB_FRAMES, "9G")
+        self.assertIn("is not above 8 GiB", str(cm.exception))
+        self.assertIn(str(_EIGHT_GIB_FRAMES), str(cm.exception))
+
+    def test_capped_log_fails_through_meminfo(self) -> None:
+        """A buddy that stopped at 8 GiB fails the 9 GiB boot."""
+        with self.assertRaises(HarnessError) as cm:
+            run_e2e.check_meminfo(_meminfo_log(_EIGHT_GIB_FRAMES), "9G")
+        self.assertIn("is not above 8 GiB", str(cm.exception))
+
+    def test_other_mem_skips_the_cap(self) -> None:
+        run_e2e.check_highmem_pmm(_EIGHT_GIB_FRAMES, "128M")
+        run_e2e.check_meminfo(MEMINFO_BOOT, "128M")
+        run_e2e.check_meminfo(MEMINFO_BOOT)
+
+
 QEMU_LOAD_ERR = "qemu-system-x86_64: -bios x.fd: could not load"
 
 

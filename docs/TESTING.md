@@ -563,6 +563,8 @@ print before `sched: cpu0 ready`, in every production mode (default, `EXPECT_PIT
 `check_meminfo` in `run_e2e.py`). Each `meminfo:` line (told apart by its text up to the first digit) and each `pmm:` line appears
 once; the `meminfo:` frame total equals the `pmm: <n> total` line's; free is at most the
 `pmm: <n> free 4KiB frames` count; used is total minus free; and heap use is at most heap capacity.
+A boot with `VIBEOS_MEM=9G` (`make test-e2e-highmem`) also requires that frame total times 4096
+to be above 8 GiB, so RAM above the old physmap cap is in the buddy (ROADMAP §11.2).
 
 Two diagnostics come from the kernel command line (BOOT.md §3.2): the kernel prints
 `vibeOS: boot: cmdline: <text>` once, after `limine: rev <n> ok` and before `pmm:` (ROADMAP §10.2),
