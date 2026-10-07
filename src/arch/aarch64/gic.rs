@@ -1,8 +1,11 @@
 //! GICv2 / GICv3 + ITS / GICv2m as `IrqChip`s (DESIGN §5.4, §11.5).
 
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::irq::{IrqChip, IrqError, IrqSpecifier, ItsCommand, gic};
+use vibeos::irq::{
+    ITS_MAPD_SIZE, IrqChip, IrqError, IrqSpecifier, ItsCommand, encode_device_unmap,
+    encode_lpi_free, gic, its_event_limit,
+};
 use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
 use vibeos::machine::PhysRange;
@@ -535,6 +538,8 @@ struct ItsDev {
     id: AtomicU32,
     itt: AtomicU64,
     next_event: AtomicU32,
+    /// MAPD V=1 has completed for this DeviceID.
+    mapped: AtomicBool,
 }
 
 static ITS_DEVS: [ItsDev; ITS_DEV_MAX] = [const {
@@ -542,6 +547,7 @@ static ITS_DEVS: [ItsDev; ITS_DEV_MAX] = [const {
         id: AtomicU32::new(ITS_DEV_EMPTY),
         itt: AtomicU64::new(0),
         next_event: AtomicU32::new(0),
+        mapped: AtomicBool::new(false),
     }
 }; ITS_DEV_MAX];
 /// EventID programmed for each LPI slot, for `compose_msi`.
@@ -654,67 +660,74 @@ fn claim_its_dev(device_id: u32) -> Option<&'static ItsDev> {
     None
 }
 
-/// Bind `hwirq` (an LPI) as EventID on `device_id`.
-pub fn map_its_event(device_id: u32, hwirq: u32) {
-    let Some(g) = gic() else {
-        return;
+fn lpi_slot(hwirq: u32) -> Option<usize> {
+    let slot = hwirq.checked_sub(LPI_BASE)? as usize;
+    if slot >= LPI_SLOTS { None } else { Some(slot) }
+}
+
+/// Bind `hwirq` as the next EventID on `device_id`. No ITS is `Ok`:
+/// GICv2 still has a v2m SPI. Past the MAPD size is [`IrqError::Exhausted`].
+pub fn map_its_event(device_id: u32, hwirq: u32) -> Result<(), IrqError> {
+    let Some(g) = gic() else { return Ok(()) };
+    let Some(its) = g.its else { return Ok(()) };
+    let Some(slot) = lpi_slot(hwirq) else {
+        return Err(IrqError::BadVector);
     };
-    let Some(its) = g.its else {
-        return;
-    };
-    if !gic::is_lpi(hwirq) {
-        return;
-    }
     let Some(dev) = claim_its_dev(device_id) else {
         crate::klog!(Level::Error, "vibeOS: gic: its itt");
-        return;
+        return Err(IrqError::Exhausted);
     };
     // Acquire: pairs with the Release store of `itt` in `claim_its_dev`.
     let itt = dev.itt.load(Ordering::Acquire);
     if itt == 0 {
         crate::klog!(Level::Error, "vibeOS: gic: its itt");
-        return;
+        return Err(IrqError::Exhausted);
     }
     let Some(rd0) = collection_rd(0) else {
         crate::klog!(Level::Error, "vibeOS: gic: its no collection 0");
-        return;
+        return Err(IrqError::NoRoute);
     };
-    // The bump and the commands share `ITS_CMDS`: another CPU's MAPTI for
-    // this device has to land after MAPD of event 0.
-    let (ok, event) = {
-        let _hold = ITS_CMDS.lock();
-        // Relaxed: per-device EventID bump; pairs with nothing.
-        let event = dev.next_event.fetch_add(1, Ordering::Relaxed);
+    let Some(limit) = its_event_limit(ITS_MAPD_SIZE) else {
+        return Err(IrqError::Exhausted);
+    };
+    // EventID stays put until MAPTI and SYNC both retire, under `ITS_CMDS`.
+    let _hold = ITS_CMDS.lock();
+    // Relaxed: per-device EventID under `ITS_CMDS`; pairs with nothing.
+    let event = dev.next_event.load(Ordering::Relaxed);
+    if event >= limit {
+        crate::klog!(Level::Error, "vibeOS: gic: its events");
+        return Err(IrqError::Exhausted);
+    }
+    // SAFETY: ITS command queue; `ITS_CMDS` is held. established here.
+    let ok = unsafe {
         let mut ok = true;
-        if event == 0
-            && let Ok(mapd) = ItsCommand::mapd(device_id, itt, 3, true)
-        {
-            // SAFETY: `its` is the mapped ITS and `ITS_CMDS` is held.
-            // established here.
-            ok = unsafe { push_cmds(its, &[mapd]) };
-        }
-        ok = ok && {
-            // SAFETY: as the MAPD push above. established here.
-            unsafe {
-                push_cmds(
-                    its,
-                    &[
-                        ItsCommand::mapti(device_id, event, hwirq, 0),
-                        ItsCommand::sync(rd0),
-                    ],
-                )
+        if event == 0 {
+            match ItsCommand::mapd(device_id, itt, ITS_MAPD_SIZE, true) {
+                Ok(mapd) => {
+                    ok = push_cmds(its, &[mapd]);
+                    if ok {
+                        // Release: pairs with the Acquire load in `remove_its_device`.
+                        dev.mapped.store(true, Ordering::Release);
+                    }
+                }
+                Err(_) => ok = false,
             }
-        };
-        (ok, event)
+        }
+        ok && push_cmds(
+            its,
+            &[
+                ItsCommand::mapti(device_id, event, hwirq, 0),
+                ItsCommand::sync(rd0),
+            ],
+        )
     };
     if !ok {
         crate::klog!(
             Level::Error,
             "vibeOS: gic: its map dev {device_id:#x} ev {event}"
         );
-        return;
+        return Err(IrqError::Busy);
     }
-    let slot = (hwirq - LPI_BASE) as usize;
     if let Some(e) = LPI_EVENT.get(slot) {
         // Release: pairs with the Acquire load in `compose_msi` and `movi_lpi`.
         e.store(event, Ordering::Release);
@@ -724,10 +737,14 @@ pub fn map_its_event(device_id: u32, hwirq: u32) {
         c.store(0, Ordering::Release);
     }
     if let Some(d) = LPI_DEV.get(slot) {
-        // Release: pairs with the Acquire load in `movi_lpi` and the AcqRel
-        // swap in `discard_lpi`.
+        // Release: pairs with the Acquire loads in `movi_lpi` and `discard_lpi`.
         d.store(device_id, Ordering::Release);
     }
+    if let Some(next) = event.checked_add(1) {
+        // Relaxed: next EventID under `ITS_CMDS`; pairs with nothing.
+        dev.next_event.store(next, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// MAPC this CPU's collection to `rd_va`, then SYNC. The BSP calls it from
@@ -821,25 +838,17 @@ fn movi_lpi(its: u64, hwirq: u32, cpu: u32) -> Result<(), IrqError> {
     Ok(())
 }
 
-/// DISCARD one mapped event. The device's ITT stays: another LPI may still
-/// use it. Nothing was mapped when `LPI_DEV` is empty.
+/// DISCARD one mapped event and SYNC. A failed command leaves `LPI_DEV` set.
 fn discard_lpi(hwirq: u32) {
-    let Some(g) = gic() else {
-        return;
-    };
-    let Some(its) = g.its else {
-        return;
-    };
-    if !gic::is_lpi(hwirq) {
-        return;
-    }
-    let slot = (hwirq - LPI_BASE) as usize;
+    let Some(g) = gic() else { return };
+    let Some(its) = g.its else { return };
+    let Some(slot) = lpi_slot(hwirq) else { return };
     let Some(dev_slot) = LPI_DEV.get(slot) else {
         return;
     };
-    // AcqRel: the swapped-out DeviceID pairs with the Release store in
-    // `map_its_event`; the store of `LPI_NO_DEV` pairs with a later Acquire.
-    let dev = dev_slot.swap(LPI_NO_DEV, Ordering::AcqRel);
+    let _hold = ITS_CMDS.lock();
+    // Acquire: pairs with the Release store in `map_its_event`.
+    let dev = dev_slot.load(Ordering::Acquire);
     if dev == LPI_NO_DEV {
         return;
     }
@@ -854,15 +863,60 @@ fn discard_lpi(hwirq: u32) {
         .map(|c| c.load(Ordering::Acquire))
         .unwrap_or(0);
     let rd = collection_rd(col).unwrap_or(0);
-    if !submit_its(
-        its,
-        &[ItsCommand::discard(dev, event), ItsCommand::sync(rd)],
-    ) {
+    // SAFETY: ITS command queue; `ITS_CMDS` is held here.
+    let ok = unsafe { push_cmds(its, &encode_lpi_free(dev, event, rd)) };
+    if !ok {
         crate::klog!(
             Level::Error,
             "vibeOS: gic: its discard dev {dev:#x} ev {event}"
         );
+        return;
     }
+    // Release: pairs with the Acquire loads in `movi_lpi` and `remove_its_device`.
+    dev_slot.store(LPI_NO_DEV, Ordering::Release);
+}
+
+/// MAPD V=0 once none of `device_id`'s LPIs are mapped. The ITT stays.
+pub fn remove_its_device(device_id: u32) {
+    let Some(g) = gic() else { return };
+    let Some(its) = g.its else { return };
+    let Some(rd) = collection_rd(0) else {
+        crate::klog!(Level::Error, "vibeOS: gic: its no collection 0");
+        return;
+    };
+    let _hold = ITS_CMDS.lock();
+    let dev = ITS_DEVS.iter().find(|d| {
+        // Relaxed: DeviceID is written once; pairs with nothing.
+        d.id.load(Ordering::Relaxed) == device_id
+    });
+    let Some(dev) = dev else { return };
+    // Acquire: pairs with the Release store in `map_its_event`.
+    if !dev.mapped.load(Ordering::Acquire) {
+        return;
+    }
+    let live = LPI_DEV.iter().any(|slot| {
+        // Acquire: pairs with the Release stores in `map_its_event` and `discard_lpi`.
+        slot.load(Ordering::Acquire) == device_id
+    });
+    if live {
+        crate::klog!(
+            Level::Error,
+            "vibeOS: gic: its remove live dev={device_id:#x}"
+        );
+        return;
+    }
+    let Ok(cmds) = encode_device_unmap(device_id, rd) else {
+        crate::klog!(Level::Error, "vibeOS: gic: its unmap");
+        return;
+    };
+    // SAFETY: ITS command queue; `ITS_CMDS` is held here.
+    if unsafe { !push_cmds(its, &cmds) } {
+        return;
+    }
+    // Release: pairs with the Acquire load in `remove_its_device`.
+    dev.mapped.store(false, Ordering::Release);
+    // Relaxed: EventID reset under `ITS_CMDS`; pairs with nothing.
+    dev.next_event.store(0, Ordering::Relaxed);
 }
 
 /// Push `cmds` in order. False when the ITS stalls or does not catch up.
@@ -1397,4 +1451,38 @@ pub fn lookup(intid: u32) -> u32 {
 #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 pub fn version_v3() -> bool {
     gic().is_some_and(|g| g.kind == Kind::V3)
+}
+
+#[cfg(feature = "kernel_tests")]
+pub fn has_its() -> bool {
+    gic().is_some_and(|g| g.its.is_some())
+}
+
+#[cfg(feature = "kernel_tests")]
+static WATCH_INTID: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "kernel_tests")]
+static WATCH_SEEN: AtomicU32 = AtomicU32::new(0);
+
+/// Arm a dispatch counter for `intid`. `0` disarms.
+#[cfg(feature = "kernel_tests")]
+pub fn ktest_watch_intid(intid: u32) {
+    // Release: pairs with the Acquire load in `ktest_note`.
+    WATCH_SEEN.store(0, Ordering::Release);
+    // Release: pairs with the Acquire load in `ktest_note`.
+    WATCH_INTID.store(intid, Ordering::Release);
+}
+
+#[cfg(feature = "kernel_tests")]
+pub fn ktest_lpi_seen() -> u32 {
+    // Acquire: pairs with the Release store in `ktest_note`.
+    WATCH_SEEN.load(Ordering::Acquire)
+}
+
+#[cfg(feature = "kernel_tests")]
+pub fn ktest_note(intid: u32) {
+    // Acquire: pairs with the Release store in `ktest_watch_intid`.
+    if intid != 0 && WATCH_INTID.load(Ordering::Acquire) == intid {
+        // Release: pairs with the Acquire load in `ktest_lpi_seen`.
+        WATCH_SEEN.fetch_add(1, Ordering::Release);
+    }
 }

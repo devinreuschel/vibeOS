@@ -96,9 +96,12 @@ enum Route {
     IoApic {
         gsi: u32,
     },
-    #[expect(
-        dead_code,
-        reason = "ROADMAP §6.3 MSI configuration: only `enable_msi` builds it"
+    #[cfg_attr(
+        any(not(feature = "kernel_tests"), not(target_arch = "aarch64")),
+        expect(
+            dead_code,
+            reason = "ROADMAP §6.3 MSI configuration: only `enable_msi` builds it"
+        )
     )]
     Msi,
     Msix,
@@ -176,6 +179,13 @@ fn unpublish_vec(hwirq: u32) {
         // Release: pairs with the Acquire load in `dispatch`.
         slot.store(0, Ordering::Release);
     }
+}
+
+/// Drop the vector map and, on aarch64, the INTID → `IrqId` map.
+fn unpublish_hwirq(hwirq: u32) {
+    unpublish_vec(hwirq);
+    #[cfg(target_arch = "aarch64")]
+    crate::arch::aarch64::gic::publish(hwirq, 0);
 }
 
 fn publish_msi(plan: &PlannedMsi, set: &IrqSet) {
@@ -296,6 +306,8 @@ pub fn dispatch_intid(intid: u32) {
         apic_init::on_timer_irq();
         return;
     }
+    #[cfg(feature = "kernel_tests")]
+    crate::arch::aarch64::gic::ktest_note(intid);
     hardirq::set(true);
     let irq_raw = crate::arch::aarch64::gic::lookup(intid);
     let irq = IrqId::from_raw(irq_raw);
@@ -530,12 +542,33 @@ pub fn alloc_msi(dev: &Device, n: u8) -> Result<IrqSet, IrqError> {
             #[cfg(target_arch = "aarch64")]
             {
                 let id = pci_device_id(dev);
+                let mut map_err = None;
                 let mut i = 0usize;
                 while i < plan.len() {
-                    if let Some(h) = plan.hwirq_at(i) {
-                        crate::arch::aarch64::gic::map_its_event(id, h);
+                    let Some(h) = plan.hwirq_at(i) else {
+                        map_err = Some(IrqError::BadVector);
+                        break;
+                    };
+                    if let Err(e) = crate::arch::aarch64::gic::map_its_event(id, h) {
+                        map_err = Some(e);
+                        break;
                     }
                     i += 1;
+                }
+                if let Some(e) = map_err {
+                    let mut j = 0usize;
+                    while j < set.len() {
+                        if let Some(irq) = set.get(j)
+                            && free_vector(irq).is_err()
+                        {
+                            crate::klog!(
+                                vibeos::log::Level::Warn,
+                                "vibeOS: irq: msi unwind failed"
+                            );
+                        }
+                        j += 1;
+                    }
+                    return Err(e);
                 }
             }
             Ok(set)
@@ -614,6 +647,29 @@ pub fn vector(irq: IrqId) -> Option<u8> {
     with_irq(|s| s.table.hwirq(irq).and_then(|h| u8::try_from(h).ok()))
 }
 
+/// The chip hwirq for `irq`, including an LPI that does not fit in a `u8`.
+#[cfg(feature = "kernel_tests")]
+#[cfg_attr(
+    not(target_arch = "aarch64"),
+    expect(
+        dead_code,
+        reason = "aarch64 `lpi_free_realloc` reads the INTID after free"
+    )
+)]
+pub fn hwirq_of(irq: IrqId) -> Option<u32> {
+    with_irq(|s| s.table.hwirq(irq))
+}
+
+/// MAPD V=0 for `dev` after its LPIs have been freed. No ITS is a no-op.
+pub fn release_its_device(dev: &Device) {
+    #[cfg(target_arch = "aarch64")]
+    crate::arch::aarch64::gic::remove_its_device(pci_device_id(dev));
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = dev;
+    }
+}
+
 pub fn free_vector(irq: IrqId) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
@@ -657,7 +713,7 @@ pub fn free_vector(irq: IrqId) -> Result<(), IrqError> {
             }
         }
         let freed = s.table.commit_free(irq)?;
-        unpublish_vec(freed.hwirq());
+        unpublish_hwirq(freed.hwirq());
         Ok((ctx, freed))
     })?;
     freed.release();
@@ -817,9 +873,12 @@ fn apic_id(cpu: u32) -> Option<u8> {
     per_cpu_init::cpu(cpu).map(|c| c.apic_id.load(Ordering::Relaxed) as u8)
 }
 
-#[expect(
-    dead_code,
-    reason = "ROADMAP §6.3 MSI configuration; no driver arms MSI yet"
+#[cfg_attr(
+    any(not(feature = "kernel_tests"), not(target_arch = "aarch64")),
+    expect(
+        dead_code,
+        reason = "ROADMAP §6.3 MSI configuration; no driver arms MSI yet"
+    )
 )]
 pub fn enable_msi(bdf: Bdf, cap: u8, irq: IrqId) -> Result<(), IrqError> {
     let cpu = cpu_of(irq).ok_or(IrqError::BadVector)?;
@@ -844,9 +903,12 @@ pub fn enable_msi(bdf: Bdf, cap: u8, irq: IrqId) -> Result<(), IrqError> {
     Ok(())
 }
 
-#[expect(
-    dead_code,
-    reason = "ROADMAP §6.3 MSI configuration; no driver arms MSI yet"
+#[cfg_attr(
+    any(not(feature = "kernel_tests"), not(target_arch = "aarch64")),
+    expect(
+        dead_code,
+        reason = "ROADMAP §6.3 MSI configuration; no driver arms MSI yet"
+    )
 )]
 pub fn disable_msi(bdf: Bdf, cap: u8) {
     let mut hw = pci_init::HwCfg;

@@ -697,3 +697,10 @@ reason = "no SVE or SME"
 arch = "aarch64"
 cpu = ["neoverse-n1", "host"]
 no_counterpart = "x86 has no SVE or SME"
+
+[[skip]]
+name = "lpi_free_realloc"
+reason = "no its"
+arch = "aarch64"
+machine = "virt,acpi=off,gic-version=2"
+no_counterpart = "GICv2 has no ITS LPI; this test is the GICv3 free path"

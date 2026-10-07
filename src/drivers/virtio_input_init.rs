@@ -491,6 +491,7 @@ impl Driver for InputDriver {
                 d.irq
             );
         }
+        irq_init::release_its_device(dev);
         let kept = virtio_init::release(stopped, d.qdma)
             .saturating_add(virtio_init::release(stopped, d.data));
         virtio_init::report_stuck(dev.addr, stopped, kept);

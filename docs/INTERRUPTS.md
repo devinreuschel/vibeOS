@@ -354,12 +354,12 @@ handler already running on another CPU (ROADMAP §20.9). With interrupt remappin
 until the interrupt entry cache invalidation completes, so a device that still
 writes its old message reaches no vector that a later `allocate` hands out.
 
-On the GICv3 ITS, freeing a device's LPIs, at `free_vector` or at removal, sends `DISCARD` for each
-of its events and `MAPD` with V=0 for its DeviceID, then `SYNC`, and waits up to 1 s, as Linux
-waits for its ITS command queue, until the ITS has consumed the commands. Only then are the
-device's ITT freed and its LPIs returned to the allocator. If the wait expires, both stay reserved
-and the event is logged. The ITS reads each device's ITT from memory, so an ITT freed earlier would
-let a late MSI translate through reused memory into another device's interrupt. This is the
+On the GICv3 ITS, `free_vector` sends `DISCARD` for that LPI's (DeviceID, EventID) and `SYNC`, and
+polls `GITS_CREADR` until the ITS has consumed the `SYNC`. It does not send `MAPD`. `MAPD` with V=0
+is sent only when the device is removed, after its LPIs have been discarded, followed by `SYNC` and
+the same `GITS_CREADR` poll. The device's ITT stays allocated until that removal completes; freeing
+it earlier would let a late MSI translate through reused memory. If the poll times out, the mapping
+stays reserved and the event is logged. A host test pins both command sequences. This is the
 aarch64 form of §12.4's interrupt-remapping rule. This is the ITS chip's free operation.
 
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
