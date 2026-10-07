@@ -68,6 +68,12 @@ pub use super::x86_64::percpu;
 )]
 pub use super::aarch64::publish_cntfrq;
 
+/// `open` / `openat` flags, in the VFS's asm-generic bits.
+#[cfg(target_arch = "aarch64")]
+pub use vibeos::arch::aarch64::fcntl::from_user as user_open_flags;
+#[cfg(target_arch = "x86_64")]
+pub use vibeos::arch::x86_64::fcntl::from_user as user_open_flags;
+
 /// This build's port's `struct stat`, which `fstat` copies out, so `proc`
 /// never names the port.
 #[cfg(target_arch = "x86_64")]

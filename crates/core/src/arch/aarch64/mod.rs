@@ -4,6 +4,7 @@
 //! Compiles on every host. The hardware half (TTBR writes, `tlbi`, `msr`)
 //! lives in the kernel crate.
 
+pub mod fcntl;
 pub mod paging;
 pub mod psci;
 pub mod stat;

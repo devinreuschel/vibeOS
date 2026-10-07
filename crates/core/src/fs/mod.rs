@@ -90,6 +90,13 @@ pub const O_CREAT: u32 = 0x40;
 pub const O_EXCL: u32 = 0x80;
 pub const O_TRUNC: u32 = 0x200;
 pub const O_APPEND: u32 = 0x400;
+// VFS bits for the four flags whose Linux values differ by architecture.
+// These are asm-generic (`include/uapi/asm-generic/fcntl.h`). aarch64's
+// `arch/arm64/include/uapi/asm/fcntl.h` values are translated in
+// `arch::aarch64::fcntl::from_user` before an open checks them.
+// `O_DIRECT` and `O_LARGEFILE` are ignored.
+pub const O_DIRECT: u32 = 0x4000;
+pub const O_LARGEFILE: u32 = 0x8000;
 pub const O_DIRECTORY: u32 = 0x10000;
 pub const O_NOFOLLOW: u32 = 0x20000;
 /// Linux `O_CLOEXEC`. Process fd table turns this into `FD_CLOEXEC`.
