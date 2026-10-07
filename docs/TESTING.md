@@ -1251,8 +1251,10 @@ the trigger, runner, tier, and upstream rules this section states where they app
 `read-all` or `write-all`, and on any grant other than `contents: read` or `none`, at the top or in a
 job, without a comment beside it naming its need (`rule_permissions`); and on a remote `uses:` not
 pinned as `@<40 hex>  # <version>`, where `./` paths and `docker://…@sha256:` pass
-(`rule_action_pins`). `tests/harness/test_workflows.py` holds a failing and a passing case for each
-clause and runs every rule on the real files.
+(`rule_action_pins`). A cache step whose `path` is `limine`, or whose `key` starts with
+`limine-`, fails unless that key names `setup.sh`'s `LIMINE_TAG` and `LIMINE_COMMIT`
+(`rule_limine_cache`), so a pin bump cannot restore an older clone. `tests/harness/test_workflows.py`
+holds a failing and a passing case for each clause and runs every rule on the real files.
 
 Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
 candidate commit, restores no cache, checks out nothing (ROADMAP §10.9's history job checks out
