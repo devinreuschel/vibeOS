@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- x86 reset and power-off map a memory-space ACPI register before writing it, so
+  that path does not page-fault ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
 - At EL2 with VHE, an EL0 read of the physical counter traps, as it does at EL1
   ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
 - aarch64 TLS with `p_align` above 16 is placed at `TP + align`, so an
