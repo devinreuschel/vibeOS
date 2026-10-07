@@ -5,9 +5,12 @@
 //! `x0`–`x5`, returns in `x0`, and is `svc #0`.
 
 pub mod env;
+mod fcntl;
 pub mod fp;
 pub mod stat;
 pub mod sys;
+
+pub use fcntl::{O_DIRECT, O_DIRECTORY, O_LARGEFILE, O_NOFOLLOW};
 
 pub use env::user_env;
 pub use fp::{FpState, fp_syscall, initial_fp, is_initial};

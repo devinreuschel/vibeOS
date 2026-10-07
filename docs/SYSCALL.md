@@ -285,7 +285,13 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   on a fatal signal; ROADMAP §12.5); a console read returns after a newline
   or `rdx` bytes
 - `open`: `mode` is ignored, and a vibefs file is created 0644 (F149;
-  ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. `open`
+  ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. Flag bits
+  are that architecture's Linux values: x86_64's are asm-generic
+  (`include/uapi/asm-generic/fcntl.h`); aarch64's `O_DIRECTORY`,
+  `O_NOFOLLOW`, `O_DIRECT`, and `O_LARGEFILE` are arm64's
+  (`arch/arm64/include/uapi/asm/fcntl.h`), and `open` and `openat`
+  translate those four onto the asm-generic bits before checking them.
+  `open`
   reserves the descriptor (`EMFILE`) and the open-file slot (`ENFILE`)
   before it creates or truncates, so a failed `open` changes no file; a
   trailing `/` after a missing name fails with `ENOTDIR` unless the call is

@@ -3,6 +3,7 @@
 pub mod apic;
 pub mod cpuid;
 pub mod desc;
+pub mod fcntl;
 pub mod paging;
 pub mod pic;
 pub mod stat;

@@ -46,7 +46,7 @@ the identity on them; a second port maps them to its own encoding (ROADMAP §11.
 | Barriers (`dma_wmb`, `dma_rmb`, `dma_mb`) and MMIO accessors | trait (`Barriers`) | `crates/core/src/dev/virtio.rs` | `src/arch/x86_64/mod.rs` | none yet (ROADMAP §11.2) | `src/arch/aarch64/mod.rs` | none | `crates/core/src/arch/stub.rs` |
 | Atomics | module selected by `cfg(loom)` | `crates/core/src/atomic.rs` | none yet (ROADMAP §10.8) | none yet (ROADMAP §10.8) | none yet (ROADMAP §10.8) | none yet (ROADMAP §10.8) | none yet (ROADMAP §10.8) |
 | Per-CPU base and current-thread registers | trait (`PerCpuBase`) | `crates/core/src/smp/per_cpu.rs`, `src/smp/per_cpu_init.rs` | `src/arch/x86_64/percpu.rs`, `src/arch/x86_64/gs.rs` | none yet (ROADMAP §11.4) | `src/arch/aarch64/percpu.rs`, `src/arch/aarch64/gs.rs` | none | `crates/core/src/arch/stub.rs` |
-| Syscall instruction, user frame's layout (§5.10), numbers and argument order | trait (`SyscallAbi`) | `crates/core/src/proc/syscall_table.rs`, `crates/core/src/proc/syscall.rs`, `crates/core/src/proc/uabi.rs`, `src/proc/proc_init/mod.rs` | `src/arch/x86_64/mod.rs`, `src/proc/syscall_init.rs` | `crates/core/src/arch/x86_64/trap.rs`, `crates/core/src/arch/x86_64/syscall.rs`, `crates/core/src/arch/x86_64/stat.rs` | `src/arch/aarch64/mod.rs`, `src/proc/syscall_init_aarch64.rs` | `crates/core/src/arch/aarch64/stat.rs` | `crates/core/src/arch/stub.rs` |
+| Syscall instruction, user frame's layout (§5.10), numbers and argument order | trait (`SyscallAbi`) | `crates/core/src/proc/syscall_table.rs`, `crates/core/src/proc/syscall.rs`, `crates/core/src/proc/uabi.rs`, `src/proc/proc_init/mod.rs` | `src/arch/x86_64/mod.rs`, `src/proc/syscall_init.rs` | `crates/core/src/arch/x86_64/trap.rs`, `crates/core/src/arch/x86_64/syscall.rs`, `crates/core/src/arch/x86_64/stat.rs`, `crates/core/src/arch/x86_64/fcntl.rs` | `src/arch/aarch64/mod.rs`, `src/proc/syscall_init_aarch64.rs` | `crates/core/src/arch/aarch64/stat.rs`, `crates/core/src/arch/aarch64/fcntl.rs` | `crates/core/src/arch/stub.rs` |
 | User-memory accessors | trait (`UserAccess`) | `crates/core/src/proc/uaccess.rs`, `src/proc/uaccess_init.rs` | `src/arch/x86_64/uaccess.rs` | none yet (ROADMAP §11.6) | `src/arch/aarch64/uaccess.rs` | none | `crates/core/src/arch/stub.rs` |
 | FP and SIMD state | port module | `crates/core/src/sched/fpu.rs` | `src/proc/syscall_init.rs` | none yet (ROADMAP §11.6) | `src/proc/syscall_init_aarch64.rs` | none | none yet (ROADMAP §11.6) |
 | User TLS register | port module | `src/proc/proc_init/exec.rs` | `src/arch/x86_64/cpu.rs` | none yet (ROADMAP §11.6) | `src/arch/aarch64/cpu.rs` | none | none yet (ROADMAP §11.6) |
@@ -89,6 +89,7 @@ fault catcher), `src/arch/aarch64/cpu.rs` (DAIF, idle `wfi`, RNDR, TLS),
 `src/arch/aarch64/switch.rs` (x19–x29, SP, LR, DAIF),
 `src/arch/aarch64/timer.rs` (generic timer), `src/arch/aarch64/uaccess.rs` (PAN),
 `src/arch/aarch64/vectors.rs` (16-entry table), `crates/core/src/arch/aarch64/mod.rs`,
+`crates/core/src/arch/aarch64/fcntl.rs`,
 `crates/core/src/arch/aarch64/paging.rs`, `crates/core/src/arch/aarch64/psci.rs`
 (IDs and `SecondaryParam`), `crates/core/src/arch/aarch64/stat.rs`,
 `crates/core/src/arch/aarch64/sysreg.rs`, `crates/core/src/arch/aarch64/tlb.rs`,

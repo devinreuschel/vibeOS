@@ -363,7 +363,8 @@ pub(super) fn sys_openat(dirfd: i32, path: u64, flags: i32, mode: u16) -> SysRes
         Some(p) => p.fds.reserve().map_err(KError::from),
         None => Err(KError::MFile),
     })?;
-    match file_init::open_at(base, &buf[..n], OpenFlags::from_bits(flags as u32), mode) {
+    let bits = crate::arch::current::user_open_flags(flags as u32);
+    match file_init::open_at(base, &buf[..n], OpenFlags::from_bits(bits), mode) {
         Ok(f) => {
             let id = f.into_raw();
             let slot = Fd {
@@ -371,7 +372,7 @@ pub(super) fn sys_openat(dirfd: i32, path: u64, flags: i32, mode: u16) -> SysRes
                     fid: id.fid,
                     r#gen: id.r#gen,
                 },
-                flags: fd_flags_from_open(flags as u32),
+                flags: fd_flags_from_open(bits),
             };
             let r = with_table(|t| match t.get_mut(pid) {
                 Some(p) => p.fds.install_reserved(fd, slot).map_err(KError::from),
