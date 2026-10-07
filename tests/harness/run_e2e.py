@@ -143,14 +143,36 @@ PMM_TOTAL_RE = re.compile(r"^vibeOS: pmm: (\d+) total, largest order (-?\d+)$")
 MEMINFO_TOTAL_RE = re.compile(r"^vibeOS: meminfo: total (\d+) frames, free (\d+), used (\d+)\b")
 MEMINFO_HEAP_RE = re.compile(r"^vibeOS: meminfo: heap used (\d+) B / capacity (\d+) B$")
 MEMINFO_PREFIX = "vibeOS: meminfo: "
+# `pmm: <n> total` counts 4 KiB frames (DESIGN §4.2).
+PMM_FRAME_BYTES = 4096
+# 8 GiB, the physmap cap ROADMAP §11.2 removed.
+EIGHT_GIB = 8 << 30
+# `make test-e2e-highmem` sets this. The buddy total must sit past the old cap.
+HIGHMEM_MEM = "9G"
 
 
-def check_meminfo(lines: list[str]) -> None:
+def check_highmem_pmm(pmm_total: int, mem: str) -> None:
+    """A 9 GiB guest's `pmm:` total includes RAM above 8 GiB (ROADMAP §11.2).
+
+    The old physmap cap left that RAM out of the buddy, so `pmm_total * 4096`
+    stayed at or under 8 GiB. `mem` is `VIBEOS_MEM`; any other size skips this.
+    """
+    if mem != HIGHMEM_MEM:
+        return
+    counted = pmm_total * PMM_FRAME_BYTES
+    if counted <= EIGHT_GIB:
+        raise HarnessError(
+            f"highmem: pmm total {pmm_total} frames ({counted} bytes) is not above 8 GiB"
+        )
+
+
+def check_meminfo(lines: list[str], mem: str = "") -> None:
     """`diag::meminfo`'s boot lines agree with the `pmm:` lines (ROADMAP §10.2).
 
     Each `meminfo:` line (grouped by its text up to the first digit) and each
     `pmm:` line appears once; the frame total equals pmm's; free is at most
     pmm's free count; used is total minus free; heap use is at most capacity.
+    When `mem` is `9G`, the frame total also sits above 8 GiB.
     """
     texts = [t for t in (kernel_text(ln) for ln in lines) if t is not None]
     groups: dict[str, int] = {}
@@ -183,6 +205,7 @@ def check_meminfo(lines: list[str]) -> None:
         raise HarnessError(f"meminfo: used {used} is not total {total} minus free {free}")
     if heap_used > heap_cap:
         raise HarnessError(f"meminfo: heap used {heap_used} B above capacity {heap_cap} B")
+    check_highmem_pmm(pmm_total, mem)
 
 
 def forged_user_lines(res: results.Results, lines: list[str]) -> None:
@@ -581,11 +604,13 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("[e2e]   . forged user lines unframed", file=sys.stderr)
         try:
-            check_meminfo(result.lines)
+            check_meminfo(result.lines, env.mem)
         except HarnessError as e:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1
         print("[e2e]   . meminfo ok", file=sys.stderr)
+        if env.mem == HIGHMEM_MEM:
+            print("[e2e]   . pmm total above 8 GiB", file=sys.stderr)
         try:
             utest = _utest_verdict(env, cfg)
             inp = run_qemu_console_input(cfg, timeout_s=env.timeout, utest=utest)
