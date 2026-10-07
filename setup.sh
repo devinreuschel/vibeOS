@@ -149,6 +149,7 @@ if [ -f "$TOOLCHAIN_FILE" ]; then
         echo "setup: adding target aarch64-unknown-linux-musl"
         rustup target add aarch64-unknown-linux-musl --toolchain "$PINNED"
         # vibeos-core's MSRV, which `make check` builds it with (ROADMAP §10.1).
+        # Both kernel targets, so `make ARCH=aarch64 check` has the one it builds.
         # VIBEOS_SKIP_MSRV=1 leaves it out: `make repro`'s two builds run only
         # `make isos`, each in a RUSTUP_HOME of its own (scripts/repro_build.py).
         MSRV=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' "$ROOT/crates/core/Cargo.toml")
@@ -166,6 +167,7 @@ if [ -f "$TOOLCHAIN_FILE" ]; then
                 rustup toolchain install "$MSRV" --profile minimal --no-self-update
             fi
             rustup target add x86_64-unknown-none --toolchain "$MSRV"
+            rustup target add aarch64-unknown-none-softfloat --toolchain "$MSRV"
         fi
     else
         echo "setup: rustup not found; install $PINNED with rust-src, llvm-tools, and targets x86_64-unknown-none and x86_64-unknown-linux-musl" >&2

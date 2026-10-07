@@ -29,6 +29,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- `make ARCH=aarch64 check` after `./setup.sh` lints the aarch64 kernel and builds
+  `vibeos-core` with the MSRV toolchain for that target.
 - a GICv2 SGI end-of-interrupt keeps the source CPU the acknowledge
   returned, so that CPU's running priority drops ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
 - aarch64 `pvpanic-pci` with a firmware BAR at 0 is placed in the virt 32-bit MMIO

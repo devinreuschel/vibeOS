@@ -331,9 +331,9 @@ MSRV_TOOLCHAIN ?= $(MSRV)
 CARGO_DENY_PIN := $(shell sed -n 's/^ *CARGO_DENY_VERSION: *//p' .github/workflows/ci.yml | head -n1)
 
 # Fast local / CI `check` job gate (T3). It lints the kernel with its default
-# features and vibeos-core's no_std build for the kernel target, so kernel-target
-# code compiles before every commit; CI's ladder lints each other ISO feature
-# set and kernel_shell (ROADMAP §10.1, F147).
+# features for $(TARGET) and vibeos-core's no_std build for the kernel target,
+# so kernel-target code compiles before every commit; CI's ladder lints each
+# other ISO feature set and kernel_shell (ROADMAP §10.1, F147).
 # Guard scripts (scripts/check_*.py) run when present (A4, Q5, A1). The
 # `hookcheck` link gives check_test_hooks.py a production-feature ELF (Q2's
 # nm check) without replacing the production kernel; it needs no initrd,
@@ -347,7 +347,7 @@ check:
 	cargo build -p vibeos-core --lib --target $(HOST_TRIPLE)
 	cargo clippy -p vibeos-core --target $(TARGET) -- -D warnings
 	$(MAKE) check-msrv
-	cargo clippy --bin vibeos -- -D warnings
+	cargo clippy --bin vibeos --target $(TARGET) -- -D warnings
 	$(MAKE) test-unit
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
 	$(MAKE) models-quick
