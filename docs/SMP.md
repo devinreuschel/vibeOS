@@ -173,7 +173,7 @@ The stub, in order: checks the ISA floor (FEAT_LSE and FEAT_PAN) and stores `STA
 `CPU_OFF` if either is missing; when the block says EL2, writes each EL2 control on the port's one
 list whole from the block (`HCR_EL2`, `CPTR_EL2`, `CNTHCTL_EL2`, `HSTR_EL2`, `MDCR_EL2`,
 `ICC_SRE_EL2`, `HCRX_EL2` and the FGT registers where the ID bits say so, `CNTVOFF_EL2` = 0,
-`SCTLR_EL2`) before any `*_EL1` access; writes `SCTLR`, `MAIR`, `TCR`, `TTBR1`, and the identity
+`SCTLR_EL2` with `M`, `C`, and `I` clear) before any `*_EL1` access; writes `SCTLR`, `MAIR`, `TCR`, `TTBR1`, and the identity
 `TTBR0` from the block, and `CNTKCTL_EL1` only at EL1 (VHE aliases it to `CNTHCTL_EL2`); enables the
 MMU with the boot CPU's whole `SCTLR_EL1`; jumps to the TTBR1 continue address; points `TTBR0` at
 the empty user root and invalidates the local TLB; then stores `STATUS_ARRIVED`, its first shared

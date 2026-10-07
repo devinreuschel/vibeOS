@@ -65,6 +65,27 @@ pub const fn sctlr_el1() -> u64 {
     M | C | SA | SA0 | NAA | EOS | I | DZE | UCT | NTWE | TSCXT | EIS | UCI
 }
 
+/// `SCTLR_EL2` bits the secondary stub must clear on its early write.
+/// `M`, `C`, and `I`: that write is before `MAIR`, `TCR`, and the `TTBR`s,
+/// and under VHE those `*_EL1` names are this regime's registers.
+pub const SCTLR_EL2_EARLY_CLEAR: u64 = (1 << 0) | (1 << 2) | (1 << 12);
+
+/// Boot CPU's `SCTLR_EL2` with translation and the caches left off.
+pub const fn sctlr_el2_early(live: u64) -> u64 {
+    live & !SCTLR_EL2_EARLY_CLEAR
+}
+
+/// `ID_AA64MMFR1_EL1.HCX` (bits 43:40) is not zero: `HCRX_EL2` exists.
+pub const fn feat_hcx(mmfr1: u64) -> bool {
+    (mmfr1 >> 40) & 0xF != 0
+}
+
+/// `ID_AA64MMFR0_EL1.FGT` (bits 59:56) is not zero: the fine-grained
+/// trap registers exist.
+pub const fn feat_fgt(mmfr0: u64) -> bool {
+    (mmfr0 >> 56) & 0xF != 0
+}
+
 /// `CNTKCTL_EL1` at EL1, and `CNTHCTL_EL2` when `HCR_EL2.E2H` is 1.
 ///
 /// Bit 1 is `EL0VCTEN`: EL0 reads `CNTVCT_EL0`. Bit 0 is `EL0PCTEN` and
@@ -152,6 +173,31 @@ mod tests {
         assert_ne!(s & (1 << 20), 0, "TSCXT");
         assert_eq!(s & (1 << 16), 0, "nTWI");
         assert_eq!(s, sctlr_el1());
+    }
+
+    #[test]
+    fn sctlr_el2_early_leaves_translation_off() {
+        // The secondary stub's early SCTLR_EL2 write is before MAIR, TCR,
+        // and the TTBRs. Under VHE those are the EL2&0 registers, so M, C,
+        // and I must be clear or the core fetches through reset translation.
+        let live = sctlr_el1();
+        assert_eq!(live & SCTLR_EL2_EARLY_CLEAR, SCTLR_EL2_EARLY_CLEAR);
+        let early = sctlr_el2_early(live);
+        assert_eq!(early & SCTLR_EL2_EARLY_CLEAR, 0);
+        assert_eq!(early | SCTLR_EL2_EARLY_CLEAR, live);
+        assert_eq!(sctlr_el2_early(0), 0);
+        assert_eq!(sctlr_el2_early((1 << 63) | 1), 1 << 63);
+        assert_eq!(SCTLR_EL2_EARLY_CLEAR, (1 << 0) | (1 << 2) | (1 << 12));
+    }
+
+    #[test]
+    fn el2_feature_fields() {
+        assert!(!feat_hcx(0));
+        assert!(feat_hcx(1 << 40));
+        assert!(!feat_hcx(0xF << 36));
+        assert!(!feat_fgt(0));
+        assert!(feat_fgt(1 << 56));
+        assert!(!feat_fgt(0xF << 52));
     }
 
     #[test]

@@ -72,7 +72,10 @@ global_asm!(
     "22:",
     "    msr cntvoff_el2, xzr",
     "    isb",
+    // M/C/I clear: translation stays off until the SCTLR_EL1 write below.
     "    ldr x1, [x0, #{sctlr_el2}]",
+    "    mov x2, #{sctlr_early_clear}",
+    "    bic x1, x1, x2",
     "    msr sctlr_el2, x1",
     "3:",
     // CNTKCTL_EL1 at EL1. At EL2, CNTHCTL_EL2 already holds that value
@@ -155,6 +158,7 @@ global_asm!(
     hdfgwtr = const SecondaryParam::HDFGWTR_EL2,
     hafgrtr = const SecondaryParam::HAFGRTR_EL2,
     sctlr_el2 = const SecondaryParam::SCTLR_EL2,
+    sctlr_early_clear = const sysreg::SCTLR_EL2_EARLY_CLEAR,
     cntkctl = const SecondaryParam::CNTKCTL,
     pmuserenr = const SecondaryParam::PMUSERENR,
     cpacr = const SecondaryParam::CPACR,
@@ -342,6 +346,7 @@ pub fn capture_el2(p: &mut SecondaryParam) {
         return;
     }
     p.el2 = 1;
+    let sctlr: u64;
     // SAFETY: readable at EL2. established here.
     unsafe {
         asm!("mrs {0}, hcr_el2", out(reg) p.hcr_el2, options(nomem, nostack, preserves_flags));
@@ -349,25 +354,21 @@ pub fn capture_el2(p: &mut SecondaryParam) {
         asm!("mrs {0}, hstr_el2", out(reg) p.hstr_el2, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, mdcr_el2", out(reg) p.mdcr_el2, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, icc_sre_el2", out(reg) p.icc_sre_el2, options(nomem, nostack, preserves_flags));
-        asm!("mrs {0}, sctlr_el2", out(reg) p.sctlr_el2, options(nomem, nostack, preserves_flags));
+        asm!("mrs {0}, sctlr_el2", out(reg) sctlr, options(nomem, nostack, preserves_flags));
     }
+    // M, C, and I stay clear until the stub's later SCTLR_EL1 write.
+    p.sctlr_el2 = sysreg::sctlr_el2_early(sctlr);
     // E2H is 1, so bits 0 and 1 are EL0PCTEN and EL0VCTEN.
     p.cnthctl_el2 = sysreg::cntkctl_el1();
-    let mmfr0: u64;
-    let mmfr1: u64;
-    // SAFETY: ID registers. established here.
-    unsafe {
-        asm!("mrs {0}, ID_AA64MMFR0_EL1", out(reg) mmfr0, options(nomem, nostack, preserves_flags));
-        asm!("mrs {0}, ID_AA64MMFR1_EL1", out(reg) mmfr1, options(nomem, nostack, preserves_flags));
-    }
-    if (mmfr1 >> 40) & 0xF != 0 {
+    let (mmfr0, mmfr1) = id_mmfr();
+    if sysreg::feat_hcx(mmfr1) {
         p.hcrx_valid = 1;
         // SAFETY: FEAT_HCX. established here.
         unsafe {
             asm!("mrs {0}, s3_4_c1_c2_2", out(reg) p.hcrx_el2, options(nomem, nostack, preserves_flags));
         }
     }
-    if (mmfr0 >> 56) & 0xF != 0 {
+    if sysreg::feat_fgt(mmfr0) {
         p.fgt_valid = 1;
         // SAFETY: FEAT_FGT. established here.
         unsafe {
@@ -381,27 +382,66 @@ pub fn capture_el2(p: &mut SecondaryParam) {
     }
 }
 
+fn id_mmfr() -> (u64, u64) {
+    let mmfr0: u64;
+    let mmfr1: u64;
+    // SAFETY: ID registers. established here.
+    unsafe {
+        asm!("mrs {0}, ID_AA64MMFR0_EL1", out(reg) mmfr0, options(nomem, nostack, preserves_flags));
+        asm!("mrs {0}, ID_AA64MMFR1_EL1", out(reg) mmfr1, options(nomem, nostack, preserves_flags));
+    }
+    (mmfr0, mmfr1)
+}
+
+/// `snapshot_sysregs` length. Slots 0..8 are the EL1 registers (their EL2
+/// forms under VHE). Slots 8.. are the EL2 controls, left zero unless
+/// entry was EL2 with VHE.
+pub const SNAP_LEN: usize = 23;
+/// `HCR_EL2` in [`snapshot_sysregs`].
+pub const SNAP_HCR_EL2: usize = 8;
+
 /// Read the listed registers for the in-guest compare.
 #[cfg_attr(
     not(feature = "kernel_tests"),
     expect(dead_code, reason = "in-guest sysreg_compare (kernel_tests)")
 )]
-pub fn snapshot_sysregs() -> [u64; 8] {
-    let mut v = [0u64; 8];
-    // SAFETY: EL1 (VHE-redirected) system registers. established here.
+pub fn snapshot_sysregs() -> [u64; SNAP_LEN] {
+    let mut v = [0u64; SNAP_LEN];
+    // SAFETY: EL1 (VHE-redirected) system registers, and the EL2 controls
+    // when `el2_vhe` recorded EL2 entry. established here.
     unsafe {
         asm!("mrs {0}, sctlr_el1", out(reg) v[0], options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, tcr_el1", out(reg) v[1], options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, mair_el1", out(reg) v[2], options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, cpacr_el1", out(reg) v[3], options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, cntkctl_el1", out(reg) v[4], options(nomem, nostack, preserves_flags));
+        asm!("mrs {0}, ttbr1_el1", out(reg) v[6], options(nomem, nostack, preserves_flags));
+        asm!("mrs {0}, oslsr_el1", out(reg) v[7], options(nomem, nostack, preserves_flags));
         if super::cpu::el2_vhe() {
             asm!("mrs {0}, vbar_el2", out(reg) v[5], options(nomem, nostack, preserves_flags));
+            asm!("mrs {0}, hcr_el2", out(reg) v[SNAP_HCR_EL2], options(nomem, nostack, preserves_flags));
+            asm!("mrs {0}, cptr_el2", out(reg) v[9], options(nomem, nostack, preserves_flags));
+            asm!("mrs {0}, cnthctl_el2", out(reg) v[10], options(nomem, nostack, preserves_flags));
+            asm!("mrs {0}, hstr_el2", out(reg) v[11], options(nomem, nostack, preserves_flags));
+            asm!("mrs {0}, mdcr_el2", out(reg) v[12], options(nomem, nostack, preserves_flags));
+            asm!("mrs {0}, icc_sre_el2", out(reg) v[13], options(nomem, nostack, preserves_flags));
+            asm!("mrs {0}, sctlr_el2", out(reg) v[14], options(nomem, nostack, preserves_flags));
+            asm!("mrs {0}, cntvoff_el2", out(reg) v[15], options(nomem, nostack, preserves_flags));
+            let (mmfr0, mmfr1) = id_mmfr();
+            if sysreg::feat_hcx(mmfr1) {
+                asm!("mrs {0}, s3_4_c1_c2_2", out(reg) v[16], options(nomem, nostack, preserves_flags));
+            }
+            if sysreg::feat_fgt(mmfr0) {
+                asm!("mrs {0}, s3_4_c1_c1_4", out(reg) v[17], options(nomem, nostack, preserves_flags));
+                asm!("mrs {0}, s3_4_c1_c1_5", out(reg) v[18], options(nomem, nostack, preserves_flags));
+                asm!("mrs {0}, s3_4_c1_c1_6", out(reg) v[19], options(nomem, nostack, preserves_flags));
+                asm!("mrs {0}, s3_4_c3_c1_4", out(reg) v[20], options(nomem, nostack, preserves_flags));
+                asm!("mrs {0}, s3_4_c3_c1_5", out(reg) v[21], options(nomem, nostack, preserves_flags));
+                asm!("mrs {0}, s3_4_c3_c1_6", out(reg) v[22], options(nomem, nostack, preserves_flags));
+            }
         } else {
             asm!("mrs {0}, vbar_el1", out(reg) v[5], options(nomem, nostack, preserves_flags));
         }
-        asm!("mrs {0}, ttbr1_el1", out(reg) v[6], options(nomem, nostack, preserves_flags));
-        asm!("mrs {0}, oslsr_el1", out(reg) v[7], options(nomem, nostack, preserves_flags));
     }
     v
 }
