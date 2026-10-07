@@ -10,7 +10,8 @@ the needs files, commit messages, runs, or results files themselves.
 - `load_needs` / `load_all_needs`: `tests/gates/phase-<N>-needs.toml`.
 - `wave1_lines`: the line numbers of the wave-1 boxes.
 - `parse_review`: KERNEL_REVIEW.md's findings and their severities.
-- `pr_commits`, `message_lines`, `docs_only`: git readers. Each takes `repo`.
+- `pr_commits`, `message_lines`, `docs_only`, `pr_diff_base`: git readers. Each
+  takes `repo`. `pr_diff_base` is the revision bare `make check` diffs against.
 - `run_proves_commit`, `run_counts_for_pr`: which CI runs prove which commit.
 - `load_results`, `parse_bracket`: harness results files and bracketed proofs.
 
@@ -20,6 +21,7 @@ Standard library only.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tomllib
@@ -310,6 +312,34 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
     if check and r.returncode != 0:
         raise GateError(f"git {' '.join(args)}: {r.stderr.strip()}")
     return r.stdout
+
+
+def _commit_exists(repo: Path, rev: str) -> bool:
+    return bool(git(repo, "rev-parse", "--verify", "-q", f"{rev}^{{commit}}",
+                    check=False).strip())
+
+
+def pr_diff_base(repo: Path = ROOT) -> str | None:
+    """The revision bare `make check` diffs against, or None for static rules
+    only.
+
+    `BASE_SHA` when it is set (the check job's pull-request base). Otherwise
+    `origin/$GITHUB_BASE_REF`, then `$GITHUB_BASE_REF`, when that names a
+    branch other than `main` and the ref is in this repo: a pull request into
+    `phase-11` is judged against `phase-11`, not against `main`. Otherwise
+    `origin/main` when that ref exists. A local run sets neither variable.
+    """
+    pinned = os.environ.get("BASE_SHA", "").strip()
+    if pinned:
+        return pinned
+    ref = os.environ.get("GITHUB_BASE_REF", "").strip()
+    if ref and ref != "main":
+        for cand in (f"origin/{ref}", ref):
+            if _commit_exists(repo, cand):
+                return cand
+    if _commit_exists(repo, "origin/main"):
+        return "origin/main"
+    return None
 
 
 def pr_commits(base: str, head: str, repo: Path = ROOT) -> list[str]:
