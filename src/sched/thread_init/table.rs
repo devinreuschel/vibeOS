@@ -179,28 +179,6 @@ pub(crate) fn scan_live_stacks(mut f: impl FnMut(vibeos::sched::stack_depth::Dee
     }
 }
 
-/// Print one line per stack size and the report line (TESTING §8.2).
-#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
-pub(crate) fn report_stack_depth() {
-    let mut table = vibeos::sched::stack_depth::DepthTable::new();
-    scan_live_stacks(|d| table.record(d));
-    for d in table.deepest() {
-        crate::marker!(
-            "vibeOS: stack: {} used {} of {} by tid {} {}",
-            d.size,
-            d.used,
-            vibeos::sched::stack_depth::budget(d.size),
-            d.tid,
-            d.name
-        );
-    }
-    crate::marker!(
-        "vibeOS: stack: report {} sizes {} lost",
-        table.len(),
-        table.lost()
-    );
-}
-
 /// The id, name, CPU and `run_tsc` of each thread in the table, up to
 /// `out.len()`, under one SCHED section: a test compares two of these to
 /// name the threads a CPU ran between them. Returns how many it wrote.

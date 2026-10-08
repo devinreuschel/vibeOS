@@ -1083,17 +1083,33 @@ one QEMU at a time), until a `ci` run measures them:
 | aarch64 | kernel-4 | `test-kernel-4` | 24 |
 | aarch64 | kernel-5 | `test-kernel-5` | 24 |
 | aarch64 | kernel-6 | `test-kernel-6` | 24 |
+| aarch64 | kernel-7 | `test-kernel-7` | 24 |
+| aarch64 | kernel-8 | `test-kernel-8` | 36 |
+| aarch64 | kernel-9 | `test-kernel-9` | 24 |
 | aarch64 | kernel-smp4-1 | `test-kernel-smp4-1` | 40 |
 | aarch64 | kernel-smp4-2 | `test-kernel-smp4-2` | 40 |
 | aarch64 | kernel-smp4-3 | `test-kernel-smp4-3` | 40 |
 | aarch64 | kernel-smp4-4 | `test-kernel-smp4-4` | 24 |
 | aarch64 | kernel-smp4-5 | `test-kernel-smp4-5` | 24 |
+| aarch64 | kernel-smp4-6 | `test-kernel-smp4-6` | 36 |
+| aarch64 | kernel-smp4-7 | `test-kernel-smp4-7` | 24 |
+| aarch64 | kernel-smp4-8 | `test-kernel-smp4-8` | 24 |
 | aarch64 | gic-fallback-1 | `test-gic-fallback-1` | 40 |
 | aarch64 | gic-fallback-2 | `test-gic-fallback-2` | 40 |
 | aarch64 | gic-fallback-3 | `test-gic-fallback-3` | 40 |
 | aarch64 | gic-fallback-4 | `test-gic-fallback-4` | 24 |
 | aarch64 | gic-fallback-5 | `test-gic-fallback-5` | 24 |
 | aarch64 | gic-fallback-6 | `test-gic-fallback-6` | 24 |
+| aarch64 | gic-fallback-7 | `test-gic-fallback-7` | 24 |
+| aarch64 | gic-fallback-8 | `test-gic-fallback-8` | 36 |
+| aarch64 | gic-fallback-9 | `test-gic-fallback-9` | 24 |
+
+aarch64's portable proof boots (`select`, `repeat`, `deadline-trip`, `planted`,
+`vblk-readonly`, `vblk-bad-sector`, and `stalled-ap` at `-smp 4`) are `test-kernel-7` to `9`,
+`test-kernel-smp4-6` to `8`, and the `-smp 2` set again as `test-gic-fallback-7` to `9`.
+`aff-off` stays on `test-kernel-smp4-5`. `hpet-off` and `fat` stay on x86: the FAT boot sends a
+self-IPI through `apic_init::send_ipi_cpu`, which does not deliver on aarch64. Those rows' figures
+are one to three boots at the x86 proof-boot cost, about 12 s each, until a `ci` run measures them.
 
 `test-e2e-init-fault` boots twice (`init_fault`, then `init_no_sh`, about 10 s more under TCG), so
 e2e-2's figure, measured before the second boot, is low by that much.

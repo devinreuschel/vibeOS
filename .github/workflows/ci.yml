@@ -319,8 +319,9 @@ jobs:
   # the QEMU runs in parallel inside a tier (ROADMAP §10.1): 2, on the
   # runner's 4 CPUs; a tier of one target runs one QEMU whatever it says.
   # The in-guest tiers are the shards of test-kernel, test-kernel-smp4 and
-  # test-lapic-fallback (tests/harness/ktest_shards.py), one target each, so
-  # each stays under the 60 s `ci_history.py --tiers` allows.
+  # test-lapic-fallback, plus the aarch64 proof-boot shards
+  # (tests/harness/ktest_shards.py), one target each, so each stays under
+  # the 60 s `ci_history.py --tiers` allows.
   tier:
     name: tier (${{ matrix.arch }}, ${{ matrix.tier }})
     needs: [check, build]
@@ -512,6 +513,24 @@ jobs:
           - arch: aarch64
             runner: ubuntu-26.04-arm
             apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-7
+            targets: test-kernel-7
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-8
+            targets: test-kernel-8
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-9
+            targets: test-kernel-9
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
             tier: kernel-smp4-1
             targets: test-kernel-smp4-1
             jobs: 2
@@ -538,6 +557,24 @@ jobs:
             apt: qemu-system-arm qemu-efi-aarch64
             tier: kernel-smp4-5
             targets: test-kernel-smp4-5
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-smp4-6
+            targets: test-kernel-smp4-6
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-smp4-7
+            targets: test-kernel-smp4-7
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-smp4-8
+            targets: test-kernel-smp4-8
             jobs: 2
           - arch: aarch64
             runner: ubuntu-26.04-arm
@@ -574,6 +611,24 @@ jobs:
             apt: qemu-system-arm qemu-efi-aarch64
             tier: gic-fallback-6
             targets: test-gic-fallback-6
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: gic-fallback-7
+            targets: test-gic-fallback-7
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: gic-fallback-8
+            targets: test-gic-fallback-8
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: gic-fallback-9
+            targets: test-gic-fallback-9
             jobs: 2
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin

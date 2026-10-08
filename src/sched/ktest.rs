@@ -15,7 +15,6 @@ mod sleep;
 mod sweep;
 pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use dead_slot::lifetime_dead_slot_on_cpu;
-#[cfg(target_arch = "x86_64")]
 pub(crate) use depth::report;
 pub(crate) use depth::{record, stack_depth_exit_scan, stack_depth_planted, wait_exit_depth};
 pub(crate) use fill::fill_threads;
