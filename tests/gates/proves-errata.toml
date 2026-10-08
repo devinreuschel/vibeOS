@@ -3,12 +3,125 @@
 # A commit's message cannot change once it is pushed. scripts/check_ticks.py
 # reads each row's `proves` in place of the line `was` of commit `commit`, lists
 # the row in its report, and fails a row whose commit is in the pull request but
-# carries no such line. `was` and `proves` are the text after `Proves: `, exactly
-# as the message holds it; `commit` is the full sha. A row is a gate input
-# (tests/gates/inputs.toml), so adding one needs a `Gate-change:` trailer.
+# does not match that `was`. `was` and `proves` are the text after `Proves: `,
+# exactly as the message holds it; `was` is empty when the commit has no line,
+# and then each non-empty line of `proves` is one supplied trailer. `commit` is
+# the full sha. A row is a gate input (tests/gates/inputs.toml), so adding one
+# needs a `Gate-change:` trailer.
 
 [[erratum]]
 commit = "e202ed1f5744bbe2dec28af640d137f826bc294d"
 was = "tsc_calib_source (existing: checks the one BSP calibration every CPU reads) -- `tsc_per_ms` calibrated once on the BSP"
 proves = "src/time/time_init.rs::tsc_per_ms (existing: every CPU reads the one calibration from time_init's STATE, a BootCell written once on the BSP before SMP) -- `tsc_per_ms` calibrated once on the BSP"
 why = "tsc_calib_source skips on every per-push tier (TCG has no invariant TSC; tests/harness/skips.toml), so no results file shows it passed; the box's text, after P10-S86 dropped the PerCpu copy, is the reader's shape"
+
+[[erratum]]
+commit = "407b413c800a29acbaa7fbf4fd487219ede9f9b2"
+was = ""
+proves = "scripts/check_orderings.py -- `scripts/check_orderings.py` in `make check`"
+why = "S2 (#200) squash dropped the Proves line; the box names this script"
+
+[[erratum]]
+commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
+was = "sysreg_compare -- when §11.1 recorded EL2 entry"
+proves = "sysreg_compare -- when §11.1 recorded EL2 entry"
+why = "the proof is the aarch64 ktest; a path::fn of the test function is not the registry row"
+
+[[erratum]]
+commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
+was = '"vibeOS: el: <el>" -- each core prints the §11.1 exception-level marker'
+proves = '"vibeOS: el: <el>" -- each core prints the §11.1 exception-level marker'
+why = "the proof is the exception-level marker, not print_exception_level"
+
+[[erratum]]
+commit = "7b7c38164dc4b33a64767a4de21e2ecb454ec991"
+was = "oslsr_clear -- every core releases the debug OS Lock"
+proves = "oslsr_clear -- every core releases the debug OS Lock"
+why = "the proof is the aarch64 ktest, not release_debug_os_lock"
+
+[[erratum]]
+commit = "73a604f71cace8e16e55eb930344359971f7871e"
+was = ""
+proves = """
+tlb_shootdown_remote -- `-smp 4` under `virt`
+sysreg_compare -- when §11.1 recorded EL2 entry
+"vibeOS: el: <el>" -- each core prints the §11.1 exception-level marker
+per_cpu_identity -- the per-CPU base
+percpu_ticks_advance -- per-CPU GIC redistributor
+oslsr_clear -- every core releases the debug OS Lock
+failed_ap_cleanup (existing: x86 pre-SIPI free; aarch64 AFF_OFF free) -- the bring-up failure path
+stalled_ap_leak -- x86_64's bring-up failure path
+loom_call_function -- the §4.9 call-function slot
+psci_ids_match_the_spec -- PSCI `SYSTEM_OFF` and `SYSTEM_RESET`
+switch_context_roundtrip -- the aarch64 context switch
+"""
+why = "S8 (#226) squash dropped the Proves lines. Proofs are the registry tests, the exception-level marker, and the host tests; boxes with no test are reopened"
+
+[[erratum]]
+commit = "48d1fb4dc9707d5259e7e59700618000666f89ec"
+was = "block_vblk_mmio_smp -- virtio-mmio transport as well"
+proves = "block_vblk_mmio_smp -- virtio-mmio transport as well"
+why = "the proof is the in-guest virtio-mmio test, not virtio_mmio_init::publish"
+
+[[erratum]]
+commit = "48d1fb4dc9707d5259e7e59700618000666f89ec"
+was = "block_vblk_mmio_smp -- every virtio queue notification writes that virtqueue's index"
+proves = "block_vblk_mmio_smp -- every virtio queue notification writes that virtqueue's index"
+why = "the proof is the in-guest -smp 4 virtio-mmio test, not queue_notify"
+
+[[erratum]]
+commit = "4ea066ae1ef3304ab3153179ae9fdd2fa4f03775"
+was = ""
+proves = """
+openat_ok -- `openat`, `dup3`, and fork-shaped
+tls_survive -- `FS_BASE` saved and restored
+"user: tests ok" (existing: the e2e contract already requires /bin/tests to pass) -- `/bin/tests` from the Phase 10 user crate
+test_aarch64_serial_then_virtio_keyboard -- the harness types
+initrd_module_sized (existing: the §10.5 in-guest initrd test) -- the initrd, built by the same
+"serial-ok" (existing: the console echo the x86 e2e already matches) -- PL011 receive
+ecam_bus_range_reg_is_first_bus -- PCIe through the ECAM the device tree names
+block_vblk_mmio_smp -- virtio-mmio transport as well
+dma_edu -- `test_dma_edu` programs each device address
+block_vblk_mmio_smp -- every virtio queue notification writes that virtqueue's index
+virtio_input -- virtio-input for keyboard and pointer
+rtc_offset -- PL031 for the §2.7 wall clock
+fb_limine -- the framebuffer console over the Limine framebuffer
+el0_svc_eret -- `svc` entry and `eret` exit
+current_migrate_if1 -- `current` in `SP_EL0`
+el0_ttbr0 -- `TTBR0` switch on context switch
+el0_pan_every_cpu -- PAN enabled on every CPU
+el0_tagged -- tagged user pointers
+tls_thread_pointer_variant_i_is_aligned -- `TPIDR_EL0` for user TLS
+el0_tls_survive -- the user TLS base is per-thread
+openat_ok -- `openat` (with `AT_FDCWD`)
+stat_aarch64_layout_is_linux -- `struct stat` for `fstat`
+"user: tests ok" (existing: the e2e contract already requires /bin/tests to pass) -- `/sbin/init`, `/bin/sh`, `/bin/tests` from the user crate
+el0_fp_no_leak -- user FP and SIMD state
+fp_fork_inherits -- aarch64 user FP state across
+el0_ring3_signals -- ring 3 cannot halt the kernel on aarch64
+"""
+why = "S9 (#228) squash dropped the Proves lines. Proofs are the registry tests, utests, markers, and host tests; the syscall-convention box has no test and is reopened"
+
+[[erratum]]
+commit = "d1f68f825e3928612cecd7ff7d33ba7f35462bb0"
+was = "make test-kernel -- `make test-kernel ARCH=aarch64` passes"
+proves = "make test-kernel -- CI runs the aarch64"
+why = "S10 (#234) squash kept this trailer after the same squash reopened the GICv2 kernel box; remap it onto the ticked CI aarch64-jobs box"
+
+[[erratum]]
+commit = "d1f68f825e3928612cecd7ff7d33ba7f35462bb0"
+was = "make test-aarch64 -- `make test-kernel ARCH=aarch64` and the e2e"
+proves = "make test-aarch64 -- CI runs the aarch64"
+why = "S10 (#234) squash kept this trailer after the same squash reopened the §11.7 e2e+kernel+GICv2 box; remap it onto the ticked CI aarch64-jobs box"
+
+[[erratum]]
+commit = "e459ebaf1c8d2501a26e026242ca8bb13db0b852"
+was = ""
+proves = "loom_call_function_reuse -- the §4.9 call-function slot is safe to reuse"
+why = "C2 (#300) squash dropped the Proves line; 063778ef carried this trailer for the rewritten call-function box"
+
+[[erratum]]
+commit = "a45037fa88aab00b12dbba61707ceb7407f082ed"
+was = ""
+proves = "el1_x16_survives_irq -- `make test-kernel ARCH=aarch64` runs the portable in-guest groups"
+why = "#299 squash dropped the Proves line; 4e4fc3b5 carried this trailer for the reworded portable-groups box"

@@ -17,7 +17,7 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
 | User build | `make user` (a prerequisite of `make all` and of the ktest kernel): clippy `-D warnings`, then `cargo build -p vibeos-user --target x86_64-unknown-linux-musl` with, through `--config` only, `-D warnings`, `-C linker=rust-lld`, `-C relocation-model=static`, `-C link-self-contained=no`, `-C link-arg=-zseparate-loadable-segments`, `-C link-arg=--image-base=0x40000000`, `-C panic=abort`, and opt-level `"z"`; `scripts/check_user_elf.py` on each unstripped ELF; then each program stripped to `build/user/<name>` |
 | Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
-| Extra host tools | `xorriso`, `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins), `cargo-deny` (`make check`'s `cargo deny check licenses bans sources`, at the version the `check` job pins; `cargo install cargo-deny --locked --version <pin>`), `kani-verifier` at `setup.sh`'s `KANI_VERSION` (`make models` only; `./setup.sh --kani` installs it) |
+| Extra host tools | `xorriso`, `qemu-system-x86_64` (or `qemu-system-aarch64` when `ARCH=aarch64`), `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins), `cargo-deny` (`make check`'s `cargo deny check licenses bans sources`, at the version the `check` job pins; `cargo install cargo-deny --locked --version <pin>`), `kani-verifier` at `setup.sh`'s `KANI_VERSION` (`make models` only; `./setup.sh --kani` installs it) |
 
 `make` is the usual entry. It builds `build/initrd.fat` with hostlib `mkinitrd` and stages it on the
 ISO as `/boot/initrd.fat`, which `limine.conf`'s `module_path:` loads as a Limine module; the kernel
@@ -94,12 +94,12 @@ first module), and derive the rest themselves.
 
 | Request | What we need from it |
 |---------|---------------------|
-| Base revision | Protocol version handshake: revision 3 today; ROADMAP §11.1 moves both architectures to the one revision the pinned Limine accepts on aarch64. Halt with a serial line if unsupported. |
+| Base revision | Protocol version handshake: revision 6 on both architectures (`vibeos::boot::LIMINE_BASE_REVISION`), the lowest the pinned Limine accepts on aarch64, so `BootInfo` differs by platform, never by revision. Halt with a serial line if unsupported. |
 | Framebuffer | Linear BGRX8888, 32 bits per pixel. Row stride is `pitch` bytes, which may exceed `width * 4`. |
 | Memory map | Physical regions and types. Only `USABLE` feeds the buddy allocator. |
 | HHDM | Higher-half direct map offset. `virt = phys + offset` for any physical access before our own tables exist. |
 | Executable address | Physical and virtual base of the loaded kernel, so we can map ourselves and exclude ourselves from the allocator. |
-| RSDP | Physical pointer to the ACPI RSDP. Gates all of ACPI, APIC, HPET, SMP. |
+| RSDP | HHDM pointer to the ACPI RSDP (base revision 4 and later), which `capture` makes physical. Gates all of ACPI, APIC, HPET, SMP. |
 | Modules | The files `limine.conf`'s `module_path:` keys load, as HHDM addresses and lengths: the x86_64 initrd, `/boot/initrd.fat`. `capture` keeps each one's physical range, never a slice over it, and never calls `path()` or `cmdline()`, which unwrap. Optional: with none the root is a ramfs. |
 | Executable command line | The `limine.conf` entry's `cmdline:`, read as raw bytes up to the NUL (at most 2048), never through the crate's `cmdline()`, which unwraps non-UTF-8. Optional: absent means empty. |
 | Stack size | 256 KiB, for the steps before `thread_init::init_bootstrap` moves boot onto its guarded KVA stack ([§4.5](MEMORY.md#45-kernel-virtual-address-allocator)); without the request Limine guarantees 64 KiB. |
@@ -165,12 +165,12 @@ row and that their `order` never decreases down the table.
 | # | Step | Marker | Why here |
 |---|------|--------|----------|
 | 1 | Serial (COM1) and the log ring | `serial online` | Nothing before this is debuggable. The panic handler uses the same port. |
-| 2 | Base revision check | `limine: rev 3 ok` | Everything downstream reads Limine responses. A `panic_test` build stops after this step with `boot: panic-test armed`. |
+| 2 | Base revision check | `limine: rev 6 ok` | Everything downstream reads Limine responses. A `panic_test` build stops after this step with `boot: panic-test armed`. |
 | 6 | `boot::capture`, then the buddy PMM from the memory map | `pmm: <n> free 4KiB frames` | Page tables and heap both need frames. `BootInfo` is captured once; nothing outside `boot` reads a Limine response. A second line, `pmm: <n> total, largest order <n>`, is a diagnostic. |
 | 7 | Page tables, install CR3 | `paging: cr3 ok` | Own the address space before mapping anything device-specific. |
-| 8 | ACPI table walk and the MMIO PTE attribute patch (`acpi_init::init`) | `paging: mmio uc` | LAPIC, I/O APIC and HPET pages must be uncacheable before first touch, so the walk runs right after CR3 and before the heap: moving it after the heap would make that first touch cacheable. Its `acpi: xsdt <n> tables` marker waits for step 12. |
 | 9 | Kernel heap, and a probe allocation read back | `heap ok` | `alloc` becomes legal. Until `irq: enabled` (step 15) boot may use its infallible API; from then on every allocation is fallible ([§4.4](MEMORY.md#44-kernel-heap)). |
-| 10 | Kernel VA allocator, and a guarded-stack probe | `kva: ready` | Guarded stacks need it, so threads and the IST stacks of step 3 need it. This is why steps 6-10 run before steps 3-5. |
+| 10 | Kernel VA allocator, and a guarded-stack probe | `kva: ready` | Guarded stacks need it, so threads and the IST stacks of step 3 need it. This is why steps 6, 7, 9, and 10 run before steps 3-5. |
+| 8 | ACPI table walk; ioremap LAPIC, I/O APIC, HPET, and a SystemMemory FADT reset or sleep page outside the physmap (`acpi_init::init`) | (none) | After KVA so a firmware table outside RAM (highmem reserved BIOS above the 512 MiB identity window) can use `memremap` (MEMORY.md §4.1). Device pages are still ioremapped here, before first MMIO touch (step 13b). Its `acpi: xsdt <n> tables` marker waits for step 12. |
 | 3 | GDT + TSS + IST (`gdt::init_bsp`) | `gdt ok` | A known code selector and a double-fault stack before the IDT is worth installing. The IST stacks are guarded KVA stacks (step 10). |
 | 4 | PIC remap and mask (`pic::remap_and_mask`), skipped when the FADT has `IAPC_BOOT_ARCH` bit 0 clear | `pic: remapped` | Firmware may leave the 8259 live with vectors overlapping CPU exceptions. Bit 0 is `LEGACY_DEVICES`, not 8259 presence. QEMU clears it, so on QEMU this step writes nothing. The remap and mask that always runs is `arch::pic::program`, after TSC calibration in step 13 and before step 13b's `sti` (§5.5; ROADMAP §20.1, F094): QEMU still has a PIC on vector 0x08. |
 | 5 | IDT (and, in a `kernel_tests` build, `arch::catch::init`) | `idt ok` | Exceptions become diagnosable. Hardware IRQs are still masked. The order GDT, PIC remap, IDT is fixed. |
@@ -200,9 +200,9 @@ Ordering rules worth stating separately because they were learned the hard way:
 - The PCI scan that sizes BARs (step 15b) runs before the first AP starts, though its
   `pci: N devices` stays at step 17b. A BAR sized while another CPU runs moves under that CPU's
   MMIO: on QEMU's TCG a LAPIC EOI went astray that way and the CPU never acked an IPI again.
-- ACPI discovery for the step-8 UC patch runs immediately after CR3 (alongside `paging: mmio uc`).
-  The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
-  heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
+- ACPI discovery for the step-8 ioremap of LAPIC, I/O APIC, and HPET runs after KVA (step 10),
+  still before first MMIO touch. The `acpi: xsdt N tables` marker stays at step 12. Firmware
+  tables outside RAM use the identity window when it covers them, else `memremap`.
 - In the ROADMAP §12.1 KASAN build, `_start` maps the early shadow (§4.1) before step 1, since every
   instrumented function reads the shadow, the buddy at step 6 included.
 

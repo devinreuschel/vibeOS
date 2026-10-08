@@ -8,6 +8,8 @@ pub(super) struct Vq {
     pub(super) vq: arch::current::SplitQueue,
     pub(super) qdma: DmaBuffer,
     pub(super) doorbell: u64,
+    /// MMIO QueueNotify is 32-bit; PCI notify is 16-bit.
+    pub(super) notify32: bool,
     pub(super) inflight: [u8; MAX_QSIZE],
 }
 
@@ -42,13 +44,17 @@ pub(super) fn pick_vq(blk: &Blk, need: u16) -> Option<usize> {
     None
 }
 
-pub(super) fn kick(doorbell: u64) {
+pub(super) fn kick(doorbell: u64, qi: u16, notify32: bool) {
     dma::dma_wmb::<Arch>();
     // SAFETY: invariant I54: `doorbell` is a queue's notify register inside
-    // the notify capability's BAR, which `map_mmio` mapped uncached, checked
-    // against the capability length by `vibeos::dev::virtio::notify_addr`;
-    // established by `crate::dev::pci_init::map_mmio`.
+    // a mapped virtio window (`map_mmio`); established by
+    // `crate::dev::pci_init::map_mmio`. The store is that virtqueue's index
+    // (virtio 1.2 sections 4.1.5.2, 4.2.2).
     unsafe {
-        core::ptr::write_volatile(doorbell as *mut u16, 0u16);
+        if notify32 {
+            core::ptr::write_volatile(doorbell as *mut u32, u32::from(virtio::queue_notify(qi)));
+        } else {
+            core::ptr::write_volatile(doorbell as *mut u16, virtio::queue_notify(qi));
+        }
     }
 }

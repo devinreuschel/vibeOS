@@ -34,6 +34,10 @@ pub(crate) fn record(ev: Event, a: u64, b: u64) {
 
 /// Publish the calibration and warp result into the trace's header, where
 /// the core tool reads them. The BSP, once bring-up is done.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub(crate) fn publish_clock(c: &ClockInfo) {
     VIBEOS_TRACE.publish_clock(c);
 }

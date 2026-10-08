@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ from scripts.check_workflows import (
     ledger,
     load_tree,
     parse,
+    rule_aarch64_arm,
     rule_action_pins,
     rule_budget_doc,
     rule_ci_triggers,
@@ -29,6 +31,8 @@ from scripts.check_workflows import (
     rule_lane_capacity,
     rule_lane_map,
     rule_ledger_row,
+    rule_limine_cache,
+    rule_matrix_artifact_names,
     rule_no_core_upload_with_secrets,
     rule_no_expr_in_run,
     rule_permissions,
@@ -544,6 +548,18 @@ class TestTiers(unittest.TestCase):
         )
         self.assertEqual(tiers(tier_ci(entries)), ["tier entry without `jobs`"])
 
+    def test_aarch64_uses_test_aarch64_when_present(self) -> None:
+        makefile = MAKEFILE + "test-d: x.iso\n\trun d\n\ntest-aarch64: test-d\n"
+        entries = (
+            "          - {arch: x86_64, tier: one, targets: test-a test-b test-c, jobs: 1}\n"
+            "          - {arch: aarch64, tier: one, targets: test-a, jobs: 1}\n"
+        )
+        self.assertEqual(
+            tiers(tier_ci(entries), makefile),
+            ["tier one: target test-a is not a `make test-aarch64` tier",
+             "aarch64: `make test-aarch64` runs test-d, no tier does"],
+        )
+
 
 TABLE = (
     "## 8.6 CI\n\ntext\n\n| Arch | Tier | Targets | QEMU s |\n|---|---|---|---|\n"
@@ -557,6 +573,41 @@ def budget(rows: str, text: str | None = None) -> list[tuple[int, str]]:
         testing_md=TABLE.format(rows=rows),
     )
     return [(p.line, p.message) for p in rule_budget_doc(t)]
+
+
+class TestAarch64Arm(unittest.TestCase):
+    def test_aarch64_tier_on_x86_runner_fails(self) -> None:
+        text = (
+            "jobs:\n  tier:\n    runs-on: ${{ matrix.runner }}\n"
+            "    strategy:\n      matrix:\n        include:\n"
+            "          - {arch: aarch64, runner: ubuntu-26.04, tier: k, "
+            "targets: test-kernel-1, jobs: 1}\n"
+            "    steps:\n      - run: make $TARGETS\n"
+        )
+        t = Tree(workflows={CI: parse(text, CI)})
+        got = [(p.rule, p.message) for p in rule_aarch64_arm(t)]
+        self.assertTrue(got and got[0][0] == "aarch64_arm", got)
+
+    def test_aarch64_tier_on_arm_runner_passes(self) -> None:
+        text = (
+            "jobs:\n  tier:\n    runs-on: ${{ matrix.runner }}\n"
+            "    strategy:\n      matrix:\n        include:\n"
+            "          - {arch: aarch64, runner: ubuntu-26.04-arm, tier: k, "
+            "targets: test-kernel-1, jobs: 1}\n"
+            "    steps:\n      - run: make $TARGETS\n"
+        )
+        t = Tree(workflows={CI: parse(text, CI)})
+        self.assertEqual(rule_aarch64_arm(t), [])
+
+    def test_aarch64_build_without_boot_passes(self) -> None:
+        text = (
+            "jobs:\n  build:\n    runs-on: ubuntu-26.04\n"
+            "    strategy:\n      matrix:\n        include:\n"
+            "          - {arch: aarch64}\n"
+            "    steps:\n      - run: make prebuilt\n"
+        )
+        t = Tree(workflows={CI: parse(text, CI)})
+        self.assertEqual(rule_aarch64_arm(t), [])
 
 
 class TestBudgetDoc(unittest.TestCase):
@@ -1306,6 +1357,263 @@ class TestNoCoreUploadWithSecrets(unittest.TestCase):
 
     def test_tree_workflows_pass(self) -> None:
         self.assertEqual(rule_no_core_upload_with_secrets(load_tree(ROOT)), [])
+
+
+def _matrix_upload(
+    matrix: str,
+    *,
+    name: str | None = "vibeos.iso",
+    step_if: str = "",
+    job_if: str = "",
+    extra: str = "",
+) -> str:
+    """A one-job workflow whose matrix is `matrix` (already indented) and which
+    uploads `name` (`None`: omit the input, so v4's default applies)."""
+    name_line = f"          name: {name}\n" if name is not None else ""
+    step = f"        if: {step_if}\n" if step_if else ""
+    job = f"    if: {job_if}\n" if job_if else ""
+    return (
+        "jobs:\n"
+        "  build:\n"
+        f"{job}"
+        "    strategy:\n"
+        "      matrix:\n"
+        f"{matrix}"
+        "    steps:\n"
+        f"      - uses: actions/upload-artifact@{SHA} # v4\n"
+        f"{step}"
+        "        with:\n"
+        f"{name_line}"
+        "          path: build/vibeos.iso\n"
+        f"{extra}"
+    )
+
+
+_TWO_ARCH = (
+    "        include:\n"
+    "          - {arch: x86_64}\n"
+    "          - {arch: aarch64}\n"
+)
+
+
+class TestMatrixArtifactNames(unittest.TestCase):
+    """upload-artifact v4: one name per matrix leg (409 on the second)."""
+
+    def problems(self, text: str) -> list[Problem]:
+        return rule_matrix_artifact_names(tree(text))
+
+    def test_fixed_name_on_two_arches_fails(self) -> None:
+        got = self.problems(_matrix_upload(_TWO_ARCH))
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].rule, "matrix_artifact_names")
+        self.assertIn("'vibeos.iso'", got[0].message)
+        self.assertIn("409", got[0].message)
+
+    def test_arch_in_the_name_passes(self) -> None:
+        text = _matrix_upload(_TWO_ARCH, name="vibeos-${{ matrix.arch }}.iso")
+        self.assertEqual(self.problems(text), [])
+
+    def test_event_if_does_not_split_legs(self) -> None:
+        text = _matrix_upload(
+            _TWO_ARCH,
+            step_if="github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        )
+        self.assertEqual(len(self.problems(text)), 1)
+
+    def test_arch_if_leaves_one_leg(self) -> None:
+        text = _matrix_upload(_TWO_ARCH, step_if="matrix.arch == 'x86_64'")
+        self.assertEqual(self.problems(text), [])
+        wrapped = _matrix_upload(_TWO_ARCH, job_if="${{ matrix.arch == 'aarch64' }}")
+        self.assertEqual(self.problems(wrapped), [])
+
+    def test_shared_arch_needs_every_varying_key(self) -> None:
+        matrix = (
+            "        include:\n"
+            "          - {arch: x86_64, tier: e2e-1}\n"
+            "          - {arch: x86_64, tier: e2e-2}\n"
+        )
+        only_arch = _matrix_upload(matrix, name="results-${{ matrix.arch }}")
+        self.assertEqual(len(self.problems(only_arch)), 1)
+        both = _matrix_upload(matrix, name="results-${{ matrix.arch }}-${{ matrix.tier }}")
+        self.assertEqual(self.problems(both), [])
+
+    def test_non_matrix_job_may_use_a_fixed_name(self) -> None:
+        text = (
+            "jobs:\n"
+            "  check:\n"
+            "    steps:\n"
+            f"      - uses: actions/upload-artifact@{SHA} # v4\n"
+            "        with:\n"
+            "          name: core-coverage\n"
+            "          path: coverage\n"
+        )
+        self.assertEqual(self.problems(text), [])
+
+    def test_one_leg_may_use_a_fixed_name(self) -> None:
+        matrix = "        include:\n          - {arch: x86_64}\n"
+        self.assertEqual(self.problems(_matrix_upload(matrix)), [])
+
+    def test_axis_product(self) -> None:
+        matrix = "        arch: [x86_64, aarch64]\n"
+        self.assertEqual(len(self.problems(_matrix_upload(matrix))), 1)
+        named = _matrix_upload(matrix, name="vibeos-${{ matrix.arch }}.iso")
+        self.assertEqual(self.problems(named), [])
+
+    def test_exclude_can_leave_one_leg(self) -> None:
+        matrix = (
+            "        arch: [x86_64, aarch64]\n"
+            "        exclude:\n"
+            "          - {arch: aarch64}\n"
+        )
+        self.assertEqual(self.problems(_matrix_upload(matrix)), [])
+
+    def test_include_adds_a_leg(self) -> None:
+        matrix = (
+            "        arch: [x86_64]\n"
+            "        include:\n"
+            "          - {arch: aarch64}\n"
+        )
+        self.assertEqual(len(self.problems(_matrix_upload(matrix))), 1)
+
+    def test_omitted_name_uses_the_default(self) -> None:
+        got = self.problems(_matrix_upload(_TWO_ARCH, name=None))
+        self.assertEqual(len(got), 1)
+        self.assertIn("'artifact'", got[0].message)
+
+    def test_overwrite_does_not_excuse_a_shared_name(self) -> None:
+        text = _matrix_upload(_TWO_ARCH, extra="          overwrite: true\n")
+        self.assertEqual(len(self.problems(text)), 1)
+
+    def test_expression_matrix_cannot_be_checked(self) -> None:
+        text = (
+            "jobs:\n"
+            "  build:\n"
+            "    strategy:\n"
+            "      matrix: ${{ fromJSON(needs.x.outputs.matrix) }}\n"
+            "    steps:\n"
+            f"      - uses: actions/upload-artifact@{SHA} # v4\n"
+            "        with:\n"
+            "          name: vibeos.iso\n"
+        )
+        got = self.problems(text)
+        self.assertEqual(len(got), 1)
+        self.assertIn("not literal", got[0].message)
+
+    def test_indexed_matrix_ref_varies(self) -> None:
+        text = _matrix_upload(_TWO_ARCH, name="vibeos-${{ matrix['arch'] }}.iso")
+        self.assertEqual(self.problems(text), [])
+
+    def test_tree_workflows_pass(self) -> None:
+        self.assertEqual(rule_matrix_artifact_names(load_tree(ROOT)), [])
+
+
+class TestLimineCache(unittest.TestCase):
+    """A Limine cache key names setup.sh's LIMINE_TAG and LIMINE_COMMIT."""
+
+    TAG = "v1.2.3"
+    COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+    def setUp(self) -> None:
+        self._td = tempfile.TemporaryDirectory()
+        self.root = Path(self._td.name)
+        self.root.joinpath("setup.sh").write_text(
+            f'LIMINE_TAG="${{LIMINE_TAG:-{self.TAG}}}"\n'
+            f'LIMINE_COMMIT="${{LIMINE_COMMIT:-{self.COMMIT}}}"\n',
+            encoding="utf-8",
+        )
+
+    def tearDown(self) -> None:
+        self._td.cleanup()
+
+    def problems(self, text: str) -> list[Problem]:
+        t = Tree(workflows={WF: wf(text)}, root=self.root)
+        return rule_limine_cache(t)
+
+    def test_old_clone_key_fails(self) -> None:
+        text = """\
+        jobs:
+          a:
+            steps:
+              - uses: actions/cache@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
+                with:
+                  path: limine
+                  key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+        """
+        got = self.problems(text)
+        self.assertEqual([(p.line, p.rule) for p in got], [(7, "limine_cache")])
+        self.assertIn(self.TAG, got[0].message)
+        self.assertIn(self.COMMIT, got[0].message)
+
+    def test_tag_or_commit_prefix_does_not_count(self) -> None:
+        longer_tag = f"limine-v1.2.30-{self.COMMIT}"
+        longer_commit = f"limine-{self.TAG}-{self.COMMIT}ff"
+        for key in (longer_tag, longer_commit):
+            with self.subTest(key=key):
+                text = f"""\
+                jobs:
+                  a:
+                    steps:
+                      - with:
+                          path: limine
+                          key: {key}
+                """
+                got = self.problems(text)
+                self.assertEqual([(p.line, p.rule) for p in got], [(6, "limine_cache")])
+
+    def test_key_naming_setup_pin_passes(self) -> None:
+        key = f"limine-{self.TAG}-{self.COMMIT}-${{{{ runner.arch }}}}"
+        text = f"""\
+        jobs:
+          a:
+            steps:
+              - with:
+                  path: limine
+                  key: {key}
+        """
+        self.assertEqual(self.problems(text), [])
+
+    def test_cargo_cache_is_ignored(self) -> None:
+        text = """\
+        jobs:
+          a:
+            steps:
+              - with:
+                  path: |
+                    ~/.cargo/registry
+                    target
+                  key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+        """
+        self.assertEqual(self.problems(text), [])
+
+    def test_limine_path_or_limine_key_prefix_is_checked(self) -> None:
+        bare = """\
+        jobs:
+          a:
+            steps:
+              - with:
+                  path: limine
+                  key: ${{ runner.os }}-boot
+        """
+        prefixed = """\
+        jobs:
+          a:
+            steps:
+              - with:
+                  path: somewhere
+                  key: limine-old
+        """
+        self.assertEqual([(p.line, p.rule) for p in self.problems(bare)], [(6, "limine_cache")])
+        self.assertEqual(
+            [(p.line, p.rule) for p in self.problems(prefixed)], [(6, "limine_cache")]
+        )
+
+    def test_missing_setup_pin_fails(self) -> None:
+        self.root.joinpath("setup.sh").write_text("echo hi\n", encoding="utf-8")
+        got = self.problems("jobs: {}\n")
+        self.assertEqual([(p.path, p.rule) for p in got], [("setup.sh", "limine_cache")])
+
+    def test_real_workflows_match_setup_pin(self) -> None:
+        self.assertEqual(rule_limine_cache(load_tree(ROOT)), [])
 
 
 class TestTree(unittest.TestCase):

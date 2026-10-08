@@ -5,12 +5,12 @@
 use vibeos::proc::wait_exited;
 
 use crate::ktest::Outcome;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 
 // CS 0x33, SS 0x2b, and DS, ES, FS and GS 0, at the first instruction and
 // again after a `getpid` (the `sysretq` path): exit 0, else the number of
 // the first check that failed (1 to 6), plus 10 after the `getpid`.
-user_code!(
+x86_user_code!(
     USER_SELECTORS,
     "
     xor r12d, r12d
@@ -70,7 +70,7 @@ pub(crate) fn test_user_selectors() -> Outcome {
 // Load 0x2b into DS and fork. Child: exit 0 if its DS is 0x2b, else 1.
 // Parent: exit 3 if its own DS changed, else wait4 the child and exit with
 // its exit code (9 if it did not exit).
-user_code!(
+x86_user_code!(
     USER_DS_FORK,
     "
     mov eax, 0x2b
@@ -128,7 +128,7 @@ pub(crate) fn test_user_ds_fork() -> Outcome {
 // the value this process loaded (0x2b in `USER_DS_SWITCH_2B`, 0 in
 // `USER_DS_SWITCH_0`): exit 0, or 1 on the first mismatch. RBX counts and
 // R12 holds the value: `syscall` preserves both.
-user_code!(
+x86_user_code!(
     USER_DS_SWITCH_2B,
     "
     mov r12d, 0x2b
@@ -154,7 +154,7 @@ user_code!(
     "
 );
 
-user_code!(
+x86_user_code!(
     USER_DS_SWITCH_0,
     "
     xor r12d, r12d

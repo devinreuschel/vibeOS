@@ -72,6 +72,7 @@ impl<T> BootCell<T> {
     /// # Safety
     /// Single writer, before `smp: done`. Must not race `get` / `try_get`.
     pub unsafe fn set(&self, v: T) {
+        // Acquire: pairs with the Release store below in a first `set`.
         assert_eq!(
             self.state.load(Ordering::Acquire),
             UNSET,
@@ -81,6 +82,23 @@ impl<T> BootCell<T> {
         // been handed `&T`, and this is the one writer, before `smp: done`;
         // established by `cell::BootCell::set`'s `# Safety` contract.
         unsafe { (*self.data.get()).write(v) };
+        // Release: pairs with the Acquire load in `try_get`.
+        self.state.store(SET, Ordering::Release);
+    }
+
+    /// Mark the cell set after the caller initialized the payload at [`as_ptr`].
+    ///
+    /// # Safety
+    /// Single writer, before `smp: done`. The payload at [`as_ptr`] is
+    /// initialized. Must not race `get` / `try_get`.
+    pub unsafe fn set_in_place(&self) {
+        // Acquire: pairs with the Release store below in a first `set`.
+        assert_eq!(
+            self.state.load(Ordering::Acquire),
+            UNSET,
+            "BootCell::set twice"
+        );
+        // Release: pairs with the Acquire load in `try_get`.
         self.state.store(SET, Ordering::Release);
     }
 
@@ -93,6 +111,7 @@ impl<T> BootCell<T> {
     }
 
     pub fn try_get(&self) -> Option<&T> {
+        // Acquire: pairs with the Release store in `set`.
         if self.state.load(Ordering::Acquire) == SET {
             // SAFETY: invariant I22: SET is stored with Release after the one
             // write, and this Acquire load saw it, so the value is
@@ -241,6 +260,7 @@ impl<T, A: InterruptMask + PerCpuBase + CellHooks> IrqCell<T, A> {
         loop {
             // Acquire: pairs with the Release store of 0 in `Unlock::drop`
             // (or `force_unlock`), so this holder sees the last one's writes.
+            // Relaxed on failure: the loop retries; pairs with nothing.
             match self
                 .owner
                 .compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed)
@@ -254,8 +274,8 @@ impl<T, A: InterruptMask + PerCpuBase + CellHooks> IrqCell<T, A> {
         impl Drop for Unlock<'_> {
             fn drop(&mut self) {
                 // Release: pairs with the next holder's Acquire
-                // compare-exchange in `with`. Relaxed only in the log ring
-                // loom model's variant (ROADMAP §10.8).
+                // compare-exchange in `with`. The log ring loom model's
+                // variant is Relaxed, which pairs with nothing (ROADMAP §10.8).
                 self.0.store(
                     0,
                     variant::pick(
@@ -355,6 +375,18 @@ mod tests {
         unsafe { c.set(9u32) };
         assert_eq!(*c.get(), 9);
         assert_eq!(c.try_get().copied(), Some(9));
+    }
+
+    #[test]
+    fn bootcell_set_in_place() {
+        let c: BootCell<u32> = BootCell::new();
+        // SAFETY: `c` is this test's local; the payload is written before
+        // `set_in_place`; established here.
+        unsafe {
+            c.as_ptr().write(7u32);
+            c.set_in_place();
+        }
+        assert_eq!(*c.get(), 7);
     }
 
     /// Holds in release builds too (DESIGN §9.4): `make check` runs it with

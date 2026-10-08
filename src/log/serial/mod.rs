@@ -54,6 +54,7 @@ fn capture(bytes: &[u8]) {
 }
 
 fn halting() -> bool {
+    // Acquire: pairs with the Release store in `ipi_init::stop_others`.
     raw::HALTING.load(Ordering::Acquire)
 }
 
@@ -66,6 +67,7 @@ impl Serial {
     /// panic may itself be *in* the serial path (DESIGN §2.5).
     pub fn init() {
         raw::init();
+        // Release: pairs with nothing; nothing reads it.
         INITIALIZED.store(true, Ordering::Release);
     }
 
@@ -192,6 +194,10 @@ impl fmt::Write for Serial {
 /// 100 ms cannot wrap it; the shell's `dmesg` writes to its console. Only
 /// those builds have it.
 #[cfg(any(feature = "kernel_tests", feature = "irqoff"))]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub struct PlainSerial;
 
 #[cfg(any(feature = "kernel_tests", feature = "irqoff"))]

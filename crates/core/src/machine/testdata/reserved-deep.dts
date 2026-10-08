@@ -1,0 +1,25 @@
+/dts-v1/;
+
+/memreserve/ 0x0000000080000000 0x0000000000001000;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa {
+	};
+
+	deep {
+		n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { n { }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; }; };
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		keep@90000000 {
+			reg = <0x0 0x90000000 0x0 0x1000>;
+		};
+	};
+};

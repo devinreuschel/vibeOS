@@ -27,8 +27,8 @@ Phase 10 (consolidation) is closed: every tier `make test` runs passes under TCG
 retry, and the scheduled runs (the nightly KVM leg, the models and Miri, the weekly stress and fuzz
 jobs, macOS) pass on the commit that closes it. TCG proves the per-push tiers; the timing a real CPU
 gives, the TSC-deadline timer and SIMD exceptions are proved by the KVM leg. Phase 11 (portability:
-the aarch64 port) and Phase 12 (demand paging / COW) are not started. See
-[The arc](docs/ROADMAP.md#the-arc).
+the aarch64 port) has S1–S9 in and S10 wiring the arm64 CI, litmus, and docs. Phase 12 (demand paging
+/ COW) is not started. See [The arc](docs/ROADMAP.md#the-arc).
 Do not run code you do not trust on vibeOS, and keep no secrets on it: Phase 10's tests are not a
 proof that no process can crash the kernel, and until Phase 18 nothing stops one from reading other
 processes' memory ([DESIGN §2.10](docs/INVARIANTS.md#210-trust-boundaries)).
@@ -40,7 +40,7 @@ gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing orde
 later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).
 Phase 10 closed the gate lines of Phases 0 to 9 that the kernel review and a later design review reopened, so `v0.8.0`, `v0.9.0` and `v0.10.0` are cut from three commits of `main`, one `phase-<N>` tag each.
 
-Quickstart:
+## x86_64 quickstart
 
     ./setup.sh          # fetches Limine binaries, verifies host tools
     make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts, cargo deny)
@@ -50,6 +50,15 @@ Quickstart:
 
 macOS setup, including the firmware image `make test` needs there:
 [AGENTS.md, How to run](AGENTS.md#how-to-run).
+
+## aarch64 quickstart
+
+On an Apple Silicon Mac, QEMU's HVF (`-accel hvf`):
+
+    ./setup.sh
+    make ARCH=aarch64
+    VIBEOS_QEMU_ACCEL=hvf make ARCH=aarch64 run   # ramfb window; PL011 on the terminal
+    make ARCH=aarch64 check                       # same host gate; kernel target is aarch64
 
 A previous iteration got to SMP with a preemptive scheduler before being scrapped; what survived is
 written down in `docs/`.

@@ -582,6 +582,32 @@ def run_gate(
         out(f"{'PASS' if passed else 'FAIL'}  L{g.line}  {short(g.text)}")
         for r in rows:
             out(r)
+    if phase >= 11:
+        common_path = root / "tests" / "gates" / "common.toml"
+        if not common_path.is_file():
+            out("COMMON no tests/gates/common.toml: from Phase 11 on make gate "
+                "checks its named entries")
+            ok = False
+        else:
+            try:
+                common = check_gates.load_common(
+                    common_path.read_text(encoding="utf-8"),
+                    str(common_path.relative_to(root)),
+                )
+            except check_gates.MapError as err:
+                out(f"COMMON {err}")
+                ok = False
+                common = []
+            for ce in common:
+                rec = Entry("record", ce.cmd, "", "", False)
+                if dry_run:
+                    out(f"COMMON {ce.name}  record {ce.cmd}  (not run)")
+                    continue
+                cr = eval_record(rec, ce.name, commit, phase, tools.history)
+                out(f"{'PASS' if cr.ok else 'FAIL'}  COMMON {ce.name}")
+                if cr.detail:
+                    out(f"      {'ok  ' if cr.ok else 'FAIL'}  {cr.detail}")
+                ok = ok and cr.ok
     for bp in box_problems(roadmap, phase):
         ok = False
         out(f"BOX   ROADMAP.md:{bp.line}  rule {bp.rule}: {short(bp.text)}")
@@ -740,6 +766,16 @@ def record_gate(
         out(f"gate: {err}")
         return 1
     todo = [(ml.key, e) for ml in lines for e in ml.entries if e.kind == "record"]
+    if phase >= 11:
+        common_rel = "tests/gates/common.toml"
+        common_text = git_show(root, commit, common_rel)
+        if common_text is not None:
+            try:
+                for ce in check_gates.load_common(common_text, common_rel):
+                    todo.append((ce.name, Entry("record", ce.cmd, "", "", False)))
+            except check_gates.MapError as err:
+                out(f"gate: {err}")
+                return 1
     ids = [ci_history.record_entry_id(phase, k, e.cmd) for k, e in todo]
     if len(set(ids)) != len(ids):
         out("gate: two record entries share one record path (same line and command); "

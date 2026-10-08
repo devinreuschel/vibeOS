@@ -95,6 +95,7 @@ fn cpus_lines(w: &mut impl Write) -> fmt::Result {
             i += 1;
             continue;
         };
+        // Relaxed: set before the CPU starts, or only that CPU stores it; pairs with nothing.
         writeln!(
             w,
             "vibeOS: cpus: cpu{} apic={} ticks={} switches={} ready={} timer={}",

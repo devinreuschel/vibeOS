@@ -15,9 +15,8 @@ mod sleep;
 mod sweep;
 pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use dead_slot::lifetime_dead_slot_on_cpu;
-pub(crate) use depth::{
-    record, report, stack_depth_exit_scan, stack_depth_planted, wait_exit_depth,
-};
+pub(crate) use depth::report;
+pub(crate) use depth::{record, stack_depth_exit_scan, stack_depth_planted, wait_exit_depth};
 pub(crate) use fill::fill_threads;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 #[cfg(feature = "irqoff")]
@@ -37,6 +36,7 @@ pub(crate) use sweep::{sched_overdue_lost_timeout, sched_sweep_cost};
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::apic::TimerMode;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::paging::PAGE_SIZE_4K;
@@ -45,8 +45,9 @@ use vibeos::proc::{SIGKILL, wait_exited, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 use vibeos::thread::{ThreadId, ThreadState};
 
+#[cfg(target_arch = "x86_64")]
 use crate::apic_init;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{
     FrameCount, Outcome, Test, dying_entry, quiescent_free_frames, registry_tid, second_cpu,
     sleep_until, spin_until_ns, test,
@@ -557,8 +558,9 @@ pub(crate) fn test_workqueue() -> Outcome {
     Outcome::Ok
 }
 
-/// The registry's stack size ROADMAP §10.2 names.
-const REGISTRY_STACK_BYTES: u64 = 64 * 1024;
+/// The registry stack `ktest::run` spawns: 64 KiB on x86_64 (ROADMAP §10.2),
+/// 16 KiB on aarch64 (ROADMAP §11.3).
+const REGISTRY_STACK_BYTES: u64 = (crate::ktest::REGISTRY_STACK_PAGES as u64) * PAGE_SIZE_4K;
 
 /// How long [`ktest_context`] yields for its worker.
 const WORKER_WAIT_NS: u64 = 1_000_000_000;
@@ -631,7 +633,11 @@ pub(crate) fn ktest_context() -> Outcome {
         let stack = unsafe { &(*crate::arch::current_tcb()).stack };
         return match stack {
             Some(ks) if (ks.pages() as u64) * PAGE_SIZE_4K != REGISTRY_STACK_BYTES => {
-                Outcome::Fail("registry stack not 64 KiB")
+                crate::fail_fmt!(
+                    "registry stack {} KiB, want {} KiB",
+                    (ks.pages() as u64) * PAGE_SIZE_4K / 1024,
+                    REGISTRY_STACK_BYTES / 1024
+                )
             }
             _ => Outcome::Fail("registry stack not guarded"),
         };
@@ -757,7 +763,7 @@ pub(crate) fn spawn_stack_oom() -> Outcome {
 
 // fork(): exit 0 when it returns -ENOMEM, 1 when it returns a pid; a
 // child exits 2.
-user_code!(
+x86_user_code!(
     FORK_ENOMEM,
     "
     mov eax, 57
@@ -958,7 +964,7 @@ pub(crate) fn lifetime_stack_reclaim() -> Outcome {
 
 // Spin about 10 million iterations (several 10 ms quanta under TCG), then
 // exit(0).
-user_code!(
+x86_user_code!(
     SPIN_EXIT0,
     "
     mov ecx, 10000000
@@ -1042,7 +1048,7 @@ pub(crate) fn exit_burst() -> Outcome {
 
 // P: fill XMM0-15 with the pattern, sched_yield 20,000 times, then exit 0
 // only if all 16 still hold it.
-user_code!(
+x86_user_code!(
     FP_PATTERN_YIELD,
     "
     mov rax, 0x5A5A5A5A5A5A5A5A
@@ -1129,7 +1135,7 @@ user_code!(
 );
 
 // Q: exit 1 if any XMM register holds P's pattern at entry, else 0.
-user_code!(
+x86_user_code!(
     FP_PATTERN_PROBE,
     "
     mov rbx, 0x5A5A5A5A5A5A5A5A
@@ -1231,7 +1237,7 @@ pub(crate) fn test_fp_no_leak() -> Outcome {
 
 // Keep a counter in xmm0 and in memory, compare them on every iteration,
 // exit 1 on a mismatch; getpid every 4,096 iterations so a kill lands.
-user_code!(
+x86_user_code!(
     FP_COUNTER,
     "
     sub rsp, 16
@@ -1320,6 +1326,11 @@ pub(crate) fn boot_stack_guarded() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
+    Outcome::Skip("x86 timer vector")
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -1331,7 +1342,6 @@ pub(crate) const TESTS: &[Test] = &[
     test("idle_runs", test_idle_runs),
     test("reap_returns_frames", test_reap_returns_frames),
     test("reap_many_via_idle", test_reap_many_via_idle),
-    #[cfg(target_arch = "x86_64")]
     test("sched_lock_timer_irq", test_sched_lock_timer_irq),
     test("spawn_exit_thousands", test_spawn_exit_thousands),
     test("cross_cpu_spawn", test_cross_cpu_spawn),

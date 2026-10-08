@@ -94,10 +94,10 @@ pub(super) fn with_initrd<R>(f: impl FnOnce(&mut Option<Span>) -> R) -> R {
 fn initrd_span() -> Option<(u64, usize)> {
     let r = crate::boot::info().initrd()?;
     let len = usize::try_from(r.end.checked_sub(r.start)?).ok()?;
-    let va = r.start.checked_add(crate::paging_init::HHDM_BASE)?;
+    let va = r.start.checked_add(crate::paging_init::hhdm_offset())?;
     let last = r.end.checked_sub(1)?;
     let mapped = |pa: u64| {
-        let va = pa.checked_add(crate::paging_init::HHDM_BASE)?;
+        let va = pa.checked_add(crate::paging_init::hhdm_offset())?;
         let (got, _, _) = crate::paging_init::translate(vibeos::paging::VirtAddr(va))?;
         (got.as_u64() == pa).then_some(())
     };
@@ -224,6 +224,7 @@ fn with_vol<R>(
     f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
 ) -> Result<R, FsError> {
     let mut g = v.vol.lock();
+    // Acquire: pairs with the Release store in `drop_slot`.
     if !v.used.load(Ordering::Acquire) {
         return Err(FsError::Io);
     }
@@ -586,6 +587,7 @@ impl FileSystem for FatFs {
     }
 
     fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        // Acquire: pairs with nothing; set once when the volume is built.
         let root_clu = vol_of(cx)?.root_clu.load(Ordering::Acquire);
         *cx.private = [0, 0];
         Ok(InodeInfo {
@@ -609,12 +611,14 @@ impl FileSystem for FatFs {
     /// then `release`).
     fn on_mount(&self, cx: &mut OpCx<'_>, _at: &[u8]) {
         if let Ok(v) = vol_of(cx) {
+            // Release: pairs with nothing; nothing reads it yet.
             v.sb.store(cx.sb, Ordering::Release);
         }
     }
 }
 
 pub fn live() -> bool {
+    // Acquire: pairs with the Release stores in `init`.
     LIVE.load(Ordering::Acquire)
 }
 
@@ -662,15 +666,18 @@ pub(super) fn hold<R>(v: &FatVolume, f: impl FnOnce() -> R) -> R {
 /// ramfs root. The root superblock owns the initrd's volume.
 pub fn init() {
     let Some((va, len)) = initrd_span() else {
+        // Release: pairs with the Acquire load in `live`.
         LIVE.store(false, Ordering::Release);
         return;
     };
     with_initrd(|span| *span = Some(Span { va, len }));
     let Ok(vol) = new_volume(Media::Initrd) else {
+        // Release: pairs with the Acquire load in `live`.
         LIVE.store(false, Ordering::Release);
         return;
     };
     let root = fs_init::api().mount_root(&FAT_FS, None, false, Some(vol));
+    // Release: pairs with the Acquire load in `live`.
     LIVE.store(root.is_ok(), Ordering::Release);
 }
 
@@ -749,7 +756,9 @@ pub fn initrd_geometry() -> Option<(u64, u64)> {
 pub(super) fn drop_slot(vol: &FatVolume) {
     let mut g = vol.vol.lock();
     g.clear();
+    // Release: pairs with the Acquire load in `with_vol`.
     vol.used.store(false, Ordering::Release);
+    // Release: pairs with nothing; nothing reads it yet.
     vol.sb.store(NO_SB, Ordering::Release);
 }
 

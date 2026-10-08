@@ -406,6 +406,8 @@ impl<T: ?Sized> TryArc<T> {
 /// this holder's uses of the value happen before its release. Only a loom
 /// variant weakens it (`sync::variant::Site::TryArcDecrement`).
 fn put_order() -> Ordering {
+    // Release: pairs with the last holder's Acquire fence in `put_raw`; the
+    // loom variant's Relaxed pairs with nothing.
     variant::pick(
         variant::Site::TryArcDecrement,
         Ordering::Release,
@@ -426,6 +428,7 @@ fn put_order() -> Ordering {
 /// and the caller owns one of its counts, which it gives up here.
 unsafe fn put_raw(h: NonNull<Header>, dec: Ordering, force_defer: bool) {
     let hp = h.as_ptr();
+    // Relaxed: the compare-exchange below rechecks it; pairs with nothing.
     // SAFETY: the caller owns a count, so the cell stays live until this
     // thread's decrement below; established by `kalloc::put_raw`'s
     // `# Safety` section.
@@ -435,6 +438,7 @@ unsafe fn put_raw(h: NonNull<Header>, dec: Ordering, force_defer: bool) {
         if c >= ARC_SATURATED {
             return;
         }
+        // Relaxed on failure: the loop retries with the value read; pairs with nothing.
         // SAFETY: until this compare-exchange succeeds, the caller's count
         // keeps the cell live; established by `kalloc::put_raw`'s
         // `# Safety` section.
@@ -466,9 +470,11 @@ impl<T: ?Sized> Clone for TryArc<T> {
         // the cell alive, so nothing is published. At the saturation value
         // the count sticks and the value leaks, instead of panicking.
         let count = &self.inner().hdr.count;
+        // Relaxed: the caller's reference publishes nothing; pairs with nothing.
         let mut c = count.load(Ordering::Relaxed);
         // At the saturation value the count sticks (I27).
         while c < ARC_SATURATED {
+            // Relaxed both ways, as the load; pairs with nothing.
             match count.compare_exchange_weak(c, c + 1, Ordering::Relaxed, Ordering::Relaxed) {
                 Ok(_) => break,
                 Err(now) => c = now,
@@ -510,6 +516,7 @@ static DEFERRED_LEAKS: statics::AtomicUsize = statics::AtomicUsize::new(0);
 
 /// Counted objects leaked by dropped [`Deferred`] tokens since boot.
 pub fn deferred_leaks() -> usize {
+    // Relaxed: a statistic; pairs with nothing.
     DEFERRED_LEAKS.load(statics::Ordering::Relaxed)
 }
 
@@ -547,6 +554,7 @@ impl Drop for Deferred {
         reason = "a dropped Deferred is a kernel bug, never input: it panics in debug builds, as a dropped pmm::Frames does (DESIGN §4.2)"
     )]
     fn drop(&mut self) {
+        // Relaxed: a statistic; pairs with nothing.
         DEFERRED_LEAKS.fetch_add(1, statics::Ordering::Relaxed);
         #[cfg(debug_assertions)]
         {
@@ -596,14 +604,18 @@ impl DeferList {
     pub fn push(&self, d: Deferred) -> bool {
         let h = d.0;
         mem::forget(d);
+        // Relaxed: the compare-exchange below rechecks it; pairs with nothing.
         let mut cur = self.head.load(Ordering::Relaxed);
         loop {
+            // Relaxed: the AcqRel compare-exchange below publishes it; pairs with nothing.
             // SAFETY: `h` is a cell whose count reached zero and which only
             // this push reaches until the compare-exchange below publishes
             // it (`kalloc::put_raw`).
             unsafe { (*h.as_ptr()).next.store(cur, Ordering::Relaxed) };
-            // Release publishes `next`; Acquire, so the list stays one
-            // release sequence that `release_all`'s swap reads whole.
+            // AcqRel: pairs with the AcqRel swap in `release_all`. Release
+            // publishes `next`; Acquire, so the list stays one release
+            // sequence that `release_all`'s swap reads whole.
+            // Relaxed on failure: the loop retries; pairs with nothing.
             match self
                 .head
                 .compare_exchange(cur, h.as_ptr(), Ordering::AcqRel, Ordering::Relaxed)
@@ -612,18 +624,21 @@ impl DeferList {
                 Err(now) => cur = now,
             }
         }
+        // AcqRel: pairs with the Release stores of `false` in `unclaim` and `release_all`.
         !self.queued.swap(true, Ordering::AcqRel)
     }
 
     /// Take the duty to queue a release item: true if the list holds
     /// objects and no item is queued for it.
     pub fn claim(&self) -> bool {
+        // AcqRel: pairs with the Release stores of `false` in `unclaim` and `release_all`.
         !self.is_empty() && !self.queued.swap(true, Ordering::AcqRel)
     }
 
     /// Give back the duty `push` or `claim` handed out, when queueing the
     /// item failed. A later `claim` retries.
     pub fn unclaim(&self) {
+        // Release: pairs with the AcqRel swap in `push` or `claim`.
         self.queued.store(false, Ordering::Release);
     }
 
@@ -632,14 +647,16 @@ impl DeferList {
     /// before it takes the list, so an object pushed after the take makes
     /// its pusher queue a new item.
     pub fn release_all(&self) -> usize {
+        // Release: pairs with the AcqRel swap in `push` or `claim`.
         self.queued.store(false, Ordering::Release);
+        // AcqRel: pairs with the compare-exchange in `push`, so every `next` is visible.
         let mut p = self.head.swap(ptr::null_mut(), Ordering::AcqRel);
         let mut n = 0usize;
         while let Some(h) = NonNull::new(p) {
+            // Relaxed: the swap's Acquire read the push that stored it; pairs with nothing.
             // SAFETY: every node on the list is a cell whose count reached
             // zero, and the swap above took the list whole, so only this
-            // walk reaches it (`kalloc::DeferList::push`). Relaxed: the
-            // swap's Acquire read the push that published `next`.
+            // walk reaches it (`kalloc::DeferList::push`).
             p = unsafe { (*h.as_ptr()).next.load(Ordering::Relaxed) };
             Deferred(h).release_now();
             n = n.saturating_add(1);
@@ -649,6 +666,7 @@ impl DeferList {
 
     /// Whether the list holds no object.
     pub fn is_empty(&self) -> bool {
+        // Acquire: pairs with the AcqRel compare-exchange in `push` and swap in `release_all`.
         self.head.load(Ordering::Acquire).is_null()
     }
 }
@@ -775,6 +793,8 @@ impl<T: Teardown> UsersArc<T> {
 /// value happen before the teardown. Only a loom variant weakens it
 /// (`sync::variant::Site::UsersDecrement`).
 fn users_put_order() -> Ordering {
+    // Release: pairs with the last holder's Acquire fence in `UsersArc::drop`; the
+    // loom variant's Relaxed pairs with nothing.
     variant::pick(
         variant::Site::UsersDecrement,
         Ordering::Release,
@@ -819,19 +839,22 @@ impl<T: Teardown> CoreArc<T> {
     pub fn pin(&self) -> Option<UsersArc<T>> {
         let users = &self.core.users;
         if variant::pick(variant::Site::UsersBlindPin, false, true) {
+            // Relaxed: the loom variant's blind pin; pairs with nothing.
             users.fetch_add(1, Ordering::Relaxed);
             return Some(UsersArc {
                 core: self.core.clone(),
             });
         }
+        // Relaxed: the compare-exchange below rechecks it; pairs with nothing.
         let mut c = users.load(Ordering::Relaxed);
         loop {
             if c == 0 {
                 return None;
             }
             let n = c.checked_add(1)?;
-            // Acquire: the pin's uses of the value come after the
-            // increment that found it live.
+            // Acquire: pairs with the Release put in `UsersArc::drop`; the
+            // pin's uses of the value come after the increment that found it
+            // live. Relaxed on failure: the loop retries; pairs with nothing.
             match users.compare_exchange_weak(c, n, Ordering::Acquire, Ordering::Relaxed) {
                 Ok(_) => {
                     return Some(UsersArc {
@@ -845,6 +868,7 @@ impl<T: Teardown> CoreArc<T> {
 
     /// The `users` count now: a snapshot, for tests and statistics.
     pub fn users(&self) -> usize {
+        // Relaxed: a snapshot for tests and statistics; pairs with nothing.
         self.core.users.load(Ordering::Relaxed)
     }
 }

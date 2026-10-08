@@ -1,0 +1,21 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <0x02>;
+	#size-cells = <0x02>;
+
+	aliases {
+		serial0 = "/pl011@9000000";
+	};
+
+	pl011@9040000 {
+		compatible = "arm,pl011";
+		status = "okay";
+		reg = <0x00 0x9040000 0x00 0x1000>;
+	};
+
+	pl011@9000000 {
+		compatible = "arm,pl011";
+		reg = <0x00 0x9000000 0x00 0x1000>;
+	};
+};

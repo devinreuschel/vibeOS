@@ -3,7 +3,9 @@
 use core::alloc::Layout;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::lock::{RANK_BUDDY, RANK_DEVICE, RANK_HEAP, RANK_PT, RANK_SCHED, RANK_SERIAL};
+#[cfg(target_arch = "x86_64")]
+use vibeos::lock::{RANK_BUDDY, RANK_HEAP, RANK_SERIAL};
+use vibeos::lock::{RANK_DEVICE, RANK_PT, RANK_SCHED};
 use vibeos::sync::OpGate;
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::Instant;
@@ -95,6 +97,7 @@ impl<T> SpinMutex<T> {
 }
 
 /// Spin iterations per lock rank (index by rank; 0 unused). Phase 19 baseline.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn spin_counts() -> [u64; sync_init::SPIN_RANKS] {
     core::array::from_fn(|i| sync_init::SPINS[i].load(Ordering::Relaxed))
 }
@@ -102,6 +105,7 @@ pub(crate) fn spin_counts() -> [u64; sync_init::SPIN_RANKS] {
 /// Print the spin counters per lock rank at the end of a run, as an info
 /// line: a measurement, never a result, so no test row counts it as a pass
 /// (DESIGN §8.2, F142).
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn report_spins() {
     let c = spin_counts();
     crate::ktest_info!(
@@ -303,7 +307,8 @@ const CELL_CASES: &[CellCase] = &[
     CellCase {
         name: "proc_init::TABLE",
         take: || {
-            let _ = crate::proc_init::dispatch(vibeos::syscall::SYS_GETPPID, [0; 6]);
+            let _ =
+                crate::proc_init::dispatch(crate::arch::current::syscall_nr::SYS_GETPPID, [0; 6]);
         },
         file: "src/proc/proc_init/mod.rs",
         rank: RANK_SCHED,
@@ -323,12 +328,13 @@ const CELL_CASES: &[CellCase] = &[
     CellCase {
         name: "irq_init::IRQ",
         take: || {
-            let _ = crate::irq_init::cpu_of(0x40);
+            let _ = crate::irq_init::cpu_of(vibeos::irq::IrqId::NONE);
         },
         file: "src/irq/irq_init.rs",
         rank: RANK_DEVICE,
         count: 1,
     },
+    #[cfg(target_arch = "x86_64")]
     CellCase {
         name: "apic_init::STATE",
         take: || {
@@ -338,6 +344,7 @@ const CELL_CASES: &[CellCase] = &[
         rank: RANK_DEVICE,
         count: 1,
     },
+    #[cfg(target_arch = "x86_64")]
     CellCase {
         name: "kbd_init::KBD",
         take: || {

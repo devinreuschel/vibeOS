@@ -246,6 +246,7 @@ pub const fn calib_in_band(reference: u64, sample: u64, lo_pct: u64, hi_pct: u64
 /// `fetch_max` then return the larger of previous and `n`. `last` is a
 /// `static` (`time_init::LAST_NS`), so it takes the seam's `core` flavour.
 pub fn monotonic_max(last: &statics::AtomicU64, n: u64) -> u64 {
+    // Relaxed: the read-modify-write alone keeps it monotonic; pairs with nothing.
     last.fetch_max(n, statics::Ordering::Relaxed).max(n)
 }
 
@@ -268,6 +269,8 @@ pub enum ClocksourceId {
     Tsc = 1,
     Hpet = 2,
     AcpiPm = 3,
+    /// `CNTVCT_EL0` (aarch64).
+    Cntvct = 4,
 }
 
 impl ClocksourceId {
@@ -277,6 +280,7 @@ impl ClocksourceId {
             ClocksourceId::Tsc => "tsc",
             ClocksourceId::Hpet => "hpet",
             ClocksourceId::AcpiPm => "acpi_pm",
+            ClocksourceId::Cntvct => "cntvct",
         }
     }
 
@@ -286,6 +290,7 @@ impl ClocksourceId {
             1 => Some(ClocksourceId::Tsc),
             2 => Some(ClocksourceId::Hpet),
             3 => Some(ClocksourceId::AcpiPm),
+            4 => Some(ClocksourceId::Cntvct),
             _ => None,
         }
     }
@@ -443,12 +448,17 @@ pub struct Candidates {
     pub tsc_warp_ok: bool,
     pub hpet: Option<Counter>,
     pub pm: Option<Counter>,
+    pub cntvct: Option<Counter>,
 }
 
-/// The clocksource (DESIGN §6.4): the TSC when CPUID reports it invariant
-/// and no warp test saw it step backward, then the HPET main counter, then
-/// the ACPI PM timer. None: no candidate.
+/// The clocksource (DESIGN §6.4): `CNTVCT` when the port has it, else the
+/// TSC when CPUID reports it invariant and no warp test saw it step
+/// backward, then the HPET main counter, then the ACPI PM timer. None:
+/// no candidate.
 pub fn rank(c: &Candidates) -> Option<Counter> {
+    if let Some(v) = c.cntvct {
+        return Some(v);
+    }
     let tsc = c.tsc.filter(|_| c.tsc_invariant && c.tsc_warp_ok);
     tsc.or(c.hpet).or(c.pm)
 }
@@ -496,15 +506,17 @@ impl Payload {
     }
 
     fn store(&self, s: Snapshot) {
-        // Relaxed: ordered by the fences around the sequence bumps.
+        // Relaxed: ordered by the fences around the sequence bumps; pairs with nothing.
         self.id.store(s.id as u64, Ordering::Relaxed);
+        // Relaxed: as `id`; pairs with nothing.
         self.cycles.store(s.cycles, Ordering::Relaxed);
+        // Relaxed: as `id`; pairs with nothing.
         self.ns.store(s.ns, Ordering::Relaxed);
     }
 
     /// The raw words: id, cycles, ns. The id is 0 before the first write.
     fn load(&self) -> (u64, u64, u64) {
-        // Relaxed: ordered by the reader's `fence(Acquire)`.
+        // Relaxed: ordered by the reader's `fence(Acquire)`; pairs with nothing.
         (
             self.id.load(Ordering::Relaxed),
             self.cycles.load(Ordering::Relaxed),
@@ -562,15 +574,17 @@ impl TickClock {
         // The loom models' variants (ROADMAP §10.8): F098's lone AcqRel
         // `fetch_add`, and the bump without its leading fence.
         if variant::pick(Site::SeqlockBumpAcqRel, false, true) {
+            // AcqRel: pairs with the reader's Acquire load of `seq`; F098 shows it is not enough.
             self.seq.fetch_add(1, Ordering::AcqRel);
             return;
         }
         if variant::pick(Site::SeqlockLeadingFence, true, false) {
-            // Release: orders the stores of the copy written before this
-            // bump ahead of it, for a reader whose Acquire load of `seq`
-            // sees the bump and then reads that copy.
+            // Release: pairs with the reader's Acquire load of `seq`; it
+            // orders the stores of the copy written before this bump ahead
+            // of it, for a reader that sees the bump and then reads that copy.
             fence(Ordering::Release);
         }
+        // Relaxed: the one writer's count, which the fences order; pairs with nothing.
         self.seq.fetch_add(1, Ordering::Relaxed);
         // Release: pairs with the reader's `fence(Acquire)` after its
         // payload loads. A reader that loaded any store made after this
@@ -608,10 +622,13 @@ impl TickClock {
     /// when `seq` changed.
     pub fn read(&self) -> Option<Snapshot> {
         loop {
+            // Acquire: pairs with the leading Release fence in `bump`.
             let s1 = self.seq.load(Ordering::Acquire);
             let v = self.copy(s1).load();
-            // Payload loads must not move past the seq re-check.
+            // Acquire: pairs with the trailing Release fence in `bump`;
+            // payload loads must not move past the seq re-check.
             fence(Ordering::Acquire);
+            // Relaxed: ordered by the Acquire fence above; pairs with nothing.
             let s2 = self.seq.load(Ordering::Relaxed);
             if s1 == s2 {
                 return decode(v);
@@ -631,11 +648,14 @@ impl TickClock {
         counter: impl Fn(ClocksourceId) -> Option<Counter>,
     ) -> u64 {
         loop {
+            // Acquire: pairs with the leading Release fence in `bump`.
             let s1 = self.seq.load(Ordering::Acquire);
             let v = self.copy(s1).load();
+            // Acquire: pairs with the trailing Release fence in `bump`.
             fence(Ordering::Acquire);
             let snap = decode(v);
             let raw = snap.map(|s| read_raw(s.id));
+            // Relaxed: ordered by the Acquire fence above; pairs with nothing.
             let s2 = self.seq.load(Ordering::Relaxed);
             if s1 != s2 {
                 continue;
@@ -1244,12 +1264,16 @@ mod tests {
             tsc_warp_ok: true,
             hpet: Some(hpet),
             pm: Some(pm),
+            cntvct: None,
         };
         assert_eq!(rank(&c), Some(tsc));
         c.tsc = None;
         assert_eq!(rank(&c), Some(hpet));
         c.hpet = None;
         assert_eq!(rank(&c), Some(pm));
+        let cntvct = Counter::new(ClocksourceId::Cntvct, 24_000_000, 64).unwrap();
+        c.cntvct = Some(cntvct);
+        assert_eq!(rank(&c), Some(cntvct));
     }
 
     #[test]
@@ -1261,6 +1285,7 @@ mod tests {
             tsc_warp_ok: true,
             hpet: Some(hpet),
             pm: Some(pm),
+            cntvct: None,
         };
         let not_inv = Candidates {
             tsc_invariant: false,
@@ -1289,6 +1314,7 @@ mod tests {
             tsc_warp_ok: true,
             hpet: None,
             pm: None,
+            cntvct: None,
         };
         assert_eq!(rank(&none), None);
         // A TSC that is not invariant is no candidate.
@@ -1317,15 +1343,17 @@ mod tests {
         assert_eq!(ClocksourceId::Tsc.as_str(), "tsc");
         assert_eq!(ClocksourceId::Hpet.as_str(), "hpet");
         assert_eq!(ClocksourceId::AcpiPm.as_str(), "acpi_pm");
+        assert_eq!(ClocksourceId::Cntvct.as_str(), "cntvct");
         for id in [
             ClocksourceId::Tsc,
             ClocksourceId::Hpet,
             ClocksourceId::AcpiPm,
+            ClocksourceId::Cntvct,
         ] {
             assert_eq!(ClocksourceId::from_u64(id as u64), Some(id));
         }
         assert_eq!(ClocksourceId::from_u64(0), None);
-        assert_eq!(ClocksourceId::from_u64(4), None);
+        assert_eq!(ClocksourceId::from_u64(5), None);
     }
 
     #[test]

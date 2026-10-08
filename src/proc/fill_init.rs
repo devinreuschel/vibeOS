@@ -125,16 +125,20 @@ pub(crate) mod testing {
     }
 
     pub(super) fn note_hold(b: Batch) {
+        // Relaxed: a statistic; pairs with nothing.
         HOLDS.fetch_add(1, Ordering::Relaxed);
+        // Relaxed: a statistic; pairs with nothing.
         MAX_PAGES.fetch_max(b.pages as u64, Ordering::Relaxed);
         let last = b.va + (b.pages.saturating_sub(1) as u64) * vibeos::paging::PAGE_SIZE_4K;
         if b.va / LEAF_SPAN != last / LEAF_SPAN {
+            // Relaxed: a statistic; pairs with nothing.
             CROSSED.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     pub(super) fn note_boundary(if_on: bool) {
         if !if_on {
+            // Relaxed: a statistic; pairs with nothing.
             IF_OFF.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -142,11 +146,13 @@ pub(crate) mod testing {
     /// Zero the counters.
     pub(crate) fn reset() {
         for c in [&HOLDS, &MAX_PAGES, &CROSSED, &IF_OFF] {
+            // Relaxed: statistics; pairs with nothing.
             c.store(0, Ordering::Relaxed);
         }
     }
 
     pub(crate) fn stats() -> Stats {
+        // Relaxed: statistics; pairs with nothing.
         Stats {
             holds: HOLDS.load(Ordering::Relaxed),
             max_pages: MAX_PAGES.load(Ordering::Relaxed),

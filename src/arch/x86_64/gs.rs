@@ -49,7 +49,7 @@ pub fn force_kernel() {
         x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
         x86::load_data_segs(KERNEL_DS);
     }
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     crate::arch::x86_64::catch::force_kernel_window();
     // SAFETY: invariant I4, as above; established here.
     unsafe { x86::wrmsr(IA32_GS_BASE, ptr) };

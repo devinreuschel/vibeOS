@@ -1,0 +1,9 @@
+X86 vibeos-seqlock-odd-llsc-x86
+(* x86 has no LDXR/STXR. The same odd bump is LOCK INC, and the same
+   outcome is forbidden without an MFENCE. *)
+{
+}
+ P0                 | P1               ;
+ LOCK INC [ver]     | MOV EAX,[data]  ;
+ MOV [data],$1      | MOV EBX,[ver]   ;
+exists (1:EAX=1 /\ 1:EBX=0)

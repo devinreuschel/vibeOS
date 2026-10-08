@@ -6,50 +6,130 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use vibeos::acpi::HpetInfo;
-use vibeos::arch::CycleCounter;
-use vibeos::pic::{PIC_EOI, PIC1_CMD};
-use vibeos::time::{
-    Bracketed, CalibSource, Candidates, ClockWriter, ClocksourceId, Counter, FS_PER_MS,
-    HPET_CALIB_READS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CALIB_WINDOWS,
-    PIT_CH0_WRITES, PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE, PM_TIMER_HZ, PitWindow,
-    Snapshot, TickClock, WallOrigin, bcd_to_bin, hpet_hz, hpet_period_ok, monotonic_max, rank,
-    tsc_per_ms_from_hpet_brackets, tsc_per_ms_from_pit_windows, unix_from_civil, wall_unix_s,
-};
-
 #[cfg(target_arch = "x86_64")]
-#[cfg(feature = "kernel_tests")]
-use vibeos::time::{PIT_CH0, PIT_CMD_CH0_LATCH};
-
 use crate::acpi_init;
 use crate::arch::current::{Arch, interrupts_enabled, wait_for_interrupt};
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86_64::{has_rdtscp, invariant_tsc, rdtsc_ser};
 use crate::cell::{BootCell, IrqCell};
-use crate::paging_init;
+use crate::machine_init;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
+use vibeos::acpi::HpetInfo;
+use vibeos::arch::CycleCounter;
+#[cfg(target_arch = "x86_64")]
+use vibeos::pic::{PIC_EOI, PIC1_CMD};
+#[cfg(target_arch = "x86_64")]
+use vibeos::time::{
+    Bracketed, FS_PER_MS, HPET_CALIB_READS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS,
+    PIT_CALIB_WINDOWS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE,
+    PM_TIMER_HZ, PitWindow, bcd_to_bin, tsc_per_ms_from_hpet_brackets, tsc_per_ms_from_pit_windows,
+    unix_from_civil,
+};
+use vibeos::time::{
+    CalibSource, Candidates, ClockWriter, ClocksourceId, Counter, Snapshot, TickClock, WallOrigin,
+    hpet_hz, hpet_period_ok, monotonic_max, rank, wall_unix_s,
+};
+#[cfg(target_arch = "x86_64")]
+#[cfg(feature = "kernel_tests")]
+use vibeos::time::{PIT_CH0, PIT_CMD_CH0_LATCH};
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const HPET_GEN_CFG: u64 = 0x10;
 const HPET_MAIN: u64 = 0xF0;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const HPET_ENABLE: u64 = 1;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const HPET_LEGACY: u64 = 2;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const CALIB_SPIN_CAP: u64 = 1_000_000_000;
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_INDEX: u16 = 0x70;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_DATA: u16 = 0x71;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_SEC: u8 = 0x00;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_MIN: u8 = 0x02;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_HOUR: u8 = 0x04;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_DAY: u8 = 0x07;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_MONTH: u8 = 0x08;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_YEAR: u8 = 0x09;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_STATUS_A: u8 = 0x0A;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_STATUS_B: u8 = 0x0B;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_CENTURY: u8 = 0x32;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_UIP: u8 = 1 << 7;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_DM_BINARY: u8 = 1 << 2;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_24H: u8 = 1 << 1;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const RTC_NMI_OFF: u8 = 0x80;
 
 pub(super) struct TimeState {
@@ -58,7 +138,15 @@ pub(super) struct TimeState {
     /// never the clock.
     ticks: AtomicU64,
     tsc_per_ms: u64,
+    #[cfg_attr(
+        target_arch = "aarch64",
+        expect(dead_code, reason = "PIT/HPET calib source is x86")
+    )]
     pub(super) source: CalibSource,
+    #[cfg_attr(
+        target_arch = "aarch64",
+        expect(dead_code, reason = "x86-only on the boot-CPU slice")
+    )]
     pub(super) use_rdtscp: bool,
     pub(super) invariant_tsc: bool,
     /// The TSC at `tsc_per_ms * 1000` Hz, once calibrated.
@@ -67,6 +155,8 @@ pub(super) struct TimeState {
     hpet: Option<(Counter, u64)>,
     /// The ACPI PM timer and its `TMR_VAL` port.
     pm: Option<(Counter, u16)>,
+    /// `CNTVCT_EL0` on aarch64.
+    cntvct: Option<Counter>,
     rtc: Option<WallOrigin>,
 }
 
@@ -82,6 +172,7 @@ impl TimeState {
             tsc: None,
             hpet: None,
             pm: None,
+            cntvct: None,
             rtc: None,
         }
     }
@@ -92,6 +183,7 @@ impl TimeState {
             ClocksourceId::Tsc => self.tsc,
             ClocksourceId::Hpet => self.hpet.map(|(c, _)| c),
             ClocksourceId::AcpiPm => self.pm.map(|(c, _)| c),
+            ClocksourceId::Cntvct => self.cntvct,
         }
     }
 
@@ -103,6 +195,7 @@ impl TimeState {
             tsc_warp_ok: tsc_warp_ok(),
             hpet: self.hpet.map(|(c, _)| c),
             pm: self.pm.map(|(c, _)| c),
+            cntvct: self.cntvct,
         }
     }
 }
@@ -136,6 +229,10 @@ pub fn read_tsc() -> u64 {
 /// # Safety
 /// `va` is the physmap address of the HPET register block, mapped UC
 /// (invariant I49), and `off` an 8-byte-aligned register offset in it.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 unsafe fn hpet_read(va: u64, off: u64) -> u64 {
     // SAFETY: this fn's `# Safety` (here): `va + off` is a mapped, aligned
     // HPET register.
@@ -144,6 +241,10 @@ unsafe fn hpet_read(va: u64, off: u64) -> u64 {
 
 /// # Safety
 /// As for [`hpet_read`].
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 unsafe fn hpet_write(va: u64, off: u64, val: u64) {
     // SAFETY: this fn's `# Safety` (here): `va + off` is a mapped, aligned
     // HPET register.
@@ -152,6 +253,10 @@ unsafe fn hpet_write(va: u64, off: u64, val: u64) {
 
 /// # Safety
 /// `va` as for [`hpet_read`].
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 unsafe fn hpet_enable(va: u64) {
     // SAFETY: this fn's `# Safety` (here); GEN_CFG is register 0x10.
     unsafe {
@@ -160,19 +265,27 @@ unsafe fn hpet_enable(va: u64) {
     }
 }
 
-fn hpet_va(hpet: &HpetInfo) -> u64 {
-    paging_init::HHDM_BASE.wrapping_add(hpet.base)
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
+fn hpet_va(_hpet: &HpetInfo) -> Option<u64> {
+    crate::acpi_init::hpet_va()
 }
 
 /// HPET main counter VA + period, after the page is UC. None if unusable.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub(crate) fn hpet_ready() -> Option<(u64, u32)> {
-    let hpet = acpi_init::info()?.hpet?;
+    let hpet = machine_init::info()?.hpet_info()?;
     if !hpet_period_ok(hpet.period_fs) {
         return None;
     }
-    let va = hpet_va(&hpet);
+    let va = hpet_va(&hpet)?;
     // SAFETY: invariant I49, established at `acpi::acpi_init::init`: it
-    // stores a nonzero `period_fs` only after UC-patching the HPET page,
+    // stores a nonzero `period_fs` only after ioremapping the HPET page,
     // and `hpet_period_ok` rejected zero just above.
     unsafe { hpet_enable(va) };
     Some((va, hpet.period_fs))
@@ -195,6 +308,10 @@ pub(crate) unsafe fn hpet_read_main(va: u64) -> u64 {
 }
 
 /// The width the kernel reads the HPET main counter at ([`hpet_read_main`]).
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub(crate) const HPET_READ_WIDTH: u32 = 32;
 
 /// The ACPI PM timer's `TMR_VAL`.
@@ -217,7 +334,27 @@ fn read_raw(st: &TimeState, id: ClocksourceId) -> u64 {
             // `va` came from `hpet_ready` in `hpet_counter`.
             unsafe { hpet_read_main(va) & c.mask() }
         }),
-        ClocksourceId::AcpiPm => st.pm.map_or(0, |(c, port)| pm_read(port) & c.mask()),
+        ClocksourceId::AcpiPm => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                st.pm.map_or(0, |(c, port)| pm_read(port) & c.mask())
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let _ = st;
+                0
+            }
+        }
+        ClocksourceId::Cntvct => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                read_tsc()
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                0
+            }
+        }
     }
 }
 
@@ -225,6 +362,10 @@ fn read_raw(st: &TimeState, id: ClocksourceId) -> u64 {
 /// whatever `GCAP_ID` reports ([`hpet_read_main`]), and a counter that
 /// moves within 100,000 spins. CPU 0's tick reads it every millisecond,
 /// far inside its 21.5 s half wrap at 100 MHz.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 fn hpet_counter() -> Option<(Counter, u64)> {
     let (va, period_fs) = hpet_ready()?;
     let c = Counter::new(ClocksourceId::Hpet, hpet_hz(period_fs)?, HPET_READ_WIDTH)?;
@@ -238,6 +379,7 @@ fn hpet_counter() -> Option<(Counter, u64)> {
 
 /// The ACPI PM timer as a clocksource, when the FADT names one and it
 /// moves within 100,000 spins.
+#[cfg(target_arch = "x86_64")]
 fn pm_counter() -> Option<(Counter, u16)> {
     let pm = acpi_init::info()?.fadt?.pm_timer?;
     let c = Counter::new(ClocksourceId::AcpiPm, PM_TIMER_HZ, u32::from(pm.width))?;
@@ -245,6 +387,10 @@ fn pm_counter() -> Option<(Counter, u16)> {
 }
 
 /// `read` returns a new value within 100,000 spins.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 fn counter_moves(read: impl Fn() -> u64) -> bool {
     let probe = read();
     for _ in 0..100_000 {
@@ -256,14 +402,15 @@ fn counter_moves(read: impl Fn() -> u64) -> bool {
     false
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(super) fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     if !hpet_period_ok(hpet.period_fs) {
         return None;
     }
-    let va = hpet_va(hpet);
+    let va = hpet_va(hpet)?;
     // Every HPET access below relies on invariant I49, established at
-    // `acpi::acpi_init::init`: it stores a nonzero `period_fs` only after
-    // UC-patching the HPET page, and `hpet_period_ok` rejected zero above.
+    // `acpi::acpi_init::init`: it ioremaps the HPET page before first
+    // touch, and `hpet_period_ok` rejected zero above.
     let main = || {
         // SAFETY: invariant I49, established at `acpi::acpi_init::init`,
         // as stated above `main`.
@@ -445,6 +592,7 @@ fn rtc_reg(reg: u8) -> u8 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rtc_wait_uip_clear() {
     for _ in 0..100_000 {
         if rtc_reg(RTC_STATUS_A) & RTC_UIP == 0 {
@@ -454,6 +602,7 @@ fn rtc_wait_uip_clear() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 struct RtcRaw {
     sec: u8,
     min: u8,
@@ -465,6 +614,7 @@ struct RtcRaw {
     status_b: u8,
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rtc_snapshot() -> RtcRaw {
     rtc_wait_uip_clear();
     RtcRaw {
@@ -479,6 +629,7 @@ fn rtc_snapshot() -> RtcRaw {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rtc_decode(raw: RtcRaw) -> Option<(i32, u8, u8, u8, u8, u8)> {
     let binary = raw.status_b & RTC_DM_BINARY != 0;
     let cvt = |v: u8| if binary { v } else { bcd_to_bin(v) };
@@ -509,6 +660,7 @@ fn rtc_decode(raw: RtcRaw) -> Option<(i32, u8, u8, u8, u8, u8)> {
     Some((year, month, day, hour, min, sec))
 }
 
+#[cfg(target_arch = "x86_64")]
 fn read_rtc_unix() -> Option<u64> {
     let a = rtc_snapshot();
     let b = rtc_snapshot();
@@ -525,7 +677,7 @@ pub fn on_hw_tick() {
     let Some(st) = STATE.try_get() else {
         return;
     };
-    // Relaxed: a count for diagnostics; nothing is published through it.
+    // Relaxed: a count for diagnostics; pairs with nothing.
     st.ticks.fetch_add(1, Ordering::Relaxed);
     WRITER.with(|w| {
         if let Some(w) = w.as_mut() {
@@ -537,17 +689,29 @@ pub fn on_hw_tick() {
 
 /// PIT interrupts taken. The 8259 reaches CPU 0 alone, so one CPU counts
 /// them; `apic_init::prove` counts them as its LAPIC timer's witness.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 static PIT_FIRES: AtomicU64 = AtomicU64::new(0);
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn on_pit_tick() {
-    // Relaxed: a count read on the CPU it counts on; nothing hangs off it.
+    // Relaxed: a count; pairs with nothing.
     PIT_FIRES.fetch_add(1, Ordering::Relaxed);
     on_hw_tick();
 }
 
 /// PIT interrupts taken since boot.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn pit_fires() -> u64 {
-    // Relaxed: as in `on_pit_tick`.
+    // Relaxed: a count; pairs with nothing.
     PIT_FIRES.load(Ordering::Relaxed)
 }
 
@@ -616,6 +780,7 @@ pub(crate) fn read_counter(id: ClocksourceId) -> Option<u64> {
 /// Timer interrupts CPU 0 has taken since `time_init::init`.
 pub fn ticks() -> u64 {
     // Relaxed: as in `on_hw_tick`.
+    // Relaxed: a count; pairs with nothing.
     STATE
         .try_get()
         .map_or(0, |s| s.ticks.load(Ordering::Relaxed))
@@ -652,6 +817,10 @@ pub fn tsc_per_ms() -> u64 {
 }
 
 /// CPUID.8000_0007H:EDX[8]. TCG leaves this clear; KVM and real silicon set it.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "invariant TSC is an x86 CPUID bit")
+)]
 pub fn tsc_invariant() -> bool {
     STATE.try_get().is_some_and(|s| s.invariant_tsc)
 }
@@ -661,6 +830,10 @@ pub fn tsc_invariant() -> bool {
 static TSC_WARP_MAX: AtomicU64 = AtomicU64::new(0);
 
 /// One side of a warp test saw at most `backward` cycles of backward step.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn note_tsc_warp(backward: u64) {
     // Release: pairs with the Acquire loads in `tsc_warp_ok` and
     // `tsc_max_skew`.
@@ -720,10 +893,57 @@ pub fn eoi_pit() {
     unsafe { x86::outb(PIC1_CMD, PIC_EOI) };
 }
 
+#[cfg(target_arch = "aarch64")]
+fn read_pl031_unix() -> Option<u64> {
+    let rtc = machine_init::info()?.rtc?;
+    if rtc.size < 4 {
+        return None;
+    }
+    // SAFETY: invariant I17: PL031 `reg` is Device MMIO the device tree
+    // named, and the physmap does not cover it; established by here.
+    let va = unsafe { crate::paging_init::ioremap(vibeos::paging::PhysAddr(rtc.base), rtc.size) }?
+        .as_u64();
+    // SAFETY: invariant I54: `va` is the ioremap of the PL031 window;
+    // established by `paging_init::ioremap`.
+    let unix = u32::from_le(unsafe { core::ptr::read_volatile(va as *const u32) });
+    Some(u64::from(unix))
+}
+
 /// Calibrate, program PIT channel 0, emit markers. Does not `sti`.
 ///
 /// # Safety
 /// IDT and PIC remap already done. IRQs still masked at the controller.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn init() {
+    let mut st = TimeState::empty();
+    let Some(c) = crate::arch::aarch64::timer::init() else {
+        crate::boot::halt_with("vibeOS: time: no cntvct");
+    };
+    st.cntvct = Some(c);
+    let hz = crate::arch::aarch64::timer::hz();
+    st.tsc_per_ms = hz / 1_000;
+    let Some(chosen) = rank(&st.candidates()) else {
+        crate::boot::halt_with("vibeOS: time: no clocksource");
+    };
+    let w = ClockWriter::new(chosen, read_raw(&st, chosen.id), 0);
+    publish(&st, w.snapshot());
+    WRITER.with(|slot| *slot = Some(w));
+    if let Some(unix) = read_pl031_unix() {
+        st.rtc = Some(WallOrigin {
+            unix_s: unix,
+            mono_ns: 0,
+        });
+        crate::klog!(vibeos::log::Level::Info, "vibeOS: time: pl031 unix={unix}");
+    }
+    // SAFETY: I22, one write on the BSP before SMP; established here.
+    unsafe { STATE.set(st) };
+}
+
+/// Calibrate, program PIT channel 0, emit markers. Does not `sti`.
+///
+/// # Safety
+/// IDT and PIC remap already done. IRQs still masked at the controller.
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn init() {
     let use_rdtscp = has_rdtscp();
     let inv = invariant_tsc();
@@ -738,7 +958,7 @@ pub unsafe fn init() {
     let mut source = CalibSource::Pit;
     let mut per_ms = None;
 
-    if let Some(hpet) = acpi_init::info().and_then(|i| i.hpet) {
+    if let Some(hpet) = machine_init::info().and_then(|d| d.hpet_info()) {
         match calibrate_hpet(&hpet, use_rdtscp) {
             Some(v) => {
                 source = CalibSource::Hpet;

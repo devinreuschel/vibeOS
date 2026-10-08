@@ -293,7 +293,9 @@ impl<const N: usize> Ring<N> {
     }
 
     fn init(&self) {
+        // Relaxed: `Trace::init`'s Release store of `magic` publishes it; pairs with nothing.
         self.cap.store(N as u32, Ordering::Relaxed);
+        // Relaxed: as `cap`; pairs with nothing.
         self.record_size
             .store(RECORD_SIZE as u32, Ordering::Relaxed);
     }
@@ -311,18 +313,26 @@ impl<const N: usize> Ring<N> {
         if N == 0 {
             return;
         }
+        // Relaxed: only this CPU stores `head`; pairs with nothing.
         let pos = self.head.load(Ordering::Relaxed);
         let Some(slot) = self.records.get((pos % N as u64) as usize) else {
             return;
         };
+        // Relaxed: the Release fence below orders it before the fields; pairs with nothing.
         slot.seq.store(0, Ordering::Relaxed);
-        // Release: a reader that sees any field below also sees `seq == 0`
-        // on its second `seq` read, so a slot caught mid-write is dropped.
+        // Release: pairs with the Acquire fence in `get`; a reader that sees
+        // any field below also sees `seq == 0` on its second `seq` read, so a
+        // slot caught mid-write is dropped.
         fence(Ordering::Release);
+        // Relaxed: the fence above and the `seq` store below order it; pairs with nothing.
         slot.tsc.store(tsc, Ordering::Relaxed);
+        // Relaxed: as `tsc`; pairs with nothing.
         slot.a.store(a, Ordering::Relaxed);
+        // Relaxed: as `tsc`; pairs with nothing.
         slot.b.store(b, Ordering::Relaxed);
+        // Relaxed: as `tsc`; pairs with nothing.
         slot.cpu.store(cpu, Ordering::Relaxed);
+        // Relaxed: as `tsc`; pairs with nothing.
         slot.event.store(ev.as_u32(), Ordering::Relaxed);
         let next = pos.wrapping_add(1);
         // Release: pairs with the Acquire `seq` load in `get`; the fields
@@ -341,6 +351,7 @@ impl<const N: usize> Ring<N> {
         let slot = self.records.get((pos % N as u64) as usize)?;
         // Acquire: pairs with the Release `seq` store in `push`.
         let seq = slot.seq.load(Ordering::Acquire);
+        // Relaxed: the `seq` loads and the fence order the fields; pairs with nothing.
         let r = RecordData {
             seq,
             tsc: slot.tsc.load(Ordering::Relaxed),
@@ -352,6 +363,7 @@ impl<const N: usize> Ring<N> {
         // Acquire: pairs with the Release fence in `push`, so a field
         // stored by a later push makes the re-read below see its `seq = 0`.
         fence(Ordering::Acquire);
+        // Relaxed: the Acquire fence above orders it after the fields; pairs with nothing.
         if slot.seq.load(Ordering::Relaxed) != seq {
             return None;
         }
@@ -443,10 +455,14 @@ impl<const CPUS: usize, const N: usize> Trace<CPUS, N> {
         for r in &self.rings {
             r.init();
         }
+        // Relaxed: the Release store of `magic` below publishes it; pairs with nothing.
         self.version.store(TRACE_VERSION, Ordering::Relaxed);
+        // Relaxed: as `version`; pairs with nothing.
         self.record_size
             .store(RECORD_SIZE as u32, Ordering::Relaxed);
+        // Relaxed: as `version`; pairs with nothing.
         self.cap.store(N as u32, Ordering::Relaxed);
+        // Relaxed: as `version`; pairs with nothing.
         self.cpus.store(CPUS as u32, Ordering::Relaxed);
         // Release: pairs with the Acquire load in `is_live`.
         self.magic
@@ -472,7 +488,9 @@ impl<const CPUS: usize, const N: usize> Trace<CPUS, N> {
     /// Publish the calibration and warp result for the core tool: the
     /// fields, then the flags that say they are there.
     pub fn publish_clock(&self, c: &ClockInfo) {
+        // Relaxed: the Release store of `flags` below publishes it; pairs with nothing.
         self.freq_hz.store(c.freq_hz, Ordering::Relaxed);
+        // Relaxed: as `freq_hz`; pairs with nothing.
         self.max_skew.store(c.max_skew, Ordering::Relaxed);
         // Release: pairs with the Acquire load in `flags`.
         self.flags.store(c.flags(), Ordering::Release);
@@ -481,6 +499,7 @@ impl<const CPUS: usize, const N: usize> Trace<CPUS, N> {
     /// The published clock, or `None` before [`Trace::publish_clock`].
     pub fn clock(&self) -> Option<ClockInfo> {
         let flags = self.flags();
+        // Relaxed: the Acquire load in `flags` above orders them; pairs with nothing.
         ClockInfo::from_header(
             self.freq_hz.load(Ordering::Relaxed),
             self.max_skew.load(Ordering::Relaxed),
@@ -521,7 +540,9 @@ impl WarpLine {
 
     /// Ready the line for the next AP. Only once neither side runs.
     pub fn reset(&self) {
+        // Relaxed: the Release store of `arrived` below publishes it; pairs with nothing.
         self.last.store(0, Ordering::Relaxed);
+        // Relaxed: as `last`; pairs with nothing.
         self.left.store(0, Ordering::Relaxed);
         // Release: pairs with the Acquire loads in `arrive`.
         self.arrived.store(0, Ordering::Release);
@@ -531,7 +552,9 @@ impl WarpLine {
     /// side waited `timeout` cycles of `now` alone and withdrew. Spins on
     /// the counter, never on a timer interrupt.
     pub fn arrive(&self, now: impl Fn() -> u64, timeout: u64) -> bool {
-        // AcqRel: the side that arrives second sees the first's `reset`.
+        // AcqRel: pairs with the Release store in `reset` and the other
+        // side's `fetch_add`, so the side that arrives second sees the
+        // first's `reset`.
         if self.arrived.fetch_add(1, Ordering::AcqRel) >= 1 {
             return true;
         }
@@ -543,6 +566,7 @@ impl WarpLine {
             }
             if now().saturating_sub(t0) >= timeout {
                 // Withdraw, unless the other side arrived meanwhile.
+                // AcqRel, Acquire on failure: pairs with the other side's AcqRel `fetch_add`.
                 return self
                     .arrived
                     .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -560,6 +584,7 @@ impl WarpLine {
         // side, so the read taken next comes after the one published.
         let prev = self.last.load(Ordering::Acquire);
         let now = read();
+        // AcqRel: pairs with the Acquire load and `fetch_max` in the other side's `step`.
         self.last.fetch_max(now, Ordering::AcqRel);
         (now, prev.saturating_sub(now))
     }

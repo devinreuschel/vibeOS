@@ -2,10 +2,13 @@
 //!
 //! Legacy `0xCF8`/`0xCFC` for bus 0 when there is no MCFG. Beyond bus 0,
 //! MCFG → ECAM (DESIGN §7.1). Scan fills the device list, with each
-//! function's parent bridge, and maps no BAR. A driver maps a memory BAR
-//! it has claimed, in its `probe`, through [`map_bar`] (DESIGN §12.3 rule
-//! 8): through ioremap or the capped physmap, never a multi-TiB page walk
-//! (DESIGN §4.1).
+//! function's parent bridge, and maps no BAR. On aarch64, a memory BAR
+//! firmware left at address 0 is assigned one in QEMU virt's 32-bit PCI
+//! window during [`scan`], before any AP starts. A driver maps a memory
+//! BAR it has claimed, in its `probe`, through [`map_bar`] (DESIGN §12.3
+//! rule 8): through ioremap, never a multi-TiB page walk (DESIGN §4.1).
+//! The physmap is RAM-only; a BAR that overlaps the framebuffer reuses
+//! that write-back mapping.
 
 use core::fmt::Write;
 #[cfg(feature = "kernel_tests")]
@@ -16,28 +19,54 @@ use vibeos::dev::{self, BarClaim, DevRef, Device};
 use vibeos::ipi::{SHOOT_RANGE_PAGES, SHOOT_RANGES, ShootRange};
 use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
+use vibeos::machine::MAX_PCI_HOSTS;
 use vibeos::paging::{IOREMAP_BASE, IOREMAP_LEN, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
-use crate::acpi_init;
 use crate::arch::current::InterruptGuard;
 use crate::boot;
 use crate::cell::BootCell;
 use crate::fb_init;
+use crate::machine_init;
 use crate::paging_init;
 use crate::sync_init::SpinMutex;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const CFG_ADDR: u16 = 0xCF8;
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const CFG_DATA: u16 = 0xCFC;
 
 const ECAM_CACHE: usize = 64;
 
-struct Ecam {
+/// One firmware ECAM window, after [`pci::scan_range`] clamps `end`.
+#[derive(Clone, Copy)]
+struct EcamWin {
     base: u64,
     start: u8,
     end: u8,
+}
+
+impl EcamWin {
+    const fn empty() -> Self {
+        Self {
+            base: 0,
+            start: 0,
+            end: 0,
+        }
+    }
+}
+
+struct Ecam {
+    wins: [EcamWin; MAX_PCI_HOSTS],
+    nwin: usize,
     phys: [u64; ECAM_CACHE],
     va: [u64; ECAM_CACHE],
     n: usize,
@@ -46,9 +75,8 @@ struct Ecam {
 impl Ecam {
     const fn empty() -> Self {
         Self {
-            base: 0,
-            start: 0,
-            end: 0,
+            wins: [EcamWin::empty(); MAX_PCI_HOSTS],
+            nwin: 0,
             phys: [0; ECAM_CACHE],
             va: [0; ECAM_CACHE],
             n: 0,
@@ -73,6 +101,8 @@ pub(super) static SCAN_ONLINE: AtomicU64 = AtomicU64::new(0);
 
 fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
     let _irq = InterruptGuard::enter();
+    // Acquire: pairs with the Release store that unlocks below.
+    // Relaxed on failure: the lock is held; pairs with nothing.
     while CFG_LOCK
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
@@ -80,6 +110,7 @@ fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
         core::hint::spin_loop();
     }
     let r = f();
+    // Release: pairs with the next holder's Acquire compare-exchange above.
     CFG_LOCK.store(false, Ordering::Release);
     r
 }
@@ -107,50 +138,27 @@ fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
     }
 }
 
-/// Map `[phys, phys + len)` for the kernel: uncached through the physmap
-/// below `map_end`, or through ioremap above it; a range that overlaps a
-/// framebuffer stays write-back on the physmap. `None` for a range that
-/// overlaps a RAM-typed range of the boot memory map, checked before
-/// anything is patched or mapped (DESIGN §12.3 rule 8), and when the UC
-/// patch fails. Reached only from [`map_bar`], through a live claim
-/// (invariant I58), from `ecam_va`, and from the in-guest tests.
-pub(super) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
+/// Map `[phys, phys + len)` uncached through `ioremap`, except a range
+/// that overlaps the framebuffer, which stays write-back on the mapping
+/// `fb_init` already installed. `None` for a range that overlaps a
+/// RAM-typed range of the boot memory map, checked before anything is
+/// mapped (DESIGN §12.3 rule 8). Reached only from [`map_bar`], through a
+/// live claim (invariant I58), from `ecam_va`, and from the in-guest tests.
+pub(crate) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     if phys == 0 || len == 0 {
         return None;
     }
     if dev::overlaps_any(phys, len, boot::info().ram_ranges()) {
         return None;
     }
-    let end = phys.checked_add(len)?;
-    // A BAR that aliases the Limine FB stays WB on the physmap: a UC patch
-    // or an ioremap would alias the console UC (DESIGN §4.1 / §9.2).
-    // Limine's surface (and thus map_end) is often smaller than the BAR
-    // (16 MiB); fill missing physmap leaves as WB so the BAR is mapped.
     if fb_init::overlaps_phys(phys, len) {
-        // SAFETY: `ensure_physmap_wb`'s contract; this range overlaps the
-        // framebuffer, which stays WB on the physmap and is never
-        // UC-patched or ioremapped (invariant I17, established here).
-        if unsafe { paging_init::ensure_physmap_wb(PhysAddr(phys), len) }
-            || phys < paging_init::map_end()
-        {
-            return Some(paging_init::HHDM_BASE.wrapping_add(phys));
-        }
-        return None;
+        return fb_init::va_for_phys(phys);
     }
-    if end <= paging_init::map_end() {
-        // A failed patch leaves some of the range write-back: refuse it.
-        // SAFETY: `paging_init::install` ran at boot, long before the PCI
-        // scan, and `end <= map_end()`, so the physmap covers the range;
-        // established by `paging_init::map_end`.
-        unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) }.ok()?;
-        Some(paging_init::HHDM_BASE.wrapping_add(phys))
-    } else {
-        // SAFETY: invariant I58: the range is a BAR its caller holds a
-        // claim on, which overlaps no other claim and no RAM, or an ECAM
-        // page, above the physmap, which only this mapping reaches;
-        // established by `dev::Registry::claim` and `pci_init::ecam_va`.
-        unsafe { paging_init::ioremap(PhysAddr(phys), len) }.map(|v| v.as_u64())
-    }
+    // SAFETY: invariant I58: the range is a BAR its caller holds a
+    // claim on, which overlaps no other claim and no RAM, or an ECAM
+    // page, which only this mapping reaches; established by
+    // `dev::Registry::claim` and `pci_init::ecam_va`.
+    unsafe { paging_init::ioremap(PhysAddr(phys), len) }.map(|v| v.as_u64())
 }
 
 /// Map the BAR `claim` holds, for the driver that claimed it; `None` for
@@ -173,14 +181,24 @@ pub fn map_bar(claim: &BarClaim) -> Option<u64> {
 
 /// Unmap the BAR `claim` holds from `va`, where [`map_bar`] mapped it. An
 /// ioremap VA loses its leaves, on every CPU, before this returns; the
-/// window never hands the VA out again (DESIGN §4.1). A physmap VA stays
-/// mapped, uncached or write-back as `map_bar` left it, until ROADMAP
-/// §11.2 makes the physmap RAM-only.
+/// window never hands the VA out again (DESIGN §4.1). A framebuffer
+/// overlap VA stays mapped write-back.
 ///
 /// # Safety
 /// `va` is what `map_bar(claim)` returned, and nothing touches it any
 /// more: the driver has stopped its device and dropped every copy of it.
 pub unsafe fn unmap_bar(claim: &BarClaim, va: u64) {
+    // SAFETY: `va` is what `map_bar(claim)` returned and nothing touches
+    // it; established by here.
+    unsafe { unmap_mmio(va, claim.len()) };
+}
+
+/// Unmap `[va, va+len)` from the ioremap window. Same contract as
+/// [`unmap_bar`].
+///
+/// # Safety
+/// `va` is an ioremap VA for `len` bytes, and nothing touches it.
+pub unsafe fn unmap_mmio(va: u64, len: u64) {
     let window = IOREMAP_BASE..IOREMAP_BASE.saturating_add(IOREMAP_LEN);
     if !window.contains(&va) {
         return;
@@ -188,7 +206,7 @@ pub unsafe fn unmap_bar(claim: &BarClaim, va: u64) {
     let start = va & !(PAGE_SIZE_4K - 1);
     let head = va - start;
     let Some(end) = head
-        .checked_add(claim.len())
+        .checked_add(len)
         .and_then(|l| l.checked_add(PAGE_SIZE_4K - 1))
         .map(|l| start.saturating_add(l & !(PAGE_SIZE_4K - 1)))
     else {
@@ -201,7 +219,7 @@ pub unsafe fn unmap_bar(claim: &BarClaim, va: u64) {
             // SAFETY: `unmap_4k_locked`'s contract: nothing uses the BAR's
             // VA any more (this fn's `# Safety` contract), and the
             // shootdown below runs before this fn returns; established by
-            // `pci_init::unmap_bar`.
+            // `pci_init::unmap_mmio`.
             let step = match unsafe { paging_init::unmap_4k_locked(pt, VirtAddr(v)) } {
                 Some((_, size)) => size.bytes(),
                 None => PAGE_SIZE_4K,
@@ -236,22 +254,80 @@ pub unsafe fn unmap_bar(claim: &BarClaim, va: u64) {
     }
 }
 
+fn window_of(e: &Ecam, bus: u8) -> Option<EcamWin> {
+    let mut i = 0usize;
+    while i < e.nwin {
+        if let Some(w) = e.wins.get(i)
+            && w.base != 0
+            && bus >= w.start
+            && bus <= w.end
+        {
+            return Some(*w);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The window `scan` installs for `h`: base non-zero, `last` clamped to
+/// `first + (size >> 20) - 1`.
+fn host_window(h: &vibeos::machine::PciHost) -> Option<EcamWin> {
+    if h.ecam_base == 0 {
+        return None;
+    }
+    let (start, end) = pci::scan_range(h.first_bus, h.last_bus, h.ecam_size)?;
+    Some(EcamWin {
+        base: h.ecam_base,
+        start,
+        end,
+    })
+}
+
 fn ecam_covers(bus: u8) -> bool {
-    with_ecam(|e| e.base != 0 && bus >= e.start && bus <= e.end)
+    with_ecam(|e| window_of(e, bus).is_some())
 }
 
 fn ecam_phys_of(bdf: Bdf, offset: u16) -> Option<u64> {
-    with_ecam(|e| {
-        pci::ecam_phys(
-            e.base,
-            e.start,
-            e.end,
-            bdf.bus,
-            bdf.device,
-            bdf.function,
-            offset,
-        )
-    })
+    let w = with_ecam(|e| window_of(e, bdf.bus))?;
+    pci::ecam_phys(
+        w.base,
+        w.start,
+        w.end,
+        bdf.bus,
+        bdf.device,
+        bdf.function,
+        offset,
+    )
+}
+
+/// Record each host's ECAM window and the bus its scan starts at.
+fn install_ecam() -> ([u8; MAX_PCI_HOSTS], usize) {
+    let mut starts = [0u8; MAX_PCI_HOSTS];
+    let mut nstarts = 0usize;
+    let Some(desc) = machine_init::info() else {
+        return (starts, 0);
+    };
+    for h in desc.pci_hosts() {
+        let Some(w) = host_window(h) else {
+            continue;
+        };
+        let stored = with_ecam(|e| {
+            let Some(slot) = e.wins.get_mut(e.nwin) else {
+                return false;
+            };
+            *slot = w;
+            e.nwin += 1;
+            true
+        });
+        if !stored {
+            break;
+        }
+        if let Some(s) = starts.get_mut(nstarts) {
+            *s = w.start;
+            nstarts += 1;
+        }
+    }
+    (starts, nstarts)
 }
 
 /// Map the 4K function page for `phys` and return the byte VA.
@@ -316,6 +392,7 @@ impl CfgIo for HwCfg {
             // dword-aligned below 4 KiB; established by `pci_init::map_mmio`.
             return with_cfg(|| unsafe { ecam_read_at(va) });
         }
+        #[cfg(target_arch = "x86_64")]
         if bdf.bus == 0 {
             return with_cfg(|| cf8_read32(bdf, offset));
         }
@@ -333,10 +410,11 @@ impl CfgIo for HwCfg {
             // SAFETY: invariant I54, as in `read32`; established by
             // `pci_init::map_mmio`.
             with_cfg(|| unsafe { ecam_write_at(va, value) });
-            return;
-        }
-        if bdf.bus == 0 {
-            with_cfg(|| cf8_write32(bdf, offset, value));
+        } else {
+            #[cfg(target_arch = "x86_64")]
+            if bdf.bus == 0 {
+                with_cfg(|| cf8_write32(bdf, offset, value));
+            }
         }
     }
 }
@@ -362,21 +440,50 @@ static SCAN: BootCell<Scan> = BootCell::new();
 /// Once, on the BSP, before `smp_init::init` starts an AP
 /// (`BootCell::set`'s contract).
 pub unsafe fn scan() {
-    if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
-        with_ecam(|e| {
-            e.base = m.ecam_base;
-            e.start = m.start_bus;
-            e.end = m.end_bus;
-        });
+    let (starts, nstarts) = install_ecam();
+    // Enumerate in the BootCell. A `[FuncInfo; MAX_SCAN]` local is an
+    // 11 KiB frame; on aarch64 the bootstrap stack is 16 KiB and IRQs
+    // are already on (DESIGN §4.5).
+    let p = SCAN.as_ptr();
+    // SAFETY: invariant I22, established here: this fn runs once, on the
+    // BSP, before any AP starts or any reader runs (this fn's `# Safety`
+    // contract). The payload at `SCAN.as_ptr()` is filled before
+    // `set_in_place`.
+    unsafe {
+        let found = &mut (*p).found;
+        for slot in found.iter_mut() {
+            *slot = FuncInfo::empty();
+        }
+        // No window: mechanism #1 on bus 0. A host starts at its first
+        // bus, so a `bus-range` of `<0x10 0x1f>` is not read as bus 0.
+        let buses = starts.get(..nstarts).unwrap_or(&[]);
+        (*p).n = if buses.is_empty() {
+            pci::enumerate(&mut HwCfg, 0, found)
+        } else {
+            pci::enumerate_buses(&mut HwCfg, buses, found)
+        };
+        #[cfg(target_arch = "aarch64")]
+        {
+            // AAVMF programs a page-or-larger BAR and leaves a sub-page
+            // one (pvpanic-pci is 16 bytes) at 0. Assign those here, on
+            // the BSP, in the same window as the size probe above
+            // (BOOT.md §3.3 step 15b): a BAR write after an AP is up
+            // rebuilds QEMU's memory map under that AP's MMIO.
+            let n_scan = (*p).n;
+            let mut cursor = mmio32_cursor(found.get(..n_scan).unwrap_or(&[]));
+            let mut i = 0usize;
+            while i < n_scan {
+                if let Some(info) = found.get_mut(i) {
+                    place_unset_bars(info, &mut cursor);
+                }
+                i += 1;
+            }
+        }
+        SCAN.set_in_place();
     }
-    let mut found = [FuncInfo::empty(); MAX_SCAN];
-    let n = pci::enumerate(&mut HwCfg, 0, &mut found);
+    // Release: pairs with the Acquire load in `dev::ktest::test_pci_scan_bsp_only`.
     #[cfg(feature = "kernel_tests")]
     SCAN_ONLINE.store(crate::per_cpu_init::online_mask(), Ordering::Release);
-    // SAFETY: `BootCell::set`'s contract (invariant I22): this fn runs
-    // once, on the BSP, before any AP starts or any reader runs (this fn's
-    // `# Safety` contract); established here.
-    unsafe { SCAN.set(Scan { n, found }) };
 }
 
 /// Publish each function [`scan`] found behind its parent bridge through
@@ -384,13 +491,18 @@ pub unsafe fn scan() {
 /// passes), emit `pci: N devices`. Maps no BAR: each driver maps what it
 /// claims.
 pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
-    if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
-        crate::marker!(
-            "vibeOS: pci: ecam {:#x} buses {}-{}",
-            m.ecam_base,
-            m.start_bus,
-            m.end_bus
-        );
+    if let Some(desc) = machine_init::info() {
+        for h in desc.pci_hosts() {
+            let Some(w) = host_window(h) else {
+                continue;
+            };
+            crate::marker!(
+                "vibeOS: pci: ecam {:#x} buses {}-{}",
+                w.base,
+                w.start,
+                w.end
+            );
+        }
     }
 
     let s = SCAN.get();
@@ -428,6 +540,7 @@ pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
         i += 1;
     }
     crate::marker!("vibeOS: pci: {} devices", n);
+    // Release: pairs with the Acquire load in `dev::ktest::pci_live`.
     LIVE.store(true, Ordering::Release);
 }
 
@@ -439,10 +552,97 @@ fn scan_line(info: &FuncInfo) -> core::fmt::Result {
     })
 }
 
+/// QEMU `virt` 32-bit PCI MMIO window (`VIRT_PCIE_MMIO` in
+/// `hw/arm/virt.c`). RAM starts at the limit.
+#[cfg(target_arch = "aarch64")]
+const PCI_MMIO32_BASE: u64 = 0x1000_0000;
+#[cfg(target_arch = "aarch64")]
+const PCI_MMIO32_LIMIT: u64 = 0x4000_0000;
+
+/// First free byte at or above [`PCI_MMIO32_BASE`], past every memory BAR
+/// already programmed inside the window. A 64-bit BAR above the limit
+/// stays in the high window and does not move the cursor.
+#[cfg(target_arch = "aarch64")]
+fn mmio32_cursor(found: &[FuncInfo]) -> u64 {
+    let mut end = PCI_MMIO32_BASE;
+    for info in found {
+        for bar in &info.bars {
+            if bar.kind.is_mem() && bar.addr != 0 && bar.addr < PCI_MMIO32_LIMIT {
+                let bar_end = bar.addr.saturating_add(bar.size);
+                if bar_end > end {
+                    end = bar_end;
+                }
+            }
+        }
+    }
+    end
+}
+
+/// Write `addr` into memory BAR `index`, keeping the type and prefetch
+/// bits. The high dword of a 64-bit BAR is written too.
+#[cfg(target_arch = "aarch64")]
+fn program_mem_bar(hw: &mut HwCfg, bdf: Bdf, index: u8, bar: pci::Bar, addr: u64) {
+    let off = pci::CFG_BAR0.saturating_add(u16::from(index).saturating_mul(4));
+    let mut low = (addr as u32) & !0xF;
+    if bar.prefetchable {
+        low |= 1 << 3;
+    }
+    if bar.kind == pci::BarKind::Mem64 {
+        low |= 0x4;
+        hw.write32(bdf, off, low);
+        hw.write32(bdf, off.saturating_add(4), (addr >> 32) as u32);
+    } else {
+        hw.write32(bdf, off, low);
+    }
+}
+
+/// Assign each memory BAR `scan` left at address 0, when its size is one
+/// [`map_bar`] would map. The reservation is one page, or the next power
+/// of two of a larger BAR, so two devices do not share an ioremap page.
+/// A BAR that does not fit is left at 0 and the walk continues.
+#[cfg(target_arch = "aarch64")]
+fn place_unset_bars(info: &mut FuncInfo, cursor: &mut u64) {
+    let mut hw = HwCfg;
+    let mut placed = false;
+    let mut i = 0u8;
+    while usize::from(i) < pci::MAX_BARS {
+        let Some(bar) = info.bars.get(usize::from(i)).copied() else {
+            break;
+        };
+        let wide = bar.kind == pci::BarKind::Mem64;
+        let step = if wide { 2u8 } else { 1 };
+        let fits = bar.kind.is_mem()
+            && bar.addr == 0
+            && bar.size > 0
+            && bar_map_allowed(bar.size)
+            && !(wide && i >= 5);
+        if fits {
+            let align = if bar.size <= PAGE_SIZE_4K {
+                PAGE_SIZE_4K
+            } else {
+                bar.size.checked_next_power_of_two().unwrap_or(bar.size)
+            };
+            if let Some((addr, next)) = pci::next_bar_addr(*cursor, align, PCI_MMIO32_LIMIT) {
+                program_mem_bar(&mut hw, info.bdf, i, bar, addr);
+                if let Some(slot) = info.bars.get_mut(usize::from(i)) {
+                    slot.addr = addr;
+                }
+                *cursor = next;
+                placed = true;
+            }
+        }
+        i = i.saturating_add(step);
+    }
+    if placed {
+        update_command(info.bdf, pci::CMD_MEM, 0);
+    }
+}
+
 /// Set `set` and clear `clear` in `bdf`'s COMMAND and return COMMAND as
 /// read back. The write leaves the RW1C STATUS half alone. This is the
 /// kernel's one COMMAND writer: each driver turns on its own device
-/// (DESIGN §12.3), and neither the binder nor MSI setup writes COMMAND.
+/// (DESIGN §12.3), aarch64 `scan` enables memory decode on a BAR it just
+/// assigned, and neither the binder nor MSI setup writes COMMAND.
 pub fn update_command(bdf: Bdf, set: u16, clear: u16) -> u16 {
     let mut hw = HwCfg;
     let cmd = pci::read16(&mut hw, bdf, CFG_COMMAND);

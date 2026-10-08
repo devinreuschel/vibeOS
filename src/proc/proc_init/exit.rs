@@ -441,3 +441,92 @@ pub fn write_ps(w: &mut impl Write) {
         let _ = writeln!(w, "vibeOS: ps: {line}");
     }
 }
+
+#[cfg(not(feature = "vibefs_crash"))]
+enum KernelWait {
+    Done(u32),
+    Sleep,
+    NotKernelChild,
+}
+
+/// Block until `pid`, a process whose parent is the kernel (ppid 0),
+/// exits; reap it and return its `wait4` status word.
+#[cfg(not(feature = "vibefs_crash"))]
+pub(crate) fn wait_kernel(pid: u32) -> u32 {
+    debug_assert_eq!(current_pid(), 0);
+    loop {
+        let r = thread_init::with_sched(|s| {
+            table_locked(|t| {
+                let Some(p) = t.get(pid) else {
+                    return KernelWait::NotKernelChild;
+                };
+                if p.ppid != 0 {
+                    return KernelWait::NotKernelChild;
+                }
+                match p.state {
+                    ProcState::Zombie => {
+                        let st = p.wait_status;
+                        reap_zombie(s, t, pid);
+                        KernelWait::Done(st)
+                    }
+                    ProcState::Live | ProcState::Stopped => {
+                        s.begin_wait(&mut t.kernel_wq, FAR_DEADLINE);
+                        KernelWait::Sleep
+                    }
+                    ProcState::Unused => KernelWait::NotKernelChild,
+                }
+            })
+        });
+        assert!(
+            !matches!(r, KernelWait::NotKernelChild),
+            "wait_kernel({pid}): not a live kernel-parented process; only kernel code calls \
+             wait_kernel, once per ppid-0 pid that spawn_elf or spawn_image returned, and only \
+             wait_kernel reaps a ppid-0 process"
+        );
+        match r {
+            KernelWait::Done(st) => return st,
+            KernelWait::Sleep | KernelWait::NotKernelChild => thread_init::schedule(),
+        }
+    }
+}
+
+/// User exception from a portable `TrapKind`: default action (kill).
+/// Kernel stays up. No-op if this is not a user process, or the kind is
+/// not a ring-3 fault.
+#[cfg(target_arch = "aarch64")]
+pub fn try_user_trap(kind: TrapKind, pc: u64, far: u64) {
+    let pid = current_pid();
+    if pid == 0 {
+        return;
+    }
+    let Ring3Action::Signal { sig, si_code: _ } = trap::ring3_action(kind) else {
+        return;
+    };
+    let name = sig_name(sig);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = writeln!(
+        Serial,
+        "user: pid {pid} killed SIG{name} pc=0x{pc:x} far=0x{far:x}"
+    );
+    crate::arch::gs::force_kernel();
+    finish_exit(wait_signaled(sig), Some(far));
+}
+
+/// A return to EL0 whose `ELR_EL1` is not a user PC: `SIGSEGV`.
+#[cfg(target_arch = "aarch64")]
+pub fn kill_bad_elr(pc: u64) -> ! {
+    let pid = current_pid();
+    if pid == 0 {
+        crate::arch::current::halt();
+    }
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = writeln!(Serial, "user: pid {pid} killed SIGSEGV bad elr=0x{pc:x}");
+    crate::arch::gs::force_kernel();
+    finish_exit(wait_signaled(vibeos::proc::SIGSEGV), Some(pc));
+}

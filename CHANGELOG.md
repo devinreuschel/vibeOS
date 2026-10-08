@@ -10,6 +10,70 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ## [Unreleased]
 
+### Added
+
+- aarch64 per-push CI on arm64 TCG, `make litmus`, and dual README quickstarts
+  ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- aarch64 boot CPU: GICv2/v3, generic timer, full vector table, idle `wfi`
+  ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
+- RAM-only physmap: a 9 GiB guest puts RAM above 8 GiB in the buddy; MMIO
+  is `ioremap` ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
+- One portable `MachineDesc` from the device tree and ACPI; reserved FDT
+  ranges stay out of the buddy ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
+- `make check` fails a Relaxed, Acquire, Release or AcqRel ordering with no
+  comment naming what it pairs with ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+
+### Changed
+
+- Limine 12.9.1; the boot handshake is base revision 6 (`vibeOS: limine: rev 6 ok`).
+
+### Fixed
+
+- freeing one GICv3 LPI stops that interrupt, and a later MSI on the device
+  is not delivered to the old handler ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
+- aarch64 `fork` and `clone` give the child the live `TPIDR_EL0`, so a thread
+  pointer written with `msr` is the child's too ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
+- aarch64 `open` and `openat` take arm64's `O_DIRECTORY`, `O_NOFOLLOW`,
+  `O_DIRECT`, and `O_LARGEFILE` bits ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
+- MSI-X `set_affinity` retargets a live interrupt: x86 rewrites the table
+  entry, and GICv3 `MOVI`s an LPI after `MAPC` on each CPU.
+- aarch64 secondaries entered at EL2 turn translation on only after MAIR, TCR,
+  and the TTBRs are set ([ROADMAP §11.4](docs/ROADMAP.md#114-smp-and-per-cpu)).
+- aarch64 EL0 cannot read or write `SCXTNUM_EL0`, and an EL0 `wfi` traps and
+  returns at once ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
+- x86 boot under a hypervisor does not read `MSR_PLATFORM_INFO`, so a missing
+  MSR's `#GP` does not halt the BSP.
+- An unaligned or overlapping ACPI memory-map entry no longer halts boot at
+  `physmap map failed` ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
+- x86 reset and power-off map a memory-space ACPI register before writing it, so
+  that path does not page-fault ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
+- At EL2 with VHE, an EL0 read of the physical counter traps, as it does at EL1
+  ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
+- aarch64 TLS with `p_align` above 16 is placed at `TP + align`, so an
+  align-64 thread-local reads its initial value ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
+- `make ARCH=aarch64 check` after `./setup.sh` lints the aarch64 kernel and builds
+  `vibeos-core` with the MSRV toolchain for that target.
+- a GICv2 SGI end-of-interrupt keeps the source CPU the acknowledge
+  returned, so that CPU's running priority drops ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
+- aarch64 `pvpanic-pci` with a firmware BAR at 0 is placed in the virt 32-bit MMIO
+  window, so a panic reaches QEMU ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- a reused call-function IPI runs the round that was published, not the
+  previous one ([ROADMAP §11.4](docs/ROADMAP.md#114-smp-and-per-cpu)).
+- aarch64 `munmap` and a `brk` shrink drop the page from the TLB before
+  the frame is freed, so a later EL0 access is `SIGSEGV`.
+- aarch64 leaf TLB invalidates drop a kernel address's high bits, so the
+  TTL hint cannot skip the invalidate ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
+- a failed `RNDR` is not entropy, so `/dev/random` does not fill zeros
+  ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
+- a failed `irq::set_affinity` leaves dest CPU unchanged, and GIC SPIs
+  stop at INTID 1019 ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
+- aarch64 EL1 vector entry no longer clobbers `x16`, which panicked as
+  `#DABT` in `cmdline::Words::next` ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- aarch64 UEFI boots prefer AAVMF no-secboot and use `-cpu neoverse-v1`
+  under TCG, so BDS reaches and `el0_sve_sigill` can fail ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- Every CPU clears `EFER.FFXSR`, so a context switch on AMD saves the XMM registers, and turns off
+  CPUID faulting that firmware left on, so `cpuid` runs in ring 3.
+
 ## [0.10.0]
 
 Phase 10 exit: consolidation. The 2026-09-23 kernel review's fixes, the user runtime in Rust, the

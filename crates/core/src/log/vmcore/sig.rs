@@ -86,11 +86,14 @@ impl PanicLine {
     pub fn record(&self, cpu: u32, line: &[u8]) {
         let line = first_line(line);
         for (d, s) in self.msg.iter().zip(line) {
+            // Relaxed: the Release store of `len` below publishes it; pairs with nothing.
             d.store(*s, Ordering::Relaxed);
         }
+        // Relaxed: as the bytes; pairs with nothing.
         self.cpu.store(cpu, Ordering::Relaxed);
-        // Release: the bytes and the CPU above are whole before a reader
-        // that sees `len` (Acquire in `read`) reads them (AGENTS.md rule 5).
+        // Release: pairs with the Acquire load in `read`; the bytes and the
+        // CPU above are whole before a reader that sees `len` reads them
+        // (AGENTS.md rule 5).
         self.len
             .store(line.len() as u32 | LINE_SET, Ordering::Release);
     }
@@ -104,9 +107,11 @@ impl PanicLine {
         }
         let mut bytes = [0u8; PANIC_LINE_CAP];
         for (d, s) in bytes.iter_mut().zip(&self.msg) {
+            // Relaxed: ordered by the Acquire load of `len` above; pairs with nothing.
             *d = s.load(Ordering::Relaxed);
         }
         let n = ((len & !LINE_SET) as usize).min(PANIC_LINE_CAP);
+        // Relaxed: as the bytes; pairs with nothing.
         Some((
             self.cpu.load(Ordering::Relaxed),
             PanicText { bytes, len: n },

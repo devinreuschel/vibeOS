@@ -23,6 +23,8 @@ MAKEFILE = ROOT / "Makefile"
 # Every variable env_config reads (tests/harness/harness.py).
 ENV_CONFIG_VARS = (
     "VIBEOS_ISO",
+    "VIBEOS_ARCH",
+    "VIBEOS_GIC",
     "VIBEOS_SMP",
     "VIBEOS_QEMU_CPU",
     "VIBEOS_MEM",
@@ -37,6 +39,7 @@ ENV_CONFIG_VARS = (
     "VIBEOS_CMDLINE",
     "VIBEOS_FW_X86_64",
     "VIBEOS_FW_AARCH64",
+    "VIBEOS_MACHINE",
 )
 
 

@@ -163,7 +163,9 @@ unsafe fn invoke<F: FnOnce()>(p: *mut u8) {
 
 fn with_thunk<F: FnOnce()>(f: F) -> i32 {
     let mut slot = Some(f);
+    // Release: pairs with the Acquire swap in `vibeos_catch_thunk`.
     THUNK_DATA.store((&raw mut slot).cast(), Ordering::Release);
+    // Release: pairs with the Acquire swap in `vibeos_catch_thunk`.
     THUNK_CALL.store(invoke::<F> as *const () as usize, Ordering::Release);
     // SAFETY: invariant: `THUNK_DATA` points at `slot`, live on this frame
     // for the call, and `THUNK_CALL` is `invoke::<F>`, the one reader that
@@ -171,14 +173,17 @@ fn with_thunk<F: FnOnce()>(f: F) -> i32 {
     // saves the context a longjmp returns to while this frame is live;
     // established here.
     let rc = unsafe { vibeos_catch() };
+    // Release: pairs with the Acquire swap in `vibeos_catch_thunk`.
     THUNK_CALL.store(0, Ordering::Release);
     rc
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn vibeos_catch_thunk() {
+    // Acquire: pairs with the Release stores in `with_thunk`.
     let call = THUNK_CALL.swap(0, Ordering::Acquire);
     if call != 0 {
+        // Acquire: pairs with the Release store in `with_thunk`.
         let data = THUNK_DATA.swap(core::ptr::null_mut(), Ordering::Acquire);
         // SAFETY: invariant: a nonzero `THUNK_CALL` is an `invoke::<F>`
         // address and `THUNK_DATA` its `Option<F>`; established by
@@ -198,15 +203,18 @@ fn token() -> u32 {
 
 /// Arm a catch window of `kind` on this CPU.
 fn arm(kind: u8) {
+    // Relaxed: the Release store of `KIND` below publishes it; pairs with nothing.
     ARMED.store(token(), Ordering::Relaxed);
-    // Release: publishes `ARMED`, `WANT` and `SKIP_LEN` to a hook's Acquire
-    // load of `KIND`.
+    // Release: pairs with the Acquire load of `KIND` in a hook (`armed_here`),
+    // publishing `ARMED`, `WANT` and `SKIP_LEN` with it.
     KIND.store(kind, Ordering::Release);
 }
 
 /// Close the window: `KIND` first, then `ARMED`.
 fn disarm() {
+    // Release: pairs with the Acquire loads in `armed_here` and `catch_skip`.
     KIND.store(ST_OFF, Ordering::Release);
+    // Relaxed: `KIND` closed the window first; pairs with nothing.
     ARMED.store(0, Ordering::Relaxed);
 }
 
@@ -215,6 +223,7 @@ fn disarm() {
 fn armed_here() -> u8 {
     // Acquire: pairs with the Release store in `arm`.
     let kind = KIND.load(Ordering::Acquire);
+    // Relaxed: the Acquire load of `KIND` above orders it; pairs with nothing.
     if kind == ST_OFF || ARMED.load(Ordering::Relaxed) != token() {
         return ST_OFF;
     }
@@ -254,6 +263,7 @@ pub fn intercept(frame: &mut TrapFrame) -> bool {
     }
     let vector = frame.vector as u8;
     let kind = armed_here();
+    // Relaxed: `armed_here`'s Acquire load of `KIND` orders it; pairs with nothing.
     let want = WANT.load(Ordering::Relaxed);
     match kind {
         ST_OFF | ST_ALLOC | ST_PANIC => false,
@@ -267,6 +277,7 @@ pub fn intercept(frame: &mut TrapFrame) -> bool {
         }
         ST_SKIP if want == vector => {
             record(frame);
+            // Relaxed: as `WANT` above; pairs with nothing.
             frame.iret.rip = frame
                 .iret
                 .rip
@@ -280,6 +291,7 @@ pub fn intercept(frame: &mut TrapFrame) -> bool {
 }
 
 pub fn catch<F: FnOnce()>(vector: u8, f: F) -> Option<Caught> {
+    // Relaxed: the Release store of `KIND` in `arm` publishes it; pairs with nothing.
     WANT.store(vector, Ordering::Relaxed);
     arm(ST_VECTOR);
     let rc = with_thunk(f);
@@ -293,10 +305,13 @@ pub fn catch<F: FnOnce()>(vector: u8, f: F) -> Option<Caught> {
 
 /// Run `f`; on `vector`, add `insn_len` to RIP and continue.
 pub fn catch_skip<F: FnOnce()>(vector: u8, insn_len: u8, f: F) -> Option<Caught> {
+    // Relaxed: the Release store of `KIND` in `arm` publishes it; pairs with nothing.
     WANT.store(vector, Ordering::Relaxed);
+    // Relaxed: the Release store of `KIND` in `arm` publishes it; pairs with nothing.
     SKIP_LEN.store(insn_len, Ordering::Relaxed);
     arm(ST_SKIP);
     let rc = with_thunk(f);
+    // Acquire: pairs with the Release store in `disarm` when `intercept` took the skip.
     let skipped = KIND.load(Ordering::Acquire);
     disarm();
     match skipped {
@@ -348,11 +363,13 @@ static FK_STALLS: AtomicU32 = AtomicU32::new(0);
 /// Hold the next `n` `gs::force_kernel` calls in [`force_kernel_window`];
 /// 0 disarms.
 pub fn arm_force_kernel_window(n: u32) {
+    // Release: pairs with the update in `force_kernel_window` and the load below.
     FK_STALLS.store(n, Ordering::Release);
 }
 
 /// Stalls not yet taken.
 pub fn force_kernel_windows_left() -> u32 {
+    // Acquire: pairs with the AcqRel update in `force_kernel_window`.
     FK_STALLS.load(Ordering::Acquire)
 }
 
@@ -361,6 +378,7 @@ pub fn force_kernel_windows_left() -> u32 {
 /// inside that window. It reads no `gs:` operand, since `mov gs` zeroed
 /// `GS_BASE`.
 pub fn force_kernel_window() {
+    // AcqRel, Acquire on failure: pairs with the Release store in `arm_force_kernel_window`.
     if FK_STALLS
         .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
         .is_err()

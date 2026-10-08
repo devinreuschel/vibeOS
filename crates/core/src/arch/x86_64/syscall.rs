@@ -58,6 +58,12 @@ pub mod nr {
     pub const SYS_GETDENTS64: u64 = 217;
     /// `psinfo`.
     pub const SYS_PSINFO: u64 = 500;
+    /// `openat`.
+    pub const SYS_OPENAT: u64 = 257;
+    /// `dup3`.
+    pub const SYS_DUP3: u64 = 292;
+    /// `clone`.
+    pub const SYS_CLONE: u64 = 56;
 }
 
 const SLOTS: [Option<Sys>; 501] = {
@@ -86,6 +92,9 @@ const SLOTS: [Option<Sys>; 501] = {
     t[nr::SYS_REBOOT as usize] = Some(Sys::Reboot);
     t[nr::SYS_GETDENTS64 as usize] = Some(Sys::Getdents64);
     t[nr::SYS_PSINFO as usize] = Some(Sys::Psinfo);
+    t[nr::SYS_OPENAT as usize] = Some(Sys::Openat);
+    t[nr::SYS_DUP3 as usize] = Some(Sys::Dup3);
+    t[nr::SYS_CLONE as usize] = Some(Sys::Clone);
     t
 };
 
@@ -119,6 +128,9 @@ pub fn call<H: Handlers + ?Sized>(h: &mut H, sys: Sys, regs: &[u64; 6]) -> SysRe
         Sys::Reboot => h.reboot(regs[0] as i32, regs[1] as i32, regs[2] as u32, regs[3]),
         Sys::Getdents64 => h.getdents64(regs[0] as u32, regs[1], regs[2] as u32),
         Sys::Psinfo => h.psinfo(regs[0], regs[1] as usize),
+        Sys::Openat => h.openat(regs[0] as i32, regs[1], regs[2] as i32, regs[3] as u16),
+        Sys::Dup3 => h.dup3(regs[0] as u32, regs[1] as u32, regs[2] as i32),
+        Sys::Clone => h.clone(regs[0], regs[1], regs[2], regs[3], regs[4]),
     }
 }
 

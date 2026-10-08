@@ -11,14 +11,14 @@ use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::{
     SIGCONT, SIGKILL, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, wait_exited, wait_signaled,
 };
-use vibeos::syscall::SYS_KILL;
 use vibeos::thread::{ThreadId, ThreadState};
 
+use crate::arch::current::syscall_nr::SYS_KILL;
 use crate::arch::idt::testing as idt_testing;
 use crate::console_init::testing as console_testing;
 use crate::file_init;
 use crate::heap_init::fail_after::{self, Scope, Seen};
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{
     Outcome, free_frames, free_frames_owned, sleep_until_s19, spin_until, spin_until_ns,
 };
@@ -34,7 +34,7 @@ fn kill(pid: u32, sig: u32) -> i64 {
 }
 
 // getpid forever.
-user_code!(
+x86_user_code!(
     S19_GETPID_LOOP,
     "
 1:
@@ -262,7 +262,7 @@ pub(crate) fn test_stop_cont_no_lost_wakeup() -> Outcome {
 }
 
 // getpid, then exit(0).
-user_code!(
+x86_user_code!(
     S19_GETPID_EXIT,
     "
     mov eax, 39
@@ -275,7 +275,7 @@ user_code!(
 );
 
 // A store to 0x5000_0000, which nothing maps.
-user_code!(
+x86_user_code!(
     S19_FAULT_A,
     "
     mov eax, 0x50000000
@@ -285,7 +285,7 @@ user_code!(
 );
 
 // 64 sched_yield calls, then a store to 0x5100_0000, which nothing maps.
-user_code!(
+x86_user_code!(
     S19_FAULT_B,
     "
     mov r12d, 64
@@ -683,7 +683,7 @@ pub(crate) fn test_kalloc_fail_after_hook() -> Outcome {
 // (exit 4 otherwise), exit 0. On -ENOMEM: wait4(-1, 0, WNOHANG) must
 // return -ECHILD (exit 3 otherwise: a child exists), exit 12. Any other
 // fork error exits 1.
-user_code!(
+x86_user_code!(
     FORK_ONCE,
     "
     mov eax, 57
@@ -730,7 +730,7 @@ user_code!(
 // Push a canary, then execve("/hello", ["/hello", "s20", NULL], NULL).
 // /hello exits 42. A return must be -ENOMEM (exit 1 otherwise) with the
 // canary unchanged (exit 2 otherwise): exit 12.
-user_code!(
+x86_user_code!(
     EXEC_HELLO,
     "
     mov rax, 0x5332305f43414e41
@@ -767,7 +767,7 @@ user_code!(
 // open("/hello", O_RDONLY). On an fd: close it, exit 0. On -ENOMEM:
 // close(3) must return -EBADF (exit 5 otherwise: an fd leaked), exit 12.
 // Any other error exits 1.
-user_code!(
+x86_user_code!(
     OPEN_RO,
     "
     lea rdi, [rip + 6f]
@@ -803,7 +803,7 @@ user_code!(
 );
 
 // open("/vibe/s20", O_CREAT | O_RDWR, 0644), then as OPEN_RO.
-user_code!(
+x86_user_code!(
     OPEN_CREAT,
     "
     lea rdi, [rip + 6f]
@@ -841,7 +841,7 @@ user_code!(
 // fork (#1). Child: getpid (#1), exit(42) (#2). Parent: wait4(child, &st,
 // 0) (#2) must return the child (exit 7 otherwise) with st 0x2A00 (exit 6
 // otherwise): exit 0. A failed fork exits 8.
-user_code!(
+x86_user_code!(
     EXIT_WAIT,
     "
     mov eax, 57
@@ -883,7 +883,7 @@ user_code!(
 // mmap 16 MiB anonymous read-write (#1; exit 8 on failure), store to each
 // of its 4,096 pages, spin 2^26 iterations, munmap it (#2; exit 7 unless
 // 0), then sched_yield until killed.
-user_code!(
+x86_user_code!(
     MUNMAP_16M,
     "
     xor edi, edi

@@ -20,7 +20,7 @@
 //!
 //!   node_ptr(phys) = phys + hhdm_offset
 //!
-//! In the kernel this is `paging_init::HHDM_BASE`. In host tests it is
+//! In the kernel this is `BootInfo.hhdm_offset`. In host tests it is
 //! `real_backing_ptr - phys_base` ([`testing::Pool`]), so the same code
 //! drives a `Vec`-backed pool without any hardware.
 //!
@@ -58,6 +58,7 @@ static LEAKED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 /// Frames leaked by dropped [`Frames`] tokens since boot. `meminfo`
 /// prints it.
 pub fn leaked_frames() -> usize {
+    // Relaxed: a statistic; pairs with nothing.
     LEAKED_FRAMES.load(Ordering::Relaxed)
 }
 
@@ -172,6 +173,7 @@ impl Drop for Frames {
         reason = "ROADMAP §10.3: a dropped Frames panics in debug builds, DESIGN §4.2"
     )]
     fn drop(&mut self) {
+        // Relaxed: a statistic; pairs with nothing.
         LEAKED_FRAMES.fetch_add(self.count(), Ordering::Relaxed);
         #[cfg(debug_assertions)]
         {
@@ -260,6 +262,16 @@ impl Buddy {
 
     pub fn hhdm_offset(&self) -> u64 {
         self.hhdm_offset
+    }
+
+    /// Write the HHDM offset on an empty buddy. The kernel static starts
+    /// at 0; `pmm_init::init` stores Limine's offset before any insert.
+    pub fn set_hhdm(&mut self, hhdm: u64) {
+        assert!(
+            self.total_frames == 0 && self.nruns == 0,
+            "Buddy::set_hhdm after insert"
+        );
+        self.hhdm_offset = hhdm;
     }
 
     pub fn stats(&self) -> PmmStats {
@@ -910,6 +922,13 @@ mod tests {
         // fires before any read, and `NULL` maps to the zeroed local `zero`
         // anyway, established here.
         unsafe { b.pop_head(0) };
+    }
+
+    #[test]
+    fn set_hhdm_only_while_empty() {
+        let mut b = Buddy::new(0);
+        b.set_hhdm(0xFFFF_8000_0000_0000);
+        assert_eq!(b.hhdm_offset(), 0xFFFF_8000_0000_0000);
     }
 
     #[test]

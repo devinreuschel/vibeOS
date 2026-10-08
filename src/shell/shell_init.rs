@@ -29,6 +29,12 @@ pub(super) fn with_reg<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
     REG.with(f)
 }
 
+/// `name` is a registered command. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn has_command(name: &str) -> bool {
+    with_reg(|r| r.lookup(name).is_some())
+}
+
 /// Subsystems register here. Not a growing `match` on the name.
 pub fn register(cmd: Command) -> bool {
     with_reg(|r| r.register(cmd))

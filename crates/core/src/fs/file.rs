@@ -590,6 +590,19 @@ impl<'l, L: Guarded<Vfs>> FileApi<'l, L> {
         })
     }
 
+    /// The dentry the open file was opened through, for `openat`.
+    pub fn file_path(&self, id: FileId) -> Result<PathRef, FsError> {
+        self.with(|v| {
+            let i = v.file_slot(id)?;
+            let f = &v.files[i];
+            let dslot = f.dslot.ok_or(FsError::Badf)?;
+            Ok(PathRef {
+                mount: f.mount,
+                dslot,
+            })
+        })
+    }
+
     /// A new counted reference to open file `id`, for one syscall.
     pub fn fget(&self, id: FileId) -> Result<FileRef, FsError> {
         self.with(|v| v.file_addref(id))?;

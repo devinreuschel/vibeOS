@@ -238,10 +238,10 @@ impl Zeroed {
 /// Zero the order-0 frame at `pa` through the physmap. Not a write to any
 /// address space: no mapping names the frame yet.
 fn zero_frame(pa: u64) {
-    let p = paging_init::HHDM_BASE.wrapping_add(pa) as *mut u8;
+    let p = paging_init::hhdm_offset().wrapping_add(pa) as *mut u8;
     // SAFETY: `pa` is a buddy frame this caller just allocated and nothing
     // else names, and the physmap maps every buddy frame writable at
-    // `HHDM_BASE`; established by `paging_init::install`.
+    // `hhdm_offset()`; established by `paging_init::install`.
     unsafe { core::ptr::write_bytes(p, 0, PAGE_SIZE_4K as usize) };
 }
 
@@ -384,7 +384,7 @@ unsafe fn map_chunks(space: &mut Mm, va: u64, len: u64, perms: UserPerms) -> Res
 
 /// Unmap and free every leaf in `[va, va+len)`, chunk by chunk, flushing
 /// each page from this CPU's TLB before its frame is freed when `space` is
-/// the loaded CR3.
+/// the loaded user root.
 ///
 /// # Safety
 /// Same contract as `AddressSpace::unmap_pages`, whose flush this fn
@@ -407,10 +407,10 @@ unsafe fn unmap_chunks(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError>
     Ok(())
 }
 
-/// A flush for `space`'s pages: `invlpg` when it is this CPU's CR3,
-/// nothing otherwise.
+/// A flush for `space`'s pages when it is this CPU's user root
+/// (CR3; TTBR0 on aarch64).
 fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
-    let loaded = Arch::root() == space.root();
+    let loaded = Arch::user_root() == space.root();
     move |va| {
         if loaded {
             Arch::flush_local(VirtAddr(va));
@@ -420,7 +420,7 @@ fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
 
 /// `munmap` of `[va, va+len)` over `AddressSpace::unmap_free`, taking `PT`
 /// once per chunk ([`CHUNK_PAGES`]). Each page leaves this CPU's TLB before
-/// its frame is freed when `space` is the loaded CR3. Only the first chunk
+/// its frame is freed when `space` is the loaded user root. Only the first chunk
 /// can split a region, so a full region table fails it before anything is
 /// unmapped.
 ///
@@ -535,13 +535,17 @@ pub(crate) mod testing {
     static MAX_PAGES: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn note_hold(pages: u64) {
+        // Relaxed: a statistic; pairs with nothing.
         HOLDS.fetch_add(1, Ordering::Relaxed);
+        // Relaxed: a statistic; pairs with nothing.
         MAX_PAGES.fetch_max(pages, Ordering::Relaxed);
     }
 
     /// Zero the chunk counters.
     pub(crate) fn reset_chunks() {
+        // Relaxed: a statistic; pairs with nothing.
         HOLDS.store(0, Ordering::Relaxed);
+        // Relaxed: a statistic; pairs with nothing.
         MAX_PAGES.store(0, Ordering::Relaxed);
     }
 
@@ -549,6 +553,7 @@ pub(crate) mod testing {
     /// unmap paths took `PT` since [`reset_chunks`], and the most pages one
     /// hold covered.
     pub(crate) fn chunk_stats() -> (u64, u64) {
+        // Relaxed: statistics; pairs with nothing.
         (
             HOLDS.load(Ordering::Relaxed),
             MAX_PAGES.load(Ordering::Relaxed),
@@ -578,13 +583,11 @@ impl fmt::Debug for RootHolder {
 /// or any TCB's saved root. Returns with no lock held, so the caller's
 /// assertion never fires under PT or SCHED.
 fn root_holder(root: u64) -> Option<RootHolder> {
-    // One IF=0 stretch: the id and CR3 name one CPU.
+    // One IF=0 stretch: the id and the user root name one CPU.
     let (here, live) = {
         let _irq = crate::arch::current::InterruptGuard::enter();
-        (
-            per_cpu_init::try_current().map_or(0, |c| c.cpu_id),
-            Arch::root().as_u64(),
-        )
+        let live = Arch::user_root().as_u64();
+        (per_cpu_init::try_current().map_or(0, |c| c.cpu_id), live)
     };
     if live == root {
         return Some(RootHolder::Loaded { cpu: here });
@@ -592,6 +595,7 @@ fn root_holder(root: u64) -> Option<RootHolder> {
     let mut id = 0u32;
     while (id as usize) < per_cpu_init::cpu_count() {
         if let Some(r) = per_cpu_init::cpu(id) {
+            // Acquire: pairs with each CPU's Release store of its `as_cr3`.
             let loaded = r.as_cr3.load(Ordering::Acquire);
             // A recorded root is a table address, as `load_cr3_u64` stores it.
             if loaded != 0 && loaded == root {
@@ -615,20 +619,43 @@ fn root_holder(root: u64) -> Option<RootHolder> {
 /// I44).
 pub unsafe fn load_cr3_u64(want: u64) {
     per_cpu_init::with_current(|cpu| {
+        // Relaxed: only this CPU stores its `as_cr3`; pairs with nothing.
         if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
             return;
         }
-        // SAFETY: invariant I44: `want` is a PML4 that shares the kernel
-        // half this code and stack run in and stays allocated while loaded
-        // (this fn's contract, `addr_space_init::load_cr3_u64`).
-        unsafe { Arch::set_root(PhysAddr(want)) };
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: invariant I44: `want` is a user root (TTBR0) that stays
+        // allocated while loaded (this fn's contract,
+        // `addr_space_init::load_cr3_u64`).
+        unsafe {
+            crate::arch::aarch64::cpu::write_ttbr0(want);
+            // `msr ttbr0_el1` does not flush, unlike an x86 CR3 write;
+            // `switch_cr3_for` already pairs its write with this.
+            crate::arch::aarch64::cpu::tlbi_all();
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        // SAFETY: invariant I44: `want` is a user PML4 that stays
+        // allocated while loaded (this fn's contract,
+        // `addr_space_init::load_cr3_u64`).
+        unsafe {
+            Arch::set_root(PhysAddr(want));
+        }
+        // Release: pairs with the Acquire load in `root_holder`.
         cpu.remote.as_cr3.store(want, Ordering::Release);
     });
 }
 
 pub fn load_kernel_cr3() {
-    // SAFETY: the kernel root comes from `paging_init::kernel_cr3`, which
-    // `paging_init::install` published and nothing frees; it is the kernel
-    // root, so no TCB need name it.
-    unsafe { load_cr3_u64(paging_init::kernel_cr3()) };
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: the empty user root comes from `paging_init::install`,
+    // which published it and nothing frees; no TCB need name it.
+    unsafe {
+        load_cr3_u64(paging_init::empty_user_root());
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    // SAFETY: the kernel root comes from `paging_init::install`, which
+    // published it and nothing frees; no TCB need name it.
+    unsafe {
+        load_cr3_u64(paging_init::kernel_cr3());
+    }
 }

@@ -108,7 +108,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989-${{ runner.arch }}
 
       - name: setup
         run: ./setup.sh
@@ -256,7 +256,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989-${{ runner.arch }}
 
       - name: setup
         run: ./setup.sh
@@ -376,7 +376,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989-${{ runner.arch }}
 
       - name: setup
         run: ./setup.sh
@@ -443,6 +443,15 @@ jobs:
 
       - name: ./setup.sh --kani && make models
         run: ./setup.sh --kani && make models
+
+      # herd7 from the distro (ROADMAP §11.7): `make litmus` beside `make models`.
+      - name: install herd7
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y herdtools7
+
+      - name: make litmus
+        run: make litmus
 
       # The host CPU model and the guest's invariant-TSC bit, to the job
       # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
@@ -707,7 +716,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989-${{ runner.arch }}
 
       - name: setup
         run: ./setup.sh
@@ -748,6 +757,133 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: runner-irqoff
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  el2:
+    name: el2
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 120
+    # Scheduled lane 1 (DESIGN §8.6): nightly EL2 boots, queued with release-profile.
+    concurrency:
+      group: sched-lane-1
+      queue: max
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+      APT_PACKAGES: qemu-system-arm qemu-efi-aarch64 xorriso
+      ARCH: aarch64
+      VIBEOS_SMP: "4"
+      VIBEOS_QEMU_CPU: neoverse-v1
+      VIBEOS_QEMU_ACCEL: tcg
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: apt cache key
+        id: apt-key
+        run: |
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: rust-src, llvm-tools
+          targets: aarch64-unknown-none-softfloat, aarch64-unknown-linux-musl
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-el2-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-el2-
+
+      - name: cache limine binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: limine
+          key: limine-v12.9.1-c82c3708b3304be806b2492dc2ce34e219c6f989-${{ runner.arch }}
+
+      - name: setup
+        run: ./setup.sh
+
+      - name: EL2 virt virtualization=on
+        env:
+          VIBEOS_MACHINE: virt,acpi=off,gic-version=3,virtualization=on
+        run: make test-e2e
+
+      - name: EL2 virt-8.2 physical timer
+        env:
+          VIBEOS_MACHINE: virt-8.2,acpi=off,gic-version=3,virtualization=on
+          VIBEOS_RESULTS_APPEND: "1"
+        run: make test-e2e
+
+      # In-guest registry at EL2. `make test-kernel` forces SMP=2.
+      - name: EL2 test-kernel -smp 4
+        env:
+          VIBEOS_MACHINE: virt,acpi=off,gic-version=3,virtualization=on
+        run: make test-kernel-smp4
+
+      - name: harness results summary
+        if: always()
+        run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload failed-run cores
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cores-aarch64-el2
+          path: build/cores/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-aarch64-el2
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-el2
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90

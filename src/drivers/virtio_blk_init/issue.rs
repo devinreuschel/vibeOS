@@ -88,10 +88,11 @@ pub(super) enum Issued {
     Full(Request),
 }
 
-/// Requests finished here that one [`pump`](Self::pump) pass holds before it drops
-/// the queue lock to wake their waiters and picks again. Small, so the pass's frame
-/// stays far below a top half's 4 KiB share of a kernel stack: `pump` runs
-/// on a submitter's stack, under the FAT write path (DESIGN §4.5).
+/// Requests one [`pump`](Self::pump) or `harvest` pass holds before it drops
+/// the queue lock to wake waiters. Small, so the pass's frame stays far
+/// below a top half's 4 KiB share of a kernel stack: `pump` runs on a
+/// submitter's stack under the FAT write path, and `harvest` on irqth
+/// (DESIGN §4.5).
 pub(super) const PUMP_BATCH: usize = 2;
 
 impl VirtioBlk {
@@ -151,6 +152,7 @@ impl VirtioBlk {
                     return Issued::Local(req, Err(BlockError::Inval));
                 }
             };
+            // Acquire: pairs with the Release store in `setup`.
             let maxd = self.max_discard.load(Ordering::Acquire);
             if maxd != 0 && n512 > maxd {
                 blk.slot_used[si] = false;
@@ -287,6 +289,7 @@ impl VirtioBlk {
     pub(super) fn pump(&self) {
         loop {
             let mut kicks = [0u64; MAX_VQ];
+            let mut notify32 = [false; MAX_VQ];
             let mut want = [false; MAX_VQ];
             let mut local: [Option<(Request, Result<(), BlockError>)>; PUMP_BATCH] =
                 [None; PUMP_BATCH];
@@ -312,17 +315,21 @@ impl VirtioBlk {
                     let seq = req.seq;
                     match self.issue(blk, req) {
                         Issued::Device { qi, kick } => {
+                            // Relaxed: a count; pairs with nothing.
                             self.io_reqs.fetch_add(1, Ordering::Relaxed);
                             if req.bio.op == Op::Flush {
+                                // Relaxed: a count; pairs with nothing.
                                 self.flushes.fetch_add(1, Ordering::Relaxed);
                             }
                             if kick && let Some(v) = blk.vqs[qi].as_ref() {
                                 kicks[qi] = v.doorbell;
+                                notify32[qi] = v.notify32;
                                 want[qi] = true;
                             }
                         }
                         Issued::Local(req, res) => {
                             if req.bio.op == Op::Flush && res.is_ok() {
+                                // Relaxed: a count; pairs with nothing.
                                 self.flushes.fetch_add(1, Ordering::Relaxed);
                             }
                             let report = match res {
@@ -357,7 +364,7 @@ impl VirtioBlk {
             i = 0;
             while i < MAX_VQ {
                 if want[i] {
-                    kick(kicks[i]);
+                    kick(kicks[i], i as u16, notify32[i]);
                 }
                 i += 1;
             }
@@ -371,8 +378,18 @@ impl VirtioBlk {
     /// §2.1.1). Until ROADMAP §12.5's error handler resets it, that is the
     /// one failure that fails the device.
     pub(super) fn needs_reset(&self) -> bool {
+        // Acquire: pairs with the Release store in `setup`.
         let common = self.common.load(Ordering::Acquire);
-        common != 0 && exhausted_fails_device(r8(common, COMMON_OFF_STATUS))
+        if common == 0 {
+            return false;
+        }
+        // Acquire: pairs with the Release store in `setup_mmio`.
+        let st = if self.mmio.load(Ordering::Acquire) {
+            crate::virtio_mmio_init::status(common)
+        } else {
+            r8(common, COMMON_OFF_STATUS)
+        };
+        exhausted_fails_device(st)
     }
 
     /// [`fail_rest`](Self::fail_rest), only when [`needs_reset`](Self::needs_reset).
@@ -383,6 +400,7 @@ impl VirtioBlk {
     }
 
     pub(super) fn fail_rest(&self) {
+        // Release: pairs with the Acquire load in `state`.
         self.state
             .store(DeviceState::Failed.as_u8(), Ordering::Release);
         loop {

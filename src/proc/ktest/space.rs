@@ -7,12 +7,12 @@ use vibeos::syscall::SYS_KILL;
 
 use crate::addr_space_init::testing as as_testing;
 use crate::fill_init::testing as fill_testing;
-use crate::ktest::user::{self, Image, Layout, user_code};
+use crate::ktest::user::{self, Image, Layout, x86_user_code};
 use crate::ktest::{Outcome, free_frames, quiescent_free_frames, settle_threads};
 use crate::proc_init::{self, testing as proc_testing};
 
 // `sched_yield` forever: the process whose space a pin outlives.
-user_code!(
+x86_user_code!(
     AS_PIN_YIELD,
     "
 1:
@@ -115,7 +115,7 @@ fn kill_and_reap(pid: u32) -> u32 {
 // Marks the first and last page of its 8 MiB bss, forks, and exits with
 // the child's status: the child exits 0 when it sees both marks, 1 when
 // not; a failed fork exits 2.
-user_code!(
+x86_user_code!(
     FILL_FORK,
     "
     mov rax, 0x40001000

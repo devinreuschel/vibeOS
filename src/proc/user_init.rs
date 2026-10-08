@@ -173,10 +173,25 @@ const PH_BATCH: usize = 8;
 /// Read the ELF header and program headers of `src`, in batches of
 /// [`PH_BATCH`], and check them against its length.
 #[inline(never)]
+fn native_machine() -> u16 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        elf::EM_AARCH64
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        elf::EM_X86_64
+    }
+}
+
 fn read_image<S: ImageSource>(src: &mut S) -> Result<Image, LoadError> {
     let file_len = src.len();
     let mut eh = [0u8; EHDR_SIZE];
     src.read_exact_at(0, &mut eh)?;
+    let machine = u16::from_le_bytes([eh[18], eh[19]]);
+    if machine != native_machine() {
+        return Err(LoadError::Elf(ElfError::BadMachine));
+    }
     let eh = elf::parse_ehdr(&eh, file_len).map_err(LoadError::Elf)?;
     let mut b = Builder::new(eh, file_len);
     let mut batch = [0u8; PH_BATCH * PHDR_SIZE];
@@ -287,17 +302,29 @@ fn setup_tls<S: ImageSource>(
         return Ok(0);
     };
     let too_big = LoadError::Elf(ElfError::ImageTooBig);
-    let map_len = tls.map_len().ok_or(too_big)?;
+    #[cfg(target_arch = "aarch64")]
+    let (map_len, tp, tls_start) = {
+        let map_len = tls.map_len_variant_i().ok_or(too_big)?;
+        let tls_map = stack_base.saturating_sub(map_len) & !(tls.map_align() - 1);
+        let (tp, tls_start) = tls.thread_pointer_variant_i(tls_map).ok_or(too_big)?;
+        (map_len, tp, tls_start)
+    };
+    #[cfg(target_arch = "x86_64")]
+    let (map_len, tp, tls_start) = {
+        let map_len = tls.map_len().ok_or(too_big)?;
+        let tls_map = stack_base.saturating_sub(map_len) & !(tls.map_align() - 1);
+        let (tp, tls_start) = tls.thread_pointer(tls_map).ok_or(too_big)?;
+        (map_len, tp, tls_start)
+    };
     let tls_map = stack_base.saturating_sub(map_len) & !(tls.map_align() - 1);
-    // The thread pointer is aligned as the block is (TLS variant II).
-    let (fs, tls_start) = tls.thread_pointer(tls_map).ok_or(too_big)?;
     fill_init::map(space, tls_map, map_len, UserPerms::RW).map_err(LoadError::As)?;
     fill_init::zero(space, tls_map, map_len).map_err(LoadError::Fill)?;
     if tls.filesz != 0 {
         copy_file_bytes(space, src, tls.offset, tls_start, tls.filesz)?;
     }
-    fill_init::write(space, fs, &fs.to_le_bytes()).map_err(LoadError::Fill)?;
-    Ok(fs)
+    #[cfg(target_arch = "x86_64")]
+    fill_init::write(space, tp, &tp.to_le_bytes()).map_err(LoadError::Fill)?;
+    Ok(tp)
 }
 
 fn at_random() -> [u8; 16] {

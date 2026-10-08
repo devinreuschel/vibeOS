@@ -90,6 +90,13 @@ pub const O_CREAT: u32 = 0x40;
 pub const O_EXCL: u32 = 0x80;
 pub const O_TRUNC: u32 = 0x200;
 pub const O_APPEND: u32 = 0x400;
+// VFS bits for the four flags whose Linux values differ by architecture.
+// These are asm-generic (`include/uapi/asm-generic/fcntl.h`). aarch64's
+// `arch/arm64/include/uapi/asm/fcntl.h` values are translated in
+// `arch::aarch64::fcntl::from_user` before an open checks them.
+// `O_DIRECT` and `O_LARGEFILE` are ignored.
+pub const O_DIRECT: u32 = 0x4000;
+pub const O_LARGEFILE: u32 = 0x8000;
 pub const O_DIRECTORY: u32 = 0x10000;
 pub const O_NOFOLLOW: u32 = 0x20000;
 /// Linux `O_CLOEXEC`. Process fd table turns this into `FD_CLOEXEC`.
@@ -587,23 +594,28 @@ impl InodeWords {
     }
 
     pub fn size(&self) -> u64 {
+        // Acquire: pairs with the Release store in `set_size`.
         self.size.load(Ordering::Acquire)
     }
 
     pub fn set_size(&self, size: u64) {
+        // Release: pairs with the Acquire load in `size`.
         self.size.store(size, Ordering::Release);
     }
 
     /// The link count, which only `Vfs` changes.
     pub fn nlink(&self) -> u32 {
+        // Acquire: pairs with the Release store in `set_nlink`.
         self.nlink.load(Ordering::Acquire) as u32
     }
 
     fn set_nlink(&self, n: u32) {
+        // Release: pairs with the Acquire load in `nlink`.
         self.nlink.store(u64::from(n), Ordering::Release);
     }
 
     pub fn private(&self) -> [u64; 2] {
+        // Acquire: pairs with the Release stores in `set_private`.
         [
             self.private[0].load(Ordering::Acquire),
             self.private[1].load(Ordering::Acquire),
@@ -611,7 +623,9 @@ impl InodeWords {
     }
 
     pub fn set_private(&self, p: [u64; 2]) {
+        // Release: pairs with the Acquire loads in `private`.
         self.private[0].store(p[0], Ordering::Release);
+        // Release: pairs with the Acquire loads in `private`.
         self.private[1].store(p[1], Ordering::Release);
     }
 }

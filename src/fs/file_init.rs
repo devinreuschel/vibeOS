@@ -41,6 +41,10 @@ use crate::vibefs_init;
 )]
 /// Open `path`; `O_CREAT` creates a regular file with `mode`, `O_TRUNC`
 /// empties one.
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn open(path: &[u8], flags: OpenFlags, mode: u32) -> Result<FileRef, FsError> {
     open_at(None, path, flags, mode)
 }
@@ -135,6 +139,10 @@ pub fn rename(old: &[u8], new: &[u8]) -> Result<(), FsError> {
 )]
 /// Mount `fstype` from `source` on `target`: `fat32` and `vibefs` from a
 /// block device (`ram0`, `vda`), `ramfs` from nothing.
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], ro: bool) -> Result<(), FsError> {
     mount_at(None, source, target, fstype, ro)
 }
@@ -148,6 +156,10 @@ pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], ro: bool) -> Result<()
 )]
 /// Unmount the mount whose root `target` names; its superblock's last
 /// mount releases the volume.
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn umount(target: &[u8]) -> Result<(), FsError> {
     umount_at(None, target)
 }
@@ -197,6 +209,10 @@ pub fn rename_at(base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), F
     )
 )]
 /// Make `path` a symlink to `target`, from `base`.
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn symlink_at(base: Option<WalkBase>, path: &[u8], target: &[u8]) -> Result<(), FsError> {
     fs_init::api().symlink(base, path, target)
 }
@@ -209,6 +225,10 @@ pub fn symlink_at(base: Option<WalkBase>, path: &[u8], target: &[u8]) -> Result<
     )
 )]
 /// Hard link `new` to the regular file `old`, both from `base`.
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn link_at(base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsError> {
     fs_init::api().link(base, old, new)
 }
@@ -221,6 +241,10 @@ pub fn link_at(base: Option<WalkBase>, old: &[u8], new: &[u8]) -> Result<(), FsE
     )
 )]
 /// Set the size of the regular file `path` names from `base`.
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub fn truncate_at(base: Option<WalkBase>, path: &[u8], size: u64) -> Result<(), FsError> {
     fs_init::api().truncate(base, path, size)
 }
@@ -319,6 +343,11 @@ pub fn fget(id: FileId) -> Result<FileRef, FsError> {
     fs_init::api().fget(id)
 }
 
+/// The dentry open file `id` was opened through (`openat`'s dirfd).
+pub fn file_path(id: FileId) -> Result<PathRef, FsError> {
+    fs_init::api().file_path(id)
+}
+
 /// Whether open file `id` is open for a `read` (`write` false) or a
 /// `write`: `Badf` if not, else its inode's kind.
 pub fn access(id: FileId, write: bool) -> Result<InodeKind, FsError> {
@@ -336,6 +365,10 @@ pub fn addref(id: FileId) -> Result<(), FsError> {
         dead_code,
         reason = "the File API's whole surface (C-FILEAPI and its `_at` forms); a production kernel calls part of it"
     )
+)]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn stat_path(path: &[u8]) -> Result<Stat, FsError> {
     stat_at(None, path)

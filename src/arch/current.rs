@@ -5,11 +5,21 @@
 /// This build's port, chosen by `cfg(target_arch)`.
 #[cfg(target_arch = "x86_64")]
 pub type Arch = super::x86_64::Arch;
+#[cfg(target_arch = "aarch64")]
+pub type Arch = super::aarch64::Arch;
 
+#[cfg(target_arch = "aarch64")]
+pub use super::aarch64::mmu::enable_nx;
 /// The page-table port items that are not `PageTable` methods.
 #[cfg(target_arch = "x86_64")]
-pub use super::x86_64::mmu::{enable_nx, flush_local_global};
+pub use super::x86_64::mmu::enable_nx;
 
+#[cfg(target_arch = "aarch64")]
+pub use super::aarch64::cpu::{
+    InterruptGuard, cli as irq_disable, halt, hlt_once as wait_for_interrupt, hw_rng64, idle_wait,
+    interrupts_enabled, set_per_cpu_hooks, set_user_tls, stack_pointer, sti as irq_enable,
+    user_tls,
+};
 /// The port's CPU primitives that shared kernel code calls by these
 /// port-neutral names (`docs/ARCH.md`): the interrupt guard and flag, the
 /// halt and the one-interrupt wait, the test exit, the hardware RNG, the
@@ -23,29 +33,65 @@ pub use super::x86_64::cpu::{
 
 // The registers the panic path saves for a CPU that stops (DESIGN §2.5
 // step 1): where it is, its frame pointer, and its flags.
+#[cfg(target_arch = "aarch64")]
+pub use super::aarch64::cpu::{frame_pointer, instruction_pointer, irq_flags};
 #[cfg(target_arch = "x86_64")]
 pub use super::x86_64::cpu::{
     read_rbp as frame_pointer, read_rip as instruction_pointer, rflags as irq_flags,
 };
 
+#[cfg(all(target_arch = "aarch64", feature = "kernel_tests"))]
+pub use super::aarch64::power::qemu_exit;
 /// The test build's end of a QEMU run.
 #[cfg(all(target_arch = "x86_64", feature = "kernel_tests"))]
 pub use super::x86_64::cpu::qemu_exit;
 
+#[cfg(target_arch = "aarch64")]
+pub use super::aarch64::power;
 /// The power-off and reset port module (`power_off`, `restart`), which the
 /// `reboot` syscall and the kernel shell's `poweroff` and `reboot` call.
 #[cfg(target_arch = "x86_64")]
 pub use super::x86_64::power;
 
+#[cfg(target_arch = "aarch64")]
+pub use super::aarch64::percpu;
 /// The per-CPU base register's port module (`PerCpuBase`'s fast path, the
 /// base install and the hardware CPU id).
 #[cfg(target_arch = "x86_64")]
 pub use super::x86_64::percpu;
 
+/// CNTFRQ for [`vibeos::arch::CycleCounter::freq_hz`].
+#[cfg(target_arch = "aarch64")]
+#[expect(
+    unused_imports,
+    reason = "CycleCounter::freq_hz reads the published value"
+)]
+pub use super::aarch64::publish_cntfrq;
+
+/// `open` / `openat` flags, in the VFS's asm-generic bits.
+#[cfg(target_arch = "aarch64")]
+pub use vibeos::arch::aarch64::fcntl::from_user as user_open_flags;
+#[cfg(target_arch = "x86_64")]
+pub use vibeos::arch::x86_64::fcntl::from_user as user_open_flags;
+
 /// This build's port's `struct stat`, which `fstat` copies out, so `proc`
 /// never names the port.
 #[cfg(target_arch = "x86_64")]
 pub type UserStat = vibeos::arch::x86_64::stat::Stat;
+#[cfg(target_arch = "aarch64")]
+pub type UserStat = vibeos::arch::aarch64::stat::Stat;
+
+/// This build's port's user frame (DESIGN §5.10).
+#[cfg(target_arch = "x86_64")]
+pub type UserFrame = vibeos::arch::x86_64::trap::UserFrame;
+#[cfg(target_arch = "aarch64")]
+pub type UserFrame = vibeos::arch::aarch64::trap::UserFrame;
+
+/// This build's port's `SYS_*` numbers (SYSCALL.md §1).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+pub use vibeos::arch::x86_64::syscall::nr as syscall_nr;
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub use vibeos::proc::syscall_table::aarch64::nr as syscall_nr;
 
 /// The IRQ-off exclusive cell over this build's port (DESIGN §2.3).
 pub type IrqCell<T> = vibeos::cell::IrqCell<T, Arch>;

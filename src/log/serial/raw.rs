@@ -14,6 +14,8 @@
 //! escaped and unframed.
 
 use core::ptr;
+#[cfg(target_arch = "aarch64")]
+use vibeos::atomic::statics::AtomicU64;
 use vibeos::atomic::statics::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use vibeos::log::line;
 use vibeos::uart::*;
@@ -43,6 +45,42 @@ static DUMP_OWNER: AtomicU32 = AtomicU32::new(NO_OWNER);
 /// dumps. A fn pointer, so this layer names nothing above arch.
 static STOP_HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
+/// This CPU's index. Installed by `per_cpu_init`; unset, the BSP is 0.
+static CPU_INDEX_HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Port halt. Installed from `_start` so a dump can park without naming
+/// the port module (DESIGN §1.2: raw talks only to the `x86` alias).
+static HALT_HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// PL011 data and flag registers (ARM DDI0183).
+#[cfg(target_arch = "aarch64")]
+const PL011_DR: u64 = 0x00;
+#[cfg(target_arch = "aarch64")]
+const PL011_FR: u64 = 0x18;
+#[cfg(target_arch = "aarch64")]
+const PL011_TXFF: u32 = 1 << 5;
+#[cfg(target_arch = "aarch64")]
+const PL011_RXFE: u32 = 1 << 4;
+/// QEMU `virt` UART before the device tree is walked.
+#[cfg(target_arch = "aarch64")]
+const PL011_EARLY: u64 = 0x0900_0000;
+
+#[cfg(target_arch = "aarch64")]
+static UART_VA: AtomicU64 = AtomicU64::new(PL011_EARLY);
+
+/// Point later writes at a mapped PL011. After paging takeover.
+#[cfg(target_arch = "aarch64")]
+pub fn set_mmio(va: u64) {
+    // Release: pairs with the Acquire load in `uart_va`.
+    UART_VA.store(va, Ordering::Release);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn uart_va() -> u64 {
+    // Acquire: pairs with the Release store in `set_mmio`.
+    UART_VA.load(Ordering::Acquire)
+}
+
 /// Bring COM1 up: DLAB dance, 115200 8N1, FIFO on. Safe to run again;
 /// the panic path re-runs it since the panic may itself be in serial.
 #[cfg(target_arch = "x86_64")]
@@ -59,6 +97,11 @@ pub fn init() {
         x86::outb(COM1_BASE + REG_FCR, FCR_ENABLE);
         x86::outb(COM1_BASE + REG_MCR, MCR_READY);
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn init() {
+    // `map_early_console` already pointed `UART_VA` at `HHDM + PA`.
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -79,11 +122,29 @@ fn write_byte(b: u8) {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+fn write_byte(b: u8) {
+    let va = uart_va();
+    let mut spin = TX_POLL_CAP;
+    while spin > 0 {
+        // SAFETY: `va` is the early identity/HHDM UART or the paging-mapped
+        // PL011; established by `init` / `set_mmio`. established here.
+        let fr = unsafe { core::ptr::read_volatile((va.wrapping_add(PL011_FR)) as *const u32) };
+        if fr & PL011_TXFF == 0 {
+            // SAFETY: as above; DR is the write register. established here.
+            unsafe {
+                core::ptr::write_volatile((va.wrapping_add(PL011_DR)) as *mut u32, u32::from(b));
+            }
+            return;
+        }
+        spin -= 1;
+    }
+}
+
 /// Write `content` as one framed kernel line (`line::kernel_line`). No
 /// lock: the caller holds `serial`'s TX lock, or is the dump's owner.
 pub fn put_line(content: &[u8]) {
-    // AcqRel: the flag is read and cleared in one step, so a write on the
-    // halt path, which takes no lock, sees a defined value.
+    // AcqRel: pairs with the Acquire load and Release stores in `put_user`.
     let open = USER_OPEN.swap(false, Ordering::AcqRel);
     line::kernel_line(open, content, write_byte);
 }
@@ -92,7 +153,7 @@ pub fn put_line(content: &[u8]) {
 /// each frame byte escaped, `\n` as `\r\n`. No lock: the caller holds
 /// `serial`'s TX lock.
 pub fn put_user(bytes: &[u8]) {
-    // Acquire / Release: as in `put_line`, the value is defined on every path.
+    // Acquire: pairs with the AcqRel swap in `put_line` and the Release stores below.
     let was = USER_OPEN.load(Ordering::Acquire);
     // The flag follows each byte, set before any byte but `\n` goes out and
     // cleared after a `\n`: a panic dump that interrupts this write on this
@@ -100,17 +161,33 @@ pub fn put_user(bytes: &[u8]) {
     // on a fresh one. At worst it writes one empty line.
     let open = line::user_bytes(was, bytes, |b| {
         if b != b'\n' {
+            // Release: pairs with the AcqRel swap in `put_line` and the Acquire load above.
             USER_OPEN.store(true, Ordering::Release);
         }
         write_byte(b);
         if b == b'\n' {
+            // Release: pairs with the AcqRel swap in `put_line` and the Acquire load above.
             USER_OPEN.store(false, Ordering::Release);
         }
     });
+    // Release: pairs with the AcqRel swap in `put_line` and the Acquire load above.
     USER_OPEN.store(open, Ordering::Release);
 }
 
 /// Poll COM1 RX. No lock; a caller racing another reader holds IRQs off.
+#[cfg(target_arch = "aarch64")]
+pub fn try_read_byte() -> Option<u8> {
+    let va = uart_va();
+    // SAFETY: as `write_byte`. established here.
+    let fr = unsafe { core::ptr::read_volatile((va.wrapping_add(PL011_FR)) as *const u32) };
+    if fr & PL011_RXFE != 0 {
+        return None;
+    }
+    // SAFETY: as `write_byte`. established here.
+    let dr = unsafe { core::ptr::read_volatile((va.wrapping_add(PL011_DR)) as *const u32) };
+    Some(dr as u8)
+}
+
 #[cfg(target_arch = "x86_64")]
 pub fn try_read_byte() -> Option<u8> {
     // SAFETY: invariant: `COM1_BASE + REG_LSR` and `+ REG_DATA` are COM1's
@@ -125,17 +202,49 @@ pub fn try_read_byte() -> Option<u8> {
 }
 
 /// This CPU's index. Before the per-CPU area is live only the BSP runs.
-#[cfg(target_arch = "x86_64")]
 fn this_cpu() -> u32 {
-    x86::cpu_index().unwrap_or(0)
+    // Acquire: pairs with the Release store in `set_cpu_index_hook`.
+    let p = CPU_INDEX_HOOK.load(Ordering::Acquire);
+    if p.is_null() {
+        return 0;
+    }
+    // SAFETY: a non-null hook holds `fn() -> Option<u32>`; established by
+    // `serial::raw::set_cpu_index_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn() -> Option<u32>>(p) };
+    f().unwrap_or(0)
+}
+
+/// Install the CPU-index hook. `per_cpu_init::init_bsp` calls it.
+pub fn set_cpu_index_hook(f: fn() -> Option<u32>) {
+    // Release: pairs with the Acquire load in `this_cpu`.
+    CPU_INDEX_HOOK.store(f as *mut (), Ordering::Release);
+}
+
+/// Install the port halt. `_start` calls it right after `Serial::init`.
+pub fn set_halt_hook(f: fn() -> !) {
+    // Release: pairs with the Acquire load in `run_halt`.
+    HALT_HOOK.store(f as *mut (), Ordering::Release);
+}
+
+fn run_halt() -> ! {
+    // Acquire: pairs with the Release store in `set_halt_hook`.
+    let p = HALT_HOOK.load(Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: a non-null hook holds `fn() -> !`; established by
+        // `serial::raw::set_halt_hook`, its only store.
+        let f = unsafe { core::mem::transmute::<*mut (), fn() -> !>(p) };
+        f();
+    }
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 /// Make this CPU the panic dump's owner. True only for the first caller:
 /// false for every later one, the owner re-entering included, so a
 /// nested panic does not dump again.
 pub fn claim_dump() -> bool {
-    // AcqRel: the winner's later writes follow its claim, and a loser
-    // sees the owner the winner stored.
+    // AcqRel, Acquire on failure: pairs with the Acquire load in `owner_cpu`.
     DUMP_OWNER
         .compare_exchange(NO_OWNER, this_cpu(), Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
@@ -194,6 +303,5 @@ pub fn stop_if_halting() {
         return;
     }
     run_stop_hook();
-    #[cfg(target_arch = "x86_64")]
-    x86::halt();
+    run_halt();
 }

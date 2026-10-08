@@ -68,8 +68,8 @@ const ONE_BLOCK: PmmStats = PmmStats {
 #[kani::stub(Buddy::node_ptr, node_ptr_in_frame)]
 fn buddy_16_frames_five_allocs() {
     let mut nodes = [const { FreeNode { next: 0, prev: 0 } }; ARENA_FRAMES];
-    // `node_ptr_in_frame` reads it only while `nodes` lives. One thread,
-    // so Relaxed.
+    // `node_ptr_in_frame` reads it only while `nodes` lives.
+    // Relaxed: one thread; pairs with nothing.
     NODES.store(&raw mut nodes, Ordering::Relaxed);
     // The stub ignores the offset; 0 names no real mapping.
     let mut b = Buddy::new(0);
@@ -118,8 +118,8 @@ fn buddy_16_frames_five_allocs() {
 #[kani::stub(Buddy::node_ptr, node_ptr_in_frame)]
 fn buddy_16_frames_alloc_then_free() {
     let mut nodes = [const { FreeNode { next: 0, prev: 0 } }; ARENA_FRAMES];
-    // `node_ptr_in_frame` reads it only while `nodes` lives. One thread,
-    // so Relaxed.
+    // `node_ptr_in_frame` reads it only while `nodes` lives.
+    // Relaxed: one thread; pairs with nothing.
     NODES.store(&raw mut nodes, Ordering::Relaxed);
     // The stub ignores the offset; 0 names no real mapping.
     let mut b = Buddy::new(0);
@@ -158,6 +158,7 @@ fn node_ptr_in_frame(_b: &Buddy, phys: u64) -> *mut FreeNode {
     let off = phys.wrapping_sub(ARENA_BASE);
     assert!(off < ARENA_END - ARENA_BASE && off % PAGE_SIZE == 0);
     let i = (off / PAGE_SIZE) as usize;
+    // Relaxed: one thread; pairs with nothing.
     let nodes = NODES.load(Ordering::Relaxed);
     // SAFETY: `nodes` points at the harness's `nodes`, live until the
     // harness returns, and the assert above makes `i < 16`; established

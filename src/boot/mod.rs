@@ -5,24 +5,25 @@
 
 use core::ops::Range;
 
-use limine::memmap::{
-    Entry, MEMMAP_ACPI_NVS, MEMMAP_ACPI_RECLAIMABLE, MEMMAP_BOOTLOADER_RECLAIMABLE,
-    MEMMAP_EXECUTABLE_AND_MODULES, MEMMAP_USABLE,
-};
+use limine::memmap::Entry;
 use limine::request::{
-    ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, FramebufferResponse,
-    HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
+    DtbRequest, ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest,
+    FramebufferResponse, HhdmRequest, MemmapRequest, ModulesRequest, RsdpRequest, StackSizeRequest,
 };
 
-use crate::arch::current::Arch;
 use crate::cell::BootCell;
-use vibeos::arch::BootHandover;
 use vibeos::boot::cmdline::{self, CMDLINE_MAX, Cmdline, CmdlineBuf, Escaped, SYSCTLS};
 use vibeos::limits::MAX_BOOT_MODULES;
 use vibeos::log::Level;
-use vibeos::paging::HHDM_BASE;
+use vibeos::machine::MAX_RESERVED;
+use vibeos::physmap::{self, PhysmapSlot};
+use vibeos::pmm::clip_usable;
 
+#[cfg(target_arch = "aarch64")]
+use vibeos::physmap::PHYSMAP_AARCH64;
 #[cfg(target_arch = "x86_64")]
+use vibeos::physmap::PHYSMAP_X86_64;
+
 pub mod fw_cfg_init;
 
 #[cfg(feature = "kernel_tests")]
@@ -50,6 +51,10 @@ static MEMMAP: MemmapRequest = MemmapRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static RSDP: RsdpRequest = RsdpRequest::new();
+
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static DTB: DtbRequest = DtbRequest::new();
 
 // Physical base of the loaded image, so the PMM does not hand our own
 // code and data back out as RAM.
@@ -85,6 +90,24 @@ static STACK_SIZE: StackSizeRequest = StackSizeRequest::new(LIMINE_STACK_BYTES);
 /// The fw_cfg file whose text follows Limine's command line.
 pub const FW_CFG_CMDLINE: &str = "opt/vibeos/cmdline";
 
+// The type numbers `physmap` filters on are Limine's. A drift here would
+// map MMIO or drop RAM, and the host tests would still pass.
+const _: () = {
+    assert!(physmap::MEMMAP_USABLE == limine::memmap::MEMMAP_USABLE);
+    assert!(physmap::MEMMAP_RESERVED == limine::memmap::MEMMAP_RESERVED);
+    assert!(physmap::MEMMAP_ACPI_RECLAIMABLE == limine::memmap::MEMMAP_ACPI_RECLAIMABLE);
+    assert!(physmap::MEMMAP_ACPI_NVS == limine::memmap::MEMMAP_ACPI_NVS);
+    assert!(physmap::MEMMAP_BAD_MEMORY == limine::memmap::MEMMAP_BAD_MEMORY);
+    assert!(
+        physmap::MEMMAP_BOOTLOADER_RECLAIMABLE == limine::memmap::MEMMAP_BOOTLOADER_RECLAIMABLE
+    );
+    assert!(
+        physmap::MEMMAP_EXECUTABLE_AND_MODULES == limine::memmap::MEMMAP_EXECUTABLE_AND_MODULES
+    );
+    assert!(physmap::MEMMAP_FRAMEBUFFER == limine::memmap::MEMMAP_FRAMEBUFFER);
+    assert!(physmap::MEMMAP_MAPPED_RESERVED == limine::memmap::MEMMAP_MAPPED_RESERVED);
+};
+
 // Kernel image bounds from linker.ld (DESIGN §3.4). Virtual.
 unsafe extern "C" {
     static __kernel_vma_start: u8;
@@ -105,12 +128,16 @@ pub struct FbInfo {
 
 /// What the kernel takes from Limine. Write-once.
 pub struct BootInfo {
+    /// Limine's HHDM offset, read once. Every `phys + offset` uses this.
+    pub hhdm_offset: u64,
     /// Physical span of the loaded kernel image.
     pub kernel_phys: Range<u64>,
     /// The AP trampoline page (DESIGN §7.3): the lowest usable 4 KiB page
     /// above frame 0 and below 1 MiB, or `None` when the map has none.
     pub trampoline_page: Option<u64>,
     pub rsdp_phys: u64,
+    /// Flattened device tree, HHDM-mapped, when Limine gave one.
+    pub dtb: Option<&'static [u8]>,
     memmap: &'static [&'static Entry],
     fb: Option<&'static FramebufferResponse>,
     /// Physical `(base, end)` of each module, in response order; the first
@@ -127,29 +154,24 @@ impl BootInfo {
     pub fn usable(&self) -> impl Iterator<Item = Range<u64>> {
         self.memmap
             .iter()
-            .filter(|e| e.type_ == MEMMAP_USABLE)
+            .filter(|e| e.type_ == physmap::MEMMAP_USABLE)
             .map(|e| e.base..e.base + e.length)
     }
 
-    /// The RAM-typed memmap ranges, physical: usable, bootloader
-    /// reclaimable, executable and modules, ACPI reclaimable and ACPI NVS.
-    /// No device range may overlap one (DESIGN §12.3 rule 8), so
-    /// `dev::Registry::claim` and `pci_init::map_mmio` check against them.
-    /// Ends saturate: the map is firmware input (AGENTS.md rule 4).
-    pub fn ram_ranges(&self) -> impl Iterator<Item = Range<u64>> {
-        self.memmap
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.type_,
-                    MEMMAP_USABLE
-                        | MEMMAP_BOOTLOADER_RECLAIMABLE
-                        | MEMMAP_EXECUTABLE_AND_MODULES
-                        | MEMMAP_ACPI_RECLAIMABLE
-                        | MEMMAP_ACPI_NVS
-                )
-            })
-            .map(|e| e.base..e.base.saturating_add(e.length))
+    /// The RAM-typed memmap ranges, physical (`physmap::ram_ranges`).
+    /// A device-tree `no-map` range is cut out (page-rounded), so the
+    /// cacheable physmap does not cover firmware or TEE memory. A claim
+    /// may then overlap that hole (DESIGN §12.3 rule 8 checks this
+    /// iterator). `Clone`, so `walk_physmap` can coalesce the ranges
+    /// before the heap exists.
+    pub fn ram_ranges(&self) -> impl Iterator<Item = Range<u64>> + Clone {
+        NomapPunch::new(physmap::ram_ranges(self.memmap.iter().map(|e| {
+            physmap::MemmapEntry {
+                base: e.base,
+                len: e.length,
+                ty: e.type_,
+            }
+        })))
     }
 
     /// Every framebuffer Limine mapped through the HHDM, in response order.
@@ -158,7 +180,7 @@ impl BootInfo {
         fbs.iter().filter_map(|fb| {
             let virt = fb.address() as u64;
             Some(FbInfo {
-                phys: virt.checked_sub(HHDM_BASE)?,
+                phys: virt.checked_sub(self.hhdm_offset)?,
                 virt,
                 width: fb.width as u32,
                 height: fb.height as u32,
@@ -201,14 +223,14 @@ impl BootInfo {
 /// file's HHDM address and length; one that is not an HHDM address, or
 /// past [`MAX_BOOT_MODULES`], is skipped. Never `File::path()` or
 /// `cmdline()`, which unwrap.
-fn module_ranges() -> ([(u64, u64); MAX_BOOT_MODULES], usize) {
+fn module_ranges(hhdm: u64) -> ([(u64, u64); MAX_BOOT_MODULES], usize) {
     let mut out = [(0u64, 0u64); MAX_BOOT_MODULES];
     let mut n = 0usize;
     let files = MODULES.response().map_or(&[][..], |r| r.modules());
     for f in files {
         let data = f.data();
         let range = (data.as_ptr() as u64)
-            .checked_sub(HHDM_BASE)
+            .checked_sub(hhdm)
             .and_then(|base| Some((base, base.checked_add(data.len() as u64)?)));
         let (Some(range), Some(slot)) = (range, out.get_mut(n)) else {
             continue;
@@ -265,6 +287,48 @@ fn capture_cmdline() -> CmdlineBuf {
     buf
 }
 
+/// Limine's DTB, sized from the FDT header `totalsize`.
+fn dtb_bytes() -> Option<&'static [u8]> {
+    let resp = DTB.response()?;
+    let ptr = resp.dtb_ptr.cast::<u8>();
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: Limine's protocol, trusted here (DESIGN §2.10): `dtb_ptr`
+    // is an HHDM address of the DTB that stays mapped while the kernel
+    // runs. The header is 40 bytes; `totalsize` then names the rest.
+    // Established here.
+    let hdr = unsafe { core::slice::from_raw_parts(ptr, 40) };
+    let total = {
+        let b = hdr.get(4..8).and_then(|s| <[u8; 4]>::try_from(s).ok())?;
+        u32::from_be_bytes(b) as usize
+    };
+    if !(40..=2_097_152).contains(&total) {
+        return None;
+    }
+    // SAFETY: as above, established here: `totalsize` is the blob length
+    // and Limine maps those bytes. The cap is the dumpdtb buffer QEMU uses.
+    Some(unsafe { core::slice::from_raw_parts(ptr, total) })
+}
+
+/// Limine's HHDM offset, before [`capture`]. None if the response is missing.
+#[cfg(target_arch = "aarch64")]
+pub fn early_hhdm_offset() -> Option<u64> {
+    HHDM.response().map(|h| h.offset)
+}
+
+/// Physical base of the loaded image, before [`capture`].
+#[cfg(target_arch = "aarch64")]
+pub fn early_kernel_phys() -> Option<u64> {
+    EXEC_ADDR.response().map(|e| e.physical_base)
+}
+
+/// Kernel VMA start from the linker script.
+#[cfg(target_arch = "aarch64")]
+pub fn kernel_vma_start() -> u64 {
+    &raw const __kernel_vma_start as u64
+}
+
 /// Read every Limine response we need and stash it. First thing in
 /// `normal_boot_tail`, before PMM / paging / ACPI. A missing required
 /// response halts with a serial line. Framebuffers are optional.
@@ -272,32 +336,34 @@ pub fn capture() -> &'static BootInfo {
     let hhdm = HHDM
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: hhdm missing"));
-    // Everything downstream computes `phys + HHDM_BASE`, buddy free-list
-    // nodes included, and those fault the moment our own PML4 goes in if
-    // Limine's offset drifted. Fail loud here instead.
-    assert!(
-        hhdm.offset == HHDM_BASE,
-        "paging: limine hhdm offset {:#x} != expected {:#x}; buddy nodes would fault after cr3",
-        hhdm.offset,
-        HHDM_BASE,
-    );
+    let hhdm_offset = hhdm.offset;
+    if !physmap::hhdm_in_slot(hhdm_offset, physmap_slot()) {
+        halt_with("vibeOS: limine: hhdm offset outside physmap slot");
+    }
     let memmap = MEMMAP
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: memmap missing"));
     let exec = EXEC_ADDR
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: executable_address missing"));
-    let rsdp = RSDP
+    // From base revision 4 the RSDP is an HHDM address. aarch64 virt
+    // has a DTB and no RSDP (ROADMAP §11.5).
+    let rsdp_phys = RSDP
         .response()
-        .unwrap_or_else(|| halt_with("vibeOS: limine: rsdp missing"));
-    let rsdp_raw = rsdp.address as u64;
+        .and_then(|r| (r.address as u64).checked_sub(hhdm_offset))
+        .unwrap_or(0);
+    #[cfg(target_arch = "x86_64")]
+    if rsdp_phys == 0 {
+        halt_with("vibeOS: limine: rsdp missing");
+    }
+    let dtb = dtb_bytes();
     let kernel_len = (&raw const __kernel_vma_end as u64) - (&raw const __kernel_vma_start as u64);
-    let (modules, nmod) = module_ranges();
+    let (modules, nmod) = module_ranges(hhdm_offset);
     let trampoline_page = vibeos::pmm::choose_trampoline_page(
         memmap
             .entries()
             .iter()
-            .filter(|e| e.type_ == MEMMAP_USABLE)
+            .filter(|e| e.type_ == physmap::MEMMAP_USABLE)
             .map(|e| e.base..e.base.saturating_add(e.length)),
     );
     // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
@@ -305,9 +371,11 @@ pub fn capture() -> &'static BootInfo {
     // any reader and long before SMP.
     unsafe {
         INFO.set(BootInfo {
+            hhdm_offset,
             kernel_phys: exec.physical_base..exec.physical_base + kernel_len,
             trampoline_page,
-            rsdp_phys: <Arch as BootHandover>::table_phys(rsdp_raw, HHDM_BASE),
+            rsdp_phys,
+            dtb,
             memmap: memmap.entries(),
             fb: FRAMEBUFFER.response(),
             modules,
@@ -359,6 +427,139 @@ pub fn cmdline() -> &'static Cmdline<'static> {
 /// Captured snapshot. Panics if [`capture`] has not run.
 pub fn info() -> &'static BootInfo {
     INFO.get()
+}
+
+pub(crate) fn physmap_slot() -> PhysmapSlot {
+    #[cfg(target_arch = "x86_64")]
+    {
+        PHYSMAP_X86_64
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        PHYSMAP_AARCH64
+    }
+}
+
+struct NoMapHoles {
+    ranges: [Range<u64>; MAX_RESERVED],
+    count: usize,
+}
+
+static NOMAP: BootCell<NoMapHoles> = BootCell::new();
+
+/// `no-map` holes for [`BootInfo::ram_ranges`]. Empty does nothing. A
+/// second call, or more holes than [`MAX_RESERVED`], halts: the cell is
+/// write-once and the physmap must not boot with a hole dropped.
+pub(crate) fn set_nomap(holes: &[Range<u64>]) {
+    if holes.is_empty() {
+        return;
+    }
+    if NOMAP.try_get().is_some() || holes.len() > MAX_RESERVED {
+        halt_with("vibeOS: dt: refused");
+    }
+    let mut ranges = core::array::from_fn(|_| 0..0);
+    for (i, h) in holes.iter().enumerate() {
+        if let Some(slot) = ranges.get_mut(i) {
+            *slot = h.clone();
+        }
+    }
+    // SAFETY: invariant I22, established at `cell::BootCell::set`: one
+    // write, from `machine::machine_init::init_from_dtb` on the BSP before
+    // `pmm_init` and SMP, and `ram_ranges` does not run until that returns.
+    unsafe {
+        NOMAP.set(NoMapHoles {
+            ranges,
+            count: holes.len(),
+        });
+    }
+}
+
+fn nomap_copy() -> ([Range<u64>; MAX_RESERVED], usize) {
+    match NOMAP.try_get() {
+        Some(n) => (n.ranges.clone(), n.count),
+        None => (core::array::from_fn(|_| 0..0), 0),
+    }
+}
+
+/// `physmap::ram_ranges` with device-tree `no-map` holes removed.
+/// `walk_physmap` clones the iterator and scans it from the start, so
+/// the hole list is copied with the iterator.
+#[derive(Clone)]
+struct NomapPunch<I> {
+    inner: I,
+    holes: [Range<u64>; MAX_RESERVED],
+    nh: usize,
+    parts: [Range<u64>; MAX_RESERVED + 1],
+    npart: usize,
+    part: usize,
+}
+
+impl<I> NomapPunch<I> {
+    fn new(inner: I) -> Self {
+        let (holes, nh) = nomap_copy();
+        Self {
+            inner,
+            holes,
+            nh,
+            parts: core::array::from_fn(|_| 0..0),
+            npart: 0,
+            part: 0,
+        }
+    }
+}
+
+impl<I> NomapPunch<I>
+where
+    I: Iterator<Item = Range<u64>>,
+{
+    fn fill(&mut self, span: Range<u64>) {
+        self.part = 0;
+        self.npart = 0;
+        let holes = self.holes.clone();
+        let nh = self.nh;
+        let mut n = 0usize;
+        let mut overflow = false;
+        clip_usable(
+            span,
+            || holes.iter().take(nh).cloned(),
+            |p| {
+                if let Some(slot) = self.parts.get_mut(n) {
+                    *slot = p;
+                    n = n.saturating_add(1);
+                } else {
+                    overflow = true;
+                }
+            },
+        );
+        if overflow {
+            halt_with("vibeOS: dt: refused");
+        }
+        self.npart = n;
+    }
+}
+
+impl<I> Iterator for NomapPunch<I>
+where
+    I: Iterator<Item = Range<u64>>,
+{
+    type Item = Range<u64>;
+
+    fn next(&mut self) -> Option<Range<u64>> {
+        loop {
+            if self.part < self.npart {
+                let p = self.parts.get(self.part).cloned();
+                self.part = self.part.saturating_add(1);
+                if let Some(p) = p {
+                    return Some(p);
+                }
+            }
+            let span = self.inner.next()?;
+            if self.nh == 0 {
+                return Some(span);
+            }
+            self.fill(span);
+        }
+    }
 }
 
 /// Print `msg` as a marker line and halt: the boot path's stop for a

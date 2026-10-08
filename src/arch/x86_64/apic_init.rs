@@ -5,7 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use vibeos::acpi::{IoApic, MAX_IOAPICS, MadtInfo};
+use vibeos::acpi::{IoApic, Iso, MAX_IOAPICS};
 use vibeos::apic::{
     self, APIC_BASE_ENABLE, CountRead, DEFAULT_LAPIC_PHYS, EoiDomain, IA32_APIC_BASE,
     IA32_TSC_DEADLINE, ICR_POLL_CAP, IOAPIC_VER, IOREGSEL, IOWIN, IpiError, IpiMode, LAPIC_EOI,
@@ -22,8 +22,8 @@ use vibeos::marker;
 use vibeos::time::{FS_PER_MS, HPET_CALIB_READS, PIT_CALIB_MS, hpet_period_ok};
 use vibeos::vectors;
 
-use crate::acpi_init;
 use crate::arch;
+use crate::machine_init;
 use crate::paging_init;
 use crate::sync_init::SpinMutex;
 use crate::time_init;
@@ -80,12 +80,22 @@ static LAPIC_VA: AtomicU64 = AtomicU64::new(0);
 static TSC_DEADLINE: AtomicBool = AtomicBool::new(false);
 
 fn publish_isr(st: &ApicState) {
+    // Release: pairs with the Acquire loads in `send_ipi` and `send_ipi_all_ex_self`.
     LAPIC_VA.store(st.lapic_va, Ordering::Release);
+    // Release: pairs with nothing; the boot CPU stores it before it starts the APs.
     TSC_DEADLINE.store(st.mode == TimerMode::TscDeadline, Ordering::Release);
 }
 
-fn phys_va(phys: u64) -> u64 {
-    paging_init::HHDM_BASE.wrapping_add(phys)
+fn lapic_mmio_va(phys: u64) -> Option<u64> {
+    crate::acpi_init::lapic_va().or_else(|| {
+        // SAFETY: invariant I49: the LAPIC page is device MMIO; ACPI
+        // already ioremapped it when the MADT named it, and this is the
+        // fallback when the MADT base was zero; established here.
+        unsafe {
+            paging_init::ioremap(vibeos::paging::PhysAddr(phys), vibeos::paging::PAGE_SIZE_4K)
+        }
+        .map(|v| v.as_u64())
+    })
 }
 
 /// # Safety
@@ -143,9 +153,9 @@ unsafe fn local_apic_id(va: u64) -> u8 {
 ///
 /// # Safety
 /// LAPIC page already UC. IRQs off.
-unsafe fn enable_lapic(madt: &MadtInfo) -> Option<u64> {
-    let phys = if madt.lapic_base != 0 {
-        madt.lapic_base
+unsafe fn enable_lapic(lapic_base: u64) -> Option<u64> {
+    let phys = if lapic_base != 0 {
+        lapic_base
     } else {
         DEFAULT_LAPIC_PHYS
     };
@@ -160,10 +170,13 @@ unsafe fn enable_lapic(madt: &MadtInfo) -> Option<u64> {
         crate::marker!("vibeOS: lapic: enable bit clear");
         return None;
     }
-    let va = phys_va(phys);
+    let Some(va) = lapic_mmio_va(phys) else {
+        crate::marker!("vibeOS: lapic: ioremap failed");
+        return None;
+    };
     // SAFETY: invariant I49, established at `acpi::acpi_init::init`: the
-    // MADT's LAPIC page is UC in the physmap (this fn's `# Safety`), and
-    // `va` is its physmap address.
+    // MADT's LAPIC page is UC through `ioremap` (this fn's `# Safety`), and
+    // `va` is that mapping.
     unsafe {
         // Probe: a disabled LAPIC reads as zero and looks like missing HW.
         lapic_write(va, LAPIC_TPR, 0);
@@ -192,20 +205,19 @@ unsafe fn enable_lapic(madt: &MadtInfo) -> Option<u64> {
     Some(va)
 }
 
-fn enum_ioapics(madt: &MadtInfo, st: &mut ApicState) {
+fn enum_ioapics(ios: impl Iterator<Item = IoApic>, st: &mut ApicState) {
     st.ioapic_n = 0;
-    let mut i = 0;
-    while i < madt.ioapic_count {
-        let IoApic { addr, gsi_base, .. } = madt.ioapics[i];
+    for IoApic { addr, gsi_base, .. } in ios {
         let phys = addr as u64;
         if phys == 0 {
-            i += 1;
             continue;
         }
-        let va = phys_va(phys);
+        let Some(va) = crate::acpi_init::ioapic_va(phys) else {
+            continue;
+        };
         // SAFETY: invariant I49, established at `acpi::acpi_init::init`:
-        // every MADT I/O APIC page is UC in the physmap, and `va` is its
-        // physmap address; the caller holds `STATE`.
+        // every MADT I/O APIC page is UC through `ioremap`, and `va` is
+        // that mapping; the caller holds `STATE`.
         let ver = unsafe { io_read(va, IOAPIC_VER) };
         let max_index = ioapic_max_index(ver);
         if let Some(slot) = st.ioapics.get_mut(st.ioapic_n) {
@@ -216,7 +228,6 @@ fn enum_ioapics(madt: &MadtInfo, st: &mut ApicState) {
             };
             st.ioapic_n += 1;
         }
-        i += 1;
     }
 }
 
@@ -251,14 +262,14 @@ fn mask_all_pins(st: &ApicState) {
     }
 }
 
-fn apply_isos(st: &ApicState, madt: &MadtInfo) {
+fn apply_isos(st: &ApicState, isos: &[Iso]) {
     // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // `st.lapic_va` is set only from its return.
     let dest = unsafe { local_apic_id(st.lapic_va) };
     let mut unrouted = 0usize;
     let mut i = 0;
-    while i < madt.iso_count {
-        let iso = madt.isos[i];
+    while i < isos.len() {
+        let iso = isos[i];
         let trig = apic::iso_trigger(iso.flags);
         let pol = apic::iso_polarity(iso.flags);
         // Shared placeholder vector: every ISO stays masked until a driver
@@ -285,7 +296,7 @@ fn apply_isos(st: &ApicState, madt: &MadtInfo) {
             vibeos::log::Level::Warn,
             "vibeOS: ioapic: {} of {} MADT ISOs name a GSI no I/O APIC serves",
             unrouted,
-            madt.iso_count
+            isos.len()
         );
     }
 }
@@ -375,6 +386,7 @@ fn set_gsi_mask_inner(st: &ApicState, gsi: u32, masked: bool) {
 }
 
 pub fn eoi() {
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va != 0 {
         // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
@@ -387,6 +399,7 @@ pub fn eoi() {
 /// LAPIC delivered the interrupt being handled and is owed its EOI. False
 /// while the LAPIC is unmapped.
 pub fn in_service(vec: u8) -> bool {
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va == 0 {
         return false;
@@ -419,7 +432,7 @@ unsafe fn write_icr(va: u64, hi: u32, lo: u32) {
     let _irq = x86::interrupts_enabled().then(|| x86::InterruptGuard::enter());
     // SAFETY: this fn's `# Safety` (here).
     unsafe { lapic_write(va, LAPIC_ICR_HIGH, hi) };
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::between_icr_writes();
     // SAFETY: this fn's `# Safety` (here).
     unsafe { lapic_write(va, LAPIC_ICR_LOW, lo) };
@@ -428,6 +441,7 @@ unsafe fn write_icr(va: u64, hi: u32, lo: u32) {
 /// ICR high then low ([`write_icr`]); bounded delivery-pending poll.
 /// ROADMAP §4.1.
 pub fn send_ipi(dest: u8, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
+    // Acquire: pairs with the Release store in `publish_isr`.
     let va = LAPIC_VA.load(Ordering::Acquire);
     if va == 0 {
         return Err(IpiError::NotReady);
@@ -453,6 +467,7 @@ pub fn send_ipi_cpu(cpu: u32, vector: u8) -> Result<(), IpiError> {
     let Some(c) = crate::per_cpu_init::cpu(cpu) else {
         return Err(IpiError::NotReady);
     };
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     send_ipi(
         c.apic_id.load(Ordering::Relaxed) as u8,
         vector,
@@ -463,6 +478,7 @@ pub fn send_ipi_cpu(cpu: u32, vector: u8) -> Result<(), IpiError> {
 /// All-excluding-self shorthand. No-op with one online CPU.
 pub fn send_ipi_all_ex_self(vector: u8) -> Result<(), IpiError> {
     vibeos::trace!(IpiSend, u64::from(vector), u64::MAX);
+    // Acquire: pairs with the Release store in `publish_isr`.
     let va = LAPIC_VA.load(Ordering::Acquire);
     if va == 0 {
         return Err(IpiError::NotReady);
@@ -628,6 +644,7 @@ fn timer_fires() -> bool {
     let pit0 = time_init::pit_fires();
     let fired = loop {
         let pit = time_init::pit_fires().wrapping_sub(pit0);
+        // Relaxed: bumped by this CPU's own timer interrupt; pairs with nothing.
         match timer_proof(TIMER_FIRES.load(Ordering::Relaxed), pit) {
             TimerProof::Fires => break true,
             TimerProof::Silent => break false,
@@ -641,9 +658,11 @@ fn timer_fires() -> bool {
 }
 
 fn rearm_deadline() {
+    // Relaxed: the boot CPU stores it before it starts the APs; pairs with nothing.
     if !TSC_DEADLINE.load(Ordering::Relaxed) {
         return;
     }
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     if LAPIC_VA.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -655,7 +674,7 @@ fn rearm_deadline() {
     // and put the LVT in TSC-deadline mode, so the MSR exists and the write
     // only arms the timer; established at `arch::x86_64::apic_init::prove`.
     unsafe { x86::wrmsr(IA32_TSC_DEADLINE, d) };
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     testing::rearmed(now, d);
 }
 
@@ -664,9 +683,10 @@ pub fn on_timer_irq() {
         .map(|c| c.cpu_id)
         .unwrap_or(0);
     if cpu_id == 0 {
+        // Relaxed: only CPU 0 counts, and `prove` reads it there; pairs with nothing.
         TIMER_FIRES.fetch_add(1, Ordering::Relaxed);
         time_init::on_hw_tick();
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::stamp_fire();
     }
     eoi();
@@ -679,6 +699,7 @@ pub fn on_spurious_irq() {
 }
 
 pub fn on_error_irq() {
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va != 0 {
         // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
@@ -700,12 +721,12 @@ pub fn on_thermal_irq() {
     eoi();
 }
 
-fn mask_pic_and_pit(st: &ApicState, madt: &MadtInfo) {
+fn mask_pic_and_pit(st: &ApicState, isos: &[Iso]) {
     arch::pic::disable_all();
     // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enable_lapic`:
     // `st.lapic_va` is set only from its return.
     unsafe { lapic_write(st.lapic_va, LAPIC_LVT_LINT0, LVT_MASKED) };
-    let gsi = apic::gsi_for_isa_irq(0, &madt.isos[..madt.iso_count]);
+    let gsi = apic::gsi_for_isa_irq(0, isos);
     set_gsi_mask_inner(st, gsi, true);
 }
 
@@ -714,6 +735,7 @@ fn emit_marker(mode: TimerMode) {
 }
 
 fn unmask_pit_fallback() {
+    // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
     let va = LAPIC_VA.load(Ordering::Relaxed);
     if va != 0 {
         // PIC virtual-wire: ExtINT on LINT0. Masked LINT0 (enable path)
@@ -730,22 +752,19 @@ fn unmask_pit_fallback() {
 /// # Safety
 /// IDT live, PIC remapped, LAPIC/IOAPIC UC, IRQs still off.
 pub unsafe fn init() {
-    let Some(info) = acpi_init::info() else {
-        return;
-    };
-    let Some(madt) = info.madt.as_ref() else {
+    let Some(desc) = machine_init::info() else {
         return;
     };
     // SAFETY: this fn's `# Safety` (here) is `enable_lapic`'s: the LAPIC
     // page is UC and IRQs are off.
-    let Some(va) = (unsafe { enable_lapic(madt) }) else {
+    let Some(va) = (unsafe { enable_lapic(desc.lapic_base().unwrap_or(0)) }) else {
         return;
     };
     with_state(|st| {
         st.lapic_va = va;
-        enum_ioapics(madt, st);
+        enum_ioapics(desc.ioapics(), st);
         mask_all_pins(st);
-        apply_isos(st, madt);
+        apply_isos(st, desc.irq_overrides());
         st.ready = true;
         publish_isr(st);
     });
@@ -773,6 +792,7 @@ pub fn prove() {
     let tsc_per_ms = time_init::tsc_per_ms();
 
     if want_td && tsc_per_ms != 0 {
+        // Relaxed: only CPU 0 touches it, here and in its timer interrupt; pairs with nothing.
         TIMER_FIRES.store(0, Ordering::Relaxed);
         with_state(|st| {
             st.mode = TimerMode::TscDeadline;
@@ -796,6 +816,7 @@ pub fn prove() {
     // `va` is `st.lapic_va`, set only from its return.
     match unsafe { calib_periodic(va) } {
         Some(per_ms) => {
+            // Relaxed: only CPU 0 touches it, here and in its timer interrupt; pairs with nothing.
             TIMER_FIRES.store(0, Ordering::Relaxed);
             with_state(|st| {
                 st.ticks_per_ms = per_ms;
@@ -833,8 +854,8 @@ fn commit_lapic(st: &mut ApicState, mode: TimerMode) {
     st.owns_tick = true;
     publish_isr(st);
     crate::per_cpu_init::set_timer_mode(mode);
-    if let Some(madt) = acpi_init::info().and_then(|i| i.madt.as_ref()) {
-        mask_pic_and_pit(st, madt);
+    if let Some(desc) = machine_init::info() {
+        mask_pic_and_pit(st, desc.irq_overrides());
     } else {
         arch::pic::disable_all();
     }
@@ -854,17 +875,14 @@ pub fn owns_tick() -> bool {
 /// # Safety
 /// LAPIC page already UC. IF off.
 pub unsafe fn enable_ap() {
-    let Some(info) = acpi_init::info() else {
-        return;
-    };
-    let Some(madt) = info.madt.as_ref() else {
+    let Some(desc) = machine_init::info() else {
         return;
     };
     // A failure has printed its line; the AP then never reports ready and
     // `smp_init::start_one` times it out.
     // SAFETY: this fn's `# Safety` (here) is `enable_lapic`'s: the LAPIC
     // page is UC and IF is off.
-    let _ = unsafe { enable_lapic(madt) };
+    let _ = unsafe { enable_lapic(desc.lapic_base().unwrap_or(0)) };
 }
 
 /// Arm this CPU's timer in the mode the BSP proved. PIT: no local tick.
@@ -895,7 +913,7 @@ pub fn arm_ap() {
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -921,19 +939,24 @@ pub(crate) mod testing {
 
     /// Stamp the TSC at each of CPU 0's next [`FIRE_STAMPS`] timer fires.
     pub(crate) fn arm_fire_stamps() {
-        // Release: the handler sees the arming.
+        // Release: pairs with the Acquire load in `fire_stamps` and the swap in
+        // `take_fire_stamps`.
         FIRE_STAMP_N.store(0, Ordering::Release);
     }
 
     /// Stamps taken so far.
     pub(crate) fn fire_stamps() -> usize {
+        // Acquire: pairs with the Release stores in `stamp_fire` and `arm_fire_stamps`.
         FIRE_STAMP_N.load(Ordering::Acquire)
     }
 
     /// Disarm and copy the stamps out: how many there were.
     pub(crate) fn take_fire_stamps(out: &mut [u64; FIRE_STAMPS]) -> usize {
+        // AcqRel: pairs with the Release store in `stamp_fire`, which publishes
+        // the stamps read below.
         let n = FIRE_STAMP_N.swap(usize::MAX, Ordering::AcqRel);
         for (o, s) in out.iter_mut().zip(FIRE_STAMP.iter()) {
+            // Relaxed: the swap above acquired the stamps it counts; pairs with nothing.
             *o = s.load(Ordering::Relaxed);
         }
         n
@@ -943,23 +966,30 @@ pub(crate) mod testing {
     /// deadline it armed (0 where its rearm did not run in the window).
     pub(crate) fn fire_rearms(at: &mut [u64; FIRE_STAMPS], deadline: &mut [u64; FIRE_STAMPS]) {
         for (o, s) in at.iter_mut().zip(FIRE_REARM_AT.iter()) {
+            // Relaxed: `take_fire_stamps` acquired the stamps it counts; pairs with nothing.
             *o = s.load(Ordering::Relaxed);
         }
         for (o, s) in deadline.iter_mut().zip(FIRE_DEADLINE.iter()) {
+            // Relaxed: `take_fire_stamps` acquired the stamps it counts; pairs with nothing.
             *o = s.load(Ordering::Relaxed);
         }
     }
 
     /// CPU 0's timer handler, with IF off: one writer.
     pub(super) fn stamp_fire() {
+        // Relaxed: the count alone picks the slot; pairs with nothing.
         let i = FIRE_STAMP_N.load(Ordering::Relaxed);
         if let Some(slot) = FIRE_STAMP.get(i) {
             if let (Some(a), Some(d)) = (FIRE_REARM_AT.get(i), FIRE_DEADLINE.get(i)) {
+                // Relaxed: CPU 0, IF off, one writer; pairs with nothing.
                 a.store(0, Ordering::Relaxed);
+                // Relaxed: as the store above; pairs with nothing.
                 d.store(0, Ordering::Relaxed);
             }
+            // Relaxed: the Release store of the count below publishes it; pairs with nothing.
             slot.store(time_init::read_tsc(), Ordering::Relaxed);
-            // Release: publishes the stamp with the count.
+            // Release: pairs with the Acquire load in `fire_stamps` and the swap
+            // in `take_fire_stamps`, publishing the stamp with the count.
             FIRE_STAMP_N.store(i + 1, Ordering::Release);
         }
     }
@@ -979,25 +1009,34 @@ pub(crate) mod testing {
         // the same handler on CPU 0, IF off, so no other writer.
         // Once all are stamped the count stays put, so only the first
         // rearm after a stamp fills its slot (`stamp_fire` cleared it).
+        // Relaxed: the count alone picks the slot; pairs with nothing.
         let n = FIRE_STAMP_N.load(Ordering::Relaxed);
+        // Relaxed: `stamp_fire` cleared the slot; pairs with nothing.
         if let Some(i) = n.checked_sub(1)
             && let (Some(a), Some(d)) = (FIRE_REARM_AT.get(i), FIRE_DEADLINE.get(i))
             && a.load(Ordering::Relaxed) == 0
         {
+            // Relaxed: CPU 0, IF off, one writer; pairs with nothing.
             a.store(now, Ordering::Relaxed);
+            // Relaxed: as the store above; pairs with nothing.
             d.store(deadline, Ordering::Relaxed);
         }
         let ahead = deadline.wrapping_sub(now);
         if ahead != time_init::tsc_per_ms() {
+            // Relaxed: the Release add of `REARMS` below publishes it; pairs with nothing.
             REARM_OFF_LAST.store(ahead, Ordering::Relaxed);
+            // Relaxed: as the store above; pairs with nothing.
             REARMS_OFF.fetch_add(1, Ordering::Relaxed);
         }
+        // Release: pairs with the Acquire load in `rearms`.
         REARMS.fetch_add(1, Ordering::Release);
     }
 
     /// CPU 0's rearms, the rearms not one tick ahead, and the last such
     /// distance in TSC cycles.
     pub(crate) fn rearms() -> (u64, u64, u64) {
+        // Acquire: pairs with the Release add in `rearmed`, which publishes the other two.
+        // Relaxed: the Acquire load orders them; pairs with nothing.
         (
             REARMS.load(Ordering::Acquire),
             REARMS_OFF.load(Ordering::Relaxed),
@@ -1009,6 +1048,7 @@ pub(crate) mod testing {
     /// count, divide)`, against what the kernel programs for one tick:
     /// `None` when they match. `None` too while the LAPIC is unmapped.
     pub(crate) fn periodic_mismatch() -> Option<([u32; 3], [u32; 3])> {
+        // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
         let va = LAPIC_VA.load(Ordering::Relaxed);
         if va == 0 {
             return None;
@@ -1039,6 +1079,7 @@ pub(crate) mod testing {
     /// This CPU's LAPIC timer current count, which the LAPIC computes from
     /// its clock when it is read; 0 while the LAPIC is unmapped.
     pub(crate) fn timer_count() -> u32 {
+        // Relaxed: the boot CPU publishes it before it starts the APs; pairs with nothing.
         let va = LAPIC_VA.load(Ordering::Relaxed);
         if va == 0 {
             return 0;
@@ -1053,12 +1094,14 @@ pub(crate) mod testing {
     static ICR_IF_ON: AtomicU64 = AtomicU64::new(0);
 
     pub(crate) fn icr_writes_if_on() -> u64 {
+        // Acquire: pairs with the AcqRel add in `between_icr_writes`.
         ICR_IF_ON.load(Ordering::Acquire)
     }
 
     /// No lock and no guard: the panic dump sends its NMIs through here.
     pub(super) fn between_icr_writes() {
         if super::x86::interrupts_enabled() {
+            // AcqRel: pairs with the Acquire load in `icr_writes_if_on`.
             ICR_IF_ON.fetch_add(1, Ordering::AcqRel);
         }
     }

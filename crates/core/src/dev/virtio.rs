@@ -16,14 +16,17 @@ use crate::pci::{
 
 pub const VENDOR_ID: u16 = 0x1AF4;
 
-/// Modern PCI device IDs are `0x1040 + virtio device id`.
+/// Modern PCI device IDs are `0x1040 + virtio device id` (virtio 1.2 §4.1.2).
 pub const DEV_RNG_MODERN: u16 = 0x1044;
-/// Transitional rng. Probe still requires [`F_VERSION_1`].
-pub const DEV_RNG_LEGACY: u16 = 0x1004;
+/// Transitional entropy source. Probe still requires [`F_VERSION_1`].
+/// Transitional `0x1004` is SCSI host, not rng.
+pub const DEV_RNG_LEGACY: u16 = 0x1005;
 /// Modern virtio-blk (`0x1040 + 2`).
 pub const DEV_BLK_MODERN: u16 = 0x1042;
 /// Transitional virtio-blk. Probe still requires [`F_VERSION_1`].
 pub const DEV_BLK_LEGACY: u16 = 0x1001;
+/// Modern virtio-input (`0x1040 + 18`).
+pub const DEV_INPUT_MODERN: u16 = 0x1052;
 
 pub const F_INDIRECT_DESC: u64 = 1 << 28;
 pub const F_EVENT_IDX: u64 = 1 << 29;
@@ -67,6 +70,62 @@ pub const COMMON_OFF_QNOTIFY: u16 = 30;
 pub const COMMON_OFF_QDESC: u16 = 32;
 pub const COMMON_OFF_QDRIVER: u16 = 40;
 pub const COMMON_OFF_QDEVICE: u16 = 48;
+
+/// virtio 1.2 §4.2.2 MMIO register layout (modern, Version = 2).
+///
+/// `QueueReady` is 0x044 in Linux uapi `virtio_mmio.h` (BSD) and QEMU 8.2's
+/// copy of it. 0x03c is legacy `QueueAlign`; a Version=2 window ignores
+/// writes there and never installs the rings.
+pub const MMIO_MAGIC: u32 = 0x7472_6976;
+pub const MMIO_VERSION: u32 = 2;
+pub const MMIO_OFF_MAGIC: u16 = 0x000;
+pub const MMIO_OFF_VERSION: u16 = 0x004;
+pub const MMIO_OFF_DEVICE_ID: u16 = 0x008;
+pub const MMIO_OFF_VENDOR_ID: u16 = 0x00c;
+pub const MMIO_OFF_DEV_FEATURES: u16 = 0x010;
+pub const MMIO_OFF_DEV_FEATURES_SEL: u16 = 0x014;
+pub const MMIO_OFF_DRV_FEATURES: u16 = 0x020;
+pub const MMIO_OFF_DRV_FEATURES_SEL: u16 = 0x024;
+pub const MMIO_OFF_QSEL: u16 = 0x030;
+pub const MMIO_OFF_QNUM_MAX: u16 = 0x034;
+pub const MMIO_OFF_QNUM: u16 = 0x038;
+/// Legacy `QueueAlign`. Version=2 does not implement this offset.
+pub const MMIO_OFF_QALIGN_LEGACY: u16 = 0x03c;
+pub const MMIO_OFF_QREADY: u16 = 0x044;
+pub const MMIO_OFF_QNOTIFY: u16 = 0x050;
+pub const MMIO_OFF_ISR: u16 = 0x060;
+pub const MMIO_OFF_ISR_ACK: u16 = 0x064;
+pub const MMIO_OFF_STATUS: u16 = 0x070;
+pub const MMIO_OFF_QDESC: u16 = 0x080;
+pub const MMIO_OFF_QDRIVER: u16 = 0x090;
+pub const MMIO_OFF_QDEVICE: u16 = 0x0a0;
+pub const MMIO_OFF_CONFIG: u16 = 0x100;
+
+/// Virtio device id: block (virtio 1.2 §5).
+pub const ID_BLOCK: u32 = 2;
+/// Virtio device id: entropy source.
+pub const ID_ENTROPY: u32 = 4;
+/// Virtio device id: input.
+pub const ID_INPUT: u32 = 18;
+
+/// PCI class used for a virtio-mmio transport published from the DT `reg`.
+pub const CLASS_MMIO: u8 = 0xFF;
+
+/// Modern PCI device id `0x1040 + virtio device id`, or `None` for an
+/// empty transport (device id 0) or a value that would wrap.
+#[must_use]
+pub const fn modern_pci_id(virtio_id: u32) -> Option<u16> {
+    if virtio_id == 0 || virtio_id > 0xFBF {
+        return None;
+    }
+    Some(0x1040u16.saturating_add(virtio_id as u16))
+}
+
+/// Whether a virtio-mmio identity pair is a modern transport.
+#[must_use]
+pub const fn mmio_ident_ok(magic: u32, version: u32) -> bool {
+    magic == MMIO_MAGIC && version == MMIO_VERSION
+}
 
 pub const CAP_HDR: u16 = 16;
 pub const MAX_VENDOR_CAPS: usize = 8;
@@ -262,6 +321,13 @@ pub fn need_event(event: u16, new: u16, old: u16) -> bool {
 
 pub fn used_pending(used_idx: u16, last_used: u16) -> u16 {
     used_idx.wrapping_sub(last_used)
+}
+
+/// Value written to a queue notify register: the virtqueue index
+/// (virtio 1.2 §§4.1.5.2 PCI Queue Notify, 4.2.2 MMIO QueueNotify).
+#[must_use]
+pub const fn queue_notify(qi: u16) -> u16 {
+    qi
 }
 
 /// `notify = bar_va + cap.offset + queue_notify_off * multiplier`.
@@ -853,6 +919,24 @@ mod tests {
 
     type Stub = crate::arch::stub::Arch;
 
+    #[test]
+    fn mmio_layout_and_ident() {
+        assert_eq!(MMIO_MAGIC, u32::from_le_bytes(*b"virt"));
+        assert_eq!(MMIO_OFF_QALIGN_LEGACY, 0x03c);
+        assert_eq!(MMIO_OFF_QREADY, 0x044);
+        assert_eq!(MMIO_OFF_QNOTIFY, 0x50);
+        assert_eq!(MMIO_OFF_STATUS, 0x70);
+        assert_eq!(MMIO_OFF_CONFIG, 0x100);
+        assert!(mmio_ident_ok(MMIO_MAGIC, MMIO_VERSION));
+        assert!(!mmio_ident_ok(0, MMIO_VERSION));
+        assert!(!mmio_ident_ok(MMIO_MAGIC, 1));
+        assert_eq!(modern_pci_id(ID_BLOCK), Some(DEV_BLK_MODERN));
+        assert_eq!(modern_pci_id(ID_ENTROPY), Some(DEV_RNG_MODERN));
+        assert_eq!(modern_pci_id(ID_INPUT), Some(DEV_INPUT_MODERN));
+        assert_eq!(modern_pci_id(0), None);
+        assert_eq!(queue_notify(3), 3);
+    }
+
     struct Fake {
         data: [u8; 256],
     }
@@ -936,6 +1020,7 @@ mod tests {
         assert_eq!(VirtioError::NoVersion1.as_str(), "no VERSION_1");
         assert!(is_rng(VENDOR_ID, DEV_RNG_MODERN));
         assert!(is_rng(VENDOR_ID, DEV_RNG_LEGACY));
+        assert!(!is_rng(VENDOR_ID, 0x1004));
         assert!(!is_rng(0x8086, DEV_RNG_MODERN));
         assert!(is_blk(VENDOR_ID, DEV_BLK_MODERN));
         assert!(is_blk(VENDOR_ID, DEV_BLK_LEGACY));
@@ -951,6 +1036,8 @@ mod tests {
         assert_eq!(notify_addr(0x1000, 0x200, 0x1000, 1, 0), Some(0x1200));
         assert_eq!(notify_addr(0x1000, 0x10, 8, 3, 4), None);
         assert!(notify_addr(u64::MAX - 8, 16, 4, 1, 1).is_none());
+        assert_eq!(queue_notify(0), 0);
+        assert_eq!(queue_notify(3), 3);
         assert_eq!(
             PciCap::parse(PCI_CAP_NOTIFY, 1, 0x10, 0x100, 4).notify_off_multiplier,
             4

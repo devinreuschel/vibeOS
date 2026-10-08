@@ -49,10 +49,11 @@ from tests.harness.harness import (
     make_disk,
     parse_ktest_line,
     qemu_argv,
+    qemu_system,
     serial_tail,
 )
 from tests.harness.linesource import LineSource
-from tests.harness.run_ktest import DISK_BYTES
+from tests.harness.run_ktest import DISK_BYTES, mmio_disk, unlink_disks
 
 # Each opt-in row and the line its `reboot` call prints (markers.toml §10.5).
 ROWS: tuple[tuple[str, str], ...] = (
@@ -185,9 +186,10 @@ def watch_power_boot(
 
 def main() -> int:
     env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
-    if not shutil.which("qemu-system-x86_64"):
-        print("[power] FAIL: qemu-system-x86_64 not on PATH", file=sys.stderr)
+    res = results.Results(env.tier, env.arch)
+    binary = qemu_system(env.arch)
+    if not shutil.which(binary):
+        print(f"[power] FAIL: {binary} not on PATH", file=sys.stderr)
         return 1
     if not os.path.exists(env.iso):
         print(f"[power] FAIL: ISO missing: {env.iso}", file=sys.stderr)
@@ -195,8 +197,12 @@ def main() -> int:
     failed = 0
     for row, line in ROWS:
         disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+        mmio = mmio_disk(env.arch)
         try:
-            base = env.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
+            base = env.qemu(
+                extra=ktest_devices(disk, env.smp, arch=env.arch, mmio_disk=mmio),
+                boot_order="d",
+            )
             cfg = dataclasses.replace(base, ktest=row)
             session = qmp.Session(cfg, row)
             argv = qemu_argv(cfg, None, qmp_sock=session.sock)
@@ -216,10 +222,7 @@ def main() -> int:
             failed += 1
             continue
         finally:
-            try:
-                os.unlink(disk)
-            except OSError:
-                pass
+            unlink_disks(disk, mmio)
         res.add_boot(argv, cfg, boot.exit_code)
         if boot.error is not None:
             res.record("ktest", row, "failed")

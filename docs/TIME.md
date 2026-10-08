@@ -19,6 +19,8 @@ hold on both architectures.
 | TSC | `busy_wait_ms`, the TSC-deadline arm, trace timestamps. The clocksource, first in §6.4's rank: when CPUID reports it invariant and the warp test saw no backward step. |
 | LAPIC timer | Per-CPU preemption tick. TSC-deadline mode preferred. |
 | RTC / CMOS | Wall clock date and time, read once at boot. |
+| Generic timer `CNTVCT_EL0` (aarch64) | The cycle counter and the clocksource. Read after `isb`. `mult`/`shift` from `CNTFRQ_EL0`, or the timer node's `clock-frequency`. |
+| Generic timer TVAL (aarch64) | The preemption tick. EL1 uses `CNTV_*` (`virt`). EL2+VHE uses `CNTHV_*` (`hyp-virt`) when the node has a fifth interrupt, otherwise `CNTHP_*` (`hyp-phys`). |
 
 | Value | Meaning |
 |-------|---------|

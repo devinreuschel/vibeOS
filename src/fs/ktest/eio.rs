@@ -21,7 +21,7 @@ use crate::block::blockdev_init;
 use crate::drivers::ktest::BAD_SECTOR;
 use crate::file_init;
 use crate::ktest::Outcome;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 
 const SEC: usize = 512;
 /// Sectors per block-cache page: the page the bad sector is in fails as
@@ -38,7 +38,7 @@ static VOL_INIT: FatVol = FatVol::new();
 // syscall succeeded, or 0x40 | errno when its `open` of the file failed.
 
 // open("/s59eio/data", O_RDONLY), then read 16 bytes onto the stack.
-user_code!(
+x86_user_code!(
     EIO_READ,
     "
     lea rdi, [rip + 90f]
@@ -77,7 +77,7 @@ user_code!(
 
 // open("/s59eio/data", O_WRONLY), then write 1 byte at offset 0, which
 // reads the file's first cluster to change it.
-user_code!(
+x86_user_code!(
     EIO_WRITE,
     "
     lea rdi, [rip + 90f]
@@ -115,7 +115,7 @@ user_code!(
 
 // open("/s59eio/dir/x", O_RDONLY): the lookup of `x` reads `dir`'s only
 // cluster.
-user_code!(
+x86_user_code!(
     EIO_OPEN,
     "
     lea rdi, [rip + 90f]
@@ -141,7 +141,7 @@ user_code!(
 
 // execve("/s59eio/prog", NULL, NULL): the load reads the ELF header from
 // the file's first cluster.
-user_code!(
+x86_user_code!(
     EIO_EXEC,
     "
     lea rdi, [rip + 90f]

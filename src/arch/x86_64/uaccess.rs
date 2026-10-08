@@ -20,7 +20,7 @@ use super::cpu as x86;
 /// this module lifts SMAP (ROADMAP §10.6, `scripts/check_user_access.py`):
 /// the accessors inside their `movsb`, and the tests through
 /// [`with_window`].
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[inline]
 fn stac() {
     if !x86::smap_live() {
@@ -35,7 +35,7 @@ fn stac() {
 /// Run `f` with SMAP lifted, then clear `RFLAGS.AC` again: the window an
 /// in-guest test needs to touch a user page from ring 0 (`kernel_tests`
 /// only, AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) fn with_window<R>(f: impl FnOnce() -> R) -> R {
     stac();
     let r = f();

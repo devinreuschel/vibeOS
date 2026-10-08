@@ -387,6 +387,30 @@ class TestDiffRule(RepoCase):
                 self.commit(f"t\n\nProves: {proof} (existing: x) -- {self.PREFIX}", "delta box")
                 self.assertErrors(self.run_check(), "proof not found at the head")
 
+    def test_rust_path_fn_must_be_a_test_or_a_registry_row(self) -> None:
+        """A `.rs` path::fn is a proof only as a #[test] or a ktest row's
+        function. A production function is refused."""
+        tree = check_ticks.Tree("HEAD", self.repo.path)
+        self.assertEqual(check_ticks.resolve("crates/core/src/a.rs::not_a_test", tree)[0], [])
+        host = check_ticks.resolve("crates/core/src/a.rs::handler", tree)[0]
+        self.assertEqual([(d.kind, d.name) for d in host], [("host", "handler")])
+        rows = check_ticks.resolve("src/ktest.rs::test_suite", tree)[0]
+        self.assertTrue(rows)
+        self.assertTrue(all(d.kind == "ktest" and d.name == "suite_row" for d in rows))
+        self.commit("t\n\nProves: crates/core/src/a.rs::not_a_test (existing: x) -- "
+                    f"{self.PREFIX}", "delta box")
+        self.assertErrors(self.run_check(), "proof not found at the head")
+
+    def test_later_reopen_withdraws_the_tick(self) -> None:
+        """A later commit that removes the `- [x]` line withdraws the tick, so
+        its proof is not checked once the definition is gone."""
+        self.commit(f"t\n\nProves: check_x -- {self.PREFIX}", "delta box",
+                    self.change("scripts/check_x.py", "return 0", "return 1"))
+        self.commit("rm", files={"scripts/check_x.py": None})
+        self.roadmap = self.roadmap.replace("- [x] delta box", "- [ ] delta box")
+        self.commit("reopen")
+        self.assertEqual(self.run_check().errors, [])
+
     def test_bare_make_target(self) -> None:
         """A bare word is a Makefile target only when it names no test or
         script, so an identifier keeps its own definition first."""
@@ -843,6 +867,34 @@ class TestFailsBefore(RepoCase):
                     "eta box")
         self.assertEqual(self.run_check().errors, [])
 
+    def test_out_of_pr_sha_accepted_when_history_failed(self) -> None:
+        # The base commit is in the repo but not in base..head. After a squash
+        # the test-only SHA is the same shape: history still holds the fail.
+        self.fix(self.good(self.base))
+        failed = {"event": "pull_request", "head_sha": self.base, "jobs": [
+            {"name": "tier", "results": [results_file(self.base, failed=["t"])]}]}
+        r = self.run_check(history=[failed])
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any("not an earlier commit of this pull request" in n
+                            for n in r.notes), r.notes)
+
+    def test_squash_dropped_sha_accepted_when_history_failed(self) -> None:
+        dropped = "ab" * 20
+        self.fix(f'Fails-before: test-kernel {dropped} "vibeOS: ktest: FAIL t" -- {ZETA}')
+        failed = {"event": "pull_request", "head_sha": dropped, "jobs": [
+            {"name": "tier", "results": [results_file(dropped, failed=["t"])]}]}
+        r = self.run_check(history=[failed])
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any(dropped in n for n in r.notes), r.notes)
+
+    def test_squash_dropped_sha_without_history_fails(self) -> None:
+        dropped = "cd" * 20
+        self.fix(f'Fails-before: test-kernel {dropped} "vibeOS: ktest: FAIL t" -- {ZETA}')
+        self.assertErrors(self.run_check(), "is not an earlier commit of the pull request")
+        other = {"event": "pull_request", "head_sha": "f" * 40, "jobs": []}
+        self.assertErrors(self.run_check(history=[other]),
+                          "is not an earlier commit of the pull request")
+
 
 class TestBareMode(unittest.TestCase):
     def setUp(self) -> None:
@@ -850,12 +902,16 @@ class TestBareMode(unittest.TestCase):
         self.addCleanup(self.repo.cleanup)
         self.repo.commit("base", dict(FILES))
 
-    def run_main(self, argv: list[str]) -> tuple[int, str, str]:
+    def run_main(self, argv: list[str], env: dict[str, str] | None = None
+                 ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
+        base_env = {"BASE_SHA": "", "GITHUB_BASE_REF": ""}
+        if env:
+            base_env.update(env)
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch.object(check_ticks, "ROOT", self.repo.path), \
                 mock.patch.object(gatelib, "ROOT", self.repo.path), \
-                mock.patch.dict(os.environ, {}):
+                mock.patch.dict(os.environ, base_env):
             cwd = os.getcwd()
             os.chdir(self.repo.path)
             try:
@@ -877,6 +933,31 @@ class TestBareMode(unittest.TestCase):
         self.repo.commit("t\n\nProves: make lint -- beta box: `make lint` checks the",
                          {"docs/ROADMAP.md": tick(ROADMAP, "beta box")})
         self.assertEqual(self.run_main([])[0], 0)
+
+    def test_non_main_pull_request_diffs_its_base(self) -> None:
+        """A tick that already landed on phase-11 is not a later pull request's
+        to prove again. A pull request into main still is."""
+        self.repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        phase = self.repo.commit("phase", {"docs/ROADMAP.md": tick(ROADMAP, "beta box")})
+        self.repo.git("update-ref", "refs/remotes/origin/phase-11", phase)
+        self.repo.commit("pr", {"src.rs": "fn x() {}\n"})
+        rc, _, err = self.run_main([])
+        self.assertEqual(rc, 1)
+        self.assertIn("ticked with no `Proves:` line", err)
+        rc, out, err = self.run_main([], {"GITHUB_BASE_REF": "phase-11"})
+        self.assertEqual(rc, 0, err)
+        self.assertIn("origin/phase-11", out)
+        rc, _, err = self.run_main([], {"GITHUB_BASE_REF": "main"})
+        self.assertEqual(rc, 1)
+        self.assertIn("ticked with no `Proves:` line", err)
+        rc, out, err = self.run_main([], {"BASE_SHA": phase})
+        self.assertEqual(rc, 0, err)
+        self.assertIn(phase, out)
+        self.repo.commit("ticks", {"docs/ROADMAP.md": tick(ROADMAP, "alpha box")})
+        rc, _, err = self.run_main([], {"GITHUB_BASE_REF": "phase-11"})
+        self.assertEqual(rc, 1)
+        self.assertIn("ticked with no `Proves:` line", err)
+        self.assertIn("alpha box", err)
 
 
 class TestSummary(RepoCase):
@@ -947,7 +1028,12 @@ class TestErrata(RepoCase):
     WAS = f"suite_row (existing: in every boot) -- {PREFIX}"
 
     def errata(self, sha: str, was: str, proves: str) -> dict[str, str | None]:
-        row = (f'[[erratum]]\ncommit = "{sha}"\nwas = "{was}"\nproves = "{proves}"\n'
+        body = proves.replace("\\", "\\\\").replace('"', '\\"')
+        if "\n" in proves:
+            quoted = '"""\n' + proves + '\n"""'
+        else:
+            quoted = f'"{body}"'
+        row = (f'[[erratum]]\ncommit = "{sha}"\nwas = "{was}"\nproves = {quoted}\n'
                'why = "the proof skips on every per-push tier"\n')
         return {check_ticks.ERRATA_PATH: row}
 
@@ -965,6 +1051,35 @@ class TestErrata(RepoCase):
         sha = self.commit(f"t\n\nProves: {self.WAS}", "delta box")
         self.commit("errata", None, self.errata(sha, f"suite_row -- {PREFIX}", self.WAS))
         self.assertErrors(self.run_check(), "erratum names no `Proves:` line")
+
+    def test_erratum_supplies_a_missing_proves_line(self) -> None:
+        sha = self.commit("t", "delta box")
+        self.assertErrors(self.run_check(), "ticked with no")
+        fixed = f"host_one (existing: a host test) -- {PREFIX}"
+        self.commit("errata", None, self.errata(sha, "", fixed))
+        r = self.run_check()
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any("erratum: Proves: host_one" in n for n in r.notes), r.notes)
+
+    def test_erratum_supplies_every_missing_proves_line(self) -> None:
+        self.roadmap = tick(self.roadmap, "delta box")
+        sha = self.commit("t", "beta box")
+        self.assertErrors(
+            self.run_check(),
+            "ticked with no `Proves:` line: beta box:",
+            "ticked with no `Proves:` line: delta box names",
+        )
+        fixed = "host_one (existing: a host test) -- delta box\nmake lint -- beta box"
+        self.commit("errata", None, self.errata(sha, "", fixed))
+        r = self.run_check()
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any("erratum: Proves: host_one" in n for n in r.notes), r.notes)
+        self.assertTrue(any("erratum: Proves: make lint" in n for n in r.notes), r.notes)
+
+    def test_erratum_supplying_a_line_when_one_exists_fails(self) -> None:
+        sha = self.commit(f"t\n\nProves: {self.WAS}", "delta box")
+        self.commit("errata", None, self.errata(sha, "", self.WAS))
+        self.assertErrors(self.run_check(), "already has one")
 
     def test_erratum_for_a_commit_outside_the_pull_request_is_ignored(self) -> None:
         self.commit("errata", None, self.errata(self.base, self.WAS, self.WAS))
@@ -990,15 +1105,22 @@ class TestErrata(RepoCase):
         rows, errors = check_ticks.load_errata(
             f'[[erratum]]\ncommit = "{full}"\nwas = " a -- b "\nproves = "c -- b"\nwhy = "w"\n')
         self.assertEqual((rows, errors), ({(full, "a -- b"): ("c -- b", "w")}, []))
+        rows, errors = check_ticks.load_errata(
+            f'[[erratum]]\ncommit = "{full}"\nwas = ""\nproves = "c -- b"\nwhy = "w"\n')
+        self.assertEqual((rows, errors), ({(full, ""): ("c -- b", "w")}, []))
 
     def test_the_tree_errata_file_parses(self) -> None:
         text = (gatelib.ROOT / check_ticks.ERRATA_PATH).read_text()
         rows, errors = check_ticks.load_errata(text)
         self.assertEqual(errors, [])
         for (sha, was), (proves, _) in rows.items():
-            for line in (was, proves):
-                self.assertIsInstance(check_ticks.parse_proves(line), check_ticks.ProvesLine,
-                                      (sha, line))
+            for part in (was, proves):
+                for line in part.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    self.assertIsInstance(check_ticks.parse_proves(line),
+                                          check_ticks.ProvesLine, (sha, line))
 
 
 if __name__ == "__main__":

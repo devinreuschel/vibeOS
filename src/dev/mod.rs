@@ -4,6 +4,7 @@ pub(crate) mod dev_init;
 pub(crate) mod dma_init;
 pub(crate) mod entropy_init;
 #[cfg(feature = "kernel_tests")]
+#[cfg_attr(target_arch = "aarch64", allow(dead_code, unused_imports))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -18,3 +19,4 @@ pub(crate) mod entropy_init;
 pub mod ktest;
 pub(crate) mod pci_init;
 pub(crate) mod virtio_init;
+pub(crate) mod virtio_mmio_init;

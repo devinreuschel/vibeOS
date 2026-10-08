@@ -63,6 +63,12 @@ pub mod nr {
     pub const SYS_GETDENTS64: usize = 217;
     /// `psinfo`.
     pub const SYS_PSINFO: usize = 500;
+    /// `openat`.
+    pub const SYS_OPENAT: usize = 257;
+    /// `dup3`.
+    pub const SYS_DUP3: usize = 292;
+    /// `clone`.
+    pub const SYS_CLONE: usize = 56;
 }
 
 /// One system call.
@@ -116,11 +122,17 @@ pub enum Sys {
     Getdents64,
     /// `psinfo`.
     Psinfo,
+    /// `openat`.
+    Openat,
+    /// `dup3`.
+    Dup3,
+    /// `clone`.
+    Clone,
 }
 
 impl Sys {
     /// Every call, in table order.
-    pub const ALL: [Sys; 24] = [
+    pub const ALL: [Sys; 27] = [
         Sys::Read,
         Sys::Write,
         Sys::Open,
@@ -145,6 +157,9 @@ impl Sys {
         Sys::Reboot,
         Sys::Getdents64,
         Sys::Psinfo,
+        Sys::Openat,
+        Sys::Dup3,
+        Sys::Clone,
     ];
 
     /// The call named `name`.
@@ -174,6 +189,9 @@ impl Sys {
             b"reboot" => Some(Sys::Reboot),
             b"getdents64" => Some(Sys::Getdents64),
             b"psinfo" => Some(Sys::Psinfo),
+            b"openat" => Some(Sys::Openat),
+            b"dup3" => Some(Sys::Dup3),
+            b"clone" => Some(Sys::Clone),
             _ => None,
         }
     }
@@ -205,6 +223,9 @@ impl Sys {
             Sys::Reboot => "reboot",
             Sys::Getdents64 => "getdents64",
             Sys::Psinfo => "psinfo",
+            Sys::Openat => "openat",
+            Sys::Dup3 => "dup3",
+            Sys::Clone => "clone",
         }
     }
 
@@ -235,6 +256,9 @@ impl Sys {
             Sys::Reboot => nr::SYS_REBOOT,
             Sys::Getdents64 => nr::SYS_GETDENTS64,
             Sys::Psinfo => nr::SYS_PSINFO,
+            Sys::Openat => nr::SYS_OPENAT,
+            Sys::Dup3 => nr::SYS_DUP3,
+            Sys::Clone => nr::SYS_CLONE,
         }
     }
 
@@ -265,6 +289,9 @@ impl Sys {
             Sys::Reboot => &["magic1", "magic2", "cmd", "arg"],
             Sys::Getdents64 => &["fd", "dirent", "count"],
             Sys::Psinfo => &["buf", "len"],
+            Sys::Openat => &["dfd", "filename", "flags", "mode"],
+            Sys::Dup3 => &["oldfd", "newfd", "flags"],
+            Sys::Clone => &["flags", "newsp", "parent_tid", "child_tid", "tls"],
         }
     }
 }
@@ -308,8 +335,8 @@ pub fn close(fd: u32) -> Result<usize, Errno> {
     result(unsafe { syscall1(nr::SYS_CLOSE, fd as usize) })
 }
 
-/// `fstat(unsigned int fd, struct stat *statbuf)`: x86_64's 144-byte `struct stat`; see SYSCALL.md
-/// §3.1.
+/// `fstat(unsigned int fd, struct stat *statbuf)`: x86_64 144-byte `struct stat`; aarch64 128-byte
+/// asm-generic; see SYSCALL.md §3.1.
 ///
 /// # Safety
 ///
@@ -548,6 +575,61 @@ pub unsafe fn psinfo(buf: *mut u8, len: usize) -> Result<usize, Errno> {
     result(unsafe { syscall2(nr::SYS_PSINFO, buf as usize, len) })
 }
 
+/// `openat(int dfd, const char *filename, int flags, umode_t mode)`: `AT_FDCWD` is -100; `filename`
+/// at most 255 bytes.
+pub fn openat(dfd: i32, filename: *const u8, flags: i32, mode: u16) -> Result<usize, Errno> {
+    // SAFETY: the kernel's `syscall` convention; the kernel writes through
+    // none of its pointers, established here by the table row.
+    result(unsafe {
+        syscall4(
+            nr::SYS_OPENAT,
+            dfd as isize as usize,
+            filename as usize,
+            flags as isize as usize,
+            mode as usize,
+        )
+    })
+}
+
+/// `dup3(unsigned int oldfd, unsigned int newfd, int flags)`: `flags` is 0 or `O_CLOEXEC`; `oldfd
+/// == newfd` is `EINVAL`.
+pub fn dup3(oldfd: u32, newfd: u32, flags: i32) -> Result<usize, Errno> {
+    // SAFETY: the kernel's `syscall` convention; the kernel writes through
+    // none of its pointers, established here by the table row.
+    result(unsafe {
+        syscall3(
+            nr::SYS_DUP3,
+            oldfd as usize,
+            newfd as usize,
+            flags as isize as usize,
+        )
+    })
+}
+
+/// `clone(unsigned long flags, unsigned long newsp, int *parent_tid, int *child_tid, unsigned long
+/// tls)`: fork semantics only: `flags` must be `SIGCHLD` and `newsp` 0; arm64 swaps `tls` and
+/// `child_tid`.
+pub fn clone(
+    flags: u64,
+    newsp: u64,
+    parent_tid: *mut i32,
+    child_tid: *mut i32,
+    tls: u64,
+) -> Result<usize, Errno> {
+    // SAFETY: the kernel's `syscall` convention; the kernel writes through
+    // none of its pointers, established here by the table row.
+    result(unsafe {
+        syscall5(
+            nr::SYS_CLONE,
+            flags as usize,
+            newsp as usize,
+            parent_tid as usize,
+            child_tid as usize,
+            tls as usize,
+        )
+    })
+}
+
 /// `limits::MAX_PROCS`: the process table's slots, zombies included.
 pub const MAX_PROCS: usize = 256;
 /// The user canonical half's exclusive end (DESIGN §4.1).
@@ -601,7 +683,7 @@ pub struct Call {
     pub ptrs: &'static [Ptr],
 }
 
-/// Every row with an x86_64 number, in table order.
+/// Every row with a x86_64 number, in table order.
 #[rustfmt::skip]
 pub const CALLS: &[Call] = &[
     Call {
@@ -782,6 +864,28 @@ pub const CALLS: &[Call] = &[
         ktest: &[],
         ptrs: &[
             Ptr { arg: 0, name: "buf", kind: PtrKind::Buf, out: true, nullable: false, len_from: Some(1), size: 0 },
+        ],
+    },
+    Call {
+        sys: Sys::Openat,
+        errors: &[Errno::EBADF, Errno::EFAULT, Errno::ENAMETOOLONG, Errno::EINVAL, Errno::ENOENT, Errno::ENOTDIR, Errno::EISDIR, Errno::EEXIST, Errno::EACCES, Errno::ELOOP, Errno::EMFILE, Errno::ENFILE, Errno::ENOSPC, Errno::ENOMEM, Errno::EIO],
+        ktest: &[(Errno::EIO, "fat_bad_sector_eio"), (Errno::ENOMEM, "kalloc_nomem")],
+        ptrs: &[
+            Ptr { arg: 1, name: "filename", kind: PtrKind::Cstr, out: false, nullable: false, len_from: None, size: 0 },
+        ],
+    },
+    Call {
+        sys: Sys::Dup3,
+        errors: &[Errno::EBADF, Errno::EINVAL],
+        ktest: &[],
+        ptrs: &[
+        ],
+    },
+    Call {
+        sys: Sys::Clone,
+        errors: &[Errno::EAGAIN, Errno::ENOMEM, Errno::EINVAL],
+        ktest: &[(Errno::ENOMEM, "fork_oom")],
+        ptrs: &[
         ],
     },
 ];

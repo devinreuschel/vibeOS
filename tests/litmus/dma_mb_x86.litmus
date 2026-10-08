@@ -1,0 +1,10 @@
+X86 vibeos-dma-mb-x86
+(* Store then load on both sides. Both MFENCEs forbid both loads
+   reading the old value. *)
+{
+}
+ P0                 | P1                 ;
+ MOV [idx],$1       | MOV [event],$1     ;
+ MFENCE             | MFENCE             ;
+ MOV EAX,[event]    | MOV EBX,[idx]      ;
+exists (0:EAX=0 /\ 1:EBX=0)

@@ -32,7 +32,6 @@
     clippy::todo,
     clippy::unimplemented
 )]
-
 extern crate alloc;
 
 // The panic-test build compiles out everything after `limine: ok`
@@ -60,6 +59,8 @@ mod fs;
 mod irq;
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
 mod log;
+#[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
+mod machine;
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
 mod mm;
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
@@ -90,16 +91,21 @@ mod time;
 mod ktest;
 
 use acpi::acpi_init;
+#[cfg(target_arch = "aarch64")]
+use arch::aarch64::irqchip as apic_init;
 #[cfg(target_arch = "x86_64")]
 use arch::x86_64::{apic_init, cpu as x86};
 use block::{block_init, cache_init, part_init};
-use console::{console_init, fb_init, kbd_init};
+#[cfg(target_arch = "x86_64")]
+use console::kbd_init;
+use console::{console_init, fb_init};
 #[cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
-use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init};
-use drivers::virtio_blk_init;
+use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init, virtio_mmio_init};
+use drivers::{virtio_blk_init, virtio_input_init};
 use fs::{fat_init, file_init, fs_init, vibefs_init};
 use irq::{ipi_init, irq_init};
 use log::{diag, log_init, panic, serial};
+use machine::machine_init;
 use mm::{heap_init, kva_init, paging_init, pmm_init};
 use proc::{addr_space_init, fill_init, proc_init, syscall_init, user_init};
 use sched::{sched_init, thread_init, work_init};
@@ -112,7 +118,6 @@ use time::time_init;
 
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
-use vibeos::arch::BootHandover;
 use vibeos::marker;
 
 // The linker groups these three into `.limine_requests` (see linker.ld).
@@ -124,8 +129,7 @@ static REQ_START: RequestsStartMarker = RequestsStartMarker::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests")]
-static BASE_REV: BaseRevision =
-    BaseRevision::with_revision(<arch::current::Arch as BootHandover>::BASE_REVISION);
+static BASE_REV: BaseRevision = BaseRevision::with_revision(vibeos::boot::LIMINE_BASE_REVISION);
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
@@ -137,9 +141,20 @@ pub extern "C" fn _start() -> ! {
     // Limine's stack (DESIGN §2.5 step 4).
     panic::note_boot_stack(crate::arch::current::stack_pointer());
     // Step 1: serial. Nothing before this is debuggable.
+    #[cfg(target_arch = "aarch64")]
+    {
+        arch::aarch64::cpu::use_sp_elx();
+        if let Some(va) = arch::aarch64::boot::map_early_console() {
+            boot::fw_cfg_init::set_mmio_va(va);
+        }
+        arch::aarch64::vectors::init_early();
+    }
     serial::Serial::init();
+    serial::raw::set_halt_hook(arch::current::halt);
     log_init::init();
     crate::marker!(marker::SERIAL_ONLINE);
+    #[cfg(target_arch = "aarch64")]
+    arch::aarch64::boot::early_init();
 
     // Step 2: base revision. DESIGN §3.3 puts this immediately after serial.
     // Missing / older Limine responds by not clearing the request, and
@@ -149,6 +164,7 @@ pub extern "C" fn _start() -> ! {
         arch::current::halt();
     }
     crate::marker!(marker::LIMINE_OK);
+    #[cfg(target_arch = "x86_64")]
     crate::log::pvpanic_init::probe();
 
     // With `--features panic_test`, prove the panic path end to end.
@@ -183,6 +199,7 @@ fn normal_boot_tail() -> ! {
     // ---- Phase 1 slice A: physical memory manager. ----
     // Capture Limine once. Nothing else reads the request statics.
     let info = boot::capture();
+    machine_init::init_from_dtb(info);
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: Limine's HHDM still maps every usable range, as `pmm_init::init` requires; established here.
     let stats = unsafe { pmm_init::init(info) };
@@ -208,15 +225,6 @@ fn normal_boot_tail() -> ! {
     // below: the buddy is up (`pmm_init::init` above), as `paging_init::install` requires; established here.
     let paging_report = unsafe { paging_init::install(info) };
     paging_init::report(&paging_report);
-
-    // ---- Phase 2 slice B: ACPI discovery + MMIO UC. ----
-    // Parse before heap so LAPIC/IOAPIC/HPET PTEs are uncacheable
-    // before anything touches those bases (DESIGN §3.3 step 8, §4.3).
-    // The `acpi: xsdt N tables` marker waits until after GDT/PIC/IDT
-    // (steps 3–5 live after KVA; step 12 relative to them).
-    // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
-    // below: the kernel's page tables are live (`paging_init::install` above), as `acpi_init::init` requires; established here.
-    unsafe { acpi_init::init(info.rsdp_phys) };
 
     // ---- Phase 1 slice C: heap, KVA, diagnostics. ----
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
@@ -257,6 +265,17 @@ fn normal_boot_tail() -> ! {
     }
     crate::marker!(marker::KVA_READY);
 
+    // ---- Phase 2 slice B: ACPI discovery + device ioremap. ----
+    // After KVA so a firmware table outside RAM (highmem RSDP/XSDT in
+    // reserved BIOS) can use `memremap`. Device pages are still
+    // ioremapped here, before first MMIO touch (step 13b).
+    // The `acpi: xsdt N tables` marker waits until after GDT/PIC/IDT
+    // (step 12).
+    // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
+    // below: page tables, heap, and KVA are live, as `acpi_init::init`
+    // requires; established here.
+    unsafe { acpi_init::init(info.rsdp_phys) };
+
     // ---- Phase 2 slice A: GDT/TSS/IST, PIC, IDT. ----
     // After KVA so IST stacks are guarded KVA stacks. PIC remap before
     // LIDT so firmware 8259 vectors cannot alias CPU exceptions. FADT
@@ -264,18 +283,26 @@ fn normal_boot_tail() -> ! {
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: KVA is up (`kva_init::init` above), as `gdt::init_bsp` requires; established here.
     unsafe { arch::gdt::init_bsp() };
+    #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::GDT_OK);
 
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the ACPI walk ran and no IDT is loaded yet, as `pic::remap_and_mask` requires; established here.
     unsafe { arch::pic::remap_and_mask() };
+    #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::PIC_REMAPPED);
 
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the GDT is loaded and the PIC remapped and masked, as `idt::init` requires; established here.
-    unsafe { arch::idt::init() };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        arch::idt::init()
+    };
+    #[cfg(target_arch = "aarch64")]
+    arch::idt::init();
     #[cfg(feature = "kernel_tests")]
     arch::catch::init();
+    #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::IDT_OK);
 
     // DESIGN §3.3 step 11. After GDT: `mov gs` already ran. Before
@@ -302,6 +329,14 @@ fn normal_boot_tail() -> ! {
 /// is left on the stack below it.
 #[cfg(not(feature = "panic_test"))]
 extern "C" fn boot_rest() -> ! {
+    #[cfg(target_arch = "aarch64")]
+    {
+        arch::aarch64::cpu::use_sp_elx();
+        // SAFETY: the bootstrap thread is on a 2S guarded stack (`init_bootstrap`). established here.
+        unsafe {
+            arch::idt::init_full();
+        }
+    }
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the GDT is loaded and `GS_BASE` is the BSP's `PerCpu`, as `syscall_init::init_bsp` requires; established here.
     unsafe { syscall_init::init_bsp() };
@@ -400,9 +435,13 @@ extern "C" fn boot_rest() -> ! {
     // Phase 6 slice A: scan → list → bind. Marker before `shell ready`
     // so lspci is available once the shell thread runs.
     crate::pci_init::init(crate::dev_init::push);
+    #[cfg(target_arch = "aarch64")]
+    crate::log::pvpanic_init::probe_pci();
+    crate::virtio_mmio_init::publish();
     crate::work_init::init();
     crate::virtio_init::init();
     crate::virtio_blk_init::init();
+    crate::virtio_input_init::init();
     crate::dev_init::init();
     crate::entropy_init::init();
     crate::block_init::init();
@@ -440,7 +479,7 @@ extern "C" fn boot_rest() -> ! {
         }
     }
 
-    #[cfg(feature = "gp_test")]
+    #[cfg(all(feature = "gp_test", target_arch = "x86_64"))]
     gp_test_trip();
     #[cfg(feature = "panic_nest_test")]
     crate::log::panic_test::nest_trip();
