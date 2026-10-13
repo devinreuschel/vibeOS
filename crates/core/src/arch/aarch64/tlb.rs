@@ -122,16 +122,20 @@ pub const DMA_WMB: &str = "dmb oshst";
 pub const DMA_RMB: &str = "dmb oshld";
 pub const DMA_MB: &str = "dmb osh";
 
-/// I-cache sync when a user page becomes executable (ROADMAP §11.2).
+/// One step of the I-cache sync a user page needs once it becomes
+/// executable (ROADMAP §11.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IcacheOp {
+    /// `dc cvau, <va>`, one D-cache line.
     DcCvau,
     DsbIsh,
+    /// `ic ivau, <va>`, one I-cache line.
     IcIvau,
     Isb,
 }
 
-/// `idc` / `dic` from `CTR_EL0`. ELF load is the first caller.
+/// The op order for `CTR_EL0.IDC` / `DIC`: a bit set drops its step.
+/// Returns the count written to `buf`.
 pub fn icache_sync(idc: bool, dic: bool, buf: &mut [IcacheOp]) -> usize {
     let mut n = 0;
     if !idc && n < buf.len() {
@@ -157,8 +161,63 @@ pub fn icache_sync(idc: bool, dic: bool, buf: &mut [IcacheOp]) -> usize {
     n
 }
 
+/// What `CTR_EL0` says about code and data cache maintenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheInfo {
+    /// `IDC`: no D-cache clean needed to make writes visible to fetch.
+    pub idc: bool,
+    /// `DIC`: no I-cache invalidate needed.
+    pub dic: bool,
+    /// Smallest D-cache line, bytes (`DminLine`).
+    pub dline: u64,
+    /// Smallest I-cache line, bytes (`IminLine`).
+    pub iline: u64,
+}
+
+impl CacheInfo {
+    /// Decode `CTR_EL0` (DDI0487): `IminLine` 3:0 and `DminLine` 19:16 are
+    /// log2 of the line in words, `IDC` is bit 28, `DIC` bit 29.
+    pub const fn from_ctr(ctr: u64) -> Self {
+        Self {
+            idc: ctr & (1 << 28) != 0,
+            dic: ctr & (1 << 29) != 0,
+            dline: 4 << ((ctr >> 16) & 0xF),
+            iline: 4 << (ctr & 0xF),
+        }
+    }
+}
+
+/// Every `line`-byte line (a power of two) that `[start, start+len)`
+/// touches, as its aligned start address, once each.
+pub fn lines(start: u64, len: u64, line: u64) -> impl Iterator<Item = u64> {
+    let first = start & !(line - 1);
+    let end = if len == 0 {
+        first
+    } else {
+        start.saturating_add(len)
+    };
+    (first..end).step_by(line as usize)
+}
+
+/// Run the sync over `[start, start+len)`: `run(op, va)` for each step, in
+/// order, `va` the line for `DcCvau` and `IcIvau` and 0 for a barrier. The
+/// kernel's `sync_icache` runs the instruction for each.
+pub fn sync_range(info: CacheInfo, start: u64, len: u64, mut run: impl FnMut(IcacheOp, u64)) {
+    let mut ops = [IcacheOp::Isb; 5];
+    let n = icache_sync(info.idc, info.dic, &mut ops);
+    for &op in &ops[..n] {
+        match op {
+            IcacheOp::DcCvau => lines(start, len, info.dline).for_each(|va| run(op, va)),
+            IcacheOp::IcIvau => lines(start, len, info.iline).for_each(|va| run(op, va)),
+            IcacheOp::DsbIsh | IcacheOp::Isb => run(op, 0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
 
     #[test]
@@ -266,6 +325,125 @@ mod tests {
         assert_eq!(
             &buf[..n],
             &[IcacheOp::DsbIsh, IcacheOp::DsbIsh, IcacheOp::Isb]
+        );
+    }
+
+    fn recorded(info: CacheInfo, start: u64, len: u64) -> std::vec::Vec<(IcacheOp, u64)> {
+        let mut v = std::vec::Vec::new();
+        sync_range(info, start, len, |op, va| v.push((op, va)));
+        v
+    }
+
+    #[test]
+    fn ctr_decodes_lines_and_bits() {
+        let c = CacheInfo::from_ctr(0x0004_0004 | (1 << 28));
+        assert_eq!(
+            c,
+            CacheInfo {
+                idc: true,
+                dic: false,
+                dline: 64,
+                iline: 64
+            }
+        );
+        let c = CacheInfo::from_ctr(0x0003_0002 | (1 << 29));
+        assert_eq!((c.idc, c.dic, c.dline, c.iline), (false, true, 32, 16));
+        // QEMU max reads 0x8444c004: DminLine 4, IminLine 4, no IDC/DIC.
+        let c = CacheInfo::from_ctr(0x8444_C004);
+        assert_eq!((c.idc, c.dic, c.dline, c.iline), (false, false, 64, 64));
+        // Reset value: 4-byte lines, the conservative floor.
+        assert_eq!(CacheInfo::from_ctr(0).dline, 4);
+    }
+
+    #[test]
+    fn lines_cover_the_range_once_aligned_down() {
+        for line in [4u64, 16, 64, 128] {
+            for (start, len) in [
+                (0x1000u64, 0x1000u64),
+                (0x1000, 1),
+                (0x1000 + line - 1, 1),
+                (0x1000 + line - 1, 2),
+                (0x1003, 0x1000),
+                (0x1000, line),
+                (0x1000, line + 1),
+            ] {
+                let got: std::vec::Vec<u64> = lines(start, len, line).collect();
+                let first = start & !(line - 1);
+                let count = (start + len - first).div_ceil(line);
+                assert_eq!(got.len() as u64, count, "line {line} {start:#x}+{len:#x}");
+                for (i, &va) in got.iter().enumerate() {
+                    assert_eq!(va, first + i as u64 * line);
+                    assert_eq!(va % line, 0);
+                }
+                assert!(*got.last().unwrap() < start + len);
+                assert!(got[0] <= start && start < got[0] + line);
+            }
+        }
+        assert_eq!(lines(0x1000, 0, 64).count(), 0);
+        // A range ending at the top of the address space does not wrap.
+        let top = u64::MAX - 63;
+        assert_eq!(lines(top, 64, 64).collect::<std::vec::Vec<_>>(), [top]);
+    }
+
+    #[test]
+    fn sync_range_runs_the_box_sequence_per_line() {
+        let info = CacheInfo {
+            idc: false,
+            dic: false,
+            dline: 64,
+            iline: 16,
+        };
+        let r = recorded(info, 0x2000, 0x1000);
+        let dc = r.iter().filter(|e| e.0 == IcacheOp::DcCvau).count();
+        let ic = r.iter().filter(|e| e.0 == IcacheOp::IcIvau).count();
+        assert_eq!((dc, ic), (64, 256));
+        // dc cvau, dsb ish, ic ivau, dsb ish, isb, in that order.
+        let mut kinds = std::vec::Vec::new();
+        for &(op, _) in &r {
+            if kinds.last() != Some(&op) {
+                kinds.push(op);
+            }
+        }
+        assert_eq!(
+            kinds,
+            [
+                IcacheOp::DcCvau,
+                IcacheOp::DsbIsh,
+                IcacheOp::IcIvau,
+                IcacheOp::DsbIsh,
+                IcacheOp::Isb
+            ]
+        );
+        assert_eq!(r[0], (IcacheOp::DcCvau, 0x2000));
+        assert_eq!(r[63], (IcacheOp::DcCvau, 0x2000 + 63 * 64));
+        assert_eq!(r[65], (IcacheOp::IcIvau, 0x2000));
+    }
+
+    #[test]
+    fn sync_range_skips_per_idc_and_dic() {
+        let mut info = CacheInfo {
+            idc: true,
+            dic: false,
+            dline: 64,
+            iline: 64,
+        };
+        let r = recorded(info, 0x2000, 0x1000);
+        assert!(r.iter().all(|e| e.0 != IcacheOp::DcCvau));
+        assert_eq!(r.iter().filter(|e| e.0 == IcacheOp::IcIvau).count(), 64);
+        info.idc = false;
+        info.dic = true;
+        let r = recorded(info, 0x2000, 0x1000);
+        assert!(r.iter().all(|e| e.0 != IcacheOp::IcIvau));
+        assert_eq!(r.iter().filter(|e| e.0 == IcacheOp::DcCvau).count(), 64);
+        info.idc = true;
+        let r = recorded(info, 0x2000, 0x1000);
+        assert_eq!(
+            r,
+            [
+                (IcacheOp::DsbIsh, 0),
+                (IcacheOp::DsbIsh, 0),
+                (IcacheOp::Isb, 0)
+            ]
         );
     }
 }

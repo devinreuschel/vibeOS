@@ -136,6 +136,14 @@ pub trait Barriers {
     /// The range is mapped memory the caller owns for this DMA, and no CPU
     /// store to it is pending that the invalidate would discard.
     unsafe fn sync_for_cpu(start: *const u8, len: usize);
+    /// Make bytes written to `start..start + len` through a data alias
+    /// fetchable as code (aarch64's `dc cvau` and `ic ivau`; x86_64's
+    /// caches are coherent with fetch).
+    ///
+    /// # Safety
+    ///
+    /// The range is mapped, readable memory.
+    unsafe fn sync_icache(_start: *const u8, _len: usize) {}
 }
 
 /// The per-CPU base register.

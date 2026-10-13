@@ -264,6 +264,12 @@ impl Barriers for Arch {
 
     #[inline]
     unsafe fn sync_for_cpu(_start: *const u8, _len: usize) {}
+    unsafe fn sync_icache(start: *const u8, len: usize) {
+        // SAFETY: the range is mapped and readable, the `# Safety` contract
+        // of `vibeos::arch::Barriers::sync_icache`; established here by the
+        // caller's unsafe call.
+        unsafe { cpu::sync_icache(start as u64, len as u64) };
+    }
 }
 
 impl PerCpuBase for Arch {

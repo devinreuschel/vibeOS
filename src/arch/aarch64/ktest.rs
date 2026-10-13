@@ -1444,6 +1444,10 @@ pub(crate) const TESTS: &[Test] = &[
         "el0_sve_sigill",
         crate::arch::aarch64::ktest_el0::test_el0_sve_sigill,
     ),
+    test(
+        "el0_code_recycle",
+        crate::arch::aarch64::ktest_el0::test_el0_code_recycle,
+    ),
     test("weak_order_probe", test_weak_order_probe)
         .deadline(330_000)
         .opt_in(),

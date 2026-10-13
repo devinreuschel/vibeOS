@@ -508,6 +508,7 @@ fn load_from<S: ImageSource>(src: &mut S, args: &ExecArgs) -> Result<Loaded, Loa
         let (stack_base, _) = map_stack(&mut space, img.stack_exec, stack)?;
         let fs = setup_tls(&mut space, &img, stack_base, src)?;
         let rsp = fill_stack(&mut space, &img, args)?;
+        fill_init::sync_exec(&space).map_err(LoadError::Fill)?;
         Ok((img.entry, rsp, fs))
     })();
     // A failure drops `space` here: its last `users` put unmaps and frees

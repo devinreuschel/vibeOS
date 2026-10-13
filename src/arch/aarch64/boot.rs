@@ -137,6 +137,7 @@ fn alloc_early_table(kphys: u64, used: &mut usize) -> Option<u64> {
 /// floor itself is checked in `_start`, before that line.
 pub fn early_init() {
     cpu::note_exception_level();
+    cpu::note_cache();
     super::percpu::set_tpidr_el2(cpu::el2_vhe());
     cpu::log_isa_floor();
     cpu::set_pan();

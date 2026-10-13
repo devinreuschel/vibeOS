@@ -17,6 +17,7 @@ use crate::cell::BootCell;
 const DAIF_I: u64 = 1 << 7;
 
 static EL2_VHE: BootCell<bool> = BootCell::new();
+static CACHE: BootCell<tlb::CacheInfo> = BootCell::new();
 static ISA_OK: AtomicBool = AtomicBool::new(false);
 static OVERFLOW_SP: AtomicU64 = AtomicU64::new(0);
 
@@ -67,6 +68,46 @@ pub fn note_exception_level() {
     } else {
         crate::marker!("vibeOS: el: {el}");
     }
+}
+
+/// Read `CTR_EL0` for [`sync_icache`]. The BSP's value stands for every
+/// CPU, as on a part whose cores share line sizes.
+pub fn note_cache() {
+    let ctr: u64;
+    // SAFETY: `CTR_EL0` is readable at EL1; established here.
+    unsafe { asm!("mrs {0}, CTR_EL0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
+    // SAFETY: I22, one write on the BSP before SMP; established here.
+    unsafe { CACHE.set(tlb::CacheInfo::from_ctr(ctr)) };
+}
+
+/// Make `[start, start+len)`, written through the data side, fetchable by
+/// every CPU. Runs `tlb::sync_range` over `CTR_EL0`'s line sizes; before
+/// [`note_cache`] it assumes the smallest lines and no IDC or DIC.
+///
+/// # Safety
+/// `[start, start+len)` is mapped, readable memory.
+pub unsafe fn sync_icache(start: u64, len: u64) {
+    let info = CACHE
+        .try_get()
+        .copied()
+        .unwrap_or(tlb::CacheInfo::from_ctr(0));
+    tlb::sync_range(info, start, len, |op, va| {
+        // SAFETY: EL1 cache maintenance by VA; `va` is a line of the mapped
+        // range `sync_icache`'s contract names, established by
+        // `arch::aarch64::cpu::sync_icache`.
+        unsafe {
+            match op {
+                tlb::IcacheOp::DcCvau => {
+                    asm!("dc cvau, {0}", in(reg) va, options(nostack, preserves_flags))
+                }
+                tlb::IcacheOp::IcIvau => {
+                    asm!("ic ivau, {0}", in(reg) va, options(nostack, preserves_flags))
+                }
+                tlb::IcacheOp::DsbIsh => asm!("dsb ish", options(nostack, preserves_flags)),
+                tlb::IcacheOp::Isb => asm!("isb", options(nostack, preserves_flags)),
+            }
+        }
+    });
 }
 
 /// `(ID_AA64ISAR0_EL1, ID_AA64MMFR1_EL1)`, readable at EL1 and EL2.

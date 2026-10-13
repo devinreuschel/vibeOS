@@ -389,6 +389,25 @@ user_code!(
     "
 );
 
+// Same page, different code: the second load reuses the first's frames.
+user_code!(
+    RECYCLE_A,
+    "
+    mov x0, #3
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    RECYCLE_B,
+    "
+    mov x0, #5
+    mov x8, #93
+    svc #0
+    "
+);
+
 fn exited0(st: u32) -> bool {
     vibeos::proc::wifexited(st) && vibeos::proc::wexitstatus(st) == 0
 }
@@ -965,6 +984,28 @@ pub(crate) fn test_el0_env_every_cpu() -> Outcome {
             return crate::fail_fmt!("cpu{i} status {st:#x}");
         }
         i += 1;
+    }
+    Outcome::Ok
+}
+
+/// A process loaded over frames a dead one's code just left runs its own
+/// code, not the old (ROADMAP §11.2: I-cache maintenance on ELF load). TCG
+/// refetches after any guest write, so this cannot see a missing `ic ivau`;
+/// on HVF or hardware with `DIC` clear it can. Here it proves the loader's
+/// maintenance runs without faulting, and the host test of
+/// `tlb::sync_range` proves the sequence.
+pub(crate) fn test_el0_code_recycle() -> Outcome {
+    for round in 0..4 {
+        let (code, want) = if round % 2 == 0 {
+            (RECYCLE_A, 3)
+        } else {
+            (RECYCLE_B, 5)
+        };
+        match user::run(&Image::Code(code, DEFAULT), &["recycle"]) {
+            Ok(st) if vibeos::proc::wifexited(st) && vibeos::proc::wexitstatus(st) == want => {}
+            Ok(st) => return crate::fail_fmt!("round {round}: status {st:#x}"),
+            Err(e) => return crate::fail_fmt!("round {round}: spawn: {}", e.as_str()),
+        }
     }
     Outcome::Ok
 }
