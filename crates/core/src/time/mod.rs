@@ -84,6 +84,13 @@ pub fn next_deadline(now: Instant) -> Instant {
     }
 }
 
+/// `CNTx_TVAL` for `ns` at `hz`. The register is signed 32-bit: a negative
+/// value fires at once, so the delay tops out at `i32::MAX` counts.
+pub fn tval_for_ns(ns: u64, hz: u64) -> u32 {
+    let ticks = u128::from(ns) * u128::from(hz) / 1_000_000_000;
+    ticks.min(i32::MAX as u128) as u32
+}
+
 pub const fn hpet_period_ok(period_fs: u32) -> bool {
     period_fs >= HPET_PERIOD_FS_MIN && period_fs <= HPET_PERIOD_FS_MAX
 }
@@ -762,6 +769,18 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn tval_never_reads_negative() {
+        let hz = 62_500_000;
+        assert_eq!(tval_for_ns(10_000_000, hz), 625_000);
+        assert_eq!(tval_for_ns(0, hz), 0);
+        // 40 s is 2.5e9 counts, past i32::MAX
+        for ns in [40_000_000_000, u64::MAX] {
+            assert_eq!(tval_for_ns(ns, hz) as i32, i32::MAX);
+        }
+        assert_eq!(tval_for_ns(u64::MAX, u64::MAX) as i32, i32::MAX);
+    }
 
     #[test]
     fn pit_divisor_is_1khz() {

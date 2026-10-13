@@ -105,9 +105,7 @@ pub fn rearm_ns(ns: u64) {
     if hz == 0 {
         return;
     }
-    let ticks = ns.saturating_mul(hz) / 1_000_000_000;
-    let tval = ticks.min(u32::MAX as u64) as u32;
-    write_tval(tval);
+    write_tval(vibeos::time::tval_for_ns(ns, hz));
 }
 
 fn write_tval(tval: u32) {
