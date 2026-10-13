@@ -236,6 +236,51 @@ pub(crate) fn test_irq_pool() -> Outcome {
     }
 }
 
+/// A rejected `set_affinity` leaves the pool, the table and the RTE alone,
+/// and a good one keeps the RTE's mask bit.
+pub(crate) fn test_ioapic_affinity_state() -> Outcome {
+    // ISA line 13 (FPU): nothing in the guest raises it.
+    const GSI: u32 = 13;
+    let irq = match irq_init::map_wired(IrqSpecifier::Gsi {
+        gsi: GSI,
+        trigger: Trigger::Edge,
+        polarity: Polarity::High,
+    }) {
+        Ok(i) => i,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    let r = ioapic_affinity_checks(irq);
+    let _ = irq_init::free_vector(irq);
+    match r {
+        Ok(()) => Outcome::Ok,
+        Err(why) => Outcome::Fail(why),
+    }
+}
+
+fn ioapic_affinity_checks(irq: IrqId) -> Result<(), &'static str> {
+    let vec = irq_init::vector(irq).ok_or("no vector")?;
+    let pool_cpu = || irq_init::with_pool(|p| p.cpu_of(vec));
+    if apic_init::gsi_masked(13) != Some(true) {
+        return Err("routed unmasked");
+    }
+    if irq_init::set_affinity(irq, 0xFFFF) != Err(IrqError::BadCpu) {
+        return Err("bad cpu accepted");
+    }
+    if pool_cpu() != Some(0) || irq_init::cpu_of(irq) != Some(0) {
+        return Err("cpu moved on error");
+    }
+    irq_init::set_affinity(irq, 0).map_err(|_| "affinity")?;
+    if apic_init::gsi_masked(13) != Some(true) {
+        return Err("affinity unmasked");
+    }
+    irq_init::set_handler(irq, irq_nop).map_err(|_| "handler")?;
+    irq_init::set_affinity(irq, 0).map_err(|_| "affinity live")?;
+    if apic_init::gsi_masked(13) != Some(false) {
+        return Err("affinity masked");
+    }
+    Ok(())
+}
+
 fn irq_th_nop(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {}
 
 fn irq_nop() {}
@@ -1344,6 +1389,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("reschedule_hook_installed", test_reschedule_hook_installed),
     test("irq_pool", test_irq_pool),
     test("irq_free_threaded", test_irq_free_threaded),
+    test("ioapic_affinity_state", test_ioapic_affinity_state),
     test("msix_cpu", test_msix_cpu),
     test("intx_fallback", test_intx_fallback),
     test("intx_free_masks", test_intx_free_masks),

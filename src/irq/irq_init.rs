@@ -859,6 +859,11 @@ pub fn cpu_of(irq: IrqId) -> Option<u32> {
 
 /// Ask the chip to move the interrupt, then record dest CPU on success.
 /// The chip call stays outside the IRQ lock so chip code can take it.
+/// Until `set_cpu` lands, `cpu_of` still names the old CPU while the chip
+/// already points at the new one. An `enable_msix` that composes its message
+/// inside that window and registers its live entry after the chip call
+/// keeps the old CPU in the table; closing it needs `enable_msix` to
+/// compose and register under one IRQ lock hold.
 pub fn set_affinity(irq: IrqId, cpu: u32) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
@@ -1155,7 +1160,7 @@ impl IrqChip for IoApicChip {
     fn set_affinity(&self, hwirq: u32, cpu: u32) -> Result<(), IrqError> {
         let vec = u8::try_from(hwirq).map_err(|_| IrqError::BadVector)?;
         let bind = with_irq(|s| {
-            s.pool.set_affinity(vec, cpu)?;
+            s.pool.cpu_of(vec).ok_or(IrqError::BadVector)?;
             let i = pool_index(vec).ok_or(IrqError::BadVector)?;
             s.gsi_bind
                 .get(i)
@@ -1163,11 +1168,12 @@ impl IrqChip for IoApicChip {
                 .flatten()
                 .ok_or(IrqError::BadVector)
         })?;
+        // The pool moves only once the RTE has, so on failure both still
+        // name the old CPU. The mask bit stays as the caller left it.
         let dest = apic_id(cpu).ok_or(IrqError::BadCpu)?;
-        apic_init::route_gsi(bind.gsi, vec, dest, bind.trigger, bind.polarity)
+        apic_init::retarget_gsi(bind.gsi, vec, dest, bind.trigger, bind.polarity)
             .map_err(|_| IrqError::BadCpu)?;
-        apic_init::unmask_gsi(bind.gsi);
-        Ok(())
+        with_irq(|s| s.pool.set_affinity(vec, cpu))
     }
 
     fn alloc_msi(&self, _n: u8, _cpu: u32, _out: &mut [u32]) -> Result<usize, IrqError> {

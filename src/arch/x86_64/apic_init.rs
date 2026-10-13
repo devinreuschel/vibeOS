@@ -354,6 +354,37 @@ pub fn route_gsi(
     })
 }
 
+/// Whether `gsi`'s entry is masked right now, `None` without an I/O APIC for it.
+fn gsi_masked_inner(st: &ApicState, gsi: u32) -> Option<bool> {
+    let (io, pin) = find_ioapic(st, gsi)?;
+    let (lo, _) = apic::ioapic_redir_regs(pin);
+    // SAFETY: invariant I49, established at `arch::x86_64::apic_init::enum_ioapics`:
+    // `io.va` is set only there, and the caller holds `STATE`.
+    Some(apic::redir_is_masked(unsafe { io_read(io.va, lo) }))
+}
+
+/// Move a routed `gsi` to `cpu`, leaving its mask bit as it is.
+pub fn retarget_gsi(
+    gsi: u32,
+    vector: u8,
+    cpu: u8,
+    trigger: Trigger,
+    polarity: Polarity,
+) -> Result<(), IpiError> {
+    with_state(|st| {
+        if !st.ready {
+            return Err(IpiError::NotReady);
+        }
+        let masked = gsi_masked_inner(st, gsi).ok_or(IpiError::NoRoute)?;
+        route_gsi_inner(st, gsi, vector, cpu, trigger, polarity, masked)
+    })
+}
+
+#[cfg(feature = "kernel_tests")]
+pub fn gsi_masked(gsi: u32) -> Option<bool> {
+    with_state(|st| gsi_masked_inner(st, gsi))
+}
+
 pub fn mask_gsi(gsi: u32) {
     set_gsi_mask(gsi, true);
 }
