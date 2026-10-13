@@ -312,16 +312,6 @@ pub fn dispatch_intid(intid: u32) {
     let irq_raw = crate::arch::aarch64::gic::lookup(intid);
     let irq = IrqId::from_raw(irq_raw);
     if let Some(i) = irq.slot() {
-        if let Some(slot) = HANDLERS.get(i) {
-            // Acquire: pairs with the Release store in `set_handler`.
-            let p = slot.load(Ordering::Acquire);
-            if p != 0 {
-                // SAFETY: a nonzero `HANDLERS` slot holds a `fn()`;
-                // established by `irq::irq_init::set_handler`.
-                let h: Handler = unsafe { core::mem::transmute(p) };
-                h();
-            }
-        }
         let (top, work, ctx) = with_irq(|s| {
             (
                 s.th.top.get(i).copied().flatten(),
@@ -329,6 +319,7 @@ pub fn dispatch_intid(intid: u32) {
                 s.th.ctx.get(i).cloned().flatten(),
             )
         });
+        // threaded and plain handlers are exclusive, as in `dispatch`
         if work.is_some() || top.is_some() {
             if let Some(h) = top {
                 h(ctx.as_deref());
@@ -344,6 +335,15 @@ pub fn dispatch_intid(intid: u32) {
                 });
             });
             drop(ctx);
+        } else if let Some(slot) = HANDLERS.get(i) {
+            // Acquire: pairs with the Release store in `set_handler`.
+            let p = slot.load(Ordering::Acquire);
+            if p != 0 {
+                // SAFETY: a nonzero `HANDLERS` slot holds a `fn()`;
+                // established by `irq::irq_init::set_handler`.
+                let h: Handler = unsafe { core::mem::transmute(p) };
+                h();
+            }
         }
     } else if let Some(c) = crate::arch::aarch64::gic::chip() {
         // No IrqId: a level SPI would re-pend after EOI forever.
@@ -898,6 +898,7 @@ pub fn enable_msi(bdf: Bdf, cap: u8, irq: IrqId) -> Result<(), IrqError> {
     let msi = pci::read_msi_cap(&mut hw, bdf, cap);
     pci::write_msi_message(&mut hw, bdf, msi, msg.addr as u32, msg.data as u16);
     pci::set_msi_enable(&mut hw, bdf, cap, true);
+    chip.unmask(hwirq);
     if let Some(i) = irq.slot() {
         with_irq(|s| {
             if let Some(r) = s.routes.get_mut(i) {

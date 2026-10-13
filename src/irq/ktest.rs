@@ -1388,6 +1388,52 @@ pub(crate) fn lpi_free_realloc() -> Outcome {
     Outcome::Ok
 }
 
+/// One edu interrupt through `enable_msi`: on GICv2m the SPI starts masked,
+/// so a device armed without an unmask never fires. GICv3 enables its LPIs
+/// at init and would pass without one.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn msi_legacy_raise() -> Outcome {
+    let Some(dev) = find_edu() else {
+        return Outcome::Fail("no edu");
+    };
+    let Some(cap) = dev.caps.msi else {
+        return Outcome::Skip("no msi cap");
+    };
+    let Some(mmio) = bar0_va(&dev) else {
+        return Outcome::Fail("edu bar0");
+    };
+    if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
+        return Outcome::Fail("edu ident");
+    }
+    LPI_FIRST.store(0, Ordering::SeqCst);
+    let saved = pci_init::cfg_read16(dev.addr, CFG_COMMAND);
+    pci_init::update_command(dev.addr, CMD_MEM | CMD_MASTER | CMD_INTX_DISABLE, 0);
+    let mut irqs = [None, None];
+    let fail = |why: &'static str, irqs: [Option<IrqId>; 2]| {
+        lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+        Outcome::Fail(why)
+    };
+    let irq =
+        match irq_init::alloc_msi(&dev, 1).and_then(|s| s.get(0).ok_or(irq::IrqError::Exhausted)) {
+            Ok(irq) => irq,
+            Err(e) => return fail(e.as_str(), irqs),
+        };
+    irqs[0] = Some(irq);
+    if irq_init::set_handler(irq, on_lpi_first).is_err() {
+        return fail("handler", irqs);
+    }
+    if let Err(e) = irq_init::enable_msi(dev.addr, cap, irq) {
+        return fail(e.as_str(), irqs);
+    }
+    IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    mmio_w32(mmio, EDU_RAISE, 1);
+    if !spin_until_ns(|| LPI_FIRST.load(Ordering::SeqCst) != 0, 500_000_000) {
+        return fail("no interrupt", irqs);
+    }
+    lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -1403,6 +1449,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("intx_free_masks", test_intx_free_masks),
     #[cfg(target_arch = "aarch64")]
     test("lpi_free_realloc", lpi_free_realloc),
+    #[cfg(target_arch = "aarch64")]
+    test("msi_legacy_raise", msi_legacy_raise),
     test("msix_cpu_publish_last", msix_cpu_publish_last),
     test("lifetime_shootdown_ack_late", lifetime_shootdown_ack_late).deadline(15_000),
     test("shootdown_ack_while_busy", shootdown_ack_while_busy).deadline(13_000),
