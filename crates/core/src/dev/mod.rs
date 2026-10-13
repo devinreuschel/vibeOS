@@ -305,6 +305,8 @@ pub struct Device {
     pub caps: CapSet,
     /// Platform GIC INTID for a virtio-mmio transport; 0 if none.
     pub intid: u32,
+    /// `intid` is edge-triggered, per its device-tree specifier.
+    pub intid_edge: bool,
 }
 
 impl Device {
@@ -321,6 +323,7 @@ impl Device {
             irq: IrqBind { pin: 0, line: 0 },
             caps: CapSet::empty(),
             intid: 0,
+            intid_edge: false,
         }
     }
 
@@ -346,6 +349,7 @@ impl Device {
             },
             caps: info.caps,
             intid: 0,
+            intid_edge: false,
         }
     }
 

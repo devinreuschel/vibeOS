@@ -193,6 +193,7 @@ pub fn publish() {
         d.device_id = did;
         d.class = CLASS_MMIO;
         d.intid = m.irq;
+        d.intid_edge = m.irq_edge;
         d.resources[0] = Resource {
             kind: ResourceKind::Memory,
             bar: 0,

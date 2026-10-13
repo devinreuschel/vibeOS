@@ -162,6 +162,8 @@ pub struct MmioDev {
     pub msi_parent: Option<u32>,
     /// GIC INTID from the node's `interrupts` specifier; 0 if absent.
     pub irq: u32,
+    /// The `interrupts` specifier's trigger is edge, not level.
+    pub irq_edge: bool,
 }
 
 /// What boot needs from firmware. No AML, no per-device `_CRS`.

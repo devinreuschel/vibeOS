@@ -15,6 +15,7 @@ use super::{
     push_reserved, push_timer, push_virtio,
 };
 use crate::irq::gic::gic_intid;
+use crate::limits::MAX_DT_REG_BYTES;
 
 /// FDT magic (`dt_spec` v0.4 §5.2).
 const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -171,24 +172,27 @@ fn cell(val: &[u8], i: usize) -> Option<u32> {
     be_u32(val, off)
 }
 
-/// First GIC INTID from a 3-cell `interrupts` specifier, or 0.
-fn first_gic_intid(props: &[Prop<'_>]) -> u32 {
+/// First GIC INTID and whether its trigger is edge (flags cell, bits 0-1:
+/// 1 rising, 2 falling; 4 and 8 are level), from a 3-cell `interrupts`
+/// specifier. `(0, false)` when absent.
+fn first_gic_irq(props: &[Prop<'_>]) -> (u32, bool) {
     prop_named(props, b"interrupts")
         .and_then(|v| {
-            let ty = cell(v, 0)?;
-            let num = cell(v, 1)?;
-            gic_intid(ty, num)
+            let intid = gic_intid(cell(v, 0)?, cell(v, 1)?)?;
+            Some((intid, cell(v, 2)? & 3 != 0))
         })
-        .unwrap_or(0)
+        .unwrap_or((0, false))
 }
 
 fn addr_cells(val: &[u8], start: usize, ncells: u32) -> Option<u64> {
     match ncells {
         0 => Some(0),
         1 => Some(u64::from(cell(val, start)?)),
-        _ => {
-            let hi = cell(val, start)?;
-            let lo = cell(val, start.checked_add(1)?)?;
+        // The low two cells, as the big-endian number's low 64 bits.
+        n => {
+            let hi_at = start.checked_add(n as usize)?.checked_sub(2)?;
+            let hi = cell(val, hi_at)?;
+            let lo = cell(val, hi_at.checked_add(1)?)?;
             Some(u64::from(hi).wrapping_shl(32) | u64::from(lo))
         }
     }
@@ -197,7 +201,9 @@ fn addr_cells(val: &[u8], start: usize, ncells: u32) -> Option<u64> {
 fn first_reg(val: &[u8], addr_c: u32, size_c: u32) -> Option<PhysRange> {
     let start = addr_cells(val, 0, addr_c)?;
     let size = addr_cells(val, addr_c as usize, size_c)?;
-    Some(PhysRange { start, size })
+    let r = PhysRange { start, size };
+    // A device window the kernel would map: no wrap, no absurd length.
+    (size <= MAX_DT_REG_BYTES && r.end().is_some()).then_some(r)
 }
 
 /// Every `(addr, size)` pair in a `reg` property. A partial trailing pair
@@ -613,24 +619,28 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
     if compatible_has(props, b"arm,pl031")
         && let Some(r) = reg
     {
+        let (irq, irq_edge) = first_gic_irq(props);
         d.rtc = Some(MmioDev {
             base: r.start,
             size: r.size,
             dma_coherent: dma,
             msi_parent,
-            irq: first_gic_intid(props),
+            irq,
+            irq_edge,
         });
     }
 
     if compatible_has(props, b"qemu,fw-cfg-mmio")
         && let Some(r) = reg
     {
+        let (irq, irq_edge) = first_gic_irq(props);
         d.fw_cfg = Some(MmioDev {
             base: r.start,
             size: r.size,
             dma_coherent: dma,
             msi_parent,
-            irq: first_gic_intid(props),
+            irq,
+            irq_edge,
         });
     }
 
@@ -638,6 +648,7 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
         && status_okay(props)
         && let Some(r) = reg
     {
+        let (irq, irq_edge) = first_gic_irq(props);
         push_virtio(
             d,
             MmioDev {
@@ -645,7 +656,8 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
                 size: r.size,
                 dma_coherent: dma,
                 msi_parent,
-                irq: first_gic_intid(props),
+                irq,
+                irq_edge,
             },
         );
     }
@@ -1006,11 +1018,14 @@ mod tests {
         // QEMU virt: SPI 16 → INTID 48 (GIC_SPI + 16).
         assert_eq!(d.virtio_mmio[0].irq, 48);
         assert_eq!(d.virtio_mmio[1].irq, 49);
+        // QEMU virt wires virtio-mmio edge rising (flags 1), the RTC level high (4).
+        assert!(d.virtio_mmio[0].irq_edge);
         let fw = d.fw_cfg.unwrap();
         assert_eq!(fw.base, 0x902_0000);
         assert!(fw.dma_coherent);
         let rtc = d.rtc.unwrap();
         assert_eq!(rtc.base, 0x901_0000);
+        assert!(!rtc.irq_edge);
         assert!(d.node_count >= 40);
         // memory@ must not become reserved or a console.
         assert!(!d.reserved_ranges().any(|r| r.start == 0x4000_0000));
@@ -1174,6 +1189,68 @@ mod tests {
         // parse must not invent a second chooser: console == pick_pl011.
         for blob in [VIRT_82, VIRT_82_SEC, VIRT_CUR, RESERVED, TIMER5] {
             assert_eq!(parse(blob).unwrap().console_uart(), pick_pl011(blob));
+        }
+    }
+
+    fn be(cells: &[u32]) -> Vec<u8> {
+        cells.iter().flat_map(|c| c.to_be_bytes()).collect()
+    }
+
+    #[test]
+    fn wide_address_cells_keep_the_low_64_bits() {
+        let v = be(&[0xdead, 0xbeef, 0x1, 0x2, 0x0, 0x1000]);
+        assert_eq!(addr_cells(&v, 0, 4), Some(0x1_0000_0002));
+        assert_eq!(addr_cells(&v, 0, 3), Some(0x0000_beef_0000_0001));
+        let r = first_reg(&v, 4, 2).unwrap();
+        assert_eq!((r.start, r.size), (0x1_0000_0002, 0x1000));
+        assert_eq!(addr_cells(&v, 0, 7), None);
+        assert_eq!(addr_cells(&v, 5, 2), None);
+    }
+
+    #[test]
+    fn first_reg_refuses_wrapping_and_huge_windows() {
+        let wraps = be(&[0xFFFF_FFFF, 0xFFFF_F000, 0x0, 0x2000]);
+        assert!(first_reg(&wraps, 2, 2).is_none());
+        let huge = be(&[0x0, 0x0900_0000, 0x1, 0x0]);
+        assert!(first_reg(&huge, 2, 2).is_none());
+        let ok = be(&[0x0, 0x0900_0000, 0x0, 0x1000]);
+        assert!(first_reg(&ok, 2, 2).is_some());
+    }
+
+    #[test]
+    fn interrupt_trigger_is_parsed() {
+        let p = |cells: &[u32]| {
+            let v = be(cells);
+            let props = [Prop {
+                name: b"interrupts",
+                value: &v,
+            }];
+            first_gic_irq(&props)
+        };
+        assert_eq!(p(&[0, 16, 1]), (48, true));
+        assert_eq!(p(&[0, 16, 2]), (48, true));
+        assert_eq!(p(&[0, 16, 4]), (48, false));
+        assert_eq!(p(&[0, 16, 8]), (48, false));
+        assert_eq!(p(&[0, 16]), (0, false));
+        assert_eq!(p(&[]), (0, false));
+    }
+
+    #[test]
+    fn truncated_and_corrupt_blobs_never_panic() {
+        for blob in [VIRT_82, VIRT_CUR, TWO_REG] {
+            for n in 0..blob.len() {
+                let _ = parse(&blob[..n]);
+                let _ = pick_pl011(&blob[..n]);
+            }
+            // Every header field forced to 0 and to the extremes.
+            for off in (4..40).step_by(4) {
+                for v in [0u32, 1, 0x7FFF_FFFF, 0xFFFF_FFFF] {
+                    let mut b = blob.to_vec();
+                    b[off..off + 4].copy_from_slice(&v.to_be_bytes());
+                    let _ = parse(&b);
+                    let _ = pick_pl011(&b);
+                }
+            }
         }
     }
 

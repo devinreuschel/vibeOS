@@ -711,7 +711,7 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
     let cpu = irq_init::threaded_cpu();
     #[cfg(target_arch = "aarch64")]
     if let vibeos::irq::IrqSpecifier::Gic { intid } = spec {
-        crate::arch::aarch64::gic::set_spi_edge(intid, true);
+        crate::arch::aarch64::gic::set_spi_edge(intid, dev.intid_edge);
     }
     let irq = match irq_init::map_wired(spec) {
         Ok(i) => i,
