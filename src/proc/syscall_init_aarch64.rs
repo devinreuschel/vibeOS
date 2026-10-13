@@ -428,42 +428,89 @@ pub fn elr_ok(pc: u64) -> bool {
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    static ERET_BP: AtomicBool = AtomicBool::new(false);
+    /// The exit stub's `ldarb` reads this. One byte, naturally aligned.
+    #[unsafe(no_mangle)]
+    static VIBEOS_ERET_BP_ARMED: AtomicBool = AtomicBool::new(false);
     static ERET_BP_HITS: AtomicU64 = AtomicU64::new(0);
+    static SAVED_MDSCR: AtomicU64 = AtomicU64::new(0);
+    static PROBE: AtomicBool = AtomicBool::new(false);
+    static EXIT_PC: AtomicU64 = AtomicU64::new(0);
+    static EXIT_PSTATE: AtomicU64 = AtomicU64::new(0);
+    static EXIT_READY: AtomicBool = AtomicBool::new(false);
+
+    /// E, PMC = EL1+EL0, BAS = 0b1111. HMC when this CPU is at EL2.
+    ///
+    /// An A64 address-match breakpoint with BAS 0 never fires. QEMU
+    /// treats that as no breakpoint. PMC 0b11 does not match EL2 unless
+    /// HMC is set, and VHE runs the exit there.
+    fn eret_bcr() -> u64 {
+        let mut bcr = 1u64 | (0b11 << 1) | (0xF << 5);
+        if crate::arch::aarch64::cpu::current_el() == 2 {
+            bcr |= 1 << 13;
+        }
+        bcr
+    }
 
     pub(crate) fn arm_eret_breakpoint() {
-        // Release: pairs with the Acquire load in `eret_bp_hit`.
+        // Release: pairs with the Acquire load in `eret_bp_hits`.
         ERET_BP_HITS.store(0, Ordering::Release);
         let eret = vibeos_el0_eret_addr();
-        // SAFETY: MDSCR/DBGBVR/DBGBCR are writable at EL1; the breakpoint
-        // is this test's and targets the exit `eret`; established here.
+        let bcr = eret_bcr();
+        let saved: u64;
+        // SAFETY: MDSCR/DBGBVR/DBGBCR are writable at the kernel EL; the
+        // breakpoint is this test's and targets the exit `eret`;
+        // established here.
         unsafe {
             core::arch::asm!(
-                "mrs {t}, mdscr_el1",
-                "mov {m}, #{mde_kde}",
-                "orr {t}, {t}, {m}",
+                "mrs {saved}, mdscr_el1",
+                // MDE|KDE is not one logical immediate.
+                "orr {t}, {saved}, {mde}",
+                "orr {t}, {t}, {kde}",
                 "msr mdscr_el1, {t}",
                 "isb",
                 "msr dbgbvr0_el1, {eret}",
-                "mov {t}, #{bcr}",
-                "msr dbgbcr0_el1, {t}",
+                "msr dbgbcr0_el1, {bcr}",
                 "isb",
+                saved = out(reg) saved,
                 t = out(reg) _,
-                m = out(reg) _,
                 eret = in(reg) eret,
-                mde_kde = const (1u64 << 15) | (1u64 << 13),
-                // E=1, PMC=EL1+EL0 (0b11 << 1), unlinked address match.
-                bcr = const 1u64 | (0b11u64 << 1),
+                bcr = in(reg) bcr,
+                mde = const 1u64 << 15,
+                kde = const 1u64 << 13,
             );
         }
-        // Release: pairs with the Acquire load in `eret_breakpoint_armed`.
-        ERET_BP.store(true, Ordering::Release);
+        // Release: pairs with the Acquire load in `disarm_eret_breakpoint`.
+        SAVED_MDSCR.store(saved, Ordering::Release);
+        // Release: pairs with the Acquire load in `eret_breakpoint_armed`
+        // and the ldarb in `vibeos_el0_return`.
+        VIBEOS_ERET_BP_ARMED.store(true, Ordering::Release);
     }
 
     pub(crate) fn disarm_eret_breakpoint() {
-        // Release: pairs with the Acquire load in `eret_breakpoint_armed`.
-        ERET_BP.store(false, Ordering::Release);
-        // SAFETY: clear the test breakpoint; established here.
+        // Release: pairs with the Acquire load in `eret_breakpoint_armed`
+        // and the ldarb in `vibeos_el0_return`.
+        VIBEOS_ERET_BP_ARMED.store(false, Ordering::Release);
+        // Release: pairs with the AcqRel swap in `take_probe`.
+        PROBE.store(false, Ordering::Release);
+        // Acquire: pairs with the Release store in `arm_eret_breakpoint`.
+        let saved = SAVED_MDSCR.load(Ordering::Acquire);
+        // SAFETY: restore the MDSCR this test saved and clear its
+        // breakpoint; established here by `arm_eret_breakpoint`.
+        unsafe {
+            core::arch::asm!(
+                "msr dbgbcr0_el1, xzr",
+                "msr mdscr_el1, {saved}",
+                "isb",
+                saved = in(reg) saved,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+
+    /// Drop the breakpoint match. The watch flag stays set so a D-clear
+    /// exit still skips the debug-build halt until the test disarms.
+    pub(crate) fn clear_eret_bcr() {
+        // SAFETY: DBGBCR0_EL1 is writable at the kernel EL; established here.
         unsafe {
             core::arch::asm!(
                 "msr dbgbcr0_el1, xzr",
@@ -475,7 +522,85 @@ pub(crate) mod testing {
 
     pub(crate) fn eret_breakpoint_armed() -> bool {
         // Acquire: pairs with the Release store in `arm_eret_breakpoint`.
-        ERET_BP.load(Ordering::Acquire)
+        VIBEOS_ERET_BP_ARMED.load(Ordering::Acquire)
+    }
+
+    /// User PC and PSTATE the next `eret` would return to. The debug
+    /// exception on that `eret` overwrites ELR and SPSR, so the handler
+    /// finishes the return from these.
+    pub(crate) fn note_exit_target(pc: u64, pstate: u64) {
+        // Relaxed: pairs with nothing; published by the Release store below.
+        EXIT_PC.store(pc, Ordering::Relaxed);
+        // Relaxed: pairs with nothing; published by the Release store below.
+        EXIT_PSTATE.store(pstate, Ordering::Relaxed);
+        // Release: pairs with the AcqRel swap in `take_exit_target`.
+        EXIT_READY.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn take_exit_target() -> Option<(u64, u64)> {
+        // AcqRel: pairs with the Release store in `note_exit_target`.
+        if !EXIT_READY.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        // Relaxed: pairs with nothing; the AcqRel swap above publishes them.
+        let pc = EXIT_PC.load(Ordering::Relaxed);
+        // Relaxed: pairs with nothing; the AcqRel swap above publishes them.
+        let pstate = EXIT_PSTATE.load(Ordering::Relaxed);
+        Some((pc, pstate))
+    }
+
+    pub(crate) fn begin_probe() {
+        // Release: pairs with the AcqRel swap in `take_probe`.
+        PROBE.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn take_probe() -> bool {
+        // AcqRel: pairs with the Release store in `begin_probe`.
+        PROBE.swap(false, Ordering::AcqRel)
+    }
+
+    /// Branch at `vibeos_el0_eret` once with PSTATE.D clear.
+    ///
+    /// The handler returns to the continuation in x30. A miss executes
+    /// the `eret`, whose ELR is that same label, so either way we land
+    /// on `2` and restore DAIF. `mrs PAN` already has the bit in [22].
+    pub(crate) fn poke_eret_once() {
+        begin_probe();
+        let eret = vibeos_el0_eret_addr();
+        // SAFETY: DAIF, ELR_EL1, and SPSR_EL1 are writable at the kernel
+        // EL; the branch targets the exit `eret`, and a missed breakpoint
+        // returns through the ELR written here; established here.
+        unsafe {
+            core::arch::asm!(
+                "mrs x9, daif",
+                "mrs x10, nzcv",
+                "orr x10, x10, x9",
+                "mrs x11, pan",
+                "orr x10, x10, x11",
+                "mrs x11, CurrentEL",
+                "mrs x12, spsel",
+                "orr x11, x11, x12",
+                "orr x10, x10, x11",
+                "msr daifset, #2",
+                "msr daifclr, #8",
+                "isb",
+                "adr x30, 2f",
+                "msr elr_el1, x30",
+                "msr spsr_el1, x10",
+                "br x13",
+                "2:",
+                "msr daif, x9",
+                in("x13") eret,
+                out("x9") _,
+                out("x10") _,
+                out("x11") _,
+                out("x12") _,
+                out("x30") _,
+                options(nostack),
+            );
+        }
+        // The handler consumes the flag on a hit. A miss leaves it set.
+        let _missed = take_probe();
     }
 
     pub(crate) fn eret_bp_hits() -> u64 {
