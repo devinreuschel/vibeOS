@@ -190,13 +190,12 @@ pub fn empty_user_root() -> u64 {
 /// no aliased mapping through the physmap will be used to touch the
 /// same registers with cacheable attributes.
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
+    let round_len = paging::page_span(phys.as_u64(), len)?;
     let (mapped, base_va, round_len) = {
         let mut pt = current_mapper();
         let va_offset = pt.window().reserve(phys, len)?;
         let base_va = VirtAddr(va_offset.as_u64() & !(PAGE_SIZE_4K - 1));
         let base_pa = PhysAddr(phys.as_u64() & !(PAGE_SIZE_4K - 1));
-        let head = phys.as_u64() & (PAGE_SIZE_4K - 1);
-        let round_len = paging_align_up(head + len, PAGE_SIZE_4K);
         let mut alloc = BuddyFrames;
         // PT is held, and only the kernel mapper takes table pages, so
         // a change in this count is this call's.

@@ -872,7 +872,7 @@ impl IoremapWindow {
             return None;
         }
         let page_off = phys.0 & (PAGE_SIZE_4K - 1);
-        let pages = align_up(page_off + len, PAGE_SIZE_4K);
+        let pages = page_span(phys.0, len)?;
         let va = align_up(self.next, PAGE_SIZE_4K);
         let end = va.checked_add(pages)?;
         if end > IOREMAP_BASE + IOREMAP_LEN {
@@ -917,6 +917,17 @@ impl Default for IoremapWindow {
 }
 
 #[inline]
+/// Bytes of whole pages covering `len` bytes at `phys`. `None` when the
+/// range runs past the address space or the page count overflows, which a
+/// firmware-supplied `len` can force.
+pub fn page_span(phys: u64, len: u64) -> Option<u64> {
+    phys.checked_add(len)?;
+    let n = (phys & (PAGE_SIZE_4K - 1))
+        .checked_add(len)?
+        .checked_add(PAGE_SIZE_4K - 1)?;
+    Some(n & !(PAGE_SIZE_4K - 1))
+}
+
 const fn align_up(x: u64, a: u64) -> u64 {
     (x + a - 1) & !(a - 1)
 }

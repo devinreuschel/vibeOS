@@ -525,8 +525,7 @@ pub unsafe fn memremap(phys: PhysAddr, len: u64, flags: PageFlags) -> Option<Vir
         return None;
     }
     let page_off = phys.as_u64() & (PAGE_SIZE - 1);
-    let span = page_off.checked_add(len)?;
-    let pages = span.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    let pages = vibeos::paging::page_span(phys.as_u64(), len)?;
     let va = paging_init::with_pt(|_pt| with_kva(|k| k.alloc(pages)))?;
     let base = VirtAddr(va);
     let base_pa = PhysAddr(phys.as_u64() & !(PAGE_SIZE - 1));

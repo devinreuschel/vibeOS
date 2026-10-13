@@ -432,6 +432,31 @@ fn ioremap_bumps_and_bounds() {
 }
 
 #[test]
+fn ioremap_refuses_firmware_lengths_that_overflow() {
+    let mut w = IoremapWindow::new();
+    let next = w.next();
+    for len in [
+        u64::MAX,
+        u64::MAX - 0xFFF,
+        u64::MAX - 0xFFE,
+        0xFFFF_FFFF_FFFF_F000,
+    ] {
+        for phys in [0, 0x123, 0x0900_0000, u64::MAX - 0xFFF] {
+            assert!(
+                w.reserve(PhysAddr(phys), len).is_none(),
+                "{phys:#x} {len:#x}"
+            );
+        }
+    }
+    // A range that wraps the physical address space.
+    assert!(w.reserve(PhysAddr(u64::MAX - 0x10), 0x100).is_none());
+    assert_eq!(w.next(), next);
+    assert_eq!(page_span(0x123, 0x1000), Some(0x2000));
+    assert_eq!(page_span(0, u64::MAX - 0xFFE), None);
+    assert_eq!(page_span(0x1000, u64::MAX), None);
+}
+
+#[test]
 fn ioremap_unreserve_returns_only_the_latest() {
     let mut w = IoremapWindow::new();
     let a = w.reserve(PhysAddr(0xFEB0_0000), 0x2000).unwrap();
