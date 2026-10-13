@@ -554,6 +554,9 @@ impl<A: PageTable> Mapper<A> {
     /// Caller is responsible for TLB invalidation: `invlpg` on this CPU and,
     /// for a kernel-half VA, `tlb_shootdown_others` (DESIGN §4.3, §7.9).
     pub unsafe fn unmap_page(&mut self, va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
+        if !A::va_ok(va.0) {
+            return None;
+        }
         let mut table_phys = self.root;
         let mut level = A::LEVELS;
         while level >= 1 {
@@ -586,6 +589,9 @@ impl<A: PageTable> Mapper<A> {
     /// Return the physical address a VA translates to, or `None` if
     /// unmapped. Does not consult the TLB (host-testable).
     pub fn translate(&self, va: VirtAddr) -> Option<(PhysAddr, PageSize, PageFlags)> {
+        if !A::va_ok(va.0) {
+            return None;
+        }
         let mut table_phys = self.root;
         let mut level = A::LEVELS;
         while level >= 1 {

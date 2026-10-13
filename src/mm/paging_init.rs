@@ -413,9 +413,10 @@ pub fn dump_ranges_to(w: &mut impl Write) -> core::fmt::Result {
                 flags.0
             );
         };
-        mapper.walk_ranges(VirtAddr(0), VirtAddr(0x0000_8000_0000_0000), &mut visit);
+        // The kernel root holds only the kernel half: TTBR1 on aarch64 has
+        // no low slots, and `index` ignores the top bits.
         mapper.walk_ranges(
-            VirtAddr(0xFFFF_8000_0000_0000),
+            VirtAddr(Arch::KERNEL_VA_START),
             VirtAddr(u64::MAX),
             &mut visit,
         );

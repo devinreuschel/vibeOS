@@ -75,6 +75,35 @@ fn map_translate_unmap_4k() {
 }
 
 #[test]
+fn non_canonical_va_neither_translates_nor_unmaps() {
+    let mut pool = Pool::new(64);
+    let mut m = fresh_mapper(&mut pool);
+    let va = VirtAddr(0xFFFF_C000_0010_0000);
+    let pa = PhysAddr(0x0080_0000);
+    // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+    // the tables are the pool's (`fresh_mapper`), established here.
+    unsafe {
+        m.map_page(
+            va,
+            pa,
+            physmap_flags(),
+            PageSize::Size4K,
+            MapMode::Fresh,
+            &mut pool,
+        )
+        .unwrap();
+    }
+    // Same table indices, top 16 bits neither all 0 nor all 1.
+    let alias = VirtAddr(0x0001_C000_0010_0000);
+    assert!(!is_canonical(alias.0));
+    assert!(m.translate(alias).is_none());
+    // SAFETY: a rejected VA touches no leaf, established by
+    // `vibeos::paging::Mapper::unmap_page`.
+    assert!(unsafe { m.unmap_page(alias) }.is_none());
+    assert_eq!(m.translate(va).unwrap().0, pa);
+}
+
+#[test]
 fn map_translate_2m() {
     let mut pool = Pool::new(64);
     let mut m = fresh_mapper(&mut pool);
