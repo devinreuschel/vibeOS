@@ -19,11 +19,10 @@ use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::{CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::virtio::{
-    self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
-    COMMON_OFF_NUM_QUEUES, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER,
-    COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE,
-    COMMON_OFF_STATUS, DESC_F_WRITE, DEV_BLK_LEGACY, DEV_BLK_MODERN, DescBuf, F_EVENT_IDX,
-    MSI_NO_VECTOR, ModernCaps, PciCap, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
+    self, COMMON_OFF_MSIX_CFG, COMMON_OFF_NUM_QUEUES, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE,
+    COMMON_OFF_QDRIVER, COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL,
+    COMMON_OFF_QSIZE, COMMON_OFF_STATUS, DESC_F_WRITE, DEV_BLK_LEGACY, DEV_BLK_MODERN, DescBuf,
+    F_EVENT_IDX, MSI_NO_VECTOR, ModernCaps, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
     STATUS_FEATURES_OK, SplitLayout, VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_blk::{
@@ -42,7 +41,9 @@ use crate::pci_init;
 use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
-use crate::virtio_init;
+use crate::virtio_init::{
+    self, r8, r16, r32, r64, read_features, region, w8, w16, w64, write_features,
+};
 
 mod irq;
 mod issue;
@@ -138,95 +139,6 @@ impl VirtioBlk {
             inject_unsupp: AtomicU32::new(0),
         }
     }
-}
-
-fn r8(va: u64, off: u16) -> u8 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
-}
-
-fn w8(va: u64, off: u16, v: u8) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
-}
-
-fn r16(va: u64, off: u16) -> u16 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        u16::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u16,
-        ))
-    }
-}
-
-fn w16(va: u64, off: u16, v: u16) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u16, v.to_le());
-    }
-}
-
-fn r32(va: u64, off: u16) -> u32 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        u32::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u32,
-        ))
-    }
-}
-
-fn w32(va: u64, off: u16, v: u32) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
-    }
-}
-
-fn r64(va: u64, off: u16) -> u64 {
-    (r32(va, off) as u64) | ((r32(va, off + 4) as u64) << 32)
-}
-
-fn w64(va: u64, off: u16, v: u64) {
-    w32(va, off, v as u32);
-    w32(va, off + 4, (v >> 32) as u32);
-}
-
-/// The VA of capability `cap`'s region, inside a BAR the probe claimed
-/// and mapped (`dev_init::claim_mem_bars`).
-fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
-    let r = dev.resources.get(cap.bar as usize)?;
-    if (cap.offset as u64) >= r.size {
-        return None;
-    }
-    let va = dev_init::bar_va(dev, cap.bar)?;
-    Some(va.wrapping_add(cap.offset as u64))
-}
-
-fn read_features(common: u64) -> u64 {
-    w32(common, COMMON_OFF_DFSEL, 0);
-    let lo = r32(common, COMMON_OFF_DF) as u64;
-    w32(common, COMMON_OFF_DFSEL, 1);
-    let hi = r32(common, COMMON_OFF_DF) as u64;
-    lo | (hi << 32)
-}
-
-fn write_features(common: u64, feat: u64) {
-    w32(common, COMMON_OFF_DRSEL, 0);
-    w32(common, COMMON_OFF_DR, feat as u32);
-    w32(common, COMMON_OFF_DRSEL, 1);
-    w32(common, COMMON_OFF_DR, (feat >> 32) as u32);
 }
 
 /// The one unwind of a probe that fails once bus mastering is on, in

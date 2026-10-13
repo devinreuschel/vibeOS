@@ -21,36 +21,13 @@ use vibeos::virtio::{
 use crate::dev_init;
 use crate::machine_init;
 use crate::pci_init;
-use crate::virtio_init;
+use crate::virtio_init::{self, r32, w32, w64};
 
 /// Platform bus used for published virtio-mmio transports (not ECAM).
 const MMIO_BUS: u8 = 0xFE;
 
 pub(crate) fn is_mmio(dev: &Device) -> bool {
     dev.class == CLASS_MMIO
-}
-
-fn r32(va: u64, off: u16) -> u32 {
-    // SAFETY: invariant I54: `va` is a virtio-mmio window `map_mmio`
-    // mapped uncached, and `off` a register in that window; established
-    // by `pci_init::map_mmio`.
-    unsafe {
-        u32::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u32,
-        ))
-    }
-}
-
-fn w32(va: u64, off: u16, v: u32) {
-    // SAFETY: invariant I54: as `r32`; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
-    }
-}
-
-fn w64(va: u64, off: u16, v: u64) {
-    w32(va, off, v as u32);
-    w32(va, off + 4, (v >> 32) as u32);
 }
 
 pub(crate) fn reset(base: u64) -> bool {

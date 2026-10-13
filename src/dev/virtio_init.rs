@@ -66,24 +66,29 @@ pub(crate) static KEPT_FRAMES: AtomicU64 = AtomicU64::new(0);
 pub(crate) const RNG_PAYLOAD: usize = 32;
 const RNG_PAYLOAD_OFF: usize = 16;
 
-fn r8(va: u64, off: u16) -> u8 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
+/// Register access shared by the PCI and mmio transports; `va` and `off`
+/// are the caller's to keep inside a window `map_mmio` mapped.
+pub(crate) fn r8(va: u64, off: u16) -> u8 {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
 }
 
-fn w8(va: u64, off: u16, v: u8) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
+pub(crate) fn w8(va: u64, off: u16, v: u8) {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
     unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
 }
 
-fn r16(va: u64, off: u16) -> u16 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
+pub(crate) fn r16(va: u64, off: u16) -> u16 {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
     unsafe {
         u16::from_le(core::ptr::read_volatile(
             (va.wrapping_add(off as u64)) as *const u16,
@@ -91,19 +96,21 @@ fn r16(va: u64, off: u16) -> u16 {
     }
 }
 
-fn w16(va: u64, off: u16, v: u16) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
+pub(crate) fn w16(va: u64, off: u16, v: u16) {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
     unsafe {
         core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u16, v.to_le());
     }
 }
 
-fn r32(va: u64, off: u16) -> u32 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
+pub(crate) fn r32(va: u64, off: u16) -> u32 {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
     unsafe {
         u32::from_le(core::ptr::read_volatile(
             (va.wrapping_add(off as u64)) as *const u32,
@@ -111,23 +118,28 @@ fn r32(va: u64, off: u16) -> u32 {
     }
 }
 
-fn w32(va: u64, off: u16, v: u32) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
+pub(crate) fn w32(va: u64, off: u16, v: u32) {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
     unsafe {
         core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
     }
 }
 
-fn w64(va: u64, off: u16, v: u64) {
+pub(crate) fn w64(va: u64, off: u16, v: u64) {
     w32(va, off, v as u32);
     w32(va, off + 4, (v >> 32) as u32);
 }
 
+pub(crate) fn r64(va: u64, off: u16) -> u64 {
+    (r32(va, off) as u64) | ((r32(va, off + 4) as u64) << 32)
+}
+
 /// The VA of capability `cap`'s region, inside a BAR the probe claimed
 /// and mapped (`dev_init::claim_mem_bars`).
-fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
+pub(crate) fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
     let r = dev.resources.get(cap.bar as usize)?;
     if (cap.offset as u64) >= r.size {
         return None;
@@ -136,15 +148,16 @@ fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
     Some(va.wrapping_add(cap.offset as u64))
 }
 
-fn clamp_qsize(hw: u16) -> u16 {
-    let n = hw.min(16);
+/// `hw` rounded down to a power of two, at most `max`; 0 if `hw` is 0.
+pub(crate) fn clamp_qsize(hw: u16, max: u16) -> u16 {
+    let n = hw.min(max);
     if n == 0 {
         return 0;
     }
     1u16 << (15u32 - n.leading_zeros())
 }
 
-fn read_features(common: u64) -> u64 {
+pub(crate) fn read_features(common: u64) -> u64 {
     w32(common, COMMON_OFF_DFSEL, 0);
     let lo = r32(common, COMMON_OFF_DF) as u64;
     w32(common, COMMON_OFF_DFSEL, 1);
@@ -152,7 +165,7 @@ fn read_features(common: u64) -> u64 {
     lo | (hi << 32)
 }
 
-fn write_features(common: u64, feat: u64) {
+pub(crate) fn write_features(common: u64, feat: u64) {
     w32(common, COMMON_OFF_DRSEL, 0);
     w32(common, COMMON_OFF_DR, feat as u32);
     w32(common, COMMON_OFF_DRSEL, 1);
@@ -351,7 +364,7 @@ fn rng_work(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     harvest();
 }
 
-fn kick(doorbell: u64, qi: u16) {
+pub(crate) fn kick(doorbell: u64, qi: u16) {
     dma::dma_wmb::<Arch>();
     // SAFETY: invariant I54: `doorbell` is a queue's notify register inside
     // the notify capability's BAR, which `map_mmio` mapped uncached, checked
@@ -431,7 +444,7 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
 
     w16(common, COMMON_OFF_QSEL, 0);
     let hw_qs = r16(common, COMMON_OFF_QSIZE);
-    let qsz = clamp_qsize(hw_qs);
+    let qsz = clamp_qsize(hw_qs, 16);
     if qsz == 0 {
         fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::BadQueue);

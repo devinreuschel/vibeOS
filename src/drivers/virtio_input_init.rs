@@ -4,18 +4,17 @@
 //! `pop`, so a missing MSI still feeds the console mux.
 
 use vibeos::dev::{DevRef, Driver, IdMatch, Instance, ProbeError};
-use vibeos::dma::{self, DmaAlloc, DmaBuffer};
+use vibeos::dma::{DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqId;
 use vibeos::kbd::{DecodedKey, RING_CAP, Ring};
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::{CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::virtio::{
-    self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
-    COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER, COMMON_OFF_QENABLE, COMMON_OFF_QMSIX,
-    COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE, COMMON_OFF_STATUS, DESC_F_WRITE,
-    DEV_INPUT_MODERN, F_EVENT_IDX, MSI_NO_VECTOR, ModernCaps, OFFER, PciCap, STATUS_ACKNOWLEDGE,
-    STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, SplitLayout, VENDOR_ID, VirtioError,
-    notify_addr,
+    self, COMMON_OFF_MSIX_CFG, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER,
+    COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE,
+    COMMON_OFF_STATUS, DESC_F_WRITE, DEV_INPUT_MODERN, F_EVENT_IDX, MSI_NO_VECTOR, ModernCaps,
+    OFFER, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, SplitLayout,
+    VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_input::{EVENT_SIZE, EvDecoder, Event};
 
@@ -25,7 +24,9 @@ use crate::dma_init;
 use crate::irq_init;
 use crate::pci_init;
 use crate::sync_init::SpinMutex;
-use crate::virtio_init;
+use crate::virtio_init::{
+    self, clamp_qsize, kick, r8, r16, read_features, region, w8, w16, w64, write_features,
+};
 
 const MAX_DEVS: usize = 4;
 const MAX_Q: usize = 16;
@@ -57,95 +58,6 @@ static STATE: SpinMutex<State> = SpinMutex::with_rank(
     },
     RANK_DEVICE,
 );
-
-fn r8(va: u64, off: u16) -> u8 {
-    // SAFETY: invariant I54: `va` is a BAR `map_mmio` mapped uncached;
-    // established by `pci_init::map_mmio`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
-}
-
-fn w8(va: u64, off: u16, v: u8) {
-    // SAFETY: invariant I54: as `r8`; established by `pci_init::map_mmio`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
-}
-
-fn r16(va: u64, off: u16) -> u16 {
-    // SAFETY: invariant I54: as `r8`; established by `pci_init::map_mmio`.
-    unsafe {
-        u16::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u16,
-        ))
-    }
-}
-
-fn w16(va: u64, off: u16, v: u16) {
-    // SAFETY: invariant I54: as `r8`; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u16, v.to_le());
-    }
-}
-
-fn r32(va: u64, off: u16) -> u32 {
-    // SAFETY: invariant I54: as `r8`; established by `pci_init::map_mmio`.
-    unsafe {
-        u32::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u32,
-        ))
-    }
-}
-
-fn w32(va: u64, off: u16, v: u32) {
-    // SAFETY: invariant I54: as `r8`; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
-    }
-}
-
-fn w64(va: u64, off: u16, v: u64) {
-    w32(va, off, v as u32);
-    w32(va, off + 4, (v >> 32) as u32);
-}
-
-fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
-    let r = dev.resources.get(cap.bar as usize)?;
-    if (cap.offset as u64) >= r.size {
-        return None;
-    }
-    let va = dev_init::bar_va(dev, cap.bar)?;
-    Some(va.wrapping_add(cap.offset as u64))
-}
-
-fn read_features(common: u64) -> u64 {
-    w32(common, COMMON_OFF_DFSEL, 0);
-    let lo = r32(common, COMMON_OFF_DF) as u64;
-    w32(common, COMMON_OFF_DFSEL, 1);
-    let hi = r32(common, COMMON_OFF_DF) as u64;
-    lo | (hi << 32)
-}
-
-fn write_features(common: u64, feat: u64) {
-    w32(common, COMMON_OFF_DRSEL, 0);
-    w32(common, COMMON_OFF_DR, feat as u32);
-    w32(common, COMMON_OFF_DRSEL, 1);
-    w32(common, COMMON_OFF_DR, (feat >> 32) as u32);
-}
-
-fn clamp_qsize(hw: u16) -> u16 {
-    let n = hw.min(MAX_Q as u16);
-    if n == 0 {
-        return 0;
-    }
-    1u16 << (15u32 - n.leading_zeros())
-}
-
-fn kick(doorbell: u64, qi: u16) {
-    dma::dma_wmb::<Arch>();
-    // SAFETY: invariant I54: `doorbell` is the queue notify register;
-    // established by `pci_init::map_mmio` and `virtio::notify_addr`.
-    unsafe {
-        core::ptr::write_volatile(doorbell as *mut u16, virtio::queue_notify(qi));
-    }
-}
 
 fn ack_isr(st: &State) {
     for d in st.devs.iter().flatten() {
@@ -307,7 +219,7 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<Dev, VirtioError> {
     }
 
     w16(common, COMMON_OFF_QSEL, 0);
-    let qsz = clamp_qsize(r16(common, COMMON_OFF_QSIZE));
+    let qsz = clamp_qsize(r16(common, COMMON_OFF_QSIZE), MAX_Q as u16);
     if qsz == 0 {
         fail_setup(dev, common, irq_opt(irq_raw), [None, None]);
         return Err(VirtioError::BadQueue);
