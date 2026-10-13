@@ -34,6 +34,7 @@ impl VirtioBlk {
         // [`PUMP_BATCH`] completions at a time, same as [`pump`](Self::pump):
         // a `[Request; N_SLOTS]` local is ~4 KiB, and this runs on irqth's
         // 16 KiB stack under a top half (DESIGN §4.5).
+        let mut bad = false;
         loop {
             let mut done: [Option<(Request, Result<(), BlockError>)>; PUMP_BATCH] =
                 [None; PUMP_BATCH];
@@ -44,22 +45,26 @@ impl VirtioBlk {
                     return;
                 };
                 let mut qi = 0usize;
-                while qi < blk.nq as usize && n < PUMP_BATCH {
+                while qi < blk.nq as usize && n < PUMP_BATCH && !bad {
                     if let Some(v) = blk.vqs[qi].as_mut() {
                         while n < PUMP_BATCH {
-                            let Some(u) = v.vq.get_used() else {
-                                break;
+                            let u = match v.vq.get_used() {
+                                Ok(Some(u)) => u,
+                                Ok(None) => break,
+                                Err(_) => {
+                                    bad = true;
+                                    break;
+                                }
                             };
+                            // The queue vouches for `id`: in flight and below its size.
                             let id = u.id as usize;
-                            let si = if id < MAX_QSIZE {
-                                let s = v.inflight[id];
-                                v.inflight[id] = FREE;
-                                s
-                            } else {
-                                FREE
-                            };
+                            let si = v.inflight.get(id).copied().unwrap_or(FREE);
+                            if let Some(e) = v.inflight.get_mut(id) {
+                                *e = FREE;
+                            }
                             if si == FREE || (si as usize) >= N_SLOTS {
-                                continue;
+                                bad = true;
+                                break;
                             }
                             let si = si as usize;
                             blk.slots.sync_for_cpu::<Arch>();
@@ -85,9 +90,6 @@ impl VirtioBlk {
                     qi += 1;
                 }
             }
-            if n == 0 {
-                break;
-            }
             let mut i = 0usize;
             while i < n {
                 if let Some((req, res)) = done[i].take() {
@@ -95,6 +97,20 @@ impl VirtioBlk {
                 }
                 i += 1;
             }
+            if n == 0 || bad {
+                break;
+            }
+        }
+        if bad {
+            // The device broke the used ring: nothing it says can be trusted.
+            crate::klog_ratelimited!(
+                1000,
+                vibeos::log::Level::Error,
+                "vibeOS: virtio-blk: {}: bad used ring, failing the device",
+                self.name()
+            );
+            self.fail_rest();
+            return;
         }
         self.pump();
     }

@@ -124,7 +124,21 @@ fn harvest(st: &mut State) {
             continue;
         };
         d.data.sync_for_cpu::<Arch>();
-        while let Some(u) = d.vq.get_used() {
+        loop {
+            let u = match d.vq.get_used() {
+                Ok(Some(u)) => u,
+                Ok(None) => break,
+                // The queue stays broken: no more events from this device.
+                Err(e) => {
+                    crate::klog_ratelimited!(
+                        1000,
+                        vibeos::log::Level::Error,
+                        "vibeOS: virtio-input: {}",
+                        e.as_str()
+                    );
+                    break;
+                }
+            };
             let slot = d.desc_slot.get(u.id as usize).copied().unwrap_or(0);
             if is_short_event(u.len as usize) {
                 // A short element holds no whole event: count it, log it at

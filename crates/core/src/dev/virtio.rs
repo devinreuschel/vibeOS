@@ -10,6 +10,7 @@ use crate::arch::Barriers;
 use crate::atomic::AtomicU16;
 
 use crate::dma::{self, publish_index};
+use crate::limits::MAX_VIRTQ_SIZE;
 use crate::pci::{
     self, Bdf, CAP_VENDOR, CFG_CAP_PTR, CFG_STATUS, CfgIo, MAX_CAP_WALK, STATUS_CAPS,
 };
@@ -145,6 +146,9 @@ pub enum VirtioError {
     Failed,
     /// An allocation the driver needs failed (DESIGN §4.4).
     NoMemory,
+    /// The device completed something it was not given, or more than it was
+    /// given. The queue is dead until `init`.
+    BadUsed,
 }
 
 /// A virtio setup error's errno: Linux's for each condition.
@@ -152,7 +156,10 @@ impl From<VirtioError> for crate::kerror::KError {
     fn from(e: VirtioError) -> Self {
         match e {
             VirtioError::NoVersion1 | VirtioError::NoCaps | VirtioError::Features => Self::NoDev,
-            VirtioError::BadQueue | VirtioError::Notify | VirtioError::Failed => Self::Io,
+            VirtioError::BadQueue
+            | VirtioError::Notify
+            | VirtioError::Failed
+            | VirtioError::BadUsed => Self::Io,
             VirtioError::NoDesc => Self::Again,
             VirtioError::NoMemory => Self::NoMem,
         }
@@ -170,6 +177,7 @@ impl VirtioError {
             VirtioError::Features => "features_ok",
             VirtioError::Failed => "failed",
             VirtioError::NoMemory => "no memory",
+            VirtioError::BadUsed => "bad used ring",
         }
     }
 }
@@ -364,7 +372,7 @@ pub struct SplitLayout {
 
 impl SplitLayout {
     pub fn new(size: u16) -> Option<Self> {
-        if !is_pow2_u16(size) {
+        if !is_pow2_u16(size) || size > MAX_VIRTQ_SIZE {
             return None;
         }
         let n = size as usize;
@@ -512,6 +520,11 @@ pub struct SplitQueue<A: Barriers> {
     last_used: u16,
     free_head: u16,
     num_free: u16,
+    /// Chain heads handed to the device and not yet completed. Guest memory
+    /// only, so a device cannot forge it.
+    inflight: [u64; MAX_VIRTQ_SIZE as usize / 64],
+    /// A bad completion was seen; `get_used` fails until `init`.
+    broken: bool,
     pub event_idx: bool,
     /// Avail idx last published. Kick uses this as `old`.
     last_avail: u16,
@@ -532,6 +545,8 @@ impl<A: Barriers> SplitQueue<A> {
             last_used: 0,
             free_head: 0,
             num_free: layout.size,
+            inflight: [0; MAX_VIRTQ_SIZE as usize / 64],
+            broken: false,
             event_idx,
             last_avail: 0,
             _port: PhantomData,
@@ -635,6 +650,8 @@ impl<A: Barriers> SplitQueue<A> {
         self.wr16(self.layout.avail_event(), 0);
         self.free_head = 0;
         self.num_free = n;
+        self.inflight = [0; MAX_VIRTQ_SIZE as usize / 64];
+        self.broken = false;
         self.last_used = 0;
         self.last_avail = 0;
     }
@@ -698,18 +715,38 @@ impl<A: Barriers> SplitQueue<A> {
             i += 1;
         }
         let head = ids[0];
+        self.set_inflight(head, true);
         let aidx = self.rd16(self.layout.avail_idx());
         self.wr16(self.layout.avail_ring(aidx), head);
         Ok(head)
     }
 
+    fn set_inflight(&mut self, head: u16, on: bool) {
+        let (w, b) = (head as usize / 64, head as u32 % 64);
+        if let Some(word) = self.inflight.get_mut(w) {
+            if on {
+                *word |= 1 << b;
+            } else {
+                *word &= !(1 << b);
+            }
+        }
+    }
+
+    /// Clears `head`'s in-flight bit; whether it was set.
+    fn take_inflight(&mut self, head: u16) -> bool {
+        let was = self
+            .inflight
+            .get(head as usize / 64)
+            .is_some_and(|w| w & (1 << (head as u32 % 64)) != 0);
+        self.set_inflight(head, false);
+        was
+    }
+
+    /// Free the chain at `i`, an in-flight head below the queue size.
     fn free_chain(&mut self, mut i: u16) {
         let cap = self.layout.size;
         let mut n = 0u16;
-        loop {
-            if n >= cap {
-                break;
-            }
+        while n < cap {
             n += 1;
             let flags = self.desc_flags(i);
             let next = self.desc_next(i);
@@ -717,7 +754,8 @@ impl<A: Barriers> SplitQueue<A> {
             if flags & DESC_F_NEXT == 0 {
                 break;
             }
-            i = next;
+            // The table is device-visible: keep a forged next in range.
+            i = ring_index(next, cap);
         }
     }
 
@@ -758,14 +796,27 @@ impl<A: Barriers> SplitQueue<A> {
         used_pending(self.used_idx(), self.last_used)
     }
 
-    pub fn get_used(&mut self) -> Option<UsedElem> {
-        if self.pending() == 0 {
-            return None;
+    /// The next completion, with its chain freed. A device that completes
+    /// more than it was given, an id past the queue, or a chain that is not
+    /// in flight breaks the queue: that and every later call is `BadUsed`.
+    pub fn get_used(&mut self) -> Result<Option<UsedElem>, VirtioError> {
+        if self.broken {
+            return Err(VirtioError::BadUsed);
+        }
+        let pending = self.pending();
+        if pending == 0 {
+            return Ok(None);
         }
         dma::dma_rmb::<A>();
         let off = self.layout.used_elem(self.last_used);
-        let id = self.rd32(off) as u16;
+        let raw = self.rd32(off);
         let len = self.rd32(off + 4);
+        let id = u16::try_from(raw).ok().filter(|&id| id < self.layout.size);
+        let Some(id) = id.filter(|&id| pending <= self.layout.size && self.take_inflight(id))
+        else {
+            self.broken = true;
+            return Err(VirtioError::BadUsed);
+        };
         self.last_used = self.last_used.wrapping_add(1);
         self.free_chain(id);
         if self.event_idx {
@@ -774,7 +825,7 @@ impl<A: Barriers> SplitQueue<A> {
             // after the `used_event` store (virtio 1.2 §2.7.13.4.1, F016).
             dma::dma_mb::<A>();
         }
-        Some(UsedElem { id, len })
+        Ok(Some(UsedElem { id, len }))
     }
 
     /// Whether the device wants a kick for the buffers published since
@@ -1143,6 +1194,8 @@ mod tests {
         assert!(!is_pow2_u16(0));
         assert!(!is_pow2_u16(3));
         assert!(SplitLayout::new(3).is_none());
+        assert!(SplitLayout::new(MAX_VIRTQ_SIZE).is_some());
+        assert!(SplitLayout::new(MAX_VIRTQ_SIZE * 2).is_none());
         let l = SplitLayout::new(4).unwrap();
         assert_eq!(l.desc(1), 16);
         assert_eq!(l.avail_off, 64);
@@ -1172,9 +1225,9 @@ mod tests {
             // buffer; established here.
             let done = unsafe { sim_complete(&mut q, (0xA0 + n) as u8, base, 0) };
             assert_eq!(done, 1);
-            let u = q.get_used().unwrap();
+            let u = q.get_used().unwrap().unwrap();
             assert_eq!(u.len, 8);
-            assert_eq!(q.get_used(), None);
+            assert_eq!(q.get_used(), Ok(None));
             n += 1;
         }
         assert_eq!(q.num_free(), 4);
@@ -1231,8 +1284,8 @@ mod tests {
             assert_eq!(unsafe { sim_complete(&mut q, 0x11, base, 0) }, 1);
             if event_idx {
                 dma::trace::start();
-                assert!(q.get_used().is_some());
-                assert_eq!(q.get_used(), None);
+                assert!(q.get_used().unwrap().is_some());
+                assert_eq!(q.get_used(), Ok(None));
                 let log = dma::trace::take();
                 assert!(!log.overflow);
                 assert!(
@@ -1264,7 +1317,7 @@ mod tests {
         assert_eq!(slot.load(core::sync::atomic::Ordering::Acquire), 1);
         // SAFETY: descriptors address `base` from offset 0; established here.
         assert_eq!(unsafe { sim_complete(&mut q, 0x5A, base, 0) }, 1);
-        let u = q.get_used().unwrap();
+        let u = q.get_used().unwrap().unwrap();
         assert_eq!(u.len, 4);
         // SAFETY: `data_off` lies in the `pool` buffer; established here.
         unsafe {
@@ -1329,10 +1382,118 @@ mod tests {
         q.wr32(uoff + 4, 513);
         dma::dma_wmb::<Stub>();
         q.wr16(q.layout.used_idx(), used.wrapping_add(1));
-        let u = q.get_used().unwrap();
+        let u = q.get_used().unwrap().unwrap();
         assert_eq!(u.id, head);
         assert_eq!(u.len, 513);
         assert_eq!(q.num_free(), 8);
-        assert_eq!(q.get_used(), None);
+        assert_eq!(q.get_used(), Ok(None));
+    }
+
+    /// A used-ring entry for `id`, published as the device would.
+    fn forge_used(q: &mut SplitQueue<Stub>, id: u32) {
+        let used = q.used_idx();
+        let off = q.layout.used_elem(used);
+        q.wr32(off, id);
+        q.wr32(off + 4, 0);
+        dma::dma_wmb::<Stub>();
+        q.wr16(q.layout.used_idx(), used.wrapping_add(1));
+    }
+
+    /// Every free descriptor once: no double free left `free_head` on a
+    /// listed descriptor or `num_free` past the size.
+    fn assert_free_list_sane(q: &SplitQueue<Stub>, want_free: u16) {
+        assert_eq!(q.num_free(), want_free);
+        let mut seen = [false; 8];
+        let mut i = q.free_head;
+        for _ in 0..want_free {
+            assert!(!seen[i as usize], "descriptor {i} listed twice");
+            seen[i as usize] = true;
+            i = q.desc_next(i);
+        }
+    }
+
+    #[test]
+    fn used_id_out_of_range_breaks_the_queue() {
+        let layout = SplitLayout::new(8).unwrap();
+        // 0x1_0000 truncates to the live head 0 as a u16.
+        for bad in [8u32, 9, 0xFFFF, 0x1_0000, u32::MAX] {
+            let (_keep, base) = pool(layout.total);
+            let mut q = queue(layout, base, false);
+            q.init();
+            let head = q.add(0x1000, 4, DESC_F_WRITE).unwrap();
+            assert_eq!(head, 0);
+            q.publish();
+            forge_used(&mut q, bad);
+            assert_eq!(q.get_used(), Err(VirtioError::BadUsed), "id {bad:#x}");
+            assert_free_list_sane(&q, 7);
+            // Sticky, even for an honest completion after it.
+            forge_used(&mut q, 0);
+            assert_eq!(q.get_used(), Err(VirtioError::BadUsed));
+            assert_free_list_sane(&q, 7);
+            q.init();
+            assert_eq!(q.get_used(), Ok(None));
+        }
+    }
+
+    #[test]
+    fn duplicate_used_id_is_not_freed_twice() {
+        let layout = SplitLayout::new(8).unwrap();
+        let (_keep, base) = pool(layout.total);
+        let mut q = queue(layout, base, false);
+        q.init();
+        let head = q.add(0x1000, 4, DESC_F_WRITE).unwrap();
+        q.publish();
+        forge_used(&mut q, head as u32);
+        forge_used(&mut q, head as u32);
+        assert_eq!(q.get_used().unwrap().unwrap().id, head);
+        assert_free_list_sane(&q, 8);
+        assert_eq!(q.get_used(), Err(VirtioError::BadUsed));
+        assert_free_list_sane(&q, 8);
+    }
+
+    #[test]
+    fn stale_used_id_is_not_freed() {
+        let layout = SplitLayout::new(8).unwrap();
+        let (_keep, base) = pool(layout.total);
+        let mut q = queue(layout, base, false);
+        q.init();
+        // Never added.
+        forge_used(&mut q, 3);
+        assert_eq!(q.get_used(), Err(VirtioError::BadUsed));
+        assert_free_list_sane(&q, 8);
+
+        q.init();
+        let chain = [DescBuf {
+            addr: 0x1000,
+            len: 4,
+            flags: 0,
+        }; 2];
+        let h = q.add_chain(&chain).unwrap();
+        let tail = q.desc_next(h);
+        q.publish();
+        // The chain's second descriptor is not a head.
+        forge_used(&mut q, tail as u32);
+        assert_eq!(q.get_used(), Err(VirtioError::BadUsed));
+        assert_free_list_sane(&q, 6);
+    }
+
+    #[test]
+    fn used_idx_ahead_of_the_queue_breaks_it() {
+        let layout = SplitLayout::new(8).unwrap();
+        let (_keep, base) = pool(layout.total);
+        let mut q = queue(layout, base, false);
+        q.init();
+        let head = q.add(0x1000, 4, DESC_F_WRITE).unwrap();
+        q.publish();
+        forge_used(&mut q, head as u32);
+        // used.idx claims 9 completions of an 8-entry ring.
+        q.wr16(layout.used_idx(), 9);
+        assert_eq!(q.pending(), 9);
+        assert_eq!(q.get_used(), Err(VirtioError::BadUsed));
+        assert_free_list_sane(&q, 7);
+        q.init();
+        q.wr16(layout.used_idx(), 0xFFFF);
+        assert_eq!(q.get_used(), Err(VirtioError::BadUsed));
+        assert_eq!(q.num_free(), 8);
     }
 }

@@ -338,9 +338,24 @@ fn harvest() {
     {
         let mut g = Q.lock();
         if let Some(q) = g.as_mut() {
-            while let Some(u) = q.vq.get_used() {
-                n += 1;
-                last = u.len;
+            loop {
+                match q.vq.get_used() {
+                    Ok(Some(u)) => {
+                        n += 1;
+                        last = u.len;
+                    }
+                    Ok(None) => break,
+                    // The queue stays broken, so no request completes again.
+                    Err(e) => {
+                        crate::klog_ratelimited!(
+                            1000,
+                            vibeos::log::Level::Error,
+                            "vibeOS: virtio-rng: {}",
+                            e.as_str()
+                        );
+                        break;
+                    }
+                }
             }
             if n != 0 {
                 q.data.sync_for_cpu::<Arch>();
