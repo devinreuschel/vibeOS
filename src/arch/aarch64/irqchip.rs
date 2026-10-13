@@ -89,7 +89,10 @@ pub fn arm_ap() {
 pub fn on_timer_irq() {
     // Relaxed: a count; pairs with nothing.
     TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    crate::time_init::on_hw_tick();
+    // cpu 0 alone publishes the clock, as on x86
+    if super::percpu::cpu_id_hint() == 0 {
+        crate::time_init::on_hw_tick();
+    }
     timer::on_tick();
     crate::sched_init::on_timer_tick();
 }
