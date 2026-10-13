@@ -170,9 +170,6 @@ impl ImageSource for FileImage {
 /// whatever `phnum` the file claims.
 const PH_BATCH: usize = 8;
 
-/// Read the ELF header and program headers of `src`, in batches of
-/// [`PH_BATCH`], and check them against its length.
-#[inline(never)]
 fn native_machine() -> u16 {
     #[cfg(target_arch = "aarch64")]
     {
@@ -184,6 +181,9 @@ fn native_machine() -> u16 {
     }
 }
 
+/// Read the ELF header and program headers of `src`, in batches of
+/// [`PH_BATCH`], and check them against its length.
+#[inline(never)]
 fn read_image<S: ImageSource>(src: &mut S) -> Result<Image, LoadError> {
     let file_len = src.len();
     let mut eh = [0u8; EHDR_SIZE];
